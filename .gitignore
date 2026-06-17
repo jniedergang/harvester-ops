@@ -1,0 +1,22 @@
+# Build artifacts
+dist/
+images/*.tar
+web/vendor/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+
+# Agent / local-only context (project conventions for AI coding assistants
+# and any private session notes). Not part of the public deliverable.
+CLAUDE.md
+REVIEW.md

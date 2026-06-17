@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>harvester-ops — Revue (v{{ version }})</title>
+<link rel="stylesheet" href="/static/css/style.css">
+<style>
+  body { padding: 20px; max-width: 1280px; margin: 0 auto; }
+  h1, h2 { border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h1 { color: var(--accent); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 16px; }
+  .card { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 14px 18px; }
+  .stat { font-size: 28px; color: var(--accent); font-weight: bold; }
+  .stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; }
+  .kpi-row { display: flex; gap: 22px; flex-wrap: wrap; }
+  .kpi-row > div { min-width: 120px; }
+  table.review { width: 100%; font-size: 12px; }
+  table.review th { color: var(--text-dim); text-transform: uppercase; font-size: 10px; }
+  table.review td { padding: 4px 8px; border-bottom: 1px solid var(--border); }
+  code.long { word-break: break-all; max-width: 600px; display: inline-block; }
+  .commit-msg { color: var(--text); }
+  .ok { color: var(--accent); }
+  .err { color: var(--danger); }
+  .warn { color: var(--warn); }
+  pre.changelog { background: var(--bg); padding: 8px 12px; border-radius: 4px; white-space: pre-wrap; font-size: 11px; max-height: 320px; overflow-y: auto; }
+  .toc { float: right; background: var(--bg-elev); border: 1px solid var(--border); padding: 8px 14px; border-radius: 4px; font-size: 12px; }
+  .toc a { color: var(--text-dim); display: block; text-decoration: none; }
+  .toc a:hover { color: var(--accent); }
+  .footer { color: var(--text-dim); font-size: 11px; text-align: center; margin-top: 30px; }
+</style>
+</head>
+<body>
+<div class="toc">
+  <strong>Sommaire</strong>
+  <a href="#kpi">KPI live</a>
+  <a href="#versions">Versions livrées</a>
+  <a href="#commits">Commits</a>
+  <a href="#actions">Actions récentes</a>
+  <a href="#tasks">Backlog</a>
+  <a href="#capi">Cluster API state</a>
+  <a href="#tests">Tests</a>
+</div>
+
+<h1>📋 harvester-ops — Revue {{ version }}</h1>
+<p class="form-hint">Snapshot généré {{ now }}. Auto-refresh toutes les 30 s.</p>
+
+<section id="kpi">
+<h2>📊 KPI live</h2>
+<div class="grid">
+  <div class="card">
+    <div class="stat-label">Actions enregistrées (SQLite)</div>
+    <div class="kpi-row">
+      <div><div class="stat">{{ actions_total }}</div><div class="stat-label">total</div></div>
+      <div><div class="stat ok">{{ actions_done }}</div><div class="stat-label">done</div></div>
+      <div><div class="stat err">{{ actions_error }}</div><div class="stat-label">error</div></div>
+      <div><div class="stat">{{ actions_running }}</div><div class="stat-label">running</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="stat-label">CAPHV stack — cluster ({{ harvester_version }})</div>
+    <table class="review">
+      <tbody>{% for c in capi_components %}
+        <tr><td>{{ '✓' if c.installed else '✗' }}</td>
+            <td>{{ c.label }}</td>
+            <td><code>{{ c.version or '—' }}</code></td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+  </div>
+  <div class="card">
+    <div class="stat-label">Terraform</div>
+    <p>Provider: <code>{{ tf_info.provider_version }}</code> ({{ tf_info.provider_binary_size // (1024 * 1024) }} MB)<br>
+       CLI: <code>{{ tf_info.terraform_bin }}</code><br>
+       Workspaces: <code>{{ tf_info.workspaces_dir }}</code><br>
+       Examples bundled: {{ tf_info.example_resources|length }}</p>
+  </div>
+  <div class="card">
+    <div class="stat-label">Bundles airgap</div>
+    <table class="review">
+      <tbody>{% for b in bundles %}
+        <tr><td>{% if b.is_active %}<strong>★</strong>{% endif %}</td>
+            <td><code>{{ b.filename }}</code></td>
+            <td>{{ (b.size // (1024 * 1024)) }} MB</td>
+        </tr>
+      {% endfor %}</tbody>
+    </table>
+    <div class="form-hint">Disque: {{ (disk_free // (1024 * 1024 * 1024)) }} GB libres / {{ (disk_total // (1024 * 1024 * 1024)) }} GB</div>
+  </div>
+</div>
+</section>
+
+<section id="versions">
+<h2>🏷 Versions livrées dans cette session</h2>
+<table class="review">
+  <thead><tr><th>Tag</th><th>Commit</th><th>Titre</th><th>Date</th></tr></thead>
+  <tbody>{% for c in version_commits %}
+    <tr>
+      <td><strong>{{ c.version }}</strong></td>
+      <td><code>{{ c.sha }}</code></td>
+      <td class="commit-msg">{{ c.subject }}</td>
+      <td><code>{{ c.date }}</code></td>
+    </tr>
+  {% endfor %}</tbody>
+</table>
+</section>
+
+<section id="commits">
+<h2>📝 30 derniers commits</h2>
+<pre class="changelog">{{ git_log }}</pre>
+</section>
+
+<section id="changelog">
+<h2>📰 Changelog (têtes de section)</h2>
+<pre class="changelog">{{ changelog }}</pre>
+</section>
+
+<section id="actions">
+<h2>⚡ 30 dernières actions (dock + activity)</h2>
+<table class="review">
+  <thead><tr><th>Status</th><th>Action</th><th>Cluster</th><th>Run ID</th><th>Dur</th><th>Ended</th></tr></thead>
+  <tbody>{% for a in actions_recent %}
+    <tr>
+      <td>{% if a.status == 'done' %}<span class="ok">✓ {{ a.status }}</span>
+          {% elif a.status == 'error' %}<span class="err">✗ {{ a.status }}</span>
+          {% elif a.status == 'cancelled' %}<span class="warn">⊘ {{ a.status }}</span>
+          {% else %}<span>{{ a.status }}</span>{% endif %}</td>
+      <td><code>{{ a.action }}</code></td>
+      <td><code>{{ a.cluster }}</code></td>
+      <td><code>{{ a.id }}</code></td>
+      <td>{% if a.duration %}{{ '%.1f'|format(a.duration) }}s{% endif %}</td>
+      <td>{{ a.ended_human or '—' }}</td>
+    </tr>
+  {% endfor %}</tbody>
+</table>
+</section>
+
+<section id="tasks">
+<h2>📌 Backlog</h2>
+<div class="grid">
+  <div class="card">
+    <div class="stat-label">Status</div>
+    <div class="kpi-row">
+      <div><div class="stat ok">{{ tasks_done }}</div><div class="stat-label">complétées</div></div>
+      <div><div class="stat warn">{{ tasks_in_progress }}</div><div class="stat-label">en cours</div></div>
+      <div><div class="stat err">{{ tasks_pending }}</div><div class="stat-label">à faire</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="stat-label">Tâches restantes (pending)</div>
+    <ul>{% for t in tasks_pending_list %}
+      <li>#{{ t.id }} — {{ t.subject }}</li>
+    {% endfor %}</ul>
+  </div>
+</div>
+</section>
+
+<section id="capi">
+<h2>🚀 CAPI/CAPHV managed clusters</h2>
+{% if capi_clusters %}
+<table class="review">
+  <thead><tr><th>Namespace/Name</th><th>Phase</th><th>Ready</th><th>K8s</th></tr></thead>
+  <tbody>{% for c in capi_clusters %}
+    <tr>
+      <td><code>{{ c.namespace }}/{{ c.name }}</code></td>
+      <td>{{ c.phase }}</td>
+      <td>{{ '✓' if c.ready else '…' }}</td>
+      <td><code>{{ c.k8sVersion or '—' }}</code></td>
+    </tr>
+  {% endfor %}</tbody>
+</table>
+{% else %}
+<p class="form-hint">Aucun cluster CAPHV pour l'instant.</p>
+{% endif %}
+</section>
+
+<section id="tests">
+<h2>🧪 Tests</h2>
+<div class="card">
+  <p><strong>API:</strong> {{ tests_api_pass }}/{{ tests_api_total }} passing — last run {{ tests_when }}</p>
+  <p><strong>e2e (Playwright):</strong> {{ tests_e2e_pass }}/{{ tests_e2e_total }} passing</p>
+  <p class="form-hint">Commande : <code>make test-api</code> et <code>make test-e2e</code></p>
+</div>
+</section>
+
+<div class="footer">
+  harvester-ops {{ version }} · Generated by Flask
+</div>
+
+<script>
+  // Auto-refresh every 30s
+  setTimeout(() => location.reload(), 30000);
+</script>
+</body>
+</html>

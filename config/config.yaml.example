@@ -1,0 +1,59 @@
+# harvester-ops — configuration file
+# Path: /etc/harvester-ops/config.yaml
+#
+# This file declares the Harvester clusters you operate.
+# You can define as many clusters as needed; they will all appear in the web UI.
+
+# Optional global settings
+settings:
+  log_dir: /var/log/harvester-ops
+  default_vm_timeout: 300          # seconds, graceful VM stop
+  default_volume_timeout: 180      # seconds, Longhorn volume detach
+  node_shutdown_delay: 15          # seconds between node shutdowns
+
+# Web UI settings (only used by the Flask service)
+web:
+  bind_host: 0.0.0.0
+  bind_port: 8090
+  basic_auth_file: /etc/harvester-ops/htpasswd   # generate with `htpasswd -B -c`
+  tls_cert: /etc/harvester-ops/tls/cert.pem      # optional, self-signed by install.sh
+  tls_key:  /etc/harvester-ops/tls/key.pem
+
+# Cluster declarations
+clusters:
+
+  - name: harv-prod
+    description: "Production Harvester cluster (DC Lyon)"
+    kubeconfig: /etc/harvester-ops/kubeconfigs/harv-prod.yaml
+    ssh:
+      user: rancher
+      port: 22
+      key: /etc/harvester-ops/ssh/id_ed25519
+    nodes:
+      - hostname: harv-prod-cp1
+        ip: 10.10.0.11
+        role: control-plane
+      - hostname: harv-prod-cp2
+        ip: 10.10.0.12
+        role: control-plane
+      - hostname: harv-prod-cp3
+        ip: 10.10.0.13
+        role: control-plane
+      - hostname: harv-prod-w1
+        ip: 10.10.0.21
+        role: worker
+      - hostname: harv-prod-w2
+        ip: 10.10.0.22
+        role: worker
+
+  - name: harv-staging
+    description: "Staging Harvester cluster"
+    kubeconfig: /etc/harvester-ops/kubeconfigs/harv-staging.yaml
+    ssh:
+      user: rancher
+      port: 22
+      key: /etc/harvester-ops/ssh/id_ed25519
+    nodes:
+      - hostname: harv-stg-cp1
+        ip: 10.20.0.11
+        role: control-plane

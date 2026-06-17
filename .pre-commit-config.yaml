@@ -1,0 +1,30 @@
+# harvester-ops pre-commit hooks (v1.6.1)
+#
+# Install: pre-commit install
+# Bypass once (e.g. WIP commit): SKIP=pytest-collect git commit ...
+#
+# We deliberately keep this lean — heavy linters slow down the dev loop.
+# The full test suite still runs separately via `make test-api`.
+
+repos:
+  - repo: local
+    hooks:
+      - id: bash-syntax
+        name: bash -n on shell scripts
+        entry: bash -c 'for f in "$@"; do bash -n "$f"; done' --
+        language: system
+        files: '^(bin/|install.sh|uninstall.sh|bundle.sh|package.sh).*\.sh$'
+
+      - id: python-compile
+        name: python3 -m py_compile on web/app.py
+        entry: python3 -m py_compile web/app.py
+        language: system
+        files: '^web/app\.py$'
+        pass_filenames: false
+
+      - id: pytest-collect
+        name: pytest collect-only (catches import errors early)
+        entry: python3 -m pytest tests/api/ -q --collect-only
+        language: system
+        files: '^(tests/api/.*\.py|web/app\.py)$'
+        pass_filenames: false

@@ -1,0 +1,32 @@
+[Unit]
+Description=harvester-ops — Harvester HCI graceful shutdown/startup UI
+Documentation=file:///opt/harvester-ops/README.md
+After=network-online.target
+Wants=network-online.target
+Requires=podman.socket
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10s
+TimeoutStartSec=60s
+
+# Reads ports/paths from /etc/harvester-ops/config.yaml
+EnvironmentFile=-/etc/harvester-ops/env
+
+ExecStartPre=-/usr/bin/podman rm -f harvester-ops
+ExecStart=/usr/bin/podman run --rm \
+    --name harvester-ops \
+    --network host \
+    --read-only \
+    --tmpfs /tmp \
+    -v /etc/harvester-ops:/etc/harvester-ops:ro,Z \
+    -v /var/log/harvester-ops:/var/log/harvester-ops:rw,Z \
+    -e HARVESTER_OPS_CONFIG=/etc/harvester-ops/config.yaml \
+    -e HARVESTER_OPS_HTPASSWD=/etc/harvester-ops/htpasswd \
+    localhost/harvester-ops:latest serve
+
+ExecStop=/usr/bin/podman stop -t 10 harvester-ops
+
+[Install]
+WantedBy=multi-user.target

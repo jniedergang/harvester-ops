@@ -1,0 +1,11 @@
+Flask==3.0.3
+flask-limiter==4.1.1
+prometheus_client==0.25.0
+PyYAML==6.0.2
+passlib==1.7.4
+bcrypt<4
+Markdown==3.6
+flask-sock==0.7.0
+simple-websocket==1.1.0
+y-py==0.6.2
+

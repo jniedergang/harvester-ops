@@ -1,0 +1,78 @@
+# harvester-ops — container image
+# Base: SUSE Base Container Image — Python 3.11 on SLE Micro
+FROM registry.suse.com/bci/python:3.11
+
+LABEL org.opencontainers.image.title="harvester-ops"
+LABEL org.opencontainers.image.description="Graceful shutdown/startup tooling for Harvester HCI clusters"
+LABEL org.opencontainers.image.vendor="harvester-ops"
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+# Install runtime tools: kubectl, yq (mikefarah), openssh-clients, gettext (envsubst)
+# Also bash + ca-certificates
+USER root
+RUN zypper --non-interactive ref && \
+    zypper --non-interactive install --no-recommends \
+        bash \
+        ca-certificates \
+        curl \
+        openssh-clients \
+        gawk \
+        jq \
+        gzip \
+        tar \
+    && zypper clean --all
+
+# kubectl — pinned, signed
+ARG KUBECTL_VERSION=v1.30.5
+RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
+        -o /usr/local/bin/kubectl && \
+    chmod +x /usr/local/bin/kubectl
+
+# yq (mikefarah)
+ARG YQ_VERSION=v4.44.3
+RUN curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
+        -o /usr/local/bin/yq && \
+    chmod +x /usr/local/bin/yq
+
+# Application
+WORKDIR /opt/harvester-ops
+
+# Copy scripts
+COPY bin/                /usr/local/bin/
+RUN chmod +x /usr/local/bin/harvester-*.sh && \
+    ln -sf /usr/local/bin/harvester-shutdown.sh /usr/local/bin/harvester-shutdown && \
+    ln -sf /usr/local/bin/harvester-startup.sh  /usr/local/bin/harvester-startup  && \
+    ln -sf /usr/local/bin/harvester-status.sh   /usr/local/bin/harvester-status
+
+# Copy web app (with bundled wheels for airgap)
+COPY web/                /opt/harvester-ops/web/
+
+# Install Python deps — prefer offline wheels if present (set during build)
+RUN if [ -d /opt/harvester-ops/web/vendor ] && [ "$(ls -A /opt/harvester-ops/web/vendor 2>/dev/null)" ]; then \
+        pip install --no-index --find-links=/opt/harvester-ops/web/vendor \
+            -r /opt/harvester-ops/web/requirements.txt; \
+    else \
+        pip install --no-cache-dir -r /opt/harvester-ops/web/requirements.txt; \
+    fi
+
+# Non-root user for the Flask process
+RUN useradd -r -u 1001 -g users -d /opt/harvester-ops -s /sbin/nologin harvops && \
+    mkdir -p /var/log/harvester-ops /etc/harvester-ops && \
+    chown -R harvops:users /var/log/harvester-ops
+
+COPY container/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+USER harvops
+WORKDIR /opt/harvester-ops/web
+
+# Default values, overridable
+ENV HARVESTER_OPS_CONFIG=/etc/harvester-ops/config.yaml \
+    HARVESTER_OPS_BIN=/usr/local/bin \
+    HARVESTER_OPS_HTPASSWD=/etc/harvester-ops/htpasswd \
+    PYTHONUNBUFFERED=1 \
+    HARVESTER_OPS_VERSION=1.0.0
+
+EXPOSE 8090
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["serve"]
