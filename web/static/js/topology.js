@@ -706,10 +706,13 @@ const Topology = (() => {
         <div class="actions">
           <button class="btn btn-sm" data-act="vm-notes">📝 ${i.t('topology.action.notes')}</button>
           <button class="btn btn-sm" data-act="vm-edit">✏️ ${i.t('topology.action.edit')}</button>
+          <button class="btn btn-sm" data-act="vm-console">🖥 ${i.t('topology.action.console')}</button>
           <button class="btn btn-sm" data-act="vm-snap">📸 ${i.t('topology.action.snapshot')}</button>
+          <button class="btn btn-sm" data-act="vm-migrate">↔ ${i.t('topology.action.migrate')}</button>
+          ${v.run_strategy === 'Halted'
+            ? `<button class="btn btn-sm" data-act="vm-start">▶ ${i.t('topology.action.start')}</button>`
+            : `<button class="btn btn-sm btn-warn" data-act="vm-stop">■ ${i.t('topology.action.stop')}</button>`}
           ${destructiveUnlocked ? `
-            <button class="btn btn-sm btn-warn" data-act="vm-stop">■ ${i.t('topology.action.stop')}</button>
-            <button class="btn btn-sm btn-warn" data-act="vm-start">▶ ${i.t('topology.action.start')}</button>
             <button class="btn btn-sm btn-danger" data-act="vm-delete">🗑 ${i.t('topology.action.delete')}</button>
           ` : ''}
         </div>`;
@@ -783,7 +786,7 @@ const Topology = (() => {
     const cluster = window.App?.getCurrentCluster?.()
                  || document.querySelector('.cluster-name')?.textContent?.trim();
     const confirmI18n = (key) => (window.i18n ? window.i18n.t(key) : key);
-    // Safe (read + edit) actions — no confirm
+    // Safe actions (read / edit / open a panel) — no confirm, no lock.
     if (act === 'node-notes')      return window.Notes?.open('node', cluster, d.raw.name);
     if (act === 'vm-notes')        return window.Notes?.open('vm', cluster,
                                             d.raw.namespace, d.raw.name);
@@ -791,15 +794,13 @@ const Topology = (() => {
                                             d.raw.namespace, d.raw.name);
     if (act === 'vm-snap')         return window.VmSnapshots?.open?.(cluster,
                                             d.raw.namespace, d.raw.name);
-    // Destructive — guarded by confirm + unlock flag
-    if (!destructiveUnlocked) {
-      alert(confirmI18n('topology.lockedHint'));
-      return;
-    }
-    if (act === 'vm-stop' || act === 'vm-start' || act === 'vm-delete' ||
-        act === 'node-cordon' || act === 'node-drain') {
-      const label = confirmI18n(`topology.confirm.${act}`)
-        .replace('{name}', d.raw.name);
+    if (act === 'vm-console')      return window.VMConsole?.open?.(cluster,
+                                            d.raw.namespace, d.raw.name);
+    if (act === 'vm-migrate')      return window.VMMigrate?.open?.(cluster,
+                                            d.raw.namespace, d.raw.name);
+
+    const runAction = async () => {
+      const label = confirmI18n(`topology.confirm.${act}`).replace('{name}', d.raw.name);
       if (!confirm(label)) return;
       try {
         await dispatchDestructive(act, d, cluster);
@@ -807,6 +808,17 @@ const Topology = (() => {
       } catch (e) {
         alert(confirmI18n('topology.actionFailed') + ': ' + (e.message || e));
       }
+    };
+
+    // Power actions (start / stop) — confirm only, available without the
+    // destructive unlock, for parity with the Virtual machines tab.
+    if (act === 'vm-start' || act === 'vm-stop') return runAction();
+
+    // Irreversible actions (delete VM, cordon / drain node) — gated by the
+    // destructive unlock on top of the confirm.
+    if (act === 'vm-delete' || act === 'node-cordon' || act === 'node-drain') {
+      if (!destructiveUnlocked) { alert(confirmI18n('topology.lockedHint')); return; }
+      return runAction();
     }
   }
 
@@ -856,16 +868,36 @@ const Topology = (() => {
     applySearchHighlight();
   }
 
-  function _collectElementIds(data, mode) {
+  // v1.6.4: "structure" = each element's id AND, for compound nodes, its
+  // parent. A VM that starts/stops/migrates keeps its id but changes
+  // parent (its host node vs. the "Stopped / unscheduled" bucket).
+  // Comparing ids alone missed that, so applyDataUpdate() only recoloured
+  // the VM in place and it stayed visually inside the wrong group. Folding
+  // the parent into the comparison makes refresh() fall through to the
+  // full re-render, which re-parents the VM under its new host.
+  function _structureMap(data, mode) {
     let elements;
     if (mode === 'cluster')      elements = buildClusterElements(data);
     else if (mode === 'network') elements = buildNetworkElements(data);
     else                         elements = buildStorageElements(data);
-    return new Set(elements.map(e => e.data.id));
+    const m = new Map();
+    elements.forEach(e => m.set(e.data.id, e.data.parent || ''));
+    return m;
   }
-  function _setsEqual(a, b) {
+  function _cyStructureMap() {
+    const m = new Map();
+    cy.elements().forEach(e => {
+      // Read the ACTUAL compound parent (e.parent()), not e.data('parent'):
+      // applyDataUpdate merges data without moving the node, so the data
+      // field can be stale while the rendered parent is what we must trust.
+      const p = e.isNode() && e.parent().nonempty() ? e.parent().id() : '';
+      m.set(e.id(), p);
+    });
+    return m;
+  }
+  function _mapsEqual(a, b) {
     if (a.size !== b.size) return false;
-    for (const v of a) if (!b.has(v)) return false;
+    for (const [k, v] of a) if (b.get(k) !== v) return false;
     return true;
   }
 
@@ -888,9 +920,9 @@ const Topology = (() => {
         // v1.4.26 was the 8 s tick shifting everything around — so
         // we DEFAULT to the cheaper update unless we have to redo
         // the layout.
-        const newIds = _collectElementIds(data, currentMode);
-        const oldIds = new Set(cy.elements().map(e => e.id()));
-        if (_setsEqual(newIds, oldIds)) {
+        const newStruct = _structureMap(data, currentMode);
+        const oldStruct = _cyStructureMap();
+        if (_mapsEqual(newStruct, oldStruct)) {
           applyDataUpdate(data);
         } else {
           // Topology changed — preserve viewport + selection so the

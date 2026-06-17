@@ -447,16 +447,21 @@ def test_topology_refresh_uses_incremental_update_when_structure_unchanged():
     """v1.4.26: the 8 s auto-refresh was previously calling render()
     every tick, which destroys + recreates the cytoscape instance and
     re-runs the layout — shifting every element under the user's
-    cursor. The fix is to detect when the element ID set is unchanged
-    and call `applyDataUpdate(data)` instead, which only merges new
-    data fields (color, label, raw) without touching positions."""
+    cursor. The fix is to detect when the structure is unchanged and
+    call `applyDataUpdate(data)` instead, which only merges new data
+    fields (color, label, raw) without touching positions.
+
+    v1.6.4: "structure" now includes each node's compound parent (not
+    just the element id set), so a VM that starts/stops/migrates — same
+    id, new parent — correctly falls through to the full re-render that
+    re-groups it under its host."""
     src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
     assert "function applyDataUpdate" in src, "applyDataUpdate helper missing"
-    # The refresh function must branch on the set comparison
+    # The refresh function must branch on a structure comparison
     rf = src[src.find("async function refresh"):]
     rf = rf[:3500]
-    assert "_setsEqual" in rf or "setsEqual" in rf, (
-        "refresh() doesn't compare old vs new element ids — it will "
+    assert "_mapsEqual" in rf, (
+        "refresh() doesn't compare old vs new structure — it will "
         "destroy+rerender on every tick."
     )
     assert "applyDataUpdate" in rf, (

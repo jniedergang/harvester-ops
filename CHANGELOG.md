@@ -4,6 +4,30 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.6.4] — 2026-06-17 — Overview/topology: live re-grouping + full VM actions
+
+### Fixed
+- A VM started (or stopped) from the Overview/Cluster topology now moves
+  to the correct group on the next refresh. The auto-refresh decided
+  between an in-place data merge and a full re-render by comparing only
+  the element-id set; a started VM keeps its id but changes compound
+  parent (host node vs. the "Stopped / unscheduled" bucket), so it was
+  recoloured in place and stayed in the wrong group. The comparison now
+  folds in each node's parent, so a grouping change triggers the
+  re-render (which already preserves zoom/pan and selection).
+
+### Changed
+- The VM detail panel (select a VM in the topology) now exposes the full
+  action set: notes, edit, **console**, snapshot, **migrate**, and a
+  contextual start/stop — instead of only notes/edit/snapshot. Start and
+  stop are available with a confirm but without the destructive unlock,
+  matching the Virtual machines tab; delete stays behind the unlock.
+
+### Tests
+- `tests/api/test_topology_vm_actions.py` (8 tests) — full action set,
+  console/migrate wiring, start/stop ungated, delete still gated,
+  parent-aware refresh comparison. Suite: 303 passing.
+
 ## [1.6.3] — 2026-06-17 — Documentation overhaul
 
 ### Changed
