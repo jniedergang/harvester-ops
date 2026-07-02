@@ -4,6 +4,15 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.6.7] — 2026-07-02 — README screenshots
+
+### Added
+- Screenshot gallery in `README.md` (assets under `docs/assets/`):
+  adaptive light/dark cluster-topology hero (`<picture>` +
+  `prefers-color-scheme`), plus overview, VM lifecycle, shutdown
+  sequencer and Activity views. Captured in English against a live
+  single-node Harvester v1.8.0 cluster (18 VMs), 1600×900 @2x.
+
 ## [1.6.6] — 2026-07-02 — Dock buttons fully i18n
 
 ### Fixed

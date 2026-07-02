@@ -13,6 +13,24 @@ Livraison autonome en un tarball unique, compatible airgap.
 
 ---
 
+## Screenshots / Captures d'écran
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/topology-dark.png">
+  <img alt="Live cluster topology — running VMs grouped by host node" src="docs/assets/topology.png">
+</picture>
+
+*Live cluster topology: running VMs grouped by host node, stopped VMs bucketed apart, per-object details on click.*
+*Topologie live du cluster : VMs actives groupées par nœud hôte, VMs arrêtées à part, détails par objet au clic.*
+
+| [![Cluster overview](docs/assets/overview.png)](docs/assets/overview.png) | [![Virtual machines](docs/assets/vms.png)](docs/assets/vms.png) |
+|---|---|
+| *Cluster overview + persistent action dock<br>Aperçu cluster + dock d'actions persistant* | *VM lifecycle per namespace (bulk runStrategy, snapshots, console)<br>Cycle de vie VM par namespace (runStrategy en masse, snapshots, console)* |
+| [![Graceful shutdown](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Activity](docs/assets/activity.png)](docs/assets/activity.png) |
+| *8-step graceful shutdown sequencer with live SSE log<br>Séquenceur d'arrêt gracieux en 8 étapes avec log SSE live* | *Every mutating action tracked, with durable history<br>Toute action mutative tracée, avec historique durable* |
+
+---
+
 ## EN — What this is
 
 harvester-ops began as graceful shutdown / startup tooling and has grown
