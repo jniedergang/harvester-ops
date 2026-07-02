@@ -45,11 +45,18 @@ mkdir -p "$WORK_DIR"
 if [[ "$SKIP_WHEELS" == "1" ]]; then
     warn "SKIP_WHEELS=1 — not bundling Python wheels"
 else
-    info "Downloading Python wheels for offline install..."
+    info "Downloading Python wheels for offline install (cp311/manylinux)..."
     rm -rf web/vendor
     mkdir -p web/vendor
-    pip download -r web/requirements.txt -d web/vendor --no-deps >/dev/null
-    pip download -r web/requirements.txt -d web/vendor >/dev/null
+    # Cross-download for the RUNTIME image (BCI python 3.11), not for the
+    # host interpreter: on a rolling host (python 3.13+) a plain
+    # `pip download` grabs cp313 wheels for C extensions (PyYAML,
+    # MarkupSafe…) that the container's pip then cannot see at all
+    # ("from versions: none"). Cross mode requires --only-binary.
+    pip download -r web/requirements.txt -d web/vendor \
+        --only-binary=:all: --implementation cp --python-version 3.11 \
+        --platform manylinux2014_x86_64 --platform manylinux_2_28_x86_64 \
+        >/dev/null
     ok "Wheels in web/vendor/ ($(ls web/vendor | wc -l) files)"
 fi
 

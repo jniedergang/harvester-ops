@@ -4,6 +4,17 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.6.8] — 2026-07-02 — Packaging works from any host Python
+
+### Fixed
+- `package.sh` bundled wheels with the host interpreter's tags: on a
+  rolling host (Python 3.13+) the C-extension wheels (PyYAML,
+  MarkupSafe…) came down as `cp313` and the BCI Python 3.11 image build
+  failed with `No matching distribution found` (`from versions: none`).
+  Wheels are now cross-downloaded explicitly for `cp311` /
+  `manylinux2014_x86_64` + `manylinux_2_28_x86_64` (`--only-binary`),
+  independent of whatever Python the build host runs.
+
 ## [1.6.7] — 2026-07-02 — README screenshots
 
 ### Added
