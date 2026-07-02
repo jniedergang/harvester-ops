@@ -14,6 +14,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Wheels are now cross-downloaded explicitly for `cp311` /
   `manylinux2014_x86_64` + `manylinux_2_28_x86_64` (`--only-binary`),
   independent of whatever Python the build host runs.
+- The tarball shipped a nested duplicate of every wheel
+  (`web/vendor/vendor/`, ~35 MB dead weight): `cp -r web …` already
+  carries `web/vendor`, and a second `cp -r web/vendor` into the
+  existing target nested it. It also embedded the build host's
+  `__pycache__/*.pyc`. Both are gone; host artefacts are pruned from
+  the assembled tree.
 
 ## [1.6.7] — 2026-07-02 — README screenshots
 

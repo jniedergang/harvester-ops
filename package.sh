@@ -91,8 +91,12 @@ if [[ -d images ]]; then
     cp -v images/*.tar "$WORK_DIR/images/" 2>/dev/null || true
 fi
 
-# Strip wheels from source tree but include in package
-[[ -d web/vendor ]] && cp -r web/vendor "$WORK_DIR/web/vendor"
+# web/ above already carries web/vendor (wheels). A second
+# `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate
+# vendor/vendor/ (~35 MB of dead weight) because the target existed.
+# Host-side build artefacts have no place in the deliverable:
+find "$WORK_DIR" -type d -name '__pycache__' -prune -exec rm -rf {} +
+find "$WORK_DIR" -type f -name '*.pyc' -delete
 
 ok "Working tree assembled at $WORK_DIR"
 
