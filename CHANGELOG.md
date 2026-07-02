@@ -4,6 +4,22 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.6.6] — 2026-07-02 — Dock buttons fully i18n
+
+### Fixed
+- The dock's Details/Hide toggle rendered hardcoded French labels
+  («Détails», «Masquer») regardless of the UI language — the dock
+  re-renders every 3s outside the data-i18n scan, so static translation
+  passes never reached it. Labels and tooltips now resolve through i18n
+  (new keys `dock.details` / `dock.hideDetails` / `dock.showDetails`,
+  EN + FR — the two title keys were referenced but never defined).
+
+### Tests
+- `test_dock_button_labels_are_i18n` — no hardcoded French literals left
+  in dock.js, keys present in both EN and FR dicts. The referenced-key
+  scanner now also parses the dock's `tr('key', fallback)` helper so
+  such keys can't silently rot. Suite: 315 passing.
+
 ## [1.6.5] — 2026-07-02 — Failed actions explain themselves; durable history
 
 Born from a live incident: after a Harvester upgrade left the cluster's

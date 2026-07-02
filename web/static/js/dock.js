@@ -321,8 +321,8 @@ const Dock = (() => {
           <div class="step-msg" title="${stepTitle}">${stepText}</div>
           <div class="progress-mini"><div class="fill" style="width:${pctValue}%"></div></div>
           <button class="btn-mini toggle-details" data-id="${a.id}"
-                  title="${expanded.has(a.id) ? 'Masquer les logs' : 'Afficher les logs en temps réel'}"
-                  data-i18n-title="${expanded.has(a.id) ? 'dock.hideDetails' : 'dock.showDetails'}">${expanded.has(a.id) ? 'Masquer' : 'Détails'}</button>
+                  title="${expanded.has(a.id) ? tr('dock.hideDetails', 'Hide the live logs') : tr('dock.showDetails', 'Show live logs')}"
+                  data-i18n-title="${expanded.has(a.id) ? 'dock.hideDetails' : 'dock.showDetails'}">${expanded.has(a.id) ? tr('dock.hide', 'Hide') : tr('dock.details', 'Details')}</button>
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${a.id}">Cancel</button>`
             : `<span class="ended-badge" title="ended ${endedHuman}">${endedHuman}</span>`}
@@ -342,8 +342,8 @@ const Dock = (() => {
         if (expanded.has(a.id)) expanded.delete(a.id); else expanded.add(a.id);
         card.classList.toggle('expanded');
         const open = expanded.has(a.id);
-        e.currentTarget.textContent = open ? 'Masquer' : 'Détails';
-        e.currentTarget.title = open ? 'Masquer les logs' : 'Afficher les logs en temps réel';
+        e.currentTarget.textContent = open ? tr('dock.hide', 'Hide') : tr('dock.details', 'Details');
+        e.currentTarget.title = open ? tr('dock.hideDetails', 'Hide the live logs') : tr('dock.showDetails', 'Show live logs');
         e.currentTarget.setAttribute('data-i18n-title', open ? 'dock.hideDetails' : 'dock.showDetails');
         updateLogTail(a.id);
       });
@@ -386,6 +386,12 @@ const Dock = (() => {
     const buf = liveLogs[runId] || [];
     pre.innerHTML = buf.map(e => `<span class="${e.cls || ''}">${escapeHtml(e.line)}</span>`).join('\n');
     pre.scrollTop = pre.scrollHeight;
+  }
+
+  // i18n avec repli : le dock se re-rend toutes les 3s en dehors du scan
+  // data-i18n, donc les libellés passent par t() à chaque rendu.
+  function tr(key, fallback) {
+    return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key) : fallback;
   }
 
   function escapeHtml(s) {

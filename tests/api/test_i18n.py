@@ -36,6 +36,8 @@ TIP_RE = re.compile(r"""data-tip-i18n\s*=\s*['"]([\w.-]+)['"]""")
 # (e.g. `i18n.t(`vm.state.${vm.runStrategy}`)`) and would otherwise
 # explode the false-positive count.
 JS_T_RE = re.compile(r"""\bi18n\.t\(\s*['"]([\w.-]+)['"]""")
+# Match `tr('key', fallback)` — dock.js i18n helper (v1.6.6).
+TR_RE = re.compile(r"""\btr\(\s*['"]([\w.-]+)['"]""")
 # Lang block boundaries in i18n.js — `en: {`, `fr: {`, …
 LANG_HEADER_RE = re.compile(r"^\s*(en|fr|it|es|de):\s*\{")
 # Key extraction inside a lang block — `'key.name':` or `"key.name":`.
@@ -63,6 +65,9 @@ def _all_referenced_keys():
         for k in JS_T_RE.findall(text):
             if not k.endswith("."):
                 keys.add(k)
+        # v1.6.6: dock.js re-renders outside the data-i18n scan and looks
+        # keys up through its local `tr('key', fallback)` helper.
+        keys.update(TR_RE.findall(text))
     return keys
 
 
@@ -128,7 +133,7 @@ def test_i18n_dict_parity_across_languages():
         # while still catching "I added an EN key and forgot all 4 others".
         # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
         # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 638
+        BASELINE = 646   # v1.6.6: +dock.details/hideDetails/showDetails, activity.errorLabel (EN+FR done; IT/ES/DE fall back to EN)
         total = sum(len(v) for v in holes.values())
         if total > BASELINE:
             lines = []
@@ -178,3 +183,19 @@ def test_i18n_no_orphan_keys_in_english():
             f"{len(orphans)} unused English i18n entries (baseline {BASELINE}):\n  - "
             + "\n  - ".join(orphans[:20]) + "\n  …"
         )
+
+
+def test_dock_button_labels_are_i18n():
+    """v1.6.6: the dock re-renders every 3s outside the data-i18n scan, so
+    its button labels went through hardcoded French literals ('Détails',
+    'Masquer') — visible as French text in an English UI. Labels must go
+    through tr()/i18n.t with keys present in BOTH en and fr dicts (the
+    template-literal `data-i18n-title="${…}"` form is invisible to the
+    reference scanner above, hence this explicit check)."""
+    dock = (JS_DIR / "dock.js").read_text()
+    for literal in ("'Masquer'", "'Détails'", "'Afficher les logs"):
+        assert literal not in dock, f"hardcoded French label {literal} in dock.js"
+    dicts = _lang_dicts()
+    for key in ("dock.details", "dock.hide", "dock.hideDetails", "dock.showDetails"):
+        assert key in dicts["en"], f"{key} missing from EN dict"
+        assert key in dicts["fr"], f"{key} missing from FR dict"
