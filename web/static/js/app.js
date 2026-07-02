@@ -13,6 +13,9 @@ const App = (() => {
   // -------------------------------------------------------------------------
   const $  = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
+  const escapeHtml = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const TAB_STORAGE = 'harvester_ops_current_tab';
 
@@ -1001,6 +1004,7 @@ const App = (() => {
           ts: a.ended_at || a.started_at,
           duration: (a.ended_at && a.started_at) ? (a.ended_at - a.started_at) : null,
           dry_run: a.dry_run,
+          error_summary: a.error_summary || null,
         });
       });
       (data.log_files || []).forEach(f => {
@@ -1061,6 +1065,7 @@ const App = (() => {
             <td>${statusBadge}</td>
             <td>${tsStr}</td>
             <td>${dur}</td>`;
+          if (it.error_summary) tr.title = it.error_summary;
           if (it.kind === 'log') {
             tr.addEventListener('click', () => showLogFile(it.filename));
           } else {
@@ -1137,6 +1142,7 @@ const App = (() => {
           it.status === 'running' ? 'Pending' : 'Stopped'}">${it.status}</span></div>
         <div><strong>When</strong> ${new Date(it.ts * 1000).toLocaleString()}</div>
         ${it.duration ? `<div><strong>Duration</strong> ${it.duration.toFixed(1)}s</div>` : ''}
+        ${it.error_summary ? `<div class="activity-detail-error"><strong data-i18n="activity.errorLabel">Error</strong> <code title="${escapeHtml(it.error_summary)}">${escapeHtml(it.error_summary)}</code></div>` : ''}
       </div>
       <pre id="activity-detail-log" class="live-log"></pre>`;
 

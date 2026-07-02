@@ -124,7 +124,15 @@ sauvegardées.
 
 - **Tracking d'actions + dock** — un dock bas persistant montre les
   actions en cours et récentes sur chaque onglet, avec streaming live des
-  steps/logs en SSE (reconnexion automatique).
+  steps/logs en SSE (reconnexion automatique). Une action en échec porte
+  l'erreur sous-jacente (dernière ligne stderr `kubectl` / script) dans le
+  dock, la table Activité et le panneau de détails — jamais un simple
+  `exit 1`.
+- **Historique d'actions durable** — les 500 derniers runs (avec leurs
+  événements step/log) sont persistés en SQLite et resservis par l'onglet
+  Activité et son replay de détails, y compris après redémarrage de l'UI.
+  L'éviction mémoire n'affecte que l'attachement SSE live, jamais
+  l'historique visible.
 - **Internationalisation** — EN + FR complets ; IT / ES / DE retombent
   sur EN.
 - **Thèmes** — 5 thèmes de couleur × sombre/clair.

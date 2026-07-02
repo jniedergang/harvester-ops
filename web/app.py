@@ -355,6 +355,10 @@ class ActionRun:
         self.dry_run = dry_run
         self.status = "starting"      # starting | running | done | error | cancelled
         self.exit_code = None
+        # v1.6.5: last meaningful error line (kubectl stderr / script stderr)
+        # so the dock and Activity can explain a failure, not just "exit 1".
+        self.error_summary = None
+        self._last_stderr = ""
         self.started_at = time.time()
         self.ended_at = None
         # Recent events buffer (so new SSE clients can replay)
@@ -410,6 +414,7 @@ class ActionRun:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "dry_run": self.dry_run,
+            "error_summary": self.error_summary,
         }
 
 
@@ -455,9 +460,16 @@ def _actions_init_db():
             ended_at    REAL,
             dry_run     INTEGER DEFAULT 0,
             cmd         TEXT,
-            events      TEXT
+            events      TEXT,
+            error_summary TEXT
         )
     """)
+    # v1.6.5: additive migration for DBs created before error_summary —
+    # hot-applicable, no downtime, no data rewrite.
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN error_summary TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already present
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -478,16 +490,18 @@ def _actions_persist(run):
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
-                            started_at, ended_at, dry_run, cmd, events)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+                            started_at, ended_at, dry_run, cmd, events,
+                            error_summary)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
             ended_at=excluded.ended_at,
-            events=excluded.events
+            events=excluded.events,
+            error_summary=excluded.error_summary
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json))
+          cmd_str, events_json, run.error_summary))
     conn.commit()
     # Cap history at 500 rows (drop oldest done/error)
     conn.execute("""
@@ -527,6 +541,8 @@ def _actions_load_history():
             run.exit_code = row["exit_code"]
             run.started_at = row["started_at"]
             run.ended_at = row["ended_at"]
+            if "error_summary" in row.keys():
+                run.error_summary = row["error_summary"]
             # An action still flagged running at startup was killed by the restart.
             if run.status in ("starting", "running") and not run.ended_at:
                 run.status = "interrupted"
@@ -547,6 +563,56 @@ def _actions_load_history():
 
 
 _actions_load_history()
+
+
+# v1.6.5: read-side of the SQLite history. Until now nothing ever read the
+# DB after startup, so the Activity tab silently lost every run older than
+# the 1h in-memory GC (or a Flask restart). These helpers back /api/activity,
+# /api/action/<id> and /api/stream/<id> for runs no longer in memory.
+_ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
+                         "started_at", "ended_at", "dry_run", "error_summary")
+
+
+def _actions_db_recent(limit=50):
+    """Most recent persisted runs, WITHOUT the events blob (list views)."""
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT {} FROM actions ORDER BY started_at DESC LIMIT ?"
+            .format(", ".join(_ACTIONS_LIST_COLUMNS)), (int(limit),)
+        ).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        return []
+    out = []
+    for r in rows:
+        d = {k: r[k] for k in _ACTIONS_LIST_COLUMNS}
+        d["dry_run"] = bool(d["dry_run"])
+        out.append(d)
+    return out
+
+
+def _actions_db_get(run_id):
+    """One persisted run + its replay events. Returns (None, []) if absent."""
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM actions WHERE id = ?", (run_id,)).fetchone()
+        conn.close()
+    except sqlite3.Error:
+        return None, []
+    if not row:
+        return None, []
+    d = {k: row[k] for k in _ACTIONS_LIST_COLUMNS if k in row.keys()}
+    d.setdefault("error_summary", None)
+    d["dry_run"] = bool(d.get("dry_run"))
+    try:
+        events = json.loads(row["events"] or "[]")
+    except (json.JSONDecodeError, TypeError):
+        events = []
+    return d, events
 
 
 def run_action_thread(run: ActionRun):
@@ -586,6 +652,10 @@ def run_action_thread(run: ActionRun):
                         "ts": time.time(),
                     })
                     continue
+            # Remember the last real stderr line: if the script dies with a
+            # non-zero exit it is almost always the explanation the user needs.
+            if stream_name == "stderr" and line.strip():
+                run._last_stderr = line.strip()
             run.emit({"type": "log", "stream": stream_name, "message": line, "ts": time.time()})
         stream.close()
 
@@ -600,6 +670,8 @@ def run_action_thread(run: ActionRun):
 
     run.exit_code = rc
     run.status = "done" if rc == 0 else "error"
+    if rc != 0 and not run.error_summary:
+        run.error_summary = (run._last_stderr or "")[:300] or None
     run.ended_at = time.time()
     run.emit({
         "type": "status",
@@ -2571,6 +2643,11 @@ def api_action_get(run_id):
     with ACTIONS_LOCK:
         run = ACTIONS.get(run_id)
     if not run:
+        # v1.6.5: fall back to SQLite — the run may have been GC'd from
+        # memory or predate the current Flask process.
+        d, _events = _actions_db_get(run_id)
+        if d:
+            return jsonify(d)
         abort(404)
     return jsonify(run.to_dict())
 
@@ -2596,7 +2673,19 @@ def api_stream(run_id):
     with ACTIONS_LOCK:
         run = ACTIONS.get(run_id)
     if not run:
-        abort(404)
+        # v1.6.5: replay persisted events for runs no longer in memory so
+        # the Activity "details" panel works across restarts and the 1h GC.
+        d, events = _actions_db_get(run_id)
+        if not d:
+            abort(404)
+
+        def gen_db():
+            for ev in events:
+                yield f"event: {ev.get('type', 'log')}\ndata: {json.dumps(ev)}\n\n"
+            yield f"event: end\ndata: {json.dumps(d)}\n\n"
+
+        return Response(stream_with_context(gen_db()), mimetype="text/event-stream",
+                        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     def gen():
         # Replay any events we already have
@@ -2624,12 +2713,23 @@ def api_stream(run_id):
 @requires_auth
 def api_activity():
     """Return current and historical activity."""
+    try:
+        limit = max(1, min(int(request.args.get("limit", 50)), 500))
+    except ValueError:
+        limit = 50
     with ACTIONS_LOCK:
         in_progress = [a.to_dict() for a in ACTIONS.values()
                        if a.status in ("starting", "running")]
         done = [a.to_dict() for a in ACTIONS.values()
                 if a.status not in ("starting", "running")]
+        mem_ids = {a["id"] for a in in_progress} | {a["id"] for a in done}
     in_progress.sort(key=lambda a: a["started_at"], reverse=True)
+    # v1.6.5: merge the SQLite history (last 500 runs) so completed actions
+    # survive Flask restarts and the in-memory GC. In-memory entries win on
+    # id conflicts (they are at least as fresh as their persisted row).
+    for row in _actions_db_recent(limit):
+        if row["id"] not in mem_ids:
+            done.append(row)
 
     # Filesystem log files (CLI runs + previous Flask sessions)
     fs_logs = []
@@ -2647,7 +2747,7 @@ def api_activity():
 
     return jsonify({
         "in_progress": in_progress,
-        "actions_done": sorted(done, key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)[:50],
+        "actions_done": sorted(done, key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)[:limit],
         "log_files": fs_logs,
     })
 
@@ -2795,16 +2895,29 @@ def _vm_action_runner(run, kc, namespace, name, target):
     run.emit({"type": "step", "step_id": "patch", "status": "running",
               "message": f"kubectl patch vm/{name} runStrategy={target}",
               "ts": time.time()})
-    # Step 1: patch
+    # Step 1: patch. stderr is captured and surfaced: a bare "exit 1" is
+    # undiagnosable from the UI (e.g. cluster webhook down → kubectl says
+    # 'no endpoints available for service "virt-api"' — the user must see it).
+    # Note: str(e) on CalledProcessError leaked the full command line
+    # (kubeconfig path included) and never contained stderr; don't go back.
     try:
-        subprocess.check_call(
+        r = subprocess.run(
             ["kubectl", "--kubeconfig", kc, "patch", "vm", name, "-n", namespace,
              "--type", "merge", "-p", json.dumps({"spec": {"runStrategy": target}})],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=15,
+            capture_output=True, text=True, timeout=15,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+    except subprocess.TimeoutExpired:
+        r = None
+    if r is None or r.returncode != 0:
+        if r is None:
+            detail = "kubectl timed out after 15s (cluster API unreachable?)"
+        else:
+            stderr_lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+            detail = (stderr_lines[-1] if stderr_lines
+                      else f"kubectl exited {r.returncode} with no error output")[:300]
+        run.error_summary = detail
         run.emit({"type": "step", "step_id": "patch", "status": "error",
-                  "message": str(e), "ts": time.time()})
+                  "message": detail, "ts": time.time()})
         run.exit_code = 1
         run.status = "error"
         run.ended_at = time.time()

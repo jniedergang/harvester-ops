@@ -2056,6 +2056,8 @@ a.bundle-inspect:hover { text-decoration: underline; }
   font-size: 12px;
 }
 .activity-detail-meta strong { color: var(--text-dim); margin-right: 4px; }
+.activity-detail-error { grid-column: 1 / -1; }
+.activity-detail-error code { color: var(--danger); word-break: break-word; }
 #activity-detail-log {
   margin: 0;
   padding: 8px 12px;

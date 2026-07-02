@@ -115,7 +115,13 @@ Drive the Terraform provider for Harvester from saved declarations.
 
 - **Action tracking + dock** — a persistent bottom dock shows in-progress
   and recent actions on every tab, with live step/log streaming over SSE
-  (auto-reconnecting).
+  (auto-reconnecting). Failed actions carry the underlying error (last
+  `kubectl` / script stderr line) in the dock, the Activity table and the
+  details panel — never a bare `exit 1`.
+- **Durable action history** — the last 500 runs (with their step/log
+  events) are persisted in SQLite and served back by the Activity tab and
+  its details replay, across UI restarts. In-memory eviction only affects
+  live SSE attachment, never the visible history.
 - **Internationalisation** — EN + FR complete; IT / ES / DE fall back to
   EN.
 - **Theming** — 5 colour themes × dark/light.

@@ -294,9 +294,16 @@ const Dock = (() => {
 
       // Final progress on done state
       const pctValue = isRunning ? live.pct : 100;
+      // v1.6.5 : une erreur montre POURQUOI (stderr kubectl/script), pas
+      // seulement "exit 1" — le message complet reste lisible au survol.
+      const errSuffix = (!isRunning && !isDone && a.error_summary)
+        ? ' — ' + escapeHtml(a.error_summary) : '';
       const stepText = isRunning
         ? `${live.step_id}${live.message ? ' — ' + live.message : ''}`
-        : (isDone ? '✓ completed' : '✗ ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')));
+        : (isDone ? '✓ completed'
+                  : '✗ ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
+      const stepTitle = (!isRunning && !isDone && a.error_summary)
+        ? escapeHtml(a.error_summary) : live.step_id;
 
       const icon = isRunning ? '⚡' : (isDone ? '✓' : '✗');
 
@@ -311,7 +318,7 @@ const Dock = (() => {
               <span class="elapsed"></span>
             </div>
           </div>
-          <div class="step-msg" title="${live.step_id}">${stepText}</div>
+          <div class="step-msg" title="${stepTitle}">${stepText}</div>
           <div class="progress-mini"><div class="fill" style="width:${pctValue}%"></div></div>
           <button class="btn-mini toggle-details" data-id="${a.id}"
                   title="${expanded.has(a.id) ? 'Masquer les logs' : 'Afficher les logs en temps réel'}"
@@ -385,7 +392,9 @@ const Dock = (() => {
     return String(s)
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
   }
 
   function updateCard(runId) {

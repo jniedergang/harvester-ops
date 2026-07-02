@@ -4,6 +4,42 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.6.5] — 2026-07-02 — Failed actions explain themselves; durable history
+
+Born from a live incident: after a Harvester upgrade left the cluster's
+`virt-api` webhook without endpoints, every VM start from the UI failed
+with a bare "exit 1" — the actual kubectl error ("no endpoints available
+for service virt-api") was captured but never surfaced, and the failed
+runs later vanished from the Activity tab.
+
+### Fixed
+- **VM start/stop errors now carry the kubectl explanation.**
+  `_vm_action_runner` used `check_call(stderr=PIPE)` — with `check_call`
+  the pipe is never read, so `CalledProcessError.stderr` is `None` and the
+  emitted message was `str(e)`: the full command line (kubeconfig path
+  included — a path we never want in UI events) without the actual error.
+  The runner now captures stderr and surfaces its last line in the step
+  event, the dock card, the Activity row tooltip and the details panel.
+- **Action history no longer evaporates.** Runs were persisted to SQLite
+  on completion, but nothing ever read the DB after startup: the 1h
+  in-memory GC (and any Flask restart) silently emptied the Activity tab.
+  `/api/activity` now merges the persisted history (last 500 runs,
+  `?limit=` up to 500), `/api/action/<id>` falls back to the DB, and
+  `/api/stream/<id>` replays persisted events so the details panel works
+  for any historical run.
+
+### Added
+- `error_summary` on actions (API + SQLite, additive `ALTER TABLE`
+  migration — hot-applicable, no downtime): last meaningful stderr line
+  of the failing `kubectl` call or engine script.
+
+### Tests
+- `tests/api/test_actions_persistence.py` (11 tests) — stderr surfacing
+  (incl. no-kubeconfig-path-leak regression), timeout wording, script
+  last-stderr capture, DB read-back, `/api/activity` merge + dedup +
+  limit, `/api/action` DB fallback, `/api/stream` replay. Suite: 314
+  passing.
+
 ## [1.6.4] — 2026-06-17 — Overview/topology: live re-grouping + full VM actions
 
 ### Fixed
