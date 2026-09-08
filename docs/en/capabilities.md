@@ -69,6 +69,9 @@ Manage KubeVirt virtual machines without leaving the console.
   network-data v1 YAML into the editors — hostname, users (password,
   passwordless sudo, Harvester SSH keys or raw public keys), packages,
   run commands, DHCP or static addressing — review, then save.
+  Common-value fields offer a dropdown of suggestions that never
+  blocks free input, and added list items are auto-named to avoid
+  duplicating a sibling (eth0 taken, next is eth1).
 
 CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
 
@@ -144,7 +147,9 @@ Drive the Terraform provider for Harvester from saved declarations.
   live SSE attachment, never the visible history.
 - **Internationalisation** — EN + FR complete; IT / ES / DE fall back to
   EN.
-- **Theming** — 5 colour themes × dark/light.
+- **Theming** — 5 colour themes × dark/light. The default SUSE theme
+  follows the suse.com identity — pine/jade palette and the official
+  SUSE typeface, vendored in the tarball (airgap-safe, OFL licensed).
 - **Accessibility** — keyboard-visible focus, dialog focus trap, tooltips
   on every control (globally toggleable).
 

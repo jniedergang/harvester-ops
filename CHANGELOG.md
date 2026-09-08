@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.3] — 2026-09-08 — SUSE brand theme, list-card ergonomics
+
+### Added
+- **SUSE brand theme, now the default**, in dark and light: the real
+  suse.com identity — pine `#0c322c` background family with jungle
+  green `#30ba78` accents in dark; white with pine text and a jade
+  darkened to `#1d8653` for AA contrast in light; persimmon warnings,
+  waterhole-blue info. The official **SUSE variable typeface** is
+  vendored (~80 KB of woff2 subsets + OFL license — airgap-safe,
+  no CDN) and wired through a per-theme `--font-ui` variable; the
+  four other themes keep the system font stack.
+- Text fields with common values (interface names, disk sizes,
+  timezone, locale, keyboard, groups, shell, NTP servers, mount
+  points, devices, permissions) now offer a **suggestion dropdown
+  that never blocks free input** (native datalist combos).
+
+### Fixed
+- "+ Add" on a repeatable list (interfaces, disks, extra disks) no
+  longer duplicates the name of an existing sibling: the new card is
+  auto-named with the first free name (eth0 taken, next is eth1;
+  /dev/vdb taken, next is /dev/vdc).
+- The per-card summary header now follows the fields live instead of
+  staying frozen at render time ("eth0 — dhcp" over an eth1 field).
+- The boot-time theme fallback in the page head and the theme module
+  were out of sync with the intended default.
+
+### Tests
+- Vendored-font assets and default-theme assertions; newItem
+  collision-avoidance evaluated in node; datalist/live-header
+  source-level checks (377 API tests green).
+
 ## [1.8.2] — 2026-09-08 — Cloud-init assistant: full module coverage
 
 ### Added

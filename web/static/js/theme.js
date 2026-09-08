@@ -26,7 +26,7 @@ const VALID_MODES  = ['dark', 'light'];
 
 const Theme = (() => {
   function getSaved() {
-    let theme = 'tokyo', mode = 'light';
+    let theme = 'suse', mode = 'light';
     try {
       const t = localStorage.getItem(THEME_KEY);
       const m = localStorage.getItem(MODE_KEY);
@@ -37,7 +37,7 @@ const Theme = (() => {
   }
 
   function apply(theme, mode) {
-    if (!VALID_THEMES.includes(theme)) theme = 'tokyo';
+    if (!VALID_THEMES.includes(theme)) theme = 'suse';
     if (!VALID_MODES.includes(mode))   mode  = 'light';
     const html = document.documentElement;
     html.setAttribute('data-theme', theme);

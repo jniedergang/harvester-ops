@@ -105,7 +105,7 @@ def test_boot_script_defaults_match_css_default():
     a fresh visit (empty localStorage) sets attrs the CSS doesn't
     actually serve, and the next reload may shift palettes."""
     html = INDEX.read_text()
-    theme_default = "tokyo"
+    theme_default = "suse"    # v1.8.3: SUSE brand theme is the default
     mode_default = "light"
     # The fallback line in the catch{} branch is the most reliable
     # source of truth — it runs when localStorage is unavailable.
@@ -120,3 +120,22 @@ def test_boot_script_defaults_match_css_default():
     assert fallback_mode in html, (
         f"boot script does not fall back to mode {mode_default!r}"
     )
+
+
+def test_suse_font_vendored_for_airgap():
+    """v1.8.3: the default theme uses the official SUSE typeface — the
+    variable woff2 subsets and their OFL license must ship in the repo
+    (CSP default-src 'self': no CDN would load anyway)."""
+    fonts = ROOT / "web" / "static" / "fonts" / "suse"
+    for f in ("suse-latin.woff2", "suse-latin-ext.woff2",
+              "suse-vietnamese.woff2", "OFL.txt"):
+        assert (fonts / f).exists(), f"missing vendored font asset {f}"
+    css = CSS.read_text()
+    assert "@font-face" in css and "'/static/fonts/suse/suse-latin.woff2'" in css
+    assert "--font-ui: 'SUSE'" in css, "the suse theme must opt into the typeface"
+    assert "font-family: var(--font-ui)" in css, "body must consume --font-ui"
+
+
+def test_default_theme_is_suse():
+    js = THEME_JS.read_text()
+    assert "let theme = 'suse'" in js

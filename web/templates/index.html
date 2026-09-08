@@ -15,12 +15,12 @@
       var MODES  = ['dark', 'light'];
       var t = localStorage.getItem('harvester_ops_theme');
       var m = localStorage.getItem('harvester_ops_mode');
-      if (!t || THEMES.indexOf(t) < 0) t = 'tokyo';
+      if (!t || THEMES.indexOf(t) < 0) t = 'suse';
       if (!m || MODES.indexOf(m)  < 0) m = 'light';
       document.documentElement.setAttribute('data-theme', t);
       document.documentElement.setAttribute('data-mode',  m);
     } catch (e) {
-      document.documentElement.setAttribute('data-theme', 'tokyo');
+      document.documentElement.setAttribute('data-theme', 'suse');
       document.documentElement.setAttribute('data-mode',  'light');
     }
   })();

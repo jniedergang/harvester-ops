@@ -49,6 +49,24 @@ const VMEdit = (() => {
   const K8S_NAME_RE = /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/;
   const MAC_RE = /^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$/;
 
+  // v1.8.3 : premier nom libre pour une nouvelle carte de liste
+  // (eth0 pris -> eth1…) — sans quoi +Add dupliquait le nom d'un
+  // voisin en rejouant le default du schéma.
+  function nextFree(prefix, start, used) {
+    const have = new Set((used || []).filter(Boolean));
+    for (let n = start; n < start + 99; n++) {
+      if (!have.has(prefix + n)) return prefix + n;
+    }
+    return prefix + start;
+  }
+  function nextFreeDev(used) {
+    const have = new Set((used || []).filter(Boolean));
+    for (const c of 'bcdefghijklmnopqrstuvwxyz') {
+      if (!have.has('/dev/vd' + c)) return '/dev/vd' + c;
+    }
+    return '/dev/vdb';
+  }
+
   const DISK_SCHEMA = {
     id: 'vm-disks',
     nested: {
@@ -58,6 +76,7 @@ const VMEdit = (() => {
         itemTitle: (v) => `💾 ${v.name || tr('vm.edit.newDisk', 'new disk')}`
           + `${v.bus ? ' — ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
+        newItem: (items) => ({ name: nextFree('disk-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Name', fr: 'Nom' },
@@ -89,6 +108,7 @@ const VMEdit = (() => {
             description: { en: 'The new PVC inherits the image’s storage class',
                            fr: 'Le nouveau PVC hérite de la storage class de l’image' } },
           { name: 'size', type: 'text', validate: /^[0-9]+(Mi|Gi|Ti)$/,
+            suggest: ['10Gi', '20Gi', '40Gi', '80Gi', '100Gi', '200Gi'],
             label: { en: 'Size (new disk)', fr: 'Taille (nouveau disque)' },
             description: { en: 'e.g. 10Gi — for image sources, at least the image size',
                            fr: 'ex. 10Gi — pour une image, au moins la taille de l’image' } },
@@ -109,6 +129,7 @@ const VMEdit = (() => {
         label: { en: 'Network interfaces', fr: 'Interfaces réseau' },
         itemTitle: (v) => `🔌 ${v.name || tr('vm.edit.newNic', 'new interface')}`
           + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`,
+        newItem: (items) => ({ name: nextFree('nic-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Name', fr: 'Nom' },
@@ -169,12 +190,15 @@ const VMEdit = (() => {
         description: { en: 'e.g. vm1.home.lo (also sets manage_etc_hosts)',
                        fr: 'ex. vm1.home.lo (active aussi manage_etc_hosts)' } },
       { name: 'timezone', type: 'text',
+        suggest: ['Europe/Paris', 'Europe/Berlin', 'Europe/London', 'UTC', 'America/New_York', 'Asia/Tokyo'],
         label: { en: 'Timezone', fr: 'Fuseau horaire' },
         description: { en: 'e.g. Europe/Paris', fr: 'ex. Europe/Paris' } },
       { name: 'locale', type: 'text',
+        suggest: ['fr_FR.UTF-8', 'en_US.UTF-8', 'de_DE.UTF-8', 'C.UTF-8'],
         label: { en: 'Locale', fr: 'Locale' },
         description: { en: 'e.g. fr_FR.UTF-8', fr: 'ex. fr_FR.UTF-8' } },
       { name: 'keyboard', type: 'text',
+        suggest: ['fr', 'us', 'de', 'gb', 'es', 'it'],
         label: { en: 'Keyboard layout', fr: 'Disposition clavier' },
         description: { en: 'e.g. fr, us, de', fr: 'ex. fr, us, de' } },
       { name: 'ssh_pwauth', type: 'bool', default: false,
@@ -208,6 +232,7 @@ const VMEdit = (() => {
         description: { en: 'Expand / to fill the (resized) root disk',
                        fr: 'Étend / pour occuper le disque racine (redimensionné)' } },
       { name: 'ntp_servers', type: 'text',
+        suggest: ['pool.ntp.org', '0.pool.ntp.org, 1.pool.ntp.org', 'time.cloudflare.com'],
         label: { en: 'NTP servers (comma-separated)', fr: 'Serveurs NTP (séparés par des virgules)' },
         description: { en: 'Enables the ntp module', fr: 'Active le module ntp' } },
       { name: 'ca_certs', type: 'textarea', rows: 3,
@@ -240,10 +265,11 @@ const VMEdit = (() => {
             label: { en: 'Passwordless sudo', fr: 'sudo sans mot de passe' },
             description: { en: 'ALL=(ALL) NOPASSWD:ALL', fr: 'ALL=(ALL) NOPASSWD:ALL' } },
           { name: 'groups', type: 'text',
+            suggest: ['wheel', 'sudo', 'docker', 'wheel, docker'],
             label: { en: 'Groups (comma-separated)', fr: 'Groupes (séparés par des virgules)' },
             description: { en: 'e.g. wheel, docker', fr: 'ex. wheel, docker' } },
-          { name: 'shell', type: 'enum', default: '/bin/bash',
-            enum_values: ['/bin/bash', '/bin/sh', '/usr/bin/zsh', '/usr/bin/fish'],
+          { name: 'shell', type: 'text', default: '/bin/bash',
+            suggest: ['/bin/bash', '/bin/sh', '/usr/bin/zsh', '/usr/bin/fish'],
             label: { en: 'Shell', fr: 'Shell' },
             description: { en: 'Login shell', fr: 'Shell de connexion' } },
           { name: 'ssh_key', type: 'ref', ref_endpoint: '/api/sshkeys',
@@ -259,8 +285,10 @@ const VMEdit = (() => {
         min: 0, max: 8,
         label: { en: 'Extra disks (format & mount)', fr: 'Disques additionnels (formater & monter)' },
         itemTitle: (v) => `🗄 ${v.device || '/dev/vdb'} → ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}`,
+        newItem: (items) => ({ device: nextFreeDev(items.map(i => i.device)) }),
         args: [
           { name: 'device', type: 'text', required: true, default: '/dev/vdb',
+            suggest: ['/dev/vdb', '/dev/vdc', '/dev/vdd', '/dev/sdb', '/dev/sdc'],
             label: { en: 'Device', fr: 'Périphérique' },
             description: { en: 'First extra virtio disk is /dev/vdb, then /dev/vdc…',
                            fr: 'Premier disque virtio additionnel : /dev/vdb, puis /dev/vdc…' } },
@@ -269,6 +297,7 @@ const VMEdit = (() => {
             description: { en: 'Created at first boot (existing data untouched: overwrite=false)',
                            fr: 'Créé au premier boot (données existantes préservées : overwrite=false)' } },
           { name: 'mount_point', type: 'text', required: true,
+            suggest: ['/data', '/srv', '/var/lib/data', '/mnt/data'],
             label: { en: 'Mount point', fr: 'Point de montage' },
             description: { en: 'e.g. /data', fr: 'ex. /data' } },
         ],
@@ -282,6 +311,7 @@ const VMEdit = (() => {
             label: { en: 'Path', fr: 'Chemin' },
             description: { en: 'Absolute path in the guest', fr: 'Chemin absolu dans l’invité' } },
           { name: 'permissions', type: 'text', default: '0644', validate: /^0[0-7]{3}$/,
+            suggest: ['0644', '0755', '0600', '0400', '0700'],
             label: { en: 'Permissions', fr: 'Permissions' },
             description: { en: 'Octal, e.g. 0644 / 0755', fr: 'Octal, ex. 0644 / 0755' } },
           { name: 'content', type: 'textarea', rows: 4,
@@ -307,8 +337,10 @@ const VMEdit = (() => {
         min: 0, max: 4,
         label: { en: 'Interfaces', fr: 'Interfaces' },
         itemTitle: (v) => `🔌 ${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}`,
+        newItem: (items) => ({ iface: nextFree('eth', 0, items.map(i => i.iface)) }),
         args: [
           { name: 'iface', type: 'text', required: true, default: 'eth0',
+            suggest: ['eth0', 'eth1', 'ens3', 'ens4', 'enp1s0'],
             label: { en: 'Interface name', fr: 'Nom d’interface' },
             description: { en: 'As seen by the guest (eth0, ens3…)',
                            fr: 'Vu par l’invité (eth0, ens3…)' } },

@@ -454,3 +454,63 @@ console.log(G.genNetworkData({ dns: '172.16.3.6, 1.1.1.1', search: 'home.lo',
     assert len(phys) == 2 and phys[0]["mtu"] == 9000
     ns = [c for c in d["config"] if c["type"] == "nameserver"][0]
     assert ns["address"] == ["172.16.3.6", "1.1.1.1"] and ns["search"] == ["home.lo"]
+
+
+# ---------------------------------------------------------------------------
+# v1.8.3 — list-card ergonomics (user report: "+Add gives an interface
+# with the same name", header stuck on "eth0 — dhcp" over an eth1 field)
+# ---------------------------------------------------------------------------
+
+def test_new_item_defaults_avoid_sibling_collisions():
+    """newItem must propose the first FREE name, never replay the arg
+    default (eth0, /dev/vdb) that collides with an existing sibling."""
+    out = _run_node("""
+const S = window.VMEdit._schemas;
+console.log(JSON.stringify([
+  S.CI_NET_SCHEMA.nested.nic.newItem([{iface: 'eth0'}, {iface: 'eth1'}]),
+  S.CI_NET_SCHEMA.nested.nic.newItem([]),
+  S.CI_USER_SCHEMA.nested.fs.newItem([{device: '/dev/vdb'}]),
+  S.DISK_SCHEMA.nested.disk.newItem([{name: 'rootdisk'}, {name: 'disk-1'}]),
+  S.NET_SCHEMA.nested.nic.newItem([{name: 'nic-1'}]),
+]));
+""")
+    assert json.loads(out) == [
+        {"iface": "eth2"}, {"iface": "eth0"}, {"device": "/dev/vdc"},
+        {"name": "disk-2"}, {"name": "nic-2"}]
+
+
+def test_tf_form_add_consumes_new_item_and_headers_stay_live():
+    """The engine side: +Add must ask ndef.newItem for initial values,
+    and the per-card summary header (itemTitle) must be refreshed from
+    the live field values instead of staying frozen at render time."""
+    tf = (WEB / "static" / "js" / "tf-form.js").read_text()
+    assert "ndef.newItem" in tf
+    assert "readItemValues" in tf
+    assert "addEventListener('input', refreshHead)" in tf
+    assert "addEventListener('change', refreshHead)" in tf
+    # header updated via textContent (plain text — no HTML injection path)
+    assert "head.textContent = ndef.itemTitle(" in tf
+
+
+def test_text_fields_offer_suggestions_without_blocking_free_input():
+    """User request: dropdown of common choices on eligible fields, but
+    free entry always possible — implemented as native <datalist> combos
+    (suggest: [...]) rather than closed <select>s."""
+    tf = (WEB / "static" / "js" / "tf-form.js").read_text()
+    assert "<datalist" in tf and 'list="' in tf
+    out = _run_node("""
+const S = window.VMEdit._schemas;
+const sug = (a) => (a.find(x => x.suggest) || {}).name || null;
+const argOf = (args, n) => args.find(a => a.name === n);
+console.log(JSON.stringify({
+  iface: argOf(S.CI_NET_SCHEMA.nested.nic.args, 'iface').suggest.includes('eth0'),
+  size: argOf(S.DISK_SCHEMA.nested.disk.args, 'size').suggest.includes('20Gi'),
+  tz: argOf(S.CI_USER_SCHEMA.args, 'timezone').suggest.includes('Europe/Paris'),
+  // shell used to be a closed enum — must now accept free input
+  shell: argOf(S.CI_USER_SCHEMA.nested.user.args, 'shell').type,
+  dev: argOf(S.CI_USER_SCHEMA.nested.fs.args, 'device').suggest.includes('/dev/vdc'),
+}));
+""")
+    got = json.loads(out)
+    assert got == {"iface": True, "size": True, "tz": True,
+                   "shell": "text", "dev": True}

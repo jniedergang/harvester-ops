@@ -67,12 +67,22 @@ const TFForm = (() => {
 
     let control = '';
     switch (arg.type) {
-      case 'text':
+      case 'text': {
+        // v1.8.3: optional `suggest: [...]` — native <datalist> combo:
+        // a dropdown of common choices that never blocks free input.
+        const dlId = arg.suggest && arg.suggest.length
+          ? `dl-${path.replace(/[^A-Za-z0-9_-]/g, '-')}` : '';
+        const dl = dlId
+          ? `<datalist id="${dlId}">` +
+            arg.suggest.map(s => `<option value="${esc(s)}"></option>`).join('') +
+            `</datalist>` : '';
         control = `<input type="text" id="${id}" name="${name}"
                           value="${esc(v)}"
+                          ${dlId ? `list="${dlId}" autocomplete="off"` : ''}
                           ${arg.required ? 'required' : ''}
-                          ${arg.validate ? `pattern="${esc(arg.validate.source)}"` : ''}>`;
+                          ${arg.validate ? `pattern="${esc(arg.validate.source)}"` : ''}>${dl}`;
         break;
+      }
       case 'int':
         control = `<input type="number" id="${id}" name="${name}"
                           value="${esc(v)}"
@@ -239,6 +249,21 @@ const TFForm = (() => {
       </div>`;
   }
 
+  // v1.8.3: current values of one nested card, straight from its DOM
+  // fields (suffix lookup — names are `${nkey}[${idx}].${arg}`, unique
+  // within a card). Feeds the live itemTitle refresh and newItem defaults.
+  function readItemValues(itemEl, ndef) {
+    const out = {};
+    (ndef.args || []).forEach(arg => {
+      const el = itemEl.querySelector(`[name$=".${arg.name}"]`);
+      if (!el) return;
+      if (arg.type === 'bool') out[arg.name] = el.checked;
+      else if (arg.type === 'int') out[arg.name] = parseInt(el.value, 10) || 0;
+      else out[arg.name] = el.value;
+    });
+    return out;
+  }
+
   // -------------------------------------------------------------------------
   // Wire — populate ref dropdowns + nested-block buttons
   // -------------------------------------------------------------------------
@@ -268,8 +293,14 @@ const TFForm = (() => {
         // would collide with an existing input name. Take max+1 instead.
         const idx = 1 + Math.max(-1, ...Array.from(items)
           .map(it => parseInt(it.dataset.blockIndex, 10) || 0));
+        // v1.8.3: let the schema propose non-colliding initial values
+        // (eth0 taken -> eth1) — replaying the arg defaults duplicated
+        // the name of an existing sibling on every +Add.
+        const init = typeof ndef.newItem === 'function'
+          ? (ndef.newItem(Array.from(items).map(it => readItemValues(it, ndef)), idx) || {})
+          : {};
         list.insertAdjacentHTML('beforeend',
-          renderNestedInstance(kind, nkey, ndef, idx, {}));
+          renderNestedInstance(kind, nkey, ndef, idx, init));
         // Re-wire ref dropdowns inside the freshly added block
         wire(list.lastElementChild, kind, currentCluster);
       });
@@ -286,6 +317,26 @@ const TFForm = (() => {
       if (remaining <= min) return;
       item.remove();
     });
+
+    // 2b. v1.8.3: keep each card's summary header (itemTitle) in sync
+    // with the fields it summarises — it used to be rendered once and
+    // go stale as soon as the user typed ("eth0 — dhcp" over an eth1).
+    if (rootEl.dataset && !rootEl.dataset.tfHeadWired) {
+      rootEl.dataset.tfHeadWired = '1';
+      const refreshHead = (e) => {
+        const item = e.target.closest && e.target.closest('.tf-block-item');
+        if (!item) return;
+        const head = item.querySelector('.tf-block-item__head');
+        if (!head) return;
+        const fs = item.closest('.tf-block');
+        const ndef = fs && (schema.nested || {})[fs.dataset.block];
+        if (!ndef || typeof ndef.itemTitle !== 'function') return;
+        head.textContent = ndef.itemTitle(readItemValues(item, ndef),
+          parseInt(item.dataset.blockIndex, 10) || 0);
+      };
+      rootEl.addEventListener('input', refreshHead);
+      rootEl.addEventListener('change', refreshHead);
+    }
 
     // 3. Phase B placeholder: inline-create buttons
     $$(rootEl, '.tf-ref-create').forEach(btn => {

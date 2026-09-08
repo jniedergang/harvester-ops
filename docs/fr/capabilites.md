@@ -73,7 +73,11 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   cloud-config et network-data v1 propres dans les éditeurs — nom
   d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH
   Harvester ou clés publiques brutes), paquets, commandes, adressage
-  DHCP ou statique — on relit, puis on enregistre.
+  DHCP ou statique — on relit, puis on enregistre. Les champs à
+  valeurs usuelles proposent un menu de suggestions qui ne bloque
+  jamais la saisie libre, et les éléments ajoutés aux listes sont
+  auto-nommés sans dupliquer un voisin (eth0 pris, le suivant est
+  eth1).
 
 La CLI expose le sous-ensemble start/stop via `harvester-status` /
 `-shutdown -N <ns>`.
@@ -157,7 +161,9 @@ sauvegardées.
   l'historique visible.
 - **Internationalisation** — EN + FR complets ; IT / ES / DE retombent
   sur EN.
-- **Thèmes** — 5 thèmes de couleur × sombre/clair.
+- **Thèmes** — 5 thèmes de couleur × sombre/clair. Le thème SUSE par
+  défaut suit l'identité suse.com — palette pin/jade et la fonte
+  officielle SUSE, vendorée dans le tarball (airgap, licence OFL).
 - **Accessibilité** — focus clavier visible, focus trap de dialogue,
   tooltips sur chaque contrôle (désactivables globalement).
 
