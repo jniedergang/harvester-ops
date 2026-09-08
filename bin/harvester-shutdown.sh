@@ -46,6 +46,8 @@ Options:
   -v, --verbose             Verbose logging
       --config <path>       Config file (default: /etc/harvester-ops/config.yaml)
       --skip-etcd-snapshot  Skip the etcd snapshot step
+      --force               Continue past failed safety checks (etcd snapshot
+                            failure, VM volumes still attached)
       --skip-vm-stop        Skip the VM stop step (assume already stopped)
       --snapshot            Take a VirtualMachineBackup (type=snapshot) of every
                             running VM before stopping it. VMs annotated
@@ -130,12 +132,12 @@ step_etcd_snapshot() {
 
     log_info "Création du snapshot sur $cp_node"
     local snap_name="pre-shutdown-$(date +%Y%m%d-%H%M%S)"
-    local cmd="sudo /var/lib/rancher/rke2/bin/etcdctl \
---endpoints=https://127.0.0.1:2379 \
---cacert=/var/lib/rancher/rke2/server/tls/etcd/server-ca.crt \
---cert=/var/lib/rancher/rke2/server/tls/etcd/server-client.crt \
---key=/var/lib/rancher/rke2/server/tls/etcd/server-client.key \
-snapshot save /var/lib/rancher/rke2/server/db/snapshots/${snap_name}.db"
+    # v1.8.9 : RKE2 n'embarque PAS d'etcdctl (etcd tourne en pod statique,
+    # aucun binaire etcdctl n'est livré sous rke2/bin -> échec immédiat,
+    # vécu le 2026-09-09). La voie native : `rke2 etcd-snapshot save`,
+    # qui pose le snapshot dans server/db/snapshots/ avec suffixe
+    # node+timestamp. Le binaire est dans le PATH ou sous /opt/rke2/bin.
+    local cmd="sudo \$(command -v rke2 || echo /opt/rke2/bin/rke2) etcd-snapshot save --name ${snap_name}"
 
     if ssh_exec "$cp_node" "$cmd"; then
         emit_event "etcd-snapshot" "done" "Snapshot: ${snap_name}.db"
@@ -143,7 +145,20 @@ snapshot save /var/lib/rancher/rke2/server/db/snapshots/${snap_name}.db"
     else
         emit_event "etcd-snapshot" "error" "Snapshot failed"
         log_error "Échec du snapshot etcd"
-        confirm "Continuer sans snapshot ? / Continue without snapshot?" || exit 1
+        # v1.8.9 : en mode --yes, confirm() auto-validait et la séquence
+        # DESTRUCTIVE continuait sans son filet de sécurité (vécu le
+        # 2026-09-09 : étape rouge, arrêt complet quand même, exit 0).
+        # Désormais : --force pour passer outre explicitement, sinon
+        # question en interactif, sinon ABANDON.
+        if [[ "$FORCE" == "1" ]]; then
+            log_warn "--force : poursuite SANS snapshot etcd"
+        elif [[ "$INTERACTIVE" == "1" ]]; then
+            confirm "Continuer sans snapshot ? / Continue without snapshot?" || exit 1
+        else
+            emit_event "complete" "error" "Aborted: etcd snapshot failed"
+            log_error "Arrêt ANNULÉ : snapshot etcd en échec. Corriger, ou relancer avec --force (ou --skip-etcd-snapshot)."
+            exit 1
+        fi
     fi
 }
 
@@ -393,26 +408,56 @@ step_longhorn_maintenance() {
         return 0
     fi
 
-    log_info "Attente du détachement des volumes (timeout ${VOLUME_TIMEOUT}s)..."
+    # v1.8.9 : ne compter que les volumes attachés par une VM (pod
+    # virt-launcher). Les volumes de PODS système (monitoring, archives
+    # upgradelog...) ne se détachent PAS quand on arrête les VMs : ils
+    # tombent proprement avec le node. Les attendre brûlait tout le
+    # timeout (3 min, vécu le 2026-09-09) et finissait sur un faux
+    # avertissement « risque pour la cohérence ».
+    log_info "Attente du détachement des volumes de VM (timeout ${VOLUME_TIMEOUT}s)..."
     local deadline=$(( SECONDS + VOLUME_TIMEOUT ))
+    local pods_reported=0 listing vm_lines
     while (( SECONDS < deadline )); do
-        local attached
-        attached=$(kc_quiet -n longhorn-system get volumes.longhorn.io \
-            -o jsonpath='{range .items[?(@.status.state=="attached")]}{.metadata.name}{"\n"}{end}' 2>/dev/null | wc -l)
-        if [[ "$attached" -eq 0 ]]; then
-            emit_event "longhorn-maint" "done" "All volumes detached"
-            log_ok "Tous les volumes Longhorn sont détachés"
+        listing=$(kc_quiet -n longhorn-system get volumes.longhorn.io \
+            -o jsonpath='{range .items[?(@.status.state=="attached")]}{.status.kubernetesStatus.namespace}{"/"}{.status.kubernetesStatus.pvcName}{"|"}{.status.kubernetesStatus.workloadsStatus[*].workloadName}{"\n"}{end}' 2>/dev/null)
+        vm_lines=$(printf '%s\n' "$listing" | grep 'virt-launcher' || true)
+        if [[ "$pods_reported" == "0" ]]; then
+            pods_reported=1
+            local pod_lines
+            pod_lines=$(printf '%s\n' "$listing" | grep -v 'virt-launcher' | grep -v '^$' || true)
+            if [[ -n "$pod_lines" ]]; then
+                log_info "  → volumes de pods (non-VM), ignorés — ils s'arrêteront avec le node :"
+                while IFS='|' read -r vol_pvc _; do
+                    [[ -n "$vol_pvc" ]] && log_info "      - $vol_pvc"
+                done <<< "$pod_lines"
+            fi
+        fi
+        if [[ -z "$vm_lines" ]]; then
+            emit_event "longhorn-maint" "done" "All VM volumes detached"
+            log_ok "Tous les volumes de VM sont détachés"
             return 0
         fi
-        log_info "  → $attached volume(s) encore attaché(s)..."
-        emit_event "longhorn-maint" "progress" "$attached volumes still attached"
+        local attached
+        attached=$(printf '%s\n' "$vm_lines" | grep -c . || true)
+        log_info "  → $attached volume(s) de VM encore attaché(s)..."
+        emit_event "longhorn-maint" "progress" "$attached VM volumes still attached"
         sleep 5
     done
 
-    emit_event "longhorn-maint" "warn" "Some volumes still attached"
-    log_warn "Certains volumes ne se détachent pas — risque pour la cohérence"
-    kc_quiet -n longhorn-system get volumes.longhorn.io
-    confirm "Continuer malgré tout ? / Continue anyway?" || exit 1
+    emit_event "longhorn-maint" "warn" "Some VM volumes still attached"
+    log_warn "Des volumes de VM ne se détachent pas — risque pour la cohérence :"
+    while IFS='|' read -r vol_pvc _; do
+        [[ -n "$vol_pvc" ]] && log_warn "    - $vol_pvc"
+    done <<< "$vm_lines"
+    if [[ "$FORCE" == "1" ]]; then
+        log_warn "--force : poursuite malgré les volumes attachés"
+    elif [[ "$INTERACTIVE" == "1" ]]; then
+        confirm "Continuer malgré tout ? / Continue anyway?" || exit 1
+    else
+        emit_event "complete" "error" "Aborted: VM volumes still attached"
+        log_error "Arrêt ANNULÉ : des volumes de VM restent attachés. Relancer avec --force pour passer outre."
+        exit 1
+    fi
 }
 
 # =============================================================================

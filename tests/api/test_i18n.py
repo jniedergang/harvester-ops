@@ -139,7 +139,7 @@ def test_i18n_dict_parity_across_languages():
         # while still catching "I added an EN key and forgot all 4 others".
         # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
         # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 1123  # v1.8.8: topology.detail.image (EN+FR done; IT/ES/DE fall back to EN)
+        BASELINE = 1129  # v1.8.9: shutdown force option (EN+FR done; IT/ES/DE fall back to EN)
         total = sum(len(v) for v in holes.values())
         if total > BASELINE:
             lines = []

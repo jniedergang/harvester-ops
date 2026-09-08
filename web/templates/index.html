@@ -198,6 +198,12 @@
                 <span class="opt-hint" data-i18n="shutdown.optSnapshotHint">Creates a VirtualMachineBackup (type=snapshot) for each running VM.</span>
               </span>
             </label>
+            <label class="opt-row">
+              <input type="checkbox" id="opt-force">
+              <span>⚠️ <strong data-i18n="shutdown.optForce">Force (ignore failed safety checks)</strong>
+                <span class="opt-hint" data-i18n="shutdown.optForceHint">Continue even if the etcd snapshot fails or VM volumes stay attached. Without it, the sequence aborts on a failed safety check.</span>
+              </span>
+            </label>
           </div>
         </div>
 

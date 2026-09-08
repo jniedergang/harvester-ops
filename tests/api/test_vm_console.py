@@ -213,9 +213,14 @@ def test_live_rfb_banner_through_upstream_leg(live_config):
     import yaml as _yaml
     cfg = _yaml.safe_load(Path(live_config).read_text())
     kc = cfg["clusters"][0]["kubeconfig"]
-    r = subprocess.run(
-        ["kubectl", "--kubeconfig", kc, "get", "vmi", "--all-namespaces",
-         "--no-headers"], capture_output=True, text=True, timeout=15)
+    try:
+        r = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "get", "vmi", "--all-namespaces",
+             "--no-headers"], capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        pytest.skip("live cluster unreachable (powered off?)")
+    if r.returncode != 0:
+        pytest.skip("live cluster unreachable (powered off?)")
     lines = [l.split() for l in r.stdout.splitlines() if " Running " in f" {l} "]
     if not lines:
         pytest.skip("no Running VMI on the live cluster")

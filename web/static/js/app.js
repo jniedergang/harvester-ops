@@ -893,6 +893,7 @@ const App = (() => {
     };
     if (action === 'shutdown') {
       body.snapshot = $('#opt-snapshot') && $('#opt-snapshot').checked;
+      body.force = $('#opt-force') && $('#opt-force').checked;
     }
     const msg = body.snapshot
       ? i18n.t('shutdown.confirmWithSnap', { action, cluster: currentCluster })

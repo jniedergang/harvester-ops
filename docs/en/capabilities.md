@@ -18,7 +18,12 @@ deployment. Available as auditable bash and mirrored in the console.
 
 - **Graceful shutdown** — 8 ordered steps: pre-flight → etcd snapshot →
   optional VM snapshot → ordered VM stop → Longhorn maintenance → cordon
-  → shutdown workers → shutdown control-plane.
+  → shutdown workers → shutdown control-plane. A failed safety check
+  (etcd snapshot failure, VM volumes still attached) **aborts** the
+  sequence in non-interactive mode; pass `--force` (or tick Force in
+  the console) to continue past it. The Longhorn wait only tracks
+  VM-attached volumes — volumes held by pods (monitoring, upgrade
+  logs) stop with the node and are listed as ignored.
 - **Startup** — 5 steps: power on first control-plane → power on the rest
   → wait for nodes Ready → restore cluster state → restart VMs in
   reverse-group order (parallel within a group).

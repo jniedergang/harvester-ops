@@ -19,7 +19,13 @@ console.
 
 - **Shutdown gracieux** — 8 étapes ordonnées : pre-flight → snapshot etcd
   → snapshot VM optionnel → arrêt VM ordonné → maintenance Longhorn →
-  cordon → arrêt workers → arrêt control-plane.
+  cordon → arrêt workers → arrêt control-plane. Un filet de sécurité en
+  échec (snapshot etcd raté, volumes de VM encore attachés) **annule**
+  la séquence en mode non interactif ; passer `--force` (ou cocher
+  Forcer dans la console) pour poursuivre malgré tout. L'attente
+  Longhorn ne suit que les volumes attachés par des VMs — les volumes
+  tenus par des pods (monitoring, logs d'upgrade) s'arrêtent avec le
+  node et sont listés comme ignorés.
 - **Startup** — 5 étapes : démarrer le premier control-plane → démarrer
   le reste → attendre les nodes Ready → restaurer l'état du cluster →
   redémarrer les VMs en ordre de groupe inversé (parallèle dans un

@@ -688,7 +688,7 @@ def run_action_thread(run: ActionRun):
 
 
 def start_action(action, cluster, dry_run=False, interactive=False,
-                 namespace=None, extra_args=None, snapshot=False):
+                 namespace=None, extra_args=None, snapshot=False, force=False):
     """Build the command and spawn the action."""
     cfg = load_config()
     if not any(c["name"] == cluster for c in cfg.get("clusters", [])):
@@ -711,6 +711,11 @@ def start_action(action, cluster, dry_run=False, interactive=False,
         cmd.append("--dry-run")
     if snapshot and action == "shutdown":
         cmd.append("--snapshot")
+    # v1.8.9 : depuis le durcissement des filets de sécurité, un échec
+    # de snapshot etcd (ou des volumes de VM non détachés) ANNULE la
+    # séquence en mode non interactif — sauf --force explicite.
+    if force and action == "shutdown":
+        cmd.append("--force")
     cmd.append("--yes")
 
     if action == "ns-stop" or action == "ns-start":
@@ -2714,6 +2719,7 @@ def api_action_start():
     namespace = data.get("namespace")
     dry_run = bool(data.get("dry_run", False))
     snapshot = bool(data.get("snapshot", False))
+    force = bool(data.get("force", False))
     extra_args = data.get("extra_args", [])
 
     if not action or not cluster:
@@ -2722,7 +2728,7 @@ def api_action_start():
     try:
         run = start_action(action, cluster, dry_run=dry_run,
                            namespace=namespace, extra_args=extra_args,
-                           snapshot=snapshot)
+                           snapshot=snapshot, force=force)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

@@ -30,6 +30,7 @@ fi
 : "${DRY_RUN:=0}"
 : "${INTERACTIVE:=0}"
 : "${ASSUME_YES:=0}"
+: "${FORCE:=0}"
 : "${VERBOSE:=0}"
 : "${CLUSTER_NAME:=}"
 
@@ -234,6 +235,7 @@ parse_common_args() {
             --dry-run|-n) DRY_RUN=1; shift ;;
             --interactive|-i) INTERACTIVE=1; shift ;;
             --yes|-y) ASSUME_YES=1; shift ;;
+            --force) FORCE=1; shift ;;
             --verbose|-v) VERBOSE=1; shift ;;
             --cluster|-c) CLUSTER_NAME="$2"; shift 2 ;;
             --cluster=*) CLUSTER_NAME="${1#*=}"; shift ;;

@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.9] — 2026-09-09 — Shutdown audit: etcd snapshot fixed, real safety nets
+
+Audit of a real full-cluster shutdown run (2026-09-09 00:36) that
+exposed three defects, all reproduced from the live log.
+
+### Fixed
+- **The etcd snapshot never worked**: it called an etcdctl binary at a
+  path RKE2 does not ship (etcd runs as a static pod), failing
+  instantly on every real run. It now uses the native
+  `rke2 etcd-snapshot save` (verified on the live cluster: snapshot
+  saved).
+- **A failed safety check no longer sails through --yes**: the failure
+  branch used confirm(), which auto-approves in batch mode — the
+  destructive sequence completed with a red step and exit 0. A failed
+  etcd snapshot (or VM volumes still attached) now ABORTS the run in
+  non-interactive mode, with a clear error; `--force` (CLI) or the new
+  Force checkbox (console) continues past it, and interactive mode
+  still asks.
+- **The Longhorn detach wait only tracks VM volumes**: it used to count
+  every attached volume, including pod-held ones (monitoring, upgrade
+  log archives) that can never detach by stopping VMs — burning the
+  whole 3-minute timeout and ending on a false consistency warning.
+  Pod volumes are now listed once as ignored (they stop with the
+  node); the wait completes as soon as VM volumes are free, and names
+  the offenders if they are not.
+
+### Tests
+- `tests/api/test_shutdown_audit.py` locks all three fixes (script
+  source + CLI flag plumbing + console checkbox and i18n); the live
+  VNC banner test now skips cleanly when the cluster is powered off.
+
 ## [1.8.8] — 2026-09-08 — ISO vs disk representation, source images
 
 ### Added
