@@ -84,8 +84,9 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   force-layout pile-ups. The Storage view answers "which volume is
   attached to what": VM → volume groups labelled with the real PVC
   claim names (joined to Longhorn volumes), guest disk name on the
-  edge, CD-ROM devices drawn as round discs (💿, media or empty
-  drive), and an **Unattached volumes** section that surfaces orphaned
+  edge, CD-ROM devices and ISO-backed volumes drawn as round discs (💿,
+  media or empty drive), every image-backed volume showing its source
+  image in the detail panel, and an **Unattached volumes** section that surfaces orphaned
   PVCs — deleted-VM leftovers an operator wants to reclaim. The detail
   panel shows PVC, consuming VM, state, size and replica placement.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and

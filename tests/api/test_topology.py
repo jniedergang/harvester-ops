@@ -761,3 +761,64 @@ def test_storage_view_renders_cdrom_distinctly():
     i18n = (Path(__file__).resolve().parent.parent.parent
             / "web" / "static" / "js" / "i18n.js").read_text()
     assert i18n.count("'topology.detail.device'") >= 2
+
+
+# ---------------------------------------------------------------------------
+# v1.8.8 — ISO vs disk representation (source image resolution)
+# ---------------------------------------------------------------------------
+
+def test_resolve_volume_images_joins_backingimage_to_vmimage():
+    """volume.spec.backingImage (vmi-<uuid>) -> BackingImage annotated
+    harvesterhci.io/imageId -> VMImage. ISO-ness comes from the display
+    name or the source url extension."""
+    resolve = app_module._resolve_volume_images
+    vols = [
+        {"name": "v-iso", "backing_image": "vmi-aaa"},
+        {"name": "v-qcow", "backing_image": "vmi-bbb"},
+        {"name": "v-blank", "backing_image": None},
+        {"name": "v-dangling", "backing_image": "vmi-zzz"},
+    ]
+    bis = [
+        {"metadata": {"name": "vmi-aaa",
+                      "annotations": {"harvesterhci.io/imageId": "default/img-iso"}}},
+        {"metadata": {"name": "vmi-bbb",
+                      "annotations": {"harvesterhci.io/imageId": "default/img-qcow"}}},
+    ]
+    imgs = [
+        {"metadata": {"namespace": "default", "name": "img-iso"},
+         "spec": {"displayName": "debian-13.4.0-amd64-netinst.iso"}},
+        {"metadata": {"namespace": "default", "name": "img-qcow"},
+         "spec": {"displayName": "rocky9", "url": "https://x/Rocky-9.qcow2"}},
+    ]
+    resolve(vols, bis, imgs)
+    by = {v["name"]: v for v in vols}
+    assert by["v-iso"]["image"].endswith(".iso") and by["v-iso"]["image_iso"] is True
+    assert by["v-qcow"]["image"] == "rocky9" and by["v-qcow"]["image_iso"] is False
+    assert by["v-blank"]["image"] is None and by["v-blank"]["image_iso"] is False
+    assert by["v-dangling"]["image"] is None
+
+
+def test_resolve_volume_images_iso_from_url_only():
+    """displayName without extension but an .iso url (e.g. the
+    autounattend image) must still flag as ISO."""
+    resolve = app_module._resolve_volume_images
+    vols = [{"name": "v", "backing_image": "vmi-c"}]
+    bis = [{"metadata": {"name": "vmi-c",
+                         "annotations": {"harvesterhci.io/imageId": "default/i"}}}]
+    imgs = [{"metadata": {"namespace": "default", "name": "i"},
+             "spec": {"displayName": "win2025-autounattend",
+                      "url": "http://x/autounattend.ISO"}}]
+    resolve(vols, bis, imgs)
+    assert vols[0]["image_iso"] is True
+
+
+def test_storage_view_renders_iso_as_disc():
+    js = (Path(__file__).resolve().parent.parent.parent
+          / "web" / "static" / "js" / "topology.js").read_text()
+    builder = js.split("function buildStorageElements", 1)[1] \
+                .split("function applyClusterLayout", 1)[0]
+    assert "v.image_iso" in builder, "ISO content must drive the disc shape"
+    assert "topology.detail.image" in js
+    i18n = (Path(__file__).resolve().parent.parent.parent
+            / "web" / "static" / "js" / "i18n.js").read_text()
+    assert i18n.count("'topology.detail.image'") >= 2

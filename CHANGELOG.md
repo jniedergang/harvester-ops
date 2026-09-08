@@ -4,6 +4,18 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.8] — 2026-09-08 — ISO vs disk representation, source images
+
+### Added
+- The Storage view now distinguishes **content**, not just the guest
+  device: a volume created from an ISO image renders as a round disc
+  (💿) like a CD-ROM drive, and every image-backed volume shows its
+  **source image** (display name) in the detail panel. Resolution is a
+  server-side two-hop join: volume.spec.backingImage -> Longhorn
+  BackingImage (harvesterhci.io/imageId annotation) -> VMImage, with
+  ISO-ness read from the display name or source url extension. Search
+  matches "iso" and image names.
+
 ## [1.8.7] — 2026-09-08 — CD-ROMs identified in the Storage view
 
 ### Added

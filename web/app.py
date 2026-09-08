@@ -1293,7 +1293,36 @@ def _topology_volume(item):
                        or status.get("ownerID"),
         "pvc_name": ks.get("pvcName") or None,
         "pvc_namespace": ks.get("namespace") or None,
+        "backing_image": spec.get("backingImage") or None,
     }
+
+
+def _resolve_volume_images(volumes, backingimages_raw, vmimages_raw):
+    """v1.8.8 : enrichit chaque volume image-backed avec le nom d'affichage
+    de son image source et un drapeau ISO (extension .iso du displayName ou
+    de l'url). Mutation en place — le join se fait une fois côté serveur."""
+    bi_to_image = {}
+    for b in backingimages_raw:
+        meta = b.get("metadata") or {}
+        img_id = (meta.get("annotations") or {}).get("harvesterhci.io/imageId")
+        if meta.get("name") and img_id:
+            bi_to_image[meta["name"]] = img_id
+    images = {}
+    for i in vmimages_raw:
+        meta = i.get("metadata") or {}
+        spec = i.get("spec") or {}
+        display = spec.get("displayName") or meta.get("name") or ""
+        url = spec.get("url") or ""
+        images[f"{meta.get('namespace')}/{meta.get('name')}"] = {
+            "display_name": display,
+            "is_iso": display.lower().endswith(".iso")
+                      or url.lower().endswith(".iso"),
+        }
+    for v in volumes:
+        img_id = bi_to_image.get(v.get("backing_image") or "")
+        img = images.get(img_id) if img_id else None
+        v["image"] = img["display_name"] if img else None
+        v["image_iso"] = bool(img and img["is_iso"])
 
 
 def _topology_replica(item):
@@ -1327,6 +1356,12 @@ def _build_topology(cluster, kc):
         "volumes":  ("get", "volumes.longhorn.io", "-A"),
         "replicas": ("get", "replicas.longhorn.io", "-A"),
         "nads":     ("get", "network-attachment-definitions", "-A"),
+        # v1.8.8 : source d'un volume image-backed. Le pont est en deux
+        # sauts : volume.spec.backingImage (vmi-<uuid>) -> BackingImage
+        # annoté harvesterhci.io/imageId -> VMImage (displayName / url,
+        # dont l'extension dit si c'est une ISO).
+        "backingimages": ("get", "backingimages.longhorn.io", "-A"),
+        "vmimages": ("get", "virtualmachineimages", "-A"),
     }
     results = {}
     with ThreadPoolExecutor(max_workers=len(queries)) as ex:
@@ -1342,18 +1377,22 @@ def _build_topology(cluster, kc):
     vols_raw     = (results["volumes"]  or {}).get("items", [])
     replicas_raw = (results["replicas"] or {}).get("items", [])
     nads_raw     = (results["nads"]     or {}).get("items", [])
+    bi_raw       = (results["backingimages"] or {}).get("items", [])
+    img_raw      = (results["vmimages"] or {}).get("items", [])
 
     vmi_by_name = {
         f"{(v.get('metadata') or {}).get('namespace')}/"
         f"{(v.get('metadata') or {}).get('name')}": v
         for v in vmis_raw
     }
+    volumes = [_topology_volume(v) for v in vols_raw]
+    _resolve_volume_images(volumes, bi_raw, img_raw)
     return {
         "cluster": cluster,
         "fetched_at": time.time(),
         "nodes": [_topology_node(n) for n in nodes_raw],
         "vms": [_topology_vm(v, vmi_by_name) for v in vms_raw],
-        "volumes": [_topology_volume(v) for v in vols_raw],
+        "volumes": volumes,
         "replicas": [_topology_replica(r) for r in replicas_raw],
         "networks": [_topology_network_attachment(n) for n in nads_raw],
     }

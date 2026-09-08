@@ -369,7 +369,9 @@ const Topology = (() => {
       const sizeLabel = formatBytes(v.size);
       // v1.8.7 : un CD-ROM (device `cdrom` côté spec VM) se voit — icône
       // 💿 et silhouette de disque ronde, au lieu du cylindre 🛢.
-      const isCd = (extra || {}).device === 'cdrom';
+      // v1.8.8 : même traitement pour le CONTENU — un volume créé depuis
+      // une image ISO est un disque optique, quel que soit le device.
+      const isCd = (extra || {}).device === 'cdrom' || !!v.image_iso;
       return {
         group: 'nodes',
         data: {
@@ -377,7 +379,8 @@ const Topology = (() => {
           label: (isCd ? '💿 ' : '🛢 ') + shortLabel(claim) + '\n' + sizeLabel,
           fullName: claim + ' (' + sizeLabel + (isCd ? ', cdrom' : '') + ')',
           searchText: (claim + ' ' + v.name + ' ' + sizeLabel
-                       + (isCd ? ' cdrom' : '')).toLowerCase(),
+                       + (isCd ? ' cdrom' : '') + (v.image_iso ? ' iso' : '')
+                       + ' ' + (v.image || '')).toLowerCase(),
           color: volStateColor(v.state),
           // Rouge = vraie faute seulement. Un volume détaché a une
           // robustness "unknown" : bord neutre, pas une alarme.
@@ -960,6 +963,7 @@ const Topology = (() => {
           <dt>${i.t('topology.detail.vm')}</dt><dd>${v.vm || '—'}</dd>
           <dt>${i.t('topology.detail.disk')}</dt><dd>${v.disk || '—'}</dd>
           <dt>${i.t('topology.detail.device')}</dt><dd>${v.device === 'cdrom' ? '💿 cdrom' : (v.device || '—')}</dd>
+          <dt>${i.t('topology.detail.image')}</dt><dd>${v.image ? v.image + (v.image_iso ? ' 💿' : '') : '—'}</dd>
           <dt>${i.t('topology.detail.state')}</dt><dd>${v.state || '—'}</dd>
           <dt>${i.t('topology.detail.health')}</dt><dd>${v.robustness || '—'}</dd>
           <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>
