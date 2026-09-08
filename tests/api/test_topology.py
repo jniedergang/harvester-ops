@@ -572,9 +572,11 @@ def test_topology_volumes_render_as_vertical_cylinder():
     look like a horizontal keg — wrong semantic."""
     src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
     storage = src[src.find("function buildStorageElements"):]
-    storage = storage[:3500]
-    # Box must be taller than wide
-    assert "width: 90" in storage and "height: 110" in storage, (
+    storage = storage[:4000]
+    # Box must be taller than wide (v1.8.7: cdrom volumes get a round
+    # disc silhouette instead — the barrel stays the disk shape)
+    assert "width: isCd ? 100 : 90" in storage \
+        and "height: isCd ? 100 : 110" in storage, (
         "Volume box no longer taller than wide — barrel won't read as "
         "a vertical cylinder."
     )
@@ -715,3 +717,47 @@ def test_storage_view_i18n_keys_en_fr():
                 "topology.detail.replicas", "topology.storage.unattached",
                 "topology.storage.unattachedHint"):
         assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"
+
+
+# ---------------------------------------------------------------------------
+# v1.8.7 — CD-ROM identification in the Storage view
+# ---------------------------------------------------------------------------
+
+def test_topology_vm_exposes_device_type_per_volume():
+    """The device type lives in the disk entry's key (disk/cdrom/lun) —
+    the Storage view renders CD-ROMs with a distinct disc silhouette."""
+    vm = {
+        "metadata": {"namespace": "ns", "name": "vm-cd"},
+        "spec": {"template": {"spec": {
+            "domain": {"devices": {"interfaces": [], "disks": [
+                {"name": "rootdisk", "bootOrder": 1, "disk": {"bus": "virtio"}},
+                {"name": "installcd", "bootOrder": 2, "cdrom": {"bus": "sata"}},
+                {"name": "san", "lun": {}},
+            ]}},
+            "networks": [],
+            "volumes": [
+                {"name": "rootdisk", "persistentVolumeClaim": {"claimName": "r"}},
+                {"name": "installcd", "persistentVolumeClaim": {"claimName": "cd"}},
+            ],
+        }}},
+    }
+    out = _topology_vm(vm, {})
+    devices = {v["disk"]: v["device"] for v in out["volumes"]}
+    assert devices == {"rootdisk": "disk", "installcd": "cdrom", "san": "lun"}
+
+
+def test_storage_view_renders_cdrom_distinctly():
+    js = (Path(__file__).resolve().parent.parent.parent
+          / "web" / "static" / "js" / "topology.js").read_text()
+    builder = js.split("function buildStorageElements", 1)[1] \
+                .split("function applyClusterLayout", 1)[0]
+    assert "device === 'cdrom'" in builder and "💿" in builder
+    assert "device: d.device" in builder
+    # an EMPTY cdrom drive (device without volume) must stay visible
+    assert "d.pvc || d.device === 'cdrom'" in builder
+    assert "topology.storage.emptyCd" in builder
+    # detail panel names the device, EN + FR keys present
+    assert "topology.detail.device" in js
+    i18n = (Path(__file__).resolve().parent.parent.parent
+            / "web" / "static" / "js" / "i18n.js").read_text()
+    assert i18n.count("'topology.detail.device'") >= 2

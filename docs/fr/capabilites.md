@@ -91,7 +91,8 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   d'empilement du layout à forces. La vue Stockage répond à « quel
   volume est lié à quoi » : groupes VM → volume étiquetés avec les
   vrais noms de PVC (joints aux volumes Longhorn), nom du disque
-  invité sur l'arête, et une section **Volumes non rattachés** qui
+  invité sur l'arête, les CD-ROM dessinés en disques ronds (💿, média
+  ou lecteur vide), et une section **Volumes non rattachés** qui
   fait remonter les PVC orphelins — restes de VMs supprimées qu'un
   opérateur veut récupérer. Le panneau de détail montre PVC, VM
   consommatrice, état, taille et placement des répliques.

@@ -367,22 +367,26 @@ const Topology = (() => {
     const volNode = (v, extra) => {
       const claim = v.pvc_name || v.name;
       const sizeLabel = formatBytes(v.size);
+      // v1.8.7 : un CD-ROM (device `cdrom` côté spec VM) se voit — icône
+      // 💿 et silhouette de disque ronde, au lieu du cylindre 🛢.
+      const isCd = (extra || {}).device === 'cdrom';
       return {
         group: 'nodes',
         data: {
           id: 'vol-' + v.name,
-          label: '🛢 ' + shortLabel(claim) + '\n' + sizeLabel,
-          fullName: claim + ' (' + sizeLabel + ')',
-          searchText: (claim + ' ' + v.name + ' ' + sizeLabel).toLowerCase(),
+          label: (isCd ? '💿 ' : '🛢 ') + shortLabel(claim) + '\n' + sizeLabel,
+          fullName: claim + ' (' + sizeLabel + (isCd ? ', cdrom' : '') + ')',
+          searchText: (claim + ' ' + v.name + ' ' + sizeLabel
+                       + (isCd ? ' cdrom' : '')).toLowerCase(),
           color: volStateColor(v.state),
           // Rouge = vraie faute seulement. Un volume détaché a une
           // robustness "unknown" : bord neutre, pas une alarme.
           border: v.robustness === 'healthy' ? '#19c37d' :
                   v.robustness === 'degraded' ? '#d97706' :
                   (v.state === 'detached' || !v.state) ? '#666' : '#e0464b',
-          shape: 'barrel',
-          width: 90,
-          height: 110,
+          shape: isCd ? 'ellipse' : 'barrel',
+          width: isCd ? 100 : 90,
+          height: isCd ? 100 : 110,
           kind: 'volume',
           raw: { ...v, replicas: replicasByVol.get(v.name) || [], ...extra },
         },
@@ -391,7 +395,9 @@ const Topology = (() => {
 
     const consumed = new Set();
     (data.vms || []).forEach(vm => {
-      const pvcDisks = (vm.volumes || []).filter(d => d.pvc);
+      // v1.8.7 : un lecteur CD-ROM sans média (device cdrom sans volume,
+      // ex. après install) reste visible — c'est une vraie info d'inventaire.
+      const pvcDisks = (vm.volumes || []).filter(d => d.pvc || d.device === 'cdrom');
       if (!pvcDisks.length) return;   // pas de stockage persistant → hors vue
       const vmId = 'vm-' + vm.namespace + '-' + vm.name;
       const fullName = vm.namespace + '/' + vm.name;
@@ -412,13 +418,43 @@ const Topology = (() => {
         },
       });
       pvcDisks.forEach(d => {
+        if (!d.pvc) {
+          // Lecteur CD-ROM vide : disque rond grisé, pas de taille.
+          const cdId = 'cd-' + vm.namespace + '-' + vm.name + '-' + d.disk;
+          els.push({
+            group: 'nodes',
+            data: {
+              id: cdId,
+              label: '💿 ' + shortLabel(d.disk || 'cdrom') + '\n('
+                     + i.t('topology.storage.emptyCd') + ')',
+              fullName: fullName + '/' + d.disk + ' (cdrom, '
+                        + i.t('topology.storage.emptyCd') + ')',
+              searchText: (fullName + ' ' + d.disk + ' cdrom').toLowerCase(),
+              color: '#3a3a3a',
+              border: '#666',
+              shape: 'ellipse',
+              width: 100,
+              height: 100,
+              kind: 'volume',
+              raw: { name: d.disk, vm: fullName, disk: d.disk,
+                     device: 'cdrom', state: null, replicas: [] },
+            },
+          });
+          consumed.add(cdId);
+          els.push({
+            group: 'edges',
+            data: { id: 'e-' + vmId + '-' + cdId, source: vmId, target: cdId,
+                    edgeType: 'disk', label: d.disk || '' },
+          });
+          return;
+        }
         const key = vm.namespace + '/' + d.pvc;
         const lh = lhByClaim.get(key);
         let volId;
         if (lh) {
           volId = 'vol-' + lh.name;
           if (!consumed.has(volId)) {
-            els.push(volNode(lh, { vm: fullName, disk: d.disk, boot_order: d.boot_order }));
+            els.push(volNode(lh, { vm: fullName, disk: d.disk, boot_order: d.boot_order, device: d.device }));
           }
         } else {
           // PVC hors Longhorn (autre storage class, ou CR pas encore
@@ -429,7 +465,7 @@ const Topology = (() => {
               group: 'nodes',
               data: {
                 id: volId,
-                label: '🛢 ' + shortLabel(d.pvc),
+                label: (d.device === 'cdrom' ? '💿 ' : '🛢 ') + shortLabel(d.pvc),
                 fullName: key,
                 searchText: key.toLowerCase(),
                 color: '#444',
@@ -439,7 +475,8 @@ const Topology = (() => {
                 height: 110,
                 kind: 'volume',
                 raw: { name: d.pvc, pvc_name: d.pvc, pvc_namespace: vm.namespace,
-                       state: null, vm: fullName, disk: d.disk, boot_order: d.boot_order, replicas: [] },
+                       state: null, vm: fullName, disk: d.disk, boot_order: d.boot_order,
+                       device: d.device, replicas: [] },
               },
             });
           }
@@ -919,9 +956,10 @@ const Topology = (() => {
       return `
         <h3>🗄 ${v.pvc_name || v.name}</h3>
         <dl class="kv">
-          <dt>${i.t('topology.detail.pvc')}</dt><dd>${v.pvc_namespace ? v.pvc_namespace + '/' : ''}${v.pvc_name || v.name}</dd>
+          <dt>${i.t('topology.detail.pvc')}</dt><dd>${v.pvc_name ? (v.pvc_namespace ? v.pvc_namespace + '/' : '') + v.pvc_name : '—'}</dd>
           <dt>${i.t('topology.detail.vm')}</dt><dd>${v.vm || '—'}</dd>
           <dt>${i.t('topology.detail.disk')}</dt><dd>${v.disk || '—'}</dd>
+          <dt>${i.t('topology.detail.device')}</dt><dd>${v.device === 'cdrom' ? '💿 cdrom' : (v.device || '—')}</dd>
           <dt>${i.t('topology.detail.state')}</dt><dd>${v.state || '—'}</dd>
           <dt>${i.t('topology.detail.health')}</dt><dd>${v.robustness || '—'}</dd>
           <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>

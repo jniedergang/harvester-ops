@@ -4,6 +4,17 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.7] — 2026-09-08 — CD-ROMs identified in the Storage view
+
+### Added
+- CD-ROM devices are now identifiable in the Storage topology: the
+  device type (disk/cdrom/lun) travels from the VM spec through the
+  topology snapshot, a CD-ROM renders as a round disc (💿) instead of
+  the cylinder, an **empty drive** (cdrom device with no media) stays
+  visible as a grey disc marked "empty", and the volume detail panel
+  gains a Device row. Verified live on both cases (empty drive, and
+  media inserted from an ISO-image PVC).
+
 ## [1.8.6] — 2026-09-08 — Storage view: which volume is attached to what
 
 ### Changed

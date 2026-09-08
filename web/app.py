@@ -1264,7 +1264,11 @@ def _topology_vm(vm_item, vmi_by_name):
         "volumes": [
             {"disk": d.get("name"),
              "pvc": vol_to_pvc.get(d.get("name")),
-             "boot_order": d.get("bootOrder")}
+             "boot_order": d.get("bootOrder"),
+             # v1.8.7 : le type de périphérique vit dans la clé du device
+             # (disk/cdrom/lun) — la vue Storage distingue les CD-ROM.
+             "device": "cdrom" if "cdrom" in d
+                       else ("lun" if "lun" in d else "disk")}
             for d in disks
         ],
     }
