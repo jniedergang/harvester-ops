@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.1] — 2026-09-08 — Cloud-init assistant
+
+### Added
+- **Cloud-init assistant** in the VM edit panel: a fold above the
+  user-data / network-data editors with two generator forms — system
+  (hostname, timezone, package refresh/upgrade, packages, run commands,
+  repeatable users with optional password, passwordless sudo, a
+  Harvester SSH KeyPair picker fed by `/api/sshkeys`, and raw public
+  keys) and network (DHCP or static with CIDR address, gateway, DNS).
+  "Generate" writes clean `#cloud-config` / network-data v1 YAML into
+  the editors (with a confirm when overwriting) — the editors remain
+  the saved truth, and the assistant is deliberately one-way: it never
+  pretends to parse arbitrary existing YAML back into form fields. The
+  generated YAML is covered by parser-validated tests, including
+  quoting of hostile strings (quotes, colons, pipes).
+
+### Tests
+- 6 more in `tests/api/test_vm_edit.py` (generator output parsed with a
+  real YAML parser, minimal output, static-requires-address, wiring and
+  EN/FR keys). Suite: 370 passing.
+
 ## [1.8.0] — 2026-09-08 — Visual disk & network editors
 
 The Disks and Network tabs of the VM edit panel were raw JSON textareas

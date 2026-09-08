@@ -68,7 +68,12 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   une image — passent par le mécanisme `volumeClaimTemplates` de
   Harvester ; bus, ordre de boot, cdrom, attachement bridge/masquerade,
   modèle de NIC et MAC sont éditables, avec validation côté client et
-  dry-run serveur. Un repli JSON brut reste disponible.
+  dry-run serveur. Un repli JSON brut reste disponible. L'onglet
+  Cloud-init gagne un **assistant** (v1.8.1) qui génère du YAML
+  cloud-config et network-data v1 propres dans les éditeurs — nom
+  d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH
+  Harvester ou clés publiques brutes), paquets, commandes, adressage
+  DHCP ou statique — on relit, puis on enregistre.
 
 La CLI expose le sous-ensemble start/stop via `harvester-status` /
 `-shutdown -N <ns>`.

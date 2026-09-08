@@ -137,6 +137,160 @@ const VMEdit = (() => {
   };
 
   // =========================================================================
+  // Cloud-init assistant (v1.8.1) — a one-way GENERATOR: the forms below
+  // produce cloud-config / network-data v1 YAML into the expert textareas
+  // (which stay the saved truth). We deliberately do not parse existing
+  // YAML back into the form — that would need a full YAML parser and
+  // would lie about arbitrary user content.
+  // =========================================================================
+  const CI_USER_SCHEMA = {
+    id: 'ci-userdata',
+    args: [
+      { name: 'hostname', type: 'text',
+        label: { en: 'Hostname', fr: 'Nom d’hôte' },
+        description: { en: 'Sets the guest hostname at first boot',
+                       fr: 'Définit le nom d’hôte de l’invité au premier boot' } },
+      { name: 'timezone', type: 'text',
+        label: { en: 'Timezone', fr: 'Fuseau horaire' },
+        description: { en: 'e.g. Europe/Paris', fr: 'ex. Europe/Paris' } },
+      { name: 'package_update', type: 'bool', default: false,
+        label: { en: 'Refresh package index', fr: 'Rafraîchir l’index des paquets' },
+        description: { en: 'apt/zypper/dnf refresh at first boot',
+                       fr: 'refresh apt/zypper/dnf au premier boot' } },
+      { name: 'package_upgrade', type: 'bool', default: false,
+        label: { en: 'Upgrade packages', fr: 'Mettre à jour les paquets' },
+        description: { en: 'Full package upgrade at first boot (slower)',
+                       fr: 'Mise à jour complète au premier boot (plus lent)' } },
+      { name: 'packages', type: 'textarea', rows: 3,
+        label: { en: 'Packages (one per line)', fr: 'Paquets (un par ligne)' },
+        description: { en: 'Installed at first boot', fr: 'Installés au premier boot' } },
+      { name: 'runcmd', type: 'textarea', rows: 3,
+        label: { en: 'Commands (one per line)', fr: 'Commandes (une par ligne)' },
+        description: { en: 'Shell commands run once at the end of first boot',
+                       fr: 'Commandes shell exécutées une fois en fin de premier boot' } },
+    ],
+    nested: {
+      user: {
+        min: 0, max: 8,
+        label: { en: 'Users', fr: 'Utilisateurs' },
+        itemTitle: (v) => `👤 ${v.name || tr('vm.edit.ci.newUser', 'new user')}${v.sudo ? ' · sudo' : ''}`,
+        args: [
+          { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
+            label: { en: 'Username', fr: 'Nom d’utilisateur' },
+            description: { en: 'Created with /bin/bash as shell',
+                           fr: 'Créé avec /bin/bash comme shell' } },
+          { name: 'password', type: 'text',
+            label: { en: 'Password', fr: 'Mot de passe' },
+            description: { en: 'Stored as plain text in the cloud-init Secret — prefer SSH keys',
+                           fr: 'Stocké en clair dans le Secret cloud-init — préférez les clés SSH' } },
+          { name: 'sudo', type: 'bool', default: true,
+            label: { en: 'Passwordless sudo', fr: 'sudo sans mot de passe' },
+            description: { en: 'ALL=(ALL) NOPASSWD:ALL', fr: 'ALL=(ALL) NOPASSWD:ALL' } },
+          { name: 'ssh_key', type: 'ref', ref_endpoint: '/api/sshkeys',
+            ref_value_field: 'public_key', ref_label_field: 'name',
+            label: { en: 'SSH key (Harvester)', fr: 'Clé SSH (Harvester)' },
+            description: { en: 'A KeyPair stored in Harvester', fr: 'Un KeyPair stocké dans Harvester' } },
+          { name: 'ssh_key_extra', type: 'textarea', rows: 2,
+            label: { en: 'Extra public keys (one per line)', fr: 'Clés publiques en plus (une par ligne)' },
+            description: { en: 'Raw ssh-ed25519/ssh-rsa lines', fr: 'Lignes ssh-ed25519/ssh-rsa brutes' } },
+        ],
+      },
+    },
+  };
+
+  const CI_NET_SCHEMA = {
+    id: 'ci-netdata',
+    args: [
+      { name: 'mode', type: 'enum', default: 'dhcp', enum_values: ['dhcp', 'static'],
+        label: { en: 'Addressing', fr: 'Adressage' },
+        description: { en: 'network-data v1 for the first NIC',
+                       fr: 'network-data v1 pour la première carte' } },
+      { name: 'iface', type: 'text', default: 'eth0',
+        label: { en: 'Interface name', fr: 'Nom d’interface' },
+        description: { en: 'As seen by the guest (eth0, ens3…)',
+                       fr: 'Vu par l’invité (eth0, ens3…)' } },
+      { name: 'address', type: 'text', validate: /^[0-9.]+\/[0-9]+$/,
+        label: { en: 'Address (CIDR)', fr: 'Adresse (CIDR)' },
+        description: { en: 'e.g. 172.16.3.50/16', fr: 'ex. 172.16.3.50/16' } },
+      { name: 'gateway', type: 'text', validate: /^[0-9.]+$/,
+        label: { en: 'Gateway', fr: 'Passerelle' },
+        description: { en: 'e.g. 172.16.0.1', fr: 'ex. 172.16.0.1' } },
+      { name: 'dns', type: 'text',
+        label: { en: 'DNS servers (comma-separated)', fr: 'Serveurs DNS (séparés par des virgules)' },
+        description: { en: 'e.g. 172.16.3.6, 1.1.1.1', fr: 'ex. 172.16.3.6, 1.1.1.1' } },
+    ],
+  };
+
+  /** Minimal YAML string quoting for the narrow structures WE generate. */
+  function yamlStr(s) {
+    s = String(s);
+    if (/^[A-Za-z0-9._\/-]+$/.test(s)) return s;
+    return "'" + s.replace(/'/g, "''") + "'";
+  }
+
+  function linesOf(text) {
+    return String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  }
+
+  function genUserData(spec) {
+    const L = ['#cloud-config'];
+    if (spec.hostname) L.push(`hostname: ${yamlStr(spec.hostname)}`);
+    if (spec.timezone) L.push(`timezone: ${yamlStr(spec.timezone)}`);
+    if (spec.package_update) L.push('package_update: true');
+    if (spec.package_upgrade) L.push('package_upgrade: true');
+    const users = spec.user || [];
+    if (users.length) {
+      L.push('users:');
+      users.forEach(u => {
+        L.push(`  - name: ${yamlStr(u.name || '')}`);
+        L.push('    shell: /bin/bash');
+        if (u.sudo) L.push(`    sudo: ${yamlStr('ALL=(ALL) NOPASSWD:ALL')}`);
+        if (u.password) {
+          L.push(`    plain_text_passwd: ${yamlStr(u.password)}`);
+          L.push('    lock_passwd: false');
+        }
+        const keys = [];
+        if (u.ssh_key) keys.push(u.ssh_key);
+        keys.push(...linesOf(u.ssh_key_extra));
+        if (keys.length) {
+          L.push('    ssh_authorized_keys:');
+          keys.forEach(k => L.push(`      - ${yamlStr(k)}`));
+        }
+      });
+    }
+    const pkgs = linesOf(spec.packages);
+    if (pkgs.length) {
+      L.push('packages:');
+      pkgs.forEach(p => L.push(`  - ${yamlStr(p)}`));
+    }
+    const cmds = linesOf(spec.runcmd);
+    if (cmds.length) {
+      L.push('runcmd:');
+      cmds.forEach(c => L.push(`  - ${yamlStr(c)}`));
+    }
+    return L.join('\n') + '\n';
+  }
+
+  function genNetworkData(spec) {
+    const iface = spec.iface || 'eth0';
+    const L = ['version: 1', 'config:', '  - type: physical', `    name: ${yamlStr(iface)}`, '    subnets:'];
+    if (spec.mode === 'static') {
+      if (!spec.address) throw new Error(tr('vm.edit.ci.errAddr', 'a CIDR address is required for static addressing'));
+      L.push('      - type: static');
+      L.push(`        address: ${yamlStr(spec.address)}`);
+      if (spec.gateway) L.push(`        gateway: ${yamlStr(spec.gateway)}`);
+      const dns = String(spec.dns || '').split(',').map(s => s.trim()).filter(Boolean);
+      if (dns.length) {
+        L.push('        dns_nameservers:');
+        dns.forEach(d => L.push(`          - ${yamlStr(d)}`));
+      }
+    } else {
+      L.push('      - type: dhcp');
+    }
+    return L.join('\n') + '\n';
+  }
+
+  // =========================================================================
   // Mappers — KubeVirt pairs of arrays <-> flat form items
   // =========================================================================
   const VCT_ANNOTATION = 'harvesterhci.io/volumeClaimTemplates';
@@ -416,7 +570,7 @@ const VMEdit = (() => {
       case 'lifecycle': return renderLifecycle(template);
       case 'disks':   return renderDisksSection(vm, cluster);
       case 'network': return renderNetworkSection(vm, cluster);
-      case 'cloudinit': return renderCloudInit();
+      case 'cloudinit': return renderCloudInit(cluster);
       default: return '';
     }
   }
@@ -542,10 +696,27 @@ const VMEdit = (() => {
       ${applyBar('lifecycle')}`;
   }
 
-  function renderCloudInit() {
+  function renderCloudInit(cluster) {
     return `
       <h3>Cloud-init</h3>
       <p class="form-hint">Edit user-data and network-data. Saved to the VM's cloud-init Secret.</p>
+      <details class="vm-edit-adv vm-edit-ci-wizard">
+        <summary>🧙 ${esc(tr('vm.edit.ci.wizard', 'Assistant — generate the YAML below'))}</summary>
+        <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
+          'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
+        <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
+        <div class="vm-edit-ci-userform">${TFForm.render(CI_USER_SCHEMA, cluster, {}, { hideHeader: true })}</div>
+        <div class="apply-bar">
+          <button class="btn btn-sm btn-primary" data-action="gen-userdata">${esc(tr('vm.edit.ci.genUser', 'Generate user-data'))}</button>
+          <span class="apply-result" data-section="ci-user"></span>
+        </div>
+        <h4>${esc(tr('vm.edit.ci.netTitle', 'Network (network-data)'))}</h4>
+        <div class="vm-edit-ci-netform">${TFForm.render(CI_NET_SCHEMA, cluster, {}, { hideHeader: true })}</div>
+        <div class="apply-bar">
+          <button class="btn btn-sm btn-primary" data-action="gen-netdata">${esc(tr('vm.edit.ci.genNet', 'Generate network-data'))}</button>
+          <span class="apply-result" data-section="ci-net"></span>
+        </div>
+      </details>
       <div class="form-row">
         <label>user-data (YAML / shell script)</label>
         <textarea class="yaml-editor tall" data-ci="userData" spellcheck="false"></textarea>
@@ -608,6 +779,43 @@ const VMEdit = (() => {
         applyCloudInit(sectionEl, cluster, namespace, name));
       sectionEl.querySelector('[data-action="reload-cloudinit"]').addEventListener('click', () =>
         loadCloudInit(sectionEl, cluster, namespace, name));
+
+      // v1.8.1 — assistant wiring: two generator forms feeding the editors.
+      const userForm = sectionEl.querySelector('.vm-edit-ci-userform .tf-form');
+      const netForm = sectionEl.querySelector('.vm-edit-ci-netform .tf-form');
+      TFForm.wire(userForm, CI_USER_SCHEMA, cluster);
+      TFForm.wire(netForm, CI_NET_SCHEMA, cluster);
+      const syncNet = () => {
+        const mode = netForm.querySelector('[name="mode"]')?.value || 'dhcp';
+        ['address', 'gateway', 'dns'].forEach(f => {
+          const el = netForm.querySelector(`[name="${f}"]`);
+          const wrap = el && el.closest('.tf-field');
+          if (wrap) wrap.style.display = mode === 'static' ? '' : 'none';
+        });
+      };
+      syncNet();
+      netForm.addEventListener('change', syncNet);
+
+      const generate = (kind) => {
+        const isUser = kind === 'user';
+        const target = sectionEl.querySelector(`[data-ci="${isUser ? 'userData' : 'networkData'}"]`);
+        const result = sectionEl.querySelector(`.apply-result[data-section="ci-${isUser ? 'user' : 'net'}"]`);
+        try {
+          const spec = TFForm.read(isUser ? userForm : netForm,
+                                   isUser ? CI_USER_SCHEMA : CI_NET_SCHEMA,
+                                   { emitEmptyLists: true });
+          const yaml = isUser ? genUserData(spec) : genNetworkData(spec);
+          if (target.value.trim()
+              && !confirm(tr('vm.edit.ci.confirmReplace',
+                'Replace the current editor content with the generated YAML?'))) return;
+          target.value = yaml;
+          result.innerHTML = `<span style="color:var(--accent)">✓ ${esc(tr('vm.edit.ci.generated', 'generated — review below, then Save'))}</span>`;
+        } catch (e) {
+          result.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+        }
+      };
+      sectionEl.querySelector('[data-action="gen-userdata"]').addEventListener('click', () => generate('user'));
+      sectionEl.querySelector('[data-action="gen-netdata"]').addEventListener('click', () => generate('net'));
       return;
     }
 
@@ -783,8 +991,9 @@ const VMEdit = (() => {
   return {
     open,
     // exported for tests (pure functions, no DOM)
-    _mappers: { vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch },
-    _schemas: { DISK_SCHEMA, NET_SCHEMA },
+    _mappers: { vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
+                genUserData, genNetworkData },
+    _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA },
   };
 })();
 

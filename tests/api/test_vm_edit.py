@@ -326,3 +326,77 @@ def test_vm_edit_i18n_keys_en_fr():
     for key in ("vm.edit.disksTitle", "vm.edit.netTitle", "vm.edit.advanced",
                 "vm.edit.restartHint", "vm.edit.errPvcNs", "vm.edit.errMac"):
         assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"
+
+
+# ---------------------------------------------------------------------------
+# 4. v1.8.1 — cloud-init assistant (one-way YAML generators)
+# ---------------------------------------------------------------------------
+
+def _gen(script):
+    return _run_node("const G = window.VMEdit._mappers;\n" + script)
+
+
+def test_ci_userdata_generator_yaml_is_valid():
+    import yaml as _yaml
+    out = _gen("""
+console.log(G.genUserData({ hostname: 'vm1', timezone: 'Europe/Paris',
+  package_update: true, packages: 'htop\\nvim',
+  runcmd: 'echo "a: b" > /tmp/x',
+  user: [{ name: 'ju', password: "p'wd: x", sudo: true,
+           ssh_key: 'ssh-ed25519 AAA ju@n1', ssh_key_extra: 'ssh-rsa BBB c@d' }] }));""")
+    d = _yaml.safe_load(out)
+    assert out.startswith("#cloud-config")
+    assert d["hostname"] == "vm1" and d["package_update"] is True
+    u = d["users"][0]
+    assert u["name"] == "ju" and u["sudo"] == "ALL=(ALL) NOPASSWD:ALL"
+    assert u["plain_text_passwd"] == "p'wd: x" and u["lock_passwd"] is False
+    assert u["ssh_authorized_keys"] == ["ssh-ed25519 AAA ju@n1", "ssh-rsa BBB c@d"]
+    assert d["packages"] == ["htop", "vim"]
+    assert d["runcmd"] == ['echo "a: b" > /tmp/x']
+
+
+def test_ci_userdata_minimal_is_just_header():
+    out = _gen("console.log(JSON.stringify(G.genUserData({})));")
+    assert json.loads(out) == "#cloud-config\n"
+
+
+def test_ci_networkdata_static_and_dhcp():
+    import yaml as _yaml
+    out = _gen("""
+console.log(JSON.stringify({
+  s: G.genNetworkData({ mode: 'static', iface: 'ens3',
+      address: '10.0.0.5/24', gateway: '10.0.0.1', dns: '1.1.1.1, 9.9.9.9' }),
+  d: G.genNetworkData({ mode: 'dhcp' }),
+}));""")
+    both = json.loads(out)
+    s = _yaml.safe_load(both["s"])
+    assert s["version"] == 1
+    sub = s["config"][0]["subnets"][0]
+    assert s["config"][0]["name"] == "ens3"
+    assert sub == {"type": "static", "address": "10.0.0.5/24",
+                   "gateway": "10.0.0.1", "dns_nameservers": ["1.1.1.1", "9.9.9.9"]}
+    d = _yaml.safe_load(both["d"])
+    assert d["config"][0]["subnets"][0] == {"type": "dhcp"}
+
+
+def test_ci_networkdata_static_requires_address():
+    out = _gen("""
+try { G.genNetworkData({ mode: 'static' }); console.log('NOERR'); }
+catch (e) { console.log('ERR'); }""")
+    assert out == "ERR"
+
+
+def test_ci_wizard_wired_in_section():
+    assert "vm-edit-ci-wizard" in JS
+    assert 'data-action="gen-userdata"' in JS and 'data-action="gen-netdata"' in JS
+    # generating over existing content must ask first
+    assert "vm.edit.ci.confirmReplace" in JS
+    # the Harvester SSH keys feed the user form (existing endpoint)
+    assert "'/api/sshkeys'" in JS
+
+
+def test_ci_i18n_keys_en_fr():
+    i18n = (WEB / "static" / "js" / "i18n.js").read_text()
+    for key in ("vm.edit.ci.wizard", "vm.edit.ci.genUser", "vm.edit.ci.genNet",
+                "vm.edit.ci.confirmReplace", "vm.edit.ci.errAddr"):
+        assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"

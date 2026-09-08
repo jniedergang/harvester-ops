@@ -64,7 +64,11 @@ Manage KubeVirt virtual machines without leaving the console.
   Harvester's `volumeClaimTemplates` mechanism; bus, boot order,
   cdrom, bridge/masquerade binding, NIC model and MAC are all
   editable, with client-side validation plus server dry-run. A raw
-  JSON fold remains for exotic specs.
+  JSON fold remains for exotic specs. The Cloud-init tab gains an
+  **assistant** (v1.8.1) that generates clean cloud-config and
+  network-data v1 YAML into the editors — hostname, users (password,
+  passwordless sudo, Harvester SSH keys or raw public keys), packages,
+  run commands, DHCP or static addressing — review, then save.
 
 CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
 
