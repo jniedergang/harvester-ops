@@ -38,6 +38,11 @@ TIP_RE = re.compile(r"""data-tip-i18n\s*=\s*['"]([\w.-]+)['"]""")
 JS_T_RE = re.compile(r"""\bi18n\.t\(\s*['"]([\w.-]+)['"]""")
 # Match `tr('key', fallback)` — dock.js i18n helper (v1.6.6).
 TR_RE = re.compile(r"""\btr\(\s*['"]([\w.-]+)['"]""")
+
+# v1.8.6: topology.js aliases the translator (`const i = window.i18n || …`)
+# and calls `i.t('key')` — invisible to JS_T_RE, which made every
+# topology.* key a false orphan sitting in the baseline.
+I_T_RE = re.compile(r"""\bi\.t\(\s*['"]([\w.-]+)['"]""")
 # Lang block boundaries in i18n.js — `en: {`, `fr: {`, …
 LANG_HEADER_RE = re.compile(r"^\s*(en|fr|it|es|de):\s*\{")
 # Key extraction inside a lang block — `'key.name':` or `"key.name":`.
@@ -68,6 +73,7 @@ def _all_referenced_keys():
         # v1.6.6: dock.js re-renders outside the data-i18n scan and looks
         # keys up through its local `tr('key', fallback)` helper.
         keys.update(TR_RE.findall(text))
+        keys.update(I_T_RE.findall(text))
     return keys
 
 
@@ -133,7 +139,7 @@ def test_i18n_dict_parity_across_languages():
         # while still catching "I added an EN key and forgot all 4 others".
         # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
         # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 1096  # v1.8.5: advanced-surface + template tooltip keys (EN+FR done; IT/ES/DE fall back to EN)
+        BASELINE = 1114  # v1.8.6: storage-view detail keys (EN+FR done; IT/ES/DE fall back to EN)
         total = sum(len(v) for v in holes.values())
         if total > BASELINE:
             lines = []
@@ -177,7 +183,7 @@ def test_i18n_no_orphan_keys_in_english():
     referenced = _all_referenced_keys()
     en = _lang_dicts().get("en") or set()
     orphans = sorted(en - referenced)
-    BASELINE = 132   # v1.4.19: +topology.* keys used via i18n.t() in template literals
+    BASELINE = 105   # v1.8.6: scanner now sees the i.t() alias — topology.* keys are real references, debt shrank from 132
     if len(orphans) > BASELINE:
         pytest.fail(
             f"{len(orphans)} unused English i18n entries (baseline {BASELINE}):\n  - "

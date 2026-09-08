@@ -1274,6 +1274,11 @@ def _topology_volume(item):
     meta = item.get("metadata") or {}
     spec = item.get("spec") or {}
     status = item.get("status") or {}
+    # v1.8.6 : kubernetesStatus porte le nom du PVC consommateur — c'est
+    # la seule passerelle entre le volume Longhorn (pvc-<uid>, illisible)
+    # et le claimName que les specs de VM référencent. La vue Storage
+    # fait le join côté client : VM.volumes[].pvc == pvc_ns/pvc_name.
+    ks = status.get("kubernetesStatus") or {}
     return {
         "name": meta.get("name"),
         "namespace": meta.get("namespace"),
@@ -1282,6 +1287,8 @@ def _topology_volume(item):
         "robustness": status.get("robustness"),
         "attached_to": status.get("currentNodeID")
                        or status.get("ownerID"),
+        "pvc_name": ks.get("pvcName") or None,
+        "pvc_namespace": ks.get("namespace") or None,
     }
 
 

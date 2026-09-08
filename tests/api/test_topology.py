@@ -660,3 +660,58 @@ def test_network_mode_uses_band_layout():
     # the network branch of layoutFor must be preset (manual), not cose
     net_branch = js.split("if (mode === 'network')", 1)[1].split("return", 1)[1]
     assert "name: 'preset'" in net_branch.split("\n", 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# v1.8.6 — VM-centric Storage view (user ask: which volume is attached
+# to which VM)
+# ---------------------------------------------------------------------------
+
+def test_topology_volume_exposes_pvc_claim_join():
+    """kubernetesStatus is the only bridge between the Longhorn volume
+    name (pvc-<uid>, unreadable) and the claimName VM specs reference —
+    the Storage view joins on it client-side."""
+    raw = {
+        "metadata": {"name": "pvc-abc123", "namespace": "longhorn-system"},
+        "spec": {"size": "10737418240"},
+        "status": {"state": "attached", "robustness": "healthy",
+                   "currentNodeID": "harv1",
+                   "kubernetesStatus": {"pvcName": "leap156-rootdisk-x",
+                                        "namespace": "default"}},
+    }
+    out = _topology_volume(raw)
+    assert out["pvc_name"] == "leap156-rootdisk-x"
+    assert out["pvc_namespace"] == "default"
+    # absent kubernetesStatus (volume not k8s-managed) -> None, not crash
+    out2 = _topology_volume({"metadata": {}, "spec": {}, "status": {}})
+    assert out2["pvc_name"] is None and out2["pvc_namespace"] is None
+
+
+def test_storage_mode_is_vm_centric_band_layout():
+    js = (Path(__file__).resolve().parent.parent.parent
+          / "web" / "static" / "js" / "topology.js").read_text()
+    assert "function applyStorageLayout" in js
+    assert "if (currentMode === 'storage') applyStorageLayout(cy);" in js
+    st_branch = js.split("if (mode === 'storage')", 1)[1].split("return", 1)[1]
+    assert "name: 'preset'" in st_branch.split("\n", 1)[0]
+    # the builder must join VM claims to Longhorn volumes and emit
+    # neutral 'disk' edges + an orphan bucket
+    builder = js.split("function buildStorageElements", 1)[1] \
+                .split("function applyClusterLayout", 1)[0]
+    assert "pvc_namespace + '/' + v.pvc_name" in builder
+    assert "edgeType: 'disk'" in builder
+    assert "storage-orphans" in builder
+    # volume detail panel names the PVC, the VM and the replicas
+    for key in ("topology.detail.pvc", "topology.detail.vm",
+                "topology.detail.disk", "topology.detail.replicas",
+                "topology.storage.unattached"):
+        assert key in js, f"missing detail key use: {key}"
+
+
+def test_storage_view_i18n_keys_en_fr():
+    i18n = (Path(__file__).resolve().parent.parent.parent
+            / "web" / "static" / "js" / "i18n.js").read_text()
+    for key in ("topology.detail.pvc", "topology.detail.disk",
+                "topology.detail.replicas", "topology.storage.unattached",
+                "topology.storage.unattachedHint"):
+        assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"

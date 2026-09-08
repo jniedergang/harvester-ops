@@ -183,6 +183,12 @@ const Topology = (() => {
         selector: 'edge[edgeType = "attached"]',
         style: { 'line-color': '#e0464b', 'width': 2 },
       },
+      // v1.8.6: VM -> volume dans la vue Storage — lien nominal, pas
+      // une alarme : bleu discret, pas le rouge de 'attached'.
+      {
+        selector: 'edge[edgeType = "disk"]',
+        style: { 'line-color': '#4aa8d8', 'width': 2 },
+      },
       {
         selector: ':selected',
         style: {
@@ -323,92 +329,156 @@ const Topology = (() => {
     return els;
   }
 
+  // v1.8.6 — Storage view is VM-centric (user ask: "which volume is
+  // attached to what"). One band per VM: the VM box on the left, its
+  // PVC-backed volumes on the right, edge labelled with the guest disk
+  // name. Volumes claimed by nothing sit in a bottom "unattached"
+  // band — the orphan signal an operator actually hunts for. Node
+  // attachment and replica placement moved to the volume detail panel
+  // (they were edge spaghetti; the data is still one click away).
   function buildStorageElements(data) {
     const els = [];
-    // Nodes (hosts)
-    data.nodes.forEach(n => {
-      els.push({
-        group: 'nodes',
-        data: {
-          id: 'node-' + n.name,
-          label: '🖥 ' + n.name,
-          color: n.ready ? '#1f4d3a' : '#5b1f22',
-          border: n.ready ? '#19c37d' : '#e0464b',
-          shape: 'round-rectangle',
-          size: 80,
-          kind: 'node',
-          raw: n,
-        },
-      });
+    const i = window.i18n || { t: (k) => k };
+    // Longhorn volume ↔ PVC claim join (kubernetesStatus)
+    const lhByClaim = new Map();
+    (data.volumes || []).forEach(v => {
+      if (v.pvc_namespace && v.pvc_name) {
+        lhByClaim.set(v.pvc_namespace + '/' + v.pvc_name, v);
+      }
     });
-    // Volumes — color by state
-    data.volumes.forEach(v => {
-      const stateColor = ({
-        attached: '#1f4d3a',
-        detached: '#3a3a3a',
-        attaching: '#7a5f1f',
-        detaching: '#7a5f1f',
-        creating: '#7a5f1f',
-        deleting: '#5b1f22',
-      })[v.state] || '#444';
-      // Two-line label: truncated PVC id + human-readable size. Lets
-      // operators eyeball capacity distribution without clicking each
-      // volume. v1.4.29: widened the box to 140×60 (was 55×55 barrel)
-      // so a 16-char truncation of UUIDs + the size line both fit
-      // comfortably without spilling outside the colored shape.
-      // v1.4.30: vertical cylinder (classic database icon). Cytoscape's
-      // `barrel` shape draws curved sides — when the box is taller than
-      // wide it reads as a vertical cylinder. The 🛢 icon reinforces.
-      const shortName = v.name.length > 12
-        ? v.name.slice(0, 11) + '…'
-        : v.name;
+    // Per-volume replica nodes — detail panel info, no longer edges
+    const replicasByVol = new Map();
+    (data.replicas || []).forEach(r => {
+      if (!r.volume) return;
+      if (!replicasByVol.has(r.volume)) replicasByVol.set(r.volume, []);
+      replicasByVol.get(r.volume).push({ node: r.node, running: r.running });
+    });
+
+    const volStateColor = (state) => ({
+      attached: '#1f4d3a',
+      detached: '#3a3a3a',
+      attaching: '#7a5f1f',
+      detaching: '#7a5f1f',
+      creating: '#7a5f1f',
+      deleting: '#5b1f22',
+    })[state] || '#444';
+
+    const shortLabel = (name) => name.length > 14 ? name.slice(0, 13) + '…' : name;
+    const volNode = (v, extra) => {
+      const claim = v.pvc_name || v.name;
       const sizeLabel = formatBytes(v.size);
-      els.push({
+      return {
         group: 'nodes',
         data: {
           id: 'vol-' + v.name,
-          label: '🛢 ' + shortName + '\n' + sizeLabel,
-          fullName: v.name + ' (' + sizeLabel + ')',
-          searchText: (v.name + ' ' + sizeLabel).toLowerCase(),
-          color: stateColor,
+          label: '🛢 ' + shortLabel(claim) + '\n' + sizeLabel,
+          fullName: claim + ' (' + sizeLabel + ')',
+          searchText: (claim + ' ' + v.name + ' ' + sizeLabel).toLowerCase(),
+          color: volStateColor(v.state),
+          // Rouge = vraie faute seulement. Un volume détaché a une
+          // robustness "unknown" : bord neutre, pas une alarme.
           border: v.robustness === 'healthy' ? '#19c37d' :
-                  v.robustness === 'degraded' ? '#d97706' : '#e0464b',
+                  v.robustness === 'degraded' ? '#d97706' :
+                  (v.state === 'detached' || !v.state) ? '#666' : '#e0464b',
           shape: 'barrel',
-          // Vertical orientation — height > width — so the barrel
-          // visually reads as a database cylinder.
           width: 90,
           height: 110,
           kind: 'volume',
-          raw: v,
+          raw: { ...v, replicas: replicasByVol.get(v.name) || [], ...extra },
+        },
+      };
+    };
+
+    const consumed = new Set();
+    (data.vms || []).forEach(vm => {
+      const pvcDisks = (vm.volumes || []).filter(d => d.pvc);
+      if (!pvcDisks.length) return;   // pas de stockage persistant → hors vue
+      const vmId = 'vm-' + vm.namespace + '-' + vm.name;
+      const fullName = vm.namespace + '/' + vm.name;
+      els.push({
+        group: 'nodes',
+        data: {
+          id: vmId,
+          label: '💻 ' + vm.name,
+          fullName,
+          searchText: fullName.toLowerCase(),
+          color: phaseColor(vm.phase),
+          border: phaseBorder(vm.phase),
+          shape: 'round-rectangle',
+          width: 130,
+          height: 50,
+          kind: 'vm',
+          raw: vm,
         },
       });
-      if (v.attached_to) {
+      pvcDisks.forEach(d => {
+        const key = vm.namespace + '/' + d.pvc;
+        const lh = lhByClaim.get(key);
+        let volId;
+        if (lh) {
+          volId = 'vol-' + lh.name;
+          if (!consumed.has(volId)) {
+            els.push(volNode(lh, { vm: fullName, disk: d.disk, boot_order: d.boot_order }));
+          }
+        } else {
+          // PVC hors Longhorn (autre storage class, ou CR pas encore
+          // réconcilié) : nœud synthétique gris, l'attachement reste lisible.
+          volId = 'pvc-' + vm.namespace + '-' + d.pvc;
+          if (!consumed.has(volId)) {
+            els.push({
+              group: 'nodes',
+              data: {
+                id: volId,
+                label: '🛢 ' + shortLabel(d.pvc),
+                fullName: key,
+                searchText: key.toLowerCase(),
+                color: '#444',
+                border: '#666',
+                shape: 'barrel',
+                width: 90,
+                height: 110,
+                kind: 'volume',
+                raw: { name: d.pvc, pvc_name: d.pvc, pvc_namespace: vm.namespace,
+                       state: null, vm: fullName, disk: d.disk, boot_order: d.boot_order, replicas: [] },
+              },
+            });
+          }
+        }
+        consumed.add(volId);
         els.push({
           group: 'edges',
           data: {
-            id: 'e-attach-' + v.name,
-            source: 'vol-' + v.name,
-            target: 'node-' + v.attached_to,
-            edgeType: 'attached',
-            label: 'attached',
+            id: 'e-' + vmId + '-' + volId,
+            source: vmId,
+            target: volId,
+            edgeType: 'disk',
+            label: d.disk || '',
           },
         });
-      }
-    });
-    // Replicas — show as small dots linking volume → host
-    data.replicas.forEach(r => {
-      if (!r.volume || !r.node) return;
-      els.push({
-        group: 'edges',
-        data: {
-          id: 'e-replica-' + r.name,
-          source: 'vol-' + r.volume,
-          target: 'node-' + r.node,
-          edgeType: 'replica',
-          label: r.running ? '' : '✗',
-        },
       });
     });
+
+    // Volumes orphelins (rattachés à aucune VM) + bandeau d'étiquette
+    const orphans = (data.volumes || []).filter(v => !consumed.has('vol-' + v.name));
+    if (orphans.length) {
+      els.push({
+        group: 'nodes',
+        data: {
+          id: 'storage-orphans',
+          label: '📦 ' + i.t('topology.storage.unattached'),
+          fullName: i.t('topology.storage.unattached'),
+          searchText: 'unattached orphan detached',
+          color: '#3a3a3a',
+          border: '#666',
+          shape: 'cut-rectangle',
+          width: 180,
+          height: 48,
+          kind: 'bucket',
+          raw: { count: orphans.length },
+        },
+      });
+      orphans.forEach(v => els.push(volNode(v, {})));
+    }
     return els;
   }
 
@@ -446,10 +516,9 @@ const Topology = (() => {
       return { name: 'preset', padding: 20 };
     }
     if (mode === 'storage') {
-      return {
-        name: 'cose', animate: false, padding: 20, idealEdgeLength: 120,
-        nodeRepulsion: 8000, nodeDimensionsIncludeLabels: true,
-      };
+      // v1.8.6: preset — bandes par VM posées par applyStorageLayout()
+      // (même remède que la vue Network en 1.8.4).
+      return { name: 'preset', padding: 20 };
     }
     return { name: 'cose' };
   }
@@ -566,6 +635,67 @@ const Topology = (() => {
     cy.fit(undefined, 40);
   }
 
+  // Manual storage layout (v1.8.6) — flow of [💻 vm][🛢…] groups.
+  // A band per VM wasted the canvas (most VMs own a single volume →
+  // a 14-band tower that fit() shrank to confetti). Groups now flow
+  // left-to-right and wrap like words in a paragraph; volumes claimed
+  // by no VM form a grid at the bottom behind their bucket label.
+  function applyStorageLayout(cy) {
+    const cellW = 120, cellH = 140, maxCols = 6;
+    const groupGap = 55, rowGap = 45, maxRowW = 1250;
+    const owner = new Map();               // volId -> vmId
+    cy.edges('[edgeType = "disk"]').forEach(e => {
+      if (!owner.has(e.data('target'))) owner.set(e.data('target'), e.data('source'));
+    });
+    const groups = new Map();
+    cy.nodes().filter(n => n.data('kind') === 'vm').forEach(n => groups.set(n.id(), []));
+    const orphans = [];
+    cy.nodes().filter(n => n.data('kind') === 'volume').forEach(v => {
+      const vm = owner.get(v.id());
+      if (vm && groups.has(vm)) groups.get(vm).push(v);
+      else orphans.push(v);
+    });
+    const isRunning = id =>
+      (cy.getElementById(id).data('raw') || {}).phase === 'Running' ? 0 : 1;
+    const order = [...groups.entries()].sort((a, b) =>
+      isRunning(a[0]) - isRunning(b[0]) || a[0].localeCompare(b[0]));
+    // Dans un groupe : disque de boot d'abord, puis nom de disque.
+    const byBoot = (a, b) => {
+      const r = n => n.data('raw') || {};
+      return ((r(a).boot_order || 99) - (r(b).boot_order || 99))
+        || String(r(a).disk || '').localeCompare(String(r(b).disk || ''));
+    };
+    let cx = 0, top = 60, rowH = 0;
+    order.forEach(([vmId, vols]) => {
+      vols.sort(byBoot);
+      const cols = Math.max(1, Math.min(vols.length || 1, maxCols));
+      const rows = Math.max(1, Math.ceil((vols.length || 1) / cols));
+      const gw = 260 + (cols - 1) * cellW;
+      const gh = rows * cellH;
+      if (cx > 0 && cx + gw > maxRowW) { cx = 0; top += rowH + rowGap; rowH = 0; }
+      vols.forEach((v, i) => v.position({
+        x: cx + 215 + (i % cols) * cellW,
+        y: top + Math.floor(i / cols) * cellH,
+      }));
+      cy.getElementById(vmId).position({ x: cx + 65, y: top + (gh - cellH) / 2 });
+      rowH = Math.max(rowH, gh);
+      cx += gw + groupGap;
+    });
+    // Volumes orphelins : grille pleine largeur sous les groupes
+    if (orphans.length) {
+      top += rowH + 110;
+      const bucket = cy.getElementById('storage-orphans');
+      if (bucket.length) bucket.position({ x: 90, y: top - 90 });
+      orphans.sort((a, b) => a.data('label').localeCompare(b.data('label')));
+      const cols = Math.max(4, Math.floor(maxRowW / cellW));
+      orphans.forEach((v, i) => v.position({
+        x: 45 + (i % cols) * cellW,
+        y: top + Math.floor(i / cols) * cellH,
+      }));
+    }
+    cy.fit(undefined, 40);
+  }
+
   // -----------------------------------------------------------------------
   // Public render entry point
   // -----------------------------------------------------------------------
@@ -609,6 +739,7 @@ const Topology = (() => {
     });
     if (currentMode === 'cluster') applyClusterLayout(cy);
     if (currentMode === 'network') applyNetworkLayout(cy);
+    if (currentMode === 'storage') applyStorageLayout(cy);
     // Belt-and-braces: ungrabify any node that managed to slip through.
     cy.nodes().ungrabify();
     // Click → details
@@ -783,14 +914,25 @@ const Topology = (() => {
     }
     if (d.kind === 'volume') {
       const v = d.raw;
+      const reps = (v.replicas || [])
+        .map(r => `${r.node || '?'}${r.running ? '' : ' ✗'}`).join(', ');
       return `
-        <h3>🗄 ${v.name}</h3>
+        <h3>🗄 ${v.pvc_name || v.name}</h3>
         <dl class="kv">
+          <dt>${i.t('topology.detail.pvc')}</dt><dd>${v.pvc_namespace ? v.pvc_namespace + '/' : ''}${v.pvc_name || v.name}</dd>
+          <dt>${i.t('topology.detail.vm')}</dt><dd>${v.vm || '—'}</dd>
+          <dt>${i.t('topology.detail.disk')}</dt><dd>${v.disk || '—'}</dd>
           <dt>${i.t('topology.detail.state')}</dt><dd>${v.state || '—'}</dd>
           <dt>${i.t('topology.detail.health')}</dt><dd>${v.robustness || '—'}</dd>
           <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>
           <dt>${i.t('topology.detail.attachedTo')}</dt><dd>${v.attached_to || '—'}</dd>
+          <dt>${i.t('topology.detail.replicas')}</dt><dd>${reps || '—'}</dd>
         </dl>`;
+    }
+    if (d.kind === 'bucket') {
+      return `
+        <h3>📦 ${i.t('topology.storage.unattached')}</h3>
+        <p>${(d.raw && d.raw.count) || 0} ${i.t('topology.storage.unattachedHint')}</p>`;
     }
     if (d.kind === 'network') {
       const n = d.raw;

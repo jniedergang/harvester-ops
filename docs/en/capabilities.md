@@ -81,7 +81,12 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   (nodes), Network, and Storage (Longhorn volumes), with click-to-detail.
   The Network view reads like a rack diagram: one band per network,
   switch on the left, member VMs in a grid (running first) — no
-  force-layout pile-ups.
+  force-layout pile-ups. The Storage view answers "which volume is
+  attached to what": VM → volume groups labelled with the real PVC
+  claim names (joined to Longhorn volumes), guest disk name on the
+  edge, and an **Unattached volumes** section that surfaces orphaned
+  PVCs — deleted-VM leftovers an operator wants to reclaim. The detail
+  panel shows PVC, consuming VM, state, size and replica placement.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,

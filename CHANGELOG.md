@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.6] — 2026-09-08 — Storage view: which volume is attached to what
+
+### Changed
+- The Storage topology is now **VM-centric** (user ask): VM → volume
+  groups flowing left-to-right, volumes labelled with their real PVC
+  claim name (kubernetesStatus join to the Longhorn volume, instead of
+  the unreadable pvc-<uid>), guest disk name on the edge, boot disk
+  first. Volumes claimed by no VM gather in an **Unattached volumes**
+  section — on the test cluster this immediately surfaced 20 orphaned
+  PVCs left behind by deleted VMs. Node attachment and replica
+  placement moved from edge spaghetti to the volume detail panel
+  (PVC, consuming VM, guest disk, state, size, replicas).
+- A red volume border now means a real fault (degraded/faulted while
+  attached); detached volumes with unknown robustness show a neutral
+  border instead of a false alarm.
+
+### Tests
+- Reducer test for the kubernetesStatus PVC join; storage-view wiring
+  and EN+FR key assertions; the i18n orphan-key scanner learned the
+  `i.t()` alias used by topology.js (baseline debt shrank 132 → 105).
+
 ## [1.8.5] — 2026-09-08 — Tooltip debt cleared: every surface localised
 
 ### Fixed

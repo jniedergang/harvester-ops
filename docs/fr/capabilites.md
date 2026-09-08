@@ -88,7 +88,13 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   (nodes), Réseau, et Stockage (volumes Longhorn), avec click-pour-détail.
   La vue Réseau se lit comme un schéma de baie : une bande par réseau,
   le switch à gauche, ses VMs en grille (Running d'abord) — plus
-  d'empilement du layout à forces.
+  d'empilement du layout à forces. La vue Stockage répond à « quel
+  volume est lié à quoi » : groupes VM → volume étiquetés avec les
+  vrais noms de PVC (joints aux volumes Longhorn), nom du disque
+  invité sur l'arête, et une section **Volumes non rattachés** qui
+  fait remonter les PVC orphelins — restes de VMs supprimées qu'un
+  opérateur veut récupérer. Le panneau de détail montre PVC, VM
+  consommatrice, état, taille et placement des répliques.
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,
