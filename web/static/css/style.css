@@ -1877,6 +1877,13 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   color: var(--text-dim);
 }
 .vm-edit-adv { margin-top: 12px; }
+.vm-edit-ci-sec {
+  margin: 14px 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  color: var(--text-dim);
+}
 .vm-edit-adv summary {
   cursor: pointer;
   font-size: 12px;

@@ -133,7 +133,7 @@ def test_i18n_dict_parity_across_languages():
         # while still catching "I added an EN key and forgot all 4 others".
         # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
         # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 895   # v1.8.1: +vm.edit.ci.* cloud-init assistant keys (EN+FR done; IT/ES/DE fall back to EN)
+        BASELINE = 898   # v1.8.2: cloud-init assistant full coverage (EN+FR done; IT/ES/DE fall back to EN)
         total = sum(len(v) for v in holes.values())
         if total > BASELINE:
             lines = []

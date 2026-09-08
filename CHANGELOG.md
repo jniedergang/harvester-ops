@@ -4,6 +4,23 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.2] — 2026-09-08 — Cloud-init assistant: full module coverage
+
+### Added
+- User report: "many parameters missing" — the assistant now covers the
+  breadth of common cloud-config modules, organised in titled sections:
+  identity (hostname, FQDN + manage_etc_hosts, timezone, locale,
+  keyboard layout), SSH access policy (ssh_pwauth, disable_root,
+  expire-passwords-at-first-login), richer users (groups, shell),
+  packages (+ reboot-if-required), storage (grow root partition, and
+  repeatable **extra disks formatted & mounted** via fs_setup + mounts —
+  pairs with the visual disk editor), repeatable **write_files**
+  (path/permissions/content as YAML literal blocks), NTP servers,
+  **trusted CA certificates** (PEM — e.g. an internal CA), bootcmd, and
+  runcmd. Network-data now supports **multiple interfaces** (per-NIC
+  dhcp/static + MTU) and global DNS/search domains (type: nameserver).
+  All generator output remains parser-validated in tests.
+
 ## [1.8.1] — 2026-09-08 — Cloud-init assistant
 
 ### Added

@@ -145,14 +145,49 @@ const VMEdit = (() => {
   // =========================================================================
   const CI_USER_SCHEMA = {
     id: 'ci-userdata',
+    sections: [
+      { id: 'identity', label: { en: 'Identity & access', fr: 'Identité & accès' },
+        args: ['hostname', 'fqdn', 'timezone', 'locale', 'keyboard',
+               'ssh_pwauth', 'disable_root', 'expire_passwords'] },
+      { id: 'users', label: { en: 'Users', fr: 'Utilisateurs' }, nested: 'user' },
+      { id: 'packages', label: { en: 'Packages', fr: 'Paquets' },
+        args: ['package_update', 'package_upgrade', 'package_reboot', 'packages'] },
+      { id: 'storage', label: { en: 'Storage', fr: 'Stockage' },
+        args: ['growpart'] },
+      { id: 'fs', label: { en: 'Extra disks', fr: 'Disques additionnels' }, nested: 'fs' },
+      { id: 'files', label: { en: 'Files', fr: 'Fichiers' }, nested: 'file' },
+      { id: 'misc', label: { en: 'System', fr: 'Système' },
+        args: ['ntp_servers', 'ca_certs', 'bootcmd', 'runcmd'] },
+    ],
     args: [
       { name: 'hostname', type: 'text',
         label: { en: 'Hostname', fr: 'Nom d’hôte' },
         description: { en: 'Sets the guest hostname at first boot',
                        fr: 'Définit le nom d’hôte de l’invité au premier boot' } },
+      { name: 'fqdn', type: 'text',
+        label: { en: 'FQDN', fr: 'FQDN' },
+        description: { en: 'e.g. vm1.home.lo (also sets manage_etc_hosts)',
+                       fr: 'ex. vm1.home.lo (active aussi manage_etc_hosts)' } },
       { name: 'timezone', type: 'text',
         label: { en: 'Timezone', fr: 'Fuseau horaire' },
         description: { en: 'e.g. Europe/Paris', fr: 'ex. Europe/Paris' } },
+      { name: 'locale', type: 'text',
+        label: { en: 'Locale', fr: 'Locale' },
+        description: { en: 'e.g. fr_FR.UTF-8', fr: 'ex. fr_FR.UTF-8' } },
+      { name: 'keyboard', type: 'text',
+        label: { en: 'Keyboard layout', fr: 'Disposition clavier' },
+        description: { en: 'e.g. fr, us, de', fr: 'ex. fr, us, de' } },
+      { name: 'ssh_pwauth', type: 'bool', default: false,
+        label: { en: 'Allow SSH password auth', fr: 'Autoriser SSH par mot de passe' },
+        description: { en: 'Required for password logins over SSH',
+                       fr: 'Requis pour se connecter en SSH par mot de passe' } },
+      { name: 'disable_root', type: 'bool', default: true,
+        label: { en: 'Disable root login', fr: 'Désactiver le login root' },
+        description: { en: 'cloud-init default is true', fr: 'true par défaut côté cloud-init' } },
+      { name: 'expire_passwords', type: 'bool', default: false,
+        label: { en: 'Expire passwords at first login', fr: 'Expirer les mots de passe au premier login' },
+        description: { en: 'Forces every user to change their password',
+                       fr: 'Force chaque utilisateur à changer son mot de passe' } },
       { name: 'package_update', type: 'bool', default: false,
         label: { en: 'Refresh package index', fr: 'Rafraîchir l’index des paquets' },
         description: { en: 'apt/zypper/dnf refresh at first boot',
@@ -161,9 +196,28 @@ const VMEdit = (() => {
         label: { en: 'Upgrade packages', fr: 'Mettre à jour les paquets' },
         description: { en: 'Full package upgrade at first boot (slower)',
                        fr: 'Mise à jour complète au premier boot (plus lent)' } },
+      { name: 'package_reboot', type: 'bool', default: false,
+        label: { en: 'Reboot if required', fr: 'Redémarrer si nécessaire' },
+        description: { en: 'package_reboot_if_required after upgrades',
+                       fr: 'package_reboot_if_required après mise à jour' } },
       { name: 'packages', type: 'textarea', rows: 3,
         label: { en: 'Packages (one per line)', fr: 'Paquets (un par ligne)' },
         description: { en: 'Installed at first boot', fr: 'Installés au premier boot' } },
+      { name: 'growpart', type: 'bool', default: true,
+        label: { en: 'Grow root partition', fr: 'Étendre la partition racine' },
+        description: { en: 'Expand / to fill the (resized) root disk',
+                       fr: 'Étend / pour occuper le disque racine (redimensionné)' } },
+      { name: 'ntp_servers', type: 'text',
+        label: { en: 'NTP servers (comma-separated)', fr: 'Serveurs NTP (séparés par des virgules)' },
+        description: { en: 'Enables the ntp module', fr: 'Active le module ntp' } },
+      { name: 'ca_certs', type: 'textarea', rows: 3,
+        label: { en: 'Trusted CA certificates (PEM)', fr: 'Certificats CA de confiance (PEM)' },
+        description: { en: 'Added to the guest trust store (e.g. your internal CA)',
+                       fr: 'Ajoutés au magasin de confiance de l’invité (ex. votre CA interne)' } },
+      { name: 'bootcmd', type: 'textarea', rows: 2,
+        label: { en: 'Early boot commands (one per line)', fr: 'Commandes de début de boot (une par ligne)' },
+        description: { en: 'Run very early, on every boot',
+                       fr: 'Exécutées très tôt, à chaque boot' } },
       { name: 'runcmd', type: 'textarea', rows: 3,
         label: { en: 'Commands (one per line)', fr: 'Commandes (une par ligne)' },
         description: { en: 'Shell commands run once at the end of first boot',
@@ -177,8 +231,7 @@ const VMEdit = (() => {
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Username', fr: 'Nom d’utilisateur' },
-            description: { en: 'Created with /bin/bash as shell',
-                           fr: 'Créé avec /bin/bash comme shell' } },
+            description: { en: 'The account to create', fr: 'Le compte à créer' } },
           { name: 'password', type: 'text',
             label: { en: 'Password', fr: 'Mot de passe' },
             description: { en: 'Stored as plain text in the cloud-init Secret — prefer SSH keys',
@@ -186,6 +239,13 @@ const VMEdit = (() => {
           { name: 'sudo', type: 'bool', default: true,
             label: { en: 'Passwordless sudo', fr: 'sudo sans mot de passe' },
             description: { en: 'ALL=(ALL) NOPASSWD:ALL', fr: 'ALL=(ALL) NOPASSWD:ALL' } },
+          { name: 'groups', type: 'text',
+            label: { en: 'Groups (comma-separated)', fr: 'Groupes (séparés par des virgules)' },
+            description: { en: 'e.g. wheel, docker', fr: 'ex. wheel, docker' } },
+          { name: 'shell', type: 'enum', default: '/bin/bash',
+            enum_values: ['/bin/bash', '/bin/sh', '/usr/bin/zsh', '/usr/bin/fish'],
+            label: { en: 'Shell', fr: 'Shell' },
+            description: { en: 'Login shell', fr: 'Shell de connexion' } },
           { name: 'ssh_key', type: 'ref', ref_endpoint: '/api/sshkeys',
             ref_value_field: 'public_key', ref_label_field: 'name',
             label: { en: 'SSH key (Harvester)', fr: 'Clé SSH (Harvester)' },
@@ -195,30 +255,78 @@ const VMEdit = (() => {
             description: { en: 'Raw ssh-ed25519/ssh-rsa lines', fr: 'Lignes ssh-ed25519/ssh-rsa brutes' } },
         ],
       },
+      fs: {
+        min: 0, max: 8,
+        label: { en: 'Extra disks (format & mount)', fr: 'Disques additionnels (formater & monter)' },
+        itemTitle: (v) => `🗄 ${v.device || '/dev/vdb'} → ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}`,
+        args: [
+          { name: 'device', type: 'text', required: true, default: '/dev/vdb',
+            label: { en: 'Device', fr: 'Périphérique' },
+            description: { en: 'First extra virtio disk is /dev/vdb, then /dev/vdc…',
+                           fr: 'Premier disque virtio additionnel : /dev/vdb, puis /dev/vdc…' } },
+          { name: 'filesystem', type: 'enum', default: 'ext4', enum_values: ['ext4', 'xfs', 'btrfs'],
+            label: { en: 'Filesystem', fr: 'Système de fichiers' },
+            description: { en: 'Created at first boot (existing data untouched: overwrite=false)',
+                           fr: 'Créé au premier boot (données existantes préservées : overwrite=false)' } },
+          { name: 'mount_point', type: 'text', required: true,
+            label: { en: 'Mount point', fr: 'Point de montage' },
+            description: { en: 'e.g. /data', fr: 'ex. /data' } },
+        ],
+      },
+      file: {
+        min: 0, max: 8,
+        label: { en: 'Files (write_files)', fr: 'Fichiers (write_files)' },
+        itemTitle: (v) => `📄 ${v.path || tr('vm.edit.ci.newFile', 'new file')}`,
+        args: [
+          { name: 'path', type: 'text', required: true,
+            label: { en: 'Path', fr: 'Chemin' },
+            description: { en: 'Absolute path in the guest', fr: 'Chemin absolu dans l’invité' } },
+          { name: 'permissions', type: 'text', default: '0644', validate: /^0[0-7]{3}$/,
+            label: { en: 'Permissions', fr: 'Permissions' },
+            description: { en: 'Octal, e.g. 0644 / 0755', fr: 'Octal, ex. 0644 / 0755' } },
+          { name: 'content', type: 'textarea', rows: 4,
+            label: { en: 'Content', fr: 'Contenu' },
+            description: { en: 'Written verbatim', fr: 'Écrit tel quel' } },
+        ],
+      },
     },
   };
 
   const CI_NET_SCHEMA = {
     id: 'ci-netdata',
     args: [
-      { name: 'mode', type: 'enum', default: 'dhcp', enum_values: ['dhcp', 'static'],
-        label: { en: 'Addressing', fr: 'Adressage' },
-        description: { en: 'network-data v1 for the first NIC',
-                       fr: 'network-data v1 pour la première carte' } },
-      { name: 'iface', type: 'text', default: 'eth0',
-        label: { en: 'Interface name', fr: 'Nom d’interface' },
-        description: { en: 'As seen by the guest (eth0, ens3…)',
-                       fr: 'Vu par l’invité (eth0, ens3…)' } },
-      { name: 'address', type: 'text', validate: /^[0-9.]+\/[0-9]+$/,
-        label: { en: 'Address (CIDR)', fr: 'Adresse (CIDR)' },
-        description: { en: 'e.g. 172.16.3.50/16', fr: 'ex. 172.16.3.50/16' } },
-      { name: 'gateway', type: 'text', validate: /^[0-9.]+$/,
-        label: { en: 'Gateway', fr: 'Passerelle' },
-        description: { en: 'e.g. 172.16.0.1', fr: 'ex. 172.16.0.1' } },
       { name: 'dns', type: 'text',
         label: { en: 'DNS servers (comma-separated)', fr: 'Serveurs DNS (séparés par des virgules)' },
-        description: { en: 'e.g. 172.16.3.6, 1.1.1.1', fr: 'ex. 172.16.3.6, 1.1.1.1' } },
+        description: { en: 'Global resolvers (type: nameserver)', fr: 'Résolveurs globaux (type: nameserver)' } },
+      { name: 'search', type: 'text',
+        label: { en: 'Search domains (comma-separated)', fr: 'Domaines de recherche (séparés par des virgules)' },
+        description: { en: 'e.g. home.lo', fr: 'ex. home.lo' } },
     ],
+    nested: {
+      nic: {
+        min: 0, max: 4,
+        label: { en: 'Interfaces', fr: 'Interfaces' },
+        itemTitle: (v) => `🔌 ${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}`,
+        args: [
+          { name: 'iface', type: 'text', required: true, default: 'eth0',
+            label: { en: 'Interface name', fr: 'Nom d’interface' },
+            description: { en: 'As seen by the guest (eth0, ens3…)',
+                           fr: 'Vu par l’invité (eth0, ens3…)' } },
+          { name: 'mode', type: 'enum', default: 'dhcp', enum_values: ['dhcp', 'static'],
+            label: { en: 'Addressing', fr: 'Adressage' },
+            description: { en: 'dhcp or static', fr: 'dhcp ou statique' } },
+          { name: 'address', type: 'text', validate: /^[0-9.]+\/[0-9]+$/,
+            label: { en: 'Address (CIDR)', fr: 'Adresse (CIDR)' },
+            description: { en: 'e.g. 172.16.3.50/16', fr: 'ex. 172.16.3.50/16' } },
+          { name: 'gateway', type: 'text', validate: /^[0-9.]+$/,
+            label: { en: 'Gateway', fr: 'Passerelle' },
+            description: { en: 'e.g. 172.16.0.1', fr: 'ex. 172.16.0.1' } },
+          { name: 'mtu', type: 'int', min: 576, max: 9216,
+            label: { en: 'MTU', fr: 'MTU' },
+            description: { en: 'Empty = default (1500)', fr: 'Vide = défaut (1500)' } },
+        ],
+      },
+    },
   };
 
   /** Minimal YAML string quoting for the narrow structures WE generate. */
@@ -228,23 +336,56 @@ const VMEdit = (() => {
     return "'" + s.replace(/'/g, "''") + "'";
   }
 
+  /** Emit a YAML literal block (|) with the given indentation. */
+  function yamlBlock(text, indent) {
+    const pad = ' '.repeat(indent);
+    return '|\n' + String(text).replace(/\s+$/, '').split('\n')
+      .map(l => pad + l).join('\n');
+  }
+
   function linesOf(text) {
     return String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  }
+
+  function csvOf(text) {
+    return String(text || '').split(',').map(s => s.trim()).filter(Boolean);
   }
 
   function genUserData(spec) {
     const L = ['#cloud-config'];
     if (spec.hostname) L.push(`hostname: ${yamlStr(spec.hostname)}`);
+    if (spec.fqdn) {
+      L.push(`fqdn: ${yamlStr(spec.fqdn)}`);
+      L.push('manage_etc_hosts: true');
+    }
     if (spec.timezone) L.push(`timezone: ${yamlStr(spec.timezone)}`);
+    if (spec.locale) L.push(`locale: ${yamlStr(spec.locale)}`);
+    if (spec.keyboard) {
+      L.push('keyboard:');
+      L.push(`  layout: ${yamlStr(spec.keyboard)}`);
+    }
+    if (spec.ssh_pwauth) L.push('ssh_pwauth: true');
+    if (spec.disable_root === false) L.push('disable_root: false');
+    if (spec.expire_passwords) {
+      L.push('chpasswd:');
+      L.push('  expire: true');
+    }
     if (spec.package_update) L.push('package_update: true');
     if (spec.package_upgrade) L.push('package_upgrade: true');
+    if (spec.package_reboot) L.push('package_reboot_if_required: true');
+    if (spec.growpart === false) {
+      L.push('growpart:');
+      L.push('  mode: off');
+    }
     const users = spec.user || [];
     if (users.length) {
       L.push('users:');
       users.forEach(u => {
         L.push(`  - name: ${yamlStr(u.name || '')}`);
-        L.push('    shell: /bin/bash');
+        L.push(`    shell: ${yamlStr(u.shell || '/bin/bash')}`);
         if (u.sudo) L.push(`    sudo: ${yamlStr('ALL=(ALL) NOPASSWD:ALL')}`);
+        const groups = csvOf(u.groups);
+        if (groups.length) L.push(`    groups: ${yamlStr(groups.join(', '))}`);
         if (u.password) {
           L.push(`    plain_text_passwd: ${yamlStr(u.password)}`);
           L.push('    lock_passwd: false');
@@ -263,6 +404,45 @@ const VMEdit = (() => {
       L.push('packages:');
       pkgs.forEach(p => L.push(`  - ${yamlStr(p)}`));
     }
+    const fsItems = spec.fs || [];
+    if (fsItems.length) {
+      L.push('fs_setup:');
+      fsItems.forEach(f => {
+        L.push(`  - device: ${yamlStr(f.device || '')}`);
+        L.push(`    filesystem: ${yamlStr(f.filesystem || 'ext4')}`);
+        L.push('    overwrite: false');
+      });
+      L.push('mounts:');
+      fsItems.forEach(f => {
+        L.push(`  - [${yamlStr(f.device || '')}, ${yamlStr(f.mount_point || '')}, ${yamlStr(f.filesystem || 'ext4')}, defaults, '0', '2']`);
+      });
+    }
+    const files = spec.file || [];
+    if (files.length) {
+      L.push('write_files:');
+      files.forEach(f => {
+        L.push(`  - path: ${yamlStr(f.path || '')}`);
+        L.push(`    permissions: '${(f.permissions || '0644').replace(/'/g, '')}'`);
+        L.push(`    content: ${yamlBlock(f.content || '', 6)}`);
+      });
+    }
+    const ntp = csvOf(spec.ntp_servers);
+    if (ntp.length) {
+      L.push('ntp:');
+      L.push('  enabled: true');
+      L.push('  servers:');
+      ntp.forEach(s2 => L.push(`    - ${yamlStr(s2)}`));
+    }
+    if (spec.ca_certs && String(spec.ca_certs).trim()) {
+      L.push('ca_certs:');
+      L.push('  trusted:');
+      L.push(`    - ${yamlBlock(spec.ca_certs, 6)}`);
+    }
+    const boots = linesOf(spec.bootcmd);
+    if (boots.length) {
+      L.push('bootcmd:');
+      boots.forEach(c => L.push(`  - ${yamlStr(c)}`));
+    }
     const cmds = linesOf(spec.runcmd);
     if (cmds.length) {
       L.push('runcmd:');
@@ -272,20 +452,35 @@ const VMEdit = (() => {
   }
 
   function genNetworkData(spec) {
-    const iface = spec.iface || 'eth0';
-    const L = ['version: 1', 'config:', '  - type: physical', `    name: ${yamlStr(iface)}`, '    subnets:'];
-    if (spec.mode === 'static') {
-      if (!spec.address) throw new Error(tr('vm.edit.ci.errAddr', 'a CIDR address is required for static addressing'));
-      L.push('      - type: static');
-      L.push(`        address: ${yamlStr(spec.address)}`);
-      if (spec.gateway) L.push(`        gateway: ${yamlStr(spec.gateway)}`);
-      const dns = String(spec.dns || '').split(',').map(s => s.trim()).filter(Boolean);
-      if (dns.length) {
-        L.push('        dns_nameservers:');
-        dns.forEach(d => L.push(`          - ${yamlStr(d)}`));
+    const nics = (spec.nic && spec.nic.length)
+      ? spec.nic : [{ iface: 'eth0', mode: 'dhcp' }];
+    const L = ['version: 1', 'config:'];
+    nics.forEach(n => {
+      L.push('  - type: physical');
+      L.push(`    name: ${yamlStr(n.iface || 'eth0')}`);
+      if (n.mtu) L.push(`    mtu: ${n.mtu}`);
+      L.push('    subnets:');
+      if (n.mode === 'static') {
+        if (!n.address) throw new Error(tr('vm.edit.ci.errAddr', 'a CIDR address is required for static addressing') + ` (${n.iface || 'eth0'})`);
+        L.push('      - type: static');
+        L.push(`        address: ${yamlStr(n.address)}`);
+        if (n.gateway) L.push(`        gateway: ${yamlStr(n.gateway)}`);
+      } else {
+        L.push('      - type: dhcp');
       }
-    } else {
-      L.push('      - type: dhcp');
+    });
+    const dns = csvOf(spec.dns);
+    const search = csvOf(spec.search);
+    if (dns.length || search.length) {
+      L.push('  - type: nameserver');
+      if (dns.length) {
+        L.push('    address:');
+        dns.forEach(d => L.push(`      - ${yamlStr(d)}`));
+      }
+      if (search.length) {
+        L.push('    search:');
+        search.forEach(d => L.push(`      - ${yamlStr(d)}`));
+      }
     }
     return L.join('\n') + '\n';
   }
@@ -705,7 +900,11 @@ const VMEdit = (() => {
         <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
           'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
         <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
-        <div class="vm-edit-ci-userform">${TFForm.render(CI_USER_SCHEMA, cluster, {}, { hideHeader: true })}</div>
+        <div class="vm-edit-ci-userform">
+          ${CI_USER_SCHEMA.sections.map(sec => `
+            <h5 class="vm-edit-ci-sec">${esc(TFForm && window.i18n ? (sec.label[i18n.currentLang] || sec.label.en) : sec.label.en)}</h5>
+            ${TFForm.render(CI_USER_SCHEMA, cluster, {}, { hideHeader: true, sectionId: sec.id })}`).join('')}
+        </div>
         <div class="apply-bar">
           <button class="btn btn-sm btn-primary" data-action="gen-userdata">${esc(tr('vm.edit.ci.genUser', 'Generate user-data'))}</button>
           <span class="apply-result" data-section="ci-user"></span>
@@ -781,20 +980,27 @@ const VMEdit = (() => {
         loadCloudInit(sectionEl, cluster, namespace, name));
 
       // v1.8.1 — assistant wiring: two generator forms feeding the editors.
-      const userForm = sectionEl.querySelector('.vm-edit-ci-userform .tf-form');
-      const netForm = sectionEl.querySelector('.vm-edit-ci-netform .tf-form');
+      // Container divs (the user form spans several section renders, so
+      // there are multiple .tf-form roots inside — wire/read on the parent).
+      const userForm = sectionEl.querySelector('.vm-edit-ci-userform');
+      const netForm = sectionEl.querySelector('.vm-edit-ci-netform');
       TFForm.wire(userForm, CI_USER_SCHEMA, cluster);
       TFForm.wire(netForm, CI_NET_SCHEMA, cluster);
+      // Per-NIC card: address/gateway only make sense in static mode.
       const syncNet = () => {
-        const mode = netForm.querySelector('[name="mode"]')?.value || 'dhcp';
-        ['address', 'gateway', 'dns'].forEach(f => {
-          const el = netForm.querySelector(`[name="${f}"]`);
-          const wrap = el && el.closest('.tf-field');
-          if (wrap) wrap.style.display = mode === 'static' ? '' : 'none';
+        netForm.querySelectorAll('.tf-block-item').forEach(item => {
+          const mode = item.querySelector('[name$=".mode"]')?.value || 'dhcp';
+          ['address', 'gateway'].forEach(f => {
+            const el = item.querySelector(`[name$=".${f}"]`);
+            const wrap = el && el.closest('.tf-field');
+            if (wrap) wrap.style.display = mode === 'static' ? '' : 'none';
+          });
         });
       };
       syncNet();
       netForm.addEventListener('change', syncNet);
+      const nicList = netForm.querySelector('.tf-block-list');
+      if (nicList) new MutationObserver(syncNet).observe(nicList, { childList: true });
 
       const generate = (kind) => {
         const isUser = kind === 'user';

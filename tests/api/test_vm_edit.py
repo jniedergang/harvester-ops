@@ -364,9 +364,10 @@ def test_ci_networkdata_static_and_dhcp():
     import yaml as _yaml
     out = _gen("""
 console.log(JSON.stringify({
-  s: G.genNetworkData({ mode: 'static', iface: 'ens3',
-      address: '10.0.0.5/24', gateway: '10.0.0.1', dns: '1.1.1.1, 9.9.9.9' }),
-  d: G.genNetworkData({ mode: 'dhcp' }),
+  s: G.genNetworkData({ dns: '1.1.1.1, 9.9.9.9',
+      nic: [{ iface: 'ens3', mode: 'static',
+              address: '10.0.0.5/24', gateway: '10.0.0.1' }] }),
+  d: G.genNetworkData({}),
 }));""")
     both = json.loads(out)
     s = _yaml.safe_load(both["s"])
@@ -374,14 +375,16 @@ console.log(JSON.stringify({
     sub = s["config"][0]["subnets"][0]
     assert s["config"][0]["name"] == "ens3"
     assert sub == {"type": "static", "address": "10.0.0.5/24",
-                   "gateway": "10.0.0.1", "dns_nameservers": ["1.1.1.1", "9.9.9.9"]}
+                   "gateway": "10.0.0.1"}
+    ns = [c for c in s["config"] if c["type"] == "nameserver"][0]
+    assert ns["address"] == ["1.1.1.1", "9.9.9.9"]
     d = _yaml.safe_load(both["d"])
     assert d["config"][0]["subnets"][0] == {"type": "dhcp"}
 
 
 def test_ci_networkdata_static_requires_address():
     out = _gen("""
-try { G.genNetworkData({ mode: 'static' }); console.log('NOERR'); }
+try { G.genNetworkData({ nic: [{ iface: 'eth0', mode: 'static' }] }); console.log('NOERR'); }
 catch (e) { console.log('ERR'); }""")
     assert out == "ERR"
 
@@ -400,3 +403,54 @@ def test_ci_i18n_keys_en_fr():
     for key in ("vm.edit.ci.wizard", "vm.edit.ci.genUser", "vm.edit.ci.genNet",
                 "vm.edit.ci.confirmReplace", "vm.edit.ci.errAddr"):
         assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"
+
+
+def test_ci_userdata_full_module_coverage():
+    """v1.8.2 — the assistant covers the requested breadth: identity,
+    SSH access policy, users with groups/shell, packages with
+    reboot-if-required, growpart, extra-disk format+mount, write_files
+    (literal blocks), NTP, trusted CAs (PEM), bootcmd/runcmd."""
+    import yaml as _yaml
+    out = _gen("""
+console.log(G.genUserData({
+  hostname: 'vm1', fqdn: 'vm1.home.lo', locale: 'fr_FR.UTF-8', keyboard: 'fr',
+  ssh_pwauth: true, disable_root: false, expire_passwords: true,
+  package_update: true, package_reboot: true, packages: 'htop',
+  growpart: false, ntp_servers: '172.16.3.6',
+  ca_certs: '-----BEGIN CERTIFICATE-----\\nMIIabc\\n-----END CERTIFICATE-----',
+  bootcmd: 'echo early', runcmd: 'echo done',
+  user: [{ name: 'ju', sudo: true, groups: 'wheel, docker', shell: '/usr/bin/zsh' }],
+  fs: [{ device: '/dev/vdb', filesystem: 'xfs', mount_point: '/data' }],
+  file: [{ path: '/etc/motd', permissions: '0755', content: 'a: b\\nline2' }] }));""")
+    d = _yaml.safe_load(out)
+    assert d["fqdn"] == "vm1.home.lo" and d["manage_etc_hosts"] is True
+    assert d["keyboard"] == {"layout": "fr"}
+    assert d["ssh_pwauth"] is True and d["disable_root"] is False
+    assert d["chpasswd"] == {"expire": True}
+    assert d["package_reboot_if_required"] is True
+    assert d["growpart"]["mode"] in ("off", False)   # both disable growpart
+    u = d["users"][0]
+    assert u["groups"] == "wheel, docker" and u["shell"] == "/usr/bin/zsh"
+    assert d["fs_setup"] == [{"device": "/dev/vdb", "filesystem": "xfs",
+                              "overwrite": False}]
+    assert d["mounts"] == [["/dev/vdb", "/data", "xfs", "defaults", "0", "2"]]
+    wf = d["write_files"][0]
+    assert wf["permissions"] == "0755"               # string, not octal int
+    assert wf["content"] == "a: b\nline2\n"   # literal block keeps one final newline
+    assert d["ntp"] == {"enabled": True, "servers": ["172.16.3.6"]}
+    assert "BEGIN CERTIFICATE" in d["ca_certs"]["trusted"][0]
+    assert d["bootcmd"] == ["echo early"] and d["runcmd"] == ["echo done"]
+
+
+def test_ci_networkdata_multi_nic_and_nameserver():
+    import yaml as _yaml
+    out = _gen("""
+console.log(G.genNetworkData({ dns: '172.16.3.6, 1.1.1.1', search: 'home.lo',
+  nic: [{ iface: 'eth0', mode: 'static', address: '10.0.0.5/24',
+          gateway: '10.0.0.1', mtu: 9000 },
+        { iface: 'eth1', mode: 'dhcp' }] }));""")
+    d = _yaml.safe_load(out)
+    phys = [c for c in d["config"] if c["type"] == "physical"]
+    assert len(phys) == 2 and phys[0]["mtu"] == 9000
+    ns = [c for c in d["config"] if c["type"] == "nameserver"][0]
+    assert ns["address"] == ["172.16.3.6", "1.1.1.1"] and ns["search"] == ["home.lo"]
