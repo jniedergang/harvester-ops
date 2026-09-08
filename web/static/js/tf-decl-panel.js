@@ -30,7 +30,7 @@ const TFDeclPanel = (() => {
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
   function lang() {
-    try { return localStorage.getItem('harvester_ops_lang') || 'en'; }
+    try { return localStorage.getItem('harvester_ops_language') || 'en'; }
     catch { return 'en'; }
   }
   function t(o) {

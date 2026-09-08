@@ -25,7 +25,7 @@ const TF = (() => {
   const $$ = (s) => document.querySelectorAll(s);
 
   function lang() {
-    try { return localStorage.getItem('harvester_ops_lang') || 'en'; }
+    try { return localStorage.getItem('harvester_ops_language') || 'en'; }
     catch { return 'en'; }
   }
   function t(o) {

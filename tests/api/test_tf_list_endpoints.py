@@ -16,6 +16,7 @@ ENDPOINTS = [
     "/api/networks",
     "/api/sshkeys",
     "/api/storageclasses",
+    "/api/pvcs",
     "/api/cloudinits",
 ]
 

@@ -60,8 +60,15 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   unique délivrés par un endpoint authentifié ; le kubeconfig doit
   avoir `get virtualmachineinstances/vnc` (vérifié par la matrice de
   permissions).
-- **Édition inline** — modifier CPU / mémoire / disques / réseaux et la
-  charge cloud-init, puis appliquer.
+- **Édition inline** — modifier CPU / mémoire et la charge cloud-init,
+  puis appliquer. **Les disques et interfaces réseau ont des éditeurs
+  visuels** (v1.8.0) : une carte par disque/NIC avec des listes
+  alimentées par le cluster (PVC existants, images Harvester, storage
+  classes, réseaux multus). Les nouveaux disques — vierges ou depuis
+  une image — passent par le mécanisme `volumeClaimTemplates` de
+  Harvester ; bus, ordre de boot, cdrom, attachement bridge/masquerade,
+  modèle de NIC et MAC sont éditables, avec validation côté client et
+  dry-run serveur. Un repli JSON brut reste disponible.
 
 La CLI expose le sous-ensemble start/stop via `harvester-status` /
 `-shutdown -N <ns>`.

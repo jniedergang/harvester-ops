@@ -27,8 +27,21 @@ const TFForm = (() => {
   }
 
   function lang() {
-    try { return localStorage.getItem('harvester_ops_lang') || 'en'; }
+    // v1.8.0: was 'harvester_ops_lang' — a key nobody ever writes (i18n.js
+    // persists under 'harvester_ops_language'), so the {en,fr} labels of
+    // TF_SCHEMA never showed in French since the feature shipped.
+    try { return localStorage.getItem('harvester_ops_language') || 'en'; }
     catch { return 'en'; }
+  }
+
+  /** v1.8.0 — accept either a registered kind name (string, looked up in
+   *  TF_SCHEMA as before) or a schema OBJECT supplied by the caller. Lets
+   *  other panels (VM disk/network editor) reuse this engine without
+   *  registering fake kinds in TF_SCHEMA (the backend test asserts every
+   *  TF_SCHEMA kind has an HCL renderer branch). */
+  function resolveSchema(kindOrSchema) {
+    if (kindOrSchema && typeof kindOrSchema === 'object') return kindOrSchema;
+    return (window.TF_SCHEMA || {})[kindOrSchema];
   }
 
   function t(obj) {
@@ -48,7 +61,9 @@ const TFForm = (() => {
     const help = arg.description ? t(arg.description) : '';
     const req = arg.required ? ' <span class="tf-required" title="required">*</span>' : '';
     const tip = help ? ` data-tip="${esc(help)}"` : '';
-    const labelHtml = `<label for="${id}" class="tf-label tip"${tip}>${esc(arg.name)}${req}</label>`;
+    // v1.8.0: optional bilingual label per arg; raw name stays the fallback
+    const labelText = arg.label ? t(arg.label) : arg.name;
+    const labelHtml = `<label for="${id}" class="tf-label tip"${tip}>${esc(labelText)}${req}</label>`;
 
     let control = '';
     switch (arg.type) {
@@ -89,8 +104,10 @@ const TFForm = (() => {
                      data-ref-label="${esc(arg.ref_label_field || arg.ref_value_field || 'name')}"
                      data-ref-namespaced="${arg.ref_namespaced ? '1' : '0'}"
                      data-ref-default="${esc(arg.default || '')}"
+                     data-ref-selected="${esc(v || '')}"
                      ${arg.required ? 'required' : ''}${multi}>
                <option value="">${esc(placeholder)}</option>
+               ${v ? `<option value="${esc(v)}" selected>${esc(v)}</option>` : ''}
              </select>` +
           (arg.creatable
             ? `<button type="button" class="btn btn-sm tf-ref-create tip"
@@ -162,8 +179,13 @@ const TFForm = (() => {
     const path = `${nkey}[${index}]`;
     const min = ndef.min || 0;
     const canRemove = index >= min;
+    // v1.8.0: optional per-item summary header (e.g. "💾 rootdisk — virtio · 20Gi")
+    const head = typeof ndef.itemTitle === 'function'
+      ? `<div class="tf-block-item__head">${esc(ndef.itemTitle(values || {}, index))}</div>`
+      : '';
     return `
       <div class="tf-block-item" data-block-index="${index}">
+        ${head}
         ${ndef.args.map(arg => renderField(arg, values[arg.name], `${path}.${arg.name}`)).join('')}
         ${canRemove
           ? `<button type="button" class="btn btn-sm btn-secondary tf-block-remove"
@@ -182,7 +204,7 @@ const TFForm = (() => {
   //   - hideHeader: skip the <p class="tf-desc"> blurb (for sub-panels).
   // -------------------------------------------------------------------------
   function render(kind, currentCluster, values, opts) {
-    const schema = (window.TF_SCHEMA || {})[kind];
+    const schema = resolveSchema(kind);
     if (!schema) {
       return `<div class="tf-error">Unknown resource kind: ${esc(kind)}</div>`;
     }
@@ -191,13 +213,13 @@ const TFForm = (() => {
     const head = (schema.description && !opts.hideHeader)
       ? `<p class="tf-desc">${esc(t(schema.description))}</p>` : '';
 
-    let argsToRender = schema.args;
+    let argsToRender = schema.args || [];   // nested-only schemas (v1.8.0)
     let nestedToRender = schema.nested;
     if (opts.sectionId && Array.isArray(schema.sections)) {
       const sec = schema.sections.find(s => s.id === opts.sectionId);
       if (sec) {
         argsToRender = sec.args
-          ? schema.args.filter(a => sec.args.includes(a.name))
+          ? (schema.args || []).filter(a => sec.args.includes(a.name))
           : [];
         nestedToRender = sec.nested && schema.nested && schema.nested[sec.nested]
           ? { [sec.nested]: schema.nested[sec.nested] }
@@ -209,7 +231,7 @@ const TFForm = (() => {
     ).join('');
     const blocks = nestedToRender ? renderNested(kind, nestedToRender, values) : '';
     return `
-      <div class="tf-form" data-kind="${esc(kind)}" data-cluster="${esc(currentCluster || '')}"
+      <div class="tf-form" data-kind="${esc(typeof kind === 'string' ? kind : (schema.id || 'custom'))}" data-cluster="${esc(currentCluster || '')}"
            ${opts.sectionId ? `data-section="${esc(opts.sectionId)}"` : ''}>
         ${head}
         ${main ? `<div class="tf-args">${main}</div>` : ''}
@@ -222,6 +244,7 @@ const TFForm = (() => {
   // -------------------------------------------------------------------------
   async function wire(rootEl, kind, currentCluster) {
     if (!rootEl) return;
+    const schema = resolveSchema(kind) || {};
 
     // v1.4.39: attach +Add / −Remove handlers SYNCHRONOUSLY so the
     // form is interactive immediately, even while the ref dropdowns
@@ -234,12 +257,17 @@ const TFForm = (() => {
     $$(rootEl, '.tf-block-add').forEach(btn => {
       btn.addEventListener('click', () => {
         const nkey = btn.dataset.block;
-        const ndef = (window.TF_SCHEMA[kind].nested || {})[nkey];
+        const ndef = (schema.nested || {})[nkey];
         const fs   = btn.closest('.tf-block');
         const list = fs.querySelector('.tf-block-list');
         const max  = parseInt(fs.dataset.max, 10) || 99;
-        const idx  = list.querySelectorAll('.tf-block-item').length;
-        if (idx >= max) return;
+        const items = list.querySelectorAll('.tf-block-item');
+        if (items.length >= max) return;
+        // v1.8.0: after a mid-list removal the remaining data-block-index
+        // values are sparse (0,2,…) — reusing `length` as the next index
+        // would collide with an existing input name. Take max+1 instead.
+        const idx = 1 + Math.max(-1, ...Array.from(items)
+          .map(it => parseInt(it.dataset.blockIndex, 10) || 0));
         list.insertAdjacentHTML('beforeend',
           renderNestedInstance(kind, nkey, ndef, idx, {}));
         // Re-wire ref dropdowns inside the freshly added block
@@ -325,8 +353,18 @@ const TFForm = (() => {
         if (previouslySelected.has(o.value) && o.value) o.selected = true;
       });
     } else {
+      // v1.8.0: edit flows pass the item's current value via
+      // data-ref-selected — it wins over the schema default, and survives
+      // even when the fetched list does not contain it (stale ref).
+      const initial = sel.dataset.refSelected || '';
       if (prev && Array.from(sel.options).some(o => o.value === prev)) {
         sel.value = prev;
+      } else if (initial) {
+        if (!Array.from(sel.options).some(o => o.value === initial)) {
+          sel.insertAdjacentHTML('beforeend',
+            `<option value="${esc(initial)}">${esc(initial)}</option>`);
+        }
+        sel.value = initial;
       } else if (defaultVal &&
                  Array.from(sel.options).some(o => o.value === defaultVal)) {
         sel.value = defaultVal;
@@ -337,11 +375,12 @@ const TFForm = (() => {
   // -------------------------------------------------------------------------
   // Read — extract spec from the rendered form
   // -------------------------------------------------------------------------
-  function read(rootEl, kind) {
-    const schema = (window.TF_SCHEMA || {})[kind];
+  function read(rootEl, kind, opts) {
+    const schema = resolveSchema(kind);
     if (!schema) return null;
+    opts = opts || {};
     const spec = {};
-    schema.args.forEach(arg => {
+    (schema.args || []).forEach(arg => {
       const el = rootEl.querySelector(`[name="${cssEscape(arg.name)}"]`);
       if (!el) return;
       const v = readControl(el, arg);
@@ -350,18 +389,24 @@ const TFForm = (() => {
     if (schema.nested) {
       Object.entries(schema.nested).forEach(([nkey, ndef]) => {
         const items = $$(rootEl, `.tf-block[data-block="${cssEscape(nkey)}"] .tf-block-item`);
-        const arr = items.map((item, idx) => {
+        const arr = items.map((item) => {
+          // v1.8.0: look fields up INSIDE each rendered item by name
+          // suffix instead of recomputing `${nkey}[${idx}]` from the loop
+          // index — after a mid-list removal the DOM indices are sparse
+          // and the old path-based lookup silently dropped every field.
           const obj = {};
           ndef.args.forEach(arg => {
-            const path = `${nkey}[${idx}].${arg.name}`;
-            const el = item.querySelector(`[name="${cssEscape(path)}"]`);
+            const el = item.querySelector(`[name$=".${cssEscape(arg.name)}"]`);
             if (!el) return;
             const v = readControl(el, arg);
             if (v !== undefined && v !== '') obj[arg.name] = v;
           });
           return obj;
         }).filter(o => Object.keys(o).length > 0);
-        if (arr.length > 0) spec[nkey] = arr;
+        // v1.8.0: full-state consumers (VM editor) need an emptied list to
+        // BE the state (merge patch replaces arrays wholesale). Default
+        // keeps the historical TF behaviour (absent key).
+        if (arr.length > 0 || opts.emitEmptyLists) spec[nkey] = arr;
       });
     }
     return spec;
@@ -438,7 +483,7 @@ const TFForm = (() => {
 
   /** Validate ONE section. Returns { valid, missing: [...] }. */
   function validateSection(spec, kind, sectionId) {
-    const schema = (window.TF_SCHEMA || {})[kind];
+    const schema = resolveSchema(kind);
     if (!schema || !Array.isArray(schema.sections)) {
       return { valid: true, missing: [] };
     }
@@ -462,7 +507,7 @@ const TFForm = (() => {
     const v = validateSection(spec, kind, sectionId);
     if (v.valid) return 'ok';
     // Distinguish "nothing entered yet" from "started but incomplete"
-    const schema = (window.TF_SCHEMA || {})[kind];
+    const schema = resolveSchema(kind);
     const sec = (schema?.sections || []).find(s => s.id === sectionId);
     if (!sec) return 'ok';
     const anyInput =
@@ -476,7 +521,7 @@ const TFForm = (() => {
   /** Validate every section of a kind. Returns
    *  { valid, sections: { [sectionId]: {valid, missing, state} } }. */
   function validateAll(spec, kind) {
-    const schema = (window.TF_SCHEMA || {})[kind];
+    const schema = resolveSchema(kind);
     if (!schema || !Array.isArray(schema.sections)) {
       return { valid: true, sections: {} };
     }

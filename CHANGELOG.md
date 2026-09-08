@@ -4,6 +4,61 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.0] — 2026-09-08 — Visual disk & network editors
+
+The Disks and Network tabs of the VM edit panel were raw JSON textareas
+(labelled YAML, actually JSON). They are now card-based visual editors.
+
+### Added
+- **Disk editor** — one card per disk (summary header, name, disk/cdrom,
+  virtio/sata/scsi bus, boot order with 0 = excluded) and a three-mode
+  volume source: attach an **existing PVC** (new `/api/pvcs/<cluster>`
+  list endpoint), create a **new disk from a Harvester image** (inherits
+  the image's storage class), or a **new blank disk** (size + storage
+  class). New disks go through Harvester's `volumeClaimTemplates`
+  annotation — the same mechanism as the Harvester UI — so the PVC is
+  provisioned automatically; removing a disk drops its template entry
+  and keeps the PVC (stated in the UI). Cloud-init volumes show as a
+  locked card; anything the form does not model (containerDisk, lun,
+  volume-less devices) is carried through untouched.
+- **Network editor** — one card per interface: bridge (multus network
+  dropdown) or masquerade (pod network), NIC model, optional MAC with
+  validation. Client-side checks (RFC 1123 names, duplicates, namespace
+  of PVCs, MAC format) + the existing server dry-run for real apiserver
+  validation. A raw-JSON fold preserves the old editing path.
+- The TFForm engine now accepts caller-supplied schema objects (no fake
+  TF_SCHEMA kinds), optional bilingual labels per field, per-item card
+  headers, and initial values for ref dropdowns (edit flows).
+
+### Fixed
+- `PATCH /api/vm/...` dropped the WHOLE `metadata` object (a v1.6.x
+  sanitisation ternary) — annotation patches, including the General
+  tab's description, silently never applied. Identity fields are still
+  stripped; annotations now pass (required by volumeClaimTemplates).
+- VM edits are now tracked in the dock/Activity (`vm-edit:<ns>/<name>`
+  actions with error_summary), per the everything-is-tracked rule.
+- The edit panel's Reset button and post-Apply refresh were dead (the
+  refresh callback was stored on the panel API but looked up on the DOM
+  node); reopening the panel stacked duplicate nav listeners; `esc()`
+  did not escape quotes inside value attributes.
+- TFForm: mid-list removals silently dropped fields on read (index-based
+  lookup over a sparse DOM) and could collide input names on the next
+  add; an emptied repeatable list now CAN be emitted (`emitEmptyLists`)
+  for full-state consumers.
+- The FR translation of the whole Terraform UI never worked: four files
+  read `localStorage['harvester_ops_lang']` while i18n persists under
+  `harvester_ops_language`. All TF_SCHEMA bilingual labels now resolve.
+- kubectl missing on the server returns a clean 502 on VM get/patch
+  instead of an unhandled 500.
+
+### Tests
+- `tests/api/test_vm_edit.py` (16 tests) — mapper round-trips through
+  node on a faithful VM fixture (identity, passthrough protection, VCT
+  add/drop, image storage-class inheritance, validation errors,
+  masquerade), `/api/pvcs` contract, metadata-patch fix, action
+  tracking, source-level wiring and EN/FR keys. `/api/pvcs` joined the
+  list-endpoint contract suite. Suite: 364 passing.
+
 ## [1.7.1] — 2026-09-08 — Console toolbar, tooltip audit, panel-resize overhaul
 
 ### Added

@@ -1858,6 +1858,49 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   margin-left: auto;
 }
 
+/* Éditeur visuel disques/réseau (v1.8.0) */
+.tf-block-item__head {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--border);
+}
+.vm-edit-banner { color: var(--warn); }
+.vm-edit-locked {
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.vm-edit-adv { margin-top: 12px; }
+.vm-edit-adv summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-dim);
+  user-select: none;
+}
+.vm-edit-adv[open] summary { color: var(--warn); }
+.vm-edit-adv .yaml-editor { margin-top: 8px; width: 100%; }
+
+/* Badge générique (les usages .badge de vm-snapshots / vm-migrate n'avaient
+   aucune règle de base). */
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 9px;
+  font-size: 11px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--bg-elev);
+}
+.badge.ok   { color: var(--done);  border-color: var(--done); }
+.badge.warn { color: var(--warn);  border-color: var(--warn); }
+.badge.fail { color: var(--error); border-color: var(--error); }
+
 /* Console VNC (v1.7.0) — le framebuffer n'est pas thémable : fond noir fixe. */
 .vm-console-wrap {
   display: flex;

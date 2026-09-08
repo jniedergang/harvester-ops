@@ -1480,6 +1480,25 @@ def _reduce_sc(item):
     }
 
 
+def _reduce_pvc(item):
+    """v1.8.0 — feeds the 'existing PVC' dropdown of the visual disk editor."""
+    meta = item.get("metadata") or {}
+    spec = item.get("spec") or {}
+    status = item.get("status") or {}
+    return {
+        "name": meta.get("name"),
+        "namespace": meta.get("namespace"),
+        "capacity": (status.get("capacity") or {}).get("storage")
+                    or ((spec.get("resources") or {}).get("requests") or {}).get("storage"),
+        "storage_class": spec.get("storageClassName"),
+        "phase": status.get("phase"),
+        "volume_mode": spec.get("volumeMode"),
+        # Harvester annotates PVCs attached to a VM; lets the UI flag
+        # volumes that are already owned by another machine.
+        "owned_by": (meta.get("annotations") or {}).get("harvesterhci.io/owned-by"),
+    }
+
+
 def _reduce_cloudinit(item):
     meta = item.get("metadata") or {}
     data = item.get("data") or {}
@@ -1548,6 +1567,22 @@ def api_list_sshkeys(cluster):
 @requires_auth
 def api_list_sc(cluster):
     data, err = _list_k8s_resources(cluster, "sc", reducer=_reduce_sc)
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify(data)
+
+
+@app.route("/api/pvcs/<cluster>")
+@requires_auth
+def api_list_pvcs(cluster):
+    """v1.8.0 — PersistentVolumeClaims for the visual disk editor.
+    Optional ?namespace= narrows the list (validated RFC 1123 by the
+    before_request hook); default is all namespaces."""
+    ns = request.args.get("namespace") or "*"
+    data, err = _list_k8s_resources(
+        cluster, "pvc", namespace=ns, reducer=_reduce_pvc,
+        cache_key=f"pvc:{ns}",
+    )
     if err:
         return jsonify({"error": err}), 502
     return jsonify(data)
@@ -2997,6 +3032,29 @@ def api_vm_get(cluster, namespace, name):
         return jsonify({"error": "kubectl failed", "detail": e.stderr.decode() if e.stderr else ""}), 404
     except subprocess.TimeoutExpired:
         return jsonify({"error": "timeout"}), 504
+    except FileNotFoundError:
+        return jsonify({"error": "kubectl not found on the server"}), 502
+
+
+def _vm_patch_track(cluster, namespace, name, ok, detail=None):
+    """v1.8.0 — every mutating apply from the edit panel shows up in the
+    dock/Activity like any other operation (project rule). The kubectl call
+    is synchronous, so the ActionRun is recorded already finished."""
+    run_id = uuid.uuid4().hex[:12]
+    run = ActionRun(run_id, f"vm-edit:{namespace}/{name}", cluster, [], dry_run=False)
+    run.status = "done" if ok else "error"
+    run.exit_code = 0 if ok else 1
+    if not ok:
+        run.error_summary = (detail or "").strip().splitlines()[-1][:300] if detail else "patch failed"
+    run.ended_at = time.time()
+    run.emit({"type": "step", "step_id": "patch", "status": "done" if ok else "error",
+              "message": "merge patch applied" if ok else run.error_summary,
+              "ts": time.time()})
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
+              "ts": time.time()})
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+    run.close()
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>", methods=["PATCH"])
@@ -3015,13 +3073,17 @@ def api_vm_patch(cluster, namespace, name):
     dry_run = bool(data.get("dry_run", False))
     if not isinstance(patch, dict):
         return jsonify({"error": "patch must be a JSON object"}), 400
-    # Safety: never let the API rewrite metadata.name / namespace via patch
-    patch.pop("metadata", None) if isinstance(patch.get("metadata"), dict) else None
-    if "metadata" in patch and isinstance(patch["metadata"], dict):
-        patch["metadata"].pop("name", None)
-        patch["metadata"].pop("namespace", None)
-        patch["metadata"].pop("uid", None)
-        patch["metadata"].pop("resourceVersion", None)
+    # Safety: identity fields must never be rewritten through this API —
+    # but the REST of metadata (annotations such as
+    # harvesterhci.io/volumeClaimTemplates, labels, description) is
+    # legitimate and needed by the disk editor. A v1.6.x ternary here
+    # popped the whole metadata dict, silently dropping every annotation
+    # patch (the General tab's description never applied).
+    if isinstance(patch.get("metadata"), dict):
+        for key in ("name", "namespace", "uid", "resourceVersion"):
+            patch["metadata"].pop(key, None)
+        if not patch["metadata"]:
+            patch.pop("metadata")
     cmd = ["kubectl", "--kubeconfig", kc, "patch", "vm", name,
            "-n", namespace, "--type", "merge", "-p", json.dumps(patch)]
     if dry_run:
@@ -3030,14 +3092,18 @@ def api_vm_patch(cluster, namespace, name):
         cmd.extend(["-o", "json"])
     try:
         out = subprocess.check_output(cmd, stderr=subprocess.PIPE, timeout=20)
+        if not dry_run:
+            _vm_patch_track(cluster, namespace, name, ok=True)
         return Response(out, mimetype="application/json")
     except subprocess.CalledProcessError as e:
-        return jsonify({
-            "error": "kubectl patch failed",
-            "detail": (e.stderr.decode() if e.stderr else "").strip()[:1500],
-        }), 400
+        detail = (e.stderr.decode() if e.stderr else "").strip()[:1500]
+        if not dry_run:
+            _vm_patch_track(cluster, namespace, name, ok=False, detail=detail)
+        return jsonify({"error": "kubectl patch failed", "detail": detail}), 400
     except subprocess.TimeoutExpired:
         return jsonify({"error": "timeout"}), 504
+    except FileNotFoundError:
+        return jsonify({"error": "kubectl not found on the server"}), 502
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>/cloudinit")
