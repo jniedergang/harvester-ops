@@ -314,7 +314,7 @@ const Dock = (() => {
             <div class="name">${a.action} → ${a.cluster}${dryBadge}</div>
             <div class="meta">
               <code class="aid">${a.id}</code> ·
-              <span class="started" title="started">${startedHuman}</span>
+              <span class="started" title="${tr('dock.startedTip', 'started')}">${startedHuman}</span>
               <span class="elapsed"></span>
             </div>
           </div>
@@ -325,7 +325,7 @@ const Dock = (() => {
                   data-i18n-title="${expanded.has(a.id) ? 'dock.hideDetails' : 'dock.showDetails'}">${expanded.has(a.id) ? tr('dock.hide', 'Hide') : tr('dock.details', 'Details')}</button>
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${a.id}">Cancel</button>`
-            : `<span class="ended-badge" title="ended ${endedHuman}">${endedHuman}</span>`}
+            : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
         </div>
         <pre class="dock-action-log" id="dock-log-${a.id}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');

@@ -54,7 +54,9 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   KubeVirt). Montre tout le boot — firmware, GRUB, kernel — grâce à
   une reconnexion automatique qui s'attache dès que qemu expose
   l'affichage ; clavier/souris, Ctrl-Alt-Suppr et ajustement
-  fenêtre / 1:1 inclus. Accès protégé par tickets éphémères à usage
+  fenêtre / 1:1 inclus ; le bandeau de la console porte aussi les
+  commandes électriques de la VM (démarrer / arrêt gracieux / reset
+  dur) et des raccourcis vers les snapshots et les paramètres. Accès protégé par tickets éphémères à usage
   unique délivrés par un endpoint authentifié ; le kubeconfig doit
   avoir `get virtualmachineinstances/vnc` (vérifié par la matrice de
   permissions).

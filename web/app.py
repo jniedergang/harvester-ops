@@ -3192,6 +3192,103 @@ def api_vm_set_run_strategy_bulk(cluster, namespace, name):
     return api_vm_set_run_strategy(cluster, namespace, name)
 
 
+def _vm_restart_runner(run, kc, namespace, name):
+    """Hard reset: delete the VMI (what `virtctl restart` does) and poll
+    until the controller has respawned a Running one. Same error-surfacing
+    contract as _vm_action_runner (stderr in error_summary, no cmdline)."""
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "delete-vmi", "status": "running",
+              "message": f"deleting VMI {name} (controller will respawn it)",
+              "ts": time.time()})
+    old_uid = subprocess.run(
+        ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
+         "-o", "jsonpath={.metadata.uid}"],
+        capture_output=True, text=True, timeout=10,
+    ).stdout.strip()
+    try:
+        r = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "-n", namespace, "delete", "vmi",
+             name, "--wait=false"],
+            capture_output=True, text=True, timeout=20,
+        )
+    except subprocess.TimeoutExpired:
+        r = None
+    if r is None or r.returncode != 0:
+        if r is None:
+            detail = "kubectl timed out after 20s (cluster API unreachable?)"
+        else:
+            stderr_lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+            detail = (stderr_lines[-1] if stderr_lines
+                      else f"kubectl exited {r.returncode} with no error output")[:300]
+        run.error_summary = detail
+        run.emit({"type": "step", "step_id": "delete-vmi", "status": "error",
+                  "message": detail, "ts": time.time()})
+        run.exit_code = 1
+        run.status = "error"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+        run.close()
+        return
+    run.emit({"type": "step", "step_id": "delete-vmi", "status": "done",
+              "message": "VMI deletion requested", "ts": time.time()})
+
+    run.emit({"type": "step", "step_id": "respawn", "status": "running",
+              "message": "waiting for a fresh VMI to reach Running",
+              "ts": time.time()})
+    deadline = time.time() + 180
+    last = ""
+    while time.time() < deadline:
+        pr = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
+             "-o", "jsonpath={.metadata.uid} {.status.phase}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        out = (pr.stdout or "").strip()
+        uid, _, phase = out.partition(" ")
+        if pr.returncode == 0 and uid and uid != old_uid and phase == "Running":
+            run.emit({"type": "step", "step_id": "respawn", "status": "done",
+                      "message": "new VMI is Running", "ts": time.time()})
+            break
+        state = phase or ("gone" if pr.returncode != 0 else "unknown")
+        if state != last:
+            run.emit({"type": "step", "step_id": "respawn", "status": "progress",
+                      "message": f"phase={state}", "ts": time.time()})
+            last = state
+        time.sleep(2)
+    else:
+        run.emit({"type": "step", "step_id": "respawn", "status": "warn",
+                  "message": f"timeout, last phase={last}", "ts": time.time()})
+
+    run.exit_code = 0
+    run.status = "done"
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
+    run.close()
+
+
+@app.route("/api/vm/<cluster>/<namespace>/<name>/restart", methods=["POST"])
+@_rate_limit("30/minute")
+@requires_auth
+def api_vm_restart(cluster, namespace, name):
+    """Hard reset of a running VM (delete the VMI; runStrategy respawns it).
+    Tracked as an action like every mutating operation."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    run_id = uuid.uuid4().hex[:12]
+    run = ActionRun(run_id, f"vm-restart:{namespace}/{name}", cluster, [], dry_run=False)
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+    threading.Thread(target=_vm_restart_runner,
+                     args=(run, kc, namespace, name),
+                     daemon=True).start()
+    return jsonify({
+        "cluster": cluster, "namespace": namespace, "name": name,
+        "action_id": run_id,
+    })
+
+
 # -----------------------------------------------------------------------------
 # Support bundle — collects logs/config/status, optionally anonymized, into tar.gz
 # -----------------------------------------------------------------------------
@@ -5482,6 +5579,10 @@ def api_vm_snapshot_restore(cluster, namespace, name):
             "virtualMachineBackupName": snap,
             "virtualMachineBackupNamespace": namespace,
             "newVM": bool(new_vm),
+            # Harvester's webhook rejects the default deletionPolicy for
+            # in-place restores of type=snapshot backups: "delete policy
+            # with backup type snapshot for replacing VM is not supported".
+            "deletionPolicy": "retain",
         },
     }
 
@@ -5498,13 +5599,17 @@ def api_vm_snapshot_restore(cluster, namespace, name):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
             )
             if r.returncode != 0:
+                stderr_lines = [l.strip() for l in r.stderr.decode().splitlines() if l.strip()]
+                detail = (stderr_lines[-1] if stderr_lines else "kubectl apply failed")[:300]
+                run.error_summary = detail
                 run.emit({"type": "step", "step_id": "apply", "status": "error",
-                          "message": r.stderr.decode()[:200], "ts": time.time()})
+                          "message": detail, "ts": time.time()})
                 run.exit_code = 1; run.status = "error"
                 run.ended_at = time.time()
                 run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
                 run.close(); return
         except subprocess.TimeoutExpired:
+            run.error_summary = "kubectl apply timed out after 15s"
             run.emit({"type": "step", "step_id": "apply", "status": "error",
                       "message": "kubectl apply timeout", "ts": time.time()})
             run.status = "error"; run.exit_code = 124; run.ended_at = time.time()

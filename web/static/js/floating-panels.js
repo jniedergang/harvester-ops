@@ -130,12 +130,19 @@ const FloatingPanels = (() => {
     el.style.left   = (120 + offset) + 'px';
     el.style.zIndex = ++zCounter;
     el.innerHTML = `
-      <div class="floating-panel-resize-handle"></div>
+      <div class="floating-panel-resize-handle" data-rs="se"></div>
+      <div class="fp-rs fp-rs-n"  data-rs="n"></div>
+      <div class="fp-rs fp-rs-s"  data-rs="s"></div>
+      <div class="fp-rs fp-rs-e"  data-rs="e"></div>
+      <div class="fp-rs fp-rs-w"  data-rs="w"></div>
+      <div class="fp-rs fp-rs-ne" data-rs="ne"></div>
+      <div class="fp-rs fp-rs-nw" data-rs="nw"></div>
+      <div class="fp-rs fp-rs-sw" data-rs="sw"></div>
       <header class="floating-panel-header" data-handle>
         <span class="floating-panel-title">${escapeHtml(opts.title || 'Panel')}</span>
         <div class="floating-panel-actions">
-          <button class="btn-icon-sm" data-action="min" title="Minimize">_</button>
-          <button class="btn-icon-sm" data-action="close" title="Close">×</button>
+          <button class="btn-icon-sm tip" data-action="min" data-tip="${window.i18n ? i18n.t('panel.minimizeTip') : 'Minimize'}">_</button>
+          <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>
         </div>
       </header>
       <div class="floating-panel-body"></div>`;
@@ -158,41 +165,64 @@ const FloatingPanels = (() => {
     panels.set(opts.id, { el, opts, api, minimized: false });
     persistOpen();
 
-    // Drag
+    // Drag & resize — Pointer Events with setPointerCapture. The old
+    // mousemove-on-document + mouseup{once} pattern lost the mouseup when
+    // it landed outside the window or inside a capturing child (the noVNC
+    // canvas grabs pointer events), leaving the panel glued to the cursor.
+    // Pointer capture delivers move/up to the handle no matter where the
+    // pointer goes, and pointercancel is handled for free.
+    function trackPointer(handleEl, onMove) {
+      handleEl.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        if (e.target.closest('button, input, select, textarea, .floating-panel-actions')) return;
+        const rect = el.getBoundingClientRect();
+        const start = { x: e.clientX, y: e.clientY,
+                        w: rect.width, h: rect.height,
+                        left: rect.left, top: rect.top };
+        const move = (ev) => onMove(start, ev);
+        const stop = () => {
+          handleEl.removeEventListener('pointermove', move);
+          handleEl.removeEventListener('pointerup', stop);
+          handleEl.removeEventListener('pointercancel', stop);
+          try { handleEl.releasePointerCapture(e.pointerId); } catch { /* gone */ }
+        };
+        handleEl.setPointerCapture(e.pointerId);
+        handleEl.addEventListener('pointermove', move);
+        handleEl.addEventListener('pointerup', stop);
+        handleEl.addEventListener('pointercancel', stop);
+        e.preventDefault();
+        e.stopPropagation();
+        bringToFront(opts.id);
+      });
+    }
+
     const header = el.querySelector('.floating-panel-header');
-    header.addEventListener('mousedown', (e) => {
-      if (e.target.closest('button, input, select, textarea, .floating-panel-actions')) return;
-      const rect = el.getBoundingClientRect();
-      const off = { x: e.clientX - rect.left, y: e.clientY - rect.top };
-      const onMove = (ev) => {
-        el.style.left = Math.max(0, Math.min(window.innerWidth - 200, ev.clientX - off.x)) + 'px';
-        el.style.top  = Math.max(0, Math.min(window.innerHeight - 50, ev.clientY - off.y)) + 'px';
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp, { once: true });
-      e.preventDefault();
+    trackPointer(header, (start, ev) => {
+      el.style.left = Math.max(0, Math.min(window.innerWidth - 200, start.left + ev.clientX - start.x)) + 'px';
+      el.style.top  = Math.max(0, Math.min(window.innerHeight - 50, start.top + ev.clientY - start.y)) + 'px';
     });
     bringToFront(opts.id);
     el.addEventListener('mousedown', () => bringToFront(opts.id));
 
-    // Resize
-    const resizer = el.querySelector('.floating-panel-resize-handle');
-    resizer.addEventListener('mousedown', (e) => {
-      const start = { x: e.clientX, y: e.clientY, w: el.offsetWidth, h: el.offsetHeight };
-      const onMove = (ev) => {
-        el.style.width  = Math.max(360, start.w + (ev.clientX - start.x)) + 'px';
-        el.style.height = Math.max(220, start.h + (ev.clientY - start.y)) + 'px';
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp, { once: true });
-      e.preventDefault();
-      e.stopPropagation();
+    // Resize from every edge and corner (data-rs carries the directions).
+    const MIN_W = 360, MIN_H = 220;
+    el.querySelectorAll('[data-rs]').forEach((handleEl) => {
+      const dirs = handleEl.dataset.rs;
+      trackPointer(handleEl, (start, ev) => {
+        const dx = ev.clientX - start.x, dy = ev.clientY - start.y;
+        if (dirs.includes('e')) el.style.width = Math.max(MIN_W, start.w + dx) + 'px';
+        if (dirs.includes('s')) el.style.height = Math.max(MIN_H, start.h + dy) + 'px';
+        if (dirs.includes('w')) {
+          const w2 = Math.max(MIN_W, start.w - dx);
+          el.style.width = w2 + 'px';
+          el.style.left = (start.left + start.w - w2) + 'px';
+        }
+        if (dirs.includes('n')) {
+          const h2 = Math.max(MIN_H, start.h - dy);
+          el.style.height = h2 + 'px';
+          el.style.top = (start.top + start.h - h2) + 'px';
+        }
+      });
     });
 
     // Buttons
@@ -235,7 +265,7 @@ const FloatingPanels = (() => {
     const title = p.opts.title || id;
     chip.innerHTML = `
       <span class="title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
-      <button class="btn-icon-sm" data-action="close" title="Close">×</button>`;
+      <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>`;
     chip.addEventListener('click', (e) => {
       if (e.target.closest('[data-action="close"]')) return;
       restore(id);

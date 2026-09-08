@@ -1875,6 +1875,12 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   flex: 0 0 auto;
 }
 .vm-console-spacer { flex: 1; }
+.vm-console-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+  margin: 2px 2px;
+}
 .vm-console-status { color: var(--text-dim); }
 .vm-console-dot {
   width: 9px; height: 9px;
@@ -1889,9 +1895,20 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   min-height: 0;
   background: #000;
   position: relative;
-  overflow: hidden;
+  overflow: hidden;   /* mode fit ; passe en auto (scroll natif) en 1:1 */
   outline: none;
 }
+
+/* Poignées de redimensionnement des panneaux flottants : 4 bords + 4 coins
+   (pointer capture — la souris ne reste plus « collée »). */
+.fp-rs { position: absolute; z-index: 2; }
+.fp-rs-n  { top: -3px; left: 12px; right: 12px; height: 7px; cursor: n-resize; }
+.fp-rs-s  { bottom: -3px; left: 12px; right: 24px; height: 7px; cursor: s-resize; }
+.fp-rs-e  { right: -3px; top: 12px; bottom: 24px; width: 7px; cursor: e-resize; }
+.fp-rs-w  { left: -3px; top: 12px; bottom: 12px; width: 7px; cursor: w-resize; }
+.fp-rs-ne { top: -4px; right: -4px; width: 14px; height: 14px; cursor: ne-resize; }
+.fp-rs-nw { top: -4px; left: -4px; width: 14px; height: 14px; cursor: nw-resize; }
+.fp-rs-sw { bottom: -4px; left: -4px; width: 14px; height: 14px; cursor: sw-resize; }
 
 /* Collaborative notes panel (Tiptap + Yjs) */
 .notes-toolbar {
@@ -3006,6 +3023,10 @@ body.no-tooltips .tip[data-tip]::before {
    ============================================================================ */
 .tip {
   position: relative;
+}
+/* L'ornement « aide » (souligné pointillé + curseur ?) est réservé au texte
+   inline ; un bouton porteur de tooltip garde son apparence de bouton. */
+.tip:not(button) {
   cursor: help;
   border-bottom: 1px dashed var(--text-dim);
 }

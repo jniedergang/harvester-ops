@@ -790,9 +790,9 @@ const Topology = (() => {
     if (act === 'node-notes')      return window.Notes?.open('node', cluster, d.raw.name);
     if (act === 'vm-notes')        return window.Notes?.open('vm', cluster,
                                             d.raw.namespace, d.raw.name);
-    if (act === 'vm-edit')         return window.VmEdit?.open?.(cluster,
+    if (act === 'vm-edit')         return window.VMEdit?.open?.(cluster,
                                             d.raw.namespace, d.raw.name);
-    if (act === 'vm-snap')         return window.VmSnapshots?.open?.(cluster,
+    if (act === 'vm-snap')         return window.VMSnapshots?.open?.(cluster,
                                             d.raw.namespace, d.raw.name);
     if (act === 'vm-console')      return window.VMConsole?.open?.(cluster,
                                             d.raw.namespace, d.raw.name);

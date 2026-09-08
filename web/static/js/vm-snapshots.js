@@ -11,10 +11,10 @@ const VMSnapshots = (() => {
     const body = `
       <div class="snapshots-panel">
         <div class="apply-bar" style="margin: 0 0 14px; padding: 0; border: 0;">
-          <button class="btn btn-primary btn-sm" id="snap-create" title="Create a new snapshot of the current VM disk state">
+          <button class="btn btn-primary btn-sm tip" id="snap-create" data-tip="${i18n.t('snap.createTip')}">
             ➕ <span>Create snapshot now</span>
           </button>
-          <button class="btn btn-secondary btn-sm" id="snap-refresh" title="Refresh the list of snapshots">Refresh</button>
+          <button class="btn btn-secondary btn-sm tip" id="snap-refresh" data-tip="${i18n.t('snap.refreshTip')}">${i18n.t('snap.refresh')}</button>
           <span class="apply-result" id="snap-feedback"></span>
         </div>
         <p class="form-hint">
@@ -71,8 +71,8 @@ const VMSnapshots = (() => {
               : '<span class="badge warn">in-progress</span>'}</td>
             <td>${s.progress || 0}%</td>
             <td>
-              <button class="btn-icon-action" title="Restore this snapshot in place (replaces current VM disk)" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>↩</button>
-              <button class="btn-icon-action" title="Delete this snapshot (cannot be undone)" data-delete="${s.name}">🗑</button>
+              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.restoreTip')}" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>↩</button>
+              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.deleteTip')}" data-delete="${s.name}">🗑</button>
               ${s.error ? '<span class="badge fail" title="' + s.error + '">error</span>' : ''}
             </td>`;
           tbody.appendChild(tr);

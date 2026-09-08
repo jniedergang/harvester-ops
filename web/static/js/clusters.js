@@ -38,10 +38,10 @@ const Clusters = (() => {
             <div class="cluster-card-actions">
               <button class="btn btn-sm btn-secondary" data-act="test-kc" data-name="${c.name}" data-i18n="clusters.testKc">${i18n.t('clusters.testKc')}</button>
               <button class="btn btn-sm btn-secondary" data-act="test-ssh" data-name="${c.name}" data-i18n="clusters.testSsh">${i18n.t('clusters.testSsh')}</button>
-              <label class="btn btn-sm btn-secondary" title="Replace kubeconfig">
+              <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceKubeconfigTip')}">
                 📄 <input type="file" accept=".yaml,.yml,.kubeconfig" data-act="upload-kc" data-name="${c.name}" style="display:none;">
               </label>
-              <label class="btn btn-sm btn-secondary" title="Replace SSH key">
+              <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceSshTip')}">
                 🔑 <input type="file" data-act="upload-ssh" data-name="${c.name}" style="display:none;">
               </label>
               <button class="btn btn-sm btn-danger" data-act="delete" data-name="${c.name}" data-i18n="clusters.delete">${i18n.t('clusters.delete')}</button>

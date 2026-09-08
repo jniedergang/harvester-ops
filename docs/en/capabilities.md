@@ -50,7 +50,9 @@ Manage KubeVirt virtual machines without leaving the console.
   WebSocket relay to the KubeVirt `vnc` subresource). Shows the whole
   boot — firmware, GRUB, kernel — thanks to an auto-retry loop that
   attaches as soon as qemu exposes the display; keyboard/mouse,
-  Ctrl-Alt-Del and fit-to-window/1:1 scaling included. Access is
+  Ctrl-Alt-Del and fit-to-window/1:1 scaling included; the console
+  title bar also carries VM power controls (start / graceful stop /
+  hard reset) and shortcuts to the snapshot manager and VM settings. Access is
   gated by short-lived single-use tickets issued by an authenticated
   endpoint; the kubeconfig needs `get virtualmachineinstances/vnc`
   (checked by the permissions matrix).

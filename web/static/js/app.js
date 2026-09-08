@@ -247,7 +247,7 @@ const App = (() => {
       tr.innerHTML = `
         <td class="check-col"><input type="checkbox" data-key="${key}" ${nsSelection.has(key) ? 'checked' : ''}></td>
         <td>${vm.name}
-          ${vm.agent_connected === 'True' ? '<span class="agent-dot ok" title="qemu-guest-agent connected">●</span>' : ''}
+          ${vm.agent_connected === 'True' ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">●</span>` : ''}
         </td>
         <td><span class="phase ${phase} tip" data-tip="${phaseTip}">${i18n.t('vm.state.' + phase)}</span></td>
         <td>
@@ -260,17 +260,17 @@ const App = (() => {
         </td>
         <td class="vm-actions-cell">
           ${vm.runStrategy === 'Halted'
-            ? `<button class="btn-icon-action start" title="Start the VM (set runStrategy=Always and wait for Running phase)" data-action="start" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-green">▶</span></button>`
-            : `<button class="btn-icon-action stop"  title="Stop the VM gracefully (set runStrategy=Halted, ACPI shutdown)"  data-action="stop"  data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-red">■</span></button>`}
-          <button class="btn-icon-action snapshot" title="Manage VM snapshots (create, restore, delete VirtualMachineBackup)"
+            ? `<button class="btn-icon-action start tip" data-tip="${i18n.t('vm.tooltip.start')}" data-action="start" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-green">▶</span></button>`
+            : `<button class="btn-icon-action stop tip" data-tip="${i18n.t('vm.tooltip.stop')}" data-action="stop" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-red">■</span></button>`}
+          <button class="btn-icon-action snapshot tip" data-tip="${i18n.t('vm.tooltip.snapshot')}"
                   data-vm-snapshot data-ns="${vm.namespace}" data-name="${vm.name}">📸</button>
-          <button class="btn-icon-action migrate"  title="Live-migrate this VM to another node (only when Running)"
+          <button class="btn-icon-action migrate tip" data-tip="${i18n.t('vm.tooltip.migrate')}"
                   data-vm-migrate data-ns="${vm.namespace}" data-name="${vm.name}">🔄</button>
-          <button class="btn-icon-action edit"    title="Edit VM settings (CPU, memory, disks, network, cloud-init)"
+          <button class="btn-icon-action edit tip" data-tip="${i18n.t('vm.tooltip.edit')}"
                   data-vm-edit data-ns="${vm.namespace}" data-name="${vm.name}">⚙</button>
           <button class="btn-icon-action console tip" data-tip="${i18n.t('vm.tooltip.console')}"
                   data-vm-console data-ns="${vm.namespace}" data-name="${vm.name}">🖥</button>
-          <button class="btn-icon-action notes"   title="Open collaborative notes for this VM (real-time multi-user)"
+          <button class="btn-icon-action notes tip" data-tip="${i18n.t('vm.tooltip.notes')}"
                   data-vm-notes data-ns="${vm.namespace}" data-name="${vm.name}">📝</button>
         </td>`;
 
@@ -507,9 +507,9 @@ const App = (() => {
     const phaseLabel = i18n.t(`vm.state.${phaseRaw}`);
     const phaseTip   = i18n.t(`vm.tooltip.${phaseRaw}`);
     const agentBadge = (vm.agent_connected === 'True')
-      ? `<span class="agent-dot ok" title="qemu-guest-agent connected">●</span>`
+      ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">●</span>`
       : (phaseRaw === 'Running'
-          ? `<span class="agent-dot warn" title="qemu-guest-agent not connected">●</span>`
+          ? `<span class="agent-dot warn tip" data-tip="${i18n.t('vm.tooltip.agentDown')}">●</span>`
           : '');
     // Intra-priority badge: only meaningful in non-default groups.
     // Placed in the SECOND grid column (right after the drag handle) so
@@ -1125,11 +1125,11 @@ const App = (() => {
       <div class="activity-detail-nav">
         <button class="btn btn-sm btn-secondary" id="act-detail-prev"
                 ${idx >= total - 1 ? 'disabled' : ''}
-                title="Older action (←)">← Older</button>
+                title="${i18n.t('activity.olderTip')}">← ${i18n.t('activity.older')}</button>
         <span class="form-hint">${idx + 1} / ${total}</span>
         <button class="btn btn-sm btn-secondary" id="act-detail-next"
                 ${idx <= 0 ? 'disabled' : ''}
-                title="Newer action (→)">Newer →</button>
+                title="${i18n.t('activity.newerTip')}">${i18n.t('activity.newer')} →</button>
       </div>
       <div class="activity-detail-meta">
         <div><strong>Action</strong> <code>${it.action}</code></div>

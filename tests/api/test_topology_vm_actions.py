@@ -78,3 +78,14 @@ def test_structure_map_reads_actual_compound_parent():
     """Must read e.parent() (rendered), not e.data('parent') (can be stale
     after an in-place data merge)."""
     assert "e.parent().nonempty()" in TOPO
+
+
+def test_edit_and_snapshot_use_correct_globals():
+    """v1.7.1 regression: topology dispatched to window.VmEdit/VmSnapshots
+    (wrong case) — the optional chaining swallowed the miss and the buttons
+    silently did nothing. The globals are VMEdit / VMSnapshots."""
+    src = TOPO.read_text() if hasattr(TOPO, "read_text") else open(
+        "web/static/js/topology.js").read()
+    assert "window.VMEdit?.open?.(" in src
+    assert "window.VMSnapshots?.open?.(" in src
+    assert "window.VmEdit" not in src and "window.VmSnapshots" not in src

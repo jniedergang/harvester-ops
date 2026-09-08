@@ -4,6 +4,48 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.7.1] — 2026-09-08 — Console toolbar, tooltip audit, panel-resize overhaul
+
+### Added
+- **Console toolbar** — VM power controls right in the console title bar:
+  start, graceful stop and hard reset (confirm-gated), plus shortcuts to
+  the snapshot manager and the VM settings overlay. Hard reset is a new
+  tracked action (`POST …/restart`: deletes the VMI and waits for a
+  fresh Running one — what `virtctl restart` does).
+- **Two-phase reconnect** (eager 400 ms phase after a disconnect) so a
+  hard reset reattaches fast enough to catch the firmware splash.
+- **Panels resize from every edge and corner** (8 handles).
+
+### Fixed
+- Topology detail panel: Edit and Snapshot did nothing — the dispatcher
+  called `window.VmEdit`/`VmSnapshots` (wrong case) and the optional
+  chaining swallowed the miss. Locked by a regression test.
+- Snapshot restore failed with "delete policy with backup type snapshot
+  for replacing VM is not supported": the VirtualMachineRestore manifest
+  now pins `deletionPolicy: retain`, and restore failures carry
+  `error_summary` like every other runner (note: Harvester requires the
+  VM to be stopped before an in-place restore — that message now reaches
+  the dock verbatim).
+- Panel drag/resize moved to pointer capture: the old
+  document-level mouseup pattern lost the button release over the noVNC
+  canvas (which captures pointer events) and the panel stayed glued to
+  the cursor.
+- 1:1 scale mode scrolls natively instead of clipping the framebuffer.
+- The console-session cap (429) is treated as transient by the client
+  and retried instead of ending the session.
+- **Tooltip audit** (user report: dashed underline + help cursor on
+  toolbar buttons): the `.tip` text ornament no longer applies to
+  buttons, and the daily surfaces (console toolbar, VM row actions,
+  dock, floating panels, snapshots, migrate, clusters, activity nav) now
+  use styled EN+FR i18n tooltips instead of hardcoded English `title=`.
+  The remaining hardcoded-title debt (advanced surfaces: capi, notes,
+  terraform, bmc) is frozen by a per-file baseline test.
+
+### Tests
+- +13 across `test_vm_console.py`, `test_snapshot_restore.py`,
+  `test_tooltips_audit.py` and `test_topology_vm_actions.py`. Suite: 348
+  passing.
+
 ## [1.7.0] — 2026-09-08 — In-browser VNC console
 
 The "VM console — coming soon" placeholder kept its promise: the console

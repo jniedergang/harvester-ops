@@ -13,10 +13,10 @@ const VMMigrate = (() => {
         <div class="migrate-status" id="migrate-status">Loading…</div>
         <div class="apply-bar" style="margin: 14px 0; padding: 0; border: 0;">
           <button class="btn btn-primary btn-sm" id="migrate-trigger"
-                  title="Migrate this VM live to another node. KubeVirt picks the target automatically based on scheduling constraints.">
+                  data-tip="${i18n.t('migrate.actionTip')}" class="tip">
             🔄 <span>Migrate now</span>
           </button>
-          <button class="btn btn-secondary btn-sm" id="migrate-refresh" title="Refresh status and history">Refresh</button>
+          <button class="btn btn-secondary btn-sm tip" id="migrate-refresh" data-tip="${i18n.t('migrate.refreshTip')}">${i18n.t('migrate.refresh')}</button>
           <span class="apply-result" id="migrate-feedback"></span>
         </div>
         <h4 style="margin-top:20px;">Available nodes</h4>

@@ -230,3 +230,88 @@ def test_live_rfb_banner_through_upstream_leg(live_config):
         assert banner and banner.startswith(b"RFB ")
     finally:
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# v1.7.1 — console toolbar power actions + hard reset endpoint
+# ---------------------------------------------------------------------------
+
+def test_toolbar_buttons_present():
+    for cls in ("vm-console-power-start", "vm-console-power-stop",
+                "vm-console-power-reset", "vm-console-snapshots",
+                "vm-console-settings"):
+        assert cls in JS, f"toolbar button {cls} missing"
+    # destructive power actions must ask first
+    assert JS.count("confirm(") >= 2
+    # panels reuse the existing overlays, not bespoke ones
+    assert "VMSnapshots.open(cluster, namespace, name)" in JS
+    assert "VMEdit.open(cluster, namespace, name)" in JS
+
+
+def test_two_phase_retry():
+    """Fast reattach right after a disconnect is what makes the firmware
+    splash of a hard reset catchable."""
+    assert "RETRY_FAST_MS" in JS and "RETRY_FAST_COUNT" in JS
+    assert re.search(r"retries <= RETRY_FAST_COUNT \? RETRY_FAST_MS : RETRY_MS", JS)
+
+
+def test_restart_unknown_cluster(client, monkeypatch):
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: None)
+    r = client.post("/api/vm/nope/ns1/vm1/restart")
+    assert r.status_code == 404
+
+
+def test_restart_returns_tracked_action(client, monkeypatch):
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/dev/null")
+    monkeypatch.setattr(wapp.threading, "Thread",
+                        lambda *a, **kw: type("T", (), {"start": lambda s: None})())
+    r = client.post("/api/vm/c1/ns1/vm1/restart")
+    assert r.status_code == 200
+    aid = r.get_json()["action_id"]
+    with wapp.ACTIONS_LOCK:
+        run = wapp.ACTIONS.pop(aid)
+    assert run.action == "vm-restart:ns1/vm1"
+
+
+def test_restart_runner_surfaces_delete_error(monkeypatch):
+    class _FR:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+    calls = {"n": 0}
+
+    def fake_run(cmd, **kw):
+        calls["n"] += 1
+        if "delete" in cmd:
+            return _FR(1, err='Error from server (NotFound): vmi "x" not found\n')
+        return _FR(0, out="uid-1")
+    monkeypatch.setattr(wapp.subprocess, "run", fake_run)
+    run = wapp.ActionRun("r" * 12, "vm-restart:ns/x", "c1", [])
+    wapp._vm_restart_runner(run, "/dev/null", "ns", "x")
+    assert run.status == "error"
+    assert "NotFound" in run.error_summary
+
+
+def test_restart_runner_waits_for_new_uid(monkeypatch):
+    class _FR:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+    seq = {"polls": 0}
+
+    def fake_run(cmd, **kw):
+        if "delete" in cmd:
+            return _FR(0)
+        if "{.metadata.uid}" in " ".join(cmd) and "{.status.phase}" not in " ".join(cmd):
+            return _FR(0, out="uid-old")
+        seq["polls"] += 1
+        # old uid still Running once, then the respawned VMI
+        if seq["polls"] == 1:
+            return _FR(0, out="uid-old Running")
+        return _FR(0, out="uid-new Running")
+    monkeypatch.setattr(wapp.subprocess, "run", fake_run)
+    monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
+    run = wapp.ActionRun("s" * 12, "vm-restart:ns/x", "c1", [])
+    wapp._vm_restart_runner(run, "/dev/null", "ns", "x")
+    assert run.status == "done"
+    steps = [e for e in run.events if e.get("type") == "step"
+             and e.get("step_id") == "respawn" and e.get("status") == "done"]
+    assert steps, "runner must confirm the NEW VMI reached Running"
