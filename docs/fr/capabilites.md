@@ -168,7 +168,8 @@ sauvegardées.
   défaut suit l'identité suse.com — palette pin/jade et la fonte
   officielle SUSE, vendorée dans le tarball (airgap, licence OFL).
 - **Accessibilité** — focus clavier visible, focus trap de dialogue,
-  tooltips sur chaque contrôle (désactivables globalement).
+  tooltips sur chaque contrôle (désactivables globalement), entièrement
+  localisés EN/FR sur toutes les surfaces, onglets avancés compris.
 
 ---
 

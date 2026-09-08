@@ -88,14 +88,14 @@ const BMC = (() => {
         </div>
         <div class="card-body">
           <div class="apply-bar" style="margin-bottom:8px;">
-            <button class="btn btn-sm btn-secondary bmc-power" data-host="${n.host}" data-action="On"
-                    title="Press the virtual power button (no-op if already On)">⚡ On</button>
-            <button class="btn btn-sm btn-secondary bmc-power" data-host="${n.host}" data-action="GracefulShutdown"
-                    title="Send ACPI shutdown to the OS">🛑 Graceful off</button>
-            <button class="btn btn-sm btn-secondary bmc-power" data-host="${n.host}" data-action="ForceOff"
-                    title="Cut power immediately (destructive)">💥 Force off</button>
-            <button class="btn btn-sm btn-secondary bmc-power" data-host="${n.host}" data-action="GracefulRestart"
-                    title="Send ACPI reboot to the OS">🔄 Restart</button>
+            <button class="btn btn-sm btn-secondary bmc-power tip" data-host="${n.host}" data-action="On"
+                    data-tip="${i18n.t('bmc.tip.on')}">⚡ On</button>
+            <button class="btn btn-sm btn-secondary bmc-power tip" data-host="${n.host}" data-action="GracefulShutdown"
+                    data-tip="${i18n.t('bmc.tip.gracefulOff')}">🛑 Graceful off</button>
+            <button class="btn btn-sm btn-secondary bmc-power tip" data-host="${n.host}" data-action="ForceOff"
+                    data-tip="${i18n.t('bmc.tip.forceOff')}">💥 Force off</button>
+            <button class="btn btn-sm btn-secondary bmc-power tip" data-host="${n.host}" data-action="GracefulRestart"
+                    data-tip="${i18n.t('bmc.tip.restart')}">🔄 Restart</button>
           </div>
           <table class="data-table">
             <thead><tr><th>NIC</th><th>MAC</th><th>State</th><th>Speed</th></tr></thead>

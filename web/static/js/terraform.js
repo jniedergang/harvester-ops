@@ -120,11 +120,11 @@ const TF = (() => {
       ? '<tr><td colspan="3" class="empty-state">No Terraform-managed resources yet.</td></tr>'
       : detail.map(r => {
           const editBtn = r.has_sidecar
-            ? `<button class="btn btn-sm tf-edit-resource"
+            ? `<button class="btn btn-sm tf-edit-resource tip"
                        data-safe="${esc(r.local_name)}"
                        data-address="${esc(r.address)}"
-                       title="Load the resource's spec back into a new declaration for editing.">✎ Edit</button>`
-            : `<span class="tf-no-sidecar" title="No sidecar JSON — was created via the legacy /apply path. Edit not available.">no sidecar</span>`;
+                       data-tip="${i18n.t('tf.tip.editResource')}">✎ Edit</button>`
+            : `<span class="tf-no-sidecar tip" data-tip="${i18n.t('tf.tip.noSidecar')}">no sidecar</span>`;
           return `
             <tr><td><code>${esc(r.address)}</code></td>
                 <td><span class="badge ok">tracked</span></td>
@@ -170,11 +170,11 @@ const TF = (() => {
         <div id="tf-result" class="apply-result" style="margin-top:8px;"></div>
         <div class="apply-bar" style="margin-top:14px; gap:8px;">
           <button class="btn btn-secondary btn-sm" id="btn-tf-clean-stale"
-                  title="Remove .tf files that aren't in state (failed creates from previous applies). Cluster resources untouched.">
+                  data-tip="${i18n.t('tf.tip.cleanStale')}">
             🧹 Clean stale files
           </button>
           <button class="btn btn-danger btn-sm" id="btn-tf-destroy"
-                  title="terraform destroy the entire workspace for this cluster">
+                  data-tip="${i18n.t('tf.tip.destroyWorkspace')}">
             🧨 Destroy workspace
           </button>
         </div>
@@ -205,7 +205,7 @@ const TF = (() => {
           the Harvester provider and the bundled examples into a single
           tar.gz that can be transferred to an offline host.</p>
         <button class="btn btn-secondary btn-sm" id="btn-tf-bundle-build"
-                title="Bundle terraform + provider + examples into a tar.gz for airgap transfer">
+                data-tip="${i18n.t('tf.tip.bundleBuild')}">
           🔨 Build airgap bundle
         </button>
       </section>`;
@@ -250,8 +250,8 @@ const TF = (() => {
       summary = `<span class="tf-decl-summary">empty</span>`;
     }
     const status = decl.last_applied_status
-      ? `<span class="tf-decl-applied tf-decl-applied--${esc(decl.last_applied_status)}"
-              title="Last apply: ${esc(decl.last_applied_at)}"
+      ? `<span class="tf-decl-applied tf-decl-applied--${esc(decl.last_applied_status)} tip"
+              data-tip="${i18n.t('tf.tip.lastApply', {when: esc(decl.last_applied_at)})}"
         >last: ${esc(decl.last_applied_status)}</span>` : '';
     return `
       <div class="tf-decl-item ${isActive ? 'tf-decl-item--active' : ''}"
@@ -266,12 +266,12 @@ const TF = (() => {
                   data-id="${esc(decl.id)}" data-dry="1">Dry-run</button>
           <button class="btn btn-sm btn-primary tf-decl-apply"
                   data-id="${esc(decl.id)}" data-dry="0">Apply ▶</button>
-          <button class="btn btn-sm btn-danger tf-decl-destroy"
+          <button class="btn btn-sm btn-danger tf-decl-destroy tip"
                   data-id="${esc(decl.id)}"
-                  title="terraform destroy every resource of this declaration that's currently in state, then clean its .tf + .json files.">🧨 Destroy</button>
-          <button class="btn btn-sm tf-decl-delete"
+                  data-tip="${i18n.t('tf.tip.destroyDecl')}">🧨 Destroy</button>
+          <button class="btn btn-sm tf-decl-delete tip"
                   data-id="${esc(decl.id)}"
-                  title="Remove this declaration from the local list only — cluster resources are NOT touched.">🗑</button>
+                  data-tip="${i18n.t('tf.tip.deleteDecl')}">🗑</button>
         </div>
       </div>`;
   }
@@ -549,7 +549,7 @@ const TF = (() => {
               <h3>🧨 ${esc(title)}</h3>
               <div class="modal-subtitle">Confirmation required</div>
             </div>
-            <button class="btn-close tf-confirm-cancel" title="Cancel">×</button>
+            <button class="btn-close tf-confirm-cancel tip" data-tip="${i18n.t('common.cancel')}">×</button>
           </div>
           <div class="modal-body">
             <p class="tf-confirm-message">${esc(message)}</p>
@@ -605,7 +605,7 @@ const TF = (() => {
       <div class="tf-log-head">
         <strong class="tf-log-title">Terraform log</strong>
         <span class="tf-log-status"></span>
-        <button type="button" class="btn-icon-sm tf-log-close" title="Hide log">×</button>
+        <button type="button" class="btn-icon-sm tf-log-close tip" data-tip="${i18n.t('tf.tip.hideLog')}">×</button>
       </div>
       <pre class="tf-log-body"></pre>`;
     document.body.appendChild(el);

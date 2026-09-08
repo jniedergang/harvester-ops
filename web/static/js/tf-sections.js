@@ -75,9 +75,9 @@ const TFSections = (() => {
         <div class="tf-resource-card__head">
           <span class="tf-resource-card__kind">${esc(kindLabel)}</span>
           <span class="tf-resource-card__name">${esc(name)}</span>
-          <button type="button" class="tf-resource-card__del btn-icon-sm"
+          <button type="button" class="tf-resource-card__del btn-icon-sm tip"
                   data-res-id="${esc(resource.id)}"
-                  title="Remove this resource from the declaration">🗑</button>
+                  data-tip="${window.i18n ? i18n.t('tf.tip.removeResource') : 'Remove this resource from the declaration'}">🗑</button>
         </div>
         <div class="tf-resource-card__sections">${buttons}</div>
       </div>`;

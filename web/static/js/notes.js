@@ -40,22 +40,22 @@ const Notes = (() => {
       <div class="notes-toolbar">
         <span class="notes-status" data-status>connecting…</span>
         <div class="notes-toolbar-buttons">
-          <button type="button" data-cmd="bold"      title="Gras (Ctrl+B)"><strong>B</strong></button>
-          <button type="button" data-cmd="italic"    title="Italique (Ctrl+I)"><em>I</em></button>
-          <button type="button" data-cmd="strike"    title="Barré"><s>S</s></button>
-          <button type="button" data-cmd="code"      title="Code inline"><code>{ }</code></button>
+          <button type="button" data-cmd="bold"      class="tip" data-tip="${i18n.t('notes.tip.bold')}"><strong>B</strong></button>
+          <button type="button" data-cmd="italic"    class="tip" data-tip="${i18n.t('notes.tip.italic')}"><em>I</em></button>
+          <button type="button" data-cmd="strike"    class="tip" data-tip="${i18n.t('notes.tip.strike')}"><s>S</s></button>
+          <button type="button" data-cmd="code"      class="tip" data-tip="${i18n.t('notes.tip.code')}"><code>{ }</code></button>
           <span class="notes-toolbar-sep">·</span>
-          <button type="button" data-cmd="h1" title="Heading 1">H1</button>
-          <button type="button" data-cmd="h2" title="Heading 2">H2</button>
-          <button type="button" data-cmd="h3" title="Heading 3">H3</button>
+          <button type="button" data-cmd="h1" class="tip" data-tip="${i18n.t('notes.tip.h1')}">H1</button>
+          <button type="button" data-cmd="h2" class="tip" data-tip="${i18n.t('notes.tip.h2')}">H2</button>
+          <button type="button" data-cmd="h3" class="tip" data-tip="${i18n.t('notes.tip.h3')}">H3</button>
           <span class="notes-toolbar-sep">·</span>
-          <button type="button" data-cmd="bullet"    title="Liste à puces">•</button>
-          <button type="button" data-cmd="ordered"   title="Liste numérotée">1.</button>
-          <button type="button" data-cmd="blockquote" title="Citation">”</button>
-          <button type="button" data-cmd="codeblock" title="Bloc de code">⌜⌝</button>
+          <button type="button" data-cmd="bullet"    class="tip" data-tip="${i18n.t('notes.tip.bullet')}">•</button>
+          <button type="button" data-cmd="ordered"   class="tip" data-tip="${i18n.t('notes.tip.ordered')}">1.</button>
+          <button type="button" data-cmd="blockquote" class="tip" data-tip="${i18n.t('notes.tip.quote')}">”</button>
+          <button type="button" data-cmd="codeblock" class="tip" data-tip="${i18n.t('notes.tip.codeblock')}">⌜⌝</button>
           <span class="notes-toolbar-sep">·</span>
-          <button type="button" data-cmd="undo"      title="Annuler (Ctrl+Z)">↶</button>
-          <button type="button" data-cmd="redo"      title="Rétablir (Ctrl+Shift+Z)">↷</button>
+          <button type="button" data-cmd="undo"      class="tip" data-tip="${i18n.t('notes.tip.undo')}">↶</button>
+          <button type="button" data-cmd="redo"      class="tip" data-tip="${i18n.t('notes.tip.redo')}">↷</button>
         </div>
         <span class="notes-stats" data-stats></span>
       </div>

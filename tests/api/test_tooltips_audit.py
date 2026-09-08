@@ -59,13 +59,10 @@ def test_hardcoded_title_debt_only_shrinks():
     converted opportunistically; daily surfaces are already clean. When
     you translate a file, lower its number; never raise one."""
     BASELINE = {
-        "app.js": 0, "dock.js": 0, "floating-panels.js": 0,
-        "vm-console.js": 0, "vm-snapshots.js": 0, "vm-migrate.js": 0,
-        "clusters.js": 0,
-        # remaining debt (advanced surfaces):
-        "bmc.js": 4, "capi.js": 24, "notes.js": 13, "terraform.js": 10,
-        "tf-form.js": 1, "tf-sections.js": 1,
-        # i18n.js: one literal inside a doc comment, not a control
+        # v1.8.5: debt CLEARED — every surface (bmc, capi, notes,
+        # terraform, tf-*) now uses i18n data-tips (or an i18n-interpolated
+        # native title on pattern-validated inputs). Keep everything at 0.
+        # i18n.js: one literal inside a doc comment, not a control.
         "i18n.js": 1,
     }
     debt = _debt()
@@ -74,3 +71,15 @@ def test_hardcoded_title_debt_only_shrinks():
         assert n <= allowed, (
             f"{fname}: {n} hardcoded English title= (baseline {allowed}) — "
             f"new controls must use data-tip=\"${{i18n.t('…')}}\" with EN+FR keys")
+
+
+def test_template_titles_are_i18n_wired():
+    """v1.8.5: every literal title= in index.html must sit next to a
+    data-i18n-title so applyTranslations() replaces the English fallback
+    at startup (sidebar tabs, sort headers, sub-tabs, refresh buttons)."""
+    html = (ROOT / "web" / "templates" / "index.html").read_text()
+    bad = []
+    for tag in re.findall(r"<[^>]*\btitle=\"[A-Za-z][^\"]*\"[^>]*>", html):
+        if "data-i18n-title" not in tag:
+            bad.append(tag.strip()[:90])
+    assert not bad, "template titles without data-i18n-title:\n" + "\n".join(bad)

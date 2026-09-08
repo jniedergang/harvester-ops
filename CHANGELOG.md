@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.5] — 2026-09-08 — Tooltip debt cleared: every surface localised
+
+### Fixed
+- The hardcoded-title debt tracked since the v1.7.1 audit is CLEARED:
+  the advanced surfaces (BMC power controls, the whole Cluster API tab,
+  the notes editor toolbar, Terraform declarations) now use styled i18n
+  tooltips (EN + FR) instead of ~53 hardcoded native titles — several
+  of which were French-only (notes toolbar) or English-only. Inputs
+  with a validation pattern keep a native title (it doubles as the
+  browser's validation hint), now localised too.
+- The 22 literal titles of the page template (sidebar tabs, VM table
+  sort headers, sub-tabs, refresh buttons) are wired to the existing
+  data-i18n-title mechanism, so they translate at startup.
+
+### Tests
+- Audit baselines dropped to zero and locked (any new hardcoded title
+  fails the suite); new template-title audit; i18n parity baseline
+  recomputed (EN+FR complete, IT/ES/DE still fall back to EN).
+
 ## [1.8.4] — 2026-09-08 — Network topology: per-network band layout
 
 ### Fixed

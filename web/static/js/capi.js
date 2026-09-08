@@ -36,14 +36,14 @@ const CAPI = (() => {
     const cmp = d.bundle_compatibility;
     let compatChip = '';
     if (d.harvester_version) {
-      compatChip += `<span class="phase Running" title="Detected Harvester version on the target cluster">Harvester ${d.harvester_version}</span> `;
+      compatChip += `<span class="phase Running tip" data-tip="${i18n.t('capi.tip.harvVersion')}">Harvester ${d.harvester_version}</span> `;
     }
     if (cmp) {
       if (cmp.compatible) {
-        compatChip += `<span class="badge ok" title="Active bundle supports the target Harvester version (${(cmp.supported_versions||[]).join(', ')})">✓ bundle compatible</span>`;
+        compatChip += `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.compatOk', {versions: (cmp.supported_versions||[]).join(', ')})}">✓ bundle compatible</span>`;
       } else {
         const sup = (cmp.supported_versions || []).join(', ') || 'unknown';
-        compatChip += `<span class="badge warn" title="Active bundle supports ${sup} — target reports ${cmp.target_version || 'unknown'}">⚠ version mismatch (supported: ${sup})</span>`;
+        compatChip += `<span class="badge warn tip" data-tip="${i18n.t('capi.tip.compatKo', {supported: sup, target: cmp.target_version || 'unknown'})}">⚠ version mismatch (supported: ${sup})</span>`;
       }
     }
 
@@ -58,26 +58,26 @@ const CAPI = (() => {
     const bundleSection = `
       <div class="apply-bar" style="margin-top: 16px; padding-top: 12px; flex-wrap: wrap; gap: 8px;">
         <button class="btn btn-secondary btn-sm" id="btn-capi-bundle-build"
-                title="Pull every CAPI/CAPHV image and build a new timestamped airgap tar.gz (heavy, several minutes). The new bundle becomes active automatically.">
+                data-tip="${i18n.t('capi.tip.bundleBuild')}">
           🔨 Build new bundle
         </button>
         <button class="btn btn-secondary btn-sm" id="btn-capi-bundle-upload"
-                title="Upload a pre-built bundle (.tar.gz) — useful when the build host has internet but the cluster doesn't">
+                data-tip="${i18n.t('capi.tip.bundleUpload')}">
           ⬆ Upload bundle…
         </button>
         <input type="file" id="capi-bundle-upload-input" accept=".tar.gz,.tgz" style="display:none">
         <span class="apply-result" id="capi-bundle-upload-result" style="margin-left: 8px;"></span>
         <button class="btn btn-primary btn-sm" id="btn-capi-install" ${d.bundle_available ? '' : 'disabled'}
-                title="${d.bundle_available
-                  ? 'Install the CAPI/CAPHV stack from the active airgap bundle (ssh + ctr import + kubectl apply)'
-                  : 'No bundle available — build one first'}">
+                data-tip="${d.bundle_available
+                  ? i18n.t('capi.tip.install')
+                  : i18n.t('capi.tip.installNoBundle')}">
           📦 Install stack from active bundle
         </button>
         <button class="btn btn-danger btn-sm" id="btn-capi-uninstall"
-                title="Remove every CAPI/CAPHV namespace, CRDs and container images from the Harvester nodes (cert-manager kept by default)">
+                data-tip="${i18n.t('capi.tip.uninstall')}">
           🗑 Uninstall stack
         </button>
-        <label class="apply-dry" title="Validate the install plan without writing anything">
+        <label class="apply-dry tip" data-tip="${i18n.t('capi.tip.dryRun')}">
           <input type="checkbox" id="capi-install-dry" checked> Dry-run (preview only)
         </label>
         <span class="form-hint" style="flex-basis: 100%; margin-top: 6px;">
@@ -149,7 +149,7 @@ const CAPI = (() => {
     // confusion is impossible.
     const otherUsed = Math.max(0, diskUsed - totalUsed);
     const diskBar = `
-      <div class="disk-usage" title="Disk hosting ${data.bundle_dir || 'dist/'}">
+      <div class="disk-usage tip" data-tip="${i18n.t('capi.tip.disk', {dir: data.bundle_dir || 'dist/'})}">
         <div class="disk-usage-line">
           <strong>${bundles.length}</strong> bundle${bundles.length>1?'s':''} ·
           <strong>${fmtSize(totalUsed)}</strong> used by bundles
@@ -177,8 +177,8 @@ const CAPI = (() => {
     const rows = bundles.map(b => `
       <tr data-filename="${b.filename}">
         <td>
-          <a href="#" class="bundle-inspect" data-filename="${b.filename}"
-             title="View bundle contents and embedded component versions">
+          <a href="#" class="bundle-inspect tip" data-filename="${b.filename}"
+             data-tip="${i18n.t('capi.tip.inspect')}">
             <code>${b.filename}</code>
           </a>
         </td>
@@ -186,21 +186,21 @@ const CAPI = (() => {
         <td>${fmtSize(b.size)}</td>
         <td><code class="sha">${(b.sha256 || '').slice(0, 12) || '—'}</code></td>
         <td>${b.is_active
-              ? '<span class="badge ok" title="The active bundle is used by Install stack and bundle.sh">✓ active</span>'
-              : `<button class="btn btn-secondary btn-sm bundle-select" data-filename="${b.filename}"
-                         title="Make this bundle the active one (Install stack will use it)">
+              ? `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.activeBundle')}">✓ active</span>`
+              : `<button class="btn btn-secondary btn-sm bundle-select tip" data-filename="${b.filename}"
+                         data-tip="${i18n.t('capi.tip.activate')}">
                    Activate
                  </button>`}
         </td>
         <td>
-          <button class="btn btn-secondary btn-sm bundle-inspect"
+          <button class="btn btn-secondary btn-sm bundle-inspect tip"
                   data-filename="${b.filename}"
-                  title="View bundle contents and embedded component versions">
+                  data-tip="${i18n.t('capi.tip.inspect')}">
             Inspect
           </button>
-          <a class="btn btn-secondary btn-sm bundle-download"
+          <a class="btn btn-secondary btn-sm bundle-download tip"
              href="/api/capi/bundle/${encodeURIComponent(b.filename)}/download"
-             title="Download this bundle (.tar.gz) — useful for airgap transfer"
+             data-tip="${i18n.t('capi.tip.download')}"
              download>
             ⬇ Download
           </a>
@@ -671,10 +671,10 @@ const CAPI = (() => {
         <td><code>${c.clusterClass || '—'}</code></td>
         <td><code>${c.k8sVersion || '—'}</code></td>
         <td>
-          <button class="btn btn-sm btn-secondary capi-cluster-details" data-ns="${c.namespace}" data-name="${c.name}" title="View detailed status, machines, conditions">Details</button>
-          <button class="btn btn-sm btn-secondary capi-cluster-kubeconfig" data-ns="${c.namespace}" data-name="${c.name}" title="Download the cluster's kubeconfig">⬇ kubeconfig</button>
-          <button class="btn btn-sm btn-secondary capi-cluster-scale" data-ns="${c.namespace}" data-name="${c.name}" title="Change worker replica count">↕ Scale</button>
-          <button class="btn btn-sm btn-danger capi-cluster-delete" data-ns="${c.namespace}" data-name="${c.name}" title="Delete the cluster (CAPHV cleans up VMs)">🗑 Delete</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-details tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterDetails')}">Details</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-kubeconfig tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterKubeconfig')}">⬇ kubeconfig</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-scale tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterScale')}">↕ Scale</button>
+          <button class="btn btn-sm btn-danger capi-cluster-delete tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterDelete')}">🗑 Delete</button>
         </td>
       </tr>`).join('');
     out.innerHTML = `
@@ -699,7 +699,7 @@ const CAPI = (() => {
           <legend>Identité</legend>
           <label>Cluster name *
             <input type="text" name="name" required pattern="[a-z][-a-z0-9]*"
-                   placeholder="my-cluster" title="lowercase + hyphens"></label>
+                   placeholder="my-cluster" title="${i18n.t('capi.tip.namePattern')}"></label>
           <label>Namespace
             <input type="text" name="namespace" placeholder="(défaut: même que le nom)"></label>
           <label>K8s version
@@ -717,10 +717,10 @@ const CAPI = (() => {
           <label>CPU par VM
             <input type="number" name="cpu" value="2" min="1" max="64"></label>
           <label>Memory
-            <input type="text" name="memory" value="4Gi" pattern="[0-9]+[KMGT]i" title="ex: 4Gi"></label>
+            <input type="text" name="memory" value="4Gi" pattern="[0-9]+[KMGT]i" title="${i18n.t('capi.tip.memFormat')}"></label>
           <label>Boot disk
-            <input type="text" name="disk_size" value="40Gi" pattern="[0-9]+[KMGT]i" title="ex: 40Gi"></label>
-          <label title="Format: size:storageClass (ex: 10Gi:longhorn)">Disque data (optionnel)
+            <input type="text" name="disk_size" value="40Gi" pattern="[0-9]+[KMGT]i" title="${i18n.t('capi.tip.diskFormat')}"></label>
+          <label title="${i18n.t('capi.tip.extraDiskFormat')}">Disque data (optionnel)
             <input type="text" name="extra_disk" placeholder="10Gi:harvester-longhorn"></label>
         </fieldset>
 
@@ -760,12 +760,12 @@ const CAPI = (() => {
         </fieldset>
 
         <div class="apply-bar" style="margin-top:8px;">
-          <label class="apply-dry" title="Génère le YAML sans l'appliquer">
+          <label class="apply-dry tip" data-tip="${i18n.t('capi.tip.createDry')}">
             <input type="checkbox" name="dry_run" checked> Dry-run (preview only)</label>
           <button type="button" class="btn btn-secondary btn-sm" id="capi-create-preview"
-                  title="Afficher le YAML qui sera appliqué (sans l'appliquer)">👁 Aperçu YAML</button>
+                  data-tip="${i18n.t('capi.tip.preview')}">👁 Aperçu YAML</button>
           <button type="submit" class="btn btn-primary btn-sm"
-                  title="Lancer la création (mode réel = applique vraiment)">🚀 Créer</button>
+                  data-tip="${i18n.t('capi.tip.create')}">🚀 Créer</button>
         </div>
       </form>`;
   }

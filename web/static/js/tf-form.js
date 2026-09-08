@@ -59,7 +59,7 @@ const TFForm = (() => {
     const name = esc(path);
     const v = value !== undefined ? value : (arg.default !== undefined ? arg.default : '');
     const help = arg.description ? t(arg.description) : '';
-    const req = arg.required ? ' <span class="tf-required" title="required">*</span>' : '';
+    const req = arg.required ? ` <span class="tf-required" title="${window.i18n ? i18n.t('tf.tip.required') : 'required'}">*</span>` : '';
     const tip = help ? ` data-tip="${esc(help)}"` : '';
     // v1.8.0: optional bilingual label per arg; raw name stays the fallback
     const labelText = arg.label ? t(arg.label) : arg.name;

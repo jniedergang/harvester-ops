@@ -154,7 +154,8 @@ Drive the Terraform provider for Harvester from saved declarations.
   follows the suse.com identity — pine/jade palette and the official
   SUSE typeface, vendored in the tarball (airgap-safe, OFL licensed).
 - **Accessibility** — keyboard-visible focus, dialog focus trap, tooltips
-  on every control (globally toggleable).
+  on every control (globally toggleable), fully localised EN/FR across
+  every surface, advanced tabs included.
 
 ---
 
