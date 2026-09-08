@@ -439,10 +439,11 @@ const Topology = (() => {
       return { name: 'preset', padding: 20 }; // we'll arrange children in fcose-like grid by hand
     }
     if (mode === 'network') {
-      return {
-        name: 'cose', animate: false, padding: 20, idealEdgeLength: 90,
-        nodeRepulsion: 4000, nodeDimensionsIncludeLabels: true,
-      };
+      // v1.8.4: preset — VMs are arranged in per-network bands by
+      // applyNetworkLayout(). cose crammed every VM in a tiny ring
+      // around the dominant hub (idealEdgeLength ≪ what 14 boxes of
+      // 130×50 need) and they overlapped into an unreadable pile.
+      return { name: 'preset', padding: 20 };
     }
     if (mode === 'storage') {
       return {
@@ -503,6 +504,68 @@ const Topology = (() => {
     cy.fit(undefined, 40);
   }
 
+  // Manual network layout (v1.8.4) — one horizontal BAND per network:
+  //   [🔀 switch]   [vm] [vm] [vm] [vm]
+  //                 [vm] [vm] …
+  // reads like a rack diagram: the switch on the left, its members in a
+  // grid on the right. A VM is assigned to the band of its FIRST NIC
+  // (edges are emitted in NIC order); extra NICs simply draw cross-band
+  // edges, which is exactly the information they carry. VMs with no
+  // network at all get a bottom band of their own.
+  function applyNetworkLayout(cy) {
+    const cellW = 150, cellH = 75, gridX = 260, maxCols = 6, bandGap = 90;
+
+    // Primary network per VM = target of its first emitted edge.
+    const primary = new Map();               // vmId -> netId
+    cy.edges().forEach(e => {
+      const src = e.data('source');
+      if (!primary.has(src)) primary.set(src, e.data('target'));
+    });
+
+    // Group members per network (every network keeps a band, even empty).
+    const bands = new Map();                 // netId -> [vm nodes]
+    cy.nodes().filter(n => n.data('kind') === 'network')
+      .forEach(n => bands.set(n.id(), []));
+    const orphans = [];
+    cy.nodes().filter(n => n.data('kind') === 'vm').forEach(v => {
+      const net = primary.get(v.id());
+      if (net && bands.has(net)) bands.get(net).push(v);
+      else orphans.push(v);
+    });
+
+    // Big bands first; name tie-break keeps the order stable across
+    // refreshes. Within a band: Running first, then by name.
+    const order = [...bands.entries()]
+      .sort((a, b) => (b[1].length - a[1].length)
+        || a[0].localeCompare(b[0]));
+    const byActivity = (a, b) => {
+      const run = n => (n.data('raw') || {}).phase === 'Running' ? 0 : 1;
+      return run(a) - run(b) || a.data('label').localeCompare(b.data('label'));
+    };
+
+    let bandTop = 60;
+    const placeGrid = (vms) => {
+      const cols = Math.max(2, Math.min(vms.length, maxCols));
+      vms.forEach((v, i) => v.position({
+        x: gridX + (i % cols) * cellW,
+        y: bandTop + Math.floor(i / cols) * cellH,
+      }));
+      return Math.max(1, Math.ceil(vms.length / cols)) * cellH;
+    };
+    order.forEach(([netId, vms]) => {
+      vms.sort(byActivity);
+      const h = placeGrid(vms);
+      // Switch vertically centred on its band, alone on the left.
+      cy.getElementById(netId).position({ x: 60, y: bandTop + (h - cellH) / 2 });
+      bandTop += h + bandGap;
+    });
+    if (orphans.length) {
+      orphans.sort(byActivity);
+      placeGrid(orphans);
+    }
+    cy.fit(undefined, 40);
+  }
+
   // -----------------------------------------------------------------------
   // Public render entry point
   // -----------------------------------------------------------------------
@@ -545,6 +608,7 @@ const Topology = (() => {
       autoungrabify: true,
     });
     if (currentMode === 'cluster') applyClusterLayout(cy);
+    if (currentMode === 'network') applyNetworkLayout(cy);
     // Belt-and-braces: ungrabify any node that managed to slip through.
     cy.nodes().ungrabify();
     // Click → details
@@ -1001,7 +1065,9 @@ const Topology = (() => {
   return { start, stop, setMode, refresh,
            setDestructiveUnlocked, isDestructiveUnlocked,
            getCurrentMode, search, setFontSize,
-           zoomBy, zoomFit };
+           zoomBy, zoomFit,
+           // accès test-only au graphe (assertions e2e de layout)
+           _cy: () => cy };
 })();
 
 window.Topology = Topology;

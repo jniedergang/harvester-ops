@@ -4,6 +4,23 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.8.4] — 2026-09-08 — Network topology: per-network band layout
+
+### Fixed
+- The Network topology view piled every VM into a tiny overlapping ring
+  around the network hub (cose force layout with an ideal edge length
+  far too short for 14 VM boxes). It now reads like a rack diagram:
+  one horizontal band per network, the switch on the left, its member
+  VMs in a grid on the right (running VMs first, then by name; big
+  networks on top). Multi-NIC VMs sit in the band of their first
+  interface and keep cross-band edges to the others; VMs with no
+  network get a bottom band. Deterministic and overlap-free (verified:
+  0 box overlaps on a 14-VM cluster, was unreadable before).
+
+### Tests
+- Band-layout wiring assertions; a `_cy()` test hook on the Topology
+  module lets e2e checks measure real node positions.
+
 ## [1.8.3] — 2026-09-08 — SUSE brand theme, list-card ergonomics
 
 ### Added

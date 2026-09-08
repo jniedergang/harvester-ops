@@ -79,6 +79,9 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
 
 - **Live topology** rendered with Cytoscape across three views: Cluster
   (nodes), Network, and Storage (Longhorn volumes), with click-to-detail.
+  The Network view reads like a rack diagram: one band per network,
+  switch on the left, member VMs in a grid (running first) — no
+  force-layout pile-ups.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,

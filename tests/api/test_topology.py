@@ -647,3 +647,16 @@ def test_topology_cache_ttl_is_reasonable():
     sweet spot has been 5 s; this test catches accidental zero or huge
     values introduced during refactors."""
     assert 1.0 <= app_module.TOPOLOGY_CACHE_TTL <= 60.0
+
+
+def test_network_mode_uses_band_layout():
+    """v1.8.4 — user report: VMs piled up unreadably around the network
+    hub. cose is out for the network mode; a deterministic per-network
+    band layout (switch left, members in a grid) replaces it."""
+    js = (Path(__file__).resolve().parent.parent.parent
+          / "web" / "static" / "js" / "topology.js").read_text()
+    assert "function applyNetworkLayout" in js
+    assert "if (currentMode === 'network') applyNetworkLayout(cy);" in js
+    # the network branch of layoutFor must be preset (manual), not cose
+    net_branch = js.split("if (mode === 'network')", 1)[1].split("return", 1)[1]
+    assert "name: 'preset'" in net_branch.split("\n", 1)[0]
