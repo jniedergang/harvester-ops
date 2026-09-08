@@ -7,7 +7,7 @@ Self-contained, airgap-friendly, single-tarball delivery.
 Livraison autonome en un tarball unique, compatible airgap.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-295_passing-green.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-335_passing-green.svg)](tests/)
 
 > Independent project. Not affiliated with, endorsed by, or supported by SUSE.
 
@@ -56,7 +56,7 @@ logs and a retained history.
 | Area | What it does | CLI | Web console |
 |---|---|:---:|:---:|
 | **Power sequencing** | Graceful shutdown (8 steps) / startup (5 steps), etcd snapshot, Longhorn maintenance, ordered VM stop/restart groups | ✓ | ✓ |
-| **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, serial console, inline edit + cloud-init | ✓ (`-N`) | ✓ |
+| **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, in-browser VNC console (full boot visible), inline edit + cloud-init | ✓ (`-N`) | ✓ |
 | **Cluster observability** | Live topology (nodes / network / storage), Longhorn rebuild status, node table, Prometheus `/metrics`, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
 | **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON | — | ✓ |
@@ -114,7 +114,7 @@ ses logs live et un historique conservé.
 | Domaine | Rôle | CLI | Console web |
 |---|---|:---:|:---:|
 | **Séquençage électrique** | Shutdown gracieux (8 étapes) / startup (5 étapes), snapshot etcd, maintenance Longhorn, groupes d'arrêt/redémarrage VM ordonnés | ✓ | ✓ |
-| **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console série, édition inline + cloud-init | ✓ (`-N`) | ✓ |
+| **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console VNC intégrée (boot visible en entier), édition inline + cloud-init | ✓ (`-N`) | ✓ |
 | **Observabilité cluster** | Topologie live (nodes / réseau / stockage), état rebuild Longhorn, table des nodes, `/metrics` Prometheus, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
 | **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON | — | ✓ |

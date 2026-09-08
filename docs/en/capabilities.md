@@ -46,7 +46,14 @@ Manage KubeVirt virtual machines without leaving the console.
   restore from a snapshot.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
-- **Serial console** — in-browser access to a VM.
+- **VNC console** — full graphical console in the browser (noVNC over a
+  WebSocket relay to the KubeVirt `vnc` subresource). Shows the whole
+  boot — firmware, GRUB, kernel — thanks to an auto-retry loop that
+  attaches as soon as qemu exposes the display; keyboard/mouse,
+  Ctrl-Alt-Del and fit-to-window/1:1 scaling included. Access is
+  gated by short-lived single-use tickets issued by an authenticated
+  endpoint; the kubeconfig needs `get virtualmachineinstances/vnc`
+  (checked by the permissions matrix).
 - **Inline edit** — change CPU / memory / disks / networks and the
   cloud-init payload, then apply.
 

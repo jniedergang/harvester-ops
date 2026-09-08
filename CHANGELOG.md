@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.7.0] — 2026-09-08 — In-browser VNC console
+
+The "VM console — coming soon" placeholder kept its promise: the console
+button now opens a real graphical console in the browser.
+
+### Added
+- **In-browser VNC console** — noVNC 1.7.0 vendored under
+  `web/static/vendor/novnc/` (MPL-2.0, license shipped; ~300 KB loaded
+  lazily on first open). The Flask side relays RFC 6143 bytes between the
+  browser and the KubeVirt `vnc` subresource over WebSockets using
+  `flask-sock` + `simple-websocket`, both already shipped — zero new
+  dependency, airgap posture intact. Upstream auth comes from the cluster
+  kubeconfig (client cert or bearer token); cert material is staged 0600
+  under the tmpfs and deleted before any network I/O.
+- **Full-boot capture** — the console auto-retries (2 s, up to ~90 s) and
+  attaches as soon as qemu exposes the display: open the console on a
+  stopped VM, start it, and the firmware/GRUB/kernel output appears.
+- **Ticket-gated access** — a WebSocket handshake cannot carry
+  credentials (and flask-sock sends the 101 before any decorator runs),
+  so an authenticated, rate-limited endpoint issues single-use 30 s
+  tickets bound to one VM, and doubles as the pre-flight that returns
+  readable errors (VM stopped, unknown cluster, session cap).
+- Toolbar: connection status, Ctrl-Alt-Del, fit-to-window / 1:1 scaling.
+- `harvester_ops_vnc_sessions` gauge; a global session cap (8) keeps
+  console relays from exhausting the request-thread pool;
+  `get virtualmachineinstances/vnc` joined the permissions matrix.
+
+### Fixed
+- Restored console panels lost their saved geometry: the panel opener
+  never returned the panel api to the layout-restore machinery. It does.
+
+### Tests
+- `tests/api/test_vm_console.py` (20 tests) — vendored tree + license,
+  lazy-import and teardown wiring, kubeconfig parsing (token auth,
+  https-only, no temp-file leak), ticket single-use/expiry/VM binding,
+  pre-flight HTTP semantics (404/409/429/400), plus a `--live` test that
+  dials the real cluster and reads the RFB banner. Suite: 335 passing.
+
 ## [1.6.8] — 2026-07-02 — Packaging works from any host Python
 
 ### Fixed

@@ -268,7 +268,7 @@ const App = (() => {
                   data-vm-migrate data-ns="${vm.namespace}" data-name="${vm.name}">🔄</button>
           <button class="btn-icon-action edit"    title="Edit VM settings (CPU, memory, disks, network, cloud-init)"
                   data-vm-edit data-ns="${vm.namespace}" data-name="${vm.name}">⚙</button>
-          <button class="btn-icon-action console" title="Open VM console (VNC / serial)"
+          <button class="btn-icon-action console tip" data-tip="${i18n.t('vm.tooltip.console')}"
                   data-vm-console data-ns="${vm.namespace}" data-name="${vm.name}">🖥</button>
           <button class="btn-icon-action notes"   title="Open collaborative notes for this VM (real-time multi-user)"
                   data-vm-notes data-ns="${vm.namespace}" data-name="${vm.name}">📝</button>

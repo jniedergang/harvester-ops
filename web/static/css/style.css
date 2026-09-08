@@ -1858,17 +1858,39 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   margin-left: auto;
 }
 
-.vm-console-placeholder {
-  padding: 22px;
+/* Console VNC (v1.7.0) — le framebuffer n'est pas thémable : fond noir fixe. */
+.vm-console-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
 }
-.vm-console-placeholder pre {
-  background: var(--tooltip-bg);
-  color: var(--accent);
-  padding: 12px;
-  border-radius: 4px;
-  font-family: var(--font-mono);
+.vm-console-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elev);
   font-size: 12px;
-  overflow-x: auto;
+  flex: 0 0 auto;
+}
+.vm-console-spacer { flex: 1; }
+.vm-console-status { color: var(--text-dim); }
+.vm-console-dot {
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  background: var(--warn);
+  flex: 0 0 auto;
+}
+.vm-console-dot[data-state="connected"] { background: var(--done); }
+.vm-console-dot[data-state="failed"]    { background: var(--error); }
+.vm-console-screen {
+  flex: 1;
+  min-height: 0;
+  background: #000;
+  position: relative;
+  overflow: hidden;
+  outline: none;
 }
 
 /* Collaborative notes panel (Tiptap + Yjs) */

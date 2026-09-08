@@ -177,6 +177,10 @@ if _PROMETHEUS_AVAILABLE:
         "Total kubectl invocations, by exit status (ok|fail).",
         labelnames=("status",),
     )
+    metric_vnc_sessions = Gauge(
+        "harvester_ops_vnc_sessions",
+        "In-browser VNC console sessions currently relayed.",
+    )
 else:
     class _NoopMetric:
         def labels(self, **kw): return self
@@ -188,6 +192,7 @@ else:
     metric_action_duration = _NoopMetric()
     metric_actions_in_flight = _NoopMetric()
     metric_kubectl_calls = _NoopMetric()
+    metric_vnc_sessions = _NoopMetric()
 
 
 @app.route("/metrics")
@@ -2436,6 +2441,8 @@ def api_connection_test(cluster):
         ("patch vm.kubevirt.io", "stop_start_vms",      ["patch", "vm.kubevirt.io"]),
         ("update vm.kubevirt.io","annotate_vms",        ["update", "vm.kubevirt.io"]),
         ("get vmi.kubevirt.io",  "read_vmi",            ["get", "vmi.kubevirt.io", "--all-namespaces"]),
+        ("get virtualmachineinstances/vnc",
+                                 "vnc_console",         ["get", "virtualmachineinstances/vnc"]),
         ("create virtualmachinebackups.harvesterhci.io",
                                  "snapshot_vms",        ["create", "virtualmachinebackups.harvesterhci.io"]),
         ("get volumes.longhorn.io",
@@ -5941,6 +5948,245 @@ def ws_notes(ws, doc_id):
             except ValueError: pass
             n_peers = len(entry["subs"])
         log_notes.info("%s conn=%s detached (%d left)", doc_id, conn_id, n_peers)
+
+
+# =============================================================================
+# VNC console relay (v1.7.0)
+# =============================================================================
+# Browser (noVNC) <-ws-> Flask <-wss-> KubeVirt /vnc subresource. Auth model:
+# flask-sock sends the 101 BEFORE the view runs, so @requires_auth is
+# structurally useless on @sock.route — and a browser cannot attach an
+# Authorization header to a WebSocket handshake anyway. So a short-lived
+# single-use ticket is issued by an authenticated HTTP endpoint (which also
+# acts as the pre-flight: it is the place that can return a READABLE error —
+# a rejected WS handshake surfaces as an opaque "connection failed").
+import secrets as _secrets
+import ssl as _ssl
+from simple_websocket import Client as _WsClient
+
+log_vnc = logging.getLogger("harvester-ops.vnc")
+
+_VNC_TICKET_TTL = 30          # seconds; consumed once
+_VNC_MAX_SESSIONS = 8         # each relay pins 3-4 werkzeug/reader threads
+_VNC_SUBPROTOCOLS = ["plain.kubevirt.io", "binary"]
+_vnc_tickets = {}             # token -> (cluster, namespace, name, expires_at)
+_vnc_lock = threading.Lock()
+_vnc_sessions = 0
+
+
+def _kubeconfig_wss(kc_path):
+    """Parse a kubeconfig into (server_url, SSLContext, bearer_token).
+
+    Client cert/key and CA are materialised for load_cert_chain() in a
+    0700 tmpdir under tempfile.gettempdir() (the container runs --read-only
+    with --tmpfs /tmp) and deleted BEFORE any network I/O happens — the
+    SSLContext keeps the parsed material in memory.
+    """
+    cfg = yaml.safe_load(Path(kc_path).read_text())
+    ctx_name = cfg.get("current-context") or ""
+    ctx = next((c.get("context", {}) for c in cfg.get("contexts", [])
+                if c.get("name") == ctx_name),
+               (cfg.get("contexts") or [{}])[0].get("context", {}))
+    cluster = next((c.get("cluster", {}) for c in cfg.get("clusters", [])
+                    if c.get("name") == ctx.get("cluster")),
+                   (cfg.get("clusters") or [{}])[0].get("cluster", {}))
+    user = next((u.get("user", {}) for u in cfg.get("users", [])
+                 if u.get("name") == ctx.get("user")),
+                (cfg.get("users") or [{}])[0].get("user", {}))
+
+    server = (cluster.get("server") or "").rstrip("/")
+    if not server.startswith("https://"):
+        raise ValueError("kubeconfig server must be https://")
+
+    sslctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+    sslctx.check_hostname = True
+    sslctx.verify_mode = _ssl.CERT_REQUIRED
+    tmpd = Path(tempfile.mkdtemp(prefix="vnc-kc-"))
+    try:
+        os.chmod(tmpd, 0o700)
+        if cluster.get("certificate-authority-data"):
+            ca = tmpd / "ca.crt"
+            ca.write_bytes(base64.b64decode(cluster["certificate-authority-data"]))
+            os.chmod(ca, 0o600)
+            sslctx.load_verify_locations(str(ca))
+        elif cluster.get("certificate-authority"):
+            sslctx.load_verify_locations(cluster["certificate-authority"])
+        elif cluster.get("insecure-skip-tls-verify"):
+            sslctx.check_hostname = False
+            sslctx.verify_mode = _ssl.CERT_NONE
+        else:
+            sslctx.load_default_certs()
+
+        if user.get("client-certificate-data") and user.get("client-key-data"):
+            crt, key = tmpd / "client.crt", tmpd / "client.key"
+            crt.write_bytes(base64.b64decode(user["client-certificate-data"]))
+            key.write_bytes(base64.b64decode(user["client-key-data"]))
+            os.chmod(crt, 0o600); os.chmod(key, 0o600)
+            sslctx.load_cert_chain(str(crt), str(key))
+        elif user.get("client-certificate") and user.get("client-key"):
+            sslctx.load_cert_chain(user["client-certificate"], user["client-key"])
+    finally:
+        shutil.rmtree(tmpd, ignore_errors=True)
+
+    return server, sslctx, user.get("token")
+
+
+def _vnc_subresource_url(server, namespace, name):
+    return (server.replace("https://", "wss://", 1)
+            + "/apis/subresources.kubevirt.io/v1/namespaces/"
+            + namespace + "/virtualmachineinstances/" + name + "/vnc")
+
+
+def _vnc_issue_ticket(cluster, namespace, name):
+    token = _secrets.token_urlsafe(24)
+    now = time.time()
+    with _vnc_lock:
+        # opportunistic purge of expired tickets
+        for t in [t for t, v in _vnc_tickets.items() if v[3] < now]:
+            _vnc_tickets.pop(t, None)
+        _vnc_tickets[token] = (cluster, namespace, name, now + _VNC_TICKET_TTL)
+    return token
+
+
+def _vnc_consume_ticket(token, cluster, namespace, name):
+    """Single-use pop; the ticket must match the exact VM it was issued for."""
+    with _vnc_lock:
+        entry = _vnc_tickets.pop(token or "", None)
+    if not entry:
+        return False
+    t_cluster, t_ns, t_name, expires = entry
+    return (expires >= time.time()
+            and (t_cluster, t_ns, t_name) == (cluster, namespace, name))
+
+
+@app.route("/api/vm/<cluster>/<namespace>/<name>/console-ticket", methods=["POST"])
+@_rate_limit("30/minute")
+@requires_auth
+def api_vm_console_ticket(cluster, namespace, name):
+    """Pre-flight + ticket for the VNC websocket (see relay comment above)."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    with _vnc_lock:
+        active = _vnc_sessions
+    if active >= _VNC_MAX_SESSIONS:
+        return jsonify({"error": f"too many console sessions open ({active})",
+                        "hint": "close an existing console first"}), 429
+    r = subprocess.run(
+        ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
+         "-o", "jsonpath={.status.phase}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    phase = (r.stdout or "").strip()
+    if r.returncode != 0 or not phase:
+        stderr_lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
+        detail = stderr_lines[-1] if stderr_lines else "VMI not found"
+        return jsonify({"error": f"VM has no live instance: {detail}",
+                        "hint": "start the VM first"}), 409
+    if phase not in ("Running", "Scheduled"):
+        return jsonify({"error": f"VMI phase is {phase}, not Running"}), 409
+    token = _vnc_issue_ticket(cluster, namespace, name)
+    return jsonify({
+        "ticket": token,
+        "ws_path": f"/ws/vnc/{cluster}/{namespace}/{name}",
+        "expires_in": _VNC_TICKET_TTL,
+    })
+
+
+@sock.route("/ws/vnc/<cluster>/<namespace>/<name>")
+def ws_vnc(ws, cluster, namespace, name):
+    """Relay RFC 6143 bytes between the browser and the KubeVirt subresource.
+
+    Threading (see the notes-WS lesson at ws_notes): ws.send() is not
+    thread-safe, so each socket has exactly ONE writer — this handler
+    thread writes browser->k8s, a dedicated thread writes k8s->browser.
+    """
+    global _vnc_sessions
+    # namespace/name are RFC1123-validated by before_request; cluster is not.
+    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$", cluster):
+        ws.close(message="invalid cluster"); return
+    if not _vnc_consume_ticket(request.args.get("ticket"), cluster, namespace, name):
+        log_vnc.warning("rejected /ws/vnc for %s/%s: bad or expired ticket",
+                        namespace, name)
+        ws.close(message="invalid or expired ticket"); return
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        ws.close(message="unknown cluster"); return
+
+    try:
+        server, sslctx, bearer = _kubeconfig_wss(kc)
+    except Exception as e:
+        log_vnc.error("kubeconfig parse failed for %s: %s", cluster, e)
+        ws.close(message="kubeconfig error"); return
+
+    headers = {"Authorization": f"Bearer {bearer}"} if bearer else None
+    dial = {}
+
+    def _dial():
+        try:
+            dial["c"] = _WsClient.connect(
+                _vnc_subresource_url(server, namespace, name),
+                ssl_context=sslctx, headers=headers,
+                subprotocols=_VNC_SUBPROTOCOLS, ping_interval=20,
+            )
+        except Exception as e:          # noqa: BLE001 — reported below
+            dial["e"] = e
+
+    t = threading.Thread(target=_dial, daemon=True, name=f"vnc-dial-{name}")
+    t.start(); t.join(timeout=12)
+    upstream = dial.get("c")
+    if upstream is None:
+        log_vnc.error("upstream VNC connect failed for %s/%s: %s",
+                      namespace, name, dial.get("e", "timeout"))
+        ws.close(message="cluster VNC endpoint unreachable"); return
+
+    with _vnc_lock:
+        _vnc_sessions += 1
+        metric_vnc_sessions.set(_vnc_sessions)
+    log_vnc.info("console attached: %s/%s (%d active)", namespace, name, _vnc_sessions)
+
+    def _pump_down(k8s_ws, browser_ws):
+        """k8s -> browser. Sole writer of browser_ws."""
+        try:
+            while True:
+                data = k8s_ws.receive(timeout=30)
+                if data is None:
+                    if not k8s_ws.connected:
+                        break
+                    continue        # idle timeout, still connected
+                if isinstance(data, str):
+                    data = data.encode()
+                browser_ws.send(data)
+        except Exception:
+            pass
+        finally:
+            try: browser_ws.close()
+            except Exception: pass
+
+    down = threading.Thread(target=_pump_down, args=(upstream, ws),
+                            daemon=True, name=f"vnc-down-{name}")
+    down.start()
+    try:
+        # browser -> k8s. Sole writer of upstream.
+        while True:
+            data = ws.receive(timeout=30)
+            if data is None:
+                if not ws.connected:
+                    break
+                continue
+            if isinstance(data, str):
+                data = data.encode()
+            upstream.send(data)
+    except Exception:
+        pass
+    finally:
+        try: upstream.close()
+        except Exception: pass
+        down.join(timeout=5)
+        with _vnc_lock:
+            _vnc_sessions -= 1
+            metric_vnc_sessions.set(_vnc_sessions)
+        log_vnc.info("console detached: %s/%s (%d active)", namespace, name, _vnc_sessions)
 
 
 # =============================================================================

@@ -133,7 +133,7 @@ def test_i18n_dict_parity_across_languages():
         # while still catching "I added an EN key and forgot all 4 others".
         # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
         # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 646   # v1.6.6: +dock.details/hideDetails/showDetails, activity.errorLabel (EN+FR done; IT/ES/DE fall back to EN)
+        BASELINE = 676   # v1.7.0: +console.* VNC keys (EN+FR done; IT/ES/DE fall back to EN)
         total = sum(len(v) for v in holes.values())
         if total > BASELINE:
             lines = []
