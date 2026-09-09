@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.10.0] — 2026-09-09 — Full localisation: German, Spanish, Italian
+
+### Added
+- **The console is now fully localised in five languages**: German,
+  Spanish and Italian join English and French with complete coverage
+  (374 strings each — every tab, tooltip, confirm, editor and hint;
+  they previously fell back to English on all but ~150 basics). Seven
+  missing French bare-metal strings were filled too, and two ghost
+  keys from a pre-1.5 UI were purged from the partial dictionaries.
+
+### Tests
+- The translation-parity baseline drops from 1129 accepted holes to
+  **zero**: any new string must now ship in all five languages or the
+  suite fails.
+
 ## [1.9.1] — 2026-09-09 — README refresh
 
 ### Changed

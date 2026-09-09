@@ -188,7 +188,8 @@ sauvegardées.
   officielle SUSE, vendorée dans le tarball (airgap, licence OFL).
 - **Accessibilité** — focus clavier visible, focus trap de dialogue,
   tooltips sur chaque contrôle (désactivables globalement), entièrement
-  localisés EN/FR sur toutes les surfaces, onglets avancés compris.
+  localisés en **cinq langues** (EN, FR, DE, ES, IT) sur toutes les
+  surfaces, onglets avancés compris.
 
 ---
 

@@ -63,7 +63,7 @@ logs and a retained history.
 | **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
 | **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON | — | ✓ |
 | **Bare-metal** | BMC / Redfish discovery + power actions, PXE / DHCP / HTTP provisioning groundwork | — | ✓ |
-| **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised EN/FR with tooltips on every control | partial | ✓ |
+| **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised in 5 languages (EN/FR/DE/ES/IT) with tooltips on every control | partial | ✓ |
 
 The power-sequencing core is the only part needed for a pure
 shutdown/startup deployment; everything else is opt-in and layered on the
@@ -121,7 +121,7 @@ ses logs live et un historique conservé.
 | **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
 | **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON | — | ✓ |
 | **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, socle provisionnement PXE / DHCP / HTTP | — | ✓ |
-| **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation EN/FR complète avec tooltips sur chaque contrôle | partiel | ✓ |
+| **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation complète en 5 langues (EN/FR/DE/ES/IT) avec tooltips sur chaque contrôle | partiel | ✓ |
 
 Le cœur de séquençage est la seule partie nécessaire à un déploiement
 shutdown/startup pur ; tout le reste est optionnel et s'empile sur le
