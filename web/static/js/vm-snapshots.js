@@ -12,24 +12,22 @@ const VMSnapshots = (() => {
       <div class="snapshots-panel">
         <div class="apply-bar" style="margin: 0 0 14px; padding: 0; border: 0;">
           <button class="btn btn-primary btn-sm tip" id="snap-create" data-tip="${i18n.t('snap.createTip')}">
-            ➕ <span>Create snapshot now</span>
+            ➕ <span>${i18n.t('snap.create')}</span>
           </button>
           <button class="btn btn-secondary btn-sm tip" id="snap-refresh" data-tip="${i18n.t('snap.refreshTip')}">${i18n.t('snap.refresh')}</button>
           <span class="apply-result" id="snap-feedback"></span>
         </div>
         <p class="form-hint">
-          Snapshots use Longhorn under the hood (VirtualMachineBackup with type=snapshot).
-          They are in-cluster and instant. Use Restore to bring back the disk state.
+          ${i18n.t('snap.hint')}
         </p>
         <table class="data-table" id="snap-table">
           <thead><tr>
             <th>Name</th>
             <th>Created</th>
             <th>Ready</th>
-            <th>Progress</th>
             <th>Actions</th>
           </tr></thead>
-          <tbody><tr><td colspan="5" class="empty-state">Loading…</td></tr></tbody>
+          <tbody><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody>
         </table>
       </div>`;
 
@@ -47,7 +45,7 @@ const VMSnapshots = (() => {
 
     let pollTimer = null;
     async function refresh(silent = false) {
-      if (!silent) tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Loading…</td></tr>';
+      if (!silent) tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Loading…</td></tr>';
       try {
         const d = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/snapshots`).then(r => r.json());
         const snaps = d.snapshots || [];
@@ -57,7 +55,7 @@ const VMSnapshots = (() => {
           pollTimer = setTimeout(() => refresh(true), 3000);
         }
         if (snaps.length === 0) {
-          tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No snapshot yet.</td></tr>';
+          tbody.innerHTML = '<tr><td colspan="4" class="empty-state">No snapshot yet.</td></tr>';
           return;
         }
         tbody.innerHTML = '';
@@ -69,7 +67,6 @@ const VMSnapshots = (() => {
             <td>${s.ready
               ? '<span class="badge ok">✓ Ready</span>'
               : '<span class="badge warn">in-progress</span>'}</td>
-            <td>${s.progress || 0}%</td>
             <td>
               <button class="btn-icon-action tip" data-tip="${i18n.t('snap.restoreTip')}" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>↩</button>
               <button class="btn-icon-action tip" data-tip="${i18n.t('snap.deleteTip')}" data-delete="${s.name}">🗑</button>
@@ -82,17 +79,17 @@ const VMSnapshots = (() => {
         tbody.querySelectorAll('[data-delete]').forEach(b =>
           b.addEventListener('click', () => doDelete(b.dataset.delete)));
       } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="5" class="empty-state" style="color:var(--danger)">${e.message}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="4" class="empty-state" style="color:var(--danger)">${e.message}</td></tr>`;
       }
     }
 
     async function doCreate() {
-      fb.textContent = 'creating…';
+      fb.textContent = i18n.t('snap.creating');
       try {
         const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/snapshots`, { method: 'POST' });
         const d = await r.json();
         if (r.ok) {
-          fb.innerHTML = `<span style="color:var(--accent)">✓ created ${d.name}</span>`;
+          fb.innerHTML = `<span style="color:var(--accent)">✓ ${i18n.t('snap.created')} ${d.name}</span>`;
           refresh();
         } else {
           fb.innerHTML = `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`;
@@ -103,8 +100,8 @@ const VMSnapshots = (() => {
     }
 
     async function doDelete(snap) {
-      if (!confirm(`Delete snapshot "${snap}"? This cannot be undone.`)) return;
-      fb.textContent = 'deleting…';
+      if (!confirm(i18n.t('snap.confirmDelete', {snap}))) return;
+      fb.textContent = i18n.t('snap.deleting');
       const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(snap)}`, { method: 'DELETE' });
       const d = await r.json();
       fb.innerHTML = r.ok
@@ -114,17 +111,21 @@ const VMSnapshots = (() => {
     }
 
     async function doRestore(snap) {
-      if (!confirm(`Restore VM "${name}" from snapshot "${snap}"?\n\nThe VM must be stopped before restore. Current disk state will be replaced.`)) return;
-      fb.textContent = 'restoring…';
+      if (!confirm(i18n.t('snap.confirmRestore', {name, snap}))) return;
+      fb.textContent = i18n.t('snap.restoring');
       const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ snapshot: snap, new_vm: false }),
       });
       const d = await r.json();
+      // v1.10.1 : restore in-place refusé tant que la VM tourne — message
+      // actionnable plutôt que l'erreur brute du webhook.
       fb.innerHTML = r.ok
         ? `<span style="color:var(--accent)">✓ restore "${d.restore}" started</span>`
-        : `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`;
+        : (r.status === 409 && d.error === 'vm-running'
+          ? `<span style="color:var(--warn)">⏻ ${i18n.t('snap.needsStopped')}</span>`
+          : `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`);
     }
 
     panel.el.querySelector('#snap-create').addEventListener('click', doCreate);

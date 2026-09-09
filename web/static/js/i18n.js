@@ -17,6 +17,15 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    'snap.create':                     'Create snapshot now',
+    'snap.hint':                       'Snapshots use Longhorn under the hood (VirtualMachineBackup with type=snapshot). They are in-cluster and instant. Use Restore to bring back the disk state.',
+    'snap.creating':                   'creating…',
+    'snap.created':                    'created',
+    'snap.deleting':                   'deleting…',
+    'snap.restoring':                  'restoring…',
+    'snap.confirmDelete':              'Delete snapshot "{snap}"? This cannot be undone.',
+    'snap.confirmRestore':             'Restore VM "{name}" from snapshot "{snap}"?\n\nThe VM must be stopped before restore. Current disk state will be replaced.',
+    'snap.needsStopped':               'Stop the VM first — Harvester only restores a snapshot onto a stopped VM.',
     'header.title':                    'harvester-ops',
     'header.settings':                 'Settings',
     'header.docs':                     'Documentation',
@@ -550,6 +559,15 @@ const translations = {
   },
 
   fr: {
+    'snap.create':                     'Créer un snapshot',
+    'snap.hint':                       'Les snapshots reposent sur Longhorn (VirtualMachineBackup de type snapshot). Ils sont in-cluster et instantanés. Utilisez Restaurer pour retrouver l’état du disque.',
+    'snap.creating':                   'création…',
+    'snap.created':                    'créé',
+    'snap.deleting':                   'suppression…',
+    'snap.restoring':                  'restauration…',
+    'snap.confirmDelete':              'Supprimer le snapshot "{snap}" ? Irréversible.',
+    'snap.confirmRestore':             'Restaurer la VM "{name}" depuis le snapshot "{snap}" ?\n\nLa VM doit être arrêtée avant la restauration. L’état actuel du disque sera remplacé.',
+    'snap.needsStopped':               'Arrêtez d’abord la VM — Harvester ne restaure un snapshot que sur une VM arrêtée.',
     // v1.10.0 — clés bare-metal manquantes
     'automation.pxe.desc': 'Serveur HTTP/DHCP/PXE embarqué pour déployer de nouveaux nodes Harvester entièrement airgap.',
     'automation.pxe.feat1': 'Boot DHCP + TFTP + HTTP embarqué (basé sur dnsmasq)',
@@ -1084,6 +1102,15 @@ const translations = {
   },
 
   it: {
+    'snap.create':                     'Crea snapshot ora',
+    'snap.hint':                       'Gli snapshot usano Longhorn sotto il cofano (VirtualMachineBackup di tipo snapshot). Sono interni al cluster e istantanei. Usare Ripristina per recuperare lo stato del disco.',
+    'snap.creating':                   'creazione…',
+    'snap.created':                    'creato',
+    'snap.deleting':                   'eliminazione…',
+    'snap.restoring':                  'ripristino…',
+    'snap.confirmDelete':              'Eliminare lo snapshot "{snap}"? Non è annullabile.',
+    'snap.confirmRestore':             'Ripristinare la VM "{name}" dallo snapshot "{snap}"?\n\nLa VM deve essere ferma prima del ripristino. Lo stato attuale del disco verrà sostituito.',
+    'snap.needsStopped':               'Fermare prima la VM — Harvester ripristina uno snapshot solo su una VM ferma.',
     // v1.10.0 — traduzione italiana completa
     'action.cancelConfirm': 'Annullare questa azione?',
     'action.cancelFailed': 'Annullamento non riuscito',
@@ -1617,6 +1644,15 @@ const translations = {
   },
 
   es: {
+    'snap.create':                     'Crear snapshot ahora',
+    'snap.hint':                       'Los snapshots usan Longhorn por debajo (VirtualMachineBackup de tipo snapshot). Son internos al clúster e instantáneos. Use Restaurar para recuperar el estado del disco.',
+    'snap.creating':                   'creando…',
+    'snap.created':                    'creado',
+    'snap.deleting':                   'eliminando…',
+    'snap.restoring':                  'restaurando…',
+    'snap.confirmDelete':              '¿Eliminar el snapshot "{snap}"? No puede deshacerse.',
+    'snap.confirmRestore':             '¿Restaurar la VM "{name}" desde el snapshot "{snap}"?\n\nLa VM debe estar detenida antes de restaurar. El estado actual del disco será reemplazado.',
+    'snap.needsStopped':               'Detenga primero la VM — Harvester solo restaura un snapshot sobre una VM detenida.',
     // v1.10.0 — traducción española completa
     'action.cancelConfirm': '¿Cancelar esta acción?',
     'action.cancelFailed': 'Fallo al cancelar',
@@ -2150,6 +2186,15 @@ const translations = {
   },
 
   de: {
+    'snap.create':                     'Snapshot jetzt erstellen',
+    'snap.hint':                       'Snapshots basieren auf Longhorn (VirtualMachineBackup vom Typ snapshot). Sie sind clusterintern und sofort verfügbar. Mit Wiederherstellen holen Sie den Diskzustand zurück.',
+    'snap.creating':                   'wird erstellt…',
+    'snap.created':                    'erstellt',
+    'snap.deleting':                   'wird gelöscht…',
+    'snap.restoring':                  'wird wiederhergestellt…',
+    'snap.confirmDelete':              'Snapshot "{snap}" löschen? Das kann nicht rückgängig gemacht werden.',
+    'snap.confirmRestore':             'VM "{name}" aus Snapshot "{snap}" wiederherstellen?\n\nDie VM muss vor der Wiederherstellung gestoppt sein. Der aktuelle Diskzustand wird ersetzt.',
+    'snap.needsStopped':               'Stoppen Sie zuerst die VM — Harvester stellt einen Snapshot nur auf einer gestoppten VM wieder her.',
     // v1.10.0 — vollständige deutsche Übersetzung
     'action.cancelConfirm': 'Diese Aktion abbrechen?',
     'action.cancelFailed': 'Abbruch fehlgeschlagen',

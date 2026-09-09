@@ -5691,6 +5691,27 @@ def api_vm_snapshot_restore(cluster, namespace, name):
     new_vm = data.get("new_vm", False)
     if not snap:
         return jsonify({"error": "snapshot name required"}), 400
+    # v1.10.1 : le webhook Harvester refuse un restore in-place sur une VM
+    # qui tourne ("Please stop the VM ... before doing a restore"). On le
+    # détecte AVANT de lancer l'action, avec un message actionnable, au
+    # lieu de laisser kubectl échouer en brut. On ne bloque que si on
+    # VOIT un VMI ; en cas de doute (cluster injoignable), on laisse le
+    # webhook trancher.
+    if not new_vm:
+        try:
+            probe = subprocess.run(
+                ["kubectl", "--kubeconfig", kc, "-n", namespace,
+                 "get", "vmi", name, "--no-headers"],
+                capture_output=True, text=True, timeout=10)
+            if probe.returncode == 0 and probe.stdout.strip():
+                return jsonify({
+                    "error": "vm-running",
+                    "detail": "The VM must be stopped before an in-place "
+                              "restore (Harvester webhook requirement). "
+                              "Stop it, then retry.",
+                }), 409
+        except Exception:
+            pass
     restore_name = f"{name}-restore-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
     manifest = {
         "apiVersion": "harvesterhci.io/v1beta1",

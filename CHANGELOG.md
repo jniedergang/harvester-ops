@@ -4,6 +4,22 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.10.1] — 2026-09-09 — Snapshot panel: honest columns, actionable restore error
+
+### Fixed
+- The snapshot panel showed a permanent "0%" Progress column: a
+  VirtualMachineBackup of type snapshot never carries status.progress
+  (verified live, including during creation — the field belongs to
+  export backups). The dead column is gone.
+- Restoring a snapshot while the VM runs surfaced the raw webhook
+  error ("The request is invalid: ... Please stop the VM"). The
+  endpoint now pre-checks the VMI and answers with an actionable
+  message before spawning anything: stop the VM first — Harvester only
+  restores onto a stopped VM (localised in all five languages).
+- The remaining hardcoded English strings of the panel (create button,
+  hint, confirm dialogs, progress verbs) joined the i18n dictionaries
+  in all five languages.
+
 ## [1.10.0] — 2026-09-09 — Full localisation: German, Spanish, Italian
 
 ### Added

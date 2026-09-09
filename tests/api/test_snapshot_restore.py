@@ -47,6 +47,8 @@ def test_restore_manifest_has_retain_policy(client, monkeypatch):
     captured = {}
 
     def fake_run(cmd, **kw):
+        if "vmi" in cmd:
+            return _FakeRun(1, stderr=b"NotFound")   # VM arrêtée: pas de VMI
         if "apply" in cmd:
             captured["manifest"] = json.loads(kw["input"].decode())
             return _FakeRun(1, stderr=b"boom\n")   # stop the runner right away
@@ -69,6 +71,8 @@ def test_restore_failure_carries_error_summary(client, monkeypatch):
                    b'doing a restore\n')
 
     def fake_run(cmd, **kw):
+        if "vmi" in cmd:
+            return _FakeRun(1, stderr=b"NotFound")   # VM arrêtée: pas de VMI
         if "apply" in cmd:
             return _FakeRun(1, stderr=webhook_err)
         return _FakeRun(0, stdout=b"{}")
@@ -81,3 +85,37 @@ def test_restore_failure_carries_error_summary(client, monkeypatch):
     assert run.error_summary and "stop the VM" in run.error_summary
     with wapp.ACTIONS_LOCK:
         wapp.ACTIONS.pop(run.id, None)
+
+
+def test_restore_refused_with_clear_message_while_vm_runs(client, monkeypatch):
+    """v1.10.1 — user report: restoring while the VM runs surfaced the raw
+    webhook error ("The request is invalid: ... Please stop the VM").
+    The endpoint now pre-checks the VMI and returns an actionable 409
+    BEFORE spawning any action."""
+    import app as wapp
+
+    class FakeProbe:
+        returncode = 0
+        stdout = "rhel9-test   10m   Running   10.52.0.9   harv1\n"
+        stderr = ""
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/dev/null")
+    monkeypatch.setattr(wapp.subprocess, "run", lambda *a, **k: FakeProbe())
+    r = client.post("/api/vm/harv1/default/rhel9-test/restore",
+                 json={"snapshot": "s1", "new_vm": False})
+    assert r.status_code == 409
+    body = r.get_json()
+    assert body["error"] == "vm-running"
+    assert "stopped" in body["detail"]
+
+
+def test_snapshot_panel_has_no_dead_progress_column():
+    """VirtualMachineBackup type=snapshot never carries status.progress
+    (verified live, including during creation) — the panel used to show
+    a misleading permanent 0%."""
+    js = (ROOT / "web" / "static" / "js" / "vm-snapshots.js").read_text()
+    assert "s.progress" not in js
+    assert "<th>Progress</th>" not in js
+    assert 'colspan="5"' not in js
+    # the friendly stopped-VM message is i18n'd in all five languages
+    i18n = (ROOT / "web" / "static" / "js" / "i18n.js").read_text()
+    assert i18n.count("'snap.needsStopped'") == 5
