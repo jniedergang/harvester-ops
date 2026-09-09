@@ -678,3 +678,84 @@ def test_edit_panel_has_console_shortcut_in_its_header():
     assert "window.VmConsole" not in js
     fp = (WEB / "static" / "js" / "floating-panels.js").read_text()
     assert "headerActions" in fp and "data-header-action=" in fp
+
+
+# ---------------------------------------------------------------------------
+# v1.15.0 — devices, tolerations, passthrough, exotic NIC bindings
+# ---------------------------------------------------------------------------
+
+def test_pcidevice_reducer_exposes_the_spec_reference():
+    """A VM references a PCI device by its resourceName, not by the CR
+    name — that is what the picker must submit."""
+    out = wapp._reduce_pcidevice({
+        "metadata": {"name": "harv1-000000020"},
+        "status": {"resourceName": "intel.com/COMETLAKEU_GT2_UHD_GRAPHICS",
+                   "address": "0000:00:02.0", "nodeName": "harv1",
+                   "description": "VGA compatible controller: Intel",
+                   "kernelDriverInUse": "i915",
+                   "vendorId": "8086", "deviceId": "9b41"},
+    })
+    assert out["device_name"] == "intel.com/COMETLAKEU_GT2_UHD_GRAPHICS"
+    assert out["driver"] == "i915"
+    assert "0000:00:02.0" in out["display_name"]
+
+
+def test_autoattach_toggles_are_tri_state():
+    """KubeVirt treats a missing autoattach* as true. The patch must send
+    false only to disable, and null to go back to the default — writing
+    `true` would freeze a choice the operator never made."""
+    js = VM_EDIT_JS.read_text()
+    fw = js.split("case 'firmware': {", 1)[1].split("case 'placement'", 1)[0]
+    assert "?.checked === false ? false : null" in fw
+    for field in ("autoattachSerialConsole", "autoattachGraphicsDevice",
+                  "autoattachMemBalloon"):
+        assert field in fw
+    # watchdog and passthrough lists are nulled when empty, never left half-built
+    assert "domain.devices.watchdog = wd" in fw and ": null;" in fw
+    assert "hostDevices = host.length ? host : null" in fw
+    assert "gpus = gpus.length ? gpus : null" in fw
+
+
+def test_tolerations_round_trip_and_operator_semantics():
+    js = VM_EDIT_JS.read_text()
+    pl = js.split("case 'placement': {", 1)[1].split("case 'lifecycle'", 1)[0]
+    # value only makes sense with Equal; an Exists rule may have no key
+    assert "out.operator === 'Equal' && (t.value || '').trim()" in pl
+    assert "t.operator === 'Exists'" in pl
+    assert "tolerations: tolRows.length ? tolRows : null" in pl
+
+
+def test_exotic_nic_bindings_round_trip():
+    """macvtap / sriov are written and read back like bridge — shipped
+    but NOT verified against real hardware (no SR-IOV NIC on the test
+    cluster), which the UI states explicitly."""
+    out = _run_node("""
+const vm = {metadata: {namespace: 'ns', name: 'v'}, spec: {template: {spec: {
+  domain: {devices: {interfaces: [{name: 'n1', sriov: {}}, {name: 'n2', macvtap: {}}]}},
+  networks: [{name: 'n1', multus: {networkName: 'a/b'}},
+             {name: 'n2', multus: {networkName: 'a/c'}}],
+}}}};
+const {items, passthrough} = M.vmNetsToForm(vm);
+const out = M.formNetsToPatch(items, passthrough, vm)
+  .spec.template.spec.domain.devices.interfaces;
+console.log(JSON.stringify([items.map(i => i.type), out]));
+""")
+    types, itfs = json.loads(out)
+    assert types == ["sriov", "macvtap"]
+    assert "sriov" in itfs[0] and "macvtap" in itfs[1]
+
+
+def test_unverified_capabilities_are_flagged_in_the_ui():
+    """Project rule: a capability we could not exercise for real is
+    never shipped silently."""
+    js = VM_EDIT_JS.read_text()
+    assert "vm-edit-unverified" in js, "the passthrough notice must carry the warning style"
+    css = (ROOT / "web" / "static" / "css" / "style.css").read_text()
+    assert ".vm-edit-unverified" in css
+    i18n = (WEB / "static" / "js" / "i18n.js").read_text()
+    en = i18n.split("  en: {", 1)[1].split("  fr: {", 1)[0]
+    assert "NOT verified end-to-end" in en
+    fr = i18n.split("  fr: {", 1)[1].split("  it: {", 1)[0]
+    assert "NON vérifié de bout en bout" in fr
+    # the exotic bindings say it too
+    assert "NOT verified on this cluster" in js

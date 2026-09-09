@@ -98,10 +98,20 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   thread d'E/S dédié) et les cartes réseau un ordre de boot pour le
   **démarrage PXE** — la séquence de boot est partagée entre disques et
   NICs, et une collision est attrapée avant l'apiserver. Un onglet
-  **Placement** épingle la VM par sélecteur de node et l'éloigne (ou la
-  rapproche) des VMs portant un tag donné ; l'affinité de node que
-  Harvester gère pour le réseau est affichée en lecture seule et laissée
-  intacte. L'onglet
+  **Placement** épingle la VM par sélecteur de node, ajoute des
+  tolérances, et l'éloigne (ou la rapproche) des VMs portant un tag
+  donné ; l'affinité de node que Harvester gère pour le réseau est
+  affichée en lecture seule et laissée intacte. L'onglet Firmware porte
+  aussi les **périphériques** : console série, graphique, ballon
+  mémoire, pointeur tablette USB et watchdog — chacun écrit uniquement
+  s'il diffère du défaut KubeVirt.
+
+**Livré mais non vérifié sur le cluster de test** (signalé dans l'UI,
+en style d'avertissement) : le passthrough PCI/GPU (le sélecteur liste
+les périphériques découverts par Harvester, mais aucun n'était cessible
+sur un cluster mono-node en production) et les attachements macvtap /
+SR-IOV (matériel absent). Tout le reste de cette page a été exercé pour
+de vrai. L'onglet
   Cloud-init gagne un **assistant** (v1.8.1) qui génère du YAML
   cloud-config et network-data v1 propres dans les éditeurs — nom
   d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH

@@ -226,6 +226,70 @@ const VMEdit = (() => {
     },
   };
 
+  // v1.15.0 — passthrough PCI/GPU. ⚠️ NON VÉRIFIÉ DE BOUT EN BOUT :
+  // harv1 n'a aucun device réservable (claim = détacher le device de son
+  // pilote hôte, exclu sur un cluster mono-node en production). Le
+  // sélecteur liste les vrais devices et la spec est validée par
+  // l'apiserver, mais aucun invité n'a été démarré dessus.
+  const HOSTDEV_SCHEMA = {
+    id: 'vm-hostdevices',
+    nested: {
+      dev: {
+        min: 0, max: 8,
+        label: { en: 'Passthrough devices', fr: 'Périphériques en passthrough' },
+        itemTitle: (v) => `${v.kind === 'gpu' ? '🎮' : '🔌'} ${v.name || tr('vm.edit.newDev', 'new device')}`
+          + `${v.device_name ? ' — ' + v.device_name : ''}`,
+        newItem: (items) => ({ kind: 'host', name: nextFree('dev-', 1, items.map(i => i.name)) }),
+        args: [
+          { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
+            label: { en: 'Name', fr: 'Nom' },
+            description: { en: 'Free name used inside the VM spec',
+                           fr: 'Nom libre utilisé dans la spec de la VM' } },
+          { name: 'kind', type: 'enum', default: 'host', enum_values: ['host', 'gpu'],
+            label: { en: 'Kind', fr: 'Type' },
+            description: { en: 'gpu = declared under devices.gpus (vGPU/GPU), host = devices.hostDevices',
+                           fr: 'gpu = déclaré sous devices.gpus (vGPU/GPU), host = devices.hostDevices' } },
+          { name: 'device_name', type: 'ref', ref_endpoint: '/api/pcidevices',
+            ref_value_field: 'device_name', ref_label_field: 'display_name',
+            label: { en: 'PCI device', fr: 'Périphérique PCI' },
+            description: { en: 'The device must be claimed and unbound from its host driver in Harvester first',
+                           fr: 'Le périphérique doit d’abord être réservé et détaché de son pilote hôte dans Harvester' } },
+        ],
+      },
+    },
+  };
+
+  const TOLERATION_SCHEMA = {
+    id: 'vm-tolerations',
+    nested: {
+      tol: {
+        min: 0, max: 10,
+        label: { en: 'Tolerations', fr: 'Tolérances' },
+        itemTitle: (v) => `🛡 ${v.key || tr('vm.edit.newTol', 'new toleration')}`
+          + `${v.value ? '=' + v.value : ''}${v.effect ? ' · ' + v.effect : ''}`,
+        newItem: () => ({ operator: 'Equal', effect: 'NoSchedule' }),
+        args: [
+          { name: 'key', type: 'text',
+            suggest: ['node-role.kubernetes.io/control-plane', 'kubevirt.io/drain'],
+            label: { en: 'Taint key', fr: 'Clé du taint' },
+            description: { en: 'Empty with operator Exists = tolerate every taint',
+                           fr: 'Vide avec l’opérateur Exists = tolère tous les taints' } },
+          { name: 'operator', type: 'enum', default: 'Equal', enum_values: ['Equal', 'Exists'],
+            label: { en: 'Operator', fr: 'Opérateur' },
+            description: { en: 'Exists ignores the value', fr: 'Exists ignore la valeur' } },
+          { name: 'value', type: 'text',
+            label: { en: 'Value', fr: 'Valeur' },
+            description: { en: 'Only with the Equal operator', fr: 'Uniquement avec l’opérateur Equal' } },
+          { name: 'effect', type: 'enum', default: 'NoSchedule',
+            enum_values: ['NoSchedule', 'PreferNoSchedule', 'NoExecute'],
+            label: { en: 'Effect', fr: 'Effet' },
+            description: { en: 'Empty = tolerate every effect for that key',
+                           fr: 'Vide = tolère tous les effets pour cette clé' } },
+        ],
+      },
+    },
+  };
+
   const NET_SCHEMA = {
     id: 'vm-networks',
     nested: {
@@ -241,10 +305,11 @@ const VMEdit = (() => {
             label: { en: 'Name', fr: 'Nom' },
             description: { en: 'Joins the network and the guest interface',
                            fr: 'Relie le réseau à l’interface invité' } },
-          { name: 'type', type: 'enum', default: 'bridge', enum_values: ['bridge', 'masquerade'],
+          { name: 'type', type: 'enum', default: 'bridge',
+            enum_values: ['bridge', 'masquerade', 'macvtap', 'sriov'],
             label: { en: 'Binding', fr: 'Attachement' },
-            description: { en: 'bridge = L2 on a VLAN network (Harvester default) · masquerade = NAT on the pod network',
-                           fr: 'bridge = L2 sur un réseau VLAN (défaut Harvester) · masquerade = NAT sur le réseau des pods' } },
+            description: { en: 'bridge = L2 on a VLAN network (Harvester default) · masquerade = NAT on the pod network · macvtap/sriov = direct attachment, needs a matching network and hardware (NOT verified on this cluster)',
+                           fr: 'bridge = L2 sur un réseau VLAN (défaut Harvester) · masquerade = NAT sur le réseau des pods · macvtap/sriov = rattachement direct, exige un réseau et du matériel adaptés (NON vérifié sur ce cluster)' } },
           { name: 'network', type: 'ref', ref_endpoint: '/api/networks', ref_namespaced: true,
             label: { en: 'Network (multus)', fr: 'Réseau (multus)' },
             description: { en: 'NetworkAttachmentDefinition — bridge mode only',
@@ -805,7 +870,10 @@ const VMEdit = (() => {
     interfaces.forEach(itf => {
       const net = netByName[itf.name];
       if (net) used.add(itf.name);
-      const type = itf.bridge ? 'bridge' : (itf.masquerade ? 'masquerade' : null);
+      const type = itf.bridge ? 'bridge'
+        : itf.masquerade ? 'masquerade'
+        : itf.macvtap ? 'macvtap'
+        : itf.sriov ? 'sriov' : null;
       if (!type || !net) {           // sriov / slirp / broken pair → untouched
         passthrough.interfaces.push(itf);
         if (net) passthrough.networks.push(net);
@@ -859,7 +927,10 @@ const VMEdit = (() => {
         if (!item.network) {
           throw new Error(tr('vm.edit.errNet', 'a multus network is required for a bridge interface') + ` (${item.name})`);
         }
-        itf.bridge = {};
+        // macvtap / sriov : même appairage réseau multus, binding différent.
+        // ⚠️ non vérifié en réel (pas de carte SR-IOV sur harv1).
+        itf[item.type === 'macvtap' ? 'macvtap'
+            : item.type === 'sriov' ? 'sriov' : 'bridge'] = {};
         net.multus = { networkName: item.network };
       }
       interfaces.push(itf);
@@ -973,7 +1044,7 @@ const VMEdit = (() => {
     switch (id) {
       case 'general': return renderGeneral(vm, spec, annot, cluster);
       case 'compute': return renderCompute(domain);
-      case 'firmware': return renderFirmware(domain);
+      case 'firmware': return renderFirmware(domain, cluster);
       case 'placement': return renderPlacement(vm, template, cluster);
       case 'lifecycle': return renderLifecycle(template);
       case 'disks':   return renderDisksSection(vm, cluster);
@@ -1160,7 +1231,15 @@ const VMEdit = (() => {
   // v1.12.0 — Firmware : UEFI / Secure Boot / TPM / type de machine.
   // Débloque les invités modernes (Windows 11, SLE 16) qui refusent de
   // booter en BIOS hérité ou exigent un TPM 2.0.
-  function renderFirmware(domain) {
+  function renderFirmware(domain, cluster) {
+    const dev = domain.devices || {};
+    const hasTablet = (dev.inputs || []).some(i => i.type === 'tablet');
+    const wd = dev.watchdog || null;
+    const wdAction = wd ? ((wd.i6300esb || {}).action || 'reset') : '';
+    const hostDevs = [
+      ...(dev.hostDevices || []).map(d => ({ kind: 'host', name: d.name, device_name: d.deviceName })),
+      ...(dev.gpus || []).map(d => ({ kind: 'gpu', name: d.name, device_name: d.deviceName })),
+    ];
     const fw   = domain.firmware || {};
     const boot = fw.bootloader || {};
     const efi  = boot.efi || null;
@@ -1209,6 +1288,49 @@ const VMEdit = (() => {
                  placeholder="(auto)">
           <span class="form-hint">${esc(tr('vm.edit.fwSerialHint', 'Some licences are bound to it. Empty = leave as-is.'))}</span>
         </div>
+      </div>
+      <h3>${esc(tr('vm.edit.devices', 'Devices'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.devicesHint', 'KubeVirt attaches these by default; untick to remove them from the guest.'))}</p>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="dev.serialConsole" ${dev.autoattachSerialConsole === false ? '' : 'checked'}>
+          <span>${esc(tr('vm.edit.serialConsole', 'Serial console'))}</span>
+        </label>
+        <span class="form-hint">${esc(tr('vm.edit.serialConsoleHint', 'Needed to read the boot log without a graphical console (virtctl console).'))}</span>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="dev.graphics" ${dev.autoattachGraphicsDevice === false ? '' : 'checked'}>
+          <span>${esc(tr('vm.edit.graphics', 'Graphics device (VNC)'))}</span>
+        </label>
+        <span class="form-hint">${esc(tr('vm.edit.graphicsHint', 'Removing it also removes the VNC console of this VM.'))}</span>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="dev.balloon" ${dev.autoattachMemBalloon === false ? '' : 'checked'}>
+          <span>${esc(tr('vm.edit.balloon', 'Memory balloon'))}</span>
+        </label>
+        <span class="form-hint">${esc(tr('vm.edit.balloonHint', 'Lets the host reclaim unused guest memory. Turn it off for latency-sensitive or hugepage workloads.'))}</span>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="dev.tablet" ${hasTablet ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.tablet', 'USB tablet pointer'))}</span>
+        </label>
+        <span class="form-hint">${esc(tr('vm.edit.tabletHint', 'Makes the mouse track correctly in the VNC console instead of drifting.'))}</span>
+      </div>
+      <div class="form-row">
+        <label>${esc(tr('vm.edit.watchdog', 'Watchdog'))}</label>
+        <select data-field="dev.watchdog">
+          ${['', 'reset', 'poweroff', 'shutdown'].map(v =>
+            `<option value="${v}" ${wdAction === v ? 'selected' : ''}>${v || tr('vm.edit.wdNone', '(none)')}</option>`).join('')}
+        </select>
+        <span class="form-hint">${esc(tr('vm.edit.watchdogHint', 'i6300esb watchdog: the guest must feed it (watchdog daemon), otherwise the chosen action fires when it freezes.'))}</span>
+      </div>
+      <h3>${esc(tr('vm.edit.passthrough', 'PCI / GPU passthrough'))}</h3>
+      <p class="form-hint vm-edit-unverified">${esc(tr('vm.edit.passthroughHint', 'The picker lists the PCI devices Harvester discovered. The device must first be claimed and unbound from its host driver in Harvester — harvester-ops never does that for you. NOT verified end-to-end on this cluster (no spare device to hand over).'))}</p>
+      <div class="vm-edit-cards" data-cards="hostdev">
+        ${TFForm.render(HOSTDEV_SCHEMA, cluster, { dev: hostDevs }, { hideHeader: true })}
       </div>
       ${restartBanner()}
       ${applyBar('firmware')}`;
@@ -1270,12 +1392,21 @@ const VMEdit = (() => {
 
   function renderPlacement(vm, template, cluster) {
     const { sel, rules } = vmPlacementToForm(vm);
+    const tolerations = (template.tolerations || []).map(t => ({
+      key: t.key || '', operator: t.operator || 'Equal',
+      value: t.value || '', effect: t.effect || '',
+    }));
     const managed = ((template.affinity || {}).nodeAffinity) || null;
     return `
       <h3>📍 ${esc(tr('vm.edit.placement', 'Placement'))}</h3>
       <p class="form-hint">${esc(tr('vm.edit.nodeSelHint', 'Pin the VM to nodes carrying these labels. Empty = the scheduler is free.'))}</p>
       <div class="vm-edit-cards" data-cards="nodesel">
         ${TFForm.render(NODESEL_SCHEMA, cluster, { sel }, { hideHeader: true })}
+      </div>
+      <h3>${esc(tr('vm.edit.tolerations', 'Tolerations'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.tolerationsHint', 'Let this VM schedule onto nodes carrying a taint (a dedicated or drained node, for example).'))}</p>
+      <div class="vm-edit-cards" data-cards="tolerations">
+        ${TFForm.render(TOLERATION_SCHEMA, cluster, { tol: tolerations }, { hideHeader: true })}
       </div>
       <h3>${esc(tr('vm.edit.affinityTitle', 'Rules relative to other VMs'))}</h3>
       <p class="form-hint">${esc(tr('vm.edit.affinityHint', 'Keep a VM away from its twin (HA pair) or next to a VM it talks to a lot. Matching is done on Harvester tags, so tag both VMs first.'))}</p>
@@ -1454,8 +1585,15 @@ const VMEdit = (() => {
     if (sectionId === 'placement') {
       const selEditor = sectionEl.querySelector('[data-cards="nodesel"] .tf-form');
       const affEditor = sectionEl.querySelector('[data-cards="affinity"] .tf-form');
+      const tolEditor = sectionEl.querySelector('[data-cards="tolerations"] .tf-form');
       if (selEditor) TFForm.wire(selEditor, NODESEL_SCHEMA, cluster);
       if (affEditor) TFForm.wire(affEditor, AFFINITY_SCHEMA, cluster);
+      if (tolEditor) TFForm.wire(tolEditor, TOLERATION_SCHEMA, cluster);
+    }
+
+    if (sectionId === 'firmware') {
+      const devEditor = sectionEl.querySelector('[data-cards="hostdev"] .tf-form');
+      if (devEditor) TFForm.wire(devEditor, HOSTDEV_SCHEMA, cluster);
     }
 
     if (sectionId === 'disks' || sectionId === 'network') {
@@ -1597,6 +1735,27 @@ const VMEdit = (() => {
           devices: { tpm: tpmOn ? (tpmPersist ? { persistent: true } : {}) : null },
         };
         if (machine) domain.machine = { type: machine };
+        // v1.15.0 : autoattach* — KubeVirt les considère à true quand la
+        // clé est absente. On n'écrit donc `false` que pour désactiver, et
+        // on RETIRE la clé (null) pour revenir au défaut.
+        const off = (f) => get(`[data-field="${f}"]`)?.checked === false ? false : null;
+        domain.devices.autoattachSerialConsole = off('dev.serialConsole');
+        domain.devices.autoattachGraphicsDevice = off('dev.graphics');
+        domain.devices.autoattachMemBalloon = off('dev.balloon');
+        domain.devices.inputs = get('[data-field="dev.tablet"]')?.checked
+          ? [{ name: 'tablet', type: 'tablet', bus: 'usb' }] : null;
+        const wd = val('dev.watchdog');
+        domain.devices.watchdog = wd
+          ? { name: 'watchdog', i6300esb: { action: wd } } : null;
+        const devEditor = sectionEl.querySelector('[data-cards="hostdev"] .tf-form');
+        const rows = ((devEditor ? TFForm.read(devEditor, HOSTDEV_SCHEMA, { emitEmptyLists: true }).dev : []) || [])
+          .filter(d => (d.name || '').trim() && (d.device_name || '').trim());
+        const host = rows.filter(d => d.kind !== 'gpu')
+          .map(d => ({ name: d.name.trim(), deviceName: d.device_name.trim() }));
+        const gpus = rows.filter(d => d.kind === 'gpu')
+          .map(d => ({ name: d.name.trim(), deviceName: d.device_name.trim() }));
+        domain.devices.hostDevices = host.length ? host : null;
+        domain.devices.gpus = gpus.length ? gpus : null;
         return { spec: { template: { spec: { domain } } } };
       }
       case 'placement': {
@@ -1617,7 +1776,20 @@ const VMEdit = (() => {
         const rules = ((affEditor ? TFForm.read(affEditor, AFFINITY_SCHEMA, { emitEmptyLists: true }).rule : []) || [])
           .filter(r => (r.key || '').trim() && String(r.value ?? '').trim());
         const affinity = formPlacementToAffinity(rules);
-        return { spec: { template: { spec: { nodeSelector, affinity } } } };
+        const tolEditor = sectionEl.querySelector('[data-cards="tolerations"] .tf-form');
+        const tolRows = ((tolEditor ? TFForm.read(tolEditor, TOLERATION_SCHEMA, { emitEmptyLists: true }).tol : []) || [])
+          .filter(t => (t.key || '').trim() || t.operator === 'Exists')
+          .map(t => {
+            const out = { operator: t.operator || 'Equal' };
+            if ((t.key || '').trim()) out.key = t.key.trim();
+            if (out.operator === 'Equal' && (t.value || '').trim()) out.value = t.value.trim();
+            if (t.effect) out.effect = t.effect;
+            return out;
+          });
+        return { spec: { template: { spec: {
+          nodeSelector, affinity,
+          tolerations: tolRows.length ? tolRows : null,
+        } } } };
       }
       case 'lifecycle':
         return {
@@ -1719,7 +1891,7 @@ const VMEdit = (() => {
       vmTagsToForm, vmPlacementToForm, formPlacementToAffinity, vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
                 genUserData, genNetworkData },
     _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA, TAG_SCHEMA,
-                 NODESEL_SCHEMA, AFFINITY_SCHEMA },
+                 NODESEL_SCHEMA, AFFINITY_SCHEMA, TOLERATION_SCHEMA, HOSTDEV_SCHEMA },
   };
 })();
 

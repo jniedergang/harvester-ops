@@ -4,6 +4,41 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.15.0] — 2026-09-09 — Devices, tolerations, passthrough picker
+
+### Added
+- **Devices** in the Firmware tab: serial console, graphics device,
+  memory balloon, USB tablet pointer and watchdog (i6300esb with its
+  action). KubeVirt treats a missing `autoattach*` as enabled, so the
+  patch writes `false` only to disable and removes the key to go back
+  to the default — it never freezes a choice the operator did not make.
+- **Tolerations** in the Placement tab, to let a VM schedule onto a
+  tainted (dedicated or drained) node.
+- **PCI / GPU passthrough picker** backed by a new
+  `/api/pcidevices/<cluster>` endpoint listing what Harvester
+  discovered on the nodes, with the `resourceName` a VM spec must
+  reference. Read-only by design: claiming a device unbinds it from its
+  host driver, which a console should never do behind the operator's
+  back.
+- **macvtap / SR-IOV** NIC bindings.
+
+### Verified live on harv1
+- Memory balloon disabled, watchdog set to poweroff, toleration added:
+  applied, read back with kubectl, then reverted — leap156 came back to
+  its exact original spec (USB tablet included).
+- **Anti-affinity proven observable on a single node**: a strict rule
+  against a tag carried by a running VM left the new VM unschedulable
+  with `0/1 nodes are available: 1 node(s) didn't match pod
+  anti-affinity rules`; removing the rule and recreating the VMI let it
+  start in 40 s. It also confirmed the "applies at next restart"
+  banner: the pending pod kept the old spec until the VMI was recreated.
+- The passthrough picker lists the 17 real PCI devices of the cluster.
+
+### Not verified (stated in the UI and here)
+- Actual PCI/GPU passthrough to a guest: no device could be handed over
+  on a single-node production cluster.
+- macvtap / SR-IOV at runtime: no such hardware on the test cluster.
+
 ## [1.14.0] — 2026-09-09 — Consistent icon set
 
 ### Changed

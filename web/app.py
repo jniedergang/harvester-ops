@@ -1627,6 +1627,46 @@ def api_list_sc(cluster):
     return jsonify(data)
 
 
+def _reduce_pcidevice(item):
+    """v1.15.0 — PCI devices Harvester discovered on the nodes, for the
+    passthrough picker. `deviceName` (vendor/product slug) is what a VM
+    spec references in domain.devices.hostDevices/gpus."""
+    meta = item.get("metadata") or {}
+    status = item.get("status") or {}
+    spec = item.get("spec") or {}
+    desc = status.get("description") or ""
+    node = status.get("nodeName") or spec.get("nodeName")
+    return {
+        "name": meta.get("name"),
+        # what the VM spec must reference
+        "device_name": status.get("resourceName") or "",
+        "address": status.get("address"),
+        "node": node,
+        "description": desc,
+        "driver": status.get("kernelDriverInUse") or "",
+        # A device is usable for passthrough only once claimed AND unbound
+        # from its host driver; we surface the raw state, no guessing.
+        "vendor_id": status.get("vendorId"), "device_id": status.get("deviceId"),
+        "display_name": f"{desc[:70]} ({status.get('address')})" if desc else meta.get("name"),
+    }
+
+
+@app.route("/api/pcidevices/<cluster>")
+@requires_auth
+def api_list_pcidevices(cluster):
+    """v1.15.0 — PCI devices for the passthrough picker of the VM editor.
+    Read-only: harvester-ops never creates a PCIDeviceClaim (claiming
+    unbinds the device from its host driver — not something a console
+    should do behind the operator's back)."""
+    data, err = _list_k8s_resources(
+        cluster, "pcidevices.devices.harvesterhci.io",
+        reducer=_reduce_pcidevice, cache_key="pcidevices",
+    )
+    if err:
+        return jsonify({"error": err}), 502
+    return jsonify(data)
+
+
 @app.route("/api/pvcs/<cluster>")
 @requires_auth
 def api_list_pvcs(cluster):

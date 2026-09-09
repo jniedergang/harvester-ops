@@ -18,6 +18,7 @@ ENDPOINTS = [
     "/api/storageclasses",
     "/api/pvcs",
     "/api/cloudinits",
+    "/api/pcidevices",
 ]
 
 
