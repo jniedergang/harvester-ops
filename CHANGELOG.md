@@ -32,6 +32,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   does not mean KubeVirt ready, and every runStrategy patch was being
   rejected minutes after boot ("no endpoints available for virt-api").
 
+### Internal
+- package.sh removes a stale images/harvester-ops-ui.tar before podman
+  save (repacking failed with "docker-archive doesn't support modifying
+  existing images").
+
 ### Verified live (full real cycle on harv1)
 - Shutdown: etcd snapshot in 2 s, Longhorn wait instant (2 pod volumes
   listed as ignored), node powered off — 51 s end to end (was ~4 min

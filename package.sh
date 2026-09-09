@@ -72,6 +72,9 @@ else
     ok "Image built: harvester-ops:${VERSION}"
 
     info "Saving OCI image to images/harvester-ops-ui.tar..."
+    # podman save refuse d'ecrire par-dessus une archive existante
+    # ("docker-archive doesn't support modifying existing images")
+    rm -f "images/harvester-ops-ui.tar"
     mkdir -p images
     "$RUNTIME" save -o "images/harvester-ops-ui.tar" "localhost/harvester-ops:latest"
     ok "Image saved ($(du -h images/harvester-ops-ui.tar | awk '{print $1}'))"
