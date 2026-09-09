@@ -3683,3 +3683,26 @@ textarea:focus-visible {
   gap: 6px;
   background: var(--bg-elev);
 }
+
+/* v1.14.0 — icônes SVG inline : elles héritent de la couleur du bouton
+   (donc des 5 thèmes) et gardent une épaisseur de trait constante là où
+   les emoji mélangeaient glyphes fins et images en couleur pleine. */
+.icon {
+  display: block;
+  flex: none;
+}
+.btn-icon-action,
+.btn-icon-sm {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+/* Portée volontairement large : le bandeau de la console utilise
+   .btn-mini, la ligne d'actions .btn-icon-action — même vocabulaire
+   (démarrer en vert, arrêter en rouge), même couleur. */
+button .icon-green,
+button .icon-red {
+  display: inline-flex;
+}
+button .icon-green { color: var(--accent); }
+button .icon-red   { color: var(--danger); }

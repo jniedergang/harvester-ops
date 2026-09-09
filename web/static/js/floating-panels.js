@@ -143,7 +143,9 @@ const FloatingPanels = (() => {
         <div class="floating-panel-actions">
           ${(opts.headerActions || []).map((a, i) =>
             `<button class="btn-icon-sm tip" data-header-action="${i}"
-                     data-tip="${escapeHtml(a.tip || '')}">${escapeHtml(a.label || '?')}</button>`).join('')}
+                     data-tip="${escapeHtml(a.tip || '')}">${
+              /^<svg[\s\S]*<\/svg>$/.test(a.label || '') ? a.label : escapeHtml(a.label || '?')
+            }</button>`).join('')}
           <button class="btn-icon-sm tip" data-action="min" data-tip="${window.i18n ? i18n.t('panel.minimizeTip') : 'Minimize'}">_</button>
           <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>
         </div>

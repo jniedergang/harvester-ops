@@ -958,7 +958,7 @@ const VMEdit = (() => {
   // ⚠️ le global est VMConsole (casse déjà payée en 1.7.1).
   function consoleAction(cluster, namespace, name) {
     return [{
-      label: '🖥',
+      label: Icons.svg('console'),
       tip: tr('vm.edit.openConsole', 'Open the VNC console for this VM'),
       onClick: () => window.VMConsole && window.VMConsole.open(cluster, namespace, name),
     }];

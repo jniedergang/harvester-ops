@@ -260,18 +260,18 @@ const App = (() => {
         </td>
         <td class="vm-actions-cell">
           ${vm.runStrategy === 'Halted'
-            ? `<button class="btn-icon-action start tip" data-tip="${i18n.t('vm.tooltip.start')}" data-action="start" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-green">▶</span></button>`
-            : `<button class="btn-icon-action stop tip" data-tip="${i18n.t('vm.tooltip.stop')}" data-action="stop" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-red">■</span></button>`}
+            ? `<button class="btn-icon-action start tip" data-tip="${i18n.t('vm.tooltip.start')}" data-action="start" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-green">${Icons.svg('play')}</span></button>`
+            : `<button class="btn-icon-action stop tip" data-tip="${i18n.t('vm.tooltip.stop')}" data-action="stop" data-ns="${vm.namespace}" data-name="${vm.name}"><span class="icon-red">${Icons.svg('stop')}</span></button>`}
           <button class="btn-icon-action snapshot tip" data-tip="${i18n.t('vm.tooltip.snapshot')}"
-                  data-vm-snapshot data-ns="${vm.namespace}" data-name="${vm.name}">📸</button>
+                  data-vm-snapshot data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('snapshot')}</button>
           <button class="btn-icon-action migrate tip" data-tip="${i18n.t('vm.tooltip.migrate')}"
-                  data-vm-migrate data-ns="${vm.namespace}" data-name="${vm.name}">🔄</button>
+                  data-vm-migrate data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('migrate')}</button>
           <button class="btn-icon-action edit tip" data-tip="${i18n.t('vm.tooltip.edit')}"
-                  data-vm-edit data-ns="${vm.namespace}" data-name="${vm.name}">⚙</button>
+                  data-vm-edit data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('settings')}</button>
           <button class="btn-icon-action console tip" data-tip="${i18n.t('vm.tooltip.console')}"
-                  data-vm-console data-ns="${vm.namespace}" data-name="${vm.name}">🖥</button>
+                  data-vm-console data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('console')}</button>
           <button class="btn-icon-action notes tip" data-tip="${i18n.t('vm.tooltip.notes')}"
-                  data-vm-notes data-ns="${vm.namespace}" data-name="${vm.name}">📝</button>
+                  data-vm-notes data-ns="${vm.namespace}" data-name="${vm.name}">${Icons.svg('notes')}</button>
         </td>`;
 
       tr.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {

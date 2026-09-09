@@ -69,8 +69,8 @@ const VMSnapshots = (() => {
               ? '<span class="badge ok">✓ Ready</span>'
               : '<span class="badge warn">in-progress</span>'}</td>
             <td>
-              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.restoreTip')}" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>↩</button>
-              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.deleteTip')}" data-delete="${s.name}">🗑</button>
+              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.restoreTip')}" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>${Icons.svg('restore')}</button>
+              <button class="btn-icon-action tip" data-tip="${i18n.t('snap.deleteTip')}" data-delete="${s.name}">${Icons.svg('trash')}</button>
               ${s.error ? '<span class="badge fail" title="' + s.error + '">error</span>' : ''}
             </td>`;
           tbody.appendChild(tr);

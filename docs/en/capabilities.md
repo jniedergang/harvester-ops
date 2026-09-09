@@ -185,6 +185,10 @@ Drive the Terraform provider for Harvester from saved declarations.
   live SSE attachment, never the visible history.
 - **Internationalisation** — EN + FR complete; IT / ES / DE fall back to
   EN.
+- **Icons** — a hand-drawn monochrome SVG set inheriting `currentColor`,
+  so one set serves every theme and both modes. It replaced the emoji
+  icons, which mixed full-colour images with thin glyphs and read poorly
+  at button size.
 - **Theming** — 5 colour themes × dark/light. The default SUSE theme
   follows the suse.com identity — pine/jade palette and the official
   SUSE typeface, vendored in the tarball (airgap-safe, OFL licensed).

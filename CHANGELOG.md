@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.14.0] — 2026-09-09 — Consistent icon set
+
+### Changed
+- **The emoji action icons are replaced by an inline SVG set** (user
+  report on the VM actions row): the emoji mixed full-colour images
+  (📸 📝) with thin glyphs (■ ⚙), rendered at different sizes per
+  platform and read poorly at 16 px. The new set is hand-drawn with one
+  stroke weight and inherits `currentColor`, so a single set serves the
+  five themes and both light and dark — with start staying green and
+  stop red across the VM row and the console toolbar alike.
+- Applied to the VM actions row, the console toolbar, the snapshot
+  panel (restore / delete) and the edit panel's console shortcut.
+
+### Tests
+- `tests/api/test_icons.py`: the set is monochrome and theme-aware, no
+  emoji left in the two action surfaces, and icons.js loads before its
+  users.
+
 ## [1.13.0] — 2026-09-09 — Placement, fine disk/NIC options, console shortcut
 
 ### Added

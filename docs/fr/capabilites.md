@@ -205,6 +205,10 @@ sauvegardées.
   l'historique visible.
 - **Internationalisation** — EN + FR complets ; IT / ES / DE retombent
   sur EN.
+- **Icônes** — un jeu SVG monochrome dessiné d'un seul trait, héritant de
+  `currentColor` : un seul jeu couvre tous les thèmes et les deux modes.
+  Il remplace les emoji, qui mélangeaient images en couleur pleine et
+  glyphes fins et se lisaient mal à la taille d'un bouton.
 - **Thèmes** — 5 thèmes de couleur × sombre/clair. Le thème SUSE par
   défaut suit l'identité suse.com — palette pin/jade et la fonte
   officielle SUSE, vendorée dans le tarball (airgap, licence OFL).

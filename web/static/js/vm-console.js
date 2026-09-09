@@ -52,20 +52,20 @@ const VMConsole = (() => {
                 >${escapeHtml(tr('console.reconnect', 'Reconnect'))}</button>
         <button class="btn-mini vm-console-power-start tip"
                 data-tip="${escapeHtml(tr('console.startTip', 'Start the VM'))}"
-                ><span class="icon-green">▶</span></button>
+                ><span class="icon-green">${Icons.svg('play')}</span></button>
         <button class="btn-mini vm-console-power-stop tip"
                 data-tip="${escapeHtml(tr('console.stopTip', 'Stop the VM (graceful)'))}"
-                ><span class="icon-red">■</span></button>
+                ><span class="icon-red">${Icons.svg('stop')}</span></button>
         <button class="btn-mini vm-console-power-reset tip"
                 data-tip="${escapeHtml(tr('console.resetTip', 'Hard reset: destroy and respawn the VM instance'))}"
-                >⟳</button>
+                >${Icons.svg('restart')}</button>
         <span class="vm-console-sep"></span>
         <button class="btn-mini vm-console-snapshots tip"
                 data-tip="${escapeHtml(tr('console.snapshotsTip', 'Open VM snapshots'))}"
-                >📸</button>
+                >${Icons.svg('snapshot')}</button>
         <button class="btn-mini vm-console-settings tip"
                 data-tip="${escapeHtml(tr('console.settingsTip', 'Open VM settings (CPU, memory, disks, cloud-init)'))}"
-                >⚙</button>
+                >${Icons.svg('settings')}</button>
         <span class="vm-console-sep"></span>
         <button class="btn-mini vm-console-cad tip"
                 data-tip="${escapeHtml(tr('console.ctrlAltDelTip', 'Send Ctrl-Alt-Del to the VM'))}"
