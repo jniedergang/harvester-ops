@@ -4,6 +4,15 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.9.1] — 2026-09-09 — README refresh
+
+### Changed
+- README capability map updated for everything shipped since 1.6.7
+  (visual editors, cloud-init assistant, safety nets, state-aware
+  restart, Wake-on-LAN, storage map); screenshot gallery reshot in the
+  SUSE default theme against a live cluster, with two new tiles
+  (storage topology, VNC console).
+
 ## [1.9.0] — 2026-09-09 — State-aware restart, Wake-on-LAN power-on
 
 ### Added

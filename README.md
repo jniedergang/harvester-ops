@@ -7,7 +7,7 @@ Self-contained, airgap-friendly, single-tarball delivery.
 Livraison autonome en un tarball unique, compatible airgap.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-335_passing-green.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-398_passing-green.svg)](tests/)
 
 > Independent project. Not affiliated with, endorsed by, or supported by SUSE.
 
@@ -28,6 +28,8 @@ Livraison autonome en un tarball unique, compatible airgap.
 | *Cluster overview + persistent action dock<br>Aperçu cluster + dock d'actions persistant* | *VM lifecycle per namespace (bulk runStrategy, snapshots, console)<br>Cycle de vie VM par namespace (runStrategy en masse, snapshots, console)* |
 | [![Graceful shutdown](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Activity](docs/assets/activity.png)](docs/assets/activity.png) |
 | *8-step graceful shutdown sequencer with live SSE log<br>Séquenceur d'arrêt gracieux en 8 étapes avec log SSE live* | *Every mutating action tracked, with durable history<br>Toute action mutative tracée, avec historique durable* |
+| [![Storage topology](docs/assets/storage.png)](docs/assets/storage.png) | [![VNC console](docs/assets/console.png)](docs/assets/console.png) |
+| *Storage map: which volume is attached to which VM, CD-ROM/ISO discs, orphan detection<br>Carte du stockage : quel volume est lié à quelle VM, disques CD-ROM/ISO, détection d'orphelins* | *Integrated VNC console with power controls (full boot visible)<br>Console VNC intégrée avec commandes d'alimentation (boot visible en entier)* |
 
 ---
 
@@ -55,13 +57,13 @@ logs and a retained history.
 
 | Area | What it does | CLI | Web console |
 |---|---|:---:|:---:|
-| **Power sequencing** | Graceful shutdown (8 steps) / startup (5 steps), etcd snapshot, Longhorn maintenance, ordered VM stop/restart groups | ✓ | ✓ |
-| **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, in-browser VNC console (full boot visible), inline edit + cloud-init | ✓ (`-N`) | ✓ |
-| **Cluster observability** | Live topology (nodes / network / storage), Longhorn rebuild status, node table, Prometheus `/metrics`, readiness probe | status | ✓ |
+| **Power sequencing** | Graceful shutdown (8 steps) / startup (5 steps), etcd snapshot, Longhorn maintenance, ordered VM stop/restart groups, abort on failed safety checks (`--force` to override), state-aware restart (only VMs the shutdown stopped come back), Wake-on-LAN power-on | ✓ | ✓ |
+| **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, in-browser VNC console with power controls, visual disk & NIC editors (PVC / image / blank disk, bridge / masquerade), cloud-init assistant generating cloud-config + network-data | ✓ (`-N`) | ✓ |
+| **Cluster observability** | Live topology: cluster (VMs per node), network (rack-diagram bands per network), storage (VM-to-volume map with real PVC names, CD-ROM/ISO discs, orphaned-volume detection), Prometheus `/metrics`, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
 | **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON | — | ✓ |
 | **Bare-metal** | BMC / Redfish discovery + power actions, PXE / DHCP / HTTP provisioning groundwork | — | ✓ |
-| **Operations support** | Multi-cluster config, collaborative per-cluster / per-node notes, anonymised support bundles with a de-anonymisation tool | partial | ✓ |
+| **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised EN/FR with tooltips on every control | partial | ✓ |
 
 The power-sequencing core is the only part needed for a pure
 shutdown/startup deployment; everything else is opt-in and layered on the
@@ -113,13 +115,13 @@ ses logs live et un historique conservé.
 
 | Domaine | Rôle | CLI | Console web |
 |---|---|:---:|:---:|
-| **Séquençage électrique** | Shutdown gracieux (8 étapes) / startup (5 étapes), snapshot etcd, maintenance Longhorn, groupes d'arrêt/redémarrage VM ordonnés | ✓ | ✓ |
-| **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console VNC intégrée (boot visible en entier), édition inline + cloud-init | ✓ (`-N`) | ✓ |
-| **Observabilité cluster** | Topologie live (nodes / réseau / stockage), état rebuild Longhorn, table des nodes, `/metrics` Prometheus, readiness probe | status | ✓ |
+| **Séquençage électrique** | Shutdown gracieux (8 étapes) / startup (5 étapes), snapshot etcd, maintenance Longhorn, groupes d'arrêt/redémarrage ordonnés, annulation sur filet de sécurité en échec (`--force` pour outrepasser), reprise d'état (seules les VMs arrêtées par le shutdown redémarrent), allumage Wake-on-LAN | ✓ | ✓ |
+| **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console VNC avec commandes d'alimentation, éditeurs visuels disques & NICs (PVC / image / disque vierge, bridge / masquerade), assistant cloud-init générant cloud-config + network-data | ✓ (`-N`) | ✓ |
+| **Observabilité cluster** | Topologie live : cluster (VMs par node), réseau (bandes façon schéma de baie), stockage (carte VM-volume avec vrais noms de PVC, disques CD-ROM/ISO, détection de volumes orphelins), `/metrics` Prometheus, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
 | **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON | — | ✓ |
 | **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, socle provisionnement PXE / DHCP / HTTP | — | ✓ |
-| **Support aux opérations** | Config multi-cluster, notes collaboratives par cluster / par node, support bundles anonymisés avec outil de dé-anonymisation | partiel | ✓ |
+| **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation EN/FR complète avec tooltips sur chaque contrôle | partiel | ✓ |
 
 Le cœur de séquençage est la seule partie nécessaire à un déploiement
 shutdown/startup pur ; tout le reste est optionnel et s'empile sur le
