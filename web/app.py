@@ -1651,6 +1651,44 @@ def _reduce_pcidevice(item):
     }
 
 
+@app.route("/api/pvc/<cluster>/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("pvc-delete")
+def api_pvc_delete(cluster, namespace, name):
+    """v1.16.0 — delete a PVC, for the orphaned volumes the Storage view
+    surfaces. Deliberately refuses a claim still referenced by a VM: the
+    UI only offers this on orphans, and a stale page must not turn into
+    a data loss."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    try:
+        vms = _kubectl_json(kc, "get", "vm", "-A") or {}
+    except Exception:
+        vms = {}
+    for vm in vms.get("items", []):
+        meta = vm.get("metadata") or {}
+        if meta.get("namespace") != namespace:
+            continue
+        tspec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+        for v in tspec.get("volumes") or []:
+            claim = ((v.get("persistentVolumeClaim") or {}).get("claimName")
+                     or (v.get("dataVolume") or {}).get("name"))
+            if claim == name:
+                return jsonify({
+                    "error": "claim-in-use",
+                    "detail": f"PVC {namespace}/{name} is still attached to VM "
+                              f"{meta.get('name')} — detach it from the VM first.",
+                }), 409
+    action_id = track_action(
+        f"pvc-delete:{namespace}/{name}", cluster,
+        _simple_kubectl_action, kc,
+        ["-n", namespace, "delete", "pvc", name, "--wait=false"],
+        "delete", f"PVC {name} deletion requested",
+    )
+    return jsonify({"action_id": action_id, "deleting": f"{namespace}/{name}"}), 201
+
+
 @app.route("/api/pcidevices/<cluster>")
 @requires_auth
 def api_list_pcidevices(cluster):
@@ -3308,9 +3346,29 @@ def api_vm_put_cloudinit(cluster, namespace, name):
              "-n", namespace, "--type", "merge", "-p", json.dumps(patch)],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=20,
         )
-        return jsonify({"ok": True, "secret": secret_name})
     except subprocess.CalledProcessError as e:
         return jsonify({"error": "patch secret failed", "detail": e.stderr.decode() if e.stderr else ""}), 500
+
+    # v1.16.0 : Harvester affiche les KeyPairs d'une VM d'après
+    # l'annotation harvesterhci.io/sshNames. L'assistant injecte la clé
+    # dans le cloud-init mais la VM n'apparaissait attachée à aucune clé
+    # dans l'UI Harvester. On synchronise l'annotation quand le client
+    # nous dit quelles KeyPairs il a utilisées.
+    ssh_names = data.get("sshNames")
+    if isinstance(ssh_names, list):
+        names = sorted({str(n) for n in ssh_names if str(n).strip()})
+        ann_patch = {"metadata": {"annotations": {
+            "harvesterhci.io/sshNames": json.dumps(names),
+        }}}
+        try:
+            subprocess.check_call(
+                ["kubectl", "--kubeconfig", kc, "patch", "vm", name,
+                 "-n", namespace, "--type", "merge", "-p", json.dumps(ann_patch)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
+            )
+        except Exception:
+            log.warning("sshNames annotation not updated for %s/%s", namespace, name)
+    return jsonify({"ok": True, "secret": secret_name})
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>/runStrategy", methods=["PATCH"])

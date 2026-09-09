@@ -92,7 +92,9 @@ Manage KubeVirt virtual machines without leaving the console.
   apiserver. A **Placement** tab pins the VM with a node selector,
   adds tolerations, and keeps it away from (or next to) VMs carrying a
   given tag; the node affinity Harvester manages for networking is shown
-  read-only and left untouched. The Firmware tab also carries the
+  read-only and left untouched, and CPU pinning (dedicated placement,
+  isolated emulator thread, NUMA passthrough) sits in Compute. The
+  Firmware tab also carries the
   **devices**: serial console, graphics, memory balloon, USB tablet
   pointer and watchdog — each written only when it differs from the
   KubeVirt default.
@@ -124,8 +126,10 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   edge, CD-ROM devices and ISO-backed volumes drawn as round discs (💿,
   media or empty drive), every image-backed volume showing its source
   image in the detail panel, and an **Unattached volumes** section that surfaces orphaned
-  PVCs — deleted-VM leftovers an operator wants to reclaim. The detail
-  panel shows PVC, consuming VM, state, size and replica placement.
+  PVCs — deleted-VM leftovers an operator wants to reclaim, and each of
+  them can be **deleted right there** (destructive lock plus a confirm;
+  the endpoint re-checks that no VM still claims it). The detail panel
+  shows PVC, consuming VM, state, size and replica placement.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,

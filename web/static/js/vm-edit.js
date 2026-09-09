@@ -1202,6 +1202,26 @@ const VMEdit = (() => {
         </datalist>
         <span class="form-hint">${esc(tr('vm.edit.cpuModelHint', 'host-passthrough is fastest but blocks live migration to a different CPU; host-model is the usual compromise. Empty = cluster default.'))}</span>
       </div>
+      <h3>${esc(tr('vm.edit.pinning', 'CPU pinning'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.pinningHint', 'For latency-sensitive workloads. Pinning requires enough full cores on the node and rules out CPU overcommit for this VM.'))}</p>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="cpu.dedicated" ${cpu.dedicatedCpuPlacement ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.dedicatedCpu', 'Dedicated CPU placement (pinning)'))}</span>
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="cpu.isolate" ${cpu.isolateEmulatorThread ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.isolateEmulator', 'Isolate the emulator thread on its own core'))}</span>
+        </label>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="cpu.numa" ${(cpu.numa && cpu.numa.guestMappingPassthrough) ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.numa', 'Pass the host NUMA topology to the guest'))}</span>
+        </label>
+      </div>
       <details class="vm-edit-adv">
         <summary>${esc(tr('vm.edit.resAdvanced', 'Scheduling reservations (advanced)'))}</summary>
         <p class="form-hint">${esc(tr('vm.edit.resHint', 'What Kubernetes actually schedules. Harvester derives these from the overcommit ratio — override only if you know why. Empty = leave as-is.'))}</p>
@@ -1701,6 +1721,13 @@ const VMEdit = (() => {
         const maxSockets = val('cpu.maxSockets');
         cpu.maxSockets = maxSockets > 0 ? maxSockets : null;
         cpu.model = (val('cpu.model') || '').trim() || null;
+        // v1.16.0 : pinning — cases décochées = clés retirées (null), pour
+        // ne pas imposer un choix implicite à une VM ordinaire.
+        const dedicated = get('[data-field="cpu.dedicated"]')?.checked;
+        cpu.dedicatedCpuPlacement = dedicated ? true : null;
+        cpu.isolateEmulatorThread = get('[data-field="cpu.isolate"]')?.checked ? true : null;
+        cpu.numa = get('[data-field="cpu.numa"]')?.checked
+          ? { guestMappingPassthrough: {} } : null;
         const memory = { guest: val('memory.guest') };
         memory.maxGuest = (val('memory.maxGuest') || '').trim() || null;
         const pick = (f) => (val(f) || '').trim() || null;
@@ -1854,6 +1881,15 @@ const VMEdit = (() => {
     const body = {
       userData:    sectionEl.querySelector('[data-ci="userData"]').value,
       networkData: sectionEl.querySelector('[data-ci="networkData"]').value,
+      // v1.16.0 : noms des KeyPairs choisies dans l'assistant. Le YAML
+      // porte le matériel de clé ; Harvester, lui, affiche les clés
+      // d'une VM d'après l'annotation sshNames — on la synchronise.
+      // Le libellé d'une ref namespacée est « nom (namespace) » : Harvester
+      // n'attend que le nom de la KeyPair.
+      sshNames: [...sectionEl.querySelectorAll('[name$=".ssh_key"]')]
+        .map(sel => sel.value && sel.selectedOptions && sel.selectedOptions[0]
+             ? sel.selectedOptions[0].textContent.trim().replace(/\s*\([^()]*\)\s*$/, '') : '')
+        .filter(Boolean),
     };
     try {
       const res = await fetch(`/api/vm/${enc(cluster)}/${enc(namespace)}/${enc(name)}/cloudinit`,

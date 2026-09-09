@@ -4,6 +4,32 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.16.0] — 2026-09-09 — Delete orphan volumes, SSH key annotation, CPU pinning
+
+### Added
+- **Delete an orphaned volume from the Storage view** — the view has
+  surfaced them since 1.8.6, but the cleanup still meant kubectl. The
+  action sits behind the destructive lock plus a confirm naming the
+  claim, and the endpoint independently re-checks that no VM claims the
+  PVC (a stale page must not become data loss). Tracked as an action.
+- **CPU pinning** in Compute: dedicated placement, isolated emulator
+  thread, NUMA passthrough — each written only when enabled.
+
+### Fixed
+- Saving cloud-init now syncs the **`harvesterhci.io/sshNames`
+  annotation**: the assistant injected the key material into user-data,
+  but Harvester lists a VM's keys from that annotation, so its own UI
+  showed the VM as having no SSH key. The KeyPair name is sent without
+  the "(namespace)" suffix the picker label carries.
+- The i18n orphan scanner learned topology.js's `confirmI18n()` alias.
+
+### Verified live on harv1
+- A deliberate orphan PVC was created, refused while the destructive
+  lock was closed, then deleted through the UI and confirmed gone;
+  deleting a PVC still attached to leap156 was refused with 409.
+- Pinning and the sshNames annotation applied to leap156, read back
+  with kubectl (`["capi-ssh-key"]`), then reverted.
+
 ## [1.15.0] — 2026-09-09 — Devices, tolerations, passthrough picker
 
 ### Added

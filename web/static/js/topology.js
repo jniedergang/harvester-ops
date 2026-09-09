@@ -969,7 +969,12 @@ const Topology = (() => {
           <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>
           <dt>${i.t('topology.detail.attachedTo')}</dt><dd>${v.attached_to || '—'}</dd>
           <dt>${i.t('topology.detail.replicas')}</dt><dd>${reps || '—'}</dd>
-        </dl>`;
+        </dl>
+        ${(!v.vm && v.pvc_name) ? `
+          <div class="actions">
+            <button class="btn btn-sm btn-danger" data-act="vol-delete">🗑 ${i.t('topology.action.deleteVolume')}</button>
+          </div>
+          <p class="form-hint">${i.t('topology.volDeleteHint')}</p>` : ''}`;
     }
     if (d.kind === 'bucket') {
       return `
@@ -1064,6 +1069,24 @@ const Topology = (() => {
 
     // Irreversible actions (delete VM, cordon / drain node) — gated by the
     // destructive unlock on top of the confirm.
+    if (act === 'vol-delete') {
+      if (!destructiveUnlocked) { alert(confirmI18n('topology.lockedHint')); return; }
+      const claim = `${d.raw.pvc_namespace}/${d.raw.pvc_name}`;
+      if (!confirm(confirmI18n('topology.confirm.vol-delete').replace('{name}', claim))) return;
+      try {
+        const r = await fetch(
+          `/api/pvc/${cluster}/${d.raw.pvc_namespace}/${d.raw.pvc_name}`, { method: 'DELETE' });
+        if (!r.ok) {
+          const body = await r.json().catch(() => ({}));
+          throw new Error(body.detail || body.error || ('HTTP ' + r.status));
+        }
+        await refresh();
+      } catch (e) {
+        alert(confirmI18n('topology.actionFailed') + ': ' + (e.message || e));
+      }
+      return;
+    }
+
     if (act === 'vm-delete' || act === 'node-cordon' || act === 'node-drain') {
       if (!destructiveUnlocked) { alert(confirmI18n('topology.lockedHint')); return; }
       return runAction();

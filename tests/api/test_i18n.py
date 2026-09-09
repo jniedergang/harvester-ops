@@ -43,6 +43,9 @@ TR_RE = re.compile(r"""\btr\(\s*['"]([\w.-]+)['"]""")
 # and calls `i.t('key')` — invisible to JS_T_RE, which made every
 # topology.* key a false orphan sitting in the baseline.
 I_T_RE = re.compile(r"""\bi\.t\(\s*['"]([\w.-]+)['"]""")
+
+# v1.16.0: topology.js also wraps the translator as confirmI18n(...)
+CONFIRM_RE = re.compile(r"""\bconfirmI18n\(\s*['"]([\w.-]+)['"]""")
 # Lang block boundaries in i18n.js — `en: {`, `fr: {`, …
 LANG_HEADER_RE = re.compile(r"^\s*(en|fr|it|es|de):\s*\{")
 # Key extraction inside a lang block — `'key.name':` or `"key.name":`.
@@ -74,6 +77,7 @@ def _all_referenced_keys():
         # keys up through its local `tr('key', fallback)` helper.
         keys.update(TR_RE.findall(text))
         keys.update(I_T_RE.findall(text))
+        keys.update(CONFIRM_RE.findall(text))
     return keys
 
 

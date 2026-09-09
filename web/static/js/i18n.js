@@ -17,6 +17,14 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    'topology.action.deleteVolume': 'Delete this volume',
+    'topology.confirm.vol-delete': 'DELETE the volume "{name}"? The data is lost for good.',
+    'topology.volDeleteHint': 'This PVC is claimed by no VM. Deleting it frees the space for good — the data cannot be recovered.',
+    'vm.edit.dedicatedCpu': 'Dedicated CPU placement (pinning)',
+    'vm.edit.isolateEmulator': 'Isolate the emulator thread on its own core',
+    'vm.edit.numa': 'Pass the host NUMA topology to the guest',
+    'vm.edit.pinning': 'CPU pinning',
+    'vm.edit.pinningHint': 'For latency-sensitive workloads. Pinning requires enough full cores on the node and rules out CPU overcommit for this VM.',
     'vm.edit.balloon': 'Memory balloon',
     'vm.edit.balloonHint': 'Lets the host reclaim unused guest memory. Turn it off for latency-sensitive or hugepage workloads.',
     'vm.edit.devices': 'Devices',
@@ -631,6 +639,14 @@ const translations = {
   },
 
   fr: {
+    'topology.action.deleteVolume': 'Supprimer ce volume',
+    'topology.confirm.vol-delete': 'SUPPRIMER le volume "{name}" ? Les données sont perdues définitivement.',
+    'topology.volDeleteHint': 'Ce PVC n’est réclamé par aucune VM. Le supprimer libère l’espace définitivement — les données ne sont pas récupérables.',
+    'vm.edit.dedicatedCpu': 'Placement CPU dédié (pinning)',
+    'vm.edit.isolateEmulator': 'Isoler le thread émulateur sur son propre cœur',
+    'vm.edit.numa': 'Passer la topologie NUMA de l’hôte à l’invité',
+    'vm.edit.pinning': 'Pinning CPU',
+    'vm.edit.pinningHint': 'Pour les charges sensibles à la latence. Le pinning exige assez de cœurs entiers sur le node et exclut l’overcommit CPU pour cette VM.',
     'vm.edit.balloon': 'Ballon mémoire',
     'vm.edit.balloonHint': 'Permet à l’hôte de récupérer la mémoire inutilisée de l’invité. À désactiver pour une charge sensible à la latence ou en hugepages.',
     'vm.edit.devices': 'Périphériques',
@@ -1246,6 +1262,14 @@ const translations = {
   },
 
   it: {
+    'topology.action.deleteVolume': 'Eliminare questo volume',
+    'topology.confirm.vol-delete': 'ELIMINARE il volume "{name}"? I dati sono persi definitivamente.',
+    'topology.volDeleteHint': 'Questo PVC non è reclamato da nessuna VM. Eliminarlo libera lo spazio definitivamente — i dati non sono recuperabili.',
+    'vm.edit.dedicatedCpu': 'Posizionamento CPU dedicato (pinning)',
+    'vm.edit.isolateEmulator': 'Isolare il thread emulatore su un core dedicato',
+    'vm.edit.numa': 'Passare la topologia NUMA dell’host al guest',
+    'vm.edit.pinning': 'Pinning CPU',
+    'vm.edit.pinningHint': 'Per carichi sensibili alla latenza. Il pinning richiede abbastanza core interi sul nodo ed esclude l’overcommit di CPU per questa VM.',
     'vm.edit.balloon': 'Balloon di memoria',
     'vm.edit.balloonHint': 'Consente all’host di recuperare la memoria inutilizzata del guest. Da disattivare per carichi sensibili alla latenza o con hugepage.',
     'vm.edit.devices': 'Dispositivi',
@@ -1860,6 +1884,14 @@ const translations = {
   },
 
   es: {
+    'topology.action.deleteVolume': 'Eliminar este volumen',
+    'topology.confirm.vol-delete': '¿ELIMINAR el volumen "{name}"? Los datos se pierden definitivamente.',
+    'topology.volDeleteHint': 'Este PVC no lo reclama ninguna VM. Eliminarlo libera el espacio definitivamente — los datos no se pueden recuperar.',
+    'vm.edit.dedicatedCpu': 'Ubicación de CPU dedicada (pinning)',
+    'vm.edit.isolateEmulator': 'Aislar el hilo emulador en su propio núcleo',
+    'vm.edit.numa': 'Pasar la topología NUMA del host al invitado',
+    'vm.edit.pinning': 'Pinning de CPU',
+    'vm.edit.pinningHint': 'Para cargas sensibles a la latencia. El pinning exige suficientes núcleos completos en el nodo y excluye el overcommit de CPU para esta VM.',
     'vm.edit.balloon': 'Globo de memoria',
     'vm.edit.balloonHint': 'Permite al host recuperar memoria no usada del invitado. Desactívelo para cargas sensibles a la latencia o con hugepages.',
     'vm.edit.devices': 'Dispositivos',
@@ -2474,6 +2506,14 @@ const translations = {
   },
 
   de: {
+    'topology.action.deleteVolume': 'Dieses Volume löschen',
+    'topology.confirm.vol-delete': 'Volume "{name}" LÖSCHEN? Die Daten sind endgültig verloren.',
+    'topology.volDeleteHint': 'Dieses PVC wird von keiner VM beansprucht. Es zu löschen gibt den Platz endgültig frei — die Daten sind nicht wiederherstellbar.',
+    'vm.edit.dedicatedCpu': 'Dedizierte CPU-Platzierung (Pinning)',
+    'vm.edit.isolateEmulator': 'Emulator-Thread auf einem eigenen Kern isolieren',
+    'vm.edit.numa': 'NUMA-Topologie des Hosts an den Gast durchreichen',
+    'vm.edit.pinning': 'CPU-Pinning',
+    'vm.edit.pinningHint': 'Für latenzkritische Lasten. Pinning verlangt genügend vollständige Kerne auf dem Node und schließt CPU-Overcommit für diese VM aus.',
     'vm.edit.balloon': 'Memory-Balloon',
     'vm.edit.balloonHint': 'Erlaubt dem Host, ungenutzten Gastspeicher zurückzuholen. Für latenzkritische oder Hugepage-Lasten abschalten.',
     'vm.edit.devices': 'Geräte',

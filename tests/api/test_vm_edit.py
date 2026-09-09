@@ -759,3 +759,62 @@ def test_unverified_capabilities_are_flagged_in_the_ui():
     assert "NON vérifié de bout en bout" in fr
     # the exotic bindings say it too
     assert "NOT verified on this cluster" in js
+
+
+# ---------------------------------------------------------------------------
+# v1.16.0 — orphan volume deletion, sshNames annotation, CPU pinning
+# ---------------------------------------------------------------------------
+
+def test_pvc_delete_refuses_a_claim_still_attached(client, monkeypatch):
+    """The Storage view only offers this on orphans, but a stale page must
+    not turn into data loss: the endpoint re-checks against live VMs."""
+    import app as wapp
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/dev/null")
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda *a, **k: {"items": [{
+        "metadata": {"name": "vm1", "namespace": "ns1"},
+        "spec": {"template": {"spec": {"volumes": [
+            {"name": "d", "persistentVolumeClaim": {"claimName": "claim-a"}}]}}},
+    }]})
+    r = client.delete("/api/pvc/c1/ns1/claim-a")
+    assert r.status_code == 409
+    assert r.get_json()["error"] == "claim-in-use"
+
+
+def test_pvc_delete_tracks_an_action_for_an_orphan(client, monkeypatch):
+    import app as wapp
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/dev/null")
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda *a, **k: {"items": []})
+    monkeypatch.setattr(wapp, "track_action", lambda *a, **k: "act123")
+    r = client.delete("/api/pvc/c1/ns1/orphan")
+    assert r.status_code == 201
+    assert r.get_json()["action_id"] == "act123"
+
+
+def test_volume_delete_is_gated_and_orphan_only():
+    js = (WEB / "static" / "js" / "topology.js").read_text()
+    assert "act === 'vol-delete'" in js
+    branch = js.split("if (act === 'vol-delete') {", 1)[1].split("if (act === 'vm-delete'", 1)[0]
+    assert "destructiveUnlocked" in branch, "must sit behind the destructive lock"
+    assert "confirm(" in branch
+    # the button only shows on a volume with no VM
+    assert "(!v.vm && v.pvc_name)" in js
+
+
+def test_cloudinit_save_syncs_the_ssh_names_annotation():
+    """Harvester lists a VM's keys from harvesterhci.io/sshNames; the
+    assistant injected the key material but left the annotation empty, so
+    the Harvester UI showed no key at all."""
+    src = (WEB / "app.py").read_text()
+    put = src.split("def api_vm_put_cloudinit", 1)[1].split("@app.route", 1)[0]
+    assert "harvesterhci.io/sshNames" in put
+    js = VM_EDIT_JS.read_text()
+    # the ref label is "name (namespace)" — Harvester wants the bare name
+    assert "replace(/\\s*\\([^()]*\\)\\s*$/, '')" in js
+
+
+def test_cpu_pinning_fields_default_to_absent():
+    js = VM_EDIT_JS.read_text()
+    comp = js.split("case 'compute': {", 1)[1].split("case 'firmware'", 1)[0]
+    assert "dedicatedCpuPlacement = dedicated ? true : null" in comp
+    assert "isolateEmulatorThread" in comp
+    assert "guestMappingPassthrough" in comp

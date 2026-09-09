@@ -101,7 +101,9 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   **Placement** épingle la VM par sélecteur de node, ajoute des
   tolérances, et l'éloigne (ou la rapproche) des VMs portant un tag
   donné ; l'affinité de node que Harvester gère pour le réseau est
-  affichée en lecture seule et laissée intacte. L'onglet Firmware porte
+  affichée en lecture seule et laissée intacte, et le pinning CPU
+  (placement dédié, thread émulateur isolé, passthrough NUMA) se trouve
+  dans Calcul. L'onglet Firmware porte
   aussi les **périphériques** : console série, graphique, ballon
   mémoire, pointeur tablette USB et watchdog — chacun écrit uniquement
   s'il diffère du défaut KubeVirt.
@@ -138,8 +140,10 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   (💿, média ou lecteur vide), chaque volume issu d'une image montrant
   son image source dans le panneau de détail, et une section **Volumes non rattachés** qui
   fait remonter les PVC orphelins — restes de VMs supprimées qu'un
-  opérateur veut récupérer. Le panneau de détail montre PVC, VM
-  consommatrice, état, taille et placement des répliques.
+  opérateur veut récupérer, et chacun peut être **supprimé sur place**
+  (verrou destructif plus confirmation ; l'endpoint revérifie qu'aucune
+  VM ne le réclame). Le panneau de détail montre PVC, VM consommatrice,
+  état, taille et placement des répliques.
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,
