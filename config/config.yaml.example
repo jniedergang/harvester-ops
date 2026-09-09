@@ -33,6 +33,9 @@ clusters:
       - hostname: harv-prod-cp1
         ip: 10.10.0.11
         role: control-plane
+        # Optional: startup powers the node on via Wake-on-LAN instead of
+        # prompting the operator (BIOS/NIC must have WoL enabled).
+        # wol_mac: "aa:bb:cc:dd:ee:ff"
       - hostname: harv-prod-cp2
         ip: 10.10.0.12
         role: control-plane

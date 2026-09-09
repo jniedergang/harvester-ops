@@ -26,7 +26,11 @@ deployment. Available as auditable bash and mirrored in the console.
   logs) stop with the node and are listed as ignored.
 - **Startup** — 5 steps: power on first control-plane → power on the rest
   → wait for nodes Ready → restore cluster state → restart VMs in
-  reverse-group order (parallel within a group).
+  reverse-group order (parallel within a group). Nodes with a
+  `wol_mac` in the config are powered on by **Wake-on-LAN** (no
+  operator prompt); and only the VMs the shutdown actually stopped are
+  restarted, each with its original run strategy — VMs deliberately
+  stopped before the shutdown stay stopped.
 - **VM ordering groups** — VMs stop/restart in configurable groups:
   sequential *between* groups, parallel *within* a group, with per-group
   priority.

@@ -77,9 +77,21 @@ step_power_first_cp() {
     IFS='|' read -r first_cp_host first_cp_ip <<< "$(nodes_by_role control-plane | head -n1)"
     [[ -z "$first_cp_host" ]] && { log_error "Aucun control-plane configuré"; exit 1; }
 
-    log_info "À allumer en premier (via iLO/iDRAC/IPMI) : $first_cp_host ($first_cp_ip)"
-    log_info "First node to power on (iLO/iDRAC/IPMI): $first_cp_host ($first_cp_ip)"
-    confirm "Le node $first_cp_host a-t-il été allumé ? / Has it been powered on?" || exit 1
+    local wol_mac
+    wol_mac=$(node_wol_mac "$first_cp_host")
+    if [[ -n "$wol_mac" && "$DRY_RUN" != "1" ]]; then
+        # v1.9.0 : Wake-on-LAN — plus besoin d'un humain devant le bouton
+        log_info "Wake-on-LAN → $first_cp_host ($wol_mac)"
+        emit_event "power-cp1" "progress" "WoL $first_cp_host"
+        wol_send "$wol_mac" \
+            && log_ok "Magic packet envoyé à $first_cp_host" \
+            || { log_warn "Envoi WoL impossible (ni python3, ni wakeonlan, ni ether-wake)"; \
+                 confirm "Allumer $first_cp_host manuellement puis confirmer / Power it on manually then confirm" || exit 1; }
+    else
+        log_info "À allumer en premier (iLO/iDRAC/IPMI/bouton) : $first_cp_host ($first_cp_ip)"
+        log_info "First node to power on (iLO/iDRAC/IPMI/button): $first_cp_host ($first_cp_ip)"
+        confirm "Le node $first_cp_host a-t-il été allumé ? / Has it been powered on?" || exit 1
+    fi
 
     if [[ "$DRY_RUN" == "1" ]]; then
         emit_event "power-cp1" "done" "[DRY-RUN] API wait skipped"
@@ -89,11 +101,22 @@ step_power_first_cp() {
 
     log_info "Attente de l'API Kubernetes (timeout ${API_TIMEOUT}s)..."
     local deadline=$(( SECONDS + API_TIMEOUT ))
+    local wol_resent=0
     while (( SECONDS < deadline )); do
         if kc_quiet get --raw=/readyz >/dev/null 2>&1; then
             emit_event "power-cp1" "done" "API ready on $first_cp_host"
             log_ok "API Kubernetes prête sur $first_cp_host"
             return 0
+        fi
+        # v1.9.0 : renvoyer le magic packet tant que le node ne PING pas.
+        # Course vécue : l'OS coupe le réseau avant le power-off réel ->
+        # un WoL parti sur le « ping mort » arrive pendant l'extinction
+        # et est ignoré. Le renvoi périodique rend l'allumage fiable
+        # (et couvre aussi un broadcast perdu).
+        if [[ -n "$wol_mac" ]] && ! ping -c1 -W2 "$first_cp_ip" >/dev/null 2>&1; then
+            wol_resent=$((wol_resent+1))
+            log_info "  → node injoignable, renvoi WoL (#$wol_resent)"
+            wol_send "$wol_mac" || true
         fi
         emit_event "power-cp1" "progress" "Waiting API on $first_cp_host..."
         log_info "  → API pas encore prête..."
@@ -114,20 +137,28 @@ step_power_rest() {
 
     # remaining CPs
     local i=0
+    _power_one() {
+        local host="$1" ip="$2" mac
+        mac=$(node_wol_mac "$host")
+        emit_event "power-rest" "progress" "$host"
+        if [[ -n "$mac" && "$DRY_RUN" != "1" ]]; then
+            log_info "Wake-on-LAN → $host ($mac)"
+            wol_send "$mac" && { log_ok "Magic packet envoyé à $host"; return 0; }
+            log_warn "Envoi WoL impossible pour $host"
+        fi
+        log_info "À allumer : $host ($ip)"
+        confirm "$host allumé ? / Powered on?" || log_warn "$host non démarré sur demande"
+    }
     while IFS='|' read -r host ip; do
         i=$((i+1))
         [[ "$i" -eq 1 ]] && continue   # skip first (already on)
-        log_info "À allumer : $host ($ip)"
-        emit_event "power-rest" "progress" "$host"
-        confirm "$host allumé ? / Powered on?" || log_warn "$host non démarré sur demande"
+        _power_one "$host" "$ip"
         sleep "$WAIT_BETWEEN_NODES"
     done < <(nodes_by_role "control-plane")
 
     while IFS='|' read -r host ip; do
         [[ -z "$host" ]] && continue
-        log_info "À allumer : $host ($ip)"
-        emit_event "power-rest" "progress" "$host"
-        confirm "$host allumé ? / Powered on?" || log_warn "$host non démarré sur demande"
+        _power_one "$host" "$ip"
         sleep "$WAIT_BETWEEN_NODES"
     done < <(nodes_by_role "worker")
 
@@ -207,11 +238,17 @@ step_restart_vms() {
     # FIRST (mirror of shutdown). Within a normal group, REVERSE intra
     # order so the VM that was stopped last comes back up first.
     local halted_vms
+    # v1.9.0 : ne relancer QUE les VMs que le shutdown a arrêtées (elles
+    # portent l'annotation previous-runStrategy). Les VMs volontairement
+    # éteintes avant l'arrêt du cluster restent éteintes. Une VM qui
+    # tournait au moment d'une coupure brutale garde de toute façon sa
+    # runStrategy et redémarre d'elle-même avec le node.
     halted_vms=$(get_ordered_vms reverse | while IFS='|' read -r ns name intra snap timeout group gprio; do
         [[ -z "$name" ]] && continue
-        local rs
+        local rs prev
         rs=$(kc_quiet -n "$ns" get vm "$name" -o jsonpath='{.spec.runStrategy}' 2>/dev/null || echo "")
-        if [[ "$rs" == "Halted" ]]; then
+        prev=$(vm_prev_runstrategy "$ns" "$name")
+        if [[ "$rs" == "Halted" && -n "$prev" ]]; then
             echo "$ns|$name|$intra|$snap|$timeout|$group|$gprio"
         fi
     done)
@@ -219,8 +256,8 @@ step_restart_vms() {
     total=$(echo "$halted_vms" | grep -c . || true)
 
     if [[ "$total" -eq 0 ]]; then
-        emit_event "vm-restart" "done" "No halted VMs"
-        log_ok "Aucune VM en état Halted"
+        emit_event "vm-restart" "done" "No VMs to restart"
+        log_ok "Aucune VM à relancer (aucune annotation de reprise pre-shutdown)"
         return 0
     fi
 
@@ -250,6 +287,29 @@ step_restart_vms() {
             || { emit_event "vm-restart" "skipped" "operator skip"; return 0; }
     fi
 
+    # v1.9.0 : « nodes Ready » ne veut PAS dire « KubeVirt prêt ».
+    # Vécu : virt-api sans endpoint 2 min après Ready -> tous les patchs
+    # runStrategy rejetés par le mutating webhook. On sonde le chemin
+    # réel (patch --dry-run=server sur la 1re VM du plan) avant de
+    # dérouler, puis chaque patch garde un retry en ceinture.
+    if [[ "$DRY_RUN" != "1" ]]; then
+        local probe_ns probe_name
+        IFS='|' read -r probe_ns probe_name _ <<< "$(echo "$halted_vms" | head -n1)"
+        log_info "Attente de virt-api (webhook KubeVirt)…"
+        local vdeadline=$(( SECONDS + 420 )) vready=0
+        while (( SECONDS < vdeadline )); do
+            if kc_quiet patch vm "$probe_name" -n "$probe_ns" --type merge \
+                 -p '{"metadata":{}}' --dry-run=server >/dev/null 2>&1; then
+                vready=1; break
+            fi
+            emit_event "vm-restart" "progress" "waiting for virt-api webhook"
+            log_info "  → virt-api pas encore prêt…"
+            sleep 10
+        done
+        [[ "$vready" == "1" ]] && log_ok "virt-api opérationnel" \
+            || log_warn "virt-api toujours indisponible après 420s — tentative quand même"
+    fi
+
     # ---------------------------------------------------------------------------
     # Algorithm (mirror of shutdown):
     #   Outer (SEQUENTIAL): each distinct group_priority level, DESCENDING
@@ -261,11 +321,27 @@ step_restart_vms() {
     _start_one_sync() {
         local ns="$1" name="$2" timeout="$3"
         local target_rs
-        target_rs=$(kc_quiet -n "$ns" get vm "$name" -o jsonpath="{.metadata.annotations['${ANNOT_PREV_RUNSTRATEGY//\//\\/}']}" 2>/dev/null || echo "")
-        [[ -z "$target_rs" ]] && target_rs="Always"
-        run kubectl --kubeconfig="$KUBECONFIG_PATH" patch vm "$name" -n "$ns" --type merge \
-            -p "{\"spec\":{\"runStrategy\":\"${target_rs}\"}}" >/dev/null 2>&1 \
-            || { log_warn "Échec start $ns/$name"; return 1; }
+        target_rs=$(vm_prev_runstrategy "$ns" "$name")
+        # v1.9.0 : sans annotation, la VM n'a pas été arrêtée par le
+        # shutdown — on la laisse éteinte (avant : fallback Always qui
+        # redémarrait tout).
+        if [[ -z "$target_rs" ]]; then
+            log_debug "  $ns/$name sans annotation de reprise — laissée arrêtée"
+            return 0
+        fi
+        local attempt patched=0
+        for attempt in 1 2 3; do
+            if run kubectl --kubeconfig="$KUBECONFIG_PATH" patch vm "$name" -n "$ns" --type merge \
+                -p "{\"spec\":{\"runStrategy\":\"${target_rs}\"}}" >/dev/null 2>&1; then
+                patched=1; break
+            fi
+            log_warn "Patch start $ns/$name échoué (essai $attempt/3)"
+            sleep 10
+        done
+        [[ "$patched" == "1" ]] || { log_warn "Échec start $ns/$name"; return 1; }
+        # Annotation consommée : la retirer pour ne pas polluer le cycle suivant
+        run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
+            "${ANNOT_PREV_RUNSTRATEGY}-" >/dev/null 2>&1 || true
         [[ "$DRY_RUN" == "1" ]] && return 0
         wait_for_vm_ready "$ns" "$name" "${timeout:-$DEFAULT_READY_TIMEOUT}" \
             || log_warn "VM $ns/$name non Ready dans le délai — on continue"

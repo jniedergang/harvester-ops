@@ -4,6 +4,43 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.9.0] — 2026-09-09 — State-aware restart, Wake-on-LAN power-on
+
+### Added
+- **The startup now restores the pre-shutdown state instead of booting
+  everything**: the shutdown annotates only the VMs it actually stops
+  (with their original run strategy) and purges stale annotations;
+  the startup restarts exactly that set, restores each VM's original
+  strategy, and consumes the annotation. Before, every Halted VM —
+  including ones deliberately stopped weeks earlier — was rebooted
+  with runStrategy Always.
+- **Wake-on-LAN power-on**: a node with `wol_mac` in the config is
+  powered on by magic packet during the startup steps (python3, then
+  wakeonlan/ether-wake as fallbacks) instead of prompting the operator
+  to press the button; nodes without it keep the prompt. The packet is
+  **re-sent while the node stays unpingable**: the OS kills networking
+  before the actual power-off, so a single packet fired on "ping died"
+  can land during shutdown and be ignored (race seen live).
+
+### Fixed
+- Reading the restart annotation via jsonpath bracket syntax
+  (`annotations['a.b/c']`) silently returns empty — the whole
+  state-restore read path now goes through a go-template helper
+  (verified against the live cluster).
+- The VM restart step now **waits for the KubeVirt virt-api webhook**
+  (server-side dry-run probe, then per-patch retries): nodes Ready
+  does not mean KubeVirt ready, and every runStrategy patch was being
+  rejected minutes after boot ("no endpoints available for virt-api").
+
+### Verified live (full real cycle on harv1)
+- Shutdown: etcd snapshot in 2 s, Longhorn wait instant (2 pod volumes
+  listed as ignored), node powered off — 51 s end to end (was ~4 min
+  with a red step and a false warning).
+- Startup: WoL boot (~40 s), API wait, virt-api wait, then exactly the
+  3 VMs the shutdown had stopped came back with their original run
+  strategies — the 11 deliberately-stopped VMs stayed down, and the
+  restart annotations were consumed.
+
 ## [1.8.9] — 2026-09-09 — Shutdown audit: etcd snapshot fixed, real safety nets
 
 Audit of a real full-cluster shutdown run (2026-09-09 00:36) that

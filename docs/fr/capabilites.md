@@ -26,7 +26,12 @@ console.
   Longhorn ne suit que les volumes attachés par des VMs — les volumes
   tenus par des pods (monitoring, logs d'upgrade) s'arrêtent avec le
   node et sont listés comme ignorés.
-- **Startup** — 5 étapes : démarrer le premier control-plane → démarrer
+- **Startup** — 5 étapes : démarrer le premier control Les nodes avec un `wol_mac` en
+  config s'allument par **Wake-on-LAN** (sans intervention) ; et seules
+  les VMs que le shutdown a réellement arrêtées redémarrent, chacune
+  avec sa run strategy d'origine — les VMs volontairement éteintes
+  avant l'arrêt restent éteintes.
+-plane → démarrer
   le reste → attendre les nodes Ready → restaurer l'état du cluster →
   redémarrer les VMs en ordre de groupe inversé (parallèle dans un
   groupe).

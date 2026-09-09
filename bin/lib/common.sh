@@ -179,11 +179,15 @@ load_cluster() {
     local count
     count=$(yq ".clusters[] | select(.name == \"$name\") | .nodes | length" "$HARVESTER_OPS_CONFIG")
     for ((i=0; i<count; i++)); do
-        local h ip role
+        local h ip role mac
         h=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].hostname" "$HARVESTER_OPS_CONFIG")
         ip=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].ip" "$HARVESTER_OPS_CONFIG")
         role=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].role" "$HARVESTER_OPS_CONFIG")
-        CLUSTER_NODES+=("$h|$ip|$role")
+        # v1.9.0 : wol_mac optionnel — permet au startup d'allumer le
+        # node par Wake-on-LAN au lieu de demander un appui sur le bouton.
+        mac=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].wol_mac // \"\"" "$HARVESTER_OPS_CONFIG")
+        [[ "$mac" == "null" ]] && mac=""
+        CLUSTER_NODES+=("$h|$ip|$role|$mac")
     done
 
     log_ok "Cluster chargé / loaded: $CLUSTER_NAME (${#CLUSTER_NODES[@]} nodes)"
@@ -198,9 +202,60 @@ list_clusters() {
 nodes_by_role() {
     local role="$1"
     for entry in "${CLUSTER_NODES[@]}"; do
-        IFS='|' read -r h ip r <<< "$entry"
+        IFS='|' read -r h ip r _mac <<< "$entry"
         [[ "$r" == "$role" ]] && echo "$h|$ip"
     done
+}
+
+# v1.9.0 : lit l'annotation previous-runStrategy d'une VM ("" si absente).
+# ATTENTION jsonpath : la forme bracket {.metadata.annotations['a.b/c']}
+# renvoie VIDE en silence (vécu : le startup ne relançait rien alors que
+# les annotations étaient posées). go-template est fiable ; il imprime
+# "<no value>" quand la clé manque, qu'on normalise en "".
+vm_prev_runstrategy() {
+    local ns="$1" name="$2" v
+    v=$(kc_quiet -n "$ns" get vm "$name" \
+        -o go-template="{{if .metadata.annotations}}{{index .metadata.annotations \"${ANNOT_PREV_RUNSTRATEGY}\"}}{{end}}" \
+        2>/dev/null || echo "")
+    [[ "$v" == "<no value>" ]] && v=""
+    echo "$v"
+}
+
+# v1.9.0 : MAC Wake-on-LAN d'un node (vide si non configurée)
+node_wol_mac() {
+    local host="$1"
+    for entry in "${CLUSTER_NODES[@]}"; do
+        IFS='|' read -r h _ip _r mac <<< "$entry"
+        [[ "$h" == "$host" ]] && { echo "$mac"; return 0; }
+    done
+    echo ""
+}
+
+# v1.9.0 : envoi d'un magic packet WoL (broadcast UDP port 9).
+# Chaîne de repli : python3 (présent sur l'hôte console, la web UI en
+# dépend) → wakeonlan → ether-wake. Retourne 1 si aucun moyen.
+wol_send() {
+    local mac="$1"
+    [[ -z "$mac" ]] && return 1
+    if command -v python3 >/dev/null 2>&1; then
+        python3 - "$mac" <<'PYWOL'
+import socket, sys, time
+mac = sys.argv[1]
+payload = b'\xff'*6 + bytes.fromhex(mac.replace(':','').replace('-',''))*16
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+for _ in range(3):
+    s.sendto(payload, ('255.255.255.255', 9))
+    time.sleep(0.2)
+PYWOL
+        return $?
+    elif command -v wakeonlan >/dev/null 2>&1; then
+        wakeonlan "$mac" >/dev/null
+    elif command -v ether-wake >/dev/null 2>&1; then
+        ether-wake "$mac" >/dev/null 2>&1 || sudo ether-wake "$mac" >/dev/null
+    else
+        return 1
+    fi
 }
 
 # -----------------------------------------------------------------------------

@@ -80,3 +80,73 @@ def test_ui_exposes_force_checkbox_with_i18n():
     i18n = (ROOT / "web" / "static" / "js" / "i18n.js").read_text()
     assert i18n.count("'shutdown.optForce'") >= 2
     assert i18n.count("'shutdown.optForceHint'") >= 2
+
+
+# ---------------------------------------------------------------------------
+# v1.9.0 — pre-shutdown state memory + Wake-on-LAN power-on
+# ---------------------------------------------------------------------------
+
+STARTUP = (ROOT / "bin" / "harvester-startup.sh").read_text()
+
+
+def test_shutdown_only_annotates_actually_running_vms():
+    """A VM already Halted before the shutdown must NOT be annotated for
+    restart (the old fallback tagged everything previous=Always, so the
+    startup rebooted long-stopped VMs). Stale annotations from previous
+    cycles are purged."""
+    fresh = (ROOT / "bin" / "harvester-shutdown.sh").read_text()
+    block = fresh.split("_stop_one_sync()", 1)[1].split("_process_group", 1)[0]
+    assert '"${ANNOT_PREV_RUNSTRATEGY}-"' in block, "stale annotation purge missing"
+    assert 'current_rs="Always"' not in block, "the annotate-everything fallback is back"
+
+
+def test_startup_restarts_only_annotated_vms_and_consumes_annotation():
+    fresh = (ROOT / "bin" / "harvester-startup.sh").read_text()
+    sel = fresh.split("halted_vms=$(", 1)[1].split("local total", 1)[0]
+    assert "vm_prev_runstrategy" in sel, "restart list must require the annotation"
+    # jsonpath bracket form silently returns EMPTY for dotted/slashed
+    # annotation keys (lived: startup restarted nothing) — banned.
+    assert "annotations['" not in fresh
+    common = (ROOT / "bin" / "lib" / "common.sh").read_text()
+    assert "vm_prev_runstrategy()" in common and "go-template" in common
+    assert "<no value>" in common
+    fresh2 = (ROOT / "bin" / "harvester-startup.sh").read_text()
+    start = fresh2.split("_start_one_sync()", 1)[1].split("_process_group", 1)[0]
+    assert 'target_rs="Always"' not in start, "no more restart-everything fallback"
+    assert '"${ANNOT_PREV_RUNSTRATEGY}-"' in start, "annotation must be consumed"
+
+
+def test_wol_helpers_and_power_steps():
+    common = (ROOT / "bin" / "lib" / "common.sh").read_text()
+    assert "wol_send()" in common and "node_wol_mac()" in common
+    # layered fallback: python3 (console host has it) then CLI tools
+    assert "SO_BROADCAST" in common and "wakeonlan" in common and "ether-wake" in common
+    assert "wol_mac" in common  # parsed from config
+    # both power steps try WoL before falling back to the human prompt
+    assert STARTUP.count("wol_send") >= 2
+    assert "node_wol_mac" in STARTUP
+    example = (ROOT / "config" / "config.yaml.example").read_text()
+    assert "wol_mac" in example
+
+
+def test_wol_is_resent_while_node_stays_down():
+    """Race seen live: the OS kills networking before the actual
+    power-off, so a magic packet sent on 'ping died' lands during
+    shutdown and is ignored. The API wait loop must re-send WoL as
+    long as the node does not answer pings."""
+    fresh = (ROOT / "bin" / "harvester-startup.sh").read_text()
+    wait = fresh.split("Attente de l'API Kubernetes", 1)[1].split("step_power_rest", 1)[0]
+    assert "wol_send" in wait and "ping -c1" in wait
+
+
+def test_vm_restart_waits_for_virt_api_webhook():
+    """Nodes Ready does not mean KubeVirt ready: virt-api had zero
+    endpoints two minutes after Ready and every runStrategy patch was
+    rejected by the mutating webhook. The restart step must probe the
+    real path (server-side dry-run patch) before the plan, and each
+    patch retries."""
+    fresh = (ROOT / "bin" / "harvester-startup.sh").read_text()
+    step = fresh.split("step_restart_vms()", 1)[1]
+    assert "--dry-run=server" in step, "virt-api probe missing"
+    start = step.split("_start_one_sync()", 1)[1].split("_process_group", 1)[0]
+    assert "for attempt in 1 2 3" in start, "patch retry missing"

@@ -270,8 +270,18 @@ step_stop_vms() {
         # Fire patch then BLOCK until the VMI is gone (or timeout).
         local ns="$1" name="$2"
         local current_rs
-        current_rs=$(kc_quiet -n "$ns" get vm "$name" -o jsonpath='{.spec.runStrategy}' 2>/dev/null || echo "Always")
-        [[ -z "$current_rs" || "$current_rs" == "Halted" ]] && current_rs="Always"
+        current_rs=$(kc_quiet -n "$ns" get vm "$name" -o jsonpath='{.spec.runStrategy}' 2>/dev/null || echo "")
+        # v1.9.0 : une VM DÉJÀ arrêtée avant le shutdown ne doit pas être
+        # relancée au startup. Avant, le fallback annotait tout le monde
+        # en previous=Always -> le startup redémarrait les 14 VMs, y
+        # compris celles volontairement éteintes depuis des semaines.
+        # On purge aussi toute annotation restée d'un cycle précédent.
+        if [[ -z "$current_rs" || "$current_rs" == "Halted" ]]; then
+            run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
+                "${ANNOT_PREV_RUNSTRATEGY}-" >/dev/null 2>&1 || true
+            log_debug "  $ns/$name déjà Halted — pas d'annotation de reprise"
+            return 0
+        fi
         run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
             "${ANNOT_PREV_RUNSTRATEGY}=${current_rs}" --overwrite >/dev/null 2>&1 || true
         run kubectl --kubeconfig="$KUBECONFIG_PATH" patch vm "$name" -n "$ns" --type merge \
