@@ -202,3 +202,172 @@ def test_artifact_server_is_not_the_authenticated_flask_app():
     assert "requires_auth" not in src
     # pas de dépendance nouvelle
     assert "import requests" not in src
+
+
+# ---------------------------------------------------------------------------
+# Configuration d'installation et orchestration (v1.18.0)
+# ---------------------------------------------------------------------------
+
+def test_install_config_is_valid_yaml_and_well_shaped():
+    yaml = pytest.importorskip("yaml")
+    cfg = wapp._harvester_install_config({
+        "token": "tok", "hostname": "harv3-node1", "password": "rancher",
+        "ssh_keys": "ssh-ed25519 AAA ju@node1\n", "ntp": "0.pool.ntp.org",
+        "dns": "172.16.3.6", "mode": "create", "device": "/dev/sda",
+        "mgmt_interface": "eno1", "method": "static", "ip": "172.16.3.13",
+        "subnet_mask": "255.255.0.0", "gateway": "172.16.0.1",
+        "vip": "172.16.3.101",
+    })
+    d = yaml.safe_load(cfg)
+    assert d["scheme_version"] == 1
+    assert d["install"]["mode"] == "create"
+    assert d["install"]["device"] == "/dev/sda"
+    assert d["install"]["vip"] == "172.16.3.101"
+    mi = d["install"]["management_interface"]
+    assert mi["interfaces"] == [{"name": "eno1"}]
+    assert mi["method"] == "static" and mi["ip"] == "172.16.3.13"
+    assert d["os"]["ssh_authorized_keys"] == ["ssh-ed25519 AAA ju@node1"]
+
+
+def test_install_config_omits_static_fields_in_dhcp():
+    yaml = pytest.importorskip("yaml")
+    d = yaml.safe_load(wapp._harvester_install_config({
+        "token": "t", "hostname": "h", "device": "/dev/sda",
+        "mgmt_interface": "eno1", "method": "dhcp", "vip": "1.2.3.4",
+    }))
+    mi = d["install"]["management_interface"]
+    assert mi["method"] == "dhcp"
+    for k in ("ip", "subnet_mask", "gateway"):
+        assert k not in mi, f"{k} n'a aucun sens en DHCP"
+
+
+def test_install_config_quotes_hostile_values():
+    """Un mot de passe avec deux-points ou dièse casserait le YAML."""
+    yaml = pytest.importorskip("yaml")
+    d = yaml.safe_load(wapp._harvester_install_config({
+        "token": "a: b #c", "hostname": "h", "password": "p@ss: word #1",
+        "device": "/dev/sda", "mgmt_interface": "eno1", "vip": "1.2.3.4",
+    }))
+    assert d["token"] == "a: b #c"
+    assert d["os"]["password"] == "p@ss: word #1"
+
+
+def test_install_endpoint_validates_before_touching_hardware(client):
+    r = client.post("/api/baremetal/install", json={})
+    assert r.status_code == 400
+    assert "bmc_host" in r.get_json()["fields"]
+
+    base = {"bmc_host": "1.2.3.4", "bmc_user": "u", "bmc_password": "p",
+            "iso": "h.iso", "hostname": "h", "device": "/dev/sda",
+            "mgmt_interface": "eno1", "vip": "1.2.3.4", "token": "t"}
+    # static sans adresse : refusé avant tout allumage
+    r = client.post("/api/baremetal/install", json={**base, "method": "static"})
+    assert r.status_code == 400 and r.get_json()["fields"] == ["ip"]
+    # nom d'ISO piégé
+    r = client.post("/api/baremetal/install",
+                    json={**base, "iso": "../../etc/passwd.iso"})
+    assert r.status_code == 400
+
+
+def test_install_action_label_carries_no_secret(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(wapp, "track_action",
+                        lambda label, cluster, worker, *a: seen.setdefault("label", label) or "id1")
+    r = client.post("/api/baremetal/install", json={
+        "bmc_host": "1.2.3.4", "bmc_user": "u", "bmc_password": "SECRET",
+        "iso": "h.iso", "hostname": "harv3", "device": "/dev/sda",
+        "mgmt_interface": "eno1", "vip": "1.2.3.4", "token": "TOKENSECRET"})
+    assert r.status_code == 202
+    assert "SECRET" not in seen["label"] and "TOKENSECRET" not in seen["label"]
+
+
+def test_advertise_ip_is_routable_towards_the_bmc():
+    """L'URL de l'ISO est consommée PAR LE BMC : publier 127.0.0.1 rendrait
+    l'insertion impossible."""
+    ip = wapp._bm_local_ip_for("172.16.1.33")
+    assert ip and not ip.startswith("127."), ip
+
+
+# ---------------------------------------------------------------------------
+# Remasterisation de l'ISO
+# ---------------------------------------------------------------------------
+
+def _build_fake_harvester_iso(d):
+    """Mini-ISO reproduisant la structure qui compte : deux grub.cfg (BIOS
+    et EFI) portant une ligne de commande d'installation, et le label."""
+    import subprocess
+    src = d / "src"
+    (src / "boot/grub2").mkdir(parents=True)
+    (src / "EFI/BOOT").mkdir(parents=True)
+    (src / "boot/grub2/grub.cfg").write_text(
+        'menuentry "Harvester" {\n'
+        '  linux /boot/kernel cdroot root=live:CDLABEL=COS_LIVE '
+        'harvester.install.mode=install console=ttyS1\n}\n')
+    (src / "EFI/BOOT/grub.cfg").write_text(
+        'menuentry "Harvester EFI" {\n'
+        '  linuxefi /boot/kernel cdroot root=live:CDLABEL=COS_LIVE '
+        'harvester.install.mode=install\n}\n')
+    (src / "boot/kernel").write_text("k")
+    iso = d / "src.iso"
+    subprocess.run(["xorriso", "-as", "mkisofs", "-V", "COS_LIVE",
+                    "-o", str(iso), str(src)],
+                   capture_output=True, check=True)
+    return iso
+
+
+@pytest.mark.skipif(not Path("/usr/bin/xorriso").exists(),
+                    reason="xorriso absent")
+def test_remaster_patches_both_grubs_and_keeps_the_label():
+    """Les deux invariants qui décident du succès d'un boot : le label
+    COS_LIVE (le rootfs est monté par lui) et les DEUX grub (BIOS et EFI),
+    sinon la machine s'installe seule dans un mode et attend dans l'autre."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        src = _build_fake_harvester_iso(d)
+        out = d / "out.iso"
+        url = "http://10.0.0.1:8091/pxe/config/TOK.yaml"
+        r = subprocess.run(
+            ["bash", str(ROOT / "bin" / "harvester-iso-remaster.sh"),
+             "--src", str(src), "--out", str(out), "--config-url", url],
+            capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr[-800:]
+        assert "STEP_EVENT|iso-verify|done" in r.stderr
+
+        extract = d / "x"
+        subprocess.run(["xorriso", "-osirrox", "on", "-indev", str(out),
+                        "-extract", "/", str(extract)],
+                       capture_output=True, check=True)
+        for cfg in ("boot/grub2/grub.cfg", "EFI/BOOT/grub.cfg"):
+            text = (extract / cfg).read_text()
+            assert "harvester.install.automatic=true" in text, cfg
+            assert url in text, cfg
+        pvd = subprocess.run(["xorriso", "-indev", str(out), "-pvd_info"],
+                             capture_output=True, text=True).stdout \
+            + subprocess.run(["xorriso", "-indev", str(out), "-pvd_info"],
+                             capture_output=True, text=True).stderr
+        assert "COS_LIVE" in pvd
+        assert (out.parent / (out.name + ".sha256")).read_text().split()[1] == out.name
+
+
+@pytest.mark.skipif(not Path("/usr/bin/xorriso").exists(),
+                    reason="xorriso absent")
+def test_remaster_refuses_an_iso_without_install_grub():
+    """Un ISO qui n'est pas un installeur Harvester doit être refusé, pas
+    produire une image silencieusement inerte."""
+    import subprocess
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "empty").mkdir()
+        (d / "empty/readme.txt").write_text("nothing here")
+        iso = d / "e.iso"
+        subprocess.run(["xorriso", "-as", "mkisofs", "-V", "COS_LIVE",
+                        "-o", str(iso), str(d / "empty")],
+                       capture_output=True, check=True)
+        r = subprocess.run(
+            ["bash", str(ROOT / "bin" / "harvester-iso-remaster.sh"),
+             "--src", str(iso), "--out", str(d / "o.iso"),
+             "--config-url", "http://x/y.yaml"],
+            capture_output=True, text=True)
+        assert r.returncode != 0
+        assert "iso-patch|error" in r.stderr

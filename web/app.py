@@ -58,6 +58,7 @@ import sqlite3
 import yaml
 import markdown
 import y_py as Y
+import pxe_server
 from flask import (
     Flask,
     Response,
@@ -1881,6 +1882,458 @@ def api_pvc_delete(cluster, namespace, name):
         "delete", f"PVC {name} deletion requested",
     )
     return jsonify({"action_id": action_id, "deleting": f"{namespace}/{name}"}), 201
+
+
+# =============================================================================
+# Installation bare-metal zéro-touch (v1.18.0)
+#
+# Enchaînement : préflight BMC -> remasterisation de l'ISO (paramètres noyau
+# d'installation automatique) -> publication ISO + config sur le serveur
+# d'artefacts -> insertion dans le lecteur virtuel -> amorce unique sur CD
+# -> allumage -> attente de l'API du nouveau cluster -> adoption.
+#
+# Modelé sur _capi_install_runner : orchestrateur court, une phase par
+# helper, et les trois précautions qu'impose une action de 30 minutes
+# (évènements agrégés, persistance périodique, annulation coopérative).
+# =============================================================================
+HARVESTER_INSTALL_TIMEOUT = int(
+    os.environ.get("HARVESTER_OPS_INSTALL_TIMEOUT", 3600))
+
+
+def _harvester_install_config(opts):
+    """Rend la configuration d'installation Harvester (YAML).
+
+    Volontairement écrite à la main plutôt que par un moteur de gabarit :
+    la structure est courte, et une clé mal placée ici coûte une
+    réinstallation complète."""
+    def esc(v):
+        v = str(v)
+        return v if re.fullmatch(r"[A-Za-z0-9._:/@-]+", v) else json.dumps(v)
+
+    L = ["scheme_version: 1"]
+    L.append(f"token: {esc(opts['token'])}")
+    L.append("os:")
+    L.append(f"  hostname: {esc(opts['hostname'])}")
+    if opts.get("password"):
+        L.append(f"  password: {esc(opts['password'])}")
+    keys = [k.strip() for k in (opts.get("ssh_keys") or "").splitlines() if k.strip()]
+    if keys:
+        L.append("  ssh_authorized_keys:")
+        L.extend(f"    - {json.dumps(k)}" for k in keys)
+    ntp = [n.strip() for n in (opts.get("ntp") or "").split(",") if n.strip()]
+    if ntp:
+        L.append("  ntp_servers:")
+        L.extend(f"    - {esc(n)}" for n in ntp)
+    dns = [d.strip() for d in (opts.get("dns") or "").split(",") if d.strip()]
+    if dns:
+        L.append("  dns_nameservers:")
+        L.extend(f"    - {esc(d)}" for d in dns)
+
+    L.append("install:")
+    L.append(f"  mode: {esc(opts.get('mode', 'create'))}")
+    L.append(f"  device: {esc(opts['device'])}")
+    L.append("  management_interface:")
+    L.append("    interfaces:")
+    L.append(f"      - name: {esc(opts['mgmt_interface'])}")
+    method = opts.get("method", "dhcp")
+    L.append(f"    method: {esc(method)}")
+    if method == "static":
+        L.append(f"    ip: {esc(opts['ip'])}")
+        L.append(f"    subnet_mask: {esc(opts['subnet_mask'])}")
+        L.append(f"    gateway: {esc(opts['gateway'])}")
+    L.append(f"    bond_options:")
+    L.append(f"      mode: {esc(opts.get('bond_mode', 'balance-tlb'))}")
+    L.append("      miimon: 100")
+    L.append(f"  vip: {esc(opts['vip'])}")
+    L.append(f"  vip_mode: {esc(opts.get('vip_mode', 'static'))}")
+    if opts.get("mode") == "join" and opts.get("server_url"):
+        L.append(f"  server_url: {esc(opts['server_url'])}")
+    return "\n".join(L) + "\n"
+
+
+def _bm_wait_api(vip, deadline, run, step):
+    """Attend que l'API du nouveau cluster réponde. Un 401/403 est un
+    SUCCÈS : il prouve qu'un apiserver écoute et refuse un anonyme."""
+    import urllib.request, ssl
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    last = ""
+    while time.time() < deadline:
+        if getattr(run, "_cancel", False):
+            raise RuntimeError("cancelled by operator")
+        try:
+            req = urllib.request.Request(f"https://{vip}:6443/version")
+            with urllib.request.urlopen(req, context=ctx, timeout=6):
+                return True
+        except Exception as e:
+            code = getattr(e, "code", None)
+            if code in (401, 403):
+                return True
+            msg = f"{type(e).__name__}"
+            if msg != last:
+                last = msg
+                step("wait-api", "progress", f"en attente de {vip}:6443 ({msg})")
+        time.sleep(15)
+    return False
+
+
+def _baremetal_install_runner(run, opts):
+    kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
+    host = opts["bmc_host"]
+    tokens = []
+    persisted = [time.time()]
+
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+        # Persistance périodique : sans elle, un redémarrage de Flask
+        # pendant les 30 minutes perd tout l'historique du run.
+        if time.time() - persisted[0] > 60:
+            persisted[0] = time.time()
+            try:
+                _actions_persist(run)
+            except Exception:
+                pass
+
+    def fail(sid, msg, code=1):
+        run.error_summary = str(msg)[:300]
+        step(sid, "error", str(msg)[:300])
+        run.exit_code = code
+        run.status = "error"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": "error", "exit_code": code,
+                  "ts": time.time()})
+        if tokens:
+            pxe_server.revoke(*tokens)
+        run.close()
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+
+    # --- préflight : le BMC dit la vérité seulement machine allumée ---
+    step("preflight", "running", f"interrogation du BMC {host}")
+    profile = _bmc_discover_one(host, kc_user, kc_pwd)
+    if not profile.get("ok"):
+        return fail("preflight", profile.get("error", "BMC unreachable"))
+    if profile.get("power_state") != "On":
+        step("preflight", "progress", "machine éteinte, allumage pour inventaire")
+        sys_path = profile.get("system_path") or "/redfish/v1/Systems/1"
+        ok, _, detail = _redfish_send(
+            host, f"{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/",
+            kc_user, kc_pwd, "POST", {"ResetType": "On"})
+        if not ok:
+            return fail("preflight", f"power on refused: {detail[:200]}")
+        deadline = time.time() + 900
+        while time.time() < deadline:
+            if getattr(run, "_cancel", False):
+                return fail("preflight", "cancelled by operator")
+            time.sleep(20)
+            profile = _bmc_discover_one(host, kc_user, kc_pwd)
+            if profile.get("post_state") == "FinishedPost":
+                break
+            step("preflight", "progress",
+                 f"POST en cours ({profile.get('post_state') or '?'})")
+    if not profile.get("virtualmedia_path"):
+        return fail("preflight", "no CD virtual media (iLO Advanced licence?)")
+    if "Cd" not in (profile.get("boot_targets") or []):
+        return fail("preflight", "the BMC cannot boot from virtual media")
+    disks = [t for t in (profile.get("uefi_targets") or []) if t.startswith("HD.")]
+    if not disks:
+        return fail("preflight", "no disk visible on this machine")
+    step("preflight", "done",
+         f"{profile.get('model')} — {len(disks)} disque(s), média virtuel OK")
+
+    # --- remasterisation ---
+    port = pxe_server.start()
+    advertise = opts.get("advertise_host") or _bm_local_ip_for(host)
+    cfg_yaml = _harvester_install_config(opts)
+    cfg_path = _iso_dir() / f"config-{run.id}.yaml"
+    cfg_path.write_text(cfg_yaml)
+    cfg_path.chmod(0o600)          # contient un token et un mot de passe
+    cfg_token = pxe_server.issue(cfg_path, "config")
+    tokens.append(cfg_token)
+    config_url = f"http://{advertise}:{port}/pxe/config/{cfg_token}.yaml"
+
+    src_iso = _iso_dir() / opts["iso"]
+    if not src_iso.is_file():
+        return fail("remaster", f"ISO not found: {opts['iso']}")
+    out_iso = _iso_dir() / f"install-{run.id}.iso"
+    step("remaster", "running", f"remasterisation de {src_iso.name}")
+    script = BIN_DIR / "harvester-iso-remaster.sh"
+    proc = subprocess.Popen(
+        ["/usr/bin/env", "bash", str(script), "--src", str(src_iso),
+         "--out", str(out_iso), "--config-url", config_url],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    for line in proc.stderr:
+        line = line.strip()
+        if line.startswith("STEP_EVENT|"):
+            parts = line.split("|", 3)
+            if len(parts) == 4:
+                step(parts[1], parts[2], parts[3])
+    if proc.wait() != 0:
+        return fail("remaster", "ISO remastering failed")
+    iso_token = pxe_server.issue(out_iso, "iso")
+    tokens.append(iso_token)
+    iso_url = f"http://{advertise}:{port}/pxe/iso/{iso_token}.iso"
+    step("serve", "done", f"artefacts publiés sur {advertise}:{port}")
+
+    # --- média virtuel + amorce + allumage ---
+    step("bmc-insert", "running", "insertion dans le lecteur virtuel")
+    vm_path, vm_res = _redfish_virtualmedia_cd(host, kc_user, kc_pwd)
+    if (vm_res or {}).get("Inserted"):
+        tgt, _ = _redfish_action_target(vm_res, "EjectVirtualMedia", "EjectMedia")
+        if tgt:
+            _redfish_send(host, tgt, kc_user, kc_pwd, "POST", {})
+            time.sleep(3)
+            _, vm_res = _redfish_virtualmedia_cd(host, kc_user, kc_pwd)
+    target, is_oem = _redfish_action_target(vm_res or {}, "InsertVirtualMedia",
+                                            "InsertMedia")
+    payload = ({"Image": iso_url} if is_oem
+               else {"Image": iso_url, "Inserted": True, "WriteProtected": True})
+    ok, _, detail = _redfish_send(host, target, kc_user, kc_pwd, "POST", payload)
+    if not ok:
+        return fail("bmc-insert", detail[:200])
+    step("bmc-insert", "done", "image montée")
+
+    step("bmc-boot", "running", "amorce unique sur le lecteur virtuel")
+    sys_path = profile.get("system_path")
+    ok, _, detail = _redfish_send(
+        host, sys_path, kc_user, kc_pwd, "PATCH",
+        {"Boot": {"BootSourceOverrideTarget": "Cd",
+                  "BootSourceOverrideEnabled": "Once"}})
+    if not ok:
+        return fail("bmc-boot", detail[:200])
+    step("bmc-boot", "done", "prochaine amorce : CD virtuel")
+
+    step("power", "running", "redémarrage sur l'installeur")
+    ok, _, detail = _redfish_send(
+        host, f"{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/",
+        kc_user, kc_pwd, "POST", {"ResetType": "ForceRestart"})
+    if not ok:
+        return fail("power", detail[:200])
+    step("power", "done", "machine redémarrée")
+
+    # --- attente de l'installation ---
+    step("wait-api", "running",
+         f"installation en cours, attente de l'API sur {opts['vip']}")
+    deadline = time.time() + HARVESTER_INSTALL_TIMEOUT
+    if not _bm_wait_api(opts["vip"], deadline, run, step):
+        return fail("wait-api",
+                    f"no API on {opts['vip']}:6443 after "
+                    f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
+    step("wait-api", "done", f"API disponible sur {opts['vip']}")
+
+    # --- ménage : ne pas laisser un ISO monté ni un artefact exposé ---
+    tgt, _ = _redfish_action_target(vm_res or {}, "EjectVirtualMedia",
+                                    "EjectMedia")
+    if tgt:
+        _redfish_send(host, tgt, kc_user, kc_pwd, "POST", {})
+    pxe_server.revoke(*tokens)
+    out_iso.unlink(missing_ok=True)
+    out_iso.with_suffix(out_iso.suffix + ".sha256").unlink(missing_ok=True)
+    cfg_path.unlink(missing_ok=True)
+    step("cleanup", "done", "média éjecté, artefacts révoqués")
+
+    run.exit_code = 0
+    run.status = "done"
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": "done", "exit_code": 0,
+              "ts": time.time()})
+    run.close()
+
+
+def _bm_local_ip_for(host):
+    """IP locale que le BMC pourra joindre : celle de l'interface qui sert
+    à lui parler. Évite de publier 127.0.0.1 dans l'URL de l'ISO."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect((host, 443))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+@app.route("/api/baremetal/install", methods=["POST"])
+@requires_auth
+@_rate_limit("baremetal-install")
+def api_baremetal_install():
+    """Lance une installation Harvester zéro-touch sur une machine nue."""
+    data = request.get_json(force=True, silent=True) or {}
+    required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
+                "device", "mgmt_interface", "vip", "token")
+    missing = [k for k in required if not data.get(k)]
+    if missing:
+        return jsonify({"error": "missing fields", "fields": missing}), 400
+    if data.get("method", "dhcp") == "static":
+        for k in ("ip", "subnet_mask", "gateway"):
+            if not data.get(k):
+                return jsonify({"error": "missing fields", "fields": [k]}), 400
+    safe_iso = _safe_artifact_name(data["iso"])
+    if not safe_iso:
+        return jsonify({"error": "invalid ISO name"}), 400
+    data["iso"] = safe_iso
+    # Le label de l'action ne porte ni token ni mot de passe.
+    action_id = track_action(f"baremetal-install:{data['hostname']}",
+                             "(local)", _baremetal_install_runner, data)
+    return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
+
+
+# =============================================================================
+# Magasin d'ISO d'installation (v1.18.0)
+#
+# Même patron que le magasin de bundles CAPI, déjà éprouvé sur 280 Mo, mais
+# dimensionné pour un ISO Harvester (~5 Go) :
+#   * le téléchargement se fait CÔTÉ SERVEUR en flux (POST /api/iso/fetch).
+#     Un upload multipart passerait par le spooling temporaire de Werkzeug,
+#     qui est un tmpfs dans le déploiement conteneurisé — donc en RAM ;
+#   * l'ISO n'est JAMAIS embarqué dans le tarball (135 Mo pour le livrable
+#     entier, contre ~5 Go pour une seule image).
+# =============================================================================
+ISO_DIR = Path(os.environ.get(
+    "HARVESTER_OPS_ISO_DIR",
+    str(Path.home() / ".local/share/harvester-ops/iso"),
+))
+
+
+def _iso_dir():
+    ISO_DIR.mkdir(parents=True, exist_ok=True)
+    return ISO_DIR
+
+
+def _safe_artifact_name(name, suffixes=(".iso",)):
+    """Nom de fichier sûr : pas de séparateur, pas de remontée, suffixe
+    attendu. Généralise la garde du magasin CAPI, qui codait son préfixe
+    en dur."""
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return None
+    if not name.endswith(tuple(suffixes)):
+        return None
+    return name
+
+
+def _iso_entry(path):
+    sha = ""
+    sha_file = path.with_suffix(path.suffix + ".sha256")
+    if sha_file.exists():
+        sha = (sha_file.read_text().split() or [""])[0]
+    st = path.stat()
+    return {"name": path.name, "size": st.st_size, "mtime": st.st_mtime,
+            "sha256": sha}
+
+
+@app.route("/api/isos")
+@requires_auth
+def api_isos_list():
+    """ISO disponibles pour une installation, avec l'espace disque —
+    un opérateur doit voir qu'il reste de la place avant de lancer un
+    téléchargement de plusieurs gigaoctets."""
+    d = _iso_dir()
+    items = sorted((_iso_entry(p) for p in d.glob("*.iso")),
+                   key=lambda e: e["mtime"], reverse=True)
+    try:
+        st = os.statvfs(d)
+        free, total = st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+    except OSError:
+        free = total = 0
+    return jsonify({"isos": items, "iso_dir": str(d),
+                    "disk_free": free, "disk_total": total,
+                    "used": sum(e["size"] for e in items)})
+
+
+def _iso_fetch_runner(run, url, dest):
+    """Télécharge un ISO en flux, avec progression et sha256 calculé au vol."""
+    import urllib.request, hashlib
+    tmp = dest.with_suffix(dest.suffix + ".downloading")
+
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    step("fetch", "running", f"downloading {url}")
+    try:
+        h = hashlib.sha256()
+        done = 0
+        last_pct = -1
+        with urllib.request.urlopen(url, timeout=60) as r:
+            total = int(r.headers.get("Content-Length") or 0)
+            with open(tmp, "wb") as f:
+                while True:
+                    if getattr(run, "_cancel", False):
+                        raise RuntimeError("cancelled by operator")
+                    chunk = r.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    h.update(chunk)
+                    done += len(chunk)
+                    if total:
+                        pct = int(done * 100 / total)
+                        # Agrégé : le buffer d'évènements d'une action est
+                        # borné, inutile de le remplir de bruit.
+                        if pct != last_pct and pct % 5 == 0:
+                            last_pct = pct
+                            step("fetch", "progress",
+                                 f"{pct}% ({done // (1024*1024)} MiB)")
+        tmp.rename(dest)
+        digest = h.hexdigest()
+        dest.with_suffix(dest.suffix + ".sha256").write_text(
+            f"{digest}  {dest.name}\n")
+        step("fetch", "done", f"{dest.name} ({done // (1024*1024)} MiB)")
+        step("sha256", "done", digest)
+        run.exit_code = 0
+        run.status = "done"
+    except Exception as e:
+        tmp.unlink(missing_ok=True)
+        run.error_summary = str(e)[:300]
+        step("fetch", "error", str(e)[:300])
+        run.exit_code = 1
+        run.status = "error"
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status,
+              "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+
+
+@app.route("/api/iso/fetch", methods=["POST"])
+@requires_auth
+@_rate_limit("iso-fetch")
+def api_iso_fetch():
+    """Télécharge un ISO côté serveur. Body: {url, name?}."""
+    data = request.get_json(force=True, silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return jsonify({"error": "http(s) URL required"}), 400
+    name = data.get("name") or url.rsplit("/", 1)[-1].split("?")[0]
+    name = _safe_artifact_name(name)
+    if not name:
+        return jsonify({"error": "the file name must be a plain *.iso"}), 400
+    dest = _iso_dir() / name
+    if dest.exists():
+        return jsonify({"error": "already present", "name": name}), 409
+    action_id = track_action(f"iso-fetch:{name}", "(local)",
+                             _iso_fetch_runner, url, dest)
+    return jsonify({"action_id": action_id, "name": name}), 202
+
+
+@app.route("/api/iso/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("iso-delete")
+def api_iso_delete(name):
+    safe = _safe_artifact_name(name)
+    if not safe:
+        return jsonify({"error": "invalid name"}), 400
+    path = _iso_dir() / safe
+    if not path.exists():
+        return jsonify({"error": "not found"}), 404
+    path.unlink()
+    path.with_suffix(path.suffix + ".sha256").unlink(missing_ok=True)
+    return jsonify({"deleted": safe})
 
 
 @app.route("/api/pcidevices/<cluster>")

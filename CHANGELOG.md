@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.18.0] — 2026-09-10 — Bare-metal: ISO store, remastering, install orchestration
+
+### Added
+- **ISO store** (`GET /api/isos`, `POST /api/iso/fetch`, `DELETE
+  /api/iso/<name>`): the image is downloaded **server-side in a stream**
+  with progress and a checksum computed on the fly. A multipart upload
+  would transit through Werkzeug's temporary spooling, which is a tmpfs
+  in the containerised deployment — a 7.6 GB image would land in RAM.
+  The ISO is never shipped in the tarball (7.6 GB against 135 MB for the
+  whole deliverable).
+- **`bin/harvester-iso-remaster.sh`**: injects
+  `harvester.install.automatic` and `config_url` into the kernel command
+  line of **every** grub config found — BIOS and EFI both, since patching
+  one leaves a machine that installs itself in one mode and waits for an
+  operator in the other. It refuses an ISO carrying no Harvester install
+  entry rather than producing a silently inert image, and verifies the
+  `COS_LIVE` volume label survived (the kernel mounts its rootfs by that
+  label).
+- **Install orchestration** (`POST /api/baremetal/install`): preflight →
+  remaster → serve → insert media → one-shot boot → power → wait for the
+  new cluster's API → cleanup. The preflight powers the machine on and
+  waits for POST before trusting any inventory, then refuses to go
+  further without a CD-capable virtual media, a `Cd` boot target and at
+  least one disk. Secrets never reach the action label, and the config
+  file is written 0600.
+- The runner addresses the three known limits of long actions: events
+  aggregated (the buffer is bounded), state persisted periodically (a
+  Flask restart used to lose a 30-minute run) and a cooperative cancel
+  flag (a pure-Python worker cannot be killed).
+
+### Tests
+- Config generation parsed by a real YAML parser, including hostile
+  values and the DHCP/static split; endpoint validation before any
+  hardware is touched; the advertised URL must be routable by the BMC,
+  never 127.0.0.1; remastering exercised on a synthetic Harvester-like
+  ISO (both grubs patched, label preserved, refusal of a non-installer
+  image).
+
 ## [1.17.0] — 2026-09-09 — Bare-metal: Redfish virtual media and artifact server
 
 First slice of the zero-touch Harvester install. Everything here was
