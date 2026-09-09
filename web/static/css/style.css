@@ -3668,3 +3668,15 @@ textarea:focus-visible {
   color: var(--text-dim);
   width: 40%;
 }
+
+/* v1.11.0 — boîte d'options du restore guidé */
+.snap-restore-box {
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-elev);
+}

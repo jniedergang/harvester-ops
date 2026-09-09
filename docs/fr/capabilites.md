@@ -56,8 +56,13 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
 
 - Liste VM par namespace avec `runStrategy` et phase VMI.
 - Start/stop en masse via `runStrategy` (une VM ou tout un namespace).
-- **Snapshots** — créer un `VirtualMachineBackup` (type=snapshot) par VM ;
-  restaurer depuis un snapshot.
+- **Snapshots** — créer un `VirtualMachineBackup` (type=snapshot) par VM.
+  **Restauration guidée** : la restauration propose de prendre d'abord
+  un snapshot de sécurité de l'état courant et d'arrêter la VM
+  automatiquement (les deux cochés par défaut), pour que « snapshoter
+  l'état vivant, arrêter, revenir en arrière » soit une seule action
+  tracée — et si le retour arrière était une erreur, le snapshot de
+  sécurité ramène exactement où on en était.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

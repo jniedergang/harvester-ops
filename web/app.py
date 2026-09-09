@@ -5689,6 +5689,10 @@ def api_vm_snapshot_restore(cluster, namespace, name):
     data = request.get_json(force=True, silent=True) or {}
     snap = data.get("snapshot")
     new_vm = data.get("new_vm", False)
+    # v1.11.0 : restore guidé — snapshot de sécurité de l'état courant
+    # puis arrêt de la VM, avant le restore, le tout dans UNE action.
+    pre_snapshot = bool(data.get("pre_snapshot", False))
+    stop_vm = bool(data.get("stop_vm", False))
     if not snap:
         return jsonify({"error": "snapshot name required"}), 400
     # v1.10.1 : le webhook Harvester refuse un restore in-place sur une VM
@@ -5697,21 +5701,23 @@ def api_vm_snapshot_restore(cluster, namespace, name):
     # lieu de laisser kubectl échouer en brut. On ne bloque que si on
     # VOIT un VMI ; en cas de doute (cluster injoignable), on laisse le
     # webhook trancher.
+    vm_running = False
     if not new_vm:
         try:
             probe = subprocess.run(
                 ["kubectl", "--kubeconfig", kc, "-n", namespace,
                  "get", "vmi", name, "--no-headers"],
                 capture_output=True, text=True, timeout=10)
-            if probe.returncode == 0 and probe.stdout.strip():
-                return jsonify({
-                    "error": "vm-running",
-                    "detail": "The VM must be stopped before an in-place "
-                              "restore (Harvester webhook requirement). "
-                              "Stop it, then retry.",
-                }), 409
+            vm_running = probe.returncode == 0 and bool(probe.stdout.strip())
         except Exception:
             pass
+        if vm_running and not stop_vm:
+            return jsonify({
+                "error": "vm-running",
+                "detail": "The VM must be stopped before an in-place "
+                          "restore (Harvester webhook requirement). "
+                          "Stop it, then retry — or rerun with stop_vm.",
+            }), 409
     restore_name = f"{name}-restore-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
     manifest = {
         "apiVersion": "harvesterhci.io/v1beta1",
@@ -5729,9 +5735,96 @@ def api_vm_snapshot_restore(cluster, namespace, name):
         },
     }
 
+    pre_snap_name = f"{name}-prerestore-{time.strftime('%Y%m%d-%H%M%S', time.gmtime())}"
+
     def _runner(run):
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
+
+        def _step(sid, status, msg):
+            run.emit({"type": "step", "step_id": sid, "status": status,
+                      "message": msg, "ts": time.time()})
+
+        def _fail(sid, msg, code=1):
+            run.error_summary = msg[:300]
+            _step(sid, "error", msg[:300])
+            run.exit_code = code; run.status = "error"; run.ended_at = time.time()
+            run.emit({"type": "status", "status": "error", "exit_code": code,
+                      "ts": time.time()})
+            run.close()
+
+        # -- Étape 0 (option) : snapshot de sécurité de l'état COURANT,
+        #    pris avant l'arrêt — le filet pour revenir en arrière si le
+        #    restore était une erreur.
+        if pre_snapshot:
+            _step("pre-snapshot", "running", f"safety snapshot {pre_snap_name}")
+            pre_manifest = {
+                "apiVersion": "harvesterhci.io/v1beta1",
+                "kind": "VirtualMachineBackup",
+                "metadata": {"name": pre_snap_name, "namespace": namespace,
+                             "labels": {"harvester-ops.io/created-by": "harvester-ops"}},
+                "spec": {"type": "snapshot",
+                         "source": {"apiGroup": "kubevirt.io",
+                                    "kind": "VirtualMachine", "name": name}},
+            }
+            try:
+                r = subprocess.run(
+                    ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
+                    input=json.dumps(pre_manifest).encode(),
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+                if r.returncode != 0:
+                    return _fail("pre-snapshot",
+                                 (r.stderr.decode().strip().splitlines() or ["snapshot failed"])[-1])
+            except subprocess.TimeoutExpired:
+                return _fail("pre-snapshot", "kubectl apply timed out", 124)
+            deadline = time.time() + 180
+            ready = False
+            while time.time() < deadline:
+                try:
+                    out = subprocess.check_output(
+                        ["kubectl", "--kubeconfig", kc, "-n", namespace, "get",
+                         "virtualmachinebackups.harvesterhci.io", pre_snap_name,
+                         "-o", "jsonpath={.status.readyToUse}"],
+                        stderr=subprocess.DEVNULL, timeout=5)
+                    if out.decode().strip() == "true":
+                        ready = True; break
+                except Exception:
+                    pass
+                time.sleep(3)
+            if not ready:
+                return _fail("pre-snapshot",
+                             f"safety snapshot {pre_snap_name} not ready after 180s")
+            _step("pre-snapshot", "done", f"safety snapshot {pre_snap_name} ready")
+
+        # -- Étape 0bis (option) : arrêter la VM (le webhook Harvester
+        #    exige une VM arrêtée pour un restore in-place).
+        if stop_vm and vm_running:
+            _step("stop-vm", "running", f"stopping {namespace}/{name}")
+            try:
+                r = subprocess.run(
+                    ["kubectl", "--kubeconfig", kc, "-n", namespace, "patch",
+                     "vm", name, "--type", "merge",
+                     "-p", '{"spec":{"runStrategy":"Halted"}}'],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
+                if r.returncode != 0:
+                    return _fail("stop-vm",
+                                 (r.stderr.decode().strip().splitlines() or ["patch failed"])[-1])
+            except subprocess.TimeoutExpired:
+                return _fail("stop-vm", "kubectl patch timed out", 124)
+            deadline = time.time() + 180
+            stopped = False
+            while time.time() < deadline:
+                p2 = subprocess.run(
+                    ["kubectl", "--kubeconfig", kc, "-n", namespace,
+                     "get", "vmi", name, "--no-headers"],
+                    capture_output=True, text=True, timeout=10)
+                if p2.returncode != 0 or not p2.stdout.strip():
+                    stopped = True; break
+                time.sleep(3)
+            if not stopped:
+                return _fail("stop-vm", f"{name} still running after 180s")
+            _step("stop-vm", "done", f"{namespace}/{name} stopped")
+
         run.emit({"type": "step", "step_id": "apply", "status": "running",
                   "message": f"kubectl apply VirtualMachineRestore/{restore_name}",
                   "ts": time.time()})
@@ -5776,7 +5869,16 @@ def api_vm_snapshot_restore(cluster, namespace, name):
                 )
                 d = json.loads(r)
                 conds = d.get("status", {}).get("conditions", []) or []
-                complete = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conds)
+                cmap = {c.get("type"): c.get("status") for c in conds}
+                # v1.11.0 : Harvester 1.8 marque un restore terminé avec
+                # Ready=True (et InProgress/Progressing=False), PAS une
+                # condition Complete (jamais émise -> l'action pollait
+                # jusqu'au deadline de 1200 s). On accepte les deux
+                # schémas pour rester compatible.
+                complete = (cmap.get("Complete") == "True"
+                            or (cmap.get("Ready") == "True"
+                                and cmap.get("InProgress", "False") != "True"
+                                and cmap.get("Progressing", "False") != "True"))
                 if complete:
                     run.emit({"type": "step", "step_id": "wait", "status": "done",
                               "message": "restore complete", "ts": time.time()})

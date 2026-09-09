@@ -17,6 +17,7 @@ const VMSnapshots = (() => {
           <button class="btn btn-secondary btn-sm tip" id="snap-refresh" data-tip="${i18n.t('snap.refreshTip')}">${i18n.t('snap.refresh')}</button>
           <span class="apply-result" id="snap-feedback"></span>
         </div>
+        <div id="snap-restore-opts" hidden></div>
         <p class="form-hint">
           ${i18n.t('snap.hint')}
         </p>
@@ -110,13 +111,43 @@ const VMSnapshots = (() => {
       refresh();
     }
 
-    async function doRestore(snap) {
-      if (!confirm(i18n.t('snap.confirmRestore', {name, snap}))) return;
+    // v1.11.0 : restore guidé — le clic ouvre une boîte d'options au lieu
+    // d'un confirm() sec : snapshot de sécurité de l'état courant (coché
+    // par défaut, le filet pour revenir en arrière) + arrêt automatique
+    // de la VM (exigé par Harvester pour un restore in-place).
+    function doRestore(snap) {
+      const box = panel.el.querySelector('#snap-restore-opts');
+      box.hidden = false;
+      box.innerHTML = `
+        <div class="snap-restore-box">
+          <strong>↩ ${esc(i18n.t('snap.restoreTitle', {snap}))}</strong>
+          <label class="opt-row"><input type="checkbox" id="snap-opt-pre" checked>
+            <span>📸 ${esc(i18n.t('snap.optPre'))}</span></label>
+          <label class="opt-row"><input type="checkbox" id="snap-opt-stop" checked>
+            <span>⏻ ${esc(i18n.t('snap.optStop'))}</span></label>
+          <div class="apply-bar">
+            <button class="btn btn-primary btn-sm" id="snap-restore-go">↩ ${esc(i18n.t('snap.restoreGo'))}</button>
+            <button class="btn btn-secondary btn-sm" id="snap-restore-cancel">${esc(i18n.t('common.cancel'))}</button>
+          </div>
+        </div>`;
+      box.querySelector('#snap-restore-cancel').addEventListener('click', () => {
+        box.hidden = true; box.innerHTML = '';
+      });
+      box.querySelector('#snap-restore-go').addEventListener('click', () => {
+        const pre = box.querySelector('#snap-opt-pre').checked;
+        const stop = box.querySelector('#snap-opt-stop').checked;
+        box.hidden = true; box.innerHTML = '';
+        fireRestore(snap, pre, stop);
+      });
+    }
+
+    async function fireRestore(snap, pre, stop) {
       fb.textContent = i18n.t('snap.restoring');
       const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ snapshot: snap, new_vm: false }),
+        body: JSON.stringify({ snapshot: snap, new_vm: false,
+                               pre_snapshot: pre, stop_vm: stop }),
       });
       const d = await r.json();
       // v1.10.1 : restore in-place refusé tant que la VM tourne — message
@@ -131,6 +162,12 @@ const VMSnapshots = (() => {
     panel.el.querySelector('#snap-create').addEventListener('click', doCreate);
     panel.el.querySelector('#snap-refresh').addEventListener('click', refresh);
     refresh();
+  }
+
+  function esc(v) {
+    return String(v == null ? '' : v)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
   return { open };

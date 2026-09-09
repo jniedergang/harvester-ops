@@ -4,6 +4,32 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.11.0] — 2026-09-09 — Guided snapshot restore
+
+### Added
+- **Restoring a snapshot is now a guided sequence** (user request):
+  the restore button opens options instead of a bare confirm — take a
+  safety snapshot of the CURRENT state first (before the stop, so it
+  captures the live state you might want back) and stop the VM
+  automatically (Harvester requires a stopped VM for an in-place
+  restore). Both are on by default, and the whole snapshot -> stop ->
+  restore runs as one tracked action with live steps. If the rollback
+  turns out wrong, the safety snapshot is right there to return to.
+
+### Fixed
+- A restore action stayed "running" for up to 20 minutes after the
+  restore had actually finished: the completion poll only recognised a
+  `Complete` condition, but Harvester 1.8 signals a finished restore
+  with `Ready=True` / `InProgress=False`. Both schemes are accepted now,
+  so the action reports done within a minute (seen live: two restores
+  stuck at "InProgress=False,Ready=True" before the fix).
+
+### Tests
+- Guided-flow ordering (safety snapshot before the stop, then restore),
+  the Harvester 1.8 completion condition, and the UI options. Verified
+  on the live cluster: full snapshot -> stop -> restore -> VM running,
+  action done in ~1 min.
+
 ## [1.10.1] — 2026-09-09 — Snapshot panel: honest columns, actionable restore error
 
 ### Fixed
