@@ -84,7 +84,16 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   une image — passent par le mécanisme `volumeClaimTemplates` de
   Harvester ; bus, ordre de boot, cdrom, attachement bridge/masquerade,
   modèle de NIC et MAC sont éditables, avec validation côté client et
-  dry-run serveur. Un repli JSON brut reste disponible. L'onglet
+  dry-run serveur. Un repli JSON brut reste disponible. Un onglet
+  **Firmware** couvre le mode de démarrage (BIOS / UEFI / UEFI +
+  Secure Boot, avec la fonctionnalité SMM que le Secure Boot exige),
+  le TPM 2.0 avec état persistant, le type de machine et le numéro de
+  série — ce sans quoi les invités récents comme Windows 11 ou SLE 16
+  refusent de démarrer. **Calcul** ajoute les plafonds d'ajout à chaud
+  (sockets CPU max, mémoire invité max), le modèle de CPU
+  (host-model / host-passthrough) et, dans un repli, les réservations
+  d'ordonnancement. **Général** édite le nom d'hôte invité et les tags
+  Harvester (`tag.harvesterhci.io/*`). L'onglet
   Cloud-init gagne un **assistant** (v1.8.1) qui génère du YAML
   cloud-config et network-data v1 propres dans les éditeurs — nom
   d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH

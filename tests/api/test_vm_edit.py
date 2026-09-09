@@ -514,3 +514,67 @@ console.log(JSON.stringify({
     got = json.loads(out)
     assert got == {"iface": True, "size": True, "tz": True,
                    "shell": "text", "dev": True}
+
+
+# ---------------------------------------------------------------------------
+# v1.12.0 — firmware (UEFI/Secure Boot/TPM), compute ceilings, Harvester tags
+# ---------------------------------------------------------------------------
+
+def test_tag_mapper_reads_only_harvester_tags():
+    """The General tab edits tag.harvesterhci.io/* labels; the internal
+    labels Harvester sets (creator, vmName) must stay untouched."""
+    vm = {"spec": {"template": {"metadata": {"labels": {
+        "harvesterhci.io/creator": "harvester",
+        "harvesterhci.io/vmName": "vm1",
+        "tag.harvesterhci.io/app": "db",
+        "tag.harvesterhci.io/purpose": "test",
+    }}}}}
+    out = _run_node("console.log(JSON.stringify(M.vmTagsToForm("
+                    + json.dumps(vm) + ")));")
+    assert json.loads(out) == [{"key": "app", "value": "db"},
+                              {"key": "purpose", "value": "test"}]
+
+
+def test_firmware_section_exists_with_uefi_tpm_and_smm():
+    """UEFI + Secure Boot + TPM unblock modern guests (Windows 11, SLE 16).
+    KubeVirt REQUIRES the SMM feature alongside secureBoot, and a merge
+    patch needs explicit nulls to go back to BIOS / drop the TPM."""
+    js = VM_EDIT_JS.read_text()
+    assert "id: 'firmware'" in js, "the Firmware tab must exist"
+    fw = js.split("case 'firmware': {", 1)[1].split("case 'lifecycle'", 1)[0]
+    # BIOS clears the bootloader, UEFI sets efi.secureBoot
+    assert "firmware.bootloader = null" in fw
+    assert "secureBoot: mode === 'uefi-sb'" in fw
+    # secure boot pulls SMM in, and removes it when leaving
+    assert "smm: mode === 'uefi-sb' ? { enabled: true } : null" in fw
+    # TPM on/off + persistent, null to detach
+    assert "tpm: tpmOn ? (tpmPersist ? { persistent: true } : {}) : null" in fw
+
+
+def test_compute_exposes_hotplug_ceilings_model_and_reservations():
+    js = VM_EDIT_JS.read_text()
+    comp = js.split("case 'compute': {", 1)[1].split("case 'firmware'", 1)[0]
+    for field in ("cpu.maxSockets", "memory.maxGuest", "cpu.model",
+                  "res.limits.cpu", "res.requests.memory"):
+        assert f"'{field}'" in comp, f"{field} must reach the patch"
+    # empty stays empty: optional keys are nulled, not set to ""
+    assert "maxSockets > 0 ? maxSockets : null" in comp
+    assert "|| null" in comp
+
+
+def test_general_patch_deletes_removed_tags_explicitly():
+    """A merge patch MERGES labels — a tag removed in the UI must be sent
+    as null or it silently survives on the VM."""
+    js = VM_EDIT_JS.read_text()
+    gen = js.split("case 'general': {", 1)[1].split("case 'compute'", 1)[0]
+    assert "labels[TAG_PREFIX + prev.key] = null" in gen
+    assert "hostname:" in gen
+    assert "errTagDup" in gen and "errTagKey" in gen
+
+
+def test_new_editor_strings_are_translated_everywhere():
+    i18n = (WEB / "static" / "js" / "i18n.js").read_text()
+    for key in ("vm.edit.firmware", "vm.edit.bootMode", "vm.edit.tpm",
+                "vm.edit.maxSockets", "vm.edit.cpuModel", "vm.edit.tags",
+                "vm.edit.hostname", "vm.edit.resAdvanced"):
+        assert i18n.count(f"'{key}'") == 5, f"{key} missing in some language"

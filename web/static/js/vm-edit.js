@@ -30,6 +30,7 @@ const VMEdit = (() => {
   const SECTIONS = [
     { id: 'general',   label: () => tr('vm.edit.general', 'General'),      icon: '📋' },
     { id: 'compute',   label: () => tr('vm.edit.compute', 'Compute'),      icon: '🧠' },
+    { id: 'firmware',  label: () => tr('vm.edit.firmware', 'Firmware'),    icon: '🔧' },
     { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: '💾' },
     { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: '🔌' },
     { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: '☁️' },
@@ -116,6 +117,31 @@ const VMEdit = (() => {
             label: { en: 'Storage class', fr: 'Storage class' },
             description: { en: 'Blank disks only (image disks inherit theirs); empty = cluster default',
                            fr: 'Disques vierges seulement (hérité pour les images) ; vide = défaut du cluster' } },
+        ],
+      },
+    },
+  };
+
+  // v1.12.0 — tags Harvester (labels tag.harvesterhci.io/<clé>) éditables
+  // comme dans l'UI Harvester : ils servent au filtrage et aux inventaires.
+  const TAG_SCHEMA = {
+    id: 'vm-tags',
+    nested: {
+      tag: {
+        min: 0, max: 20,
+        label: { en: 'Tags', fr: 'Tags' },
+        itemTitle: (v) => `🏷 ${v.key || tr('vm.edit.newTag', 'new tag')}${v.value ? ' = ' + v.value : ''}`,
+        newItem: (items) => ({ key: nextFree('tag-', 1, items.map(i => i.key)) }),
+        args: [
+          { name: 'key', type: 'text', required: true, validate: /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/,
+            suggest: ['app', 'purpose', 'case', 'ssh-user', 'owner', 'env'],
+            label: { en: 'Key', fr: 'Clé' },
+            description: { en: 'Stored as tag.harvesterhci.io/<key>',
+                           fr: 'Stocké en tag.harvesterhci.io/<clé>' } },
+          { name: 'value', type: 'text',
+            label: { en: 'Value', fr: 'Valeur' },
+            description: { en: 'Free text (Kubernetes label value rules)',
+                           fr: 'Texte libre (règles de valeur de label Kubernetes)' } },
         ],
       },
     },
@@ -792,8 +818,9 @@ const VMEdit = (() => {
     const annot    = (vm.metadata?.annotations) || {};
 
     switch (id) {
-      case 'general': return renderGeneral(vm, spec, annot);
+      case 'general': return renderGeneral(vm, spec, annot, cluster);
       case 'compute': return renderCompute(domain);
+      case 'firmware': return renderFirmware(domain);
       case 'lifecycle': return renderLifecycle(template);
       case 'disks':   return renderDisksSection(vm, cluster);
       case 'network': return renderNetworkSection(vm, cluster);
@@ -848,28 +875,52 @@ const VMEdit = (() => {
       ${applyBar('network')}`;
   }
 
-  function renderGeneral(vm, spec, annot) {
+  const TAG_PREFIX = 'tag.harvesterhci.io/';
+
+  /** labels du template -> lignes {key,value} pour l'éditeur de tags */
+  function vmTagsToForm(vm) {
+    const labels = (((vm.spec || {}).template || {}).metadata || {}).labels || {};
+    return Object.keys(labels)
+      .filter(k => k.startsWith(TAG_PREFIX))
+      .sort()
+      .map(k => ({ key: k.slice(TAG_PREFIX.length), value: labels[k] }));
+  }
+
+  function renderGeneral(vm, spec, annot, cluster) {
     const description = annot['harvesterhci.io/description'] || annot['description'] || '';
+    const hostname = ((spec.template || {}).spec || {}).hostname || '';
+    const tagItems = vmTagsToForm(vm);
     return `
-      <h3>General</h3>
+      <h3>${esc(tr('vm.edit.general', 'General'))}</h3>
       <div class="form-row">
-        <label>Name</label>
+        <label>${esc(tr('vm.edit.fName', 'Name'))}</label>
         <input type="text" value="${esc(vm.metadata.name)}" readonly>
       </div>
       <div class="form-row">
-        <label>Namespace</label>
+        <label>${esc(tr('vm.edit.fNamespace', 'Namespace'))}</label>
         <input type="text" value="${esc(vm.metadata.namespace)}" readonly>
       </div>
       <div class="form-row">
-        <label>Description (annotation harvesterhci.io/description)</label>
+        <label>${esc(tr('vm.edit.fDescription', 'Description'))}</label>
         <textarea data-field="annot.description" rows="2">${esc(description)}</textarea>
       </div>
       <div class="form-row">
-        <label>Run strategy</label>
+        <label>${esc(tr('vm.edit.fRunStrategy', 'Run strategy'))}</label>
         <select data-field="spec.runStrategy">
           ${['Always','RerunOnFailure','Manual','Halted'].map(v =>
             `<option value="${v}" ${spec.runStrategy === v ? 'selected' : ''}>${v}</option>`).join('')}
         </select>
+      </div>
+      <div class="form-row">
+        <label>${esc(tr('vm.edit.hostname', 'Guest hostname'))}</label>
+        <input type="text" data-field="spec.hostname" value="${esc(hostname)}"
+               placeholder="${esc(vm.metadata.name)}">
+        <span class="form-hint">${esc(tr('vm.edit.hostnameHint', 'Empty = the VM name is used'))}</span>
+      </div>
+      <h3>🏷 ${esc(tr('vm.edit.tags', 'Tags'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.tagsHint', 'Harvester tags (labels tag.harvesterhci.io/<key>) — also shown in the Harvester UI.'))}</p>
+      <div class="vm-edit-cards" data-cards="tags">
+        ${TFForm.render(TAG_SCHEMA, cluster, { tag: tagItems }, { hideHeader: true })}
       </div>
       ${applyBar('general')}`;
   }
@@ -878,41 +929,146 @@ const VMEdit = (() => {
     const cpu = domain.cpu || {};
     const mem = domain.memory || {};
     const res = (domain.resources || {}).requests || {};
+    const lim = (domain.resources || {}).limits || {};
     return `
-      <h3>Compute resources</h3>
+      <h3>${esc(tr('vm.edit.computeTitle', 'Compute resources'))}</h3>
       <div class="grid-2">
         <div class="form-row">
-          <label>CPU sockets</label>
+          <label>${esc(tr('vm.edit.fSockets', 'CPU sockets'))}</label>
           <input type="number" min="1" data-field="cpu.sockets" value="${cpu.sockets ?? 1}">
         </div>
         <div class="form-row">
-          <label>CPU cores</label>
+          <label>${esc(tr('vm.edit.fCores', 'CPU cores'))}</label>
           <input type="number" min="1" data-field="cpu.cores" value="${cpu.cores ?? 1}">
         </div>
         <div class="form-row">
-          <label>Threads per core</label>
+          <label>${esc(tr('vm.edit.fThreads', 'Threads per core'))}</label>
           <input type="number" min="1" data-field="cpu.threads" value="${cpu.threads ?? 1}">
         </div>
         <div class="form-row">
-          <label>Memory (guest, e.g. 4Gi / 4096Mi)</label>
+          <label>${esc(tr('vm.edit.fMemory', 'Memory (guest)'))}</label>
           <input type="text" data-field="memory.guest" value="${esc(mem.guest || '')}" placeholder="4Gi">
         </div>
       </div>
-      <h3>Current resources</h3>
-      <pre>${esc(JSON.stringify({ requests: res }, null, 2))}</pre>
-      <p class="form-hint">Changing CPU/memory while the VM is running may require a reboot for the guest to see the new values.</p>
+      <h3>${esc(tr('vm.edit.hotplug', 'Hot-plug ceilings'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.hotplugHint', 'Set these ABOVE the current values to allow adding CPU or memory without a reboot later. They cannot be lowered while the VM runs.'))}</p>
+      <div class="grid-2">
+        <div class="form-row">
+          <label>${esc(tr('vm.edit.maxSockets', 'Max CPU sockets (hot-plug)'))}</label>
+          <input type="number" min="0" data-field="cpu.maxSockets" value="${cpu.maxSockets ?? ''}"
+                 placeholder="${cpu.sockets ?? 1}">
+        </div>
+        <div class="form-row">
+          <label>${esc(tr('vm.edit.maxGuest', 'Max guest memory (hot-plug)'))}</label>
+          <input type="text" data-field="memory.maxGuest" value="${esc(mem.maxGuest || '')}"
+                 placeholder="${esc(mem.guest || '8Gi')}">
+        </div>
+      </div>
+      <h3>${esc(tr('vm.edit.cpuModel', 'CPU model'))}</h3>
+      <div class="form-row">
+        <label>${esc(tr('vm.edit.cpuModel', 'CPU model'))}</label>
+        <input type="text" data-field="cpu.model" value="${esc(cpu.model || '')}"
+               list="dl-cpu-model" autocomplete="off" placeholder="(default)">
+        <datalist id="dl-cpu-model">
+          <option value="host-model"></option>
+          <option value="host-passthrough"></option>
+          <option value="Skylake-Server"></option>
+          <option value="Cascadelake-Server"></option>
+        </datalist>
+        <span class="form-hint">${esc(tr('vm.edit.cpuModelHint', 'host-passthrough is fastest but blocks live migration to a different CPU; host-model is the usual compromise. Empty = cluster default.'))}</span>
+      </div>
+      <details class="vm-edit-adv">
+        <summary>${esc(tr('vm.edit.resAdvanced', 'Scheduling reservations (advanced)'))}</summary>
+        <p class="form-hint">${esc(tr('vm.edit.resHint', 'What Kubernetes actually schedules. Harvester derives these from the overcommit ratio — override only if you know why. Empty = leave as-is.'))}</p>
+        <div class="grid-2">
+          <div class="form-row">
+            <label>limits.cpu</label>
+            <input type="text" data-field="res.limits.cpu" value="${esc(lim.cpu || '')}" placeholder="2">
+          </div>
+          <div class="form-row">
+            <label>limits.memory</label>
+            <input type="text" data-field="res.limits.memory" value="${esc(lim.memory || '')}" placeholder="4Gi">
+          </div>
+          <div class="form-row">
+            <label>requests.cpu</label>
+            <input type="text" data-field="res.requests.cpu" value="${esc(res.cpu || '')}" placeholder="125m">
+          </div>
+          <div class="form-row">
+            <label>requests.memory</label>
+            <input type="text" data-field="res.requests.memory" value="${esc(res.memory || '')}" placeholder="2730Mi">
+          </div>
+        </div>
+      </details>
+      <p class="form-hint">${esc(tr('vm.edit.computeHint', 'Changing CPU/memory while the VM is running may require a reboot for the guest to see the new values.'))}</p>
       ${applyBar('compute')}`;
+  }
+
+  // v1.12.0 — Firmware : UEFI / Secure Boot / TPM / type de machine.
+  // Débloque les invités modernes (Windows 11, SLE 16) qui refusent de
+  // booter en BIOS hérité ou exigent un TPM 2.0.
+  function renderFirmware(domain) {
+    const fw   = domain.firmware || {};
+    const boot = fw.bootloader || {};
+    const efi  = boot.efi || null;
+    const mode = efi ? (efi.secureBoot === false ? 'uefi' : 'uefi-sb') : 'bios';
+    const tpm  = (domain.devices || {}).tpm || null;
+    const machine = (domain.machine || {}).type || '';
+    const opt = (v, cur, label) =>
+      `<option value="${v}" ${cur === v ? 'selected' : ''}>${label}</option>`;
+    return `
+      <h3>🔧 ${esc(tr('vm.edit.firmware', 'Firmware'))}</h3>
+      <div class="form-row">
+        <label>${esc(tr('vm.edit.bootMode', 'Boot mode'))}</label>
+        <select data-field="fw.mode">
+          ${opt('bios', mode, 'BIOS (legacy)')}
+          ${opt('uefi', mode, 'UEFI')}
+          ${opt('uefi-sb', mode, 'UEFI + Secure Boot')}
+        </select>
+        <span class="form-hint">${esc(tr('vm.edit.bootModeHint', 'Windows 11 and recent SLES/openSUSE images need UEFI; Secure Boot additionally enables the SMM feature. Switching mode on an installed guest usually makes it unbootable — set it before the first install.'))}</span>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="fw.tpm" ${tpm ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.tpm', 'Attach a TPM 2.0 device'))}</span>
+        </label>
+        <span class="form-hint">${esc(tr('vm.edit.tpmHint', 'Required by Windows 11. Persistent keeps the TPM state across reboots (needed for BitLocker).'))}</span>
+      </div>
+      <div class="form-row">
+        <label class="opt-row">
+          <input type="checkbox" data-field="fw.tpmPersistent" ${(tpm && tpm.persistent) ? 'checked' : ''}>
+          <span>${esc(tr('vm.edit.tpmPersistent', 'Persistent TPM state'))}</span>
+        </label>
+      </div>
+      <div class="grid-2">
+        <div class="form-row">
+          <label>${esc(tr('vm.edit.machineType', 'Machine type'))}</label>
+          <input type="text" data-field="fw.machine" value="${esc(machine)}"
+                 list="dl-machine" autocomplete="off" placeholder="q35">
+          <datalist id="dl-machine">
+            <option value="q35"></option>
+            <option value="pc"></option>
+          </datalist>
+        </div>
+        <div class="form-row">
+          <label>${esc(tr('vm.edit.fwSerial', 'Firmware serial number'))}</label>
+          <input type="text" data-field="fw.serial" value="${esc(fw.serial || '')}"
+                 placeholder="(auto)">
+          <span class="form-hint">${esc(tr('vm.edit.fwSerialHint', 'Some licences are bound to it. Empty = leave as-is.'))}</span>
+        </div>
+      </div>
+      ${restartBanner()}
+      ${applyBar('firmware')}`;
   }
 
   function renderLifecycle(template) {
     return `
-      <h3>Lifecycle</h3>
+      <h3>${esc(tr('vm.edit.lifecycle', 'Lifecycle'))}</h3>
       <div class="form-row">
-        <label>terminationGracePeriodSeconds (seconds the guest has to ACPI shut down)</label>
+        <label>${esc(tr('vm.edit.fGrace', 'ACPI shutdown grace period (seconds)'))}</label>
         <input type="number" min="0" data-field="lifecycle.terminationGracePeriodSeconds" value="${template.terminationGracePeriodSeconds ?? 180}">
       </div>
       <div class="form-row">
-        <label>evictionStrategy</label>
+        <label>${esc(tr('vm.edit.fEviction', 'Eviction strategy'))}</label>
         <select data-field="lifecycle.evictionStrategy">
           <option value="">(none)</option>
           <option value="LiveMigrate"      ${template.evictionStrategy === 'LiveMigrate' ? 'selected' : ''}>LiveMigrate</option>
@@ -1057,6 +1213,12 @@ const VMEdit = (() => {
       return;
     }
 
+    // v1.12.0 : l'onglet General embarque l'éditeur de tags (cartes TFForm)
+    if (sectionId === 'general') {
+      const tagsEditor = sectionEl.querySelector('.vm-edit-cards .tf-form');
+      if (tagsEditor) TFForm.wire(tagsEditor, TAG_SCHEMA, cluster);
+    }
+
     if (sectionId === 'disks' || sectionId === 'network') {
       const editor = sectionEl.querySelector('.vm-edit-cards .tf-form');
       const schema = sectionId === 'disks' ? DISK_SCHEMA : NET_SCHEMA;
@@ -1115,24 +1277,89 @@ const VMEdit = (() => {
       return el ? (el.type === 'number' ? Number(el.value) : el.value) : undefined;
     };
     switch (sectionId) {
-      case 'general':
+      case 'general': {
+        // v1.12.0 : un merge patch FUSIONNE les labels — pour retirer un
+        // tag il faut explicitement le mettre à null, sinon il survit.
+        const editor = get('.vm-edit-cards .tf-form');
+        const labels = {};
+        if (editor) {
+          const rows = (TFForm.read(editor, TAG_SCHEMA, { emitEmptyLists: true }).tag) || [];
+          const kept = new Set();
+          rows.forEach(t => {
+            const k = (t.key || '').trim();
+            if (!k) return;
+            if (!/^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(k)) {
+              throw new Error(tr('vm.edit.errTagKey', 'invalid tag key') + `: "${k}"`);
+            }
+            if (kept.has(k)) {
+              throw new Error(tr('vm.edit.errTagDup', 'duplicate tag key') + `: ${k}`);
+            }
+            kept.add(k);
+            labels[TAG_PREFIX + k] = String(t.value ?? '');
+          });
+          vmTagsToForm(vm).forEach(prev => {
+            if (!kept.has(prev.key)) labels[TAG_PREFIX + prev.key] = null;
+          });
+        }
         return {
           metadata: {
             annotations: { 'harvesterhci.io/description': val('annot.description') || '' },
           },
-          spec: { runStrategy: val('spec.runStrategy') },
-        };
-      case 'compute':
-        return {
-          spec: { template: { spec: { domain: {
-            cpu: {
-              sockets: val('cpu.sockets'),
-              cores:   val('cpu.cores'),
-              threads: val('cpu.threads'),
+          spec: {
+            runStrategy: val('spec.runStrategy'),
+            template: {
+              metadata: { labels },
+              spec: { hostname: (val('spec.hostname') || '').trim() || null },
             },
-            memory: { guest: val('memory.guest') },
-          } } } },
+          },
         };
+      }
+      case 'compute': {
+        const cpu = {
+          sockets: val('cpu.sockets'),
+          cores:   val('cpu.cores'),
+          threads: val('cpu.threads'),
+        };
+        // Champs optionnels : vide = ne pas imposer (null retire la clé).
+        const maxSockets = val('cpu.maxSockets');
+        cpu.maxSockets = maxSockets > 0 ? maxSockets : null;
+        cpu.model = (val('cpu.model') || '').trim() || null;
+        const memory = { guest: val('memory.guest') };
+        memory.maxGuest = (val('memory.maxGuest') || '').trim() || null;
+        const pick = (f) => (val(f) || '').trim() || null;
+        const resources = {};
+        const limits = { cpu: pick('res.limits.cpu'), memory: pick('res.limits.memory') };
+        const requests = { cpu: pick('res.requests.cpu'), memory: pick('res.requests.memory') };
+        if (limits.cpu || limits.memory) resources.limits = limits;
+        if (requests.cpu || requests.memory) resources.requests = requests;
+        const domain = { cpu, memory };
+        if (Object.keys(resources).length) domain.resources = resources;
+        return { spec: { template: { spec: { domain } } } };
+      }
+      case 'firmware': {
+        const mode = val('fw.mode') || 'bios';
+        const tpmOn = !!get('[data-field="fw.tpm"]')?.checked;
+        const tpmPersist = !!get('[data-field="fw.tpmPersistent"]')?.checked;
+        const machine = (val('fw.machine') || '').trim();
+        const serial = (val('fw.serial') || '').trim();
+        const firmware = {};
+        if (mode === 'bios') {
+          firmware.bootloader = null;          // retire l'EFI -> BIOS hérité
+        } else {
+          firmware.bootloader = { efi: { secureBoot: mode === 'uefi-sb' } };
+        }
+        if (serial) firmware.serial = serial;
+        const domain = {
+          firmware,
+          // Secure Boot EXIGE la fonctionnalité SMM côté KubeVirt ; sans
+          // elle l'apiserver refuse la VM. On la retire en sortant du
+          // Secure Boot pour ne pas laisser de résidu.
+          features: { smm: mode === 'uefi-sb' ? { enabled: true } : null },
+          devices: { tpm: tpmOn ? (tpmPersist ? { persistent: true } : {}) : null },
+        };
+        if (machine) domain.machine = { type: machine };
+        return { spec: { template: { spec: { domain } } } };
+      }
       case 'lifecycle':
         return {
           spec: { template: { spec: {
@@ -1229,9 +1456,10 @@ const VMEdit = (() => {
   return {
     open,
     // exported for tests (pure functions, no DOM)
-    _mappers: { vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
+    _mappers: {
+      vmTagsToForm, vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
                 genUserData, genNetworkData },
-    _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA },
+    _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA, TAG_SCHEMA },
   };
 })();
 

@@ -4,6 +4,40 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.12.0] — 2026-09-09 — Firmware tab, compute ceilings, Harvester tags
+
+### Added
+- **Firmware tab** — boot mode (BIOS / UEFI / UEFI + Secure Boot), TPM
+  2.0 with optional persistent state, machine type and firmware serial.
+  This is what modern guests need: Windows 11 and recent SLE/openSUSE
+  images will not boot in legacy BIOS, and Windows 11 also wants a TPM.
+  Secure Boot automatically pulls in the SMM feature KubeVirt requires
+  (and drops it again when leaving Secure Boot).
+- **Compute** — hot-plug ceilings (`cpu.maxSockets`, `memory.maxGuest`)
+  so CPU/RAM can be added later without a reboot, the CPU model
+  (host-model / host-passthrough, which decides live-migration
+  compatibility), and the scheduling reservations (limits/requests)
+  behind an advanced fold.
+- **General** — the guest hostname, and an editor for the **Harvester
+  tags** (`tag.harvesterhci.io/*`) shown in the Harvester UI. Removing
+  a tag sends an explicit null, since a merge patch otherwise just
+  merges the remaining ones and the tag survives.
+
+### Changed
+- **The dashed underline announcing tooltips is gone** (user report):
+  it decorated every label of the visual editors and turned the panels
+  into a grid of dashes. The help cursor and the hover bubble remain.
+- The Compute / General / Lifecycle labels inherited from earlier
+  versions were still hardcoded English — now translated in all five
+  languages like the rest.
+
+### Tests
+- Tag mapper (only `tag.harvesterhci.io/*`, internal labels untouched),
+  explicit null on tag removal, firmware patch shape (BIOS clears the
+  bootloader, Secure Boot implies SMM, TPM detach), compute optional
+  keys. Verified live on harv1: tag added then removed on onit-repro,
+  General dry-run green, Firmware/Compute reading real VM specs.
+
 ## [1.11.0] — 2026-09-09 — Guided snapshot restore
 
 ### Added

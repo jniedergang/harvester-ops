@@ -77,7 +77,15 @@ Manage KubeVirt virtual machines without leaving the console.
   Harvester's `volumeClaimTemplates` mechanism; bus, boot order,
   cdrom, bridge/masquerade binding, NIC model and MAC are all
   editable, with client-side validation plus server dry-run. A raw
-  JSON fold remains for exotic specs. The Cloud-init tab gains an
+  JSON fold remains for exotic specs. A **Firmware** tab covers boot
+  mode (BIOS / UEFI / UEFI + Secure Boot, pulling in the SMM feature
+  Secure Boot requires), TPM 2.0 with persistent state, machine type
+  and firmware serial — what modern guests such as Windows 11 or
+  SLE 16 refuse to boot without. **Compute** adds the hot-plug ceilings
+  (max CPU sockets, max guest memory), the CPU model
+  (host-model / host-passthrough) and, behind a fold, the scheduling
+  reservations. **General** edits the guest hostname and the Harvester
+  tags (`tag.harvesterhci.io/*`). The Cloud-init tab gains an
   **assistant** (v1.8.1) that generates clean cloud-config and
   network-data v1 YAML into the editors — hostname, users (password,
   passwordless sudo, Harvester SSH keys or raw public keys), packages,

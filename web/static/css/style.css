@@ -3105,9 +3105,12 @@ body.no-tooltips .tip[data-tip]::before {
 }
 /* L'ornement « aide » (souligné pointillé + curseur ?) est réservé au texte
    inline ; un bouton porteur de tooltip garde son apparence de bouton. */
+/* v1.12.0 : plus de soulignement pointillé. Il marquait CHAQUE label des
+   formulaires visuels (disques, réseau, cloud-init, tags) et transformait
+   les panneaux en grille de tirets — illisible. Le curseur d'aide et la
+   bulle au survol suffisent comme indice. */
 .tip:not(button) {
   cursor: help;
-  border-bottom: 1px dashed var(--text-dim);
 }
 .tip[data-tip]::after,
 .tip[data-tip]::before {
