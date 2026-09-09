@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.13.0] — 2026-09-09 — Placement, fine disk/NIC options, console shortcut
+
+### Added
+- **Placement tab** — a node selector to pin the VM, and rules relative
+  to other VMs (keep away from an HA twin, or co-locate with a VM it
+  talks to a lot) expressed on Harvester tags. Only `nodeSelector` and
+  the pod rules are written: the `nodeAffinity` Harvester derives from
+  the VM networks is displayed read-only and left untouched by the
+  merge patch (verified live — it survived every apply).
+- **Fine disk options** — serial (visible as /dev/disk/by-id inside the
+  guest), cache mode, shareable, read-only, dedicated I/O thread. They
+  stay absent from the spec when left at their default.
+- **NIC boot order** — the field that makes a VM PXE-boot.
+- **Console shortcut in the edit panel header**, mirroring the settings
+  shortcut the console already offers (generic `headerActions` on
+  floating panels).
+
+### Fixed
+- Boot order is a single sequence shared by disks AND NICs — a clash
+  used to surface as a raw webhook refusal ("already set for a
+  different device", hit for real while testing). Each editor now
+  checks the other half of the spec and names the offending device
+  before anything is sent.
+
+### Tests
+- Round-trips for the disk options and the NIC boot order, placement
+  mappers (including "never republish nodeAffinity"), console-shortcut
+  wiring. Live on harv1: options and placement applied to leap156,
+  verified with kubectl, clash refused client-side, then everything
+  reverted through the UI back to the original spec.
+
 ## [1.12.0] — 2026-09-09 — Firmware tab, compute ceilings, Harvester tags
 
 ### Added

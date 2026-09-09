@@ -141,6 +141,9 @@ const FloatingPanels = (() => {
       <header class="floating-panel-header" data-handle>
         <span class="floating-panel-title">${escapeHtml(opts.title || 'Panel')}</span>
         <div class="floating-panel-actions">
+          ${(opts.headerActions || []).map((a, i) =>
+            `<button class="btn-icon-sm tip" data-header-action="${i}"
+                     data-tip="${escapeHtml(a.tip || '')}">${escapeHtml(a.label || '?')}</button>`).join('')}
           <button class="btn-icon-sm tip" data-action="min" data-tip="${window.i18n ? i18n.t('panel.minimizeTip') : 'Minimize'}">_</button>
           <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>
         </div>
@@ -226,6 +229,14 @@ const FloatingPanels = (() => {
     });
 
     // Buttons
+    // v1.13.0 : raccourcis propres au panneau, posés dans le bandeau
+    // (ex. ouvrir la console depuis l'éditeur de VM).
+    (opts.headerActions || []).forEach((a, i) => {
+      const btn = el.querySelector(`[data-header-action="${i}"]`);
+      if (btn && typeof a.onClick === 'function') {
+        btn.addEventListener('click', (e) => { e.stopPropagation(); a.onClick(); });
+      }
+    });
     el.querySelector('[data-action="min"]').addEventListener('click', (e) => {
       e.stopPropagation();
       minimize(opts.id);

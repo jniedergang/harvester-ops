@@ -578,3 +578,103 @@ def test_new_editor_strings_are_translated_everywhere():
                 "vm.edit.maxSockets", "vm.edit.cpuModel", "vm.edit.tags",
                 "vm.edit.hostname", "vm.edit.resAdvanced"):
         assert i18n.count(f"'{key}'") == 5, f"{key} missing in some language"
+
+
+# ---------------------------------------------------------------------------
+# v1.13.0 — placement, fine disk/NIC options, console shortcut
+# ---------------------------------------------------------------------------
+
+def test_disk_fine_options_round_trip():
+    """serial / cache / shareable / readonly / dedicatedIOThread must
+    survive a read->write cycle, and stay ABSENT when left at default so
+    the spec is not bloated with implicit choices."""
+    out = _run_node("""
+const vm = {metadata: {namespace: 'ns', name: 'v'}, spec: {template: {spec: {
+  domain: {devices: {disks: [
+    {name: 'd1', disk: {bus: 'virtio', readonly: true}, serial: 'DATA01',
+     cache: 'none', shareable: true, dedicatedIOThread: true},
+    {name: 'd2', disk: {bus: 'virtio'}},
+  ]}},
+  volumes: [
+    {name: 'd1', persistentVolumeClaim: {claimName: 'p1'}},
+    {name: 'd2', persistentVolumeClaim: {claimName: 'p2'}},
+  ],
+}}}};
+const {items, passthrough} = M.vmDisksToForm(vm);
+const patch = M.formDisksToPatch(items, passthrough, vm);
+console.log(JSON.stringify(patch.spec.template.spec.domain.devices.disks));
+""")
+    disks = json.loads(out)
+    d1 = next(d for d in disks if d["name"] == "d1")
+    assert d1["serial"] == "DATA01" and d1["cache"] == "none"
+    assert d1["shareable"] is True and d1["dedicatedIOThread"] is True
+    assert d1["disk"]["readonly"] is True
+    d2 = next(d for d in disks if d["name"] == "d2")
+    for absent in ("serial", "cache", "shareable", "dedicatedIOThread"):
+        assert absent not in d2, f"{absent} must stay out of an untouched disk"
+    assert "readonly" not in d2["disk"]
+
+
+def test_nic_boot_order_round_trip():
+    """bootOrder on a NIC is what makes a VM PXE-boot; it shares the
+    numbering with the disks."""
+    out = _run_node("""
+const vm = {metadata: {namespace: 'ns', name: 'v'}, spec: {template: {spec: {
+  domain: {devices: {interfaces: [{name: 'n1', bridge: {}, bootOrder: 1}]}},
+  networks: [{name: 'n1', multus: {networkName: 'default/prod'}}],
+}}}};
+const {items, passthrough} = M.vmNetsToForm(vm);
+console.log(JSON.stringify([items[0].boot_order,
+  M.formNetsToPatch(items, passthrough, vm).spec.template.spec.domain.devices.interfaces[0]]));
+""")
+    order, itf = json.loads(out)
+    assert order == 1 and itf["bootOrder"] == 1
+
+
+def test_placement_never_touches_harvester_node_affinity():
+    """Harvester owns nodeAffinity (it derives it from the VM networks).
+    The placement patch must only carry nodeSelector + pod rules, so the
+    merge patch leaves nodeAffinity alone."""
+    out = _run_node("""
+const rules = [
+  {kind: 'avoid', key: 'app', value: 'db', hard: true},
+  {kind: 'attract', key: 'app', value: 'cache', hard: false},
+];
+console.log(JSON.stringify(M.formPlacementToAffinity(rules)));
+""")
+    aff = json.loads(out)
+    assert "nodeAffinity" not in aff, "the patch must not republish nodeAffinity"
+    hard = aff["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+    assert hard[0]["labelSelector"]["matchLabels"] == {"tag.harvesterhci.io/app": "db"}
+    assert hard[0]["topologyKey"] == "kubernetes.io/hostname"
+    soft = aff["podAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]
+    assert soft[0]["weight"] == 100
+    # no rule of a kind -> the whole block is nulled, not left half-built
+    out2 = _run_node("console.log(JSON.stringify(M.formPlacementToAffinity([])));")
+    assert json.loads(out2) == {"podAntiAffinity": None, "podAffinity": None}
+
+
+def test_placement_reads_existing_rules_back():
+    out = _run_node("""
+console.log(JSON.stringify(M.vmPlacementToForm({spec: {template: {spec: {
+  nodeSelector: {'kubernetes.io/hostname': 'harv1'},
+  affinity: {
+    nodeAffinity: {requiredDuringSchedulingIgnoredDuringExecution: {}},
+    podAntiAffinity: {requiredDuringSchedulingIgnoredDuringExecution: [
+      {labelSelector: {matchLabels: {'tag.harvesterhci.io/app': 'db'}}}]},
+  },
+}}}})));
+""")
+    got = json.loads(out)
+    assert got["sel"] == [{"key": "kubernetes.io/hostname", "value": "harv1"}]
+    assert got["rules"] == [{"kind": "avoid", "hard": True, "key": "app", "value": "db"}]
+
+
+def test_edit_panel_has_console_shortcut_in_its_header():
+    js = VM_EDIT_JS.read_text()
+    assert "headerActions: consoleAction(" in js
+    # the global really is VMConsole (wrong case silently no-ops)
+    assert "window.VMConsole && window.VMConsole.open" in js
+    assert "window.VmConsole" not in js
+    fp = (WEB / "static" / "js" / "floating-panels.js").read_text()
+    assert "headerActions" in fp and "data-header-action=" in fp

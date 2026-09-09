@@ -34,6 +34,7 @@ const VMEdit = (() => {
     { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: '💾' },
     { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: '🔌' },
     { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: '☁️' },
+    { id: 'placement', label: () => tr('vm.edit.placement', 'Placement'),  icon: '📍' },
     { id: 'lifecycle', label: () => tr('vm.edit.lifecycle', 'Lifecycle'),  icon: '🔁' },
   ];
 
@@ -117,6 +118,26 @@ const VMEdit = (() => {
             label: { en: 'Storage class', fr: 'Storage class' },
             description: { en: 'Blank disks only (image disks inherit theirs); empty = cluster default',
                            fr: 'Disques vierges seulement (hérité pour les images) ; vide = défaut du cluster' } },
+          { name: 'serial', type: 'text', validate: /^[A-Za-z0-9_.+-]{0,36}$/,
+            label: { en: 'Serial', fr: 'Numéro de série' },
+            description: { en: 'Shown to the guest (/dev/disk/by-id) — handy to identify a disk from inside the VM',
+                           fr: 'Vu par l’invité (/dev/disk/by-id) — pratique pour identifier un disque depuis la VM' } },
+          { name: 'cache', type: 'enum', enum_values: ['none', 'writethrough', 'writeback'],
+            label: { en: 'Cache mode', fr: 'Mode de cache' },
+            description: { en: 'Empty = hypervisor default. none is the safest for shared storage',
+                           fr: 'Vide = défaut de l’hyperviseur. none est le plus sûr sur stockage partagé' } },
+          { name: 'shareable', type: 'bool', default: false,
+            label: { en: 'Shareable', fr: 'Partageable' },
+            description: { en: 'Allows several VMs to attach this volume (clustering) — the guests must coordinate writes',
+                           fr: 'Permet à plusieurs VMs d’attacher ce volume (clustering) — aux invités de coordonner les écritures' } },
+          { name: 'readonly', type: 'bool', default: false,
+            label: { en: 'Read-only', fr: 'Lecture seule' },
+            description: { en: 'The guest cannot write to it (typical for an ISO)',
+                           fr: 'L’invité ne peut pas y écrire (typique d’une ISO)' } },
+          { name: 'io_thread', type: 'bool', default: false,
+            label: { en: 'Dedicated I/O thread', fr: 'Thread d’E/S dédié' },
+            description: { en: 'A thread of its own for this disk — helps a latency-sensitive workload',
+                           fr: 'Un thread rien que pour ce disque — utile pour une charge sensible à la latence' } },
         ],
       },
     },
@@ -147,6 +168,64 @@ const VMEdit = (() => {
     },
   };
 
+  // v1.13.0 — placement. On n'écrit QUE nodeSelector et les règles pod :
+  // la nodeAffinity est gérée par Harvester (contrainte réseau) et serait
+  // écrasée si on la republiait — le merge patch préserve les clés sœurs.
+  const NODESEL_SCHEMA = {
+    id: 'vm-nodeselector',
+    nested: {
+      sel: {
+        min: 0, max: 10,
+        label: { en: 'Node selector', fr: 'Sélecteur de node' },
+        itemTitle: (v) => `📍 ${v.key || tr('vm.edit.newSel', 'new constraint')}${v.value ? ' = ' + v.value : ''}`,
+        newItem: () => ({ key: 'kubernetes.io/hostname' }),
+        args: [
+          { name: 'key', type: 'text', required: true,
+            suggest: ['kubernetes.io/hostname', 'topology.kubernetes.io/zone',
+                      'node-role.kubernetes.io/control-plane'],
+            label: { en: 'Node label', fr: 'Label de node' },
+            description: { en: 'The VM only schedules on nodes carrying this label',
+                           fr: 'La VM ne se place que sur les nodes portant ce label' } },
+          { name: 'value', type: 'text',
+            label: { en: 'Value', fr: 'Valeur' },
+            description: { en: 'e.g. the node hostname', fr: 'ex. le nom d’hôte du node' } },
+        ],
+      },
+    },
+  };
+
+  const AFFINITY_SCHEMA = {
+    id: 'vm-affinity',
+    nested: {
+      rule: {
+        min: 0, max: 10,
+        label: { en: 'VM placement rules', fr: 'Règles de placement VM' },
+        itemTitle: (v) => `${v.kind === 'attract' ? '🧲' : '🚧'} `
+          + `${v.kind === 'attract' ? tr('vm.edit.affNear', 'near') : tr('vm.edit.affAway', 'away from')} `
+          + `${v.key || 'tag'}=${v.value || '?'}${v.hard ? ' (strict)' : ''}`,
+        newItem: () => ({ kind: 'avoid', key: 'app' }),
+        args: [
+          { name: 'kind', type: 'enum', default: 'avoid', enum_values: ['avoid', 'attract'],
+            label: { en: 'Rule', fr: 'Règle' },
+            description: { en: 'avoid = do not co-locate (HA pairs) · attract = co-locate (latency)',
+                           fr: 'avoid = ne pas co-localiser (paires HA) · attract = co-localiser (latence)' } },
+          { name: 'key', type: 'text', required: true,
+            suggest: ['app', 'purpose', 'case'],
+            label: { en: 'Tag key', fr: 'Clé du tag' },
+            description: { en: 'Matches other VMs carrying tag.harvesterhci.io/<key>',
+                           fr: 'Vise les autres VMs portant tag.harvesterhci.io/<clé>' } },
+          { name: 'value', type: 'text', required: true,
+            label: { en: 'Tag value', fr: 'Valeur du tag' },
+            description: { en: 'The value those VMs carry', fr: 'La valeur que portent ces VMs' } },
+          { name: 'hard', type: 'bool', default: false,
+            label: { en: 'Strict', fr: 'Stricte' },
+            description: { en: 'Strict = the VM stays unschedulable if the rule cannot be met; otherwise it is only a preference',
+                           fr: 'Stricte = la VM reste non planifiable si la règle ne peut pas être respectée ; sinon simple préférence' } },
+        ],
+      },
+    },
+  };
+
   const NET_SCHEMA = {
     id: 'vm-networks',
     nested: {
@@ -154,7 +233,8 @@ const VMEdit = (() => {
         min: 0, max: 8,
         label: { en: 'Network interfaces', fr: 'Interfaces réseau' },
         itemTitle: (v) => `🔌 ${v.name || tr('vm.edit.newNic', 'new interface')}`
-          + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`,
+          + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`
+          + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
         newItem: (items) => ({ name: nextFree('nic-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
@@ -174,6 +254,10 @@ const VMEdit = (() => {
             label: { en: 'Model', fr: 'Modèle' },
             description: { en: 'virtio needs guest drivers; e1000 for legacy guests',
                            fr: 'virtio requiert des pilotes invité ; e1000 pour les invités anciens' } },
+          { name: 'boot_order', type: 'int', default: 0, min: 0, max: 64,
+            label: { en: 'Boot order', fr: 'Ordre de boot' },
+            description: { en: '0 = not bootable. Set 1 to PXE-boot from this NIC (shares the numbering with the disks)',
+                           fr: '0 = pas de boot. Mettre 1 pour démarrer en PXE sur cette carte (numérotation partagée avec les disques)' } },
           { name: 'mac', type: 'text', validate: MAC_RE,
             label: { en: 'MAC address', fr: 'Adresse MAC' },
             description: { en: 'Empty = auto-generated. Changing it may break DHCP leases',
@@ -575,11 +659,39 @@ const VMEdit = (() => {
         boot_order: d.bootOrder ?? 0,
         source: 'pvc',
         pvc: `${vm.metadata.namespace}/${vol.persistentVolumeClaim.claimName}`,
+        // v1.13.0 : options fines par disque
+        serial: d.serial || '',
+        cache: d.cache || '',
+        shareable: !!d.shareable,
+        readonly: !!(d[devKey] || {}).readonly,
+        io_thread: !!d.dedicatedIOThread,
       });
     });
     // Orphan volumes (no matching disk entry) ride along untouched.
     volumes.forEach(v => { if (!usedVols.has(v.name)) passthrough.volumes.push(v); });
     return { items, passthrough };
+  }
+
+  // v1.13.0 : bootOrder est une séquence GLOBALE partagée par les disques
+  // ET les cartes réseau (appris en vrai : le webhook Harvester répond
+  // « Boot order ... already set for a different device »). Chaque éditeur
+  // ne voit que sa moitié — on confronte donc l'autre moitié de la spec.
+  function bootOrdersTakenBy(vm, kind) {
+    const dev = ((((vm.spec || {}).template || {}).spec || {}).domain || {}).devices || {};
+    const src = kind === 'disks' ? (dev.disks || []) : (dev.interfaces || []);
+    const out = new Map();
+    src.forEach(d => { if (d.bootOrder > 0) out.set(d.bootOrder, d.name); });
+    return out;
+  }
+
+  function checkBootOrder(order, name, taken, otherLabel) {
+    if (!(order > 0)) return;
+    const clash = taken.get(order);
+    if (clash) {
+      throw new Error(tr('vm.edit.errBootDup',
+        'boot order already used by another device') + `: #${order} — ${otherLabel} "${clash}"`);
+    }
+    taken.set(order, name);
   }
 
   function formDisksToPatch(items, passthrough, vm) {
@@ -592,6 +704,8 @@ const VMEdit = (() => {
 
     const volumes = [...passthrough.volumes];
     const disks = [...passthrough.disks];
+    const takenBoot = bootOrdersTakenBy(vm, 'interfaces');
+    passthrough.disks.forEach(d => { if (d.bootOrder > 0) takenBoot.set(d.bootOrder, d.name); });
     const newVCT = [];
     const keepClaims = new Set();
 
@@ -604,8 +718,25 @@ const VMEdit = (() => {
       }
       seen.add(item.name);
       const d = { name: item.name };
+      checkBootOrder(item.boot_order, item.name, takenBoot,
+                     tr('vm.edit.devNic', 'interface'));
       if (item.boot_order > 0) d.bootOrder = item.boot_order;
-      d[item.device === 'cdrom' ? 'cdrom' : 'disk'] = { bus: item.bus || 'virtio' };
+      const devKey = item.device === 'cdrom' ? 'cdrom' : 'disk';
+      d[devKey] = { bus: item.bus || 'virtio' };
+      // v1.13.0 : options fines — omises quand elles valent le défaut,
+      // pour ne pas alourdir la spec ni figer des choix implicites.
+      if (item.readonly) d[devKey].readonly = true;
+      const serial = (item.serial || '').trim();
+      if (serial) {
+        if (!/^[A-Za-z0-9_.+-]{1,36}$/.test(serial)) {
+          throw new Error(tr('vm.edit.errSerial',
+            'disk serial: up to 36 chars, letters/digits/_.+- only') + `: ${item.name}`);
+        }
+        d.serial = serial;
+      }
+      if (item.cache) d.cache = item.cache;
+      if (item.shareable) d.shareable = true;
+      if (item.io_thread) d.dedicatedIOThread = true;
       disks.push(d);
 
       if (item.source === 'pvc' || !item.source) {
@@ -686,6 +817,8 @@ const VMEdit = (() => {
         network: net.multus ? net.multus.networkName : '',
         model: itf.model || 'virtio',
         mac: itf.macAddress || '',
+        // v1.13.0 : ordre de boot réseau (PXE)
+        boot_order: itf.bootOrder ?? 0,
       });
     });
     networks.forEach(n => { if (!used.has(n.name)) passthrough.networks.push(n); });
@@ -695,6 +828,8 @@ const VMEdit = (() => {
   function formNetsToPatch(items, passthrough, vm) {
     const seen = new Set(passthrough.interfaces.map(i => i.name));
     const interfaces = [...passthrough.interfaces];
+    const takenBoot = bootOrdersTakenBy(vm, 'disks');
+    passthrough.interfaces.forEach(i => { if (i.bootOrder > 0) takenBoot.set(i.bootOrder, i.name); });
     const networks = [...passthrough.networks];
 
     items.forEach(item => {
@@ -709,8 +844,13 @@ const VMEdit = (() => {
         throw new Error(tr('vm.edit.errMac', 'invalid MAC address') + `: ${item.mac}`);
       }
       const itf = { name: item.name };
+      checkBootOrder(item.boot_order, item.name, takenBoot,
+                     tr('vm.edit.devDisk', 'disk'));
       if (item.model) itf.model = item.model;
       if (item.mac) itf.macAddress = item.mac;
+      // bootOrder partage la MÊME séquence que les disques : une VM qui
+      // doit démarrer en PXE met son NIC à 1 et repousse le disque.
+      if (item.boot_order > 0) itf.bootOrder = item.boot_order;
       const net = { name: item.name };
       if (item.type === 'masquerade') {
         itf.masquerade = {};
@@ -742,7 +882,8 @@ const VMEdit = (() => {
     if (existing) {
       // Already open: FloatingPanels restores/focuses it. Re-running the
       // setup below would stack duplicate nav listeners (v1.6.x bug).
-      return FloatingPanels.open({ id: panelId, title });
+      return FloatingPanels.open({ id: panelId, title,
+        headerActions: consoleAction(cluster, namespace, name) });
     }
     const html = `
       <div class="vm-edit-layout">
@@ -765,6 +906,7 @@ const VMEdit = (() => {
       width: 980,
       height: 640,
       restoreSpec: { type: 'vm-edit', args: { cluster, namespace, name } },
+      headerActions: consoleAction(cluster, namespace, name),
       onClose: () => refreshers.delete(panelId),
     });
 
@@ -811,6 +953,17 @@ const VMEdit = (() => {
   // =========================================================================
   // Section renderers
   // =========================================================================
+  // v1.13.0 : raccourci vers la console dans le bandeau du panneau Edit
+  // (symétrique du bouton ⚙ que la console offre déjà vers l'éditeur).
+  // ⚠️ le global est VMConsole (casse déjà payée en 1.7.1).
+  function consoleAction(cluster, namespace, name) {
+    return [{
+      label: '🖥',
+      tip: tr('vm.edit.openConsole', 'Open the VNC console for this VM'),
+      onClick: () => window.VMConsole && window.VMConsole.open(cluster, namespace, name),
+    }];
+  }
+
   function renderSectionHtml(id, vm, cluster) {
     const spec     = vm.spec || {};
     const template = (spec.template || {}).spec || {};
@@ -821,6 +974,7 @@ const VMEdit = (() => {
       case 'general': return renderGeneral(vm, spec, annot, cluster);
       case 'compute': return renderCompute(domain);
       case 'firmware': return renderFirmware(domain);
+      case 'placement': return renderPlacement(vm, template, cluster);
       case 'lifecycle': return renderLifecycle(template);
       case 'disks':   return renderDisksSection(vm, cluster);
       case 'network': return renderNetworkSection(vm, cluster);
@@ -1060,6 +1214,84 @@ const VMEdit = (() => {
       ${applyBar('firmware')}`;
   }
 
+  /** nodeSelector -> lignes, et règles pod -> lignes éditables */
+  function vmPlacementToForm(vm) {
+    const t = (((vm.spec || {}).template || {}).spec) || {};
+    const sel = Object.entries(t.nodeSelector || {}).map(([key, value]) => ({ key, value }));
+    const aff = t.affinity || {};
+    const rules = [];
+    const harvest = (block, kind) => {
+      if (!block) return;
+      (block.requiredDuringSchedulingIgnoredDuringExecution || []).forEach(term => {
+        const m = ((term.labelSelector || {}).matchLabels) || {};
+        Object.entries(m).forEach(([k, v]) => rules.push({
+          kind, hard: true,
+          key: k.startsWith(TAG_PREFIX) ? k.slice(TAG_PREFIX.length) : k, value: v,
+        }));
+      });
+      (block.preferredDuringSchedulingIgnoredDuringExecution || []).forEach(w => {
+        const m = (((w.podAffinityTerm || {}).labelSelector || {}).matchLabels) || {};
+        Object.entries(m).forEach(([k, v]) => rules.push({
+          kind, hard: false,
+          key: k.startsWith(TAG_PREFIX) ? k.slice(TAG_PREFIX.length) : k, value: v,
+        }));
+      });
+    };
+    harvest(aff.podAntiAffinity, 'avoid');
+    harvest(aff.podAffinity, 'attract');
+    return { sel, rules };
+  }
+
+  /** lignes -> blocs podAffinity / podAntiAffinity (null si vide) */
+  function formPlacementToAffinity(rules) {
+    const mk = (list) => {
+      const hard = list.filter(r => r.hard).map(r => ({
+        labelSelector: { matchLabels: { [TAG_PREFIX + r.key]: String(r.value) } },
+        topologyKey: 'kubernetes.io/hostname',
+      }));
+      const soft = list.filter(r => !r.hard).map(r => ({
+        weight: 100,
+        podAffinityTerm: {
+          labelSelector: { matchLabels: { [TAG_PREFIX + r.key]: String(r.value) } },
+          topologyKey: 'kubernetes.io/hostname',
+        },
+      }));
+      if (!hard.length && !soft.length) return null;
+      const out = {};
+      out.requiredDuringSchedulingIgnoredDuringExecution = hard;
+      out.preferredDuringSchedulingIgnoredDuringExecution = soft;
+      return out;
+    };
+    return {
+      podAntiAffinity: mk(rules.filter(r => r.kind !== 'attract')),
+      podAffinity: mk(rules.filter(r => r.kind === 'attract')),
+    };
+  }
+
+  function renderPlacement(vm, template, cluster) {
+    const { sel, rules } = vmPlacementToForm(vm);
+    const managed = ((template.affinity || {}).nodeAffinity) || null;
+    return `
+      <h3>📍 ${esc(tr('vm.edit.placement', 'Placement'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.nodeSelHint', 'Pin the VM to nodes carrying these labels. Empty = the scheduler is free.'))}</p>
+      <div class="vm-edit-cards" data-cards="nodesel">
+        ${TFForm.render(NODESEL_SCHEMA, cluster, { sel }, { hideHeader: true })}
+      </div>
+      <h3>${esc(tr('vm.edit.affinityTitle', 'Rules relative to other VMs'))}</h3>
+      <p class="form-hint">${esc(tr('vm.edit.affinityHint', 'Keep a VM away from its twin (HA pair) or next to a VM it talks to a lot. Matching is done on Harvester tags, so tag both VMs first.'))}</p>
+      <div class="vm-edit-cards" data-cards="affinity">
+        ${TFForm.render(AFFINITY_SCHEMA, cluster, { rule: rules }, { hideHeader: true })}
+      </div>
+      ${managed ? `
+        <details class="vm-edit-adv">
+          <summary>${esc(tr('vm.edit.managedAffinity', 'Node affinity managed by Harvester (read-only)'))}</summary>
+          <p class="form-hint">${esc(tr('vm.edit.managedAffinityHint', 'Harvester derives this from the networks the VM is attached to. It is left untouched when you save.'))}</p>
+          <pre>${esc(JSON.stringify(managed, null, 2))}</pre>
+        </details>` : ''}
+      ${restartBanner()}
+      ${applyBar('placement')}`;
+  }
+
   function renderLifecycle(template) {
     return `
       <h3>${esc(tr('vm.edit.lifecycle', 'Lifecycle'))}</h3>
@@ -1219,6 +1451,13 @@ const VMEdit = (() => {
       if (tagsEditor) TFForm.wire(tagsEditor, TAG_SCHEMA, cluster);
     }
 
+    if (sectionId === 'placement') {
+      const selEditor = sectionEl.querySelector('[data-cards="nodesel"] .tf-form');
+      const affEditor = sectionEl.querySelector('[data-cards="affinity"] .tf-form');
+      if (selEditor) TFForm.wire(selEditor, NODESEL_SCHEMA, cluster);
+      if (affEditor) TFForm.wire(affEditor, AFFINITY_SCHEMA, cluster);
+    }
+
     if (sectionId === 'disks' || sectionId === 'network') {
       const editor = sectionEl.querySelector('.vm-edit-cards .tf-form');
       const schema = sectionId === 'disks' ? DISK_SCHEMA : NET_SCHEMA;
@@ -1360,6 +1599,26 @@ const VMEdit = (() => {
         if (machine) domain.machine = { type: machine };
         return { spec: { template: { spec: { domain } } } };
       }
+      case 'placement': {
+        const selEditor = sectionEl.querySelector('[data-cards="nodesel"] .tf-form');
+        const affEditor = sectionEl.querySelector('[data-cards="affinity"] .tf-form');
+        const prev = vmPlacementToForm(vm);
+        // nodeSelector : map -> une clé retirée doit partir à null.
+        const nodeSelector = {};
+        const kept = new Set();
+        ((selEditor ? TFForm.read(selEditor, NODESEL_SCHEMA, { emitEmptyLists: true }).sel : []) || [])
+          .forEach(r => {
+            const k = (r.key || '').trim();
+            if (!k) return;
+            kept.add(k);
+            nodeSelector[k] = String(r.value ?? '');
+          });
+        prev.sel.forEach(p => { if (!kept.has(p.key)) nodeSelector[p.key] = null; });
+        const rules = ((affEditor ? TFForm.read(affEditor, AFFINITY_SCHEMA, { emitEmptyLists: true }).rule : []) || [])
+          .filter(r => (r.key || '').trim() && String(r.value ?? '').trim());
+        const affinity = formPlacementToAffinity(rules);
+        return { spec: { template: { spec: { nodeSelector, affinity } } } };
+      }
       case 'lifecycle':
         return {
           spec: { template: { spec: {
@@ -1457,9 +1716,10 @@ const VMEdit = (() => {
     open,
     // exported for tests (pure functions, no DOM)
     _mappers: {
-      vmTagsToForm, vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
+      vmTagsToForm, vmPlacementToForm, formPlacementToAffinity, vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,
                 genUserData, genNetworkData },
-    _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA, TAG_SCHEMA },
+    _schemas: { DISK_SCHEMA, NET_SCHEMA, CI_USER_SCHEMA, CI_NET_SCHEMA, TAG_SCHEMA,
+                 NODESEL_SCHEMA, AFFINITY_SCHEMA },
   };
 })();
 

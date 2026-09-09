@@ -85,7 +85,14 @@ Manage KubeVirt virtual machines without leaving the console.
   (max CPU sockets, max guest memory), the CPU model
   (host-model / host-passthrough) and, behind a fold, the scheduling
   reservations. **General** edits the guest hostname and the Harvester
-  tags (`tag.harvesterhci.io/*`). The Cloud-init tab gains an
+  tags (`tag.harvesterhci.io/*`). Disks carry their fine options
+  (serial, cache mode, shareable, read-only, dedicated I/O thread) and
+  NICs a boot order for **PXE booting** — the boot sequence is shared
+  between disks and NICs, and a clash is caught before it reaches the
+  apiserver. A **Placement** tab pins the VM with a node selector and
+  keeps it away from (or next to) VMs carrying a given tag; the node
+  affinity Harvester manages for networking is shown read-only and left
+  untouched. The Cloud-init tab gains an
   **assistant** (v1.8.1) that generates clean cloud-config and
   network-data v1 YAML into the editors — hostname, users (password,
   passwordless sudo, Harvester SSH keys or raw public keys), packages,

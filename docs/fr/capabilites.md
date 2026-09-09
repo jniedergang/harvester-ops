@@ -93,7 +93,15 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   (sockets CPU max, mémoire invité max), le modèle de CPU
   (host-model / host-passthrough) et, dans un repli, les réservations
   d'ordonnancement. **Général** édite le nom d'hôte invité et les tags
-  Harvester (`tag.harvesterhci.io/*`). L'onglet
+  Harvester (`tag.harvesterhci.io/*`). Les disques portent leurs options
+  fines (numéro de série, mode de cache, partageable, lecture seule,
+  thread d'E/S dédié) et les cartes réseau un ordre de boot pour le
+  **démarrage PXE** — la séquence de boot est partagée entre disques et
+  NICs, et une collision est attrapée avant l'apiserver. Un onglet
+  **Placement** épingle la VM par sélecteur de node et l'éloigne (ou la
+  rapproche) des VMs portant un tag donné ; l'affinité de node que
+  Harvester gère pour le réseau est affichée en lecture seule et laissée
+  intacte. L'onglet
   Cloud-init gagne un **assistant** (v1.8.1) qui génère du YAML
   cloud-config et network-data v1 propres dans les éditeurs — nom
   d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH
