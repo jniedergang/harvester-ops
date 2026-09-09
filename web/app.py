@@ -849,6 +849,112 @@ def _redfish_get(host, path, user, pwd, timeout=8):
         return None
 
 
+def _redfish_send(host, path, user, pwd, method, payload=None, timeout=20):
+    """v1.17.0 — PATCH/POST vers Redfish. Renvoie (ok, status, detail).
+
+    urllib (pas `requests` : il n'est pas vendoré). Les iLO exigent souvent
+    un If-Match sur les PATCH ; on lit d'abord l'ETag de la ressource et on
+    le renvoie quand il existe."""
+    import urllib.request, urllib.error, ssl, base64 as _b64
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    data = json.dumps(payload or {}).encode()
+    req = urllib.request.Request(f"https://{host}{path}", data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    if user:
+        cred = _b64.b64encode(f"{user}:{pwd}".encode()).decode()
+        req.add_header("Authorization", f"Basic {cred}")
+    if method == "PATCH":
+        etag = _redfish_etag(host, path, user, pwd)
+        if etag:
+            req.add_header("If-Match", etag)
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            return True, r.status, (r.read() or b"")[:400].decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = (e.read() or b"")[:400].decode("utf-8", "replace")
+        except Exception:
+            pass
+        return False, e.code, body or str(e)
+    except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as e:
+        return False, 0, str(e)
+
+
+def _redfish_etag(host, path, user, pwd, timeout=8):
+    import urllib.request, ssl, base64 as _b64
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(f"https://{host}{path}")
+    if user:
+        cred = _b64.b64encode(f"{user}:{pwd}".encode()).decode()
+        req.add_header("Authorization", f"Basic {cred}")
+    try:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
+            return r.headers.get("ETag")
+    except Exception:
+        return None
+
+
+def _redfish_system_path(host, user, pwd):
+    """Chemin du System, résolu dynamiquement. iLO expose /Systems/1/ et
+    iDRAC /Systems/System.Embedded.1/ — le coder en dur cassait les actions
+    d'alimentation sur Dell alors que la découverte, elle, résolvait déjà."""
+    sysroot = _redfish_get(host, "/redfish/v1/Systems/", user, pwd, timeout=6)
+    members = (sysroot or {}).get("Members") or []
+    return members[0]["@odata.id"] if members else None
+
+
+def _redfish_manager_path(host, user, pwd):
+    mroot = _redfish_get(host, "/redfish/v1/Managers/", user, pwd, timeout=6)
+    members = (mroot or {}).get("Members") or []
+    return members[0]["@odata.id"] if members else None
+
+
+def _redfish_virtualmedia_cd(host, user, pwd, manager_path=None):
+    """Renvoie (chemin, ressource) du lecteur virtuel acceptant un CD/DVD."""
+    mp = manager_path or _redfish_manager_path(host, user, pwd)
+    if not mp:
+        return None, None
+    coll = _redfish_get(host, mp.rstrip("/") + "/VirtualMedia/", user, pwd, timeout=6)
+    for m in (coll or {}).get("Members", []) or []:
+        vm = _redfish_get(host, m["@odata.id"], user, pwd, timeout=6)
+        if not vm:
+            continue
+        types = [t.upper() for t in (vm.get("MediaTypes") or [])]
+        if "CD" in types or "DVD" in types:
+            return m["@odata.id"], vm
+    return None, None
+
+
+def _redfish_action_target(resource, *names):
+    """Trouve la cible d'une action Redfish, standard OU OEM.
+
+    Renvoie (target, is_oem). Le dialecte OEM n'accepte QUE `Image` et
+    rejette `Inserted`/`WriteProtected` avec ActionParameterUnknown
+    (constaté en direct sur node3).
+
+    Sur les iLO 4 l'insertion de média n'existe QUE sous
+    Oem.Hp.Actions['#HpiLOVirtualMedia.InsertVirtualMedia'] (vérifié sur
+    node3) ; ailleurs c'est Actions['#VirtualMedia.InsertMedia']."""
+    pools = [((resource.get("Actions") or {}), False)]
+    oem = (resource.get("Oem") or {})
+    for vendor in ("Hp", "Hpe", "Dell"):
+        v = oem.get(vendor) or {}
+        pools.append(((v.get("Actions") or {}), True))
+    for pool, is_oem in pools:
+        for key, val in pool.items():
+            short = key.split(".")[-1]
+            if short in names or key in names:
+                target = (val or {}).get("target")
+                if target:
+                    return target, is_oem
+    return None, False
+
+
 def _bmc_discover_one(host, user, pwd):
     """Walk Redfish to produce a node profile (system info + NICs)."""
     root = _redfish_get(host, "/redfish/v1/", user, pwd, timeout=6)
@@ -873,9 +979,31 @@ def _bmc_discover_one(host, user, pwd):
             "status": (n.get("Status") or {}).get("State") or "",
             "speed_mbps": n.get("SpeedMbps") or 0,
         })
+    # v1.17.0 : ce dont l'installation zéro-touch a besoin en plus.
+    boot = s.get("Boot") or {}
+    mgr_path = _redfish_manager_path(host, user, pwd)
+    vm_path, vm_res = _redfish_virtualmedia_cd(host, user, pwd, mgr_path)
     return {
         "ok": True,
         "host": host,
+        # chemins résolus dynamiquement : les réutiliser évite le
+        # /Systems/1 codé en dur qui cassait Dell.
+        "system_path": sys_path,
+        "manager_path": mgr_path,
+        "virtualmedia_path": vm_path,
+        "virtualmedia_inserted": bool((vm_res or {}).get("Inserted")),
+        # Deux schémas coexistent : les Redfish récents publient
+        # ...@Redfish.AllowableValues, l'iLO 4 publie BootSourceOverrideSupported
+        # (constaté sur node3). Lire les deux, sinon la liste paraît vide.
+        "boot_targets": (boot.get("BootSourceOverrideTarget@Redfish.AllowableValues")
+                         or boot.get("BootSourceOverrideSupported") or []),
+        "boot_override": boot.get("BootSourceOverrideTarget"),
+        # HD.Emb.* = disques embarqués vus par l'UEFI : c'est le signal le
+        # plus fiable qu'il y a de quoi installer, l'iLO 4 n'exposant pas
+        # /Storage et laissant SmartStorage vide hors contrôleur RAID.
+        "uefi_targets": boot.get("UefiTargetBootSourceOverrideSupported") or [],
+        "post_state": ((s.get("Oem") or {}).get("Hp")
+                       or (s.get("Oem") or {}).get("Hpe") or {}).get("PostState"),
         "manufacturer": s.get("Manufacturer"),
         "model": s.get("Model"),
         "serial": s.get("SerialNumber"),
@@ -908,6 +1036,71 @@ def api_bmc_discover():
     return jsonify({"nodes": results, "count": len(results)})
 
 
+@app.route("/api/bmc/<host>/virtualmedia", methods=["POST"])
+@requires_auth
+@_rate_limit("bmc-virtualmedia")
+def api_bmc_virtualmedia(host):
+    """v1.17.0 — insère ou éjecte une image dans le lecteur virtuel du BMC.
+
+    Body: {action: "insert"|"eject", image: "<url http(s)>", user, password}.
+    L'URL doit être joignable PAR LE BMC (pas par le navigateur) : c'est
+    l'iLO qui va chercher l'image."""
+    data = request.get_json(force=True, silent=True) or {}
+    action = (data.get("action") or "").lower()
+    if action not in ("insert", "eject"):
+        return jsonify({"error": "action must be insert or eject"}), 400
+    user = data.get("user", "")
+    pwd = data.get("password", "")
+    image = data.get("image", "")
+    if action == "insert" and not image:
+        return jsonify({"error": "image URL required"}), 400
+
+    vm_path, vm_res = _redfish_virtualmedia_cd(host, user, pwd)
+    if not vm_path:
+        return jsonify({"error": "no CD/DVD virtual media on this BMC",
+                        "detail": "the BMC exposes no VirtualMedia accepting a CD "
+                                  "(on iLO this usually means no Advanced licence)"}), 412
+    if action == "insert":
+        target, is_oem = _redfish_action_target(vm_res, "InsertVirtualMedia",
+                                                "InsertMedia")
+        payload = ({"Image": image} if is_oem
+                   else {"Image": image, "Inserted": True, "WriteProtected": True})
+    else:
+        target, _ = _redfish_action_target(vm_res, "EjectVirtualMedia", "EjectMedia")
+        payload = {}
+    if not target:
+        return jsonify({"error": "virtual media action not exposed by this BMC"}), 412
+    ok, status, detail = _redfish_send(host, target, user, pwd, "POST", payload)
+    if not ok:
+        return jsonify({"error": "virtual media action failed",
+                        "status": status, "detail": detail[:300]}), 502
+    return jsonify({"ok": True, "action": action, "media": vm_path})
+
+
+@app.route("/api/bmc/<host>/boot-once", methods=["POST"])
+@requires_auth
+@_rate_limit("bmc-boot-once")
+def api_bmc_boot_once(host):
+    """v1.17.0 — force la prochaine amorce sur une cible (Cd, Pxe, Hdd…).
+
+    `Once` et non `Continuous` : après l'installation la machine doit
+    reprendre son ordre de boot normal sans qu'on ait à y revenir."""
+    data = request.get_json(force=True, silent=True) or {}
+    target = data.get("target", "Cd")
+    user = data.get("user", "")
+    pwd = data.get("password", "")
+    sys_path = _redfish_system_path(host, user, pwd)
+    if not sys_path:
+        return jsonify({"error": "Systems collection empty"}), 502
+    payload = {"Boot": {"BootSourceOverrideTarget": target,
+                        "BootSourceOverrideEnabled": "Once"}}
+    ok, status, detail = _redfish_send(host, sys_path, user, pwd, "PATCH", payload)
+    if not ok:
+        return jsonify({"error": "boot override failed", "status": status,
+                        "detail": detail[:300]}), 502
+    return jsonify({"ok": True, "target": target, "system": sys_path})
+
+
 @app.route("/api/bmc/<host>/power", methods=["POST"])
 @requires_auth
 def api_bmc_power(host):
@@ -932,7 +1125,8 @@ def api_bmc_power(host):
         ctx = ssl.create_default_context()
         ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
         body = json.dumps({"ResetType": action}).encode()
-        url = f"https://{host}/redfish/v1/Systems/1/Actions/ComputerSystem.Reset/"
+        sys_path = _redfish_system_path(host, user, pwd) or "/redfish/v1/Systems/1"
+        url = f"https://{host}{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/"
         req = urllib.request.Request(url, data=body, method="POST")
         req.add_header("Content-Type", "application/json")
         if user:

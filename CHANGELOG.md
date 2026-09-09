@@ -4,6 +4,42 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.17.0] — 2026-09-09 — Bare-metal: Redfish virtual media and artifact server
+
+First slice of the zero-touch Harvester install. Everything here was
+exercised for real against node3 (ProLiant XL170r Gen9, iLO 4 Advanced).
+
+### Added
+- **Redfish virtual media and boot override**: `POST /api/bmc/<host>/
+  virtualmedia` (insert/eject an image the BMC fetches over HTTP) and
+  `POST /api/bmc/<host>/boot-once` (one-shot boot target). Discovery now
+  reports the resolved system/manager paths, the virtual media device,
+  the allowed boot targets, the UEFI disk targets and the POST state.
+- **Artifact server** (`web/pxe_server.py`): a small plain-HTTP listener
+  on its own port, serving only two token-addressed paths (the ISO and
+  the node config). It exists because the console serves HTTPS with a
+  self-signed certificate behind Basic auth — a BMC can neither
+  authenticate nor trust that — and because the dev WSGI server handles
+  neither multi-gigabyte files nor Range requests well. Tokens are
+  random, time-limited and revoked when the install ends; no directory
+  listing, no other path.
+
+### Fixed
+- Power actions hardcoded `/redfish/v1/Systems/1`, which broke them on
+  iDRAC (`System.Embedded.1`) even though discovery already resolved the
+  path dynamically. The resolved path is now reused everywhere.
+
+### What the live test corrected
+- iLO 4 publishes `BootSourceOverrideSupported` where recent Redfish
+  publishes `...@Redfish.AllowableValues` — reading only one showed an
+  empty list of boot targets.
+- The HP OEM `InsertVirtualMedia` action **rejects** `Inserted` and
+  `WriteProtected` (`ActionParameterUnknown`), which the standard
+  `InsertMedia` action expects. The payload now follows the dialect.
+- Verified end to end on node3: a test ISO served by the artifact server
+  was inserted (`Inserted: true`, `ConnectedVia: URI`), the boot target
+  set to `Cd`/`Once`, then reset and ejected.
+
 ## [1.16.0] — 2026-09-09 — Delete orphan volumes, SSH key annotation, CPU pinning
 
 ### Added
