@@ -176,7 +176,11 @@ class _Handler(BaseHTTPRequestHandler):
 def start(port=None, bind="0.0.0.0"):
     """Démarre le serveur si besoin. Idempotent, renvoie le port utilisé."""
     global _SERVER, _THREAD
-    port = int(port or os.environ.get("HARVESTER_OPS_PXE_PORT", 8091))
+    # `port=0` demande un port éphémère : le distinguer de « non précisé »,
+    # qu'un simple `or` confondait avec 0 et renvoyait sur le port fixe.
+    if port is None:
+        port = os.environ.get("HARVESTER_OPS_PXE_PORT", 8091)
+    port = int(port)
     if _SERVER is not None:
         return _SERVER.server_address[1]
     _SERVER = ThreadingHTTPServer((bind, port), _Handler)

@@ -51,6 +51,27 @@ def test_icons_script_loads_before_its_users():
         "icons.js must load before the modules that call Icons.svg()")
 
 
+def test_every_referenced_icon_is_defined():
+    """`Icons.svg()` returns an empty string for an unknown name, so a typo
+    silently produces a button with no glyph. Catch it here instead."""
+    defined = set(re.findall(r"^\s{4}(\w+):", ICONS, re.M))
+    used = set()
+    for js in JS.glob("*.js"):
+        used |= set(re.findall(r"Icons\.svg\(\s*'(\w+)'", js.read_text()))
+    assert used, "no Icons.svg() call found, the scan is broken"
+    assert used <= defined, f"icons used but never drawn: {sorted(used - defined)}"
+
+
+def test_baremetal_actions_use_svg_not_emoji():
+    """v1.19.0 — the bare-metal power/install buttons went through the same
+    emoji-to-SVG pass as the VM row."""
+    js = (JS / "bmc.js").read_text()
+    bar = js.split("bmc-power", 1)[1].split("</div>", 1)[0]
+    assert not EMOJI_RE.search(bar), (
+        f"emoji left on the bare-metal action bar: {EMOJI_RE.findall(bar)}")
+    assert bar.count("Icons.svg(") >= 4
+
+
 def test_panel_header_keeps_svg_labels_unescaped():
     """A header action can carry an SVG label; escaping it would print
     the raw markup."""

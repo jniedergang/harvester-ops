@@ -4,6 +4,111 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.19.0] - 2026-09-10 - Bare-metal: the tab that drives an install
+
+### Added
+- **Bare-metal tab, filled in.** Until now it could discover a BMC and
+  send a power action; it now carries the whole chain: the ISO store
+  (download with progress, disk headroom, deletion), the discovery, and
+  a per-node install form (image, hostname, install disk, management
+  NIC, static or DHCP addressing, VIP, DNS, cluster token, OS password,
+  SSH keys) posting to `/api/baremetal/install` and tracked in the dock.
+- **Install is offered only when the machine can actually do it.** The
+  button appears when the BMC exposes a CD virtual media device *and*
+  publishes a `Cd` boot target. Otherwise the card shows a badge
+  explaining why, which on iLO usually means no Advanced licence.
+  Offering the action anyway would walk the operator into a wall thirty
+  seconds into an installation.
+- **Extra kernel arguments** on the install form (filtered, since they
+  land on a grub command line): `harvester.install.skipchecks=true` to
+  bypass the hardware preflight, `console=ttyS1,115200` to mirror the
+  install onto the BMC serial console, which is the only way to watch an
+  unattended install unfold.
+- **`docs/en/bare-metal.md` / `docs/fr/bare-metal.md`**: prerequisites,
+  the flow step by step, why the ISO has to be remastered, why the
+  artifact server is a second listener rather than a Flask route, and a
+  troubleshooting section.
+
+### Fixed
+Everything in this section came out of driving the tab against two real
+iLO 4s rather than out of the unit tests.
+
+- **BMC credentials no longer evaporate.** Actions used to re-read the
+  username and password from the discovery form, which is emptied by any
+  re-render: the request went out with an empty password and failed as a
+  silent 401. They are now kept in the module for the session and never
+  sent anywhere but the BMC endpoint they belong to.
+- **A click inside the tab wiped the tab.** The content pane carries the
+  same `data-subtab="pxe"` attribute as the navigation link, so an
+  unscoped selector re-rendered everything 50 ms after *any* click in the
+  pane, erasing a discovery that takes a minute to produce. The trigger
+  now targets the nav link, and a non-forced re-render keeps what is
+  already on screen.
+- **The management interface is designated by MAC address.** Redfish
+  names both NICs of an XL170r "System Ethernet Interface" and says
+  nothing about the name Linux will give them; writing that name into
+  the config produced an install with an unfindable management
+  interface. The config now emits `hwAddr` when given a MAC, and a real
+  interface name still works.
+- **Confirmations showed raw `{host}` / `{device}` placeholders**: the
+  module's translation helper swallowed the interpolation parameters.
+- **The remastering was rewritten around what the ISO actually is.** It
+  had been built on assumptions, and every one of them was wrong: the
+  official image has a *single* grub config carrying the menu entries
+  (the EFI one only chainloads it), its entries already end in
+  `${extra_iso_cmdline}`, sourced from `/boot/grub2/harvester.cfg`, and
+  its El Torito record is **UEFI-only and hidden** (not a file in the
+  tree), so rebuilding the image with `mkisofs` produced an ISO that
+  could not boot at all. The step now sets that one variable and copies
+  the image with `-boot_image any replay`, which keeps the original boot
+  setup by construction instead of trying to recreate it. It also
+  verifies the boot record survived, not just the volume label, and it
+  never extracts the 7.7 GB payload: two minutes instead of the full
+  extract-and-rebuild, and a quarter of the disk space.
+- **Unattended installs get `ip=dhcp rd.neednet=1`.** The vendor's
+  installer fetches its configuration from `config_url` *before*
+  configuring any network. A PXE install has networking already, from
+  the kernel's `ip=` parameter; booting the same ISO from virtual media
+  has none, so the installer sat silent forever, never emitting a single
+  request. This is the difference between an install that happens and
+  one that hangs with nothing to show for it.
+- **Remastering no longer works in `/tmp`**, which is a tmpfs on many
+  hosts. It now works beside the produced image and refuses upfront when
+  the space is not there.
+- **Generated artifacts left the ISO store.** A run killed mid-flight
+  (a server restart during the 30-minute wait) left its 7.7 GB remastered
+  image in the store, where the next install picked it as the source
+  instead of the official one. Run artifacts now live in a private
+  `work/` directory, swept of anything older than a day.
+- **`port=0` no longer means "the default port"** in the artifact
+  server: an `or` folded the ephemeral-port request into the fixed
+  port, which was already taken.
+- **The install form shipped the development lab's addresses** as default
+  values. Examples now use the documentation range (RFC 5737), and
+  switching to DHCP hides the static fields *and* drops their `required`,
+  which otherwise blocked submission on invisible fields.
+
+### Changed
+- Power and install buttons moved from emoji to the SVG icon set, three
+  new icons (`download`, `search`, `install`), and Force off is now
+  styled as the destructive action it is.
+- 60 new interface strings, complete in the five languages.
+- README and capabilities pages: the bare-metal row no longer advertises
+  "PXE / DHCP / HTTP groundwork", and the i18n line no longer claims
+  IT/ES/DE fall back to English (they have been complete since 1.12.0).
+
+### Tests
+- Every `Icons.svg()` reference resolves to a drawn icon (an unknown name
+  silently returns an empty string, so a typo produced a blank button).
+- Bare-metal front-end, at source level: credentials survive a re-render,
+  install gated on virtual media, no BMC-provided field reaches
+  `innerHTML` unescaped, every button carries a tooltip.
+- The remastering tests now build a synthetic ISO shaped like the real
+  one, El Torito record included, and assert what actually breaks a boot:
+  the volume label, the boot record, the injected arguments, and the
+  network parameters without which the install never starts.
+- 466 tests green.
+
 ## [1.18.0] — 2026-09-10 — Bare-metal: ISO store, remastering, install orchestration
 
 ### Added

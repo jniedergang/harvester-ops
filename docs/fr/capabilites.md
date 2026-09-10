@@ -186,10 +186,39 @@ sauvegardées.
 
 ## 6. Bare-metal (console)
 
+Transformer un serveur vierge en node Harvester opérationnel sans y
+toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
+
 - **Découverte BMC / Redfish** — pointer un ou plusieurs endpoints BMC et
-  lire les profils des nodes (modèle, NICs, état d'alimentation).
-- **Actions d'alimentation** via Redfish.
-- **Provisionnement PXE / DHCP / HTTP** : socle (en cours).
+  lire les profils des nodes : modèle, numéro de série, BIOS, mémoire,
+  NICs avec leurs MAC, état d'alimentation, disques amorçables, et la
+  possibilité ou non d'installer la machine. Fonctionne sur iLO 4/5,
+  iDRAC 9 et Redfish standard ; les chemins System et Manager sont
+  résolus selon le constructeur au lieu d'être supposés.
+- **Actions d'alimentation** via Redfish, avec la même résolution
+  dynamique des chemins.
+- **Magasin d'images d'installation** — télécharger un ISO Harvester côté
+  serveur, en flux, avec un pourcentage suivi. Les 7,6 Go de l'image ne
+  passent jamais par le navigateur et ne sont pas livrés dans le tarball.
+- **Installation sans opérateur** — choisir un ISO, renseigner le node
+  (nom d'hôte, disque d'installation, NIC de management, adressage, VIP,
+  DNS, token, mot de passe OS), et la console remasterise l'ISO pour
+  l'installation zéro-touch, le publie derrière un jeton à usage unique,
+  le monte en média virtuel, programme une amorce unique sur `Cd` et
+  allume la machine. Suivi étape par étape dans le dock, du préflight
+  jusqu'à l'API Harvester qui répond sur la VIP.
+- **Préflight contre l'inventaire périmé** — un BMC éteint rejoue
+  l'inventaire de son *dernier POST*, parfois vieux de plusieurs mois.
+  L'installation allume la machine et lit le matériel réel avant de
+  décider.
+- **Arguments noyau supplémentaires** pour les cas que les valeurs par
+  défaut ne couvrent pas : passer outre les contrôles matériels, ou
+  renvoyer toute l'installation sur la console série du BMC, seul moyen
+  de regarder une installation sans opérateur se dérouler.
+- **Aucun identifiant stocké** — l'utilisateur et le mot de passe du BMC
+  restent dans la page le temps de la session ; le token du cluster et le
+  mot de passe OS n'apparaissent jamais dans une réponse, un libellé
+  d'action ou une ligne de log.
 
 ## 7. Support aux opérations (CLI + console)
 
@@ -217,8 +246,8 @@ sauvegardées.
   Activité et son replay de détails, y compris après redémarrage de l'UI.
   L'éviction mémoire n'affecte que l'attachement SSE live, jamais
   l'historique visible.
-- **Internationalisation** — EN + FR complets ; IT / ES / DE retombent
-  sur EN.
+- **Internationalisation** — cinq langues complètes (EN, FR, DE, ES, IT),
+  avec un test de parité qui casse la build sur une clé manquante.
 - **Icônes** — un jeu SVG monochrome dessiné d'un seul trait, héritant de
   `currentColor` : un seul jeu couvre tous les thèmes et les deux modes.
   Il remplace les emoji, qui mélangeaient images en couleur pleine et

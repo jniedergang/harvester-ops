@@ -1932,9 +1932,22 @@ def _harvester_install_config(opts):
     L.append("install:")
     L.append(f"  mode: {esc(opts.get('mode', 'create'))}")
     L.append(f"  device: {esc(opts['device'])}")
+    # Obligatoire en mode automatique — l'installeur refuse la
+    # configuration sans, avec « iso_url is required in automatic
+    # installation », même quand l'image est déjà montée en média virtuel.
+    if opts.get("iso_url"):
+        L.append(f"  iso_url: {esc(opts['iso_url'])}")
     L.append("  management_interface:")
     L.append("    interfaces:")
-    L.append(f"      - name: {esc(opts['mgmt_interface'])}")
+    # Désigner la carte par son ADRESSE MAC quand on l'a. Redfish ne publie
+    # pas le nom que Linux donnera à l'interface — sur les XL170r les deux
+    # NICs s'appellent toutes deux « System Ethernet Interface » — alors que
+    # la MAC, elle, identifie sans ambiguïté et survit au renommage.
+    iface = str(opts["mgmt_interface"]).strip()
+    if re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", iface):
+        L.append(f"      - hwAddr: {esc(iface.lower().replace('-', ':'))}")
+    else:
+        L.append(f"      - name: {esc(iface)}")
     method = opts.get("method", "dhcp")
     L.append(f"    method: {esc(method)}")
     if method == "static":
@@ -1982,6 +1995,10 @@ def _baremetal_install_runner(run, opts):
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
     tokens = []
+    # Fichiers à effacer quoi qu'il arrive : la configuration porte le token
+    # du cluster et le mot de passe OS, elle n'a rien à faire sur le disque
+    # après un échec.
+    scratch = []
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
@@ -2006,6 +2023,11 @@ def _baremetal_install_runner(run, opts):
                   "ts": time.time()})
         if tokens:
             pxe_server.revoke(*tokens)
+        for p in scratch:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
         run.close()
 
     run.status = "running"
@@ -2047,23 +2069,42 @@ def _baremetal_install_runner(run, opts):
     # --- remasterisation ---
     port = pxe_server.start()
     advertise = opts.get("advertise_host") or _bm_local_ip_for(host)
-    cfg_yaml = _harvester_install_config(opts)
-    cfg_path = _iso_dir() / f"config-{run.id}.yaml"
-    cfg_path.write_text(cfg_yaml)
-    cfg_path.chmod(0o600)          # contient un token et un mot de passe
-    cfg_token = pxe_server.issue(cfg_path, "config")
-    tokens.append(cfg_token)
-    config_url = f"http://{advertise}:{port}/pxe/config/{cfg_token}.yaml"
 
     src_iso = _iso_dir() / opts["iso"]
     if not src_iso.is_file():
         return fail("remaster", f"ISO not found: {opts['iso']}")
-    out_iso = _iso_dir() / f"install-{run.id}.iso"
+    out_iso = _iso_work_dir() / f"install-{run.id}.iso"
+    scratch.extend([out_iso, out_iso.with_suffix(out_iso.suffix + ".sha256")])
+
+    # Le jeton de l'ISO est émis AVANT d'écrire la configuration : celle-ci
+    # doit porter `iso_url`, faute de quoi l'installeur s'arrête sur
+    # « iso_url is required in automatic installation ». Le fichier n'existe
+    # pas encore, ce n'est pas un problème : il sera là bien avant la
+    # première requête, qui n'a lieu qu'une fois la machine démarrée.
+    iso_token = pxe_server.issue(out_iso, "iso")
+    tokens.append(iso_token)
+    iso_url = f"http://{advertise}:{port}/pxe/iso/{iso_token}.iso"
+
+    cfg_yaml = _harvester_install_config(dict(opts, iso_url=iso_url))
+    cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
+    cfg_path.write_text(cfg_yaml)
+    cfg_path.chmod(0o600)          # contient un token et un mot de passe
+    scratch.append(cfg_path)
+    cfg_token = pxe_server.issue(cfg_path, "config")
+    tokens.append(cfg_token)
+    config_url = f"http://{advertise}:{port}/pxe/config/{cfg_token}.yaml"
+
     step("remaster", "running", f"remasterisation de {src_iso.name}")
     script = BIN_DIR / "harvester-iso-remaster.sh"
+    cmd = ["/usr/bin/env", "bash", str(script), "--src", str(src_iso),
+           "--out", str(out_iso), "--config-url", config_url,
+           # le magasin d'ISO est sur disque ; /tmp est un tmpfs sur
+           # beaucoup d'hôtes et l'extraction y tiendrait en RAM.
+           "--work-dir", str(_iso_work_dir())]
+    if opts.get("extra_args"):
+        cmd += ["--extra-args", opts["extra_args"]]
     proc = subprocess.Popen(
-        ["/usr/bin/env", "bash", str(script), "--src", str(src_iso),
-         "--out", str(out_iso), "--config-url", config_url],
+        cmd,
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     for line in proc.stderr:
         line = line.strip()
@@ -2073,9 +2114,6 @@ def _baremetal_install_runner(run, opts):
                 step(parts[1], parts[2], parts[3])
     if proc.wait() != 0:
         return fail("remaster", "ISO remastering failed")
-    iso_token = pxe_server.issue(out_iso, "iso")
-    tokens.append(iso_token)
-    iso_url = f"http://{advertise}:{port}/pxe/iso/{iso_token}.iso"
     step("serve", "done", f"artefacts publiés sur {advertise}:{port}")
 
     # --- média virtuel + amorce + allumage ---
@@ -2176,6 +2214,13 @@ def api_baremetal_install():
     if not safe_iso:
         return jsonify({"error": "invalid ISO name"}), 400
     data["iso"] = safe_iso
+    # Arguments noyau supplémentaires : ils finissent sur une ligne de
+    # commande grub, donc pas de guillemets ni de saut de ligne qui
+    # permettraient d'en sortir.
+    extra = " ".join(str(data.get("extra_args") or "").split())
+    if extra and not re.fullmatch(r"[A-Za-z0-9 ._:/,=@+-]*", extra):
+        return jsonify({"error": "invalid extra kernel arguments"}), 400
+    data["extra_args"] = extra
     # Le label de l'action ne porte ni token ni mot de passe.
     action_id = track_action(f"baremetal-install:{data['hostname']}",
                              "(local)", _baremetal_install_runner, data)
@@ -2202,6 +2247,28 @@ ISO_DIR = Path(os.environ.get(
 def _iso_dir():
     ISO_DIR.mkdir(parents=True, exist_ok=True)
     return ISO_DIR
+
+
+def _iso_work_dir():
+    """Artefacts produits par une installation (ISO remasterisé,
+    configuration). Séparés du magasin : sinon un run interrompu laisse une
+    image de 7,7 Go dans la liste des ISO, où elle finit par être
+    re-sélectionnée à la place de l'image officielle."""
+    d = ISO_DIR / "work"
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)          # la configuration y porte des secrets
+    # Un run tué (redémarrage du serveur pendant les 30 minutes d'attente)
+    # ne passe par aucun nettoyage : balayer ce qui traîne depuis plus d'un
+    # jour évite d'accumuler des images de 7,7 Go et des configurations
+    # contenant des secrets.
+    cutoff = time.time() - 86400
+    for p in d.iterdir():
+        try:
+            if p.is_file() and p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
+    return d
 
 
 def _safe_artifact_name(name, suffixes=(".iso",)):

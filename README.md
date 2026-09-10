@@ -7,7 +7,7 @@ Self-contained, airgap-friendly, single-tarball delivery.
 Livraison autonome en un tarball unique, compatible airgap.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-398_passing-green.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-466_passing-green.svg)](tests/)
 
 > Independent project. Not affiliated with, endorsed by, or supported by SUSE.
 
@@ -38,7 +38,7 @@ Livraison autonome en un tarball unique, compatible airgap.
 harvester-ops began as graceful shutdown / startup tooling and has grown
 into a single-pane **operations console** for day-2 Harvester work: power
 sequencing, VM lifecycle, cluster observability, downstream cluster
-provisioning, infrastructure-as-code, and bare-metal discovery — all
+provisioning, infrastructure-as-code, and bare-metal installation, all
 multi-cluster, all auditable.
 
 It ships as **two equivalent surfaces over one engine**:
@@ -62,7 +62,7 @@ logs and a retained history.
 | **Cluster observability** | Live topology: cluster (VMs per node), network (rack-diagram bands per network), storage (VM-to-volume map with real PVC names, CD-ROM/ISO discs, orphaned-volume detection), Prometheus `/metrics`, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
 | **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON | — | ✓ |
-| **Bare-metal** | BMC / Redfish discovery + power actions, PXE / DHCP / HTTP provisioning groundwork | — | ✓ |
+| **Bare-metal** | BMC / Redfish discovery + power actions, ISO store, unattended Harvester install over virtual media | — | ✓ |
 | **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised in 5 languages (EN/FR/DE/ES/IT) with tooltips on every control | partial | ✓ |
 
 The power-sequencing core is the only part needed for a pure
@@ -96,7 +96,7 @@ harvester-ops est né comme outillage d'extinction / démarrage gracieux
 et est devenu une **console d'exploitation** unifiée pour le day-2
 Harvester : séquençage électrique, cycle de vie des VMs, observabilité
 cluster, provisionnement de clusters downstream, infrastructure-as-code et
-découverte bare-metal — le tout multi-cluster et auditable.
+installation bare-metal, le tout multi-cluster et auditable.
 
 Il se présente comme **deux surfaces équivalentes sur un même moteur** :
 
@@ -120,7 +120,7 @@ ses logs live et un historique conservé.
 | **Observabilité cluster** | Topologie live : cluster (VMs par node), réseau (bandes façon schéma de baie), stockage (carte VM-volume avec vrais noms de PVC, disques CD-ROM/ISO, détection de volumes orphelins), `/metrics` Prometheus, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
 | **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON | — | ✓ |
-| **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, socle provisionnement PXE / DHCP / HTTP | — | ✓ |
+| **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, magasin d'ISO, installation Harvester sans opérateur par média virtuel | — | ✓ |
 | **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation complète en 5 langues (EN/FR/DE/ES/IT) avec tooltips sur chaque contrôle | partiel | ✓ |
 
 Le cœur de séquençage est la seule partie nécessaire à un déploiement
@@ -179,8 +179,8 @@ harvester-ops/
 
 ## Documentation
 
-- **EN**: [capabilities](docs/en/capabilities.md) · [operating-procedure](docs/en/operating-procedure.md) · [architecture](docs/en/architecture.md) · [install](docs/en/install.md) · [troubleshooting](docs/en/troubleshooting.md)
-- **FR**: [capacités](docs/fr/capabilites.md) · [procédure opérationnelle](docs/fr/procedure-operationnelle.md) · [architecture](docs/fr/architecture.md) · [installation](docs/fr/installation.md) · [dépannage](docs/fr/depannage.md)
+- **EN**: [capabilities](docs/en/capabilities.md) · [operating-procedure](docs/en/operating-procedure.md) · [architecture](docs/en/architecture.md) · [install](docs/en/install.md) · [bare-metal](docs/en/bare-metal.md) · [troubleshooting](docs/en/troubleshooting.md)
+- **FR**: [capacités](docs/fr/capabilites.md) · [procédure opérationnelle](docs/fr/procedure-operationnelle.md) · [architecture](docs/fr/architecture.md) · [installation](docs/fr/installation.md) · [bare-metal](docs/fr/bare-metal.md) · [dépannage](docs/fr/depannage.md)
 
 ## Contributing
 

@@ -3707,6 +3707,15 @@ button .icon-red {
 button .icon-green { color: var(--accent); }
 button .icon-red   { color: var(--danger); }
 
+/* v1.19.0 — bouton portant une icône ET un libellé. `.icon` est en
+   display:block (pour les boutons icône seule) : sans ce flex, l'icône
+   passerait à la ligne au-dessus du texte. */
+.btn-ico {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 /* v1.15.0 — signale une capacité livrée mais non vérifiée sur le cluster
    de test (matériel absent). Volontairement visible : la règle projet est
    de ne jamais laisser croire qu'une fonction a été éprouvée. */

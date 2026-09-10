@@ -36,6 +36,13 @@ const Icons = (() => {
              + '<path d="M7 6.8l.9 12.1a1 1 0 001 .9h6.2a1 1 0 001-.9l.9-12.1"/>',
     restore: '<path d="M4 12a8 8 0 102.6-5.9"/><path d="M4 4v4.5h4.5"/>',
     refresh: '<path d="M20 12a8 8 0 11-2.6-5.9"/><path d="M20 4v4.5h-4.5"/>',
+
+    // Bare-metal (v1.19.0)
+    download: '<path d="M12 4v10.5"/><path d="M8.2 10.8L12 14.6l3.8-3.8"/>'
+              + '<path d="M4.8 18.6h14.4"/>',
+    search:  '<circle cx="10.8" cy="10.8" r="6.1"/><path d="M15.3 15.3L20 20"/>',
+    install: '<path d="M12 3.4l7.6 4v8.6L12 20.6 4.4 16V7.4z"/>'
+             + '<path d="M4.4 7.4L12 11.7l7.6-4.3"/><path d="M12 11.7v8.9"/>',
   };
 
   function svg(name, opts) {

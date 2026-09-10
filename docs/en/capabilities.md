@@ -167,10 +167,33 @@ Drive the Terraform provider for Harvester from saved declarations.
 
 ## 6. Bare-metal (console)
 
+Turn a blank server into a running Harvester node without touching it.
+Full walkthrough in **[bare-metal.md](bare-metal.md)**.
+
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
-  read back node profiles (model, NICs, power state).
-- **Power actions** over Redfish.
-- **PXE / DHCP / HTTP** provisioning groundwork (work in progress).
+  read back node profiles: model, serial, BIOS, memory, NICs with their
+  MACs, power state, bootable disks, and whether the machine can be
+  installed at all. Works on iLO 4/5, iDRAC 9 and standard Redfish; the
+  system and manager paths are resolved per vendor rather than assumed.
+- **Power actions** over Redfish, with the same dynamic path resolution.
+- **Installation image store** — download a Harvester ISO server-side, as
+  a stream, tracked with a percentage. The 7.6 GB image never passes
+  through the browser and is not shipped in the tarball.
+- **Unattended installation** — pick an ISO, fill in the node (hostname,
+  install disk, management NIC, addressing, VIP, DNS, token, OS
+  password), and the console remasters the ISO for zero-touch install,
+  publishes it behind a one-off token, mounts it as virtual media, sets a
+  one-shot `Cd` boot and powers the machine on. Tracked step by step in
+  the dock, from preflight to the Harvester API answering on the VIP.
+- **Preflight against stale inventory** — a powered-off BMC replays the
+  inventory of its *last POST*, which can be months old. The install
+  powers the machine on and reads the real hardware before deciding.
+- **Extra kernel arguments** for the cases the defaults do not cover:
+  skip the hardware preflight, or mirror the whole install onto the BMC
+  serial console, which is the only way to watch an unattended install.
+- **Credentials are never stored** — BMC username and password stay in
+  the page for the session; the cluster token and OS password never
+  appear in a response, an action label or a log line.
 
 ## 7. Operations support (CLI + console)
 
@@ -196,8 +219,8 @@ Drive the Terraform provider for Harvester from saved declarations.
   events) are persisted in SQLite and served back by the Activity tab and
   its details replay, across UI restarts. In-memory eviction only affects
   live SSE attachment, never the visible history.
-- **Internationalisation** — EN + FR complete; IT / ES / DE fall back to
-  EN.
+- **Internationalisation** — five complete languages (EN, FR, DE, ES,
+  IT), with a parity test that fails the build on a missing key.
 - **Icons** — a hand-drawn monochrome SVG set inheriting `currentColor`,
   so one set serves every theme and both modes. It replaced the emoji
   icons, which mixed full-colour images with thin glyphs and read poorly
