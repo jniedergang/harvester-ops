@@ -7,12 +7,12 @@ const VMSnapshots = (() => {
 
   async function open(cluster, namespace, name) {
     const panelId = `vm-snapshots-${cluster}-${namespace}-${name}`;
-    const title = `📸 Snapshots — ${namespace}/${name}`;
+    const title = `Snapshots — ${namespace}/${name}`;
     const body = `
       <div class="snapshots-panel">
         <div class="apply-bar" style="margin: 0 0 14px; padding: 0; border: 0;">
           <button class="btn btn-primary btn-sm tip" id="snap-create" data-tip="${i18n.t('snap.createTip')}">
-            ➕ <span>${i18n.t('snap.create')}</span>
+            ${Icons.svg('add', { size: 14 })} <span>${i18n.t('snap.create')}</span>
           </button>
           <button class="btn btn-secondary btn-sm tip" id="snap-refresh" data-tip="${i18n.t('snap.refreshTip')}">${i18n.t('snap.refresh')}</button>
           <span class="apply-result" id="snap-feedback"></span>
@@ -35,6 +35,7 @@ const VMSnapshots = (() => {
     const panel = FloatingPanels.open({
       id: panelId,
       title,
+      icon: 'snapshot',
       bodyHtml: body,
       width: 760,
       height: 480,
@@ -66,7 +67,7 @@ const VMSnapshots = (() => {
             <td><code>${s.name}</code></td>
             <td>${s.creationTimestamp ? new Date(s.creationTimestamp).toLocaleString() : '—'}</td>
             <td>${s.ready
-              ? '<span class="badge ok">✓ Ready</span>'
+              ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + ' Ready</span>'
               : '<span class="badge warn">in-progress</span>'}</td>
             <td>
               <button class="btn-icon-action tip" data-tip="${i18n.t('snap.restoreTip')}" data-restore="${s.name}" ${s.ready ? '' : 'disabled'}>${Icons.svg('restore')}</button>
@@ -90,13 +91,13 @@ const VMSnapshots = (() => {
         const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/snapshots`, { method: 'POST' });
         const d = await r.json();
         if (r.ok) {
-          fb.innerHTML = `<span style="color:var(--accent)">✓ ${i18n.t('snap.created')} ${d.name}</span>`;
+          fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${i18n.t('snap.created')} ${d.name}</span>`;
           refresh();
         } else {
-          fb.innerHTML = `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`;
+          fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.detail || d.error}</span>`;
         }
       } catch (e) {
-        fb.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+        fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       }
     }
 
@@ -106,8 +107,8 @@ const VMSnapshots = (() => {
       const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/snapshots/${encodeURIComponent(snap)}`, { method: 'DELETE' });
       const d = await r.json();
       fb.innerHTML = r.ok
-        ? `<span style="color:var(--accent)">✓ deleted</span>`
-        : `<span style="color:var(--danger)">✗ ${d.error}</span>`;
+        ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} deleted</span>`
+        : `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}</span>`;
       refresh();
     }
 
@@ -120,13 +121,13 @@ const VMSnapshots = (() => {
       box.hidden = false;
       box.innerHTML = `
         <div class="snap-restore-box">
-          <strong>↩ ${esc(i18n.t('snap.restoreTitle', {snap}))}</strong>
+          <strong>${Icons.svg('restore')} ${esc(i18n.t('snap.restoreTitle', {snap}))}</strong>
           <label class="opt-row"><input type="checkbox" id="snap-opt-pre" checked>
-            <span>📸 ${esc(i18n.t('snap.optPre'))}</span></label>
+            <span>${Icons.svg('snapshot')} ${esc(i18n.t('snap.optPre'))}</span></label>
           <label class="opt-row"><input type="checkbox" id="snap-opt-stop" checked>
-            <span>⏻ ${esc(i18n.t('snap.optStop'))}</span></label>
+            <span>${Icons.svg('power')} ${esc(i18n.t('snap.optStop'))}</span></label>
           <div class="apply-bar">
-            <button class="btn btn-primary btn-sm" id="snap-restore-go">↩ ${esc(i18n.t('snap.restoreGo'))}</button>
+            <button class="btn btn-primary btn-sm" id="snap-restore-go">${Icons.svg('restore')} ${esc(i18n.t('snap.restoreGo'))}</button>
             <button class="btn btn-secondary btn-sm" id="snap-restore-cancel">${esc(i18n.t('common.cancel'))}</button>
           </div>
         </div>`;
@@ -153,10 +154,10 @@ const VMSnapshots = (() => {
       // v1.10.1 : restore in-place refusé tant que la VM tourne — message
       // actionnable plutôt que l'erreur brute du webhook.
       fb.innerHTML = r.ok
-        ? `<span style="color:var(--accent)">✓ restore "${d.restore}" started</span>`
+        ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} restore "${d.restore}" started</span>`
         : (r.status === 409 && d.error === 'vm-running'
-          ? `<span style="color:var(--warn)">⏻ ${i18n.t('snap.needsStopped')}</span>`
-          : `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`);
+          ? `<span style="color:var(--warn)">${Icons.svg('power')} ${i18n.t('snap.needsStopped')}</span>`
+          : `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.detail || d.error}</span>`);
     }
 
     panel.el.querySelector('#snap-create').addEventListener('click', doCreate);

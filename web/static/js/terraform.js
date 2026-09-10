@@ -103,11 +103,11 @@ const TF = (() => {
     const tfOk = info.terraform_available;
     const provOk = !!info.provider_binary;
     const summary = (tfOk && provOk)
-      ? `<div class="summary-bar ok">✓ Terraform <code>${info.terraform_bin}</code> ·
+      ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Terraform <code>${info.terraform_bin}</code> ·
          provider <code>${info.provider_version}</code> ·
          ${state.initialized ? state.resource_count + ' resource(s) in state'
                              : 'workspace not initialized'}</div>`
-      : `<div class="summary-bar warn">⚠ ${tfOk ? '' : 'terraform CLI missing — '}${
+      : `<div class="summary-bar warn">${Icons.svg('warn', { size: 14 })} ${tfOk ? '' : 'terraform CLI missing — '}${
             provOk ? '' : 'provider binary missing'}</div>`;
     // v1.5.3: prefer `resources_detail` (carries has_sidecar + kind);
     // fall back to bare addresses for older API responses.
@@ -123,7 +123,7 @@ const TF = (() => {
             ? `<button class="btn btn-sm tf-edit-resource tip"
                        data-safe="${esc(r.local_name)}"
                        data-address="${esc(r.address)}"
-                       data-tip="${i18n.t('tf.tip.editResource')}">✎ Edit</button>`
+                       data-tip="${i18n.t('tf.tip.editResource')}">${Icons.svg('edit')} Edit</button>`
             : `<span class="tf-no-sidecar tip" data-tip="${i18n.t('tf.tip.noSidecar')}">no sidecar</span>`;
           return `
             <tr><td><code>${esc(r.address)}</code></td>
@@ -132,7 +132,7 @@ const TF = (() => {
                   ${editBtn}
                   <button class="btn btn-sm btn-danger tf-destroy-resource"
                           data-address="${esc(r.address)}"
-                  >🗑 Destroy</button>
+                  >${Icons.svg('delete')} Destroy</button>
                 </td>
             </tr>`;
         }).join('');
@@ -141,11 +141,11 @@ const TF = (() => {
 
       <nav class="sub-tabs sub-tabs-2nd" role="tablist" aria-label="Terraform sections">
         <button type="button" class="sub-tab" data-tf-tab="decls"
-                role="tab">📦 Declarations</button>
+                role="tab">${Icons.svg('bundle')} Declarations</button>
         <button type="button" class="sub-tab" data-tf-tab="live"
-                role="tab">🌐 Live resources</button>
+                role="tab">${Icons.svg('network')} Live resources</button>
         <button type="button" class="sub-tab" data-tf-tab="install"
-                role="tab">⚙ Installation</button>
+                role="tab">${Icons.svg('settings')} Installation</button>
       </nav>
 
       <section class="tf-subtab-content" data-tf-tab="decls" role="tabpanel">
@@ -160,7 +160,7 @@ const TF = (() => {
       <section class="tf-subtab-content" data-tf-tab="live" role="tabpanel">
         <h4 style="margin-top:8px;">Resources in state (cluster: ${esc(cluster || '—')})</h4>
         <p class="form-hint">Resources currently tracked by Terraform on
-          this cluster. Click ✎ Edit to reopen one in a fresh declaration
+          this cluster. Click Edit to reopen one in a fresh declaration
           (requires a sidecar — only resources created via a declaration
           carry one).</p>
         <table class="data-table">
@@ -171,11 +171,11 @@ const TF = (() => {
         <div class="apply-bar" style="margin-top:14px; gap:8px;">
           <button class="btn btn-secondary btn-sm" id="btn-tf-clean-stale"
                   data-tip="${i18n.t('tf.tip.cleanStale')}">
-            🧹 Clean stale files
+            ${Icons.svg('clean')} Clean stale files
           </button>
           <button class="btn btn-danger btn-sm" id="btn-tf-destroy"
                   data-tip="${i18n.t('tf.tip.destroyWorkspace')}">
-            🧨 Destroy workspace
+            ${Icons.svg('destroy')} Destroy workspace
           </button>
         </div>
       </section>
@@ -206,7 +206,7 @@ const TF = (() => {
           tar.gz that can be transferred to an offline host.</p>
         <button class="btn btn-secondary btn-sm" id="btn-tf-bundle-build"
                 data-tip="${i18n.t('tf.tip.bundleBuild')}">
-          🔨 Build airgap bundle
+          ${Icons.svg('build')} Build airgap bundle
         </button>
       </section>`;
   }
@@ -244,8 +244,8 @@ const TF = (() => {
         return !v.valid;
       }).length;
       summary = incomplete > 0
-        ? `<span class="tf-decl-summary tf-decl-summary--warn">⚠ ${incomplete}/${totals} incomplete</span>`
-        : `<span class="tf-decl-summary tf-decl-summary--ok">✓ ${totals} ready</span>`;
+        ? `<span class="tf-decl-summary tf-decl-summary--warn">${Icons.svg('warn', { size: 14 })} ${incomplete}/${totals} incomplete</span>`
+        : `<span class="tf-decl-summary tf-decl-summary--ok">${Icons.svg('ok', { size: 14 })} ${totals} ready</span>`;
     } else {
       summary = `<span class="tf-decl-summary">empty</span>`;
     }
@@ -265,13 +265,13 @@ const TF = (() => {
           <button class="btn btn-sm tf-decl-dryrun"
                   data-id="${esc(decl.id)}" data-dry="1">Dry-run</button>
           <button class="btn btn-sm btn-primary tf-decl-apply"
-                  data-id="${esc(decl.id)}" data-dry="0">Apply ▶</button>
+                  data-id="${esc(decl.id)}" data-dry="0">${Icons.svg('play', { size: 12 })} Apply</button>
           <button class="btn btn-sm btn-danger tf-decl-destroy tip"
                   data-id="${esc(decl.id)}"
-                  data-tip="${i18n.t('tf.tip.destroyDecl')}">🧨 Destroy</button>
+                  data-tip="${i18n.t('tf.tip.destroyDecl')}">${Icons.svg('destroy')} Destroy</button>
           <button class="btn btn-sm tf-decl-delete tip"
                   data-id="${esc(decl.id)}"
-                  data-tip="${i18n.t('tf.tip.deleteDecl')}">🗑</button>
+                  data-tip="${i18n.t('tf.tip.deleteDecl')}">${Icons.svg('delete')}</button>
         </div>
       </div>`;
   }
@@ -374,14 +374,14 @@ const TF = (() => {
         const detail = (d.errors || []).map(e =>
           `#${e.index + 1} ${e.kind || '?'} "${e.name || ''}": ${e.error}`).join('\n');
         if (result) result.innerHTML =
-          `<span style="color:var(--danger)">✗ ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
+          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
         return;
       }
       runId = d.action_id;
       if (result) result.innerHTML =
-        `<span style="color:var(--accent)">⏳ ${dryRun ? 'plan' : 'apply'} running — dock action <code>${runId}</code></span>`;
+        `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} ${dryRun ? 'plan' : 'apply'} running — dock action <code>${runId}</code></span>`;
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       return;
     }
     if (runId) followRun(runId, dryRun, 'declaration', cluster,
@@ -410,7 +410,7 @@ const TF = (() => {
         decl.resources.map((r, i) =>
           `#${i + 1} ${r.kind}  ${r.spec?.name || ''}`).join('\n'),
       requiredText: decl.name,
-      confirmLabel: `🧨 Destroy "${decl.name}"`,
+      confirmLabel: `Destroy "${decl.name}"`,
     });
     if (!ok) return;
 
@@ -433,14 +433,14 @@ const TF = (() => {
         const detail = (d.errors || []).map(e =>
           `#${e.index + 1} ${e.kind || '?'} "${e.name || ''}": ${e.error}`).join('\n');
         if (result) result.innerHTML =
-          `<span style="color:var(--danger)">✗ ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
+          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
         return;
       }
       runId = d.action_id;
       if (result) result.innerHTML =
-        `<span style="color:var(--accent)">⏳ destroy running — dock action <code>${runId}</code></span>`;
+        `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} destroy running — dock action <code>${runId}</code></span>`;
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       return;
     }
     if (runId) followRun(runId, false, 'destroy-decl', cluster,
@@ -496,9 +496,9 @@ const TF = (() => {
           try { exit = JSON.parse(e.data).exit_code ?? 0; } catch {}
           const isDestroy = !!(ctx && ctx.isDestroy);
           if (exit === 0) {
-            status.textContent = dryRun
-              ? '✓ plan ready (no changes applied)'
-              : (isDestroy ? '✓ destroy completed' : '✓ apply completed');
+            status.innerHTML = Icons.svg('ok', { size: 14, cls: 'icon-ok' }) + ' ' + (dryRun
+              ? 'plan ready (no changes applied)'
+              : (isDestroy ? 'destroy completed' : 'apply completed'));
             status.className = 'tf-log-status ok';
             if (ctx && ctx.declId) {
               window.TFDecl.markApplied(ctx.declId,
@@ -507,7 +507,7 @@ const TF = (() => {
             }
             if (!dryRun) setTimeout(refresh, 1500);
           } else {
-            status.textContent = `✗ ${dryRun ? 'plan' : (isDestroy ? 'destroy' : 'apply')} failed (exit ${exit})`;
+            status.innerHTML = `${Icons.svg('fail', { size: 14, cls: 'icon-err' })} ${dryRun ? 'plan' : (isDestroy ? 'destroy' : 'apply')} failed (exit ${exit})`;
             status.className = 'tf-log-status err';
             if (ctx && ctx.declId) window.TFDecl.markApplied(ctx.declId, 'error');
           }
@@ -518,7 +518,7 @@ const TF = (() => {
           append('warn', `[stream] connection lost — retrying in ${Math.round(s.delay/1000)}s (${s.attempt}/5)`);
         } else if (s.state === 'dead') {
           append('err', `[stream] reconnect failed after ${s.attempts} attempts — open Activity to see the recorded log`);
-          status.textContent = '✗ stream lost (log preserved)';
+          status.innerHTML = Icons.svg('fail', { size: 14, cls: 'icon-err' }) + ' stream lost (log preserved)';
           status.className = 'tf-log-status err';
         }
       },
@@ -539,14 +539,14 @@ const TF = (() => {
       const title = opts.title || 'Confirm destruction';
       const message = opts.message || 'This action is irreversible.';
       const detail = opts.detail || '';
-      const confirmLabel = opts.confirmLabel || '🧨 Destroy';
+      const confirmLabel = opts.confirmLabel || 'Destroy';
       const root = document.createElement('div');
       root.className = 'modal-overlay tf-confirm-overlay active';
       root.innerHTML = `
         <div class="modal modal-small tf-confirm-modal">
           <div class="modal-header">
             <div>
-              <h3>🧨 ${esc(title)}</h3>
+              <h3>${Icons.svg('destroy')} ${esc(title)}</h3>
               <div class="modal-subtitle">Confirmation required</div>
             </div>
             <button class="btn-close tf-confirm-cancel tip" data-tip="${i18n.t('common.cancel')}">×</button>
@@ -565,7 +565,7 @@ const TF = (() => {
             <div class="tf-confirm-actions">
               <button class="btn btn-secondary btn-sm tf-confirm-cancel">Cancel</button>
               <button class="btn btn-danger btn-sm tf-confirm-go"
-                      disabled>${esc(confirmLabel)}</button>
+                      disabled>${Icons.svg('destroy', { size: 14 })} ${esc(confirmLabel)}</button>
             </div>
           </div>
         </div>`;
@@ -623,9 +623,9 @@ const TF = (() => {
     try {
       const r = await fetch('/api/terraform/bundle/build', { method: 'POST' });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error}</span>`; return; }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">✓ build started — see dock action <code>${d.action_id}</code></span>`;
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} build started — see dock action <code>${d.action_id}</code></span>`;
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; }
   }
   async function cleanStale() {
     const cluster = $('#cluster-select')?.value;
@@ -637,14 +637,14 @@ const TF = (() => {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dry_run: true }) });
       preview = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${preview.error}</span>`; return; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${preview.error}</span>`; return; }
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       return;
     }
     const list = preview.would_remove || [];
     if (list.length === 0) {
-      if (result) result.innerHTML = `<span style="color:var(--text-dim)">✓ workspace is already clean</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--text-dim)">${Icons.svg('ok', { size: 14 })} workspace is already clean</span>`;
       return;
     }
     if (!confirm(`Remove ${list.length} stale .tf file(s)?\n\n${list.join('\n')}\n\n(No cluster resource is touched.)`)) return;
@@ -653,10 +653,10 @@ const TF = (() => {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dry_run: false }) });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error}</span>`; return; }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">✓ removed ${d.removed.length} stale file(s)</span>`;
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} removed ${d.removed.length} stale file(s)</span>`;
       setTimeout(refresh, 800);
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`; }
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; }
   }
   async function destroyWorkspace() {
     const cluster = $('#cluster-select')?.value;
@@ -669,7 +669,7 @@ const TF = (() => {
         `cluster will be deleted, regardless of which declaration owns ` +
         `it. This action is irreversible.`,
       requiredText: cluster,
-      confirmLabel: `🧨 Destroy workspace`,
+      confirmLabel: `Destroy workspace`,
     });
     if (!ok) return;
     try {
@@ -679,7 +679,7 @@ const TF = (() => {
       const d = await r.json();
       if (!r.ok) { alert('Destroy failed: ' + (d.error || 'unknown')); return; }
       const result = $('#tf-result');
-      if (result) result.innerHTML = `<span style="color:var(--accent)">✓ destroy started — see dock action <code>${d.action_id}</code></span>`;
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} destroy started — see dock action <code>${d.action_id}</code></span>`;
     } catch (e) { alert(e.message); }
   }
   async function importResourceForEdit(safe, address) {
@@ -692,7 +692,7 @@ const TF = (() => {
       if (!r.ok) {
         const d = await r.json().catch(() => ({}));
         if (result) result.innerHTML =
-          `<span style="color:var(--danger)">✗ ${d.error || 'no sidecar found'}</span>`;
+          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'no sidecar found'}</span>`;
         return;
       }
       const meta = await r.json();
@@ -700,7 +700,7 @@ const TF = (() => {
       const spec = meta.spec || {};
       if (!kind || !window.TF_SCHEMA[kind]) {
         if (result) result.innerHTML =
-          `<span style="color:var(--danger)">✗ unsupported kind: ${esc(kind || '?')}</span>`;
+          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} unsupported kind: ${esc(kind || '?')}</span>`;
         return;
       }
       // Re-use the declaration named after the sidecar's
@@ -728,12 +728,12 @@ const TF = (() => {
       }
       window.TFDecl.setActive(target.id);
       if (result) result.innerHTML =
-        `<span style="color:var(--accent)">✎ loaded ${esc(address)} into declaration "${esc(target.name)}" — scroll up</span>`;
+        `<span style="color:var(--accent)">${Icons.svg('edit')} loaded ${esc(address)} into declaration "${esc(target.name)}" — scroll up</span>`;
       // Re-render the panel so the active declaration view shows the
       // imported card.
       refresh();
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
@@ -746,7 +746,7 @@ const TF = (() => {
         `terraform destroy -target=${address} on cluster "${cluster}", ` +
         `then remove its .tf file from the workspace.`,
       requiredText: address.split('.').pop(),
-      confirmLabel: `🧨 Destroy ${address}`,
+      confirmLabel: `Destroy ${address}`,
     });
     if (!ok) return;
     const result = $('#tf-result');
@@ -757,10 +757,10 @@ const TF = (() => {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ address, dry_run: false }) });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'failed'}</span>`; return; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`; return; }
       runId = d.action_id;
-      if (result) result.innerHTML = `<span style="color:var(--accent)">⏳ destroy running — dock action <code>${runId}</code></span>`;
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} destroy running — dock action <code>${runId}</code></span>`;
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; return; }
     if (runId) followRun(runId, false, 'destroy', cluster, { name: address });
   }
 

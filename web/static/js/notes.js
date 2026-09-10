@@ -26,10 +26,10 @@ const Notes = (() => {
     const id = docId(kind, cluster, namespace, name);
     const panelId = 'notes-' + id.replace(/[^a-zA-Z0-9_-]/g, '_');
     const title = kind === 'vm'
-      ? `📝 Notes — ${namespace}/${name}`
+      ? `Notes — ${namespace}/${name}`
       : kind === 'node'
-        ? `📝 Notes — node ${namespace}`
-        : `📝 Notes — namespace ${namespace}`;
+        ? `Notes — node ${namespace}`
+        : `Notes — namespace ${namespace}`;
 
     if (openDocs.has(id)) {
       FloatingPanels.restore(panelId);
@@ -52,10 +52,10 @@ const Notes = (() => {
           <button type="button" data-cmd="bullet"    class="tip" data-tip="${i18n.t('notes.tip.bullet')}">•</button>
           <button type="button" data-cmd="ordered"   class="tip" data-tip="${i18n.t('notes.tip.ordered')}">1.</button>
           <button type="button" data-cmd="blockquote" class="tip" data-tip="${i18n.t('notes.tip.quote')}">”</button>
-          <button type="button" data-cmd="codeblock" class="tip" data-tip="${i18n.t('notes.tip.codeblock')}">⌜⌝</button>
+          <button type="button" data-cmd="codeblock" class="tip" data-tip="${i18n.t('notes.tip.codeblock')}">${Icons.svg('code', { size: 14 })}</button>
           <span class="notes-toolbar-sep">·</span>
-          <button type="button" data-cmd="undo"      class="tip" data-tip="${i18n.t('notes.tip.undo')}">↶</button>
-          <button type="button" data-cmd="redo"      class="tip" data-tip="${i18n.t('notes.tip.redo')}">↷</button>
+          <button type="button" data-cmd="undo"      class="tip" data-tip="${i18n.t('notes.tip.undo')}">${Icons.svg('undo', { size: 14 })}</button>
+          <button type="button" data-cmd="redo"      class="tip" data-tip="${i18n.t('notes.tip.redo')}">${Icons.svg('redo', { size: 14 })}</button>
         </div>
         <span class="notes-stats" data-stats></span>
       </div>
@@ -64,6 +64,7 @@ const Notes = (() => {
     const panel = FloatingPanels.open({
       id: panelId,
       title,
+      icon: 'notes',
       bodyHtml: html,
       width: 720,
       height: 520,
@@ -138,7 +139,7 @@ const Notes = (() => {
   }
 
   function connect(id, entry, statusEl, statsEl) {
-    if (statusEl) { statusEl.textContent = '○ connecting…'; statusEl.className = 'notes-status'; }
+    if (statusEl) { statusEl.innerHTML = Icons.svg('dotOff', { size: 10 }) + ' connecting…'; statusEl.className = 'notes-status'; }
     const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/notes/' + id;
     let ws;
     try { ws = new WebSocket(url); } catch (e) {
@@ -147,7 +148,7 @@ const Notes = (() => {
     entry.ws = ws;
 
     ws.addEventListener('open', () => {
-      if (statusEl) { statusEl.textContent = '● connected'; statusEl.classList.add('connected'); }
+      if (statusEl) { statusEl.innerHTML = Icons.svg('dotOn', { size: 10 }) + ' connected'; statusEl.classList.add('connected'); }
       ws.send(JSON.stringify({ type: 'hello' }));
     });
 
@@ -166,7 +167,7 @@ const Notes = (() => {
     });
 
     ws.addEventListener('close', () => {
-      if (statusEl) { statusEl.textContent = '○ disconnected — reconnecting…'; statusEl.classList.remove('connected'); }
+      if (statusEl) { statusEl.innerHTML = Icons.svg('dotOff', { size: 10 }) + ' disconnected — reconnecting…'; statusEl.classList.remove('connected'); }
       entry.ws = null;
       if (openDocs.has(id)) {
         entry.reconnectTimer = setTimeout(() => connect(id, entry, statusEl, statsEl), 3000);

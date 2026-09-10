@@ -28,14 +28,14 @@ const VMEdit = (() => {
   };
 
   const SECTIONS = [
-    { id: 'general',   label: () => tr('vm.edit.general', 'General'),      icon: '📋' },
-    { id: 'compute',   label: () => tr('vm.edit.compute', 'Compute'),      icon: '🧠' },
-    { id: 'firmware',  label: () => tr('vm.edit.firmware', 'Firmware'),    icon: '🔧' },
-    { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: '💾' },
-    { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: '🔌' },
-    { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: '☁️' },
-    { id: 'placement', label: () => tr('vm.edit.placement', 'Placement'),  icon: '📍' },
-    { id: 'lifecycle', label: () => tr('vm.edit.lifecycle', 'Lifecycle'),  icon: '🔁' },
+    { id: 'general',   label: () => tr('vm.edit.general', 'General'),      icon: 'general' },
+    { id: 'compute',   label: () => tr('vm.edit.compute', 'Compute'),      icon: 'compute' },
+    { id: 'firmware',  label: () => tr('vm.edit.firmware', 'Firmware'),    icon: 'firmware' },
+    { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: 'disk' },
+    { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: 'network' },
+    { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: 'cloud' },
+    { id: 'placement', label: () => tr('vm.edit.placement', 'Placement'),  icon: 'placement' },
+    { id: 'lifecycle', label: () => tr('vm.edit.lifecycle', 'Lifecycle'),  icon: 'lifecycle' },
   ];
 
   // Per-open refresh callbacks. v1.6.x stored this on the panel API object
@@ -75,7 +75,7 @@ const VMEdit = (() => {
       disk: {
         min: 0, max: 16,
         label: { en: 'Disks', fr: 'Disques' },
-        itemTitle: (v) => `💾 ${v.name || tr('vm.edit.newDisk', 'new disk')}`
+        itemTitle: (v) => `${Icons.svg('disk')} ${v.name || tr('vm.edit.newDisk', 'new disk')}`
           + `${v.bus ? ' — ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
         newItem: (items) => ({ name: nextFree('disk-', 1, items.map(i => i.name)) }),
@@ -151,7 +151,7 @@ const VMEdit = (() => {
       tag: {
         min: 0, max: 20,
         label: { en: 'Tags', fr: 'Tags' },
-        itemTitle: (v) => `🏷 ${v.key || tr('vm.edit.newTag', 'new tag')}${v.value ? ' = ' + v.value : ''}`,
+        itemTitle: (v) => `${Icons.svg('tag')} ${v.key || tr('vm.edit.newTag', 'new tag')}${v.value ? ' = ' + v.value : ''}`,
         newItem: (items) => ({ key: nextFree('tag-', 1, items.map(i => i.key)) }),
         args: [
           { name: 'key', type: 'text', required: true, validate: /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/,
@@ -177,7 +177,7 @@ const VMEdit = (() => {
       sel: {
         min: 0, max: 10,
         label: { en: 'Node selector', fr: 'Sélecteur de node' },
-        itemTitle: (v) => `📍 ${v.key || tr('vm.edit.newSel', 'new constraint')}${v.value ? ' = ' + v.value : ''}`,
+        itemTitle: (v) => `${Icons.svg('placement')} ${v.key || tr('vm.edit.newSel', 'new constraint')}${v.value ? ' = ' + v.value : ''}`,
         newItem: () => ({ key: 'kubernetes.io/hostname' }),
         args: [
           { name: 'key', type: 'text', required: true,
@@ -200,7 +200,7 @@ const VMEdit = (() => {
       rule: {
         min: 0, max: 10,
         label: { en: 'VM placement rules', fr: 'Règles de placement VM' },
-        itemTitle: (v) => `${v.kind === 'attract' ? '🧲' : '🚧'} `
+        itemTitle: (v) => `${v.kind === 'attract' ? Icons.svg('magnet') : Icons.svg('construction')} `
           + `${v.kind === 'attract' ? tr('vm.edit.affNear', 'near') : tr('vm.edit.affAway', 'away from')} `
           + `${v.key || 'tag'}=${v.value || '?'}${v.hard ? ' (strict)' : ''}`,
         newItem: () => ({ kind: 'avoid', key: 'app' }),
@@ -237,7 +237,7 @@ const VMEdit = (() => {
       dev: {
         min: 0, max: 8,
         label: { en: 'Passthrough devices', fr: 'Périphériques en passthrough' },
-        itemTitle: (v) => `${v.kind === 'gpu' ? '🎮' : '🔌'} ${v.name || tr('vm.edit.newDev', 'new device')}`
+        itemTitle: (v) => `${v.kind === 'gpu' ? Icons.svg('gamepad') : Icons.svg('plug')} ${v.name || tr('vm.edit.newDev', 'new device')}`
           + `${v.device_name ? ' — ' + v.device_name : ''}`,
         newItem: (items) => ({ kind: 'host', name: nextFree('dev-', 1, items.map(i => i.name)) }),
         args: [
@@ -265,7 +265,7 @@ const VMEdit = (() => {
       tol: {
         min: 0, max: 10,
         label: { en: 'Tolerations', fr: 'Tolérances' },
-        itemTitle: (v) => `🛡 ${v.key || tr('vm.edit.newTol', 'new toleration')}`
+        itemTitle: (v) => `${Icons.svg('shield')} ${v.key || tr('vm.edit.newTol', 'new toleration')}`
           + `${v.value ? '=' + v.value : ''}${v.effect ? ' · ' + v.effect : ''}`,
         newItem: () => ({ operator: 'Equal', effect: 'NoSchedule' }),
         args: [
@@ -296,7 +296,7 @@ const VMEdit = (() => {
       nic: {
         min: 0, max: 8,
         label: { en: 'Network interfaces', fr: 'Interfaces réseau' },
-        itemTitle: (v) => `🔌 ${v.name || tr('vm.edit.newNic', 'new interface')}`
+        itemTitle: (v) => `${Icons.svg('plug')} ${v.name || tr('vm.edit.newNic', 'new interface')}`
           + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
         newItem: (items) => ({ name: nextFree('nic-', 1, items.map(i => i.name)) }),
@@ -427,7 +427,7 @@ const VMEdit = (() => {
       user: {
         min: 0, max: 8,
         label: { en: 'Users', fr: 'Utilisateurs' },
-        itemTitle: (v) => `👤 ${v.name || tr('vm.edit.ci.newUser', 'new user')}${v.sudo ? ' · sudo' : ''}`,
+        itemTitle: (v) => `${Icons.svg('user')} ${v.name || tr('vm.edit.ci.newUser', 'new user')}${v.sudo ? ' · sudo' : ''}`,
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Username', fr: 'Nom d’utilisateur' },
@@ -459,7 +459,7 @@ const VMEdit = (() => {
       fs: {
         min: 0, max: 8,
         label: { en: 'Extra disks (format & mount)', fr: 'Disques additionnels (formater & monter)' },
-        itemTitle: (v) => `🗄 ${v.device || '/dev/vdb'} → ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}`,
+        itemTitle: (v) => `${Icons.svg('storage')} ${v.device || '/dev/vdb'} → ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}`,
         newItem: (items) => ({ device: nextFreeDev(items.map(i => i.device)) }),
         args: [
           { name: 'device', type: 'text', required: true, default: '/dev/vdb',
@@ -480,7 +480,7 @@ const VMEdit = (() => {
       file: {
         min: 0, max: 8,
         label: { en: 'Files (write_files)', fr: 'Fichiers (write_files)' },
-        itemTitle: (v) => `📄 ${v.path || tr('vm.edit.ci.newFile', 'new file')}`,
+        itemTitle: (v) => `${Icons.svg('doc')} ${v.path || tr('vm.edit.ci.newFile', 'new file')}`,
         args: [
           { name: 'path', type: 'text', required: true,
             label: { en: 'Path', fr: 'Chemin' },
@@ -511,7 +511,7 @@ const VMEdit = (() => {
       nic: {
         min: 0, max: 4,
         label: { en: 'Interfaces', fr: 'Interfaces' },
-        itemTitle: (v) => `🔌 ${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}`,
+        itemTitle: (v) => `${Icons.svg('plug')} ${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}`,
         newItem: (items) => ({ iface: nextFree('eth', 0, items.map(i => i.iface)) }),
         args: [
           { name: 'iface', type: 'text', required: true, default: 'eth0',
@@ -949,11 +949,11 @@ const VMEdit = (() => {
   async function open(cluster, namespace, name) {
     const panelId = `vm-edit-${cluster}-${namespace}-${name}`;
     const existing = document.getElementById('fp-' + panelId);
-    const title = `⚙ ${tr('vm.edit.title', 'Edit')} — ${namespace}/${name}`;
+    const title = `${tr('vm.edit.title', 'Edit')} — ${namespace}/${name}`;
     if (existing) {
       // Already open: FloatingPanels restores/focuses it. Re-running the
       // setup below would stack duplicate nav listeners (v1.6.x bug).
-      return FloatingPanels.open({ id: panelId, title,
+      return FloatingPanels.open({ id: panelId, title, icon: 'settings',
         headerActions: consoleAction(cluster, namespace, name) });
     }
     const html = `
@@ -961,7 +961,7 @@ const VMEdit = (() => {
         <aside class="vm-edit-nav">
           ${SECTIONS.map(s => `
             <button data-section="${s.id}">
-              <span class="ic">${s.icon}</span>
+              <span class="ic">${Icons.svg(s.icon, { size: 14 })}</span>
               <span>${esc(s.label())}</span>
             </button>`).join('')}
         </aside>
@@ -973,6 +973,7 @@ const VMEdit = (() => {
     const panel = FloatingPanels.open({
       id: panelId,
       title,
+      icon: 'settings',
       bodyHtml: html,
       width: 980,
       height: 640,
@@ -1013,7 +1014,7 @@ const VMEdit = (() => {
         renderSection();
       } catch (e) {
         panel.el.querySelector('.vm-edit-content').innerHTML =
-          `<div class="vm-edit-section active"><div class="summary-bar bad">✗ ${esc(e.message)}</div></div>`;
+          `<div class="vm-edit-section active"><div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</div></div>`;
       }
     };
     refreshers.set(panelId, refresh);
@@ -1055,7 +1056,7 @@ const VMEdit = (() => {
   }
 
   function restartBanner() {
-    return `<p class="form-hint vm-edit-banner">⚠ ${esc(tr('vm.edit.restartHint',
+    return `<p class="form-hint vm-edit-banner">${Icons.svg('warn', { size: 14 })} ${esc(tr('vm.edit.restartHint',
       'Changes apply at the next VM restart (the running instance keeps the old layout — use the console reset button).'))}</p>`;
   }
 
@@ -1066,7 +1067,7 @@ const VMEdit = (() => {
                   disks: ((template.domain || {}).devices || {}).disks || [] };
     const locked = passthrough.volumes
       .filter(v => v.cloudInitNoCloud || v.cloudInitConfigDrive)
-      .map(v => `<div class="vm-edit-locked">☁️ <code>${esc(v.name)}</code> — ${esc(tr('vm.edit.cloudinitVol', 'cloud-init volume, managed by the Cloud-init tab'))}</div>`)
+      .map(v => `<div class="vm-edit-locked">${Icons.svg('cloud')} <code>${esc(v.name)}</code> — ${esc(tr('vm.edit.cloudinitVol', 'cloud-init volume, managed by the Cloud-init tab'))}</div>`)
       .join('');
     return `
       <h3>${esc(tr('vm.edit.disksTitle', 'Disks & Volumes'))}</h3>
@@ -1142,7 +1143,7 @@ const VMEdit = (() => {
                placeholder="${esc(vm.metadata.name)}">
         <span class="form-hint">${esc(tr('vm.edit.hostnameHint', 'Empty = the VM name is used'))}</span>
       </div>
-      <h3>🏷 ${esc(tr('vm.edit.tags', 'Tags'))}</h3>
+      <h3>${Icons.svg('tag')} ${esc(tr('vm.edit.tags', 'Tags'))}</h3>
       <p class="form-hint">${esc(tr('vm.edit.tagsHint', 'Harvester tags (labels tag.harvesterhci.io/<key>) — also shown in the Harvester UI.'))}</p>
       <div class="vm-edit-cards" data-cards="tags">
         ${TFForm.render(TAG_SCHEMA, cluster, { tag: tagItems }, { hideHeader: true })}
@@ -1269,7 +1270,7 @@ const VMEdit = (() => {
     const opt = (v, cur, label) =>
       `<option value="${v}" ${cur === v ? 'selected' : ''}>${label}</option>`;
     return `
-      <h3>🔧 ${esc(tr('vm.edit.firmware', 'Firmware'))}</h3>
+      <h3>${Icons.svg('firmware')} ${esc(tr('vm.edit.firmware', 'Firmware'))}</h3>
       <div class="form-row">
         <label>${esc(tr('vm.edit.bootMode', 'Boot mode'))}</label>
         <select data-field="fw.mode">
@@ -1418,7 +1419,7 @@ const VMEdit = (() => {
     }));
     const managed = ((template.affinity || {}).nodeAffinity) || null;
     return `
-      <h3>📍 ${esc(tr('vm.edit.placement', 'Placement'))}</h3>
+      <h3>${Icons.svg('placement')} ${esc(tr('vm.edit.placement', 'Placement'))}</h3>
       <p class="form-hint">${esc(tr('vm.edit.nodeSelHint', 'Pin the VM to nodes carrying these labels. Empty = the scheduler is free.'))}</p>
       <div class="vm-edit-cards" data-cards="nodesel">
         ${TFForm.render(NODESEL_SCHEMA, cluster, { sel }, { hideHeader: true })}
@@ -1467,7 +1468,7 @@ const VMEdit = (() => {
       <h3>Cloud-init</h3>
       <p class="form-hint">Edit user-data and network-data. Saved to the VM's cloud-init Secret.</p>
       <details class="vm-edit-adv vm-edit-ci-wizard">
-        <summary>🧙 ${esc(tr('vm.edit.ci.wizard', 'Assistant — generate the YAML below'))}</summary>
+        <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant — generate the YAML below'))}</summary>
         <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
           'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
         <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
@@ -1586,9 +1587,9 @@ const VMEdit = (() => {
               && !confirm(tr('vm.edit.ci.confirmReplace',
                 'Replace the current editor content with the generated YAML?'))) return;
           target.value = yaml;
-          result.innerHTML = `<span style="color:var(--accent)">✓ ${esc(tr('vm.edit.ci.generated', 'generated — review below, then Save'))}</span>`;
+          result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated — review below, then Save'))}</span>`;
         } catch (e) {
-          result.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+          result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
         }
       };
       sectionEl.querySelector('[data-action="gen-userdata"]').addEventListener('click', () => generate('user'));
@@ -1643,18 +1644,18 @@ const VMEdit = (() => {
           });
           const d = await res.json();
           if (!res.ok) {
-            result.innerHTML = `<span style="color:var(--danger)">✗ ${esc((d.detail || d.error || 'failed').slice(0, 300))}</span>`;
+            result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc((d.detail || d.error || 'failed').slice(0, 300))}</span>`;
             return;
           }
           result.innerHTML = dryRun
-            ? `<span style="color:var(--accent)">✓ ${esc(tr('vm.edit.dryOk', 'dry-run OK'))}</span>`
-            : `<span style="color:var(--accent)">✓ ${esc(tr('vm.edit.applied', 'applied'))}</span>`;
+            ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.dryOk', 'dry-run OK'))}</span>`
+            : `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.applied', 'applied'))}</span>`;
           if (!dryRun) {
             const refresh = refreshers.get(`vm-edit-${cluster}-${namespace}-${name}`);
             if (refresh) setTimeout(refresh, 600);
           }
         } catch (e) {
-          result.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+          result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
         }
       });
     }
@@ -1871,7 +1872,7 @@ const VMEdit = (() => {
           ? `<span style="color:var(--warn)">inline cloud-init (read-only)</span>`
           : '<span style="color:var(--text-dim)">no cloud-init configured</span>';
     } catch (e) {
-      out.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+      out.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
     }
   }
 
@@ -1896,12 +1897,12 @@ const VMEdit = (() => {
         { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       const d = await res.json();
       if (!res.ok) {
-        result.innerHTML = `<span style="color:var(--danger)">✗ ${esc(d.error || res.status)}</span>`;
+        result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || res.status)}</span>`;
       } else {
-        result.innerHTML = `<span style="color:var(--accent)">✓ saved to Secret ${esc(d.secret)}</span>`;
+        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} saved to Secret ${esc(d.secret)}</span>`;
       }
     } catch (e) {
-      result.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+      result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
     }
   }
 

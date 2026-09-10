@@ -225,7 +225,8 @@ const VMConsole = (() => {
 
     const panel = FloatingPanels.open({
       id: panelId,
-      title: `🖥 Console — ${namespace}/${name}`,
+      title: `Console — ${namespace}/${name}`,
+      icon: 'console',
       bodyNode: wrap,
       width: 900, height: 620,
       restoreSpec: { type: 'vm-console', args: { cluster, namespace, name } },

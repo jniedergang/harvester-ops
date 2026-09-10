@@ -526,7 +526,7 @@ def test_automation_subtabs(page):
     expect(page.locator('.tab-child[data-subtab="pxe"]')).to_be_visible()
     # CAPI subtab is active by default → its content is active
     expect(page.locator('.sub-tab-content[data-subtab="capi"]')).to_have_class("sub-tab-content active")
-    # The inline 📦 / 🛠 strip is only visible for CAPI
+    # The inline Installation / Création de clusters strip is only visible for CAPI
     expect(page.locator('.sub-tabs-inline')).to_be_visible()
     # Click Terraform sidebar entry — hides the inline strip
     page.click('.tab-child[data-subtab="terraform"]')
@@ -540,7 +540,7 @@ def test_automation_subtabs(page):
 
 
 def test_automation_capi_inline_subtabs(page):
-    """The 📦 Installation / 🛠 Création de clusters / 🖥 Clusters K8S inline
+    """The Installation / Création de clusters / Clusters K8S inline
     strip on the automation header should swap which .capi-tab-content is
     visible. All three buttons must be present and centered (justify-self)."""
     page.click('.tab-group-head[data-group="automation"]')
@@ -870,8 +870,8 @@ def test_decl_open_panel_two_at_once(page):
 
 
 def test_decl_destroy_button_visible_on_each_declaration_row(page):
-    """v1.5.1: every declaration row carries a 🧨 Destroy button — a
-    real cluster-side teardown, distinct from the 🗑 local-delete."""
+    """v1.5.1: every declaration row carries a Destroy button — a
+    real cluster-side teardown, distinct from the local-delete."""
     _open_terraform(page)
     page.evaluate("""() => {
       window.TFDecl.create('destroy-target', 'harv-fake');
@@ -883,7 +883,7 @@ def test_decl_destroy_button_visible_on_each_declaration_row(page):
 
 
 def test_decl_destroy_opens_typed_confirm_modal(page):
-    """v1.5.2: 🧨 Destroy on a declaration must NOT trigger via a
+    """v1.5.2: Destroy on a declaration must NOT trigger via a
     one-click confirm(). It opens a typed-confirmation modal where
     the user has to type the declaration's exact name before the
     Destroy button is enabled."""
@@ -958,7 +958,7 @@ def test_decl_destroy_cancel_closes_modal_without_action(page):
 
 
 def test_state_table_shows_edit_button_only_when_sidecar_present(page):
-    """v1.5.3: a deployed resource WITH a sidecar gets ✎ Edit; without
+    """v1.5.3: a deployed resource WITH a sidecar gets an Edit button; without
     one it shows the "no sidecar" hint. We force both cases by
     stubbing fetch /state."""
     _open_terraform(page)
@@ -987,7 +987,7 @@ def test_state_table_shows_edit_button_only_when_sidecar_present(page):
     # v1.5.4: the state table lives behind the "Live resources" sub-tab.
     page.click('#tf-status-body .sub-tab[data-tf-tab="live"]')
     page.wait_for_timeout(150)
-    # Exactly one ✎ Edit button (for alpha) and one "no sidecar" hint
+    # Exactly one Edit button (for alpha) and one "no sidecar" hint
     expect(page.locator('.tf-edit-resource')).to_have_count(1)
     expect(page.locator('.tf-no-sidecar')).to_have_count(1)
     addr = page.evaluate(
@@ -996,7 +996,7 @@ def test_state_table_shows_edit_button_only_when_sidecar_present(page):
 
 
 def test_clicking_edit_imports_sidecar_into_new_declaration(page):
-    """Click ✎ → fetch sidecar → create "Edit <addr>" declaration → set
+    """Click Edit → fetch sidecar → create "Edit <addr>" declaration → set
     active → render card with the resource's kind."""
     _open_terraform(page)
     # No existing declarations

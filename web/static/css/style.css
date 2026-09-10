@@ -40,6 +40,18 @@
   --brand-title-size: 16px;
 }
 
+/* Masques SVG pour les pseudo-éléments (puces d'étape, tri de colonnes).
+   Régénérés par scripts/gen-icons.py — voir web/static/js/icons.js. */
+/* BEGIN GENERATED — lucide-static 1.44.0 masks (scripts/gen-icons.py) */
+:root {
+  --icon-check: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M20 6 9 17l-5-5%22/%3E%3C/svg%3E");
+  --icon-x: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22M18 6 6 18%22/%3E%3Cpath d=%22m6 6 12 12%22/%3E%3C/svg%3E");
+  --icon-sort: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22m7 15 5 5 5-5%22/%3E%3Cpath d=%22m7 9 5-5 5 5%22/%3E%3C/svg%3E");
+  --icon-sort-asc: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22m18 15-6-6-6 6%22/%3E%3C/svg%3E");
+  --icon-sort-desc: url("data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 24 24%22 fill=%22none%22 stroke=%22black%22 stroke-width=%222%22 stroke-linecap=%22round%22 stroke-linejoin=%22round%22%3E%3Cpath d=%22m6 9 6 6 6-6%22/%3E%3C/svg%3E");
+}
+/* END GENERATED */
+
 /* ============================================================
    THEME 1 — SUSE Slate
    Neutral slate background, SUSE green as the sole brand accent.
@@ -420,9 +432,9 @@ body.sidebar-collapsed .tab.active {
   border-left-color: transparent;
 }
 body.sidebar-collapsed .tab .tab-icon {
-  font-size: 18px;
-  display: inline-block;
+  display: inline-flex;
 }
+body.sidebar-collapsed .tab .tab-icon .icon { width: 18px; height: 18px; }
 body.sidebar-collapsed #sidebar footer {
   padding: 8px;
   text-align: center;
@@ -531,27 +543,15 @@ body.sidebar-collapsed .sidebar-collapse-btn .when-collapsed { display: inline; 
   font-size: 13px;
   transition: all 0.15s ease;
 }
-.tab .icon-red,
-.tab .icon-green {
-  display: inline-block;
-  width: 14px; height: 14px;
-  line-height: 14px;
-  text-align: center;
-  font-size: 12px;
-  border-radius: 2px;
-  margin-right: 2px;
-  vertical-align: middle;
+.tab .tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px; height: 16px;
+  flex: none;
 }
-.tab .icon-red {
-  background: var(--danger);
-  color: var(--btn-primary-text);
-  font-size: 11px;
-}
-.tab .icon-green {
-  background: transparent;
-  color: var(--accent);
-  font-size: 14px;
-}
+.tab .icon-red   { color: var(--danger); }
+.tab .icon-green { color: var(--accent); }
 .tab:hover {
   background: var(--bg-elev);
   color: var(--text);
@@ -756,10 +756,11 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   background: var(--done);
 }
 .step.done .bullet::after {
-  content: '✓';
-  color: var(--bg);
-  font-weight: bold;
-  font-size: 12px;
+  content: '';
+  width: 12px; height: 12px;
+  background-color: var(--bg);
+  -webkit-mask: var(--icon-check) center / contain no-repeat;
+  mask: var(--icon-check) center / contain no-repeat;
   position: absolute;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
@@ -770,10 +771,11 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   background: var(--error);
 }
 .step.error .bullet::after {
-  content: '✗';
-  color: #fff;
-  font-weight: bold;
-  font-size: 12px;
+  content: '';
+  width: 12px; height: 12px;
+  background-color: #fff;
+  -webkit-mask: var(--icon-x) center / contain no-repeat;
+  mask: var(--icon-x) center / contain no-repeat;
   position: absolute;
   top: 50%; left: 50%;
   transform: translate(-50%, -50%);
@@ -971,7 +973,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 }
 .vm-group.collapsed .vm-group-list { display: none; }
 
-/* Mode badge: ⚡ parallel (default group) vs ▶ sequential (named) */
+/* Mode badge: parallel (default group, zap icon) vs sequential (named, play icon) */
 .group-mode-badge {
   font-size: 10px;
   padding: 2px 6px;
@@ -1151,7 +1153,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 .vm-group-list li:last-child { border-bottom: 0; }
 .vm-group-list li:hover { background: var(--bg-elev); }
 .vm-group-list li.dragging { opacity: 0.4; cursor: grabbing; }
-.vm-group-list .drag-handle { color: var(--text-dim); font-size: 16px; user-select: none; cursor: grab; }
+.vm-group-list .drag-handle { color: var(--text-dim); display: inline-flex; align-items: center; user-select: none; cursor: grab; }
 .vm-group-list .vm-name {
   color: var(--text);
   min-width: 0;
@@ -1237,6 +1239,18 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   min-width: 200px;
 }
 .topology-toolbar .topology-search:focus { border-color: var(--accent); }
+.topology-toolbar .topology-search-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.topology-toolbar .topology-search-wrap .icon {
+  position: absolute;
+  left: 8px;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+.topology-toolbar .topology-search-wrap .topology-search { padding-left: 26px; }
 .topology-toolbar .topology-fontsize {
   display: inline-flex;
   align-items: center;
@@ -1380,9 +1394,8 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   text-overflow: ellipsis;
 }
 .agent-dot {
-  display: inline-block;
+  display: inline-flex;
   margin-right: 4px;
-  font-size: 10px;
   line-height: 1;
   vertical-align: middle;
 }
@@ -1503,6 +1516,9 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   flex-shrink: 0;
 }
 .dock-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 500;
   color: var(--text);
@@ -1556,13 +1572,13 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   border-left-color: var(--done);
   opacity: 0.85;
 }
-.dock-action-card.state-done .icon { animation: none; color: var(--done); }
+.dock-action-card.state-done .dock-icon { animation: none; color: var(--done); }
 .dock-action-card.state-done .progress-mini .fill { background: var(--done); }
 .dock-action-card.state-error {
   border-left-color: var(--error);
   opacity: 0.85;
 }
-.dock-action-card.state-error .icon { animation: none; color: var(--error); }
+.dock-action-card.state-error .dock-icon { animation: none; color: var(--error); }
 .dock-action-card.state-error .progress-mini .fill { background: var(--error); }
 .dock-action-summary .meta .dur.running {
   color: var(--running);
@@ -1612,8 +1628,9 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   text-align: center;
   white-space: nowrap;
 }
-.dock-action-summary .icon {
-  font-size: 18px;
+.dock-action-summary .dock-icon {
+  display: inline-flex;
+  color: var(--running);
   animation: pulse 2s ease-in-out infinite;
 }
 .dock-action-summary .info {
@@ -1697,6 +1714,12 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   font-size: 13px;
   color: var(--text);
 }
+.floating-panel-icon {
+  display: inline-flex;
+  margin-right: 6px;
+  color: var(--text-dim);
+}
+.floating-panel-icon:empty { display: none; }
 .floating-panel-actions {
   display: flex;
   gap: 6px;
@@ -1792,7 +1815,8 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   color: var(--accent);
   border-left-color: var(--accent);
 }
-.vm-edit-nav .ic { font-size: 14px; }
+.vm-edit-nav .ic { display: inline-flex; }
+.vm-edit-nav .ic .icon { width: 14px; height: 14px; }
 
 .vm-edit-content {
   overflow-y: auto;
@@ -2381,6 +2405,7 @@ a.bundle-inspect:hover { text-decoration: underline; }
   width: 14px; height: 14px; border-radius: 50%;
   font-size: 10px; font-weight: 700;
 }
+.tf-section-btn__icon .icon { width: 10px; height: 10px; }
 .tf-section-btn--ok      { border-color: var(--accent); }
 .tf-section-btn--ok      .tf-section-btn__icon { background: var(--accent); color: var(--bg); }
 .tf-section-btn--missing { border-color: var(--danger); color: var(--danger); }
@@ -2672,12 +2697,25 @@ body.sidebar-collapsed .tab-group-chevron { display: none; }
 }
 .data-table.sortable th[data-sort]:hover { background: var(--bg-elev2, var(--bg)); }
 .data-table.sortable th[data-sort]::after {
-  content: ' ⇅';
-  color: var(--text-dim);
-  font-size: 10px;
+  content: '';
+  display: inline-block;
+  width: 11px; height: 11px;
+  margin-left: 4px;
+  vertical-align: middle;
+  background-color: var(--text-dim);
+  -webkit-mask: var(--icon-sort) center / contain no-repeat;
+  mask: var(--icon-sort) center / contain no-repeat;
 }
-.data-table.sortable th.sort-asc::after  { content: ' ▲'; color: var(--accent); }
-.data-table.sortable th.sort-desc::after { content: ' ▼'; color: var(--accent); }
+.data-table.sortable th.sort-asc::after {
+  background-color: var(--accent);
+  -webkit-mask-image: var(--icon-sort-asc);
+  mask-image: var(--icon-sort-asc);
+}
+.data-table.sortable th.sort-desc::after {
+  background-color: var(--accent);
+  -webkit-mask-image: var(--icon-sort-desc);
+  mask-image: var(--icon-sort-desc);
+}
 
 /* Activity tab — bigger card spacing, table for history */
 .empty-state {
@@ -2842,11 +2880,6 @@ body.no-tooltips .tip[data-tip]::before {
 }
 .btn-icon-action.start:hover { border-color: var(--accent); color: var(--accent); }
 .btn-icon-action.stop:hover  { border-color: var(--danger); color: var(--danger); }
-.btn-icon-action .icon-red,
-.btn-icon-action .icon-green {
-  font-size: 10px;
-}
-
 /* =============================================================================
    Docs floating panel — draggable + resizable
    ============================================================================= */
@@ -3374,8 +3407,19 @@ textarea:focus-visible {
   color: var(--btn-primary-text);
 }
 .lang-grid .lang-flag {
-  font-size: 22px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
   line-height: 1;
+  letter-spacing: 0.04em;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+}
+.lang-grid button.active .lang-flag {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* Range sliders */
@@ -3688,9 +3732,16 @@ textarea:focus-visible {
    (donc des 5 thèmes) et gardent une épaisseur de trait constante là où
    les emoji mélangeaient glyphes fins et images en couleur pleine. */
 .icon {
-  display: block;
+  display: inline-block;
+  vertical-align: -0.125em;
   flex: none;
 }
+/* Couleurs d'état (ok vert, erreur rouge, avertissement ambre) — par classe. */
+.icon-ok   { color: var(--done); }
+.icon-err  { color: var(--error); }
+.icon-warn { color: var(--warn); }
+.icon-run  { color: var(--running); }
+.icon-dim  { color: var(--text-dim); }
 .btn-icon-action,
 .btn-icon-sm {
   display: inline-flex;

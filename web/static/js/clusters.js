@@ -39,10 +39,10 @@ const Clusters = (() => {
               <button class="btn btn-sm btn-secondary" data-act="test-kc" data-name="${c.name}" data-i18n="clusters.testKc">${i18n.t('clusters.testKc')}</button>
               <button class="btn btn-sm btn-secondary" data-act="test-ssh" data-name="${c.name}" data-i18n="clusters.testSsh">${i18n.t('clusters.testSsh')}</button>
               <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceKubeconfigTip')}">
-                📄 <input type="file" accept=".yaml,.yml,.kubeconfig" data-act="upload-kc" data-name="${c.name}" style="display:none;">
+                ${Icons.svg('doc')} <input type="file" accept=".yaml,.yml,.kubeconfig" data-act="upload-kc" data-name="${c.name}" style="display:none;">
               </label>
               <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceSshTip')}">
-                🔑 <input type="file" data-act="upload-ssh" data-name="${c.name}" style="display:none;">
+                ${Icons.svg('key')} <input type="file" data-act="upload-ssh" data-name="${c.name}" style="display:none;">
               </label>
               <button class="btn btn-sm btn-danger" data-act="delete" data-name="${c.name}" data-i18n="clusters.delete">${i18n.t('clusters.delete')}</button>
             </div>
@@ -76,8 +76,8 @@ const Clusters = (() => {
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}/test-kubeconfig`, { method: 'POST' });
         const d = await r.json();
         resEl.innerHTML = d.ok
-          ? `<div class="summary-bar ok">✓ ${escapeHtml(i18n.t('settings.connection.reachable'))} — server ${escapeHtml(d.server_version || '')}</div>`
-          : `<div class="summary-bar bad">✗ ${escapeHtml(d.error || 'failed')}</div>`;
+          ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${escapeHtml(i18n.t('settings.connection.reachable'))} — server ${escapeHtml(d.server_version || '')}</div>`
+          : `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${escapeHtml(d.error || 'failed')}</div>`;
       } else if (act === 'test-ssh') {
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}/test-ssh`, { method: 'POST' });
         const d = await r.json();
@@ -86,8 +86,8 @@ const Clusters = (() => {
             <td>${escapeHtml(n.hostname)}</td>
             <td><code>${escapeHtml(n.ip)}</code></td>
             <td>${n.ok
-              ? '<span class="badge ok">✓ reachable</span>'
-              : '<span class="badge fail">✗ ' + escapeHtml((n.detail || 'failed').slice(0, 80)) + '</span>'}
+              ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + ' reachable</span>'
+              : '<span class="badge fail">' + Icons.svg('fail', { size: 14 }) + ' ' + escapeHtml((n.detail || 'failed').slice(0, 80)) + '</span>'}
               ${n.sudo_nopasswd ? '<span class="badge ok">sudo</span>' : ''}</td>
           </tr>`).join('');
         resEl.innerHTML = `<table class="perm-table">${rows}</table>`;
@@ -98,7 +98,7 @@ const Clusters = (() => {
         }
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}`, { method: 'DELETE' });
         if (r.ok) {
-          resEl.innerHTML = `<div class="summary-bar ok">✓ Deleted</div>`;
+          resEl.innerHTML = `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Deleted</div>`;
           setTimeout(refreshList, 600);
         } else {
           const d = await r.json();
@@ -124,7 +124,7 @@ const Clusters = (() => {
       const r = await fetch(endpoint, { method: 'POST', body: fd });
       const d = await r.json();
       if (r.ok) {
-        resEl.innerHTML = `<div class="summary-bar ok">✓ ${escapeHtml(file.name)} uploaded</div>`;
+        resEl.innerHTML = `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${escapeHtml(file.name)} uploaded</div>`;
       } else {
         resEl.innerHTML = `<div class="summary-bar bad">${escapeHtml(d.error || 'HTTP ' + r.status)}</div>`;
       }

@@ -47,7 +47,7 @@ const BMC = (() => {
       `<tr><td colspan="4" class="empty-state">${esc(tr('bmc.iso.empty'))}</td></tr>`;
     box.innerHTML = `
       <div class="card">
-        <div class="card-header"><h2>💿 ${esc(tr('bmc.iso.title'))}</h2>
+        <div class="card-header"><h2>${Icons.svg('cdrom', { size: 18 })} ${esc(tr('bmc.iso.title'))}</h2>
           <span class="form-hint">${gib(d.disk_free || 0)} GiB ${esc(tr('bmc.iso.free'))}</span>
         </div>
         <div class="card-body">
@@ -89,7 +89,7 @@ const BMC = (() => {
     out.innerHTML = `
       <div id="bmc-iso-store"></div>
       <div class="card" style="margin-top:12px;">
-        <div class="card-header"><h2>🔍 ${esc(tr('bmc.discovery'))}</h2></div>
+        <div class="card-header"><h2>${Icons.svg('search', { size: 18 })} ${esc(tr('bmc.discovery'))}</h2></div>
         <div class="card-body">
           <form id="bmc-discover-form" class="capi-form">
             <fieldset>
@@ -293,10 +293,10 @@ const BMC = (() => {
         });
         const d = await r.json();
         res.innerHTML = r.ok
-          ? `<span style="color:var(--accent)">✓ ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`
-          : `<span style="color:var(--danger)">✗ ${esc(d.error || r.status)} ${esc((d.fields || []).join(', '))}</span>`;
+          ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`
+          : `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)} ${esc((d.fields || []).join(', '))}</span>`;
       } catch (e) {
-        res.innerHTML = `<span style="color:var(--danger)">✗ ${esc(e.message)}</span>`;
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
       }
     });
   }

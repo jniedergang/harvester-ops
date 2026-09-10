@@ -228,13 +228,12 @@ const Settings = (() => {
   function renderLanguageGrid() {
     const grid = $('#lang-grid');
     if (!grid) return;
-    const flags = { en: '🇬🇧', fr: '🇫🇷', it: '🇮🇹', es: '🇪🇸', de: '🇩🇪' };
     grid.innerHTML = '';
     i18n.getAvailableLanguages().forEach(({ code, label }) => {
       const btn = document.createElement('button');
       btn.dataset.lang = code;
       btn.className = code === i18n.currentLang ? 'active' : '';
-      btn.innerHTML = `<span class="lang-flag">${flags[code] || '🌐'}</span><span>${label}</span>`;
+      btn.innerHTML = `<span class="lang-flag">${code.toUpperCase()}</span><span>${label}</span>`;
       btn.addEventListener('click', () => {
         i18n.setLang(code);
         renderLanguageGrid();
@@ -280,26 +279,26 @@ const Settings = (() => {
       const data = await res.json();
       out.innerHTML = renderDiag(data);
     } catch (e) {
-      out.innerHTML = `<div class="summary-bar bad">✗ ${i18n.t('common.error')}: ${e.message}</div>`;
+      out.innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${i18n.t('common.error')}: ${e.message}</div>`;
     }
   }
 
   function renderDiag(d) {
     const T = (k) => i18n.t(k);
     const badge = (ok) => ok
-      ? `<span class="badge ok">✓ ${T('settings.connection.allowed')}</span>`
-      : `<span class="badge fail">✗ ${T('settings.connection.denied')}</span>`;
+      ? `<span class="badge ok">${Icons.svg('ok', { size: 14 })} ${T('settings.connection.allowed')}</span>`
+      : `<span class="badge fail">${Icons.svg('fail', { size: 14 })} ${T('settings.connection.denied')}</span>`;
     const reach = (ok) => ok
-      ? `<span class="badge ok">✓ ${T('settings.connection.reachable')}</span>`
-      : `<span class="badge fail">✗ ${T('settings.connection.unreachable')}</span>`;
+      ? `<span class="badge ok">${Icons.svg('ok', { size: 14 })} ${T('settings.connection.reachable')}</span>`
+      : `<span class="badge fail">${Icons.svg('fail', { size: 14 })} ${T('settings.connection.unreachable')}</span>`;
 
     // Determine overall summary
     const permsOk = d.permissions && Object.values(d.permissions).every(p => p.allowed);
     const sshOk   = d.ssh && d.ssh.length > 0 && d.ssh.every(n => n.reachable);
     const allOk   = d.api_reachable && permsOk && sshOk && d.errors.length === 0;
     const summary = allOk
-      ? `<div class="summary-bar ok">✓ ${T('settings.connection.allGreen')}</div>`
-      : `<div class="summary-bar bad">⚠ ${T('settings.connection.issues')}</div>`;
+      ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${T('settings.connection.allGreen')}</div>`
+      : `<div class="summary-bar bad">${Icons.svg('warn', { size: 14 })} ${T('settings.connection.issues')}</div>`;
 
     const permsRows = Object.entries(d.permissions || {}).map(([key, p]) => `
       <tr>
@@ -335,8 +334,8 @@ const Settings = (() => {
         <dd>${d.server || '–'}</dd>
         <dt>${T('settings.connection.apiVersion')}</dt>
         <dd>${d.api_version || '–'} ${d.api_reachable
-          ? `<span class="badge ok">✓ ${T('settings.connection.reachable')}</span>`
-          : `<span class="badge fail">✗ ${T('settings.connection.unreachable')}</span>`}</dd>
+          ? `<span class="badge ok">${Icons.svg('ok', { size: 14 })} ${T('settings.connection.reachable')}</span>`
+          : `<span class="badge fail">${Icons.svg('fail', { size: 14 })} ${T('settings.connection.unreachable')}</span>`}</dd>
       </dl>
 
       <h5>${T('settings.connection.permissions')}</h5>

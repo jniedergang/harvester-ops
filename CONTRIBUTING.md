@@ -14,6 +14,8 @@ tests/api/          pytest against Flask test_client + spawned server
 tests/e2e/          Playwright tests against headless Chromium
 web/                Flask app, JS/CSS, templates
 web/static/js/      Vanilla JS (no framework); IIFE modules on window.X
+web/static/vendor/  Third-party frontend assets (noVNC, Cytoscape, tiptap, Lucide licence)
+scripts/gen-icons.py  Regenerates the Lucide icon table in web/static/js/icons.js
 web/requirements.txt        Pinned versions
 web/requirements-lock.txt   Hash-pinned (use for production installs)
 CHANGELOG.md        Conventional Changelog (## [x.y.z] — date — title)
@@ -116,6 +118,32 @@ pre-commit install
   `innerHTML`. Use the `esc()` helper in the relevant module.
 - Timers (`setInterval`, `setTimeout`) must be cleared in `beforeunload`.
 - New i18n strings: add to EN + FR; IT/ES/DE fall back to EN.
+
+### Icons
+
+- Never paste an emoji or a pictographic character into a template,
+  module or stylesheet — `tests/api/test_icons.py` scans for them. Use
+  the vendored Lucide set instead:
+  - in JS templates: `${Icons.svg('ok', { size: 14, cls: 'icon-ok' })}`
+    (`Icons.el()` returns a DOM node for `append()`);
+  - in static HTML (`index.html`, `review.html`): `<span data-icon="node"
+    data-icon-size="18"></span>`, hydrated once by `Icons.mount()`;
+  - on the Cytoscape canvas: `Icons.dataUri('vm')` as node `icon` data;
+  - in `FloatingPanels.open({...})`: the `icon` option, not a glyph in
+    `title`.
+- Icons are addressed by *meaning* (`delete` vs `destroy`, `warn`,
+  `node`), never by Lucide file name. To add one, add a row to `MANIFEST`
+  in `scripts/gen-icons.py`, run `python3 scripts/gen-icons.py` (or
+  `--from-tarball FILE` offline) and commit the regenerated blocks of
+  `icons.js` / `style.css` together with the manifest. `--check` only
+  compares the generated blocks, but it still needs the pinned tarball:
+  online it downloads and hash-verifies it into `dist/`; in CI or an
+  airgapped shell, point it at a cached artefact with
+  `--from-tarball` (or an unpacked package with `--from-dir`).
+- Status colour comes from a class (`.icon-ok`, `.icon-err`,
+  `.icon-warn`, `.icon-run`, `.icon-dim`), never from the glyph.
+- Never put an icon inside a `data-i18n` element: `applyTranslations()`
+  replaces its `textContent`. Use a sibling `<span>`.
 
 ### CSS
 

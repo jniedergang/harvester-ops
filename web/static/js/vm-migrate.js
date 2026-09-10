@@ -7,14 +7,14 @@ const VMMigrate = (() => {
 
   async function open(cluster, namespace, name) {
     const panelId = `vm-migrate-${cluster}-${namespace}-${name}`;
-    const title = `🔄 Live migrate — ${namespace}/${name}`;
+    const title = `Live migrate — ${namespace}/${name}`;
     const body = `
       <div class="migrate-panel">
         <div class="migrate-status" id="migrate-status">Loading…</div>
         <div class="apply-bar" style="margin: 14px 0; padding: 0; border: 0;">
           <button class="btn btn-primary btn-sm" id="migrate-trigger"
                   data-tip="${i18n.t('migrate.actionTip')}" class="tip">
-            🔄 <span>Migrate now</span>
+            ${Icons.svg('migrate')} <span>Migrate now</span>
           </button>
           <button class="btn btn-secondary btn-sm tip" id="migrate-refresh" data-tip="${i18n.t('migrate.refreshTip')}">${i18n.t('migrate.refresh')}</button>
           <span class="apply-result" id="migrate-feedback"></span>
@@ -34,6 +34,7 @@ const VMMigrate = (() => {
     const panel = FloatingPanels.open({
       id: panelId,
       title,
+      icon: 'migrate',
       bodyHtml: body,
       width: 780,
       height: 540,
@@ -59,8 +60,8 @@ const VMMigrate = (() => {
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td><code>${n.name}</code> ${n.current ? '<span class="badge ok">current</span>' : ''}</td>
-            <td>${n.ready === 'True' ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
-            <td>${n.schedulable ? '<span class="badge ok">✓</span>' : '<span class="badge warn">cordoned</span>'}</td>
+            <td>${n.ready === 'True' ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge fail">' + Icons.svg('fail', { size: 14 }) + '</span>'}</td>
+            <td>${n.schedulable ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge warn">cordoned</span>'}</td>
             <td></td>`;
           nodesBody.appendChild(tr);
         });
@@ -97,13 +98,13 @@ const VMMigrate = (() => {
         });
         const d = await r.json();
         if (r.ok) {
-          fb.innerHTML = `<span style="color:var(--accent)">✓ ${d.migration} started</span>`;
+          fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${d.migration} started</span>`;
           setTimeout(refresh, 800);
         } else {
-          fb.innerHTML = `<span style="color:var(--danger)">✗ ${d.detail || d.error}</span>`;
+          fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.detail || d.error}</span>`;
         }
       } catch (e) {
-        fb.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+        fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       }
     }
 
