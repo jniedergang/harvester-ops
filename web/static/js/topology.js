@@ -1174,10 +1174,16 @@ const Topology = (() => {
 
   async function refresh() {
     if (!lastCluster || !currentHost) return;
+    // Cluster et mode au moment de la demande : une réponse qui arrive
+    // après une bascule appartient au cluster PRÉCÉDENT et repeindrait ses
+    // VMs sur la vue du nouveau.
+    const askedCluster = lastCluster;
+    const askedMode = currentMode;
     try {
-      const r = await fetch(`/api/topology/${encodeURIComponent(lastCluster)}`);
+      const r = await fetch(`/api/topology/${encodeURIComponent(askedCluster)}`);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
+      if (askedCluster !== lastCluster || askedMode !== currentMode) return;
       lastData = data;
       const container = currentHost.querySelector('.topology-canvas');
       if (!cy) {
@@ -1234,9 +1240,12 @@ const Topology = (() => {
     currentHost = document.querySelector(
       `.overview-subtab[data-subtab="${mode}"] .topology-host`
     );
-    refresh();
+    // Rendre la promesse du premier chargement : l'appelant peut ainsi
+    // poser un voile sur la zone le temps qu'il aboutisse.
+    const first = refresh();
     if (refreshTimer) clearInterval(refreshTimer);
     refreshTimer = setInterval(refresh, REFRESH_INTERVAL);
+    return first;
   }
 
   function stop() {

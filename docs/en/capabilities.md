@@ -224,6 +224,10 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   on, then hands the page back. It matters because the failure mode is
   silent: the previous cluster's numbers stay on screen and read as the
   new one's, which is how an operator acts on the wrong machine.
+- **Slow views veil their own zone.** The same transition, scoped: a large
+  cluster's topology blurs only its own panel while it loads, naming what
+  it is fetching, with the rest of the page sharp and usable. Nothing
+  shows below 250 ms, and never on a background refresh.
 - **Internationalisation** — five complete languages (EN, FR, DE, ES,
   IT), with a parity test that fails the build on a missing key.
 - **Icons** — a hand-drawn monochrome SVG set inheriting `currentColor`,

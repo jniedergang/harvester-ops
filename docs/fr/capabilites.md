@@ -252,6 +252,11 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   que le défaut est silencieux : les chiffres du cluster précédent
   restent à l'écran et se lisent comme ceux du nouveau, ce qui est la
   façon dont on finit par agir sur la mauvaise machine.
+- **Les vues lentes floutent leur propre zone.** La même transition, mais
+  cantonnée : la topologie d'un gros cluster ne floute que son panneau le
+  temps de charger, en nommant ce qu'elle va chercher, le reste de la
+  page restant net et utilisable. Rien ne s'affiche en dessous de 250 ms,
+  et jamais sur un rafraîchissement de fond.
 - **Internationalisation** — cinq langues complètes (EN, FR, DE, ES, IT),
   avec un test de parité qui casse la build sur une clé manquante.
 - **Icônes** — un jeu SVG monochrome dessiné d'un seul trait, héritant de

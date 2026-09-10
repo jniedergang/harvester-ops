@@ -4,6 +4,38 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.21.0] - 2026-09-10 - The overview kept showing the previous cluster
+
+### Fixed
+- **The topology painted the wrong cluster.** With a cluster selected from
+  another tab, coming back to Cluster / Overview showed the *previous*
+  cluster's node and VMs under a heading naming the new one. The topology
+  was only ever (re)mounted by a click on its own sub-tab, so arriving from
+  anywhere else left the old canvas in place. Worse, its 8-second poll kept
+  running in the background while you were on other tabs, repainting that
+  stale cluster and querying it for nothing. Arriving on the overview now
+  remounts it, leaving it stops it.
+- **A response in flight during a switch is dropped.** It belongs to the
+  cluster you just left; painting it would overwrite the new one's view
+  moments after it loaded correctly.
+
+### Added
+- **Slow views veil their own zone.** The same blurred transition as the
+  cluster switch, but scoped: the topology of a large cluster and the
+  overview metrics blur only their own panel, naming what is loading,
+  while the rest of the page stays sharp and clickable. It appears only
+  past 250 ms, so a fast cluster shows nothing at all, and never on a
+  background refresh — otherwise the panel would blink on every poll.
+- The veil is now one generic module (`veil.js`), full-screen or scoped to
+  an element, replacing the cluster-specific overlay.
+
+### Tests
+- Four more browser tests: returning to the overview asks for the *current*
+  cluster's topology, leaving it stops the polling entirely (checked past
+  the 8-second period), a slow view veils only its own zone with the rest
+  of the page still usable, and a fast view veils nothing.
+- 482 tests green.
+
 ## [1.20.0] - 2026-09-10 - Switching cluster actually switches cluster
 
 ### Fixed

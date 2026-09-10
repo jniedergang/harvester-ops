@@ -31,10 +31,23 @@ const App = (() => {
     $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     $$('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
     try { localStorage.setItem(TAB_STORAGE, name); } catch {}
-    if (name === 'overview')   refreshStatus();
+    if (name === 'overview')   { refreshStatus({ veil: true }); mountTopology(overviewMode()); }
     if (name === 'namespaces') { refreshNamespaces(true); }
     if (name === 'activity')   refreshActivity();
     if (name === 'shutdown')   loadVMOrder();
+    // Quitter l'aperçu coupe le rafraîchissement de la topologie. Il
+    // continuait sinon d'interroger le cluster en arrière-plan — et, après
+    // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
+    // harv1 sur un aperçu titré harv3.
+    if (name !== 'overview' && window.Topology) window.Topology.stop();
+  }
+
+  /** Sous-onglet d'aperçu actif (metrics | cluster | network | storage). */
+  function overviewMode() {
+    const btn = document.querySelector('[data-overview-tab].active');
+    if (btn) return btn.dataset.overviewTab;
+    try { return localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; }
+    catch { return 'metrics'; }
   }
 
   function setStepStatus(panelId, stepId, status, msg) {
@@ -87,8 +100,14 @@ const App = (() => {
     // le voile n'aurait rien à masquer.
     if (!previous || opts.silent) { await refreshStatus(); return; }
 
-    if (window.ClusterSwitch) {
-      await window.ClusterSwitch.during(name, reloadForCluster);
+    if (window.Veil) {
+      // La chaîne traduite garde son `{name}` : c'est le voile qui le
+      // remplace, pour pouvoir le mettre en valeur sans injecter de HTML.
+      await window.Veil.during(null, {
+        message: i18n.t('cluster.switching'),
+        name,
+        hint: i18n.t('cluster.switchingHint'),
+      }, reloadForCluster);
     } else {
       await reloadForCluster();
     }
@@ -106,7 +125,7 @@ const App = (() => {
   async function reloadForCluster() {
     const active = document.querySelector('.tab-content.active')?.id
       ?.replace(/^tab-/, '') || 'overview';
-    const jobs = [refreshStatus()];      // alimente aussi les compteurs d'en-tête
+    const jobs = [refreshStatus({ veil: true })];   // alimente aussi l'en-tête
 
     if (active === 'namespaces') jobs.push(refreshNamespaces(true));
     if (active === 'activity')   jobs.push(refreshActivity());
@@ -129,7 +148,30 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Overview tab
   // -------------------------------------------------------------------------
-  async function refreshStatus() {
+  /**
+   * Aperçu. Le voile n'est posé que si la zone est visible ET que la
+   * réponse tarde : un cluster qui répond en 80 ms ne doit pas produire un
+   * clignotement, un cluster distant qui prend cinq secondes ne doit pas
+   * laisser croire que les chiffres affichés sont les siens.
+   */
+  async function refreshStatus(opts = {}) {
+    if (!currentCluster) return;
+    // Un rafraîchissement DE FOND ne floute rien : le voile est réservé aux
+    // chargements demandés par l'opérateur (arrivée sur l'onglet, bascule
+    // de cluster). Sinon la zone clignoterait à chaque cycle du minuteur.
+    if (!opts.veil) return refreshStatusInner();
+    const zone = document.querySelector('.overview-subtab[data-subtab="metrics"]');
+    const visible = zone && !zone.hidden
+      && document.querySelector('#tab-overview.tab-content.active');
+    if (!visible || !window.Veil) return refreshStatusInner();
+    return window.Veil.during(zone, {
+      message: i18n.t('overview.loading'),
+      name: currentCluster,
+      delay: 250,
+    }, refreshStatusInner);
+  }
+
+  async function refreshStatusInner() {
     if (!currentCluster) return;
     try {
       const data = await api(`/api/status/${encodeURIComponent(currentCluster)}`);
@@ -1430,14 +1472,10 @@ const App = (() => {
         $$('[data-overview-tab]').forEach(b => b.classList.toggle('active', b === btn));
         $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== target));
         try { localStorage.setItem('harvester_ops_overview_subtab', target); } catch {}
-        // Mount the topology viewer once per mode switch
-        if (window.Topology && currentCluster) {
-          if (target === 'metrics') {
-            window.Topology.stop();
-          } else {
-            mountTopology(target);
-          }
-        }
+        // Un seul chemin de montage : mountTopology gère lui-même le cas
+        // « Métriques » (pas de canevas, mais il faut couper le polling).
+        mountTopology(target);
+        if (target === 'metrics') refreshStatus({ veil: true });
       });
     });
 
@@ -1569,6 +1607,9 @@ const App = (() => {
   // -------------------------------------------------------------------------
   function mountTopology(mode) {
     if (!window.Topology || !currentCluster) return;
+    // L'onglet Métriques n'a pas de canevas : y monter la topologie n'a
+    // pas de sens, mais il faut couper son rafraîchissement.
+    if (mode === 'metrics') { window.Topology.stop(); return; }
     // Build the canvas + detail sidebar shell once per host, then ask
     // the Topology module to render for the active mode. We use CSS
     // classes (not ids) so each of the 3 subtabs gets its own
@@ -1638,7 +1679,18 @@ const App = (() => {
       });
       if (typeof i18n !== 'undefined') i18n.applyTranslations();
     }
-    window.Topology.start(currentCluster, mode);
+    const loading = window.Topology.start(currentCluster, mode);
+    // Sur un gros cluster, la topologie met plusieurs secondes à revenir.
+    // Le voile ne couvre que cette zone : le reste de la page demeure
+    // lisible et cliquable.
+    if (window.Veil && loading && typeof loading.then === 'function') {
+      window.Veil.during(host, {
+        message: i18n.t('topology.loading'),
+        name: currentCluster,
+        delay: 250,
+      }, () => loading);
+    }
+    return loading;
   }
 
   // Expose getCurrentCluster for the topology module
