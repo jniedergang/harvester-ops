@@ -4,6 +4,41 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.20.0] - 2026-09-10 - Switching cluster actually switches cluster
+
+### Fixed
+- **The visible tab kept the previous cluster's data.** Selecting another
+  cluster refreshed the overview and nothing else: staying on Cluster
+  API, on the VM list or on the topology left the former cluster's
+  numbers on screen, reading as if they were the new one's. That is the
+  worst kind of defect for an operations console, because nothing looks
+  wrong until you act on the wrong machine. The tab you are looking at is
+  now reloaded; the hidden ones already rebuilt themselves on activation.
+
+### Added
+- **A loading veil while the switch happens.** The page behind it is
+  blurred, a card names the cluster being loaded, and clicks are blocked
+  until the data on screen really belongs to it. It has a minimum
+  display time so a fast cluster does not produce a flash, and a safety
+  timeout so a refresh that never returns cannot leave the interface
+  locked. Reduced-motion preferences drop the animation, screen readers
+  get the change announced, and browsers without `backdrop-filter` fall
+  back to an opaque veil rather than to no signal at all.
+- `CAPI.reactivate()`, the entry point that replays the current
+  Automation sub-tab so it reloads for the new cluster through exactly
+  the same path a click takes.
+
+### Tests
+- Four browser tests drive a real switch between two declared clusters:
+  the veil appears and names the cluster, the page is still clickable
+  afterwards, and the VM list and Cluster API tabs both re-query the new
+  cluster with no residual call to the old one.
+- Source-level guards for what would regress silently: script load
+  order, the safety timeout, the `[hidden]` rule that keeps the veil out
+  of the flow, the reduced-motion block, and a check that every tab
+  declared in the page is covered by the reload.
+- 476 tests green.
+
 ## [1.19.1] - 2026-09-10 - Cluster declarations keep what you give them
 
 ### Fixed

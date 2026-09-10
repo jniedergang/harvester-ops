@@ -219,6 +219,11 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   events) are persisted in SQLite and served back by the Activity tab and
   its details replay, across UI restarts. In-memory eviction only affects
   live SSE attachment, never the visible history.
+- **Cluster switching that actually switches.** Picking another cluster
+  blurs the page behind a named loading veil and reloads the view you are
+  on, then hands the page back. It matters because the failure mode is
+  silent: the previous cluster's numbers stay on screen and read as the
+  new one's, which is how an operator acts on the wrong machine.
 - **Internationalisation** — five complete languages (EN, FR, DE, ES,
   IT), with a parity test that fails the build on a missing key.
 - **Icons** — a hand-drawn monochrome SVG set inheriting `currentColor`,

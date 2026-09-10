@@ -246,6 +246,12 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   Activité et son replay de détails, y compris après redémarrage de l'UI.
   L'éviction mémoire n'affecte que l'attachement SSE live, jamais
   l'historique visible.
+- **Changement de cluster qui change vraiment de cluster.** Choisir un
+  autre cluster floute la page derrière un voile de chargement qui le
+  nomme, recharge la vue affichée, puis rend la main. Cela compte parce
+  que le défaut est silencieux : les chiffres du cluster précédent
+  restent à l'écran et se lisent comme ceux du nouveau, ce qui est la
+  façon dont on finit par agir sur la mauvaise machine.
 - **Internationalisation** — cinq langues complètes (EN, FR, DE, ES, IT),
   avec un test de parité qui casse la build sur une clé manquante.
 - **Icônes** — un jeu SVG monochrome dessiné d'un seul trait, héritant de

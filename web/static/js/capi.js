@@ -913,10 +913,32 @@ const CAPI = (() => {
     window.open(`/api/capi/${encodeURIComponent(cluster)}/cluster/${namespace}/${name}/kubeconfig`, '_blank');
   }
 
+  /**
+   * Rejoue l'activation du sous-onglet courant (v1.20.0).
+   *
+   * Appelé au changement de cluster : l'onglet Automation ne se
+   * reconstruisait qu'au clic, si bien qu'en restant dessus on continuait
+   * de lire le diagnostic CAPI du cluster précédent. Passer par les mêmes
+   * sélecteurs que le clic évite d'avoir deux chemins de rendu à tenir
+   * en cohérence.
+   */
+  async function reactivate() {
+    let sub = 'capi';
+    try { sub = localStorage.getItem('harvester_ops_automation_subtab') || 'capi'; } catch {}
+    selectAutomationSubtab(sub);
+    if (sub === 'capi') {
+      let capiTab = null;
+      try { capiTab = localStorage.getItem('harvester_ops_capi_subtab'); } catch {}
+      // selectAutomationSubtab a déjà rendu le diagnostic ; les vues
+      // « Création » et « Clusters K8S » ont leur propre chargement.
+      if (capiTab && capiTab !== 'diag') selectCapiTab(capiTab);
+    }
+  }
+
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh };
+  return { init, refresh, reactivate };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

@@ -74,13 +74,56 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Cluster selection
   // -------------------------------------------------------------------------
-  function setCluster(name) {
+  async function setCluster(name, opts = {}) {
+    if (!name) return;
+    const previous = currentCluster;
     currentCluster = name;
     $$('.cluster-name').forEach(el => el.textContent = name);
     // v1.4.32: persist the selection so F5 restores the same cluster
     // (was always defaulting to the first <select> option).
     try { localStorage.setItem('harvester_ops_current_cluster', name); } catch {}
-    refreshStatus();
+
+    // Premier choix de la session : il n'y a rien à l'écran à remplacer,
+    // le voile n'aurait rien à masquer.
+    if (!previous || opts.silent) { await refreshStatus(); return; }
+
+    if (window.ClusterSwitch) {
+      await window.ClusterSwitch.during(name, reloadForCluster);
+    } else {
+      await reloadForCluster();
+    }
+  }
+
+  /**
+   * Recharge la vue affichée pour le cluster courant.
+   *
+   * Les onglets masqués se reconstruisent à leur activation (setTab et les
+   * sélecteurs de sous-onglets appellent déjà leur rafraîchissement) ; le
+   * seul qui restait figé était CELUI QUI EST À L'ÉCRAN. On y voyait donc
+   * les données du cluster précédent — sur l'onglet Cluster API par
+   * exemple, le diagnostic n'était jamais réinterrogé.
+   */
+  async function reloadForCluster() {
+    const active = document.querySelector('.tab-content.active')?.id
+      ?.replace(/^tab-/, '') || 'overview';
+    const jobs = [refreshStatus()];      // alimente aussi les compteurs d'en-tête
+
+    if (active === 'namespaces') jobs.push(refreshNamespaces(true));
+    if (active === 'activity')   jobs.push(refreshActivity());
+    if (active === 'shutdown')   jobs.push(loadVMOrder());
+    if (active === 'overview') {
+      let mode = 'metrics';
+      try { mode = localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; } catch {}
+      if (mode !== 'metrics' && window.Topology) {
+        window.Topology.stop();          // couper le rafraîchissement de l'ancien
+        mountTopology(mode);
+      }
+    }
+    if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
+      jobs.push(window.CAPI.reactivate());
+    }
+    // allSettled : un onglet en erreur ne doit pas laisser le voile en place.
+    await Promise.allSettled(jobs);
   }
 
   // -------------------------------------------------------------------------
