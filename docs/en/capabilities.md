@@ -241,10 +241,14 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   shows below 250 ms, and never on a background refresh.
 - **Internationalisation** — five complete languages (EN, FR, DE, ES,
   IT), with a parity test that fails the build on a missing key.
-- **Icons** — a hand-drawn monochrome SVG set inheriting `currentColor`,
-  so one set serves every theme and both modes. It replaced the emoji
-  icons, which mixed full-colour images with thin glyphs and read poorly
-  at button size.
+- **Icons** — one monochrome SVG set, [Lucide](https://lucide.dev)
+  (ISC, vendored in the tarball, never fetched at runtime), inheriting
+  `currentColor` so it serves every theme and both modes — including the
+  topology canvas, where the same glyphs are drawn as node images. It
+  replaced the emoji icons, which mixed full-colour images with thin
+  glyphs, rendered differently per platform and read poorly at button
+  size. `scripts/gen-icons.py` regenerates the set from the pinned
+  release.
 - **Theming** — 5 colour themes × dark/light. The default SUSE theme
   follows the suse.com identity — pine/jade palette and the official
   SUSE typeface, vendored in the tarball (airgap-safe, OFL licensed).

@@ -29,8 +29,8 @@ const CAPI = (() => {
   function render(out, d) {
     const allInstalled = (d.components || []).every(c => c.installed);
     const summary = allInstalled
-      ? '<div class="summary-bar ok">✓ CAPI/CAPHV stack fully installed</div>'
-      : '<div class="summary-bar warn">⚠ Some components are missing — use Install stack to deploy them</div>';
+      ? '<div class="summary-bar ok">' + Icons.svg('ok', { size: 14 }) + ' CAPI/CAPHV stack fully installed</div>'
+      : '<div class="summary-bar warn">' + Icons.svg('warn', { size: 14 }) + ' Some components are missing — use Install stack to deploy them</div>';
 
     // Target Harvester version + bundle compatibility chip
     const cmp = d.bundle_compatibility;
@@ -40,16 +40,16 @@ const CAPI = (() => {
     }
     if (cmp) {
       if (cmp.compatible) {
-        compatChip += `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.compatOk', {versions: (cmp.supported_versions||[]).join(', ')})}">✓ bundle compatible</span>`;
+        compatChip += `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.compatOk', {versions: (cmp.supported_versions||[]).join(', ')})}">${Icons.svg('ok', { size: 14 })} bundle compatible</span>`;
       } else {
         const sup = (cmp.supported_versions || []).join(', ') || 'unknown';
-        compatChip += `<span class="badge warn tip" data-tip="${i18n.t('capi.tip.compatKo', {supported: sup, target: cmp.target_version || 'unknown'})}">⚠ version mismatch (supported: ${sup})</span>`;
+        compatChip += `<span class="badge warn tip" data-tip="${i18n.t('capi.tip.compatKo', {supported: sup, target: cmp.target_version || 'unknown'})}">${Icons.svg('warn', { size: 14 })} version mismatch (supported: ${sup})</span>`;
       }
     }
 
     const componentRows = (d.components || []).map(c => `
       <tr>
-        <td>${c.installed ? '<span class="badge ok">✓</span>' : '<span class="badge fail">✗</span>'}</td>
+        <td>${c.installed ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge fail">' + Icons.svg('fail', { size: 14 }) + '</span>'}</td>
         <td><strong>${c.label}</strong></td>
         <td>${c.version ? `<code title="${c.image || ''}">${c.version}</code>` : '<span class="form-hint">—</span>'}</td>
         <td><code>${c.details || '—'}</code></td>
@@ -59,11 +59,11 @@ const CAPI = (() => {
       <div class="apply-bar" style="margin-top: 16px; padding-top: 12px; flex-wrap: wrap; gap: 8px;">
         <button class="btn btn-secondary btn-sm" id="btn-capi-bundle-build"
                 data-tip="${i18n.t('capi.tip.bundleBuild')}">
-          🔨 Build new bundle
+          ${Icons.svg('build')} Build new bundle
         </button>
         <button class="btn btn-secondary btn-sm" id="btn-capi-bundle-upload"
                 data-tip="${i18n.t('capi.tip.bundleUpload')}">
-          ⬆ Upload bundle…
+          ${Icons.svg('upload')} Upload bundle…
         </button>
         <input type="file" id="capi-bundle-upload-input" accept=".tar.gz,.tgz" style="display:none">
         <span class="apply-result" id="capi-bundle-upload-result" style="margin-left: 8px;"></span>
@@ -71,19 +71,19 @@ const CAPI = (() => {
                 data-tip="${d.bundle_available
                   ? i18n.t('capi.tip.install')
                   : i18n.t('capi.tip.installNoBundle')}">
-          📦 Install stack from active bundle
+          ${Icons.svg('bundle')} Install stack from active bundle
         </button>
         <button class="btn btn-danger btn-sm" id="btn-capi-uninstall"
                 data-tip="${i18n.t('capi.tip.uninstall')}">
-          🗑 Uninstall stack
+          ${Icons.svg('delete')} Uninstall stack
         </button>
         <label class="apply-dry tip" data-tip="${i18n.t('capi.tip.dryRun')}">
           <input type="checkbox" id="capi-install-dry" checked> Dry-run (preview only)
         </label>
         <span class="form-hint" style="flex-basis: 100%; margin-top: 6px;">
           ${d.bundle_available
-            ? `<span style="color:var(--accent)">✓ Active bundle: <code>${d.active_bundle || 'capi-bundle.tar.gz'}</code></span>`
-            : '<span style="color:var(--warn)">✗ No bundle — click <strong>Build new bundle</strong> first</span>'}
+            ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} Active bundle: <code>${d.active_bundle || 'capi-bundle.tar.gz'}</code></span>`
+            : '<span style="color:var(--warn)">' + Icons.svg('fail', { size: 14 }) + ' No bundle — click <strong>Build new bundle</strong> first</span>'}
         </span>
         <span class="apply-result" id="capi-install-result" style="flex-basis: 100%;"></span>
       </div>
@@ -186,7 +186,7 @@ const CAPI = (() => {
         <td>${fmtSize(b.size)}</td>
         <td><code class="sha">${(b.sha256 || '').slice(0, 12) || '—'}</code></td>
         <td>${b.is_active
-              ? `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.activeBundle')}">✓ active</span>`
+              ? `<span class="badge ok tip" data-tip="${i18n.t('capi.tip.activeBundle')}">${Icons.svg('ok', { size: 14 })} active</span>`
               : `<button class="btn btn-secondary btn-sm bundle-select tip" data-filename="${b.filename}"
                          data-tip="${i18n.t('capi.tip.activate')}">
                    Activate
@@ -202,7 +202,7 @@ const CAPI = (() => {
              href="/api/capi/bundle/${encodeURIComponent(b.filename)}/download"
              data-tip="${i18n.t('capi.tip.download')}"
              download>
-            ⬇ Download
+            ${Icons.svg('download')} Download
           </a>
           <button class="btn btn-secondary btn-sm bundle-delete"
                   data-filename="${b.filename}"
@@ -245,7 +245,7 @@ const CAPI = (() => {
       await renderBundles();
       const hint = document.querySelector('#capi-status-body .apply-bar .form-hint');
       if (hint) {
-        hint.innerHTML = `<span style="color:var(--accent)">✓ Active bundle: <code>${filename}</code></span>`;
+        hint.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} Active bundle: <code>${filename}</code></span>`;
       }
     } catch (e) {
       alert(`Failed to activate bundle: ${e.message}`);
@@ -379,16 +379,16 @@ const CAPI = (() => {
       });
       const d = await r.json();
       if (!r.ok) {
-        if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'failed'}</span>`;
+        if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`;
         return;
       }
       if (result) {
         const verb = dryRun ? 'dry-run uninstall' : 'uninstall';
         const cm = keepCertManager ? '' : ' (incl. cert-manager)';
-        result.innerHTML = `<span style="color:var(--accent)">✓ ${verb}${cm} started — see dock action <code>${d.action_id}</code></span>`;
+        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${verb}${cm} started — see dock action <code>${d.action_id}</code></span>`;
       }
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
@@ -403,41 +403,41 @@ const CAPI = (() => {
       });
       const d = await r.json();
       if (!r.ok) {
-        if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'failed'}</span>`;
+        if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`;
         return;
       }
       if (result) {
         const verb = dryRun ? 'dry-run' : 'install';
-        let line = `<span style="color:var(--accent)">✓ ${verb} started — see dock action <code>${d.action_id}</code></span>`;
+        let line = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${verb} started — see dock action <code>${d.action_id}</code></span>`;
         if (d.compatibility_warning) {
           const cw = d.compatibility_warning;
           const sup = (cw.supported_versions || []).join(', ') || '(unspecified)';
-          line += `<br><span style="color:var(--warn)">⚠ Version mismatch noted: target Harvester ${cw.target_version || 'unknown'}, bundle supports ${sup}. The install will proceed — the warning is recorded in the action log.</span>`;
+          line += `<br><span style="color:var(--warn)">${Icons.svg('warn', { size: 14 })} Version mismatch noted: target Harvester ${cw.target_version || 'unknown'}, bundle supports ${sup}. The install will proceed — the warning is recorded in the action log.</span>`;
         }
         result.innerHTML = line;
       }
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
   async function uploadBundle(file) {
     const result = document.querySelector('#capi-bundle-upload-result');
-    if (result) result.innerHTML = `<span style="color:var(--text-dim)">⏳ uploading ${file.name} (${fmtSize(file.size)})…</span>`;
+    if (result) result.innerHTML = `<span style="color:var(--text-dim)">${Icons.svg('pending', { size: 14 })} uploading ${file.name} (${fmtSize(file.size)})…</span>`;
     const fd = new FormData();
     fd.append('file', file);
     try {
       const r = await fetch('/api/capi/bundle/upload', { method: 'POST', body: fd });
       const d = await r.json();
       if (!r.ok) {
-        if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'upload failed'}</span>`;
+        if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'upload failed'}</span>`;
         return;
       }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">✓ uploaded as <code>${d.uploaded}</code> — set as active</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} uploaded as <code>${d.uploaded}</code> — set as active</span>`;
       await renderBundles();
       await refresh();
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
@@ -522,15 +522,15 @@ const CAPI = (() => {
       const r = await fetch('/api/capi/bundle/build', { method: 'POST' });
       const d = await r.json();
       if (!r.ok) {
-        if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'failed'}</span>`;
+        if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`;
         return;
       }
       runId = d.action_id;
       if (result) {
-        result.innerHTML = `<span style="color:var(--accent)">⏳ bundle build running — see dock action <code>${runId}</code></span>`;
+        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} bundle build running — see dock action <code>${runId}</code></span>`;
       }
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
       return;
     }
     // Follow the action and update label on completion
@@ -542,10 +542,10 @@ const CAPI = (() => {
           const span = document.querySelector('#capi-install-result');
           if (!span) return;
           if (d.status === 'done') {
-            span.innerHTML = `<span style="color:var(--accent)">✓ bundle build completed (action <code>${runId}</code>) — refresh diagnostic to see "Bundle present"</span>`;
+            span.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} bundle build completed (action <code>${runId}</code>) — refresh diagnostic to see "Bundle present"</span>`;
             setTimeout(refresh, 800);
           } else {
-            span.innerHTML = `<span style="color:var(--danger)">✗ bundle build failed (exit ${d.exit_code ?? '?'}) — see dock action <code>${runId}</code> log for details</span>`;
+            span.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} bundle build failed (exit ${d.exit_code ?? '?'}) — see dock action <code>${runId}</code> log for details</span>`;
           }
         },
       },
@@ -660,21 +660,21 @@ const CAPI = (() => {
 
     const clusters = diag.capi_clusters || [];
     if (clusters.length === 0) {
-      out.innerHTML = `<p class="empty-state">Aucun cluster CAPHV managé sur <code>${cluster}</code>. Va dans <strong>🛠 Création de clusters</strong> pour en créer un.</p>`;
+      out.innerHTML = `<p class="empty-state">Aucun cluster CAPHV managé sur <code>${cluster}</code>. Va dans <strong>${Icons.svg('tools')} Création de clusters</strong> pour en créer un.</p>`;
       return;
     }
     const rows = clusters.map(c => `
       <tr>
         <td><code>${c.namespace}/${c.name}</code></td>
         <td><span class="phase ${c.phase === 'Provisioned' ? 'Running' : c.phase === 'Failed' ? 'Failed' : 'Pending'}">${c.phase}</span></td>
-        <td>${c.ready ? '<span class="badge ok">✓</span>' : '<span class="badge warn">…</span>'}</td>
+        <td>${c.ready ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge warn">…</span>'}</td>
         <td><code>${c.clusterClass || '—'}</code></td>
         <td><code>${c.k8sVersion || '—'}</code></td>
         <td>
           <button class="btn btn-sm btn-secondary capi-cluster-details tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterDetails')}">Details</button>
-          <button class="btn btn-sm btn-secondary capi-cluster-kubeconfig tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterKubeconfig')}">⬇ kubeconfig</button>
-          <button class="btn btn-sm btn-secondary capi-cluster-scale tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterScale')}">↕ Scale</button>
-          <button class="btn btn-sm btn-danger capi-cluster-delete tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterDelete')}">🗑 Delete</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-kubeconfig tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterKubeconfig')}">${Icons.svg('download')} kubeconfig</button>
+          <button class="btn btn-sm btn-secondary capi-cluster-scale tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterScale')}">${Icons.svg('moveVertical')} Scale</button>
+          <button class="btn btn-sm btn-danger capi-cluster-delete tip" data-ns="${c.namespace}" data-name="${c.name}" data-tip="${i18n.t('capi.tip.clusterDelete')}">${Icons.svg('delete')} Delete</button>
         </td>
       </tr>`).join('');
     out.innerHTML = `
@@ -763,9 +763,9 @@ const CAPI = (() => {
           <label class="apply-dry tip" data-tip="${i18n.t('capi.tip.createDry')}">
             <input type="checkbox" name="dry_run" checked> Dry-run (preview only)</label>
           <button type="button" class="btn btn-secondary btn-sm" id="capi-create-preview"
-                  data-tip="${i18n.t('capi.tip.preview')}">👁 Aperçu YAML</button>
+                  data-tip="${i18n.t('capi.tip.preview')}">${Icons.svg('preview')} Aperçu YAML</button>
           <button type="submit" class="btn btn-primary btn-sm"
-                  data-tip="${i18n.t('capi.tip.create')}">🚀 Créer</button>
+                  data-tip="${i18n.t('capi.tip.create')}">${Icons.svg('capi')} Créer</button>
         </div>
       </form>`;
   }
@@ -793,12 +793,12 @@ const CAPI = (() => {
       });
       const d = await r.json();
       if (!r.ok) {
-        if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error || 'failed'}</span>`;
+        if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`;
         return;
       }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">✓ Aperçu généré — action <code>${d.action_id}</code> (logs dans le dock)</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} Aperçu généré — action <code>${d.action_id}</code> (logs dans le dock)</span>`;
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
@@ -821,16 +821,16 @@ const CAPI = (() => {
       if (!r.ok) {
         if (result) {
           const miss = (d.missing || []).join(', ');
-          result.innerHTML = `<span style="color:var(--danger)">✗ ${d.error}${miss ? ' — missing: ' + miss : ''}</span>`;
+          result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}${miss ? ' — missing: ' + miss : ''}</span>`;
         }
         return;
       }
       if (result) {
-        result.innerHTML = `<span style="color:var(--accent)">✓ ${form.dry_run ? 'dry-run' : 'création'} lancée — action <code>${d.action_id}</code> (suivez la progression dans le dock)</span>`;
+        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${form.dry_run ? 'dry-run' : 'création'} lancée — action <code>${d.action_id}</code> (suivez la progression dans le dock)</span>`;
       }
       setTimeout(refreshClustersPanel, 4000);
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 
@@ -839,7 +839,7 @@ const CAPI = (() => {
     const panelId = `capi-cluster-${namespace}-${name}`;
     if (!window.FloatingPanels) { alert('FloatingPanels not loaded'); return; }
     const api = window.FloatingPanels.open({
-      id: panelId, title: `🛠 ${namespace}/${name}`, width: 720, height: 540,
+      id: panelId, title: `${namespace}/${name}`, icon: 'tools', width: 720, height: 540,
       bodyHtml: '<div style="padding:16px;">Loading…</div>',
     });
     try {
@@ -862,7 +862,7 @@ const CAPI = (() => {
         <div style="padding:12px 14px;">
           <div class="summary-bar ${d.ready ? 'ok' : 'warn'}">
             <strong>${d.namespace}/${d.name}</strong> · phase: <strong>${d.phase}</strong> ·
-            ready: ${d.ready ? '✓' : '…'} ·
+            ready: ${d.ready ? Icons.svg('ok', { size: 14 }) : '…'} ·
             endpoint: <code>${(d.controlPlaneEndpoint||{}).host || '—'}:${(d.controlPlaneEndpoint||{}).port || '—'}</code>
           </div>
           <h4 style="margin-top:14px;">Conditions</h4>

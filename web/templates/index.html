@@ -33,7 +33,7 @@
     <header>
       <div class="brand">
         <img id="brand-logo" src="" alt="" style="display:none;">
-        <span class="logo" id="brand-fallback">⬢</span>
+        <span class="logo" id="brand-fallback" data-icon="brand" data-icon-size="22"></span>
         <span class="title" id="brand-title" data-i18n="header.title">harvester-ops</span>
       </div>
       <div class="version">v{{ version }}</div>
@@ -54,57 +54,57 @@
     <nav>
       <div class="tab-group expanded" id="tab-group-cluster">
         <a class="tab tab-group-head" data-group="cluster" href="#cluster" data-i18n-title="tab.cluster" title="Cluster">
-          <span class="tab-icon">🖥</span>
+          <span class="tab-icon" data-icon="node"></span>
           <span class="sidebar-label" data-i18n="tab.cluster">Cluster</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true">▾</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
         </a>
         <div class="tab-group-children">
           <a class="tab tab-child active" data-tab="overview" href="#overview" data-i18n-title="tab.overview" title="Overview">
-            <span class="tab-icon">📊</span>
+            <span class="tab-icon" data-icon="metrics"></span>
             <span class="sidebar-label" data-i18n="tab.overview">Overview</span>
           </a>
           <a class="tab tab-child" data-tab="startup" href="#startup" data-i18n-title="tab.startup" title="Startup">
-            <span class="tab-icon"><span class="icon-green">▶</span></span>
+            <span class="tab-icon icon-green" data-icon="play"></span>
             <span class="sidebar-label" data-i18n="tab.startup">Startup</span>
           </a>
           <a class="tab tab-child" data-tab="shutdown" href="#shutdown" data-i18n-title="tab.shutdown" title="Shutdown">
-            <span class="tab-icon"><span class="icon-red">■</span></span>
+            <span class="tab-icon icon-red" data-icon="stop"></span>
             <span class="sidebar-label" data-i18n="tab.shutdown">Shutdown</span>
           </a>
         </div>
       </div>
-      <a class="tab"        data-tab="namespaces"   href="#namespaces" data-i18n-title="tab.vms" title="Virtual machines"><span class="tab-icon">💻</span> <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span></a>
+      <a class="tab"        data-tab="namespaces"   href="#namespaces" data-i18n-title="tab.vms" title="Virtual machines"><span class="tab-icon" data-icon="vm"></span> <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span></a>
       <div class="tab-group" id="tab-group-automation">
         <a class="tab tab-group-head" data-group="automation" href="#automation" data-i18n-title="tab.automation" title="Automation">
-          <span class="tab-icon">🤖</span>
+          <span class="tab-icon" data-icon="robot"></span>
           <span class="sidebar-label" data-i18n="tab.automation">Automation</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true">▾</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
         </a>
         <div class="tab-group-children">
           <a class="tab tab-child" data-subtab="capi"
              href="#automation/capi" data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2) — declarative cluster provisioning via CAPHV">
-            <span class="tab-icon">🚀</span>
+            <span class="tab-icon" data-icon="capi"></span>
             <span class="sidebar-label" data-i18n="automation.tab.capi">Cluster API</span>
           </a>
           <a class="tab tab-child" data-subtab="terraform"
              href="#automation/terraform" data-i18n-title="automation.tab.terraform" title="Terraform infrastructure">
-            <span class="tab-icon">🧱</span>
+            <span class="tab-icon" data-icon="terraform"></span>
             <span class="sidebar-label" data-i18n="automation.tab.terraform">Terraform</span>
           </a>
           <a class="tab tab-child" data-subtab="pxe"
              href="#automation/pxe" data-i18n-title="automation.tab.pxe.tip" title="Bare-metal (BMC / Redfish)">
-            <span class="tab-icon">🛰</span>
+            <span class="tab-icon" data-icon="baremetal"></span>
             <span class="sidebar-label" data-i18n="automation.tab.pxe">Bare-metal</span>
           </a>
         </div>
       </div>
-      <a class="tab"        data-tab="activity"     href="#activity" data-i18n-title="tab.activity" title="Activity"><span class="tab-icon">📜</span> <span class="sidebar-label" data-i18n="tab.activity">Activity</span></a>
+      <a class="tab"        data-tab="activity"     href="#activity" data-i18n-title="tab.activity" title="Activity"><span class="tab-icon" data-icon="activity"></span> <span class="sidebar-label" data-i18n="tab.activity">Activity</span></a>
     </nav>
 
     <footer>
       <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" data-i18n-title="sidebar.collapse" title="Collapse sidebar">
-        <span class="when-expanded">‹</span>
-        <span class="when-collapsed">›</span>
+        <span class="when-expanded" data-icon="chevronLeft"></span>
+        <span class="when-collapsed" data-icon="chevronRight"></span>
       </button>
     </footer>
   </aside>
@@ -133,10 +133,10 @@
           <h1><span data-i18n="overview.title">Overview</span> — <span class="cluster-name"></span></h1>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Overview sub-tabs">
-          <button type="button" class="sub-tab active" data-overview-tab="metrics" data-i18n="overview.tabMetrics">📊 Metrics</button>
-          <button type="button" class="sub-tab" data-overview-tab="cluster" data-i18n="overview.tabCluster">🖥 Cluster</button>
-          <button type="button" class="sub-tab" data-overview-tab="network" data-i18n="overview.tabNetwork">🌐 Network</button>
-          <button type="button" class="sub-tab" data-overview-tab="storage" data-i18n="overview.tabStorage">🗄 Storage</button>
+          <button type="button" class="sub-tab active" data-overview-tab="metrics"><span class="tab-icon" data-icon="metrics"></span> <span data-i18n="overview.tabMetrics">Metrics</span></button>
+          <button type="button" class="sub-tab" data-overview-tab="cluster"><span class="tab-icon" data-icon="node"></span> <span data-i18n="overview.tabCluster">Cluster</span></button>
+          <button type="button" class="sub-tab" data-overview-tab="network"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabNetwork">Network</span></button>
+          <button type="button" class="sub-tab" data-overview-tab="storage"><span class="tab-icon" data-icon="storage"></span> <span data-i18n="overview.tabStorage">Storage</span></button>
         </div>
       </div>
 
@@ -194,13 +194,13 @@
           <div style="padding:14px 16px;">
             <label class="opt-row">
               <input type="checkbox" id="opt-snapshot">
-              <span>📸 <strong data-i18n="shutdown.optSnapshot">Snapshot running VMs before shutdown</strong>
+              <span><span data-icon="snapshot" class="icon-dim"></span> <strong data-i18n="shutdown.optSnapshot">Snapshot running VMs before shutdown</strong>
                 <span class="opt-hint" data-i18n="shutdown.optSnapshotHint">Creates a VirtualMachineBackup (type=snapshot) for each running VM.</span>
               </span>
             </label>
             <label class="opt-row">
               <input type="checkbox" id="opt-force">
-              <span>⚠️ <strong data-i18n="shutdown.optForce">Force (ignore failed safety checks)</strong>
+              <span><span data-icon="warn" class="icon-warn"></span> <strong data-i18n="shutdown.optForce">Force (ignore failed safety checks)</strong>
                 <span class="opt-hint" data-i18n="shutdown.optForceHint">Continue even if the etcd snapshot fails or VM volumes stay attached. Without it, the sequence aborts on a failed safety check.</span>
               </span>
             </label>
@@ -221,7 +221,7 @@
         </div>
 
         <div class="actions">
-          <button class="btn btn-danger" id="btn-shutdown"><span class="icon-red">■</span> <span data-i18n="shutdown.btn">Start shutdown</span></button>
+          <button class="btn btn-danger" id="btn-shutdown"><span class="icon-red" data-icon="stop"></span> <span data-i18n="shutdown.btn">Start shutdown</span></button>
           <label class="dry-run-inline">
             <input type="checkbox" class="dry-run-sync" data-sync-dryrun>
             <span data-i18n="sidebar.dryRunMode">Dry-run mode</span>
@@ -241,7 +241,7 @@
             <h2 data-i18n="shutdown.vmOrder">VM shutdown order</h2>
             <div>
               <button class="btn btn-sm btn-secondary" id="btn-vms-refresh" data-i18n="shutdown.reload">Reload</button>
-              <button class="btn btn-sm btn-primary" id="btn-vms-save"><span data-i18n="shutdown.saveOrder">💾 Save order</span></button>
+              <button class="btn btn-sm btn-primary" id="btn-vms-save"><span data-icon="save"></span> <span data-i18n="shutdown.saveOrder">Save order</span></button>
             </div>
           </div>
           <div style="padding:12px 16px;">
@@ -266,7 +266,7 @@
                 </select>
               </label>
               <div class="priority-help tip" data-tip-i18n="shutdown.priorityTip" style="margin-left:auto; color:var(--text-dim); font-size:11px; cursor:help;">
-                ❓ <span data-i18n="shutdown.priorityHelp">How priorities work</span>
+                <span data-icon="help" data-icon-size="14"></span> <span data-i18n="shutdown.priorityHelp">How priorities work</span>
               </div>
             </div>
             <div class="vm-order-list" id="vm-order-list"></div>
@@ -297,7 +297,7 @@
       </div>
 
       <div class="actions">
-        <button class="btn btn-primary" id="btn-startup"><span class="icon-green">▶</span> <span data-i18n="startup.btn">Start startup</span></button>
+        <button class="btn btn-primary" id="btn-startup"><span class="icon-green" data-icon="play"></span> <span data-i18n="startup.btn">Start startup</span></button>
         <label class="dry-run-inline">
           <input type="checkbox" class="dry-run-sync" data-sync-dryrun>
           <span data-i18n="sidebar.dryRunMode">Dry-run mode</span>
@@ -319,14 +319,14 @@
         <label data-i18n="vms.namespace">Namespace:</label>
         <select id="ns-dropdown"></select>
         <span class="vm-count-badge" id="ns-vm-count">0 VMs</span>
-        <button class="btn btn-sm btn-secondary" id="btn-ns-notes" data-i18n-title="vms.nsNotes" title="Namespace notes">📝 <span data-i18n="vms.nsNotes">Namespace notes</span></button>
+        <button class="btn btn-sm btn-secondary" id="btn-ns-notes" data-i18n-title="vms.nsNotes" title="Namespace notes"><span data-icon="notes"></span> <span data-i18n="vms.nsNotes">Namespace notes</span></button>
         <button class="btn btn-sm btn-secondary" id="btn-ns-refresh" data-i18n="overview.refresh">Refresh</button>
       </div>
 
       <div class="bulk-toolbar" id="bulk-toolbar" style="display:none;">
         <span class="bulk-count"><strong id="bulk-count-num">0</strong> <span data-i18n="namespaces.selected">selected</span></span>
-        <button class="btn btn-sm btn-danger"  id="btn-bulk-stop"><span class="icon-red">■</span> <span data-i18n="namespaces.bulkStop">Stop</span></button>
-        <button class="btn btn-sm btn-primary" id="btn-bulk-start"><span class="icon-green">▶</span> <span data-i18n="namespaces.bulkStart">Start</span></button>
+        <button class="btn btn-sm btn-danger"  id="btn-bulk-stop"><span class="icon-red" data-icon="stop"></span> <span data-i18n="namespaces.bulkStop">Stop</span></button>
+        <button class="btn btn-sm btn-primary" id="btn-bulk-start"><span class="icon-green" data-icon="play"></span> <span data-i18n="namespaces.bulkStart">Start</span></button>
         <div class="bulk-strategy">
           <span data-i18n="namespaces.bulkSetStrategy">Set strategy:</span>
           <select id="bulk-strategy-select">
@@ -361,16 +361,16 @@
     <section id="tab-automation" class="tab-content">
       <div class="automation-header">
         <div class="automation-header-text">
-          <h1>🤖 <span data-i18n="automation.title">Automation</span></h1>
+          <h1><span data-icon="robot" data-icon-size="22"></span> <span data-i18n="automation.title">Automation</span></h1>
           <p class="hint" data-i18n="automation.hint">Provision and manage infrastructure declaratively.</p>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" data-only-for="capi">
           <button class="sub-tab active" data-capi-tab="install"
-                  data-i18n-title="capi.tab.install.tip" title="Install / uninstall the CAPI + CAPHV controllers on the management cluster">📦 <span data-i18n="capi.tab.install">Installation</span></button>
+                  data-i18n-title="capi.tab.install.tip" title="Install / uninstall the CAPI + CAPHV controllers on the management cluster"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.install">Installation</span></button>
           <button class="sub-tab" data-capi-tab="clusters"
-                  data-i18n-title="capi.tab.clusters.tip" title="Create downstream RKE2 clusters via the harvester-rke2 ClusterClass">🛠 <span data-i18n="capi.tab.clusters">Création de clusters</span></button>
+                  data-i18n-title="capi.tab.clusters.tip" title="Create downstream RKE2 clusters via the harvester-rke2 ClusterClass"><span class="tab-icon" data-icon="tools"></span> <span data-i18n="capi.tab.clusters">Création de clusters</span></button>
           <button class="sub-tab" data-capi-tab="k8s"
-                  data-i18n-title="capi.tab.k8s.tip" title="List + manage the downstream Kubernetes clusters reconciled by CAPHV">🖥 <span data-i18n="capi.tab.k8s">Clusters K8S</span></button>
+                  data-i18n-title="capi.tab.k8s.tip" title="List + manage the downstream Kubernetes clusters reconciled by CAPHV"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.k8s">Clusters K8S</span></button>
         </div>
       </div>
 
@@ -379,7 +379,7 @@
         <div class="capi-tab-content active" data-capi-tab="install">
           <div class="card">
             <div class="card-header">
-              <h2>📦 <span data-i18n="capi.install.title">Installation CAPI / CAPHV</span></h2>
+              <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="capi.install.title">Installation CAPI / CAPHV</span></h2>
               <button class="btn btn-sm btn-secondary" id="btn-capi-refresh" data-i18n="overview.refresh" data-i18n-title="capi.tip.refresh" title="Re-run the diagnostic against the selected cluster">Refresh</button>
             </div>
             <div class="card-body" id="capi-status-body">
@@ -391,7 +391,7 @@
         <div class="capi-tab-content" data-capi-tab="clusters">
           <div class="card">
             <div class="card-header">
-              <h2>🛠 <span data-i18n="capi.clusters.title">Création de clusters RKE2</span></h2>
+              <h2><span data-icon="tools" data-icon-size="18"></span> <span data-i18n="capi.clusters.title">Création de clusters RKE2</span></h2>
             </div>
             <div class="card-body" id="capi-clusters-body">
               <p class="form-hint" data-i18n="common.loading">Loading…</p>
@@ -402,7 +402,7 @@
         <div class="capi-tab-content" data-capi-tab="k8s">
           <div class="card">
             <div class="card-header">
-              <h2>🖥 <span data-i18n="capi.k8s.title">Clusters Kubernetes managés</span></h2>
+              <h2><span data-icon="node" data-icon-size="18"></span> <span data-i18n="capi.k8s.title">Clusters Kubernetes managés</span></h2>
               <button class="btn btn-sm btn-secondary" id="btn-capi-k8s-refresh" data-i18n-title="capi.tip.refreshK8s" title="Reload the list of CAPI-managed clusters">Refresh</button>
             </div>
             <div class="card-body" id="capi-k8s-body">
@@ -415,7 +415,7 @@
       <div class="sub-tab-content" data-subtab="terraform">
         <div class="card">
           <div class="card-header">
-            <h2>🧱 Terraform infrastructure</h2>
+            <h2><span data-icon="terraform" data-icon-size="18"></span> Terraform infrastructure</h2>
             <button class="btn btn-sm btn-secondary" id="btn-tf-refresh" data-i18n-title="tf.tip.refresh" title="Refresh provider info + state">Refresh</button>
           </div>
           <div class="card-body" id="tf-status-body">
@@ -427,7 +427,7 @@
       <div class="sub-tab-content" data-subtab="pxe">
         <div class="card">
           <div class="card-header">
-            <h2>🛰 Bare-metal (BMC / Redfish)</h2>
+            <h2><span data-icon="baremetal" data-icon-size="18"></span> Bare-metal (BMC / Redfish)</h2>
             <button class="btn btn-sm btn-secondary" id="btn-bmc-refresh" data-i18n-title="bmc.tip.refresh" title="Re-render the discovery panel">Refresh</button>
           </div>
           <div class="card-body" id="bmc-body">
@@ -575,7 +575,7 @@
           <label data-i18n="settings.appearance.logo">Logo</label>
           <div class="logo-preview-wrap">
             <img id="logo-preview" src="" alt="" class="logo-preview" style="display:none;">
-            <span id="logo-preview-empty" class="logo-empty">⬢</span>
+            <span id="logo-preview-empty" class="logo-empty" data-icon="brand" data-icon-size="28"></span>
           </div>
           <div style="display:flex; gap:8px; margin-top:10px;">
             <label class="btn btn-secondary btn-sm">
@@ -698,9 +698,9 @@
 <div id="bottom-dock" class="bottom-dock" style="display:none;">
   <div class="dock-resize-handle" id="dock-resize-handle" data-i18n-title="dock.resize" title="Drag to resize"></div>
   <div class="bottom-dock-header">
-    <span class="dock-title">⚡ <span data-i18n="dock.runningActions">Running actions</span> <span class="dock-count" id="dock-count">0</span></span>
+    <span class="dock-title"><span data-icon="running" class="icon-run"></span> <span data-i18n="dock.runningActions">Running actions</span> <span class="dock-count" id="dock-count">0</span></span>
     <div class="dock-header-actions">
-      <button class="btn-icon-sm" id="btn-dock-collapse" data-i18n-title="dock.collapse" title="Collapse">▾</button>
+      <button class="btn-icon-sm" id="btn-dock-collapse" data-i18n-title="dock.collapse" title="Collapse"><span data-icon="chevronDown" data-icon-size="14"></span></button>
       <button class="btn-icon-sm" id="btn-dock-hide" data-i18n-title="dock.hide" title="Hide">×</button>
     </div>
   </div>
@@ -715,7 +715,7 @@
      ========================================================================= -->
 <div id="docs-panel" class="docs-panel" style="display:none;">
   <div class="docs-header" id="docs-drag-handle">
-    <span class="docs-title">📚 <span data-i18n="docs.title">Documentation</span></span>
+    <span class="docs-title"><span data-icon="docs"></span> <span data-i18n="docs.title">Documentation</span></span>
     <div class="docs-header-actions">
       <select id="docs-lang">
         <option value="en">EN</option>
@@ -741,7 +741,7 @@
      ========================================================================= -->
 <div id="support-panel" class="support-panel" style="display:none;">
   <div class="support-header" id="support-drag-handle">
-    <span class="support-title">📦 <span data-i18n="support.progress.title">Support bundle</span></span>
+    <span class="support-title"><span data-icon="bundle"></span> <span data-i18n="support.progress.title">Support bundle</span></span>
     <div class="support-header-actions">
       <button class="btn-icon-sm" id="btn-support-min" data-i18n-title="support.progress.minimize" title="Minimize">_</button>
       <button class="btn-icon-sm" id="btn-support-close" data-i18n-title="support.progress.close" title="Close">×</button>
@@ -759,7 +759,7 @@
 
 <!-- Minimized bubble for backgrounded support bundle progress -->
 <div id="support-bubble" class="support-bubble" style="display:none;">
-  📦 <span id="support-bubble-pct">0%</span>
+  <span data-icon="bundle"></span> <span id="support-bubble-pct">0%</span>
 </div>
 
 <script src="/static/js/i18n.js"></script>

@@ -33,7 +33,7 @@ const TFSections = (() => {
   }
 
   function _stateIcon(state) {
-    if (state === 'ok')      return '✓';
+    if (state === 'ok')      return Icons.svg('ok', { size: 10 });
     if (state === 'missing') return '!';
     return '·';
   }
@@ -77,7 +77,7 @@ const TFSections = (() => {
           <span class="tf-resource-card__name">${esc(name)}</span>
           <button type="button" class="tf-resource-card__del btn-icon-sm tip"
                   data-res-id="${esc(resource.id)}"
-                  data-tip="${window.i18n ? i18n.t('tf.tip.removeResource') : 'Remove this resource from the declaration'}">🗑</button>
+                  data-tip="${window.i18n ? i18n.t('tf.tip.removeResource') : 'Remove this resource from the declaration'}">${Icons.svg('delete')}</button>
         </div>
         <div class="tf-resource-card__sections">${buttons}</div>
       </div>`;
@@ -153,7 +153,7 @@ const TFSections = (() => {
       { sectionId, hideHeader: true },
     ) + `
       <div class="tf-sec-overlay-actions">
-        <button type="button" class="btn btn-primary btn-sm tf-sec-save">💾 Save section</button>
+        <button type="button" class="btn btn-primary btn-sm tf-sec-save">${Icons.svg('save')} Save section</button>
         <button type="button" class="btn btn-secondary btn-sm tf-sec-cancel">Cancel</button>
       </div>`;
 

@@ -568,7 +568,7 @@ def test_app_js_restores_subtabs_after_setcluster():
 def test_topology_volumes_render_as_vertical_cylinder():
     """v1.4.30: classic database-cylinder representation. The barrel
     shape is taller than wide so it reads as a vertical cylinder, with
-    the 🛢 icon reinforcing. Switching back to a wide barrel would
+    the cylinder icon reinforcing. Switching back to a wide barrel would
     look like a horizontal keg — wrong semantic."""
     src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
     storage = src[src.find("function buildStorageElements"):]
@@ -580,16 +580,17 @@ def test_topology_volumes_render_as_vertical_cylinder():
         "Volume box no longer taller than wide — barrel won't read as "
         "a vertical cylinder."
     )
-    # 🛢 icon (classic vertical cylinder)
-    assert "🛢" in storage, (
-        "Volume label icon must be 🛢 (vertical cylinder), not 🗄 (card box)."
+    # cylinder icon (v1.19.0: a Lucide glyph drawn on the canvas as a
+    # data-URI background image, no longer an emoji in the label)
+    assert "nodeIcon('volume')" in storage, (
+        "Volume node icon must be the 'volume' (cylinder) glyph, not 'storage'."
     )
 
 
 def test_topology_networks_render_as_switch_silhouette():
     """v1.4.30: networks now look like rack-mount switches —
     cut-rectangle shape (chamfered corners suggesting a device),
-    wide+short proportions, 🔀 icon."""
+    wide+short proportions, switch icon."""
     src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
     net = src[src.find("function buildNetworkElements"):]
     net = net[:4000]
@@ -600,8 +601,8 @@ def test_topology_networks_render_as_switch_silhouette():
     # 1U-ish proportions
     assert "width: 180" in net or "width:180" in net
     assert "height: 48" in net or "height:48" in net
-    # 🔀 icon
-    assert "🔀" in net
+    # switch icon (Lucide arrow-right-left, see scripts/gen-icons.py)
+    assert "nodeIcon('switch')" in net
 
 
 def test_topology_volume_label_fits_inside_shape():
@@ -751,7 +752,7 @@ def test_storage_view_renders_cdrom_distinctly():
           / "web" / "static" / "js" / "topology.js").read_text()
     builder = js.split("function buildStorageElements", 1)[1] \
                 .split("function applyClusterLayout", 1)[0]
-    assert "device === 'cdrom'" in builder and "💿" in builder
+    assert "device === 'cdrom'" in builder and "nodeIcon('cdrom')" in builder
     assert "device: d.device" in builder
     # an EMPTY cdrom drive (device without volume) must stay visible
     assert "d.pvc || d.device === 'cdrom'" in builder

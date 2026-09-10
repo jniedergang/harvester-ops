@@ -8,7 +8,8 @@
  * Usage:
  *   const panel = FloatingPanels.open({
  *     id: 'unique-id',
- *     title: '⚙ Edit VM — default/foo',
+ *     title: 'Edit VM — default/foo',
+ *     icon: 'settings',            // optional Icons name, rendered before the title
  *     bodyHtml: '<div>...</div>',
  *     width: 760, height: 540,
  *     onClose: () => {...},
@@ -139,7 +140,7 @@ const FloatingPanels = (() => {
       <div class="fp-rs fp-rs-nw" data-rs="nw"></div>
       <div class="fp-rs fp-rs-sw" data-rs="sw"></div>
       <header class="floating-panel-header" data-handle>
-        <span class="floating-panel-title">${escapeHtml(opts.title || 'Panel')}</span>
+        <span class="floating-panel-icon">${opts.icon && window.Icons ? Icons.svg(opts.icon) : ''}</span><span class="floating-panel-title">${escapeHtml(opts.title || 'Panel')}</span>
         <div class="floating-panel-actions">
           ${(opts.headerActions || []).map((a, i) =>
             `<button class="btn-icon-sm tip" data-header-action="${i}"
@@ -277,7 +278,7 @@ const FloatingPanels = (() => {
     chip.dataset.fpId = id;
     const title = p.opts.title || id;
     chip.innerHTML = `
-      <span class="title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
+      <span class="floating-panel-icon">${p.opts.icon && window.Icons ? Icons.svg(p.opts.icon, { size: 14 }) : ''}</span><span class="title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
       <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>`;
     chip.addEventListener('click', (e) => {
       if (e.target.closest('[data-action="close"]')) return;

@@ -87,7 +87,7 @@ const Support = (() => {
           li.classList.remove('running', 'done', 'error');
           li.classList.add(ev.status);
           const ico = li.querySelector('.ico');
-          ico.textContent = ev.status === 'done' ? '✓' : ev.status === 'error' ? '✗' : '⏳';
+          ico.innerHTML = Icons.svg(ev.status === 'done' ? 'ok' : ev.status === 'error' ? 'fail' : 'pending', { size: 14 });
           li.querySelector('.text').textContent = `${labelFor(ev.step_id)}${ev.message ? ' — ' + ev.message : ''}`;
 
           if (typeof ev.percent === 'number') {
@@ -108,22 +108,22 @@ const Support = (() => {
             } catch {}
             const mapBtn = hasMapping
               ? `<a class="btn btn-secondary btn-sm" href="/api/support-bundle/${currentJobId}/mapping" download
-                    style="margin-left:6px;">🗝 ${i18n.t('settings.support.downloadMapping')}</a>`
+                    style="margin-left:6px;">${Icons.svg('key')} ${i18n.t('settings.support.downloadMapping')}</a>`
               : '';
             $('#support-result').innerHTML = `
-              <div class="summary-bar ok">✓ Bundle ready</div>
+              <div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Bundle ready</div>
               <a class="btn btn-primary btn-sm" href="/api/support-bundle/${currentJobId}/download" download>
-                ⬇ Download archive
+                ${Icons.svg('download')} Download archive
               </a>${mapBtn}`;
           } else {
-            $('#support-result').innerHTML = `<div class="summary-bar bad">✗ ${ev.error || 'Failed'}</div>`;
+            $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${ev.error || 'Failed'}</div>`;
           }
         },
       },
       onStatus: (s) => {
         if (s.state === 'dead') {
           $('#support-result').style.display = 'block';
-          $('#support-result').innerHTML = `<div class="summary-bar bad">✗ Stream lost — refresh and check past bundles</div>`;
+          $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} Stream lost — refresh and check past bundles</div>`;
         }
       },
     });
@@ -152,7 +152,7 @@ const Support = (() => {
             <code>${b.filename}</code>
             <div style="color:var(--text-dim);font-size:10px;margin-top:2px;">${date} — ${sizeKB} KB ${b.anonymized ? '— anonymized' : ''}</div>
           </div>
-          <a class="btn btn-sm btn-secondary" href="/api/support-bundle/${b.filename.replace(/^harvester-ops-bundle-[0-9]+-[0-9]+-/, '').replace(/-anon$|\.tar\.gz$/g, '')}/download" download>⬇</a>`;
+          <a class="btn btn-sm btn-secondary" href="/api/support-bundle/${b.filename.replace(/^harvester-ops-bundle-[0-9]+-[0-9]+-/, '').replace(/-anon$|\.tar\.gz$/g, '')}/download" download>${Icons.svg('download')}</a>`;
         container.appendChild(row);
       });
     } catch (e) {
@@ -201,7 +201,7 @@ const Support = (() => {
       const res = await fetch('/api/deanonymize', { method: 'POST', body: fd });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        out.innerHTML = `<span style="color:var(--danger)">✗ ${err.error || 'HTTP ' + res.status}</span>`;
+        out.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${err.error || 'HTTP ' + res.status}</span>`;
         return;
       }
       const replaced = res.headers.get('X-Replaced-Entries') || '?';
@@ -215,9 +215,9 @@ const Support = (() => {
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
-      out.innerHTML = `<span style="color:var(--accent)">✓ ${i18n.t('settings.support.deanonOk').replace('{n}', replaced)}</span>`;
+      out.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${i18n.t('settings.support.deanonOk').replace('{n}', replaced)}</span>`;
     } catch (e) {
-      out.innerHTML = `<span style="color:var(--danger)">✗ ${e.message}</span>`;
+      out.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
     }
   }
 

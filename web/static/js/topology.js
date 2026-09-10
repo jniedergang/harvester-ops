@@ -8,7 +8,7 @@
  *   3. Storage   — Longhorn volumes ↔ replicas ↔ nodes
  *
  * Default mode is read-only with safe actions on click (open Notes,
- * VM Edit, VM Snapshots). The "🔓 destructive" toggle in the toolbar
+ * VM Edit, VM Snapshots). The "Allow destructive actions" toggle in the toolbar
  * unlocks Stop / Migrate / Cordon etc. — guarded by a confirm() every
  * time so a misclick can't bring down a node.
  */
@@ -51,6 +51,11 @@ const Topology = (() => {
   // Styles — Pathway Commons SBGN inspired (https://pathwaycommons.github.io/cytoscape-sbgn-stylesheet/)
   // High-contrast, role-based shapes, dim text on light fills.
   // -----------------------------------------------------------------------
+  // Canvas nodes cannot host DOM icons: bake a white Lucide glyph into a
+  // data-URI image (label colour is a fixed #fff too, so this suits every
+  // theme). Nodes without `icon` simply never match the node[icon] rules.
+  const nodeIcon = (name) => (window.Icons ? Icons.dataUri(name, { color: '#fff' }) : undefined);
+
   function baseStyle() {
     return [
       {
@@ -131,6 +136,42 @@ const Topology = (() => {
           'height': 'data(height)',
         },
       },
+      // v1.19.0: Lucide glyph drawn as a background image, left of the
+      // label for wide boxes (VM, network), above it for volumes, and in
+      // the top-left corner of compound parents (whose label sits outside).
+      {
+        selector: 'node[icon]',
+        style: {
+          'background-image': 'data(icon)',
+          'background-fit': 'none',
+          'background-clip': 'none',
+          'background-width': 18,
+          'background-height': 18,
+          'background-image-opacity': 0.9,
+          'background-position-x': '8px',
+          'background-position-y': '50%',
+          'text-margin-x': 8,
+        },
+      },
+      {
+        selector: 'node[icon][kind = "volume"]',
+        style: {
+          'background-position-x': '50%',
+          'background-position-y': '12px',
+          'text-margin-x': 0,
+          'text-margin-y': 10,
+        },
+      },
+      {
+        selector: 'node:parent[icon]',
+        style: {
+          'background-width': 20,
+          'background-height': 20,
+          'background-position-x': '10px',
+          'background-position-y': '8px',
+          'text-margin-x': 0,
+        },
+      },
       // VM-specific label handling: native Cytoscape ellipsis is more
       // accurate than the JS char budget, and `text-max-width` ensures
       // the label stays INSIDE the box (was overflowing in v1.4.27).
@@ -138,7 +179,7 @@ const Topology = (() => {
         selector: 'node[kind = "vm"]',
         style: {
           'text-wrap': 'ellipsis',
-          'text-max-width': 110,
+          'text-max-width': 96,
         },
       },
       {
@@ -212,7 +253,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: 'node-' + n.name,
-          label: '🖥 ' + n.name,
+          label: n.name,
+          icon: nodeIcon('node'),
           color: n.ready ? '#1f4d3a' : '#5b1f22',
           border: n.ready ? '#19c37d' : '#e0464b',
           shape: 'round-rectangle',
@@ -237,7 +279,8 @@ const Topology = (() => {
           // text-max-width to truncate visually, more accurate than the
           // JS char budget. fullName still feeds the hover tooltip +
           // search (namespace prefix included).
-          label: '💻 ' + fullName,
+          label: fullName,
+          icon: nodeIcon('vm'),
           fullName: v.namespace + '/' + fullName,
           searchText: (v.namespace + '/' + fullName).toLowerCase(),
           color: phaseColor(v.phase),
@@ -257,7 +300,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: 'node-unscheduled',
-          label: '⏸ Stopped / unscheduled',
+          label: 'Stopped / unscheduled',
+          icon: nodeIcon('paused'),
           color: '#3a3a3a',
           border: '#777',
           shape: 'round-rectangle',
@@ -277,7 +321,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: 'vm-' + v.namespace + '-' + v.name,
-          label: '💻 ' + v.name,
+          label: v.name,
+          icon: nodeIcon('vm'),
           fullName,
           searchText: fullName.toLowerCase(),
           color: phaseColor(v.phase),
@@ -299,8 +344,9 @@ const Topology = (() => {
             data: {
               id,
               // v1.4.30: switch-like silhouette (cut-rectangle = rack
-              // device shape) + 🔀 icon to evoke a network switch.
-              label: '🔀 ' + ref,
+              // device shape) + a switch icon to evoke a network switch.
+              label: ref,
+              icon: nodeIcon('switch'),
               fullName: ref,
               searchText: ref.toLowerCase(),
               color: '#1f3e5b',
@@ -376,7 +422,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: 'vol-' + v.name,
-          label: (isCd ? '💿 ' : '🛢 ') + shortLabel(claim) + '\n' + sizeLabel,
+          label: shortLabel(claim) + '\n' + sizeLabel,
+          icon: isCd ? nodeIcon('cdrom') : nodeIcon('volume'),
           fullName: claim + ' (' + sizeLabel + (isCd ? ', cdrom' : '') + ')',
           searchText: (claim + ' ' + v.name + ' ' + sizeLabel
                        + (isCd ? ' cdrom' : '') + (v.image_iso ? ' iso' : '')
@@ -408,7 +455,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: vmId,
-          label: '💻 ' + vm.name,
+          label: vm.name,
+          icon: nodeIcon('vm'),
           fullName,
           searchText: fullName.toLowerCase(),
           color: phaseColor(vm.phase),
@@ -428,11 +476,12 @@ const Topology = (() => {
             group: 'nodes',
             data: {
               id: cdId,
-              label: '💿 ' + shortLabel(d.disk || 'cdrom') + '\n('
+              label: shortLabel(d.disk || 'cdrom') + '\n('
                      + i.t('topology.storage.emptyCd') + ')',
               fullName: fullName + '/' + d.disk + ' (cdrom, '
                         + i.t('topology.storage.emptyCd') + ')',
               searchText: (fullName + ' ' + d.disk + ' cdrom').toLowerCase(),
+              icon: nodeIcon('cdrom'),
               color: '#3a3a3a',
               border: '#666',
               shape: 'ellipse',
@@ -468,7 +517,8 @@ const Topology = (() => {
               group: 'nodes',
               data: {
                 id: volId,
-                label: (d.device === 'cdrom' ? '💿 ' : '🛢 ') + shortLabel(d.pvc),
+                label: shortLabel(d.pvc),
+                icon: d.device === 'cdrom' ? nodeIcon('cdrom') : nodeIcon('volume'),
                 fullName: key,
                 searchText: key.toLowerCase(),
                 color: '#444',
@@ -505,7 +555,8 @@ const Topology = (() => {
         group: 'nodes',
         data: {
           id: 'storage-orphans',
-          label: '📦 ' + i.t('topology.storage.unattached'),
+          label: i.t('topology.storage.unattached'),
+          icon: nodeIcon('bundle'),
           fullName: i.t('topology.storage.unattached'),
           searchText: 'unattached orphan detached',
           color: '#3a3a3a',
@@ -910,27 +961,27 @@ const Topology = (() => {
     if (d.kind === 'node') {
       const n = d.raw;
       return `
-        <h3>🖥 ${n.name}</h3>
+        <h3>${Icons.svg('node', { size: 18 })} ${n.name}</h3>
         <dl class="kv">
-          <dt>${i.t('topology.detail.ready')}</dt><dd>${n.ready ? '✓' : '✗ NotReady'}</dd>
-          <dt>${i.t('topology.detail.schedulable')}</dt><dd>${n.schedulable ? '✓' : 'Cordoned'}</dd>
+          <dt>${i.t('topology.detail.ready')}</dt><dd>${n.ready ? Icons.svg('ok', { cls: 'icon-ok' }) : Icons.svg('fail', { cls: 'icon-err' }) + ' NotReady'}</dd>
+          <dt>${i.t('topology.detail.schedulable')}</dt><dd>${n.schedulable ? Icons.svg('ok', { cls: 'icon-ok' }) : 'Cordoned'}</dd>
           <dt>${i.t('topology.detail.roles')}</dt><dd>${(n.roles||[]).join(', ')||'—'}</dd>
           <dt>${i.t('topology.detail.ip')}</dt><dd>${n.addresses?.InternalIP||'—'}</dd>
           <dt>CPU</dt><dd>${n.allocatable?.cpu||'—'} / ${n.capacity?.cpu||'—'}</dd>
           <dt>${i.t('topology.detail.memory')}</dt><dd>${formatMem(n.allocatable?.memory)} / ${formatMem(n.capacity?.memory)}</dd>
         </dl>
         <div class="actions">
-          <button class="btn btn-sm" data-act="node-notes">📝 ${i.t('topology.action.notes')}</button>
+          <button class="btn btn-sm" data-act="node-notes">${Icons.svg('notes')} ${i.t('topology.action.notes')}</button>
           ${destructiveUnlocked ? `
-            <button class="btn btn-sm btn-warn" data-act="node-cordon">🚧 ${i.t('topology.action.cordon')}</button>
-            <button class="btn btn-sm btn-danger" data-act="node-drain">⚠️ ${i.t('topology.action.drain')}</button>
+            <button class="btn btn-sm btn-warn" data-act="node-cordon">${Icons.svg('construction')} ${i.t('topology.action.cordon')}</button>
+            <button class="btn btn-sm btn-danger" data-act="node-drain">${Icons.svg('warn')} ${i.t('topology.action.drain')}</button>
           ` : ''}
         </div>`;
     }
     if (d.kind === 'vm') {
       const v = d.raw;
       return `
-        <h3>💻 ${v.namespace}/${v.name}</h3>
+        <h3>${Icons.svg('vm', { size: 18 })} ${v.namespace}/${v.name}</h3>
         <dl class="kv">
           <dt>${i.t('topology.detail.phase')}</dt><dd><span class="phase ${v.phase}">${v.phase}</span></dd>
           <dt>${i.t('topology.detail.runStrategy')}</dt><dd>${v.run_strategy}</dd>
@@ -939,31 +990,31 @@ const Topology = (() => {
           <dt>${i.t('topology.detail.volumes')}</dt><dd>${(v.volumes||[]).map(x=>x.pvc||x.disk).join(', ')||'—'}</dd>
         </dl>
         <div class="actions">
-          <button class="btn btn-sm" data-act="vm-notes">📝 ${i.t('topology.action.notes')}</button>
-          <button class="btn btn-sm" data-act="vm-edit">✏️ ${i.t('topology.action.edit')}</button>
-          <button class="btn btn-sm" data-act="vm-console">🖥 ${i.t('topology.action.console')}</button>
-          <button class="btn btn-sm" data-act="vm-snap">📸 ${i.t('topology.action.snapshot')}</button>
-          <button class="btn btn-sm" data-act="vm-migrate">↔ ${i.t('topology.action.migrate')}</button>
+          <button class="btn btn-sm" data-act="vm-notes">${Icons.svg('notes')} ${i.t('topology.action.notes')}</button>
+          <button class="btn btn-sm" data-act="vm-edit">${Icons.svg('edit')} ${i.t('topology.action.edit')}</button>
+          <button class="btn btn-sm" data-act="vm-console">${Icons.svg('console')} ${i.t('topology.action.console')}</button>
+          <button class="btn btn-sm" data-act="vm-snap">${Icons.svg('snapshot')} ${i.t('topology.action.snapshot')}</button>
+          <button class="btn btn-sm" data-act="vm-migrate">${Icons.svg('migrate')} ${i.t('topology.action.migrate')}</button>
           ${v.run_strategy === 'Halted'
-            ? `<button class="btn btn-sm" data-act="vm-start">▶ ${i.t('topology.action.start')}</button>`
-            : `<button class="btn btn-sm btn-warn" data-act="vm-stop">■ ${i.t('topology.action.stop')}</button>`}
+            ? `<button class="btn btn-sm" data-act="vm-start"><span class="icon-green">${Icons.svg('play')}</span> ${i.t('topology.action.start')}</button>`
+            : `<button class="btn btn-sm btn-warn" data-act="vm-stop"><span class="icon-red">${Icons.svg('stop')}</span> ${i.t('topology.action.stop')}</button>`}
           ${destructiveUnlocked ? `
-            <button class="btn btn-sm btn-danger" data-act="vm-delete">🗑 ${i.t('topology.action.delete')}</button>
+            <button class="btn btn-sm btn-danger" data-act="vm-delete">${Icons.svg('delete')} ${i.t('topology.action.delete')}</button>
           ` : ''}
         </div>`;
     }
     if (d.kind === 'volume') {
       const v = d.raw;
       const reps = (v.replicas || [])
-        .map(r => `${r.node || '?'}${r.running ? '' : ' ✗'}`).join(', ');
+        .map(r => `${r.node || '?'}${r.running ? '' : ' ' + Icons.svg('fail', { size: 12, cls: 'icon-err' })}`).join(', ');
       return `
-        <h3>🗄 ${v.pvc_name || v.name}</h3>
+        <h3>${Icons.svg('volume', { size: 18 })} ${v.pvc_name || v.name}</h3>
         <dl class="kv">
           <dt>${i.t('topology.detail.pvc')}</dt><dd>${v.pvc_name ? (v.pvc_namespace ? v.pvc_namespace + '/' : '') + v.pvc_name : '—'}</dd>
           <dt>${i.t('topology.detail.vm')}</dt><dd>${v.vm || '—'}</dd>
           <dt>${i.t('topology.detail.disk')}</dt><dd>${v.disk || '—'}</dd>
-          <dt>${i.t('topology.detail.device')}</dt><dd>${v.device === 'cdrom' ? '💿 cdrom' : (v.device || '—')}</dd>
-          <dt>${i.t('topology.detail.image')}</dt><dd>${v.image ? v.image + (v.image_iso ? ' 💿' : '') : '—'}</dd>
+          <dt>${i.t('topology.detail.device')}</dt><dd>${v.device === 'cdrom' ? Icons.svg('cdrom', { size: 14 }) + ' cdrom' : (v.device || '—')}</dd>
+          <dt>${i.t('topology.detail.image')}</dt><dd>${v.image ? v.image + (v.image_iso ? ' ' + Icons.svg('cdrom', { size: 14 }) : '') : '—'}</dd>
           <dt>${i.t('topology.detail.state')}</dt><dd>${v.state || '—'}</dd>
           <dt>${i.t('topology.detail.health')}</dt><dd>${v.robustness || '—'}</dd>
           <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>
@@ -972,19 +1023,19 @@ const Topology = (() => {
         </dl>
         ${(!v.vm && v.pvc_name) ? `
           <div class="actions">
-            <button class="btn btn-sm btn-danger" data-act="vol-delete">🗑 ${i.t('topology.action.deleteVolume')}</button>
+            <button class="btn btn-sm btn-danger" data-act="vol-delete">${Icons.svg('delete')} ${i.t('topology.action.deleteVolume')}</button>
           </div>
           <p class="form-hint">${i.t('topology.volDeleteHint')}</p>` : ''}`;
     }
     if (d.kind === 'bucket') {
       return `
-        <h3>📦 ${i.t('topology.storage.unattached')}</h3>
+        <h3>${Icons.svg('bundle', { size: 18 })} ${i.t('topology.storage.unattached')}</h3>
         <p>${(d.raw && d.raw.count) || 0} ${i.t('topology.storage.unattachedHint')}</p>`;
     }
     if (d.kind === 'network') {
       const n = d.raw;
       return `
-        <h3>🌐 ${n.name}</h3>
+        <h3>${Icons.svg('network', { size: 18 })} ${n.name}</h3>
         <dl class="kv">
           <dt>${i.t('topology.detail.type')}</dt><dd>${n.type}</dd>
         </dl>`;
@@ -1228,7 +1279,7 @@ const Topology = (() => {
     } catch (e) {
       console.warn('topology refresh failed', e);
       const meta = currentHost && currentHost.querySelector('.topology-meta');
-      if (meta) meta.textContent = '⚠️ ' + (e.message || e);
+      if (meta) { meta.textContent = ''; meta.append(Icons.el('warn', { size: 12, cls: 'icon-warn' }), ' ' + (e.message || e)); }
     }
   }
 

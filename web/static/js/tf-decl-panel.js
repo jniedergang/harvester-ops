@@ -39,7 +39,7 @@ const TFDeclPanel = (() => {
     return o[lang()] || o.en || '';
   }
   function _stateIcon(state) {
-    if (state === 'ok') return '✓';
+    if (state === 'ok') return Icons.svg('ok', { size: 10 });
     if (state === 'missing') return '!';
     return '·';
   }
@@ -53,7 +53,7 @@ const TFDeclPanel = (() => {
     if (window.TFForm && schema) {
       const v = window.TFForm.validateAll(res.spec, res.kind);
       const states = Object.values(v.sections || {}).map(s => s.state || 'ok');
-      let cls = 'ok', icon = '✓';
+      let cls = 'ok', icon = Icons.svg('ok', { size: 10 });
       if (states.some(s => s === 'missing')) { cls = 'missing'; icon = '!'; }
       else if (states.every(s => s === 'empty')) { cls = 'empty'; icon = '·'; }
       summary = `<span class="tf-dp-resitem__state tf-dp-resitem__state--${cls}">${icon}</span>`;
@@ -122,9 +122,9 @@ const TFDeclPanel = (() => {
         <button class="btn btn-sm tf-dp-dryrun"
                 data-decl="${esc(decl.id)}">Dry-run</button>
         <button class="btn btn-sm btn-primary tf-dp-apply"
-                data-decl="${esc(decl.id)}">Apply ▶</button>
+                data-decl="${esc(decl.id)}">${Icons.svg('play', { size: 12 })} Apply</button>
         <button class="btn btn-sm btn-danger tf-dp-destroy"
-                data-decl="${esc(decl.id)}">🧨 Destroy</button>
+                data-decl="${esc(decl.id)}">${Icons.svg('destroy')} Destroy</button>
       </div>`;
   }
 
@@ -196,7 +196,7 @@ const TFDeclPanel = (() => {
     if (!entry) return;
     const decl = window.TFDecl.get(declId);
     if (!decl) { close(declId); return; }
-    entry.api.setTitle(`📦 ${decl.name}`);
+    entry.api.setTitle(decl.name);
     entry.api.setBody(_renderBody(decl));
     _wire(entry.api.body, declId, entry.api);
   }
@@ -208,13 +208,14 @@ const TFDeclPanel = (() => {
     // Existing panel? bring it to front, refresh.
     if (openPanels.has(declId)) {
       const entry = openPanels.get(declId);
-      window.FloatingPanels.open({ id: panelId, title: `📦 ${decl.name}` }); // brings front
+      window.FloatingPanels.open({ id: panelId, title: decl.name, icon: 'bundle' }); // brings front
       _rerender(declId);
       return entry.api;
     }
     const api = window.FloatingPanels.open({
       id: panelId,
-      title: `📦 ${decl.name}`,
+      title: decl.name,
+      icon: 'bundle',
       bodyHtml: _renderBody(decl),
       width: 880, height: 540,
       restoreSpec: { type: 'tf-decl-panel', args: { declId } },

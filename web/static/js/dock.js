@@ -300,16 +300,16 @@ const Dock = (() => {
         ? ' — ' + escapeHtml(a.error_summary) : '';
       const stepText = isRunning
         ? `${live.step_id}${live.message ? ' — ' + live.message : ''}`
-        : (isDone ? '✓ completed'
-                  : '✗ ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
+        : (isDone ? Icons.svg('ok', { size: 12, cls: 'icon-ok' }) + ' completed'
+                  : Icons.svg('fail', { size: 12, cls: 'icon-err' }) + ' ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
       const stepTitle = (!isRunning && !isDone && a.error_summary)
         ? escapeHtml(a.error_summary) : live.step_id;
 
-      const icon = isRunning ? '⚡' : (isDone ? '✓' : '✗');
+      const icon = Icons.svg(isRunning ? 'running' : (isDone ? 'ok' : 'fail'), { size: 18 });
 
       card.innerHTML = `
         <div class="dock-action-summary">
-          <span class="icon">${icon}</span>
+          <span class="dock-icon">${icon}</span>
           <div class="info">
             <div class="name">${a.action} → ${a.cluster}${dryBadge}</div>
             <div class="meta">
@@ -371,11 +371,11 @@ const Dock = (() => {
       if (endedAt) {
         const duration = endedAt - startedAt;
         const sinceDone = now - endedAt;
-        el.innerHTML = ` · <span class="dur">⏱ ${fmtDuration(duration)}</span>` +
+        el.innerHTML = ` · <span class="dur">${Icons.svg('timer', { size: 11 })} ${fmtDuration(duration)}</span>` +
                        ` · <span class="ago">done ${fmtDuration(sinceDone)} ago</span>`;
       } else {
         const elapsed = now - startedAt;
-        el.innerHTML = ` · <span class="dur running">⏱ ${fmtDuration(elapsed)}</span>`;
+        el.innerHTML = ` · <span class="dur running">${Icons.svg('timer', { size: 11 })} ${fmtDuration(elapsed)}</span>`;
       }
     });
   }

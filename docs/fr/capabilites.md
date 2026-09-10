@@ -271,10 +271,14 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   et jamais sur un rafraîchissement de fond.
 - **Internationalisation** — cinq langues complètes (EN, FR, DE, ES, IT),
   avec un test de parité qui casse la build sur une clé manquante.
-- **Icônes** — un jeu SVG monochrome dessiné d'un seul trait, héritant de
-  `currentColor` : un seul jeu couvre tous les thèmes et les deux modes.
-  Il remplace les emoji, qui mélangeaient images en couleur pleine et
-  glyphes fins et se lisaient mal à la taille d'un bouton.
+- **Icônes** — un seul jeu SVG monochrome, [Lucide](https://lucide.dev)
+  (licence ISC, vendoré dans le tarball, jamais chargé depuis le réseau),
+  héritant de `currentColor` : il couvre tous les thèmes et les deux
+  modes, y compris la topologie où les mêmes glyphes sont dessinés comme
+  images de nœud. Il remplace les emoji, qui mélangeaient images en
+  couleur pleine et glyphes fins, variaient selon la plateforme et se
+  lisaient mal à la taille d'un bouton. `scripts/gen-icons.py` régénère
+  le jeu depuis la release épinglée.
 - **Thèmes** — 5 thèmes de couleur × sombre/clair. Le thème SUSE par
   défaut suit l'identité suse.com — palette pin/jade et la fonte
   officielle SUSE, vendorée dans le tarball (airgap, licence OFL).

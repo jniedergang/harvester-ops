@@ -192,9 +192,9 @@ const App = (() => {
         tr.innerHTML = `
           <td>${n.name}</td>
           <td>${n.ready === 'True' ? '<span class="phase Running">Ready</span>' : '<span class="phase Failed">NotReady</span>'}</td>
-          <td>${n.schedulable ? '✓' : '<span class="phase Stopped">Cordoned</span>'}</td>
+          <td>${n.schedulable ? Icons.svg('ok', { cls: 'icon-ok' }) : '<span class="phase Stopped">Cordoned</span>'}</td>
           <td>${(n.roles || []).join(', ')}</td>
-          <td><button class="btn-node-notes tip" data-tip-i18n="overview.nodeNotesTip" data-node="${n.name}" title="${i18n.t('overview.nodeNotesTip')}">📝</button></td>`;
+          <td><button class="btn-node-notes tip" data-tip-i18n="overview.nodeNotesTip" data-node="${n.name}" title="${i18n.t('overview.nodeNotesTip')}">${Icons.svg('notes')}</button></td>`;
         tr.querySelector('.btn-node-notes').addEventListener('click', () => {
           window.Notes && Notes.open('node', currentCluster, n.name);
         });
@@ -218,7 +218,7 @@ const App = (() => {
         if (parsed.hint) detail = parsed.hint;
         else if (parsed.stderr) detail = parsed.stderr;
       } catch {}
-      banner.textContent = `⚠️ ${i18n.t('overview.statusError')}: ${detail}`;
+      banner.innerHTML = `${Icons.svg('warn')} ${escapeHtml(i18n.t('overview.statusError'))}: ${escapeHtml(detail)}`;
     }
   }
 
@@ -316,7 +316,7 @@ const App = (() => {
     $$('#ns-vms-table th.sortable').forEach(th => {
       const arrow = th.querySelector('.sort-arrow');
       const isActive = th.dataset.sortBy === nsSortKey;
-      arrow.textContent = isActive ? (nsSortDir === 'asc' ? '↑' : '↓') : '';
+      arrow.innerHTML = isActive ? Icons.svg(nsSortDir === 'asc' ? 'arrowUp' : 'arrowDown', { size: 12 }) : '';
       th.classList.toggle('active-sort', isActive);
     });
     vms.forEach(vm => {
@@ -332,7 +332,7 @@ const App = (() => {
       tr.innerHTML = `
         <td class="check-col"><input type="checkbox" data-key="${key}" ${nsSelection.has(key) ? 'checked' : ''}></td>
         <td>${vm.name}
-          ${vm.agent_connected === 'True' ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">●</span>` : ''}
+          ${vm.agent_connected === 'True' ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">${Icons.svg('dotOn', { size: 10 })}</span>` : ''}
         </td>
         <td><span class="phase ${phase} tip" data-tip="${phaseTip}">${i18n.t('vm.state.' + phase)}</span></td>
         <td>
@@ -432,9 +432,9 @@ const App = (() => {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ runStrategy: target }),
         });
-        line.textContent += ' ✓';
+        line.append(' ', Icons.el('ok', { cls: 'icon-ok' }));
       } catch (e) {
-        line.textContent += ' ✗ ' + e.message;
+        line.append(' ', Icons.el('fail', { cls: 'icon-err' }), ' ' + e.message);
       }
     }
     setTimeout(() => selectNamespace(currentNamespace), 800);
@@ -592,9 +592,9 @@ const App = (() => {
     const phaseLabel = i18n.t(`vm.state.${phaseRaw}`);
     const phaseTip   = i18n.t(`vm.tooltip.${phaseRaw}`);
     const agentBadge = (vm.agent_connected === 'True')
-      ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">●</span>`
+      ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">${Icons.svg('dotOn', { size: 10 })}</span>`
       : (phaseRaw === 'Running'
-          ? `<span class="agent-dot warn tip" data-tip="${i18n.t('vm.tooltip.agentDown')}">●</span>`
+          ? `<span class="agent-dot warn tip" data-tip="${i18n.t('vm.tooltip.agentDown')}">${Icons.svg('dotOn', { size: 10 })}</span>`
           : '');
     // Intra-priority badge: only meaningful in non-default groups.
     // Placed in the SECOND grid column (right after the drag handle) so
@@ -604,7 +604,7 @@ const App = (() => {
       : `<span class="vm-intra tip" data-tip-i18n="shutdown.intraPriorityTip" title="${i18n.t('shutdown.intraPriorityTip')}">#${vm.priority ?? 10}</span>`;
     const handleTipKey = parentIsDefault ? 'shutdown.dragVmDefaultTip' : 'shutdown.dragVmTip';
     li.innerHTML = `
-      <span class="drag-handle tip" data-tip-i18n="${handleTipKey}" title="${i18n.t(handleTipKey)}">⠿</span>
+      <span class="drag-handle tip" data-tip-i18n="${handleTipKey}" title="${i18n.t(handleTipKey)}">${Icons.svg('grip')}</span>
       ${intraBadge}
       <span class="vm-name">${agentBadge}<small>${vm.namespace}/</small>${vm.name}</span>
       <span class="vm-state-cell">
@@ -671,15 +671,15 @@ const App = (() => {
       section.style.setProperty('--prio-hue', String(hue));
       const tipKey = isDefault ? 'shutdown.defaultGroupTip' : 'shutdown.groupTip';
       const badge = isDefault
-        ? `<span class="group-mode-badge default tip" data-tip-i18n="shutdown.defaultGroupTip">⚡ ${i18n.t('shutdown.parallelLabel')}</span>`
-        : `<span class="group-mode-badge ordered tip" data-tip-i18n="shutdown.orderedLabelTip">▶ ${i18n.t('shutdown.orderedLabel')}</span>`;
+        ? `<span class="group-mode-badge default tip" data-tip-i18n="shutdown.defaultGroupTip">${Icons.svg('running', { size: 12 })} ${i18n.t('shutdown.parallelLabel')}</span>`
+        : `<span class="group-mode-badge ordered tip" data-tip-i18n="shutdown.orderedLabelTip">${Icons.svg('play', { size: 12 })} ${i18n.t('shutdown.orderedLabel')}</span>`;
       const sizeText = g.vms.length === 0
         ? i18n.t('shutdown.groupEmpty')
         : (g.vms.length + ' VM' + (g.vms.length > 1 ? 's' : ''));
       section.innerHTML = `
         <header class="vm-group-head">
           <button type="button" class="group-collapse tip" data-tip-i18n="shutdown.collapseTip"
-                  title="${i18n.t('shutdown.collapseTip')}">${collapsed ? '▶' : '▼'}</button>
+                  title="${i18n.t('shutdown.collapseTip')}">${Icons.svg(collapsed ? 'chevronRight' : 'chevronDown', { size: 14 })}</button>
           <input class="group-name" value="${escapeAttr(g.name)}"
                  placeholder="${i18n.t('shutdown.groupNamePlaceholder')}"
                  ${isDefault ? 'disabled aria-readonly="true"' : ''}
@@ -694,8 +694,8 @@ const App = (() => {
             <span class="tier-chip" data-tier="${tier}"
                   title="${i18n.t('shutdown.tierTip').replace('{n}', String(tier))}">T${tier}</span>
           </label>
-          <span class="group-info tip" data-tip-i18n="${tipKey}">ⓘ</span>
-          ${isDefault ? '' : `<button type="button" class="btn-delete-group" title="${i18n.t('shutdown.deleteGroup')}">✕</button>`}
+          <span class="group-info tip" data-tip-i18n="${tipKey}">${Icons.svg('info', { size: 14 })}</span>
+          ${isDefault ? '' : `<button type="button" class="btn-delete-group" title="${i18n.t('shutdown.deleteGroup')}">${Icons.svg('close', { size: 14 })}</button>`}
         </header>
         <ul class="vm-group-list"></ul>`;
       const ul = section.querySelector('.vm-group-list');
@@ -710,7 +710,7 @@ const App = (() => {
         e.stopPropagation();
         groupCollapsed[g.name] = !groupCollapsed[g.name];
         section.classList.toggle('collapsed');
-        chevron.textContent = groupCollapsed[g.name] ? '▶' : '▼';
+        chevron.innerHTML = Icons.svg(groupCollapsed[g.name] ? 'chevronRight' : 'chevronDown', { size: 14 });
       });
       // Group name edit — disabled for default (which is locked)
       const input = section.querySelector('.group-name');
@@ -780,7 +780,7 @@ const App = (() => {
     const adder = document.createElement('button');
     adder.type = 'button';
     adder.className = 'btn btn-secondary vm-group-add';
-    adder.innerHTML = '➕ <span data-i18n="shutdown.newGroup">New group</span>';
+    adder.innerHTML = Icons.svg('add', { size: 14 }) + ' <span data-i18n="shutdown.newGroup">New group</span>';
     adder.addEventListener('click', addEmptyGroup);
     host.appendChild(adder);
 
@@ -796,7 +796,7 @@ const App = (() => {
         nameWarn.className = 'vm-order-warning';
         host.parentElement.insertBefore(nameWarn, host);
       }
-      nameWarn.textContent = '⚠️ ' + i18n.t('shutdown.groupNameRequired');
+      nameWarn.innerHTML = Icons.svg('warn', { cls: 'icon-warn' }) + ' ' + escapeHtml(i18n.t('shutdown.groupNameRequired'));
     } else if (nameWarn) {
       nameWarn.remove();
     }
@@ -935,7 +935,7 @@ const App = (() => {
     // Block save if any non-default group has an empty name
     const blank = groups.find(g => g.name !== 'default' && !g.name.trim());
     if (blank) {
-      alert('⚠️ ' + i18n.t('shutdown.groupNameRequired'));
+      alert(i18n.t('shutdown.groupNameRequired'));
       return;
     }
     const payload = {
@@ -956,7 +956,7 @@ const App = (() => {
         body: JSON.stringify(payload),
       });
       pendingEmptyGroups = [];
-      alert(`✓ ${i18n.t('shutdown.orderSaved')} ${res.updated}/${res.total}`);
+      alert(`${i18n.t('shutdown.orderSaved')} ${res.updated}/${res.total}`);
       loadVMOrder();
     } catch (e) {
       alert(`${i18n.t('shutdown.orderSaveFailed')}: ${e.message}`);
@@ -1163,7 +1163,7 @@ const App = (() => {
           const dur = it.duration ? `${it.duration.toFixed(1)}s` : '—';
           const tsStr = new Date(it.ts * 1000).toLocaleString();
           tr.innerHTML = `
-            <td>📜</td>
+            <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
             <td>${typeBadge}</td>
             <td>${it.cluster}</td>
             <td>${it.action}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
@@ -1316,11 +1316,11 @@ const App = (() => {
       <div class="activity-detail-nav">
         <button class="btn btn-sm btn-secondary" id="act-detail-prev"
                 ${idx >= total - 1 ? 'disabled' : ''}
-                title="${i18n.t('activity.olderTip')}">← ${i18n.t('activity.older')}</button>
+                title="${i18n.t('activity.olderTip')}">${Icons.svg('arrowLeft', { size: 14 })} ${i18n.t('activity.older')}</button>
         <span class="form-hint">${idx + 1} / ${total}</span>
         <button class="btn btn-sm btn-secondary" id="act-detail-next"
                 ${idx <= 0 ? 'disabled' : ''}
-                title="${i18n.t('activity.newerTip')}">${i18n.t('activity.newer')} →</button>
+                title="${i18n.t('activity.newerTip')}">${i18n.t('activity.newer')} ${Icons.svg('arrowRight', { size: 14 })}</button>
       </div>
       <div class="activity-detail-meta">
         <div><strong>Action</strong> <code>${it.action}</code></div>
@@ -1643,6 +1643,10 @@ const App = (() => {
     bind();
     restoreActivityFilters();
     bindActivityFilters();
+    // Hydrate the static <span data-icon="…"> placeholders of the template.
+    // Icons live in sibling spans of translated nodes, so order vs. i18n
+    // does not matter; doing it first avoids a flash of empty slots.
+    if (window.Icons) Icons.mount();
     // Apply translations before first render
     if (typeof i18n !== 'undefined') i18n.applyTranslations();
     const sel = $('#cluster-select');
@@ -1727,10 +1731,10 @@ const App = (() => {
     if (!host.querySelector('.topology-canvas')) {
       host.innerHTML = `
         <div class="topology-toolbar">
-          <input type="search" class="topology-search tip"
+          <span class="topology-search-wrap">${Icons.svg('search', { size: 14 })}<input type="search" class="topology-search tip"
                  placeholder="${i18n.t('topology.searchPlaceholder')}"
                  data-tip-i18n="topology.searchTip"
-                 aria-label="${i18n.t('topology.searchPlaceholder')}">
+                 aria-label="${i18n.t('topology.searchPlaceholder')}"></span>
           <div class="topology-zoom-group" role="group"
                aria-label="${i18n.t('topology.zoomGroupAria')}">
             <button type="button" class="btn btn-sm topology-zoom-out tip"
@@ -1738,7 +1742,7 @@ const App = (() => {
                     aria-label="${i18n.t('topology.zoomOutTip')}">−</button>
             <button type="button" class="btn btn-sm topology-zoom-fit tip"
                     data-tip-i18n="topology.zoomFitTip"
-                    aria-label="${i18n.t('topology.zoomFitTip')}">⊡</button>
+                    aria-label="${i18n.t('topology.zoomFitTip')}">${Icons.svg('fit', { size: 14 })}</button>
             <button type="button" class="btn btn-sm topology-zoom-in tip"
                     data-tip-i18n="topology.zoomInTip"
                     aria-label="${i18n.t('topology.zoomInTip')}">+</button>
@@ -1751,10 +1755,10 @@ const App = (() => {
           </label>
           <span class="topology-meta tip" data-tip-i18n="topology.metaTip">—</span>
           <button type="button" class="btn btn-sm topology-refresh"
-                  data-tip-i18n="topology.refreshTip">⟳ ${i18n.t('topology.refresh')}</button>
+                  data-tip-i18n="topology.refreshTip">${Icons.svg('refresh', { size: 14 })} ${i18n.t('topology.refresh')}</button>
           <label class="topology-unlock tip" data-tip-i18n="topology.unlockTip">
             <input type="checkbox" class="topology-unlock-input">
-            🔓 ${i18n.t('topology.unlockDestructive')}
+            ${Icons.svg('unlock', { size: 14 })} ${i18n.t('topology.unlockDestructive')}
           </label>
         </div>
         <div class="topology-canvas-wrap">
