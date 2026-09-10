@@ -96,7 +96,7 @@ const BMC = (() => {
               <legend>${esc(tr('bmc.targets'))}</legend>
               <label style="grid-column:1/-1;">${esc(tr('bmc.hosts'))} *
                 <textarea name="hosts" rows="2" required
-                          placeholder="172.16.1.33, 172.16.1.34"></textarea></label>
+                          placeholder="192.0.2.10, 192.0.2.11"></textarea></label>
               <label>${esc(tr('bmc.user'))} *
                 <input name="user" required value="${esc(creds.user || 'admin')}"></label>
               <label>${esc(tr('bmc.password'))} *

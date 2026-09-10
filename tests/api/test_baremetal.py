@@ -527,13 +527,13 @@ def test_install_form_offers_macs_not_redfish_names():
     assert 'value="${esc(n.mac)}"' in BMC_JS
 
 
-def test_install_form_carries_no_homelab_address():
-    """Le formulaire est livré à des clients : aucune adresse du réseau de
-    développement ne doit s'y trouver comme valeur par défaut. Les exemples
-    utilisent les plages de documentation (RFC 5737)."""
-    form = BMC_JS.split("bmc.fs.node", 1)[1].split("</fieldset>", 1)[0]
-    assert "172.16." not in form, "adresse du lab en dur dans le formulaire"
-    assert "192.0.2." in form, "utiliser 192.0.2.0/24 (RFC 5737) en exemple"
+def test_the_tab_carries_no_homelab_address():
+    """L'onglet est livré à des clients : aucune adresse du réseau de
+    développement, nulle part. Le formulaire d'installation respectait la
+    règle mais le placeholder de la découverte y avait échappé, avec les
+    adresses des iLO du lab."""
+    assert "172.16." not in BMC_JS, "adresse du lab en dur dans l'onglet"
+    assert "192.0.2." in BMC_JS, "utiliser 192.0.2.0/24 (RFC 5737) en exemple"
 
 
 def test_dhcp_hides_and_unrequires_the_static_fields():

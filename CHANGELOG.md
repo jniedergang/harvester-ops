@@ -4,6 +4,14 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.23.1] - 2026-09-10 - No lab addresses in the shipped tab
+
+### Fixed
+- The BMC discovery placeholder still carried the development lab's iLO
+  addresses. 1.19.0 moved the install form to the documentation range
+  (RFC 5737) and added a test for it, but the test only scanned that one
+  fieldset. It now covers the whole tab.
+
 ## [1.23.0] - 2026-09-10 - Filtering the Activity tab
 
 ### Added
