@@ -2962,13 +2962,26 @@ def _validate_cluster_payload(data, allow_partial=False):
             return None, f"node {i}: ip required"
         if role not in ("control-plane", "worker"):
             return None, f"node {i}: role must be 'control-plane' or 'worker'"
-        cleaned_nodes.append({"hostname": host, "ip": ip, "role": role})
+        node_obj = {"hostname": host, "ip": ip, "role": role}
+        # L'adresse MAC de réveil : `harvester-startup.sh` s'en sert pour
+        # rallumer le node. La laisser tomber donne une déclaration qui
+        # semble complète mais dont le démarrage ne peut rien faire.
+        mac = (n.get("wol_mac") or "").strip()
+        if mac:
+            if not re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", mac):
+                return None, f"node {i}: invalid wol_mac"
+            node_obj["wol_mac"] = mac.lower().replace("-", ":")
+        cleaned_nodes.append(node_obj)
+
+    # Chemin de clé SSH fourni directement (déclaration sans téléversement) :
+    # le vider rendait toute action SSH inopérante sur le cluster déclaré.
+    ssh_key = (ssh.get("key") or "").strip()
 
     cluster_obj = {
         "name": name,
         "description": description,
         "kubeconfig": "",   # filled by upload step
-        "ssh": {"user": ssh_user, "port": ssh_port, "key": ""},
+        "ssh": {"user": ssh_user, "port": ssh_port, "key": ssh_key},
         "nodes": cleaned_nodes,
     }
     return cluster_obj, None

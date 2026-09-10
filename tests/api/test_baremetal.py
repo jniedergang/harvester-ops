@@ -677,3 +677,36 @@ def test_iso_token_is_issued_before_the_config_is_written():
             "l'URL de l'ISO doit exister avant que la configuration soit rendue")
     assert runner.count("pxe_server.issue(out_iso") == 1, "un seul jeton d'ISO"
     assert 'dict(opts, iso_url=iso_url)' in runner
+
+
+# ---------------------------------------------------------------------------
+# Adoption du cluster fraîchement installé (v1.19.0)
+# ---------------------------------------------------------------------------
+
+def test_cluster_declaration_keeps_the_wake_on_lan_mac():
+    """Trouvé en adoptant harv3 juste après son installation : la
+    déclaration acceptait `wol_mac` et le jetait. Le résultat a l'air
+    complet, mais `harvester-startup.sh` n'a alors plus rien pour rallumer
+    le node, ce qui est la moitié du travail de ce toolkit."""
+    payload = {"name": "c1", "nodes": [
+        {"hostname": "n1", "ip": "10.0.0.1", "role": "control-plane",
+         "wol_mac": "D0-67-26-D5-4A-F8"}]}
+    cluster, err = wapp._validate_cluster_payload(payload)
+    assert err is None, err
+    assert cluster["nodes"][0]["wol_mac"] == "d0:67:26:d5:4a:f8"
+
+    bad = {"name": "c1", "nodes": [
+        {"hostname": "n1", "ip": "10.0.0.1", "role": "control-plane",
+         "wol_mac": "pas-une-mac"}]}
+    _, err = wapp._validate_cluster_payload(bad)
+    assert err and "wol_mac" in err
+
+
+def test_cluster_declaration_keeps_an_ssh_key_path():
+    """Même symptôme sur la clé SSH fournie par chemin : vidée, toute action
+    SSH sur le cluster déclaré échouait."""
+    cluster, err = wapp._validate_cluster_payload(
+        {"name": "c1", "ssh": {"user": "rancher", "key": "/home/ju/.ssh/id_ed25519"},
+         "nodes": [{"hostname": "n1", "ip": "10.0.0.1", "role": "control-plane"}]})
+    assert err is None
+    assert cluster["ssh"]["key"] == "/home/ju/.ssh/id_ed25519"

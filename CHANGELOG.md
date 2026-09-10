@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.19.1] - 2026-09-10 - Cluster declarations keep what you give them
+
+### Fixed
+Both found while adopting the cluster the bare-metal tab had just
+installed, which is the first time a declaration was created through the
+API rather than written by hand.
+
+- **The Wake-on-LAN MAC address was accepted and thrown away.** The
+  declaration came back looking complete, but `harvester-startup.sh` had
+  nothing left to power the node on with, which is half of what this
+  toolkit does. It is now kept and validated as a MAC.
+- **An SSH key given as a path was blanked**, so every SSH action on the
+  declared cluster failed. Uploading a key file still overrides the path,
+  as before.
+
+### Tests
+- Both fields survive a declaration, and a malformed MAC is refused.
+- 468 tests green.
+
 ## [1.19.0] - 2026-09-10 - Bare-metal: the tab that drives an install
 
 ### Added
