@@ -1051,14 +1051,31 @@ const App = (() => {
   // -------------------------------------------------------------------------
   async function refreshActivity() {
     try {
-      const data = await api('/api/activity');
+      const qs = activityQuery();
+      const data = await api('/api/activity' + (qs ? '?' + qs : ''));
+      activityFacets = data.facets || activityFacets;
+      renderActivityFilterOptions();
+      const active = !!(data.filters && data.filters.active);
+      const reset = $('#btn-act-filter-reset');
+      if (reset) reset.hidden = !active;
+      const count = $('#act-filter-count');
+      if (count) {
+        // « N sur M » dès que la table ne montre pas tout, filtre ou pas :
+        // l'historique est plus profond que la page, et le dire évite de
+        // conclure trop vite qu'il ne s'est rien passé de plus.
+        count.textContent = (data.matched < data.total)
+          ? i18n.t('activity.filter.countFiltered',
+                   { matched: data.matched, total: data.total })
+          : i18n.t('activity.filter.count', { total: data.total });
+      }
 
       // In-progress section
       const runBody = $('#activity-running tbody');
       runBody.innerHTML = '';
       const running = data.in_progress || [];
       if (running.length === 0) {
-        runBody.innerHTML = `<tr><td colspan="6" class="empty-state">${i18n.t('activity.noneRunning')}</td></tr>`;
+        runBody.innerHTML = `<tr><td colspan="6" class="empty-state">${
+          escapeHtml(i18n.t(active ? 'activity.filter.noneRunningMatch' : 'activity.noneRunning'))}</td></tr>`;
       } else {
         running.forEach(a => {
           const tr = document.createElement('tr');
@@ -1094,13 +1111,14 @@ const App = (() => {
         });
       });
       (data.log_files || []).forEach(f => {
-        // Try to extract cluster + action from filename: YYYYMMDD-HHMMSS-<cluster>-<action>.log
-        const m = f.filename.match(/^\d{8}-\d{6}-(.+?)-(shutdown|startup|status|ns-stop|ns-start|action)\.log$/);
+        // Cluster et action sont extraits du nom de fichier PAR LE SERVEUR :
+        // c'est lui qui filtre dessus, les deux doivent lire le nom de la
+        // même façon.
         items.push({
           kind: 'log',
           filename: f.filename,
-          cluster: m ? m[1] : '?',
-          action: m ? m[2] : f.filename,
+          cluster: f.cluster || '?',
+          action: f.action || f.filename,
           status: 'done',
           ts: f.mtime,
           duration: null,
@@ -1132,7 +1150,8 @@ const App = (() => {
       activityActionList = visible.filter(it => it.kind === 'action');
 
       if (items.length === 0) {
-        histBody.innerHTML = `<tr><td colspan="7" class="empty-state">—</td></tr>`;
+        histBody.innerHTML = `<tr><td colspan="7" class="empty-state">${
+          active ? escapeHtml(i18n.t('activity.filter.noMatch')) : '—'}</td></tr>`;
       } else {
         visible.forEach(it => {
           const tr = document.createElement('tr');
@@ -1184,6 +1203,92 @@ const App = (() => {
   let activityCurrentIdx = -1;
   let activitySSE = null;
   const activitySort = { col: 'ts', dir: 'desc' };
+
+  // -------------------------------------------------------------------------
+  // Filtres d'activité (v1.23.0)
+  //
+  // Ils sont envoyés au SERVEUR, pas appliqués sur la liste déjà reçue :
+  // filtrer les 50 derniers runs affichés répondrait « aucun échec sur
+  // harv3 » alors qu'il y en a, simplement plus loin dans l'historique.
+  // -------------------------------------------------------------------------
+  const ACT_FILTER_KEY = 'harvester_ops_activity_filters';
+  const activityFilters = { cluster: '', status: '', action: '', q: '' };
+  let activityFacets = { clusters: [], statuses: [], actions: [] };
+  let activityQTimer = null;
+
+  function activityQuery() {
+    const p = new URLSearchParams();
+    Object.entries(activityFilters).forEach(([k, v]) => { if (v) p.set(k, v); });
+    return p.toString();
+  }
+
+  function saveActivityFilters() {
+    try { localStorage.setItem(ACT_FILTER_KEY, JSON.stringify(activityFilters)); } catch {}
+  }
+
+  function restoreActivityFilters() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(ACT_FILTER_KEY) || '{}');
+      Object.keys(activityFilters).forEach(k => {
+        if (typeof saved[k] === 'string') activityFilters[k] = saved[k];
+      });
+    } catch {}
+  }
+
+  /** Remplit les menus avec les valeurs réellement présentes. */
+  function renderActivityFilterOptions() {
+    const fill = (sel, values, allLabel, current) => {
+      const el = $(sel);
+      if (!el) return;
+      const opts = [`<option value="">${escapeHtml(allLabel)}</option>`]
+        .concat(values.map(v =>
+          `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`));
+      el.innerHTML = opts.join('');
+      // Une valeur filtrée absente des facettes (cluster retiré de la
+      // config, par exemple) doit rester sélectionnable, sinon le filtre
+      // se réinitialiserait tout seul sans rien dire.
+      if (current && !values.includes(current)) {
+        el.insertAdjacentHTML('beforeend',
+          `<option value="${escapeHtml(current)}">${escapeHtml(current)}</option>`);
+      }
+      el.value = current || '';
+    };
+    fill('#act-f-cluster', activityFacets.clusters || [],
+         i18n.t('activity.filter.allClusters'), activityFilters.cluster);
+    fill('#act-f-status', activityFacets.statuses || [],
+         i18n.t('activity.filter.allStatuses'), activityFilters.status);
+    fill('#act-f-action', activityFacets.actions || [],
+         i18n.t('activity.filter.allActions'), activityFilters.action);
+    const q = $('#act-f-q');
+    if (q && document.activeElement !== q) q.value = activityFilters.q;
+  }
+
+  function bindActivityFilters() {
+    const onChange = (key) => (e) => {
+      activityFilters[key] = e.target.value;
+      saveActivityFilters();
+      refreshActivity();
+    };
+    $('#act-f-cluster')?.addEventListener('change', onChange('cluster'));
+    $('#act-f-status')?.addEventListener('change', onChange('status'));
+    $('#act-f-action')?.addEventListener('change', onChange('action'));
+    // La recherche part au repos de la frappe : un aller-retour serveur
+    // par caractère ferait clignoter la table.
+    $('#act-f-q')?.addEventListener('input', (e) => {
+      clearTimeout(activityQTimer);
+      const v = e.target.value;
+      activityQTimer = setTimeout(() => {
+        activityFilters.q = v;
+        saveActivityFilters();
+        refreshActivity();
+      }, 250);
+    });
+    $('#btn-act-filter-reset')?.addEventListener('click', () => {
+      Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
+      saveActivityFilters();
+      refreshActivity();
+    });
+  }
 
   // Header click → toggle sort column / direction. Wired once at init.
   document.addEventListener('click', (e) => {
@@ -1536,6 +1641,8 @@ const App = (() => {
 
   function init() {
     bind();
+    restoreActivityFilters();
+    bindActivityFilters();
     // Apply translations before first render
     if (typeof i18n !== 'undefined') i18n.applyTranslations();
     const sel = $('#cluster-select');

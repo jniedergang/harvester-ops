@@ -579,14 +579,37 @@ _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary")
 
 
-def _actions_db_recent(limit=50):
-    """Most recent persisted runs, WITHOUT the events blob (list views)."""
+def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
+                       q=None):
+    """Most recent persisted runs, WITHOUT the events blob (list views).
+
+    Les filtres s'appliquent EN SQL, pas après coup sur la page renvoyée :
+    chercher « les échecs sur harv3 » parmi les 50 derniers runs seulement
+    donnerait une réponse fausse dès que le cluster est peu actif — un
+    filtre doit chercher dans tout l'historique, pas dans la fenêtre déjà
+    affichée."""
+    where, params = [], []
+    if cluster:
+        where.append("cluster = ?")
+        params.append(cluster)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if action:
+        where.append("action LIKE ?")
+        params.append(f"%{action}%")
+    if q:
+        where.append("(id LIKE ? OR action LIKE ? OR cluster LIKE ?"
+                     " OR IFNULL(error_summary,'') LIKE ?)")
+        params += [f"%{q}%"] * 4
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
     try:
         conn = sqlite3.connect(str(ACTIONS_DB))
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT {} FROM actions ORDER BY started_at DESC LIMIT ?"
-            .format(", ".join(_ACTIONS_LIST_COLUMNS)), (int(limit),)
+            "SELECT {} FROM actions{} ORDER BY started_at DESC LIMIT ?"
+            .format(", ".join(_ACTIONS_LIST_COLUMNS), clause),
+            (*params, int(limit))
         ).fetchall()
         conn.close()
     except sqlite3.Error:
@@ -597,6 +620,18 @@ def _actions_db_recent(limit=50):
         d["dry_run"] = bool(d["dry_run"])
         out.append(d)
     return out
+
+
+def _actions_db_count():
+    """Nombre total de runs persistés, filtres non appliqués : c'est le
+    dénominateur du « N sur M » de l'onglet Activité."""
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        n = conn.execute("SELECT COUNT(*) FROM actions").fetchone()[0]
+        conn.close()
+        return int(n)
+    except sqlite3.Error:
+        return 0
 
 
 def _actions_db_get(run_id):
@@ -3633,14 +3668,64 @@ def api_stream(run_id):
 # -----------------------------------------------------------------------------
 # Activity (in-progress actions + history with log files)
 # -----------------------------------------------------------------------------
+# Actions dont un fichier de log CLI peut porter le nom. Le nom de fichier
+# est `AAAAMMJJ-HHMMSS-<cluster>-<action>.log`, et un nom de cluster peut
+# contenir des tirets (`harv-second`) tout comme un nom d'action
+# (`ns-stop`) : c'est la liste des actions connues qui lève l'ambiguïté.
+_LOG_ACTIONS = ("shutdown", "startup", "status", "ns-stop", "ns-start", "action")
+_LOG_NAME_RE = re.compile(
+    r"^(\d{8})-(\d{6})-(?P<cluster>.+?)-(?P<action>" + "|".join(_LOG_ACTIONS) + r")\.log$")
+
+
+def _log_file_entry(path, stat):
+    """Décrit un fichier de log, cluster et action extraits de son nom."""
+    m = _LOG_NAME_RE.match(path.name)
+    return {
+        "filename": path.name,
+        "size": stat.st_size,
+        "mtime": stat.st_mtime,
+        "cluster": m.group("cluster") if m else "?",
+        "action": m.group("action") if m else path.stem,
+    }
+
+
+def _activity_matches(entry, cluster, status, action, q):
+    """Filtre commun aux trois sources (en cours, historique, fichiers)."""
+    if cluster and entry.get("cluster") != cluster:
+        return False
+    if status and entry.get("status", "done") != status:
+        return False
+    if action and action.lower() not in str(entry.get("action", "")).lower():
+        return False
+    if q:
+        hay = " ".join(str(entry.get(k, "")) for k in
+                       ("id", "action", "cluster", "filename", "error_summary"))
+        if q.lower() not in hay.lower():
+            return False
+    return True
+
+
 @app.route("/api/activity")
 @requires_auth
 def api_activity():
-    """Return current and historical activity."""
+    """Return current and historical activity, optionally filtered.
+
+    Query params: `cluster`, `status`, `action` (substring), `q` (free
+    text), `limit`.
+    """
     try:
         limit = max(1, min(int(request.args.get("limit", 50)), 500))
     except ValueError:
         limit = 50
+    f_cluster = (request.args.get("cluster") or "").strip()
+    f_status = (request.args.get("status") or "").strip()
+    f_action = (request.args.get("action") or "").strip()
+    f_q = (request.args.get("q") or "").strip()
+    filtering = any((f_cluster, f_status, f_action, f_q))
+
+    def keep(e):
+        return _activity_matches(e, f_cluster, f_status, f_action, f_q)
+
     with ACTIONS_LOCK:
         in_progress = [a.to_dict() for a in ACTIONS.values()
                        if a.status in ("starting", "running")]
@@ -3651,29 +3736,75 @@ def api_activity():
     # v1.6.5: merge the SQLite history (last 500 runs) so completed actions
     # survive Flask restarts and the in-memory GC. In-memory entries win on
     # id conflicts (they are at least as fresh as their persisted row).
-    for row in _actions_db_recent(limit):
+    # v1.23.0 : le filtre descend jusqu'à SQL, sinon il ne chercherait que
+    # dans la page déjà chargée.
+    for row in _actions_db_recent(limit, cluster=f_cluster or None,
+                                  status=f_status or None,
+                                  action=f_action or None, q=f_q or None):
         if row["id"] not in mem_ids:
             done.append(row)
 
     # Filesystem log files (CLI runs + previous Flask sessions)
-    fs_logs = []
+    all_logs = []
     if LOG_DIR.exists():
-        for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:100]:
+        for p in sorted(LOG_DIR.glob("*.log"), reverse=True)[:200]:
             try:
-                st = p.stat()
-                fs_logs.append({
-                    "filename": p.name,
-                    "size": st.st_size,
-                    "mtime": st.st_mtime,
-                })
+                all_logs.append(_log_file_entry(p, p.stat()))
             except OSError:
                 pass
 
+    # Total AVANT filtrage : le compter sur `done`, déjà filtré en SQL,
+    # affichait « 6 entrées sur 19 » là où l'historique en compte 211.
+    with ACTIONS_LOCK:
+        mem_total = len(ACTIONS)
+    total = max(_actions_db_count(), mem_total) + len(all_logs)
+    in_progress = [a for a in in_progress if keep(a)]
+    done = [a for a in done if keep(a)]
+    fs_logs = [f for f in all_logs if keep(f)][:100]
+    done.sort(key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)
+
+    # Valeurs proposables dans les menus de filtre : celles réellement
+    # présentes, y compris pour un cluster retiré de la configuration dont
+    # l'historique existe encore.
+    facets = _activity_facets()
     return jsonify({
         "in_progress": in_progress,
-        "actions_done": sorted(done, key=lambda a: a.get("ended_at") or a["started_at"], reverse=True)[:limit],
+        "actions_done": done[:limit],
         "log_files": fs_logs,
+        "filters": {"cluster": f_cluster, "status": f_status,
+                    "action": f_action, "q": f_q, "active": filtering},
+        "matched": len(in_progress) + len(done[:limit]) + len(fs_logs),
+        "total": total,
+        "facets": facets,
     })
+
+
+def _activity_facets():
+    """Clusters, statuts et actions présents dans l'historique."""
+    clusters, statuses, actions = set(), set(), set()
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        for c, s, a in conn.execute(
+                "SELECT DISTINCT cluster, status, action FROM actions"):
+            clusters.add(c); statuses.add(s); actions.add(a)
+        conn.close()
+    except sqlite3.Error:
+        pass
+    with ACTIONS_LOCK:
+        for a in ACTIONS.values():
+            clusters.add(a.cluster); statuses.add(a.status); actions.add(a.action)
+    if LOG_DIR.exists():
+        for p in list(LOG_DIR.glob("*.log"))[:200]:
+            m = _LOG_NAME_RE.match(p.name)
+            if m:
+                clusters.add(m.group("cluster")); actions.add(m.group("action"))
+                statuses.add("done")
+    # Les actions portent souvent une cible (`vm-start:default/x`) : ne
+    # proposer que le verbe, sinon le menu compterait une entrée par VM.
+    verbs = sorted({str(a).split(":", 1)[0] for a in actions if a})
+    return {"clusters": sorted(c for c in clusters if c),
+            "statuses": sorted(s for s in statuses if s),
+            "actions": verbs}
 
 
 @app.route("/api/logs/<path:filename>")

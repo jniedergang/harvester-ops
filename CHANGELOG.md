@@ -4,6 +4,41 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.23.0] - 2026-09-10 - Filtering the Activity tab
+
+### Added
+- **Filters on Activity**: by cluster, by status, by kind of action, plus a
+  free-text search over ids, action names, clusters and error messages.
+  They combine, they survive a reload, and a Reset button appears only when
+  something is filtered.
+- **The filters run in SQL, not on the page already loaded.** That is the
+  whole point: with 200 recent runs on one cluster, another cluster's
+  failures sit outside the default window, and a client-side filter would
+  answer "no errors on harv3" with confidence. A test builds exactly that
+  history and proves the filter still finds them.
+- **The counter says how much is hidden** ("61 of 514 entries"), filtered
+  or not, because the table is capped either way and a short list should
+  not read as a quiet history.
+- The filter menus are built from the values actually present, including a
+  cluster that has been removed from the configuration but still has
+  history. A filtered value missing from the menu stays selectable rather
+  than silently resetting itself.
+
+### Changed
+- CLI log files are parsed **server-side** into cluster + action, instead
+  of the browser re-deriving them from the file name. The server is the one
+  filtering on those fields; both had to read the name the same way.
+
+### Tests
+- The whole-history property, each dimension, the AND combination, and a
+  quote in the search box (the query is parameterised, so `'; DROP TABLE`
+  finds nothing and breaks nothing).
+- File-name parsing, including a cluster whose name contains a dash and an
+  action that does too (`harv-second` / `ns-stop`).
+- Three browser tests: the filter reaches the server, it survives a reload,
+  and the counter is rendered.
+- 504 tests green.
+
 ## [1.22.0] - 2026-09-10 - Logs say which cluster they are talking about
 
 With one declared cluster the question never came up. With several, the

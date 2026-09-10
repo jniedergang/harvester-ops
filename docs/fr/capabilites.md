@@ -241,6 +241,12 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   l'erreur sous-jacente (dernière ligne stderr `kubectl` / script) dans le
   dock, la table Activité et le panneau de détails — jamais un simple
   `exit 1`.
+- **Activité filtrable** — l'onglet Activité filtre par cluster, statut et
+  type d'action, avec une recherche libre sur les identifiants, les actions
+  et les messages d'erreur. Les filtres s'appliquent à tout l'historique en
+  SQL, pas à la page déjà affichée : les échecs d'un cluster peu actif sont
+  donc trouvés quand même, et le compteur dit combien d'entrées sont
+  affichées sur combien existent.
 - **Historique d'actions durable** — les 500 derniers runs (avec leurs
   événements step/log) sont persistés en SQLite et resservis par l'onglet
   Activité et son replay de détails, y compris après redémarrage de l'UI.

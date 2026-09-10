@@ -215,6 +215,12 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   (auto-reconnecting). Failed actions carry the underlying error (last
   `kubectl` / script stderr line) in the dock, the Activity table and the
   details panel — never a bare `exit 1`.
+- **Filtered activity** — the Activity tab filters by cluster, status and
+  kind of action, with a free-text search over ids, actions and error
+  messages. The filters run against the whole history in SQL, not against
+  the page already displayed, so a quiet cluster's failures are still
+  found; the counter states how many entries are shown out of how many
+  exist.
 - **Durable action history** — the last 500 runs (with their step/log
   events) are persisted in SQLite and served back by the Activity tab and
   its details replay, across UI restarts. In-memory eviction only affects

@@ -218,3 +218,78 @@ def test_a_fast_view_shows_no_veil_at_all(context, flask_server):
     page.click('[data-overview-tab="cluster"]')
     page.wait_for_timeout(2000)
     assert not seen, "un voile est apparu alors que la vue a chargé vite"
+
+
+# ---------------------------------------------------------------------------
+# v1.23.0 — filtres de l'onglet Activité
+# ---------------------------------------------------------------------------
+
+def test_activity_filters_drive_the_server_not_the_rendered_page(
+        context, flask_server):
+    """Filtrer la table déjà affichée répondrait « rien » sur un cluster
+    dont l'activité est plus ancienne que la fenêtre. La requête doit
+    repartir au serveur avec le filtre."""
+    page = context.new_page()
+    calls = []
+    page.on("request", lambda r: calls.append(r.url))
+    page.context.add_init_script(
+        "localStorage.setItem('harvester_ops_language','en');"
+        "localStorage.setItem('harvester_ops_current_tab','activity');"
+        "localStorage.removeItem('harvester_ops_activity_filters');")
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_timeout(1800)
+
+    assert page.locator('#act-f-cluster option').count() >= 1
+    assert page.locator('#btn-act-filter-reset').is_hidden(), (
+        "sans filtre actif, rien à réinitialiser")
+    calls.clear()
+
+    # La recherche libre ne dépend d'aucune donnée présente : elle teste
+    # le chemin filtre -> serveur quel que soit l'historique du serveur
+    # de test, qui démarre vide.
+    page.fill('#act-f-q', 'shutdown')
+    page.wait_for_timeout(1000)
+    assert any("/api/activity?" in c and "q=shutdown" in c for c in calls), (
+        f"le filtre n'est pas parti au serveur : {[c for c in calls if 'activity' in c]}")
+    assert page.locator('#btn-act-filter-reset').is_visible()
+
+    page.click('#btn-act-filter-reset')
+    page.wait_for_timeout(800)
+    assert page.locator('#act-f-q').input_value() == ""
+    assert page.locator('#btn-act-filter-reset').is_hidden()
+
+
+def test_activity_filters_survive_a_reload(context, flask_server):
+    """Un opérateur qui suit les échecs d'un cluster ne veut pas
+    reconstruire son filtre à chaque rechargement."""
+    page = context.new_page()
+    page.context.add_init_script(
+        "localStorage.setItem('harvester_ops_language','en');"
+        "localStorage.setItem('harvester_ops_current_tab','activity');")
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_timeout(1800)
+    page.fill('#act-f-q', 'shutdown')
+    page.wait_for_timeout(900)
+
+    page.reload(wait_until="domcontentloaded")
+    page.wait_for_timeout(1800)
+    assert page.locator('#act-f-q').input_value() == 'shutdown'
+    assert page.locator('#btn-act-filter-reset').is_visible()
+    # nettoyage pour ne pas polluer les tests suivants du même contexte
+    page.click('#btn-act-filter-reset')
+    page.wait_for_timeout(500)
+
+
+def test_the_counter_says_how_much_is_hidden(context, flask_server):
+    """La table est plafonnée : dire « N sur M » évite de conclure qu'il ne
+    s'est rien passé de plus."""
+    page = context.new_page()
+    page.context.add_init_script(
+        "localStorage.setItem('harvester_ops_language','en');"
+        "localStorage.setItem('harvester_ops_current_tab','activity');"
+        "localStorage.removeItem('harvester_ops_activity_filters');")
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_timeout(1800)
+    text = page.locator('#act-filter-count').inner_text()
+    assert text.strip(), "aucun compteur affiché"
+    assert "entries" in text

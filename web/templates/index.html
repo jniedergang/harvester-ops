@@ -467,7 +467,23 @@
       </div>
 
       <div class="card">
-        <div class="card-header"><h2 data-i18n="activity.history">History</h2></div>
+        <div class="card-header">
+          <h2 data-i18n="activity.history">History</h2>
+          <div class="activity-filters">
+            <select id="act-f-cluster" class="tip" data-tip-i18n="activity.filter.clusterTip"
+                    aria-label="Cluster"></select>
+            <select id="act-f-status" class="tip" data-tip-i18n="activity.filter.statusTip"
+                    aria-label="Status"></select>
+            <select id="act-f-action" class="tip" data-tip-i18n="activity.filter.actionTip"
+                    aria-label="Action"></select>
+            <input type="search" id="act-f-q" class="tip" data-tip-i18n="activity.filter.searchTip"
+                   data-i18n-placeholder="activity.filter.search" placeholder="Search…">
+            <button class="btn btn-sm btn-secondary tip" id="btn-act-filter-reset"
+                    data-tip-i18n="activity.filter.resetTip"
+                    data-i18n="activity.filter.reset" hidden>Reset</button>
+            <span class="form-hint" id="act-filter-count"></span>
+          </div>
+        </div>
         <div class="activity-history-scroll">
           <table class="data-table sortable" id="activity-history">
             <thead><tr>

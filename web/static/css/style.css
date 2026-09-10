@@ -3814,3 +3814,29 @@ body.veil-blocking #app { pointer-events: none; }
   .veil-orbit span { animation: none; }
   .veil { transition: none; }
 }
+
+/* v1.23.0 — barre de filtres de l'onglet Activité. Elle vit dans l'en-tête
+   de la carte : le filtre reste visible quand la table défile. */
+.activity-filters {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+.activity-filters select,
+.activity-filters input[type="search"] {
+  font-size: .82rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.activity-filters input[type="search"] { min-width: 190px; }
+.activity-filters select { max-width: 190px; }
+.activity-filters .form-hint { white-space: nowrap; }
+@media (max-width: 900px) {
+  .activity-filters { margin-left: 0; width: 100%; }
+  .activity-filters input[type="search"] { flex: 1 1 140px; min-width: 0; }
+}

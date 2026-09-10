@@ -7,7 +7,7 @@ Self-contained, airgap-friendly, single-tarball delivery.
 Livraison autonome en un tarball unique, compatible airgap.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-492_passing-green.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-504_passing-green.svg)](tests/)
 
 > Independent project. Not affiliated with, endorsed by, or supported by SUSE.
 
