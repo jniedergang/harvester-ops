@@ -4,6 +4,45 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.22.0] - 2026-09-10 - Logs say which cluster they are talking about
+
+With one declared cluster the question never came up. With several, the
+interface answered it (a Cluster column in Activity, `action -> cluster` on
+every dock card) but the logs did not.
+
+### Fixed
+- **CLI logs carried the cluster only in the file name.** A line copied out
+  of its file — into a ticket, a support bundle, a chat — no longer said
+  what it was about. Every line now carries `[cluster]`, and each log opens
+  with a header giving the version, the action, the cluster, the host, the
+  user and which kubeconfig was used. That last one matters because a
+  kubeconfig is not obliged to be named after its cluster: harv1's is
+  `harvester.yaml`. Only its basename is written, so a file meant for
+  support does not spell out the machine's directory layout.
+- **`kubectl ... failed` did not say on what.** That is precisely the line
+  you read when something is wrong. Failures, timeouts and parse errors are
+  now prefixed with the cluster, resolved from the kubeconfig when the
+  caller does not pass it. Same for the one other cluster-blind warning
+  (`sshNames annotation not updated`).
+- `STEP_EVENT|` lines are deliberately left untouched: the console parses
+  them over SSE, and slipping a field in would break the live tracking.
+
+### Changed
+- **`harvester_ops_kubectl_calls_total` gains a `cluster` label.** The same
+  question in the metrics plane: which cluster is failing. Scrapers that
+  aggregated this counter still work; anything pinned to the exact series
+  will see the new dimension.
+
+### Tests
+- The CLI library is exercised for real (sourced, run, log file read back):
+  header present, every line prefixed, lines emitted before the cluster is
+  known still work and stay unprefixed, machine-readable events unchanged,
+  and the full kubeconfig path absent.
+- Server side: a kubeconfig resolves back to its cluster name, an explicit
+  cluster wins over the lookup, a failing call names it, and the metric
+  carries the label.
+- 492 tests green.
+
 ## [1.21.0] - 2026-09-10 - The overview kept showing the previous cluster
 
 ### Fixed

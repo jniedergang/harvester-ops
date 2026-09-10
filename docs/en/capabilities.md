@@ -133,7 +133,7 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,
-  kubectl call outcomes.
+  kubectl call outcomes **broken down by cluster**.
 - **`/healthz/ready`** — readiness probe returning 503 when config,
   clusters, or the action DB are unhealthy (`/healthz` for liveness).
 
@@ -224,6 +224,11 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   on, then hands the page back. It matters because the failure mode is
   silent: the previous cluster's numbers stay on screen and read as the
   new one's, which is how an operator acts on the wrong machine.
+- **Every log says which cluster it is about.** CLI logs open with a
+  header (version, action, cluster, host, user, kubeconfig) and prefix
+  every line with `[cluster]`, so a line pasted into a ticket still says
+  what it refers to. Server-side `kubectl` failures name the cluster too,
+  and the metrics break down by it.
 - **Slow views veil their own zone.** The same transition, scoped: a large
   cluster's topology blurs only its own panel while it loads, naming what
   it is fetching, with the rest of the page sharp and usable. Nothing

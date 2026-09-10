@@ -147,7 +147,7 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,
-  issues des appels kubectl.
+  issues des appels kubectl **ventilées par cluster**.
 - **`/healthz/ready`** — readiness probe renvoyant 503 si la config, les
   clusters ou la base d'actions sont en défaut (`/healthz` pour la
   liveness).
@@ -252,6 +252,12 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   que le défaut est silencieux : les chiffres du cluster précédent
   restent à l'écran et se lisent comme ceux du nouveau, ce qui est la
   façon dont on finit par agir sur la mauvaise machine.
+- **Chaque log dit sur quel cluster il porte.** Les journaux CLI
+  s'ouvrent sur un en-tête (version, action, cluster, hôte, utilisateur,
+  kubeconfig) et préfixent chaque ligne par `[cluster]` : une ligne
+  recopiée dans un ticket dit encore de quoi elle parle. Les échecs
+  `kubectl` côté serveur nomment aussi le cluster, et les métriques se
+  ventilent par cluster.
 - **Les vues lentes floutent leur propre zone.** La même transition, mais
   cantonnée : la topologie d'un gros cluster ne floute que son panneau le
   temps de charger, en nommant ce qu'elle va chercher, le reste de la

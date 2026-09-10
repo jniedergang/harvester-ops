@@ -171,7 +171,7 @@ def test_list_cache_hit_returns_within_ttl_without_recall(tmp_path,
     with wapp._list_lock:
         wapp._list_cache.clear()
     calls = []
-    def fake_kubectl_json(kc, *args, timeout=15):
+    def fake_kubectl_json(kc, *args, timeout=15, cluster=None):
         calls.append(args)
         return {"items": [{"metadata": {"name": "a"}}]}
     monkeypatch.setattr(wapp, "_kubectl_json", fake_kubectl_json)

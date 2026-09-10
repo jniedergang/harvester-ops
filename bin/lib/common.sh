@@ -53,6 +53,27 @@ init_logging() {
     mkdir -p "$HARVESTER_OPS_LOG_DIR"
     _log_file="$HARVESTER_OPS_LOG_DIR/$(date +%Y%m%d-%H%M%S)-${CLUSTER_NAME:-default}-${action}.log"
     : > "$_log_file"
+
+    # En-tête du journal. Depuis qu'il y a plusieurs clusters déclarés, un
+    # extrait de log sorti de son fichier ne disait plus sur quoi il
+    # portait : le nom du cluster n'était que dans le nom du fichier. Ce
+    # bloc, plus le préfixe posé par _log sur chaque ligne, rend chaque
+    # journal auto-suffisant — y compris recopié dans un ticket.
+    local version="${HARVESTER_OPS_VERSION:-}"
+    if [[ -z "$version" && -f "${SCRIPT_DIR:-}/../VERSION" ]]; then
+        version="$(<"${SCRIPT_DIR}/../VERSION")"
+    fi
+    {
+        printf '# harvester-ops%s | action=%s | cluster=%s\n' \
+               "${version:+ v$version}" "$action" "${CLUSTER_NAME:-<none>}"
+        printf '# started=%s | host=%s | user=%s\n' \
+               "$(date -Is)" "$(hostname)" "${USER:-$(id -un)}"
+        # Basename seulement : identifie le kubeconfig utilisé sans étaler
+        # l'arborescence de la machine dans un fichier destiné au support.
+        printf '# kubeconfig=%s | config=%s\n' \
+               "$(basename "${KUBECONFIG_PATH:-<none>}")" "$HARVESTER_OPS_CONFIG"
+    } >> "$_log_file"
+
     log_info "Log file: $_log_file"
 }
 
@@ -60,11 +81,16 @@ _log() {
     local level="$1"; shift
     local color="$1"; shift
     local msg="$*"
-    local ts
+    local ts tag=""
     ts="$(date '+%Y-%m-%d %H:%M:%S')"
-    printf '%s%s [%s]%s %s\n' "$color" "$ts" "$level" "$C_RESET" "$msg" >&2
+    # Le cluster sur chaque ligne : une ligne extraite d'un journal doit
+    # dire d'elle-même sur quel cluster elle est survenue. Il est évalué à
+    # chaque appel, donc les lignes émises avant le chargement du cluster
+    # (analyse des arguments) n'en portent simplement pas.
+    [[ -n "$CLUSTER_NAME" ]] && tag="[$CLUSTER_NAME] "
+    printf '%s%s [%s]%s %s%s\n' "$color" "$ts" "$level" "$C_RESET" "$tag" "$msg" >&2
     if [[ -n "$_log_file" ]]; then
-        printf '%s [%s] %s\n' "$ts" "$level" "$msg" >> "$_log_file"
+        printf '%s [%s] %s%s\n' "$ts" "$level" "$tag" "$msg" >> "$_log_file"
     fi
     return 0
 }

@@ -175,8 +175,8 @@ if _PROMETHEUS_AVAILABLE:
     )
     metric_kubectl_calls = Counter(
         "harvester_ops_kubectl_calls_total",
-        "Total kubectl invocations, by exit status (ok|fail).",
-        labelnames=("status",),
+        "Total kubectl invocations, by exit status (ok|fail) and cluster.",
+        labelnames=("status", "cluster"),
     )
     metric_vnc_sessions = Gauge(
         "harvester_ops_vnc_sessions",
@@ -1363,28 +1363,49 @@ _topology_lock = threading.Lock()
 TOPOLOGY_CACHE_TTL = 5.0
 
 
-def _kubectl_json(kc, *args, timeout=15):
+def _cluster_of_kubeconfig(kc):
+    """Nom du cluster déclaré pour ce kubeconfig, pour les journaux.
+
+    Depuis qu'il y a plusieurs clusters, « kubectl get nodes failed » ne
+    disait plus SUR QUOI il avait échoué — précisément la ligne qu'on lit
+    quand quelque chose ne va pas. Le chemin du kubeconfig ne suffit pas :
+    rien n'oblige à le nommer d'après son cluster (celui de harv1
+    s'appelle `harvester.yaml`)."""
+    if not kc:
+        return "?"
+    try:
+        for c in load_config().get("clusters", []):
+            if c.get("kubeconfig") == str(kc):
+                return c["name"]
+    except Exception:
+        pass
+    return "?"
+
+
+def _kubectl_json(kc, *args, timeout=15, cluster=None):
     """Run `kubectl --kubeconfig kc <args> -o json` and return the parsed
-    object, or None on any error (logged at WARNING)."""
+    object, or None on any error (logged at WARNING, with the cluster)."""
+    name = cluster or _cluster_of_kubeconfig(kc)
     try:
         r = subprocess.run(
             ["kubectl", "--kubeconfig", kc, *args, "-o", "json"],
             capture_output=True, text=True, timeout=timeout,
         )
         if r.returncode != 0:
-            log.warning("kubectl %s failed: %s", " ".join(args),
+            log.warning("[%s] kubectl %s failed: %s", name, " ".join(args),
                         r.stderr.strip()[:200])
-            metric_kubectl_calls.labels(status="fail").inc()
+            metric_kubectl_calls.labels(status="fail", cluster=name).inc()
             return None
-        metric_kubectl_calls.labels(status="ok").inc()
+        metric_kubectl_calls.labels(status="ok", cluster=name).inc()
         return json.loads(r.stdout)
     except subprocess.TimeoutExpired:
-        log.warning("kubectl %s timeout", " ".join(args))
-        metric_kubectl_calls.labels(status="timeout").inc()
+        log.warning("[%s] kubectl %s timeout", name, " ".join(args))
+        metric_kubectl_calls.labels(status="timeout", cluster=name).inc()
         return None
     except json.JSONDecodeError as e:
-        log.warning("kubectl %s json parse failed: %s", " ".join(args), e)
-        metric_kubectl_calls.labels(status="parse_error").inc()
+        log.warning("[%s] kubectl %s json parse failed: %s", name,
+                    " ".join(args), e)
+        metric_kubectl_calls.labels(status="parse_error", cluster=name).inc()
         return None
 
 
@@ -1665,7 +1686,7 @@ def _list_k8s_resources(cluster, gvk, namespace=None, label_selector=None,
         args += ["-n", namespace]
     if label_selector:
         args += ["-l", label_selector]
-    raw = _kubectl_json(kc, *args)
+    raw = _kubectl_json(kc, *args, cluster=cluster)
     if not raw:
         return [], f"kubectl get {gvk} failed"
     items = raw.get("items") or []
@@ -1858,7 +1879,7 @@ def api_pvc_delete(cluster, namespace, name):
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     try:
-        vms = _kubectl_json(kc, "get", "vm", "-A") or {}
+        vms = _kubectl_json(kc, "get", "vm", "-A", cluster=cluster) or {}
     except Exception:
         vms = {}
     for vm in vms.get("items", []):
@@ -4094,7 +4115,8 @@ def api_vm_put_cloudinit(cluster, namespace, name):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15,
             )
         except Exception:
-            log.warning("sshNames annotation not updated for %s/%s", namespace, name)
+            log.warning("[%s] sshNames annotation not updated for %s/%s",
+                        cluster, namespace, name)
     return jsonify({"ok": True, "secret": secret_name})
 
 
