@@ -1442,6 +1442,16 @@ def _kubectl_json(kc, *args, timeout=15, cluster=None):
                     " ".join(args), e)
         metric_kubectl_calls.labels(status="parse_error", cluster=name).inc()
         return None
+    except OSError as e:
+        # kubectl absent du PATH : c'est l'erreur la plus probable sur une
+        # machine fraîche, et elle remontait en FileNotFoundError non
+        # rattrapée, donc en 500 opaque. Le contrat de cette fonction est
+        # « None sur toute erreur, journalisée » : un binaire manquant en
+        # fait partie.
+        log.warning("[%s] kubectl %s unavailable: %s", name,
+                    " ".join(args), e)
+        metric_kubectl_calls.labels(status="unavailable", cluster=name).inc()
+        return None
 
 
 def _topology_node(item):

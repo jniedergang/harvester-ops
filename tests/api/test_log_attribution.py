@@ -49,7 +49,12 @@ def test_cli_log_carries_a_self_sufficient_header(tmp_path):
     head = content.splitlines()[:3]
     assert head[0].startswith("# harvester-ops v9.9.9 |")
     assert "action=shutdown" in head[0] and "cluster=prod" in head[0]
-    assert "host=" in head[1] and "started=" in head[1]
+    # Une étiquette `started=` vide passait le test : c'est ainsi que
+    # `date -Is`, extension GNU absente de BSD/macOS, a pu casser l'en-tête
+    # sans que rien ne l'attrape.
+    assert re.search(r"# started=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4} \| ",
+                     head[1]), head[1]
+    assert re.search(r"host=\S+ \| user=\S+", head[1]), head[1]
     # le nom du fichier porte toujours le cluster, l'en-tête ne le remplace pas
     assert "-prod-shutdown.log" in logs[0].name
 
@@ -164,3 +169,21 @@ def test_the_watcher_already_named_its_cluster():
     src = (ROOT / "web" / "app.py").read_text()
     assert 'log_watch.info("starting cluster watcher for %s", cluster)' in src
     assert 'log_watch.warning("%s: %s", cluster, e)' in src
+
+
+def test_a_missing_kubectl_is_logged_not_raised(monkeypatch, caplog):
+    """Signalé par un contributeur dont la machine n'a pas kubectl : l'appel
+    remontait en FileNotFoundError non rattrapée, donc en 500 opaque. Le
+    contrat est « None sur toute erreur, journalisée »."""
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": [
+        {"name": "harv3", "kubeconfig": "/tmp/harv3.yaml"},
+    ]})
+
+    def boom(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory", "kubectl")
+    monkeypatch.setattr(wapp.subprocess, "run", boom)
+
+    with caplog.at_level("WARNING"):
+        out = wapp._kubectl_json("/tmp/harv3.yaml", "get", "nodes")
+    assert out is None, "un binaire absent doit dégrader, pas lever"
+    assert "[harv3] kubectl get nodes unavailable" in caplog.text, caplog.text

@@ -66,8 +66,10 @@ init_logging() {
     {
         printf '# harvester-ops%s | action=%s | cluster=%s\n' \
                "${version:+ v$version}" "$action" "${CLUSTER_NAME:-<none>}"
+        # `date -Is` est une extension GNU : sur BSD/macOS elle échoue et
+        # l'horodatage sortait vide. Le format explicite marche partout.
         printf '# started=%s | host=%s | user=%s\n' \
-               "$(date -Is)" "$(hostname)" "${USER:-$(id -un)}"
+               "$(date +%Y-%m-%dT%H:%M:%S%z)" "$(hostname)" "${USER:-$(id -un)}"
         # Basename seulement : identifie le kubeconfig utilisé sans étaler
         # l'arborescence de la machine dans un fichier destiné au support.
         printf '# kubeconfig=%s | config=%s\n' \

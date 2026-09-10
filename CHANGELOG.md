@@ -4,6 +4,29 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.23.2] - 2026-09-10 - Two portability defects found by a contributor
+
+Both surfaced by a contributor running the suite on a Mac without kubectl,
+in the course of reviewing an unrelated pull request.
+
+### Fixed
+- **A missing `kubectl` raised instead of degrading.** `_kubectl_json`
+  promises "None on any error, logged at WARNING", but only caught timeouts
+  and parse errors: an absent binary came back as an unhandled
+  `FileNotFoundError`, so an endpoint answered with an opaque 500 on the
+  most likely failure of a fresh install. It is now logged like the others,
+  with the cluster, under a new `unavailable` metric status.
+- **`date -Is` is a GNU extension.** On BSD and macOS it fails, and the CLI
+  log header came out with an empty `started=`. The format is now spelled
+  out and works on both. The test accepted the empty value, which is how it
+  went unnoticed; it now requires a real timestamp.
+
+### Tests
+- A missing binary is logged and returns None rather than raising.
+- The header timestamp is matched against a real date, not just its label.
+- 505 tests green, checked again with `kubectl` off the PATH and against a
+  `date` stub that rejects `-I` the way BSD does.
+
 ## [1.23.1] - 2026-09-10 - No lab addresses in the shipped tab
 
 ### Fixed
