@@ -164,6 +164,16 @@ Drive the Terraform provider for Harvester from saved declarations.
 - **Edit deployed resources** — each applied resource writes a sidecar
   JSON so its original spec can be reloaded and edited from the Live
   sub-tab.
+- **Provider updates from the console**: install a different build of
+  `terraform-provider-harvester` without shell access to the host. Give a
+  version (the official release is downloaded and checked against the
+  published `SHA256SUMS`), a URL to an internal mirror, or upload the
+  archive from a machine that has no outbound network at all. The
+  Install sub-tab names the active binary, its version and where it came
+  from, and one click reverts to the provider shipped in the package.
+  Every workspace is re-initialised on its next apply; Terraform state is
+  never touched. The same install runs from the CLI:
+  `bin/harvester-provider-install.py 1.7.3 --dest <dir>`.
 
 ## 6. Bare-metal (console)
 

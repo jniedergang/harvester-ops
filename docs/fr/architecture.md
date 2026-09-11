@@ -46,6 +46,16 @@ d'API classiques.
   stderr, parsées par la console en événements SSE.
 - Lisent la config depuis `/etc/harvester-ops/config.yaml`.
 
+### Outils annexes (`bin/`, Python)
+
+- `harvester-provider-install.py` installe ou met à jour le provider
+  Terraform depuis une version, une URL ou un fichier local. Bibliothèque
+  standard uniquement, pour tourner sur un hôte airgap où n'existent que
+  `python3` et le tarball décompressé.
+- Même contrat `STEP_EVENT` que les scripts bash : la console les diffuse
+  par le même chemin SSE. La console lance ce script au lieu de
+  réimplémenter l'installation, ce qui maintient la parité CLI / UI.
+
 ### Bibliothèque commune (`bin/lib/common.sh`)
 
 - Logging (TTY coloré + fichier de log plain).

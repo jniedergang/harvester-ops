@@ -192,8 +192,10 @@ const TF = (() => {
             <tr><td>Harvester provider</td>
                 <td>${info.provider_binary
                   ? `<code>${esc(info.provider_binary)}</code>
-                     <span class="form-hint">v${esc(info.provider_version)},
-                       ${Math.round((info.provider_binary_size||0)/1024/1024)} MB</span>`
+                     ${originBadge(info.provider_origin)}
+                     <span class="form-hint">v${esc(String(info.provider_version).replace(/^v/, ''))},
+                       ${Math.round((info.provider_binary_size||0)/1024/1024)} MB,
+                       ${esc(info.provider_arch || '')}</span>`
                   : `<span class="badge bad">missing</span>
                      <details class="tf-missing-where">
                        <summary>${esc(i18n.t('tf.whereLooked'))}</summary>
@@ -208,6 +210,9 @@ const TF = (() => {
                 <td>${(info.example_resources || []).length} resource type(s)</td></tr>
           </tbody>
         </table>
+
+        ${renderProviderUpdate(info)}
+
         <p class="form-hint">The airgap bundle packages the Terraform CLI,
           the Harvester provider and the bundled examples into a single
           tar.gz that can be transferred to an offline host.</p>
@@ -216,6 +221,102 @@ const TF = (() => {
           ${Icons.svg('build')} Build airgap bundle
         </button>
       </section>`;
+  }
+
+  // -------------------------------------------------------------------------
+  // Provider update
+  //
+  // Le provider livré avec le paquet vieillit plus vite que le toolkit :
+  // une version de Harvester peut exiger un provider plus récent que celui
+  // du tarball. Le remplacer devait jusqu'ici se faire à la main sur
+  // l'hôte, ce qui n'a de sens ni pour un opérateur ni pour un site airgap.
+  // -------------------------------------------------------------------------
+  function originBadge(origin) {
+    // Clés écrites en toutes lettres : construire `'tf.prov.origin.' + origin`
+    // les rendrait invisibles au contrôle de parité i18n, qui ne lit que des
+    // littéraux — piège déjà payé sur les filtres d'activité.
+    const label = origin === 'managed' ? i18n.t('tf.prov.origin.managed')
+                : origin === 'bundled' ? i18n.t('tf.prov.origin.bundled')
+                : origin === 'custom'  ? i18n.t('tf.prov.origin.custom')
+                : '';
+    if (!label) return '';
+    // `ok` seulement pour une mise à jour posée par l'opérateur : le
+    // provider du livrable n'est pas une anomalie, il ne mérite pas une
+    // couleur d'alerte.
+    const cls = origin === 'managed' ? 'badge ok' : 'badge';
+    return `<span class="${cls}">${esc(label)}</span>`;
+  }
+
+  function renderProviderUpdate(info) {
+    if (!info.provider_can_install) {
+      return `<div class="summary-bar warn">${Icons.svg('warn', { size: 14 })}
+                ${esc(i18n.t('tf.prov.unavailable'))}</div>`;
+    }
+    const when = info.provider_installed_at
+      ? new Date(info.provider_installed_at * 1000).toLocaleString()
+      : '';
+    const installed = (info.provider_origin === 'managed' && when)
+      ? `<p class="form-hint">${esc(i18n.t('tf.prov.installedFrom'))}
+           <code>${esc(info.provider_installed_source || '')}</code>
+           <br>${esc(when)}
+           ${info.provider_installed_sha256
+             ? `· <code class="sha">${esc(info.provider_installed_sha256.slice(0, 16))}…</code>`
+             : ''}</p>`
+      : '';
+    const revert = info.provider_origin === 'managed'
+      ? `<button type="button" class="btn btn-danger btn-sm btn-ico tip"
+                 id="btn-tf-prov-revert" data-tip="${esc(i18n.t('tf.tip.provRevert'))}">
+           ${Icons.svg('undo')} ${esc(i18n.t('tf.prov.revert'))}
+         </button>`
+      : '';
+    return `
+      <div class="card" style="margin-bottom:14px;">
+        <div class="card-header">
+          <h2>${Icons.svg('download', { size: 18 })} ${esc(i18n.t('tf.prov.title'))}</h2>
+        </div>
+        <div class="card-body">
+          <p class="form-hint">${esc(i18n.t('tf.prov.hint'))}</p>
+          <form id="tf-prov-form" class="capi-form">
+            <fieldset>
+              <legend>${esc(i18n.t('tf.prov.source'))}</legend>
+              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.source'))} *
+                <input name="source" required placeholder="1.7.3"
+                       data-tip="${esc(i18n.t('tf.prov.sourceHint'))}" class="tip">
+                <span class="form-hint">${esc(i18n.t('tf.prov.sourceHint'))}</span></label>
+              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.sha'))}
+                <input name="sha256" pattern="[0-9a-fA-F]{64}"
+                       placeholder="${esc(i18n.t('tf.optional'))}">
+                <span class="form-hint">${esc(i18n.t('tf.prov.shaHint'))}</span></label>
+            </fieldset>
+            <div class="apply-bar">
+              <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
+                      data-tip="${esc(i18n.t('tf.tip.provInstall'))}">
+                ${Icons.svg('download')} ${esc(i18n.t('tf.prov.go'))}
+              </button>
+            </div>
+          </form>
+          <form id="tf-prov-file-form" class="capi-form" style="margin-top:8px;">
+            <fieldset>
+              <legend>${esc(i18n.t('tf.prov.fileLegend'))}</legend>
+              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.file'))} *
+                <input name="file" type="file" required accept=".zip,application/zip">
+                <span class="form-hint">${esc(i18n.t('tf.prov.fileHint'))}</span></label>
+            </fieldset>
+            <div class="apply-bar">
+              <button type="submit" class="btn btn-secondary btn-sm btn-ico tip"
+                      data-tip="${esc(i18n.t('tf.tip.provUpload'))}">
+                ${Icons.svg('install')} ${esc(i18n.t('tf.prov.fileGo'))}
+              </button>
+              ${revert}
+            </div>
+          </form>
+          ${installed}
+          <p class="form-hint">${esc(i18n.t('tf.prov.reinit'))}</p>
+          <p class="form-hint">${esc(i18n.t('tf.prov.managedDir'))}
+            <code>${esc(info.provider_managed_dir || '')}</code></p>
+          <div id="tf-prov-result" class="apply-result"></div>
+        </div>
+      </div>`;
   }
 
   // -------------------------------------------------------------------------
@@ -634,6 +735,87 @@ const TF = (() => {
       if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} build started — see dock action <code>${d.action_id}</code></span>`;
     } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; }
   }
+  // -------------------------------------------------------------------------
+  // Provider: install / update / revert
+  // -------------------------------------------------------------------------
+  function provResult(html, bad) {
+    const el = $('#tf-prov-result');
+    if (!el) return;
+    el.innerHTML = `<span style="color:var(--${bad ? 'danger' : 'accent'})">${
+      Icons.svg(bad ? 'fail' : 'ok', { size: 14 })} ${html}</span>`;
+  }
+
+  function provStarted(d) {
+    // Le dock suit l'action : l'opérateur voit le téléchargement avancer
+    // sans rester sur cet écran.
+    provResult(`${esc(i18n.t('tf.prov.started'))} <code>${esc(d.action_id)}</code>`);
+    // Le provider actif ne change qu'à la fin ; on rafraîchit alors.
+    pollProviderUntilDone(d.action_id);
+  }
+
+  async function pollProviderUntilDone(actionId, tries = 0) {
+    if (tries > 240) return;                 // ~20 min, borne de sécurité
+    try {
+      const r = await fetch(`/api/action/${encodeURIComponent(actionId)}`);
+      const d = await r.json();
+      // `starting` est l'état initial d'un ActionRun, pas une fin : tout ce
+      // qui n'est pas terminal signifie « encore en cours ».
+      if (d.status === 'done') { refresh(); return; }
+      if (d.status === 'error' || d.status === 'cancelled') {
+        provResult(esc(d.error_summary || i18n.t('tf.prov.failed')), true);
+        return;
+      }
+      setTimeout(() => pollProviderUntilDone(actionId, tries + 1), 5000);
+    } catch {
+      setTimeout(() => pollProviderUntilDone(actionId, tries + 1), 5000);
+    }
+  }
+
+  async function installProvider(ev) {
+    ev.preventDefault();
+    const f = ev.target;
+    const source = f.source.value.trim();
+    const sha256 = f.sha256.value.trim();
+    if (!source) return;
+    provResult(esc(i18n.t('tf.prov.starting')));
+    try {
+      const r = await fetch('/api/terraform/provider/install', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, sha256 }),
+      });
+      const d = await r.json();
+      if (!r.ok) { provResult(esc(d.error || 'error'), true); return; }
+      provStarted(d);
+    } catch (e) { provResult(esc(e.message), true); }
+  }
+
+  async function uploadProvider(ev) {
+    ev.preventDefault();
+    const f = ev.target;
+    const file = f.file.files?.[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append('file', file);
+    provResult(esc(i18n.t('tf.prov.uploading')));
+    try {
+      const r = await fetch('/api/terraform/provider/upload',
+                            { method: 'POST', body: fd });
+      const d = await r.json();
+      if (!r.ok) { provResult(esc(d.error || 'error'), true); return; }
+      provStarted(d);
+    } catch (e) { provResult(esc(e.message), true); }
+  }
+
+  async function revertProvider() {
+    if (!confirm(i18n.t('tf.prov.confirmRevert'))) return;
+    try {
+      const r = await fetch('/api/terraform/provider', { method: 'DELETE' });
+      const d = await r.json();
+      if (!r.ok) { provResult(esc(d.error || 'error'), true); return; }
+      refresh();
+    } catch (e) { provResult(esc(e.message), true); }
+  }
+
   async function cleanStale() {
     const cluster = $('#cluster-select')?.value;
     if (!cluster) return;
@@ -782,6 +964,7 @@ const TF = (() => {
       }
       if (e.target.closest('#btn-tf-destroy')) destroyWorkspace();
       if (e.target.closest('#btn-tf-clean-stale')) cleanStale();
+      if (e.target.closest('#btn-tf-prov-revert')) { e.preventDefault(); revertProvider(); }
       const dr = e.target.closest('.tf-destroy-resource');
       if (dr) destroySingleResource(dr.dataset.address);
       const ed = e.target.closest('.tf-edit-resource');
@@ -795,6 +978,10 @@ const TF = (() => {
           e.target.closest('.tab-child[data-subtab="terraform"]')) {
         setTimeout(refresh, 50);
       }
+    });
+    document.addEventListener('submit', (e) => {
+      if (e.target?.id === 'tf-prov-form') installProvider(e);
+      if (e.target?.id === 'tf-prov-file-form') uploadProvider(e);
     });
   }
 

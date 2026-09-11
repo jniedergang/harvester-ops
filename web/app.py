@@ -21,6 +21,7 @@ Architecture:
 import json
 import logging
 import os
+import platform
 import shutil
 import re
 import shlex
@@ -212,6 +213,27 @@ def api_metrics():
 # (single-process). Disabled in test runs via HARVESTER_OPS_DISABLE_RATELIMIT=1
 # so the 30-tests-per-suite hitting /api/action don't blow the limit.
 _RATELIMIT_DISABLED = os.environ.get("HARVESTER_OPS_DISABLE_RATELIMIT") == "1"
+
+try:
+    from limits import parse_many as _parse_rate_limits
+except ImportError:                                  # pragma: no cover
+    _parse_rate_limits = None
+
+
+def _validate_rate_spec(spec):
+    """Refuse au démarrage une limite que flask-limiter ne sait pas lire.
+
+    flask-limiter IGNORE EN SILENCE une chaîne invalide : le point d'entrée
+    répond normalement, sans aucune limitation, et rien ne le signale. Six
+    points d'entrée mutatifs ont ainsi porté pendant plusieurs versions une
+    limite écrite comme un nom d'action, donc illisible, donc inopérante.
+    Lever ici transforme la faute de frappe en erreur visible.
+    """
+    if _parse_rate_limits is None:                   # pragma: no cover
+        return
+    _parse_rate_limits(spec)
+
+
 if _LIMITER_AVAILABLE and not _RATELIMIT_DISABLED:
     limiter = Limiter(
         get_remote_address,
@@ -221,10 +243,14 @@ if _LIMITER_AVAILABLE and not _RATELIMIT_DISABLED:
         headers_enabled=True,  # adds X-RateLimit-* + Retry-After
     )
     def _rate_limit(spec):
+        _validate_rate_spec(spec)
         return limiter.limit(spec)
 else:
     limiter = None
     def _rate_limit(spec):
+        # Validée même quand la limitation est désactivée : c'est ainsi que
+        # la suite de tests attrape une limite mal écrite.
+        _validate_rate_spec(spec)
         def _wrap(fn):
             return fn
         return _wrap
@@ -1194,7 +1220,7 @@ def api_bmc_discover():
 
 @app.route("/api/bmc/<host>/virtualmedia", methods=["POST"])
 @requires_auth
-@_rate_limit("bmc-virtualmedia")
+@_rate_limit("20/minute")
 def api_bmc_virtualmedia(host):
     """v1.17.0 — insère ou éjecte une image dans le lecteur virtuel du BMC.
 
@@ -1235,7 +1261,7 @@ def api_bmc_virtualmedia(host):
 
 @app.route("/api/bmc/<host>/boot-once", methods=["POST"])
 @requires_auth
-@_rate_limit("bmc-boot-once")
+@_rate_limit("20/minute")
 def api_bmc_boot_once(host):
     """v1.17.0 — force la prochaine amorce sur une cible (Cd, Pxe, Hdd…).
 
@@ -2034,7 +2060,7 @@ def _reduce_pcidevice(item):
 
 @app.route("/api/pvc/<cluster>/<namespace>/<name>", methods=["DELETE"])
 @requires_auth
-@_rate_limit("pvc-delete")
+@_rate_limit("20/minute")
 def api_pvc_delete(cluster, namespace, name):
     """v1.16.0 — delete a PVC, for the orphaned volumes the Storage view
     surfaces. Deliberately refuses a claim still referenced by a VM: the
@@ -2383,7 +2409,7 @@ def _bm_local_ip_for(host):
 
 @app.route("/api/baremetal/install", methods=["POST"])
 @requires_auth
-@_rate_limit("baremetal-install")
+@_rate_limit("6/minute")
 def api_baremetal_install():
     """Lance une installation Harvester zéro-touch sur une machine nue."""
     data = request.get_json(force=True, silent=True) or {}
@@ -2555,7 +2581,7 @@ def _iso_fetch_runner(run, url, dest):
 
 @app.route("/api/iso/fetch", methods=["POST"])
 @requires_auth
-@_rate_limit("iso-fetch")
+@_rate_limit("6/minute")
 def api_iso_fetch():
     """Télécharge un ISO côté serveur. Body: {url, name?}."""
     data = request.get_json(force=True, silent=True) or {}
@@ -2576,7 +2602,7 @@ def api_iso_fetch():
 
 @app.route("/api/iso/<name>", methods=["DELETE"])
 @requires_auth
-@_rate_limit("iso-delete")
+@_rate_limit("20/minute")
 def api_iso_delete(name):
     safe = _safe_artifact_name(name)
     if not safe:
@@ -7663,44 +7689,105 @@ except PermissionError:
     TF_WORKSPACES = Path(tempfile.gettempdir()) / "harvester-ops-terraform"
     TF_WORKSPACES.mkdir(parents=True, exist_ok=True)
 
+# Emplacement des mises à jour du provider posées depuis l'interface ou par
+# `bin/harvester-provider-install.py`. Séparé du provider du livrable : une
+# mise à jour ne doit jamais écraser ce que le paquet a installé, sans quoi
+# une réinstallation du toolkit ferait silencieusement régresser la version.
+TF_PROVIDER_MANAGED = Path(os.environ.get(
+    "HARVESTER_OPS_TF_PROVIDER_MANAGED",
+    str(Path.home() / ".local/share/harvester-ops/terraform-provider"),
+))
+TF_PROVIDER_INSTALLER = "harvester-provider-install.py"
+
+
+def _tf_provider_meta():
+    """Fiche écrite à l'installation : version, empreinte, provenance.
+
+    C'est la seule source fiable pour la version d'un binaire posé à la
+    main : un provider Terraform est un greffon gRPC, l'exécuter n'affiche
+    pas sa version, elle ne se lit que dans son nom ou dans cette fiche.
+    """
+    try:
+        return json.loads((TF_PROVIDER_MANAGED / "provider.json").read_text())
+    except Exception:
+        return {}
+
 
 def _tf_provider_version():
-    """Resolve the bundled terraform-provider-harvester version. Tries `git
-    describe`, falls back to the highest v-tag in the repo, then to 'dev'."""
-    if not TF_PROVIDER_REPO.exists():
-        return "dev"
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(TF_PROVIDER_REPO), "describe", "--tags", "--abbrev=0"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
+    """Version du binaire RÉELLEMENT actif.
+
+    L'ancienne implémentation renvoyait toujours le tag git du dépôt source,
+    y compris quand le binaire utilisé venait d'ailleurs : l'écran affichait
+    alors une version qui n'était pas celle qui tournait.
+    """
+    bin_p = _tf_provider_binary()
+    if bin_p:
+        meta = _tf_provider_meta()
+        try:
+            if meta.get("version") and bin_p.is_relative_to(TF_PROVIDER_MANAGED):
+                return "v" + str(meta["version"]).lstrip("v")
+        except (AttributeError, ValueError):
+            pass
+        # Archive officielle : la version est dans le nom du binaire.
+        m = re.search(r"_v?(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$", bin_p.name)
+        if m:
+            return "v" + m.group(1)
+    # Dépôt source compilé sur place : le tag git fait foi.
+    if TF_PROVIDER_REPO.exists():
+        try:
+            r = subprocess.run(
+                ["git", "-C", str(TF_PROVIDER_REPO), "describe", "--tags",
+                 "--abbrev=0"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return r.stdout.strip()
+        except Exception:
+            pass
     return "dev"
 
 
-# Emplacements fouillés pour le binaire du provider, dans l'ordre. Le
-# premier est celui du livrable packagé ; les suivants couvrent un provider
-# compilé sur place, cas normal en développement et fréquent chez un
-# opérateur qui construit son propre binaire. N'en chercher qu'un seul
-# affichait « missing » alors que le binaire était sur la machine.
+# Emplacements fouillés pour le binaire du provider, dans l'ordre de
+# priorité :
+#   1. HARVESTER_OPS_TF_PROVIDER_PATH — surcharge explicite de l'opérateur,
+#      elle doit gagner sur tout le reste ;
+#   2. le répertoire géré — une mise à jour faite depuis l'interface serait
+#      sans effet si le provider du livrable passait devant ;
+#   3. le provider du livrable, puis les emplacements système.
+# N'en chercher qu'un seul affichait « missing » alors que le binaire était
+# sur la machine.
+def _tf_provider_roots():
+    extra = os.environ.get("HARVESTER_OPS_TF_PROVIDER_PATH", "")
+    roots = [Path(x) for x in extra.split(os.pathsep) if x]
+    roots += [
+        TF_PROVIDER_MANAGED,
+        TF_PROVIDER_REPO,
+        Path("/usr/local/share/harvester-ops/terraform-provider"),
+    ]
+    return roots
+
+
+# Le nom que porte le binaire dans l'archive officielle une fois
+# décompressée : `terraform-provider-harvester_v1.7.3`. Un opérateur qui
+# dézippe la release à la main obtient exactement ça, et ne le trouvait pas.
+_TF_PROVIDER_GLOB = "terraform-provider-harvester_v*"
+
+
 def _tf_provider_candidates():
     names = ("terraform-provider-harvester-amd64",
              "terraform-provider-harvester")
-    roots = [TF_PROVIDER_REPO]
-    extra = os.environ.get("HARVESTER_OPS_TF_PROVIDER_PATH", "")
-    roots += [Path(x) for x in extra.split(os.pathsep) if x]
-    roots += [
-        Path.home() / ".local/share/harvester-ops/terraform-provider",
-        Path("/usr/local/share/harvester-ops/terraform-provider"),
-    ]
     out = []
-    for root in roots:
+    seen = set()
+    for root in _tf_provider_roots():
         for n in names:
-            out.append(root / "bin" / n)
-            out.append(root / n)
+            for c in (root / "bin" / n, root / n):
+                if c not in seen:
+                    seen.add(c)
+                    out.append(c)
+        for c in (root / "bin" / _TF_PROVIDER_GLOB, root / _TF_PROVIDER_GLOB):
+            if c not in seen:
+                seen.add(c)
+                out.append(c)
     return out
 
 
@@ -7708,6 +7795,16 @@ def _tf_provider_binary():
     """Locate the prebuilt provider binary. None if nowhere to be found."""
     for c in _tf_provider_candidates():
         try:
+            if c.name == _TF_PROVIDER_GLOB:
+                # Plusieurs versions déposées côte à côte : prendre la plus
+                # récemment écrite, c'est celle que l'opérateur vient de
+                # poser.
+                hits = sorted((p for p in c.parent.glob(c.name)
+                               if p.is_file() and os.access(p, os.X_OK)),
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+                if hits:
+                    return hits[0]
+                continue
             if c.is_file() and os.access(c, os.X_OK):
                 return c
         except OSError:
@@ -7741,10 +7838,18 @@ def _tf_plugin_cache_init(ws_dir):
     raw = _tf_provider_version().lstrip("v") or "0.0.0"
     version = re.sub(r"-(rc|snap|alpha|beta|dev)[\w\.-]*$", "", raw)
     plug = (ws_dir / "plugins" / "registry.terraform.io" / "harvester"
-            / "harvester" / version / "linux_amd64")
+            / "harvester" / version / f"linux_{_tf_host_arch()}")
     plug.mkdir(parents=True, exist_ok=True)
     dest = plug / f"terraform-provider-harvester_v{version}"
-    if not dest.exists():
+    # Recopier aussi quand la taille diffère : réinstaller la MÊME version
+    # avec un autre binaire (un correctif reconstruit sur place) laissait
+    # sinon l'ancien greffon dans le miroir, indéfiniment.
+    try:
+        stale = (not dest.exists()
+                 or dest.stat().st_size != bin_src.stat().st_size)
+    except OSError:
+        stale = True
+    if stale:
         try:
             import shutil as _shutil
             _shutil.copy2(bin_src, dest)
@@ -7754,11 +7859,255 @@ def _tf_plugin_cache_init(ws_dir):
     return version
 
 
+def _tf_host_arch():
+    m = platform.machine().lower()
+    if m in ("x86_64", "amd64"):
+        return "amd64"
+    if m in ("aarch64", "arm64"):
+        return "arm64"
+    return m
+
+
+def _tf_provider_origin(bin_p):
+    """D'où vient le binaire actif — l'opérateur doit pouvoir distinguer une
+    mise à jour qu'il a posée du provider livré avec le paquet."""
+    if not bin_p:
+        return ""
+    for root, label in ((TF_PROVIDER_MANAGED, "managed"),
+                        (TF_PROVIDER_REPO, "bundled")):
+        try:
+            if bin_p.is_relative_to(root):
+                return label
+        except (AttributeError, ValueError):
+            pass
+    return "custom"
+
+
+def _tf_workspaces_invalidate():
+    """Force un `terraform init` neuf dans chaque workspace après un
+    changement de provider.
+
+    Indispensable : l'apply ne relance `init` que si `.terraform/` est
+    absent, et le miroir local garde une copie du greffon. Sans ce ménage,
+    une mise à jour du provider resterait sans aucun effet sur les clusters
+    déjà utilisés. Le fichier de verrou part avec, sinon terraform refuse la
+    nouvelle version pour cause d'empreinte inconnue.
+
+    Ce qui N'EST PAS touché : `terraform.tfstate`, les `.tf` et leurs
+    sidecars. Seuls les artefacts reconstructibles disparaissent.
+    """
+    import shutil as _shutil
+    touched = []
+    if not TF_WORKSPACES.exists():
+        return touched
+    for ws in sorted(TF_WORKSPACES.iterdir()):
+        if not ws.is_dir():
+            continue
+        hit = False
+        for victim in (ws / ".terraform", ws / "plugins"):
+            if victim.exists():
+                _shutil.rmtree(victim, ignore_errors=True)
+                hit = True
+        lock = ws / ".terraform.lock.hcl"
+        if lock.exists():
+            lock.unlink()
+            hit = True
+        if hit:
+            touched.append(ws.name)
+    return touched
+
+
+def _tf_provider_installer():
+    """Chemin de l'installateur, ou None s'il n'est pas déployé."""
+    p = BIN_DIR / TF_PROVIDER_INSTALLER
+    return p if p.is_file() else None
+
+
+def _tf_provider_install_runner(run, source, sha256, version, cleanup,
+                                source_label=""):
+    """Délègue à l'installateur CLI et relaie ses étapes.
+
+    L'interface ne réimplémente rien : c'est le même script qu'un opérateur
+    lance à la main sur un site airgap, d'où la parité.
+    """
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+
+    script = _tf_provider_installer()
+    try:
+        if script is None:
+            step("resolve", "error",
+                 f"{TF_PROVIDER_INSTALLER} absent de {BIN_DIR}")
+            run.exit_code = 1
+            run.status = "error"
+            run.error_summary = "installer not deployed"
+        else:
+            cmd = [sys.executable, str(script), source,
+                   "--dest", str(TF_PROVIDER_MANAGED)]
+            if sha256:
+                cmd += ["--sha256", sha256]
+            if version:
+                cmd += ["--version", version]
+            if source_label:
+                cmd += ["--source-label", source_label]
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, text=True)
+            run.proc = proc          # rend l'action annulable depuis le dock
+            for line in proc.stderr:
+                line = line.strip()
+                if line.startswith("STEP_EVENT|"):
+                    parts = line.split("|", 3)
+                    if len(parts) == 4:
+                        step(parts[1], parts[2], parts[3])
+            rc = proc.wait()
+            if rc != 0:
+                run.exit_code = rc
+                run.status = "error"
+                run.error_summary = "provider install failed"
+            else:
+                touched = _tf_workspaces_invalidate()
+                step("workspaces", "done",
+                     (f"{len(touched)} workspace(s) à réinitialiser : "
+                      + ", ".join(touched)) if touched
+                     else "aucun workspace à réinitialiser")
+                meta = _tf_provider_meta()
+                step("done", "done",
+                     f"provider actif : v{meta.get('version', '?')}")
+                run.exit_code = 0
+                run.status = "done"
+    except Exception as e:
+        run.error_summary = str(e)[:300]
+        step("install", "error", str(e)[:300])
+        run.exit_code = 1
+        run.status = "error"
+    finally:
+        if cleanup:
+            Path(cleanup).unlink(missing_ok=True)
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status,
+              "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+
+
+def _tf_provider_upload_dir():
+    """Dépôt temporaire des archives téléversées. Chmod 700 : une archive de
+    provider n'est pas un secret, mais rien n'oblige à la rendre lisible de
+    tout l'hôte."""
+    d = TF_PROVIDER_MANAGED / "incoming"
+    d.mkdir(parents=True, exist_ok=True)
+    d.chmod(0o700)
+    return d
+
+
+# Une source venue du réseau ne peut être qu'une version ou une URL http(s).
+# Accepter un chemin local ici donnerait à tout compte authentifié le moyen
+# de faire exécuter un fichier arbitraire de l'hôte comme provider ; le
+# téléversement, lui, passe par un fichier que le serveur a lui-même écrit.
+_TF_SOURCE_VERSION_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+
+
+@app.route("/api/terraform/provider/install", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_tf_provider_install():
+    """Installe ou met à jour le provider. Body: {source, sha256?, version?}.
+
+    `source` : une version (`1.7.3`) ou une URL http(s) d'archive.
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    source = (data.get("source") or "").strip()
+    sha256 = (data.get("sha256") or "").strip().lower()
+    version = (data.get("version") or "").strip()
+    if not source:
+        return jsonify({"error": "source required (version or http(s) URL)"}), 400
+    if not (_TF_SOURCE_VERSION_RE.match(source)
+            or source.startswith(("http://", "https://"))):
+        return jsonify({"error": "source must be a version (1.7.3) or an "
+                                 "http(s) URL"}), 400
+    if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return jsonify({"error": "sha256 must be 64 hex characters"}), 400
+    if version and not _TF_SOURCE_VERSION_RE.match(version):
+        return jsonify({"error": "invalid version"}), 400
+    action_id = track_action(f"tf-provider-install:{source[:60]}", "(local)",
+                             _tf_provider_install_runner,
+                             source, sha256, version, None)
+    return jsonify({"action_id": action_id, "source": source}), 202
+
+
+# Un provider linux_amd64 pèse 20 Mo compressé, 70 Mo en clair. La borne
+# laisse la marge d'une future architecture sans ouvrir la porte à un
+# téléversement qui remplirait le disque.
+TF_PROVIDER_UPLOAD_MAX = 256 * 1024 * 1024
+
+
+@app.route("/api/terraform/provider/upload", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_tf_provider_upload():
+    """Installe le provider depuis un fichier téléversé — la seule voie
+    utilisable sur un site sans accès réseau sortant."""
+    if (request.content_length or 0) > TF_PROVIDER_UPLOAD_MAX:
+        return jsonify({"error": "file too large (max 256 MiB)"}), 413
+    f = request.files.get("file")
+    if f is None or not f.filename:
+        return jsonify({"error": "no file uploaded — use form field 'file'"}), 400
+    sha256 = (request.form.get("sha256") or "").strip().lower()
+    version = (request.form.get("version") or "").strip()
+    if sha256 and not re.fullmatch(r"[0-9a-f]{64}", sha256):
+        return jsonify({"error": "sha256 must be 64 hex characters"}), 400
+    if version and not _TF_SOURCE_VERSION_RE.match(version):
+        return jsonify({"error": "invalid version"}), 400
+    # Nom imposé par le serveur : le nom client ne sert jamais à construire
+    # un chemin. Le contenu est validé par l'installateur, pas par le nom.
+    staged = _tf_provider_upload_dir() / f"upload-{uuid.uuid4().hex}.bin"
+    try:
+        f.save(str(staged))
+        staged.chmod(0o600)
+    except OSError as e:
+        return jsonify({"error": f"cannot stage upload: {e}"}), 500
+    if staged.stat().st_size == 0:
+        staged.unlink(missing_ok=True)
+        return jsonify({"error": "empty file"}), 400
+    # Le nom client ne sert QUE d'étiquette lisible, jamais de chemin : le
+    # chemin de transit, lui, ne dirait rien à l'opérateur six mois plus tard.
+    label = re.sub(r"[^\w.+-]", "_", f.filename)[:80]
+    action_id = track_action(f"tf-provider-install:{f.filename[:60]}", "(local)",
+                             _tf_provider_install_runner,
+                             str(staged), sha256, version, str(staged),
+                             f"uploaded: {label}")
+    return jsonify({"action_id": action_id, "name": f.filename}), 202
+
+
+@app.route("/api/terraform/provider", methods=["DELETE"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_tf_provider_revert():
+    """Retire la mise à jour et rend la main au provider du livrable."""
+    if not (TF_PROVIDER_MANAGED / "provider.json").exists():
+        return jsonify({"error": "no managed provider installed"}), 404
+    import shutil as _shutil
+    _shutil.rmtree(TF_PROVIDER_MANAGED, ignore_errors=True)
+    touched = _tf_workspaces_invalidate()
+    bin_p = _tf_provider_binary()
+    return jsonify({
+        "reverted": True,
+        "workspaces_reset": touched,
+        "provider_binary": str(bin_p) if bin_p else "",
+        "provider_version": _tf_provider_version(),
+        "provider_origin": _tf_provider_origin(bin_p),
+    })
+
+
 @app.route("/api/terraform/info")
 @requires_auth
 def api_terraform_info():
     """Provider + CLI versions + bundled examples count + bundle path."""
     bin_p = _tf_provider_binary()
+    meta = _tf_provider_meta()
     return jsonify({
         # Dire OÙ l'on a cherché : un badge « missing » seul laisse
         # l'opérateur sans prise, alors que le binaire est souvent là,
@@ -7769,6 +8118,16 @@ def api_terraform_info():
         "provider_version": _tf_provider_version(),
         "provider_binary": str(bin_p) if bin_p else "",
         "provider_binary_size": bin_p.stat().st_size if bin_p else 0,
+        # Mise à jour : d'où vient le binaire actif, ce que l'opérateur a
+        # posé, et si la machine sait installer (l'installateur fait partie
+        # du livrable, mais un déploiement partiel existe).
+        "provider_origin": _tf_provider_origin(bin_p),
+        "provider_managed_dir": str(TF_PROVIDER_MANAGED),
+        "provider_installed_sha256": meta.get("sha256", ""),
+        "provider_installed_source": meta.get("source", ""),
+        "provider_installed_at": meta.get("installed_at", 0),
+        "provider_can_install": _tf_provider_installer() is not None,
+        "provider_arch": _tf_host_arch(),
         "terraform_bin": TF_BIN,
         "terraform_available": Path(TF_BIN).exists(),
         "workspaces_dir": str(TF_WORKSPACES),

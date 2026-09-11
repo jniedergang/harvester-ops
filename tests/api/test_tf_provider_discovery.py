@@ -11,9 +11,24 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "web"))
 import app as wapp  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_provider_dirs(tmp_path, monkeypatch):
+    """v1.25.0 — écarter les emplacements réels de la machine.
+
+    Depuis que le provider peut être mis à jour depuis l'interface, un
+    binaire géré peut exister pour de bon sur la machine de développement.
+    Les tests « aucun provider nulle part » le trouvaient alors et
+    échouaient, alors que le code était juste.
+    """
+    monkeypatch.setattr(wapp, "TF_PROVIDER_MANAGED", tmp_path / "no-managed-here")
+    monkeypatch.setattr(wapp, "TF_PROVIDER_REPO", tmp_path / "no-bundled-here")
 
 
 def test_several_locations_are_searched():

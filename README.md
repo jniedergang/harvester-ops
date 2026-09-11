@@ -66,7 +66,7 @@ logs and a retained history.
 | **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, in-browser VNC console with power controls, visual disk & NIC editors (PVC / image / blank disk, bridge / masquerade), cloud-init assistant generating cloud-config + network-data | ✓ (`-N`) | ✓ |
 | **Cluster observability** | Live topology: cluster (VMs per node), network (rack-diagram bands per network), storage (VM-to-volume map with real PVC names, CD-ROM/ISO discs, orphaned-volume detection), Prometheus `/metrics`, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
-| **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON | — | ✓ |
+| **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON, install or update the Harvester provider (version, mirror URL or uploaded archive) | provider install | ✓ |
 | **Bare-metal** | BMC / Redfish discovery + power actions, ISO store, unattended Harvester install over virtual media | — | ✓ |
 | **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised in 5 languages (EN/FR/DE/ES/IT) with tooltips on every control | partial | ✓ |
 
@@ -124,7 +124,7 @@ ses logs live et un historique conservé.
 | **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console VNC avec commandes d'alimentation, éditeurs visuels disques & NICs (PVC / image / disque vierge, bridge / masquerade), assistant cloud-init générant cloud-config + network-data | ✓ (`-N`) | ✓ |
 | **Observabilité cluster** | Topologie live : cluster (VMs par node), réseau (bandes façon schéma de baie), stockage (carte VM-volume avec vrais noms de PVC, disques CD-ROM/ISO, détection de volumes orphelins), `/metrics` Prometheus, readiness probe | status | ✓ |
 | **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
-| **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON | — | ✓ |
+| **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON, installation ou mise à jour du provider Harvester (version, URL de miroir ou archive téléversée) | installation du provider | ✓ |
 | **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, magasin d'ISO, installation Harvester sans opérateur par média virtuel | — | ✓ |
 | **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation complète en 5 langues (EN/FR/DE/ES/IT) avec tooltips sur chaque contrôle | partiel | ✓ |
 

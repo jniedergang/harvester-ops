@@ -4,6 +4,91 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.25.0] - 2026-09-11 - Updating the Terraform provider from the console
+
+The provider shipped in the package ages faster than the toolkit: a newer
+Harvester release can require a newer provider, and replacing it meant shell
+access to the host. It is now a panel in the Terraform tab, and a CLI for the
+hosts that have no console.
+
+### Added
+- **Provider install and update, three ways.** A version (`1.7.3`) pulls the
+  official GitHub release and verifies it against the `SHA256SUMS` published
+  beside it; an http(s) URL is fetched as-is, for an internal mirror; a file
+  upload covers the airgapped site with no outbound network at all. An
+  expected SHA-256 can be supplied by hand, and then it wins over the
+  published one.
+- **`bin/harvester-provider-install.py`** does the actual work, standard
+  library only, and is what the console spawns. The same command installs the
+  provider on a host that has no console at all:
+  `bin/harvester-provider-install.py 1.7.3 --dest <dir>`.
+- **The Install sub-tab now names the active binary**, its version, its
+  architecture, and where it came from: installed here, from the package, or
+  a custom path. One button reverts to the provider shipped in the package.
+- **Refusals that explain themselves**: a checksum mismatch, a binary built
+  for another architecture (caught from the ELF header, instead of letting
+  Terraform fail later on an `exec format error`), an archive with no
+  provider in it, and the most common one of all, an HTML error page
+  downloaded in place of the file.
+
+### Fixed
+- **Six mutative endpoints were not rate-limited at all.** flask-limiter
+  silently ignores a limit string it cannot parse, and those six carried a
+  decorator written as an action name (`@_rate_limit("iso-fetch")`) rather
+  than a rate. No exception, no log, no limit. They now carry real rates, and
+  an unparseable one raises at import instead of disappearing.
+- **The reported provider version was the source repository's git tag**, even
+  when the binary actually in use came from somewhere else. It is now read
+  from the binary that Terraform will really execute.
+- **A provider unzipped by hand was not found.** Extracting the official
+  archive yields `terraform-provider-harvester_v1.7.3`, a name that was
+  searched for nowhere, so the tab said "missing" with the binary sitting
+  right there. It is now found, and it carries its own version.
+- **Rebuilding the same version left the old plugin in the workspace
+  mirror**, indefinitely, because only the version directory was compared.
+- **`install.sh` deployed a hardcoded list of three scripts.**
+  `harvester-iso-remaster.sh` had been missing from it since 1.19.0, so on a
+  host installed that way the bare-metal install failed on a script that was
+  not there. It now deploys every helper in `bin/`, which is also what keeps
+  the next one from being forgotten.
+
+### Changed
+- **A provider installed from the console takes precedence over the packaged
+  one** (otherwise the update would sit on disk with no effect), while an
+  explicit `HARVESTER_OPS_TF_PROVIDER_PATH` still wins over both: it is the
+  operator's way out when everything else guesses wrong.
+- **Changing the provider re-initialises every workspace** on its next apply.
+  Without it the update would have had no effect on clusters already in use:
+  apply only runs `terraform init` when `.terraform/` is absent, and the
+  local mirror keeps its own copy of the plugin. Terraform state, `.tf` files
+  and their sidecars are left untouched.
+- The workspace plugin mirror is laid out for the host architecture instead
+  of assuming `linux_amd64`.
+
+### Tests
+- The installer exercised for real on archives built inside the test: local
+  zip, bare binary, wrong checksum, zip-slip member, wrong architecture, HTML
+  error page, and reinstallation over a previous version.
+- Resolution order, version reading, and the workspace invalidation keeping
+  state while dropping what is rebuildable.
+- Endpoint refusals, including a local path as a source, which would
+  otherwise let any authenticated account have an arbitrary host file
+  installed and executed as the provider.
+- Every `@_rate_limit` string in the source is checked to actually parse.
+- Test isolation: the suite no longer sees the provider really installed on
+  the machine running it, which used to break it as soon as the feature had
+  been used once.
+- Deployment: `install.sh` and the container image are checked to carry
+  every helper in `bin/`, executable.
+- 562 API tests green, plus 4 browser tests on the update panel.
+
+### Verified for real
+Against harv1 and the upstream release: `1.8.0` (packaged) to `1.7.3`
+(installed by version, checksum verified against the published SHA256SUMS)
+to `1.7.2` (uploaded as a file) and back to `1.8.0` (reverted). Terraform
+re-locked the right version each time, and the `1.7.3` provider read a real
+image from the live cluster.
+
 ## [1.24.0] - 2026-09-11 - Three defects found by using the thing
 
 ### Fixed

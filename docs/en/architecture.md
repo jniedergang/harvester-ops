@@ -45,6 +45,17 @@ lose data. The higher-level surfaces are conventional API clients.
   console to parse into SSE events.
 - Read configuration from `/etc/harvester-ops/config.yaml`.
 
+### Helper tools (`bin/`, Python)
+
+- `harvester-provider-install.py` installs or updates the Terraform
+  provider from a version, a URL or a local file. Standard library only,
+  so it runs on an airgapped host where nothing but `python3` and the
+  extracted tarball exist.
+- Same `STEP_EVENT` contract as the bash scripts, so the console streams
+  them through the identical SSE path. The console spawns this script
+  rather than reimplementing the install, which is what keeps the CLI and
+  the UI at parity.
+
 ### Common library (`bin/lib/common.sh`)
 
 - Logging (colored TTY + plain log file).

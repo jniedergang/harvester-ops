@@ -90,9 +90,14 @@ install_scripts() {
     info "Installing CLI scripts to $PREFIX/"
     install -d -m 0755 "$PREFIX"
     install -d -m 0755 "$PREFIX/lib"
-    install -m 0755 "$SCRIPT_DIR/bin/harvester-shutdown.sh" "$PREFIX/"
-    install -m 0755 "$SCRIPT_DIR/bin/harvester-startup.sh"  "$PREFIX/"
-    install -m 0755 "$SCRIPT_DIR/bin/harvester-status.sh"   "$PREFIX/"
+    # Every helper in bin/, not a hardcoded list: harvester-iso-remaster.sh
+    # had already been left out, which makes the bare-metal install fail
+    # with a missing script, and the provider installer would have been the
+    # next one forgotten.
+    for helper in "$SCRIPT_DIR"/bin/*.sh "$SCRIPT_DIR"/bin/*.py; do
+        [ -f "$helper" ] || continue
+        install -m 0755 "$helper" "$PREFIX/"
+    done
     install -m 0644 "$SCRIPT_DIR/bin/lib/common.sh"         "$PREFIX/lib/"
     ln -sf "$PREFIX/harvester-shutdown.sh" "$PREFIX/harvester-shutdown"
     ln -sf "$PREFIX/harvester-startup.sh"  "$PREFIX/harvester-startup"

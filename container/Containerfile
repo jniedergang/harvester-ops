@@ -39,7 +39,7 @@ WORKDIR /opt/harvester-ops
 
 # Copy scripts
 COPY bin/                /usr/local/bin/
-RUN chmod +x /usr/local/bin/harvester-*.sh && \
+RUN chmod +x /usr/local/bin/harvester-*.sh /usr/local/bin/harvester-*.py && \
     ln -sf /usr/local/bin/harvester-shutdown.sh /usr/local/bin/harvester-shutdown && \
     ln -sf /usr/local/bin/harvester-startup.sh  /usr/local/bin/harvester-startup  && \
     ln -sf /usr/local/bin/harvester-status.sh   /usr/local/bin/harvester-status

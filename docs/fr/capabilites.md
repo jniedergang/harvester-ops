@@ -183,6 +183,16 @@ sauvegardées.
 - **Éditer les ressources déployées** — chaque ressource appliquée écrit
   un sidecar JSON pour recharger et éditer sa spec d'origine depuis le
   sous-onglet Live.
+- **Mettre à jour le provider depuis la console** : installer une autre
+  version de `terraform-provider-harvester` sans accès shell à l'hôte.
+  Au choix : une version (la release officielle est téléchargée puis
+  comparée au `SHA256SUMS` publié), une URL vers un miroir interne, ou le
+  téléversement de l'archive depuis un poste sans aucun accès réseau
+  sortant. Le sous-onglet Install nomme le binaire actif, sa version et sa
+  provenance, et un clic rend la main à celui du livrable. Chaque
+  workspace est réinitialisé à son prochain apply ; le state Terraform
+  n'est jamais touché. La même installation se fait en CLI :
+  `bin/harvester-provider-install.py 1.7.3 --dest <rep>`.
 
 ## 6. Bare-metal (console)
 
