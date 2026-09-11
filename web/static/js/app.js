@@ -1497,16 +1497,91 @@ const App = (() => {
 
     $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
 
-    // Sidebar collapse/expand toggle (persists in localStorage)
-    const SIDEBAR_STORAGE = 'harvester_ops_sidebar_collapsed';
-    const applySidebar = (collapsed) => {
-      document.body.classList.toggle('sidebar-collapsed', collapsed);
-      try { localStorage.setItem(SIDEBAR_STORAGE, collapsed ? '1' : '0'); } catch {}
+    // -------------------------------------------------------------------
+    // Menu latéral : rail par défaut, dépliage au survol, épinglage
+    // optionnel.
+    //
+    // Le menu est un CALQUE (cf. style.css) : le déplier ne redimensionne
+    // plus la zone de travail. Avant, chaque ouverture poussait le contenu
+    // et déplaçait le panneau de détail de la topologie. Seul l'épinglage,
+    // geste explicite, lui rend une colonne dans le flux.
+    // -------------------------------------------------------------------
+    const SIDEBAR_PINNED = 'harvester_ops_sidebar_pinned';
+    const SIDEBAR_LEGACY = 'harvester_ops_sidebar_collapsed';
+    const sidebarEl = $('#sidebar');
+    const isPinned = () => document.body.classList.contains('sidebar-pinned');
+    const setCollapsed = (v) =>
+      document.body.classList.toggle('sidebar-collapsed', v);
+
+    const applyPinned = (pinned) => {
+      document.body.classList.toggle('sidebar-pinned', pinned);
+      // Dépingler sous le curseur ne doit pas escamoter le menu : le survol
+      // reprend la main tout de suite, sans exiger de ressortir puis
+      // revenir.
+      setCollapsed(!pinned && !sidebarEl?.matches(':hover'));
+      try { localStorage.setItem(SIDEBAR_PINNED, pinned ? '1' : '0'); } catch {}
     };
-    applySidebar(localStorage.getItem(SIDEBAR_STORAGE) === '1');
-    $('#btn-sidebar-collapse')?.addEventListener('click', () => {
-      applySidebar(!document.body.classList.contains('sidebar-collapsed'));
+
+    let pinnedInitial = false;
+    try {
+      const stored = localStorage.getItem(SIDEBAR_PINNED);
+      // Reprise de l'ancien réglage : qui avait laissé le menu déplié le
+      // retrouve épinglé, au lieu de le voir se replier tout seul au
+      // premier chargement après mise à jour.
+      pinnedInitial = stored !== null
+        ? stored === '1'
+        : localStorage.getItem(SIDEBAR_LEGACY) === '0';
+    } catch {}
+    applyPinned(pinnedInitial);
+
+    // Temporisations : sans elles, une souris qui traverse le rail pour
+    // atteindre le contenu déclenche un dépliage parasite à chaque passage.
+    const HOVER_OPEN_MS = 120, HOVER_CLOSE_MS = 260;
+    let hoverTimer = null;
+    const scheduleHover = (collapsed, delay) => {
+      clearTimeout(hoverTimer);
+      hoverTimer = setTimeout(() => {
+        if (!isPinned()) setCollapsed(collapsed);
+      }, delay);
+    };
+    sidebarEl?.addEventListener('mouseenter',
+      () => scheduleHover(false, HOVER_OPEN_MS));
+    sidebarEl?.addEventListener('mouseleave', () => {
+      // La souris sortie, le menu se referme même si un de ses éléments
+      // garde le focus : sinon un clic sur le sélecteur de cluster laissait
+      // un calque ouvert par-dessus la page. Sauf navigation au clavier en
+      // cours, qu'on ne doit pas interrompre.
+      if (keyboardInside()) return;
+      scheduleHover(true, HOVER_CLOSE_MS);
     });
+    // Navigation au CLAVIER : sans ça, tabuler dans le menu parcourt des
+    // libellés invisibles.
+    //
+    // `:focus-visible` et pas `:focus` : un simple clic sur le sélecteur de
+    // cluster donne le focus à un élément du menu, et le menu restait alors
+    // ouvert indéfiniment — un calque de 240 px par-dessus la page, qui
+    // avalait les clics du contenu en dessous jusqu'à ce qu'on aille
+    // cliquer ailleurs. Le navigateur ne pose `:focus-visible` que sur un
+    // focus venu du clavier, ce qui est exactement la distinction voulue.
+    const keyboardInside = () => {
+      try { return !!sidebarEl?.querySelector(':focus-visible'); }
+      catch { return false; }          // sélecteur inconnu d'un vieux moteur
+    };
+    sidebarEl?.addEventListener('focusin', () => {
+      if (!isPinned() && keyboardInside()) {
+        clearTimeout(hoverTimer);
+        setCollapsed(false);
+      }
+    });
+    sidebarEl?.addEventListener('focusout', (e) => {
+      if (!isPinned() && !sidebarEl.contains(e.relatedTarget)
+          && !sidebarEl.matches(':hover')) {
+        setCollapsed(true);
+      }
+    });
+
+    $('#btn-sidebar-pin')?.addEventListener('click',
+      () => applyPinned(!isPinned()));
 
     // Keep every inline .dry-run-sync checkbox (shutdown + startup tabs) in
     // sync with each other. The sidebar toggle was removed in 1.3.4 because

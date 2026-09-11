@@ -11,19 +11,34 @@ const CAPI = (() => {
   const $  = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
 
+  // Le diagnostic CAPI interroge le cluster : plusieurs secondes sur un
+  // cluster lent. Un « Loading… » qui vide la carte donnait l'impression
+  // que l'onglet s'était cassé. Même voile flouté que les autres
+  // chargements, posé sur la CARTE : le corps est réécrit par le rendu et
+  // emporterait le voile avec lui.
+  function veiled(bodyEl, cluster, work) {
+    if (!window.Veil || !bodyEl) return work();
+    return window.Veil.during(bodyEl.closest('.card') || bodyEl, {
+      message: window.i18n ? i18n.t('common.loadingNamed') : 'Loading {name}…',
+      name: cluster,
+      delay: 250,
+    }, work);
+  }
+
   async function refresh() {
     if (!window.App) return;
     const cluster = window.App && document.querySelector('#cluster-select')?.value;
     if (!cluster) return;
     const out = $('#capi-status-body');
     if (!out) return;
-    out.innerHTML = '<p class="form-hint">Loading…</p>';
-    try {
-      const d = await fetch(`/api/capi/${encodeURIComponent(cluster)}/diag`).then(r => r.json());
-      render(out, d);
-    } catch (e) {
-      out.innerHTML = `<div class="summary-bar bad">${e.message}</div>`;
-    }
+    return veiled(out, cluster, async () => {
+      try {
+        const d = await fetch(`/api/capi/${encodeURIComponent(cluster)}/diag`).then(r => r.json());
+        render(out, d);
+      } catch (e) {
+        out.innerHTML = `<div class="summary-bar bad">${e.message}</div>`;
+      }
+    });
   }
 
   function render(out, d) {
@@ -653,7 +668,10 @@ const CAPI = (() => {
     if (!out) return;
     const cluster = document.querySelector('#cluster-select')?.value;
     if (!cluster) { out.innerHTML = '<p class="form-hint">Select a Harvester cluster first.</p>'; return; }
-    out.innerHTML = '<p class="form-hint">Loading…</p>';
+    return veiled(out, cluster, () => k8sClustersInner(out, cluster));
+  }
+
+  async function k8sClustersInner(out, cluster) {
     let diag;
     try { diag = await fetch(`/api/capi/${encodeURIComponent(cluster)}/diag`).then(r => r.json()); }
     catch (e) { out.innerHTML = `<div class="summary-bar bad">${e.message}</div>`; return; }

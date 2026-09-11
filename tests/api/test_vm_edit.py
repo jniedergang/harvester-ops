@@ -488,8 +488,15 @@ def test_tf_form_add_consumes_new_item_and_headers_stay_live():
     assert "readItemValues" in tf
     assert "addEventListener('input', refreshHead)" in tf
     assert "addEventListener('change', refreshHead)" in tf
-    # header updated via textContent (plain text — no HTML injection path)
-    assert "head.textContent = ndef.itemTitle(" in tf
+    # v1.26.0 : l'en-tête passait par `textContent`, choisi à l'époque pour
+    # fermer toute injection. Depuis les icônes SVG, il affichait la balise
+    # `<svg …>` en toutes lettres devant chaque étiquette. Le rendu passe
+    # maintenant par `itemHeadHtml`, qui échappe le texte (il vient de la
+    # VM) et n'accepte de l'icône qu'un NOM pioché dans le jeu vérifié :
+    # même garantie, sans le dégât d'affichage. Détail dans
+    # tests/api/test_item_title_icons.py.
+    assert "head.textContent = ndef.itemTitle(" not in tf
+    assert "head.innerHTML = itemHeadHtml(" in tf
 
 
 def test_text_fields_offer_suggestions_without_blocking_free_input():

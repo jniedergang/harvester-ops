@@ -201,13 +201,37 @@ const TFForm = (() => {
     }).join('');
   }
 
+  // ---------------------------------------------------------------------
+  // En-tête récapitulatif d'un élément de bloc.
+  //
+  // `itemTitle` peut renvoyer deux choses :
+  //   * une CHAÎNE, traitée comme du texte et échappée intégralement ;
+  //   * un OBJET `{ icon, text }`, dont seul `text` est échappé, `icon`
+  //     n'étant qu'un NOM piochY dans le jeu d'icônes vérifié.
+  //
+  // Ce contrat existe parce que l'inverse a été livré : les titres
+  // renvoyaient `Icons.svg('tag') + ' app = ...'` et tout était échappé, si
+  // bien que l'écran affichait la balise `<svg …>` en toutes lettres devant
+  // chaque étiquette. Laisser passer du HTML brut aurait « réparé »
+  // l'affichage en ouvrant une injection : les valeurs viennent de la spec
+  // de la VM. Séparer les deux rend la faute impossible à refaire.
+  // ---------------------------------------------------------------------
+  function itemHeadHtml(ndef, values, index) {
+    const out = ndef.itemTitle(values, index);
+    if (out && typeof out === 'object') {
+      const icon = out.icon && window.Icons ? Icons.svg(out.icon, { size: 14 }) : '';
+      return `${icon} ${esc(out.text == null ? '' : out.text)}`;
+    }
+    return esc(out == null ? '' : out);
+  }
+
   function renderNestedInstance(kind, nkey, ndef, index, values) {
     const path = `${nkey}[${index}]`;
     const min = ndef.min || 0;
     const canRemove = index >= min;
-    // v1.8.0: optional per-item summary header (e.g. "💾 rootdisk — virtio · 20Gi")
+    // v1.8.0: optional per-item summary header (e.g. "rootdisk — virtio · 20Gi")
     const head = typeof ndef.itemTitle === 'function'
-      ? `<div class="tf-block-item__head">${esc(ndef.itemTitle(values || {}, index))}</div>`
+      ? `<div class="tf-block-item__head">${itemHeadHtml(ndef, values || {}, index)}</div>`
       : '';
     return `
       <div class="tf-block-item" data-block-index="${index}">
@@ -347,7 +371,9 @@ const TFForm = (() => {
         const fs = item.closest('.tf-block');
         const ndef = fs && (schema.nested || {})[fs.dataset.block];
         if (!ndef || typeof ndef.itemTitle !== 'function') return;
-        head.textContent = ndef.itemTitle(readItemValues(item, ndef),
+        // `textContent` aurait recraché la balise de l'icône en clair : même
+        // chemin d'échappement que le rendu initial, une seule règle.
+        head.innerHTML = itemHeadHtml(ndef, readItemValues(item, ndef),
           parseInt(item.dataset.blockIndex, 10) || 0);
       };
       rootEl.addEventListener('input', refreshHead);

@@ -102,9 +102,12 @@
     </nav>
 
     <footer>
-      <button class="sidebar-collapse-btn" id="btn-sidebar-collapse" data-i18n-title="sidebar.collapse" title="Collapse sidebar">
-        <span class="when-expanded" data-icon="chevronLeft"></span>
-        <span class="when-collapsed" data-icon="chevronRight"></span>
+      <button class="sidebar-collapse-btn tip" id="btn-sidebar-pin"
+              data-tip-i18n="sidebar.pinTip" data-i18n-title="sidebar.pinTip"
+              title="Keep the menu open instead of letting it expand on hover">
+        <span class="tab-icon" data-icon="pin"></span>
+        <span class="sidebar-label when-unpinned" data-i18n="sidebar.pin">Pin menu open</span>
+        <span class="sidebar-label when-pinned" data-i18n="sidebar.unpin">Unpin menu</span>
       </button>
     </footer>
   </aside>

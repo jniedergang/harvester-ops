@@ -33,7 +33,12 @@
 :root {
   /* Non-themed structural vars */
   --sidebar-w: 240px;
-  --sidebar-w-collapsed: 56px;
+  /* Le rail est la place que la mise en page RÉSERVE en permanence. Il ne
+     varie jamais : c'est ce qui empêche le contenu et le dock de sauter
+     quand le menu s'ouvre au survol. Seul un épinglage explicite élargit
+     la réserve. */
+  --sidebar-rail: 56px;
+  --sidebar-w-collapsed: var(--sidebar-rail);
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
   --brand-logo-size:  24px;
@@ -383,14 +388,53 @@ html, body {
 /* -----------------------------------------------------------------------
    Sidebar
    ----------------------------------------------------------------------- */
+/* Le menu est un CALQUE, pas une colonne du flux : il se déplie par-dessus
+   le contenu. Avant, il poussait tout, si bien que le moindre survol
+   redimensionnait la zone de travail et déplaçait le panneau de détail de
+   la topologie. */
 #sidebar {
+  position: fixed;
+  top: 0; left: 0;
+  height: 100vh;
   width: var(--sidebar-w);
   background: var(--bg-panel);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
   padding: 16px 0;
-  transition: width 0.2s ease;
+  transition: width 0.18s ease, box-shadow 0.18s ease;
   flex-shrink: 0;
+  /* Au-dessus du dock (800) et de la barre des fenêtres (850), qu'il
+     recouvre en se dépliant ; sous les panneaux flottants (921+), la
+     doc (900) et les modales (1000+), qui doivent pouvoir le couvrir.
+     900 entrait en égalité avec .docs-panel, donc dans un ordre décidé
+     par la position dans le DOM. */
+  z-index: 880;
+  overflow-x: hidden;  /* les libellés ne débordent pas du rail */
+  /* RIEN ne doit revenir à la ligne ici. En s'ouvrant, le menu rend ses
+     textes visibles AVANT d'avoir fini d'élargir : chaque texte trop long
+     se répartissait alors sur deux lignes dans 56 px, la rangée doublait
+     de hauteur et toutes les suivantes descendaient. On appuyait sur une
+     entrée et on relâchait sur une autre : le navigateur jetait le clic.
+     Le titre de marque le faisait le temps d'une seule image, ce qui
+     suffisait. Le texte trop long est coupé par l'overflow ci-dessus. */
+  white-space: nowrap;
+}
+
+/* L'ombre dit que le menu est posé PAR-DESSUS le contenu, ce qui est vrai
+   dans les deux cas, épinglé compris. Sans elle, un menu déplié se lit
+   comme une colonne et l'on cherche pourquoi le texte dessous est tronqué. */
+body:not(.sidebar-collapsed) #sidebar {
+  box-shadow: 6px 0 24px rgba(0, 0, 0, 0.28);
+}
+
+/* La zone de travail ne connaît QUE le rail, dans tous les cas. Le menu ne
+   redimensionne donc jamais rien : ni au survol, ni épinglé. C'est la seule
+   façon d'empêcher le panneau de détail de la topologie, les canvas et les
+   tableaux de sauter sous les yeux de l'opérateur. */
+#content { margin-left: var(--sidebar-rail); }
+
+@media (prefers-reduced-motion: reduce) {
+  #sidebar { transition: none; }
 }
 
 /* Collapsed sidebar: icon-only, narrow width */
@@ -400,27 +444,56 @@ body.sidebar-collapsed {
 body.sidebar-collapsed #sidebar {
   width: var(--sidebar-w-collapsed);
 }
+/* Ce qui ne prend pas de hauteur propre peut disparaître franchement. */
 body.sidebar-collapsed .sidebar-label,
-body.sidebar-collapsed #sidebar .version,
-body.sidebar-collapsed .cluster-selector label,
-body.sidebar-collapsed .cluster-row #cluster-select,
 body.sidebar-collapsed .dry-run-toggle label > span,
 body.sidebar-collapsed #sidebar .brand .title {
   display: none !important;
 }
+/* Ceux-ci, en revanche, OCCUPENT une hauteur. Les retirer du flux faisait
+   remonter toute la navigation de 55 px dans le rail, puis redescendre au
+   dépliage : on visait « Activité », le menu s'ouvrait sous le curseur et
+   le clic atterrissait sur la ligne voisine. `visibility` masque sans
+   libérer la place, donc la géométrie verticale est rigoureusement la
+   même dans les deux états. */
+body.sidebar-collapsed #sidebar .version,
+body.sidebar-collapsed .cluster-selector label {
+  visibility: hidden;
+}
+/* Le sélecteur de cluster, LUI, reste utilisable dans le rail. Le masquer
+   obligeait à ouvrir le menu pour lire ou changer de cluster, sur une
+   console dont c'est le contrôle le plus utilisé, et le rendait carrément
+   inatteignable au clavier comme au script. Il occupe la largeur du rail,
+   le nom est tronqué mais lisible, et le bouton « + » (ajouter un cluster,
+   geste rare) attend le dépliage. La hauteur de la rangée ne change pas. */
+body.sidebar-collapsed .cluster-row #cluster-select {
+  width: 100%;
+  min-width: 0;
+  padding-left: 4px;
+  padding-right: 4px;
+}
+body.sidebar-collapsed .cluster-row .btn-icon-sm { display: none; }
+/* Exception au `display:none !important` ci-dessus : ce libellé porte la
+   classe `sidebar-label` mais occupe une LIGNE dans l'en-tête. Le retirer
+   du flux remontait toute la navigation de 19 px. */
+body.sidebar-collapsed .cluster-selector > label.sidebar-label {
+  display: block !important;
+  visibility: hidden;
+}
+/* Seul l'espacement HORIZONTAL change : toucher au vertical recréerait le
+   décalage. */
 body.sidebar-collapsed #sidebar header {
-  padding: 0 8px 12px;
+  padding: 0 8px 16px;
   text-align: center;
 }
 body.sidebar-collapsed #sidebar .brand { justify-content: center; }
 body.sidebar-collapsed .cluster-selector {
-  padding: 10px 8px;
+  padding: 14px 8px;
   border-bottom: 1px solid var(--border);
 }
 body.sidebar-collapsed .cluster-row {
   justify-content: center;
 }
-body.sidebar-collapsed .cluster-row .btn-icon-sm { margin: 0 auto; }
 body.sidebar-collapsed .tab {
   padding: 10px 0;
   text-align: center;
@@ -434,7 +507,10 @@ body.sidebar-collapsed .tab.active {
 body.sidebar-collapsed .tab .tab-icon {
   display: inline-flex;
 }
-body.sidebar-collapsed .tab .tab-icon .icon { width: 18px; height: 18px; }
+/* L'icône gardait 18 px dans le rail contre 16 ailleurs : 1 px de plus par
+   ligne, qui s'accumulait et décalait la navigation de 6 px en bas du
+   menu. Même taille dans les deux états. */
+body.sidebar-collapsed .tab .tab-icon .icon { width: 16px; height: 16px; }
 body.sidebar-collapsed #sidebar footer {
   padding: 8px;
   text-align: center;
@@ -443,27 +519,33 @@ body.sidebar-collapsed .dry-run-toggle {
   text-align: center;
 }
 
-/* Collapse toggle button */
+/* Bouton d'épinglage — aligné sur les onglets pour que le rail reste une
+   colonne d'icônes régulière. */
 .sidebar-collapse-btn {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   width: 100%;
   background: transparent;
   border: 0;
   border-top: 1px solid var(--border);
   margin-top: 8px;
-  padding: 6px;
+  padding: 10px 18px;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 16px;
+  font-size: 14px;
   font-weight: 500;
+  font-family: inherit;
+  text-align: left;
 }
 .sidebar-collapse-btn:hover {
   color: var(--accent);
   background: var(--bg-elev);
 }
-.sidebar-collapse-btn .when-collapsed { display: none; }
-body.sidebar-collapsed .sidebar-collapse-btn .when-expanded { display: none; }
-body.sidebar-collapsed .sidebar-collapse-btn .when-collapsed { display: inline; }
+body.sidebar-collapsed .sidebar-collapse-btn {
+  justify-content: center;
+  padding: 10px 0;
+}
 
 #sidebar header {
   padding: 0 18px 16px 18px;
@@ -542,6 +624,15 @@ body.sidebar-collapsed .sidebar-collapse-btn .when-collapsed { display: inline; 
   border-left: 3px solid transparent;
   font-size: 13px;
   transition: all 0.15s ease;
+  /* Pendant l'ouverture du menu, les libellés redeviennent visibles avant
+     que la largeur ait fini d'animer : sans cette règle, « Machines
+     virtuelles » passait à la ligne dans 56 px, la rangée doublait de
+     hauteur et TOUTES les suivantes descendaient. On appuyait sur
+     « Activité » et on relâchait sur « Machines virtuelles » : le clic
+     partait à la poubelle (cible = <nav>). Le libellé est coupé par
+     l'overflow du menu, jamais renvoyé à la ligne (règle posée sur
+     #sidebar). La coupe se fait ici, rangée par rangée. */
+  overflow: hidden;
 }
 .tab .tab-icon {
   display: inline-flex;
@@ -1467,7 +1558,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
    ============================================================================ */
 .bottom-dock {
   position: fixed;
-  left: var(--sidebar-w);
+  left: var(--sidebar-rail);
   right: 0;
   bottom: 0;
   height: var(--dock-height, 160px);
@@ -1742,7 +1833,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 /* Minimized-panel dock bar (above the actions dock) */
 .min-bar {
   position: fixed;
-  left: var(--sidebar-w);
+  left: var(--sidebar-rail);
   right: 0;
   bottom: 0;
   display: flex;
@@ -1777,6 +1868,51 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Trois états, lisibles d'un coup d'oeil : au premier plan, ouverte mais
+   recouverte, rangée. Sans cette distinction la barre ne dirait pas laquelle
+   des fenêtres on regarde. */
+.min-chip[data-state="front"] {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--btn-primary-text, #fff);
+}
+.min-chip[data-state="front"] .floating-panel-icon .icon { color: currentColor; }
+.min-chip[data-state="min"] {
+  opacity: 0.62;
+  border-style: dashed;
+}
+.min-chip[data-state="min"]:hover { opacity: 1; }
+
+/* Fenêtres d'une même entité : le nom est écrit UNE fois, les fenêtres
+   s'empilent derrière lui. */
+.tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg);
+  max-width: 100%;
+}
+.tb-group .tb-entity {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+  padding-right: 4px;
+  border-right: 1px solid var(--border);
+  margin-right: 2px;
+}
+.tb-group .min-chip {
+  border-radius: 13px;
+  padding: 3px 8px;
+  max-width: 160px;
 }
 
 /* VM edit layout: vertical menu on left + content on right */
@@ -2120,6 +2256,11 @@ body.has-dock #content {
 body.has-dock.dock-collapsed #content {
   padding-bottom: 56px;
 }
+/* La barre des fenêtres est un calque fixe : elle recouvrirait les dernières
+   lignes d'un tableau sans réserve dédiée. */
+body.has-taskbar #content { padding-bottom: 60px; }
+body.has-dock.has-taskbar #content { padding-bottom: 224px; }
+body.has-dock.dock-collapsed.has-taskbar #content { padding-bottom: 100px; }
 
 /* VM order toolbar (filter + sort + priority help) */
 .vm-order-toolbar {
@@ -2673,8 +2814,12 @@ a.bundle-inspect:hover { text-decoration: underline; }
   color: var(--accent);
   background: var(--bg-elev);
 }
-/* In collapsed sidebar mode (icon-only) hide children to avoid stacked icons */
-body.sidebar-collapsed .tab-group-children { display: none; }
+/* Les enfants d'un groupe ouvert restent visibles dans le rail, en icônes.
+   Les masquer changerait le NOMBRE de rangées entre les deux états, donc
+   ferait remonter puis redescendre toute la navigation au survol. La règle
+   qui les cachait est retirée plutôt que laissée inerte : elle perdait déjà
+   en spécificité face à `.tab-group.expanded .tab-group-children`, et un
+   remaniement du CSS l'aurait réveillée. */
 body.sidebar-collapsed .tab-group-chevron { display: none; }
 
 /* Activity history table: cap at ~5 rows then scroll, sortable headers */
@@ -3899,3 +4044,10 @@ body.veil-blocking #app { pointer-events: none; }
 .tf-missing-where { margin-top: 6px; }
 .tf-missing-where summary { cursor: pointer; font-size: .82rem; color: var(--text-dim); }
 .tf-missing-where ul { margin: 4px 0 0 18px; }
+
+/* Le bouton d'épinglage garde la couleur d'accent quand il est actif, pour
+   que l'état se lise sans survoler. */
+body.sidebar-pinned .sidebar-collapse-btn { color: var(--accent); }
+.sidebar-collapse-btn .when-pinned { display: none; }
+body.sidebar-pinned .sidebar-collapse-btn .when-pinned { display: inline; }
+body.sidebar-pinned .sidebar-collapse-btn .when-unpinned { display: none; }

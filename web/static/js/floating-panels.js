@@ -106,7 +106,11 @@ const FloatingPanels = (() => {
     } else {
       bar.style.bottom = '0';
     }
-    bar.style.display = bar.children.length === 0 ? 'none' : 'flex';
+    const empty = bar.children.length === 0;
+    bar.style.display = empty ? 'none' : 'flex';
+    // La barre est un calque fixe : sans réserve en bas du contenu, elle
+    // recouvre les dernières lignes des tableaux.
+    document.body.classList.toggle('has-taskbar', !empty);
   }
 
   function open(opts) {
@@ -169,6 +173,9 @@ const FloatingPanels = (() => {
     };
 
     panels.set(opts.id, { el, opts, api, minimized: false });
+    // La fenêtre entre dans la barre dès son ouverture : c'est ce qui
+    // permet de la retrouver quand une autre la recouvre.
+    renderTaskbar();
     persistOpen();
 
     // Drag & resize — Pointer Events with setPointerCapture. The old
@@ -257,7 +264,131 @@ const FloatingPanels = (() => {
     const p = panels.get(id);
     if (!p) return;
     p.el.style.zIndex = ++zCounter;
+    renderTaskbar();
   }
+
+  // =========================================================================
+  // Barre de tâches
+  //
+  // Elle ne listait QUE les fenêtres minimisées : une fenêtre ouverte mais
+  // recouverte par une autre devenait introuvable, et il fallait la
+  // minimiser pour qu'elle apparaisse enfin quelque part. Elle liste
+  // désormais TOUTE fenêtre ouverte, et le clic fait l'aller-retour.
+  //
+  // Les fenêtres d'une même entité (une VM, un cluster) sont regroupées sous
+  // son nom, écrit une fois : ouvrir console + édition + snapshots sur la
+  // même machine donnait trois pavés qui répétaient tous « default/leap156 ».
+  // =========================================================================
+
+  // Libellé court par type de fenêtre. Le titre complet reste dans
+  // l'infobulle ; dans un groupe, seule la nature de la fenêtre distingue
+  // les éléments, l'entité étant déjà nommée par le groupe.
+  // Clés écrites en toutes lettres : `i18n.t(uneVariable)` est invisible au
+  // contrôle de parité i18n, qui ne lit que des littéraux. Le helper `tr`
+  // est reconnu par ce même contrôle (comme dans dock.js).
+  const tr = (key, fallback) => (window.i18n ? i18n.t(key) : fallback);
+
+  const KIND_LABELS = {
+    'vm-console':   () => tr('panel.kind.console',   'Console'),
+    'vm-edit':      () => tr('panel.kind.edit',      'Settings'),
+    'vm-snapshots': () => tr('panel.kind.snapshots', 'Snapshots'),
+    'vm-migrate':   () => tr('panel.kind.migrate',   'Migrate'),
+    'notes':        () => tr('panel.kind.notes',     'Notes'),
+  };
+
+  function kindLabel(opts) {
+    const type = opts.restoreSpec && opts.restoreSpec.type;
+    const fn = KIND_LABELS[type];
+    return fn ? fn() : (opts.title || '');
+  }
+
+  // Une entité = ce que les fenêtres ont en commun. Déduite des arguments de
+  // restauration, que toutes les fenêtres liées à une machine portent déjà :
+  // rien à changer côté appelants.
+  function entityOf(opts) {
+    if (opts.entity && opts.entity.key) return opts.entity;
+    const a = (opts.restoreSpec && opts.restoreSpec.args) || {};
+    if (a.namespace && a.name) {
+      return { key: `${a.cluster || ''}|${a.namespace}/${a.name}`,
+               label: `${a.namespace}/${a.name}` };
+    }
+    return null;
+  }
+
+  function frontmostId() {
+    let best = null, bestZ = -1;
+    panels.forEach((p, id) => {
+      if (p.minimized) return;
+      const z = parseInt(p.el.style.zIndex || '0', 10);
+      if (z > bestZ) { bestZ = z; best = id; }
+    });
+    return best;
+  }
+
+  /** Aller-retour depuis la barre : une fenêtre au premier plan se range,
+   *  une fenêtre rangée ou recouverte revient. */
+  function toggleFromTaskbar(id) {
+    const p = panels.get(id);
+    if (!p) return;
+    if (p.minimized) { restore(id); return; }
+    if (frontmostId() === id) minimize(id);
+    else bringToFront(id);
+  }
+
+  function chipHtml(id, p, showTitle) {
+    const title = p.opts.title || id;
+    const label = showTitle ? title : kindLabel(p.opts);
+    const icon = p.opts.icon && window.Icons
+      ? Icons.svg(p.opts.icon, { size: 14 }) : '';
+    const closeTip = window.i18n ? i18n.t('panel.closeTip') : 'Close';
+    return `
+      <div class="min-chip tip" data-fp-id="${escapeHtml(id)}"
+           data-state="${p.minimized ? 'min' : (frontmostId() === id ? 'front' : 'open')}"
+           data-tip="${escapeHtml(title)}">
+        <span class="floating-panel-icon">${icon}</span
+        ><span class="title">${escapeHtml(label)}</span>
+        <button class="btn-icon-sm" data-action="close"
+                data-tip="${escapeHtml(closeTip)}">×</button>
+      </div>`;
+  }
+
+  function renderTaskbar() {
+    const bar = ensureMinBar();
+    // Regroupement par entité, dans l'ordre d'ouverture : une barre qui se
+    // réordonne toute seule fait perdre la fenêtre qu'on visait.
+    const groups = new Map();
+    panels.forEach((p, id) => {
+      const e = entityOf(p.opts);
+      const key = e ? e.key : `solo:${id}`;
+      if (!groups.has(key)) groups.set(key, { label: e && e.label, items: [] });
+      groups.get(key).items.push({ id, p });
+    });
+
+    let html = '';
+    groups.forEach((g) => {
+      const grouped = !!g.label && g.items.length > 1;
+      if (grouped) {
+        html += `<div class="tb-group"><span class="tb-entity" title="${
+          escapeHtml(g.label)}">${escapeHtml(g.label)}</span>`
+          + g.items.map(it => chipHtml(it.id, it.p, false)).join('')
+          + `</div>`;
+      } else {
+        html += g.items.map(it => chipHtml(it.id, it.p, true)).join('');
+      }
+    });
+    bar.innerHTML = html;
+    positionMinBar();
+  }
+
+  // Délégation : la barre est reconstruite à chaque changement, des
+  // écouteurs posés par puce fuiraient à chaque rendu.
+  document.addEventListener('click', (e) => {
+    const chip = e.target.closest('#min-bar .min-chip');
+    if (!chip) return;
+    const id = chip.dataset.fpId;
+    if (e.target.closest('[data-action="close"]')) { closePanel(id); return; }
+    toggleFromTaskbar(id);
+  });
 
   function minimize(id) {
     const p = panels.get(id);
@@ -271,25 +402,7 @@ const FloatingPanels = (() => {
     };
     p.el.style.display = 'none';
     p.minimized = true;
-
-    const bar = ensureMinBar();
-    const chip = document.createElement('div');
-    chip.className = 'min-chip';
-    chip.dataset.fpId = id;
-    const title = p.opts.title || id;
-    chip.innerHTML = `
-      <span class="floating-panel-icon">${p.opts.icon && window.Icons ? Icons.svg(p.opts.icon, { size: 14 }) : ''}</span><span class="title" title="${escapeHtml(title)}">${escapeHtml(title)}</span>
-      <button class="btn-icon-sm tip" data-action="close" data-tip="${window.i18n ? i18n.t('panel.closeTip') : 'Close'}">×</button>`;
-    chip.addEventListener('click', (e) => {
-      if (e.target.closest('[data-action="close"]')) return;
-      restore(id);
-    });
-    chip.querySelector('[data-action="close"]').addEventListener('click', (e) => {
-      e.stopPropagation();
-      closePanel(id);
-    });
-    bar.appendChild(chip);
-    positionMinBar();
+    renderTaskbar();
     persistOpen();
   }
 
@@ -305,12 +418,9 @@ const FloatingPanels = (() => {
         p.el.style.left   = p.savedDims.left;
       }
       p.minimized = false;
-      const chip = document.querySelector(`#min-bar .min-chip[data-fp-id="${id}"]`);
-      if (chip) chip.remove();
-      positionMinBar();
       persistOpen();
     }
-    bringToFront(id);
+    bringToFront(id);          // rend la barre
   }
 
   function closePanel(id) {
@@ -320,10 +430,8 @@ const FloatingPanels = (() => {
       try { p.opts.onClose(); } catch (e) { console.warn(e); }
     }
     p.el.remove();
-    const chip = document.querySelector(`#min-bar .min-chip[data-fp-id="${id}"]`);
-    if (chip) chip.remove();
     panels.delete(id);
-    positionMinBar();
+    renderTaskbar();
     persistOpen();
   }
 

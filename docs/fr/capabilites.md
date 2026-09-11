@@ -245,6 +245,24 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
 
 ## 8. Transversal
 
+- **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail
+  d'icônes de 56 px qui se déplie par-dessus la page sous le pointeur et se
+  replie quand il s'en va. C'est un calque, pas une colonne : l'ouvrir ne
+  redimensionne jamais la zone de travail, si bien que le panneau de détail
+  de la topologie, les canvas et les tableaux ne sautent pas sous les yeux.
+  Il s'épingle depuis son pied de menu quand on veut les libellés en
+  permanence, et l'épinglage est mémorisé.
+- **Une barre qui liste toutes les fenêtres ouvertes.** Consoles, réglages
+  de VM, snapshots, migrations et notes gardent chacun une puce au-dessus
+  du dock tant qu'ils sont ouverts, et pas seulement une fois minimisés. Un
+  clic range la fenêtre, un autre la rappelle ; une fenêtre cachée derrière
+  une autre revient au premier plan. Les fenêtres d'une même machine
+  s'empilent sous son nom, écrit une fois : trois fenêtres sur une VM
+  coûtent une entrée au lieu de trois qui répètent `default/leap156`.
+- **Des chargements qui se ressemblent partout** : un onglet lent (le
+  diagnostic Cluster API interroge le cluster et peut prendre dix secondes)
+  floute sa carte derrière un voile nommé au lieu de la vider, avec un
+  seuil anti-clignotement pour qu'une réponse rapide n'affiche rien.
 - **Tracking d'actions + dock** — un dock bas persistant montre les
   actions en cours et récentes sur chaque onglet, avec streaming live des
   steps/logs en SSE (reconnexion automatique). Une action en échec porte

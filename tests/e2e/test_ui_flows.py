@@ -40,6 +40,9 @@ def page(browser, flask_server):
 
 def test_index_loads_with_brand(page):
     expect(page.locator("#brand-title")).to_have_text("harvester-ops")
+    # v1.26.0 : le sélecteur de cluster reste utilisable dans le rail, sans
+    # avoir à déplier le menu. C'est le contrôle le plus utilisé d'une
+    # console multi-cluster, le cacher derrière un survol serait un recul.
     expect(page.locator("#cluster-select")).to_be_visible()
 
 
@@ -144,7 +147,11 @@ def test_language_switch_changes_strings(page):
     page.click('.lang-grid button[data-lang="fr"]')
     # Verify some translated UI element
     page.click("#btn-close-settings")
-    # Tab labels are translated via data-i18n
+    # Tab labels are translated via data-i18n. v1.26.0 : le menu est un rail
+    # d'icônes tant qu'on ne le survole pas, ses libellés ne sont donc pas
+    # rendus. On le déplie pour les lire, comme le ferait l'opérateur.
+    page.locator('#sidebar').hover()
+    page.wait_for_timeout(400)
     txt = page.locator('.tab[data-tab="shutdown"]').inner_text()
     assert "Arrêt" in txt or "Shutdown" in txt   # tolerant if hot-swap deferred
 
@@ -1189,29 +1196,149 @@ def test_capi_diag_renders(page, api):
     expect(body).to_be_visible()
 
 
-def test_sidebar_collapse_and_persist(page):
-    """REGRESSION: clicking the collapse button hides the labels and narrows
-    the sidebar; state persists across reload."""
+def test_sidebar_is_a_rail_that_opens_on_hover(page):
+    """v1.26.0 — le menu se déplie au survol et se replie tout seul."""
     sidebar = page.locator('#sidebar')
-    width_full = sidebar.evaluate('el => el.getBoundingClientRect().width')
-    assert width_full > 200, f"sidebar should start expanded, got {width_full}"
+    rail = sidebar.evaluate('el => el.getBoundingClientRect().width')
+    assert rail < 80, f"le menu doit démarrer en rail, mesuré {rail}"
+    assert page.locator('.tab[data-tab="overview"] .sidebar-label').evaluate(
+        'el => getComputedStyle(el).display') == 'none'
 
-    page.click('#btn-sidebar-collapse')
+    sidebar.hover()
+    page.wait_for_timeout(500)
+    opened = sidebar.evaluate('el => el.getBoundingClientRect().width')
+    assert opened > 200, f"le survol doit déplier le menu, mesuré {opened}"
+    assert page.locator('.tab[data-tab="overview"] .sidebar-label').evaluate(
+        'el => getComputedStyle(el).display') != 'none'
+
+    page.mouse.move(1200, 500)
+    page.wait_for_timeout(600)
+    closed = sidebar.evaluate('el => el.getBoundingClientRect().width')
+    assert closed < 80, f"le menu doit se replier en sortant, mesuré {closed}"
+
+
+def test_opening_the_sidebar_never_moves_the_content(page):
+    """LE défaut signalé : le menu poussait la zone de travail, si bien que
+    le panneau de détail de la topologie sautait au moindre survol.
+
+    Il est désormais un calque : la géométrie du contenu doit être
+    rigoureusement identique, menu ouvert ou fermé.
+    """
+    box = 'el => { const r = el.getBoundingClientRect();' \
+          ' return [Math.round(r.left), Math.round(r.width)]; }'
+    content = page.locator('#content')
+    before = content.evaluate(box)
+
+    page.locator('#sidebar').hover()
+    page.wait_for_timeout(500)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') > 200, "le menu ne s'est pas ouvert"
+
+    after = content.evaluate(box)
+    assert before == after, (
+        f"la zone de travail a bougé au survol du menu : {before} -> {after}")
+
+
+def test_clicking_from_the_rail_lands_on_the_entry_aimed_at(page):
+    """LE défaut du dépliage au survol, et il ne se voit qu'à la souris.
+
+    En s'ouvrant, le menu rendait les libellés visibles avant d'avoir fini
+    d'élargir : « Machines virtuelles » passait à la ligne dans 56 px, sa
+    rangée doublait de hauteur et toutes les suivantes descendaient. On
+    appuyait sur « Activité », on relâchait sur « Machines virtuelles », et
+    le navigateur jetait le clic (cible commune = <nav>). Rien ne se
+    passait.
+
+    Le test reproduit la séquence exacte : survol puis clic, sans laisser au
+    menu le temps de finir son animation.
+    """
+    page.mouse.move(900, 400)
+    page.wait_for_timeout(500)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') < 80, "le menu doit être en rail"
+
+    page.click('.tab[data-tab="activity"]')
+    page.wait_for_timeout(600)
+    assert page.locator('.tab-content.active').get_attribute('id') == 'tab-activity'
+
+
+def test_the_menu_rows_never_move_while_it_opens(page):
+    """La cause du défaut ci-dessus, mesurée : les rangées doivent garder
+    leur position du début à la fin de l'animation, pas seulement à ses deux
+    extrémités."""
+    tops = ("els => els.map(e => Math.round(e.getBoundingClientRect().top))")
+    page.mouse.move(900, 400)
+    page.wait_for_timeout(500)
+    before = page.eval_on_selector_all('#sidebar .tab', tops)
+
+    page.locator('#sidebar').hover()
+    seen = []
+    for _ in range(12):                     # échantillonne pendant l'animation
+        page.wait_for_timeout(40)
+        seen.append(page.eval_on_selector_all('#sidebar .tab', tops))
+    page.wait_for_timeout(500)
+    seen.append(page.eval_on_selector_all('#sidebar .tab', tops))
+
+    drifted = [s for s in seen if s != before]
+    assert not drifted, (
+        f"les rangées bougent pendant l'ouverture : {before} -> {drifted[0]}")
+
+
+def test_the_cluster_picker_stays_usable_in_the_rail(page):
+    """Sur une console multi-cluster, savoir sur quel cluster on est et en
+    changer est le geste le plus fréquent. Le cacher derrière un survol le
+    rendait aussi inatteignable au clavier et au script."""
+    page.mouse.move(900, 400)
+    page.wait_for_timeout(500)
+    picker = page.locator('#cluster-select')
+    assert picker.is_visible(), "le sélecteur de cluster doit survivre au rail"
+    box = picker.bounding_box()
+    assert box and box['width'] > 20, f"trop étroit pour être lisible : {box}"
+
+
+def test_clicking_inside_the_menu_does_not_leave_it_open(page):
+    """Un clic donne le focus à un élément du menu. Tant que l'ouverture
+    suivait le focus, le menu restait déplié indéfiniment : un calque de
+    240 px par-dessus la page, qui avalait les clics du contenu en dessous
+    jusqu'à ce qu'on aille cliquer ailleurs."""
+    page.locator('#sidebar').hover()
+    page.wait_for_timeout(400)
+    page.click('#cluster-select')
+    page.keyboard.press('Escape')
+    page.mouse.move(900, 400)
+    page.wait_for_timeout(700)
+    width = page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width')
+    assert width < 80, f"le menu est resté ouvert ({width}px) et masque la page"
+
+
+def test_pinning_the_sidebar_persists(page):
+    """Épingler est le geste explicite qui rend une colonne au menu, et il
+    doit survivre au rechargement."""
+    page.locator('#sidebar').hover()
+    page.wait_for_timeout(400)
+    page.click('#btn-sidebar-pin')
     page.wait_for_timeout(300)
-    width_collapsed = sidebar.evaluate('el => el.getBoundingClientRect().width')
-    assert width_collapsed < 80, f"sidebar should be narrow when collapsed, got {width_collapsed}"
-    # Labels in tabs must be hidden
-    label_visible = page.locator('.tab[data-tab="overview"] .sidebar-label').evaluate(
-        'el => window.getComputedStyle(el).display'
-    )
-    assert label_visible == 'none', f"sidebar-label should be display:none, got {label_visible}"
 
-    # Persist after reload
+    # Épinglé, le menu reste ouvert même quand la souris s'en va.
+    page.mouse.move(1200, 500)
+    page.wait_for_timeout(600)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') > 200, "l'épinglage n'a pas tenu"
+
     page.reload()
     page.wait_for_load_state('networkidle')
-    page.wait_for_timeout(300)
-    width_after_reload = page.locator('#sidebar').evaluate('el => el.getBoundingClientRect().width')
-    assert width_after_reload < 80, f"sidebar should stay collapsed after reload, got {width_after_reload}"
+    page.wait_for_timeout(400)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') > 200, \
+        "l'épinglage doit survivre au rechargement"
+
+    # Et se défait.
+    page.click('#btn-sidebar-pin')
+    page.mouse.move(1200, 500)
+    page.wait_for_timeout(600)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') < 80
 
 
 def test_namespaces_tab_auto_selects_first(page):

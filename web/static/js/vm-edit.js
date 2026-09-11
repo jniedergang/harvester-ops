@@ -75,9 +75,10 @@ const VMEdit = (() => {
       disk: {
         min: 0, max: 16,
         label: { en: 'Disks', fr: 'Disques' },
-        itemTitle: (v) => `${Icons.svg('disk')} ${v.name || tr('vm.edit.newDisk', 'new disk')}`
+        itemTitle: (v) => ({ icon: 'disk', text:
+          `${v.name || tr('vm.edit.newDisk', 'new disk')}`
           + `${v.bus ? ' — ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
-          + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
+          + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}` }),
         newItem: (items) => ({ name: nextFree('disk-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
@@ -151,7 +152,8 @@ const VMEdit = (() => {
       tag: {
         min: 0, max: 20,
         label: { en: 'Tags', fr: 'Tags' },
-        itemTitle: (v) => `${Icons.svg('tag')} ${v.key || tr('vm.edit.newTag', 'new tag')}${v.value ? ' = ' + v.value : ''}`,
+        itemTitle: (v) => ({ icon: 'tag', text:
+          `${v.key || tr('vm.edit.newTag', 'new tag')}${v.value ? ' = ' + v.value : ''}` }),
         newItem: (items) => ({ key: nextFree('tag-', 1, items.map(i => i.key)) }),
         args: [
           { name: 'key', type: 'text', required: true, validate: /^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$/,
@@ -177,7 +179,8 @@ const VMEdit = (() => {
       sel: {
         min: 0, max: 10,
         label: { en: 'Node selector', fr: 'Sélecteur de node' },
-        itemTitle: (v) => `${Icons.svg('placement')} ${v.key || tr('vm.edit.newSel', 'new constraint')}${v.value ? ' = ' + v.value : ''}`,
+        itemTitle: (v) => ({ icon: 'placement', text:
+          `${v.key || tr('vm.edit.newSel', 'new constraint')}${v.value ? ' = ' + v.value : ''}` }),
         newItem: () => ({ key: 'kubernetes.io/hostname' }),
         args: [
           { name: 'key', type: 'text', required: true,
@@ -200,9 +203,9 @@ const VMEdit = (() => {
       rule: {
         min: 0, max: 10,
         label: { en: 'VM placement rules', fr: 'Règles de placement VM' },
-        itemTitle: (v) => `${v.kind === 'attract' ? Icons.svg('magnet') : Icons.svg('construction')} `
-          + `${v.kind === 'attract' ? tr('vm.edit.affNear', 'near') : tr('vm.edit.affAway', 'away from')} `
-          + `${v.key || 'tag'}=${v.value || '?'}${v.hard ? ' (strict)' : ''}`,
+        itemTitle: (v) => ({ icon: v.kind === 'attract' ? 'magnet' : 'construction', text:
+          `${v.kind === 'attract' ? tr('vm.edit.affNear', 'near') : tr('vm.edit.affAway', 'away from')} `
+          + `${v.key || 'tag'}=${v.value || '?'}${v.hard ? ' (strict)' : ''}` }),
         newItem: () => ({ kind: 'avoid', key: 'app' }),
         args: [
           { name: 'kind', type: 'enum', default: 'avoid', enum_values: ['avoid', 'attract'],
@@ -237,8 +240,9 @@ const VMEdit = (() => {
       dev: {
         min: 0, max: 8,
         label: { en: 'Passthrough devices', fr: 'Périphériques en passthrough' },
-        itemTitle: (v) => `${v.kind === 'gpu' ? Icons.svg('gamepad') : Icons.svg('plug')} ${v.name || tr('vm.edit.newDev', 'new device')}`
-          + `${v.device_name ? ' — ' + v.device_name : ''}`,
+        itemTitle: (v) => ({ icon: v.kind === 'gpu' ? 'gamepad' : 'plug', text:
+          `${v.name || tr('vm.edit.newDev', 'new device')}`
+          + `${v.device_name ? ' — ' + v.device_name : ''}` }),
         newItem: (items) => ({ kind: 'host', name: nextFree('dev-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
@@ -265,8 +269,9 @@ const VMEdit = (() => {
       tol: {
         min: 0, max: 10,
         label: { en: 'Tolerations', fr: 'Tolérances' },
-        itemTitle: (v) => `${Icons.svg('shield')} ${v.key || tr('vm.edit.newTol', 'new toleration')}`
-          + `${v.value ? '=' + v.value : ''}${v.effect ? ' · ' + v.effect : ''}`,
+        itemTitle: (v) => ({ icon: 'shield', text:
+          `${v.key || tr('vm.edit.newTol', 'new toleration')}`
+          + `${v.value ? '=' + v.value : ''}${v.effect ? ' · ' + v.effect : ''}` }),
         newItem: () => ({ operator: 'Equal', effect: 'NoSchedule' }),
         args: [
           { name: 'key', type: 'text',
@@ -296,9 +301,10 @@ const VMEdit = (() => {
       nic: {
         min: 0, max: 8,
         label: { en: 'Network interfaces', fr: 'Interfaces réseau' },
-        itemTitle: (v) => `${Icons.svg('plug')} ${v.name || tr('vm.edit.newNic', 'new interface')}`
+        itemTitle: (v) => ({ icon: 'plug', text:
+          `${v.name || tr('vm.edit.newNic', 'new interface')}`
           + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`
-          + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}`,
+          + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}` }),
         newItem: (items) => ({ name: nextFree('nic-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
@@ -427,7 +433,8 @@ const VMEdit = (() => {
       user: {
         min: 0, max: 8,
         label: { en: 'Users', fr: 'Utilisateurs' },
-        itemTitle: (v) => `${Icons.svg('user')} ${v.name || tr('vm.edit.ci.newUser', 'new user')}${v.sudo ? ' · sudo' : ''}`,
+        itemTitle: (v) => ({ icon: 'user', text:
+          `${v.name || tr('vm.edit.ci.newUser', 'new user')}${v.sudo ? ' · sudo' : ''}` }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Username', fr: 'Nom d’utilisateur' },
@@ -459,7 +466,8 @@ const VMEdit = (() => {
       fs: {
         min: 0, max: 8,
         label: { en: 'Extra disks (format & mount)', fr: 'Disques additionnels (formater & monter)' },
-        itemTitle: (v) => `${Icons.svg('storage')} ${v.device || '/dev/vdb'} → ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}`,
+        itemTitle: (v) => ({ icon: 'storage', text:
+          `${v.device || '/dev/vdb'} -> ${v.mount_point || '?'}${v.filesystem ? ' (' + v.filesystem + ')' : ''}` }),
         newItem: (items) => ({ device: nextFreeDev(items.map(i => i.device)) }),
         args: [
           { name: 'device', type: 'text', required: true, default: '/dev/vdb',
@@ -480,7 +488,8 @@ const VMEdit = (() => {
       file: {
         min: 0, max: 8,
         label: { en: 'Files (write_files)', fr: 'Fichiers (write_files)' },
-        itemTitle: (v) => `${Icons.svg('doc')} ${v.path || tr('vm.edit.ci.newFile', 'new file')}`,
+        itemTitle: (v) => ({ icon: 'doc', text:
+          `${v.path || tr('vm.edit.ci.newFile', 'new file')}` }),
         args: [
           { name: 'path', type: 'text', required: true,
             label: { en: 'Path', fr: 'Chemin' },
@@ -511,7 +520,8 @@ const VMEdit = (() => {
       nic: {
         min: 0, max: 4,
         label: { en: 'Interfaces', fr: 'Interfaces' },
-        itemTitle: (v) => `${Icons.svg('plug')} ${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}`,
+        itemTitle: (v) => ({ icon: 'plug', text:
+          `${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}` }),
         newItem: (items) => ({ iface: nextFree('eth', 0, items.map(i => i.iface)) }),
         args: [
           { name: 'iface', type: 'text', required: true, default: 'eth0',

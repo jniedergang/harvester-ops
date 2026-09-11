@@ -220,6 +220,23 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
 
 ## 8. Cross-cutting
 
+- **A sidebar that gives the screen back.** The left menu is a 56 px rail
+  of icons that expands over the page while the pointer is on it, and
+  collapses when it leaves. It is a layer, not a column: opening it never
+  resizes the work area, so the topology detail panel, canvases and tables
+  do not jump under the operator. Pin it open from its footer when you want
+  the labels permanently; the pin is remembered.
+- **A window bar that lists every open window.** Consoles, VM settings,
+  snapshots, migrations and notes each keep a chip above the dock for as
+  long as they are open, not only once minimised. Clicking a chip sends its
+  window away and brings it back; a window hidden behind another comes
+  forward. Windows belonging to the same machine stack under its name,
+  written once, so three windows on one VM cost one entry rather than three
+  that all repeat `default/leap156`.
+- **Loading states that look the same everywhere**: a slow tab (the
+  Cluster API diagnostic queries the cluster and can take ten seconds)
+  blurs its card behind a named loading veil instead of blanking it, with
+  an anti-flash threshold so a fast answer shows nothing at all.
 - **Action tracking + dock** — a persistent bottom dock shows in-progress
   and recent actions on every tab, with live step/log streaming over SSE
   (auto-reconnecting). Failed actions carry the underlying error (last

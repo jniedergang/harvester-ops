@@ -4,6 +4,89 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.26.0] - 2026-09-11 - The chrome gets out of the way
+
+Four things reported by using the console, all of them about the frame
+around the work rather than the work itself.
+
+### Added
+- **The sidebar is a rail that opens on hover.** 56 px of icons, expanding
+  to 240 px while the pointer is on it. It expands on keyboard focus too, so
+  tabbing through it no longer walks a list of invisible labels, and it can
+  be pinned open from its footer if you want the labels permanently. The pin
+  is remembered.
+- **The window bar lists every open window, not only the minimised ones.**
+  A console hidden behind another window appeared nowhere: you had to
+  minimise it for it to exist somewhere, which is the opposite of what a
+  taskbar is for. Every open panel now keeps a chip. Clicking it sends the
+  window away, clicking again brings it back, and a window that is merely
+  covered comes forward instead.
+- **Windows of the same machine stack under its name.** Three windows on one
+  VM used to be three chips all repeating `default/leap156`. The name is now
+  written once and its windows sit behind it, each showing only what it is.
+- **Slow tabs blur behind a named loading veil**, the same one the cluster
+  switch and the overview already used. The Cluster API diagnostic queries
+  the cluster and takes about ten seconds on a real one; blanking the card
+  for that long read as a broken tab. An anti-flash threshold keeps a fast
+  answer from showing anything.
+
+### Fixed
+- **Opening the menu moved the whole page.** It was a column in the flow, so
+  every hover resized the work area and the topology detail panel, the
+  canvases and the tables jumped. It is a layer now, and the layout reserves
+  the rail width and nothing else: the geometry of the content is identical
+  whether the menu is closed, open or pinned. Verified on the overview, the
+  VM list and the activity tab, down to the pixel.
+- **Clicking a menu entry from the rail did nothing at all.** Making the menu
+  open on hover exposed three ways its own rows could move while it opened:
+  the header lost 55 px when its cluster picker left the flow, icons were
+  18 px in the rail against 16 elsewhere (one pixel per row, accumulating),
+  and above all the labels became visible before the width had finished
+  animating, so "Virtual machines" wrapped inside 56 px and pushed every row
+  below it down. You pressed on one entry and released on another, and the
+  browser dropped the click. Rows now hold their position from the first
+  frame to the last.
+- **The VM editor printed raw `<svg …>` markup** in front of every tag,
+  placement rule, disk, NIC, device, toleration, cloud-init user, mount and
+  file. Eleven section headers. The renderer escaped the whole summary line,
+  which was right when those lines held emoji and wrong the day they held
+  icon markup. The fix is not to stop escaping (those lines carry values
+  from the VM spec): the contract now separates the icon NAME, taken from
+  the vetted set, from the TEXT, which is still escaped.
+- **The cluster picker disappeared into the rail.** Hiding the most used
+  control of a multi-cluster console behind a hover was a step backwards, and
+  it made the picker unreachable to the keyboard and to scripts. It now sits
+  in the rail at rail width, name truncated but readable; the "add cluster"
+  button, a rare gesture, waits for the menu to open.
+- **Clicking inside the menu left it open over the page.** Expansion followed
+  focus, so a click on the cluster picker parked a 240 px layer over the
+  content and it swallowed clicks underneath until you clicked elsewhere.
+  Keyboard focus still opens it, because that is what it is for, but it is
+  now told apart from a mouse click.
+- **A duplicate i18n key was silently overwriting a translation.**
+  `common.loading` existed twice per language; the second won, so the one
+  that was added had no effect and the veil showed "Loading..." instead of
+  naming the cluster. A JavaScript object literal accepts duplicate keys
+  without a word.
+
+### Tests
+- The audit the report asked for, as a test: content geometry is compared
+  across the three menu states, and a failure names the element that moved.
+- The window bar: every open window listed, same-entity stacking, the
+  send-away/bring-back round trip, a covered window coming forward, closing
+  from a chip, and the bar reserving space so it does not cover the content.
+- The loading veil, with the response deliberately slowed so the test does
+  not depend on how fast the cluster answers, plus the anti-flash threshold.
+- Summary headers: no implementation may embed icon markup, the renderer
+  escapes text but not the icon name, the live refresh goes through the same
+  path, and every icon named by a header exists in the set.
+- Duplicate i18n keys, checked against a deliberately reintroduced one.
+- 568 API tests green, and 94 browser tests, 17 of them new on the menu, the
+  window bar and the veil. The five browser failures that remain are the ones
+  that were already there before this release (theme switching, the shutdown
+  VM list and groups, and an automation selector that matches three elements
+  since other inline strips were added); none of them is touched by this work.
+
 ## [1.25.0] - 2026-09-11 - Updating the Terraform provider from the console
 
 The provider shipped in the package ages faster than the toolkit: a newer

@@ -53,9 +53,19 @@ const TF = (() => {
   async function refresh() {
     const out = $('#tf-status-body');
     if (!out) return;
-    const myRev = ++_refreshRev;
     const cluster = $('#cluster-select')?.value || '';
-    out.innerHTML = '<p class="form-hint">Loading…</p>';
+    // Même voile flouté que les autres chargements. Posé sur la CARTE : le
+    // corps est réécrit par le rendu et emporterait le voile avec lui.
+    if (!window.Veil) return refreshInner(out, cluster);
+    return window.Veil.during(out.closest('.card') || out, {
+      message: window.i18n ? i18n.t('common.loadingNamed') : 'Loading {name}…',
+      name: cluster || 'Terraform',
+      delay: 250,
+    }, () => refreshInner(out, cluster));
+  }
+
+  async function refreshInner(out, cluster) {
+    const myRev = ++_refreshRev;
 
     let info;
     try { info = await fetch('/api/terraform/info').then(r => r.json()); }
