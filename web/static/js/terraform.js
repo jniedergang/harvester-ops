@@ -286,45 +286,50 @@ const TF = (() => {
         </div>
         <div class="card-body">
           <p class="form-hint">${esc(i18n.t('tf.prov.hint'))}</p>
-          <form id="tf-prov-form" class="capi-form">
-            <fieldset>
-              <legend>${esc(i18n.t('tf.prov.netLegend'))}</legend>
-              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.source'))} *
-                <input name="source" required placeholder="1.7.3"
-                       data-tip="${esc(i18n.t('tf.prov.sourceHint'))}" class="tip">
-                <span class="form-hint">${esc(i18n.t('tf.prov.sourceHint'))}</span></label>
-              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.sha'))}
-                <input name="sha256" pattern="[0-9a-fA-F]{64}"
-                       placeholder="${esc(i18n.t('tf.optional'))}">
-                <span class="form-hint">${esc(i18n.t('tf.prov.shaHint'))}</span></label>
-            </fieldset>
-            <div class="apply-bar">
-              <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
-                      data-tip="${esc(i18n.t('tf.tip.provInstall'))}">
-                ${Icons.svg('download')} ${esc(i18n.t('tf.prov.go'))}
-              </button>
-            </div>
-          </form>
-          <form id="tf-prov-file-form" class="capi-form" style="margin-top:8px;">
-            <fieldset>
-              <legend>${esc(i18n.t('tf.prov.fileLegend'))}</legend>
-              <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.file'))} *
-                <input name="file" type="file" required accept=".zip,application/zip">
-                <span class="form-hint">${esc(i18n.t('tf.prov.fileHint'))}</span></label>
-            </fieldset>
-            <div class="apply-bar">
-              <button type="submit" class="btn btn-secondary btn-sm btn-ico tip"
-                      data-tip="${esc(i18n.t('tf.tip.provUpload'))}">
-                ${Icons.svg('install')} ${esc(i18n.t('tf.prov.fileGo'))}
-              </button>
-              ${revert}
-            </div>
-          </form>
+          <!-- Deux voies exclusives. Le bouton de chacune vit DANS son bloc :
+               posé entre les deux, il ne se rattachait visuellement ni à
+               l'une ni à l'autre. -->
+          <div class="tf-prov-ways">
+            <form id="tf-prov-form" class="capi-form">
+              <fieldset>
+                <legend>${esc(i18n.t('tf.prov.netLegend'))}</legend>
+                <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.source'))} *
+                  <input name="source" required placeholder="1.7.3"
+                         data-tip="${esc(i18n.t('tf.prov.sourceHint'))}" class="tip">
+                  <span class="form-hint">${esc(i18n.t('tf.prov.sourceHint'))}</span></label>
+                <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.sha'))}
+                  <input name="sha256" pattern="[0-9a-fA-F]{64}"
+                         placeholder="${esc(i18n.t('tf.optional'))}">
+                  <span class="form-hint">${esc(i18n.t('tf.prov.shaHint'))}</span></label>
+                <div class="tf-prov-go">
+                  <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
+                          data-tip="${esc(i18n.t('tf.tip.provInstall'))}">
+                    ${Icons.svg('download')} ${esc(i18n.t('tf.prov.go'))}
+                  </button>
+                </div>
+              </fieldset>
+            </form>
+            <form id="tf-prov-file-form" class="capi-form">
+              <fieldset>
+                <legend>${esc(i18n.t('tf.prov.fileLegend'))}</legend>
+                <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.file'))} *
+                  <input name="file" type="file" required accept=".zip,application/zip">
+                  <span class="form-hint">${esc(i18n.t('tf.prov.fileHint'))}</span></label>
+                <div class="tf-prov-go">
+                  <button type="submit" class="btn btn-secondary btn-sm btn-ico tip"
+                          data-tip="${esc(i18n.t('tf.tip.provUpload'))}">
+                    ${Icons.svg('install')} ${esc(i18n.t('tf.prov.fileGo'))}
+                  </button>
+                </div>
+              </fieldset>
+            </form>
+          </div>
           ${installed}
           <p class="form-hint">${esc(i18n.t('tf.prov.reinit'))}</p>
           <p class="form-hint">${esc(i18n.t('tf.prov.managedDir'))}
             <code>${esc(info.provider_managed_dir || '')}</code></p>
           <div id="tf-prov-result" class="apply-result"></div>
+          ${revert ? `<div class="apply-bar">${revert}</div>` : ''}
         </div>
       </div>`;
   }

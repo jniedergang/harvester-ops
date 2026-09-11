@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.26.1] - 2026-09-11 - Two ways in, told apart
+
+### Fixed
+- **The provider update panel did not say which button did what.** Its two
+  forms, one for the network and one for a local file, were stacked with
+  their action bars between them. A bar with a rule above it reads as a
+  separator, so the "Install / update" button looked like it belonged to
+  neither block, or to the airgap section below it. The two routes now sit
+  side by side, each one a bordered block carrying its own button at its own
+  foot, aligned on the same baseline. Nothing about the behaviour changed.
+
+### Tests
+- Each route's submit button is asserted to live inside its own fieldset,
+  and the two blocks to share the same top and bottom.
+
 ## [1.26.0] - 2026-09-11 - The chrome gets out of the way
 
 Four things reported by using the console, all of them about the frame

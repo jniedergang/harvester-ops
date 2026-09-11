@@ -4051,3 +4051,33 @@ body.sidebar-pinned .sidebar-collapse-btn { color: var(--accent); }
 .sidebar-collapse-btn .when-pinned { display: none; }
 body.sidebar-pinned .sidebar-collapse-btn .when-pinned { display: inline; }
 body.sidebar-pinned .sidebar-collapse-btn .when-unpinned { display: none; }
+
+/* Mise à jour du provider Terraform : deux voies EXCLUSIVES (réseau ou
+   fichier local). Côte à côte dès qu'il y a la place, l'une sous l'autre
+   sinon. Chaque bouton vit dans son propre bloc : placé entre les deux, il
+   ne se rattachait visuellement ni à l'une ni à l'autre, et l'opérateur ne
+   savait pas ce qu'il déclenchait. */
+.tf-prov-ways {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
+/* Colonne simple plutôt que la grille de `.capi-form` : tous les champs de
+   ce panneau sont déjà pleine largeur, et le flux vertical permet de coller
+   le bouton au bas de son bloc. Les deux blocs finissent donc à la même
+   hauteur au lieu de s'arrêter chacun où son contenu s'arrête. */
+.tf-prov-ways .capi-form { height: 100%; }
+.tf-prov-ways .capi-form fieldset {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tf-prov-go {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}

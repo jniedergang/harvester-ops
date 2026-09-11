@@ -104,3 +104,26 @@ def test_the_checksum_field_rejects_a_malformed_value(context, flask_server):
         "document.querySelector('#tf-prov-form input[name=\"sha256\"]')"
         ".checkValidity()")
     assert valid is False
+
+
+def test_each_route_carries_its_own_button(context, flask_server):
+    """Le bouton « Installer » était posé ENTRE les deux formulaires, avec
+    un filet au-dessus : il se lisait comme un séparateur, et l'on ne savait
+    pas lequel des deux il déclenchait. Chacun vit désormais dans son bloc.
+    """
+    page = context.new_page()
+    _open_install_tab(page, flask_server["base_url"])
+
+    for form_id in ('#tf-prov-form', '#tf-prov-file-form'):
+        btn = page.locator(f'{form_id} fieldset button[type="submit"]')
+        assert btn.count() == 1, \
+            f"{form_id} : son bouton doit être DANS son fieldset"
+
+    # Et les deux blocs s'alignent : des bords qui s'arrêtent chacun où leur
+    # contenu s'arrête donnent une carte bâclée.
+    boxes = page.eval_on_selector_all(
+        '.tf-prov-ways fieldset',
+        "els => els.map(e => { const r = e.getBoundingClientRect();"
+        " return [Math.round(r.top), Math.round(r.bottom)]; })")
+    assert len(boxes) == 2, boxes
+    assert boxes[0] == boxes[1], f"blocs désalignés : {boxes}"
