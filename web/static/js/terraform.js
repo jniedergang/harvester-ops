@@ -194,7 +194,14 @@ const TF = (() => {
                   ? `<code>${esc(info.provider_binary)}</code>
                      <span class="form-hint">v${esc(info.provider_version)},
                        ${Math.round((info.provider_binary_size||0)/1024/1024)} MB</span>`
-                  : '<span class="badge bad">missing</span>'}</td></tr>
+                  : `<span class="badge bad">missing</span>
+                     <details class="tf-missing-where">
+                       <summary>${esc(i18n.t('tf.whereLooked'))}</summary>
+                       <p class="form-hint">${esc(i18n.t('tf.pointEnv'))}
+                         <code>${esc(info.provider_env || '')}=/chemin/du/provider</code></p>
+                       <ul class="form-hint">${(info.provider_searched || [])
+                         .map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>
+                     </details>`}</td></tr>
             <tr><td>Workspace dir</td>
                 <td><code>${esc(info.workspaces_dir)}</code></td></tr>
             <tr><td>Examples bundled</td>

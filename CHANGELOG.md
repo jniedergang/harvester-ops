@@ -4,6 +4,39 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.24.0] - 2026-09-11 - Three defects found by using the thing
+
+### Fixed
+- **`network_name` was labelled optional next to a `bridge` interface.**
+  That field is where the virtual NIC gets bridged. The provider's schema
+  calls it optional, but its constructor *infers* the interface type from
+  it (empty gives masquerade, set gives bridge), so the two are coupled.
+  Showing it as optional beside the default `bridge` type let the operator
+  build the one combination the provider never produces on its own: a
+  bridge with no network to attach to. It is now required when the type is
+  `bridge`, recomputed live when the type changes, and its description says
+  what the field does rather than what it contains.
+- **The Harvester provider was reported missing while sitting on the
+  machine.** Only one location was searched, the packaged one, and the
+  badge did not say which. Several locations are now searched, including a
+  locally built provider and a `HARVESTER_OPS_TF_PROVIDER_PATH` list, a
+  file that is present but not executable is not mistaken for a provider,
+  and when nothing is found the tab lists every path it tried plus the
+  environment variable to set.
+- **The dropdown placeholder was hardcoded English** in all five languages,
+  and kept saying "optional" on a field that had become required.
+
+### Added
+- The bare-metal module in the README screenshot gallery.
+
+### Tests
+- `network_name` requirement follows the interface type, live, scoped to
+  its own block so `disk[0].type` cannot interfere.
+- Provider discovery: several candidates, a built provider is found
+  wherever it sits, a non-executable file is refused, and the endpoint
+  reports where it looked.
+- 525 tests green.
+
 ## [1.23.2] - 2026-09-10 - Two portability defects found by a contributor
 
 Both surfaced by a contributor running the suite on a Mac without kubectl,

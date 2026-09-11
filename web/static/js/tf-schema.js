@@ -173,12 +173,18 @@ const TF_SCHEMA = {
           { name: 'model', type: 'enum', default: 'virtio',
             enum_values: ['virtio', 'e1000', 'e1000e', 'ne2k_pco',
                           'pcnet', 'rtl8139'] },
+          // Couplé au type, et c'est tout l'enjeu : le provider DÉDUIT le
+          // type de ce champ (vide -> masquerade, renseigné -> bridge).
+          // L'afficher « optionnel » à côté d'un type `bridge` laissait
+          // fabriquer la seule combinaison que le provider ne produit
+          // jamais seul : un bridge sans réseau où l'attacher.
           { name: 'network_name', type: 'ref', required: false,
+            required_when: { field: 'type', equals: 'bridge' },
             ref_endpoint: '/api/networks', creatable: true,
             ref_namespaced: true,
             description: {
-              en: 'NetworkAttachmentDefinition (leave empty for management).',
-              fr: 'NetworkAttachmentDefinition (vide = management).',
+              en: 'Where the interface is bridged. Required for type=bridge; leave empty for masquerade, which uses the management network.',
+              fr: "Réseau sur lequel l'interface est bridgée. Obligatoire si type=bridge ; vide pour masquerade, qui utilise le réseau de management.",
             }
           },
           { name: 'wait_for_lease', type: 'bool', default: false,

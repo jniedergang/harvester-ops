@@ -7,7 +7,7 @@ Self-contained, airgap-friendly, single-tarball delivery.
 Livraison autonome en un tarball unique, compatible airgap.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-505_passing-green.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-525_passing-green.svg)](tests/)
 
 > Independent project. Not affiliated with, endorsed by, or supported by SUSE.
 
@@ -30,6 +30,11 @@ Livraison autonome en un tarball unique, compatible airgap.
 | *8-step graceful shutdown sequencer with live SSE log<br>Séquenceur d'arrêt gracieux en 8 étapes avec log SSE live* | *Every mutating action tracked, with durable history<br>Toute action mutative tracée, avec historique durable* |
 | [![Storage topology](docs/assets/storage.png)](docs/assets/storage.png) | [![VNC console](docs/assets/console.png)](docs/assets/console.png) |
 | *Storage map: which volume is attached to which VM, CD-ROM/ISO discs, orphan detection<br>Carte du stockage : quel volume est lié à quelle VM, disques CD-ROM/ISO, détection d'orphelins* | *Integrated VNC console with power controls (full boot visible)<br>Console VNC intégrée avec commandes d'alimentation (boot visible en entier)* |
+
+[![Bare-metal](docs/assets/baremetal.png)](docs/assets/baremetal.png)
+
+*Bare-metal: discover the BMCs over Redfish, then install Harvester on a blank machine without touching it. The console remasters the ISO for an unattended install, serves it behind a one-off token, mounts it as virtual media and boots the machine once on it.*
+*Bare-metal : découvrir les BMC en Redfish, puis installer Harvester sur une machine vierge sans y toucher. La console remasterise l'ISO pour une installation sans opérateur, le sert derrière un jeton à usage unique, le monte en média virtuel et démarre la machine une fois dessus.*
 
 ---
 

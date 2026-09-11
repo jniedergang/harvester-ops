@@ -1074,8 +1074,12 @@ const App = (() => {
       runBody.innerHTML = '';
       const running = data.in_progress || [];
       if (running.length === 0) {
+        // Les deux clés sont écrites en toutes lettres : un `i18n.t()`
+        // dont l'argument est une expression échappe au scanner de clés
+        // orphelines, et à quiconque grepperait le dépôt.
         runBody.innerHTML = `<tr><td colspan="6" class="empty-state">${
-          escapeHtml(i18n.t(active ? 'activity.filter.noneRunningMatch' : 'activity.noneRunning'))}</td></tr>`;
+          active ? escapeHtml(i18n.t('activity.filter.noneRunningMatch'))
+                 : escapeHtml(i18n.t('activity.noneRunning'))}</td></tr>`;
       } else {
         running.forEach(a => {
           const tr = document.createElement('tr');

@@ -59,8 +59,18 @@ const TFForm = (() => {
     const name = esc(path);
     const v = value !== undefined ? value : (arg.default !== undefined ? arg.default : '');
     const help = arg.description ? t(arg.description) : '';
-    const req = arg.required ? ` <span class="tf-required" title="${window.i18n ? i18n.t('tf.tip.required') : 'required'}">*</span>` : '';
+    // `required_when` : obligatoire seulement pour certaines valeurs d'un
+    // autre champ du même bloc. Rendu ici dans son état de départ, puis
+    // recalculé à chaque changement du champ qui le commande.
+    const rw = arg.required_when;
+    const req = (arg.required || rw)
+      ? ` <span class="tf-required${(!arg.required && rw) ? ' tf-required-cond' : ''}"`
+        + ` title="${window.i18n ? i18n.t('tf.tip.required') : 'required'}">*</span>`
+      : '';
     const tip = help ? ` data-tip="${esc(help)}"` : '';
+    const rwAttr = rw
+      ? ` data-required-field="${esc(rw.field)}" data-required-equals="${esc(rw.equals)}"`
+      : '';
     // v1.8.0: optional bilingual label per arg; raw name stays the fallback
     const labelText = arg.label ? t(arg.label) : arg.name;
     const labelHtml = `<label for="${id}" class="tf-label tip"${tip}>${esc(labelText)}${req}</label>`;
@@ -104,7 +114,13 @@ const TFForm = (() => {
           `</select>`;
         break;
       case 'ref': {
-        const placeholder = `— ${arg.required ? 'select' : 'optional'} —`;
+        // Traduit, et surtout cohérent avec l'état conditionnel : un champ
+        // devenu obligatoire ne doit plus s'annoncer « optionnel ».
+        const startsRequired = arg.required
+          || (rw && (v || '') === '' && arg.default === rw.equals);
+        const phKey = startsRequired ? 'tf.select' : 'tf.optional';
+        const placeholder = `— ${window.i18n ? i18n.t(phKey)
+                                 : (startsRequired ? 'select' : 'optional')} —`;
         // Multi-select shown as a <select multiple>; renderer is the same
         const multi = arg.multiple ? ' multiple size="4"' : '';
         control =
@@ -115,7 +131,7 @@ const TFForm = (() => {
                      data-ref-namespaced="${arg.ref_namespaced ? '1' : '0'}"
                      data-ref-default="${esc(arg.default || '')}"
                      data-ref-selected="${esc(v || '')}"
-                     ${arg.required ? 'required' : ''}${multi}>
+                     ${arg.required ? 'required' : ''}${rwAttr}${multi}>
                <option value="">${esc(placeholder)}</option>
                ${v ? `<option value="${esc(v)}" selected>${esc(v)}</option>` : ''}
              </select>` +
@@ -336,6 +352,43 @@ const TFForm = (() => {
       };
       rootEl.addEventListener('input', refreshHead);
       rootEl.addEventListener('change', refreshHead);
+    }
+
+    // 2c. v1.24.0 : champs obligatoires SOUS CONDITION.
+    // `network_name` en est le cas d'école : le provider déduit le type de
+    // l'interface de ce champ (vide -> masquerade, renseigné -> bridge).
+    // Affiché « optionnel » à côté d'un type `bridge`, il laissait produire
+    // un bridge sans réseau où l'attacher, que le provider ne fabrique
+    // jamais de lui-même.
+    if (rootEl.dataset && !rootEl.dataset.tfCondWired) {
+      rootEl.dataset.tfCondWired = '1';
+      const syncConditional = (scope) => {
+        (scope || rootEl).querySelectorAll('[data-required-field]').forEach(el => {
+          const item = el.closest('.tf-block-item') || rootEl;
+          const ctl = item.querySelector(`[name$=".${el.dataset.requiredField}"]`);
+          const on = !!ctl && ctl.value === el.dataset.requiredEquals;
+          el.required = on;
+          const label = item.querySelector(`label[for="${el.id}"] .tf-required`);
+          if (label) label.classList.toggle('tf-required-off', !on);
+          // Le libellé de l'option vide doit suivre : « optionnel » sur un
+          // champ devenu obligatoire est exactement ce qui induit en erreur.
+          const empty = el.querySelector('option[value=""]');
+          if (empty && window.i18n) {
+            empty.textContent = `— ${i18n.t(on ? 'tf.select' : 'tf.optional')} —`;
+          }
+        });
+      };
+      rootEl.addEventListener('change', (e) => {
+        if (e.target && e.target.name) syncConditional(
+          e.target.closest('.tf-block-item') || rootEl);
+      });
+      syncConditional();
+      // Les blocs ajoutés après coup doivent être traités aussi.
+      rootEl.addEventListener('click', (e) => {
+        if (e.target.closest && e.target.closest('.tf-block-add')) {
+          setTimeout(() => syncConditional(), 0);
+        }
+      });
     }
 
     // 3. Phase B placeholder: inline-create buttons

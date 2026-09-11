@@ -3891,3 +3891,11 @@ body.veil-blocking #app { pointer-events: none; }
   .activity-filters { margin-left: 0; width: 100%; }
   .activity-filters input[type="search"] { flex: 1 1 140px; min-width: 0; }
 }
+
+/* v1.24.0 — astérisque d'un champ obligatoire SOUS CONDITION : présent dans
+   le DOM en permanence (le recalcul est à chaud), simplement estompé quand
+   la condition n'est pas remplie. */
+.tf-required-cond.tf-required-off { opacity: .25; }
+.tf-missing-where { margin-top: 6px; }
+.tf-missing-where summary { cursor: pointer; font-size: .82rem; color: var(--text-dim); }
+.tf-missing-where ul { margin: 4px 0 0 18px; }

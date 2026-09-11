@@ -991,6 +991,126 @@ def _redfish_action_target(resource, *names):
     return None, False
 
 
+def _reduce_drive(d):
+    """Un disque physique, réduit à ce qui sert à décider."""
+    cap = d.get("CapacityBytes")
+    return {
+        "id": d.get("Id") or (d.get("@odata.id") or "").rsplit("/", 1)[-1],
+        "path": d.get("@odata.id"),
+        "name": d.get("Name"),
+        "model": (d.get("Model") or "").strip(),
+        "media": d.get("MediaType"),            # SSD | HDD | SMR
+        "protocol": d.get("Protocol"),          # SATA | SAS | NVMe
+        "capacity_bytes": cap,
+        "serial": d.get("SerialNumber"),
+        "health": (d.get("Status") or {}).get("Health"),
+        "failure_predicted": d.get("FailurePredicted"),
+        "hotspare": d.get("HotspareType"),
+        "encryptable": d.get("EncryptionAbility") not in (None, "None"),
+        # Constaté sur le HBA330 : le seul verbe offert sur un disque.
+        "secure_erase": bool(_redfish_action_target(d, "SecureErase")[0]),
+    }
+
+
+def _reduce_volume(v):
+    return {
+        "id": v.get("Id") or (v.get("@odata.id") or "").rsplit("/", 1)[-1],
+        "path": v.get("@odata.id"),
+        "name": v.get("Name"),
+        "raid_type": v.get("RAIDType"),
+        # `RawDevice` = disque présenté tel quel par un HBA en pass-through,
+        # pas un volume RAID. La distinction décide de ce qu'on propose.
+        "volume_type": v.get("VolumeType"),
+        "capacity_bytes": v.get("CapacityBytes"),
+        "encrypted": v.get("Encrypted"),
+        "health": (v.get("Status") or {}).get("Health"),
+        "can_initialize": bool(_redfish_action_target(v, "Initialize")[0]),
+    }
+
+
+def _bmc_storage(host, user, pwd, system_path=None):
+    """Inventaire du stockage vu par le BMC : contrôleurs, disques, volumes.
+
+    Deux dialectes, tous deux constatés en direct :
+
+    * Redfish standard `Systems/<id>/Storage` — riche sur iDRAC 9 (le
+      HBA330 du R740xd y expose ses 4 disques avec modèle, média, capacité,
+      série, prédiction de panne) ;
+    * l'OEM HPE `Systems/1/SmartStorage/{ArrayControllers,HostBusAdapters}`.
+
+    ⚠ Sur les ProLiant XL170r Gen9 de ce parc, les DEUX renvoient zéro :
+    cet iLO 4 ne publie aucun contrôleur ni disque. L'inventaire revient
+    donc légitimement vide, et l'appelant doit savoir le dire plutôt que de
+    laisser croire à une machine sans disque.
+    """
+    sp = (system_path or _redfish_system_path(host, user, pwd) or "").rstrip("/")
+    out = {"controllers": [], "source": None, "supported": False}
+    if not sp:
+        return out
+
+    coll = _redfish_get(host, sp + "/Storage", user, pwd, timeout=10)
+    for m in (coll or {}).get("Members", []) or []:
+        ctrl = _redfish_get(host, m["@odata.id"], user, pwd, timeout=10)
+        if not ctrl:
+            continue
+        sc = (ctrl.get("StorageControllers") or [{}])[0]
+        drives = []
+        for dref in ctrl.get("Drives") or []:
+            d = _redfish_get(host, dref["@odata.id"], user, pwd, timeout=10)
+            if d:
+                drives.append(_reduce_drive(d))
+        volumes = []
+        vpath = (ctrl.get("Volumes") or {}).get("@odata.id")
+        if vpath:
+            vcoll = _redfish_get(host, vpath, user, pwd, timeout=10)
+            for vref in (vcoll or {}).get("Members", []) or []:
+                v = _redfish_get(host, vref["@odata.id"], user, pwd, timeout=10)
+                if v:
+                    volumes.append(_reduce_volume(v))
+        raid_types = sc.get("SupportedRAIDTypes") or []
+        out["controllers"].append({
+            "id": ctrl.get("Id") or m["@odata.id"].rsplit("/", 1)[-1],
+            "path": m["@odata.id"],
+            "name": ctrl.get("Name"),
+            "model": (sc.get("Model") or "").strip(),
+            "firmware": sc.get("FirmwareVersion"),
+            "raid_types": raid_types,
+            # Un HBA en pass-through annonce une liste vide : il n'y a
+            # aucun volume à déclarer dessus, seulement des disques bruts.
+            "can_create_volume": bool(raid_types) and bool(vpath),
+            "volumes_path": vpath,
+            "drives": drives,
+            "volumes": volumes,
+        })
+    if out["controllers"]:
+        out["source"] = "redfish"
+        out["supported"] = True
+        return out
+
+    # Repli OEM HPE : un iLO qui publierait ses contrôleurs Smart Array.
+    for kind in ("ArrayControllers", "HostBusAdapters"):
+        coll = _redfish_get(host, f"{sp}/SmartStorage/{kind}/", user, pwd, timeout=10)
+        for m in (coll or {}).get("Members", []) or []:
+            ctrl = _redfish_get(host, m["@odata.id"], user, pwd, timeout=10) or {}
+            out["controllers"].append({
+                "id": ctrl.get("Id") or m["@odata.id"].rsplit("/", 1)[-2],
+                "path": m["@odata.id"],
+                "name": ctrl.get("Name") or kind,
+                "model": (ctrl.get("Model") or "").strip(),
+                "firmware": ((ctrl.get("FirmwareVersion") or {})
+                             .get("Current", {}) or {}).get("VersionString"),
+                "raid_types": [],
+                "can_create_volume": False,
+                "volumes_path": None,
+                "drives": [],
+                "volumes": [],
+            })
+    if out["controllers"]:
+        out["source"] = "hpe-oem"
+        out["supported"] = True
+    return out
+
+
 def _bmc_discover_one(host, user, pwd):
     """Walk Redfish to produce a node profile (system info + NICs)."""
     root = _redfish_get(host, "/redfish/v1/", user, pwd, timeout=6)
@@ -7561,10 +7681,38 @@ def _tf_provider_version():
     return "dev"
 
 
+# Emplacements fouillés pour le binaire du provider, dans l'ordre. Le
+# premier est celui du livrable packagé ; les suivants couvrent un provider
+# compilé sur place, cas normal en développement et fréquent chez un
+# opérateur qui construit son propre binaire. N'en chercher qu'un seul
+# affichait « missing » alors que le binaire était sur la machine.
+def _tf_provider_candidates():
+    names = ("terraform-provider-harvester-amd64",
+             "terraform-provider-harvester")
+    roots = [TF_PROVIDER_REPO]
+    extra = os.environ.get("HARVESTER_OPS_TF_PROVIDER_PATH", "")
+    roots += [Path(x) for x in extra.split(os.pathsep) if x]
+    roots += [
+        Path.home() / ".local/share/harvester-ops/terraform-provider",
+        Path("/usr/local/share/harvester-ops/terraform-provider"),
+    ]
+    out = []
+    for root in roots:
+        for n in names:
+            out.append(root / "bin" / n)
+            out.append(root / n)
+    return out
+
+
 def _tf_provider_binary():
-    """Locate the prebuilt provider binary (./bin/...). Empty if missing."""
-    p = TF_PROVIDER_REPO / "bin" / "terraform-provider-harvester-amd64"
-    return p if p.exists() else None
+    """Locate the prebuilt provider binary. None if nowhere to be found."""
+    for c in _tf_provider_candidates():
+        try:
+            if c.is_file() and os.access(c, os.X_OK):
+                return c
+        except OSError:
+            pass
+    return None
 
 
 def _tf_workspace_dir(cluster):
@@ -7612,6 +7760,11 @@ def api_terraform_info():
     """Provider + CLI versions + bundled examples count + bundle path."""
     bin_p = _tf_provider_binary()
     return jsonify({
+        # Dire OÙ l'on a cherché : un badge « missing » seul laisse
+        # l'opérateur sans prise, alors que le binaire est souvent là,
+        # ailleurs.
+        "provider_searched": [str(c) for c in _tf_provider_candidates()],
+        "provider_env": "HARVESTER_OPS_TF_PROVIDER",
         "provider_repo": str(TF_PROVIDER_REPO),
         "provider_version": _tf_provider_version(),
         "provider_binary": str(bin_p) if bin_p else "",
