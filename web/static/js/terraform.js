@@ -278,7 +278,7 @@ const TF = (() => {
           <p class="form-hint">${esc(i18n.t('tf.prov.hint'))}</p>
           <form id="tf-prov-form" class="capi-form">
             <fieldset>
-              <legend>${esc(i18n.t('tf.prov.source'))}</legend>
+              <legend>${esc(i18n.t('tf.prov.netLegend'))}</legend>
               <label style="grid-column:1/-1;">${esc(i18n.t('tf.prov.source'))} *
                 <input name="source" required placeholder="1.7.3"
                        data-tip="${esc(i18n.t('tf.prov.sourceHint'))}" class="tip">
