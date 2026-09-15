@@ -428,13 +428,22 @@ step_longhorn_maintenance() {
     local deadline=$(( SECONDS + VOLUME_TIMEOUT ))
     local pods_reported=0 listing vm_lines
     while (( SECONDS < deadline )); do
+        # Le discriminant est le TYPE du workload, pas son nom. Longhorn met
+        # dans `workloadName` le nom de la VM (« mlm », « rhel9-test ») ;
+        # « virt-launcher » n'apparaît que dans `podName`, champ qui n'était
+        # même pas extrait. Chercher cette chaîne ici ne correspondait donc
+        # JAMAIS, sur aucun cluster : depuis la v1.8.9 cette attente rendait
+        # la main aussitôt en annonçant « tous les volumes détachés », et le
+        # disque de la VM qu'on venait d'arrêter était rangé parmi les
+        # volumes de pods à ignorer. Constaté en éteignant harv3, vérifié sur
+        # harv1 (filtre d'origine : 0 correspondance sur 2 volumes de VM).
         listing=$(kc_quiet -n longhorn-system get volumes.longhorn.io \
-            -o jsonpath='{range .items[?(@.status.state=="attached")]}{.status.kubernetesStatus.namespace}{"/"}{.status.kubernetesStatus.pvcName}{"|"}{.status.kubernetesStatus.workloadsStatus[*].workloadName}{"\n"}{end}' 2>/dev/null)
-        vm_lines=$(printf '%s\n' "$listing" | grep 'virt-launcher' || true)
+            -o jsonpath='{range .items[?(@.status.state=="attached")]}{.status.kubernetesStatus.namespace}{"/"}{.status.kubernetesStatus.pvcName}{"|"}{.status.kubernetesStatus.workloadsStatus[*].workloadType}{"\n"}{end}' 2>/dev/null)
+        vm_lines=$(printf '%s\n' "$listing" | grep 'VirtualMachineInstance' || true)
         if [[ "$pods_reported" == "0" ]]; then
             pods_reported=1
             local pod_lines
-            pod_lines=$(printf '%s\n' "$listing" | grep -v 'virt-launcher' | grep -v '^$' || true)
+            pod_lines=$(printf '%s\n' "$listing" | grep -v 'VirtualMachineInstance' | grep -v '^$' || true)
             if [[ -n "$pod_lines" ]]; then
                 log_info "  → volumes de pods (non-VM), ignorés — ils s'arrêteront avec le node :"
                 while IFS='|' read -r vol_pvc _; do
@@ -477,13 +486,44 @@ step_cordon() {
     emit_event "cordon" "running" "Cordon all nodes"
     log_step "[4/8] Cordon des nodes"
 
+    # Le `|| true` d'origine avalait TOUTE erreur et l'étape se déclarait
+    # réussie sans condition : sur un cluster multi-node, un vrai échec de
+    # cordon (RBAC, API en vrac) passait pour un succès. On compte donc.
+    #
+    # Cas particulier légitime : sur un cluster mono-node, le webhook
+    # Harvester refuse de cordonner le dernier node disponible. On éteint
+    # tout le cluster de toute façon, ce refus est sans conséquence — mais
+    # il se dit, il ne se maquille pas en succès.
+    local ok_count=0 last_node_refusals=0 failed=0 out rc
     while IFS= read -r node; do
         log_info "Cordon: $node"
-        run kubectl --kubeconfig="$KUBECONFIG_PATH" cordon "$node" || true
+        if [[ "$DRY_RUN" == "1" ]]; then
+            run kubectl --kubeconfig="$KUBECONFIG_PATH" cordon "$node"
+            ok_count=$((ok_count + 1))
+            continue
+        fi
+        out=$(kubectl --kubeconfig="$KUBECONFIG_PATH" cordon "$node" 2>&1); rc=$?
+        if (( rc == 0 )); then
+            ok_count=$((ok_count + 1))
+        elif grep -qi 'last available node' <<< "$out"; then
+            last_node_refusals=$((last_node_refusals + 1))
+            log_info "  → $node : dernier node disponible, cordon refusé par Harvester (sans conséquence ici)"
+        else
+            failed=$((failed + 1))
+            log_warn "  → $node : cordon EN ÉCHEC — ${out##*: }"
+        fi
     done < <(kc_quiet get nodes -o name 2>/dev/null | sed 's|node/||')
 
-    emit_event "cordon" "done" "Nodes cordoned"
-    log_ok "Tous les nodes sont cordonnés"
+    if (( failed > 0 )); then
+        emit_event "cordon" "warn" "$failed node(s) not cordoned"
+        log_warn "$ok_count cordonné(s), $failed en échec — les workloads peuvent encore être planifiés"
+    elif (( last_node_refusals > 0 && ok_count == 0 )); then
+        emit_event "cordon" "skipped" "single-node cluster, cordon refused by Harvester"
+        log_ok "Cluster mono-node : cordon non applicable"
+    else
+        emit_event "cordon" "done" "$ok_count node(s) cordoned"
+        log_ok "$ok_count node(s) cordonné(s)"
+    fi
 }
 
 # =============================================================================

@@ -198,17 +198,20 @@ def test_api_capi_diag_unknown_cluster(api):
     assert "unknown cluster" in body["error"]
 
 
-def test_api_capi_diag_shape(api):
-    """Diag must run even when no CAPI is installed (harv-fake has no API).
-    We expect a 200 with the expected structure (all components False)."""
+def test_api_capi_diag_says_so_when_the_cluster_is_down(api):
+    """v1.27.0 : le kubeconfig de harv-fake pointe volontairement un port
+    fermé, donc le cluster est injoignable — et c'est ce que le diagnostic
+    doit répondre, tout de suite.
+
+    Avant, il interrogeait quand même le cluster et enchaînait les délais de
+    `kubectl` : 75 secondes mesurées contre le vrai harv3 hors tension, pour
+    finir par un écran qui annonçait « CAPI/CAPHV stack fully installed »,
+    `[].every()` valant `true`."""
     status, body = api("GET", "/api/capi/harv-fake/diag")
     assert status == 200
-    assert "components" in body
-    assert "capi_clusters" in body
-    assert "have_capi_crds" in body
-    assert "bundle_available" in body
-    # On the fake cluster nothing is installed
-    assert all(c["installed"] is False for c in body["components"])
+    assert body["unreachable"] is True
+    assert body["cluster"] == "harv-fake"
+    assert body["endpoint"], "l'adresse injoignable doit être nommée"
 
 
 def test_api_capi_install_unknown_cluster(api):

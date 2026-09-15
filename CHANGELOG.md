@@ -4,6 +4,75 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.27.0] - 2026-09-15 - What a cluster that is switched off should look like
+
+Reported by switching to a cluster that had just been powered off: the screen
+span with nothing to show, then gave up without explaining, and coming back to
+a healthy cluster displayed it as "not ready". Powering that cluster down for
+real also exposed two safety nets that were not doing their job.
+
+### Fixed
+- **A declared but powered-off cluster froze the console.** Every call waited
+  for `kubectl` to give up on its own: 30 s for the status, 15 s for the VM
+  list and the topology, and 75 s for the Cluster API diagnostic, which chains
+  those calls. Measured against the real harv3 with its power off. A machine
+  that is off is recognised in two seconds, because its API server refuses the
+  TCP connection, so that is asked first and the answer says "unreachable"
+  along with the address. The four calls now answer in well under two seconds,
+  and the answer is cached briefly so one cluster switch probes once.
+- **A late failure repainted the cluster you had switched to.** Nothing
+  checked that a response still concerned the cluster on screen, so the dead
+  cluster's error, arriving 30 s later, landed on a healthy one and showed it
+  as not ready. The overview and the VM list now drop a response whose cluster
+  changed while it was in flight.
+- **The Cluster API tab reported a stack that was "fully installed" on a
+  cluster that was not answering at all.** `[].every()` is `true` in
+  JavaScript, so an empty component list came out green.
+- **The Longhorn detach wait was watching nothing.** It picked VM volumes by
+  looking for "virt-launcher" in `workloadName`, but Longhorn puts the VM's
+  own name there; the discriminator is `workloadType` being
+  `VirtualMachineInstance`, and "virt-launcher" only ever appears in
+  `podName`, a field that was not even read. So the filter never matched, on
+  any cluster: since 1.8.9 the step returned immediately announcing "all VM
+  volumes detached", and filed the disk of the VM it had just stopped under
+  the pod volumes it ignores. This is the invariant the toolkit puts forward,
+  and cutting power while a volume is still attached is exactly what the step
+  exists to prevent. Verified on the live harv1: the old filter returned zero
+  matches while two VM volumes were attached.
+- **Clicking the cluster picker still left the menu open**, which 1.26.0
+  claimed to have fixed. Telling a keyboard focus from a mouse focus with
+  `:focus-visible` is not enough: Chromium sets it on a `<select>` focused
+  with the mouse too, because a select is driven by the keyboard afterwards.
+  The input modality is now tracked explicitly, so only Tab navigation holds
+  the menu open. Caught by the test written for 1.26.0, which had started
+  passing for the wrong reason.
+- **A failed cordon was reported as a success.** `|| true` swallowed the
+  error and the step emitted "done" unconditionally. It now counts what it
+  actually cordoned, and tells a real failure apart from Harvester's
+  legitimate refusal to cordon the last available node of a single-node
+  cluster, which is harmless when the whole cluster is going down.
+
+### Tests
+- The probe: reading the endpoint from the current context, the default port
+  per scheme, an unreadable kubeconfig deciding nothing rather than locking a
+  healthy cluster out, a listening socket, a closed port answering in under
+  three seconds, and one probe per switch thanks to the cache.
+- The four endpoints answering "unreachable" with the address named, and the
+  guarantee that a reachable cluster is never blocked.
+- The stale-response guard, the empty-component-list green, and the message
+  existing in the five languages.
+- The two shutdown safety nets, including that the keep and drop filters use
+  the same criterion so a volume cannot fall into both lists or neither.
+- Both halves of the menu rule: a mouse click inside it closes it, Tab into
+  it opens it. The second is why the mechanism exists, and the guard against
+  the first must not take it away.
+- 591 API tests green, 97 browser tests.
+
+### Known limitation
+While the selected cluster is unreachable, the Cluster API tab shows the
+unreachable notice instead of its bundle management, which is local and would
+still work. Switching to a reachable cluster brings it back.
+
 ## [1.26.1] - 2026-09-11 - Two ways in, told apart
 
 ### Fixed

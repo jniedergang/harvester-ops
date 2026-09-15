@@ -232,6 +232,12 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
 
 ## 7. Support aux opérations (CLI + console)
 
+- **Un cluster éteint le dit.** Un cluster déclaré dont le serveur d'API ne
+  répond pas est reconnu en deux secondes environ, et la console nomme
+  l'adresse injoignable au lieu de tourner dans le vide jusqu'à 75 secondes
+  puis d'abandonner sans rien expliquer. Les réponses qui arrivent après une
+  bascule sont jetées : l'échec d'un cluster mort ne peut plus s'afficher
+  comme l'état d'un cluster sain.
 - **Config multi-cluster** — déclarer les clusters dans `config.yaml` ;
   ajouter / éditer / supprimer et uploader kubeconfig + clé SSH depuis la
   console ; tests de connexion kubeconfig et SSH.

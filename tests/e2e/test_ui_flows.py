@@ -1312,6 +1312,38 @@ def test_clicking_inside_the_menu_does_not_leave_it_open(page):
     assert width < 80, f"le menu est resté ouvert ({width}px) et masque la page"
 
 
+def test_tabbing_into_the_menu_still_opens_it(page):
+    """Contrepartie du test précédent : le clavier, lui, DOIT ouvrir le
+    menu, sinon tabuler dedans parcourt des libellés invisibles. C'est la
+    raison d'être du mécanisme, et la garde posée contre le clic souris ne
+    doit pas l'emporter avec elle.
+
+    `:focus-visible` seul ne distingue pas les deux : Chromium le pose aussi
+    sur un `<select>` focalisé à la souris.
+    """
+    page.mouse.move(900, 400)
+    page.wait_for_timeout(500)
+    assert page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width') < 80
+
+    # Tabuler depuis le haut de la page finit par entrer dans le menu.
+    page.keyboard.press('Tab')
+    for _ in range(12):
+        inside = page.evaluate(
+            "() => document.querySelector('#sidebar')"
+            ".contains(document.activeElement)")
+        if inside:
+            break
+        page.keyboard.press('Tab')
+    else:
+        pytest.skip("le focus n'a pas atteint le menu en 12 tabulations")
+
+    page.wait_for_timeout(400)
+    width = page.locator('#sidebar').evaluate(
+        'el => el.getBoundingClientRect().width')
+    assert width > 200, f"le clavier doit ouvrir le menu, mesuré {width}px"
+
+
 def test_pinning_the_sidebar_persists(page):
     """Épingler est le geste explicite qui rend une colonne au menu, et il
     doit survivre au rechargement."""

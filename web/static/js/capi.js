@@ -11,6 +11,12 @@ const CAPI = (() => {
   const $  = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
 
+  function esc(v) {
+    if (v === null || v === undefined) return '';
+    return String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
   // Le diagnostic CAPI interroge le cluster : plusieurs secondes sur un
   // cluster lent. Un « Loading… » qui vide la carte donnait l'impression
   // que l'onglet s'était cassé. Même voile flouté que les autres
@@ -42,7 +48,19 @@ const CAPI = (() => {
   }
 
   function render(out, d) {
-    const allInstalled = (d.components || []).every(c => c.installed);
+    // Cluster déclaré mais hors tension : le dire, et surtout ne rien
+    // conclure sur la pile.
+    if (d.unreachable) {
+      out.innerHTML = `<div class="summary-bar warn">${Icons.svg('warn', { size: 14 })} ${
+        esc(window.i18n ? i18n.t('overview.clusterUnreachable', { name: d.cluster || '' })
+                        : 'Cluster unreachable')} <code>${esc(d.endpoint || '')}</code></div>`;
+      return;
+    }
+    // ⚠️ `[].every()` vaut TRUE : sans le contrôle de longueur, une réponse
+    // sans composants affichait « stack fully installed » en vert sur un
+    // cluster qui ne répondait même pas.
+    const comps = d.components || [];
+    const allInstalled = comps.length > 0 && comps.every(c => c.installed);
     const summary = allInstalled
       ? '<div class="summary-bar ok">' + Icons.svg('ok', { size: 14 }) + ' CAPI/CAPHV stack fully installed</div>'
       : '<div class="summary-bar warn">' + Icons.svg('warn', { size: 14 }) + ' Some components are missing — use Install stack to deploy them</div>';
@@ -62,7 +80,7 @@ const CAPI = (() => {
       }
     }
 
-    const componentRows = (d.components || []).map(c => `
+    const componentRows = comps.map(c => `
       <tr>
         <td>${c.installed ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge fail">' + Icons.svg('fail', { size: 14 }) + '</span>'}</td>
         <td><strong>${c.label}</strong></td>

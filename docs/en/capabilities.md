@@ -207,6 +207,12 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
 
 ## 7. Operations support (CLI + console)
 
+- **A cluster that is switched off says so.** A declared cluster whose API
+  server does not answer is recognised in about two seconds, and the console
+  says which address is unreachable instead of spinning for up to 75 seconds
+  and then giving up silently. Responses that arrive after you have switched
+  clusters are dropped, so a dead cluster's failure can never be displayed as
+  the state of a healthy one.
 - **Multi-cluster config** — declare clusters in `config.yaml`; add /
   edit / delete and upload kubeconfig + SSH key from the console;
   connection tests for kubeconfig and SSH.

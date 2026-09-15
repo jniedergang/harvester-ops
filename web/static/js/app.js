@@ -171,10 +171,43 @@ const App = (() => {
     }, refreshStatusInner);
   }
 
+  /** Cluster déclaré mais hors tension. On vide les compteurs au lieu de
+   *  laisser ceux du cluster précédent, qui se liraient comme les siens. */
+  function showUnreachable(data) {
+    ['#m-nodes', '#m-vms', '#m-volumes', '#m-rebuild'].forEach(sel => {
+      const el = $(sel);
+      if (el) el.textContent = '–';
+    });
+    const tbody = $('#nodes-table tbody');
+    if (tbody) tbody.innerHTML = '';
+    const banner = $('#status-error-banner') || (() => {
+      const b = document.createElement('div');
+      b.id = 'status-error-banner';
+      b.className = 'status-error-banner';
+      const overview = $('#tab-overview');
+      if (overview) overview.insertBefore(b, overview.firstChild);
+      return b;
+    })();
+    banner.innerHTML = `${Icons.svg('warn')} ${
+      escapeHtml(i18n.t('overview.clusterUnreachable', { name: data.cluster || '' }))
+    } <code>${escapeHtml(data.endpoint || '')}</code>`;
+  }
+
   async function refreshStatusInner() {
     if (!currentCluster) return;
+    // Le cluster interrogé est figé ICI. Une réponse qui arrive après une
+    // bascule doit être jetée : sans cette garde, l'échec tardif d'un
+    // cluster éteint repeignait l'écran d'un cluster bien vivant, qui
+    // s'affichait alors « not ready » sans raison.
+    const asked = currentCluster;
     try {
-      const data = await api(`/api/status/${encodeURIComponent(currentCluster)}`);
+      const data = await api(`/api/status/${encodeURIComponent(asked)}`);
+      if (asked !== currentCluster) return;
+
+      // Cluster déclaré mais injoignable : ce n'est pas une panne de
+      // l'outil, et le dire franchement vaut mieux qu'un écran vide.
+      if (data.unreachable) { showUnreachable(data); return; }
+
       // Clear any previous error banner on a successful refresh
       const old = $('#status-error-banner');
       if (old) old.remove();
@@ -251,8 +284,29 @@ const App = (() => {
 
   async function refreshNamespaces(autoSelectFirst = false) {
     if (!currentCluster) return;
+    // Même garde que pour l'aperçu : une réponse arrivée après une bascule
+    // ne doit pas repeindre l'écran du cluster suivant.
+    const asked = currentCluster;
     try {
-      const data = await api(`/api/vms/${encodeURIComponent(currentCluster)}`);
+      const data = await api(`/api/vms/${encodeURIComponent(asked)}`);
+      if (asked !== currentCluster) return;
+      if (data.unreachable) {
+        const sel = $('#ns-dropdown');
+        if (sel) sel.innerHTML = '';
+        // Le message va dans le CORPS du tableau : remplacer l'onglet
+        // entier emporterait la liste déroulante et la barre d'outils, que
+        // rien ne reconstruirait.
+        const tbody = $('#ns-vms-table tbody');
+        if (tbody) {
+          tbody.innerHTML = `<tr><td colspan="8" class="empty-state">${
+            Icons.svg('warn', { size: 14 })} ${
+            escapeHtml(i18n.t('overview.clusterUnreachable', { name: data.cluster || '' }))
+          } <code>${escapeHtml(data.endpoint || '')}</code></td></tr>`;
+        }
+        const count = $('#ns-vm-count');
+        if (count) count.textContent = '–';
+        return;
+      }
       const groups = {};
       (data.vms || []).forEach(vm => {
         (groups[vm.namespace] = groups[vm.namespace] || []).push(vm);
@@ -1563,9 +1617,23 @@ const App = (() => {
     // avalait les clics du contenu en dessous jusqu'à ce qu'on aille
     // cliquer ailleurs. Le navigateur ne pose `:focus-visible` que sur un
     // focus venu du clavier, ce qui est exactement la distinction voulue.
+    // `:focus-visible` ne suffit PAS : Chromium le pose aussi sur un
+    // `<select>` focalisé à la SOURIS, parce qu'un select se pilote ensuite
+    // au clavier. Cliquer le sélecteur de cluster gardait donc le menu
+    // ouvert, c'est-à-dire précisément le défaut qu'on voulait corriger.
+    // On suit donc la modalité d'entrée explicitement : seule une
+    // navigation au clavier (Tab) retient le menu.
+    let lastInputWasKeyboard = false;
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') lastInputWasKeyboard = true;
+    }, true);
+    document.addEventListener('pointerdown', () => {
+      lastInputWasKeyboard = false;
+    }, true);
     const keyboardInside = () => {
-      try { return !!sidebarEl?.querySelector(':focus-visible'); }
-      catch { return false; }          // sélecteur inconnu d'un vieux moteur
+      if (!lastInputWasKeyboard || !sidebarEl) return false;
+      const el = document.activeElement;
+      return !!el && el !== document.body && sidebarEl.contains(el);
     };
     sidebarEl?.addEventListener('focusin', () => {
       if (!isPinned() && keyboardInside()) {

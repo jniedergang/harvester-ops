@@ -25,6 +25,7 @@ import platform
 import shutil
 import re
 import shlex
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1481,6 +1482,13 @@ def api_clusters():
 @app.route("/api/status/<cluster>")
 @requires_auth
 def api_status(cluster):
+    # Cluster déclaré mais hors tension : on le dit en deux secondes plutôt
+    # que de faire patienter trente. Sans ça, l'écran tournait dans le vide
+    # et finissait sans explication.
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
     script = BIN_DIR / "harvester-status.sh"
     namespace = request.args.get("namespace", "")
     cmd = ["/usr/bin/env", "bash", str(script), "--cluster", cluster, "--output", "json"]
@@ -1816,6 +1824,13 @@ def api_topology(cluster):
     """Consolidated topology snapshot consumed by the Aperçu visual
     viewers (Cytoscape.js). Cached server-side for TOPOLOGY_CACHE_TTL
     seconds. Pass `?fresh=1` to force a refresh."""
+    # Cluster déclaré mais hors tension : répondre tout de suite. Sans cela
+    # cet appel attend le délai de `kubectl`, et une bascule de cluster
+    # enchaîne ces attentes (15 s mesurées).
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
@@ -2675,6 +2690,86 @@ def _kubectl_for_cluster(cluster):
 
 
 # =============================================================================
+# Joignabilité d'un cluster
+#
+# Un cluster déclaré mais éteint faisait attendre 30 secondes : `kubectl` ne
+# rend la main qu'au bout de son propre délai, et le point d'entrée de statut
+# attendait la fin du script. À l'écran, la bascule de cluster tournait dans
+# le vide puis le voile abandonnait sur son garde-fou, sans rien expliquer.
+#
+# Un cluster hors tension se reconnaît en deux secondes : son serveur d'API
+# n'accepte pas la connexion TCP. On le demande donc AVANT de lancer quoi que
+# ce soit de lent, et on répond « injoignable » au lieu de faire patienter.
+# =============================================================================
+_REACH_CACHE = {}          # kubeconfig -> (timestamp, bool)
+_REACH_TTL = 5.0           # assez court pour suivre un cluster qui revient
+_REACH_LOCK = threading.Lock()
+
+
+def _cluster_api_endpoint(kubeconfig):
+    """(hôte, port) du serveur d'API du contexte courant, ou None si on ne
+    sait pas lire le kubeconfig — auquel cas on ne bloque rien."""
+    try:
+        with open(kubeconfig) as fh:
+            kc = yaml.safe_load(fh) or {}
+        ctx_name = kc.get("current-context")
+        cluster_name = None
+        for ctx in kc.get("contexts") or []:
+            if ctx.get("name") == ctx_name:
+                cluster_name = (ctx.get("context") or {}).get("cluster")
+                break
+        server = None
+        for c in kc.get("clusters") or []:
+            if cluster_name is None or c.get("name") == cluster_name:
+                server = (c.get("cluster") or {}).get("server")
+                break
+        if not server:
+            return None
+        from urllib.parse import urlparse
+        u = urlparse(server)
+        if not u.hostname:
+            return None
+        return (u.hostname, u.port or (443 if u.scheme == "https" else 80))
+    except Exception:
+        return None
+
+
+def _cluster_reachable(kubeconfig, timeout=2.0):
+    """True/False, ou None quand la question n'a pas de réponse fiable
+    (kubeconfig illisible) : dans ce cas l'appelant procède normalement
+    plutôt que de refuser à tort."""
+    if not kubeconfig:
+        return None
+    now = time.time()
+    with _REACH_LOCK:
+        hit = _REACH_CACHE.get(kubeconfig)
+        if hit and now - hit[0] < _REACH_TTL:
+            return hit[1]
+    endpoint = _cluster_api_endpoint(kubeconfig)
+    if endpoint is None:
+        return None
+    try:
+        with socket.create_connection(endpoint, timeout=timeout):
+            ok = True
+    except OSError:
+        ok = False
+    with _REACH_LOCK:
+        _REACH_CACHE[kubeconfig] = (now, ok)
+    return ok
+
+
+def _unreachable_payload(cluster, kubeconfig):
+    """Réponse commune aux points d'entrée qui interrogent un cluster."""
+    endpoint = _cluster_api_endpoint(kubeconfig) or ("?", 0)
+    return {
+        "error": "cluster unreachable",
+        "unreachable": True,
+        "cluster": cluster,
+        "endpoint": f"{endpoint[0]}:{endpoint[1]}",
+    }
+
+
+# =============================================================================
 # Harvester cluster event watcher
 # =============================================================================
 # Goal: capture mutative actions made on the Harvester cluster (via Harvester
@@ -3009,6 +3104,13 @@ def api_vms_list(cluster):
     """Return all VMs with their current shutdown-priority annotation, snapshot flag,
     runStrategy and live VMI phase (Running/Pending/Failed/...).
     """
+    # Cluster déclaré mais hors tension : répondre tout de suite. Sans cela
+    # cet appel attend le délai de `kubectl`, et une bascule de cluster
+    # enchaîne ces attentes (15 s mesurées).
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
@@ -6514,6 +6616,13 @@ def api_capi_uninstall(cluster):
 @requires_auth
 def api_capi_diag(cluster):
     """Diagnostic of the CAPI/CAPHV stack on the target Harvester cluster."""
+    # Cluster déclaré mais hors tension : répondre tout de suite. Sans cela
+    # cet appel attend le délai de `kubectl`, et une bascule de cluster
+    # enchaîne ces attentes (75 s mesurées).
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
