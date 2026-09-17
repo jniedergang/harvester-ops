@@ -843,8 +843,11 @@ const VMEdit = (() => {
         if (!item.image) throw new Error(tr('vm.edit.errImage', 'select a VM image for disk') + ` ${item.name}`);
         const imgName = item.image.split('/').pop();
         t.metadata.annotations['harvesterhci.io/imageId'] = item.image;
-        // Harvester provisions one storage class per image: longhorn-<image>
-        t.spec.storageClassName = `longhorn-${imgName}`;
+        // Lue sur l'image, jamais fabriquée (cf. imageStorageClass). Le
+        // repli sur l'ancienne convention ne sert qu'au cas où la liste
+        // n'aurait pas encore été chargée.
+        t.spec.storageClassName = imageStorageClass.get(item.image)
+          || `longhorn-${imgName}`;
       } else if (item.storage_class) {
         t.spec.storageClassName = item.storage_class;
       }
@@ -1070,7 +1073,28 @@ const VMEdit = (() => {
       'Changes apply at the next VM restart (the running instance keeps the old layout — use the console reset button).'))}</p>`;
   }
 
+  // La storage class d'une image ne se DÉDUIT pas de son nom. Harvester en
+  // crée une par image, mais sous deux conventions : `longhorn-image-xxxx`
+  // pour les anciennes, `lh-<uuid>` pour celles à backend backingimage.
+  // Fabriquer le nom donnait un PVC bloqué en Pending sur « storageclass
+  // not found », et une VM non planifiable — vécu sur harv1. On lit donc
+  // `status.storageClassName`, exposé par /api/images.
+  const imageStorageClass = new Map();     // "ns/name" -> storage class
+
+  function primeImageStorageClasses(cluster) {
+    if (!cluster) return;
+    fetch(`/api/images/${encodeURIComponent(cluster)}`)
+      .then(r => r.json())
+      .then(list => (Array.isArray(list) ? list : []).forEach(i => {
+        if (i && i.namespace && i.name && i.storage_class) {
+          imageStorageClass.set(`${i.namespace}/${i.name}`, i.storage_class);
+        }
+      }))
+      .catch(() => {});
+  }
+
   function renderDisksSection(vm, cluster) {
+    primeImageStorageClasses(cluster);
     const { items, passthrough } = vmDisksToForm(vm);
     const template = ((vm.spec || {}).template || {}).spec || {};
     const raw = { volumes: template.volumes || [],
@@ -1553,13 +1577,23 @@ const VMEdit = (() => {
     });
   }
 
-  function wireSection(sectionEl, sectionId, cluster, namespace, name, getVM) {
+  /**
+   * @param opts.createMode  la VM n'existe pas encore (panneau de création) :
+   *   il n'y a rien à charger depuis le cluster et rien à patcher. Les
+   *   assistants et les éditeurs, eux, se câblent normalement — c'est tout
+   *   l'intérêt de rejouer ces sections plutôt que d'en écrire d'autres.
+   */
+  function wireSection(sectionEl, sectionId, cluster, namespace, name, getVM,
+                       opts = {}) {
+    const createMode = !!opts.createMode;
     if (sectionId === 'cloudinit') {
-      loadCloudInit(sectionEl, cluster, namespace, name);
-      sectionEl.querySelector('[data-action="apply-cloudinit"]').addEventListener('click', () =>
-        applyCloudInit(sectionEl, cluster, namespace, name));
-      sectionEl.querySelector('[data-action="reload-cloudinit"]').addEventListener('click', () =>
-        loadCloudInit(sectionEl, cluster, namespace, name));
+      if (!createMode) {
+        loadCloudInit(sectionEl, cluster, namespace, name);
+        sectionEl.querySelector('[data-action="apply-cloudinit"]')?.addEventListener('click', () =>
+          applyCloudInit(sectionEl, cluster, namespace, name));
+        sectionEl.querySelector('[data-action="reload-cloudinit"]')?.addEventListener('click', () =>
+          loadCloudInit(sectionEl, cluster, namespace, name));
+      }
 
       // v1.8.1 — assistant wiring: two generator forms feeding the editors.
       // Container divs (the user form spans several section renders, so
@@ -1642,6 +1676,10 @@ const VMEdit = (() => {
     const applyBtn = sectionEl.querySelector('[data-action="apply"]');
     if (applyBtn) {
       applyBtn.addEventListener('click', async () => {
+        // En création, le bouton d'application d'une section n'a pas de
+        // VM à patcher : c'est le bouton « Créer » du panneau qui vaut
+        // validation, une fois toutes les sections assemblées.
+        if (createMode) return;
         const dryRun = !!sectionEl.querySelector('[data-dry-run]')?.checked;
         const result = sectionEl.querySelector('.apply-result');
         result.textContent = 'applying…';
@@ -1933,6 +1971,14 @@ const VMEdit = (() => {
 
   return {
     open,
+    // v1.28.0 : la création de VM REJOUE ces deux fonctions sur un
+    // squelette au lieu d'une VM existante. C'est ce qui garantit que tout
+    // ce qui est éditable est réglable à la création, sans dupliquer les
+    // huit sections de formulaire.
+    SECTIONS,
+    renderSectionHtml,
+    buildPatch,
+    wireSection,
     // exported for tests (pure functions, no DOM)
     _mappers: {
       vmTagsToForm, vmPlacementToForm, formPlacementToAffinity, vmDisksToForm, formDisksToPatch, vmNetsToForm, formNetsToPatch,

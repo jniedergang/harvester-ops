@@ -1551,6 +1551,14 @@ const App = (() => {
 
     $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
 
+    // Création de VM : le namespace courant sert de proposition, le panneau
+    // laisse en changer.
+    $('#btn-vm-create')?.addEventListener('click', () => {
+      if (!currentCluster) return;
+      window.VMCreate && VMCreate.open(currentCluster,
+        currentNamespace || $('#ns-dropdown')?.value || 'default');
+    });
+
     // -------------------------------------------------------------------
     // Menu latéral : rail par défaut, dépliage au survol, épinglage
     // optionnel.

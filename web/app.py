@@ -1919,6 +1919,17 @@ def _reduce_image(item):
         "source_type": spec.get("sourceType"),
         "size": status.get("size"),
         "progress": status.get("progress"),
+        # Indispensables pour créer une VM à partir de cette image, et tous
+        # deux à LIRE, jamais à deviner :
+        #  * la storage class n'est pas `longhorn-<nom de l'image>`. Les
+        #    images récentes (backend backingimage) portent une classe
+        #    `lh-<uuid>`. Deviner le nom a produit un PVC bloqué en Pending
+        #    sur « storageclass not found », et une VM non planifiable ;
+        #  * un disque plus petit que la taille VIRTUELLE de l'image est
+        #    refusé : c'est le plancher à proposer, pas la taille du
+        #    fichier téléchargé (723 Mo compressés pour 10 Gio réels).
+        "storage_class": status.get("storageClassName"),
+        "virtual_size": status.get("virtualSize"),
     }
 
 
@@ -4284,6 +4295,305 @@ def _vm_action_runner(run, kc, namespace, name, target):
     run.ended_at = time.time()
     run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
     run.close()
+
+
+# =============================================================================
+# Création de machines virtuelles
+#
+# La console savait tout éditer d'une VM mais pas en créer une : il fallait
+# passer par l'UI Harvester ou par une déclaration Terraform. Le formulaire
+# de création REJOUE les sections de l'éditeur (cf. web/static/js/vm-create.js)
+# et envoie ici un manifeste complet : tout ce qui est éditable est donc
+# réglable à la création, par construction.
+# =============================================================================
+VM_CREATE_MAX = 50          # garde-fou : un chiffre tapé de travers ne doit
+                            # pas lancer mille créations
+
+
+def _rand_suffix(n=5):
+    import random
+    import string
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(n))
+
+
+def _instance_names(base, count, start_at=1, pad=2):
+    """`web` x3 -> web-01, web-02, web-03. Une seule instance garde le nom
+    tel quel : suffixer « web » en « web-01 » quand on n'en demande qu'une
+    surprendrait."""
+    if count <= 1:
+        return [base]
+    return [f"{base}-{i:0{pad}d}" for i in range(start_at, start_at + count)]
+
+
+def _vm_manifest_for_instance(manifest, name, namespace, start):
+    """Décline le manifeste pour UNE instance.
+
+    Le point délicat est le stockage : les noms de PVC de
+    `harvesterhci.io/volumeClaimTemplates` portent le nom de la VM, et les
+    volumes les référencent par `claimName`. Créer trois VMs à partir du
+    même manifeste sans les réécrire ferait échouer les deux dernières sur
+    des PVC déjà pris (ou, pire, les ferait partager un disque).
+    """
+    import copy
+    vm = copy.deepcopy(manifest)
+    vm.setdefault("apiVersion", "kubevirt.io/v1")
+    vm.setdefault("kind", "VirtualMachine")
+    meta = vm.setdefault("metadata", {})
+    old_name = meta.get("name") or ""
+    meta["name"] = name
+    meta["namespace"] = namespace
+
+    spec = vm.setdefault("spec", {})
+    spec["runStrategy"] = "Always" if start else "Halted"
+
+    tmpl_spec = spec.setdefault("template", {}).setdefault("spec", {})
+    # Le nom d'hôte invité suit le nom de la VM quand il n'a pas été fixé
+    # à la main.
+    if not tmpl_spec.get("hostname") or tmpl_spec.get("hostname") == old_name:
+        tmpl_spec["hostname"] = name
+
+    # --- stockage : renommer les PVC et leurs références ---
+    annotations = meta.setdefault("annotations", {})
+    raw = annotations.get("harvesterhci.io/volumeClaimTemplates")
+    renamed = {}
+    if raw:
+        try:
+            vcts = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            vcts = []
+        for vct in vcts or []:
+            vmeta = vct.setdefault("metadata", {})
+            old_pvc = vmeta.get("name") or ""
+            # Le suffixe aléatoire évite la collision avec un PVC orphelin
+            # laissé par une VM supprimée du même nom.
+            disk_part = old_pvc
+            if old_name and old_pvc.startswith(old_name + "-"):
+                disk_part = old_pvc[len(old_name) + 1:]
+            disk_part = re.sub(r"-[a-z0-9]{5}$", "", disk_part) or "disk-0"
+            new_pvc = f"{name}-{disk_part}-{_rand_suffix()}"
+            vmeta["name"] = new_pvc
+            if old_pvc:
+                renamed[old_pvc] = new_pvc
+        if vcts:
+            annotations["harvesterhci.io/volumeClaimTemplates"] = json.dumps(vcts)
+
+    for vol in tmpl_spec.get("volumes") or []:
+        pvc = vol.get("persistentVolumeClaim") or {}
+        claim = pvc.get("claimName")
+        if claim and claim in renamed:
+            pvc["claimName"] = renamed[claim]
+
+    # Les champs que l'apiserver refuse sur une création.
+    for field in ("resourceVersion", "uid", "creationTimestamp",
+                  "generation", "selfLink", "managedFields"):
+        meta.pop(field, None)
+    vm.pop("status", None)
+    return vm
+
+
+def _vm_create_runner(run, cluster, kc, namespace, names, start, manifest,
+                      dry_run):
+    """Crée les VMs une par une, en rendant compte de chacune.
+
+    Une par une et non en lot : sur un échec partiel, l'opérateur doit
+    savoir lesquelles existent. Un `kubectl create` groupé s'arrête à la
+    première erreur en laissant un résultat ambigu.
+    """
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    created, failed = [], []
+    try:
+        for name in names:
+            vm = _vm_manifest_for_instance(manifest, name, namespace, start)
+            cmd = ["kubectl", "--kubeconfig", kc, "create", "-f", "-",
+                   "-o", "name"]
+            if dry_run:
+                cmd += ["--dry-run=server"]
+            step(name, "running", f"création de {namespace}/{name}")
+            try:
+                r = subprocess.run(cmd, input=json.dumps(vm), capture_output=True,
+                                   text=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                failed.append((name, "timeout"))
+                step(name, "error", "timeout")
+                continue
+            if r.returncode == 0:
+                created.append(name)
+                step(name, "done",
+                     ("(dry-run) " if dry_run else "") + (r.stdout.strip() or name))
+            else:
+                detail = (r.stderr or r.stdout).strip().splitlines()
+                detail = detail[-1][:300] if detail else f"exit {r.returncode}"
+                failed.append((name, detail))
+                step(name, "error", detail)
+
+        if failed:
+            run.exit_code = 1
+            run.status = "error"
+            run.error_summary = (f"{len(created)}/{len(names)} créée(s) ; "
+                                 f"échec sur {failed[0][0]} : {failed[0][1]}")[:300]
+        else:
+            run.exit_code = 0
+            run.status = "done"
+    except Exception as e:
+        run.error_summary = str(e)[:300]
+        step("create", "error", str(e)[:300])
+        run.exit_code = 1
+        run.status = "error"
+    if not dry_run and created:
+        _invalidate_cluster_caches(cluster)
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status,
+              "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+
+
+@app.route("/api/vms/<cluster>/create", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_vm_create(cluster):
+    """Crée une ou plusieurs VMs.
+
+    Body: {namespace, name, count?, start?, manifest, dry_run?}
+    """
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    data = request.get_json(force=True, silent=True) or {}
+    namespace = (data.get("namespace") or "").strip()
+    name = (data.get("name") or "").strip()
+    manifest = data.get("manifest")
+    start = bool(data.get("start", True))
+    dry_run = bool(data.get("dry_run", False))
+    try:
+        count = int(data.get("count", 1))
+    except (TypeError, ValueError):
+        return jsonify({"error": "count must be a number"}), 400
+
+    if not _valid_k8s_name(namespace):
+        return jsonify({"error": "invalid namespace"}), 400
+    if not _valid_k8s_name(name):
+        return jsonify({"error": "invalid VM name (RFC 1123)"}), 400
+    if not isinstance(manifest, dict) or not manifest.get("spec"):
+        return jsonify({"error": "manifest with a spec is required"}), 400
+    if count < 1 or count > VM_CREATE_MAX:
+        return jsonify({"error": f"count must be between 1 and {VM_CREATE_MAX}"}), 400
+
+    names = _instance_names(name, count)
+    # Les noms dérivés doivent rester valides : « mon-app » x12 donne
+    # « mon-app-12 », mais un nom déjà à la limite des 63 caractères ne
+    # passerait plus.
+    invalid = [n for n in names if not _valid_k8s_name(n)]
+    if invalid:
+        return jsonify({"error": f"generated name is not RFC 1123: {invalid[0]}"}), 400
+
+    action_id = track_action(
+        f"vm-create:{namespace}/{name}" + (f" x{count}" if count > 1 else ""),
+        cluster, _vm_create_runner,
+        cluster, kc, namespace, names, start, manifest, dry_run)
+    return jsonify({"action_id": action_id, "names": names,
+                    "dry_run": dry_run}), 202
+
+
+@app.route("/api/vmtemplates/<cluster>")
+@requires_auth
+def api_vmtemplates_list(cluster):
+    """Templates de VM Harvester, pour réutiliser une configuration."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    data = _kubectl_json(kc, "get", "virtualmachinetemplates", "-A", "-o", "json",
+                         cluster=cluster)
+    items = []
+    for it in (data or {}).get("items", []):
+        meta = it.get("metadata") or {}
+        spec = it.get("spec") or {}
+        items.append({
+            "name": meta.get("name"),
+            "namespace": meta.get("namespace"),
+            "description": spec.get("description"),
+            "default_version": spec.get("defaultVersionId"),
+        })
+    return jsonify({"templates": items})
+
+
+@app.route("/api/vmtemplates/<cluster>", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_vmtemplate_create(cluster):
+    """Enregistre une configuration de VM comme template réutilisable.
+
+    Harvester modélise cela en DEUX objets : un `VirtualMachineTemplate`
+    (le nom, la description) et une `VirtualMachineTemplateVersion` qui
+    porte la spec et référence son parent par `templateId`. Créer la
+    version sans le template laisse un objet orphelin, invisible dans
+    l'interface Harvester.
+    """
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    data = request.get_json(force=True, silent=True) or {}
+    namespace = (data.get("namespace") or "").strip()
+    name = (data.get("name") or "").strip()
+    manifest = data.get("manifest")
+    description = (data.get("description") or "")[:200]
+    if not _valid_k8s_name(namespace):
+        return jsonify({"error": "invalid namespace"}), 400
+    if not _valid_k8s_name(name):
+        return jsonify({"error": "invalid template name (RFC 1123)"}), 400
+    if not isinstance(manifest, dict) or not manifest.get("spec"):
+        return jsonify({"error": "manifest with a spec is required"}), 400
+
+    version_name = f"{name}-v1"
+    if not _valid_k8s_name(version_name):
+        return jsonify({"error": "template name too long"}), 400
+
+    tmpl = {
+        "apiVersion": "harvesterhci.io/v1beta1",
+        "kind": "VirtualMachineTemplate",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"description": description or f"Created from {name}"},
+    }
+    version = {
+        "apiVersion": "harvesterhci.io/v1beta1",
+        "kind": "VirtualMachineTemplateVersion",
+        "metadata": {"name": version_name, "namespace": namespace},
+        "spec": {
+            "templateId": f"{namespace}/{name}",
+            # Seule la spec de la VM est conservée : le nom, lui, sera
+            # choisi à chaque instanciation.
+            "vm": {"metadata": manifest.get("metadata", {}),
+                   "spec": manifest.get("spec", {})},
+        },
+    }
+
+    for obj in (tmpl, version):
+        r = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "create", "-f", "-", "-o", "name"],
+            input=json.dumps(obj), capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            detail = (r.stderr or r.stdout).strip().splitlines()
+            detail = detail[-1][:300] if detail else f"exit {r.returncode}"
+            # Le template a pu être créé avant l'échec de la version : le
+            # dire, sinon l'opérateur croit que rien n'a eu lieu.
+            return jsonify({"error": "template creation failed",
+                            "detail": detail,
+                            "kind": obj["kind"]}), 502
+    return jsonify({"created": True, "name": name, "namespace": namespace,
+                    "version": version_name}), 201
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>")

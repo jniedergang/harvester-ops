@@ -63,6 +63,15 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   l'état vivant, arrêter, revenir en arrière » soit une seule action
   tracée — et si le retour arrière était une erreur, le snapshot de
   sécurité ramène exactement où on en était.
+- **Créer des machines virtuelles** : un bouton Créer dans l'onglet VMs
+  ouvre un panneau portant *tous* les réglages d'une VM, parce qu'il rejoue
+  les huit sections de l'éditeur au lieu de proposer un formulaire réduit :
+  tout ce qui est éditable est réglable à la création. Nom, namespace,
+  nombre d'instances (au-delà d'une, les noms sont numérotés web-01,
+  web-02, et chaque instance reçoit ses propres PVC), et démarrage ou non
+  après création. « Valider seulement » demande au cluster de vérifier le
+  manifeste sans rien créer, et la configuration peut être enregistrée
+  comme template Harvester réutilisable.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

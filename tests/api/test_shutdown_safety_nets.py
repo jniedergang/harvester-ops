@@ -118,3 +118,60 @@ def test_the_script_still_parses():
     import subprocess
     r = subprocess.run(["bash", "-n", str(SCRIPT)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# ---------------------------------------------------------------------------
+# Filet 3 : la restauration au démarrage
+#
+# Trouvé en cherchant pourquoi harv1 affichait « NotReady ». Le journal du
+# démarrage du 09/09/2026 dit tout :
+#
+#     [WARN ] patch concurrent-rebuild échoué
+#     [OK   ] Cluster restauré : rebuild ON, nodes uncordoned
+#
+# Le patch a échoué, l'étape a annoncé le contraire, et harv1 a tourné SIX
+# JOURS avec la reconstruction de réplicas Longhorn désactivée sans que rien
+# ne le signale. Cause probable : au redémarrage, les nodes passent Ready
+# bien avant que le webhook de Longhorn ne réponde.
+# ---------------------------------------------------------------------------
+
+STARTUP = ROOT / "bin" / "harvester-startup.sh"
+
+
+def restore_step():
+    s = STARTUP.read_text()
+    return s[s.index("step_restore_cluster_state()"):].split("\n}", 1)[0]
+
+
+def test_a_failed_rebuild_patch_is_not_announced_as_success():
+    step = restore_step()
+    assert 'emit_event "restore" "warn"' in step, \
+        "une restauration incomplète doit remonter, pas se déclarer done"
+    assert "rebuild_ok" in step
+
+
+def test_the_patch_is_retried_because_longhorn_lags_behind_the_nodes():
+    step = restore_step()
+    assert "for attempt in" in step, \
+        "sans reprise, le patch retombe sur la fenêtre où Longhorn n'est pas prêt"
+    assert "sleep 10" in step
+
+
+def test_the_value_is_read_back_after_patching():
+    """Un patch accepté n'est pas un patch appliqué : relire est le seul
+    moyen de savoir si le cluster est vraiment sorti du mode maintenance."""
+    step = restore_step()
+    assert "jsonpath='{.value}'" in step
+    assert '"$value" != "0"' in step
+
+
+def test_a_failed_uncordon_is_reported():
+    step = restore_step()
+    assert "uncordon_failed" in step
+    assert "uncordon \"$node\" || true" not in step
+
+
+def test_the_startup_script_still_parses():
+    import subprocess
+    r = subprocess.run(["bash", "-n", str(STARTUP)], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr

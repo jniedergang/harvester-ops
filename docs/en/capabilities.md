@@ -57,6 +57,14 @@ Manage KubeVirt virtual machines without leaving the console.
   default), so the whole "snapshot the live state, stop, roll back" is
   one tracked action — and if the rollback was a mistake, the safety
   snapshot brings back exactly where you were.
+- **Create virtual machines**: a Create button on the VM tab opens an
+  overlay carrying *every* setting a VM has, because it replays the eight
+  sections of the editor rather than offering a reduced form: anything you
+  can edit, you can set at creation. Name, namespace, how many (above one,
+  names are numbered web-01, web-02, and each instance gets its own PVCs),
+  and whether to start once created. "Validate only" asks the cluster to
+  check the manifest without creating anything, and the configuration can be
+  saved as a reusable Harvester template.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
 - **VNC console** — full graphical console in the browser (noVNC over a

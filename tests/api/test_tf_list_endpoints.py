@@ -74,13 +74,20 @@ def test_reducer_image_preserves_display_name_and_size(api):
         "metadata": {"name": "image-9dlfh", "namespace": "default"},
         "spec": {"displayName": "openSUSE Tumbleweed",
                  "sourceType": "upload", "url": "..."},
-        "status": {"size": 4578082816, "progress": 100},
+        "status": {"size": 4578082816, "progress": 100,
+                   # v1.28.0 : la création de VM a besoin des deux. La
+                   # storage class ne se DÉDUIT pas du nom de l'image
+                   # (deux conventions coexistent), et un disque plus petit
+                   # que la taille virtuelle est refusé.
+                   "storageClassName": "lh-1234",
+                   "virtualSize": 10737418240},
     })
     assert out == {
         "name": "image-9dlfh", "namespace": "default",
         "display_name": "openSUSE Tumbleweed",
         "source_type": "upload",
         "size": 4578082816, "progress": 100,
+        "storage_class": "lh-1234", "virtual_size": 10737418240,
     }
 
 

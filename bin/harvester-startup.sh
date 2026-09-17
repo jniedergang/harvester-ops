@@ -205,20 +205,63 @@ step_restore_cluster_state() {
     emit_event "restore" "running" "Restore cluster state"
     log_step "[4/5] Restauration : Longhorn + uncordon"
 
+    # Ce patch échoue si on le tente trop tôt : au redémarrage, les nodes
+    # passent Ready bien avant que le webhook de Longhorn ne réponde. Le
+    # 09/09/2026 il a échoué et l'étape a quand même annoncé « rebuild ON » :
+    # harv1 a tourné SIX JOURS avec la reconstruction de réplicas désactivée,
+    # sans que rien ne le signale. D'où la reprise, puis la vérification de
+    # la valeur réellement en place.
+    local rebuild_ok=0
     if kc_quiet get crd settings.longhorn.io >/dev/null 2>&1; then
         log_info "Réactivation du rebuild Longhorn"
-        run kubectl --kubeconfig="$KUBECONFIG_PATH" -n longhorn-system patch settings.longhorn.io \
-            concurrent-replica-rebuild-per-node-limit \
-            --type=merge -p '{"value":"5"}' || log_warn "patch concurrent-rebuild échoué"
+        local attempt value
+        for attempt in 1 2 3 4 5 6; do
+            if [[ "$DRY_RUN" == "1" ]]; then
+                run kubectl --kubeconfig="$KUBECONFIG_PATH" -n longhorn-system patch settings.longhorn.io \
+                    concurrent-replica-rebuild-per-node-limit --type=merge -p '{"value":"5"}'
+                rebuild_ok=1
+                break
+            fi
+            if kubectl --kubeconfig="$KUBECONFIG_PATH" -n longhorn-system patch settings.longhorn.io \
+                   concurrent-replica-rebuild-per-node-limit \
+                   --type=merge -p '{"value":"5"}' >/dev/null 2>&1; then
+                # Relire : un patch accepté qui ne prend pas laisserait le
+                # cluster en mode maintenance sans que rien ne le dise.
+                value=$(kc_quiet -n longhorn-system get settings.longhorn.io \
+                        concurrent-replica-rebuild-per-node-limit \
+                        -o jsonpath='{.value}' 2>/dev/null)
+                if [[ "$value" != "0" && -n "$value" ]]; then
+                    rebuild_ok=1
+                    log_ok "Rebuild Longhorn réactivé (valeur $value)"
+                    break
+                fi
+            fi
+            (( attempt < 6 )) && { log_info "  → Longhorn pas encore prêt, nouvelle tentative dans 10 s ($attempt/6)"; sleep 10; }
+        done
+        (( rebuild_ok == 0 )) && log_warn "Rebuild Longhorn NON réactivé — la reconstruction de réplicas reste désactivée"
+    else
+        rebuild_ok=1          # pas de Longhorn sur ce cluster : rien à restaurer
+        log_info "Pas de CRD Longhorn — étape sans objet"
     fi
 
+    local uncordon_failed=0
     while IFS= read -r node; do
         log_info "Uncordon: $node"
-        run kubectl --kubeconfig="$KUBECONFIG_PATH" uncordon "$node" || true
+        if [[ "$DRY_RUN" == "1" ]]; then
+            run kubectl --kubeconfig="$KUBECONFIG_PATH" uncordon "$node"
+        elif ! kubectl --kubeconfig="$KUBECONFIG_PATH" uncordon "$node" >/dev/null 2>&1; then
+            uncordon_failed=$((uncordon_failed + 1))
+            log_warn "  → $node : uncordon EN ÉCHEC, les workloads n'y seront pas planifiés"
+        fi
     done < <(kc_quiet get nodes -o name 2>/dev/null | sed 's|node/||')
 
-    emit_event "restore" "done" "Cluster state restored"
-    log_ok "Cluster restauré : rebuild ON, nodes uncordoned"
+    if (( rebuild_ok == 1 && uncordon_failed == 0 )); then
+        emit_event "restore" "done" "Cluster state restored"
+        log_ok "Cluster restauré : rebuild ON, nodes uncordoned"
+    else
+        emit_event "restore" "warn" "restore incomplete (rebuild_ok=$rebuild_ok, uncordon_failed=$uncordon_failed)"
+        log_warn "Restauration INCOMPLÈTE — le cluster reste partiellement en mode maintenance"
+    fi
 }
 
 # =============================================================================

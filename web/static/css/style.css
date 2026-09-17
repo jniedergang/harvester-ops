@@ -4081,3 +4081,40 @@ body.sidebar-pinned .sidebar-collapse-btn .when-unpinned { display: none; }
   padding-top: 10px;
   border-top: 1px solid var(--border);
 }
+
+/* ---------------------------------------------------------------------------
+   Création de VM. Le panneau rejoue les sections de l'éditeur : il hérite donc
+   de .vm-edit-layout, avec l'en-tête d'identité au-dessus et la barre d'action
+   en dessous. Les boutons « Appliquer » propres à chaque section n'ont pas de
+   VM à patcher ici, on les retire.
+   --------------------------------------------------------------------------- */
+.vm-create {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 10px;
+}
+.vm-create-head { flex: none; }
+.vm-create-head fieldset {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px 14px;
+}
+.vm-create-start {
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+  align-self: end;
+  padding-bottom: 6px;
+}
+.vm-create-layout {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.vm-create-layout .vm-edit-content { overflow-y: auto; }
+/* Pas de « Appliquer » par section : c'est le bouton Créer qui valide. */
+.vm-create-section .apply-bar { display: none; }
+.vm-create-actions { flex: none; margin-top: 0; }

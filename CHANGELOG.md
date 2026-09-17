@@ -4,6 +4,57 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.28.0] - 2026-09-17 - Creating virtual machines
+
+The console could edit everything about a VM but could not create one: that
+meant going to the Harvester UI or writing a Terraform declaration.
+
+### Added
+- **A Create button on the VM tab** opening an overlay that carries every
+  setting a VM has. It does not offer a reduced form: it replays the eight
+  sections of the editor on a skeleton VM instead of a fetched one, so
+  anything you can edit you can set at creation, and it will stay that way
+  the day a section gains a field. No form is duplicated.
+- **Several at once**, with a count. Above one the names are numbered
+  (web-01, web-02), each instance gets its own PVCs, and the guest hostname
+  follows unless it was set by hand.
+- **Start once created**, on by default and unticked to prepare a VM before
+  running it.
+- **Validate only**, which asks the cluster itself to check the manifest
+  through a server-side dry run without creating anything.
+- **Save as template**, writing the Harvester pair a template really is: a
+  VirtualMachineTemplate and a VirtualMachineTemplateVersion pointing at it.
+  Writing only the version leaves an object the Harvester UI never shows.
+- `GET /api/vmtemplates/<cluster>` lists the templates of a cluster.
+
+### Fixed
+- **The VM editor was inventing the storage class of an image.** It built
+  `longhorn-<image name>`, which only matches the older convention. Images
+  with a backing-image backend get `lh-<uuid>`, and the invented name does
+  not exist: the PVC stays Pending on "storageclass not found" and the VM is
+  never schedulable. Found by creating a VM for real on harv1 and watching
+  it fail. The class is now read from the image, where Harvester publishes
+  it, and `/api/images` exposes it along with the virtual size, which is the
+  floor for a disk built from that image.
+
+### Tests
+- Instance naming, and the trap behind it: three VMs built from one manifest
+  must not share a PVC. The source manifest is also checked to be left
+  untouched, since every instance is derived from it.
+- Server-side fields stripped, the start checkbox driving runStrategy, and
+  the refusals of the endpoint, including a name too long to survive being
+  numbered.
+- In a browser: the eight sections rendering on a skeleton without a single
+  JS error, which is where the whole approach could have broken; the
+  complete manifest reaching the request; the dry run; and a refusal landing
+  under the operator's eyes.
+- 621 API tests green, plus 6 browser tests on the panel.
+
+### Verified for real
+Two VMs created from the panel on harv1, from an image, with a count of two:
+both reached Running with their own PVCs Bound on the right storage class,
+then were deleted. The cluster is back to its 14 original VMs.
+
 ## [1.27.0] - 2026-09-15 - What a cluster that is switched off should look like
 
 Reported by switching to a cluster that had just been powered off: the screen
