@@ -1080,17 +1080,105 @@ const VMEdit = (() => {
   // not found », et une VM non planifiable — vécu sur harv1. On lit donc
   // `status.storageClassName`, exposé par /api/images.
   const imageStorageClass = new Map();     // "ns/name" -> storage class
+  const imageVirtualSize = new Map();      // "ns/name" -> octets
+  let storageCapacity = null;              // réponse de /api/storage-capacity
 
   function primeImageStorageClasses(cluster) {
     if (!cluster) return;
     fetch(`/api/images/${encodeURIComponent(cluster)}`)
       .then(r => r.json())
       .then(list => (Array.isArray(list) ? list : []).forEach(i => {
-        if (i && i.namespace && i.name && i.storage_class) {
-          imageStorageClass.set(`${i.namespace}/${i.name}`, i.storage_class);
-        }
+        if (!i || !i.namespace || !i.name) return;
+        const id = `${i.namespace}/${i.name}`;
+        if (i.storage_class) imageStorageClass.set(id, i.storage_class);
+        if (i.virtual_size) imageVirtualSize.set(id, Number(i.virtual_size));
       }))
       .catch(() => {});
+    fetch(`/api/storage-capacity/${encodeURIComponent(cluster)}`)
+      .then(r => r.json())
+      .then(d => { if (d && d.classes) storageCapacity = d; })
+      .catch(() => {});
+  }
+
+  const GIB = 1024 * 1024 * 1024;
+  const gib = (b) => Math.round((Number(b) || 0) / GIB * 10) / 10;
+
+  /** « 10Gi » -> octets. Renvoie 0 sur une saisie incomplète, ce qui est le
+   *  comportement voulu pendant la frappe. */
+  function parseSize(text) {
+    const m = /^([0-9]+)(Mi|Gi|Ti)$/.exec((text || '').trim());
+    if (!m) return 0;
+    const mult = { Mi: 1024 ** 2, Gi: GIB, Ti: 1024 ** 4 }[m[2]];
+    return Number(m[1]) * mult;
+  }
+
+  /** La place restante pour le disque en cours de saisie : l'allouable de sa
+   *  storage class MOINS ce que les autres disques de la même VM réclament
+   *  déjà sur la même classe. Sans cette soustraction, trois disques de
+   *  600 Gio paraîtraient tous tenir dans 1100 Gio. */
+  function renderDiskCapacity(editor) {
+    const hint = editor.parentElement
+      && editor.parentElement.querySelector('[data-disk-capacity]');
+    if (!hint) return;
+    if (!storageCapacity || !storageCapacity.classes) { hint.textContent = ''; return; }
+
+    const items = [...editor.querySelectorAll('.tf-block-item')];
+    const rows = items.map(it => {
+      const g = (n) => it.querySelector(`[name$=".${n}"]`);
+      const source = g('source') ? g('source').value : '';
+      const image = g('image') ? g('image').value : '';
+      const sc = source === 'image'
+        ? (imageStorageClass.get(image) || '')
+        : (g('storage_class') ? g('storage_class').value : '');
+      return { sc, bytes: parseSize(g('size') ? g('size').value : ''),
+               isNew: source === 'image' || source === 'blank' };
+    }).filter(r => r.isNew && r.sc);
+
+    const byClass = new Map();
+    rows.forEach(r => byClass.set(r.sc, (byClass.get(r.sc) || 0) + r.bytes));
+
+    const lines = [];
+    byClass.forEach((asked, sc) => {
+      const info = storageCapacity.classes[sc];
+      if (!info) return;
+      if (info.reason) {
+        lines.push(`${sc} : ${tr('vm.edit.capNone', 'no schedulable room')} (${info.replicas} ×)`);
+        return;
+      }
+      const left = info.allocatable - asked;
+      const over = left < 0;
+      lines.push(
+        `${sc} : ${gib(info.allocatable)} Gio ${tr('vm.edit.capAllocatable', 'allocatable')}`
+        + ` (${info.replicas} ${tr('vm.edit.capReplicas', 'replica(s)')})`
+        + (asked ? ` − ${gib(asked)} ${tr('vm.edit.capAsked', 'requested here')}`
+                   + ` = ${over ? '−' : ''}${gib(Math.abs(left))} Gio` : ''));
+    });
+    hint.innerHTML = lines.length
+      ? lines.map(l => esc(l)).join('<br>')
+      : esc(tr('vm.edit.capHint',
+               'Pick a source and a size to see the room left.'));
+    hint.classList.toggle('vm-cap-over',
+      [...byClass.entries()].some(([sc, asked]) => {
+        const i = storageCapacity.classes[sc];
+        return i && !i.reason && asked > i.allocatable;
+      }));
+  }
+
+  /** Une image impose un plancher : un disque plus petit que sa taille
+   *  virtuelle est refusé. On le propose donc dès qu'elle est choisie. */
+  function suggestSizeFromImage(editor) {
+    editor.querySelectorAll('.tf-block-item').forEach(it => {
+      const src = it.querySelector('[name$=".source"]');
+      const img = it.querySelector('[name$=".image"]');
+      const size = it.querySelector('[name$=".size"]');
+      if (!src || !img || !size) return;
+      if (src.value !== 'image' || !img.value) return;
+      if (size.value.trim()) return;               // ne jamais écraser une saisie
+      const virt = imageVirtualSize.get(img.value);
+      if (!virt) return;
+      size.value = `${Math.max(1, Math.ceil(virt / GIB))}Gi`;
+      size.dispatchEvent(new Event('input', { bubbles: true }));
+    });
   }
 
   function renderDisksSection(vm, cluster) {
@@ -1108,6 +1196,7 @@ const VMEdit = (() => {
       ${restartBanner()}
       <div class="vm-edit-cards" data-editor="disks">
         ${TFForm.render(DISK_SCHEMA, cluster, { disk: items }, { hideHeader: true })}
+        <p class="form-hint vm-disk-capacity" data-disk-capacity></p>
       </div>
       ${locked}
       <details class="vm-edit-adv">
@@ -1671,6 +1760,20 @@ const VMEdit = (() => {
       // New cards appear via +Add after this wire() — keep them in sync too.
       new MutationObserver(() => sync(editor)).observe(
         editor.querySelector('.tf-block-list'), { childList: true });
+
+      if (sectionId === 'disks') {
+        const refresh = () => {
+          suggestSizeFromImage(editor);
+          renderDiskCapacity(editor);
+        };
+        editor.addEventListener('change', refresh);
+        editor.addEventListener('input', () => renderDiskCapacity(editor));
+        new MutationObserver(refresh).observe(
+          editor.querySelector('.tf-block-list'), { childList: true });
+        // Les données arrivent en asynchrone : réafficher quand elles sont là.
+        setTimeout(refresh, 600);
+        setTimeout(refresh, 1800);
+      }
     }
 
     const applyBtn = sectionEl.querySelector('[data-action="apply"]');

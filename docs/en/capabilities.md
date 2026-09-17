@@ -64,7 +64,12 @@ Manage KubeVirt virtual machines without leaving the console.
   names are numbered web-01, web-02, and each instance gets its own PVCs),
   and whether to start once created. "Validate only" asks the cluster to
   check the manifest without creating anything, and the configuration can be
-  saved as a reusable Harvester template.
+  saved as a reusable Harvester template. The disk editor shows the room
+  left per storage class, which is not the "available" figure Longhorn
+  displays: its scheduler applies two constraints at once and the tighter one
+  decides, replicas included, and what the other disks of the same VM already
+  request is subtracted. Disk sizes are proposed from the image's virtual
+  size, and creation can start from an existing Harvester template.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
 - **VNC console** — full graphical console in the browser (noVNC over a

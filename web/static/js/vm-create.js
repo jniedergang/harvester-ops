@@ -33,11 +33,14 @@ const VMCreate = (() => {
   // que renvoie le cluster. Les sections de l'éditeur savent la lire sans
   // rien savoir du fait qu'elle n'existe pas encore.
   // ---------------------------------------------------------------------
-  function skeleton(name) {
+  function skeleton(name, namespace) {
     return {
       apiVersion: 'kubevirt.io/v1',
       kind: 'VirtualMachine',
-      metadata: { name, annotations: {}, labels: {} },
+      // Le namespace compte dès le squelette : sans lui, les références de
+      // PVC des sections s'affichent « undefined/pvc-xxx ».
+      metadata: { name, namespace: namespace || 'default',
+                  annotations: {}, labels: {} },
       spec: {
         runStrategy: 'Halted',
         template: {
@@ -126,6 +129,11 @@ const VMCreate = (() => {
             <label class="vm-create-start">
               <input name="start" type="checkbox" checked>
               <span>${esc(tr('vm.create.start', 'Start once created'))}</span></label>
+            <label style="grid-column:1/-1;">${esc(tr('vm.create.template', 'Start from a template'))}
+              <select name="template"><option value="">${
+                esc(tr('vm.create.noTemplate', '(from scratch)'))}</option></select>
+              <span class="form-hint">${esc(tr('vm.create.templateHint',
+                'Loads the template settings as a starting point. Everything stays editable.'))}</span></label>
           </fieldset>
         </form>
 
@@ -178,8 +186,12 @@ const VMCreate = (() => {
 
     // Une seule instance de squelette pour toute la vie du panneau : les
     // sections déjà visitées y ont écrit, on ne doit pas la recréer.
-    let vm = skeleton('vm-01');
+    let vm = skeleton('vm-01', namespace);
     const rendered = new Map();          // id -> élément de section
+
+    head.querySelector('[name="namespace"]').addEventListener('change', (e) => {
+      vm.metadata.namespace = e.target.value;
+    });
 
     const nameInput = head.querySelector('[name="name"]');
     nameInput.addEventListener('input', () => {
@@ -206,6 +218,59 @@ const VMCreate = (() => {
           esc(namespace || 'default')}</option>`;
       }
     })();
+
+    // --- templates : liste, puis application comme point de départ ---
+    (async () => {
+      const sel = head.querySelector('[name="template"]');
+      try {
+        const d = await fetch(`/api/vmtemplates/${encodeURIComponent(cluster)}`)
+          .then(r => r.json());
+        (d.templates || []).forEach(tp => {
+          const id = `${tp.namespace}/${tp.name}`;
+          const o = document.createElement('option');
+          o.value = id;
+          o.textContent = tp.description ? `${id} — ${tp.description}` : id;
+          sel.appendChild(o);
+        });
+      } catch { /* pas de template : le choix « depuis zéro » suffit */ }
+      sel.addEventListener('change', () => applyTemplate(sel.value));
+    })();
+
+    async function applyTemplate(id) {
+      const name = nameInput.value.trim() || 'vm-01';
+      const ns = head.querySelector('[name="namespace"]').value || namespace;
+      if (!id) { vm = skeleton(name, ns); resetSections(); return; }
+      say(esc(tr('vm.create.loadingTemplate', 'Loading the template…')));
+      try {
+        const [ns, tpl] = id.split('/');
+        const d = await fetch(`/api/vmtemplates/${encodeURIComponent(cluster)}`
+          + `/${encodeURIComponent(ns)}/${encodeURIComponent(tpl)}`).then(r => r.json());
+        if (d.error) { say(esc(d.error), true); return; }
+        // On repart du squelette et on y fusionne la spec du template : le
+        // template ne porte ni nom ni namespace, et il peut lui manquer des
+        // champs que les sections attendent.
+        const base = skeleton(name, ns);
+        merge(base, { metadata: (d.vm && d.vm.metadata) || {},
+                      spec: (d.vm && d.vm.spec) || {} });
+        // Le template porte SON namespace d'origine ; la VM ira dans celui
+        // choisi ici. Sans ce rappel après la fusion, les références de PVC
+        // pointent le namespace du template.
+        base.metadata.name = name;
+        base.metadata.namespace = ns;
+        vm = base;
+        resetSections();
+        say(esc(tr('vm.create.templateLoaded', 'Template loaded')) + ` <code>${esc(id)}</code>`);
+      } catch (e) { say(esc(e.message), true); }
+    }
+
+    /** Le squelette a changé sous les sections : elles doivent être
+     *  reconstruites, sinon on éditerait encore l'ancienne VM. */
+    function resetSections() {
+      rendered.forEach(el => el.remove());
+      rendered.clear();
+      const active = root.querySelector('.vm-edit-nav button.active');
+      showSection(active ? active.dataset.section : 'general');
+    }
 
     function showSection(id) {
       navBtns.forEach(b => b.classList.toggle('active', b.dataset.section === id));

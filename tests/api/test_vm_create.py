@@ -254,3 +254,152 @@ def test_nulls_are_stripped_from_the_manifest():
     src = (JS / "vm-create.js").read_text()
     assert "function stripNulls" in src
     assert "stripNulls(out)" in src
+
+
+# ---------------------------------------------------------------------------
+# Capacité de stockage allouable
+#
+# « Combien puis-je encore allouer ? » n'a pas pour réponse l'espace
+# disponible affiché par Longhorn. Son ordonnanceur applique DEUX contraintes
+# et c'est la plus serrée qui décide. Sur harv1 : la première laisse
+# 2592 Gio, la seconde 1107 Gio. Afficher « 1968 Gio disponibles » ferait
+# promettre presque le double de ce que le cluster acceptera.
+# ---------------------------------------------------------------------------
+
+GIB = 1024 ** 3
+
+
+def capacity_payload(monkeypatch, *, disks, scs, over=200.0, minimal=25.0):
+    monkeypatch.setattr(wapp, "_cluster_reachable", lambda kc, **k: True)
+    monkeypatch.setattr(wapp, "load_config", lambda: {
+        "clusters": [{"name": "c", "kubeconfig": "/nonexistent.yaml"}]})
+    monkeypatch.setattr(wapp, "_longhorn_setting",
+                        lambda kc, cl, name, default:
+                        over if "over" in name else minimal)
+
+    def fake_json(kc, *args, **kw):
+        if "nodes.longhorn.io" in args:
+            return {"items": disks}
+        if "sc" in args:
+            return {"items": scs}
+        return {}
+
+    monkeypatch.setattr(wapp, "_kubectl_json", fake_json)
+    with wapp.app.test_client() as c:
+        return c.get("/api/storage-capacity/c").get_json()
+
+
+def node(name, *, maximum, scheduled, available, reserved=0, schedulable=True):
+    return {
+        "metadata": {"name": name},
+        "spec": {"disks": {"d0": {"storageReserved": reserved,
+                                  "allowScheduling": schedulable}}},
+        "status": {"diskStatus": {"d0": {
+            "storageMaximum": maximum, "storageScheduled": scheduled,
+            "storageAvailable": available,
+            "conditions": [{"type": "Ready", "status": "True"},
+                           {"type": "Schedulable",
+                            "status": "True" if schedulable else "False"}],
+        }}},
+    }
+
+
+def sc(name, replicas):
+    return {"metadata": {"name": name}, "provisioner": "driver.longhorn.io",
+            "parameters": {"numberOfReplicas": str(replicas)}}
+
+
+def test_the_tighter_of_the_two_constraints_decides(monkeypatch):
+    """Les chiffres réels de harv1. Sur-provisionnement : (3446-1034)*2
+    − 2233 = 2592 Gio. Place réelle : 1968 − 3446*0.25 = 1107 Gio."""
+    d = capacity_payload(monkeypatch,
+                         disks=[node("n1", maximum=3446 * GIB, scheduled=2233 * GIB,
+                                     available=1968 * GIB, reserved=1034 * GIB)],
+                         scs=[sc("one", 1)])
+    room = d["disks"][0]["room"] / GIB
+    assert 1100 < room < 1110, room
+    assert d["disks"][0]["limited_by"] == "free-space"
+    assert abs(d["classes"]["one"]["allocatable"] / GIB - room) < 1
+
+
+def test_over_provisioning_can_be_the_tighter_one(monkeypatch):
+    """L'autre sens : beaucoup de place libre mais déjà très sur-engagée."""
+    d = capacity_payload(monkeypatch,
+                         disks=[node("n1", maximum=1000 * GIB, scheduled=1900 * GIB,
+                                     available=900 * GIB)],
+                         scs=[sc("one", 1)])
+    assert d["disks"][0]["limited_by"] == "over-provisioning"
+    assert d["disks"][0]["room"] / GIB == pytest.approx(100, abs=1)
+
+
+def test_three_replicas_need_three_nodes(monkeypatch):
+    """Sur un cluster mono-node, une classe à 3 répliques n'alloue RIEN.
+    Le dire évite un échec de planification incompréhensible."""
+    d = capacity_payload(monkeypatch,
+                         disks=[node("n1", maximum=1000 * GIB, scheduled=0,
+                                     available=900 * GIB)],
+                         scs=[sc("one", 1), sc("three", 3)])
+    assert d["classes"]["one"]["allocatable"] > 0
+    assert d["classes"]["three"]["allocatable"] == 0
+    assert "schedulable nodes" in d["classes"]["three"]["reason"]
+
+
+def test_the_replica_count_takes_the_smallest_of_the_needed_nodes(monkeypatch):
+    """Trois nodes inégaux, deux répliques : c'est le second qui limite,
+    pas le plus grand."""
+    d = capacity_payload(monkeypatch, disks=[
+        node("big", maximum=4000 * GIB, scheduled=0, available=4000 * GIB),
+        node("mid", maximum=1000 * GIB, scheduled=0, available=1000 * GIB),
+        node("small", maximum=200 * GIB, scheduled=0, available=200 * GIB),
+    ], scs=[sc("two", 2)])
+    # mid : 1000 − 1000*0.25 = 750 Gio
+    assert d["classes"]["two"]["allocatable"] / GIB == pytest.approx(750, abs=1)
+
+
+def test_an_unschedulable_disk_offers_nothing(monkeypatch):
+    d = capacity_payload(monkeypatch,
+                         disks=[node("n1", maximum=1000 * GIB, scheduled=0,
+                                     available=900 * GIB, schedulable=False)],
+                         scs=[sc("one", 1)])
+    assert d["schedulable_nodes"] == 0
+    assert d["classes"]["one"]["allocatable"] == 0
+
+
+def test_non_longhorn_classes_are_left_out(monkeypatch):
+    d = capacity_payload(monkeypatch,
+                         disks=[node("n1", maximum=1000 * GIB, scheduled=0,
+                                     available=900 * GIB)],
+                         scs=[sc("lh", 1),
+                              {"metadata": {"name": "nfs"},
+                               "provisioner": "example.com/nfs"}])
+    assert "lh" in d["classes"] and "nfs" not in d["classes"]
+
+
+# ---------------------------------------------------------------------------
+# Le reste de l'interface
+# ---------------------------------------------------------------------------
+
+def test_the_form_subtracts_the_other_disks_of_the_same_vm():
+    """Sans la soustraction, trois disques de 600 Gio paraîtraient tous
+    tenir dans 1100 Gio."""
+    src = (JS / "vm-edit.js").read_text()
+    assert "function renderDiskCapacity" in src
+    assert "byClass.set(r.sc, (byClass.get(r.sc) || 0) + r.bytes)" in src, \
+        "les disques d'une même classe doivent s'additionner"
+    assert "vm-cap-over" in src, "un dépassement doit se voir"
+
+
+def test_the_size_is_suggested_from_the_image_virtual_size():
+    """Un disque plus petit que la taille virtuelle de l'image est refusé."""
+    src = (JS / "vm-edit.js").read_text()
+    assert "function suggestSizeFromImage" in src
+    assert "if (size.value.trim()) return;" in src, \
+        "une saisie de l'opérateur ne doit jamais être écrasée"
+
+
+def test_the_panel_can_start_from_a_template():
+    src = (JS / "vm-create.js").read_text()
+    assert "applyTemplate" in src
+    assert "/api/vmtemplates/" in src
+    assert "base.metadata.namespace = ns;" in src, \
+        "la VM va dans le namespace choisi, pas celui du template"

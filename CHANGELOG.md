@@ -4,6 +4,46 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.29.0] - 2026-09-17 - Room, size and templates when creating a VM
+
+Three additions to the creation panel, all answering the same question
+differently: what will the cluster actually accept?
+
+### Added
+- **The room left per storage class, under the disk editor.** Not the
+  "available" figure Longhorn shows: its scheduler applies two constraints at
+  once and the tighter one decides. On harv1, over-provisioning leaves
+  2592 GiB while real free space leaves 1107 GiB, so showing 1968 GiB would
+  promise almost double what the cluster will take. The panel says which
+  constraint is binding, and subtracts what the other disks of the same VM
+  already request on the same class, so three disks of 600 GiB no longer all
+  look like they fit. A class needing more replicas than there are
+  schedulable nodes reports no room at all, which on a single-node cluster is
+  the honest answer and saves an incomprehensible scheduling failure.
+- **The disk size is proposed from the image**, rounded up from its virtual
+  size, because a disk smaller than that is refused. A size typed by the
+  operator is never overwritten.
+- **Start from a template.** The panel lists the cluster's Harvester
+  templates and loads the chosen one as a starting point; everything stays
+  editable afterwards. The VM goes to the namespace picked in the form, not
+  the template's own.
+- `GET /api/storage-capacity/<cluster>` and
+  `GET /api/vmtemplates/<cluster>/<namespace>/<name>`.
+
+### Tests
+- The capacity maths against harv1's real figures, both constraints in both
+  directions, a class needing more nodes than exist, replicas taking the
+  smallest of the nodes they need rather than the largest, and an
+  unschedulable disk offering nothing.
+- The subtraction between disks of one class, and that a typed size survives.
+- 630 API tests green.
+
+### Known wrinkle
+Harvester's own base templates carry a placeholder disk pointing at a PVC
+that does not exist. Loading such a template shows that placeholder in the
+Disks section; pick a source (an image, usually) to replace it. Templates
+saved from this panel do not have the problem.
+
 ## [1.28.0] - 2026-09-17 - Creating virtual machines
 
 The console could edit everything about a VM but could not create one: that

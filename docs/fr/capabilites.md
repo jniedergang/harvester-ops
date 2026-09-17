@@ -71,7 +71,13 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   web-02, et chaque instance reçoit ses propres PVC), et démarrage ou non
   après création. « Valider seulement » demande au cluster de vérifier le
   manifeste sans rien créer, et la configuration peut être enregistrée
-  comme template Harvester réutilisable.
+  comme template Harvester réutilisable. L'éditeur de disques affiche la
+  place restante par storage class, qui n'est pas l'espace « disponible »
+  annoncé par Longhorn : son ordonnanceur applique deux contraintes à la fois
+  et c'est la plus serrée qui décide, répliques comprises, et ce que les
+  autres disques de la même VM réclament est soustrait. La taille d'un disque
+  est proposée depuis la taille virtuelle de l'image, et la création peut
+  partir d'un template Harvester existant.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

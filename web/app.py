@@ -4503,6 +4503,115 @@ def api_vm_create(cluster):
                     "dry_run": dry_run}), 202
 
 
+# =============================================================================
+# Capacité de stockage allouable
+#
+# « Combien puis-je encore allouer ? » n'a pas pour réponse l'espace
+# disponible affiché par Longhorn. Son ordonnanceur applique DEUX contraintes
+# à la fois, et c'est la plus serrée qui décide :
+#
+#   1. sur-provisionnement : scheduled + taille <= (max - reserved) * over%/100
+#   2. place réelle        : available - taille >= max * minimalAvailable%/100
+#
+# Sur harv1 : la première laisse 2592 Gio, la seconde 1107 Gio. Afficher
+# « 1968 Gio disponibles » ferait donc promettre presque le double de ce que
+# le cluster acceptera, et la VM échouerait à la planification.
+#
+# S'y ajoute le nombre de RÉPLIQUES de la storage class : un volume de 100 Gio
+# en 3 répliques consomme 100 Gio sur trois nodes DIFFÉRENTS. L'allouable
+# d'une classe est donc la R-ième meilleure place parmi les nodes, pas la
+# meilleure.
+# =============================================================================
+
+
+def _longhorn_setting(kc, cluster, name, default):
+    data = _kubectl_json(kc, "get", "settings.longhorn.io", name,
+                         "-n", "longhorn-system", "-o", "json", cluster=cluster)
+    try:
+        return float((data or {}).get("value"))
+    except (TypeError, ValueError):
+        return default
+
+
+@app.route("/api/storage-capacity/<cluster>")
+@requires_auth
+def api_storage_capacity(cluster):
+    """Ce qu'on peut encore allouer, par storage class."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    over = _longhorn_setting(kc, cluster, "storage-over-provisioning-percentage", 200.0)
+    minimal = _longhorn_setting(kc, cluster, "storage-minimal-available-percentage", 25.0)
+
+    nodes = _kubectl_json(kc, "get", "nodes.longhorn.io", "-n", "longhorn-system",
+                          "-o", "json", cluster=cluster)
+    disks = []
+    for node in (nodes or {}).get("items", []):
+        node_name = (node.get("metadata") or {}).get("name")
+        spec_disks = (node.get("spec") or {}).get("disks") or {}
+        for disk_name, ds in (((node.get("status") or {}).get("diskStatus")) or {}).items():
+            conditions = {c.get("type"): c.get("status")
+                          for c in (ds.get("conditions") or [])}
+            schedulable = (conditions.get("Schedulable") == "True"
+                           and conditions.get("Ready") == "True"
+                           and (spec_disks.get(disk_name) or {}).get("allowScheduling", True))
+            maximum = ds.get("storageMaximum") or 0
+            scheduled = ds.get("storageScheduled") or 0
+            available = ds.get("storageAvailable") or 0
+            reserved = (spec_disks.get(disk_name) or {}).get("storageReserved") or 0
+            room_over = (maximum - reserved) * over / 100.0 - scheduled
+            room_free = available - maximum * minimal / 100.0
+            room = max(0, int(min(room_over, room_free)))
+            disks.append({
+                "node": node_name, "disk": disk_name,
+                "schedulable": bool(schedulable),
+                "maximum": maximum, "scheduled": scheduled,
+                "available": available, "reserved": reserved,
+                "room": room if schedulable else 0,
+                # Dire LAQUELLE des deux contraintes serre : sinon un
+                # opérateur qui voit un chiffre bas cherche de la place là
+                # où il n'y a rien à gagner.
+                "limited_by": "over-provisioning" if room_over < room_free else "free-space",
+            })
+
+    # Meilleure place par NODE : deux répliques ne vont pas sur le même.
+    by_node = {}
+    for d in disks:
+        if d["schedulable"]:
+            by_node[d["node"]] = max(by_node.get(d["node"], 0), d["room"])
+    rooms = sorted(by_node.values(), reverse=True)
+
+    classes = {}
+    scs = _kubectl_json(kc, "get", "sc", "-o", "json", cluster=cluster)
+    for sc in (scs or {}).get("items", []):
+        name = (sc.get("metadata") or {}).get("name")
+        if sc.get("provisioner") != "driver.longhorn.io":
+            continue
+        try:
+            replicas = int(((sc.get("parameters") or {}).get("numberOfReplicas")) or 3)
+        except (TypeError, ValueError):
+            replicas = 3
+        if replicas <= 0:
+            replicas = 1
+        if len(rooms) < replicas:
+            allocatable, reason = 0, "not enough schedulable nodes"
+        else:
+            allocatable, reason = rooms[replicas - 1], None
+        classes[name] = {"replicas": replicas, "allocatable": allocatable,
+                         "reason": reason}
+
+    return jsonify({
+        "over_provisioning_pct": over,
+        "minimal_available_pct": minimal,
+        "schedulable_nodes": len(rooms),
+        "disks": disks,
+        "classes": classes,
+    })
+
+
 @app.route("/api/vmtemplates/<cluster>")
 @requires_auth
 def api_vmtemplates_list(cluster):
@@ -4525,6 +4634,46 @@ def api_vmtemplates_list(cluster):
             "default_version": spec.get("defaultVersionId"),
         })
     return jsonify({"templates": items})
+
+
+@app.route("/api/vmtemplates/<cluster>/<namespace>/<name>")
+@requires_auth
+def api_vmtemplate_spec(cluster, namespace, name):
+    """Spec de VM portée par la version par défaut d'un template.
+
+    Un template Harvester ne contient pas la spec : elle vit dans une
+    `VirtualMachineTemplateVersion` que `spec.defaultVersionId` désigne.
+    """
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    tmpl = _kubectl_json(kc, "get", "virtualmachinetemplate", name,
+                         "-n", namespace, "-o", "json", cluster=cluster)
+    if not tmpl:
+        return jsonify({"error": "template not found"}), 404
+    version_id = ((tmpl.get("spec") or {}).get("defaultVersionId")) or ""
+    if "/" not in version_id:
+        return jsonify({"error": "template has no default version"}), 404
+    v_ns, v_name = version_id.split("/", 1)
+    if not _valid_k8s_name(v_ns) or not _valid_k8s_name(v_name):
+        return jsonify({"error": "invalid default version id"}), 400
+    version = _kubectl_json(kc, "get", "virtualmachinetemplateversion", v_name,
+                            "-n", v_ns, "-o", "json", cluster=cluster)
+    if not version:
+        return jsonify({"error": f"version {version_id} not found"}), 404
+    vm = ((version.get("spec") or {}).get("vm")) or {}
+    return jsonify({
+        "template": f"{namespace}/{name}",
+        "version": version_id,
+        "description": (tmpl.get("spec") or {}).get("description"),
+        # La spec seule : le nom viendra du formulaire, à chaque
+        # instanciation.
+        "vm": {"metadata": vm.get("metadata") or {},
+               "spec": vm.get("spec") or {}},
+    })
 
 
 @app.route("/api/vmtemplates/<cluster>", methods=["POST"])

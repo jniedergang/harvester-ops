@@ -4118,3 +4118,19 @@ body.sidebar-pinned .sidebar-collapse-btn .when-unpinned { display: none; }
 /* Pas de « Appliquer » par section : c'est le bouton Créer qui valide. */
 .vm-create-section .apply-bar { display: none; }
 .vm-create-actions { flex: none; margin-top: 0; }
+
+/* Place restante par storage class, sous l'éditeur de disques. Ce n'est pas
+   l'espace « disponible » de Longhorn : c'est ce que son ordonnanceur
+   acceptera réellement, répliques comprises. */
+.vm-disk-capacity {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--accent-dim);
+  background: var(--bg-elev);
+  border-radius: 0 4px 4px 0;
+  line-height: 1.5;
+}
+.vm-disk-capacity.vm-cap-over {
+  border-left-color: var(--danger);
+  color: var(--danger);
+}
