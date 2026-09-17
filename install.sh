@@ -122,6 +122,25 @@ prepare_config() {
     else
         info "Existing config at $CONF_DIR/config.yaml — left untouched"
     fi
+    # Rôles de la console. Sans ce fichier, tout compte authentifié peut
+    # tout faire : c'est ce que faisait la console avant la 1.30.0.
+    if [[ ! -f "$CONF_DIR/roles.yaml" ]]; then
+        cat > "$CONF_DIR/roles.yaml" <<'ROLES'
+# Rôles de la console harvester-ops.
+#   viewer   : lecture seule
+#   operator : gestes mutatifs courants (VMs, Terraform, snapshots...)
+#   admin    : tout, dont arrêt/démarrage de cluster, déclarations de
+#              cluster, bare-metal, magasin d'ISO et provider Terraform
+#
+# Un compte absent de la liste reçoit `default_role`. Ce fichier n'a d'effet
+# que si une authentification est en place (htpasswd) : sans identité, il
+# n'y a personne à qui attribuer un rôle.
+default_role: viewer
+users: {}
+ROLES
+        chmod 0640 "$CONF_DIR/roles.yaml"
+        ok "roles.yaml created (everyone is a viewer until listed)"
+    fi
 }
 
 # -----------------------------------------------------------------------------

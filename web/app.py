@@ -374,6 +374,145 @@ def requires_auth(f):
     return decorated
 
 
+# =============================================================================
+# Rôles
+#
+# L'authentification htpasswd ne vérifiait qu'un mot de passe : tout compte
+# authentifié pouvait ensuite ÉTEINDRE un cluster, supprimer une VM ou
+# détruire un workspace Terraform. Il n'existait ni utilisateur ni rôle.
+#
+# Le garde est CENTRAL et en REFUS PAR DÉFAUT : toute requête qui modifie
+# quelque chose exige au moins `operator`, et une liste explicite de chemins
+# exige `admin`. Un point d'entrée ajouté demain est donc protégé sans que
+# personne ait à y penser — la leçon des `@_rate_limit` qui décoraient sans
+# rien limiter.
+#
+# Ce que ce modèle ne fait PAS, et qu'il faut dire : la console agit sur le
+# cluster avec UN kubeconfig partagé, administrateur. Le cluster ne voit donc
+# qu'une identité, quel que soit l'humain derrière l'écran. C'est un
+# garde-fou contre l'erreur et l'abus, pas une frontière que la RBAC du
+# cluster ferait respecter. Déléguer l'identité à un fournisseur OIDC et agir
+# avec le jeton de l'utilisateur est la suite prévue.
+# =============================================================================
+ROLES_PATH = Path(os.environ.get(
+    "HARVESTER_OPS_ROLES", str(HTPASSWD_PATH.parent / "roles.yaml")))
+
+ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
+
+# Chemins réservés à `admin`. Comparés au chemin de la requête, préfixe.
+# Ce sont les gestes qui coupent un service, changent la configuration de
+# l'outil, ou touchent au matériel.
+ADMIN_ONLY_PREFIXES = (
+    "/api/action",              # séquençage électrique d'un cluster
+    "/api/clusters",            # déclarations de cluster, kubeconfig, clés
+    "/api/bmc/",                # alimentation et média virtuel des machines
+    "/api/baremetal/",          # installation sans opérateur
+    "/api/iso/",                # magasin d'ISO
+    "/api/terraform/provider",  # remplacement du provider
+    "/api/vmtemplates/",        # templates partagés du cluster
+    "/api/users",               # gestion des comptes de la console
+)
+# Sous-chemins admin qui ne se distinguent pas par un préfixe.
+ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall")
+
+_roles_cache = {"mtime": None, "data": None}
+
+
+def load_roles():
+    """{'default_role': str, 'users': {login: role}}. Fichier absent =
+    personne n'est bridé, pour ne pas verrouiller une installation
+    existante au moment de la mise à jour."""
+    try:
+        mtime = ROLES_PATH.stat().st_mtime
+    except OSError:
+        return {"default_role": "admin", "users": {}, "configured": False}
+    if _roles_cache["mtime"] != mtime:
+        try:
+            raw = yaml.safe_load(ROLES_PATH.read_text()) or {}
+        except Exception as e:
+            log.warning("roles.yaml illisible (%s) : tout le monde admin", e)
+            raw = {}
+        users = {str(k): str(v) for k, v in (raw.get("users") or {}).items()
+                 if str(v) in ROLE_RANK}
+        default = raw.get("default_role")
+        if default not in ROLE_RANK:
+            default = "viewer"
+        _roles_cache.update({"mtime": mtime,
+                             "data": {"default_role": default,
+                                      "users": users, "configured": True}})
+    return _roles_cache["data"]
+
+
+def current_user():
+    auth = request.authorization
+    return auth.username if auth and auth.username else ""
+
+
+def roles_active():
+    """Des rôles n'ont de sens que si l'on sait QUI demande.
+
+    Sans htpasswd, la console tourne en mode ouvert (développement, ou
+    installation derrière un proxy qui authentifie déjà) : personne n'est
+    identifiable, et brider sur une identité vide mettrait tout le monde en
+    lecture seule, y compris l'exploitant. On ne bride donc pas, et on le
+    DIT plutôt que de le laisser deviner.
+    """
+    return HTPASSWD_PATH.exists() and load_roles().get("configured", False)
+
+
+def current_role():
+    if not roles_active():
+        return "admin"
+    roles = load_roles()
+    return roles["users"].get(current_user(), roles["default_role"])
+
+
+def required_role_for(path, method):
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return "viewer"
+    if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
+        return "admin"
+    return "operator"
+
+
+@app.before_request
+def _enforce_role():
+    path = request.path
+    # Les pages, les ressources statiques et les sondes ne passent pas par
+    # le modèle de rôles.
+    if not path.startswith("/api/"):
+        return None
+    if path in ("/api/whoami",):
+        return None
+    needed = required_role_for(path, request.method)
+    have = current_role()
+    if ROLE_RANK.get(have, 0) < ROLE_RANK[needed]:
+        return jsonify({
+            "error": "forbidden",
+            "role": have,
+            "required": needed,
+            "hint": f"this action needs the '{needed}' role; "
+                    f"'{current_user() or 'you'}' has '{have}'",
+        }), 403
+    return None
+
+
+@app.route("/api/whoami")
+@requires_auth
+def api_whoami():
+    """Qui suis-je et qu'ai-je le droit de faire. L'interface s'en sert pour
+    ne pas proposer des gestes qui seront refusés."""
+    roles = load_roles()
+    return jsonify({
+        "user": current_user(),
+        "role": current_role(),
+        "roles_active": roles_active(),
+        "roles_configured": bool(roles.get("configured")),
+        "auth_configured": HTPASSWD_PATH.exists(),
+        "roles_file": str(ROLES_PATH),
+    })
+
+
 # -----------------------------------------------------------------------------
 # Action registry (in-memory)
 # -----------------------------------------------------------------------------

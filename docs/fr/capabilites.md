@@ -264,7 +264,36 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   `<<IP-NODE-1>>`) ; un outil de dé-anonymisation séparé inverse
   l'opération depuis la table de mapping pour le passage au support.
 
-## 8. Transversal
+## 8. Droits et rôles
+
+Jusqu'à la 1.30.0, la console vérifiait un mot de passe et rien d'autre :
+tout compte entré pouvait éteindre un cluster, supprimer une VM ou détruire
+un workspace Terraform.
+
+- **Trois rôles**, déclarés dans `/etc/harvester-ops/roles.yaml` : `viewer`
+  lit, `operator` fait le travail mutatif courant (VMs, snapshots, applies
+  Terraform), `admin` y ajoute ce qui coupe un service ou change la
+  configuration de l'outil : séquençage électrique, déclarations de cluster,
+  bare-metal, magasin d'ISO et provider Terraform.
+- **Appliqué au centre, en refus par défaut.** Toute requête qui modifie
+  quelque chose exige au moins `operator`, et une liste explicite de chemins
+  exige `admin`. Un point d'entrée ajouté demain est protégé sans que
+  personne ait à y penser, et un test parcourt toute la table des routes pour
+  vérifier qu'aucun n'échappe au garde.
+- **Un refus dit ce qui manque**, en nommant le rôle requis et celui qu'on a,
+  au lieu d'un 403 nu.
+- **Des rôles exigent des identités.** Sans htpasswd, personne n'est
+  distinguable : rien n'est bridé, et la console le dit plutôt que de mettre
+  discrètement tout le monde, exploitant compris, en lecture seule.
+
+**Ce que ce n'est pas.** La console atteint les clusters avec un kubeconfig
+partagé, administrateur : le cluster ne voit qu'une identité, quel que soit
+l'humain au clavier. Ces rôles sont un garde-fou contre l'erreur et l'abus
+dans la console, pas une frontière que la RBAC du cluster ferait respecter.
+Déléguer l'identité à un fournisseur OIDC et agir avec le jeton de
+l'utilisateur est la suite.
+
+## 9. Transversal
 
 - **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail
   d'icônes de 56 px qui se déplie par-dessus la page sous le pointeur et se

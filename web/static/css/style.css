@@ -4134,3 +4134,30 @@ body.sidebar-pinned .sidebar-collapse-btn .when-unpinned { display: none; }
   border-left-color: var(--danger);
   color: var(--danger);
 }
+
+/* Rôle de la session, dans le pied du menu. Masqué tant qu'aucun fichier de
+   rôles n'est en place : afficher « admin » à une installation qui n'a pas
+   encore de rôles laisserait croire à un réglage volontaire. */
+.session-role {
+  display: block;
+  margin: 0 18px 6px;
+  padding: 3px 8px;
+  font-size: 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+body.role-admin .session-role { color: var(--accent); border-color: var(--accent); }
+body.role-viewer .session-role { color: var(--warn); border-color: var(--warn); }
+body.sidebar-collapsed .session-role { margin: 0 4px 6px; text-align: center; }
+
+/* Un lecteur ne doit pas se voir proposer ce qui lui sera refusé. Le serveur
+   refuse de toute façon : ceci évite le clic inutile, ce n'est pas la
+   protection. */
+body.roles-active.role-viewer .btn-danger,
+body.roles-active.role-viewer #btn-vm-create,
+body.roles-active.role-viewer #btn-shutdown,
+body.roles-active.role-viewer #btn-startup { display: none !important; }

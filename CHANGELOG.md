@@ -4,6 +4,59 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.30.0] - 2026-09-18 - Roles, because a password was the only gate
+
+The console authenticated a password and nothing more. Any account that got
+in could shut down a cluster, delete a VM or destroy a Terraform workspace.
+There was no notion of user and no notion of role.
+
+### Added
+- **Three roles** declared in `/etc/harvester-ops/roles.yaml`: `viewer`
+  reads, `operator` does the everyday mutating work, `admin` adds what cuts
+  a service or changes the tool's own configuration (cluster power
+  sequencing, cluster declarations, bare-metal, the ISO store, the Terraform
+  provider).
+- **A central gate, deny by default.** Any request that changes something
+  needs at least `operator`; an explicit list of paths needs `admin`. An
+  endpoint added tomorrow is protected without anyone having to remember it.
+  That shape is deliberate: the rate limits were applied decorator by
+  decorator and six of them silently protected nothing for several releases.
+- **A refusal that explains itself**, naming the role required and the one
+  you hold, on the wire and on screen.
+- `GET /api/whoami`, and a badge in the sidebar footer showing who you are
+  and what you may do. It stays hidden until roles are actually in force, so
+  an installation without them is not told it is running as "admin" by
+  design.
+- `install.sh` writes a default `roles.yaml` where everyone is a viewer
+  until listed.
+
+### Internal
+- **Roles need identities.** With no htpasswd nobody can be told apart. The
+  first cut restricted on an empty identity and put everyone, including the
+  operator, in read-only; the dev server locked itself out within a minute.
+  Now the absence of authentication disables the gate and `/api/whoami` says
+  so.
+- A malformed or missing roles file, an unknown role name and an invalid
+  default all fall back safely rather than locking an installation out or
+  granting rights by accident.
+
+### Tests
+- The classification of every kind of path, and the deny-by-default for one
+  invented on the spot.
+- Enforcement per role, end to end, including a viewer refused and an
+  operator stopped at the cluster power switch.
+- A walk over the whole route table proving no mutating endpoint escapes the
+  gate.
+- 662 API tests green.
+
+### What this is not
+The console reaches clusters with one shared kubeconfig that is
+cluster-admin, so the cluster sees a single identity whoever is at the
+keyboard. These roles are a guardrail inside the console, not a boundary the
+cluster's RBAC enforces. Managing Harvester's own users from the console,
+then delegating identity to OIDC and acting with the user's token, are the
+agreed next steps.
+
 ## [1.29.1] - 2026-09-17 - A template's PVC is a recipe, not a volume
 
 1.29.0 shipped this as a wrinkle in Harvester's base templates. It was not:

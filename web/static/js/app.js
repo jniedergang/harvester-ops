@@ -80,8 +80,45 @@ const App = (() => {
   // -------------------------------------------------------------------------
   async function api(path, opts = {}) {
     const res = await fetch(path, { ...opts, headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) } });
-    if (!res.ok) throw new Error(`${path}: HTTP ${res.status}`);
+    if (!res.ok) {
+      // Un refus de rôle mérite sa phrase : « HTTP 403 » laisse l'opérateur
+      // croire à une panne alors qu'il lui manque un droit.
+      if (res.status === 403) {
+        const d = await res.json().catch(() => ({}));
+        if (d && d.required) {
+          throw new Error(i18n.t('role.denied', { required: d.required, role: d.role })
+                          || `needs role ${d.required}`);
+        }
+      }
+      throw new Error(`${path}: HTTP ${res.status}`);
+    }
     return res.json();
+  }
+
+  // -------------------------------------------------------------------------
+  // Rôle de la session. Le serveur décide et refuse ; l'interface se contente
+  // de ne pas proposer ce qui sera refusé, et de le DIRE.
+  // -------------------------------------------------------------------------
+  let sessionRole = 'admin';
+
+  async function loadRole() {
+    try {
+      const d = await fetch('/api/whoami').then(r => r.json());
+      sessionRole = d.role || 'admin';
+      document.body.classList.remove('role-viewer', 'role-operator', 'role-admin');
+      document.body.classList.add(`role-${sessionRole}`);
+      document.body.classList.toggle('roles-active', !!d.roles_active);
+      const badge = $('#session-role');
+      if (badge) {
+        badge.hidden = !d.roles_active;
+        badge.textContent = d.user ? `${d.user} · ${sessionRole}` : sessionRole;
+        // Clés en toutes lettres : `i18n.t(\`role.desc.${x}\`)` est
+        // invisible au contrôle de parité, qui ne lit que des littéraux.
+        badge.title = sessionRole === 'admin' ? i18n.t('role.desc.admin')
+                    : sessionRole === 'operator' ? i18n.t('role.desc.operator')
+                    : i18n.t('role.desc.viewer');
+      }
+    } catch { /* pas de whoami : on ne bride rien côté écran */ }
   }
 
   // -------------------------------------------------------------------------
@@ -1548,6 +1585,8 @@ const App = (() => {
         if (saved === '1') grp.classList.add('expanded');
       } catch {}
     });
+
+    loadRole();
 
     $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
 

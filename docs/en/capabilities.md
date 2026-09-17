@@ -237,7 +237,35 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   `<<IP-NODE-1>>`); a separate de-anonymisation tool reverses it from the
   mapping for support hand-off.
 
-## 8. Cross-cutting
+## 8. Rights and roles
+
+Until 1.30.0 the console authenticated a password and nothing more: any
+account that got in could shut down a cluster, delete a VM or destroy a
+Terraform workspace.
+
+- **Three roles**, declared in `/etc/harvester-ops/roles.yaml`: `viewer`
+  reads, `operator` performs the everyday mutating work (VMs, snapshots,
+  Terraform applies), `admin` adds what cuts a service or changes the tool's
+  own configuration: cluster power sequencing, cluster declarations,
+  bare-metal, the ISO store and the Terraform provider.
+- **Enforced centrally, deny by default.** Any request that changes
+  something needs at least `operator`, and an explicit list of paths needs
+  `admin`. An endpoint added tomorrow is protected without anyone having to
+  remember; a test walks the whole route table to prove none escapes.
+- **A refusal says what is missing**, naming the role required and the one
+  you have, instead of a bare 403.
+- **Roles need identities.** With no htpasswd nobody can be told apart, so
+  nothing is restricted and the console says so rather than quietly putting
+  everyone, including the operator, in read-only.
+
+**What this is not.** The console reaches clusters with one shared
+kubeconfig that is cluster-admin, so the cluster sees a single identity
+whoever is at the keyboard. These roles are a guardrail against mistakes and
+misuse inside the console, not a boundary the cluster's own RBAC enforces.
+Delegating identity to an OIDC provider and acting with the user's own token
+is the next step.
+
+## 9. Cross-cutting
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
   of icons that expands over the page while the pointer is on it, and
