@@ -707,11 +707,31 @@ const VMEdit = (() => {
   // =========================================================================
   const VCT_ANNOTATION = 'harvesterhci.io/volumeClaimTemplates';
 
-  function vmDisksToForm(vm) {
+  /**
+   * @param opts.claimsAreToCreate  les PVC déclarés dans l'annotation
+   *   `volumeClaimTemplates` n'existent pas encore et doivent être créés.
+   *
+   * C'est vrai d'un TEMPLATE (son `pvc-rootdisk` est une recette, pas un
+   * volume), faux d'une VM en service. La distinction est capitale : sur une
+   * VM existante, présenter son disque comme « à créer depuis une image »
+   * ferait générer un PVC NEUF à la sauvegarde suivante, abandonnant
+   * l'ancien et son contenu. L'option est donc explicite, et l'éditeur ne
+   * l'active jamais.
+   */
+  function vmDisksToForm(vm, opts = {}) {
     const template = ((vm.spec || {}).template || {}).spec || {};
     const disks = ((template.domain || {}).devices || {}).disks || [];
     const volumes = template.volumes || [];
     const volByName = Object.fromEntries(volumes.map(v => [v.name, v]));
+    let vctByName = {};
+    try {
+      const raw = ((vm.metadata || {}).annotations || {})[VCT_ANNOTATION];
+      if (raw) {
+        const list = typeof raw === 'string' ? JSON.parse(raw) : raw;
+        vctByName = Object.fromEntries(
+          (list || []).map(v => [(v.metadata || {}).name, v]));
+      }
+    } catch { vctByName = {}; }
     const usedVols = new Set();
     const items = [];
     const passthrough = { disks: [], volumes: [] };
@@ -727,13 +747,24 @@ const VMEdit = (() => {
         if (vol) passthrough.volumes.push(vol);
         return;
       }
+      const claimName = vol.persistentVolumeClaim.claimName;
+      const recipe = opts.claimsAreToCreate ? (vctByName[claimName] || null) : null;
+      const imageId = recipe
+        && ((recipe.metadata || {}).annotations || {})['harvesterhci.io/imageId'];
       items.push({
         name: d.name,
         device: devKey,
         bus: (d[devKey] || {}).bus || 'virtio',
         boot_order: d.bootOrder ?? 0,
-        source: 'pvc',
-        pvc: `${vm.metadata.namespace}/${vol.persistentVolumeClaim.claimName}`,
+        // Un PVC à créer se présente pour ce qu'il est : une image ou un
+        // disque vierge, avec la taille et la classe que la recette porte.
+        source: recipe ? (imageId ? 'image' : 'blank') : 'pvc',
+        image: imageId || '',
+        size: recipe
+          ? (((recipe.spec || {}).resources || {}).requests || {}).storage || ''
+          : '',
+        storage_class: recipe ? ((recipe.spec || {}).storageClassName || '') : '',
+        pvc: recipe ? '' : `${vm.metadata.namespace}/${claimName}`,
         // v1.13.0 : options fines par disque
         serial: d.serial || '',
         cache: d.cache || '',
@@ -1049,7 +1080,7 @@ const VMEdit = (() => {
     }];
   }
 
-  function renderSectionHtml(id, vm, cluster) {
+  function renderSectionHtml(id, vm, cluster, opts = {}) {
     const spec     = vm.spec || {};
     const template = (spec.template || {}).spec || {};
     const domain   = template.domain || {};
@@ -1061,7 +1092,7 @@ const VMEdit = (() => {
       case 'firmware': return renderFirmware(domain, cluster);
       case 'placement': return renderPlacement(vm, template, cluster);
       case 'lifecycle': return renderLifecycle(template);
-      case 'disks':   return renderDisksSection(vm, cluster);
+      case 'disks':   return renderDisksSection(vm, cluster, opts);
       case 'network': return renderNetworkSection(vm, cluster);
       case 'cloudinit': return renderCloudInit(cluster);
       default: return '';
@@ -1181,9 +1212,9 @@ const VMEdit = (() => {
     });
   }
 
-  function renderDisksSection(vm, cluster) {
+  function renderDisksSection(vm, cluster, opts = {}) {
     primeImageStorageClasses(cluster);
-    const { items, passthrough } = vmDisksToForm(vm);
+    const { items, passthrough } = vmDisksToForm(vm, opts);
     const template = ((vm.spec || {}).template || {}).spec || {};
     const raw = { volumes: template.volumes || [],
                   disks: ((template.domain || {}).devices || {}).disks || [] };

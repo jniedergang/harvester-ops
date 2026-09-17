@@ -278,7 +278,10 @@ const VMCreate = (() => {
       if (rendered.has(id)) return;
       const wrap = document.createElement('div');
       wrap.className = 'vm-create-section';
-      wrap.innerHTML = VMEdit.renderSectionHtml(id, vm, cluster);
+      // Rien n'existe encore : les PVC déclarés par un template sont des
+      // recettes, pas des volumes à sélectionner.
+      wrap.innerHTML = VMEdit.renderSectionHtml(id, vm, cluster,
+                                                { claimsAreToCreate: true });
       content.appendChild(wrap);
       rendered.set(id, wrap);
       try {

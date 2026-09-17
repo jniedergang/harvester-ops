@@ -4,6 +4,36 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.29.1] - 2026-09-17 - A template's PVC is a recipe, not a volume
+
+1.29.0 shipped this as a wrinkle in Harvester's base templates. It was not:
+the templates are correct, the mapper was wrong.
+
+A template declares its disk in the `volumeClaimTemplates` annotation
+(pvc-rootdisk, 10Gi, empty imageId) and references it by claimName. That PVC
+does not exist anywhere: it is a recipe to be created, with the image left
+for the operator to pick. The disk mapper ignored the annotation entirely
+and reported every volume with a claim as an existing PVC to select, so
+loading a template showed a phantom.
+
+### Fixed
+- A claim declared in `volumeClaimTemplates` is now presented for what it
+  is: an image or a blank disk, carrying the size and storage class the
+  recipe declares. Loading the raw-image base template now shows a blank
+  10 GiB disk instead of a PVC that cannot be found.
+
+### Internal
+- The rewrite is opt-in and the editor never asks for it. On a VM in
+  service the PVC really exists, and showing its disk as "to create from an
+  image" would have generated a fresh PVC on the next save, abandoning the
+  old one and its contents. Checked on a live VM: its disk still maps to its
+  real PVC.
+
+### Tests
+- The distinction itself, including that the editor never passes the option,
+  which is the guard against that data loss.
+- 633 API tests green.
+
 ## [1.29.0] - 2026-09-17 - Room, size and templates when creating a VM
 
 Three additions to the creation panel, all answering the same question
@@ -37,12 +67,6 @@ differently: what will the cluster actually accept?
   unschedulable disk offering nothing.
 - The subtraction between disks of one class, and that a typed size survives.
 - 630 API tests green.
-
-### Known wrinkle
-Harvester's own base templates carry a placeholder disk pointing at a PVC
-that does not exist. Loading such a template shows that placeholder in the
-Disks section; pick a source (an image, usually) to replace it. Templates
-saved from this panel do not have the problem.
 
 ## [1.28.0] - 2026-09-17 - Creating virtual machines
 

@@ -403,3 +403,44 @@ def test_the_panel_can_start_from_a_template():
     assert "/api/vmtemplates/" in src
     assert "base.metadata.namespace = ns;" in src, \
         "la VM va dans le namespace choisi, pas celui du template"
+
+
+# ---------------------------------------------------------------------------
+# PVC d'un template : une recette, pas un volume
+#
+# Un template Harvester déclare son disque dans l'annotation
+# `volumeClaimTemplates` (« pvc-rootdisk », 10Gi, imageId vide) et le
+# référence par `claimName`. Ce PVC n'existe pas : il est À CRÉER. Le mapper
+# le présentait pourtant comme un PVC existant à sélectionner.
+#
+# Le correctif ne pouvait pas être appliqué partout : sur une VM EN SERVICE,
+# présenter son disque comme « à créer depuis une image » ferait générer un
+# PVC neuf à la sauvegarde suivante, abandonnant l'ancien et son contenu.
+# D'où l'option explicite, que l'éditeur n'active jamais.
+# ---------------------------------------------------------------------------
+
+def test_the_mapper_only_recreates_claims_when_told_to():
+    src = (JS / "vm-edit.js").read_text()
+    mapper = src.split("function vmDisksToForm", 1)[1].split("\n  }", 1)[0]
+    assert "opts.claimsAreToCreate" in mapper, \
+        "la réécriture doit être explicite, jamais implicite"
+    assert "source: recipe ? (imageId ? 'image' : 'blank') : 'pvc'" in mapper
+
+
+def test_the_editor_never_asks_for_claim_recreation():
+    """La garde anti-perte de données : seul le panneau de création passe
+    cette option, et l'éditeur d'une VM existante ne doit jamais la voir."""
+    edit = (JS / "vm-edit.js").read_text()
+    create = (JS / "vm-create.js").read_text()
+    assert "claimsAreToCreate: true" in create
+    assert "claimsAreToCreate: true" not in edit, \
+        "l'éditeur activerait la recréation des PVC d'une VM en service"
+
+
+def test_the_recipe_carries_size_and_class_to_the_form():
+    """Le template déclare 10Gi : le formulaire doit le reprendre plutôt que
+    de laisser l'opérateur deviner."""
+    src = (JS / "vm-edit.js").read_text()
+    mapper = src.split("function vmDisksToForm", 1)[1].split("\n  }", 1)[0]
+    assert "requests || {}).storage" in mapper
+    assert "storageClassName" in mapper
