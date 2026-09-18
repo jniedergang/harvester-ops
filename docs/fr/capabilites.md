@@ -286,6 +286,17 @@ un workspace Terraform.
   distinguable : rien n'est bridé, et la console le dit plutôt que de mettre
   discrètement tout le monde, exploitant compris, en lecture seule.
 
+- **Les comptes du cluster** (Réglages > Comptes du cluster) : les comptes
+  déclarés sur le cluster Harvester sélectionné, leur activation et qui
+  détient l'administration, d'un seul regard. L'administration s'accorde et
+  se retire, les comptes s'activent et se désactivent. Les délégations
+  orphelines sont signalées : un sujet détenant cluster-admin sans compte
+  derrière lui signifie que le compte a été supprimé et sa délégation non,
+  et en recréer un portant le même identifiant la lui rendrait en silence.
+  La création d'un compte local avec mot de passe n'est volontairement pas
+  offerte : Harvester le range sous forme de clé dérivée dont cette console
+  ne devinera pas le schéma.
+
 **Ce que ce n'est pas.** La console atteint les clusters avec un kubeconfig
 partagé, administrateur : le cluster ne voit qu'une identité, quel que soit
 l'humain au clavier. Ces rôles sont un garde-fou contre l'erreur et l'abus

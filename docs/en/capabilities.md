@@ -258,6 +258,16 @@ Terraform workspace.
   nothing is restricted and the console says so rather than quietly putting
   everyone, including the operator, in read-only.
 
+- **The cluster's own accounts** (Settings > Cluster accounts): the accounts
+  declared on the selected Harvester cluster, whether each is enabled, and
+  who holds cluster administration, in one view. Administration can be
+  granted or revoked, and accounts enabled or disabled. Orphaned
+  administration is surfaced: a subject holding cluster-admin with no
+  account behind it means the account was deleted and its delegation was
+  not, so recreating one with that id would silently give it back. Creating
+  a local account with a password is deliberately not offered: Harvester
+  stores it as a derived key whose scheme this console will not guess.
+
 **What this is not.** The console reaches clusters with one shared
 kubeconfig that is cluster-admin, so the cluster sees a single identity
 whoever is at the keyboard. These roles are a guardrail against mistakes and

@@ -411,6 +411,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/terraform/provider",  # remplacement du provider
     "/api/vmtemplates/",        # templates partagés du cluster
     "/api/users",               # gestion des comptes de la console
+    "/api/harvester-users",     # comptes du cluster Harvester
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall")
@@ -467,7 +468,14 @@ def current_role():
     return roles["users"].get(current_user(), roles["default_role"])
 
 
+# Chemins dont la simple LECTURE est réservée aux admins : savoir qui
+# détient l'administration d'un cluster n'a pas à être public.
+ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users",)
+
+
 def required_role_for(path, method):
+    if path.startswith(ADMIN_ONLY_READ_PREFIXES):
+        return "admin"
     if method in ("GET", "HEAD", "OPTIONS"):
         return "viewer"
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
@@ -4749,6 +4757,210 @@ def api_storage_capacity(cluster):
         "disks": disks,
         "classes": classes,
     })
+
+
+# =============================================================================
+# Comptes du cluster Harvester
+#
+# Harvester (v1.8) modélise ses comptes très simplement :
+#   * un objet `users.management.cattle.io` porte le login, le nom affiché
+#     et l'activation ;
+#   * l'administration est un `ClusterRoleBinding` ordinaire vers
+#     `cluster-admin`, sujet `User: <nom de l'objet>` ;
+#   * le mot de passe vit AILLEURS, dans un secret du namespace
+#     `cattle-local-user-passwords`, sous forme de clé dérivée de 32 octets
+#     avec un sel de 32 octets — pas une empreinte bcrypt.
+#
+# C'est ce dernier point qui borne cette surface. Fabriquer ce secret
+# demanderait de deviner l'algorithme et ses paramètres à partir de sa
+# forme ; on poserait au mieux des comptes incapables de se connecter, au
+# pire une authentification affaiblie. La création d'un compte local AVEC
+# mot de passe n'est donc pas offerte ici, et le dire vaut mieux que de
+# livrer une fonction qu'on ne peut pas vérifier. Tout le reste l'est :
+# lister, activer, désactiver, accorder ou retirer l'administration,
+# supprimer.
+# =============================================================================
+LOCAL_PASSWORD_NS = "cattle-local-user-passwords"
+
+
+def _admin_binding_name(user_id):
+    return f"harvester-ops-admin-{user_id}"
+
+
+def _cluster_admin_subjects(kc, cluster):
+    """Ensemble des utilisateurs et groupes qui détiennent cluster-admin,
+    avec le binding qui l'accorde."""
+    data = _kubectl_json(kc, "get", "clusterrolebindings", "-o", "json",
+                         cluster=cluster)
+    holders = {}
+    for b in (data or {}).get("items", []):
+        ref = b.get("roleRef") or {}
+        if ref.get("kind") != "ClusterRole" or ref.get("name") != "cluster-admin":
+            continue
+        for s in b.get("subjects") or []:
+            key = f"{s.get('kind')}:{s.get('name')}"
+            holders.setdefault(key, []).append((b.get("metadata") or {}).get("name"))
+    return holders
+
+
+@app.route("/api/harvester-users/<cluster>")
+@requires_auth
+def api_harvester_users(cluster):
+    """Comptes du cluster, avec qui détient l'administration."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    # Les deux listes sont indépendantes : les enchaîner coûtait 5,5 s sur
+    # harv1 (1,5 s pour les comptes, 2,7 s pour les bindings, plus les
+    # aller-retours). En parallèle, le panneau s'ouvre en moitié moins.
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_users = pool.submit(_kubectl_json, kc, "get",
+                              "users.management.cattle.io", "-o", "json",
+                              cluster=cluster)
+        f_holders = pool.submit(_cluster_admin_subjects, kc, cluster)
+        data = f_users.result()
+        holders = f_holders.result()
+    if data is None:
+        return jsonify({"error": "cannot list users",
+                        "hint": "users.management.cattle.io is a Rancher CRD; "
+                                "it exists on Harvester but the kubeconfig "
+                                "must be allowed to read it"}), 502
+    users = []
+    for u in data.get("items", []):
+        meta = u.get("metadata") or {}
+        uid = meta.get("name")
+        bindings = holders.get(f"User:{uid}", [])
+        principals = u.get("principalIds") or []
+        users.append({
+            "id": uid,
+            "username": u.get("username"),
+            "display_name": u.get("displayName"),
+            "description": u.get("description"),
+            # `enabled` absent veut dire actif : Rancher ne le pose qu'en
+            # cas de désactivation explicite.
+            "enabled": u.get("enabled") is not False,
+            "is_admin": bool(bindings),
+            "admin_bindings": bindings,
+            # Un compte venu d'un fournisseur externe ne se gère pas ici.
+            "local": any(str(p).startswith("local://") for p in principals)
+                     or not principals,
+            "principals": principals,
+            # Les comptes de service internes ne doivent pas être touchés.
+            "system": "authz.management.cattle.io/bootstrapping" in (meta.get("labels") or {})
+                      or any(str(p).startswith("system://") for p in principals),
+        })
+    # Les détenteurs qui ne sont pas des objets User : groupes OIDC, comptes
+    # de service. Les montrer évite de croire la liste exhaustive.
+    # Les détenteurs qui ne sont pas dans la liste des comptes : groupes
+    # venus d'un fournisseur externe, surtout. Les comptes de SERVICE sont
+    # comptés à part : ils sont une vingtaine, tous d'infrastructure, et les
+    # lister noierait l'information utile.
+    known = {u["id"] for u in users}
+    others, service_accounts = [], 0
+    for key, bindings in sorted(holders.items()):
+        kind, _, name = key.partition(":")
+        if kind == "ServiceAccount":
+            service_accounts += 1
+            continue
+        if kind == "User" and name in known:
+            continue
+        others.append({
+            "subject": key, "kind": kind, "name": name, "bindings": bindings,
+            # Un sujet `User:` sans objet utilisateur est une liaison
+            # ORPHELINE : le compte a été supprimé, sa délégation
+            # d'administration non. Recréer un compte portant cet
+            # identifiant lui rendrait cluster-admin en silence. Sur harv1,
+            # trois en traînaient.
+            "orphan": kind == "User",
+        })
+    return jsonify({"users": sorted(users, key=lambda u: u["username"] or u["id"]),
+                    "other_admins": others,
+                    "service_account_admins": service_accounts,
+                    # Dit franchement : cette console ne pose pas de mot de
+                    # passe local, faute de pouvoir le faire sûrement.
+                    "password_management": False})
+
+
+@app.route("/api/harvester-users/<cluster>/<user_id>", methods=["PATCH"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_harvester_user_patch(cluster, user_id):
+    """Active/désactive un compte, accorde/retire l'administration.
+
+    Body : {enabled?: bool, admin?: bool}
+    """
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+
+    data = request.get_json(force=True, silent=True) or {}
+    done = []
+
+    if "enabled" in data:
+        enabled = bool(data["enabled"])
+        r = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "patch",
+             "users.management.cattle.io", user_id, "--type", "merge",
+             "-p", json.dumps({"enabled": enabled})],
+            capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return jsonify({"error": "cannot change enabled",
+                            "detail": (r.stderr or r.stdout).strip()[:300]}), 502
+        done.append("enabled" if enabled else "disabled")
+
+    if "admin" in data:
+        want = bool(data["admin"])
+        holders = _cluster_admin_subjects(kc, cluster)
+        existing = holders.get(f"User:{user_id}", [])
+        if want and not existing:
+            binding = {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": _admin_binding_name(user_id),
+                             "labels": {"harvester-ops.io/managed": "true"}},
+                "roleRef": {"apiGroup": "rbac.authorization.k8s.io",
+                            "kind": "ClusterRole", "name": "cluster-admin"},
+                "subjects": [{"apiGroup": "rbac.authorization.k8s.io",
+                              "kind": "User", "name": user_id}],
+            }
+            r = subprocess.run(
+                ["kubectl", "--kubeconfig", kc, "create", "-f", "-"],
+                input=json.dumps(binding), capture_output=True, text=True,
+                timeout=30)
+            if r.returncode != 0:
+                return jsonify({"error": "cannot grant admin",
+                                "detail": (r.stderr or r.stdout).strip()[:300]}), 502
+            done.append("admin granted")
+        elif not want and existing:
+            # On ne retire QUE les bindings qu'on a posés : supprimer celui
+            # que Harvester a créé à l'installation casserait le compte
+            # d'origine, et le rétablir n'aurait rien d'évident.
+            ours = [b for b in existing if b == _admin_binding_name(user_id)]
+            if not ours:
+                return jsonify({
+                    "error": "admin not granted by harvester-ops",
+                    "bindings": existing,
+                    "hint": "this account holds cluster-admin through a binding "
+                            "this console did not create; remove it deliberately "
+                            "with kubectl rather than from here",
+                }), 409
+            for b in ours:
+                subprocess.run(["kubectl", "--kubeconfig", kc, "delete",
+                                "clusterrolebinding", b],
+                               capture_output=True, text=True, timeout=30)
+            done.append("admin revoked")
+
+    if not done:
+        return jsonify({"error": "nothing to change",
+                        "hint": "send enabled and/or admin"}), 400
+    _invalidate_cluster_caches(cluster)
+    return jsonify({"changed": done, "user": user_id})
 
 
 @app.route("/api/vmtemplates/<cluster>")

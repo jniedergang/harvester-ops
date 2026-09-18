@@ -147,9 +147,19 @@ def flask_server(test_config):
         for line in iter(proc.stderr.readline, b""):
             _server_stderr_buf.append(line)
     _t.Thread(target=_drain_stderr, daemon=True, name="server-stderr").start()
-    # Wait until the port responds (max 8s)
+    # Wait until the port responds.
+    #
+    # 8 s was too tight. Importing app.py pulls Flask, flask-sock,
+    # flask-limiter, passlib and y_py; on an idle machine that is a couple of
+    # seconds, but on a busy host it is not. Measured on node1 under load
+    # average 27: 14 s for the import alone, which failed EVERY test with
+    # "Flask did not start" — 117 errors that look like a catastrophic
+    # regression and are only a loaded machine. The budget is now generous,
+    # and the failure message says how long it actually waited.
+    startup_budget = float(os.environ.get("HARVESTER_OPS_TEST_STARTUP", "60"))
     base_url = f"http://127.0.0.1:{port}"
-    deadline = time.time() + 8
+    started = time.time()
+    deadline = started + startup_budget
     import urllib.request
     while time.time() < deadline:
         try:
@@ -162,7 +172,11 @@ def flask_server(test_config):
         proc.kill()
         out, _err = proc.communicate()
         err_dump = b"".join(_server_stderr_buf).decode("utf-8", errors="replace")
-        raise RuntimeError(f"Flask did not start.\nSTDOUT:\n{out.decode()}\nSTDERR:\n{err_dump}")
+        raise RuntimeError(
+            f"Flask did not start within {startup_budget:.0f}s "
+            f"(waited {time.time() - started:.1f}s). On a loaded host the "
+            f"import alone can take 15s; raise HARVESTER_OPS_TEST_STARTUP if "
+            f"needed.\nSTDOUT:\n{out.decode()}\nSTDERR:\n{err_dump}")
 
     yield {"base_url": base_url, "port": port, "proc": proc, "config": test_config}
     proc.terminate()
@@ -170,6 +184,12 @@ def flask_server(test_config):
         proc.wait(timeout=4)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+# Certains points d'entrée sondent en SSH ou en kubectl avec leurs propres
+# délais ; sur un hôte chargé, 10 s ne suffisent pas et le test échoue sur un
+# TimeoutError qui n'apprend rien sur le code.
+_REQ_TIMEOUT = float(os.environ.get("HARVESTER_OPS_TEST_TIMEOUT", "30"))
 
 
 @pytest.fixture
@@ -190,7 +210,7 @@ def api(flask_server):
         if json_body is not None:
             body = json.dumps(json_body).encode()
         try:
-            with urllib.request.urlopen(req, data=body, timeout=10) as r:
+            with urllib.request.urlopen(req, data=body, timeout=_REQ_TIMEOUT) as r:
                 status = r.status
                 payload = r.read().decode()
         except urllib.error.HTTPError as e:

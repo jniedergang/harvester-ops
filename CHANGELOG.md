@@ -4,6 +4,62 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.31.0] - 2026-09-18 - The cluster's own accounts
+
+Second of the three steps agreed on rights: seeing and changing who holds
+administration of a Harvester cluster, without leaving the console.
+
+Harvester's model was read from the cluster rather than assumed. A
+`users.management.cattle.io` object carries the login and whether the
+account is enabled; administration is a plain ClusterRoleBinding to
+`cluster-admin`; and the password lives somewhere else entirely.
+
+### Added
+- **A Cluster accounts tab** in Settings, listing the accounts of the
+  selected cluster with, in one view, whether each is enabled and whether it
+  holds administration. The Harvester UI keeps those two apart.
+- **Enable, disable, grant or revoke administration**, with a confirmation
+  before handing someone the whole cluster.
+- **Orphaned administration is surfaced.** A `User` subject holding
+  cluster-admin with no user object behind it means the account was deleted
+  and its delegation was not. Recreating an account with that id would
+  silently give it back. harv1 had three.
+- Groups holding administration are listed as such, and the seventeen
+  service accounts that hold it are counted rather than listed, so the
+  useful information is not drowned.
+
+### Internal
+- Revoking only removes bindings this console created. Deleting the one
+  Harvester writes at installation would break the original account, and
+  putting it back is not obvious; that case returns 409 and says to do it
+  deliberately with kubectl.
+- Listing the accounts requires the `admin` role, reading included: who
+  holds administration of a cluster is not something a read-only account
+  needs.
+- The two kubectl calls run in parallel. Chained, the panel took 5.5 s on
+  harv1.
+
+### Not offered, and why
+Creating a local account with a password. Harvester stores it as a 32-byte
+derived key with its own 32-byte salt, in a separate secret, not as a bcrypt
+hash. A probe account created with bcrypt was refused at login, and so was
+the `$2a$` variant. Guessing the scheme would produce accounts that cannot
+log in at best. The panel says so and points at the Harvester UI. The probe
+account was deleted; the cluster is back to its two original users.
+
+### Tests
+- The model itself: administration read from the binding and not the user, a
+  missing `enabled` meaning active, bindings for other roles ignored,
+  orphans told apart from groups, service accounts counted.
+- The guard on revoking, which must not touch a binding it did not create.
+- **The harness stopped lying under load.** The fixture gave the server 8 s
+  to start and each request 10 s. On a host at load average 27, importing
+  the app alone takes 14 s, so every single test failed with "Flask did not
+  start": 117 errors that read as a catastrophic regression and were a busy
+  machine. Both budgets are now generous and overridable, and the failure
+  message says how long it actually waited.
+- 678 API tests green.
+
 ## [1.30.0] - 2026-09-18 - Roles, because a password was the only gate
 
 The console authenticated a password and nothing more. Any account that got

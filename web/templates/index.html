@@ -539,6 +539,7 @@
       <button class="settings-tab"        data-stab="language"   data-i18n="settings.tab.language">Language</button>
       <button class="settings-tab"        data-stab="clusters"   data-i18n="settings.tab.clusters">Clusters</button>
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
+      <button class="settings-tab"        data-stab="husers"     data-i18n="settings.tab.husers">Cluster accounts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -552,6 +553,13 @@
           <div class="form-hint" data-i18n="settings.general.titleHint">Shown in the sidebar and browser tab.</div>
         </div>
         <button class="btn btn-secondary btn-sm" id="btn-reset-title" data-i18n="settings.general.reset">Reset to default</button>
+      </div>
+
+      <div class="settings-tab-content" id="stab-husers">
+        <h4 data-i18n="husers.title">Cluster accounts</h4>
+        <p class="form-hint" data-i18n="husers.intro">Accounts declared on the
+          selected Harvester cluster, and who holds cluster administration.</p>
+        <div id="husers-body"><p class="form-hint">…</p></div>
       </div>
 
       <div class="settings-tab-content" id="stab-appearance">
@@ -783,6 +791,7 @@
 <script src="/static/js/dock.js"></script>
 <script src="/static/js/vm-edit.js"></script>
 <script src="/static/js/vm-create.js"></script>
+<script src="/static/js/harvester-users.js"></script>
 <script src="/static/js/vm-console.js"></script>
 <script src="/static/js/vm-snapshots.js"></script>
 <script src="/static/js/vm-migrate.js"></script>
