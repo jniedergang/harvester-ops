@@ -18,6 +18,7 @@ Architecture:
   - All running actions are tracked in an in-memory registry (no DB)
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -65,6 +66,7 @@ from flask import (
     Flask,
     Response,
     abort,
+    g,
     jsonify,
     render_template,
     request,
@@ -419,28 +421,72 @@ ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall")
 _roles_cache = {"mtime": None, "data": None}
 
 
+def _parse_role_entry(value):
+    """Une entrée de `users:` est soit le rôle seul, soit une table qui porte
+    aussi l'identité à présenter au cluster.
+
+        operatrice: operator                  # forme courte, toujours valide
+        patronne:
+          role: admin
+          cluster_user: u-p5oguyiwv6
+          cluster_groups: [harvester-admins]
+
+    Rend (rôle, identité) ; le rôle est None si la valeur est inexploitable,
+    ce qui écarte l'entrée plutôt que de lui accorder des droits par défaut.
+    """
+    if isinstance(value, dict):
+        role = str(value.get("role", ""))
+        cuser = value.get("cluster_user")
+        groups = value.get("cluster_groups") or []
+        if not isinstance(groups, list):
+            groups = [groups]
+        identity = None
+        if cuser:
+            identity = {"user": str(cuser),
+                        "groups": [str(g) for g in groups if str(g)]}
+        return (role if role in ROLE_RANK else None), identity
+    role = str(value)
+    return (role if role in ROLE_RANK else None), None
+
+
 def load_roles():
-    """{'default_role': str, 'users': {login: role}}. Fichier absent =
-    personne n'est bridé, pour ne pas verrouiller une installation
-    existante au moment de la mise à jour."""
+    """{'default_role': str, 'users': {login: role}, 'identities': {...}}.
+    Fichier absent = personne n'est bridé, pour ne pas verrouiller une
+    installation existante au moment de la mise à jour."""
     try:
         mtime = ROLES_PATH.stat().st_mtime
     except OSError:
-        return {"default_role": "admin", "users": {}, "configured": False}
+        return {"default_role": "admin", "users": {}, "identities": {},
+                "delegate": False, "deny_unmapped": False, "configured": False}
     if _roles_cache["mtime"] != mtime:
         try:
             raw = yaml.safe_load(ROLES_PATH.read_text()) or {}
         except Exception as e:
             log.warning("roles.yaml illisible (%s) : tout le monde admin", e)
             raw = {}
-        users = {str(k): str(v) for k, v in (raw.get("users") or {}).items()
-                 if str(v) in ROLE_RANK}
+        users, identities = {}, {}
+        for k, v in (raw.get("users") or {}).items():
+            role, identity = _parse_role_entry(v)
+            if role:
+                users[str(k)] = role
+            if identity:
+                identities[str(k)] = identity
         default = raw.get("default_role")
         if default not in ROLE_RANK:
             default = "viewer"
+        ident_cfg = raw.get("identity") or {}
+        delegate = bool(ident_cfg.get("delegate", False))
+        # Un exploitant qui active la délégation la veut effective : un compte
+        # sans correspondance est refusé, pas silencieusement promu au
+        # kubeconfig partagé. Il peut l'assouplir explicitement.
+        deny_unmapped = bool(ident_cfg.get("deny_unmapped", True)) and delegate
         _roles_cache.update({"mtime": mtime,
                              "data": {"default_role": default,
-                                      "users": users, "configured": True}})
+                                      "users": users,
+                                      "identities": identities,
+                                      "delegate": delegate,
+                                      "deny_unmapped": deny_unmapped,
+                                      "configured": True}})
     return _roles_cache["data"]
 
 
@@ -502,6 +548,18 @@ def _enforce_role():
             "hint": f"this action needs the '{needed}' role; "
                     f"'{current_user() or 'you'}' has '{have}'",
         }), 403
+    # v1.32.0 : délégation active et compte sans identité de cluster. Le
+    # laisser passer le ferait retomber sur le kubeconfig partagé,
+    # administrateur, soit exactement ce que la délégation vient supprimer.
+    # On refuse, et on dit quoi écrire dans roles.yaml.
+    if load_roles().get("deny_unmapped") and not current_cluster_identity():
+        return jsonify({
+            "error": "no cluster identity",
+            "user": current_user(),
+            "hint": "identity delegation is on and this account maps to no "
+                    "cluster user; add 'cluster_user:' for it in roles.yaml, "
+                    "or set identity.deny_unmapped to false",
+        }), 403
     return None
 
 
@@ -511,6 +569,7 @@ def api_whoami():
     """Qui suis-je et qu'ai-je le droit de faire. L'interface s'en sert pour
     ne pas proposer des gestes qui seront refusés."""
     roles = load_roles()
+    ident = cluster_identity_for(current_user())
     return jsonify({
         "user": current_user(),
         "role": current_role(),
@@ -518,7 +577,141 @@ def api_whoami():
         "roles_configured": bool(roles.get("configured")),
         "auth_configured": HTPASSWD_PATH.exists(),
         "roles_file": str(ROLES_PATH),
+        # v1.32.0 : ce que le CLUSTER voit, qui n'est pas le rôle console.
+        "delegation_active": identity_delegation_active(),
+        "cluster_user": (ident or {}).get("user"),
+        "cluster_groups": (ident or {}).get("groups", []),
     })
+
+
+# =============================================================================
+# Identité présentée au cluster (v1.32.0)
+#
+# Jusqu'ici la console agissait avec UN kubeconfig partagé. Mesuré sur harv1 :
+# il vaut `system:admin`, groupe `system:masters` (un superutilisateur câblé
+# dans l'apiserver), qui COURT-CIRCUITE la RBAC. Aucune règle Harvester ne
+# s'appliquait donc à quoi que ce soit fait depuis la console, quel que soit
+# l'humain derrière l'écran. Les rôles de la v1.30.0 sont un garde-fou côté
+# console ; ils ne sont pas une frontière que le cluster fait respecter.
+#
+# kubectl sait porter une usurpation DANS le kubeconfig (`as`, `as-groups`),
+# et l'apiserver ajoute lui-même `system:authenticated`. On produit donc une
+# copie du kubeconfig porteuse de l'identité de l'appelant, et on la substitue
+# au point unique où le chemin est résolu : les ~50 sites d'appel kubectl la
+# reçoivent sans être touchés, et les scripts bin/*.sh font de même par
+# HARVESTER_OPS_AS. Vérifié sur harv1 : sous usurpation, `can-i list vm`
+# répond « no » là où le kubeconfig partagé répond « yes ».
+#
+# Ce que cela ne fait toujours PAS : la console DÉTIENT le kubeconfig
+# administrateur. Un défaut de cette couche redonnerait les pleins pouvoirs.
+# C'est une frontière que le cluster applique, pas un coffre.
+# =============================================================================
+IDENTITY_DIR = Path(os.environ.get("HARVESTER_OPS_IDENTITY_DIR",
+                                   "/var/lib/harvester-ops/identities"))
+_identity_cache = {}      # clé -> Path
+_identity_lock = threading.Lock()
+
+
+def identity_delegation_active():
+    """La délégation n'a de sens que si l'on sait QUI demande : elle suit donc
+    les rôles, et reste éteinte tant qu'on ne l'a pas demandée."""
+    return roles_active() and load_roles().get("delegate", False)
+
+
+def cluster_identity_for(login):
+    """{'user': ..., 'groups': [...]} ou None si ce compte n'a pas de
+    correspondance côté cluster."""
+    if not identity_delegation_active():
+        return None
+    return load_roles().get("identities", {}).get(login)
+
+
+def current_cluster_identity():
+    try:
+        return cluster_identity_for(current_user())
+    except RuntimeError:
+        # Hors contexte de requête (thread de travail) : l'identité a déjà été
+        # figée dans le kubeconfig résolu côté requête.
+        return None
+
+
+def _identity_dir():
+    """Répertoire privé des copies. Repli sur un temporaire quand
+    /var/lib n'est pas inscriptible (déploiement en rootfs read-only)."""
+    for candidate in (IDENTITY_DIR,
+                      Path(tempfile.gettempdir()) / "harvester-ops-identities"):
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            os.chmod(candidate, 0o700)
+            return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _identity_kubeconfig(src_kc, identity):
+    """Copie de `src_kc` portant `as`/`as-groups`. Rend le chemin d'origine
+    quand il n'y a rien à usurper, pour que le chemin nominal soit inchangé.
+
+    La copie contient les identifiants du cluster : répertoire 0700,
+    fichier 0600, et jamais de chemin ni de secret dans une réponse.
+    """
+    if not identity or not identity.get("user") or not src_kc:
+        return src_kc
+    try:
+        mtime = os.stat(src_kc).st_mtime
+    except OSError:
+        return src_kc
+    groups = tuple(identity.get("groups") or ())
+    key = (str(src_kc), mtime, identity["user"], groups)
+    with _identity_lock:
+        cached = _identity_cache.get(key)
+        if cached and cached.exists():
+            return str(cached)
+        target_dir = _identity_dir()
+        if target_dir is None:
+            log.warning("délégation d'identité : aucun répertoire inscriptible,"
+                        " appel avec le kubeconfig partagé")
+            return src_kc
+        digest = hashlib.sha256(
+            "\0".join([str(src_kc), str(mtime), identity["user"],
+                       ",".join(groups)]).encode()).hexdigest()[:16]
+        dst = target_dir / f"{digest}.yaml"
+        try:
+            doc = yaml.safe_load(Path(src_kc).read_text()) or {}
+            for u in doc.get("users") or []:
+                entry = u.setdefault("user", {})
+                entry["as"] = identity["user"]
+                if groups:
+                    entry["as-groups"] = list(groups)
+                else:
+                    entry.pop("as-groups", None)
+            tmp = dst.with_suffix(".tmp")
+            with open(os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                              0o600), "w") as fh:
+                yaml.safe_dump(doc, fh)
+            os.replace(tmp, dst)
+            os.chmod(dst, 0o600)
+        except Exception as e:
+            log.warning("délégation d'identité impossible (%s) : appel avec le"
+                        " kubeconfig partagé", e)
+            return src_kc
+        _identity_cache[key] = dst
+        return str(dst)
+
+
+def identity_env(login=None):
+    """Variables d'environnement à passer aux scripts bin/*.sh pour qu'ils
+    présentent la même identité. C'est le pendant CLI, et la règle de parité
+    impose qu'il existe."""
+    ident = (cluster_identity_for(login) if login is not None
+             else current_cluster_identity())
+    if not ident:
+        return {}
+    env = {"HARVESTER_OPS_AS": ident["user"]}
+    if ident.get("groups"):
+        env["HARVESTER_OPS_AS_GROUPS"] = ",".join(ident["groups"])
+    return env
 
 
 # -----------------------------------------------------------------------------
@@ -533,6 +726,12 @@ class ActionRun:
         self.cluster = cluster
         self.cmd = cmd
         self.dry_run = dry_run
+        # v1.32.0 : identité présentée au cluster, figée au DÉCLENCHEMENT.
+        # Le thread de travail n'a pas de contexte de requête ; l'y relire
+        # rendrait None et l'action repasserait en kubeconfig partagé, c'est-
+        # à-dire exactement là où les gestes sont les plus lourds.
+        self.identity_env = {}
+        self.cluster_user = None
         self.status = "starting"      # starting | running | done | error | cancelled
         self.exit_code = None
         # v1.6.5: last meaningful error line (kubectl stderr / script stderr)
@@ -595,6 +794,9 @@ class ActionRun:
             "ended_at": self.ended_at,
             "dry_run": self.dry_run,
             "error_summary": self.error_summary,
+            # Sous quelle identité le cluster a vu cette action. None quand la
+            # délégation est éteinte : l'action a employé le kubeconfig partagé.
+            "cluster_user": self.cluster_user,
         }
 
 
@@ -842,7 +1044,9 @@ def run_action_thread(run: ActionRun):
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
-            env={**os.environ, "NO_COLOR": "1", "HARVESTER_OPS_CONFIG": str(CONFIG_PATH)},
+            env={**os.environ, "NO_COLOR": "1",
+                 "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
+                 **getattr(run, "identity_env", {})},
         )
     except FileNotFoundError as e:
         run.status = "error"
@@ -936,6 +1140,12 @@ def start_action(action, cluster, dry_run=False, interactive=False,
 
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, action, cluster, cmd, dry_run=dry_run)
+    # Identité capturée ICI, dans le thread de la requête : le thread de
+    # travail ne la retrouverait pas, et l'action repartirait avec le
+    # kubeconfig partagé, administrateur.
+    _ident = current_cluster_identity()
+    run.identity_env = identity_env()
+    run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
 
@@ -1646,7 +1856,9 @@ def api_status(cluster):
             cmd,
             stderr=subprocess.PIPE,
             timeout=30,
-            env={**os.environ, "NO_COLOR": "1", "HARVESTER_OPS_CONFIG": str(CONFIG_PATH)},
+            env={**os.environ, "NO_COLOR": "1",
+                 "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
+                 **identity_env()},
         )
         return Response(out, mimetype="application/json")
     except subprocess.CalledProcessError as e:
@@ -1718,6 +1930,65 @@ def _cluster_of_kubeconfig(kc):
     return "?"
 
 
+# Un refus de la RBAC du cluster n'est pas une panne de la console. Avant la
+# délégation d'identité personne ne pouvait en recevoir (le kubeconfig partagé
+# est `system:masters`, qui court-circuite la RBAC) ; depuis, un compte aux
+# droits réduits en reçoit, et cela remontait en 500 : l'écran annonçait une
+# erreur serveur pour un refus parfaitement normal, sans dire qui refusait.
+def _safe_proc_error(exc, limit=200):
+    """Message d'erreur d'un sous-processus SANS sa ligne de commande.
+
+    `CalledProcessError.__str__` recopie l'argv complet, donc le chemin du
+    kubeconfig : le renvoyer dans une réponse HTTP le divulgue. Trouvé en
+    testant la délégation en réel, quand un compte aux droits réduits a
+    ramené le chemin du fichier dans le corps de la réponse.
+    """
+    if isinstance(exc, subprocess.CalledProcessError):
+        return f"command failed with exit code {exc.returncode}"
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return "command timed out"
+    return str(exc)[:limit]
+
+
+_DENIAL_MARKERS = ("forbidden", "is not allowed", "cannot list",
+                   "cannot get", "cannot create", "cannot delete",
+                   "cannot patch", "cannot update")
+
+
+def _note_cluster_denial(stderr):
+    """Retient qu'un appel a été refusé par la RBAC, pour que la réponse le
+    dise. Silencieux hors contexte de requête (threads de travail)."""
+    text = (stderr or "").strip()
+    if not any(m in text.lower() for m in _DENIAL_MARKERS):
+        return
+    try:
+        g.cluster_denied = text[:300]
+    except RuntimeError:
+        pass
+
+
+@app.after_request
+def _surface_cluster_denial(response):
+    """Un refus du cluster vaut 403, pas 500."""
+    denied = getattr(g, "cluster_denied", None)
+    if denied and response.status_code >= 500:
+        ident = current_cluster_identity() or {}
+        # Un after_request doit rendre une Response, PAS un tuple : rendre
+        # (jsonify(...), 403) fait exploser le handler suivant sur
+        # `.headers`, et la réponse part en 500 sans rien expliquer.
+        replacement = jsonify({
+            "error": "cluster refused",
+            "cluster_user": ident.get("user"),
+            "detail": denied,
+            "hint": "the cluster's RBAC refused this call for the identity "
+                    "the console presented; grant it on the cluster, or map "
+                    "this account to another cluster user in roles.yaml",
+        })
+        replacement.status_code = 403
+        return replacement
+    return response
+
+
 def _kubectl_json(kc, *args, timeout=15, cluster=None):
     """Run `kubectl --kubeconfig kc <args> -o json` and return the parsed
     object, or None on any error (logged at WARNING, with the cluster)."""
@@ -1731,6 +2002,7 @@ def _kubectl_json(kc, *args, timeout=15, cluster=None):
             log.warning("[%s] kubectl %s failed: %s", name, " ".join(args),
                         r.stderr.strip()[:200])
             metric_kubectl_calls.labels(status="fail", cluster=name).inc()
+            _note_cluster_denial(r.stderr)
             return None
         metric_kubectl_calls.labels(status="ok", cluster=name).inc()
         return json.loads(r.stdout)
@@ -1992,7 +2264,8 @@ def api_topology(cluster):
         data = _build_topology(cluster, kc)
     except Exception as e:
         log.exception("topology build failed for %s", cluster)
-        return jsonify({"error": "topology build failed", "detail": str(e)[:200]}), 500
+        return jsonify({"error": "topology build failed",
+                        "detail": _safe_proc_error(e)}), 500
     with _topology_lock:
         _topology_cache[cluster] = {"ts": time.time(), "data": data}
     return jsonify(data)
@@ -2840,10 +3113,18 @@ def api_list_cloudinits(cluster):
 # VM order management — list VMs with priority, update order via annotations
 # -----------------------------------------------------------------------------
 def _kubectl_for_cluster(cluster):
+    """Chemin du kubeconfig à employer pour ce cluster.
+
+    Point de substitution UNIQUE de la délégation d'identité (v1.32.0) :
+    quand elle est active, on rend une copie porteuse de l'identité de
+    l'appelant, et les ~50 sites d'appel kubectl en héritent sans être
+    modifiés. Rendu inchangé quand la délégation est éteinte.
+    """
     cfg = load_config()
     for c in cfg.get("clusters", []):
         if c["name"] == cluster:
-            return c["kubeconfig"]
+            return _identity_kubeconfig(c["kubeconfig"],
+                                        current_cluster_identity())
     return None
 
 
@@ -3273,14 +3554,19 @@ def api_vms_list(cluster):
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     try:
-        out = subprocess.check_output(
+        proc = subprocess.run(
             ["kubectl", "--kubeconfig", kc, "get", "vm", "-A", "-o", "json"],
-            stderr=subprocess.DEVNULL,
-            timeout=20,
+            capture_output=True, text=True, timeout=20,
         )
-        data = json.loads(out)
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        return jsonify({"error": "kubectl failed", "detail": str(e)}), 500
+        if proc.returncode != 0:
+            # stderr était jeté ici : un refus de la RBAC devenait un 500 muet.
+            _note_cluster_denial(proc.stderr)
+            return jsonify({"error": "kubectl failed",
+                            "detail": f"exit code {proc.returncode}"}), 500
+        data = json.loads(proc.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
+        return jsonify({"error": "kubectl failed",
+                        "detail": _safe_proc_error(e)}), 500
 
     # Fetch VMIs to expose live phase + agent connection + paused state
     vmi_state = {}
@@ -3653,7 +3939,8 @@ def api_clusters_test_kubeconfig(name):
     cluster = next((c for c in cfg.get("clusters", []) if c["name"] == name), None)
     if not cluster:
         return jsonify({"error": f"cluster '{name}' not found"}), 404
-    kc = cluster.get("kubeconfig", "")
+    kc = _identity_kubeconfig(cluster.get("kubeconfig", ""),
+                              current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"ok": False, "error": f"kubeconfig file not found: {kc}"}), 404
     try:
@@ -3708,7 +3995,7 @@ def api_clusters_test_ssh(name):
         except subprocess.TimeoutExpired:
             entry["detail"] = "timeout"
         except Exception as e:
-            entry["detail"] = str(e)[:200]
+            entry["detail"] = _safe_proc_error(e)
         return entry
 
     # v1.6.0: parallelize the SSH probe across nodes — 10 nodes used to
@@ -3741,7 +4028,8 @@ def api_connection_test(cluster):
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
 
-    kc_path = cluster_cfg.get("kubeconfig", "")
+    kc_path = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+                                   current_cluster_identity())
     result = {
         "cluster": cluster,
         "kubeconfig": kc_path,
@@ -3857,7 +4145,7 @@ def api_connection_test(cluster):
         except subprocess.TimeoutExpired:
             node_result["detail"] = "timeout"
         except Exception as e:
-            node_result["detail"] = str(e)[:200]
+            node_result["detail"] = _safe_proc_error(e)
         return node_result
 
     # v1.6.0: parallel probe (was sequential — 10 nodes × 16s = 160s).
@@ -5551,6 +5839,9 @@ class BundleJob:
     def __init__(self, bundle_id, anonymize):
         self.id = bundle_id
         self.anonymize = anonymize
+        # v1.32.0 : identite figee a la creation, le job tourne dans un thread.
+        self.identity = None
+        self.identity_env = {}
         self.status = "starting"     # starting | running | done | error
         self.steps = []              # [{id, label, status, message}]
         self.percent = 0
@@ -5622,14 +5913,17 @@ def _build_bundle(job: BundleJob):
         status_data = {}
         for c in cfg.get("clusters", []):
             cname = c["name"]
-            kc = c.get("kubeconfig", "")
+            kc = _identity_kubeconfig(c.get("kubeconfig", ""),
+                                      getattr(job, "identity", None))
             if not Path(kc).exists():
                 continue
             try:
                 out = subprocess.check_output(
                     ["/usr/bin/env", "bash", str(BIN_DIR / "harvester-status.sh"),
                      "--cluster", cname, "--output", "json"],
-                    env={**os.environ, "NO_COLOR": "1", "HARVESTER_OPS_CONFIG": str(CONFIG_PATH)},
+                    env={**os.environ, "NO_COLOR": "1",
+                         "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
+                         **getattr(job, "identity_env", {})},
                     stderr=subprocess.DEVNULL,
                     timeout=30,
                 ).decode("utf-8", errors="replace")
@@ -5770,6 +6064,8 @@ def api_support_bundle_start():
     anonymize = bool(data.get("anonymize", True))
     bundle_id = uuid.uuid4().hex[:10]
     job = BundleJob(bundle_id, anonymize)
+    job.identity = current_cluster_identity()
+    job.identity_env = identity_env()
     job.status = "running"
     with BUNDLES_LOCK:
         BUNDLES[bundle_id] = job
@@ -6747,7 +7043,8 @@ def api_capi_install(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = cluster_cfg.get("kubeconfig", "")
+    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+                              current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
 
@@ -7050,7 +7347,8 @@ def api_capi_cluster_create(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = cluster_cfg.get("kubeconfig", "")
+    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+                              current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
     if not CAPHV_GEN_BIN.exists():
@@ -7394,7 +7692,8 @@ def api_capi_uninstall(cluster):
     cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
     if not cluster_cfg:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = cluster_cfg.get("kubeconfig", "")
+    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
+                              current_cluster_identity())
     if not Path(kc).exists():
         return jsonify({"error": "kubeconfig missing"}), 400
     data = request.get_json(force=True, silent=True) or {}

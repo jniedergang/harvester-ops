@@ -181,6 +181,62 @@ require_yq() {
     fi
 }
 
+# -----------------------------------------------------------------------------
+# Identité présentée au cluster (v1.32.0)
+#
+# Sans cela, tout passe par le kubeconfig partagé du toolkit, qui est
+# administrateur : le cluster ne voit qu'une identité et sa RBAC ne s'applique
+# à rien. kubectl sait porter une usurpation DANS le kubeconfig (`as`,
+# `as-groups`), donc on repointe KUBECONFIG_PATH vers une copie qui la porte.
+# Un seul endroit à toucher : tous les appels kubectl des scripts suivent,
+# wrapper `kc` comme appels directs.
+#
+#   HARVESTER_OPS_AS=alice HARVESTER_OPS_AS_GROUPS=ops,lecture ./bin/...
+#
+# La copie vit dans un répertoire privé (0700) et le fichier en 0600 : il
+# contient les identifiants du cluster.
+# -----------------------------------------------------------------------------
+IDENTITY_WORKDIR=""
+
+cleanup_cluster_identity() {
+    [[ -n "$IDENTITY_WORKDIR" && -d "$IDENTITY_WORKDIR" ]] && rm -rf "$IDENTITY_WORKDIR"
+    IDENTITY_WORKDIR=""
+}
+
+apply_cluster_identity() {
+    local as="${HARVESTER_OPS_AS:-}"
+    [[ -z "$as" ]] && return 0
+    if [[ ! -f "$KUBECONFIG_PATH" ]]; then
+        log_error "Usurpation demandée mais kubeconfig introuvable : $KUBECONFIG_PATH"
+        return 1
+    fi
+    require_yq
+
+    IDENTITY_WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/harvester-ops-identity.XXXXXX") || return 1
+    chmod 0700 "$IDENTITY_WORKDIR"
+    trap cleanup_cluster_identity EXIT
+
+    local dst="$IDENTITY_WORKDIR/kubeconfig"
+    umask 077
+    cp "$KUBECONFIG_PATH" "$dst" || return 1
+    chmod 0600 "$dst"
+
+    # Posé sur tous les utilisateurs du fichier : kubectl n'en lit qu'un, celui
+    # du contexte courant, et cibler « le bon » demanderait de résoudre le
+    # contexte à la main pour aucun gain.
+    yq -i ".users[].user.as = \"$as\"" "$dst" || return 1
+    if [[ -n "${HARVESTER_OPS_AS_GROUPS:-}" ]]; then
+        local groups_json
+        groups_json=$(printf '%s' "$HARVESTER_OPS_AS_GROUPS" \
+            | awk -F, '{for(i=1;i<=NF;i++){gsub(/^ +| +$/,"",$i); if($i!=""){printf "%s\"%s\"", (n++?",":""), $i}}}')
+        [[ -n "$groups_json" ]] && { yq -i ".users[].user.\"as-groups\" = [$groups_json]" "$dst" || return 1; }
+    fi
+
+    KUBECONFIG_PATH="$dst"
+    log_info "Identité présentée au cluster : $as${HARVESTER_OPS_AS_GROUPS:+ (groupes : $HARVESTER_OPS_AS_GROUPS)}"
+    return 0
+}
+
 load_cluster() {
     local name="$1"
     [[ -z "$name" ]] && { log_error "Nom de cluster requis / cluster name required"; return 1; }
@@ -199,6 +255,8 @@ load_cluster() {
 
     SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p $SSH_PORT"
     [[ -n "$SSH_KEY" && "$SSH_KEY" != "null" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
+
+    apply_cluster_identity
 
     export KUBECONFIG="$KUBECONFIG_PATH"
 

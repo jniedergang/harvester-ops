@@ -4154,6 +4154,17 @@ body.role-admin .session-role { color: var(--accent); border-color: var(--accent
 body.role-viewer .session-role { color: var(--warn); border-color: var(--warn); }
 body.sidebar-collapsed .session-role { margin: 0 4px 6px; text-align: center; }
 
+/* v1.32.0, délégation d'identité. Le trait plein dit que le cluster voit
+   bien QUI agit ; sans lui, tout part avec le kubeconfig administrateur. */
+.session-role.delegated { border-style: solid; border-width: 2px; }
+/* Délégation active mais aucune identité : le cluster refusera tout. */
+.session-role.no-identity,
+body.role-admin .session-role.no-identity {
+  color: var(--danger, var(--warn));
+  border-color: var(--danger, var(--warn));
+  border-style: dashed;
+}
+
 /* Un lecteur ne doit pas se voir proposer ce qui lui sera refusé. Le serveur
    refuse de toute façon : ceci évite le clic inutile, ce n'est pas la
    protection. */

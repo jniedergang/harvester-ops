@@ -4,6 +4,79 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.32.0] - 2026-09-18 - The identity the cluster sees
+
+Third and last of the three steps agreed on rights, and the one that makes
+the other two mean something.
+
+Measured on harv1 rather than assumed: the console acted with a kubeconfig
+worth `system:admin`, group `system:masters`. That group is a hardcoded
+superuser in the apiserver, so it bypasses RBAC entirely. Whatever roles the
+console enforced on its own side, the cluster applied no rule of its own to
+anything the console did.
+
+kubectl can carry an impersonation inside the kubeconfig itself (`as`,
+`as-groups`). The console now builds a copy carrying the caller's identity
+and substitutes it at the single point where the kubeconfig path is
+resolved, so the fifty-odd kubectl call sites inherit it untouched, and the
+`bin/*.sh` scripts do the same through `HARVESTER_OPS_AS`. Verified live on
+harv1: under impersonation `kubectl auth can-i list virtualmachines` answers
+`no` where the shared kubeconfig answers `yes`.
+
+### Added
+- **A cluster identity per console account**, declared in `roles.yaml`.
+  The short form (`login: role`) keeps working; the long form adds
+  `cluster_user:` and optional `cluster_groups:`.
+- **`identity.delegate`** turns it on. It stays off on upgrade, so an
+  existing install behaves exactly as before until someone asks for it.
+- **An account with no cluster identity is refused** once delegation is on,
+  rather than quietly falling back to the shared administrator kubeconfig,
+  which is what delegation exists to remove. Relaxable with
+  `identity.deny_unmapped: false`.
+- **CLI parity**: `HARVESTER_OPS_AS` and `HARVESTER_OPS_AS_GROUPS` make the
+  scripts present the same identity, in one place in `bin/lib/common.sh`.
+- **The role badge says what the CLUSTER sees**, which is not the console
+  role: delegated, not delegated, or delegated with no identity.
+- Each action records the identity it ran under, so the history says who the
+  cluster saw, not only who clicked.
+
+### Fixed
+- **A failed kubectl no longer leaks the kubeconfig path.**
+  `CalledProcessError.__str__` copies the whole argv, and it was being put
+  straight into the HTTP response. Found by testing delegation for real: a
+  reduced-rights account brought the file path back in the response body.
+  Four endpoints were affected; this predates delegation.
+- **A cluster refusal is a 403, not a 500.** The VM listing discarded
+  stderr, so an RBAC denial surfaced as an opaque server error. It now
+  carries the cluster's own reason and the identity that was refused.
+  Nobody could hit this before delegation, precisely because the shared
+  kubeconfig bypasses RBAC.
+
+### Internal
+- The impersonated copies live in a private directory (0700) with each file
+  at 0600: they carry the cluster credentials. They are cached per source
+  kubeconfig, identity and source mtime, so a certificate rotation produces
+  a fresh copy instead of pinning the old one.
+- The identity is frozen when an action is triggered, in the request thread.
+  A worker thread has no request context; re-reading it there yields none,
+  and the action would have gone back to the administrator kubeconfig, which
+  is exactly where the heaviest gestures live.
+
+### Tests
+- `tests/api/test_identity_delegation.py`, 32 tests: configuration format
+  and backward compatibility, when delegation applies, file permissions,
+  copy reuse and invalidation, refusal of unmapped accounts, CLI parity,
+  the worker-thread trap, the path leak and the 403.
+- Each was checked against a deliberately broken implementation, so they
+  fail for the right reason.
+- Suite: 710 green.
+
+### Known limitation
+- The console still HOLDS the administrator kubeconfig. This is a boundary
+  the cluster enforces, not a vault: a flaw in this layer would hand back
+  full powers. Sourcing the identity from an OIDC provider is the next step,
+  and needs the identity provider to be running.
+
 ## [1.31.0] - 2026-09-18 - The cluster's own accounts
 
 Second of the three steps agreed on rights: seeing and changing who holds

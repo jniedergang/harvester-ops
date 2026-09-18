@@ -268,12 +268,58 @@ Terraform workspace.
   a local account with a password is deliberately not offered: Harvester
   stores it as a derived key whose scheme this console will not guess.
 
-**What this is not.** The console reaches clusters with one shared
-kubeconfig that is cluster-admin, so the cluster sees a single identity
-whoever is at the keyboard. These roles are a guardrail against mistakes and
-misuse inside the console, not a boundary the cluster's own RBAC enforces.
-Delegating identity to an OIDC provider and acting with the user's own token
-is the next step.
+### The identity the cluster sees (1.32.0)
+
+Roles above are enforced by the console. On their own they changed nothing
+for the cluster: the shared kubeconfig is `system:admin`, group
+`system:masters`, a hardcoded superuser in the apiserver that bypasses RBAC
+entirely. Whoever was at the keyboard, the cluster applied no rule of its
+own.
+
+Each console account can now be mapped to a cluster identity, and every
+kubectl call carries it, so Harvester's RBAC finally applies.
+
+```yaml
+# /etc/harvester-ops/roles.yaml
+default_role: viewer
+identity:
+  delegate: true          # off by default: an upgrade changes nothing
+  deny_unmapped: true     # an account with no mapping is refused (default)
+users:
+  alice: operator                     # short form, still valid
+  bob:
+    role: admin
+    cluster_user: user-2fhwx          # the Harvester user id, not the login
+    cluster_groups: [harvester-admins]
+```
+
+- `cluster_user` is the **id** of the `users.management.cattle.io` object
+  (`user-2fhwx`), not the login. Settings > Cluster accounts lists them.
+- **Unmapped accounts are refused** while delegation is on, rather than
+  falling back to the shared administrator kubeconfig, which is what
+  delegation exists to remove. Set `deny_unmapped: false` to allow it.
+- **A cluster refusal reads as a refusal**: 403, with the cluster's own
+  reason and the identity that was refused, not an opaque server error.
+- The role badge in the sidebar says which of the three states applies:
+  delegated, not delegated, or delegated with no identity.
+- **CLI parity.** The scripts take the same identity from the environment:
+
+```bash
+HARVESTER_OPS_AS=user-2fhwx HARVESTER_OPS_AS_GROUPS=harvester-admins \
+  ./bin/harvester-shutdown.sh --cluster harv1 --dry-run
+```
+
+Check what a cluster actually grants an identity before relying on it:
+
+```bash
+kubectl --kubeconfig <kc> auth can-i list virtualmachines.kubevirt.io -A \
+  --as user-2fhwx
+```
+
+**What this is still not.** The console HOLDS the administrator kubeconfig:
+this is a boundary the cluster enforces, not a vault, and a flaw in this
+layer would hand back full powers. The identity is declared locally rather
+than proven by an identity provider; sourcing it from OIDC is the next step.
 
 ## 9. Cross-cutting
 

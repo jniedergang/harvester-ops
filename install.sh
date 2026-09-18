@@ -135,6 +135,23 @@ prepare_config() {
 # Un compte absent de la liste reçoit `default_role`. Ce fichier n'a d'effet
 # que si une authentification est en place (htpasswd) : sans identité, il
 # n'y a personne à qui attribuer un rôle.
+#
+# Ces rôles sont appliqués par la CONSOLE. Seuls, ils ne changent rien pour le
+# cluster : le kubeconfig employé est administrateur et court-circuite la RBAC.
+# Pour que les règles du cluster s'appliquent vraiment, associer chaque compte
+# à une identité de cluster et activer la délégation :
+#
+#   identity:
+#     delegate: true        # éteint par défaut
+#     deny_unmapped: true   # un compte sans correspondance est refusé
+#   users:
+#     alice: operator                   # forme courte, toujours valide
+#     bob:
+#       role: admin
+#       cluster_user: user-2fhwx        # identifiant Harvester, pas le login
+#       cluster_groups: [harvester-admins]
+#
+# Les identifiants se lisent dans Réglages > Comptes du cluster.
 default_role: viewer
 users: {}
 ROLES

@@ -114,9 +114,21 @@ const App = (() => {
         badge.textContent = d.user ? `${d.user} · ${sessionRole}` : sessionRole;
         // Clés en toutes lettres : `i18n.t(\`role.desc.${x}\`)` est
         // invisible au contrôle de parité, qui ne lit que des littéraux.
-        badge.title = sessionRole === 'admin' ? i18n.t('role.desc.admin')
-                    : sessionRole === 'operator' ? i18n.t('role.desc.operator')
-                    : i18n.t('role.desc.viewer');
+        const desc = sessionRole === 'admin' ? i18n.t('role.desc.admin')
+                   : sessionRole === 'operator' ? i18n.t('role.desc.operator')
+                   : i18n.t('role.desc.viewer');
+        // v1.32.0 : le rôle console et ce que le CLUSTER voit sont deux
+        // choses différentes. Sans délégation, tout part avec un kubeconfig
+        // administrateur et aucune règle du cluster ne s'applique ; le dire
+        // vaut mieux que de le laisser croire.
+        let cluster;
+        if (!d.delegation_active) cluster = i18n.t('role.cluster.shared');
+        else if (d.cluster_user) cluster = i18n.t('role.cluster.as', { user: d.cluster_user });
+        else cluster = i18n.t('role.cluster.none');
+        badge.title = `${desc}\n${cluster}`;
+        badge.classList.toggle('delegated', !!d.delegation_active);
+        badge.classList.toggle('no-identity',
+                               !!d.delegation_active && !d.cluster_user);
       }
     } catch { /* pas de whoami : on ne bride rien côté écran */ }
   }

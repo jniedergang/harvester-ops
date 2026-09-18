@@ -297,12 +297,64 @@ un workspace Terraform.
   offerte : Harvester le range sous forme de clé dérivée dont cette console
   ne devinera pas le schéma.
 
-**Ce que ce n'est pas.** La console atteint les clusters avec un kubeconfig
-partagé, administrateur : le cluster ne voit qu'une identité, quel que soit
-l'humain au clavier. Ces rôles sont un garde-fou contre l'erreur et l'abus
-dans la console, pas une frontière que la RBAC du cluster ferait respecter.
-Déléguer l'identité à un fournisseur OIDC et agir avec le jeton de
-l'utilisateur est la suite.
+### L'identité que voit le cluster (1.32.0)
+
+Les rôles ci-dessus sont appliqués par la console. Seuls, ils ne changeaient
+rien pour le cluster : le kubeconfig partagé vaut `system:admin`, groupe
+`system:masters`, un superutilisateur câblé dans l'apiserver qui
+court-circuite entièrement la RBAC. Quel que soit l'humain au clavier, le
+cluster n'appliquait aucune règle propre.
+
+Chaque compte de la console peut désormais être associé à une identité de
+cluster, que tous les appels kubectl portent : la RBAC de Harvester
+s'applique enfin.
+
+```yaml
+# /etc/harvester-ops/roles.yaml
+default_role: viewer
+identity:
+  delegate: true          # éteint par défaut : une mise à jour ne change rien
+  deny_unmapped: true     # un compte sans correspondance est refusé (défaut)
+users:
+  alice: operator                     # forme courte, toujours valide
+  bob:
+    role: admin
+    cluster_user: user-2fhwx          # l'identifiant Harvester, pas le login
+    cluster_groups: [harvester-admins]
+```
+
+- `cluster_user` est l'**identifiant** de l'objet
+  `users.management.cattle.io` (`user-2fhwx`), pas le login. Réglages >
+  Comptes du cluster les liste.
+- **Un compte sans correspondance est refusé** tant que la délégation est
+  active, plutôt que de retomber sur le kubeconfig administrateur partagé,
+  qui est précisément ce que la délégation supprime. `deny_unmapped: false`
+  pour l'autoriser.
+- **Un refus du cluster se lit comme un refus** : 403, avec la raison donnée
+  par le cluster et l'identité refusée, au lieu d'une erreur serveur opaque.
+- Le badge de rôle du menu dit lequel des trois états s'applique : délégué,
+  non délégué, ou délégué sans identité.
+- **Parité CLI.** Les scripts prennent la même identité dans
+  l'environnement :
+
+```bash
+HARVESTER_OPS_AS=user-2fhwx HARVESTER_OPS_AS_GROUPS=harvester-admins \
+  ./bin/harvester-shutdown.sh --cluster harv1 --dry-run
+```
+
+Vérifier ce qu'un cluster accorde réellement à une identité avant de s'y
+fier :
+
+```bash
+kubectl --kubeconfig <kc> auth can-i list virtualmachines.kubevirt.io -A \
+  --as user-2fhwx
+```
+
+**Ce que ce n'est toujours pas.** La console DÉTIENT le kubeconfig
+administrateur : c'est une frontière que le cluster applique, pas un coffre,
+et un défaut de cette couche redonnerait les pleins pouvoirs. L'identité est
+déclarée localement, non prouvée par un fournisseur d'identité ; la faire
+venir d'OIDC est la suite.
 
 ## 9. Transversal
 
