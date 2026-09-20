@@ -84,6 +84,19 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   affichée mais verrouillée : c'est celle de l'image, qui porte l'image de
   base, et en choisir une autre donnerait un disque vide. Les disques
   vierges la laissent libre.
+- **Cette VM est-elle sur le bon réseau, par la bonne carte ?** La section
+  Réseau de l'éditeur de VM porte un onglet Chemin de connexion à côté de
+  l'éditeur d'interfaces. Il dessine la chaîne de la VM jusqu'au cuivre :
+  vNIC, réseau attachable, bridge, bond, carte physique, chaque maillon
+  portant ce qu'on sait de lui, et ce qui est déclaré tenu à part de ce qui
+  tourne, parce qu'un écart entre les deux est justement ce qu'on cherche.
+  Deux sondes ne partent qu'à la demande, chacune étant un aller-retour
+  SSH : l'une résout le port hôte exact qui porte la VM en comparant sa MAC
+  dans les espaces de noms réseau des pods, l'autre écoute brièvement sur la
+  carte physique une annonce LLDP et dit quel switch et quel port ont
+  répondu. Une VM arrêtée montre son chemin déclaré, annoncé comme tel.
+  La sonde LLDP n'est pas vérifiée contre une vraie trame : rien n'en émet
+  sur le réseau d'essai.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

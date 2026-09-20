@@ -288,7 +288,7 @@ def test_node_detail_parses_links_and_counters():
             '"miimon":100}}}]\n---\n'
             '[{"ifname":"mgmt-bo","stats64":{"rx":{"bytes":10,"errors":1,'
             '"dropped":2},"tx":{"bytes":20,"errors":0,"dropped":0}}}]')
-    links, stats = wapp._parse_fabric_detail(text)
+    links, stats, phys = wapp._parse_fabric_detail(text)
     assert links[0]["kind"] == "bond"
     assert links[0]["bond_mode"] == "active-backup"
     assert links[0]["bond_miimon"] == 100
@@ -297,5 +297,19 @@ def test_node_detail_parses_links_and_counters():
 
 
 def test_node_detail_survives_an_empty_or_broken_answer():
-    assert wapp._parse_fabric_detail("") == ([], {})
-    assert wapp._parse_fabric_detail("pas du json\n---\nnon plus") == ([], {})
+    assert wapp._parse_fabric_detail("") == ([], {}, {})
+    assert wapp._parse_fabric_detail("pas du json\n---\nnon plus") == ([], {}, {})
+
+
+def test_node_detail_reads_speed_duplex_and_carrier():
+    """Ni l'API Kubernetes ni `ip link` ne donnent le débit négocié : il
+    vient de /sys. `carrier_changes` est le plus parlant des trois, un lien
+    qui bat est un lien qui va tomber."""
+    text = "[]\n---\n[]\n---\nenp1s0\t1000\tfull\t1\t2\neno2\t-1\tunknown\t0\t1\n"
+    _, _, phys = wapp._parse_fabric_detail(text)
+    assert phys["enp1s0"] == {"speed_mbps": 1000, "duplex": "full",
+                              "carrier": 1, "carrier_changes": 2}
+    # Une carte sans porteuse rapporte -1 : l'afficher tel quel donnerait
+    # « -1 Mb/s » au lieu de « pas de lien ».
+    assert phys["eno2"]["speed_mbps"] is None
+    assert phys["eno2"]["carrier"] == 0

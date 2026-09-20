@@ -1261,22 +1261,185 @@ const VMEdit = (() => {
       ${applyBar('disks')}`;
   }
 
+  // ---------------------------------------------------------------------
+  // Chemin de connexion d'une VM (v1.36.0)
+  //
+  // On se met dans la peau d'un exploitant qui VÉRIFIE : la VM sort-elle
+  // par le bon réseau et la bonne carte ? La chaîne se lit de gauche à
+  // droite, de la VM jusqu'au cuivre, et chaque maillon porte ce qu'on
+  // sait de lui. Ce qui est DÉCLARÉ et ce qui est RÉEL sont distingués :
+  // un écart entre les deux est précisément ce qu'on cherche.
+  // ---------------------------------------------------------------------
+  function chainBox(kind, title, lines, cls) {
+    const body = lines.filter(Boolean)
+      .map(([k, v]) => `<div><span>${esc(k)}</span> <b>${esc(v)}</b></div>`)
+      .join('');
+    return `<div class="netpath-box ${cls || ''}" data-kind="${esc(kind)}">`
+      + `<header>${Icons.svg(kind, { size: 13 })} ${esc(title)}</header>`
+      + `<div class="netpath-kv">${body}</div></div>`;
+  }
+
+  function renderNetPath(d) {
+    if (d.error) return `<p class="hint">${esc(d.error)}</p>`;
+    if (!d.nics || !d.nics.length) {
+      return `<p class="hint">${esc(tr('vm.edit.netPathNone',
+        'This VM declares no network interface.'))}</p>`;
+    }
+    // Dire si l'on regarde ce qui TOURNE ou seulement ce qui est déclaré :
+    // sur une VM arrêtée, l'IP et l'état du lien n'existent pas, et croire
+    // le contraire ferait diagnostiquer une panne qui n'en est pas une.
+    const live = d.chain_is_live ? '' :
+      `<p class="hint netpath-warn">${esc(tr('vm.edit.netPathDeclared',
+        'This VM is not running: the chain below is the declared path, not '
+        + 'a live one. Address and link state are unknown until it starts.'))}</p>`;
+    const warn = d.full_linkmonitor ? '' :
+      `<p class="hint netpath-warn">${esc(tr('vm.edit.netPathPartial',
+        'Open vSwitch bridges are not reported by Harvester: a chain that '
+        + 'crosses them stops early. The Fabric view can install the link '
+        + 'monitor that reveals them.'))}</p>`;
+    const nics = d.nics.map(n => {
+      const live = n.live || {}, dec = n.declared || {}, nad = n.network_detail || {};
+      const boxes = [];
+      boxes.push(chainBox('vm', d.namespace + '/' + d.name, [
+        [tr('vm.edit.netPathNode', 'Node'), d.node || '-'],
+        [tr('vm.edit.netPathState', 'State'),
+         d.running ? tr('vm.edit.netPathRunning', 'running')
+                   : tr('vm.edit.netPathStopped', 'stopped')],
+      ]));
+      boxes.push(chainBox('network', n.name, [
+        [tr('vm.edit.netPathBinding', 'Binding'), dec.binding || '-'],
+        ['MAC', live.mac || dec.mac || '-'],
+        [tr('vm.edit.netPathGuest', 'In guest'), live.guest_interface || '-'],
+        ['IP', live.ip || '-'],
+        [tr('vm.edit.netPathLink', 'Link'), live.link_state || '-'],
+      ], live.link_state && live.link_state !== 'up' ? 'down' : ''));
+      boxes.push(chainBox('switch', dec.network || tr('vm.edit.netPathPod', 'pod network'), [
+        [tr('vm.edit.netPathType', 'Type'), nad.kind || '-'],
+        ['CNI', nad.cni || '-'],
+        ['VLAN', nad.vlan == null ? '-' : String(nad.vlan)],
+        [tr('vm.edit.netPathReady', 'Ready'), nad.ready === undefined ? '-' : String(nad.ready)],
+      ]));
+      (n.chain || []).forEach(c => {
+        if (!c.known) {
+          boxes.push(chainBox('warn', c.name, [
+            [tr('vm.edit.netPathUnknown', 'Not reported'), '-'],
+          ], 'unknown'));
+          return;
+        }
+        boxes.push(chainBox(c.type === 'device' ? 'node' : 'switch', c.name, [
+          [tr('vm.edit.netPathType', 'Type'), c.type],
+          [tr('vm.edit.netPathState', 'State'), c.state],
+          ['MAC', c.mac || '-'],
+        ], c.state === 'down' ? 'down' : ''));
+      });
+      const last = (n.chain || []).filter(c => c.known && c.type === 'device').pop();
+      const mac = live.mac || dec.mac || '';
+      const bridge = nad.bridge || '';
+      const tools =
+        (mac && bridge
+          ? `<button type="button" class="btn btn-small" data-netpath-port
+                     data-mac="${esc(mac)}" data-bridge="${esc(bridge)}">`
+            + `${esc(tr('vm.edit.netPathFindPort', 'Which host port?'))}</button>` : '')
+        + (last
+          ? `<button type="button" class="btn btn-small" data-netpath-lldp
+                     data-iface="${esc(last.name)}">`
+            + `${esc(tr('vm.edit.netPathLldp', 'Identify the switch (LLDP)'))}</button>` : '');
+      return `<div class="netpath-row">`
+        + `<div class="netpath-chain">${boxes.join('<i class="netpath-arrow"></i>')}</div>`
+        + `<div class="netpath-tools">${tools}<span class="netpath-out"></span></div>`
+        + (n.mac_matches ? '' :
+           `<p class="hint netpath-warn">${esc(tr('vm.edit.netPathMacGap',
+             'The declared MAC and the running one differ.'))}</p>`)
+        + `</div>`;
+    }).join('');
+    return live + warn + nics;
+  }
+
+  async function loadNetPath(sectionEl, cluster, namespace, name) {
+    const body = sectionEl.querySelector('[data-net-path-body]');
+    if (!body) return;
+    try {
+      const d = await fetch(`/api/vm-network-path/${encodeURIComponent(cluster)}`
+        + `/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}`)
+        .then(r => r.json());
+      body.outerHTML = `<div data-net-path-body>${renderNetPath(d)}</div>`;
+      wireNetPathTools(sectionEl, cluster, namespace, name, d);
+    } catch (e) {
+      body.textContent = String(e.message || e);
+    }
+  }
+
+  function wireNetPathTools(sectionEl, cluster, namespace, name, d) {
+    sectionEl.querySelectorAll('[data-netpath-port]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const out = btn.parentElement.querySelector('.netpath-out');
+        btn.disabled = true;
+        out.textContent = tr('common.loading', 'Loading...');
+        try {
+          const r = await fetch(`/api/vm-network-path/${encodeURIComponent(cluster)}`
+            + `/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/hostport`
+            + `?mac=${encodeURIComponent(btn.dataset.mac)}`
+            + `&bridge=${encodeURIComponent(btn.dataset.bridge)}`
+            + `&node=${encodeURIComponent(d.node || '')}`).then(x => x.json());
+          out.textContent = r.host_port
+            ? tr('vm.edit.netPathPortIs', 'Host port:') + ' ' + r.host_port
+            : tr('vm.edit.netPathPortNone', 'No host port matched this MAC.');
+        } catch (e) { out.textContent = String(e.message || e); }
+        btn.disabled = false;
+      });
+    });
+    sectionEl.querySelectorAll('[data-netpath-lldp]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const out = btn.parentElement.querySelector('.netpath-out');
+        btn.disabled = true;
+        out.textContent = tr('vm.edit.netPathListening', 'Listening for LLDP...');
+        try {
+          const r = await fetch(`/api/network-fabric/${encodeURIComponent(cluster)}`
+            + `/node/${encodeURIComponent(d.node || '')}/lldp`
+            + `?iface=${encodeURIComponent(btn.dataset.iface)}`).then(x => x.json());
+          out.textContent = r.found
+            ? Object.entries(r.fields).map(([k, v]) => `${k}=${v}`).join('  ')
+            : (r.hint || tr('vm.edit.netPathNoLldp', 'No LLDP frame.'));
+        } catch (e) { out.textContent = String(e.message || e); }
+        btn.disabled = false;
+      });
+    });
+  }
+
   function renderNetworkSection(vm, cluster) {
     const { items } = vmNetsToForm(vm);
     const template = ((vm.spec || {}).template || {}).spec || {};
     const raw = { networks: template.networks || [],
                   interfaces: ((template.domain || {}).devices || {}).interfaces || [] };
+    // Deux vues : on ÉDITE les interfaces, et on VÉRIFIE par où elles
+    // sortent. La seconde répond à « cette VM est-elle branchée sur le bon
+    // réseau, par les bonnes cartes ? », qui ne se lit dans aucun formulaire.
     return `
       <h3>${esc(tr('vm.edit.netTitle', 'Network interfaces'))}</h3>
-      ${restartBanner()}
-      <div class="vm-edit-cards" data-editor="network">
-        ${TFForm.render(NET_SCHEMA, cluster, { nic: items }, { hideHeader: true })}
+      <div class="sub-tabs sub-tabs-inline" role="tablist"
+           aria-label="${esc(tr('vm.edit.netTitle', 'Network interfaces'))}">
+        <button type="button" class="sub-tab active" data-net-tab="edit">
+          ${Icons.svg('network', { size: 14 })}
+          <span>${esc(tr('vm.edit.netTabEdit', 'Interfaces'))}</span></button>
+        <button type="button" class="sub-tab tip" data-net-tab="path"
+                data-tip-i18n="vm.edit.netTabPathTip">
+          ${Icons.svg('node', { size: 14 })}
+          <span>${esc(tr('vm.edit.netTabPath', 'Connection path'))}</span></button>
       </div>
-      <details class="vm-edit-adv">
-        <summary>${esc(tr('vm.edit.advanced', 'Advanced (raw JSON)'))}</summary>
-        <textarea class="yaml-editor" data-yaml="network" spellcheck="false">${esc(toYaml(raw))}</textarea>
-      </details>
-      ${applyBar('network')}`;
+      <div data-net-pane="edit">
+        ${restartBanner()}
+        <div class="vm-edit-cards" data-editor="network">
+          ${TFForm.render(NET_SCHEMA, cluster, { nic: items }, { hideHeader: true })}
+        </div>
+        <details class="vm-edit-adv">
+          <summary>${esc(tr('vm.edit.advanced', 'Advanced (raw JSON)'))}</summary>
+          <textarea class="yaml-editor" data-yaml="network" spellcheck="false">${esc(toYaml(raw))}</textarea>
+        </details>
+        ${applyBar('network')}
+      </div>
+      <div data-net-pane="path" hidden>
+        <p class="hint" data-net-path-body>${esc(tr('common.loading', 'Loading...'))}</p>
+      </div>`;
   }
 
   const TAG_PREFIX = 'tag.harvesterhci.io/';
@@ -1776,6 +1939,26 @@ const VMEdit = (() => {
   function wireSection(sectionEl, sectionId, cluster, namespace, name, getVM,
                        opts = {}) {
     const createMode = !!opts.createMode;
+
+    // Bascule entre « Interfaces » (on édite) et « Chemin » (on vérifie).
+    // Le chemin n'est chargé qu'à la PREMIÈRE ouverture : il interroge le
+    // cluster, et le payer à chaque rendu de la section serait gratuit.
+    if (sectionId === 'network' && !createMode) {
+      const tabs = sectionEl.querySelectorAll('[data-net-tab]');
+      let pathLoaded = false;
+      tabs.forEach(btn => btn.addEventListener('click', () => {
+        const want = btn.dataset.netTab;
+        tabs.forEach(b => b.classList.toggle('active', b === btn));
+        sectionEl.querySelectorAll('[data-net-pane]').forEach(pane => {
+          pane.hidden = pane.dataset.netPane !== want;
+        });
+        if (want === 'path' && !pathLoaded) {
+          pathLoaded = true;
+          loadNetPath(sectionEl, cluster, namespace, name);
+        }
+      }));
+    }
+
     if (sectionId === 'cloudinit') {
       if (!createMode) {
         loadCloudInit(sectionEl, cluster, namespace, name);

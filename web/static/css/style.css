@@ -4185,3 +4185,38 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
 .fabric-notice.warn { border-color: var(--warn); color: var(--text); }
 .fabric-notice.ok { border-color: var(--accent); }
 .fabric-notice span { flex: 1 1 320px; }
+
+/* v1.36.0 : chemin de connexion d'une VM. La chaîne se lit de gauche à
+   droite, de la VM jusqu'au cuivre. Un maillon mort ou non rapporté doit
+   sauter aux yeux : c'est ce qu'on vient vérifier. */
+.netpath-row { margin: 0 0 18px; }
+.netpath-chain {
+  display: flex; align-items: stretch; gap: 0; flex-wrap: wrap;
+  overflow-x: auto; padding: 4px 0;
+}
+.netpath-box {
+  min-width: 150px; border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 9px; background: var(--card-bg, transparent); font-size: 11px;
+}
+.netpath-box header {
+  display: flex; align-items: center; gap: 5px;
+  font-weight: 600; margin-bottom: 4px; white-space: nowrap;
+}
+.netpath-kv div { display: flex; justify-content: space-between; gap: 10px; }
+.netpath-kv span { color: var(--text-dim); }
+.netpath-box.down { border-color: var(--danger, var(--warn)); }
+.netpath-box.unknown { border-style: dashed; border-color: var(--warn); }
+.netpath-arrow {
+  align-self: center; width: 22px; height: 1px; background: var(--border);
+  position: relative; flex: 0 0 22px;
+}
+.netpath-arrow::after {
+  content: ''; position: absolute; right: 0; top: -3px;
+  border: 3px solid transparent; border-left-color: var(--border);
+}
+.netpath-tools {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 11px;
+}
+.netpath-out { color: var(--text-dim); font-family: var(--mono, monospace); }
+.netpath-warn { color: var(--warn); }

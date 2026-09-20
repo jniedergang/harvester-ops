@@ -2574,7 +2574,16 @@ def api_network_fabric_linkmonitor(cluster):
 # l'exploitant ouvre une carte, pour ne pas payer un SSH à chaque rendu.
 _FABRIC_DETAIL_CMD = (
     "ip -d -j link show 2>/dev/null; echo '---'; "
-    "ip -j -s link show 2>/dev/null"
+    "ip -j -s link show 2>/dev/null; echo '---'; "
+    # Débit négocié, duplex et battements de porteuse : le noyau les expose
+    # dans /sys et l'API Kubernetes n'en sait rien. `carrier_changes` est le
+    # plus parlant des trois pour un exploitant : un lien qui bat est un
+    # lien qui va tomber.
+    "for d in /sys/class/net/*/; do n=$(basename $d); "
+    "printf '%s\\t%s\\t%s\\t%s\\t%s\\n' \"$n\" "
+    "\"$(cat $d/speed 2>/dev/null)\" \"$(cat $d/duplex 2>/dev/null)\" "
+    "\"$(cat $d/carrier 2>/dev/null)\" \"$(cat $d/carrier_changes 2>/dev/null)\"; "
+    "done"
 )
 
 
@@ -2621,14 +2630,15 @@ def api_network_fabric_node_detail(cluster, node):
     if proc.returncode != 0:
         return jsonify({"error": "ssh failed",
                         "detail": f"exit code {proc.returncode}"}), 502
-    links, stats = _parse_fabric_detail(proc.stdout)
+    links, stats, phys = _parse_fabric_detail(proc.stdout)
     return jsonify({"cluster": cluster, "node": node,
-                    "links": links, "stats": stats})
+                    "links": links, "stats": stats, "phys": phys})
 
 
 def _parse_fabric_detail(text):
-    """(liens détaillés, compteurs) depuis la sortie de `ip -d -j` puis
-    `ip -j -s`. Les deux listes sont séparées par une ligne `---`."""
+    """(liens, compteurs, attributs physiques) depuis trois blocs séparés
+    par `---` : `ip -d -j link`, `ip -j -s link`, puis un relevé de
+    /sys/class/net (débit, duplex, porteuse)."""
     parts = (text or "").split("\n---\n")
     def _load(chunk):
         try:
@@ -2652,6 +2662,23 @@ def _parse_fabric_detail(text):
             "bond_miimon": data.get("miimon"),
             "flags": l.get("flags") or [],
         })
+    phys = {}
+    for line in (parts[2] if len(parts) > 2 else "").splitlines():
+        f = line.split("\t")
+        if len(f) < 5 or not f[0]:
+            continue
+        def _num(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        # Une carte sans porteuse rapporte -1 en débit : le rendre tel quel
+        # ferait afficher « -1 Mb/s » au lieu de « pas de lien ».
+        speed = _num(f[1])
+        phys[f[0]] = {"speed_mbps": speed if (speed or 0) > 0 else None,
+                      "duplex": f[2] or None,
+                      "carrier": _num(f[3]),
+                      "carrier_changes": _num(f[4])}
     stats = {}
     for l in counters:
         s = l.get("stats64") or {}
@@ -2662,7 +2689,312 @@ def _parse_fabric_detail(text):
             "tx_bytes": tx.get("bytes"), "tx_errors": tx.get("errors"),
             "tx_dropped": tx.get("dropped"),
         }
-    return links, stats
+    return links, stats, phys
+
+
+# =============================================================================
+# Chaîne de connexion d'une VM (v1.36.0)
+#
+# « Cette VM est-elle branchée sur le bon réseau, par les bonnes cartes ? »
+# La réponse tient en une chaîne, et le maillon qui la rend possible est
+# `podInterfaceName` dans le statut du VMI : c'est le nom du port CÔTÉ HÔTE.
+# Sans lui on saute du réseau logique à la carte physique sans pouvoir le
+# prouver ; avec lui la chaîne se suit lien par lien :
+#
+#   VM -> vNIC -> NAD -> port hôte -> bridge -> bond -> carte physique
+#
+# Ce qui vient du VMI est l'état RÉEL (IP, état du lien, nœud) ; ce qui
+# vient de la VM est le DÉCLARÉ. Les deux sont rendus séparément, parce
+# qu'un écart entre les deux est précisément ce que l'exploitant cherche.
+# =============================================================================
+
+
+def _vm_network_path(cluster, kc, namespace, name):
+    vm = _kubectl_json(kc, "get", "vm", name, "-n", namespace,
+                       timeout=20, cluster=cluster)
+    if vm is None:
+        return None
+    vmi = _kubectl_json(kc, "get", "vmi", name, "-n", namespace,
+                        timeout=20, cluster=cluster) or {}
+    fabric = _build_fabric(cluster, kc) or {}
+
+    tmpl = (((vm.get("spec") or {}).get("template") or {}).get("spec") or {})
+    declared_ifaces = ((tmpl.get("domain") or {}).get("devices") or {}).get("interfaces") or []
+    declared_nets = {n.get("name"): n for n in (tmpl.get("networks") or [])}
+    vmi_status = vmi.get("status") or {}
+    live = {i.get("name"): i for i in (vmi_status.get("interfaces") or [])}
+    node = vmi_status.get("nodeName")
+    # VM arrêtée : pas de VMI, donc pas de nœud, donc plus aucun maillon ne
+    # se résout et la chaîne affichait « non rapporté » comme si le cluster
+    # était cassé. Or le chemin DÉCLARÉ (NAD, bridge, bond, carte) ne dépend
+    # pas de l'exécution : on le montre, en disant que c'est le déclaré.
+    fabric_nodes = [n.get("name") for n in fabric.get("nodes") or []]
+    chain_is_live = bool(node)
+    if not node and len(fabric_nodes) == 1:
+        node = fabric_nodes[0]
+
+    links = {(l["node"], l["name"]): l for l in fabric.get("links") or []}
+    nads = {f'{n["namespace"]}/{n["name"]}': n for n in fabric.get("networks") or []}
+
+    def chain_from(start):
+        """Remonter la chaîne des maîtres depuis un lien de l'hôte.
+
+        On part du BRIDGE nommé par le NAD, pas du `podInterfaceName` du
+        VMI : ce dernier désigne l'interface DANS l'espace de noms du pod
+        et n'existe pas sur l'hôte. Pire, deux VMs différentes portent le
+        même nom là-dedans (`pod8fe0d3f1ac5` dans les deux pods de harv1),
+        donc il ne discrimine rien. Le veth hôte exact se résout à la
+        demande, par la MAC, et c'est un aller-retour SSH.
+        """
+        # Sans nœud connu (VM arrêtée sur un cluster multi-nœuds), on ne
+        # sait pas où elle démarrera. Rendre une chaîne « non rapportée »
+        # ferait croire à un défaut de remontée au lieu d'une inconnue.
+        if not node:
+            return []
+        out, cur, guard = [], start, 0
+        while cur and guard < 10:
+            l = links.get((node, cur))
+            if not l:
+                # Le lien est nommé mais aucun moniteur ne le rapporte : on
+                # le DIT plutôt que d'arrêter la chaîne en silence. C'est le
+                # cas des bridges Open vSwitch, que Harvester ne publie pas.
+                out.append({"name": cur, "known": False})
+                break
+            out.append({"name": l["name"], "type": l["type"], "state": l["state"],
+                        "mac": l["mac"], "layer": l["layer"],
+                        "fabric": l["fabric"], "known": True})
+            # On DESCEND vers l'uplink : bridge -> bond -> carte physique.
+            # Remonter vers le maître partirait dans le vide, un bridge
+            # n'en ayant pas. Et on écarte les veth : ce sont les ports des
+            # AUTRES charges, pas le chemin vers le monde extérieur.
+            kids = [x for x in fabric.get("links") or []
+                    if x["node"] == node and x.get("master") == l["name"]
+                    and x["layer"] != 5]
+            kids.sort(key=lambda x: {"bond": 0, "device": 1}.get(x["type"], 2))
+            cur = kids[0]["name"] if kids else None
+            guard += 1
+        return out
+
+    nics = []
+    for iface in declared_ifaces:
+        nic_name = iface.get("name")
+        net = declared_nets.get(nic_name) or {}
+        nad_ref = ((net.get("multus") or {}).get("networkName")
+                   if net.get("multus") else None)
+        if nad_ref and "/" not in nad_ref:
+            nad_ref = f"{namespace}/{nad_ref}"
+        st = live.get(nic_name) or {}
+        host_port = st.get("podInterfaceName")
+        nics.append({
+            "name": nic_name,
+            "declared": {
+                "mac": iface.get("macAddress"),
+                "model": iface.get("model"),
+                "binding": next((k for k in ("bridge", "masquerade", "sriov",
+                                             "macvtap", "slirp")
+                                 if k in iface), None),
+                "network": nad_ref,
+                "pod_network": bool(net.get("pod")),
+            },
+            "live": {
+                "guest_interface": st.get("interfaceName"),
+                "mac": st.get("mac"),
+                "ip": st.get("ipAddress"),
+                "ips": st.get("ipAddresses") or [],
+                "link_state": st.get("linkState"),
+                "host_port": host_port,
+                "info_source": st.get("infoSource"),
+            },
+            # Un écart entre déclaré et réel est ce que l'exploitant cherche.
+            "mac_matches": (not iface.get("macAddress") or not st.get("mac")
+                            or iface.get("macAddress") == st.get("mac")),
+            "network_detail": nads.get(nad_ref),
+            # La chaîne part du bridge que le NAD désigne : c'est le
+            # premier maillon qui existe VRAIMENT sur l'hôte.
+            "chain": chain_from((nads.get(nad_ref) or {}).get("bridge")),
+        })
+
+    return {"cluster": cluster, "namespace": namespace, "name": name,
+            "node": node, "running": bool(vmi_status),
+            # Le chemin vient-il de ce qui TOURNE, ou seulement de ce qui est
+            # déclaré ? L'exploitant doit savoir ce qu'il regarde.
+            "chain_is_live": chain_is_live,
+            "nodes": fabric_nodes,
+            "nics": nics,
+            "full_linkmonitor": fabric.get("full_linkmonitor", False)}
+
+
+# Identification côté switch (v1.36.0).
+#
+# LLDP est le mécanisme normalisé : un switch annonce périodiquement son nom
+# et le port sur lequel on est branché. C'est LA réponse à « par quelle prise
+# cette carte sort-elle ».
+#
+# Deux contraintes mesurées sur harv1 : `lldpd` est ABSENT (SLE Micro est
+# minimal et son rootfs est en lecture seule), mais `tcpdump` est présent, ce
+# qui permet une écoute ponctuelle. Les trames arrivent typiquement toutes
+# les 30 s, d'où une attente qui doit être explicite et bornée.
+#
+# ⚠️ NON VÉRIFIÉ EN RÉEL : aucun équipement du réseau d'essai n'émet de LLDP
+# (écoute de 40 s sur enp1s0, zéro trame ; le switch est un TP-Link « Easy
+# Smart » qui n'en fait pas). Le décodage ci-dessous suit la norme et la
+# sortie de tcpdump, mais il n'a pas pu être confronté à une vraie trame.
+_LLDP_FIELDS = (
+    ("system_name", "System Name TLV"),
+    ("port_id", "Port ID TLV"),
+    ("port_description", "Port Description TLV"),
+    ("system_description", "System Description TLV"),
+    ("chassis_id", "Chassis ID TLV"),
+)
+
+
+def _parse_lldp(text):
+    """Champs utiles depuis la sortie verbeuse de tcpdump.
+
+    Best-effort assumé : tcpdump imprime « System Name TLV (5), length 7:
+    switch1 ». On prend ce qui suit le dernier « : » de la ligne.
+    """
+    out = {}
+    for line in (text or "").splitlines():
+        for key, label in _LLDP_FIELDS:
+            if label in line and key not in out:
+                val = line.split(":", 1)[-1].strip() if ":" in line else ""
+                if val:
+                    out[key] = val[:120]
+    return out
+
+
+@app.route("/api/network-fabric/<cluster>/node/<node>/lldp")
+@requires_auth
+@_rate_limit("4 per minute")
+def api_network_fabric_lldp(cluster, node):
+    """Écouter une trame LLDP sur une carte, pour savoir sur quel port de
+    quel switch elle est branchée."""
+    iface = request.args.get("iface", "")
+    if not _valid_k8s_name(iface.replace("_", "-")) or len(iface) > 32:
+        return jsonify({"error": "invalid interface"}), 400
+    try:
+        wait = min(max(int(request.args.get("wait", 35)), 5), 60)
+    except ValueError:
+        wait = 35
+    ssh = _fabric_ssh_base(cluster, node)
+    if isinstance(ssh, tuple):
+        return ssh
+    cmd = ssh + [f"sudo timeout {wait} tcpdump -i {shlex.quote(iface)} "
+                 f"-s 1500 -c 1 -nn -v 'ether proto 0x88cc' 2>&1"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=wait + 20)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return jsonify({"error": "lldp probe failed",
+                        "detail": _safe_proc_error(e)}), 502
+    text = proc.stdout or ""
+    fields = _parse_lldp(text)
+    return jsonify({
+        "cluster": cluster, "node": node, "interface": iface,
+        "waited_s": wait,
+        "found": bool(fields),
+        "fields": fields,
+        # Sans trame, dire POURQUOI : beaucoup de switchs non administrables
+        # n'émettent tout simplement pas de LLDP, et l'exploitant doit le
+        # savoir plutôt que de croire à une panne.
+        "hint": None if fields else
+                "no LLDP frame in the listening window; many unmanaged or "
+                "'easy smart' switches never emit any",
+        "raw": text[-1200:] if not fields else "",
+    })
+
+
+def _fabric_ssh_base(cluster, node):
+    """Préfixe de commande SSH vers un nœud déclaré, ou une réponse d'erreur."""
+    cfg = load_config()
+    cluster_cfg = next((c for c in cfg.get("clusters", [])
+                        if c["name"] == cluster), None)
+    if not cluster_cfg:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    target = next((n for n in cluster_cfg.get("nodes", [])
+                   if n.get("hostname") == node or n.get("ip") == node), None)
+    if not target:
+        kc_node = _kubectl_for_cluster(cluster)
+        info = _kubectl_json(kc_node, "get", "node", node, timeout=20,
+                             cluster=cluster) if kc_node else None
+        addrs = {a.get("type"): a.get("address")
+                 for a in ((info or {}).get("status", {}).get("addresses") or [])}
+        ip = addrs.get("InternalIP")
+        if ip:
+            target = next((n for n in cluster_cfg.get("nodes", [])
+                           if n.get("ip") == ip), None) or {"ip": ip}
+    if not target:
+        return jsonify({"error": "unknown node", "node": node}), 404
+    ssh = cluster_cfg.get("ssh") or {}
+    base = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-p", str(ssh.get("port", 22))]
+    if ssh.get("key"):
+        base += ["-i", str(ssh["key"])]
+    return base + [f"{ssh.get('user', 'rancher')}@{target.get('ip')}"]
+
+
+# Quel port de l'hôte porte VRAIMENT cette VM.
+#
+# `podInterfaceName` ne sert à rien pour ça : il nomme une interface DANS
+# l'espace de noms du pod, et sur harv1 les deux VMs qui tournent portent
+# exactement le même nom (`pod8fe0d3f1ac5`) dans leurs pods respectifs. Seule
+# la MAC discrimine. On entre donc dans chaque espace de noms rattaché au
+# bridge et on cherche celle de la VM. C'est un aller-retour SSH : à la
+# demande, jamais à chaque rendu.
+_VETH_RESOLVE = (
+    "for v in $(ip -o link show master {bridge} 2>/dev/null "
+    "| awk -F'[ :@]+' '$2 ~ /^veth/ {{print $2}}'); do "
+    "ns=$(ip -o link show $v 2>/dev/null | awk '{{print $NF}}'); "
+    "case \"$ns\" in cni-*) ;; *) continue ;; esac; "
+    "if sudo ip netns exec $ns ip -o link show 2>/dev/null "
+    "| grep -qi {mac}; then echo \"$v\"; fi; done"
+)
+
+
+@app.route("/api/vm-network-path/<cluster>/<namespace>/<name>/hostport")
+@requires_auth
+def api_vm_host_port(cluster, namespace, name):
+    """Résoudre le port de l'hôte qui porte cette VM, par sa MAC."""
+    mac = request.args.get("mac", "")
+    bridge = request.args.get("bridge", "")
+    node = request.args.get("node", "")
+    if not re.fullmatch(r"[0-9a-fA-F:]{17}", mac or ""):
+        return jsonify({"error": "invalid mac"}), 400
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,32}", bridge or ""):
+        return jsonify({"error": "invalid bridge"}), 400
+    ssh = _fabric_ssh_base(cluster, node)
+    if isinstance(ssh, tuple):
+        return ssh
+    cmd = ssh + [_VETH_RESOLVE.format(bridge=shlex.quote(bridge),
+                                      mac=shlex.quote(mac))]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=40)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return jsonify({"error": "resolve failed",
+                        "detail": _safe_proc_error(e)}), 502
+    ports = [l.strip() for l in (proc.stdout or "").splitlines() if l.strip()]
+    return jsonify({"cluster": cluster, "vm": f"{namespace}/{name}",
+                    "mac": mac, "bridge": bridge,
+                    "host_port": ports[0] if ports else None,
+                    "candidates": ports})
+
+
+@app.route("/api/vm-network-path/<cluster>/<namespace>/<name>")
+@requires_auth
+def api_vm_network_path(cluster, namespace, name):
+    """De la VM jusqu'à la carte physique, maillon par maillon."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    data = _vm_network_path(cluster, kc, namespace, name)
+    if data is None:
+        return jsonify({"error": "vm not found",
+                        "vm": f"{namespace}/{name}"}), 404
+    return jsonify(data)
 
 
 @app.route("/api/network-fabric/<cluster>")

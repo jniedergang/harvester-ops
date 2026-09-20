@@ -4,6 +4,68 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.36.0] - 2026-09-21 - Is this VM on the right network, through the right card?
+
+That question has no answer in any form. It is a chain, from the VM down to
+the copper, and the VM editor now draws it: a Connection path tab beside the
+interface editor, in the Network section.
+
+    VM -> vNIC -> attachable network -> bridge -> bond -> physical card
+
+Each link carries what is known of it, and what is DECLARED is kept apart
+from what is RUNNING, because a gap between the two is exactly what the
+operator is looking for.
+
+### Added
+- **A Connection path tab** in the VM editor's Network section. Read from
+  left to right, with the address, the guest interface name and the link
+  state on the vNIC, then the type and state of every hop down to the card.
+  A dead link or an unreported hop stands out.
+- **"Which host port?"**, which resolves the exact veth carrying this VM by
+  matching its MAC inside the pod network namespaces on the node. It is an
+  SSH round trip, so it runs only when asked.
+- **"Identify the switch (LLDP)"**, which listens briefly on the physical
+  card for a switch advertisement and reports the system name, port id and
+  port description.
+- **`GET /api/vm-network-path/<cluster>/<ns>/<name>`**, plus `/hostport`
+  and the node LLDP probe.
+- The node detail now also reports **negotiated speed, duplex and carrier
+  changes**, read from /sys. The Kubernetes API knows none of them, and a
+  link that flaps is a link about to go down.
+
+### Internal
+- **`podInterfaceName` from the VMI is not a host port.** It names an
+  interface inside the pod's network namespace, and on the test cluster the
+  two running VMs carried the SAME name there, so it discriminates nothing.
+  The chain starts from the bridge the attachable network names.
+- **From the VM you go DOWN towards the uplink**, not up towards masters: a
+  bridge has none, so walking up stopped immediately.
+- **Workload ports are kept off the path.** A veth hanging from the same
+  bridge is another VM's port; following it would lead to the neighbour
+  instead of the outside world.
+- **A stopped VM still has a declared path.** Without a VMI there is no
+  node, every hop became "not reported" as though the cluster were broken.
+  The declared path is shown instead, labelled as such. On a multi-node
+  cluster nothing says where it will start, so no path is guessed.
+
+### Known limitation
+- **The LLDP probe is NOT verified against a real frame.** Nothing on the
+  test network emits LLDP (40 seconds of listening, zero frames; the switch
+  there is an unmanaged model that never does). The decoding follows the
+  standard and tcpdump's documented output, but it has not been confronted
+  with a live advertisement. It is written in the code so nobody has to
+  rediscover it.
+
+### Tests
+- `tests/api/test_vm_network_path.py`, 18 tests: the chain walking down,
+  workload ports kept out, unreported hops flagged, the stopped-VM
+  fallback, a drifted MAC reported, and the shell arguments refused when
+  malformed.
+- `tests/e2e/test_vm_network_path_view.py`, 6 tests in a real browser.
+- Each was checked against a deliberately broken implementation. One
+  sabotage showed a test passing for the wrong reason (a sort was saving
+  it, not the filter it claimed to check), and it was tightened.
+
 ## [1.35.0] - 2026-09-21 - The network seen from the floor up
 
 The existing Network view looks at the network from above: which VMs sit on

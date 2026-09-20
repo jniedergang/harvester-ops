@@ -76,6 +76,19 @@ Manage KubeVirt virtual machines without leaving the console.
   disk the storage class is shown but locked: it is the image's own class
   that carries the backing image, and picking another would give an empty
   disk. Blank disks let you choose it freely.
+- **Is this VM on the right network, through the right card?** The VM
+  editor's Network section has a Connection path tab beside the interface
+  editor. It draws the chain from the VM down to the copper: vNIC, the
+  attachable network, the bridge, the bond, the physical card, each hop
+  carrying what is known of it, with what is declared kept apart from what
+  is running because a gap between the two is what you are looking for. Two
+  probes run only when asked, since each is an SSH round trip: one resolves
+  the exact host port carrying this VM by matching its MAC inside the pod
+  network namespaces, the other listens briefly on the physical card for an
+  LLDP advertisement and reports which switch and which port answered. A
+  stopped VM shows its declared path, labelled as such.
+  The LLDP probe is not verified against a real frame: nothing on the test
+  network emits any.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
 - **VNC console** — full graphical console in the browser (noVNC over a
