@@ -1988,6 +1988,27 @@ const App = (() => {
             <p class="hint">${i18n.t('topology.detailEmpty')}</p>
           </aside>
         </div>`;
+      // La fabrique s'arrête aux bridges Open vSwitch, que Harvester ne
+      // publie pas. On PROPOSE de poser le moniteur qui les révèle, sans
+      // jamais l'imposer : c'est une écriture sur le cluster de l'exploitant.
+      if (mode === 'fabric' && !host.querySelector('.fabric-notice')) {
+        const notice = document.createElement('div');
+        notice.className = 'fabric-notice';
+        notice.hidden = true;
+        host.insertBefore(notice, host.firstElementChild.nextElementSibling);
+        notice.addEventListener('click', async (e) => {
+          const btn = e.target.closest('[data-fabric-monitor]');
+          if (!btn) return;
+          const remove = btn.dataset.fabricMonitor === 'remove';
+          btn.disabled = true;
+          try {
+            await api(`/api/network-fabric/${encodeURIComponent(currentCluster)}/linkmonitor`,
+                      { method: remove ? 'DELETE' : 'POST' });
+            // Le contrôleur met quelques secondes à publier les liens.
+            setTimeout(() => window.Topology.refresh(), 2500);
+          } catch { btn.disabled = false; }
+        });
+      }
       host.querySelector('.topology-refresh').addEventListener('click', () => window.Topology.refresh());
       host.querySelector('.topology-unlock-input').addEventListener('change', (e) => {
         window.Topology.setDestructiveUnlocked(e.target.checked);

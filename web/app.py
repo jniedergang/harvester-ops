@@ -2252,6 +2252,434 @@ def _build_topology(cluster, kc):
     }
 
 
+# =============================================================================
+# Fabrique réseau de l'hôte (v1.35.0)
+#
+# La vue « network » existante regarde le réseau par le haut : quelles VMs
+# sont sur quel réseau. Celle-ci le regarde par le BAS, côté exploitant :
+# quelle carte physique porte quoi, et par quelle pile.
+#
+# Le modèle est un EMPILEMENT, établi en lisant harv1 plutôt qu'en le
+# supposant :
+#
+#   5  VMs
+#   4  réseaux attachables (NetworkAttachmentDefinition)
+#   3  abstraction : ClusterNetwork  |  ProviderNetwork + VLAN + Subnet/VPC
+#   2  switch virtuel : bridge Linux |  Open vSwitch (ovs-system, br-int, ...)
+#   1  bond (agrégation d'uplinks)
+#   0  interfaces physiques
+#
+# Deux pièges que ce modèle évite :
+#   * la couche BOND n'est pas cosmétique, c'est là que vit le VlanConfig
+#     (mode d'agrégation, MTU), donc la redondance d'uplink ;
+#   * DEUX fabriques coexistent au-dessus des cartes et ne se confondent
+#     pas. Sur harv1 elles n'utilisent même pas la même carte : `enp1s0`
+#     pour le bridge Linux, `eno2` pour Open vSwitch.
+#
+# Tout le déclaratif tient en UN appel kubectl groupé (mesuré : 330 ms pour
+# huit types), conformément à l'économie de la v1.33.0. Le détail fin d'une
+# carte (pilote, débit, compteurs) n'est pas dans l'API : il se demande au
+# nœud, à la demande, quand l'exploitant ouvre une carte.
+# =============================================================================
+FABRIC_KINDS = [
+    "nodes",
+    "linkmonitors.network.harvesterhci.io",
+    "clusternetworks.network.harvesterhci.io",
+    "vlanconfigs.network.harvesterhci.io",
+    "network-attachment-definitions.k8s.cni.cncf.io",
+    "provider-networks.kubeovn.io",
+    "subnets.kubeovn.io",
+    "vpcs.kubeovn.io",
+]
+
+# Un maître dont le nom commence par là relève d'Open vSwitch, pas d'un
+# bridge Linux : c'est ce qui sépare les deux fabriques.
+_OVS_PREFIXES = ("ovs-system", "br-int", "br-external", "ovn", "mirror")
+
+
+def _fabric_is_ovs(name):
+    return any((name or "").startswith(p) for p in _OVS_PREFIXES)
+
+
+def _fabric_link_layer(link):
+    """Couche d'un lien rapporté par LinkMonitor.
+
+    `veth` va en couche 5 : ce sont les ports des charges (pods, VMs), pas
+    des switchs. Les confondre noyait la couche des switchs sous 83 paires
+    sur un seul nœud, et le peu qu'on voulait montrer disparaissait.
+    """
+    t = link.get("type")
+    if t == "device":
+        return 0
+    if t == "bond":
+        return 1
+    if t == "veth":
+        return 5
+    return 2            # bridge, openvswitch, vxlan, et tout le reste
+
+
+def _build_fabric(cluster, kc):
+    """Empilement réseau de l'hôte, en un seul appel groupé."""
+    raw = _kubectl_json(kc, "get", "-A", ",".join(FABRIC_KINDS),
+                        timeout=40, cluster=cluster)
+    if raw is None:
+        return None
+    by_kind = {}
+    for item in raw.get("items", []):
+        by_kind.setdefault(item.get("kind"), []).append(item)
+
+    out = {"cluster": cluster, "nodes": [], "links": [], "cluster_networks": [],
+           "vlan_configs": [], "networks": [], "kubeovn":
+           {"provider_networks": [], "vpcs": [], "subnets": []},
+           # L'interface propose de poser le moniteur qui complète la
+           # fabrique ; elle doit donc savoir s'il est déjà là.
+           "full_linkmonitor": any(
+               lm.get("metadata", {}).get("name") == FABRIC_LINKMONITOR
+               for lm in by_kind.get("LinkMonitor", []))}
+
+    for n in by_kind.get("Node", []):
+        meta = n.get("metadata", {})
+        labels = meta.get("labels") or {}
+        ann = meta.get("annotations") or {}
+        # Les rattachements kube-ovn d'une carte sont portés par des labels
+        # `<provider>.provider-network.kubernetes.io/interface`.
+        bindings = {}
+        for k, v in labels.items():
+            if ".provider-network.kubernetes.io/" in k:
+                prov, field = k.split(".provider-network.kubernetes.io/", 1)
+                bindings.setdefault(prov, {})[field] = v
+        addresses = {a.get("type"): a.get("address")
+                     for a in (n.get("status", {}).get("addresses") or [])}
+        out["nodes"].append({
+            "name": meta.get("name"),
+            # Le nom Kubernetes (`harv1.home.lo`) n'est PAS le nom déclaré
+            # dans la config (`harv1-node1`) : sans cette adresse, l'écran
+            # ne saurait pas à qui demander le détail.
+            "address": addresses.get("InternalIP") or addresses.get("Hostname"),
+            "mgmt": labels.get("network.harvesterhci.io/mgmt") == "true",
+            "ovn_role": labels.get("kube-ovn/role"),
+            "ovn_chassis": ann.get("ovn.kubernetes.io/chassis"),
+            "ovn_ip": ann.get("ovn.kubernetes.io/ip_address"),
+            "ovn_switch": ann.get("ovn.kubernetes.io/logical_switch"),
+            "provider_bindings": bindings,
+        })
+
+    # Les liens sont indexés par (nœud, index) : c'est `masterIndex` qui
+    # reconstruit la chaîne carte -> bond -> switch.
+    for lm in by_kind.get("LinkMonitor", []):
+        status = lm.get("status") or {}
+        for node, links in (status.get("linkStatus") or {}).items():
+            for l in links or []:
+                out["links"].append({
+                    "node": node,
+                    "name": l.get("name"),
+                    "type": l.get("type"),
+                    "state": l.get("state"),
+                    "mac": l.get("mac"),
+                    "index": l.get("index"),
+                    "master_index": l.get("masterIndex"),
+                    "promiscuous": l.get("promiscuous"),
+                    "layer": _fabric_link_layer(l),
+                    "fabric": "ovn" if _fabric_is_ovs(l.get("name")) else "classic",
+                    "monitor": lm.get("metadata", {}).get("name"),
+                })
+
+    # Un même lien est rapporté par CHAQUE moniteur dont la règle le
+    # capte : poser un moniteur permissif faisait sortir `enp1s0`,
+    # `mgmt-bo` et `mgmt-br` en double. La clé de vérité est (nœud, index).
+    seen, unique = set(), []
+    for l in out["links"]:
+        key = (l["node"], l.get("index"))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(l)
+    out["links"] = unique
+
+    # Résoudre le maître de chaque lien par son index. Ce qui reste non
+    # résolu est DIT, pas inventé : sans moniteur permissif, les bridges
+    # Open vSwitch de kube-ovn ne sont rapportés par aucun moniteur et la
+    # chaîne s'arrête là.
+    by_index = {(l["node"], l["index"]): l["name"] for l in out["links"]
+                if l.get("index") is not None}
+    by_name = {(l["node"], l["name"]): l for l in out["links"]}
+    for l in out["links"]:
+        mi = l.get("master_index")
+        l["master"] = by_index.get((l["node"], mi)) if mi is not None else None
+        l["master_unresolved"] = mi is not None and l["master"] is None
+
+    # La fabrique se lit sur la CHAÎNE des maîtres, pas sur le nom du lien
+    # seul : une veth nommée `5a9ba3611271_h` ne dit rien d'elle-même, mais
+    # elle pend d'`ovs-system`, donc elle est du côté kube-ovn.
+    def _fabric_of(link, depth=0):
+        if _fabric_is_ovs(link.get("name")):
+            return "ovn"
+        parent_name = link.get("master")
+        if not parent_name or depth > 8:
+            return "classic"
+        parent = by_name.get((link["node"], parent_name))
+        return _fabric_of(parent, depth + 1) if parent else "classic"
+
+    for l in out["links"]:
+        l["fabric"] = _fabric_of(l)
+
+    for cn in by_kind.get("ClusterNetwork", []):
+        out["cluster_networks"].append({"name": cn["metadata"]["name"], "layer": 3})
+
+    for vc in by_kind.get("VlanConfig", []):
+        spec = vc.get("spec") or {}
+        up = spec.get("uplink") or {}
+        out["vlan_configs"].append({
+            "name": vc["metadata"]["name"],
+            "cluster_network": spec.get("clusterNetwork"),
+            "nics": up.get("nics") or [],
+            "bond_mode": (up.get("bondOptions") or {}).get("mode"),
+            "mtu": (up.get("linkAttributes") or {}).get("mtu"),
+            "node_selector": spec.get("nodeSelector") or {},
+            "matched_nodes": (vc.get("status") or {}).get("matchedNodes") or [],
+            "layer": 1,
+        })
+
+    for nad in by_kind.get("NetworkAttachmentDefinition", []):
+        meta = nad.get("metadata", {})
+        labels = meta.get("labels") or {}
+        try:
+            conf = json.loads((nad.get("spec") or {}).get("config") or "{}")
+        except (ValueError, TypeError):
+            conf = {}
+        out["networks"].append({
+            "namespace": meta.get("namespace"),
+            "name": meta.get("name"),
+            "cluster_network": labels.get("network.harvesterhci.io/clusternetwork"),
+            "kind": labels.get("network.harvesterhci.io/type"),
+            "ready": labels.get("network.harvesterhci.io/ready") == "true",
+            "cni": conf.get("type"),
+            "bridge": conf.get("bridge"),
+            "vlan": conf.get("vlan"),
+            "provider": conf.get("provider"),
+            "fabric": "ovn" if conf.get("type") == "kube-ovn" else "classic",
+            "layer": 4,
+        })
+
+    for pn in by_kind.get("ProviderNetwork", []):
+        conds = (pn.get("status") or {}).get("conditions") or []
+        out["kubeovn"]["provider_networks"].append({
+            "name": pn["metadata"]["name"],
+            "default_interface": (pn.get("spec") or {}).get("defaultInterface"),
+            "ready": any(c.get("type") == "Ready" and c.get("status") == "True"
+                         for c in conds),
+            "layer": 3,
+        })
+    for vpc in by_kind.get("Vpc", []):
+        out["kubeovn"]["vpcs"].append({"name": vpc["metadata"]["name"], "layer": 3})
+    for sn in by_kind.get("Subnet", []):
+        spec = sn.get("spec") or {}
+        st = sn.get("status") or {}
+        out["kubeovn"]["subnets"].append({
+            "name": sn["metadata"]["name"],
+            "vpc": spec.get("vpc"),
+            "cidr": spec.get("cidrBlock"),
+            "gateway": spec.get("gateway"),
+            "nat": bool(spec.get("natOutgoing")),
+            "provider": spec.get("provider"),
+            "vlan": spec.get("vlan"),
+            "available_ips": st.get("v4availableIPs"),
+            "layer": 3,
+        })
+    return out
+
+
+# Harvester ne publie PAS ses bridges Open vSwitch : ses deux moniteurs de
+# liens ne couvrent que `mgmt(-br|-bo)` et les cartes, donc la fabrique
+# kube-ovn s'arrête au premier maître non rapporté. `LinkMonitor` est
+# justement prévu pour ça, et son CRD dit qu'une règle VIDE veut dire
+# « tout ». On PROPOSE donc d'en poser un, sans jamais l'imposer : c'est une
+# écriture sur le cluster de l'exploitant, elle passe par une action tracée
+# et elle se retire d'un geste.
+FABRIC_LINKMONITOR = "harvester-ops-fabric"
+
+
+def _fabric_linkmonitor_manifest():
+    return json.dumps({
+        "apiVersion": "network.harvesterhci.io/v1beta1",
+        "kind": "LinkMonitor",
+        "metadata": {
+            "name": FABRIC_LINKMONITOR,
+            "labels": {"app.kubernetes.io/managed-by": "harvester-ops"},
+        },
+        # Règle vide : le CRD documente « empty value means matching all ».
+        "spec": {"targetLinkRule": {}},
+    })
+
+
+def _fabric_linkmonitor_apply(run, kc, cluster, remove):
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    step = "linkmonitor-remove" if remove else "linkmonitor-apply"
+    run.emit({"type": "step", "step_id": step, "status": "running",
+              "message": FABRIC_LINKMONITOR, "ts": time.time()})
+    try:
+        if remove:
+            proc = subprocess.run(
+                ["kubectl", "--kubeconfig", kc, "delete",
+                 "linkmonitors.network.harvesterhci.io", FABRIC_LINKMONITOR,
+                 "--ignore-not-found"],
+                capture_output=True, text=True, timeout=60)
+        else:
+            proc = subprocess.run(
+                ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
+                input=_fabric_linkmonitor_manifest(),
+                capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        run.status = "error"
+        run.exit_code = 1
+        run.emit({"type": "step", "step_id": step, "status": "error",
+                  "message": _safe_proc_error(e), "ts": time.time()})
+        run.ended_at = time.time(); run.close(); return
+
+    ok = proc.returncode == 0
+    if not ok:
+        _note_cluster_denial(proc.stderr)
+    run.status = "done" if ok else "error"
+    run.exit_code = proc.returncode
+    run.emit({"type": "step", "step_id": step,
+              "status": "done" if ok else "error",
+              "message": (proc.stdout or proc.stderr).strip()[:300],
+              "ts": time.time()})
+    run.ended_at = time.time()
+    run.close()
+
+
+@app.route("/api/network-fabric/<cluster>/linkmonitor", methods=["POST", "DELETE"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_network_fabric_linkmonitor(cluster):
+    """Poser ou retirer le moniteur de liens qui rend la fabrique complète."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    remove = request.method == "DELETE"
+    label = ("network:linkmonitor-remove" if remove
+             else "network:linkmonitor-apply")
+    run_id = track_action(label, cluster, _fabric_linkmonitor_apply,
+                          kc, cluster, remove)
+    return jsonify({"action_id": run_id, "name": FABRIC_LINKMONITOR,
+                    "removing": remove}), 202
+
+
+# Ce que l'API ne dira JAMAIS d'une carte : pilote, débit négocié, duplex,
+# compteurs d'erreurs. Cela se demande au nœud, et seulement quand
+# l'exploitant ouvre une carte, pour ne pas payer un SSH à chaque rendu.
+_FABRIC_DETAIL_CMD = (
+    "ip -d -j link show 2>/dev/null; echo '---'; "
+    "ip -j -s link show 2>/dev/null"
+)
+
+
+@app.route("/api/network-fabric/<cluster>/node/<node>")
+@requires_auth
+def api_network_fabric_node_detail(cluster, node):
+    """Détail fin des liens d'un nœud, pris sur le nœud lui-même."""
+    cfg = load_config()
+    cluster_cfg = next((c for c in cfg.get("clusters", [])
+                        if c["name"] == cluster), None)
+    if not cluster_cfg:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    target = next((n for n in cluster_cfg.get("nodes", [])
+                   if n.get("hostname") == node or n.get("ip") == node), None)
+    if not target:
+        # Repli : `node` est peut-être le nom Kubernetes, qui ne coïncide
+        # pas avec le nom déclaré. On demande son adresse au cluster.
+        kc_node = _kubectl_for_cluster(cluster)
+        info = _kubectl_json(kc_node, "get", "node", node, timeout=20,
+                             cluster=cluster) if kc_node else None
+        addrs = {a.get("type"): a.get("address")
+                 for a in ((info or {}).get("status", {}).get("addresses") or [])}
+        ip = addrs.get("InternalIP")
+        if ip:
+            target = next((n for n in cluster_cfg.get("nodes", [])
+                           if n.get("ip") == ip), None) or {"ip": ip}
+    if not target:
+        return jsonify({"error": "unknown node", "node": node,
+                        "hint": "the node must be declared in the cluster "
+                                "config to be reachable over SSH"}), 404
+    ssh = cluster_cfg.get("ssh") or {}
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+           "-o", "StrictHostKeyChecking=accept-new",
+           "-p", str(ssh.get("port", 22))]
+    if ssh.get("key"):
+        cmd += ["-i", str(ssh["key"])]
+    cmd += [f"{ssh.get('user', 'rancher')}@{target.get('ip')}",
+            _FABRIC_DETAIL_CMD]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=25)
+    except (subprocess.TimeoutExpired, OSError) as e:
+        return jsonify({"error": "ssh failed",
+                        "detail": _safe_proc_error(e)}), 502
+    if proc.returncode != 0:
+        return jsonify({"error": "ssh failed",
+                        "detail": f"exit code {proc.returncode}"}), 502
+    links, stats = _parse_fabric_detail(proc.stdout)
+    return jsonify({"cluster": cluster, "node": node,
+                    "links": links, "stats": stats})
+
+
+def _parse_fabric_detail(text):
+    """(liens détaillés, compteurs) depuis la sortie de `ip -d -j` puis
+    `ip -j -s`. Les deux listes sont séparées par une ligne `---`."""
+    parts = (text or "").split("\n---\n")
+    def _load(chunk):
+        try:
+            return json.loads(chunk.strip() or "[]")
+        except ValueError:
+            return []
+    detailed = _load(parts[0] if parts else "")
+    counters = _load(parts[1] if len(parts) > 1 else "")
+    links = []
+    for l in detailed:
+        info = l.get("linkinfo") or {}
+        data = info.get("info_data") or {}
+        links.append({
+            "name": l.get("ifname"),
+            "state": l.get("operstate"),
+            "mtu": l.get("mtu"),
+            "mac": l.get("address"),
+            "master": l.get("master"),
+            "kind": info.get("info_kind") or "device",
+            "bond_mode": data.get("mode"),
+            "bond_miimon": data.get("miimon"),
+            "flags": l.get("flags") or [],
+        })
+    stats = {}
+    for l in counters:
+        s = l.get("stats64") or {}
+        rx, tx = s.get("rx") or {}, s.get("tx") or {}
+        stats[l.get("ifname")] = {
+            "rx_bytes": rx.get("bytes"), "rx_errors": rx.get("errors"),
+            "rx_dropped": rx.get("dropped"),
+            "tx_bytes": tx.get("bytes"), "tx_errors": tx.get("errors"),
+            "tx_dropped": tx.get("dropped"),
+        }
+    return links, stats
+
+
+@app.route("/api/network-fabric/<cluster>")
+@requires_auth
+def api_network_fabric(cluster):
+    """L'empilement réseau vu du côté de l'hôte."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    data = _build_fabric(cluster, kc)
+    if data is None:
+        return jsonify({"error": "kubectl failed"}), 502
+    return jsonify(data)
+
+
 @app.route("/api/topology/<cluster>")
 @requires_auth
 def api_topology(cluster):

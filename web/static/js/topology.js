@@ -29,6 +29,13 @@ const Topology = (() => {
   let currentHost = null;          // <div.topology-host> of the active mode
   const REFRESH_INTERVAL = 8000;
 
+  // Ce module n'avait pas d'échappement à lui : `escapeHtml` est local à
+  // l'IIFE d'app.js et n'est pas visible ici. La règle du projet est
+  // d'échapper avant toute interpolation dans `innerHTML`.
+  const escapeHtml = (v) => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
   function canvasId(mode) { return 'topology-canvas-' + mode; }
   function detailId(mode) { return 'topology-detail-' + mode; }
   function metaId(mode)   { return 'topology-meta-'   + mode; }
@@ -606,6 +613,11 @@ const Topology = (() => {
       // 130×50 need) and they overlapped into an unreadable pile.
       return { name: 'preset', padding: 20 };
     }
+    if (mode === 'fabric') {
+      // Bandes empilées posées par applyFabricLayout() : même remède que
+      // les vues Network et Storage, cose entasserait les couches.
+      return { name: 'preset', padding: 20 };
+    }
     if (mode === 'storage') {
       // v1.8.6: preset — bandes par VM posées par applyStorageLayout()
       // (même remède que la vue Network en 1.8.4).
@@ -787,6 +799,214 @@ const Topology = (() => {
     cy.fit(undefined, 40);
   }
 
+  // Le bandeau qui propose (ou retire) le moniteur permissif. Il dit ce
+  // qui MANQUE plutôt que de laisser croire que la fabrique est complète.
+  function updateFabricNotice(data) {
+    const el = currentHost && currentHost.querySelector('.fabric-notice');
+    if (!el) return;
+    const tr = (k, f) => (window.i18n ? i18n.t(k) : f);
+    if (data.full_linkmonitor) {
+      el.hidden = false;
+      el.className = 'fabric-notice ok';
+      el.innerHTML = `<span>${escapeHtml(tr('fabric.noticePresent',
+        'Full link monitor in place: Open vSwitch bridges and workload ports are visible.'))}</span>`
+        + `<button type="button" class="btn btn-small" data-fabric-monitor="remove">`
+        + `${escapeHtml(tr('fabric.noticeRemove', 'Remove it'))}</button>`;
+    } else {
+      el.hidden = false;
+      el.className = 'fabric-notice warn';
+      el.innerHTML = `<span>${escapeHtml(tr('fabric.noticeMissing',
+        'Open vSwitch bridges and workload ports are missing: Harvester does not publish them. A link monitor would, and it only reads.'))}</span>`
+        + `<button type="button" class="btn btn-small" data-fabric-monitor="add">`
+        + `${escapeHtml(tr('fabric.noticeInstall', 'Install the link monitor'))}</button>`;
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Fabrique réseau de l'hôte (v1.35.0) : vue EMPILÉE
+  //
+  //   L5  ports de charges (repliés : 83 veth sur un seul nœud noieraient tout)
+  //   L4  réseaux attachables
+  //   L3  ClusterNetwork          |  ProviderNetwork / VPC / Subnet
+  //   L2  switch virtuel          |  Open vSwitch
+  //   L1  bond
+  //   L0  interfaces physiques
+  //
+  // Deux colonnes : la fabrique classique à gauche, kube-ovn à droite. Sur
+  // harv1 elles n'utilisent même pas la même carte, les fondre en une seule
+  // rangée effacerait précisément ce qu'on veut voir.
+  // -----------------------------------------------------------------------
+  const FABRIC_LAYERS = [0, 1, 2, 3, 4, 5];
+
+  function fabricNode(id, label, kind, opts) {
+    return { group: 'nodes', data: Object.assign({
+      id, label, kind,
+      fullName: opts.fullName || label,
+      searchText: (opts.fullName || label).toLowerCase(),
+      icon: nodeIcon(opts.icon || 'network'),
+      color: opts.color, border: opts.border,
+      shape: opts.shape || 'round-rectangle',
+      width: opts.width || 150, height: opts.height || 44,
+      layer: opts.layer, fabric: opts.fabric || 'classic',
+      raw: opts.raw || {},
+    }) };
+  }
+
+  // Un lien mort ou un rattachement non résolu doivent SAUTER aux yeux :
+  // c'est l'information que l'exploitant cherche en ouvrant cette vue.
+  function fabricLinkColors(l) {
+    if (l.state === 'down') return { color: '#4a1f1f', border: '#d86a6a' };
+    if (l.master_unresolved) return { color: '#4a3a1f', border: '#d8a84a' };
+    if (l.fabric === 'ovn')  return { color: '#1f3e5b', border: '#4aa8d8' };
+    return { color: '#1f4a33', border: '#4ad88a' };
+  }
+
+  function buildFabricElements(data) {
+    const els = [];
+    const links = data.links || [];
+    const idOf = (node, name) => 'fl-' + node + '-' + name;
+
+    links.filter(l => l.layer <= 2).forEach(l => {
+      const c = fabricLinkColors(l);
+      els.push(fabricNode(idOf(l.node, l.name), l.name,
+        l.layer === 0 ? 'fab-nic' : l.layer === 1 ? 'fab-bond' : 'fab-switch', {
+          icon: l.layer === 0 ? 'node' : 'switch',
+          color: c.color, border: c.border,
+          shape: l.layer === 0 ? 'cut-rectangle' : 'round-rectangle',
+          layer: l.layer, fabric: l.fabric,
+          fullName: l.name + ' (' + l.type + ', ' + l.state + ')',
+          raw: l,
+        }));
+      if (l.master) {
+        els.push({ group: 'edges', data: {
+          id: 'fe-' + l.node + '-' + l.name,
+          source: idOf(l.node, l.name), target: idOf(l.node, l.master),
+          edgeType: 'fabric' } });
+      }
+    });
+
+    // Les ports de charges sont REPLIÉS, un nœud par fabrique avec leur
+    // nombre. Les déplier ferait 83 boîtes sur un seul nœud.
+    const ports = links.filter(l => l.layer === 5);
+    ['classic', 'ovn'].forEach(fab => {
+      const mine = ports.filter(l => l.fabric === fab);
+      if (!mine.length) return;
+      els.push(fabricNode('fab-ports-' + fab,
+        mine.length + ' ' + (window.i18n ? i18n.t('fabric.ports')
+                                        : 'workload ports'),
+        'fab-ports', { icon: 'vm', layer: 5, fabric: fab, width: 170,
+          color: '#2a2f3a', border: '#8a93a6',
+          fullName: mine.map(l => l.name).slice(0, 40).join(', '),
+          raw: { count: mine.length, fabric: fab } }));
+    });
+
+    (data.cluster_networks || []).forEach(cn => {
+      els.push(fabricNode('fab-cn-' + cn.name, cn.name, 'fab-abstract',
+        { icon: 'network', layer: 3, fabric: 'classic', width: 160,
+          color: '#1f4a33', border: '#4ad88a', raw: cn }));
+    });
+    // Une VlanConfig rattache des cartes à un cluster network : c'est la
+    // seule source qui relie les deux, donc on la dessine comme un lien.
+    (data.vlan_configs || []).forEach(vc => {
+      (vc.nics || []).forEach(nic => {
+        (data.nodes || []).forEach(n => {
+          if (!links.some(l => l.node === n.name && l.name === nic)) return;
+          els.push({ group: 'edges', data: {
+            id: 'fe-vc-' + vc.name + '-' + n.name + '-' + nic,
+            source: 'fab-cn-' + vc.cluster_network,
+            target: idOf(n.name, nic),
+            label: vc.bond_mode || '', edgeType: 'fabric-declared' } });
+        });
+      });
+    });
+
+    const ovn = data.kubeovn || {};
+    (ovn.vpcs || []).forEach(v => {
+      els.push(fabricNode('fab-vpc-' + v.name, v.name, 'fab-abstract',
+        { icon: 'network', layer: 3, fabric: 'ovn', width: 150,
+          color: '#1f3e5b', border: '#4aa8d8', raw: v }));
+    });
+    (ovn.provider_networks || []).forEach(pn => {
+      els.push(fabricNode('fab-pn-' + pn.name, pn.name, 'fab-abstract',
+        { icon: 'network', layer: 3, fabric: 'ovn', width: 150,
+          color: pn.ready ? '#1f3e5b' : '#4a3a1f',
+          border: pn.ready ? '#4aa8d8' : '#d8a84a',
+          fullName: pn.name + ' -> ' + (pn.default_interface || '?'),
+          raw: pn }));
+      (data.nodes || []).forEach(n => {
+        if (!pn.default_interface) return;
+        if (!links.some(l => l.node === n.name && l.name === pn.default_interface)) return;
+        els.push({ group: 'edges', data: {
+          id: 'fe-pn-' + pn.name + '-' + n.name,
+          source: 'fab-pn-' + pn.name,
+          target: idOf(n.name, pn.default_interface),
+          edgeType: 'fabric-declared' } });
+      });
+    });
+    (ovn.subnets || []).forEach(sn => {
+      els.push(fabricNode('fab-sn-' + sn.name, sn.name, 'fab-abstract',
+        { icon: 'storage', layer: 3, fabric: 'ovn', width: 170,
+          color: '#1f3e5b', border: '#4aa8d8',
+          fullName: sn.name + ' ' + (sn.cidr || ''), raw: sn }));
+      if (sn.vpc) {
+        els.push({ group: 'edges', data: {
+          id: 'fe-sn-' + sn.name, source: 'fab-sn-' + sn.name,
+          target: 'fab-vpc-' + sn.vpc, edgeType: 'fabric-declared' } });
+      }
+    });
+
+    (data.networks || []).forEach(nw => {
+      const id = 'fab-nad-' + nw.namespace + '-' + nw.name;
+      els.push(fabricNode(id, nw.name, 'fab-network',
+        { icon: 'switch', layer: 4, fabric: nw.fabric, width: 170,
+          shape: 'cut-rectangle',
+          color: nw.fabric === 'ovn' ? '#1f3e5b' : '#1f4a33',
+          border: nw.ready ? (nw.fabric === 'ovn' ? '#4aa8d8' : '#4ad88a')
+                           : '#d8a84a',
+          fullName: nw.namespace + '/' + nw.name + ' (' + (nw.kind || '?') + ')',
+          raw: nw }));
+      if (nw.cluster_network && nw.fabric === 'classic') {
+        els.push({ group: 'edges', data: {
+          id: 'fe-nad-' + id, source: id,
+          target: 'fab-cn-' + nw.cluster_network, edgeType: 'fabric-declared' } });
+      }
+      const sub = (ovn.subnets || []).find(x => x.provider && x.provider === nw.provider);
+      if (sub) {
+        els.push({ group: 'edges', data: {
+          id: 'fe-nadsn-' + id, source: id,
+          target: 'fab-sn-' + sub.name, edgeType: 'fabric-declared' } });
+      }
+    });
+    return els;
+  }
+
+  // Empilement : couche 0 EN BAS. En Cytoscape l'axe y descend, donc la
+  // couche basse porte le plus grand y.
+  function applyFabricLayout(cy) {
+    const bandH = 110, colGap = 40, cellW = 200, leftPad = 60;
+    const maxLayer = Math.max(...FABRIC_LAYERS);
+    let widest = 1;
+    FABRIC_LAYERS.forEach(layer => {
+      ['classic', 'ovn'].forEach(fab => {
+        const n = cy.nodes().filter(x => x.data('layer') === layer
+                                      && x.data('fabric') === fab).length;
+        widest = Math.max(widest, n);
+      });
+    });
+    const colWidth = widest * cellW + colGap;
+    FABRIC_LAYERS.forEach(layer => {
+      const y = (maxLayer - layer) * bandH + 60;
+      ['classic', 'ovn'].forEach((fab, fi) => {
+        const nodes = cy.nodes()
+          .filter(x => x.data('layer') === layer && x.data('fabric') === fab)
+          .sort((a, b) => a.data('label').localeCompare(b.data('label')));
+        const baseX = leftPad + fi * colWidth;
+        nodes.forEach((n, i) => n.position({ x: baseX + i * cellW, y }));
+      });
+    });
+    cy.fit(undefined, 40);
+  }
+
   // -----------------------------------------------------------------------
   // Public render entry point
   // -----------------------------------------------------------------------
@@ -796,6 +1016,7 @@ const Topology = (() => {
     let elements;
     if (currentMode === 'cluster')      elements = buildClusterElements(data);
     else if (currentMode === 'network') elements = buildNetworkElements(data);
+    else if (currentMode === 'fabric')  elements = buildFabricElements(data);
     else                                elements = buildStorageElements(data);
     // Some cose layouts crash if the container has 0 width — happens
     // when a subtab is still `hidden` (display:none) at render time.
@@ -831,6 +1052,7 @@ const Topology = (() => {
     if (currentMode === 'cluster') applyClusterLayout(cy);
     if (currentMode === 'network') applyNetworkLayout(cy);
     if (currentMode === 'storage') applyStorageLayout(cy);
+    if (currentMode === 'fabric')  applyFabricLayout(cy);
     // Belt-and-braces: ungrabify any node that managed to slip through.
     cy.nodes().ungrabify();
     // Click → details
@@ -950,6 +1172,87 @@ const Topology = (() => {
     sidebar.querySelectorAll('[data-act]').forEach(btn => {
       btn.addEventListener('click', () => doAction(btn.dataset.act, d));
     });
+    const deep = sidebar.querySelector('[data-fabric-detail]');
+    if (deep) deep.addEventListener('click', () => loadFabricDeep(sidebar, deep));
+  }
+
+  // Détail d'un élément de la fabrique. Pour une carte physique, l'API ne
+  // sait pas tout (pilote, MTU réel, compteurs d'erreurs) : on va le
+  // chercher sur le nœud, mais SEULEMENT à l'ouverture, jamais à chaque
+  // rendu, sinon on paierait un SSH toutes les huit secondes.
+  async function loadFabricDeep(sidebar, btn) {
+    const node = btn.dataset.fabricDetail;
+    const link = btn.dataset.fabricLink;
+    const out = sidebar.querySelector('.fabric-deep');
+    if (!out || !node) return;
+    btn.disabled = true;
+    out.textContent = (window.i18n ? i18n.t('common.loading') : 'Loading...');
+    try {
+      const r = await fetch(`/api/network-fabric/${encodeURIComponent(lastCluster)}`
+                            + `/node/${encodeURIComponent(node)}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const data = await r.json();
+      const l = (data.links || []).find(x => x.name === link) || {};
+      const st = (data.stats || {})[link] || {};
+      const rows = [
+        ['MTU', l.mtu], ['kind', l.kind], ['bond', l.bond_mode],
+        ['miimon', l.bond_miimon],
+        ['rx', st.rx_bytes], ['rx err', st.rx_errors], ['rx drop', st.rx_dropped],
+        ['tx', st.tx_bytes], ['tx err', st.tx_errors], ['tx drop', st.tx_dropped],
+      ].filter(([, v]) => v !== undefined && v !== null && v !== '');
+      out.innerHTML = `<dl class="kv">` + rows.map(([k, v]) =>
+        `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('') + `</dl>`;
+    } catch (e) {
+      out.textContent = String(e.message || e);
+      btn.disabled = false;
+    }
+  }
+
+  function renderFabricDetail(d) {
+    const tr = (k, f) => (window.i18n ? i18n.t(k) : f);
+    const raw = d.raw || {};
+    const rows = [];
+    const add = (k, v) => { if (v !== undefined && v !== null && v !== '') rows.push([k, v]); };
+    if (d.kind === 'fab-ports') {
+      add(tr('fabric.d.count', 'Ports'), raw.count);
+      add(tr('fabric.d.fabric', 'Fabric'), raw.fabric);
+    } else if (d.kind === 'fab-network') {
+      add(tr('fabric.d.namespace', 'Namespace'), raw.namespace);
+      add(tr('fabric.d.type', 'Type'), raw.kind);
+      add('CNI', raw.cni);
+      add(tr('fabric.d.bridge', 'Bridge'), raw.bridge);
+      add('VLAN', raw.vlan);
+      add(tr('fabric.d.provider', 'Provider'), raw.provider);
+      add(tr('fabric.d.ready', 'Ready'), String(raw.ready));
+    } else if (d.kind === 'fab-abstract') {
+      add('CIDR', raw.cidr);
+      add(tr('fabric.d.gateway', 'Gateway'), raw.gateway);
+      add('VPC', raw.vpc);
+      add('NAT', raw.nat === undefined ? '' : String(raw.nat));
+      add(tr('fabric.d.provider', 'Provider'), raw.provider);
+      add(tr('fabric.d.freeIps', 'Free IPs'), raw.available_ips);
+      add(tr('fabric.d.uplink', 'Uplink'), raw.default_interface);
+    } else {
+      add(tr('fabric.d.type', 'Type'), raw.type);
+      add(tr('fabric.d.state', 'State'), raw.state);
+      add('MAC', raw.mac);
+      add(tr('fabric.d.master', 'Master'), raw.master
+        || (raw.master_unresolved
+            ? tr('fabric.d.masterUnknown', 'reported index ') + raw.master_index
+            : ''));
+      add(tr('fabric.d.fabric', 'Fabric'), raw.fabric);
+      add(tr('fabric.d.node', 'Node'), raw.node);
+    }
+    const kv = rows.map(([k, v]) =>
+      `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('');
+    const deep = (d.kind === 'fab-nic' || d.kind === 'fab-bond'
+                  || d.kind === 'fab-switch')
+      ? `<button type="button" class="btn btn-small" data-fabric-detail="${escapeHtml(raw.node || '')}"
+                 data-fabric-link="${escapeHtml(raw.name || '')}">`
+        + `${escapeHtml(tr('fabric.d.more', 'Detail from the node'))}</button>`
+      : '';
+    return `<h3>${Icons.svg('network', { size: 18 })} ${escapeHtml(d.label)}</h3>`
+      + `<dl class="kv">${kv}</dl>${deep}<div class="fabric-deep"></div>`;
   }
 
   function renderDetail(d) {
@@ -958,6 +1261,7 @@ const Topology = (() => {
     // back to a no-op translator so the panel still renders and the
     // user can read the raw key — better than throwing TypeError.
     const i = window.i18n || { t: (k) => k };
+    if (String(d.kind || '').startsWith('fab-')) return renderFabricDetail(d);
     if (d.kind === 'node') {
       const n = d.raw;
       return `
@@ -1179,6 +1483,7 @@ const Topology = (() => {
     let elements;
     if (currentMode === 'cluster')      elements = buildClusterElements(data);
     else if (currentMode === 'network') elements = buildNetworkElements(data);
+    else if (currentMode === 'fabric')  elements = buildFabricElements(data);
     else                                elements = buildStorageElements(data);
     const newById = new Map(elements.map(e => [e.data.id, e.data]));
     cy.batch(() => {
@@ -1201,6 +1506,7 @@ const Topology = (() => {
     let elements;
     if (mode === 'cluster')      elements = buildClusterElements(data);
     else if (mode === 'network') elements = buildNetworkElements(data);
+    else if (mode === 'fabric')  elements = buildFabricElements(data);
     else                         elements = buildStorageElements(data);
     const m = new Map();
     elements.forEach(e => m.set(e.data.id, e.data.parent || ''));
@@ -1231,7 +1537,10 @@ const Topology = (() => {
     const askedCluster = lastCluster;
     const askedMode = currentMode;
     try {
-      const r = await fetch(`/api/topology/${encodeURIComponent(askedCluster)}`);
+      const url = askedMode === 'fabric'
+        ? `/api/network-fabric/${encodeURIComponent(askedCluster)}`
+        : `/api/topology/${encodeURIComponent(askedCluster)}`;
+      const r = await fetch(url);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
       if (askedCluster !== lastCluster || askedMode !== currentMode) return;
@@ -1273,8 +1582,16 @@ const Topology = (() => {
         const cached = data.cached
           ? ` (cache ${Math.round(data.cache_age_s)}s)`
           : '';
-        meta.textContent =
-          `${data.nodes.length} nodes · ${data.vms.length} VMs · ${data.volumes.length} volumes${cached}`;
+        // La fabrique n'a ni VMs ni volumes : lui appliquer le résumé des
+        // autres vues jetait une exception, rattrapée en un bandeau d'erreur
+        // à côté de la barre d'outils. Chaque mode résume ce qu'il montre.
+      if (currentMode === 'fabric') updateFabricNotice(data);
+        meta.textContent = currentMode === 'fabric'
+          ? `${(data.nodes || []).length} nodes · `
+            + `${(data.links || []).length} links · `
+            + `${(data.networks || []).length} networks${cached}`
+          : `${data.nodes.length} nodes · ${data.vms.length} VMs · `
+            + `${data.volumes.length} volumes${cached}`;
       }
     } catch (e) {
       console.warn('topology refresh failed', e);

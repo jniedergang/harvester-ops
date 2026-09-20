@@ -143,6 +143,7 @@
           <button type="button" class="sub-tab" data-overview-tab="cluster"><span class="tab-icon" data-icon="node"></span> <span data-i18n="overview.tabCluster">Cluster</span></button>
           <button type="button" class="sub-tab" data-overview-tab="network"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabNetwork">Network</span></button>
           <button type="button" class="sub-tab" data-overview-tab="storage"><span class="tab-icon" data-icon="storage"></span> <span data-i18n="overview.tabStorage">Storage</span></button>
+          <button type="button" class="sub-tab tip" data-overview-tab="fabric" data-i18n-title="overview.tabFabricTip" title="Physical interfaces, virtual switches and the networks above them"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabFabric">Fabric</span></button>
         </div>
       </div>
 
@@ -175,6 +176,9 @@
       </div>
       <div class="overview-subtab" data-subtab="network" hidden>
         <div class="topology-host" data-topology-mode="network"></div>
+      </div>
+      <div class="overview-subtab" data-subtab="fabric" hidden>
+        <div class="topology-host" data-topology-mode="fabric"></div>
       </div>
       <div class="overview-subtab" data-subtab="storage" hidden>
         <div class="topology-host" data-topology-mode="storage"></div>

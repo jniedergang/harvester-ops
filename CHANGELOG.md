@@ -4,6 +4,67 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.35.0] - 2026-09-21 - The network seen from the floor up
+
+The existing Network view looks at the network from above: which VMs sit on
+which network. This one looks at it the way an operator does, from below:
+which physical card carries what, and through which stack.
+
+A Fabric sub-tab in Overview stacks the whole thing, bottom to top, in two
+columns because two fabrics coexist above the cards and do not mix.
+
+    5  workload ports (folded)
+    4  attachable networks
+    3  ClusterNetwork          |  ProviderNetwork / VPC / Subnet
+    2  virtual switch          |  Open vSwitch
+    1  bond
+    0  physical interfaces
+
+### Added
+- **A Fabric view** that draws that stack, with a dead link or an
+  unresolved attachment standing out by colour: that is what the operator
+  opens this view to find.
+- **Detail on a card**, from the cluster (type, state, MAC, master, fabric)
+  and, on demand, from the node itself over SSH: MTU, bond mode and
+  traffic counters. It is fetched only when asked, never on every render,
+  or the view would cost an SSH round trip every eight seconds.
+- **`GET /api/network-fabric/<cluster>`** assembles the whole declarative
+  picture in ONE grouped kubectl call (eight resource types), as the
+  1.33.0 audit requires.
+
+### Internal
+- **The bond is a floor of its own.** That is where the VlanConfig lives
+  (aggregation mode, MTU), so it is where uplink redundancy is configured.
+  Folding it into the switch would hide the only layer anyone actually
+  sets.
+- **A link's fabric is read from its chain of masters, not its name.** A
+  veth called `5a9ba3611271_h` says nothing about itself, but it hangs off
+  `ovs-system`. Classified by name, 81 of the 83 veth pairs on the test
+  cluster landed on the wrong side, and so did a physical card.
+- **Workload ports are folded** into one box per fabric with their count.
+  83 veth pairs on a single node drowned the switch floor.
+- The same link is reported by every monitor whose rule catches it, so the
+  key is (node, index).
+
+### Known limitation, and what is offered about it
+- **Harvester does not publish its Open vSwitch bridges**: its two link
+  monitors only cover `mgmt(-br|-bo)` and cards, so the kube-ovn side stops
+  at the first unreported master. That is shown as such rather than
+  guessed. The view OFFERS to install a permissive `LinkMonitor`, which the
+  CRD documents as matching everything with an empty rule, and which only
+  reads. It is never installed on its own, it goes through a tracked
+  action, and it can be removed from the same banner. On the test cluster
+  it takes the reported links from 5 to 94.
+
+### Tests
+- `tests/api/test_network_fabric.py`, 21 tests: the floors, the two
+  fabrics, deduplication across monitors, unresolved masters being flagged
+  rather than invented, and the node detail parser.
+- `tests/e2e/test_fabric_view.py`, 11 tests in a real browser: the stack
+  drawn bottom-up, the bond on its own floor, the two columns, folded
+  ports, detail fetched only on demand, and the banner.
+- Each was checked against a deliberately broken implementation.
+
 ## [1.34.0] - 2026-09-20 - A new disk is one you boot from
 
 The VM creation panel opened with no size field, and the field looked

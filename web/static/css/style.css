@@ -4172,3 +4172,16 @@ body.roles-active.role-viewer .btn-danger,
 body.roles-active.role-viewer #btn-vm-create,
 body.roles-active.role-viewer #btn-shutdown,
 body.roles-active.role-viewer #btn-startup { display: none !important; }
+
+/* v1.35.0 : bandeau de la vue Fabrique. Il dit ce qui MANQUE dans la carte
+   plutôt que de laisser croire qu'elle est complète : Harvester ne publie
+   pas ses bridges Open vSwitch. */
+.fabric-notice {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 0 0 10px; padding: 8px 12px;
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 12px; color: var(--text-dim);
+}
+.fabric-notice.warn { border-color: var(--warn); color: var(--text); }
+.fabric-notice.ok { border-color: var(--accent); }
+.fabric-notice span { flex: 1 1 320px; }

@@ -150,6 +150,22 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
 
 ## 3. Observabilité cluster (console)
 
+- **Le réseau vu d'en bas (Fabrique).** La vue Réseau regarde le réseau
+  depuis les VMs ; celle-ci le regarde comme un exploitant, depuis la carte
+  physique. Elle empile, de bas en haut : interfaces physiques, bonds,
+  switchs virtuels, cluster network ou provider network kube-ovn et ses
+  subnets, réseaux attachables, et les ports de charges repliés en une
+  boîte avec leur nombre. Deux colonnes, parce que deux fabriques coexistent
+  au-dessus des cartes et que sur un vrai cluster elles n'utilisent même pas
+  la même. Un lien mort ou un rattachement non résolu saute aux yeux par sa
+  couleur. Cliquer une carte montre ce que le cluster sait, et à la demande
+  ce que seul le nœud sait (MTU, mode de bond, compteurs), cherché à ce
+  moment-là et pas à chaque rendu.
+  Harvester ne publie pas ses bridges Open vSwitch, donc le côté kube-ovn
+  s'arrête au premier maître non rapporté. C'est dit plutôt que deviné, et
+  la vue propose de poser un `LinkMonitor` en lecture seule qui les révèle,
+  par une action tracée et retirable depuis le même bandeau.
+
 - **Topologie live** rendue avec Cytoscape sur trois vues : Cluster
   (nodes), Réseau, et Stockage (volumes Longhorn), avec click-pour-détail.
   La vue Réseau se lit comme un schéma de baie : une bande par réseau,
