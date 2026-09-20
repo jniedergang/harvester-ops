@@ -18,9 +18,9 @@ import pytest
 playwright = pytest.importorskip("playwright")
 
 
-def open_panel(page, base_url):
+def open_panel(page, base_url, lang='en'):
     page.context.add_init_script(
-        "localStorage.setItem('harvester_ops_language','en');"
+        f"localStorage.setItem('harvester_ops_language','{lang}');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
         "localStorage.setItem('harvester_ops_current_tab','namespaces');")
     page.goto(base_url, wait_until="domcontentloaded")
@@ -132,3 +132,187 @@ def test_a_refusal_is_shown_to_the_operator(context, flask_server):
     page.click('#fp-vm-create [data-action="create"]')
     page.wait_for_timeout(900)
     assert "RFC 1123" in page.locator('#fp-vm-create [data-result]').inner_text()
+
+
+# ---------------------------------------------------------------------------
+# v1.34.0 : le disque naissait en « volume existant », sans champ de taille
+# ---------------------------------------------------------------------------
+
+def open_disks(page, base_url, lang='en'):
+    open_panel(page, base_url, lang)
+    page.click('#fp-vm-create .vm-edit-nav button[data-section="disks"]')
+    page.wait_for_timeout(500)
+    add = page.locator('#fp-vm-create .vm-create-section:not([hidden]) '
+                       '.tf-block-add, #fp-vm-create .vm-create-section:not([hidden]) '
+                       'button:has-text("Add Disks")')
+    if page.locator('#fp-vm-create .vm-create-section:not([hidden]) '
+                    '.tf-block-item').count() == 0:
+        add.first.click()
+        page.wait_for_timeout(500)
+    return page.locator('#fp-vm-create .vm-create-section:not([hidden]) '
+                        '.tf-block-item').first
+
+
+def field_of(item, name):
+    return item.locator(f'[name$=".{name}"]')
+
+
+def visible_field(item, name):
+    el = field_of(item, name)
+    return el.count() > 0 and el.first.is_visible()
+
+
+def test_a_new_disk_boots_from_an_image_not_an_existing_volume(context, flask_server):
+    """Le défaut était `pvc`, c'est-à-dire « attacher un volume existant ».
+    Ce mode n'a ni taille ni storage class à choisir (le PVC porte les
+    siennes), donc le panneau de CRÉATION s'ouvrait sans champ de taille et
+    on la croyait oubliée. Une VM qu'on crée doit d'abord démarrer."""
+    page = context.new_page()
+    item = open_disks(page, flask_server["base_url"])
+    assert field_of(item, 'source').first.input_value() == 'image'
+
+
+def test_the_size_field_is_there_when_the_disk_is_a_new_one(context, flask_server):
+    page = context.new_page()
+    item = open_disks(page, flask_server["base_url"])
+    assert visible_field(item, 'size'), "pas de champ Taille sur un disque neuf"
+
+
+def test_attaching_an_existing_volume_still_hides_the_size(context, flask_server):
+    """Le masquage reste juste : un PVC déjà créé porte sa propre taille,
+    proposer de la choisir mentirait."""
+    page = context.new_page()
+    item = open_disks(page, flask_server["base_url"])
+    field_of(item, 'source').first.select_option('pvc')
+    page.wait_for_timeout(300)
+    assert not visible_field(item, 'size')
+    assert not visible_field(item, 'storage_class')
+    assert visible_field(item, 'pvc')
+
+
+def test_a_blank_disk_lets_the_operator_pick_the_storage_class(context, flask_server):
+    page = context.new_page()
+    item = open_disks(page, flask_server["base_url"])
+    field_of(item, 'source').first.select_option('blank')
+    page.wait_for_timeout(300)
+    sc = field_of(item, 'storage_class').first
+    assert sc.is_visible(), "storage class absente sur un disque vierge"
+    assert not sc.is_disabled(), "elle doit rester modifiable ici"
+
+
+def test_an_image_disk_shows_its_storage_class_locked(context, flask_server):
+    """Elle est imposée : la classe d'une image porte `backingImage`, et
+    c'est elle qui fait démarrer le disque. La MONTRER verrouillée répond à
+    « pourquoi je ne peux pas la choisir » ; la cacher ne répondait rien."""
+    page = context.new_page()
+    item = open_disks(page, flask_server["base_url"])
+    sc = field_of(item, 'storage_class').first
+    assert sc.is_visible(), "storage class cachée sur un disque d'image"
+    assert sc.is_disabled(), "elle ne doit pas être modifiable pour une image"
+
+
+def test_the_second_disk_is_a_blank_data_disk(context, flask_server):
+    """Le premier démarre la VM, les suivants portent des données. Aucun ne
+    doit retomber sur « volume existant », le cas rare."""
+    page = context.new_page()
+    open_disks(page, flask_server["base_url"])
+    section = page.locator('#fp-vm-create .vm-create-section:not([hidden])')
+    section.locator('.tf-block-add, button:has-text("Add Disks")').first.click()
+    page.wait_for_timeout(500)
+    items = section.locator('.tf-block-item')
+    assert items.count() == 2, f"{items.count()} disque(s)"
+    assert field_of(items.nth(1), 'source').first.input_value() == 'blank'
+
+
+# ---------------------------------------------------------------------------
+# v1.34.0 : la ligne de place restante, une unité sur CHAQUE nombre
+# ---------------------------------------------------------------------------
+
+# L'endpoint rend une LISTE nue, pas un objet : une charge simulée en
+# {"images": [...]} laissait le select vide sans que rien ne le signale.
+CANNED_IMAGES = [{"namespace": "default", "name": "img-1",
+                  "display_name": "leap.qcow2",
+                  "storage_class": "lh-test",
+                  "virtual_size": 2 * 1024 ** 3}]
+CANNED_CAPACITY = {"classes": {"lh-test": {"allocatable": 1107 * 1024 ** 3,
+                                           "replicas": 1}}}
+
+
+def with_storage(page):
+    # `*` ne franchit pas le `?namespace=...` : sans `**` la réponse réelle
+    # passait et la liste d'images du test restait vide.
+    page.route("**/api/images/**", lambda r, q: r.fulfill(
+        status=200, content_type="application/json", body=json.dumps(CANNED_IMAGES)))
+    page.route("**/api/storage-capacity/**", lambda r, q: r.fulfill(
+        status=200, content_type="application/json", body=json.dumps(CANNED_CAPACITY)))
+
+
+def disk_hint(page):
+    return page.locator('#fp-vm-create [data-disk-capacity]').first.inner_text()
+
+
+def test_every_number_on_the_capacity_line_carries_its_unit(context, flask_server):
+    """« 1107 GiB allocatable − 10 requested here » laissait deviner si ce 10
+    était des GiB, des MiB ou des disques. L'unité manquait sur la quantité
+    demandée, et sur elle seule."""
+    page = context.new_page()
+    with_storage(page)
+    item = open_disks(page, flask_server["base_url"])
+    item.locator('[name$=".size"]').first.fill('10Gi')
+    field_of(item, 'image').first.select_option('default/img-1')
+    page.wait_for_timeout(900)
+    line = disk_hint(page)
+    assert 'requested here' in line, line
+    # Trois nombres, trois unités.
+    assert line.count('GiB') == 3, line
+
+
+def test_the_unit_follows_the_language(context, flask_server):
+    """« Gio » était codé en dur : l'interface anglaise affichait une
+    abréviation française."""
+    page = context.new_page()
+    with_storage(page)
+    item = open_disks(page, flask_server["base_url"], lang='fr')
+    item.locator('[name$=".size"]').first.fill('10Gi')
+    field_of(item, 'image').first.select_option('default/img-1')
+    page.wait_for_timeout(900)
+    line = disk_hint(page)
+    assert 'Gio' in line and 'GiB' not in line, line
+
+
+def test_without_an_image_the_hint_asks_for_an_image(context, flask_server):
+    """Source et taille étaient renseignées et l'écran réclamait quand même
+    « a source and a size » : ce qui manquait, c'était l'image."""
+    page = context.new_page()
+    with_storage(page)
+    item = open_disks(page, flask_server["base_url"])
+    item.locator('[name$=".size"]').first.fill('10Gi')
+    page.wait_for_timeout(700)
+    assert 'image' in disk_hint(page).lower()
+
+
+def test_the_pending_storage_class_says_where_it_will_come_from(context, flask_server):
+    """Verrouillée sur une valeur vide, elle donnait un champ grisé qui avait
+    l'air cassé."""
+    page = context.new_page()
+    with_storage(page)
+    item = open_disks(page, flask_server["base_url"])
+    sc = field_of(item, 'storage_class').first
+    assert sc.is_disabled()
+    shown = sc.locator('option:checked').inner_text()
+    assert 'image' in shown.lower(), f"affiché : {shown!r}"
+    field_of(item, 'image').first.select_option('default/img-1')
+    page.wait_for_timeout(900)
+    assert sc.locator('option:checked').inner_text() == 'lh-test'
+
+
+def test_leaving_the_image_mode_unlocks_the_storage_class(context, flask_server):
+    """L'option d'attente ne doit pas rester collée dans la liste."""
+    page = context.new_page()
+    with_storage(page)
+    item = open_disks(page, flask_server["base_url"])
+    field_of(item, 'source').first.select_option('blank')
+    page.wait_for_timeout(500)
+    sc = field_of(item, 'storage_class').first
+    assert not sc.is_disabled()
+    assert 'follows the image' not in sc.inner_text().lower()

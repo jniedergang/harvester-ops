@@ -69,7 +69,13 @@ Manage KubeVirt virtual machines without leaving the console.
   displays: its scheduler applies two constraints at once and the tighter one
   decides, replicas included, and what the other disks of the same VM already
   request is subtracted. Disk sizes are proposed from the image's virtual
-  size, and creation can start from an existing Harvester template.
+  size, and creation can start from an existing Harvester template. A new
+  disk starts as a bootable one from an image (the next ones as blank data
+  disks), never as an existing volume to attach, which is the rare case and
+  the only one with no size and no storage class to choose. For an image
+  disk the storage class is shown but locked: it is the image's own class
+  that carries the backing image, and picking another would give an empty
+  disk. Blank disks let you choose it freely.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
 - **VNC console** — full graphical console in the browser (noVNC over a

@@ -4,6 +4,48 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.34.0] - 2026-09-20 - A new disk is one you boot from
+
+The VM creation panel opened with no size field, and the field looked
+forgotten. It was not: a disk was born as "attach an existing volume", the
+one mode where size and storage class come from the volume already created,
+so showing them would be a lie. That mode is also by far the rarest thing
+to want when creating a machine.
+
+### Fixed
+- **A new disk boots from an image**, and the next ones are blank data
+  disks. Neither falls back to attaching an existing volume, so the size
+  and the storage class are there from the start.
+- **Every number on the room-left line carries its unit.** It read
+  "1107 GiB allocatable ... 10 requested here": the unit was missing on the
+  requested amount, and on it alone, leaving the reader to guess whether
+  that 10 meant gibibytes, mebibytes or disks.
+- **The unit follows the language.** "Gio" was hardcoded, so the English
+  interface displayed a French abbreviation.
+- **The room-left line names what is actually missing.** With a source and
+  a size both filled in, it still asked for "a source and a size"; what was
+  missing was the image.
+
+### Changed
+- **An image disk shows its storage class, locked.** It used to disappear,
+  which left "why can I not choose it?" unanswered on screen. It is the
+  image's own class, and it carries the backing image: verified on a live
+  cluster, an image class holds `backingImage` where a generic one does
+  not, so picking another would produce an empty disk. Before an image is
+  chosen the field says the class follows the image, rather than sitting
+  greyed out and empty as though it were broken.
+
+### Tests
+- `tests/e2e/test_vm_create_panel.py`, 11 new tests in a real browser: the
+  default source of the first and second disk, the size field appearing,
+  attaching an existing volume still hiding it, the storage class editable
+  on a blank disk and locked on an image one, the unit on every number, the
+  unit following the language, and the hint naming the missing image.
+- Each was checked against a deliberately broken implementation.
+- Two existing tests needed updating. One of them caught its own blind
+  spot: its guard reported that it had stopped analysing one item title out
+  of eleven because a comment had outgrown its regexp window.
+
 ## [1.33.0] - 2026-09-20 - Stop asking the cluster the same thing
 
 An audit of every kubectl invocation, measured with a shim that logs each

@@ -79,7 +79,16 @@ const VMEdit = (() => {
           `${v.name || tr('vm.edit.newDisk', 'new disk')}`
           + `${v.bus ? ' — ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}` }),
-        newItem: (items) => ({ name: nextFree('disk-', 1, items.map(i => i.name)) }),
+        // Le premier disque doit faire DÉMARRER la VM, donc une image ; les
+        // suivants sont des disques de données, donc vierges. Le défaut était
+        // `pvc` (attacher un volume existant), de loin le cas le plus rare :
+        // or ce mode masque Taille et Storage class, puisque le PVC porte déjà
+        // les siennes. À l'écran, la création d'une VM s'ouvrait donc sans
+        // champ de taille, et on la croyait oubliée.
+        newItem: (items) => ({
+          name: nextFree('disk-', 1, items.map(i => i.name)),
+          source: items.length === 0 ? 'image' : 'blank',
+        }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
             label: { en: 'Name', fr: 'Nom' },
@@ -1162,12 +1171,20 @@ const VMEdit = (() => {
         ? (imageStorageClass.get(image) || '')
         : (g('storage_class') ? g('storage_class').value : '');
       return { sc, bytes: parseSize(g('size') ? g('size').value : ''),
-               isNew: source === 'image' || source === 'blank' };
-    }).filter(r => r.isNew && r.sc);
+               isNew: source === 'image' || source === 'blank',
+               // Un disque d'image SANS image choisie n'a pas encore de
+               // classe : ce n'est pas « rien à dire », c'est « il manque
+               // l'image ». Sans cette distinction, l'indication réclamait
+               // une source et une taille déjà saisies toutes les deux.
+               waitingImage: source === 'image' && !image };
+    });
+    const waitingImage = rows.some(r => r.waitingImage);
+    const usable = rows.filter(r => r.isNew && r.sc);
 
     const byClass = new Map();
-    rows.forEach(r => byClass.set(r.sc, (byClass.get(r.sc) || 0) + r.bytes));
+    usable.forEach(r => byClass.set(r.sc, (byClass.get(r.sc) || 0) + r.bytes));
 
+    const unit = tr('vm.edit.capUnit', 'GiB');
     const lines = [];
     byClass.forEach((asked, sc) => {
       const info = storageCapacity.classes[sc];
@@ -1179,15 +1196,22 @@ const VMEdit = (() => {
       const left = info.allocatable - asked;
       const over = left < 0;
       lines.push(
-        `${sc} : ${gib(info.allocatable)} Gio ${tr('vm.edit.capAllocatable', 'allocatable')}`
+        // L'unité suit la langue (« Gio » en français, « GiB » ailleurs) et
+        // accompagne CHAQUE nombre. Elle manquait sur la quantité demandée :
+        // « 1107 Gio allocatable − 10 requested here » laissait deviner si ce
+        // 10 était des Gio, des Mio ou des disques.
+        `${sc} : ${gib(info.allocatable)} ${unit} ${tr('vm.edit.capAllocatable', 'allocatable')}`
         + ` (${info.replicas} ${tr('vm.edit.capReplicas', 'replica(s)')})`
-        + (asked ? ` − ${gib(asked)} ${tr('vm.edit.capAsked', 'requested here')}`
-                   + ` = ${over ? '−' : ''}${gib(Math.abs(left))} Gio` : ''));
+        + (asked ? ` − ${gib(asked)} ${unit} ${tr('vm.edit.capAsked', 'requested here')}`
+                   + ` = ${over ? '−' : ''}${gib(Math.abs(left))} ${unit}` : ''));
     });
     hint.innerHTML = lines.length
       ? lines.map(l => esc(l)).join('<br>')
-      : esc(tr('vm.edit.capHint',
-               'Pick a source and a size to see the room left.'));
+      : esc(waitingImage
+            ? tr('vm.edit.capPickImage',
+                 'Pick a VM image to see the room left.')
+            : tr('vm.edit.capHint',
+                 'Pick a source and a size to see the room left.'));
     hint.classList.toggle('vm-cap-over',
       [...byClass.entries()].some(([sc, asked]) => {
         const i = storageCapacity.classes[sc];
@@ -1678,14 +1702,60 @@ const VMEdit = (() => {
   function syncDiskSourceFields(rootEl) {
     rootEl.querySelectorAll('.tf-block-item').forEach(item => {
       const src = item.querySelector('[name$=".source"]')?.value || 'pvc';
+      // La storage class reste AFFICHÉE pour un disque d'image, verrouillée
+      // sur la valeur héritée, au lieu de disparaître : la classe d'une image
+      // porte `backingImage` (vérifié sur harv1), et c'est elle qui fait
+      // démarrer le disque. En choisir une autre donnerait un disque vide.
+      // Masquer le champ laissait « pourquoi je ne peux pas la choisir ? »
+      // sans aucune réponse à l'écran.
       const show = { pvc: src === 'pvc', image: src === 'image',
-                     size: src !== 'pvc', storage_class: src === 'blank' };
+                     size: src !== 'pvc', storage_class: src !== 'pvc' };
       Object.entries(show).forEach(([field, visible]) => {
         const el = item.querySelector(`[name$=".${field}"]`);
         const wrap = el && el.closest('.tf-field');
         if (wrap) wrap.style.display = visible ? '' : 'none';
       });
+      lockInheritedStorageClass(item, src);
     });
+  }
+
+  /** Disque d'image : afficher la storage class héritée, non modifiable. */
+  function lockInheritedStorageClass(item, src) {
+    const sel = item.querySelector('[name$=".storage_class"]');
+    if (!sel || sel.tagName !== 'SELECT') return;
+    if (src !== 'image') {
+      Array.from(sel.options).filter(o => o.dataset.waiting === '1')
+        .forEach(o => o.remove());
+      sel.disabled = false;
+      sel.removeAttribute('title');
+      return;
+    }
+    const imageId = item.querySelector('[name$=".image"]')?.value || '';
+    const inherited = imageStorageClass.get(imageId) || '';
+    if (inherited) {
+      // La liste peut ne pas être encore chargée : injecter l'option plutôt
+      // que d'afficher un champ vide qui ferait croire à une classe absente.
+      if (!Array.from(sel.options).some(o => o.value === inherited)) {
+        sel.add(new Option(inherited, inherited));
+      }
+      sel.value = inherited;
+    } else {
+      // Aucune image choisie : la classe n'est pas « vide », elle est encore
+      // INCONNUE. Un select grisé sur l'option vide donne un champ qui a
+      // l'air cassé ; on dit d'où elle viendra.
+      const waiting = tr('vm.edit.scFromImage', '(follows the image)');
+      let opt = Array.from(sel.options).find(o => o.dataset.waiting === '1');
+      if (!opt) {
+        opt = new Option(waiting, '');
+        opt.dataset.waiting = '1';
+        sel.add(opt, sel.options[0] || null);
+      }
+      opt.textContent = waiting;
+      sel.value = '';
+    }
+    sel.disabled = true;
+    sel.title = tr('vm.edit.scInherited',
+                   'Imposed by the image: this class carries the backing image.');
   }
 
   function syncNicTypeFields(rootEl) {

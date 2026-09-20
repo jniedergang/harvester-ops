@@ -26,7 +26,7 @@ def test_no_item_title_embeds_icon_markup():
     offenders, seen = [], 0
     for path in JS.glob("*.js"):
         src = path.read_text()
-        for m in re.finditer(r"itemTitle:\s*\([^)]*\)\s*=>([\s\S]{0,400}?)\n\s*(?:newItem|args|min|max|label)\s*:", src):
+        for m in re.finditer(r"itemTitle:\s*\([^)]*\)\s*=>([\s\S]{0,1200}?)\n\s*(?:newItem|args|min|max|label)\s*:", src):
             seen += 1
             if "Icons.svg(" in m.group(1):
                 line = src[:m.start()].count("\n") + 1

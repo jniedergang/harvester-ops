@@ -77,7 +77,13 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   et c'est la plus serrée qui décide, répliques comprises, et ce que les
   autres disques de la même VM réclament est soustrait. La taille d'un disque
   est proposée depuis la taille virtuelle de l'image, et la création peut
-  partir d'un template Harvester existant.
+  partir d'un template Harvester existant. Un disque neuf naît amorçable
+  depuis une image (les suivants en disques de données vierges), jamais en
+  volume existant à attacher, qui est le cas rare et le seul sans taille ni
+  storage class à choisir. Pour un disque d'image la storage class est
+  affichée mais verrouillée : c'est celle de l'image, qui porte l'image de
+  base, et en choisir une autre donnerait un disque vide. Les disques
+  vierges la laissent libre.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

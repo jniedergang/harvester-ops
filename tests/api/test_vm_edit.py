@@ -476,7 +476,11 @@ console.log(JSON.stringify([
 """)
     assert json.loads(out) == [
         {"iface": "eth2"}, {"iface": "eth0"}, {"device": "/dev/vdc"},
-        {"name": "disk-2"}, {"name": "nic-2"}]
+        # v1.34.0 : un disque ajouté à côté d'autres est un disque de
+        # DONNÉES, donc vierge. Le défaut d'avant (`pvc`, attacher un volume
+        # existant) masquait Taille et Storage class, et faisait croire à des
+        # champs oubliés dans le panneau de création.
+        {"name": "disk-2", "source": "blank"}, {"name": "nic-2"}]
 
 
 def test_tf_form_add_consumes_new_item_and_headers_stay_live():
