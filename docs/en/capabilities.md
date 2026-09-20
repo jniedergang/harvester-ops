@@ -340,6 +340,16 @@ than proven by an identity provider; sourcing it from OIDC is the next step.
   Cluster API diagnostic queries the cluster and can take ten seconds)
   blurs its card behind a named loading veil instead of blanking it, with
   an anti-flash threshold so a fast answer shows nothing at all.
+- **It stops asking the cluster the same thing.** Every kubectl invocation
+  pays a full process start before it touches the network, so the console
+  groups what it can: the cluster watcher polls its five resource types in
+  a single call, and the status script makes two grouped calls instead of
+  five. A hidden browser tab stops polling entirely (returning to it
+  refreshes at once), and the watcher slows down after five minutes with no
+  human request. Monitoring scrapes of `/metrics` and `/healthz` do not
+  count as a human, or the console would never be idle. Tune with
+  `HARVESTER_OPS_WATCH_IDLE_AFTER` (default 300 s) and
+  `HARVESTER_OPS_WATCH_IDLE_INTERVAL` (default 120 s).
 - **Action tracking + dock** — a persistent bottom dock shows in-progress
   and recent actions on every tab, with live step/log streaming over SSE
   (auto-reconnecting). Failed actions carry the underlying error (last

@@ -376,6 +376,17 @@ venir d'OIDC est la suite.
   diagnostic Cluster API interroge le cluster et peut prendre dix secondes)
   floute sa carte derrière un voile nommé au lieu de la vider, avec un
   seuil anti-clignotement pour qu'une réponse rapide n'affiche rien.
+- **Il cesse de redemander la même chose au cluster.** Chaque invocation de
+  kubectl paie un démarrage de processus complet avant même de toucher au
+  réseau, alors la console regroupe ce qu'elle peut : la surveillance de
+  cluster interroge ses cinq types de ressources en un seul appel, et le
+  script de statut en fait deux groupés au lieu de cinq. Un onglet de
+  navigateur caché cesse d'interroger (y revenir rafraîchit aussitôt), et la
+  surveillance ralentit après cinq minutes sans requête humaine. Les relevés
+  de supervision sur `/metrics` et `/healthz` ne comptent pas pour un
+  humain, sinon la console ne serait jamais au repos. Réglages :
+  `HARVESTER_OPS_WATCH_IDLE_AFTER` (défaut 300 s) et
+  `HARVESTER_OPS_WATCH_IDLE_INTERVAL` (défaut 120 s).
 - **Tracking d'actions + dock** — un dock bas persistant montre les
   actions en cours et récentes sur chaque onglet, avec streaming live des
   steps/logs en SSE (reconnexion automatique). Une action en échec porte

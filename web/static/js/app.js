@@ -1895,6 +1895,12 @@ const App = (() => {
     }
 
     statusRefreshTimer = setInterval(() => {
+      // Un onglet de navigateur caché n'a personne devant lui. Sans ce
+      // garde, l'aperçu continuait d'interroger le cluster toutes les 8 s
+      // pour une page que nul ne regarde : mesuré à deux `kubectl get`
+      // groupés par tour, soit le poste de dépense principal de l'outil au
+      // repos. Le dock (dock.js) fait déjà ce test ; l'aperçu l'avait oublié.
+      if (document.hidden) return;
       if ($('#tab-overview').classList.contains('active')) refreshStatus();
       if ($('#tab-activity').classList.contains('active')) refreshActivity();
       if ($('#tab-namespaces').classList.contains('active')) refreshNamespaces(false);
@@ -1912,6 +1918,15 @@ const App = (() => {
     // v1.5.7: stop the long-running interval on page unload so the
     // browser doesn't keep firing it after navigation. Also stop the
     // SSE subscription if any.
+    // Au retour sur l'onglet, rafraîchir tout de suite : attendre le tour
+    // suivant laisserait jusqu'à huit secondes d'écran périmé, ce qui est
+    // exactement ce qu'on ne veut pas payer en échange de l'économie.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) return;
+      if ($('#tab-overview').classList.contains('active')) refreshStatus();
+      if ($('#tab-activity').classList.contains('active')) refreshActivity();
+      if ($('#tab-namespaces').classList.contains('active')) refreshNamespaces(false);
+    });
     window.addEventListener('beforeunload', () => {
       if (statusRefreshTimer) clearInterval(statusRefreshTimer);
       if (currentSSE) { try { currentSSE.close(); } catch {} }

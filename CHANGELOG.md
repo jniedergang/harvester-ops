@@ -4,6 +4,60 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.33.0] - 2026-09-20 - Stop asking the cluster the same thing
+
+An audit of every kubectl invocation, measured with a shim that logs each
+real call rather than trusting the code. Starting point: one operator with
+the overview open triggered 54 kubectl invocations per minute, on an idle
+screen. Each invocation pays a full process start before it touches the
+network, so the NUMBER of calls matters as much as what they bring back.
+
+### Changed
+- **The cluster watcher makes one call instead of five.** It polls five
+  resource types; `kubectl get a,b,c,d,e` returns them all in one go, each
+  object carrying its own kind. Falls back to one call per type when the
+  cluster does not expose one of them, because a grouped get fails as a
+  whole and losing the watch entirely would be worse than being slow.
+- **The status script makes two calls instead of five**, grouped by scope
+  and run concurrently. Byte-for-byte identical output, checked against the
+  previous version on a live cluster.
+- **A hidden browser tab stops polling the cluster.** The overview kept
+  querying every 8 seconds for a page nobody was looking at. Coming back to
+  the tab refreshes immediately, so the saving costs no staleness.
+- **The watcher slows down when nobody uses the console** (after 5 minutes
+  without a request, configurable). Monitoring scrapes of `/metrics` and
+  `/healthz` do not count as a human, otherwise the console would never be
+  considered idle.
+
+### Fixed
+- **The Cluster API diagnostic no longer lists CRDs.** It asked for every
+  CustomResourceDefinition to answer a yes/no question. The API returns the
+  whole objects, OpenAPI schemas included: 37.9 MB on the test cluster,
+  whatever output format is requested, since the format only changes
+  client-side rendering. `api-resources` answers the same question with
+  about 27 times less work.
+
+### Internal
+- Measured: 54 kubectl invocations per minute down to 19 for one operator
+  on the overview, for the same information.
+- The kubectl call metric only ever counted calls made through one helper,
+  while most go through `subprocess` directly. The audit used an external
+  shim instead, which also revealed that a call killed by a timeout leaves
+  no trace at all in a logger placed after the process returns.
+
+### Tests
+- `tests/api/test_kubectl_economy.py`, 14 tests: the grouped collector and
+  its per-kind fallback, both reduction paths agreeing, the watch loop
+  actually using the collector, idle detection, monitoring scrapes not
+  counting, the hidden tab guard, and the status script staying grouped.
+- Each was checked against a deliberately broken implementation. One
+  sabotage showed a test passing while the watch loop had been degrouped,
+  which is how the loop itself ended up covered.
+
+### New settings
+- `HARVESTER_OPS_WATCH_IDLE_AFTER` (default 300 s) and
+  `HARVESTER_OPS_WATCH_IDLE_INTERVAL` (default 120 s).
+
 ## [1.32.0] - 2026-09-18 - The identity the cluster sees
 
 Third and last of the three steps agreed on rights, and the one that makes

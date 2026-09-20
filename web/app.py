@@ -318,6 +318,21 @@ _VALIDATED_PATH_PARAMS = ("namespace", "name", "vm", "n")
 
 
 @app.before_request
+def _mark_console_activity():
+    """Dernier signe de vie côté humain, qui commande le rythme de la
+    surveillance de cluster.
+
+    `/metrics` et les sondes de santé sont EXCLUS : ce sont des systèmes de
+    supervision qui interrogent en permanence. Les compter maintiendrait la
+    console éveillée pour toujours et le ralentissement au repos ne servirait
+    jamais à rien.
+    """
+    global _last_request_ts
+    if request.path != "/metrics" and not request.path.startswith("/healthz"):
+        _last_request_ts = time.time()
+
+
+@app.before_request
 def _validate_k8s_path_params():
     args = request.view_args or {}
     for key in _VALIDATED_PATH_PARAMS:
@@ -3222,15 +3237,32 @@ def _unreachable_payload(cluster, kubeconfig):
 # dependency to the airgap install image.
 # =============================================================================
 CLUSTER_WATCH_INTERVAL = float(os.environ.get("HARVESTER_OPS_WATCH_INTERVAL", "15"))
+# Au repos, la surveillance ralentit. Elle existe pour alimenter le dock et
+# l'activité ; sans personne devant la console, ce travail n'a pas de
+# destinataire, et il coûtait un `kubectl get` groupé toutes les 15 s sans
+# discontinuer. Le cadencement nominal revient à la PREMIÈRE requête reçue.
+# Rien n'est perdu : l'état précédent est conservé, donc ce qui a changé
+# pendant le repos est détecté au tour suivant, en un lot.
+CLUSTER_WATCH_IDLE_AFTER = float(os.environ.get("HARVESTER_OPS_WATCH_IDLE_AFTER", "300"))
+CLUSTER_WATCH_IDLE_INTERVAL = float(os.environ.get("HARVESTER_OPS_WATCH_IDLE_INTERVAL", "120"))
+_last_request_ts = time.time()
+
+
+def _console_is_idle():
+    return (time.time() - _last_request_ts) > CLUSTER_WATCH_IDLE_AFTER
 CLUSTER_WATCH_ENABLED = os.environ.get("HARVESTER_OPS_WATCH", "1") not in ("0", "false", "no")
 
 CLUSTER_WATCH_RESOURCES = [
-    # (label, kubectl-kind, scope)  -- scope: 'cluster' or 'namespaced'
-    ("namespace",     "namespaces",                                  "cluster"),
-    ("vm-image",      "virtualmachineimages.harvesterhci.io",        "namespaced"),
-    ("net-attach",    "network-attachment-definitions.k8s.cni.cncf.io", "namespaced"),
-    ("pvc",           "persistentvolumeclaims",                       "namespaced"),
-    ("vm",            "virtualmachines.kubevirt.io",                  "namespaced"),
+    # (label, kubectl-kind, scope, Kind rendu par l'API)
+    # Le dernier champ sert à démultiplexer UN SEUL `kubectl get a,b,c` : les
+    # objets reviennent mélangés dans une même liste, chacun portant son
+    # `kind`. Cinq appels séparés coûtaient 7,2 s mesurés sur harv1, le même
+    # travail en un appel en coûte 3,3 s.
+    ("namespace",  "namespaces",                                     "cluster",    "Namespace"),
+    ("vm-image",   "virtualmachineimages.harvesterhci.io",           "namespaced", "VirtualMachineImage"),
+    ("net-attach", "network-attachment-definitions.k8s.cni.cncf.io", "namespaced", "NetworkAttachmentDefinition"),
+    ("pvc",        "persistentvolumeclaims",                         "namespaced", "PersistentVolumeClaim"),
+    ("vm",         "virtualmachines.kubevirt.io",                    "namespaced", "VirtualMachine"),
 ]
 
 # {cluster_name: {kind: {uid: {"rv": "...", "gen": int, "name": "ns/n"}}}}
@@ -3254,8 +3286,18 @@ def _cluster_snapshot(kc, kind, scope):
         data = json.loads(r.stdout) if r.stdout.strip() else {}
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return None
+    return _snapshot_items(kind, data.get("items", []))
+
+
+def _snapshot_items(kind, items):
+    """{uid: {rv, name, extra}} pour une liste d'objets d'un même type.
+
+    Partagé par le chemin groupé et le chemin par type : la réduction doit
+    être identique des deux côtés, sinon le watcher verrait de faux
+    changements au premier repli.
+    """
     out = {}
-    for item in data.get("items", []):
+    for item in items:
         m = item.get("metadata", {}) or {}
         uid = m.get("uid")
         if not uid:
@@ -3284,6 +3326,43 @@ def _cluster_snapshot(kc, kind, scope):
             "extra": extra,
         }
     return out
+
+
+def _cluster_snapshot_all(kc, resources):
+    """{kind: {uid: {...}}} pour TOUS les types surveillés, en un seul
+    `kubectl get a,b,c -A -o json`.
+
+    Pourquoi : chaque invocation de kubectl paie ~0,7 s de démarrage de
+    processus avant de toucher au réseau (mesuré sur node1). Cinq types =
+    cinq démarrages. Groupés, c'est un seul.
+
+    Repli par type si l'appel groupé échoue : `kubectl get a,b,c` échoue EN
+    BLOC quand le cluster n'expose pas l'un des types (« the server doesn't
+    have a resource type »). Un cluster sans Harvester perdrait donc la
+    surveillance des namespaces et des PVC avec, ce qui serait pire que lent.
+    Rend None pour un type qu'on n'a pas su lire, comme le chemin par type.
+    """
+    kinds = [kind for _, kind, _, _ in resources]
+    args = ["kubectl", "--kubeconfig", kc, "get", "-A", ",".join(kinds),
+            "-o", "json"]
+    data = None
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and r.stdout.strip():
+            data = json.loads(r.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+        data = None
+
+    if data is None:
+        log_watch.debug("appel groupé indisponible, repli type par type")
+        return {kind: _cluster_snapshot(kc, kind, scope)
+                for _, kind, scope, _ in resources}
+
+    by_api_kind = {}
+    for item in data.get("items", []):
+        by_api_kind.setdefault(item.get("kind"), []).append(item)
+    return {kind: _snapshot_items(kind, by_api_kind.get(api_kind, []))
+            for _, kind, _, api_kind in resources}
 
 
 def _record_cluster_event(cluster, kind, op, name):
@@ -3385,8 +3464,9 @@ def _cluster_watch_iteration(cluster, kc):
     """One snapshot + diff cycle for one cluster."""
     with _cluster_watch_lock:
         prev_all = _cluster_watch_state.setdefault(cluster, {})
-    for label, kind, scope in CLUSTER_WATCH_RESOURCES:
-        snap = _cluster_snapshot(kc, kind, scope)
+    snaps = _cluster_snapshot_all(kc, CLUSTER_WATCH_RESOURCES)
+    for label, kind, scope, _api_kind in CLUSTER_WATCH_RESOURCES:
+        snap = snaps.get(kind)
         if snap is None:
             continue
         with _cluster_watch_lock:
@@ -3451,7 +3531,8 @@ def _cluster_watch_thread(cluster):
                 _cluster_watch_iteration(cluster, kc)
         except Exception as e:
             log_watch.warning("%s: %s", cluster, e)
-        time.sleep(CLUSTER_WATCH_INTERVAL)
+        time.sleep(CLUSTER_WATCH_IDLE_INTERVAL if _console_is_idle()
+                   else CLUSTER_WATCH_INTERVAL)
 
 
 def _start_cluster_watchers():
@@ -7721,6 +7802,26 @@ def api_capi_uninstall(cluster):
                     "keep_cert_manager": keep_cm}), 201
 
 
+def _api_resource_names(text):
+    """Noms pluriels qualifiés ({'clusters.cluster.x-k8s.io', ...}) lus dans
+    la sortie de `kubectl api-resources --no-headers`.
+
+    Colonnes : NAME [SHORTNAMES] APIVERSION NAMESPACED KIND. SHORTNAMES est
+    absent sur beaucoup de lignes, donc on lit par la FIN : APIVERSION est
+    l'avant-avant-dernier champ quoi qu'il arrive. Compter depuis le début
+    décalerait une ligne sur deux.
+    """
+    names = set()
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        name, api_version = parts[0], parts[-3]
+        group = api_version.rsplit("/", 1)[0] if "/" in api_version else ""
+        names.add(f"{name}.{group}" if group else name)
+    return names
+
+
 @app.route("/api/capi/<cluster>/diag")
 @requires_auth
 def api_capi_diag(cluster):
@@ -7746,9 +7847,17 @@ def api_capi_diag(cluster):
         except subprocess.TimeoutExpired:
             return 124, "", "timeout"
 
-    # Collect installed CRDs once (cheap)
-    rc, out, _ = kc_run("get", "crd", "-o", "jsonpath={.items[*].metadata.name}")
-    crds = set(out.split()) if rc == 0 else set()
+    # Quelles familles d'API ce cluster expose-t-il.
+    #
+    # On demandait `get crd`, en le croyant bon marché. Mesuré sur harv1 :
+    # 298 CRD, et l'API renvoie les objets ENTIERS, schémas OpenAPI compris,
+    # soit 37,9 Mo et ~24 s. Le format de sortie n'y change rien, il ne joue
+    # que sur le rendu côté client. Or ce `kc_run` n'accorde que 8 s : l'appel
+    # expirait À TOUS LES COUPS, `crds` restait vide, et le diagnostic
+    # annonçait la pile CAPI absente même quand elle était installée.
+    # `api-resources` répond à la même question en 0,9 s.
+    rc, out, _ = kc_run("api-resources", "--no-headers", timeout=25)
+    crds = _api_resource_names(out) if rc == 0 else set()
     have_capi = any(c.startswith("clusters.cluster.x-k8s.io") for c in crds)
     have_caphv = any(c.endswith(".infrastructure.cluster.x-k8s.io") and "harvester" in c for c in crds)
 
