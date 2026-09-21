@@ -27,7 +27,7 @@ REBUILD_LIMIT_SETTING = "concurrent-replica-rebuild-per-node-limit"
 # dégradés sans fin : c'est l'une des causes que l'on reconnaît.
 REBUILD_LIMIT_RESTORED = "5"
 
-ORDER = ("faulted", "rebuild-disabled", "rebuilding", "replica-failed",
+ORDER = ("faulted", "rebuild-disabled", "rebuilding", "rebuild-pending", "replica-failed",
          "not-enough-nodes", "no-room", "node-unavailable", "unexplained")
 
 
@@ -156,6 +156,27 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
             items.append({"replica": rn, "node": node, "progress": p.get("progress")})
         found["rebuilding"] = {"severity": "info", "facts": {"replicas": items}, "fix": None}
 
+    # Une réplique placée sur un nœud mais pas encore connue du moteur : elle
+    # démarre, la copie suit (une dizaine de secondes relevées sur harv1).
+    # Sauf si la reconstruction est coupée : elle attendrait alors sans fin,
+    # et c'est « rebuild-disabled » qui le dit.
+    if engine and degraded and "rebuild-disabled" not in found:
+        def _on_ready_node(r):
+            node = nodes.get((r.get("spec") or {}).get("nodeID"))
+            return bool(node and node["ready"])
+        pending = [r for r in replicas
+                   if (r.get("spec") or {}).get("nodeID")
+                   and not (r.get("spec") or {}).get("failedAt")
+                   and _name(r) not in modes
+                   and _on_ready_node(r)]
+        if pending:
+            found["rebuild-pending"] = {
+                "severity": "info",
+                "facts": {"replicas": [{"replica": _name(r),
+                                        "node": (r.get("spec") or {}).get("nodeID")}
+                                       for r in pending]},
+                "fix": None}
+
     if failed and not faulted:
         wait = setting(settings, "replica-replenishment-wait-interval", "600")
         # Supprimer une réplique en échec force Longhorn à en reconstruire une
@@ -205,6 +226,11 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
     down = []
     for r in replicas:
         rspec = r.get("spec") or {}
+        if not rspec.get("nodeID"):
+            # Réplique NON PLACÉE (nodeID vide, relevé sur harv1) : elle n'est
+            # sur aucun nœud, c'est le manque de place ou de nœuds qui
+            # l'explique, pas une panne.
+            continue
         node = nodes.get(rspec.get("nodeID"))
         if node is None or not node["ready"]:
             down.append({"replica": _name(r), "node": rspec.get("nodeID"), "why": "node"})

@@ -249,6 +249,28 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   volume de StatefulSet), le détail le dit d'abord. Le serveur revérifie
   avant de supprimer et refuse un claim que monte un pod en cours. Un seul
   appel kubectl groupé.
+- **Volumes dégradés, expliqués et corrigés.** Un bandeau en tête de la vue
+  Stockage compte les volumes qui demandent de l'attention (en panne,
+  dégradés, à risque de démarrer dégradés) avec leur cause principale, et
+  ouvre le plus urgent. Le détail de chaque volume dit pourquoi, d'après ce
+  que rapporte Longhorn : plus aucune réplique saine, reconstruction
+  désactivée (un arrêt gracieux la laisse coupée si le démarrage n'a pas pu
+  la rétablir), reconstruction en cours avec son pourcentage, nouvelle
+  réplique en préparation, réplique en échec en attente de réutilisation,
+  pas assez de nœuds pour le nombre de répliques, aucun disque avec la
+  place, réplique sur un nœud ou un disque indisponible. Chaque cause vient
+  avec la marche à suivre, et trois d'entre elles avec une correction en un
+  clic : ramener le nombre de répliques à ce que le cluster peut porter,
+  réactiver la reconstruction, reconstruire tout de suite une réplique en
+  échec. Chaque correction montre sa commande kubectl équivalente, demande
+  confirmation, et s'exécute en action tracée qui guette l'effet pendant
+  une minute et le dit quand rien n'a changé. Le serveur relit le cluster
+  et refait le diagnostic avant d'agir, avec des valeurs qu'il calcule
+  lui-même ; il ne touche jamais un volume en panne, ne descend jamais sous
+  une réplique, ne supprime jamais la dernière copie saine, et ne réactive
+  pas la reconstruction pendant un arrêt ou un démarrage du cluster. Les
+  volumes Longhorn dont le PVC a été supprimé sont montrés aussi, signalés
+  comme tels.
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,

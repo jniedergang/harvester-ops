@@ -185,6 +185,26 @@ def test_a_rebuild_in_progress_shows_its_progress(key):
     assert f[0]["facts"]["replicas"] == [{"replica": "r2", "node": "n2", "progress": 42}]
 
 
+def test_a_replica_being_prepared_is_not_unexplained():
+    """Relevé sur harv1 : une nouvelle réplique est placée et démarrée, mais
+    reste absente du moteur une dizaine de secondes avant la copie. Pendant
+    ce temps la vue disait « cause non identifiée »."""
+    reps = [replica("r1"), replica("r2")]           # r2 placée, pas encore au moteur
+    f = run(volume(replicas=2, soft="enabled"), reps, engine(modes={"r1": "RW"}))
+    assert causes(f) == ["rebuild-pending"]
+    assert f[0]["severity"] == "info" and f[0]["fix"] is None
+    assert f[0]["facts"]["replicas"] == [{"replica": "r2", "node": "n1"}]
+
+
+def test_with_rebuild_off_a_prepared_replica_waits_for_ever():
+    """Reconstruction coupée : la réplique attendrait sans fin. C'est ce
+    blocage qu'il faut dire, pas « elle démarre bientôt »."""
+    reps = [replica("r1"), replica("r2", running=False)]
+    f = run(volume(replicas=2, soft="enabled"), reps, engine(modes={"r1": "RW"}),
+            settings={vh.REBUILD_LIMIT_SETTING: "0"})
+    assert causes(f) == ["rebuild-disabled"]
+
+
 # ---------------------------------------------------------------------------
 # Réplique en échec
 # ---------------------------------------------------------------------------
@@ -233,12 +253,24 @@ def test_a_node_that_already_hosts_a_healthy_replica_needs_no_room():
     assert "no-room" not in causes(f)
 
 
+def test_an_unscheduled_replica_is_not_a_node_that_is_down():
+    """Relevé sur harv1 : les répliques que Longhorn ne peut pas placer ont
+    un nodeID et un diskID VIDES. Elles ne sont sur aucun nœud, et surtout
+    pas sur un nœud en panne : c'est le manque de nœuds qui les explique."""
+    reps = [replica("r1"), replica("r2", node="", disk="", running=False),
+            replica("r3", node="", disk="", running=False)]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW"}))
+    assert causes(f) == ["not-enough-nodes"]
+
+
 def test_a_replica_on_a_node_that_is_down():
     nodes = [lh_node("n1"), lh_node("n2", ready=False), lh_node("n3")]
     reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2", running=False)]
     f = run(volume(replicas=2), reps, engine(modes={"r1": "RW"}), nodes=nodes)
     down = next(x for x in f if x["cause"] == "node-unavailable")
     assert down["facts"]["replicas"] == [{"replica": "r2", "node": "n2", "why": "node"}]
+    # Absente du moteur parce que son nœud est tombé : pas « en préparation ».
+    assert "rebuild-pending" not in causes(f)
 
 
 def test_a_replica_on_a_disk_that_is_not_ready():

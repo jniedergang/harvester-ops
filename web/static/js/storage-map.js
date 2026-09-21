@@ -265,6 +265,7 @@ const StorageMap = (() => {
       case 'faulted': return tr('health.t.faulted', 'No healthy replica left');
       case 'rebuild-disabled': return tr('health.t.rebuildDisabled', 'Rebuilding is switched off');
       case 'rebuilding': return tr('health.t.rebuilding', 'Rebuilding in progress');
+      case 'rebuild-pending': return tr('health.t.rebuildPending', 'A new replica is being prepared');
       case 'replica-failed': return tr('health.t.replicaFailed', 'A replica failed');
       case 'not-enough-nodes': return f.severity === 'watch'
         ? tr('health.t.willDegrade', 'Will start degraded: not enough nodes')
@@ -305,6 +306,8 @@ const StorageMap = (() => {
         'A graceful shutdown switches it off and the startup switches it back on. Here it stayed off, so no degraded volume is repaired.');
       case 'rebuilding': return tr('health.a.rebuilding',
         'Nothing to do: the volume repairs itself and stays degraded until the copy is complete.');
+      case 'rebuild-pending': return tr('health.a.rebuildPending',
+        'Nothing to do: Longhorn is starting the new replica, and the copy begins within seconds.');
       case 'replica-failed': return tr('health.a.replicaFailed',
         'Rebuilding now starts a fresh copy immediately instead of waiting, at the cost of disk and network load.');
       case 'not-enough-nodes': return tr('health.a.notEnoughNodes',

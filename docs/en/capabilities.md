@@ -226,6 +226,26 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   last workload that used it may come back (a StatefulSet volume), the
   detail says so first. The server checks again before deleting and
   refuses a claim that any running pod mounts. One grouped kubectl call.
+- **Degraded volumes, explained and fixed.** A banner at the top of the
+  Storage view counts the volumes that need attention (faulted, degraded,
+  at risk of starting degraded) with their main cause, and opens the most
+  urgent one. Each volume's detail says why, from what Longhorn reports:
+  no healthy replica left, rebuilding switched off (a graceful shutdown
+  leaves it off if the startup could not restore it), a rebuild in
+  progress with its percentage, a new replica being prepared, a failed
+  replica waiting to be reused, not enough nodes for the replica count,
+  no disk with room, a replica on a node or disk that is down. Each cause
+  comes with what to do, and three of them with a one-click fix: lower
+  the replica count to what the cluster can hold, switch rebuilding back
+  on, rebuild a failed replica now. Every fix shows its equivalent
+  kubectl command, asks for confirmation, and runs as a tracked action
+  that watches for the effect for a minute and says so when nothing
+  changed. The server reads the cluster again and redoes the diagnosis
+  before acting, with values it computes itself; it never touches a
+  faulted volume, never goes below one replica, never deletes the last
+  healthy copy, and does not switch rebuilding on while a cluster shutdown
+  or startup is running. Longhorn volumes whose claim was deleted are shown
+  too, marked as such.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,

@@ -4,6 +4,61 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.42.0] - 2026-09-21 - Why a volume is degraded, and what to do
+
+A degraded Longhorn volume has fewer healthy replicas than it asks for: it
+still works, but one more failure can make it unreachable. Nothing in the
+console said so, let alone why.
+
+### Added
+- **A health banner in the Storage view**: how many volumes are faulted,
+  degraded or at risk of starting degraded, the main cause, and a click
+  that opens the most urgent one. Rows carry a coloured dot and a tag.
+- **A diagnosis per volume**, from what Longhorn already reports and in
+  the same grouped kubectl call (one type added, the engines): no healthy
+  replica left, rebuilding switched off, rebuild in progress with its
+  percentage, a new replica being prepared, a failed replica waiting to be
+  reused, not enough nodes for the replica count, no disk with room, a
+  replica on a node or disk that is down. Each cause says what is observed
+  and what to do.
+- **Three one-click fixes**, each with its equivalent kubectl command:
+  lower the replica count to what the cluster can hold, switch rebuilding
+  back on, rebuild a failed replica now. `POST
+  /api/volume-health/<cluster>/<volume>/fix` reads the cluster again,
+  redoes the diagnosis and applies only what it offers at that moment,
+  with values it computes itself: nothing on a faulted volume, never below
+  one replica, never deleting the last healthy copy, never switching
+  rebuilding on during a cluster shutdown or startup. The tracked action
+  watches for the effect for a minute and reports an error rather than a
+  success when nothing changed.
+
+### Fixed
+- **A Longhorn volume whose claim was deleted was invisible** in the
+  Storage view, which was built from the claims. On harv1,
+  `rancher-monitoring-grafana` was missing. Such volumes are shown,
+  tagged "claim deleted", and the banner counts exactly what the view
+  shows.
+
+### Internal
+- `web/volume_health.py`: a pure diagnosis returning codes and facts; the
+  browser writes the text, in five languages.
+
+### Tests
+- 31 unit tests on the diagnosis, built on structures read on harv1, 8
+  new ones on the storage map, 19 on the fix endpoint and its guards, 10
+  in the browser. Each guard was checked by breaking it.
+- Exercised on harv1 with throwaway volumes, removed afterwards. A
+  3-replica volume on the single node was diagnosed "not enough nodes",
+  fixed from the view and became healthy. A 2.5 GB volume with rebuilding
+  switched off was diagnosed "rebuilding switched off", switched back on
+  from the view, and the view followed the rebuild to healthy. The live
+  runs caught two mistakes the unit tests had not: a replica Longhorn
+  cannot place has an empty node, and was taken for a replica on a node
+  that is down; and a new replica spends about ten seconds unknown to the
+  engine, shown as "cause not identified". Both are fixed and tested.
+- Not exercised live (one node, no failure to cause safely): a replica on
+  a node that is down, a failed replica, a faulted volume.
+
 ## [1.41.0] - 2026-09-21 - One console, several people
 
 Reported as a console that "blinks" when several people open it. It did,
