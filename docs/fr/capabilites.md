@@ -163,25 +163,42 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
 
 ## 3. Observabilité cluster (console)
 
-- **Le réseau vu d'en bas (Fabrique).** La vue Réseau regarde le réseau
-  depuis les VMs ; celle-ci le regarde comme un exploitant, depuis la carte
-  physique. Elle empile, de bas en haut : interfaces physiques, bonds,
-  switchs virtuels, cluster network ou provider network kube-ovn et ses
-  subnets, réseaux attachables, et les ports de charges repliés en une
-  boîte avec leur nombre. Deux colonnes, parce que deux fabriques coexistent
-  au-dessus des cartes et que sur un vrai cluster elles n'utilisent même pas
-  la même. Un lien mort ou un rattachement non résolu saute aux yeux par sa
-  couleur, un subnet d'overlay se distingue de celui qui atteint vraiment
-  le cuivre, et les niveaux kube-ovn (provider network, VLAN, subnet, VPC)
-  s'empilent dans l'ordre au lieu de partager une rangée. Une arête
-  pointillée est une déclaration, pas un rattachement observé. Chaque bande porte son nom, et la chaîne se termine au switch physique, marqué inconnu tant que LLDP n'a pas répondu. Cliquer une
-  carte montre ce que le cluster sait, et à la demande
-  ce que seul le nœud sait (MTU, mode de bond, compteurs), cherché à ce
-  moment-là et pas à chaque rendu.
-  Harvester ne publie pas ses bridges Open vSwitch, donc le côté kube-ovn
-  s'arrête au premier maître non rapporté. C'est dit plutôt que deviné, et
-  la vue propose de poser un `LinkMonitor` en lecture seule qui les révèle,
-  par une action tracée et retirable depuis le même bandeau.
+- **Le réseau de l'hôte, un switch virtuel à la fois (Fabrique).** La
+  vue Réseau ci-dessous regarde le réseau depuis les VMs ; celle-ci le lit
+  comme un exploitant ESXi lit un Standard Switch : un bloc par switch, de
+  gauche à droite, avec les réseaux et leurs VMs à gauche, le switch au
+  milieu et les cartes physiques à droite.
+  - Un **cluster network** est un switch qui porte le nom de son bridge
+    (lu dans les réseaux attachables, pas déduit d'une convention de
+    nommage). Son en-tête reprend la politique du VlanConfig (mode de bond,
+    MTU) et le nombre de ports de charges ; son uplink est le bond qui
+    tient ses cartes.
+  - Un **provider network kube-ovn** est aussi un switch : ses subnets sont
+    à gauche avec leur VLAN (le VLAN 0 s'affiche « sans étiquette »), CIDR,
+    passerelle, VPC et le réseau attachable par lequel une VM les rejoint ;
+    sa carte à droite.
+  - L'**overlay OVN** est un switch interne : en pointillé, sans carte
+    physique, ce qu'il est. Un réseau d'overlay lié à aucun subnet est
+    signalé.
+  - Chaque réseau liste les **VMs qui y sont branchées**, les démarrées
+    d'abord, le reste se dépliant à la demande. Les VMs du réseau de pod
+    sont listées à part : ce réseau n'a pas de bridge et sort par le
+    routage du nœud.
+  - Chaque carte montre son état et, comme ESXi, son débit et son duplex
+    (« 1000 Full »). Une carte sans lien est en rouge avec un câble
+    pointillé. Les cartes rattachées à aucun switch restent affichées, pour
+    que rien ne manque sans le dire.
+  - Cliquer une carte ou un bond ouvre son détail : MAC, maître, débit,
+    duplex, MTU, changements de porteuse, compteurs de trafic et d'erreurs,
+    mode de bond et miimon, plus la sonde LLDP sur une carte physique. Ce
+    que seul le nœud sait est lu en SSH une fois par nœud et par session,
+    pas à chaque rafraîchissement.
+  - Chaque nom, adresse et CIDR a son bouton de copie.
+  Harvester ne publie pas ses bridges Open vSwitch : sans aide, les ports
+  de charges côté kube-ovn restent invisibles. C'est dit plutôt que deviné,
+  et la vue propose de poser un `LinkMonitor` en lecture seule qui les
+  révèle, par une action tracée et retirable depuis le même bandeau. La vue
+  fonctionne aussi sur un cluster sans l'addon kube-ovn.
 
 - **Topologie live** rendue avec Cytoscape sur trois vues : Cluster
   (nodes), Réseau, et Stockage (volumes Longhorn), avec click-pour-détail.

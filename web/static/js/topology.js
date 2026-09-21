@@ -29,13 +29,6 @@ const Topology = (() => {
   let currentHost = null;          // <div.topology-host> of the active mode
   const REFRESH_INTERVAL = 8000;
 
-  // Ce module n'avait pas d'échappement à lui : `escapeHtml` est local à
-  // l'IIFE d'app.js et n'est pas visible ici. La règle du projet est
-  // d'échapper avant toute interpolation dans `innerHTML`.
-  const escapeHtml = (v) => String(v == null ? '' : v)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
   function canvasId(mode) { return 'topology-canvas-' + mode; }
   function detailId(mode) { return 'topology-detail-' + mode; }
   function metaId(mode)   { return 'topology-meta-'   + mode; }
@@ -222,34 +215,6 @@ const Topology = (() => {
           'font-size': 9,
           'text-rotation': 'autorotate',
         },
-      },
-      {
-        // Une arête DÉCLARÉE (un cluster network réalisé par un bridge, un
-        // provider network lié à une carte) n'est pas un rattachement
-        // observé : la pointiller évite de la lire comme un chemin de
-        // trafic, ce qui a déjà prêté à confusion.
-        // Un libellé de bande n'est pas un objet du réseau : pas de
-        // cadre, pas de fond, et il ne réagit pas au clic.
-        selector: 'node[kind = "fab-band"]',
-        // `background-image: none` est INDISPENSABLE : le style de base
-        // mappe cette propriété sur `data(icon)`, et une icône vide produit
-        // une valeur invalide qui fait échouer le parseur de styles, donc
-        // le rendu ENTIER de la vue. Le symptôme est un canevas vide et une
-        // erreur venue des entrailles de Cytoscape, pas de notre code.
-        style: { 'background-opacity': 0, 'background-image': 'none',
-                 'border-width': 0,
-                 // `left` = le texte se pose À GAUCHE du point d'ancrage,
-                 // donc dans la gouttière. Avec `right` il partait vers la
-                 // droite et recouvrait la première colonne.
-                 'text-halign': 'left', 'text-valign': 'center',
-                 'font-size': 11, 'color': '#8a93a6',
-                 'text-wrap': 'wrap', 'text-max-width': '150px',
-                 'events': 'no' },
-      },
-      {
-        selector: 'edge[edgeType = "fabric-declared"]',
-        style: { 'line-style': 'dashed', 'line-dash-pattern': [5, 4],
-                 'opacity': 0.75 },
       },
       {
         selector: 'edge[edgeType = "replica"]',
@@ -641,11 +606,6 @@ const Topology = (() => {
       // 130×50 need) and they overlapped into an unreadable pile.
       return { name: 'preset', padding: 20 };
     }
-    if (mode === 'fabric') {
-      // Bandes empilées posées par applyFabricLayout() : même remède que
-      // les vues Network et Storage, cose entasserait les couches.
-      return { name: 'preset', padding: 20 };
-    }
     if (mode === 'storage') {
       // v1.8.6: preset — bandes par VM posées par applyStorageLayout()
       // (même remède que la vue Network en 1.8.4).
@@ -827,376 +787,6 @@ const Topology = (() => {
     cy.fit(undefined, 40);
   }
 
-  // Le bandeau qui propose (ou retire) le moniteur permissif. Il dit ce
-  // qui MANQUE plutôt que de laisser croire que la fabrique est complète.
-  function updateFabricNotice(data) {
-    const el = currentHost && currentHost.querySelector('.fabric-notice');
-    if (!el) return;
-    const tr = (k, f) => (window.i18n ? i18n.t(k) : f);
-    if (data.full_linkmonitor) {
-      el.hidden = false;
-      el.className = 'fabric-notice ok';
-      el.innerHTML = `<span>${escapeHtml(tr('fabric.noticePresent',
-        'Full link monitor in place: Open vSwitch bridges and workload ports are visible.'))}</span>`
-        + `<button type="button" class="btn btn-small" data-fabric-monitor="remove">`
-        + `${escapeHtml(tr('fabric.noticeRemove', 'Remove it'))}</button>`;
-    } else {
-      el.hidden = false;
-      el.className = 'fabric-notice warn';
-      el.innerHTML = `<span>${escapeHtml(tr('fabric.noticeMissing',
-        'Open vSwitch bridges and workload ports are missing: Harvester does not publish them. A link monitor would, and it only reads.'))}</span>`
-        + `<button type="button" class="btn btn-small" data-fabric-monitor="add">`
-        + `${escapeHtml(tr('fabric.noticeInstall', 'Install the link monitor'))}</button>`;
-    }
-  }
-
-  // -----------------------------------------------------------------------
-  // Fabrique réseau de l'hôte (v1.35.0) : vue EMPILÉE
-  //
-  //   L5  ports de charges (repliés : 83 veth sur un seul nœud noieraient tout)
-  //   L4  réseaux attachables
-  //   L3  ClusterNetwork          |  ProviderNetwork / VPC / Subnet
-  //   L2  switch virtuel          |  Open vSwitch
-  //   L1  bond
-  //   L0  interfaces physiques
-  //
-  // Deux colonnes : la fabrique classique à gauche, kube-ovn à droite. Sur
-  // harv1 elles n'utilisent même pas la même carte, les fondre en une seule
-  // rangée effacerait précisément ce qu'on veut voir.
-  // -----------------------------------------------------------------------
-  // -1 = le switch physique : la chaîne s'arrêtait au cuivre, alors que la
-  // question de l'exploitant continue (« sur quelle prise ? »). Le montrer,
-  // même inconnu, donne à LLDP un endroit où se poser et ferme le schéma,
-  // comme le fait la barre « Physical Switch » des diagrammes vSphere.
-  const FABRIC_LAYERS = [-1, 0, 1, 2, 3, 4, 5];
-
-  // Nommer les bandes évite d'avoir à déduire chaque niveau de ses boîtes.
-  function fabricBandLabel(layer) {
-    // Clés en toutes lettres via `i18n.t(...)` : un alias local `t(...)`
-    // est INVISIBLE au contrôle de parité, qui ne reconnaît que cette
-    // forme. Le piège a déjà coûté trois fois dans ce projet.
-    const has = !!window.i18n;
-    switch (layer) {
-      case -1: return has ? i18n.t('fabric.band.switch') : 'Physical switch';
-      case 0:  return has ? i18n.t('fabric.band.nic') : 'Physical interfaces';
-      case 1:  return has ? i18n.t('fabric.band.bond') : 'Aggregation';
-      case 2:  return has ? i18n.t('fabric.band.vswitch') : 'Virtual switches';
-      case 3:  return has ? i18n.t('fabric.band.logical') : 'Networks and routing';
-      case 4:  return has ? i18n.t('fabric.band.attach') : 'Attachable networks';
-      default: return has ? i18n.t('fabric.band.ports') : 'Workload ports';
-    }
-  }
-
-  function fabricNode(id, label, kind, opts) {
-    return { group: 'nodes', data: Object.assign({
-      id, label, kind,
-      fullName: opts.fullName || label,
-      searchText: (opts.fullName || label).toLowerCase(),
-      icon: nodeIcon(opts.icon || 'network'),
-      color: opts.color, border: opts.border,
-      shape: opts.shape || 'round-rectangle',
-      width: opts.width || 150, height: opts.height || 44,
-      layer: opts.layer, rank: opts.rank || 0,
-      fabric: opts.fabric || 'classic',
-      raw: opts.raw || {},
-    }) };
-  }
-
-  // Un lien mort ou un rattachement non résolu doivent SAUTER aux yeux :
-  // c'est l'information que l'exploitant cherche en ouvrant cette vue.
-  function fabricLinkColors(l) {
-    if (l.state === 'down') return { color: '#4a1f1f', border: '#d86a6a' };
-    if (l.master_unresolved) return { color: '#4a3a1f', border: '#d8a84a' };
-    if (l.fabric === 'ovn')  return { color: '#1f3e5b', border: '#4aa8d8' };
-    return { color: '#1f4a33', border: '#4ad88a' };
-  }
-
-  function buildFabricElements(data) {
-    const els = [];
-    const links = data.links || [];
-    const idOf = (node, name) => 'fl-' + node + '-' + name;
-
-    links.filter(l => l.layer <= 2).forEach(l => {
-      const c = fabricLinkColors(l);
-      els.push(fabricNode(idOf(l.node, l.name), l.name,
-        l.layer === 0 ? 'fab-nic' : l.layer === 1 ? 'fab-bond' : 'fab-switch', {
-          icon: l.layer === 0 ? 'node' : 'switch',
-          color: c.color, border: c.border,
-          shape: l.layer === 0 ? 'cut-rectangle' : 'round-rectangle',
-          layer: l.layer, fabric: l.fabric,
-          fullName: l.name + ' (' + l.type + ', ' + l.state + ')',
-          raw: l,
-        }));
-      if (l.master) {
-        els.push({ group: 'edges', data: {
-          id: 'fe-' + l.node + '-' + l.name,
-          source: idOf(l.node, l.name), target: idOf(l.node, l.master),
-          edgeType: 'fabric' } });
-      }
-    });
-
-    // Les ports de charges sont REPLIÉS, un nœud par fabrique avec leur
-    // nombre. Les déplier ferait 83 boîtes sur un seul nœud.
-    const ports = links.filter(l => l.layer === 5);
-    ['classic', 'ovn'].forEach(fab => {
-      const mine = ports.filter(l => l.fabric === fab);
-      if (!mine.length) return;
-      els.push(fabricNode('fab-ports-' + fab,
-        mine.length + ' ' + (window.i18n ? i18n.t('fabric.ports')
-                                        : 'workload ports'),
-        'fab-ports', { icon: 'vm', layer: 5, fabric: fab, width: 170,
-          color: '#2a2f3a', border: '#8a93a6',
-          fullName: mine.map(l => l.name).slice(0, 40).join(', '),
-          raw: { count: mine.length, fabric: fab } }));
-    });
-
-    // Un cluster network se RÉALISE par un bridge, et c'est un NAD qui le
-    // dit : il porte à la fois `clusternetwork` et le nom du bridge. On lit
-    // donc le lien dans la donnée au lieu de le déduire du nommage
-    // (`<cn>-br`), qui n'est qu'une convention.
-    const bridgeOfCn = {};
-    (data.networks || []).forEach(nw => {
-      if (nw.cluster_network && nw.bridge) bridgeOfCn[nw.cluster_network] = nw.bridge;
-    });
-    // Les cartes et le mode d'agrégation déclarés par la VlanConfig sont
-    // portés PAR le cluster network, pas dessinés en arête : une arête de la
-    // couche 3 vers la couche 0 sautait le bridge et le bond, traversait
-    // tout le schéma et laissait croire à un second chemin parallèle.
-    const vcOfCn = {};
-    (data.vlan_configs || []).forEach(vc => { vcOfCn[vc.cluster_network] = vc; });
-
-    // Une boîte de switch par carte physique. On ne sait pas encore ce
-    // qu'il y a au bout (rien n'émet de LLDP sur le réseau d'essai) : on le
-    // dit, plutôt que de laisser la chaîne se terminer dans le vide.
-    links.filter(l => l.layer === 0 && l.state === 'up').forEach(l => {
-      const id = 'fab-sw-' + l.node + '-' + l.name;
-      els.push(fabricNode(id,
-        (window.i18n ? i18n.t('fabric.unknownSwitch') : 'switch ?'),
-        'fab-switchport', {
-          icon: 'switch', layer: -1, fabric: l.fabric, width: 150,
-          color: '#2a2f3a', border: '#8a93a6', shape: 'cut-rectangle',
-          fullName: (window.i18n ? i18n.t('fabric.unknownSwitchTip')
-                                 : 'Unknown until LLDP answers'),
-          raw: { node: l.node, interface: l.name, unknown: true } }));
-      els.push({ group: 'edges', data: {
-        id: 'fe-sw-' + l.node + '-' + l.name,
-        source: idOf(l.node, l.name), target: id,
-        label: '', edgeType: 'fabric' } });
-    });
-
-    (data.cluster_networks || []).forEach(cn => {
-      const vc = vcOfCn[cn.name] || {};
-      els.push(fabricNode('fab-cn-' + cn.name, cn.name, 'fab-abstract',
-        { icon: 'network', layer: 3, fabric: 'classic', width: 160,
-          color: '#1f4a33', border: '#4ad88a',
-          fullName: cn.name + (vc.nics ? ' (' + vc.nics.join(', ') + ')' : ''),
-          raw: Object.assign({}, cn, {
-            uplink_nics: vc.nics, bond_mode: vc.bond_mode, mtu: vc.mtu,
-            vlan_config: vc.name, bridge: bridgeOfCn[cn.name] }) }));
-      const br = bridgeOfCn[cn.name];
-      if (!br) return;
-      (data.nodes || []).forEach(n => {
-        if (!links.some(l => l.node === n.name && l.name === br)) return;
-        els.push({ group: 'edges', data: {
-          id: 'fe-cn-' + cn.name + '-' + n.name,
-          source: 'fab-cn-' + cn.name, target: idOf(n.name, br),
-          label: '', edgeType: 'fabric-declared' } });
-      });
-    });
-
-    const ovn = data.kubeovn || {};
-    // kube-ovn est une HIÉRARCHIE, pas une rangée : le provider network
-    // touche le matériel, un VLAN le découpe, un subnet porte les adresses,
-    // un VPC regroupe les subnets. `rank` les empile dans la bande, du plus
-    // proche du cuivre au plus abstrait.
-    (ovn.vpcs || []).forEach(v => {
-      els.push(fabricNode('fab-vpc-' + v.name, v.name, 'fab-abstract',
-        { icon: 'network', layer: 3, rank: 3, fabric: 'ovn', width: 150,
-          color: '#1f3e5b', border: '#4aa8d8',
-          fullName: v.name + ' (' + (v.subnets || []).length + ' subnets)',
-          raw: v }));
-    });
-    (ovn.vlans || []).forEach(vl => {
-      els.push(fabricNode('fab-vlan-' + vl.name, vl.name, 'fab-abstract',
-        { icon: 'switch', layer: 3, rank: 1, fabric: 'ovn', width: 150,
-          color: '#1f3e5b', border: '#4aa8d8',
-          fullName: vl.name + ' (VLAN ' + vl.id + ')', raw: vl }));
-      if (vl.provider_network) {
-        els.push({ group: 'edges', data: {
-          id: 'fe-vlan-pn-' + vl.name, source: 'fab-vlan-' + vl.name,
-          target: 'fab-pn-' + vl.provider_network,
-          label: '', edgeType: 'fabric-declared' } });
-      }
-    });
-    (ovn.provider_networks || []).forEach(pn => {
-      els.push(fabricNode('fab-pn-' + pn.name, pn.name, 'fab-abstract',
-        { icon: 'network', layer: 3, rank: 0, fabric: 'ovn', width: 150,
-          color: pn.ready ? '#1f3e5b' : '#4a3a1f',
-          border: pn.ready ? '#4aa8d8' : '#d8a84a',
-          fullName: pn.name + ' -> ' + (pn.default_interface || '?'),
-          raw: pn }));
-      (data.nodes || []).forEach(n => {
-        if (!pn.default_interface) return;
-        const nic = links.find(l => l.node === n.name
-                                 && l.name === pn.default_interface);
-        if (!nic) return;
-        // Viser le MAÎTRE de la carte quand il est connu : sinon l'arête
-        // va de la couche 3 à la couche 0, saute le switch et traverse
-        // tout le schéma, exactement ce qu'on vient de corriger côté
-        // classique. Sans maître rapporté, on garde la carte : c'est ce
-        // que le CRD déclare, et mieux vaut une arête longue qu'un lien
-        // inventé vers un bridge qu'on n'a pas vu.
-        const target = nic.master || pn.default_interface;
-        els.push({ group: 'edges', data: {
-          id: 'fe-pn-' + pn.name + '-' + n.name,
-          source: 'fab-pn-' + pn.name,
-          target: idOf(n.name, target),
-          label: '', edgeType: 'fabric-declared' } });
-      });
-    });
-    (ovn.subnets || []).forEach(sn => {
-      // Un subnet d'OVERLAY est encapsulé sur le réseau des nœuds : il ne
-      // sort PAS par un uplink physique. Le distinguer évite le pire des
-      // contresens de cette vue, croire qu'il passe par la carte.
-      els.push(fabricNode('fab-sn-' + sn.name, sn.name, 'fab-abstract',
-        { icon: 'storage', layer: 3, rank: 2, fabric: 'ovn', width: 170,
-          color: sn.overlay ? '#2a2f3a' : '#1f3e5b',
-          border: sn.overlay ? '#8a93a6' : '#4aa8d8',
-          fullName: sn.name + ' ' + (sn.cidr || '')
-                    + (sn.overlay ? ' (overlay)' : ''),
-          raw: sn }));
-      if (sn.vpc) {
-        els.push({ group: 'edges', data: {
-          id: 'fe-sn-' + sn.name, source: 'fab-sn-' + sn.name,
-          target: 'fab-vpc-' + sn.vpc, label: '', edgeType: 'fabric-declared' } });
-      }
-      // Un subnet d'underlay descend vers le matériel PAR SON VLAN, pas en
-      // sautant directement sur la carte.
-      if (sn.vlan) {
-        els.push({ group: 'edges', data: {
-          id: 'fe-sn-vlan-' + sn.name, source: 'fab-sn-' + sn.name,
-          target: 'fab-vlan-' + sn.vlan, label: '', edgeType: 'fabric-declared' } });
-      }
-    });
-
-    (data.networks || []).forEach(nw => {
-      const id = 'fab-nad-' + nw.namespace + '-' + nw.name;
-      els.push(fabricNode(id, nw.name, 'fab-network',
-        { icon: 'switch', layer: 4, fabric: nw.fabric, width: 170,
-          shape: 'cut-rectangle',
-          color: nw.fabric === 'ovn' ? '#1f3e5b' : '#1f4a33',
-          border: nw.ready ? (nw.fabric === 'ovn' ? '#4aa8d8' : '#4ad88a')
-                           : '#d8a84a',
-          fullName: nw.namespace + '/' + nw.name + ' (' + (nw.kind || '?') + ')',
-          raw: nw }));
-      if (nw.cluster_network && nw.fabric === 'classic') {
-        els.push({ group: 'edges', data: {
-          id: 'fe-nad-' + id, source: id,
-          target: 'fab-cn-' + nw.cluster_network, label: '', edgeType: 'fabric-declared' } });
-      }
-      const sub = (ovn.subnets || []).find(x => x.provider && x.provider === nw.provider);
-      if (sub) {
-        els.push({ group: 'edges', data: {
-          id: 'fe-nadsn-' + id, source: id,
-          target: 'fab-sn-' + sub.name, label: '', edgeType: 'fabric-declared' } });
-      }
-    });
-    // Un libellé par bande, calé à gauche. Sans eux il faut déduire chaque
-    // niveau du contenu de ses boîtes, ce qu'un exploitant pressé ne fera
-    // pas. C'est l'idée des bandes nommées des schémas vSphere.
-    const used = new Set(els.filter(e => e.group === 'nodes')
-                             .map(e => e.data.layer));
-    FABRIC_LAYERS.filter(l => used.has(l)).forEach(layer => {
-      els.push({ group: 'nodes', data: {
-        id: 'fab-band-' + layer, label: fabricBandLabel(layer),
-        kind: 'fab-band', layer, rank: -1, fabric: 'band',
-        fullName: fabricBandLabel(layer),
-        searchText: '', icon: '', color: 'transparent',
-        // Un POINT, pas une boîte : seul le texte posé à sa gauche est
-        // visible. Lui laisser la taille d'une boîte le faisait chevaucher
-        // la première colonne dans la géométrie, sans que rien ne se voie.
-        border: 'transparent', shape: 'rectangle', width: 1, height: 1,
-        raw: { band: layer } } });
-    });
-    return els;
-  }
-
-  // Empilement : couche 0 EN BAS. En Cytoscape l'axe y descend, donc la
-  // couche basse porte le plus grand y.
-  function applyFabricLayout(cy) {
-    const rowH = 64, colGap = 40, cellW = 200, leftPad = 60, topPad = 60;
-    const maxLayer = Math.max(...FABRIC_LAYERS);
-
-    // Largeur d'une colonne : la bande la plus chargée commande, sinon les
-    // deux fabriques se chevauchent horizontalement.
-    let widest = 1;
-    FABRIC_LAYERS.forEach(layer => {
-      ['classic', 'ovn'].forEach(fab => {
-        const byRank = new Map();
-        cy.nodes().filter(x => x.data('layer') === layer
-                            && x.data('fabric') === fab)
-          .forEach(n => {
-            const r = n.data('rank') || 0;
-            byRank.set(r, (byRank.get(r) || 0) + 1);
-          });
-        byRank.forEach(v => { widest = Math.max(widest, v); });
-      });
-    });
-    const colWidth = widest * cellW + colGap;
-
-    // Hauteur de CHAQUE bande selon le nombre de rangs qu'elle contient :
-    // kube-ovn en loge quatre en couche 3 (provider network, VLAN, subnet,
-    // VPC). Une hauteur fixe les faisait se chevaucher, les boîtes étant
-    // plus hautes que le pas entre rangs.
-    const ranksOf = (layer) => {
-      const rs = new Set();
-      cy.nodes().filter(x => x.data('layer') === layer
-                          && x.data('kind') !== 'fab-band')
-        .forEach(n => rs.add(n.data('rank') || 0));
-      return rs.size ? [...rs].sort((a, b) => a - b) : [0];
-    };
-    const bandTop = {};
-    let cursor = topPad;
-    // De la couche HAUTE vers la basse : la couche 0 doit finir en bas.
-    [...FABRIC_LAYERS].sort((a, b) => b - a).forEach(layer => {
-      bandTop[layer] = cursor;
-      cursor += Math.max(1, ranksOf(layer).length) * rowH + 26;
-    });
-
-    FABRIC_LAYERS.forEach(layer => {
-      // Dans une bande, le rang le plus proche du matériel est le plus BAS.
-      const ranks = ranksOf(layer);
-      const yOfRank = {};
-      ranks.forEach((r, i) => {
-        yOfRank[r] = bandTop[layer] + (ranks.length - 1 - i) * rowH;
-      });
-      const band = cy.nodes().filter(x => x.data('kind') === 'fab-band'
-                                        && x.data('layer') === layer);
-      if (band.length) {
-        // Franchement à GAUCHE du bord des boîtes : centrées en `leftPad`
-        // et larges de 150, elles s'étendent jusqu'à leftPad-75, et une
-        // ancre posée dedans compte comme un chevauchement.
-        band.position({ x: leftPad - 115,
-                        y: yOfRank[ranks[ranks.length - 1]] });
-      }
-      ['classic', 'ovn'].forEach((fab, fi) => {
-        const nodes = cy.nodes()
-          .filter(x => x.data('layer') === layer && x.data('fabric') === fab)
-          .sort((a, b) => (a.data('rank') - b.data('rank'))
-                          || a.data('label').localeCompare(b.data('label')));
-        const baseX = leftPad + fi * colWidth;
-        const used = new Map();
-        nodes.forEach(n => {
-          const r = n.data('rank') || 0;
-          const col = used.get(r) || 0;
-          used.set(r, col + 1);
-          n.position({ x: baseX + col * cellW, y: yOfRank[r] });
-        });
-      });
-    });
-    cy.fit(undefined, 40);
-  }
-
   // -----------------------------------------------------------------------
   // Public render entry point
   // -----------------------------------------------------------------------
@@ -1206,7 +796,6 @@ const Topology = (() => {
     let elements;
     if (currentMode === 'cluster')      elements = buildClusterElements(data);
     else if (currentMode === 'network') elements = buildNetworkElements(data);
-    else if (currentMode === 'fabric')  elements = buildFabricElements(data);
     else                                elements = buildStorageElements(data);
     // Some cose layouts crash if the container has 0 width — happens
     // when a subtab is still `hidden` (display:none) at render time.
@@ -1242,7 +831,6 @@ const Topology = (() => {
     if (currentMode === 'cluster') applyClusterLayout(cy);
     if (currentMode === 'network') applyNetworkLayout(cy);
     if (currentMode === 'storage') applyStorageLayout(cy);
-    if (currentMode === 'fabric')  applyFabricLayout(cy);
     // Belt-and-braces: ungrabify any node that managed to slip through.
     cy.nodes().ungrabify();
     // Click → details
@@ -1360,7 +948,7 @@ const Topology = (() => {
     sidebar.innerHTML = renderDetail(d);
     // Poser les boutons de copie APRÈS coup, sur les valeurs qui le
     // méritent : les ajouter dans chaque gabarit de détail voudrait dire
-    // les répéter dans les cinq (nœud, VM, volume, réseau, fabrique) et en
+    // les répéter dans les quatre (nœud, VM, volume, réseau) et en
     // oublier un au premier ajout.
     if (window.CopyTo) {
       sidebar.querySelectorAll('dd').forEach(dd => {
@@ -1374,87 +962,6 @@ const Topology = (() => {
     sidebar.querySelectorAll('[data-act]').forEach(btn => {
       btn.addEventListener('click', () => doAction(btn.dataset.act, d));
     });
-    const deep = sidebar.querySelector('[data-fabric-detail]');
-    if (deep) deep.addEventListener('click', () => loadFabricDeep(sidebar, deep));
-  }
-
-  // Détail d'un élément de la fabrique. Pour une carte physique, l'API ne
-  // sait pas tout (pilote, MTU réel, compteurs d'erreurs) : on va le
-  // chercher sur le nœud, mais SEULEMENT à l'ouverture, jamais à chaque
-  // rendu, sinon on paierait un SSH toutes les huit secondes.
-  async function loadFabricDeep(sidebar, btn) {
-    const node = btn.dataset.fabricDetail;
-    const link = btn.dataset.fabricLink;
-    const out = sidebar.querySelector('.fabric-deep');
-    if (!out || !node) return;
-    btn.disabled = true;
-    out.textContent = (window.i18n ? i18n.t('common.loading') : 'Loading...');
-    try {
-      const r = await fetch(`/api/network-fabric/${encodeURIComponent(lastCluster)}`
-                            + `/node/${encodeURIComponent(node)}`);
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      const data = await r.json();
-      const l = (data.links || []).find(x => x.name === link) || {};
-      const st = (data.stats || {})[link] || {};
-      const rows = [
-        ['MTU', l.mtu], ['kind', l.kind], ['bond', l.bond_mode],
-        ['miimon', l.bond_miimon],
-        ['rx', st.rx_bytes], ['rx err', st.rx_errors], ['rx drop', st.rx_dropped],
-        ['tx', st.tx_bytes], ['tx err', st.tx_errors], ['tx drop', st.tx_dropped],
-      ].filter(([, v]) => v !== undefined && v !== null && v !== '');
-      out.innerHTML = `<dl class="kv">` + rows.map(([k, v]) =>
-        `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('') + `</dl>`;
-    } catch (e) {
-      out.textContent = String(e.message || e);
-      btn.disabled = false;
-    }
-  }
-
-  function renderFabricDetail(d) {
-    const tr = (k, f) => (window.i18n ? i18n.t(k) : f);
-    const raw = d.raw || {};
-    const rows = [];
-    const add = (k, v) => { if (v !== undefined && v !== null && v !== '') rows.push([k, v]); };
-    if (d.kind === 'fab-ports') {
-      add(tr('fabric.d.count', 'Ports'), raw.count);
-      add(tr('fabric.d.fabric', 'Fabric'), raw.fabric);
-    } else if (d.kind === 'fab-network') {
-      add(tr('fabric.d.namespace', 'Namespace'), raw.namespace);
-      add(tr('fabric.d.type', 'Type'), raw.kind);
-      add('CNI', raw.cni);
-      add(tr('fabric.d.bridge', 'Bridge'), raw.bridge);
-      add('VLAN', raw.vlan);
-      add(tr('fabric.d.provider', 'Provider'), raw.provider);
-      add(tr('fabric.d.ready', 'Ready'), String(raw.ready));
-    } else if (d.kind === 'fab-abstract') {
-      add('CIDR', raw.cidr);
-      add(tr('fabric.d.gateway', 'Gateway'), raw.gateway);
-      add('VPC', raw.vpc);
-      add('NAT', raw.nat === undefined ? '' : String(raw.nat));
-      add(tr('fabric.d.provider', 'Provider'), raw.provider);
-      add(tr('fabric.d.freeIps', 'Free IPs'), raw.available_ips);
-      add(tr('fabric.d.uplink', 'Uplink'), raw.default_interface);
-    } else {
-      add(tr('fabric.d.type', 'Type'), raw.type);
-      add(tr('fabric.d.state', 'State'), raw.state);
-      add('MAC', raw.mac);
-      add(tr('fabric.d.master', 'Master'), raw.master
-        || (raw.master_unresolved
-            ? tr('fabric.d.masterUnknown', 'reported index ') + raw.master_index
-            : ''));
-      add(tr('fabric.d.fabric', 'Fabric'), raw.fabric);
-      add(tr('fabric.d.node', 'Node'), raw.node);
-    }
-    const kv = rows.map(([k, v]) =>
-      `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`).join('');
-    const deep = (d.kind === 'fab-nic' || d.kind === 'fab-bond'
-                  || d.kind === 'fab-switch')
-      ? `<button type="button" class="btn btn-small" data-fabric-detail="${escapeHtml(raw.node || '')}"
-                 data-fabric-link="${escapeHtml(raw.name || '')}">`
-        + `${escapeHtml(tr('fabric.d.more', 'Detail from the node'))}</button>`
-      : '';
-    return `<h3>${Icons.svg('network', { size: 18 })} ${escapeHtml(d.label)}</h3>`
-      + `<dl class="kv">${kv}</dl>${deep}<div class="fabric-deep"></div>`;
   }
 
   function renderDetail(d) {
@@ -1463,7 +970,6 @@ const Topology = (() => {
     // back to a no-op translator so the panel still renders and the
     // user can read the raw key — better than throwing TypeError.
     const i = window.i18n || { t: (k) => k };
-    if (String(d.kind || '').startsWith('fab-')) return renderFabricDetail(d);
     if (d.kind === 'node') {
       const n = d.raw;
       return `
@@ -1685,7 +1191,6 @@ const Topology = (() => {
     let elements;
     if (currentMode === 'cluster')      elements = buildClusterElements(data);
     else if (currentMode === 'network') elements = buildNetworkElements(data);
-    else if (currentMode === 'fabric')  elements = buildFabricElements(data);
     else                                elements = buildStorageElements(data);
     const newById = new Map(elements.map(e => [e.data.id, e.data]));
     cy.batch(() => {
@@ -1708,7 +1213,6 @@ const Topology = (() => {
     let elements;
     if (mode === 'cluster')      elements = buildClusterElements(data);
     else if (mode === 'network') elements = buildNetworkElements(data);
-    else if (mode === 'fabric')  elements = buildFabricElements(data);
     else                         elements = buildStorageElements(data);
     const m = new Map();
     elements.forEach(e => m.set(e.data.id, e.data.parent || ''));
@@ -1739,9 +1243,7 @@ const Topology = (() => {
     const askedCluster = lastCluster;
     const askedMode = currentMode;
     try {
-      const url = askedMode === 'fabric'
-        ? `/api/network-fabric/${encodeURIComponent(askedCluster)}`
-        : `/api/topology/${encodeURIComponent(askedCluster)}`;
+      const url = `/api/topology/${encodeURIComponent(askedCluster)}`;
       const r = await fetch(url);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const data = await r.json();
@@ -1784,16 +1286,8 @@ const Topology = (() => {
         const cached = data.cached
           ? ` (cache ${Math.round(data.cache_age_s)}s)`
           : '';
-        // La fabrique n'a ni VMs ni volumes : lui appliquer le résumé des
-        // autres vues jetait une exception, rattrapée en un bandeau d'erreur
-        // à côté de la barre d'outils. Chaque mode résume ce qu'il montre.
-      if (currentMode === 'fabric') updateFabricNotice(data);
-        meta.textContent = currentMode === 'fabric'
-          ? `${(data.nodes || []).length} nodes · `
-            + `${(data.links || []).length} links · `
-            + `${(data.networks || []).length} networks${cached}`
-          : `${data.nodes.length} nodes · ${data.vms.length} VMs · `
-            + `${data.volumes.length} volumes${cached}`;
+        meta.textContent = `${data.nodes.length} nodes · ${data.vms.length} VMs · `
+          + `${data.volumes.length} volumes${cached}`;
       }
     } catch (e) {
       console.warn('topology refresh failed', e);

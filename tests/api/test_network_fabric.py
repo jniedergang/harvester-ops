@@ -398,8 +398,10 @@ def test_the_cluster_network_is_linked_to_its_bridge_by_data():
     dit. Le déduire du nommage (`<cn>-br`) serait une convention, pas une
     donnée, et la vue tirait avant cela une arête de la couche 3 à la
     couche 0 qui sautait le bridge et le bond."""
-    src = (ROOT / "web" / "static" / "js" / "topology.js").read_text()
-    block = src.split("function buildFabricElements", 1)[1][:6000]
+    # v1.39.0 : la vue est devenue une page de switchs (fabric.js), la règle
+    # la suit. Le switch d'un cluster network est le bridge que ses NADs
+    # nomment, et ses uplinks se lisent sous CE bridge.
+    src = (ROOT / "web" / "static" / "js" / "fabric.js").read_text()
+    block = src.split("function buildModel", 1)[1][:6000]
     assert "bridgeOfCn" in block
-    # L'ancienne arête directe vers la carte ne doit pas revenir.
-    assert "fe-vc-" not in block
+    assert "uplinksOf(node, bridge)" in block

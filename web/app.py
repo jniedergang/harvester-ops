@@ -2293,7 +2293,50 @@ FABRIC_KINDS = [
     # Le maillon qui relie un subnet d'UNDERLAY à son provider network.
     # Sans lui, la chaîne kube-ovn saute du subnet à la carte physique.
     "vlans.kubeovn.io",
+    # Les VMs branchées sur chaque réseau : c'est ce qu'un exploitant
+    # cherche en premier sous un port group, et ce qu'ESXi montre.
+    "virtualmachines.kubevirt.io",
 ]
+
+# Types absents d'un cluster, retenus un moment. `kubectl get a,b,c` échoue
+# EN BLOC quand l'un des types n'existe pas : un Harvester sans l'addon
+# kube-ovn n'a pas ses CRD, et toute la fabrique passait pour « cluster
+# injoignable ». On se replie alors type par type, puis on retient ce qui
+# manque pour que les rafraîchissements suivants restent UN seul appel.
+# La mémoire expire : un addon activé plus tard doit finir par apparaître.
+FABRIC_MISSING_TTL = 600
+_fabric_missing = {}
+_fabric_missing_lock = threading.Lock()
+
+
+def _fabric_items(kc, cluster):
+    """Objets de la fabrique, en un appel groupé quand c'est possible.
+    None seulement si même les nœuds sont illisibles."""
+    now = time.time()
+    with _fabric_missing_lock:
+        missing, ts = _fabric_missing.get(cluster, (frozenset(), 0))
+        if now - ts > FABRIC_MISSING_TTL:
+            missing = frozenset()
+    kinds = [k for k in FABRIC_KINDS if k not in missing]
+    raw = _kubectl_json(kc, "get", "-A", ",".join(kinds),
+                        timeout=40, cluster=cluster)
+    if raw is not None:
+        return raw.get("items", [])
+    items, absent = [], set()
+    for kind in kinds:
+        one = _kubectl_json(kc, "get", "-A", kind, timeout=20, cluster=cluster)
+        if one is None:
+            absent.add(kind)
+            continue
+        items.extend(one.get("items", []))
+    # Sans les nœuds, il n'y a rien à dessiner : c'est bien le cluster qui
+    # ne répond pas, pas un type qui manque.
+    if "nodes" in absent:
+        return None
+    if absent:
+        with _fabric_missing_lock:
+            _fabric_missing[cluster] = (frozenset(missing | absent), now)
+    return items
 
 # Un maître dont le nom commence par là relève d'Open vSwitch, pas d'un
 # bridge Linux : c'est ce qui sépare les deux fabriques.
@@ -2323,16 +2366,15 @@ def _fabric_link_layer(link):
 
 def _build_fabric(cluster, kc):
     """Empilement réseau de l'hôte, en un seul appel groupé."""
-    raw = _kubectl_json(kc, "get", "-A", ",".join(FABRIC_KINDS),
-                        timeout=40, cluster=cluster)
-    if raw is None:
+    items = _fabric_items(kc, cluster)
+    if items is None:
         return None
     by_kind = {}
-    for item in raw.get("items", []):
+    for item in items:
         by_kind.setdefault(item.get("kind"), []).append(item)
 
     out = {"cluster": cluster, "nodes": [], "links": [], "cluster_networks": [],
-           "vlan_configs": [], "networks": [], "kubeovn":
+           "vlan_configs": [], "networks": [], "vms": [], "kubeovn":
            {"provider_networks": [], "vpcs": [], "subnets": []},
            # L'interface propose de poser le moniteur qui complète la
            # fabrique ; elle doit donc savoir s'il est déjà là.
@@ -2518,6 +2560,28 @@ def _build_fabric(cluster, kc):
             "layer": 3, "rank": 3,
         })
     out["kubeovn"].setdefault("vlans", [])
+
+    # Qui est branché où. Un `networkName` sans namespace désigne un NAD du
+    # namespace de la VM : le normaliser ici évite que l'écran rate la
+    # moitié des rattachements. Le réseau de pod n'a pas de NAD : il est
+    # signalé tel quel.
+    for vm in by_kind.get("VirtualMachine", []):
+        meta = vm.get("metadata", {})
+        ns = meta.get("namespace")
+        spec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+        nets = []
+        for n in spec.get("networks") or []:
+            multus = n.get("multus") or {}
+            target = multus.get("networkName")
+            if target and "/" not in target:
+                target = f"{ns}/{target}"
+            nets.append({"nic": n.get("name"), "network": target,
+                         "pod": "pod" in n})
+        out["vms"].append({
+            "namespace": ns, "name": meta.get("name"),
+            "status": (vm.get("status") or {}).get("printableStatus"),
+            "networks": nets,
+        })
     return out
 
 

@@ -4,6 +4,61 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.39.0] - 2026-09-21 - The fabric, read like a vSwitch
+
+The stacked graph of 1.35 to 1.38 was found hard to read and awkward to
+use, and rightly so: the pieces of one switch were scattered over the
+whole canvas and the edges ran diagonally. The Fabric view now copies the
+ESXi "Standard Switch" layout that operators already know.
+
+### Changed
+- **One block per switch, read left to right**: networks and their VMs,
+  the switch, then the physical adapters. A cluster network is a switch
+  named after its bridge, with the VlanConfig policy (bond mode, MTU) in
+  its header and the bond holding its cards as uplink. A kube-ovn provider
+  network is a switch whose port groups are its underlay subnets (VLAN,
+  CIDR, gateway, VPC, and the attachable network a VM joins them through).
+- **The OVN overlay is an internal switch**: dotted, with no adapter. That
+  is what it is, and it is the point the old graph got wrong.
+- The view is HTML, not a canvas: text can be selected, copy buttons are
+  native, and it folds to one column on a narrow screen.
+- The LLDP probe moved to the adapter detail, where ESXi keeps its CDP and
+  LLDP information, instead of an "unknown switch" box under every card.
+
+### Added
+- **The VMs on each network**, running ones first, the rest unfolding on
+  demand (and staying unfolded across the 8 second refresh). VMs on the
+  pod network are listed apart: that network has no bridge.
+- **Speed and duplex on every card** ("1000 Full"), read from the node
+  once per node and per session. The card detail adds MTU, carrier
+  changes, traffic and error counters, and bond mode with miimon on a bond.
+- Cards attached to no switch are still shown, and an overlay network
+  bound to no subnet is flagged.
+- Tooltips on the two probes of the VM connection path, which had none.
+
+### Fixed
+- **A cluster without kube-ovn showed "cluster unreachable".** `kubectl
+  get a,b,c` fails as a whole when one type is missing, and a Harvester
+  without the add-on has none of its CRDs. The fabric now falls back type
+  by type, and remembers the missing ones for ten minutes so that the
+  following refreshes stay a single call.
+
+### Internal
+- The Cytoscape fabric code (builder, layout, detail panel, notice) is
+  gone from `topology.js`, with its 21 translation keys; the orphan
+  baseline drops from 105 to 103.
+
+### Tests
+- 11 API tests: VM attachments (bare network names resolved in the VM
+  namespace, pod network flagged), the per-type fallback, its memory, its
+  expiry, and a dead cluster still reported as such.
+- The 21 browser tests of the fabric view are rewritten for the new
+  layout: reading order measured on screen, bond then card as uplink,
+  internal overlay, untagged VLAN 0, VMs under their network and the
+  unfolding that survives a refresh, one node read per session, a copy
+  click that does not select the card, and a tooltip on every control.
+  Each one was checked to fail when the behaviour it guards is broken.
+
 ## [1.38.0] - 2026-09-21 - Named bands, and a switch to end the chain
 
 Two ideas taken from vSphere network diagrams, which an operator offered as

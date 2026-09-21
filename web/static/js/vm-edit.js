@@ -1340,11 +1340,13 @@ const VMEdit = (() => {
       const bridge = nad.bridge || '';
       const tools =
         (mac && bridge
-          ? `<button type="button" class="btn btn-small" data-netpath-port
+          ? `<button type="button" class="btn btn-small tip" data-netpath-port
+                     data-tip-i18n="vm.edit.netPathFindPortTip"
                      data-mac="${esc(mac)}" data-bridge="${esc(bridge)}">`
             + `${esc(tr('vm.edit.netPathFindPort', 'Which host port?'))}</button>` : '')
         + (last
-          ? `<button type="button" class="btn btn-small" data-netpath-lldp
+          ? `<button type="button" class="btn btn-small tip" data-netpath-lldp
+                     data-tip-i18n="fabric.lldpTip"
                      data-iface="${esc(last.name)}">`
             + `${esc(tr('vm.edit.netPathLldp', 'Identify the switch (LLDP)'))}</button>` : '');
       return `<div class="netpath-row">`
@@ -1374,6 +1376,14 @@ const VMEdit = (() => {
 
   function wireNetPathTools(sectionEl, cluster, namespace, name, d) {
     if (window.CopyTo) CopyTo.wire(sectionEl);
+    // Les bulles lisent `data-tip`, que i18n ne pose qu'à son passage sur
+    // le document : ce rendu arrive après, il faut le faire ici.
+    if (window.i18n) {
+      sectionEl.querySelectorAll('[data-tip-i18n]').forEach(el => {
+        const t = i18n.t(el.getAttribute('data-tip-i18n'));
+        if (t) el.setAttribute('data-tip', t);
+      });
+    }
 
     sectionEl.querySelectorAll('[data-netpath-port]').forEach(btn => {
       btn.addEventListener('click', async () => {

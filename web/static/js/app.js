@@ -40,6 +40,7 @@ const App = (() => {
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
     if (name !== 'overview' && window.Topology) window.Topology.stop();
+    if (name !== 'overview' && window.Fabric) window.Fabric.stop();
   }
 
   /** Sous-onglet d'aperçu actif (metrics | cluster | network | storage). */
@@ -1938,7 +1939,23 @@ const App = (() => {
   // app modules don't need to know about cytoscape internals.
   // -------------------------------------------------------------------------
   function mountTopology(mode) {
-    if (!window.Topology || !currentCluster) return;
+    if (!currentCluster) return;
+    // La fabrique n'est plus un graphe : c'est une page de switchs à la
+    // manière d'ESXi, rendue en HTML par son propre module. Elle ne dépend
+    // donc pas de Cytoscape, chargé en module différé.
+    if (window.Fabric && mode !== 'fabric') window.Fabric.stop();
+    if (mode === 'fabric' && window.Fabric) {
+      if (window.Topology) window.Topology.stop();
+      const fabricHost = document.querySelector('.overview-subtab[data-subtab="fabric"] .topology-host');
+      const fabricLoading = window.Fabric.start(currentCluster);
+      if (window.Veil && fabricHost && fabricLoading && typeof fabricLoading.then === 'function') {
+        window.Veil.during(fabricHost, {
+          message: i18n.t('topology.loading'), name: currentCluster, delay: 250,
+        }, () => fabricLoading);
+      }
+      return fabricLoading;
+    }
+    if (!window.Topology) return;
     // L'onglet Métriques n'a pas de canevas : y monter la topologie n'a
     // pas de sens, mais il faut couper son rafraîchissement.
     if (mode === 'metrics') { window.Topology.stop(); return; }
@@ -1988,27 +2005,6 @@ const App = (() => {
             <p class="hint">${i18n.t('topology.detailEmpty')}</p>
           </aside>
         </div>`;
-      // La fabrique s'arrête aux bridges Open vSwitch, que Harvester ne
-      // publie pas. On PROPOSE de poser le moniteur qui les révèle, sans
-      // jamais l'imposer : c'est une écriture sur le cluster de l'exploitant.
-      if (mode === 'fabric' && !host.querySelector('.fabric-notice')) {
-        const notice = document.createElement('div');
-        notice.className = 'fabric-notice';
-        notice.hidden = true;
-        host.insertBefore(notice, host.firstElementChild.nextElementSibling);
-        notice.addEventListener('click', async (e) => {
-          const btn = e.target.closest('[data-fabric-monitor]');
-          if (!btn) return;
-          const remove = btn.dataset.fabricMonitor === 'remove';
-          btn.disabled = true;
-          try {
-            await api(`/api/network-fabric/${encodeURIComponent(currentCluster)}/linkmonitor`,
-                      { method: remove ? 'DELETE' : 'POST' });
-            // Le contrôleur met quelques secondes à publier les liens.
-            setTimeout(() => window.Topology.refresh(), 2500);
-          } catch { btn.disabled = false; }
-        });
-      }
       host.querySelector('.topology-refresh').addEventListener('click', () => window.Topology.refresh());
       host.querySelector('.topology-unlock-input').addEventListener('change', (e) => {
         window.Topology.setDestructiveUnlocked(e.target.checked);

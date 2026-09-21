@@ -4235,7 +4235,7 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
   background: none; border: 0; padding: 0; cursor: pointer; line-height: 1;
   color: var(--text-dim); opacity: 0; transition: opacity .12s;
 }
-:is(.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div):hover > .copy-btn,
+:is(.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div, .vsw-val):hover > .copy-btn,
 .copy-btn:focus-visible { opacity: 1; }
 .copy-btn:hover { color: var(--accent); }
 .copy-btn.copied { opacity: 1; color: var(--accent); }
@@ -4246,12 +4246,166 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
    PERMANENCE : sans elle le bouton recouvrait la fin de la valeur (« 172.16.3.⧉ »
    au lieu de « 172.16.3.43 »), et la réserver seulement au survol ferait
    sauter le texte à chaque passage de souris. */
-.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div {
+.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div, .vsw-val {
   position: relative;
 }
 /* La gouttière n'est réservée QUE sur les lignes qui portent un bouton :
    l'imposer partout perdait 15 px à droite de chaque valeur, y compris sur
    celles qui n'ont rien à copier. */
-:is(.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div):has(> .copy-btn) {
+:is(.netpath-kv div, .netpath-box header, .kv dd, .tf-kv div, .vsw-val):has(> .copy-btn) {
   padding-right: 15px;
+}
+
+/* v1.39.0 : la fabrique à la manière des vSwitch d'ESXi. Un bloc par
+   switch, lu de gauche à droite : réseaux (et leurs VMs), le switch, puis
+   les cartes physiques. Le graphe empilé qu'il remplace éparpillait un même
+   switch sur toute la surface et se lisait en diagonale. */
+.fabric-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 8px 0; margin-bottom: 4px;
+}
+.fabric-meta { font-size: 12px; color: var(--text-dim); }
+.fabric-layout {
+  display: grid; grid-template-columns: minmax(0, 1fr) 290px;
+  gap: 14px; align-items: start;
+}
+.fabric-detail {
+  position: sticky; top: 8px; font-size: 12px;
+  border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; background: var(--bg-panel);
+}
+.fabric-detail h3 { margin: 0 0 8px; font-size: 14px; }
+.fabric-detail dl.kv {
+  display: grid; grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px; margin: 0 0 10px;
+}
+.fabric-detail dl.kv dt { color: var(--text-dim); font-size: 11px; }
+.fabric-detail dl.kv dd { margin: 0; word-break: break-all; }
+.fabric-lldp-out { margin-top: 6px; font-family: var(--font-mono); font-size: 11px; }
+.fabric-notice-err { flex-basis: 100%; color: var(--danger); }
+.fabric-host-title { font-weight: 600; margin: 2px 0 10px; font-size: 13px; }
+.hint.warn { color: var(--warn); }
+
+.vsw {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-panel); margin: 0 0 14px; overflow: hidden;
+}
+.vsw-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  padding: 8px 12px; background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+}
+.vsw-kind {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-dim);
+}
+.vsw-title { font-weight: 700; font-size: 14px; }
+.vsw-sub { font-size: 11px; color: var(--text-dim); }
+.vsw-ports { margin-left: auto; }
+.vsw-body {
+  display: grid; grid-template-columns: minmax(0, 1fr) 44px minmax(0, 1fr);
+  padding: 10px 12px 4px;
+}
+.vsw-col-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--text-dim); margin-bottom: 6px;
+}
+/* La barre du switch, et un trait vers chaque réseau et chaque uplink. */
+.vsw-spine { position: relative; }
+.vsw-spine::before {
+  content: ''; position: absolute; left: 50%; transform: translateX(-50%);
+  top: 22px; bottom: 10px; width: 6px; border-radius: 3px;
+  background: var(--accent);
+}
+.vsw-link { position: relative; }
+.vsw-left .vsw-link::after,
+.vsw-right .vsw-link::before {
+  content: ''; position: absolute; top: 15px; width: 22px;
+  border-top: 2px solid var(--accent);
+}
+.vsw-left .vsw-link::after { right: -23px; }
+.vsw-right .vsw-link::before { left: -23px; }
+.vsw-right .vsw-nic.down::before {
+  border-top-style: dashed; border-top-color: var(--danger);
+}
+/* Switch INTERNE : aucun uplink. Barre en pointillé, pour qu'on ne le
+   confonde pas avec un switch qui atteint le cuivre. */
+.vsw-overlay .vsw-spine::before {
+  background: repeating-linear-gradient(var(--text-dim) 0 6px, transparent 6px 11px);
+}
+.vsw-overlay .vsw-left .vsw-link::after { border-top-color: var(--text-dim); }
+
+.vsw-pg, .vsw-nic, .vsw-bond {
+  border: 1px solid var(--border); border-radius: 8px;
+  margin: 0 0 8px; font-size: 12px;
+}
+.vsw-pg { padding: 6px 10px; background: var(--bg); }
+.vsw-pg.warn { border-color: var(--warn); }
+.vsw-pg-head { display: flex; align-items: center; gap: 6px; font-weight: 600; }
+.vsw-tags { display: flex; flex-wrap: wrap; gap: 4px; margin: 3px 0; }
+.vsw-tags span {
+  font-size: 10.5px; padding: 0 6px; border-radius: 9px;
+  border: 1px solid var(--border); color: var(--text-dim);
+}
+.vsw-kv { display: flex; align-items: baseline; gap: 8px; font-size: 11.5px; }
+.vsw-kv > span:first-child { color: var(--text-dim); min-width: 72px; }
+.vsw-list { display: flex; flex-direction: column; }
+.vsw-vms-title {
+  margin-top: 5px; padding-top: 4px; border-top: 1px dashed var(--border);
+  font-size: 11px; color: var(--text-dim);
+}
+.vsw-vms { list-style: none; margin: 2px 0 0; padding: 0; font-size: 11.5px; }
+.vsw-vms li { display: flex; align-items: center; gap: 6px; padding: 1px 0; }
+.vsw-vms li small { margin-left: auto; color: var(--text-dim); }
+.vsw-vms li.more { padding-left: 14px; }
+.vsw-more {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--accent); font-size: 11.5px;
+}
+.vsw-more:hover { text-decoration: underline; }
+.vsw-dot {
+  flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-dim);
+}
+.vsw-nic.up .vsw-dot, .vsw-vms li.running .vsw-dot { background: var(--done); }
+.vsw-right .vsw-nic.down .vsw-dot { background: var(--danger); }
+.vsw-nic {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  background: var(--bg); cursor: pointer;
+}
+.vsw-nic:hover, .vsw-nic.selected { border-color: var(--accent); }
+.vsw-nic.selected { box-shadow: 0 0 0 1px var(--accent); }
+.vsw-nic .vsw-name { font-weight: 600; }
+.vsw-speed {
+  margin-left: auto; font-size: 11px; color: var(--text-dim);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.vsw-bond { padding: 6px 8px 0; background: var(--bg-elev); }
+.vsw-bond-head { display: flex; align-items: center; gap: 6px; font-weight: 600; margin-bottom: 6px; }
+.vsw-bond-head small { color: var(--text-dim); font-weight: 400; }
+.vsw-internal {
+  border: 1px dashed var(--border); border-radius: 8px; padding: 10px;
+  color: var(--text-dim); font-size: 12px;
+}
+.vsw-empty { color: var(--text-dim); font-size: 12px; padding: 4px 0 10px; }
+.vsw-empty.warn { color: var(--warn); }
+.vsw-badge {
+  font-size: 10px; padding: 0 6px; border-radius: 9px; font-weight: 400;
+  border: 1px solid var(--warn); color: var(--warn);
+}
+.vsw-nodename { font-size: 11px; color: var(--text-dim); margin: 2px 0 4px; }
+.vsw-unused-list, .vsw-pod-body {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px;
+}
+.vsw-pod-body { display: block; }
+.vsw-unused-list .vsw-nic { margin: 0; min-width: 210px; }
+
+@media (max-width: 1100px) {
+  .fabric-layout { grid-template-columns: minmax(0, 1fr); }
+  .fabric-detail { position: static; }
+}
+@media (max-width: 700px) {
+  .vsw-body { grid-template-columns: minmax(0, 1fr); }
+  .vsw-spine { display: none; }
+  .vsw-left .vsw-link::after, .vsw-right .vsw-link::before { display: none; }
 }

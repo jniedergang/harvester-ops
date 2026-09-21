@@ -187,7 +187,7 @@ def test_i18n_no_orphan_keys_in_english():
     referenced = _all_referenced_keys()
     en = _lang_dicts().get("en") or set()
     orphans = sorted(en - referenced)
-    BASELINE = 105   # v1.8.6: scanner now sees the i.t() alias — topology.* keys are real references, debt shrank from 132
+    BASELINE = 103   # v1.39.0: the Cytoscape fabric and its keys are gone (was 105 since v1.8.6)
     if len(orphans) > BASELINE:
         pytest.fail(
             f"{len(orphans)} unused English i18n entries (baseline {BASELINE}):\n  - "
