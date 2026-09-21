@@ -10,6 +10,8 @@ import sys
 from pathlib import Path
 import importlib
 
+import pytest
+
 WEB_DIR = Path(__file__).resolve().parent.parent.parent / "web"
 sys.path.insert(0, str(WEB_DIR))
 app_module = importlib.import_module("app")
@@ -530,3 +532,176 @@ def test_the_cluster_view_costs_one_grouped_call(monkeypatch):
     assert [n["name"] for n in out["nodes"]] == ["n1"]
     assert out["vms"][0]["node"] == "n1" and out["vms"][0]["phase"] == "Running"
     assert "volumes" not in out
+
+
+# ---------------------------------------------------------------------------
+# v1.43.0 : la vue Cluster montre ce que chaque VM consomme
+# ---------------------------------------------------------------------------
+GIB = 1024 ** 3
+
+
+def harv_vm(name="web", ns="default", cpu=None, memory=None, resources=None,
+            disks=None, volumes=None, networks=None, interfaces=None):
+    """Une VM au format de harv1 (Harvester 1.8)."""
+    domain = {"devices": {"disks": disks if disks is not None else [
+                  {"name": "rootdisk", "disk": {"bus": "virtio"}, "bootOrder": 1},
+                  {"name": "cloudinitdisk", "disk": {"bus": "virtio"}}],
+                          "interfaces": interfaces or [
+                  {"name": "nic-1", "bridge": {}, "model": "virtio",
+                   "macAddress": "02:00:00:00:00:01"}]}}
+    if cpu is not None:
+        domain["cpu"] = cpu
+    if memory is not None:
+        domain["memory"] = memory
+    if resources is not None:
+        domain["resources"] = resources
+    return {"kind": "VirtualMachine",
+            "metadata": {"name": name, "namespace": ns, "uid": "u-" + name},
+            "spec": {"runStrategy": "RerunOnFailure", "template": {"spec": {
+                "domain": domain,
+                "networks": networks or [{"name": "nic-1",
+                                          "multus": {"networkName": "default/production"}}],
+                "volumes": volumes if volumes is not None else [
+                    {"name": "rootdisk", "persistentVolumeClaim": {"claimName": name + "-root"}},
+                    {"name": "cloudinitdisk", "cloudInitNoCloud": {"userData": "#cloud-config"}}],
+            }}}}
+
+
+def harv_vmi(name="web", ns="default", node="harv1", ips=("172.16.3.43",), os_name=None):
+    st = {"phase": "Running", "nodeName": node,
+          "interfaces": [{"name": "nic-1", "mac": "ce:0f:db:1f:33:ee",
+                          "ipAddress": ips[0] if ips else None,
+                          "ipAddresses": list(ips), "interfaceName": "eth0",
+                          "linkState": "up"}]}
+    if os_name:
+        st["guestOSInfo"] = {"prettyName": os_name}
+    return {"kind": "VirtualMachineInstance",
+            "metadata": {"name": name, "namespace": ns}, "status": st}
+
+
+PVCS = {"default/web-root": {"size": 20 * GIB, "storage_class": "longhorn-image-c7rvm"}}
+
+
+def reduce(vm, vmi=None, pvcs=PVCS):
+    key = f"{vm['metadata']['namespace']}/{vm['metadata']['name']}"
+    return _topology_vm(vm, {key: vmi} if vmi else {}, pvcs)
+
+
+def test_vcpu_is_cores_times_sockets_times_threads():
+    """Relevé sur harv1 : `cpu: {cores: 2, sockets: 1, threads: 1}`."""
+    assert reduce(harv_vm(cpu={"cores": 2, "sockets": 1, "threads": 1}))["vcpu"] == 2
+    assert reduce(harv_vm(cpu={"cores": 2, "sockets": 2, "threads": 2}))["vcpu"] == 8
+    assert reduce(harv_vm(cpu={"cores": 4}))["vcpu"] == 4
+
+
+def test_vcpu_falls_back_on_the_cpu_limit():
+    assert reduce(harv_vm(resources={"limits": {"cpu": "3"}}))["vcpu"] == 3
+    # Des millicœurs : une VM à 1,5 cœur occupe 2 vCPU.
+    assert reduce(harv_vm(resources={"limits": {"cpu": "1500m"}}))["vcpu"] == 2
+    assert reduce(harv_vm())["vcpu"] == 1
+
+
+def test_memory_is_what_the_guest_sees_not_the_reservation():
+    """harv1 : guest 4Gi, limits 4Gi, requests 2730Mi. Les requests sont une
+    réservation surallouée : les afficher ferait croire à 2,7 Gio."""
+    vm = harv_vm(memory={"guest": "4Gi"},
+                 resources={"limits": {"memory": "4Gi"}, "requests": {"memory": "2730Mi"}})
+    assert reduce(vm)["memory"] == 4 * GIB
+    assert reduce(harv_vm(resources={"limits": {"memory": "8Gi"},
+                                     "requests": {"memory": "2Gi"}}))["memory"] == 8 * GIB
+    assert reduce(harv_vm(resources={"requests": {"memory": "2Gi"}}))["memory"] == 2 * GIB
+    assert reduce(harv_vm())["memory"] is None
+
+
+def test_disks_carry_their_size_class_and_boot_order():
+    v = reduce(harv_vm())
+    root, cloudinit = v["disks"]
+    assert root == {"disk": "rootdisk", "device": "disk", "boot_order": 1,
+                    "source": "pvc", "pvc": "web-root", "size": 20 * GIB,
+                    "storage_class": "longhorn-image-c7rvm"}
+    # Le disque cloud-init n'est pas un volume : pas de taille à compter.
+    assert cloudinit["source"] == "cloudinit" and cloudinit["size"] is None
+    assert v["disk_total"] == 20 * GIB
+
+
+def test_a_cdrom_and_a_missing_claim_are_told_apart():
+    vm = harv_vm(disks=[{"name": "cd", "cdrom": {"bus": "sata"}},
+                        {"name": "gone", "disk": {"bus": "virtio"}}],
+                 volumes=[{"name": "cd", "persistentVolumeClaim": {"claimName": "iso"}},
+                          {"name": "gone", "persistentVolumeClaim": {"claimName": "lost"}}])
+    cd, gone = reduce(vm, pvcs={"default/iso": {"size": 5 * GIB, "storage_class": "x"}})["disks"]
+    assert cd["device"] == "cdrom" and cd["size"] == 5 * GIB
+    assert gone["pvc"] == "lost" and gone["size"] is None
+
+
+def test_nics_carry_mac_and_addresses_from_the_vmi():
+    v = reduce(harv_vm(), harv_vmi(ips=("172.16.3.43", "fe80::1"), os_name="RHEL 9.7"))
+    nic = v["nics"][0]
+    assert (nic["network"], nic["mac"], nic["ips"]) == (
+        "default/production", "ce:0f:db:1f:33:ee", ["172.16.3.43", "fe80::1"])
+    assert v["guest_os"] == "RHEL 9.7"
+
+
+def test_a_stopped_vm_keeps_its_declared_mac():
+    nic = reduce(harv_vm())["nics"][0]
+    assert nic["mac"] == "02:00:00:00:00:01" and nic["ips"] == []
+
+
+def node_item(name="harv1", cpu="7020m", memory="65624056Ki", annotations=None,
+              unschedulable=False, labels=None):
+    return {"kind": "Node",
+            "metadata": {"name": name, "annotations": annotations or {},
+                         "labels": labels or {"node-role.kubernetes.io/control-plane": "true"}},
+            "spec": {"unschedulable": unschedulable},
+            "status": {"allocatable": {"cpu": cpu, "memory": memory},
+                       "capacity": {"cpu": "8", "memory": memory},
+                       "conditions": [{"type": "Ready", "status": "True"}],
+                       "addresses": [{"type": "InternalIP", "address": "172.16.3.11"}]}}
+
+
+def build_items(items, monkeypatch):
+    app_module._topology_missing.clear()
+    monkeypatch.setattr(app_module, "_kubectl_json", lambda kc, *a, **k: {"items": items})
+    return app_module._build_topology("c", "/kc")
+
+
+def test_a_host_says_what_it_can_give_and_what_is_given(monkeypatch):
+    items = [node_item(),
+             harv_vm("web", cpu={"cores": 2}, memory={"guest": "4Gi"}), harv_vmi("web"),
+             harv_vm("db", cpu={"cores": 4}, memory={"guest": "8Gi"}), harv_vmi("db"),
+             harv_vm("idle", cpu={"cores": 16}, memory={"guest": "64Gi"})]   # arrêtée
+    host = build_items(items, monkeypatch)["nodes"][0]
+    assert host["cpu_allocatable"] == pytest.approx(7.02)
+    assert host["memory_allocatable"] == 65624056 * 1024
+    # Seules les VMs en marche SUR cet hôte comptent.
+    assert host["vcpu_allocated"] == 6
+    assert host["memory_allocated"] == 12 * GIB
+
+
+@pytest.mark.parametrize("annotations,state", [
+    ({}, None),
+    ({"harvesterhci.io/drain-requested": "true"}, "requested"),
+    ({"harvesterhci.io/maintain-status": "running"}, "running"),
+    ({"harvesterhci.io/maintain-status": "completed"}, "completed"),
+])
+def test_a_host_tells_its_maintenance_state(monkeypatch, annotations, state):
+    host = build_items([node_item(annotations=annotations)], monkeypatch)["nodes"][0]
+    assert host["maintenance"] == state
+
+
+def test_the_view_still_costs_one_call_with_the_claims():
+    """Les tailles de disque viennent des PVC, dans le même appel. Les
+    répliques Longhorn, elles, ne servent qu'au contrôle de maintenance, lu
+    à la demande : pas à chaque rafraîchissement de 8 secondes."""
+    assert "persistentvolumeclaims" in app_module.TOPOLOGY_KINDS
+    assert "replicas.longhorn.io" not in app_module.TOPOLOGY_KINDS
+
+
+def test_the_claim_sizes_come_from_the_same_call(monkeypatch):
+    pvc = {"kind": "PersistentVolumeClaim",
+           "metadata": {"name": "web-root", "namespace": "default"},
+           "spec": {"storageClassName": "harv-rep1",
+                    "resources": {"requests": {"storage": "20Gi"}}}}
+    out = build_items([node_item(), harv_vm("web"), harv_vmi("web"), pvc], monkeypatch)
+    root = out["vms"][0]["disks"][0]
+    assert (root["size"], root["storage_class"]) == (20 * GIB, "harv-rep1")

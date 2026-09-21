@@ -20,6 +20,7 @@ Architecture:
 
 import hashlib
 import json
+import math
 import logging
 import os
 import platform
@@ -64,6 +65,7 @@ import y_py as Y
 import pxe_server
 import vnc_mux
 import volume_health
+import node_maintenance
 from flask import (
     Flask,
     Response,
@@ -2044,6 +2046,53 @@ def _kubectl_json(kc, *args, timeout=15, cluster=None):
         return None
 
 
+def _vm_nics(vm, vmi):
+    """(cartes réseau, interfaces connues du seul invité) d'une VM.
+
+    Partagé par la Fabrique, la vue Réseau et la vue Cluster : la MAC VUE
+    par la VM prime sur la déclarée (c'est elle qu'on cherche dans la table
+    d'un switch), et un `networkName` sans namespace désigne un NAD du
+    namespace de la VM."""
+    ns = (vm.get("metadata") or {}).get("namespace")
+    spec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+    ifaces = {i.get("name"): i for i in
+              (((spec.get("domain") or {}).get("devices") or {}).get("interfaces") or [])}
+    vmi_status = (vmi or {}).get("status") or {}
+    live = {i.get("name"): i for i in (vmi_status.get("interfaces") or []) if i.get("name")}
+    nets = []
+    for n in spec.get("networks") or []:
+        target = (n.get("multus") or {}).get("networkName")
+        if target and "/" not in target:
+            target = f"{ns}/{target}"
+        decl = ifaces.get(n.get("name")) or {}
+        got = live.get(n.get("name")) or {}
+        nets.append({
+            "nic": n.get("name"), "network": target, "pod": "pod" in n,
+            "model": decl.get("model"),
+            "binding": next((k for k in ("bridge", "masquerade", "sriov", "macvtap", "passt")
+                             if k in decl), None),
+            "mac": got.get("mac") or decl.get("macAddress"),
+            "ips": got.get("ipAddresses") or ([got["ipAddress"]] if got.get("ipAddress") else []),
+            "guest_iface": got.get("interfaceName"),
+            "link_state": got.get("linkState"),
+        })
+    # Les interfaces que seul l'agent invité connaît (docker0, bridges
+    # internes) ne sortent par aucun réseau du cluster : à part.
+    guest_only = [{"iface": i.get("interfaceName"), "mac": i.get("mac"),
+                   "ips": i.get("ipAddresses") or []}
+                  for i in (vmi_status.get("interfaces") or []) if not i.get("name")]
+    return nets, guest_only
+
+
+def _cpu_cores(q):
+    """Quantité CPU Kubernetes en cœurs : `8` -> 8.0, `7020m` -> 7.02."""
+    q = str(q or "").strip()
+    try:
+        return float(q[:-1]) / 1000.0 if q.endswith("m") else float(q)
+    except ValueError:
+        return None
+
+
 def _topology_node(item):
     """Reduce a node object to the fields the viz needs."""
     meta = item.get("metadata") or {}
@@ -2052,6 +2101,7 @@ def _topology_node(item):
     labels = meta.get("labels") or {}
     addr_map = {a["type"]: a.get("address") for a in status.get("addresses", [])}
     conds = {c["type"]: c.get("status") for c in status.get("conditions", [])}
+    allocatable = status.get("allocatable") or {}
     return {
         "name": meta.get("name"),
         "uid": meta.get("uid"),
@@ -2064,12 +2114,51 @@ def _topology_node(item):
         ]),
         "addresses": addr_map,
         "capacity": status.get("capacity") or {},
-        "allocatable": status.get("allocatable") or {},
+        "allocatable": allocatable,
+        # v1.43.0 : ce que l'hôte peut donner, en unités lisibles.
+        "cpu_allocatable": _cpu_cores(allocatable.get("cpu")),
+        "memory_allocatable": _k8s_bytes(allocatable.get("memory")),
+        "maintenance": node_maintenance.maintenance_state(item),
+        "vcpu_allocated": 0,
+        "memory_allocated": 0,
     }
 
 
-def _topology_vm(vm_item, vmi_by_name):
+def _vm_vcpu(domain):
+    """vCPU vus par l'invité : cœurs x sockets x threads (relevé sur harv1),
+    sinon la limite CPU arrondie au cœur supérieur, sinon 1."""
+    cpu = domain.get("cpu")
+    if cpu:
+        n = 1
+        for k in ("cores", "sockets", "threads"):
+            try:
+                n *= max(1, int(cpu.get(k) or 1))
+            except (TypeError, ValueError):
+                pass
+        return n
+    res = domain.get("resources") or {}
+    cores = _cpu_cores((res.get("limits") or {}).get("cpu")
+                       or (res.get("requests") or {}).get("cpu"))
+    return max(1, math.ceil(cores)) if cores else 1
+
+
+def _vm_memory(domain):
+    """Mémoire vue par l'invité. Sur harv1 `memory.guest` vaut la limite ;
+    les `requests` (2730Mi pour 4Gi) sont une réservation surallouée, prise
+    seulement en dernier recours."""
+    res = domain.get("resources") or {}
+    for q in ((domain.get("memory") or {}).get("guest"),
+              (res.get("limits") or {}).get("memory"),
+              (res.get("requests") or {}).get("memory")):
+        b = _k8s_bytes(q)
+        if b:
+            return b
+    return None
+
+
+def _topology_vm(vm_item, vmi_by_name, pvcs=None):
     """Reduce a VM + its VMI (if any) to the viz-relevant fields."""
+    pvcs = pvcs or {}
     meta = vm_item.get("metadata") or {}
     spec = vm_item.get("spec") or {}
     template_spec = (spec.get("template") or {}).get("spec") or {}
@@ -2081,11 +2170,20 @@ def _topology_vm(vm_item, vmi_by_name):
     volumes_in_spec = template_spec.get("volumes") or []
     # Map disk name → claim name (PVC) when applicable
     vol_to_pvc = {}
+    vol_source = {}
     for v in volumes_in_spec:
         if "persistentVolumeClaim" in v:
             vol_to_pvc[v["name"]] = v["persistentVolumeClaim"].get("claimName")
+            vol_source[v["name"]] = "pvc"
         elif "dataVolume" in v:
             vol_to_pvc[v["name"]] = v["dataVolume"].get("name")
+            vol_source[v["name"]] = "pvc"
+        elif "cloudInitNoCloud" in v or "cloudInitConfigDrive" in v:
+            vol_source[v["name"]] = "cloudinit"
+        elif "containerDisk" in v:
+            vol_source[v["name"]] = "container"
+        else:
+            vol_source[v["name"]] = next((k for k in v if k != "name"), None)
     ns = meta.get("namespace")
     name = meta.get("name")
     vmi = vmi_by_name.get(f"{ns}/{name}")
@@ -2094,6 +2192,20 @@ def _topology_vm(vm_item, vmi_by_name):
     if vmi:
         node_name = (vmi.get("status") or {}).get("nodeName")
         phase = (vmi.get("status") or {}).get("phase", "Unknown")
+    disk_list = []
+    for d in disks:
+        pvc = vol_to_pvc.get(d.get("name"))
+        info = pvcs.get(f"{ns}/{pvc}") if pvc else None
+        disk_list.append({
+            "disk": d.get("name"),
+            "device": "cdrom" if "cdrom" in d else ("lun" if "lun" in d else "disk"),
+            "boot_order": d.get("bootOrder"),
+            "source": vol_source.get(d.get("name")),
+            "pvc": pvc,
+            "size": (info or {}).get("size"),
+            "storage_class": (info or {}).get("storage_class"),
+        })
+    nics, guest_only = _vm_nics(vm_item, vmi)
     return {
         "namespace": ns,
         "name": name,
@@ -2127,21 +2239,27 @@ def _topology_vm(vm_item, vmi_by_name):
                        else ("lun" if "lun" in d else "disk")}
             for d in disks
         ],
+        # v1.43.0 : ce que la VM consomme, pour la vue Cluster.
+        "vcpu": _vm_vcpu(domain),
+        "memory": _vm_memory(domain),
+        "disks": disk_list,
+        "disk_total": sum(d["size"] or 0 for d in disk_list),
+        "nics": nics,
+        "guest_only": guest_only,
+        "guest_os": (((vmi or {}).get("status") or {}).get("guestOSInfo") or {})
+                    .get("prettyName"),
     }
 
 
 TOPOLOGY_KINDS = ["nodes", "virtualmachines.kubevirt.io",
-                  "virtualmachineinstances.kubevirt.io"]
+                  "virtualmachineinstances.kubevirt.io",
+                  # v1.43.0 : la taille des disques, dans le même appel.
+                  "persistentvolumeclaims"]
 _topology_missing = {}
 
 
 def _build_topology(cluster, kc):
-    """Nœuds et VMs pour la vue Cluster, en UN appel groupé.
-
-    v1.40.0 : Réseau et Stockage ont chacun leur point d'accès. Cette vue
-    n'a plus besoin que des nœuds et des VMs ; elle lançait jusqu'ici huit
-    kubectl à chaque rafraîchissement, dont cinq pour des volumes, des
-    répliques et des images qu'elle n'affichait pas."""
+    """Hôtes et VMs pour la vue Cluster, en UN appel groupé."""
     items = _grouped_items(kc, cluster, TOPOLOGY_KINDS, _topology_missing)
     if items is None:
         raise RuntimeError("cluster unreachable")
@@ -2153,12 +2271,28 @@ def _build_topology(cluster, kc):
         f"{(v.get('metadata') or {}).get('name')}": v
         for v in by_kind.get("VirtualMachineInstance", [])
     }
+    pvcs = {}
+    for p in by_kind.get("PersistentVolumeClaim", []):
+        pm = p.get("metadata") or {}
+        ps = p.get("spec") or {}
+        pvcs[f"{pm.get('namespace')}/{pm.get('name')}"] = {
+            "size": _k8s_bytes(((ps.get("resources") or {}).get("requests") or {})
+                               .get("storage")),
+            "storage_class": ps.get("storageClassName")}
+    nodes = [_topology_node(n) for n in by_kind.get("Node", [])]
+    vms = [_topology_vm(v, vmi_by_name, pvcs) for v in by_kind.get("VirtualMachine", [])]
+    # Ce que chaque hôte a déjà donné : les VMs EN MARCHE qu'il porte.
+    by_name = {n["name"]: n for n in nodes}
+    for v in vms:
+        host = by_name.get(v["node"])
+        if host and v["phase"] == "Running":
+            host["vcpu_allocated"] += v["vcpu"] or 0
+            host["memory_allocated"] += v["memory"] or 0
     return {
         "cluster": cluster,
         "fetched_at": time.time(),
-        "nodes": [_topology_node(n) for n in by_kind.get("Node", [])],
-        "vms": [_topology_vm(v, vmi_by_name)
-                for v in by_kind.get("VirtualMachine", [])],
+        "nodes": nodes,
+        "vms": vms,
     }
 
 
@@ -2490,44 +2624,9 @@ def _build_fabric(cluster, kc):
     for vm in by_kind.get("VirtualMachine", []):
         meta = vm.get("metadata", {})
         ns = meta.get("namespace")
-        spec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
-        ifaces = {i.get("name"): i for i in
-                  (((spec.get("domain") or {}).get("devices") or {})
-                   .get("interfaces") or [])}
         vmi = vmis.get(f"{ns}/{meta.get('name')}") or {}
         vmi_status = vmi.get("status") or {}
-        live = {i.get("name"): i for i in (vmi_status.get("interfaces") or [])
-                if i.get("name")}
-        nets = []
-        for n in spec.get("networks") or []:
-            multus = n.get("multus") or {}
-            target = multus.get("networkName")
-            if target and "/" not in target:
-                target = f"{ns}/{target}"
-            decl = ifaces.get(n.get("name")) or {}
-            got = live.get(n.get("name")) or {}
-            nets.append({
-                "nic": n.get("name"), "network": target, "pod": "pod" in n,
-                "model": decl.get("model"),
-                "binding": next((k for k in ("bridge", "masquerade", "sriov",
-                                             "macvtap", "passt") if k in decl),
-                                None),
-                # La MAC VUE par la VM prime sur la déclarée : c'est elle
-                # qu'on cherche dans la table d'un switch.
-                "mac": got.get("mac") or decl.get("macAddress"),
-                "ips": got.get("ipAddresses") or ([got["ipAddress"]]
-                                                  if got.get("ipAddress") else []),
-                "guest_iface": got.get("interfaceName"),
-                "link_state": got.get("linkState"),
-            })
-        # Les interfaces que seul l'agent invité connaît (docker0, bridges
-        # internes) n'ont pas de nom KubeVirt : elles ne sortent par aucun
-        # réseau du cluster, mais un exploitant qui cherche une adresse les
-        # rencontre, autant les montrer pour ce qu'elles sont.
-        guest_only = [{"iface": i.get("interfaceName"), "mac": i.get("mac"),
-                       "ips": i.get("ipAddresses") or []}
-                      for i in (vmi_status.get("interfaces") or [])
-                      if not i.get("name")]
+        nets, guest_only = _vm_nics(vm, vmi)
         out["vms"].append({
             "namespace": ns, "name": meta.get("name"),
             "status": (vm.get("status") or {}).get("printableStatus"),
