@@ -435,7 +435,9 @@ ADMIN_ONLY_PREFIXES = (
     "/api/harvester-users",     # comptes du cluster Harvester
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
-ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall")
+ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall",
+                       # v1.43.0 : une maintenance déplace ou arrête des VMs.
+                       "/maintenance")
 
 _roles_cache = {"mtime": None, "data": None}
 
@@ -6526,6 +6528,273 @@ def api_volume_fix(cluster, volume):
                              _volume_fix_runner, kc, cluster, volume, plan)
     return jsonify({"action_id": action_id, "summary": plan["summary"],
                     "params": plan["params"]}), 201
+
+
+# =============================================================================
+# Isoler un nœud, le mettre en maintenance (v1.43.0)
+#
+# Les boutons « cordon » et « drain » de la vue Cluster échouaient tous deux
+# (« not yet implemented »). Mécanique et règles reprises de Harvester v1.8.0
+# (voir node_maintenance.py) : le contrôle préalable refuse exactement ce que
+# Harvester refuserait, et le dit AVANT d'écrire quoi que ce soit.
+# =============================================================================
+NODE_MAINT_KINDS = ["nodes", "virtualmachineinstances.kubevirt.io",
+                    "virtualmachines.kubevirt.io", "volumes.longhorn.io",
+                    "replicas.longhorn.io"]
+_node_maint_missing = {}
+NODE_MAINT_POLL = 5.0
+NODE_MAINT_TIMEOUT = 600.0
+
+
+def _node_request(cluster, name):
+    """((kc, objets par type, nœuds, nœud), None) ou (None, réponse d'erreur).
+    Toujours relu sur le cluster : on n'agit pas sur un état en cache."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    if _cluster_reachable(kc) is False:
+        return None, (jsonify({"error": "cluster unreachable"}), 503)
+    items = _grouped_items(kc, cluster, NODE_MAINT_KINDS, _node_maint_missing)
+    if items is None:
+        return None, (jsonify({"error": "cluster unreachable"}), 503)
+    by = {}
+    for it in items:
+        by.setdefault(it.get("kind"), []).append(it)
+    nodes = by.get("Node", [])
+    node = next((n for n in nodes if (n.get("metadata") or {}).get("name") == name), None)
+    if not node:
+        return None, (jsonify({"error": f"unknown node: {name}"}), 404)
+    return (kc, by, nodes, node), None
+
+
+def _node_plan(ctx, force):
+    _kc, by, nodes, node = ctx
+    return node_maintenance.plan(node, nodes, by.get("VirtualMachineInstance", []),
+                                 by.get("Volume", []), by.get("Replica", []), force)
+
+
+def _kubectl_step(run, step, args):
+    """Lance kubectl pour une étape ; rend le message d'erreur, ou None."""
+    try:
+        r = subprocess.run(["kubectl", *args], capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return "kubectl timeout"
+    except OSError as e:
+        return _safe_proc_error(e)
+    if r.returncode != 0:
+        return (r.stderr or r.stdout).strip()[:300] or f"kubectl exit {r.returncode}"
+    return None
+
+
+def _finish_run(run, status, summary=None):
+    run.status = status
+    run.exit_code = 0 if status == "done" else 1
+    if summary:
+        run.error_summary = summary
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": status, "exit_code": run.exit_code,
+              "ts": time.time()})
+    run.close()
+
+
+def _node_patch_runner(run, kc, name, patch, step):
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": step, "status": "running",
+              "message": f"kubectl patch node {name}", "ts": time.time()})
+    err = _kubectl_step(run, step, ["--kubeconfig", kc, "patch", "node", name,
+                                    "--type", "merge", "-p", json.dumps(patch)])
+    if err:
+        run.emit({"type": "step", "step_id": step, "status": "error", "message": err,
+                  "ts": time.time()})
+        _finish_run(run, "error", err)
+        return
+    run.emit({"type": "step", "step_id": step, "status": "done",
+              "message": f"{name}: " + ("cordoned" if patch["spec"]["unschedulable"]
+                                        else "schedulable again"), "ts": time.time()})
+    _finish_run(run, "done")
+
+
+def _node_maint_read(kc, name):
+    """(annotations du nœud, nombre de VMs qu'il porte encore)."""
+    n = _kubectl_json(kc, "get", "node", name)
+    vmis = _kubectl_json(kc, "get", "vmi", "-A", "-l", f"kubevirt.io/nodeName={name}")
+    ann = ((n.get("metadata") or {}).get("annotations") or {}) if n else None
+    return ann, (len(vmis.get("items", [])) if vmis else None)
+
+
+def _maintenance_enter_runner(run, kc, name, force):
+    """Demander, puis SUIVRE le contrôleur de Harvester jusqu'au bout : il
+    migre les VMs et pose `maintain-status`, ou retire la demande s'il
+    refuse. Dans ce dernier cas on le dit, au lieu d'attendre dix minutes."""
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "request", "status": "running",
+              "message": f"{name}: maintenance requested"
+                         + (" (forced: non-migratable VMs are shut down)" if force else ""),
+              "ts": time.time()})
+    err = _kubectl_step(run, "request", [
+        "--kubeconfig", kc, "patch", "node", name, "--type", "merge", "-p",
+        json.dumps(node_maintenance.enter_patch(force))])
+    if err:
+        run.emit({"type": "step", "step_id": "request", "status": "error",
+                  "message": err, "ts": time.time()})
+        _finish_run(run, "error", err)
+        return
+    run.emit({"type": "step", "step_id": "request", "status": "done",
+              "message": "requested", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "follow", "status": "running",
+              "message": "Harvester migrates the VMs", "ts": time.time()})
+    deadline = time.time() + NODE_MAINT_TIMEOUT
+    last = None
+    while time.time() < deadline:
+        time.sleep(NODE_MAINT_POLL)
+        ann, left = _node_maint_read(kc, name)
+        if ann is None:
+            continue
+        status = ann.get(node_maintenance.MAINTAIN_STATUS)
+        if status == "completed":
+            run.emit({"type": "step", "step_id": "follow", "status": "done",
+                      "message": f"{name} is in maintenance mode", "ts": time.time()})
+            _finish_run(run, "done")
+            return
+        if status == "running":
+            msg = f"{left} VM(s) still on {name}" if left is not None else "migrating"
+            if msg != last:
+                run.emit({"type": "step", "step_id": "follow", "status": "running",
+                          "message": msg, "ts": time.time()})
+                last = msg
+            continue
+        if node_maintenance.DRAIN_REQUESTED not in ann:
+            msg = ("Harvester refused the maintenance and withdrew the request "
+                   "(see the harvester controller logs)")
+            run.emit({"type": "step", "step_id": "follow", "status": "error",
+                      "message": msg, "ts": time.time()})
+            _finish_run(run, "error", msg)
+            return
+    msg = (f"not completed after {int(NODE_MAINT_TIMEOUT)} s; Harvester keeps "
+           "working on it, check the node again later")
+    run.emit({"type": "step", "step_id": "follow", "status": "warn", "message": msg,
+              "ts": time.time()})
+    _finish_run(run, "error", msg)
+
+
+def _maintenance_leave_runner(run, kc, name, patch, restart):
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "leave", "status": "running",
+              "message": f"{name}: leaving maintenance", "ts": time.time()})
+    err = _kubectl_step(run, "leave", ["--kubeconfig", kc, "patch", "node", name,
+                                       "--type", "merge", "-p", json.dumps(patch)])
+    if err:
+        run.emit({"type": "step", "step_id": "leave", "status": "error", "message": err,
+                  "ts": time.time()})
+        _finish_run(run, "error", err)
+        return
+    run.emit({"type": "step", "step_id": "leave", "status": "done",
+              "message": f"{name} is schedulable again", "ts": time.time()})
+    failed = []
+    for ns, vm, strategy in restart:
+        err = _kubectl_step(run, "restart", [
+            "--kubeconfig", kc, "-n", ns, "patch", "virtualmachines.kubevirt.io", vm,
+            "--type", "merge", "-p", json.dumps({
+                "spec": {"runStrategy": strategy},
+                "metadata": {"annotations": {
+                    node_maintenance.STRATEGY_NODE_ANNOTATION: None}}})])
+        run.emit({"type": "step", "step_id": "restart", "status": "error" if err else "done",
+                  "message": f"{ns}/{vm}: " + (err or f"restarted ({strategy})"),
+                  "ts": time.time()})
+        if err:
+            failed.append(f"{ns}/{vm}")
+    if failed:
+        _finish_run(run, "error", "could not restart " + ", ".join(failed))
+    else:
+        _finish_run(run, "done")
+
+
+@app.route("/api/node/<cluster>/<node>/maintenance-check")
+@requires_auth
+@_rate_limit("20/minute")
+def api_node_maintenance_check(cluster, node):
+    """Ce que ferait la mise en maintenance : refus éventuel, VMs qui
+    migreront, VMs qui ne le peuvent pas et pourquoi, VMs qui s'arrêteront."""
+    ctx, err = _node_request(cluster, node)
+    if err:
+        return err
+    return jsonify(_node_plan(ctx, request.args.get("force") == "1"))
+
+
+def _node_cordon(cluster, node, cordon):
+    ctx, err = _node_request(cluster, node)
+    if err:
+        return err
+    kc, _by, _nodes, obj = ctx
+    if node_maintenance.maintenance_state(obj):
+        return jsonify({"error": "in-maintenance",
+                        "detail": "the node is in maintenance mode: leave the "
+                                  "maintenance instead"}), 409
+    already = bool((obj.get("spec") or {}).get("unschedulable"))
+    if already == cordon:
+        return jsonify({"error": "no-change",
+                        "detail": "the node is already " + ("cordoned" if cordon
+                                                           else "schedulable")}), 409
+    step = "cordon" if cordon else "uncordon"
+    action_id = track_action(f"node-{step}:{node}", cluster, _node_patch_runner,
+                             kc, node, {"spec": {"unschedulable": cordon}}, step)
+    return jsonify({"action_id": action_id}), 201
+
+
+@app.route("/api/node/<cluster>/<node>/cordon", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_node_cordon(cluster, node):
+    return _node_cordon(cluster, node, True)
+
+
+@app.route("/api/node/<cluster>/<node>/uncordon", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_node_uncordon(cluster, node):
+    return _node_cordon(cluster, node, False)
+
+
+@app.route("/api/node/<cluster>/<node>/maintenance", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_node_maintenance_enter(cluster, node):
+    # Un vrai booléen : la chaîne "false" est non vide, donc vraie en
+    # Python, et elle arrêterait des VMs par erreur.
+    force = (request.get_json(silent=True) or {}).get("force") is True
+    ctx, err = _node_request(cluster, node)
+    if err:
+        return err
+    plan = _node_plan(ctx, force)
+    if plan["refusal"]:
+        return jsonify({**plan, "error": "refused"}), 409
+    if plan["blocked"]:
+        return jsonify({**plan, "error": "blocked"}), 409
+    kc = ctx[0]
+    action_id = track_action(f"node-maintenance-enter:{node}", cluster,
+                             _maintenance_enter_runner, kc, node, force)
+    return jsonify({"action_id": action_id, "plan": plan}), 201
+
+
+@app.route("/api/node/<cluster>/<node>/maintenance", methods=["DELETE"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_node_maintenance_leave(cluster, node):
+    ctx, err = _node_request(cluster, node)
+    if err:
+        return err
+    kc, by, _nodes, obj = ctx
+    if not node_maintenance.maintenance_state(obj):
+        return jsonify({"error": "not-in-maintenance",
+                        "detail": "the node is not in maintenance mode"}), 409
+    restart = node_maintenance.vms_to_restart(node, by.get("VirtualMachine", []))
+    action_id = track_action(f"node-maintenance-leave:{node}", cluster,
+                             _maintenance_leave_runner, kc, node,
+                             node_maintenance.leave_patch(obj), restart)
+    return jsonify({"action_id": action_id, "restart": [f"{n}/{v}" for n, v, _ in restart]}), 201
 
 
 def _health_summary(volumes):
