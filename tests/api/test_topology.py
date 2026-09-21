@@ -16,9 +16,6 @@ app_module = importlib.import_module("app")
 
 _topology_node          = app_module._topology_node
 _topology_vm            = app_module._topology_vm
-_topology_volume        = app_module._topology_volume
-_topology_replica       = app_module._topology_replica
-_topology_network_attachment = app_module._topology_network_attachment
 
 
 # ---------------------------------------------------------------------------
@@ -138,63 +135,6 @@ def test_topology_vm_pod_network_type():
     out = _topology_vm(vm, {})
     assert out["networks"] == [{"name": "default", "type": "pod", "ref": None}]
     assert out["interfaces"][0]["binding"] == "masquerade"
-
-
-# ---------------------------------------------------------------------------
-# Reducer: _topology_volume + _topology_replica
-# ---------------------------------------------------------------------------
-def test_topology_volume_exposes_state_and_attachment():
-    raw = {
-        "metadata": {"name": "pvc-1", "namespace": "longhorn-system"},
-        "spec":   {"size": "10Gi"},
-        "status": {"state": "attached", "robustness": "healthy",
-                   "currentNodeID": "n1"},
-    }
-    out = _topology_volume(raw)
-    assert out["name"] == "pvc-1"
-    assert out["state"] == "attached"
-    assert out["robustness"] == "healthy"
-    assert out["attached_to"] == "n1"
-
-
-def test_topology_volume_detached_no_node():
-    raw = {"metadata": {"name": "p"}, "spec": {}, "status": {"state": "detached"}}
-    out = _topology_volume(raw)
-    assert out["attached_to"] is None
-
-
-def test_topology_replica_links_volume_to_node():
-    raw = {
-        "metadata": {"name": "r-1"},
-        "spec":   {"volumeName": "pvc-1", "nodeID": "n1"},
-        "status": {"currentState": "running"},
-    }
-    out = _topology_replica(raw)
-    assert out == {"name": "r-1", "volume": "pvc-1", "node": "n1", "running": True}
-
-
-def test_topology_replica_unhealthy_state():
-    raw = {
-        "metadata": {"name": "r-2"},
-        "spec":   {"volumeName": "v", "nodeID": "n"},
-        "status": {"currentState": "stopped"},
-    }
-    out = _topology_replica(raw)
-    assert out["running"] is False
-
-
-# ---------------------------------------------------------------------------
-# Reducer: _topology_network_attachment
-# ---------------------------------------------------------------------------
-def test_topology_network_attachment_truncates_config():
-    raw = {
-        "metadata": {"name": "prod", "namespace": "default"},
-        "spec": {"config": "x" * 500},
-    }
-    out = _topology_network_attachment(raw)
-    assert out["name"] == "prod"
-    assert out["namespace"] == "default"
-    assert len(out["config_summary"]) <= 200
 
 
 # ---------------------------------------------------------------------------
@@ -379,70 +319,6 @@ def test_topology_search_uses_searched_class_for_highlight():
     )
 
 
-def test_topology_volume_size_is_human_readable():
-    """v1.4.25: Longhorn ships volume sizes as raw byte strings (e.g.
-    '42949672960'). Showing that to operators is unhelpful — they
-    can't tell 40 GiB from 4 TiB at a glance. topology.js must run
-    those through formatBytes before display."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "function formatBytes" in src, "formatBytes helper missing"
-    # The volume detail panel must use formatBytes, not raw v.size
-    rd = src[src.find("if (d.kind === 'volume')"):]
-    rd = rd[:1500]
-    assert "formatBytes(v.size)" in rd, (
-        "Volume detail still shows raw v.size — operators see "
-        "'42949672960' instead of '40 GiB'."
-    )
-    # Storage view: the cytoscape volume node label also uses it
-    sb = src[src.find("function buildStorageElements"):]
-    sb = sb[:3000]
-    assert "formatBytes(v.size)" in sb, (
-        "Storage view volume label doesn't show human-readable size."
-    )
-
-
-def test_format_bytes_handles_raw_bytes_and_k8s_quantities(tmp_path):
-    """Drive the JS function via Node to verify its math on the cases
-    we ship to operators: pure byte strings (Longhorn), K8s quantities
-    (PVC.spec.resources.requests.storage), edge cases."""
-    import subprocess
-    topo_src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    # Pull the function body out — it's pure, no DOM/cyto deps
-    start = topo_src.find("function formatBytes")
-    assert start >= 0
-    end = topo_src.find("\n  }", start)
-    assert end > start
-    fn = topo_src[start:end + 4]
-    script = tmp_path / "fmt.js"
-    script.write_text(fn + """
-
-const cases = [
-  ['42949672960', '40 GiB'],
-  ['1073741824',  '1 GiB'],
-  ['10737418240', '10 GiB'],
-  ['10Gi',        '10 GiB'],
-  ['512Mi',       '512 MiB'],
-  ['1Ti',         '1 TiB'],
-  ['1024',        '1 KiB'],
-  [0,             '0 B'],
-  [null,          '—'],
-  ['',            '—'],
-  ['nonsense',    'nonsense'],
-];
-for (const [inp, want] of cases) {
-  const got = formatBytes(inp);
-  if (got !== want) {
-    console.error(`FAIL: formatBytes(${JSON.stringify(inp)}) -> "${got}" (want "${want}")`);
-    process.exit(1);
-  }
-}
-console.log('OK');
-""")
-    r = subprocess.run(["node", str(script)], capture_output=True, text=True, timeout=10)
-    assert r.returncode == 0, f"formatBytes test failed:\n{r.stdout}\n{r.stderr}"
-    assert "OK" in r.stdout
-
-
 def test_topology_refresh_uses_incremental_update_when_structure_unchanged():
     """v1.4.26: the 8 s auto-refresh was previously calling render()
     every tick, which destroys + recreates the cytoscape instance and
@@ -565,59 +441,6 @@ def test_app_js_restores_subtabs_after_setcluster():
     )
 
 
-def test_topology_volumes_render_as_vertical_cylinder():
-    """v1.4.30: classic database-cylinder representation. The barrel
-    shape is taller than wide so it reads as a vertical cylinder, with
-    the cylinder icon reinforcing. Switching back to a wide barrel would
-    look like a horizontal keg — wrong semantic."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    storage = src[src.find("function buildStorageElements"):]
-    storage = storage[:4000]
-    # Box must be taller than wide (v1.8.7: cdrom volumes get a round
-    # disc silhouette instead — the barrel stays the disk shape)
-    assert "width: isCd ? 100 : 90" in storage \
-        and "height: isCd ? 100 : 110" in storage, (
-        "Volume box no longer taller than wide — barrel won't read as "
-        "a vertical cylinder."
-    )
-    # cylinder icon (v1.19.0: a Lucide glyph drawn on the canvas as a
-    # data-URI background image, no longer an emoji in the label)
-    assert "nodeIcon('volume')" in storage, (
-        "Volume node icon must be the 'volume' (cylinder) glyph, not 'storage'."
-    )
-
-
-def test_topology_networks_render_as_switch_silhouette():
-    """v1.4.30: networks now look like rack-mount switches —
-    cut-rectangle shape (chamfered corners suggesting a device),
-    wide+short proportions, switch icon."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    net = src[src.find("function buildNetworkElements"):]
-    net = net[:4000]
-    assert "shape: 'cut-rectangle'" in net or 'shape: "cut-rectangle"' in net, (
-        "Network shape must be cut-rectangle (switch silhouette), "
-        "not hexagon."
-    )
-    # 1U-ish proportions
-    assert "width: 180" in net or "width:180" in net
-    assert "height: 48" in net or "height:48" in net
-    # switch icon (Lucide arrow-right-left, see scripts/gen-icons.py)
-    assert "nodeIcon('switch')" in net
-
-
-def test_topology_volume_label_fits_inside_shape():
-    """text-max-width must be smaller than the box width so the 2-line
-    label stays inside the colored shape. v1.4.30 narrowed the
-    cylinder to 90 px wide; the style follows at 75."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    vol_style = src[src.find("selector: 'node[kind = \"volume\"]'"):]
-    vol_style = vol_style[:600]
-    assert "'text-max-width': 75" in vol_style or \
-           "text-max-width: 75"  in vol_style, (
-        "Volume text-max-width must match the narrower cylinder width."
-    )
-
-
 def test_topology_vm_nodes_are_rectangular_to_fit_labels():
     """v1.4.28: VM boxes were 60×60 square but labels could span
     120 px → text overflowed the colored box. VMs now carry explicit
@@ -652,74 +475,6 @@ def test_topology_cache_ttl_is_reasonable():
     assert 1.0 <= app_module.TOPOLOGY_CACHE_TTL <= 60.0
 
 
-def test_network_mode_uses_band_layout():
-    """v1.8.4 — user report: VMs piled up unreadably around the network
-    hub. cose is out for the network mode; a deterministic per-network
-    band layout (switch left, members in a grid) replaces it."""
-    js = (Path(__file__).resolve().parent.parent.parent
-          / "web" / "static" / "js" / "topology.js").read_text()
-    assert "function applyNetworkLayout" in js
-    assert "if (currentMode === 'network') applyNetworkLayout(cy);" in js
-    # the network branch of layoutFor must be preset (manual), not cose
-    net_branch = js.split("if (mode === 'network')", 1)[1].split("return", 1)[1]
-    assert "name: 'preset'" in net_branch.split("\n", 1)[0]
-
-
-# ---------------------------------------------------------------------------
-# v1.8.6 — VM-centric Storage view (user ask: which volume is attached
-# to which VM)
-# ---------------------------------------------------------------------------
-
-def test_topology_volume_exposes_pvc_claim_join():
-    """kubernetesStatus is the only bridge between the Longhorn volume
-    name (pvc-<uid>, unreadable) and the claimName VM specs reference —
-    the Storage view joins on it client-side."""
-    raw = {
-        "metadata": {"name": "pvc-abc123", "namespace": "longhorn-system"},
-        "spec": {"size": "10737418240"},
-        "status": {"state": "attached", "robustness": "healthy",
-                   "currentNodeID": "harv1",
-                   "kubernetesStatus": {"pvcName": "leap156-rootdisk-x",
-                                        "namespace": "default"}},
-    }
-    out = _topology_volume(raw)
-    assert out["pvc_name"] == "leap156-rootdisk-x"
-    assert out["pvc_namespace"] == "default"
-    # absent kubernetesStatus (volume not k8s-managed) -> None, not crash
-    out2 = _topology_volume({"metadata": {}, "spec": {}, "status": {}})
-    assert out2["pvc_name"] is None and out2["pvc_namespace"] is None
-
-
-def test_storage_mode_is_vm_centric_band_layout():
-    js = (Path(__file__).resolve().parent.parent.parent
-          / "web" / "static" / "js" / "topology.js").read_text()
-    assert "function applyStorageLayout" in js
-    assert "if (currentMode === 'storage') applyStorageLayout(cy);" in js
-    st_branch = js.split("if (mode === 'storage')", 1)[1].split("return", 1)[1]
-    assert "name: 'preset'" in st_branch.split("\n", 1)[0]
-    # the builder must join VM claims to Longhorn volumes and emit
-    # neutral 'disk' edges + an orphan bucket
-    builder = js.split("function buildStorageElements", 1)[1] \
-                .split("function applyClusterLayout", 1)[0]
-    assert "pvc_namespace + '/' + v.pvc_name" in builder
-    assert "edgeType: 'disk'" in builder
-    assert "storage-orphans" in builder
-    # volume detail panel names the PVC, the VM and the replicas
-    for key in ("topology.detail.pvc", "topology.detail.vm",
-                "topology.detail.disk", "topology.detail.replicas",
-                "topology.storage.unattached"):
-        assert key in js, f"missing detail key use: {key}"
-
-
-def test_storage_view_i18n_keys_en_fr():
-    i18n = (Path(__file__).resolve().parent.parent.parent
-            / "web" / "static" / "js" / "i18n.js").read_text()
-    for key in ("topology.detail.pvc", "topology.detail.disk",
-                "topology.detail.replicas", "topology.storage.unattached",
-                "topology.storage.unattachedHint"):
-        assert i18n.count(f"'{key}'") >= 2, f"{key} must exist in EN and FR"
-
-
 # ---------------------------------------------------------------------------
 # v1.8.7 — CD-ROM identification in the Storage view
 # ---------------------------------------------------------------------------
@@ -747,79 +502,31 @@ def test_topology_vm_exposes_device_type_per_volume():
     assert devices == {"rootdisk": "disk", "installcd": "cdrom", "san": "lun"}
 
 
-def test_storage_view_renders_cdrom_distinctly():
-    js = (Path(__file__).resolve().parent.parent.parent
-          / "web" / "static" / "js" / "topology.js").read_text()
-    builder = js.split("function buildStorageElements", 1)[1] \
-                .split("function applyClusterLayout", 1)[0]
-    assert "device === 'cdrom'" in builder and "nodeIcon('cdrom')" in builder
-    assert "device: d.device" in builder
-    # an EMPTY cdrom drive (device without volume) must stay visible
-    assert "d.pvc || d.device === 'cdrom'" in builder
-    assert "topology.storage.emptyCd" in builder
-    # detail panel names the device, EN + FR keys present
-    assert "topology.detail.device" in js
-    i18n = (Path(__file__).resolve().parent.parent.parent
-            / "web" / "static" / "js" / "i18n.js").read_text()
-    assert i18n.count("'topology.detail.device'") >= 2
-
-
 # ---------------------------------------------------------------------------
-# v1.8.8 — ISO vs disk representation (source image resolution)
+# v1.40.0 : la vue Cluster est la seule restée en graphe
 # ---------------------------------------------------------------------------
+def test_the_cluster_view_costs_one_grouped_call(monkeypatch):
+    """Elle lançait huit kubectl à chaque rafraîchissement, dont cinq pour
+    des volumes, des répliques et des images qu'elle n'affichait pas :
+    Réseau et Stockage ont désormais leurs propres points d'accès."""
+    calls = []
 
-def test_resolve_volume_images_joins_backingimage_to_vmimage():
-    """volume.spec.backingImage (vmi-<uuid>) -> BackingImage annotated
-    harvesterhci.io/imageId -> VMImage. ISO-ness comes from the display
-    name or the source url extension."""
-    resolve = app_module._resolve_volume_images
-    vols = [
-        {"name": "v-iso", "backing_image": "vmi-aaa"},
-        {"name": "v-qcow", "backing_image": "vmi-bbb"},
-        {"name": "v-blank", "backing_image": None},
-        {"name": "v-dangling", "backing_image": "vmi-zzz"},
-    ]
-    bis = [
-        {"metadata": {"name": "vmi-aaa",
-                      "annotations": {"harvesterhci.io/imageId": "default/img-iso"}}},
-        {"metadata": {"name": "vmi-bbb",
-                      "annotations": {"harvesterhci.io/imageId": "default/img-qcow"}}},
-    ]
-    imgs = [
-        {"metadata": {"namespace": "default", "name": "img-iso"},
-         "spec": {"displayName": "debian-13.4.0-amd64-netinst.iso"}},
-        {"metadata": {"namespace": "default", "name": "img-qcow"},
-         "spec": {"displayName": "rocky9", "url": "https://x/Rocky-9.qcow2"}},
-    ]
-    resolve(vols, bis, imgs)
-    by = {v["name"]: v for v in vols}
-    assert by["v-iso"]["image"].endswith(".iso") and by["v-iso"]["image_iso"] is True
-    assert by["v-qcow"]["image"] == "rocky9" and by["v-qcow"]["image_iso"] is False
-    assert by["v-blank"]["image"] is None and by["v-blank"]["image_iso"] is False
-    assert by["v-dangling"]["image"] is None
-
-
-def test_resolve_volume_images_iso_from_url_only():
-    """displayName without extension but an .iso url (e.g. the
-    autounattend image) must still flag as ISO."""
-    resolve = app_module._resolve_volume_images
-    vols = [{"name": "v", "backing_image": "vmi-c"}]
-    bis = [{"metadata": {"name": "vmi-c",
-                         "annotations": {"harvesterhci.io/imageId": "default/i"}}}]
-    imgs = [{"metadata": {"namespace": "default", "name": "i"},
-             "spec": {"displayName": "win2025-autounattend",
-                      "url": "http://x/autounattend.ISO"}}]
-    resolve(vols, bis, imgs)
-    assert vols[0]["image_iso"] is True
-
-
-def test_storage_view_renders_iso_as_disc():
-    js = (Path(__file__).resolve().parent.parent.parent
-          / "web" / "static" / "js" / "topology.js").read_text()
-    builder = js.split("function buildStorageElements", 1)[1] \
-                .split("function applyClusterLayout", 1)[0]
-    assert "v.image_iso" in builder, "ISO content must drive the disc shape"
-    assert "topology.detail.image" in js
-    i18n = (Path(__file__).resolve().parent.parent.parent
-            / "web" / "static" / "js" / "i18n.js").read_text()
-    assert i18n.count("'topology.detail.image'") >= 2
+    def fake(kc, *args, **kw):
+        calls.append(args)
+        return {"items": [
+            {"kind": "Node", "metadata": {"name": "n1", "labels": {}},
+             "status": {"conditions": [{"type": "Ready", "status": "True"}]}},
+            {"kind": "VirtualMachine", "metadata": {"name": "web", "namespace": "default"},
+             "spec": {"runStrategy": "Always", "template": {"spec": {}}}},
+            {"kind": "VirtualMachineInstance",
+             "metadata": {"name": "web", "namespace": "default"},
+             "status": {"phase": "Running", "nodeName": "n1"}},
+        ]}
+    app_module._topology_missing.clear()
+    monkeypatch.setattr(app_module, "_kubectl_json", fake)
+    out = app_module._build_topology("c", "/kc")
+    assert len(calls) == 1
+    assert calls[0][calls[0].index("-A") + 1] == ",".join(app_module.TOPOLOGY_KINDS)
+    assert [n["name"] for n in out["nodes"]] == ["n1"]
+    assert out["vms"][0]["node"] == "n1" and out["vms"][0]["phase"] == "Running"
+    assert "volumes" not in out

@@ -61,9 +61,9 @@ def test_a_vm_attachment_names_the_network_it_uses(monkeypatch):
     items = [node_obj(), vm_obj("web", networks=[
         {"name": "nic-1", "multus": {"networkName": "default/production"}}])]
     vm = build(items, monkeypatch)["vms"][0]
-    assert vm == {"namespace": "default", "name": "web", "status": "Running",
-                  "networks": [{"nic": "nic-1", "network": "default/production",
-                                "pod": False}]}
+    assert (vm["namespace"], vm["name"], vm["status"]) == ("default", "web", "Running")
+    net = vm["networks"][0]
+    assert (net["nic"], net["network"], net["pod"]) == ("nic-1", "default/production", False)
 
 
 def test_a_bare_network_name_belongs_to_the_vm_namespace(monkeypatch):
@@ -81,13 +81,71 @@ def test_the_pod_network_is_flagged_not_invented(monkeypatch):
     rattacher à un switch serait un mensonge."""
     items = [node_obj(), vm_obj("web", networks=[{"name": "default", "pod": {}}])]
     net = build(items, monkeypatch)["vms"][0]["networks"][0]
-    assert net == {"nic": "default", "network": None, "pod": True}
+    assert (net["nic"], net["network"], net["pod"]) == ("default", None, True)
 
 
 def test_a_stopped_vm_is_listed_with_its_state(monkeypatch):
     items = [node_obj(), vm_obj("idle", status="Stopped", networks=[
         {"name": "nic-1", "multus": {"networkName": "default/production"}}])]
     assert build(items, monkeypatch)["vms"][0]["status"] == "Stopped"
+
+
+def vmi_obj(name, ns="default", node="n1", interfaces=None):
+    return {"kind": "VirtualMachineInstance",
+            "metadata": {"name": name, "namespace": ns},
+            "status": {"nodeName": node, "interfaces": interfaces or []}}
+
+
+def running_web(interfaces, decl=None):
+    vm = vm_obj("web", networks=[
+        {"name": "nic-1", "multus": {"networkName": "default/production"}}])
+    vm["spec"]["template"]["spec"]["domain"] = {"devices": {"interfaces": [
+        decl or {"name": "nic-1", "bridge": {}, "model": "virtio",
+                 "macAddress": "02:00:00:00:00:01"}]}}
+    return [node_obj(), vm, vmi_obj("web", interfaces=interfaces)]
+
+
+def test_the_vms_live_interfaces_come_in_the_same_call():
+    """La vue Réseau montre la MAC et les adresses que la VM a VRAIMENT.
+    Elles sont dans le VMI, qui vient dans le même appel groupé."""
+    assert "virtualmachineinstances.kubevirt.io" in wapp.FABRIC_KINDS
+
+
+def test_a_running_vm_shows_what_it_really_has(monkeypatch):
+    items = running_web([{"name": "nic-1", "mac": "ce:0f:db:1f:33:ee",
+                          "ipAddress": "172.16.3.43",
+                          "ipAddresses": ["172.16.3.43", "fe80::1"],
+                          "interfaceName": "eth0", "linkState": "up"}])
+    vm = build(items, monkeypatch)["vms"][0]
+    net = vm["networks"][0]
+    assert vm["node"] == "n1"
+    # La MAC vue par la VM prime sur la déclarée : c'est elle qu'on cherche
+    # dans la table d'un switch.
+    assert net["mac"] == "ce:0f:db:1f:33:ee"
+    assert net["ips"] == ["172.16.3.43", "fe80::1"]
+    assert (net["guest_iface"], net["link_state"]) == ("eth0", "up")
+    assert (net["model"], net["binding"]) == ("virtio", "bridge")
+
+
+def test_a_stopped_vm_keeps_its_declared_mac(monkeypatch):
+    items = running_web([])[:2]                 # pas de VMI
+    net = build(items, monkeypatch)["vms"][0]["networks"][0]
+    assert net["mac"] == "02:00:00:00:00:01"
+    assert net["ips"] == [] and net["link_state"] is None
+
+
+def test_an_interface_known_only_to_the_guest_is_kept_apart(monkeypatch):
+    """docker0 et consorts n'ont pas de nom KubeVirt : ils ne sortent par
+    aucun réseau du cluster. Les ranger sous `production` serait faux."""
+    items = running_web([
+        {"name": "nic-1", "mac": "ce:0f", "ipAddress": "172.16.3.43",
+         "interfaceName": "eth0"},
+        {"interfaceName": "docker0", "mac": "ca:df", "ipAddress": "172.17.0.1",
+         "ipAddresses": ["172.17.0.1"]}])
+    vm = build(items, monkeypatch)["vms"][0]
+    assert len(vm["networks"]) == 1
+    assert vm["guest_only"] == [{"iface": "docker0", "mac": "ca:df",
+                                 "ips": ["172.17.0.1"]}]
 
 
 # ---------------------------------------------------------------------------

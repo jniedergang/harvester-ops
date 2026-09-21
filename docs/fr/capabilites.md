@@ -200,21 +200,39 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   révèle, par une action tracée et retirable depuis le même bandeau. La vue
   fonctionne aussi sur un cluster sans l'addon kube-ovn.
 
-- **Topologie live** rendue avec Cytoscape sur trois vues : Cluster
-  (nodes), Réseau, et Stockage (volumes Longhorn), avec click-pour-détail.
-  La vue Réseau se lit comme un schéma de baie : une bande par réseau,
-  le switch à gauche, ses VMs en grille (Running d'abord) — plus
-  d'empilement du layout à forces. La vue Stockage répond à « quel
-  volume est lié à quoi » : groupes VM → volume étiquetés avec les
-  vrais noms de PVC (joints aux volumes Longhorn), nom du disque
-  invité sur l'arête, les CD-ROM et volumes issus d'une ISO dessinés en disques ronds
-  (💿, média ou lecteur vide), chaque volume issu d'une image montrant
-  son image source dans le panneau de détail, et une section **Volumes non rattachés** qui
-  fait remonter les PVC orphelins — restes de VMs supprimées qu'un
-  opérateur veut récupérer, et chacun peut être **supprimé sur place**
-  (verrou destructif plus confirmation ; l'endpoint revérifie qu'aucune
-  VM ne le réclame). Le panneau de détail montre PVC, VM consommatrice,
-  état, taille et placement des répliques.
+- **Vue Cluster** : les nœuds hyperviseurs et les VMs qu'ils hébergent,
+  dessinés avec Cytoscape, avec le détail au clic et les actions de VM
+  (éditer, console, snapshot, migrer, démarrer, arrêter, supprimer
+  derrière le verrou destructif). Un seul appel kubectl groupé par
+  rafraîchissement.
+- **Vue Réseau, un bloc par réseau** (même disposition que la Fabrique).
+  À gauche, chaque VM branchée sur ce réseau avec ce qu'elle y a vraiment :
+  nom de l'interface, MAC, adresses, nom de l'interface dans l'invité,
+  état du lien, modèle et liaison, les VMs démarrées d'abord. Les
+  interfaces que seul l'agent invité connaît (docker0 et consorts) sont
+  listées à part : elles ne sortent par aucun réseau du cluster. À droite,
+  par où le réseau sort : le bridge, son bond et ses cartes ; pour un
+  underlay kube-ovn, le subnet, sa passerelle et sa carte ; pour l'overlay
+  et le réseau de pod, rien de physique, et c'est dit. Les réseaux sans VM
+  sont listés en bas. Elle lit la même donnée que la Fabrique : aucun
+  appel de plus.
+- **Vue Stockage, lue comme un datastore** : un bloc par moteur de
+  stockage. À gauche, chaque storage class avec sa politique (répliques,
+  sort à la libération, image source), la place qu'elle peut encore
+  allouer (le même chiffre que le panneau de création de VM) et ses
+  volumes rangés par VM dans l'ordre d'amorçage, disques CD-ROM et ISO
+  signalés. Les volumes montés par des pods et ceux que personne ne
+  réclame sont regroupés à part. À droite, les disques des nœuds avec une
+  jauge de ce qui est écrit et de ce qui est promis, la place restante et
+  le nombre de répliques. Cliquer un volume ou un disque ouvre son détail
+  (claim, VM, pods, image, taille demandée et écrite, santé, placement des
+  répliques). Un **volume orphelin** (réclamé par aucune VM, monté par
+  aucun pod, connu de Longhorn et non attaché) peut être **supprimé depuis
+  son détail**, derrière le verrou destructif et une confirmation, par une
+  action tracée. Quand la dernière charge qui l'a utilisé peut revenir (un
+  volume de StatefulSet), le détail le dit d'abord. Le serveur revérifie
+  avant de supprimer et refuse un claim que monte un pod en cours. Un seul
+  appel kubectl groupé.
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,

@@ -40,7 +40,9 @@ const App = (() => {
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
     if (name !== 'overview' && window.Topology) window.Topology.stop();
-    if (name !== 'overview' && window.Fabric) window.Fabric.stop();
+    if (name !== 'overview') {
+      [window.Fabric, window.NetMap, window.StorageMap].forEach(b => b && b.stop());
+    }
   }
 
   /** Sous-onglet d'aperçu actif (metrics | cluster | network | storage). */
@@ -183,9 +185,9 @@ const App = (() => {
     if (active === 'overview') {
       let mode = 'metrics';
       try { mode = localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; } catch {}
-      if (mode !== 'metrics' && window.Topology) {
-        window.Topology.stop();          // couper le rafraîchissement de l'ancien
-        mountTopology(mode);
+      if (mode !== 'metrics') {
+        if (window.Topology) window.Topology.stop();   // couper l'ancien
+        mountTopology(mode);             // Fabrique, Réseau, Stockage compris
       }
     }
     if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
@@ -1940,20 +1942,22 @@ const App = (() => {
   // -------------------------------------------------------------------------
   function mountTopology(mode) {
     if (!currentCluster) return;
-    // La fabrique n'est plus un graphe : c'est une page de switchs à la
-    // manière d'ESXi, rendue en HTML par son propre module. Elle ne dépend
-    // donc pas de Cytoscape, chargé en module différé.
-    if (window.Fabric && mode !== 'fabric') window.Fabric.stop();
-    if (mode === 'fabric' && window.Fabric) {
+    // Fabrique, Réseau et Stockage ne sont plus des graphes : ce sont des
+    // pages de blocs à la manière d'ESXi, rendues en HTML par leur propre
+    // module. Elles ne dépendent donc pas de Cytoscape, chargé en différé.
+    const boards = { fabric: window.Fabric, network: window.NetMap, storage: window.StorageMap };
+    Object.entries(boards).forEach(([m, b]) => { if (b && m !== mode) b.stop(); });
+    const board = boards[mode];
+    if (board) {
       if (window.Topology) window.Topology.stop();
-      const fabricHost = document.querySelector('.overview-subtab[data-subtab="fabric"] .topology-host');
-      const fabricLoading = window.Fabric.start(currentCluster);
-      if (window.Veil && fabricHost && fabricLoading && typeof fabricLoading.then === 'function') {
-        window.Veil.during(fabricHost, {
+      const boardHost = document.querySelector(`.overview-subtab[data-subtab="${mode}"] .topology-host`);
+      const boardLoading = board.start(currentCluster);
+      if (window.Veil && boardHost && boardLoading && typeof boardLoading.then === 'function') {
+        window.Veil.during(boardHost, {
           message: i18n.t('topology.loading'), name: currentCluster, delay: 250,
-        }, () => fabricLoading);
+        }, () => boardLoading);
       }
-      return fabricLoading;
+      return boardLoading;
     }
     if (!window.Topology) return;
     // L'onglet Métriques n'a pas de canevas : y monter la topologie n'a

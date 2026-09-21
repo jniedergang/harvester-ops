@@ -2128,127 +2128,35 @@ def _topology_vm(vm_item, vmi_by_name):
     }
 
 
-def _topology_volume(item):
-    meta = item.get("metadata") or {}
-    spec = item.get("spec") or {}
-    status = item.get("status") or {}
-    # v1.8.6 : kubernetesStatus porte le nom du PVC consommateur — c'est
-    # la seule passerelle entre le volume Longhorn (pvc-<uid>, illisible)
-    # et le claimName que les specs de VM référencent. La vue Storage
-    # fait le join côté client : VM.volumes[].pvc == pvc_ns/pvc_name.
-    ks = status.get("kubernetesStatus") or {}
-    return {
-        "name": meta.get("name"),
-        "namespace": meta.get("namespace"),
-        "size": spec.get("size"),
-        "state": status.get("state"),
-        "robustness": status.get("robustness"),
-        "attached_to": status.get("currentNodeID")
-                       or status.get("ownerID"),
-        "pvc_name": ks.get("pvcName") or None,
-        "pvc_namespace": ks.get("namespace") or None,
-        "backing_image": spec.get("backingImage") or None,
-    }
-
-
-def _resolve_volume_images(volumes, backingimages_raw, vmimages_raw):
-    """v1.8.8 : enrichit chaque volume image-backed avec le nom d'affichage
-    de son image source et un drapeau ISO (extension .iso du displayName ou
-    de l'url). Mutation en place — le join se fait une fois côté serveur."""
-    bi_to_image = {}
-    for b in backingimages_raw:
-        meta = b.get("metadata") or {}
-        img_id = (meta.get("annotations") or {}).get("harvesterhci.io/imageId")
-        if meta.get("name") and img_id:
-            bi_to_image[meta["name"]] = img_id
-    images = {}
-    for i in vmimages_raw:
-        meta = i.get("metadata") or {}
-        spec = i.get("spec") or {}
-        display = spec.get("displayName") or meta.get("name") or ""
-        url = spec.get("url") or ""
-        images[f"{meta.get('namespace')}/{meta.get('name')}"] = {
-            "display_name": display,
-            "is_iso": display.lower().endswith(".iso")
-                      or url.lower().endswith(".iso"),
-        }
-    for v in volumes:
-        img_id = bi_to_image.get(v.get("backing_image") or "")
-        img = images.get(img_id) if img_id else None
-        v["image"] = img["display_name"] if img else None
-        v["image_iso"] = bool(img and img["is_iso"])
-
-
-def _topology_replica(item):
-    spec = item.get("spec") or {}
-    status = item.get("status") or {}
-    return {
-        "name": (item.get("metadata") or {}).get("name"),
-        "volume": spec.get("volumeName"),
-        "node": spec.get("nodeID"),
-        "running": (status.get("currentState") == "running"),
-    }
-
-
-def _topology_network_attachment(item):
-    meta = item.get("metadata") or {}
-    return {
-        "name": meta.get("name"),
-        "namespace": meta.get("namespace"),
-        "config_summary": (item.get("spec") or {}).get("config", "")[:200],
-    }
+TOPOLOGY_KINDS = ["nodes", "virtualmachines.kubevirt.io",
+                  "virtualmachineinstances.kubevirt.io"]
+_topology_missing = {}
 
 
 def _build_topology(cluster, kc):
-    """Fetch every resource the viz needs (in parallel where possible)
-    and reduce to a stable shape."""
-    from concurrent.futures import ThreadPoolExecutor
-    queries = {
-        "nodes":    ("get", "nodes"),
-        "vms":      ("get", "vm", "-A"),
-        "vmis":     ("get", "vmi", "-A"),
-        "volumes":  ("get", "volumes.longhorn.io", "-A"),
-        "replicas": ("get", "replicas.longhorn.io", "-A"),
-        "nads":     ("get", "network-attachment-definitions", "-A"),
-        # v1.8.8 : source d'un volume image-backed. Le pont est en deux
-        # sauts : volume.spec.backingImage (vmi-<uuid>) -> BackingImage
-        # annoté harvesterhci.io/imageId -> VMImage (displayName / url,
-        # dont l'extension dit si c'est une ISO).
-        "backingimages": ("get", "backingimages.longhorn.io", "-A"),
-        "vmimages": ("get", "virtualmachineimages", "-A"),
-    }
-    results = {}
-    with ThreadPoolExecutor(max_workers=len(queries)) as ex:
-        futures = {
-            k: ex.submit(_kubectl_json, kc, *args)
-            for k, args in queries.items()
-        }
-        for k, fut in futures.items():
-            results[k] = fut.result()
-    nodes_raw    = (results["nodes"]    or {}).get("items", [])
-    vms_raw      = (results["vms"]      or {}).get("items", [])
-    vmis_raw     = (results["vmis"]     or {}).get("items", [])
-    vols_raw     = (results["volumes"]  or {}).get("items", [])
-    replicas_raw = (results["replicas"] or {}).get("items", [])
-    nads_raw     = (results["nads"]     or {}).get("items", [])
-    bi_raw       = (results["backingimages"] or {}).get("items", [])
-    img_raw      = (results["vmimages"] or {}).get("items", [])
+    """Nœuds et VMs pour la vue Cluster, en UN appel groupé.
 
+    v1.40.0 : Réseau et Stockage ont chacun leur point d'accès. Cette vue
+    n'a plus besoin que des nœuds et des VMs ; elle lançait jusqu'ici huit
+    kubectl à chaque rafraîchissement, dont cinq pour des volumes, des
+    répliques et des images qu'elle n'affichait pas."""
+    items = _grouped_items(kc, cluster, TOPOLOGY_KINDS, _topology_missing)
+    if items is None:
+        raise RuntimeError("cluster unreachable")
+    by_kind = {}
+    for it in items:
+        by_kind.setdefault(it.get("kind"), []).append(it)
     vmi_by_name = {
         f"{(v.get('metadata') or {}).get('namespace')}/"
         f"{(v.get('metadata') or {}).get('name')}": v
-        for v in vmis_raw
+        for v in by_kind.get("VirtualMachineInstance", [])
     }
-    volumes = [_topology_volume(v) for v in vols_raw]
-    _resolve_volume_images(volumes, bi_raw, img_raw)
     return {
         "cluster": cluster,
         "fetched_at": time.time(),
-        "nodes": [_topology_node(n) for n in nodes_raw],
-        "vms": [_topology_vm(v, vmi_by_name) for v in vms_raw],
-        "volumes": volumes,
-        "replicas": [_topology_replica(r) for r in replicas_raw],
-        "networks": [_topology_network_attachment(n) for n in nads_raw],
+        "nodes": [_topology_node(n) for n in by_kind.get("Node", [])],
+        "vms": [_topology_vm(v, vmi_by_name)
+                for v in by_kind.get("VirtualMachine", [])],
     }
 
 
@@ -2296,6 +2204,9 @@ FABRIC_KINDS = [
     # Les VMs branchées sur chaque réseau : c'est ce qu'un exploitant
     # cherche en premier sous un port group, et ce qu'ESXi montre.
     "virtualmachines.kubevirt.io",
+    # Et ce que chacune y fait VRAIMENT : MAC, adresses, état du lien. La
+    # vue Réseau en vit ; c'est le même appel, pas un de plus.
+    "virtualmachineinstances.kubevirt.io",
 ]
 
 # Types absents d'un cluster, retenus un moment. `kubectl get a,b,c` échoue
@@ -2309,34 +2220,40 @@ _fabric_missing = {}
 _fabric_missing_lock = threading.Lock()
 
 
-def _fabric_items(kc, cluster):
-    """Objets de la fabrique, en un appel groupé quand c'est possible.
-    None seulement si même les nœuds sont illisibles."""
+def _grouped_items(kc, cluster, kinds, memo, required="nodes"):
+    """Les objets de plusieurs types, en UN appel groupé quand c'est possible.
+
+    `memo` retient, par cluster, les types absents (voir FABRIC_MISSING_TTL).
+    None seulement si le type `required` lui-même est illisible : c'est alors
+    le cluster qui ne répond pas, pas un type qui manque."""
     now = time.time()
     with _fabric_missing_lock:
-        missing, ts = _fabric_missing.get(cluster, (frozenset(), 0))
+        missing, ts = memo.get(cluster, (frozenset(), 0))
         if now - ts > FABRIC_MISSING_TTL:
             missing = frozenset()
-    kinds = [k for k in FABRIC_KINDS if k not in missing]
-    raw = _kubectl_json(kc, "get", "-A", ",".join(kinds),
+    wanted = [k for k in kinds if k not in missing]
+    raw = _kubectl_json(kc, "get", "-A", ",".join(wanted),
                         timeout=40, cluster=cluster)
     if raw is not None:
         return raw.get("items", [])
     items, absent = [], set()
-    for kind in kinds:
+    for kind in wanted:
         one = _kubectl_json(kc, "get", "-A", kind, timeout=20, cluster=cluster)
         if one is None:
             absent.add(kind)
             continue
         items.extend(one.get("items", []))
-    # Sans les nœuds, il n'y a rien à dessiner : c'est bien le cluster qui
-    # ne répond pas, pas un type qui manque.
-    if "nodes" in absent:
+    if required in absent:
         return None
     if absent:
         with _fabric_missing_lock:
-            _fabric_missing[cluster] = (frozenset(missing | absent), now)
+            memo[cluster] = (frozenset(missing | absent), now)
     return items
+
+
+def _fabric_items(kc, cluster):
+    """Objets de la fabrique. Sans les nœuds, il n'y a rien à dessiner."""
+    return _grouped_items(kc, cluster, FABRIC_KINDS, _fabric_missing)
 
 # Un maître dont le nom commence par là relève d'Open vSwitch, pas d'un
 # bridge Linux : c'est ce qui sépare les deux fabriques.
@@ -2565,22 +2482,56 @@ def _build_fabric(cluster, kc):
     # namespace de la VM : le normaliser ici évite que l'écran rate la
     # moitié des rattachements. Le réseau de pod n'a pas de NAD : il est
     # signalé tel quel.
+    vmis = {f"{(i.get('metadata') or {}).get('namespace')}/"
+            f"{(i.get('metadata') or {}).get('name')}": i
+            for i in by_kind.get("VirtualMachineInstance", [])}
     for vm in by_kind.get("VirtualMachine", []):
         meta = vm.get("metadata", {})
         ns = meta.get("namespace")
         spec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+        ifaces = {i.get("name"): i for i in
+                  (((spec.get("domain") or {}).get("devices") or {})
+                   .get("interfaces") or [])}
+        vmi = vmis.get(f"{ns}/{meta.get('name')}") or {}
+        vmi_status = vmi.get("status") or {}
+        live = {i.get("name"): i for i in (vmi_status.get("interfaces") or [])
+                if i.get("name")}
         nets = []
         for n in spec.get("networks") or []:
             multus = n.get("multus") or {}
             target = multus.get("networkName")
             if target and "/" not in target:
                 target = f"{ns}/{target}"
-            nets.append({"nic": n.get("name"), "network": target,
-                         "pod": "pod" in n})
+            decl = ifaces.get(n.get("name")) or {}
+            got = live.get(n.get("name")) or {}
+            nets.append({
+                "nic": n.get("name"), "network": target, "pod": "pod" in n,
+                "model": decl.get("model"),
+                "binding": next((k for k in ("bridge", "masquerade", "sriov",
+                                             "macvtap", "passt") if k in decl),
+                                None),
+                # La MAC VUE par la VM prime sur la déclarée : c'est elle
+                # qu'on cherche dans la table d'un switch.
+                "mac": got.get("mac") or decl.get("macAddress"),
+                "ips": got.get("ipAddresses") or ([got["ipAddress"]]
+                                                  if got.get("ipAddress") else []),
+                "guest_iface": got.get("interfaceName"),
+                "link_state": got.get("linkState"),
+            })
+        # Les interfaces que seul l'agent invité connaît (docker0, bridges
+        # internes) n'ont pas de nom KubeVirt : elles ne sortent par aucun
+        # réseau du cluster, mais un exploitant qui cherche une adresse les
+        # rencontre, autant les montrer pour ce qu'elles sont.
+        guest_only = [{"iface": i.get("interfaceName"), "mac": i.get("mac"),
+                       "ips": i.get("ipAddresses") or []}
+                      for i in (vmi_status.get("interfaces") or [])
+                      if not i.get("name")]
         out["vms"].append({
             "namespace": ns, "name": meta.get("name"),
             "status": (vm.get("status") or {}).get("printableStatus"),
+            "node": vmi_status.get("nodeName"),
             "networks": nets,
+            "guest_only": guest_only,
         })
     return out
 
@@ -3403,6 +3354,26 @@ def api_pvc_delete(cluster, namespace, name):
                     "error": "claim-in-use",
                     "detail": f"PVC {namespace}/{name} is still attached to VM "
                               f"{meta.get('name')} — detach it from the VM first.",
+                }), 409
+    # Un PVC que monte un POD n'est pas orphelin non plus (base Prometheus,
+    # journaux d'une mise à jour). La protection de Kubernetes ne fait que
+    # DIFFÉRER l'effacement : le PVC passe en Terminating et disparaît au
+    # prochain redémarrage du pod, avec ses données. Et si l'on ne peut pas
+    # vérifier, on refuse : dans le doute, rien n'est supprimé.
+    pods = _kubectl_json(kc, "get", "pods", "-n", namespace, cluster=cluster)
+    if pods is None:
+        return jsonify({"error": "cannot-verify",
+                        "detail": "could not list the pods of this namespace, "
+                                  "so whether the claim is in use is unknown"}), 503
+    for pod in pods.get("items", []):
+        if (pod.get("status") or {}).get("phase") in ("Succeeded", "Failed"):
+            continue
+        for v in (pod.get("spec") or {}).get("volumes") or []:
+            if (v.get("persistentVolumeClaim") or {}).get("claimName") == name:
+                return jsonify({
+                    "error": "claim-in-use",
+                    "detail": f"PVC {namespace}/{name} is mounted by pod "
+                              f"{(pod.get('metadata') or {}).get('name')}.",
                 }), 409
     action_id = track_action(
         f"pvc-delete:{namespace}/{name}", cluster,
@@ -5917,28 +5888,48 @@ def api_storage_capacity(cluster):
 
     over = _longhorn_setting(kc, cluster, "storage-over-provisioning-percentage", 200.0)
     minimal = _longhorn_setting(kc, cluster, "storage-minimal-available-percentage", 25.0)
-
     nodes = _kubectl_json(kc, "get", "nodes.longhorn.io", "-n", "longhorn-system",
                           "-o", "json", cluster=cluster)
+    scs = _kubectl_json(kc, "get", "sc", "-o", "json", cluster=cluster)
+    room = _storage_room((nodes or {}).get("items", []),
+                         (scs or {}).get("items", []), over, minimal)
+    return jsonify({
+        "over_provisioning_pct": over,
+        "minimal_available_pct": minimal,
+        "schedulable_nodes": room["schedulable_nodes"],
+        "disks": room["disks"],
+        "classes": room["classes"],
+    })
+
+
+def _storage_room(lh_nodes, storage_classes, over, minimal):
+    """Place allouable, par disque et par storage class Longhorn.
+
+    Fonction pure, partagée par le panneau de création de VM et la vue
+    Stockage : deux calculs de « place restante » finiraient par diverger,
+    et l'exploitant verrait deux chiffres pour la même question."""
     disks = []
-    for node in (nodes or {}).get("items", []):
+    for node in lh_nodes:
         node_name = (node.get("metadata") or {}).get("name")
         spec_disks = (node.get("spec") or {}).get("disks") or {}
         for disk_name, ds in (((node.get("status") or {}).get("diskStatus")) or {}).items():
             conditions = {c.get("type"): c.get("status")
                           for c in (ds.get("conditions") or [])}
+            spec_disk = spec_disks.get(disk_name) or {}
             schedulable = (conditions.get("Schedulable") == "True"
                            and conditions.get("Ready") == "True"
-                           and (spec_disks.get(disk_name) or {}).get("allowScheduling", True))
+                           and spec_disk.get("allowScheduling", True))
             maximum = ds.get("storageMaximum") or 0
             scheduled = ds.get("storageScheduled") or 0
             available = ds.get("storageAvailable") or 0
-            reserved = (spec_disks.get(disk_name) or {}).get("storageReserved") or 0
+            reserved = spec_disk.get("storageReserved") or 0
             room_over = (maximum - reserved) * over / 100.0 - scheduled
             room_free = available - maximum * minimal / 100.0
             room = max(0, int(min(room_over, room_free)))
             disks.append({
                 "node": node_name, "disk": disk_name,
+                "path": spec_disk.get("path") or ds.get("diskPath"),
+                "tags": spec_disk.get("tags") or [],
                 "schedulable": bool(schedulable),
                 "maximum": maximum, "scheduled": scheduled,
                 "available": available, "reserved": reserved,
@@ -5957,8 +5948,7 @@ def api_storage_capacity(cluster):
     rooms = sorted(by_node.values(), reverse=True)
 
     classes = {}
-    scs = _kubectl_json(kc, "get", "sc", "-o", "json", cluster=cluster)
-    for sc in (scs or {}).get("items", []):
+    for sc in storage_classes:
         name = (sc.get("metadata") or {}).get("name")
         if sc.get("provisioner") != "driver.longhorn.io":
             continue
@@ -5974,14 +5964,288 @@ def api_storage_capacity(cluster):
             allocatable, reason = rooms[replicas - 1], None
         classes[name] = {"replicas": replicas, "allocatable": allocatable,
                          "reason": reason}
+    return {"disks": disks, "classes": classes, "schedulable_nodes": len(rooms)}
 
-    return jsonify({
-        "over_provisioning_pct": over,
-        "minimal_available_pct": minimal,
-        "schedulable_nodes": len(rooms),
-        "disks": disks,
-        "classes": classes,
-    })
+
+# =============================================================================
+# Carte du stockage (v1.40.0)
+#
+# La vue Stockage se lit comme un datastore d'ESXi : les storage classes (et
+# les disques de VM qu'elles portent) à gauche, le moteur au milieu, les
+# disques des nœuds à droite avec leur jauge. Tout vient d'UN appel groupé,
+# conformément à l'économie de la v1.33.0 : l'ancienne vue en lançait huit
+# à chaque rafraîchissement.
+# =============================================================================
+STORAGE_KINDS = [
+    "persistentvolumeclaims",
+    "storageclasses",
+    "nodes.longhorn.io",
+    "volumes.longhorn.io",
+    "replicas.longhorn.io",
+    "settings.longhorn.io",
+    "virtualmachines.kubevirt.io",
+    "virtualmachineinstances.kubevirt.io",
+    "backingimages.longhorn.io",
+    "virtualmachineimages.harvesterhci.io",
+]
+_storage_missing = {}
+STORAGE_MAP_TTL = 5.0
+_storage_map_cache = {}
+_storage_map_lock = threading.Lock()
+
+# Un pod de VM (ou d'attachement à chaud) n'est pas un « autre » consommateur :
+# la VM le dit déjà, par sa spec.
+_VM_POD_PREFIXES = ("virt-launcher-", "hp-volume-")
+
+
+def _k8s_bytes(q):
+    """Quantité Kubernetes (`10Gi`, `1Ti`, `500M`) en octets, ou None."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGTPE]i?)?\s*", str(q or ""))
+    if not m:
+        return None
+    mul = {None: 1, "Ki": 1024, "Mi": 1024**2, "Gi": 1024**3, "Ti": 1024**4,
+           "Pi": 1024**5, "Ei": 1024**6, "K": 10**3, "M": 10**6, "G": 10**9,
+           "T": 10**12, "P": 10**15, "E": 10**18}[m.group(2)]
+    return int(float(m.group(1)) * mul)
+
+
+def _build_storage_map(cluster, kc):
+    items = _grouped_items(kc, cluster, STORAGE_KINDS, _storage_missing,
+                           required="persistentvolumeclaims")
+    if items is None:
+        return None
+    by_kind = {}
+    for it in items:
+        api = it.get("apiVersion") or ""
+        kind = it.get("kind")
+        # `Node` et `Setting` existent aussi hors de Longhorn : ne garder que
+        # ceux qu'on a demandés.
+        if kind in ("Node", "Setting") and not api.startswith("longhorn.io"):
+            continue
+        by_kind.setdefault(kind, []).append(it)
+
+    def _num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    settings = {(s.get("metadata") or {}).get("name"): s.get("value")
+                for s in by_kind.get("Setting", [])}
+    over = _num(settings.get("storage-over-provisioning-percentage")) or 200.0
+    minimal = _num(settings.get("storage-minimal-available-percentage"))
+    minimal = 25.0 if minimal is None else minimal
+    lh_nodes = by_kind.get("Node", [])
+    scs = by_kind.get("StorageClass", [])
+    room = _storage_room(lh_nodes, scs, over, minimal)
+
+    # Image source d'une classe ou d'un volume : BackingImage -> VMImage.
+    bi_to_image = {}
+    for b in by_kind.get("BackingImage", []):
+        meta = b.get("metadata") or {}
+        img_id = (meta.get("annotations") or {}).get("harvesterhci.io/imageId")
+        if meta.get("name") and img_id:
+            bi_to_image[meta["name"]] = img_id
+    images = {}
+    for i in by_kind.get("VirtualMachineImage", []):
+        meta = i.get("metadata") or {}
+        spec = i.get("spec") or {}
+        display = spec.get("displayName") or meta.get("name") or ""
+        url = spec.get("url") or ""
+        images[f"{meta.get('namespace')}/{meta.get('name')}"] = {
+            "name": display,
+            "iso": display.lower().endswith(".iso") or url.lower().endswith(".iso")}
+
+    def _image_of(backing):
+        return images.get(bi_to_image.get(backing or "") or "")
+
+    classes = []
+    for sc in scs:
+        meta = sc.get("metadata") or {}
+        params = sc.get("parameters") or {}
+        ann = meta.get("annotations") or {}
+        name = meta.get("name")
+        img = _image_of(params.get("backingImage"))
+        rc = room["classes"].get(name) or {}
+        try:
+            replicas = int(params["numberOfReplicas"])
+        except (KeyError, TypeError, ValueError):
+            replicas = None
+        classes.append({
+            "name": name,
+            "provisioner": sc.get("provisioner"),
+            "replicas": replicas,
+            "reclaim_policy": sc.get("reclaimPolicy"),
+            "binding_mode": sc.get("volumeBindingMode"),
+            "expansion": bool(sc.get("allowVolumeExpansion")),
+            "default": "true" in (ann.get("storageclass.kubernetes.io/is-default-class"),
+                                  ann.get("storageclass.beta.kubernetes.io/is-default-class")),
+            "image": img["name"] if img else None,
+            "allocatable": rc.get("allocatable"),
+            "reason": rc.get("reason"),
+        })
+
+    # Disques Longhorn : la réplique désigne son disque par UUID.
+    disk_by_uuid = {}
+    for node in lh_nodes:
+        nname = (node.get("metadata") or {}).get("name")
+        for dname, ds in (((node.get("status") or {}).get("diskStatus")) or {}).items():
+            if ds.get("diskUUID"):
+                disk_by_uuid[ds["diskUUID"]] = (nname, dname)
+    replicas_by_vol = {}
+    for r in by_kind.get("Replica", []):
+        spec = r.get("spec") or {}
+        node, disk = disk_by_uuid.get(spec.get("diskID"), (spec.get("nodeID"), None))
+        replicas_by_vol.setdefault(spec.get("volumeName"), []).append({
+            "node": node or spec.get("nodeID"), "disk": disk,
+            "running": (r.get("status") or {}).get("currentState") == "running"})
+    replicas_on_disk = {}
+    for reps in replicas_by_vol.values():
+        for rep in reps:
+            key = (rep["node"], rep["disk"])
+            replicas_on_disk[key] = replicas_on_disk.get(key, 0) + 1
+    for d in room["disks"]:
+        d["replicas"] = replicas_on_disk.get((d["node"], d["disk"]), 0)
+        d["used"] = max(0, (d["maximum"] or 0) - (d["available"] or 0))
+
+    lh_by_claim = {}
+    lh_unclaimed = []
+    for v in by_kind.get("Volume", []):
+        ks = (v.get("status") or {}).get("kubernetesStatus") or {}
+        if ks.get("pvcName"):
+            lh_by_claim[f"{ks.get('namespace')}/{ks['pvcName']}"] = v
+        else:
+            lh_unclaimed.append(v)
+
+    # Qui réclame quel PVC : la spec des VMs fait foi, arrêtées comprises.
+    vmis = {f"{(i.get('metadata') or {}).get('namespace')}/"
+            f"{(i.get('metadata') or {}).get('name')}": i
+            for i in by_kind.get("VirtualMachineInstance", [])}
+    claimed, vms = {}, []
+    for vm in by_kind.get("VirtualMachine", []):
+        meta = vm.get("metadata") or {}
+        ns, vname = meta.get("namespace"), meta.get("name")
+        tspec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+        vol_claim = {}
+        for v in tspec.get("volumes") or []:
+            c = ((v.get("persistentVolumeClaim") or {}).get("claimName")
+                 or (v.get("dataVolume") or {}).get("name"))
+            if c:
+                vol_claim[v.get("name")] = c
+        disks = []
+        for d in (((tspec.get("domain") or {}).get("devices") or {}).get("disks") or []):
+            device = "cdrom" if "cdrom" in d else ("lun" if "lun" in d else "disk")
+            pvc = vol_claim.get(d.get("name"))
+            disks.append({"disk": d.get("name"), "device": device,
+                          "boot_order": d.get("bootOrder"), "pvc": pvc})
+            if pvc:
+                claimed[f"{ns}/{pvc}"] = {"vm": f"{ns}/{vname}", "disk": d.get("name"),
+                                          "device": device,
+                                          "boot_order": d.get("bootOrder")}
+        vmi = (vmis.get(f"{ns}/{vname}") or {}).get("status") or {}
+        vms.append({"namespace": ns, "name": vname,
+                    "status": (vm.get("status") or {}).get("printableStatus"),
+                    "node": vmi.get("nodeName"), "disks": disks})
+
+    volumes = []
+    for pvc in by_kind.get("PersistentVolumeClaim", []):
+        meta = pvc.get("metadata") or {}
+        spec = pvc.get("spec") or {}
+        key = f"{meta.get('namespace')}/{meta.get('name')}"
+        lh = lh_by_claim.get(key)
+        lh_spec = (lh or {}).get("spec") or {}
+        lh_status = (lh or {}).get("status") or {}
+        img = _image_of(lh_spec.get("backingImage"))
+        # Consommateurs ACTUELS hors VM, d'après Longhorn : un pod qui monte
+        # le volume. `lastPodRefAt` renseigné = le pod n'existe plus.
+        ks = lh_status.get("kubernetesStatus") or {}
+        pods = [{"name": w.get("podName"), "status": w.get("podStatus"),
+                 "workload": w.get("workloadName"), "kind": w.get("workloadType")}
+                for w in (ks.get("workloadsStatus") or [])
+                if not ks.get("lastPodRefAt")
+                and w.get("workloadType") != "VirtualMachineInstance"
+                and not str(w.get("podName") or "").startswith(_VM_POD_PREFIXES)]
+        # Le dernier pod qui l'a monté, s'il n'existe plus : un volume de
+        # StatefulSet (Prometheus d'une supervision désactivée) est orphelin
+        # AUJOURD'HUI, mais sa charge peut revenir le réclamer.
+        last_pods = [{"name": w.get("podName"), "workload": w.get("workloadName"),
+                      "kind": w.get("workloadType"), "at": ks.get("lastPodRefAt")}
+                     for w in (ks.get("workloadsStatus") or [])
+                     if ks.get("lastPodRefAt")
+                     and w.get("workloadType") != "VirtualMachineInstance"
+                     and not str(w.get("podName") or "").startswith(_VM_POD_PREFIXES)]
+        claim = claimed.get(key) or {}
+        volumes.append({
+            "pvc_namespace": meta.get("namespace"), "pvc_name": meta.get("name"),
+            "storage_class": spec.get("storageClassName"),
+            "phase": (pvc.get("status") or {}).get("phase"),
+            "requested": _k8s_bytes(((spec.get("resources") or {})
+                                     .get("requests") or {}).get("storage")),
+            "longhorn": (lh or {}).get("metadata", {}).get("name"),
+            "size": _num(lh_spec.get("size")),
+            "actual_size": lh_status.get("actualSize"),
+            "state": lh_status.get("state"),
+            "robustness": lh_status.get("robustness"),
+            "attached_to": lh_status.get("currentNodeID") or None,
+            "replicas_wanted": lh_spec.get("numberOfReplicas"),
+            "replicas": replicas_by_vol.get((lh or {}).get("metadata", {}).get("name"), []),
+            "image": img["name"] if img else None,
+            "image_iso": bool(img and img["iso"]),
+            "vm": claim.get("vm"), "disk": claim.get("disk"),
+            "device": claim.get("device"), "boot_order": claim.get("boot_order"),
+            "pods": pods, "last_pods": last_pods,
+            # Supprimable depuis la vue : réclamé par aucune VM, monté par
+            # aucun pod, et connu de Longhorn (sinon on ne SAIT pas qui le
+            # monte). Le serveur revérifie de toute façon avant d'agir.
+            "orphan": (not claim and not pods and lh is not None
+                       and lh_status.get("state") != "attached"),
+        })
+    # Volume Longhorn sans PVC : reste d'une suppression, ou volume créé à
+    # la main. Montré, jamais proposé à la suppression d'ici.
+    for v in lh_unclaimed:
+        vs = v.get("spec") or {}
+        st = v.get("status") or {}
+        volumes.append({
+            "pvc_namespace": None, "pvc_name": None, "storage_class": None,
+            "phase": None, "requested": None,
+            "longhorn": (v.get("metadata") or {}).get("name"),
+            "size": _num(vs.get("size")), "actual_size": st.get("actualSize"),
+            "state": st.get("state"), "robustness": st.get("robustness"),
+            "attached_to": st.get("currentNodeID") or None,
+            "replicas_wanted": vs.get("numberOfReplicas"),
+            "replicas": replicas_by_vol.get((v.get("metadata") or {}).get("name"), []),
+            "image": None, "image_iso": False, "vm": None, "disk": None,
+            "device": None, "boot_order": None, "pods": [], "last_pods": [],
+            "orphan": False,
+        })
+    return {"cluster": cluster, "over_provisioning_pct": over,
+            "minimal_available_pct": minimal,
+            "schedulable_nodes": room["schedulable_nodes"],
+            "classes": classes, "disks": room["disks"],
+            "volumes": volumes, "vms": vms}
+
+
+@app.route("/api/storage-map/<cluster>")
+@requires_auth
+def api_storage_map(cluster):
+    """Le stockage lu comme un datastore : classes, volumes, disques."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    with _storage_map_lock:
+        cached = _storage_map_cache.get(cluster)
+        if cached and time.time() - cached["ts"] < STORAGE_MAP_TTL \
+                and request.args.get("fresh") != "1":
+            return jsonify(cached["data"])
+    data = _build_storage_map(cluster, kc)
+    if data is None:
+        return jsonify({"cluster": cluster, "unreachable": True,
+                        "error": "cluster unreachable"}), 200
+    with _storage_map_lock:
+        _storage_map_cache[cluster] = {"ts": time.time(), "data": data}
+    return jsonify(data)
 
 
 # =============================================================================

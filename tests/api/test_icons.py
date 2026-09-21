@@ -266,5 +266,7 @@ def test_floating_panel_renders_icon_option():
 def test_topology_canvas_uses_data_uri_icons():
     src = (JS / "topology.js").read_text()
     assert "'background-image': 'data(icon)'" in src
-    for name in ("node", "vm", "volume", "cdrom", "switch", "bundle", "paused"):
+    # v1.40.0 : seule la vue Cluster reste un canevas ; volumes, CD-ROM et
+    # switchs sont désormais dessinés en HTML par storage-map.js et netmap.js.
+    for name in ("node", "vm", "paused"):
         assert f"nodeIcon('{name}')" in src, f"canvas icon {name} missing"

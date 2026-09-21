@@ -38,28 +38,8 @@ const Fabric = (() => {
   const detail = new Map();        // node -> {phys, stats, links}
   const detailPending = new Set();
 
-  const tr = (k, f) => {
-    const v = window.i18n ? i18n.t(k) : null;
-    return v && v !== k ? v : f;
-  };
-  const esc = (v) => String(v == null ? '' : v)
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-  // Les bulles d'aide lisent `data-tip`, que i18n ne résout qu'à son
-  // passage sur tout le document. Une vue réécrite toutes les 8 s doit le
-  // faire elle-même, sur sa seule surface.
-  function applyTips(root) {
-    if (!root) return;
-    root.querySelectorAll('[data-tip-i18n]').forEach(el => {
-      const t = window.i18n ? i18n.t(el.getAttribute('data-tip-i18n')) : null;
-      if (t) el.setAttribute('data-tip', t);
-    });
-  }
-  // Une valeur copiable : le bouton est un calque, son porteur un repère.
-  const val = (v, cls = '') => {
-    const b = window.CopyTo ? CopyTo.button(v) : '';
-    return `<span class="vsw-val ${cls}">${esc(v)}${b}</span>`;
-  };
+  // Outils communs aux trois vues (board.js).
+  const { tr, esc, val, applyTips } = window.Board;
 
   // -------------------------------------------------------------------------
   // Modèle : regrouper par SWITCH
@@ -403,14 +383,6 @@ const Fabric = (() => {
   // -------------------------------------------------------------------------
   // Détail d'une carte
   // -------------------------------------------------------------------------
-  function fmtBytes(n) {
-    if (n == null) return '-';
-    const u = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
-    let i = 0, v = n;
-    while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
-    return (i ? v.toFixed(1) : String(v)) + ' ' + u[i];
-  }
-
   function showDetail(node, name) {
     const side = host && host.querySelector('.fabric-detail');
     if (!side || !lastData) return;
@@ -438,9 +410,9 @@ const Fabric = (() => {
       [tr('fabric.carrierChanges', 'Carrier changes'),
        p.carrier_changes == null ? '-' : String(p.carrier_changes)],
       [tr('fabric.rx', 'Received'), s.rx_bytes == null ? '-'
-        : `${fmtBytes(s.rx_bytes)} · ${s.rx_errors || 0} err · ${s.rx_dropped || 0} drop`],
+        : `${window.Board.bytes(s.rx_bytes)} · ${s.rx_errors || 0} err · ${s.rx_dropped || 0} drop`],
       [tr('fabric.tx', 'Sent'), s.tx_bytes == null ? '-'
-        : `${fmtBytes(s.tx_bytes)} · ${s.tx_errors || 0} err · ${s.tx_dropped || 0} drop`],
+        : `${window.Board.bytes(s.tx_bytes)} · ${s.tx_errors || 0} err · ${s.tx_dropped || 0} drop`],
     ];
     side.innerHTML = `<h3>${esc(name)}</h3>`
       + (pending ? `<p class="hint">${esc(tr('fabric.detailLoading', 'Reading the node...'))}</p>` : '')

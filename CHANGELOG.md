@@ -4,6 +4,75 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.40.0] - 2026-09-21 - Network and Storage, read the same way
+
+The Fabric view in its vSwitch layout was judged right, and the Network and
+Storage views were asked to follow. Both leave the Cytoscape canvas for the
+same page of blocks read left to right. Doing so turned up a real hazard in
+the old Storage view.
+
+### Fixed
+- **A volume mounted by a pod was offered for deletion.** The old Storage
+  view called "unattached" any claim no VM referenced, and the delete
+  endpoint only refused a claim still named by a VM. On the test cluster
+  that included the Prometheus and Alertmanager databases and three upgrade
+  log archives mounted by running pods. Kubernetes does not delete a claim
+  a pod uses, it only postpones it: the claim goes Terminating and vanishes
+  with its data at the pod's next restart. The server now lists the pods of
+  the namespace before deleting and refuses a claim any of them mounts; if
+  it cannot list them, it refuses too.
+
+### Changed
+- **Network view: one block per network.** On the left, each VM with what
+  it really has on that network: interface, MAC, addresses, interface name
+  in the guest, link state, model and binding, running VMs first.
+  Interfaces known only to the guest agent (docker0, internal bridges) are
+  listed apart. On the right, where the network leaves: bridge, bond and
+  cards; subnet, gateway and card for a kube-ovn underlay; nothing physical
+  for the overlay and the pod network. Networks with no VM are listed at
+  the bottom. Same data as Fabric, so no extra call to the cluster.
+- **Storage view, read like a datastore.** One block per storage engine:
+  storage classes on the left with their policy, the room they can still
+  allocate and their volumes grouped by VM in boot order; the node disks on
+  the right with a gauge of what is written and what is promised. A volume
+  mounted by pods, and one claimed by nobody, are grouped apart; only the
+  latter can be deleted, from its detail, behind the destructive lock and a
+  confirmation. When the workload that last used it may come back (a
+  StatefulSet), the detail says so first.
+- **The Cluster view costs one call instead of eight.** It fetched volumes,
+  replicas, attachable networks, backing images and images on every
+  refresh without showing them; it now asks for nodes and VMs only, in one
+  grouped call.
+
+### Added
+- `GET /api/storage-map/<cluster>`: classes, volumes with their consumers
+  (VM from its spec, pods from Longhorn), replicas placed on their disk,
+  node disks with their room, in one grouped kubectl call.
+- The fabric payload carries each VM's live interfaces (MAC, addresses,
+  guest interface, link state) from its VMI, in the same grouped call.
+
+### Internal
+- The room-left computation is one pure function shared by the VM creation
+  panel and the Storage view, so the two can never show different figures.
+- The grouped fetch with its per-type fallback is shared by the three
+  views (`_grouped_items`).
+- `board.js` holds what the Fabric, Network and Storage views share
+  (escaping, copy buttons, tooltips, sizes).
+- The Cytoscape network and storage code, its reducers and 17 translation
+  keys are gone.
+
+### Tests
+- 21 API tests for the storage map (consumers, orphans, the pod mounted
+  claim, replicas by disk UUID, room shared with the creation panel,
+  settings and nodes not confused with their Harvester namesakes) and for
+  the pod check before deleting, including when pods cannot be listed.
+- 19 browser tests for the two views, each checked to fail when the
+  behaviour it guards is broken.
+- Exercised on harv1: a throwaway claim mounted by a pod was refused by the
+  server (409) and offered no button; a throwaway orphan was deleted from
+  the view as a tracked action and disappeared from the cluster; both test
+  objects were then removed.
+
 ## [1.39.0] - 2026-09-21 - The fabric, read like a vSwitch
 
 The stacked graph of 1.35 to 1.38 was found hard to read and awkward to

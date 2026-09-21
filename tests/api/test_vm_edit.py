@@ -802,13 +802,13 @@ def test_pvc_delete_tracks_an_action_for_an_orphan(client, monkeypatch):
 
 
 def test_volume_delete_is_gated_and_orphan_only():
-    js = (WEB / "static" / "js" / "topology.js").read_text()
-    assert "act === 'vol-delete'" in js
-    branch = js.split("if (act === 'vol-delete') {", 1)[1].split("if (act === 'vm-delete'", 1)[0]
-    assert "destructiveUnlocked" in branch, "must sit behind the destructive lock"
+    # v1.40.0 : la suppression a suivi la vue Stockage dans storage-map.js.
+    js = (WEB / "static" / "js" / "storage-map.js").read_text()
+    branch = js.split("async function deleteVol(", 1)[1].split("\n  }\n", 1)[0]
+    assert "!v.orphan || !unlocked" in branch, "must sit behind the lock, orphans only"
     assert "confirm(" in branch
-    # the button only shows on a volume with no VM
-    assert "(!v.vm && v.pvc_name)" in js
+    # le bouton ne se montre que sur un orphelin, et seulement déverrouillé
+    assert "const del = v.orphan ? (unlocked" in js
 
 
 def test_cloudinit_save_syncs_the_ssh_names_annotation():

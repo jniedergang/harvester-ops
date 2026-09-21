@@ -1,11 +1,12 @@
 /**
  * harvester-ops — interactive topology viewer (v1.4.19)
  *
- * Three perspectives over the same /api/topology/<cluster> snapshot,
- * rendered with Cytoscape.js:
- *   1. Cluster   — hypervisor nodes + their hosted VMs (parent/child)
- *   2. Network   — VMs ↔ networks (multus / pod) bipartite-ish graph
- *   3. Storage   — Longhorn volumes ↔ replicas ↔ nodes
+ * The Cluster view: hypervisor nodes and their hosted VMs (parent/child),
+ * from /api/topology/<cluster>, rendered with Cytoscape.js.
+ *
+ * v1.40.0 : Réseau et Stockage ont quitté ce module, comme la Fabrique en
+ * v1.39.0. Ce sont désormais des pages de blocs à la manière d'ESXi
+ * (netmap.js, storage-map.js), que les exploitants lisent mieux qu'un graphe.
  *
  * Default mode is read-only with safe actions on click (open Notes,
  * VM Edit, VM Snapshots). The "Allow destructive actions" toggle in the toolbar
@@ -16,7 +17,7 @@ import cytoscape from '/static/vendor/cytoscape/cytoscape-bundle.mjs';
 
 const Topology = (() => {
   let cy = null;
-  let currentMode = 'cluster';     // 'cluster' | 'network' | 'storage'
+  let currentMode = 'cluster';     // seule vue encore en graphe
   let lastData = null;
   let destructiveUnlocked = false;
   let refreshTimer = null;
@@ -91,16 +92,6 @@ const Topology = (() => {
           'text-max-width': 75,
           'font-size': 10,
           'text-outline-width': 2,
-        },
-      },
-      // Network = switch silhouette. The cut-rectangle gets a single-
-      // line label that ellipsizes if too long.
-      {
-        selector: 'node[kind = "network"]',
-        style: {
-          'text-wrap': 'ellipsis',
-          'text-max-width': 160,
-          'font-size': 11,
         },
       },
       // Highlight (search hit). Bright green ring + a soft glow so
@@ -224,12 +215,6 @@ const Topology = (() => {
         selector: 'edge[edgeType = "attached"]',
         style: { 'line-color': '#e0464b', 'width': 2 },
       },
-      // v1.8.6: VM -> volume dans la vue Storage — lien nominal, pas
-      // une alarme : bleu discret, pas le rouge de 'attached'.
-      {
-        selector: 'edge[edgeType = "disk"]',
-        style: { 'line-color': '#4aa8d8', 'width': 2 },
-      },
       {
         selector: ':selected',
         style: {
@@ -312,267 +297,6 @@ const Topology = (() => {
     return els;
   }
 
-  function buildNetworkElements(data) {
-    const els = [];
-    const seen = new Set();
-    data.vms.forEach(v => {
-      const fullName = v.namespace + '/' + v.name;
-      els.push({
-        group: 'nodes',
-        data: {
-          id: 'vm-' + v.namespace + '-' + v.name,
-          label: v.name,
-          icon: nodeIcon('vm'),
-          fullName,
-          searchText: fullName.toLowerCase(),
-          color: phaseColor(v.phase),
-          border: phaseBorder(v.phase),
-          shape: 'round-rectangle',
-          width: 130,
-          height: 50,
-          kind: 'vm',
-          raw: v,
-        },
-      });
-      v.networks.forEach(net => {
-        const ref = net.ref || net.name;
-        const id = 'net-' + ref;
-        if (!seen.has(id)) {
-          seen.add(id);
-          els.push({
-            group: 'nodes',
-            data: {
-              id,
-              // v1.4.30: switch-like silhouette (cut-rectangle = rack
-              // device shape) + a switch icon to evoke a network switch.
-              label: ref,
-              icon: nodeIcon('switch'),
-              fullName: ref,
-              searchText: ref.toLowerCase(),
-              color: '#1f3e5b',
-              border: '#4aa8d8',
-              shape: 'cut-rectangle',
-              // Wide & short = 1U rack-mount silhouette.
-              width: 180,
-              height: 48,
-              kind: 'network',
-              raw: { name: ref, type: net.type },
-            },
-          });
-        }
-        els.push({
-          group: 'edges',
-          data: {
-            id: 'e-' + v.namespace + '-' + v.name + '-' + id,
-            source: 'vm-' + v.namespace + '-' + v.name,
-            target: id,
-            label: net.type,
-            edgeType: 'network',
-          },
-        });
-      });
-    });
-    return els;
-  }
-
-  // v1.8.6 — Storage view is VM-centric (user ask: "which volume is
-  // attached to what"). One band per VM: the VM box on the left, its
-  // PVC-backed volumes on the right, edge labelled with the guest disk
-  // name. Volumes claimed by nothing sit in a bottom "unattached"
-  // band — the orphan signal an operator actually hunts for. Node
-  // attachment and replica placement moved to the volume detail panel
-  // (they were edge spaghetti; the data is still one click away).
-  function buildStorageElements(data) {
-    const els = [];
-    const i = window.i18n || { t: (k) => k };
-    // Longhorn volume ↔ PVC claim join (kubernetesStatus)
-    const lhByClaim = new Map();
-    (data.volumes || []).forEach(v => {
-      if (v.pvc_namespace && v.pvc_name) {
-        lhByClaim.set(v.pvc_namespace + '/' + v.pvc_name, v);
-      }
-    });
-    // Per-volume replica nodes — detail panel info, no longer edges
-    const replicasByVol = new Map();
-    (data.replicas || []).forEach(r => {
-      if (!r.volume) return;
-      if (!replicasByVol.has(r.volume)) replicasByVol.set(r.volume, []);
-      replicasByVol.get(r.volume).push({ node: r.node, running: r.running });
-    });
-
-    const volStateColor = (state) => ({
-      attached: '#1f4d3a',
-      detached: '#3a3a3a',
-      attaching: '#7a5f1f',
-      detaching: '#7a5f1f',
-      creating: '#7a5f1f',
-      deleting: '#5b1f22',
-    })[state] || '#444';
-
-    const shortLabel = (name) => name.length > 14 ? name.slice(0, 13) + '…' : name;
-    const volNode = (v, extra) => {
-      const claim = v.pvc_name || v.name;
-      const sizeLabel = formatBytes(v.size);
-      // v1.8.7 : un CD-ROM (device `cdrom` côté spec VM) se voit — icône
-      // 💿 et silhouette de disque ronde, au lieu du cylindre 🛢.
-      // v1.8.8 : même traitement pour le CONTENU — un volume créé depuis
-      // une image ISO est un disque optique, quel que soit le device.
-      const isCd = (extra || {}).device === 'cdrom' || !!v.image_iso;
-      return {
-        group: 'nodes',
-        data: {
-          id: 'vol-' + v.name,
-          label: shortLabel(claim) + '\n' + sizeLabel,
-          icon: isCd ? nodeIcon('cdrom') : nodeIcon('volume'),
-          fullName: claim + ' (' + sizeLabel + (isCd ? ', cdrom' : '') + ')',
-          searchText: (claim + ' ' + v.name + ' ' + sizeLabel
-                       + (isCd ? ' cdrom' : '') + (v.image_iso ? ' iso' : '')
-                       + ' ' + (v.image || '')).toLowerCase(),
-          color: volStateColor(v.state),
-          // Rouge = vraie faute seulement. Un volume détaché a une
-          // robustness "unknown" : bord neutre, pas une alarme.
-          border: v.robustness === 'healthy' ? '#19c37d' :
-                  v.robustness === 'degraded' ? '#d97706' :
-                  (v.state === 'detached' || !v.state) ? '#666' : '#e0464b',
-          shape: isCd ? 'ellipse' : 'barrel',
-          width: isCd ? 100 : 90,
-          height: isCd ? 100 : 110,
-          kind: 'volume',
-          raw: { ...v, replicas: replicasByVol.get(v.name) || [], ...extra },
-        },
-      };
-    };
-
-    const consumed = new Set();
-    (data.vms || []).forEach(vm => {
-      // v1.8.7 : un lecteur CD-ROM sans média (device cdrom sans volume,
-      // ex. après install) reste visible — c'est une vraie info d'inventaire.
-      const pvcDisks = (vm.volumes || []).filter(d => d.pvc || d.device === 'cdrom');
-      if (!pvcDisks.length) return;   // pas de stockage persistant → hors vue
-      const vmId = 'vm-' + vm.namespace + '-' + vm.name;
-      const fullName = vm.namespace + '/' + vm.name;
-      els.push({
-        group: 'nodes',
-        data: {
-          id: vmId,
-          label: vm.name,
-          icon: nodeIcon('vm'),
-          fullName,
-          searchText: fullName.toLowerCase(),
-          color: phaseColor(vm.phase),
-          border: phaseBorder(vm.phase),
-          shape: 'round-rectangle',
-          width: 130,
-          height: 50,
-          kind: 'vm',
-          raw: vm,
-        },
-      });
-      pvcDisks.forEach(d => {
-        if (!d.pvc) {
-          // Lecteur CD-ROM vide : disque rond grisé, pas de taille.
-          const cdId = 'cd-' + vm.namespace + '-' + vm.name + '-' + d.disk;
-          els.push({
-            group: 'nodes',
-            data: {
-              id: cdId,
-              label: shortLabel(d.disk || 'cdrom') + '\n('
-                     + i.t('topology.storage.emptyCd') + ')',
-              fullName: fullName + '/' + d.disk + ' (cdrom, '
-                        + i.t('topology.storage.emptyCd') + ')',
-              searchText: (fullName + ' ' + d.disk + ' cdrom').toLowerCase(),
-              icon: nodeIcon('cdrom'),
-              color: '#3a3a3a',
-              border: '#666',
-              shape: 'ellipse',
-              width: 100,
-              height: 100,
-              kind: 'volume',
-              raw: { name: d.disk, vm: fullName, disk: d.disk,
-                     device: 'cdrom', state: null, replicas: [] },
-            },
-          });
-          consumed.add(cdId);
-          els.push({
-            group: 'edges',
-            data: { id: 'e-' + vmId + '-' + cdId, source: vmId, target: cdId,
-                    edgeType: 'disk', label: d.disk || '' },
-          });
-          return;
-        }
-        const key = vm.namespace + '/' + d.pvc;
-        const lh = lhByClaim.get(key);
-        let volId;
-        if (lh) {
-          volId = 'vol-' + lh.name;
-          if (!consumed.has(volId)) {
-            els.push(volNode(lh, { vm: fullName, disk: d.disk, boot_order: d.boot_order, device: d.device }));
-          }
-        } else {
-          // PVC hors Longhorn (autre storage class, ou CR pas encore
-          // réconcilié) : nœud synthétique gris, l'attachement reste lisible.
-          volId = 'pvc-' + vm.namespace + '-' + d.pvc;
-          if (!consumed.has(volId)) {
-            els.push({
-              group: 'nodes',
-              data: {
-                id: volId,
-                label: shortLabel(d.pvc),
-                icon: d.device === 'cdrom' ? nodeIcon('cdrom') : nodeIcon('volume'),
-                fullName: key,
-                searchText: key.toLowerCase(),
-                color: '#444',
-                border: '#666',
-                shape: 'barrel',
-                width: 90,
-                height: 110,
-                kind: 'volume',
-                raw: { name: d.pvc, pvc_name: d.pvc, pvc_namespace: vm.namespace,
-                       state: null, vm: fullName, disk: d.disk, boot_order: d.boot_order,
-                       device: d.device, replicas: [] },
-              },
-            });
-          }
-        }
-        consumed.add(volId);
-        els.push({
-          group: 'edges',
-          data: {
-            id: 'e-' + vmId + '-' + volId,
-            source: vmId,
-            target: volId,
-            edgeType: 'disk',
-            label: d.disk || '',
-          },
-        });
-      });
-    });
-
-    // Volumes orphelins (rattachés à aucune VM) + bandeau d'étiquette
-    const orphans = (data.volumes || []).filter(v => !consumed.has('vol-' + v.name));
-    if (orphans.length) {
-      els.push({
-        group: 'nodes',
-        data: {
-          id: 'storage-orphans',
-          label: i.t('topology.storage.unattached'),
-          icon: nodeIcon('bundle'),
-          fullName: i.t('topology.storage.unattached'),
-          searchText: 'unattached orphan detached',
-          color: '#3a3a3a',
-          border: '#666',
-          shape: 'cut-rectangle',
-          width: 180,
-          height: 48,
-          kind: 'bucket',
-          raw: { count: orphans.length },
-        },
-      });
-      orphans.forEach(v => els.push(volNode(v, {})));
-    }
-    return els;
-  }
-
   function phaseColor(phase) {
     return ({
       Running: '#1f4d3a',
@@ -598,18 +322,6 @@ const Topology = (() => {
   function layoutFor(mode) {
     if (mode === 'cluster') {
       return { name: 'preset', padding: 20 }; // we'll arrange children in fcose-like grid by hand
-    }
-    if (mode === 'network') {
-      // v1.8.4: preset — VMs are arranged in per-network bands by
-      // applyNetworkLayout(). cose crammed every VM in a tiny ring
-      // around the dominant hub (idealEdgeLength ≪ what 14 boxes of
-      // 130×50 need) and they overlapped into an unreadable pile.
-      return { name: 'preset', padding: 20 };
-    }
-    if (mode === 'storage') {
-      // v1.8.6: preset — bandes par VM posées par applyStorageLayout()
-      // (même remède que la vue Network en 1.8.4).
-      return { name: 'preset', padding: 20 };
     }
     return { name: 'cose' };
   }
@@ -664,129 +376,6 @@ const Topology = (() => {
     cy.fit(undefined, 40);
   }
 
-  // Manual network layout (v1.8.4) — one horizontal BAND per network:
-  //   [🔀 switch]   [vm] [vm] [vm] [vm]
-  //                 [vm] [vm] …
-  // reads like a rack diagram: the switch on the left, its members in a
-  // grid on the right. A VM is assigned to the band of its FIRST NIC
-  // (edges are emitted in NIC order); extra NICs simply draw cross-band
-  // edges, which is exactly the information they carry. VMs with no
-  // network at all get a bottom band of their own.
-  function applyNetworkLayout(cy) {
-    const cellW = 150, cellH = 75, gridX = 260, maxCols = 6, bandGap = 90;
-
-    // Primary network per VM = target of its first emitted edge.
-    const primary = new Map();               // vmId -> netId
-    cy.edges().forEach(e => {
-      const src = e.data('source');
-      if (!primary.has(src)) primary.set(src, e.data('target'));
-    });
-
-    // Group members per network (every network keeps a band, even empty).
-    const bands = new Map();                 // netId -> [vm nodes]
-    cy.nodes().filter(n => n.data('kind') === 'network')
-      .forEach(n => bands.set(n.id(), []));
-    const orphans = [];
-    cy.nodes().filter(n => n.data('kind') === 'vm').forEach(v => {
-      const net = primary.get(v.id());
-      if (net && bands.has(net)) bands.get(net).push(v);
-      else orphans.push(v);
-    });
-
-    // Big bands first; name tie-break keeps the order stable across
-    // refreshes. Within a band: Running first, then by name.
-    const order = [...bands.entries()]
-      .sort((a, b) => (b[1].length - a[1].length)
-        || a[0].localeCompare(b[0]));
-    const byActivity = (a, b) => {
-      const run = n => (n.data('raw') || {}).phase === 'Running' ? 0 : 1;
-      return run(a) - run(b) || a.data('label').localeCompare(b.data('label'));
-    };
-
-    let bandTop = 60;
-    const placeGrid = (vms) => {
-      const cols = Math.max(2, Math.min(vms.length, maxCols));
-      vms.forEach((v, i) => v.position({
-        x: gridX + (i % cols) * cellW,
-        y: bandTop + Math.floor(i / cols) * cellH,
-      }));
-      return Math.max(1, Math.ceil(vms.length / cols)) * cellH;
-    };
-    order.forEach(([netId, vms]) => {
-      vms.sort(byActivity);
-      const h = placeGrid(vms);
-      // Switch vertically centred on its band, alone on the left.
-      cy.getElementById(netId).position({ x: 60, y: bandTop + (h - cellH) / 2 });
-      bandTop += h + bandGap;
-    });
-    if (orphans.length) {
-      orphans.sort(byActivity);
-      placeGrid(orphans);
-    }
-    cy.fit(undefined, 40);
-  }
-
-  // Manual storage layout (v1.8.6) — flow of [💻 vm][🛢…] groups.
-  // A band per VM wasted the canvas (most VMs own a single volume →
-  // a 14-band tower that fit() shrank to confetti). Groups now flow
-  // left-to-right and wrap like words in a paragraph; volumes claimed
-  // by no VM form a grid at the bottom behind their bucket label.
-  function applyStorageLayout(cy) {
-    const cellW = 120, cellH = 140, maxCols = 6;
-    const groupGap = 55, rowGap = 45, maxRowW = 1250;
-    const owner = new Map();               // volId -> vmId
-    cy.edges('[edgeType = "disk"]').forEach(e => {
-      if (!owner.has(e.data('target'))) owner.set(e.data('target'), e.data('source'));
-    });
-    const groups = new Map();
-    cy.nodes().filter(n => n.data('kind') === 'vm').forEach(n => groups.set(n.id(), []));
-    const orphans = [];
-    cy.nodes().filter(n => n.data('kind') === 'volume').forEach(v => {
-      const vm = owner.get(v.id());
-      if (vm && groups.has(vm)) groups.get(vm).push(v);
-      else orphans.push(v);
-    });
-    const isRunning = id =>
-      (cy.getElementById(id).data('raw') || {}).phase === 'Running' ? 0 : 1;
-    const order = [...groups.entries()].sort((a, b) =>
-      isRunning(a[0]) - isRunning(b[0]) || a[0].localeCompare(b[0]));
-    // Dans un groupe : disque de boot d'abord, puis nom de disque.
-    const byBoot = (a, b) => {
-      const r = n => n.data('raw') || {};
-      return ((r(a).boot_order || 99) - (r(b).boot_order || 99))
-        || String(r(a).disk || '').localeCompare(String(r(b).disk || ''));
-    };
-    let cx = 0, top = 60, rowH = 0;
-    order.forEach(([vmId, vols]) => {
-      vols.sort(byBoot);
-      const cols = Math.max(1, Math.min(vols.length || 1, maxCols));
-      const rows = Math.max(1, Math.ceil((vols.length || 1) / cols));
-      const gw = 260 + (cols - 1) * cellW;
-      const gh = rows * cellH;
-      if (cx > 0 && cx + gw > maxRowW) { cx = 0; top += rowH + rowGap; rowH = 0; }
-      vols.forEach((v, i) => v.position({
-        x: cx + 215 + (i % cols) * cellW,
-        y: top + Math.floor(i / cols) * cellH,
-      }));
-      cy.getElementById(vmId).position({ x: cx + 65, y: top + (gh - cellH) / 2 });
-      rowH = Math.max(rowH, gh);
-      cx += gw + groupGap;
-    });
-    // Volumes orphelins : grille pleine largeur sous les groupes
-    if (orphans.length) {
-      top += rowH + 110;
-      const bucket = cy.getElementById('storage-orphans');
-      if (bucket.length) bucket.position({ x: 90, y: top - 90 });
-      orphans.sort((a, b) => a.data('label').localeCompare(b.data('label')));
-      const cols = Math.max(4, Math.floor(maxRowW / cellW));
-      orphans.forEach((v, i) => v.position({
-        x: 45 + (i % cols) * cellW,
-        y: top + Math.floor(i / cols) * cellH,
-      }));
-    }
-    cy.fit(undefined, 40);
-  }
-
   // -----------------------------------------------------------------------
   // Public render entry point
   // -----------------------------------------------------------------------
@@ -794,9 +383,7 @@ const Topology = (() => {
     lastData = data;
     if (cy) { try { cy.destroy(); } catch {} cy = null; }
     let elements;
-    if (currentMode === 'cluster')      elements = buildClusterElements(data);
-    else if (currentMode === 'network') elements = buildNetworkElements(data);
-    else                                elements = buildStorageElements(data);
+    elements = buildClusterElements(data);
     // Some cose layouts crash if the container has 0 width — happens
     // when a subtab is still `hidden` (display:none) at render time.
     // Force a reflow + re-query to be safe.
@@ -829,8 +416,6 @@ const Topology = (() => {
       autoungrabify: true,
     });
     if (currentMode === 'cluster') applyClusterLayout(cy);
-    if (currentMode === 'network') applyNetworkLayout(cy);
-    if (currentMode === 'storage') applyStorageLayout(cy);
     // Belt-and-braces: ungrabify any node that managed to slip through.
     cy.nodes().ungrabify();
     // Click → details
@@ -1015,43 +600,6 @@ const Topology = (() => {
           ` : ''}
         </div>`;
     }
-    if (d.kind === 'volume') {
-      const v = d.raw;
-      const reps = (v.replicas || [])
-        .map(r => `${r.node || '?'}${r.running ? '' : ' ' + Icons.svg('fail', { size: 12, cls: 'icon-err' })}`).join(', ');
-      return `
-        <h3>${Icons.svg('volume', { size: 18 })} ${v.pvc_name || v.name}</h3>
-        <dl class="kv">
-          <dt>${i.t('topology.detail.pvc')}</dt><dd>${v.pvc_name ? (v.pvc_namespace ? v.pvc_namespace + '/' : '') + v.pvc_name : '—'}</dd>
-          <dt>${i.t('topology.detail.vm')}</dt><dd>${v.vm || '—'}</dd>
-          <dt>${i.t('topology.detail.disk')}</dt><dd>${v.disk || '—'}</dd>
-          <dt>${i.t('topology.detail.device')}</dt><dd>${v.device === 'cdrom' ? Icons.svg('cdrom', { size: 14 }) + ' cdrom' : (v.device || '—')}</dd>
-          <dt>${i.t('topology.detail.image')}</dt><dd>${v.image ? v.image + (v.image_iso ? ' ' + Icons.svg('cdrom', { size: 14 }) : '') : '—'}</dd>
-          <dt>${i.t('topology.detail.state')}</dt><dd>${v.state || '—'}</dd>
-          <dt>${i.t('topology.detail.health')}</dt><dd>${v.robustness || '—'}</dd>
-          <dt>${i.t('topology.detail.size')}</dt><dd>${formatBytes(v.size)}</dd>
-          <dt>${i.t('topology.detail.attachedTo')}</dt><dd>${v.attached_to || '—'}</dd>
-          <dt>${i.t('topology.detail.replicas')}</dt><dd>${reps || '—'}</dd>
-        </dl>
-        ${(!v.vm && v.pvc_name) ? `
-          <div class="actions">
-            <button class="btn btn-sm btn-danger" data-act="vol-delete">${Icons.svg('delete')} ${i.t('topology.action.deleteVolume')}</button>
-          </div>
-          <p class="form-hint">${i.t('topology.volDeleteHint')}</p>` : ''}`;
-    }
-    if (d.kind === 'bucket') {
-      return `
-        <h3>${Icons.svg('bundle', { size: 18 })} ${i.t('topology.storage.unattached')}</h3>
-        <p>${(d.raw && d.raw.count) || 0} ${i.t('topology.storage.unattachedHint')}</p>`;
-    }
-    if (d.kind === 'network') {
-      const n = d.raw;
-      return `
-        <h3>${Icons.svg('network', { size: 18 })} ${n.name}</h3>
-        <dl class="kv">
-          <dt>${i.t('topology.detail.type')}</dt><dd>${n.type}</dd>
-        </dl>`;
-    }
     return '<p>—</p>';
   }
 
@@ -1064,38 +612,6 @@ const Topology = (() => {
     if (unit.startsWith('K')) return Math.round(v / 1024 / 1024) + ' GiB';
     if (unit.startsWith('M')) return Math.round(v / 1024) + ' GiB';
     return v + ' ' + unit;
-  }
-
-  // Format any byte count (Longhorn ships raw bytes as a string, e.g.
-  // "42949672960" → "40 GiB") OR a K8s quantity ("10Gi" → "10 GiB").
-  // Uses binary prefixes (KiB/MiB/GiB/TiB/PiB) since Longhorn and
-  // Kubernetes both work in base 1024. One decimal for sizes < 10 of
-  // the chosen unit, integer otherwise.
-  function formatBytes(input) {
-    if (input === null || input === undefined || input === '') return '—';
-    let bytes;
-    if (typeof input === 'number') {
-      bytes = input;
-    } else {
-      const s = String(input).trim();
-      // K8s quantity ("10Gi", "512Mi") → convert to bytes first
-      const k8s = /^(\d+(?:\.\d+)?)([KMGTPE])i?$/.exec(s);
-      if (k8s) {
-        const v = parseFloat(k8s[1]);
-        const mul = ({ K: 1024, M: 1024**2, G: 1024**3,
-                       T: 1024**4, P: 1024**5, E: 1024**6 })[k8s[2]];
-        bytes = v * mul;
-      } else {
-        bytes = Number(s);
-      }
-      if (!Number.isFinite(bytes)) return String(input);   // unparseable → show as-is
-    }
-    if (bytes === 0) return '0 B';
-    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB'];
-    const i = Math.min(units.length - 1, Math.floor(Math.log2(Math.abs(bytes)) / 10));
-    const v = bytes / Math.pow(1024, i);
-    const fmt = v >= 10 || i === 0 ? Math.round(v) : (Math.round(v * 10) / 10);
-    return fmt + ' ' + units[i];
   }
 
   async function doAction(act, d) {
@@ -1132,24 +648,6 @@ const Topology = (() => {
 
     // Irreversible actions (delete VM, cordon / drain node) — gated by the
     // destructive unlock on top of the confirm.
-    if (act === 'vol-delete') {
-      if (!destructiveUnlocked) { alert(confirmI18n('topology.lockedHint')); return; }
-      const claim = `${d.raw.pvc_namespace}/${d.raw.pvc_name}`;
-      if (!confirm(confirmI18n('topology.confirm.vol-delete').replace('{name}', claim))) return;
-      try {
-        const r = await fetch(
-          `/api/pvc/${cluster}/${d.raw.pvc_namespace}/${d.raw.pvc_name}`, { method: 'DELETE' });
-        if (!r.ok) {
-          const body = await r.json().catch(() => ({}));
-          throw new Error(body.detail || body.error || ('HTTP ' + r.status));
-        }
-        await refresh();
-      } catch (e) {
-        alert(confirmI18n('topology.actionFailed') + ': ' + (e.message || e));
-      }
-      return;
-    }
-
     if (act === 'vm-delete' || act === 'node-cordon' || act === 'node-drain') {
       if (!destructiveUnlocked) { alert(confirmI18n('topology.lockedHint')); return; }
       return runAction();
@@ -1189,9 +687,7 @@ const Topology = (() => {
   function applyDataUpdate(data) {
     if (!cy) return;
     let elements;
-    if (currentMode === 'cluster')      elements = buildClusterElements(data);
-    else if (currentMode === 'network') elements = buildNetworkElements(data);
-    else                                elements = buildStorageElements(data);
+    elements = buildClusterElements(data);
     const newById = new Map(elements.map(e => [e.data.id, e.data]));
     cy.batch(() => {
       cy.elements().forEach(ele => {
@@ -1211,9 +707,7 @@ const Topology = (() => {
   // full re-render, which re-parents the VM under its new host.
   function _structureMap(data, mode) {
     let elements;
-    if (mode === 'cluster')      elements = buildClusterElements(data);
-    else if (mode === 'network') elements = buildNetworkElements(data);
-    else                         elements = buildStorageElements(data);
+    elements = buildClusterElements(data);
     const m = new Map();
     elements.forEach(e => m.set(e.data.id, e.data.parent || ''));
     return m;
@@ -1286,8 +780,7 @@ const Topology = (() => {
         const cached = data.cached
           ? ` (cache ${Math.round(data.cache_age_s)}s)`
           : '';
-        meta.textContent = `${data.nodes.length} nodes · ${data.vms.length} VMs · `
-          + `${data.volumes.length} volumes${cached}`;
+        meta.textContent = `${data.nodes.length} nodes · ${data.vms.length} VMs${cached}`;
       }
     } catch (e) {
       console.warn('topology refresh failed', e);

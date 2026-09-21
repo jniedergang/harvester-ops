@@ -182,20 +182,35 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   that reveals them, through a tracked action and removable from the same
   banner. The view also works on a cluster without the kube-ovn add-on.
 
-- **Live topology** rendered with Cytoscape across three views: Cluster
-  (nodes), Network, and Storage (Longhorn volumes), with click-to-detail.
-  The Network view reads like a rack diagram: one band per network,
-  switch on the left, member VMs in a grid (running first) — no
-  force-layout pile-ups. The Storage view answers "which volume is
-  attached to what": VM → volume groups labelled with the real PVC
-  claim names (joined to Longhorn volumes), guest disk name on the
-  edge, CD-ROM devices and ISO-backed volumes drawn as round discs (💿,
-  media or empty drive), every image-backed volume showing its source
-  image in the detail panel, and an **Unattached volumes** section that surfaces orphaned
-  PVCs — deleted-VM leftovers an operator wants to reclaim, and each of
-  them can be **deleted right there** (destructive lock plus a confirm;
-  the endpoint re-checks that no VM still claims it). The detail panel
-  shows PVC, consuming VM, state, size and replica placement.
+- **Cluster view**: the hypervisor nodes and the VMs they host, drawn
+  with Cytoscape, with click-to-detail and the VM actions (edit, console,
+  snapshot, migrate, start, stop, delete behind the destructive lock).
+  It costs one grouped kubectl call per refresh.
+- **Network view, one block per network** (same layout as Fabric). On the
+  left, every VM attached to that network with what it really has on it:
+  interface name, MAC, addresses, the interface name inside the guest,
+  link state, model and binding, running VMs first. Interfaces known only
+  to the guest agent (docker0 and the like) are listed apart, since they
+  leave through no cluster network. On the right, where the network goes
+  out: the bridge, its bond and its cards; for a kube-ovn underlay, the
+  subnet, its gateway and its card; for the overlay and the pod network,
+  nothing physical, which is said. Networks with no VM are listed at the
+  bottom. It reads the same data as Fabric, so it costs no extra call.
+- **Storage view, read like a datastore**: one block per storage engine.
+  On the left, each storage class with its policy (replicas, what happens
+  on release, source image), the room it can still allocate (the same
+  figure as the VM creation panel), and its volumes grouped by VM in boot
+  order, CD-ROM and ISO disks marked. Volumes mounted by pods and volumes
+  claimed by nobody are grouped apart. On the right, the node disks with
+  a gauge of what is written and what is promised, the room left and the
+  replica count. Clicking a volume or a disk opens its detail (claim, VM,
+  pods, image, requested and written size, health, replica placement).
+  An **orphaned volume** (claimed by no VM, mounted by no pod, known to
+  Longhorn and not attached) can be **deleted from its detail**, behind
+  the destructive lock and a confirmation, as a tracked action. When the
+  last workload that used it may come back (a StatefulSet volume), the
+  detail says so first. The server checks again before deleting and
+  refuses a claim that any running pod mounts. One grouped kubectl call.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,
