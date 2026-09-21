@@ -228,6 +228,25 @@ const Topology = (() => {
         // provider network lié à une carte) n'est pas un rattachement
         // observé : la pointiller évite de la lire comme un chemin de
         // trafic, ce qui a déjà prêté à confusion.
+        // Un libellé de bande n'est pas un objet du réseau : pas de
+        // cadre, pas de fond, et il ne réagit pas au clic.
+        selector: 'node[kind = "fab-band"]',
+        // `background-image: none` est INDISPENSABLE : le style de base
+        // mappe cette propriété sur `data(icon)`, et une icône vide produit
+        // une valeur invalide qui fait échouer le parseur de styles, donc
+        // le rendu ENTIER de la vue. Le symptôme est un canevas vide et une
+        // erreur venue des entrailles de Cytoscape, pas de notre code.
+        style: { 'background-opacity': 0, 'background-image': 'none',
+                 'border-width': 0,
+                 // `left` = le texte se pose À GAUCHE du point d'ancrage,
+                 // donc dans la gouttière. Avec `right` il partait vers la
+                 // droite et recouvrait la première colonne.
+                 'text-halign': 'left', 'text-valign': 'center',
+                 'font-size': 11, 'color': '#8a93a6',
+                 'text-wrap': 'wrap', 'text-max-width': '150px',
+                 'events': 'no' },
+      },
+      {
         selector: 'edge[edgeType = "fabric-declared"]',
         style: { 'line-style': 'dashed', 'line-dash-pattern': [5, 4],
                  'opacity': 0.75 },
@@ -845,7 +864,28 @@ const Topology = (() => {
   // harv1 elles n'utilisent même pas la même carte, les fondre en une seule
   // rangée effacerait précisément ce qu'on veut voir.
   // -----------------------------------------------------------------------
-  const FABRIC_LAYERS = [0, 1, 2, 3, 4, 5];
+  // -1 = le switch physique : la chaîne s'arrêtait au cuivre, alors que la
+  // question de l'exploitant continue (« sur quelle prise ? »). Le montrer,
+  // même inconnu, donne à LLDP un endroit où se poser et ferme le schéma,
+  // comme le fait la barre « Physical Switch » des diagrammes vSphere.
+  const FABRIC_LAYERS = [-1, 0, 1, 2, 3, 4, 5];
+
+  // Nommer les bandes évite d'avoir à déduire chaque niveau de ses boîtes.
+  function fabricBandLabel(layer) {
+    // Clés en toutes lettres via `i18n.t(...)` : un alias local `t(...)`
+    // est INVISIBLE au contrôle de parité, qui ne reconnaît que cette
+    // forme. Le piège a déjà coûté trois fois dans ce projet.
+    const has = !!window.i18n;
+    switch (layer) {
+      case -1: return has ? i18n.t('fabric.band.switch') : 'Physical switch';
+      case 0:  return has ? i18n.t('fabric.band.nic') : 'Physical interfaces';
+      case 1:  return has ? i18n.t('fabric.band.bond') : 'Aggregation';
+      case 2:  return has ? i18n.t('fabric.band.vswitch') : 'Virtual switches';
+      case 3:  return has ? i18n.t('fabric.band.logical') : 'Networks and routing';
+      case 4:  return has ? i18n.t('fabric.band.attach') : 'Attachable networks';
+      default: return has ? i18n.t('fabric.band.ports') : 'Workload ports';
+    }
+  }
 
   function fabricNode(id, label, kind, opts) {
     return { group: 'nodes', data: Object.assign({
@@ -925,6 +965,25 @@ const Topology = (() => {
     const vcOfCn = {};
     (data.vlan_configs || []).forEach(vc => { vcOfCn[vc.cluster_network] = vc; });
 
+    // Une boîte de switch par carte physique. On ne sait pas encore ce
+    // qu'il y a au bout (rien n'émet de LLDP sur le réseau d'essai) : on le
+    // dit, plutôt que de laisser la chaîne se terminer dans le vide.
+    links.filter(l => l.layer === 0 && l.state === 'up').forEach(l => {
+      const id = 'fab-sw-' + l.node + '-' + l.name;
+      els.push(fabricNode(id,
+        (window.i18n ? i18n.t('fabric.unknownSwitch') : 'switch ?'),
+        'fab-switchport', {
+          icon: 'switch', layer: -1, fabric: l.fabric, width: 150,
+          color: '#2a2f3a', border: '#8a93a6', shape: 'cut-rectangle',
+          fullName: (window.i18n ? i18n.t('fabric.unknownSwitchTip')
+                                 : 'Unknown until LLDP answers'),
+          raw: { node: l.node, interface: l.name, unknown: true } }));
+      els.push({ group: 'edges', data: {
+        id: 'fe-sw-' + l.node + '-' + l.name,
+        source: idOf(l.node, l.name), target: id,
+        label: '', edgeType: 'fabric' } });
+    });
+
     (data.cluster_networks || []).forEach(cn => {
       const vc = vcOfCn[cn.name] || {};
       els.push(fabricNode('fab-cn-' + cn.name, cn.name, 'fab-abstract',
@@ -941,7 +1000,7 @@ const Topology = (() => {
         els.push({ group: 'edges', data: {
           id: 'fe-cn-' + cn.name + '-' + n.name,
           source: 'fab-cn-' + cn.name, target: idOf(n.name, br),
-          edgeType: 'fabric-declared' } });
+          label: '', edgeType: 'fabric-declared' } });
       });
     });
 
@@ -966,7 +1025,7 @@ const Topology = (() => {
         els.push({ group: 'edges', data: {
           id: 'fe-vlan-pn-' + vl.name, source: 'fab-vlan-' + vl.name,
           target: 'fab-pn-' + vl.provider_network,
-          edgeType: 'fabric-declared' } });
+          label: '', edgeType: 'fabric-declared' } });
       }
     });
     (ovn.provider_networks || []).forEach(pn => {
@@ -992,7 +1051,7 @@ const Topology = (() => {
           id: 'fe-pn-' + pn.name + '-' + n.name,
           source: 'fab-pn-' + pn.name,
           target: idOf(n.name, target),
-          edgeType: 'fabric-declared' } });
+          label: '', edgeType: 'fabric-declared' } });
       });
     });
     (ovn.subnets || []).forEach(sn => {
@@ -1009,14 +1068,14 @@ const Topology = (() => {
       if (sn.vpc) {
         els.push({ group: 'edges', data: {
           id: 'fe-sn-' + sn.name, source: 'fab-sn-' + sn.name,
-          target: 'fab-vpc-' + sn.vpc, edgeType: 'fabric-declared' } });
+          target: 'fab-vpc-' + sn.vpc, label: '', edgeType: 'fabric-declared' } });
       }
       // Un subnet d'underlay descend vers le matériel PAR SON VLAN, pas en
       // sautant directement sur la carte.
       if (sn.vlan) {
         els.push({ group: 'edges', data: {
           id: 'fe-sn-vlan-' + sn.name, source: 'fab-sn-' + sn.name,
-          target: 'fab-vlan-' + sn.vlan, edgeType: 'fabric-declared' } });
+          target: 'fab-vlan-' + sn.vlan, label: '', edgeType: 'fabric-declared' } });
       }
     });
 
@@ -1033,14 +1092,31 @@ const Topology = (() => {
       if (nw.cluster_network && nw.fabric === 'classic') {
         els.push({ group: 'edges', data: {
           id: 'fe-nad-' + id, source: id,
-          target: 'fab-cn-' + nw.cluster_network, edgeType: 'fabric-declared' } });
+          target: 'fab-cn-' + nw.cluster_network, label: '', edgeType: 'fabric-declared' } });
       }
       const sub = (ovn.subnets || []).find(x => x.provider && x.provider === nw.provider);
       if (sub) {
         els.push({ group: 'edges', data: {
           id: 'fe-nadsn-' + id, source: id,
-          target: 'fab-sn-' + sub.name, edgeType: 'fabric-declared' } });
+          target: 'fab-sn-' + sub.name, label: '', edgeType: 'fabric-declared' } });
       }
+    });
+    // Un libellé par bande, calé à gauche. Sans eux il faut déduire chaque
+    // niveau du contenu de ses boîtes, ce qu'un exploitant pressé ne fera
+    // pas. C'est l'idée des bandes nommées des schémas vSphere.
+    const used = new Set(els.filter(e => e.group === 'nodes')
+                             .map(e => e.data.layer));
+    FABRIC_LAYERS.filter(l => used.has(l)).forEach(layer => {
+      els.push({ group: 'nodes', data: {
+        id: 'fab-band-' + layer, label: fabricBandLabel(layer),
+        kind: 'fab-band', layer, rank: -1, fabric: 'band',
+        fullName: fabricBandLabel(layer),
+        searchText: '', icon: '', color: 'transparent',
+        // Un POINT, pas une boîte : seul le texte posé à sa gauche est
+        // visible. Lui laisser la taille d'une boîte le faisait chevaucher
+        // la première colonne dans la géométrie, sans que rien ne se voie.
+        border: 'transparent', shape: 'rectangle', width: 1, height: 1,
+        raw: { band: layer } } });
     });
     return els;
   }
@@ -1074,7 +1150,8 @@ const Topology = (() => {
     // plus hautes que le pas entre rangs.
     const ranksOf = (layer) => {
       const rs = new Set();
-      cy.nodes().filter(x => x.data('layer') === layer)
+      cy.nodes().filter(x => x.data('layer') === layer
+                          && x.data('kind') !== 'fab-band')
         .forEach(n => rs.add(n.data('rank') || 0));
       return rs.size ? [...rs].sort((a, b) => a - b) : [0];
     };
@@ -1093,6 +1170,15 @@ const Topology = (() => {
       ranks.forEach((r, i) => {
         yOfRank[r] = bandTop[layer] + (ranks.length - 1 - i) * rowH;
       });
+      const band = cy.nodes().filter(x => x.data('kind') === 'fab-band'
+                                        && x.data('layer') === layer);
+      if (band.length) {
+        // Franchement à GAUCHE du bord des boîtes : centrées en `leftPad`
+        // et larges de 150, elles s'étendent jusqu'à leftPad-75, et une
+        // ancre posée dedans compte comme un chevauchement.
+        band.position({ x: leftPad - 115,
+                        y: yOfRank[ranks[ranks.length - 1]] });
+      }
       ['classic', 'ovn'].forEach((fab, fi) => {
         const nodes = cy.nodes()
           .filter(x => x.data('layer') === layer && x.data('fabric') === fab)

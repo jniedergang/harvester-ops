@@ -4,6 +4,42 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.38.0] - 2026-09-21 - Named bands, and a switch to end the chain
+
+Two ideas taken from vSphere network diagrams, which an operator offered as
+a reference: every band carries its name, and the physical switch closes the
+picture at the bottom.
+
+### Added
+- **Each band says what it is** (physical interfaces, aggregation, virtual
+  switches, networks and routing, attachable networks, workload ports).
+  Without a label the level has to be inferred from the boxes it holds,
+  which a hurried operator will not do.
+- **The chain ends at a switch, even an unknown one.** The operator's
+  question does not stop at the copper ("which port?"), so the switch is
+  drawn for every card that has a carrier, marked unknown until LLDP
+  answers. It also gives the LLDP probe somewhere to land. A card with no
+  carrier gets none: drawing one would suggest it is plugged in.
+
+### Fixed
+- **An empty icon produced `background-image: ` and killed the whole
+  view.** The base node style maps that property to `data(icon)`, and a
+  label node carrying no icon made the style parser fail, so nothing
+  rendered at all, with an error from inside Cytoscape rather than from our
+  code. A test now fails on any invalid style warning.
+- Band labels are anchored by a POINT clear of the first column, not by a
+  box: a full-size anchor overlapped the first column in geometry without
+  anything showing, which is how the overlap test caught it.
+- Seven band keys were invisible to the i18n parity scanner because they
+  went through a local `t()` alias it does not recognise. The same trap has
+  now cost four times in this project; they are written as `i18n.t('...')`.
+- `vm.edit.netPathCopy` removed: `copy.title` replaced it.
+
+### Tests
+- 21 tests on the fabric view, including one that fails if any two boxes
+  overlap, one that checks the band labels stay out of the columns, and one
+  that fails on a Cytoscape style warning.
+
 ## [1.37.0] - 2026-09-21 - The kube-ovn side, audited
 
 An operator doubted that column and asked for a deep audit. He was right:

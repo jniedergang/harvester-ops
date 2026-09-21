@@ -159,7 +159,7 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   stands out by colour, an overlay subnet is told apart from one that
   really reaches the wire, and the kube-ovn levels (provider network, VLAN,
   subnet, VPC) stack in order instead of sharing a row. A dashed edge is a
-  declaration, not an observed attachment. Clicking a card shows what the
+  declaration, not an observed attachment. Each band carries its name, and the chain ends at the physical switch, marked unknown until LLDP answers. Clicking a card shows what the
   cluster knows, and
   on demand what only the node knows (MTU, bond mode, traffic counters),
   fetched then and not on every render.

@@ -308,3 +308,79 @@ def test_the_cluster_network_hangs_from_its_bridge(context, flask_server):
       return cy.edges().map(e => l(e.data('source')) + '>' + l(e.data('target'))); }""")
     assert "mgmt>mgmt-br" in edges
     assert "mgmt>enp1s0" not in edges
+
+
+# ---------------------------------------------------------------------------
+# v1.38.0 : bandes nommées et switch physique
+#
+# Inspiré des schémas vSphere, où chaque bande porte son nom (« Uplink port
+# group ») et où le switch physique ferme le dessin en bas.
+# ---------------------------------------------------------------------------
+
+def test_each_band_says_what_it_is(context, flask_server):
+    """Sans libellé il faut déduire chaque niveau du contenu de ses boîtes,
+    ce qu'un exploitant pressé ne fera pas."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    bands = page.evaluate("""() => { const cy = window.Topology._cy();
+      return cy.nodes().filter(n => n.data('kind') === 'fab-band')
+               .map(n => n.data('label')); }""")
+    for expected in ("Physical interfaces", "Aggregation", "Virtual switches",
+                     "Attachable networks", "Physical switch"):
+        assert expected in bands, bands
+
+
+def test_the_band_labels_stay_out_of_the_columns(context, flask_server):
+    """Posés à droite de leur ancre, ils recouvraient la première colonne."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    out = page.evaluate("""() => { const cy = window.Topology._cy();
+      const band = cy.nodes().filter(n => n.data('kind') === 'fab-band')[0];
+      const other = cy.nodes().filter(n => n.data('kind') !== 'fab-band');
+      return { halign: band.style('text-halign'),
+               bandX: band.position('x'),
+               minX: Math.min(...other.map(n => n.position('x'))) }; }""")
+    assert out["halign"] == "left"
+    assert out["bandX"] < out["minX"]
+
+
+def test_the_chain_ends_at_a_switch_even_an_unknown_one(context, flask_server):
+    """La question de l'exploitant ne s'arrête pas au cuivre (« sur quelle
+    prise ? »). Montrer le switch, même inconnu, ferme le schéma et donne à
+    LLDP un endroit où se poser."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    out = page.evaluate("""() => { const cy = window.Topology._cy();
+      const sw = cy.nodes().filter(n => n.data('kind') === 'fab-switchport');
+      const nic = cy.nodes().filter(n => n.data('label') === 'enp1s0')[0];
+      return { count: sw.length,
+               below: sw.length ? sw[0].position('y') > nic.position('y') : false,
+               iface: sw.length ? sw[0].data('raw').interface : null }; }""")
+    assert out["count"] == 1, "un switch par carte en service"
+    assert out["below"], "le switch doit être SOUS la carte"
+    assert out["iface"] == "enp1s0"
+
+
+def test_a_dead_card_gets_no_switch(context, flask_server):
+    """`eno2` n'a pas de porteuse : lui dessiner un switch laisserait croire
+    qu'il est branché."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    ifaces = page.evaluate("""() => { const cy = window.Topology._cy();
+      return cy.nodes().filter(n => n.data('kind') === 'fab-switchport')
+               .map(n => n.data('raw').interface); }""")
+    assert "eno2" not in ifaces
+
+
+def test_the_view_still_renders_without_a_style_error(context, flask_server):
+    """Une icône vide produisait `background-image: ` invalide, ce qui
+    faisait échouer le parseur de styles et donc le rendu ENTIER, avec une
+    erreur venue des entrailles de Cytoscape et non de notre code."""
+    page = context.new_page()
+    bad = []
+    page.on("console", lambda m: bad.append(m.text[:120])
+            if (m.type == "warning" and "invalid" in m.text.lower()) else None)
+    page.on("pageerror", lambda e: bad.append("ERR " + str(e)[:120]))
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    assert page.evaluate("() => !!window.Topology._cy()"), "rien rendu"
+    assert not bad, bad

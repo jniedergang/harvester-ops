@@ -174,7 +174,7 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   couleur, un subnet d'overlay se distingue de celui qui atteint vraiment
   le cuivre, et les niveaux kube-ovn (provider network, VLAN, subnet, VPC)
   s'empilent dans l'ordre au lieu de partager une rangée. Une arête
-  pointillée est une déclaration, pas un rattachement observé. Cliquer une
+  pointillée est une déclaration, pas un rattachement observé. Chaque bande porte son nom, et la chaîne se termine au switch physique, marqué inconnu tant que LLDP n'a pas répondu. Cliquer une
   carte montre ce que le cluster sait, et à la demande
   ce que seul le nœud sait (MTU, mode de bond, compteurs), cherché à ce
   moment-là et pas à chaque rendu.
