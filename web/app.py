@@ -63,6 +63,7 @@ import markdown
 import y_py as Y
 import pxe_server
 import vnc_mux
+import volume_health
 from flask import (
     Flask,
     Response,
@@ -5988,6 +5989,10 @@ STORAGE_KINDS = [
     "virtualmachineinstances.kubevirt.io",
     "backingimages.longhorn.io",
     "virtualmachineimages.harvesterhci.io",
+    # v1.42.0 : l'état des répliques vu par le moteur, et la progression
+    # des reconstructions. Sans lui, on ne distingue pas un volume qui se
+    # répare d'un volume qui attend qu'on agisse.
+    "engines.longhorn.io",
 ]
 _storage_missing = {}
 STORAGE_MAP_TTL = 5.0
@@ -6219,11 +6224,216 @@ def _build_storage_map(cluster, kc):
             "device": None, "boot_order": None, "pods": [], "last_pods": [],
             "orphan": False,
         })
+    # Pourquoi un volume est dégradé, et quoi faire (v1.42.0).
+    health = volume_health.diagnose_all(
+        by_kind.get("Volume", []), by_kind.get("Replica", []),
+        by_kind.get("Engine", []), lh_nodes, settings, room["disks"])
+    for v in volumes:
+        h = health.get(v["longhorn"]) if v["longhorn"] else None
+        v["health"] = h["health"] if h else None
+        v["findings"] = h["findings"] if h else []
     return {"cluster": cluster, "over_provisioning_pct": over,
             "minimal_available_pct": minimal,
             "schedulable_nodes": room["schedulable_nodes"],
             "classes": classes, "disks": room["disks"],
-            "volumes": volumes, "vms": vms}
+            "volumes": volumes, "vms": vms,
+            "health_summary": _health_summary(health)}
+
+
+# =============================================================================
+# Corriger un volume dégradé (v1.42.0)
+#
+# Le serveur ne croit pas la page : au clic, il relit le cluster, refait le
+# diagnostic, et n'applique que ce que ce diagnostic propose À CET INSTANT,
+# avec des paramètres qu'il calcule lui-même. Une page restée ouverte, ou une
+# requête fabriquée, n'obtient rien de plus.
+# =============================================================================
+VOLUME_FIXES = ("set-replicas", "enable-rebuild", "rebuild-now")
+VOLUME_FIX_OBSERVE = 60.0     # secondes pendant lesquelles on constate l'effet
+VOLUME_FIX_POLL = 5.0
+# La cause qu'une correction doit faire disparaître.
+_FIX_TARGET = {"set-replicas": "not-enough-nodes",
+               "enable-rebuild": "rebuild-disabled",
+               "rebuild-now": "replica-failed"}
+
+
+def _power_action_running(cluster):
+    """Un arrêt ou un démarrage du cluster est-il en cours dans la console ?
+    Ils règlent eux-mêmes la reconstruction Longhorn."""
+    with ACTIONS_LOCK:
+        runs = list(ACTIONS.values())
+    return any(getattr(r, "cluster", None) == cluster
+               and getattr(r, "action", None) in ("shutdown", "startup")
+               and getattr(r, "status", None) in ("starting", "running")
+               for r in runs)
+
+
+def _volume_fix_plan(entry, kind, cluster):
+    """(plan, None) si la correction vaut encore, sinon (None, raison)."""
+    if kind not in VOLUME_FIXES:
+        return None, f"unknown fix: {kind}"
+    if entry.get("health") == "faulted":
+        return None, ("the volume is faulted: no automatic fix while no healthy "
+                      "replica is left")
+    found = next((f for f in entry.get("findings") or []
+                  if (f.get("fix") or {}).get("kind") == kind), None)
+    if not found:
+        return None, ("this fix no longer applies: the volume recovered or the "
+                      "cause changed")
+    params = found["fix"].get("params") or {}
+    vol = entry["longhorn"]
+    if kind == "set-replicas":
+        target, current = params.get("replicas"), entry.get("replicas_wanted")
+        if not (isinstance(target, int) and isinstance(current, int)
+                and 1 <= target < current):
+            return None, (f"refusing to set {target} replica(s) on a volume "
+                          f"that wants {current}")
+        return {"kind": kind, "params": {"replicas": target},
+                "summary": f"{current} -> {target} replica(s)",
+                "args": ["-n", "longhorn-system", "patch", "volumes.longhorn.io", vol,
+                         "--type", "merge", "-p",
+                         json.dumps({"spec": {"numberOfReplicas": target}})]}, None
+    if kind == "enable-rebuild":
+        if _power_action_running(cluster):
+            return None, ("a cluster shutdown or startup is running, and it manages "
+                          "this setting itself")
+        value = volume_health.REBUILD_LIMIT_RESTORED
+        return {"kind": kind, "params": {"value": value},
+                "summary": f"{volume_health.REBUILD_LIMIT_SETTING} = {value}",
+                "args": ["-n", "longhorn-system", "patch", "settings.longhorn.io",
+                         volume_health.REBUILD_LIMIT_SETTING, "--type", "merge", "-p",
+                         json.dumps({"value": value})]}, None
+    replica = params.get("replica") or ""
+    if not (found.get("facts") or {}).get("healthy"):
+        return None, ("no healthy replica is left: deleting a failed one would put "
+                      "the data at risk")
+    if not _K8S_NAME_RE.match(replica):
+        return None, "invalid replica name"
+    return {"kind": kind, "params": {"replica": replica},
+            "summary": f"rebuild now instead of waiting for {replica}",
+            "args": ["-n", "longhorn-system", "delete", "replicas.longhorn.io", replica,
+                     "--wait=false"]}, None
+
+
+def _volume_now(kc, cluster, volume):
+    """Santé actuelle d'un volume, relue sur le cluster (sans cache)."""
+    data = _build_storage_map(cluster, kc)
+    entry = next((v for v in (data or {}).get("volumes") or []
+                  if v.get("longhorn") == volume), None)
+    return {"health": entry["health"], "findings": entry["findings"]} if entry else None
+
+
+def _volume_fix_runner(run, kc, cluster, volume, plan):
+    """Vérifier, appliquer, puis CONSTATER : une correction appliquée sans
+    effet visible est dite telle, pas annoncée comme un succès."""
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "verify", "status": "done",
+              "message": plan["summary"], "ts": time.time()})
+    run.emit({"type": "step", "step_id": "apply", "status": "running",
+              "message": "kubectl " + " ".join(plan["args"]), "ts": time.time()})
+
+    def finish(status, summary=None):
+        run.status = status
+        run.exit_code = 0 if status == "done" else 1
+        if summary:
+            run.error_summary = summary
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": status, "exit_code": run.exit_code,
+                  "ts": time.time()})
+        run.close()
+
+    try:
+        r = subprocess.run(["kubectl", "--kubeconfig", kc, *plan["args"]],
+                           capture_output=True, text=True, timeout=30)
+        failure = None if r.returncode == 0 else ((r.stderr or r.stdout).strip()[:300]
+                                                  or f"kubectl exit {r.returncode}")
+    except subprocess.TimeoutExpired:
+        failure = "kubectl timeout"
+    except OSError as e:
+        failure = _safe_proc_error(e)
+    if failure:
+        run.emit({"type": "step", "step_id": "apply", "status": "error",
+                  "message": failure, "ts": time.time()})
+        finish("error", failure)
+        return
+    run.emit({"type": "step", "step_id": "apply", "status": "done",
+              "message": "applied", "ts": time.time()})
+
+    run.emit({"type": "step", "step_id": "observe", "status": "running",
+              "message": f"watching {volume} for {int(VOLUME_FIX_OBSERVE)} s",
+              "ts": time.time()})
+    target = _FIX_TARGET[plan["kind"]]
+    deadline = time.time() + VOLUME_FIX_OBSERVE
+    while True:
+        time.sleep(VOLUME_FIX_POLL)
+        now = _volume_now(kc, cluster, volume)
+        if now:
+            causes = {f["cause"] for f in now["findings"]}
+            verdict = ("the volume is healthy again" if now["health"] == "healthy"
+                       else "the rebuild started" if "rebuilding" in causes
+                       else "the cause is gone" if target not in causes
+                       else None)
+            if verdict:
+                run.emit({"type": "step", "step_id": "observe", "status": "done",
+                          "message": verdict, "ts": time.time()})
+                finish("done")
+                return
+        if time.time() >= deadline:
+            break
+    msg = (f"applied, but no effect observed within {int(VOLUME_FIX_OBSERVE)} s: "
+           "check the volume in the Storage view")
+    run.emit({"type": "step", "step_id": "observe", "status": "warn",
+              "message": msg, "ts": time.time()})
+    finish("error", msg)
+
+
+@app.route("/api/volume-health/<cluster>/<volume>/fix", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_volume_fix(cluster, volume):
+    kind = (request.get_json(silent=True) or {}).get("kind")
+    if kind not in VOLUME_FIXES:
+        return jsonify({"error": f"unknown fix: {kind}"}), 400
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify({"error": "cluster unreachable"}), 503
+    # Relecture : jamais le cache, qui peut dater de plusieurs secondes.
+    with _storage_map_lock:
+        _storage_map_cache.pop(cluster, None)
+    data = _build_storage_map(cluster, kc)
+    if data is None:
+        return jsonify({"error": "cluster unreachable"}), 503
+    entry = next((v for v in data.get("volumes") or [] if v.get("longhorn") == volume), None)
+    if not entry:
+        return jsonify({"error": f"unknown volume: {volume}"}), 404
+    plan, why = _volume_fix_plan(entry, kind, cluster)
+    if not plan:
+        return jsonify({"error": "not-applicable", "detail": why}), 409
+    action_id = track_action(f"volume-fix:{kind}:{volume}", cluster,
+                             _volume_fix_runner, kc, cluster, volume, plan)
+    return jsonify({"action_id": action_id, "summary": plan["summary"],
+                    "params": plan["params"]}), 201
+
+
+def _health_summary(health):
+    """Ce que le bandeau de la vue Stockage résume : combien, et la cause
+    qui revient le plus parmi celles qui demandent d'agir."""
+    counts = {"degraded": 0, "faulted": 0, "at-risk": 0}
+    causes = {}
+    for h in health.values():
+        if h["health"] in counts:
+            counts[h["health"]] += 1
+        for f in h["findings"]:
+            if f["severity"] in ("critical", "action"):
+                causes[f["cause"]] = causes.get(f["cause"], 0) + 1
+    # À égalité, la plus grave d'abord (ordre du diagnostic).
+    top = min(causes, key=lambda c: (-causes[c], volume_health.ORDER.index(c))) \
+        if causes else None
+    return {"degraded": counts["degraded"], "faulted": counts["faulted"],
+            "at_risk": counts["at-risk"], "top_cause": top}
 
 
 @app.route("/api/storage-map/<cluster>")

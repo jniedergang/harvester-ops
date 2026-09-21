@@ -57,10 +57,15 @@ def sc(name, replicas="1", default=False, backing=None):
 def lh_node(name="n1", maximum=1000 * GIB, available=800 * GIB, scheduled=100 * GIB):
     return {"apiVersion": "longhorn.io/v1beta2", "kind": "Node",
             "metadata": {"name": name, "namespace": "longhorn-system"},
-            "spec": {"disks": {"d1": {"path": "/var/lib/harvester/defaultdisk",
+            "spec": {"allowScheduling": True,
+                     "disks": {"d1": {"path": "/var/lib/harvester/defaultdisk",
                                       "allowScheduling": True,
                                       "storageReserved": 0, "tags": []}}},
-            "status": {"diskStatus": {"d1": {
+            # Comme un vrai nœud Longhorn (relevé sur harv1) : sans ces
+            # conditions, le diagnostic le tient pour indisponible.
+            "status": {"conditions": [{"type": "Ready", "status": "True"},
+                                      {"type": "Schedulable", "status": "True"}],
+                       "diskStatus": {"d1": {
                 "diskUUID": "uuid-1", "diskPath": "/var/lib/harvester/defaultdisk",
                 "storageMaximum": maximum, "storageAvailable": available,
                 "storageScheduled": scheduled,
@@ -69,12 +74,12 @@ def lh_node(name="n1", maximum=1000 * GIB, available=800 * GIB, scheduled=100 * 
 
 
 def lh_volume(name, claim, ns="default", state="detached", workloads=None,
-              last_ref="", backing=None):
+              last_ref="", backing=None, robustness="healthy", replicas=1):
     return {"apiVersion": "longhorn.io/v1beta2", "kind": "Volume",
             "metadata": {"name": name, "namespace": "longhorn-system"},
-            "spec": {"size": str(10 * GIB), "numberOfReplicas": 1,
+            "spec": {"size": str(10 * GIB), "numberOfReplicas": replicas,
                      "backingImage": backing},
-            "status": {"state": state, "robustness": "healthy",
+            "status": {"state": state, "robustness": robustness,
                        "kubernetesStatus": {"pvcName": claim, "namespace": ns,
                                             "workloadsStatus": workloads or [],
                                             "lastPodRefAt": last_ref}}}
@@ -379,3 +384,65 @@ def test_a_true_orphan_is_deleted_as_a_tracked_action(client, monkeypatch):
     r = client.delete("/api/pvc/c1/ns1/orphan")
     assert r.status_code == 201
     assert r.get_json()["action_id"] == "act1"
+
+
+# ---------------------------------------------------------------------------
+# v1.42.0 : la santé de chaque volume, dans le même appel
+# ---------------------------------------------------------------------------
+
+def lh_engine(vol, modes):
+    return {"apiVersion": "longhorn.io/v1beta2", "kind": "Engine",
+            "metadata": {"name": vol + "-e-0"},
+            "spec": {"volumeName": vol},
+            "status": {"currentState": "running", "replicaModeMap": modes}}
+
+
+def degraded_cluster():
+    """Le cas de harv1 : une classe à 3 répliques sur un seul nœud."""
+    rep = replica("pvc-3", disk_uuid="uuid-1", running=True)
+    rep["metadata"]["name"] = "pvc-3-r-1"
+    return [pvc("three-disk", sc="three"), sc("three", replicas="3"), lh_node(),
+            lh_volume("pvc-3", "three-disk", state="attached", robustness="degraded",
+                      replicas=3, workloads=[{"podName": "db-0", "podStatus": "Running",
+                                              "workloadType": "StatefulSet"}]),
+            rep, lh_engine("pvc-3", {"pvc-3-r-1": "RW"}),
+            pvc("fine"), sc("harv-rep1"), lh_volume("pvc-ok", "fine")]
+
+
+def test_the_engines_come_in_the_same_grouped_call():
+    """La progression d'une reconstruction se lit sur le moteur : un type de
+    plus dans l'appel groupé, pas un appel de plus."""
+    assert "engines.longhorn.io" in wapp.STORAGE_KINDS
+
+
+def test_a_degraded_volume_carries_its_diagnosis(monkeypatch):
+    v = vol(build(degraded_cluster(), monkeypatch), "three-disk")
+    assert v["health"] == "degraded"
+    assert [f["cause"] for f in v["findings"]] == ["not-enough-nodes"]
+    assert v["findings"][0]["fix"] == {"kind": "set-replicas", "params": {"replicas": 1}}
+
+
+def test_a_healthy_volume_carries_no_finding(monkeypatch):
+    v = vol(build(degraded_cluster(), monkeypatch), "fine")
+    assert v["findings"] == []
+
+
+def test_the_summary_counts_and_names_the_main_cause(monkeypatch):
+    out = build(degraded_cluster(), monkeypatch)
+    assert out["health_summary"] == {"degraded": 1, "faulted": 0, "at_risk": 0,
+                                     "top_cause": "not-enough-nodes"}
+
+
+def test_a_healthy_cluster_has_an_empty_summary(monkeypatch):
+    out = build([pvc("fine"), sc("harv-rep1"), lh_node(), lh_volume("pvc-ok", "fine")],
+                monkeypatch)
+    assert out["health_summary"] == {"degraded": 0, "faulted": 0, "at_risk": 0,
+                                     "top_cause": None}
+
+
+def test_a_volume_without_claim_is_diagnosed_too(monkeypatch):
+    lone = lh_volume("pvc-lone", None, state="attached", robustness="degraded", replicas=3)
+    lone["status"]["kubernetesStatus"] = {}
+    out = build([sc("harv-rep1"), lh_node(), lone], monkeypatch)
+    v = next(x for x in out["volumes"] if x["longhorn"] == "pvc-lone")
+    assert v["health"] == "degraded" and v["findings"]
