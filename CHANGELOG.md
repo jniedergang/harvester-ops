@@ -97,9 +97,9 @@ picture at the bottom.
 
 ## [1.37.0] - 2026-09-21 - The kube-ovn side, audited
 
-An operator doubted that column and asked for a deep audit. He was right:
-three things were wrong, and one of them was the worst contresens this view
-can make.
+An operator doubted that column and asked for a deep audit, with good
+reason: three things were wrong, and one of them was the worst misreading
+this view can make.
 
 ### Fixed
 - **A subnet on the overlay was drawn as if it reached the wire.** A subnet
