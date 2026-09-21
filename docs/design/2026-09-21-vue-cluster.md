@@ -71,6 +71,13 @@ vues (`board.js`).
 `spec.unschedulable` du nœud, comme l'action de Harvester. Action tracée,
 réversible, sans verrou destructif mais avec confirmation.
 
+Relevé en réel sur harv1 : le webhook de Harvester
+(`pkg/webhook/resources/node/validator.go`, `validateCordonAndMaintenanceMode`)
+refuse d'isoler ou de mettre en maintenance le **dernier nœud disponible**
+(aucun autre nœud ni isolé ni porteur de `maintain-status`). La console
+applique cette règle en amont : bouton désactivé avec la raison, 409 côté
+serveur, refus « last-available-node » au contrôle de maintenance.
+
 ## Mode maintenance (le « drain » de Harvester)
 
 Mécanique relevée dans le code de Harvester v1.8.0
@@ -106,10 +113,11 @@ restant sur le nœud, jusqu'à `completed` (10 minutes au plus), et qui
 rapporte un refus du contrôleur (annotations retirées sans `maintain-status`).
 
 **Vérification réelle** : harv1 n'a qu'un nœud, qui porte le plan de
-contrôle. Le refus y est vérifiable ; l'entrée et la sortie effectives ne le
-sont pas sans arrêter des VMs. Elles sont couvertes par les tests
-automatisés et documentées comme **non vérifiées en réel**, jusqu'au cluster
-imbriqué à 3 nœuds.
+contrôle. Les refus y sont vérifiables ; isoler, réintégrer, entrer et
+sortir de maintenance pour de bon ne le sont pas (le webhook refuse
+d'isoler le seul nœud). Ils sont couverts par les tests automatisés et
+documentés comme **non vérifiés en réel**, jusqu'au cluster imbriqué à
+plusieurs nœuds.
 
 ## Ménage
 
@@ -130,5 +138,5 @@ portaient sur le canevas.
 - Navigateur : blocs, jauges, cartes, calque au survol, filtre, panneau
   d'actions, bulles d'aide, français.
 - Réel sur harv1 : captures ; éditeur et console ouverts depuis une carte ;
-  isoler puis réintégrer harv1 ; refus du mode maintenance (plan de
-  contrôle unique).
+  refus d'isoler le dernier nœud (webhook de Harvester, constaté) ; refus
+  du mode maintenance (plan de contrôle unique).

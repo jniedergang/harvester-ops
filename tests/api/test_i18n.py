@@ -187,7 +187,7 @@ def test_i18n_no_orphan_keys_in_english():
     referenced = _all_referenced_keys()
     en = _lang_dicts().get("en") or set()
     orphans = sorted(en - referenced)
-    BASELINE = 103   # v1.39.0: the Cytoscape fabric and its keys are gone (was 105 since v1.8.6)
+    BASELINE = 98    # v1.43.0: the last Cytoscape view and its keys are gone (was 103 since v1.39.0)
     if len(orphans) > BASELINE:
         pytest.fail(
             f"{len(orphans)} unused English i18n entries (baseline {BASELINE}):\n  - "

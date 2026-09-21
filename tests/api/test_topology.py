@@ -159,65 +159,22 @@ def test_topology_endpoint_returns_500_on_kubectl_failure(api):
 
 
 # ---------------------------------------------------------------------------
-# Cache TTL — drift guard
+# Vues de l'aperçu : montage et chargement
 # ---------------------------------------------------------------------------
-def test_topology_js_uses_scoped_selectors_not_global_ids():
-    """REGRESSION (v1.4.21): the three overview subtabs share the
-    topology.js module. Selecting elements via global IDs like
-    `#topology-canvas` returned the FIRST one across all 3 subtabs
-    (always the Cluster's), so Network and Storage rendered into the
-    wrong DOM element and looked empty. The fix is to query relative
-    to a `currentHost` element, and use class selectors that are
-    scoped to that host."""
-    topo_js = WEB_DIR / "static" / "js" / "topology.js"
-    src = topo_js.read_text()
-    # The module must hold a reference to the active host
-    assert "currentHost" in src, (
-        "topology.js no longer scopes queries to currentHost — "
-        "Network/Storage subtabs will render into Cluster's container."
-    )
-    # And queries must be class-based, not id-based
-    assert "querySelector('#topology-canvas')" not in src and \
-           'querySelector("#topology-canvas")' not in src, (
-        "topology.js still uses global id #topology-canvas — fix to "
-        "currentHost.querySelector('.topology-canvas') instead."
-    )
-
-
-def test_app_js_topology_shell_uses_classes_not_ids():
-    """app.js's mountTopology() builds the canvas shell. It must use
-    classes (`.topology-canvas`, `.topology-detail`, etc.) — never ids,
-    because the shell is rendered into 3 different sub-tab hosts and
-    duplicate ids would break the topology module's scoped lookups."""
-    app_js = WEB_DIR / "static" / "js" / "app.js"
-    src = app_js.read_text()
-    mount = src[src.find("function mountTopology"):]
-    mount = mount[:mount.find("\n  }") + 4]  # one function body
-    forbidden = ['id="topology-canvas"', "id='topology-canvas'",
-                 'id="topology-detail"', "id='topology-detail'",
-                 'id="topology-meta"',   "id='topology-meta'"]
-    bad = [f for f in forbidden if f in mount]
-    assert not bad, f"mountTopology() still uses these ids: {bad}"
-
-
-def test_topology_nodes_are_not_grabbable_so_clicks_register():
-    """REGRESSION (v1.4.22): Cytoscape defaults nodes to grabbable —
-    any pixel of mouse movement during a click is interpreted as a
-    drag, swallowing the tap event and hiding the detail panel.
-    Users reported "I can't click, it just moves the element."
-
-    Lock positions with `autoungrabify: true` in the cyto config,
-    plus an explicit `cy.nodes().ungrabify()` belt-and-braces."""
-    topo_js = WEB_DIR / "static" / "js" / "topology.js"
-    src = topo_js.read_text()
-    assert "autoungrabify: true" in src, (
-        "Cytoscape must boot with autoungrabify so clicks aren't "
-        "interpreted as drags. See v1.4.22 fix."
-    )
-    assert "ungrabify()" in src, (
-        "Explicit nodes().ungrabify() guard missing — belt-and-braces "
-        "in case future elements are added dynamically."
-    )
+def test_each_overview_board_mounts_into_its_own_subtab():
+    """REGRESSION (v1.4.21), toujours valable avec les vues de blocs : un
+    identifiant global (`#topology-canvas`) renvoyait la PREMIÈRE zone des
+    sous-onglets, et Réseau ou Stockage se dessinaient dans celle du
+    Cluster. Chaque module cherche donc la zone de SON sous-onglet."""
+    js = WEB_DIR / "static" / "js"
+    for module, mode in (("cluster-map.js", "cluster"), ("netmap.js", "network"),
+                         ("fabric.js", "fabric"), ("storage-map.js", "storage")):
+        src = (js / module).read_text()
+        assert (f"document.querySelector('.overview-subtab[data-subtab=\"{mode}\"] "
+                ".topology-host')") in src, module
+        assert "#topology-canvas" not in src, module
+    app = (js / "app.js").read_text()
+    assert "cluster: window.ClusterMap" in app
 
 
 def test_i18n_exposes_itself_on_window_for_es_modules():
@@ -232,187 +189,6 @@ def test_i18n_exposes_itself_on_window_for_es_modules():
     assert "window.i18n = " in src or "window['i18n']" in src, (
         "i18n.js must expose `i18n` on window so ES modules can use it."
     )
-
-
-def test_topology_renderDetail_handles_missing_i18n():
-    """Defensive: even if i18n.js loads after topology.js (race),
-    renderDetail must not throw. Guard the lookup with a fallback."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    # The renderDetail body must reference window.i18n with a guard
-    rd = src[src.find("function renderDetail"):]
-    rd = rd[:5000]
-    assert "window.i18n ||" in rd or "window.i18n ??" in rd or \
-           "|| { t:" in rd, (
-        "renderDetail() must guard against window.i18n being undefined."
-    )
-
-
-def test_topology_style_scopes_size_to_node_with_size():
-    """Cytoscape warns 100× per layout pass if width/height map to a
-    data field absent on some nodes. Parents (compound nodes) auto-
-    size from their children, so the `width/height: data(size)` rule
-    MUST be scoped to `node[size]` (only nodes that defined size)."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    # The narrowed selector must exist
-    assert "selector: 'node[size]'" in src or 'selector: "node[size]"' in src
-
-
-def test_topology_cluster_layout_separates_running_from_unscheduled():
-    """v1.4.24: the cluster view must group VMs by node on TOP and put
-    the catch-all 'unscheduled' bucket on the BOTTOM. The code path
-    that arranges this is `applyClusterLayout`; we assert it explicitly
-    separates the two parent kinds rather than rendering them side-by-side."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    layout = src[src.find("function applyClusterLayout"):]
-    layout = layout[:2500]
-    assert "node-unscheduled" in layout, (
-        "applyClusterLayout no longer references node-unscheduled — "
-        "halted VMs may end up mixed with live hypervisor nodes."
-    )
-    # And there's a separate yOffset for the second row
-    assert "row1Bottom" in layout or "startY" in layout, (
-        "applyClusterLayout doesn't compute a separate Y offset for the "
-        "unscheduled bucket → it will overlap the hypervisor row."
-    )
-
-
-def test_topology_truncates_vm_names_with_fullname_fallback():
-    """Long VM names overflow the box. v1.4.28 switched from a JS
-    char-budget truncation to native Cytoscape ellipsis (more
-    accurate). The cluster builder must still populate `fullName`
-    so the hover tooltip and search can use the un-ellipsized name."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "fullName" in src, (
-        "fullName field missing — hover tooltip + search won't have "
-        "the full VM name to show."
-    )
-    builder = src[src.find("function buildClusterElements"):]
-    builder = builder[:2500]
-    assert "fullName" in builder, "buildClusterElements doesn't set fullName"
-    # And the VM-specific style enables Cytoscape's native ellipsis
-    assert "'text-wrap': 'ellipsis'" in src or \
-           "text-wrap: 'ellipsis'"  in src, (
-        "VM label style must use text-wrap:'ellipsis' for native truncation."
-    )
-
-
-def test_topology_exposes_search_and_setfontsize_api():
-    """The Topology module's public API gains `search()` (highlight
-    matching nodes + auto-fit) and `setFontSize()` (live re-render of
-    labels with a new truncation budget)."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    # Both functions defined
-    assert "function search(" in src
-    assert "function setFontSize(" in src
-    # And exposed on the return object
-    ret = src[src.rfind("return {"):]
-    assert "search" in ret and "setFontSize" in ret
-
-
-def test_topology_search_uses_searched_class_for_highlight():
-    """Search highlight is implemented via a `.searched` cytoscape
-    class so the style rule (border-color, overlay) is decoupled from
-    the search logic. A regression that removed the class would leave
-    matches visually identical to non-matches."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "addClass('searched')" in src or 'addClass("searched")' in src
-    assert "node.searched" in src, (
-        "The .searched style rule is missing — matches won't be visually distinct."
-    )
-
-
-def test_topology_refresh_uses_incremental_update_when_structure_unchanged():
-    """v1.4.26: the 8 s auto-refresh was previously calling render()
-    every tick, which destroys + recreates the cytoscape instance and
-    re-runs the layout — shifting every element under the user's
-    cursor. The fix is to detect when the structure is unchanged and
-    call `applyDataUpdate(data)` instead, which only merges new data
-    fields (color, label, raw) without touching positions.
-
-    v1.6.4: "structure" now includes each node's compound parent (not
-    just the element id set), so a VM that starts/stops/migrates — same
-    id, new parent — correctly falls through to the full re-render that
-    re-groups it under its host."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "function applyDataUpdate" in src, "applyDataUpdate helper missing"
-    # The refresh function must branch on a structure comparison
-    rf = src[src.find("async function refresh"):]
-    rf = rf[:3500]
-    assert "_mapsEqual" in rf, (
-        "refresh() doesn't compare old vs new structure — it will "
-        "destroy+rerender on every tick."
-    )
-    assert "applyDataUpdate" in rf, (
-        "refresh() never calls applyDataUpdate — incremental path missing."
-    )
-
-
-def test_topology_refresh_preserves_viewport_on_structural_change():
-    """When topology DID change (VM added/removed), we still re-render
-    fully — but the user's zoom + pan + selection must survive so the
-    view doesn't visually 'snap' back to the default fit."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    rf = src[src.find("async function refresh"):]
-    rf = rf[:3500]
-    # Both zoom + pan saved and restored
-    assert "cy.zoom()" in rf and "cy.pan()" in rf, (
-        "refresh() doesn't snapshot zoom/pan before the full re-render."
-    )
-    assert "cy.zoom(zoom)" in rf and "cy.pan(pan)" in rf, (
-        "refresh() doesn't restore zoom/pan after the full re-render."
-    )
-    # And selection is preserved
-    assert ":selected" in rf and "select()" in rf, (
-        "refresh() loses the user's selected node on structural change."
-    )
-
-
-def test_topology_apply_data_update_uses_batch_for_perf():
-    """applyDataUpdate should wrap its node updates in `cy.batch(...)`
-    so cytoscape skips intermediate redraws — important when 18+ VMs
-    need their color/label updated at once."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    fn = src[src.find("function applyDataUpdate"):]
-    fn = fn[:1500]
-    assert "cy.batch(" in fn, (
-        "applyDataUpdate doesn't batch — every node update triggers a "
-        "separate redraw, defeating the purpose of the incremental path."
-    )
-
-
-def test_topology_zoom_is_smoothed_and_granular():
-    """v1.4.27: the user reported coarse zoom steps. We lower the wheel
-    sensitivity to 0.2 (4× more granular than default 1.0) and widen
-    the [minZoom, maxZoom] range so users can dig deeper into dense
-    clusters or zoom out to see the whole layout."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "wheelSensitivity: 0.2" in src or "wheelSensitivity:0.2" in src, (
-        "wheelSensitivity must be 0.2 for smooth zoom — the default 1.0 "
-        "feels too coarse to operators."
-    )
-    # Wider zoom range
-    assert "minZoom: 0.1" in src
-    assert "maxZoom: 4" in src
-
-
-def test_topology_zoom_helpers_exposed():
-    """zoomBy(factor) + zoomFit() must be on the Topology public API so
-    the toolbar buttons can drive smooth animated zoom."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "function zoomBy" in src
-    assert "function zoomFit" in src
-    # And both exposed on the return object
-    ret = src[src.rfind("return {"):]
-    assert "zoomBy" in ret and "zoomFit" in ret
-
-
-def test_topology_zoom_helpers_use_animation():
-    """The zoom transitions should be smooth — call cy.animate() with a
-    short duration, never a synchronous cy.zoom() (jarring jump)."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    fn = src[src.find("function zoomBy"):]
-    fn = fn[:1500]
-    assert "cy.animate(" in fn, "zoomBy() doesn't animate — zoom will be jumpy."
 
 
 def test_app_js_restores_subtabs_after_setcluster():
@@ -440,33 +216,6 @@ def test_app_js_restores_subtabs_after_setcluster():
         "restoreSubTabsFromStorage() must be called AFTER setCluster() "
         "in init() — otherwise currentCluster is null at click time and "
         "mountTopology() short-circuits."
-    )
-
-
-def test_topology_vm_nodes_are_rectangular_to_fit_labels():
-    """v1.4.28: VM boxes were 60×60 square but labels could span
-    120 px → text overflowed the colored box. VMs now carry explicit
-    `width` and `height` data fields rendering as 130×50 rectangles
-    so labels fit naturally."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    cluster = src[src.find("function buildClusterElements"):]
-    cluster = cluster[:3000]
-    assert "width: 130" in cluster or "width:130" in cluster, (
-        "VM cluster builder no longer sets an explicit width — labels "
-        "may overflow."
-    )
-    assert "height: 50" in cluster or "height:50" in cluster
-    # And the style mapping picks up data(width) when present
-    assert "selector: 'node[width][height]'" in src or \
-           'selector: "node[width][height]"' in src
-
-
-def test_topology_binds_click_and_tap_for_resilience():
-    """Both `tap` and `click` listeners should be wired so the detail
-    panel opens reliably across desktop, touch and pen interactions."""
-    src = (WEB_DIR / "static" / "js" / "topology.js").read_text()
-    assert "'tap click'" in src or '"tap click"' in src, (
-        "topology.js must listen on both tap AND click for resilience."
     )
 
 
@@ -687,6 +436,18 @@ def test_a_host_says_what_it_can_give_and_what_is_given(monkeypatch):
 def test_a_host_tells_its_maintenance_state(monkeypatch, annotations, state):
     host = build_items([node_item(annotations=annotations)], monkeypatch)["nodes"][0]
     assert host["maintenance"] == state
+
+
+def test_a_host_tells_whether_it_is_the_last_available(monkeypatch):
+    """Harvester refuse d'isoler le dernier nœud disponible : la vue le sait
+    pour le dire avant qu'on essaie (relevé en réel sur harv1)."""
+    alone = build_items([node_item()], monkeypatch)["nodes"][0]
+    assert alone["last_available"] is True
+    two = build_items([node_item(), node_item(name="harv2")], monkeypatch)["nodes"]
+    assert [n["last_available"] for n in two] == [False, False]
+    one_cordoned = build_items([node_item(), node_item(name="harv2", unschedulable=True)],
+                               monkeypatch)["nodes"]
+    assert [n["last_available"] for n in one_cordoned] == [True, False]
 
 
 def test_the_view_still_costs_one_call_with_the_claims():

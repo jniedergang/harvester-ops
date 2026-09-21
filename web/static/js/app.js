@@ -39,10 +39,7 @@ const App = (() => {
     // continuait sinon d'interroger le cluster en arrière-plan — et, après
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
-    if (name !== 'overview' && window.Topology) window.Topology.stop();
-    if (name !== 'overview') {
-      [window.Fabric, window.NetMap, window.StorageMap].forEach(b => b && b.stop());
-    }
+    if (name !== 'overview') stopBoards(null);
   }
 
   /** Sous-onglet d'aperçu actif (metrics | cluster | network | storage). */
@@ -186,8 +183,7 @@ const App = (() => {
       let mode = 'metrics';
       try { mode = localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; } catch {}
       if (mode !== 'metrics') {
-        if (window.Topology) window.Topology.stop();   // couper l'ancien
-        mountTopology(mode);             // Fabrique, Réseau, Stockage compris
+        mountTopology(mode);             // coupe aussi les vues de l'ancien
       }
     }
     if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
@@ -1778,8 +1774,7 @@ const App = (() => {
       });
     });
 
-    // Overview sub-tabs (Metrics / Cluster / Network / Storage — v1.4.19).
-    // The latter three drive the Cytoscape topology viewer.
+    // Overview sub-tabs (Metrics / Cluster / Network / Fabric / Storage).
     $$('[data-overview-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
         const target = btn.dataset.overviewTab;
@@ -1787,7 +1782,7 @@ const App = (() => {
         $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== target));
         try { localStorage.setItem('harvester_ops_overview_subtab', target); } catch {}
         // Un seul chemin de montage : mountTopology gère lui-même le cas
-        // « Métriques » (pas de canevas, mais il faut couper le polling).
+        // « Métriques » (pas de vue de blocs, mais il faut couper le polling).
         mountTopology(target);
         if (target === 'metrics') refreshStatus({ veil: true });
       });
@@ -1937,116 +1932,37 @@ const App = (() => {
   }
 
   // -------------------------------------------------------------------------
-  // Topology viewer mounting (v1.4.19) — wraps the Topology module so other
-  // app modules don't need to know about cytoscape internals.
+  // Vues de l'aperçu. Depuis la v1.43.0, les quatre (Cluster, Réseau,
+  // Fabrique, Stockage) sont des pages de blocs HTML, chacune son module ;
+  // plus aucun graphe Cytoscape.
   // -------------------------------------------------------------------------
-  function mountTopology(mode) {
-    if (!currentCluster) return;
-    // Fabrique, Réseau et Stockage ne sont plus des graphes : ce sont des
-    // pages de blocs à la manière d'ESXi, rendues en HTML par leur propre
-    // module. Elles ne dépendent donc pas de Cytoscape, chargé en différé.
-    const boards = { fabric: window.Fabric, network: window.NetMap, storage: window.StorageMap };
-    Object.entries(boards).forEach(([m, b]) => { if (b && m !== mode) b.stop(); });
-    const board = boards[mode];
-    if (board) {
-      if (window.Topology) window.Topology.stop();
-      const boardHost = document.querySelector(`.overview-subtab[data-subtab="${mode}"] .topology-host`);
-      const boardLoading = board.start(currentCluster);
-      if (window.Veil && boardHost && boardLoading && typeof boardLoading.then === 'function') {
-        window.Veil.during(boardHost, {
-          message: i18n.t('topology.loading'), name: currentCluster, delay: 250,
-        }, () => boardLoading);
-      }
-      return boardLoading;
-    }
-    if (!window.Topology) return;
-    // L'onglet Métriques n'a pas de canevas : y monter la topologie n'a
-    // pas de sens, mais il faut couper son rafraîchissement.
-    if (mode === 'metrics') { window.Topology.stop(); return; }
-    // Build the canvas + detail sidebar shell once per host, then ask
-    // the Topology module to render for the active mode. We use CSS
-    // classes (not ids) so each of the 3 subtabs gets its own
-    // independent canvas — sharing an id was the v1.4.21 bug that
-    // made Network and Storage render into the Cluster's container.
-    const host = document.querySelector(`.overview-subtab[data-subtab="${mode}"] .topology-host`);
-    if (!host) return;
-    if (!host.querySelector('.topology-canvas')) {
-      host.innerHTML = `
-        <div class="topology-toolbar">
-          <span class="topology-search-wrap">${Icons.svg('search', { size: 14 })}<input type="search" class="topology-search tip"
-                 placeholder="${i18n.t('topology.searchPlaceholder')}"
-                 data-tip-i18n="topology.searchTip"
-                 aria-label="${i18n.t('topology.searchPlaceholder')}"></span>
-          <div class="topology-zoom-group" role="group"
-               aria-label="${i18n.t('topology.zoomGroupAria')}">
-            <button type="button" class="btn btn-sm topology-zoom-out tip"
-                    data-tip-i18n="topology.zoomOutTip"
-                    aria-label="${i18n.t('topology.zoomOutTip')}">−</button>
-            <button type="button" class="btn btn-sm topology-zoom-fit tip"
-                    data-tip-i18n="topology.zoomFitTip"
-                    aria-label="${i18n.t('topology.zoomFitTip')}">${Icons.svg('fit', { size: 14 })}</button>
-            <button type="button" class="btn btn-sm topology-zoom-in tip"
-                    data-tip-i18n="topology.zoomInTip"
-                    aria-label="${i18n.t('topology.zoomInTip')}">+</button>
-          </div>
-          <label class="topology-fontsize tip" data-tip-i18n="topology.fontSizeTip">
-            <span aria-hidden="true">Aa</span>
-            <input type="range" min="8" max="18" value="11" step="1"
-                   class="topology-fontsize-input"
-                   aria-label="${i18n.t('topology.fontSizeTip')}">
-          </label>
-          <span class="topology-meta tip" data-tip-i18n="topology.metaTip">—</span>
-          <button type="button" class="btn btn-sm topology-refresh"
-                  data-tip-i18n="topology.refreshTip">${Icons.svg('refresh', { size: 14 })} ${i18n.t('topology.refresh')}</button>
-          <label class="topology-unlock tip" data-tip-i18n="topology.unlockTip">
-            <input type="checkbox" class="topology-unlock-input">
-            ${Icons.svg('unlock', { size: 14 })} ${i18n.t('topology.unlockDestructive')}
-          </label>
-        </div>
-        <div class="topology-canvas-wrap">
-          <div class="topology-canvas"></div>
-          <aside class="topology-detail">
-            <p class="hint">${i18n.t('topology.detailEmpty')}</p>
-          </aside>
-        </div>`;
-      host.querySelector('.topology-refresh').addEventListener('click', () => window.Topology.refresh());
-      host.querySelector('.topology-unlock-input').addEventListener('change', (e) => {
-        window.Topology.setDestructiveUnlocked(e.target.checked);
-      });
-      host.querySelector('.topology-zoom-in').addEventListener('click',
-        () => window.Topology.zoomBy(1.25));
-      host.querySelector('.topology-zoom-out').addEventListener('click',
-        () => window.Topology.zoomBy(0.8));
-      host.querySelector('.topology-zoom-fit').addEventListener('click',
-        () => window.Topology.zoomFit());
-      // Search field: debounced highlight + auto-fit on first match.
-      const searchInput = host.querySelector('.topology-search');
-      let _searchT;
-      searchInput.addEventListener('input', (e) => {
-        clearTimeout(_searchT);
-        _searchT = setTimeout(() => window.Topology.search(e.target.value), 150);
-      });
-      // Font size slider: live re-render of labels with the new budget.
-      host.querySelector('.topology-fontsize-input').addEventListener('input', (e) => {
-        window.Topology.setFontSize(e.target.value);
-      });
-      if (typeof i18n !== 'undefined') i18n.applyTranslations();
-    }
-    const loading = window.Topology.start(currentCluster, mode);
-    // Sur un gros cluster, la topologie met plusieurs secondes à revenir.
-    // Le voile ne couvre que cette zone : le reste de la page demeure
-    // lisible et cliquable.
-    if (window.Veil && loading && typeof loading.then === 'function') {
-      window.Veil.during(host, {
-        message: i18n.t('topology.loading'),
-        name: currentCluster,
-        delay: 250,
-      }, () => loading);
-    }
-    return loading;
+  const BOARDS = () => ({ cluster: window.ClusterMap, fabric: window.Fabric,
+                          network: window.NetMap, storage: window.StorageMap });
+
+  function stopBoards(except) {
+    Object.entries(BOARDS()).forEach(([m, b]) => { if (b && m !== except) b.stop(); });
   }
 
-  // Expose getCurrentCluster for the topology module
+  function mountTopology(mode) {
+    if (!currentCluster) return;
+    stopBoards(mode);
+    // « Métriques » n'a pas de vue de blocs : il suffit d'avoir coupé les
+    // rafraîchissements des autres.
+    const board = BOARDS()[mode];
+    if (!board) return;
+    const boardHost = document.querySelector(`.overview-subtab[data-subtab="${mode}"] .topology-host`);
+    const boardLoading = board.start(currentCluster);
+    // Sur un gros cluster, la vue met plusieurs secondes à revenir. Le voile
+    // ne couvre que cette zone : le reste de la page demeure lisible.
+    if (window.Veil && boardHost && boardLoading && typeof boardLoading.then === 'function') {
+      window.Veil.during(boardHost, {
+        message: i18n.t('topology.loading'), name: currentCluster, delay: 250,
+      }, () => boardLoading);
+    }
+    return boardLoading;
+  }
+
+  // Expose getCurrentCluster for the other modules
   function getCurrentCluster() { return currentCluster; }
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster, mountTopology };

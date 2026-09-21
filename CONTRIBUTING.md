@@ -14,7 +14,7 @@ tests/api/          pytest against Flask test_client + spawned server
 tests/e2e/          Playwright tests against headless Chromium
 web/                Flask app, JS/CSS, templates
 web/static/js/      Vanilla JS (no framework); IIFE modules on window.X
-web/static/vendor/  Third-party frontend assets (noVNC, Cytoscape, tiptap, Lucide licence)
+web/static/vendor/  Third-party frontend assets (noVNC, tiptap, Lucide licence)
 scripts/gen-icons.py  Regenerates the Lucide icon table in web/static/js/icons.js
 web/requirements.txt        Pinned versions
 web/requirements-lock.txt   Hash-pinned (use for production installs)
@@ -128,7 +128,6 @@ pre-commit install
     (`Icons.el()` returns a DOM node for `append()`);
   - in static HTML (`index.html`, `review.html`): `<span data-icon="node"
     data-icon-size="18"></span>`, hydrated once by `Icons.mount()`;
-  - on the Cytoscape canvas: `Icons.dataUri('vm')` as node `icon` data;
   - in `FloatingPanels.open({...})`: the `icon` option, not a glyph in
     `title`.
 - Icons are addressed by *meaning* (`delete` vs `destroy`, `warn`,

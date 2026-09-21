@@ -197,10 +197,49 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   that reveals them, through a tracked action and removable from the same
   banner. The view also works on a cluster without the kube-ovn add-on.
 
-- **Cluster view**: the hypervisor nodes and the VMs they host, drawn
-  with Cytoscape, with click-to-detail and the VM actions (edit, console,
-  snapshot, migrate, start, stop, delete behind the destructive lock).
-  It costs one grouped kubectl call per refresh.
+- **Cluster view, one block per host** (same layout as the other views).
+  Each host shows its state (ready, cordoned, in maintenance), its roles,
+  its address and two gauges: vCPU and memory given to its running VMs
+  against what the host can give. Past 100 % the gauge says the host is
+  overcommitted. Each VM is a card with what it consumes: vCPU, memory,
+  disks ("20 GiB" or "2 disks · 60 GiB"), networks and first address.
+  Hovering a card, or giving it the keyboard focus, shows the full detail:
+  every disk with its size, storage class and boot order, every network
+  card with its MAC and all its addresses, the guest OS and interfaces
+  only the guest knows, the run strategy. Stopped VMs are grouped apart. A
+  filter narrows the cards by name, namespace, address, MAC, network or
+  guest OS. Clicking a VM opens its actions (notes, edit, console,
+  snapshots, migrate, start, stop, delete behind the destructive lock).
+  One grouped kubectl call per refresh, disk sizes included.
+- **Cordon, uncordon and node maintenance**, from a host's panel. Cordon
+  and uncordon set the node's `spec.unschedulable`, as Harvester does, as
+  tracked actions with a confirmation. Harvester's admission webhook
+  refuses to cordon, or put in maintenance, the last node still available
+  (no other node that is neither cordoned nor in maintenance): the console
+  applies the same rule beforehand, so on such a node the Cordon button is
+  shown disabled with the reason, and the server refuses it with a 409
+  instead of starting an action bound to fail. **Maintenance** is Harvester's own:
+  the console asks for it the way the Harvester UI does (the
+  `harvesterhci.io/drain-requested` annotation), and Harvester's
+  controller migrates the VMs away. Before anything is asked, the console
+  shows what would happen, with Harvester's own rules: a node that is the
+  only control plane is refused, as is a control plane node while another
+  one is already in maintenance; the VMs that will migrate; the VMs that
+  cannot, and why (the last healthy replica of one of their volumes is on
+  this node, KubeVirt says they are not live-migratable, or no other node
+  satisfies their placement rules); the VMs marked to be shut down during
+  maintenance. While a VM cannot migrate, maintenance is refused unless
+  forced, and forcing (shutting those VMs down) sits behind the
+  destructive lock. The tracked action follows Harvester until the node is
+  in maintenance (10 minutes at most) and reports a refusal by its
+  controller. Leaving maintenance makes the node schedulable again and
+  restarts the VMs maintenance shut down. Entering and leaving maintenance
+  need the `admin` role. **Not verified on a real cluster yet**: the test
+  cluster has a single node, which carries the control plane, so only the
+  refusals could be exercised for real (Harvester's webhook refusing to
+  cordon the last node, the single control plane refusing maintenance);
+  actually cordoning, uncordoning, entering and leaving maintenance are
+  covered by automated tests until a multi-node test cluster exists.
 - **Network view, one block per network** (same layout as Fabric). On the
   left, every VM attached to that network with what it really has on it:
   interface name, MAC, addresses, the interface name inside the guest,
@@ -349,8 +388,8 @@ Terraform workspace.
 - **Three roles**, declared in `/etc/harvester-ops/roles.yaml`: `viewer`
   reads, `operator` performs the everyday mutating work (VMs, snapshots,
   Terraform applies), `admin` adds what cuts a service or changes the tool's
-  own configuration: cluster power sequencing, cluster declarations,
-  bare-metal, the ISO store and the Terraform provider.
+  own configuration: cluster power sequencing, node maintenance, cluster
+  declarations, bare-metal, the ISO store and the Terraform provider.
 - **Enforced centrally, deny by default.** Any request that changes
   something needs at least `operator`, and an explicit list of paths needs
   `admin`. An endpoint added tomorrow is protected without anyone having to

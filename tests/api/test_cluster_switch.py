@@ -15,7 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 JS = ROOT / "web" / "static" / "js"
 VEIL = (JS / "veil.js").read_text()
 APP = (JS / "app.js").read_text()
-TOPO = (JS / "topology.js").read_text()
+# v1.43.0 : les quatre vues de l'aperçu sont des modules de blocs.
+BOARDS = {m: (JS / m).read_text()
+          for m in ("cluster-map.js", "netmap.js", "fabric.js", "storage-map.js")}
 CSS = (ROOT / "web" / "static" / "css" / "style.css").read_text()
 HTML = (ROOT / "web" / "templates" / "index.html").read_text()
 
@@ -42,7 +44,7 @@ def test_a_fast_load_shows_nothing_at_all():
     during = VEIL.split("async function during(", 1)[1].split("\n  }", 1)[0]
     assert "opts.delay" in during and "setTimeout" in during
     assert "if (armed)" in during, "ne rien lever si rien n'a été montré"
-    # les zones de l'aperçu utilisent bien ce seuil
+    # l'en-tête et les vues de l'aperçu utilisent bien ce seuil
     assert APP.count("delay: 250") >= 2
 
 
@@ -122,29 +124,34 @@ def test_the_cluster_name_reaches_the_veil_escaped():
 
 def test_returning_to_the_overview_remounts_the_topology():
     """Constaté : avec harv3 sélectionné depuis Cluster API, revenir sur
-    Cluster/Aperçu affichait le nœud et les VMs de harv1. La topologie
-    n'était (re)montée que par un clic sur son sous-onglet."""
+    Cluster/Aperçu affichait le nœud et les VMs de harv1. La vue n'était
+    (re)montée que par un clic sur son sous-onglet."""
     set_tab = APP.split("function setTab(name)", 1)[1].split("\n  }", 1)[0]
     assert "mountTopology(overviewMode())" in set_tab
-    assert "if (name !== 'overview' && window.Topology) window.Topology.stop();" in set_tab, (
+    assert "if (name !== 'overview') stopBoards(null);" in set_tab, (
         "quitter l'aperçu doit couper le polling, qui visait l'ancien cluster")
+    stop = APP.split("function stopBoards(except)", 1)[1].split("\n  }", 1)[0]
+    assert "b.stop()" in stop
 
 
 def test_the_topology_drops_a_response_from_the_previous_cluster():
     """Une réponse en vol au moment de la bascule appartient au cluster
-    précédent : la peindre écraserait la vue du nouveau."""
-    refresh = TOPO.split("async function refresh()", 1)[1].split("\n  }", 1)[0]
-    assert "const askedCluster = lastCluster;" in refresh
-    assert "if (askedCluster !== lastCluster || askedMode !== currentMode) return;" in refresh
+    précédent : la peindre écraserait la vue du nouveau. Vrai pour chacune
+    des quatre vues."""
+    for name, src in BOARDS.items():
+        refresh = src.split("async function refresh(", 1)[1].split("\n  }", 1)[0]
+        assert "const asked = cluster;" in refresh, name
+        assert "if (asked !== cluster) return;" in refresh, name
 
 
 def test_the_topology_load_can_be_awaited_and_veiled():
-    start = TOPO.split("function start(cluster, mode", 1)[1].split("\n  }", 1)[0]
-    assert "const first = refresh();" in start and "return first;" in start
+    for name, src in BOARDS.items():
+        start = src.split("function start(clusterName)", 1)[1].split("\n  }", 1)[0]
+        assert "return refresh();" in start, name
     mount = APP.split("function mountTopology(mode)", 1)[1].split("\n  }\n", 1)[0]
-    assert "Veil.during(host, {" in mount
-    assert "if (mode === 'metrics') { window.Topology.stop(); return; }" in mount, (
-        "l'onglet Métriques n'a pas de canevas mais doit couper le polling")
+    assert "Veil.during(boardHost, {" in mount
+    assert "stopBoards(mode);" in mount and "if (!board) return;" in mount, (
+        "l'onglet Métriques n'a pas de vue de blocs mais doit couper le polling")
 
 
 def test_background_refreshes_do_not_veil():

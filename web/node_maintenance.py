@@ -14,6 +14,10 @@ supposée (`pkg/api/node/formatter.go`, `pkg/util/drainhelper/helper.go`,
   * SORTIR : réintégrer, retirer le taint `kubevirt.io/drain` et les trois
     annotations, redémarrer les VMs arrêtées par la maintenance.
 
+Et le garde-fou de son webhook (`pkg/webhook/resources/node/validator.go`,
+relevé en réel sur harv1) : ni isoler ni mettre en maintenance le DERNIER
+nœud disponible.
+
 Module pur : ni Flask ni cluster, pour que les règles se testent seules.
 """
 
@@ -57,6 +61,19 @@ def node_ready(node):
         return False
     return any(c.get("type") == "Ready" and c.get("status") == "True"
                for c in ((node.get("status") or {}).get("conditions") or []))
+
+
+def last_available(node, nodes):
+    """Vrai si aucun AUTRE nœud n'est disponible : ni isolé, ni porteur de
+    `maintain-status` (règle exacte de validateCordonAndMaintenanceMode ;
+    l'état Ready n'y entre pas). Harvester refuse alors d'isoler ce nœud
+    comme de le mettre en maintenance."""
+    name = _meta(node).get("name")
+    return not any(
+        _meta(n).get("name") != name
+        and not (n.get("spec") or {}).get("unschedulable")
+        and MAINTAIN_STATUS not in (_meta(n).get("annotations") or {})
+        for n in nodes)
 
 
 def drain_possible(node, nodes):
@@ -167,7 +184,9 @@ def non_migratable(node, nodes, vmis, volumes, replicas):
 def plan(node, nodes, vmis, volumes, replicas, force=False):
     """Ce que ferait la mise en maintenance, dit AVANT de la demander."""
     name = _meta(node).get("name")
-    refusal = "already" if maintenance_state(node) else drain_possible(node, nodes)
+    refusal = ("already" if maintenance_state(node)
+               else drain_possible(node, nodes)
+               or ("last-available-node" if last_available(node, nodes) else None))
     here = [v for v in vmis if _vmi_node(v) == name]
     on_node = sorted({_vm_of(v) for v in here})
     blocked_by = non_migratable(node, nodes, vmis, volumes, replicas)

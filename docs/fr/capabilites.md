@@ -216,11 +216,54 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   révèle, par une action tracée et retirable depuis le même bandeau. La vue
   fonctionne aussi sur un cluster sans l'addon kube-ovn.
 
-- **Vue Cluster** : les nœuds hyperviseurs et les VMs qu'ils hébergent,
-  dessinés avec Cytoscape, avec le détail au clic et les actions de VM
-  (éditer, console, snapshot, migrer, démarrer, arrêter, supprimer
+- **Vue Cluster, un bloc par hôte** (même disposition que les autres
+  vues). Chaque hôte montre son état (prêt, isolé, en maintenance), ses
+  rôles, son adresse et deux jauges : vCPU et mémoire donnés à ses VMs en
+  marche, face à ce que l'hôte peut donner. Au-delà de 100 %, la jauge dit
+  que l'hôte est surchargé. Chaque VM est une carte qui dit ce qu'elle
+  consomme : vCPU, mémoire, disques (« 20 GiB » ou « 2 disques · 60 GiB »),
+  réseaux et première adresse. Survoler une carte, ou lui donner le focus
+  au clavier, affiche le détail complet : chaque disque avec sa taille, sa
+  storage class et son rang d'amorçage, chaque carte réseau avec sa MAC et
+  toutes ses adresses, le système invité et les interfaces que seul
+  l'invité connaît, la stratégie de démarrage. Les VMs arrêtées sont
+  regroupées à part. Un filtre réduit les cartes par nom, namespace,
+  adresse, MAC, réseau ou système invité. Cliquer une VM ouvre ses actions
+  (notes, éditer, console, snapshots, migrer, démarrer, arrêter, supprimer
   derrière le verrou destructif). Un seul appel kubectl groupé par
-  rafraîchissement.
+  rafraîchissement, tailles des disques comprises.
+- **Isoler, réintégrer, mettre un nœud en maintenance**, depuis le panneau
+  d'un hôte. Isoler et réintégrer posent le `spec.unschedulable` du nœud,
+  comme Harvester, en actions tracées avec confirmation. Le webhook
+  d'admission de Harvester refuse d'isoler, ou de mettre en maintenance, le
+  dernier nœud encore disponible (aucun autre nœud ni isolé ni en
+  maintenance) : la console applique la même règle en amont ; sur un tel
+  nœud, le bouton Isoler est affiché désactivé avec la raison, et le
+  serveur refuse par un 409 au lieu de lancer une action vouée à l'échec. La
+  **maintenance** est celle de Harvester : la console la demande comme le
+  fait l'interface de Harvester (annotation
+  `harvesterhci.io/drain-requested`), et c'est le contrôleur de Harvester
+  qui migre les VMs. Avant toute demande, la console montre ce qui se
+  passerait, avec les règles de Harvester : un nœud qui est le seul plan
+  de contrôle est refusé, comme un nœud du plan de contrôle quand un autre
+  est déjà en maintenance ; les VMs qui migreront ; celles qui ne le
+  peuvent pas, et pourquoi (la dernière réplique saine d'un de leurs
+  volumes est sur ce nœud, KubeVirt les dit non migrables à chaud, ou
+  aucun autre nœud ne satisfait leurs règles de placement) ; les VMs
+  marquées pour être arrêtées pendant la maintenance. Tant qu'une VM ne
+  peut pas migrer, la maintenance est refusée sauf forçage, et le forçage
+  (arrêter ces VMs) est derrière le verrou destructif. L'action tracée
+  suit Harvester jusqu'à ce que le nœud soit en maintenance (10 minutes au
+  plus) et rapporte un refus de son contrôleur. Sortir de maintenance rend
+  le nœud de nouveau planifiable et redémarre les VMs que la maintenance a
+  arrêtées. Entrer et sortir de maintenance demandent le rôle `admin`.
+  **Pas encore vérifié sur un vrai cluster** : le cluster de test n'a
+  qu'un nœud, qui porte le plan de contrôle ; seuls les refus ont pu être
+  exercés en réel (le webhook de Harvester qui refuse d'isoler le dernier
+  nœud, le plan de contrôle unique qui refuse la maintenance). Isoler,
+  réintégrer, entrer et sortir de maintenance pour de bon sont couverts
+  par les tests automatisés, en attendant un cluster de test à plusieurs
+  nœuds.
 - **Vue Réseau, un bloc par réseau** (même disposition que la Fabrique).
   À gauche, chaque VM branchée sur ce réseau avec ce qu'elle y a vraiment :
   nom de l'interface, MAC, adresses, nom de l'interface dans l'invité,
@@ -385,8 +428,8 @@ un workspace Terraform.
 - **Trois rôles**, déclarés dans `/etc/harvester-ops/roles.yaml` : `viewer`
   lit, `operator` fait le travail mutatif courant (VMs, snapshots, applies
   Terraform), `admin` y ajoute ce qui coupe un service ou change la
-  configuration de l'outil : séquençage électrique, déclarations de cluster,
-  bare-metal, magasin d'ISO et provider Terraform.
+  configuration de l'outil : séquençage électrique, maintenance des nœuds,
+  déclarations de cluster, bare-metal, magasin d'ISO et provider Terraform.
 - **Appliqué au centre, en refus par défaut.** Toute requête qui modifie
   quelque chose exige au moins `operator`, et une liste explicite de chemins
   exige `admin`. Un point d'entrée ajouté demain est protégé sans que

@@ -164,6 +164,41 @@ def test_the_single_control_plane_refusal_comes_first():
 
 
 # ---------------------------------------------------------------------------
+# Le dernier nœud disponible (webhook de Harvester, relevé en réel sur harv1 :
+# « can't enable maintenance mode or cordon on the last available node »)
+# ---------------------------------------------------------------------------
+
+def test_the_only_node_is_the_last_available():
+    assert nm.last_available(node("harv1"), [node("harv1")]) is True
+
+
+def test_another_schedulable_node_makes_it_possible():
+    assert nm.last_available(HA[0], HA) is False
+
+
+def test_cordoned_or_maintained_nodes_do_not_count():
+    """Règle exacte du webhook : un autre nœud compte s'il n'est ni isolé ni
+    porteur de `maintain-status`. Sa préparation (Ready) n'entre pas en
+    jeu, et une simple demande de maintenance non plus."""
+    others = [node("n2", unschedulable=True),
+              node("n3", annotations={nm.MAINTAIN_STATUS: "completed"})]
+    assert nm.last_available(HA[0], [HA[0]] + others) is True
+    requested = node("n3", annotations={nm.DRAIN_REQUESTED: "true"})
+    assert nm.last_available(HA[0], [HA[0], others[0], requested]) is False
+    not_ready = node("n3", ready=False)
+    assert nm.last_available(HA[0], [HA[0], others[0], not_ready]) is False
+
+
+def test_maintenance_of_the_last_available_worker_is_refused():
+    """Un nœud de travail échappe à la règle du plan de contrôle, pas à
+    celle du dernier nœud disponible."""
+    nodes = [node("w1", cp=False), node("w2", cp=False, unschedulable=True)]
+    assert nm.plan(nodes[0], nodes, [], [], [], False)["refusal"] == "last-available-node"
+    nodes[1] = node("w2", cp=False)
+    assert nm.plan(nodes[0], nodes, [], [], [], False)["refusal"] is None
+
+
+# ---------------------------------------------------------------------------
 # Ce qui est écrit sur le nœud
 # ---------------------------------------------------------------------------
 
@@ -254,6 +289,16 @@ def test_cordon_refused_when_already_cordoned_or_in_maintenance(client, monkeypa
                                 HA[1], HA[2]])
     r = client.post("/api/node/c1/n1/uncordon")
     assert r.status_code == 409 and "maintenance" in r.get_json()["detail"]
+
+
+def test_cordon_refused_on_the_last_available_node(client, monkeypatch):
+    """Harvester le refuserait par son webhook ; la console le dit avant,
+    sans lancer d'action vouée à l'échec."""
+    cluster_state(monkeypatch, [node("harv1")])
+    runs = tracked(monkeypatch)
+    r = client.post("/api/node/c1/harv1/cordon")
+    assert r.status_code == 409 and r.get_json()["error"] == "last-available-node"
+    assert runs == []
 
 
 def test_uncordon_refused_when_not_cordoned(client, monkeypatch):

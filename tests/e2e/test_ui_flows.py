@@ -313,13 +313,14 @@ def test_overview_subtab_persists_across_reload(page):
 
     Fix: a new `restoreSubTabsFromStorage()` helper runs from init()
     AFTER setCluster(), guaranteeing mountTopology has a cluster to
-    work with."""
-    # Navigate to Overview > Cluster sub-tab and wait for the canvas
+    work with. Since v1.43.0 the Cluster view is a board, not a canvas:
+    its shell (`.fabric-body`) is what proves it was mounted."""
+    # Navigate to Overview > Cluster sub-tab and wait for the board
     # to be mounted by mountTopology().
     page.click('.tab[data-tab="overview"]')
     page.click('[data-overview-tab="cluster"]')
     page.wait_for_selector(
-        '.overview-subtab[data-subtab="cluster"] .topology-canvas',
+        '.overview-subtab[data-subtab="cluster"] .fabric-body',
         timeout=5000,
     )
 
@@ -328,7 +329,7 @@ def test_overview_subtab_persists_across_reload(page):
     page.wait_for_timeout(400)
 
     # After reload the Cluster sub-tab must still be active AND the
-    # canvas must be present (the topology was actually mounted).
+    # board must be present (the view was actually mounted).
     cls = page.locator('[data-overview-tab="cluster"]').get_attribute("class") or ""
     assert "active" in cls.split(), (
         f"Overview Cluster sub-tab did not stay active after reload "
@@ -336,7 +337,7 @@ def test_overview_subtab_persists_across_reload(page):
         f"after setCluster() in init()."
     )
     page.wait_for_selector(
-        '.overview-subtab[data-subtab="cluster"] .topology-canvas',
+        '.overview-subtab[data-subtab="cluster"] .fabric-body',
         timeout=5000,
     )
 

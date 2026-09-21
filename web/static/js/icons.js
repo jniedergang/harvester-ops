@@ -20,7 +20,6 @@
  * Usage :  Icons.svg('console')                 -> chaîne HTML
  *          Icons.svg('ok', {size: 14, cls: 'icon-ok'})
  *          Icons.el('warn')                     -> élément DOM (append())
- *          Icons.dataUri('node', {color: '#fff'}) -> image pour le canvas
  *          Icons.mount(root)                    -> hydrate [data-icon] des gabarits
  */
 const Icons = (() => {
@@ -152,21 +151,6 @@ const Icons = (() => {
     return tpl.content.firstElementChild;
   }
 
-  // Image autonome (couleur figée) pour les contextes sans DOM : fond de
-  // nœud Cytoscape, etc. `currentColor` n'existe pas dans une image.
-  function dataUri(name, opts) {
-    const d = PATHS[name];
-    if (!d) return '';
-    const o = opts || {};
-    const size = o.size || 24;
-    const color = o.color || '#fff';
-    const sw = o.strokeWidth || DEFAULT_STROKE;
-    const markup = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="${size}" height="${size}"`
-      + ` fill="none" stroke="${color}" stroke-width="${sw}"`
-      + ` stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
-    return 'data:image/svg+xml;utf8,' + encodeURIComponent(markup);
-  }
-
   // Gabarits statiques (index.html, review.html) : <span data-icon="node">
   // est rempli ici. Idempotent — un second appel ne touche pas aux éléments
   // déjà hydratés.
@@ -182,7 +166,7 @@ const Icons = (() => {
 
   function has(name) { return Object.prototype.hasOwnProperty.call(PATHS, name); }
 
-  return { svg, el, dataUri, mount, has, names: () => Object.keys(PATHS) };
+  return { svg, el, mount, has, names: () => Object.keys(PATHS) };
 })();
 
 window.Icons = Icons;

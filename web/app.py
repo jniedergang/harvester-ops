@@ -1919,13 +1919,12 @@ def api_namespace(cluster, namespace):
 
 
 # =============================================================================
-# /api/topology/<cluster> — graph data for the Aperçu visual viewers
+# /api/topology/<cluster> : hôtes et VMs de la vue Cluster de l'aperçu
 # =============================================================================
-# Returns a consolidated snapshot of the cluster's physical + logical
-# topology. The frontend feeds this to Cytoscape.js to render three
-# perspectives (Cluster nodes ↔ VMs, Network, Storage). One endpoint
-# rather than four → one HTTP round-trip, one cache, less coupling.
-# Cached for 5 s so the auto-refresh poller doesn't hammer kubectl.
+# Ce que chaque hôte peut donner et a déjà donné, ce que chaque VM consomme
+# (v1.43.0 : la vue est en blocs HTML, `cluster-map.js`). Un seul appel
+# kubectl groupé ; en cache 5 s pour que le rafraîchissement automatique ne
+# martèle pas le cluster.
 # =============================================================================
 _topology_cache = {}    # cluster → {"ts": float, "data": dict}
 _topology_lock = threading.Lock()
@@ -2281,7 +2280,12 @@ def _build_topology(cluster, kc):
             "size": _k8s_bytes(((ps.get("resources") or {}).get("requests") or {})
                                .get("storage")),
             "storage_class": ps.get("storageClassName")}
-    nodes = [_topology_node(n) for n in by_kind.get("Node", [])]
+    raw_nodes = by_kind.get("Node", [])
+    nodes = [_topology_node(n) for n in raw_nodes]
+    # Harvester refuse d'isoler le dernier nœud disponible : la vue le dit
+    # avant qu'on essaie.
+    for n, raw in zip(nodes, raw_nodes):
+        n["last_available"] = node_maintenance.last_available(raw, raw_nodes)
     vms = [_topology_vm(v, vmi_by_name, pvcs) for v in by_kind.get("VirtualMachine", [])]
     # Ce que chaque hôte a déjà donné : les VMs EN MARCHE qu'il porte.
     by_name = {n["name"]: n for n in nodes}
@@ -3165,9 +3169,9 @@ def api_network_fabric(cluster):
 @app.route("/api/topology/<cluster>")
 @requires_auth
 def api_topology(cluster):
-    """Consolidated topology snapshot consumed by the Aperçu visual
-    viewers (Cytoscape.js). Cached server-side for TOPOLOGY_CACHE_TTL
-    seconds. Pass `?fresh=1` to force a refresh."""
+    """Hosts and VMs for the Overview's Cluster view (`cluster-map.js`).
+    Cached server-side for TOPOLOGY_CACHE_TTL seconds. Pass `?fresh=1` to
+    force a refresh."""
     # Cluster déclaré mais hors tension : répondre tout de suite. Sans cela
     # cet appel attend le délai de `kubectl`, et une bascule de cluster
     # enchaîne ces attentes (15 s mesurées).
@@ -6728,7 +6732,7 @@ def _node_cordon(cluster, node, cordon):
     ctx, err = _node_request(cluster, node)
     if err:
         return err
-    kc, _by, _nodes, obj = ctx
+    kc, _by, nodes, obj = ctx
     if node_maintenance.maintenance_state(obj):
         return jsonify({"error": "in-maintenance",
                         "detail": "the node is in maintenance mode: leave the "
@@ -6738,6 +6742,12 @@ def _node_cordon(cluster, node, cordon):
         return jsonify({"error": "no-change",
                         "detail": "the node is already " + ("cordoned" if cordon
                                                            else "schedulable")}), 409
+    # Le webhook de Harvester le refuserait (constaté sur harv1) : le dire
+    # tout de suite plutôt que lancer une action vouée à l'échec.
+    if cordon and node_maintenance.last_available(obj, nodes):
+        return jsonify({"error": "last-available-node",
+                        "detail": "Harvester refuses to cordon the last available node: "
+                                  "another node must stay schedulable"}), 409
     step = "cordon" if cordon else "uncordon"
     action_id = track_action(f"node-{step}:{node}", cluster, _node_patch_runner,
                              kc, node, {"spec": {"unschedulable": cordon}}, step)

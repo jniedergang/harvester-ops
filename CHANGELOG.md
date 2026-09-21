@@ -4,6 +4,80 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.43.0] - 2026-09-21 - A cluster view that says what each VM consumes
+
+The Cluster view of the Overview was the last Cytoscape graph of the
+console: 130 x 50 pixel boxes carrying a VM name and nothing else. And the
+Cordon and Drain buttons of a node both failed with "not yet implemented".
+
+### Added
+- **The Cluster view in blocks**, like the Fabric, Network and Storage
+  views: one block per host with its state (ready, cordoned, in
+  maintenance), roles and address, and two gauges, vCPU and memory given to
+  its running VMs against what the host can give, flagged past 100 %. Each
+  VM is a card with its vCPU, memory, disks ("20 GiB" or "2 disks ·
+  60 GiB"), networks and first address. Hovering a card or focusing it
+  with the keyboard shows everything else: each disk with its size,
+  storage class and boot order (an empty CD-ROM drive is said empty), each
+  network card with its MAC and all its addresses, the guest OS, the
+  interfaces only the guest knows, the run strategy. Stopped VMs are
+  grouped apart; a filter narrows the cards by name, namespace, address,
+  MAC, network or guest OS. A click opens the VM's actions, as before.
+- **Cordon and uncordon that work**: `POST
+  /api/node/<cluster>/<node>/cordon` and `/uncordon` set
+  `spec.unschedulable`, as Harvester does, as tracked actions.
+- **Harvester's maintenance mode**, asked for the way the Harvester UI does
+  (the `harvesterhci.io/drain-requested` annotation, plus `drain-forced`
+  to force). `GET .../maintenance-check` says beforehand what would happen,
+  with Harvester's own rules read in its source: the single control plane
+  and the busy control plane refusals, the VMs that will migrate, the ones
+  that cannot and why (last healthy replica on this node, not
+  live-migratable, no other node fits their placement rules), the ones
+  marked to be shut down. The view shows this check before any
+  confirmation; forcing sits behind the destructive lock. `POST` and
+  `DELETE .../maintenance` enter and leave it, as tracked actions that
+  follow Harvester's controller for up to ten minutes and report its
+  refusals; leaving restarts the VMs the maintenance shut down. Entering
+  and leaving need the `admin` role.
+- The topology payload carries, per VM, vCPU, guest memory, disks with
+  their size and class, network cards, guest OS; per host, allocatable CPU
+  and memory, what running VMs take, the maintenance state, and whether it
+  is the last available node. Disk sizes come in the same grouped kubectl
+  call.
+
+### Changed
+- **The console no longer ships Cytoscape** (552 KB): `topology.js`, the
+  vendored bundle and the canvas styles are gone, with the i18n keys only
+  they used.
+
+### Fixed
+- **Cordon and Drain did nothing** but fail with "not yet implemented".
+- **Harvester refuses to cordon the last available node**, which its
+  admission webhook enforces (caught on harv1, where the first real cordon
+  ended in `can't enable maintenance mode or cordon on the last available
+  node`). The console now applies the rule beforehand: the button is
+  disabled with the reason, the server answers 409, and the maintenance
+  check says so.
+
+### Internal
+- `web/node_maintenance.py`: Harvester's maintenance and cordon rules as a
+  pure module. `web/static/js/cluster-map.js` replaces `topology.js`;
+  `app.js` mounts the four Overview views the same way.
+- `Icons.dataUri`, used only by the graph, is removed.
+
+### Tests
+- 35 unit tests on the maintenance and cordon rules and endpoints, 15 on
+  the topology data, 9 source-level guards on the view (actions, locks,
+  confirmations, check before request, tooltips, Cytoscape gone), 18 in
+  the browser. Each guard was checked by breaking it.
+- On harv1: the view with real data in French and English, console and
+  editor opened from a card, the webhook refusing to cordon the only node
+  (now refused beforehand with a 409, the node untouched), the single
+  control plane refusing maintenance.
+- **Not verified on a real cluster**: actually cordoning, uncordoning,
+  entering and leaving maintenance. harv1 has a single node, which
+  Harvester will not cordon; they wait for a multi-node test cluster.
+
 ## [1.42.0] - 2026-09-21 - Why a volume is degraded, and what to do
 
 A degraded Longhorn volume has fewer healthy replicas than it asks for: it

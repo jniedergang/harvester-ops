@@ -1282,98 +1282,12 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   font-size: 11px;
 }
 
-/* v1.4.19: interactive topology viewer (Cytoscape.js). Three sub-tabs
-   of Aperçu (Cluster / Network / Storage) share one canvas + detail
-   sidebar. The detail panel shows VM/node/volume facts and per-kind
-   action buttons (safe by default, destructive when unlocked). */
+/* Aperçu : un hôte par sous-onglet (Cluster, Réseau, Fabrique, Stockage),
+   chacun rempli par son module de blocs (v1.43.0 : plus de canevas). */
 .overview-subtab[hidden] { display: none; }
 .topology-host { min-height: 420px; }
-.topology-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 0;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-}
-.topology-toolbar .topology-meta {
-  color: var(--text-dim);
-  font-size: 12px;
-  font-family: var(--font-mono);
-  margin-right: auto;
-}
-.topology-toolbar .topology-zoom-group {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.topology-toolbar .topology-zoom-group .btn {
-  border-radius: 0;
-  border: 0;
-  border-right: 1px solid var(--border);
-  min-width: 30px;
-  padding: 3px 8px;
-  font-size: 14px;
-  line-height: 1;
-}
-.topology-toolbar .topology-zoom-group .btn:last-child { border-right: 0; }
-
-.topology-toolbar .topology-search {
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 5px 10px;
-  font: inherit;
-  font-size: 12px;
-  min-width: 200px;
-}
-.topology-toolbar .topology-search:focus { border-color: var(--accent); }
-.topology-toolbar .topology-search-wrap {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-}
-.topology-toolbar .topology-search-wrap .icon {
-  position: absolute;
-  left: 8px;
-  color: var(--text-dim);
-  pointer-events: none;
-}
-.topology-toolbar .topology-search-wrap .topology-search { padding-left: 26px; }
-.topology-toolbar .topology-fontsize {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: help;
-}
-.topology-toolbar .topology-fontsize-input {
-  width: 90px;
-  accent-color: var(--accent);
-}
-/* Hover tooltip — full VM/node name on a floating div. Positioned via
-   JS at the cursor; appears above all other layers (modals stay above
-   via their own higher z-index). */
-.topology-hover-tip {
-  position: fixed;
-  z-index: 950;
-  pointer-events: none;
-  background: var(--tooltip-bg);
-  color: var(--tooltip-text);
-  padding: 6px 10px;
-  border-radius: 4px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-  max-width: 480px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  box-shadow: var(--shadow-soft);
-}
-.topology-toolbar .topology-unlock {
+/* Le verrou des gestes destructifs, dans la barre d'outils des vues. */
+.topology-unlock {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -1381,41 +1295,6 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
   color: var(--text-dim);
   cursor: pointer;
   user-select: none;
-}
-.topology-canvas-wrap {
-  display: grid;
-  grid-template-columns: 1fr 340px;
-  gap: 12px;
-  min-height: 520px;
-}
-.topology-canvas {
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  min-height: 520px;
-  height: 65vh;
-}
-.topology-detail {
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 14px;
-  overflow-y: auto;
-  max-height: 65vh;
-  font-size: 13px;
-}
-.topology-detail h3 { margin: 0 0 10px; color: var(--accent); font-size: 14px; }
-.topology-detail dl.kv {
-  display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0;
-}
-.topology-detail dl.kv dt { color: var(--text-dim); font-size: 11px; }
-.topology-detail dl.kv dd { margin: 0; color: var(--text); word-break: break-all; }
-.topology-detail .actions {
-  margin-top: 12px; display: flex; flex-wrap: wrap; gap: 6px;
-}
-@media (max-width: 1100px) {
-  .topology-canvas-wrap { grid-template-columns: 1fr; }
-  .topology-detail { max-height: 280px; }
 }
 
 /* Overview status-fetch error banner — shown when /api/status fails so
@@ -4546,3 +4425,81 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
   font-size: 10px; padding: 0 6px; border-radius: 9px; white-space: nowrap;
   border: 1px solid var(--border); color: var(--text-dim);
 }
+
+/* v1.43.0 : la vue Cluster, un bloc par hôte. Deux jauges disent ce que
+   l'hôte peut donner et ce qu'il a déjà donné ; chaque VM est une carte de
+   largeur fixe, en grille, et ce qui n'y tient pas passe dans le calque. */
+.cm-host.warn { border-color: var(--warn); }
+.cm-host-head { cursor: pointer; }
+.cm-host-head:hover, .cm-host-head.selected { background: var(--bg); }
+.cm-host-head.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.cm-host.cm-idle { opacity: .75; }
+.cm-gauges {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 18px; padding: 8px 12px 2px;
+}
+.cm-gauge {
+  display: grid; grid-template-columns: 58px minmax(60px, 1fr);
+  align-items: center; gap: 0 8px; font-size: 11.5px;
+}
+.cm-gauge .sto-bar { margin: 0; }
+.cm-gauge-label { color: var(--text-dim); }
+.cm-gauge-figs { grid-column: 2; font-size: 11px; color: var(--text-dim); }
+.cm-gauge.over .sto-bar-used { background: var(--warn); }
+.cm-gauge.over .cm-gauge-figs { color: var(--warn); }
+.cm-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 8px; padding: 10px 12px 12px;
+}
+.cm-grid > .vsw-empty { grid-column: 1 / -1; }
+.cm-vm {
+  min-width: 0; padding: 6px 9px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg); font-size: 11.5px;
+}
+.cm-vm:hover, .cm-vm:focus-visible, .cm-vm.selected { border-color: var(--accent); }
+.cm-vm.selected { box-shadow: 0 0 0 1px var(--accent); }
+.cm-vm.running .vsw-dot, .cm-pop-head .vsw-dot.on { background: var(--done); }
+.cm-vm-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.cm-vm-head small { color: var(--text-dim); margin-left: auto; }
+.cm-vm-name, .cm-vm-line {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cm-vm-name { font-size: 12.5px; }
+.cm-vm-line { margin-top: 1px; }
+.cm-dim { color: var(--text-dim); }
+.cm-ip { font-family: var(--font-mono); font-size: 11px; }
+.cm-filter { width: 270px; }
+/* Le calque : ancré à la fenêtre (il sort du bloc), jamais sous le curseur
+   pour ne pas voler le survol à la carte. */
+.cm-pop {
+  position: fixed; z-index: 900; width: 320px; max-height: 70vh; overflow: auto;
+  padding: 10px 12px; border-radius: 10px; font-size: 12px; pointer-events: none;
+  border: 1px solid var(--border); background: var(--bg-panel);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .25);
+}
+.cm-pop[hidden] { display: none; }
+.cm-pop-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.cm-pop-head small { color: var(--text-dim); }
+.cm-pop dl.kv, .fabric-detail .cm-pop-head + dl.kv {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 10px; margin: 0 0 8px;
+}
+.cm-pop dl.kv dt { color: var(--text-dim); font-size: 11px; }
+/* Un nom de système se coupe entre les mots, pas au milieu d'un mot. */
+.cm-pop dl.kv dd, .fabric-detail .cm-pop-head + dl.kv dd { margin: 0; word-break: normal; overflow-wrap: anywhere; }
+.cm-pop-title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--text-dim); margin: 6px 0 2px;
+}
+.cm-pop-title.warn { color: var(--warn); }
+.cm-pop-list { list-style: none; margin: 0; padding: 0; }
+.cm-pop-list li {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; padding: 2px 0;
+  border-top: 1px dashed var(--border); overflow-wrap: anywhere;
+}
+.cm-pop-list li:first-child { border-top: 0; }
+.cm-pop-list small { color: var(--text-dim); }
+.cm-pop-guest { font-size: 11px; margin-top: 6px; }
+.cm-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; }
+.cm-maint-box { margin-top: 8px; }
+.cm-force { display: flex; align-items: center; gap: 6px; margin: 8px 0 4px; font-size: 11.5px; }
+.cm-out { font-size: 11.5px; margin-top: 4px; }

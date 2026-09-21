@@ -47,7 +47,7 @@ PICTOGRAPH_RE = re.compile(
 )
 
 ICON_REF_RE = re.compile(
-    r"Icons\.(?:svg|el|dataUri)\(\s*'([A-Za-z0-9]+)'"
+    r"Icons\.(?:svg|el)\(\s*'([A-Za-z0-9]+)'"
     r"|data-icon=\"([A-Za-z0-9]+)\""
     r"|\bicon:\s*'([A-Za-z0-9]+)'"
 )
@@ -225,7 +225,7 @@ def test_lucide_licence_is_vendored():
 
 def test_icons_api_surface():
     exported = ICONS.split("return {", 1)[1].split("}", 1)[0]
-    for fn in ("svg", "el", "dataUri", "mount", "has", "names"):
+    for fn in ("svg", "el", "mount", "has", "names"):
         assert re.search(rf"\b{fn}\b", exported), f"Icons.{fn} not exported"
     assert "data-icon-mounted" in ICONS, "mount() must be idempotent"
 
@@ -243,7 +243,7 @@ def test_i18n_strings_carry_no_icons():
     textContent of translated nodes, which would wipe an inline SVG."""
     src = (JS / "i18n.js").read_text()
     for key in ("overview.tabMetrics", "overview.tabCluster", "overview.tabNetwork",
-                "overview.tabStorage", "topology.searchPlaceholder",
+                "overview.tabStorage", "cluster.filter",
                 "action.cancelled", "topology.lockedHint"):
         values = re.findall(rf"'{re.escape(key)}':\s*'([^']*)'", src)
         assert len(values) == 5, f"{key} should be defined in the 5 dictionaries"
@@ -261,12 +261,3 @@ def test_floating_panel_renders_icon_option():
     assert fp.count("floating-panel-icon") >= 2, (
         "header and minimised chip must both render opts.icon")
     assert "opts.icon" in fp and "p.opts.icon" in fp
-
-
-def test_topology_canvas_uses_data_uri_icons():
-    src = (JS / "topology.js").read_text()
-    assert "'background-image': 'data(icon)'" in src
-    # v1.40.0 : seule la vue Cluster reste un canevas ; volumes, CD-ROM et
-    # switchs sont désormais dessinés en HTML par storage-map.js et netmap.js.
-    for name in ("node", "vm", "paused"):
-        assert f"nodeIcon('{name}')" in src, f"canvas icon {name} missing"
