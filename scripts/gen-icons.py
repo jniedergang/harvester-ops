@@ -127,6 +127,7 @@ MANIFEST = [
         "trash": "trash-2",
         "destroy": "bomb",
         "save": "save",
+        "copy": "copy",
         "download": "download",
         "upload": "upload",
         "preview": "eye",

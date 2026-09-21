@@ -4,6 +4,54 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.37.0] - 2026-09-21 - The kube-ovn side, audited
+
+An operator doubted that column and asked for a deep audit. He was right:
+three things were wrong, and one of them was the worst contresens this view
+can make.
+
+### Fixed
+- **A subnet on the overlay was drawn as if it reached the wire.** A subnet
+  whose provider is `ovn` is encapsulated over the node network and never
+  leaves through a physical uplink. Showing it beside an underlay subnet
+  suggested the opposite. Overlay subnets are now told apart.
+- **The VLAN that links an underlay subnet to its uplink was not even
+  queried.** Without it the chain jumped from the subnet to the card with
+  nothing to explain it. A subnet now reaches the wire through its VLAN,
+  which names the provider network.
+- **The four kube-ovn objects sat on one row.** A subnet belongs to a VPC
+  and goes through a VLAN that names a provider network: they are a
+  hierarchy, and flattening them erased it. They now stack inside the band,
+  from the closest to the copper to the most abstract.
+- **A cluster network hung off the physical card**, an edge that skipped the
+  bridge and the bond, crossed the whole diagram and suggested a second
+  parallel path. It now hangs off its bridge, which a network attachment
+  names in data rather than being guessed from the `<name>-br` convention.
+- **Boxes overlapped** once a band held four ranks: the boxes are 44 px tall
+  and the step between ranks was 26. Band heights now follow the number of
+  ranks they hold.
+- Provider network readiness is read from `status.ready`, which exists
+  directly; reading only the conditions happened to work on one cluster.
+
+### Added
+- **Copy buttons on values worth copying** (addresses, MACs, resource
+  names), in the connection path and in every topology detail panel. An
+  address is meant to be pasted into a ping, a ticket or a switch table;
+  retyping it from a screen is the surest way to be off by one character.
+  The button is an overlay and its gutter is reserved only on rows that
+  have one, so nothing shifts and nothing is covered.
+- A declared edge (a cluster network realised by a bridge, a provider
+  network bound to a card) is drawn dashed: it is not an observed
+  attachment, and reading it as a traffic path has already caused
+  confusion.
+
+### Tests
+- 28 tests on the fabric model and 11 in a real browser, including one that
+  fails if any two boxes overlap and one that checks the four kube-ovn
+  levels stack in the right order.
+- `web/static/js/copy.js` is shared rather than duplicated: the copy
+  affordance is wanted in many places.
+
 ## [1.36.0] - 2026-09-21 - Is this VM on the right network, through the right card?
 
 That question has no answer in any form. It is a chain, from the VM down to

@@ -313,3 +313,93 @@ def test_node_detail_reads_speed_duplex_and_carrier():
     # « -1 Mb/s » au lieu de « pas de lien ».
     assert phys["eno2"]["speed_mbps"] is None
     assert phys["eno2"]["carrier"] == 0
+
+
+# ---------------------------------------------------------------------------
+# v1.37.0 : kube-ovn est une HIÉRARCHIE, pas une rangée
+#
+# Audit demandé par l'exploitant, qui doutait à juste titre de cette colonne.
+# Trois erreurs y ont été trouvées : le VLAN n'était même pas interrogé, les
+# quatre objets étaient posés sur la même couche, et surtout un subnet
+# d'overlay était montré comme s'il sortait par la carte physique.
+# ---------------------------------------------------------------------------
+
+def ovn_items():
+    return [
+        node_obj(),
+        {"kind": "ProviderNetwork", "metadata": {"name": "external"},
+         "spec": {"defaultInterface": "eno2"},
+         "status": {"ready": True, "readyNodes": ["n1"],
+                    "vlans": ["external-vlan"]}},
+        {"kind": "Vlan", "metadata": {"name": "external-vlan"},
+         "spec": {"id": 0, "provider": "external"},
+         "status": {"subnets": ["egress-external"]}},
+        {"kind": "Subnet", "metadata": {"name": "egress-external"},
+         "spec": {"vpc": "ovn-cluster", "cidrBlock": "172.16.0.0/22",
+                  "provider": "external.kube-system.ovn",
+                  "vlan": "external-vlan"}},
+        {"kind": "Subnet", "metadata": {"name": "ovn-default"},
+         "spec": {"vpc": "ovn-cluster", "cidrBlock": "10.54.0.0/16",
+                  "provider": "ovn", "natOutgoing": True}},
+        {"kind": "Vpc", "metadata": {"name": "ovn-cluster"},
+         "status": {"subnets": ["egress-external", "ovn-default"]}},
+    ]
+
+
+def test_the_vlan_that_links_a_subnet_to_its_uplink_is_read(monkeypatch):
+    """Il n'était pas interrogé du tout, donc la chaîne kube-ovn sautait du
+    subnet à la carte physique sans rien pour l'expliquer."""
+    k = build(ovn_items(), monkeypatch)["kubeovn"]
+    vl = k["vlans"][0]
+    assert vl["name"] == "external-vlan"
+    assert vl["provider_network"] == "external"
+    assert vl["subnets"] == ["egress-external"]
+    assert k["subnets"][0]["vlan"] == "external-vlan"
+
+
+def test_an_overlay_subnet_is_not_shown_as_reaching_the_wire(monkeypatch):
+    """C'est le pire contresens possible ici : un subnet d'overlay est
+    encapsulé sur le réseau des nœuds, il ne sort PAS par un uplink."""
+    subs = {s["name"]: s for s in build(ovn_items(), monkeypatch)["kubeovn"]["subnets"]}
+    assert subs["ovn-default"]["overlay"] is True
+    assert subs["ovn-default"]["vlan"] is None
+    assert subs["egress-external"]["overlay"] is False
+
+
+def test_the_four_kube_ovn_objects_are_not_on_one_row(monkeypatch):
+    """Un subnet appartient à un VPC et passe par un VLAN qui désigne un
+    provider network : les aligner effaçait la hiérarchie."""
+    k = build(ovn_items(), monkeypatch)["kubeovn"]
+    ranks = {"pn": k["provider_networks"][0]["rank"],
+             "vlan": k["vlans"][0]["rank"],
+             "subnet": k["subnets"][0]["rank"],
+             "vpc": k["vpcs"][0]["rank"]}
+    # Du plus proche du cuivre au plus abstrait.
+    assert ranks["pn"] < ranks["vlan"] < ranks["subnet"] < ranks["vpc"]
+
+
+def test_the_provider_network_readiness_comes_from_its_status(monkeypatch):
+    """`status.ready` existe directement ; ne lire que les conditions
+    marchait par chance sur ce cluster."""
+    k = build(ovn_items(), monkeypatch)["kubeovn"]
+    pn = k["provider_networks"][0]
+    assert pn["ready"] is True
+    assert pn["vlans"] == ["external-vlan"]
+    assert pn["ready_nodes"] == ["n1"]
+
+
+def test_a_vpc_carries_the_subnets_it_contains(monkeypatch):
+    k = build(ovn_items(), monkeypatch)["kubeovn"]
+    assert k["vpcs"][0]["subnets"] == ["egress-external", "ovn-default"]
+
+
+def test_the_cluster_network_is_linked_to_its_bridge_by_data():
+    """Un cluster network se réalise par un bridge, et c'est un NAD qui le
+    dit. Le déduire du nommage (`<cn>-br`) serait une convention, pas une
+    donnée, et la vue tirait avant cela une arête de la couche 3 à la
+    couche 0 qui sautait le bridge et le bond."""
+    src = (ROOT / "web" / "static" / "js" / "topology.js").read_text()
+    block = src.split("function buildFabricElements", 1)[1][:6000]
+    assert "bridgeOfCn" in block
+    # L'ancienne arête directe vers la carte ne doit pas revenir.
+    assert "fe-vc-" not in block

@@ -224,6 +224,15 @@ const Topology = (() => {
         },
       },
       {
+        // Une arête DÉCLARÉE (un cluster network réalisé par un bridge, un
+        // provider network lié à une carte) n'est pas un rattachement
+        // observé : la pointiller évite de la lire comme un chemin de
+        // trafic, ce qui a déjà prêté à confusion.
+        selector: 'edge[edgeType = "fabric-declared"]',
+        style: { 'line-style': 'dashed', 'line-dash-pattern': [5, 4],
+                 'opacity': 0.75 },
+      },
+      {
         selector: 'edge[edgeType = "replica"]',
         style: { 'line-color': '#4aa8d8', 'line-style': 'dashed' },
       },
@@ -847,7 +856,8 @@ const Topology = (() => {
       color: opts.color, border: opts.border,
       shape: opts.shape || 'round-rectangle',
       width: opts.width || 150, height: opts.height || 44,
-      layer: opts.layer, fabric: opts.fabric || 'classic',
+      layer: opts.layer, rank: opts.rank || 0,
+      fabric: opts.fabric || 'classic',
       raw: opts.raw || {},
     }) };
   }
@@ -900,58 +910,113 @@ const Topology = (() => {
           raw: { count: mine.length, fabric: fab } }));
     });
 
+    // Un cluster network se RÉALISE par un bridge, et c'est un NAD qui le
+    // dit : il porte à la fois `clusternetwork` et le nom du bridge. On lit
+    // donc le lien dans la donnée au lieu de le déduire du nommage
+    // (`<cn>-br`), qui n'est qu'une convention.
+    const bridgeOfCn = {};
+    (data.networks || []).forEach(nw => {
+      if (nw.cluster_network && nw.bridge) bridgeOfCn[nw.cluster_network] = nw.bridge;
+    });
+    // Les cartes et le mode d'agrégation déclarés par la VlanConfig sont
+    // portés PAR le cluster network, pas dessinés en arête : une arête de la
+    // couche 3 vers la couche 0 sautait le bridge et le bond, traversait
+    // tout le schéma et laissait croire à un second chemin parallèle.
+    const vcOfCn = {};
+    (data.vlan_configs || []).forEach(vc => { vcOfCn[vc.cluster_network] = vc; });
+
     (data.cluster_networks || []).forEach(cn => {
+      const vc = vcOfCn[cn.name] || {};
       els.push(fabricNode('fab-cn-' + cn.name, cn.name, 'fab-abstract',
         { icon: 'network', layer: 3, fabric: 'classic', width: 160,
-          color: '#1f4a33', border: '#4ad88a', raw: cn }));
-    });
-    // Une VlanConfig rattache des cartes à un cluster network : c'est la
-    // seule source qui relie les deux, donc on la dessine comme un lien.
-    (data.vlan_configs || []).forEach(vc => {
-      (vc.nics || []).forEach(nic => {
-        (data.nodes || []).forEach(n => {
-          if (!links.some(l => l.node === n.name && l.name === nic)) return;
-          els.push({ group: 'edges', data: {
-            id: 'fe-vc-' + vc.name + '-' + n.name + '-' + nic,
-            source: 'fab-cn-' + vc.cluster_network,
-            target: idOf(n.name, nic),
-            label: vc.bond_mode || '', edgeType: 'fabric-declared' } });
-        });
+          color: '#1f4a33', border: '#4ad88a',
+          fullName: cn.name + (vc.nics ? ' (' + vc.nics.join(', ') + ')' : ''),
+          raw: Object.assign({}, cn, {
+            uplink_nics: vc.nics, bond_mode: vc.bond_mode, mtu: vc.mtu,
+            vlan_config: vc.name, bridge: bridgeOfCn[cn.name] }) }));
+      const br = bridgeOfCn[cn.name];
+      if (!br) return;
+      (data.nodes || []).forEach(n => {
+        if (!links.some(l => l.node === n.name && l.name === br)) return;
+        els.push({ group: 'edges', data: {
+          id: 'fe-cn-' + cn.name + '-' + n.name,
+          source: 'fab-cn-' + cn.name, target: idOf(n.name, br),
+          edgeType: 'fabric-declared' } });
       });
     });
 
     const ovn = data.kubeovn || {};
+    // kube-ovn est une HIÉRARCHIE, pas une rangée : le provider network
+    // touche le matériel, un VLAN le découpe, un subnet porte les adresses,
+    // un VPC regroupe les subnets. `rank` les empile dans la bande, du plus
+    // proche du cuivre au plus abstrait.
     (ovn.vpcs || []).forEach(v => {
       els.push(fabricNode('fab-vpc-' + v.name, v.name, 'fab-abstract',
-        { icon: 'network', layer: 3, fabric: 'ovn', width: 150,
-          color: '#1f3e5b', border: '#4aa8d8', raw: v }));
+        { icon: 'network', layer: 3, rank: 3, fabric: 'ovn', width: 150,
+          color: '#1f3e5b', border: '#4aa8d8',
+          fullName: v.name + ' (' + (v.subnets || []).length + ' subnets)',
+          raw: v }));
+    });
+    (ovn.vlans || []).forEach(vl => {
+      els.push(fabricNode('fab-vlan-' + vl.name, vl.name, 'fab-abstract',
+        { icon: 'switch', layer: 3, rank: 1, fabric: 'ovn', width: 150,
+          color: '#1f3e5b', border: '#4aa8d8',
+          fullName: vl.name + ' (VLAN ' + vl.id + ')', raw: vl }));
+      if (vl.provider_network) {
+        els.push({ group: 'edges', data: {
+          id: 'fe-vlan-pn-' + vl.name, source: 'fab-vlan-' + vl.name,
+          target: 'fab-pn-' + vl.provider_network,
+          edgeType: 'fabric-declared' } });
+      }
     });
     (ovn.provider_networks || []).forEach(pn => {
       els.push(fabricNode('fab-pn-' + pn.name, pn.name, 'fab-abstract',
-        { icon: 'network', layer: 3, fabric: 'ovn', width: 150,
+        { icon: 'network', layer: 3, rank: 0, fabric: 'ovn', width: 150,
           color: pn.ready ? '#1f3e5b' : '#4a3a1f',
           border: pn.ready ? '#4aa8d8' : '#d8a84a',
           fullName: pn.name + ' -> ' + (pn.default_interface || '?'),
           raw: pn }));
       (data.nodes || []).forEach(n => {
         if (!pn.default_interface) return;
-        if (!links.some(l => l.node === n.name && l.name === pn.default_interface)) return;
+        const nic = links.find(l => l.node === n.name
+                                 && l.name === pn.default_interface);
+        if (!nic) return;
+        // Viser le MAÎTRE de la carte quand il est connu : sinon l'arête
+        // va de la couche 3 à la couche 0, saute le switch et traverse
+        // tout le schéma, exactement ce qu'on vient de corriger côté
+        // classique. Sans maître rapporté, on garde la carte : c'est ce
+        // que le CRD déclare, et mieux vaut une arête longue qu'un lien
+        // inventé vers un bridge qu'on n'a pas vu.
+        const target = nic.master || pn.default_interface;
         els.push({ group: 'edges', data: {
           id: 'fe-pn-' + pn.name + '-' + n.name,
           source: 'fab-pn-' + pn.name,
-          target: idOf(n.name, pn.default_interface),
+          target: idOf(n.name, target),
           edgeType: 'fabric-declared' } });
       });
     });
     (ovn.subnets || []).forEach(sn => {
+      // Un subnet d'OVERLAY est encapsulé sur le réseau des nœuds : il ne
+      // sort PAS par un uplink physique. Le distinguer évite le pire des
+      // contresens de cette vue, croire qu'il passe par la carte.
       els.push(fabricNode('fab-sn-' + sn.name, sn.name, 'fab-abstract',
-        { icon: 'storage', layer: 3, fabric: 'ovn', width: 170,
-          color: '#1f3e5b', border: '#4aa8d8',
-          fullName: sn.name + ' ' + (sn.cidr || ''), raw: sn }));
+        { icon: 'storage', layer: 3, rank: 2, fabric: 'ovn', width: 170,
+          color: sn.overlay ? '#2a2f3a' : '#1f3e5b',
+          border: sn.overlay ? '#8a93a6' : '#4aa8d8',
+          fullName: sn.name + ' ' + (sn.cidr || '')
+                    + (sn.overlay ? ' (overlay)' : ''),
+          raw: sn }));
       if (sn.vpc) {
         els.push({ group: 'edges', data: {
           id: 'fe-sn-' + sn.name, source: 'fab-sn-' + sn.name,
           target: 'fab-vpc-' + sn.vpc, edgeType: 'fabric-declared' } });
+      }
+      // Un subnet d'underlay descend vers le matériel PAR SON VLAN, pas en
+      // sautant directement sur la carte.
+      if (sn.vlan) {
+        els.push({ group: 'edges', data: {
+          id: 'fe-sn-vlan-' + sn.name, source: 'fab-sn-' + sn.name,
+          target: 'fab-vlan-' + sn.vlan, edgeType: 'fabric-declared' } });
       }
     });
 
@@ -983,25 +1048,64 @@ const Topology = (() => {
   // Empilement : couche 0 EN BAS. En Cytoscape l'axe y descend, donc la
   // couche basse porte le plus grand y.
   function applyFabricLayout(cy) {
-    const bandH = 110, colGap = 40, cellW = 200, leftPad = 60;
+    const rowH = 64, colGap = 40, cellW = 200, leftPad = 60, topPad = 60;
     const maxLayer = Math.max(...FABRIC_LAYERS);
+
+    // Largeur d'une colonne : la bande la plus chargée commande, sinon les
+    // deux fabriques se chevauchent horizontalement.
     let widest = 1;
     FABRIC_LAYERS.forEach(layer => {
       ['classic', 'ovn'].forEach(fab => {
-        const n = cy.nodes().filter(x => x.data('layer') === layer
-                                      && x.data('fabric') === fab).length;
-        widest = Math.max(widest, n);
+        const byRank = new Map();
+        cy.nodes().filter(x => x.data('layer') === layer
+                            && x.data('fabric') === fab)
+          .forEach(n => {
+            const r = n.data('rank') || 0;
+            byRank.set(r, (byRank.get(r) || 0) + 1);
+          });
+        byRank.forEach(v => { widest = Math.max(widest, v); });
       });
     });
     const colWidth = widest * cellW + colGap;
+
+    // Hauteur de CHAQUE bande selon le nombre de rangs qu'elle contient :
+    // kube-ovn en loge quatre en couche 3 (provider network, VLAN, subnet,
+    // VPC). Une hauteur fixe les faisait se chevaucher, les boîtes étant
+    // plus hautes que le pas entre rangs.
+    const ranksOf = (layer) => {
+      const rs = new Set();
+      cy.nodes().filter(x => x.data('layer') === layer)
+        .forEach(n => rs.add(n.data('rank') || 0));
+      return rs.size ? [...rs].sort((a, b) => a - b) : [0];
+    };
+    const bandTop = {};
+    let cursor = topPad;
+    // De la couche HAUTE vers la basse : la couche 0 doit finir en bas.
+    [...FABRIC_LAYERS].sort((a, b) => b - a).forEach(layer => {
+      bandTop[layer] = cursor;
+      cursor += Math.max(1, ranksOf(layer).length) * rowH + 26;
+    });
+
     FABRIC_LAYERS.forEach(layer => {
-      const y = (maxLayer - layer) * bandH + 60;
+      // Dans une bande, le rang le plus proche du matériel est le plus BAS.
+      const ranks = ranksOf(layer);
+      const yOfRank = {};
+      ranks.forEach((r, i) => {
+        yOfRank[r] = bandTop[layer] + (ranks.length - 1 - i) * rowH;
+      });
       ['classic', 'ovn'].forEach((fab, fi) => {
         const nodes = cy.nodes()
           .filter(x => x.data('layer') === layer && x.data('fabric') === fab)
-          .sort((a, b) => a.data('label').localeCompare(b.data('label')));
+          .sort((a, b) => (a.data('rank') - b.data('rank'))
+                          || a.data('label').localeCompare(b.data('label')));
         const baseX = leftPad + fi * colWidth;
-        nodes.forEach((n, i) => n.position({ x: baseX + i * cellW, y }));
+        const used = new Map();
+        nodes.forEach(n => {
+          const r = n.data('rank') || 0;
+          const col = used.get(r) || 0;
+          used.set(r, col + 1);
+          n.position({ x: baseX + col * cellW, y: yOfRank[r] });
+        });
       });
     });
     cy.fit(undefined, 40);
@@ -1168,6 +1272,18 @@ const Topology = (() => {
     const sidebar = currentHost && currentHost.querySelector('.topology-detail');
     if (!sidebar) return;
     sidebar.innerHTML = renderDetail(d);
+    // Poser les boutons de copie APRÈS coup, sur les valeurs qui le
+    // méritent : les ajouter dans chaque gabarit de détail voudrait dire
+    // les répéter dans les cinq (nœud, VM, volume, réseau, fabrique) et en
+    // oublier un au premier ajout.
+    if (window.CopyTo) {
+      sidebar.querySelectorAll('dd').forEach(dd => {
+        const text = dd.textContent.trim();
+        if (!CopyTo.worth(text) || dd.querySelector('[data-copy]')) return;
+        dd.insertAdjacentHTML('beforeend', CopyTo.button(text));
+      });
+      CopyTo.wire(sidebar);
+    }
     sidebar.scrollTop = 0;
     sidebar.querySelectorAll('[data-act]').forEach(btn => {
       btn.addEventListener('click', () => doAction(btn.dataset.act, d));

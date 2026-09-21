@@ -2290,6 +2290,9 @@ FABRIC_KINDS = [
     "provider-networks.kubeovn.io",
     "subnets.kubeovn.io",
     "vpcs.kubeovn.io",
+    # Le maillon qui relie un subnet d'UNDERLAY à son provider network.
+    # Sans lui, la chaîne kube-ovn saute du subnet à la carte physique.
+    "vlans.kubeovn.io",
 ]
 
 # Un maître dont le nom commence par là relève d'Open vSwitch, pas d'un
@@ -2461,31 +2464,60 @@ def _build_fabric(cluster, kc):
             "layer": 4,
         })
 
+    # Les trois objets kube-ovn ne sont PAS du même niveau : un subnet
+    # appartient à un VPC, et un subnet d'underlay passe par un VLAN qui
+    # désigne un provider network. Les aligner sur une même rangée effaçait
+    # la hiérarchie. `rank` ordonne à l'intérieur de la bande, du plus près
+    # du matériel au plus abstrait.
     for pn in by_kind.get("ProviderNetwork", []):
-        conds = (pn.get("status") or {}).get("conditions") or []
+        st = pn.get("status") or {}
+        conds = st.get("conditions") or []
         out["kubeovn"]["provider_networks"].append({
             "name": pn["metadata"]["name"],
             "default_interface": (pn.get("spec") or {}).get("defaultInterface"),
-            "ready": any(c.get("type") == "Ready" and c.get("status") == "True"
-                         for c in conds),
-            "layer": 3,
+            "ready": bool(st.get("ready")) or any(
+                c.get("type") == "Ready" and c.get("status") == "True"
+                for c in conds),
+            "ready_nodes": st.get("readyNodes") or [],
+            "vlans": st.get("vlans") or [],
+            "layer": 3, "rank": 0,
         })
-    for vpc in by_kind.get("Vpc", []):
-        out["kubeovn"]["vpcs"].append({"name": vpc["metadata"]["name"], "layer": 3})
+    for vl in by_kind.get("Vlan", []):
+        spec = vl.get("spec") or {}
+        out["kubeovn"].setdefault("vlans", []).append({
+            "name": vl["metadata"]["name"],
+            "id": spec.get("id"),
+            "provider_network": spec.get("provider"),
+            "subnets": (vl.get("status") or {}).get("subnets") or [],
+            "layer": 3, "rank": 1,
+        })
     for sn in by_kind.get("Subnet", []):
         spec = sn.get("spec") or {}
         st = sn.get("status") or {}
+        provider = spec.get("provider")
         out["kubeovn"]["subnets"].append({
             "name": sn["metadata"]["name"],
             "vpc": spec.get("vpc"),
             "cidr": spec.get("cidrBlock"),
             "gateway": spec.get("gateway"),
             "nat": bool(spec.get("natOutgoing")),
-            "provider": spec.get("provider"),
+            "provider": provider,
             "vlan": spec.get("vlan"),
             "available_ips": st.get("v4availableIPs"),
-            "layer": 3,
+            # `provider: ovn` = subnet d'OVERLAY : il est encapsulé sur le
+            # réseau des nœuds et NE SORT PAS par un uplink physique. Le
+            # montrer au même niveau qu'un subnet d'underlay laissait croire
+            # le contraire, ce qui est le pire des contresens ici.
+            "overlay": provider in (None, "", "ovn"),
+            "layer": 3, "rank": 2,
         })
+    for vpc in by_kind.get("Vpc", []):
+        out["kubeovn"]["vpcs"].append({
+            "name": vpc["metadata"]["name"],
+            "subnets": (vpc.get("status") or {}).get("subnets") or [],
+            "layer": 3, "rank": 3,
+        })
+    out["kubeovn"].setdefault("vlans", [])
     return out
 
 

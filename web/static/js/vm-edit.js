@@ -1271,11 +1271,14 @@ const VMEdit = (() => {
   // un écart entre les deux est précisément ce qu'on cherche.
   // ---------------------------------------------------------------------
   function chainBox(kind, title, lines, cls) {
+    const copy = (v) => (window.CopyTo ? CopyTo.button(v) : '');
     const body = lines.filter(Boolean)
-      .map(([k, v]) => `<div><span>${esc(k)}</span> <b>${esc(v)}</b></div>`)
+      .map(([k, v]) => `<div><span>${esc(k)}</span> <b>${esc(v)}</b>`
+                       + `${copy(v)}</div>`)
       .join('');
     return `<div class="netpath-box ${cls || ''}" data-kind="${esc(kind)}">`
-      + `<header>${Icons.svg(kind, { size: 13 })} ${esc(title)}</header>`
+      + `<header>${Icons.svg(kind, { size: 13 })} ${esc(title)}`
+      + `${copy(title)}</header>`
       + `<div class="netpath-kv">${body}</div></div>`;
   }
 
@@ -1370,6 +1373,8 @@ const VMEdit = (() => {
   }
 
   function wireNetPathTools(sectionEl, cluster, namespace, name, d) {
+    if (window.CopyTo) CopyTo.wire(sectionEl);
+
     sectionEl.querySelectorAll('[data-netpath-port]').forEach(btn => {
       btn.addEventListener('click', async () => {
         const out = btn.parentElement.querySelector('.netpath-out');

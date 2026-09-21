@@ -218,3 +218,93 @@ def test_the_summary_line_counts_what_this_view_shows(context, flask_server):
     assert "links" in meta and "networks" in meta
     assert "undefined" not in meta
     assert not errors
+
+
+# ---------------------------------------------------------------------------
+# v1.37.0 : kube-ovn loge quatre niveaux dans la couche 3
+# ---------------------------------------------------------------------------
+
+OVN = dict(FABRIC, kubeovn={
+    "provider_networks": [{"name": "external", "default_interface": "eno2",
+                           "ready": True, "ready_nodes": ["n1.lo"],
+                           "vlans": ["external-vlan"], "layer": 3, "rank": 0}],
+    "vlans": [{"name": "external-vlan", "id": 0,
+               "provider_network": "external",
+               "subnets": ["egress-external"], "layer": 3, "rank": 1}],
+    "subnets": [
+        {"name": "egress-external", "vpc": "ovn-cluster",
+         "cidr": "172.16.0.0/22", "gateway": "172.16.0.1", "nat": False,
+         "provider": "external.kube-system.ovn", "vlan": "external-vlan",
+         "available_ips": 6, "overlay": False, "layer": 3, "rank": 2},
+        {"name": "ovn-default", "vpc": "ovn-cluster", "cidr": "10.54.0.0/16",
+         "gateway": "10.54.0.1", "nat": True, "provider": "ovn", "vlan": None,
+         "available_ips": 65000, "overlay": True, "layer": 3, "rank": 2}],
+    "vpcs": [{"name": "ovn-cluster",
+              "subnets": ["egress-external", "ovn-default"],
+              "layer": 3, "rank": 3}],
+})
+
+
+def boxes(page):
+    return page.evaluate("""() => { const cy = window.Topology._cy();
+      if (!cy) return []; return cy.nodes().map(n => ({
+        l: n.data('label'), x: n.position('x'), y: n.position('y'),
+        w: n.data('width'), h: n.data('height'), rank: n.data('rank') })); }""")
+
+
+def test_no_two_boxes_sit_on_top_of_each_other(context, flask_server):
+    """Quatre rangs dans une bande de hauteur fixe se chevauchaient : les
+    boîtes font 44 px et le pas n'en faisait que 26."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    ns = boxes(page)
+    assert ns, "rien dessiné"
+    over = [(a["l"], b["l"]) for i, a in enumerate(ns) for b in ns[i + 1:]
+            if abs(a["x"] - b["x"]) < (a["w"] + b["w"]) / 2 - 4
+            and abs(a["y"] - b["y"]) < (a["h"] + b["h"]) / 2 - 4]
+    assert not over, f"boîtes superposées : {over}"
+
+
+def test_the_kube_ovn_levels_stack_in_the_right_order(context, flask_server):
+    """Du plus proche du cuivre au plus abstrait : provider network, VLAN,
+    subnet, VPC. Les aligner effaçait la hiérarchie."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    pos = {b["l"]: b["y"] for b in boxes(page)}
+    assert pos["external"] > pos["external-vlan"] > pos["egress-external"] \
+        > pos["ovn-cluster"], pos
+
+
+def test_an_overlay_subnet_is_told_apart(context, flask_server):
+    """Il ne sort pas par un uplink physique : le montrer comme les autres
+    est le pire contresens de cette vue."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    colors = page.evaluate("""() => { const cy = window.Topology._cy();
+      const g = l => cy.nodes().filter(n => n.data('label') === l)[0].data('color');
+      return { overlay: g('ovn-default'), underlay: g('egress-external') }; }""")
+    assert colors["overlay"] != colors["underlay"]
+
+
+def test_a_subnet_reaches_the_wire_through_its_vlan(context, flask_server):
+    """Et non en sautant directement sur la carte."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    edges = page.evaluate("""() => { const cy = window.Topology._cy();
+      const l = id => cy.getElementById(id).data('label');
+      return cy.edges().map(e => l(e.data('source')) + '>' + l(e.data('target'))); }""")
+    assert "egress-external>external-vlan" in edges
+    assert "external-vlan>external" in edges
+    assert not any(e.startswith("egress-external>eno2") for e in edges)
+
+
+def test_the_cluster_network_hangs_from_its_bridge(context, flask_server):
+    """Pas de la carte physique : l'arête sautait le bridge et le bond,
+    traversait tout le schéma, et laissait croire à un second chemin."""
+    page = context.new_page()
+    open_fabric(page, flask_server["base_url"], fabric=OVN)
+    edges = page.evaluate("""() => { const cy = window.Topology._cy();
+      const l = id => cy.getElementById(id).data('label');
+      return cy.edges().map(e => l(e.data('source')) + '>' + l(e.data('target'))); }""")
+    assert "mgmt>mgmt-br" in edges
+    assert "mgmt>enp1s0" not in edges

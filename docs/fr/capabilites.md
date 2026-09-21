@@ -171,7 +171,11 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   boîte avec leur nombre. Deux colonnes, parce que deux fabriques coexistent
   au-dessus des cartes et que sur un vrai cluster elles n'utilisent même pas
   la même. Un lien mort ou un rattachement non résolu saute aux yeux par sa
-  couleur. Cliquer une carte montre ce que le cluster sait, et à la demande
+  couleur, un subnet d'overlay se distingue de celui qui atteint vraiment
+  le cuivre, et les niveaux kube-ovn (provider network, VLAN, subnet, VPC)
+  s'empilent dans l'ordre au lieu de partager une rangée. Une arête
+  pointillée est une déclaration, pas un rattachement observé. Cliquer une
+  carte montre ce que le cluster sait, et à la demande
   ce que seul le nœud sait (MTU, mode de bond, compteurs), cherché à ce
   moment-là et pas à chaque rendu.
   Harvester ne publie pas ses bridges Open vSwitch, donc le côté kube-ovn

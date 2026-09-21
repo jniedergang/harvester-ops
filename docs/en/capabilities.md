@@ -156,7 +156,11 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   the workload ports folded into one box with their count. Two columns,
   because two fabrics coexist above the cards and on a real cluster they do
   not even share the same one. A dead link or an unresolved attachment
-  stands out by colour. Clicking a card shows what the cluster knows, and
+  stands out by colour, an overlay subnet is told apart from one that
+  really reaches the wire, and the kube-ovn levels (provider network, VLAN,
+  subnet, VPC) stack in order instead of sharing a row. A dashed edge is a
+  declaration, not an observed attachment. Clicking a card shows what the
+  cluster knows, and
   on demand what only the node knows (MTU, bond mode, traffic counters),
   fetched then and not on every render.
   Harvester does not publish its Open vSwitch bridges, so the kube-ovn side
