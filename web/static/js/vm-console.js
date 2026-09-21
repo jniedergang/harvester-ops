@@ -37,6 +37,7 @@ const VMConsole = (() => {
     const panelId = `vm-console-${cluster}-${namespace}-${name}`;
     const state = {
       rfb: null, closed: false, retries: 0, retryTimer: null, scaled: true,
+      statusTimer: null,
     };
 
     // --- panel body -------------------------------------------------------
@@ -83,7 +84,55 @@ const VMConsole = (() => {
     function setStatus(stateName, text) {
       dotEl.dataset.state = stateName;
       statusEl.textContent = text;
-      reconnectBtn.hidden = stateName !== 'failed';
+      reconnectBtn.hidden = !(stateName === 'failed' || stateName === 'taken');
+      // « Reprendre la main » quand un autre client a pris l'écran : le mot
+      // dit ce que le clic va faire à l'autre.
+      reconnectBtn.textContent = stateName === 'taken'
+        ? tr('console.takeBack', 'Take it back')
+        : tr('console.reconnect', 'Reconnect');
+      reconnectBtn.dataset.tip = stateName === 'taken'
+        ? tr('console.takeBackTip', 'Reconnect: the other client loses the display, KubeVirt allows only one')
+        : tr('console.reconnectTip', 'Retry the console connection');
+    }
+
+    // La console est PARTAGÉE : tous les navigateurs d'une VM passent par une
+    // seule connexion côté serveur (KubeVirt n'en accepte qu'une). On dit
+    // avec qui, pour qu'on sache qu'un autre peut taper en même temps.
+    async function fetchStatus() {
+      try {
+        const r = await fetch(`/api/vm/${cluster}/${namespace}/${name}/console-status`);
+        return r.ok ? await r.json() : null;
+      } catch { return null; }
+    }
+
+    async function showViewers() {
+      if (state.closed || !state.rfb || document.hidden) return;
+      const st = await fetchStatus();
+      if (!st || !state.rfb || state.closed) return;
+      const names = (st.viewers || []).filter(Boolean);
+      let text = tr('console.connected', 'Connected');
+      if (st.count > 1) {
+        text += ' · ' + tr('console.sharedWith', 'shared by {n} viewers', { n: st.count })
+          + (names.length ? ' (' + [...new Set(names)].join(', ') + ')' : '');
+      }
+      setStatus('connected', text);
+    }
+
+    // Quand un collègue a repris la main depuis cette console, la connexion
+    // partagée est de nouveau là : la rejoindre n'éjecte personne, on le
+    // fait donc sans attendre de clic. Tant que personne ne l'a reprise, on
+    // ne touche à rien, pour ne pas voler l'écran au client extérieur.
+    function watchForReturn() {
+      clearInterval(state.statusTimer);
+      state.statusTimer = setInterval(async () => {
+        if (state.closed || state.rfb || document.hidden) return;
+        const st = await fetchStatus();
+        if (st && st.count > 0 && !state.rfb && !state.closed) {
+          clearInterval(state.statusTimer);
+          state.retries = 0;
+          connectOnce();
+        }
+      }, 5000);
     }
 
     // --- connection loop --------------------------------------------------
@@ -132,14 +181,30 @@ const VMConsole = (() => {
       rfb.addEventListener('connect', () => {
         state.retries = 0;
         setStatus('connected', tr('console.connected', 'Connected'));
+        showViewers();
+        clearInterval(state.statusTimer);
+        state.statusTimer = setInterval(showViewers, 10000);
         // Re-apply after layout: set before the panel had dimensions, the
         // initial scale computation can run against a 0-sized container.
         applyScaleMode();
         rfb.focus();
       });
-      rfb.addEventListener('disconnect', () => {
+      rfb.addEventListener('disconnect', async () => {
         state.rfb = null;
+        clearInterval(state.statusTimer);
         if (state.closed) return;
+        // Un AUTRE client a pris l'écran (la console d'Harvester, une autre
+        // instance) : se reconnecter aussitôt l'éjecterait à son tour, et
+        // les deux se reprendraient l'écran en boucle. On le dit, et on
+        // laisse l'exploitant choisir.
+        const st = await fetchStatus();
+        if (state.closed) return;
+        if (st && st.last_close && st.last_close.reason === 'taken') {
+          setStatus('taken', tr('console.taken',
+            'Another console took this display (for example the Harvester UI): KubeVirt allows only one.'));
+          watchForReturn();
+          return;
+        }
         setStatus('retrying', tr('console.retrying',
           'Waiting for the VM display… (attempt {n})',
           { n: state.retries + 1 }));
@@ -193,6 +258,7 @@ const VMConsole = (() => {
     }
 
     reconnectBtn.addEventListener('click', () => {
+      clearInterval(state.statusTimer);
       state.retries = 0;
       connectOnce();
     });
@@ -233,6 +299,7 @@ const VMConsole = (() => {
       onClose: () => {
         state.closed = true;
         clearTimeout(state.retryTimer);
+        clearInterval(state.statusTimer);
         try { if (state.rfb) state.rfb.disconnect(); } catch (e) { /* down */ }
       },
     });

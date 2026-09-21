@@ -4,6 +4,76 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.41.0] - 2026-09-21 - One console, several people
+
+Reported as a console that "blinks" when several people open it. It did,
+and measurably: two browsers on the same VM each connected and dropped 15
+times in 25 seconds.
+
+### Fixed
+- **Two people on the same console kicked each other out in a loop.**
+  KubeVirt accepts a single VNC connection per VM and closes the previous
+  one when another arrives (checked against the cluster directly, without
+  the relay: the first connection is closed with 1005 the moment the
+  second opens). Each console reconnects by itself within 400 ms, so each
+  took the display back from the other, every second. The console now
+  holds ONE connection per VM and shares it between every browser.
+- **The console ignored identity delegation.** Its websocket does not go
+  through kubectl, so the `as`/`as-groups` carried by the delegated
+  kubeconfig never reached it, and the console opened with the toolkit's
+  own rights whatever the delegation said. The connection to KubeVirt now
+  carries `Impersonate-User`/`Impersonate-Group`, and every person joining
+  a console, including one someone else opened, is checked by the cluster
+  under their own identity (`get virtualmachineinstances/vnc`).
+
+### Added
+- **A shared console.** Everyone on a VM sees the same screen and can type
+  and click; the status line says how many people share it, and who when
+  accounts are configured.
+- **The console says when another client took the display** (the Harvester
+  UI, another console instance) instead of taking it back in a loop, and
+  offers **Take it back**. The other browsers of the session rejoin by
+  themselves once someone has taken it back. A VM that restarted or
+  stopped is still reattached automatically, as before: the server tells
+  the cases apart by checking whether the same VM instance is still
+  running.
+- `GET /api/vm/<cluster>/<ns>/<name>/console-status`: who is watching, and
+  why the last shared connection ended.
+
+### Internal
+- `web/vnc_mux.py` speaks RFB on both sides: it answers each browser's
+  handshake locally (replaying the screen size), measures every server
+  message so that a newcomer always joins on a message boundary, replays
+  the cursor and the QEMU keyboard extension acknowledgement to newcomers,
+  and requests a full frame when someone joins. The shared connection uses
+  stateless encodings (Hextile, Raw): Tight and ZRLE keep a compression
+  dictionary from the first frame that a newcomer never saw. The QEMU
+  keyboard extension is kept, so an AZERTY keyboard still types right.
+  The browsers' SetPixelFormat and SetEncodings are absorbed; a browser too
+  slow to keep up is dropped rather than buffered without limit.
+
+### Tests
+- 35 unit tests for the shared console against a fake QEMU and fake
+  browsers: every server and client message measured at every split,
+  stateful encodings refused, one upstream for many browsers, input from
+  all of them forwarded and settings from none, replay to newcomers, join
+  on a message boundary, closing when the last viewer leaves, the loss
+  reason recorded before browsers are told, one dial for simultaneous
+  arrivals, a slow browser dropped.
+- 13 application tests: the identity check at ticket time, the
+  impersonation headers, the loss classification, the status endpoint,
+  the session cap across VMs. 4 browser tests for the console states.
+  Each test was checked to fail when the behaviour it guards is broken.
+- Exercised on harv1: two browsers on rhel9-test for 25 s went from 15
+  drops each to none, with one connection to KubeVirt; text typed in one
+  appeared in both and reached the VM (then erased); the joiner uses the
+  QEMU keyboard extension; an external connection made both consoles stop
+  and say so, **Take it back** reclaimed the display and the other console
+  rejoined by itself; an impersonated identity without rights was refused
+  by the cluster (403) and accepted once given an admin group.
+- Not exercised live: a hard reset of the VM with two consoles open (the
+  reattach path is unchanged, and the classification is unit tested).
+
 ## [1.40.0] - 2026-09-21 - Network and Storage, read the same way
 
 The Fabric view in its vSwitch layout was judged right, and the Network and

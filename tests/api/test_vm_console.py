@@ -192,7 +192,7 @@ def test_ticket_running_vmi_issues_ticket(client, monkeypatch):
 
 def test_ticket_session_cap(client, monkeypatch):
     monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/dev/null")
-    monkeypatch.setattr(wapp, "_vnc_sessions", wapp._VNC_MAX_SESSIONS)
+    monkeypatch.setattr(wapp, "_vnc_viewers", lambda: wapp._VNC_MAX_SESSIONS)
     r = client.post("/api/vm/c1/ns1/vm1/console-ticket")
     assert r.status_code == 429
 

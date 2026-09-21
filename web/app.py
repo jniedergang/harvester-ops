@@ -62,6 +62,7 @@ import yaml
 import markdown
 import y_py as Y
 import pxe_server
+import vnc_mux
 from flask import (
     Flask,
     Response,
@@ -9898,11 +9899,20 @@ from simple_websocket import Client as _WsClient
 log_vnc = logging.getLogger("harvester-ops.vnc")
 
 _VNC_TICKET_TTL = 30          # seconds; consumed once
-_VNC_MAX_SESSIONS = 8         # each relay pins 3-4 werkzeug/reader threads
+# Navigateurs rattachés, toutes VMs confondues. Chaque navigateur tient deux
+# fils (lecture, écriture) ; la connexion partagée d'une VM en tient un.
+_VNC_MAX_SESSIONS = 8
 _VNC_SUBPROTOCOLS = ["plain.kubevirt.io", "binary"]
-_vnc_tickets = {}             # token -> (cluster, namespace, name, expires_at)
+_vnc_tickets = {}             # token -> dict(cluster, namespace, name, expires, user, identity, uid)
 _vnc_lock = threading.Lock()
-_vnc_sessions = 0
+# Pourquoi la dernière connexion partagée d'une VM a été perdue, pour que la
+# console le dise au lieu de se reconnecter en boucle : {clé: {reason, at}}.
+_vnc_last_close = {}
+_VNC_CLOSE_MEMORY = 30        # secondes pendant lesquelles la raison est servie
+
+
+def _vnc_viewers():
+    return vnc_mux.viewers_total()
 
 
 def _kubeconfig_wss(kc_path):
@@ -9968,26 +9978,85 @@ def _vnc_subresource_url(server, namespace, name):
             + namespace + "/virtualmachineinstances/" + name + "/vnc")
 
 
-def _vnc_issue_ticket(cluster, namespace, name):
+def _vnc_upstream_headers(bearer, identity):
+    """En-têtes de la connexion vers KubeVirt.
+
+    Le websocket ne passe pas par kubectl : l'usurpation que porte le
+    kubeconfig délégué (`as`, `as-groups`, v1.32.0) n'y arrivait donc pas,
+    et la console s'ouvrait avec les pleins pouvoirs du toolkit. On la
+    reporte ici, en en-têtes Impersonate-*, que l'API server traite de la
+    même façon."""
+    headers = []
+    if bearer:
+        headers.append(("Authorization", f"Bearer {bearer}"))
+    if identity and identity.get("user"):
+        headers.append(("Impersonate-User", identity["user"]))
+        for g in identity.get("groups") or []:
+            headers.append(("Impersonate-Group", g))
+    return headers
+
+
+def _vnc_issue_ticket(cluster, namespace, name, user="", identity=None, uid=None):
     token = _secrets.token_urlsafe(24)
     now = time.time()
     with _vnc_lock:
         # opportunistic purge of expired tickets
-        for t in [t for t, v in _vnc_tickets.items() if v[3] < now]:
+        for t in [t for t, v in _vnc_tickets.items() if v["expires"] < now]:
             _vnc_tickets.pop(t, None)
-        _vnc_tickets[token] = (cluster, namespace, name, now + _VNC_TICKET_TTL)
+        _vnc_tickets[token] = {"cluster": cluster, "namespace": namespace,
+                               "name": name, "expires": now + _VNC_TICKET_TTL,
+                               "user": user or "", "identity": identity,
+                               "uid": uid}
     return token
 
 
-def _vnc_consume_ticket(token, cluster, namespace, name):
-    """Single-use pop; the ticket must match the exact VM it was issued for."""
+def _vnc_take_ticket(token, cluster, namespace, name):
+    """Single-use pop; the ticket must match the exact VM it was issued for.
+    Rend l'entrée (qui l'a demandé, sous quelle identité), ou None."""
     with _vnc_lock:
         entry = _vnc_tickets.pop(token or "", None)
     if not entry:
-        return False
-    t_cluster, t_ns, t_name, expires = entry
-    return (expires >= time.time()
-            and (t_cluster, t_ns, t_name) == (cluster, namespace, name))
+        return None
+    if entry["expires"] < time.time():
+        return None
+    if (entry["cluster"], entry["namespace"], entry["name"]) != (cluster, namespace, name):
+        return None
+    return entry
+
+
+def _vnc_consume_ticket(token, cluster, namespace, name):
+    return _vnc_take_ticket(token, cluster, namespace, name) is not None
+
+
+def _vnc_classify_loss(cluster, namespace, name, uid):
+    """KubeVirt a fermé la connexion partagée : la VM a-t-elle redémarré, ou
+    un AUTRE client (la console d'Harvester, une autre instance du toolkit)
+    a-t-il pris la place ? KubeVirt n'en accepte qu'un, et sans cette
+    distinction les deux consoles se la reprenaient en boucle."""
+    cfg = load_config()
+    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+               if c["name"] == cluster), None)
+    reason = "lost"
+    if kc:
+        try:
+            r = subprocess.run(
+                ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
+                 "-o", "jsonpath={.status.phase} {.metadata.uid}"],
+                capture_output=True, text=True, timeout=10)
+            parts = (r.stdout or "").split()
+            if r.returncode != 0 or not parts:
+                reason = "vm-stopped"
+            elif parts[0] == "Running" and uid and len(parts) > 1 and parts[1] == uid:
+                reason = "taken"
+            else:
+                reason = "vm-restarted"
+        except (subprocess.TimeoutExpired, OSError):
+            reason = "lost"
+    with _vnc_lock:
+        _vnc_last_close[(cluster, namespace, name)] = {"reason": reason,
+                                                      "at": time.time()}
+    log_vnc.info("console %s/%s/%s lost: %s", cluster, namespace, name, reason)
+    return reason
 
 
 @app.route("/api/vm/<cluster>/<namespace>/<name>/console-ticket", methods=["POST"])
@@ -9998,17 +10067,18 @@ def api_vm_console_ticket(cluster, namespace, name):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    with _vnc_lock:
-        active = _vnc_sessions
+    active = _vnc_viewers()
     if active >= _VNC_MAX_SESSIONS:
         return jsonify({"error": f"too many console sessions open ({active})",
                         "hint": "close an existing console first"}), 429
     r = subprocess.run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
-         "-o", "jsonpath={.status.phase}"],
+         "-o", "jsonpath={.status.phase} {.metadata.uid}"],
         capture_output=True, text=True, timeout=10,
     )
-    phase = (r.stdout or "").strip()
+    parts = (r.stdout or "").split()
+    phase = parts[0] if parts else ""
+    uid = parts[1] if len(parts) > 1 else None
     if r.returncode != 0 or not phase:
         stderr_lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
         detail = stderr_lines[-1] if stderr_lines else "VMI not found"
@@ -10016,7 +10086,20 @@ def api_vm_console_ticket(cluster, namespace, name):
                         "hint": "start the VM first"}), 409
     if phase not in ("Running", "Scheduled"):
         return jsonify({"error": f"VMI phase is {phase}, not Running"}), 409
-    token = _vnc_issue_ticket(cluster, namespace, name)
+    # Chaque navigateur est vérifié par le cluster, sous SA propre identité,
+    # même s'il rejoint une console déjà ouverte par quelqu'un d'autre.
+    identity = current_cluster_identity()
+    if identity:
+        can = subprocess.run(
+            ["kubectl", "--kubeconfig", kc, "auth", "can-i", "get",
+             "virtualmachineinstances", "--subresource=vnc", "-n", namespace],
+            capture_output=True, text=True, timeout=10)
+        if (can.stdout or "").strip() != "yes":
+            return jsonify({"error": "the cluster does not allow your identity "
+                                     "to open this console",
+                            "cluster_user": identity.get("user")}), 403
+    token = _vnc_issue_ticket(cluster, namespace, name, user=current_user(),
+                              identity=identity, uid=uid)
     return jsonify({
         "ticket": token,
         "ws_path": f"/ws/vnc/{cluster}/{namespace}/{name}",
@@ -10024,100 +10107,77 @@ def api_vm_console_ticket(cluster, namespace, name):
     })
 
 
+@app.route("/api/vm/<cluster>/<namespace>/<name>/console-status")
+@requires_auth
+def api_vm_console_status(cluster, namespace, name):
+    """Qui regarde cette console, et pourquoi elle s'est fermée la dernière
+    fois. La console s'en sert pour dire « partagée avec bob » et pour ne
+    pas reprendre en boucle une place qu'un autre client vient de prendre."""
+    key = (cluster, namespace, name)
+    viewers = vnc_mux.sessions().get(key, [])
+    with _vnc_lock:
+        last = _vnc_last_close.get(key)
+    if last and time.time() - last["at"] > _VNC_CLOSE_MEMORY:
+        last = None
+    return jsonify({"viewers": viewers, "count": len(viewers), "last_close": last})
+
+
 @sock.route("/ws/vnc/<cluster>/<namespace>/<name>")
 def ws_vnc(ws, cluster, namespace, name):
-    """Relay RFC 6143 bytes between the browser and the KubeVirt subresource.
+    """Rattache le navigateur à la console PARTAGÉE de la VM (vnc_mux).
 
-    Threading (see the notes-WS lesson at ws_notes): ws.send() is not
-    thread-safe, so each socket has exactly ONE writer — this handler
-    thread writes browser->k8s, a dedicated thread writes k8s->browser.
-    """
-    global _vnc_sessions
+    KubeVirt n'accepte qu'une connexion VNC par VM et ferme la précédente :
+    une connexion par navigateur faisait s'éjecter deux exploitants en
+    boucle. Tous les navigateurs d'une VM passent donc par une seule."""
     # namespace/name are RFC1123-validated by before_request; cluster is not.
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$", cluster):
         ws.close(message="invalid cluster"); return
-    if not _vnc_consume_ticket(request.args.get("ticket"), cluster, namespace, name):
+    entry = _vnc_take_ticket(request.args.get("ticket"), cluster, namespace, name)
+    if not entry:
         log_vnc.warning("rejected /ws/vnc for %s/%s: bad or expired ticket",
                         namespace, name)
         ws.close(message="invalid or expired ticket"); return
-    kc = _kubectl_for_cluster(cluster)
+    cfg = load_config()
+    kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
+               if c["name"] == cluster), None)
     if not kc:
         ws.close(message="unknown cluster"); return
 
-    try:
+    def dial():
         server, sslctx, bearer = _kubeconfig_wss(kc)
-    except Exception as e:
-        log_vnc.error("kubeconfig parse failed for %s: %s", cluster, e)
-        ws.close(message="kubeconfig error"); return
+        headers = _vnc_upstream_headers(bearer, entry.get("identity"))
+        box = {}
 
-    headers = {"Authorization": f"Bearer {bearer}"} if bearer else None
-    dial = {}
+        def _go():
+            try:
+                box["c"] = _WsClient.connect(
+                    _vnc_subresource_url(server, namespace, name),
+                    ssl_context=sslctx, headers=headers or None,
+                    subprotocols=_VNC_SUBPROTOCOLS, ping_interval=20)
+            except Exception as e:      # noqa: BLE001 (reported below)
+                box["e"] = e
+        t = threading.Thread(target=_go, daemon=True, name=f"vnc-dial-{name}")
+        t.start(); t.join(timeout=12)
+        if "c" not in box:
+            raise ConnectionError(str(box.get("e", "timeout")))
+        return box["c"]
 
-    def _dial():
-        try:
-            dial["c"] = _WsClient.connect(
-                _vnc_subresource_url(server, namespace, name),
-                ssl_context=sslctx, headers=headers,
-                subprotocols=_VNC_SUBPROTOCOLS, ping_interval=20,
-            )
-        except Exception as e:          # noqa: BLE001 — reported below
-            dial["e"] = e
+    uid = entry.get("uid")
 
-    t = threading.Thread(target=_dial, daemon=True, name=f"vnc-dial-{name}")
-    t.start(); t.join(timeout=12)
-    upstream = dial.get("c")
-    if upstream is None:
-        log_vnc.error("upstream VNC connect failed for %s/%s: %s",
-                      namespace, name, dial.get("e", "timeout"))
-        ws.close(message="cluster VNC endpoint unreachable"); return
+    def lost(_hub):
+        _vnc_classify_loss(cluster, namespace, name, uid)
 
+    key = (cluster, namespace, name)
     with _vnc_lock:
-        _vnc_sessions += 1
-        metric_vnc_sessions.set(_vnc_sessions)
-    log_vnc.info("console attached: %s/%s (%d active)", namespace, name, _vnc_sessions)
-
-    def _pump_down(k8s_ws, browser_ws):
-        """k8s -> browser. Sole writer of browser_ws."""
-        try:
-            while True:
-                data = k8s_ws.receive(timeout=30)
-                if data is None:
-                    if not k8s_ws.connected:
-                        break
-                    continue        # idle timeout, still connected
-                if isinstance(data, str):
-                    data = data.encode()
-                browser_ws.send(data)
-        except Exception:
-            pass
-        finally:
-            try: browser_ws.close()
-            except Exception: pass
-
-    down = threading.Thread(target=_pump_down, args=(upstream, ws),
-                            daemon=True, name=f"vnc-down-{name}")
-    down.start()
+        _vnc_last_close.pop(key, None)
     try:
-        # browser -> k8s. Sole writer of upstream.
-        while True:
-            data = ws.receive(timeout=30)
-            if data is None:
-                if not ws.connected:
-                    break
-                continue
-            if isinstance(data, str):
-                data = data.encode()
-            upstream.send(data)
-    except Exception:
-        pass
-    finally:
-        try: upstream.close()
+        vnc_mux.attach(key, dial, ws, user=entry.get("user") or "", on_lost=lost)
+    except Exception as e:              # noqa: BLE001
+        log_vnc.error("console %s/%s: upstream unavailable: %s", namespace, name, e)
+        try: ws.close(message="cluster VNC endpoint unreachable")
         except Exception: pass
-        down.join(timeout=5)
-        with _vnc_lock:
-            _vnc_sessions -= 1
-            metric_vnc_sessions.set(_vnc_sessions)
-        log_vnc.info("console detached: %s/%s (%d active)", namespace, name, _vnc_sessions)
+    finally:
+        metric_vnc_sessions.set(_vnc_viewers())
 
 
 # =============================================================================

@@ -110,6 +110,22 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   unique délivrés par un endpoint authentifié ; le kubeconfig doit
   avoir `get virtualmachineinstances/vnc` (vérifié par la matrice de
   permissions).
+  **Plusieurs personnes peuvent utiliser la même console en même temps.**
+  KubeVirt n'accepte qu'une connexion VNC par VM et ferme la précédente
+  quand une autre arrive : la console tient donc une seule connexion par
+  VM et la partage entre tous les navigateurs. Chacun voit le même écran
+  et peut taper et cliquer, et la ligne d'état dit combien de personnes le
+  partagent (et lesquelles, quand des comptes sont configurés). Pour qu'un
+  arrivant puisse rejoindre à tout moment, la connexion partagée utilise
+  des encodages sans état (Hextile, Raw) ; l'extension clavier de QEMU est
+  conservée, donc un clavier non américain comme l'AZERTY tape juste.
+  Quand un autre client extérieur prend l'écran (l'interface Harvester par
+  exemple), la console le dit et s'arrête au lieu de le reprendre en
+  boucle ; **Reprendre la main** se reconnecte à la demande, et les autres
+  consoles de la session rejoignent d'elles-mêmes. Avec la délégation
+  d'identité, chaque personne qui rejoint est vérifiée par le cluster sous
+  sa propre identité (`get virtualmachineinstances/vnc`), et la connexion
+  vers KubeVirt porte l'usurpation.
 - **Édition inline** — modifier CPU / mémoire et la charge cloud-init,
   puis appliquer. **Les disques et interfaces réseau ont des éditeurs
   visuels** (v1.8.0) : une carte par disque/NIC avec des listes

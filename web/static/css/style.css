@@ -2129,6 +2129,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 }
 .vm-console-dot[data-state="connected"] { background: var(--done); }
 .vm-console-dot[data-state="failed"]    { background: var(--error); }
+.vm-console-dot[data-state="taken"]     { background: var(--warn); }
 .vm-console-screen {
   flex: 1;
   min-height: 0;

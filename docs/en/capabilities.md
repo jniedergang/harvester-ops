@@ -101,6 +101,21 @@ Manage KubeVirt virtual machines without leaving the console.
   gated by short-lived single-use tickets issued by an authenticated
   endpoint; the kubeconfig needs `get virtualmachineinstances/vnc`
   (checked by the permissions matrix).
+  **Several people can use the same console at once.** KubeVirt accepts
+  a single VNC connection per VM and closes the previous one when another
+  arrives, so the console holds one connection per VM and shares it
+  between every browser: everyone sees the same screen and can type and
+  click, and the status line says how many people share it (and who,
+  when accounts are configured). To make a newcomer able to join at any
+  moment, the shared connection uses stateless encodings (Hextile, Raw);
+  the QEMU keyboard extension is kept, so a non-US keyboard such as AZERTY
+  still types right. When another client outside the console takes the
+  display (the Harvester UI, for example), the console says so and stops
+  instead of taking it back in a loop; **Take it back** reconnects on
+  demand, and the other consoles of the session rejoin by themselves.
+  With identity delegation on, every person joining is checked by the
+  cluster under their own identity (`get virtualmachineinstances/vnc`),
+  and the connection to KubeVirt carries the impersonation.
 - **Inline edit** — change CPU / memory and the cloud-init payload,
   then apply. **Disks and network interfaces get visual editors**
   (v1.8.0): one card per disk/NIC with dropdowns fed by the live
