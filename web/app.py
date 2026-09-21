@@ -6183,6 +6183,7 @@ def _build_storage_map(cluster, kc):
         claim = claimed.get(key) or {}
         volumes.append({
             "pvc_namespace": meta.get("namespace"), "pvc_name": meta.get("name"),
+            "claim_missing": False,
             "storage_class": spec.get("storageClassName"),
             "phase": (pvc.get("status") or {}).get("phase"),
             "requested": _k8s_bytes(((spec.get("resources") or {})
@@ -6207,12 +6208,22 @@ def _build_storage_map(cluster, kc):
                        and lh_status.get("state") != "attached"),
         })
     # Volume Longhorn sans PVC : reste d'une suppression, ou volume créé à
-    # la main. Montré, jamais proposé à la suppression d'ici.
-    for v in lh_unclaimed:
+    # la main. Montré, jamais proposé à la suppression d'ici. Y compris celui
+    # dont le PVC a DISPARU (Longhorn garde son nom) : partir des seuls PVC
+    # le rendait invisible (relevé sur harv1, `rancher-monitoring-grafana`).
+    pvc_keys = {f"{(p.get('metadata') or {}).get('namespace')}/"
+                f"{(p.get('metadata') or {}).get('name')}"
+                for p in by_kind.get("PersistentVolumeClaim", [])}
+    gone = [v for k, v in lh_by_claim.items() if k not in pvc_keys]
+    for v in lh_unclaimed + gone:
         vs = v.get("spec") or {}
         st = v.get("status") or {}
+        ks = st.get("kubernetesStatus") or {}
         volumes.append({
-            "pvc_namespace": None, "pvc_name": None, "storage_class": None,
+            "pvc_namespace": ks.get("namespace") or None,
+            "pvc_name": ks.get("pvcName") or None,
+            "claim_missing": bool(ks.get("pvcName")),
+            "storage_class": None,
             "phase": None, "requested": None,
             "longhorn": (v.get("metadata") or {}).get("name"),
             "size": _num(vs.get("size")), "actual_size": st.get("actualSize"),
@@ -6237,7 +6248,7 @@ def _build_storage_map(cluster, kc):
             "schedulable_nodes": room["schedulable_nodes"],
             "classes": classes, "disks": room["disks"],
             "volumes": volumes, "vms": vms,
-            "health_summary": _health_summary(health)}
+            "health_summary": _health_summary(volumes)}
 
 
 # =============================================================================
@@ -6418,12 +6429,13 @@ def api_volume_fix(cluster, volume):
                     "params": plan["params"]}), 201
 
 
-def _health_summary(health):
+def _health_summary(volumes):
     """Ce que le bandeau de la vue Stockage résume : combien, et la cause
-    qui revient le plus parmi celles qui demandent d'agir."""
+    qui revient le plus parmi celles qui demandent d'agir. Compté sur les
+    volumes AFFICHÉS, pour que le bandeau ne dise jamais plus que l'écran."""
     counts = {"degraded": 0, "faulted": 0, "at-risk": 0}
     causes = {}
-    for h in health.values():
+    for h in volumes:
         if h["health"] in counts:
             counts[h["health"]] += 1
         for f in h["findings"]:

@@ -446,3 +446,27 @@ def test_a_volume_without_claim_is_diagnosed_too(monkeypatch):
     out = build([sc("harv-rep1"), lh_node(), lone], monkeypatch)
     v = next(x for x in out["volumes"] if x["longhorn"] == "pvc-lone")
     assert v["health"] == "degraded" and v["findings"]
+
+
+def test_a_volume_whose_claim_is_gone_is_still_shown(monkeypatch):
+    """Relevé sur harv1 : `rancher-monitoring-grafana` est un volume Longhorn
+    dont le PVC a été supprimé. La carte partait des PVC et l'omettait :
+    invisible, alors que le résumé le comptait."""
+    gone = lh_volume("pvc-gone", "grafana", ns="mon", replicas=3)
+    out = build([pvc("fine"), sc("harv-rep1"), lh_node(), lh_volume("pvc-ok", "fine"), gone],
+                monkeypatch)
+    v = next(x for x in out["volumes"] if x["longhorn"] == "pvc-gone")
+    assert v["claim_missing"] is True
+    assert (v["pvc_namespace"], v["pvc_name"]) == ("mon", "grafana")
+    assert v["orphan"] is False, "pas de PVC : rien à supprimer par ce chemin"
+    assert v["health"] == "at-risk"
+
+
+def test_the_summary_counts_exactly_what_the_map_shows(monkeypatch):
+    gone = lh_volume("pvc-gone", "grafana", ns="mon", replicas=3)
+    out = build(degraded_cluster() + [gone], monkeypatch)
+    shown = [v["health"] for v in out["volumes"]]
+    s = out["health_summary"]
+    assert s["degraded"] == shown.count("degraded")
+    assert s["at_risk"] == shown.count("at-risk")
+    assert s["faulted"] == shown.count("faulted")

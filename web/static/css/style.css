@@ -4495,3 +4495,54 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
 .sto-disk-facts {
   display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; color: var(--text-dim);
 }
+
+/* v1.42.0 : santé des volumes. Orange : à corriger ou à surveiller ;
+   rouge : plus aucune réplique saine. */
+.sto-health-banner {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px;
+  margin: 0 0 12px; padding: 8px 12px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--warn); font-size: 12.5px;
+}
+.sto-health-banner.critical { border-color: var(--danger); }
+.sto-health-banner b { color: var(--warn); }
+.sto-health-banner.critical b { color: var(--danger); }
+.sto-vol.health-degraded .vsw-dot, .sto-vol.health-at-risk .vsw-dot { background: var(--warn); }
+.sto-vol.health-faulted .vsw-dot { background: var(--danger); }
+.sto-health-tag {
+  font-size: 10px; padding: 0 6px; border-radius: 9px; white-space: nowrap;
+  border: 1px solid var(--warn); color: var(--warn);
+}
+.sto-vol.health-faulted .sto-health-tag { border-color: var(--danger); color: var(--danger); }
+.sto-health {
+  margin: 0 0 12px; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--warn); background: var(--bg);
+}
+.sto-health-head { font-size: 12px; margin-bottom: 6px; }
+.sto-finding { padding: 6px 0 8px; border-top: 1px dashed var(--border); }
+.sto-finding:first-of-type { border-top: 0; }
+.sto-finding-title { font-weight: 600; }
+.sto-finding.sev-critical .sto-finding-title { color: var(--danger); }
+.sto-finding.sev-action .sto-finding-title,
+.sto-finding.sev-watch .sto-finding-title { color: var(--warn); }
+.sto-finding.sev-info .sto-finding-title { color: var(--info, var(--accent)); }
+.sto-finding-facts { font-size: 11.5px; margin: 2px 0; }
+.sto-finding-advice { font-size: 11.5px; color: var(--text-dim); margin: 2px 0 6px; }
+.sto-finding .btn { margin: 2px 0 4px; }
+.sto-rebuild {
+  display: grid; grid-template-columns: auto minmax(60px, 1fr) auto;
+  align-items: center; gap: 8px; font-size: 11px; margin: 2px 0;
+}
+.sto-rebuild .sto-bar { margin: 0; }
+.sto-kubectl { font-size: 11px; margin-top: 4px; }
+.sto-kubectl summary { cursor: pointer; color: var(--text-dim); }
+.sto-kubectl code {
+  display: block; margin-top: 4px; padding: 6px 8px; border-radius: 6px;
+  background: var(--bg-elev); white-space: pre-wrap; word-break: break-all;
+  font-family: var(--font-mono);
+}
+.sto-kubectl .vsw-val { display: block; }
+.sto-fix-out { font-size: 11.5px; margin-top: 4px; }
+.sto-claim-gone {
+  font-size: 10px; padding: 0 6px; border-radius: 9px; white-space: nowrap;
+  border: 1px solid var(--border); color: var(--text-dim);
+}

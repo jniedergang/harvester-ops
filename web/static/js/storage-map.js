@@ -97,11 +97,14 @@ const StorageMap = (() => {
     // restaurations d'une même VM ne diffèrent qu'à la fin.
     const full = v.pvc_name ? v.pvc_namespace + '/' + v.pvc_name : v.longhorn;
     const tip = `${full} · ${tr('storage.volTip', 'click for the detail')}`;
-    return `<div class="sto-vol ${esc(state)}${isSel ? ' selected' : ''}${v.orphan ? ' orphan' : ''} tip"
+    const ill = HEALTH_ISSUES.includes(v.health) ? ' health-' + v.health : '';
+    return `<div class="sto-vol ${esc(state)}${isSel ? ' selected' : ''}${v.orphan ? ' orphan' : ''}${ill} tip"
                  data-vol="${esc(k)}" data-tip="${esc(tip)}" aria-label="${esc(tip)}"
                  tabindex="0" role="button">
       <span class="vsw-dot" aria-hidden="true"></span>
       <span class="sto-vol-name">${esc(label)}${cd ? ` <small class="sto-cd">${esc(tr('storage.cdrom', 'CD-ROM'))}</small>` : ''}</span>
+      ${ill ? `<small class="sto-health-tag">${esc(healthLabel(v.health))}</small>` : ''}
+      ${v.claim_missing ? `<small class="sto-claim-gone">${esc(tr('storage.claimGone', 'claim deleted'))}</small>` : ''}
       ${v.boot_order ? `<small class="sto-boot">${esc(tr('storage.boot', 'boot'))} ${esc(v.boot_order)}</small>` : ''}
       <span class="sto-size">${esc(bytes(v.requested || v.size))}</span>
       <small class="sto-state">${esc(state)}</small>
@@ -228,7 +231,7 @@ const StorageMap = (() => {
         <header class="vsw-head"><span class="vsw-kind">${esc(tr('storage.emptyCd', 'Empty CD-ROM drives'))}</span></header>
         <div class="vsw-unused-list">${m.emptyCd.map(c => `<div class="vsw-pg">${val(c.vm)} <small>${esc(c.disk)}</small></div>`).join('')}</div></section>` : '';
     const scroll = body.scrollTop;
-    body.innerHTML = m.blocks.map(b => blockHtml(b, d)).join('') + stray + cds
+    body.innerHTML = bannerHtml(d) + m.blocks.map(b => blockHtml(b, d)).join('') + stray + cds
       || `<p class="hint">${esc(tr('storage.none', 'No storage class on this cluster.'))}</p>`;
     body.scrollTop = scroll;
     applyTips(body);
@@ -236,6 +239,195 @@ const StorageMap = (() => {
     if (meta) {
       meta.textContent = `${(d.volumes || []).length} ${tr('storage.volumes', 'volumes')} · `
         + `${m.orphans.length} ${tr('storage.orphanCount', 'orphaned')}`;
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Santé des volumes (v1.42.0)
+  //
+  // Le serveur rend des codes et des faits (volume_health.py) ; le texte est
+  // écrit ici, dans la langue de l'exploitant. Chaque cause dit ce qu'on
+  // observe, quoi faire, et propose la correction quand elle est sûre, avec
+  // la commande kubectl équivalente pour qui préfère la ligne de commande.
+  // -------------------------------------------------------------------------
+  const HEALTH_ISSUES = ['faulted', 'degraded', 'at-risk'];
+  const fill = (text, vars) => String(text).replace(/\{(\w+)\}/g,
+    (m, k) => (vars && vars[k] != null ? vars[k] : m));
+
+  function healthLabel(h) {
+    if (h === 'faulted') return tr('health.faulted', 'faulted');
+    if (h === 'degraded') return tr('health.degraded', 'degraded');
+    return tr('health.atRisk', 'at risk');
+  }
+
+  function findingTitle(f) {
+    switch (f.cause) {
+      case 'faulted': return tr('health.t.faulted', 'No healthy replica left');
+      case 'rebuild-disabled': return tr('health.t.rebuildDisabled', 'Rebuilding is switched off');
+      case 'rebuilding': return tr('health.t.rebuilding', 'Rebuilding in progress');
+      case 'replica-failed': return tr('health.t.replicaFailed', 'A replica failed');
+      case 'not-enough-nodes': return f.severity === 'watch'
+        ? tr('health.t.willDegrade', 'Will start degraded: not enough nodes')
+        : fill(tr('health.t.notEnoughNodes', 'Not enough nodes for {wanted} replicas'), f.facts);
+      case 'no-room': return tr('health.t.noRoom', 'No disk has room for a new replica');
+      case 'node-unavailable': return tr('health.t.nodeUnavailable', 'A replica sits on a node or disk that is down');
+      default: return tr('health.t.unexplained', 'Degraded, cause not identified');
+    }
+  }
+
+  function findingFacts(f) {
+    const x = f.facts || {};
+    switch (f.cause) {
+      case 'faulted': return fill(tr('health.f.faulted', '{failed} of {replicas} replica(s) failed.'), x);
+      case 'rebuild-disabled': return `${x.setting} = ${x.value}`;
+      case 'replica-failed': return fill(tr('health.f.replicaFailed',
+        '{failed} failed, {healthy} healthy. Longhorn waits up to {wait} s to reuse a failed replica.'),
+        { failed: (x.replicas || []).length, healthy: x.healthy, wait: x.wait_seconds });
+      case 'not-enough-nodes': return fill(tr('health.f.notEnoughNodes',
+        '{wanted} replicas wanted, {nodes} schedulable node(s): Longhorn keeps replicas on distinct nodes.'), x);
+      case 'no-room': return fill(tr('health.f.noRoom', '{size} needed, {n} node(s) with room.'),
+        { size: bytes(x.size), n: x.nodes_with_room });
+      case 'node-unavailable': return (x.replicas || []).map(r => fill(r.why === 'disk'
+        ? tr('health.f.diskDown', '{replica} on {node}: disk {disk} not ready')
+        : tr('health.f.nodeDown', '{replica} on {node}: node not ready'), r)).join(' ; ');
+      case 'unexplained': return fill(tr('health.f.unexplained',
+        '{healthy} healthy replica(s) of {wanted}. Longhorn says: {reason} {message}'),
+        { healthy: x.healthy, wanted: x.wanted, reason: x.reason || '', message: x.message || '' });
+      default: return '';
+    }
+  }
+
+  function findingAdvice(f) {
+    switch (f.cause) {
+      case 'faulted': return tr('health.a.faulted',
+        'Do not delete anything. Bring back the node or disk that held the data: Longhorn recovers the volume when a replica returns.');
+      case 'rebuild-disabled': return tr('health.a.rebuildDisabled',
+        'A graceful shutdown switches it off and the startup switches it back on. Here it stayed off, so no degraded volume is repaired.');
+      case 'rebuilding': return tr('health.a.rebuilding',
+        'Nothing to do: the volume repairs itself and stays degraded until the copy is complete.');
+      case 'replica-failed': return tr('health.a.replicaFailed',
+        'Rebuilding now starts a fresh copy immediately instead of waiting, at the cost of disk and network load.');
+      case 'not-enough-nodes': return tr('health.a.notEnoughNodes',
+        'Lower the replica count to what the cluster can hold, or add nodes. Letting replicas share a node would hide the warning without protecting against the loss of that node.');
+      case 'no-room': return tr('health.a.noRoom',
+        'Free space (the orphaned volumes of this view can be deleted), add a disk, or review the over-provisioning setting.');
+      case 'node-unavailable': return tr('health.a.nodeUnavailable',
+        'Bring the node or disk back and Longhorn resumes the replica. If the node is gone for good, remove it from Longhorn so the replica is rebuilt elsewhere.');
+      default: return tr('health.a.unexplained', 'Check the volume in the Longhorn UI.');
+    }
+  }
+
+  // La même commande que celle que le serveur exécutera.
+  function fixCommand(fix, v) {
+    const p = fix.params || {};
+    if (fix.kind === 'set-replicas') {
+      return `kubectl -n longhorn-system patch volumes.longhorn.io ${v.longhorn} --type merge -p '{"spec":{"numberOfReplicas":${p.replicas}}}'`;
+    }
+    if (fix.kind === 'enable-rebuild') {
+      return `kubectl -n longhorn-system patch settings.longhorn.io concurrent-replica-rebuild-per-node-limit --type merge -p '{"value":"${p.value}"}'`;
+    }
+    return `kubectl -n longhorn-system delete replicas.longhorn.io ${p.replica}`;
+  }
+
+  function fixLabel(fix) {
+    if (fix.kind === 'set-replicas') {
+      return fill(tr('health.fix.setReplicas', 'Set {replicas} replica(s)'), fix.params);
+    }
+    if (fix.kind === 'enable-rebuild') return tr('health.fix.enableRebuild', 'Switch rebuilding back on');
+    return tr('health.fix.rebuildNow', 'Rebuild now');
+  }
+
+  function fixConfirm(fix, v) {
+    if (fix.kind === 'set-replicas') {
+      return fill(tr('health.confirm.setReplicas',
+        'Lower {volume} to {replicas} replica(s)? Its data is kept, but it loses redundancy until the cluster has more nodes.'),
+        { volume: v.pvc_name || v.longhorn, replicas: fix.params.replicas });
+    }
+    if (fix.kind === 'enable-rebuild') {
+      return tr('health.confirm.enableRebuild',
+        'Switch Longhorn rebuilding back on for the whole cluster? Every degraded volume starts repairing.');
+    }
+    return fill(tr('health.confirm.rebuildNow',
+      'Delete the failed replica {replica} so that Longhorn rebuilds a fresh copy now? A healthy replica remains.'),
+      fix.params);
+  }
+
+  function findingHtml(f, v) {
+    const progress = f.cause === 'rebuilding'
+      ? (f.facts.replicas || []).map(r => `<div class="sto-rebuild">
+          <span>${esc(r.node || r.replica)}</span>
+          <span class="sto-bar"><span class="sto-bar-used" style="width:${Math.max(0, Math.min(100, Number(r.progress) || 0))}%"></span></span>
+          <span>${r.progress == null ? '?' : esc(r.progress) + ' %'}</span></div>`).join('')
+      : '';
+    const fix = f.fix
+      ? `<button type="button" class="btn btn-sm tip" data-vol-fix="${esc(f.fix.kind)}"
+                 data-tip-i18n="health.fixTip">${esc(fixLabel(f.fix))}</button>
+         <details class="sto-kubectl"><summary>${esc(tr('health.command', 'Equivalent command'))}</summary>
+           <span class="vsw-val"><code>${esc(fixCommand(f.fix, v))}</code>${window.CopyTo ? CopyTo.button(fixCommand(f.fix, v), { force: true }) : ''}</span>
+         </details>`
+      : '';
+    const facts = findingFacts(f);
+    return `<div class="sto-finding sev-${esc(f.severity)}" data-cause="${esc(f.cause)}">
+      <div class="sto-finding-title">${esc(findingTitle(f))}</div>
+      ${facts ? `<div class="sto-finding-facts">${esc(facts)}</div>` : ''}
+      <div class="sto-finding-advice">${esc(findingAdvice(f))}</div>
+      ${progress}${fix}
+    </div>`;
+  }
+
+  function healthBoxHtml(v) {
+    if (!(v.findings || []).length) return '';
+    return `<section class="sto-health">
+      <div class="sto-health-head">${esc(tr('health.title', 'Health'))} :
+        <b>${esc(healthLabel(v.health))}</b></div>
+      ${v.findings.map(f => findingHtml(f, v)).join('')}
+      <div class="sto-fix-out"></div>
+    </section>`;
+  }
+
+  function bannerHtml(d) {
+    const s = d.health_summary || {};
+    const parts = [];
+    if (s.faulted) parts.push(fill(tr('health.banner.faulted', '{n} faulted'), { n: s.faulted }));
+    if (s.degraded) parts.push(fill(tr('health.banner.degraded', '{n} degraded'), { n: s.degraded }));
+    if (s.at_risk) parts.push(fill(tr('health.banner.atRisk', '{n} at risk'), { n: s.at_risk }));
+    if (!parts.length) return '';
+    // Le premier volume à ouvrir : le plus grave d'abord.
+    const vols = d.volumes || [];
+    const first = ['faulted', 'degraded', 'at-risk']
+      .map(h => vols.find(v => v.health === h)).find(Boolean);
+    const top = s.top_cause
+      ? ' · ' + tr('health.banner.cause', 'main cause') + ' : '
+        + findingTitle({ cause: s.top_cause, severity: 'action',
+                         facts: (first && (first.findings || []).find(f => f.cause === s.top_cause) || {}).facts || {} })
+      : '';
+    return `<div class="sto-health-banner ${s.faulted ? 'critical' : 'warn'} tip" role="button" tabindex="0"
+                 data-health-first="${first ? esc(volKey(first)) : ''}" data-tip-i18n="health.bannerTip">
+      <b>${esc(tr('health.banner.title', 'Volumes need attention'))}</b>
+      <span>${esc(parts.join(', '))}${esc(top)}</span>
+    </div>`;
+  }
+
+  async function applyFix(kind, btn) {
+    const v = (lastData.volumes || []).find(x => selected && volKey(x) === selected.key);
+    const f = v && (v.findings || []).find(x => x.fix && x.fix.kind === kind);
+    if (!f) return;
+    if (!window.confirm(fixConfirm(f.fix, v))) return;
+    btn.disabled = true;
+    const out = host.querySelector('.sto-fix-out');
+    try {
+      const r = await fetch(`/api/volume-health/${encodeURIComponent(cluster)}/${encodeURIComponent(v.longhorn)}/fix`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind }) });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.detail || j.error || 'HTTP ' + r.status);
+      if (out) out.textContent = fill(tr('health.fixStarted',
+        'Requested ({summary}); the action checks the result for a minute, in the actions dock.'),
+        { summary: j.summary || kind });
+      setTimeout(() => refresh(true), 3000);
+    } catch (e) {
+      btn.disabled = false;
+      if (out) out.textContent = String(e.message || e);
     }
   }
 
@@ -257,6 +449,7 @@ const StorageMap = (() => {
                  data-tip-i18n="storage.deleteTip">${window.Icons ? Icons.svg('delete') : ''} ${esc(tr('storage.delete', 'Delete this volume'))}</button>`
       : `<p class="form-hint">${esc(tr('storage.lockedHint', 'Unlock destructive actions in the toolbar to delete this orphaned volume.'))}</p>`) : '';
     side.innerHTML = `<h3>${esc(v.pvc_name || v.longhorn)}</h3>`
+      + healthBoxHtml(v)
       + (last ? `<p class="hint warn">${esc(tr('storage.lastUsed', 'Last used by'))} ${esc(last)}. ${esc(tr('storage.lastUsedNote', 'That workload may come back and expect its data.'))}</p>` : '')
       + `<dl class="kv">`
       + kv('PVC', v.pvc_name ? v.pvc_namespace + '/' + v.pvc_name : null)
@@ -378,6 +571,10 @@ const StorageMap = (() => {
       if (e.target.closest('.fabric-refresh')) { refresh(true); return; }
       const del = e.target.closest('[data-sto-delete]');
       if (del) { deleteVol(del.dataset.stoDelete, del); return; }
+      const fixBtn = e.target.closest('[data-vol-fix]');
+      if (fixBtn) { applyFix(fixBtn.dataset.volFix, fixBtn); return; }
+      const banner = e.target.closest('[data-health-first]');
+      if (banner && banner.dataset.healthFirst) { showVol(banner.dataset.healthFirst); return; }
       if (e.target.closest('[data-sto-idle]')) {
         showIdle = !showIdle;
         if (lastData) render(lastData);
@@ -390,6 +587,10 @@ const StorageMap = (() => {
     });
     host.addEventListener('keydown', (e) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
+      const banner = e.target.closest('[data-health-first]');
+      if (banner && banner.dataset.healthFirst) {
+        e.preventDefault(); showVol(banner.dataset.healthFirst); return;
+      }
       const v = e.target.closest('[data-vol]');
       const dk = e.target.closest('[data-disk]');
       if (v) { e.preventDefault(); showVol(v.dataset.vol); }
