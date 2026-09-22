@@ -4,21 +4,33 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
-## [1.44.9] - 2026-09-22 - A maintenance that worked no longer reports a failure
+## [1.44.9] - 2026-09-22 - A maintenance that works no longer reports a failure
 
 Filming the demonstration videos on the three-node test cluster showed a
 node entering maintenance while the actions dock displayed, in red,
 "Harvester refused the maintenance". The maintenance was going through.
 
 ### Fixed
-- **The end of a maintenance is no longer read as a refusal.** Harvester
-  removes the `drain-requested` mark and sets `maintain-status` in two
-  separate writes; a reading that landed between the two concluded the
-  request had been withdrawn and failed the action one second before the
-  node went into maintenance (measured on the test cluster: drain of three
-  minutes, then the two marks change within the same two seconds). The
-  console now waits 30 seconds before calling it a refusal, and starts
-  that delay over if Harvester asks again.
+- **A drain still running is no longer read as a refusal.** Harvester
+  clears its `drain-requested` mark before the drain is over, and the
+  drain itself can take minutes: on the test cluster it retried for three
+  minutes against the disruption budget of the Longhorn instance managers
+  before the node reached maintenance. The console now follows the signal
+  that actually separates the two cases: Harvester keeps the node cordoned
+  while it works, and gives it back to the cluster when it gives up. A
+  withdrawal is reported only once the node is schedulable again, and
+  after a 30 second delay, since the mark and the status are written
+  separately.
+- The dock now says "drain in progress" during that phase, instead of
+  showing nothing between the request and the end.
+- **When Harvester withdraws a maintenance, the console says what held
+  it.** Harvester gives no reason. On a three-node cluster it is always the
+  same: the Longhorn instance manager of the node cannot be evicted, its
+  disruption budget allows none. The error now names the pod and its
+  budget, checked against the live cluster.
+- **A volume is named once in the maintenance pre-check.** Longhorn keeps
+  one workload entry per pod that mounted the volume, so after three
+  migrations of the same VM the panel listed the same disk three times.
 
 ### Internal
 - `tools/demo-video/`: the chain that produces the short demonstration
@@ -29,9 +41,13 @@ node entering maintenance while the actions dock displayed, in red,
   customers: `package.sh` copies only `bin web container config docs`.
 
 ### Tests
-- 3 new unit tests on the follow-up of a maintenance: the gap before the
-  status is not a refusal, a request that comes back restarts the delay,
-  and a real withdrawal is still reported.
+- 5 new unit tests on the reading of disruption budgets (a blocked pod is
+  named, a budget that still allows a disruption is not a blocker, another
+  namespace does not count, an unsupported selector is ignored rather than
+  fatal), and one on the de-duplication of volumes.
+- 4 new unit tests on the follow-up of a maintenance: a drain still
+  running on a cordoned node, the gap before the status, a request that
+  comes back, and a real withdrawal still reported.
 - 16 tests on the video chain: cutting, speed-up, the reporting of marks
   into the edited film, subtitle generation, and the parity of the caption
   files between English and French.

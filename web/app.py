@@ -6846,11 +6846,29 @@ def _node_patch_runner(run, kc, name, patch, step):
 
 
 def _node_maint_read(kc, name):
-    """(annotations du nœud, nombre de VMs qu'il porte encore)."""
+    """(annotations, VMs encore portées, nœud isolé ?).
+
+    L'isolement est le signal qui distingue « Harvester travaille encore »
+    de « Harvester a renoncé » : tant qu'il vide le nœud, il le garde
+    isolé ; quand il abandonne, il le rend au cluster.
+    """
     n = _kubectl_json(kc, "get", "node", name)
     vmis = _kubectl_json(kc, "get", "vmi", "-A", "-l", f"kubevirt.io/nodeName={name}")
     ann = ((n.get("metadata") or {}).get("annotations") or {}) if n else None
-    return ann, (len(vmis.get("items", [])) if vmis else None)
+    cordoned = bool((n.get("spec") or {}).get("unschedulable")) if n else None
+    return ann, (len(vmis.get("items", [])) if vmis else None), cordoned
+
+
+def _drain_blockers(kc, name):
+    """Pods du nœud qu'un budget de perturbation retient (diagnostic servi
+    quand Harvester renonce, il ne dit pas pourquoi)."""
+    pods = _kubectl_json(kc, "get", "pods", "-A", "--field-selector",
+                         f"spec.nodeName={name}")
+    pdbs = _kubectl_json(kc, "get", "pdb", "-A")
+    if not pods or not pdbs:
+        return []
+    return node_maintenance.eviction_blockers(pods.get("items", []),
+                                              pdbs.get("items", []))
 
 
 def _maintenance_enter_runner(run, kc, name, force):
@@ -6877,12 +6895,20 @@ def _maintenance_enter_runner(run, kc, name, force):
               "message": "Harvester migrates the VMs", "ts": time.time()})
     deadline = time.time() + NODE_MAINT_TIMEOUT
     last = None
+    last_seen = None
     withdrawn_since = None
     while time.time() < deadline:
         time.sleep(NODE_MAINT_POLL)
-        ann, left = _node_maint_read(kc, name)
+        ann, left, cordoned = _node_maint_read(kc, name)
         if ann is None:
+            log.info("[maintenance] %s: node unreadable, retrying", name)
             continue
+        seen = (cordoned, node_maintenance.DRAIN_REQUESTED in ann,
+                ann.get(node_maintenance.MAINTAIN_STATUS), left)
+        if seen != last_seen:
+            log.info("[maintenance] %s: cordoned=%s requested=%s status=%s vms=%s",
+                     name, *seen)
+            last_seen = seen
         status = ann.get(node_maintenance.MAINTAIN_STATUS)
         if node_maintenance.DRAIN_REQUESTED in ann or status in ("running", "completed"):
             withdrawn_since = None
@@ -6899,6 +6925,16 @@ def _maintenance_enter_runner(run, kc, name, force):
                 last = msg
             continue
         if node_maintenance.DRAIN_REQUESTED not in ann:
+            # Le nœud est encore isolé : Harvester n'a pas renoncé, il vide
+            # (mesuré sur harvlab : la demande disparaît avant la fin, et la
+            # vidange peut buter plusieurs minutes sur le budget de
+            # perturbation des gestionnaires Longhorn).
+            if cordoned:
+                if last != "draining":
+                    run.emit({"type": "step", "step_id": "follow", "status": "running",
+                              "message": f"{name}: drain in progress", "ts": time.time()})
+                    last = "draining"
+                continue
             # Trou entre le retrait de la demande et la pose du statut : on
             # ne conclut au refus que s'il dure.
             if withdrawn_since is None:
@@ -6907,6 +6943,11 @@ def _maintenance_enter_runner(run, kc, name, force):
                 continue
             msg = ("Harvester refused the maintenance and withdrew the request "
                    "(see the harvester controller logs)")
+            stuck = _drain_blockers(kc, name)
+            if stuck:
+                msg += "; still on the node and protected by a disruption " \
+                       "budget: " + ", ".join(
+                           f"{b['namespace']}/{b['pod']} ({b['pdb']})" for b in stuck[:4])
             run.emit({"type": "step", "step_id": "follow", "status": "error",
                       "message": msg, "ts": time.time()})
             _finish_run(run, "error", msg)

@@ -104,6 +104,30 @@ def manifest(name, cores, memory, sc):
     }
 
 
+def set_replicas(count=2):
+    """Ramène les volumes des VMs de démonstration à `count` répliques.
+
+    Avec autant de répliques que de nœuds (le défaut de Harvester, 3), vider
+    un nœud ne laisse aucune place pour reconstruire ailleurs : Longhorn
+    garde son gestionnaire d'instances protégé, la vidange réessaie toutes
+    les 5 s et Harvester peut renoncer au bout de deux minutes (mesuré sur
+    harvlab le 22/09/2026 : entre 2 et 7 minutes, ou un abandon). À deux
+    répliques, la reconstruction a où aller et la maintenance passe.
+    """
+    import os
+    kc = os.path.expanduser("~/.kube/harvlab.yaml")
+    out = subprocess.run(["kubectl", "--kubeconfig", kc, "-n", "longhorn-system",
+                          "get", "volumes.longhorn.io", "-o",
+                          "jsonpath={range .items[*]}{.metadata.name} {end}"],
+                         capture_output=True, text=True, check=True).stdout.split()
+    for vol in out:
+        subprocess.run(["kubectl", "--kubeconfig", kc, "-n", "longhorn-system",
+                        "patch", "volumes.longhorn.io", vol, "--type", "merge",
+                        "-p", json.dumps({"spec": {"numberOfReplicas": count}})],
+                       capture_output=True, text=True, check=True)
+    print(f"{len(out)} volume(s) à {count} répliques")
+
+
 def up():
     sc = image_storage_class()
     for name, cores, memory in VMS:
@@ -112,6 +136,7 @@ def up():
                  "manifest": manifest(name, cores, memory, sc)})
         print(f"{name} : action {r.get('action_id')}")
     print("créées ; elles démarrent (cirros, quelques dizaines de secondes)")
+    print("penser à `./seed.py wait` puis `./seed.py replicas` avant de filmer")
 
 
 def down():
@@ -149,6 +174,7 @@ def wait_running(timeout=600):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("what", choices=("up", "down", "status", "wait"))
+    ap.add_argument("what", choices=("up", "down", "status", "wait", "replicas"))
     what = ap.parse_args().what
-    {"up": up, "down": down, "status": status, "wait": wait_running}[what]()
+    {"up": up, "down": down, "status": status, "wait": wait_running,
+     "replicas": set_replicas}[what]()

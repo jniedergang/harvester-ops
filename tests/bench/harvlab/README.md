@@ -83,3 +83,26 @@ fonction virtuelle devient un PCIDevice à réserver de la même façon.
 Vérifié le 22/09/2026 : la carte et une fonction virtuelle, choisies dans
 l'éditeur de VM de la console, sont arrivées sur le bus PCI de l'invité
 (`virsh qemu-monitor-command ... "info pci"` dans le virt-launcher).
+
+
+## Réglages pour les démonstrations
+
+Vider un nœud de trois attend Longhorn, pas les VMs : les machines migrent
+en une minute, puis la vidange bute sur le budget de perturbation du
+gestionnaire d'instances jusqu'à ce que les répliques soient reconstruites
+ailleurs. Avec les valeurs d'origine, la maintenance prend de 2 à 8 minutes
+et **Harvester renonce parfois** (il retire sa demande et rend le nœud au
+cluster, sans dire pourquoi).
+
+Deux réglages rendent le banc prévisible, et rien de plus :
+
+```sh
+# répliques des volumes de démonstration : 2 au lieu de 3 (3 nœuds)
+tools/demo-video/seed.py replicas
+# délai avant reconstruction d'une réplique : 30 s au lieu de 600
+kubectl -n longhorn-system patch settings.longhorn.io \
+  replica-replenishment-wait-interval --type merge -p '{"value":"30"}'
+```
+
+Mesuré le 22/09/2026 : maintenance d'un nœud portant 3 VMs, 196 s au lieu
+de 452 s, sans abandon.

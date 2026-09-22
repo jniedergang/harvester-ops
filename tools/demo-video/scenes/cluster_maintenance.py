@@ -72,7 +72,10 @@ def scene(cam):
     cam.pause(5)
 
     cam.say("waiting")
-    with cam.fast(8):
+    # Sur le banc, vider un nœud prend de deux à huit minutes : Longhorn ne
+    # laisse partir son gestionnaire d'instances qu'une fois les répliques
+    # reconstruites ailleurs. On montre l'attente accélérée, pas coupée.
+    with cam.fast(20):
         # Harvester marque le nœud « en maintenance » AVANT d'avoir vidé
         # quoi que ce soit : attendre cette marque ne montrerait aucune
         # migration. On attend que le nœud soit réellement vide.
@@ -80,7 +83,9 @@ def scene(cam):
           const d = await (await fetch(`/api/topology/${cluster}`)).json();
           const n = (d.nodes || []).find(x => x.name === window.__demoNode);
           const left = (d.vms || []).filter(v => v.node === window.__demoNode).length;
-          return !!(n && n.maintenance && left === 0);
+          // « requested » veut dire « demande posée », pas « nœud vidé » :
+          // seul `completed` dit que Harvester a fini.
+          return !!(n && n.maintenance === 'completed' && left === 0);
         }""", arg=CLUSTER)
         cam.pause(4)
 

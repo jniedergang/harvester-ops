@@ -114,9 +114,9 @@ The browser tab was inactive too long, or the proxy in front of Flask has a low 
 
 Before 1.44.9, the actions dock could show "Harvester refused the
 maintenance and withdrew the request" while the node did enter maintenance.
-Harvester clears its `drain-requested` mark before setting
-`maintain-status`, and a reading that fell between the two took it for a
-withdrawal. Check the node itself:
+Harvester clears its `drain-requested` mark before the drain is over, and
+the drain can take minutes (it waits on the disruption budget of the
+Longhorn instance managers). Check the node itself:
 
 ```sh
 kubectl get node <name> -o jsonpath='{.metadata.annotations}'

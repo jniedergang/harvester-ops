@@ -498,8 +498,11 @@ class Proc:
         self.returncode, self.stdout, self.stderr = rc, out, err
 
 
-def follow(monkeypatch, states, vmis_left=0):
-    """Chaque relecture du nœud rend l'état suivant de la liste."""
+def follow(monkeypatch, states, vmis_left=0, cordoned=False):
+    """Chaque relecture du nœud rend l'état suivant de la liste.
+
+    `cordoned` dit si Harvester tient encore le nœud isolé : c'est ce qui
+    sépare « il vide » de « il a renoncé »."""
     it = iter(states)
     last = {"v": None}
 
@@ -508,7 +511,7 @@ def follow(monkeypatch, states, vmis_left=0):
             last["v"] = next(it)
         except StopIteration:
             pass
-        return last["v"], vmis_left
+        return last["v"], vmis_left, cordoned
     monkeypatch.setattr(wapp, "_node_maint_read", read)
     monkeypatch.setattr(wapp, "NODE_MAINT_POLL", 0)
     # Une régression doit échouer vite, pas au bout des dix minutes réelles.
@@ -534,6 +537,80 @@ def test_a_refusal_by_harvester_is_reported(monkeypatch):
     run = FakeRun()
     wapp._maintenance_enter_runner(run, "/kc", "n1", False)
     assert run.status == "error" and "refused" in run.error_summary
+
+
+def _pdb(name, ns, labels, allowed):
+    return {"metadata": {"name": name, "namespace": ns},
+            "spec": {"selector": {"matchLabels": labels}},
+            "status": {"disruptionsAllowed": allowed}}
+
+
+def _pod(name, ns, labels):
+    return {"metadata": {"name": name, "namespace": ns, "labels": labels}}
+
+
+def test_a_pod_held_by_a_full_disruption_budget_is_named():
+    """v1.44.9 : quand Harvester renonce à une maintenance il n'en donne pas
+    la raison. Sur un cluster de trois nœuds elle est toujours la même, le
+    gestionnaire d'instances Longhorn ne peut pas être évincé ; la console
+    va donc la chercher pour la dire."""
+    pods = [_pod("instance-manager-abc", "longhorn-system", {"longhorn.io/component": "instance-manager"}),
+            _pod("virt-launcher-web", "default", {"kubevirt.io": "virt-launcher"})]
+    pdbs = [_pdb("instance-manager-abc", "longhorn-system",
+                 {"longhorn.io/component": "instance-manager"}, 0)]
+    assert nm.eviction_blockers(pods, pdbs) == [
+        {"pod": "instance-manager-abc", "namespace": "longhorn-system",
+         "pdb": "instance-manager-abc"}]
+
+
+def test_a_budget_that_still_allows_a_disruption_is_not_a_blocker():
+    pods = [_pod("p", "ns", {"app": "x"})]
+    assert nm.eviction_blockers(pods, [_pdb("b", "ns", {"app": "x"}, 1)]) == []
+
+
+def test_a_budget_of_another_namespace_does_not_count():
+    pods = [_pod("p", "ns", {"app": "x"})]
+    assert nm.eviction_blockers(pods, [_pdb("b", "autre", {"app": "x"}, 0)]) == []
+
+
+def test_a_selector_we_do_not_read_is_ignored_not_fatal():
+    """Un sélecteur à expressions ne doit pas casser le diagnostic."""
+    pdb = {"metadata": {"name": "b", "namespace": "ns"},
+           "spec": {"selector": {"matchExpressions": [{"key": "app", "operator": "Exists"}]}},
+           "status": {"disruptionsAllowed": 0}}
+    assert nm.eviction_blockers([_pod("p", "ns", {"app": "x"})], [pdb]) == []
+
+
+def test_a_volume_is_named_once_even_with_several_workload_entries():
+    """v1.44.9 : Longhorn garde une entrée de charge par pod ayant monté le
+    volume ; après trois migrations, la même VM y figurait trois fois et le
+    panneau listait trois fois le même disque."""
+    node = {"metadata": {"name": "n1"}}
+    vmi = {"metadata": {"name": "web", "namespace": "default"},
+           "status": {"nodeName": "n1"}}
+    vol = {"metadata": {"name": "pvc-1"},
+           "status": {"robustness": "degraded",
+                      "kubernetesStatus": {"namespace": "default", "workloadsStatus": [
+                          {"workloadType": "VirtualMachineInstance", "workloadName": "web"},
+                          {"workloadType": "VirtualMachineInstance", "workloadName": "web"},
+                          {"workloadType": "VirtualMachineInstance", "workloadName": "web"}]}}}
+    assert nm.volume_waits(node, [vmi], [vol]) == [{"vm": "default/web", "volume": "pvc-1"}]
+
+
+def test_a_drain_still_running_is_not_a_refusal(monkeypatch):
+    """v1.44.9, mesuré sur harvlab : la marque `drain-requested` disparaît
+    AVANT la fin de la vidange, qui peut buter plusieurs minutes sur le
+    budget de perturbation des gestionnaires Longhorn. Tant que Harvester
+    garde le nœud isolé, il travaille ; il ne le rend au cluster que s'il
+    renonce."""
+    follow(monkeypatch, [{nm.DRAIN_REQUESTED: "true"}, {}, {}, {}, {},
+                         {nm.MAINTAIN_STATUS: "completed"}], cordoned=True)
+    monkeypatch.setattr(wapp, "NODE_MAINT_WITHDRAW_GRACE", 0.01)
+    monkeypatch.setattr(wapp, "NODE_MAINT_TIMEOUT", 5.0)
+    run = FakeRun()
+    wapp._maintenance_enter_runner(run, "/kc", "n1", False)
+    assert run.status == "done", run.error_summary
+    assert any("drain in progress" in (e.get("message") or "") for e in run.events)
 
 
 def test_the_gap_before_the_status_is_not_a_refusal(monkeypatch):

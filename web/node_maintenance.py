@@ -201,6 +201,11 @@ def volume_waits(node, vmis, volumes):
     la reconstruction passe. La VM migrera, mais bien plus tard."""
     name = _meta(node).get("name")
     by_name = {f"{_meta(v).get('namespace')}/{_meta(v).get('name')}": v for v in vmis}
+    # Un volume peut porter PLUSIEURS entrées de charge pour la même VM (une
+    # par pod ayant monté le volume, migrations comprises) : sans regroupement
+    # le panneau affichait trois fois le même disque (vu sur harvlab après
+    # trois migrations de la même VM).
+    seen = set()
     out = []
     for v in volumes:
         if (v.get("status") or {}).get("robustness") in (None, "healthy"):
@@ -210,7 +215,11 @@ def volume_waits(node, vmis, volumes):
             vmi = by_name.get(f"{ks.get('namespace')}/{w.get('workloadName')}")
             if (w.get("workloadType") == "VirtualMachineInstance" and vmi
                     and _vmi_node(vmi) == name):
-                out.append({"vm": _vm_of(vmi), "volume": _meta(v).get("name")})
+                key = (_vm_of(vmi), _meta(v).get("name"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append({"vm": key[0], "volume": key[1]})
     return sorted(out, key=lambda x: (x["vm"], x["volume"]))
 
 
@@ -319,3 +328,39 @@ def vms_to_restart(node_name, vms):
                         (meta.get("annotations") or {}).get(RUN_STRATEGY_ANNOTATION)
                         or "RerunOnFailure"))
     return out
+
+
+def eviction_blockers(pods, pdbs):
+    """Pods encore sur le nœud qu'un budget de perturbation empêche d'évincer.
+
+    Quand Harvester renonce à une maintenance, il ne dit pas pourquoi. La
+    cause vue sur un cluster de trois nœuds est toujours la même : le
+    gestionnaire d'instances Longhorn du nœud ne peut pas partir, parce que
+    son budget n'autorise aucune perturbation (les volumes attachés veulent
+    autant de répliques qu'il y a de nœuds). La vidange réessaie toutes les
+    5 s, Harvester abandonne au bout de deux minutes.
+
+    Rend [{pod, namespace, pdb}] trié, pour le dire à l'opérateur.
+
+    Ne gère que les sélecteurs `matchLabels` : c'est ce qu'utilisent Longhorn
+    et KubeVirt, et un sélecteur plus riche ne doit pas faire échouer le
+    diagnostic (on l'ignore).
+    """
+    blocked = []
+    for pdb in pdbs:
+        if ((pdb.get("status") or {}).get("disruptionsAllowed") or 0) > 0:
+            continue
+        meta = _meta(pdb)
+        want = ((pdb.get("spec") or {}).get("selector") or {}).get("matchLabels") or {}
+        if not want:
+            continue
+        for pod in pods:
+            pmeta = _meta(pod)
+            if pmeta.get("namespace") != meta.get("namespace"):
+                continue
+            labels = pmeta.get("labels") or {}
+            if all(labels.get(k) == v for k, v in want.items()):
+                blocked.append({"pod": pmeta.get("name"),
+                                "namespace": pmeta.get("namespace"),
+                                "pdb": meta.get("name")})
+    return sorted(blocked, key=lambda b: (b["namespace"], b["pod"]))
