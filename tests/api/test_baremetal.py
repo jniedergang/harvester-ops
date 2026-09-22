@@ -243,6 +243,35 @@ def test_install_config_omits_static_fields_in_dhcp():
         assert k not in mi, f"{k} n'a aucun sens en DHCP"
 
 
+def test_a_joining_node_points_at_the_cluster_at_the_top_level():
+    """`server_url` est un champ de PREMIER niveau de la configuration
+    (HarvesterConfig.ServerURL dans harvester-installer), pas de `install`.
+    Placé sous `install`, il était ignoré et l'installeur refusait de
+    rejoindre (constaté en préparant le banc à trois nœuds). La VIP
+    appartient au cluster créé, pas à un nœud qui le rejoint."""
+    yaml = pytest.importorskip("yaml")
+    d = yaml.safe_load(wapp._harvester_install_config({
+        "token": "t", "hostname": "harvlab-n2", "mode": "join",
+        "server_url": "https://172.16.2.60:443", "device": "/dev/vda",
+        "mgmt_interface": "52:54:00:4c:ab:62", "method": "static",
+        "ip": "172.16.2.62", "subnet_mask": "255.255.0.0", "gateway": "172.16.0.1",
+    }))
+    assert d["server_url"] == "https://172.16.2.60:443"
+    assert "server_url" not in d["install"]
+    assert d["install"]["mode"] == "join"
+    assert "vip" not in d["install"] and "vip_mode" not in d["install"]
+
+
+def test_a_created_cluster_has_no_server_url():
+    yaml = pytest.importorskip("yaml")
+    d = yaml.safe_load(wapp._harvester_install_config({
+        "token": "t", "hostname": "h", "mode": "create", "device": "/dev/sda",
+        "mgmt_interface": "eno1", "vip": "1.2.3.4",
+        "server_url": "https://ignored:443",
+    }))
+    assert "server_url" not in d and d["install"]["vip"] == "1.2.3.4"
+
+
 def test_install_config_quotes_hostile_values():
     """Un mot de passe avec deux-points ou dièse casserait le YAML."""
     yaml = pytest.importorskip("yaml")
@@ -269,6 +298,89 @@ def test_install_endpoint_validates_before_touching_hardware(client):
     r = client.post("/api/baremetal/install",
                     json={**base, "iso": "../../etc/passwd.iso"})
     assert r.status_code == 400
+
+
+@pytest.mark.parametrize("body,field", [
+    ({"mode": "join"}, "server_url"),
+    ({"mode": "join", "server_url": "http://172.16.2.60"}, "server_url"),
+    ({"mode": "join", "server_url": "https://x:443\nevil: 1"}, "server_url"),
+    ({"mode": "create", "vip": ""}, "vip"),
+    ({"mode": "upgrade"}, "mode"),
+])
+def test_install_endpoint_checks_the_mode(client, body, field):
+    """Rejoindre exige l'adresse HTTPS du cluster ; créer exige une VIP."""
+    base = {"bmc_host": "10.0.0.9", "bmc_user": "u", "bmc_password": "p",
+            "iso": "harvester.iso", "hostname": "n2", "device": "/dev/sda",
+            "mgmt_interface": "eno1", "vip": "172.16.2.60", "token": "t"}
+    base.update(body)
+    r = client.post("/api/baremetal/install", json=base)
+    assert r.status_code == 400
+    assert field in (r.get_json().get("fields") or [r.get_json().get("error")])[0]
+
+
+JOIN = {"bmc_host": "10.0.0.9", "bmc_user": "u", "bmc_password": "p",
+        "iso": "harvester.iso", "hostname": "n2", "device": "/dev/sda",
+        "mgmt_interface": "eno1", "token": "t", "mode": "join",
+        "server_url": "https://172.16.2.60:443"}
+
+
+def _declared(monkeypatch, tmp_path, server="https://172.16.2.60:6443"):
+    kc = tmp_path / "harvlab.yaml"
+    kc.write_text(
+        "apiVersion: v1\nkind: Config\ncurrent-context: c\n"
+        "contexts: [{name: c, context: {cluster: k, user: u}}]\n"
+        f"clusters: [{{name: k, cluster: {{server: '{server}'}}}}]\n"
+        "users: [{name: u, user: {token: x}}]\n")
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": [
+        {"name": "harvlab", "kubeconfig": str(kc)}]})
+
+
+def test_a_join_needs_no_vip_but_a_known_cluster(client, monkeypatch, tmp_path):
+    """Suivre l'arrivée du nœud demande de lire ce cluster : il doit être
+    déclaré dans la console (reconnu par l'hôte de son serveur d'API)."""
+    runs = []
+    monkeypatch.setattr(wapp, "track_action",
+                        lambda label, cluster, worker, *args: runs.append(args) or "a1")
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": []})
+    r = client.post("/api/baremetal/install", json=JOIN)
+    assert r.status_code == 400 and r.get_json()["fields"] == ["server_url"]
+    _declared(monkeypatch, tmp_path)
+    r = client.post("/api/baremetal/install", json=JOIN)
+    assert r.status_code == 202
+    assert runs[0][0]["cluster"] == "harvlab"
+
+
+def test_a_join_waits_for_the_node_to_be_ready(monkeypatch):
+    """L'API du cluster répond déjà : l'attendre ne prouverait rien. La fin
+    d'une jonction, c'est le nœud prêt dans le cluster."""
+    answers = iter([None,
+                    {"status": {"conditions": [{"type": "Ready", "status": "False"}]}},
+                    {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}])
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/kc")
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: next(answers))
+    monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
+    steps = []
+    run = type("R", (), {})()
+    ok = wapp._bm_wait_node_ready("harvlab", "n2", wapp.time.time() + 60, run,
+                                  lambda *a: steps.append(a))
+    assert ok is True
+    assert any("n2" in str(a) for a in steps)
+
+
+def test_a_join_that_never_comes_times_out(monkeypatch):
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/kc")
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: None)
+    monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
+    run = type("R", (), {})()
+    assert wapp._bm_wait_node_ready("harvlab", "n2", wapp.time.time() - 1, run,
+                                    lambda *a: None) is False
+
+
+def test_the_runner_follows_a_join_on_the_node_not_the_vip():
+    src = (Path(wapp.__file__)).read_text()
+    body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
+    assert 'if opts.get("mode") == "join":' in body
+    assert "_bm_wait_node_ready(opts[\"cluster\"], opts[\"hostname\"]" in body
 
 
 def test_install_action_label_carries_no_secret(client, monkeypatch):

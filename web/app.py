@@ -3535,6 +3535,12 @@ def _harvester_install_config(opts):
         return v if re.fullmatch(r"[A-Za-z0-9._:/@-]+", v) else json.dumps(v)
 
     L = ["scheme_version: 1"]
+    joining = opts.get("mode") == "join"
+    # Champ de PREMIER niveau (HarvesterConfig.ServerURL). Placé sous
+    # `install` jusqu'en 1.44.1, il y était ignoré : un nœud ne pouvait pas
+    # rejoindre un cluster.
+    if joining:
+        L.append(f"server_url: {esc(opts['server_url'])}")
     L.append(f"token: {esc(opts['token'])}")
     L.append("os:")
     L.append(f"  hostname: {esc(opts['hostname'])}")
@@ -3581,10 +3587,10 @@ def _harvester_install_config(opts):
     L.append(f"    bond_options:")
     L.append(f"      mode: {esc(opts.get('bond_mode', 'balance-tlb'))}")
     L.append("      miimon: 100")
-    L.append(f"  vip: {esc(opts['vip'])}")
-    L.append(f"  vip_mode: {esc(opts.get('vip_mode', 'static'))}")
-    if opts.get("mode") == "join" and opts.get("server_url"):
-        L.append(f"  server_url: {esc(opts['server_url'])}")
+    # La VIP appartient au cluster créé, pas à un nœud qui le rejoint.
+    if not joining:
+        L.append(f"  vip: {esc(opts['vip'])}")
+        L.append(f"  vip_mode: {esc(opts.get('vip_mode', 'static'))}")
     return "\n".join(L) + "\n"
 
 
@@ -3611,6 +3617,44 @@ def _bm_wait_api(vip, deadline, run, step):
             if msg != last:
                 last = msg
                 step("wait-api", "progress", f"en attente de {vip}:6443 ({msg})")
+        time.sleep(15)
+    return False
+
+
+def _cluster_for_server(server_url):
+    """Nom du cluster déclaré dont le serveur d'API est sur l'hôte de
+    `server_url` (une jonction vise https://VIP:443, le kubeconfig
+    https://VIP:6443 : seul l'hôte compte), ou None."""
+    from urllib.parse import urlparse
+    host = urlparse(str(server_url)).hostname
+    for c in load_config().get("clusters", []):
+        try:
+            kc = yaml.safe_load(Path(c["kubeconfig"]).read_text()) or {}
+        except (OSError, KeyError, yaml.YAMLError):
+            continue
+        for entry in kc.get("clusters") or []:
+            if urlparse((entry.get("cluster") or {}).get("server") or "").hostname == host:
+                return c["name"]
+    return None
+
+
+def _bm_wait_node_ready(cluster, hostname, deadline, run, step):
+    """Attend que le nœud qui rejoint soit prêt dans le cluster. L'API de ce
+    cluster répond déjà : l'attendre ne prouverait rien."""
+    last = ""
+    while time.time() < deadline:
+        if getattr(run, "_cancel", False):
+            raise RuntimeError("cancelled by operator")
+        node = _kubectl_json(_kubectl_for_cluster(cluster), "get", "node", hostname,
+                             cluster=cluster)
+        conds = {c.get("type"): c.get("status")
+                 for c in ((node or {}).get("status") or {}).get("conditions") or []}
+        if conds.get("Ready") == "True":
+            return True
+        state = "absent" if node is None else "pas encore prêt"
+        if state != last:
+            last = state
+            step("wait-node", "progress", f"{hostname} {state} dans {cluster}")
         time.sleep(15)
     return False
 
@@ -3777,14 +3821,23 @@ def _baremetal_install_runner(run, opts):
     step("power", "done", "machine redémarrée")
 
     # --- attente de l'installation ---
-    step("wait-api", "running",
-         f"installation en cours, attente de l'API sur {opts['vip']}")
     deadline = time.time() + HARVESTER_INSTALL_TIMEOUT
-    if not _bm_wait_api(opts["vip"], deadline, run, step):
-        return fail("wait-api",
-                    f"no API on {opts['vip']}:6443 after "
-                    f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
-    step("wait-api", "done", f"API disponible sur {opts['vip']}")
+    if opts.get("mode") == "join":
+        step("wait-node", "running",
+             f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
+        if not _bm_wait_node_ready(opts["cluster"], opts["hostname"], deadline, run, step):
+            return fail("wait-node",
+                        f"{opts['hostname']} not Ready in {opts['cluster']} after "
+                        f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
+        step("wait-node", "done", f"{opts['hostname']} prêt dans {opts['cluster']}")
+    else:
+        step("wait-api", "running",
+             f"installation en cours, attente de l'API sur {opts['vip']}")
+        if not _bm_wait_api(opts["vip"], deadline, run, step):
+            return fail("wait-api",
+                        f"no API on {opts['vip']}:6443 after "
+                        f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
+        step("wait-api", "done", f"API disponible sur {opts['vip']}")
 
     # --- ménage : ne pas laisser un ISO monté ni un artefact exposé ---
     tgt, _ = _redfish_action_target(vm_res or {}, "EjectVirtualMedia",
@@ -3825,11 +3878,27 @@ def _bm_local_ip_for(host):
 def api_baremetal_install():
     """Lance une installation Harvester zéro-touch sur une machine nue."""
     data = request.get_json(force=True, silent=True) or {}
+    mode = data.get("mode") or "create"
+    if mode not in ("create", "join"):
+        return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
+    data["mode"] = mode
+    # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
-                "device", "mgmt_interface", "vip", "token")
+                "device", "mgmt_interface", "token",
+                "vip" if mode == "create" else "server_url")
     missing = [k for k in required if not data.get(k)]
     if missing:
         return jsonify({"error": "missing fields", "fields": missing}), 400
+    if mode == "join":
+        if not re.fullmatch(r"https://[A-Za-z0-9.:\[\]-]+(?::\d+)?/?",
+                            str(data["server_url"])):
+            return jsonify({"error": "invalid server_url (https://host[:port])",
+                            "fields": ["server_url"]}), 400
+        # Suivre l'arrivée du nœud demande de lire ce cluster.
+        data["cluster"] = _cluster_for_server(data["server_url"])
+        if not data["cluster"]:
+            return jsonify({"error": "declare the cluster of server_url first",
+                            "fields": ["server_url"]}), 400
     if data.get("method", "dhcp") == "static":
         for k in ("ip", "subnet_mask", "gateway"):
             if not data.get(k):

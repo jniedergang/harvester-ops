@@ -105,6 +105,17 @@ The one-shot boot matters: the machine boots the ISO **once**, then goes
 back to its normal boot order and comes up on the freshly installed
 system. Nothing to undo by hand afterwards.
 
+### Adding a node to an existing cluster (API only)
+
+The tab creates a new cluster. `POST /api/baremetal/install` also takes
+`"mode": "join"` with the address of the cluster to join
+(`"server_url": "https://<VIP>:443"`) instead of a VIP. That cluster must be
+declared in the console: the action ends when the new node is **Ready** in
+it (step `wait-node`), not when an API answers, since the cluster's API was
+already up. The configuration generated for a join was checked by
+installing two nodes into a three-node test cluster; the Redfish-driven
+flow in join mode has not been run on real hardware yet.
+
 ---
 
 ## Why the ISO gets remastered

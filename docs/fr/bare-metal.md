@@ -110,6 +110,18 @@ L'amorce unique compte : la machine démarre l'ISO **une seule fois**,
 puis reprend son ordre d'amorçage normal et se relève sur le système
 fraîchement installé. Rien à défaire à la main ensuite.
 
+### Ajouter un nœud à un cluster existant (API seulement)
+
+L'onglet crée un nouveau cluster. `POST /api/baremetal/install` accepte
+aussi `"mode": "join"` avec l'adresse du cluster à rejoindre
+(`"server_url": "https://<VIP>:443"`) au lieu d'une VIP. Ce cluster doit
+être déclaré dans la console : l'action se termine quand le nouveau nœud
+est **prêt** dans ce cluster (étape `wait-node`), pas quand une API
+répond, puisque celle du cluster répondait déjà. La configuration produite
+pour une jonction a été vérifiée en installant deux nœuds dans un cluster
+de test à trois nœuds ; le déroulé par Redfish en mode jonction n'a pas
+encore été exécuté sur du vrai matériel.
+
 ---
 
 ## Pourquoi l'ISO est remasterisé
