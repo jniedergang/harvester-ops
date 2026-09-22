@@ -548,6 +548,19 @@ venir d'OIDC est la suite.
   l'erreur sous-jacente (dernière ligne stderr `kubectl` / script) dans le
   dock, la table Activité et le panneau de détails — jamais un simple
   `exit 1`.
+- **Les changements faits hors de la console apparaissent aussi.** Une
+  surveillance relève les namespaces, les images de VM (avec la progression
+  du téléversement), les réseaux, les claims de volume et les VMs (avec
+  leurs changements d'état) de chaque cluster, et chaque changement fait
+  ailleurs (interface de Harvester, kubectl, Rancher) devient une action
+  terminée dans le dock et l'onglet Activité. Sa dernière photo est gardée
+  sur disque, à côté de l'historique des actions (`watch/` à côté de la
+  base d'actions, ou `HARVESTER_OPS_WATCH_STATE_DIR`) : ce qui a changé
+  pendant l'arrêt de la console, ou pendant qu'un cluster était
+  injoignable, est signalé au premier tour suivant, et marqué comme tel ;
+  un téléversement d'image encore en cours est de nouveau suivi. Seul ce
+  qui sert à comparer est gardé (noms et quelques champs d'état), lisible
+  par le seul compte du service.
 - **Activité filtrable** — l'onglet Activité filtre par cluster, statut et
   type d'action, avec une recherche libre sur les identifiants, les actions
   et les messages d'erreur. Les filtres s'appliquent à tout l'historique en

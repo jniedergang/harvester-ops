@@ -388,7 +388,7 @@ def test_theme_switcher_applies_and_persists(page):
     asserting it changes is enough to prove the palette swap reached
     the DOM. Persistence is checked via reload."""
     # Default theme: SUSE in light mode (Tokyo Night Day until the SUSE
-    # theme became the default) — set on <html> by the inline <head>
+    # theme became the default), set on <html> by the inline <head>
     # bootstrap before style.css parses (no FOUC).
     initial = page.evaluate("""() => ({
       theme: document.documentElement.getAttribute('data-theme'),

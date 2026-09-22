@@ -4,6 +4,48 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.0] - 2026-09-22 - Nothing lost while the console restarts
+
+The console reports in the dock what changes on a cluster outside it: a
+VM, a volume, a network or a namespace created, deleted, started or
+stopped from the Harvester UI, kubectl or Rancher. Anything that changed
+while the console itself was restarting was never reported: at startup,
+the watcher took a first snapshot as its reference, and that snapshot
+already contained the change. Seen on harv1 with a volume created just
+before a restart.
+
+### Fixed
+- **The watcher's last snapshot is kept on disk**, next to the action
+  history (`watch/` beside the actions database, or
+  `HARVESTER_OPS_WATCH_STATE_DIR`). The first round after a start compares
+  against it, so what was created, deleted, started or stopped in the
+  meantime appears in the dock and the Activity tab, marked "changed while
+  the console was not watching". The same holds for a cluster that was
+  unreachable when the console started. An image upload still running at
+  restart is followed again, with one action and not two.
+- Only what is needed to compare is written (names and a few status
+  fields, not the resource versions that change at every status update),
+  and only when it changed: not every 15 seconds. The file is readable by
+  the service account alone and replaced atomically. A damaged type in it
+  is set aside whole, so that no object passes for created; an unwritable
+  directory only means the watcher forgets across restarts, as before.
+
+### Tests
+- 15 unit tests on the kept snapshot: reported changes, first round
+  without a snapshot, damaged or malformed file, no rewrite without
+  change, uploads across a restart, file name confined to its directory,
+  unwritable directory. Each guard was checked by breaking it.
+- On harv1: the console stopped, a namespace and a volume created, the
+  console started; both appeared in the dock at once, with the message
+  saying so. The throwaway objects were then deleted, which the dock
+  reported live.
+- Five browser tests that had been failing for several releases are
+  aligned with the current interface: the default theme is SUSE, the VM
+  stop order has its own sub-tab, shutdown groups are ordered by their
+  own priority (only the default group runs in parallel, under a locked
+  name), and each view has its own inline sub-tab strip. The browser
+  suite is fully green again.
+
 ## [1.43.0] - 2026-09-21 - A cluster view that says what each VM consumes
 
 The Cluster view of the Overview was the last Cytoscape graph of the

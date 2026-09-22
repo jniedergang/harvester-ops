@@ -4204,6 +4204,83 @@ _cluster_watch_state = {}
 _cluster_watch_lock = threading.Lock()
 _cluster_watch_threads = {}
 
+# v1.44.0 : la dernière photo est gardée sur disque. Au démarrage, la
+# surveillance n'avait pas de photo précédente : elle en prenait une de
+# référence, qui contenait déjà ce qui avait changé pendant l'arrêt, et ne le
+# signalait jamais (constaté sur harv1 : un volume créé juste avant un
+# redémarrage n'est jamais apparu). Le premier tour se compare maintenant à
+# la photo gardée, à côté de l'historique des actions : même persistance.
+WATCH_STATE_DIR = Path(os.environ.get("HARVESTER_OPS_WATCH_STATE_DIR",
+                                      str(ACTIONS_DB.parent / "watch")))
+_watch_state_saved = {}    # cluster -> dernière photo écrite (forme réduite)
+_watch_resumed = {}        # cluster -> types repris du disque, pas encore comparés
+
+
+def _watch_state_path(cluster):
+    """Un fichier par cluster, dont le nom ne peut pas sortir du répertoire."""
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", cluster or "") or "_"
+    return WATCH_STATE_DIR / f"{safe}.json"
+
+
+def _watch_state_reduce(prev_all):
+    """Ce qui sert à comparer, sans la version de ressource : elle change à
+    chaque mise à jour de statut, et ferait écrire le disque toutes les 15 s."""
+    return {kind: {uid: {"name": v.get("name", "?"), "extra": v.get("extra") or {}}
+                   for uid, v in snap.items()}
+            for kind, snap in prev_all.items()}
+
+
+def _watch_state_save(cluster, prev_all):
+    reduced = _watch_state_reduce(prev_all)
+    if _watch_state_saved.get(cluster) == reduced:
+        return
+    path = _watch_state_path(cluster)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Un inventaire du cluster : lisible par le seul compte du service.
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"saved_at": time.time(), "kinds": reduced}, f)
+        os.replace(tmp, path)
+        _watch_state_saved[cluster] = reduced
+    except OSError as e:
+        # Sans disque, la surveillance continue : elle perd seulement la
+        # mémoire d'un redémarrage à l'autre, comme avant.
+        log_watch.warning("%s: photo non gardée sur disque (%s)", cluster, e)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _watch_state_load(cluster):
+    """La photo gardée, au format de la mémoire ; {} si absente ou illisible.
+
+    Tout ou rien PAR TYPE : une entrée écartée passerait, au premier tour,
+    pour un objet créé pendant l'arrêt. Un type abîmé est donc écarté en
+    entier (il repart d'une photo de référence) ; les autres restent."""
+    try:
+        data = json.loads(_watch_state_path(cluster).read_text())
+    except (OSError, ValueError):
+        return {}
+    kinds = data.get("kinds") if isinstance(data, dict) else None
+    if not isinstance(kinds, dict):
+        return {}
+    out = {}
+    for kind, snap in kinds.items():
+        if not isinstance(snap, dict):
+            continue
+        entries = {}
+        for uid, v in snap.items():
+            if not (isinstance(v, dict) and isinstance(v.get("name"), str)
+                    and isinstance(v.get("extra", {}), dict)):
+                break
+            entries[uid] = {"rv": "", "name": v["name"], "extra": v.get("extra", {})}
+        else:
+            out[kind] = entries
+    return out
+
 
 def _cluster_snapshot(kc, kind, scope):
     """Run kubectl get <kind> -A -o json and return {uid: {rv, name, extra}}.
@@ -4299,12 +4376,15 @@ def _cluster_snapshot_all(kc, resources):
             for _, kind, _, api_kind in resources}
 
 
-def _record_cluster_event(cluster, kind, op, name):
+def _record_cluster_event(cluster, kind, op, name, while_down=False):
     """Materialize a cluster-side event as an ActionRun(status=done).
 
     `name` is `<namespace>/<name>` for namespaced resources, `<name>` for
     cluster-scoped — embedded in the action label so the dock card and
-    activity row show *which* resource changed, not just the type."""
+    activity row show *which* resource changed, not just the type.
+    `while_down`: found by the first round after a restart (or after the
+    cluster came back), against the snapshot kept on disk; when exactly it
+    happened is unknown."""
     rid = uuid.uuid4().hex[:12]
     label = f"harvester:{kind}-{op}:{name}"
     run = ActionRun(rid, label, cluster, ["watch"], dry_run=False)
@@ -4313,9 +4393,12 @@ def _record_cluster_event(cluster, kind, op, name):
     run.exit_code = 0
     run.started_at = now
     run.ended_at = now
+    how = (f"changed while the console was not watching {cluster}, "
+           f"found when the watch resumed"
+           if while_down else f"detected via cluster watch on {cluster}")
     run.events.append({
         "type": "step", "step_id": op, "status": "done",
-        "message": f"{kind} {name} (detected via cluster watch on {cluster})",
+        "message": f"{kind} {name} ({how})",
         "ts": now,
     })
     run.events.append({
@@ -4397,7 +4480,12 @@ def _watcher_handle_image_progress(cluster, uid, name, info, is_new, is_gone):
 def _cluster_watch_iteration(cluster, kc):
     """One snapshot + diff cycle for one cluster."""
     with _cluster_watch_lock:
-        prev_all = _cluster_watch_state.setdefault(cluster, {})
+        if cluster not in _cluster_watch_state:
+            # Premier tour de ce processus : reprendre la photo gardée.
+            _cluster_watch_state[cluster] = _watch_state_load(cluster)
+            _watch_resumed[cluster] = set(_cluster_watch_state[cluster])
+        prev_all = _cluster_watch_state[cluster]
+        resumed = _watch_resumed.setdefault(cluster, set())
     snaps = _cluster_snapshot_all(kc, CLUSTER_WATCH_RESOURCES)
     for label, kind, scope, _api_kind in CLUSTER_WATCH_RESOURCES:
         snap = snaps.get(kind)
@@ -4421,15 +4509,21 @@ def _cluster_watch_iteration(cluster, kc):
             added = set(snap) - set(prev)
             removed = set(prev) - set(snap)
             prev_all[kind] = snap
+            # Comparé à la photo du disque : ce qui suit a eu lieu pendant
+            # l'arrêt de la console.
+            while_down = kind in resumed
+            resumed.discard(kind)
 
         # Cluster-wide create/delete events
         for uid in added:
-            _record_cluster_event(cluster, label, "created", snap[uid]["name"])
+            _record_cluster_event(cluster, label, "created", snap[uid]["name"],
+                                  while_down=while_down)
             if kind.startswith("virtualmachineimages"):
                 _watcher_handle_image_progress(cluster, uid, snap[uid]["name"],
                                                snap[uid], is_new=True, is_gone=False)
         for uid in removed:
-            _record_cluster_event(cluster, label, "deleted", prev[uid]["name"])
+            _record_cluster_event(cluster, label, "deleted", prev[uid]["name"],
+                                  while_down=while_down)
             if kind.startswith("virtualmachineimages"):
                 _watcher_handle_image_progress(cluster, uid, prev[uid]["name"],
                                                prev[uid], is_new=False, is_gone=True)
@@ -4437,6 +4531,16 @@ def _cluster_watch_iteration(cluster, kc):
         # Per-kind status tracking — only fire on meaningful changes.
         common = set(snap) & set(prev)
         if kind.startswith("virtualmachineimages"):
+            if while_down:
+                # Un téléversement en cours au redémarrage : l'action du
+                # processus précédent est perdue, en ouvrir une qui le suit.
+                for uid in common:
+                    ex = snap[uid].get("extra", {})
+                    if (uid not in _image_upload_actions and not ex.get("imported")
+                            and ex.get("progress", 0) < 100):
+                        _watcher_handle_image_progress(
+                            cluster, uid, snap[uid]["name"], snap[uid],
+                            is_new=True, is_gone=False)
             for uid in common:
                 old_ex = prev[uid].get("extra", {})
                 new_ex = snap[uid].get("extra", {})
@@ -4453,7 +4557,10 @@ def _cluster_watch_iteration(cluster, kc):
                 if old_ph and new_ph and old_ph != new_ph:
                     _record_cluster_event(
                         cluster, label, f"phase-{new_ph.lower()}",
-                        snap[uid]["name"])
+                        snap[uid]["name"], while_down=while_down)
+
+    with _cluster_watch_lock:
+        _watch_state_save(cluster, dict(prev_all))
 
 
 def _cluster_watch_thread(cluster):

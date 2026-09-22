@@ -497,6 +497,17 @@ than proven by an identity provider; sourcing it from OIDC is the next step.
   (auto-reconnecting). Failed actions carry the underlying error (last
   `kubectl` / script stderr line) in the dock, the Activity table and the
   details panel — never a bare `exit 1`.
+- **Changes made outside the console show up too.** A watcher polls the
+  namespaces, VM images (with upload progress), networks, volume claims and
+  VMs (with their state changes) of each cluster, and each change made
+  elsewhere (Harvester UI, kubectl, Rancher) becomes a completed action in
+  the dock and the Activity tab. Its last snapshot is kept on disk, next to
+  the action history (`watch/` beside the actions database, or
+  `HARVESTER_OPS_WATCH_STATE_DIR`), so what changed while the console was
+  stopped, or while a cluster was unreachable, is reported at the first
+  round after, marked as such; an image upload still running is followed
+  again. Only what is needed to compare is kept (names and a few status
+  fields), readable by the service account alone.
 - **Filtered activity** — the Activity tab filters by cluster, status and
   kind of action, with a free-text search over ids, actions and error
   messages. The filters run against the whole history in SQL, not against
