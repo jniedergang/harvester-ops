@@ -28,7 +28,22 @@ is where it had been exercised until now.
   defect the other way round: it called a node under maintenance "not
   Ready".
 
+### Added
+- **One shutdown or startup at a time per cluster.** While filming, a
+  startup stuck on the defect above was still running when a new shutdown
+  was launched on the same cluster: one was halting the virtual machines
+  the other was waiting to restart. Two operators, or a double click,
+  would do the same. The console now refuses with a clear message in the
+  shutdown or startup log (naming the action already running), and the
+  scripts take a lock next to their logs, so a sequence started from the
+  command line and one started from the console see each other. Dry runs
+  change nothing: they neither take nor wait for the lock.
+
 ### Tests
+- Six tests on the console guard (another cluster, a dry run or a finished
+  sequence do not block; the endpoint answers 409 naming the running
+  action), three on the script lock, and a browser test that the refusal
+  shows in the log in English and French.
 - A test replays the shutdown loop with a fake `ssh` and fails when a node
   is missed, plus two guards on the helper and on the shutdown step.
 - Three tests on the Ready count with a fake `kubectl` (cordoned nodes are

@@ -65,6 +65,9 @@ def test_start_action_threads_force_to_cli(monkeypatch):
                         lambda: {"clusters": [{"name": "c1"}]})
     run = wapp.start_action("shutdown", "c1", force=True)
     assert "--force" in run.cmd
+    # v1.44.10 : un second arrêt du même cluster est refusé tant que le
+    # premier tourne ; on termine celui-ci avant de lancer l'autre.
+    run.status = "done"
     run2 = wapp.start_action("shutdown", "c1")
     assert "--force" not in run2.cmd
     with wapp.ACTIONS_LOCK:

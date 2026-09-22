@@ -49,6 +49,12 @@ L'outillage garantit ces invariants en séquençant les opérations et en vérif
 
 ## 4. Exécution
 
+> **Une séquence à la fois.** Un cluster n'exécute qu'un arrêt ou un
+> démarrage à la fois. La console refuse le second et dit quelle action
+> tourne déjà ; les scripts font de même par un verrou posé à côté de leurs
+> journaux, si bien que la ligne de commande et la console se voient. Les
+> simulations ne sont jamais bloquées.
+
 ### Recommandé : mode interactif
 
 Pour une première exécution sur un cluster, **toujours** utiliser `--interactive`. Le script fait une pause entre chaque étape pour permettre à l'opérateur de vérifier et d'interrompre si nécessaire.

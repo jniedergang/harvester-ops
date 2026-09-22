@@ -90,6 +90,15 @@ const App = (() => {
                           || `needs role ${d.required}`);
         }
       }
+      // v1.44.10 : un arrêt ou un démarrage déjà en cours sur ce cluster.
+      // La réponse dit lequel ; l'appelant l'affiche dans le journal.
+      if (res.status === 409) {
+        const d = await res.json().catch(() => ({}));
+        const err = new Error(d.error || `${path}: HTTP 409`);
+        err.status = 409;
+        err.body = d;
+        throw err;
+      }
       throw new Error(`${path}: HTTP ${res.status}`);
     }
     return res.json();
@@ -1091,6 +1100,22 @@ const App = (() => {
     return run;
   }
 
+  // Un lancement refusé doit se VOIR : sans cela, la promesse rejetée
+  // disparaissait en silence et le bouton semblait ne rien faire.
+  function reportLaunchError(action, e) {
+    const logSel = action === 'shutdown' ? '#shutdown-log' : '#startup-log';
+    if (e && e.status === 409 && e.body) {
+      const id = e.body.running || '?';
+      // Clés littérales : le contrôle de parité des traductions ne voit
+      // pas une clé passée par variable.
+      appendLog(logSel, e.body.running_action === 'startup'
+        ? i18n.t('action.busy.startup', { id })
+        : i18n.t('action.busy.shutdown', { id }), 'error');
+    } else {
+      appendLog(logSel, (e && e.message) || String(e), 'error');
+    }
+  }
+
   function attachSSE(runId, action) {
     if (currentSSE) currentSSE.close();
 
@@ -1723,6 +1748,7 @@ const App = (() => {
       const cancelBtn = $('#btn-cancel-shutdown');
       if (cancelBtn) cancelBtn.disabled = false;
       try { await launchAction('shutdown'); }
+      catch (e) { reportLaunchError('shutdown', e); }
       finally {
         $('#btn-shutdown').disabled = false;
         if (cancelBtn) cancelBtn.disabled = true;
@@ -1732,6 +1758,7 @@ const App = (() => {
     $('#btn-startup')?.addEventListener('click', async () => {
       $('#btn-startup').disabled = true;
       try { await launchAction('startup'); }
+      catch (e) { reportLaunchError('startup', e); }
       finally { $('#btn-startup').disabled = false; }
     });
 

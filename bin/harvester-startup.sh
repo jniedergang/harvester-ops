@@ -57,6 +57,7 @@ done
 
 load_cluster "$CLUSTER_NAME"
 init_logging "startup"
+acquire_cluster_lock "startup"
 
 cat >&2 <<EOF
 

@@ -43,6 +43,29 @@ SSH_OPTS=""
 declare -a CLUSTER_NODES=()    # "hostname|ip|role"
 
 # -----------------------------------------------------------------------------
+# Un seul arrêt ou démarrage à la fois par cluster
+# -----------------------------------------------------------------------------
+# v1.44.10 : la console refuse déjà d'en lancer un second, mais la ligne de
+# commande passe à côté de la console. Le verrou vit à côté des journaux :
+# le répertoire est partagé entre l'hôte et le conteneur du service, donc un
+# arrêt lancé en CLI et un démarrage lancé depuis la console se voient.
+# Une simulation (--dry-run) ne touche à rien et ne prend pas le verrou.
+acquire_cluster_lock() {
+    local action="${1:-action}"
+    [[ "$DRY_RUN" == "1" ]] && return 0
+    command -v flock >/dev/null 2>&1 || { log_warn "flock absent : pas de verrou de cluster"; return 0; }
+    local lock="$HARVESTER_OPS_LOG_DIR/.lock-${CLUSTER_NAME:-default}"
+    exec 9>>"$lock" || { log_warn "verrou $lock inaccessible"; return 0; }
+    if ! flock -n 9; then
+        log_error "Un arrêt ou un démarrage tourne déjà sur '$CLUSTER_NAME' : $(cat "$lock" 2>/dev/null)"
+        log_error "A shutdown or startup is already running on '$CLUSTER_NAME'."
+        emit_event "lock" "error" "another shutdown or startup is running on $CLUSTER_NAME"
+        exit 3
+    fi
+    printf '%s pid %s since %s\n' "$action" "$$" "$(date '+%F %T')" > "$lock"
+}
+
+# -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
 _log_file=""

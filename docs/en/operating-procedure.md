@@ -48,6 +48,12 @@ The toolkit enforces these invariants by sequencing operations and verifying sta
 
 ## 4. Running the procedure
 
+> **One sequence at a time.** A cluster runs at most one shutdown or startup
+> at a time. The console refuses a second one and says which action is
+> already running; the scripts do the same through a lock kept next to
+> their logs, so the command line and the console see each other. Dry runs
+> are never blocked.
+
 ### Recommended: interactive mode
 
 For the first execution against a cluster, **always use `--interactive`**. The script pauses between every step so the operator can verify state and abort if anything is unexpected.

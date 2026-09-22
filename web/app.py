@@ -1139,6 +1139,24 @@ def run_action_thread(run: ActionRun):
     run.close()
 
 
+# v1.44.10 : un arrêt et un démarrage du MÊME cluster ne doivent jamais
+# tourner ensemble. Vécu sur le banc : un démarrage resté bloqué tournait
+# encore quand un nouvel arrêt a été lancé ; l'un isolait et arrêtait les
+# VMs pendant que l'autre attendait de les relancer. Deux opérateurs, ou un
+# double clic, produiraient la même chose. Les simulations (dry-run) ne
+# touchent à rien : elles ne bloquent pas et ne sont pas bloquées.
+CLUSTER_SEQUENCES = ("shutdown", "startup")
+
+
+class ActionBusy(Exception):
+    """Un arrêt ou un démarrage tourne déjà sur ce cluster."""
+
+    def __init__(self, run):
+        super().__init__(f"a {run.action} is already running on {run.cluster} "
+                         f"(action {run.id}); wait for it to end or cancel it")
+        self.run = run
+
+
 def start_action(action, cluster, dry_run=False, interactive=False,
                  namespace=None, extra_args=None, snapshot=False, force=False):
     """Build the command and spawn the action."""
@@ -1185,6 +1203,15 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     run.identity_env = identity_env()
     run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
+        # Contrôle et inscription sous le même verrou : deux requêtes
+        # simultanées ne peuvent pas passer toutes les deux.
+        if action in CLUSTER_SEQUENCES and not dry_run:
+            busy = next((r for r in ACTIONS.values()
+                         if r.cluster == cluster and r.action in CLUSTER_SEQUENCES
+                         and not r.dry_run and r.status in ("starting", "running")),
+                        None)
+            if busy:
+                raise ActionBusy(busy)
         ACTIONS[run_id] = run
 
     threading.Thread(target=run_action_thread, args=(run,), daemon=True).start()
@@ -5521,6 +5548,9 @@ def api_action_start():
         run = start_action(action, cluster, dry_run=dry_run,
                            namespace=namespace, extra_args=extra_args,
                            snapshot=snapshot, force=force)
+    except ActionBusy as e:
+        return jsonify({"error": str(e), "running": e.run.id,
+                        "running_action": e.run.action}), 409
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 

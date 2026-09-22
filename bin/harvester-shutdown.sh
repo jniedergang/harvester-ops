@@ -91,6 +91,7 @@ done
 
 load_cluster "$CLUSTER_NAME"
 init_logging "shutdown"
+acquire_cluster_lock "shutdown"
 
 cat >&2 <<EOF
 
