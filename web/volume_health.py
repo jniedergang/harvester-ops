@@ -124,7 +124,29 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
 
     eng = (engine or {}).get("status") or {}
     modes = eng.get("replicaModeMap") or {}
-    failed = [r for r in replicas if (r.get("spec") or {}).get("failedAt")]
+
+    def unavailable(st):
+        """Tombé, ou revenu sans disque prêt : il reviendra (au retour d'un
+        nœud, relevé sur harvlab, son disque reste non prêt une minute)."""
+        # Sans aucun disque déclaré, il ne porte rien : ce n'est pas un retour.
+        return not st["ready"] or (bool(st["disks"])
+                                   and not any(d["ready"] for d in st["disks"].values()))
+
+    def on_down_node(r):
+        spec = r.get("spec") or {}
+        node = nodes.get(spec.get("nodeID"))
+        if not spec.get("nodeID"):
+            return False
+        if node is None or unavailable(node):
+            return True
+        disk = node["disks"].get(spec.get("diskID"))
+        return disk is not None and not disk["ready"]
+
+    # Une réplique en échec parce que son NŒUD est tombé n'est pas à
+    # reconstruire : Longhorn la reprend au retour du nœud. Elle est dite
+    # sous « node-unavailable », sans correction (relevé sur harvlab).
+    failed = [r for r in replicas
+              if (r.get("spec") or {}).get("failedAt") and not on_down_node(r)]
     healthy = [r for r in replicas
                if not (r.get("spec") or {}).get("failedAt") and modes.get(_name(r)) == "RW"]
     rebuilding = sorted(n for n, m in modes.items() if m == "WO")
@@ -195,7 +217,12 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
             "fix": fix}
 
     hard = not soft_anti_affinity(volume, settings)
-    if hard and wanted > len(sched_nodes) and (degraded or detached):
+    # Un nœud TOMBÉ n'est pas un nœud qui manque : il reviendra, et ramener
+    # le nombre de répliques changerait pour de bon une panne passagère. Seul
+    # un manque qui subsiste en comptant les nœuds tombés est structurel.
+    down_nodes = [n for n, st in nodes.items() if unavailable(st)]
+    if (hard and wanted > len(sched_nodes) + len(down_nodes)
+            and (degraded or detached)):
         target = len(sched_nodes)
         found["not-enough-nodes"] = {
             "severity": "action" if degraded else "watch",
@@ -212,9 +239,13 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
                      and d["node"] in sched_nodes}
         if hard:
             # Une réplique par nœud : un nœud qui en porte déjà une saine
-            # n'a pas besoin de place, les autres si.
+            # n'a pas besoin de place, les autres si. Un nœud tombé qui porte
+            # une réplique la rapportera à son retour : ce n'est pas de la
+            # place qui manque.
             hosting = {(r.get("spec") or {}).get("nodeID") for r in healthy}
-            short = len(hosting | with_room) < wanted
+            coming_back = {(r.get("spec") or {}).get("nodeID") for r in replicas
+                           if on_down_node(r)}
+            short = len(hosting | with_room | coming_back) < wanted
         else:
             short = not with_room
         if short:
@@ -240,6 +271,10 @@ def diagnose(volume, replicas, engine, nodes, settings, disks):
     if down and (degraded or faulted):
         found["node-unavailable"] = {"severity": "action", "facts": {"replicas": down},
                                      "fix": None}
+    elif down and detached and any(d["why"] == "node" for d in down):
+        # Détaché, il démarrerait dégradé tant que le nœud n'est pas revenu.
+        found["node-unavailable"] = {"severity": "watch", "facts": {"replicas": down},
+                                     "fix": None}
 
     if degraded and not found:
         cond = _conditions(volume).get("Scheduled") or {}
@@ -262,7 +297,8 @@ def health_of(volume, findings):
         return "faulted"
     if robustness == "degraded":
         return "degraded"
-    if any(f["cause"] == "not-enough-nodes" and f["severity"] == "watch" for f in findings):
+    if any(f["cause"] in ("not-enough-nodes", "node-unavailable") and f["severity"] == "watch"
+           for f in findings):
         return "at-risk"
     return "healthy" if robustness == "healthy" else "unknown"
 

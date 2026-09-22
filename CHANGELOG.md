@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.4] - 2026-09-22 - A node that is down is not a missing node
+
+The degraded-volume cases 1.42.0 could not exercise (a replica on a node
+that is down, a failed replica, a volume with no healthy copy) were run on
+the three-node test cluster by cutting a node's power.
+
+### Fixed
+- **While a node was down, the Storage view offered two harmful fixes**:
+  "rebuild now", which deletes the replica Longhorn takes back when the node
+  returns, and "lower to 2 replicas", which turns a passing outage into a
+  permanent loss of redundancy. A replica on a node that is down, or back
+  without its disk ready yet (a window of about a minute seen when the node
+  returned), is now reported only as unavailable, with no one-click fix;
+  lacking nodes or room is no longer claimed when the gap is a node that
+  will come back. A node with no disk at all is not counted as coming back.
+- A detached volume with a replica on such a node is shown at risk, with
+  the reason, instead of "not enough nodes".
+
+### Tests
+- 6 new unit tests on down and returning nodes; each rule was checked by
+  breaking it.
+- On harvlab: node 3 powered off abruptly. A volume with its only replica
+  there was shown faulted with no fix, its pod kept running, and it
+  recovered on its own when the node came back; the other volumes were
+  shown with an unavailable replica and no fix, then rebuilding, then
+  healthy. A replica failed on a healthy node (its instance manager killed)
+  was offered "rebuild now"; applied from the console it deleted the failed
+  replica and Longhorn rebuilt a new one within twenty seconds. When
+  Longhorn had already started reusing the failed replica, the server
+  redid the diagnosis and refused the fix as no longer applicable.
+
 ## [1.44.3] - 2026-09-22 - Node maintenance, checked on three real nodes
 
 Cordon, uncordon and maintenance mode shipped in 1.43.0 marked "not

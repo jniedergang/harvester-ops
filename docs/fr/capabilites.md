@@ -324,9 +324,19 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   et refait le diagnostic avant d'agir, avec des valeurs qu'il calcule
   lui-même ; il ne touche jamais un volume en panne, ne descend jamais sous
   une réplique, ne supprime jamais la dernière copie saine, et ne réactive
-  pas la reconstruction pendant un arrêt ou un démarrage du cluster. Les
-  volumes Longhorn dont le PVC a été supprimé sont montrés aussi, signalés
-  comme tels.
+  pas la reconstruction pendant un arrêt ou un démarrage du cluster. Un
+  nœud **tombé, ou revenu sans son disque encore prêt**, n'est pas un nœud
+  qui manque : ses répliques sont dites indisponibles, sans correction en un
+  clic, puisque Longhorn les reprend au retour du nœud ; reconstruire tout
+  de suite ou réduire le nombre de répliques changerait une panne passagère
+  en données ou en redondance perdues. Un volume détaché qui a une réplique
+  sur un tel nœud est montré à risque. Vérifié sur un cluster de test à
+  trois nœuds en coupant l'alimentation d'un nœud : un volume sans plus
+  aucune copie saine (montré en panne, sans correction proposée) est revenu
+  seul avec le nœud ; la correction « reconstruire maintenant » a été
+  appliquée depuis la console à une réplique en échec sur un nœud sain, et
+  Longhorn en a reconstruit une neuve. Les volumes Longhorn dont le PVC a
+  été supprimé sont montrés aussi, signalés comme tels.
 - **Métriques d'overview** : nodes, VMs en marche, nombre de volumes
   Longhorn et limite de rebuild, table des nodes.
 - **`/metrics` Prometheus** — compteurs/durées d'actions, gauge in-flight,

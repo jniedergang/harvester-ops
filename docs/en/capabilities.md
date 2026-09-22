@@ -296,8 +296,17 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   before acting, with values it computes itself; it never touches a
   faulted volume, never goes below one replica, never deletes the last
   healthy copy, and does not switch rebuilding on while a cluster shutdown
-  or startup is running. Longhorn volumes whose claim was deleted are shown
-  too, marked as such.
+  or startup is running. A node that is **down, or back without its disk
+  ready yet**, is not a missing node: its replicas are reported as
+  unavailable with no one-click fix, since Longhorn takes them back when
+  the node returns, and rebuilding now or lowering the replica count would
+  turn a passing outage into lost data or lost redundancy. A detached
+  volume with a replica on such a node is shown at risk. Verified on a
+  three-node test cluster by cutting a node's power: a volume with no
+  healthy copy left (shown faulted, no fix offered) came back on its own
+  with the node; the rebuild-now fix was applied from the console to a
+  replica failed on a healthy node, and Longhorn rebuilt a new one. Longhorn
+  volumes whose claim was deleted are shown too, marked as such.
 - **Overview metrics**: nodes, VMs running, Longhorn volume count and
   rebuild limit, node table.
 - **Prometheus `/metrics`** — action counters/durations, in-flight gauge,

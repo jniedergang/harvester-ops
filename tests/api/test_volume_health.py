@@ -273,6 +273,75 @@ def test_a_replica_on_a_node_that_is_down():
     assert "rebuild-pending" not in causes(f)
 
 
+def test_a_node_that_is_down_is_not_a_missing_node():
+    """Relevé sur harvlab en coupant un nœud : la vue proposait « reconstruire
+    maintenant » (qui supprime la réplique que Longhorn reprendra au retour du
+    nœud) et « passer à 2 répliques » (qui change pour de bon une panne
+    passagère). Seule la cause est dite, sans correction en un clic."""
+    nodes = [lh_node("n1"), lh_node("n2"), lh_node("n3", ready=False)]
+    reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2"),
+            replica("r3", node="n3", disk="uuid-n3", failed="2026-09-22T10:44:00Z",
+                    running=False)]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW", "r2": "RW"}), nodes=nodes)
+    assert causes(f) == ["node-unavailable"]
+    assert all(x["fix"] is None for x in f)
+
+
+def test_a_failed_replica_on_a_ready_node_can_still_be_rebuilt_beside_a_down_node():
+    nodes = [lh_node("n1"), lh_node("n2"), lh_node("n3", ready=False)]
+    reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2",
+                                   failed="2026-09-22T10:00:00Z", running=False),
+            replica("r3", node="n3", disk="uuid-n3", failed="2026-09-22T10:44:00Z",
+                    running=False)]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW"}), nodes=nodes)
+    assert fix_of(f, "replica-failed") == {"kind": "rebuild-now", "params": {"replica": "r2"}}
+    failed = next(x for x in f if x["cause"] == "replica-failed")["facts"]["replicas"]
+    assert [r["replica"] for r in failed] == ["r2"]
+
+
+def test_a_detached_volume_with_a_replica_on_a_down_node_is_at_risk():
+    nodes = [lh_node("n1"), lh_node("n2"), lh_node("n3", ready=False)]
+    vol = volume(replicas=3, robustness="unknown", state="detached")
+    reps = [replica("r1", running=False), replica("r2", node="n2", disk="uuid-n2", running=False),
+            replica("r3", node="n3", disk="uuid-n3", running=False)]
+    f = run(vol, reps, None, nodes=nodes)
+    assert causes(f) == ["node-unavailable"]
+    assert f[0]["severity"] == "watch" and f[0]["fix"] is None
+    assert vh.health_of(vol, f) == "at-risk"
+
+
+def test_a_node_whose_disk_is_not_ready_yet_is_coming_back():
+    """Relevé sur harvlab au retour du nœud : prêt pour Kubernetes, son disque
+    ne l'est pas encore pendant une minute. Les corrections contre-productives
+    ne doivent pas revenir dans cette fenêtre."""
+    nodes = [lh_node("n1"), lh_node("n2"), lh_node("n3", disk_ready=False, disk_sched=False)]
+    reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2"),
+            replica("r3", node="n3", disk="uuid-n3", failed="2026-09-22T10:44:00Z",
+                    running=False)]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW", "r2": "RW"}), nodes=nodes)
+    assert causes(f) == ["node-unavailable"]
+    assert all(x["fix"] is None for x in f)
+
+
+def test_a_node_without_any_disk_is_not_coming_back():
+    diskless = lh_node("n3")
+    diskless["spec"]["disks"] = {}
+    diskless["status"]["diskStatus"] = {}
+    nodes = [lh_node("n1"), lh_node("n2"), diskless]
+    reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2")]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW", "r2": "RW"}), nodes=nodes)
+    assert fix_of(f, "not-enough-nodes") == {"kind": "set-replicas", "params": {"replicas": 2}}
+
+
+def test_a_node_gone_for_good_brings_the_reduction_back():
+    """Retiré de Longhorn (la marche à suivre quand il ne reviendra pas), le
+    nœud ne compte plus : manquer de nœuds redevient structurel."""
+    nodes = [lh_node("n1"), lh_node("n2")]
+    reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2")]
+    f = run(volume(replicas=3), reps, engine(modes={"r1": "RW", "r2": "RW"}), nodes=nodes)
+    assert fix_of(f, "not-enough-nodes") == {"kind": "set-replicas", "params": {"replicas": 2}}
+
+
 def test_a_replica_on_a_disk_that_is_not_ready():
     nodes = [lh_node("n1"), lh_node("n2", disk_ready=False, disk_sched=False), lh_node("n3")]
     reps = [replica("r1"), replica("r2", node="n2", disk="uuid-n2", running=False)]
