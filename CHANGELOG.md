@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.7] - 2026-09-22 - A maintenance that would never finish is said so
+
+### Fixed
+- **A volume used by a pod could hold a node's maintenance for ever**,
+  unannounced. When an attached volume's only healthy replica is on the
+  node, Longhorn refuses to evict its instance manager and the drain retries
+  endlessly. Harvester's check, and so the console's, looked only at the
+  volumes of VMs. The pre-check now lists such volumes with their claim and
+  pods, and says what to do: add a replica elsewhere, or stop what uses
+  them.
+
+### Tests
+- 2 new unit tests (pod volume held on the node, VM volume left to the VM
+  rule) and the browser test of the section.
+- On harvlab: a node's maintenance stayed "requested" for ten minutes on a
+  one-replica volume used by a pod on another node; the pre-check named
+  that volume and pod; once the pod was stopped, the maintenance completed.
+
 ## [1.44.6] - 2026-09-22 - The LLDP probe, against a real frame
 
 Since 1.36.0 the LLDP probe carried a warning: never checked against a real

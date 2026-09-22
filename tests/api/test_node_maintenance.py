@@ -204,6 +204,37 @@ def test_a_vm_whose_volume_is_not_healthy_is_flagged():
     assert "default/web" in plan["migrate"] and plan["blocked"] is False
 
 
+def test_a_pod_volume_whose_last_replica_is_here_holds_the_drain():
+    """Relevé sur harvlab : un volume attaché à un POD, dont la seule réplique
+    saine est sur le nœud, bloque le drain pour de bon (Longhorn refuse
+    d'évincer son instance-manager). Harvester ne regarde que les volumes
+    des VMs ; le plan le dit, pour tout consommateur."""
+    pod_vol = {"metadata": {"name": "pvc-db"},
+               "status": {"state": "attached", "robustness": "healthy",
+                          "kubernetesStatus": {"namespace": "default", "pvcName": "db-data",
+                                               "workloadsStatus": [{"podName": "db-0",
+                                                                    "workloadType": "Pod"}]}}}
+    reps = [lh_replica("pvc-db", "n1")]
+    plan = nm.plan(HA[0], HA, [], [pod_vol], reps, force=False)
+    assert plan["stuck_volumes"] == [{"volume": "pvc-db", "claim": "default/db-data",
+                                      "pods": ["db-0"]}]
+    # une seconde réplique saine ailleurs : plus de blocage
+    reps.append(lh_replica("pvc-db", "n2"))
+    assert nm.plan(HA[0], HA, [], [pod_vol], reps, force=False)["stuck_volumes"] == []
+    # détaché : rien ne le retient
+    pod_vol["status"]["state"] = "detached"
+    assert nm.plan(HA[0], HA, [], [pod_vol], reps[:1], force=False)["stuck_volumes"] == []
+
+
+def test_a_vm_volume_stays_under_its_vm():
+    """Pour une VM, c'est déjà « LastHealthyReplica » (non migrable)."""
+    vol = dict(lh_volume("pvc-web", "web"))
+    vol["status"] = dict(vol["status"], state="attached")
+    plan = nm.plan(HA[0], HA, [vmi("web", "n1")], [vol], [lh_replica("pvc-web", "n1")])
+    assert plan["stuck_volumes"] == []
+    assert plan["non_migratable"] == {"LastHealthyReplica": ["default/web"]}
+
+
 def test_non_migratable_vms_block_unless_forced():
     vmis = [vmi("gpu", "n1", migratable=False)]
     plan = nm.plan(HA[0], HA, vmis, [], [], force=False)

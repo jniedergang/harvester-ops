@@ -270,6 +270,10 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   - celles dont un **volume n'est pas sain** : Longhorn ne migre pas un
     volume dont une réplique attend sa reconstruction, et la maintenance peut
     alors durer bien plus longtemps ;
+  - les **volumes attachés utilisés par des pods** dont la seule réplique
+    saine est sur le nœud : Longhorn ne la lâche pas et le drain attend
+    indéfiniment (le contrôle de Harvester ne regarde que les volumes des
+    VMs) ;
   - les VMs étiquetées pour être arrêtées pendant la maintenance.
   L'action tracée suit Harvester jusqu'à ce que le nœud soit en maintenance
   (10 minutes au plus) et rapporte un refus de son contrôleur. Sortir de

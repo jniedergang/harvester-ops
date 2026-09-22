@@ -378,7 +378,8 @@ def test_vms_the_drain_will_stop_are_said_so(context, flask_server):
     drained = dict(base, force=False, will_stop=[], drain_stops=[
         {"vm": "default/db", "restarts": False},
         {"vm": "default/batch", "restarts": True}],
-        volume_waits=[{"vm": "default/web", "volume": "pvc-web"}])
+        volume_waits=[{"vm": "default/web", "volume": "pvc-web"}],
+        stuck_volumes=[{"volume": "pvc-db", "claim": "default/db-data", "pods": ["db-0"]}])
     forced = dict(base, force=True, will_stop=["default/gpu"], drain_stops=[],
                   non_migratable={"LiveMigratable": ["default/gpu"]})
     view = open_cluster(page, flask_server["base_url"], checks=[drained, forced])
@@ -391,6 +392,8 @@ def test_vms_the_drain_will_stop_are_said_so(context, flask_server):
     assert "LiveMigrateIfPossible" in text
     # un volume pas sain retarde la migration : dit avant
     assert "default/web : pvc-web" in text and "Storage view" in text
+    # un volume de pod dont la seule réplique saine est ici : le drain attendra
+    assert "the maintenance will not finish" in text.lower() and "default/db-data (db-0)" in text
     view.locator('[data-cm-act="node-maint-check"]').click()
     page.wait_for_timeout(400)
     assert "they stay stopped after the maintenance" in view.locator('.cm-maint-box').inner_text()

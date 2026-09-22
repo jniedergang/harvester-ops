@@ -214,6 +214,34 @@ def volume_waits(node, vmis, volumes):
     return sorted(out, key=lambda x: (x["vm"], x["volume"]))
 
 
+def stuck_volumes(node, volumes, replicas):
+    """Volumes ATTACHÉS, hors VMs, dont la seule réplique saine est sur ce
+    nœud : Longhorn refuse d'évincer leur instance-manager, et le drain
+    attend indéfiniment (relevé sur harvlab avec un volume de pod).
+    Harvester ne regarde que les volumes des VMs (« LastHealthyReplica »)."""
+    name = _meta(node).get("name")
+    started = {}
+    for r in replicas:
+        if (r.get("status") or {}).get("started"):
+            started.setdefault((r.get("spec") or {}).get("volumeName"), []).append(r)
+    out = []
+    for v in volumes:
+        st = v.get("status") or {}
+        if st.get("state") != "attached":
+            continue
+        ks = st.get("kubernetesStatus") or {}
+        workloads = ks.get("workloadsStatus") or []
+        if any(w.get("workloadType") == "VirtualMachineInstance" for w in workloads):
+            continue
+        healthy = started.get(_meta(v).get("name"), [])
+        if len(healthy) == 1 and (healthy[0].get("spec") or {}).get("nodeID") == name:
+            claim = (f"{ks.get('namespace')}/{ks.get('pvcName')}"
+                     if ks.get("pvcName") else None)
+            out.append({"volume": _meta(v).get("name"), "claim": claim,
+                        "pods": sorted(w.get("podName") for w in workloads if w.get("podName"))})
+    return sorted(out, key=lambda x: x["volume"])
+
+
 def plan(node, nodes, vmis, volumes, replicas, force=False, vms=(), default_eviction=None):
     """Ce que ferait la mise en maintenance, dit AVANT de la demander.
 
@@ -258,6 +286,7 @@ def plan(node, nodes, vmis, volumes, replicas, force=False, vms=(), default_evic
         "drain_stops": drain_stops,
         "migrate": migrate,
         "volume_waits": [w for w in volume_waits(node, vmis, volumes) if w["vm"] in migrate],
+        "stuck_volumes": stuck_volumes(node, volumes, replicas),
     }
 
 

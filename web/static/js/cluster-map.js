@@ -387,6 +387,11 @@ const ClusterMap = (() => {
         <div class="cm-pop-title">${esc(tr('cluster.maintStop', 'Will be shut down'))}</div>${list(p.will_stop || [])}
         ${p.force && (p.will_stop || []).length ? `<p class="form-hint">${esc(tr('cluster.maintStopStays',
           'Shut down by forcing, they stay stopped after the maintenance: restart them by hand.'))}</p>` : ''}
+        ${(p.stuck_volumes || []).length ? `
+        <div class="cm-pop-title warn">${esc(tr('cluster.maintStuck', 'The maintenance will not finish'))}</div>
+        ${list(p.stuck_volumes.map(v => `${v.claim || v.volume}${(v.pods || []).length ? ' (' + v.pods.join(', ') + ')' : ''}`))}
+        <p class="form-hint">${esc(tr('cluster.stuckHint',
+          'These attached volumes have their only healthy replica on this node: Longhorn will not let it go, and the drain waits for ever. Add a replica elsewhere, or stop what uses them, before the maintenance.'))}</p>` : ''}
         ${(p.volume_waits || []).length ? `
         <div class="cm-pop-title warn">${esc(tr('cluster.maintVolumeWaits', 'Migration will wait for a volume'))}</div>
         ${list(p.volume_waits.map(w => `${w.vm} : ${w.volume}`))}

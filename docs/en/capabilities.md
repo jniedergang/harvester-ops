@@ -247,6 +247,9 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   - the VMs whose **volume is not healthy**: Longhorn does not migrate a
     volume while a replica waits to be rebuilt, and the maintenance can then
     take much longer;
+  - the **attached volumes used by pods** whose only healthy replica is on
+    the node: Longhorn will not let it go and the drain waits for ever (the
+    Harvester check looks only at VM volumes);
   - the VMs labelled to be shut down during maintenance.
   The tracked action follows Harvester until the node is in maintenance (10
   minutes at most) and reports a refusal by its controller. Leaving
