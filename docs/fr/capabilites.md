@@ -106,7 +106,10 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   l'affichage ; clavier/souris, Ctrl-Alt-Suppr et ajustement
   fenêtre / 1:1 inclus ; le bandeau de la console porte aussi les
   commandes électriques de la VM (démarrer / arrêt gracieux / reset
-  dur) et des raccourcis vers les snapshots et les paramètres. Accès protégé par tickets éphémères à usage
+  dur, par la sous-ressource `restart` de la VM comme `virtctl restart`, qui
+  redémarre quelle que soit la stratégie de démarrage) et des raccourcis
+  vers les snapshots et les paramètres. Les consoles ouvertes sur une VM
+  réinitialisée s'y rattachent seules à son retour. Accès protégé par tickets éphémères à usage
   unique délivrés par un endpoint authentifié ; le kubeconfig doit
   avoir `get virtualmachineinstances/vnc` (vérifié par la matrice de
   permissions).

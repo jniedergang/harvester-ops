@@ -278,7 +278,9 @@ def test_restart_returns_tracked_action(client, monkeypatch):
     assert run.action == "vm-restart:ns1/vm1"
 
 
-def test_restart_runner_surfaces_delete_error(monkeypatch):
+def test_restart_runner_surfaces_restart_error(monkeypatch):
+    """v1.44.5 : la réinitialisation passe par la sous-ressource `restart`
+    de la VM (voir test_vm_restart.py), plus par la suppression du VMI."""
     class _FR:
         def __init__(self, rc, out="", err=""):
             self.returncode, self.stdout, self.stderr = rc, out, err
@@ -286,8 +288,8 @@ def test_restart_runner_surfaces_delete_error(monkeypatch):
 
     def fake_run(cmd, **kw):
         calls["n"] += 1
-        if "delete" in cmd:
-            return _FR(1, err='Error from server (NotFound): vmi "x" not found\n')
+        if "replace" in cmd:
+            return _FR(1, err='Error from server (NotFound): vm "x" not found\n')
         return _FR(0, out="uid-1")
     monkeypatch.setattr(wapp.subprocess, "run", fake_run)
     run = wapp.ActionRun("r" * 12, "vm-restart:ns/x", "c1", [])
@@ -303,7 +305,7 @@ def test_restart_runner_waits_for_new_uid(monkeypatch):
     seq = {"polls": 0}
 
     def fake_run(cmd, **kw):
-        if "delete" in cmd:
+        if "replace" in cmd:
             return _FR(0)
         if "{.metadata.uid}" in " ".join(cmd) and "{.status.phase}" not in " ".join(cmd):
             return _FR(0, out="uid-old")

@@ -4,6 +4,34 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.5] - 2026-09-22 - The reset button resets
+
+1.41.0 left one case unverified: a hard reset of a VM with two consoles
+open. Run on the test cluster, it shut the VM down instead.
+
+### Fixed
+- **The console's hard reset shut Harvester VMs down.** It deleted the VM
+  instance, believing it did what `virtctl restart` does; a deleted
+  instance comes back only when the VM runs `Always`, and Harvester creates
+  its VMs `RerunOnFailure`. It now goes through the VM's `restart`
+  subresource with no grace period, which restarts whatever the run
+  strategy (18 seconds to a new instance on the test cluster).
+- **A reset that failed was reported as done**: when no new instance came
+  up within 180 seconds, the action still ended in success. It now ends in
+  error, saying the VM did not come back.
+- **Both consoles said another client had taken the display** after the
+  reset, and stopped. When the connection drops, the instance is still
+  "Running" with the same identity, but its deletion has started: that is
+  now read as a restart, and the consoles reattach once the VM is back.
+
+### Tests
+- 3 new tests on the reset action (subresource, failure when nothing comes
+  back, a refused restart reported as is) and a new classification case;
+  the two older restart tests now check the subresource.
+- On harvlab, two browsers on the same VM (run strategy `RerunOnFailure`),
+  reset from the first: the VM restarted with a new instance, and both
+  consoles reattached on their own, "shared by 2 viewers".
+
 ## [1.44.4] - 2026-09-22 - A node that is down is not a missing node
 
 The degraded-volume cases 1.42.0 could not exercise (a replica on a node

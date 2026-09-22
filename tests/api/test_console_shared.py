@@ -125,6 +125,10 @@ def cluster_cfg(monkeypatch):
     ("Running uid-2", 0, "vm-restarted"),   # recréée : réinitialisation
     ("Failed uid-1", 0, "vm-restarted"),
     ("", 1, "vm-stopped"),                  # plus d'instance
+    # v1.44.5, relevé sur harvlab : au moment où la connexion tombe, la même
+    # instance est encore « Running », mais sa suppression est commencée
+    # (réinitialisation). Ce n'est pas un autre client qui a pris la place.
+    ("Running uid-1 2026-09-22T10:55:01Z", 0, "vm-restarted"),
 ])
 def test_a_loss_is_told_apart(cluster_cfg, monkeypatch, out, rc, reason):
     monkeypatch.setattr(wapp.subprocess, "run", lambda *a, **k: Run(rc, out))

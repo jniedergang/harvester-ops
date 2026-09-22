@@ -7650,24 +7650,47 @@ def api_vm_set_run_strategy_bulk(cluster, namespace, name):
     return api_vm_set_run_strategy(cluster, namespace, name)
 
 
+# Délai d'attente de la nouvelle instance après une réinitialisation.
+VM_RESTART_TIMEOUT = 180
+
+
 def _vm_restart_runner(run, kc, namespace, name):
-    """Hard reset: delete the VMI (what `virtctl restart` does) and poll
-    until the controller has respawned a Running one. Same error-surfacing
-    contract as _vm_action_runner (stderr in error_summary, no cmdline)."""
+    """Hard reset through the VM's `restart` subresource, what `virtctl
+    restart --force --grace-period=0` does, then poll until a NEW VMI is
+    Running.
+
+    v1.44.5 : it used to DELETE the VMI. A deleted VMI comes back only when
+    the VM is `runStrategy: Always`; Harvester creates its VMs
+    `RerunOnFailure`, so the reset button shut them down (seen on harvlab).
+    The subresource restarts whatever the run strategy. Same
+    error-surfacing contract as _vm_action_runner (stderr in error_summary,
+    no cmdline)."""
+    def fail(step, detail):
+        run.error_summary = detail
+        run.emit({"type": "step", "step_id": step, "status": "error",
+                  "message": detail, "ts": time.time()})
+        run.exit_code = 1
+        run.status = "error"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+        run.close()
+
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
-    run.emit({"type": "step", "step_id": "delete-vmi", "status": "running",
-              "message": f"deleting VMI {name} (controller will respawn it)",
+    run.emit({"type": "step", "step_id": "restart", "status": "running",
+              "message": f"restarting VM {name} now (no grace period)",
               "ts": time.time()})
     old_uid = subprocess.run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
          "-o", "jsonpath={.metadata.uid}"],
         capture_output=True, text=True, timeout=10,
     ).stdout.strip()
+    path = (f"/apis/subresources.kubevirt.io/v1/namespaces/{namespace}"
+            f"/virtualmachines/{name}/restart")
     try:
         r = subprocess.run(
-            ["kubectl", "--kubeconfig", kc, "-n", namespace, "delete", "vmi",
-             name, "--wait=false"],
+            ["kubectl", "--kubeconfig", kc, "replace", "--raw", path, "-f", "-"],
+            input=json.dumps({"gracePeriodSeconds": 0}),
             capture_output=True, text=True, timeout=20,
         )
     except subprocess.TimeoutExpired:
@@ -7679,24 +7702,16 @@ def _vm_restart_runner(run, kc, namespace, name):
             stderr_lines = [l.strip() for l in (r.stderr or "").splitlines() if l.strip()]
             detail = (stderr_lines[-1] if stderr_lines
                       else f"kubectl exited {r.returncode} with no error output")[:300]
-        run.error_summary = detail
-        run.emit({"type": "step", "step_id": "delete-vmi", "status": "error",
-                  "message": detail, "ts": time.time()})
-        run.exit_code = 1
-        run.status = "error"
-        run.ended_at = time.time()
-        run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
-        run.close()
-        return
-    run.emit({"type": "step", "step_id": "delete-vmi", "status": "done",
-              "message": "VMI deletion requested", "ts": time.time()})
+        return fail("restart", detail)
+    run.emit({"type": "step", "step_id": "restart", "status": "done",
+              "message": "restart requested", "ts": time.time()})
 
     run.emit({"type": "step", "step_id": "respawn", "status": "running",
               "message": "waiting for a fresh VMI to reach Running",
               "ts": time.time()})
-    deadline = time.time() + 180
+    deadline = time.time() + VM_RESTART_TIMEOUT
     last = ""
-    while time.time() < deadline:
+    while True:
         pr = subprocess.run(
             ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
              "-o", "jsonpath={.metadata.uid} {.status.phase}"],
@@ -7713,10 +7728,11 @@ def _vm_restart_runner(run, kc, namespace, name):
             run.emit({"type": "step", "step_id": "respawn", "status": "progress",
                       "message": f"phase={state}", "ts": time.time()})
             last = state
+        if time.time() >= deadline:
+            # Ce n'est pas un succès : la VM n'est pas revenue.
+            return fail("respawn", f"the VM did not come back within "
+                                   f"{VM_RESTART_TIMEOUT} s (last phase: {last})")
         time.sleep(2)
-    else:
-        run.emit({"type": "step", "step_id": "respawn", "status": "warn",
-                  "message": f"timeout, last phase={last}", "ts": time.time()})
 
     run.exit_code = 0
     run.status = "done"
@@ -7729,7 +7745,7 @@ def _vm_restart_runner(run, kc, namespace, name):
 @_rate_limit("30/minute")
 @requires_auth
 def api_vm_restart(cluster, namespace, name):
-    """Hard reset of a running VM (delete the VMI; runStrategy respawns it).
+    """Hard reset of a running VM (the VM's `restart` subresource, immediate).
     Tracked as an action like every mutating operation."""
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -10836,14 +10852,19 @@ def _vnc_classify_loss(cluster, namespace, name, uid):
         try:
             r = subprocess.run(
                 ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
-                 "-o", "jsonpath={.status.phase} {.metadata.uid}"],
+                 "-o", "jsonpath={.status.phase} {.metadata.uid} "
+                       "{.metadata.deletionTimestamp}"],
                 capture_output=True, text=True, timeout=10)
             parts = (r.stdout or "").split()
             if r.returncode != 0 or not parts:
                 reason = "vm-stopped"
-            elif parts[0] == "Running" and uid and len(parts) > 1 and parts[1] == uid:
+            elif (parts[0] == "Running" and uid and len(parts) == 2 and parts[1] == uid):
+                # Même instance, toujours là, et PAS en cours de suppression.
                 reason = "taken"
             else:
+                # Une instance dont la suppression a commencé (relevé sur
+                # harvlab : encore « Running » au moment où la connexion
+                # tombe) est une réinitialisation, pas un autre client.
                 reason = "vm-restarted"
         except (subprocess.TimeoutExpired, OSError):
             reason = "lost"
