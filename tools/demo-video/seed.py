@@ -128,6 +128,26 @@ def set_replicas(count=2):
     print(f"{len(out)} volume(s) à {count} répliques")
 
 
+def degrade():
+    """Supprime UNE réplique d'un volume : le volume passe dégradé, Longhorn
+    la reconstruit ailleurs. Sert à filmer le diagnostic pour de vrai, sans
+    rien casser (les autres répliques portent les données)."""
+    import os
+    kc = os.path.expanduser("~/.kube/harvlab.yaml")
+    raw = subprocess.run(["kubectl", "--kubeconfig", kc, "-n", "longhorn-system",
+                          "get", "replicas.longhorn.io", "-o", "json"],
+                         capture_output=True, text=True, check=True).stdout
+    # Filtrage en Python : le jsonpath de kubectl n'aime pas les guillemets
+    # imbriqués et échoue en silence sur ce genre de sélection.
+    out = [r["metadata"]["name"] for r in json.loads(raw).get("items", [])
+           if (r.get("status") or {}).get("currentState") == "running"]
+    victim = out[0]
+    subprocess.run(["kubectl", "--kubeconfig", kc, "-n", "longhorn-system",
+                    "delete", "replicas.longhorn.io", victim],
+                   capture_output=True, text=True, check=True)
+    print(f"réplique supprimée : {victim}")
+
+
 def up():
     sc = image_storage_class()
     for name, cores, memory in VMS:
@@ -174,7 +194,7 @@ def wait_running(timeout=600):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("what", choices=("up", "down", "status", "wait", "replicas"))
+    ap.add_argument("what", choices=("up", "down", "status", "wait", "replicas", "degrade"))
     what = ap.parse_args().what
     {"up": up, "down": down, "status": status, "wait": wait_running,
-     "replicas": set_replicas}[what]()
+     "replicas": set_replicas, "degrade": degrade}[what]()

@@ -1,0 +1,12 @@
+card.title: "Le stockage, et un volume dégradé"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Outil libre pour SUSE Harvester"
+
+intro: "Stockage : les classes, les volumes qu'elles portent, et les disques de chaque nœud."
+classes: "Chaque volume dit quelle machine s'en sert, quel disque il est, et s'il est attaché."
+disks: "Pour chaque disque : ce qui est utilisé, ce qui est promis aux volumes, et ce qu'on peut encore y placer. Ce ne sont pas les mêmes chiffres."
+degraded: "Ici un volume a perdu une réplique. Longhorn le dit dégradé, et la vue explique ce que ça veut dire."
+advice: "Le constat nomme le volume, le nœud, et ce qu'il y a à faire. Il refuse aussi les corrections qui aggraveraient les choses."
+rebuild: "Longhorn reconstruit la réplique manquante sur un autre nœud."
+healthy: "De nouveau sain. L'intérêt : savoir au même endroit si le cluster peut perdre un nœud cette nuit."

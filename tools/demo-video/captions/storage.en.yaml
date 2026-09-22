@@ -1,0 +1,12 @@
+card.title: "Storage, and a degraded volume"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Open source toolkit for SUSE Harvester"
+
+intro: "Storage: the classes, the volumes they hold, and the disks of every node."
+classes: "Each volume says which machine uses it, which disk it is, and whether it is attached."
+disks: "For each disk: what is used, what is promised to volumes, and what can still be scheduled. The two are not the same number."
+degraded: "Here a volume lost a replica. Longhorn calls it degraded, and the view says what that means."
+advice: "The finding names the volume, the node, and what to do. It also refuses the fixes that would make things worse."
+rebuild: "Longhorn rebuilds the missing replica on another node."
+healthy: "Healthy again. The point is to know, in one place, whether the cluster can lose a node tonight."

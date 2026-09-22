@@ -356,14 +356,18 @@ kc_quiet() {
     kubectl --kubeconfig="$KUBECONFIG_PATH" "$@"
 }
 
+# `-n` n'est pas un détail : sans lui, ssh lit l'entrée standard et VIDE la
+# liste que parcourt la boucle appelante. L'extinction ne touchait alors que
+# le PREMIER control-plane, puis annonçait « 3 nodes éteints » (constaté sur
+# le banc le 22/09/2026 : deux nœuds sur trois toujours allumés).
 ssh_exec() {
     local target="$1"; shift
-    run ssh $SSH_OPTS "${SSH_USER}@${target}" "$@"
+    run ssh -n $SSH_OPTS "${SSH_USER}@${target}" "$@"
 }
 
 ssh_exec_quiet() {
     local target="$1"; shift
-    ssh $SSH_OPTS -o LogLevel=ERROR "${SSH_USER}@${target}" "$@" 2>&1
+    ssh -n $SSH_OPTS -o LogLevel=ERROR "${SSH_USER}@${target}" "$@" 2>&1
 }
 
 # -----------------------------------------------------------------------------

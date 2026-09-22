@@ -1,0 +1,13 @@
+card.title: "Machines virtuelles et console"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Outil libre pour SUSE Harvester"
+
+intro: "Les machines d'un espace de noms : état, stratégie de démarrage, et les actions sur chacune."
+table: "Démarrer, arrêter, photographier, modifier, console, migrer. Chaque bouton dit ce qu'il fait avant qu'on appuie."
+bulk: "On en choisit plusieurs et on agit sur toutes d'un coup, changement de stratégie compris."
+create: "La création est guidée : le formulaire, c'est l'éditeur, donc tout ce qui se modifie se règle dès la création."
+createForm: "Taille, disques, réseaux, ordre de démarrage, et la place réellement disponible, vérifiée au fil de la saisie."
+console: "La console est intégrée : aucun client à installer, aucun port à ouvrir."
+consoleLive: "Le clavier arrive jusqu'à la machine, dans la bonne disposition, et tout le démarrage est visible."
+consoleShared: "Plusieurs personnes peuvent suivre la même console en même temps, ce que Harvester seul ne permet pas."

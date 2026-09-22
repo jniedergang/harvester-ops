@@ -1,0 +1,12 @@
+card.title: "Réseaux, fabrique et chemins"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Outil libre pour SUSE Harvester"
+
+intro: "Réseau : chaque réseau du cluster, et ce qui y est raccordé."
+attachments: "Par machine : la carte, son adresse MAC, son adresse, son mode de raccordement, et si le lien est actif."
+leaves: "Et par où le trafic sort : par un pont, ou par le nœud lui-même."
+fabric: "La fabrique, c'est le côté physique : un bloc par commutateur virtuel, avec les cartes qui l'alimentent."
+fabricDetail: "Débit, agrégats, quelle carte porte quel réseau. Ce qu'on lirait sinon sur trois écrans différents."
+path: "Pour une machine donnée, la console suit le chemin depuis l'invité vers l'extérieur."
+pathDetail: "Carte, adresse, mode de raccordement, et où ça rejoint le réseau du cluster. Là où Harvester cesse de renseigner, la vue Fabrique pose une sonde de lien pour finir la chaîne."

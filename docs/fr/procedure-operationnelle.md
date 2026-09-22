@@ -31,6 +31,12 @@ L'outillage garantit ces invariants en séquençant les opérations et en vérif
 | 6 | Extinction des workers | `ssh <worker> 'sudo shutdown -h +0'` | Les workers n'ont pas de quorum |
 | 7 | Extinction du control-plane | Idem, ordre inverse des hostnames, délai `--node-shutdown-delay` entre chaque | Le dernier CP éteint garde l'etcd le plus récent |
 
+> **Vérifier que les machines sont bien éteintes.** Jusqu'à la 1.44.10, la
+> séquence pouvait se déclarer réussie en n'ayant touché que le premier
+> control-plane. Après une extinction, confirmer par les cartes
+> d'administration, ou par un ping, que chaque nœud est éteint avant de
+> couper l'alimentation.
+
 ## 3. Séquence de démarrage (5 étapes)
 
 | # | Étape | Action |

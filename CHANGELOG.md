@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.10] - 2026-09-23 - The shutdown reached only the first control-plane
+
+Filming the shutdown on the three-node test cluster: the log announced
+"3 control-plane node(s) shut down" after a single "CP shutdown (1/3)"
+line, and all three machines were still running.
+
+### Fixed
+- **Every node of the cluster now receives the shutdown order.** `ssh`
+  reads standard input; called inside a `while read` loop over the node
+  list, it swallowed the rest of that list. The loop ended after the first
+  node and the step still reported success. Both loops that power nodes
+  off were affected (control-plane and workers), on every cluster with
+  more than one node. The helper now passes `-n`.
+
+### Tests
+- A test replays the loop with a fake `ssh` and fails when a node is
+  missed, plus two guards on the helper and on the shutdown step. Checked
+  by sabotage: removing the fix turns them red.
+
 ## [1.44.9] - 2026-09-22 - A maintenance that works no longer reports a failure
 
 Filming the demonstration videos on the three-node test cluster showed a

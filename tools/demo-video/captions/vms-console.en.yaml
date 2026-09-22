@@ -1,0 +1,13 @@
+card.title: "Virtual machines and console"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Open source toolkit for SUSE Harvester"
+
+intro: "The machines of a namespace: state, run strategy, and the actions on each one."
+table: "Start, stop, snapshot, edit, console, migrate. Each button says what it does before you press it."
+bulk: "Pick several and act on all of them at once, including changing their run strategy."
+create: "Creating a machine is guided: the form is the editor, so anything you can edit, you can set at creation."
+createForm: "Sizing, disks, networks, boot order, and the space actually left on the cluster, checked as you type."
+console: "The console is built in, no client to install and no port to open."
+consoleLive: "The keyboard goes through to the machine, in the right layout, and the whole boot is visible."
+consoleShared: "Several people can watch the same console at once, which Harvester alone does not allow."

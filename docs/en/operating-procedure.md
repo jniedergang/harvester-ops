@@ -31,6 +31,11 @@ The toolkit enforces these invariants by sequencing operations and verifying sta
 | 6 | Shutdown workers | `ssh <worker> 'sudo shutdown -h +0'` | Workers can go first — they hold no quorum |
 | 7 | Shutdown control-plane | Same, in reverse hostname order, with `--node-shutdown-delay` between each | The last CP standing keeps the most recent etcd state |
 
+> **Check the machines are really down.** Until 1.44.10 the sequence could
+> report success having reached only the first control-plane. After a
+> shutdown, confirm with the management boards, or with a ping, that every
+> node is off before cutting the power.
+
 ## 3. Startup sequence (the 5 steps)
 
 | # | Step | What it does |

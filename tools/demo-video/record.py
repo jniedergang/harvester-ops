@@ -57,9 +57,10 @@ POINTER = """
 class Cam:
     """Le carnet de bord de la scène : repères datés + gestes lisibles."""
 
-    def __init__(self, page, t0):
+    def __init__(self, page, t0, lang="en"):
         self.page = page
         self.t0 = t0
+        self.lang = lang          # une scène peut en avoir besoin (choix de langue)
         self.cues = []
 
     def _at(self):
@@ -80,17 +81,38 @@ class Cam:
     def pause(self, seconds):
         self.page.wait_for_timeout(int(seconds * 1000))
 
-    def point(self, selector, settle=0.6):
-        """Amène la souris sur un élément sans cliquer (le halo suit)."""
-        loc = self.page.locator(selector).first
-        loc.scroll_into_view_if_needed()
-        loc.hover()
-        self.pause(settle)
-        return loc
+    def point(self, selector, settle=0.6, tries=3):
+        """Amène la souris sur un élément sans cliquer (le halo suit).
 
-    def click(self, selector, settle=0.9, park=True):
-        loc = self.point(selector, settle=0.35)
-        loc.click()
+        Les tableaux de la console se redessinent tout seuls (sondage) : un
+        élément visé peut être détaché entre deux appels. On réessaie au
+        lieu d'abandonner la prise.
+        """
+        last = None
+        for _ in range(tries):
+            try:
+                loc = self.page.locator(selector).first
+                loc.scroll_into_view_if_needed()
+                loc.hover()
+                self.pause(settle)
+                return loc
+            except Exception as e:                                 # noqa: BLE001
+                last = e
+                self.pause(1)
+        raise last
+
+    def click(self, selector, settle=0.9, park=True, tries=3):
+        last = None
+        for _ in range(tries):
+            loc = self.point(selector, settle=0.35)
+            try:
+                loc.click()
+                break
+            except Exception as e:                                 # noqa: BLE001
+                last = e
+                self.pause(1)
+        else:
+            raise last
         # On éloigne le pointeur : sinon l'infobulle du bouton reste ouverte
         # et masque le panneau qu'on vient d'ouvrir.
         if park:
@@ -172,7 +194,7 @@ def main():
         # Les actions de la console demandent confirmation : la scène les a
         # décidées, on répond oui (les boîtes natives ne sont pas filmées).
         page.on("dialog", lambda d: d.accept())
-        cam = Cam(page, t0)
+        cam = Cam(page, t0, args.lang)
         page.goto(args.base + "/", wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
         try:

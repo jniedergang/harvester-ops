@@ -1,0 +1,12 @@
+card.title: "Networks, fabric and paths"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Open source toolkit for SUSE Harvester"
+
+intro: "Network: every network of the cluster, and what is attached to it."
+attachments: "Per machine: the card, its MAC address, its address, its binding, and whether the link is up."
+leaves: "And where the traffic leaves: through a bridge, or through the node itself."
+fabric: "Fabric is the physical side: one block per virtual switch, with the cards that feed it."
+fabricDetail: "Speed, bonds, which card carries which network. What you would otherwise read on three different screens."
+path: "For a given machine, the console follows the path outwards from the guest."
+pathDetail: "Card, address, binding, and where it joins the cluster network. Where Harvester stops reporting, the Fabric view installs a link monitor to finish the chain."
