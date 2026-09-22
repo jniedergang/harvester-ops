@@ -6762,6 +6762,13 @@ NODE_MAINT_KINDS = ["nodes", "virtualmachineinstances.kubevirt.io",
 _node_maint_missing = {}
 NODE_MAINT_POLL = 5.0
 NODE_MAINT_TIMEOUT = 600.0
+# v1.44.9 : Harvester RETIRE `drain-requested` avant de poser
+# `maintain-status`, et les deux écritures ne sont pas atomiques (mesuré sur
+# harvlab le 22/09/2026 : la marque disparaît, le statut arrive juste après).
+# Un relevé qui tombe dans cet intervalle voyait « maintenance refusée » alors
+# que le nœud entrait en maintenance. On laisse passer ce trou avant de
+# conclure au refus.
+NODE_MAINT_WITHDRAW_GRACE = 30.0
 
 
 def _node_request(cluster, name):
@@ -6870,12 +6877,15 @@ def _maintenance_enter_runner(run, kc, name, force):
               "message": "Harvester migrates the VMs", "ts": time.time()})
     deadline = time.time() + NODE_MAINT_TIMEOUT
     last = None
+    withdrawn_since = None
     while time.time() < deadline:
         time.sleep(NODE_MAINT_POLL)
         ann, left = _node_maint_read(kc, name)
         if ann is None:
             continue
         status = ann.get(node_maintenance.MAINTAIN_STATUS)
+        if node_maintenance.DRAIN_REQUESTED in ann or status in ("running", "completed"):
+            withdrawn_since = None
         if status == "completed":
             run.emit({"type": "step", "step_id": "follow", "status": "done",
                       "message": f"{name} is in maintenance mode", "ts": time.time()})
@@ -6889,6 +6899,12 @@ def _maintenance_enter_runner(run, kc, name, force):
                 last = msg
             continue
         if node_maintenance.DRAIN_REQUESTED not in ann:
+            # Trou entre le retrait de la demande et la pose du statut : on
+            # ne conclut au refus que s'il dure.
+            if withdrawn_since is None:
+                withdrawn_since = time.time()
+            if time.time() - withdrawn_since < NODE_MAINT_WITHDRAW_GRACE:
+                continue
             msg = ("Harvester refused the maintenance and withdrew the request "
                    "(see the harvester controller logs)")
             run.emit({"type": "step", "step_id": "follow", "status": "error",

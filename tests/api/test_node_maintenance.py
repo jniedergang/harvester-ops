@@ -513,6 +513,9 @@ def follow(monkeypatch, states, vmis_left=0):
     monkeypatch.setattr(wapp, "NODE_MAINT_POLL", 0)
     # Une régression doit échouer vite, pas au bout des dix minutes réelles.
     monkeypatch.setattr(wapp, "NODE_MAINT_TIMEOUT", 0.5)
+    # Le trou entre le retrait de la demande et la pose du statut est toléré
+    # 30 s en vrai ; les tests n'attendent pas si longtemps.
+    monkeypatch.setattr(wapp, "NODE_MAINT_WITHDRAW_GRACE", 0.05)
     monkeypatch.setattr(wapp.subprocess, "run", lambda *a, **k: Proc(0))
 
 
@@ -527,10 +530,41 @@ def test_entering_is_followed_until_completed(monkeypatch):
 def test_a_refusal_by_harvester_is_reported(monkeypatch):
     """Le contrôleur retire l'annotation sans poser de statut quand il
     refuse : la console doit le dire, pas attendre dix minutes."""
-    follow(monkeypatch, [{nm.DRAIN_REQUESTED: "true"}, {}, {}])
+    follow(monkeypatch, [{nm.DRAIN_REQUESTED: "true"}, {}, {}, {}, {}])
     run = FakeRun()
     wapp._maintenance_enter_runner(run, "/kc", "n1", False)
     assert run.status == "error" and "refused" in run.error_summary
+
+
+def test_the_gap_before_the_status_is_not_a_refusal(monkeypatch):
+    """v1.44.9, mesuré sur harvlab : Harvester RETIRE `drain-requested` puis
+    pose `maintain-status` dans une seconde écriture. Un relevé tombé entre
+    les deux faisait échouer une maintenance qui se déroulait bien (vu dans
+    le dock : « Harvester refused the maintenance » une seconde avant que le
+    nœud passe en maintenance)."""
+    follow(monkeypatch, [{nm.DRAIN_REQUESTED: "true"}, {},
+                         {nm.MAINTAIN_STATUS: "running"},
+                         {nm.MAINTAIN_STATUS: "completed"}])
+    monkeypatch.setattr(wapp, "NODE_MAINT_WITHDRAW_GRACE", 30.0)
+    monkeypatch.setattr(wapp, "NODE_MAINT_TIMEOUT", 5.0)
+    run = FakeRun()
+    wapp._maintenance_enter_runner(run, "/kc", "n1", False)
+    assert run.status == "done", run.error_summary
+
+
+def test_a_request_that_comes_back_resets_the_grace(monkeypatch):
+    """Harvester réessaie : la demande peut réapparaître après avoir disparu.
+    Le compte à rebours du refus doit repartir de zéro, sinon une reprise
+    normale finirait en erreur."""
+    follow(monkeypatch, [{nm.DRAIN_REQUESTED: "true"}, {},
+                         {nm.DRAIN_REQUESTED: "true"}, {},
+                         {nm.MAINTAIN_STATUS: "completed"}])
+    monkeypatch.setattr(wapp, "NODE_MAINT_WITHDRAW_GRACE", 0.4)
+    monkeypatch.setattr(wapp, "NODE_MAINT_TIMEOUT", 5.0)
+    monkeypatch.setattr(wapp, "NODE_MAINT_POLL", 0.15)
+    run = FakeRun()
+    wapp._maintenance_enter_runner(run, "/kc", "n1", False)
+    assert run.status == "done", run.error_summary
 
 
 def test_leaving_restarts_the_vms_it_shut_down(monkeypatch):

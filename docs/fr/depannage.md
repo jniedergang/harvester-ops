@@ -110,6 +110,22 @@ Le kubeconfig de ce cluster est invalide ou l'API est down. L'UI web ne plante p
 
 L'onglet du navigateur est resté inactif trop longtemps, ou le proxy devant Flask a un timeout court. L'opération continue côté serveur ; rafraîchir la page pour ré-attacher le stream.
 
+### Une maintenance finit en erreur mais le nœud est en maintenance
+
+Avant la 1.44.9, le dock des actions pouvait afficher « Harvester
+refused the maintenance and withdrew the request » alors que le nœud
+entrait bien en maintenance. Harvester retire sa marque `drain-requested`
+avant de poser `maintain-status`, et un relevé tombé entre les deux le
+prenait pour un abandon. Vérifier sur le nœud :
+
+```sh
+kubectl get node <nom> -o jsonpath='{.metadata.annotations}'
+```
+
+`harvesterhci.io/maintain-status: completed` signifie que la maintenance
+est faite, quoi qu'ait dit l'action. À partir de la 1.44.9, la console
+attend avant de conclure : le cas ne se présente plus.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

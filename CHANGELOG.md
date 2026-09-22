@@ -4,6 +4,38 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.9] - 2026-09-22 - A maintenance that worked no longer reports a failure
+
+Filming the demonstration videos on the three-node test cluster showed a
+node entering maintenance while the actions dock displayed, in red,
+"Harvester refused the maintenance". The maintenance was going through.
+
+### Fixed
+- **The end of a maintenance is no longer read as a refusal.** Harvester
+  removes the `drain-requested` mark and sets `maintain-status` in two
+  separate writes; a reading that landed between the two concluded the
+  request had been withdrawn and failed the action one second before the
+  node went into maintenance (measured on the test cluster: drain of three
+  minutes, then the two marks change within the same two seconds). The
+  console now waits 30 seconds before calling it a refusal, and starts
+  that delay over if Harvester asks again.
+
+### Internal
+- `tools/demo-video/`: the chain that produces the short demonstration
+  videos. A scene plays the real console against a real cluster, and the
+  edit speeds up the waits, burns in the captions and adds the cards and
+  the music. Captions live apart from the scenes, so rewording or
+  translating one costs a rebuild, not a new take. Not shipped to
+  customers: `package.sh` copies only `bin web container config docs`.
+
+### Tests
+- 3 new unit tests on the follow-up of a maintenance: the gap before the
+  status is not a refusal, a request that comes back restarts the delay,
+  and a real withdrawal is still reported.
+- 16 tests on the video chain: cutting, speed-up, the reporting of marks
+  into the edited film, subtitle generation, and the parity of the caption
+  files between English and French.
+
 ## [1.44.8] - 2026-09-22 - PCI passthrough and SR-IOV, checked end to end
 
 Since 1.15.0 the VM editor's passthrough picker was marked "not verified

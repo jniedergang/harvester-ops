@@ -110,6 +110,22 @@ Means the kubeconfig for that cluster is invalid or the API is down. The web UI 
 
 The browser tab was inactive too long, or the proxy in front of Flask has a low timeout. The operation continues server-side; refresh the page to re-attach the stream.
 
+### A maintenance ends in error but the node is in maintenance
+
+Before 1.44.9, the actions dock could show "Harvester refused the
+maintenance and withdrew the request" while the node did enter maintenance.
+Harvester clears its `drain-requested` mark before setting
+`maintain-status`, and a reading that fell between the two took it for a
+withdrawal. Check the node itself:
+
+```sh
+kubectl get node <name> -o jsonpath='{.metadata.annotations}'
+```
+
+`harvesterhci.io/maintain-status: completed` means the maintenance is
+done, whatever the action said. On 1.44.9 and later the console waits
+before concluding, so this no longer happens.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

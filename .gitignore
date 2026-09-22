@@ -20,3 +20,7 @@ __pycache__/
 # and any private session notes). Not part of the public deliverable.
 CLAUDE.md
 REVIEW.md
+
+# Prises et rendus vidéo (lourds) : les MP4 partent en pièces jointes de
+# release, pas dans l'historique.
+tools/demo-video/out/
