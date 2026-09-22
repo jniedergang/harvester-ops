@@ -181,7 +181,7 @@ step_wait_nodes_ready() {
     local deadline=$(( SECONDS + NODE_READY_TIMEOUT ))
     while (( SECONDS < deadline )); do
         local ready
-        ready=$(kc_quiet get nodes --no-headers 2>/dev/null | awk '$2 == "Ready" {c++} END {print c+0}')
+        ready=$(ready_nodes_count)
         if [[ "$ready" -ge "$expected" ]]; then
             emit_event "wait-ready" "done" "$ready/$expected Ready"
             log_ok "$ready/$expected nodes Ready"

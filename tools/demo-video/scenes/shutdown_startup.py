@@ -25,6 +25,21 @@ ACTION_DONE = """async (kind) => {
 }"""
 
 
+def lab_off(cam, timeout=900):
+    """Attend que plus aucune machine du banc ne tourne (vu par libvirt)."""
+    import time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r = subprocess.run(
+            ["ssh", "-n", "-o", "BatchMode=yes", "-o", "LogLevel=ERROR", "ju@172.16.1.12",
+             "sudo virsh list --name --state-running"],
+            capture_output=True, text=True, check=False)
+        if r.returncode == 0 and "harvlab" not in r.stdout:
+            return
+        cam.pause(5)
+    raise TimeoutError("les machines du banc ne s'éteignent pas")
+
+
 def scene(cam):
     p = cam.page
 
@@ -51,21 +66,28 @@ def scene(cam):
 
     with cam.fast(20):
         cam.until(ACTION_DONE, arg="shutdown", timeout=1800)
-        cam.pause(4)
+        # L'étape rend la main quand l'ordre est parti, pas quand la machine
+        # est éteinte : on attend que les trois le soient VRAIMENT. Rallumer
+        # trop tôt laissait deux nœuds éteints (ils finissaient de s'arrêter
+        # pendant qu'on les démarrait) et le démarrage les attendait en vain.
+        lab_off(cam)
+        cam.pause(3)
     cam.say("down")
     cam.pause(6)
 
-    # -- on rallume les machines (ce que ferait un BMC) ---------------------
-    cam.say("powerOn")
-    subprocess.run([str(HARVLAB), "start"], capture_output=True, text=True, check=False)
-    cam.pause(6)
-
+    # -- démarrage : la console dit quoi allumer, on obéit -------------------
     cam.click('.tab[data-tab="startup"]')
     p.wait_for_timeout(2000)
     cam.say("startup")
-    cam.pause(6)
+    cam.pause(5)
     cam.click("#btn-startup")
     cam.pause(8)
+    cam.say("powerOn")
+    cam.point("#startup-log")
+    cam.pause(4)
+    # À la place d'un BMC ou d'une main sur le bouton.
+    subprocess.run([str(HARVLAB), "start"], capture_output=True, text=True, check=False)
+    cam.pause(4)
     cam.say("startupRunning")
     cam.pause(6)
 

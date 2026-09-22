@@ -4,11 +4,11 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
-## [1.44.10] - 2026-09-23 - The shutdown reached only the first control-plane
+## [1.44.10] - 2026-09-23 - A real shutdown and startup of a multi-node cluster
 
-Filming the shutdown on the three-node test cluster: the log announced
-"3 control-plane node(s) shut down" after a single "CP shutdown (1/3)"
-line, and all three machines were still running.
+Filming the shutdown and startup on the three-node test cluster found two
+defects in the core sequence. Neither shows on a single-node cluster, which
+is where it had been exercised until now.
 
 ### Fixed
 - **Every node of the cluster now receives the shutdown order.** `ssh`
@@ -17,11 +17,26 @@ line, and all three machines were still running.
   node and the step still reported success. Both loops that power nodes
   off were affected (control-plane and workers), on every cluster with
   more than one node. The helper now passes `-n`.
+- **The startup no longer waits fifteen minutes for nodes that are already
+  back.** It counted a node as Ready only when `kubectl get nodes` printed
+  exactly "Ready"; the shutdown cordons every node, and a cordoned node
+  prints "Ready,SchedulingDisabled". The uncordon comes after that wait, so
+  the startup was waiting for a condition only it could fulfil, then went on
+  after its timeout. Seen on the test cluster: three nodes back, "1/3
+  Ready" for fifteen minutes, virtual machines still stopped. The scripts
+  now read the node's Ready condition. The shutdown pre-check had the same
+  defect the other way round: it called a node under maintenance "not
+  Ready".
 
 ### Tests
-- A test replays the loop with a fake `ssh` and fails when a node is
-  missed, plus two guards on the helper and on the shutdown step. Checked
-  by sabotage: removing the fix turns them red.
+- A test replays the shutdown loop with a fake `ssh` and fails when a node
+  is missed, plus two guards on the helper and on the shutdown step.
+- Three tests on the Ready count with a fake `kubectl` (cordoned nodes are
+  Ready, a node whose condition is False or missing is not), plus a guard
+  that no script reads the status column any more.
+- Both checked by sabotage: putting the old code back turns them red.
+- Checked on the test cluster: with two of three nodes cordoned, the new
+  count gives 3 and the startup goes through in 61 s.
 
 ## [1.44.9] - 2026-09-22 - A maintenance that works no longer reports a failure
 

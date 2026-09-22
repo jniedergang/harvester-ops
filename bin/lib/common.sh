@@ -551,6 +551,27 @@ set_vm_priority() {
 }
 
 # -----------------------------------------------------------------------------
+# Nodes Ready : lire la CONDITION, jamais la colonne STATUS
+# -----------------------------------------------------------------------------
+# `kubectl get nodes` affiche « Ready,SchedulingDisabled » pour un nœud
+# isolé. Comparer la colonne à « Ready » le comptait comme absent : après une
+# extinction (qui isole tous les nœuds), le démarrage attendait ses quinze
+# minutes de délai avant d'aller plus loin, sur tout cluster de plus d'un
+# nœud (constaté sur le banc harvlab le 23/09/2026). Un cluster mono-nœud ne
+# le montrait pas : Harvester refuse d'isoler son dernier nœud.
+node_ready_states() {
+    kc_quiet get nodes -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}' 2>/dev/null
+}
+
+ready_nodes_count() {
+    node_ready_states | awk '$2 == "True" {c++} END {print c+0}'
+}
+
+not_ready_nodes() {
+    node_ready_states | awk 'NF && $2 != "True" {print $1}'
+}
+
+# -----------------------------------------------------------------------------
 # Pre-flight checks
 # -----------------------------------------------------------------------------
 preflight() {
@@ -564,7 +585,7 @@ preflight() {
     fi
 
     local notready
-    notready=$(kc_quiet get nodes --no-headers | awk '$2 != "Ready" {print $1}' | wc -l)
+    notready=$(not_ready_nodes | wc -l)
     if [[ "$notready" -gt 0 ]]; then
         log_warn "$notready node(s) non Ready avant shutdown — état dégradé"
         kc_quiet get nodes
