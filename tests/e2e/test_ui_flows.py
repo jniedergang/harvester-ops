@@ -205,6 +205,8 @@ def test_dock_resize_handle_exists(page):
 
 def test_shutdown_tab_loads_vm_list(page):
     page.click('.tab[data-tab="shutdown"]')
+    # Depuis la v1.4.12, la liste vit dans le sous-onglet « Ordre d'arrêt ».
+    page.click('[data-shutdown-tab="order"]')
     expect(page.locator(".vm-order-toolbar")).to_be_visible()
     expect(page.locator("#vm-order-filter-ns")).to_be_visible()
     expect(page.locator("#vm-order-sort")).to_be_visible()
@@ -385,15 +387,16 @@ def test_theme_switcher_applies_and_persists(page):
     Settings > Appearance. Each theme defines a different --bg, so
     asserting it changes is enough to prove the palette swap reached
     the DOM. Persistence is checked via reload."""
-    # Default since v1.4.35 = Tokyo Night Day (light) — set on <html>
-    # by the inline <head> bootstrap before style.css parses (no FOUC).
+    # Default theme: SUSE in light mode (Tokyo Night Day until the SUSE
+    # theme became the default) — set on <html> by the inline <head>
+    # bootstrap before style.css parses (no FOUC).
     initial = page.evaluate("""() => ({
       theme: document.documentElement.getAttribute('data-theme'),
       mode:  document.documentElement.getAttribute('data-mode'),
       bg:    getComputedStyle(document.documentElement)
                .getPropertyValue('--bg').trim(),
     })""")
-    assert initial["theme"] == "tokyo" and initial["mode"] == "light", initial
+    assert initial["theme"] == "suse" and initial["mode"] == "light", initial
     assert initial["bg"], f"--bg empty on boot, got {initial!r}"
 
     # Switch to Nord dark via the Theme API (the in-modal selects
@@ -534,11 +537,14 @@ def test_automation_subtabs(page):
     expect(page.locator('.tab-child[data-subtab="pxe"]')).to_be_visible()
     # CAPI subtab is active by default → its content is active
     expect(page.locator('.sub-tab-content[data-subtab="capi"]')).to_have_class("sub-tab-content active")
-    # The inline Installation / Création de clusters strip is only visible for CAPI
-    expect(page.locator('.sub-tabs-inline')).to_be_visible()
-    # Click Terraform sidebar entry — hides the inline strip
+    # The inline Installation / Création de clusters strip is only visible
+    # for CAPI (the Overview and Shutdown tabs have their own strips).
+    strip = page.locator('.sub-tabs-inline[data-only-for="capi"]')
+    expect(strip).to_be_visible()
+    # Click Terraform sidebar entry: hides the inline strip
     page.click('.tab-child[data-subtab="terraform"]')
     page.wait_for_timeout(200)
+    expect(strip).to_be_hidden()
     expect(page.locator('.sub-tab-content[data-subtab="terraform"]')).to_have_class("sub-tab-content active")
     expect(page.locator('.sub-tab-content[data-subtab="capi"]')).not_to_have_class("active")
     # Click Bare-metal
@@ -1437,22 +1443,23 @@ def test_logo_size_slider_updates_css_var(page):
 def test_shutdown_groups_render_from_canned_vms(page):
     """Intercept /api/vms/<cluster> with canned VMs spanning 3 groups, open
     the Shutdown tab, and assert each group renders as its own section with
-    a name input + the right number of VMs + a 'parallel' label. Catches
+    a name input + the right number of VMs + its execution mode (in order,
+    or in parallel for the default group). Catches
     regressions where the group sections aren't wired or the default group
     is missing."""
     canned = {
         "cluster": "harv-fake",
         "vms": [
-            {"namespace": "default", "name": "web-1",  "priority": 10,
+            {"namespace": "default", "name": "web-1",  "priority": 10, "group_priority": 10,
              "group": "frontends", "snapshot": True, "ready_timeout": 300,
              "runStrategy": "Always", "phase": "Running", "agent_connected": "True"},
-            {"namespace": "default", "name": "web-2",  "priority": 10,
+            {"namespace": "default", "name": "web-2",  "priority": 10, "group_priority": 10,
              "group": "frontends", "snapshot": True, "ready_timeout": 300,
              "runStrategy": "Always", "phase": "Running", "agent_connected": "True"},
-            {"namespace": "default", "name": "db-1",   "priority": 50,
+            {"namespace": "default", "name": "db-1",   "priority": 50, "group_priority": 50,
              "group": "backends",  "snapshot": True, "ready_timeout": 300,
              "runStrategy": "Always", "phase": "Running", "agent_connected": "True"},
-            {"namespace": "default", "name": "extras", "priority": 100,
+            {"namespace": "default", "name": "extras", "priority": 100, "group_priority": 100,
              "group": "default",   "snapshot": True, "ready_timeout": 300,
              "runStrategy": "Always", "phase": "Running", "agent_connected": "True"},
         ],
@@ -1469,19 +1476,22 @@ def test_shutdown_groups_render_from_canned_vms(page):
     groups = page.locator("#vm-order-list .vm-group")
     assert groups.count() == 3, f"expected 3 groups, got {groups.count()}"
 
-    # First group (lowest priority) = frontends, 2 VMs
+    # Groups are ordered by their own `group_priority` (v1.4.14 model, as
+    # /api/vms returns it): the lowest runs first = frontends, 2 VMs.
     first = groups.nth(0)
     assert "frontends" in first.locator(".group-name").input_value()
     assert first.locator(".vm-group-list li").count() == 2
-    size_text = first.locator(".group-size").inner_text().lower()
-    assert "parallel" in size_text or "parallèle" in size_text, size_text
+    assert first.locator(".group-size").inner_text() == "2 VMs"
+    # v1.4.14 model: a normal group stops its VMs IN ORDER...
+    assert first.locator(".group-mode-badge.ordered").count() == 1
 
-    # Default group must be present, with `is-default` class. Since v1.4.12
-    # the catch-all IS renamable (user can call it "défaut" etc.) — the
-    # class stays for styling but the input is editable.
+    # ...and only the catch-all group runs them in parallel. It is always
+    # present, and its name is locked (v1.4.14; renamable in v1.4.12).
     default = page.locator("#vm-order-list .vm-group.is-default")
     assert default.count() == 1
-    assert default.locator(".group-name").is_editable()
+    badge = default.locator(".group-mode-badge.default").inner_text().lower()
+    assert "parallel" in badge or "parallèle" in badge, badge
+    assert not default.locator(".group-name").is_editable()
 
 
 def test_shutdown_new_group_name_survives_periodic_refresh(page):
@@ -1558,9 +1568,11 @@ def test_shutdown_groups_payload_sent_on_save(page):
         "cluster": "harv-fake",
         "vms": [
             {"namespace": "ns1", "name": "a", "priority": 10, "group": "g1",
+             "group_priority": 10,
              "snapshot": True, "ready_timeout": 300, "runStrategy": "Always",
              "phase": "Running", "agent_connected": "True"},
             {"namespace": "ns1", "name": "b", "priority": 100, "group": "default",
+             "group_priority": 100,
              "snapshot": True, "ready_timeout": 300, "runStrategy": "Always",
              "phase": "Running", "agent_connected": "True"},
         ],
@@ -1596,8 +1608,10 @@ def test_shutdown_groups_payload_sent_on_save(page):
     assert len(groups) == 2, f"expected 2 groups in payload, got {len(groups)}"
     names = sorted(g["name"] for g in groups)
     assert names == ["default", "g1"]
-    # Group g1 must carry both VMs with priority 10
+    # Group g1 carries its own priority (v1.4.14 model) and its VM with
+    # its intra-group priority.
     g1 = next(g for g in groups if g["name"] == "g1")
-    assert g1["priority"] == 10
+    assert g1["group_priority"] == 10
     assert len(g1["vms"]) == 1
     assert g1["vms"][0]["name"] == "a"
+    assert g1["vms"][0]["priority"] == 10
