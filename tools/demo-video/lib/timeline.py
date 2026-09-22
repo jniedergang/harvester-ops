@@ -139,8 +139,8 @@ def _wrap(text, width=62):
 
 def ass_document(captions, spans=(), width=1920, height=1080,
                  font="Open Sans", size=44, offset=0.0):
-    """Fichier ASS : les sous-titres en bas, le repère d'accélération en haut
-    à droite. `offset` décale tout (carton de titre ajouté devant).
+    """Fichier ASS : les sous-titres en bas, le repère d'accélération en bas
+    à droite, au-dessus du dock (en haut il couvrait la barre d'outils). `offset` décale tout (carton de titre ajouté devant).
 
     `BorderStyle: 3` dessine un cartouche derrière le texte, et ce cartouche
     prend la couleur de CONTOUR (pas celle de fond) : sans épaisseur de
@@ -156,7 +156,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Caption,{font},{size},&H00FFFFFF,&H4D0E2B24,&H00000000,0,3,9,0,2,140,140,56,1
-Style: Speed,{font},{int(size * 0.8)},&H0078BA30,&H4D0E2B24,&H00000000,-1,3,7,0,9,50,50,40,1
+Style: Speed,{font},{int(size * 0.8)},&H0078BA30,&H4D0E2B24,&H00000000,-1,3,7,0,3,50,60,230,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

@@ -13,6 +13,19 @@ Livraison autonome en un tarball unique, compatible airgap.
 
 ---
 
+## Demo / Démonstration
+
+[![Cluster view and node maintenance](docs/assets/video/cluster-maintenance-en.webp)](docs/assets/video/cluster-maintenance-en.webp)
+
+*Cluster view and node maintenance, filmed on a real three-node cluster: the
+pre-check says what maintenance would do, the host is drained while its VMs
+live-migrate, then it comes back and a machine is moved by hand. Waits are
+shown sped up, never cut.*
+*Vue Cluster et maintenance d'un nœud, filmée sur un vrai cluster de trois
+nœuds : le pré-contrôle annonce ce que ferait la maintenance, l'hôte est vidé
+pendant que ses VMs migrent à chaud, puis il revient et une machine est
+déplacée à la main. Les attentes sont accélérées, jamais coupées.*
+
 ## Screenshots / Captures d'écran
 
 <picture>

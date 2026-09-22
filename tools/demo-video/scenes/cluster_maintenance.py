@@ -84,8 +84,11 @@ def scene(cam):
           const n = (d.nodes || []).find(x => x.name === window.__demoNode);
           const left = (d.vms || []).filter(v => v.node === window.__demoNode).length;
           // « requested » veut dire « demande posée », pas « nœud vidé » :
-          // seul `completed` dit que Harvester a fini.
-          return !!(n && n.maintenance === 'completed' && left === 0);
+          // seul `completed` dit que Harvester a fini. Et on attend que
+          // toutes les VMs tournent : une machine encore en train de
+          // redémarrer ailleurs contredirait le sous-titre.
+          const all = (d.vms || []).every(v => v.phase === 'Running');
+          return !!(n && n.maintenance === 'completed' && left === 0 && all);
         }""", arg=CLUSTER)
         cam.pause(4)
 

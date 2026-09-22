@@ -115,8 +115,13 @@ class Cam:
         raise TimeoutError(f"condition jamais remplie en {timeout}s")
 
     def park(self):
-        """Pointeur sur une zone neutre (aucune infobulle, aucun survol)."""
+        """Pointeur sur une zone neutre, et on retire le focus du bouton.
+
+        Les infobulles de la console s'affichent aussi au focus : après un
+        clic, celle du bouton restait ouverte sur le panneau pendant vingt
+        secondes de film."""
         self.page.mouse.move(940, 620)
+        self.page.evaluate("() => document.activeElement && document.activeElement.blur()")
 
 
 class _Fast:
