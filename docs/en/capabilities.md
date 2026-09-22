@@ -152,11 +152,17 @@ Manage KubeVirt virtual machines without leaving the console.
   pointer and watchdog — each written only when it differs from the
   KubeVirt default.
 
-**Shipped but not verified on the test cluster** (stated in the UI, in
-the warning style): PCI/GPU passthrough (the picker lists the devices
-Harvester discovered, but no device could be claimed on a single-node
-production cluster) and the macvtap / SR-IOV NIC bindings (no such
-hardware). Everything else on this page was exercised for real. The Cloud-init tab gains an
+**PCI passthrough and SR-IOV**: the picker lists the devices Harvester
+discovered as address, node and driver; only a device claimed in Harvester
+(driver `vfio-pci`) can be used, and the console never claims one itself.
+Verified on the three-node test cluster with emulated hardware (a virtual
+IOMMU): a network card, and an SR-IOV virtual function of another card,
+chosen in the editor, reached the guest's PCI bus. On Harvester, SR-IOV
+goes through such a virtual function passed through as a PCI device. A real
+GPU has not been tried. **Shipped but not verified** (stated in the UI, in
+the warning style): the macvtap and SR-IOV interface bindings of KubeVirt,
+which need components Harvester does not ship. Everything else on this page
+was exercised for real. The Cloud-init tab gains an
   **assistant** (v1.8.1) that generates clean cloud-config and
   network-data v1 YAML into the editors — hostname, users (password,
   passwordless sudo, Harvester SSH keys or raw public keys), packages,

@@ -3457,7 +3457,15 @@ def _reduce_pcidevice(item):
         # A device is usable for passthrough only once claimed AND unbound
         # from its host driver; we surface the raw state, no guessing.
         "vendor_id": status.get("vendorId"), "device_id": status.get("deviceId"),
-        "display_name": f"{desc[:70]} ({status.get('address')})" if desc else meta.get("name"),
+        # Réservé = détaché de son pilote hôte (vfio-pci) : seul utilisable
+        # par une VM. Sans le dire, le sélecteur laissait choisir un device
+        # libre, et la VM ne démarrait jamais (relevé sur harvlab, v1.44.8).
+        "claimed": (status.get("kernelDriverInUse") or "") == "vfio-pci",
+        # Le pilote plutôt qu'un mot : « vfio-pci » dit « réservé » dans
+        # toutes les langues, l'aide de l'éditeur (traduite) l'explique.
+        "display_name": (f"{desc[:70]} ({status.get('address')} · {node} · "
+                         f"{status.get('kernelDriverInUse') or '-'})"
+                         if desc else meta.get("name")),
     }
 
 

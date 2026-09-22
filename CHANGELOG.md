@@ -4,6 +4,36 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.8] - 2026-09-22 - PCI passthrough and SR-IOV, checked end to end
+
+Since 1.15.0 the VM editor's passthrough picker was marked "not verified
+end to end": no device could be handed over on a single-node production
+cluster. One node of the three-node test cluster was given a virtual IOMMU
+and two emulated cards to try it.
+
+### Changed
+- **The passthrough picker says where each device is and whether it can be
+  used**: address, node and driver. Only a device claimed in Harvester
+  (driver `vfio-pci`) can be used; picking another gave a VM that never
+  starts, and the 33 devices of the test cluster were listed alike.
+- The editor's passthrough hint no longer says "not verified", and says
+  how to read the list. The description of the interface bindings adds that
+  on Harvester, SR-IOV goes through a virtual function passed through as a
+  PCI device; the KubeVirt `macvtap` and `sriov` bindings stay marked as
+  not verified.
+
+### Internal
+- `tests/bench/harvlab/harvlab.sh pci` adds the virtual IOMMU, an e1000e
+  card and an SR-IOV capable igb card to the test cluster's node 3.
+
+### Tests
+- 1 new unit test on the picker's label; the guard on unverified
+  capabilities now expects passthrough to say it was verified.
+- On harvlab: with the device claimed in Harvester, an e1000e card chosen
+  in the console's editor reached the guest's PCI bus (`8086:10d3`), then
+  an SR-IOV virtual function enabled through Harvester (`8086:10ca`). Not
+  tried: a real GPU.
+
 ## [1.44.7] - 2026-09-22 - A maintenance that would never finish is said so
 
 ### Fixed

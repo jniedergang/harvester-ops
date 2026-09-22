@@ -238,11 +238,10 @@ const VMEdit = (() => {
     },
   };
 
-  // v1.15.0 — passthrough PCI/GPU. ⚠️ NON VÉRIFIÉ DE BOUT EN BOUT :
-  // harv1 n'a aucun device réservable (claim = détacher le device de son
-  // pilote hôte, exclu sur un cluster mono-node en production). Le
-  // sélecteur liste les vrais devices et la spec est validée par
-  // l'apiserver, mais aucun invité n'a été démarré dessus.
+  // v1.15.0, passthrough PCI/GPU. Vérifié de bout en bout le 22/09/2026 sur
+  // le banc harvlab (IOMMU virtuel, cartes émulées) : une carte e1000e et une
+  // fonction virtuelle SR-IOV d'une igb, choisies ici, sont arrivées sur le
+  // bus PCI de l'invité. Toujours pas de vrai GPU pour l'essayer.
   const HOSTDEV_SCHEMA = {
     id: 'vm-hostdevices',
     nested: {
@@ -323,8 +322,8 @@ const VMEdit = (() => {
           { name: 'type', type: 'enum', default: 'bridge',
             enum_values: ['bridge', 'masquerade', 'macvtap', 'sriov'],
             label: { en: 'Binding', fr: 'Attachement' },
-            description: { en: 'bridge = L2 on a VLAN network (Harvester default) · masquerade = NAT on the pod network · macvtap/sriov = direct attachment, needs a matching network and hardware (NOT verified on this cluster)',
-                           fr: 'bridge = L2 sur un réseau VLAN (défaut Harvester) · masquerade = NAT sur le réseau des pods · macvtap/sriov = rattachement direct, exige un réseau et du matériel adaptés (NON vérifié sur ce cluster)' } },
+            description: { en: 'bridge = L2 on a VLAN network (Harvester default) · masquerade = NAT on the pod network · macvtap/sriov = direct attachment, needs a matching network and hardware (NOT verified on this cluster). On Harvester, SR-IOV goes through a virtual function passed through as a PCI device (Firmware section), verified on a test cluster.',
+                           fr: 'bridge = L2 sur un réseau VLAN (défaut Harvester) · masquerade = NAT sur le réseau des pods · macvtap/sriov = rattachement direct, exige un réseau et du matériel adaptés (NON vérifié sur ce cluster). Sur Harvester, le SR-IOV passe par une fonction virtuelle en passthrough PCI (section Firmware), vérifié sur un cluster de test.' } },
           { name: 'network', type: 'ref', ref_endpoint: '/api/networks', ref_namespaced: true,
             label: { en: 'Network (multus)', fr: 'Réseau (multus)' },
             description: { en: 'NetworkAttachmentDefinition — bridge mode only',
@@ -1705,7 +1704,7 @@ const VMEdit = (() => {
         <span class="form-hint">${esc(tr('vm.edit.watchdogHint', 'i6300esb watchdog: the guest must feed it (watchdog daemon), otherwise the chosen action fires when it freezes.'))}</span>
       </div>
       <h3>${esc(tr('vm.edit.passthrough', 'PCI / GPU passthrough'))}</h3>
-      <p class="form-hint vm-edit-unverified">${esc(tr('vm.edit.passthroughHint', 'The picker lists the PCI devices Harvester discovered. The device must first be claimed and unbound from its host driver in Harvester — harvester-ops never does that for you. NOT verified end-to-end on this cluster (no spare device to hand over).'))}</p>
+      <p class="form-hint">${esc(tr('vm.edit.passthroughHint', 'The picker lists the PCI devices Harvester discovered, as address · node · driver. Only a device claimed in Harvester (driver vfio-pci) can be used; harvester-ops never claims one for you. Verified on a test cluster: a network card and an SR-IOV virtual function reached the guest.'))}</p>
       <div class="vm-edit-cards" data-cards="hostdev">
         ${TFForm.render(HOSTDEV_SCHEMA, cluster, { dev: hostDevs }, { hideHeader: true })}
       </div>

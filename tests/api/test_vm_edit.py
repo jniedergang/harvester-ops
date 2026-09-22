@@ -711,6 +711,25 @@ def test_pcidevice_reducer_exposes_the_spec_reference():
     assert "0000:00:02.0" in out["display_name"]
 
 
+def test_the_picker_says_where_a_device_is_and_whether_it_is_claimed():
+    """v1.44.8, relevé sur harvlab : le sélecteur listait les 33 devices PCI
+    du cluster sans dire lesquels étaient réservés (seuls utilisables) ni sur
+    quel nœud ; choisir un device non réservé donne une VM qui ne démarre
+    jamais."""
+    base = {"metadata": {"name": "harvlab-n3-000004000"},
+            "status": {"resourceName": "intel.com/82574L", "address": "0000:04:00.0",
+                       "nodeName": "harvlab-n3",
+                       "description": "Ethernet controller: Intel 82574L"}}
+    free = wapp._reduce_pcidevice(dict(base, status=dict(base["status"],
+                                                         kernelDriverInUse="e1000e")))
+    claimed = wapp._reduce_pcidevice(dict(base, status=dict(base["status"],
+                                                            kernelDriverInUse="vfio-pci")))
+    assert "harvlab-n3" in free["display_name"] and "0000:04:00.0" in free["display_name"]
+    # le pilote plutôt qu'un mot anglais : vfio-pci = réservé, dans toute langue
+    assert free["display_name"].endswith("· e1000e)") and free["claimed"] is False
+    assert claimed["display_name"].endswith("· vfio-pci)") and claimed["claimed"] is True
+
+
 def test_autoattach_toggles_are_tri_state():
     """KubeVirt treats a missing autoattach* as true. The patch must send
     false only to disable, and null to go back to the default — writing
@@ -758,18 +777,20 @@ console.log(JSON.stringify([items.map(i => i.type), out]));
 
 def test_unverified_capabilities_are_flagged_in_the_ui():
     """Project rule: a capability we could not exercise for real is
-    never shipped silently."""
+    never shipped silently. PCI passthrough was verified on the harvlab
+    test cluster (v1.44.8) and says so; the exotic interface bindings
+    were not, and keep saying it."""
     js = VM_EDIT_JS.read_text()
-    assert "vm-edit-unverified" in js, "the passthrough notice must carry the warning style"
-    css = (ROOT / "web" / "static" / "css" / "style.css").read_text()
-    assert ".vm-edit-unverified" in css
     i18n = (WEB / "static" / "js" / "i18n.js").read_text()
     en = i18n.split("  en: {", 1)[1].split("  fr: {", 1)[0]
-    assert "NOT verified end-to-end" in en
+    assert "Verified on a test cluster" in en and "NOT verified end-to-end" not in en
     fr = i18n.split("  fr: {", 1)[1].split("  it: {", 1)[0]
-    assert "NON vérifié de bout en bout" in fr
-    # the exotic bindings say it too
+    assert "Vérifié sur un cluster de test" in fr
+    # the exotic bindings still say they are not verified
     assert "NOT verified on this cluster" in js
+    # the warning style stays for what is still unverified elsewhere
+    css = (ROOT / "web" / "static" / "css" / "style.css").read_text()
+    assert ".vm-edit-unverified" in css
 
 
 # ---------------------------------------------------------------------------

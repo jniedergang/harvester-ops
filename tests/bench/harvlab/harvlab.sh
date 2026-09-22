@@ -18,6 +18,8 @@
 #   harvlab.sh status         état des VMs et des nœuds
 #   harvlab.sh stop|start     arrête proprement ou démarre les trois VMs
 #   harvlab.sh destroy        supprime VMs et disques (confirmation)
+#   harvlab.sh pci            donne au nœud 3 un IOMMU virtuel, une e1000e et
+#                             une igb (SR-IOV) pour le passthrough PCI
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -227,6 +229,23 @@ cmd_destroy() {
     say "VMs et disques supprimés (l'ISO reste dans $DIR)"
 }
 
+# Passthrough PCI et SR-IOV sur le nœud 3, avec du matériel émulé. Le nœud
+# doit être vidé avant (mise en maintenance depuis la console) : il est
+# arrêté, modifié puis redémarré. Idempotent.
+cmd_pci() {
+    local name; name="$(name_of 3)"
+    on_node2 "sudo virsh dumpxml $name | grep -q \"<iommu model='intel'\"" \
+        && { say "$name a déjà son IOMMU virtuel"; return; }
+    on_node2 "sudo virsh shutdown $name >/dev/null; \
+        for i in \$(seq 1 60); do [ \"\$(sudo virsh domstate $name)\" = 'shut off' ] && break; sleep 5; done; \
+        sudo virt-xml $name --edit --features ioapic.driver=qemu >/dev/null && \
+        sudo virt-xml $name --add-device --iommu model=intel,driver.intremap=on,driver.caching_mode=on >/dev/null && \
+        sudo virt-xml $name --add-device --network bridge=br0,model=e1000e,mac=52:54:00:4c:ab:73 >/dev/null && \
+        sudo virt-xml $name --add-device --network bridge=br0,model=igb,mac=52:54:00:4c:ab:74 >/dev/null && \
+        sudo virsh start $name >/dev/null"
+    say "$name : IOMMU virtuel, e1000e (04:00.0) et igb SR-IOV (05:00.0) ajoutés"
+}
+
 case "${1:-}" in
     secrets)    cmd_secrets ;;
     serve)      cmd_serve ;;
@@ -239,5 +258,6 @@ case "${1:-}" in
     stop)       cmd_stop ;;
     start)      cmd_start ;;
     destroy)    cmd_destroy ;;
+    pci)        cmd_pci ;;
     *) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 1 ;;
 esac

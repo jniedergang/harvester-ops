@@ -65,3 +65,21 @@ Puis `stop` / `start` pour l'éteindre et le rallumer, `status` pour son état,
 - UEFI **sans Secure Boot** (le démarrage direct du noyau ne passe pas par
   shim) ; CPU `host-passthrough` pour que KubeVirt puisse lancer des VMs dans
   les nœuds.
+
+## Passthrough PCI et SR-IOV (nœud 3)
+
+`harvlab.sh pci` donne au nœud 3 un IOMMU virtuel (Intel, remappage des
+interruptions), une carte e1000e (`04:00.0`) à passer telle quelle et une
+carte igb (`05:00.0`) qui sait faire du SR-IOV (7 fonctions virtuelles). Le
+vider avant (mise en maintenance depuis la console). Harvester démarre déjà
+avec `intel_iommu=on iommu=pt`.
+
+Ensuite, côté Harvester : activer l'addon `pcidevices-controller`, créer le
+`PCIDeviceClaim` du périphérique **avec une ownerReference vers son
+PCIDevice** (sans elle, le contrôleur boucle sur « Cannot find PCIDevice that
+owns », et le claim ne se supprime plus sans retirer son finalizer). Pour le
+SR-IOV, régler `spec.numVFs` du `SriovNetworkDevice` du nœud : chaque
+fonction virtuelle devient un PCIDevice à réserver de la même façon.
+Vérifié le 22/09/2026 : la carte et une fonction virtuelle, choisies dans
+l'éditeur de VM de la console, sont arrivées sur le bus PCI de l'invité
+(`virsh qemu-monitor-command ... "info pci"` dans le virt-launcher).

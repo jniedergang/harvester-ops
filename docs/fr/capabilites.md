@@ -164,12 +164,18 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   mémoire, pointeur tablette USB et watchdog — chacun écrit uniquement
   s'il diffère du défaut KubeVirt.
 
-**Livré mais non vérifié sur le cluster de test** (signalé dans l'UI,
-en style d'avertissement) : le passthrough PCI/GPU (le sélecteur liste
-les périphériques découverts par Harvester, mais aucun n'était cessible
-sur un cluster mono-node en production) et les attachements macvtap /
-SR-IOV (matériel absent). Tout le reste de cette page a été exercé pour
-de vrai. L'onglet
+**Passthrough PCI et SR-IOV** : le sélecteur liste les périphériques
+découverts par Harvester sous la forme adresse, nœud et pilote ; seul un
+périphérique réservé dans Harvester (pilote `vfio-pci`) est utilisable, et
+la console n'en réserve jamais un elle-même. Vérifié sur le cluster de test
+à trois nœuds avec du matériel émulé (IOMMU virtuel) : une carte réseau, et
+une fonction virtuelle SR-IOV d'une autre carte, choisies dans l'éditeur,
+sont arrivées sur le bus PCI de l'invité. Sur Harvester, le SR-IOV passe par
+une telle fonction virtuelle en passthrough PCI. Aucun vrai GPU n'a été
+essayé. **Livré mais non vérifié** (signalé dans l'UI, en style
+d'avertissement) : les attachements d'interface macvtap et SR-IOV de
+KubeVirt, qui exigent des composants que Harvester ne livre pas. Tout le
+reste de cette page a été exercé pour de vrai. L'onglet
   Cloud-init gagne un **assistant** (v1.8.1) qui génère du YAML
   cloud-config et network-data v1 propres dans les éditeurs — nom
   d'hôte, utilisateurs (mot de passe, sudo sans mot de passe, clés SSH
