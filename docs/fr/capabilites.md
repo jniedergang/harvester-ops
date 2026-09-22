@@ -239,31 +239,44 @@ La CLI expose le sous-ensemble start/stop via `harvester-status` /
   dernier nœud encore disponible (aucun autre nœud ni isolé ni en
   maintenance) : la console applique la même règle en amont ; sur un tel
   nœud, le bouton Isoler est affiché désactivé avec la raison, et le
-  serveur refuse par un 409 au lieu de lancer une action vouée à l'échec. La
-  **maintenance** est celle de Harvester : la console la demande comme le
-  fait l'interface de Harvester (annotation
-  `harvesterhci.io/drain-requested`), et c'est le contrôleur de Harvester
-  qui migre les VMs. Avant toute demande, la console montre ce qui se
-  passerait, avec les règles de Harvester : un nœud qui est le seul plan
-  de contrôle est refusé, comme un nœud du plan de contrôle quand un autre
-  est déjà en maintenance ; les VMs qui migreront ; celles qui ne le
-  peuvent pas, et pourquoi (la dernière réplique saine d'un de leurs
-  volumes est sur ce nœud, KubeVirt les dit non migrables à chaud, ou
-  aucun autre nœud ne satisfait leurs règles de placement) ; les VMs
-  marquées pour être arrêtées pendant la maintenance. Tant qu'une VM ne
-  peut pas migrer, la maintenance est refusée sauf forçage, et le forçage
-  (arrêter ces VMs) est derrière le verrou destructif. L'action tracée
-  suit Harvester jusqu'à ce que le nœud soit en maintenance (10 minutes au
-  plus) et rapporte un refus de son contrôleur. Sortir de maintenance rend
-  le nœud de nouveau planifiable et redémarre les VMs que la maintenance a
-  arrêtées. Entrer et sortir de maintenance demandent le rôle `admin`.
-  **Pas encore vérifié sur un vrai cluster** : le cluster de test n'a
-  qu'un nœud, qui porte le plan de contrôle ; seuls les refus ont pu être
-  exercés en réel (le webhook de Harvester qui refuse d'isoler le dernier
-  nœud, le plan de contrôle unique qui refuse la maintenance). Isoler,
-  réintégrer, entrer et sortir de maintenance pour de bon sont couverts
-  par les tests automatisés, en attendant un cluster de test à plusieurs
-  nœuds.
+  serveur refuse par un 409 au lieu de lancer une action vouée à l'échec.
+  La **maintenance** est celle de Harvester : la console la demande comme le
+  fait l'interface de Harvester (annotation `harvesterhci.io/drain-requested`),
+  et c'est le contrôleur de Harvester qui draine le nœud. Avant toute
+  demande, la console montre ce qui se passerait, avec les règles de
+  Harvester :
+  - un nœud qui est le seul plan de contrôle est refusé, comme un nœud du
+    plan de contrôle quand un autre est déjà en maintenance ;
+  - les VMs qui **migreront** ;
+  - celles qui **ne le peuvent pas**, et pourquoi (la dernière réplique saine
+    d'un de leurs volumes est sur ce nœud, KubeVirt les dit non migrables à
+    chaud, ou aucun autre nœud ne satisfait leurs règles de placement). Tant
+    qu'il y en a, la maintenance est refusée sauf forçage ; le forçage est
+    derrière le verrou destructif, arrête ces VMs, et elles **restent
+    arrêtées** ensuite ;
+  - celles que le **drain arrêtera** : KubeVirt ne migre une VM à l'éviction
+    que si sa stratégie d'éviction le demande (`LiveMigrate` ou
+    `LiveMigrateIfPossible`, ou le défaut du cluster). L'interface de
+    Harvester la pose, mais les VMs créées par kubectl ou Terraform souvent
+    pas. Pour chacune, la console dit si elle revient sur un autre nœud
+    (stratégie de démarrage `Always` : un redémarrage, pas une migration) ou
+    reste arrêtée, et comment la faire migrer ;
+  - celles dont un **volume n'est pas sain** : Longhorn ne migre pas un
+    volume dont une réplique attend sa reconstruction, et la maintenance peut
+    alors durer bien plus longtemps ;
+  - les VMs étiquetées pour être arrêtées pendant la maintenance.
+  L'action tracée suit Harvester jusqu'à ce que le nœud soit en maintenance
+  (10 minutes au plus) et rapporte un refus de son contrôleur. Sortir de
+  maintenance rend le nœud de nouveau planifiable et redémarre les VMs
+  étiquetées pour redémarrer après. Entrer et sortir de maintenance
+  demandent le rôle `admin`. Les VMs créées depuis la console reçoivent
+  désormais `LiveMigrateIfPossible`, comme celles de l'interface de
+  Harvester. **Vérifié sur un cluster de test à trois nœuds** : isoler et
+  réintégrer ; le refus d'isoler le dernier nœud disponible (la console et
+  le webhook de Harvester le refusent de même) ; la maintenance avec et sans
+  forçage, où chaque VM a fini comme annoncé (migrée avec la même instance,
+  redémarrée ailleurs, arrêtée) ; le refus pour plan de contrôle occupé ; la
+  sortie de maintenance.
 - **Vue Réseau, un bloc par réseau** (même disposition que la Fabrique).
   À gauche, chaque VM branchée sur ce réseau avec ce qu'elle y a vraiment :
   nom de l'interface, MAC, adresses, nom de l'interface dans l'invité,

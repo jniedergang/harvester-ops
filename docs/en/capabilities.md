@@ -220,26 +220,39 @@ CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
   shown disabled with the reason, and the server refuses it with a 409
   instead of starting an action bound to fail. **Maintenance** is Harvester's own:
   the console asks for it the way the Harvester UI does (the
-  `harvesterhci.io/drain-requested` annotation), and Harvester's
-  controller migrates the VMs away. Before anything is asked, the console
-  shows what would happen, with Harvester's own rules: a node that is the
-  only control plane is refused, as is a control plane node while another
-  one is already in maintenance; the VMs that will migrate; the VMs that
-  cannot, and why (the last healthy replica of one of their volumes is on
-  this node, KubeVirt says they are not live-migratable, or no other node
-  satisfies their placement rules); the VMs marked to be shut down during
-  maintenance. While a VM cannot migrate, maintenance is refused unless
-  forced, and forcing (shutting those VMs down) sits behind the
-  destructive lock. The tracked action follows Harvester until the node is
-  in maintenance (10 minutes at most) and reports a refusal by its
-  controller. Leaving maintenance makes the node schedulable again and
-  restarts the VMs maintenance shut down. Entering and leaving maintenance
-  need the `admin` role. **Not verified on a real cluster yet**: the test
-  cluster has a single node, which carries the control plane, so only the
-  refusals could be exercised for real (Harvester's webhook refusing to
-  cordon the last node, the single control plane refusing maintenance);
-  actually cordoning, uncordoning, entering and leaving maintenance are
-  covered by automated tests until a multi-node test cluster exists.
+  `harvesterhci.io/drain-requested` annotation), and Harvester's controller
+  drains the node. Before anything is asked, the console shows what would
+  happen, with Harvester's own rules:
+  - a node that is the only control plane is refused, as is a control plane
+    node while another one is already in maintenance;
+  - the VMs that **will migrate**;
+  - the VMs that **cannot**, and why (the last healthy replica of one of their
+    volumes is on this node, KubeVirt says they are not live-migratable, or no
+    other node satisfies their placement rules). While there are any,
+    maintenance is refused unless forced; forcing sits behind the destructive
+    lock, shuts those VMs down, and they **stay stopped** afterwards;
+  - the VMs the **drain will shut down**: KubeVirt live-migrates a VM on
+    eviction only if its eviction strategy asks for it (`LiveMigrate` or
+    `LiveMigrateIfPossible`, or the cluster default). The Harvester UI sets
+    it, but VMs created with kubectl or Terraform often do not. For each one
+    the console says whether it comes back on another node (run strategy
+    `Always`: a restart, not a migration) or stays stopped, and how to make it
+    migrate;
+  - the VMs whose **volume is not healthy**: Longhorn does not migrate a
+    volume while a replica waits to be rebuilt, and the maintenance can then
+    take much longer;
+  - the VMs labelled to be shut down during maintenance.
+  The tracked action follows Harvester until the node is in maintenance (10
+  minutes at most) and reports a refusal by its controller. Leaving
+  maintenance makes the node schedulable again and restarts the VMs labelled
+  to restart after it. Entering and leaving maintenance need the `admin` role.
+  VMs created from the console now get `LiveMigrateIfPossible`, like those of
+  the Harvester UI. **Verified on a three-node test cluster**: cordon and
+  uncordon; the refusal to cordon the last available node (the console and
+  Harvester's webhook refuse it alike); maintenance with and without forcing,
+  where each VM ended as announced (migrated with the same instance,
+  restarted elsewhere, stopped); the busy control plane refusal; leaving
+  maintenance.
 - **Network view, one block per network** (same layout as Fabric). On the
   left, every VM attached to that network with what it really has on it:
   interface name, MAC, addresses, the interface name inside the guest,

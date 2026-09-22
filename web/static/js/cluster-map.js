@@ -385,6 +385,20 @@ const ClusterMap = (() => {
         ${refusal ? `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(refusal)}</div></div>` : `
         <div class="cm-pop-title">${esc(tr('cluster.maintMigrate', 'Will migrate'))}</div>${list(p.migrate || [])}
         <div class="cm-pop-title">${esc(tr('cluster.maintStop', 'Will be shut down'))}</div>${list(p.will_stop || [])}
+        ${p.force && (p.will_stop || []).length ? `<p class="form-hint">${esc(tr('cluster.maintStopStays',
+          'Shut down by forcing, they stay stopped after the maintenance: restart them by hand.'))}</p>` : ''}
+        ${(p.volume_waits || []).length ? `
+        <div class="cm-pop-title warn">${esc(tr('cluster.maintVolumeWaits', 'Migration will wait for a volume'))}</div>
+        ${list(p.volume_waits.map(w => `${w.vm} : ${w.volume}`))}
+        <p class="form-hint">${esc(tr('cluster.volumeWaitsHint',
+          'These volumes are not healthy: Longhorn does not migrate a volume while a replica waits to be rebuilt, and the maintenance can take much longer. Wait until they are healthy (Storage view).'))}</p>` : ''}
+        ${(p.drain_stops || []).length ? `
+        <div class="cm-pop-title warn">${esc(tr('cluster.maintDrainStops', 'Shut down by the drain'))}</div>
+        ${list(p.drain_stops.map(d => `${d.vm} : ${d.restarts
+          ? tr('cluster.drainRestarts', 'restarted on another node (not live-migrated)')
+          : tr('cluster.drainStays', 'stays stopped')}`))}
+        <p class="form-hint">${esc(tr('cluster.drainHint',
+          'These VMs have no live-migration eviction strategy. To have them migrate, set Eviction strategy to LiveMigrateIfPossible in the VM editor (Lifecycle).'))}</p>` : ''}
         ${blocked.length ? `<div class="cm-pop-title warn">${esc(tr('cluster.maintBlocked', 'Cannot migrate'))}</div>${list(blocked)}` : ''}
         ${blocked.length ? `<label class="cm-force tip" data-tip-i18n="cluster.maintForceTip">
             <input type="checkbox" data-cm-force ${force ? 'checked' : ''} ${unlocked ? '' : 'disabled'}>

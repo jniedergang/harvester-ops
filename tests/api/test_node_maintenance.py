@@ -27,13 +27,14 @@ def node(name, cp=True, ready=True, unschedulable=False, annotations=None, label
 
 
 def vmi(name, node_name, ns="default", migratable=True, reason="DisksNotLiveMigratable",
-        strategy=None, node_selector=None, affinity=None):
+        strategy=None, node_selector=None, affinity=None, eviction="LiveMigrateIfPossible"):
+    """Par défaut, un VMI comme Harvester le crée : `LiveMigrateIfPossible`."""
     labels = {"kubevirt.io/nodeName": node_name}
     if strategy:
         labels["harvesterhci.io/maintain-mode-strategy"] = strategy
     conds = [] if migratable else [{"type": "LiveMigratable", "status": "False",
                                     "reason": reason}]
-    spec = {}
+    spec = {"evictionStrategy": eviction} if eviction else {}
     if node_selector:
         spec["nodeSelector"] = node_selector
     if affinity:
@@ -44,10 +45,11 @@ def vmi(name, node_name, ns="default", migratable=True, reason="DisksNotLiveMigr
             "spec": spec, "status": {"nodeName": node_name, "conditions": conds}}
 
 
-def lh_volume(name, vmi_name, ns="default"):
+def lh_volume(name, vmi_name, ns="default", robustness="healthy"):
     return {"metadata": {"name": name},
-            "status": {"kubernetesStatus": {"namespace": ns, "workloadsStatus": [
-                {"workloadName": vmi_name, "workloadType": "VirtualMachineInstance"}]}}}
+            "status": {"robustness": robustness,
+                       "kubernetesStatus": {"namespace": ns, "workloadsStatus": [
+                           {"workloadName": vmi_name, "workloadType": "VirtualMachineInstance"}]}}}
 
 
 def lh_replica(vol, node_name, started=True):
@@ -142,6 +144,64 @@ def test_the_plan_says_what_migrates_and_what_stops():
     assert plan["vms_on_node"] == ["default/batch", "default/web"]
     assert plan["migrate"] == ["default/web"]
     assert plan["will_stop"] == ["default/batch"]
+
+
+def test_a_vm_without_a_live_migration_eviction_is_stopped_by_the_drain():
+    """Constaté sur harvlab : une VM sans `evictionStrategy` (créée par
+    kubectl, Terraform ou la console avant 1.44.3) est ARRÊTÉE par le drain
+    au lieu de migrer ; KubeVirt ne migre à l'éviction que si on le lui
+    demande. Le plan le dit, au lieu de l'annoncer comme migrée."""
+    vmis = [vmi("web", "n1"), vmi("legacy", "n1", eviction=None),
+            vmi("ext", "n1", eviction="External")]
+    plan = nm.plan(HA[0], HA, vmis, [], [], force=False)
+    assert plan["migrate"] == ["default/web"]
+    assert plan["drain_stops"] == [{"vm": "default/ext", "restarts": False},
+                                   {"vm": "default/legacy", "restarts": False}]
+    assert plan["blocked"] is False
+
+
+def test_an_always_vm_comes_back_on_another_node():
+    """`Always` : KubeVirt la relance ailleurs (arrêt, pas migration) ;
+    `RerunOnFailure` : un arrêt propre n'est pas une panne, elle reste arrêtée."""
+    vmis = [vmi("always", "n1", eviction=None), vmi("rerun", "n1", eviction=None)]
+    vms = [{"metadata": {"name": "always", "namespace": "default"},
+            "spec": {"runStrategy": "Always"}},
+           {"metadata": {"name": "rerun", "namespace": "default"},
+            "spec": {"runStrategy": "RerunOnFailure"}}]
+    plan = nm.plan(HA[0], HA, vmis, [], [], force=False, vms=vms)
+    assert plan["drain_stops"] == [{"vm": "default/always", "restarts": True},
+                                   {"vm": "default/rerun", "restarts": False}]
+
+
+def test_the_cluster_default_eviction_counts():
+    vmis = [vmi("legacy", "n1", eviction=None)]
+    plan = nm.plan(HA[0], HA, vmis, [], [], force=False, default_eviction="LiveMigrate")
+    assert plan["migrate"] == ["default/legacy"] and plan["drain_stops"] == []
+
+
+def test_forcing_stops_only_the_non_migratable():
+    """Harvester n'honore l'étiquette « arrêter pendant la maintenance »
+    qu'SANS forçage ; forcer arrête les seules VMs non migrables."""
+    vmis = [vmi("gpu", "n1", migratable=False), vmi("batch", "n1", strategy="Shutdown")]
+    forced = nm.plan(HA[0], HA, vmis, [], [], force=True)
+    assert forced["will_stop"] == ["default/gpu"]
+    assert forced["migrate"] == ["default/batch"]
+    normal = nm.plan(HA[0], [HA[0], HA[1], HA[2]], [vmis[1]], [], [], force=False)
+    assert normal["will_stop"] == ["default/batch"]
+
+
+def test_a_vm_whose_volume_is_not_healthy_is_flagged():
+    """Constaté sur harvlab : Longhorn annule la migration d'un volume dont
+    une réplique attend sa reconstruction (« Need to revert rather than
+    starting migration »). KubeVirt réessaie, la maintenance piétine un
+    quart d'heure. La VM migrera, mais le plan le dit AVANT."""
+    vmis = [vmi("web", "n1"), vmi("db", "n1"), vmi("far", "n2")]
+    vols = [lh_volume("pvc-web", "web", robustness="degraded"),
+            lh_volume("pvc-db", "db"), lh_volume("pvc-far", "far", robustness="degraded")]
+    reps = [lh_replica("pvc-web", n) for n in ("n1", "n2", "n3")]
+    plan = nm.plan(HA[0], HA, vmis, vols, reps, force=False)
+    assert plan["volume_waits"] == [{"vm": "default/web", "volume": "pvc-web"}]
+    assert "default/web" in plan["migrate"] and plan["blocked"] is False
 
 
 def test_non_migratable_vms_block_unless_forced():
@@ -322,6 +382,19 @@ def test_maintenance_refused_on_a_single_control_plane(client, monkeypatch):
     assert r.status_code == 409
     assert (r.get_json()["error"], r.get_json()["refusal"]) == ("refused", "single-control-plane")
     assert not runs
+
+
+def test_the_check_reads_the_cluster_default_eviction(client, monkeypatch):
+    """Le défaut vient de la ressource KubeVirt, dans le même appel groupé."""
+    kv = {"kind": "KubeVirt", "metadata": {"name": "kubevirt"},
+          "spec": {"configuration": {"evictionStrategy": "LiveMigrate"}}}
+    assert "kubevirts.kubevirt.io" in wapp.NODE_MAINT_KINDS
+    items = [dict(n, kind="Node") for n in HA] + [dict(vmi("legacy", "n1", eviction=None),
+                                                     kind="VirtualMachineInstance"), kv]
+    wapp._node_maint_missing.clear()
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: {"items": items})
+    plan = client.get("/api/node/c1/n1/maintenance-check").get_json()
+    assert plan["migrate"] == ["default/legacy"] and plan["drain_stops"] == []
 
 
 def test_non_migratable_vms_need_force(client, monkeypatch):

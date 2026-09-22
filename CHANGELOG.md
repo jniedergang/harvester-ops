@@ -4,6 +4,52 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.3] - 2026-09-22 - Node maintenance, checked on three real nodes
+
+Cordon, uncordon and maintenance mode shipped in 1.43.0 marked "not
+verified on a real cluster". They have now been run on `harvlab`, a
+three-node test cluster, and the run corrected what the pre-check announced.
+
+### Fixed
+- **The pre-check announced "will migrate" for VMs the drain shuts down.**
+  KubeVirt live-migrates a VM on eviction only if its eviction strategy asks
+  for it (`LiveMigrate`, `LiveMigrateIfPossible`, or the cluster default read
+  from the KubeVirt resource). A VM without one is stopped by the drain: seen
+  on harvlab, a VM announced as migrating was shut down. The pre-check now
+  lists these VMs apart, says for each whether it comes back on another node
+  (run strategy `Always`, a restart and not a migration) or stays stopped,
+  and how to make it migrate.
+- **VMs created from the console had no eviction strategy**, so they were
+  shut down by any node maintenance. They now get `LiveMigrateIfPossible`,
+  like those of the Harvester UI. Four VMs of harv1 created with kubectl or
+  Terraform have none; the pre-check shows them.
+- **Forcing was described wrongly**: Harvester stops only the non-migratable
+  VMs, they stay stopped after the maintenance, and the "shut down during
+  maintenance" label is honoured only without forcing. The pre-check and
+  the documentation say so.
+- **A VM whose volume is not healthy is flagged**: Longhorn cancels the
+  migration of a volume while a replica waits to be rebuilt (seen on
+  harvlab: the drain went round for a quarter of an hour until the rebuild
+  went through).
+
+### Changed
+- The comment of the migration endpoint claimed a target node could be
+  chosen; KubeVirt always chooses it. Choosing one is not implemented.
+
+### Tests
+- 6 new unit tests (eviction strategy, cluster default, `Always`, forcing,
+  unhealthy volume) and a browser test of the new sections; the VM creation
+  test checks the eviction strategy sent.
+- On harvlab (Harvester v1.8.2, three control-plane nodes): cordon and
+  uncordon; the last available node refused by the console and by
+  Harvester's webhook alike; forced maintenance; maintenance without
+  forcing where each VM ended as announced (`LiveMigrateIfPossible`:
+  migrated, same instance; `Always` without strategy: new instance on
+  another node; `RerunOnFailure` without strategy: stopped); the busy
+  control plane refusal; leaving maintenance; the unhealthy volume flagged
+  while degraded and no longer once healthy. The console's live migration
+  and its volume diagnosis were exercised along the way.
+
 ## [1.44.2] - 2026-09-22 - A node can join an existing cluster
 
 Found while building a three-node test cluster (`harvlab`, nested on

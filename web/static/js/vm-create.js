@@ -47,6 +47,10 @@ const VMCreate = (() => {
           metadata: { labels: { 'harvesterhci.io/vmName': name } },
           spec: {
             hostname: name,
+            // Comme l'interface de Harvester : sans stratégie d'éviction, la
+            // VM est ARRÊTÉE par la mise en maintenance de son nœud au lieu
+            // de migrer (constaté sur harvlab, v1.44.3).
+            evictionStrategy: 'LiveMigrateIfPossible',
             domain: {
               cpu: { cores: 1, sockets: 1, threads: 1 },
               memory: { guest: '2Gi' },

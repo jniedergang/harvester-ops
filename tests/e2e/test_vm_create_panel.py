@@ -102,6 +102,11 @@ def test_the_request_carries_a_complete_manifest(context, flask_server):
     assert manifest.get("kind") == "VirtualMachine"
     assert manifest["spec"]["template"]["spec"]["domain"]["cpu"], \
         "le squelette doit porter un domaine complet"
+    # v1.44.3 : comme l'interface de Harvester. Sans stratégie d'éviction,
+    # une VM est ARRÊTÉE par la mise en maintenance de son nœud au lieu de
+    # migrer (constaté sur harvlab).
+    assert manifest["spec"]["template"]["spec"].get("evictionStrategy") == \
+        "LiveMigrateIfPossible"
     # L'identifiant d'action revient à l'opérateur, sans quoi il ne peut pas
     # suivre la création dans le dock.
     assert "act-1" in page.locator('#fp-vm-create [data-result]').inner_text()

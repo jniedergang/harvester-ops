@@ -112,12 +112,22 @@ destructif) arrête ces VMs.
 restant sur le nœud, jusqu'à `completed` (10 minutes au plus), et qui
 rapporte un refus du contrôleur (annotations retirées sans `maintain-status`).
 
-**Vérification réelle** : harv1 n'a qu'un nœud, qui porte le plan de
-contrôle. Les refus y sont vérifiables ; isoler, réintégrer, entrer et
-sortir de maintenance pour de bon ne le sont pas (le webhook refuse
-d'isoler le seul nœud). Ils sont couverts par les tests automatisés et
-documentés comme **non vérifiés en réel**, jusqu'au cluster imbriqué à
-plusieurs nœuds.
+**Vérification réelle** : sur harv1 (un seul nœud) seuls les refus sont
+vérifiables. Le 22/09/2026, sur le banc à trois nœuds `harvlab`
+(`tests/bench/harvlab`), tout a été exercé : isoler, réintégrer, le refus du
+dernier nœud disponible, la maintenance avec et sans forçage, le refus pour
+plan de contrôle occupé, la sortie.
+
+Ce que le réel a appris et que le contrôle préalable dit désormais :
+- le drain n'**arrête** pas une VM seulement quand elle est non migrable :
+  toute VM sans stratégie d'éviction par migration (`LiveMigrate`,
+  `LiveMigrateIfPossible`, ou défaut du cluster) est arrêtée, puis relancée
+  ailleurs si sa stratégie de démarrage est `Always` ;
+- en forçant, Harvester n'arrête que les VMs non migrables, et elles restent
+  arrêtées ; l'étiquette « arrêter pendant la maintenance » n'est honorée
+  que sans forçage ;
+- Longhorn annule la migration d'un volume dont une réplique attend sa
+  reconstruction : la maintenance piétine jusqu'à la fin de celle-ci.
 
 ## Ménage
 

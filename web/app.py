@@ -6737,7 +6737,9 @@ def api_volume_fix(cluster, volume):
 # =============================================================================
 NODE_MAINT_KINDS = ["nodes", "virtualmachineinstances.kubevirt.io",
                     "virtualmachines.kubevirt.io", "volumes.longhorn.io",
-                    "replicas.longhorn.io"]
+                    "replicas.longhorn.io",
+                    # v1.44.3 : la stratégie d'éviction par défaut du cluster
+                    "kubevirts.kubevirt.io"]
 _node_maint_missing = {}
 NODE_MAINT_POLL = 5.0
 NODE_MAINT_TIMEOUT = 600.0
@@ -6766,8 +6768,13 @@ def _node_request(cluster, name):
 
 def _node_plan(ctx, force):
     _kc, by, nodes, node = ctx
+    default_eviction = next(
+        (((kv.get("spec") or {}).get("configuration") or {}).get("evictionStrategy")
+         for kv in by.get("KubeVirt", [])), None)
     return node_maintenance.plan(node, nodes, by.get("VirtualMachineInstance", []),
-                                 by.get("Volume", []), by.get("Replica", []), force)
+                                 by.get("Volume", []), by.get("Replica", []), force,
+                                 vms=by.get("VirtualMachine", []),
+                                 default_eviction=default_eviction)
 
 
 def _kubectl_step(run, step, args):
@@ -10339,8 +10346,8 @@ def api_vm_migrate_info(cluster, namespace, name):
 @app.route("/api/vm/<cluster>/<namespace>/<name>/migrate", methods=["POST"])
 @requires_auth
 def api_vm_migrate_trigger(cluster, namespace, name):
-    """Trigger a live migration. KubeVirt picks the target node automatically
-    unless a specific node is requested via the body 'nodeSelector'."""
+    """Trigger a live migration. KubeVirt picks the target node: choosing
+    one is not implemented (the body is ignored)."""
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404

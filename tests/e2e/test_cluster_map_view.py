@@ -367,6 +367,35 @@ def test_maintenance_blocked_then_forced_behind_the_lock(context, flask_server):
                          {"force": True})
 
 
+def test_vms_the_drain_will_stop_are_said_so(context, flask_server):
+    """Relevé sur harvlab : une VM sans stratégie d'éviction par migration
+    est ARRÊTÉE par le drain. Le contrôle le dit, VM par VM, avec ce qu'elle
+    devient et comment la faire migrer ; en forçant, il dit que les VMs
+    arrêtées le restent."""
+    page = context.new_page()
+    base = {"node": "n1.lo", "refusal": None, "vms_on_node": ["default/db", "default/web"],
+            "non_migratable": {}, "blocked": False, "migrate": ["default/web"]}
+    drained = dict(base, force=False, will_stop=[], drain_stops=[
+        {"vm": "default/db", "restarts": False},
+        {"vm": "default/batch", "restarts": True}],
+        volume_waits=[{"vm": "default/web", "volume": "pvc-web"}])
+    forced = dict(base, force=True, will_stop=["default/gpu"], drain_stops=[],
+                  non_migratable={"LiveMigratable": ["default/gpu"]})
+    view = open_cluster(page, flask_server["base_url"], checks=[drained, forced])
+    host(view, "n1.lo").locator('.cm-host-head').click()
+    view.locator('[data-cm-act="node-maint-check"]').click()
+    page.wait_for_timeout(400)
+    text = view.locator('.cm-maint-box').inner_text()
+    assert "default/db : stays stopped" in text
+    assert "default/batch : restarted on another node (not live-migrated)" in text
+    assert "LiveMigrateIfPossible" in text
+    # un volume pas sain retarde la migration : dit avant
+    assert "default/web : pvc-web" in text and "Storage view" in text
+    view.locator('[data-cm-act="node-maint-check"]').click()
+    page.wait_for_timeout(400)
+    assert "they stay stopped after the maintenance" in view.locator('.cm-maint-box').inner_text()
+
+
 def test_leaving_maintenance(context, flask_server):
     page = context.new_page()
     calls = []

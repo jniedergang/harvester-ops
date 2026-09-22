@@ -181,8 +181,45 @@ def non_migratable(node, nodes, vmis, volumes, replicas):
     return {k: sorted(v) for k, v in out.items()}
 
 
-def plan(node, nodes, vmis, volumes, replicas, force=False):
-    """Ce que ferait la mise en maintenance, dit AVANT de la demander."""
+# KubeVirt ne migre une VM à l'éviction de son pod (le drain) que si sa
+# stratégie d'éviction le demande ; sinon le pod est évincé et la VM arrêtée.
+LIVE_EVICTION = ("LiveMigrate", "LiveMigrateIfPossible")
+
+
+def eviction_strategy(vmi, default=None):
+    """Stratégie effective : celle du VMI, sinon le défaut du cluster
+    (ressource KubeVirt), sinon aucune."""
+    return (vmi.get("spec") or {}).get("evictionStrategy") or default or "None"
+
+
+def volume_waits(node, vmis, volumes):
+    """[{vm, volume}] des VMs du nœud dont un volume n'est pas sain.
+
+    Constaté sur harvlab : Longhorn annule la migration d'un volume dont une
+    réplique attend sa reconstruction (« Need to revert rather than starting
+    migration »), KubeVirt réessaie, et la maintenance piétine jusqu'à ce que
+    la reconstruction passe. La VM migrera, mais bien plus tard."""
+    name = _meta(node).get("name")
+    by_name = {f"{_meta(v).get('namespace')}/{_meta(v).get('name')}": v for v in vmis}
+    out = []
+    for v in volumes:
+        if (v.get("status") or {}).get("robustness") in (None, "healthy"):
+            continue
+        ks = (v.get("status") or {}).get("kubernetesStatus") or {}
+        for w in ks.get("workloadsStatus") or []:
+            vmi = by_name.get(f"{ks.get('namespace')}/{w.get('workloadName')}")
+            if (w.get("workloadType") == "VirtualMachineInstance" and vmi
+                    and _vmi_node(vmi) == name):
+                out.append({"vm": _vm_of(vmi), "volume": _meta(v).get("name")})
+    return sorted(out, key=lambda x: (x["vm"], x["volume"]))
+
+
+def plan(node, nodes, vmis, volumes, replicas, force=False, vms=(), default_eviction=None):
+    """Ce que ferait la mise en maintenance, dit AVANT de la demander.
+
+    `vms` (les VirtualMachine) donne la stratégie de démarrage, qui décide
+    si une VM arrêtée par le drain revient ailleurs ; `default_eviction` est
+    la stratégie d'éviction par défaut du cluster."""
     name = _meta(node).get("name")
     refusal = ("already" if maintenance_state(node)
                else drain_possible(node, nodes)
@@ -190,13 +227,26 @@ def plan(node, nodes, vmis, volumes, replicas, force=False):
     here = [v for v in vmis if _vmi_node(v) == name]
     on_node = sorted({_vm_of(v) for v in here})
     blocked_by = non_migratable(node, nodes, vmis, volumes, replicas)
-    stuck = {vm for vms in blocked_by.values() for vm in vms}
+    stuck = {vm for vms_ in blocked_by.values() for vm in vms_}
     labelled = {_vm_of(v) for v in here
                 if (_meta(v).get("labels") or {}).get(STRATEGY_LABEL) in SHUTDOWN_STRATEGIES}
     # Forcer arrête toutes les VMs non migrables, y compris celle d'un autre
     # nœud dont la dernière copie saine est ici : Harvester arrête la liste
-    # entière.
-    will_stop = labelled | (stuck if force else set())
+    # entière. L'étiquette « arrêter pendant la maintenance » n'est honorée
+    # que SANS forçage (nodedrain_controller.go) ; les VMs arrêtées par un
+    # forçage restent arrêtées à la sortie.
+    will_stop = set(stuck) if force else labelled
+    # Les autres sont évincées par le drain : elles migrent si leur
+    # stratégie d'éviction le demande, sinon elles s'arrêtent. Constaté sur
+    # harvlab : une VM sans stratégie, annoncée « migrera », a été arrêtée.
+    by_vm = {_vm_of(v): v for v in here}
+    run = {f"{_meta(v).get('namespace')}/{_meta(v).get('name')}":
+           (v.get("spec") or {}).get("runStrategy") for v in vms}
+    drain_stops = [{"vm": vm, "restarts": run.get(vm) == "Always"}
+                   for vm in sorted(set(on_node) - will_stop - stuck)
+                   if eviction_strategy(by_vm[vm], default_eviction) not in LIVE_EVICTION]
+    stopped = {d["vm"] for d in drain_stops}
+    migrate = sorted(set(on_node) - will_stop - stuck - stopped)
     return {
         "node": name,
         "refusal": refusal,
@@ -205,7 +255,9 @@ def plan(node, nodes, vmis, volumes, replicas, force=False):
         "non_migratable": blocked_by,
         "blocked": bool(blocked_by) and not force,
         "will_stop": sorted(will_stop),
-        "migrate": sorted(set(on_node) - will_stop - stuck),
+        "drain_stops": drain_stops,
+        "migrate": migrate,
+        "volume_waits": [w for w in volume_waits(node, vmis, volumes) if w["vm"] in migrate],
     }
 
 
