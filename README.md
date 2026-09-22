@@ -1,211 +1,209 @@
 # harvester-ops
 
-**An operations console for SUSE Harvester HCI clusters**
-*Une console d'exploitation pour clusters SUSE Harvester HCI*
+**Shut a SUSE Harvester cluster down cleanly, bring it back in the right
+order, and run it day to day from one console.**
 
-Self-contained, airgap-friendly, single-tarball delivery.
-Livraison autonome en un tarball unique, compatible airgap.
+English · [Français](README.fr.md)
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-525_passing-green.svg)](tests/)
+[![Release](https://img.shields.io/github/v/release/jniedergang/harvester-ops)](https://github.com/jniedergang/harvester-ops/releases/latest)
+[![Tests](https://img.shields.io/badge/tests-1230%2B_passing-green.svg)](tests/)
 
-> Independent project. Not affiliated with, endorsed by, or supported by SUSE.
+> Independent open source project. Not affiliated with, endorsed by, or
+> supported by SUSE.
 
----
+[![A tour of harvester-ops](docs/assets/video/tour-en.webp)](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4)
 
-## Demo / Démonstration
+*A tour of the console, going down the left-hand menu. Click the picture
+for the full video.*
 
-[![Cluster view and node maintenance](docs/assets/video/cluster-maintenance-en.webp)](docs/assets/video/cluster-maintenance-en.webp)
+## Why
 
-*Cluster view and node maintenance, filmed on a real three-node cluster: the
-pre-check says what maintenance would do, the host is drained while its VMs
-live-migrate, then it comes back and a machine is moved by hand. Waits are
-shown sped up, never cut.*
-*Vue Cluster et maintenance d'un nœud, filmée sur un vrai cluster de trois
-nœuds : le pré-contrôle annonce ce que ferait la maintenance, l'hôte est vidé
-pendant que ses VMs migrent à chaud, puis il revient et une machine est
-déplacée à la main. Les attentes sont accélérées, jamais coupées.*
+A Harvester cluster does not like being switched off at the wall. Stopping
+it properly means taking an etcd snapshot, stopping the virtual machines in
+a sensible order, waiting until Longhorn has let go of every volume,
+cordoning the nodes, then powering them off with the control plane last.
+Starting it again is the same list backwards, waiting at each stage for
+the cluster to be ready for the next.
 
-## Screenshots / Captures d'écran
+harvester-ops does both. From a command line that works on an airgapped
+site, or from a web console that shows each step as it happens and stops
+if a check fails. Around that core it has grown into a day-2 console for
+Harvester: cluster and node maintenance, virtual machines, storage,
+network, Cluster API, Terraform and bare-metal installation, for several
+clusters at once.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/topology-dark.png">
-  <img alt="Live cluster topology — running VMs grouped by host node" src="docs/assets/topology.png">
-</picture>
+## Watch it work
 
-*Live cluster topology: running VMs grouped by host node, stopped VMs bucketed apart, per-object details on click.*
-*Topologie live du cluster : VMs actives groupées par nœud hôte, VMs arrêtées à part, détails par objet au clic.*
+Short clips filmed on a real three-node cluster, with captions. Waits are
+sped up, with the factor shown on screen; nothing is cut.
 
-| [![Cluster overview](docs/assets/overview.png)](docs/assets/overview.png) | [![Virtual machines](docs/assets/vms.png)](docs/assets/vms.png) |
+| Clip | What you see | Watch |
+|---|---|---|
+| **Tour** | Every entry of the menu, top to bottom, and the five interface languages | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) |
+| **Shutdown and startup** | A whole cluster powered off in order, then brought back | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) |
+| **Node maintenance** | The pre-check, a host drained while its VMs live-migrate, then a VM moved by hand | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) |
+| **Virtual machines** | The VM list, guided creation, and the built-in console | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) |
+| **Storage** | Space really left, and a degraded volume explained while it rebuilds | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) |
+| **Network** | Networks, the physical fabric, and the path of a VM | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) |
+| **Snapshots** | A VM snapshot taken, the VM changed, and restored | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) |
+| **Activity** | Every action on record with its log, and a support bundle | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) |
+| **Several clusters** | Switching clusters, one that is powered off, roles and accounts | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) |
+
+## What it does
+
+### Power sequencing, the core (command line and console)
+
+- **Graceful shutdown in eight steps**: pre-flight checks, etcd snapshot,
+  optional VM snapshots, VMs stopped in configurable groups, Longhorn
+  volumes detached, nodes cordoned, workers then control plane powered off.
+- **Startup in five steps**: first control-plane node, then the others
+  (by Wake-on-LAN when a MAC address is declared), nodes Ready, cluster
+  state restored, VMs restarted in reverse order.
+- **Safety nets**: a failed check (etcd snapshot, a volume still attached)
+  stops the sequence unless you force it; only the VMs the shutdown
+  stopped come back, with their original run strategy; one shutdown or
+  startup at a time per cluster, from the console or the command line.
+
+### Day-2 console
+
+- **Cluster view**: one block per host with its CPU and memory gauges and
+  the VMs it runs. Node maintenance with a pre-check that says which VMs
+  will migrate, which would stop and what would hold the drain, then the
+  drain followed to the end.
+- **Virtual machines**: create with the space actually left checked as you
+  type, edit every section, templates, snapshots and restore, live
+  migration, bulk actions, and a VNC console several people can watch at
+  once.
+- **Storage**: classes, volumes and node disks, allocatable space as
+  Longhorn computes it, and degraded volumes diagnosed with the fixes that
+  are safe.
+- **Network**: the networks and what is attached to them, the physical
+  fabric (cards, bonds, virtual switches), a VM's path end to end, LLDP.
+- **Activity**: every operation that changes something is recorded with
+  its live log and kept in the history.
+
+### Automation
+
+- **Cluster API (CAPHV)**: install the stack from an airgap bundle, list,
+  scale and delete downstream RKE2 clusters, fetch their kubeconfig.
+  Creating a cluster needs the `caphv-generate` tool on the host.
+- **Terraform**: saved declarations (VMs, images, SSH keys, raw HCL), plan
+  shown before apply, destroy, and the Harvester provider installed or
+  updated from the console.
+- **Bare-metal**: find machines by their management board over Redfish,
+  power them, keep an ISO store, and install Harvester on a blank machine
+  unattended, over virtual media.
+
+### Made for production sites
+
+- **Airgap**: one tarball with its SHA-256 checksum, the Python wheels and
+  the container image inside; nothing is fetched at run time.
+- **Several clusters**, including clusters that are powered off.
+- **Roles and identities**: viewer, operator and admin, deny by default,
+  and actions carried out on the cluster under the operator's own identity.
+- **Five languages** (English, French, German, Spanish, Italian), a tooltip
+  on every control, light and dark themes.
+- Prometheus metrics, a readiness probe, and an anonymised support bundle.
+
+## Screenshots
+
+| | |
 |---|---|
-| *Cluster overview + persistent action dock<br>Aperçu cluster + dock d'actions persistant* | *VM lifecycle per namespace (bulk runStrategy, snapshots, console)<br>Cycle de vie VM par namespace (runStrategy en masse, snapshots, console)* |
-| [![Graceful shutdown](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Activity](docs/assets/activity.png)](docs/assets/activity.png) |
-| *8-step graceful shutdown sequencer with live SSE log<br>Séquenceur d'arrêt gracieux en 8 étapes avec log SSE live* | *Every mutating action tracked, with durable history<br>Toute action mutative tracée, avec historique durable* |
-| [![Storage topology](docs/assets/storage.png)](docs/assets/storage.png) | [![VNC console](docs/assets/console.png)](docs/assets/console.png) |
-| *Storage map: which volume is attached to which VM, CD-ROM/ISO discs, orphan detection<br>Carte du stockage : quel volume est lié à quelle VM, disques CD-ROM/ISO, détection d'orphelins* | *Integrated VNC console with power controls (full boot visible)<br>Console VNC intégrée avec commandes d'alimentation (boot visible en entier)* |
+| [![Cluster view](docs/assets/cluster.png)](docs/assets/cluster.png) | [![Virtual machines](docs/assets/vms.png)](docs/assets/vms.png) |
+| Cluster view, with a node maintenance pre-check | Virtual machines of a namespace |
+| [![Graceful shutdown](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Storage](docs/assets/storage.png)](docs/assets/storage.png) |
+| The eight shutdown steps | Storage, with a volume being rebuilt |
+| [![Network fabric](docs/assets/fabric.png)](docs/assets/fabric.png) | [![VNC console](docs/assets/console.png)](docs/assets/console.png) |
+| Physical fabric of the cluster | Built-in VNC console |
+| [![Activity](docs/assets/activity.png)](docs/assets/activity.png) | [![Bare-metal](docs/assets/baremetal.png)](docs/assets/baremetal.png) |
+| Activity: every action and its log | Bare-metal: Redfish discovery and unattended install |
 
-[![Bare-metal](docs/assets/baremetal.png)](docs/assets/baremetal.png)
-
-*Bare-metal: discover the BMCs over Redfish, then install Harvester on a blank machine without touching it. The console remasters the ISO for an unattended install, serves it behind a one-off token, mounts it as virtual media and boots the machine once on it.*
-*Bare-metal : découvrir les BMC en Redfish, puis installer Harvester sur une machine vierge sans y toucher. La console remasterise l'ISO pour une installation sans opérateur, le sert derrière un jeton à usage unique, le monte en média virtuel et démarre la machine une fois dessus.*
-
----
-
-## EN — What this is
-
-harvester-ops began as graceful shutdown / startup tooling and has grown
-into a single-pane **operations console** for day-2 Harvester work: power
-sequencing, VM lifecycle, cluster observability, downstream cluster
-provisioning, infrastructure-as-code, and bare-metal installation, all
-multi-cluster, all auditable.
-
-It ships as **two equivalent surfaces over one engine**:
-
-- **CLI scripts** — auditable bash for the power-sequencing core
-  (shutdown / startup / status), usable on any SLES/RHEL/Ubuntu host with
-  `kubectl` and `ssh`. This is the airgap-safe path that never needs the UI.
-- **Web console** (optional) — a Flask app with live SSE progress, a
-  persistent action dock, cluster topology, and the higher-level
-  automation surfaces (Cluster API, Terraform, bare-metal).
-
-Every mutating operation — CLI or UI — is tracked as an action with live
-logs and a retained history.
-
-### Capability map
-
-| Area | What it does | CLI | Web console |
-|---|---|:---:|:---:|
-| **Power sequencing** | Graceful shutdown (8 steps) / startup (5 steps), etcd snapshot, Longhorn maintenance, ordered VM stop/restart groups, abort on failed safety checks (`--force` to override), state-aware restart (only VMs the shutdown stopped come back), Wake-on-LAN power-on | ✓ | ✓ |
-| **VM lifecycle** | Per-namespace VM list, bulk runStrategy, snapshots, live migration, in-browser VNC console with power controls, visual disk & NIC editors (PVC / image / blank disk, bridge / masquerade), cloud-init assistant generating cloud-config + network-data | ✓ (`-N`) | ✓ |
-| **Cluster observability** | Live topology: cluster (VMs per node), network (rack-diagram bands per network), storage (VM-to-volume map with real PVC names, CD-ROM/ISO discs, orphaned-volume detection), Prometheus `/metrics`, readiness probe | status | ✓ |
-| **Cluster API (CAPHV)** | Install the CAPI/CAPHV stack from an airgap bundle, create & scale downstream RKE2 clusters, roll K8s upgrades, manage bundles | — | ✓ |
-| **Terraform (IaC)** | Saved multi-resource declarations (VMs, images, SSH keys, raw HCL), apply / destroy, edit deployed resources via sidecar JSON, install or update the Harvester provider (version, mirror URL or uploaded archive) | provider install | ✓ |
-| **Bare-metal** | BMC / Redfish discovery + power actions, ISO store, unattended Harvester install over virtual media | — | ✓ |
-| **Operations support** | Multi-cluster config, collaborative notes, anonymised support bundles, SUSE-branded UI (dark/light, official typeface), fully localised in 5 languages (EN/FR/DE/ES/IT) with tooltips on every control | partial | ✓ |
-
-The power-sequencing core is the only part needed for a pure
-shutdown/startup deployment; everything else is opt-in and layered on the
-same multi-cluster engine. See **[docs/en/capabilities.md](docs/en/capabilities.md)**
-for the full tour.
-
-### Quick start
+## Quick start
 
 ```bash
 # On the operations workstation
 tar xzf harvester-ops-<version>.tar.gz
 cd harvester-ops-<version>
-./install.sh                       # interactive installer
-$EDITOR /etc/harvester-ops/config.yaml
+sudo ./install.sh                      # interactive installer
+sudo $EDITOR /etc/harvester-ops/config.yaml
 
-# CLI — the airgap-safe power-sequencing core
+# Command line: the power-sequencing core, fine on an airgapped site
 harvester-status   --cluster prod
 harvester-shutdown --cluster prod --interactive
 harvester-startup  --cluster prod
 
-# Web console (if installed)
+# Web console, if you installed it
 xdg-open https://localhost:8090
 ```
 
----
+Every command takes `--dry-run`, which shows what would happen and touches
+nothing. See [install](docs/en/install.md) and the
+[operating procedure](docs/en/operating-procedure.md).
 
-## FR — De quoi s'agit-il
+## How it is built
 
-harvester-ops est né comme outillage d'extinction / démarrage gracieux
-et est devenu une **console d'exploitation** unifiée pour le day-2
-Harvester : séquençage électrique, cycle de vie des VMs, observabilité
-cluster, provisionnement de clusters downstream, infrastructure-as-code et
-installation bare-metal, le tout multi-cluster et auditable.
+- **Two surfaces, one engine.** The sequencing lives in auditable bash
+  scripts (`bin/`), needing only `kubectl` and `ssh`. The console (Flask,
+  plain JavaScript, no framework) runs those same scripts and never goes
+  around them.
+- **Every change is an action**: it gets an id the moment it starts, its
+  steps stream live to the browser, and its log is kept.
+- **Delivered as one tarball** built on SUSE BCI, installed as a systemd
+  service that runs a read-only container under an unprivileged account.
 
-Il se présente comme **deux surfaces équivalentes sur un même moteur** :
+## Tested on real clusters
 
-- **Scripts CLI** — bash auditable pour le cœur de séquençage
-  (shutdown / startup / status), utilisable depuis n'importe quel
-  SLES/RHEL/Ubuntu avec `kubectl` et `ssh`. C'est la voie airgap qui ne
-  dépend jamais de l'UI.
-- **Console web** (optionnelle) — application Flask avec suivi SSE live,
-  dock d'actions persistant, topologie cluster, et les surfaces
-  d'automation de plus haut niveau (Cluster API, Terraform, bare-metal).
-
-Toute opération mutative — CLI ou UI — est tracée comme une action avec
-ses logs live et un historique conservé.
-
-### Carte des capacités
-
-| Domaine | Rôle | CLI | Console web |
-|---|---|:---:|:---:|
-| **Séquençage électrique** | Shutdown gracieux (8 étapes) / startup (5 étapes), snapshot etcd, maintenance Longhorn, groupes d'arrêt/redémarrage ordonnés, annulation sur filet de sécurité en échec (`--force` pour outrepasser), reprise d'état (seules les VMs arrêtées par le shutdown redémarrent), allumage Wake-on-LAN | ✓ | ✓ |
-| **Cycle de vie VM** | Liste par namespace, runStrategy en masse, snapshots, live migration, console VNC avec commandes d'alimentation, éditeurs visuels disques & NICs (PVC / image / disque vierge, bridge / masquerade), assistant cloud-init générant cloud-config + network-data | ✓ (`-N`) | ✓ |
-| **Observabilité cluster** | Topologie live : cluster (VMs par node), réseau (bandes façon schéma de baie), stockage (carte VM-volume avec vrais noms de PVC, disques CD-ROM/ISO, détection de volumes orphelins), `/metrics` Prometheus, readiness probe | status | ✓ |
-| **Cluster API (CAPHV)** | Installer la stack CAPI/CAPHV depuis un bundle airgap, créer & scaler des clusters RKE2 downstream, upgrades K8s, gestion des bundles | — | ✓ |
-| **Terraform (IaC)** | Déclarations multi-ressources sauvegardées (VMs, images, clés SSH, HCL brut), apply / destroy, édition des ressources déployées via sidecar JSON, installation ou mise à jour du provider Harvester (version, URL de miroir ou archive téléversée) | installation du provider | ✓ |
-| **Bare-metal** | Découverte BMC / Redfish + actions d'alimentation, magasin d'ISO, installation Harvester sans opérateur par média virtuel | — | ✓ |
-| **Support aux opérations** | Config multi-cluster, notes collaboratives, support bundles anonymisés, UI aux couleurs SUSE (sombre/clair, fonte officielle), localisation complète en 5 langues (EN/FR/DE/ES/IT) avec tooltips sur chaque contrôle | partiel | ✓ |
-
-Le cœur de séquençage est la seule partie nécessaire à un déploiement
-shutdown/startup pur ; tout le reste est optionnel et s'empile sur le
-même moteur multi-cluster. Voir **[docs/fr/capabilites.md](docs/fr/capabilites.md)**
-pour le tour complet.
-
-### Démarrage rapide
-
-```bash
-# Sur le poste d'exploitation
-tar xzf harvester-ops-<version>.tar.gz
-cd harvester-ops-<version>
-./install.sh                       # installeur interactif
-$EDITOR /etc/harvester-ops/config.yaml
-
-# CLI — le cœur de séquençage, voie airgap
-harvester-status   --cluster prod
-harvester-shutdown --cluster prod --interactive
-harvester-startup  --cluster prod
-
-# Console web (si installée)
-xdg-open https://localhost:8090
-```
-
----
-
-## Contents / Contenu du livrable
-
-```
-harvester-ops/
-├── README.md                       This file / Ce fichier
-├── VERSION                         Semantic version
-├── install.sh / uninstall.sh       Interactive installer
-├── bin/
-│   ├── harvester-shutdown.sh       Power-down engine (8 steps)
-│   ├── harvester-startup.sh        Power-up engine (5 steps)
-│   ├── harvester-status.sh         Cluster state (text / json)
-│   └── lib/common.sh               Shared lib (logs, dry-run, SSE events)
-├── web/                            Flask console (optional)
-│   ├── app.py                      Engine spawner + automation surfaces
-│   ├── templates/  static/         Vanilla-JS UI (no framework)
-│   └── vendor/                     Pre-fetched Python wheels (airgap)
-├── container/
-│   ├── Containerfile               FROM registry.suse.com/bci/python:3.11
-│   └── entrypoint.sh
-├── images/
-│   └── harvester-ops-ui.tar        OCI image (podman load)
-├── config/
-│   ├── config.yaml.example
-│   └── systemd/harvester-ops.service
-└── docs/
-    ├── en/   capabilities, operating-procedure, architecture, install, troubleshooting
-    └── fr/   capabilites, procedure-operationnelle, architecture, installation, depannage
-```
+Unit and browser tests run on every change (over 1,000 backend tests and
+200 browser tests). That is not enough on its own: each feature is also
+exercised on a real cluster before release, on a single-node production
+cluster and on a three-node test cluster for what needs several nodes
+(maintenance, migration, a full shutdown and startup). The clips above
+were filmed on that test cluster, and filming them found and fixed
+defects in node maintenance, the shutdown and the startup that no
+single-node cluster could show; the [changelog](CHANGELOG.md) tells each
+story.
 
 ## Documentation
 
-- **EN**: [capabilities](docs/en/capabilities.md) · [operating-procedure](docs/en/operating-procedure.md) · [architecture](docs/en/architecture.md) · [install](docs/en/install.md) · [bare-metal](docs/en/bare-metal.md) · [troubleshooting](docs/en/troubleshooting.md)
-- **FR**: [capacités](docs/fr/capabilites.md) · [procédure opérationnelle](docs/fr/procedure-operationnelle.md) · [architecture](docs/fr/architecture.md) · [installation](docs/fr/installation.md) · [bare-metal](docs/fr/bare-metal.md) · [dépannage](docs/fr/depannage.md)
+[Capabilities](docs/en/capabilities.md) ·
+[Operating procedure](docs/en/operating-procedure.md) ·
+[Architecture](docs/en/architecture.md) ·
+[Install](docs/en/install.md) ·
+[Bare-metal](docs/en/bare-metal.md) ·
+[Troubleshooting](docs/en/troubleshooting.md) ·
+[Changelog](CHANGELOG.md)
+
+<details>
+<summary>What the tarball contains</summary>
+
+```
+harvester-ops/
+├── README.md, README.fr.md, VERSION, CHANGELOG.md, LICENSE
+├── install.sh, uninstall.sh        interactive installer
+├── bin/
+│   ├── harvester-shutdown.sh       shutdown engine (8 steps)
+│   ├── harvester-startup.sh        startup engine (5 steps)
+│   ├── harvester-status.sh         cluster state (text or JSON)
+│   └── lib/common.sh               logs, dry run, live step events
+├── web/                            the console (optional)
+│   ├── app.py
+│   ├── templates/, static/         plain JavaScript interface
+│   └── vendor/                     Python wheels, for airgapped sites
+├── container/Containerfile         FROM registry.suse.com/bci/python:3.11
+├── images/harvester-ops-ui.tar     OCI image (podman load)
+├── config/                         example config, systemd unit
+└── docs/en/, docs/fr/
+```
+
+</details>
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for repo layout, setup, test policy
-and release flow. Every change ships with a test, a `VERSION` bump and a
-matching `CHANGELOG.md` entry.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the layout, the setup and the
+release flow. Every change comes with a test, a `VERSION` bump and a
+`CHANGELOG.md` entry.
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0, see [LICENSE](LICENSE).

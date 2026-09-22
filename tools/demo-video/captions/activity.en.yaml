@@ -1,0 +1,13 @@
+card.title: "Every action on record"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Open source toolkit for SUSE Harvester"
+
+intro: "Activity: everything that changed something on a cluster, from the console or the command line."
+history: "Each action: the cluster, what was done, how it ended, when, and how long it took."
+filter: "Search by cluster, kind of action, state, or any word."
+details: "Open one, and its full log is there, step by step, kept after it ends."
+dock: "While an action runs, the dock at the bottom follows it live, whatever the page."
+support: "When something goes wrong, the support bundle gathers logs, configuration and cluster state in one archive."
+bundleBuilding: "Anonymized by default: addresses, host and machine names are replaced, with the key to put them back kept apart."
+bundleReady: "Ready to download and attach to a support case."

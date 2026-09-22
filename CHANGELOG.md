@@ -28,6 +28,11 @@ is where it had been exercised until now.
   defect the other way round: it called a node under maintenance "not
   Ready".
 
+- **The support bundle panel speaks the interface language.** "Bundle
+  ready", "Download archive", "Loading..." and the rest were hard-coded in
+  English, and the build steps existed only in English and French. Found
+  while preparing the French demonstration of the Activity page.
+
 ### Added
 - **One shutdown or startup at a time per cluster.** While filming, a
   startup stuck on the defect above was still running when a new shutdown

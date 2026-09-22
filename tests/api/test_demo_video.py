@@ -125,6 +125,9 @@ def test_every_scene_has_its_two_languages_with_the_same_keys():
         assert fr.exists(), f"{fr.name} manquant"
         ken = set(yaml.safe_load(en.read_text()) or {})
         kfr = set(yaml.safe_load(fr.read_text()) or {})
+        # Piège YAML 1.1 : une clé « off », « on », « yes » ou « no » devient
+        # un booléen, et la scène ne retrouve plus son sous-titre.
+        assert all(isinstance(k, str) for k in ken | kfr), f"{en.name} : clé non textuelle"
         assert ken == kfr, f"{en.name} / {fr.name} : {ken ^ kfr}"
 
 

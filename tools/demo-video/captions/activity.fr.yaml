@@ -1,0 +1,13 @@
+card.title: "Toutes les actions conservées"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Outil libre pour SUSE Harvester"
+
+intro: "Activité : tout ce qui a modifié un cluster, depuis la console ou la ligne de commande."
+history: "Chaque action : le cluster, ce qui a été fait, comment ça s'est terminé, quand, et combien de temps."
+filter: "On cherche par cluster, par type d'action, par état, ou par n'importe quel mot."
+details: "On en ouvre une, et son journal complet est là, étape par étape, conservé après la fin."
+dock: "Pendant qu'une action tourne, le dock du bas la suit en direct, quelle que soit la page."
+support: "Quand quelque chose ne va pas, le paquet de support réunit journaux, configuration et état du cluster en une archive."
+bundleBuilding: "Anonymisé par défaut : adresses, noms d'hôtes et de machines sont remplacés, et la clé pour les rétablir est gardée à part."
+bundleReady: "Prêt à télécharger et à joindre à une demande de support."

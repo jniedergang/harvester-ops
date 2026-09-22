@@ -338,9 +338,13 @@ the Cluster API Provider Harvester (CAPHV).
   the RKE2 bootstrap/control-plane providers, CAPHV, and a ClusterClass —
   with step-by-step progress in the dock.
 - **Create clusters** via a guided wizard (sizing, image, SSH, network,
-  CNI), with a YAML preview (dry-run) before apply.
+  CNI), with a YAML preview (dry-run) before apply. The manifests are
+  rendered by the `caphv-generate` tool, which is not shipped in the
+  tarball: without it on the host, creation answers that the tool is
+  missing.
 - **Operate** managed clusters: scale (patches the topology), download
-  kubeconfig, view spec/conditions/machines, roll K8s upgrades, delete.
+  kubeconfig, view spec/conditions/machines, delete. Kubernetes version
+  upgrades are not implemented.
 - **Bundle management** — timestamped airgap bundles with active marker,
   inspect, upload, download, and a Harvester-version compatibility check.
 

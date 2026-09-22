@@ -85,7 +85,7 @@ fi
 # -----------------------------------------------------------------------------
 info "Assembling deliverable..."
 cp -r bin web container config docs "$WORK_DIR/"
-cp README.md VERSION install.sh uninstall.sh package.sh "$WORK_DIR/"
+cp README.md README.fr.md VERSION install.sh uninstall.sh package.sh "$WORK_DIR/"
 [[ -f LICENSE ]] && cp LICENSE "$WORK_DIR/"
 [[ -f CHANGELOG.md ]] && cp CHANGELOG.md "$WORK_DIR/"
 

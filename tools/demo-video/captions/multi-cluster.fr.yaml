@@ -1,0 +1,12 @@
+card.title: "Plusieurs clusters, une console"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Outil libre pour SUSE Harvester"
+
+intro: "Une console peut piloter plusieurs clusters Harvester."
+switch: "On choisit le cluster en haut du menu : toutes les vues suivent."
+poweredOff: "Celui-ci est éteint. La console le dit clairement, et continue de servir les autres."
+back: "Retour au cluster d'essai."
+declarations: "Les clusters se déclarent ici, chacun avec un contrôle de son kubeconfig et du SSH vers ses nœuds."
+accounts: "Les comptes du cluster lui-même : lesquels sont actifs, et qui détient l'administration."
+roles: "La console a aussi ses propres rôles, lecteur, opérateur et administrateur, et agit sur le cluster sous l'identité de chaque opérateur."

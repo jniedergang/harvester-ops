@@ -10,20 +10,23 @@ const Support = (() => {
   let currentJobId = null;
   let dragOffset = null;
 
+  // Clés littérales : le contrôle de parité des traductions ne voit pas
+  // une clé fabriquée. Avant la 1.44.10 ces libellés n'existaient qu'en
+  // anglais et en français, et le résultat de la génération restait en
+  // anglais dans toutes les langues.
   const STEP_LABELS = {
-    metadata: { en: 'Capturing metadata',           fr: 'Capture des métadonnées' },
-    config:   { en: 'Sanitizing configuration',     fr: 'Assainissement de la configuration' },
-    logs:     { en: 'Collecting logs',              fr: 'Collecte des logs' },
-    status:   { en: 'Capturing cluster status',     fr: 'Capture du statut cluster' },
-    system:   { en: 'Capturing system info',        fr: 'Capture infos système' },
-    archive:  { en: 'Creating tar.gz archive',      fr: 'Création de l\'archive tar.gz' },
-    error:    { en: 'Error',                        fr: 'Erreur' },
+    metadata: () => i18n.t('support.step.metadata'),
+    config:   () => i18n.t('support.step.config'),
+    logs:     () => i18n.t('support.step.logs'),
+    status:   () => i18n.t('support.step.status'),
+    system:   () => i18n.t('support.step.system'),
+    archive:  () => i18n.t('support.step.archive'),
+    error:    () => i18n.t('support.step.error'),
   };
 
   function labelFor(stepId) {
-    const lang = typeof i18n !== 'undefined' ? i18n.currentLang : 'en';
     const entry = STEP_LABELS[stepId];
-    return entry ? (entry[lang] || entry.en) : stepId;
+    return entry ? entry() : stepId;
   }
 
   function open() {
@@ -111,19 +114,19 @@ const Support = (() => {
                     style="margin-left:6px;">${Icons.svg('key')} ${i18n.t('settings.support.downloadMapping')}</a>`
               : '';
             $('#support-result').innerHTML = `
-              <div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Bundle ready</div>
+              <div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${i18n.t('support.ready')}</div>
               <a class="btn btn-primary btn-sm" href="/api/support-bundle/${currentJobId}/download" download>
-                ${Icons.svg('download')} Download archive
+                ${Icons.svg('download')} ${i18n.t('support.download')}
               </a>${mapBtn}`;
           } else {
-            $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${ev.error || 'Failed'}</div>`;
+            $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${ev.error || i18n.t('support.failed')}</div>`;
           }
         },
       },
       onStatus: (s) => {
         if (s.state === 'dead') {
           $('#support-result').style.display = 'block';
-          $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} Stream lost — refresh and check past bundles</div>`;
+          $('#support-result').innerHTML = `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${i18n.t('support.streamLost')}</div>`;
         }
       },
     });
@@ -133,12 +136,12 @@ const Support = (() => {
     const container = $('#bundle-history');
     if (!container) return;
     container.style.display = 'block';
-    container.innerHTML = '<p class="hint">Loading...</p>';
+    container.innerHTML = `<p class="hint">${i18n.t('support.loading')}</p>`;
     try {
       const data = await fetch('/api/support-bundle').then(r => r.json());
       const items = data.bundles || [];
       if (items.length === 0) {
-        container.innerHTML = '<p class="hint">(no past bundles)</p>';
+        container.innerHTML = `<p class="hint">${i18n.t('support.noPast')}</p>`;
         return;
       }
       container.innerHTML = '';
@@ -150,7 +153,7 @@ const Support = (() => {
         row.innerHTML = `
           <div>
             <code>${b.filename}</code>
-            <div style="color:var(--text-dim);font-size:10px;margin-top:2px;">${date} — ${sizeKB} KB ${b.anonymized ? '— anonymized' : ''}</div>
+            <div style="color:var(--text-dim);font-size:10px;margin-top:2px;">${date} · ${sizeKB} KB${b.anonymized ? ' · ' + i18n.t('support.anonymizedTag') : ''}</div>
           </div>
           <a class="btn btn-sm btn-secondary" href="/api/support-bundle/${b.filename.replace(/^harvester-ops-bundle-[0-9]+-[0-9]+-/, '').replace(/-anon$|\.tar\.gz$/g, '')}/download" download>${Icons.svg('download')}</a>`;
         container.appendChild(row);

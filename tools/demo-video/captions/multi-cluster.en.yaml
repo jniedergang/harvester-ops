@@ -1,0 +1,12 @@
+card.title: "Several clusters, one console"
+card.title.sub: "harvester-ops"
+card.end: "harvester-ops"
+card.end.sub: "Open source toolkit for SUSE Harvester"
+
+intro: "One console can operate several Harvester clusters."
+switch: "Pick the cluster at the top of the menu: every view follows."
+poweredOff: "This one is powered off. The console says so plainly, and keeps working for the others."
+back: "Back to the test cluster."
+declarations: "Clusters are declared here, each with a check of its kubeconfig and of SSH to its nodes."
+accounts: "The accounts of the cluster itself: which are enabled, and who holds administration."
+roles: "The console has its own roles too, viewer, operator and admin, and acts on the cluster under each operator's identity."
