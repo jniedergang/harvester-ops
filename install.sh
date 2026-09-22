@@ -13,6 +13,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="/usr/local/bin"
 CONF_DIR="/etc/harvester-ops"
 LOG_DIR="/var/log/harvester-ops"
+STATE_DIR="/var/lib/harvester-ops"
 INSTALL_DIR="/opt/harvester-ops"
 
 C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_RESET=$'\e[0m'
@@ -106,15 +107,33 @@ install_scripts() {
 }
 
 # -----------------------------------------------------------------------------
-# Step 2: config directories
+# Step 2: service account and config directories
 # -----------------------------------------------------------------------------
+# The web UI container runs as this system account, never as root. It reads
+# /etc/harvester-ops through the account's group and owns its state and logs.
+setup_service_account() {
+    if ! getent group harvester-ops >/dev/null; then
+        groupadd --system harvester-ops
+    fi
+    if ! id -u harvester-ops >/dev/null 2>&1; then
+        useradd --system --gid harvester-ops --home-dir /var/lib/harvester-ops \
+            --no-create-home --shell "$(command -v nologin || echo /sbin/nologin)" \
+            --comment "harvester-ops web UI" harvester-ops
+        ok "System account harvester-ops created"
+    else
+        info "System account harvester-ops already present"
+    fi
+}
+
 prepare_config() {
     info "Preparing config directories under $CONF_DIR/"
-    install -d -m 0755 "$CONF_DIR"
-    install -d -m 0700 "$CONF_DIR/kubeconfigs"
-    install -d -m 0700 "$CONF_DIR/ssh"
-    install -d -m 0700 "$CONF_DIR/tls"
-    install -d -m 0755 "$LOG_DIR"
+    install -d -m 0750 "$CONF_DIR"
+    install -d -m 0750 "$CONF_DIR/kubeconfigs"
+    install -d -m 0750 "$CONF_DIR/ssh"
+    install -d -m 0750 "$CONF_DIR/tls"
+    # State (action history, notes, cluster watcher snapshot) and logs
+    # belong to the service account: the container writes them.
+    install -d -m 0750 -o harvester-ops -g harvester-ops "$LOG_DIR" "$STATE_DIR"
 
     if [[ ! -f "$CONF_DIR/config.yaml" ]]; then
         install -m 0644 "$SCRIPT_DIR/config/config.yaml.example" "$CONF_DIR/config.yaml"
@@ -387,6 +406,17 @@ install_systemd() {
     fi
 }
 
+# Everything under $CONF_DIR readable by the service account's group, and by
+# no other account: htpasswd, TLS key, kubeconfigs and SSH keys are written
+# root-only above. The systemd unit reapplies this at each start, so files
+# copied later by hand are covered too. SSH accepts a key owned by root and
+# readable by the group.
+secure_config() {
+    chgrp -R harvester-ops "$CONF_DIR"
+    chmod -R g+rX,g-w,o-rwx "$CONF_DIR"
+    ok "$CONF_DIR readable by the harvester-ops group only"
+}
+
 # -----------------------------------------------------------------------------
 # Step 5: uninstall helper
 # -----------------------------------------------------------------------------
@@ -415,12 +445,14 @@ EOF
     check_deps
 
     install_scripts
+    setup_service_account
     prepare_config
 
     if prompt_yesno "Install the Web UI (recommended)?" "Y"; then
         install_web_ui
         setup_basic_auth
         setup_tls
+        secure_config
         # Open the UI port in the host firewall BEFORE starting the
         # service — otherwise admins testing the URL right after install
         # see "connection refused" and think the install failed.
@@ -445,6 +477,9 @@ Next steps:
   1. Edit ${C_BOLD}$CONF_DIR/config.yaml${C_RESET} to declare your clusters.
   2. Copy kubeconfigs to ${C_BOLD}$CONF_DIR/kubeconfigs/${C_RESET}.
   3. Copy the SSH key used to reach nodes to ${C_BOLD}$CONF_DIR/ssh/${C_RESET}.
+     The web UI reads them as the ${C_BOLD}harvester-ops${C_RESET} account: its service makes
+     them readable by that account's group at each start, so restart it
+     (${C_BOLD}systemctl restart harvester-ops${C_RESET}) after adding one.
   4. Test: ${C_BOLD}harvester-status --cluster <name>${C_RESET}
   5. Dry-run: ${C_BOLD}harvester-shutdown --cluster <name> --dry-run --yes${C_RESET}
 

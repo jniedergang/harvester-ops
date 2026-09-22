@@ -4,6 +4,55 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.1] - 2026-09-22 - The packaged service starts
+
+Checking that 1.44.0 kept its watcher snapshot once installed, we ran the
+systemd unit exactly as `install.sh` sets it up, with rootful podman and a
+read-only root filesystem. **The service did not start**, and had not since
+the first public release (1.42.0 reproduced it): the tarball releases were
+checked by starting the application directly, never through its unit.
+
+### Fixed
+- **The application crashed at startup** creating `/var/lib/harvester-ops`
+  on the read-only filesystem: only `PermissionError` was expected, not
+  `Read-only file system`. The action history, the notes and the Terraform
+  workspaces now fall back to a temporary directory on any such error,
+  with a warning, instead of crashing.
+- **The container could not read its own configuration.** It runs as a
+  non-root account, and `install.sh` made the TLS key, the htpasswd file and
+  the kubeconfigs readable by root only. `install.sh` now creates a
+  `harvester-ops` system account; the container runs as that account,
+  resolved on the host (the image's uid 1001 may belong to a real person
+  there); `/etc/harvester-ops/` is readable by its group and by no other
+  account. The unit reapplies this at each start, so a kubeconfig copied
+  later by hand is covered by a restart.
+- **Nothing persisted across restarts**: there was no writable volume, so
+  the action history, the notes and the watcher snapshot of 1.44.0 lived in
+  memory. `/var/lib/harvester-ops/` is now a persistent volume owned by the
+  account, and its home: the kubectl cache, and the SSH `known_hosts`
+  without which a node's host key was accepted anew at every connection,
+  never checked.
+- **Stopping took 10 seconds and ended in SIGKILL**: as the container's
+  first process, the application ignored SIGTERM. It now exits cleanly
+  (0.6 s measured).
+- `uninstall.sh --purge` also removes `/var/lib/harvester-ops/` and the
+  account. The install guide no longer tells to `chmod 600` the kubeconfigs,
+  which locked the service out; a troubleshooting entry covers existing
+  installs.
+
+### Tests
+- 17 tests on the unit, `install.sh`, `uninstall.sh`, the install guides,
+  the read-only fallback and SIGTERM. The unit passes `systemd-analyze
+  verify`.
+- On node1, the unit's own commands (extracted from the file, host paths
+  moved to a throwaway directory) with the account created by the real
+  `install.sh` function, a kubeconfig left root-only as after a manual
+  copy, then the real `--purge` block to clean up: the service started as
+  `harvester-ops` over HTTPS, refused requests without credentials, read
+  harv1, wrote its state to the volume; after a restart the history was
+  still there and a namespace deleted in between was reported; SSH
+  recorded the node's host key; the stop took 0.6 s.
+
 ## [1.44.0] - 2026-09-22 - Nothing lost while the console restarts
 
 The console reports in the dock what changes on a cluster outside it: a

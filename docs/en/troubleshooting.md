@@ -82,6 +82,22 @@ The script auto-restarts only VMs that had `runStrategy: Halted` set **by it** d
 
 ## Web UI issues
 
+### The service does not start, or cannot read a kubeconfig
+
+Before 1.44.1 the packaged service could not start: the application
+crashed with `Read-only file system: '/var/lib/harvester-ops'`, and the
+container, which runs as a non-root account, could not read the TLS key,
+the htpasswd file or the kubeconfigs that `install.sh` made root-only.
+Re-run `sudo ./install.sh` from the 1.44.1 package or later: it creates the
+`harvester-ops` account, the persistent `/var/lib/harvester-ops/` volume,
+and installs the unit that gives the account read access to
+`/etc/harvester-ops/` at each start.
+
+If a kubeconfig or an SSH key added later is reported unreadable, restart
+the service (`sudo systemctl restart harvester-ops`): the unit makes every
+file under `/etc/harvester-ops/` readable by the `harvester-ops` group, and
+by no other account, before starting the container.
+
 ### Login loop
 
 Check `/etc/harvester-ops/htpasswd` exists and the format is bcrypt (`htpasswd -B -c`).

@@ -45,7 +45,12 @@ The installer is **interactive**. It will ask:
 The installer will:
 
 - Copy `bin/*` to `/usr/local/bin/`
-- Create `/etc/harvester-ops/` (config, htpasswd, TLS, ssh keys directory)
+- Create the `harvester-ops` system account: the web UI container runs as
+  this account, never as root
+- Create `/etc/harvester-ops/` (config, htpasswd, TLS, ssh keys directory),
+  readable by the `harvester-ops` group and by no other account
+- Create `/var/lib/harvester-ops/` (action history, notes, cluster watcher
+  snapshot) and `/var/log/harvester-ops/`, owned by that account
 - Copy `config/config.yaml.example` → `/etc/harvester-ops/config.yaml` (if not present)
 - Load `images/harvester-ops-ui.tar` into podman/docker
 - Install `config/systemd/harvester-ops.service` (if UI was selected)
@@ -55,11 +60,15 @@ The installer will:
 For each cluster you intend to manage:
 
 ```bash
-sudo cp /path/to/prod-kubeconfig.yaml /etc/harvester-ops/kubeconfigs/prod.yaml
-sudo chmod 600 /etc/harvester-ops/kubeconfigs/*.yaml
-sudo cp /path/to/id_ed25519 /etc/harvester-ops/ssh/id_ed25519
-sudo chmod 600 /etc/harvester-ops/ssh/id_ed25519
+sudo install -m 0640 -g harvester-ops /path/to/prod-kubeconfig.yaml /etc/harvester-ops/kubeconfigs/prod.yaml
+sudo install -m 0640 -g harvester-ops /path/to/id_ed25519 /etc/harvester-ops/ssh/id_ed25519
 ```
+
+The web UI reads these files as the `harvester-ops` account, through its
+group. Do not make them root-only (`chmod 600`): the service reapplies
+group read access at each start, so a file copied another way is fixed by
+`sudo systemctl restart harvester-ops`. SSH accepts a key owned by root and
+readable by the group.
 
 ### 4. Edit the config
 
@@ -100,4 +109,4 @@ Open `https://<host>:8090` in a browser. Accept the self-signed certificate, log
 sudo /opt/harvester-ops/uninstall.sh
 ```
 
-Removes binaries, systemd unit, container image. Preserves `/etc/harvester-ops/` and `/var/log/harvester-ops/` unless `--purge` is passed.
+Removes binaries, systemd unit, container image. Preserves `/etc/harvester-ops/`, `/var/log/harvester-ops/`, `/var/lib/harvester-ops/` and the `harvester-ops` account unless `--purge` is passed.

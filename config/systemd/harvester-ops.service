@@ -1,5 +1,5 @@
 [Unit]
-Description=harvester-ops — Harvester HCI graceful shutdown/startup UI
+Description=harvester-ops, Harvester HCI graceful shutdown/startup UI
 Documentation=file:///opt/harvester-ops/README.md
 After=network-online.target
 Wants=network-online.target
@@ -15,16 +15,32 @@ TimeoutStartSec=60s
 EnvironmentFile=-/etc/harvester-ops/env
 
 ExecStartPre=-/usr/bin/podman rm -f harvester-ops
-ExecStart=/usr/bin/podman run --rm \
+# The container runs as the `harvester-ops` account created by install.sh.
+# Before each start: the configuration is readable by that account's group
+# and by nobody else (a kubeconfig copied later by hand, root-only, becomes
+# readable at the next start), and the state and log directories are its own.
+ExecStartPre=/bin/sh -c 'chgrp -R harvester-ops /etc/harvester-ops && \
+    chmod -R g+rX,g-w,o-rwx /etc/harvester-ops && \
+    install -d -m 0750 -o harvester-ops -g harvester-ops /var/lib/harvester-ops /var/log/harvester-ops'
+# Read-only root filesystem; /var/lib/harvester-ops keeps the action history,
+# the notes and the cluster watcher's snapshot across restarts, and is the
+# account's home (kubectl cache, and the ssh known_hosts that must persist
+# for a node's host key to be checked, not re-accepted at every connection).
+ExecStart=/bin/sh -c 'u=$$(id -u harvester-ops); g=$$(id -g harvester-ops); \
+    exec /usr/bin/podman run --rm \
     --name harvester-ops \
     --network host \
     --read-only \
     --tmpfs /tmp \
+    --user "$$u:$$g" \
+    --passwd-entry "harvester-ops:*:$$u:$$g:harvester-ops web UI:/var/lib/harvester-ops:/bin/sh" \
+    -e HOME=/var/lib/harvester-ops \
     -v /etc/harvester-ops:/etc/harvester-ops:ro,Z \
     -v /var/log/harvester-ops:/var/log/harvester-ops:rw,Z \
+    -v /var/lib/harvester-ops:/var/lib/harvester-ops:rw,Z \
     -e HARVESTER_OPS_CONFIG=/etc/harvester-ops/config.yaml \
     -e HARVESTER_OPS_HTPASSWD=/etc/harvester-ops/htpasswd \
-    localhost/harvester-ops:latest serve
+    localhost/harvester-ops:latest serve'
 
 ExecStop=/usr/bin/podman stop -t 10 harvester-ops
 

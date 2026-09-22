@@ -82,6 +82,22 @@ Le script ne redémarre automatiquement que les VMs qu'il a lui-même mises en `
 
 ## Problèmes UI web
 
+### Le service ne démarre pas, ou ne lit pas une kubeconfig
+
+Avant la 1.44.1, le service packagé ne pouvait pas démarrer : l'application
+s'arrêtait sur `Read-only file system: '/var/lib/harvester-ops'`, et le
+conteneur, qui tourne sous un compte non root, ne pouvait lire ni la clé
+TLS, ni le fichier htpasswd, ni les kubeconfigs, qu'`install.sh` réservait
+à root. Relancer `sudo ./install.sh` depuis le paquet 1.44.1 ou suivant : il
+crée le compte `harvester-ops`, le volume persistant `/var/lib/harvester-ops/`,
+et installe l'unité qui donne à ce compte la lecture de `/etc/harvester-ops/`
+à chaque démarrage.
+
+Si une kubeconfig ou une clé SSH ajoutée plus tard est signalée illisible,
+redémarrer le service (`sudo systemctl restart harvester-ops`) : l'unité
+rend tout fichier de `/etc/harvester-ops/` lisible par le groupe
+`harvester-ops`, et par aucun autre compte, avant de lancer le conteneur.
+
 ### Boucle de login
 
 Vérifier que `/etc/harvester-ops/htpasswd` existe et est au format bcrypt (`htpasswd -B -c`).

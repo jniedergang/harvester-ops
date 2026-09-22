@@ -45,7 +45,13 @@ L'installeur est **interactif**. Il demande :
 L'installeur va :
 
 - Copier `bin/*` dans `/usr/local/bin/`
-- Créer `/etc/harvester-ops/` (config, htpasswd, TLS, dossier clés ssh)
+- Créer le compte système `harvester-ops` : le conteneur de l'UI web tourne
+  sous ce compte, jamais en root
+- Créer `/etc/harvester-ops/` (config, htpasswd, TLS, dossier clés ssh),
+  lisible par le groupe `harvester-ops` et par aucun autre compte
+- Créer `/var/lib/harvester-ops/` (historique des actions, notes, photo de
+  la surveillance des clusters) et `/var/log/harvester-ops/`, qui
+  appartiennent à ce compte
 - Copier `config/config.yaml.example` → `/etc/harvester-ops/config.yaml` (si absent)
 - Charger `images/harvester-ops-ui.tar` dans podman/docker
 - Installer `config/systemd/harvester-ops.service` (si UI sélectionnée)
@@ -55,11 +61,15 @@ L'installeur va :
 Pour chaque cluster à gérer :
 
 ```bash
-sudo cp /chemin/vers/prod-kubeconfig.yaml /etc/harvester-ops/kubeconfigs/prod.yaml
-sudo chmod 600 /etc/harvester-ops/kubeconfigs/*.yaml
-sudo cp /chemin/vers/id_ed25519 /etc/harvester-ops/ssh/id_ed25519
-sudo chmod 600 /etc/harvester-ops/ssh/id_ed25519
+sudo install -m 0640 -g harvester-ops /chemin/vers/prod-kubeconfig.yaml /etc/harvester-ops/kubeconfigs/prod.yaml
+sudo install -m 0640 -g harvester-ops /chemin/vers/id_ed25519 /etc/harvester-ops/ssh/id_ed25519
 ```
+
+L'UI web lit ces fichiers sous le compte `harvester-ops`, par son groupe.
+Ne pas les réserver à root (`chmod 600`) : le service rétablit la lecture
+par le groupe à chaque démarrage, et un fichier copié autrement est donc
+corrigé par `sudo systemctl restart harvester-ops`. SSH accepte une clé
+qui appartient à root et que le groupe peut lire.
 
 ### 4. Éditer la config
 
@@ -100,4 +110,4 @@ Ouvrir `https://<host>:8090` dans un navigateur. Accepter le certificat self-sig
 sudo /opt/harvester-ops/uninstall.sh
 ```
 
-Supprime les binaires, l'unité systemd, l'image conteneur. Préserve `/etc/harvester-ops/` et `/var/log/harvester-ops/` sauf si `--purge` est passé.
+Supprime les binaires, l'unité systemd, l'image conteneur. Préserve `/etc/harvester-ops/`, `/var/log/harvester-ops/`, `/var/lib/harvester-ops/` et le compte `harvester-ops` sauf si `--purge` est passé.

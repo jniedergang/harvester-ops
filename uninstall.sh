@@ -5,6 +5,7 @@ set -eo pipefail
 PREFIX="/usr/local/bin"
 CONF_DIR="/etc/harvester-ops"
 LOG_DIR="/var/log/harvester-ops"
+STATE_DIR="/var/lib/harvester-ops"
 INSTALL_DIR="/opt/harvester-ops"
 PURGE=0
 
@@ -19,7 +20,8 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             cat <<EOF
 Usage: uninstall.sh [--purge]
-  --purge   Also remove $CONF_DIR and $LOG_DIR (default: keep them)
+  --purge   Also remove $CONF_DIR, $LOG_DIR, $STATE_DIR and the
+            harvester-ops system account (default: keep them)
 EOF
             exit 0 ;;
         *) shift ;;
@@ -52,12 +54,18 @@ info "Removing install dir..."
 rm -rf "$INSTALL_DIR"
 
 if [[ "$PURGE" == "1" ]]; then
-    warn "Purging configuration and logs..."
-    rm -rf "$CONF_DIR" "$LOG_DIR"
-    ok "Configuration and logs removed"
+    warn "Purging configuration, logs and state..."
+    rm -rf "$CONF_DIR" "$LOG_DIR" "$STATE_DIR"
+    if id -u harvester-ops >/dev/null 2>&1; then
+        userdel harvester-ops 2>/dev/null || true
+    fi
+    if getent group harvester-ops >/dev/null; then
+        groupdel harvester-ops 2>/dev/null || true
+    fi
+    ok "Configuration, logs, state and the harvester-ops account removed"
 else
     info "Configuration preserved at $CONF_DIR/ (use --purge to delete)"
-    info "Logs preserved at $LOG_DIR/"
+    info "Logs preserved at $LOG_DIR/, state at $STATE_DIR/"
 fi
 
 ok "harvester-ops uninstalled"

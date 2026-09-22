@@ -27,6 +27,7 @@ import platform
 import shutil
 import re
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -830,15 +831,31 @@ ACTIONS_LOCK = threading.Lock()
 _ACTIONS_GC_KEEP_SECONDS = 3600    # 1h after end → evict
 _ACTIONS_GC_TICK_SECONDS = 60
 
+def _usable_dir(preferred, fallback):
+    """`preferred` s'il peut être créé, sinon `fallback`, avec un
+    avertissement : l'état n'y survivra pas à un redémarrage.
+
+    Rattrape toute OSError et pas seulement PermissionError : le service
+    packagé tourne sur un système de fichiers en LECTURE SEULE, et y créer
+    un répertoire lève « Read-only file system », qui faisait planter
+    l'application au démarrage (constaté en v1.44.0 sur l'unité installée).
+    """
+    try:
+        preferred.mkdir(parents=True, exist_ok=True)
+        return preferred
+    except OSError as e:
+        log.warning(
+            "%s inutilisable (%s) : repli sur %s, perdu au redémarrage",
+            preferred, e.strerror or e, fallback)
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+
 # Persistence — SQLite so the failure list survives a Flask restart.
-ACTIONS_DB = Path(os.environ.get(
-    "HARVESTER_OPS_ACTIONS_DB", "/var/lib/harvester-ops/actions.db"))
-try:
-    ACTIONS_DB.parent.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    fallback = Path(tempfile.gettempdir()) / "harvester-ops-actions" / "actions.db"
-    fallback.parent.mkdir(parents=True, exist_ok=True)
-    ACTIONS_DB = fallback
+_actions_db = Path(os.environ.get("HARVESTER_OPS_ACTIONS_DB",
+                                  "/var/lib/harvester-ops/actions.db"))
+ACTIONS_DB = _usable_dir(_actions_db.parent,
+                         Path(tempfile.gettempdir()) / "harvester-ops-actions") / _actions_db.name
 
 
 def _actions_init_db():
@@ -10334,14 +10351,9 @@ def api_vm_migrate_trigger(cluster, namespace, name):
 # -----------------------------------------------------------------------------
 # Collaborative notes — Yjs sync over WebSocket + SQLite persistence
 # -----------------------------------------------------------------------------
-NOTES_DB = Path(os.environ.get("HARVESTER_OPS_NOTES_DB", "/var/lib/harvester-ops/notes.db"))
-try:
-    NOTES_DB.parent.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    # Fallback to a tmp path if we can't create the default — tests etc.
-    fallback = Path(tempfile.gettempdir()) / "harvester-ops-notes" / "notes.db"
-    fallback.parent.mkdir(parents=True, exist_ok=True)
-    NOTES_DB = fallback
+_notes_db = Path(os.environ.get("HARVESTER_OPS_NOTES_DB", "/var/lib/harvester-ops/notes.db"))
+NOTES_DB = _usable_dir(_notes_db.parent,
+                       Path(tempfile.gettempdir()) / "harvester-ops-notes") / _notes_db.name
 
 
 def _notes_init_db():
@@ -10895,13 +10907,11 @@ TF_PROVIDER_REPO = Path(os.environ.get(
     "/usr/local/share/terraform-provider-harvester",
 ))
 TF_BIN = os.environ.get("HARVESTER_OPS_TF_BIN") or "/usr/local/bin/terraform"
-TF_WORKSPACES = Path(os.environ.get(
-    "HARVESTER_OPS_TF_WORKSPACES", "/var/lib/harvester-ops/terraform"))
-try:
-    TF_WORKSPACES.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    TF_WORKSPACES = Path(tempfile.gettempdir()) / "harvester-ops-terraform"
-    TF_WORKSPACES.mkdir(parents=True, exist_ok=True)
+TF_WORKSPACES = _usable_dir(
+    Path(os.environ.get("HARVESTER_OPS_TF_WORKSPACES",
+                        "/var/lib/harvester-ops/terraform")),
+    Path(tempfile.gettempdir()) / "harvester-ops-terraform",
+)
 
 # Emplacement des mises à jour du provider posées depuis l'interface ou par
 # `bin/harvester-provider-install.py`. Séparé du provider du livrable : une
@@ -12558,4 +12568,9 @@ if __name__ == "__main__":
     cert = cfg.get("tls_cert")
     key = cfg.get("tls_key")
     ssl_ctx = (cert, key) if cert and key and Path(cert).exists() else None
+    # Dans le conteneur, l'application est le processus 1 : le noyau ne lui
+    # applique pas l'action par défaut de SIGTERM, qui était donc ignoré, et
+    # `podman stop` finissait par un SIGKILL au bout de 10 s. Sortir
+    # proprement à la place.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)
