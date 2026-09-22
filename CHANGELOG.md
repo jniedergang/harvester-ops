@@ -4,6 +4,35 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.6] - 2026-09-22 - The LLDP probe, against a real frame
+
+Since 1.36.0 the LLDP probe carried a warning: never checked against a real
+frame, since nothing on the test network emitted any. The three-node test
+cluster's host bridge now does (lldpd on node2), and the first real frame
+showed two defects.
+
+### Fixed
+- **Three fields out of five were lost.** tcpdump writes the value of the
+  chassis ID, the port ID and the system description on the line AFTER the
+  TLV; only the TLV line was read. They are now decoded, and the switch's
+  management address is added (the IPv4 one first).
+- **The answer never showed in the Fabric view.** The probe listens up to
+  35 seconds; the view refreshes every 8 and redrew the card's detail,
+  dropping "Listening..." after a second and writing the answer into an
+  element no longer on the page. The probe's state is now kept by the view
+  and shown at every redraw.
+- The answer reads one line per field with a translated label (switch,
+  port, management address, chassis, description) instead of raw
+  `key=value` pairs, in the Fabric view and in a VM's network path.
+
+### Tests
+- The real frame captured on harvlab is a unit test fixture; the guard
+  that required the code to say "not verified" now requires it to say
+  where and when it was. Two browser tests: the display, and an answer
+  that survives a refresh while listening.
+- On harvlab: the probe on a node's physical card, from the Fabric view,
+  showed every field after 11 seconds, through the view's refreshes.
+
 ## [1.44.5] - 2026-09-22 - The reset button resets
 
 1.41.0 left one case unverified: a hard reset of a VM with two consoles

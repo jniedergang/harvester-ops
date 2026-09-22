@@ -87,8 +87,11 @@ Manage KubeVirt virtual machines without leaving the console.
   network namespaces, the other listens briefly on the physical card for an
   LLDP advertisement and reports which switch and which port answered. A
   stopped VM shows its declared path, labelled as such.
-  The LLDP probe is not verified against a real frame: nothing on the test
-  network emits any.
+  The LLDP probe reports the switch name, the port (description and
+  identifier), the switch's management address, its chassis and its
+  description, one per line. Verified against real frames on the
+  three-node test cluster, whose host bridge emits LLDP; the production
+  LAN switch emits none, and the probe says so after listening.
 - **Live migration** — move a running VM between nodes, with pre-flight
   migration-info checks.
 - **VNC console** — full graphical console in the browser (noVNC over a

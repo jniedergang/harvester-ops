@@ -166,3 +166,25 @@ def test_the_switch_probe_is_offered_on_the_physical_card(context, flask_server)
     btn = page.locator('[data-netpath-lldp]')
     assert btn.count() == 1
     assert btn.first.get_attribute("data-iface") == "enp1s0"
+
+
+def test_the_switch_answer_reads_as_one_line_per_field(context, flask_server):
+    """v1.44.6 : les champs d'une vraie trame (relevée sur harvlab), un par
+    ligne avec son libellé, plus « system_name=... chassis_id=... »."""
+    page = context.new_page()
+    page.route("**/lldp*", lambda r, q: r.fulfill(
+        status=200, content_type="application/json", body=json.dumps({
+            "found": True, "fields": {
+                "system_name": "node2-xl170r", "port_description": "br0",
+                "port_id": "c6:34:cd:cd:4f:1a", "chassis_id": "70:10:6f:b6:e6:3a",
+                "management_address": "172.16.1.12",
+                "system_description": "openSUSE Tumbleweed Linux"}})))
+    open_path_tab(page, flask_server["base_url"])
+    page.locator('[data-netpath-lldp]').first.click()
+    page.wait_for_timeout(800)
+    lines = page.locator('.netpath-out').last.inner_text().splitlines()
+    assert lines == ["Switch : node2-xl170r", "Port : br0 (c6:34:cd:cd:4f:1a)",
+                     "Management address : 172.16.1.12", "Chassis : 70:10:6f:b6:e6:3a",
+                     "Description : openSUSE Tumbleweed Linux"]
+
+

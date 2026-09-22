@@ -215,9 +215,8 @@ def test_an_absent_vm_is_not_an_empty_path(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_lldp_fields_are_read_from_the_capture():
-    """NON VÉRIFIÉ contre une vraie trame : aucun équipement du réseau
-    d'essai n'émet de LLDP (40 s d'écoute, zéro trame). Le décodage suit la
-    sortie documentée de tcpdump."""
+    """Une valeur sur la ligne même du TLV reste lue (voir la vraie trame
+    ci-dessous pour la forme sur deux lignes)."""
     text = ("12:00:00.1 LLDP, length 100\n"
             "  Chassis ID TLV (1), length 7: switch-a\n"
             "  Port ID TLV (2), length 5: Gi1/0/7\n"
@@ -227,6 +226,44 @@ def test_lldp_fields_are_read_from_the_capture():
     assert f["system_name"] == "switch-a"
     assert f["port_id"] == "Gi1/0/7"
     assert f["port_description"] == "uplink-7"
+
+
+# Trame RÉELLE, capturée le 22/09/2026 sur harvlab-n2 (enp1s0) : node2 émet
+# du LLDP (lldpd) sur son bridge br0, dont le nœud imbriqué est un port.
+REAL_LLDP = """\
+11:10:37.184349 LLDP, length 316
+	Chassis ID TLV (1), length 7
+	  Subtype MAC address (4): 70:10:6f:b6:e6:3a
+	Port ID TLV (2), length 7
+	  Subtype MAC address (3): c6:34:cd:cd:4f:1a
+	Time to Live TLV (3), length 2: TTL 120s
+	System Name TLV (5), length 12: node2-xl170r
+	System Description TLV (6), length 112
+	  openSUSE Tumbleweed Linux 6.19.11-1-default #1 SMP PREEMPT_DYNAMIC Thu Apr  2 16:41:45 UTC 2026 (b4a2f1c) x86_64
+	System Capabilities TLV (7), length 4
+	  System  Capabilities [Bridge, WLAN AP, Router, Station Only] (0x009c)
+	  Enabled Capabilities [Bridge, Router] (0x0014)
+	Management Address TLV (8), length 12
+	  Management Address length 5, AFI IPv4 (1): 172.16.1.12
+	  Interface Index Interface Numbering (2): 4
+	Port Description TLV (4), length 3: br0
+"""
+
+
+def test_a_real_frame_gives_every_field():
+    """Confronté à une vraie trame, le décodage perdait trois champs sur
+    cinq : tcpdump écrit la valeur du Chassis ID, du Port ID et de la
+    description sur la ligne SUIVANTE (« Subtype ... : valeur »)."""
+    f = wapp._parse_lldp(REAL_LLDP)
+    assert f == {
+        "chassis_id": "70:10:6f:b6:e6:3a",
+        "port_id": "c6:34:cd:cd:4f:1a",
+        "system_name": "node2-xl170r",
+        "system_description": ("openSUSE Tumbleweed Linux 6.19.11-1-default #1 SMP "
+                               "PREEMPT_DYNAMIC Thu Apr  2 16:41:45 UTC 2026 (b4a2f1c) x86_64"),
+        "port_description": "br0",
+        "management_address": "172.16.1.12",
+    }
 
 
 def test_no_lldp_frame_is_not_an_error():
@@ -258,9 +295,10 @@ def test_reading_a_path_needs_no_special_role():
         "/api/vm-network-path/c/default/v", "GET") == "viewer"
 
 
-def test_the_unverified_limitation_is_written_down():
-    """LLDP n'a pas pu être confronté à une vraie trame : le code doit le
-    dire, sinon personne ne saura que c'est à reprendre."""
+def test_where_lldp_was_verified_is_written_down():
+    """Longtemps non vérifié faute d'émetteur, le décodage a été confronté à
+    une vraie trame sur harvlab (v1.44.6) : le code dit où et quand."""
     src = (ROOT / "web" / "app.py").read_text()
     block = src.split("# Identification côté switch", 1)[1][:1400]
-    assert "NON VÉRIFIÉ" in block
+    assert "NON VÉRIFIÉ" not in block
+    assert "Vérifié en réel le 22/09/2026 sur harvlab" in block

@@ -3006,32 +3006,43 @@ def _vm_network_path(cluster, kc, namespace, name):
 # qui permet une écoute ponctuelle. Les trames arrivent typiquement toutes
 # les 30 s, d'où une attente qui doit être explicite et bornée.
 #
-# ⚠️ NON VÉRIFIÉ EN RÉEL : aucun équipement du réseau d'essai n'émet de LLDP
-# (écoute de 40 s sur enp1s0, zéro trame ; le switch est un TP-Link « Easy
-# Smart » qui n'en fait pas). Le décodage ci-dessous suit la norme et la
-# sortie de tcpdump, mais il n'a pas pu être confronté à une vraie trame.
+# Vérifié en réel le 22/09/2026 sur harvlab : node2 émet du LLDP (lldpd) sur
+# son bridge, dont les nœuds imbriqués sont des ports. Le LAN de production
+# n'en a toujours pas (switch TP-Link « Easy Smart »).
 _LLDP_FIELDS = (
     ("system_name", "System Name TLV"),
     ("port_id", "Port ID TLV"),
     ("port_description", "Port Description TLV"),
     ("system_description", "System Description TLV"),
     ("chassis_id", "Chassis ID TLV"),
+    ("management_address", "Management Address TLV"),
 )
 
 
 def _parse_lldp(text):
     """Champs utiles depuis la sortie verbeuse de tcpdump.
 
-    Best-effort assumé : tcpdump imprime « System Name TLV (5), length 7:
-    switch1 ». On prend ce qui suit le dernier « : » de la ligne.
-    """
+    La valeur est sur la ligne du TLV (« System Name TLV (5), length 12:
+    node2 ») ou, pour le Chassis ID, le Port ID, la description et l'adresse
+    de gestion, sur la ligne SUIVANTE (« Subtype MAC address (4): 70:10:... »,
+    ou le texte seul). Confronté à une vraie trame, lire la seule ligne du TLV
+    perdait trois champs sur cinq. On garde la première occurrence (l'adresse
+    IPv4 de gestion précède l'IPv6)."""
     out = {}
-    for line in (text or "").splitlines():
+    lines = (text or "").splitlines()
+    for i, line in enumerate(lines):
         for key, label in _LLDP_FIELDS:
-            if label in line and key not in out:
-                val = line.split(":", 1)[-1].strip() if ":" in line else ""
-                if val:
-                    out[key] = val[:120]
+            if label not in line or key in out:
+                continue
+            same = re.match(r"\s*\(\d+\), length \d+:\s*(.+)$", line.split(label, 1)[1])
+            if same:
+                val = same.group(1).strip()
+            else:
+                nxt = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                sub = re.match(r"(?:Subtype|Management Address length).*?\(\d+\):\s*(.+)$", nxt)
+                val = sub.group(1).strip() if sub else nxt
+            if val:
+                out[key] = val[:120]
     return out
 
 

@@ -4098,7 +4098,8 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin-top: 8px; font-size: 11px;
 }
-.netpath-out { color: var(--text-dim); font-family: var(--mono, monospace); }
+.netpath-out { color: var(--text-dim); font-family: var(--mono, monospace);
+               white-space: pre-line; overflow-wrap: anywhere; }
 .netpath-warn { color: var(--warn); }
 
 /* v1.37.0 : copier une valeur. Une IP, une MAC ou un identifiant servent à
@@ -4166,7 +4167,8 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
 }
 .fabric-detail dl.kv dt { color: var(--text-dim); font-size: 11px; }
 .fabric-detail dl.kv dd { margin: 0; word-break: break-all; }
-.fabric-lldp-out { margin-top: 6px; font-family: var(--font-mono); font-size: 11px; }
+.fabric-lldp-out { margin-top: 6px; font-family: var(--font-mono); font-size: 11px;
+                   white-space: pre-line; overflow-wrap: anywhere; }
 .fabric-notice-err { flex-basis: 100%; color: var(--danger); }
 .fabric-host-title { font-weight: 600; margin: 2px 0 10px; font-size: 13px; }
 .hint.warn { color: var(--warn); }

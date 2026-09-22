@@ -307,6 +307,34 @@ def test_a_click_on_a_card_opens_its_detail(context, flask_server):
     assert page.locator('.fabric-detail [data-fabric-lldp]').count() == 1
 
 
+def test_the_switch_answer_survives_the_refresh(context, flask_server):
+    """Relevé sur harvlab : la sonde écoute jusqu'à 35 s, la vue se
+    rafraîchit toutes les 8 s et redessinait le détail ; la réponse (17 s
+    sur harvlab) s'écrivait dans un élément déjà retiré, et « écoute en
+    cours » disparaissait au bout d'une seconde. Rien ne s'affichait jamais."""
+    page = context.new_page()
+    held = []
+    open_fabric(page, flask_server["base_url"])
+    # Après open_fabric : la dernière interception déclarée l'emporte.
+    page.route("**/lldp*", lambda r, q: held.append(r))
+    page.locator('.vsw-nic[data-nic="enp1s0"]').first.click()
+    page.wait_for_timeout(300)
+    page.locator('.fabric-detail [data-fabric-lldp]').click()
+    page.wait_for_timeout(300)
+    page.evaluate("() => window.Fabric.refresh()")
+    page.wait_for_timeout(500)
+    out = page.locator('.fabric-detail .fabric-lldp-out')
+    assert "Listening" in out.inner_text()
+    assert page.locator('.fabric-detail [data-fabric-lldp]').is_disabled()
+    held[0].fulfill(status=200, content_type="application/json", body=json.dumps({
+        "found": True, "fields": {"system_name": "node2-xl170r", "port_description": "br0"}}))
+    page.wait_for_timeout(500)
+    page.evaluate("() => window.Fabric.refresh()")
+    page.wait_for_timeout(500)
+    assert out.inner_text().splitlines() == ["Switch : node2-xl170r", "Port : br0"]
+    assert page.locator('.fabric-detail [data-fabric-lldp]').is_enabled()
+
+
 def test_a_bond_detail_shows_its_mode_but_offers_no_lldp(context, flask_server):
     """LLDP n'a de sens que sur une carte physique."""
     page = context.new_page()

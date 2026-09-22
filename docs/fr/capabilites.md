@@ -95,8 +95,11 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   dans les espaces de noms réseau des pods, l'autre écoute brièvement sur la
   carte physique une annonce LLDP et dit quel switch et quel port ont
   répondu. Une VM arrêtée montre son chemin déclaré, annoncé comme tel.
-  La sonde LLDP n'est pas vérifiée contre une vraie trame : rien n'en émet
-  sur le réseau d'essai.
+  La sonde LLDP donne le nom du switch, le port (description et
+  identifiant), l'adresse de gestion du switch, son châssis et sa
+  description, un par ligne. Vérifiée sur de vraies trames avec le cluster
+  de test à trois nœuds, dont le bridge de l'hôte émet du LLDP ; le switch
+  du LAN de production n'en émet pas, et la sonde le dit après écoute.
 - **Live migration** — déplacer une VM en marche entre nodes, avec
   vérifications migration-info préalables.
 - **Console VNC** — console graphique complète dans le navigateur

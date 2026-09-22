@@ -52,7 +52,22 @@ const Board = (() => {
     return `<dt>${esc(label)}</dt><dd>${esc(t)}${window.CopyTo ? CopyTo.button(t) : ''}</dd>`;
   }
 
-  return { tr, esc, val, applyTips, bytes, kv };
+  /** Ce qu'une trame LLDP dit du switch d'en face, une ligne par champ
+   *  (texte brut : à poser en textContent, avec white-space: pre-line). */
+  function lldpText(fields) {
+    const f = fields || {};
+    const port = [f.port_description, f.port_id].filter(Boolean);
+    const rows = [
+      [tr('lldp.switch', 'Switch'), f.system_name],
+      [tr('lldp.port', 'Port'), port.length > 1 ? `${port[0]} (${port[1]})` : port[0]],
+      [tr('lldp.mgmt', 'Management address'), f.management_address],
+      [tr('lldp.chassis', 'Chassis'), f.chassis_id],
+      [tr('lldp.description', 'Description'), f.system_description],
+    ];
+    return rows.filter(([, v]) => v).map(([k, v]) => `${k} : ${v}`).join('\n');
+  }
+
+  return { tr, esc, val, applyTips, bytes, kv, lldpText };
 })();
 
 if (typeof window !== 'undefined') window.Board = Board;

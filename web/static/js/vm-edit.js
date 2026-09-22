@@ -1413,7 +1413,7 @@ const VMEdit = (() => {
             + `/node/${encodeURIComponent(d.node || '')}/lldp`
             + `?iface=${encodeURIComponent(btn.dataset.iface)}`).then(x => x.json());
           out.textContent = r.found
-            ? Object.entries(r.fields).map(([k, v]) => `${k}=${v}`).join('  ')
+            ? window.Board.lldpText(r.fields)
             : (r.hint || tr('vm.edit.netPathNoLldp', 'No LLDP frame.'));
         } catch (e) { out.textContent = String(e.message || e); }
         btn.disabled = false;

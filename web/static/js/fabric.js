@@ -36,6 +36,10 @@ const Fabric = (() => {
   // l'API : un aller-retour SSH. On le fait UNE fois par nœud et par
   // session, pas à chaque rafraîchissement.
   const detail = new Map();        // node -> {phys, stats, links}
+  // Sonde LLDP par carte (« node/iface » -> {busy, text}). Tenue ici et non
+  // dans le panneau : il est redessiné toutes les 8 s, et la sonde écoute
+  // jusqu'à 35 s (réponse perdue, relevé sur harvlab).
+  const lldpState = new Map();
   const detailPending = new Set();
 
   // Outils communs aux trois vues (board.js).
@@ -424,29 +428,40 @@ const Fabric = (() => {
           return `<dt>${esc(key)}</dt><dd>${esc(t)}${window.CopyTo ? CopyTo.button(t) : ''}</dd>`;
         }).join('')
       + `</dl>`
-      + (l.layer === 0
-          ? `<button type="button" class="btn btn-small tip" data-fabric-lldp
-                     data-tip-i18n="fabric.lldpTip"
-                     data-node="${esc(node)}" data-iface="${esc(name)}">`
-            + `${esc(tr('vm.edit.netPathLldp', 'Identify the switch (LLDP)'))}</button>`
-            + `<div class="fabric-lldp-out"></div>`
-          : '');
+      + (l.layer === 0 ? lldpBlock(node, name) : '');
     applyTips(side);
   }
 
+  function lldpBlock(node, name) {
+    const st = lldpState.get(`${node}/${name}`) || {};
+    return `<button type="button" class="btn btn-small tip" data-fabric-lldp
+                    data-tip-i18n="fabric.lldpTip" ${st.busy ? 'disabled' : ''}
+                    data-node="${esc(node)}" data-iface="${esc(name)}">`
+      + `${esc(tr('vm.edit.netPathLldp', 'Identify the switch (LLDP)'))}</button>`
+      + `<div class="fabric-lldp-out">${esc(st.text || '')}</div>`;
+  }
+
+  /** Redessine le détail s'il montre encore cette carte. */
+  function repaintIfShown(node, name) {
+    if (selected && selected.node === node && selected.name === name) showDetail(node, name);
+  }
+
   async function probeLldp(btn) {
-    const out = host.querySelector('.fabric-lldp-out');
-    btn.disabled = true;
-    out.textContent = tr('vm.edit.netPathListening', 'Listening for LLDP...');
+    const { node, iface } = btn.dataset;
+    const key = `${node}/${iface}`;
+    lldpState.set(key, { busy: true, text: tr('vm.edit.netPathListening', 'Listening for LLDP...') });
+    repaintIfShown(node, iface);
+    let text;
     try {
       const r = await fetch(`/api/network-fabric/${encodeURIComponent(cluster)}`
-        + `/node/${encodeURIComponent(btn.dataset.node)}/lldp`
-        + `?iface=${encodeURIComponent(btn.dataset.iface)}`).then(x => x.json());
-      out.textContent = r.found
-        ? Object.entries(r.fields || {}).map(([k, v]) => `${k}=${v}`).join('  ')
+        + `/node/${encodeURIComponent(node)}/lldp`
+        + `?iface=${encodeURIComponent(iface)}`).then(x => x.json());
+      text = r.found
+        ? Board.lldpText(r.fields)
         : (r.hint || r.error || tr('vm.edit.netPathNoLldp', 'No LLDP frame.'));
-    } catch (e) { out.textContent = String(e.message || e); }
-    btn.disabled = false;
+    } catch (e) { text = String(e.message || e); }
+    lldpState.set(key, { busy: false, text });
+    repaintIfShown(node, iface);
   }
 
   async function toggleMonitor(btn) {
