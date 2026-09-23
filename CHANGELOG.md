@@ -76,6 +76,12 @@ is where it had been exercised until now.
 - Both checked by sabotage: putting the old code back turns them red.
 - Checked on the test cluster: with two of three nodes cordoned, the new
   count gives 3 and the startup goes through in 61 s.
+- The packaged service, checked through its unit's own commands (host
+  paths moved to a throwaway directory, the account created by the real
+  `install.sh` function, a kubeconfig left root-only): it served the
+  console as `harvester-ops`, read the three-node test cluster, ran a
+  dry-run shutdown, took the script lock in its log directory and refused
+  a second one, kept its state on the volume, and stopped in 0.7 s.
 
 ## [1.44.9] - 2026-09-22 - A maintenance that works no longer reports a failure
 
