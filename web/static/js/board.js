@@ -7,9 +7,11 @@
  * aurait fait diverger au premier correctif.
  */
 const Board = (() => {
-  /** Traduction avec repli lisible si la clé manque. */
-  const tr = (k, f) => {
-    const v = window.i18n ? i18n.t(k) : null;
+  /** Traduction avec repli lisible si la clé manque. `vars` remplit les
+   *  {marqueurs} du texte : sans eux, « Loading {name}'s topology… »
+   *  s'affichait tel quel (v1.44.12). */
+  const tr = (k, f, vars) => {
+    const v = window.i18n ? i18n.t(k, vars) : null;
     return v && v !== k ? v : f;
   };
 

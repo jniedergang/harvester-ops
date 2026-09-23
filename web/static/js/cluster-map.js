@@ -367,7 +367,7 @@ const ClusterMap = (() => {
   async function maintenanceCheck(name, force) {
     const box = host.querySelector('.fabric-detail .cm-maint');
     if (!box) return;
-    box.innerHTML = `<p class="hint">${esc(tr('topology.loading', 'Loading...'))}</p>`;
+    box.innerHTML = `<p class="hint">${esc(tr('common.loadingNamed', 'Loading...', { name }))}</p>`;
     let p;
     try {
       p = await call('GET', `/api/node/${encodeURIComponent(cluster)}/${encodeURIComponent(name)}`
@@ -573,7 +573,7 @@ const ClusterMap = (() => {
     if (host !== h || !h.querySelector('.fabric-body')) { host = h; unlocked = false; shell(); }
     if (!lastData) {
       host.querySelector('.fabric-body').innerHTML =
-        `<p class="hint">${esc(tr('topology.loading', 'Loading...'))}</p>`;
+        `<p class="hint">${esc(tr('topology.loading', 'Loading...', { name: cluster }))}</p>`;
     }
     if (timer) clearInterval(timer);
     timer = setInterval(refresh, REFRESH_MS);

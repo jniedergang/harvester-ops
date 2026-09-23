@@ -561,7 +561,7 @@ const Fabric = (() => {
     if (host !== h || !h.querySelector('.fabric-body')) { host = h; shell(); }
     if (!lastData) {
       host.querySelector('.fabric-body').innerHTML =
-        `<p class="hint">${esc(tr('topology.loading', 'Loading...'))}</p>`;
+        `<p class="hint">${esc(tr('topology.loading', 'Loading...', { name: cluster }))}</p>`;
     }
     if (timer) clearInterval(timer);
     timer = setInterval(refresh, REFRESH_MS);

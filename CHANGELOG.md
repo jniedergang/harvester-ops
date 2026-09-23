@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.12] - 2026-09-23 - Loading texts name the cluster
+
+Spotted on the project's GitHub page: the animated preview of the README
+showed "Loading {name}'s topology...", placeholder included.
+
+### Fixed
+- **The Cluster, Network, Storage and Fabric views name the cluster while
+  they load**, in every language. They asked for a text that expects the
+  cluster name without ever giving it, and the helper they share could not
+  pass values at all. The maintenance pre-check showed that same text about
+  a whole cluster while loading one node's plan; it now says "Loading
+  harvlab-n1...".
+- The README preview no longer includes the moment a view is loading.
+
+### Tests
+- A scan of the interface code fails when a translated text that expects a
+  value is displayed without it (unless it goes through `fill`,
+  `.replace` or the loading veil); checked by sabotage.
+- A browser test holds each view's data back and reads its loading text in
+  English, French and German; it fails when the helper drops the values.
+
 ## [1.44.11] - 2026-09-23 - The README says what the console is for
 
 ### Changed
