@@ -56,7 +56,7 @@ def render_cards(texts, out_dir, lang):
     return made
 
 
-def build(take_dir, force_music=None):
+def build(take_dir, force_music=None, bitrate="7M"):
     take = Path(take_dir).resolve()
     meta = json.loads((take / "cues.json").read_text())
     scene, lang = meta["scene"], meta["lang"]
@@ -111,7 +111,7 @@ def build(take_dir, force_music=None):
 
     mp4 = take / f"{scene}-{lang}.mp4"
     cmd += ["-filter_complex", ";".join(chain), *maps,
-            "-c:v", "libopenh264", "-b:v", "7M", "-profile:v", "high",
+            "-c:v", "libopenh264", "-b:v", bitrate, "-profile:v", "high",
             "-pix_fmt", "yuv420p", "-movflags", "+faststart", str(mp4)]
     subprocess.run(cmd, check=True)
 
@@ -133,5 +133,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("take", help="dossier de prise (out/<scene>-<lang>)")
     ap.add_argument("--music", default=None)
+    # GitHub n'affiche un lecteur que pour une vidéo téléversée par son
+    # interface web, et la refuse au-delà de 10 Mo sur un compte gratuit :
+    # baisser le débit fait passer les clips les plus longs sous la barre.
+    ap.add_argument("--bitrate", default="7M")
     args = ap.parse_args()
-    build(args.take, force_music=args.music)
+    build(args.take, force_music=args.music, bitrate=args.bitrate)
