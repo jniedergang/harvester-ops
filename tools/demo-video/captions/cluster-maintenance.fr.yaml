@@ -13,7 +13,7 @@ precheckDetail: "Quelles machines migrent à chaud, lesquelles seraient arrêté
 enter: "Cette fois on le fait pour de vrai : l'hôte est vidé puis mis en maintenance."
 dock: "Toute opération est tracée. Le dock la suit en direct, et le journal reste dans Activité."
 waiting: "Harvester migre les machines à chaud vers les autres hôtes. Aucune coupure pour elles."
-moved: "L'hôte est en maintenance et vide. Ses machines tournent sur les deux autres."
+moved: "L'hôte est en maintenance et vide. Ses machines tournent sur les autres hôtes."
 leave: "Sortir de maintenance rend l'hôte au cluster."
 back: "L'hôte est de nouveau disponible. Tout cela tient en un clic, sur un vrai cluster."
 migrate: "Une machine seule se déplace aussi à la main, à chaud, sans l'éteindre."

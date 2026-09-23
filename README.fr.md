@@ -42,15 +42,15 @@ n'est coupé.
 
 | Vidéo | Ce qu'on y voit | Regarder |
 |---|---|---|
-| **Le tour** | Chaque entrée du menu, de haut en bas, et les cinq langues de l'interface | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) |
-| **Arrêt et redémarrage** | Tout un cluster éteint dans l'ordre, puis remonté | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) |
-| **Maintenance d'un nœud** | Le pré-contrôle, un hôte vidé pendant que ses VMs migrent à chaud, puis une VM déplacée à la main | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) |
-| **Machines virtuelles** | La liste des VMs, la création guidée, et la console intégrée | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) |
-| **Stockage** | La place réellement disponible, et un volume dégradé expliqué pendant sa reconstruction | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) |
-| **Réseau** | Les réseaux, la fabrique physique, et le chemin d'une VM | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) |
-| **Instantanés** | Une VM photographiée, modifiée, puis restaurée | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) |
-| **Activité** | Toutes les actions conservées avec leur journal, et un paquet de support | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) |
-| **Plusieurs clusters** | Changer de cluster, dont un éteint, les rôles et les comptes | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) |
+| **Le tour** (2:23) | Chaque entrée du menu, de haut en bas, et les cinq langues de l'interface | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) |
+| **Arrêt et redémarrage** (2:16) | Tout un cluster éteint dans l'ordre, puis remonté | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) |
+| **Maintenance d'un nœud** (1:43) | Le pré-contrôle, un hôte vidé pendant que ses VMs migrent à chaud, puis une VM déplacée à la main | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) |
+| **Machines virtuelles** (1:17) | La liste des VMs, la création guidée, et la console intégrée | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) |
+| **Stockage** (0:54) | La place réellement disponible, et un volume dégradé expliqué pendant sa reconstruction | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) |
+| **Réseau** (1:12) | Les réseaux, la fabrique physique, et le chemin d'une VM | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) |
+| **Instantanés** (1:50) | Une VM photographiée, modifiée, puis restaurée | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) |
+| **Activité** (1:12) | Toutes les actions conservées avec leur journal, et un paquet de support | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) |
+| **Plusieurs clusters** (1:16) | Changer de cluster, dont un éteint, les rôles et les comptes | [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) · [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) |
 
 ## Ce qu'il fait
 
@@ -83,8 +83,8 @@ n'est coupé.
   telle que Longhorn la calcule, et les volumes dégradés diagnostiqués,
   avec les corrections sans risque.
 - **Réseau** : les réseaux et ce qui y est raccordé, la fabrique physique
-  (cartes, agrégats, commutateurs virtuels), le chemin d'une VM de bout en
-  bout, LLDP.
+  (cartes, agrégats, commutateurs virtuels), le chemin d'une VM depuis
+  l'invité vers l'extérieur, LLDP.
 - **Activité** : toute opération qui modifie quelque chose est enregistrée
   avec son journal en direct et conservée dans l'historique.
 
@@ -95,8 +95,8 @@ n'est coupé.
   leur kubeconfig. Créer un cluster demande l'outil `caphv-generate` sur
   l'hôte.
 - **Terraform** : déclarations sauvegardées (VMs, images, clés SSH, HCL
-  brut), plan montré avant application, destruction, et le fournisseur
-  Harvester installé ou mis à jour depuis la console.
+  brut), un plan seul ou un plan suivi de l'application, destruction, et
+  le fournisseur Harvester installé ou mis à jour depuis la console.
 - **Bare-metal** : trouver les machines par leur carte d'administration en
   Redfish, les allumer et les éteindre, tenir un magasin d'ISO, et
   installer Harvester sur une machine vierge sans intervention, par média

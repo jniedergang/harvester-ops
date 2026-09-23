@@ -210,6 +210,13 @@ def volume_waits(node, vmis, volumes):
     for v in volumes:
         if (v.get("status") or {}).get("robustness") in (None, "healthy"):
             continue
+        # Un volume DÉTACHÉ ne retient aucune migration. Longhorn y laisse
+        # pourtant l'ancienne charge dans `workloadsStatus` : après deux
+        # restaurations d'instantané, les deux disques abandonnés de db-01
+        # (robustesse « unknown ») étaient annoncés comme retardant sa
+        # migration (vu sur harvlab le 23/09/2026).
+        if (v.get("status") or {}).get("state") != "attached":
+            continue
         ks = (v.get("status") or {}).get("kubernetesStatus") or {}
         for w in ks.get("workloadsStatus") or []:
             vmi = by_name.get(f"{ks.get('namespace')}/{w.get('workloadName')}")

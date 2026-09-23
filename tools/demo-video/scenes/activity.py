@@ -33,11 +33,14 @@ def scene(cam):
     cam.pause(8)
     cam.say("dock")
     cam.pause(6)
-    try:
-        cam.click("#btn-activity-log-close")
-    except Exception:                                              # noqa: BLE001
-        pass
-    cam.click("#btn-act-filter-reset")
+    # Le détail s'ouvre dans une fenêtre flottante : on la referme par
+    # l'API des fenêtres (un clic manqué coûtait trois délais de 30 s).
+    p.evaluate("""() => document.querySelectorAll('.floating-panel').forEach(
+        el => window.FloatingPanels.close(el.id.replace(/^fp-/, '')))""")
+    cam.pause(1)
+    # Le bouton de remise à zéro bouge sans cesse (le tableau se redessine
+    # chaque seconde) : on vide la recherche directement.
+    p.fill("#act-f-q", "")
     cam.pause(1)
 
     # -- le paquet de support -------------------------------------------------
@@ -47,6 +50,8 @@ def scene(cam):
     cam.point("#sup-anonymize")
     cam.pause(6)
     cam.click("#btn-build-bundle")
+    # La fenêtre des réglages masquerait le panneau de la génération.
+    cam.click("#btn-close-settings")
     cam.say("bundleBuilding")
     with cam.fast(6):
         cam.until(BUNDLE_DONE, timeout=600, poll=2)

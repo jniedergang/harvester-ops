@@ -45,9 +45,11 @@ def vmi(name, node_name, ns="default", migratable=True, reason="DisksNotLiveMigr
             "spec": spec, "status": {"nodeName": node_name, "conditions": conds}}
 
 
-def lh_volume(name, vmi_name, ns="default", robustness="healthy"):
+def lh_volume(name, vmi_name, ns="default", robustness="healthy", state="attached"):
+    # Un volume Longhorn a toujours un état ; celui d'une VM qui tourne est
+    # attaché (un volume détaché ne retient aucune migration, v1.44.10).
     return {"metadata": {"name": name},
-            "status": {"robustness": robustness,
+            "status": {"robustness": robustness, "state": state,
                        "kubernetesStatus": {"namespace": ns, "workloadsStatus": [
                            {"workloadName": vmi_name, "workloadType": "VirtualMachineInstance"}]}}}
 
@@ -581,6 +583,21 @@ def test_a_selector_we_do_not_read_is_ignored_not_fatal():
     assert nm.eviction_blockers([_pod("p", "ns", {"app": "x"})], [pdb]) == []
 
 
+def test_a_detached_orphan_volume_does_not_delay_a_migration():
+    """v1.44.10 : une restauration d'instantané laisse l'ancien disque
+    détaché, robustesse « unknown », avec la VM toujours inscrite dans ses
+    charges. Il ne peut rien retarder : seul un volume attaché compte."""
+    node = {"metadata": {"name": "n1"}}
+    vmi = {"metadata": {"name": "db", "namespace": "default"}, "status": {"nodeName": "n1"}}
+    def vol(name, state, robustness):
+        return {"metadata": {"name": name},
+                "status": {"state": state, "robustness": robustness,
+                           "kubernetesStatus": {"namespace": "default", "workloadsStatus": [
+                               {"workloadType": "VirtualMachineInstance", "workloadName": "db"}]}}}
+    vols = [vol("orphan", "detached", "unknown"), vol("live", "attached", "degraded")]
+    assert nm.volume_waits(node, [vmi], vols) == [{"vm": "default/db", "volume": "live"}]
+
+
 def test_a_volume_is_named_once_even_with_several_workload_entries():
     """v1.44.9 : Longhorn garde une entrée de charge par pod ayant monté le
     volume ; après trois migrations, la même VM y figurait trois fois et le
@@ -589,7 +606,7 @@ def test_a_volume_is_named_once_even_with_several_workload_entries():
     vmi = {"metadata": {"name": "web", "namespace": "default"},
            "status": {"nodeName": "n1"}}
     vol = {"metadata": {"name": "pvc-1"},
-           "status": {"robustness": "degraded",
+           "status": {"robustness": "degraded", "state": "attached",
                       "kubernetesStatus": {"namespace": "default", "workloadsStatus": [
                           {"workloadType": "VirtualMachineInstance", "workloadName": "web"},
                           {"workloadType": "VirtualMachineInstance", "workloadName": "web"},

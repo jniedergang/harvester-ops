@@ -28,10 +28,25 @@ is where it had been exercised until now.
   defect the other way round: it called a node under maintenance "not
   Ready".
 
+- **A detached volume no longer delays a migration in the pre-check.**
+  Restoring a snapshot leaves the previous disk detached, with the VM still
+  listed among its workloads; the maintenance pre-check announced that the
+  VM's migration would wait for those abandoned disks. Only attached
+  volumes count now.
 - **The support bundle panel speaks the interface language.** "Bundle
   ready", "Download archive", "Loading..." and the rest were hard-coded in
   English, and the build steps existed only in English and French. Found
   while preparing the French demonstration of the Activity page.
+
+### Changed
+- **The README is rewritten**, in English with a French version
+  (`README.fr.md`, also in the tarball) instead of interleaved captions. It
+  opens on a tour video, lists nine demonstration clips in both languages,
+  and every screenshot is new: the old ones showed the topology graph
+  removed in 1.43.
+- The Cluster API section of the capabilities guide no longer promises
+  Kubernetes version upgrades, which do not exist, and says that cluster
+  creation needs the `caphv-generate` tool on the host.
 
 ### Added
 - **One shutdown or startup at a time per cluster.** While filming, a
@@ -51,6 +66,10 @@ is where it had been exercised until now.
   shows in the log in English and French.
 - A test replays the shutdown loop with a fake `ssh` and fails when a node
   is missed, plus two guards on the helper and on the shutdown step.
+- One test on a detached orphan volume in the pre-check, checked by
+  sabotage and against the test cluster after two snapshot restores.
+- Two tests that the support panel has no English left hard-coded and that
+  each of its keys exists in the five languages.
 - Three tests on the Ready count with a fake `kubectl` (cordoned nodes are
   Ready, a node whose condition is False or missing is not), plus a guard
   that no script reads the status column any more.
@@ -87,6 +106,10 @@ node entering maintenance while the actions dock displayed, in red,
   migrations of the same VM the panel listed the same disk three times.
 
 ### Internal
+- Nine demonstration clips, English and French, filmed on the three-node
+  test cluster: tour, shutdown and startup, node maintenance, virtual
+  machines, storage, network, snapshots, activity, several clusters.
+  `tools/demo-video/screenshots.py` retakes the README screenshots.
 - `tools/demo-video/`: the chain that produces the short demonstration
   videos. A scene plays the real console against a real cluster, and the
   edit speeds up the waits, burns in the captions and adds the cards and

@@ -40,15 +40,15 @@ sped up, with the factor shown on screen; nothing is cut.
 
 | Clip | What you see | Watch |
 |---|---|---|
-| **Tour** | Every entry of the menu, top to bottom, and the five interface languages | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) |
-| **Shutdown and startup** | A whole cluster powered off in order, then brought back | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) |
-| **Node maintenance** | The pre-check, a host drained while its VMs live-migrate, then a VM moved by hand | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) |
-| **Virtual machines** | The VM list, guided creation, and the built-in console | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) |
-| **Storage** | Space really left, and a degraded volume explained while it rebuilds | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) |
-| **Network** | Networks, the physical fabric, and the path of a VM | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) |
-| **Snapshots** | A VM snapshot taken, the VM changed, and restored | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) |
-| **Activity** | Every action on record with its log, and a support bundle | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) |
-| **Several clusters** | Switching clusters, one that is powered off, roles and accounts | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) |
+| **Tour** (2:23) | Every entry of the menu, top to bottom, and the five interface languages | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) |
+| **Shutdown and startup** (2:16) | A whole cluster powered off in order, then brought back | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) |
+| **Node maintenance** (1:43) | The pre-check, a host drained while its VMs live-migrate, then a VM moved by hand | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) |
+| **Virtual machines** (1:17) | The VM list, guided creation, and the built-in console | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) |
+| **Storage** (0:54) | Space really left, and a degraded volume explained while it rebuilds | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) |
+| **Network** (1:12) | Networks, the physical fabric, and the path of a VM | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) |
+| **Snapshots** (1:50) | A VM snapshot taken, the VM changed, and restored | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) |
+| **Activity** (1:12) | Every action on record with its log, and a support bundle | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) |
+| **Several clusters** (1:16) | Switching clusters, one that is powered off, roles and accounts | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) |
 
 ## What it does
 
@@ -79,7 +79,8 @@ sped up, with the factor shown on screen; nothing is cut.
   Longhorn computes it, and degraded volumes diagnosed with the fixes that
   are safe.
 - **Network**: the networks and what is attached to them, the physical
-  fabric (cards, bonds, virtual switches), a VM's path end to end, LLDP.
+  fabric (cards, bonds, virtual switches), a VM's path from the guest
+  outwards, LLDP.
 - **Activity**: every operation that changes something is recorded with
   its live log and kept in the history.
 
@@ -88,9 +89,9 @@ sped up, with the factor shown on screen; nothing is cut.
 - **Cluster API (CAPHV)**: install the stack from an airgap bundle, list,
   scale and delete downstream RKE2 clusters, fetch their kubeconfig.
   Creating a cluster needs the `caphv-generate` tool on the host.
-- **Terraform**: saved declarations (VMs, images, SSH keys, raw HCL), plan
-  shown before apply, destroy, and the Harvester provider installed or
-  updated from the console.
+- **Terraform**: saved declarations (VMs, images, SSH keys, raw HCL), a
+  plan on its own or plan then apply, destroy, and the Harvester provider
+  installed or updated from the console.
 - **Bare-metal**: find machines by their management board over Redfish,
   power them, keep an ISO store, and install Harvester on a blank machine
   unattended, over virtual media.

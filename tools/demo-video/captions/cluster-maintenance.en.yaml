@@ -13,7 +13,7 @@ precheckDetail: "Which machines migrate live, which ones would be shut down, and
 enter: "Now we really do it: the host is drained and put in maintenance."
 dock: "Every operation is tracked. The dock follows it live, and the log is kept in Activity."
 waiting: "Harvester live-migrates the machines to the other hosts. No downtime for them."
-moved: "The host is in maintenance and empty. Its machines are running on the other two."
+moved: "The host is in maintenance and empty. Its machines are running on the other hosts."
 leave: "Leaving maintenance gives the host back to the cluster."
 back: "The host is available again. The whole thing is one click away, on a real cluster."
 migrate: "A single machine can be moved by hand too, live, without shutting it down."
