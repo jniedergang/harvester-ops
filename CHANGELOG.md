@@ -4,6 +4,26 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.11] - 2026-09-23 - The README says what the console is for
+
+### Changed
+- **The README, in English and French, presents harvester-ops for what it
+  is**: a modern console to run a set of Harvester clusters, resting on
+  three things: every cluster in one interface, everyday operations
+  automated, and every event on record, whether made from the console or
+  elsewhere. The previous version presented it as shutdown tooling that had
+  grown; the ordered shutdown and startup are now one of the automations,
+  and the clips are listed in that order (tour, several clusters,
+  activity first). The introduction of the capabilities guide follows.
+- The tour video's captions follow too: the console is introduced for all
+  your clusters, and the shutdown is no longer "the reason this toolkit
+  exists". The video attached to the 1.44.10 release is replaced.
+
+### Tests
+- Five tests on the two READMEs: the same videos in both languages, one
+  video per filmed scene and language, every image present, each README
+  linking to the other, no typographic trace.
+
 ## [1.44.10] - 2026-09-23 - A real shutdown and startup of a multi-node cluster
 
 Filming the shutdown and startup on the three-node test cluster found two

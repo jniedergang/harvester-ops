@@ -1,9 +1,12 @@
 # Capabilities
 
-harvester-ops is an operations console for SUSE Harvester clusters. It
-started as power-sequencing tooling and now covers most of the day-2
-surface. This page tours each capability area, what it does, and where it
-lives (CLI vs. web console).
+harvester-ops is a modern console to run a set of SUSE Harvester
+clusters. It rests on three things: **every cluster in one interface**,
+**everyday operations automated** (VMs, node maintenance, ordered shutdown
+and startup, Terraform, Cluster API, bare-metal installs), and **every event
+on record**, whether it was made from the console or elsewhere. This page
+tours each capability area, what it does, and where it lives (command line
+or web console).
 
 Everything is **multi-cluster** (one `config.yaml` declares N clusters)
 and every mutating operation is **tracked as an action** with live logs

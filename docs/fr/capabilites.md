@@ -1,9 +1,13 @@
 # Capacités
 
-harvester-ops est une console d'exploitation pour clusters SUSE Harvester.
-Né comme outillage de séquençage électrique, il couvre aujourd'hui la
-majeure partie de la surface day-2. Cette page fait le tour de chaque
-domaine de capacité, son rôle, et où il vit (CLI vs. console web).
+harvester-ops est une console moderne pour exploiter un ensemble de
+clusters SUSE Harvester. Elle repose sur trois piliers : **tous les
+clusters dans une seule interface**, **les opérations courantes
+automatisées** (VMs, maintenance des nœuds, arrêt et démarrage ordonnés,
+Terraform, Cluster API, installations bare-metal), et **chaque événement
+conservé**, qu'il vienne de la console ou d'ailleurs. Cette page fait le
+tour de chaque domaine de capacité, son rôle, et où il vit (ligne de
+commande ou console web).
 
 Tout est **multi-cluster** (un seul `config.yaml` déclare N clusters) et
 chaque opération mutative est **tracée comme une action** avec ses logs
