@@ -1,4 +1,4 @@
-"""v1.44.10 — le panneau du paquet de support parle la langue de l'interface.
+"""v1.44.10 : le panneau du paquet de support parle la langue de l'interface.
 
 Relevé en préparant la vidéo « Activité » en français : « Bundle ready »,
 « Download archive », « Loading... » étaient écrits en dur, et les étapes

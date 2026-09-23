@@ -1,4 +1,4 @@
-"""v1.44.10 — un nœud isolé est Ready.
+"""v1.44.10 : un nœud isolé est Ready.
 
 Constaté sur le banc harvlab (3 nœuds) en filmant l'extinction puis le
 redémarrage : les trois nœuds étaient revenus, mais le démarrage restait

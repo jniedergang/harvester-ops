@@ -1,4 +1,4 @@
-"""v1.44.10 — un arrêt refusé parce qu'un démarrage tourne déjà se VOIT.
+"""v1.44.10 : un arrêt refusé parce qu'un démarrage tourne déjà se VOIT.
 
 Avant, `api()` levait « HTTP 409 » dans une promesse que personne
 n'attrapait : le bouton semblait ne rien faire. Le refus s'écrit désormais

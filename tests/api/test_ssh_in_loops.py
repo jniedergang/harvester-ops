@@ -1,4 +1,4 @@
-"""v1.44.10 — l'extinction n'éteignait qu'UN nœud sur trois.
+"""v1.44.10 : l'extinction n'éteignait qu'UN nœud sur trois.
 
 Constaté en filmant la démonstration : le journal annonçait « 3
 control-plane node(s) éteints » après une seule ligne « CP shutdown (1/3) »,

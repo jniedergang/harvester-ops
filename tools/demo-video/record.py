@@ -126,7 +126,7 @@ class Cam:
         ⚠️ `page.wait_for_function` NE SAIT PAS attendre une fonction
         asynchrone : elle reçoit une promesse, la trouve « vraie » et rend
         la main au premier tour (mesuré le 22/09/2026 : 0,1 s au lieu
-        d'attendre). D'où cette boucle, qui évalue pour de bon — et qui
+        d'attendre). D'où cette boucle, qui évalue pour de bon, et qui
         laisse le film tourner pendant l'attente.
         """
         deadline = time.time() + timeout

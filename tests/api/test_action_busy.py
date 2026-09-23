@@ -1,4 +1,4 @@
-"""v1.44.10 — un seul arrêt ou démarrage à la fois par cluster.
+"""v1.44.10 : un seul arrêt ou démarrage à la fois par cluster.
 
 Vécu sur le banc harvlab en filmant : un démarrage resté bloqué tournait
 encore quand un nouvel arrêt a été lancé sur le même cluster. L'un
