@@ -4,6 +4,20 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.44.13] - 2026-09-23 - The videos play on the GitHub page
+
+### Changed
+- **The demonstration videos play inside the README**, in English in
+  `README.md` and in French in `README.fr.md`: the tour at the top of the
+  page, the eight other clips under "Watch it work", each with its download
+  links in both languages. GitHub shows a player only for videos uploaded
+  through its web interface, under 10 MB on a free account; the clips were
+  re-encoded to fit. The animated previews they replace are removed.
+
+### Tests
+- One more test on the READMEs: nine players per language, none shared,
+  each address alone on its line, which is what makes GitHub show a player.
+
 ## [1.44.12] - 2026-09-23 - Loading texts name the cluster
 
 Spotted on the project's GitHub page: the animated preview of the README

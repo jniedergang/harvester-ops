@@ -12,10 +12,9 @@ English · [Français](README.fr.md)
 > Independent open source project. Not affiliated with, endorsed by, or
 > supported by SUSE.
 
-[![A tour of harvester-ops](docs/assets/video/tour-en.webp)](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4)
+https://github.com/user-attachments/assets/ab427a38-bc0a-4dbe-a5c9-2113cb5fdc0a
 
-*A tour of the console, going down the left-hand menu. Click the picture
-for the full video.*
+*A tour of the console, going down the left-hand menu (2:23). [Download](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) · [en français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4)*
 
 ## Why
 
@@ -87,19 +86,72 @@ recorded, whether it was made from the console or somewhere else.
 ## Watch it work
 
 Short clips filmed on a real three-node cluster, with captions. Waits are
-sped up, with the factor shown on screen; nothing is cut.
+sped up, with the factor shown on screen; nothing is cut. The tour is at
+the top of this page; every clip also exists in French.
 
-| Clip | What you see | Watch |
-|---|---|---|
-| **Tour** (2:23) | Every entry of the menu, top to bottom, and the five interface languages | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/tour-fr.mp4) |
-| **Several clusters** (1:16) | Switching clusters, one that is powered off, cluster declarations and accounts | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4) |
-| **Activity** (1:12) | Every action on record with its log, and a support bundle | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4) |
-| **Virtual machines** (1:17) | The VM list, guided creation, and the built-in console | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4) |
-| **Snapshots** (1:50) | A VM snapshot taken, the VM changed, and restored | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4) |
-| **Node maintenance** (1:43) | The pre-check, a host drained while its VMs live-migrate, then a VM moved by hand | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4) |
-| **Storage** (0:54) | Space really left, and a degraded volume explained while it rebuilds | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4) |
-| **Network** (1:12) | Networks, the physical fabric, and the path of a VM | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4) |
-| **Shutdown and startup** (2:16) | A whole cluster powered off in order, then brought back | [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4) |
+### Several clusters (1:16)
+
+Switching clusters, one that is powered off, cluster declarations and accounts.
+
+https://github.com/user-attachments/assets/964161b5-ab87-4239-a723-e306a750760b
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/multi-cluster-fr.mp4)
+
+### Activity (1:12)
+
+Every action on record with its log, and a support bundle.
+
+https://github.com/user-attachments/assets/b2160f56-898c-43a5-bd64-9bd9ddd069e2
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/activity-fr.mp4)
+
+### Virtual machines (1:17)
+
+The VM list, guided creation, and the built-in console.
+
+https://github.com/user-attachments/assets/93eb79ae-f273-4680-838f-bb8b63b1e331
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/vms-console-fr.mp4)
+
+### Snapshots (1:50)
+
+A VM snapshot taken, the VM changed, and restored.
+
+https://github.com/user-attachments/assets/7a941e36-4a9f-44b5-8685-88a6eea3afba
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/snapshots-fr.mp4)
+
+### Node maintenance (1:43)
+
+The pre-check, a host drained while its VMs live-migrate, then a VM moved by hand.
+
+https://github.com/user-attachments/assets/dd1f9be7-ad56-41c7-9b14-56b22d0061f8
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/cluster-maintenance-fr.mp4)
+
+### Storage (0:54)
+
+Space really left, and a degraded volume explained while it rebuilds.
+
+https://github.com/user-attachments/assets/c9140310-0b35-4464-bc39-1b0c4b960876
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/storage-fr.mp4)
+
+### Network (1:12)
+
+Networks, the physical fabric, and the path of a VM.
+
+https://github.com/user-attachments/assets/35013956-4e3d-4811-a6e1-96f5b92485c9
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/network-fr.mp4)
+
+### Shutdown and startup (2:16)
+
+A whole cluster powered off in order, then brought back.
+
+https://github.com/user-attachments/assets/ab02921e-259e-426b-aad1-f5e4a328877d
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.44.10/shutdown-startup-fr.mp4)
 
 ## Screenshots
 
