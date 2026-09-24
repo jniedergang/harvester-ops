@@ -117,6 +117,28 @@ def test_sanitize_drops_cluster_state_and_controller_annotations():
     assert "status" in vm
 
 
+def test_sanitize_keeps_macs_that_only_live_in_the_annotation():
+    """Relevé sur harvlab : une VM créée hors de l'interface de Harvester n'a
+    pas de `macAddress` dans sa spec, le webhook note les adresses attribuées
+    dans `harvesterhci.io/mac-address`. Sans les recopier, « garder les MAC »
+    ne garderait rien."""
+    vm = leap156()
+    iface = vm["spec"]["template"]["spec"]["domain"]["devices"]["interfaces"][0]
+    iface.pop("macAddress")
+    vm["metadata"]["annotations"]["harvesterhci.io/mac-address"] = '{"default":"d2:79:9f:81:cf:fa"}'
+    clean = vt.sanitize_vm(vm)
+    got = clean["spec"]["template"]["spec"]["domain"]["devices"]["interfaces"][0]
+    assert got["macAddress"] == "d2:79:9f:81:cf:fa"
+    assert "harvesterhci.io/mac-address" not in clean["metadata"].get("annotations", {})
+    # une MAC déjà dans la spec l'emporte ; une annotation illisible est ignorée
+    vm = leap156()
+    vm["metadata"]["annotations"]["harvesterhci.io/mac-address"] = '{"default":"00:00:00:00:00:01"}'
+    assert vt.sanitize_vm(vm)["spec"]["template"]["spec"]["domain"]["devices"][
+        "interfaces"][0]["macAddress"] == "ca:02:10:ff:0f:61"
+    vm["metadata"]["annotations"]["harvesterhci.io/mac-address"] = "{broken"
+    vt.sanitize_vm(vm)
+
+
 def test_inventory_of_leap156():
     inv = inventory()
     assert inv["disks"] == [{

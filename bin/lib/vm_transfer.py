@@ -202,9 +202,22 @@ def vm_inventory(vm, pvcs, used=None):
 
 
 def sanitize_vm(vm):
-    """Copie de la VM sans ce qui décrit son cluster d'origine."""
+    """Copie de la VM sans ce qui décrit son cluster d'origine.
+
+    Les adresses MAC que le webhook de Harvester n'a notées que dans
+    l'annotation `harvesterhci.io/mac-address` (VM créée hors de son
+    interface) sont recopiées dans les interfaces avant que l'annotation
+    disparaisse : c'est ce qui permet de les garder sur la cible."""
     out = {k: copy.deepcopy(v) for k, v in vm.items() if k != "status"}
     md = out.setdefault("metadata", {})
+    try:
+        macs = json.loads((md.get("annotations") or {}).get("harvesterhci.io/mac-address") or "{}")
+    except ValueError:
+        macs = {}
+    if isinstance(macs, dict):
+        for iface in ((_tspec(out).get("domain") or {}).get("devices") or {}).get("interfaces") or []:
+            if not iface.get("macAddress") and macs.get(iface.get("name")):
+                iface["macAddress"] = macs[iface["name"]]
     for k in _DROP_METADATA:
         md.pop(k, None)
     ann = {k: v for k, v in (md.get("annotations") or {}).items()

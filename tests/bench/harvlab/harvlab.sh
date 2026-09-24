@@ -25,25 +25,37 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"
 
+# Un second banc se décrit par variables d'environnement (v1.45.0, essais
+# de transfert de VM entre clusters) ; sans elles, c'est harvlab :
+#   HARVLAB_NAME=harvlab2 HARVLAB_NODES=1 HARVLAB_VIP=172.16.2.70 \
+#   HARVLAB_IP_PREFIX=172.16.2.7 HARVLAB_MAC_PREFIX=52:54:00:4c:ac:7 harvlab.sh ...
+# (IP à réserver et enregistrer dans NetBox et Pi-hole AVANT l'installation).
+LAB="${HARVLAB_NAME:-harvlab}"
+NODES="${HARVLAB_NODES:-1 2 3}"
 NODE2="${HARVLAB_HOST:-ju@172.16.1.12}"
 NODE2_IP="${NODE2#*@}"
-DIR="/var/lib/libvirt/images/harvlab"
+DIR="/var/lib/libvirt/images/$LAB"
+# L'ISO (8 Go), le noyau et l'initrd restent partagés dans le répertoire de
+# harvlab : un second banc ne les recopie pas.
+ISO_DIR="/var/lib/libvirt/images/harvlab"
 ISO="harvester-v1.8.2-amd64.iso"
 ISO_LOCAL="$HOME/.local/share/harvester-ops/iso/$ISO"
-PORT=8099
-VIP=172.16.2.60
-VCPUS=8
-MEMORY_MB=20480
-DISK_GB=250
-VAULT_PATH=secret/infra/harvlab
-KUBECONFIG_OUT="$HOME/.kube/harvlab.yaml"
+PORT="${HARVLAB_PORT:-8099}"
+VIP="${HARVLAB_VIP:-172.16.2.60}"
+IP_PREFIX="${HARVLAB_IP_PREFIX:-172.16.2.6}"
+MAC_PREFIX="${HARVLAB_MAC_PREFIX:-52:54:00:4c:ab:6}"
+VCPUS="${HARVLAB_VCPUS:-8}"
+MEMORY_MB="${HARVLAB_MEMORY_MB:-20480}"
+DISK_GB="${HARVLAB_DISK_GB:-250}"
+VAULT_PATH="secret/infra/$LAB"
+KUBECONFIG_OUT="$HOME/.kube/$LAB.yaml"
 
-ip_of()   { echo "172.16.2.6$1"; }
-mac_of()  { echo "52:54:00:4c:ab:6$1"; }
-name_of() { echo "harvlab-n$1"; }
+ip_of()   { echo "${IP_PREFIX}$1"; }
+mac_of()  { echo "${MAC_PREFIX}$1"; }
+name_of() { echo "$LAB-n$1"; }
 
 on_node2() { ssh -o BatchMode=yes -o LogLevel=ERROR "$NODE2" "$@"; }
-say()      { printf '[harvlab] %s\n' "$*"; }
+say()      { printf '[%s] %s\n' "$LAB" "$*"; }
 
 vault_env() {
     export VAULT_ADDR=http://127.0.0.1:8200
@@ -109,9 +121,10 @@ serve_path() { on_node2 "sudo cat $DIR/.serve-path 2>/dev/null" || true; }
 
 cmd_serve() {
     on_node2 "sudo install -d -m 0755 $DIR"
-    if ! on_node2 "sudo test -s $DIR/$ISO"; then
+    on_node2 "sudo install -d -m 0755 $ISO_DIR"
+    if ! on_node2 "sudo test -s $ISO_DIR/$ISO"; then
         say "copie de l'ISO vers node2 (8 Go)"
-        rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$ISO_LOCAL" "$NODE2:$DIR/"
+        rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$ISO_LOCAL" "$NODE2:$ISO_DIR/"
     fi
     # Noyau et initrd de l'installeur, pour un démarrage direct : la ligne de
     # commande porte l'adresse de la configuration propre à chaque nœud.
@@ -120,7 +133,7 @@ cmd_serve() {
     xorriso -osirrox on -indev "$ISO_LOCAL" \
         -extract /boot/x86_64/loader/linux "$tmp/linux" \
         -extract /boot/x86_64/loader/initrd "$tmp/initrd" >/dev/null 2>&1
-    rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$tmp/linux" "$tmp/initrd" "$NODE2:$DIR/"
+    rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$tmp/linux" "$tmp/initrd" "$NODE2:$ISO_DIR/"
     rm -rf "$tmp"
     # Un chemin non devinable : les configurations portent le jeton du cluster.
     rand="$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
@@ -129,9 +142,9 @@ cmd_serve() {
     on_node2 "sudo rm -rf $DIR/serve && sudo install -d -m 0755 $DIR/serve/$rand \
         && echo $rand | sudo tee $DIR/.serve-path >/dev/null \
         && sudo touch $DIR/serve/index.html $DIR/serve/$rand/index.html \
-        && sudo ln -s $DIR/$ISO $DIR/serve/$rand/$ISO"
+        && sudo ln -s $ISO_DIR/$ISO $DIR/serve/$rand/$ISO"
     url="http://$NODE2_IP:$PORT/$rand/$ISO"
-    for n in 1 2 3; do
+    for n in $NODES; do
         # Le nœud 3 reçoit le mot de passe EN CLAIR, comme le fait l'onglet
         # Bare-metal : on vérifie ainsi ce que l'installeur en fait.
         form=hash; [[ "$n" == 3 ]] && form=plain
@@ -139,14 +152,14 @@ cmd_serve() {
             | on_node2 "sudo install -m 0644 /dev/stdin $DIR/serve/$rand/$(name_of "$n").yaml"
     done
     on_node2 "sudo firewall-cmd --add-port=$PORT/tcp --timeout=3h >/dev/null \
-        && (sudo systemctl stop harvlab-serve 2>/dev/null || true) \
-        && sudo systemd-run --unit=harvlab-serve --collect \
+        && (sudo systemctl stop $LAB-serve 2>/dev/null || true) \
+        && sudo systemd-run --unit=$LAB-serve --collect \
            python3 -m http.server $PORT --bind $NODE2_IP --directory $DIR/serve >/dev/null"
     say "publication active sur $NODE2_IP:$PORT (chemin non devinable, port ouvert 3 h)"
 }
 
 cmd_unserve() {
-    on_node2 "sudo systemctl stop harvlab-serve 2>/dev/null || true; \
+    on_node2 "sudo systemctl stop $LAB-serve 2>/dev/null || true; \
         sudo firewall-cmd --remove-port=$PORT/tcp >/dev/null 2>&1 || true; \
         sudo rm -rf $DIR/serve $DIR/.serve-path"
     say "publication retirée"
@@ -169,18 +182,22 @@ cmd_install() {
         say "installation de $name ($(ip_of "$n"))"
         # --wait -1 : virt-install enchaîne lui-même la fin de l'installation
         # (arrêt) et le premier démarrage sur le disque.
+        # --check disk_size=off : le qcow2 est creux, virt-install refusait
+        # pourtant un disque plus grand que la place libre (vécu le
+        # 24/09/2026 avec 119 Go libres pour 250 Go annoncés).
         # cache=unsafe : sur le RAID1 SATA de node2, etcd attendait ses fsync
         # jusqu'à 800 ms et kube-vip perdait la VIP en boucle (constaté le
         # 22/09/2026). Un banc jetable accepte le risque (perte seulement si
         # node2 lui-même tombe).
-        on_node2 "sudo systemd-run --unit=harvlab-install-$name --collect \
+        on_node2 "sudo systemd-run --unit=$LAB-install-$name --collect \
             virt-install --name $name --memory $MEMORY_MB --vcpus $VCPUS \
             --cpu host-passthrough --machine q35 --osinfo detect=on,require=off \
             --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
             --disk path=$DIR/$name.qcow2,size=$DISK_GB,format=qcow2,bus=virtio,cache=unsafe \
-            --disk path=$DIR/$ISO,device=cdrom,bus=sata,readonly=on \
+            --check disk_size=off \
+            --disk path=$ISO_DIR/$ISO,device=cdrom,bus=sata,readonly=on \
             --network bridge=br0,model=virtio,mac=$(mac_of "$n") \
-            --install kernel=$DIR/linux,initrd=$DIR/initrd,kernel_args=\"$args\",kernel_args_overwrite=yes \
+            --install kernel=$ISO_DIR/linux,initrd=$ISO_DIR/initrd,kernel_args=\"$args\",kernel_args_overwrite=yes \
             --graphics vnc,listen=127.0.0.1 --serial pty \
             --noautoconsole --wait -1 >/dev/null"
     done
@@ -198,7 +215,7 @@ cmd_kubeconfig() {
 }
 
 cmd_status() {
-    on_node2 "sudo virsh list --all | grep -E 'harvlab|Name' || true"
+    on_node2 "sudo virsh list --all | grep -E '$LAB-n|Name' || true"
     if [[ -s "$KUBECONFIG_OUT" ]]; then
         kubectl --kubeconfig "$KUBECONFIG_OUT" get nodes -o wide 2>&1 | head -5 || true
     fi
@@ -206,21 +223,21 @@ cmd_status() {
 
 cmd_stop() {
     local n
-    for n in 3 2 1; do on_node2 "sudo virsh shutdown $(name_of "$n") >/dev/null 2>&1 || true"; done
+    for n in $(echo $NODES | tr ' ' '\n' | sort -rn); do on_node2 "sudo virsh shutdown $(name_of "$n") >/dev/null 2>&1 || true"; done
     say "arrêt demandé (virsh shutdown)"
 }
 
 cmd_start() {
     local n
-    for n in 1 2 3; do on_node2 "sudo virsh start $(name_of "$n") >/dev/null 2>&1 || true"; done
+    for n in $NODES; do on_node2 "sudo virsh start $(name_of "$n") >/dev/null 2>&1 || true"; done
     say "démarrage demandé"
 }
 
 cmd_destroy() {
-    read -r -p "Supprimer les VMs harvlab et leurs disques ? (tapez harvlab) " answer
-    [[ "$answer" == "harvlab" ]] || { say "abandon"; exit 1; }
+    read -r -p "Supprimer les VMs $LAB et leurs disques ? (tapez $LAB) " answer
+    [[ "$answer" == "$LAB" ]] || { say "abandon"; exit 1; }
     local n
-    for n in 1 2 3; do
+    for n in $NODES; do
         on_node2 "sudo virsh destroy $(name_of "$n") >/dev/null 2>&1 || true; \
             sudo virsh undefine $(name_of "$n") --nvram --remove-all-storage >/dev/null 2>&1 || true"
     done
