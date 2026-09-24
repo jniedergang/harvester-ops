@@ -108,7 +108,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-shutdown.sh" "$PREFIX/harvester-shutdown"
     ln -sf "$PREFIX/harvester-startup.sh"  "$PREFIX/harvester-startup"
     ln -sf "$PREFIX/harvester-status.sh"   "$PREFIX/harvester-status"
-    ok "Scripts installed: harvester-{shutdown,startup,status}"
+    ln -sf "$PREFIX/harvester-vm-transfer.py" "$PREFIX/harvester-vm-transfer"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer}"
 }
 
 # -----------------------------------------------------------------------------
