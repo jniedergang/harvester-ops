@@ -1,0 +1,210 @@
+{
+ "apiVersion": "kubevirt.io/v1",
+ "kind": "VirtualMachine",
+ "metadata": {
+  "annotations": {
+   "harvester-ops.io/shutdown-group": "default",
+   "harvester-ops.io/shutdown-group-priority": "100",
+   "harvester-ops.io/shutdown-priority": "30",
+   "harvester-ops.io/snapshot": "false",
+   "harvesterhci.io/mac-address": "{\"default\":\"ca:02:10:ff:0f:61\"}",
+   "harvesterhci.io/vmRunStrategy": "RerunOnFailure",
+   "harvesterhci.io/volumeClaimTemplates": "[{\"metadata\":{\"name\":\"leap156-disk-0-gfcec\",\"annotations\":{\"harvesterhci.io/imageId\":\"default/opensuse-leap-cloud\"}},\"spec\":{\"accessModes\":[\"ReadWriteMany\"],\"resources\":{\"requests\":{\"storage\":\"10Gi\"}},\"volumeMode\":\"Block\",\"storageClassName\":\"longhorn-opensuse-leap-cloud\"}}]",
+   "kubevirt.io/latest-observed-api-version": "v1",
+   "kubevirt.io/storage-observed-api-version": "v1",
+   "network.harvesterhci.io/ips": "[\"192.0.2.10\"]"
+  },
+  "creationTimestamp": "2026-05-04T08:21:40Z",
+  "finalizers": [
+   "wrangler.cattle.io/harvester-lb-vm-controller",
+   "wrangler.cattle.io/VMController.CleanupPVCAndSnapshot",
+   "kubevirt.io/virtualMachineControllerFinalize",
+   "wrangler.cattle.io/VMController.ReconcileBackendStorageClone"
+  ],
+  "generation": 38,
+  "labels": {
+   "harvesterhci.io/creator": "harvester"
+  },
+  "name": "leap156",
+  "namespace": "default",
+  "resourceVersion": "332900398",
+  "uid": "83db8fc2-2f7f-4e22-9214-67b14e2ac945"
+ },
+ "spec": {
+  "runStrategy": "Halted",
+  "template": {
+   "metadata": {
+    "annotations": {
+     "harvesterhci.io/sshNames": "[]",
+     "kubevirt.io/pci-topology-version": "v3"
+    },
+    "labels": {
+     "harvesterhci.io/vmName": "leap156"
+    }
+   },
+   "spec": {
+    "affinity": {
+     "nodeAffinity": {
+      "requiredDuringSchedulingIgnoredDuringExecution": {
+       "nodeSelectorTerms": [
+        {
+         "matchExpressions": [
+          {
+           "key": "network.harvesterhci.io/mgmt",
+           "operator": "In",
+           "values": [
+            "true"
+           ]
+          }
+         ]
+        }
+       ]
+      }
+     }
+    },
+    "architecture": "amd64",
+    "domain": {
+     "cpu": {
+      "cores": 1,
+      "maxSockets": 1,
+      "sockets": 1,
+      "threads": 1
+     },
+     "devices": {
+      "disks": [
+       {
+        "bootOrder": 2,
+        "cdrom": {
+         "bus": "sata"
+        },
+        "name": "disk-2"
+       },
+       {
+        "disk": {
+         "bus": "virtio"
+        },
+        "name": "cloudinitdisk"
+       },
+       {
+        "bootOrder": 1,
+        "disk": {
+         "bus": "virtio"
+        },
+        "name": "disk-0"
+       }
+      ],
+      "inputs": [
+       {
+        "bus": "usb",
+        "name": "tablet",
+        "type": "tablet"
+       }
+      ],
+      "interfaces": [
+       {
+        "bridge": {},
+        "macAddress": "ca:02:10:ff:0f:61",
+        "model": "virtio",
+        "name": "default"
+       }
+      ]
+     },
+     "features": {
+      "acpi": {
+       "enabled": true
+      }
+     },
+     "firmware": {
+      "serial": "050aeb91-1d15-47fd-8e63-bb8d6d11772d",
+      "uuid": "bc362399-ffe3-427f-a7a7-483c78cf6859"
+     },
+     "machine": {
+      "type": "q35"
+     },
+     "memory": {
+      "guest": "4Gi"
+     },
+     "resources": {
+      "limits": {
+       "cpu": "1",
+       "memory": "4Gi"
+      },
+      "requests": {
+       "cpu": "62m",
+       "memory": "2730Mi"
+      }
+     }
+    },
+    "evictionStrategy": "LiveMigrateIfPossible",
+    "hostname": "leap156",
+    "networks": [
+     {
+      "multus": {
+       "networkName": "default/production"
+      },
+      "name": "default"
+     }
+    ],
+    "terminationGracePeriodSeconds": 120,
+    "volumes": [
+     {
+      "cloudInitNoCloud": {
+       "networkDataSecretRef": {
+        "name": "leap156-hd4ry"
+       },
+       "secretRef": {
+        "name": "leap156-hd4ry"
+       }
+      },
+      "name": "cloudinitdisk"
+     },
+     {
+      "name": "disk-0",
+      "persistentVolumeClaim": {
+       "claimName": "leap156-disk-0-gfcec"
+      }
+     }
+    ]
+   }
+  }
+ },
+ "status": {
+  "conditions": [
+   {
+    "lastProbeTime": "2026-09-17T09:16:07Z",
+    "lastTransitionTime": "2026-09-17T09:16:07Z",
+    "message": "VMI does not exist",
+    "reason": "VMINotExists",
+    "status": "False",
+    "type": "Ready"
+   },
+   {
+    "lastProbeTime": null,
+    "lastTransitionTime": null,
+    "status": "True",
+    "type": "LiveMigratable"
+   },
+   {
+    "lastProbeTime": null,
+    "lastTransitionTime": null,
+    "status": "True",
+    "type": "StorageLiveMigratable"
+   }
+  ],
+  "desiredGeneration": 38,
+  "observedGeneration": 38,
+  "printableStatus": "Stopped",
+  "runStrategy": "Halted",
+  "volumeSnapshotStatuses": [
+   {
+    "enabled": false,
+    "name": "cloudinitdisk",
+    "reason": "Snapshot is not supported for this volumeSource type [cloudinitdisk]"
+   },
+   {
+    "enabled": true,
+    "name": "disk-0"
+   }
+  ]
+ }
+}
