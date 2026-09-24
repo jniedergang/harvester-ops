@@ -654,3 +654,48 @@ def test_target_starts_like_the_source_ran(env):
     run.run_backup(ctx)
     run.finalize(ctx)
     assert e.dst.objs[(run.K_VM, "default", "leap156")]["spec"]["runStrategy"] == "RerunOnFailure"
+
+
+def test_a_download_refused_before_its_first_byte_is_retried(env, tmp_path):
+    """Vécu sur harvlab2 : le proxy de l'API a répondu une fois
+    « ServiceUnavailable ... tls: unrecognized name », puis a servi le même
+    téléchargement une minute plus tard. Un tel accroc ne doit pas faire
+    échouer tout un transfert."""
+    e = env(shared=False)
+    orig = e.src.raw_stream
+    fails = {"n": 0}
+
+    def flaky(path):
+        if fails["n"] < 2:
+            fails["n"] += 1
+            raise RuntimeError("ServiceUnavailable: tls: unrecognized name")
+        yield from orig(path)
+    e.src.raw_stream = flaky
+    ctx = e.ctx(request(kind="export"))
+    run.run_export(ctx, vt.ArchiveWriter(tmp_path / "a.hvx"), "harv-rep1")
+    assert vt.ArchiveReader(tmp_path / "a.hvx").verify() == []
+    assert any("retrying" in ev[2] for ev in e.events)
+
+
+def test_a_download_that_breaks_midway_is_not_silently_retried(env, tmp_path):
+    e = env(shared=False)
+
+    def broken(path):
+        yield b"abc"
+        raise OSError("connection reset")
+    e.src.raw_stream = broken
+    ctx = e.ctx(request(kind="export"))
+    with pytest.raises(OSError):
+        run.run_export(ctx, vt.ArchiveWriter(tmp_path / "a.hvx"), "harv-rep1")
+
+
+def test_a_download_refused_three_times_fails(env, tmp_path):
+    e = env(shared=False)
+
+    def refused(path):
+        raise RuntimeError("ServiceUnavailable")
+        yield b""                                  # noqa: unreachable
+    e.src.raw_stream = refused
+    ctx = e.ctx(request(kind="export"))
+    with pytest.raises(RuntimeError):
+        run.run_export(ctx, vt.ArchiveWriter(tmp_path / "a.hvx"), "harv-rep1")

@@ -379,8 +379,28 @@ def export_images(ctx, inv, running, export_class):
     return exported
 
 
-def image_stream(ctx, ns, img):
-    return ctx.src.raw_stream(IMAGE_DOWNLOAD.format(ns=ns, name=img))
+def image_stream(ctx, ns, img, attempts=3):
+    """Le téléchargement d'une image, repris s'il est refusé AVANT son
+    premier octet. Vécu sur harvlab2 : le proxy de l'API a répondu une fois
+    « ServiceUnavailable ... tls: unrecognized name », puis a servi le même
+    téléchargement une minute plus tard. Une coupure en cours de route, elle,
+    remonte : reprendre au milieu donnerait un disque faux."""
+    path = IMAGE_DOWNLOAD.format(ns=ns, name=img)
+    for attempt in range(1, attempts + 1):
+        it = iter(ctx.src.raw_stream(path))
+        try:
+            first = next(it)
+        except StopIteration:
+            return
+        except Exception as e:                  # noqa: BLE001
+            if attempt == attempts:
+                raise
+            ctx.emit("download", "running", f"{img}: download refused ({e}), retrying")
+            ctx.sleep(15 * attempt)
+            continue
+        yield first
+        yield from it
+        return
 
 
 def delete_export_images(ctx, exported):
