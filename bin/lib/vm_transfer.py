@@ -502,7 +502,7 @@ def check(src, dst, req):
         ns = req.get("namespace")
         if ns not in (dst.get("namespaces") or []):
             out.append(_finding("namespace-missing",
-                                "warn" if req.get("create_namespace") else "block",
+                                "ok" if req.get("create_namespace") else "block",
                                 namespace=ns, create=bool(req.get("create_namespace"))))
         if req.get("name") in (dst.get("vm_names") or []):
             out.append(_finding("vm-name-taken", "block", name=req.get("name"), namespace=ns))

@@ -428,7 +428,7 @@ def test_namespace_missing_blocks_unless_creation_is_accepted():
     f = vt.check(src_facts(), dst_facts(), req(namespace="newns"))
     assert "namespace-missing" in codes(f, "block")
     f = vt.check(src_facts(), dst_facts(), req(namespace="newns", create_namespace=True))
-    assert "namespace-missing" in codes(f, "warn") and not vt.blocking(f)
+    assert "namespace-missing" in codes(f, "ok") and not vt.blocking(f)
 
 
 def test_a_taken_name_blocks():

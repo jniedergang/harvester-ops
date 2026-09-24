@@ -39,7 +39,8 @@ const VMTransfer = (() => {
     'target-unreachable': (v) => tr('transfer.finding.target-unreachable', v),
     'kubevirt-missing': (v) => tr('transfer.finding.kubevirt-missing', v),
     'version-older': (v) => tr('transfer.finding.version-older', v),
-    'namespace-missing': (v) => tr('transfer.finding.namespace-missing', v),
+    'namespace-missing': (v) => (v.create ? tr('transfer.finding.namespace-created', v)
+                                          : tr('transfer.finding.namespace-missing', v)),
     'vm-name-taken': (v) => tr('transfer.finding.vm-name-taken', v),
     'network-unmapped': (v) => tr('transfer.finding.network-unmapped', v),
     'storage-class-unmapped': (v) => tr('transfer.finding.storage-class-unmapped', v),
