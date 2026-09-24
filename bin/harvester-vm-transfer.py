@@ -342,8 +342,17 @@ def build_request(args, kind, src, dst):
         vm_ns, vm_name = (src.get("namespace") or "default"), (src.get("name") or "")
     else:
         vm_ns, _, vm_name = args.vm.partition("/")
-    engine, _ = vt.choose_engine(src, dst, {"kind": kind, "engine": getattr(args, "engine", None)})
-    defaults = vt.default_mappings(inv, dst or {}, engine) if dst else {"networks": {}, "storage_classes": {}}
+    user_nets = _pairs(getattr(args, "map_net", None))
+    user_scs = _pairs(getattr(args, "map_sc", None))
+    if dst:
+        # le moteur dépend des correspondances (un réseau renommé impose la
+        # copie par la console), et les classes proposées dépendent du moteur
+        nets = dict(vt.default_mappings(inv, dst, "backup")["networks"], **user_nets)
+        engine, _ = vt.choose_engine(src, dst, {"kind": kind, "networks": nets,
+                                               "engine": getattr(args, "engine", None)})
+        defaults = vt.default_mappings(inv, dst, engine)
+    else:
+        defaults = {"networks": {}, "storage_classes": {}}
     running = inv.get("running")
     source = getattr(args, "source", None) or ("running" if (kind == "export" and running) else "stopped")
     req = {
@@ -354,8 +363,8 @@ def build_request(args, kind, src, dst):
         "source": source,
         "target": getattr(args, "target", None) or "started",
         "keep_mac": not getattr(args, "new_mac", False),
-        "networks": dict(defaults["networks"], **_pairs(getattr(args, "map_net", None))),
-        "storage_classes": dict(defaults["storage_classes"], **_pairs(getattr(args, "map_sc", None))),
+        "networks": dict(defaults["networks"], **user_nets),
+        "storage_classes": dict(defaults["storage_classes"], **user_scs),
         "create_namespace": bool(getattr(args, "create_namespace", False)),
         "keep_backups": bool(getattr(args, "keep_backups", False)),
         "run_strategy": inv.get("run_strategy"),

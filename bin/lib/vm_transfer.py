@@ -456,6 +456,17 @@ def choose_engine(src, dst, req):
         return "file", "target-no-target"
     if tuple(s) != tuple(d):
         return "file", "different-targets"
+    # une restauration Harvester reprend réseaux et classes d'origine, et son
+    # webhook refuse un réseau absent de la cible (relevé sur harvlab2) : ce
+    # moteur ne sait ni renommer un réseau ni changer une classe
+    nets = req.get("networks") or {}
+    for n in src["inventory"]["networks"]:
+        if nets.get(n, n) != n:
+            return "file", "network-renamed"
+    classes = dst.get("storage_classes") or {}
+    for disk in src["inventory"]["disks"]:
+        if not disk.get("image") and disk["storage_class"] not in classes:
+            return "file", "class-missing"
     return "backup", "shared-target"
 
 
@@ -518,10 +529,6 @@ def check(src, dst, req):
                 if target_sc not in classes:
                     continue
             else:
-                if sc not in classes:
-                    out.append(_finding("storage-class-missing-backup", "block",
-                                        storage_class=sc))
-                    continue
                 target_sc = sc
             needed[target_sc] = needed.get(target_sc, 0) + d["size"]
         for sc, n in sorted(needed.items()):

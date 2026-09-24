@@ -158,6 +158,8 @@ class FakeCluster:
     def patch(self, kind, ns, name, patch):
         self.calls.append(("patch", kind, ns, name, json.dumps(patch, sort_keys=True)))
         key = (kind, ns, name)
+        if kind == run.K_LH_TARGET:
+            return
         if kind == run.K_SETTING:
             ann = ((patch.get("metadata") or {}).get("annotations") or {})
             if "harvesterhci.io/hash" in ann and ann["harvesterhci.io/hash"] is None:
@@ -481,6 +483,9 @@ def test_sync_is_nudged_until_the_backup_shows_up(env):
     nudges = [c for c in e.dst.calls if c[0] == "patch" and c[1] == run.K_SETTING]
     assert len(nudges) >= 2
     assert all('"harvesterhci.io/hash": null' in n[4] for n in nudges)
+    # et Longhorn relit sa cible tout de suite, au lieu de ses 5 minutes
+    lh = [c for c in e.dst.calls if c[0] == "patch" and c[1] == run.K_LH_TARGET]
+    assert lh and "syncRequestedAt" in lh[0][4] and lh[0][2] == "longhorn-system"
     assert (run.K_VM, "default", "leap156") in e.dst.objs
 
 

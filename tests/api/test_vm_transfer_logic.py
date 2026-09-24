@@ -449,10 +449,23 @@ def test_file_engine_needs_a_mapped_class_that_exists():
     assert "storage-class-unmapped" in codes(f, "block")
 
 
-def test_backup_engine_cannot_rename_a_plain_class():
+def test_a_missing_plain_class_falls_back_to_the_file_engine():
+    """Une restauration Harvester reprend la classe d'origine telle quelle :
+    si elle manque sur la cible, seule la copie par la console convient."""
     inv = vt.vm_inventory(leap156(), {"leap156-disk-0-gfcec": pvc("leap156-disk-0-gfcec", sc="gold", image=None)})
-    f = vt.check(src_facts(inventory=inv), dst_facts(), req())
-    assert "storage-class-missing-backup" in codes(f, "block")
+    assert vt.choose_engine(src_facts(inventory=inv), dst_facts(), req()) == ("file", "class-missing")
+
+
+def test_a_renamed_network_falls_back_to_the_file_engine():
+    """Relevé sur harvlab2 : le webhook de Harvester refuse une restauration
+    dont un réseau d'origine n'existe pas sur la cible (« failed to get
+    network attachment definition »). Remapper après coup est donc
+    impossible avec ce moteur."""
+    r = req(networks={"default/production": "lab/vlan10"})
+    assert vt.choose_engine(src_facts(), dst_facts(networks=["lab/vlan10"]), r) == \
+        ("file", "network-renamed")
+    f = vt.check(src_facts(), dst_facts(networks=["lab/vlan10"]), r)
+    assert [x for x in f if x["code"] == "engine"][0]["facts"]["engine"] == "file"
 
 
 def test_capacity_short_blocks():

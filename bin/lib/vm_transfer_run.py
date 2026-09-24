@@ -39,6 +39,7 @@ K_DV = "datavolumes.cdi.kubevirt.io"
 K_PVC = "persistentvolumeclaims"
 K_SECRET = "secrets"
 K_NS = "namespaces"
+K_LH_TARGET = "backuptargets.longhorn.io"
 
 TRANSFERRED_FROM = "harvester-ops.io/transferred-from"
 # Harvester ne relit sa cible de sauvegarde que si cette annotation du
@@ -253,6 +254,15 @@ def wait_synced(ctx, ns, name):
             return "synced, not ready yet"
         now = ctx.now()
         if last[0] is None or now - last[0] >= ctx.timeouts["sync_nudge"]:
+            # Longhorn d'abord : Harvester saute une sauvegarde dont Longhorn
+            # n'a pas encore vu les volumes (« longhorn backup is not found »),
+            # et Longhorn ne relit sa cible que toutes les 5 minutes
+            try:
+                ctx.dst.patch(K_LH_TARGET, "longhorn-system", "default", {"spec": {
+                    "syncRequestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                     time.gmtime(ctx.now()))}})
+            except Exception:                   # noqa: BLE001
+                pass                            # une version sans ce champ : on attend
             ctx.dst.patch(K_SETTING, None, "backup-target",
                           {"metadata": {"annotations": {HASH_ANNOTATION: None}}})
             last[0] = now
