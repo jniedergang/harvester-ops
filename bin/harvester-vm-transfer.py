@@ -258,7 +258,8 @@ def collect_target(kube, namespace, name, cluster=""):
         kube.run("get", "--raw", "/readyz", timeout=15)
     except (KubeError, subprocess.SubprocessError):
         return {"cluster": cluster, "reachable": False}
-    crds = {c["metadata"]["name"] for c in kube.list("customresourcedefinitions")}
+    crd_objs = {c["metadata"]["name"]: c for c in kube.list("customresourcedefinitions")}
+    crds = set(crd_objs)
     cdi_ok = False
     if "datavolumes.cdi.kubevirt.io" in crds:
         cdis = kube.list("cdis.cdi.kubevirt.io")
@@ -269,11 +270,19 @@ def collect_target(kube, namespace, name, cluster=""):
     nodes, over, minimal = _longhorn_numbers(kube)
     room = longhorn_room.storage_room(nodes, scs, over, minimal)
     classes = {}
+    nodes_ok = room["schedulable_nodes"]
     for sc in scs:
         n = sc["metadata"]["name"]
         if n in room["classes"]:
-            classes[n] = dict(room["classes"][n],
-                              image=bool((sc.get("parameters") or {}).get("backingImage")))
+            info = dict(room["classes"][n], nodes=nodes_ok,
+                        image=bool((sc.get("parameters") or {}).get("backingImage")))
+            if info["replicas"] > nodes_ok > 0:
+                # la place d'un volume dégradé : autant de répliques que de nœuds
+                fake = dict(sc, parameters=dict(sc.get("parameters") or {},
+                                                numberOfReplicas=str(nodes_ok)))
+                info["degraded_allocatable"] = longhorn_room.storage_room(
+                    nodes, [fake], over, minimal)["classes"][n]["allocatable"]
+            classes[n] = info
     nets = [f"{n['metadata']['namespace']}/{n['metadata']['name']}"
             for n in kube.list("network-attachment-definitions.k8s.cni.cncf.io")]
     vms = kube.list(run.K_VM)
@@ -283,6 +292,8 @@ def collect_target(kube, namespace, name, cluster=""):
             macs[m] = f"{v['metadata'].get('namespace')}/{v['metadata']['name']}"
     return {"cluster": cluster, "reachable": True,
             "kubevirt": "virtualmachines.kubevirt.io" in crds, "cdi": cdi_ok,
+            "restore_halt": vt.restore_supports_halt(
+                crd_objs.get("virtualmachinerestores.harvesterhci.io")),
             "version": version,
             "namespaces": [n["metadata"]["name"] for n in kube.list(run.K_NS)],
             "vm_names": [v["metadata"]["name"] for v in vms
@@ -348,6 +359,7 @@ def build_request(args, kind, src, dst):
         "create_namespace": bool(getattr(args, "create_namespace", False)),
         "keep_backups": bool(getattr(args, "keep_backups", False)),
         "run_strategy": inv.get("run_strategy"),
+        "restore_halt": bool((dst or {}).get("restore_halt")),
     }
     if getattr(args, "engine", None):
         req["engine"] = args.engine

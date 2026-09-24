@@ -68,9 +68,10 @@ class Store:
 
 
 class FakeCluster:
-    def __init__(self, name, clock, store=None, auto_sync=True, fail=None):
+    def __init__(self, name, clock, store=None, auto_sync=True, fail=None, no_halt=False):
         self.name, self.clock, self.store = name, clock, store
         self.auto_sync = auto_sync
+        self.no_halt = no_halt          # Harvester 1.8 : pas de haltAfterRestore
         self.resync_at = None
         self.fail = fail or {}
         self.objs = {}
@@ -92,13 +93,29 @@ class FakeCluster:
         for _, fn in due:
             fn()
         if self.store is not None:
-            for (ns, name), (ready_at, obj) in list(self.store.backups.items()):
+            # comme Harvester (relevé sur harvlab2) : une synchronisation
+            # ramène d'abord les images manquantes, et saute la sauvegarde
+            # tant que la classe de stockage de l'image n'existe pas ; il
+            # faut un passage suivant pour la voir
+            one_shot = self.resync_at is not None and now >= self.resync_at
+            if one_shot:
+                self.resync_at = None
+            for (ns, name), (ready_at, obj, needs) in list(self.store.backups.items()):
                 if (run.K_BACKUP, ns, name) in self.objs:
                     continue
-                synced = (self.auto_sync and now >= ready_at + 20) or \
-                         (self.resync_at is not None and now >= self.resync_at)
-                if synced and now >= ready_at:
-                    self.objs[(run.K_BACKUP, ns, name)] = copy.deepcopy(obj)
+                if not ((self.auto_sync and now >= ready_at + 20) or one_shot):
+                    continue
+                missing = [sc for sc in needs if ("storageclasses", None, sc) not in self.objs]
+                if missing:
+                    for sc in missing:
+                        img = ("virtualmachineimages.harvesterhci.io", "default", f"img-{sc}")
+                        if img not in self.objs:
+                            self.objs[img] = {"metadata": {"name": f"img-{sc}", "namespace": "default"},
+                                              "spec": {"sourceType": "restore"}}
+                            self.at(30, lambda sc=sc: self.objs.__setitem__(
+                                ("storageclasses", None, sc), {"metadata": {"name": sc}}))
+                    continue
+                self.objs[(run.K_BACKUP, ns, name)] = copy.deepcopy(obj)
 
     def labelled(self):
         return sorted(k for k, o in self.objs.items()
@@ -124,6 +141,8 @@ class FakeCluster:
             raise RuntimeError(f"AlreadyExists {key}")
         if self.fail.get(("create", kind)):
             raise RuntimeError(self.fail[("create", kind)])
+        if self.no_halt and kind == run.K_RESTORE and "haltAfterRestore" in obj["spec"]:
+            raise RuntimeError('strict decoding error: unknown field "spec.haltAfterRestore"')
         self.calls.append(("create", kind, md.get("namespace"), md["name"]))
         self.objs[key] = copy.deepcopy(obj)
         getattr(self, "_on_" + kind.split(".")[0], lambda o: None)(self.objs[key])
@@ -140,7 +159,9 @@ class FakeCluster:
         self.calls.append(("patch", kind, ns, name, json.dumps(patch, sort_keys=True)))
         key = (kind, ns, name)
         if kind == run.K_SETTING:
-            self.resync_at = self.clock.now() + 5
+            ann = ((patch.get("metadata") or {}).get("annotations") or {})
+            if "harvesterhci.io/hash" in ann and ann["harvesterhci.io/hash"] is None:
+                self.resync_at = self.clock.now() + 5
             return
         if key not in self.objs:
             raise RuntimeError(f"NotFound {key}")
@@ -198,13 +219,20 @@ class FakeCluster:
             if o is None:
                 return
             o["status"] = {"readyToUse": True, "progress": 100, "source": vm}
+            needs = set()
+            for v in (vm or {}).get("spec", {}).get("template", {}).get("spec", {}).get("volumes", []):
+                claim = (v.get("persistentVolumeClaim") or {}).get("claimName")
+                pvc = self.objs.get((run.K_PVC, ns, claim)) if claim else None
+                if pvc and (pvc["metadata"].get("annotations") or {}).get("harvesterhci.io/imageId"):
+                    needs.add(pvc["spec"]["storageClassName"])
             if self.store is not None:
-                self.store.backups[(ns, name)] = (self.clock.now(), copy.deepcopy(o))
+                self.store.backups[(ns, name)] = (self.clock.now(), copy.deepcopy(o), needs)
         self.at(30, ready)
 
     def _on_virtualmachinerestores(self, obj):
         ns, rname = obj["metadata"]["namespace"], obj["metadata"]["name"]
         spec = obj["spec"]
+        halt = spec.get("haltAfterRestore", False)
         backup = self.objs[(run.K_BACKUP, spec["virtualMachineBackupNamespace"],
                             spec["virtualMachineBackupName"])]
         src_vm = backup["status"]["source"]
@@ -214,7 +242,11 @@ class FakeCluster:
             vm = copy.deepcopy(src_vm)
             vm["metadata"] = {"name": name, "namespace": ns, "resourceVersion": "7",
                               "labels": dict(src_vm["metadata"].get("labels") or {})}
-            vm["spec"]["runStrategy"] = "Halted"
+            if halt:
+                vm["spec"]["runStrategy"] = "Halted"
+            elif vm["spec"].get("runStrategy") != "Halted":
+                self.objs[(run.K_VMI, ns, name)] = {"metadata": {"name": name, "namespace": ns},
+                                                    "status": {"phase": "Running"}}
             pvc = f"restore-{spec['virtualMachineBackupName']}-uid-disk-0"
             for v in vm["spec"]["template"]["spec"]["volumes"]:
                 if "persistentVolumeClaim" in v:
@@ -312,11 +344,13 @@ def request(**kw):
 
 
 class Env:
-    def __init__(self, shared=True, auto_sync=True, running=True, fail_dst=None, fail_src=None):
+    def __init__(self, shared=True, auto_sync=True, running=True, fail_dst=None, fail_src=None,
+                 no_halt=False):
         self.clock = Clock()
         store = Store() if shared else None
         self.src = FakeCluster("harvlab", self.clock, store, fail=fail_src)
-        self.dst = FakeCluster("harvlab2", self.clock, store, auto_sync=auto_sync, fail=fail_dst)
+        self.dst = FakeCluster("harvlab2", self.clock, store, auto_sync=auto_sync, fail=fail_dst,
+                               no_halt=no_halt)
         seed_source(self.src, running)
         seed_target(self.dst)
         self.events = []
@@ -436,12 +470,45 @@ def test_restore_keeps_mac_only_when_asked(env):
         assert m["spec"]["haltAfterRestore"] is True
 
 
-def test_sync_is_nudged_when_the_backup_does_not_show_up(env):
+def test_sync_is_nudged_until_the_backup_shows_up(env):
+    """Relevé sur harvlab2 (refreshIntervalInSeconds à 0) : Harvester ne
+    relit la cible que si l'annotation `harvesterhci.io/hash` du réglage
+    manque. Une autre annotation ne déclenche rien. Et le premier passage ne
+    fait que ramener l'image : il en faut un second pour la sauvegarde."""
     e = env(auto_sync=False)
     ctx = e.ctx(request())
     run.run_backup(ctx)
     nudges = [c for c in e.dst.calls if c[0] == "patch" and c[1] == run.K_SETTING]
-    assert len(nudges) == 1 and run.RESYNC_ANNOTATION in nudges[0][4]
+    assert len(nudges) >= 2
+    assert all('"harvesterhci.io/hash": null' in n[4] for n in nudges)
+    assert (run.K_VM, "default", "leap156") in e.dst.objs
+
+
+def test_restore_on_a_target_without_halt_after_restore(env):
+    """Relevé sur harvlab2 (Harvester 1.8.2) : `haltAfterRestore` n'existe
+    pas (« strict decoding error: unknown field »), et la VM restaurée
+    démarre d'elle-même. On l'arrête avant d'appliquer les correspondances."""
+    e = env(no_halt=True)
+    ctx = e.ctx(request(restore_halt=False, target="stopped"))
+    run.run_backup(ctx)
+    run.finalize(ctx)
+    sent = [c for c in e.dst.calls if c[:2] == ("create", run.K_RESTORE)]
+    assert sent
+    assert (run.K_VMI, "default", "leap156") not in e.dst.objs
+    vm = e.dst.objs[(run.K_VM, "default", "leap156")]
+    assert vm["spec"]["runStrategy"] == "Halted"
+    assert vm["spec"]["template"]["spec"]["networks"][0]["multus"]["networkName"] == "lab/vlan10"
+
+
+def test_rollback_removes_the_images_harvester_brought_for_the_transfer(env):
+    e = env(fail_dst={"start": True})
+    ctx = e.ctx(request())
+    run.run_backup(ctx)
+    assert [k for k in e.dst.objs if k[0] == "virtualmachineimages.harvesterhci.io"]
+    with pytest.raises(run.TransferError):
+        run.finalize(ctx)
+    run.rollback(ctx)
+    assert not [k for k in e.dst.objs if k[0] == "virtualmachineimages.harvesterhci.io"]
 
 
 def test_sync_that_never_comes_fails_and_rolls_back(env):

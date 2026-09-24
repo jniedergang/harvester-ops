@@ -41,7 +41,11 @@ K_SECRET = "secrets"
 K_NS = "namespaces"
 
 TRANSFERRED_FROM = "harvester-ops.io/transferred-from"
-RESYNC_ANNOTATION = "harvester-ops.io/resync"
+# Harvester ne relit sa cible de sauvegarde que si cette annotation du
+# réglage `backup-target` manque (ou si la valeur change) ; avec
+# refreshIntervalInSeconds à 0, jamais d'elle-même. La retirer est sans
+# risque : il la réécrit après la relecture.
+HASH_ANNOTATION = "harvesterhci.io/hash"
 
 IMAGE_DOWNLOAD = ("/api/v1/namespaces/harvester-system/services/https:harvester:8443/"
                   "proxy/v1/harvester/harvesterhci.io.virtualmachineimages/{ns}/{name}/download")
@@ -49,7 +53,9 @@ IMAGE_DOWNLOAD = ("/api/v1/namespaces/harvester-system/services/https:harvester:
 # Délais (secondes). Généreux : une sauvegarde ou une restauration de
 # plusieurs centaines de gigaoctets se compte en heures.
 TIMEOUTS = {
-    "stop": 600, "start": 900, "backup": 6 * 3600, "sync": 900, "sync_nudge": 180,
+    # la synchronisation ramène d'abord les images, qui peuvent peser
+    # plusieurs gigaoctets : le délai est large, la relance fréquente
+    "stop": 600, "start": 900, "backup": 6 * 3600, "sync": 2 * 3600, "sync_nudge": 60,
     "restore": 6 * 3600, "export": 6 * 3600, "import": 12 * 3600,
     "first_hit": 300, "delete": 600,
 }
@@ -223,14 +229,21 @@ def make_backup(ctx, suffix):
     return ns, name
 
 
+def _images(kube):
+    return {(i["metadata"].get("namespace"), i["metadata"]["name"]): i
+            for i in kube.list(K_IMAGE)}
+
+
 def wait_synced(ctx, ns, name):
     """La sauvegarde doit apparaître sur la cible, par la synchronisation des
-    métadonnées de Harvester. Si elle tarde, on la relance en touchant le
-    réglage `backup-target` de la cible (une annotation : la valeur, elle,
-    ne change pas)."""
+    métadonnées de Harvester. Relevé sur harvlab2 : la relecture n'a lieu
+    que si l'annotation `harvesterhci.io/hash` manque, et son premier passage
+    ne fait que ramener les images dont la VM est née ; la sauvegarde n'est
+    visible qu'à un passage suivant, une fois leur classe de stockage créée.
+    On relance donc à intervalle régulier jusqu'à la voir."""
     ctx.emit("sync", "running", f"waiting for {name} on {ctx.target_cluster or 'the target'}")
-    start = ctx.now()
-    nudged = [False]
+    before = set(_images(ctx.dst))
+    last = [None]
 
     def synced():
         b = ctx.dst.get(K_BACKUP, ns, name)
@@ -238,14 +251,25 @@ def wait_synced(ctx, ns, name):
             if (b.get("status") or {}).get("readyToUse"):
                 return True
             return "synced, not ready yet"
-        if not nudged[0] and ctx.now() - start >= ctx.timeouts["sync_nudge"]:
-            ctx.dst.patch(K_SETTING, None, "backup-target", {"metadata": {"annotations": {
-                RESYNC_ANNOTATION: str(int(ctx.now()))}}})
-            nudged[0] = True
-            return "resync requested"
-        return "not synced yet"
+        now = ctx.now()
+        if last[0] is None or now - last[0] >= ctx.timeouts["sync_nudge"]:
+            ctx.dst.patch(K_SETTING, None, "backup-target",
+                          {"metadata": {"annotations": {HASH_ANNOTATION: None}}})
+            last[0] = now
+        restoring = [f"{k[1]}" for k, i in _images(ctx.dst).items()
+                     if k not in before and (i.get("spec") or {}).get("sourceType") == "restore"]
+        return ("images being restored: " + ", ".join(sorted(restoring))) if restoring \
+            else "not synced yet"
 
-    wait_for(ctx, "sync", f"backup {name} on the target", synced, ctx.timeouts["sync"])
+    try:
+        wait_for(ctx, "sync", f"backup {name} on the target", synced, ctx.timeouts["sync"],
+                 every=10)
+    finally:
+        # les images que Harvester a ramenées pour ce transfert : à défaire
+        # avec lui s'il échoue
+        for k, i in _images(ctx.dst).items():
+            if k not in before and (i.get("spec") or {}).get("sourceType") == "restore":
+                ctx.record("dst", K_IMAGE, k[0], k[1])
     # l'objet synchronisé est à nous aussi : à nettoyer comme l'original
     ctx.record("dst", K_BACKUP, ns, name)
     ctx.emit("sync", "done", f"{name} visible on the target")
@@ -255,7 +279,8 @@ def restore_on_target(ctx, backup_ns, backup_name):
     req = ctx.req
     ns, name = req["namespace"], req["name"]
     keep_mac = _keep_mac(req)
-    m = vt.restore_manifest(backup_ns, backup_name, name, ns, keep_mac, ctx.tid)
+    halt = req.get("restore_halt", True) is not False
+    m = vt.restore_manifest(backup_ns, backup_name, name, ns, keep_mac, ctx.tid, halt=halt)
     rname = m["metadata"]["name"]
     ctx.emit("restore", "running", f"restoring {ns}/{name}")
     ctx.dst.create(m)
@@ -274,6 +299,11 @@ def restore_on_target(ctx, backup_ns, backup_name):
         return f"{st.get('progress', 0)}%"
 
     wait_for(ctx, "restore", f"restore of {ns}/{name}", complete, ctx.timeouts["restore"])
+    if not halt:
+        # Harvester 1.8 ne connaît pas haltAfterRestore : la VM restaurée
+        # démarre d'elle-même, avec les réseaux d'origine. On l'arrête avant
+        # d'appliquer les correspondances.
+        stop_vm(ctx, ctx.dst, ns, name, sid="restore")
     ctx.emit("restore", "done", f"{ns}/{name} restored")
 
 
@@ -641,7 +671,7 @@ def cleanup(ctx):
         "labels": {vt.TRANSFER_LABEL: None},
         "annotations": {TRANSFERRED_FROM: f"{ctx.source_cluster}/{req['vm_ns']}/{req['vm_name']}"}}})
     for side, kind, kns, kname in list(ctx.created):
-        if kind != K_VM:
+        if kind not in (K_VM, K_IMAGE):
             _unlabel(ctx.kube(side), kind, kns, kname)
     ctx.created.clear()
     ctx.emit("cleanup", "done", "transfer resources removed")

@@ -637,3 +637,40 @@ def test_macs_already_used_on_the_target_block_when_kept():
     # une copie qui laisse la source en marche prend toujours de nouvelles adresses
     assert "mac-in-use" not in codes(vt.check(src_facts(), dst_facts(macs=taken),
                                               req(keep_mac=True, source="running")))
+
+
+def test_more_replicas_than_nodes_warns_instead_of_blocking():
+    """Relevé sur harvlab2 (un nœud) : la classe par défaut demande 3
+    répliques. Longhorn crée pourtant le volume, dégradé, avec une seule
+    réplique : c'est le quotidien d'un site mononœud, pas un manque de
+    place. La place se juge alors sur les nœuds réels."""
+    classes = {"harvester-longhorn": {"replicas": 3, "allocatable": 0, "image": False,
+                                      "nodes": 1, "degraded_allocatable": 400 * GIB}}
+    f = vt.check(src_facts(backup_target=None), dst_facts(storage_classes=classes), req())
+    assert "capacity-short" not in codes(f)
+    deg = [x for x in f if x["code"] == "replicas-degraded"]
+    assert deg and deg[0]["level"] == "warn"
+    assert deg[0]["facts"] == {"storage_class": "harvester-longhorn", "replicas": 3, "nodes": 1}
+    # et la place réelle reste contrôlée
+    classes["harvester-longhorn"]["degraded_allocatable"] = GIB
+    f = vt.check(src_facts(backup_target=None), dst_facts(storage_classes=classes), req())
+    assert "capacity-short" in codes(f, "block")
+
+
+def crd(fields):
+    return {"metadata": {"name": "virtualmachinerestores.harvesterhci.io"},
+            "spec": {"versions": [{"name": "v1beta1", "schema": {"openAPIV3Schema": {
+                "properties": {"spec": {"properties": {f: {} for f in fields}}}}}}]}}
+
+
+def test_restore_supports_halt_reads_the_crd_schema():
+    """harv1 (1.9.0) connaît haltAfterRestore, harvlab2 (1.8.2) le refuse."""
+    assert vt.restore_supports_halt(crd(["newVM", "haltAfterRestore"])) is True
+    assert vt.restore_supports_halt(crd(["newVM", "keepMacAddress"])) is False
+    assert vt.restore_supports_halt(None) is False
+    assert vt.restore_supports_halt({"spec": {}}) is False
+
+
+def test_restore_manifest_without_halt():
+    m = vt.restore_manifest("default", "b", "x", "lab", False, "t1", halt=False)
+    assert "haltAfterRestore" not in m["spec"] and m["spec"]["newVM"] is True

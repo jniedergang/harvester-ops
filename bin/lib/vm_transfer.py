@@ -340,6 +340,17 @@ def _meta(name, namespace, transfer_id, annotations=None):
     return md
 
 
+def restore_supports_halt(crd):
+    """La CRD de restauration de la cible connaît-elle `haltAfterRestore` ?
+    Lu dans son schéma : la 1.8 le refuse en décodage strict."""
+    for ver in ((crd or {}).get("spec") or {}).get("versions") or []:
+        props = ((((ver.get("schema") or {}).get("openAPIV3Schema") or {})
+                  .get("properties") or {}).get("spec") or {}).get("properties") or {}
+        if "haltAfterRestore" in props:
+            return True
+    return False
+
+
 def backup_manifest(namespace, vm_name, name, transfer_id):
     return {"apiVersion": "harvesterhci.io/v1beta1", "kind": "VirtualMachineBackup",
             "metadata": _meta(name, namespace, transfer_id),
@@ -348,18 +359,24 @@ def backup_manifest(namespace, vm_name, name, transfer_id):
                                 "name": vm_name}}}
 
 
-def restore_manifest(backup_ns, backup_name, name, namespace, keep_mac, transfer_id):
-    return {"apiVersion": "harvesterhci.io/v1beta1", "kind": "VirtualMachineRestore",
-            "metadata": _meta(f"{name}-{transfer_id}", namespace, transfer_id),
+def restore_manifest(backup_ns, backup_name, name, namespace, keep_mac, transfer_id,
+                     halt=True):
+    """`halt` : la cible connaît `haltAfterRestore` (Harvester 1.9 ; la 1.8
+    le refuse, « unknown field », relevé sur harvlab2)."""
+    spec = {"newVM": True,
             # retain : supprimer l'objet de restauration après coup ne doit
             # pas emporter la VM restaurée (même réglage que les
             # restaurations d'instantané de la console)
-            "spec": {"newVM": True, "haltAfterRestore": True, "deletionPolicy": "retain",
-                     "keepMacAddress": bool(keep_mac),
-                     "target": {"apiGroup": "kubevirt.io", "kind": "VirtualMachine",
-                                "name": name},
-                     "virtualMachineBackupNamespace": backup_ns,
-                     "virtualMachineBackupName": backup_name}}
+            "deletionPolicy": "retain",
+            "keepMacAddress": bool(keep_mac),
+            "target": {"apiGroup": "kubevirt.io", "kind": "VirtualMachine", "name": name},
+            "virtualMachineBackupNamespace": backup_ns,
+            "virtualMachineBackupName": backup_name}
+    if halt:
+        spec["haltAfterRestore"] = True
+    return {"apiVersion": "harvesterhci.io/v1beta1", "kind": "VirtualMachineRestore",
+            "metadata": _meta(f"{name}-{transfer_id}", namespace, transfer_id),
+            "spec": spec}
 
 
 def export_image_manifest(namespace, pvc, image_name, transfer_id, target_sc):
@@ -508,7 +525,14 @@ def check(src, dst, req):
                 target_sc = sc
             needed[target_sc] = needed.get(target_sc, 0) + d["size"]
         for sc, n in sorted(needed.items()):
-            alloc = int((classes.get(sc) or {}).get("allocatable") or 0)
+            info = classes.get(sc) or {}
+            alloc = int(info.get("allocatable") or 0)
+            # plus de répliques demandées que de nœuds : Longhorn crée le
+            # volume quand même, dégradé (le quotidien d'un site mononœud)
+            if not alloc and info.get("degraded_allocatable"):
+                out.append(_finding("replicas-degraded", "warn", storage_class=sc,
+                                    replicas=info.get("replicas"), nodes=info.get("nodes")))
+                alloc = int(info["degraded_allocatable"])
             if n > alloc:
                 out.append(_finding("capacity-short", "block", storage_class=sc,
                                     needed=n, allocatable=alloc))
