@@ -1,95 +1,119 @@
 /**
- * harvester-ops — VM live migration panel.
- * Shows the current node, lists target nodes available, triggers
- * a VirtualMachineInstanceMigration, and shows recent migration history.
+ * harvester-ops — la fenêtre « Migrer » d'une VM.
+ *
+ * Un seul geste, trois destinations (v1.45.0, décision de l'exploitant) :
+ *   - un autre nœud de ce cluster : la migration à chaud, qui déclenche une
+ *     VirtualMachineInstanceMigration et montre les nœuds et l'historique ;
+ *   - un autre cluster déclaré : le transfert (vm-transfer.js) ;
+ *   - un fichier : l'export dans le magasin (vm-transfer.js).
  */
 const VMMigrate = (() => {
+  const esc = (v) => String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  const tr = (k, vars) => i18n.t(k, vars);
+  const DESTS = ['node', 'cluster', 'file'];
 
-  async function open(cluster, namespace, name) {
+  function open(cluster, namespace, name, dest) {
     const panelId = `vm-migrate-${cluster}-${namespace}-${name}`;
-    const title = `Live migrate — ${namespace}/${name}`;
+    const vm = `${namespace}/${name}`;
     const body = `
       <div class="migrate-panel">
-        <div class="migrate-status" id="migrate-status">Loading…</div>
-        <div class="apply-bar" style="margin: 14px 0; padding: 0; border: 0;">
-          <button class="btn btn-primary btn-sm" id="migrate-trigger"
-                  data-tip="${i18n.t('migrate.actionTip')}" class="tip">
-            ${Icons.svg('migrate')} <span>Migrate now</span>
-          </button>
-          <button class="btn btn-secondary btn-sm tip" id="migrate-refresh" data-tip="${i18n.t('migrate.refreshTip')}">${i18n.t('migrate.refresh')}</button>
-          <span class="apply-result" id="migrate-feedback"></span>
+        <div class="sub-tabs sub-tabs-inline migrate-dests" role="tablist">
+          <button type="button" class="sub-tab tip" role="tab" data-dest="node"
+                  data-tip="${esc(tr('migrate.dest.nodeTip'))}">${Icons.svg('node')} <span>${esc(tr('migrate.dest.node'))}</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-dest="cluster"
+                  data-tip="${esc(tr('migrate.dest.clusterTip'))}">${Icons.svg('cloud')} <span>${esc(tr('migrate.dest.cluster'))}</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-dest="file"
+                  data-tip="${esc(tr('migrate.dest.fileTip'))}">${Icons.svg('download')} <span>${esc(tr('migrate.dest.file'))}</span></button>
         </div>
-        <h4 style="margin-top:20px;">Available nodes</h4>
-        <table class="data-table" id="migrate-nodes">
-          <thead><tr><th>Node</th><th>Ready</th><th>Schedulable</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-        <h4 style="margin-top:20px;">Recent migrations</h4>
-        <table class="data-table" id="migrate-history">
-          <thead><tr><th>Migration</th><th>From → To</th><th>Phase</th><th>Created</th></tr></thead>
-          <tbody><tr><td colspan="4" class="empty-state">—</td></tr></tbody>
-        </table>
+
+        <div class="migrate-pane" data-pane="node" role="tabpanel">
+          <div class="migrate-status" data-x="status">${esc(tr('common.loading'))}</div>
+          <div class="apply-bar" style="margin: 14px 0; padding: 0; border: 0;">
+            <button type="button" class="btn btn-primary btn-sm tip" data-x="trigger"
+                    data-tip="${esc(tr('migrate.actionTip'))}">${Icons.svg('migrate')} <span>${esc(tr('migrate.now'))}</span></button>
+            <button type="button" class="btn btn-secondary btn-sm tip" data-x="refresh"
+                    data-tip="${esc(tr('migrate.refreshTip'))}">${esc(tr('migrate.refresh'))}</button>
+            <span class="apply-result" data-x="feedback"></span>
+          </div>
+          <h4 style="margin-top:20px;">${esc(tr('migrate.nodes'))}</h4>
+          <table class="data-table" data-x="nodes">
+            <thead><tr><th>${esc(tr('migrate.col.node'))}</th><th>${esc(tr('migrate.col.ready'))}</th><th>${esc(tr('migrate.col.schedulable'))}</th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <h4 style="margin-top:20px;">${esc(tr('migrate.history'))}</h4>
+          <table class="data-table" data-x="history">
+            <thead><tr><th>${esc(tr('migrate.col.migration'))}</th><th>${esc(tr('migrate.col.fromTo'))}</th><th>${esc(tr('migrate.col.phase'))}</th><th>${esc(tr('migrate.col.created'))}</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="migrate-pane" data-pane="cluster" role="tabpanel" hidden></div>
+        <div class="migrate-pane" data-pane="file" role="tabpanel" hidden></div>
       </div>`;
 
     const panel = FloatingPanels.open({
       id: panelId,
-      title,
+      title: tr('migrate.title', { vm }),
       icon: 'migrate',
       bodyHtml: body,
-      width: 780,
-      height: 540,
-      restoreSpec: { type: 'vm-migrate', args: { cluster, namespace, name } },
+      width: 820,
+      height: 660,
+      restoreSpec: { type: 'vm-migrate', args: { cluster, namespace, name, dest } },
     });
+    const root = panel.el;
+    const q = (x) => root.querySelector(`[data-pane="node"] [data-x="${x}"]`);
+    const rendered = {};
 
-    const fb = panel.el.querySelector('#migrate-feedback');
-    const statusEl = panel.el.querySelector('#migrate-status');
-    const nodesBody = panel.el.querySelector('#migrate-nodes tbody');
-    const histBody  = panel.el.querySelector('#migrate-history tbody');
+    function show(d) {
+      if (!DESTS.includes(d)) d = 'node';
+      root.querySelectorAll('[data-dest]').forEach(b => {
+        const on = b.dataset.dest === d;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+      root.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== d; });
+      if (d !== 'node' && !rendered[d] && window.VMTransfer) {
+        rendered[d] = true;
+        VMTransfer.render(root.querySelector(`[data-pane="${d}"]`),
+                          { kind: d === 'cluster' ? 'migrate' : 'export', cluster, namespace, name });
+      }
+    }
+    root.querySelectorAll('[data-dest]').forEach(b =>
+      b.addEventListener('click', () => show(b.dataset.dest)));
 
     async function refresh() {
+      const statusEl = q('status');
       try {
         const d = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/migrate-info`).then(r => r.json());
         statusEl.innerHTML = `
           <div class="kv-strip">
-            <span><strong>Current node:</strong> <code>${d.current_node || '—'}</code></span>
-            <span><strong>VMI phase:</strong> <span class="phase ${d.phase || 'Unknown'}">${d.phase || 'Unknown'}</span></span>
+            <span><strong>${esc(tr('migrate.currentNode'))} :</strong> <code>${esc(d.current_node || '?')}</code></span>
+            <span><strong>${esc(tr('migrate.phase'))} :</strong> <span class="phase ${esc(d.phase || 'Unknown')}">${esc(d.phase || 'Unknown')}</span></span>
           </div>`;
-        // Nodes
-        nodesBody.innerHTML = '';
-        (d.nodes || []).forEach(n => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><code>${n.name}</code> ${n.current ? '<span class="badge ok">current</span>' : ''}</td>
+        const nodesBody = q('nodes').querySelector('tbody');
+        nodesBody.innerHTML = (d.nodes || []).map(n => `<tr>
+            <td><code>${esc(n.name)}</code> ${n.current ? `<span class="badge ok">${esc(tr('migrate.current'))}</span>` : ''}</td>
             <td>${n.ready === 'True' ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge fail">' + Icons.svg('fail', { size: 14 }) + '</span>'}</td>
-            <td>${n.schedulable ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : '<span class="badge warn">cordoned</span>'}</td>
-            <td></td>`;
-          nodesBody.appendChild(tr);
-        });
-        if (nodesBody.children.length === 0)
-          nodesBody.innerHTML = '<tr><td colspan="4" class="empty-state">—</td></tr>';
-        // History
-        histBody.innerHTML = '';
-        (d.migrations || []).slice(0, 10).forEach(m => {
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td><code>${m.name}</code></td>
-            <td><code>${m.sourceNode || '?'}</code> → <code>${m.targetNode || '?'}</code></td>
-            <td><span class="phase ${m.phase === 'Succeeded' ? 'Running' : m.phase === 'Failed' ? 'Failed' : 'Pending'}">${m.phase}</span></td>
-            <td>${m.creationTimestamp ? new Date(m.creationTimestamp).toLocaleString() : '—'}</td>`;
-          histBody.appendChild(tr);
-        });
-        if (histBody.children.length === 0)
-          histBody.innerHTML = '<tr><td colspan="4" class="empty-state">No migration yet.</td></tr>';
-        // Disable trigger if VM not running
-        panel.el.querySelector('#migrate-trigger').disabled = d.phase !== 'Running';
+            <td>${n.schedulable ? '<span class="badge ok">' + Icons.svg('ok', { size: 14 }) + '</span>' : `<span class="badge warn">${esc(tr('migrate.cordoned'))}</span>`}</td>
+          </tr>`).join('') || '<tr><td colspan="3" class="empty-state">?</td></tr>';
+        const histBody = q('history').querySelector('tbody');
+        histBody.innerHTML = (d.migrations || []).slice(0, 10).map(m => `<tr>
+            <td><code>${esc(m.name)}</code></td>
+            <td><code>${esc(m.sourceNode || '?')}</code> / <code>${esc(m.targetNode || '?')}</code></td>
+            <td><span class="phase ${m.phase === 'Succeeded' ? 'Running' : m.phase === 'Failed' ? 'Failed' : 'Pending'}">${esc(m.phase)}</span></td>
+            <td>${m.creationTimestamp ? esc(new Date(m.creationTimestamp).toLocaleString()) : '?'}</td>
+          </tr>`).join('') || `<tr><td colspan="4" class="empty-state">${esc(tr('migrate.none'))}</td></tr>`;
+        q('trigger').disabled = d.phase !== 'Running';
       } catch (e) {
-        statusEl.innerHTML = `<span style="color:var(--danger)">${e.message}</span>`;
+        statusEl.innerHTML = `<span style="color:var(--danger)">${esc(e.message)}</span>`;
       }
     }
 
     async function doMigrate() {
-      if (!confirm(`Live-migrate VM "${name}" to another node?\nThe VM keeps running; brief network interruption possible.`)) return;
-      fb.textContent = 'triggering…';
+      if (!confirm(tr('migrate.confirm', { name }))) return;
+      const fb = q('feedback');
+      fb.textContent = tr('migrate.triggering');
       try {
         const r = await fetch(`/api/vm/${encodeURIComponent(cluster)}/${encodeURIComponent(namespace)}/${encodeURIComponent(name)}/migrate`, {
           method: 'POST',
@@ -98,19 +122,20 @@ const VMMigrate = (() => {
         });
         const d = await r.json();
         if (r.ok) {
-          fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${d.migration} started</span>`;
+          fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('migrate.started', { migration: d.migration }))}</span>`;
           setTimeout(refresh, 800);
         } else {
-          fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.detail || d.error}</span>`;
+          fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.detail || d.error)}</span>`;
         }
       } catch (e) {
-        fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
+        fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
       }
     }
 
-    panel.el.querySelector('#migrate-trigger').addEventListener('click', doMigrate);
-    panel.el.querySelector('#migrate-refresh').addEventListener('click', refresh);
+    q('trigger').addEventListener('click', doMigrate);
+    q('refresh').addEventListener('click', refresh);
     refresh();
+    show(dest || 'node');
   }
 
   return { open };
@@ -119,5 +144,5 @@ const VMMigrate = (() => {
 window.VMMigrate = VMMigrate;
 if (window.FloatingPanels) {
   FloatingPanels.registerType('vm-migrate', (args) =>
-    VMMigrate.open(args.cluster, args.namespace, args.name));
+    VMMigrate.open(args.cluster, args.namespace, args.name, args.dest));
 }

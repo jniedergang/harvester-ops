@@ -1628,6 +1628,9 @@ const App = (() => {
 
     // Création de VM : le namespace courant sert de proposition, le panneau
     // laisse en changer.
+    $('#btn-vm-exports')?.addEventListener('click', () => {
+      if (window.VMTransfer) window.VMTransfer.openStore(currentCluster);
+    });
     $('#btn-vm-create')?.addEventListener('click', () => {
       if (!currentCluster) return;
       window.VMCreate && VMCreate.open(currentCluster,
