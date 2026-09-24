@@ -272,6 +272,7 @@ def test_restore_manifest_always_halts_and_creates_a_new_vm():
     assert m["metadata"]["labels"][vt.TRANSFER_LABEL] == "t1"
     s = m["spec"]
     assert s["newVM"] is True and s["haltAfterRestore"] is True and s["keepMacAddress"] is True
+    assert s["deletionPolicy"] == "retain"
     assert s["target"] == {"apiGroup": "kubevirt.io", "kind": "VirtualMachine", "name": "leap156-b"}
     assert (s["virtualMachineBackupNamespace"], s["virtualMachineBackupName"]) == \
         ("default", "leap156-xfer-t1")

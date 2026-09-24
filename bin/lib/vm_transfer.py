@@ -320,7 +320,10 @@ def backup_manifest(namespace, vm_name, name, transfer_id):
 def restore_manifest(backup_ns, backup_name, name, namespace, keep_mac, transfer_id):
     return {"apiVersion": "harvesterhci.io/v1beta1", "kind": "VirtualMachineRestore",
             "metadata": _meta(f"{name}-{transfer_id}", namespace, transfer_id),
-            "spec": {"newVM": True, "haltAfterRestore": True,
+            # retain : supprimer l'objet de restauration après coup ne doit
+            # pas emporter la VM restaurée (même réglage que les
+            # restaurations d'instantané de la console)
+            "spec": {"newVM": True, "haltAfterRestore": True, "deletionPolicy": "retain",
                      "keepMacAddress": bool(keep_mac),
                      "target": {"apiGroup": "kubevirt.io", "kind": "VirtualMachine",
                                 "name": name},
