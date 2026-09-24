@@ -254,13 +254,20 @@ VM ne redémarre pas comme avant). L'assistant le signale.
 
 ## Console
 
-- **Assistant** « Déplacer / exporter » dans le menu d'une VM, en fenêtre
-  flottante : destination (un cluster déclaré, ou un fichier), namespace et
-  nom, moteur retenu et pourquoi, mode d'interruption (arrêt court proposé
-  seulement avec une cible commune), états finaux, MAC, table des
-  correspondances pré-remplie, puis le rapport de contrôle (chaque constat
-  expliqué, les blocages en tête). « Lancer » crée l'ActionRun ; la suite se
-  lit dans le dock et l'Activité, sur les deux clusters.
+- **Une seule fenêtre « Migrer »** (décision de l'exploitant, 25/09/2026) :
+  la migration à chaud existante et le transfert entre clusters sont deux
+  destinations du même geste, ouvert par le bouton de migration de la ligne
+  de la VM. En tête, le choix de la destination :
+  - **un autre nœud** de ce cluster : la migration à chaud d'aujourd'hui,
+    inchangée (nœuds disponibles, historique) ;
+  - **un autre cluster** déclaré ;
+  - **un fichier** (export).
+  Pour un autre cluster ou un fichier : namespace et nom, moteur retenu et
+  pourquoi, mode d'interruption (arrêt court proposé seulement avec une
+  cible commune), états finaux, MAC, table des correspondances pré-remplie,
+  puis le rapport de contrôle (chaque constat expliqué, les blocages en
+  tête). « Lancer » crée l'ActionRun ; la suite se lit dans le dock et
+  l'Activité, sur les deux clusters.
 - **Magasin d'exports** : fenêtre flottante ouverte par un bouton « Exports »
   de la barre de la vue Machines virtuelles (la vue n'a pas de sous-onglets ;
   même patron que les instantanés), sur le modèle du magasin d'ISO : liste (VM, cluster et date d'origine, taille,

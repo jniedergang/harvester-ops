@@ -287,7 +287,9 @@ lire le flux (pas de `kubectl proxy`).
 
 **Fichiers :**
 - Créer : `web/static/js/vm-transfer.js`
-- Modifier : `web/static/js/app.js` (bouton de ligne `data-vm-transfer`),
+- Modifier : `web/static/js/vm-migrate.js` (la fenêtre « Migrer » propose
+  trois destinations : un autre nœud, un autre cluster, un fichier ; décision
+  du 25/09/2026), `web/static/js/app.js`,
   `web/templates/index.html` (script, bouton « Exports »),
   `web/static/js/icons.js` (icône `transfer`), `web/static/js/i18n.js`
   (clés `transfer.*`, cinq langues), `web/static/css/style.css` si besoin
