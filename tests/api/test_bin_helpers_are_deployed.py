@@ -57,3 +57,14 @@ def test_every_helper_is_executable_in_the_repo():
                 if p.is_file() and p.suffix in (".sh", ".py")
                 and not os.access(p, os.X_OK)]
     assert not not_exec, f"bit d'exécution manquant : {not_exec}"
+
+
+def test_install_sh_deploys_every_shared_library():
+    """v1.45.0 : `bin/lib/` n'est plus fait du seul `common.sh`. Les scripts
+    Python y trouvent leurs modules partagés avec la console
+    (`longhorn_room.py`, ceux du transfert de VM) : une liste figée les aurait
+    oubliés, et le script échouait à l'import sur l'hôte."""
+    src = (ROOT / "install.sh").read_text()
+    block = src.split("install_scripts()", 1)[1].split("\n}", 1)[0]
+    assert 'bin/lib/*' in block, block
+    assert (BIN / "lib" / "longhorn_room.py").is_file()

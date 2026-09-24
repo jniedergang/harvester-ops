@@ -99,7 +99,12 @@ install_scripts() {
         [ -f "$helper" ] || continue
         install -m 0755 "$helper" "$PREFIX/"
     done
-    install -m 0644 "$SCRIPT_DIR/bin/lib/common.sh"         "$PREFIX/lib/"
+    # Toute la bibliothèque partagée : common.sh pour les scripts bash, et
+    # depuis la v1.45.0 les modules Python communs avec la console.
+    for lib in "$SCRIPT_DIR"/bin/lib/*; do
+        [ -f "$lib" ] || continue
+        install -m 0644 "$lib" "$PREFIX/lib/"
+    done
     ln -sf "$PREFIX/harvester-shutdown.sh" "$PREFIX/harvester-shutdown"
     ln -sf "$PREFIX/harvester-startup.sh"  "$PREFIX/harvester-startup"
     ln -sf "$PREFIX/harvester-status.sh"   "$PREFIX/harvester-status"
