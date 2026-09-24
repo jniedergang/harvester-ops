@@ -158,7 +158,7 @@ doit retomber sur la classe de l'image recréée sur la cible.
 2. Arrêt de la source.
 3. Pour chaque disque : image temporaire « exportée du volume »
    (`export-from-volume`, une réplique, étiquetée
-   `harvester-ops/transfer=<id>`), attente de son état prêt.
+   `harvester-ops.io/transfer=<id>`), attente de son état prêt.
 4. **Source rallumée tout de suite** si son état final est « en marche » :
    les données sont figées dans l'image. L'interruption dure l'export interne
    au cluster, pas le transfert.
@@ -193,6 +193,26 @@ Résultat sur la cible : des volumes ordinaires, sans image Harvester
 derrière eux. Passer par une image Harvester en aurait laissé une par disque,
 impossible à supprimer tant que la VM existe.
 
+**Vérifié sur harv1 le 24/09/2026** (disque système de 10 Gio d'une VM
+arrêtée, tout nettoyé ensuite) :
+
+- export du volume en image : 90 s ; téléchargement par le proxy de l'API :
+  110 s, 500 Mo de gzip pour 10 Gio de disque brut ;
+- `DataVolume` de source HTTP vers `harv-rep1` (RWX, bloc) : importé en
+  2 min 30. L'importeur fait un `HEAD` puis un seul `GET`, sans requête
+  `Range` : le guichet doit répondre aux deux, en flux ;
+- VM créée sur ce volume (sans annotation `volumeClaimTemplates`) : démarrée,
+  agent invité connecté en 40 s. Le webhook de Harvester pose lui-même
+  `mac-address` et `vmRunStrategy` ;
+- **CDI ne ramasse pas le `DataVolume` terminé**, et le volume lui appartient
+  (`ownerReference` contrôleur) : supprimer le `DataVolume` supprimerait le
+  disque de la VM. Le moteur le supprime donc avec `--cascade=orphan` une fois
+  l'import réussi (vérifié : le volume reste lié, sans propriétaire, la VM
+  continue de tourner) ;
+- l'affinité `network.harvesterhci.io/<réseau de cluster>` d'une VM vient de
+  ses réseaux, pas de ses nœuds : elle suit la correspondance des réseaux au
+  lieu d'être signalée comme une affinité de nœud.
+
 ## Format d'archive `<vm>-<AAAAMMJJ-HHMMSS>.hvx`
 
 Tar non compressé, lisible en flux, membres dans cet ordre :
@@ -212,7 +232,7 @@ VM ne redémarre pas comme avant). L'assistant le signale.
 ## États finaux, adresses MAC, retour arrière
 
 - **Source** : en marche, arrêtée (annotée
-  `harvester-ops/transferred-to=<cluster>/<ns>/<nom>`) ou supprimée avec ses
+  `harvester-ops.io/transferred-to=<cluster>/<ns>/<nom>`) ou supprimée avec ses
   volumes. La suppression n'a lieu qu'une fois la cible vérifiée.
 - **Cible** : démarrée, ou laissée arrêtée.
 - **Vérification de la cible** : démarrée, la VM atteint `Running` (et
@@ -223,7 +243,7 @@ VM ne redémarre pas comme avant). L'assistant le signale.
   reste en marche, de nouvelles adresses sont imposées, et l'assistant
   prévient que le nom d'hôte cloud-init sera en double.
 - **Retour arrière** : tout ce que le transfert crée porte l'étiquette
-  `harvester-ops/transfer=<id>`. En cas d'échec ou d'annulation (depuis le
+  `harvester-ops.io/transfer=<id>`. En cas d'échec ou d'annulation (depuis le
   dock : signal au script) avant la vérification de la cible, le script
   supprime ce qu'il a créé des deux côtés et remet la source dans son état de
   départ (relancée si elle tournait). La source n'est jamais supprimée sur un
@@ -241,8 +261,9 @@ VM ne redémarre pas comme avant). L'assistant le signale.
   correspondances pré-remplie, puis le rapport de contrôle (chaque constat
   expliqué, les blocages en tête). « Lancer » crée l'ActionRun ; la suite se
   lit dans le dock et l'Activité, sur les deux clusters.
-- **Magasin d'exports** : sous-onglet de la vue Machines virtuelles, sur le
-  patron du magasin d'ISO : liste (VM, cluster et date d'origine, taille,
+- **Magasin d'exports** : fenêtre flottante ouverte par un bouton « Exports »
+  de la barre de la vue Machines virtuelles (la vue n'a pas de sous-onglets ;
+  même patron que les instantanés), sur le modèle du magasin d'ISO : liste (VM, cluster et date d'origine, taille,
   intégrité), suppression, téléchargement, « Importer vers... » qui rouvre
   l'assistant en partant du fichier.
 - Répertoire du magasin : `HARVESTER_OPS_EXPORT_DIR`, par défaut
@@ -297,7 +318,7 @@ harvester-vm-transfer import  --to B --in fichier.hvx [--serve-address ip:port] 
   5. entre versions différentes : archive d'un cluster 1.8.2 importée sur
      harv1 (1.9.0), puis VM de test supprimée ;
   6. chaque fois : VM vérifiée côté cible (`kubectl`), source dans l'état
-     choisi, rien d'étiqueté `harvester-ops/transfer` laissé derrière.
+     choisi, rien d'étiqueté `harvester-ops.io/transfer` laissé derrière.
 
 ## Hors périmètre
 
