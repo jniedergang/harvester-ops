@@ -2801,20 +2801,27 @@ body.sidebar-collapsed .tab-group-chevron { display: none; }
 }
 
 /* Namespace bulk toolbar */
+/* v1.45.0 : fond neutre bordé d'accent. Sur le fond d'accent d'avant, le
+   bouton principal s'y fondait, le bouton d'arrêt détonnait, et le menu de
+   stratégie écrivait ses options en blanc sur la liste blanche du
+   navigateur : illisibles. */
 .bulk-toolbar {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
-  background: var(--accent-dim);
+  padding: 8px 14px;
+  background: var(--bg-elev);
+  border: 1px solid var(--accent);
+  border-left-width: 4px;
   border-radius: 6px;
   margin-bottom: 8px;
-  color: var(--btn-primary-text);
+  color: var(--text);
   font-size: 13px;
 }
 .bulk-toolbar .bulk-count {
   margin-right: auto;
 }
+.bulk-toolbar .bulk-count strong { color: var(--accent); }
 .bulk-strategy {
   display: flex;
   align-items: center;
@@ -2822,12 +2829,17 @@ body.sidebar-collapsed .tab-group-chevron { display: none; }
   font-size: 12px;
 }
 .bulk-strategy select {
-  background: var(--overlay-soft);
-  color: var(--btn-primary-text);
-  border: 0;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
   padding: 3px 6px;
   border-radius: 3px;
   font-size: 12px;
+  font-family: var(--font-mono);
+}
+.bulk-strategy select option {
+  background: var(--bg-elev);
+  color: var(--text);
 }
 .ns-vm-table .check-col {
   width: 30px;
