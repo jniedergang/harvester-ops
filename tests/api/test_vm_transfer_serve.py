@@ -129,3 +129,38 @@ def test_an_opener_error_is_recorded(server):
     except Exception:
         pass
     assert "source vanished" in (s.error(path) or "")
+
+
+def test_a_client_that_hangs_up_is_not_a_source_failure(server):
+    """Relevé sur harvlab2 : l'importeur de CDI ouvre une première connexion,
+    lit de quoi reconnaître le format, la coupe (« connection reset »), puis
+    rouvre et télécharge tout. Le transfert échouait sur cette coupure
+    normale, prise pour une panne de la source."""
+    import socket
+    s, base = server
+    closed = []
+
+    def opener():
+        try:
+            for _ in range(2000):
+                yield b"z" * 65536
+        finally:
+            closed.append(True)        # la lecture de la source est refermée
+
+    path = s.publish(opener, None)
+    host, port = base[len("http://"):].split(":")
+    sock = socket.create_connection((host, int(port)))
+    sock.sendall(f"GET {path} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    sock.recv(4096)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, b"\x01\x00\x00\x00\x00\x00\x00\x00")
+    sock.close()                       # coupure brutale, comme CDI
+    import time
+    for _ in range(50):
+        if closed:
+            break
+        time.sleep(0.1)
+    assert closed, "la source n'a pas été refermée"
+    assert s.error(path) is None
+    assert s.aborted(path) == 1
+    with req(base + path) as r:        # le second GET complet passe
+        assert len(r.read()) == 2000 * 65536

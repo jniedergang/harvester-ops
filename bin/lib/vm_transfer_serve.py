@@ -27,6 +27,7 @@ class _Entry:
         self.size = size
         self.hits = 0
         self.sent = 0
+        self.aborted = 0
         self.error = None
 
 
@@ -80,13 +81,35 @@ class DiskServer:
                 with server._lock:
                     entry.hits += 1
                 self._headers(entry)
+                # Deux pannes à ne pas confondre (vécu sur harvlab2) : le
+                # CLIENT qui raccroche est normal, l'importeur de CDI coupe sa
+                # première connexion après avoir reconnu le format, puis
+                # recommence ; la SOURCE qui échoue est une vraie erreur. Dans
+                # les deux cas la lecture de la source est refermée (un
+                # téléchargement depuis le cluster source s'arrête).
+                it = iter(entry.opener())
                 try:
-                    for chunk in entry.opener():
-                        if chunk:
+                    while True:
+                        try:
+                            chunk = next(it)
+                        except StopIteration:
+                            break
+                        except Exception as e:      # noqa: BLE001
+                            entry.error = f"{type(e).__name__}: {e}"
+                            break
+                        if not chunk:
+                            continue
+                        try:
                             self.wfile.write(chunk)
-                            entry.sent += len(chunk)
-                except Exception as e:              # noqa: BLE001
-                    entry.error = f"{type(e).__name__}: {e}"
+                        except OSError:
+                            with server._lock:
+                                entry.aborted += 1
+                            break
+                        entry.sent += len(chunk)
+                finally:
+                    close = getattr(it, "close", None)
+                    if close:
+                        close()
                 self.close_connection = True
 
             def _refuse(self):
@@ -133,6 +156,10 @@ class DiskServer:
     def sent(self, path):
         e = self._get(path)
         return e.sent if e else 0
+
+    def aborted(self, path):
+        e = self._get(path)
+        return e.aborted if e else 0
 
     def error(self, path):
         e = self._get(path)

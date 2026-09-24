@@ -254,6 +254,10 @@ class FakeCluster:
             if o is None:
                 return
             try:
+                # comme CDI (relevé sur harvlab2) : une première connexion
+                # pour reconnaître le format, coupée, puis la vraie
+                with urllib.request.urlopen(url, timeout=5) as r:
+                    r.read(16)
                 with urllib.request.urlopen(url, timeout=5) as r:
                     data = r.read()
                 self.objs[(run.K_PVC, ns, name)]["data"] = data
