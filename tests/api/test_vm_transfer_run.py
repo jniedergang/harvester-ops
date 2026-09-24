@@ -176,6 +176,12 @@ class FakeCluster:
         key = (kind, ns, name)
         if key not in self.objs:
             raise RuntimeError(f"NotFound {key}")
+        if kind == run.K_RESTORE:
+            # Harvester (relevé sur harvlab2) : « The restore can't be removed
+            # because the restored VM exists »
+            target = self.objs[key]["spec"]["target"]["name"]
+            if (run.K_VM, ns, target) in self.objs:
+                raise RuntimeError("The restore can't be removed because the restored VM exists")
         self.objs.pop(key)
         if kind == run.K_BACKUP and self.store is not None:
             # supprimer une sauvegarde efface ses données de la cible
@@ -417,9 +423,11 @@ def test_backup_engine_stop_mode(env):
     src = e.src.objs[(run.K_VM, "default", "leap156")]
     assert src["spec"]["runStrategy"] == "Halted"
     assert src["metadata"]["annotations"][vt.TRANSFERRED_TO] == "harvlab2/default/leap156"
-    # rien d'étiqueté ne reste, les sauvegardes et la restauration sont parties
+    # rien d'étiqueté ne reste, les sauvegardes sont parties ; la restauration
+    # reste, Harvester la lie à la VM restaurée pour toute sa vie
     assert e.src.labelled() == [] and e.dst.labelled() == []
-    assert not any(k[0] in (run.K_BACKUP, run.K_RESTORE) for k in list(e.src.objs) + list(e.dst.objs))
+    assert not any(k[0] == run.K_BACKUP for k in list(e.src.objs) + list(e.dst.objs))
+    assert [k for k in e.dst.objs if k[0] == run.K_RESTORE]
 
 
 def test_backup_engine_short_mode_takes_a_second_backup_after_the_stop(env):
@@ -450,9 +458,7 @@ def test_a_copy_takes_one_backup_without_stopping(env):
     assert e.src.objs[(run.K_VMI, "default", "leap156")]["status"]["phase"] == "Running"
     # deux VM en marche : jamais la même adresse MAC
     r = [o for (k, _, _), o in e.dst.objs.items() if k == run.K_RESTORE]
-    assert not r      # nettoyée ; on vérifie le manifeste envoyé
-    sent = [c for c in e.dst.calls if c[:2] == ("create", run.K_RESTORE)]
-    assert sent
+    assert len(r) == 1 and r[0]["spec"]["keepMacAddress"] is False
 
 
 def test_restore_keeps_mac_only_when_asked(env):
@@ -539,6 +545,8 @@ def test_a_target_that_does_not_start_rolls_everything_back(env):
     run.rollback(ctx)
     assert (run.K_VM, "default", "leap156") not in e.dst.objs
     assert not [k for k in e.dst.objs if k[0] == run.K_PVC and k[2].startswith("restore-")]
+    # la restauration ne se supprime qu'une fois la VM partie : elle est partie
+    assert not [k for k in e.dst.objs if k[0] == run.K_RESTORE]
     # la source n'a jamais été supprimée, et elle repart
     assert (run.K_VM, "default", "leap156") in e.src.objs
     assert e.src.objs[(run.K_VMI, "default", "leap156")]["status"]["phase"] == "Running"

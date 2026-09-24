@@ -667,7 +667,10 @@ def cleanup(ctx):
     de ce qui reste."""
     req = ctx.req
     if ctx.restore:
-        delete_quiet(ctx.dst, K_RESTORE, *ctx.restore)
+        # Harvester lie la restauration à la VM restaurée pour toute sa vie
+        # (« The restore can't be removed because the restored VM exists ») :
+        # elle reste, sans l'étiquette du transfert
+        _unlabel(ctx.dst, K_RESTORE, *ctx.restore)
         ctx.forget("dst", K_RESTORE, *ctx.restore)
     for side, kind, ns, name in list(ctx.created):
         if kind == K_BACKUP:
@@ -713,11 +716,17 @@ def rollback(ctx):
     if ctx.restore and ctx.target:
         ns, name = ctx.target
         r = ctx.dst.get(K_RESTORE, *ctx.restore) or {}
+        # la VM et les volumes que la restauration a créés : leur nom était
+        # libre au contrôle, ils sont donc à nous. La VM d'abord : Harvester
+        # refuse de supprimer la restauration tant qu'elle existe
+        if delete_quiet(ctx.dst, K_VM, ns, name):
+            try:
+                wait_for(ctx, "rollback", "restored VM deleted",
+                         lambda: ctx.dst.get(K_VM, ns, name) is None, ctx.timeouts["delete"])
+            except TransferError as e:
+                ctx.emit("rollback", "error", str(e))
         delete_quiet(ctx.dst, K_RESTORE, *ctx.restore)
         ctx.forget("dst", K_RESTORE, *ctx.restore)
-        # la VM et les volumes que la restauration a créés : leur nom était
-        # libre au contrôle, ils sont donc à nous
-        delete_quiet(ctx.dst, K_VM, ns, name)
         for rs in ((r.get("status") or {}).get("restores") or []):
             pvc = ((rs.get("persistentVolumeClaimSpec") or {}).get("metadata") or {}).get("name")
             if pvc:
