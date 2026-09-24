@@ -51,6 +51,13 @@ lose data. The higher-level surfaces are conventional API clients.
   provider from a version, a URL or a local file. Standard library only,
   so it runs on an airgapped host where nothing but `python3` and the
   extracted tarball exist.
+- `harvester-vm-transfer.py` (1.45.0) checks, moves, exports and imports a
+  VM between clusters. Its decisions live in `bin/lib/vm_transfer.py`
+  (pure, tested without a cluster), its two engines in
+  `bin/lib/vm_transfer_run.py` (driving the clusters through an injectable
+  client), the HTTP counter that serves disks to CDI in
+  `bin/lib/vm_transfer_serve.py`, and the Longhorn allocatable space it
+  shares with the console in `bin/lib/longhorn_room.py`.
 - Same `STEP_EVENT` contract as the bash scripts, so the console streams
   them through the identical SSE path. The console spawns this script
   rather than reimplementing the install, which is what keeps the CLI and

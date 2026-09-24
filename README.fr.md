@@ -58,6 +58,11 @@ ailleurs.
   au fil de la saisie, modèles, plusieurs machines d'un coup, assistant
   cloud-init, démarrage, arrêt et stratégie de démarrage en masse,
   instantanés et restauration, migration à chaud.
+- **Une VM déplacée vers un autre cluster**, ou exportée dans un fichier et
+  importée ailleurs : un pré-contrôle dit ce qui bloquerait, réseaux et
+  stockage sont mis en correspondance, les sauvegardes de Harvester servent
+  quand les deux clusters partagent une cible (avec un mode d'arrêt court),
+  une copie par la console sinon, et rien ne reste à moitié fait.
 - **Maintenance des nœuds, guidée** : un pré-contrôle dit quelles VMs
   migreront, lesquelles s'arrêteraient et ce qui bloquerait la vidange,
   puis la vidange est suivie jusqu'au bout.

@@ -103,6 +103,25 @@ sudo systemctl status harvester-ops
 
 Open `https://<host>:8090` in a browser. Accept the self-signed certificate, log in with the credentials set during install.
 
+### 8. Moving VMs between clusters (optional)
+
+When two clusters do not share a backup target, a VM moves through this
+host: the target cluster's nodes fetch each disk over HTTP, on port 8094 by
+default. Open it for them, or choose another address and port in
+`config.yaml`:
+
+```bash
+sudo firewall-cmd --permanent --add-port=8094/tcp && sudo firewall-cmd --reload
+```
+
+```yaml
+transfer:
+  serve_address: 10.0.0.5:8094    # an address the clusters' nodes reach
+```
+
+Exported archives are kept in `/var/lib/harvester-ops/exports` (the
+service's persistent volume).
+
 ## Uninstall
 
 ```bash

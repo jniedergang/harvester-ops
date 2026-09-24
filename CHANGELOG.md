@@ -4,6 +4,75 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.45.0] - 2026-09-25 - A VM moved to another cluster, exported, imported
+
+A VM was bound to the cluster it was born on. It can now move to another
+declared cluster, or leave as a file for a site the console cannot reach.
+
+### Added
+- **One Migrate window, three destinations**: another node of the same
+  cluster (the live migration, unchanged), another cluster, or a file. The
+  live migration panel it replaces is now translated.
+- **A pre-check before anything changes**, shown in the interface language,
+  blockers first, Start disabled while one remains: target reachable, name
+  free, namespace present or to be created, every network and storage class
+  mapped (pre-filled when the name exists), Longhorn room (more replicas
+  than nodes only warns: the volumes run degraded), MAC addresses already
+  taken on the target (Harvester refuses them even for a stopped VM), host
+  devices and node pinning that cannot travel, an older Harvester on the
+  target.
+- **Two engines, chosen for you.** Harvester's own backup when both
+  clusters share a backup target and the restore can succeed (networks keep
+  their names, storage classes exist); it alone offers a **short stop**, a
+  first backup while the VM runs and a second, incremental one after the
+  stop. Otherwise a copy through the console: each disk frozen into a
+  temporary image, streamed, and imported by CDI into an ordinary volume of
+  the chosen class, without an image left behind on the target.
+- **Final states chosen by the operator**: the source left running (a copy,
+  with new MAC addresses), stopped and marked as moved, or deleted with its
+  volumes once the target is verified; the target started or left stopped.
+- **Nothing left half-done**: everything a transfer creates is labelled,
+  and a failure or a cancellation from the dock removes it and puts the
+  source back as it was.
+- **An export store**: the Exports button of the VM view lists the archives
+  (origin, date, size, complete or not), downloads one, imports it into a
+  declared cluster, deletes it. An archive is a plain tar with SHA-256 sums
+  checked during the import; it holds cloud-init secrets and is created
+  0600.
+- **`harvester-vm-transfer`** on the command line: `check`, `migrate`,
+  `export`, `import`, the same engine and archive as the console, for
+  isolated sites.
+
+### Fixed
+- **The bulk action bar of the VM view is readable**: the strategy menu
+  wrote its options in white on the browser's white list, and the main
+  button blended into the bar. It is now a neutral panel edged with the
+  accent colour.
+
+### Changed
+- `install.sh` deploys every file of `bin/lib`, not only `common.sh`; the
+  Longhorn allocatable space moves there to be shared by the console and the
+  new command.
+- The service keeps exports in `/var/lib/harvester-ops/exports`.
+
+### Tests
+- The decisions, the disk counter and both engines are tested without a
+  cluster, the engines against two simulated clusters that behave like the
+  real ones (backup sync, image restore, CDI's first connection, a restore
+  that cannot be removed while its VM lives); every guard was sabotaged to
+  see its test fail.
+- The command with a fake `kubectl`, the console endpoints, and a browser
+  test of the Migrate window and the store, including the race that left a
+  previous cluster's mappings on screen.
+- A browser test measures the contrast of the bulk action bar in both
+  themes; it fails on the old style.
+- Real runs on two nested Harvester 1.8.2 clusters and harv1 (1.9.0): a
+  direct copy and an archive import across versions, disks compared bit
+  for bit; the backup engine in stop and short mode, with an image restored
+  on the target and the source deleted; a transfer started from the
+  interface; a cancellation and two real failures, each undone. Each defect
+  they found was first reproduced by a test.
+
 ## [1.44.13] - 2026-09-23 - The videos play on the GitHub page
 
 ### Changed

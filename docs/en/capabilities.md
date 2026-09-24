@@ -95,8 +95,10 @@ Manage KubeVirt virtual machines without leaving the console.
   description, one per line. Verified against real frames on the
   three-node test cluster, whose host bridge emits LLDP; the production
   LAN switch emits none, and the probe says so after listening.
-- **Live migration** — move a running VM between nodes, with pre-flight
-  migration-info checks.
+- **Migrate** (1.45.0): one window, three destinations. **Another node**
+  of the same cluster is the live migration (the VM keeps running, with
+  pre-flight migration-info checks); **another cluster** and **a file** are
+  described below.
 - **VNC console** — full graphical console in the browser (noVNC over a
   WebSocket relay to the KubeVirt `vnc` subresource). Shows the whole
   boot — firmware, GRUB, kernel — thanks to an auto-retry loop that
@@ -175,6 +177,75 @@ was exercised for real. The Cloud-init tab gains an
   duplicating a sibling (eth0 taken, next is eth1).
 
 CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
+
+### Moving a VM to another cluster, exporting, importing (1.45.0)
+
+The Migrate window of a VM (its migrate button, or `harvester-vm-transfer`
+on the command line) moves or copies it to another declared cluster, or
+exports it to an archive that can be imported later, elsewhere. Console and
+command line run the same engine and write the same archive.
+
+**The pre-check.** Before anything changes, both clusters are read and every
+finding is shown in the interface language, blockers first; Start stays
+disabled while one remains. It checks that the target answers and runs
+KubeVirt, that the name is free and the namespace exists (or is to be
+created), that every network and storage class of the VM has a counterpart
+on the target, the allocatable Longhorn space (more replicas asked than the
+target has nodes is a warning, not a lack of room: the volumes run
+degraded), MAC addresses already used on the target (Harvester refuses a
+duplicate even for a stopped VM), host devices and node pinning that cannot
+travel, and an older Harvester version on the target.
+
+**Two engines, chosen for you.**
+
+- **Harvester backup**, when both clusters use the same backup target (NFS
+  or S3) and the restore can succeed: every network keeps its name on the
+  target and every storage class exists there. A `VirtualMachineBackup` is
+  taken, the target is made to re-read the backup target (Harvester only
+  does it when asked), and the VM is restored as a new VM; images the VM was
+  born from come with it. Only this engine offers the **short stop**: a
+  first backup while the VM runs, then a second one after the stop, which
+  carries only what changed.
+- **Copy through the console** otherwise. Each disk is frozen into a
+  temporary image on the source (the VM is stopped for that, and restarted
+  right away if it is to keep running), streamed, and imported on the
+  target by a CDI `DataVolume` into an ordinary volume of the chosen
+  storage class. The target's nodes fetch the disks from the console host
+  over HTTP, on port 8094 by default: open it, or set `transfer:
+  serve_address: host:port` in `config.yaml`.
+
+**Final states, chosen by the operator.** The source is left running (a
+copy, with new MAC addresses), stopped and annotated as moved, or deleted
+with its volumes; the target is started or left stopped. The target is
+verified (running, or its volumes bound) before the source is stopped for
+good or deleted. Anything the transfer created carries the label
+`harvester-ops.io/transfer`; a failure or a cancellation from the dock
+removes it and puts the source back as it was. The target VM keeps an
+annotation `harvester-ops.io/transferred-from`.
+
+**The export store.** The Exports button of the VM view lists the
+archives: source cluster and version, date, size, and whether the archive
+is complete. Download one to carry it to an isolated site, import it into a
+declared cluster, or delete it. An archive (`.hvx`) is a plain tar: the
+cleaned VM, the disks as Harvester serves them (gzip), and SHA-256 sums
+checked during the import. It holds the VM's cloud-init secrets: it is
+created with mode 0600 and must be kept like a secret.
+
+On the command line:
+
+```bash
+harvester-vm-transfer check   --from prod --vm default/web-01 --to dr
+harvester-vm-transfer migrate --from prod --vm default/web-01 --to dr \
+    --mode short --source stopped --target started
+harvester-vm-transfer export  --from prod --vm default/web-01 --out /srv/exports/
+harvester-vm-transfer import  --to edge --in /srv/exports/web-01-20260925-002842.hvx \
+    --namespace apps --create-namespace --map-net default/lan=apps/vlan10
+```
+
+Exit codes: 0 done, 1 failed (undone), 2 refused by the pre-check,
+3 cancelled (undone). Verified on real clusters (Harvester 1.8.2 and 1.9.0):
+disks compared bit for bit after a copy, an export and an import across
+versions.
 
 ## 3. Cluster observability (console)
 

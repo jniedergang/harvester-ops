@@ -1,6 +1,8 @@
 # Déplacer une VM d'un cluster à l'autre : transfert, export, import
 
-Conception validée le 24/09/2026. Livraison prévue : v1.45.0.
+Conception validée le 24/09/2026, livrée en v1.45.0 le 25/09/2026 après essais
+réels (section « Ce que le banc a appris », qui prime sur le reste en cas de
+doute).
 
 ## Contexte
 
@@ -106,7 +108,9 @@ Lecture seule, sortie JSON : une liste de constats
 | Chaque classe de stockage a une correspondance existante sur la cible | block |
 | Place allouable Longhorn cible >= somme des disques (répliques comprises) | block |
 | Périphériques PCI, vGPU, affinité ou sélecteur de nœuds de la source | warn (retirés, listés) |
-| Moteur sauvegarde : même cible (type, adresse, compartiment normalisés), condition `configured` des deux côtés | décide du moteur |
+| Moteur sauvegarde : même cible (type, adresse, compartiment normalisés), condition `configured` des deux côtés, chaque réseau garde son nom sur la cible, chaque classe (hors image) y existe | décide du moteur, sinon copie par la console |
+| Adresses MAC gardées déjà portées par une VM de la cible (même arrêtée) | block |
+| Plus de répliques demandées que de nœuds sur la cible | warn (volumes dégradés ; place jugée sur les nœuds réels) |
 | Moteur sauvegarde : image de même nom ou nom affiché sur la cible, contenu différent (somme de contrôle) | block (Harvester sauterait la synchro) |
 | Moteur sauvegarde : Harvester cible < 1.4 et image absente | block, proposer le moteur fichier |
 | Moteur fichier : CDI prêt sur la cible | block |
@@ -127,17 +131,26 @@ cible, sinon la classe de stockage par défaut de la cible et aucun réseau
    fichiers par l'agent invité s'il est présent), attente `readyToUse`.
 3. Arrêt de la source (sauf état final « en marche » en copie).
 4. Sauvegarde n°2 (en arrêt court, seul le delta part), attente `readyToUse`.
-5. Attente de la sauvegarde sur la cible (objet synchronisé). Si elle
-   n'apparaît pas dans le délai, relance de la synchronisation en réécrivant
-   la valeur de `backup-target` à l'identique, puis nouvelle attente.
+5. Attente de la sauvegarde sur la cible (objet synchronisé), avec une
+   relance chaque minute : retrait de l'annotation `harvesterhci.io/hash` du
+   réglage `backup-target` (seul déclencheur d'une relecture quand
+   `refreshIntervalInSeconds` vaut 0) et demande de relecture à Longhorn
+   (`BackupTarget.spec.syncRequestedAt`). Le premier passage ne ramène que
+   les images ; la sauvegarde apparaît à un passage suivant.
 6. `VirtualMachineRestore` sur la cible : `newVM: true`, nom et namespace
-   choisis, `keepMacAddress` selon la section MAC, **toujours
-   `haltAfterRestore: true`**.
-7. Correspondances appliquées à la VM restaurée (réseaux ; retrait des
-   périphériques et affinités signalés).
+   choisis, `keepMacAddress` selon la section MAC, `deletionPolicy: retain`,
+   `haltAfterRestore: true` seulement si la CRD de la cible le connaît (1.9 ;
+   la 1.8 le refuse). Sinon la VM restaurée démarre d'elle-même et le moteur
+   l'arrête avant l'étape suivante.
+7. Retrait des périphériques et épinglages signalés sur la VM restaurée.
+   Les réseaux gardent leur nom : le webhook de Harvester refuse une
+   restauration dont un réseau d'origine manque sur la cible, c'est pourquoi
+   un réseau renommé impose la copie par la console.
 8. États finaux (section suivante).
 9. Nettoyage : les sauvegardes du transfert sont supprimées, sauf si
-   l'opérateur demande à les garder.
+   l'opérateur demande à les garder. L'objet de restauration reste (Harvester
+   refuse de le supprimer tant que la VM restaurée existe), sans l'étiquette
+   du transfert.
 
 Si la source doit rester en marche (copie), une seule sauvegarde est prise
 VM en marche, sans interruption ; le mode d'interruption est alors sans objet.
@@ -146,9 +159,9 @@ Interruption réelle : en arrêt simple, sauvegarde complète + restauration ;
 en arrêt court, delta + restauration. La restauration relit tout le volume
 depuis la cible, elle reste proportionnelle à la taille.
 
-Point à vérifier en réel : les classes de stockage d'image (`lh-<uuid>`)
-portent l'uid de l'image source ; la restauration d'un disque né d'une image
-doit retomber sur la classe de l'image recréée sur la cible.
+Vérifié en réel : l'image recréée sur la cible garde le nom de classe de
+l'image source (`lh-<uuid>` identique) ; la sauvegarde n'est synchronisée
+qu'une fois cette classe créée.
 
 ## Moteur « fichier » (sans cible commune, export, import)
 
@@ -326,6 +339,37 @@ harvester-vm-transfer import  --to B --in fichier.hvx [--serve-address ip:port] 
      harv1 (1.9.0), puis VM de test supprimée ;
   6. chaque fois : VM vérifiée côté cible (`kubectl`), source dans l'état
      choisi, rien d'étiqueté `harvester-ops.io/transfer` laissé derrière.
+
+## Ce que le banc a appris (25/09/2026)
+
+Essais réels sur harvlab (3 nœuds) et harvlab2 (1 nœud), deux clusters
+Harvester 1.8.2 imbriqués sur node2, et sur harv1 (1.9.0). Chaque constat a
+d'abord été reproduit par un test, puis corrigé :
+
+- **CDI coupe sa première connexion** après avoir reconnu le format, puis
+  retélécharge tout : le guichet distingue le client qui raccroche (normal)
+  de la source qui échoue.
+- **Le proxy de l'API a refusé une fois un téléchargement** (« tls:
+  unrecognized name ») puis l'a servi : un téléchargement refusé avant son
+  premier octet est repris, jamais une coupure en cours de route.
+- **Adresses MAC** : une VM créée hors de l'interface de Harvester ne les a
+  que dans l'annotation `harvesterhci.io/mac-address` (recopiées au
+  nettoyage) ; Harvester refuse deux VMs de même MAC, même arrêtée (contrôle
+  `mac-in-use`).
+- **Synchronisation de la cible de sauvegarde** : voir l'étape 5 du moteur.
+- **`haltAfterRestore` inconnu en 1.8**, **réseau d'origine exigé à la
+  restauration**, **restauration indélébile tant que la VM vit** : voir les
+  étapes 6, 7 et 9.
+- **Site mononœud** : la classe par défaut demande 3 répliques, Longhorn
+  crée le volume dégradé ; c'est un avertissement, pas un manque de place.
+- **Interface** : les correspondances suivent le cluster de la réponse du
+  contrôle (une réponse écartée laissait les listes d'un autre cluster).
+
+Scénarios passés : copie directe sans cible commune (disques identiques bit
+à bit), export puis import, sauvegarde en arrêt simple avec image recréée,
+arrêt court avec suppression de la source, archive 1.8.2 importée sur harv1
+1.9.0 (identique bit à bit), transfert lancé depuis l'interface, annulation
+depuis le dock et deux échecs réels, chacun défait sans rien laisser.
 
 ## Hors périmètre
 

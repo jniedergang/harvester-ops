@@ -19,6 +19,12 @@ web:
   tls_cert: /etc/harvester-ops/tls/cert.pem      # optional, self-signed by install.sh
   tls_key:  /etc/harvester-ops/tls/key.pem
 
+# Moving VMs between clusters without a shared backup target: the target
+# cluster's nodes fetch each disk from this host over HTTP. Default: the
+# address of the interface towards the target cluster, port 8094 (open it).
+# transfer:
+#   serve_address: 10.0.0.5:8094
+
 # Cluster declarations
 clusters:
 

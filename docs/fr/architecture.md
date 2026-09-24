@@ -55,6 +55,13 @@ d'API classiques.
 - Même contrat `STEP_EVENT` que les scripts bash : la console les diffuse
   par le même chemin SSE. La console lance ce script au lieu de
   réimplémenter l'installation, ce qui maintient la parité CLI / UI.
+- `harvester-vm-transfer.py` (1.45.0) contrôle, déplace, exporte et importe
+  une VM entre clusters. Ses décisions vivent dans `bin/lib/vm_transfer.py`
+  (pur, testé sans cluster), ses deux moteurs dans
+  `bin/lib/vm_transfer_run.py` (qui pilote les clusters par un client
+  injectable), le guichet HTTP qui sert les disques à CDI dans
+  `bin/lib/vm_transfer_serve.py`, et la place allouable Longhorn qu'il
+  partage avec la console dans `bin/lib/longhorn_room.py`.
 
 ### Bibliothèque commune (`bin/lib/common.sh`)
 

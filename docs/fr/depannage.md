@@ -127,6 +127,42 @@ kubectl get node <nom> -o jsonpath='{.metadata.annotations}'
 est faite, quoi qu'ait dit l'action. À partir de la 1.44.9, la console
 attend avant de conclure : le cas ne se présente plus.
 
+## Déplacer une VM entre clusters
+
+### « The target cluster never fetched the disk »
+
+La copie par la console exige que les nœuds de la cible joignent l'hôte de
+la console en HTTP, sur le port 8094 par défaut. Ouvrir ce port sur l'hôte
+(`firewall-cmd --add-port=8094/tcp`), ou régler `transfer: serve_address:
+hôte:port` dans `config.yaml` sur une adresse et un port qu'ils joignent. Le
+transfert s'arrête après cinq minutes sans requête et défait ce qu'il a
+créé.
+
+### La sauvegarde n'apparaît jamais sur la cible
+
+Les deux clusters doivent avoir la même cible de sauvegarde, à l'état
+`configured`. Harvester ne relit sa cible que sur demande (avec
+`refreshIntervalInSeconds` à zéro, jamais de lui-même), et son premier
+passage ne ramène que les images dont la VM est née : la sauvegarde apparaît
+à un passage suivant. Le transfert le demande chaque minute, et demande
+aussi à Longhorn de relire la cible tout de suite. Si les images sont
+grosses, l'attente suit leur restauration.
+
+### « duplicate mac address present for vm »
+
+Harvester refuse deux VMs avec la même adresse MAC sur un réseau de
+cluster, même si l'une est arrêtée (par exemple la VM d'origine, laissée
+arrêtée, à côté de sa copie qui revient). Le contrôle préalable affiche les
+adresses et la VM qui les porte : décocher « Garder les adresses MAC », ou
+supprimer cette VM.
+
+### Une VirtualMachineRestore reste sur la cible
+
+Normal : Harvester la lie à la VM restaurée et refuse de la supprimer tant
+que cette VM existe. Des objets `BackupVolume` vides restent aussi dans
+Longhorn après la suppression des sauvegardes du transfert ; c'est le
+fonctionnement de Longhorn.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

@@ -104,8 +104,10 @@ Gérer les machines virtuelles KubeVirt sans quitter la console.
   description, un par ligne. Vérifiée sur de vraies trames avec le cluster
   de test à trois nœuds, dont le bridge de l'hôte émet du LLDP ; le switch
   du LAN de production n'en émet pas, et la sonde le dit après écoute.
-- **Live migration** — déplacer une VM en marche entre nodes, avec
-  vérifications migration-info préalables.
+- **Migrer** (1.45.0) : une fenêtre, trois destinations. **Un autre nœud**
+  du même cluster, c'est la migration à chaud (la VM continue de tourner,
+  avec les contrôles de migrate-info) ; **un autre cluster** et **un
+  fichier** sont décrits plus bas.
 - **Console VNC** — console graphique complète dans le navigateur
   (noVNC via un relais WebSocket vers la sous-ressource `vnc` de
   KubeVirt). Montre tout le boot — firmware, GRUB, kernel — grâce à
@@ -192,6 +194,101 @@ reste de cette page a été exercé pour de vrai. L'onglet
 
 La CLI expose le sous-ensemble start/stop via `harvester-status` /
 `-shutdown -N <ns>`.
+
+### Déplacer une VM vers un autre cluster, l'exporter, l'importer (1.45.0)
+
+La fenêtre « Migrer » d'une VM (son bouton de migration, ou
+`harvester-vm-transfer` en ligne de commande) la déplace ou la copie vers un
+autre cluster déclaré, ou l'exporte dans une archive importable plus tard,
+ailleurs. Console et ligne de commande emploient le même moteur et écrivent
+la même archive.
+
+**Le contrôle préalable.** Avant toute modification, les deux clusters sont
+lus et chaque constat s'affiche dans la langue de l'interface, blocages en
+tête ; « Lancer » reste grisé tant qu'il en reste un. Il vérifie :
+
+- que la cible répond et fait tourner KubeVirt ;
+- que le nom est libre et que le namespace existe (ou sera créé) ;
+- que chaque réseau et chaque classe de stockage de la VM a un équivalent
+  sur la cible ;
+- la place allouable Longhorn. Plus de répliques demandées que de nœuds sur
+  la cible donne un avertissement, pas un manque de place : les volumes
+  tournent dégradés ;
+- les adresses MAC déjà prises sur la cible : Harvester refuse un doublon,
+  même pour une VM arrêtée ;
+- les périphériques d'hôte et l'épinglage à un nœud, qui ne voyagent pas ;
+- une version de Harvester plus ancienne sur la cible.
+
+**Deux moteurs, choisis pour vous.**
+
+- **Sauvegarde Harvester**, quand les deux clusters partagent leur cible de
+  sauvegarde (NFS ou S3) et que la restauration peut réussir : chaque réseau
+  garde son nom sur la cible et chaque classe de stockage y existe.
+  Le déroulé :
+  - une `VirtualMachineBackup` est prise ;
+  - la cible est poussée à relire sa cible de sauvegarde (Harvester ne le
+    fait que sur demande) ;
+  - la VM est restaurée en nouvelle VM, et les images dont elle est née
+    suivent.
+
+  Seul ce moteur permet l'**arrêt court** : une première sauvegarde VM en
+  marche, puis une seconde après l'arrêt, qui ne porte que ce qui a changé.
+- **Copie par la console** sinon. Chaque disque est figé en image
+  temporaire sur la source (la VM est arrêtée pour cela, et relancée
+  aussitôt si elle doit rester en marche), lu en flux, puis importé sur la
+  cible par un `DataVolume` CDI dans un volume ordinaire de la classe
+  choisie. Les nœuds de la cible viennent chercher les disques sur l'hôte de
+  la console, en HTTP, sur le port 8094 par défaut : l'ouvrir, ou régler
+  `transfer: serve_address: hôte:port` dans `config.yaml`.
+
+**États finaux, choisis par l'opérateur.**
+
+- **Source :** laissée en marche (une copie, avec de nouvelles adresses
+  MAC), arrêtée et annotée comme déplacée, ou supprimée avec ses volumes.
+- **Cible :** démarrée ou laissée arrêtée.
+- **Ordre des gestes :** la cible est vérifiée (en marche, ou volumes liés)
+  avant que la source soit arrêtée pour de bon ou supprimée.
+- **Retour arrière :** tout ce que le transfert crée porte l'étiquette
+  `harvester-ops.io/transfer`. Un échec ou une annulation depuis le dock le
+  supprime et remet la source dans son état de départ.
+- **Provenance :** la VM cible garde une annotation
+  `harvester-ops.io/transferred-from`.
+
+**Le magasin d'exports.** Le bouton « Exports » de la vue Machines
+virtuelles liste les archives, avec leur cluster et leur version d'origine,
+leur date, leur taille, et si elles sont complètes. On peut en télécharger
+une pour l'emporter vers un site isolé, l'importer dans un cluster déclaré,
+ou la supprimer.
+
+Une archive (`.hvx`) est un tar ordinaire qui contient :
+
+- la VM nettoyée ;
+- ses disques, tels que Harvester les sert (gzip) ;
+- des sommes SHA-256, vérifiées pendant l'import.
+
+Elle contient aussi les secrets cloud-init de la VM : elle est créée en 0600
+et se garde comme un secret.
+
+En ligne de commande :
+
+```bash
+harvester-vm-transfer check   --from prod --vm default/web-01 --to secours
+harvester-vm-transfer migrate --from prod --vm default/web-01 --to secours \
+    --mode short --source stopped --target started
+harvester-vm-transfer export  --from prod --vm default/web-01 --out /srv/exports/
+harvester-vm-transfer import  --to site-isole --in /srv/exports/web-01-20260925-002842.hvx \
+    --namespace apps --create-namespace --map-net default/lan=apps/vlan10
+```
+
+Codes de sortie :
+
+- 0 : terminé ;
+- 1 : échec, transfert défait ;
+- 2 : refusé par le contrôle préalable ;
+- 3 : annulé, transfert défait.
+
+Vérifié sur de vrais clusters (Harvester 1.8.2 et 1.9.0) : disques comparés
+bit à bit après une copie, un export et un import entre versions.
 
 ## 3. Observabilité cluster (console)
 

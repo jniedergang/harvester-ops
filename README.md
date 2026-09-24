@@ -53,6 +53,11 @@ recorded, whether it was made from the console or somewhere else.
 - **Virtual machines**: guided creation that checks the space left as you
   type, templates, several machines in one go, a cloud-init assistant,
   bulk start, stop and run strategy, snapshots and restore, live migration.
+- **A VM moved to another cluster**, or exported to a file and imported
+  elsewhere: a pre-check says what would block, networks and storage are
+  mapped, Harvester's backups are used when both clusters share a backup
+  target (with a short-stop mode), a copy through the console otherwise,
+  and anything left half-done is undone.
 - **Node maintenance, guided**: a pre-check says which VMs will migrate,
   which would stop and what would hold the drain, then the drain is
   followed to the end.

@@ -3,6 +3,11 @@
 Mise en œuvre de `docs/design/2026-09-24-migration-vm.md`, tâche par tâche,
 chaque tâche avec ses tests. Cases à cocher pour le suivi.
 
+Exécuté les 24 et 25/09/2026 (v1.45.0). Les écarts découverts en réel
+(moteur sauvegarde choisi seulement si la restauration peut réussir,
+relance de synchronisation, MAC, 1.8 sans `haltAfterRestore`...) sont
+consignés dans la spec, section « Ce que le banc a appris ».
+
 **Objectif :** transférer une VM entre deux clusters déclarés (par la cible
 de sauvegarde commune, ou par la console), l'exporter dans un fichier et
 l'importer, depuis la console comme en ligne de commande.
@@ -61,12 +66,12 @@ lire le flux (pas de `kubectl proxy`).
 - `web/app.py` ajoute `BIN_DIR / "lib"` à `sys.path` une seule fois et garde
   le nom `_storage_room` (alias), sans toucher aux appelants.
 
-- [ ] Tests : les cas de `_storage_room` couverts aujourd'hui, rejoués sur
+- [x] Tests : les cas de `_storage_room` couverts aujourd'hui, rejoués sur
   `longhorn_room.storage_room` (sur-provisionnement, place réelle, nœud non
   planifiable, trop peu de nœuds pour les répliques) ; `app._storage_room is
   longhorn_room.storage_room`.
-- [ ] Échec constaté, déplacement, tests verts, suite API verte.
-- [ ] Commit.
+- [x] Échec constaté, déplacement, tests verts, suite API verte.
+- [x] Commit.
 
 ### Tâche 2 : les décisions pures (`bin/lib/vm_transfer.py`)
 
@@ -124,7 +129,7 @@ lire le flux (pas de `kubectl proxy`).
   `{"code", "level": "ok"|"warn"|"block", "facts": dict}` ; codes :
   `target-unreachable`, `kubevirt-missing`, `version-older`,
   `namespace-missing`, `vm-name-taken`, `network-unmapped`,
-  `storage-class-unmapped`, `storage-class-missing-backup`,
+  `storage-class-unmapped`, `mac-in-use`, `replicas-degraded`,
   `capacity-short`, `devices-removed`, `node-affinity-removed`, `engine`,
   `image-conflict`, `image-sync-unsupported`, `cdi-missing`,
   `source-room-short`, `store-room-short`, `short-mode-needs-backup`,
@@ -137,7 +142,7 @@ lire le flux (pas de `kubectl proxy`).
   `open_member(name) -> fichier borné`, `verify() -> list[str]` (membres
   corrompus ou absents).
 
-- [ ] Tests (objets au format relevé sur harv1, dont la VM leap156) :
+- [x] Tests (objets au format relevé sur harv1, dont la VM leap156) :
   nettoyage (champs et annotations retirés, étiquettes utiles gardées) ;
   inventaire (disques, image par `imageId`, secrets cloud-init, réseaux,
   périphériques) ; correspondances par défaut (même nom, classe par défaut,
@@ -148,9 +153,9 @@ lire le flux (pas de `kubectl proxy`).
   archive écrite puis relue avec un faux disque de 3 Mo non multiple de 512,
   sommes justes, `verify` qui détecte un octet modifié, droits 0600 ;
   `step` neutralise un `|` final et un retour à la ligne.
-- [ ] Échec constaté, module écrit, tests verts, sabotage de chaque garde-fou
+- [x] Échec constaté, module écrit, tests verts, sabotage de chaque garde-fou
   (le test correspondant doit échouer).
-- [ ] Commit.
+- [x] Commit.
 
 ### Tâche 3 : le guichet des disques (`bin/lib/vm_transfer_serve.py`)
 
@@ -167,10 +172,10 @@ lire le flux (pas de `kubectl proxy`).
   tout autre chemin, jeton révoqué ou méthode : 404/405 sans corps ; aucun
   listing ; journalisation sans le jeton.
 
-- [ ] Tests : HEAD et GET d'un contenu publié (corps identique), longueur
+- [x] Tests : HEAD et GET d'un contenu publié (corps identique), longueur
   annoncée, jeton inconnu 404, jeton révoqué 404, racine 404, `hits`
   incrémenté par GET seulement, deux publications simultanées.
-- [ ] Échec, module, verts, commit.
+- [x] Échec, module, verts, commit.
 
 ### Tâche 4 : le déroulé des moteurs (`bin/lib/vm_transfer_run.py`)
 
@@ -204,7 +209,7 @@ lire le flux (pas de `kubectl proxy`).
 - `rollback(ctx)` : supprime `ctx.created` dans l'ordre inverse, remet la
   source dans son `runStrategy` de départ.
 
-- [ ] Tests (FakeKube à états scriptés, horloge et sommeil injectés) :
+- [x] Tests (FakeKube à états scriptés, horloge et sommeil injectés) :
   moteur sauvegarde en arrêt simple et en arrêt court (deux sauvegardes, la
   seconde après l'arrêt) ; copie sans arrêt (une seule sauvegarde) ;
   sauvegarde absente de la cible puis relance de synchro par réécriture de
@@ -217,7 +222,7 @@ lire le flux (pas de `kubectl proxy`).
   explicite ; finalize : suppression de la source seulement après
   vérification ; rollback : ressources créées supprimées, source relancée ;
   aucune ressource étiquetée restante après un échec simulé à chaque étape.
-- [ ] Échec, module, verts, sabotage, commit.
+- [x] Échec, module, verts, sabotage, commit.
 
 ### Tâche 5 : le script (`bin/harvester-vm-transfer.py`)
 
@@ -244,11 +249,11 @@ lire le flux (pas de `kubectl proxy`).
 - `--serve-address hôte[:port]` : adresse à laquelle la cible joint le
   guichet (défaut : l'adresse de l'hôte vers l'API du cluster cible).
 
-- [ ] Tests : `check --json` sur fixtures (nominal, blocages) ; `--help` de
+- [x] Tests : `check --json` sur fixtures (nominal, blocages) ; `--help` de
   chaque sous-commande ; résolution d'un cluster par nom via un faux `yq` ;
   code 2 quand le contrôle bloque ; `--dry-run` ne lance aucune commande
   mutative (le faux kubectl journalise ses appels).
-- [ ] Échec, script, verts, commit.
+- [x] Échec, script, verts, commit.
 
 ### Tâche 6 : la console (points d'accès et magasin)
 
@@ -275,13 +280,13 @@ lire le flux (pas de `kubectl proxy`).
   `config.yaml` si présent, sinon celle de l'onglet Bare-metal si réglée,
   sinon le défaut du script.
 
-- [ ] Tests : contrôle relayé (Popen simulé), cluster inconnu 404, cible
+- [x] Tests : contrôle relayé (Popen simulé), cluster inconnu 404, cible
   inconnue 404 ; lancement crée l'ActionRun et passe les bons kubeconfigs ;
   409 pour un second transfert de la même VM et pendant un arrêt de la
   cible ; magasin : liste lit le manifeste sans charger les disques,
   suppression, nom invalide 400, téléchargement ; aucun secret dans les
   réponses ; limite de débit déclarée valide (`limits.parse_many`).
-- [ ] Échec, implémentation, verts, commit.
+- [x] Échec, implémentation, verts, commit.
 
 ### Tâche 7 : l'écran
 
@@ -299,27 +304,27 @@ lire le flux (pas de `kubectl proxy`).
 - `VMTransfer.open(cluster, ns, name)`, `VMTransfer.openStore(cluster)`,
   `VMTransfer.openImport(file)`.
 
-- [ ] Tests e2e (API interceptée) : l'assistant affiche un blocage en tête et
+- [x] Tests e2e (API interceptée) : l'assistant affiche un blocage en tête et
   désactive « Lancer » ; l'arrêt court n'est proposé qu'avec une cible
   commune ; changer une correspondance relance le contrôle ; « Lancer » part
   avec le bon corps ; le magasin liste un export et ouvre l'import ; textes
   en français avec la langue réglée sur fr.
-- [ ] Implémentation, verts, suite e2e complète verte, commit.
+- [x] Implémentation, verts, suite e2e complète verte, commit.
 
 ### Tâche 8 : en réel, doc, version
 
-- [ ] Banc : second cluster imbriqué sur node2 (`harvlab.sh` paramétré par
+- [x] Banc : second cluster imbriqué sur node2 (`harvlab.sh` paramétré par
   variables d'environnement, IP réservées et enregistrées dans NetBox et
   Pi-hole), cible de sauvegarde NFS dédiée au banc sur le NAS.
-- [ ] Scénarios de la spec (cible commune en arrêt simple et court, direct
+- [x] Scénarios de la spec (cible commune en arrêt simple et court, direct
   sans cible commune, export puis import, archive 1.8.2 vers harv1 1.9.0) :
   chaque fois VM vérifiée côté cible, source dans l'état choisi, aucune
   ressource étiquetée restante. Tout défaut trouvé : test qui le reproduit,
   correction, nouvel essai.
-- [ ] Doc EN + FR : `capabilities.md` (nouvelle section), 
+- [x] Doc EN + FR : `capabilities.md` (nouvelle section), 
   `operating-procedure.md` (CLI), `architecture.md` (moteur),
   `troubleshooting.md` (accès du cluster cible au guichet) ; README EN + FR
   (une ligne dans les automatisations).
-- [ ] `VERSION` 1.45.0, entrée CHANGELOG, suite API et e2e vertes, commit,
+- [x] `VERSION` 1.45.0, entrée CHANGELOG, suite API et e2e vertes, commit,
   poussée Gitea puis GitHub.
-- [ ] Banc éteint, node2 éteint ; mémoire du projet mise à jour.
+- [x] Banc éteint, node2 éteint ; mémoire du projet mise à jour.

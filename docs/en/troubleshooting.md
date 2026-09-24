@@ -126,6 +126,40 @@ kubectl get node <name> -o jsonpath='{.metadata.annotations}'
 done, whatever the action said. On 1.44.9 and later the console waits
 before concluding, so this no longer happens.
 
+## Moving a VM between clusters
+
+### "The target cluster never fetched the disk"
+
+The copy through the console needs the target's nodes to reach the console
+host over HTTP, on port 8094 by default. Open that port on the host
+(`firewall-cmd --add-port=8094/tcp`), or set `transfer: serve_address:
+host:port` in `config.yaml` to an address and port they can reach. The
+transfer stops after five minutes without a request and undoes what it
+created.
+
+### The backup never shows on the target
+
+Both clusters must have the same backup target, in the `configured` state.
+Harvester re-reads the backup target only when asked (with a zero
+`refreshIntervalInSeconds`, never on its own), and its first pass only
+brings back the images the VM was born from: the backup appears on a later
+pass. The transfer asks every minute, and also asks Longhorn to re-read the
+target at once. If the images are large, the wait follows their restore.
+
+### "duplicate mac address present for vm"
+
+Harvester refuses two VMs with the same MAC address on a cluster network,
+even when one of them is stopped (for example the original VM, left
+stopped, next to its copy coming back). The pre-check shows the addresses
+and the VM holding them: untick "Keep the MAC addresses", or remove that
+VM.
+
+### A VirtualMachineRestore stays on the target
+
+Normal: Harvester ties it to the restored VM and refuses to delete it
+while that VM exists. Empty `BackupVolume` objects also stay in Longhorn
+after the transfer backups are deleted; that is how Longhorn works.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:
