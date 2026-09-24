@@ -9968,6 +9968,386 @@ def api_capi_diag(cluster):
     })
 
 
+# =============================================================================
+# Transfert de VM entre clusters, export et import (v1.45.0)
+#
+# La console ne réimplémente rien : elle lance `bin/harvester-vm-transfer.py`,
+# le même script qu'un opérateur utilise en ligne de commande sur un site
+# isolé, et relaie ses STEP_EVENT. Elle lui passe les kubeconfigs préparés
+# ICI, dans le thread de la requête : ils portent l'identité de l'opérateur,
+# que le thread de travail ne saurait pas retrouver.
+#
+# Voir docs/design/2026-09-24-migration-vm.md.
+# =============================================================================
+import vm_transfer as _vt  # noqa: E402
+
+EXPORT_DIR = Path(os.environ.get(
+    "HARVESTER_OPS_EXPORT_DIR",
+    str(Path.home() / ".local/share/harvester-ops/exports"),
+))
+VM_TRANSFER_SCRIPT = "harvester-vm-transfer.py"
+_EXPORT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.hvx$")
+_SC_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$")
+_TRANSFER_CHOICES = {"mode": ("stop", "short"),
+                     "source": ("running", "stopped", "deleted"),
+                     "target": ("started", "stopped")}
+
+
+def _export_dir():
+    """Magasin des archives : elles contiennent les secrets cloud-init des
+    VMs, d'où un répertoire 0700."""
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        EXPORT_DIR.chmod(0o700)
+    except OSError:
+        pass
+    return EXPORT_DIR
+
+
+def _export_safe_name(name):
+    if not name or "/" in name or ".." in name or not _EXPORT_NAME_RE.match(name):
+        return None
+    return name
+
+
+def _vm_transfer_script():
+    p = BIN_DIR / VM_TRANSFER_SCRIPT
+    return p if p.is_file() else None
+
+
+def _net_ref_ok(v):
+    ns, sep, n = str(v).partition("/")
+    return bool(sep) and _valid_k8s_name(ns) and _valid_k8s_name(n)
+
+
+def _transfer_args(body, kind):
+    """Options de la demande en arguments du script, validées une à une :
+    rien de ce que le navigateur envoie ne part tel quel sur une ligne de
+    commande."""
+    args = []
+    for key in ("name", "namespace"):
+        v = body.get(key)
+        if v:
+            if not _valid_k8s_name(v):
+                raise ValueError(f"invalid {key}")
+            args += [f"--{key}", v]
+    for key, allowed in _TRANSFER_CHOICES.items():
+        v = body.get(key)
+        if not v:
+            continue
+        if v not in allowed:
+            raise ValueError(f"invalid {key}")
+        if kind == "export" and key != "source":
+            continue
+        if kind == "import" and key != "target":
+            continue
+        if kind == "export" and v == "deleted":
+            raise ValueError("an export never deletes its source")
+        args += [f"--{key}", v]
+    if kind != "export":
+        if body.get("keep_mac") is False:
+            args.append("--new-mac")
+        if body.get("create_namespace"):
+            args.append("--create-namespace")
+        for src, dst in (body.get("networks") or {}).items():
+            if dst:
+                if not (_net_ref_ok(src) and _net_ref_ok(dst)):
+                    raise ValueError("invalid network mapping")
+                args += ["--map-net", f"{src}={dst}"]
+        for src, dst in (body.get("storage_classes") or {}).items():
+            if dst:
+                if not (_SC_NAME_RE.match(str(src)) and _SC_NAME_RE.match(str(dst))):
+                    raise ValueError("invalid storage class mapping")
+                args += ["--map-sc", f"{src}={dst}"]
+        serve = (load_config().get("transfer") or {}).get("serve_address")
+        if serve:
+            args += ["--serve-address", str(serve)]
+    if kind == "migrate":
+        if body.get("keep_backups"):
+            args.append("--keep-backups")
+        if body.get("engine") == "file":
+            args += ["--engine", "file"]
+    return args
+
+
+def _transfer_check(cmd):
+    """Lance un contrôle (lecture seule) et rend sa sortie JSON."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "the pre-check timed out"}), 504
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        err = [ln.split("|", 3)[3] for ln in (proc.stderr or "").splitlines()
+               if ln.startswith("STEP_EVENT|") and ln.split("|")[2:3] == ["error"]]
+        return jsonify({"error": (err[-1] if err else "pre-check failed")[:300]}), 502
+    out["blocked"] = proc.returncode == 2
+    return jsonify(out)
+
+
+def _transfer_busy(clusters, label):
+    """Même VM déjà en transfert, ou arrêt/démarrage de l'un des clusters en
+    cours : un transfert qui démarre sous un cluster qu'on éteint échoue au
+    milieu, et deux transferts de la même VM se marcheraient dessus."""
+    for r in ACTIONS.values():
+        if r.status not in ("starting", "running") or r.dry_run:
+            continue
+        if r.action == label and r.cluster == clusters[0]:
+            return r
+        if r.action in CLUSTER_SEQUENCES and r.cluster in clusters:
+            return r
+    return None
+
+
+def _vm_transfer_runner(run, cmd):
+    """Relaie les étapes du script, comme pour l'installateur du provider."""
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    last_error = None
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, text=True)
+        run.proc = proc          # annulable depuis le dock : le script défait tout
+        for line in proc.stderr:
+            line = line.strip()
+            if line.startswith("STEP_EVENT|"):
+                parts = line.split("|", 3)
+                if len(parts) == 4:
+                    step(parts[1], parts[2], parts[3])
+                    if parts[2] == "error":
+                        last_error = parts[3]
+        rc = proc.wait()
+        run.exit_code = rc
+        if rc == 0:
+            run.status = "done"
+        elif rc == 3 or run.status == "cancelled":
+            run.status = "cancelled"
+            run.error_summary = "cancelled, transfer undone"
+        else:
+            run.status = "error"
+            run.error_summary = (last_error or f"exit {rc}")[:300]
+    except Exception as e:                     # noqa: BLE001
+        run.error_summary = str(e)[:300]
+        step("transfer", "error", str(e)[:300])
+        run.exit_code = 1
+        run.status = "error"
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status,
+              "exit_code": run.exit_code, "ts": time.time()})
+    run.close()
+
+
+def _start_transfer(label, cluster, clusters, public_cmd, cmd):
+    run_id = uuid.uuid4().hex[:12]
+    run = ActionRun(run_id, label, cluster, public_cmd)
+    _ident = current_cluster_identity()
+    run.cluster_user = (_ident or {}).get("user")
+    with ACTIONS_LOCK:
+        busy = _transfer_busy(clusters, label)
+        if busy:
+            return None, busy
+        ACTIONS[run_id] = run
+    threading.Thread(target=_vm_transfer_runner,
+                     args=(run, cmd + ["--id", run_id[:8]]), daemon=True).start()
+    return run, None
+
+
+def _busy_response(busy):
+    return jsonify({"error": f"{busy.action} is already running on {busy.cluster} "
+                             f"(action {busy.id})",
+                    "running": busy.id, "running_action": busy.action}), 409
+
+
+@app.route("/api/vm/<cluster>/<namespace>/<name>/transfer/check", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_vm_transfer_check(cluster, namespace, name):
+    """Contrôle préalable d'un transfert vers `to`, ou d'un export si `to`
+    est vide. Ne modifie rien."""
+    body = request.get_json(silent=True) or {}
+    src_kc = _kubectl_for_cluster(cluster)
+    if not src_kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    script = _vm_transfer_script()
+    if script is None:
+        return jsonify({"error": f"{VM_TRANSFER_SCRIPT} not deployed"}), 503
+    to = body.get("to")
+    kind = "migrate" if to else "export"
+    try:
+        args = _transfer_args(body, kind)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    base = [sys.executable, str(script)]
+    if to:
+        dst_kc = _kubectl_for_cluster(to)
+        if not dst_kc:
+            return jsonify({"error": f"unknown cluster: {to}"}), 404
+        cmd = base + ["check", "--from", cluster, "--from-kubeconfig", src_kc,
+                      "--vm", f"{namespace}/{name}", "--to", to,
+                      "--to-kubeconfig", dst_kc, "--json"] + args
+        if body.get("engine") == "file":
+            cmd += ["--engine", "file"]
+    else:
+        cmd = base + ["export", "--from", cluster, "--from-kubeconfig", src_kc,
+                      "--vm", f"{namespace}/{name}", "--out", str(_export_dir()),
+                      "--dry-run", "--json"] + args
+    return _transfer_check(cmd)
+
+
+@app.route("/api/vm/<cluster>/<namespace>/<name>/transfer", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_vm_transfer(cluster, namespace, name):
+    """Lance le transfert vers `to`, ou l'export si `to` est vide."""
+    body = request.get_json(silent=True) or {}
+    src_kc = _kubectl_for_cluster(cluster)
+    if not src_kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    script = _vm_transfer_script()
+    if script is None:
+        return jsonify({"error": f"{VM_TRANSFER_SCRIPT} not deployed"}), 503
+    to = body.get("to")
+    kind = "migrate" if to else "export"
+    try:
+        args = _transfer_args(body, kind)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    vm = f"{namespace}/{name}"
+    base = [sys.executable, str(script)]
+    if to:
+        dst_kc = _kubectl_for_cluster(to)
+        if not dst_kc:
+            return jsonify({"error": f"unknown cluster: {to}"}), 404
+        cmd = base + ["migrate", "--from", cluster, "--from-kubeconfig", src_kc,
+                      "--vm", vm, "--to", to, "--to-kubeconfig", dst_kc] + args
+        public = ["harvester-vm-transfer", "migrate", "--from", cluster, "--vm", vm,
+                  "--to", to] + args
+        label, clusters = f"vm-transfer:{vm}", (cluster, to)
+    else:
+        cmd = base + ["export", "--from", cluster, "--from-kubeconfig", src_kc,
+                      "--vm", vm, "--out", str(_export_dir())] + args
+        public = ["harvester-vm-transfer", "export", "--from", cluster, "--vm", vm] + args
+        label, clusters = f"vm-export:{vm}", (cluster,)
+    run, busy = _start_transfer(label, cluster, clusters, public, cmd)
+    if busy:
+        return _busy_response(busy)
+    return jsonify({"action_id": run.id}), 201
+
+
+@app.route("/api/exports")
+@requires_auth
+def api_exports_list():
+    """Les archives du magasin, lues par leurs en-têtes : aucun disque n'est
+    lu, et aucun secret n'est rendu."""
+    out = []
+    for p in sorted(_export_dir().glob("*" + _vt.ARCHIVE_SUFFIX),
+                    key=lambda x: x.stat().st_mtime, reverse=True):
+        entry = {"name": p.name, "size": p.stat().st_size, "mtime": p.stat().st_mtime}
+        try:
+            r = _vt.ArchiveReader(p)
+            entry["complete"] = r.complete
+            m = r.manifest()
+            src = m.get("source") or {}
+            inv = m.get("inventory") or {}
+            entry.update({
+                "vm": src.get("name"), "namespace": src.get("namespace"),
+                "cluster": src.get("cluster"), "version": src.get("version"),
+                "created": m.get("created"),
+                "disks": [{"volume": d.get("volume"), "size": d.get("size"),
+                           "storage_class": d.get("storage_class")}
+                          for d in inv.get("disks") or []],
+                "networks": inv.get("networks") or [],
+            })
+        except Exception:                      # noqa: BLE001
+            entry["complete"] = False
+            entry["unreadable"] = True
+        out.append(entry)
+    try:
+        st = os.statvfs(_export_dir())
+        free = st.f_bavail * st.f_frsize
+    except OSError:
+        free = None
+    return jsonify({"exports": out, "free": free})
+
+
+@app.route("/api/exports/<archive>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_exports_delete(archive):
+    safe = _export_safe_name(archive)
+    if not safe:
+        return jsonify({"error": "invalid archive name"}), 400
+    p = _export_dir() / safe
+    if not p.is_file():
+        return jsonify({"error": "not found"}), 404
+    p.unlink()
+    return jsonify({"deleted": safe})
+
+
+@app.route("/api/exports/<archive>/download")
+@requires_auth
+def api_exports_download(archive):
+    safe = _export_safe_name(archive)
+    if not safe or not (_export_dir() / safe).is_file():
+        return jsonify({"error": "not found"}), 404
+    return send_from_directory(str(_export_dir()), safe, as_attachment=True,
+                               mimetype="application/x-tar", conditional=True)
+
+
+def _import_cmd(archive, body, dry_run):
+    safe = _export_safe_name(archive)
+    if not safe or not (_export_dir() / safe).is_file():
+        return None, (jsonify({"error": "not found"}), 404)
+    to = body.get("to")
+    dst_kc = _kubectl_for_cluster(to) if to else None
+    if not dst_kc:
+        return None, (jsonify({"error": f"unknown cluster: {to}"}), 404)
+    script = _vm_transfer_script()
+    if script is None:
+        return None, (jsonify({"error": f"{VM_TRANSFER_SCRIPT} not deployed"}), 503)
+    try:
+        args = _transfer_args(body, "import")
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+    cmd = [sys.executable, str(script), "import", "--in", str(_export_dir() / safe),
+           "--to", to, "--to-kubeconfig", dst_kc] + args
+    if dry_run:
+        cmd += ["--dry-run", "--json"]
+    public = ["harvester-vm-transfer", "import", "--in", safe, "--to", to] + args
+    return (cmd, public, to, safe), None
+
+
+@app.route("/api/exports/<archive>/check", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_exports_check(archive):
+    body = request.get_json(silent=True) or {}
+    got, err = _import_cmd(archive, body, dry_run=True)
+    if err:
+        return err
+    return _transfer_check(got[0])
+
+
+@app.route("/api/exports/<archive>/import", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_exports_import(archive):
+    body = request.get_json(silent=True) or {}
+    got, err = _import_cmd(archive, body, dry_run=False)
+    if err:
+        return err
+    cmd, public, to, safe = got
+    run, busy = _start_transfer(f"vm-import:{safe}", to, (to,), public, cmd)
+    if busy:
+        return _busy_response(busy)
+    return jsonify({"action_id": run.id}), 201
+
+
 # -----------------------------------------------------------------------------
 # VM snapshots (VirtualMachineBackup with type=snapshot) per-VM
 # -----------------------------------------------------------------------------
