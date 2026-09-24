@@ -156,7 +156,7 @@ const VMTransfer = (() => {
       </div>`;
 
     const q = (x) => container.querySelector(`[data-x="${x}"]`);
-    const state = { mappings: { networks: {}, storage_classes: {} }, target: null, busy: false, seq: 0 };
+    const state = { seq: 0, mapsFor: null };
 
     function syncMac() {
       const src = q('source'), mac = q('keep_mac');
@@ -224,7 +224,22 @@ const VMTransfer = (() => {
         const d = await r.json();
         if (seq !== state.seq) return;            // un contrôle plus récent a suivi
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
-        if (toCluster && (fresh || !container.querySelector('[data-map]'))) renderMaps(d);
+        // Les correspondances suivent le cluster de la RÉPONSE : une réponse
+        // pour un nouveau cluster peut arriver après qu'un contrôle plus
+        // ancien a été écarté (vécu : on change de cluster puis on retouche
+        // le nom, et les listes restaient celles du cluster d'avant).
+        const shownFor = d.target && d.target.cluster;
+        if (toCluster && (fresh || state.mapsFor !== shownFor
+                          || !container.querySelector('[data-map]'))) {
+          renderMaps(d);
+          state.mapsFor = shownFor;
+        } else if (toCluster) {
+          // une liste restée vide prend la valeur que le serveur a retenue
+          container.querySelectorAll('[data-map]').forEach(sel => {
+            const v = ((d.mappings || {})[sel.dataset.map] || {})[sel.dataset.src];
+            if (!sel.value && v && [...sel.options].some(o => o.value === v)) sel.value = v;
+          });
+        }
         report.innerHTML = reportHtml(d);
         const mode = q('mode');
         if (mode) {

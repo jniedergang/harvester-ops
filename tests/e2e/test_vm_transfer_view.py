@@ -169,3 +169,40 @@ def test_the_store_lists_and_opens_an_import(page_with_api):
     expect(store.locator('a[href*="/download"]')).to_have_count(1)
     store.locator('[data-act="import"]').click()
     expect(page.locator('#fp-vm-import-vm1-20260925\\.hvx')).to_be_visible(timeout=5000)
+
+
+def test_mappings_follow_a_quickly_changed_target(context, flask_server):
+    """Vécu en réel : choisir un autre cluster puis retoucher le nom aussitôt
+    écartait la réponse du premier contrôle, et les correspondances restaient
+    celles du cluster d'avant (« choisir... » alors que le réseau existait)."""
+    context.add_init_script("localStorage.setItem('harvester_ops_language','en');")
+    page = context.new_page()
+
+    seen = []
+
+    def check(route, request):
+        body = json.loads(request.post_data or "{}")
+        to = body.get("to")
+        seen.append((to, body.get("name"), (body.get("networks") or {}).get("default/lab")))
+        nets = ["default/lab"] if to == "second" else ["default/other"]
+        mapped = "default/lab" if to == "second" else None
+        page.wait_for_timeout(300 if to == "second" else 0)
+        fulfill(route, {"engine": "backup", "reason": "shared-target", "blocked": False,
+                        "findings": [{"code": "engine", "level": "ok", "facts": {}}],
+                        "mappings": {"networks": {"default/lab": mapped}, "storage_classes": {}},
+                        "target": {"cluster": to, "networks": nets, "storage_classes": []}})
+
+    page.route("**/api/clusters", lambda r, q: fulfill(r, {"clusters": [
+        {"name": "harv-fake"}, {"name": "first"}, {"name": "second"}]}))
+    page.route(f"**{VM}/migrate-info", lambda r, q: fulfill(r, {"phase": "Running", "nodes": [], "migrations": []}))
+    page.route(f"**{VM}/transfer/check", check)
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_function("window.VMMigrate && window.VMTransfer")
+    page.evaluate("VMMigrate.open('harv-fake', 'default', 'vm1', 'cluster')")
+    pane = page.locator('#fp-vm-migrate-harv-fake-default-vm1 [data-pane="cluster"]')
+    expect(pane.locator('[data-x="report"] .sto-finding').first).to_be_visible(timeout=5000)
+    pane.locator('[data-x="to"]').select_option("second")
+    pane.locator('[data-x="name"]').fill("renamed")
+    pane.locator('[data-x="name"]').dispatch_event("change")
+    sel = pane.locator('select[data-map="networks"][data-src="default/lab"]')
+    expect(sel).to_have_value("default/lab", timeout=5000)
