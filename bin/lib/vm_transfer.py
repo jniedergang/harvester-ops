@@ -160,6 +160,23 @@ def _cloudinit_secrets(tspec):
     return names
 
 
+def vm_macs(vm):
+    """Adresses MAC d'une VM : celles de sa spec et celles que le webhook de
+    Harvester a notées dans son annotation. En minuscules."""
+    out = set()
+    for iface in ((_tspec(vm).get("domain") or {}).get("devices") or {}).get("interfaces") or []:
+        if iface.get("macAddress"):
+            out.add(iface["macAddress"].lower())
+    try:
+        ann = json.loads(((vm.get("metadata") or {}).get("annotations") or {})
+                         .get("harvesterhci.io/mac-address") or "{}")
+    except ValueError:
+        ann = {}
+    if isinstance(ann, dict):
+        out.update(str(v).lower() for v in ann.values() if v)
+    return out
+
+
 def vm_inventory(vm, pvcs, used=None):
     """Ce que la VM emporte : disques, réseaux, secrets cloud-init,
     périphériques, épinglage à un nœud, état.
@@ -193,6 +210,7 @@ def vm_inventory(vm, pvcs, used=None):
     return {
         "disks": disks,
         "networks": networks,
+        "macs": sorted(vm_macs(sanitize_vm(vm))),
         "secrets": _cloudinit_secrets(tspec),
         "devices": _devices(tspec),
         "node_affinity": _pinned_to_node(tspec),
@@ -494,6 +512,16 @@ def check(src, dst, req):
             if n > alloc:
                 out.append(_finding("capacity-short", "block", storage_class=sc,
                                     needed=n, allocatable=alloc))
+
+        # Harvester refuse deux VMs avec la même MAC sur un réseau de cluster,
+        # même arrêtée (vécu : la source d'origine, gardée arrêtée, bloquait
+        # le retour de sa copie)
+        keep = req.get("keep_mac", True) is not False and req.get("source") != "running"
+        taken = dst.get("macs") or {}
+        clash = sorted(m for m in inv.get("macs") or [] if m in taken)
+        if keep and clash:
+            out.append(_finding("mac-in-use", "block", macs=", ".join(clash),
+                                vms=", ".join(sorted({taken[m] for m in clash}))))
 
     if inv.get("devices"):
         out.append(_finding("devices-removed", "warn", devices=list(inv["devices"])))

@@ -147,6 +147,7 @@ def test_inventory_of_leap156():
         "access_modes": ["ReadWriteMany"], "volume_mode": "Block",
         "image": "default/opensuse-leap-cloud", "used": None,
     }]
+    assert inv["macs"] == ["ca:02:10:ff:0f:61"]
     assert inv["networks"] == ["default/production"]
     assert inv["secrets"] == ["leap156-hd4ry"]
     assert inv["devices"] == []
@@ -608,3 +609,31 @@ def test_large_member_header_is_rewritten_in_place():
     assert len(hdr) == 512
     ti = tarfile.TarInfo.frombuf(hdr, "utf-8", "surrogateescape")
     assert ti.size == 20 * GIB and ti.name == "disks/big.raw.gz"
+
+
+def test_inventory_macs_include_the_annotation_ones():
+    vm = leap156()
+    vm["spec"]["template"]["spec"]["domain"]["devices"]["interfaces"][0].pop("macAddress")
+    vm["metadata"]["annotations"]["harvesterhci.io/mac-address"] = '{"default":"d2:79:9f:81:cf:fa"}'
+    assert inventory(vm)["macs"] == ["d2:79:9f:81:cf:fa"]
+
+
+def test_vm_macs_reads_spec_and_annotation():
+    vm = leap156()
+    vm["metadata"]["annotations"]["harvesterhci.io/mac-address"] = '{"other":"AA:BB:CC:DD:EE:FF"}'
+    assert vt.vm_macs(vm) == {"ca:02:10:ff:0f:61", "aa:bb:cc:dd:ee:ff"}
+
+
+def test_macs_already_used_on_the_target_block_when_kept():
+    """Vécu sur harvlab : la VM réimportée gardait ses adresses, et sa source
+    d'origine, arrêtée mais présente, les portait encore ; le webhook de
+    Harvester a refusé (« duplicate mac address »)."""
+    taken = {"ca:02:10:ff:0f:61": "default/xfer-test"}
+    f = vt.check(src_facts(), dst_facts(macs=taken), req(keep_mac=True))
+    hit = [x for x in f if x["code"] == "mac-in-use"]
+    assert hit and hit[0]["level"] == "block"
+    assert hit[0]["facts"] == {"macs": "ca:02:10:ff:0f:61", "vms": "default/xfer-test"}
+    assert "mac-in-use" not in codes(vt.check(src_facts(), dst_facts(macs=taken), req(keep_mac=False)))
+    # une copie qui laisse la source en marche prend toujours de nouvelles adresses
+    assert "mac-in-use" not in codes(vt.check(src_facts(), dst_facts(macs=taken),
+                                              req(keep_mac=True, source="running")))

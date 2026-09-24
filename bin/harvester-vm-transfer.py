@@ -276,12 +276,18 @@ def collect_target(kube, namespace, name, cluster=""):
                               image=bool((sc.get("parameters") or {}).get("backingImage")))
     nets = [f"{n['metadata']['namespace']}/{n['metadata']['name']}"
             for n in kube.list("network-attachment-definitions.k8s.cni.cncf.io")]
+    vms = kube.list(run.K_VM)
+    macs = {}
+    for v in vms:
+        for m in vt.vm_macs(v):
+            macs[m] = f"{v['metadata'].get('namespace')}/{v['metadata']['name']}"
     return {"cluster": cluster, "reachable": True,
             "kubevirt": "virtualmachines.kubevirt.io" in crds, "cdi": cdi_ok,
             "version": version,
             "namespaces": [n["metadata"]["name"] for n in kube.list(run.K_NS)],
-            "vm_names": [v["metadata"]["name"] for v in kube.list(run.K_VM, namespace)]
-            if kube.get(run.K_NS, None, namespace) else [],
+            "vm_names": [v["metadata"]["name"] for v in vms
+                         if v["metadata"].get("namespace") == namespace],
+            "macs": macs,
             "networks": nets, "storage_classes": classes,
             "default_storage_class": _default_class(scs),
             "backup_target": vt.normalize_backup_target(bt_raw),
@@ -296,8 +302,12 @@ def facts_from_archive(reader, path):
     if m.get("format") != vt.FORMAT:
         raise SystemExit(f"{path}: unsupported archive format {m.get('format')}")
     src = m.get("source") or {}
+    # les MAC se relisent sur la VM du manifeste (nettoyée, elle les porte
+    # dans ses interfaces) : l'inventaire d'une archive plus ancienne ne les
+    # liste pas
+    inv = dict(m["inventory"], macs=sorted(vt.vm_macs(m.get("vm") or {})))
     return m, {"cluster": src.get("cluster", ""), "version": src.get("version", ""),
-               "inventory": m["inventory"], "backup_target": None, "backup_target_ok": False,
+               "inventory": inv, "backup_target": None, "backup_target_ok": False,
                "images": {}, "room_one": 0}
 
 

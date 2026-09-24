@@ -529,6 +529,7 @@ def test_direct_transfer_streams_each_disk_to_cdi(env):
     vols = {v["name"]: v for v in vm["spec"]["template"]["spec"]["volumes"]}
     assert vols["disk-0"]["persistentVolumeClaim"]["claimName"] == claim
     secret = vols["cloudinitdisk"]["cloudInitNoCloud"]["secretRef"]["name"]
+    assert secret == "leap156-cloudinit-t1"
     assert e.dst.objs[(run.K_SECRET, "default", secret)]["data"] == {"userdata": "I2Nsb3VkLWNvbmZpZw=="}
     # images temporaires supprimées, rien d'étiqueté ne reste
     assert not [k for k in e.src.objs if k[0] == run.K_IMAGE]

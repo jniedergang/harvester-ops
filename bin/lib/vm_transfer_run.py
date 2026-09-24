@@ -493,8 +493,11 @@ def create_target_vm(ctx, clean_vm, secrets, claims):
     req = ctx.req
     ns, name = req["namespace"], req["name"]
     smap = {}
-    for s in secrets:
-        new = _short(f"{name}-{s['name']}-{ctx.tid}")
+    for i, s in enumerate(secrets):
+        # nom court et stable : repris du nom d'origine, il s'allongeait à
+        # chaque transfert (xfer-back-xfer-test-xfer-test-cloudinit-...)
+        suffix = "cloudinit" if len(secrets) == 1 else f"cloudinit{i}"
+        new = _short(f"{name}-{suffix}-{ctx.tid}")
         ctx.dst.create(vt.secret_manifest(s, new, ns, ctx.tid))
         ctx.record("dst", K_SECRET, ns, new)
         smap[s["name"]] = new
