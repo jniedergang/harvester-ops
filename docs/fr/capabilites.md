@@ -523,24 +523,106 @@ bit à bit après une copie, un export et un import entre versions.
   clusters ou la base d'actions sont en défaut (`/healthz` pour la
   liveness).
 
-## 4. Cluster API — clusters RKE2 downstream (console)
+## 4. Cluster API : clusters RKE2 en aval (console + CLI)
 
-Provisionner et opérer des clusters Kubernetes downstream sur Harvester
-via le Cluster API Provider Harvester (CAPHV).
+Créer et exploiter des clusters Kubernetes dont les nœuds sont des VMs
+Harvester, par Cluster API et le Cluster API Provider Harvester (CAPHV). La
+console lance `harvester-capi` à chaque étape, que la CLI peut lancer
+aussi.
 
-- **Installer la stack depuis un bundle airgap** — cert-manager, CAPI
-  core, les providers RKE2 bootstrap/control-plane, CAPHV et une
-  ClusterClass — avec progression pas à pas dans le dock.
-- **Créer des clusters** via un wizard guidé (sizing, image, SSH, réseau,
-  CNI), avec aperçu YAML (dry-run) avant apply. Les manifestes sont
-  produits par l'outil `caphv-generate`, qui n'est pas livré dans le
-  tarball : sans lui sur l'hôte, la création répond que l'outil manque.
-- **Opérer** les clusters managés : scaler (patch la topologie),
-  télécharger le kubeconfig, voir spec/conditions/machines, supprimer. Les
-  montées de version Kubernetes ne sont pas implémentées.
-- **Gestion des bundles** — bundles airgap horodatés avec marqueur actif,
-  inspect, upload, download, et contrôle de compatibilité avec la version
+### Installer la pile (1.48.0)
+
+- **Harvester v1.9 et suivants** embarquent Rancher Turtles, qui fait déjà
+  tourner le cœur de Cluster API. La console déclare à Turtles les
+  fournisseurs RKE2 (amorçage et plan de contrôle) et Harvester (objets
+  `CAPIProvider`) depuis le paquet airgap, sans accès à Internet, et charge
+  leurs images sur les nœuds par SSH. L'onglet Installation donne chaque
+  fournisseur avec sa version et son état.
+- **Des correctifs de compatibilité pour CAPHV v0.10.1 sur Harvester v1.9**
+  sont posés par l'installation et affichés sur le même onglet : un Service
+  `kube-system/ingress-expose` qui porte la VIP (Harvester v1.9 l'a retiré
+  et CAPHV le lit encore), un correctif pour que le cœur de Cluster API lise
+  l'état des HarvesterMachine tel que CAPHV l'écrit, et des gabarits
+  générés passés en `v1beta1`. Ils disparaîtront quand CAPHV livrera les
+  corrections.
+- **Les restes d'une installation antérieure** à côté de Turtles (un second
+  cœur Cluster API, des webhooks aux certificats expirés) sont repérés ; un
+  administrateur peut les retirer depuis l'onglet Installation. Rien de ce
+  qui appartient à Turtles n'est touché, et le retrait refuse tant qu'il
+  existe d'autres clusters que le cluster local.
+- **Les versions antérieures de Harvester** gardent l'installation
+  d'avant : cert-manager, cœur Cluster API et fournisseurs, tout depuis le
+  paquet.
+
+### Créer un cluster (1.48.0)
+
+L'onglet Création de cluster est un formulaire rempli à partir du cluster
+lui-même :
+
+- **L'essentiel** : le nom et la version de Kubernetes (les versions
+  créées pour de vrai avec le paquet sont marquées « testée »).
+- **La taille** : 1, 3 ou 5 nœuds de plan de contrôle, le nombre de
+  workers, et un gabarit petit / moyen / grand ou des CPU, mémoire et
+  disque sur mesure.
+- **Système et accès** : les images du cluster (sans les ISO ni les images
+  en cours de téléchargement, les images SUSE d'abord, la dernière choisie
+  retenue), l'utilisateur SSH suggéré d'après le système de l'image, et
+  une paire de clés.
+- **Le réseau** : le réseau des VMs avec son VLAN, le pool d'adresses avec
+  ses plages et ses adresses libres ; la passerelle et le masque sont tirés
+  du pool, et marqués comme tels tant qu'on ne les change pas ; le serveur
+  DNS est retenu.
+- **Les options avancées**, repliées : espaces de noms des objets du
+  cluster et des VMs, pools et réseaux supplémentaires, un disque de
+  données et sa classe de stockage, le CNI, les CIDR des pods et des
+  services, l'import dans Rancher, les compléments Fleet avec MTU,
+  encapsulation et BGP.
+
+Chaque contrôle s'explique au survol. Un **contrôle préalable** tourne
+pendant la saisie et dit, dans la langue de l'interface, ce qui bloque (pas
+assez d'adresses libres, CIDR qui se chevauchent, image absente ou pas
+prête, espace de noms qui contient déjà un cluster, pile non
+installée...) et ce qui mérite un coup d'œil (un seul nœud de plan de
+contrôle ou un nombre pair, mémoire ou CPU justes, une version jamais créée
+avec le paquet, une adresse d'API qui vient du DHCP). Le bouton Créer reste
+grisé tant que quelque chose bloque. **Aperçu** montre les manifestes, le
+secret d'identité masqué.
+
+La création est une action : la page et le dock la suivent
+(infrastructure, plan de contrôle a/b, workers c/d), et elle se termine sur
+le téléchargement du kubeconfig. L'annuler retire ce qu'elle a créé.
+
+### Exploiter les clusters
+
+- Liste, détails (spec, conditions, machines), mise à l'échelle des
+  workers, téléchargement du kubeconfig, suppression.
+- **La suppression ne laisse rien derrière elle (1.48.0)** : les VMs
+  d'abord, puis les objets que la console a générés à côté du cluster
+  (ClusterClass, gabarits, compléments, et le secret d'identité, qui porte
+  un kubeconfig du cluster Harvester) dès qu'aucun autre cluster de
+  l'espace de noms ne s'en sert, puis l'espace de noms si la console l'a
+  créé.
+- Les montées de version de Kubernetes ne sont pas implémentées.
+- Les volumes que réclament les applications du nouveau cluster sont des
+  volumes Harvester (PVC nommées `pvc-<id>` dans l'espace de noms des VMs).
+  Supprimer leurs demandes dans le cluster les libère ; un cluster supprimé
+  avec des demandes encore liées les laisse derrière lui.
+- **Les images SLES ont besoin d'un enregistrement ou d'un dépôt local** :
+  cloud-init installe `iptables` et `qemu-guest-agent` sur chaque nœud, et
+  sans eux les pods qui publient un port d'hôte (ingress-nginx) ne
+  démarrent pas. Le contrôle préalable le signale. L'image cloud openSUSE
+  Leap 15.6 fonctionne telle quelle.
+
+### Paquets et CLI
+
+- Paquets airgap horodatés avec marqueur actif, inspection, dépôt,
+  téléchargement, et contrôle de compatibilité avec la version de
   Harvester.
+- `harvester-capi status | install | cleanup-legacy | inventory | check |
+  render | create | delete`, chacune avec `--cluster` ou `--kubeconfig` ;
+  `create` sort en 2 quand le contrôle préalable bloque. Les manifestes sont
+  produits par `caphv-generate`, livré avec la console (repris de CAPHV à
+  un commit fixé, voir `bin/caphv-generate.PROVENANCE`).
 
 ## 5. Terraform — infrastructure as code (console)
 

@@ -4,6 +4,108 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.48.0] - 2026-09-25 - Creating a Kubernetes cluster works again, from a form that helps
+
+### Added
+- **Cluster creation form** (Automation, Cluster API, Cluster creation),
+  filled from the cluster itself: Kubernetes versions (the ones created for
+  real with the bundle marked "tested"), control plane 1/3/5, workers and
+  size presets, the cluster's images (no ISOs, SUSE first, the last choice
+  remembered) with the SSH user suggested from the image's system, key
+  pairs, networks with their VLAN, IP pools with their ranges and free
+  addresses; gateway and mask taken from the pool, DNS remembered. The
+  extended options (namespaces, extra pools and networks, data disk, CNI,
+  pod and service CIDRs, Rancher import, Fleet add-ons) are folded. Every
+  control has a tooltip, and a summary line gives the VMs, vCPUs, memory,
+  disk and addresses needed.
+- **Pre-check while typing**, in the interface language: what blocks (not
+  enough addresses, overlapping CIDRs, image missing or not ready, a
+  namespace that already holds a cluster, stack not installed...) and what
+  deserves a look (one or an even number of control plane nodes, CPU or
+  memory running short under Harvester's overcommit, a version never
+  created with the bundle, an unregistered SLES image). Create stays greyed
+  out while something blocks.
+- **Creation followed in the page and the dock** (infrastructure, control
+  plane a/b, workers c/d), ending with the kubeconfig download; cancelling
+  removes what was created. Preview shows the manifests with the identity
+  secret masked.
+- **Installation through Rancher Turtles on Harvester v1.9**: the RKE2 and
+  Harvester providers are declared as `CAPIProvider` objects fed from the
+  airgap bundle, their images loaded on the nodes over SSH; the
+  Installation tab lists them with their state. Leftovers of an earlier
+  install next to Turtles are detected and can be removed by an
+  administrator. The install checks its result on the cluster: Turtles
+  re-applies a provider without removing a label already on a CRD (seen
+  when reinstalling), so the contract label the patch removes is taken off
+  by the console, and the status reports it while it is there.
+- **`harvester-capi` command line**: `status`, `install`,
+  `cleanup-legacy`, `inventory`, `check`, `render`, `create`, `delete`. The
+  console runs it for every step.
+- **`caphv-generate` is shipped** with the console (taken from CAPHV at a
+  fixed commit, provenance recorded): without it, every creation used to
+  answer that the tool was missing.
+
+### Changed
+- The Installation, bundle and Kubernetes cluster views are translated in
+  the five languages (about fifty labels, messages and confirmations were
+  in English, one in French only), and every value from the cluster is
+  escaped.
+- Bundle: Kubernetes v1.34.11 by default; Harvester v1.9.x accepted.
+
+### Fixed
+- **Creation could not work on Harvester v1.9**, for three reasons in
+  CAPHV v0.10.1, worked around by the console until CAPHV ships the fixes:
+  the VIP Service it reads is gone (a stand-in is created), its machines
+  never looked provisioned to the Cluster API core v1.13 (a patch carried by
+  the provider keeps the core on the contract CAPHV follows), and its
+  generated templates at `v1alpha1` were refused once copied (moved to
+  `v1beta1`).
+- **The wait for a new cluster read the v1beta1 status**, which the Cluster
+  API core of Harvester v1.9 no longer serves: every creation would have
+  ended on a timeout.
+- **A cluster was announced ready too early** (seen twice for real):
+  Cluster API reports it available as soon as the control plane is up, the
+  workers being created afterwards; and a machine counted as soon as its
+  node registered, half a minute before the node was Ready. The console now
+  waits for the counts the topology asks for, each machine's node Ready, and
+  the Available condition when the core publishes one. The cluster list
+  reads the same counters from the cluster status.
+- **Deleting a cluster left its identity secret behind** (a kubeconfig of
+  the Harvester cluster), with the ClusterClass, templates and add-ons. They
+  are now removed with the last cluster of the namespace.
+- **An image with a space in its name was refused**; images are now
+  referenced by their object name.
+- **The free addresses of an IP pool could exceed its size** (Harvester's
+  counter drifts after deletions); they are counted from the allocations.
+- The request keys became script options without an allow list, and the
+  kubeconfig of a created cluster could be downloaded with the read-only
+  role: both closed.
+
+### Tests
+- Pure logic of the form and the pre-check against objects read on harv1
+  (71 tests, among them the two early "ready" cases rebuilt from what was
+  seen), the stack install with a simulated cluster (13), the command line
+  (13: deletion, images, versions), the form in a browser (11), the
+  translated views (6).
+- Real, on harv1 (Harvester v1.9.0, Turtles, Cluster API core v1.13.3):
+  providers installed from the Installation tab on a cleaned cluster,
+  images pushed over SSH, stand-in created, patch applied. Two clusters
+  created from the form (1 control plane, 1 worker, v1.34.11), followed in
+  the page to the end, reached with the downloaded kubeconfig, then deleted
+  from the list with nothing left behind (namespace, VMs, addresses):
+  - SLES 15 SP7: both nodes Ready, but ingress-nginx stuck, the image having
+    no repository (hence the new warning);
+  - openSUSE Leap 15.6: everything running, and a volume claimed inside the
+    new cluster provisioned by Harvester through its CSI driver, written,
+    then released.
+- Real, the CAPHV fixes meant for upstream: the patched provider image on
+  harv1 without any of the three workarounds (contract label present, no
+  stand-in Service, templates rendered at `v1alpha1`): a cluster reached
+  Available with both machines provisioned, its cloud provider pointing at
+  the VIP found on `rke2-traefik`. harv1 was then put back to the shipped
+  configuration from the Installation tab, which is where the leftover
+  label was found.
+
 ## [1.47.2] - 2026-09-25 - Small defects seen while testing 1.47
 
 ### Fixed

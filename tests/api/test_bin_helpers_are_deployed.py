@@ -68,3 +68,20 @@ def test_install_sh_deploys_every_shared_library():
     block = src.split("install_scripts()", 1)[1].split("\n}", 1)[0]
     assert 'bin/lib/*' in block, block
     assert (BIN / "lib" / "longhorn_room.py").is_file()
+
+
+def test_the_cluster_generator_is_deployed_and_executable():
+    """v1.48.0 : `caphv-generate` (dépôt CAPHV) n'a pas d'extension. Le glob
+    `bin/*.sh bin/*.py` ne le prenait pas : sur l'hôte installé, la création
+    de cluster aurait échoué faute de générateur, comme avant 1.48 où il
+    n'était livré nulle part."""
+    import os
+    gen = BIN / "caphv-generate"
+    assert gen.is_file() and os.access(gen, os.X_OK)
+    assert (BIN / "caphv-generate.PROVENANCE").is_file()
+    src = (ROOT / "install.sh").read_text()
+    block = src.split("install_scripts()", 1)[1].split("\n}", 1)[0]
+    assert "bin/caphv-generate" in block and 'harvester-capi"' in block
+    dockerfile = (ROOT / "container" / "Containerfile").read_text()
+    assert "/usr/local/bin/caphv-generate" in dockerfile
+    assert "/usr/local/bin/harvester-capi" in dockerfile

@@ -95,10 +95,14 @@ install_scripts() {
     # had already been left out, which makes the bare-metal install fail
     # with a missing script, and the provider installer would have been the
     # next one forgotten.
-    for helper in "$SCRIPT_DIR"/bin/*.sh "$SCRIPT_DIR"/bin/*.py; do
+    for helper in "$SCRIPT_DIR"/bin/*.sh "$SCRIPT_DIR"/bin/*.py "$SCRIPT_DIR"/bin/caphv-generate; do
         [ -f "$helper" ] || continue
         install -m 0755 "$helper" "$PREFIX/"
     done
+    # v1.48.0 : le générateur de clusters (dépôt CAPHV) et sa provenance
+    if [ -f "$SCRIPT_DIR/bin/caphv-generate.PROVENANCE" ]; then
+        install -m 0644 "$SCRIPT_DIR/bin/caphv-generate.PROVENANCE" "$PREFIX/"
+    fi
     # Toute la bibliothèque partagée : common.sh pour les scripts bash, et
     # depuis la v1.45.0 les modules Python communs avec la console.
     for lib in "$SCRIPT_DIR"/bin/lib/*; do
@@ -109,7 +113,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-startup.sh"  "$PREFIX/harvester-startup"
     ln -sf "$PREFIX/harvester-status.sh"   "$PREFIX/harvester-status"
     ln -sf "$PREFIX/harvester-vm-transfer.py" "$PREFIX/harvester-vm-transfer"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer}"
+    ln -sf "$PREFIX/harvester-capi.py" "$PREFIX/harvester-capi"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,capi}"
 }
 
 # -----------------------------------------------------------------------------

@@ -450,24 +450,95 @@ versions.
 - **`/healthz/ready`** — readiness probe returning 503 when config,
   clusters, or the action DB are unhealthy (`/healthz` for liveness).
 
-## 4. Cluster API — downstream RKE2 clusters (console)
+## 4. Cluster API: downstream RKE2 clusters (console + CLI)
 
-Provision and operate downstream Kubernetes clusters on Harvester through
-the Cluster API Provider Harvester (CAPHV).
+Create and operate Kubernetes clusters whose nodes are Harvester VMs,
+through Cluster API and the Cluster API Provider Harvester (CAPHV). The
+console runs `harvester-capi` for every step, which the CLI can run too.
 
-- **Install the stack from an airgap bundle** — cert-manager, CAPI core,
-  the RKE2 bootstrap/control-plane providers, CAPHV, and a ClusterClass —
-  with step-by-step progress in the dock.
-- **Create clusters** via a guided wizard (sizing, image, SSH, network,
-  CNI), with a YAML preview (dry-run) before apply. The manifests are
-  rendered by the `caphv-generate` tool, which is not shipped in the
-  tarball: without it on the host, creation answers that the tool is
-  missing.
-- **Operate** managed clusters: scale (patches the topology), download
-  kubeconfig, view spec/conditions/machines, delete. Kubernetes version
-  upgrades are not implemented.
-- **Bundle management** — timestamped airgap bundles with active marker,
-  inspect, upload, download, and a Harvester-version compatibility check.
+### Installing the stack (1.48.0)
+
+- **Harvester v1.9 and later** embed Rancher Turtles, which already runs the
+  Cluster API core. The console declares the RKE2 bootstrap, RKE2 control
+  plane and Harvester providers to Turtles (`CAPIProvider` objects) from the
+  airgap bundle, without Internet access, and loads their images on the
+  nodes over SSH. The Installation tab lists each provider with its version
+  and state.
+- **Compatibility fixes for CAPHV v0.10.1 on Harvester v1.9** are applied by
+  the install and shown on the same tab: a `kube-system/ingress-expose`
+  Service carrying the VIP (Harvester v1.9 removed it and CAPHV still reads
+  it), a patch that keeps the Cluster API core reading the HarvesterMachine
+  status the way CAPHV writes it, and generated templates moved to
+  `v1beta1`. They go away once CAPHV ships the fixes.
+- **Leftovers of an earlier install** next to Turtles (a second Cluster API
+  core, webhooks with expired certificates) are detected; an administrator
+  can remove them from the Installation tab. Nothing that Turtles owns is
+  touched, and the removal refuses while clusters other than the local one
+  exist.
+- **Older Harvester releases** keep the previous install: cert-manager,
+  Cluster API core and providers, all from the bundle.
+
+### Creating a cluster (1.48.0)
+
+The Cluster creation tab is a form filled from the cluster itself:
+
+- **Essentials**: the name and the Kubernetes version (versions created for
+  real with the bundle are marked "tested").
+- **Size**: 1, 3 or 5 control plane nodes, the number of workers, and a
+  small / medium / large preset or custom CPU, memory and disk.
+- **System and access**: the images of the cluster (ISOs and images still
+  downloading are left out, SUSE images first, the last one used is
+  remembered), the SSH user suggested from the image's system, and a key
+  pair.
+- **Network**: the VM network with its VLAN, the IP pool with its ranges and
+  free addresses; the gateway and mask are taken from the pool and marked as
+  such until changed; the DNS server is remembered.
+- **Advanced options**, folded: namespaces of the cluster objects and of
+  the VMs, extra IP pools and networks, a data disk and its storage class,
+  the CNI, pod and service CIDRs, import into Rancher, Fleet add-ons with
+  MTU, encapsulation and BGP.
+
+Every control explains itself on hover. A **pre-check** runs as you type
+and lists, in the interface language, what blocks (not enough free
+addresses, overlapping CIDRs, image missing or not ready, a namespace that
+already holds a cluster, stack not installed...) and what deserves a look
+(one or an even number of control plane nodes, memory or CPU running short,
+a version never created with the bundle, an endpoint address that comes
+from DHCP). Create stays disabled while something blocks. **Preview** shows
+the manifests with the identity secret masked.
+
+Creation is an action: the page and the dock follow it (infrastructure,
+control plane a/b, workers c/d), and it ends with a kubeconfig download.
+Cancelling it removes what it created.
+
+### Operating clusters
+
+- List, details (spec, conditions, machines), scale the workers, download
+  the kubeconfig, delete.
+- **Deletion leaves nothing behind (1.48.0)**: the VMs go first, then the
+  objects the console generated next to the cluster (ClusterClass,
+  templates, add-ons, and the identity secret, which holds a kubeconfig of
+  the Harvester cluster) once no other cluster in the namespace uses them,
+  then the namespace if the console created it.
+- Kubernetes version upgrades are not implemented.
+- Volumes that the new cluster's workloads claim are Harvester volumes
+  (PVCs named `pvc-<id>` in the VM namespace). Deleting their claims in the
+  cluster releases them; a cluster deleted with claims still bound leaves
+  them behind.
+- **SLES images need a registration or a local repository**: cloud-init
+  installs `iptables` and `qemu-guest-agent` on each node, and without them
+  pods that publish a host port (ingress-nginx) do not start. The
+  pre-check says so. The openSUSE Leap 15.6 cloud image works as is.
+
+### Bundles and CLI
+
+- Timestamped airgap bundles with an active marker, inspect, upload,
+  download, and a Harvester version compatibility check.
+- `harvester-capi status | install | cleanup-legacy | inventory | check |
+  render | create | delete`, each with `--cluster` or `--kubeconfig`;
+  `create` exits 2 when the pre-check blocks. The manifests are rendered by
+  `caphv-generate`, shipped with the console (taken from CAPHV at a fixed
+  commit, see `bin/caphv-generate.PROVENANCE`).
 
 ## 5. Terraform — infrastructure as code (console)
 

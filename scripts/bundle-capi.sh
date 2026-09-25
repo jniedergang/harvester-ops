@@ -137,6 +137,39 @@ done < "$inventory_file"
 ok "Images bundled ($(ls "$BUNDLE/images" | wc -l) files)"
 
 # ----------------------------------------------------------------------------
+# 2b. Turtles mode (Harvester 1.9+): turtles.json + turtles/<key>/
+# ----------------------------------------------------------------------------
+# The console declares these providers as CAPIProvider objects whose
+# components come from ConfigMaps built from these files.
+python3 - "$CONF" "$BUNDLE" <<'PY'
+import json, shutil, sys, yaml
+from pathlib import Path
+conf, bundle = sys.argv[1], Path(sys.argv[2])
+data = yaml.safe_load(open(conf)) or {}
+meta = data.get("bundle_metadata") or {}
+index = json.loads((bundle / "manifest.json").read_text())
+providers = []
+for comp, body in data.items():
+    if not isinstance(body, dict) or not body.get("turtles"):
+        continue
+    t = dict(body["turtles"])
+    dest = bundle / "turtles" / t["key"]
+    dest.mkdir(parents=True, exist_ok=True)
+    for m in body.get("manifests") or []:
+        shutil.copy(bundle / "manifests" / comp / f"{m['name']}.yaml", dest / f"{m['name']}.yaml")
+    t["version"] = body["version"]
+    t["images"] = list(body.get("images") or [])
+    t["image_files"] = [i["file"] for i in index.get("images", []) if i["component"] == comp]
+    providers.append(t)
+out = {"providers": providers,
+       "kubernetes_versions": meta.get("kubernetes_versions") or [],
+       "default_kubernetes_version": meta.get("default_kubernetes_version")}
+(bundle / "turtles.json").write_text(json.dumps(out, indent=2))
+print(f"  turtles.json: {len(providers)} provider(s)")
+PY
+ok "Turtles providers described"
+
+# ----------------------------------------------------------------------------
 # 3. Local ClusterClass + templates (from CAPHV repo if present)
 # ----------------------------------------------------------------------------
 # Search several plausible locations for the plain-YAML ClusterClass

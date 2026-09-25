@@ -1,0 +1,67 @@
+{
+ "apiVersion": "loadbalancer.harvesterhci.io/v1beta1",
+ "kind": "IPPool",
+ "metadata": {
+  "annotations": {},
+  "finalizers": [
+   "wrangler.cattle.io/harvester-ipam-controller"
+  ],
+  "labels": {
+   "loadbalancer.harvesterhci.io/global-ip-pool": "false",
+   "loadbalancer.harvesterhci.io/vid": "0"
+  },
+  "name": "capi-vm-pool"
+ },
+ "spec": {
+  "ranges": [
+   {
+    "gateway": "172.16.0.1",
+    "rangeEnd": "172.16.3.49",
+    "rangeStart": "172.16.3.44",
+    "subnet": "172.16.0.0/16"
+   },
+   {
+    "gateway": "172.16.0.1",
+    "rangeEnd": "172.16.3.69",
+    "rangeStart": "172.16.3.60",
+    "subnet": "172.16.0.0/16"
+   }
+  ],
+  "selector": {}
+ },
+ "status": {
+  "allocated": {
+   "172.16.3.46": "essai-capi/essai-capi-gmqzm-rnbsk",
+   "172.16.3.47": "essai-capi/essai-capi-workers-zq477-w8tzg-q4w9z",
+   "172.16.3.48": "essai-capi/essai-capi-workers-zq477-w8tzg-6xkr9"
+  },
+  "allocatedHistory": {
+   "172.16.3.44": "",
+   "172.16.3.45": "",
+   "172.16.3.46": "",
+   "172.16.3.47": "default/creategitops-w2qapi-caphv-gitops-am03zl-ngcdb-lb",
+   "172.16.3.48": "",
+   "172.16.3.49": "",
+   "172.16.3.60": "default/creategitops-8b19c6-caphv-gitops-z1jrx1-ktwhn-lb",
+   "172.16.3.61": "",
+   "172.16.3.62": "",
+   "172.16.3.63": "default/creategitops-s9wq6y-caphv-gitops-5ym00d-bwzqt-lb",
+   "172.16.3.64": "creategitops-s9wq6y/caphv-gitops-5ym00d-nwg5p-ms4n5",
+   "172.16.3.65": "",
+   "172.16.3.66": "default/creategitops-3epbm6-caphv-gitops-nnt9mu-9sgn4-lb",
+   "172.16.3.67": "",
+   "172.16.3.68": "",
+   "172.16.3.69": "default/creategitops-hvw305-caphv-gitops-rbztyu-plcc4-lb"
+  },
+  "available": 13,
+  "conditions": [
+   {
+    "lastUpdateTime": "2026-03-07T21:17:59Z",
+    "status": "True",
+    "type": "Ready"
+   }
+  ],
+  "lastAllocated": "172.16.3.48",
+  "total": 16
+ }
+}

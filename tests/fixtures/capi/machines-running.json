@@ -1,0 +1,659 @@
+{
+ "apiVersion": "v1",
+ "items": [
+  {
+   "apiVersion": "cluster.x-k8s.io/v1beta2",
+   "kind": "Machine",
+   "metadata": {
+    "annotations": {
+     "controlplane.cluster.x-k8s.io/rke2-server-configuration": "{\"cni\":\"calico\",\"cloudProviderName\":\"external\"}",
+     "pre-terminate.delete.hook.machine.cluster.x-k8s.io/rke2-cleanup": ""
+    },
+    "finalizers": [
+     "machine.cluster.x-k8s.io"
+    ],
+    "labels": {
+     "cluster.x-k8s.io/cluster-name": "essai-capi",
+     "cluster.x-k8s.io/control-plane": "",
+     "cluster.x-k8s.io/control-plane-name": "essai-capi-qjz24",
+     "topology.cluster.x-k8s.io/owned": ""
+    },
+    "name": "essai-capi-qjz24-7lt27",
+    "namespace": "essai-capi",
+    "ownerReferences": [
+     {
+      "apiVersion": "controlplane.cluster.x-k8s.io/v1beta2",
+      "blockOwnerDeletion": true,
+      "controller": true,
+      "kind": "RKE2ControlPlane",
+      "name": "essai-capi-qjz24",
+      "uid": "b6ec9e87-2003-4731-966e-08dc402b2d11"
+     }
+    ]
+   },
+   "spec": {
+    "bootstrap": {
+     "configRef": {
+      "apiGroup": "bootstrap.cluster.x-k8s.io",
+      "kind": "RKE2Config",
+      "name": "essai-capi-qjz24-d6wwp"
+     },
+     "dataSecretName": "essai-capi-qjz24-d6wwp"
+    },
+    "clusterName": "essai-capi",
+    "deletion": {
+     "nodeDeletionTimeoutSeconds": 10,
+     "nodeDrainTimeoutSeconds": 120,
+     "nodeVolumeDetachTimeoutSeconds": 300
+    },
+    "failureDomain": "harv1.home.lo",
+    "infrastructureRef": {
+     "apiGroup": "infrastructure.cluster.x-k8s.io",
+     "kind": "HarvesterMachine",
+     "name": "essai-capi-gmqzm-rnbsk"
+    },
+    "providerID": "harvester://b77ab019-b2a5-4b7f-be75-78a1a15bc3f9",
+    "version": "v1.31.14+rke2r1"
+   },
+   "status": {
+    "addresses": [
+     {
+      "address": "172.16.3.46",
+      "type": "ExternalIP"
+     },
+     {
+      "address": "fe80::ecee:eeff:feee:eeee",
+      "type": "ExternalIP"
+     },
+     {
+      "address": "10.42.103.64",
+      "type": "ExternalIP"
+     }
+    ],
+    "conditions": [
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Available",
+      "status": "True",
+      "type": "Available"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:26:53Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "UpToDate",
+      "status": "True",
+      "type": "UpToDate"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:20:20Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "BootstrapConfigReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "InfrastructureReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeHealthy",
+      "status": "True",
+      "type": "NodeHealthy"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:23:39Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeReady",
+      "status": "True",
+      "type": "NodeReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Healthy",
+      "status": "True",
+      "type": "EtcdMemberHealthy"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:33Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "HealthCheckSucceeded",
+      "status": "True",
+      "type": "HealthCheckSucceeded"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:20:20Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotUpdating",
+      "status": "False",
+      "type": "Updating"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Healthy",
+      "status": "True",
+      "type": "AgentHealthy"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "UpToDate",
+      "status": "True",
+      "type": "NodeMetadataUpToDate"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:20:18Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotPaused",
+      "status": "False",
+      "type": "Paused"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:20:20Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotDeleting",
+      "status": "False",
+      "type": "Deleting"
+     }
+    ],
+    "deprecated": {
+     "v1beta1": {
+      "conditions": [
+       {
+        "lastTransitionTime": "2026-09-25T17:41:18Z",
+        "status": "True",
+        "type": "Ready"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:20:21Z",
+        "status": "True",
+        "type": "BootstrapReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:41:33Z",
+        "status": "True",
+        "type": "HealthCheckSucceeded"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:41:18Z",
+        "status": "True",
+        "type": "InfrastructureReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:41:18Z",
+        "status": "True",
+        "type": "NodeHealthy"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:41:18Z",
+        "status": "True",
+        "type": "NodeMetadataUpToDate"
+       }
+      ]
+     }
+    },
+    "failureDomain": "harv1.home.lo",
+    "initialization": {
+     "bootstrapDataSecretCreated": true,
+     "infrastructureProvisioned": true
+    },
+    "lastUpdated": "2026-09-25T17:41:18Z",
+    "nodeInfo": {
+     "architecture": "amd64",
+     "bootID": "699b5ce5-b4ef-40f2-8770-75a9605a81f5",
+     "containerRuntimeVersion": "containerd://2.1.5-k3s1",
+     "kernelVersion": "6.4.0-150700.53.22-default",
+     "kubeProxyVersion": "v1.31.14+rke2r1",
+     "kubeletVersion": "v1.31.14+rke2r1",
+     "machineID": "b4c513969c154f97ad060de0b919745e",
+     "operatingSystem": "linux",
+     "osImage": "SUSE Linux Enterprise Server 15 SP7",
+     "systemUUID": "b4c51396-9c15-4f97-ad06-0de0b919745e"
+    },
+    "nodeRef": {
+     "name": "essai-capi-gmqzm-rnbsk"
+    },
+    "observedGeneration": 3,
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "cluster.x-k8s.io/v1beta2",
+   "kind": "Machine",
+   "metadata": {
+    "finalizers": [
+     "machine.cluster.x-k8s.io"
+    ],
+    "labels": {
+     "cluster.x-k8s.io/cluster-name": "essai-capi",
+     "cluster.x-k8s.io/deployment-name": "essai-capi-workers-zq477",
+     "cluster.x-k8s.io/set-name": "essai-capi-workers-zq477-w8tzg",
+     "machine-template-hash": "3437603892-w8tzg",
+     "topology.cluster.x-k8s.io/deployment-name": "workers",
+     "topology.cluster.x-k8s.io/owned": ""
+    },
+    "name": "essai-capi-workers-zq477-w8tzg-6xkr9",
+    "namespace": "essai-capi",
+    "ownerReferences": [
+     {
+      "apiVersion": "cluster.x-k8s.io/v1beta2",
+      "blockOwnerDeletion": true,
+      "controller": true,
+      "kind": "MachineSet",
+      "name": "essai-capi-workers-zq477-w8tzg",
+      "uid": "217d359e-a5d6-465e-a44e-c0762f9cd387"
+     }
+    ]
+   },
+   "spec": {
+    "bootstrap": {
+     "configRef": {
+      "apiGroup": "bootstrap.cluster.x-k8s.io",
+      "kind": "RKE2Config",
+      "name": "essai-capi-workers-zq477-w8tzg-6xkr9"
+     },
+     "dataSecretName": "essai-capi-workers-zq477-w8tzg-6xkr9"
+    },
+    "clusterName": "essai-capi",
+    "deletion": {
+     "nodeDeletionTimeoutSeconds": 10
+    },
+    "infrastructureRef": {
+     "apiGroup": "infrastructure.cluster.x-k8s.io",
+     "kind": "HarvesterMachine",
+     "name": "essai-capi-workers-zq477-w8tzg-6xkr9"
+    },
+    "providerID": "harvester://cca72664-1fd7-49f0-9ea5-6a5947f61624",
+    "version": "v1.31.14+rke2r1"
+   },
+   "status": {
+    "addresses": [
+     {
+      "address": "172.16.3.48",
+      "type": "ExternalIP"
+     }
+    ],
+    "conditions": [
+     {
+      "lastTransitionTime": "2026-09-25T17:48:17Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Available",
+      "status": "True",
+      "type": "Available"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:48:17Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:43Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "UpToDate",
+      "status": "True",
+      "type": "UpToDate"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:43Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "BootstrapConfigReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:53Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "InfrastructureReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:48:17Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeHealthy",
+      "status": "True",
+      "type": "NodeHealthy"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:48:17Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeReady",
+      "status": "True",
+      "type": "NodeReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:48:20Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "HealthCheckSucceeded",
+      "status": "True",
+      "type": "HealthCheckSucceeded"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:43Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotUpdating",
+      "status": "False",
+      "type": "Updating"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:42Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotPaused",
+      "status": "False",
+      "type": "Paused"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:43Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotDeleting",
+      "status": "False",
+      "type": "Deleting"
+     }
+    ],
+    "deprecated": {
+     "v1beta1": {
+      "conditions": [
+       {
+        "lastTransitionTime": "2026-09-25T17:44:54Z",
+        "reason": "WaitingForInfrastructure",
+        "severity": "Info",
+        "status": "False",
+        "type": "Ready"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:44:45Z",
+        "status": "True",
+        "type": "BootstrapReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:48:20Z",
+        "status": "True",
+        "type": "HealthCheckSucceeded"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:44:54Z",
+        "reason": "WaitingForInfrastructure",
+        "severity": "Info",
+        "status": "False",
+        "type": "InfrastructureReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:48:17Z",
+        "status": "True",
+        "type": "NodeHealthy"
+       }
+      ]
+     }
+    },
+    "initialization": {
+     "bootstrapDataSecretCreated": true,
+     "infrastructureProvisioned": true
+    },
+    "lastUpdated": "2026-09-25T17:47:50Z",
+    "nodeInfo": {
+     "architecture": "amd64",
+     "bootID": "ce351ef2-930f-44ed-8c88-8cbf49998ee2",
+     "containerRuntimeVersion": "containerd://2.1.5-k3s1",
+     "kernelVersion": "6.4.0-150700.53.22-default",
+     "kubeProxyVersion": "v1.31.14+rke2r1",
+     "kubeletVersion": "v1.31.14+rke2r1",
+     "machineID": "c6a7ea942cbd46dd8c5fc2ea8cbfdbad",
+     "operatingSystem": "linux",
+     "osImage": "SUSE Linux Enterprise Server 15 SP7",
+     "systemUUID": "c6a7ea94-2cbd-46dd-8c5f-c2ea8cbfdbad"
+    },
+    "nodeRef": {
+     "name": "essai-capi-workers-zq477-w8tzg-6xkr9"
+    },
+    "observedGeneration": 3,
+    "phase": "Running"
+   }
+  },
+  {
+   "apiVersion": "cluster.x-k8s.io/v1beta2",
+   "kind": "Machine",
+   "metadata": {
+    "finalizers": [
+     "machine.cluster.x-k8s.io"
+    ],
+    "labels": {
+     "cluster.x-k8s.io/cluster-name": "essai-capi",
+     "cluster.x-k8s.io/deployment-name": "essai-capi-workers-zq477",
+     "cluster.x-k8s.io/set-name": "essai-capi-workers-zq477-w8tzg",
+     "machine-template-hash": "3437603892-w8tzg",
+     "topology.cluster.x-k8s.io/deployment-name": "workers",
+     "topology.cluster.x-k8s.io/owned": ""
+    },
+    "name": "essai-capi-workers-zq477-w8tzg-q4w9z",
+    "namespace": "essai-capi",
+    "ownerReferences": [
+     {
+      "apiVersion": "cluster.x-k8s.io/v1beta2",
+      "blockOwnerDeletion": true,
+      "controller": true,
+      "kind": "MachineSet",
+      "name": "essai-capi-workers-zq477-w8tzg",
+      "uid": "217d359e-a5d6-465e-a44e-c0762f9cd387"
+     }
+    ]
+   },
+   "spec": {
+    "bootstrap": {
+     "configRef": {
+      "apiGroup": "bootstrap.cluster.x-k8s.io",
+      "kind": "RKE2Config",
+      "name": "essai-capi-workers-zq477-w8tzg-q4w9z"
+     },
+     "dataSecretName": "essai-capi-workers-zq477-w8tzg-q4w9z"
+    },
+    "clusterName": "essai-capi",
+    "deletion": {
+     "nodeDeletionTimeoutSeconds": 10
+    },
+    "infrastructureRef": {
+     "apiGroup": "infrastructure.cluster.x-k8s.io",
+     "kind": "HarvesterMachine",
+     "name": "essai-capi-workers-zq477-w8tzg-q4w9z"
+    },
+    "providerID": "harvester://f043eda3-28f0-4f7f-a9f6-65a8c59ac562",
+    "version": "v1.31.14+rke2r1"
+   },
+   "status": {
+    "addresses": [
+     {
+      "address": "172.16.3.47",
+      "type": "ExternalIP"
+     }
+    ],
+    "conditions": [
+     {
+      "lastTransitionTime": "2026-09-25T17:44:05Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Available",
+      "status": "True",
+      "type": "Available"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:05Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:22Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "UpToDate",
+      "status": "True",
+      "type": "UpToDate"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:22Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "BootstrapConfigReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:42:49Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "Ready",
+      "status": "True",
+      "type": "InfrastructureReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:05Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeHealthy",
+      "status": "True",
+      "type": "NodeHealthy"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:05Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NodeReady",
+      "status": "True",
+      "type": "NodeReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:44:12Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "HealthCheckSucceeded",
+      "status": "True",
+      "type": "HealthCheckSucceeded"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:22Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotUpdating",
+      "status": "False",
+      "type": "Updating"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:21Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotPaused",
+      "status": "False",
+      "type": "Paused"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:41:22Z",
+      "message": "",
+      "observedGeneration": 3,
+      "reason": "NotDeleting",
+      "status": "False",
+      "type": "Deleting"
+     }
+    ],
+    "deprecated": {
+     "v1beta1": {
+      "conditions": [
+       {
+        "lastTransitionTime": "2026-09-25T17:42:49Z",
+        "status": "True",
+        "type": "Ready"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:41:24Z",
+        "status": "True",
+        "type": "BootstrapReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:44:12Z",
+        "status": "True",
+        "type": "HealthCheckSucceeded"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:42:49Z",
+        "status": "True",
+        "type": "InfrastructureReady"
+       },
+       {
+        "lastTransitionTime": "2026-09-25T17:44:05Z",
+        "status": "True",
+        "type": "NodeHealthy"
+       }
+      ]
+     }
+    },
+    "initialization": {
+     "bootstrapDataSecretCreated": true,
+     "infrastructureProvisioned": true
+    },
+    "lastUpdated": "2026-09-25T17:43:41Z",
+    "nodeInfo": {
+     "architecture": "amd64",
+     "bootID": "3cf6cffa-06c5-4d3e-a4dd-21a5446da524",
+     "containerRuntimeVersion": "containerd://2.1.5-k3s1",
+     "kernelVersion": "6.4.0-150700.53.22-default",
+     "kubeProxyVersion": "v1.31.14+rke2r1",
+     "kubeletVersion": "v1.31.14+rke2r1",
+     "machineID": "f585742c56d04ead9e244eb9287e91ea",
+     "operatingSystem": "linux",
+     "osImage": "SUSE Linux Enterprise Server 15 SP7",
+     "systemUUID": "f585742c-56d0-4ead-9e24-4eb9287e91ea"
+    },
+    "nodeRef": {
+     "name": "essai-capi-workers-zq477-w8tzg-q4w9z"
+    },
+    "observedGeneration": 3,
+    "phase": "Running"
+   }
+  }
+ ],
+ "kind": "List",
+ "metadata": {
+  "resourceVersion": ""
+ }
+}

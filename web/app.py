@@ -442,7 +442,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/harvester-users",     # comptes du cluster Harvester
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
-ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall",
+ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
                        # v1.43.0 : une maintenance déplace ou arrête des VMs.
                        "/maintenance")
 
@@ -547,10 +547,17 @@ def current_role():
 ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users",)
 
 
+# Lectures qui donnent plus qu'une vue : le kubeconfig d'un cluster créé
+# par Cluster API est administrateur de ce cluster (v1.48.0).
+OPERATOR_READ_SUFFIXES = ("/kubeconfig",)
+
+
 def required_role_for(path, method):
     if path.startswith(ADMIN_ONLY_READ_PREFIXES):
         return "admin"
     if method in ("GET", "HEAD", "OPTIONS"):
+        if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
+            return "operator"
         return "viewer"
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
@@ -9203,6 +9210,31 @@ def api_capi_install(cluster):
     data = request.get_json(force=True, silent=True) or {}
     dry_run = bool(data.get("dry_run", False))
 
+    # v1.48.0 : sur un Harvester qui embarque Turtles (1.9 et après), la
+    # console ne déclare que les fournisseurs, par l'outil harvester-capi.
+    stack_cmd, err = _capi_base(cluster, "status")
+    if not err:
+        comp = _capi_components_dir()
+        got, _err = _capi_run_json(stack_cmd + (["--components", str(comp)] if comp else [])
+                                   + ["--json"], timeout=90)
+        stack = got[0] if got else {}
+        if stack.get("turtles") and (stack.get("core") or {}).get("ready"):
+            if comp is None:
+                return jsonify({"error": "the active bundle has no Turtles providers",
+                                "hint": "build a new bundle (harvester-ops 1.48 or later)"}), 412
+            if dry_run:
+                return jsonify({"dry_run": True, "mode": "turtles", "stack": stack}), 200
+            cmd, err = _capi_base(cluster, "install")
+            if err:
+                return err
+            cmd += ["--cluster", cluster, "--components", str(active)]
+            if data.get("push_images", bool(cluster_cfg.get("nodes"))):
+                cmd += ["--push-images"]
+            run, err = _capi_action(cluster, f"capi-install:{cluster}", cmd)
+            if err:
+                return err
+            return jsonify({"action_id": run.id, "mode": "turtles", "dry_run": False}), 201
+
     # Compatibility check is advisory only — never blocks. The diag UI already
     # surfaces the mismatch, and the runner will log a warning at preflight.
     manifest = _read_bundle_manifest(active)
@@ -9251,294 +9283,294 @@ def api_capi_install(cluster):
 
 
 # -----------------------------------------------------------------------------
-# Downstream cluster CRUD via CAPHV (uses the local caphv-generate CLI)
+# Clusters RKE2 par Cluster API (v1.48.0)
+#
+# La console lance `bin/harvester-capi.py`, le même outil qu'un opérateur
+# utilise en ligne de commande : état de la pile, installation par Turtles,
+# relevés pour le formulaire, contrôle préalable, aperçu, création et
+# suppression. Voir docs/design/2026-09-25-creation-cluster-capi.md.
 # -----------------------------------------------------------------------------
-CAPHV_GEN_BIN = Path(os.environ.get(
-    "HARVESTER_OPS_CAPHV_GEN",
-    "/usr/local/bin/caphv-generate",
-))
+import capi_cluster as _cc  # noqa: E402
+
+CAPI_SCRIPT = "harvester-capi.py"
+_CAPI_INVENTORY_CACHE = {}          # cluster -> (horodatage, réponse)
+_CAPI_INVENTORY_TTL = 15
 
 
-def _caphv_generate_yaml(opts, kc):
-    """Run caphv-generate with the supplied options and return the rendered
-    YAML (string). Raises subprocess.CalledProcessError on non-zero rc."""
-    args = [str(CAPHV_GEN_BIN), "--harvester-kubeconfig", kc]
-    for k, v in opts.items():
-        if v is None or v == "":
-            continue
-        flag = "--" + k.replace("_", "-")
-        if isinstance(v, bool):
-            if v:
-                args.append(flag)
-        else:
-            args.extend([flag, str(v)])
-    r = subprocess.run(args, capture_output=True, text=True, timeout=20)
-    if r.returncode != 0:
-        raise subprocess.CalledProcessError(r.returncode, args,
-                                            output=r.stdout, stderr=r.stderr)
-    return r.stdout
+def _capi_script():
+    p = BIN_DIR / CAPI_SCRIPT
+    return p if p.is_file() else None
 
 
-def _caphv_cluster_runner(run, cluster, kc, opts):
-    """Background worker: generate YAML → kubectl apply → poll cluster status.
-
-    Server-side defaults applied here so callers don't trip over CAPHV's
-    schema validators (which reject e.g. empty `dnsServers`)."""
-    opts = dict(opts or {})
-    opts.setdefault("dns", "8.8.8.8")
-    run.status = "running"
-    run.emit({"type": "status", "status": "running", "ts": time.time()})
-
-    def step(sid, status, msg=""):
-        run.emit({"type": "step", "step_id": sid, "status": status,
-                  "message": msg, "ts": time.time()})
-
-    def fail(sid, msg):
-        step(sid, "error", msg)
-        run.exit_code = 1; run.status = "error"; run.ended_at = time.time()
-        run.emit({"type": "status", "status": "error",
-                  "exit_code": 1, "ts": time.time()})
-        run.close()
-
-    step("generate", "running", "Generating cluster manifests")
+def _capi_work_dir():
+    """Où l'outil extrait un paquet : jamais /tmp, en mémoire dans le
+    service installé (un paquet avec ses images pèse des centaines de Mio)."""
+    d = Path(os.environ.get("HARVESTER_OPS_WORK_DIR") or (CAPI_BUNDLE_DIR / ".work"))
     try:
-        yaml_text = _caphv_generate_yaml(opts, kc)
-    except subprocess.CalledProcessError as e:
-        return fail("generate", f"caphv-generate rc={e.returncode}: {(e.stderr or e.output or '')[:240]}")
-    except Exception as e:
-        return fail("generate", str(e))
-    if not yaml_text.strip():
-        return fail("generate", "caphv-generate returned empty output")
-    # Echo a short preview of the rendered YAML into the log
-    head = "\n".join(yaml_text.splitlines()[:20])
-    run.emit({"type": "log", "stream": "stdout",
-              "message": f"--- generated manifest preview ---\n{head}\n...",
-              "ts": time.time()})
-    step("generate", "done", f"manifest {len(yaml_text)} bytes")
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    return d
 
-    target_ns = opts.get("namespace") or opts.get("name")
-    if opts.get("dry_run"):
-        step("apply", "done", "[DRY-RUN] skipping kubectl apply")
-    else:
-        step("apply", "running", f"kubectl apply (namespace {target_ns})")
-        try:
-            r = subprocess.run(
-                ["kubectl", "--kubeconfig", kc, "apply", "-f", "-",
-                 "--server-side", "--force-conflicts",
-                 "--field-manager=harvester-ops"],
-                input=yaml_text, capture_output=True, text=True, timeout=60,
-            )
-            applied = sum(1 for l in r.stdout.splitlines()
-                          if "serverside-applied" in l or "configured" in l or "created" in l)
-            err_lines = [l for l in (r.stderr or "").splitlines()
-                         if l.startswith("Error from server")]
-            # kubectl returns non-zero when any single resource apply fails
-            # (webhook rejection, cert issue, etc.). The Cluster resource is
-            # what we care about — verify it landed regardless of rc.
-            check = subprocess.run(
-                ["kubectl", "--kubeconfig", kc, "-n", target_ns, "get",
-                 "cluster.cluster.x-k8s.io", opts["name"], "-o", "name"],
-                capture_output=True, text=True, timeout=10,
-            )
-            cluster_ok = check.returncode == 0 and check.stdout.strip()
-            if not cluster_ok:
-                return fail("apply",
-                    f"Cluster resource not present after apply. kubectl rc={r.returncode}. "
-                    + (err_lines[0][:200] if err_lines else r.stderr.strip()[:200]))
-            if err_lines:
-                step("apply", "progress",
-                     f"applied {applied} objects ({len(err_lines)} resource(s) had errors — see log)")
-                # Emit each error as a log line so operators see exactly what
-                # was rejected (e.g. webhook cert mismatch).
-                for line in err_lines[:5]:
-                    run.emit({"type": "log", "stream": "stderr",
-                              "message": line[:300], "ts": time.time()})
-            step("apply", "done", f"applied — {applied} objects" +
-                 (f" ({len(err_lines)} resource error(s) — see log)" if err_lines else ""))
-        except subprocess.TimeoutExpired:
-            return fail("apply", "kubectl apply timed out")
 
-    if opts.get("dry_run"):
-        run.exit_code = 0; run.status = "done"; run.ended_at = time.time()
-        run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
-        run.close()
-        return
+def _capi_components_dir():
+    """`turtles.json` et `turtles/` du paquet actif, extraits une fois et sans
+    les images : le formulaire les relit à chaque contrôle. None si le
+    paquet est d'avant 1.48 (sans fournisseurs pour Turtles)."""
+    active = _capi_bundle_active_path()
+    if active is None:
+        return None
+    dest = CAPI_BUNDLE_DIR / ".components" / f"{active.name}-{int(active.stat().st_mtime)}"
+    if (dest / "turtles.json").is_file():
+        return dest
+    import tarfile as _tar
+    tmp = dest.with_name(dest.name + ".part")
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    found = False
+    try:
+        with _tar.open(active, "r:gz") as tar:
+            for m in tar:
+                parts = Path(m.name).parts
+                if not m.isfile() or ".." in parts or m.name.startswith("/"):
+                    continue
+                rel = Path(*parts[1:]) if len(parts) > 1 else Path(parts[0])
+                if rel.parts[:1] != ("turtles",) and str(rel) != "turtles.json":
+                    continue
+                out = tmp / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                with tar.extractfile(m) as src, open(out, "wb") as f:
+                    shutil.copyfileobj(src, f)
+                found = found or str(rel) == "turtles.json"
+    except (OSError, _tar.TarError):
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    if not found:
+        shutil.rmtree(tmp, ignore_errors=True)
+        return None
+    shutil.rmtree(dest, ignore_errors=True)
+    tmp.rename(dest)
+    return dest
 
-    # Poll Cluster.status.phase for up to ~25 min (provisioning of even a
-    # single-node CP takes 8-12 min on this hardware).
-    cl_name = opts["name"]
-    step("wait", "running", f"waiting for cluster {target_ns}/{cl_name} to become Provisioned")
-    deadline = time.time() + 25 * 60
-    last_phase = ""
-    while time.time() < deadline:
-        try:
-            r = subprocess.run(
-                ["kubectl", "--kubeconfig", kc, "-n", target_ns,
-                 "get", "cluster.cluster.x-k8s.io", cl_name,
-                 "-o", "jsonpath={.status.phase}|{.status.controlPlaneReady}|{.status.infrastructureReady}"],
-                capture_output=True, text=True, timeout=10,
-            )
-            phase = r.stdout.strip() if r.returncode == 0 else "?"
-        except (subprocess.TimeoutExpired, OSError):
-            phase = "?"
-        if phase != last_phase:
-            step("wait", "progress", f"phase: {phase}")
-            last_phase = phase
-        if phase.startswith("Provisioned|") and "|true|true" in phase:
-            step("wait", "done", "cluster is Provisioned + ready")
-            run.exit_code = 0; run.status = "done"; run.ended_at = time.time()
-            run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
-            run.close()
-            return
-        if phase.startswith("Failed"):
-            step("wait", "error", f"cluster phase Failed: {phase}")
-            run.exit_code = 1; run.status = "error"; run.ended_at = time.time()
-            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
-            run.close()
-            return
-        time.sleep(20)
-    # Timed out — leave the cluster but mark the action as warning (done with
-    # exit_code=2 so the UI flags it but doesn't look like a hard failure).
-    step("wait", "error", "cluster still Provisioning after 25min (will continue in background)")
-    run.exit_code = 2; run.status = "error"; run.ended_at = time.time()
-    run.emit({"type": "status", "status": "error", "exit_code": 2, "ts": time.time()})
-    run.close()
+
+def _capi_base(cluster, sub):
+    script = _capi_script()
+    if script is None:
+        return None, (jsonify({"error": f"{CAPI_SCRIPT} not deployed"}), 503)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return [sys.executable, str(script), sub, "--kubeconfig", kc], None
+
+
+def _capi_run_json(cmd, spec=None, timeout=180):
+    """Lance une sous-commande en lecture seule qui répond en JSON."""
+    env = dict(os.environ)
+    wd = _capi_work_dir()
+    if wd:
+        env["HARVESTER_OPS_WORK_DIR"] = str(wd)
+    try:
+        proc = subprocess.run(cmd, input=json.dumps(spec) if spec is not None else None,
+                              capture_output=True, text=True, timeout=timeout, env=env)
+    except subprocess.TimeoutExpired:
+        return None, (jsonify({"error": "timed out reading the cluster"}), 504)
+    try:
+        return (json.loads(proc.stdout), proc.returncode), None
+    except ValueError:
+        err = [ln.split("|", 3)[3] for ln in (proc.stderr or "").splitlines()
+               if ln.startswith("STEP_EVENT|") and ln.split("|")[2:3] == ["error"]]
+        msg = err[-1] if err else (proc.stderr or "failed").strip().splitlines()[-1:] or ["failed"]
+        return None, (jsonify({"error": (msg if isinstance(msg, str) else msg[0])[:300]}), 502)
+
+
+def _capi_spec_body():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": "a JSON object is expected"}), 400)
+    try:
+        return _cc.normalize(body), None
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+
+
+@app.route("/api/capi/<cluster>/stack")
+@requires_auth
+def api_capi_stack(cluster):
+    """État de la pile Cluster API : Turtles, cœur, fournisseurs, ancienne
+    installation, contournements. Lecture seule."""
+    cmd, err = _capi_base(cluster, "status")
+    if err:
+        return err
+    comp = _capi_components_dir()
+    if comp:
+        cmd += ["--components", str(comp)]
+    got, err = _capi_run_json(cmd + ["--json"], timeout=90)
+    if err:
+        return err
+    out, _rc = got
+    active = _capi_bundle_active_path()
+    out["bundle"] = {"active": active.name if active else None, "turtles": comp is not None}
+    return jsonify(out)
 
 
 @app.route("/api/capi/<cluster>/inventory")
 @requires_auth
 def api_capi_inventory(cluster):
-    """List the Harvester resources users need to pick from when creating a
-    cluster: images (display names), VM networks, SSH keypairs, IPPools,
-    storage classes. Used by the create-cluster wizard."""
-    kc = _kubectl_for_cluster(cluster)
-    if not kc:
-        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-
-    def kc_run(*args, timeout=8):
-        try:
-            r = subprocess.run(["kubectl", "--kubeconfig", kc, *args],
-                               capture_output=True, text=True, timeout=timeout)
-            return r.returncode, r.stdout
-        except (subprocess.TimeoutExpired, OSError):
-            return 1, ""
-
-    out = {"images": [], "networks": [], "ssh_keypairs": [],
-           "ip_pools": [], "storage_classes": []}
-    # Images — use display name (caphv-generate accepts namespace/displayName)
-    rc, j = kc_run("get", "virtualmachineimages.harvesterhci.io", "-A", "-o", "json")
-    if rc == 0 and j.strip():
-        try:
-            for it in json.loads(j).get("items", []):
-                m = it["metadata"]; sp = it.get("spec", {})
-                ns = m.get("namespace", "default")
-                disp = sp.get("displayName") or m["name"]
-                out["images"].append({
-                    "ref": f"{ns}/{disp}",
-                    "size": (it.get("status", {}) or {}).get("size", 0),
-                    "imported": any(c.get("type") == "Imported" and c.get("status") == "True"
-                                    for c in (it.get("status", {}) or {}).get("conditions", []) or []),
-                })
-        except Exception:
-            pass
-    # Networks (NetworkAttachmentDefinition under k8s.cni.cncf.io)
-    rc, j = kc_run("get", "network-attachment-definitions.k8s.cni.cncf.io",
-                   "-A", "-o", "json")
-    if rc == 0 and j.strip():
-        try:
-            for it in json.loads(j).get("items", []):
-                m = it["metadata"]
-                out["networks"].append({"ref": f"{m.get('namespace', 'default')}/{m['name']}"})
-        except Exception:
-            pass
-    # SSH KeyPairs (Harvester CRD)
-    rc, j = kc_run("get", "keypairs.harvesterhci.io", "-A", "-o", "json")
-    if rc == 0 and j.strip():
-        try:
-            for it in json.loads(j).get("items", []):
-                m = it["metadata"]
-                out["ssh_keypairs"].append({"ref": f"{m.get('namespace', 'default')}/{m['name']}"})
-        except Exception:
-            pass
-    # IPPools (Harvester loadbalancer namespace)
-    rc, j = kc_run("get", "ippools.loadbalancer.harvesterhci.io",
-                   "-A", "-o", "json")
-    if rc == 0 and j.strip():
-        try:
-            for it in json.loads(j).get("items", []):
-                m = it["metadata"]
-                out["ip_pools"].append({"ref": m["name"],
-                                        "namespace": m.get("namespace", "")})
-        except Exception:
-            pass
-    # Storage classes
-    rc, j = kc_run("get", "sc", "-o", "json")
-    if rc == 0 and j.strip():
-        try:
-            for it in json.loads(j).get("items", []):
-                m = it["metadata"]
-                out["storage_classes"].append({"name": m["name"]})
-        except Exception:
-            pass
+    """Ce que le formulaire de création propose : images, clés, réseaux,
+    pools d'adresses (plages, passerelle, masque, places), classes de
+    stockage, versions Kubernetes du paquet, place restante, état de la
+    pile. Mis en cache quelques secondes (`?fresh=1` pour relire)."""
+    cached = _CAPI_INVENTORY_CACHE.get(cluster)
+    if cached and time.time() - cached[0] < _CAPI_INVENTORY_TTL and not request.args.get("fresh"):
+        return jsonify(cached[1])
+    cmd, err = _capi_base(cluster, "inventory")
+    if err:
+        return err
+    comp = _capi_components_dir()
+    if comp:
+        cmd += ["--components", str(comp)]
+    got, err = _capi_run_json(cmd + ["--json"], timeout=120)
+    if err:
+        return err
+    out, _rc = got
+    _CAPI_INVENTORY_CACHE[cluster] = (time.time(), out)
     return jsonify(out)
+
+
+@app.route("/api/capi/<cluster>/cluster-check", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_cluster_check(cluster):
+    """Contrôle préalable d'une demande de cluster. Ne modifie rien."""
+    spec, err = _capi_spec_body()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "check")
+    if err:
+        return err
+    comp = _capi_components_dir()
+    if comp:
+        cmd += ["--components", str(comp)]
+    got, err = _capi_run_json(cmd + ["--spec", "-", "--json"], spec=spec, timeout=120)
+    if err:
+        return err
+    out, rc = got
+    out["blocked"] = rc == 2 or out.get("blocked", False)
+    return jsonify(out)
+
+
+@app.route("/api/capi/<cluster>/cluster-preview", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_capi_cluster_preview(cluster):
+    """Les manifestes que la création appliquerait, secret d'identité masqué."""
+    spec, err = _capi_spec_body()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "render")
+    if err:
+        return err
+    try:
+        proc = subprocess.run(cmd + ["--spec", "-"], input=json.dumps(spec), capture_output=True,
+                              text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "timed out"}), 504
+    if proc.returncode != 0:
+        lines = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+        return jsonify({"error": "; ".join(lines[-5:])[:500] or "render failed"}), 400
+    return jsonify({"yaml": proc.stdout})
+
+
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
+    """Une action suivie (dock, Activité) qui lance l'outil. La demande part
+    par un fichier privé, effacé à la fin."""
+    busy = _transfer_busy((cluster,), label)
+    if busy:
+        return None, _busy_response(busy)
+    wd = _capi_work_dir()
+    spec_file = None
+    if spec is not None:
+        fd, spec_file = tempfile.mkstemp(prefix="capi-spec-", suffix=".json",
+                                         dir=str(wd) if wd else None)
+        with os.fdopen(fd, "w") as f:
+            json.dump(spec, f)
+        cmd = cmd + ["--spec", spec_file]
+    run_id = uuid.uuid4().hex[:12]
+    public = ["harvester-capi"] + [a for a in cmd[2:] if not a.startswith("/")
+                                   and a not in ("--kubeconfig",)]
+    run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
+    run.cluster_user = (current_cluster_identity() or {}).get("user")
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+
+    def work():
+        try:
+            _vm_transfer_runner(run, cmd)
+        finally:
+            if spec_file:
+                Path(spec_file).unlink(missing_ok=True)
+            _CAPI_INVENTORY_CACHE.pop(cluster, None)
+    threading.Thread(target=work, daemon=True).start()
+    return run, None
 
 
 @app.route("/api/capi/<cluster>/cluster-create", methods=["POST"])
 @requires_auth
+@_rate_limit("6 per minute")
 def api_capi_cluster_create(cluster):
-    """Create a downstream CAPHV/RKE2 cluster on the target Harvester cluster.
-
-    Body: a flat dict of caphv-generate flags (snake-case keys). The handler
-    spawns the action immediately and returns 201 + action_id."""
-    cfg = load_config()
-    cluster_cfg = next((c for c in cfg.get("clusters", []) if c["name"] == cluster), None)
-    if not cluster_cfg:
-        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    kc = _identity_kubeconfig(cluster_cfg.get("kubeconfig", ""),
-                              current_cluster_identity())
-    if not Path(kc).exists():
-        return jsonify({"error": "kubeconfig missing"}), 400
-    if not CAPHV_GEN_BIN.exists():
-        return jsonify({
-            "error": "caphv-generate CLI not available",
-            "hint": f"expected at {CAPHV_GEN_BIN} (set HARVESTER_OPS_CAPHV_GEN to override)",
-        }), 412
-
-    data = request.get_json(force=True, silent=True) or {}
-    required = ("name", "image", "ssh_keypair", "network", "gateway",
-                "subnet_mask", "ip_pool")
-    missing = [f for f in required if not data.get(f)]
-    if missing:
-        return jsonify({"error": "missing required fields",
-                        "missing": missing}), 400
-
-    run_id = uuid.uuid4().hex[:12]
-    label = f"capi-cluster-create:{data['name']}"
-    run = ActionRun(run_id, label, cluster, [],
-                    dry_run=bool(data.get("dry_run")))
-    with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
-    threading.Thread(
-        target=_caphv_cluster_runner, args=(run, cluster, kc, data),
-        daemon=True,
-    ).start()
-    return jsonify({"action_id": run_id}), 201
+    """Crée un cluster RKE2 : contrôle, manifestes, application, suivi
+    jusqu'à ce qu'il soit disponible. Réponse immédiate avec l'action."""
+    spec, err = _capi_spec_body()
+    if err:
+        return err
+    errs = _cc.validate(spec)
+    if errs:
+        return jsonify({"error": "invalid request", "invalid": dict(errs)}), 400
+    cmd, err = _capi_base(cluster, "create")
+    if err:
+        return err
+    comp = _capi_components_dir()
+    if comp:
+        cmd += ["--components", str(comp)]
+    run, err = _capi_action(cluster, f"capi-cluster-create:{spec['namespace']}/{spec['name']}",
+                            cmd, spec=spec)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "cluster": f"{spec['namespace']}/{spec['name']}"}), 201
 
 
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>", methods=["DELETE"])
 @requires_auth
+@_rate_limit("6 per minute")
 def api_capi_cluster_delete(cluster, namespace, name):
-    """Delete a CAPI-managed cluster. CAPHV reconciles VM cleanup."""
-    kc = _kubectl_for_cluster(cluster)
-    if not kc:
-        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    action_id = track_action(
-        f"capi-cluster-delete:{namespace}/{name}", cluster,
-        _simple_kubectl_action, kc,
-        ["-n", namespace, "delete", "cluster.cluster.x-k8s.io", name, "--wait=false"],
-        "delete", f"cluster {name} deletion requested",
-    )
-    return jsonify({"action_id": action_id, "deleting": f"{namespace}/{name}"}), 201
+    """Supprime un cluster créé par Cluster API et suit le retrait de ses
+    machines ; retire aussi son espace de noms s'il a été créé pour lui."""
+    cmd, err = _capi_base(cluster, "delete")
+    if err:
+        return err
+    run, err = _capi_action(cluster, f"capi-cluster-delete:{namespace}/{name}",
+                            cmd + ["--name", f"{namespace}/{name}"])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "deleting": f"{namespace}/{name}"}), 201
+
+
+@app.route("/api/capi/<cluster>/cleanup-legacy", methods=["POST"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_capi_cleanup_legacy(cluster):
+    """Retire une installation d'avant Turtles, sans toucher au cœur que
+    Turtles a repris. Refusé tant qu'un cluster Cluster API existe."""
+    data = request.get_json(silent=True) or {}
+    cmd, err = _capi_base(cluster, "cleanup-legacy")
+    if err:
+        return err
+    dry = bool(data.get("dry_run"))
+    run, err = _capi_action(cluster, f"capi-cleanup-legacy:{cluster}",
+                            cmd + (["--dry-run"] if dry else []), dry_run=dry)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "dry_run": dry}), 201
 
 
 @app.route("/api/capi/<cluster>/cluster/<namespace>/<name>/scale", methods=["POST"])
@@ -9570,15 +9602,17 @@ def api_capi_cluster_scale(cluster, namespace, name):
     md_name = md_name.strip(); md_class = md_class.strip()
     if not md_name:
         return jsonify({"error": "cluster has no workers MD to scale"}), 400
-    # Patch the topology in place. Turtles' Cluster webhook can flake on TLS
-    # — server-side apply with --force-conflicts works around most cases.
-    patch = json.dumps({"spec": {"topology": {"workers": {"machineDeployments":
-              [{"class": md_class, "name": md_name, "replicas": replicas}]}}}})
+    # v1.48.0 : seul le nombre change. Le patch de fusion remplaçait toute la
+    # liste par une entrée (classe, nom, nombre) : les variables propres au
+    # groupe et les autres groupes de workers disparaissaient.
+    patch = json.dumps([{"op": "replace",
+                         "path": "/spec/topology/workers/machineDeployments/0/replicas",
+                         "value": replicas}])
     action_id = track_action(
         f"capi-cluster-scale:{namespace}/{name}->{replicas}", cluster,
         _simple_kubectl_action, kc,
         ["-n", namespace, "patch", "cluster.cluster.x-k8s.io", name,
-         "--type=merge", "-p", patch],
+         "--type=json", "-p", patch],
         "scale", f"scaled {md_name} to {replicas} workers",
     )
     return jsonify({"action_id": action_id, "replicas": replicas,
@@ -9653,8 +9687,11 @@ def api_capi_cluster_details(cluster, namespace, name):
         "name": name,
         "namespace": namespace,
         "phase": cl.get("status", {}).get("phase", ""),
-        "ready": cl.get("status", {}).get("controlPlaneReady", False)
-                  and cl.get("status", {}).get("infrastructureReady", False),
+        # v1.48.0 : le cœur de Turtles répond en v1beta2 (plus de
+        # `status.controlPlaneReady`)
+        "ready": _cc.cluster_state(cl)["ready"]
+                 or (cl.get("status", {}).get("controlPlaneReady", False)
+                     and cl.get("status", {}).get("infrastructureReady", False)),
         "conditions": cl.get("status", {}).get("conditions", []),
         "topology": cl.get("spec", {}).get("topology", {}),
         "controlPlaneEndpoint": cl.get("spec", {}).get("controlPlaneEndpoint", {}),
@@ -10012,8 +10049,10 @@ def api_capi_diag(cluster):
                     "namespace": c["metadata"]["namespace"],
                     "name":      c["metadata"]["name"],
                     "phase":     st.get("phase", "Unknown"),
-                    "ready":     st.get("controlPlaneReady", False),
-                    "clusterClass": topology.get("class"),
+                    # v1.48.0 : v1beta2 (cœur de Turtles) comme v1beta1
+                    "ready":     _cc.cluster_state(c)["ready"]
+                                 or bool(st.get("controlPlaneReady")),
+                    "clusterClass": _cc.class_of(c),
                     "k8sVersion": topology.get("version"),
                     "creationTimestamp": c["metadata"].get("creationTimestamp"),
                 })

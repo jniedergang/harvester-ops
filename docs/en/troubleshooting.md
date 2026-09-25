@@ -193,6 +193,68 @@ Normal: Harvester ties it to the restored VM and refuses to delete it
 while that VM exists. Empty `BackupVolume` objects also stay in Longhorn
 after the transfer backups are deleted; that is how Longhorn works.
 
+## Cluster API clusters
+
+### Machines stay "Provisioning" although their VMs run
+
+CAPHV v0.10.1 reports a HarvesterMachine ready in `status.ready` only,
+while the Cluster API core of Harvester v1.9 (v1.13) reads
+`status.initialization.provisioned` because of a contract label on the
+HarvesterMachine CRD. The install removes that label through a patch kept
+in the Harvester `CAPIProvider` (an edit by hand is reverted by Turtles).
+Check that it is gone:
+
+```bash
+kubectl get crd harvestermachines.infrastructure.cluster.x-k8s.io \
+  -o jsonpath='{.metadata.labels}'     # no "cluster.x-k8s.io/v1beta2"
+```
+
+The Installation tab reports it (`compatibility/contract-label`) and the
+install removes it: Turtles re-applies the provider without taking off a
+label that is already there.
+
+### "unable to compute the Harvester Endpoint: problem in getting the ingress-expose service"
+
+Harvester v1.9 no longer has the `kube-system/ingress-expose` Service that
+CAPHV v0.10.1 reads the VIP from. The install creates a stand-in labelled
+`harvester-ops.io/shim=caphv-ingress-expose`; the Installation tab says
+whether it is there. Run the install again to recreate it.
+
+### "spec.template.metadata in body should have at least 1 properties"
+
+The Harvester templates were created at `v1alpha1` (by the upstream
+generator run by hand, for instance): the conversion stores an empty
+`metadata` that the schema then refuses when the topology copies the
+template. Clusters created by the console use `v1beta1`. Delete the
+cluster and its templates, and create it again from the console.
+
+### The pre-check says the namespace already holds a cluster
+
+The generated objects (ClusterClass, identity secret, add-ons) carry fixed
+names, so a second cluster in the same namespace would overwrite the
+first one's. Leave the namespace empty in the advanced options (it then
+takes the cluster name) or pick another one.
+
+### The IP pool shows more free addresses than it has
+
+Harvester's `available` counter on an IP pool drifts upwards after
+clusters are deleted (24 free out of 16 seen on a test cluster). The
+console counts from the table of allocated addresses instead.
+
+### ingress-nginx stays in ContainerCreating: "iptables: executable file not found"
+
+The node image has no `iptables`: cloud-init installs it at first boot, and
+on an unregistered SLES image (no repository) the installation fails
+(`cloud-init status --long` on the node shows it). Register the image, give
+it a local repository, prepare an image that already has `iptables` and
+`qemu-guest-agent`, or use the openSUSE Leap 15.6 cloud image.
+
+### The API address answers with the Harvester certificate
+
+While the first control plane node is not up, the load balancer address
+of the new cluster has no backend, and the connection ends on the
+Harvester API server. This is normal until the control plane counts 1.
+
 ## Recovering from a half-done shutdown
 
 If the script was killed (Ctrl-C, lost SSH, ...) and some nodes are off while others are still up:

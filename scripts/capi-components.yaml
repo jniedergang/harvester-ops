@@ -14,14 +14,33 @@ bundle_metadata:
   compatible_harvester_versions:
     - "v1.7.x"
     - "v1.8.x"
+    - "v1.9.x"
+  # Kubernetes versions offered by the cluster creation form (RKE2 releases
+  # suffixed +rke2r1: the generator appends that suffix). `tested` marks the
+  # ones created for real with this bundle. Editable without code.
+  kubernetes_versions:
+    - {version: "v1.34.11", tested: true}   # harv1, Harvester v1.9.0, 25/09/2026
+    - {version: "v1.35.8", tested: false}
+    - {version: "v1.36.4", tested: false}
+    - {version: "v1.31.14", tested: true}
+  default_kubernetes_version: "v1.34.11"
   # Free-form notes shown in the bundle inspect overlay
   notes: |
-    Built against Harvester v1.7.x / v1.8.x (K8s v1.31, RKE2 v1.31).
-    Bundle pins the CAPI stack to versions known to work on these
-    Harvester releases. Other Harvester majors are likely to require
-    a different CAPHV / cabp-rke2 / cacp-rke2 combination.
+    Harvester v1.9.x: RKE2 providers v0.25.2 and CAPHV v0.10.1 declared to
+    Rancher Turtles (Cluster API core v1.13.3); clusters created for real
+    with Kubernetes v1.34.11 on openSUSE Leap 15.6 and SLES 15 SP7.
+    Harvester v1.7.x / v1.8.x: legacy install (K8s v1.31, RKE2 v1.31).
+    Other Harvester majors are likely to require a different
+    CAPHV / RKE2 providers combination.
 #
-# Components are deployed in this order on the target Harvester cluster:
+# Two installation modes, chosen by the console from what the cluster runs:
+#   - Harvester 1.9 and later embed Rancher Turtles and its Cluster API core:
+#     only the `turtles-*` components below are declared, as CAPIProvider
+#     objects whose components come from ConfigMaps (no Internet access).
+#     Their certificates are issued by Rancher, not cert-manager.
+#   - Older Harvester: the legacy components below, applied in order.
+#
+# Legacy order on the target Harvester cluster:
 #   1. cert-manager      (CAPI prerequisite, often already installed)
 #   2. cluster-api-core  (CRDs + capi-controller-manager)
 #   3. cabp-rke2         (RKE2 bootstrap provider)
@@ -80,3 +99,59 @@ caphv-clusterclass:
   description: |
     harvester-rke2 ClusterClass + RKE2 cluster template (kubectl apply -f).
     Source: CAPHV repo, templates/clusterclass/rke2/*.yaml.
+
+# ---------------------------------------------------------------------------
+# Turtles mode (Harvester 1.9+). `turtles:` describes the CAPIProvider.
+# `workarounds` and `patches` cover known defects of the pinned versions;
+# remove them when the provider fixes them (see
+# docs/design/2026-09-25-creation-cluster-capi.md).
+# ---------------------------------------------------------------------------
+turtles-rke2-bootstrap:
+  version: v0.25.2
+  turtles: {key: rke2-bootstrap, name: rke2, type: bootstrap, namespace: rke2-bootstrap-system}
+  manifests:
+    - name: components
+      url: https://github.com/rancher/cluster-api-provider-rke2/releases/download/v0.25.2/bootstrap-components.yaml
+    - name: metadata
+      url: https://github.com/rancher/cluster-api-provider-rke2/releases/download/v0.25.2/metadata.yaml
+  images:
+    - ghcr.io/rancher/cluster-api-provider-rke2-bootstrap:v0.25.2
+
+turtles-rke2-control-plane:
+  version: v0.25.2
+  turtles: {key: rke2-control-plane, name: rke2, type: controlPlane, namespace: rke2-control-plane-system}
+  manifests:
+    - name: components
+      url: https://github.com/rancher/cluster-api-provider-rke2/releases/download/v0.25.2/control-plane-components.yaml
+    - name: metadata
+      url: https://github.com/rancher/cluster-api-provider-rke2/releases/download/v0.25.2/metadata.yaml
+  images:
+    - ghcr.io/rancher/cluster-api-provider-rke2-controlplane:v0.25.2
+
+turtles-caphv:
+  version: v0.10.1
+  turtles:
+    key: harvester
+    name: harvester
+    type: infrastructure
+    namespace: caphv-system
+    # CAPHV <= v0.10.1 reads the Harvester VIP from kube-system/ingress-expose,
+    # which Harvester 1.9 removed: the console recreates it (labelled).
+    workarounds: [ingress-expose]
+    patches:
+      # CAPHV <= v0.10.1 sets HarvesterMachine status.ready but not
+      # status.initialization.provisioned, which the v1beta2 contract (CAPI
+      # core 1.13) reads: machines stay Provisioning. Without the contract
+      # label the core falls back to the v1beta1 contract and reads `ready`.
+      - target: {kind: CustomResourceDefinition, name: harvestermachines.infrastructure.cluster.x-k8s.io}
+        patch: |
+          - op: remove
+            path: /metadata/labels/cluster.x-k8s.io~1v1beta2
+  manifests:
+    - name: components
+      url: https://github.com/harvester/cluster-api-provider-harvester/releases/download/v0.10.1/infrastructure-components.yaml
+    - name: metadata
+      url: https://github.com/harvester/cluster-api-provider-harvester/releases/download/v0.10.1/metadata.yaml
+  images:
+    - ghcr.io/rancher-sandbox/cluster-api-provider-harvester:v0.10.1
+

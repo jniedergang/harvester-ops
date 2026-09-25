@@ -4559,3 +4559,16 @@ body.js-tips .tip[data-tip]::before { display: none; }
   box-shadow: var(--shadow-soft);
 }
 body.no-tooltips .tip-layer { display: none; }
+
+/* v1.48.0 : création d'un cluster RKE2 (Cluster API) */
+.capi-derived { font-size: 10px; color: var(--accent); border: 1px solid var(--accent); border-radius: 8px;
+  padding: 0 5px; margin-left: 4px; opacity: 0.8; white-space: nowrap; }
+.capi-derived[hidden] { display: none; }
+.capi-advanced > summary { cursor: pointer; font-weight: 600; padding: 4px 0; }
+.capi-advanced[open] > summary { margin-bottom: 8px; }
+.capi-summary { font-weight: 600; margin-top: 8px; }
+.capi-stack-note { margin: 4px 0 8px; }
+.capi-create select[multiple] { min-height: 3.4em; }
+.capi-yaml { margin: 0; padding: 12px 14px; font-family: var(--font-mono); font-size: 11.5px;
+  white-space: pre; overflow: auto; height: 100%; box-sizing: border-box; }
+

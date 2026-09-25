@@ -310,13 +310,16 @@ def test_notes_websocket_two_users_sync(flask_server):
 
 
 def test_api_capi_inventory_shape(api):
-    """Inventory endpoint returns the 5 buckets even when the cluster has
-    nothing — UI consumer relies on the keys being present."""
+    """Inventory endpoint returns every bucket even when the cluster has
+    nothing or cannot be reached (v1.48.0: said by `unreachable`, never with
+    kubectl's own noise) — the form relies on the keys being present."""
     status, body = api("GET", "/api/capi/harv-fake/inventory")
     assert status == 200, body
-    for key in ("images", "networks", "ssh_keypairs", "ip_pools", "storage_classes"):
+    for key in ("images", "networks", "keypairs", "pools", "storage_classes",
+                "namespaces", "clusters"):
         assert key in body, f"missing {key}: {body}"
         assert isinstance(body[key], list)
+    assert body["unreachable"] is True
 
 
 def test_api_capi_cluster_create_missing_required(api):

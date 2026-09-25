@@ -1,0 +1,16 @@
+caphv-generate: cluster manifest generator of the Cluster API Provider Harvester
+(CAPHV), copied unchanged so that the console can render clusters offline.
+
+Source:   https://github.com/harvester/cluster-api-provider-harvester
+          (development fork: gitea jniedergang/cluster-api-provider-harvester)
+File:     bin/caphv-generate
+Commit:   5373a21672008ad15240d3e3bfb6660d9331e935 (2026-09-01, after tag v0.10.1)
+License:  Apache-2.0 (same as harvester-ops)
+
+The console corrects its output instead of editing the script (see
+bin/lib/capi_cluster.py, postprocess): Harvester objects are moved from
+infrastructure v1alpha1 to v1beta1, the Rancher auto-import label is removed
+unless asked for, and the targetNamespace variable is set.
+
+To update: copy the script from a newer CAPHV commit, update this file, and
+run tests/api/test_capi_generator.py, which renders real manifests with it.

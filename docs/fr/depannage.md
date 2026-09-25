@@ -195,6 +195,71 @@ que cette VM existe. Des objets `BackupVolume` vides restent aussi dans
 Longhorn après la suppression des sauvegardes du transfert ; c'est le
 fonctionnement de Longhorn.
 
+## Clusters Cluster API
+
+### Des machines restent « Provisioning » alors que leurs VMs tournent
+
+CAPHV v0.10.1 déclare une HarvesterMachine prête dans `status.ready`
+seulement, alors que le cœur Cluster API de Harvester v1.9 (v1.13) lit
+`status.initialization.provisioned`, à cause d'une étiquette de contrat sur
+la CRD HarvesterMachine. L'installation retire cette étiquette par un
+correctif porté par le `CAPIProvider` Harvester (une retouche à la main est
+défaite par Turtles). Vérifier qu'elle a disparu :
+
+```bash
+kubectl get crd harvestermachines.infrastructure.cluster.x-k8s.io \
+  -o jsonpath='{.metadata.labels}'     # pas de « cluster.x-k8s.io/v1beta2 »
+```
+
+L'onglet Installation le signale (`compatibility/contract-label`) et
+l'installation la retire : Turtles réapplique le fournisseur sans ôter une
+étiquette déjà posée.
+
+### « unable to compute the Harvester Endpoint: problem in getting the ingress-expose service »
+
+Harvester v1.9 n'a plus le Service `kube-system/ingress-expose` où CAPHV
+v0.10.1 lit la VIP. L'installation crée un remplaçant étiqueté
+`harvester-ops.io/shim=caphv-ingress-expose` ; l'onglet Installation dit
+s'il est présent. Relancer l'installation pour le recréer.
+
+### « spec.template.metadata in body should have at least 1 properties »
+
+Les gabarits Harvester ont été créés en `v1alpha1` (par le générateur
+amont lancé à la main, par exemple) : la conversion enregistre un
+`metadata` vide que le schéma refuse ensuite quand la topologie recopie le
+gabarit. Les clusters créés par la console sont en `v1beta1`. Supprimer le
+cluster et ses gabarits, puis le recréer depuis la console.
+
+### Le contrôle préalable dit que l'espace de noms contient déjà un cluster
+
+Les objets générés (ClusterClass, secret d'identité, compléments) portent
+des noms fixes : un second cluster dans le même espace de noms écraserait
+ceux du premier. Laisser l'espace de noms vide dans les options avancées
+(il prend alors le nom du cluster) ou en choisir un autre.
+
+### Le pool d'adresses annonce plus d'adresses libres qu'il n'en a
+
+Le compteur `available` d'un pool d'adresses Harvester dérive vers le haut
+après des suppressions de clusters (24 libres sur 16 vu sur un cluster
+d'essai). La console compte plutôt d'après la table des adresses
+allouées.
+
+### ingress-nginx reste en ContainerCreating : « iptables: executable file not found »
+
+L'image des nœuds n'a pas `iptables` : cloud-init l'installe au premier
+démarrage, et sur une image SLES non enregistrée (aucun dépôt) l'installation
+échoue (`cloud-init status --long` sur le nœud le montre). Enregistrer
+l'image, lui donner un dépôt local, préparer une image qui contient déjà
+`iptables` et `qemu-guest-agent`, ou prendre l'image cloud openSUSE Leap
+15.6.
+
+### L'adresse de l'API répond avec le certificat de Harvester
+
+Tant que le premier nœud de plan de contrôle n'est pas monté, l'adresse
+d'équilibrage du nouveau cluster n'a pas de destination, et la connexion
+aboutit sur le serveur d'API de Harvester. C'est normal jusqu'à ce que le
+plan de contrôle compte 1.
+
 ## Reprendre une extinction interrompue
 
 Si le script a été tué (Ctrl-C, perte SSH, ...) avec certains nodes éteints et d'autres encore up :

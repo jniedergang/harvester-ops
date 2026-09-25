@@ -1,0 +1,333 @@
+{
+ "apiVersion": "cluster.x-k8s.io/v1beta2",
+ "kind": "Cluster",
+ "metadata": {
+  "annotations": {
+   "topology.internal.cluster.x-k8s.io/upgrade-step": ""
+  },
+  "finalizers": [
+   "cluster.cluster.x-k8s.io"
+  ],
+  "labels": {
+   "ccm": "external",
+   "cloud-config": "harvester",
+   "cluster.x-k8s.io/cluster-name": "essai-capi",
+   "cni": "external",
+   "csi": "external",
+   "topology.cluster.x-k8s.io/owned": ""
+  },
+  "name": "essai-capi",
+  "namespace": "essai-capi"
+ },
+ "spec": {
+  "clusterNetwork": {
+   "pods": {
+    "cidrBlocks": [
+     "10.42.0.0/16"
+    ]
+   }
+  },
+  "controlPlaneEndpoint": {
+   "host": "172.16.11.118",
+   "port": 6443
+  },
+  "controlPlaneRef": {
+   "apiGroup": "controlplane.cluster.x-k8s.io",
+   "kind": "RKE2ControlPlane",
+   "name": "essai-capi-qjz24"
+  },
+  "infrastructureRef": {
+   "apiGroup": "infrastructure.cluster.x-k8s.io",
+   "kind": "HarvesterCluster",
+   "name": "essai-capi-wpw7k"
+  },
+  "topology": {
+   "classRef": {
+    "name": "harvester-rke2"
+   },
+   "controlPlane": {
+    "replicas": 1
+   },
+   "variables": [
+    {
+     "name": "sshKeyPair",
+     "value": "default/capi-ssh-key"
+    },
+    {
+     "name": "sshUser",
+     "value": "sles"
+    },
+    {
+     "name": "cpuCount",
+     "value": 2
+    },
+    {
+     "name": "memorySize",
+     "value": "4Gi"
+    },
+    {
+     "name": "vmNetworks",
+     "value": [
+      "default/production"
+     ]
+    },
+    {
+     "name": "volumes",
+     "value": [
+      {
+       "bootOrder": 1,
+       "imageName": "default/sles15-sp7-minimal-vm.x86_64-cloud-qu2.qcow2",
+       "storageClass": "",
+       "volumeSize": "40Gi",
+       "volumeType": "image"
+      }
+     ]
+    },
+    {
+     "name": "gateway",
+     "value": "172.16.0.1"
+    },
+    {
+     "name": "subnetMask",
+     "value": "255.255.0.0"
+    },
+    {
+     "name": "ipPoolRef",
+     "value": "capi-vm-pool"
+    },
+    {
+     "name": "ipPoolRefs",
+     "value": []
+    },
+    {
+     "name": "dnsServers",
+     "value": [
+      "172.16.3.6"
+     ]
+    },
+    {
+     "name": "cni",
+     "value": "calico"
+    },
+    {
+     "name": "identitySecretName",
+     "value": "hv-identity-secret"
+    },
+    {
+     "name": "targetNamespace",
+     "value": "default"
+    }
+   ],
+   "version": "v1.31.14+rke2r1",
+   "workers": {
+    "machineDeployments": [
+     {
+      "class": "default-worker",
+      "name": "workers",
+      "replicas": 2
+     }
+    ]
+   }
+  }
+ },
+ "status": {
+  "conditions": [
+   {
+    "lastTransitionTime": "2026-09-25T17:48:19Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Available",
+    "status": "True",
+    "type": "Available"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:26:52Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "ProbeSucceeded",
+    "status": "True",
+    "type": "RemoteConnectionProbe"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:20:16Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Ready",
+    "status": "True",
+    "type": "InfrastructureReady"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:26:53Z",
+    "message": "",
+    "observedGeneration": 4,
+    "reason": "Initialized",
+    "status": "True",
+    "type": "ControlPlaneInitialized"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:41:18Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Available",
+    "status": "True",
+    "type": "ControlPlaneAvailable"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:48:19Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Available",
+    "status": "True",
+    "type": "WorkersAvailable"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:19:43Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "ReconcileSucceeded",
+    "status": "True",
+    "type": "TopologyReconciled"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:19:46Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotRollingOut",
+    "status": "False",
+    "type": "RollingOut"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:19:44Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotRemediating",
+    "status": "False",
+    "type": "Remediating"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:19:46Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotScalingDown",
+    "status": "False",
+    "type": "ScalingDown"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:44:46Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotScalingUp",
+    "status": "False",
+    "type": "ScalingUp"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:41:18Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Ready",
+    "status": "True",
+    "type": "ControlPlaneMachinesReady"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:48:18Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "Ready",
+    "status": "True",
+    "type": "WorkerMachinesReady"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:26:53Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "UpToDate",
+    "status": "True",
+    "type": "ControlPlaneMachinesUpToDate"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:19:44Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "UpToDate",
+    "status": "True",
+    "type": "WorkerMachinesUpToDate"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:18:00Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotPaused",
+    "status": "False",
+    "type": "Paused"
+   },
+   {
+    "lastTransitionTime": "2026-09-25T17:18:01Z",
+    "message": "",
+    "observedGeneration": 5,
+    "reason": "NotDeleting",
+    "status": "False",
+    "type": "Deleting"
+   }
+  ],
+  "controlPlane": {
+   "availableReplicas": 1,
+   "desiredReplicas": 1,
+   "readyReplicas": 1,
+   "replicas": 1,
+   "upToDateReplicas": 1
+  },
+  "deprecated": {
+   "v1beta1": {
+    "conditions": [
+     {
+      "lastTransitionTime": "2026-09-25T17:26:53Z",
+      "status": "True",
+      "type": "Ready"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:26:53Z",
+      "status": "True",
+      "type": "ControlPlaneInitialized"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:26:53Z",
+      "status": "True",
+      "type": "ControlPlaneReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:20:16Z",
+      "status": "True",
+      "type": "InfrastructureReady"
+     },
+     {
+      "lastTransitionTime": "2026-09-25T17:19:43Z",
+      "status": "True",
+      "type": "TopologyReconciled"
+     }
+    ]
+   }
+  },
+  "failureDomains": [
+   {
+    "attributes": {
+     "topologyKey": "kubernetes.io/hostname"
+    },
+    "controlPlane": true,
+    "name": "harv1.home.lo"
+   }
+  ],
+  "initialization": {
+   "controlPlaneInitialized": true,
+   "infrastructureProvisioned": true
+  },
+  "observedGeneration": 5,
+  "phase": "Provisioned",
+  "workers": {
+   "availableReplicas": 2,
+   "desiredReplicas": 2,
+   "readyReplicas": 2,
+   "replicas": 2,
+   "upToDateReplicas": 2
+  }
+ }
+}
