@@ -3,7 +3,7 @@
 FROM registry.suse.com/bci/python:3.11
 
 LABEL org.opencontainers.image.title="harvester-ops"
-LABEL org.opencontainers.image.description="Graceful shutdown/startup tooling for Harvester HCI clusters"
+LABEL org.opencontainers.image.description="Console for a set of SUSE Harvester HCI clusters: every cluster in one interface, automation made simple, every event on record"
 LABEL org.opencontainers.image.vendor="harvester-ops"
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 

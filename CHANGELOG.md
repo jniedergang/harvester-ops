@@ -4,6 +4,18 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.47.1] - 2026-09-25 - The package says what the console is
+
+### Fixed
+- **`systemctl status` and the image metadata presented a shutdown tool.**
+  The systemd unit read "Harvester HCI graceful shutdown/startup UI" and the
+  image label "Graceful shutdown/startup tooling": both now describe a
+  console for a set of Harvester clusters, as the README does since 1.44.11.
+
+### Tests
+- The unit description and the image label name a console for clusters and
+  no longer a shutdown tool.
+
 ## [1.47.0] - 2026-09-25 - Get an export back, and bring it to another console
 
 Asked after a first real export: "how do I get the image back? how do I

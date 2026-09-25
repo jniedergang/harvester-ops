@@ -1,5 +1,5 @@
 [Unit]
-Description=harvester-ops, Harvester HCI graceful shutdown/startup UI
+Description=harvester-ops, console for a set of SUSE Harvester HCI clusters
 Documentation=file:///opt/harvester-ops/README.md
 After=network-online.target
 Wants=network-online.target

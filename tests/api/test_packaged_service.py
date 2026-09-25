@@ -216,3 +216,17 @@ def test_sigterm_stops_the_server_cleanly(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_the_package_presents_a_console_not_a_shutdown_tool():
+    """v1.47.1 : ce que l'exploitant lit dans `systemctl status` et dans les
+    métadonnées de l'image. harvester-ops est une console pour un ensemble de
+    clusters ; l'arrêt et le démarrage n'en sont qu'une fonction (précisé
+    par le mainteneur le 23/09/2026). L'unité et l'image disaient encore
+    « outil d'arrêt et de démarrage »."""
+    desc = re.search(r"^Description=(.*)$", UNIT, re.M).group(1)
+    label = re.search(r'image\.description="([^"]*)"',
+                      (ROOT / "container" / "Containerfile").read_text()).group(1)
+    for text in (desc, label):
+        assert "console" in text.lower() and "clusters" in text
+        assert "shutdown" not in text.lower() and "startup" not in text.lower()
