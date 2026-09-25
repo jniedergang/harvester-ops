@@ -154,6 +154,20 @@ stopped, next to its copy coming back). The pre-check shows the addresses
 and the VM holding them: untick "Keep the MAC addresses", or remove that
 VM.
 
+### The import shows every byte sent, then waits
+
+"The target is still writing": CDI has received the disk and is flushing it
+to the volume. On slow storage this can take minutes (measured on a nested
+test cluster: five minutes for 4 GiB). The transfer goes on by itself.
+
+### "could not undo, remove by hand"
+
+A rollback retries its deletions for five minutes while a cluster API is
+unreachable. What remains is listed, and carries the label
+`harvester-ops.io/transfer=<id>`: `kubectl get vm,pvc,virtualmachineimages -A
+-l harvester-ops.io/transfer=<id>`. Harvester refuses to delete a volume
+while an image is exported from it: delete the images first.
+
 ### A VirtualMachineRestore stays on the target
 
 Normal: Harvester ties it to the restored VM and refuses to delete it

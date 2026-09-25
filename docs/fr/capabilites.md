@@ -269,6 +269,40 @@ Une archive (`.hvx`) est un tar ordinaire qui contient :
 Elle contient aussi les secrets cloud-init de la VM : elle est créée en 0600
 et se garde comme un secret.
 
+**Suivre un transfert, et sa vitesse (1.46.0).** Le contrôle préalable
+annonce ce qu'il y a à transférer : disques, taille, place réellement
+occupée.
+
+Une fois le transfert lancé, la fenêtre « Migrer » et le dock montrent :
+
+- la phase en cours : gel des disques, téléchargement, import, sauvegarde,
+  images ou restauration ;
+- la quantité faite sur le total, et les octets réellement transmis ;
+- le débit, le temps restant et le temps écoulé.
+
+Chaque phase finie garde son bilan dans l'Activité. Quand tout est parti
+mais que la cible écrit encore, l'affichage le dit. Pour une sauvegarde, la
+quantité est la taille des volumes : une sauvegarde incrémentale en
+transmet moins.
+
+Un choix **Vitesse** dit ce qu'il coûte :
+
+| Profil | Ce qu'il fait | Coût |
+|---|---|---|
+| Économe | un disque à la fois | le plus lent, ménage un cluster chargé |
+| Normale (défaut) | tous les disques ensemble (Longhorn compresse chaque téléchargement sur un cœur) | CPU sur la source, réseau |
+| Maximale | relève en plus de 2 à 8 les fils de sauvegarde et de restauration de Longhorn le temps du transfert, rétablis à la fin même en cas d'échec | CPU et réseau sur tous les nœuds des deux clusters, partagés avec toute autre sauvegarde en cours |
+
+Un **plafond de débit** (Mio/s) limite ce que l'hôte de la console envoie,
+tous disques confondus, pour ménager un lien de production.
+
+Un transfert encaisse une API de cluster qui décroche un moment :
+
+- les attentes réessaient ;
+- un téléchargement coupé est resservi, ou réécrit depuis son début ;
+- un retour arrière réessaie ses suppressions et nomme ce qu'il n'a pas
+  pu retirer.
+
 En ligne de commande :
 
 ```bash

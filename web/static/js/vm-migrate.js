@@ -73,6 +73,13 @@ const VMMigrate = (() => {
         b.setAttribute('aria-selected', on ? 'true' : 'false');
       });
       root.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== d; });
+      if (d !== 'node' && !rendered[d] && !window.VMTransfer) {
+        // vécu : une console redémarrée à moitié (page en cache, scripts
+        // nouveaux) laissait l'onglet blanc ; le dire plutôt
+        root.querySelector(`[data-pane="${d}"]`).innerHTML =
+          `<p class="empty-state">${esc(tr('migrate.reload'))}</p>`;
+        return;
+      }
       if (d !== 'node' && !rendered[d] && window.VMTransfer) {
         rendered[d] = true;
         VMTransfer.render(root.querySelector(`[data-pane="${d}"]`),

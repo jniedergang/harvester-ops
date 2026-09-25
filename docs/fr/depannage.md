@@ -156,6 +156,20 @@ arrêtée, à côté de sa copie qui revient). Le contrôle préalable affiche l
 adresses et la VM qui les porte : décocher « Garder les adresses MAC », ou
 supprimer cette VM.
 
+### L'import montre tous les octets envoyés, puis attend
+
+« La cible écrit encore » : CDI a reçu le disque et l'écrit sur le volume.
+Sur un stockage lent, cela peut durer des minutes (mesuré sur un cluster de
+test imbriqué : cinq minutes pour 4 Gio). Le transfert continue de lui-même.
+
+### « could not undo, remove by hand »
+
+Un retour arrière réessaie ses suppressions pendant cinq minutes quand l'API
+d'un cluster est injoignable. Ce qui reste est listé, et porte l'étiquette
+`harvester-ops.io/transfer=<id>` : `kubectl get vm,pvc,virtualmachineimages
+-A -l harvester-ops.io/transfer=<id>`. Harvester refuse de supprimer un
+volume tant qu'une image en est exportée : supprimer les images d'abord.
+
 ### Une VirtualMachineRestore reste sur la cible
 
 Normal : Harvester la lie à la VM restaurée et refuse de la supprimer tant

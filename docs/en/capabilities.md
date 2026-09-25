@@ -231,6 +231,29 @@ cleaned VM, the disks as Harvester serves them (gzip), and SHA-256 sums
 checked during the import. It holds the VM's cloud-init secrets: it is
 created with mode 0600 and must be kept like a secret.
 
+**Following a transfer, and its speed (1.46.0).** The pre-check announces
+what there is to transfer (disks, size, space really used). Once started,
+the Migrate window and the dock show the phase in progress (freezing the
+disks, download, import, backup, images, restore), the amount done over the
+total, the bytes actually sent, the throughput, the time left and the time
+elapsed; each finished phase keeps its summary in Activity. When every byte
+is sent but the target is still writing, it says so. For a backup, the
+amount is the volumes' size: an incremental backup sends less.
+
+A **Speed** choice says what it costs:
+
+| Profile | What it does | Cost |
+|---|---|---|
+| Economical | one disk at a time | slowest, gentle on a busy cluster |
+| Normal (default) | every disk at once (Longhorn compresses each download on one core) | CPU on the source, network |
+| Maximum | also raises Longhorn's backup and restore threads from 2 to 8 for the transfer, put back at the end even on failure | CPU and network on every node of both clusters, shared with any other backup running meanwhile |
+
+A **bandwidth cap** (MiB/s) limits what the console host sends, all disks
+together, to spare a production link. A transfer rides out a cluster API
+that drops for a while: waits retry, a broken download is served or written
+again from its start, and a rollback retries its deletions and names what it
+could not remove.
+
 On the command line:
 
 ```bash
