@@ -57,7 +57,8 @@ recorded, whether it was made from the console or somewhere else.
   elsewhere: a pre-check says what would block, networks and storage are
   mapped, Harvester's backups are used when both clusters share a backup
   target (with a short-stop mode), a copy through the console otherwise,
-  and anything left half-done is undone.
+  anything left half-done is undone, and the transfer shows its
+  throughput and time left, with a speed choice that says what it costs.
 - **Node maintenance, guided**: a pre-check says which VMs will migrate,
   which would stop and what would hold the drain, then the drain is
   followed to the end.

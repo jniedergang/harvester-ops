@@ -1,6 +1,7 @@
 # Progression et vitesse d'un transfert de VM
 
-Conception validée le 25/09/2026. Livraison prévue : v1.46.0. Complète
+Conception validée le 25/09/2026, livrée en v1.46.0 après mesures réelles
+(section « Mesures »). Complète
 `2026-09-24-migration-vm.md`.
 
 ## Besoin (exploitant, 25/09/2026)
@@ -104,6 +105,48 @@ le débit de chaque maillon. Leviers relevés :
 
 plus un plafond de débit facultatif (Mo/s). CLI : `--speed eco|normal|max`,
 `--bandwidth <Mo/s>`, `--parallel N`.
+
+## Mesures (banc, 25/09/2026)
+
+Même VM de mesure (deux disques de 2 Gio remplis de données aléatoires,
+incompressibles, classe à une réplique), de harvlab vers harvlab2. Les deux
+clusters sont imbriqués sur node2 et écrivent sur le même RAID1 SATA : c'est
+lui qui borne tout, les chiffres absolus ne disent rien d'un vrai cluster ;
+les comparaisons, si.
+
+| Essai | Total | Détail |
+|---|---|---|
+| Fichier, économe (un disque à la fois) | 8 min 03 s | gel 53 s (77 Mio/s), import 6 min 59 s (9,8 Mio/s) |
+| Fichier, normale (disques ensemble) | 6 min 00 s | gel 1 min 10 s (58 Mio/s), import 4 min 35 s (14,9 Mio/s) |
+| Sauvegarde, normale | 6 min 17 s | sauvegarde 1 min 26 s (47,5 Mio/s), restauration 2 min 27 s (27,9 Mio/s) |
+| Sauvegarde, maximale (concurrence 8) | 6 min 37 s | sauvegarde 1 min 24 s (49,0 Mio/s), restauration 2 min 27 s (27,9 Mio/s) |
+
+- **Disques en parallèle : un quart de temps en moins**, retenu par défaut.
+- **Concurrence de Longhorn relevée : aucun gain ici**, le disque de node2
+  étant saturé ; relevée puis rétablie comme prévu (vérifié). Le gain attendu
+  sur un vrai stockage n'est pas vérifié : l'option reste, présentée comme
+  telle.
+- **Export KubeVirt en brut : écarté.** Refusé par Harvester (« vm export
+  feature gate not enabled », en 1.8.2 comme en 1.9.0) ; l'activer
+  modifierait la configuration KubeVirt que Harvester gère lui-même.
+- Référence hors banc : un téléchargement gzip de harv1 (matériel réel)
+  débite 93 Mio/s de disque brut pour un seul flux.
+
+Ce que le banc a aussi appris, chaque fois reproduit par un test puis
+corrigé :
+
+- CDI reste plusieurs minutes à 99 % après avoir tout reçu (il écrit) :
+  l'affichage dit « la cible écrit encore » ;
+- la VIP d'un cluster a décroché pendant des téléchargements, et un appel
+  kubectl est resté 60 s sans réponse : les attentes réessaient, un flux
+  coupé est resservi ou réécrit depuis le début, un retour arrière réessaie
+  ses suppressions et nomme ce qu'il n'a pas pu retirer, et une erreur ne
+  cite plus la ligne de commande (chemin du kubeconfig) ;
+- cliquer « Lancer » juste après avoir modifié un champ perdait le clic ;
+- les bulles d'aide passaient sous la barre de titre des fenêtres
+  flottantes (signalé par l'exploitant) ;
+- le disque de node2 s'est rempli à 100 % : les qcow2 des bancs gardaient
+  tout ce que Longhorn avait écrit ; discard et `harvlab.sh tidy` depuis.
 
 ## Tests
 

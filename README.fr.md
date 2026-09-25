@@ -62,7 +62,9 @@ ailleurs.
   importée ailleurs : un pré-contrôle dit ce qui bloquerait, réseaux et
   stockage sont mis en correspondance, les sauvegardes de Harvester servent
   quand les deux clusters partagent une cible (avec un mode d'arrêt court),
-  une copie par la console sinon, et rien ne reste à moitié fait.
+  une copie par la console sinon, rien ne reste à moitié fait, et le
+  transfert montre son débit et le temps restant, avec un choix de vitesse
+  qui dit ce qu'il coûte.
 - **Maintenance des nœuds, guidée** : un pré-contrôle dit quelles VMs
   migreront, lesquelles s'arrêteraient et ce qui bloquerait la vidange,
   puis la vidange est suivie jusqu'au bout.

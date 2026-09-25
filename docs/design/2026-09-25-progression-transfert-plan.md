@@ -43,7 +43,7 @@ gzip), Flask existant, JS vanilla, pytest, Playwright.
 - `GzipCounter()` : `.feed(chunk) -> int` (octets bruts décompressés du
   morceau), `.wire` (octets compressés vus).
 
-- [ ] Tests : débit sur fenêtre glissante (horloge factice), `eta` absent
+- [x] Tests : débit sur fenêtre glissante (horloge factice), `eta` absent
   sans débit puis juste, étranglement à 2 s, `finish` émet toujours, bilan
   moyen ; `GzipCounter` sur un gzip réel découpé en morceaux (brut = taille
   d'origine, transmis = taille du gzip) ; ligne `PROGRESS_EVENT` bien formée.
@@ -60,7 +60,7 @@ phase de la spec crée un `Progress` et appelle `finish()` ; bilan dans un
 - `backup`, `restore` : `progress%` × somme des tailles des volumes.
 - `images` : pendant `wait_synced`, progression des images en restauration.
 
-- [ ] Tests (clusters simulés) : chaque moteur publie ses phases avec un
+- [x] Tests (clusters simulés) : chaque moteur publie ses phases avec un
   `total` égal à la somme des disques et un point final ; le bilan est dans
   les étapes ; la sonde de CDI ne double pas le compte.
 
@@ -74,7 +74,7 @@ phase de la spec crée un `Progress` et appelle `finish()` ; bilan dans un
 - `_vm_transfer_runner` lit `PROGRESS_EVENT|`.
 - Contrôle : le rapport rend `amount` = `{disks, size, used}`.
 
-- [ ] Tests : un seul point gardé par phase ; `to_dict` ; le flux continue
+- [x] Tests : un seul point gardé par phase ; `to_dict` ; le flux continue
   au-delà de 500 événements ; le relais du runner ; `amount` dans le rapport.
 
 ### Tâche 4 : l'interface
@@ -84,7 +84,7 @@ phase de la spec crée un `Progress` et appelle `finish()` ; bilan dans un
 - `dock.js` : ligne de progression et barre de la phase en cours.
 - `i18n.js` : phases, « reste », « transmis », unités, cinq langues.
 
-- [ ] Tests navigateur : quantité annoncée, bloc de suivi alimenté par un flux
+- [x] Tests navigateur : quantité annoncée, bloc de suivi alimenté par un flux
   simulé (français), ligne du dock.
 
 ### Tâche 4 bis : la vitesse
@@ -100,12 +100,12 @@ phase de la spec crée un `Progress` et appelle `finish()` ; bilan dans un
 - Script et console : `--speed`, `--bandwidth`, `--parallel` ; profil dans
   l'assistant avec bulle d'aide sur le coût.
 
-- [ ] Tests : deux disques demandés en même temps (guichet simulé) ; plafond
+- [x] Tests : deux disques demandés en même temps (guichet simulé) ; plafond
   respecté ; concurrence relevée puis rétablie, y compris sur échec ; options
   validées par la console ; profil dans l'assistant.
 
 ### Tâche 5 : en réel, doc, version
 
-- [ ] Banc : node2 rallumé, un transfert par la console et un par sauvegarde,
+- [x] Banc : node2 rallumé, un transfert par la console et un par sauvegarde,
   chiffres cohérents ; node2 éteint.
-- [ ] Doc EN/FR (capacités), CHANGELOG 1.46.0, VERSION, tests verts, push.
+- [x] Doc EN/FR (capacités), CHANGELOG 1.46.0, VERSION, tests verts, push.

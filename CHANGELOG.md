@@ -4,6 +4,56 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.46.0] - 2026-09-25 - Follow a transfer, and make it faster
+
+Asked for: during a transfer, see the throughput, the time left, what there
+is to transfer and what is already done; go as fast as possible, with
+options when that costs resources.
+
+### Added
+- **Live progress of a transfer**, in the Migrate window and the dock: the
+  phase in progress (freezing the disks, download, import, backup, images,
+  restore), amount done over total, bytes actually sent, throughput, time
+  left, elapsed, and a summary of each finished phase kept in Activity.
+  When every byte is sent but the target is still writing, it says so.
+- **The pre-check announces the amount**: disks, size, space really used.
+- **A Speed choice whose tooltip says what it costs**: economical (one disk
+  at a time), normal (every disk at once, the default), maximum (also
+  raises Longhorn's backup and restore threads from 2 to 8 for the transfer,
+  put back at the end, even on failure). A **bandwidth cap** in MiB/s for
+  what the console host sends. On the command line: `--speed`,
+  `--parallel`, `--bandwidth`.
+
+### Changed
+- Disks are copied at the same time: measured on the test bench, a
+  quarter less time for a two-disk VM. The sync nudge runs every 20 s.
+
+### Fixed
+- **Tooltips are never hidden** behind a floating window's title bar or cut
+  by a scrolling container (reported with a screenshot): one layer above
+  everything, placed below the element when there is no room above.
+- **A long transfer rides out a cluster API that drops for a while**: waits
+  retry, a broken stream is served or written again from its start, a
+  rollback retries its deletions and names what it could not remove. A
+  kubectl timeout no longer quotes the command line and its kubeconfig path.
+- **The live stream of any action no longer freezes past 500 events**: it
+  walked the event queue by position.
+- **Start was lost when clicked right after editing a field**: the re-check
+  greyed it out and moved it under the pointer.
+- A console restarted halfway (cached page, new scripts) left the cluster
+  and file tabs of the Migrate window blank; they now ask to reload.
+
+### Tests
+- The throughput, remaining time, throttling and gzip counting; each engine
+  phase publishes its progress; the CDI probe is not counted twice; disks
+  in parallel or one by one; Longhorn concurrency raised and put back, even
+  on failure; transient API errors and broken streams; the event stream
+  past 500 events; browser tests of the progress block, the dock line, the
+  speed options, the tooltip layer and the blank-tab guard.
+- Real measurements on the test bench, in the design document: economical
+  and normal copies, backups at normal and maximum concurrency. The KubeVirt
+  raw export was evaluated and set aside: Harvester does not enable it.
+
 ## [1.45.0] - 2026-09-25 - A VM moved to another cluster, exported, imported
 
 A VM was bound to the cluster it was born on. It can now move to another
