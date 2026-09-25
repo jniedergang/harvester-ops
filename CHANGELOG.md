@@ -4,6 +4,58 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.47.0] - 2026-09-25 - Get an export back, and bring it to another console
+
+Asked after a first real export: "how do I get the image back? how do I
+import it again?". The window said the transfer was finished without naming
+the file, and an archive could only reach another console's store by hand.
+
+### Added
+- **The end of an export names its archive**, with its size and three
+  buttons: Download, Import into a cluster (opens the import form for that
+  archive), Export store.
+- **Add an archive to the store from the browser.** The file travels as the
+  request body and is written to disk as it arrives, never staged in memory:
+  a disk of tens of GiB goes through. Before it is accepted the archive is
+  checked (complete, readable, every member matching its SHA-256 sum); a
+  copy damaged on its way, even at the right size, is refused with the
+  member at fault and nothing is kept. A name already in the store is
+  refused, and a lack of room is reported before receiving anything. The
+  upload is an action: throughput and time left in the window and the dock,
+  then the checksum pass; Cancel stops it and deletes the partial file.
+
+### Fixed
+- **Cancel in the dock did nothing for actions without a process** (ISO
+  download, bare-metal install): they watch a cancel flag that nothing set.
+  They now stop, and read "cancelled" rather than "error".
+- **Deleting an imported VM left its cloud-init secret behind**, user data
+  included (seen on harv1): the secret a console copy or an import creates
+  now belongs to the VM, as Harvester does for the VMs it creates.
+- The export store window, opened a second time, wired its buttons twice.
+- The test server read the real export store of the development console.
+
+### Internal
+- The console names the export archive itself and passes it to the script
+  as `--out <file>`; an action carries a `result` (here the archive name),
+  sent with its end event.
+
+### Tests
+- Upload: kept and private (0600), refused names, never over another
+  archive, two uploads of one name, no room, a truncated file, a byte
+  flipped in a disk at the right size, cancel, no path in an error, crash
+  leftovers removed but not a live upload; the export names its archive;
+  the dock cancels an action without a process, and a cancelled ISO
+  download or bare-metal install reads "cancelled"; an imported VM owns its
+  cloud-init secret. Browser tests of the
+  archive block and of real uploads to the test server (accepted, damaged,
+  not an archive, window opened twice).
+- Real, on harv1 (Harvester 1.9.0): export of a stopped VM from the Migrate
+  window, archive named and downloaded (identical to the store copy),
+  uploaded back through the browser under another name (identical, checked
+  in 1.7 s), imported into harv1 from the store with new MACs, then again
+  from the command line; the secret now disappears with its VM. An upload
+  and an ISO download cancelled from the dock keep nothing.
+
 ## [1.46.0] - 2026-09-25 - Follow a transfer, and make it faster
 
 Asked for: during a transfer, see the throughput, the time left, what there

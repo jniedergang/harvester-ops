@@ -779,6 +779,9 @@ class ActionRun:
         self.progress = {}
         self.progress_last = None
         self.progress_ver = 0
+        # v1.47.0 : ce que l'action a produit et que l'interface doit pouvoir
+        # désigner à la fin (le nom de l'archive d'un export, par exemple)
+        self.result = {}
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -852,6 +855,7 @@ class ActionRun:
             # v1.46.0 : progression d'un transfert (dernier point par phase)
             "progress": dict(self.progress),
             "progress_current": self.progress_last,
+            "result": dict(self.result),
         }
 
 
@@ -3761,12 +3765,14 @@ def _baremetal_install_runner(run, opts):
                 pass
 
     def fail(sid, msg, code=1):
+        # v1.47.0 : un arrêt demandé depuis le dock se lit « annulé »
+        cancelled = getattr(run, "_cancel", False)
         run.error_summary = str(msg)[:300]
         step(sid, "error", str(msg)[:300])
-        run.exit_code = code
-        run.status = "error"
+        run.exit_code = 3 if cancelled else code
+        run.status = "cancelled" if cancelled else "error"
         run.ended_at = time.time()
-        run.emit({"type": "status", "status": "error", "exit_code": code,
+        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
                   "ts": time.time()})
         if tokens:
             pxe_server.revoke(*tokens)
@@ -4129,10 +4135,12 @@ def _iso_fetch_runner(run, url, dest):
         run.status = "done"
     except Exception as e:
         tmp.unlink(missing_ok=True)
+        # v1.47.0 : un arrêt demandé depuis le dock se lit « annulé »
+        cancelled = getattr(run, "_cancel", False)
         run.error_summary = str(e)[:300]
         step("fetch", "error", str(e)[:300])
-        run.exit_code = 1
-        run.status = "error"
+        run.exit_code = 3 if cancelled else 1
+        run.status = "cancelled" if cancelled else "error"
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
@@ -5617,6 +5625,12 @@ def api_action_cancel(run_id):
         run.status = "cancelled"
         run.emit({"type": "status", "status": "cancelled", "ts": time.time()})
         run.close()
+    elif run.proc is None and run.status in ("starting", "running"):
+        # v1.47.0 : une action sans processus (téléchargement d'ISO,
+        # installation bare-metal, dépôt d'archive) consulte `_cancel` dans
+        # ses boucles, mais rien ne le posait : le bouton du dock ne faisait
+        # rien. Elle s'arrête d'elle-même et nettoie ce qu'elle a commencé.
+        run._cancel = True
     return jsonify(run.to_dict())
 
 
@@ -10014,6 +10028,7 @@ def api_capi_diag(cluster):
 # Voir docs/design/2026-09-24-migration-vm.md.
 # =============================================================================
 import vm_transfer as _vt  # noqa: E402
+import vm_transfer_progress as _vp  # noqa: E402
 
 EXPORT_DIR = Path(os.environ.get(
     "HARVESTER_OPS_EXPORT_DIR",
@@ -10207,9 +10222,10 @@ def _vm_transfer_runner(run, cmd):
     run.close()
 
 
-def _start_transfer(label, cluster, clusters, public_cmd, cmd):
+def _start_transfer(label, cluster, clusters, public_cmd, cmd, result=None):
     run_id = uuid.uuid4().hex[:12]
     run = ActionRun(run_id, label, cluster, public_cmd)
+    run.result = dict(result or {})
     _ident = current_cluster_identity()
     run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
@@ -10292,13 +10308,19 @@ def api_vm_transfer(cluster, namespace, name):
                       "--vm", vm, "--to", to, "--to-kubeconfig", dst_kc] + args
         public = ["harvester-vm-transfer", "migrate", "--from", cluster, "--vm", vm,
                   "--to", to] + args
-        label, clusters = f"vm-transfer:{vm}", (cluster, to)
+        label, clusters, result = f"vm-transfer:{vm}", (cluster, to), None
     else:
+        # v1.47.0 : la console nomme l'archive elle-même, pour pouvoir la
+        # désigner à la fin (télécharger, importer) au lieu de laisser
+        # l'exploitant la chercher dans le magasin.
+        archive = f"{name}-{time.strftime('%Y%m%d-%H%M%S')}{_vt.ARCHIVE_SUFFIX}"
         cmd = base + ["export", "--from", cluster, "--from-kubeconfig", src_kc,
-                      "--vm", vm, "--out", str(_export_dir())] + args
-        public = ["harvester-vm-transfer", "export", "--from", cluster, "--vm", vm] + args
+                      "--vm", vm, "--out", str(_export_dir() / archive)] + args
+        public = ["harvester-vm-transfer", "export", "--from", cluster, "--vm", vm,
+                  "--out", archive] + args
         label, clusters = f"vm-export:{vm}", (cluster,)
-    run, busy = _start_transfer(label, cluster, clusters, public, cmd)
+        result = {"archive": archive}
+    run, busy = _start_transfer(label, cluster, clusters, public, cmd, result)
     if busy:
         return _busy_response(busy)
     return jsonify({"action_id": run.id}), 201
@@ -10362,6 +10384,189 @@ def api_exports_download(archive):
         return jsonify({"error": "not found"}), 404
     return send_from_directory(str(_export_dir()), safe, as_attachment=True,
                                mimetype="application/x-tar", conditional=True)
+
+
+# -----------------------------------------------------------------------------
+# Dépôt d'une archive dans le magasin (v1.47.0)
+#
+# Pour importer sur un site qui a sa propre console, l'archive téléchargée
+# ailleurs devait être recopiée à la main dans le répertoire du magasin. Le
+# dépôt passe par le navigateur, EN FLUX : le corps de la requête est le
+# fichier lui-même. Un formulaire multipart aurait été recopié en entier par
+# Werkzeug dans /tmp avant d'arriver ici, et /tmp est en mémoire vive dans le
+# service installé : intenable pour un disque de plusieurs dizaines de Gio.
+#
+# Le travail se fait dans le thread de la requête, puisque les données
+# arrivent par elle ; il est suivi comme toute action (dock, Activité,
+# annulation). Une archive n'entre dans le magasin qu'une fois vérifiée
+# (complète, chaque membre conforme à sa somme) : une copie abîmée « à la
+# bonne taille » est refusée au dépôt, pas au milieu d'un import.
+# -----------------------------------------------------------------------------
+_UPLOADS = set()                       # archives en cours de dépôt
+_UPLOADS_LOCK = threading.Lock()
+_UPLOAD_CHUNK = 1024 * 1024
+_UPLOAD_SPARE = 256 * 1024 * 1024      # laissé libre après un dépôt
+_PART_SUFFIX = ".part"
+
+
+class _UploadCancelled(Exception):
+    pass
+
+
+class _BadArchive(ValueError):
+    pass
+
+
+def _receive_archive(run, stream, length, part):
+    """Écrit le corps de la requête dans `part` (0600 : l'archive porte les
+    secrets cloud-init), avec la progression de l'action. Lève si
+    l'opérateur annule, ou si le navigateur s'arrête avant la fin."""
+    prog = _vp.Progress(run.emit_progress, "upload", length)
+    done = 0
+    fd = os.open(str(part), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        while done < length:
+            if getattr(run, "_cancel", False):
+                raise _UploadCancelled()
+            chunk = stream.read(min(_UPLOAD_CHUNK, length - done))
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            prog.update(done)
+        f.flush()
+        os.fsync(f.fileno())
+    if done != length:
+        raise ValueError(f"the upload stopped at {done} of {length} bytes")
+    return prog.finish()
+
+
+def _check_archive(run, path):
+    """Complète, lisible, et chaque membre conforme à sa somme."""
+    try:
+        reader = _vt.ArchiveReader(path)
+    except OSError as e:
+        raise _BadArchive(f"unreadable archive ({e.strerror or e})") from None
+    if not reader.complete:
+        raise _BadArchive("incomplete archive: its checksum list is missing "
+                          "(an interrupted export, or not a harvester-ops archive)")
+    try:
+        manifest = reader.manifest()
+    except (KeyError, ValueError):
+        raise _BadArchive("not a harvester-ops VM archive: no readable manifest") from None
+    if not isinstance(manifest, dict) or "vm" not in manifest or "inventory" not in manifest:
+        raise _BadArchive("not a harvester-ops VM archive: the manifest has no VM")
+    sums = reader.sums()
+    total = sum(size for name, (_, size) in reader.members.items() if name in sums)
+    prog = _vp.Progress(run.emit_progress, "verify", total)
+    bad = reader.verify(on_chunk=lambda n: prog.add(n))
+    if bad:
+        raise _BadArchive("checksum mismatch in " + ", ".join(sorted(bad)[:5]))
+    prog.finish()
+    return manifest
+
+
+def _drop_stale_parts(directory):
+    """Un dépôt interrompu par un arrêt de la console laisse son `.part` :
+    tout `.part` qu'aucun dépôt en cours n'écrit est un reste. Appelé sous
+    `_UPLOADS_LOCK`."""
+    for p in directory.glob("*" + _vt.ARCHIVE_SUFFIX + _PART_SUFFIX):
+        if p.name[:-len(_PART_SUFFIX)] not in _UPLOADS:
+            p.unlink(missing_ok=True)
+
+
+def _error_text(e):
+    # jamais de chemin dans une réponse : une OSError en porte un
+    if isinstance(e, OSError) and e.strerror:
+        return e.strerror
+    return str(e)[:300]
+
+
+@app.route("/api/exports/<archive>", methods=["PUT"])
+@requires_auth
+@_rate_limit("6 per minute")
+def api_exports_upload(archive):
+    """Dépose une archive dans le magasin. Le corps est le fichier .hvx."""
+    safe = _export_safe_name(archive)
+    if not safe:
+        return jsonify({"error": "the file must be a *.hvx archive with a plain name"}), 400
+    length = request.content_length
+    if not length:
+        return jsonify({"error": "Content-Length required"}), 411
+    store = _export_dir()
+    dest = store / safe
+    part = store / (safe + _PART_SUFFIX)
+    try:
+        st = os.statvfs(store)
+        free = st.f_bavail * st.f_frsize
+    except OSError:
+        free = None
+    if free is not None and free < length + _UPLOAD_SPARE:
+        return jsonify({"error": "not enough room in the store",
+                        "need": length, "free": free}), 507
+    with _UPLOADS_LOCK:
+        if dest.exists() or safe in _UPLOADS:
+            return jsonify({"error": f"{safe} is already in the store"}), 409
+        _drop_stale_parts(store)
+        _UPLOADS.add(safe)
+
+    run = ActionRun(uuid.uuid4().hex[:12], f"vm-archive-upload:{safe}", "(local)",
+                    ["upload", safe])
+    run.cluster_user = (current_cluster_identity() or {}).get("user")
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    step("upload", "running", f"receiving {safe} ({_vp.fmt_bytes(length)})")
+    code, body = 201, None
+    try:
+        res = _receive_archive(run, request.stream, length, part)
+        step("upload", "done", _vp.summary("upload", res))
+        step("verify", "running", "checking the archive and its checksums")
+        manifest = _check_archive(run, part)
+        # un lien ne remplace jamais une archive déjà là
+        os.link(part, dest)
+        src = manifest.get("source") or {}
+        step("verify", "done", f"{src.get('namespace')}/{src.get('name')} "
+                               f"from {src.get('cluster')} {src.get('version') or ''}".rstrip())
+        run.result = {"archive": safe}
+        run.status, run.exit_code = "done", 0
+        body = {"action_id": run.id, "archive": safe, "size": length}
+    except _UploadCancelled:
+        run.status, run.exit_code = "cancelled", 3
+        run.error_summary = "cancelled, nothing kept"
+        step("upload", "error", run.error_summary)
+        code, body = 409, {"error": "cancelled", "action_id": run.id}
+    except FileExistsError:
+        run.status, run.exit_code = "error", 1
+        run.error_summary = f"{safe} appeared in the store meanwhile"
+        step("verify", "error", run.error_summary)
+        code, body = 409, {"error": run.error_summary, "action_id": run.id}
+    except _BadArchive as e:
+        run.status, run.exit_code = "error", 2
+        run.error_summary = str(e)[:300]
+        step("verify", "error", run.error_summary)
+        code, body = 422, {"error": run.error_summary, "action_id": run.id}
+    except Exception as e:                     # noqa: BLE001
+        # navigateur fermé ou réseau coupé en cours de route
+        run.status, run.exit_code = "error", 1
+        run.error_summary = _error_text(e)
+        step("upload", "error", run.error_summary)
+        code, body = 400, {"error": run.error_summary, "action_id": run.id}
+    finally:
+        part.unlink(missing_ok=True)
+        with _UPLOADS_LOCK:
+            _UPLOADS.discard(safe)
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status,
+                  "exit_code": run.exit_code, "ts": time.time()})
+        run.close()
+    return jsonify(body), code
 
 
 def _import_cmd(archive, body, dry_run):

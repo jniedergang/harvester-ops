@@ -221,7 +221,9 @@ verified (running, or its volumes bound) before the source is stopped for
 good or deleted. Anything the transfer created carries the label
 `harvester-ops.io/transfer`; a failure or a cancellation from the dock
 removes it and puts the source back as it was. The target VM keeps an
-annotation `harvester-ops.io/transferred-from`.
+annotation `harvester-ops.io/transferred-from`. The cloud-init secret a
+console copy or an import recreates belongs to the target VM, as Harvester
+does: deleting the VM deletes it (1.47.0).
 
 **The export store.** The Exports button of the VM view lists the
 archives: source cluster and version, date, size, and whether the archive
@@ -230,6 +232,28 @@ declared cluster, or delete it. An archive (`.hvx`) is a plain tar: the
 cleaned VM, the disks as Harvester serves them (gzip), and SHA-256 sums
 checked during the import. It holds the VM's cloud-init secrets: it is
 created with mode 0600 and must be kept like a secret.
+
+**Getting an export back, and bringing it elsewhere (1.47.0).** When an
+export ends, the Migrate window names its archive and its size, with three
+buttons: Download (to this computer), Import into a cluster (opens the
+import form for that archive), and Export store. On the site that receives
+the file, the store's **Add an archive** button sends a `.hvx` from the
+operator's computer into that console's store:
+
+- the file travels as the request body and is written to disk as it
+  arrives, never staged in memory, so a disk of tens of GiB goes through;
+- before it is accepted, the archive is checked: complete, readable, and
+  every member matching its SHA-256 sum. A copy damaged in transit, even at
+  the right size, is refused with the member at fault, and nothing is kept;
+- the store refuses a name that is already there, and says so before
+  receiving anything when there is not enough room;
+- the upload is an action like the others: throughput and time left in the
+  window and the dock, then the checksum pass, and Cancel in the dock stops
+  it and deletes the partial file.
+
+Once added, the archive is imported like any other (import button of its
+row). On the command line an archive is simply a file:
+`harvester-vm-transfer import --in <file>.hvx`.
 
 **Following a transfer, and its speed (1.46.0).** The pre-check announces
 what there is to transfer (disks, size, space really used). Once started,

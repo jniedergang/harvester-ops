@@ -736,6 +736,21 @@ def import_disks(ctx, disks, sources):
     return claims
 
 
+def own_secrets(ctx, ns, vm_name, uid, names):
+    """Comme Harvester pour une VM créée par son interface : le secret
+    cloud-init appartient à la VM, et la supprimer le supprime. Sans ce
+    lien, supprimer une VM importée laissait ses données utilisateur
+    derrière elle (vu en réel sur harv1, v1.47.0)."""
+    if not uid:
+        uid = ((ctx.dst.get(K_VM, ns, vm_name) or {}).get("metadata") or {}).get("uid")
+    if not uid:
+        return
+    ref = {"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
+           "name": vm_name, "uid": uid}
+    for secret in names:
+        ctx.dst.patch(K_SECRET, ns, secret, {"metadata": {"ownerReferences": [ref]}})
+
+
 def create_target_vm(ctx, clean_vm, secrets, claims):
     req = ctx.req
     ns, name = req["namespace"], req["name"]
@@ -752,10 +767,11 @@ def create_target_vm(ctx, clean_vm, secrets, claims):
                                  networks=req.get("networks") or {}, claims=claims,
                                  secrets=smap, keep_mac=_keep_mac(req),
                                  transfer_id=ctx.tid)
-    ctx.dst.create(vm)
+    created = ctx.dst.create(vm) or {}
     ctx.record("dst", K_VM, ns, name)
     ctx.target = (ns, name)
     ctx.removed = removed
+    own_secrets(ctx, ns, name, (created.get("metadata") or {}).get("uid"), smap.values())
     ctx.emit("vm", "done", f"{ns}/{name} created"
              + (f", removed: {', '.join(removed)}" if removed else ""))
     return ctx.target

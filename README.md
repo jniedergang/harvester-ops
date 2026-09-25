@@ -59,6 +59,8 @@ recorded, whether it was made from the console or somewhere else.
   target (with a short-stop mode), a copy through the console otherwise,
   anything left half-done is undone, and the transfer shows its
   throughput and time left, with a speed choice that says what it costs.
+  An archive is downloaded from the window that made it, and added to
+  another console's store from the browser, checked before it is kept.
 - **Node maintenance, guided**: a pre-check says which VMs will migrate,
   which would stop and what would hold the drain, then the drain is
   followed to the end.

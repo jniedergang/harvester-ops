@@ -64,7 +64,9 @@ ailleurs.
   quand les deux clusters partagent une cible (avec un mode d'arrêt court),
   une copie par la console sinon, rien ne reste à moitié fait, et le
   transfert montre son débit et le temps restant, avec un choix de vitesse
-  qui dit ce qu'il coûte.
+  qui dit ce qu'il coûte. Une archive se télécharge depuis la fenêtre qui
+  l'a produite, et se dépose dans le magasin d'une autre console depuis le
+  navigateur, vérifiée avant d'être gardée.
 - **Maintenance des nœuds, guidée** : un pré-contrôle dit quelles VMs
   migreront, lesquelles s'arrêteraient et ce qui bloquerait la vidange,
   puis la vidange est suivie jusqu'au bout.

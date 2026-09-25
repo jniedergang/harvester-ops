@@ -288,15 +288,56 @@ VM ne redémarre pas comme avant). L'assistant le signale.
   l'assistant en partant du fichier.
 - Répertoire du magasin : `HARVESTER_OPS_EXPORT_DIR`, par défaut
   `~/.local/share/harvester-ops/exports`, et `/var/lib/harvester-ops/exports`
-  dans le service installé (volume persistant déjà monté). Pas de
-  téléversement par le navigateur (un fichier de plusieurs gigaoctets
-  passerait par un tmpfs) : on dépose le fichier dans le répertoire, ou on
-  importe en CLI.
+  dans le service installé (volume persistant déjà monté). En 1.45.0, pas de
+  téléversement par le navigateur (un formulaire multipart de plusieurs
+  gigaoctets passerait par un tmpfs) : on déposait le fichier dans le
+  répertoire, ou on importait en CLI. Levé en 1.47.0, voir plus bas.
 - Points d'accès : `POST /api/vm/<cluster>/<ns>/<nom>/transfer/check`,
   `POST /api/vm/<cluster>/<ns>/<nom>/transfer`, `GET /api/exports`,
   `DELETE /api/exports/<fichier>`, `GET /api/exports/<fichier>/download`,
-  `POST /api/exports/<fichier>/check`, `POST /api/exports/<fichier>/import`.
+  `POST /api/exports/<fichier>/check`, `POST /api/exports/<fichier>/import`,
+  et depuis 1.47.0 `PUT /api/exports/<fichier>` (dépôt).
   Tous `@requires_auth` ; les mutations avec `@_rate_limit`, rôle operator.
+
+### 1.47.0 : l'archive désignée, le dépôt en flux
+
+Question de l'exploitant après son premier export réel : « comment est-ce
+que je récupère l'image ? comment la réimporter ? ». La fenêtre disait
+« Transfert terminé » sans nommer le fichier, et une archive téléchargée ne
+revenait dans le magasin d'une autre console qu'à la main.
+
+- **La console nomme l'archive** (`<vm>-<AAAAMMJJ-HHMMSS>.hvx`) et la passe
+  au script en `--out <fichier>` au lieu du répertoire ; l'`ActionRun` la
+  porte dans `result.archive`, que l'événement de fin transmet. La fenêtre
+  affiche alors le nom, la taille et trois gestes : télécharger, importer,
+  ouvrir le magasin. `result` n'est pas persisté en base : après un
+  redémarrage ou le ménage d'une heure, le magasin reste le chemin.
+- **Dépôt : `PUT /api/exports/<fichier>`, le corps EST le fichier.** Rien
+  ne passe par le parseur de formulaires de Werkzeug, qui aurait recopié le
+  fichier entier dans `/tmp` (en mémoire dans le service installé) : la
+  requête est lue par tranches de 1 Mio dans `<fichier>.part` (0600), puis
+  liée sous son nom final (`os.link`, qui refuse d'écraser). Content-Length
+  obligatoire ; la place est contrôlée avant de lire le premier octet
+  (taille + 256 Mio de marge).
+- **Vérifiée avant d'entrer** : complète (liste des sommes présente),
+  manifeste lisible avec une VM, chaque membre conforme à sa somme. La leçon
+  des téléchargements corrompus « à la bonne taille » vaut ici : une archive
+  abîmée est refusée au dépôt (422, membre en cause), pas au milieu d'un
+  import de vingt minutes.
+- **Suivi comme une action**, bien que le travail se fasse dans le thread
+  de la requête (les données arrivent par elle) : phases `upload` puis
+  `verify` avec débit et temps restant, dans le dock et l'Activité. La
+  fenêtre du magasin mesure l'envoi côté navigateur (XHR), puis suit la
+  vérification par le flux de l'action.
+- **Annulation** : depuis la fenêtre (abandon de la requête) ou le dock.
+  Le dock ne savait tuer qu'un processus ; les actions sans processus
+  (téléchargement d'ISO, installation bare-metal) consultaient un drapeau
+  `_cancel` que rien ne posait. Il est posé désormais, ce qui répare aussi
+  ces deux-là.
+- Un `.part` laissé par un arrêt de la console est retiré au dépôt suivant
+  (tout `.part` qu'aucun dépôt en cours n'écrit est un reste).
+- Parité CLI : une archive est un fichier, `harvester-vm-transfer import
+  --in` le prend directement ; le magasin n'est qu'un répertoire.
 
 ## Ligne de commande
 
@@ -375,6 +416,5 @@ depuis le dock et deux échecs réels, chacun défait sans rien laisser.
 
 - Transfert de plusieurs VMs d'un coup, planification, reprise d'un
   transfert interrompu.
-- Téléversement d'une archive par le navigateur.
 - Restauration incrémentale continue côté cible (volumes de reprise Longhorn).
 - Chiffrement de l'archive.

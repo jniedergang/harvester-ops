@@ -145,6 +145,8 @@ class FakeCluster:
         if self.no_halt and kind == run.K_RESTORE and "haltAfterRestore" in obj["spec"]:
             raise RuntimeError('strict decoding error: unknown field "spec.haltAfterRestore"')
         self.calls.append(("create", kind, md.get("namespace"), md["name"]))
+        obj = copy.deepcopy(obj)
+        obj["metadata"].setdefault("uid", f"uid-{md['name']}")
         self.objs[key] = copy.deepcopy(obj)
         getattr(self, "_on_" + kind.split(".")[0], lambda o: None)(self.objs[key])
         return copy.deepcopy(obj)
@@ -693,6 +695,13 @@ def test_import_from_an_archive(env, tmp_path):
     vm = e2.dst.objs[(run.K_VM, "imported", "leap156")]
     assert vm["metadata"]["namespace"] == "imported"
     assert e2.dst.labelled() == []
+    # v1.47.0 : le secret cloud-init appartient à la VM, comme chez Harvester
+    secrets = [o for (k, n, _), o in e2.dst.objs.items() if k == run.K_SECRET and n == "imported"]
+    assert secrets
+    for sec in secrets:
+        assert sec["metadata"]["ownerReferences"] == [{
+            "apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
+            "name": "leap156", "uid": vm["metadata"]["uid"]}]
     # un import ne touche à aucune source
     assert not [c for c in e2.src.calls if c[0] != "raw"]
 

@@ -4530,6 +4530,12 @@ body.roles-active.role-viewer #btn-startup { display: none !important; }
 .xfer-amount { font-weight: 600; }
 .dock-action-card .xfer-dock-line { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
 .xfer-report.is-checking { opacity: 0.55; transition: opacity 0.2s; }
+/* v1.47.0 : l'archive produite par un export, et ce qu'on en fait */
+.xfer-archive { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 12.5px; }
+.xfer-archive-name { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.xfer-archive-name code { font-family: var(--font-mono); word-break: break-all; }
+/* un lien habillé en bouton (Télécharger) ne se souligne pas */
+a.btn, a.btn:hover { text-decoration: none; }
 
 /* v1.46.0 : les bulles dans un calque au-dessus de tout (tooltips.js). Les
    pseudo-éléments restent en repli si le script ne se charge pas. */

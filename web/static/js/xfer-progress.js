@@ -18,6 +18,8 @@ const XferProgress = (() => {
     backup: () => tr('progress.phase.backup'),
     images: () => tr('progress.phase.images'),
     restore: () => tr('progress.phase.restore'),
+    upload: () => tr('progress.phase.upload'),
+    verify: () => tr('progress.phase.verify'),
   };
 
   function lang() {

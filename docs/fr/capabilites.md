@@ -253,6 +253,9 @@ tête ; « Lancer » reste grisé tant qu'il en reste un. Il vérifie :
   supprime et remet la source dans son état de départ.
 - **Provenance :** la VM cible garde une annotation
   `harvester-ops.io/transferred-from`.
+- **Secret cloud-init :** celui qu'une copie par la console ou un import
+  recrée appartient à la VM cible, comme chez Harvester : supprimer la VM
+  le supprime (1.47.0).
 
 **Le magasin d'exports.** Le bouton « Exports » de la vue Machines
 virtuelles liste les archives, avec leur cluster et leur version d'origine,
@@ -268,6 +271,30 @@ Une archive (`.hvx`) est un tar ordinaire qui contient :
 
 Elle contient aussi les secrets cloud-init de la VM : elle est créée en 0600
 et se garde comme un secret.
+
+**Récupérer un export, et l'amener ailleurs (1.47.0).** À la fin d'un
+export, la fenêtre « Migrer » nomme l'archive et sa taille, avec trois
+boutons : Télécharger (sur ce poste), Importer dans un cluster (ouvre le
+formulaire d'import de cette archive) et Magasin d'exports. Sur le site qui
+reçoit le fichier, le bouton **Déposer une archive** du magasin envoie un
+`.hvx` du poste de l'exploitant dans le magasin de cette console :
+
+- le fichier voyage dans le corps de la requête et s'écrit sur le disque
+  au fur et à mesure, jamais en mémoire : un disque de plusieurs dizaines
+  de Gio passe ;
+- avant d'être acceptée, l'archive est vérifiée : complète, lisible, et
+  chaque membre conforme à sa somme SHA-256. Une copie abîmée en route,
+  même à la bonne taille, est refusée avec le membre en cause, et rien
+  n'est gardé ;
+- le magasin refuse un nom déjà présent, et dit qu'il manque de place avant
+  de recevoir quoi que ce soit ;
+- le dépôt est une action comme les autres : débit et temps restant dans la
+  fenêtre et le dock, puis la vérification des sommes ; Annuler dans le
+  dock l'arrête et supprime le fichier partiel.
+
+Une fois déposée, l'archive s'importe comme toute autre (bouton d'import de
+sa ligne). En ligne de commande, une archive est simplement un fichier :
+`harvester-vm-transfer import --in <fichier>.hvx`.
 
 **Suivre un transfert, et sa vitesse (1.46.0).** Le contrôle préalable
 annonce ce qu'il y a à transférer : disques, taille, place réellement

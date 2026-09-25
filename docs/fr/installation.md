@@ -121,7 +121,9 @@ transfer:
 ```
 
 Les archives exportées sont gardées dans `/var/lib/harvester-ops/exports`
-(le volume persistant du service).
+(le volume persistant du service), comme celles déposées depuis un
+navigateur (1.47.0) : dimensionner ce volume pour la plus grosse VM qu'on
+pense déplacer par fichier.
 
 ## Désinstallation
 

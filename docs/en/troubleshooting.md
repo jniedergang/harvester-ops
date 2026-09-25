@@ -168,6 +168,25 @@ unreachable. What remains is listed, and carries the label
 -l harvester-ops.io/transfer=<id>`. Harvester refuses to delete a volume
 while an image is exported from it: delete the images first.
 
+### "Upload refused" when adding an archive to the store
+
+The message says why:
+
+- `checksum mismatch in disks/<volume>.raw.gz`: the file was damaged on its
+  way (copy, USB key, transfer tool), even though its size is right.
+  Download it again from the source store and compare
+  `sha256sum` on both sides;
+- `incomplete archive`: the export was interrupted, or the copy was cut
+  short;
+- `already in the store`: rename the file (the name must end in `.hvx`)
+  or delete the older archive first;
+- `not enough room in the store`: the size needed and the space free are
+  given; free space in `/var/lib/harvester-ops/exports`.
+
+Behind a reverse proxy, raise its request body limit (nginx:
+`client_max_body_size 0;`) and its timeouts for the console's URL: an
+archive is one request as large as the file.
+
 ### A VirtualMachineRestore stays on the target
 
 Normal: Harvester ties it to the restored VM and refuses to delete it

@@ -757,7 +757,10 @@ class ArchiveReader:
                     out[name] = digest
         return out
 
-    def verify(self):
+    def verify(self, on_chunk=None):
+        """Les membres dont la somme ne correspond pas (ou absents).
+        `on_chunk(n)` est appelé à chaque tranche lue : une archive de
+        plusieurs dizaines de gigaoctets se vérifie en minutes."""
         bad = []
         for name, digest in self.sums().items():
             if name not in self.members:
@@ -770,6 +773,8 @@ class ArchiveReader:
                     if not chunk:
                         break
                     h.update(chunk)
+                    if on_chunk:
+                        on_chunk(len(chunk))
             if h.hexdigest() != digest:
                 bad.append(name)
         return bad

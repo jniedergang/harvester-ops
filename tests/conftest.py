@@ -114,6 +114,9 @@ def flask_server(test_config):
         "HARVESTER_OPS_BUNDLE_DIR": str(test_config["root"] / "bundles"),
         "HARVESTER_OPS_NOTES_DB": str(test_config["root"] / "notes.db"),
         "HARVESTER_OPS_ACTIONS_DB": str(test_config["root"] / "actions.db"),
+        # v1.47.0 : sans lui, le serveur de test lisait (et un dépôt aurait
+        # écrit) le magasin d'exports réel de la console de dev
+        "HARVESTER_OPS_EXPORT_DIR": str(test_config["root"] / "exports"),
         # Force no auth in tests — point to a path that won't exist
         "HARVESTER_OPS_HTPASSWD": str(test_config["root"] / "no-such-htpasswd"),
         # v1.5.6: disable flask-limiter in tests; the suite hits some

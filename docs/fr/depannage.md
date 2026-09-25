@@ -170,6 +170,24 @@ d'un cluster est injoignable. Ce qui reste est listé, et porte l'étiquette
 -A -l harvester-ops.io/transfer=<id>`. Harvester refuse de supprimer un
 volume tant qu'une image en est exportée : supprimer les images d'abord.
 
+### « Dépôt refusé » en déposant une archive dans le magasin
+
+Le message dit pourquoi :
+
+- `checksum mismatch in disks/<volume>.raw.gz` : le fichier a été abîmé en
+  route (copie, clé USB, outil de transfert), bien que sa taille soit la
+  bonne. Le retélécharger depuis le magasin d'origine et comparer
+  `sha256sum` des deux côtés ;
+- `incomplete archive` : l'export a été interrompu, ou la copie coupée ;
+- `already in the store` : renommer le fichier (le nom doit finir par
+  `.hvx`) ou supprimer d'abord l'ancienne archive ;
+- `not enough room in the store` : la taille nécessaire et la place libre
+  sont données ; faire de la place dans `/var/lib/harvester-ops/exports`.
+
+Derrière un proxy inverse, relever sa limite de taille de requête (nginx :
+`client_max_body_size 0;`) et ses délais pour l'adresse de la console : une
+archive est une seule requête aussi grosse que le fichier.
+
 ### Une VirtualMachineRestore reste sur la cible
 
 Normal : Harvester la lie à la VM restaurée et refuse de la supprimer tant

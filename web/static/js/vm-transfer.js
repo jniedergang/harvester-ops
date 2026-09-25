@@ -7,6 +7,9 @@
  * `harvester-vm-transfer` : ce module compose la demande, affiche le
  * contrôle préalable dans la langue de l'interface, et lance l'action,
  * suivie ensuite dans le dock.
+ *
+ * v1.47.0 : la fin d'un export désigne son archive (télécharger, importer),
+ * et le magasin accepte une archive déposée depuis ce poste.
  */
 const VMTransfer = (() => {
   const esc = (v) => String(v == null ? '' : v)
@@ -174,6 +177,7 @@ const VMTransfer = (() => {
           <div class="progress-mini xfer-live-bar"><div class="fill" data-x="live-bar" style="width:0%"></div></div>
           <div class="tf-desc" data-x="live-meta"></div>
           <ul class="xfer-live-done" data-x="live-done"></ul>
+          <div class="xfer-archive" data-x="archive" hidden></div>
         </fieldset>
       </div>`;
 
@@ -344,6 +348,7 @@ const VMTransfer = (() => {
             if (d.status === 'done') {
               line.textContent = tr('progress.finished');
               q('live-bar').style.width = '100%';
+              if (d.result && d.result.archive) archiveBlock(q('archive'), d.result.archive);
             } else if (d.status === 'cancelled') {
               line.textContent = tr('progress.cancelled');
             } else {
@@ -362,6 +367,123 @@ const VMTransfer = (() => {
     q('start').addEventListener('click', start);
     syncMac();
     check({ target: { dataset: { x: 'to' } } });
+  }
+
+  // v1.47.0 : la fin d'un export désigne l'archive produite, avec ce qu'on
+  // en fait ensuite ; avant, l'exploitant devait deviner où elle était.
+  async function archiveBlock(box, name) {
+    box.hidden = false;
+    box.innerHTML = `
+      <div class="xfer-archive-name">${Icons.svg('bundle', { size: 14 })} ${esc(tr('transfer.archive.ready'))} <code>${esc(name)}</code> <span class="tf-desc" data-x="archive-size"></span></div>
+      <div class="apply-bar" style="margin:6px 0 0; padding:0; border:0;">
+        <a class="btn btn-secondary btn-sm tip" data-x="archive-download" href="/api/exports/${enc(name)}/download" download data-tip="${esc(tr('transfer.archive.downloadTip'))}">${Icons.svg('download')} <span>${esc(tr('transfer.archive.download'))}</span></a>
+        <button type="button" class="btn btn-secondary btn-sm tip" data-x="archive-import" data-tip="${esc(tr('transfer.archive.importTip'))}">${Icons.svg('upload')} <span>${esc(tr('transfer.archive.import'))}</span></button>
+        <button type="button" class="btn btn-secondary btn-sm tip" data-x="archive-store" data-tip="${esc(tr('transfer.archive.storeTip'))}">${Icons.svg('bundle')} <span>${esc(tr('transfer.archive.store'))}</span></button>
+      </div>`;
+    box.querySelector('[data-x="archive-import"]').addEventListener('click', () => openImport(name));
+    box.querySelector('[data-x="archive-store"]').addEventListener('click', () => openStore());
+    try {
+      const d = await fetch('/api/exports').then(r => r.json());
+      const e = (d.exports || []).find(x => x.name === name);
+      if (e) box.querySelector('[data-x="archive-size"]').textContent = `· ${XferProgress.bytes(e.size)}`;
+    } catch (_) { /* la taille n'est qu'un plus */ }
+  }
+
+  // Débit et temps restant d'un envoi, mesurés sur les dix dernières
+  // secondes, dans la forme des points de progression du serveur.
+  function uploadMeter(total) {
+    const t0 = Date.now();
+    const samples = [[t0, 0]];
+    return (loaded) => {
+      const now = Date.now();
+      samples.push([now, loaded]);
+      while (samples.length > 2 && now - samples[1][0] >= 10000) samples.shift();
+      const dt = (now - samples[0][0]) / 1000;
+      const rate = dt > 0.5 ? (loaded - samples[0][1]) / dt : null;
+      return { phase: 'upload', item: null, done: loaded, total, wire: 0, rate,
+               eta: rate ? (total - loaded) / rate : null, elapsed: (now - t0) / 1000,
+               final: false };
+    };
+  }
+
+  // v1.47.0 : déposer une archive dans le magasin, depuis ce poste. Le
+  // fichier part tel quel dans le corps de la requête (le serveur l'écrit
+  // au fil de l'eau), puis le serveur vérifie ses sommes avant de l'accepter.
+  function uploadArchive(file, box, done) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.hvx$/.test(file.name)) {
+      box.hidden = false;
+      box.querySelector('[data-x="up-line"]').textContent = tr('transfer.store.uploadBadName', { name: file.name });
+      return null;
+    }
+    box.hidden = false;
+    const line = box.querySelector('[data-x="up-line"]');
+    const bar = box.querySelector('[data-x="up-bar"]');
+    const meta = box.querySelector('[data-x="up-meta"]');
+    const cancel = box.querySelector('[data-x="up-cancel"]');
+    const meter = uploadMeter(file.size);
+    let es = null;
+    line.textContent = tr('transfer.store.uploadStarting', { name: file.name });
+    bar.style.width = '0%';
+    meta.textContent = '';
+    cancel.hidden = false;
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', `/api/exports/${enc(file.name)}`);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => {
+      const snap = meter(e.loaded);
+      if (e.loaded < file.size) line.textContent = XferProgress.text(snap);
+      bar.style.width = XferProgress.pct(snap) + '%';
+      meta.textContent = tr('progress.elapsed', { t: XferProgress.duration(snap.elapsed) });
+    };
+    // Tout est parti : le serveur vérifie les sommes. Sa progression est
+    // celle de l'action (la même que dans le dock).
+    xhr.upload.onload = async () => {
+      line.textContent = tr('transfer.store.verifying');
+      bar.style.width = '0%';
+      try {
+        const d = await fetch(`/api/activity?action=${enc('vm-archive-upload:' + file.name)}`).then(r => r.json());
+        const run = (d.in_progress || [])[0];
+        if (!run || !window.SSEReconnect) return;
+        es = SSEReconnect.connect(`/api/stream/${enc(run.id)}`, {
+          on: {
+            progress: (ev) => {
+              const snap = JSON.parse(ev.data);
+              if (snap.phase !== 'verify' || xhr.readyState === 4) return;
+              line.textContent = XferProgress.text(snap);
+              bar.style.width = XferProgress.pct(snap) + '%';
+            },
+            end: () => es && es.close(),
+          },
+        });
+      } catch (_) { /* le dock suit aussi l'action */ }
+    };
+    const finish = (ok, msg) => {
+      if (es) es.close();
+      cancel.hidden = true;
+      line.innerHTML = `<span style="color:var(${ok ? '--accent' : '--danger'})">${Icons.svg(ok ? 'ok' : 'fail', { size: 14 })} ${esc(msg)}</span>`;
+      if (ok) bar.style.width = '100%';
+      done(ok);
+    };
+    xhr.onload = () => {
+      let d = {};
+      try { d = JSON.parse(xhr.responseText); } catch (_) { /* réponse sans corps */ }
+      if (xhr.status === 201) {
+        finish(true, tr('transfer.store.uploaded', { name: d.archive || file.name }));
+      } else if (xhr.status === 507) {
+        finish(false, tr('transfer.store.uploadNoRoom', { need: XferProgress.bytes(d.need),
+                                                          free: XferProgress.bytes(d.free) }));
+      } else if (d.error === 'cancelled') {
+        finish(false, tr('transfer.store.uploadCancelled'));
+      } else {
+        finish(false, tr('transfer.store.uploadFailed', { msg: d.error || `HTTP ${xhr.status}` }));
+      }
+    };
+    xhr.onerror = () => finish(false, tr('transfer.store.uploadFailed', { msg: tr('transfer.store.uploadLost') }));
+    xhr.onabort = () => finish(false, tr('transfer.store.uploadCancelled'));
+    cancel.onclick = () => xhr.abort();
+    xhr.send(file);
+    return xhr;
   }
 
   async function clusterNames() {
@@ -390,8 +512,19 @@ const VMTransfer = (() => {
       bodyHtml: `<div class="migrate-panel xfer-store">
         <div class="apply-bar" style="margin:0 0 10px; padding:0; border:0;">
           <button type="button" class="btn btn-secondary btn-sm tip" data-x="refresh" data-tip="${esc(tr('transfer.refreshTip'))}">${Icons.svg('refresh')} <span>${esc(tr('transfer.refresh'))}</span></button>
+          <button type="button" class="btn btn-primary btn-sm tip" data-x="upload" data-tip="${esc(tr('transfer.store.uploadTip'))}">${Icons.svg('upload')} <span>${esc(tr('transfer.store.upload'))}</span></button>
+          <input type="file" data-x="upload-file" accept=".hvx" hidden>
           <span class="apply-result" data-x="free"></span>
         </div>
+        <fieldset class="tf-block xfer-live" data-x="up-box" hidden>
+          <legend>${esc(tr('transfer.store.uploadTitle'))}</legend>
+          <div class="xfer-live-line" data-x="up-line"></div>
+          <div class="progress-mini xfer-live-bar"><div class="fill" data-x="up-bar" style="width:0%"></div></div>
+          <div class="apply-bar" style="margin:4px 0 0; padding:0; border:0;">
+            <span class="tf-desc" data-x="up-meta"></span>
+            <button type="button" class="btn btn-secondary btn-sm tip" data-x="up-cancel" data-tip="${esc(tr('transfer.store.uploadCancelTip'))}" hidden>${Icons.svg('close')} <span>${esc(tr('transfer.store.uploadCancel'))}</span></button>
+          </div>
+        </fieldset>
         <table class="data-table" data-x="table">
           <thead><tr><th>${esc(tr('transfer.store.col.file'))}</th><th>${esc(tr('transfer.store.col.vm'))}</th>
             <th>${esc(tr('transfer.store.col.from'))}</th><th>${esc(tr('transfer.store.col.date'))}</th>
@@ -403,6 +536,13 @@ const VMTransfer = (() => {
       restoreSpec: { type: 'vm-exports', args: { cluster } },
     });
     const root = panel.el;
+    // déjà ouvert : FloatingPanels rend la même fenêtre ; la brancher une
+    // seconde fois doublerait chaque geste (deux dépôts du même fichier)
+    if (root.dataset.storeReady) {
+      root.querySelector('[data-x="refresh"]').click();
+      return;
+    }
+    root.dataset.storeReady = '1';
     const tbody = root.querySelector('[data-x="table"] tbody');
 
     async function refresh() {
@@ -442,6 +582,19 @@ const VMTransfer = (() => {
       }
     }
     root.querySelector('[data-x="refresh"]').addEventListener('click', refresh);
+    const picker = root.querySelector('[data-x="upload-file"]');
+    const upBtn = root.querySelector('[data-x="upload"]');
+    upBtn.addEventListener('click', () => picker.click());
+    picker.addEventListener('change', () => {
+      const file = picker.files && picker.files[0];
+      picker.value = '';
+      if (!file) return;
+      const xhr = uploadArchive(file, root.querySelector('[data-x="up-box"]'), (ok) => {
+        upBtn.disabled = false;
+        if (ok) refresh();
+      });
+      if (xhr) upBtn.disabled = true;
+    });
     refresh();
   }
 
@@ -464,7 +617,7 @@ const VMTransfer = (() => {
                  { kind: 'import', file, namespace: manifest.namespace, name: manifest.vm });
   }
 
-  return { render, openStore, openImport, _findingText: findingText };
+  return { render, openStore, openImport, _findingText: findingText, _uploadMeter: uploadMeter };
 })();
 
 window.VMTransfer = VMTransfer;
