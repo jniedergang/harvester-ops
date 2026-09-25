@@ -770,6 +770,15 @@ class ActionRun:
         self.ended_at = None
         # Recent events buffer (so new SSE clients can replay)
         self.events = deque(maxlen=500)
+        # v1.46.0 : numéro absolu du prochain événement. Le flux SSE suivait
+        # une position dans la file ; passé 500, les plus anciens sortent, la
+        # file ne grandit plus, et il n'envoyait plus rien (dock figé).
+        self._seq = 0
+        # v1.46.0 : progression d'un transfert, un point par phase, JAMAIS
+        # dans la file : un transfert de plusieurs heures l'aurait remplie.
+        self.progress = {}
+        self.progress_last = None
+        self.progress_ver = 0
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -779,6 +788,21 @@ class ActionRun:
     def emit(self, event):
         with self._cond:
             self.events.append(event)
+            self._seq += 1
+            self._cond.notify_all()
+
+    def events_since(self, seq):
+        """Événements de numéro >= `seq` encore dans la file, et le numéro
+        suivant. Ce qui est sorti de la file est sauté, pas attendu."""
+        first = self._seq - len(self.events)
+        start = max(seq, first)
+        return list(self.events)[start - first:], self._seq
+
+    def emit_progress(self, snap):
+        with self._cond:
+            self.progress[snap.get("phase") or "?"] = snap
+            self.progress_last = snap
+            self.progress_ver += 1
             self._cond.notify_all()
 
     def close(self):
@@ -825,6 +849,9 @@ class ActionRun:
             # Sous quelle identité le cluster a vu cette action. None quand la
             # délégation est éteinte : l'action a employé le kubeconfig partagé.
             "cluster_user": self.cluster_user,
+            # v1.46.0 : progression d'un transfert (dernier point par phase)
+            "progress": dict(self.progress),
+            "progress_current": self.progress_last,
         }
 
 
@@ -5614,19 +5641,26 @@ def api_stream(run_id):
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     def gen():
-        # Replay any events we already have
-        last_idx = 0
+        # Replay any events we already have. v1.46.0 : par numéro absolu
+        # (`events_since`), sinon le flux se figeait passé 500 événements ;
+        # et la progression d'un transfert quand elle change.
+        seq, prog_ver = 0, 0
         while True:
             with run._cond:
-                while last_idx >= len(run.events) and not run._closed:
+                while (seq >= run._seq and prog_ver == run.progress_ver
+                       and not run._closed):
                     run._cond.wait(timeout=15)
-                while last_idx < len(run.events):
-                    ev = run.events[last_idx]
-                    last_idx += 1
-                    yield f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n"
-                if run._closed and last_idx >= len(run.events):
-                    yield f"event: end\ndata: {json.dumps(run.to_dict())}\n\n"
-                    return
+                evs, seq = run.events_since(seq)
+                prog = run.progress_last if prog_ver != run.progress_ver else None
+                prog_ver = run.progress_ver
+                closed = run._closed and seq >= run._seq
+            for ev in evs:
+                yield f"event: {ev['type']}\ndata: {json.dumps(ev)}\n\n"
+            if prog is not None:
+                yield f"event: progress\ndata: {json.dumps(prog)}\n\n"
+            if closed:
+                yield f"event: end\ndata: {json.dumps(run.to_dict())}\n\n"
+                return
 
     return Response(stream_with_context(gen()), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -10143,6 +10177,15 @@ def _vm_transfer_runner(run, cmd):
                     step(parts[1], parts[2], parts[3])
                     if parts[2] == "error":
                         last_error = parts[3]
+            elif line.startswith("PROGRESS_EVENT|"):
+                # v1.46.0 : débit, temps restant, quantités ; gardé à part
+                parts = line.split("|", 2)
+                try:
+                    snap = json.loads(parts[2]) if len(parts) == 3 else None
+                except ValueError:
+                    snap = None
+                if isinstance(snap, dict):
+                    run.emit_progress(snap)
         rc = proc.wait()
         run.exit_code = rc
         if rc == 0:
