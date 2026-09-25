@@ -578,7 +578,7 @@ const TF = (() => {
     overlay.classList.remove('hidden');
     overlay.dataset.runId = runId;
     overlay.querySelector('.tf-log-title').textContent =
-      `${dryRun ? 'Dry-run' : 'Apply'} — ${kindLabel}/${ctx.name || '?'} on ${cluster}`;
+      `${dryRun ? 'Dry-run' : (ctx && ctx.isDestroy ? 'Destroy' : 'Apply')} — ${kindLabel}/${ctx.name || '?'} on ${cluster}`;
     const body = overlay.querySelector('.tf-log-body');
     body.innerHTML = '';
     const status = overlay.querySelector('.tf-log-status');
@@ -965,7 +965,8 @@ const TF = (() => {
       runId = d.action_id;
       if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} destroy running — dock action <code>${runId}</code></span>`;
     } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; return; }
-    if (runId) followRun(runId, false, 'destroy', cluster, { name: address });
+    // v1.52.1 : sans isDestroy, la fin s'annonçait « apply completed ».
+    if (runId) followRun(runId, false, 'destroy', cluster, { name: address, isDestroy: true });
   }
 
   // -------------------------------------------------------------------------

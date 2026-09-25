@@ -4,6 +4,39 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.52.1] - 2026-09-26 - Terraform tab: VMs can be created again, one click is one action
+
+### Fixed
+- **No VM could be created from the Terraform tab**: the form offered the
+  cloud-init types `nocloud` and `configdrive`, and the Harvester provider
+  only accepts `noCloud` and `configDrive`, so every plan was refused.
+  Declarations saved before this fix are translated when rendered.
+- **A click in a declaration window could fire several times**: each redraw
+  of the window added its click handlers again. After a few redraws one
+  "+ Add" created five resources, and a Dry-run sent 81 requests (most
+  refused on the Terraform state lock or the rate limit).
+- The destruction of a single resource ended on "apply completed", and its
+  log window said "Apply".
+- A failed provider installation now says why (for example
+  "HTTP Error 404: Not Found") instead of "provider install failed".
+- A Dry-run and an Apply of a declaration carried the same action label and
+  could not be told apart in the Activity tab.
+- **A destroyed VM left its disks behind** (a 10 Gi volume stayed Bound in
+  Harvester): disks now go with the VM, unless "delete this disk when the
+  VM is destroyed" is unchecked on the disk.
+
+### Tests
+- The cloud-init types offered by the form and rendered are the provider's;
+  earlier values are translated.
+- One click after several redraws adds one resource (fails on the previous
+  code).
+- The cause of a failed provider installation; the two action labels.
+- A destroyed VM takes its disks unless asked otherwise.
+- Real, on harv1, from the Terraform tab: a VM declared, planned (one
+  request for one click), applied in 32 s and destroyed in 54 s, with no
+  volume left behind; the Activity tab tells the plan and the apply
+  apart.
+
 ## [1.52.0] - 2026-09-26 - Services on the clusters created by Cluster API
 
 ### Added

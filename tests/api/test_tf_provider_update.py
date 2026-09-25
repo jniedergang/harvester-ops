@@ -511,3 +511,29 @@ def test_the_panel_is_wired_to_the_endpoints():
     # Le panneau doit dire d'où vient le binaire actif, sinon l'opérateur ne
     # sait pas si sa mise à jour a pris.
     assert "provider_origin" in js
+
+
+# ---------------------------------------------------------------------------
+# v1.52.1 : un échec d'installation dit sa cause.
+#
+# Vu à l'audit du 26/09/2026 : une version inexistante finissait sur
+# « provider install failed », la vraie cause (HTTP Error 404) restant dans
+# une étape que personne n'ouvrait.
+# ---------------------------------------------------------------------------
+def test_a_failed_install_summarises_its_cause(tmp_path, monkeypatch):
+    fake = tmp_path / "installer.py"
+    fake.write_text("import sys\n"
+                    "print('STEP_EVENT|download|running|fetching', file=sys.stderr)\n"
+                    "print('STEP_EVENT|download|error|HTTP Error 404: Not Found', file=sys.stderr)\n"
+                    "sys.exit(1)\n")
+    monkeypatch.setattr(wapp, "_tf_provider_installer", lambda: fake)
+    monkeypatch.setattr(wapp, "TF_PROVIDER_MANAGED", tmp_path / "managed")
+    run = wapp.ActionRun("tfprov-test", "tf-provider-install", "harv-fake", [])
+    wapp._tf_provider_install_runner(run, "https://example.invalid/p.zip", "", "9.9.9", False)
+    assert run.status == "error"
+    assert run.error_summary == "provider install failed: HTTP Error 404: Not Found"
+
+
+def test_a_dry_run_and_an_apply_are_told_apart():
+    assert wapp._tf_decl_label("web", 3, True) == "tf-plan-decl:web:3"
+    assert wapp._tf_decl_label("web", 3, False) == "tf-apply-decl:web:3"

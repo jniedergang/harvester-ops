@@ -161,6 +161,14 @@ const TF_SCHEMA = {
               fr: 'Storage class (défaut : celle par défaut du cluster).',
             }
           },
+          // v1.52.1 : sans lui, une VM détruite laissait ses disques
+          // (volume de 10 Gi resté Bound, vu à l'audit du 26/09/2026).
+          { name: 'auto_delete', type: 'bool', default: true,
+            description: {
+              en: 'Delete this disk when the VM is destroyed. Unchecked: the volume stays in Harvester.',
+              fr: 'Supprimer ce disque quand la VM est détruite. Décoché : le volume reste dans Harvester.',
+            }
+          },
         ],
       },
       network_interface: {
@@ -202,8 +210,11 @@ const TF_SCHEMA = {
         min: 1, max: 1,
         label: { en: 'Cloud-init', fr: 'Cloud-init' },
         args: [
-          { name: 'type', type: 'enum', default: 'nocloud',
-            enum_values: ['nocloud', 'configdrive'] },
+          // v1.52.1 : les valeurs exactes du provider (noCloud,
+          // configDrive, constantes de harvester/pkg/builder). Les
+          // minuscules d'avant faisaient refuser toute VM au plan.
+          { name: 'type', type: 'enum', default: 'noCloud',
+            enum_values: ['noCloud', 'configDrive'] },
           { name: 'user_data', type: 'textarea', rows: 8,
             default:
               '#cloud-config\n' +

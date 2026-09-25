@@ -610,7 +610,9 @@ Drive the Terraform provider for Harvester from saved declarations.
   resources (VMs, VM images, SSH keys, raw HCL), edited section by section
   (Specs / Disks / Networks / Cloud-init) and applied in one shot.
 - **Apply / destroy** with live plan and apply streaming; typed-confirm
-  modal on every destroy entry point.
+  modal on every destroy entry point. A destroyed VM takes its disks with
+  it unless "delete this disk when the VM is destroyed" is unchecked on the
+  disk (1.52.1).
 - **Edit deployed resources** — each applied resource writes a sidecar
   JSON so its original spec can be reloaded and edited from the Live
   sub-tab.

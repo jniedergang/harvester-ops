@@ -197,8 +197,11 @@ const TFDeclPanel = (() => {
     const decl = window.TFDecl.get(declId);
     if (!decl) { close(declId); return; }
     entry.api.setTitle(decl.name);
+    // Le corps du panneau reste le même élément : ses écouteurs, posés une
+    // fois à l'ouverture, servent encore. Les reposer ici les empilait, et
+    // un clic partait autant de fois que le panneau avait été redessiné
+    // (81 requêtes pour un Dry-run, vu à l'audit de la v1.52.1).
     entry.api.setBody(_renderBody(decl));
-    _wire(entry.api.body, declId, entry.api);
   }
 
   function open(declId) {

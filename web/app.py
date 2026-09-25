@@ -12615,17 +12615,23 @@ def _tf_provider_install_runner(run, source, sha256, version, cleanup,
             proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE, text=True)
             run.proc = proc          # rend l'action annulable depuis le dock
+            last_error = ""
             for line in proc.stderr:
                 line = line.strip()
                 if line.startswith("STEP_EVENT|"):
                     parts = line.split("|", 3)
                     if len(parts) == 4:
                         step(parts[1], parts[2], parts[3])
+                        if parts[2] == "error":
+                            last_error = parts[3]
             rc = proc.wait()
             if rc != 0:
                 run.exit_code = rc
                 run.status = "error"
-                run.error_summary = "provider install failed"
+                # v1.52.1 : la vraie cause (« HTTP Error 404 »...) plutôt
+                # qu'un message générique, qui laissait chercher.
+                run.error_summary = ("provider install failed: " + last_error[:200]
+                                     if last_error else "provider install failed")
             else:
                 touched = _tf_workspaces_invalidate()
                 step("workspaces", "done",
@@ -13141,7 +13147,7 @@ def api_terraform_apply_declaration(cluster):
         }), 400
 
     run_id = uuid.uuid4().hex[:12]
-    label = f"tf-apply-decl:{decl.get('name', '?')}:{len(rendered)}"
+    label = _tf_decl_label(decl.get("name", "?"), len(rendered), dry_run)
     run = ActionRun(run_id, label, cluster, [], dry_run=dry_run)
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
@@ -13363,6 +13369,10 @@ def _render_disk_block(disk):
     elif disk.get("storage_class_name"):
         # storage_class_name is only valid on a blank data disk
         parts.append(f'    storage_class_name = {_hcl_str(disk["storage_class_name"])}')
+    # v1.52.1 : une VM détruite emporte ses disques, sauf demande contraire.
+    # Le provider les gardait par défaut : un volume orphelin par destruction.
+    keep = disk.get("auto_delete") in (False, "false", "False", 0)
+    parts.append(f'    auto_delete = {"false" if keep else "true"}')
     return "  disk {\n" + "\n".join(parts) + "\n  }"
 
 
@@ -13379,8 +13389,22 @@ def _render_nic_block(nic):
     return "  network_interface {\n" + "\n".join(parts) + "\n  }"
 
 
+# Les seules valeurs que le provider accepte (constantes de
+# harvester/pkg/builder). Les déclarations enregistrées avant la v1.52.1
+# portent les minuscules que le formulaire proposait : on les traduit.
+TF_CLOUDINIT_TYPES = {"nocloud": "noCloud", "configdrive": "configDrive"}
+
+
+def _tf_decl_label(name, count, dry_run):
+    """Libellé d'action d'une déclaration. v1.52.1 : un Dry-run et un Apply
+    se distinguent dans l'Activité (ils portaient le même)."""
+    return f"{'tf-plan-decl' if dry_run else 'tf-apply-decl'}:{name}:{count}"
+
+
 def _render_cloudinit_block(ci):
-    parts = [f'    type = {_hcl_str(ci.get("type") or "nocloud")}']
+    kind = str(ci.get("type") or "noCloud")
+    kind = TF_CLOUDINIT_TYPES.get(kind.lower(), kind)
+    parts = [f'    type = {_hcl_str(kind)}']
     if ci.get("user_data"):
         parts.append(f'    user_data = {_hcl_str(ci["user_data"])}')
     if ci.get("network_data"):

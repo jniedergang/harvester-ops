@@ -701,7 +701,9 @@ sauvegardées.
   section (Specs / Disques / Réseaux / Cloud-init) et appliquées en un
   coup.
 - **Apply / destroy** avec streaming live du plan et de l'apply ; modale
-  de confirmation typée sur chaque point d'entrée de destroy.
+  de confirmation typée sur chaque point d'entrée de destroy. Une VM
+  détruite emporte ses disques, sauf si « supprimer ce disque quand la VM
+  est détruite » est décoché sur le disque (1.52.1).
 - **Éditer les ressources déployées** — chaque ressource appliquée écrit
   un sidecar JSON pour recharger et éditer sa spec d'origine depuis le
   sous-onglet Live.

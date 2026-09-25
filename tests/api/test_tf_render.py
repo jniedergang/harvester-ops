@@ -13,6 +13,7 @@ Naming convention: `test_<kind>_<scenario>`.
 
 import sys
 from pathlib import Path
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "web"))
@@ -386,3 +387,48 @@ def test_unknown_kind_returns_empty_string():
 def test_unknown_kind_with_legitimate_spec_still_empty():
     assert wapp._render_tf_for_kind("totally_unknown",
                                      _vm_minimum_nested()) == ""
+
+
+# ---------------------------------------------------------------------------
+# v1.52.1 : le type de cloud-init tel que le provider l'accepte.
+#
+# Vu à l'audit du 26/09/2026 : le formulaire proposait `nocloud` et
+# `configdrive`, le provider v1.9.0 refuse tout sauf `noCloud` et
+# `configDrive` (constantes de harvester/pkg/builder/cloudinit.go), si bien
+# qu'aucune VM ne passait le plan.
+# ---------------------------------------------------------------------------
+PROVIDER_CLOUDINIT_TYPES = {"noCloud", "configDrive"}
+
+
+def test_cloudinit_type_defaults_to_the_provider_value():
+    assert 'type = "noCloud"' in wapp._render_cloudinit_block({})
+
+
+@pytest.mark.parametrize("given, rendered", [
+    ("nocloud", "noCloud"), ("configdrive", "configDrive"),
+    ("noCloud", "noCloud"), ("configDrive", "configDrive")])
+def test_cloudinit_types_saved_before_the_fix_are_translated(given, rendered):
+    assert f'type = "{rendered}"' in wapp._render_cloudinit_block({"type": given})
+
+
+def test_the_form_only_offers_values_the_provider_accepts():
+    import re
+    text = (ROOT / "web" / "static" / "js" / "tf-schema.js").read_text()
+    text = text[text.index("cloudinit: {"):]
+    m = re.search(r"name: 'type', type: 'enum', default: '(\w+)',\s*enum_values: \[([^\]]*)\]", text)
+    assert m, "cloud-init type field not found in tf-schema.js"
+    offered = set(re.findall(r"'(\w+)'", m.group(2)))
+    assert offered == PROVIDER_CLOUDINIT_TYPES and m.group(1) in offered
+
+
+# ---------------------------------------------------------------------------
+# v1.52.1 : une VM détruite emporte ses disques.
+#
+# Vu à l'audit du 26/09/2026, puis à l'essai réel de la 1.52.1 : la VM
+# détruite, son disque de 10 Gi restait Bound dans Harvester.
+# ---------------------------------------------------------------------------
+def test_disks_go_with_the_vm_unless_asked_otherwise():
+    assert "auto_delete = true" in wapp._render_disk_block({"image": "default/img"})
+    assert "auto_delete = false" in wapp._render_disk_block({"image": "default/img", "auto_delete": False})
+    text = (ROOT / "web" / "static" / "js" / "tf-schema.js").read_text()
+    assert "name: 'auto_delete', type: 'bool', default: true" in text
