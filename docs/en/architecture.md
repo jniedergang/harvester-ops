@@ -95,13 +95,18 @@ lose data. The higher-level surfaces are conventional API clients.
 ### Container image
 
 - Base: `registry.suse.com/bci/python:3.11`.
-- Includes `kubectl`, `yq`, `openssh-clients`, the Python wheels
+- Includes `kubectl`, `yq`, `openssh-clients`, `xorriso`, OpenTofu (the
+  open, compatible equivalent of Terraform, MPL-2.0), the Python wheels
   (offline), the bash scripts, and the console.
 - Built via `container/Containerfile`, saved as an OCI tar
   (`images/harvester-ops-ui.tar`) for airgap delivery.
-- CAPHV bundles and the Terraform provider binary are **supplied
-  separately** (they enable the optional Cluster API / Terraform
-  surfaces); the base image does not embed them.
+- **Ready to use (1.51.0)**: the deliverable also carries the Cluster API
+  bundle of the moment (providers and their images, airgap) and the
+  Terraform provider for Harvester, pinned in
+  `scripts/embedded-providers.env`. `install.sh` places them in the
+  service's persistent state (`/var/lib/harvester-ops`), active at first
+  start; a bundle or provider the operator chooses later is never
+  overwritten by a new installation.
 
 ## Multi-cluster model
 

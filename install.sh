@@ -442,6 +442,62 @@ install_uninstaller() {
 # -----------------------------------------------------------------------------
 # Main flow
 # -----------------------------------------------------------------------------
+# v1.51.0 : les fournisseurs embarqués dans le livrable (le paquet Cluster API
+# et le provider Terraform du moment) sont posés dans l'état persistant du
+# service, prêts à l'emploi. Un choix de l'exploitant n'est jamais écrasé :
+# un autre paquet actif reste actif, un provider installé depuis la console
+# reste en place ; seul un provider venu d'un livrable précédent est remplacé.
+install_bundles() {
+    local src="$SCRIPT_DIR/bundles"
+    [[ -d "$src" ]] || return 0
+    local owner="harvester-ops:harvester-ops"
+    id harvester-ops >/dev/null 2>&1 || owner="root:root"
+    local b name last=""
+    if compgen -G "$src/capi/*.tar.gz" >/dev/null; then
+        install -d -m 0750 "$STATE_DIR" "$STATE_DIR/capi-bundles"
+        for b in "$src"/capi/*.tar.gz; do
+            name="$(basename "$b")"
+            if ! (cd "$src/capi" && sha256sum -c "$name.sha256" >/dev/null 2>&1); then
+                warn "Cluster API bundle $name: checksum mismatch, not installed"
+                continue
+            fi
+            if [[ ! -f "$STATE_DIR/capi-bundles/$name" ]]; then
+                install -m 0640 "$b" "$STATE_DIR/capi-bundles/$name"
+                install -m 0640 "$b.sha256" "$STATE_DIR/capi-bundles/$name.sha256"
+            fi
+            last="$name"
+        done
+        if [[ -n "$last" && ! -f "$STATE_DIR/capi-bundles/active.json" ]]; then
+            printf '{"filename": "%s"}\n' "$last" > "$STATE_DIR/capi-bundles/active.json"
+            ok "Cluster API bundle $last installed and active"
+        elif [[ -n "$last" ]]; then
+            ok "Cluster API bundle $last available (the active bundle is kept)"
+        fi
+        chown -R "$owner" "$STATE_DIR/capi-bundles" 2>/dev/null || warn "could not give $STATE_DIR/capi-bundles to $owner"
+    fi
+    local tf="$src/terraform-provider"
+    if [[ -x "$tf/bin/terraform-provider-harvester" ]]; then
+        local dest="$STATE_DIR/.local/share/harvester-ops/terraform-provider"
+        if [[ ! -f "$dest/provider.json" ]] || grep -q '"embedded' "$dest/provider.json"; then
+            install -d -m 0750 "$dest/bin"
+            install -m 0755 "$tf/bin/terraform-provider-harvester" "$dest/bin/terraform-provider-harvester"
+            # la fiche garde le chemin où le binaire se trouve vraiment
+            python3 - "$tf/provider.json" "$dest/provider.json" "$dest/bin/terraform-provider-harvester" <<'PY'
+import json, sys
+meta = json.load(open(sys.argv[1]))
+meta["binary"] = sys.argv[3]
+with open(sys.argv[2], "w") as f:
+    json.dump(meta, f, indent=2)
+PY
+            chmod 0644 "$dest/provider.json"
+            chown -R "$owner" "$STATE_DIR/.local" 2>/dev/null || warn "could not give $STATE_DIR/.local to $owner"
+            ok "Terraform provider $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$tf/provider.json") installed"
+        else
+            ok "Terraform provider: the one installed from the console is kept"
+        fi
+    fi
+}
+
 main() {
     require_root
 
@@ -458,6 +514,7 @@ EOF
 
     install_scripts
     setup_service_account
+    install_bundles
     prepare_config
 
     if prompt_yesno "Install the Web UI (recommended)?" "Y"; then

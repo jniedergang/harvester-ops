@@ -12231,7 +12231,23 @@ TF_PROVIDER_REPO = Path(os.environ.get(
     "HARVESTER_OPS_TF_PROVIDER",
     "/usr/local/share/terraform-provider-harvester",
 ))
-TF_BIN = os.environ.get("HARVESTER_OPS_TF_BIN") or "/usr/local/bin/terraform"
+def _resolve_tf_bin():
+    """Le binaire de Terraform à employer. v1.51.0 : l'image embarque
+    OpenTofu (MPL-2.0, même CLI, même format de configuration) ; un
+    `terraform` posé par l'exploitant garde la priorité, et
+    HARVESTER_OPS_TF_BIN tranche."""
+    env = os.environ.get("HARVESTER_OPS_TF_BIN")
+    if env:
+        return env
+    for cand in ("/usr/local/bin/terraform", shutil.which("terraform"),
+                 "/usr/local/bin/tofu", shutil.which("tofu")):
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return "/usr/local/bin/terraform"
+
+
+TF_BIN = _resolve_tf_bin()
+TF_FLAVOR = "opentofu" if os.path.basename(TF_BIN).startswith("tofu") else "terraform"
 TF_WORKSPACES = _usable_dir(
     Path(os.environ.get("HARVESTER_OPS_TF_WORKSPACES",
                         "/var/lib/harvester-ops/terraform")),
@@ -12678,6 +12694,7 @@ def api_terraform_info():
         "provider_can_install": _tf_provider_installer() is not None,
         "provider_arch": _tf_host_arch(),
         "terraform_bin": TF_BIN,
+        "terraform_flavor": TF_FLAVOR,
         "terraform_available": Path(TF_BIN).exists(),
         "workspaces_dir": str(TF_WORKSPACES),
         "examples_dir": str(TF_PROVIDER_REPO / "examples"),

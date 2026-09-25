@@ -20,6 +20,7 @@ RUN zypper --non-interactive ref && \
         jq \
         gzip \
         tar \
+        xorriso \
     && zypper clean --all
 
 # kubectl — pinned, signed
@@ -33,6 +34,18 @@ ARG YQ_VERSION=v4.44.3
 RUN curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
         -o /usr/local/bin/yq && \
     chmod +x /usr/local/bin/yq
+
+# v1.51.0 : OpenTofu (MPL-2.0), l'équivalent ouvert de Terraform, pour que
+# l'onglet Terraform marche dès l'installation. Épinglé et vérifié par la
+# somme publiée par OpenTofu. Un binaire `terraform` posé par l'exploitant
+# reste pris en priorité (HARVESTER_OPS_TF_BIN).
+ARG TOFU_VERSION=1.12.6
+ARG TOFU_SHA256=50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec
+RUN curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.tar.gz" \
+        -o /tmp/tofu.tar.gz && \
+    echo "${TOFU_SHA256}  /tmp/tofu.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/tofu.tar.gz -C /usr/local/bin tofu && \
+    chmod +x /usr/local/bin/tofu && rm -f /tmp/tofu.tar.gz
 
 # Application
 WORKDIR /opt/harvester-ops

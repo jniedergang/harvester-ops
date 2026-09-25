@@ -56,6 +56,11 @@ L'installeur va :
 - Charger `images/harvester-ops-ui.tar` dans podman/docker
 - Installer `config/systemd/harvester-ops.service` (si UI sélectionnée)
 
+L'installeur pose aussi le paquet Cluster API et le provider Terraform
+embarqués dans `/var/lib/harvester-ops` (1.51.0) : les onglets Cluster API
+et Terraform marchent sans rien télécharger. Un paquet ou un provider choisi
+ensuite depuis la console est conservé par les installations suivantes.
+
 ### 3. Fournir les kubeconfigs et clés SSH
 
 Pour chaque cluster à gérer :

@@ -4,6 +4,39 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.51.0] - 2026-09-26 - A deliverable ready to use: Cluster API bundle, Terraform provider and OpenTofu inside
+
+### Added
+- **The deliverable carries the providers of the moment**: the active
+  Cluster API bundle (RKE2 providers v0.25.2 and CAPHV v0.10.1 with their
+  images, plus the earlier install for Harvester 1.7/1.8) and the Terraform
+  provider for Harvester v1.9.0, pinned in `scripts/embedded-providers.env`
+  and checked against their published checksums.
+- `install.sh` places them in the service's persistent state: the bundle is
+  active and the provider installed at first start. A bundle made active or
+  a provider installed later from the console is never overwritten by a new
+  installation; a provider that came from an earlier deliverable is
+  upgraded.
+- **OpenTofu in the image** (MPL-2.0, the open and compatible equivalent of
+  Terraform), pinned and checked: the Terraform tab works right after
+  installation. A `terraform` binary set by the operator keeps priority
+  (`HARVESTER_OPS_TF_BIN`).
+
+### Fixed
+- **Cluster API bundles could not be added or built in the packaged
+  service**: their directory was inside the read-only image. It is now in
+  the persistent state.
+- **The image had no `xorriso`**, which the bare-metal installation needs to
+  prepare the Harvester ISO.
+
+### Tests
+- The placement by `install.sh` (fresh install, the operator's choices kept,
+  an embedded provider upgraded, a corrupt bundle refused), the package and
+  image contents, the choice between Terraform and OpenTofu.
+- Real: the package built, installed through the unit's own command, the
+  bundle active and the provider found at first start, and a Terraform plan
+  run against harv1 with the embedded OpenTofu and provider.
+
 ## [1.50.0] - 2026-09-26 - Sign in through Rancher, with the rights Rancher gives
 
 ### Added

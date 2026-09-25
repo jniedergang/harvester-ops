@@ -97,13 +97,18 @@ d'API classiques.
 ### Image conteneur
 
 - Base : `registry.suse.com/bci/python:3.11`.
-- Contient `kubectl`, `yq`, `openssh-clients`, les wheels Python
-  (offline), les scripts bash et la console.
+- Contient `kubectl`, `yq`, `openssh-clients`, `xorriso`, OpenTofu
+  (l'équivalent ouvert et compatible de Terraform, MPL-2.0), les wheels
+  Python (offline), les scripts bash et la console.
 - Construit via `container/Containerfile`, sauvegardé en tar OCI
   (`images/harvester-ops-ui.tar`) pour la livraison airgap.
-- Les bundles CAPHV et le binaire du provider Terraform sont **fournis
-  séparément** (ils activent les surfaces optionnelles Cluster API /
-  Terraform) ; l'image de base ne les embarque pas.
+- **Prêt à l'emploi (1.51.0)** : le livrable porte aussi le paquet
+  Cluster API du moment (fournisseurs et leurs images, airgap) et le
+  provider Terraform pour Harvester, épinglés dans
+  `scripts/embedded-providers.env`. `install.sh` les pose dans l'état
+  persistant du service (`/var/lib/harvester-ops`), actifs dès le premier
+  démarrage ; un paquet ou un provider choisi ensuite par l'exploitant n'est
+  jamais écrasé par une nouvelle installation.
 
 ## Modèle multi-cluster
 

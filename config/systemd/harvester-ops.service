@@ -41,6 +41,7 @@ ExecStart=/bin/sh -c 'u=$$(id -u harvester-ops); g=$$(id -g harvester-ops); \
     -e HARVESTER_OPS_CONFIG=/etc/harvester-ops/config.yaml \
     -e HARVESTER_OPS_HTPASSWD=/etc/harvester-ops/htpasswd \
     -e HARVESTER_OPS_EXPORT_DIR=/var/lib/harvester-ops/exports \
+    -e HARVESTER_OPS_CAPI_BUNDLE=/var/lib/harvester-ops/capi-bundles/capi-bundle.tar.gz \
     localhost/harvester-ops:latest serve'
 
 ExecStop=/usr/bin/podman stop -t 10 harvester-ops

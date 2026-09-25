@@ -94,6 +94,33 @@ if [[ -d images ]]; then
     cp -v images/*.tar "$WORK_DIR/images/" 2>/dev/null || true
 fi
 
+# v1.51.0 : les fournisseurs du moment, embarqués pour un livrable prêt à
+# l'emploi (voir scripts/embedded-providers.env et install_bundles).
+if [[ "${SKIP_EMBEDDED:-0}" == "1" ]]; then
+    warn "SKIP_EMBEDDED=1 — no embedded Cluster API bundle nor Terraform provider"
+else
+    # shellcheck disable=SC1091
+    source scripts/embedded-providers.env
+    bundle="${CAPI_BUNDLE:-}"
+    if [[ -z "$bundle" && -f dist/active.json ]]; then
+        bundle="dist/$(python3 -c 'import json; print(json.load(open("dist/active.json"))["filename"])')"
+    fi
+    [[ -n "$bundle" && -f "$bundle" && -f "$bundle.sha256" ]] || {
+        err "no Cluster API bundle to embed (build one, or CAPI_BUNDLE=<file>, or SKIP_EMBEDDED=1)"; exit 1; }
+    (cd "$(dirname "$bundle")" && sha256sum -c "$(basename "$bundle").sha256" >/dev/null) || {
+        err "Cluster API bundle $bundle: checksum mismatch"; exit 1; }
+    mkdir -p "$WORK_DIR/bundles/capi"
+    cp "$bundle" "$bundle.sha256" "$WORK_DIR/bundles/capi/"
+    providers="$(tar -xzOf "$bundle" --wildcards '*/turtles.json' 2>/dev/null \
+        | python3 -c 'import json,sys; print(", ".join(p["name"]+" "+p["version"] for p in json.load(sys.stdin)["providers"]))' 2>/dev/null || echo "?")"
+    ok "Cluster API bundle embedded: $(basename "$bundle") ($providers)"
+    python3 bin/harvester-provider-install.py "$TF_PROVIDER_VERSION" \
+        --dest "$WORK_DIR/bundles/terraform-provider" \
+        --source-label "embedded in harvester-ops ${VERSION}" 2>/dev/null
+    [[ -x "$WORK_DIR/bundles/terraform-provider/bin/terraform-provider-harvester" ]] || {
+        err "Terraform provider ${TF_PROVIDER_VERSION} could not be fetched"; exit 1; }
+    ok "Terraform provider embedded: v${TF_PROVIDER_VERSION} (checksum verified)"
+fi
 # web/ above already carries web/vendor (wheels). A second
 # `cp -r web/vendor "$WORK_DIR/web/vendor"` used to nest a duplicate
 # vendor/vendor/ (~35 MB of dead weight) because the target existed.
