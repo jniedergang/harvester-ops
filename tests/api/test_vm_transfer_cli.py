@@ -288,3 +288,27 @@ def test_check_reports_the_amount_and_the_speed(sandbox):
     r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
                      "--to-kubeconfig", str(d))
     assert "to transfer: 1 disk(s), 10.0 GiB (3.0 GiB used)" in r.stdout
+
+
+def test_a_kubectl_timeout_is_transient_and_leaks_no_path(tmp_path, monkeypatch):
+    """Vécu sur le banc : un appel kubectl est resté 60 s sans réponse (API
+    à genoux). L'erreur de subprocess citait la ligne de commande, chemin du
+    kubeconfig compris, jusque dans l'interface."""
+    import importlib.util
+    import subprocess as sp
+    spec = importlib.util.spec_from_file_location("hvt", SCRIPT)
+    hvt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hvt)
+
+    def slow(*a, **k):
+        raise sp.TimeoutExpired(cmd=a[0], timeout=60)
+    monkeypatch.setattr(hvt.subprocess, "run", slow)
+    k = hvt.Kube("/secret/place/kubeconfig.yaml")
+    with pytest.raises(hvt.KubeError) as ei:
+        k.get("virtualmachineimages.harvesterhci.io", "default", "x")
+    msg = str(ei.value)
+    assert "/secret/place" not in msg and "kubeconfig" not in msg
+    assert "timed out" in msg
+    sys.path.insert(0, str(ROOT / "bin" / "lib"))
+    import vm_transfer_run as run
+    assert run.transient(ei.value)

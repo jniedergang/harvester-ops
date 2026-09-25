@@ -76,8 +76,14 @@ class Kube:
         return ["kubectl", "--kubeconfig", self.kubeconfig]
 
     def run(self, *args, input=None, timeout=None):
-        p = subprocess.run(self._base() + list(args), input=input, capture_output=True,
-                           text=True, timeout=timeout or self.timeout)
+        t = timeout or self.timeout
+        try:
+            p = subprocess.run(self._base() + list(args), input=input, capture_output=True,
+                               text=True, timeout=t)
+        except subprocess.TimeoutExpired:
+            # jamais la ligne de commande : elle porte le chemin du kubeconfig
+            raise KubeError(f"kubectl {' '.join(str(a) for a in args[:2])} timed out after {t} s") \
+                from None
         if p.returncode != 0:
             raise KubeError((p.stderr or p.stdout or "kubectl failed").strip()[:500])
         return p.stdout

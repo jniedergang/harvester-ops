@@ -125,7 +125,8 @@ class Ctx:
 # d'un cluster a décroché quelques secondes pendant un long transfert.
 _TRANSIENT = ("Unable to connect to the server", "connection refused", "no route to host",
               "i/o timeout", "ServiceUnavailable", "TLS handshake timeout",
-              "connection reset by peer", "EOF", "the server is currently unable")
+              "connection reset by peer", "EOF", "the server is currently unable",
+              "timed out")
 
 
 def transient(e):
