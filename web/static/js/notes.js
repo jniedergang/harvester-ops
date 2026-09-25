@@ -113,6 +113,11 @@ const Notes = (() => {
 
     // Toolbar wiring
     panel.el.querySelectorAll('.notes-toolbar [data-cmd]').forEach(btn => {
+      // v1.47.2 : l'appui souris ne donne pas le focus au bouton. Tiptap ne
+      // le rend à l'éditeur qu'à l'image suivante : une frappe entre-temps
+      // partait sur le bouton et se perdait. Le clavier (Tab, Entrée) reste
+      // intact.
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
       btn.addEventListener('click', () => runCmd(editor, btn.dataset.cmd));
     });
 

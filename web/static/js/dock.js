@@ -323,7 +323,7 @@ const Dock = (() => {
         <div class="dock-action-summary">
           <span class="dock-icon">${icon}</span>
           <div class="info">
-            <div class="name">${a.action} → ${a.cluster}${dryBadge}</div>
+            <div class="name">${escapeHtml(a.action)} → ${escapeHtml(a.cluster)}${dryBadge}</div>
             <div class="meta">
               <code class="aid">${a.id}</code> ·
               <span class="started" title="${tr('dock.startedTip', 'started')}">${startedHuman}</span>
@@ -338,14 +338,15 @@ const Dock = (() => {
                   title="${expanded.has(a.id) ? tr('dock.hideDetails', 'Hide the live logs') : tr('dock.showDetails', 'Show live logs')}"
                   data-i18n-title="${expanded.has(a.id) ? 'dock.hideDetails' : 'dock.showDetails'}">${expanded.has(a.id) ? tr('dock.hide', 'Hide') : tr('dock.details', 'Details')}</button>
           ${isRunning
-            ? `<button class="btn-mini" data-cancel="${a.id}">Cancel</button>`
+            ? `<button class="btn-mini" data-cancel="${a.id}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
         </div>
         <pre class="dock-action-log" id="dock-log-${a.id}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
       if (cancelBtn) cancelBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
-        if (!confirm('Cancel ' + a.action + ' on ' + a.cluster + '?')) return;
+        if (!confirm(tr('dock.cancelConfirm', `Cancel ${a.action} on ${a.cluster}?`,
+                        { action: a.action, cluster: a.cluster }))) return;
         try {
           await fetch(`/api/action/${a.id}`, { method: 'DELETE' });
           poll();
@@ -404,8 +405,8 @@ const Dock = (() => {
 
   // i18n avec repli : le dock se re-rend toutes les 3s en dehors du scan
   // data-i18n, donc les libellés passent par t() à chaque rendu.
-  function tr(key, fallback) {
-    return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key) : fallback;
+  function tr(key, fallback, vars) {
+    return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key, vars) : fallback;
   }
 
   function escapeHtml(s) {

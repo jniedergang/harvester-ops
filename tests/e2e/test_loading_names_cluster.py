@@ -16,7 +16,12 @@ from playwright.sync_api import expect  # noqa: E402
 @pytest.mark.parametrize("sub,path,lang,needle", [
     ("cluster", "**/api/topology/**", "en", "Loading harv-fake's topology"),
     ("storage", "**/api/storage-map/**", "fr", "Chargement de la topologie de harv-fake"),
-    ("network", "**/api/topology/**", "de", "Topologie von harv-fake wird geladen"),
+    # v1.47.2 : la vue Réseau lit /api/network-fabric, plus /api/topology.
+    # Retenir la mauvaise requête laissait passer la vraie réponse (« cluster
+    # injoignable », le cluster de test étant fictif) : lente seule, immédiate
+    # dans la suite complète une fois le cluster connu éteint, d'où un test
+    # qui n'échouait que là.
+    ("network", "**/api/network-fabric/**", "de", "Topologie von harv-fake wird geladen"),
 ])
 def test_the_loading_text_names_the_cluster(context, flask_server, sub, path, lang, needle):
     held = threading.Event()

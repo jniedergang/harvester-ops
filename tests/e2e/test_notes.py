@@ -159,6 +159,26 @@ def test_notes_formatting_via_toolbar(page):
     assert "<strong>" in html and "bold-typing" in html, html
 
 
+def test_notes_toolbar_keeps_the_focus_in_the_editor(page):
+    """v1.47.2 : cliquer un bouton de la barre donnait le focus au bouton ;
+    Tiptap ne le rend à l'éditeur qu'à l'image suivante
+    (`requestAnimationFrame`). Une frappe dans l'intervalle partait sur le
+    bouton : la première lettre après « gras » se perdait sur une machine
+    chargée (« old-typing » au lieu de « bold-typing »). Le bouton ne prend
+    plus le focus : l'appui souris est neutralisé, le clic agit toujours."""
+    page.wait_for_load_state("networkidle")
+    _open_ns_notes(page, "default-focus")
+    page.locator(EDITOR).click()
+    kept = page.evaluate("""(sel) => {
+        const b = document.querySelector(sel);
+        const ev = new MouseEvent('mousedown', { bubbles: true, cancelable: true });
+        b.dispatchEvent(ev);
+        return { prevented: ev.defaultPrevented,
+                 inEditor: !!document.activeElement.closest('.ProseMirror') };
+    }""", TOOLBAR_BOLD)
+    assert kept == {"prevented": True, "inEditor": True}
+
+
 def test_notes_two_users_real_sync(page, context, flask_server):
     """The hard one. Open the SAME note in two browser contexts; what one
     types must appear in the other. Catches the 2-user reconnect bug AND

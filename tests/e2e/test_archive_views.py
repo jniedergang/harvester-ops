@@ -202,3 +202,124 @@ def test_the_store_is_wired_once_even_if_opened_twice(store, tmp_path):
     expect(panel.locator('[data-x="up-line"]')).to_contain_text("double.hvx", timeout=15000)
     expect(panel.locator('[data-x="up-line"]')).to_contain_text("Archive déposée", timeout=15000)
     assert len(puts) == 1
+
+
+# -- v1.47.2 : le contrôle dit ce qu'il lit, « Lancer » reste grisé ----------
+
+@pytest.fixture
+def export_pane(context, flask_server):
+    """La fenêtre « Migrer », destination fichier, avec un contrôle que le
+    test libère quand il veut et un flux d'action choisi par le test."""
+    context.add_init_script("localStorage.setItem('harvester_ops_language','fr');")
+    page = context.new_page()
+    held, checks, stream = [], [], {"events": []}
+
+    def check(route, request):
+        checks.append(json.loads(request.post_data or "{}"))
+        if held is not None and len(checks) == 1 and held == []:
+            held.append(route)                 # le premier contrôle attend le test
+            return
+        fulfill(route, {"engine": "file", "reason": "file-requested", "blocked": False,
+                        "findings": [{"code": "engine", "level": "ok", "facts": {}}],
+                        "amount": {"disks": 1, "size": GIB, "used": GIB}})
+
+    page.route("**/api/clusters", lambda r, q: fulfill(r, {"clusters": [{"name": "harv-fake"}]}))
+    page.route(f"**{VM}/migrate-info", lambda r, q: fulfill(r, {"phase": "Running", "nodes": [], "migrations": []}))
+    page.route(f"**{VM}/transfer/check", check)
+    page.route(f"**{VM}/transfer", lambda r, q: fulfill(r, {"action_id": "exp000000002"}, 201))
+    page.route("**/api/stream/exp000000002",
+               lambda r, q: fulfill(r, sse(stream["events"]), ctype="text/event-stream"))
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_function("window.VMMigrate && window.VMTransfer && window.XferProgress")
+    page.evaluate("VMMigrate.open('harv-fake', 'default', 'vm1', 'file')")
+    pane = page.locator('#fp-vm-migrate-harv-fake-default-vm1 [data-pane="file"]')
+    return page, pane, held, checks, stream
+
+
+def _release(page, held):
+    # les routes ne sont servies que pendant une attente de Playwright
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    route = held.pop()
+    fulfill(route, {"engine": "file", "reason": "file-requested", "blocked": False,
+                    "findings": [{"code": "engine", "level": "ok", "facts": {}}],
+                    "amount": {"disks": 1, "size": GIB, "used": GIB}})
+
+
+def test_an_export_check_says_it_reads_one_cluster(export_pane):
+    page, pane, held, checks, _ = export_pane
+    report = pane.locator('[data-x="report"]')
+    expect(report).to_have_text("Lecture du cluster...", timeout=5000)
+    assert "deux clusters" not in pane.locator('[data-x="check"]').get_attribute("data-tip")
+    assert "le cluster" in pane.locator('[data-x="check"]').get_attribute("data-tip")
+    _release(page, held)
+    expect(report).to_contain_text("Aucun blocage", timeout=5000)
+
+
+def test_a_late_check_does_not_reenable_start_while_running(export_pane):
+    page, pane, held, checks, stream = export_pane
+    # le transfert tourne : un point de progression, pas de fin
+    stream["events"] = [("progress", {"phase": "freeze", "item": None, "done": 1, "total": GIB,
+                                      "wire": 0, "rate": None, "eta": None, "elapsed": 1,
+                                      "items_done": 0, "items_total": 1, "final": False})]
+    _release(page, held)
+    start = pane.locator('[data-x="start"]')
+    expect(start).to_be_enabled(timeout=5000)
+    start.click()
+    expect(pane.locator('[data-x="feedback"]')).to_contain_text("exp000000002", timeout=5000)
+    n = len(checks)
+    # un champ quitté après le lancement relance le contrôle
+    pane.locator('[data-x="source"]').select_option("stopped")
+    expect(pane.locator('[data-x="report"]')).to_contain_text("Aucun blocage", timeout=5000)
+    page.wait_for_timeout(500)
+    assert len(checks) > n
+    expect(start).to_be_disabled()
+
+
+def test_a_failed_transfer_can_be_started_again(export_pane):
+    page, pane, held, checks, stream = export_pane
+    stream["events"] = [("end", {"status": "error", "error_summary": "disk-0: boom",
+                                 "progress": {}, "result": {}})]
+    _release(page, held)
+    start = pane.locator('[data-x="start"]')
+    expect(start).to_be_enabled(timeout=5000)
+    n = len(checks)
+    start.click()
+    expect(pane.locator('[data-x="live-line"]')).to_contain_text("boom", timeout=5000)
+    # tout a été défait : un contrôle frais, puis « Lancer » redevient possible
+    expect(start).to_be_enabled(timeout=5000)
+    assert len(checks) > n
+
+
+def test_a_cancel_from_the_dock_stops_the_upload_in_the_window(context, flask_server, tmp_path):
+    """Vu en réel (1.47.2) : « Annuler » du dock arrêtait le dépôt côté
+    serveur, mais le navigateur continuait d'envoyer et la fenêtre
+    d'afficher l'envoi. Elle suit maintenant l'action et s'arrête avec elle."""
+    context.add_init_script("localStorage.setItem('harvester_ops_language','fr');")
+    page = context.new_page()
+    run = {"id": "upl000000001", "action": "vm-archive-upload:stopper.hvx", "cluster": "(local)",
+           "status": "running", "started_at": 1, "ended_at": None, "exit_code": None,
+           "dry_run": False, "error_summary": None, "progress": {}, "progress_current": None,
+           "result": {}}
+    failed = []
+    page.on("requestfailed", lambda r: failed.append(r.method) if r.method == "PUT" else None)
+    page.route("**/api/exports/stopper.hvx", lambda r, q: None)       # l'envoi reste en vol
+    page.route("**/api/activity**", lambda r, q: fulfill(r, {"in_progress": [run], "actions_done": [],
+                                                           "log_files": [], "total": 1}))
+    page.route("**/api/stream/upl000000001", lambda r, q: fulfill(r, sse([
+        ("end", {"status": "cancelled", "error_summary": "cancelled, nothing kept", "result": {}}),
+    ]), ctype="text/event-stream"))
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_function("window.VMTransfer && window.XferProgress && window.i18n")
+    page.evaluate("VMTransfer.openStore()")
+    panel = page.locator("#fp-vm-exports")
+    panel.locator('[data-x="upload-file"]').set_input_files(files=[{
+        "name": "stopper.hvx", "mimeType": "application/octet-stream",
+        "buffer": _archive(tmp_path, name="stopper")}])
+    expect(panel.locator('[data-x="up-line"]')).to_contain_text("Dépôt annulé", timeout=10000)
+    expect(panel.locator('[data-x="up-cancel"]')).to_be_hidden()
+    expect(panel.locator('[data-x="upload"]')).to_be_enabled()
+    page.wait_for_timeout(300)
+    assert failed == ["PUT"]                     # l'envoi a bien été interrompu

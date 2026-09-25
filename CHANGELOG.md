@@ -4,6 +4,56 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.47.2] - 2026-09-25 - Small defects seen while testing 1.47
+
+### Fixed
+- **After a console restart, the details of an action finished in the
+  previous hour were empty.** The runs reloaded from the database kept
+  their events but not the event counter introduced in 1.46.0, so their
+  stream replayed nothing until the hourly cleanup handed them back to the
+  database path.
+- **The end of an export names its archive after a restart too**: the
+  action's result is kept in the database (a column added in place, older
+  databases keep working).
+- **Start could come back to life while a transfer ran**: a pre-check
+  finishing after the launch (a field left just before) enabled it again.
+  It stays greyed out until the action ends; after a failure or a
+  cancellation a fresh pre-check makes it available again.
+- **The export pre-check said it was reading "both clusters"**; an export
+  reads one cluster, an import the archive and the target cluster. The
+  Check button's tooltip says the same.
+- **The dock's Cancel button and its confirmation were in English** in every
+  language; the button has a tooltip saying what cancelling does. The
+  action and cluster names in a dock card are escaped.
+- **Cancelling an upload from the dock left the store window uploading**
+  (seen for real): the server stopped and deleted the partial file, but the
+  browser went on sending without noticing. The window now follows the
+  upload's action from the start and stops with it.
+- **The first letter typed after a notes toolbar button could be lost** on
+  a busy machine: the button took the focus, which the editor only gets
+  back at the next frame. The button no longer takes it.
+
+### Tests
+- A reloaded run replays its events and its result; the result survives in
+  the database, an older database gains the column; a late pre-check keeps
+  Start greyed out (the test fails without the fix), a failed transfer can
+  be started again; the export pre-check text; the dock's Cancel in five
+  languages; a cancel from the dock stops the upload in the window (the test
+  fails with the previous window); the notes toolbar keeps the focus in the
+  editor.
+- Real, on the development console: a run finished just before a restart
+  replays its steps and its archive name after it; a 3 GiB upload
+  cancelled with the dock's Annuler button, confirmation in French, the
+  window stopping at once and nothing kept.
+- The loading-text test of the network view held a request the view no
+  longer makes (`/api/topology` instead of `/api/network-fabric`): it passed
+  only while the real answer was slow, which is why it failed in the full
+  suite. Reproduced with an instant answer, then corrected.
+- The dock toggle test clicked the Activity tab, in the side menu, and left
+  the pointer there: a menu that had time to unfold (120 ms after hovering)
+  covered the toggle. Reproduced by waiting, then corrected by moving the
+  pointer away as a user does.
+
 ## [1.47.1] - 2026-09-25 - The package says what the console is
 
 ### Fixed

@@ -310,8 +310,9 @@ revenait dans le magasin d'une autre console qu'à la main.
   au script en `--out <fichier>` au lieu du répertoire ; l'`ActionRun` la
   porte dans `result.archive`, que l'événement de fin transmet. La fenêtre
   affiche alors le nom, la taille et trois gestes : télécharger, importer,
-  ouvrir le magasin. `result` n'est pas persisté en base : après un
-  redémarrage ou le ménage d'une heure, le magasin reste le chemin.
+  ouvrir le magasin. Depuis 1.47.2, `result` est aussi gardé en base
+  (colonne ajoutée à chaud) : le flux rejoué après un redémarrage ou le
+  ménage d'une heure se termine avec lui.
 - **Dépôt : `PUT /api/exports/<fichier>`, le corps EST le fichier.** Rien
   ne passe par le parseur de formulaires de Werkzeug, qui aurait recopié le
   fichier entier dans `/tmp` (en mémoire dans le service installé) : la

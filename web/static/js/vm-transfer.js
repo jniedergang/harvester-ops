@@ -75,6 +75,19 @@ const VMTransfer = (() => {
 
   const LEVEL_CLASS = { block: 'sev-critical', warn: 'sev-watch', ok: 'sev-info' };
 
+  // v1.47.2 : un export ne lit qu'un cluster, un import une archive et un
+  // cluster ; « Lecture des deux clusters » ne valait que pour un transfert.
+  const CHECKING = {
+    migrate: () => tr('transfer.checking'),
+    export: () => tr('transfer.checkingExport'),
+    import: () => tr('transfer.checkingImport'),
+  };
+  const CHECK_TIP = {
+    migrate: () => tr('transfer.checkTip'),
+    export: () => tr('transfer.checkTipExport'),
+    import: () => tr('transfer.checkTipImport'),
+  };
+
   function reportHtml(d) {
     const engine = d.engine === 'backup'
       ? tr('transfer.engine.backup')
@@ -167,7 +180,7 @@ const VMTransfer = (() => {
         <fieldset class="tf-block"><legend>${esc(tr('transfer.findings'))}</legend>
           <div class="xfer-report" data-x="report"></div></fieldset>
         <div class="apply-bar" style="margin:0; padding:0; border:0;">
-          <button type="button" class="btn btn-secondary btn-sm tip" data-x="check" data-tip="${esc(tr('transfer.checkTip'))}">${Icons.svg('refresh')} <span>${esc(tr('transfer.check'))}</span></button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="check" data-tip="${esc(CHECK_TIP[kind]())}">${Icons.svg('refresh')} <span>${esc(tr('transfer.check'))}</span></button>
           <button type="button" class="btn btn-primary btn-sm tip" data-x="start" data-tip="${esc(tr('transfer.startTip'))}" disabled>${Icons.svg(kind === 'export' ? 'download' : kind === 'import' ? 'upload' : 'migrate')} <span>${esc((kind === 'export' ? tr('transfer.startExport') : kind === 'import' ? tr('transfer.startImport') : tr('transfer.start')))}</span></button>
           <span class="apply-result" data-x="feedback"></span>
         </div>
@@ -182,7 +195,10 @@ const VMTransfer = (() => {
       </div>`;
 
     const q = (x) => container.querySelector(`[data-x="${x}"]`);
-    const state = { seq: 0, mapsFor: null };
+    // `running` : une action lancée d'ici n'est pas finie. Un contrôle qui
+    // arrive après le lancement (déclenché par un champ quitté) réactivait
+    // « Lancer » pendant le transfert (vu en réel, v1.47.2).
+    const state = { seq: 0, mapsFor: null, running: false };
 
     function syncMac() {
       const src = q('source'), mac = q('keep_mac');
@@ -244,7 +260,7 @@ const VMTransfer = (() => {
       // faisait remonter « Lancer » pendant le clic (appui sur le bouton,
       // relâchement à côté), et le clic était perdu.
       if (report.querySelector('.sto-finding')) report.classList.add('is-checking');
-      else report.innerHTML = `<p class="tf-desc">${esc(tr('transfer.checking'))}</p>`;
+      else report.innerHTML = `<p class="tf-desc">${esc(CHECKING[kind]())}</p>`;
       // « Lancer » n'est PAS grisé pendant qu'un contrôle se refait : quitter
       // un champ pour cliquer dessus relance le contrôle (événement change),
       // et un bouton grisé à cet instant perd le clic. Le script refait le
@@ -281,7 +297,7 @@ const VMTransfer = (() => {
           short.disabled = d.engine !== 'backup';
           if (short.disabled && mode.value === 'short') mode.value = 'stop';
         }
-        q('start').disabled = !!d.blocked;
+        q('start').disabled = !!d.blocked || state.running;
       } catch (e) {
         if (seq !== state.seq) return;
         report.innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(tr('transfer.error', { msg: e.message }))}</div></div>`;
@@ -303,6 +319,7 @@ const VMTransfer = (() => {
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('transfer.started', { id: d.action_id }))}</span>`;
+        state.running = true;
         follow(d.action_id);
       } catch (e) {
         fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('transfer.error', { msg: e.message }))}</span>`;
@@ -342,6 +359,7 @@ const VMTransfer = (() => {
           end: (e) => {
             let d = {};
             try { d = JSON.parse(e.data); } catch (_) { /* fin sans détail */ }
+            state.running = false;
             Object.values(d.progress || {}).forEach(p => { phases[p.phase] = p; });
             draw(null);
             const line = q('live-line');
@@ -355,6 +373,10 @@ const VMTransfer = (() => {
               line.textContent = tr('progress.failed', { msg: d.error_summary || d.status || '?' });
             }
             es.close();
+            // Échec ou annulation : tout a été défait, on peut relancer après
+            // un contrôle frais. Réussi : « Lancer » reste grisé jusqu'au
+            // prochain contrôle demandé.
+            if (d.status !== 'done') check();
           },
         },
       });
@@ -421,7 +443,7 @@ const VMTransfer = (() => {
     const meta = box.querySelector('[data-x="up-meta"]');
     const cancel = box.querySelector('[data-x="up-cancel"]');
     const meter = uploadMeter(file.size);
-    let es = null;
+    let es = null, finished = false, serverEnd = null;
     line.textContent = tr('transfer.store.uploadStarting', { name: file.name });
     bar.style.width = '0%';
     meta.textContent = '';
@@ -431,40 +453,66 @@ const VMTransfer = (() => {
     xhr.open('PUT', `/api/exports/${enc(file.name)}`);
     xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = (e) => {
+      if (finished) return;
       const snap = meter(e.loaded);
       if (e.loaded < file.size) line.textContent = XferProgress.text(snap);
       bar.style.width = XferProgress.pct(snap) + '%';
       meta.textContent = tr('progress.elapsed', { t: XferProgress.duration(snap.elapsed) });
     };
-    // Tout est parti : le serveur vérifie les sommes. Sa progression est
-    // celle de l'action (la même que dans le dock).
-    xhr.upload.onload = async () => {
+    // Tout est parti : le serveur vérifie les sommes (suivi par l'action).
+    xhr.upload.onload = () => {
+      if (finished) return;
       line.textContent = tr('transfer.store.verifying');
       bar.style.width = '0%';
-      try {
-        const d = await fetch(`/api/activity?action=${enc('vm-archive-upload:' + file.name)}`).then(r => r.json());
-        const run = (d.in_progress || [])[0];
-        if (!run || !window.SSEReconnect) return;
-        es = SSEReconnect.connect(`/api/stream/${enc(run.id)}`, {
-          on: {
-            progress: (ev) => {
-              const snap = JSON.parse(ev.data);
-              if (snap.phase !== 'verify' || xhr.readyState === 4) return;
-              line.textContent = XferProgress.text(snap);
-              bar.style.width = XferProgress.pct(snap) + '%';
-            },
-            end: () => es && es.close(),
-          },
-        });
-      } catch (_) { /* le dock suit aussi l'action */ }
     };
     const finish = (ok, msg) => {
+      if (finished) return;
+      finished = true;
       if (es) es.close();
       cancel.hidden = true;
       line.innerHTML = `<span style="color:var(${ok ? '--accent' : '--danger'})">${Icons.svg(ok ? 'ok' : 'fail', { size: 14 })} ${esc(msg)}</span>`;
       if (ok) bar.style.width = '100%';
       done(ok);
     };
+
+    // L'action du serveur, suivie dès le début : la vérification des sommes
+    // (la même progression que le dock), et une fin décidée ailleurs, par
+    // « Annuler » du dock. Le navigateur ne voit pas toujours le serveur
+    // fermer la connexion au milieu d'un envoi : la fenêtre continuait
+    // d'afficher un envoi que le serveur avait arrêté (vu en réel, 1.47.2).
+    async function followRun() {
+      if (!window.SSEReconnect) return;
+      const action = 'vm-archive-upload:' + file.name;
+      let run = null;
+      for (let i = 0; i < 20 && !run && !finished; i++) {
+        try {
+          const d = await fetch(`/api/activity?action=${enc(action)}`).then(r => r.json());
+          run = (d.in_progress || []).find(a => a.action === action) || null;
+        } catch (_) { /* nouvel essai */ }
+        if (!run) await new Promise(r => setTimeout(r, 500));
+      }
+      if (!run || finished) return;
+      es = SSEReconnect.connect(`/api/stream/${enc(run.id)}`, {
+        on: {
+          progress: (ev) => {
+            const snap = JSON.parse(ev.data);
+            if (snap.phase !== 'verify' || finished) return;
+            line.textContent = XferProgress.text(snap);
+            bar.style.width = XferProgress.pct(snap) + '%';
+          },
+          end: (ev) => {
+            if (es) es.close();
+            let d = {};
+            try { d = JSON.parse(ev.data); } catch (_) { /* fin sans détail */ }
+            // réussie : la réponse de la requête dit le reste
+            if (d.status === 'done' || xhr.readyState === 4) return;
+            serverEnd = d;
+            xhr.abort();
+          },
+        },
+      });
+    }
+
     xhr.onload = () => {
       let d = {};
       try { d = JSON.parse(xhr.responseText); } catch (_) { /* réponse sans corps */ }
@@ -480,9 +528,17 @@ const VMTransfer = (() => {
       }
     };
     xhr.onerror = () => finish(false, tr('transfer.store.uploadFailed', { msg: tr('transfer.store.uploadLost') }));
-    xhr.onabort = () => finish(false, tr('transfer.store.uploadCancelled'));
+    // arrêté ici (bouton Annuler de la fenêtre) ou par la fin de l'action
+    xhr.onabort = () => {
+      if (serverEnd && serverEnd.status !== 'cancelled') {
+        finish(false, tr('transfer.store.uploadFailed', { msg: serverEnd.error_summary || serverEnd.status }));
+      } else {
+        finish(false, tr('transfer.store.uploadCancelled'));
+      }
+    };
     cancel.onclick = () => xhr.abort();
     xhr.send(file);
+    followRun();
     return xhr;
   }
 

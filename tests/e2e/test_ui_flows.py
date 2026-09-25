@@ -185,6 +185,13 @@ def test_dock_toggle_in_activity_tab(page):
     """The checkbox has width=0/height=0 (CSS slider style) — click the
     parent label which propagates the toggle event."""
     page.click('.tab[data-tab="activity"]')
+    # v1.47.2 : l'onglet est dans le menu latéral, qui se déplie en calque
+    # 120 ms après le survol. Le pointeur y restait, et un menu déplié à
+    # temps couvrait l'interrupteur pour de bon (échec sous charge seulement).
+    # Comme un utilisateur, on sort du menu et on le laisse se replier.
+    page.mouse.move(1100, 450)
+    page.wait_for_function("document.body.classList.contains('sidebar-collapsed')"
+                           " || document.body.classList.contains('sidebar-pinned')")
     toggle = page.locator("#dock-toggle")
     expect(toggle).to_be_checked()
 

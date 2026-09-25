@@ -209,3 +209,33 @@ def test_dock_button_labels_are_i18n():
     for key in ("dock.details", "dock.hide", "dock.hideDetails", "dock.showDetails"):
         assert key in dicts["en"], f"{key} missing from EN dict"
         assert key in dicts["fr"], f"{key} missing from FR dict"
+
+
+def test_dock_cancel_is_translated_and_explained():
+    """v1.47.2 : dans une interface française, le dock affichait « Cancel »
+    et demandait « Cancel vm-export:... on harv1? ». Le bouton passe par
+    tr(), porte une bulle, et la confirmation est traduite dans les cinq
+    langues."""
+    dock = (JS_DIR / "dock.js").read_text()
+    assert ">Cancel</button>" not in dock
+    assert "confirm('Cancel '" not in dock
+    assert "tr('dock.cancel'" in dock and "tr('dock.cancelConfirm'" in dock
+    assert "title=\"${tr('dock.cancelTip'" in dock
+    dicts = _lang_dicts()
+    for lang in ("en", "fr", "de", "es", "it"):
+        for key in ("dock.cancel", "dock.cancelTip", "dock.cancelConfirm"):
+            assert key in dicts[lang], f"{key} missing from {lang}"
+    import re
+    confirms = re.findall(r"'dock\.cancelConfirm':\s*'((?:[^'\\]|\\.)*)'",
+                          (JS_DIR / "i18n.js").read_text())
+    assert len(confirms) == 5
+    for text in confirms:
+        assert "{action}" in text and "{cluster}" in text
+
+
+def test_dock_card_escapes_what_it_shows():
+    """Le nom de l'action et du cluster entrent dans innerHTML : échappés,
+    comme tout le reste de l'interface."""
+    dock = (JS_DIR / "dock.js").read_text()
+    assert "${a.action} → ${a.cluster}" not in dock
+    assert "${escapeHtml(a.action)}" in dock and "${escapeHtml(a.cluster)}" in dock

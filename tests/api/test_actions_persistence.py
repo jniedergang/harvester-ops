@@ -213,3 +213,81 @@ def test_stream_replays_persisted_events(client):
     assert "event: step" in body
     assert "no endpoints available" in body
     assert "event: end" in body             # replay terminates the stream
+
+
+# ---------------------------------------------------------------------------
+# 4. v1.47.2 : le résultat d'une action survit à la mémoire
+# ---------------------------------------------------------------------------
+
+def test_the_result_of_an_action_is_persisted(tmp_actions_db):
+    """Le nom de l'archive d'un export vivait seulement en mémoire : passé le
+    ménage d'une heure ou un redémarrage, le flux rejoué depuis la base
+    finissait sans lui, et la fenêtre ne pouvait plus désigner l'archive."""
+    run = _make_finished_run(status="done", exit_code=0)
+    run.result = {"archive": "web-01-20260925-101500.hvx"}
+    app_module._actions_persist(run)
+    d, _ = app_module._actions_db_get(run.id)
+    assert d["result"] == {"archive": "web-01-20260925-101500.hvx"}
+    rows = app_module._actions_db_recent(10)
+    assert rows[0]["result"] == {"archive": "web-01-20260925-101500.hvx"}
+
+
+def test_a_run_without_result_reads_an_empty_one(tmp_actions_db):
+    run = _make_finished_run()
+    app_module._actions_persist(run)
+    d, _ = app_module._actions_db_get(run.id)
+    assert d["result"] == {}
+
+
+def test_an_older_database_gains_the_column(tmp_path, monkeypatch):
+    """Migration additive, à chaud : une base d'avant 1.47.2 s'ouvre, garde
+    ses lignes, et accepte un résultat."""
+    import sqlite3
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""CREATE TABLE actions (id TEXT PRIMARY KEY, action TEXT NOT NULL,
+        cluster TEXT, status TEXT NOT NULL, exit_code INTEGER, started_at REAL NOT NULL,
+        ended_at REAL, dry_run INTEGER DEFAULT 0, cmd TEXT, events TEXT, error_summary TEXT)""")
+    conn.execute("INSERT INTO actions (id, action, status, started_at) VALUES ('old000000001', 'x', 'done', 1)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(app_module, "ACTIONS_DB", db)
+    app_module._actions_init_db()
+    d, _ = app_module._actions_db_get("old000000001")
+    assert d["status"] == "done" and d["result"] == {}
+    run = _make_finished_run(status="done", exit_code=0)
+    run.result = {"archive": "a.hvx"}
+    app_module._actions_persist(run)
+    assert app_module._actions_db_get(run.id)[0]["result"] == {"archive": "a.hvx"}
+
+
+def test_the_replayed_stream_ends_with_the_result(client):
+    run = _make_finished_run("db00000res01", status="done", exit_code=0)
+    run.result = {"archive": "a.hvx"}
+    app_module._actions_persist(run)
+    body = client.get("/api/stream/db00000res01").get_data(as_text=True)
+    end = body.split("event: end\ndata: ", 1)[1].split("\n", 1)[0]
+    assert json.loads(end)["result"] == {"archive": "a.hvx"}
+
+
+def test_a_run_restored_at_startup_replays_its_events_and_result(tmp_actions_db, monkeypatch):
+    """v1.47.2 : au démarrage, les 200 dernières actions sont rechargées en
+    mémoire. La file d'événements l'était, pas le compteur absolu introduit
+    en 1.46.0 : le flux d'une action rechargée ne rendait plus AUCUN
+    événement (détails vides dans l'Activité après chaque redémarrage)."""
+    events = [{"type": "step", "step_id": "download", "status": "done",
+               "message": "archive written", "ts": time.time()}]
+    run = _make_finished_run("rst000000001", status="done", exit_code=0, events=events)
+    run.result = {"archive": "a.hvx"}
+    app_module._actions_persist(run)
+    saved = dict(app_module.ACTIONS)
+    app_module.ACTIONS.clear()
+    try:
+        app_module._actions_load_history()
+        restored = app_module.ACTIONS["rst000000001"]
+        got, nxt = restored.events_since(0)
+        assert got == events and nxt == 1
+        assert restored.to_dict()["result"] == {"archive": "a.hvx"}
+    finally:
+        app_module.ACTIONS.clear()
+        app_module.ACTIONS.update(saved)

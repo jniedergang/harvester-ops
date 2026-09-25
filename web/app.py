@@ -927,6 +927,12 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN error_summary TEXT")
     except sqlite3.OperationalError:
         pass  # column already present
+    # v1.47.2 : ce que l'action a produit (le nom de l'archive d'un export),
+    # même migration additive, à chaud
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN result TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -944,21 +950,26 @@ def _actions_persist(run):
     except Exception:
         events_json = "[]"
     cmd_str = json.dumps(run.cmd) if isinstance(run.cmd, list) else str(run.cmd)[:2000]
+    try:
+        result_json = json.dumps(getattr(run, "result", None) or {})
+    except (TypeError, ValueError):
+        result_json = "{}"
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
             ended_at=excluded.ended_at,
             events=excluded.events,
-            error_summary=excluded.error_summary
+            error_summary=excluded.error_summary,
+            result=excluded.result
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json, run.error_summary))
+          cmd_str, events_json, run.error_summary, result_json))
     conn.commit()
     # Cap history at 500 rows (drop oldest done/error)
     conn.execute("""
@@ -1008,8 +1019,13 @@ def _actions_load_history():
             try:
                 evs = json.loads(row["events"] or "[]")
                 run.events = deque(evs, maxlen=500)
+                # v1.47.2 : le flux lit par numéro absolu (1.46.0) ; sans
+                # ce compteur, une action rechargée ne rejouait RIEN
+                run._seq = len(run.events)
             except Exception:
                 pass
+            if "result" in row.keys():
+                run.result = _row_result(row["result"])
             run._closed = True
             ACTIONS[row["id"]] = run
             restored += 1
@@ -1027,7 +1043,18 @@ _actions_load_history()
 # the 1h in-memory GC (or a Flask restart). These helpers back /api/activity,
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
-                         "started_at", "ended_at", "dry_run", "error_summary")
+                         "started_at", "ended_at", "dry_run", "error_summary",
+                         "result")
+
+
+def _row_result(raw):
+    """La colonne `result` (JSON) relue en dictionnaire ; vide pour une
+    ligne écrite avant 1.47.2 ou illisible."""
+    try:
+        v = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
@@ -1069,6 +1096,7 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
     for r in rows:
         d = {k: r[k] for k in _ACTIONS_LIST_COLUMNS}
         d["dry_run"] = bool(d["dry_run"])
+        d["result"] = _row_result(d.get("result"))
         out.append(d)
     return out
 
@@ -1100,6 +1128,7 @@ def _actions_db_get(run_id):
     d = {k: row[k] for k in _ACTIONS_LIST_COLUMNS if k in row.keys()}
     d.setdefault("error_summary", None)
     d["dry_run"] = bool(d.get("dry_run"))
+    d["result"] = _row_result(d.get("result"))
     try:
         events = json.loads(row["events"] or "[]")
     except (json.JSONDecodeError, TypeError):
