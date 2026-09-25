@@ -67,12 +67,14 @@ import pxe_server
 import vnc_mux
 import volume_health
 import node_maintenance
+import rancher_sso as _rs
 from flask import (
     Flask,
     Response,
     abort,
     g,
     jsonify,
+    redirect,
     render_template,
     request,
     send_from_directory,
@@ -368,6 +370,103 @@ def load_config():
 
 
 # -----------------------------------------------------------------------------
+# v1.50.0 : connexion par Rancher (fournisseur OIDC intégré à Rancher)
+#
+# Une personne connectée à Rancher entre dans la console sans rien ressaisir,
+# et tout ce qu'elle fait sur un cluster géré par ce Rancher passe par son
+# mandataire avec SON jeton : Rancher applique ses droits. Le jeton ne quitte
+# jamais le serveur ; le navigateur n'a qu'un identifiant de session.
+# Voir docs/design/2026-09-26-connexion-par-rancher.md et web/rancher_sso.py.
+# -----------------------------------------------------------------------------
+_SSO_PENDING = _rs.PendingLogins()
+_SSO_SESSIONS = None
+_SSO_CLUSTER_IDS = {}          # cluster de la console -> id du cluster Rancher
+_KUBE_SYSTEM_UIDS = {}         # cluster de la console -> uid de kube-system
+SSO_POWER_ACTIONS = ("shutdown", "startup")
+
+
+def _sso_settings():
+    try:
+        return _rs.settings(load_config())
+    except Exception:
+        return None
+
+
+def _sso_store():
+    global _SSO_SESSIONS
+    if _SSO_SESSIONS is None:
+        _SSO_SESSIONS = _rs.Sessions(_identity_dir)
+    return _SSO_SESSIONS
+
+
+def _sso_http(s):
+    return _rs.Http(s.get("ca_file"))
+
+
+def _sso_session():
+    """La session Rancher de la requête en cours, ou None (hors requête
+    aussi : un fil de travail a déjà reçu son kubeconfig)."""
+    try:
+        if "sso_session" in g:
+            return g.sso_session
+        sid = request.cookies.get(_rs.COOKIE)
+    except RuntimeError:
+        return None
+    sess = _sso_store().get(sid) if sid else None
+    if sess is not None:
+        st = _sso_settings()
+        if st is None or not _sso_store().renew(sess, _sso_http(st), st):
+            _sso_store().close(sess.sid)
+            sess = None
+    g.sso_session = sess
+    return sess
+
+
+_SSO_RENEWER = {"started": False}
+
+
+def _sso_start_renewer():
+    """Renouvelle les jetons des sessions même sans requête du navigateur :
+    une action de trente minutes lit son kubeconfig bien après les dix
+    minutes d'un jeton d'accès."""
+    if _SSO_RENEWER["started"]:
+        return
+    _SSO_RENEWER["started"] = True
+
+    def loop():
+        while True:
+            time.sleep(60)
+            st = _sso_settings()
+            if st is None:
+                continue
+            store = _sso_store()
+            for sess in store.all():
+                if sess.expires < time.time() or not store.renew(sess, _sso_http(st), st, margin=180):
+                    store.close(sess.sid)
+    threading.Thread(target=loop, daemon=True, name="rancher-token-renewer").start()
+
+
+def _same_origin():
+    """Une écriture authentifiée par cookie doit venir de la console même :
+    SameSite le garantit déjà dans les navigateurs récents, ceci le vérifie."""
+    src = request.headers.get("Origin") or request.headers.get("Referer") or ""
+    if not src:
+        return False
+    from urllib.parse import urlparse as _up
+    return _up(src).netloc == request.host
+
+
+def _sso_redirect_uri(s):
+    return s.get("redirect_uri") or request.url_root.rstrip("/") + "/auth/rancher/callback"
+
+
+def _sso_cookie_secure(s):
+    """Derrière un mandataire TLS (Traefik), la console reçoit du HTTP : c'est
+    l'adresse de retour déclarée qui dit si le navigateur est en HTTPS."""
+    return request.is_secure or _sso_redirect_uri(s).startswith("https://")
+
+
+# -----------------------------------------------------------------------------
 # Auth (HTTP Basic via htpasswd)
 # -----------------------------------------------------------------------------
 def check_auth(username, password):
@@ -392,11 +491,21 @@ def authenticate():
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # v1.50.0 : une session ouverte par Rancher vaut authentification
+        if _sso_session() is not None:
+            return f(*args, **kwargs)
         # No htpasswd file → dev mode, skip auth entirely
         if not HTPASSWD_PATH.exists():
             return f(*args, **kwargs)
         auth = request.authorization
         if not auth or not check_auth(auth.username, auth.password):
+            if not auth and _sso_settings() is not None:
+                # Pas d'invite du navigateur quand on peut proposer Rancher :
+                # la page de connexion offre les deux chemins.
+                if request.method == "GET" and not request.path.startswith("/api/"):
+                    return redirect("/login")
+                if request.cookies.get(_rs.COOKIE):
+                    return jsonify({"error": "session expired", "login": "/login"}), 401
             return authenticate()
         return f(*args, **kwargs)
     return decorated
@@ -419,8 +528,9 @@ def requires_auth(f):
 # cluster avec UN kubeconfig partagé, administrateur. Le cluster ne voit donc
 # qu'une identité, quel que soit l'humain derrière l'écran. C'est un
 # garde-fou contre l'erreur et l'abus, pas une frontière que la RBAC du
-# cluster ferait respecter. Déléguer l'identité à un fournisseur OIDC et agir
-# avec le jeton de l'utilisateur est la suite prévue.
+# cluster ferait respecter. Depuis la v1.50.0, une personne connectée par
+# Rancher agit avec SON jeton, à travers Rancher (voir « connexion par
+# Rancher » plus haut).
 # =============================================================================
 ROLES_PATH = Path(os.environ.get(
     "HARVESTER_OPS_ROLES", str(HTPASSWD_PATH.parent / "roles.yaml")))
@@ -520,6 +630,9 @@ def load_roles():
 
 
 def current_user():
+    sess = _sso_session()
+    if sess is not None:
+        return sess.login
     auth = request.authorization
     return auth.username if auth and auth.username else ""
 
@@ -533,10 +646,15 @@ def roles_active():
     lecture seule, y compris l'exploitant. On ne bride donc pas, et on le
     DIT plutôt que de le laisser deviner.
     """
+    if _sso_session() is not None:
+        return True
     return HTPASSWD_PATH.exists() and load_roles().get("configured", False)
 
 
 def current_role():
+    sess = _sso_session()
+    if sess is not None:
+        return sess.role
     if not roles_active():
         return "admin"
     roles = load_roles()
@@ -574,6 +692,10 @@ def _enforce_role():
         return None
     if path in ("/api/whoami",):
         return None
+    if (_sso_session() is not None and request.method not in ("GET", "HEAD", "OPTIONS")
+            and not _same_origin()):
+        return jsonify({"error": "forbidden",
+                        "hint": "cross-origin write refused for a Rancher session"}), 403
     needed = required_role_for(path, request.method)
     have = current_role()
     if ROLE_RANK.get(have, 0) < ROLE_RANK[needed]:
@@ -617,6 +739,11 @@ def api_whoami():
         "delegation_active": identity_delegation_active(),
         "cluster_user": (ident or {}).get("user"),
         "cluster_groups": (ident or {}).get("groups", []),
+        # v1.50.0 : connexion par Rancher
+        "auth": ("rancher" if _sso_session() is not None
+                 else ("local" if HTPASSWD_PATH.exists() else "open")),
+        "rancher_login": _sso_settings() is not None,
+        "session": _sso_session().public() if _sso_session() is not None else None,
     })
 
 
@@ -663,6 +790,8 @@ def cluster_identity_for(login):
 
 
 def current_cluster_identity():
+    if _sso_session() is not None:
+        return None          # l'identité voyage dans le kubeconfig de la session
     try:
         return cluster_identity_for(current_user())
     except RuntimeError:
@@ -736,10 +865,13 @@ def _identity_kubeconfig(src_kc, identity):
         return str(dst)
 
 
-def identity_env(login=None):
+def identity_env(login=None, cluster=None):
     """Variables d'environnement à passer aux scripts bin/*.sh pour qu'ils
     présentent la même identité. C'est le pendant CLI, et la règle de parité
     impose qu'il existe."""
+    if login is None and cluster and _sso_session() is not None:
+        kc = _sso_kubeconfig(cluster)
+        return {"HARVESTER_OPS_KUBECONFIG": kc} if kc else {}
     ident = (cluster_identity_for(login) if login is not None
              else current_cluster_identity())
     if not ident:
@@ -1274,7 +1406,7 @@ def start_action(action, cluster, dry_run=False, interactive=False,
     # travail ne la retrouverait pas, et l'action repartirait avec le
     # kubeconfig partagé, administrateur.
     _ident = current_cluster_identity()
-    run.identity_env = identity_env()
+    run.identity_env = identity_env(cluster=cluster)
     run.cluster_user = (_ident or {}).get("user")
     with ACTIONS_LOCK:
         # Contrôle et inscription sous le même verrou : deux requêtes
@@ -1342,8 +1474,107 @@ def _harvester_ops_version():
 def index():
     cfg = load_config()
     return render_template("index.html",
-                           clusters=cfg.get("clusters", []),
+                           clusters=[c for c in cfg.get("clusters", []) if _sso_visible(c)],
                            version=_harvester_ops_version())
+
+
+# -----------------------------------------------------------------------------
+# v1.50.0 : pages de connexion
+# -----------------------------------------------------------------------------
+_LOGIN_ERROR_KINDS = {
+    "state-unknown": "expired", "state-browser": "expired",
+    "access_denied": "denied", "token-refused": "denied", "identity-refused": "denied",
+    "rancher-unreachable": "unreachable", "not-configured": "config",
+}
+
+
+@app.route("/login")
+def login_page():
+    st = _sso_settings()
+    err = request.args.get("error", "")[:40]
+    return render_template("login.html", rancher=st is not None,
+                           rancher_label=(st or {}).get("label", "Rancher"),
+                           local=HTPASSWD_PATH.exists(), error=err,
+                           error_kind=(_LOGIN_ERROR_KINDS.get(err, "token") if err else ""),
+                           version=_harvester_ops_version())
+
+
+@app.route("/login/local")
+def login_local():
+    """Déclenche l'invite du navigateur pour un compte local."""
+    if not HTPASSWD_PATH.exists():
+        return redirect("/")
+    auth = request.authorization
+    if not auth or not check_auth(auth.username, auth.password):
+        return authenticate()
+    return redirect("/")
+
+
+@app.route("/auth/rancher/login")
+@_rate_limit("20/minute")
+def sso_login():
+    st = _sso_settings()
+    if st is None:
+        return redirect("/login?error=not-configured")
+    state, nonce, challenge, browser = _SSO_PENDING.start()
+    resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge))
+    resp.set_cookie(_rs.PENDING_COOKIE, browser, max_age=_rs.PENDING_TTL, httponly=True,
+                    secure=_sso_cookie_secure(st), samesite="Lax", path="/auth/rancher")
+    return resp
+
+
+@app.route("/auth/rancher/callback")
+@_rate_limit("20/minute")
+def sso_callback():
+    st = _sso_settings()
+    if st is None:
+        return redirect("/login?error=not-configured")
+    if request.args.get("error"):
+        code = "access_denied" if request.args.get("error") == "access_denied" else "token-refused"
+        return redirect("/login?error=" + code)
+    try:
+        pending = _SSO_PENDING.take(request.args.get("state"),
+                                    request.cookies.get(_rs.PENDING_COOKIE))
+        http = _sso_http(st)
+        tok = _rs.exchange_code(http, st, request.args.get("code", ""), pending["verifier"],
+                                _sso_redirect_uri(st))
+        claims = _rs.check_id_token(_rs.claims_of(tok["id_token"]), st, pending["nonce"])
+        ident = _rs.rancher_identity(http, st, tok["access_token"])
+        if ident["id"] != claims["sub"]:
+            raise _rs.SSOError("identity-mismatch")
+        if not tok.get("refresh_token"):
+            # sans lui, la session tomberait au bout de dix minutes
+            raise _rs.SSOError("token-refused", "no refresh token (scope offline_access)")
+    except _rs.SSOError as e:
+        # le détail est un statut et un message de Rancher, jamais un jeton
+        app.logger.warning("Rancher sign-in refused: %s %s", e.code, e.detail)
+        return redirect("/login?error=" + e.code)
+    sess = _sso_store().open(ident, _rs.console_role(st, ident), tok["access_token"],
+                             tok["refresh_token"], st["session_seconds"])
+    _sso_start_renewer()
+    app.logger.info("Rancher sign-in: %s (%s)", sess.login, sess.role)
+    resp = redirect(pending.get("next") or "/")
+    resp.set_cookie(_rs.COOKIE, sess.sid, max_age=st["session_seconds"], httponly=True,
+                    secure=_sso_cookie_secure(st), samesite="Lax", path="/")
+    resp.delete_cookie(_rs.PENDING_COOKIE, path="/auth/rancher")
+    return resp
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    """Ferme la session Rancher : la console oublie ses jetons (qui n'ont
+    jamais quitté le serveur) et efface ses kubeconfigs. Rancher 2.14 ne
+    laisse pas un jeton OIDC se révoquer lui-même (401) : il expire à la
+    durée fixée dans le client OIDC."""
+    sess = _sso_session()
+    if sess is not None:
+        if not _same_origin():
+            return jsonify({"error": "forbidden"}), 403
+        _sso_store().close(sess.sid)
+        app.logger.info("Rancher sign-out: %s", sess.login)
+    resp = jsonify({"ok": True, "login": "/login"})
+    resp.delete_cookie(_rs.COOKIE, path="/")
+    return resp
 
 
 @app.route("/healthz")
@@ -1967,6 +2198,8 @@ def api_clusters():
     cfg = load_config()
     clusters = []
     for c in cfg.get("clusters", []):
+        if not _sso_visible(c):
+            continue
         clusters.append({
             "name": c["name"],
             "description": c.get("description", ""),
@@ -1997,7 +2230,7 @@ def api_status(cluster):
             timeout=30,
             env={**os.environ, "NO_COLOR": "1",
                  "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
-                 **identity_env()},
+                 **identity_env(cluster=cluster)},
         )
         return Response(out, mimetype="application/json")
     except subprocess.CalledProcessError as e:
@@ -4282,9 +4515,84 @@ def _kubectl_for_cluster(cluster):
     cfg = load_config()
     for c in cfg.get("clusters", []):
         if c["name"] == cluster:
+            if _sso_session() is not None:
+                return _sso_kubeconfig(cluster, c)
             return _identity_kubeconfig(c["kubeconfig"],
                                         current_cluster_identity())
     return None
+
+
+_KUBE_SYSTEM_MISS = {}         # cluster -> horodatage du dernier échec
+
+
+def _kube_system_uid(entry):
+    """L'UID de `kube-system`, lu avec le kubeconfig de la console : le même
+    objet vu à travers Rancher désigne le même cluster."""
+    name = entry.get("name")
+    if name in _KUBE_SYSTEM_UIDS:
+        return _KUBE_SYSTEM_UIDS[name]
+    # Un cluster éteint ne se relit pas à chaque page : une minute de répit,
+    # et la sonde TCP de deux secondes plutôt que le délai de kubectl.
+    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60:
+        return None
+    if _cluster_reachable(entry["kubeconfig"]) is False:
+        _KUBE_SYSTEM_MISS[name] = time.time()
+        return None
+    try:
+        out = subprocess.run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "namespace",
+                              "kube-system", "-o", "jsonpath={.metadata.uid}"],
+                             capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    uid = out.stdout.strip() if out.returncode == 0 else None
+    if uid:
+        _KUBE_SYSTEM_UIDS[name] = uid
+    else:
+        _KUBE_SYSTEM_MISS[name] = time.time()
+    return uid
+
+
+def _sso_visible(entry):
+    """Ce cluster est-il atteignable à travers Rancher pour cette session ?"""
+    return _sso_session() is None or _sso_kubeconfig(entry["name"], entry) is not None
+
+
+@app.before_request
+def _sso_cluster_guard():
+    """Garde centrale : une session Rancher ne touche qu'aux clusters que
+    Rancher lui montre. Un point d'entrée ajouté demain est couvert sans que
+    personne ait à y penser."""
+    if _sso_session() is None or not request.path.startswith(("/api/", "/ws/")):
+        return None
+    cluster = (request.view_args or {}).get("cluster")
+    if cluster and _sso_kubeconfig(cluster) is None:
+        return jsonify({"error": "forbidden", "code": "cluster-not-in-rancher",
+                        "hint": "this cluster is not reachable through Rancher for your account"}), 403
+    return None
+
+
+def _sso_kubeconfig(cluster, entry=None):
+    """Le kubeconfig de la session Rancher pour ce cluster : il vise le
+    mandataire de Rancher avec le jeton de la personne. None si Rancher ne
+    gère pas ce cluster ou ne le lui montre pas."""
+    sess, st = _sso_session(), _sso_settings()
+    if sess is None or st is None:
+        return None
+    if entry is None:
+        entry = next((c for c in load_config().get("clusters", []) if c["name"] == cluster), None)
+        if entry is None:
+            return None
+    cid = entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster)
+    if not cid:
+        try:
+            cid = _rs.discover_cluster_id(_sso_http(st), st, sess.token, _kube_system_uid(entry))
+        except _rs.SSOError:
+            cid = None
+        if cid:
+            _SSO_CLUSTER_IDS[cluster] = cid
+    if not cid:
+        return None
+    return _sso_store().kubeconfig(sess, st, cid)
 
 
 # =============================================================================
@@ -5621,6 +5929,11 @@ def api_action_start():
 
     if not action or not cluster:
         return jsonify({"error": "action and cluster required"}), 400
+    if action in SSO_POWER_ACTIONS and _sso_session() is not None:
+        # Un cluster éteint ne passe plus par Rancher, et Rancher peut tourner
+        # sur le cluster qu'on éteint : l'alimentation reste aux comptes locaux.
+        return jsonify({"error": "forbidden", "code": "power-needs-local-account",
+                        "hint": "starting or stopping a cluster needs a local account"}), 403
 
     try:
         run = start_action(action, cluster, dry_run=dry_run,
@@ -8217,6 +8530,12 @@ def api_support_bundle_start():
     """Start a new support bundle job. Returns a job ID for SSE tracking."""
     data = request.get_json(force=True, silent=True) or {}
     anonymize = bool(data.get("anonymize", True))
+    if _sso_session() is not None and current_role() != "admin":
+        # Le paquet de diagnostic lit tous les clusters avec le compte de la
+        # console, pas à travers Rancher : pas pour un non-administrateur.
+        return jsonify({"error": "forbidden", "code": "bundle-needs-admin",
+                        "hint": "a support bundle reads every cluster with the console's "
+                                "own account: local account or Rancher administrator"}), 403
     bundle_id = uuid.uuid4().hex[:10]
     job = BundleJob(bundle_id, anonymize)
     job.identity = current_cluster_identity()
@@ -11813,7 +12132,8 @@ def api_vm_console_ticket(cluster, namespace, name):
     # Chaque navigateur est vérifié par le cluster, sous SA propre identité,
     # même s'il rejoint une console déjà ouverte par quelqu'un d'autre.
     identity = current_cluster_identity()
-    if identity:
+    if identity or _sso_session() is not None:
+        # v1.50.0 : une session Rancher aussi ; `kc` passe alors par Rancher
         can = subprocess.run(
             ["kubectl", "--kubeconfig", kc, "auth", "can-i", "get",
              "virtualmachineinstances", "--subresource=vnc", "-n", namespace],

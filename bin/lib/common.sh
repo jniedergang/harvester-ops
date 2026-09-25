@@ -280,6 +280,13 @@ load_cluster() {
     [[ -n "$SSH_KEY" && "$SSH_KEY" != "null" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
 
     apply_cluster_identity
+    # v1.50.0 : action lancée par une personne connectée par Rancher. La
+    # console donne le kubeconfig de sa session, qui passe par le mandataire
+    # de Rancher avec son jeton : Rancher applique ses droits.
+    if [[ -n "${HARVESTER_OPS_KUBECONFIG:-}" ]]; then
+        KUBECONFIG_PATH="$HARVESTER_OPS_KUBECONFIG"
+        log_info "Identité présentée au cluster : session Rancher"
+    fi
 
     export KUBECONFIG="$KUBECONFIG_PATH"
 

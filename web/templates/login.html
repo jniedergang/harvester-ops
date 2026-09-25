@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title data-i18n="login.title">harvester-ops: sign in</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<script>
+  (function() {
+    try {
+      var THEMES = ['suse', 'nord', 'solarized', 'catppuccin', 'tokyo'];
+      var MODES  = ['dark', 'light'];
+      var t = localStorage.getItem('harvester_ops_theme');
+      var m = localStorage.getItem('harvester_ops_mode');
+      if (!t || THEMES.indexOf(t) < 0) t = 'suse';
+      if (!m || MODES.indexOf(m)  < 0) m = 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.setAttribute('data-mode',  m);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'suse');
+      document.documentElement.setAttribute('data-mode',  'light');
+    }
+  })();
+</script>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="login-page">
+  <main class="login-card card">
+    <div class="login-brand">
+      <img src="/static/favicon.svg" alt="" width="36" height="36">
+      <div>
+        <h1>harvester-ops</h1>
+        <div class="login-version">v{{ version }}</div>
+      </div>
+    </div>
+    <p class="login-intro" data-i18n="login.intro">A console for your Harvester clusters. Sign in to continue.</p>
+
+    {% if error_kind %}
+    <div class="sto-finding sev-critical login-error" data-code="{{ error }}">
+      {% if error_kind == 'expired' %}
+      <div class="sto-finding-title" data-i18n="login.err.expired">The sign-in took too long, or was finished in another window. Try again.</div>
+      {% elif error_kind == 'denied' %}
+      <div class="sto-finding-title" data-i18n="login.err.denied">Rancher refused the sign-in.</div>
+      {% elif error_kind == 'unreachable' %}
+      <div class="sto-finding-title" data-i18n="login.err.unreachable">Rancher cannot be reached. A local account still works.</div>
+      {% elif error_kind == 'config' %}
+      <div class="sto-finding-title" data-i18n="login.err.config">Sign-in through Rancher is not configured on this console.</div>
+      {% else %}
+      <div class="sto-finding-title" data-i18n="login.err.token">Rancher's answer could not be verified: sign-in refused.</div>
+      {% endif %}
+      <small class="login-code">{{ error }}</small>
+    </div>
+    {% endif %}
+
+    <div class="login-actions">
+      {% if rancher %}
+      <a class="btn btn-primary login-rancher tip" href="/auth/rancher/login" data-i18n-title="login.rancherTip"
+         title="Uses your Rancher session: your rights on the clusters are the ones Rancher gives you.">
+        <span data-i18n="login.rancher">Sign in with {{ rancher_label }}</span>
+      </a>
+      {% endif %}
+      {% if local %}
+      <a class="btn btn-secondary login-local tip" href="/login/local" data-i18n-title="login.localTip"
+         title="A local account of this console (user name and password).">
+        <span data-i18n="login.local">Local account</span>
+      </a>
+      {% endif %}
+      {% if not rancher and not local %}
+      <a class="btn btn-primary" href="/" data-i18n="login.open">Open the console</a>
+      {% endif %}
+    </div>
+    {% if rancher %}
+    <p class="login-note" data-i18n="login.rancherNote">Already signed in to Rancher? You enter without typing anything. Your rights on each cluster are those Rancher gives you.</p>
+    {% endif %}
+  </main>
+<script src="/static/js/i18n.js"></script>
+<script>
+  (function () {
+    try {
+      window.i18n.applyTranslations();
+      var btn = document.querySelector('.login-rancher span');
+      var label = {{ rancher_label|tojson }};
+      if (btn && window.i18n) btn.textContent = window.i18n.t('login.rancher', { name: label });
+    } catch (e) { /* page lisible sans traduction */ }
+  })();
+</script>
+</body>
+</html>

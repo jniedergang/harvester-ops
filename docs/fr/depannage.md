@@ -211,6 +211,30 @@ reste isolé tant qu'il n'a pas de route vers l'extérieur (un appairage avec
 le VPC par défaut et une route statique, ou une passerelle NAT de VPC, que
 la console proposera dans une version suivante).
 
+## Connexion par Rancher
+
+### La page de connexion dit « La réponse de Rancher n'a pas pu être vérifiée »
+
+Le code sous le message dit quel contrôle a échoué. `token-issuer` : l'`url`
+de `config.yaml` diffère de l'adresse sous laquelle Rancher répond.
+`token-audience` : `client_id` n'est pas le client OIDC de cette console.
+Sur l'hôte de la console, la ligne « Rancher sign-in refused » du journal
+porte le message de Rancher (un statut et une phrase, jamais un jeton).
+
+### Une personne de Rancher ne voit aucun cluster, ou des vues vides
+
+La console ne propose que les clusters que Rancher montre à cette personne,
+retrouvés par l'UID de `kube-system` ; un cluster éteint ne peut pas être
+reconnu (nouvel essai au bout d'une minute). Des vues vides veulent dire que
+Rancher n'y donne aucun droit de lecture : vérifier ses rôles de cluster et
+de projet dans Rancher. Sur harv1, l'espace de noms `default` était rattaché
+à un projet d'un autre Rancher (`field.cattle.io/projectId`) : les rôles de
+projet ne couvraient pas ses VMs.
+
+### « starting or stopping a cluster needs a local account »
+
+Voulu : l'alimentation se fait avec un compte local.
+
 ## Clusters Cluster API
 
 ### Des machines restent « Provisioning » alors que leurs VMs tournent

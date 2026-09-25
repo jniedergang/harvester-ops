@@ -826,6 +826,40 @@ et un défaut de cette couche redonnerait les pleins pouvoirs. L'identité est
 déclarée localement, non prouvée par un fournisseur d'identité ; la faire
 venir d'OIDC est la suite.
 
+### Se connecter par Rancher (1.50.0)
+
+Quand la console est déclarée dans Rancher Manager (2.12 et suivants, voir
+le guide d'installation), sa page de connexion propose **« Se connecter
+avec Rancher »** à côté des comptes locaux. Une personne déjà connectée à
+Rancher entre sans rien saisir ; sinon Rancher affiche sa propre page de
+connexion, compte local ou Keycloak.
+
+- **Les droits viennent de Rancher, sans copie** : chaque geste sur un
+  cluster passe par le mandataire de Rancher (`/k8s/clusters/<id>`) avec le
+  jeton de la personne, et Rancher applique ses droits d'utilisateur, de
+  groupe et de projet. Vérifié : un « membre du cluster » Rancher a été
+  refusé par harv1 lui-même (`User "u-t286c" cannot get resource
+  "virtualmachines"`), l'administrateur non.
+- La console retrouve quel cluster Rancher est lequel en comparant l'UID de
+  `kube-system` des deux côtés (ou `rancher_cluster` dans la
+  configuration). Les clusters que Rancher ne montre pas à la personne sont
+  écartés, et toute requête qui en nomme un est refusée.
+- **Rôle dans la console** : administrateur pour les administrateurs de
+  Rancher et les groupes de `admin_groups`, `default_role` (opérateur) pour
+  les autres.
+- **Reste aux comptes locaux** : l'arrêt et le démarrage d'un cluster (un
+  cluster éteint ne passe plus par Rancher, et Rancher peut tourner sur le
+  cluster qu'on éteint), et le paquet de diagnostic pour les
+  non-administrateurs (il lit tous les clusters avec le compte de la
+  console).
+- **Les jetons ne quittent jamais le serveur** : le navigateur n'a qu'un
+  identifiant de session aléatoire (cookie HttpOnly) ; le jeton d'accès est
+  renouvelé avant son expiration et les kubeconfigs de la session réécrits,
+  si bien qu'une action longue continue. Se déconnecter fait oublier la
+  session ; Rancher ne laisse pas un jeton OIDC se révoquer lui-même, il
+  expire à la durée de la session. Se déconnecter de Rancher ferme aussi la
+  session de la console à son renouvellement suivant.
+
 ## 9. Transversal
 
 - **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail

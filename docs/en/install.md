@@ -123,6 +123,47 @@ Exported archives are kept in `/var/lib/harvester-ops/exports` (the
 service's persistent volume), as are the archives added from a browser
 (1.47.0): size that volume for the largest VM you expect to move by file.
 
+### 9. Sign in through Rancher (optional, 1.50.0)
+
+People already signed in to Rancher Manager (2.12 or later) can enter the
+console without typing anything, with the rights Rancher gives them on each
+cluster. Declare the console in Rancher, on its local cluster:
+
+```bash
+cat <<EOF | kubectl apply -f -
+apiVersion: management.cattle.io/v3
+kind: OIDCClient
+metadata:
+  name: harvester-ops
+spec:
+  description: harvester-ops console
+  redirectURIs: ["https://console.example.com/auth/rancher/callback"]
+  tokenExpirationSeconds: 600
+  refreshTokenExpirationSeconds: 43200     # the session length
+EOF
+CID=$(kubectl get oidcclient harvester-ops -o jsonpath='{.status.clientID}')
+kubectl get secret -n cattle-oidc-client-secrets "$CID" \
+  -o jsonpath='{.data.client-secret-1}' | base64 -d \
+  | sudo install -m 0600 /dev/stdin /etc/harvester-ops/rancher-oidc-secret
+```
+
+Then in `config.yaml`:
+
+```yaml
+rancher:
+  url: https://rancher.example.com
+  client_id: client-xxxxxxxx
+  client_secret_file: /etc/harvester-ops/rancher-oidc-secret
+  redirect_uri: https://console.example.com/auth/rancher/callback
+  default_role: operator        # console role of non-administrators
+  admin_groups: []              # Rancher group principals made console admins
+  session_hours: 12             # keep it at refreshTokenExpirationSeconds
+```
+
+The console must reach Rancher, and each cluster must be imported in
+Rancher for a Rancher user to see it. Local accounts keep working; starting
+and stopping a cluster stays with them.
+
 ## Uninstall
 
 ```bash

@@ -209,6 +209,29 @@ isolated until it gets a route out (a peering with the default VPC and a
 static route, or a VPC NAT gateway, which a later version of the console
 will offer).
 
+## Signing in through Rancher
+
+### The sign-in page says "Rancher's answer could not be verified"
+
+The code under the message says which check failed. `token-issuer`: the
+`url` in `config.yaml` differs from the address Rancher answers as.
+`token-audience`: `client_id` is not this console's OIDC client. On the
+console host, the log line "Rancher sign-in refused" carries Rancher's own
+message (a status and a sentence, never a token).
+
+### A Rancher user sees no cluster, or empty views
+
+The console only offers the clusters Rancher shows that person, found by
+comparing the `kube-system` UID; a cluster that is off cannot be matched
+(retried after a minute). Empty views mean Rancher gives no read right
+there: check their cluster and project roles in Rancher. On harv1 the
+`default` namespace was linked to a project of another Rancher
+(`field.cattle.io/projectId`), so project roles did not cover its VMs.
+
+### "starting or stopping a cluster needs a local account"
+
+By design: use a local account for power sequencing.
+
 ## Cluster API clusters
 
 ### Machines stay "Provisioning" although their VMs run

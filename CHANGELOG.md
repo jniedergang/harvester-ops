@@ -4,6 +4,52 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.50.0] - 2026-09-26 - Sign in through Rancher, with the rights Rancher gives
+
+### Added
+- **"Sign in with Rancher"** on a new sign-in page, next to local accounts.
+  The console is declared once as an OIDC client of Rancher Manager (2.12 or
+  later, built-in OIDC provider); someone already signed in to Rancher
+  enters without typing anything, otherwise Rancher shows its own sign-in
+  page (local account or Keycloak).
+- **Rights inherited from Rancher, not copied**: for a Rancher session, every
+  action on a cluster goes through Rancher's proxy with that person's own
+  token, so the cluster applies the user, group and project rights Rancher
+  gives. The console finds which Rancher cluster is which by the UID of
+  `kube-system`, leaves out the clusters Rancher does not show that person,
+  and refuses any request naming one.
+- **Console role from Rancher**: administrator for Rancher administrators
+  and listed groups, operator (configurable) for the others. Starting and
+  stopping a cluster stay with local accounts (a stopped cluster no longer
+  goes through Rancher, and Rancher may run on the cluster being stopped).
+- **Sign-out button** next to the session badge; a Rancher session that
+  expires sends the page back to the sign-in page.
+
+### Security
+- Tokens never leave the server: the browser holds a random session id
+  (HttpOnly, SameSite=Lax, Secure behind an HTTPS proxy). The code exchange
+  uses PKCE, a single-use state bound to the browser and a nonce; the
+  identity is read back from Rancher with the token itself.
+- Writes authenticated by the session cookie must come from the console's
+  own origin.
+- The status script, the VNC console check and the support bundle still
+  used the console's own account for a delegated session: they now act
+  through Rancher, or are refused to non-administrators.
+
+### Tests
+- The sign-in logic against a Rancher simulated after the real one (16),
+  the whole flow through the application (15), the sign-in page in a
+  browser (6).
+- Real, on Rancher Prime 2.14.1 and harv1, through `https://harvops.home.lo`:
+  the Rancher administrator entered in 6 s without typing, listed 14 VMs and
+  stopped one through Rancher, and was refused the cluster shutdown; a
+  temporary "cluster member" account was refused by harv1 itself
+  (`User "u-t286c" cannot get resource "virtualmachines"`). Three
+  differences with the design, found this way and handled: Rancher refuses
+  to derive a longer token from an OIDC token (the access token is renewed
+  instead), gives `expires_in` in nanoseconds, and discovery waited on
+  unavailable clusters.
+
 ## [1.49.0] - 2026-09-25 - kube-ovn networks: VPCs, subnets and overlay networks, with their forms
 
 First step of the kube-ovn network settings decided on 20/09: what a

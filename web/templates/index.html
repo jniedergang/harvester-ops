@@ -105,6 +105,12 @@
       <span class="session-role tip" id="session-role" hidden
             data-tip-i18n="role.badgeTip" data-i18n-title="role.badgeTip"
             title="Your role on this console"></span>
+      <!-- v1.50.0 : sortir d'une session ouverte par Rancher -->
+      <button type="button" class="btn-icon-sm session-logout tip" id="btn-logout" hidden
+              data-tip-i18n="session.logoutTip" data-i18n-title="session.logoutTip"
+              title="Sign out: the console forgets this Rancher session">
+        <span data-icon="logout" data-icon-size="14"></span>
+      </button>
       <button class="sidebar-collapse-btn tip" id="btn-sidebar-pin"
               data-tip-i18n="sidebar.pinTip" data-i18n-title="sidebar.pinTip"
               title="Keep the menu open instead of letting it expand on hover">

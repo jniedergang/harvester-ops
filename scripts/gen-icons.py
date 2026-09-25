@@ -74,6 +74,7 @@ MANIFEST = [
         "restart": "rotate-cw",
         "power": "power",
         "refresh": "refresh-cw",
+        "logout": "log-out",
         "restore": "refresh-ccw",
     }),
     ("Objets", {

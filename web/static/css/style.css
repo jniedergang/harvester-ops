@@ -4586,3 +4586,22 @@ body.no-tooltips .tip-layer { display: none; }
    proposer aux autres (le serveur refuse de toute façon). */
 body.roles-active.role-viewer .needs-admin,
 body.roles-active.role-operator .needs-admin { display: none !important; }
+
+/* v1.50.0 : page de connexion (compte local ou Rancher) */
+body.login-page {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg); padding: 16px; box-sizing: border-box;
+}
+.login-card { width: min(440px, 100%); padding: 28px 28px 22px; }
+.login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+.login-brand h1 { margin: 0; font-size: 20px; }
+.login-version { font-size: 11px; color: var(--text-dim); }
+.login-intro { color: var(--text-dim); margin: 6px 0 16px; }
+.login-actions { display: flex; flex-direction: column; gap: 10px; }
+.login-actions .btn { justify-content: center; text-align: center; padding: 10px 14px; }
+.login-note { font-size: 12px; color: var(--text-dim); margin: 14px 0 0; }
+.login-error { margin: 0 0 14px; }
+.login-code { display: block; margin-top: 4px; color: var(--text-dim); font-size: 11px; }
+.session-logout { margin-left: 4px; }
+.session-logout[hidden] { display: none; }
+.session-role.via-rancher { border-style: solid; }

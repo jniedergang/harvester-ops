@@ -110,10 +110,37 @@ const App = (() => {
   // -------------------------------------------------------------------------
   let sessionRole = 'admin';
 
+  // v1.50.0 : une session Rancher expirée ne doit pas laisser l'écran
+  // tourner sur des 401 : on retourne à la page de connexion.
+  (function watchExpiredSession() {
+    if (window.__hopsFetchWrapped) return;
+    window.__hopsFetchWrapped = true;
+    const orig = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+      const r = await orig(...args);
+      if (r.status === 401 && document.body.classList.contains('auth-rancher')) {
+        window.location.href = '/login';
+      }
+      return r;
+    };
+  })();
+
   async function loadRole() {
     try {
       const d = await fetch('/api/whoami').then(r => r.json());
       sessionRole = d.role || 'admin';
+      document.body.classList.toggle('auth-rancher', d.auth === 'rancher');
+      const out = $('#btn-logout');
+      if (out) {
+        out.hidden = d.auth !== 'rancher';
+        if (!out.dataset.wired) {
+          out.dataset.wired = '1';
+          out.addEventListener('click', async () => {
+            try { await fetch('/logout', { method: 'POST' }); } catch { /* on part quand même */ }
+            window.location.href = '/login';
+          });
+        }
+      }
       document.body.classList.remove('role-viewer', 'role-operator', 'role-admin');
       document.body.classList.add(`role-${sessionRole}`);
       document.body.classList.toggle('roles-active', !!d.roles_active);
@@ -121,6 +148,7 @@ const App = (() => {
       if (badge) {
         badge.hidden = !d.roles_active;
         badge.textContent = d.user ? `${d.user} · ${sessionRole}` : sessionRole;
+        badge.classList.toggle('via-rancher', d.auth === 'rancher');
         // Clés en toutes lettres : `i18n.t(\`role.desc.${x}\`)` est
         // invisible au contrôle de parité, qui ne lit que des littéraux.
         const desc = sessionRole === 'admin' ? i18n.t('role.desc.admin')
@@ -131,7 +159,8 @@ const App = (() => {
         // administrateur et aucune règle du cluster ne s'applique ; le dire
         // vaut mieux que de le laisser croire.
         let cluster;
-        if (!d.delegation_active) cluster = i18n.t('role.cluster.shared');
+        if (d.auth === 'rancher') cluster = i18n.t('role.cluster.rancher');
+        else if (!d.delegation_active) cluster = i18n.t('role.cluster.shared');
         else if (d.cluster_user) cluster = i18n.t('role.cluster.as', { user: d.cluster_user });
         else cluster = i18n.t('role.cluster.none');
         badge.title = `${desc}\n${cluster}`;

@@ -725,6 +725,37 @@ this is a boundary the cluster enforces, not a vault, and a flaw in this
 layer would hand back full powers. The identity is declared locally rather
 than proven by an identity provider; sourcing it from OIDC is the next step.
 
+### Signing in through Rancher (1.50.0)
+
+When the console is declared in Rancher Manager (2.12 or later, see the
+install guide), its sign-in page offers **"Sign in with Rancher"** next to
+local accounts. Someone already signed in to Rancher enters without typing
+anything; otherwise Rancher shows its own sign-in page, local account or
+Keycloak alike.
+
+- **Rights come from Rancher, not copied**: every action on a cluster goes
+  through Rancher's proxy (`/k8s/clusters/<id>`) with that person's own
+  token, so Rancher applies their user, group and project rights. Verified:
+  a Rancher "cluster member" was refused by harv1 itself
+  (`User "u-t286c" cannot get resource "virtualmachines"`), the
+  administrator was not.
+- The console finds which Rancher cluster is which by comparing the UID of
+  `kube-system` on both sides (or `rancher_cluster` in the configuration).
+  Clusters Rancher does not show to that person are left out, and any
+  request naming one is refused.
+- **Console role**: administrator for Rancher administrators and the groups
+  listed in `admin_groups`, `default_role` (operator) for the others.
+- **Stays with local accounts**: starting and stopping a cluster (a stopped
+  cluster no longer goes through Rancher, and Rancher may run on the cluster
+  being stopped), and the support bundle for non-administrators (it reads
+  every cluster with the console's own account).
+- **Tokens never leave the server**: the browser holds a random session id
+  (HttpOnly cookie); the access token is renewed before it expires and the
+  session's kubeconfigs are rewritten, so a long action keeps working.
+  Signing out forgets the session; Rancher does not let an OIDC token revoke
+  itself, it expires at the session length. Signing out of Rancher also
+  ends the console session at its next renewal.
+
 ## 9. Cross-cutting
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
