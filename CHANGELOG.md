@@ -4,6 +4,33 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.48.1] - 2026-09-25 - Restart only the VMs that were running, whatever their run strategy
+
+Since 1.9.0 the startup restarts only the VMs the shutdown stopped. The
+shutdown decided "was running" from the run strategy alone, which two cases
+got wrong.
+
+### Fixed
+- **A VM powered off from its own system came back at startup.** It keeps
+  `RerunOnFailure`, Harvester's default, with a finished instance: the
+  shutdown recorded it as running. "Running" is now read on the VM
+  instance (`Always` still counts as meant to run).
+- **A running `Manual` VM stayed off after startup.** Restoring its run
+  strategy does not start it; the startup now calls the `start`
+  subresource, as `virtctl start` does.
+- The shutdown summary counted every VM as stopped ("3 VMs stopped" with
+  one already off); it now says how many it stopped and how many were
+  already off.
+
+### Tests
+- The running rule for every run strategy and instance phase, the `start`
+  call against a stand-in `kubectl` (and nothing sent in dry run), the
+  summary count.
+- Real, on the harvlab2 bench: three VMs (running `RerunOnFailure`, powered
+  off from the guest, running `Manual`), a complete shutdown and startup of
+  the cluster: the first and the `Manual` one came back, the one powered
+  off from its guest stayed off, the resume annotations were consumed.
+
 ## [1.48.0] - 2026-09-25 - Creating a Kubernetes cluster works again, from a form that helps
 
 ### Added

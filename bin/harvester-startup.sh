@@ -383,6 +383,15 @@ step_restart_vms() {
             sleep 10
         done
         [[ "$patched" == "1" ]] || { log_warn "Échec start $ns/$name"; return 1; }
+        if [[ "$target_rs" == "Manual" ]]; then
+            local started=0
+            for attempt in 1 2 3; do
+                vm_start_subresource "$ns" "$name" >/dev/null 2>&1 && { started=1; break; }
+                log_warn "Start (Manual) $ns/$name échoué (essai $attempt/3)"
+                sleep 10
+            done
+            [[ "$started" == "1" ]] || { log_warn "Échec start $ns/$name"; return 1; }
+        fi
         # Annotation consommée : la retirer pour ne pas polluer le cycle suivant
         run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
             "${ANNOT_PREV_RUNSTRATEGY}-" >/dev/null 2>&1 || true

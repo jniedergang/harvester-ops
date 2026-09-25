@@ -277,10 +277,12 @@ step_stop_vms() {
         # en previous=Always -> le startup redémarrait les 14 VMs, y
         # compris celles volontairement éteintes depuis des semaines.
         # On purge aussi toute annotation restée d'un cycle précédent.
-        if [[ -z "$current_rs" || "$current_rs" == "Halted" ]]; then
+        local vmi_phase
+        vmi_phase=$(kc_quiet -n "$ns" get vmi "$name" -o jsonpath='{.status.phase}' 2>/dev/null || echo "")
+        if ! vm_was_running "$current_rs" "$vmi_phase"; then
             run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
                 "${ANNOT_PREV_RUNSTRATEGY}-" >/dev/null 2>&1 || true
-            log_debug "  $ns/$name déjà Halted — pas d'annotation de reprise"
+            log_debug "  $ns/$name ne tournait pas (${current_rs:-?}, VMI ${vmi_phase:-absente}) — pas d'annotation de reprise"
             return 0
         fi
         run kubectl --kubeconfig="$KUBECONFIG_PATH" annotate vm "$name" -n "$ns" \
@@ -392,7 +394,11 @@ step_stop_vms() {
         kc_quiet get vmi -A
         confirm "Continuer malgré tout ? / Continue anyway?" || exit 1
     fi
-    emit_event "vm-stop" "done" "$vm_count VMs stopped (ordered)"
+    # v1.48.1 : ne compter que les VMs que cet arrêt a stoppées (celles qui
+    # portent l'annotation de reprise), pas celles déjà éteintes.
+    local stopped
+    stopped=$(count_vms_to_resume)
+    emit_event "vm-stop" "done" "$stopped VM(s) stopped, $(( vm_count - stopped )) already off"
     log_ok "Toutes les VMs sont arrêtées"
 }
 

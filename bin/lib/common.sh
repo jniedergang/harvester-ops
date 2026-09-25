@@ -321,6 +321,38 @@ nodes_by_role() {
 # renvoie VIDE en silence (vécu : le startup ne relançait rien alors que
 # les annotations étaient posées). go-template est fiable ; il imprime
 # "<no value>" quand la clé manque, qu'on normalise en "".
+# v1.48.1 : « tournait au moment de l'arrêt » se lit sur la VMI, pas sur la
+# seule runStrategy. RerunOnFailure (le défaut de Harvester) reste posée sur
+# une VM éteinte depuis son propre système, sans VMI active : le démarrage la
+# relançait. Manual peut porter une VM qui tourne. Always vaut intention de
+# marche, VMI présente ou non (KubeVirt la recrée d'elle-même).
+#   vm_was_running <runStrategy> <phase de la VMI, vide si absente>
+vm_was_running() {
+    local rs="$1" phase="$2"
+    case "$rs" in
+        ""|Halted) return 1 ;;
+        Always) return 0 ;;
+    esac
+    case "$phase" in
+        ""|Succeeded|Failed) return 1 ;;
+    esac
+    return 0
+}
+
+# v1.48.1 : rétablir runStrategy=Manual ne démarre pas la VM ; il faut la
+# sous-ressource start, ce que fait `virtctl start`.
+vm_start_subresource() {
+    local ns="$1" name="$2"
+    echo '{}' | run kubectl --kubeconfig="$KUBECONFIG_PATH" replace --raw \
+        "/apis/subresources.kubevirt.io/v1/namespaces/${ns}/virtualmachines/${name}/start" -f -
+}
+
+# Nombre de VMs qui portent l'annotation de reprise (arrêtées par le shutdown)
+count_vms_to_resume() {
+    kc_quiet get vm -A -o jsonpath="{range .items[*]}{.metadata.annotations.harvester-ops\.io/previous-runStrategy}{'\n'}{end}" \
+        2>/dev/null | grep -c . || true
+}
+
 vm_prev_runstrategy() {
     local ns="$1" name="$2" v
     v=$(kc_quiet -n "$ns" get vm "$name" \

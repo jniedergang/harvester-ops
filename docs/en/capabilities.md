@@ -33,7 +33,11 @@ deployment. Available as auditable bash and mirrored in the console.
   `wol_mac` in the config are powered on by **Wake-on-LAN** (no
   operator prompt); and only the VMs the shutdown actually stopped are
   restarted, each with its original run strategy — VMs deliberately
-  stopped before the shutdown stay stopped.
+  stopped before the shutdown stay stopped. "Running" is read on the VM
+  instance, not only on the run strategy (1.48.1): a VM powered off from
+  its own system keeps `RerunOnFailure`, Harvester's default, and is no
+  longer restarted; a running `Manual` VM is started again through the
+  `start` subresource, restoring its strategy alone does not start it.
 - **VM ordering groups** — VMs stop/restart in configurable groups:
   sequential *between* groups, parallel *within* a group, with per-group
   priority.

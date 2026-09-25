@@ -30,15 +30,18 @@ console.
   Longhorn ne suit que les volumes attachés par des VMs — les volumes
   tenus par des pods (monitoring, logs d'upgrade) s'arrêtent avec le
   node et sont listés comme ignorés.
-- **Startup** — 5 étapes : démarrer le premier control Les nodes avec un `wol_mac` en
-  config s'allument par **Wake-on-LAN** (sans intervention) ; et seules
-  les VMs que le shutdown a réellement arrêtées redémarrent, chacune
-  avec sa run strategy d'origine — les VMs volontairement éteintes
-  avant l'arrêt restent éteintes.
--plane → démarrer
+- **Startup** — 5 étapes : démarrer le premier control-plane → démarrer
   le reste → attendre les nodes Ready → restaurer l'état du cluster →
   redémarrer les VMs en ordre de groupe inversé (parallèle dans un
-  groupe).
+  groupe). Les nodes avec un `wol_mac` en config s'allument par
+  **Wake-on-LAN** (sans intervention) ; et seules les VMs que le shutdown
+  a réellement arrêtées redémarrent, chacune avec sa run strategy
+  d'origine : les VMs volontairement éteintes avant l'arrêt restent
+  éteintes. « Tournait » se lit sur l'instance de la VM, pas seulement
+  sur sa run strategy (1.48.1) : une VM éteinte depuis son propre système
+  garde `RerunOnFailure`, le défaut de Harvester, et n'est plus relancée ;
+  une VM `Manual` qui tournait est redémarrée par la sous-ressource
+  `start`, rétablir sa stratégie ne suffisant pas à la lancer.
 - **Groupes d'ordonnancement VM** — les VMs s'arrêtent/redémarrent par
   groupes configurables : séquentiel *entre* groupes, parallèle *dans* un
   groupe, avec priorité par groupe.
