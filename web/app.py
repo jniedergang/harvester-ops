@@ -440,6 +440,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/vmtemplates/",        # templates partagés du cluster
     "/api/users",               # gestion des comptes de la console
     "/api/harvester-users",     # comptes du cluster Harvester
+    "/api/kubeovn/",            # réseaux kube-ovn : un changement peut couper des VMs
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
@@ -9481,23 +9482,24 @@ def api_capi_cluster_preview(cluster):
     return jsonify({"yaml": proc.stdout})
 
 
-def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
-    """Une action suivie (dock, Activité) qui lance l'outil. La demande part
-    par un fichier privé, effacé à la fin."""
+def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None):
+    """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
+    demande part par un fichier privé, effacé à la fin ; la ligne de commande
+    montrée ne porte ni chemin ni kubeconfig."""
     busy = _transfer_busy((cluster,), label)
     if busy:
         return None, _busy_response(busy)
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
-        fd, spec_file = tempfile.mkstemp(prefix="capi-spec-", suffix=".json",
+        fd, spec_file = tempfile.mkstemp(prefix=f"{tool}-spec-", suffix=".json",
                                          dir=str(wd) if wd else None)
         with os.fdopen(fd, "w") as f:
             json.dump(spec, f)
         cmd = cmd + ["--spec", spec_file]
     run_id = uuid.uuid4().hex[:12]
-    public = ["harvester-capi"] + [a for a in cmd[2:] if not a.startswith("/")
-                                   and a not in ("--kubeconfig",)]
+    public = [tool] + [a for a in cmd[2:] if not a.startswith("/")
+                       and a not in ("--kubeconfig",)]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = (current_cluster_identity() or {}).get("user")
     with ACTIONS_LOCK:
@@ -9509,9 +9511,145 @@ def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
         finally:
             if spec_file:
                 Path(spec_file).unlink(missing_ok=True)
-            _CAPI_INVENTORY_CACHE.pop(cluster, None)
+            if after:
+                after()
     threading.Thread(target=work, daemon=True).start()
     return run, None
+
+
+def _capi_action(cluster, label, cmd, spec=None, dry_run=False):
+    return _cli_action(cluster, label, cmd, "harvester-capi", spec, dry_run,
+                       after=lambda: _CAPI_INVENTORY_CACHE.pop(cluster, None))
+
+
+# ---------------------------------------------------------------------------
+# v1.49.0 : réseaux kube-ovn (VPC, subnets, réseaux overlay)
+#
+# Tout passe par `bin/harvester-network.py` (parité CLI) : relevé, contrôle
+# d'une demande, écriture en action suivie. Voir
+# docs/design/2026-09-26-reseaux-kubeovn.md.
+# ---------------------------------------------------------------------------
+
+import ovn_net as _on  # noqa: E402
+
+NETWORK_SCRIPT = "harvester-network.py"
+_NET_INVENTORY_CACHE = {}           # (cluster, identité) -> (horodatage, réponse)
+NET_KINDS = ("vpc", "subnet")
+
+
+def _net_base(cluster, sub):
+    script = BIN_DIR / NETWORK_SCRIPT
+    if not script.is_file():
+        return None, (jsonify({"error": f"{NETWORK_SCRIPT} not deployed"}), 503)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return [sys.executable, str(script), sub, "--kubeconfig", kc], None
+
+
+def _net_cache_key(cluster):
+    return (cluster, (current_cluster_identity() or {}).get("user"))
+
+
+def _net_request():
+    """(kind, spec normalisée, update) d'un corps JSON, ou une réponse 400."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": "a JSON object is expected"}), 400)
+    kind = body.get("kind")
+    if kind not in NET_KINDS:
+        return None, (jsonify({"error": "kind must be vpc or subnet"}), 400)
+    try:
+        spec = (_on.normalize_vpc if kind == "vpc" else _on.normalize_subnet)(body.get("spec") or {})
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+    return (kind, spec, bool(body.get("update"))), None
+
+
+@app.route("/api/kubeovn/<cluster>")
+@requires_auth
+def api_kubeovn(cluster):
+    """VPC, subnets, réseaux overlay et ce qui cloche. Lecture seule, 5 s de
+    cache par identité (la vue se relit toutes les 8 s)."""
+    key = _net_cache_key(cluster)
+    hit = _NET_INVENTORY_CACHE.get(key)
+    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
+        return jsonify(hit[1])
+    cmd, err = _net_base(cluster, "inventory")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    inv = res[0]
+    out = {k: inv.get(k) for k in ("unreachable", "kubeovn", "model", "namespaces",
+                                   "suggested_cidr", "free_overlays")}
+    out["node_ips"] = (inv.get("facts") or {}).get("node_ips") or []
+    _NET_INVENTORY_CACHE[key] = (time.time(), out)
+    return jsonify(out)
+
+
+@app.route("/api/kubeovn/<cluster>/check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_kubeovn_check(cluster):
+    """Contrôle d'une demande de VPC ou de subnet, sans rien écrire."""
+    req, err = _net_request()
+    if err:
+        return err
+    kind, spec, update = req
+    cmd, err = _net_base(cluster, "check")
+    if err:
+        return err
+    cmd += ["--kind", kind, "--spec", "-"] + (["--update"] if update else [])
+    res, err = _capi_run_json(cmd, spec=spec, timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+@app.route("/api/kubeovn/<cluster>/apply", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_kubeovn_apply(cluster):
+    """Crée ou modifie un VPC ou un subnet (et son réseau overlay) : action
+    suivie, réponse immédiate."""
+    req, err = _net_request()
+    if err:
+        return err
+    kind, spec, update = req
+    cmd, err = _net_base(cluster, "apply")
+    if err:
+        return err
+    cmd += ["--kind", kind] + (["--update"] if update else [])
+    verb = "update" if update else "create"
+    run, err = _cli_action(cluster, f"network:{kind}-{verb}:{spec['name']}", cmd,
+                           "harvester-network", spec=spec,
+                           after=lambda: _NET_INVENTORY_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": spec["name"], "kind": kind}), 202
+
+
+@app.route("/api/kubeovn/<cluster>/<kind>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_kubeovn_delete(cluster, kind, name):
+    """Supprime un VPC vide ou un subnet inutilisé ; `with_network=1` retire
+    aussi le réseau overlay du subnet s'il a été créé par la console."""
+    if kind not in NET_KINDS:
+        return jsonify({"error": "kind must be vpc or subnet"}), 400
+    cmd, err = _net_base(cluster, "delete")
+    if err:
+        return err
+    cmd += ["--kind", kind, "--name", name]
+    if request.args.get("with_network") == "1":
+        cmd.append("--with-network")
+    run, err = _cli_action(cluster, f"network:{kind}-delete:{name}", cmd, "harvester-network",
+                           after=lambda: _NET_INVENTORY_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": name, "kind": kind}), 202
 
 
 @app.route("/api/capi/<cluster>/cluster-create", methods=["POST"])

@@ -144,6 +144,7 @@
           <button type="button" class="sub-tab" data-overview-tab="network"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabNetwork">Network</span></button>
           <button type="button" class="sub-tab" data-overview-tab="storage"><span class="tab-icon" data-icon="storage"></span> <span data-i18n="overview.tabStorage">Storage</span></button>
           <button type="button" class="sub-tab tip" data-overview-tab="fabric" data-i18n-title="overview.tabFabricTip" title="Physical interfaces, virtual switches and the networks above them"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabFabric">Fabric</span></button>
+          <button type="button" class="sub-tab tip" data-overview-tab="vpc" data-i18n-title="overview.tabVpcTip" title="kube-ovn: VPCs, subnets and overlay networks, with their forms"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabVpc">VPC</span></button>
         </div>
       </div>
 
@@ -182,6 +183,10 @@
       </div>
       <div class="overview-subtab" data-subtab="storage" hidden>
         <div class="topology-host" data-topology-mode="storage"></div>
+      </div>
+      <!-- v1.49.0 : réseaux kube-ovn, un bloc par VPC, avec leurs formulaires -->
+      <div class="overview-subtab" data-subtab="vpc" hidden>
+        <div class="topology-host" data-topology-mode="vpc"></div>
       </div>
     </section>
 
@@ -819,6 +824,7 @@
 <script src="/static/js/board.js"></script>
 <script src="/static/js/fabric.js"></script>
 <script src="/static/js/netmap.js"></script>
+<script src="/static/js/vpc.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>
 <!-- Yjs notes module (ESM) -->

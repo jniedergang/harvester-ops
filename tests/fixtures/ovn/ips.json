@@ -1,0 +1,188 @@
+[
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "aiscaleimage-test.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.0.160",
+   "macAddress": "b6:c5:d6:1c:3f:ce",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "aiscaleimage-test",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.0.160",
+   "v6IpAddress": ""
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "downstream.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.0.114",
+   "macAddress": "26:d2:26:15:a4:c4",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "downstream",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.0.114",
+   "v6IpAddress": ""
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "idp.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.0.18",
+   "macAddress": "c2:f8:19:bd:c6:a9",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "idp",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.0.18",
+   "v6IpAddress": ""
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "leap156.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.0.122",
+   "macAddress": "da:cd:40:c9:1d:86",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "leap156",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.0.122",
+   "v6IpAddress": ""
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "mgmt-v030.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.1.25",
+   "macAddress": "8e:76:9b:8c:9e:95",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "mgmt-v030",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.1.25",
+   "v6IpAddress": ""
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "IP",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "labels": {
+    "ovn-default": "",
+    "ovn.kubernetes.io/ip_reserved": "false",
+    "ovn.kubernetes.io/node-name": "harv1.home.lo",
+    "ovn.kubernetes.io/subnet": "ovn-default"
+   },
+   "name": "mlm.default"
+  },
+  "spec": {
+   "attachIps": [],
+   "attachMacs": [],
+   "attachSubnets": [],
+   "containerID": "",
+   "ipAddress": "10.54.0.115",
+   "macAddress": "1e:01:a1:97:86:5c",
+   "namespace": "default",
+   "nodeName": "harv1.home.lo",
+   "podName": "mlm",
+   "podType": "VirtualMachine",
+   "subnet": "ovn-default",
+   "v4IpAddress": "10.54.0.115",
+   "v6IpAddress": ""
+  }
+ }
+]

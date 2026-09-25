@@ -1,0 +1,211 @@
+[
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "Subnet",
+  "metadata": {
+   "annotations": {},
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "name": "egress-external"
+  },
+  "spec": {
+   "cidrBlock": "172.16.0.0/22",
+   "default": false,
+   "enableLb": true,
+   "excludeIps": [
+    "172.16.0.0..172.16.3.199",
+    "172.16.3.206..172.16.3.255"
+   ],
+   "gateway": "172.16.0.1",
+   "gatewayNode": "",
+   "gatewayType": "distributed",
+   "natOutgoing": false,
+   "private": false,
+   "protocol": "IPv4",
+   "provider": "external.kube-system.ovn",
+   "vlan": "external-vlan",
+   "vpc": "ovn-cluster"
+  },
+  "status": {
+   "activateGateway": "",
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-06-02T12:10:01Z",
+     "lastUpdateTime": "2026-09-16T17:21:46Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Validated"
+    },
+    {
+     "lastTransitionTime": "2026-06-02T12:10:01Z",
+     "lastUpdateTime": "2026-06-02T12:10:01Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Ready"
+    },
+    {
+     "lastTransitionTime": "2026-06-02T12:10:01Z",
+     "lastUpdateTime": "2026-06-02T12:10:01Z",
+     "message": "Not Observed",
+     "reason": "Init",
+     "status": "Unknown",
+     "type": "Error"
+    }
+   ],
+   "dhcpV4OptionsUUID": "",
+   "dhcpV6OptionsUUID": "",
+   "mcastQuerierIP": "",
+   "mcastQuerierMAC": "",
+   "natOutgoingPolicyRules": [],
+   "u2oInterconnectionIP": "",
+   "u2oInterconnectionMAC": "",
+   "u2oInterconnectionVPC": "",
+   "v4availableIPrange": "172.16.3.200-172.16.3.205",
+   "v4availableIPs": 6,
+   "v4usingIPrange": "",
+   "v4usingIPs": 0,
+   "v6availableIPrange": "",
+   "v6availableIPs": 0,
+   "v6usingIPrange": "",
+   "v6usingIPs": 0
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "Subnet",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "name": "join"
+  },
+  "spec": {
+   "cidrBlock": "100.64.0.0/16",
+   "default": false,
+   "disableInterConnection": true,
+   "excludeIps": [
+    "100.64.0.1"
+   ],
+   "gateway": "100.64.0.1",
+   "gatewayNode": "",
+   "natOutgoing": false,
+   "private": false,
+   "protocol": "IPv4",
+   "provider": "ovn",
+   "vpc": "ovn-cluster"
+  },
+  "status": {
+   "activateGateway": "",
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-03-05T23:49:58Z",
+     "lastUpdateTime": "2026-09-16T17:21:46Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Validated"
+    },
+    {
+     "lastTransitionTime": "2026-03-05T23:50:00Z",
+     "lastUpdateTime": "2026-03-05T23:50:00Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Ready"
+    },
+    {
+     "lastTransitionTime": "2026-03-05T23:50:00Z",
+     "lastUpdateTime": "2026-03-05T23:50:00Z",
+     "message": "Not Observed",
+     "reason": "Init",
+     "status": "Unknown",
+     "type": "Error"
+    }
+   ],
+   "dhcpV4OptionsUUID": "",
+   "dhcpV6OptionsUUID": "",
+   "mcastQuerierIP": "",
+   "mcastQuerierMAC": "",
+   "natOutgoingPolicyRules": [],
+   "u2oInterconnectionIP": "",
+   "u2oInterconnectionMAC": "",
+   "u2oInterconnectionVPC": "",
+   "v4availableIPrange": "100.64.0.3-100.64.255.254",
+   "v4availableIPs": 65532,
+   "v4usingIPrange": "100.64.0.2",
+   "v4usingIPs": 1,
+   "v6availableIPrange": "",
+   "v6availableIPs": 0,
+   "v6usingIPrange": "",
+   "v6usingIPs": 0
+  }
+ },
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "Subnet",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "name": "ovn-default"
+  },
+  "spec": {
+   "cidrBlock": "10.54.0.0/16",
+   "default": true,
+   "enableLb": true,
+   "excludeIps": [
+    "10.54.0.1"
+   ],
+   "gateway": "10.54.0.1",
+   "gatewayNode": "",
+   "gatewayType": "distributed",
+   "natOutgoing": true,
+   "private": false,
+   "protocol": "IPv4",
+   "provider": "ovn",
+   "vpc": "ovn-cluster"
+  },
+  "status": {
+   "activateGateway": "",
+   "conditions": [
+    {
+     "lastTransitionTime": "2026-03-05T23:50:00Z",
+     "lastUpdateTime": "2026-09-16T17:21:46Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Validated"
+    },
+    {
+     "lastTransitionTime": "2026-03-06T09:52:02Z",
+     "lastUpdateTime": "2026-03-06T09:52:02Z",
+     "reason": "ResetLogicalSwitchAclSuccess",
+     "status": "True",
+     "type": "Ready"
+    },
+    {
+     "lastTransitionTime": "2026-03-06T09:52:02Z",
+     "lastUpdateTime": "2026-03-06T09:52:02Z",
+     "message": "Not Observed",
+     "reason": "Init",
+     "status": "Unknown",
+     "type": "Error"
+    }
+   ],
+   "dhcpV4OptionsUUID": "",
+   "dhcpV6OptionsUUID": "",
+   "mcastQuerierIP": "",
+   "mcastQuerierMAC": "",
+   "natOutgoingPolicyRules": [],
+   "u2oInterconnectionIP": "",
+   "u2oInterconnectionMAC": "",
+   "u2oInterconnectionVPC": "",
+   "v4availableIPrange": "10.54.0.2-10.54.0.10,10.54.0.13-10.54.0.14,10.54.0.20,10.54.0.22,10.54.0.24,10.54.0.26,10.54.0.28,10.54.0.31,10.54.0.39,10.54.0.47-10.54.0.48,10.54.0.50-10.54.0.51,10.54.0.61,10.54.0.80-10.54.0.95,10.54.0.97-10.54.0.98,10.54.0.101,10.54.0.104-10.54.0.108,10.54.0.126-10.54.0.139,10.54.0.141-10.54.0.156,10.54.0.158-10.54.0.159,10.54.0.161-10.54.0.169,10.54.0.171-10.54.0.191,10.54.0.193-10.54.0.209,10.54.0.212-10.54.0.224,10.54.0.226-10.54.0.228,10.54.0.230-10.54.1.24,10.54.1.26-10.54.255.254",
+   "v4availableIPs": 65446,
+   "v4usingIPrange": "10.54.0.11-10.54.0.12,10.54.0.15-10.54.0.19,10.54.0.21,10.54.0.23,10.54.0.25,10.54.0.27,10.54.0.29-10.54.0.30,10.54.0.32-10.54.0.38,10.54.0.40-10.54.0.46,10.54.0.49,10.54.0.52-10.54.0.60,10.54.0.62-10.54.0.79,10.54.0.96,10.54.0.99-10.54.0.100,10.54.0.102-10.54.0.103,10.54.0.109-10.54.0.125,10.54.0.140,10.54.0.157,10.54.0.160,10.54.0.170,10.54.0.192,10.54.0.210-10.54.0.211,10.54.0.225,10.54.0.229,10.54.1.25",
+   "v4usingIPs": 87,
+   "v6availableIPrange": "",
+   "v6availableIPs": 0,
+   "v6usingIPrange": "",
+   "v6usingIPs": 0
+  }
+ }
+]

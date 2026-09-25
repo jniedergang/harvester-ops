@@ -403,6 +403,31 @@ versions.
   subnet, its gateway and its card; for the overlay and the pod network,
   nothing physical, which is said. Networks with no VM are listed at the
   bottom. It reads the same data as Fabric, so it costs no extra call.
+- **kube-ovn networks: VPCs, subnets and overlay networks, with their
+  forms (VPC tab, 1.49.0).** One block per VPC, in the same layout: on the
+  left its subnets (range, gateway, overlay network, NAT, DHCP, address
+  usage) and the VMs holding an address in each; on the right how the VPC
+  leaves (outgoing NAT through the nodes in the default VPC, its static
+  routes and peerings, or "isolated"). What goes wrong is said above the
+  blocks: an overlay network no subnet serves (a VM attached to it gets
+  no address), a subnet whose network is gone, overlapping ranges, a
+  nearly full subnet.
+  - **Forms** (administrators): a VPC (namespaces; folded, static routes
+    and peerings) and a subnet (VPC, a free /24 proposed away from the
+    nodes, pods and other subnets, gateway derived from it, overlay network
+    created with the subnet or an existing one without subnet, outgoing
+    NAT proposed in the default VPC only, DHCP for the VMs; folded,
+    excluded addresses, private subnet and allowed networks, namespaces).
+    A pre-check runs while typing; Save stays greyed out while something
+    blocks. Changing a subnet keeps its range, VPC and network, which
+    kube-ovn cannot change.
+  - **Deletion** is refused while a VM or a pod still uses the subnet (the
+    view says which, before sending anything) or while a VPC still has
+    subnets; the overlay network goes with its subnet only if the console
+    created it. The default VPC, its `ovn-default` and `join` subnets and
+    underlay subnets are read only.
+  - Every change is an action followed in the dock; the command line does
+    the same: `harvester-network inventory | check | apply | delete`.
 - **Storage view, read like a datastore**: one block per storage engine.
   On the left, each storage class with its policy (replicas, what happens
   on release, source image), the room it can still allocate (the same

@@ -193,6 +193,22 @@ Normal: Harvester ties it to the restored VM and refuses to delete it
 while that VM exists. Empty `BackupVolume` objects also stay in Longhorn
 after the transfer backups are deleted; that is how Longhorn works.
 
+## kube-ovn networks (VPC tab)
+
+### A VM attached to an overlay network gets no address
+
+Either no subnet serves that network (the VPC tab says so above the
+blocks, with a button that opens the subnet form on it), or the subnet has
+DHCP turned off and the VM expects DHCP. A subnet serves a network when its
+`provider` is `<network>.<namespace>.ovn`.
+
+### A VM on a subnet of another VPC cannot reach the Internet
+
+kube-ovn does outgoing NAT in its default VPC only. A VPC of its own is
+isolated until it gets a route out (a peering with the default VPC and a
+static route, or a VPC NAT gateway, which a later version of the console
+will offer).
+
 ## Cluster API clusters
 
 ### Machines stay "Provisioning" although their VMs run

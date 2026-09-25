@@ -4,6 +4,43 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.49.0] - 2026-09-25 - kube-ovn networks: VPCs, subnets and overlay networks, with their forms
+
+First step of the kube-ovn network settings decided on 20/09: what a
+Harvester VM can use today.
+
+### Added
+- **VPC tab** (Overview), in the block layout of Fabric and Network: one
+  block per VPC, its subnets (range, gateway, overlay network, NAT, DHCP,
+  address usage) with the VMs holding an address in each, and how the VPC
+  leaves (NAT through the nodes, static routes, peerings, or isolated).
+  Findings above the blocks: an overlay network no subnet serves (seen on
+  harv1: a VM attached to it would get no address), a subnet whose network
+  is gone, overlapping ranges, a nearly full subnet.
+- **Forms for a VPC and a subnet** (administrators): a free /24 proposed
+  away from the nodes, pods and other subnets, gateway derived, overlay
+  network created with the subnet or an existing one reused, outgoing NAT
+  only where kube-ovn does it, DHCP for the VMs, advanced options folded;
+  a pre-check while typing in the five languages; changes a subnet cannot
+  take (range, VPC, network) are refused before sending.
+- **Deletion guarded**: a subnet still used by a VM or a pod, or a VPC
+  with subnets, is refused, the view saying which before sending
+  anything; the overlay network goes with its subnet only if the console
+  created it; kube-ovn's own VPC and subnets are read only.
+- **`harvester-network` command line** (`inventory`, `check`, `apply`,
+  `delete`): the console runs it as a followed action; a creation that
+  fails half-way is undone.
+
+### Tests
+- Logic against the objects read on harv1 (34 tests), the command line
+  with a simulated cluster (10), the endpoints and the admin-only writes
+  (5), the view and its forms in a browser (6).
+- Real, on harv1 (Harvester v1.9.0, kube-ovn v1.16.2): subnets and a VPC
+  created, a VM on a new overlay subnet got its address by DHCP and reached
+  the Internet through NAT, deletions refused while in use, then the same
+  from the view (create, edit, refused deletion, clean-up), leaving harv1
+  as it was.
+
 ## [1.48.1] - 2026-09-25 - Restart only the VMs that were running, whatever their run strategy
 
 Since 1.9.0 the startup restarts only the VMs the shutdown stopped. The

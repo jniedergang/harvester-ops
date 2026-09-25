@@ -195,6 +195,22 @@ que cette VM existe. Des objets `BackupVolume` vides restent aussi dans
 Longhorn après la suppression des sauvegardes du transfert ; c'est le
 fonctionnement de Longhorn.
 
+## Réseaux kube-ovn (onglet VPC)
+
+### Une VM branchée sur un réseau overlay ne reçoit aucune adresse
+
+Soit aucun subnet ne sert ce réseau (l'onglet VPC le dit au-dessus des
+blocs, avec un bouton qui ouvre le formulaire de subnet sur lui), soit le
+subnet a le DHCP coupé et la VM attend le DHCP. Un subnet sert un réseau
+quand son `provider` vaut `<réseau>.<espace de noms>.ovn`.
+
+### Une VM d'un subnet d'un autre VPC ne sort pas sur Internet
+
+kube-ovn ne fait le NAT sortant que dans son VPC par défaut. Un VPC à part
+reste isolé tant qu'il n'a pas de route vers l'extérieur (un appairage avec
+le VPC par défaut et une route statique, ou une passerelle NAT de VPC, que
+la console proposera dans une version suivante).
+
 ## Clusters Cluster API
 
 ### Des machines restent « Provisioning » alors que leurs VMs tournent

@@ -469,6 +469,33 @@ bit à bit après une copie, un export et un import entre versions.
   et le réseau de pod, rien de physique, et c'est dit. Les réseaux sans VM
   sont listés en bas. Elle lit la même donnée que la Fabrique : aucun
   appel de plus.
+- **Réseaux kube-ovn : VPC, subnets et réseaux overlay, avec leurs
+  formulaires (onglet VPC, 1.49.0).** Un bloc par VPC, dans la même
+  disposition : à gauche ses subnets (plage, passerelle, réseau overlay,
+  NAT, DHCP, occupation des adresses) et les VMs qui y ont une adresse ; à
+  droite par où le VPC sort (NAT sortant par les nœuds dans le VPC par
+  défaut, ses routes statiques et appairages, ou « isolé »). Ce qui cloche
+  est dit au-dessus des blocs : un réseau overlay qu'aucun subnet ne sert
+  (une VM qui s'y branche ne reçoit aucune adresse), un subnet dont le
+  réseau a disparu, des plages qui se chevauchent, un subnet presque plein.
+  - **Formulaires** (administrateurs) : un VPC (espaces de noms ; repliés,
+    routes statiques et appairages) et un subnet (VPC, un /24 libre proposé
+    loin des nœuds, des pods et des autres subnets, passerelle déduite,
+    réseau overlay créé avec le subnet ou un existant sans subnet, NAT
+    sortant proposé dans le VPC par défaut seulement, DHCP pour les VMs ;
+    repliés, adresses exclues, subnet privé et réseaux autorisés, espaces
+    de noms). Un contrôle préalable tourne pendant la saisie ; Enregistrer
+    reste grisé tant que quelque chose bloque. Modifier un subnet garde sa
+    plage, son VPC et son réseau, que kube-ovn ne sait pas changer.
+  - **La suppression** est refusée tant qu'une VM ou un pod utilise le
+    subnet (la vue dit lesquels, avant d'envoyer quoi que ce soit) ou
+    qu'un VPC a encore des subnets ; le réseau overlay ne part avec son
+    subnet que si la console l'a créé. Le VPC par défaut, ses subnets
+    `ovn-default` et `join` et les subnets d'underlay restent en lecture
+    seule.
+  - Chaque changement est une action suivie dans le dock ; la ligne de
+    commande fait de même : `harvester-network inventory | check | apply |
+    delete`.
 - **Vue Stockage, lue comme un datastore** : un bloc par moteur de
   stockage. À gauche, chaque storage class avec sa politique (répliques,
   sort à la libération, image source), la place qu'elle peut encore

@@ -1967,7 +1967,8 @@ const App = (() => {
   // plus aucun graphe Cytoscape.
   // -------------------------------------------------------------------------
   const BOARDS = () => ({ cluster: window.ClusterMap, fabric: window.Fabric,
-                          network: window.NetMap, storage: window.StorageMap });
+                          network: window.NetMap, storage: window.StorageMap,
+                          vpc: window.VpcBoard });
 
   function stopBoards(except) {
     Object.entries(BOARDS()).forEach(([m, b]) => { if (b && m !== except) b.stop(); });

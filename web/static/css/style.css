@@ -4572,3 +4572,17 @@ body.no-tooltips .tip-layer { display: none; }
 .capi-yaml { margin: 0; padding: 12px 14px; font-family: var(--font-mono); font-size: 11.5px;
   white-space: pre; overflow: auto; height: 100%; box-sizing: border-box; }
 
+
+/* v1.49.0 : la vue VPC (kube-ovn). Même grammaire que Fabrique et Réseau. */
+.vpc-actions { display: inline-flex; align-items: center; gap: 4px; margin-left: 6px; }
+.vsw-pg-head .vpc-actions { margin-left: auto; }
+.vpc-usage { display: flex; align-items: center; gap: 8px; margin: 4px 0 2px; font-size: 11px; color: var(--text-dim); }
+.vpc-usage .progress-mini { flex: 1 1 auto; }
+.vpc-findings { margin: 0 0 12px; }
+.vpc-modal .modal { width: min(860px, 96vw); }
+.vpc-modal textarea { width: 100%; font-family: var(--font-mono, monospace); font-size: 12px; }
+.vsw-pg .warn { color: var(--warn); }
+/* Les formulaires kube-ovn sont réservés aux administrateurs : ne pas les
+   proposer aux autres (le serveur refuse de toute façon). */
+body.roles-active.role-viewer .needs-admin,
+body.roles-active.role-operator .needs-admin { display: none !important; }

@@ -1,0 +1,87 @@
+[
+ {
+  "apiVersion": "k8s.cni.cncf.io/v1",
+  "kind": "NetworkAttachmentDefinition",
+  "metadata": {
+   "annotations": {
+    "network.harvesterhci.io/route": "{\"mode\":\"auto\",\"serverIPAddr\":\"\",\"cidr\":\"\",\"gateway\":\"\"}"
+   },
+   "finalizers": [
+    "wrangler.cattle.io/harvester-network-manager-nad-controller"
+   ],
+   "labels": {
+    "network.harvesterhci.io/clusternetwork": "mgmt",
+    "network.harvesterhci.io/ready": "true",
+    "network.harvesterhci.io/type": "UntaggedNetwork"
+   },
+   "name": "management",
+   "namespace": "default"
+  },
+  "spec": {
+   "config": "{\"cniVersion\":\"0.3.1\",\"name\":\"management\",\"type\":\"bridge\",\"bridge\":\"mgmt-br\",\"promiscMode\":true,\"ipam\":{}}"
+  }
+ },
+ {
+  "apiVersion": "k8s.cni.cncf.io/v1",
+  "kind": "NetworkAttachmentDefinition",
+  "metadata": {
+   "annotations": {},
+   "finalizers": [
+    "wrangler.cattle.io/harvester-network-manager-nad-controller"
+   ],
+   "labels": {
+    "network.harvesterhci.io/clusternetwork": "mgmt",
+    "network.harvesterhci.io/ready": "true",
+    "network.harvesterhci.io/type": "OverlayNetwork"
+   },
+   "name": "ovn-overlay",
+   "namespace": "default"
+  },
+  "spec": {
+   "config": "{\"cniVersion\":\"0.3.0\",\"type\":\"kube-ovn\",\"server_socket\":\"/run/openvswitch/kube-ovn-daemon.sock\",\"provider\":\"ovn-overlay.default.ovn\"}"
+  }
+ },
+ {
+  "apiVersion": "k8s.cni.cncf.io/v1",
+  "kind": "NetworkAttachmentDefinition",
+  "metadata": {
+   "annotations": {
+    "network.harvesterhci.io/route": "{\"mode\":\"auto\",\"serverIPAddr\":\"\",\"cidr\":\"\",\"gateway\":\"\"}"
+   },
+   "finalizers": [
+    "wrangler.cattle.io/harvester-network-manager-nad-controller",
+    "wrangler.cattle.io/harvester-network-nad-controller"
+   ],
+   "labels": {
+    "network.harvesterhci.io/clusternetwork": "mgmt",
+    "network.harvesterhci.io/ready": "true",
+    "network.harvesterhci.io/type": "UntaggedNetwork"
+   },
+   "name": "production",
+   "namespace": "default"
+  },
+  "spec": {
+   "config": "{\"cniVersion\":\"0.3.1\",\"name\":\"production\",\"type\":\"bridge\",\"bridge\":\"mgmt-br\",\"promiscMode\":true,\"ipam\":{}}"
+  }
+ },
+ {
+  "apiVersion": "k8s.cni.cncf.io/v1",
+  "kind": "NetworkAttachmentDefinition",
+  "metadata": {
+   "annotations": {},
+   "finalizers": [
+    "wrangler.cattle.io/harvester-network-manager-nad-controller"
+   ],
+   "labels": {
+    "network.harvesterhci.io/clusternetwork": "mgmt",
+    "network.harvesterhci.io/ready": "true",
+    "network.harvesterhci.io/type": "OverlayNetwork"
+   },
+   "name": "external",
+   "namespace": "kube-system"
+  },
+  "spec": {
+   "config": "{ \"cniVersion\": \"0.3.1\", \"type\": \"kube-ovn\", \"server_socket\": \"/run/openvswitch/kube-ovn-daemon.sock\", \"provider\": \"external.kube-system.ovn\" }"
+  }
+ }
+]

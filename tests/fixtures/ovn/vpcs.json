@@ -1,0 +1,33 @@
+[
+ {
+  "apiVersion": "kubeovn.io/v1",
+  "kind": "Vpc",
+  "metadata": {
+   "finalizers": [
+    "kubeovn.io/kube-ovn-controller"
+   ],
+   "name": "ovn-cluster"
+  },
+  "spec": {},
+  "status": {
+   "bfdPort": {},
+   "default": true,
+   "defaultLogicalSwitch": "ovn-default",
+   "enableBfd": false,
+   "enableExternal": false,
+   "router": "ovn-cluster",
+   "sctpLoadBalancer": "cluster-sctp-loadbalancer",
+   "sctpSessionLoadBalancer": "cluster-sctp-session-loadbalancer",
+   "standby": true,
+   "subnets": [
+    "egress-external",
+    "join",
+    "ovn-default"
+   ],
+   "tcpLoadBalancer": "cluster-tcp-loadbalancer",
+   "tcpSessionLoadBalancer": "cluster-tcp-session-loadbalancer",
+   "udpLoadBalancer": "cluster-udp-loadbalancer",
+   "udpSessionLoadBalancer": "cluster-udp-session-loadbalancer"
+  }
+ }
+]
