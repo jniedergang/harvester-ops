@@ -1,4 +1,4 @@
-# Progression d'un transfert de VM : débit, temps restant, quantités
+# Progression et vitesse d'un transfert de VM
 
 Conception validée le 25/09/2026. Livraison prévue : v1.46.0. Complète
 `2026-09-24-migration-vm.md`.
@@ -67,6 +67,44 @@ Le script calcule, la console relaie, l'interface traduit.
   occupés) » (tailles et occupation réelle Longhorn de l'inventaire).
 - Textes et unités dans les cinq langues.
 
+## Vitesse et ressources (demande de l'exploitant, 25/09/2026)
+
+« Tout faire pour optimiser la vitesse, et donner des options si cela
+impacte les ressources. » Mesurer d'abord : la progression par phase donne
+le débit de chaque maillon. Leviers relevés :
+
+- **Le gzip de Longhorn est mono-cœur par flux** : Harvester relaie le
+  téléchargement de Longhorn (`backingimages/<nom>/download`), toujours
+  compressé, sans réglage (code lu le 25/09/2026). Mesuré sur harv1 :
+  93 Mo/s de disque brut pour un flux. D'où :
+  - **disques en parallèle** (moteur fichier) : chaque disque est
+    téléchargé et importé en même temps que les autres, un cœur de
+    compression par disque. Option `parallel` : tous (défaut) ou N ;
+    1 ménage la source.
+- **Plafond de débit** (moteur fichier) : `bandwidth` en Mo/s, appliqué par
+  le guichet au total du transfert (seau à jetons). Défaut : aucun.
+- **Concurrence de Longhorn** (moteur sauvegarde) : `backup-concurrent-limit`
+  sur la source et `restore-concurrent-limit` sur la cible valent 2
+  (relevé sur harv1) ; relevés à 8 le temps du transfert, puis rétablis à
+  leur valeur d'origine, y compris sur échec ou annulation. Coût : CPU et
+  réseau de tous les nœuds des deux clusters, et toute autre sauvegarde ou
+  restauration en cours pendant ce temps. Défaut : non.
+- **Temps morts** : relance de synchronisation toutes les 20 s au lieu de 60.
+- **À évaluer sur le banc** : l'export KubeVirt (`VirtualMachineExport`, CRD
+  présente) en disque brut, sans le gzip mono-cœur. Retenu seulement si la
+  mesure le justifie : le brut transporte aussi les zéros d'un disque creux.
+
+**Interface et CLI** : un choix « Vitesse », dont la bulle d'aide dit le coût :
+
+| Profil | Disques en parallèle | Concurrence Longhorn | Pour quoi |
+|---|---|---|---|
+| Économe | 1 | inchangée | cluster de production chargé |
+| Normale (défaut) | tous | inchangée | le cas courant |
+| Maximale | tous | relevée à 8 | fenêtre de maintenance |
+
+plus un plafond de débit facultatif (Mo/s). CLI : `--speed eco|normal|max`,
+`--bandwidth <Mo/s>`, `--parallel N`.
+
 ## Tests
 
 - Calcul : débit sur fenêtre, temps restant, étranglement à 2 s, bilan.
@@ -76,5 +114,10 @@ Le script calcule, la console relaie, l'interface traduit.
   continue au-delà de 500 événements.
 - Navigateur : ligne du dock et bloc de suivi en français, quantité annoncée
   au contrôle.
-- Réel : un transfert sur le banc (node2 rallumé puis éteint), chiffres
-  cohérents avec la taille des disques.
+- Vitesse : parallélisme (deux disques servis en même temps), plafond
+  respecté (débit mesuré sous le plafond), concurrence Longhorn relevée puis
+  rétablie, même sur échec.
+- Réel : transferts sur le banc (node2 rallumé puis éteint), chiffres
+  cohérents avec la taille des disques ; mesures comparées (un disque puis
+  deux en parallèle, concurrence 2 puis 8, export brut KubeVirt), consignées
+  ici.
