@@ -76,13 +76,17 @@ const VMTransfer = (() => {
     const engine = d.engine === 'backup'
       ? tr('transfer.engine.backup')
       : tr('transfer.engine.file', { reason: (REASONS[d.reason] || (() => ''))() });
+    const a = d.amount;
+    const amount = a ? `<p class="tf-desc xfer-amount">${esc(tr('transfer.amount', { disks: a.disks,
+      size: XferProgress.bytes(a.size) }) + (a.used != null
+        ? ' ' + tr('transfer.amountUsed', { used: XferProgress.bytes(a.used) }) : ''))}</p>` : '';
     const items = (d.findings || []).filter(f => f.code !== 'engine');
     const list = items.map(f => `
       <div class="sto-finding ${LEVEL_CLASS[f.level] || ''}" data-code="${esc(f.code)}" data-level="${esc(f.level)}">
         <div class="sto-finding-title">${esc(findingText(f))}</div>
       </div>`).join('');
     const ok = d.blocked ? '' : `<div class="sto-finding sev-info" data-code="ok"><div class="sto-finding-title">${esc(tr('transfer.noBlocker'))}</div></div>`;
-    return `<p class="tf-desc xfer-engine">${esc(engine)}</p>${list}${ok}`;
+    return `<p class="tf-desc xfer-engine">${esc(engine)}</p>${amount}${list}${ok}`;
   }
 
   function options(values, selected, withEmpty) {
@@ -142,6 +146,16 @@ const VMTransfer = (() => {
               <option value="stopped">${esc(tr('transfer.targetState.stopped'))}</option>
             </select></label>
           <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('transfer.keepMacTip'))}"><input data-x="keep_mac" type="checkbox" checked><span class="tf-label">${esc(tr('transfer.keepMac'))}</span></label>` : ''}
+          ${toCluster ? `
+          <label class="tf-field"><span class="tf-label">${esc(tr('transfer.speed'))}</span>
+            <select data-x="speed" class="tip" data-tip="${esc(tr('transfer.speed.tip'))}">
+              <option value="normal">${esc(tr('transfer.speed.normal'))}</option>
+              <option value="eco">${esc(tr('transfer.speed.eco'))}</option>
+              <option value="max">${esc(tr('transfer.speed.max'))}</option>
+            </select></label>
+          <label class="tf-field"><span class="tf-label">${esc(tr('transfer.bandwidth'))}</span>
+            <input data-x="bandwidth" type="number" min="1" step="1" placeholder="-"
+                   class="tip" data-tip="${esc(tr('transfer.bandwidthTip'))}"></label>` : ''}
           ${kind === 'migrate' ? `
           <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('transfer.forceFile'))}"><input data-x="engine_file" type="checkbox"><span class="tf-label">${esc(tr('transfer.forceFile'))}</span></label>
           <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('transfer.keepBackups'))}"><input data-x="keep_backups" type="checkbox"><span class="tf-label">${esc(tr('transfer.keepBackups'))}</span></label>` : ''}
@@ -154,6 +168,13 @@ const VMTransfer = (() => {
           <button type="button" class="btn btn-primary btn-sm tip" data-x="start" data-tip="${esc(tr('transfer.startTip'))}" disabled>${Icons.svg(kind === 'export' ? 'download' : kind === 'import' ? 'upload' : 'migrate')} <span>${esc((kind === 'export' ? tr('transfer.startExport') : kind === 'import' ? tr('transfer.startImport') : tr('transfer.start')))}</span></button>
           <span class="apply-result" data-x="feedback"></span>
         </div>
+        <fieldset class="tf-block xfer-live" data-x="live" hidden>
+          <legend>${esc(tr('progress.title'))}</legend>
+          <div class="xfer-live-line" data-x="live-line">${esc(tr('progress.waiting'))}</div>
+          <div class="progress-mini xfer-live-bar"><div class="fill" data-x="live-bar" style="width:0%"></div></div>
+          <div class="tf-desc" data-x="live-meta"></div>
+          <ul class="xfer-live-done" data-x="live-done"></ul>
+        </fieldset>
       </div>`;
 
     const q = (x) => container.querySelector(`[data-x="${x}"]`);
@@ -169,7 +190,7 @@ const VMTransfer = (() => {
 
     function body() {
       const b = {};
-      ['to', 'namespace', 'name', 'mode', 'source', 'target'].forEach(k => {
+      ['to', 'namespace', 'name', 'mode', 'source', 'target', 'speed', 'bandwidth'].forEach(k => {
         const el = q(k); if (el && el.value) b[k] = el.value.trim();
       });
       const cb = (k) => { const el = q(k); return !!(el && el.checked); };
@@ -215,8 +236,15 @@ const VMTransfer = (() => {
       const fresh = ev && ev.target && ev.target.dataset && ev.target.dataset.x === 'to';
       const seq = ++state.seq;
       const report = q('report');
-      report.innerHTML = `<p class="tf-desc">${esc(tr('transfer.checking'))}</p>`;
-      q('start').disabled = true;
+      // L'ancien rapport reste affiché, estompé : le remplacer par une ligne
+      // faisait remonter « Lancer » pendant le clic (appui sur le bouton,
+      // relâchement à côté), et le clic était perdu.
+      if (report.querySelector('.sto-finding')) report.classList.add('is-checking');
+      else report.innerHTML = `<p class="tf-desc">${esc(tr('transfer.checking'))}</p>`;
+      // « Lancer » n'est PAS grisé pendant qu'un contrôle se refait : quitter
+      // un champ pour cliquer dessus relance le contrôle (événement change),
+      // et un bouton grisé à cet instant perd le clic. Le script refait le
+      // contrôle avant d'agir et refuse ce qui bloque : aucun risque.
       const b = body();
       if (fresh) { b.networks = {}; b.storage_classes = {}; }
       try {
@@ -242,6 +270,7 @@ const VMTransfer = (() => {
           });
         }
         report.innerHTML = reportHtml(d);
+        report.classList.remove('is-checking');
         const mode = q('mode');
         if (mode) {
           const short = mode.querySelector('option[value="short"]');
@@ -252,6 +281,7 @@ const VMTransfer = (() => {
       } catch (e) {
         if (seq !== state.seq) return;
         report.innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(tr('transfer.error', { msg: e.message }))}</div></div>`;
+        report.classList.remove('is-checking');
       }
     }
 
@@ -269,10 +299,63 @@ const VMTransfer = (() => {
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
         fb.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('transfer.started', { id: d.action_id }))}</span>`;
+        follow(d.action_id);
       } catch (e) {
         fb.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('transfer.error', { msg: e.message }))}</span>`;
         q('start').disabled = false;
       }
+    }
+
+    // Suivi en direct de l'action lancée : phase en cours, quantités, débit,
+    // temps restant ; les phases finies gardent leur bilan.
+    function follow(actionId) {
+      const box = q('live');
+      box.hidden = false;
+      const phases = {};
+      let lastStep = '';
+      const draw = (cur) => {
+        if (cur) {
+          q('live-line').textContent = XferProgress.text(cur);
+          q('live-bar').style.width = XferProgress.pct(cur) + '%';
+          const meta = [tr('progress.elapsed', { t: XferProgress.duration(cur.elapsed) })];
+          const n = XferProgress.note(cur);
+          if (n) meta.push(n);
+          if (lastStep) meta.push(lastStep);
+          q('live-meta').textContent = meta.join(' · ');
+        }
+        q('live-done').innerHTML = Object.values(phases).filter(p => p.final)
+          .map(p => `<li>${Icons.svg('ok', { size: 12 })} ${esc(XferProgress.text(p))}</li>`).join('');
+      };
+      if (!window.SSEReconnect) return;
+      const es = SSEReconnect.connect(`/api/stream/${enc(actionId)}`, {
+        on: {
+          progress: (e) => {
+            const snap = JSON.parse(e.data);
+            phases[snap.phase] = snap;
+            draw(snap);
+          },
+          step: (e) => {
+            const ev = JSON.parse(e.data);
+            if (ev.message) lastStep = ev.message;
+          },
+          end: (e) => {
+            let d = {};
+            try { d = JSON.parse(e.data); } catch (_) { /* fin sans détail */ }
+            Object.values(d.progress || {}).forEach(p => { phases[p.phase] = p; });
+            draw(null);
+            const line = q('live-line');
+            if (d.status === 'done') {
+              line.textContent = tr('progress.finished');
+              q('live-bar').style.width = '100%';
+            } else if (d.status === 'cancelled') {
+              line.textContent = tr('progress.cancelled');
+            } else {
+              line.textContent = tr('progress.failed', { msg: d.error_summary || d.status || '?' });
+            }
+            es.close();
+          },
+        },
+      });
     }
 
     container.querySelectorAll('select[data-x], input[data-x]').forEach(el => {

@@ -91,6 +91,8 @@ const Dock = (() => {
   }
 
   const liveSteps = {};   // run_id -> {step_id, status, message, pct}
+  // v1.46.0 : progression d'un transfert (débit, temps restant, quantités)
+  const liveProgress = {};   // run_id -> dernier point publié
   const liveLogs  = {};   // run_id -> [recent events as strings]
   const expanded  = new Set();   // run_ids currently showing details
   const LOG_BUFFER_SIZE = 80;
@@ -214,6 +216,7 @@ const Dock = (() => {
         activeSSE[id].close();
         delete activeSSE[id];
         delete liveSteps[id];
+      delete liveProgress[id];
       }
     });
 
@@ -242,6 +245,10 @@ const Dock = (() => {
               liveSteps[a.id] = { step_id: ev.step_id, status: ev.status, message: ev.message, pct };
               push(`[step] ${ev.step_id} → ${ev.status}${ev.message ? ' — ' + ev.message : ''}`,
                    ev.status === 'done' ? 'ok' : ev.status === 'error' ? 'err' : 'info');
+              updateCard(a.id);
+            },
+            progress: (e) => {
+              liveProgress[a.id] = JSON.parse(e.data);
               updateCard(a.id);
             },
             log: (e) => {
@@ -278,6 +285,7 @@ const Dock = (() => {
       }
 
       const live = liveSteps[a.id] || { step_id: '–', status: 'running', message: '', pct: 5 };
+      if (a.progress_current && !liveProgress[a.id]) liveProgress[a.id] = a.progress_current;
       const card = document.createElement('div');
       card.className = 'dock-action-card'
                      + (expanded.has(a.id) ? ' expanded' : '')
@@ -317,6 +325,8 @@ const Dock = (() => {
               <span class="started" title="${tr('dock.startedTip', 'started')}">${startedHuman}</span>
               <span class="elapsed"></span>
             </div>
+            ${isRunning && liveProgress[a.id] && window.XferProgress
+              ? `<div class="xfer-dock-line">${escapeHtml(XferProgress.text(liveProgress[a.id]))}</div>` : ''}
           </div>
           <div class="step-msg" title="${stepTitle}">${stepText}</div>
           <div class="progress-mini"><div class="fill" style="width:${pctValue}%"></div></div>
@@ -409,15 +419,27 @@ const Dock = (() => {
     // Freeze the summary line once the action is finished: the next poll() will
     // rebuild the card with the proper "✓ completed" / "✗ exit N" text.
     if (card.classList.contains('state-done') || card.classList.contains('state-error')) return;
-    const live = liveSteps[runId];
-    if (!live) return;
+    const live = liveSteps[runId] || { step_id: '', message: '', pct: 0 };
     const msgEl = card.querySelector('.step-msg');
     const fillEl = card.querySelector('.progress-mini .fill');
-    if (msgEl) {
+    if (msgEl && liveSteps[runId]) {
       msgEl.textContent = live.step_id + (live.message ? ' — ' + live.message : '');
       msgEl.title = live.step_id;
     }
     if (fillEl) fillEl.style.width = live.pct + '%';
+    // un transfert : la barre suit la phase en cours, et une ligne dit les
+    // quantités, le débit et le temps restant
+    const prog = liveProgress[runId];
+    if (prog && window.XferProgress) {
+      if (fillEl) fillEl.style.width = XferProgress.pct(prog) + '%';
+      let line = card.querySelector('.xfer-dock-line');
+      if (!line) {
+        line = document.createElement('div');
+        line.className = 'xfer-dock-line';
+        card.querySelector('.dock-action-summary .info')?.appendChild(line);
+      }
+      line.textContent = XferProgress.text(prog);
+    }
   }
 
   function init() {
