@@ -29,6 +29,7 @@ class _Entry:
         self.hits = 0
         self.sent = 0
         self.aborted = 0
+        self.errors = 0
         self.error = None
 
 
@@ -103,6 +104,7 @@ class DiskServer:
                             break
                         except Exception as e:      # noqa: BLE001
                             entry.error = f"{type(e).__name__}: {e}"
+                            entry.errors += 1
                             break
                         if not chunk:
                             continue
@@ -180,6 +182,10 @@ class DiskServer:
     def aborted(self, path):
         e = self._get(path)
         return e.aborted if e else 0
+
+    def errors(self, path):
+        e = self._get(path)
+        return e.errors if e else 0
 
     def error(self, path):
         e = self._get(path)

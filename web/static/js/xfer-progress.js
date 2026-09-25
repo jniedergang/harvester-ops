@@ -75,6 +75,9 @@ const XferProgress = (() => {
     const parts = [s];
     if (snap.rate != null) parts.push(`${bytes(snap.rate)}/s`);
     if (snap.final) parts.push(tr('progress.took', { t: duration(snap.elapsed) }));
+    // tout est parti mais la cible n'a pas fini d'écrire (vécu : CDI à 99 %
+    // pendant cinq minutes) : le dire, plutôt qu'une barre pleine muette
+    else if (snap.total && (snap.done || 0) >= snap.total) parts.push(tr('progress.writing'));
     else if (snap.eta != null) parts.push(tr('progress.left', { t: duration(snap.eta) }));
     return parts.join(' · ');
   }

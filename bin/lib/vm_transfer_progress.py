@@ -120,7 +120,9 @@ def human(snap):
         parts[0] += f" ({fmt_bytes(snap['wire'])} sent)"
     if snap.get("rate") is not None:
         parts.append(f"{fmt_bytes(snap['rate'])}/s")
-    if snap.get("eta") is not None and not snap.get("final"):
+    if not snap.get("final") and total and snap["done"] >= total:
+        parts.append("target still writing")
+    elif snap.get("eta") is not None and not snap.get("final"):
         parts.append(f"{fmt_duration(snap['eta'])} left")
     return ", ".join(parts)
 

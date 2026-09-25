@@ -919,3 +919,93 @@ def test_boost_leaves_a_higher_value_alone(env):
     ctx = e.ctx(request(boost=True))
     run.run_backup(ctx)
     assert not [c for c in e.src.calls if c[:2] == ("patch", run.K_LH_SETTING)]
+
+
+# ---------------------------------------------------------------------------
+# Coupures passagères (v1.46.0, vécu sur le banc : la VIP de harvlab a
+# décroché pendant un téléchargement, « no route to host »)
+# ---------------------------------------------------------------------------
+
+def test_wait_for_rides_out_a_transient_api_error(env):
+    e = env()
+    ctx = e.ctx(request())
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("Unable to connect to the server: dial tcp 172.16.2.60:6443: "
+                               "connect: no route to host")
+        return True
+    run.wait_for(ctx, "x", "thing", fn, 600)
+    assert calls["n"] == 3
+    assert any("API unreachable" in ev[2] for ev in e.events)
+
+
+def test_wait_for_still_raises_a_real_error(env):
+    e = env()
+    ctx = e.ctx(request())
+
+    def fn():
+        raise RuntimeError("admission webhook denied the request")
+    with pytest.raises(RuntimeError):
+        run.wait_for(ctx, "x", "thing", fn, 600)
+
+
+def test_an_archive_disk_broken_midway_is_written_again(env, tmp_path):
+    e = env(shared=False)
+    orig = e.src.raw_stream
+    state = {"n": 0}
+
+    def flaky(path):
+        state["n"] += 1
+        it = orig(path)
+        yield next(it)
+        if state["n"] == 1:
+            raise RuntimeError("Unable to connect to the server: no route to host")
+        yield from it
+    e.src.raw_stream = flaky
+    ctx = e.ctx(request(kind="export"))
+    path = tmp_path / "a.hvx"
+    run.run_export(ctx, vt.ArchiveWriter(path), "harv-rep1")
+    r = vt.ArchiveReader(path)
+    assert r.complete and r.verify() == []
+    with r.open_member("disks/disk-0.raw.gz") as f:
+        assert gzip.decompress(f.read()) == b"disk-content-of-xfer-t1-disk-0" * 1000
+    # compté une seule fois
+    assert finals(e, "download")[0]["done"] == len(b"disk-content-of-xfer-t1-disk-0" * 1000)
+    assert any("again" in ev[2] for ev in e.events)
+
+
+def test_a_source_stream_broken_once_is_served_again(env):
+    """Copie directe : le flux de la source casse ; CDI redemande le disque
+    (le faux CDI recommence au bout de 30 s) et on le resert depuis le début."""
+    e = env(shared=False)
+    orig = e.src.raw_stream
+    state = {"n": 0}
+
+    def flaky(path):
+        state["n"] += 1
+        it = orig(path)
+        yield next(it)
+        if state["n"] == 2:                 # la vraie requête, après la sonde
+            raise RuntimeError("Unable to connect to the server: no route to host")
+        yield from it
+    e.src.raw_stream = flaky
+    ctx = e.ctx(request(), serve=True)
+    run.run_direct(ctx, "harv-rep1")
+    pvc = e.dst.objs[(run.K_PVC, "default", "leap156-disk-0-t1")]
+    assert pvc["data"] == b"disk-content-of-xfer-t1-disk-0" * 1000
+
+
+def test_a_source_that_keeps_breaking_fails_the_transfer(env):
+    e = env(shared=False)
+
+    def broken(path):
+        yield gzip.compress(b"x")[:5]
+        raise RuntimeError("Unable to connect to the server: no route to host")
+    e.src.raw_stream = broken
+    ctx = e.ctx(request(), serve=True)
+    with pytest.raises(run.TransferError) as ei:
+        run.run_direct(ctx, "harv-rep1")
+    assert "source stream failed" in str(ei.value)

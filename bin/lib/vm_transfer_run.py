@@ -121,14 +121,32 @@ class Ctx:
 # Attente et petites opérations
 # ---------------------------------------------------------------------------
 
+# Erreurs d'une API momentanément injoignable : vécu sur le banc, la VIP
+# d'un cluster a décroché quelques secondes pendant un long transfert.
+_TRANSIENT = ("Unable to connect to the server", "connection refused", "no route to host",
+              "i/o timeout", "ServiceUnavailable", "TLS handshake timeout",
+              "connection reset by peer", "EOF", "the server is currently unable")
+
+
+def transient(e):
+    msg = str(e)
+    return any(t in msg for t in _TRANSIENT)
+
+
 def wait_for(ctx, sid, what, fn, timeout, every=5):
     """Attend que `fn()` rende True. Une chaîne est une progression (émise
     quand elle change, pas à chaque tour : le journal d'une action est
-    borné), un `Fail` un échec définitif."""
+    borné), un `Fail` un échec définitif. Une API momentanément injoignable
+    n'arrête pas l'attente : on réessaie jusqu'au délai."""
     deadline = ctx.now() + timeout
     last = None
     while True:
-        r = fn()
+        try:
+            r = fn()
+        except Exception as e:                  # noqa: BLE001
+            if not transient(e):
+                raise
+            r = f"API unreachable, retrying ({str(e)[:120]})"
         if r is True:
             return
         if isinstance(r, Fail):
@@ -517,7 +535,7 @@ def export_images(ctx, inv, running, export_class):
     return exported
 
 
-def image_stream(ctx, ns, img, attempts=3):
+def image_stream(ctx, ns, img, attempts=5):
     """Le téléchargement d'une image, repris s'il est refusé AVANT son
     premier octet. Vécu sur harvlab2 : le proxy de l'API a répondu une fois
     « ServiceUnavailable ... tls: unrecognized name », puis a servi le même
@@ -566,8 +584,24 @@ def write_archive(ctx, writer, vm, inv, secrets, exported, source_version=""):
                        items_total=len(exported))
     for i, (d, img) in enumerate(exported):
         prog.update(prog.done, item=d["volume"], items_done=i)
-        writer.add_stream(f"disks/{d['volume']}.raw.gz",
-                          _counted(image_stream(ctx, req["vm_ns"], img), prog))
+        for attempt in range(1, 4):
+            # un disque coupé en cours de route est réécrit depuis le début,
+            # au même endroit de l'archive (vécu : la VIP de la source a
+            # décroché pendant un téléchargement)
+            pos, before = writer.f.tell(), (prog.done, prog.wire)
+            try:
+                writer.add_stream(f"disks/{d['volume']}.raw.gz",
+                                  _counted(image_stream(ctx, req["vm_ns"], img), prog))
+                break
+            except Exception as e:              # noqa: BLE001
+                if attempt == 3 or not transient(e):
+                    raise
+                writer.f.seek(pos)
+                writer.f.truncate()
+                prog.update(before[0], wire=before[1])
+                ctx.emit("download", "running",
+                         f"{d['volume']}: download broke ({str(e)[:120]}), starting it again")
+                ctx.sleep(15 * attempt)
     prog.update(prog.done, items_done=len(exported))
     writer.close()
     _close(ctx, "download", prog)
@@ -615,6 +649,7 @@ def import_disks(ctx, disks, sources):
                     items_done=len(finished))
 
     claims, published = {}, []
+    broken = {}                          # chemin -> coupures déjà signalées
     batch = int(req.get("parallel") or 0) or len(disks)
     try:
         for start in range(0, len(disks), batch):
@@ -640,9 +675,17 @@ def import_disks(ctx, disks, sources):
                         continue
                     dv = ctx.dst.get(K_DV, ns, claim) or {}
                     phase = (dv.get("status") or {}).get("phase") or ""
-                    err = ctx.server.error(path)
-                    if err:
-                        return Fail(f"source stream failed: {err}")
+                    # une coupure du flux de la source n'est pas fatale : CDI
+                    # redemande le disque, et on le resert depuis le début ;
+                    # trois coupures, en revanche, arrêtent le transfert
+                    errs = ctx.server.errors(path)
+                    if errs >= 3:
+                        return Fail(f"source stream failed: {ctx.server.error(path)}")
+                    if errs > broken.get(path, 0):
+                        broken[path] = errs
+                        ctx.emit("import", "running",
+                                 f"{d['volume']}: source stream broke ({ctx.server.error(path)}), "
+                                 "the target fetches it again")
                     if phase == "Succeeded":
                         finished.add(d["volume"])
                         # CDI ne ramasse pas le DataVolume, et le volume lui

@@ -157,3 +157,13 @@ def test_gzip_counter_never_breaks_a_transfer():
     assert c.feed(b"not gzip at all") == 15
     assert c.feed(b"more") == 4
     assert c.raw == 19 and c.wire == 19
+
+
+def test_all_sent_but_not_finished_says_the_target_is_writing():
+    """Relevé sur le banc : CDI a reçu tous les octets, puis est resté cinq
+    minutes à 99 % à écrire. Une barre pleine sans temps restant ferait
+    croire à un blocage."""
+    snap = {"phase": "import", "item": None, "done": 4 * GIB, "total": 4 * GIB, "wire": 4 * GIB,
+            "rate": 0.0, "eta": None, "elapsed": 90, "items_done": 1, "items_total": 2,
+            "final": False}
+    assert vp.human(snap).endswith("target still writing")
