@@ -311,8 +311,10 @@ const VMTransfer = (() => {
     function follow(actionId) {
       const box = q('live');
       box.hidden = false;
+      // la fenêtre ne défilait pas vers le suivi : il restait sous le bord
+      // (vu sur la capture d'un vrai transfert)
+      box.scrollIntoView({ block: 'nearest' });
       const phases = {};
-      let lastStep = '';
       const draw = (cur) => {
         if (cur) {
           q('live-line').textContent = XferProgress.text(cur);
@@ -320,7 +322,6 @@ const VMTransfer = (() => {
           const meta = [tr('progress.elapsed', { t: XferProgress.duration(cur.elapsed) })];
           const n = XferProgress.note(cur);
           if (n) meta.push(n);
-          if (lastStep) meta.push(lastStep);
           q('live-meta').textContent = meta.join(' · ');
         }
         q('live-done').innerHTML = Object.values(phases).filter(p => p.final)
@@ -333,10 +334,6 @@ const VMTransfer = (() => {
             const snap = JSON.parse(e.data);
             phases[snap.phase] = snap;
             draw(snap);
-          },
-          step: (e) => {
-            const ev = JSON.parse(e.data);
-            if (ev.message) lastStep = ev.message;
           },
           end: (e) => {
             let d = {};

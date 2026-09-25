@@ -98,12 +98,16 @@ def test_the_live_block_shows_amounts_rate_and_time_left(page_fr):
     pane.locator('[data-x="start"]').click()
     live = pane.locator('[data-x="live"]')
     expect(live).to_be_visible(timeout=5000)
+    # la fenêtre défile vers le suivi au lancement
+    expect(live).to_be_in_viewport()
     line = live.locator('[data-x="live-line"]')
     expect(line).to_contain_text("Import disk-0 : 3,2 / 10,0 Gio", timeout=5000)
     expect(line).to_contain_text("512,0 Mio transmis")
     expect(line).to_contain_text("85,0 Mio/s")
     expect(line).to_contain_text("reste 1 min 30 s")
     expect(live.locator('[data-x="live-meta"]')).to_contain_text("écoulé 40 s")
+    # pas de message d'étape du moteur (en anglais) dans la ligne d'état
+    assert "importing" not in live.locator('[data-x="live-meta"]').inner_text()
     # la phase finie garde son bilan
     expect(live.locator('[data-x="live-done"] li')).to_contain_text("Gel des disques : 10,0 / 10,0 Gio")
     bar = live.locator('[data-x="live-bar"]').get_attribute("style")
@@ -129,3 +133,6 @@ def test_the_dock_shows_the_transfer_progress(context, flask_server):
     expect(card.locator(".xfer-dock-line")).to_contain_text(
         "Import disk-0: 3.2 / 10.0 GiB", timeout=10000)
     expect(card.locator(".xfer-dock-line")).to_contain_text("1 min 30 s left")
+    # la barre suit la phase (32 %), y compris après le rafraîchissement de la carte
+    page.wait_for_timeout(3500)
+    assert "width: 32%" in card.locator(".progress-mini .fill").get_attribute("style")

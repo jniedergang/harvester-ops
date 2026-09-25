@@ -90,6 +90,10 @@ def test_finish_always_emits_and_sums_up():
     n = len(out)
     res = p.finish()
     assert len(out) == n + 1 and out[-1]["final"] is True and out[-1]["eta"] == 0
+    # le point final porte le débit MOYEN de la phase (vécu : un bilan de
+    # sauvegarde affichait le débit de ses 20 dernières secondes, 7 Mio/s
+    # au lieu de 48)
+    assert out[-1]["rate"] == GIB / 2
     assert res == {"done": GIB, "wire": 20 * MIB, "elapsed": 2.0, "rate": GIB / 2}
     s = vp.summary("download", res)
     assert s == "download: 1.0 GiB (20.0 MiB sent) in 2 s, 512.0 MiB/s average"
@@ -167,3 +171,20 @@ def test_all_sent_but_not_finished_says_the_target_is_writing():
             "rate": 0.0, "eta": None, "elapsed": 90, "items_done": 1, "items_total": 2,
             "final": False}
     assert vp.human(snap).endswith("target still writing")
+
+
+def test_the_final_point_carries_the_average_rate():
+    """Vécu en réel : le bilan d'une sauvegarde de 4 Gio en 1 min 25 s
+    affichait 7,4 Mio/s, le débit de ses 20 dernières secondes (la fin
+    ralentit), au lieu des 48 Mio/s de moyenne."""
+    p, c, out = make(total=4 * GIB)
+    for _ in range(30):
+        c.t += 2
+        p.update(p.done + 128 * MIB)            # 64 Mio/s pendant 60 s
+    for _ in range(15):
+        c.t += 2
+        p.update(p.done + 2 * MIB)              # puis presque rien
+    p.finish()
+    avg = p.done / 90
+    assert abs(out[-1]["rate"] - avg) < 1
+    assert out[-2]["rate"] < avg / 10          # le point courant, lui, suit la fin

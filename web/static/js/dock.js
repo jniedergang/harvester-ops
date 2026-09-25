@@ -301,7 +301,11 @@ const Dock = (() => {
       const endedHuman   = a.ended_at ? new Date(a.ended_at * 1000).toLocaleTimeString() : '';
 
       // Final progress on done state
-      const pctValue = isRunning ? live.pct : 100;
+      // un transfert : la barre suit la phase en cours, pas l'étape (sinon
+      // elle retombait à chaque rafraîchissement de la carte)
+      const pctValue = isRunning
+        ? (liveProgress[a.id] && window.XferProgress ? XferProgress.pct(liveProgress[a.id]) : live.pct)
+        : 100;
       // v1.6.5 : une erreur montre POURQUOI (stderr kubectl/script), pas
       // seulement "exit 1" — le message complet reste lisible au survol.
       const errSuffix = (!isRunning && !isDone && a.error_summary)

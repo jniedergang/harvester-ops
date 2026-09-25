@@ -71,7 +71,13 @@ class Progress:
         return max(0.0, (self.done - d0) / dt)
 
     def snapshot(self, final=False):
-        rate = self._rate()
+        if final:
+            # un bilan donne le débit moyen de la phase, pas celui de ses
+            # dernières secondes
+            elapsed = self.now() - self.start
+            rate = (self.done / elapsed) if elapsed > 0 else None
+        else:
+            rate = self._rate()
         remaining = max(0, self.total - self.done)
         if final:
             eta = 0
