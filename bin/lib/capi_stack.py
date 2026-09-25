@@ -107,13 +107,22 @@ def stack_status(kube, wanted=()):
     states = [provider_state(p) for p in providers]
     out["core"] = next((s for s in states if s["type"] == "core"), None)
     out["providers"] = [s for s in states if s["type"] != "core"]
+    out["optional"] = []
     for w in wanted or []:
         got = next((s for s in out["providers"]
                     if s["name"] == w["name"] and s["type"] == w["type"]), None)
+        gap = None
         if got is None or not got["ready"]:
-            out["missing"].append(f"{w['type']}/{w['name']}")
+            gap = f"{w['type']}/{w['name']}"
         elif w.get("version") and got["version"] != w["version"]:
-            out["missing"].append(f"{w['type']}/{w['name']} {w['version']} (installed {got['version']})")
+            gap = f"{w['type']}/{w['name']} {w['version']} (installed {got['version']})"
+        if w.get("optional"):
+            # v1.52.0 : un fournisseur facultatif (CAAPH, les services) ne
+            # bloque pas la création de clusters ; il est dit à part.
+            out["optional"].append({"provider": f"{w['type']}/{w['name']}", "version": w.get("version"),
+                                    "ready": gap is None, "gap": gap})
+        elif gap:
+            out["missing"].append(gap)
     if not out["turtles"]:
         out["missing"].insert(0, "turtles")
     elif not (out["core"] and out["core"]["ready"]):

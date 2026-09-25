@@ -559,13 +559,46 @@ Cancelling it removes what it created.
   pods that publish a host port (ingress-nginx) do not start. The
   pre-check says so. The openSUSE Leap 15.6 cloud image works as is.
 
+### Services on the created clusters (1.52.0)
+
+The Services tab deploys Helm charts on the clusters created by Cluster
+API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
+
+- **The provider** is in the airgap bundle and installed from the
+  Installation tab with the others. It is optional: without it clusters can
+  still be created, and the Services tab says what is missing.
+- **A catalog ready to use**: a DNS server (CoreDNS with upstream resolvers
+  and local records, reachable on a load balancer address), a test
+  application (podinfo, a page that tells which cluster serves it), and any
+  Helm chart (repository, chart, version, values).
+- **A form** fills in the settings, proposes the tested chart version and
+  shows the values the chart will receive. The pre-check runs as you type:
+  provider missing, cluster unknown, invalid name, namespace, repository or
+  YAML, a version left floating, a service that exists and will be updated.
+- **Deploying** declares a `HelmChartProxy` next to the cluster and labels
+  the `Cluster` so that the service selects it; CAAPH installs the chart,
+  and the action follows the release (one `HelmReleaseProxy` per cluster)
+  until it is ready. **Removing** a service deletes it: CAAPH uninstalls the
+  release from each cluster, and the label goes away.
+- **The service address** is given to the load balancer of the created
+  cluster by the DHCP of the VM network, or taken from a Harvester IP pool.
+  It is announced by **kube-vip**, which CAPHV does not install: the
+  console adds it to every cluster it creates (from the Harvester cloud
+  provider chart, on the control plane nodes), and to an older cluster
+  with its first service; the pre-check says so.
+- **Not yet**: charts and their images come from the Internet (the
+  management cluster fetches the chart, the created cluster pulls the
+  images); serving them from the bundle comes later. DHCP and NTP servers
+  are not in the catalog.
+
 ### Bundles and CLI
 
 - Timestamped airgap bundles with an active marker, inspect, upload,
   download, and a Harvester version compatibility check.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
-  render | create | delete`, each with `--cluster` or `--kubeconfig`;
-  `create` exits 2 when the pre-check blocks. The manifests are rendered by
+  render | create | delete | services | service-check | service-deploy |
+  service-remove`, each with `--cluster` or `--kubeconfig`; `create` and
+  `service-deploy` exit 2 when the pre-check blocks. The manifests are rendered by
   `caphv-generate`, shipped with the console (taken from CAPHV at a fixed
   commit, see `bin/caphv-generate.PROVENANCE`).
 

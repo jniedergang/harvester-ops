@@ -16,7 +16,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 CONF="$SCRIPT_DIR/capi-components.yaml"
-OUT="${1:-$ROOT/dist/capi-bundle.tar.gz}"
+# --output X (annoncé par l'usage) ou le chemin en premier argument
+if [[ "${1:-}" == "--output" ]]; then OUT="${2:?--output needs a path}"; else OUT="${1:-$ROOT/dist/capi-bundle.tar.gz}"; fi
 RUNTIME="${CONTAINER_RUNTIME:-$(command -v podman || command -v docker)}"
 
 [[ -n "$RUNTIME" ]] || { echo "podman or docker required" >&2; exit 1; }

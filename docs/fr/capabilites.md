@@ -643,14 +643,51 @@ le téléchargement du kubeconfig. L'annuler retire ce qu'elle a créé.
   démarrent pas. Le contrôle préalable le signale. L'image cloud openSUSE
   Leap 15.6 fonctionne telle quelle.
 
+### Services sur les clusters créés (1.52.0)
+
+L'onglet Services déploie des charts Helm sur les clusters créés par
+Cluster API, par le fournisseur d'add-ons Helm de Cluster API (CAAPH
+v0.6.4) :
+
+- **Le fournisseur** est dans le paquet airgap et s'installe depuis
+  l'onglet Installation avec les autres. Il est facultatif : sans lui, on
+  crée toujours des clusters, et l'onglet Services dit ce qui manque.
+- **Un catalogue prêt à l'emploi** : un serveur DNS (CoreDNS avec
+  résolveurs amont et enregistrements locaux, joignable sur une adresse de
+  répartiteur de charge), une application témoin (podinfo, une page qui dit
+  quel cluster la sert), et un chart Helm libre (dépôt, chart, version,
+  valeurs).
+- **Un formulaire** remplit les réglages, propose la version de chart
+  essayée et montre les valeurs que recevra le chart. Le contrôle préalable
+  tourne pendant la saisie : fournisseur absent, cluster inconnu, nom,
+  espace de noms, dépôt ou YAML invalides, version laissée libre, service
+  existant qui sera mis à jour.
+- **Déployer** déclare un `HelmChartProxy` à côté du cluster et étiquette
+  le `Cluster` pour que le service le retienne ; CAAPH installe le chart,
+  et l'action suit la release (une `HelmReleaseProxy` par cluster) jusqu'à
+  ce qu'elle soit prête. **Retirer** un service le supprime : CAAPH
+  désinstalle la release de chaque cluster, et l'étiquette disparaît.
+- **L'adresse du service** est donnée au répartiteur de charge du cluster
+  créé par le DHCP du réseau des VMs, ou prise dans un pool d'IP Harvester.
+  Elle est annoncée par **kube-vip**, que CAPHV n'installe pas : la console
+  le pose dans chaque cluster qu'elle crée (repris du chart du fournisseur
+  de cloud Harvester, sur les nœuds du plan de contrôle), et dans un
+  cluster plus ancien avec son premier service ; le contrôle préalable le
+  signale.
+- **Pas encore** : les charts et leurs images viennent d'Internet (le
+  cluster de gestion télécharge le chart, le cluster créé tire les images) ;
+  les servir depuis le paquet viendra ensuite. Les serveurs DHCP et NTP ne
+  sont pas au catalogue.
+
 ### Paquets et CLI
 
 - Paquets airgap horodatés avec marqueur actif, inspection, dépôt,
   téléchargement, et contrôle de compatibilité avec la version de
   Harvester.
 - `harvester-capi status | install | cleanup-legacy | inventory | check |
-  render | create | delete`, chacune avec `--cluster` ou `--kubeconfig` ;
-  `create` sort en 2 quand le contrôle préalable bloque. Les manifestes sont
+  render | create | delete | services | service-check | service-deploy |
+  service-remove`, chacune avec `--cluster` ou `--kubeconfig` ; `create` et
+  `service-deploy` sortent en 2 quand le contrôle préalable bloque. Les manifestes sont
   produits par `caphv-generate`, livré avec la console (repris de CAPHV à
   un commit fixé, voir `bin/caphv-generate.PROVENANCE`).
 

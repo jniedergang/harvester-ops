@@ -4605,3 +4605,16 @@ body.login-page {
 .session-logout { margin-left: 4px; }
 .session-logout[hidden] { display: none; }
 .session-role.via-rancher { border-style: solid; }
+
+/* v1.52.0 : services sur les clusters créés (Cluster API, CAAPH) */
+.svc-catalog { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.svc-card { border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; display: flex;
+  flex-direction: column; gap: 6px; background: var(--bg-card, transparent); }
+.svc-card-title { font-weight: 600; }
+.svc-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: auto; }
+.svc-releases { display: flex; flex-wrap: wrap; gap: 4px; }
+.svc-releases .badge { font-size: 11px; white-space: nowrap; }
+.svc-values { font-family: var(--font-mono); font-size: 11.5px; }
+.svc-preview > summary { cursor: pointer; font-size: 12px; margin-top: 6px; }
+.svc-feedback:empty { display: none; }
+.sto-finding-title .btn { margin-left: 8px; }

@@ -306,3 +306,26 @@ def test_cleanup_dry_run_deletes_nothing():
     assert seen[-1][1] == "done" and "to remove" in seen[-1][2]
     cs.cleanup_legacy(kube, step)
     assert len(kube.deleted) == len(plan)
+
+
+def test_an_optional_provider_does_not_block_and_is_installed(tmp_path):
+    """v1.52.0 : CAAPH (les services) est facultatif : son absence ne rend
+    pas la pile « pas prête » pour créer un cluster, mais elle est dite, et
+    l'installation le pose avec les autres."""
+    d = desc(tmp_path)
+    helm = tmp_path / "turtles" / "helm"
+    helm.mkdir(parents=True)
+    (helm / "components.yaml").write_text("kind: Deployment\n")
+    (helm / "metadata.yaml").write_text("releaseSeries: []\n")
+    d["providers"].append({"key": "helm", "name": "helm", "type": "addon", "namespace": "caaph-system",
+                           "version": "v0.6.4", "optional": True,
+                           "components_path": str(helm / "components.yaml"),
+                           "metadata_path": str(helm / "metadata.yaml"), "image_files": []})
+    kube = FakeKube()
+    cs.install(kube, {"providers": d["providers"][:3]}, steps()[1], sleep=lambda s: None)
+    st = cs.stack_status(kube, d["providers"])
+    assert st["ready"] and st["missing"] == []
+    assert st["optional"] == [{"provider": "addon/helm", "version": "v0.6.4", "ready": False,
+                               "gap": "addon/helm"}]
+    st = cs.install(kube, d, steps()[1], sleep=lambda s: None)
+    assert st["optional"][0]["ready"] and ("CAPIProvider", "caaph-system", "helm") in kube.applied

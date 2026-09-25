@@ -155,3 +155,22 @@ turtles-caphv:
   images:
     - ghcr.io/rancher-sandbox/cluster-api-provider-harvester:v0.10.1
 
+# v1.52.0 (B2) : the Cluster API add-on provider for Helm. Deploys services
+# (Helm charts) on the clusters Cluster API created, through HelmChartProxy
+# objects. Optional: cluster creation does not need it.
+turtles-caaph:
+  version: v0.6.4
+  turtles:
+    key: helm
+    name: helm
+    type: addon
+    namespace: caaph-system
+    optional: true
+  manifests:
+    - name: components
+      url: https://github.com/kubernetes-sigs/cluster-api-addon-provider-helm/releases/download/v0.6.4/addon-components.yaml
+    - name: metadata
+      url: https://github.com/kubernetes-sigs/cluster-api-addon-provider-helm/releases/download/v0.6.4/metadata.yaml
+  images:
+    - registry.k8s.io/cluster-api-helm/cluster-api-helm-controller:v0.6.4
+

@@ -9971,6 +9971,99 @@ def api_kubeovn_delete(cluster, kind, name):
     return jsonify({"action_id": run.id, "name": name, "kind": kind}), 202
 
 
+# ---------------------------------------------------------------------------
+# v1.52.0 (B2) : services sur les clusters créés, par CAAPH (HelmChartProxy)
+# ---------------------------------------------------------------------------
+import capi_services as _sv  # noqa: E402
+
+_CAPI_SERVICES_CACHE = {}      # (cluster, identité) -> (horodatage, réponse)
+
+
+def _capi_service_body():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": "a JSON object is expected"}), 400)
+    try:
+        return _sv.normalize(body), None
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+
+
+@app.route("/api/capi/<cluster>/services")
+@requires_auth
+def api_capi_services(cluster):
+    """Catalogue, services déployés et leur état sur chaque cluster, et si
+    CAAPH est installé. Lecture seule, 5 s de cache par identité."""
+    key = (cluster, (current_cluster_identity() or {}).get("user"), current_user())
+    hit = _CAPI_SERVICES_CACHE.get(key)
+    if hit and request.args.get("fresh") != "1" and time.time() - hit[0] < 5:
+        return jsonify(hit[1])
+    kc = _kubectl_for_cluster(cluster)
+    if kc and _cluster_reachable(kc) is False:
+        return jsonify({"unreachable": True, "caaph": False, "clusters": [],
+                        "catalog": _sv.catalog(), "services": []})
+    cmd, err = _capi_base(cluster, "services")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--json"], timeout=60)
+    if err:
+        return err
+    out = res[0]
+    _CAPI_SERVICES_CACHE[key] = (time.time(), out)
+    return jsonify(out)
+
+
+@app.route("/api/capi/<cluster>/service-check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_capi_service_check(cluster):
+    spec, err = _capi_service_body()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "service-check")
+    if err:
+        return err
+    res, err = _capi_run_json(cmd + ["--spec", "-"], spec=spec, timeout=60)
+    if err:
+        return err
+    return jsonify(res[0])
+
+
+@app.route("/api/capi/<cluster>/service-deploy", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_service_deploy(cluster):
+    """Déploie un service sur un cluster créé : action suivie."""
+    spec, err = _capi_service_body()
+    if err:
+        return err
+    cmd, err = _capi_base(cluster, "service-deploy")
+    if err:
+        return err
+    run, err = _cli_action(cluster, f"capi-service-deploy:{spec['cluster']}:{spec['name']}", cmd,
+                           "harvester-capi", spec=spec,
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": spec["name"], "cluster": spec["cluster"]}), 202
+
+
+@app.route("/api/capi/<cluster>/service/<namespace>/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_capi_service_remove(cluster, namespace, name):
+    """Retire un service : CAAPH désinstalle ses releases."""
+    cmd, err = _capi_base(cluster, "service-remove")
+    if err:
+        return err
+    run, err = _cli_action(cluster, f"capi-service-remove:{namespace}/{name}",
+                           cmd + ["--name", f"{namespace}/{name}"], "harvester-capi",
+                           after=lambda: _CAPI_SERVICES_CACHE.clear())
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": name}), 202
+
+
 @app.route("/api/capi/<cluster>/cluster-create", methods=["POST"])
 @requires_auth
 @_rate_limit("6 per minute")

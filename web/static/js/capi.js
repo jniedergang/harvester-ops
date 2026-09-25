@@ -71,6 +71,13 @@ const CAPI = (() => {
         <td><code>${esc(p.version || '-')}</code></td>
         <td>${esc(p.phase || '')}</td>
         <td class="form-hint">${esc(by(p))}</td>
+      </tr>`).join('') + (st.optional || []).filter(o => !o.ready).map(o => `
+      <tr>
+        <td><span class="badge warn">${Icons.svg('pending', { size: 14 })}</span></td>
+        <td><strong>${esc(o.provider)}</strong></td>
+        <td><code>${esc(o.version || '-')}</code></td>
+        <td>${esc(tr('capi.stack.optionalMissing'))}</td>
+        <td class="form-hint">${esc(tr('capi.stack.optional'))}</td>
       </tr>`).join('');
     const shim = st.shim || {};
     const shimLine = shim.present && shim.ours
@@ -555,6 +562,7 @@ const CAPI = (() => {
   function init() {
     $('#btn-capi-refresh')?.addEventListener('click', refresh);
     $('#btn-capi-k8s-refresh')?.addEventListener('click', refreshK8sClustersPanel);
+    $('#btn-capi-services-refresh')?.addEventListener('click', () => window.CapiServices && CapiServices.refresh(true));
     // Wizard interactions, all delegated.
     document.addEventListener('click', (e) => {
       const det = e.target.closest('.capi-cluster-details');
@@ -683,6 +691,7 @@ const CAPI = (() => {
     try { localStorage.setItem('harvester_ops_capi_subtab', name); } catch {}
     if (name === 'clusters') refreshClustersPanel();
     else if (name === 'k8s') refreshK8sClustersPanel();
+    else if (name === 'services' && window.CapiServices) CapiServices.start();
   }
 
   function initSubtabs() {
@@ -709,7 +718,7 @@ const CAPI = (() => {
         selectAutomationSubtab('capi');
       }
       const savedCapi = localStorage.getItem('harvester_ops_capi_subtab');
-      if (savedCapi && ['install', 'clusters', 'k8s'].includes(savedCapi)) {
+      if (savedCapi && ['install', 'clusters', 'k8s', 'services'].includes(savedCapi)) {
         selectCapiTab(savedCapi);
       }
     } catch {
@@ -899,7 +908,7 @@ const CAPI = (() => {
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh, reactivate };
+  return { init, refresh, reactivate, selectCapiTab };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

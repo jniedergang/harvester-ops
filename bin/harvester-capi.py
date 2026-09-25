@@ -46,6 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 import capi_cluster as cc  # noqa: E402
 import capi_stack as cs  # noqa: E402
+import capi_services as sv  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
@@ -629,6 +630,164 @@ def cmd_delete(args):
     return EXIT_OK
 
 
+# ---------------------------------------------------------------------------
+# v1.52.0 (B2) : services sur les clusters créés (CAAPH, HelmChartProxy)
+# ---------------------------------------------------------------------------
+
+def _caaph_ready(kube):
+    try:
+        provs = [cs.provider_state(p) for p in kube.list(cs.K_CAPIPROVIDER)]
+    except KubeError:
+        return False
+    return any(p["type"] == "addon" and p["name"] == "helm" and p["ready"] for p in provs)
+
+
+def _clusters_without_kube_vip(kube):
+    """Les clusters du fournisseur de cloud Harvester créés avant la v1.52.0 :
+    sans kube-vip, leurs services LoadBalancer n'ont pas d'adresse."""
+    try:
+        have = {c["metadata"].get("namespace") for c in kube.list(cc.K_CRS)
+                if c["metadata"].get("name") == cc.KUBE_VIP_CRS}
+    except KubeError:
+        return []
+    return sorted(f"{c['metadata']['namespace']}/{c['metadata']['name']}"
+                  for c in kube.list(cs.K_CLUSTER)
+                  if (c["metadata"].get("labels") or {}).get("ccm") == "external"
+                  and c["metadata"].get("namespace") not in have)
+
+
+def _ensure_kube_vip(kube, ns, cluster):
+    c = kube.get(cs.K_CLUSTER, ns, cluster) or {}
+    if ((c.get("metadata") or {}).get("labels") or {}).get("ccm") != "external":
+        return
+    if kube.get(cc.K_CRS, ns, cc.KUBE_VIP_CRS) is None:
+        kube.apply(cc.kube_vip_docs(ns))
+        step("lb", "done", f"kube-vip added to {cluster}, so that LoadBalancer services get an address")
+
+
+def _service_facts(kube):
+    clusters = [f"{c['metadata']['namespace']}/{c['metadata']['name']}"
+                for c in kube.list(cs.K_CLUSTER)
+                if c["metadata"].get("namespace") not in ("fleet-local", "fleet-default")]
+    try:
+        hcps = kube.list(sv.K_HCP)
+        hrps = kube.list(sv.K_HRP)
+    except KubeError:
+        hcps, hrps = [], []
+    return {"caaph": _caaph_ready(kube), "clusters": sorted(clusters),
+            "no_lb": _clusters_without_kube_vip(kube),
+            "services": [f"{h['metadata']['namespace']}/{h['metadata']['name']}" for h in hcps],
+            "_hcps": hcps, "_hrps": hrps}
+
+
+def service_spec_from(path):
+    raw = json.load(sys.stdin) if path == "-" else json.loads(Path(path).read_text())
+    return sv.normalize(raw)
+
+
+def cmd_services(args):
+    kube, _, _ = kube_from(args)
+    f = _service_facts(kube)
+    out = {"caaph": f["caaph"], "clusters": f["clusters"], "catalog": sv.catalog(),
+           "services": sv.state(f["_hcps"], f["_hrps"])}
+    print(json.dumps(out) if args.json else json.dumps(out, indent=1))
+    return EXIT_OK
+
+
+def cmd_service_check(args):
+    kube, _, _ = kube_from(args)
+    spec = service_spec_from(args.spec)
+    found = sv.check(spec, _service_facts(kube))
+    blocked = bool(sv.blocking(found))
+    print(json.dumps({"blocked": blocked, "findings": found,
+                      "values": sv.render_values(spec)}))
+    return EXIT_BLOCKED if blocked else EXIT_OK
+
+
+def _release_of(kube, ns, name, cluster):
+    for r in kube.list(sv.K_HRP, ns):
+        owners = [o.get("name") for o in r["metadata"].get("ownerReferences") or []]
+        if name in owners and (r.get("spec") or {}).get("clusterRef", {}).get("name") == cluster:
+            return r
+    return None
+
+
+def cmd_service_deploy(args):
+    """Déclare le service (HelmChartProxy), vise le cluster par son
+    étiquette, et suit l'installation jusqu'à ce que CAAPH la dise prête."""
+    kube, _, _ = kube_from(args)
+    spec = service_spec_from(args.spec)
+    found = sv.check(spec, _service_facts(kube))
+    if sv.blocking(found):
+        for f in sv.blocking(found):
+            step("check", "error", f"{f['code']} {json.dumps(f['facts'])}")
+        return EXIT_BLOCKED
+    ns, _, cluster = spec["cluster"].partition("/")
+    step("check", "done", f"{spec['name']} ({spec['chart']} {spec['version'] or 'latest'}) for {spec['cluster']}")
+    _ensure_kube_vip(kube, ns, cluster)
+    kube.apply([sv.manifest(spec)])
+    kube.patch(cs.K_CLUSTER, ns, cluster, {"metadata": {"labels": {sv.label_of(spec["name"]): "on"}}})
+    step("apply", "done", f"service {spec['name']} declared, cluster {cluster} selected")
+    deadline = time.time() + args.timeout
+    last = None
+    while time.time() < deadline:
+        # Une mise à jour ne se juge qu'une fois lue par CAAPH : le service
+        # dans sa nouvelle version, puis la release refaite. Avant, la release
+        # d'avant, encore prête, faisait finir l'action sans rien attendre.
+        hcp = kube.get(sv.K_HCP, ns, spec["name"]) or {"metadata": {"name": spec["name"], "namespace": ns}}
+        r = _release_of(kube, ns, spec["name"], cluster)
+        st = sv.state([dict(hcp, metadata=dict(hcp["metadata"], name=spec["name"], namespace=ns))],
+                      [r] if r else [])[0]
+        rel = st["releases"][0] if st["releases"] else None
+        if not st["current"]:
+            msg = "waiting for CAAPH to read the service"
+        elif rel is None:
+            msg = "waiting for CAAPH to pick the cluster"
+        else:
+            msg = f"release {rel['status'] or 'pending'} (revision {rel['revision'] or '-'})"
+            if not rel["current"]:
+                msg += ", being updated"
+            elif rel["message"]:
+                msg += f": {rel['message'][:160]}"
+        if msg != last:
+            step("install", "running", msg)
+            last = msg
+        if st["current"] and rel and rel["ready"] and rel["current"]:
+            step("install", "done", f"{spec['name']} installed on {cluster} "
+                                    f"(namespace {spec['namespace']}, revision {rel['revision']})")
+            return EXIT_OK
+        time.sleep(10)
+    step("install", "error", f"not ready after {args.timeout} s: {last}")
+    return EXIT_FAIL
+
+
+def cmd_service_remove(args):
+    """Retire le service : CAAPH désinstalle la release de chaque cluster
+    visé, puis l'étiquette est ôtée."""
+    kube, _, _ = kube_from(args)
+    ns, _, name = args.name.partition("/")
+    hcp = kube.get(sv.K_HCP, ns, name)
+    if hcp is None:
+        step("remove", "error", f"service {ns}/{name} not found")
+        return EXIT_FAIL
+    label = sv.label_of(name)
+    kube.delete(sv.K_HCP, ns, name)
+    step("remove", "running", f"service {ns}/{name} deleted, releases being uninstalled")
+    deadline = time.time() + args.timeout
+    while time.time() < deadline:
+        left = [r for r in kube.list(sv.K_HRP, ns)
+                if name in [o.get("name") for o in r["metadata"].get("ownerReferences") or []]]
+        if not left:
+            break
+        time.sleep(5)
+    for c in kube.list(cs.K_CLUSTER, ns):
+        if ((c["metadata"].get("labels") or {}).get(label)):
+            kube.patch(cs.K_CLUSTER, ns, c["metadata"]["name"],
+                       {"metadata": {"labels": {label: None}}})
+    step("remove", "done", f"service {ns}/{name} removed")
+    return EXIT_OK
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="harvester-capi", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -646,7 +805,11 @@ def main(argv=None):
             ("check", cmd_check, ("spec", "components", "json")),
             ("render", cmd_render, ("spec", "secrets")),
             ("create", cmd_create, ("spec", "components", "json", "dry", "timeout")),
-            ("delete", cmd_delete, ("name", "timeout"))):
+            ("delete", cmd_delete, ("name", "timeout")),
+            ("services", cmd_services, ("json",)),
+            ("service-check", cmd_service_check, ("sspec",)),
+            ("service-deploy", cmd_service_deploy, ("sspec", "timeout")),
+            ("service-remove", cmd_service_remove, ("sname", "timeout"))):
         sp = sub.add_parser(name)
         common(sp)
         sp.set_defaults(fn=fn)
@@ -667,14 +830,22 @@ def main(argv=None):
             sp.add_argument("--no-wait", action="store_true")
             sp.add_argument("--timeout", type=int, default=300)
         if "timeout" in extra:
-            sp.add_argument("--timeout", type=int, default=2400)
+            sp.add_argument("--timeout", type=int,
+                            default=900 if name.startswith("service") else 2400)
             if name == "create":
                 sp.add_argument("--no-wait", action="store_true")
         if "name" in extra:
             sp.add_argument("--name", required=True, help="namespace/name of the cluster")
+        if "sname" in extra:
+            sp.add_argument("--name", required=True, help="namespace/name of the service")
+        if "sspec" in extra:
+            sp.add_argument("--spec", required=True, help="JSON service request, '-' for stdin")
     args = ap.parse_args(argv)
     try:
         return args.fn(args)
+    except ValueError as e:
+        step(args.cmd, "error", str(e)[:300])
+        return EXIT_BLOCKED
     except KubeError as e:
         step(args.cmd, "error", str(e)[:300])
         return EXIT_FAIL

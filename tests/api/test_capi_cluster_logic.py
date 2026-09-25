@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
@@ -125,7 +126,8 @@ def test_harvester_objects_and_references_move_to_v1beta1():
     assert cc.INFRA_OLD not in json.dumps(out)
     assert out[1]["apiVersion"] == cc.INFRA_NEW
     assert out[0]["spec"]["infrastructure"]["ref"]["apiVersion"] == cc.INFRA_NEW
-    assert len(out) == 4                                   # le document vide est écarté
+    # le document vide est écarté ; kube-vip s'ajoute (v1.52.0)
+    assert len([d for d in out if d["metadata"]["name"] not in (cc.KUBE_VIP_CM, cc.KUBE_VIP_CRS)]) == 4
 
 
 def test_no_rancher_import_unless_asked():
@@ -373,3 +375,31 @@ def test_a_cluster_on_its_way_is_not_ready_and_says_why():
             c["status"], c["message"] = "False", "* ControlPlaneAvailable: waiting"
     st = cc.cluster_state(cl, [])
     assert not st["ready"] and "ControlPlaneAvailable" in st["message"]
+
+
+# ---------------------------------------------------------------------------
+# v1.52.0 : kube-vip dans chaque cluster créé.
+#
+# Vu sur harv1 le 26/09/2026 : le fournisseur de cloud Harvester posé par
+# CAPHV demande à kube-vip d'annoncer l'adresse des services LoadBalancer
+# (`kube-vip.io/loadbalancerIPs`), mais CAPHV ne pose pas kube-vip : podinfo
+# est resté sans adresse et sa release a échoué au bout de dix minutes.
+# ---------------------------------------------------------------------------
+def test_created_clusters_carry_kube_vip():
+    docs = [{"apiVersion": "cluster.x-k8s.io/v1beta1", "kind": "Cluster",
+             "metadata": {"name": "web", "namespace": "web", "labels": {"ccm": "external"}},
+             "spec": {"topology": {"variables": []}}}]
+    out = cc.postprocess(docs, {})
+    cm = next(d for d in out if d["kind"] == "ConfigMap" and d["metadata"]["name"] == cc.KUBE_VIP_CM)
+    crs = next(d for d in out if d["kind"] == "ClusterResourceSet")
+    assert cm["metadata"]["namespace"] == crs["metadata"]["namespace"] == "web"
+    assert cm["metadata"]["labels"][cc.GENERATED] == crs["metadata"]["labels"][cc.GENERATED] == "true"
+    assert crs["spec"]["clusterSelector"] == {"matchLabels": {"ccm": "external"}}
+    assert crs["spec"]["resources"] == [{"kind": "ConfigMap", "name": cc.KUBE_VIP_CM}]
+    ds = [d for d in yaml.safe_load_all(cm["data"]["kube-vip.yaml"]) if d and d["kind"] == "DaemonSet"][0]
+    env = {e["name"]: e["value"] for e in ds["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["svc_enable"] == "true" and env["cp_enable"] == "false"
+    assert ds["spec"]["template"]["spec"]["hostNetwork"] is True
+    # une seule fois, même repassé
+    again = cc.postprocess(out, {})
+    assert sum(1 for d in again if d["kind"] == "ClusterResourceSet") == 1

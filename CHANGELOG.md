@@ -4,6 +4,51 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.52.0] - 2026-09-26 - Services on the clusters created by Cluster API
+
+### Added
+- **Services tab** (Automation, Cluster API): deploy Helm charts on the
+  clusters created by Cluster API, through the Cluster API add-on provider
+  for Helm (CAAPH v0.6.4). A catalog ready to use (a DNS server with CoreDNS,
+  the podinfo test application) and any chart from a Helm repository; a
+  form with the tested chart version, the settings, a pre-check as you type
+  and a preview of the values the chart receives; per service, the clusters
+  it runs on with the state and revision of each release; removal.
+- A service is a `HelmChartProxy` next to the cluster, which selects the
+  `Cluster` by a label the console sets; CAAPH installs, upgrades and
+  uninstalls the chart. Deployment and removal are tracked actions.
+- CLI parity: `harvester-capi services | service-check | service-deploy |
+  service-remove`.
+- **kube-vip in the created clusters**: CAPHV installs the Harvester cloud
+  provider but not kube-vip, which announces the address of LoadBalancer
+  services; without it they stayed pending forever. The console adds it to
+  every cluster it creates, and to an older cluster with its first service
+  (the pre-check says so).
+- **CAAPH is in the Cluster API bundle** and installed from the Installation
+  tab with the other providers, as an optional provider: its absence does
+  not block the creation of clusters, and the tab lists it apart.
+
+### Fixed
+- `scripts/bundle-capi.sh` announced `--output` but took the path from its
+  first argument only.
+
+### Known limits
+- When a service of a created cluster goes away in DHCP mode, the Harvester
+  cloud provider leaves its LoadBalancer object on Harvester (it holds no
+  address). CAPHV starts the cloud provider without a cluster name, so these
+  objects cannot be tied to their cluster. Both are to be reported upstream.
+
+### Tests
+- Catalog, pre-check, manifest and state reading (`capi_services`); the CLI
+  subcommands against a fake management cluster (deploy, blocked when CAAPH
+  is missing, a release that never gets ready, removal); the endpoints;
+  an optional provider in the stack status.
+- Real, on harv1: CAAPH installed from the Installation tab, a cluster
+  created from the form, podinfo and CoreDNS deployed from the Services tab
+  (kube-vip added by the console on the way), podinfo answering over HTTP
+  and the DNS over UDP and TCP on their load balancer addresses, an update
+  followed to its new revision, then removal and deletion of the cluster.
+
 ## [1.51.0] - 2026-09-26 - A deliverable ready to use: Cluster API bundle, Terraform provider and OpenTofu inside
 
 ### Added

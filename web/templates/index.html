@@ -398,6 +398,8 @@
                   data-i18n-title="capi.tab.clusters.tip" title="Create downstream RKE2 clusters via the harvester-rke2 ClusterClass"><span class="tab-icon" data-icon="tools"></span> <span data-i18n="capi.tab.clusters">Création de clusters</span></button>
           <button class="sub-tab" data-capi-tab="k8s"
                   data-i18n-title="capi.tab.k8s.tip" title="List + manage the downstream Kubernetes clusters reconciled by CAPHV"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.k8s">Clusters K8S</span></button>
+          <button class="sub-tab" data-capi-tab="services"
+                  data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
         </div>
       </div>
 
@@ -433,6 +435,18 @@
               <button class="btn btn-sm btn-secondary" id="btn-capi-k8s-refresh" data-i18n-title="capi.tip.refreshK8s" title="Reload the list of CAPI-managed clusters">Refresh</button>
             </div>
             <div class="card-body" id="capi-k8s-body">
+              <p class="form-hint" data-i18n="common.loading">Loading…</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="capi-tab-content" data-capi-tab="services">
+          <div class="card">
+            <div class="card-header">
+              <h2><span data-icon="bundle" data-icon-size="18"></span> <span data-i18n="capi.services.title">Services sur les clusters créés</span></h2>
+              <button class="btn btn-sm btn-secondary" id="btn-capi-services-refresh" data-i18n="overview.refresh" data-i18n-title="capi.tip.refreshServices" title="Reload the services and their state">Refresh</button>
+            </div>
+            <div class="card-body" id="capi-services-body">
               <p class="form-hint" data-i18n="common.loading">Loading…</p>
             </div>
           </div>
@@ -831,6 +845,7 @@
 <script src="/static/js/fabric.js"></script>
 <script src="/static/js/netmap.js"></script>
 <script src="/static/js/vpc.js"></script>
+<script src="/static/js/capi-services.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>
 <!-- Yjs notes module (ESM) -->

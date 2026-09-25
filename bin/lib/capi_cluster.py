@@ -13,6 +13,7 @@ Bibliothèque standard seulement : le script tourne sur un hôte airgap.
 """
 
 import copy
+from pathlib import Path
 import ipaddress
 import re
 
@@ -214,6 +215,34 @@ GENERATED_KINDS = (
     "machinehealthchecks.cluster.x-k8s.io",
     "configmaps", "secrets",
 )
+# v1.52.0 : kube-vip dans chaque cluster créé. Le fournisseur de cloud
+# Harvester que CAPHV y pose attend kube-vip pour annoncer l'adresse des
+# services LoadBalancer ; CAPHV ne le pose pas, et sans lui ces services
+# restent sans adresse (vu sur harv1 : podinfo « pending » dix minutes, la
+# release en échec). Même sélecteur que le fournisseur de cloud.
+KUBE_VIP_MANIFEST = Path(__file__).resolve().parent / "kube-vip.yaml"
+KUBE_VIP_CM = "kube-vip-addon"
+KUBE_VIP_CRS = "crs-kube-vip"
+K_CRS = "clusterresourcesets.addons.cluster.x-k8s.io"
+CCM_SELECTOR = {"ccm": "external"}
+
+
+def kube_vip_docs(namespace):
+    """Le ConfigMap qui porte kube-vip et le ClusterResourceSet qui l'applique
+    aux clusters du fournisseur de cloud Harvester de cet espace de noms."""
+    labels = {GENERATED: "true"}
+    return [
+        {"apiVersion": "v1", "kind": "ConfigMap",
+         "metadata": {"name": KUBE_VIP_CM, "namespace": namespace, "labels": labels},
+         "data": {"kube-vip.yaml": KUBE_VIP_MANIFEST.read_text()}},
+        {"apiVersion": "addons.cluster.x-k8s.io/v1beta1", "kind": "ClusterResourceSet",
+         "metadata": {"name": KUBE_VIP_CRS, "namespace": namespace, "labels": dict(labels)},
+         "spec": {"clusterSelector": {"matchLabels": dict(CCM_SELECTOR)},
+                  "resources": [{"kind": "ConfigMap", "name": KUBE_VIP_CM}],
+                  "strategy": "Reconcile"}},
+    ]
+
+
 INFRA_OLD = "infrastructure.cluster.x-k8s.io/v1alpha1"
 INFRA_NEW = "infrastructure.cluster.x-k8s.io/v1beta1"
 
@@ -248,6 +277,8 @@ def postprocess(docs, spec):
       10.43.0.0/16).
     - **Étiquette `GENERATED`** sur tout ce qui n'est ni l'espace de noms ni
       le Cluster, pour que la suppression n'oublie rien.
+    - **kube-vip** (v1.52.0), sans quoi aucun service LoadBalancer du
+      cluster n'obtient d'adresse.
     """
     out = []
     for d in docs:
@@ -276,6 +307,10 @@ def postprocess(docs, spec):
                 d["spec"].setdefault("clusterNetwork", {}).setdefault("services", {})[
                     "cidrBlocks"] = [svc]
         out.append(d)
+    cluster = next((d for d in out if d.get("kind") == "Cluster"), None)
+    have = {(d.get("kind"), (d.get("metadata") or {}).get("name")) for d in out}
+    if cluster and ("ClusterResourceSet", KUBE_VIP_CRS) not in have:
+        out.extend(kube_vip_docs(cluster["metadata"].get("namespace") or "default"))
     return out
 
 
