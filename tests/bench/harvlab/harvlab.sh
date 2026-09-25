@@ -20,6 +20,8 @@
 #   harvlab.sh destroy        supprime VMs et disques (confirmation)
 #   harvlab.sh pci            donne au nœud 3 un IOMMU virtuel, une e1000e et
 #                             une igb (SR-IOV) pour le passthrough PCI
+#   harvlab.sh tidy           éjecte l'ISO, active le discard, lance fstrim :
+#                             rend à node2 la place que Longhorn a libérée
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -182,6 +184,10 @@ cmd_install() {
         say "installation de $name ($(ip_of "$n"))"
         # --wait -1 : virt-install enchaîne lui-même la fin de l'installation
         # (arrêt) et le premier démarrage sur le disque.
+        # discard=unmap : sans lui, le qcow2 garde pour toujours tout ce que
+        # Longhorn a écrit un jour, même effacé (vécu le 25/09/2026 : le disque
+        # de node2 plein à 100 %, toutes les VMs en pause). Un `fstrim -a` dans
+        # le nœud rend alors la place (voir `tidy`).
         # --check disk_size=off : le qcow2 est creux, virt-install refusait
         # pourtant un disque plus grand que la place libre (vécu le
         # 24/09/2026 avec 119 Go libres pour 250 Go annoncés).
@@ -193,7 +199,7 @@ cmd_install() {
             virt-install --name $name --memory $MEMORY_MB --vcpus $VCPUS \
             --cpu host-passthrough --machine q35 --osinfo detect=on,require=off \
             --boot uefi,firmware.feature0.name=secure-boot,firmware.feature0.enabled=no \
-            --disk path=$DIR/$name.qcow2,size=$DISK_GB,format=qcow2,bus=virtio,cache=unsafe \
+            --disk path=$DIR/$name.qcow2,size=$DISK_GB,format=qcow2,bus=virtio,cache=unsafe,discard=unmap \
             --check disk_size=off \
             --disk path=$ISO_DIR/$ISO,device=cdrom,bus=sata,readonly=on \
             --network bridge=br0,model=virtio,mac=$(mac_of "$n") \
@@ -246,6 +252,21 @@ cmd_destroy() {
     say "VMs et disques supprimés (l'ISO reste dans $DIR)"
 }
 
+# Après l'installation : l'ISO n'est plus utile au nœud (QEMU la gardait
+# ouverte, et la supprimer ne rendait pas sa place), le discard rend au disque
+# de node2 ce que Longhorn efface, et `fstrim` le fait tout de suite.
+cmd_tidy() {
+    local n name
+    for n in $NODES; do
+        name="$(name_of "$n")"
+        on_node2 "sudo virsh change-media $name sda --eject --force --live --config >/dev/null 2>&1; \
+            sudo virt-xml $name --edit target=vda --disk driver.discard=unmap >/dev/null 2>&1" || true
+        ssh -o BatchMode=yes -o ConnectTimeout=10 "rancher@$(ip_of "$n")" "sudo fstrim -a" >/dev/null 2>&1 || true
+    done
+    on_node2 "df -h /var/lib/libvirt/images | tail -1"
+    say "ISO éjectée, discard actif (effectif au prochain démarrage), fstrim fait"
+}
+
 # Passthrough PCI et SR-IOV sur le nœud 3, avec du matériel émulé. Le nœud
 # doit être vidé avant (mise en maintenance depuis la console) : il est
 # arrêté, modifié puis redémarré. Idempotent.
@@ -276,5 +297,6 @@ case "${1:-}" in
     start)      cmd_start ;;
     destroy)    cmd_destroy ;;
     pci)        cmd_pci ;;
+    tidy)       cmd_tidy ;;
     *) sed -n '2,/^set -euo/p' "$0" | sed '$d'; exit 1 ;;
 esac

@@ -65,7 +65,7 @@ TIMEOUTS = {
     # plusieurs gigaoctets : le délai est large, la relance fréquente
     "stop": 600, "start": 900, "backup": 6 * 3600, "sync": 2 * 3600, "sync_nudge": 20,
     "restore": 6 * 3600, "export": 6 * 3600, "import": 12 * 3600,
-    "first_hit": 300, "delete": 600,
+    "first_hit": 300, "delete": 600, "undo": 300,
 }
 
 
@@ -260,6 +260,25 @@ def delete_quiet(kube, kind, ns, name, cascade=None):
         return True
     except Exception:                          # noqa: BLE001
         return False
+
+
+def _undo_delete(ctx, kube, kind, ns, name, cascade=None):
+    """Supprime pour un retour arrière : réessaie tant que l'API est
+    momentanément injoignable (vécu : le retour arrière d'un transfert
+    interrompu par une API tombée échouait en silence). Rend False si la
+    ressource n'a pas pu être supprimée."""
+    deadline = ctx.now() + ctx.timeouts["undo"]
+    while True:
+        try:
+            kube.delete(kind, ns, name, cascade=cascade)
+            return True
+        except Exception as e:                  # noqa: BLE001
+            msg = str(e)
+            if "NotFound" in msg or "not found" in msg:
+                return True
+            if not transient(e) or ctx.now() >= deadline:
+                return False
+            ctx.sleep(10)
 
 
 def ensure_namespace(ctx, side, ns):
@@ -909,21 +928,28 @@ def rollback(ctx):
         # la VM et les volumes que la restauration a créés : leur nom était
         # libre au contrôle, ils sont donc à nous. La VM d'abord : Harvester
         # refuse de supprimer la restauration tant qu'elle existe
-        if delete_quiet(ctx.dst, K_VM, ns, name):
+        if _undo_delete(ctx, ctx.dst, K_VM, ns, name):
             try:
                 wait_for(ctx, "rollback", "restored VM deleted",
                          lambda: ctx.dst.get(K_VM, ns, name) is None, ctx.timeouts["delete"])
             except TransferError as e:
                 ctx.emit("rollback", "error", str(e))
-        delete_quiet(ctx.dst, K_RESTORE, *ctx.restore)
+        _undo_delete(ctx, ctx.dst, K_RESTORE, *ctx.restore)
         ctx.forget("dst", K_RESTORE, *ctx.restore)
         for rs in ((r.get("status") or {}).get("restores") or []):
             pvc = ((rs.get("persistentVolumeClaimSpec") or {}).get("metadata") or {}).get("name")
             if pvc:
-                delete_quiet(ctx.dst, K_PVC, ns, pvc)
+                _undo_delete(ctx, ctx.dst, K_PVC, ns, pvc)
+    left = []
     for side, kind, ns, name in reversed(list(ctx.created)):
-        delete_quiet(ctx.kube(side), kind, ns, name)
+        if not _undo_delete(ctx, ctx.kube(side), kind, ns, name):
+            cluster = ctx.source_cluster if side == "src" else ctx.target_cluster
+            left.append(f"{kind} {ns + '/' if ns else ''}{name} ({cluster or side})")
     ctx.created.clear()
+    if left:
+        # dire exactement ce qui reste : tout porte l'étiquette du transfert
+        ctx.emit("rollback", "error", "could not undo, remove by hand (label "
+                 f"{vt.TRANSFER_LABEL}={ctx.tid}): " + "; ".join(left))
     if ctx.source_stopped:
         try:
             start_vm(ctx, ctx.src, ctx.req["vm_ns"], ctx.req["vm_name"],

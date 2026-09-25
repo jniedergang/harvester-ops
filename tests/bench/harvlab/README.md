@@ -106,3 +106,14 @@ kubectl -n longhorn-system patch settings.longhorn.io \
 
 Mesuré le 22/09/2026 : maintenance d'un nœud portant 3 VMs, 196 s au lieu
 de 452 s, sans abandon.
+
+
+## Disque de node2 : ne pas le laisser se remplir
+
+Vécu le 25/09/2026 : le disque des images de node2 s'est rempli à 100 %,
+et QEMU a mis en pause toutes les VMs des bancs. Un qcow2 garde tout ce
+que Longhorn a écrit un jour dans le nœud, même effacé, tant que le discard
+n'est pas actif : quelques transferts de VM d'essai suffisent. Depuis,
+`virt-install` pose `discard=unmap` et `harvlab.sh tidy` (à lancer après une
+installation, et après une série d'essais) éjecte l'ISO, active le discard
+et lance `fstrim -a` dans chaque nœud. Premier passage : 138 Go rendus.

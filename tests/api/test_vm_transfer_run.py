@@ -1009,3 +1009,44 @@ def test_a_source_that_keeps_breaking_fails_the_transfer(env):
     with pytest.raises(run.TransferError) as ei:
         run.run_direct(ctx, "harv-rep1")
     assert "source stream failed" in str(ei.value)
+
+
+def test_rollback_retries_while_the_api_is_down(env):
+    """Vécu sur le banc : le retour arrière a tourné pendant que l'API de la
+    source était injoignable ; ses suppressions ont échoué en silence et les
+    images temporaires sont restées."""
+    e = env(shared=False)
+    ctx = e.ctx(request(), serve=True, advertise="127.0.0.1:9")
+    ctx.timeouts["first_hit"] = 60
+    with pytest.raises(run.TransferError):
+        run.run_direct(ctx, "harv-rep1")
+    # les images ont été supprimées par run_direct (finally) ; on en recrée
+    # une étiquetée, et l'API refuse deux fois avant de répondre
+    e.src.put(run.K_IMAGE, {"metadata": {"name": "xfer-t1-disk-0", "namespace": "default",
+                                         "labels": {vt.TRANSFER_LABEL: "t1"}}})
+    ctx.record("src", run.K_IMAGE, "default", "xfer-t1-disk-0")
+    orig, n = e.src.delete, {"k": 0}
+
+    def flaky(kind, ns, name, cascade=None):
+        if kind == run.K_IMAGE and n["k"] < 2:
+            n["k"] += 1
+            raise RuntimeError("Unable to connect to the server: no route to host")
+        return orig(kind, ns, name, cascade)
+    e.src.delete = flaky
+    run.rollback(ctx)
+    assert e.src.labelled() == []
+
+
+def test_rollback_names_what_it_could_not_undo(env):
+    e = env(shared=False)
+    ctx = e.ctx(request())
+    e.src.put(run.K_IMAGE, {"metadata": {"name": "stuck", "namespace": "default",
+                                         "labels": {vt.TRANSFER_LABEL: "t1"}}})
+    ctx.record("src", run.K_IMAGE, "default", "stuck")
+
+    def refuse(kind, ns, name, cascade=None):
+        raise RuntimeError("admission webhook denied the request")
+    e.src.delete = refuse
+    run.rollback(ctx)
+    errs = [ev for ev in e.events if ev[0] == "rollback" and ev[1] == "error"]
+    assert errs and "virtualmachineimages.harvesterhci.io default/stuck" in errs[-1][2]
