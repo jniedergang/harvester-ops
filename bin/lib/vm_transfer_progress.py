@@ -159,10 +159,19 @@ class GzipCounter:
 
     def feed(self, chunk):
         self.wire += len(chunk)
+        if self._d is None:              # pas du gzip : compté tel quel
+            self.raw += len(chunk)
+            return len(chunk)
         n = 0
         buf = chunk
         while buf:
-            out = self._d.decompress(buf, self.max_chunk)
+            try:
+                out = self._d.decompress(buf, self.max_chunk)
+            except zlib.error:
+                # compter n'est qu'un plus : jamais une cause d'échec
+                self._d = None
+                self.raw += len(chunk) - n
+                return len(chunk)
             n += len(out)
             if self._d.eof:
                 # membre suivant d'un gzip concaténé

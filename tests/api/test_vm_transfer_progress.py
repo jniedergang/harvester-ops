@@ -148,3 +148,12 @@ def test_gzip_counter_handles_concatenated_members():
     gz = gzip.compress(b"a" * 1000) + gzip.compress(b"b" * 500)
     c = vp.GzipCounter()
     assert c.feed(gz) == 1500
+
+
+def test_gzip_counter_never_breaks_a_transfer():
+    """Compter n'est qu'un plus : un flux qui n'est pas du gzip est compté
+    tel quel, sans lever d'erreur."""
+    c = vp.GzipCounter()
+    assert c.feed(b"not gzip at all") == 15
+    assert c.feed(b"more") == 4
+    assert c.raw == 19 and c.wire == 19

@@ -12,6 +12,7 @@ de seconde, et les délais sont vérifiés pour de bon.
 """
 
 import copy
+import gzip
 import json
 import sys
 import urllib.request
@@ -197,9 +198,10 @@ class FakeCluster:
             self.objs.pop((run.K_VMI, ns, name), None)
 
     def raw_stream(self, path):
+        # comme Harvester : toujours du gzip
         self.calls.append(("raw", path))
         img = path.rstrip("/").split("/")[-2]
-        data = f"disk-content-of-{img}".encode() * 1000
+        data = gzip.compress(f"disk-content-of-{img}".encode() * 1000)
         for i in range(0, len(data), 4096):
             yield data[i:i + 4096]
 
@@ -299,7 +301,7 @@ class FakeCluster:
                 with urllib.request.urlopen(url, timeout=5) as r:
                     r.read(16)
                 with urllib.request.urlopen(url, timeout=5) as r:
-                    data = r.read()
+                    data = gzip.decompress(r.read())
                 self.objs[(run.K_PVC, ns, name)]["data"] = data
                 o["status"] = {"phase": "Succeeded", "progress": "100.0%"}
             except Exception as e:           # noqa: BLE001
@@ -362,6 +364,7 @@ class Env:
         seed_source(self.src, running)
         seed_target(self.dst)
         self.events = []
+        self.progress = []
         self.server = None
 
     def ctx(self, req, advertise=None, serve=False):
@@ -371,7 +374,8 @@ class Env:
             advertise = advertise or f"127.0.0.1:{port}"
         return run.Ctx(self.src, self.dst, req, "t1", emit=lambda *a: self.events.append(a),
                        sleep=self.clock.sleep, now=self.clock.now, server=self.server,
-                       advertise=advertise, source_cluster="harvlab", target_cluster="harvlab2")
+                       advertise=advertise, source_cluster="harvlab", target_cluster="harvlab2",
+                       progress=self.progress.append)
 
     def close(self):
         if self.server:
@@ -780,3 +784,138 @@ def test_a_download_refused_three_times_fails(env, tmp_path):
     ctx = e.ctx(request(kind="export"))
     with pytest.raises(RuntimeError):
         run.run_export(ctx, vt.ArchiveWriter(tmp_path / "a.hvx"), "harv-rep1")
+
+
+# ---------------------------------------------------------------------------
+# Progression et vitesse (v1.46.0)
+# ---------------------------------------------------------------------------
+
+GIB = 1024 ** 3
+
+
+def finals(e, phase):
+    return [p for p in e.progress if p["phase"] == phase and p["final"]]
+
+
+def add_second_disk(c):
+    vm = c.objs[(run.K_VM, "default", "leap156")]
+    tspec = vm["spec"]["template"]["spec"]
+    tspec["volumes"].append({"name": "disk-1", "persistentVolumeClaim": {"claimName": "leap156-data"}})
+    tspec["domain"]["devices"]["disks"].append({"name": "disk-1", "disk": {"bus": "virtio"}})
+    c.put(run.K_PVC, {"metadata": {"name": "leap156-data", "namespace": "default"},
+                      "spec": {"accessModes": ["ReadWriteMany"], "volumeMode": "Block",
+                               "storageClassName": "harvester-longhorn",
+                               "resources": {"requests": {"storage": "5Gi"}}},
+                      "status": {"phase": "Bound"}})
+
+
+def test_direct_transfer_publishes_freeze_and_import(env):
+    e = env(shared=False)
+    ctx = e.ctx(request(), serve=True)
+    run.run_direct(ctx, "harv-rep1")
+    fr, im = finals(e, "freeze"), finals(e, "import")
+    assert len(fr) == 1 and fr[0]["total"] == 10 * GIB and fr[0]["done"] == 10 * GIB
+    assert len(im) == 1 and im[0]["total"] == 10 * GIB
+    # le bilan de chaque phase reste dans les étapes, pour l'Activité
+    msgs = [ev[2] for ev in e.events if ev[1] == "done"]
+    assert any(m.startswith("freeze: ") for m in msgs)
+    assert any(m.startswith("import: ") and "sent" in m for m in msgs)
+
+
+def test_the_cdi_probe_does_not_count_twice(env):
+    """Le faux CDI lit 16 octets puis coupe, puis retélécharge tout (comme le
+    vrai) : le compte de ce disque repart de zéro à la seconde requête."""
+    e = env(shared=False)
+    ctx = e.ctx(request(), serve=True)
+    run.run_direct(ctx, "harv-rep1")
+    sent_once = len(gzip.compress(b"disk-content-of-xfer-t1-disk-0" * 1000))
+    last = finals(e, "import")[0]
+    # disque importé en entier : compté pour sa taille, et ses octets
+    # transmis une seule fois (la sonde a été remise à zéro)
+    assert last["done"] == 10 * GIB
+    assert last["wire"] == sent_once
+
+
+def test_export_publishes_the_download_with_raw_and_sent_bytes(env, tmp_path):
+    e = env(shared=False)
+    ctx = e.ctx(request(kind="export"))
+    run.run_export(ctx, vt.ArchiveWriter(tmp_path / "a.hvx"), "harv-rep1")
+    dl = finals(e, "download")
+    assert len(dl) == 1 and dl[0]["total"] == 10 * GIB and dl[0]["items_total"] == 1
+    raw = len(b"disk-content-of-xfer-t1-disk-0" * 1000)
+    assert dl[0]["done"] == raw and dl[0]["wire"] < raw
+
+
+def test_backup_engine_publishes_backup_and_restore(env):
+    e = env()
+    ctx = e.ctx(request())
+    run.run_backup(ctx)
+    assert finals(e, "backup")[0]["total"] == 10 * GIB
+    assert finals(e, "restore")[0]["done"] == 10 * GIB
+    # l'image ramenée par la synchronisation a aussi sa progression
+    assert finals(e, "images")
+
+
+def test_disks_are_imported_together_by_default(env):
+    e = env(shared=False)
+    add_second_disk(e.src)
+    ctx = e.ctx(request(storage_classes={"longhorn-opensuse-leap-cloud": "harv-rep1",
+                                         "harvester-longhorn": "harv-rep1"}), serve=True)
+    run.run_direct(ctx, "harv-rep1")
+    seq = [c[:2] for c in e.dst.calls if c[1] == run.K_DV]
+    assert seq[:2] == [("create", run.K_DV)] * 2, seq
+    assert finals(e, "import")[0]["total"] == 15 * GIB
+
+
+def test_parallel_one_imports_disk_after_disk(env):
+    e = env(shared=False)
+    add_second_disk(e.src)
+    ctx = e.ctx(request(parallel=1, storage_classes={"longhorn-opensuse-leap-cloud": "harv-rep1",
+                                                     "harvester-longhorn": "harv-rep1"}), serve=True)
+    run.run_direct(ctx, "harv-rep1")
+    seq = [c[:2] for c in e.dst.calls if c[1] == run.K_DV]
+    assert seq == [("create", run.K_DV), ("delete", run.K_DV)] * 2, seq
+
+
+def lh_settings(c, value="2"):
+    for n in ("backup-concurrent-limit", "restore-concurrent-limit"):
+        c.put(run.K_LH_SETTING, {"metadata": {"name": n, "namespace": "longhorn-system"},
+                                 "value": value})
+
+
+def test_boost_raises_longhorn_concurrency_then_restores_it(env):
+    e = env()
+    lh_settings(e.src)
+    lh_settings(e.dst)
+    ctx = e.ctx(request(boost=True))
+    run.run_backup(ctx)
+    raised = [c for c in e.src.calls if c[:2] == ("patch", run.K_LH_SETTING)]
+    assert raised and '"8"' in raised[0][4] and raised[0][3] == "backup-concurrent-limit"
+    assert [c for c in e.dst.calls if c[:2] == ("patch", run.K_LH_SETTING)][0][3] == \
+        "restore-concurrent-limit"
+    assert e.src.objs[(run.K_LH_SETTING, "longhorn-system", "backup-concurrent-limit")]["value"] == "8"
+    run.finalize(ctx)
+    assert e.src.objs[(run.K_LH_SETTING, "longhorn-system", "backup-concurrent-limit")]["value"] == "2"
+    assert e.dst.objs[(run.K_LH_SETTING, "longhorn-system", "restore-concurrent-limit")]["value"] == "2"
+
+
+def test_boost_is_undone_on_failure(env):
+    e = env(fail_dst={"start": True})
+    lh_settings(e.src)
+    lh_settings(e.dst)
+    ctx = e.ctx(request(boost=True))
+    run.run_backup(ctx)
+    with pytest.raises(run.TransferError):
+        run.finalize(ctx)
+    run.rollback(ctx)
+    assert e.src.objs[(run.K_LH_SETTING, "longhorn-system", "backup-concurrent-limit")]["value"] == "2"
+    assert e.dst.objs[(run.K_LH_SETTING, "longhorn-system", "restore-concurrent-limit")]["value"] == "2"
+
+
+def test_boost_leaves_a_higher_value_alone(env):
+    e = env()
+    lh_settings(e.src, "12")
+    lh_settings(e.dst, "12")
+    ctx = e.ctx(request(boost=True))
+    run.run_backup(ctx)
+    assert not [c for c in e.src.calls if c[:2] == ("patch", run.K_LH_SETTING)]

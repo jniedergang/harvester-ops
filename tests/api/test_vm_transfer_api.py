@@ -283,3 +283,22 @@ def test_the_service_keeps_exports_on_the_persistent_volume():
     unit = (ROOT / "config" / "systemd" / "harvester-ops.service").read_text()
     assert "HARVESTER_OPS_EXPORT_DIR=/var/lib/harvester-ops/exports" in unit
     assert "-v /var/lib/harvester-ops:/var/lib/harvester-ops:rw" in unit
+
+
+@pytest.mark.parametrize("body", [{"speed": "turbo"}, {"parallel": 0.5}, {"parallel": 99},
+                                  {"parallel": "x"}, {"bandwidth": -3}, {"bandwidth": "lots"}])
+def test_speed_options_are_validated(client, monkeypatch, body):
+    seen = _fake_check(monkeypatch, CHECK)
+    r = client.post("/api/vm/harvlab/default/xfer-test/transfer/check", json=dict(body, to="harvlab2"))
+    assert r.status_code == 400 and seen == []
+
+
+def test_speed_options_reach_the_script(client, monkeypatch):
+    seen = _fake_check(monkeypatch, CHECK)
+    r = client.post("/api/vm/harvlab/default/xfer-test/transfer/check",
+                    json={"to": "harvlab2", "speed": "max", "parallel": 2, "bandwidth": 150})
+    assert r.status_code == 200
+    cmd = seen[0]
+    assert cmd[cmd.index("--speed") + 1] == "max"
+    assert cmd[cmd.index("--parallel") + 1] == "2"
+    assert cmd[cmd.index("--bandwidth") + 1] == "150"

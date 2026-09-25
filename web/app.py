@@ -10062,6 +10062,28 @@ def _transfer_args(body, kind):
         serve = (load_config().get("transfer") or {}).get("serve_address")
         if serve:
             args += ["--serve-address", str(serve)]
+    if kind in ("migrate", "import"):
+        sp = body.get("speed")
+        if sp:
+            if sp not in ("eco", "normal", "max"):
+                raise ValueError("invalid speed")
+            args += ["--speed", sp]
+        if body.get("parallel") not in (None, "", 0):
+            try:
+                n = int(body["parallel"])
+            except (TypeError, ValueError):
+                raise ValueError("invalid parallel") from None
+            if not 1 <= n <= 32:
+                raise ValueError("invalid parallel")
+            args += ["--parallel", str(n)]
+        if body.get("bandwidth") not in (None, "", 0):
+            try:
+                bw = float(body["bandwidth"])
+            except (TypeError, ValueError):
+                raise ValueError("invalid bandwidth") from None
+            if not 1 <= bw <= 100000:
+                raise ValueError("invalid bandwidth")
+            args += ["--bandwidth", f"{bw:g}"]
     if kind == "migrate":
         if body.get("keep_backups"):
             args.append("--keep-backups")

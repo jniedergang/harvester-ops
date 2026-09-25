@@ -269,3 +269,22 @@ def test_short_mode_without_shared_target_is_refused(sandbox):
     assert "short-mode-needs-backup" in r.stdout
     verbs = {c["args"][0] for c in sandbox.calls()}
     assert verbs <= {"get", "config"}
+
+
+def test_check_reports_the_amount_and_the_speed(sandbox):
+    s = sandbox.write("harvlab", source_state())
+    d = sandbox.write("harvlab2", target_state())
+    r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
+                     "--to-kubeconfig", str(d), "--json", "--speed", "eco")
+    out = json.loads(r.stdout)
+    assert out["amount"] == {"disks": 1, "size": 10 * GIB, "used": 3 * GIB}
+    assert out["request"]["speed"] == "eco" and out["request"]["parallel"] == 1
+    assert out["request"]["boost"] is False
+    r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
+                     "--to-kubeconfig", str(d), "--json", "--speed", "max", "--parallel", "3",
+                     "--bandwidth", "200")
+    req = json.loads(r.stdout)["request"]
+    assert (req["boost"], req["parallel"], req["bandwidth"]) == (True, 3, 200.0)
+    r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
+                     "--to-kubeconfig", str(d))
+    assert "to transfer: 1 disk(s), 10.0 GiB (3.0 GiB used)" in r.stdout

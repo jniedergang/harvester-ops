@@ -48,6 +48,8 @@ import vm_transfer_run as run  # noqa: E402
 import vm_transfer_serve as vs  # noqa: E402
 
 DEFAULT_PORT = 8094
+MIB = 1024 * 1024
+SPEEDS = ("eco", "normal", "max")
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
 
 
@@ -370,6 +372,12 @@ def build_request(args, kind, src, dst):
         "run_strategy": inv.get("run_strategy"),
         "restore_halt": bool((dst or {}).get("restore_halt")),
     }
+    # vitesse : profil, puis réglages explicites qui l'emportent
+    speed = getattr(args, "speed", None) or "normal"
+    req["speed"] = speed
+    req["parallel"] = getattr(args, "parallel", None) or (1 if speed == "eco" else None)
+    req["boost"] = speed == "max"
+    req["bandwidth"] = getattr(args, "bandwidth", None)
     if getattr(args, "engine", None):
         req["engine"] = args.engine
     return req
@@ -379,14 +387,25 @@ def _public_inventory(inv):
     return {k: v for k, v in inv.items() if k != "secrets"} | {"secrets": len(inv.get("secrets") or [])}
 
 
+def amount(inv):
+    """Ce qu'il y a à transférer : taille des disques, et occupation réelle
+    Longhorn quand elle est connue."""
+    disks = inv.get("disks") or []
+    used = [d.get("used") for d in disks]
+    return {"disks": len(disks), "size": sum(int(d.get("size") or 0) for d in disks),
+            "used": sum(used) if used and all(u is not None for u in used) else None}
+
+
 def report(args, src, dst, req, findings):
     engine = next(f["facts"] for f in findings if f["code"] == "engine") if any(
         f["code"] == "engine" for f in findings) else {"engine": None, "reason": None}
     out = {"engine": engine["engine"], "reason": engine["reason"], "findings": findings,
            "mappings": {"networks": req["networks"], "storage_classes": req["storage_classes"]},
            "inventory": _public_inventory(src["inventory"]),
-           "request": {k: req[k] for k in ("name", "namespace", "mode", "source", "target",
-                                            "keep_mac", "create_namespace")},
+           "amount": amount(src["inventory"]),
+           "request": {k: req.get(k) for k in ("name", "namespace", "mode", "source", "target",
+                                                "keep_mac", "create_namespace", "speed",
+                                                "parallel", "boost", "bandwidth")},
            "source": {"cluster": src.get("cluster"), "version": src.get("version")},
            "target": {"cluster": (dst or {}).get("cluster"), "version": (dst or {}).get("version"),
                       "networks": (dst or {}).get("networks"),
@@ -396,6 +415,9 @@ def report(args, src, dst, req, findings):
         print(json.dumps(out, indent=1))
     else:
         print(f"engine: {out['engine']} ({out['reason']})")
+        a = out["amount"]
+        used = f" ({a['used'] / MIB / 1024:.1f} GiB used)" if a["used"] is not None else ""
+        print(f"to transfer: {a['disks']} disk(s), {a['size'] / MIB / 1024:.1f} GiB{used}")
         for f in findings:
             if f["code"] == "engine":
                 continue
@@ -497,7 +519,8 @@ def execute(args, kind):
     advertise = None
     if kind in ("import",) or (kind == "migrate" and engine == "file"):
         host, port = _advertise(args, dst_kube)
-        server = vs.DiskServer(bind="0.0.0.0", port=port)
+        rate = int(req["bandwidth"] * MIB) if req.get("bandwidth") else None
+        server = vs.DiskServer(bind="0.0.0.0", port=port, rate=rate)
         server.start()
         advertise = f"{host}:{server.port}"
         vt.step("serve", "done", f"disks served on {advertise}")
@@ -616,6 +639,16 @@ def parser():
         sp.add_argument("--serve-address", metavar="HOST[:PORT]",
                         help=f"address the target reaches this host on (default port {DEFAULT_PORT})")
 
+    def speed(sp):
+        sp.add_argument("--speed", choices=SPEEDS,
+                        help="eco: one disk at a time; normal (default): all disks at once; "
+                             "max: also raise Longhorn's backup and restore concurrency "
+                             "during the transfer (more CPU and network on every node)")
+        sp.add_argument("--parallel", type=int, metavar="N",
+                        help="disks copied at the same time through this host (default: all)")
+        sp.add_argument("--bandwidth", type=float, metavar="MIB_S",
+                        help="cap on the disks served by this host, in MiB/s (default: none)")
+
     def common(sp):
         sp.add_argument("--json", action="store_true", help="print the pre-check as JSON")
         sp.add_argument("--dry-run", action="store_true", help="check and stop, change nothing")
@@ -628,6 +661,7 @@ def parser():
     c.add_argument("--mode", choices=["stop", "short"])
     c.add_argument("--source", choices=["running", "stopped", "deleted"])
     c.add_argument("--engine", choices=["file"], help="force the copy through this host")
+    speed(c)
 
     m = sub.add_parser("migrate", help="move or copy a VM to another cluster")
     source(m)
@@ -641,6 +675,7 @@ def parser():
     m.add_argument("--keep-backups", action="store_true",
                    help="keep the transfer backups on the backup target")
     m.add_argument("--engine", choices=["file"], help="force the copy through this host")
+    speed(m)
 
     e = sub.add_parser("export", help="export a VM to an archive file")
     source(e)
@@ -653,6 +688,7 @@ def parser():
     i.add_argument("--in", dest="input", required=True, help="archive file (.hvx)")
     target(i)
     common(i)
+    speed(i)
     return p
 
 

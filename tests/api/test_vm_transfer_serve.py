@@ -164,3 +164,44 @@ def test_a_client_that_hangs_up_is_not_a_source_failure(server):
     assert s.aborted(path) == 1
     with req(base + path) as r:        # le second GET complet passe
         assert len(r.read()) == 2000 * 65536
+
+
+def test_a_bandwidth_cap_is_shared_by_all_disks():
+    """Le plafond vaut pour le transfert entier : deux disques servis en même
+    temps se partagent le débit, ils ne le doublent pas."""
+    import time
+    s = vs.DiskServer(bind="127.0.0.1", port=0, rate=8 * 1024 * 1024)   # 8 Mio/s
+    port = s.start()
+    try:
+        data = b"x" * (2 * 1024 * 1024)
+        paths = [s.publish(opener_of(data), len(data)) for _ in range(2)]
+        out = []
+
+        def fetch(p):
+            with req(f"http://127.0.0.1:{port}{p}") as r:
+                out.append(len(r.read()))
+
+        t0 = time.monotonic()
+        ts = [threading.Thread(target=fetch, args=(p,)) for p in paths]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join(20)
+        elapsed = time.monotonic() - t0
+        assert out == [len(data)] * 2
+        # 4 Mio à 8 Mio/s : un demi-seconde au moins (moins le premier morceau)
+        assert elapsed >= 0.4, elapsed
+        assert elapsed < 3, elapsed
+    finally:
+        s.stop()
+
+
+def test_no_cap_by_default(server):
+    import time
+    s, base = server
+    data = b"x" * (8 * 1024 * 1024)
+    path = s.publish(opener_of(data), len(data))
+    t0 = time.monotonic()
+    with req(base + path) as r:
+        assert len(r.read()) == len(data)
+    assert time.monotonic() - t0 < 2

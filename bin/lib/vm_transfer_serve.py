@@ -18,6 +18,7 @@ script de transfert l'ouvre lui-même, aussi en ligne de commande.
 
 import secrets
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
@@ -32,9 +33,15 @@ class _Entry:
 
 
 class DiskServer:
-    def __init__(self, bind="0.0.0.0", port=0):
+    """`rate` : plafond de débit en octets par seconde, partagé par tous les
+    disques servis (un seau à jetons) ; aucun par défaut."""
+
+    def __init__(self, bind="0.0.0.0", port=0, rate=None):
         self.bind = bind
         self.port = port
+        self.rate = rate
+        self._next = 0.0
+        self._rate_lock = threading.Lock()
         self._entries = {}
         self._lock = threading.Lock()
         self._httpd = None
@@ -99,6 +106,7 @@ class DiskServer:
                             break
                         if not chunk:
                             continue
+                        server._throttle(len(chunk))
                         try:
                             self.wfile.write(chunk)
                         except OSError:
@@ -132,6 +140,18 @@ class DiskServer:
             self._httpd = None
         with self._lock:
             self._entries.clear()
+
+    def _throttle(self, n):
+        """Réserve la place de `n` octets dans le débit plafonné, et attend
+        son tour : la moyenne ne dépasse pas `rate`, tous flux confondus."""
+        if not self.rate:
+            return
+        with self._rate_lock:
+            now = time.monotonic()
+            start = max(now, self._next)
+            self._next = start + n / float(self.rate)
+        if start > now:
+            time.sleep(start - now)
 
     # -- publication -------------------------------------------------------
     def publish(self, opener, size):

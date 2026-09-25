@@ -28,6 +28,7 @@ départ. En fin de transfert réussi, l'étiquette est retirée de ce qui reste
 import time
 
 import vm_transfer as vt
+import vm_transfer_progress as vp
 
 K_VM = "virtualmachines.kubevirt.io"
 K_VMI = "virtualmachineinstances.kubevirt.io"
@@ -40,6 +41,12 @@ K_PVC = "persistentvolumeclaims"
 K_SECRET = "secrets"
 K_NS = "namespaces"
 K_LH_TARGET = "backuptargets.longhorn.io"
+K_LH_SETTING = "settings.longhorn.io"
+
+# Profil « maximal » : concurrence de Longhorn relevée le temps du transfert
+# (2 par défaut, relevé sur harv1), puis rétablie.
+BOOST_SETTINGS = (("src", "backup-concurrent-limit"), ("dst", "restore-concurrent-limit"))
+BOOST_VALUE = 8
 
 TRANSFERRED_FROM = "harvester-ops.io/transferred-from"
 # Harvester ne relit sa cible de sauvegarde que si cette annotation du
@@ -56,7 +63,7 @@ IMAGE_DOWNLOAD = ("/api/v1/namespaces/harvester-system/services/https:harvester:
 TIMEOUTS = {
     # la synchronisation ramène d'abord les images, qui peuvent peser
     # plusieurs gigaoctets : le délai est large, la relance fréquente
-    "stop": 600, "start": 900, "backup": 6 * 3600, "sync": 2 * 3600, "sync_nudge": 60,
+    "stop": 600, "start": 900, "backup": 6 * 3600, "sync": 2 * 3600, "sync_nudge": 20,
     "restore": 6 * 3600, "export": 6 * 3600, "import": 12 * 3600,
     "first_hit": 300, "delete": 600,
 }
@@ -78,9 +85,11 @@ class Fail:
 class Ctx:
     def __init__(self, src, dst, req, tid, *, emit=vt.step, sleep=time.sleep,
                  now=time.time, server=None, advertise=None, timeouts=None,
-                 source_cluster="", target_cluster=""):
+                 source_cluster="", target_cluster="", progress=vp.emit_line):
         self.src, self.dst, self.req, self.tid = src, dst, req, tid
         self.emit, self.sleep, self.now = emit, sleep, now
+        self.progress = progress
+        self.boosted = []               # (côté, réglage Longhorn, valeur d'origine)
         self.server, self.advertise = server, advertise
         self.timeouts = dict(TIMEOUTS, **(timeouts or {}))
         self.source_cluster, self.target_cluster = source_cluster, target_cluster
@@ -94,6 +103,9 @@ class Ctx:
 
     def kube(self, side):
         return self.src if side == "src" else self.dst
+
+    def tracker(self, phase, total, items_total=None):
+        return vp.Progress(self.progress, phase, total, now=self.now, items_total=items_total)
 
     def record(self, side, kind, ns, name):
         self.created.append((side, kind, ns, name))
@@ -127,6 +139,61 @@ def wait_for(ctx, sid, what, fn, timeout, every=5):
         if ctx.now() >= deadline:
             raise TransferError(sid, f"timed out waiting for {what}")
         ctx.sleep(every)
+
+
+def _close(ctx, sid, prog):
+    """Point final d'une phase, et son bilan gardé comme message d'étape."""
+    ctx.emit(sid, "done", vp.summary(prog.phase, prog.finish()))
+
+
+def _pct(obj):
+    try:
+        return max(0.0, min(100.0, float(((obj or {}).get("status") or {}).get("progress") or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _vm_disk_total(ctx, vm):
+    """Somme des tailles des disques de la VM source (pour les phases dont
+    la mesure est un pourcentage)."""
+    total = 0
+    tspec = ((vm.get("spec") or {}).get("template") or {}).get("spec") or {}
+    for vol in tspec.get("volumes") or []:
+        claim = (vol.get("persistentVolumeClaim") or {}).get("claimName")
+        if claim:
+            p = ctx.src.get(K_PVC, ctx.req["vm_ns"], claim) or {}
+            total += vt.parse_quantity((((p.get("spec") or {}).get("resources") or {})
+                                        .get("requests") or {}).get("storage"))
+    return total
+
+
+def boost_longhorn(ctx):
+    """Profil maximal : plus de fils par sauvegarde (source) et par
+    restauration (cible). Coûte du CPU et du réseau à tous les nœuds, et
+    profite à toute autre sauvegarde en cours : rétabli dès la fin."""
+    for side, name in BOOST_SETTINGS:
+        kube = ctx.kube(side)
+        s = kube.get(K_LH_SETTING, "longhorn-system", name)
+        old = str((s or {}).get("value") or "")
+        if not old.isdigit() or int(old) >= BOOST_VALUE:
+            continue
+        kube.patch(K_LH_SETTING, "longhorn-system", name, {"value": str(BOOST_VALUE)})
+        ctx.boosted.append((side, name, old))
+    if ctx.boosted:
+        ctx.emit("speed", "done", "Longhorn concurrency raised to "
+                 f"{BOOST_VALUE}: " + ", ".join(f"{n} ({s}, was {o})" for s, n, o in ctx.boosted))
+
+
+def restore_longhorn(ctx):
+    for side, name, old in reversed(ctx.boosted):
+        try:
+            ctx.kube(side).patch(K_LH_SETTING, "longhorn-system", name, {"value": old})
+        except Exception as e:                  # noqa: BLE001
+            ctx.emit("speed", "error", f"{name} not restored to {old} on {side}: {e}")
+            continue
+    if ctx.boosted:
+        ctx.emit("speed", "done", "Longhorn concurrency restored")
+    ctx.boosted.clear()
 
 
 def _cond(obj, ctype):
@@ -206,7 +273,7 @@ def _stop_source_if_needed(ctx, running):
 # Moteur « sauvegarde »
 # ---------------------------------------------------------------------------
 
-def make_backup(ctx, suffix):
+def make_backup(ctx, suffix, total=0):
     req = ctx.req
     ns = req["vm_ns"]
     name = _short(f"{req['vm_name']}-xfer-{ctx.tid}-{suffix}")
@@ -214,6 +281,7 @@ def make_backup(ctx, suffix):
     ctx.src.create(vt.backup_manifest(ns, req["vm_name"], name, ctx.tid))
     ctx.record("src", K_BACKUP, ns, name)
     ctx.backups.append((ns, name))
+    prog = ctx.tracker("backup", total)
 
     def ready():
         b = ctx.src.get(K_BACKUP, ns, name) or {}
@@ -222,11 +290,13 @@ def make_backup(ctx, suffix):
         if err:
             return Fail(f"backup {name}: {err}")
         if st.get("readyToUse"):
+            prog.update(total)
             return True
-        return f"{st.get('progress', 0)}%"
+        prog.update(int(total * _pct(b) / 100))
+        return "in progress"
 
-    wait_for(ctx, "backup", f"backup {name}", ready, ctx.timeouts["backup"])
-    ctx.emit("backup", "done", f"backup {name} ready")
+    wait_for(ctx, "backup", f"backup {name}", ready, ctx.timeouts["backup"], every=2)
+    _close(ctx, "backup", prog)
     return ns, name
 
 
@@ -245,6 +315,7 @@ def wait_synced(ctx, ns, name):
     ctx.emit("sync", "running", f"waiting for {name} on {ctx.target_cluster or 'the target'}")
     before = set(_images(ctx.dst))
     last = [None]
+    img_prog = [None]
 
     def synced():
         b = ctx.dst.get(K_BACKUP, ns, name)
@@ -266,14 +337,23 @@ def wait_synced(ctx, ns, name):
             ctx.dst.patch(K_SETTING, None, "backup-target",
                           {"metadata": {"annotations": {HASH_ANNOTATION: None}}})
             last[0] = now
-        restoring = [f"{k[1]}" for k, i in _images(ctx.dst).items()
-                     if k not in before and (i.get("spec") or {}).get("sourceType") == "restore"]
-        return ("images being restored: " + ", ".join(sorted(restoring))) if restoring \
-            else "not synced yet"
+        brought = {k: i for k, i in _images(ctx.dst).items()
+                   if k not in before and (i.get("spec") or {}).get("sourceType") == "restore"}
+        if brought:
+            sizes = {k: int((i.get("status") or {}).get("virtualSize") or 0)
+                     for k, i in brought.items()}
+            if img_prog[0] is None or img_prog[0].total != sum(sizes.values()):
+                img_prog[0] = ctx.tracker("images", sum(sizes.values()), items_total=len(brought))
+            img_prog[0].update(int(sum(sizes[k] * _pct(i) / 100 for k, i in brought.items())),
+                               items_done=sum(1 for i in brought.values() if _pct(i) >= 100))
+            return "images being restored: " + ", ".join(sorted(k[1] for k in brought))
+        return "not synced yet"
 
     try:
         wait_for(ctx, "sync", f"backup {name} on the target", synced, ctx.timeouts["sync"],
-                 every=10)
+                 every=5)
+        if img_prog[0] is not None:
+            _close(ctx, "sync", img_prog[0])
     finally:
         # les images que Harvester a ramenées pour ce transfert : à défaire
         # avec lui s'il échoue
@@ -285,7 +365,7 @@ def wait_synced(ctx, ns, name):
     ctx.emit("sync", "done", f"{name} visible on the target")
 
 
-def restore_on_target(ctx, backup_ns, backup_name):
+def restore_on_target(ctx, backup_ns, backup_name, total=0):
     req = ctx.req
     ns, name = req["namespace"], req["name"]
     keep_mac = _keep_mac(req)
@@ -297,18 +377,22 @@ def restore_on_target(ctx, backup_ns, backup_name):
     ctx.record("dst", K_RESTORE, ns, rname)
     ctx.restore = (ns, rname)
     ctx.target = (ns, name)
+    prog = ctx.tracker("restore", total)
 
     def complete():
         r = ctx.dst.get(K_RESTORE, ns, rname) or {}
         st = r.get("status") or {}
         if st.get("complete"):
+            prog.update(total)
             return True
         err = _cond(r, "Failure")
         if err and err.get("status") == "True":
             return Fail(f"restore: {err.get('message') or err.get('reason')}")
-        return f"{st.get('progress', 0)}%"
+        prog.update(int(total * _pct(r) / 100))
+        return "in progress"
 
-    wait_for(ctx, "restore", f"restore of {ns}/{name}", complete, ctx.timeouts["restore"])
+    wait_for(ctx, "restore", f"restore of {ns}/{name}", complete, ctx.timeouts["restore"], every=2)
+    _close(ctx, "restore", prog)
     if not halt:
         # Harvester 1.8 ne connaît pas haltAfterRestore : la VM restaurée
         # démarre d'elle-même, avec les réseaux d'origine. On l'arrête avant
@@ -338,19 +422,23 @@ def remap_restored(ctx):
 
 def run_backup(ctx):
     req = ctx.req
-    _vm, running = _source_state(ctx)
+    vm, running = _source_state(ctx)
+    total = _vm_disk_total(ctx, vm)
+    if req.get("boost"):
+        boost_longhorn(ctx)
     keep_running = req.get("source") == "running"
     if req.get("mode") == "short" and running and not keep_running:
-        make_backup(ctx, "a")           # VM en marche : le gros de la copie
+        make_backup(ctx, "a", total)    # VM en marche : le gros de la copie
     _stop_source_if_needed(ctx, running)
-    ns, name = make_backup(ctx, "b" if req.get("mode") == "short" and running and not keep_running else "a")
+    ns, name = make_backup(ctx, "b" if req.get("mode") == "short" and running and not keep_running else "a",
+                           total)
     if req["namespace"] != ns:
         # la sauvegarde se synchronise dans son namespace d'origine
         ensure_namespace(ctx, "dst", ns)
     if req.get("create_namespace"):
         ensure_namespace(ctx, "dst", req["namespace"])
     wait_synced(ctx, ns, name)
-    restore_on_target(ctx, ns, name)
+    restore_on_target(ctx, ns, name, total)
     remap_restored(ctx)
     return ctx.target
 
@@ -401,18 +489,28 @@ def export_images(ctx, inv, running, export_class):
         ctx.src.create(vt.export_image_manifest(ns, d["claim"], img, ctx.tid, export_class))
         ctx.record("src", K_IMAGE, ns, img)
         exported.append((d, img))
-    for d, img in exported:
-        def imported(img=img):
+    # tous les disques se figent en même temps (Longhorn copie chaque
+    # volume de son côté) : une attente commune, une progression commune
+    prog = ctx.tracker("freeze", sum(d["size"] for d, _ in exported), items_total=len(exported))
+
+    def all_imported():
+        done, ready = 0, 0
+        for d, img in exported:
             obj = ctx.src.get(K_IMAGE, ns, img) or {}
             st = obj.get("status") or {}
             c = _cond(obj, "Imported")
             if c and c.get("status") == "True":
-                return True
+                done += d["size"]
+                ready += 1
+                continue
             if c and c.get("status") == "False" and int(st.get("failed") or 0) >= 3:
                 return Fail(f"export of {img}: {c.get('message') or c.get('reason')}")
-            return f"{st.get('progress', 0)}%"
-        wait_for(ctx, "export", f"export of {d['volume']}", imported, ctx.timeouts["export"])
-    ctx.emit("export", "done", f"{len(exported)} disk(s) frozen")
+            done += int(d["size"] * _pct(obj) / 100)
+        prog.update(done, items_done=ready)
+        return True if ready == len(exported) else "in progress"
+
+    wait_for(ctx, "export", "disks frozen", all_imported, ctx.timeouts["export"], every=2)
+    _close(ctx, "export", prog)
     if running and req.get("source") == "running" and ctx.source_stopped:
         start_vm(ctx, ctx.src, ns, req["vm_name"], ctx.source_initial, sid="restart-source")
         ctx.source_stopped = False
@@ -464,68 +562,114 @@ def write_archive(ctx, writer, vm, inv, secrets, exported, source_version=""):
         "inventory": dict(inv, disks=disks),
         "secrets": secrets,
     })
-    for d, img in exported:
-        ctx.emit("download", "running", f"{d['volume']}: downloading")
-        info = writer.add_stream(f"disks/{d['volume']}.raw.gz",
-                                 image_stream(ctx, req["vm_ns"], img))
-        ctx.emit("download", "running",
-                 f"{d['volume']}: {info['size'] // (1024 * 1024)} MiB compressed")
+    prog = ctx.tracker("download", sum(d["size"] for d, _ in exported),
+                       items_total=len(exported))
+    for i, (d, img) in enumerate(exported):
+        prog.update(prog.done, item=d["volume"], items_done=i)
+        writer.add_stream(f"disks/{d['volume']}.raw.gz",
+                          _counted(image_stream(ctx, req["vm_ns"], img), prog))
+    prog.update(prog.done, items_done=len(exported))
     writer.close()
-    ctx.emit("download", "done", "archive complete")
+    _close(ctx, "download", prog)
+
+
+def _counted(chunks, prog):
+    """Laisse passer un flux gzip en comptant ses octets bruts et transmis."""
+    counter = vp.GzipCounter()
+    for chunk in chunks:
+        prog.add(counter.feed(chunk), len(chunk))
+        yield chunk
 
 
 def import_disks(ctx, disks, sources):
     """`sources` : {volume: (opener, taille ou None)}. Un DataVolume par
-    disque, servi par le guichet ; rend {ancien PVC: nouveau PVC}."""
+    disque, servi par le guichet ; rend {ancien PVC: nouveau PVC}.
+
+    Les disques s'importent en même temps, par lots de `req["parallel"]`
+    (tous par défaut) : Longhorn compresse chaque téléchargement sur un seul
+    cœur, plusieurs flux vont donc plus vite qu'un seul. Le compte d'un
+    disque repart de zéro à chaque nouvelle requête : la première connexion
+    de CDI n'est qu'une sonde, coupée après quelques octets."""
     req = ctx.req
     ns, name = req["namespace"], req["name"]
     classes = req.get("storage_classes") or {}
+    size_of = {d["volume"]: int(d.get("size") or 0) for d in disks}
+    prog = ctx.tracker("import", sum(size_of.values()), items_total=len(disks))
+    counts = {}                          # volume -> [brut, transmis] de la requête en cours
+    finished = set()
+
+    def counted(vol, opener):
+        def run():
+            counts[vol] = [0, 0]
+            counter = vp.GzipCounter()
+            for chunk in opener():
+                counts[vol][0] += counter.feed(chunk)
+                counts[vol][1] += len(chunk)
+                yield chunk
+        return run
+
+    def report():
+        raw = sum(size_of[v] if v in finished else c[0] for v, c in counts.items())
+        raw += sum(size_of[v] for v in finished if v not in counts)
+        prog.update(min(raw, prog.total or raw), wire=sum(c[1] for c in counts.values()),
+                    items_done=len(finished))
+
     claims, published = {}, []
+    batch = int(req.get("parallel") or 0) or len(disks)
     try:
-        for d in disks:
-            opener, size = sources[d["volume"]]
-            path = ctx.server.publish(opener, size)
-            published.append(path)
-            claim = _short(f"{name}-{d['volume']}-{ctx.tid}")
-            url = f"http://{ctx.advertise}{path}"
-            sc = classes.get(d["storage_class"]) or d["storage_class"]
-            ctx.emit("import", "running", f"{d['volume']}: importing into {sc}")
-            ctx.dst.create(vt.datavolume_manifest(ns, claim, url, d, sc, ctx.tid))
-            ctx.record("dst", K_PVC, ns, claim)
-            ctx.record("dst", K_DV, ns, claim)
-            claims[d["claim"]] = claim
+        for start in range(0, len(disks), batch):
+            group = []
+            for d in disks[start:start + batch]:
+                opener, size = sources[d["volume"]]
+                path = ctx.server.publish(counted(d["volume"], opener), size)
+                published.append(path)
+                claim = _short(f"{name}-{d['volume']}-{ctx.tid}")
+                url = f"http://{ctx.advertise}{path}"
+                sc = classes.get(d["storage_class"]) or d["storage_class"]
+                ctx.emit("import", "running", f"{d['volume']}: importing into {sc}")
+                ctx.dst.create(vt.datavolume_manifest(ns, claim, url, d, sc, ctx.tid))
+                ctx.record("dst", K_PVC, ns, claim)
+                ctx.record("dst", K_DV, ns, claim)
+                claims[d["claim"]] = claim
+                group.append((d, claim, path, ctx.now()))
 
-            started = ctx.now()
+            def all_done(group=group):
+                pending = 0
+                for d, claim, path, started in group:
+                    if d["volume"] in finished:
+                        continue
+                    dv = ctx.dst.get(K_DV, ns, claim) or {}
+                    phase = (dv.get("status") or {}).get("phase") or ""
+                    err = ctx.server.error(path)
+                    if err:
+                        return Fail(f"source stream failed: {err}")
+                    if phase == "Succeeded":
+                        finished.add(d["volume"])
+                        # CDI ne ramasse pas le DataVolume, et le volume lui
+                        # appartient : le supprimer « orphelin » laisse un
+                        # volume ordinaire (vérifié)
+                        ctx.dst.delete(K_DV, ns, claim, cascade="orphan")
+                        ctx.forget("dst", K_DV, ns, claim)
+                        ctx.emit("import", "running", f"{d['volume']}: imported")
+                        continue
+                    if phase == "Failed":
+                        return Fail(f"import failed: {(_cond(dv, 'Running') or {}).get('message') or phase}")
+                    if (ctx.server.hits(path) == 0
+                            and ctx.now() - started >= ctx.timeouts["first_hit"]):
+                        msg = (_cond(dv, "Running") or {}).get("message") or phase or "no request"
+                        return Fail("the target cluster never fetched the disk from "
+                                    f"{ctx.advertise} ({msg}): check that its nodes can "
+                                    "reach this host on that port")
+                    pending += 1
+                report()
+                return True if not pending else "in progress"
 
-            def done(claim=claim, path=path):
-                dv = ctx.dst.get(K_DV, ns, claim) or {}
-                st = dv.get("status") or {}
-                phase = st.get("phase") or ""
-                err = ctx.server.error(path)
-                if err:
-                    return Fail(f"source stream failed: {err}")
-                if phase == "Succeeded":
-                    return True
-                if phase == "Failed":
-                    return Fail(f"import failed: {(_cond(dv, 'Running') or {}).get('message') or phase}")
-                if (ctx.server.hits(path) == 0
-                        and ctx.now() - started >= ctx.timeouts["first_hit"]):
-                    msg = (_cond(dv, "Running") or {}).get("message") or phase or "no request"
-                    return Fail("the target cluster never fetched the disk from "
-                                f"{ctx.advertise} ({msg}): check that its nodes can "
-                                "reach this host on that port")
-                return f"{phase or 'pending'} {st.get('progress', '')}".strip()
-
-            wait_for(ctx, "import", f"import of {d['volume']}", done, ctx.timeouts["import"])
-            # CDI ne ramasse pas le DataVolume, et le volume lui appartient :
-            # le supprimer « orphelin » laisse un volume ordinaire (vérifié)
-            ctx.dst.delete(K_DV, ns, claim, cascade="orphan")
-            ctx.forget("dst", K_DV, ns, claim)
-            ctx.emit("import", "running", f"{d['volume']}: imported")
+            wait_for(ctx, "import", "disks imported", all_done, ctx.timeouts["import"], every=2)
     finally:
         for p in published:
             ctx.server.revoke(p)
-    ctx.emit("import", "done", f"{len(claims)} disk(s) imported")
+    report()
+    _close(ctx, "import", prog)
     return claims
 
 
@@ -697,6 +841,7 @@ def finalize(ctx):
     if ctx.req.get("kind", "migrate") == "migrate":
         settle_source(ctx)
     cleanup(ctx)
+    restore_longhorn(ctx)
 
 
 def finish_export(ctx):
@@ -713,6 +858,7 @@ def rollback(ctx):
     """Défait ce que le transfert a créé, dans l'ordre inverse, et remet la
     source dans son état de départ. Ne supprime jamais la source."""
     ctx.emit("rollback", "running", "undoing the transfer")
+    restore_longhorn(ctx)
     if ctx.restore and ctx.target:
         ns, name = ctx.target
         r = ctx.dst.get(K_RESTORE, *ctx.restore) or {}
