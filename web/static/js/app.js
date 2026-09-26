@@ -35,19 +35,32 @@ const App = (() => {
     if (name === 'namespaces') { refreshNamespaces(true); }
     if (name === 'activity')   refreshActivity();
     if (name === 'shutdown')   loadVMOrder();
+    // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
+    // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
+    const section = window.Sections && Sections.isSection(name);
+    if (section) Sections.activate(name);
+    else if (window.Sections) Sections.stopLists();
     // Quitter l'aperçu coupe le rafraîchissement de la topologie. Il
     // continuait sinon d'interroger le cluster en arrière-plan — et, après
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
-    if (name !== 'overview') stopBoards(null);
+    if (name !== 'overview' && !section) stopBoards(null);
   }
 
-  /** Sous-onglet d'aperçu actif (metrics | cluster | network | storage). */
+  /** Sous-onglet d'aperçu actif (metrics | cluster). */
   function overviewMode() {
     const btn = document.querySelector('[data-overview-tab].active');
     if (btn) return btn.dataset.overviewTab;
-    try { return localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; }
-    catch { return 'metrics'; }
+    return savedOverviewMode();
+  }
+
+  // v1.57.0 : un navigateur peut encore garder « storage », « network »,
+  // « fabric » ou « vpc », partis dans leurs sections : on revient aux
+  // métriques plutôt que de monter une vue dont la zone est ailleurs.
+  function savedOverviewMode() {
+    let m = 'metrics';
+    try { m = localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; } catch {}
+    return ['metrics', 'cluster'].includes(m) ? m : 'metrics';
   }
 
   function setStepStatus(panelId, stepId, status, msg) {
@@ -225,14 +238,17 @@ const App = (() => {
     if (active === 'activity')   jobs.push(refreshActivity());
     if (active === 'shutdown')   jobs.push(loadVMOrder());
     if (active === 'overview') {
-      let mode = 'metrics';
-      try { mode = localStorage.getItem('harvester_ops_overview_subtab') || 'metrics'; } catch {}
+      const mode = savedOverviewMode();
       if (mode !== 'metrics') {
         mountTopology(mode);             // coupe aussi les vues de l'ancien
       }
     }
     if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
       jobs.push(window.CAPI.reactivate());
+    }
+    // v1.57.0 : les sections de Harvester relisent le nouveau cluster
+    if (['storage', 'network', 'addons', 'security'].includes(active) && window.Sections) {
+      jobs.push(Sections.activate(active));
     }
     // allSettled : un onglet en erreur ne doit pas laisser le voile en place.
     await Promise.allSettled(jobs);
@@ -2019,7 +2035,7 @@ const App = (() => {
     // rafraîchissements des autres.
     const board = BOARDS()[mode];
     if (!board) return;
-    const boardHost = document.querySelector(`.overview-subtab[data-subtab="${mode}"] .topology-host`);
+    const boardHost = document.querySelector(`[data-board="${mode}"] .topology-host`);
     const boardLoading = board.start(currentCluster);
     // Sur un gros cluster, la vue met plusieurs secondes à revenir. Le voile
     // ne couvre que cette zone : le reste de la page demeure lisible.
@@ -2034,7 +2050,8 @@ const App = (() => {
   // Expose getCurrentCluster for the other modules
   function getCurrentCluster() { return currentCluster; }
 
-  return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster, mountTopology };
+  return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
+           mountTopology, stopBoards, setTab };
 })();
 
 window.App = App;

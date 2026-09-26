@@ -18,6 +18,10 @@ Le réseau est intercepté : aucun test ne touche à un cluster.
 import json
 
 import pytest
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from boards import goto_board  # noqa: E402
 
 playwright = pytest.importorskip("playwright")
 
@@ -161,15 +165,15 @@ def open_view(page, base_url, sub, lang="en", deletes=None, delete_status=201):
         "localStorage.setItem('harvester_ops_current_tab','overview');")
     page.goto(base_url, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click(f'[data-overview-tab="{sub}"]')
-    page.wait_for_selector(f'.overview-subtab[data-subtab="{sub}"] .vsw', timeout=10000)
+    goto_board(page, sub)
+    page.wait_for_selector(f'[data-board="{sub}"] .vsw', timeout=10000)
     page.wait_for_timeout(800)
-    return page.locator(f'.overview-subtab[data-subtab="{sub}"]')
+    return page.locator(f'[data-board="{sub}"]')
 
 
 def no_tooltip_missing(page, sub):
     return page.evaluate(f"""() => [...document.querySelectorAll(
-        '.overview-subtab[data-subtab="{sub}"] button, .overview-subtab[data-subtab="{sub}"] [role=button], .overview-subtab[data-subtab="{sub}"] label')]
+        '[data-board="{sub}"] button, [data-board="{sub}"] [role=button], [data-board="{sub}"] label')]
         .filter(el => !el.getAttribute('data-tip'))
         .map(el => el.className + ' ' + el.textContent.trim().slice(0, 20))""")
 
@@ -238,7 +242,7 @@ def test_the_switch_link_opens_the_fabric(context, flask_server):
     view = open_view(page, flask_server["base_url"], "network")
     view.locator('[data-netmap-fabric]').first.click()
     page.wait_for_timeout(1500)
-    assert page.locator('.overview-subtab[data-subtab="fabric"]').is_visible()
+    assert page.locator('[data-board="fabric"]').is_visible()
 
 
 def test_network_controls_all_have_a_tooltip(context, flask_server):

@@ -300,6 +300,34 @@ versions.
 
 ## 3. Cluster observability (console)
 
+### The Harvester sections, one cluster at a time (1.57.0)
+
+The sidebar groups, under Cluster, the menus operators know from Harvester,
+for whichever cluster is selected:
+
+- **Storage**: Volumes (the storage board: replicas, health, fixes),
+  Images (source, size, state, storage class, the VMs using them) and
+  Storage Classes (replicas, reclaim, binding, expansion, the image a class
+  was made for, how many volumes use it).
+- **Network**: VM Networks (one block per network), Overlay Networks (the
+  kube-ovn VPCs and subnets, with their forms) and Underlay Networks (the
+  fabric: physical cards, virtual switches, LLDP). These views left the
+  Overview, which keeps Metrics and the Cluster board.
+- **Add-ons**: every Harvester add-on, its chart and version, its state, and
+  Enable / Disable for administrators, followed in the dock
+  (`harvester-resources addon` on the command line). A refusal of Harvester
+  is said plainly: on a single-node cluster, the descheduler "cannot be
+  enabled as not enough nodes exist in the cluster". Verified on harv1:
+  harvester-seeder enabled (deployed in 21 s), then disabled.
+- **Security**: Secrets (type, key names, the VMs using them; values are
+  never read into the page; the several hundred secrets the cluster uses
+  for itself are hidden until asked for) and SSH Keys (fingerprint,
+  validation, the VMs that received them).
+
+Every list filters by words, sorts by any column (click the header, again to
+reverse; the order is remembered), opens a row's details, and opens a VM
+from its name. Lists refresh every 10 s while shown.
+
 - **The host network, one virtual switch at a time (Fabric).** The
   Network view below looks at the network from the VMs; this one reads it
   the way an ESXi operator reads a Standard Switch: one block per switch,
@@ -832,6 +860,19 @@ Keycloak alike.
   Signing out forgets the session; Rancher does not let an OIDC token revoke
   itself, it expires at the session length. Signing out of Rancher also
   ends the console session at its next renewal.
+
+### Signing in is mandatory (1.57.0)
+
+There is no open console any more: without a session, every page leads to
+the sign-in page (never a browser password prompt), and every API call is
+refused. Local accounts sign in with a form (an HttpOnly session cookie,
+twelve hours); a write carried by a session cookie must come from the
+console itself. With no account at all, the first start creates the first
+administrator with a token read on the server's disk (see the install
+guide). Administrators manage the console accounts in Settings > Console
+accounts (create, role, reset a password, delete; the last administrator
+cannot be removed); everyone changes their own password from the account
+menu; resetting a password or deleting an account closes its sessions.
 
 ### Your account and signing out (1.56.0)
 

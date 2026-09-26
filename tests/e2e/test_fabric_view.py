@@ -18,6 +18,10 @@ Le réseau est intercepté : aucun test ne touche à un cluster.
 import json
 
 import pytest
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from boards import goto_board  # noqa: E402
 
 playwright = pytest.importorskip("playwright")
 
@@ -137,7 +141,7 @@ def open_fabric(page, base_url, fabric=None, lang="en", detail_calls=None,
         "localStorage.setItem('harvester_ops_current_tab','overview');")
     page.goto(base_url, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click('[data-overview-tab="fabric"]')
+    goto_board(page, "fabric")
     page.wait_for_selector('.vsw', timeout=10000)
     page.wait_for_timeout(1200)
 
@@ -163,7 +167,7 @@ def test_it_is_html_not_a_canvas(context, flask_server):
     """Le texte se sélectionne et se copie ; plus de diagonales."""
     page = context.new_page()
     open_fabric(page, flask_server["base_url"])
-    host = page.locator('.overview-subtab[data-subtab="fabric"]')
+    host = page.locator('[data-board="fabric"]')
     assert host.locator('.topology-canvas').count() == 0
     assert host.locator('canvas').count() == 0
 
@@ -382,7 +386,7 @@ def test_every_control_has_a_tooltip(context, flask_server):
     page = context.new_page()
     open_fabric(page, flask_server["base_url"])
     missing = page.evaluate("""() => [...document.querySelectorAll(
-        '.overview-subtab[data-subtab="fabric"] button, .overview-subtab[data-subtab="fabric"] [role=button]')]
+        '[data-board="fabric"] button, [data-board="fabric"] [role=button]')]
         .filter(el => !el.getAttribute('data-tip'))
         .map(el => el.className + ' ' + el.textContent.trim().slice(0, 20))""")
     assert not missing, missing

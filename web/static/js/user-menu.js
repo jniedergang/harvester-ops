@@ -73,6 +73,10 @@ const UserMenu = (() => {
       </div>
       <dl class="um-facts">${facts.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>
       <div class="um-actions">
+        ${d.password_managed ? `<button type="button" class="um-item tip" role="menuitem" data-um="password" data-tip="${escapeHtml(tr('accounts.changeTip'))}">
+          ${window.Icons ? Icons.svg('key', { size: 14 }) : ''}<span>${escapeHtml(tr('accounts.myPassword'))}</span></button>` : ''}
+        ${d.role === 'admin' && d.auth !== 'open' ? `<button type="button" class="um-item tip" role="menuitem" data-um="console-accounts" data-tip="${escapeHtml(tr('accounts.menuTip'))}">
+          ${window.Icons ? Icons.svg('user', { size: 14 }) : ''}<span>${escapeHtml(tr('accounts.title'))}</span></button>` : ''}
         <button type="button" class="um-item tip" role="menuitem" data-um="accounts" data-tip="${escapeHtml(tr('user.accountsTip'))}">
           ${window.Icons ? Icons.svg('shield', { size: 14 }) : ''}<span>${escapeHtml(tr('user.accounts'))}</span></button>
         <button type="button" class="um-item tip" role="menuitem" data-um="language" data-tip="${escapeHtml(tr('user.languageTip'))}">
@@ -105,9 +109,11 @@ const UserMenu = (() => {
 
   async function signOut() {
     const d = who || {};
-    if (d.auth === 'rancher') {
-      try { await fetch('/logout', { method: 'POST' }); } catch { /* on part quand même */ }
-    } else if (d.auth === 'local') {
+    // v1.57.0 : une session (Rancher ou compte local) se ferme côté serveur ;
+    // un navigateur qui s'était authentifié en HTTP Basic (avant la 1.57)
+    // doit en plus oublier le mot de passe qu'il garde.
+    try { await fetch('/logout', { method: 'POST' }); } catch { /* on part quand même */ }
+    if (d.auth_via === 'basic') {
       await new Promise((resolve) => {
         const x = new XMLHttpRequest();
         x.open('GET', '/logout/local', true, PSEUDO_USER, String(Date.now()));
@@ -120,7 +126,9 @@ const UserMenu = (() => {
 
   function act(what) {
     setOpen(false);
-    if (what === 'accounts' && typeof Settings !== 'undefined') Settings.openTab('husers');
+    if (what === 'password' && window.ConsoleAccounts) ConsoleAccounts.openPasswordChange();
+    else if (what === 'console-accounts' && typeof Settings !== 'undefined') Settings.openTab('accounts');
+    else if (what === 'accounts' && typeof Settings !== 'undefined') Settings.openTab('husers');
     else if (what === 'language' && typeof Settings !== 'undefined') Settings.openTab('language');
     else if (what === 'versions') window.Versions?.open();
     else if (what === 'signout') signOut();

@@ -356,6 +356,36 @@ bit à bit après une copie, un export et un import entre versions.
 
 ## 3. Observabilité cluster (console)
 
+### Les sections de Harvester, un cluster à la fois (1.57.0)
+
+Le menu latéral regroupe, sous Cluster, les menus que les opérateurs
+connaissent de Harvester, pour le cluster choisi :
+
+- **Stockage** : Volumes (la vue du stockage : répliques, santé,
+  corrections), Images (source, taille, état, classe de stockage, VMs qui
+  s'en servent) et Classes de stockage (répliques, récupération, liaison,
+  extension, l'image pour laquelle une classe a été faite, combien de
+  volumes l'utilisent).
+- **Réseau** : Réseaux des VMs (un bloc par réseau), Réseaux overlay (les
+  VPC et subnets kube-ovn, avec leurs formulaires) et Réseaux underlay (la
+  fabrique : cartes physiques, switchs virtuels, LLDP). Ces vues ont quitté
+  l'Aperçu, qui garde Métriques et la vue Cluster.
+- **Add-ons** : chaque add-on de Harvester, son chart et sa version, son
+  état, et Activer / Désactiver pour les administrateurs, suivi dans le dock
+  (`harvester-resources addon` en ligne de commande). Un refus de Harvester
+  se dit simplement : sur un cluster d'un seul nœud, le descheduler « cannot
+  be enabled as not enough nodes exist in the cluster ». Vérifié sur harv1 :
+  harvester-seeder activé (déployé en 21 s), puis désactivé.
+- **Sécurité** : Secrets (type, nom des clés, VMs qui s'en servent ; les
+  valeurs ne sont jamais lues dans la page ; les centaines de secrets que le
+  cluster utilise pour lui-même restent cachés tant qu'on ne les demande
+  pas) et Clés SSH (empreinte, validation, VMs qui les ont reçues).
+
+Chaque liste se filtre par mots, se trie par n'importe quelle colonne (clic
+sur l'en-tête, à nouveau pour inverser ; l'ordre est retenu), ouvre le
+détail d'une ligne et ouvre une VM depuis son nom. Les listes se relisent
+toutes les 10 s tant qu'elles sont à l'écran.
+
 - **Le réseau de l'hôte, un switch virtuel à la fois (Fabrique).** La
   vue Réseau ci-dessous regarde le réseau depuis les VMs ; celle-ci le lit
   comme un exploitant ESXi lit un Standard Switch : un bloc par switch, de
@@ -939,6 +969,20 @@ connexion, compte local ou Keycloak.
   session ; Rancher ne laisse pas un jeton OIDC se révoquer lui-même, il
   expire à la durée de la session. Se déconnecter de Rancher ferme aussi la
   session de la console à son renouvellement suivant.
+
+### La connexion est obligatoire (1.57.0)
+
+Il n'y a plus de console ouverte : sans session, toute page mène à la page
+de connexion (jamais l'invite de mot de passe du navigateur) et tout appel
+d'API est refusé. Les comptes locaux se connectent par un formulaire (cookie
+de session HttpOnly, douze heures) ; une écriture portée par un cookie de
+session doit venir de la console même. Sans aucun compte, le premier
+démarrage crée le premier administrateur avec un jeton lu sur le disque du
+serveur (voir le guide d'installation). Les administrateurs gèrent les
+comptes dans Réglages > Comptes de la console (créer, rôle, réinitialiser un
+mot de passe, supprimer ; le dernier administrateur ne peut pas être
+retiré) ; chacun change son propre mot de passe depuis le menu du compte ;
+réinitialiser un mot de passe ou supprimer un compte ferme ses sessions.
 
 ### Votre compte et la déconnexion (1.56.0)
 

@@ -602,7 +602,7 @@ const StorageMap = (() => {
   }
 
   function start(clusterName) {
-    const h = document.querySelector('.overview-subtab[data-subtab="storage"] .topology-host');
+    const h = document.querySelector('[data-board="storage"] .topology-host');
     if (!h) return Promise.resolve();
     if (cluster !== clusterName) { lastData = null; selected = null; }
     cluster = clusterName;

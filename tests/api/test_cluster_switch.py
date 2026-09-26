@@ -128,8 +128,12 @@ def test_returning_to_the_overview_remounts_the_topology():
     (re)montée que par un clic sur son sous-onglet."""
     set_tab = APP.split("function setTab(name)", 1)[1].split("\n  }", 1)[0]
     assert "mountTopology(overviewMode())" in set_tab
-    assert "if (name !== 'overview') stopBoards(null);" in set_tab, (
+    # v1.57.0 : les sections Storage et Network portent aussi des vues de
+    # blocs ; y entrer les monte (Sections.activate), en sortir les coupe.
+    assert "if (name !== 'overview' && !section) stopBoards(null);" in set_tab, (
         "quitter l'aperçu doit couper le polling, qui visait l'ancien cluster")
+    assert "if (section) Sections.activate(name);" in set_tab
+    assert "else if (window.Sections) Sections.stopLists();" in set_tab
     stop = APP.split("function stopBoards(except)", 1)[1].split("\n  }", 1)[0]
     assert "b.stop()" in stop
 

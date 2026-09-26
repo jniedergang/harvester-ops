@@ -13,6 +13,10 @@ Le réseau est intercepté : aucun test ne touche à un cluster.
 import json
 
 import pytest
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from boards import goto_board  # noqa: E402
 
 playwright = pytest.importorskip("playwright")
 
@@ -80,10 +84,10 @@ def open_storage(page, base_url, data, fix_status=201, fixes=None, lang="en"):
         "localStorage.setItem('harvester_ops_current_tab','overview');")
     page.goto(base_url, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click('[data-overview-tab="storage"]')
-    page.wait_for_selector('.overview-subtab[data-subtab="storage"] .vsw', timeout=10000)
+    goto_board(page, "storage")
+    page.wait_for_selector('[data-board="storage"] .vsw', timeout=10000)
     page.wait_for_timeout(600)
-    return page.locator('.overview-subtab[data-subtab="storage"]')
+    return page.locator('[data-board="storage"]')
 
 
 def test_the_banner_says_how_many_and_why(context, flask_server):
@@ -205,7 +209,7 @@ def test_health_controls_have_tooltips_and_french_renders(context, flask_server)
     view.locator('[data-vol="default/db"]').click()
     page.wait_for_timeout(300)
     missing = page.evaluate("""() => [...document.querySelectorAll(
-        '.overview-subtab[data-subtab="storage"] button, .overview-subtab[data-subtab="storage"] [role=button]')]
+        '[data-board="storage"] button, [data-board="storage"] [role=button]')]
         .filter(el => !el.getAttribute('data-tip')).map(el => el.className)""")
     assert not missing, missing
     page2 = context.new_page()

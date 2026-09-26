@@ -28,6 +28,11 @@ import tempfile as _tempfile  # noqa: E402
 _TF_TEST_DIR = _tempfile.mkdtemp(prefix="hops-tf-tests-")
 os.environ.setdefault("HARVESTER_OPS_TF_WORKSPACES", _TF_TEST_DIR + "/terraform")
 os.environ.setdefault("HARVESTER_OPS_TF_DB", _TF_TEST_DIR + "/tf-declarations.db")
+# v1.57.0 : la console exige une connexion ; les tests qui n'éprouvent pas
+# l'authentification tournent en mode ouvert, DEMANDÉ explicitement, et
+# leurs comptes éventuels restent dans leur dossier.
+os.environ.setdefault("HARVESTER_OPS_AUTH", "none")
+os.environ.setdefault("HARVESTER_OPS_ACCOUNTS", _TF_TEST_DIR + "/accounts.json")
 
 import pytest
 
@@ -128,8 +133,12 @@ def flask_server(test_config):
         # /tmp/harvester-ops-terraform, audit D17)
         "HARVESTER_OPS_TF_WORKSPACES": str(test_config["root"] / "terraform"),
         "HARVESTER_OPS_TF_DB": str(test_config["root"] / "tf-declarations.db"),
-        # Force no auth in tests — point to a path that won't exist
+        # Force no auth in tests — point to a path that won't exist, and ask
+        # for the open mode explicitly (v1.57.0 : sinon la console attend son
+        # premier administrateur)
         "HARVESTER_OPS_HTPASSWD": str(test_config["root"] / "no-such-htpasswd"),
+        "HARVESTER_OPS_AUTH": "none",
+        "HARVESTER_OPS_ACCOUNTS": str(test_config["root"] / "accounts.json"),
         # v1.5.6: disable flask-limiter in tests; the suite hits some
         # endpoints dozens of times in a row.
         "HARVESTER_OPS_DISABLE_RATELIMIT": "1",

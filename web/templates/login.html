@@ -49,6 +49,8 @@
       <div class="sto-finding-title" data-i18n="login.err.unreachable">Rancher cannot be reached. A local account still works.</div>
       {% elif error_kind == 'config' %}
       <div class="sto-finding-title" data-i18n="login.err.config">Sign-in through Rancher is not configured on this console.</div>
+      {% elif error_kind == 'credentials' %}
+      <div class="sto-finding-title" data-i18n="login.err.credentials">Wrong user name or password.</div>
       {% else %}
       <div class="sto-finding-title" data-i18n="login.err.token">Rancher's answer could not be verified: sign-in refused.</div>
       {% endif %}
@@ -56,20 +58,33 @@
     </div>
     {% endif %}
 
+    {% if local %}
+    <!-- v1.57.0 : un compte local se connecte par ce formulaire ; la session
+         (cookie HttpOnly) se quitte par « Se déconnecter » -->
+    <form class="login-form" method="post" action="/login/local" autocomplete="on">
+      <input type="hidden" name="next" value="{{ next }}">
+      <label class="login-field"><span data-i18n="login.username">User name</span>
+        <input type="text" name="username" value="{{ username }}" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required {% if not username %}autofocus{% endif %}></label>
+      <label class="login-field"><span data-i18n="login.password">Password</span>
+        <input type="password" name="password" autocomplete="current-password" required
+               {% if username %}autofocus{% endif %}></label>
+      <button type="submit" class="btn btn-primary login-submit tip" data-i18n-title="login.localTip"
+              title="A local account of this console (user name and password).">
+        <span data-i18n="login.submit">Sign in</span></button>
+    </form>
+    {% endif %}
+
     <div class="login-actions">
       {% if rancher %}
-      <a class="btn btn-primary login-rancher tip" href="/auth/rancher/login" data-i18n-title="login.rancherTip"
+      {% if local %}<div class="login-or" data-i18n="login.or">or</div>{% endif %}
+      <a class="btn {% if local %}btn-secondary{% else %}btn-primary{% endif %} login-rancher tip" href="/auth/rancher/login" data-i18n-title="login.rancherTip"
          title="Uses your Rancher session: your rights on the clusters are the ones Rancher gives you.">
         <span data-i18n="login.rancher">Sign in with {{ rancher_label }}</span>
       </a>
       {% endif %}
-      {% if local %}
-      <a class="btn btn-secondary login-local tip" href="/login/local" data-i18n-title="login.localTip"
-         title="A local account of this console (user name and password).">
-        <span data-i18n="login.local">Local account</span>
-      </a>
-      {% endif %}
       {% if not rancher and not local %}
+      <!-- mode ouvert, demandé explicitement (HARVESTER_OPS_AUTH=none) -->
       <a class="btn btn-primary" href="/" data-i18n="login.open">Open the console</a>
       {% endif %}
     </div>

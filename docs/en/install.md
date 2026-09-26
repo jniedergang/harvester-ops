@@ -37,7 +37,8 @@ sudo ./install.sh
 The installer is **interactive**. It will ask:
 
 - Install the web UI? (default: yes)
-- HTTP Basic auth username and password (only if UI)
+- The first account of the console, user name and password (only if UI):
+  it administers the console (1.57.0; it used to land as a viewer)
 - TLS: generate a self-signed certificate? (default: yes)
 - Web UI bind port (default: 8090)
 - systemd service for the UI? (default: yes)
@@ -127,6 +128,26 @@ transfer:
 Exported archives are kept in `/var/lib/harvester-ops/exports` (the
 service's persistent volume), as are the archives added from a browser
 (1.47.0): size that volume for the largest VM you expect to move by file.
+
+### 8b. Signing in (1.57.0)
+
+The console always asks who you are: there is no open mode any more
+(`HARVESTER_OPS_AUTH=none` restores it for tests only, and only while no
+account exists). People sign in on the sign-in page with a user name and a
+password; the session is an HttpOnly cookie, and "Sign out" in the account
+menu (top right) ends it. Scripts and API clients keep using HTTP Basic.
+
+- **Accounts**: the installer's account (htpasswd) and the accounts created
+  in Settings > Console accounts, kept in
+  `/var/lib/harvester-ops/accounts.json` (bcrypt hashes, mode 0600). An
+  administrator creates them, sets their role (viewer, operator,
+  administrator), resets a password or deletes them; everyone changes their
+  own password from the account menu. Each change is recorded in Activity.
+- **First start without any account** (no htpasswd, no Rancher): every page
+  leads to `/setup`, which creates the first administrator. It asks for a
+  token written to `/var/lib/harvester-ops/setup-token` (mode 0600, the
+  service log gives the path): only who administers the server can read it,
+  so nobody reaching the port first can take the console.
 
 ### 9. Sign in through Rancher (optional, 1.50.0)
 

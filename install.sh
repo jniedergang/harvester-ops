@@ -115,7 +115,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-vm-transfer.py" "$PREFIX/harvester-vm-transfer"
     ln -sf "$PREFIX/harvester-capi.py" "$PREFIX/harvester-capi"
     ln -sf "$PREFIX/harvester-network.py" "$PREFIX/harvester-network"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,capi}"
+    ln -sf "$PREFIX/harvester-resources.py" "$PREFIX/harvester-resources"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,capi,network,resources}"
 }
 
 # -----------------------------------------------------------------------------
@@ -214,6 +215,31 @@ install_web_ui() {
     fi
 }
 
+# v1.57.0 : le compte créé par l'installeur administre la console. Avant,
+# roles.yaml naissait avec `users: {}` et `default_role: viewer` : ce seul
+# compte n'était qu'un lecteur, incapable de rien changer. Un choix déjà écrit
+# pour ce compte n'est jamais remplacé.
+grant_admin_role() {
+    local user="$1" f="$CONF_DIR/roles.yaml"
+    [[ -f "$f" ]] || return 0
+    python3 - "$f" "$user" <<'PY'
+import re, sys
+path, user = sys.argv[1], sys.argv[2]
+text = open(path).read()
+if re.search(r"^[ \t]+%s[ \t]*:" % re.escape(user), text, re.M):
+    sys.exit(0)
+line = "users:\n  %s: admin" % user
+if re.search(r"^users:[ \t]*\{[ \t]*\}[ \t]*$", text, re.M):
+    text = re.sub(r"^users:[ \t]*\{[ \t]*\}[ \t]*$", line, text, count=1, flags=re.M)
+elif re.search(r"^users:[ \t]*$", text, re.M):
+    text = re.sub(r"^users:[ \t]*$", line, text, count=1, flags=re.M)
+else:
+    text = text.rstrip("\n") + "\n" + line + "\n"
+open(path, "w").write(text)
+PY
+    ok "'$user' administers the console (roles.yaml)"
+}
+
 setup_basic_auth() {
     info "Setting up HTTP Basic auth"
     if [[ -f "$CONF_DIR/htpasswd" ]]; then
@@ -252,7 +278,8 @@ PY
         htpasswd -B -c "$CONF_DIR/htpasswd" "$user"
     fi
     chmod 0640 "$CONF_DIR/htpasswd"
-    ok "Basic auth configured for user '$user'"
+    ok "Sign-in configured for user '$user'"
+    grant_admin_role "$user"
 }
 
 setup_tls() {

@@ -159,7 +159,13 @@ def test_without_a_roles_file_nobody_is_restricted(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "HTPASSWD_PATH", htpasswd)
     monkeypatch.setattr(wapp, "ROLES_PATH", tmp_path / "absent.yaml")
     monkeypatch.setattr(wapp, "_roles_cache", {"mtime": None, "data": None})
-    assert wapp.roles_active() is False
+    monkeypatch.setattr(wapp, "check_auth", lambda u, p: True)
+    import base64
+    h = {"Authorization": "Basic " + base64.b64encode(b"bob:x").decode()}
+    # v1.57.0 : la personne est identifiée (les rôles « s'appliquent »), mais
+    # sans fichier de rôles son compte garde tout, comme avant
+    with wapp.app.test_request_context("/api/x", headers=h):
+        assert wapp.current_user() == "bob" and wapp.current_role() == "admin"
 
 
 def test_a_broken_roles_file_does_not_lock_everyone_out(tmp_path, monkeypatch,
@@ -213,6 +219,9 @@ def test_every_mutating_route_is_covered_by_the_gate():
     construction. Ce test le VÉRIFIE plutôt que de le supposer : c'est ce
     qui manquait aux limites de débit, décorées une par une et oubliées six
     fois."""
+    # v1.57.0 : changer SON mot de passe est ouvert à tout compte connecté,
+    # lecteur compris (l'ancien mot de passe est exigé).
+    for_everyone = {"POST /api/me/password"}
     uncovered = []
     for rule in wapp.app.url_map.iter_rules():
         path = str(rule)
@@ -222,7 +231,7 @@ def test_every_mutating_route_is_covered_by_the_gate():
         if not mutating:
             continue
         for method in sorted(mutating):
-            if wapp.required_role_for(path, method) == "viewer":
+            if wapp.required_role_for(path, method) == "viewer" and f"{method} {path}" not in for_everyone:
                 uncovered.append(f"{method} {path}")
     assert not uncovered, (
         "ces points d'entrée modifient quelque chose sans exiger de rôle : "

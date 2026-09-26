@@ -83,12 +83,18 @@ def board(context, flask_server):
             r, 'event: end\ndata: {"status": "done"}\n\n', ctype="text/event-stream"))
         page.goto(flask_server["base_url"], wait_until="domcontentloaded")
         page.wait_for_function("window.VpcBoard && window.i18n && window.Board")
+        # le rôle de la session arrive par /api/whoami : l'attendre, sinon
+        # sa réponse efface le rôle posé ci-dessous
+        page.wait_for_function("() => document.body.className.includes('role-')")
         page.evaluate("""(role) => {
-            document.querySelectorAll('.overview-subtab').forEach(p => p.hidden = p.dataset.subtab !== 'vpc');
-            if (role) document.body.classList.add('roles-active', 'role-' + role);
+            App.setTab('network'); Sections.show('network', 'overlay');
+            if (role) {
+                document.body.classList.remove('role-viewer', 'role-operator', 'role-admin');
+                document.body.classList.add('roles-active', 'role-' + role);
+            }
             VpcBoard.start('harv-fake');
         }""", role)
-        view = page.locator('.overview-subtab[data-subtab="vpc"]')
+        view = page.locator('[data-board="vpc"]')
         expect(view.locator('.vpc-block[data-vpc="lab"]')).to_be_visible(timeout=5000)
         return page, view, calls
     return make

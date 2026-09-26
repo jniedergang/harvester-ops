@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title data-i18n="setup.title">harvester-ops: first start</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<script>
+  (function() {
+    try {
+      var THEMES = ['suse', 'nord', 'solarized', 'catppuccin', 'tokyo'];
+      var MODES  = ['dark', 'light'];
+      var t = localStorage.getItem('harvester_ops_theme');
+      var m = localStorage.getItem('harvester_ops_mode');
+      if (!t || THEMES.indexOf(t) < 0) t = 'suse';
+      if (!m || MODES.indexOf(m)  < 0) m = 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.setAttribute('data-mode',  m);
+    } catch (e) {
+      document.documentElement.setAttribute('data-theme', 'suse');
+      document.documentElement.setAttribute('data-mode',  'light');
+    }
+  })();
+</script>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body class="login-page">
+  <main class="login-card card setup-card">
+    <div class="login-brand">
+      <img src="/static/favicon.svg" alt="" width="36" height="36">
+      <div>
+        <h1>harvester-ops</h1>
+        <div class="login-version">v{{ version }}</div>
+      </div>
+    </div>
+    <h2 class="setup-title" data-i18n="setup.heading">First start: create the administrator</h2>
+    <p class="login-intro" data-i18n="setup.intro">This console has no account yet. Nobody can use it
+      until its first administrator exists.</p>
+    <div class="setup-token-hint">
+      <span data-i18n="setup.tokenHint">To prove you administer this server, give the token written in this file (readable on the server only):</span>
+      <code>{{ token_path }}</code>
+    </div>
+
+    {% if error %}
+    <div class="sto-finding sev-critical login-error" data-code="{{ error }}">
+      {% if error == 'token' %}
+      <div class="sto-finding-title" data-i18n="setup.err.token">This token is not the one in the file.</div>
+      {% elif error == 'mismatch' %}
+      <div class="sto-finding-title" data-i18n="setup.err.mismatch">The two passwords differ.</div>
+      {% elif error == 'password-short' %}
+      <div class="sto-finding-title" data-i18n="setup.err.short">The password is too short.</div>
+      {% elif error == 'password-name' %}
+      <div class="sto-finding-title" data-i18n="setup.err.name">The password must not contain the account name.</div>
+      {% elif error == 'name-invalid' %}
+      <div class="sto-finding-title" data-i18n="setup.err.invalid">2 to 32 characters: lower-case letters, digits, dot, dash, underscore.</div>
+      {% else %}
+      <div class="sto-finding-title">{{ error }}</div>
+      {% endif %}
+    </div>
+    {% endif %}
+
+    <form class="login-form" method="post" action="/setup" autocomplete="off">
+      <label class="login-field"><span data-i18n="setup.token">Setup token</span>
+        <input type="text" name="token" required autocapitalize="none" spellcheck="false" autofocus></label>
+      <label class="login-field"><span data-i18n="login.username">User name</span>
+        <input type="text" name="username" value="{{ username or 'admin' }}" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required pattern="[a-z0-9][a-z0-9._\-]{1,31}"></label>
+      <label class="login-field"><span data-i18n="login.password">Password</span>
+        <input type="password" name="password" autocomplete="new-password" required minlength="{{ min }}"></label>
+      <label class="login-field"><span data-i18n="setup.confirm">Password again</span>
+        <input type="password" name="confirm" autocomplete="new-password" required minlength="{{ min }}"></label>
+      <p class="login-note setup-rule" data-i18n="setup.rule">At least 12 characters, without the account name.</p>
+      <button type="submit" class="btn btn-primary login-submit tip" data-i18n-title="setup.submitTip"
+              title="Creates the administrator account and signs you in">
+        <span data-i18n="setup.submit">Create the administrator</span></button>
+    </form>
+  </main>
+<script src="/static/js/i18n.js"></script>
+<script>
+  (function () {
+    try { window.i18n.applyTranslations(); } catch (e) { /* page lisible sans traduction */ }
+  })();
+</script>
+</body>
+</html>

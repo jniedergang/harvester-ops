@@ -171,12 +171,17 @@ def test_a_tampered_return_is_refused(world, tamper, error):
 
 def test_a_local_account_still_works(world, monkeypatch):
     monkeypatch.setattr(wapp, "check_auth", lambda u, p: u == "local")
+    monkeypatch.setattr(wapp, "_htpasswd_users", lambda: ["local"])
     import base64
     with wapp.app.test_client() as c:
         h = {"Authorization": "Basic " + base64.b64encode(b"local:x").decode()}
         assert c.get("/api/whoami", headers=h).get_json()["auth"] == "local"
-        assert c.get("/login/local", headers=h).status_code == 302
-        assert c.get("/login/local").status_code == 401
+        # v1.57.0 : plus d'invite du navigateur ; le formulaire ouvre une session
+        assert c.get("/login/local").headers["Location"].endswith("/login")
+        r = c.post("/login/local", data={"username": "local", "password": "x"}, headers=ORIGIN)
+        assert r.status_code == 302
+        who = c.get("/api/whoami").get_json()
+        assert who["auth"] == "local" and who["auth_via"] == "session" and who["user"] == "local"
 
 
 def test_clusters_rancher_does_not_show_are_left_out_and_refused(world, monkeypatch):

@@ -566,7 +566,7 @@ const ClusterMap = (() => {
   }
 
   function start(clusterName) {
-    const h = document.querySelector('.overview-subtab[data-subtab="cluster"] .topology-host');
+    const h = document.querySelector('[data-board="cluster"] .topology-host');
     if (!h) return Promise.resolve();
     if (cluster !== clusterName) { lastData = null; selected = null; }
     cluster = clusterName;

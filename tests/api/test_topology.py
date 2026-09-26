@@ -167,12 +167,17 @@ def test_each_overview_board_mounts_into_its_own_subtab():
     sous-onglets, et Réseau ou Stockage se dessinaient dans celle du
     Cluster. Chaque module cherche donc la zone de SON sous-onglet."""
     js = WEB_DIR / "static" / "js"
+    html = (WEB_DIR / "templates" / "index.html").read_text()
+    # v1.57.0 : les vues ont quitté l'aperçu pour leurs sections (Storage,
+    # Network) ; chacune cherche la zone qui porte SON data-board, présente
+    # une seule fois dans la page.
     for module, mode in (("cluster-map.js", "cluster"), ("netmap.js", "network"),
-                         ("fabric.js", "fabric"), ("storage-map.js", "storage")):
+                         ("fabric.js", "fabric"), ("storage-map.js", "storage"),
+                         ("vpc.js", "vpc")):
         src = (js / module).read_text()
-        assert (f"document.querySelector('.overview-subtab[data-subtab=\"{mode}\"] "
-                ".topology-host')") in src, module
+        assert (f"document.querySelector('[data-board=\"{mode}\"] .topology-host')") in src, module
         assert "#topology-canvas" not in src, module
+        assert html.count(f'data-board="{mode}"') == 1, mode
     app = (js / "app.js").read_text()
     assert "cluster: window.ClusterMap" in app
 

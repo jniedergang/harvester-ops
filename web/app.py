@@ -38,6 +38,7 @@ import uuid
 from collections import deque
 from functools import wraps
 from pathlib import Path
+from urllib.parse import quote
 
 # v1.4.18: structured logging replaces the print(file=sys.stderr)
 # sprinkled across the file. The format embeds the logger name so a
@@ -469,17 +470,108 @@ def _sso_cookie_secure(s):
 
 
 # -----------------------------------------------------------------------------
-# Auth (HTTP Basic via htpasswd)
+# Authentification (v1.57.0 : connexion obligatoire)
+#
+# Jusqu'à la 1.56, sans htpasswd la console tournait OUVERTE : quiconque
+# atteignait le port pouvait éteindre un cluster. Elle exige maintenant une
+# identité : session Rancher, session d'un compte local (formulaire de
+# connexion, cookie HttpOnly), ou HTTP Basic pour les clients d'API et les
+# scripts. Sans aucun compte, la console attend la création du premier
+# administrateur (/setup, jeton lu sur le disque du serveur). Le mode ouvert
+# ne subsiste que demandé explicitement (HARVESTER_OPS_AUTH=none, tests).
 # -----------------------------------------------------------------------------
-def check_auth(username, password):
+import accounts as _acc  # noqa: E402
+
+AUTH_OPEN_ALLOWED = os.environ.get("HARVESTER_OPS_AUTH", "") == "none"
+_ACCOUNTS = {"store": None}
+_LOCAL_SESSIONS = _acc.LocalSessions()
+
+
+def _accounts():
+    if _ACCOUNTS["store"] is None:
+        _ACCOUNTS["store"] = _acc.Accounts(ACCOUNTS_PATH)
+    return _ACCOUNTS["store"]
+
+
+def _setup_token_path():
+    return ACCOUNTS_PATH.parent / "setup-token"
+
+
+def _htpasswd_check(username, password):
     if not HTPASSWD_PATH.exists():
-        # No htpasswd → allow (dev mode)
-        return True
+        return False
     try:
         ht = HtpasswdFile(str(HTPASSWD_PATH))
         return ht.check_password(username, password) or False
     except Exception:
         return False
+
+
+def _htpasswd_users():
+    if not HTPASSWD_PATH.exists():
+        return []
+    try:
+        return list(HtpasswdFile(str(HTPASSWD_PATH)).users())
+    except Exception:
+        return []
+
+
+def check_auth(username, password):
+    """Un compte local : ceux de la console d'abord, puis le htpasswd de
+    l'installeur. Plus jamais « vrai » faute de fichier (c'était le mode
+    ouvert)."""
+    if _accounts().has(username):
+        return _accounts().verify(username, password)
+    return _htpasswd_check(username, password)
+
+
+def local_accounts_exist():
+    return HTPASSWD_PATH.exists() or _accounts().exists()
+
+
+def auth_configured():
+    return local_accounts_exist() or _sso_settings() is not None
+
+
+def open_mode():
+    """Console sans connexion : seulement si on l'a demandé ET qu'aucun
+    compte n'existe (un compte créé referme la porte)."""
+    return AUTH_OPEN_ALLOWED and not auth_configured()
+
+
+def setup_needed():
+    return not AUTH_OPEN_ALLOWED and not auth_configured()
+
+
+def _local_session():
+    try:
+        if "local_session" in g:
+            return g.local_session
+        sid = request.cookies.get(_acc.COOKIE)
+    except RuntimeError:
+        return None
+    sess = _LOCAL_SESSIONS.get(sid) if sid else None
+    # un compte supprimé entre-temps n'a plus de session
+    if sess is not None and not (_accounts().has(sess["user"]) or sess["user"] in _htpasswd_users()):
+        _LOCAL_SESSIONS.close(sess["sid"])
+        sess = None
+    g.local_session = sess
+    return sess
+
+
+def _basic_user():
+    """L'utilisateur d'un en-tête HTTP Basic valable (clients d'API, scripts),
+    vérifié une fois par requête."""
+    try:
+        if "basic_user" in g:
+            return g.basic_user
+        auth = request.authorization
+    except RuntimeError:
+        return None
+    user = auth.username if (auth and auth.username and auth.type == "basic"
+                             and check_auth(auth.username, auth.password)) else None
+    g.basic_user = user
+    return user
 
 
 def authenticate():
@@ -490,26 +582,35 @@ def authenticate():
     )
 
 
+def _wants_page():
+    return request.method == "GET" and not request.path.startswith(("/api/", "/ws/"))
+
+
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         # v1.50.0 : une session ouverte par Rancher vaut authentification
-        if _sso_session() is not None:
+        if _sso_session() is not None or _local_session() is not None:
             return f(*args, **kwargs)
-        # No htpasswd file → dev mode, skip auth entirely
-        if not HTPASSWD_PATH.exists():
+        if open_mode():
             return f(*args, **kwargs)
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            if not auth and _sso_settings() is not None:
-                # Pas d'invite du navigateur quand on peut proposer Rancher :
-                # la page de connexion offre les deux chemins.
-                if request.method == "GET" and not request.path.startswith("/api/"):
-                    return redirect("/login")
-                if request.cookies.get(_rs.COOKIE):
-                    return jsonify({"error": "session expired", "login": "/login"}), 401
+        if setup_needed():
+            if _wants_page():
+                return redirect("/setup")
+            return jsonify({"error": "setup required", "setup": "/setup"}), 401
+        if _basic_user():
+            return f(*args, **kwargs)
+        if _wants_page():
+            nxt = request.full_path if request.query_string else request.path
+            return redirect("/login" + ("" if request.path == "/" else "?next=" + quote(nxt, safe="")))
+        # Un client qui a présenté des identifiants reçoit le défi Basic ; un
+        # navigateur sans identifiants, NON : l'invite du navigateur
+        # court-circuiterait la page de connexion.
+        if request.authorization is not None:
             return authenticate()
-        return f(*args, **kwargs)
+        expired = request.cookies.get(_acc.COOKIE) or request.cookies.get(_rs.COOKIE)
+        return jsonify({"error": "session expired" if expired else "authentication required",
+                        "login": "/login"}), 401
     return decorated
 
 
@@ -553,6 +654,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/users",               # gestion des comptes de la console
     "/api/harvester-users",     # comptes du cluster Harvester
     "/api/kubeovn/",            # réseaux kube-ovn : un changement peut couper des VMs
+    "/api/addons/",             # v1.57.0 : activer un add-on installe un chart sur le cluster
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
@@ -635,8 +737,10 @@ def current_user():
     sess = _sso_session()
     if sess is not None:
         return sess.login
-    auth = request.authorization
-    return auth.username if auth and auth.username else ""
+    local = _local_session()
+    if local is not None:
+        return local["user"]
+    return _basic_user() or ""
 
 
 def roles_active():
@@ -650,22 +754,31 @@ def roles_active():
     """
     if _sso_session() is not None:
         return True
-    return HTPASSWD_PATH.exists() and load_roles().get("configured", False)
+    # v1.57.0 : dès qu'une personne est identifiée, son rôle s'applique
+    return not open_mode()
 
 
 def current_role():
     sess = _sso_session()
     if sess is not None:
         return sess.role
-    if not roles_active():
+    if open_mode():
         return "admin"
+    user = current_user()
+    # les comptes créés dans la console portent leur rôle
+    role = _accounts().role_of(user) if user else None
+    if role:
+        return role
     roles = load_roles()
-    return roles["users"].get(current_user(), roles["default_role"])
+    if not roles.get("configured"):
+        # installation d'avant les rôles : ses comptes gardaient tout
+        return "admin" if user else "viewer"
+    return roles["users"].get(user, roles["default_role"])
 
 
 # Chemins dont la simple LECTURE est réservée aux admins : savoir qui
 # détient l'administration d'un cluster n'a pas à être public.
-ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users",)
+ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users", "/api/users")
 
 
 # Lectures qui donnent plus qu'une vue : le kubeconfig d'un cluster créé
@@ -676,6 +789,9 @@ OPERATOR_READ_SUFFIXES = ("/kubeconfig",)
 def required_role_for(path, method):
     if path.startswith(ADMIN_ONLY_READ_PREFIXES):
         return "admin"
+    # v1.57.0 : chacun change son propre mot de passe, lecteur compris
+    if path.startswith("/api/me/"):
+        return "viewer"
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
@@ -694,10 +810,12 @@ def _enforce_role():
         return None
     if path in ("/api/whoami",):
         return None
-    if (_sso_session() is not None and request.method not in ("GET", "HEAD", "OPTIONS")
-            and not _same_origin()):
+    # Une écriture portée par un cookie de session (Rancher ou compte local)
+    # doit venir de la console même.
+    if ((_sso_session() is not None or _local_session() is not None)
+            and request.method not in ("GET", "HEAD", "OPTIONS") and not _same_origin()):
         return jsonify({"error": "forbidden",
-                        "hint": "cross-origin write refused for a Rancher session"}), 403
+                        "hint": "cross-origin write refused for a browser session"}), 403
     needed = required_role_for(path, request.method)
     have = current_role()
     if ROLE_RANK.get(have, 0) < ROLE_RANK[needed]:
@@ -735,15 +853,21 @@ def api_whoami():
         "role": current_role(),
         "roles_active": roles_active(),
         "roles_configured": bool(roles.get("configured")),
-        "auth_configured": HTPASSWD_PATH.exists(),
+        "auth_configured": auth_configured(),
         "roles_file": str(ROLES_PATH),
         # v1.32.0 : ce que le CLUSTER voit, qui n'est pas le rôle console.
         "delegation_active": identity_delegation_active(),
         "cluster_user": (ident or {}).get("user"),
         "cluster_groups": (ident or {}).get("groups", []),
-        # v1.50.0 : connexion par Rancher
+        # v1.50.0 : connexion par Rancher ; v1.57.0 : session d'un compte
+        # local, ou HTTP Basic (client d'API, navigateur d'avant la 1.57)
         "auth": ("rancher" if _sso_session() is not None
-                 else ("local" if HTPASSWD_PATH.exists() else "open")),
+                 else ("open" if open_mode() else "local")),
+        "auth_via": ("rancher" if _sso_session() is not None
+                     else "session" if _local_session() is not None
+                     else "basic" if _basic_user() else "open"),
+        # peut changer son mot de passe depuis la console
+        "password_managed": bool(current_user()) and _accounts().has(current_user()),
         "rancher_login": _sso_settings() is not None,
         "session": _sso_session().public() if _sso_session() is not None else None,
     })
@@ -1568,27 +1692,123 @@ _LOGIN_ERROR_KINDS = {
 }
 
 
-@app.route("/login")
-def login_page():
+_LOGIN_ERROR_KINDS.update({"bad-credentials": "credentials", "too-many": "throttled"})
+
+
+def _safe_next(value):
+    """Une adresse de retour, seulement sur cette console (jamais `//hôte`)."""
+    v = (value or "").strip()
+    return v if v.startswith("/") and not v.startswith("//") and "\\" not in v else "/"
+
+
+def _cookie_secure():
     st = _sso_settings()
-    err = request.args.get("error", "")[:40]
+    return request.is_secure or (st is not None and _sso_redirect_uri(st).startswith("https://"))
+
+
+def _open_local_session(user):
+    sid = _LOCAL_SESSIONS.open(user)
+    return sid
+
+
+def _render_login(error="", status=200, username=""):
+    st = _sso_settings()
     return render_template("login.html", rancher=st is not None,
                            rancher_label=(st or {}).get("label", "Rancher"),
-                           local=HTPASSWD_PATH.exists(), error=err,
+                           local=local_accounts_exist(), error=error,
                            signed_out=request.args.get("signed_out") == "1",
-                           error_kind=(_LOGIN_ERROR_KINDS.get(err, "token") if err else ""),
-                           version=_harvester_ops_version())
+                           error_kind=(_LOGIN_ERROR_KINDS.get(error, "token") if error else ""),
+                           next=_safe_next(request.values.get("next")), username=username,
+                           version=_harvester_ops_version()), status
 
 
-@app.route("/login/local")
+@app.route("/login")
+def login_page():
+    if setup_needed():
+        return redirect("/setup")
+    # déjà connecté : la page de connexion n'a rien à offrir
+    if (_local_session() is not None or _sso_session() is not None) and not request.args.get("signed_out"):
+        return redirect(_safe_next(request.args.get("next")))
+    return _render_login(request.args.get("error", "")[:40])
+
+
+@app.route("/login/local", methods=["GET", "POST"])
+@_rate_limit("10/minute")
 def login_local():
-    """Déclenche l'invite du navigateur pour un compte local."""
-    if not HTPASSWD_PATH.exists():
-        return redirect("/")
-    auth = request.authorization
-    if not auth or not check_auth(auth.username, auth.password):
-        return authenticate()
-    return redirect("/")
+    """v1.57.0 : connexion d'un compte local par le formulaire de la page de
+    connexion ; une session (cookie HttpOnly) remplace l'invite HTTP Basic
+    du navigateur, qu'on ne pouvait pas vraiment quitter."""
+    if request.method == "GET":
+        return redirect("/login")
+    if not _same_origin():
+        return jsonify({"error": "forbidden"}), 403
+    user = (request.form.get("username") or "").strip()
+    pw = request.form.get("password") or ""
+    if not user or not check_auth(user, pw):
+        app.logger.warning("sign-in refused for %r from %s", user[:40], request.remote_addr)
+        return _render_login("bad-credentials", 401, username=user[:40])
+    sid = _open_local_session(user)
+    app.logger.info("sign-in: %s", user)
+    resp = redirect(_safe_next(request.form.get("next")))
+    resp.set_cookie(_acc.COOKIE, sid, max_age=_LOCAL_SESSIONS.ttl, httponly=True,
+                    secure=_cookie_secure(), samesite="Lax", path="/")
+    return resp
+
+
+def _announce_setup():
+    """Au démarrage, sans aucun compte : le jeton de création du premier
+    administrateur est écrit sur le disque, et son emplacement dit au journal."""
+    if not setup_needed():
+        return
+    try:
+        _acc.ensure_setup_token(_setup_token_path())
+    except OSError as e:
+        log.error("first start: cannot write the setup token (%s)", e)
+        return
+    log.warning("FIRST START: no account yet. Open the console, page /setup, and give the "
+                "token read from %s to create the first administrator.", _setup_token_path())
+
+
+@app.route("/setup", methods=["GET", "POST"])
+@_rate_limit("10/minute")
+def setup_page():
+    """Premier démarrage : créer le premier administrateur. Le jeton est dans
+    un fichier du serveur ; qui ne peut pas le lire ne peut pas prendre la
+    console avant son exploitant."""
+    if not setup_needed():
+        return redirect("/login")
+    try:
+        _acc.ensure_setup_token(_setup_token_path())
+    except OSError:
+        pass
+    ctx = {"token_path": str(_setup_token_path()), "version": _harvester_ops_version(),
+           "error": "", "username": "", "min": _acc.PASSWORD_MIN}
+    if request.method == "GET":
+        return render_template("setup.html", **ctx)
+    if not _same_origin():
+        return jsonify({"error": "forbidden"}), 403
+    user = (request.form.get("username") or "").strip()
+    pw, pw2 = request.form.get("password") or "", request.form.get("confirm") or ""
+    ctx["username"] = user[:40]
+    if not _acc.check_setup_token(_setup_token_path(), request.form.get("token")):
+        app.logger.warning("setup refused: wrong token from %s", request.remote_addr)
+        return render_template("setup.html", **dict(ctx, error="token")), 401
+    if pw != pw2:
+        return render_template("setup.html", **dict(ctx, error="mismatch")), 400
+    try:
+        _accounts().create(user, pw, "admin", by="setup")
+    except _acc.AccountError as e:
+        return render_template("setup.html", **dict(ctx, error=e.code)), 400
+    try:
+        _setup_token_path().unlink()
+    except OSError:
+        pass
+    app.logger.warning("first administrator created: %s", user)
+    sid = _open_local_session(user)
+    resp = redirect("/")
+    resp.set_cookie(_acc.COOKIE, sid, max_age=_LOCAL_SESSIONS.ttl, httponly=True,
+                    secure=_cookie_secure(), samesite="Lax", path="/")
+    return resp
 
 
 # v1.56.0 : se déconnecter d'un compte local. L'authentification HTTP Basic
@@ -1602,8 +1822,8 @@ LOGOUT_PSEUDO_USER = "harvester-ops-signed-out"
 @app.route("/logout/local")
 @_rate_limit("30/minute")
 def logout_local():
-    if not HTPASSWD_PATH.exists():
-        return jsonify({"ok": True, "login": "/"})       # console ouverte : rien à oublier
+    if not local_accounts_exist():
+        return jsonify({"ok": True, "login": "/"})       # aucun compte local : rien à oublier
     auth = request.authorization
     if auth and auth.username == LOGOUT_PSEUDO_USER:
         return jsonify({"ok": True, "login": "/login?signed_out=1"})
@@ -1667,13 +1887,18 @@ def logout():
     laisse pas un jeton OIDC se révoquer lui-même (401) : il expire à la
     durée fixée dans le client OIDC."""
     sess = _sso_session()
+    local = _local_session()
+    if (sess is not None or local is not None) and not _same_origin():
+        return jsonify({"error": "forbidden"}), 403
     if sess is not None:
-        if not _same_origin():
-            return jsonify({"error": "forbidden"}), 403
         _sso_store().close(sess.sid)
         app.logger.info("Rancher sign-out: %s", sess.login)
-    resp = jsonify({"ok": True, "login": "/login"})
+    if local is not None:
+        _LOCAL_SESSIONS.close(local["sid"])
+        app.logger.info("sign-out: %s", local["user"])
+    resp = jsonify({"ok": True, "login": "/login?signed_out=1"})
     resp.delete_cookie(_rs.COOKIE, path="/")
+    resp.delete_cookie(_acc.COOKIE, path="/")
     return resp
 
 
@@ -10184,6 +10409,231 @@ def api_kubeovn_delete(cluster, kind, name):
 
 
 # ---------------------------------------------------------------------------
+# v1.57.0 : les comptes de la console (Réglages > Comptes de la console, et
+# « Changer mon mot de passe » dans le menu du compte). Chaque changement est
+# une action de l'Activité (qui, quoi), jamais avec un mot de passe.
+# ---------------------------------------------------------------------------
+
+def _record_action(label, message, ok=True):
+    run = ActionRun(uuid.uuid4().hex[:12], label, None, [], dry_run=False)
+    run.status = "done" if ok else "error"
+    run.exit_code = 0 if ok else 1
+    run.emit({"type": "step", "step_id": "account", "status": "done" if ok else "error",
+              "message": f"{message} (by {current_user() or '?'})", "ts": time.time()})
+    run.ended_at = time.time()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.close()
+    return run.id
+
+
+def _account_error(e):
+    status = {"not-found": 404, "name-taken": 409, "last-admin": 409}.get(e.code, 400)
+    return jsonify({"error": str(e), "code": e.code}), status
+
+
+def _check_user_param(user):
+    if not _acc.USERNAME_RE.match(user or ""):
+        return jsonify({"error": "invalid account name"}), 400
+    return None
+
+
+@app.route("/api/users")
+@requires_auth
+def api_users():
+    """Les comptes locaux : ceux de la console (modifiables ici) et ceux du
+    htpasswd de l'installeur (lus seulement)."""
+    managed = _accounts().list()
+    roles = load_roles()
+    out = [{"name": n, "role": u.get("role"), "source": "console", "created": u.get("created"),
+            "created_by": u.get("created_by"), "password_changed": u.get("password_changed")}
+           for n, u in sorted(managed.items())]
+    for n in sorted(_htpasswd_users()):
+        if n not in managed:
+            role = (roles["users"].get(n, roles["default_role"]) if roles.get("configured") else "admin")
+            out.append({"name": n, "role": role, "source": "htpasswd"})
+    return jsonify({"accounts": out, "me": current_user(), "min_password": _acc.PASSWORD_MIN,
+                    "roles": list(_acc.ROLES)})
+
+
+@app.route("/api/users", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_user_create():
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name") or "").strip()
+    if name in _htpasswd_users():
+        return jsonify({"error": f"an account {name} already exists (installer)", "code": "name-taken"}), 409
+    try:
+        _accounts().create(name, body.get("password"), body.get("role") or "viewer", by=current_user())
+    except _acc.AccountError as e:
+        return _account_error(e)
+    aid = _record_action(f"account:create:{name}", f"account {name} created, role {body.get('role') or 'viewer'}")
+    return jsonify({"ok": True, "name": name, "action_id": aid}), 201
+
+
+@app.route("/api/users/<user>", methods=["PATCH"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_user_update(user):
+    bad = _check_user_param(user)
+    if bad:
+        return bad
+    body = request.get_json(silent=True) or {}
+    done = []
+    try:
+        if body.get("role"):
+            _accounts().set_role(user, body["role"])
+            done.append(f"role {body['role']}")
+        if body.get("password"):
+            _accounts().set_password(user, body["password"])
+            _LOCAL_SESSIONS.close_user(user)          # ses sessions ouvertes tombent
+            done.append("password reset")
+    except _acc.AccountError as e:
+        return _account_error(e)
+    if not done:
+        return jsonify({"error": "nothing to change (role, password)"}), 400
+    aid = _record_action(f"account:update:{user}", f"account {user}: {', '.join(done)}")
+    return jsonify({"ok": True, "action_id": aid})
+
+
+@app.route("/api/users/<user>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_user_delete(user):
+    bad = _check_user_param(user)
+    if bad:
+        return bad
+    if user == current_user():
+        return jsonify({"error": "you cannot delete your own account", "code": "self"}), 409
+    try:
+        _accounts().delete(user)
+    except _acc.AccountError as e:
+        return _account_error(e)
+    _LOCAL_SESSIONS.close_user(user)
+    aid = _record_action(f"account:delete:{user}", f"account {user} deleted")
+    return jsonify({"ok": True, "action_id": aid})
+
+
+@app.route("/api/me/password", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_my_password():
+    """Changer son propre mot de passe (comptes de la console) : l'ancien est
+    exigé ; les autres sessions du compte se ferment, celle-ci reste."""
+    user = current_user()
+    if not user or not _accounts().has(user):
+        return jsonify({"error": "this account's password is not managed by the console",
+                        "code": "not-managed"}), 409
+    body = request.get_json(silent=True) or {}
+    if not _accounts().verify(user, body.get("current") or ""):
+        return jsonify({"error": "the current password is wrong", "code": "bad-current"}), 403
+    try:
+        _accounts().set_password(user, body.get("new"))
+    except _acc.AccountError as e:
+        return _account_error(e)
+    local = _local_session()
+    _LOCAL_SESSIONS.close_user(user, keep=local["sid"] if local else None)
+    aid = _record_action(f"account:password:{user}", f"account {user}: password changed")
+    return jsonify({"ok": True, "action_id": aid})
+
+
+# ---------------------------------------------------------------------------
+# v1.57.0 : les objets rangés sous Cluster (Storage > Images et Storage
+# Classes, Security > Secrets et SSH Keys, Add-ons), comme dans l'interface de
+# Harvester. Lecture : un `kubectl get` groupé, mis en regard des VMs et des
+# volumes (web/cluster_objects.py). Écriture : bin/harvester-resources.py.
+# ---------------------------------------------------------------------------
+import cluster_objects as _co  # noqa: E402
+
+RESOURCES_SCRIPT = "harvester-resources.py"
+_CO_KIND_NAMES = {"vm": "virtualmachines.kubevirt.io", "pvc": "persistentvolumeclaims",
+                  "vmimage": "virtualmachineimages.harvesterhci.io"}
+_CO_KIND_OF = {"virtualmachineimages.harvesterhci.io": "VirtualMachineImage",
+               "virtualmachines.kubevirt.io": "VirtualMachine",
+               "persistentvolumeclaims": "PersistentVolumeClaim",
+               "storageclasses.storage.k8s.io": "StorageClass",
+               "keypairs.harvesterhci.io": "KeyPair", "secrets": "Secret",
+               "addons.harvesterhci.io": "Addon"}
+
+
+def _kubectl_kinds(kc, kinds, cluster):
+    """{nom complet: [objets]} de plusieurs types en un appel ; si la RBAC en
+    refuse un, le lot échoue en bloc : on relit alors type par type ce qui est
+    permis (les refus sont notés et dits par l'en-tête X-Cluster-Denied)."""
+    got = _kubectl_json(kc, "get", ",".join(kinds), "-A", timeout=30, cluster=cluster)
+    out = {k: [] for k in kinds}
+    if got is not None:
+        rev = {v: k for k, v in _CO_KIND_OF.items()}
+        for it in got.get("items") or []:
+            k = rev.get(it.get("kind"))
+            if k in out:
+                out[k].append(it)
+        return out
+    for k in kinds:
+        one = _kubectl_json(kc, "get", k, "-A", timeout=30, cluster=cluster)
+        out[k] = (one or {}).get("items") or []
+    return out
+
+
+@app.route("/api/cluster-objects/<cluster>/<kind>")
+@requires_auth
+def api_cluster_objects(cluster, kind):
+    """Une liste de la vue Storage, Security ou Add-ons, avec qui s'en sert.
+    Un Secret ne sort qu'avec le nom de ses clés, jamais ses valeurs."""
+    if kind not in _co.KINDS:
+        return jsonify({"error": f"kind must be one of {', '.join(_co.KINDS)}"}), 400
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    main = _co.FETCH[kind]
+    kinds = [main] + [_CO_KIND_NAMES[u] for u in _co.NEEDS_USAGE[kind]]
+    got = _kubectl_kinds(kc, kinds, cluster)
+    items = got[main]
+    extra = {}
+    if kind == "images":
+        rows = _co.images(items, got[_CO_KIND_NAMES["vm"]], got[_CO_KIND_NAMES["pvc"]])
+    elif kind == "storageclasses":
+        rows = _co.storage_classes(items, got[_CO_KIND_NAMES["pvc"]], got[_CO_KIND_NAMES["vmimage"]])
+    elif kind == "sshkeys":
+        rows = _co.ssh_keys(items, got[_CO_KIND_NAMES["vm"]])
+    elif kind == "secrets":
+        rows, hidden = _co.secrets(items, got[_CO_KIND_NAMES["vm"]],
+                                   include_system=request.args.get("all") == "1")
+        extra["system_hidden"] = hidden
+    else:
+        rows = _co.addons(items)
+    rows.sort(key=lambda r: (r.get("namespace") or "", r.get("name") or ""))
+    return jsonify({"cluster": cluster, "kind": kind, "items": rows, **extra})
+
+
+@app.route("/api/addons/<cluster>/<namespace>/<name>", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_addon_toggle(cluster, namespace, name):
+    """Active ou désactive un add-on Harvester : action suivie, par
+    bin/harvester-resources.py (parité CLI)."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return jsonify({"error": "a JSON object with a boolean 'enabled' is expected"}), 400
+    script = BIN_DIR / RESOURCES_SCRIPT
+    if not script.is_file():
+        return jsonify({"error": f"{RESOURCES_SCRIPT} not deployed"}), 503
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    verb = "enable" if body["enabled"] else "disable"
+    cmd = [sys.executable, str(script), "addon", "--kubeconfig", kc,
+           "--namespace", namespace, "--name", name, f"--{verb}"]
+    run, err = _cli_action(cluster, f"addon:{verb}:{namespace}/{name}", cmd, "harvester-resources")
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "addon": f"{namespace}/{name}", "enabled": body["enabled"]}), 202
+
+
+# ---------------------------------------------------------------------------
 # v1.52.0 (B2) : services sur les clusters créés, par CAAPH (HelmChartProxy)
 # ---------------------------------------------------------------------------
 import capi_services as _sv  # noqa: E402
@@ -11978,6 +12428,9 @@ def api_vm_migrate_trigger(cluster, namespace, name):
 _notes_db = Path(os.environ.get("HARVESTER_OPS_NOTES_DB", "/var/lib/harvester-ops/notes.db"))
 NOTES_DB = _usable_dir(_notes_db.parent,
                        Path(tempfile.gettempdir()) / "harvester-ops-notes") / _notes_db.name
+# v1.57.0 : les comptes de la console, dans l'état persistant (à côté des
+# notes) : le répertoire de configuration est en lecture seule dans le service
+ACCOUNTS_PATH = Path(os.environ.get("HARVESTER_OPS_ACCOUNTS", str(NOTES_DB.parent / "accounts.json")))
 
 
 def _notes_init_db():
@@ -14715,4 +15168,5 @@ if __name__ == "__main__":
     # `podman stop` finissait par un SIGKILL au bout de 10 s. Sortir
     # proprement à la place.
     signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+    _announce_setup()
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)

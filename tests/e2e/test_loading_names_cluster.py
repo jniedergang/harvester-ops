@@ -11,6 +11,10 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).parent))
+from boards import goto_board  # noqa: E402
 
 
 @pytest.mark.parametrize("sub,path,lang,needle", [
@@ -38,7 +42,7 @@ def test_the_loading_text_names_the_cluster(context, flask_server, sub, path, la
     page.route(path, hang)
     page.goto(flask_server["base_url"], wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click(f'[data-overview-tab="{sub}"]')
-    hint = page.locator(f'.overview-subtab[data-subtab="{sub}"] .fabric-body .hint').first
+    goto_board(page, sub)
+    hint = page.locator(f'[data-board="{sub}"] .fabric-body .hint').first
     expect(hint).to_contain_text(needle, timeout=8000)
     expect(hint).not_to_contain_text("{name}")

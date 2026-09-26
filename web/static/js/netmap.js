@@ -283,15 +283,15 @@ const NetMap = (() => {
         window.VMEdit.open(cluster, ns, name);
         return;
       }
-      if (e.target.closest('[data-netmap-fabric]')) {
-        const tab = document.querySelector('[data-overview-tab="fabric"]');
-        if (tab) tab.click();
+      // v1.57.0 : la fabrique est l'onglet Underlay de la section Network
+      if (e.target.closest('[data-netmap-fabric]') && window.Sections) {
+        window.Sections.open('network', 'underlay');
       }
     });
   }
 
   function start(clusterName) {
-    const h = document.querySelector('.overview-subtab[data-subtab="network"] .topology-host');
+    const h = document.querySelector('[data-board="network"] .topology-host');
     if (!h) return Promise.resolve();
     if (cluster !== clusterName) lastData = null;
     cluster = clusterName;

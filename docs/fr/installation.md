@@ -37,7 +37,8 @@ sudo ./install.sh
 L'installeur est **interactif**. Il demande :
 
 - Installer l'UI web ? (défaut : oui)
-- Nom d'utilisateur et mot de passe HTTP Basic (uniquement si UI)
+- Le premier compte de la console, nom et mot de passe (uniquement si UI) :
+  il administre la console (1.57.0 ; il arrivait lecteur auparavant)
 - TLS : générer un certificat self-signed ? (défaut : oui)
 - Port d'écoute de l'UI (défaut : 8090)
 - Service systemd pour l'UI ? (défaut : oui)
@@ -129,6 +130,29 @@ Les archives exportées sont gardées dans `/var/lib/harvester-ops/exports`
 (le volume persistant du service), comme celles déposées depuis un
 navigateur (1.47.0) : dimensionner ce volume pour la plus grosse VM qu'on
 pense déplacer par fichier.
+
+### 8b. Se connecter (1.57.0)
+
+La console demande toujours qui vous êtes : il n'y a plus de mode ouvert
+(`HARVESTER_OPS_AUTH=none` le rétablit pour les tests seulement, et tant
+qu'aucun compte n'existe). On se connecte sur la page de connexion avec un
+nom et un mot de passe ; la session est un cookie HttpOnly, et « Se
+déconnecter » dans le menu du compte (en haut à droite) la ferme. Les
+scripts et clients d'API gardent HTTP Basic.
+
+- **Comptes** : celui de l'installeur (htpasswd) et ceux créés dans
+  Réglages > Comptes de la console, gardés dans
+  `/var/lib/harvester-ops/accounts.json` (empreintes bcrypt, mode 0600). Un
+  administrateur les crée, choisit leur rôle (lecteur, opérateur,
+  administrateur), réinitialise un mot de passe ou les supprime ; chacun
+  change son propre mot de passe depuis le menu du compte. Chaque changement
+  est inscrit dans l'Activité.
+- **Premier démarrage sans aucun compte** (ni htpasswd, ni Rancher) : toute
+  page mène à `/setup`, qui crée le premier administrateur. Il demande un
+  jeton écrit dans `/var/lib/harvester-ops/setup-token` (mode 0600, le
+  journal du service en donne le chemin) : seul qui administre le serveur
+  peut le lire, si bien que personne ne prend la console en atteignant son
+  port le premier.
 
 ### 9. Connexion par Rancher (facultatif, 1.50.0)
 

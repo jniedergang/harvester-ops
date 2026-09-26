@@ -552,7 +552,7 @@ const Fabric = (() => {
   }
 
   function start(clusterName) {
-    const h = document.querySelector('.overview-subtab[data-subtab="fabric"] .topology-host');
+    const h = document.querySelector('[data-board="fabric"] .topology-host');
     if (!h) return Promise.resolve();
     if (cluster !== clusterName) {
       detail.clear(); expanded.clear(); lastData = null; selected = null;

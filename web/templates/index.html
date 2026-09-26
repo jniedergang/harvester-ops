@@ -66,6 +66,23 @@
             <span class="tab-icon" data-icon="metrics"></span>
             <span class="sidebar-label" data-i18n="tab.overview">Overview</span>
           </a>
+          <!-- v1.57.0 : les sections de Harvester, un cluster à la fois -->
+          <a class="tab tab-child" data-tab="storage" href="#storage" data-i18n-title="tab.storageTip" title="Volumes, images and storage classes">
+            <span class="tab-icon" data-icon="storage"></span>
+            <span class="sidebar-label" data-i18n="tab.storage">Storage</span>
+          </a>
+          <a class="tab tab-child" data-tab="network" href="#network" data-i18n-title="tab.networkTip" title="VM networks, overlay networks (kube-ovn) and underlay networks">
+            <span class="tab-icon" data-icon="network"></span>
+            <span class="sidebar-label" data-i18n="tab.network">Network</span>
+          </a>
+          <a class="tab tab-child" data-tab="addons" href="#addons" data-i18n-title="tab.addonsTip" title="Harvester add-ons: what is installed, enable or disable">
+            <span class="tab-icon" data-icon="plug"></span>
+            <span class="sidebar-label" data-i18n="tab.addons">Add-ons</span>
+          </a>
+          <a class="tab tab-child" data-tab="security" href="#security" data-i18n-title="tab.securityTip" title="Secrets and SSH keys of the cluster">
+            <span class="tab-icon" data-icon="shield"></span>
+            <span class="sidebar-label" data-i18n="tab.security">Security</span>
+          </a>
           <a class="tab tab-child" data-tab="startup" href="#startup" data-i18n-title="tab.startup" title="Startup">
             <span class="tab-icon icon-green" data-icon="play"></span>
             <span class="sidebar-label" data-i18n="tab.startup">Startup</span>
@@ -158,10 +175,6 @@
         <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Overview sub-tabs">
           <button type="button" class="sub-tab active" data-overview-tab="metrics"><span class="tab-icon" data-icon="metrics"></span> <span data-i18n="overview.tabMetrics">Metrics</span></button>
           <button type="button" class="sub-tab" data-overview-tab="cluster"><span class="tab-icon" data-icon="node"></span> <span data-i18n="overview.tabCluster">Cluster</span></button>
-          <button type="button" class="sub-tab" data-overview-tab="network"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabNetwork">Network</span></button>
-          <button type="button" class="sub-tab" data-overview-tab="storage"><span class="tab-icon" data-icon="storage"></span> <span data-i18n="overview.tabStorage">Storage</span></button>
-          <button type="button" class="sub-tab tip" data-overview-tab="fabric" data-i18n-title="overview.tabFabricTip" title="Physical interfaces, virtual switches and the networks above them"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabFabric">Fabric</span></button>
-          <button type="button" class="sub-tab tip" data-overview-tab="vpc" data-i18n-title="overview.tabVpcTip" title="kube-ovn: VPCs, subnets and overlay networks, with their forms"><span class="tab-icon" data-icon="network"></span> <span data-i18n="overview.tabVpc">VPC</span></button>
         </div>
       </div>
 
@@ -188,23 +201,72 @@
         </div>
       </div>
 
-      <!-- Cluster / Network / Fabric / Storage subtabs: one board per view (v1.43.0) -->
-      <div class="overview-subtab" data-subtab="cluster" hidden>
+      <!-- Vue de blocs du cluster (v1.43.0). Depuis la v1.57.0, Réseau,
+           Fabrique, Stockage et VPC vivent dans leurs sections. -->
+      <div class="overview-subtab" data-subtab="cluster" data-board="cluster" hidden>
         <div class="topology-host" data-topology-mode="cluster"></div>
       </div>
-      <div class="overview-subtab" data-subtab="network" hidden>
-        <div class="topology-host" data-topology-mode="network"></div>
+    </section>
+
+    <!-- v1.57.0 : STORAGE (Volumes, Images, Storage Classes) -->
+    <section id="tab-storage" class="tab-content" data-section="storage">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="tab.storage">Storage</span> · <span class="cluster-name"></span></h1>
+        </div>
+        <div class="sub-tabs sub-tabs-inline" role="tablist">
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="volumes" data-i18n-title="section.volumesTip" title="Longhorn volumes, their replicas and the VMs using them"><span class="tab-icon" data-icon="volume"></span> <span data-i18n="section.volumes">Volumes</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="images" data-i18n-title="section.imagesTip" title="VM images: source, size, state and the VMs using them"><span class="tab-icon" data-icon="cdrom"></span> <span data-i18n="section.images">Images</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="classes" data-i18n-title="section.classesTip" title="Storage classes: replicas, placement and the volumes using them"><span class="tab-icon" data-icon="disk"></span> <span data-i18n="section.classes">Storage Classes</span></button>
+        </div>
       </div>
-      <div class="overview-subtab" data-subtab="fabric" hidden>
-        <div class="topology-host" data-topology-mode="fabric"></div>
+      <div class="section-pane" data-pane="volumes" data-board="storage" hidden><div class="topology-host" data-topology-mode="storage"></div></div>
+      <div class="section-pane" data-pane="images" hidden><div class="resource-host" data-resource="images"></div></div>
+      <div class="section-pane" data-pane="classes" hidden><div class="resource-host" data-resource="storageclasses"></div></div>
+    </section>
+
+    <!-- v1.57.0 : NETWORK (réseaux des VMs, overlay kube-ovn, underlay) -->
+    <section id="tab-network" class="tab-content" data-section="network">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="tab.network">Network</span> · <span class="cluster-name"></span></h1>
+        </div>
+        <div class="sub-tabs sub-tabs-inline" role="tablist">
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="vmnets" data-i18n-title="section.vmnetsTip" title="The networks VMs attach to (VLAN, untagged), one block per network"><span class="tab-icon" data-icon="network"></span> <span data-i18n="section.vmnets">VM Networks</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="overlay" data-i18n-title="overview.tabVpcTip" title="kube-ovn: VPCs, subnets and overlay networks, with their forms"><span class="tab-icon" data-icon="network"></span> <span data-i18n="section.overlay">Overlay Networks</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="underlay" data-i18n-title="overview.tabFabricTip" title="Physical interfaces, virtual switches and the networks above them"><span class="tab-icon" data-icon="switch"></span> <span data-i18n="section.underlay">Underlay Networks</span></button>
+        </div>
       </div>
-      <div class="overview-subtab" data-subtab="storage" hidden>
-        <div class="topology-host" data-topology-mode="storage"></div>
-      </div>
+      <div class="section-pane" data-pane="vmnets" data-board="network" hidden><div class="topology-host" data-topology-mode="network"></div></div>
       <!-- v1.49.0 : réseaux kube-ovn, un bloc par VPC, avec leurs formulaires -->
-      <div class="overview-subtab" data-subtab="vpc" hidden>
-        <div class="topology-host" data-topology-mode="vpc"></div>
+      <div class="section-pane" data-pane="overlay" data-board="vpc" hidden><div class="topology-host" data-topology-mode="vpc"></div></div>
+      <div class="section-pane" data-pane="underlay" data-board="fabric" hidden><div class="topology-host" data-topology-mode="fabric"></div></div>
+    </section>
+
+    <!-- v1.57.0 : ADD-ONS -->
+    <section id="tab-addons" class="tab-content" data-section="addons">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="tab.addons">Add-ons</span> · <span class="cluster-name"></span></h1>
+          <p class="hint" data-i18n="section.addonsHint">Optional components Harvester installs on demand. Enabling one deploys its chart on the cluster; disabling it removes it.</p>
+        </div>
       </div>
+      <div class="section-pane" data-pane="list" hidden><div class="resource-host" data-resource="addons"></div></div>
+    </section>
+
+    <!-- v1.57.0 : SECURITY (Secrets, SSH Keys) -->
+    <section id="tab-security" class="tab-content" data-section="security">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="tab.security">Security</span> · <span class="cluster-name"></span></h1>
+        </div>
+        <div class="sub-tabs sub-tabs-inline" role="tablist">
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="secrets" data-i18n-title="section.secretsTip" title="Secrets of the cluster: type, key names and the VMs using them. Values are never shown."><span class="tab-icon" data-icon="lock"></span> <span data-i18n="section.secrets">Secrets</span></button>
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="sshkeys" data-i18n-title="section.sshkeysTip" title="SSH public keys declared on the cluster and the VMs that received them"><span class="tab-icon" data-icon="key"></span> <span data-i18n="section.sshkeys">SSH Keys</span></button>
+        </div>
+      </div>
+      <div class="section-pane" data-pane="secrets" hidden><div class="resource-host" data-resource="secrets"></div></div>
+      <div class="section-pane" data-pane="sshkeys" hidden><div class="resource-host" data-resource="sshkeys"></div></div>
     </section>
 
     <!-- SHUTDOWN -->
@@ -572,6 +634,7 @@
       <button class="settings-tab"        data-stab="language"   data-i18n="settings.tab.language">Language</button>
       <button class="settings-tab"        data-stab="clusters"   data-i18n="settings.tab.clusters">Clusters</button>
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
+      <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
       <button class="settings-tab"        data-stab="husers"     data-i18n="settings.tab.husers">Cluster accounts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
@@ -586,6 +649,14 @@
           <div class="form-hint" data-i18n="settings.general.titleHint">Shown in the sidebar and browser tab.</div>
         </div>
         <button class="btn btn-secondary btn-sm" id="btn-reset-title" data-i18n="settings.general.reset">Reset to default</button>
+      </div>
+
+      <!-- v1.57.0 : les comptes de la console (administrateurs) -->
+      <div class="settings-tab-content" id="stab-accounts">
+        <h4 data-i18n="accounts.title">Console accounts</h4>
+        <p class="form-hint" data-i18n="accounts.intro">Who can sign in to this console, and with which role. Accounts from the installer (htpasswd) are managed on the server.</p>
+        <div id="accounts-feedback" class="res-feedback"></div>
+        <div id="accounts-body"><p class="form-hint">…</p></div>
       </div>
 
       <div class="settings-tab-content" id="stab-husers">
@@ -878,7 +949,10 @@
 <script src="/static/js/capi-services.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>
+<script src="/static/js/resource-views.js"></script>
+<script src="/static/js/sections.js"></script>
 <script src="/static/js/versions.js"></script>
+<script src="/static/js/console-accounts.js"></script>
 <script src="/static/js/user-menu.js"></script>
 <script src="/static/js/access-notice.js"></script>
 <!-- Yjs notes module (ESM) -->

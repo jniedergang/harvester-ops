@@ -149,21 +149,20 @@ def local_server(tmp_path_factory, test_config):
         proc.kill()
 
 
-def test_a_local_account_really_signs_out(browser, local_server):
-    """Le mot de passe est donné une fois (dans l'adresse, comme le ferait la
-    fenêtre du navigateur) ; le navigateur le renvoie ensuite de lui-même.
-    Après « Se déconnecter », il ne le renvoie plus : la console redemande."""
+def test_a_local_account_signs_in_and_out_with_the_form(browser, local_server):
+    """v1.57.0 : un navigateur sans session arrive sur la page de connexion
+    (jamais l'invite HTTP Basic) ; le formulaire ouvre une session, « Se
+    déconnecter » la ferme, et la console ne s'ouvre plus sans se reconnecter."""
     ctx = browser.new_context()
     page = ctx.new_page()
-    host = local_server.replace("http://", "")
-    # la réponse à l'invite du navigateur : on la rejoue par l'adresse, puis
-    # l'on revient sur une adresse sans identifiants (celle de tous les jours)
-    page.goto(f"http://alice:wonderland@{host}/login/local")
     page.goto(local_server + "/")
+    assert page.url.endswith("/login")
+    page.fill('.login-form [name="username"]', "alice")
+    page.fill('.login-form [name="password"]', "wonderland")
+    page.click(".login-form .login-submit")
+    page.wait_for_url(local_server + "/")
     page.wait_for_function("window.UserMenu && window.i18n")
-    r = page.evaluate("fetch('/api/whoami').then(r => r.status)")
-    assert r == 200                                   # le navigateur renvoie seul le mot de passe
-    page.wait_for_timeout(500)
+    assert page.evaluate("fetch('/api/whoami').then(r => r.json()).then(d => d.auth_via)") == "session"
     page.locator("#btn-user").click()
     expect(page.locator("#user-menu .um-name")).to_have_text("alice")
     signout = page.locator("#user-signout")
@@ -171,8 +170,76 @@ def test_a_local_account_really_signs_out(browser, local_server):
     signout.click()
     page.wait_for_url("**/login?signed_out=1")
     expect(page.locator(".login-signed-out")).to_be_visible()
-    # le mot de passe est oublié : la console ne s'ouvre plus sans le redonner
-    resp = page.goto(local_server + "/")
-    assert resp.status == 401
+    page.goto(local_server + "/")
+    assert page.url.endswith("/login")
     assert page.evaluate("fetch('/api/whoami').then(r => r.status)") == 401
+    ctx.close()
+
+
+@pytest.fixture(scope="module")
+def blank_server(tmp_path_factory, test_config):
+    """Une console neuve, sans aucun compte ni mode ouvert : premier démarrage."""
+    tmp = tmp_path_factory.mktemp("first-start")
+    port = _free_port()
+    import re
+    cfg = tmp / "config.yaml"
+    cfg.write_text(re.sub(r"bind_port: \d+", f"bind_port: {port}", test_config["config"].read_text()))
+    env = {**os.environ, "HARVESTER_OPS_CONFIG": str(cfg), "HARVESTER_OPS_HTPASSWD": str(tmp / "none"),
+           "HARVESTER_OPS_ROLES": str(tmp / "roles.yaml"), "HARVESTER_OPS_ACCOUNTS": str(tmp / "accounts.json"),
+           "HARVESTER_OPS_ACTIONS_DB": str(tmp / "actions.db"), "HARVESTER_OPS_NOTES_DB": str(tmp / "notes.db"),
+           "HARVESTER_OPS_LOG_DIR": str(tmp / "logs"), "HARVESTER_OPS_DISABLE_RATELIMIT": "1",
+           "HARVESTER_OPS_LOG_LEVEL": "WARNING", "HARVESTER_OPS_VERSION": "test"}
+    env.pop("HARVESTER_OPS_AUTH", None)
+    proc = subprocess.Popen([sys.executable, str(ROOT / "web" / "app.py")], env=env, cwd=str(ROOT / "web"),
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(base + "/healthz", timeout=0.5)
+            break
+        except Exception:
+            time.sleep(0.3)
+    yield base, tmp
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+
+
+def test_the_first_start_creates_the_administrator(browser, blank_server):
+    base, tmp = blank_server
+    ctx = browser.new_context()
+    ctx.add_init_script("localStorage.setItem('harvester_ops_language','fr');")
+    page = ctx.new_page()
+    page.goto(base + "/")
+    assert page.url.endswith("/setup")
+    expect(page.locator(".setup-token-hint code")).to_have_text(str(tmp / "setup-token"))
+    token = (tmp / "setup-token").read_text().strip()
+    page.fill('[name="token"]', "not-the-token")
+    page.fill('[name="username"]', "ops")
+    page.fill('[name="password"]', "a long enough pass")
+    page.fill('[name="confirm"]', "a long enough pass")
+    page.click(".login-submit")
+    expect(page.locator(".login-error")).to_contain_text("pas celui du fichier")
+    page.fill('[name="token"]', token)
+    page.fill('[name="password"]', "a long enough pass")
+    page.fill('[name="confirm"]', "a long enough pass")
+    page.click(".login-submit")
+    page.wait_for_url(base + "/")
+    page.wait_for_function("window.UserMenu && window.i18n")
+    who = page.evaluate("fetch('/api/whoami').then(r => r.json())")
+    assert who["user"] == "ops" and who["role"] == "admin"
+    # le compte se gère ensuite depuis la console : changer son mot de passe
+    page.locator("#btn-user").click()
+    page.locator('[data-um="password"]').click()
+    m = page.locator("#my-password-modal")
+    m.locator('[name="current"]').fill("a long enough pass")
+    m.locator('[name="new"]').fill("another long pass")
+    m.locator('[name="confirm"]').fill("another long pass")
+    m.locator('button[type="submit"]').click()
+    expect(m.locator(".my-password-msg")).to_contain_text("changé")
+    page.goto(base + "/setup")
+    assert page.url.endswith("/")                     # la porte est refermée
     ctx.close()

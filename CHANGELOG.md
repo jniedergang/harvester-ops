@@ -4,6 +4,62 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.57.0] - 2026-09-26 - Sign-in required, and the Harvester sections under Cluster
+
+### Added
+- **Signing in is required.** Without a session every page leads to the
+  sign-in page and every API call is refused: the console no longer runs
+  open when no account exists. Local accounts sign in with a form (an
+  HttpOnly session cookie) instead of the browser's password prompt, and
+  "Sign out" really ends the session. API clients and scripts keep HTTP
+  Basic. The open mode only exists when asked for (`HARVESTER_OPS_AUTH=none`,
+  tests) and only while no account exists.
+- **First start**: with no account at all, `/setup` creates the first
+  administrator, with a token written to the server's disk (0600, its path
+  in the log), so that nobody reaching the port first can take the console.
+- **Console accounts** (Settings, administrators): create an account with a
+  role, change a role, reset a password, delete; the last administrator
+  cannot be removed. **Change my password** in the account menu. Resetting a
+  password or deleting an account closes its sessions; every change is in
+  Activity, never with a password. Accounts live in `accounts.json` in the
+  service's persistent state (bcrypt, 0600).
+- **The Harvester sections under Cluster**, one cluster at a time:
+  Storage (Volumes, Images, Storage Classes), Network (VM Networks, Overlay
+  Networks, Underlay Networks), Add-ons, Security (Secrets, SSH Keys).
+  Images, storage classes, secrets and SSH keys say which VMs or volumes use
+  them; secrets show their key names, never their values, and the cluster's
+  own secrets are hidden until asked for.
+- **Add-ons**: enable or disable a Harvester add-on (administrators),
+  followed in the dock, through `harvester-resources addon` (CLI parity).
+  A refusal of Harvester's webhook is said plainly.
+- **Sortable columns** in these lists (click the header, again to reverse;
+  remembered), with a word filter and row details.
+
+### Changed
+- Network, Fabric, Storage and VPC left the Overview for the Network and
+  Storage sections; the Overview keeps Metrics and the Cluster board.
+- The installer's account administers the console: it was created as a
+  viewer (roles.yaml listed no user and defaulted to viewer).
+
+### Fixed
+- Accounts deleted or whose password was reset kept their open sessions.
+
+### Tests
+- Sign-in: first start and its token, the form, sign-out, sessions closed
+  by a reset or a deletion, a cross-site write refused, the open mode only
+  when asked; accounts (roles, last administrator, own password); the
+  installer's role granting, run from install.sh itself; in Chromium, the
+  first start, signing in and out, changing one's password.
+- The sections: lists, sorting remembered, filter, details, secrets without
+  values, add-on toggle, remembered tabs, tooltips; the grouped reads with a
+  refused kind; the add-on CLI (statuses seen on harv1, a stale success not
+  taken for the end, a webhook refusal).
+- Real, on harv1: every section read live; harvester-seeder enabled (21 s)
+  and disabled (27 s) from the interface, checked with kubectl; the
+  descheduler refused by Harvester on a single node, said in the view; a
+  local account created from Settings by a Rancher administrator, then
+  signed in with the form, wrong password refused, signed out.
+
 ## [1.56.0] - 2026-09-26 - Account menu, version history, refusals said instead of empty views
 
 ### Added

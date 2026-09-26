@@ -551,7 +551,7 @@ const VpcBoard = (() => {
   }
 
   function start(clusterName) {
-    const h = document.querySelector('.overview-subtab[data-subtab="vpc"] .topology-host');
+    const h = document.querySelector('[data-board="vpc"] .topology-host');
     if (!h) return Promise.resolve();
     if (cluster !== clusterName) lastData = null;
     cluster = clusterName;

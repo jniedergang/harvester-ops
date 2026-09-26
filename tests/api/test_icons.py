@@ -242,17 +242,18 @@ def test_i18n_strings_carry_no_icons():
     """Icons live in sibling elements: applyTranslations() overwrites the
     textContent of translated nodes, which would wipe an inline SVG."""
     src = (JS / "i18n.js").read_text()
-    for key in ("overview.tabMetrics", "overview.tabCluster", "overview.tabNetwork",
-                "overview.tabStorage", "cluster.filter",
+    for key in ("overview.tabMetrics", "overview.tabCluster", "section.volumes",
+                "section.vmnets", "cluster.filter",
                 "action.cancelled", "topology.lockedHint"):
         values = re.findall(rf"'{re.escape(key)}':\s*'([^']*)'", src)
         assert len(values) == 5, f"{key} should be defined in the 5 dictionaries"
         for v in values:
             assert not PICTOGRAPH_RE.search(v), f"{key}: {v!r}"
-    # the overview sub-tabs put their icon in a sibling span
+    # the overview and section sub-tabs put their icon in a sibling span
+    # (v1.57.0 : Network and Storage left the overview for their sections)
     index = (TEMPLATES / "index.html").read_text()
     for key, icon in (("overview.tabMetrics", "metrics"), ("overview.tabCluster", "node"),
-                      ("overview.tabNetwork", "network"), ("overview.tabStorage", "storage")):
+                      ("section.vmnets", "network"), ("section.volumes", "volume")):
         assert f'data-icon="{icon}"></span> <span data-i18n="{key}"' in index
 
 
