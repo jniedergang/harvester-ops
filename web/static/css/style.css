@@ -4618,3 +4618,19 @@ body.login-page {
 .svc-preview > summary { cursor: pointer; font-size: 12px; margin-top: 6px; }
 .svc-feedback:empty { display: none; }
 .sto-finding-title .btn { margin-left: 8px; }
+
+/* v1.53.0 : créer un cluster dans une fenêtre à menus, comme une VM */
+.capi-create-host { height: 100%; }
+.capi-create-win { display: flex; flex-direction: column; height: 100%; gap: 10px; padding: 10px 12px; box-sizing: border-box; }
+.capi-create-win .capi-stack-note:empty { display: none; }
+.capi-create-win .vm-create-layout { flex: 1; min-height: 0; }
+.capi-create-win .tf-args { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.capi-create-win .xfer-live { flex: none; margin: 0; }
+.capi-create-actions { flex: none; margin: 0; padding-top: 8px; flex-wrap: wrap; gap: 8px; }
+.capi-nav-count { margin-left: auto; min-width: 18px; padding: 0 5px; border-radius: 9px; font-size: 11px;
+  font-weight: 600; text-align: center; color: var(--warn); border: 1px solid var(--warn); }
+.capi-nav-count.is-block { color: var(--danger); border-color: var(--danger); }
+.capi-check-status { background: none; border: 0; padding: 0 4px; font: inherit; font-size: 12px;
+  color: var(--accent); cursor: pointer; text-decoration: underline dotted; }
+.capi-check-status.is-block { color: var(--danger); }
+.capi-check-status:empty { display: none; }

@@ -104,11 +104,14 @@ sur les nœuds du plan de contrôle), par un ClusterResourceSet
 
 ## Limites constatées, à remonter
 
-- **Objets LoadBalancer laissés sur Harvester en mode DHCP** : quand un
-  service du cluster créé disparaît, le fournisseur de cloud journalise
-  « Deleted load balancer » mais l'objet reste (reproduit avec v0.2.5 et
-  v0.2.8, pas en mode pool). En DHCP il ne tient aucune adresse : c'est du
-  désordre, pas une fuite.
+- **Objets LoadBalancer laissés sur Harvester en mode DHCP** : sur le
+  premier cluster d'essai, quand un service disparaissait, le fournisseur de
+  cloud journalisait « Deleted load balancer » mais l'objet restait (six fois
+  sur six, avec v0.2.5 comme avec v0.2.8 ; pas en mode pool). Sur un second
+  cluster (v1.53.0, kube-vip posé dès la création), l'objet de podinfo
+  n'était plus là après le retrait du service et la suppression du cluster :
+  le défaut n'est donc pas systématique, sa cause reste à trouver. En DHCP
+  l'objet ne tient aucune adresse : c'est du désordre, pas une fuite.
 - **Nom de cluster** : CAPHV lance le fournisseur de cloud sans
   `--cluster-name` ; tous les objets LoadBalancer des clusters créés portent
   `cluster: kubernetes` (le fournisseur l'écrit lui-même en avertissement),

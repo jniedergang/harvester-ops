@@ -561,29 +561,30 @@ def test_automation_subtabs(page):
 
 
 def test_automation_capi_inline_subtabs(page):
-    """The Installation / Création de clusters / Clusters K8S inline
-    strip on the automation header should swap which .capi-tab-content is
-    visible. All three buttons must be present and centered (justify-self)."""
+    """The Installation / Clusters K8S / Services inline strip on the
+    automation header swaps which .capi-tab-content is visible. v1.53.0:
+    no "Création de clusters" sub-tab any more, a button in Clusters K8S
+    opens the creation window."""
     page.click('.tab-group-head[data-group="automation"]')
     page.wait_for_timeout(200)
     page.click('.tab-child[data-subtab="capi"]')
     page.wait_for_timeout(200)
-    # All 3 buttons present
-    expect(page.locator('.sub-tabs-inline .sub-tab[data-capi-tab="install"]')).to_be_visible()
-    expect(page.locator('.sub-tabs-inline .sub-tab[data-capi-tab="clusters"]')).to_be_visible()
-    expect(page.locator('.sub-tabs-inline .sub-tab[data-capi-tab="k8s"]')).to_be_visible()
+    for tab in ("install", "k8s", "services"):
+        expect(page.locator(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]')).to_be_visible()
+    assert page.locator('.sub-tabs-inline .sub-tab[data-capi-tab="clusters"]').count() == 0
     # Default: install tab active
     expect(page.locator('.capi-tab-content[data-capi-tab="install"]')).to_have_class("capi-tab-content active")
-    # Click "Création de clusters"
-    page.click('.sub-tabs-inline .sub-tab[data-capi-tab="clusters"]')
-    page.wait_for_timeout(200)
-    expect(page.locator('.capi-tab-content[data-capi-tab="clusters"]')).to_have_class("capi-tab-content active")
-    expect(page.locator('.capi-tab-content[data-capi-tab="install"]')).not_to_have_class("active")
-    # Click "Clusters K8S"
+    # Click "Clusters K8S": the create button is there
     page.click('.sub-tabs-inline .sub-tab[data-capi-tab="k8s"]')
     page.wait_for_timeout(200)
     expect(page.locator('.capi-tab-content[data-capi-tab="k8s"]')).to_have_class("capi-tab-content active")
-    expect(page.locator('.capi-tab-content[data-capi-tab="clusters"]')).not_to_have_class("active")
+    expect(page.locator('.capi-tab-content[data-capi-tab="install"]')).not_to_have_class("active")
+    expect(page.locator("#btn-capi-create")).to_be_visible()
+    # Click "Services"
+    page.click('.sub-tabs-inline .sub-tab[data-capi-tab="services"]')
+    page.wait_for_timeout(200)
+    expect(page.locator('.capi-tab-content[data-capi-tab="services"]')).to_have_class("capi-tab-content active")
+    expect(page.locator('.capi-tab-content[data-capi-tab="k8s"]')).not_to_have_class("active")
 
 
 # v1.5.0: the inline single-resource Terraform form was replaced by the

@@ -562,6 +562,7 @@ const CAPI = (() => {
   function init() {
     $('#btn-capi-refresh')?.addEventListener('click', refresh);
     $('#btn-capi-k8s-refresh')?.addEventListener('click', refreshK8sClustersPanel);
+    $('#btn-capi-create')?.addEventListener('click', openCreate);
     $('#btn-capi-services-refresh')?.addEventListener('click', () => window.CapiServices && CapiServices.refresh(true));
     // Wizard interactions, all delegated.
     document.addEventListener('click', (e) => {
@@ -684,13 +685,15 @@ const CAPI = (() => {
   }
 
   function selectCapiTab(name) {
+    // v1.53.0 : plus de sous-onglet « Création de clusters », la création
+    // s'ouvre en fenêtre depuis Clusters K8S (un choix mémorisé y mène).
+    if (name === 'clusters') name = 'k8s';
     $$('#tab-automation .sub-tabs-inline .sub-tab').forEach(x =>
       x.classList.toggle('active', x.dataset.capiTab === name));
     $$('[data-subtab="capi"] .capi-tab-content').forEach(x =>
       x.classList.toggle('active', x.dataset.capiTab === name));
     try { localStorage.setItem('harvester_ops_capi_subtab', name); } catch {}
-    if (name === 'clusters') refreshClustersPanel();
-    else if (name === 'k8s') refreshK8sClustersPanel();
+    if (name === 'k8s') refreshK8sClustersPanel();
     else if (name === 'services' && window.CapiServices) CapiServices.start();
   }
 
@@ -736,15 +739,12 @@ const CAPI = (() => {
   }
 
   // ---------------------------------------------------------------------
-  // Cluster creation panel (second sub-tab) — v1.48.0 : capi-create.js
+  // Création d'un cluster : une fenêtre à menus (capi-create.js, v1.53.0)
   // ---------------------------------------------------------------------
-  async function refreshClustersPanel() {
-    const out = document.querySelector('#capi-clusters-body');
-    if (!out) return;
+  function openCreate() {
     const cluster = document.querySelector('#cluster-select')?.value;
-    if (!cluster) { out.innerHTML = `<p class="form-hint">${i18n.t('capi.new.pickCluster')}</p>`; return; }
-    if (!window.CapiCreate) { out.innerHTML = `<p class="form-hint">${i18n.t('migrate.reload')}</p>`; return; }
-    return CapiCreate.render(out, cluster);
+    if (!cluster || !window.CapiCreate) return;
+    CapiCreate.open(cluster);
   }
 
   async function refreshK8sClustersPanel() {
@@ -767,7 +767,7 @@ const CAPI = (() => {
 
     const clusters = diag.capi_clusters || [];
     if (clusters.length === 0) {
-      out.innerHTML = `<p class="empty-state">${esc(tr('capi.v.k8s.empty', { cluster, tab: tr('capi.tab.clusters') }))}</p>`;
+      out.innerHTML = `<p class="empty-state">${esc(tr('capi.v.k8s.empty', { cluster, tab: tr('capi.k8s.create') }))}</p>`;
       return;
     }
     const rows = clusters.map(c => {
@@ -908,7 +908,7 @@ const CAPI = (() => {
   // Wire sub-tabs at DOMContentLoaded
   document.addEventListener('DOMContentLoaded', initSubtabs);
 
-  return { init, refresh, reactivate, selectCapiTab };
+  return { init, refresh, reactivate, selectCapiTab, refreshK8s: refreshK8sClustersPanel, openCreate };
 })();
 
 document.addEventListener('DOMContentLoaded', CAPI.init);

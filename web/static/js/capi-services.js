@@ -97,7 +97,7 @@ const CapiServices = (() => {
                 data-tip="${esc(tr('svc.t.gotoInstall', 'Open the Installation tab'))}">${esc(tr('capi.tab.install', 'Installation'))}</button></div></div>`);
     }
     if (!(d.clusters || []).length) {
-      parts.push(`<p class="empty-state">${esc(tr('svc.noCluster', 'No cluster created by Cluster API on {cluster} yet: create one in the {tab} tab, then deploy services on it.', { cluster, tab: tr('capi.tab.clusters', 'Cluster creation') }))}</p>`);
+      parts.push(`<p class="empty-state">${esc(tr('svc.noCluster', 'No cluster created by Cluster API on {cluster} yet: create one with "{tab}" in the K8S Clusters tab, then deploy services on it.', { cluster, tab: tr('capi.k8s.create', 'Create a cluster') }))}</p>`);
     }
     const cat = (d.catalog || []).map(c => c.key).concat(['custom']);
     const canDeploy = d.caaph && (d.clusters || []).length;

@@ -507,25 +507,33 @@ console runs `harvester-capi` for every step, which the CLI can run too.
 - **Older Harvester releases** keep the previous install: cert-manager,
   Cluster API core and providers, all from the bundle.
 
-### Creating a cluster (1.48.0)
+### Creating a cluster (1.48.0, window with menus in 1.53.0)
 
-The Cluster creation tab is a form filled from the cluster itself:
+The **Create a cluster** button of the K8S Clusters tab opens a window that
+can be minimised to the window bar, to check a setting elsewhere, and
+reopened as it was. It is organised in menus, like the creation of a VM,
+and filled from the cluster itself:
 
-- **Essentials**: the name and the Kubernetes version (versions created for
-  real with the bundle are marked "tested").
-- **Size**: 1, 3 or 5 control plane nodes, the number of workers, and a
-  small / medium / large preset or custom CPU, memory and disk.
-- **System and access**: the images of the cluster (ISOs and images still
-  downloading are left out, SUSE images first, the last one used is
-  remembered), the SSH user suggested from the image's system, and a key
-  pair.
-- **Network**: the VM network with its VLAN, the IP pool with its ranges and
-  free addresses; the gateway and mask are taken from the pool and marked as
-  such until changed; the DNS server is remembered.
-- **Advanced options**, folded: namespaces of the cluster objects and of
-  the VMs, extra IP pools and networks, a data disk and its storage class,
-  the CNI, pod and service CIDRs, import into Rancher, Fleet add-ons with
-  MTU, encapsulation and BGP.
+- **Essentials**, the opening menu, enough to create: the name, the
+  Kubernetes version (versions created for real with the bundle are marked
+  "tested"), 1, 3 or 5 control plane nodes, the number of workers, a small /
+  medium / large preset, the image (ISOs and images still downloading are
+  left out, SUSE images first, the last one used is remembered), the key
+  pair, the VM network with its VLAN and the IP pool with its ranges and
+  free addresses.
+- **Nodes**: custom CPU, memory and disk, the SSH user suggested from the
+  image's system.
+- **Network**: the gateway and mask taken from the pool (and marked as
+  such until changed), the DNS server (remembered), extra IP pools and
+  networks.
+- **Storage**: a data disk and its storage class.
+- **Kubernetes**: namespaces of the cluster objects and of the VMs, the
+  CNI, pod and service CIDRs.
+- **Integrations**: import into Rancher, Fleet add-ons with MTU,
+  encapsulation and BGP.
+- **Pre-check**: the details of the pre-check; each menu shows the number
+  of findings that concern it, and the action bar sums them up whatever the
+  open menu.
 
 Every control explains itself on hover. A **pre-check** runs as you type
 and lists, in the interface language, what blocks (not enough free

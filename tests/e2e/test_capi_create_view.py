@@ -1,4 +1,7 @@
-"""v1.48.0 : la page de création d'un cluster RKE2, dans un navigateur.
+"""v1.48.0 : la création d'un cluster RKE2, dans un navigateur.
+
+v1.53.0 : une fenêtre à menus ouverte depuis Clusters K8S (demande de
+l'exploitant), l'essentiel au premier menu.
 
 Demandé par l'exploitant : un maximum de choix proposés, une explication au
 survol, l'essentiel regroupé, les calculs d'adresses suggérés, toutes les
@@ -91,9 +94,8 @@ def form(context, flask_server):
                    lambda r, q: fulfill(r, sse(list(stream)), ctype="text/event-stream"))
         page.goto(flask_server["base_url"], wait_until="domcontentloaded")
         page.wait_for_function("window.CapiCreate && window.XferProgress && window.i18n")
-        page.evaluate("""() => { const d = document.createElement('div'); d.id = 'capi-test-host';
-                                 document.body.prepend(d); CapiCreate.render(d, 'harv-fake'); }""")
-        host = page.locator("#capi-test-host")
+        page.evaluate("CapiCreate.open('harv-fake')")
+        host = page.locator("#fp-capi-create")
         if ready:
             expect(host.locator('[data-x="name"]')).to_be_visible(timeout=5000)
         return page, host, calls
@@ -102,6 +104,11 @@ def form(context, flask_server):
 
 def x(host, key):
     return host.locator(f'[data-x="{key}"]')
+
+
+def menu(host, sec):
+    host.locator(f'.vm-edit-nav [data-sec="{sec}"]').click()
+    expect(host.locator(f'.capi-sec[data-sec="{sec}"]')).to_be_visible()
 
 
 def test_the_essentials_are_filled_from_the_cluster(form):
@@ -116,24 +123,28 @@ def test_the_essentials_are_filled_from_the_cluster(form):
     # réseau : la production d'abord proposée, avec son VLAN
     expect(x(host, "network")).to_have_value("default/production")
     assert "VLAN 124" in x(host, "network").inner_text()
-    # passerelle et masque déduits du pool
+    assert "172.16.3.44-49, 172.16.3.60-69, 13 libres" in x(host, "ip_pool").inner_text()
+    # l'essentiel au premier menu, le reste rangé : les autres menus fermés
+    expect(host.locator('.capi-sec[data-sec="network"]')).to_be_hidden()
+    navs = host.locator(".vm-edit-nav [data-sec]")
+    assert navs.count() == 7 and all(b.get_attribute("data-tip") for b in navs.all())
+    expect(x(host, "summary")).to_contain_text("2 VM : 4 vCPU")
+    # passerelle et masque déduits du pool, au menu Réseau
+    menu(host, "network")
     expect(x(host, "gateway")).to_have_value("172.16.0.1")
     expect(x(host, "subnet_mask")).to_have_value("255.255.0.0")
     expect(x(host, "gw-derived")).to_be_visible()
-    assert "172.16.3.44-49, 172.16.3.60-69, 13 libres" in x(host, "ip_pool").inner_text()
     # chaque contrôle s'explique
     for el in host.locator("input[data-x], select[data-x]").all():
         if el.get_attribute("type") == "checkbox":
             continue
         assert el.get_attribute("data-tip"), el.get_attribute("data-x")
-    # les options étendues sont repliées
-    assert not host.locator("details.capi-advanced").get_attribute("open")
-    expect(x(host, "summary")).to_contain_text("2 VM : 4 vCPU")
 
 
 def test_the_pool_fills_gateway_and_mask_and_says_so(form):
     page, host, _ = form()
     x(host, "ip_pool").select_option("lab-pool")
+    menu(host, "network")
     expect(x(host, "gateway")).to_have_value("10.20.0.254")
     expect(x(host, "subnet_mask")).to_have_value("255.255.255.0")
     x(host, "gateway").fill("10.20.0.1")
@@ -144,12 +155,13 @@ def test_the_pool_fills_gateway_and_mask_and_says_so(form):
 def test_presets_and_image_suggest_values(form):
     page, host, _ = form()
     x(host, "preset").select_option("medium")
+    x(host, "image").select_option("default/Rocky-9-GenericCloud.qcow2")
+    menu(host, "nodes")
     expect(x(host, "cpu")).to_have_value("4")
     expect(x(host, "memory")).to_have_value("8Gi")
+    expect(x(host, "ssh_user")).to_have_value("rocky")
     x(host, "cpu").fill("6")
     expect(x(host, "preset")).to_have_value("custom")
-    x(host, "image").select_option("default/Rocky-9-GenericCloud.qcow2")
-    expect(x(host, "ssh_user")).to_have_value("rocky")
 
 
 def test_the_check_sends_the_request_and_explains_in_french(form):
@@ -159,6 +171,13 @@ def test_the_check_sends_the_request_and_explains_in_french(form):
     x(host, "name").fill("Web Prod")
     x(host, "name").dispatch_event("change")
     expect(x(host, "name")).to_have_value("web-prod")          # nom rendu valide en tapant
+    # l'état du contrôle dans la barre, et un compteur sur chaque menu concerné
+    expect(x(host, "check-status")).to_contain_text("1 blocage(s), 1 avertissement(s)", timeout=5000)
+    expect(host.locator('[data-count="essentials"]')).to_have_text("1")
+    expect(host.locator('[data-count="nodes"]')).to_have_text("1")
+    assert "is-block" in host.locator('[data-count="essentials"]').get_attribute("class")
+    x(host, "check-status").click()                            # mène au détail
+    expect(host.locator('.capi-sec[data-sec="check"]')).to_be_visible()
     report = x(host, "report")
     expect(report).to_contain_text("Pas assez d'adresses : 6 nécessaires", timeout=5000)
     expect(report).to_contain_text("8,0 Gio")
@@ -171,12 +190,16 @@ def test_the_check_sends_the_request_and_explains_in_french(form):
 
 def test_advanced_options_reach_the_request(form):
     page, host, calls = form()
-    host.locator("details.capi-advanced summary").click()
     x(host, "name").fill("web")
+    menu(host, "network")
     x(host, "ip_pool_refs").select_option(["lab-pool"])
+    menu(host, "storage")
     x(host, "extra_disk_size").fill("20Gi")
+    menu(host, "integrations")
     x(host, "rancher_import").check()
+    menu(host, "kubernetes")
     x(host, "cni").select_option("cilium")
+    menu(host, "check")
     expect(x(host, "report")).to_contain_text("Aucun blocage", timeout=5000)
     body = calls["check"][-1]
     assert body["ip_pool_refs"] == ["capi-vm-pool", "lab-pool"]   # le principal d'abord
@@ -243,6 +266,7 @@ def test_a_shared_namespace_is_refused(form):
          "facts": {"namespace": "apps", "cluster": "apps/web"}}]})
     x(host, "name").fill("api")
     x(host, "name").dispatch_event("change")
+    menu(host, "check")
     expect(x(host, "report")).to_contain_text("contient déjà le cluster apps/web", timeout=5000)
     expect(x(host, "create")).to_be_disabled()
 
@@ -254,3 +278,44 @@ def test_an_unready_stack_points_to_installation(form):
     note = x(host, "stack-note")
     expect(note).to_contain_text("infrastructure/harvester")
     assert note.locator('[data-x="go-install"]').get_attribute("data-tip")
+
+
+def test_the_window_opens_from_the_k8s_clusters_tab_and_minimises(context, flask_server):
+    """Demandé par l'exploitant : plus de sous-onglet de création, un bouton
+    dans Clusters K8S qui ouvre une fenêtre qu'on replie dans la barre."""
+    context.add_init_script("""localStorage.setItem('harvester_ops_language','fr');
+      localStorage.setItem('harvester_ops_current_tab','automation');
+      localStorage.setItem('harvester_ops_automation_subtab','capi');
+      localStorage.setItem('harvester_ops_capi_subtab','clusters');""")      # ancien choix mémorisé
+    page = context.new_page()
+    page.route("**/api/capi/harv-fake/inventory*", lambda r, q: fulfill(r, INVENTORY))
+    page.route("**/api/capi/harv-fake/diag*", lambda r, q: fulfill(r, {"capi_clusters": []}))
+    page.route("**/api/capi/harv-fake/cluster-check", lambda r, q: fulfill(r, {"blocked": False, "findings": []}))
+    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    page.wait_for_function("window.CapiCreate && window.CAPI && window.i18n")
+    page.evaluate("document.querySelector('.tab[data-tab=automation]')?.click()")
+    assert page.locator('#tab-automation .sub-tab[data-capi-tab="clusters"]').count() == 0
+    expect(page.locator('#tab-automation .sub-tab[data-capi-tab="k8s"]')).to_have_class("sub-tab active")
+    btn = page.locator("#btn-capi-create")
+    expect(btn).to_be_visible()
+    assert btn.get_attribute("data-tip")
+    btn.click()
+    win = page.locator("#fp-capi-create")
+    expect(win.locator('[data-x="name"]')).to_be_visible(timeout=5000)
+    win.locator('[data-x="name"]').fill("web")
+    page.evaluate("FloatingPanels.minimize('capi-create')")
+    expect(win).to_be_hidden()
+    btn.click()                                        # la même fenêtre revient, saisie gardée
+    expect(win).to_be_visible()
+    expect(win.locator('[data-x="name"]')).to_have_value("web")
+
+
+def test_a_refused_field_counts_on_its_own_menu(form):
+    """Vu à l'essai : le refus du DNS vide se comptait sur l'Essentiel alors
+    que le champ est au menu Réseau."""
+    page, host, _ = form(check={"blocked": True, "findings": [
+        {"code": "invalid", "level": "block", "facts": {"option": "dns", "message": "at least one DNS server"}}]})
+    x(host, "name").fill("web")
+    x(host, "name").dispatch_event("change")
+    expect(host.locator('[data-count="network"]')).to_have_text("1", timeout=5000)
+    expect(host.locator('[data-count="essentials"]')).to_be_hidden()

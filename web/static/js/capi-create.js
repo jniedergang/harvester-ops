@@ -66,6 +66,37 @@ const CapiCreate = (() => {
     return fn ? fn(v) : f.code;
   }
 
+  // v1.53.0 : la création passe dans une fenêtre à menus, comme celle d'une
+  // VM (demande de l'exploitant) : l'essentiel au premier menu, le reste
+  // rangé par thème, le contrôle préalable à part avec un compteur par menu.
+  const SECTIONS = ['essentials', 'nodes', 'network', 'storage', 'kubernetes', 'integrations', 'check'];
+  const SEC_LABEL = {
+    essentials: () => tr('capi.new.nav.essentials'),
+    nodes: () => tr('capi.new.nav.nodes'),
+    network: () => tr('capi.new.nav.network'),
+    storage: () => tr('capi.new.nav.storage'),
+    kubernetes: () => tr('capi.new.nav.kubernetes'),
+    integrations: () => tr('capi.new.nav.integrations'),
+    check: () => tr('capi.new.nav.check'),
+  };
+  const SEC_TIP = {
+    essentials: () => tr('capi.new.nav.t.essentials'),
+    nodes: () => tr('capi.new.nav.t.nodes'),
+    network: () => tr('capi.new.nav.t.network'),
+    storage: () => tr('capi.new.nav.t.storage'),
+    kubernetes: () => tr('capi.new.nav.t.kubernetes'),
+    integrations: () => tr('capi.new.nav.t.integrations'),
+    check: () => tr('capi.new.nav.t.check'),
+  };
+  const SEC_ICON = { essentials: 'general', nodes: 'compute', network: 'network', storage: 'storage',
+                     kubernetes: 'capi', integrations: 'plug', check: 'test' };
+  // Le menu où se règle ce que dit chaque constat (compteur sur le menu).
+  const FINDING_SEC = {
+    'small-nodes': 'nodes', 'cpu-short': 'nodes', 'memory-short': 'nodes',
+    'gateway-differs': 'network', 'mask-differs': 'network', 'endpoint-dhcp': 'network',
+    'storage-class-missing': 'storage', 'cidr-overlap': 'kubernetes', 'cni-tuning-ignored': 'integrations',
+  };
+
   function opts(list, selected, label = (v) => v, value = (v) => v) {
     return list.map(v => `<option value="${esc(value(v))}" ${value(v) === selected ? 'selected' : ''}>${esc(label(v))}</option>`).join('');
   }
@@ -92,11 +123,20 @@ const CapiCreate = (() => {
     const verOpts = versions.map(v => (typeof v === 'string' ? { version: v } : v));
     const dns0 = (() => { try { return localStorage.getItem('harvester_ops_capi_dns') || ''; } catch { return ''; } })();
     return `
-      <div class="tf-form capi-create" data-cluster="${esc(cluster)}">
-        <p class="tf-desc">${esc(tr('capi.new.intro'))}</p>
+      <div class="capi-create capi-create-win" data-cluster="${esc(cluster)}">
         <div class="capi-stack-note" data-x="stack-note"></div>
-
-        <fieldset class="tf-block"><legend>${esc(tr('capi.new.sec.essentials'))}</legend>
+        <div class="vm-edit-layout vm-create-layout">
+          <aside class="vm-edit-nav" role="tablist" aria-label="${esc(tr('capi.new.title'))}">
+            ${SECTIONS.map(x => `
+              <button type="button" role="tab" data-sec="${x}" class="tip" data-tip="${esc(SEC_TIP[x]())}">
+                <span class="ic">${Icons.svg(SEC_ICON[x], { size: 14 })}</span>
+                <span>${esc(SEC_LABEL[x]())}</span>
+                <span class="capi-nav-count" data-count="${x}" hidden></span>
+              </button>`).join('')}
+          </aside>
+          <div class="vm-edit-content tf-form">
+        <section class="capi-sec" data-sec="essentials" role="tabpanel">
+          <h3>${esc(SEC_LABEL.essentials())}</h3>
           <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.name'))}</span>
               <input data-x="name" type="text" placeholder="web-prod" autocomplete="off" spellcheck="false"
@@ -105,11 +145,6 @@ const CapiCreate = (() => {
               <select data-x="k8s_version" class="tip" data-tip="${esc(tr('capi.new.t.version'))}">
                 ${opts(verOpts, inv.default_version, v => v.tested ? `${v.version} (${tr('capi.new.tested')})` : v.version, v => v.version)}
               </select></label>
-          </div>
-        </fieldset>
-
-        <fieldset class="tf-block"><legend>${esc(tr('capi.new.sec.size'))}</legend>
-          <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.cp'))}</span>
               <select data-x="cp_replicas" class="tip" data-tip="${esc(tr('capi.new.t.cp'))}">
                 <option value="1">${esc(tr('capi.new.cp1'))}</option>
@@ -126,35 +161,15 @@ const CapiCreate = (() => {
                 <option value="large">${esc(tr('capi.new.p.large'))}</option>
                 <option value="custom">${esc(tr('capi.new.p.custom'))}</option>
               </select></label>
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.cpu'))}</span>
-              <input data-x="cpu" type="number" min="1" max="64" value="2" class="tip" data-tip="${esc(tr('capi.new.t.cpu'))}"></label>
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.memory'))}</span>
-              <input data-x="memory" type="text" value="4Gi" list="capi-mem-sizes" class="tip" data-tip="${esc(tr('capi.new.t.memory'))}"></label>
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.disk'))}</span>
-              <input data-x="disk_size" type="text" value="40Gi" list="capi-disk-sizes" class="tip" data-tip="${esc(tr('capi.new.t.disk'))}"></label>
-          </div>
-          <datalist id="capi-mem-sizes">${['4Gi', '8Gi', '12Gi', '16Gi', '32Gi'].map(v => `<option value="${v}">`).join('')}</datalist>
-          <datalist id="capi-disk-sizes">${['40Gi', '60Gi', '80Gi', '120Gi', '200Gi'].map(v => `<option value="${v}">`).join('')}</datalist>
-        </fieldset>
-
-        <fieldset class="tf-block"><legend>${esc(tr('capi.new.sec.os'))}</legend>
-          <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.image'))}</span>
               <select data-x="image" class="tip" data-tip="${esc(tr('capi.new.t.image'))}">
                 ${images.length ? opts(images, img0.ref, i => i.display_name + (i.virtual_size ? ` (${bytes(i.virtual_size)})` : ''), i => i.ref)
                                 : `<option value="">${esc(tr('capi.new.noImage'))}</option>`}
               </select></label>
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.sshUser'))}</span>
-              <input data-x="ssh_user" type="text" value="${esc(user0)}" class="tip" data-tip="${esc(tr('capi.new.t.sshUser'))}"></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.keypair'))}</span>
               <select data-x="ssh_keypair" class="tip" data-tip="${esc(tr('capi.new.t.keypair'))}">
                 ${keys.length ? opts(keys, keys[0]) : `<option value="">${esc(tr('capi.new.noKeypair'))}</option>`}
               </select></label>
-          </div>
-        </fieldset>
-
-        <fieldset class="tf-block"><legend>${esc(tr('capi.new.sec.network'))}</legend>
-          <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.network'))}</span>
               <select data-x="network" class="tip" data-tip="${esc(tr('capi.new.t.network'))}">
                 ${opts(nets, (nets.find(n => /production/.test(n.ref)) || nets[0] || {}).ref,
@@ -164,6 +179,28 @@ const CapiCreate = (() => {
               <select data-x="ip_pool" class="tip" data-tip="${esc(tr('capi.new.t.pool'))}">
                 ${opts(pools, pool0.name, poolLabel, p => p.name)}
               </select></label>
+          </div>
+          <p class="tf-desc capi-summary" data-x="summary"></p>
+          <p class="tf-desc">${esc(tr('capi.new.intro'))}</p>
+        </section>
+        <section class="capi-sec" data-sec="nodes" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.nodes())}</h3>
+          <div class="tf-args">
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.cpu'))}</span>
+              <input data-x="cpu" type="number" min="1" max="64" value="2" class="tip" data-tip="${esc(tr('capi.new.t.cpu'))}"></label>
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.memory'))}</span>
+              <input data-x="memory" type="text" value="4Gi" list="capi-mem-sizes" class="tip" data-tip="${esc(tr('capi.new.t.memory'))}"></label>
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.disk'))}</span>
+              <input data-x="disk_size" type="text" value="40Gi" list="capi-disk-sizes" class="tip" data-tip="${esc(tr('capi.new.t.disk'))}"></label>
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.sshUser'))}</span>
+              <input data-x="ssh_user" type="text" value="${esc(user0)}" class="tip" data-tip="${esc(tr('capi.new.t.sshUser'))}"></label>
+          </div>
+          <datalist id="capi-mem-sizes">${['4Gi', '8Gi', '12Gi', '16Gi', '32Gi'].map(v => `<option value="${v}">`).join('')}</datalist>
+          <datalist id="capi-disk-sizes">${['40Gi', '60Gi', '80Gi', '120Gi', '200Gi'].map(v => `<option value="${v}">`).join('')}</datalist>
+        </section>
+        <section class="capi-sec" data-sec="network" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.network())}</h3>
+          <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.gateway'))} <span class="capi-derived" data-x="gw-derived">${esc(tr('capi.new.fromPool'))}</span></span>
               <input data-x="gateway" type="text" value="${esc(pool0.gateway || '')}" class="tip" data-tip="${esc(tr('capi.new.t.gateway'))}"></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.mask'))} <span class="capi-derived" data-x="mask-derived">${esc(tr('capi.new.fromPool'))}</span></span>
@@ -171,20 +208,6 @@ const CapiCreate = (() => {
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.dns'))}</span>
               <input data-x="dns" type="text" value="${esc(dns0)}" list="capi-dns" placeholder="${esc(pool0.gateway || '8.8.8.8')}"
                      class="tip" data-tip="${esc(tr('capi.new.t.dns'))}"></label>
-          </div>
-          <datalist id="capi-dns">${[pool0.gateway, dns0].filter(Boolean).map(v => `<option value="${esc(v)}">`).join('')}</datalist>
-          <p class="tf-desc capi-summary" data-x="summary"></p>
-        </fieldset>
-
-        <details class="tf-block capi-advanced" data-x="advanced">
-          <summary class="tip" data-tip="${esc(tr('capi.new.t.advanced'))}">${esc(tr('capi.new.sec.advanced'))}</summary>
-          <div class="tf-args">
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.namespace'))}</span>
-              <input data-x="namespace" type="text" placeholder="${esc(tr('capi.new.sameAsName'))}" class="tip" data-tip="${esc(tr('capi.new.t.namespace'))}"></label>
-            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.targetNs'))}</span>
-              <select data-x="target_namespace" class="tip" data-tip="${esc(tr('capi.new.t.targetNs'))}">
-                ${opts((inv.namespaces || []).filter(n => !/^(cattle-|kube-|harvester-|longhorn-|fleet-|rke2-|caphv-|capi-|cert-manager)/.test(n) || n === 'default'), 'default')}
-              </select></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.extraPools'))}</span>
               <select data-x="ip_pool_refs" multiple size="2" class="tip" data-tip="${esc(tr('capi.new.t.extraPools'))}">
                 ${opts(pools, '', poolLabel, p => p.name)}
@@ -193,11 +216,28 @@ const CapiCreate = (() => {
               <select data-x="extra_networks" multiple size="2" class="tip" data-tip="${esc(tr('capi.new.t.extraNets'))}">
                 ${opts(nets, '', n => n.ref, n => n.ref)}
               </select></label>
+          </div>
+          <datalist id="capi-dns">${[pool0.gateway, dns0].filter(Boolean).map(v => `<option value="${esc(v)}">`).join('')}</datalist>
+        </section>
+        <section class="capi-sec" data-sec="storage" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.storage())}</h3>
+          <div class="tf-args">
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.extraDisk'))}</span>
               <input data-x="extra_disk_size" type="text" placeholder="20Gi" class="tip" data-tip="${esc(tr('capi.new.t.extraDisk'))}"></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.extraDiskClass'))}</span>
               <select data-x="extra_disk_class" class="tip" data-tip="${esc(tr('capi.new.t.extraDiskClass'))}">
                 ${opts(scs, (scs.find(s => s.default) || scs[0] || {}).name, s => s.name + (s.default ? ' *' : ''), s => s.name)}
+              </select></label>
+          </div>
+        </section>
+        <section class="capi-sec" data-sec="kubernetes" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.kubernetes())}</h3>
+          <div class="tf-args">
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.namespace'))}</span>
+              <input data-x="namespace" type="text" placeholder="${esc(tr('capi.new.sameAsName'))}" class="tip" data-tip="${esc(tr('capi.new.t.namespace'))}"></label>
+            <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.targetNs'))}</span>
+              <select data-x="target_namespace" class="tip" data-tip="${esc(tr('capi.new.t.targetNs'))}">
+                ${opts((inv.namespaces || []).filter(n => !/^(cattle-|kube-|harvester-|longhorn-|fleet-|rke2-|caphv-|capi-|cert-manager)/.test(n) || n === 'default'), 'default')}
               </select></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.cni'))}</span>
               <select data-x="cni" class="tip" data-tip="${esc(tr('capi.new.t.cni'))}">
@@ -207,6 +247,11 @@ const CapiCreate = (() => {
               <input data-x="pod_cidr" type="text" value="10.42.0.0/16" class="tip" data-tip="${esc(tr('capi.new.t.podCidr'))}"></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.svcCidr'))}</span>
               <input data-x="service_cidr" type="text" value="10.43.0.0/16" class="tip" data-tip="${esc(tr('capi.new.t.svcCidr'))}"></label>
+          </div>
+        </section>
+        <section class="capi-sec" data-sec="integrations" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.integrations())}</h3>
+          <div class="tf-args">
             <label class="tf-field tf-type-bool tip" data-tip="${esc(tr('capi.new.t.rancher'))}"><input data-x="rancher_import" type="checkbox"><span class="tf-label">${esc(tr('capi.new.f.rancher'))}</span></label>
             <label class="tf-field"><span class="tf-label">${esc(tr('capi.new.f.fleetRepo'))}</span>
               <input data-x="fleet_repo" type="text" placeholder="https://" class="tip" data-tip="${esc(tr('capi.new.t.fleetRepo'))}"></label>
@@ -223,15 +268,12 @@ const CapiCreate = (() => {
                 ${opts(['Disabled', 'Enabled'], 'Disabled')}
               </select></label>
           </div>
-        </details>
-
-        <fieldset class="tf-block"><legend>${esc(tr('capi.new.sec.check'))}</legend>
-          <div class="xfer-report" data-x="report"></div></fieldset>
-        <div class="apply-bar" style="margin:0; padding:0; border:0;">
-          <button type="button" class="btn btn-secondary btn-sm tip" data-x="check" data-tip="${esc(tr('capi.new.t.check'))}">${Icons.svg('refresh')} <span>${esc(tr('capi.new.check'))}</span></button>
-          <button type="button" class="btn btn-secondary btn-sm tip" data-x="preview" data-tip="${esc(tr('capi.new.t.preview'))}">${Icons.svg('preview')} <span>${esc(tr('capi.new.preview'))}</span></button>
-          <button type="button" class="btn btn-primary btn-sm tip" data-x="create" data-tip="${esc(tr('capi.new.t.create'))}" disabled>${Icons.svg('capi')} <span>${esc(tr('capi.new.create'))}</span></button>
-          <span class="apply-result" data-x="feedback"></span>
+        </section>
+        <section class="capi-sec" data-sec="check" role="tabpanel" hidden>
+          <h3>${esc(SEC_LABEL.check())}</h3>
+          <div class="xfer-report" data-x="report"></div>
+        </section>
+          </div>
         </div>
         <fieldset class="tf-block xfer-live" data-x="live" hidden>
           <legend>${esc(tr('capi.new.sec.progress'))}</legend>
@@ -240,6 +282,13 @@ const CapiCreate = (() => {
           <div class="tf-desc" data-x="live-meta"></div>
           <div class="xfer-archive" data-x="done-box" hidden></div>
         </fieldset>
+        <div class="apply-bar capi-create-actions">
+          <button type="button" class="btn btn-primary btn-sm tip" data-x="create" data-tip="${esc(tr('capi.new.t.create'))}" disabled>${Icons.svg('capi')} <span>${esc(tr('capi.new.create'))}</span></button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="check" data-tip="${esc(tr('capi.new.t.check'))}">${Icons.svg('refresh')} <span>${esc(tr('capi.new.check'))}</span></button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-x="preview" data-tip="${esc(tr('capi.new.t.preview'))}">${Icons.svg('preview')} <span>${esc(tr('capi.new.preview'))}</span></button>
+          <button type="button" class="btn-link capi-check-status tip" data-x="check-status" data-tip="${esc(tr('capi.new.t.checkStatus'))}"></button>
+          <span class="apply-result" data-x="feedback"></span>
+        </div>
       </div>`;
   }
 
@@ -272,6 +321,49 @@ const CapiCreate = (() => {
     const imageByRef = Object.fromEntries((inv.images || []).map(i => [i.ref, i]));
 
     stackNote(q('stack-note'), inv.stack);
+
+    function show(sec) {
+      root.querySelectorAll('.vm-edit-nav [data-sec]').forEach(b => {
+        b.classList.toggle('active', b.dataset.sec === sec);
+        b.setAttribute('aria-selected', b.dataset.sec === sec ? 'true' : 'false');
+      });
+      root.querySelectorAll('.capi-sec').forEach(x => { x.hidden = x.dataset.sec !== sec; });
+    }
+    root.querySelectorAll('.vm-edit-nav [data-sec]').forEach(b =>
+      b.addEventListener('click', () => show(b.dataset.sec)));
+    q('check-status').addEventListener('click', () => show('check'));
+    show('essentials');
+
+    // Un compteur par menu, et l'état du contrôle dans la barre d'actions,
+    // visible quel que soit le menu ouvert.
+    // Le menu de chaque champ, lu dans le formulaire : un refus qui nomme
+    // son champ (`invalid`, option « dns »...) compte sur le bon menu.
+    const fieldSec = {};
+    root.querySelectorAll('.capi-sec').forEach(sec => sec.querySelectorAll('[data-x]').forEach(el => {
+      fieldSec[el.dataset.x] = sec.dataset.sec;
+    }));
+
+    function counts(items, blocked) {
+      const per = {};
+      items.filter(f => f.level !== 'ok').forEach(f => {
+        const sec = FINDING_SEC[f.code] || fieldSec[(f.facts || {}).option] || 'essentials';
+        per[sec] = per[sec] || { n: 0, block: false };
+        per[sec].n += 1;
+        per[sec].block = per[sec].block || f.level === 'block';
+      });
+      root.querySelectorAll('[data-count]').forEach(el => {
+        const c = per[el.dataset.count];
+        el.hidden = !c;
+        el.textContent = c ? String(c.n) : '';
+        el.classList.toggle('is-block', !!(c && c.block));
+      });
+      const nb = items.filter(f => f.level === 'block').length;
+      const nw = items.filter(f => f.level === 'warn').length;
+      const st = q('check-status');
+      st.textContent = blocked ? tr('capi.new.status.blocked', { n: nb, w: nw })
+        : (nw ? tr('capi.new.status.warn', { w: nw }) : tr('capi.new.status.ok'));
+      st.classList.toggle('is-block', !!blocked);
+    }
 
     function body() {
       const b = {};
@@ -342,6 +434,7 @@ const CapiCreate = (() => {
         report.classList.remove('is-checking');
         report.innerHTML = `<p class="tf-desc">${esc(tr('capi.new.needName'))}</p>`;
         q('create').disabled = true;
+        q('check-status').textContent = tr('capi.new.needName');
         return;
       }
       try {
@@ -357,6 +450,7 @@ const CapiCreate = (() => {
         const ok = d.blocked ? '' : `<div class="sto-finding sev-info" data-code="ok"><div class="sto-finding-title">${esc(tr('capi.new.noBlocker'))}</div></div>`;
         report.innerHTML = list + ok;
         report.classList.remove('is-checking');
+        counts(items, d.blocked);
         q('create').disabled = !!d.blocked || state.running;
       } catch (e) {
         if (seq !== state.seq) return;
@@ -427,6 +521,7 @@ const CapiCreate = (() => {
               q('live-line').textContent = tr('capi.new.done', { name: ref });
               q('live-bar').style.width = '100%';
               doneBlock(q('done-box'), cluster, ref);
+              if (window.CAPI && CAPI.refreshK8s) CAPI.refreshK8s();
             } else if (d.status === 'cancelled') {
               q('live-line').textContent = tr('capi.new.cancelled');
             } else {
@@ -470,6 +565,7 @@ const CapiCreate = (() => {
       </div>`;
     box.querySelector('[data-x="open-list"]').addEventListener('click', () => {
       document.querySelector('#tab-automation .sub-tab[data-capi-tab="k8s"]')?.click();
+      if (window.CAPI && CAPI.refreshK8s) CAPI.refreshK8s();
     });
   }
 
@@ -514,7 +610,31 @@ const CapiCreate = (() => {
     return Number(m[1]) * { Mi: 1024 ** 2, Gi: GIB, Ti: 1024 ** 4 }[m[2]];
   }
 
-  return { render, _findingText: findingText, _stepText: stepText };
+  const PANEL_ID = 'capi-create';
+
+  /** La fenêtre de création : repliable dans la barre des fenêtres, une
+   *  seule à la fois (la rouvrir la ramène au premier plan). */
+  function open(cluster) {
+    if (!cluster) return null;
+    if (document.getElementById('fp-' + PANEL_ID)) {
+      return FloatingPanels.open({ id: PANEL_ID, icon: 'capi', title: tr('capi.new.title') });
+    }
+    const panel = FloatingPanels.open({
+      id: PANEL_ID,
+      title: `${tr('capi.new.title')} (${cluster})`,
+      icon: 'capi',
+      bodyHtml: '<div class="capi-create-host"></div>',
+      width: 1060, height: 720,
+      restoreSpec: { type: 'capi-create', args: { cluster } },
+    });
+    render(panel.el.querySelector('.capi-create-host'), cluster);
+    return panel;
+  }
+
+  return { open, render, _findingText: findingText, _stepText: stepText };
 })();
 
 window.CapiCreate = CapiCreate;
+if (typeof FloatingPanels !== 'undefined') {
+  FloatingPanels.registerType('capi-create', (args) => CapiCreate.open(args.cluster));
+}

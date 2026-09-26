@@ -394,8 +394,6 @@
         <div class="sub-tabs sub-tabs-inline" role="tablist" data-only-for="capi">
           <button class="sub-tab active" data-capi-tab="install"
                   data-i18n-title="capi.tab.install.tip" title="Install / uninstall the CAPI + CAPHV controllers on the management cluster"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.install">Installation</span></button>
-          <button class="sub-tab" data-capi-tab="clusters"
-                  data-i18n-title="capi.tab.clusters.tip" title="Create downstream RKE2 clusters via the harvester-rke2 ClusterClass"><span class="tab-icon" data-icon="tools"></span> <span data-i18n="capi.tab.clusters">Création de clusters</span></button>
           <button class="sub-tab" data-capi-tab="k8s"
                   data-i18n-title="capi.tab.k8s.tip" title="List + manage the downstream Kubernetes clusters reconciled by CAPHV"><span class="tab-icon" data-icon="node"></span> <span data-i18n="capi.tab.k8s">Clusters K8S</span></button>
           <button class="sub-tab" data-capi-tab="services"
@@ -417,22 +415,14 @@
           </div>
         </div>
 
-        <div class="capi-tab-content" data-capi-tab="clusters">
-          <div class="card">
-            <div class="card-header">
-              <h2><span data-icon="tools" data-icon-size="18"></span> <span data-i18n="capi.clusters.title">Création de clusters RKE2</span></h2>
-            </div>
-            <div class="card-body" id="capi-clusters-body">
-              <p class="form-hint" data-i18n="common.loading">Loading…</p>
-            </div>
-          </div>
-        </div>
-
         <div class="capi-tab-content" data-capi-tab="k8s">
           <div class="card">
             <div class="card-header">
               <h2><span data-icon="node" data-icon-size="18"></span> <span data-i18n="capi.k8s.title">Clusters Kubernetes managés</span></h2>
-              <button class="btn btn-sm btn-secondary" id="btn-capi-k8s-refresh" data-i18n-title="capi.tip.refreshK8s" title="Reload the list of CAPI-managed clusters">Refresh</button>
+              <div>
+                <button class="btn btn-sm btn-primary tip" id="btn-capi-create" data-i18n-title="capi.k8s.t.create" data-tip-i18n="capi.k8s.t.create" title="Open the creation window"><span data-icon="add" data-icon-size="14"></span> <span data-i18n="capi.k8s.create">Create a cluster</span></button>
+                <button class="btn btn-sm btn-secondary" id="btn-capi-k8s-refresh" data-i18n-title="capi.tip.refreshK8s" title="Reload the list of CAPI-managed clusters">Refresh</button>
+              </div>
             </div>
             <div class="card-body" id="capi-k8s-body">
               <p class="form-hint" data-i18n="common.loading">Loading…</p>

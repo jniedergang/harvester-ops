@@ -4,6 +4,32 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.53.0] - 2026-09-26 - Create a cluster from a window with menus
+
+### Changed
+- **Cluster API: the "Cluster creation" sub-tab is gone.** A "Create a
+  cluster" button in the K8S Clusters tab opens a window, like the creation
+  of a VM: it can be minimised to the window bar to check something
+  elsewhere, and comes back as it was. A saved choice of the old sub-tab
+  now opens K8S Clusters.
+- The window is organised in menus: **Essentials** first (name, version,
+  control plane and workers, size preset, image, key pair, VM network, IP
+  pool: enough to create), then Nodes, Network, Storage, Kubernetes,
+  Integrations and Pre-check. Each menu shows how many findings concern
+  it, and the action bar sums up the pre-check whatever the open menu
+  (a click leads to the details).
+- The list of clusters refreshes itself when a creation ends.
+
+### Tests
+- The window opened from the K8S Clusters button, minimised and reopened
+  with its input kept; the menus; the counters per menu (a refused field
+  counts on its own menu); the pre-check status in the action bar; every
+  earlier behaviour of the form (values from the cluster, pool, presets,
+  request, preview, follow-up).
+- Real, on harv1: a cluster created from the window (minimised during the
+  creation, then reopened), with kube-vip in place from the start: a
+  service deployed on it got its address without any extra step.
+
 ## [1.52.1] - 2026-09-26 - Terraform tab: VMs can be created again, one click is one action
 
 ### Fixed
@@ -67,9 +93,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 
 ### Known limits
 - When a service of a created cluster goes away in DHCP mode, the Harvester
-  cloud provider leaves its LoadBalancer object on Harvester (it holds no
-  address). CAPHV starts the cloud provider without a cluster name, so these
-  objects cannot be tied to their cluster. Both are to be reported upstream.
+  cloud provider may leave its LoadBalancer object on Harvester (seen on one
+  test cluster, not on another; it holds no address). CAPHV starts the
+  cloud provider without a cluster name, so these objects cannot be tied to
+  their cluster. Both are to be reported upstream.
 
 ### Tests
 - Catalog, pre-check, manifest and state reading (`capi_services`); the CLI

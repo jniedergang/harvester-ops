@@ -584,29 +584,33 @@ aussi.
   d'avant : cert-manager, cœur Cluster API et fournisseurs, tout depuis le
   paquet.
 
-### Créer un cluster (1.48.0)
+### Créer un cluster (1.48.0, fenêtre à menus en 1.53.0)
 
-L'onglet Création de cluster est un formulaire rempli à partir du cluster
-lui-même :
+Le bouton **Créer un cluster** de l'onglet Clusters K8S ouvre une fenêtre
+qu'on peut replier dans la barre des fenêtres, le temps de vérifier un
+réglage ailleurs, et rouvrir telle quelle. Elle est organisée en menus,
+comme la création d'une VM, et remplie à partir du cluster lui-même :
 
-- **L'essentiel** : le nom et la version de Kubernetes (les versions
-  créées pour de vrai avec le paquet sont marquées « testée »).
-- **La taille** : 1, 3 ou 5 nœuds de plan de contrôle, le nombre de
-  workers, et un gabarit petit / moyen / grand ou des CPU, mémoire et
-  disque sur mesure.
-- **Système et accès** : les images du cluster (sans les ISO ni les images
-  en cours de téléchargement, les images SUSE d'abord, la dernière choisie
-  retenue), l'utilisateur SSH suggéré d'après le système de l'image, et
-  une paire de clés.
-- **Le réseau** : le réseau des VMs avec son VLAN, le pool d'adresses avec
-  ses plages et ses adresses libres ; la passerelle et le masque sont tirés
-  du pool, et marqués comme tels tant qu'on ne les change pas ; le serveur
-  DNS est retenu.
-- **Les options avancées**, repliées : espaces de noms des objets du
-  cluster et des VMs, pools et réseaux supplémentaires, un disque de
-  données et sa classe de stockage, le CNI, les CIDR des pods et des
-  services, l'import dans Rancher, les compléments Fleet avec MTU,
+- **Essentiel**, le menu d'ouverture, qui suffit pour créer : le nom, la
+  version de Kubernetes (les versions créées pour de vrai avec le paquet
+  sont marquées « testée »), 1, 3 ou 5 nœuds de plan de contrôle, le nombre
+  de workers, un gabarit petit / moyen / grand, l'image (sans les ISO ni
+  les images en cours de téléchargement, les images SUSE d'abord, la
+  dernière choisie retenue), la paire de clés, le réseau des VMs avec son
+  VLAN et le pool d'adresses avec ses plages et ses adresses libres.
+- **Nœuds** : CPU, mémoire et disque sur mesure, l'utilisateur SSH suggéré
+  d'après le système de l'image.
+- **Réseau** : la passerelle et le masque tirés du pool (et marqués comme
+  tels tant qu'on ne les change pas), le serveur DNS (retenu), des pools et
+  réseaux supplémentaires.
+- **Stockage** : un disque de données et sa classe de stockage.
+- **Kubernetes** : espaces de noms des objets du cluster et des VMs, le
+  CNI, les CIDR des pods et des services.
+- **Intégrations** : l'import dans Rancher, les compléments Fleet avec MTU,
   encapsulation et BGP.
+- **Contrôle** : le détail du contrôle préalable ; chaque menu porte le
+  nombre de constats qui le concernent, et la barre d'actions en donne le
+  résumé quel que soit le menu ouvert.
 
 Chaque contrôle s'explique au survol. Un **contrôle préalable** tourne
 pendant la saisie et dit, dans la langue de l'interface, ce qui bloque (pas
