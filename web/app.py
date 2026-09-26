@@ -1125,6 +1125,20 @@ def _actions_persist(run):
     conn.close()
 
 
+def _row_result(raw):
+    """La colonne `result` (JSON) relue en dictionnaire ; vide pour une
+    ligne écrite avant 1.47.2 ou illisible.
+
+    Définie AVANT le rechargement de l'historique, qui s'exécute à l'import :
+    placée après, chaque ligne échouait sur un NameError depuis la 1.47.2 et
+    plus aucune action n'était rechargée au démarrage (vu en v1.56.0)."""
+    try:
+        v = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
 def _actions_load_history():
     """Restore actions from SQLite at startup. Mark interrupted runs as 'interrupted'."""
     try:
@@ -1187,16 +1201,6 @@ _actions_load_history()
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
                          "result")
-
-
-def _row_result(raw):
-    """La colonne `result` (JSON) relue en dictionnaire ; vide pour une
-    ligne écrite avant 1.47.2 ou illisible."""
-    try:
-        v = json.loads(raw) if raw else {}
-    except (TypeError, ValueError):
-        return {}
-    return v if isinstance(v, dict) else {}
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
@@ -1471,6 +1475,80 @@ def _harvester_ops_version():
     return "dev"
 
 
+# v1.56.0 : l'historique des versions, lu dans CHANGELOG.md (livré avec la
+# console) et affiché d'un clic sur le numéro de version.
+_CHANGELOG_CACHE = {"mtime": None, "data": None}
+_CHANGELOG_HEAD_RE = re.compile(r"^## \[([^\]]+)\]\s*(?:[-—–]\s*(\S+))?\s*(?:[-—–]\s*(.*))?$")
+
+
+def _changelog_path():
+    return Path(__file__).resolve().parent.parent / "CHANGELOG.md"
+
+
+def _parse_changelog(text):
+    """Les versions de CHANGELOG.md : `## [x.y.z] - date - titre`, puis des
+    sections `### Added` (etc.) faites de puces, une puce pouvant courir sur
+    plusieurs lignes indentées. Le texte reste en Markdown léger ; l'écran
+    l'échappe avant d'en rendre le gras, le code et les liens."""
+    releases, rel, sec, item = [], None, None, None
+
+    def flush_item():
+        nonlocal item
+        if item is not None and sec is not None:
+            sec["items"].append(" ".join(item).strip())
+        item = None
+
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        m = _CHANGELOG_HEAD_RE.match(line)
+        if m:
+            flush_item()
+            rel = {"version": m.group(1).strip(), "date": (m.group(2) or "").strip(),
+                   "title": (m.group(3) or "").strip(), "sections": []}
+            releases.append(rel)
+            sec = None
+            continue
+        if rel is None:
+            continue
+        if line.startswith("### "):
+            flush_item()
+            sec = {"name": line[4:].strip(), "items": []}
+            rel["sections"].append(sec)
+            continue
+        if not line.strip():
+            flush_item()
+            continue
+        if sec is None:
+            sec = {"name": "", "items": []}
+            rel["sections"].append(sec)
+        stripped = line.strip()
+        if stripped.startswith(("- ", "* ")):
+            flush_item()
+            item = [stripped[2:]]
+        elif item is not None and raw[:1] in (" ", "\t"):
+            item.append(stripped)
+        else:
+            flush_item()
+            item = [stripped]
+    flush_item()
+    return releases
+
+
+@app.route("/api/changelog")
+@requires_auth
+def api_changelog():
+    path = _changelog_path()
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return jsonify({"current": _harvester_ops_version(), "releases": [],
+                        "error": "changelog not shipped"}), 200
+    if _CHANGELOG_CACHE["mtime"] != mtime:
+        _CHANGELOG_CACHE.update({"mtime": mtime,
+                                 "data": _parse_changelog(path.read_text(errors="replace"))})
+    return jsonify({"current": _harvester_ops_version(), "releases": _CHANGELOG_CACHE["data"]})
+
+
 @app.route("/")
 @requires_auth
 def index():
@@ -1497,6 +1575,7 @@ def login_page():
     return render_template("login.html", rancher=st is not None,
                            rancher_label=(st or {}).get("label", "Rancher"),
                            local=HTPASSWD_PATH.exists(), error=err,
+                           signed_out=request.args.get("signed_out") == "1",
                            error_kind=(_LOGIN_ERROR_KINDS.get(err, "token") if err else ""),
                            version=_harvester_ops_version())
 
@@ -1510,6 +1589,25 @@ def login_local():
     if not auth or not check_auth(auth.username, auth.password):
         return authenticate()
     return redirect("/")
+
+
+# v1.56.0 : se déconnecter d'un compte local. L'authentification HTTP Basic
+# n'a pas de session : le NAVIGATEUR garde le mot de passe et le renvoie à
+# chaque requête. Pour qu'il l'oublie, la page lui fait retenir un compte
+# factice, que la console accepte sur ce seul chemin : les requêtes suivantes
+# portent ce compte, sont refusées, et le navigateur redemande le mot de passe.
+LOGOUT_PSEUDO_USER = "harvester-ops-signed-out"
+
+
+@app.route("/logout/local")
+@_rate_limit("30/minute")
+def logout_local():
+    if not HTPASSWD_PATH.exists():
+        return jsonify({"ok": True, "login": "/"})       # console ouverte : rien à oublier
+    auth = request.authorization
+    if auth and auth.username == LOGOUT_PSEUDO_USER:
+        return jsonify({"ok": True, "login": "/login?signed_out=1"})
+    return authenticate()
 
 
 @app.route("/auth/rancher/login")
@@ -2198,16 +2296,26 @@ def review():
 @requires_auth
 def api_clusters():
     cfg = load_config()
-    clusters = []
+    clusters, hidden = [], []
+    sso = _sso_session() is not None
     for c in cfg.get("clusters", []):
-        if not _sso_visible(c):
-            continue
+        if sso:
+            kc, why = _sso_cluster_state(c)
+            if kc is None:
+                # v1.56.0 : dire POURQUOI un cluster manque, au lieu d'une
+                # liste vide sans explication (vu en réel : un membre du
+                # cluster ne voyait rien, ni cluster ni message)
+                hidden.append({"name": c["name"], "reason": why})
+                continue
         clusters.append({
             "name": c["name"],
             "description": c.get("description", ""),
             "node_count": len(c.get("nodes", [])),
         })
-    return jsonify({"clusters": clusters})
+    out = {"clusters": clusters}
+    if sso:
+        out["hidden"] = hidden
+    return jsonify(out)
 
 
 @app.route("/api/status/<cluster>")
@@ -2234,6 +2342,13 @@ def api_status(cluster):
                  "HARVESTER_OPS_CONFIG": str(CONFIG_PATH),
                  **identity_env(cluster=cluster)},
         )
+        # v1.56.0 : ce que la RBAC a refusé au script (les VMs d'un membre
+        # du cluster, par exemple) part avec la réponse, pour être dit
+        try:
+            for line in (json.loads(out).get("denied") or []):
+                _note_cluster_denial(line)
+        except (ValueError, AttributeError):
+            pass
         return Response(out, mimetype="application/json")
     except subprocess.CalledProcessError as e:
         stderr = e.stderr.decode() if e.stderr else ""
@@ -2328,37 +2443,80 @@ _DENIAL_MARKERS = ("forbidden", "is not allowed", "cannot list",
                    "cannot patch", "cannot update")
 
 
+_DENIAL_RE = re.compile(
+    r'cannot (?P<verb>[\w-]+) resource "(?P<resource>[^"]+)" in API group "(?P<group>[^"]*)"'
+    r'(?: in the namespace "(?P<namespace>[^"]+)")?')
+_DENIAL_MAX = 8
+
+
 def _note_cluster_denial(stderr):
     """Retient qu'un appel a été refusé par la RBAC, pour que la réponse le
-    dise. Silencieux hors contexte de requête (threads de travail)."""
+    dise. Silencieux hors contexte de requête (threads de travail).
+
+    v1.56.0 : chaque refus est aussi rangé (verbe, ressource, groupe,
+    espace de noms) : une vue qui s'affiche quand même, avec ce qui est
+    permis, porte la liste des refus dans l'en-tête `X-Cluster-Denied`, et
+    l'écran dit ce qui lui est caché au lieu de montrer une liste vide."""
     text = (stderr or "").strip()
     if not any(m in text.lower() for m in _DENIAL_MARKERS):
         return
     try:
         g.cluster_denied = text[:300]
+        seen = g.setdefault("cluster_denials", [])
     except RuntimeError:
-        pass
+        return
+    for m in _DENIAL_RE.finditer(text):
+        item = {k: v for k, v in m.groupdict().items() if v}
+        if item not in seen and len(seen) < _DENIAL_MAX:
+            seen.append(item)
+
+
+def _kubectl_run(argv, **kwargs):
+    """`subprocess.run` d'un kubectl, qui retient un refus de la RBAC. Les
+    appels directs rendaient une vue vide sans dire que le cluster avait
+    refusé (vu en réel avec un compte « membre du cluster » de Rancher)."""
+    r = subprocess.run(argv, **kwargs)
+    err = getattr(r, "stderr", None)
+    if getattr(r, "returncode", 0) != 0 and isinstance(err, (str, bytes)):
+        _note_cluster_denial(err.decode(errors="replace") if isinstance(err, bytes) else err)
+    return r
+
+
+def _denial_hint():
+    sess = _sso_session()
+    if sess is not None:
+        return ("Rancher refused this for your account; a Rancher administrator can "
+                "grant a role on this cluster, or on the project that holds the namespace")
+    return ("the cluster's RBAC refused this call for the identity the console "
+            "presented; grant it on the cluster, or map this account to another "
+            "cluster user in roles.yaml")
 
 
 @app.after_request
 def _surface_cluster_denial(response):
-    """Un refus du cluster vaut 403, pas 500."""
+    """Un refus du cluster vaut 403, pas 500 ; et une réponse qui passe
+    malgré des refus les signale (en-tête `X-Cluster-Denied`)."""
     denied = getattr(g, "cluster_denied", None)
-    if denied and response.status_code >= 500:
+    if not denied:
+        return response
+    items = list(getattr(g, "cluster_denials", []) or [])
+    sess = _sso_session()
+    if response.status_code >= 500:
         ident = current_cluster_identity() or {}
         # Un after_request doit rendre une Response, PAS un tuple : rendre
         # (jsonify(...), 403) fait exploser le handler suivant sur
         # `.headers`, et la réponse part en 500 sans rien expliquer.
-        replacement = jsonify({
+        response = jsonify({
             "error": "cluster refused",
-            "cluster_user": ident.get("user"),
+            "cluster_user": ident.get("user") or (sess.login if sess is not None else None),
+            "via": "rancher" if sess is not None else "console",
             "detail": denied,
-            "hint": "the cluster's RBAC refused this call for the identity "
-                    "the console presented; grant it on the cluster, or map "
-                    "this account to another cluster user in roles.yaml",
+            "denied": items,
+            "hint": _denial_hint(),
         })
-        replacement.status_code = 403
-        return replacement
+        response.status_code = 403
+    if items:
+        response.headers["X-Cluster-Denied"] = json.dumps(items, ensure_ascii=True)
     return response
 
 
@@ -2367,7 +2525,7 @@ def _kubectl_json(kc, *args, timeout=15, cluster=None):
     object, or None on any error (logged at WARNING, with the cluster)."""
     name = cluster or _cluster_of_kubeconfig(kc)
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, *args, "-o", "json"],
             capture_output=True, text=True, timeout=timeout,
         )
@@ -3027,13 +3185,13 @@ def _fabric_linkmonitor_apply(run, kc, cluster, remove):
               "message": FABRIC_LINKMONITOR, "ts": time.time()})
     try:
         if remove:
-            proc = subprocess.run(
+            proc = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "delete",
                  "linkmonitors.network.harvesterhci.io", FABRIC_LINKMONITOR,
                  "--ignore-not-found"],
                 capture_output=True, text=True, timeout=60)
         else:
-            proc = subprocess.run(
+            proc = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
                 input=_fabric_linkmonitor_manifest(),
                 capture_output=True, text=True, timeout=60)
@@ -4541,7 +4699,7 @@ def _kube_system_uid(entry):
         _KUBE_SYSTEM_MISS[name] = time.time()
         return None
     try:
-        out = subprocess.run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "namespace",
+        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "namespace",
                               "kube-system", "-o", "jsonpath={.metadata.uid}"],
                              capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, OSError):
@@ -4557,6 +4715,69 @@ def _kube_system_uid(entry):
 def _sso_visible(entry):
     """Ce cluster est-il atteignable à travers Rancher pour cette session ?"""
     return _sso_session() is None or _sso_kubeconfig(entry["name"], entry) is not None
+
+
+_NODE_UIDS = {}                # cluster -> (instant, frozenset des uid de nœuds)
+
+
+def _node_uids(entry):
+    """Les UID des nœuds, lus avec le kubeconfig de la console : un membre du
+    cluster les lit à travers Rancher alors qu'il ne lit pas `kube-system`.
+    Relus toutes les dix minutes (un nœud peut rejoindre le cluster)."""
+    name = entry.get("name")
+    seen = _NODE_UIDS.get(name)
+    if seen and time.time() - seen[0] < 600:
+        return seen[1]
+    if time.time() - _KUBE_SYSTEM_MISS.get(name, 0) < 60 or _cluster_reachable(entry["kubeconfig"]) is False:
+        return frozenset()
+    try:
+        out = _kubectl_run(["kubectl", "--kubeconfig", entry["kubeconfig"], "get", "nodes",
+                              "-o", "jsonpath={.items[*].metadata.uid}"],
+                             capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return frozenset()
+    uids = frozenset(out.stdout.split()) if out.returncode == 0 else frozenset()
+    if uids:
+        _NODE_UIDS[name] = (time.time(), uids)
+    return uids
+
+
+def _sso_cluster_state(entry):
+    """(kubeconfig de la session, raison) pour ce cluster. La raison dit
+    pourquoi la personne ne le voit pas, pour que l'écran l'explique au lieu
+    d'afficher une liste vide :
+      - `no-access` : Rancher gère ce cluster et n'y donne pas accès à ce compte ;
+      - `not-found` : aucun cluster que Rancher montre à ce compte n'est
+        celui-ci (pas géré par ce Rancher, ou aucun droit d'y lire) ;
+      - `unidentified` : la console elle-même ne joint pas ce cluster pour le
+        reconnaître."""
+    sess, st = _sso_session(), _sso_settings()
+    if sess is None or st is None:
+        return None, "no-session"
+    cluster = entry["name"]
+    store, http = _sso_store(), _sso_http(st)
+    cid = entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster)
+    if cid:
+        if not store.has_access(sess, http, st, cid):
+            return None, "no-access"
+    else:
+        ks_uid, nodes = _kube_system_uid(entry), None
+        if not ks_uid:
+            nodes = _node_uids(entry)
+            if not nodes:
+                return None, "unidentified"
+        try:
+            cid = _rs.discover_cluster_id(http, st, sess.token, ks_uid,
+                                          nodes if nodes is not None else _node_uids(entry))
+        except _rs.SSOError:
+            cid = None
+        if not cid:
+            return None, "not-found"
+        # l'id d'un cluster est un fait sur le cluster, pas sur la personne :
+        # il sert aux sessions suivantes, dont l'accès est vérifié à part
+        _SSO_CLUSTER_IDS[cluster] = cid
+        store.grant(sess, cid)
+    return store.kubeconfig(sess, st, cid), None
 
 
 @app.before_request
@@ -4577,24 +4798,13 @@ def _sso_kubeconfig(cluster, entry=None):
     """Le kubeconfig de la session Rancher pour ce cluster : il vise le
     mandataire de Rancher avec le jeton de la personne. None si Rancher ne
     gère pas ce cluster ou ne le lui montre pas."""
-    sess, st = _sso_session(), _sso_settings()
-    if sess is None or st is None:
+    if _sso_session() is None or _sso_settings() is None:
         return None
     if entry is None:
         entry = next((c for c in load_config().get("clusters", []) if c["name"] == cluster), None)
         if entry is None:
             return None
-    cid = entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster)
-    if not cid:
-        try:
-            cid = _rs.discover_cluster_id(_sso_http(st), st, sess.token, _kube_system_uid(entry))
-        except _rs.SSOError:
-            cid = None
-        if cid:
-            _SSO_CLUSTER_IDS[cluster] = cid
-    if not cid:
-        return None
-    return _sso_store().kubeconfig(sess, st, cid)
+    return _sso_cluster_state(entry)[0]
 
 
 # =============================================================================
@@ -5196,7 +5406,7 @@ def api_vms_list(cluster):
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
     try:
-        proc = subprocess.run(
+        proc = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "get", "vm", "-A", "-o", "json"],
             capture_output=True, text=True, timeout=20,
         )
@@ -5586,7 +5796,7 @@ def api_clusters_test_kubeconfig(name):
     if not Path(kc).exists():
         return jsonify({"ok": False, "error": f"kubeconfig file not found: {kc}"}), 404
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "version", "-o", "json"],
             capture_output=True, text=True, timeout=10,
         )
@@ -5692,7 +5902,7 @@ def api_connection_test(cluster):
         return jsonify(result)
 
     def kc_cmd(*args, timeout=10):
-        return subprocess.run(
+        return _kubectl_run(
             ["kubectl", "--kubeconfig", kc_path, *args],
             capture_output=True, text=True, timeout=timeout,
         )
@@ -6281,7 +6491,7 @@ def _simple_kubectl_action(run, kc, kubectl_args, step_label, success_msg=""):
     run.emit({"type": "step", "step_id": step_label, "status": "running",
               "message": " ".join(kubectl_args), "ts": time.time()})
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, *kubectl_args],
             capture_output=True, text=True, timeout=30,
         )
@@ -6323,7 +6533,7 @@ def _vm_action_runner(run, kc, namespace, name, target):
     # Note: str(e) on CalledProcessError leaked the full command line
     # (kubeconfig path included) and never contained stderr; don't go back.
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "patch", "vm", name, "-n", namespace,
              "--type", "merge", "-p", json.dumps({"spec": {"runStrategy": target}})],
             capture_output=True, text=True, timeout=15,
@@ -6357,7 +6567,7 @@ def _vm_action_runner(run, kc, namespace, name, target):
     last_phase = ""
     while time.time() < deadline:
         try:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
                  "-o", "jsonpath={.status.phase}"],
                 capture_output=True, text=True, timeout=5,
@@ -7048,7 +7258,7 @@ def _volume_fix_runner(run, kc, cluster, volume, plan):
         run.close()
 
     try:
-        r = subprocess.run(["kubectl", "--kubeconfig", kc, *plan["args"]],
+        r = _kubectl_run(["kubectl", "--kubeconfig", kc, *plan["args"]],
                            capture_output=True, text=True, timeout=30)
         failure = None if r.returncode == 0 else ((r.stderr or r.stdout).strip()[:300]
                                                   or f"kubectl exit {r.returncode}")
@@ -7182,7 +7392,7 @@ def _node_plan(ctx, force):
 def _kubectl_step(run, step, args):
     """Lance kubectl pour une étape ; rend le message d'erreur, ou None."""
     try:
-        r = subprocess.run(["kubectl", *args], capture_output=True, text=True, timeout=30)
+        r = _kubectl_run(["kubectl", *args], capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
         return "kubectl timeout"
     except OSError as e:
@@ -7646,7 +7856,7 @@ def api_harvester_user_patch(cluster, user_id):
 
     if "enabled" in data:
         enabled = bool(data["enabled"])
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "patch",
              "users.management.cattle.io", user_id, "--type", "merge",
              "-p", json.dumps({"enabled": enabled})],
@@ -7671,7 +7881,7 @@ def api_harvester_user_patch(cluster, user_id):
                 "subjects": [{"apiGroup": "rbac.authorization.k8s.io",
                               "kind": "User", "name": user_id}],
             }
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "create", "-f", "-"],
                 input=json.dumps(binding), capture_output=True, text=True,
                 timeout=30)
@@ -7693,7 +7903,7 @@ def api_harvester_user_patch(cluster, user_id):
                             "with kubectl rather than from here",
                 }), 409
             for b in ours:
-                subprocess.run(["kubectl", "--kubeconfig", kc, "delete",
+                _kubectl_run(["kubectl", "--kubeconfig", kc, "delete",
                                 "clusterrolebinding", b],
                                capture_output=True, text=True, timeout=30)
             done.append("admin revoked")
@@ -7823,7 +8033,7 @@ def api_vmtemplate_create(cluster):
     }
 
     for obj in (tmpl, version):
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "create", "-f", "-", "-o", "name"],
             input=json.dumps(obj), capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
@@ -8132,7 +8342,7 @@ def _vm_restart_runner(run, kc, namespace, name):
     run.emit({"type": "step", "step_id": "restart", "status": "running",
               "message": f"restarting VM {name} now (no grace period)",
               "ts": time.time()})
-    old_uid = subprocess.run(
+    old_uid = _kubectl_run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
          "-o", "jsonpath={.metadata.uid}"],
         capture_output=True, text=True, timeout=10,
@@ -8140,7 +8350,7 @@ def _vm_restart_runner(run, kc, namespace, name):
     path = (f"/apis/subresources.kubevirt.io/v1/namespaces/{namespace}"
             f"/virtualmachines/{name}/restart")
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "replace", "--raw", path, "-f", "-"],
             input=json.dumps({"gracePeriodSeconds": 0}),
             capture_output=True, text=True, timeout=20,
@@ -8164,7 +8374,7 @@ def _vm_restart_runner(run, kc, namespace, name):
     deadline = time.time() + VM_RESTART_TIMEOUT
     last = ""
     while True:
-        pr = subprocess.run(
+        pr = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
              "-o", "jsonpath={.metadata.uid} {.status.phase}"],
             capture_output=True, text=True, timeout=5,
@@ -8818,7 +9028,7 @@ def _harvester_server_version(kc):
     """Return the Harvester server version (e.g. 'v1.8.0') from the target
     cluster's `setting/server-version`. Empty string on failure."""
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc,
              "get", "setting.harvesterhci.io", "server-version",
              "-o", "jsonpath={.value}"],
@@ -8977,7 +9187,7 @@ def _capi_wait_for_deploy(kc, ns, deploy, timeout="180s"):
     """Wait for ns/deploy to be Available. Returns (ok, message). Polls
     briefly first to give the API a chance to register the Deployment."""
     for _ in range(6):
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "-n", ns, "get",
              f"deploy/{deploy}", "-o", "name"],
             capture_output=True, text=True, timeout=10,
@@ -8986,7 +9196,7 @@ def _capi_wait_for_deploy(kc, ns, deploy, timeout="180s"):
             break
         time.sleep(2)
     try:
-        r = subprocess.run(
+        r = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "-n", ns, "wait",
              f"deploy/{deploy}", "--for=condition=Available",
              f"--timeout={timeout}"],
@@ -10142,7 +10352,7 @@ def api_capi_cluster_scale(cluster, namespace, name):
         return jsonify({"error": "replicas out of range (0-100)"}), 400
     # Discover the actual MD name + class from the cluster topology so we
     # don't hardcode (it varies per template).
-    r = subprocess.run(
+    r = _kubectl_run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get",
          "cluster.cluster.x-k8s.io", name,
          "-o", "jsonpath={.spec.topology.workers.machineDeployments[0].name}|{.spec.topology.workers.machineDeployments[0].class}"],
@@ -10179,7 +10389,7 @@ def api_capi_cluster_kubeconfig(cluster, namespace, name):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
-    r = subprocess.run(
+    r = _kubectl_run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get",
          f"secret/{name}-kubeconfig", "-o", "jsonpath={.data.value}"],
         capture_output=True, text=True, timeout=10,
@@ -10205,7 +10415,7 @@ def api_capi_cluster_details(cluster, namespace, name):
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
 
     def kc_run(*args, timeout=8):
-        r = subprocess.run(["kubectl", "--kubeconfig", kc, *args],
+        r = _kubectl_run(["kubectl", "--kubeconfig", kc, *args],
                            capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     rc, cl_out, _ = kc_run("-n", namespace, "get", "cluster.cluster.x-k8s.io",
@@ -10297,7 +10507,7 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
     step("clusterclass", "running", "Deleting harvester-rke2 ClusterClass")
     if not dry_run:
         for nm in ("harvester-rke2",):
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "delete",
                  "clusterclass.cluster.x-k8s.io", nm, "--ignore-not-found",
                  "--wait=false"],
@@ -10316,7 +10526,7 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
          f"Deleting {len(nss)} namespaces: {', '.join(nss)}")
     if not dry_run:
         for ns in nss:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "delete", "ns", ns,
                  "--ignore-not-found", "--wait=false"],
                 capture_output=True, text=True, timeout=30,
@@ -10326,7 +10536,7 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
         # Wait up to ~3 minutes for them to actually terminate
         deadline = time.time() + 180
         while time.time() < deadline:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "get", "ns", *nss,
                  "-o", "jsonpath={.items[*].metadata.name}",
                  "--ignore-not-found"],
@@ -10348,7 +10558,7 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
             "controlplane.cluster.x-k8s.io",
             "addons.cluster.x-k8s.io",
         ):
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "get", "crd",
                  "-o", "jsonpath={.items[*].metadata.name}"],
                 capture_output=True, text=True, timeout=15,
@@ -10366,7 +10576,7 @@ def _capi_uninstall_runner(run, cluster, kc, nodes_ips, ssh_user, ssh_key,
                             "machinesets.cluster.x-k8s.io",
                             "machinehealthchecks.cluster.x-k8s.io"):
                     continue
-                d = subprocess.run(
+                d = _kubectl_run(
                     ["kubectl", "--kubeconfig", kc, "delete", "crd", name,
                      "--ignore-not-found", "--wait=false"],
                     capture_output=True, text=True, timeout=15,
@@ -10494,7 +10704,7 @@ def api_capi_diag(cluster):
 
     def kc_run(*args, timeout=8):
         try:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, *args],
                 capture_output=True, text=True, timeout=timeout,
             )
@@ -11283,7 +11493,7 @@ def _snapshot_action_runner(run, kc, namespace, name, snap_name, manifest):
     run.emit({"type": "step", "step_id": "create", "status": "running",
               "message": f"kubectl apply VMBackup {snap_name}", "ts": time.time()})
     try:
-        proc = subprocess.run(
+        proc = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
             input=json.dumps(manifest).encode(),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
@@ -11424,7 +11634,7 @@ def api_vm_snapshot_restore(cluster, namespace, name):
     vm_running = False
     if not new_vm:
         try:
-            probe = subprocess.run(
+            probe = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "-n", namespace,
                  "get", "vmi", name, "--no-headers"],
                 capture_output=True, text=True, timeout=10)
@@ -11488,7 +11698,7 @@ def api_vm_snapshot_restore(cluster, namespace, name):
                                     "kind": "VirtualMachine", "name": name}},
             }
             try:
-                r = subprocess.run(
+                r = _kubectl_run(
                     ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
                     input=json.dumps(pre_manifest).encode(),
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15)
@@ -11521,7 +11731,7 @@ def api_vm_snapshot_restore(cluster, namespace, name):
         if stop_vm and vm_running:
             _step("stop-vm", "running", f"stopping {namespace}/{name}")
             try:
-                r = subprocess.run(
+                r = _kubectl_run(
                     ["kubectl", "--kubeconfig", kc, "-n", namespace, "patch",
                      "vm", name, "--type", "merge",
                      "-p", '{"spec":{"runStrategy":"Halted"}}'],
@@ -11534,7 +11744,7 @@ def api_vm_snapshot_restore(cluster, namespace, name):
             deadline = time.time() + 180
             stopped = False
             while time.time() < deadline:
-                p2 = subprocess.run(
+                p2 = _kubectl_run(
                     ["kubectl", "--kubeconfig", kc, "-n", namespace,
                      "get", "vmi", name, "--no-headers"],
                     capture_output=True, text=True, timeout=10)
@@ -11549,7 +11759,7 @@ def api_vm_snapshot_restore(cluster, namespace, name):
                   "message": f"kubectl apply VirtualMachineRestore/{restore_name}",
                   "ts": time.time()})
         try:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
                 input=json.dumps(manifest).encode(),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
@@ -11704,7 +11914,7 @@ def api_vm_migrate_trigger(cluster, namespace, name):
         run.emit({"type": "step", "step_id": "create", "status": "running",
                   "message": f"creating VMIM {mig_name}", "ts": time.time()})
         try:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "apply", "-f", "-"],
                 input=json.dumps(manifest).encode(),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15,
@@ -12102,7 +12312,12 @@ def _kubeconfig_wss(kc_path):
     finally:
         shutil.rmtree(tmpd, ignore_errors=True)
 
-    return server, sslctx, user.get("token")
+    token = user.get("token")
+    if not token and user.get("tokenFile"):
+        # v1.56.0 : une session Rancher range son jeton dans un fichier
+        # renouvelé, relu ici à chaque ouverture de console
+        token = Path(user["tokenFile"]).read_text().strip()
+    return server, sslctx, token
 
 
 def _vnc_subresource_url(server, namespace, name):
@@ -12172,7 +12387,7 @@ def _vnc_classify_loss(cluster, namespace, name, uid):
     reason = "lost"
     if kc:
         try:
-            r = subprocess.run(
+            r = _kubectl_run(
                 ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
                  "-o", "jsonpath={.status.phase} {.metadata.uid} "
                        "{.metadata.deletionTimestamp}"],
@@ -12209,7 +12424,7 @@ def api_vm_console_ticket(cluster, namespace, name):
     if active >= _VNC_MAX_SESSIONS:
         return jsonify({"error": f"too many console sessions open ({active})",
                         "hint": "close an existing console first"}), 429
-    r = subprocess.run(
+    r = _kubectl_run(
         ["kubectl", "--kubeconfig", kc, "-n", namespace, "get", "vmi", name,
          "-o", "jsonpath={.status.phase} {.metadata.uid}"],
         capture_output=True, text=True, timeout=10,
@@ -12229,7 +12444,7 @@ def api_vm_console_ticket(cluster, namespace, name):
     identity = current_cluster_identity()
     if identity or _sso_session() is not None:
         # v1.50.0 : une session Rancher aussi ; `kc` passe alors par Rancher
-        can = subprocess.run(
+        can = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "auth", "can-i", "get",
              "virtualmachineinstances", "--subresource=vnc", "-n", namespace],
             capture_output=True, text=True, timeout=10)

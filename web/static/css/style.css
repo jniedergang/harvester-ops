@@ -4602,8 +4602,6 @@ body.login-page {
 .login-note { font-size: 12px; color: var(--text-dim); margin: 14px 0 0; }
 .login-error { margin: 0 0 14px; }
 .login-code { display: block; margin-top: 4px; color: var(--text-dim); font-size: 11px; }
-.session-logout { margin-left: 4px; }
-.session-logout[hidden] { display: none; }
 .session-role.via-rancher { border-style: solid; }
 
 /* v1.52.0 : services sur les clusters créés (Cluster API, CAAPH) */
@@ -4731,3 +4729,64 @@ body.login-page {
   border-top-color: var(--accent); border-radius: 50%; animation: tfd-spin 0.8s linear infinite; vertical-align: -2px; }
 @keyframes tfd-spin { to { transform: rotate(360deg); } }
 .tfd-plan-modal .modal-footer { padding: 12px 20px; }
+
+/* v1.56.0 : le numéro de version ouvre l'historique des versions */
+.version-link { background: none; border: 0; padding: 0; cursor: pointer; font-family: inherit; font-size: 11px;
+  display: block; text-align: left; }
+.version-link:hover { color: var(--accent); text-decoration: underline; }
+.versions-tools { display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 24px; border-bottom: 1px solid var(--border); }
+.versions-tools input[type="search"] { flex: 1 1 220px; min-width: 0; }
+.versions-kinds { margin: 0; }
+.versions-body { padding-top: 8px; }
+.version-rel { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 8px; background: var(--bg); }
+.version-rel.is-current { border-color: var(--accent); }
+.version-rel > summary { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px;
+  cursor: pointer; list-style-position: inside; }
+.version-num { font-family: var(--font-mono, monospace); font-weight: 600; color: var(--accent); white-space: nowrap; }
+.version-title { flex: 1; min-width: 0; }
+.version-date { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+.version-sec { padding: 0 14px 6px 28px; }
+.version-sec h5 { margin: 8px 0 4px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-dim); }
+.version-sec ul { margin: 0; padding-left: 18px; }
+.version-sec li { margin: 3px 0; line-height: 1.45; }
+
+/* v1.56.0 : menu du compte, en haut à droite */
+.topbar { display: flex; gap: 8px; align-items: flex-start; }
+.user-menu-wrap { position: relative; display: inline-block; }
+#btn-user.has-initials .user-icon { display: none; }
+.user-initials { font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--accent); }
+.user-menu { position: absolute; right: 0; top: 44px; width: 340px; max-width: calc(100vw - 32px);
+  padding: 14px; z-index: 1001; box-shadow: 0 12px 32px rgba(0,0,0,.25); }
+.user-menu[hidden] { display: none; }
+.um-head { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+.um-avatar { width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center;
+  justify-content: center; background: var(--accent); color: var(--bg-panel); font-weight: 700; flex: none; }
+.um-who { min-width: 0; }
+.um-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.um-auth { font-size: 12px; color: var(--text-dim); }
+.um-facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0 0 10px;
+  font-size: 12px; }
+.um-facts dt { color: var(--text-dim); }
+.um-facts dd { margin: 0; overflow-wrap: anywhere; }
+.um-actions { display: flex; flex-direction: column; border-top: 1px solid var(--border); padding-top: 6px; }
+.um-item { display: flex; align-items: center; gap: 8px; background: none; border: 0; color: var(--text);
+  padding: 7px 6px; border-radius: 4px; cursor: pointer; text-align: left; font: inherit; }
+.um-item:hover, .um-item:focus-visible { background: var(--bg); }
+.um-signout { color: var(--danger, var(--warn)); }
+.um-note { font-size: 12px; color: var(--text-dim); margin: 6px 0 0; }
+
+/* v1.56.0 : ce que le cluster (ou Rancher) a refusé de montrer */
+.access-notice { display: flex; gap: 10px; align-items: flex-start; margin: 0 156px 14px 0;
+  padding: 10px 12px; border: 1px solid var(--border); border-left: 4px solid var(--warn);
+  border-radius: 6px; background: var(--bg-panel); font-size: 13px; }
+.access-notice[hidden] { display: none; }
+.an-icon { color: var(--warn); padding-top: 1px; }
+.an-body { flex: 1; min-width: 0; }
+.an-title { display: block; margin-bottom: 2px; }
+.an-intro { margin: 4px 0 2px; }
+.an-list { margin: 0 0 4px; padding-left: 18px; }
+.an-list code { white-space: normal; overflow-wrap: anywhere; }
+.an-hint { margin: 4px 0 0; color: var(--text-dim); font-size: 12px; }
+@media (max-width: 700px) { .access-notice { margin-right: 0; margin-top: 48px; } }

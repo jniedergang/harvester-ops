@@ -53,13 +53,41 @@ kubeconfig, ns_filter = sys.argv[1], sys.argv[2]
 env = os.environ.copy()
 env["KUBECONFIG"] = kubeconfig
 
+denied = []
+
+
 def kc(*args):
     try:
-        out = subprocess.check_output(["kubectl", "--kubeconfig", kubeconfig, *args],
-                                      env=env, stderr=subprocess.DEVNULL)
-        return json.loads(out)
-    except Exception:
+        r = subprocess.run(["kubectl", "--kubeconfig", kubeconfig, *args],
+                           env=env, capture_output=True, text=True)
+    except OSError:
         return {"items": []}
+    if r.returncode != 0:
+        return {"items": [], "_err": r.stderr}
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return {"items": []}
+
+
+def kc_kinds(scope, kinds):
+    """Un `get` groupé. Un seul type refusé par la RBAC fait échouer le lot :
+    un membre du cluster, qui lit les nœuds mais pas les VMs, voyait alors
+    « 0 nœud » (vu en réel, v1.56.0). On relit donc type par type ce qui est
+    permis, et l'on retient les refus pour que l'écran les dise."""
+    out = kc("get", *scope, ",".join(kinds), "-o", "json")
+    if "_err" not in out:
+        return out
+    items = []
+    for kind in kinds:
+        one = kc("get", *scope, kind, "-o", "json")
+        if "_err" not in one:
+            items += one.get("items", [])
+            continue
+        line = next((x for x in one["_err"].splitlines() if "forbidden" in x.lower()), "")
+        if line:
+            denied.append(line.strip()[:300])
+    return {"items": items}
 
 
 def by_kind(payload):
@@ -76,9 +104,9 @@ def by_kind(payload):
 # d'aperçu se rafraîchit toutes les 8 s, donc l'ancien coût ne rentrait pas
 # dans son propre intervalle.
 with ThreadPoolExecutor(max_workers=2) as ex:
-    f_core = ex.submit(kc, "get", "-A", "nodes,vm,vmi", "-o", "json")
-    f_lh = ex.submit(kc, "get", "-n", "longhorn-system",
-                     "volumes.longhorn.io,settings.longhorn.io", "-o", "json")
+    f_core = ex.submit(kc_kinds, ["-A"], ["nodes", "vm", "vmi"])
+    f_lh = ex.submit(kc_kinds, ["-n", "longhorn-system"],
+                     ["volumes.longhorn.io", "settings.longhorn.io"])
     core = by_kind(f_core.result())
     lh = by_kind(f_lh.result())
 
@@ -137,6 +165,8 @@ result["summary"]["nodes_ready"] = sum(1 for n in result["nodes"] if n["ready"] 
 result["summary"]["vms_running"] = sum(1 for ns in result["vms_by_namespace"].values()
                                        for v in ns if v["phase"] == "Running")
 result["summary"]["vms_total"] = sum(len(v) for v in result["vms_by_namespace"].values())
+if denied:
+    result["denied"] = denied
 
 print(json.dumps(result, indent=2))
 PY

@@ -121,6 +121,12 @@ const App = (() => {
       if (r.status === 401 && document.body.classList.contains('auth-rancher')) {
         window.location.href = '/login';
       }
+      // v1.56.0 : lectures refusées par la RBAC du cluster (ou par Rancher)
+      // pendant cette requête ; le bandeau les dit au lieu d'une vue vide.
+      const denied = r.headers && r.headers.get('X-Cluster-Denied');
+      if (denied && window.AccessNotice) {
+        try { AccessNotice.report(JSON.parse(denied)); } catch { /* en-tête illisible : rien */ }
+      }
       return r;
     };
   })();
@@ -130,16 +136,15 @@ const App = (() => {
       const d = await fetch('/api/whoami').then(r => r.json());
       sessionRole = d.role || 'admin';
       document.body.classList.toggle('auth-rancher', d.auth === 'rancher');
-      const out = $('#btn-logout');
-      if (out) {
-        out.hidden = d.auth !== 'rancher';
-        if (!out.dataset.wired) {
-          out.dataset.wired = '1';
-          out.addEventListener('click', async () => {
-            try { await fetch('/logout', { method: 'POST' }); } catch { /* on part quand même */ }
-            window.location.href = '/login';
-          });
-        }
+      // v1.56.0 : le compte et la déconnexion vivent dans le menu du compte
+      // (en haut à droite), pour tous les modes de connexion
+      if (window.UserMenu) UserMenu.update(d);
+      if (window.AccessNotice) AccessNotice.setIdentity(d);
+      if (d.auth === 'rancher' && window.AccessNotice) {
+        // les clusters que Rancher ne laisse pas ouvrir, et pourquoi
+        fetch('/api/clusters').then(r => r.json())
+          .then(c => AccessNotice.clusters(c.hidden || []))
+          .catch(() => {});
       }
       document.body.classList.remove('role-viewer', 'role-operator', 'role-admin');
       document.body.classList.add(`role-${sessionRole}`);
@@ -178,6 +183,8 @@ const App = (() => {
     if (!name) return;
     const previous = currentCluster;
     currentCluster = name;
+    // v1.56.0 : les refus de l'ancien cluster ne valent pas pour celui-ci
+    if (previous && previous !== name && window.AccessNotice) AccessNotice.reset();
     $$('.cluster-name').forEach(el => el.textContent = name);
     // v1.4.32: persist the selection so F5 restores the same cluster
     // (was always defaulting to the first <select> option).
@@ -1904,6 +1911,8 @@ const App = (() => {
 
   function init() {
     bind();
+    if (window.Versions) Versions.init();
+    if (window.UserMenu) UserMenu.init();
     restoreActivityFilters();
     bindActivityFilters();
     // Hydrate the static <span data-icon="…"> placeholders of the template.

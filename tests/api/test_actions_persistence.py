@@ -291,3 +291,23 @@ def test_a_run_restored_at_startup_replays_its_events_and_result(tmp_actions_db,
     finally:
         app_module.ACTIONS.clear()
         app_module.ACTIONS.update(saved)
+
+
+def test_the_history_is_reloaded_when_the_console_starts(tmp_path, tmp_actions_db):
+    """v1.56.0 : le rechargement s'exécute à l'IMPORT du module, et appelait
+    `_row_result` avant sa définition. Depuis la 1.47.2, chaque ligne
+    échouait sur un NameError et aucune action n'était rechargée au
+    démarrage. Le test précédent appelait le rechargement après l'import,
+    quand la fonction existait déjà : il ne pouvait pas le voir."""
+    run = _make_finished_run("boot00000001", status="done", exit_code=0, events=[])
+    run.result = {"archive": "a.hvx"}
+    app_module._actions_persist(run)
+    code = ("import sys; sys.path.insert(0, %r); import app; "
+            "r = app.ACTIONS.get('boot00000001'); "
+            "print('RESULT', r.to_dict()['result'] if r else None)") % str(WEB_DIR)
+    import os
+    env = dict(os.environ, HARVESTER_OPS_ACTIONS_DB=str(tmp_actions_db))
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         env=env, timeout=120, cwd=str(tmp_path))
+    assert "failed to restore" not in out.stderr, out.stderr[-600:]
+    assert "RESULT {'archive': 'a.hvx'}" in out.stdout, (out.stdout, out.stderr[-600:])

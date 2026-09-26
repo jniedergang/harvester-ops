@@ -4,6 +4,69 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.56.0] - 2026-09-26 - Account menu, version history, refusals said instead of empty views
+
+### Added
+- **Account menu**, top right next to the settings: who is signed in and
+  how (Rancher, local account, open console), the console role and what it
+  allows, what the clusters see, when a Rancher session ends and its
+  groups; shortcuts to the cluster accounts, the language and the version
+  history; and **Sign out** for every mode.
+- **Local accounts can sign out.** HTTP Basic has no session and the
+  browser resends the password: the console makes it remember a
+  placeholder account instead (`/logout/local`), so the next page asks for
+  the password again. The sign-in page then says "You are signed out".
+- **Version history**: clicking the version number (sidebar, account menu,
+  Settings > About) lists what each version brought, read from the release
+  notes shipped with the console (`/api/changelog`); newest first, the
+  installed one marked, filtered by words, or reduced to additions or
+  fixes.
+- **What the cluster refused is said.** Reads refused by RBAC (or by
+  Rancher) travel with the answer (`X-Cluster-Denied` header) and a notice
+  above the page lists them, grouped by resource, with what to ask for. A
+  Rancher session also learns why a cluster of the console is missing.
+
+### Changed
+- A Rancher session finds its cluster by the node UIDs when it cannot read
+  `kube-system`: a Rancher "cluster member" saw no cluster at all.
+- A cluster id learned by one Rancher session no longer opens the cluster
+  to every other session: Rancher is asked account by account.
+- A refused kind no longer hides the permitted ones in a cluster status:
+  the overview showed 0 nodes to someone refused only the VMs.
+- A cluster refusal returned to a Rancher session says to ask Rancher, and
+  names the Rancher account, instead of pointing at `roles.yaml`.
+- The logout button left the sidebar for the account menu.
+
+### Fixed
+- **Long Terraform runs under a Rancher session** (audit D18): the token
+  copied into the workspace kubeconfig expired after ten minutes. The
+  kubeconfigs of a session now point to a token file rewritten at each
+  renewal, which kubectl reads at every call and client-go rereads every
+  minute.
+- **The action history was no longer reloaded at startup** since 1.47.2
+  (a helper was defined after the code that runs at import): every row
+  failed and Activity lost the in-memory runs after each restart.
+- **The packaged image showed "v1.0.0"** (a value frozen in the image) and
+  shipped no release notes: `VERSION` and `CHANGELOG.md` are now in the
+  image.
+
+### Tests
+- The changelog parser (both heading styles, the real file read back
+  completely), its route, the image content; local sign-out, including in
+  Chromium with a real htpasswd (the browser really forgets the password);
+  the account menu of an open console; the version history (current version,
+  additions only, word filter, escaping); the refusal notice (grouping,
+  dismissal); refusals parsed and carried on successful answers, the 403
+  of a Rancher session; the status script falling back kind by kind; node
+  discovery for a cluster member, per-account access, the reasons of a
+  missing cluster; the token file followed by a copied kubeconfig; the
+  history reloaded when the console starts (reproduced on the old code).
+- Real, on harv1 through Rancher Prime 2.14.1: a "cluster member" account
+  sees harv1, its node, and the refusals; an administrator sees no notice;
+  both open the account menu and the version history and sign out; a
+  Terraform plan through a Rancher session with the token file; client-go
+  v0.33.7 picking up a renewed token within the minute.
+
 ## [1.55.0] - 2026-09-26 - The Terraform tab redone: one view, a plan read before applying
 
 ### Changed

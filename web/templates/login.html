@@ -35,6 +35,10 @@
     </div>
     <p class="login-intro" data-i18n="login.intro">A console for your Harvester clusters. Sign in to continue.</p>
 
+    {% if signed_out %}
+    <div class="login-signed-out" role="status" data-i18n="login.signedOut">You are signed out.</div>
+    {% endif %}
+
     {% if error_kind %}
     <div class="sto-finding sev-critical login-error" data-code="{{ error }}">
       {% if error_kind == 'expired' %}

@@ -265,11 +265,17 @@ def expiry_of(access_token):
 # Le cluster Rancher d'un cluster de la console
 # ---------------------------------------------------------------------------
 
-def discover_cluster_id(http, s, token, kube_system_uid):
+def discover_cluster_id(http, s, token, kube_system_uid, node_uids=()):
     """L'id Rancher du cluster dont `kube-system` a cet UID : le même objet
     vu de la console et à travers Rancher. None si l'utilisateur ne le voit
-    pas (pas géré par ce Rancher, ou pas de droit)."""
-    if not kube_system_uid:
+    pas (pas géré par ce Rancher, ou pas de droit).
+
+    v1.56.0 : un membre du cluster ne lit PAS `kube-system` (vu en réel :
+    « cannot get resource namespaces in the namespace kube-system ») mais lit
+    les nœuds ; leurs UID, relus par la console, désignent le cluster aussi
+    sûrement. Sans ce second chemin, un membre ne voyait aucun cluster."""
+    node_uids = set(node_uids or ())
+    if not kube_system_uid and not node_uids:
         return None
     status, out = http.request("GET", s["url"] + "/v3/clusters", headers=_bearer(token))
     for c in (out or {}).get("data") or []:
@@ -278,21 +284,49 @@ def discover_cluster_id(http, s, token, kube_system_uid):
         # du mandataire pour rien (vu : 6 s à la connexion d'un administrateur)
         if not cid or c.get("state", "active") != "active":
             continue
-        st, ns = http.request("GET", f"{s['url']}/k8s/clusters/{cid}/api/v1/namespaces/kube-system",
-                              headers=_bearer(token))
-        if st == 200 and ((ns or {}).get("metadata") or {}).get("uid") == kube_system_uid:
-            return cid
+        if kube_system_uid:
+            st, ns = http.request("GET", f"{s['url']}/k8s/clusters/{cid}/api/v1/namespaces/kube-system",
+                                  headers=_bearer(token))
+            if st == 200 and ((ns or {}).get("metadata") or {}).get("uid") == kube_system_uid:
+                return cid
+            if st == 200:
+                continue
+        if node_uids:
+            st, nodes = http.request("GET", f"{s['url']}/k8s/clusters/{cid}/api/v1/nodes",
+                                     headers=_bearer(token))
+            seen = {((n or {}).get("metadata") or {}).get("uid") for n in (nodes or {}).get("items") or []}
+            if st == 200 and seen & node_uids:
+                return cid
     return None
 
 
-def kubeconfig_text(s, cid, token):
+def cluster_access(http, s, token, cid):
+    """Rancher donne-t-il accès à ce cluster à cette personne ? True, False,
+    ou None quand Rancher ne répond pas (rien à conclure)."""
+    try:
+        st, _ = http.request("GET", f"{s['url']}/v3/clusters/{cid}", headers=_bearer(token))
+    except SSOError:
+        return None
+    if st == 200:
+        return True
+    if st in (401, 403, 404):
+        return False
+    return None
+
+
+def kubeconfig_text(s, cid, token_file):
+    """v1.56.0 : le jeton est lu dans un FICHIER (`tokenFile`), que le
+    renouvellement réécrit. client-go relit ce fichier pendant qu'il tourne
+    (une fois par minute) : un apply Terraform de vingt minutes suit donc les
+    jetons successifs, là où un jeton recopié dans son kubeconfig expirait
+    au bout de dix (audit D18)."""
     cluster = {"server": f"{s['url']}/k8s/clusters/{cid}"}
     if s.get("ca_file"):
         cluster["certificate-authority"] = s["ca_file"]
     return json.dumps({
         "apiVersion": "v1", "kind": "Config", "current-context": "rancher",
         "clusters": [{"name": "rancher", "cluster": cluster}],
-        "users": [{"name": "rancher-user", "user": {"token": token}}],
+        "users": [{"name": "rancher-user", "user": {"tokenFile": token_file}}],
         "contexts": [{"name": "rancher", "context": {"cluster": "rancher", "user": "rancher-user"}}],
     })
 
@@ -311,6 +345,8 @@ class Session:
         self.token_expires = expiry_of(token)
         self.expires = expires                 # fin de la session
         self.kubeconfigs = {}                  # cid -> chemin
+        self.token_file = None                 # le jeton courant, relu par kubectl
+        self.access = {}                       # cid -> (instant, accès donné par Rancher)
         self.lock = threading.Lock()
 
     @property
@@ -345,9 +381,9 @@ class Sessions:
 
     def renew(self, session, http, settings_, margin=120):
         """Renouvelle le jeton d'accès s'il expire dans moins de `margin`
-        secondes, et réécrit les kubeconfigs de la session : une action
-        longue relit le fichier à chaque appel de kubectl. Rend False si
-        Rancher refuse (session à fermer)."""
+        secondes, et réécrit le fichier du jeton de la session : une action
+        longue le relit (kubectl à chaque appel, client-go chaque minute).
+        Rend False si Rancher refuse (session à fermer)."""
         with session.lock:
             if session.token_expires - self.now() > margin:
                 return True
@@ -358,8 +394,8 @@ class Sessions:
             session.token = tok["access_token"]
             session.refresh_token = tok.get("refresh_token") or session.refresh_token
             session.token_expires = expiry_of(session.token)
-            for cid, path in list(session.kubeconfigs.items()):
-                _write_private(path, kubeconfig_text(settings_, cid, session.token))
+            if session.token_file:
+                _write_private(session.token_file, session.token)
             return True
 
     def get(self, sid):
@@ -378,9 +414,10 @@ class Sessions:
         with self._lock:
             s = self._d.pop(sid, None)
         if s is not None:
-            for p in s.kubeconfigs.values():
+            for p in list(s.kubeconfigs.values()) + [s.token_file]:
                 try:
-                    os.unlink(p)
+                    if p:
+                        os.unlink(p)
                 except OSError:
                     pass
         return s
@@ -392,17 +429,42 @@ class Sessions:
 
     def kubeconfig(self, session, settings_, cid):
         """Le kubeconfig de cette session pour ce cluster Rancher (0600, dans
-        le répertoire privé des identités)."""
+        le répertoire privé des identités). Il désigne le fichier du jeton."""
         path = session.kubeconfigs.get(cid)
-        if path and os.path.exists(path):
+        if path and os.path.exists(path) and session.token_file and os.path.exists(session.token_file):
             return path
         d = self.directory_fn()
         if d is None:
             return None
+        stem = hashlib.sha256(session.sid.encode()).hexdigest()[:24]
+        with session.lock:
+            if not (session.token_file and os.path.exists(session.token_file)):
+                session.token_file = str(Path(d) / f"rancher-{stem}.token")
+                _write_private(session.token_file, session.token)
         path = str(Path(d) / f"rancher-{hashlib.sha256((session.sid + cid).encode()).hexdigest()[:24]}.kubeconfig")
-        _write_private(path, kubeconfig_text(settings_, cid, session.token))
+        _write_private(path, kubeconfig_text(settings_, cid, session.token_file))
         session.kubeconfigs[cid] = path
         return path
+
+    def has_access(self, session, http, settings_, cid, ttl=300):
+        """L'accès au cluster que Rancher donne à cette personne, relu toutes
+        les `ttl` secondes. Connaître l'id Rancher d'un cluster (appris d'une
+        autre session, ou fixé par la configuration) ne dit pas que CETTE
+        personne y a droit."""
+        now = self.now()
+        seen = session.access.get(cid)
+        if seen and now - seen[0] < ttl:
+            return seen[1]
+        ok = cluster_access(http, settings_, session.token, cid)
+        if ok is None:
+            # Rancher ne répond pas : on garde l'avis précédent, ou on refuse
+            return bool(seen and seen[1])
+        session.access[cid] = (now, ok)
+        return ok
+
+    def grant(self, session, cid):
+        """La personne vient de lire ce cluster à travers Rancher."""
+        session.access[cid] = (self.now(), True)
 
 
 def _write_private(path, text):

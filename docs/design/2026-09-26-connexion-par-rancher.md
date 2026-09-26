@@ -128,7 +128,43 @@ travers `https://harvops.home.lo` (Traefik) comme l'exploitant l'utilise.
    essais supprimés. Le client OIDC de la console de dev est gardé (secret
    en Vault `secret/services/harvester-ops-rancher-oidc`).
 
-Reste à améliorer : une vue vide quand Rancher refuse la lecture dit moins
-qu'un message ; sur harv1, l'espace de noms `default` pointe vers un projet
-d'un autre Rancher (`c-qt5jz`), si bien que les rôles de projet de ce
+Reste à améliorer : sur harv1, l'espace de noms `default` pointe vers un
+projet d'un autre Rancher (`c-qt5jz`), si bien que les rôles de projet de ce
 Rancher ne couvrent pas les VMs.
+
+## v1.56.0 : ce que le réel a encore appris
+
+Nouvel essai avec un compte « membre du cluster » (`hops-membre`, créé pour
+l'occasion puis supprimé), console de dev fraîchement redémarrée :
+
+1. **Le membre ne voyait AUCUN cluster.** La découverte lisait `kube-system`
+   avec son jeton : refusé (`cannot get resource "namespaces" in the
+   namespace "kube-system"`). En 1.50.0 il voyait harv1 parce que
+   l'administrateur s'était connecté avant lui et que l'id découvert était
+   gardé pour tout le processus. Deux corrections :
+   - les nœuds, que le membre lit, désignent le cluster aussi sûrement
+     (leurs UID relus par la console) ;
+   - l'id d'un cluster appris par une session sert aux suivantes, mais
+     Rancher est interrogé compte par compte (`GET /v3/clusters/<id>`,
+     réponse gardée cinq minutes) : avant, un compte sans aucun droit
+     voyait le cluster dès qu'un autre l'avait découvert.
+2. **Les vues vides sans un mot** : l'aperçu montrait « 0 nœud » parce que
+   le `get nodes,vm,vmi` groupé échouait en bloc sur les VMs refusées ; la
+   topologie, la carte du stockage, les modèles rendaient des listes vides.
+   Les refus sont maintenant rangés (verbe, ressource, groupe, espace de
+   noms) depuis tous les appels kubectl de la console et le script d'état,
+   joints à la réponse (en-tête `X-Cluster-Denied`) et affichés dans un
+   bandeau ; le script d'état relit type par type ce qui est permis.
+3. **Audit D18, jeton périmé pendant un apply long** : Terraform recopie le
+   kubeconfig dans son espace ; le jeton qui y était écrit mourait au bout
+   de dix minutes. Le kubeconfig désigne désormais un fichier de jeton
+   (`tokenFile`) que le renouvellement réécrit. Prouvé avec client-go
+   v0.33.7 (celui du provider) contre un serveur TLS de test : un client
+   lancé passe au nouveau jeton dans la minute. Point payé : client-go ne
+   présente AUCUN identifiant à un serveur en HTTP simple, le premier essai
+   en `httptest.NewServer` ne voyait donc aucun en-tête. Plan réel sur harv1
+   par une session Rancher : kubeconfig à `tokenFile`, « 1 à créer ».
+4. La garde centrale des clusters avait perdu son décorateur
+   `@app.before_request` pendant la réécriture : les tests existants l'ont
+   vu tout de suite (500 au lieu de 403).
+

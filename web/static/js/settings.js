@@ -431,7 +431,16 @@ const Settings = (() => {
     applySizes(logoSize, titleSize);
   }
 
-  return { init, openModal, closeModal };
+  // v1.56.0 : ouvrir les réglages sur un onglet (menu du compte). Le clic
+  // passe par le bouton de l'onglet, pour que ce qui s'y accroche (chargement
+  // des comptes du cluster, par exemple) s'exécute comme à la main.
+  function openTab(name) {
+    openModal();
+    const tab = document.querySelector(`.settings-tab[data-stab="${name}"]`);
+    if (tab) tab.click();
+  }
+
+  return { init, openModal, closeModal, openTab };
 })();
 
 document.addEventListener('DOMContentLoaded', () => {

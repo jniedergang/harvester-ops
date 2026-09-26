@@ -36,7 +36,10 @@
         <span class="logo" id="brand-fallback" data-icon="brand" data-icon-size="22"></span>
         <span class="title" id="brand-title" data-i18n="header.title">harvester-ops</span>
       </div>
-      <div class="version">v{{ version }}</div>
+      <!-- v1.56.0 : un clic sur la version ouvre l'historique des versions -->
+      <button type="button" class="version version-link tip" id="btn-version"
+              data-tip-i18n="versions.openTip" data-i18n-title="versions.openTip"
+              title="What each version brought">v{{ version }}</button>
     </header>
 
     <div class="cluster-selector">
@@ -105,12 +108,6 @@
       <span class="session-role tip" id="session-role" hidden
             data-tip-i18n="role.badgeTip" data-i18n-title="role.badgeTip"
             title="Your role on this console"></span>
-      <!-- v1.50.0 : sortir d'une session ouverte par Rancher -->
-      <button type="button" class="btn-icon-sm session-logout tip" id="btn-logout" hidden
-              data-tip-i18n="session.logoutTip" data-i18n-title="session.logoutTip"
-              title="Sign out: the console forgets this Rancher session">
-        <span data-icon="logout" data-icon-size="14"></span>
-      </button>
       <button class="sidebar-collapse-btn tip" id="btn-sidebar-pin"
               data-tip-i18n="sidebar.pinTip" data-i18n-title="sidebar.pinTip"
               title="Keep the menu open instead of letting it expand on hover">
@@ -136,7 +133,21 @@
           <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
         </svg>
       </button>
+      <!-- v1.56.0 : le compte de la personne (rôle, identité sur les clusters,
+           session) et la déconnexion, quel que soit le mode de connexion -->
+      <span class="user-menu-wrap">
+        <button class="btn-icon tip" id="btn-user" type="button" aria-haspopup="menu" aria-expanded="false"
+                aria-controls="user-menu" data-tip-i18n="user.menuTip" data-i18n-title="user.menuTip"
+                title="Your account: role, identity on the clusters, sign out" aria-label="Account">
+          <span class="user-initials" id="user-initials" hidden></span>
+          <span class="user-icon" data-icon="user" data-icon-size="18"></span>
+        </button>
+        <div class="user-menu card" id="user-menu" role="menu" hidden></div>
+      </span>
     </div>
+
+    <!-- v1.56.0 : ce que le cluster (ou Rancher) a refusé de montrer -->
+    <div class="access-notice" id="access-notice" role="status" hidden></div>
 
     <!-- OVERVIEW -->
     <section id="tab-overview" class="tab-content active">
@@ -721,13 +732,43 @@
       <div class="settings-tab-content" id="stab-about">
         <h4 data-i18n="settings.about.title">About</h4>
         <table class="about-table">
-          <tr><td data-i18n="settings.about.version">Version</td><td><code>v{{ version }}</code></td></tr>
+          <tr><td data-i18n="settings.about.version">Version</td><td><code>v{{ version }}</code>
+            <button type="button" class="btn btn-secondary btn-sm tip" id="btn-about-versions"
+                    data-tip-i18n="versions.openTip" data-i18n-title="versions.openTip"
+                    data-i18n="versions.open" title="What each version brought">Version history</button></td></tr>
           <tr><td data-i18n="settings.about.license">License</td><td><code>Apache-2.0</code></td></tr>
           <tr><td data-i18n="settings.about.docs">Documentation</td><td><code>/opt/harvester-ops/docs/</code></td></tr>
         </table>
       </div>
 
     </div>
+  </div>
+</div>
+
+<!-- v1.56.0 : historique des versions, lu dans CHANGELOG.md -->
+<div class="modal-overlay" id="versions-modal" role="dialog" aria-modal="true" aria-labelledby="versions-modal-title" aria-hidden="true">
+  <div class="modal modal-large versions-modal">
+    <div class="modal-header">
+      <div>
+        <h3 id="versions-modal-title" data-i18n="versions.title">Version history</h3>
+        <div class="modal-subtitle" data-i18n="versions.subtitle">What each version brought (release notes in English)</div>
+      </div>
+      <button class="btn-close" id="btn-close-versions" data-i18n-title="common.close" title="Close" aria-label="Close">×</button>
+    </div>
+    <div class="versions-tools">
+      <input type="search" id="versions-filter" class="tip" data-i18n-placeholder="versions.filter"
+             placeholder="Filter (word, version)" data-tip-i18n="versions.filterTip" data-i18n-title="versions.filterTip"
+             title="Keep only the versions whose notes contain these words">
+      <div class="sub-tabs sub-tabs-inline versions-kinds" role="tablist">
+        <button type="button" class="sub-tab active tip" data-vkind="all" data-i18n="versions.kind.all"
+                data-tip-i18n="versions.kind.allTip" data-i18n-title="versions.kind.allTip" title="Every change">All changes</button>
+        <button type="button" class="sub-tab tip" data-vkind="added" data-i18n="versions.kind.added"
+                data-tip-i18n="versions.kind.addedTip" data-i18n-title="versions.kind.addedTip" title="Only what was added">Additions</button>
+        <button type="button" class="sub-tab tip" data-vkind="fixed" data-i18n="versions.kind.fixed"
+                data-tip-i18n="versions.kind.fixedTip" data-i18n-title="versions.kind.fixedTip" title="Only what was fixed">Fixes</button>
+      </div>
+    </div>
+    <div class="modal-body versions-body" id="versions-body"></div>
   </div>
 </div>
 
@@ -837,6 +878,9 @@
 <script src="/static/js/capi-services.js"></script>
 <script src="/static/js/storage-map.js"></script>
 <script src="/static/js/cluster-map.js"></script>
+<script src="/static/js/versions.js"></script>
+<script src="/static/js/user-menu.js"></script>
+<script src="/static/js/access-notice.js"></script>
 <!-- Yjs notes module (ESM) -->
 <script type="module" src="/static/js/notes.js"></script>
 <script src="/static/js/app.js"></script>

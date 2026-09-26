@@ -40,6 +40,7 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "_SSO_PENDING", rs.PendingLogins())
     monkeypatch.setattr(wapp, "_SSO_CLUSTER_IDS", {})
     monkeypatch.setattr(wapp, "_kube_system_uid", lambda entry: "uid-harv1")
+    monkeypatch.setattr(wapp, "_node_uids", lambda entry: frozenset({"node-uid-1"}))
     fake = FakeRancher()
     monkeypatch.setattr(wapp, "_sso_http", lambda s: fake)
     return {"fake": fake, "cfg": cfg, "ids": ids}
@@ -97,7 +98,8 @@ def test_the_cluster_is_reached_through_rancher_with_the_users_token(world):
     with wapp.app.test_request_context("/api/x", headers={"Cookie": f"{rs.COOKIE}={sid}"}):
         kc = json.loads(Path(wapp._kubectl_for_cluster("harv1")).read_text())
         assert kc["clusters"][0]["cluster"]["server"] == URL + "/k8s/clusters/c-sg2q6"
-        assert rs.claims_of(kc["users"][0]["user"]["token"])["token"] == "token-oidc"
+        token = Path(kc["users"][0]["user"]["tokenFile"]).read_text()
+        assert rs.claims_of(token)["token"] == "token-oidc"
         assert wapp.identity_env(cluster="harv1")["HARVESTER_OPS_KUBECONFIG"]
 
 
@@ -210,3 +212,54 @@ def test_the_status_script_acts_through_rancher(world, monkeypatch):
         assert c.get("/api/status/harv1").status_code == 200
     kc = json.loads(Path(seen["env"]["HARVESTER_OPS_KUBECONFIG"]).read_text())
     assert kc["clusters"][0]["cluster"]["server"].endswith("/k8s/clusters/c-sg2q6")
+
+
+# -- v1.56.0 : dire pourquoi un cluster manque -----------------------------------------
+
+def test_a_cluster_member_sees_the_cluster(world):
+    """Vu en réel : un membre du cluster ne lit pas kube-system, il ne voyait
+    donc AUCUN cluster. Il est reconnu par les nœuds."""
+    fake = world["fake"]
+    with wapp.app.test_client() as c:
+        sign_in(c, fake, roles=("user",), username="membre", member=True)
+        d = c.get("/api/clusters").get_json()
+        assert [x["name"] for x in d["clusters"]] == ["harv1"] and d["hidden"] == []
+
+
+def test_why_a_cluster_is_missing_is_said(world, monkeypatch):
+    world["cfg"]["clusters"] += [{"name": "harv3", "kubeconfig": "/nope"},
+                                 {"name": "harvlab", "kubeconfig": "/nope2"}]
+    monkeypatch.setattr(wapp, "_kube_system_uid",
+                        lambda e: {"harv1": "uid-harv1", "harv3": "uid-harv3"}.get(e["name"]))
+    monkeypatch.setattr(wapp, "_node_uids",
+                        lambda e: frozenset({"node-uid-1"}) if e["name"] == "harv1" else frozenset())
+    with wapp.app.test_client() as c:
+        sign_in(c, world["fake"])
+        d = c.get("/api/clusters").get_json()
+        assert [x["name"] for x in d["clusters"]] == ["harv1"]
+        assert {h["name"]: h["reason"] for h in d["hidden"]} == {"harv3": "not-found",
+                                                                 "harvlab": "unidentified"}
+    # hors session Rancher, la réponse ne change pas
+    with wapp.app.test_client() as c:
+        import base64
+        monkeypatch.setattr(wapp, "check_auth", lambda u, p: True)
+        h = {"Authorization": "Basic " + base64.b64encode(b"local:x").decode()}
+        assert "hidden" not in c.get("/api/clusters", headers=h).get_json()
+
+
+def test_a_known_cluster_id_does_not_open_the_cluster_to_everyone(world):
+    """L'id Rancher appris par la session d'un administrateur sert aux
+    suivantes, mais Rancher juge encore l'accès de chacune : avant, un compte
+    sans aucun droit voyait le cluster dès qu'un autre l'avait découvert."""
+    fake = world["fake"]
+    with wapp.app.test_client() as c:
+        sign_in(c, fake)
+        assert [x["name"] for x in c.get("/api/clusters").get_json()["clusters"]] == ["harv1"]
+    assert wapp._SSO_CLUSTER_IDS == {"harv1": "c-sg2q6"}
+    fake.no_access.add("c-sg2q6")
+    with wapp.app.test_client() as c:
+        sign_in(c, fake, roles=("user",), username="intrus")
+        d = c.get("/api/clusters").get_json()
+        assert d["clusters"] == [] and d["hidden"] == [{"name": "harv1", "reason": "no-access"}]
+        r = c.get("/api/status/harv1")
+        assert r.status_code == 403 and r.get_json()["code"] == "cluster-not-in-rancher"

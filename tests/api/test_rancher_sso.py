@@ -43,6 +43,11 @@ class FakeRancher:
                  clusters=None, nonce=None):
         self.user, self.username, self.roles, self.groups = user, username, roles, groups
         self.clusters = clusters or {"c-sg2q6": "uid-harv1", "local": "uid-local"}
+        self.nodes = {"c-sg2q6": ["node-uid-1"], "local": ["node-uid-local"]}
+        # v1.56.0 : un membre du cluster, vu en réel, ne lit pas kube-system
+        # mais lit les nœuds ; et Rancher peut refuser un cluster à un compte
+        self.member = False
+        self.no_access = set()
         self.nonce = nonce
         self.calls = []
         self.revoked = []
@@ -81,8 +86,17 @@ class FakeRancher:
         if path.startswith("/k8s/clusters/c-down/"):
             raise AssertionError("an unavailable cluster must not be probed")
         for cid, uid in self.clusters.items():
+            if cid in self.no_access and (path.startswith(f"/k8s/clusters/{cid}/")
+                                          or path == f"/v3/clusters/{cid}"):
+                return 403, {"message": f'clusters.management.cattle.io "{cid}" is forbidden'}
+            if path == f"/v3/clusters/{cid}":
+                return 200, {"id": cid, "state": "active"}
             if path == f"/k8s/clusters/{cid}/api/v1/namespaces/kube-system":
+                if self.member:
+                    return 403, {"message": 'namespaces "kube-system" is forbidden'}
                 return 200, {"metadata": {"uid": uid}}
+            if path == f"/k8s/clusters/{cid}/api/v1/nodes":
+                return 200, {"items": [{"metadata": {"uid": u}} for u in self.nodes.get(cid, [])]}
         return 404, {}
 
 
@@ -193,8 +207,10 @@ def test_the_access_token_is_renewed_before_it_expires(tmp_path):
     t[0] += 500                                                           # 100 s avant la fin
     assert sessions.renew(sess, fake, s) and sess.token != first
     assert sess.refresh_token == "refresh-1" and sess.token_expires > t[0]
-    assert json.loads(Path(path).read_text())["users"][0]["user"]["token"] == sess.token
+    token_file = json.loads(Path(path).read_text())["users"][0]["user"]["tokenFile"]
+    assert Path(token_file).read_text() == sess.token
     assert oct(os.stat(path).st_mode & 0o777) == "0o600"
+    assert oct(os.stat(token_file).st_mode & 0o777) == "0o600"
     fake.revoked.append("refresh-1")                                      # Rancher refuse
     t[0] = sess.token_expires
     assert sessions.renew(sess, fake, s) is False
@@ -227,10 +243,12 @@ def test_a_session_kubeconfig_goes_through_rancher(tmp_path):
     kc = json.loads(Path(path).read_text())
     assert kc["clusters"][0]["cluster"] == {"server": URL + "/k8s/clusters/c-sg2q6",
                                             "certificate-authority": "/etc/ssl/rancher-ca.pem"}
-    assert kc["users"][0]["user"]["token"] == "token-1:zz"
+    token_file = kc["users"][0]["user"]["tokenFile"]
+    assert Path(token_file).read_text() == "token-1:zz" and "token" not in kc["users"][0]["user"]
     assert sess.login == "ana@rancher" and "token" not in json.dumps(sess.public()).lower().replace("expires", "")
     sessions.close(sess.sid)
-    assert not os.path.exists(path) and sessions.get(sess.sid) is None
+    assert not os.path.exists(path) and not os.path.exists(token_file)
+    assert sessions.get(sess.sid) is None
 
 
 def test_an_expired_session_is_gone():
@@ -241,3 +259,74 @@ def test_an_expired_session_is_gone():
     t[0] = 11
     assert sessions.expired() == [sess.sid]
     assert sessions.get(sess.sid) is None
+
+
+# -- v1.56.0 -------------------------------------------------------------------------
+
+def test_a_long_action_follows_the_renewed_token(tmp_path):
+    """Audit D18 : Terraform recopie le kubeconfig dans son espace et un apply
+    dure plus que les dix minutes d'un jeton. Le kubeconfig désigne donc un
+    fichier de jeton que le renouvellement réécrit (client-go le relit) ;
+    le kubeconfig lui-même ne change pas, une copie reste valable."""
+    s = settings(tmp_path)
+    fake = FakeRancher()
+    t = [time.time()]
+    d = tmp_path / "ids"
+    d.mkdir()
+    sessions = rs.Sessions(lambda: d, now=lambda: t[0])
+    sess = sessions.open({"id": "u", "username": "a"}, "operator",
+                         jwt({"exp": t[0] + 600, "token": "token-oidc"}), "refresh-0", 43200)
+    path = sessions.kubeconfig(sess, s, "c-sg2q6")
+    copy = tmp_path / "workspace-kubeconfig"
+    copy.write_bytes(Path(path).read_bytes())            # ce que fait _stage_kubeconfig
+    before = Path(path).read_bytes()
+    token_file = json.loads(copy.read_text())["users"][0]["user"]["tokenFile"]
+    first = Path(token_file).read_text()
+    t[0] += 500
+    assert sessions.renew(sess, fake, s)
+    assert Path(path).read_bytes() == before              # le kubeconfig ne bouge pas
+    assert Path(token_file).read_text() == sess.token != first
+    # un second cluster de la même session partage le même jeton
+    other = sessions.kubeconfig(sess, s, "local")
+    assert json.loads(Path(other).read_text())["users"][0]["user"]["tokenFile"] == token_file
+
+
+def test_a_cluster_member_is_found_by_the_nodes(tmp_path):
+    """Vu en réel (compte « membre du cluster » de harv1) : kube-system est
+    refusé, les nœuds sont lisibles. Sans ce chemin le membre ne voyait
+    aucun cluster."""
+    s = settings(tmp_path)
+    fake = FakeRancher()
+    fake.member = True
+    assert rs.discover_cluster_id(fake, s, "tok", "uid-harv1") is None
+    assert rs.discover_cluster_id(fake, s, "tok", "uid-harv1", {"node-uid-1"}) == "c-sg2q6"
+    assert rs.discover_cluster_id(fake, s, "tok", None, {"node-uid-1"}) == "c-sg2q6"
+    assert rs.discover_cluster_id(fake, s, "tok", "uid-harv1", {"node-uid-9"}) is None
+    # kube-system lisible et d'un autre cluster : on ne compare pas les nœuds
+    fake.member = False
+    fake.nodes["local"] = ["node-uid-1"]
+    assert rs.discover_cluster_id(fake, s, "tok", "uid-harv1", {"node-uid-1"}) == "c-sg2q6"
+
+
+def test_access_to_a_known_cluster_is_asked_to_rancher(tmp_path):
+    """Connaître l'id Rancher d'un cluster ne dit pas que cette personne y a
+    droit : Rancher est interrogé, la réponse gardée cinq minutes, et un
+    Rancher muet ne donne pas d'accès qu'il n'a jamais confirmé."""
+    s = settings(tmp_path)
+    fake = FakeRancher()
+    t = [0.0]
+    sessions = rs.Sessions(lambda: None, now=lambda: t[0])
+    sess = sessions.open({"id": "u", "username": "a"}, "viewer", "t:x", "r", 3600)
+    assert sessions.has_access(sess, fake, s, "c-sg2q6") is True
+    fake.no_access.add("c-sg2q6")
+    assert sessions.has_access(sess, fake, s, "c-sg2q6") is True        # gardé
+    t[0] += 301
+    assert sessions.has_access(sess, fake, s, "c-sg2q6") is False
+    other = sessions.open({"id": "v", "username": "b"}, "viewer", "t:y", "r", 3600)
+
+    class Down:
+        def request(self, *a, **k):
+            raise rs.SSOError("rancher-unreachable", "down")
+    assert sessions.has_access(other, Down(), s, "c-sg2q6") is False
+    sessions.grant(other, "c-sg2q6")
+    assert sessions.has_access(other, Down(), s, "c-sg2q6") is True

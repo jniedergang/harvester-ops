@@ -19,6 +19,8 @@ Trois faits que l'audit a établis et que ces tests figent :
     navigateur caché, console que personne n'utilise.
 """
 
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -205,8 +207,9 @@ def test_the_status_script_groups_and_parallelises():
     appels groupés lancés de front en coûtent 5,6 s, pour une sortie
     strictement identique (vérifiée sur harv1)."""
     src = (ROOT / "bin" / "harvester-status.sh").read_text()
-    assert "nodes,vm,vmi" in src
-    assert "volumes.longhorn.io,settings.longhorn.io" in src
+    # v1.56.0 : les lots sont écrits en liste, joints par une virgule
+    assert '["nodes", "vm", "vmi"]' in src and '",".join(kinds)' in src
+    assert '["volumes.longhorn.io", "settings.longhorn.io"]' in src
     assert "ThreadPoolExecutor" in src
     # Les appels un par un ne doivent pas revenir par la bande.
     assert '"get", "vmi", "-A"' not in src
@@ -217,3 +220,37 @@ def test_the_status_script_still_parses():
     r = subprocess.run(["bash", "-n", str(ROOT / "bin" / "harvester-status.sh")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+def test_a_refused_kind_does_not_hide_the_permitted_ones(tmp_path):
+    """v1.56.0, vu en réel : un membre du cluster lit les nœuds mais pas les
+    VMs. Le `get nodes,vm,vmi` groupé échouait en bloc et l'aperçu montrait
+    « 0 nœud » sans rien dire. Le script relit type par type ce qui est
+    permis et rend les refus, que la console affiche."""
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "kubectl").write_text("""#!/usr/bin/env bash
+args="$*"
+case "$args" in
+  *"nodes,vm,vmi"*|*" vm -o"*|*" vmi -o"*)
+    echo 'Error from server (Forbidden): virtualmachines.kubevirt.io is forbidden: User "u-7df4t" cannot list resource "virtualmachines" in API group "kubevirt.io" at the cluster scope' >&2
+    exit 1 ;;
+  *" nodes -o"*)
+    echo '{"items":[{"kind":"Node","metadata":{"name":"n1","labels":{}},"status":{"conditions":[{"type":"Ready","status":"True"}]},"spec":{}}]}' ;;
+  *)
+    echo '{"items":[]}' ;;
+esac
+""")
+    (fake / "kubectl").chmod(0o755)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("clusters:\n  - name: c1\n    kubeconfig: /dev/null\n")
+    env = dict(os.environ, PATH=f"{fake}:{os.environ['PATH']}", HARVESTER_OPS_CONFIG=str(cfg),
+               NO_COLOR="1")
+    env.pop("HARVESTER_OPS_KUBECONFIG", None)
+    r = subprocess.run(["bash", str(ROOT / "bin" / "harvester-status.sh"), "--cluster", "c1",
+                        "--output", "json"], capture_output=True, text=True, env=env, timeout=60)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert [n["name"] for n in out["nodes"]] == ["n1"]
+    assert out["summary"]["nodes_ready"] == 1
+    assert len(out["denied"]) == 2 and "virtualmachines" in out["denied"][0]

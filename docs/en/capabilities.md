@@ -811,7 +811,10 @@ Keycloak alike.
   (`User "u-t286c" cannot get resource "virtualmachines"`), the
   administrator was not.
 - The console finds which Rancher cluster is which by comparing the UID of
-  `kube-system` on both sides (or `rancher_cluster` in the configuration).
+  `kube-system` on both sides, or the UIDs of the nodes for someone who
+  cannot read `kube-system` (a Rancher "cluster member", 1.56.0), or
+  `rancher_cluster` in the configuration. Once a cluster is known, Rancher
+  is still asked, account by account, whether that person may open it.
   Clusters Rancher does not show to that person are left out, and any
   request naming one is refused.
 - **Console role**: administrator for Rancher administrators and the groups
@@ -821,13 +824,54 @@ Keycloak alike.
   being stopped), and the support bundle for non-administrators (it reads
   every cluster with the console's own account).
 - **Tokens never leave the server**: the browser holds a random session id
-  (HttpOnly cookie); the access token is renewed before it expires and the
-  session's kubeconfigs are rewritten, so a long action keeps working.
+  (HttpOnly cookie); the access token is renewed before it expires and
+  written to the session's token file, which its kubeconfigs point to
+  (`tokenFile`). kubectl reads it at each call and a running client (the
+  Terraform provider) rereads it every minute, so an apply that outlasts a
+  ten-minute token keeps working (1.56.0).
   Signing out forgets the session; Rancher does not let an OIDC token revoke
   itself, it expires at the session length. Signing out of Rancher also
   ends the console session at its next renewal.
 
+### Your account and signing out (1.56.0)
+
+The account button, top right next to the settings, opens a menu that says
+who is signed in and how (Rancher, local account, or an open console with
+no sign-in), the console role and what it allows, what the clusters see
+(Rancher rights, a delegated cluster identity, or the shared kubeconfig),
+when a Rancher session ends and its groups. It leads to the cluster
+accounts, the language and the version history, and signs out:
+
+- a Rancher session is forgotten by the console;
+- a local account signs out too, although HTTP Basic authentication has no
+  session: the browser keeps the password and resends it, so the console
+  makes it remember a placeholder account instead, accepted on that single
+  path (`/logout/local`). The next page asks for the password again.
+  Verified in Chromium.
+- an open console has nothing to sign out of, and the menu says so.
+
+### What the cluster refused (1.56.0)
+
+A view that a cluster (or Rancher) only partly lets someone read no longer
+shows an empty list without a word. The reads that RBAC refused travel with
+the answer (`X-Cluster-Denied` header, verb, resource, API group and
+namespace) and a notice above the page lists them, grouped by resource,
+with what to ask for: a role on the cluster or on the project from a
+Rancher administrator, or a grant for the delegated identity. A Rancher
+session also learns why a cluster of the console is missing: Rancher gives
+the account no access to it, or no cluster Rancher shows the account is
+that one. Seen for real with a Rancher "cluster member" on harv1: the
+overview showed 0 nodes and the cluster list was empty; it now shows the
+node, and says that virtual machines and Longhorn volumes are refused. A
+refused kind no longer hides the permitted ones in the status of a cluster
+either (the grouped read is retried kind by kind).
+
 ## 9. Cross-cutting
+
+- **Version history.** Clicking the version number (sidebar, account menu,
+  Settings > About) lists what each version brought, from the release
+  notes shipped with the console: newest first, the installed one marked,
+  filtered by words, or reduced to additions or to fixes.
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
   of icons that expands over the page while the pointer is on it, and

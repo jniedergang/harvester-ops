@@ -915,8 +915,11 @@ connexion, compte local ou Keycloak.
   refusé par harv1 lui-même (`User "u-t286c" cannot get resource
   "virtualmachines"`), l'administrateur non.
 - La console retrouve quel cluster Rancher est lequel en comparant l'UID de
-  `kube-system` des deux côtés (ou `rancher_cluster` dans la
-  configuration). Les clusters que Rancher ne montre pas à la personne sont
+  `kube-system` des deux côtés, ou les UID des nœuds pour qui ne lit pas
+  `kube-system` (un « membre du cluster » Rancher, 1.56.0), ou
+  `rancher_cluster` dans la configuration. Un cluster connu, Rancher est
+  encore interrogé, compte par compte, pour savoir si la personne peut
+  l'ouvrir. Les clusters que Rancher ne montre pas à la personne sont
   écartés, et toute requête qui en nomme un est refusée.
 - **Rôle dans la console** : administrateur pour les administrateurs de
   Rancher et les groupes de `admin_groups`, `default_role` (opérateur) pour
@@ -928,13 +931,57 @@ connexion, compte local ou Keycloak.
   console).
 - **Les jetons ne quittent jamais le serveur** : le navigateur n'a qu'un
   identifiant de session aléatoire (cookie HttpOnly) ; le jeton d'accès est
-  renouvelé avant son expiration et les kubeconfigs de la session réécrits,
-  si bien qu'une action longue continue. Se déconnecter fait oublier la
+  renouvelé avant son expiration et écrit dans le fichier de jeton de la
+  session, que ses kubeconfigs désignent (`tokenFile`). kubectl le lit à
+  chaque appel et un client qui tourne (le provider Terraform) le relit
+  chaque minute : un apply plus long qu'un jeton de dix minutes continue
+  (1.56.0). Se déconnecter fait oublier la
   session ; Rancher ne laisse pas un jeton OIDC se révoquer lui-même, il
   expire à la durée de la session. Se déconnecter de Rancher ferme aussi la
   session de la console à son renouvellement suivant.
 
+### Votre compte et la déconnexion (1.56.0)
+
+Le bouton du compte, en haut à droite à côté des réglages, ouvre un menu
+qui dit qui est connecté et comment (Rancher, compte local, ou console
+ouverte sans connexion), le rôle dans la console et ce qu'il permet, ce que
+voient les clusters (droits Rancher, identité de cluster déléguée, ou
+kubeconfig partagé), la fin d'une session Rancher et ses groupes. Il mène
+aux comptes du cluster, à la langue et à l'historique des versions, et
+déconnecte :
+
+- une session Rancher est oubliée par la console ;
+- un compte local se déconnecte aussi, bien que l'authentification HTTP
+  Basic n'ait pas de session : le navigateur garde le mot de passe et le
+  renvoie ; la console lui fait donc retenir à la place un compte factice,
+  accepté sur ce seul chemin (`/logout/local`). La page suivante redemande
+  le mot de passe. Vérifié dans Chromium.
+- une console ouverte n'a rien dont se déconnecter, et le menu le dit.
+
+### Ce que le cluster a refusé (1.56.0)
+
+Une vue que le cluster (ou Rancher) ne laisse lire qu'en partie n'affiche
+plus une liste vide sans un mot. Les lectures refusées par la RBAC partent
+avec la réponse (en-tête `X-Cluster-Denied` : verbe, ressource, groupe
+d'API, espace de noms) et un bandeau au-dessus de la page les liste,
+regroupées par ressource, avec ce qu'il faut demander : un rôle sur le
+cluster ou sur le projet à un administrateur de Rancher, ou un droit pour
+l'identité déléguée. Une session Rancher apprend aussi pourquoi un cluster
+de la console manque : Rancher n'y donne pas accès à ce compte, ou aucun
+cluster que Rancher lui montre n'est celui-là. Vu en réel avec un « membre
+du cluster » Rancher sur harv1 : l'aperçu montrait 0 nœud et la liste des
+clusters était vide ; il montre maintenant le nœud, et dit que les
+machines virtuelles et les volumes Longhorn sont refusés. Un type refusé ne
+cache plus non plus les types permis dans l'état d'un cluster (la lecture
+groupée est reprise type par type).
+
 ## 9. Transversal
+
+- **Historique des versions.** Un clic sur le numéro de version (menu
+  latéral, menu du compte, Réglages > À propos) liste ce que chaque version
+  a apporté, d'après les notes de version livrées avec la console : la plus
+  récente d'abord, celle installée signalée, filtrées par mots, ou réduites
+  aux ajouts ou aux corrections. Les notes sont en anglais.
 
 - **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail
   d'icônes de 56 px qui se déplie par-dessus la page sous le pointeur et se
