@@ -129,7 +129,11 @@ const TF = (() => {
     const stateRows = detail.length === 0
       ? '<tr><td colspan="3" class="empty-state">No Terraform-managed resources yet.</td></tr>'
       : detail.map(r => {
-          const editBtn = r.has_sidecar
+          const editBtn = r.declaration_id
+            ? `<button class="btn btn-sm tf-open-decl tip"
+                       data-decl="${esc(r.declaration_id)}"
+                       data-tip="${esc(i18n.t('tf.tip.openDecl', { name: r.declaration_name || '' }))}">${Icons.svg('edit')} ${esc(r.declaration_name || 'Edit')}</button>`
+            : r.has_sidecar
             ? `<button class="btn btn-sm tf-edit-resource tip"
                        data-safe="${esc(r.local_name)}"
                        data-address="${esc(r.address)}"
@@ -141,7 +145,7 @@ const TF = (() => {
                 <td class="tf-state-actions">
                   ${editBtn}
                   <button class="btn btn-sm btn-danger tf-destroy-resource"
-                          data-address="${esc(r.address)}"
+                          data-address="${esc(r.address)}" data-decl="${esc(r.declaration_id || '')}"
                   >${Icons.svg('delete')} Destroy</button>
                 </td>
             </tr>`;
@@ -341,7 +345,7 @@ const TF = (() => {
     const root = $('#tf-decl-list');
     if (!root) return;
     if (cluster === undefined) cluster = $('#cluster-select')?.value || '';
-    const decls = window.TFDecl.list().filter(d => !d.cluster || d.cluster === cluster);
+    const decls = window.TFDecl.list(cluster);
     if (decls.length === 0) {
       root.innerHTML = `
         <div class="tf-decl-empty">
@@ -355,7 +359,13 @@ const TF = (() => {
         <button class="btn btn-secondary btn-sm" id="btn-tf-decl-new"
                 style="margin-top:6px;">+ New declaration</button>`;
     }
-    root.addEventListener('click', onDeclListClick);
+    // v1.54.0 : la liste se redessine à chaque changement du magasin ; son
+    // écouteur n'est posé qu'une fois (il s'empilait, comme dans la fenêtre
+    // d'une déclaration : un clic ouvrait plusieurs invites).
+    if (!root.dataset.wired) {
+      root.addEventListener('click', onDeclListClick);
+      root.dataset.wired = '1';
+    }
   }
 
   function renderDeclRow(decl, isActive) {
@@ -376,13 +386,19 @@ const TF = (() => {
       ? `<span class="tf-decl-applied tf-decl-applied--${esc(decl.last_applied_status)} tip"
               data-tip="${i18n.t('tf.tip.lastApply', {when: esc(decl.last_applied_at)})}"
         >last: ${esc(decl.last_applied_status)}</span>` : '';
+    const deployed = (decl.deployed || []).length
+      ? `<span class="tf-decl-summary tip" data-tip="${esc((decl.deployed || []).join(', '))}">${Icons.svg('ok', { size: 14 })} ${(decl.deployed || []).length} deployed</span>` : '';
     return `
       <div class="tf-decl-item ${isActive ? 'tf-decl-item--active' : ''}"
            data-decl-id="${esc(decl.id)}">
         <div class="tf-decl-item__head">
           <strong class="tf-decl-item__name">${esc(decl.name)}</strong>
-          ${summary}${status}
+          <button type="button" class="btn-icon-sm tf-decl-rename-btn tip" data-id="${esc(decl.id)}"
+                  aria-label="${esc(i18n.t('tf.tip.renameDecl'))}"
+                  data-tip="${esc(i18n.t('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 13 })}</button>
+          ${summary}${deployed}${status}
         </div>
+        ${decl.description ? `<div class="tf-decl-summary">${esc(decl.description)}</div>` : ''}
         <div class="tf-decl-item__actions">
           <button class="btn btn-sm tf-decl-open"  data-id="${esc(decl.id)}">Open</button>
           <button class="btn btn-sm tf-decl-dryrun"
@@ -404,10 +420,13 @@ const TF = (() => {
     if (e.target.closest('#btn-tf-decl-new')) {
       const name = prompt('Name for the new declaration:', `decl-${Date.now().toString(36)}`);
       if (!name) return;
-      const decl = window.TFDecl.create(name, cluster);
-      renderDeclarations(cluster);
+      window.TFDecl.createAsync(name, cluster)
+        .then(d => { if (window.TFDeclPanel) window.TFDeclPanel.open(d.id); })
+        .catch(err => declError(err));
       return;
     }
+    const ren = e.target.closest('.tf-decl-rename-btn');
+    if (ren) { startRename(ren.dataset.id); return; }
     const open = e.target.closest('.tf-decl-open');
     if (open) {
       window.TFDecl.setActive(open.dataset.id);
@@ -432,11 +451,61 @@ const TF = (() => {
     if (del) {
       const d = window.TFDecl.get(del.dataset.id);
       if (!d) return;
-      if (!confirm(`Delete declaration "${d.name}"? This only removes the local definition — no cluster resource is touched.`)) return;
-      window.TFDecl.remove(del.dataset.id);
-      renderDeclarations(cluster);
+      if ((d.deployed || []).length) {
+        declError({ code: 'deployed', data: { deployed: d.deployed } });
+        return;
+      }
+      if (!confirm(i18n.t('tf.confirmDeleteDecl', { name: d.name }))) return;
+      window.TFDecl.removeAsync(del.dataset.id).catch(err => declError(err));
       return;
     }
+  }
+
+  /** v1.54.0 : renommer sur place ; le nom est contrôlé par la console
+   *  (unique dans le cluster). Ni l'état Terraform ni les ressources ne
+   *  bougent. */
+  function startRename(id) {
+    const d = window.TFDecl.get(id);
+    const row = document.querySelector(`#tf-decl-list .tf-decl-item[data-decl-id="${CSS.escape(id)}"]`);
+    if (!d || !row) return;
+    const nameEl = row.querySelector('.tf-decl-item__name');
+    const input = document.createElement('input');
+    input.className = 'tf-decl-rename tip';
+    input.value = d.name;
+    input.maxLength = 80;
+    input.setAttribute('aria-label', i18n.t('tf.tip.renameDecl'));
+    input.dataset.tip = i18n.t('tf.tip.renameInput');
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const finish = (save) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      input.replaceWith(nameEl);                 // le champ cède la place tout de suite
+      if (!save || !v || v === d.name) return;
+      nameEl.textContent = v;
+      window.TFDecl.renameAsync(id, v).catch(err => { declError(err); renderDeclarations(); });
+    };
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+      if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+    });
+    input.addEventListener('blur', () => finish(true));
+  }
+
+  /** Les refus de la console, dits clairement (nom pris, déclaration
+   *  déployée, modifiée ailleurs entre-temps). */
+  function declError(err) {
+    const d = (err && err.data) || {};
+    let msg = (err && err.message) || String(err);
+    if (err && err.code === 'name-taken') msg = i18n.t('tf.err.nameTaken', { name: d.name || '' });
+    else if (err && err.code === 'deployed') msg = i18n.t('tf.err.deployed', { resources: (d.deployed || []).join(', ') });
+    else if (err && err.code === 'conflict') msg = i18n.t('tf.err.conflict');
+    const result = $('#tf-result');
+    if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(msg)}</span>`;
+    alert(msg);
   }
 
   // v1.5.5: the active-declaration content moved into a FloatingPanel
@@ -482,16 +551,13 @@ const TF = (() => {
 
     let runId;
     try {
+      // v1.54.0 : la console applique ce qu'elle a enregistré, dans l'état
+      // propre à la déclaration ; on attend que la dernière saisie soit partie.
+      await window.TFDecl.flush(declId);
       const r = await fetch(
         `/api/terraform/${encodeURIComponent(cluster)}/apply_declaration`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            declaration: {
-              name: decl.name,
-              resources: decl.resources.map(x => ({ kind: x.kind, spec: x.spec })),
-            },
-            dry_run: dryRun,
-          }) });
+          body: JSON.stringify({ declaration: { id: declId }, dry_run: dryRun }) });
       const d = await r.json();
       if (!r.ok) {
         const detail = (d.errors || []).map(e =>
@@ -516,7 +582,7 @@ const TF = (() => {
     if (!cluster) { alert('Select a cluster first.'); return; }
     const decl = window.TFDecl.get(declId);
     if (!decl) return;
-    if (decl.resources.length === 0) {
+    if (decl.resources.length === 0 && !(decl.deployed || []).length) {
       alert('This declaration has no resources to destroy.');
       return;
     }
@@ -544,13 +610,7 @@ const TF = (() => {
       const r = await fetch(
         `/api/terraform/${encodeURIComponent(cluster)}/destroy_declaration`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            declaration: {
-              name: decl.name,
-              resources: decl.resources.map(x => ({ kind: x.kind, spec: x.spec })),
-            },
-            dry_run: false,
-          }) });
+          body: JSON.stringify({ declaration: { id: declId }, dry_run: false }) });
       const d = await r.json();
       if (!r.ok) {
         const detail = (d.errors || []).map(e =>
@@ -941,7 +1001,7 @@ const TF = (() => {
     }
   }
 
-  async function destroySingleResource(address) {
+  async function destroySingleResource(address, declId) {
     const cluster = $('#cluster-select')?.value;
     if (!cluster || !address) return;
     const ok = await confirmDestructive({
@@ -959,7 +1019,7 @@ const TF = (() => {
     try {
       const r = await fetch(`/api/terraform/${encodeURIComponent(cluster)}/destroy_resource`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ address, dry_run: false }) });
+          body: JSON.stringify({ address, dry_run: false, declaration_id: declId || undefined }) });
       const d = await r.json();
       if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`; return; }
       runId = d.action_id;
@@ -982,7 +1042,9 @@ const TF = (() => {
       if (e.target.closest('#btn-tf-clean-stale')) cleanStale();
       if (e.target.closest('#btn-tf-prov-revert')) { e.preventDefault(); revertProvider(); }
       const dr = e.target.closest('.tf-destroy-resource');
-      if (dr) destroySingleResource(dr.dataset.address);
+      if (dr) destroySingleResource(dr.dataset.address, dr.dataset.decl);
+      const od = e.target.closest('.tf-open-decl');
+      if (od && window.TFDeclPanel) { activateSubtab('decls'); window.TFDeclPanel.open(od.dataset.decl); }
       const ed = e.target.closest('.tf-edit-resource');
       if (ed) importResourceForEdit(ed.dataset.safe, ed.dataset.address);
       const tab = e.target.closest('#tf-status-body .sub-tab[data-tf-tab]');
@@ -999,6 +1061,14 @@ const TF = (() => {
       if (e.target?.id === 'tf-prov-form') installProvider(e);
       if (e.target?.id === 'tf-prov-file-form') uploadProvider(e);
     });
+    if (window.TFDecl) {
+      window.TFDecl.onChange(() => {
+        // pas pendant un renommage : le champ disparaîtrait sous les doigts
+        if (document.activeElement && document.activeElement.classList.contains('tf-decl-rename')) return;
+        if ($('#tf-decl-list')) renderDeclarations();
+      });
+      window.TFDecl.onError(err => { if (err && (err.code === 'conflict' || err.declId)) declError(err); });
+    }
   }
 
   return {

@@ -617,6 +617,19 @@ Drive the Terraform provider for Harvester from saved declarations.
 - **Declarations** — named, persisted bundles of N heterogeneous
   resources (VMs, VM images, SSH keys, raw HCL), edited section by section
   (Specs / Disks / Networks / Cloud-init) and applied in one shot.
+- **Kept by the console, one Terraform state each (1.54.0)**: declarations
+  are stored by the console (shared between operators, backed up with it),
+  no longer in each browser; those left in a browser are imported at the
+  first visit. A declaration can be renamed in place (the name is unique in
+  the cluster; neither the Terraform state nor the resources move). Each
+  declaration has its own Terraform state: applying it only touches its
+  resources. Resources applied before 1.54 are taken over from the shared
+  state at the first plan, without being recreated. A resource removed from
+  a declaration is destroyed by its next apply (the plan says so); a
+  resource destroyed on its own from the live view leaves its declaration.
+  A declaration with deployed resources cannot be deleted. Two operators
+  editing the same declaration do not overwrite each other: the later one
+  is told and sees the current version.
 - **Apply / destroy** with live plan and apply streaming; typed-confirm
   modal on every destroy entry point. A destroyed VM takes its disks with
   it unless "delete this disk when the VM is destroyed" is unchecked on the

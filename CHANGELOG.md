@@ -4,6 +4,62 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.54.0] - 2026-09-26 - Terraform declarations kept by the console, one state each
+
+### Added
+- **Declarations are kept by the console** (`/api/tf-declarations`,
+  SQLite next to the notes and the action history), shared between
+  operators and backed up with the console, no longer in each browser.
+  Those a browser still holds are imported at the first visit, with their
+  identifiers.
+- **Rename a declaration** in place from the list; the name is unique in
+  the cluster and the change moves neither the Terraform state nor the
+  resources. A description can be set.
+- **One Terraform state per declaration**: applying a declaration only
+  touches its resources, and two declarations can no longer overwrite each
+  other. Resources applied before this version are taken over from the
+  cluster's shared state at the first plan, without being recreated.
+- **A reviewed plan can be applied as is**: the plan is kept with a
+  fingerprint of the declaration and a readable summary (created, changed
+  setting by setting, replaced, destroyed; sensitive values masked). An
+  apply that carries the fingerprint applies that plan; if the declaration
+  changed since, it is refused.
+- Two operators editing the same declaration do not overwrite each other:
+  the later one is told and gets the current version.
+
+### Changed
+- A resource removed from a declaration is destroyed by the next apply
+  (the plan says so), like Terraform does.
+- A resource destroyed on its own from the live view leaves its
+  declaration (the next apply recreated it).
+- A declaration with deployed resources cannot be deleted; destroy it
+  first.
+- "Destroy everything" covers the state of every declaration too.
+- The live view names the declaration of each resource and opens it.
+- A raw HCL resource is named after its `resource` block, no longer after
+  the first 24 characters of its code.
+
+### Fixed
+- The declaration list added its click handler at each redraw, like the
+  declaration window did (1.52.1): one click could open several prompts.
+- A failed Terraform run left the error summary empty in the Activity tab.
+- The development console kept its Terraform workspaces under `/tmp`.
+
+### Tests
+- The store (names, duplicates, revisions, validation), state moves with
+  backups, the plan summary, the routes, the runner (own workspace,
+  takeover, removal, reviewed plan, outdated plan, destroy), the live view,
+  the provider change reaching declaration workspaces; in a browser, the
+  import from localStorage, the inline rename with a duplicate refused, a
+  conflict between two operators.
+- Tests no longer write into the real Terraform workspaces.
+- Real, on harv1: a key applied the old way then taken over by its
+  declaration without being recreated, a reviewed plan applied, a VM in a
+  second declaration, plans isolated, a rename that moves nothing, a
+  resource removed and destroyed by the apply, a VM destroyed on its own
+  leaving its declaration with its disk, deletion refused while deployed,
+  then destroy and deletion.
+
 ## [1.53.0] - 2026-09-26 - Create a cluster from a window with menus
 
 ### Changed

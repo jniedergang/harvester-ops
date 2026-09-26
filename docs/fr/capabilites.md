@@ -704,6 +704,20 @@ sauvegardées.
   hétérogènes (VMs, images VM, clés SSH, HCL brut), éditées section par
   section (Specs / Disques / Réseaux / Cloud-init) et appliquées en un
   coup.
+- **Gardées par la console, un état Terraform chacune (1.54.0)** : les
+  déclarations sont conservées par la console (partagées entre opérateurs,
+  sauvegardées avec elle), et non plus dans chaque navigateur ; celles
+  qu'un navigateur garde encore sont reprises à la première visite. Une
+  déclaration se renomme sur place (nom unique dans le cluster ; ni l'état
+  Terraform ni les ressources ne bougent). Chaque déclaration a son propre
+  état : l'appliquer ne touche que ses ressources. Les ressources
+  appliquées avant la 1.54 sont reprises de l'état partagé au premier plan,
+  sans être recréées. Une ressource retirée d'une déclaration est détruite
+  par son prochain apply (le plan le dit) ; une ressource détruite à
+  l'unité depuis la vue en direct sort de sa déclaration. Une déclaration
+  qui a des ressources déployées ne peut pas être supprimée. Deux
+  opérateurs qui modifient la même déclaration ne s'écrasent pas : le
+  second est prévenu et voit la version courante.
 - **Apply / destroy** avec streaming live du plan et de l'apply ; modale
   de confirmation typée sur chaque point d'entrée de destroy. Une VM
   détruite emporte ses disques, sauf si « supprimer ce disque quand la VM

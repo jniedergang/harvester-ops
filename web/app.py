@@ -68,6 +68,8 @@ import vnc_mux
 import volume_health
 import node_maintenance
 import rancher_sso as _rs
+import tf_store as _tfs
+import tf_state as _tfst
 from flask import (
     Flask,
     Response,
@@ -12471,11 +12473,43 @@ def _tf_provider_binary():
 
 
 def _tf_workspace_dir(cluster):
-    """Per-cluster workspace dir — keeps state files isolated."""
+    """Per-cluster workspace dir — keeps state files isolated.
+
+    v1.54.0 : c'est l'espace PARTAGÉ d'avant, qui garde les ressources
+    appliquées hors déclaration (chemin `/apply`) et celles d'avant la
+    v1.54 tant que leur déclaration ne les a pas reprises."""
     safe = re.sub(r"[^a-z0-9-]+", "-", cluster.lower()) or "default"
     p = TF_WORKSPACES / safe
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# v1.54.0 : les déclarations sont gardées par la console (SQLite, à côté des
+# notes), et chacune a son propre état Terraform : appliquer une déclaration
+# ne touche plus qu'à ses ressources, et deux déclarations ne se marchent
+# plus dessus (audit du 26/09/2026). Voir docs/design/2026-09-26-terraform-declarations.md.
+TF_DB = Path(os.environ.get("HARVESTER_OPS_TF_DB", str(NOTES_DB.parent / "tf-declarations.db")))
+TF_DECLS = _tfs.DeclStore(TF_DB)
+TF_STATE_LOCK = threading.Lock()
+
+
+def _tf_decl_workspace_dir(cluster, decl_id, create=True):
+    """L'espace de travail d'une déclaration : `<cluster>/decls/<id>/`."""
+    if not _tfs.ID_RE.match(str(decl_id or "")):
+        raise ValueError("invalid declaration id")
+    p = _tf_workspace_dir(cluster) / "decls" / decl_id
+    if create:
+        p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _tf_decl_workspaces(cluster):
+    """(id, dossier) des espaces de déclaration existants d'un cluster."""
+    root = _tf_workspace_dir(cluster) / "decls"
+    if not root.is_dir():
+        return []
+    return [(d.name, d) for d in sorted(root.iterdir())
+            if d.is_dir() and _tfs.ID_RE.match(d.name)]
 
 
 def _tf_plugin_cache_init(ws_dir):
@@ -12558,9 +12592,15 @@ def _tf_workspaces_invalidate():
     touched = []
     if not TF_WORKSPACES.exists():
         return touched
+    spaces = []
     for ws in sorted(TF_WORKSPACES.iterdir()):
         if not ws.is_dir():
             continue
+        spaces.append(ws)
+        decls = ws / "decls"
+        if decls.is_dir():
+            spaces.extend(d for d in sorted(decls.iterdir()) if d.is_dir())
+    for ws in spaces:
         hit = False
         for victim in (ws / ".terraform", ws / "plugins"):
             if victim.exists():
@@ -12571,7 +12611,7 @@ def _tf_workspaces_invalidate():
             lock.unlink()
             hit = True
         if hit:
-            touched.append(ws.name)
+            touched.append(str(ws.relative_to(TF_WORKSPACES)))
     return touched
 
 
@@ -12928,6 +12968,10 @@ def _tf_bundle_runner(run):
 def _close_err(run, step_id, msg):
     run.emit({"type": "step", "step_id": step_id, "status": "error",
               "message": msg[:400], "ts": time.time()})
+    # v1.54.0 : la cause dans le résumé (Activité, fin de l'action), qui
+    # restait vide pour tous les échecs Terraform.
+    if not run.error_summary:
+        run.error_summary = f"{step_id}: {msg}"[:300]
     run.exit_code = 1; run.status = "error"; run.ended_at = time.time()
     run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
     run.close()
@@ -12994,31 +13038,35 @@ def api_terraform_state(cluster):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    # v1.54.0 : chaque déclaration a son état ; la vue les réunit, avec
+    # l'espace partagé d'avant. Lu dans les fichiers d'état (pas besoin de
+    # lancer Terraform ni d'un `init` pour lister).
     ws = _tf_workspace_dir(cluster)
-    if not (ws / ".terraform").exists():
-        return jsonify({
-            "initialized": False, "resources": [], "resources_detail": [],
-            "workspace": str(ws),
-        })
-    rc, out, _ = _tf_run_cmd(ws, kc, ["state", "list"], timeout=30)
-    resources = [l for l in (out or "").splitlines() if l.strip()]
-    detail = []
-    for addr in resources:
-        local = addr.split(".", 1)[1] if "." in addr else addr
-        side = ws / f"{local}.json"
-        d = {"address": addr, "local_name": local, "has_sidecar": False}
-        if side.exists():
-            d["has_sidecar"] = True
-            try:
-                meta = json.loads(side.read_text())
-                d["kind"] = meta.get("kind")
-                d["declaration_name"] = meta.get("declaration_name")
-                d["written_at"] = meta.get("written_at")
-            except (OSError, json.JSONDecodeError):
-                pass
-        detail.append(d)
+    spaces = [(None, ws)] + _tf_decl_workspaces(cluster)
+    resources, detail = [], []
+    for decl_id, space in spaces:
+        decl = TF_DECLS.get(decl_id) if decl_id else None
+        for addr in _tfst.addresses(space):
+            local = addr.split(".", 1)[1] if "." in addr else addr
+            side = space / f"{local}.json"
+            d = {"address": addr, "local_name": local, "has_sidecar": False,
+                 "workspace": decl_id or "shared", "declaration_id": decl_id,
+                 "declaration_name": decl["name"] if decl else None}
+            if side.exists():
+                d["has_sidecar"] = True
+                try:
+                    meta = json.loads(side.read_text())
+                    d["kind"] = meta.get("kind")
+                    d["declaration_name"] = d["declaration_name"] or meta.get("declaration_name")
+                    d["written_at"] = meta.get("written_at")
+                except (OSError, json.JSONDecodeError):
+                    pass
+            resources.append(addr)
+            detail.append(d)
+    initialized = (ws / ".terraform").exists() or any(
+        (space / ".terraform").exists() for _, space in spaces[1:])
     return jsonify({
-        "initialized": True, "workspace": str(ws),
+        "initialized": initialized, "workspace": str(ws),
         "resources": resources, "resources_detail": detail,
         "resource_count": len(resources),
     })
@@ -13042,6 +13090,11 @@ def api_terraform_sidecar(cluster, safe):
         return jsonify({"error": "invalid safe name",
                         "hint": "alphanumeric and underscore only"}), 400
     ws = _tf_workspace_dir(cluster)
+    decl_id = request.args.get("decl")
+    if decl_id:
+        if not _tf_decl_id_ok(decl_id):
+            return jsonify({"error": "invalid declaration id"}), 400
+        ws = _tf_decl_workspace_dir(cluster, decl_id, create=False)
     side = ws / f"{safe}.json"
     # Defensive: ensure we resolved a file inside the workspace.
     try:
@@ -13086,6 +13139,98 @@ def api_terraform_apply(cluster):
     return jsonify({"action_id": run_id}), 201
 
 
+# ---------------------------------------------------------------------------
+# v1.54.0 : les déclarations Terraform, gardées par la console
+# ---------------------------------------------------------------------------
+def _tf_store_error(e):
+    status = {"not-found": 404, "name-taken": 409, "id-taken": 409, "conflict": 409}.get(e.code, 400)
+    body = {"error": str(e), "code": e.code}
+    if isinstance(e, _tfs.Conflict):
+        body["current"] = _tf_decl_view(e.facts.get("current"))
+    elif e.facts:
+        body.update({k: v for k, v in e.facts.items() if k != "current"})
+    return jsonify(body), status
+
+
+def _tf_decl_id_ok(decl_id):
+    return bool(_tfs.ID_RE.match(str(decl_id or "")))
+
+
+@app.route("/api/tf-declarations")
+@requires_auth
+def api_tf_declarations():
+    cluster = request.args.get("cluster") or None
+    return jsonify({"declarations": [_tf_decl_view(d) for d in TF_DECLS.list(cluster)]})
+
+
+@app.route("/api/tf-declarations", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_tf_declaration_create():
+    """Crée une déclaration. L'identifiant peut venir du navigateur : la
+    reprise des déclarations d'avant la v1.54 (localStorage) garde le leur."""
+    data = request.get_json(force=True, silent=True) or {}
+    cluster = str(data.get("cluster") or "")
+    if not _kubectl_for_cluster(cluster):
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    decl_id = str(data.get("id") or uuid.uuid4().hex[:12])
+    try:
+        d = TF_DECLS.create(decl_id, cluster, data.get("name"), data.get("description") or "",
+                            data.get("resources") or [], user=current_user() or "")
+    except _tfs.StoreError as e:
+        return _tf_store_error(e)
+    return jsonify(_tf_decl_view(d)), 201
+
+
+@app.route("/api/tf-declarations/<decl_id>")
+@requires_auth
+def api_tf_declaration_get(decl_id):
+    d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
+    if d is None:
+        return jsonify({"error": "declaration not found"}), 404
+    return jsonify(_tf_decl_view(d))
+
+
+@app.route("/api/tf-declarations/<decl_id>", methods=["PUT"])
+@requires_auth
+@_rate_limit("240/minute")
+def api_tf_declaration_update(decl_id):
+    """Renommer, décrire, changer les ressources, à révision attendue : si
+    quelqu'un est passé entre-temps, 409 avec la version courante."""
+    if not _tf_decl_id_ok(decl_id):
+        return jsonify({"error": "invalid declaration id"}), 400
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        d = TF_DECLS.update(decl_id, data.get("revision"), user=current_user() or "",
+                            name=data.get("name"), description=data.get("description"),
+                            resources=data.get("resources"))
+    except _tfs.StoreError as e:
+        return _tf_store_error(e)
+    return jsonify(_tf_decl_view(d))
+
+
+@app.route("/api/tf-declarations/<decl_id>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_tf_declaration_delete(decl_id):
+    """Supprime la définition. Refusé tant que des ressources de la
+    déclaration sont déployées : les détruire d'abord (sinon elles
+    resteraient sur le cluster sans plus personne pour les gérer)."""
+    d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
+    if d is None:
+        return jsonify({"error": "declaration not found"}), 404
+    ws = _tf_decl_workspace_dir(d["cluster"], decl_id, create=False)
+    deployed = _tfst.addresses(ws) if ws.exists() else []
+    if deployed:
+        return jsonify({"error": "declaration still has deployed resources",
+                        "code": "deployed", "deployed": deployed}), 409
+    TF_DECLS.delete(decl_id)
+    if ws.exists():
+        import shutil as _shutil
+        _shutil.rmtree(ws, ignore_errors=True)
+    return jsonify({"deleted": decl_id})
+
+
 @app.route("/api/terraform/<cluster>/apply_declaration", methods=["POST"])
 @_rate_limit("20/minute")
 @requires_auth
@@ -13113,31 +13258,16 @@ def api_terraform_apply_declaration(cluster):
     decl = data.get("declaration") or {}
     resources = decl.get("resources") or []
     dry_run = bool(data.get("dry_run", False))
+    decl_id = str(decl.get("id") or "")
+    if decl_id:
+        # v1.54.0 : une déclaration gardée par la console s'applique dans son
+        # propre espace d'état, depuis son contenu enregistré (le corps ne
+        # porte que son identifiant).
+        return _tf_decl_start(cluster, kc, decl_id, "plan" if dry_run else "apply",
+                              plan_hash=data.get("plan_hash"))
     if not isinstance(resources, list) or not resources:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
-
-    rendered = []      # list of (safe_name, kind, spec, hcl)
-    errors = []
-    seen_names = set()
-    for i, res in enumerate(resources):
-        kind = (res or {}).get("kind") or ""
-        spec = (res or {}).get("spec") or {}
-        hcl = _render_tf_for_kind(kind, spec)
-        if not hcl:
-            errors.append({"index": i, "kind": kind,
-                           "name": spec.get("name"),
-                           "error": "missing required fields"})
-            continue
-        base = spec.get("name") or spec.get("tf", "")[:24] or f"res_{i}"
-        safe = re.sub(r"[^a-z0-9_]+", "_", base.lower()) or f"res_{i}"
-        # Disambiguate clashing safe names (e.g. 2 VMs both named "node")
-        n = safe
-        j = 1
-        while n in seen_names:
-            j += 1
-            n = f"{safe}_{j}"
-        seen_names.add(n)
-        rendered.append((n, kind, spec, hcl))
+    rendered, errors = _tf_render_resources(resources)
 
     if errors:
         return jsonify({
@@ -13153,7 +13283,7 @@ def api_terraform_apply_declaration(cluster):
         ACTIONS[run_id] = run
     threading.Thread(
         target=_tf_apply_declaration_runner,
-        args=(run, cluster, kc, rendered, dry_run, decl.get("name") or "?"),
+        args=(run, cluster, kc, [r[:4] for r in rendered], dry_run, decl.get("name") or "?"),
         daemon=True,
     ).start()
     return jsonify({"action_id": run_id}), 201
@@ -13177,6 +13307,39 @@ def _tf_address_for_resource(kind, safe_name, hcl=None):
         if m:
             return f"{m.group(1)}.{m.group(2)}"
     return None
+
+
+def _tf_raw_name(hcl):
+    m = re.search(r'resource\s+"[a-z_]+"\s+"([a-zA-Z0-9_]+)"', hcl or "")
+    return m.group(1) if m else ""
+
+
+def _tf_render_resources(resources):
+    """(rendu, erreurs) : rendu = [(nom_sûr, kind, spec, hcl, adresse, rang)].
+
+    Le nom sûr nomme les fichiers `<nom>.tf` / `<nom>.json` et, pour les
+    types connus, l'adresse Terraform. Deux ressources au même nom sont
+    départagées (`node`, `node_2`). v1.54.0 : une ressource « raw » prend le
+    nom de son bloc `resource` (elle s'appelait d'après les 24 premiers
+    caractères de son code, `resource_harvester_ssh_`, audit D6)."""
+    rendered, errors, seen = [], [], set()
+    for i, res in enumerate(resources or []):
+        kind = (res or {}).get("kind") or ""
+        spec = (res or {}).get("spec") or {}
+        hcl = _render_tf_for_kind(kind, spec)
+        if not hcl:
+            errors.append({"index": i, "kind": kind, "name": spec.get("name"),
+                           "error": "missing required fields"})
+            continue
+        base = spec.get("name") or (_tf_raw_name(spec.get("tf")) if kind == "raw" else "") or f"res_{i}"
+        safe = re.sub(r"[^a-z0-9_]+", "_", base.lower()) or f"res_{i}"
+        n, j = safe, 1
+        while n in seen:
+            j += 1
+            n = f"{safe}_{j}"
+        seen.add(n)
+        rendered.append((n, kind, spec, hcl, _tf_address_for_resource(kind, n, hcl=hcl), i))
+    return rendered, errors
 
 
 def _safe_name_for_spec(spec, fallback="res"):
@@ -13310,6 +13473,221 @@ def _tf_apply_declaration_runner(run, cluster, kc, rendered, dry_run,
     run.emit({"type": "status", "status": "done", "exit_code": 0,
               "ts": time.time()})
     run.close()
+
+
+# Fichiers d'un espace de déclaration qui ne décrivent pas une ressource.
+_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta"}
+
+
+def _tf_decl_hash(rendered):
+    """Empreinte du contenu rendu : un plan ne s'applique que si la
+    déclaration n'a pas changé depuis."""
+    blob = json.dumps([[r[0], r[1], r[3]] for r in rendered], sort_keys=True)
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _tf_decl_resource_addresses(decl):
+    """{id de ressource: adresse Terraform} d'une déclaration."""
+    resources = decl.get("resources") or []
+    rendered, _ = _tf_render_resources(resources)
+    return {resources[r[5]]["id"]: r[4] for r in rendered if r[4]}
+
+
+def _tf_decl_view(decl):
+    """Une déclaration pour la page : ses ressources avec leur adresse, ce
+    qui est déployé (état de son espace), le dernier plan."""
+    if decl is None:
+        return None
+    d = dict(decl)
+    addr = _tf_decl_resource_addresses(decl)
+    d["resources"] = [dict(r, address=addr.get(r["id"])) for r in decl.get("resources") or []]
+    ws = None
+    try:
+        ws = _tf_decl_workspace_dir(decl["cluster"], decl["id"], create=False)
+    except ValueError:
+        pass
+    d["deployed"] = _tfst.addresses(ws) if ws and ws.exists() else []
+    meta = {}
+    if ws and (ws / "tfplan.meta").exists():
+        try:
+            meta = json.loads((ws / "tfplan.meta").read_text())
+        except (OSError, ValueError):
+            meta = {}
+    d["last_plan"] = meta or None
+    return d
+
+
+def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None):
+    """Lance plan, apply ou destroy d'une déclaration gardée par la console,
+    en action suivie. `mode` : plan | apply | destroy | destroy-plan."""
+    decl = TF_DECLS.get(decl_id)
+    if decl is None:
+        return jsonify({"error": "declaration not found", "id": decl_id}), 404
+    if decl["cluster"] != cluster:
+        return jsonify({"error": "declaration belongs to another cluster",
+                        "cluster": decl["cluster"]}), 400
+    rendered, errors = _tf_render_resources(decl["resources"])
+    if errors:
+        return jsonify({"error": "one or more resources are incomplete", "errors": errors,
+                        "supported": ["vm", "image", "ssh_key", "raw"]}), 400
+    if mode in ("plan", "apply") and not rendered:
+        return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
+    missing = [r[0] for r in rendered if not r[4]]
+    if missing:
+        return jsonify({"error": "cannot compute Terraform address", "resources": missing}), 400
+    h = _tf_decl_hash(rendered)
+    if mode == "apply" and plan_hash and plan_hash != h:
+        return jsonify({"error": "plan outdated",
+                        "hint": "the declaration changed since this plan; plan again"}), 409
+    label = {"plan": "tf-plan-decl", "apply": "tf-apply-decl",
+             "destroy": "tf-destroy-decl", "destroy-plan": "tf-destroy-decl"}[mode]
+    run_id = uuid.uuid4().hex[:12]
+    run = ActionRun(run_id, f"{label}:{decl['name']}:{len(rendered)}", cluster, [],
+                    dry_run=mode in ("plan", "destroy-plan"))
+    run.cluster_user = (current_cluster_identity() or {}).get("user")
+    user = current_user() or ""
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+    threading.Thread(target=_tf_decl_runner,
+                     args=(run, cluster, kc, decl, rendered, mode, h, bool(plan_hash), user),
+                     daemon=True).start()
+    return jsonify({"action_id": run_id, "plan_hash": h}), 201
+
+
+def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_saved_plan, user):
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status, "message": msg, "ts": time.time()})
+
+    def log(msg):
+        run.emit({"type": "log", "stream": "stdout", "message": msg[:200], "ts": time.time()})
+
+    def done(result=None):
+        run.result = result or {}
+        run.exit_code = 0; run.status = "done"; run.ended_at = time.time()
+        run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
+        run.close()
+
+    destroying = mode in ("destroy", "destroy-plan")
+    name = decl["name"]
+    step("preflight", "running", f"declaration '{name}' ({len(rendered)} resources)")
+    ws = _tf_decl_workspace_dir(cluster, decl["id"])
+    shared = _tf_workspace_dir(cluster)
+    try:
+        _stage_kubeconfig(kc, ws)
+    except Exception as e:
+        return _close_err(run, "preflight", f"kubeconfig copy failed: {e}")
+    (ws / "_providers.tf").write_text(_TF_HEADER)
+
+    # Reprise : ce qui a été appliqué avant la v1.54 vit dans l'état partagé.
+    wanted = {r[4] for r in rendered}
+    lock_file = shared / ".terraform.tfstate.lock.info"
+    if wanted - set(_tfst.addresses(ws)) and not lock_file.exists():
+        with TF_STATE_LOCK:
+            moved = _tfst.move(shared, ws, wanted)
+        for a in moved:
+            local = a.split(".", 1)[1]
+            for ext in (".tf", ".json"):
+                (shared / f"{local}{ext}").unlink(missing_ok=True)
+        if moved:
+            step("adopt", "done", f"{len(moved)} resource(s) taken over from the shared workspace: "
+                                  + ", ".join(moved))
+
+    # Les fichiers de l'espace suivent la déclaration : ce qui n'y est plus
+    # disparaît, et sera détruit par l'apply (le plan le montre).
+    keep = set()
+    for safe, kind, spec, hcl, _addr, _i in rendered:
+        keep |= {f"{safe}.tf", f"{safe}.json"}
+    for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")):
+        if f.name not in keep and f.name not in _TF_KEEP:
+            f.unlink(missing_ok=True)
+    for safe, kind, spec, hcl, _addr, _i in rendered:
+        try:
+            _write_resource_with_sidecar(ws, safe, hcl, kind, spec, name)
+        except OSError as e:
+            return _close_err(run, "preflight", f"writing {safe}.tf failed: {e}")
+    _tf_plugin_cache_init(ws)
+    step("preflight", "done", f"workspace of declaration {decl['id']}")
+    kcp = str((ws / "kubeconfig").resolve())
+
+    if not (ws / ".terraform").exists():
+        step("init", "running", "init")
+        rc, out, err = _tf_run_cmd(ws, kcp, ["init", "-input=false"], timeout=120)
+        if rc != 0:
+            return _close_err(run, "init", err.strip()[:400] or out.strip()[:400])
+        step("init", "done", "providers ready")
+
+    if destroying:
+        args = (["plan", "-destroy", "-input=false", "-no-color"] if mode == "destroy-plan"
+                else ["destroy", "-input=false", "-no-color", "-auto-approve"])
+        step("destroy", "running", args[0])
+        rc, out, err = _tf_run_cmd(ws, kcp, args, timeout=900)
+        for line in (out or "").splitlines()[-60:]:
+            if line.strip():
+                log(line)
+        if rc != 0:
+            if mode == "destroy":
+                TF_DECLS.mark_applied(decl["id"], "error", user)
+            return _close_err(run, "destroy", err.strip()[:400] or out.strip()[:400])
+        if mode == "destroy":
+            for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")) + [ws / "tfplan", ws / "tfplan.meta"]:
+                if f.name != "_providers.tf":
+                    f.unlink(missing_ok=True)
+            TF_DECLS.mark_applied(decl["id"], "destroyed", user)
+        step("destroy", "done", f"declaration '{name}' destroyed" if mode == "destroy" else "destroy plan ready")
+        return done({"deployed": _tfst.addresses(ws)})
+
+    summary = None
+    if not (use_saved_plan and (ws / "tfplan").exists()):
+        step("plan", "running", "plan")
+        rc, out, err = _tf_run_cmd(ws, kcp, ["plan", "-input=false", "-no-color", "-out=tfplan"],
+                                   timeout=300)
+        if rc != 0:
+            (ws / "tfplan.meta").unlink(missing_ok=True)
+            return _close_err(run, "plan", err.strip()[:400] or out.strip()[:400])
+        for line in (out or "").splitlines()[-40:]:
+            if line.strip():
+                log(line)
+        rc2, js, _ = _tf_run_cmd(ws, kcp, ["show", "-json", "tfplan"], timeout=120)
+        try:
+            summary = _tfst.plan_summary(json.loads(js)) if rc2 == 0 else None
+        except ValueError:
+            summary = None
+        meta = {"hash": content_hash, "revision": decl["revision"],
+                "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "by": user,
+                "summary": summary}
+        (ws / "tfplan.meta").write_text(json.dumps(meta))
+        step("plan", "done", "plan ready")
+    else:
+        try:
+            meta = json.loads((ws / "tfplan.meta").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        if meta.get("hash") != content_hash:
+            return _close_err(run, "plan", "plan outdated: the declaration changed since this plan")
+        summary = meta.get("summary")
+        step("plan", "done", "applying the reviewed plan")
+
+    if mode == "plan":
+        step("apply", "skipped", "[DRY-RUN]")
+        return done({"plan": summary, "plan_hash": content_hash})
+
+    step("apply", "running", f"apply ({len(rendered)} resources)")
+    rc, out, err = _tf_run_cmd(ws, kcp, ["apply", "-input=false", "-no-color", "-auto-approve", "tfplan"],
+                               timeout=900)
+    for line in (out or "").splitlines()[-60:]:
+        if line.strip():
+            log(line)
+    (ws / "tfplan").unlink(missing_ok=True)
+    (ws / "tfplan.meta").unlink(missing_ok=True)
+    if rc != 0:
+        TF_DECLS.mark_applied(decl["id"], "error", user)
+        return _close_err(run, "apply", err.strip()[:400] or out.strip()[:400])
+    TF_DECLS.mark_applied(decl["id"], "done", user)
+    step("apply", "done", f"declaration '{name}' applied ({len(rendered)} resources)")
+    return done({"plan": summary, "deployed": _tfst.addresses(ws)})
 
 
 _TF_HEADER = """terraform {
@@ -13657,28 +14035,37 @@ def api_terraform_destroy(cluster):
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
 
+    user = current_user() or ""
+
     def runner():
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
-        ws = _tf_workspace_dir(cluster)
-        if not (ws / ".terraform").exists():
-            return _close_err(run, "preflight",
-                              f"workspace not initialized: {ws}")
-        # Stage kubeconfig (chmod 0600 via _stage_kubeconfig)
-        try:
-            _stage_kubeconfig(kc, ws)
-        except Exception as e:
-            return _close_err(run, "preflight", f"kubeconfig: {e}")
+        # v1.54.0 : tout ce que Terraform gère sur ce cluster, c'est l'espace
+        # partagé ET l'état de chaque déclaration.
+        spaces = [(None, _tf_workspace_dir(cluster))] + _tf_decl_workspaces(cluster)
+        spaces = [(i, w) for i, w in spaces if (w / ".terraform").exists() and _tfst.addresses(w)]
+        if not spaces:
+            return _close_err(run, "preflight", "nothing managed by Terraform on this cluster")
         args = ["plan", "-destroy", "-no-color"] if dry_run \
                else ["destroy", "-no-color", "-auto-approve"]
-        rc, out, err = _tf_run_cmd(ws, str((ws / "kubeconfig").resolve()),
-                                   args, timeout=600)
-        for line in (out or "").splitlines()[-40:]:
-            if line.strip():
-                run.emit({"type": "log", "stream": "stdout", "message": line[:200],
-                          "ts": time.time()})
-        if rc != 0:
-            return _close_err(run, "destroy", err.strip()[:400])
+        for decl_id, ws in spaces:
+            what = f"declaration {decl_id}" if decl_id else "shared workspace"
+            try:
+                _stage_kubeconfig(kc, ws)
+            except Exception as e:
+                return _close_err(run, "preflight", f"kubeconfig: {e}")
+            run.emit({"type": "step", "step_id": "destroy", "status": "running",
+                      "message": f"{args[0]}: {what}", "ts": time.time()})
+            rc, out, err = _tf_run_cmd(ws, str((ws / "kubeconfig").resolve()),
+                                       args, timeout=600)
+            for line in (out or "").splitlines()[-40:]:
+                if line.strip():
+                    run.emit({"type": "log", "stream": "stdout", "message": line[:200],
+                              "ts": time.time()})
+            if rc != 0:
+                return _close_err(run, "destroy", f"{what}: " + err.strip()[:400])
+            if decl_id and not dry_run:
+                TF_DECLS.mark_applied(decl_id, "destroyed", user)
         run.emit({"type": "step", "step_id": "destroy", "status": "done",
                   "message": "ok", "ts": time.time()})
         run.exit_code = 0; run.status = "done"; run.ended_at = time.time()
@@ -13708,6 +14095,8 @@ def api_terraform_destroy_declaration(cluster):
     decl = data.get("declaration") or {}
     resources = decl.get("resources") or []
     dry_run = bool(data.get("dry_run", False))
+    if decl.get("id"):
+        return _tf_decl_start(cluster, kc, str(decl["id"]), "destroy-plan" if dry_run else "destroy")
     if not isinstance(resources, list) or not resources:
         return jsonify({"error": "declaration.resources must be a non-empty list"}), 400
 
@@ -13939,6 +14328,10 @@ def api_terraform_destroy_resource(cluster):
     if not re.match(r"^[a-z_][a-z0-9_]*\.[a-zA-Z0-9_]+$", address):
         return jsonify({"error": "invalid address",
                         "hint": "expected `<resource_type>.<local_name>`"}), 400
+    decl_id = data.get("declaration_id") or None
+    if decl_id and not _tf_decl_id_ok(decl_id):
+        return jsonify({"error": "invalid declaration id"}), 400
+    user = current_user() or ""
 
     run_id = uuid.uuid4().hex[:12]
     label = f"tf-destroy-resource:{address}"
@@ -13949,7 +14342,8 @@ def api_terraform_destroy_resource(cluster):
     def runner():
         run.status = "running"
         run.emit({"type": "status", "status": "running", "ts": time.time()})
-        ws = _tf_workspace_dir(cluster)
+        ws = (_tf_decl_workspace_dir(cluster, decl_id, create=False) if decl_id
+              else _tf_workspace_dir(cluster))
         if not (ws / ".terraform").exists():
             return _close_err(run, "preflight",
                               f"workspace not initialized: {ws}")
@@ -13984,6 +14378,7 @@ def api_terraform_destroy_resource(cluster):
                     txt = f.read_text()
                     if f'"{local}"' in txt and "resource " in txt:
                         f.unlink()
+                        (ws / f"{f.stem}.json").unlink(missing_ok=True)
                         run.emit({"type": "log", "stream": "stdout",
                                   "message": f"removed {f.name}",
                                   "ts": time.time()})
@@ -13991,6 +14386,15 @@ def api_terraform_destroy_resource(cluster):
             except OSError as e:
                 run.emit({"type": "log", "stream": "stderr",
                           "message": f"file cleanup: {e}", "ts": time.time()})
+        # v1.54.0 : la ressource détruite sort de sa déclaration, sans quoi le
+        # prochain apply la recréait sans prévenir (audit D8).
+        if not dry_run and decl_id:
+            d = TF_DECLS.get(decl_id)
+            gone = [rid for rid, a in _tf_decl_resource_addresses(d).items() if a == address] if d else []
+            if gone:
+                TF_DECLS.drop_resources(decl_id, gone, user)
+                run.emit({"type": "log", "stream": "stdout",
+                          "message": f"removed from declaration '{d['name']}'", "ts": time.time()})
 
         run.emit({"type": "step", "step_id": "destroy", "status": "done",
                   "message": "ok", "ts": time.time()})

@@ -249,7 +249,11 @@ const TFDeclPanel = (() => {
     if (!window.FloatingPanels || !window.FloatingPanels.registerType) return;
     window.FloatingPanels.registerType('tf-decl-panel', (args) => {
       if (!args || !args.declId) return null;
-      return open(args.declId);
+      if (window.TFDecl.get(args.declId)) return open(args.declId);
+      // v1.54.0 : les déclarations viennent de la console ; au rechargement
+      // la fenêtre attend qu'elles soient là.
+      window.TFDecl.ready.then(() => { if (window.TFDecl.get(args.declId)) open(args.declId); });
+      return null;
     });
   }
 

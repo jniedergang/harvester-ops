@@ -15,6 +15,7 @@ correctness lives in `test_tf_render.py`; concurrency / workspace
 mechanics in `test_tf_workspace.py`.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -70,20 +71,15 @@ def test_state_uninitialized_workspace_reports_so(api, tmp_path,
 
 
 def test_state_initialized_lists_resources(api, tmp_path, monkeypatch):
-    """When the workspace has .terraform/, the endpoint shells out to
-    `terraform state list` and returns each non-empty line."""
+    """When the workspace has .terraform/, the endpoint lists the managed
+    resources of its state. v1.54.0 : read from the state file (no
+    `terraform state list` any more), declaration workspaces included."""
     monkeypatch.setattr(wapp, "_tf_workspace_dir", lambda c: tmp_path)
     (tmp_path / ".terraform").mkdir()
-    monkeypatch.setattr(
-        wapp, "_tf_run_cmd",
-        lambda ws, kc, cmd, timeout=30: (
-            0,
-            "harvester_virtualmachine.a\n"
-            "\n"  # blank line must be filtered
-            "harvester_image.b\n",
-            "",
-        ),
-    )
+    (tmp_path / "terraform.tfstate").write_text(json.dumps({"version": 4, "resources": [
+        {"mode": "managed", "type": "harvester_virtualmachine", "name": "a", "instances": []},
+        {"mode": "managed", "type": "harvester_image", "name": "b", "instances": []},
+    ]}))
     # Make _kubectl_for_cluster succeed so we don't 404
     monkeypatch.setattr(wapp, "_kubectl_for_cluster",
                         lambda c: "/dev/null")
@@ -93,8 +89,8 @@ def test_state_initialized_lists_resources(api, tmp_path, monkeypatch):
         d = r.get_json()
         assert d["initialized"] is True
         assert d["resources"] == [
-            "harvester_virtualmachine.a",
             "harvester_image.b",
+            "harvester_virtualmachine.a",
         ]
         assert d["resource_count"] == 2
 

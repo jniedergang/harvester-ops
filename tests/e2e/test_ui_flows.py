@@ -607,9 +607,16 @@ def _clear_tf_drafts(page):
 
 
 def _clear_tf_decls(page):
-    page.evaluate("""() => {
+    """v1.54.0 : les déclarations sont gardées par la console ; chaque test
+    part d'un magasin vide (et plus seulement d'un navigateur vide)."""
+    page.evaluate("""async () => {
       try { localStorage.removeItem('harvester_ops_tf_declarations'); } catch {}
       try { localStorage.removeItem('harvester_ops_tf_subtab'); } catch {}
+      const d = await fetch('/api/tf-declarations').then(r => r.json());
+      for (const x of d.declarations || []) {
+        await fetch('/api/tf-declarations/' + x.id, { method: 'DELETE' });
+      }
+      if (window.TFDecl) await window.TFDecl.load();
     }""")
 
 

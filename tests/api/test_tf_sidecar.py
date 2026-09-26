@@ -124,22 +124,18 @@ def test_state_returns_resources_detail_with_sidecar_flag(tmp_path,
     (tmp_path / "alpha.json").write_text(json.dumps({
         "kind": "vm", "spec": {}, "declaration_name": "lab"
     }))
-    # beta has no sidecar
-    monkeypatch.setattr(
-        wapp, "_tf_run_cmd",
-        lambda ws, kc, cmd, timeout=30: (
-            0,
-            "harvester_virtualmachine.alpha\nharvester_image.beta\n",
-            "",
-        ),
-    )
+    # beta has no sidecar ; v1.54.0 : the state file is read directly
+    (tmp_path / "terraform.tfstate").write_text(json.dumps({"version": 4, "resources": [
+        {"mode": "managed", "type": "harvester_virtualmachine", "name": "alpha", "instances": []},
+        {"mode": "managed", "type": "harvester_image", "name": "beta", "instances": []},
+    ]}))
     with wapp.app.test_client() as c:
         r = c.get("/api/terraform/x/state")
         assert r.status_code == 200
         d = r.get_json()
         # Legacy `resources` list still present for backward compat
         assert d["resources"] == [
-            "harvester_virtualmachine.alpha", "harvester_image.beta",
+            "harvester_image.beta", "harvester_virtualmachine.alpha",
         ]
         # The new detail list carries has_sidecar per row
         detail = d["resources_detail"]

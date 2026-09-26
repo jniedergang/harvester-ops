@@ -22,6 +22,12 @@ from pathlib import Path
 # tests that import `app` directly (in-process test_client) don't
 # instantiate the limiter at module load.
 os.environ.setdefault("HARVESTER_OPS_DISABLE_RATELIMIT", "1")
+# v1.54.0 : les tests qui importent `app` dans le processus ne doivent pas
+# écrire dans les espaces Terraform ni les déclarations réels (audit D17).
+import tempfile as _tempfile  # noqa: E402
+_TF_TEST_DIR = _tempfile.mkdtemp(prefix="hops-tf-tests-")
+os.environ.setdefault("HARVESTER_OPS_TF_WORKSPACES", _TF_TEST_DIR + "/terraform")
+os.environ.setdefault("HARVESTER_OPS_TF_DB", _TF_TEST_DIR + "/tf-declarations.db")
 
 import pytest
 
@@ -117,6 +123,11 @@ def flask_server(test_config):
         # v1.47.0 : sans lui, le serveur de test lisait (et un dépôt aurait
         # écrit) le magasin d'exports réel de la console de dev
         "HARVESTER_OPS_EXPORT_DIR": str(test_config["root"] / "exports"),
+        # v1.54.0 : les espaces Terraform et les déclarations du serveur de
+        # test restent dans son dossier (ils atterrissaient dans le vrai
+        # /tmp/harvester-ops-terraform, audit D17)
+        "HARVESTER_OPS_TF_WORKSPACES": str(test_config["root"] / "terraform"),
+        "HARVESTER_OPS_TF_DB": str(test_config["root"] / "tf-declarations.db"),
         # Force no auth in tests — point to a path that won't exist
         "HARVESTER_OPS_HTPASSWD": str(test_config["root"] / "no-such-htpasswd"),
         # v1.5.6: disable flask-limiter in tests; the suite hits some
