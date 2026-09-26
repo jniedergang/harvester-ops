@@ -700,31 +700,48 @@ v0.6.4) :
 Piloter le provider Terraform pour Harvester depuis des déclarations
 sauvegardées.
 
-- **Déclarations** — bundles nommés et persistés de N ressources
-  hétérogènes (VMs, images VM, clés SSH, HCL brut), éditées section par
-  section (Specs / Disques / Réseaux / Cloud-init) et appliquées en un
-  coup.
-- **Gardées par la console, un état Terraform chacune (1.54.0)** : les
-  déclarations sont conservées par la console (partagées entre opérateurs,
-  sauvegardées avec elle), et non plus dans chaque navigateur ; celles
-  qu'un navigateur garde encore sont reprises à la première visite. Une
-  déclaration se renomme sur place (nom unique dans le cluster ; ni l'état
-  Terraform ni les ressources ne bougent). Chaque déclaration a son propre
-  état : l'appliquer ne touche que ses ressources. Les ressources
-  appliquées avant la 1.54 sont reprises de l'état partagé au premier plan,
-  sans être recréées. Une ressource retirée d'une déclaration est détruite
-  par son prochain apply (le plan le dit) ; une ressource détruite à
-  l'unité depuis la vue en direct sort de sa déclaration. Une déclaration
-  qui a des ressources déployées ne peut pas être supprimée. Deux
-  opérateurs qui modifient la même déclaration ne s'écrasent pas : le
-  second est prévenu et voit la version courante.
-- **Apply / destroy** avec streaming live du plan et de l'apply ; modale
-  de confirmation typée sur chaque point d'entrée de destroy. Une VM
-  détruite emporte ses disques, sauf si « supprimer ce disque quand la VM
-  est détruite » est décoché sur le disque (1.52.1).
-- **Éditer les ressources déployées** — chaque ressource appliquée écrit
-  un sidecar JSON pour recharger et éditer sa spec d'origine depuis le
-  sous-onglet Live.
+- **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
+  clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
+  avec son propre état Terraform (1.54.0). Elles sont gardées par la
+  console (partagées entre opérateurs, sauvegardées avec elle) ; celles
+  qu'un navigateur gardait encore sont reprises à la première visite.
+- **Une seule vue (1.55.0)** : la liste des déclarations à gauche, chacune
+  avec son état (jamais appliquée, à jour, N à appliquer, modifiée,
+  erreur) ; la déclaration choisie à droite, renommée sur place (nom
+  unique dans le cluster, rien de déployé ne bouge) et décrite. Trois
+  onglets :
+  - **Ressources** : une carte par ressource avec son résumé, son adresse
+    Terraform et son état (à créer, déployée, N réglages à changer, à
+    remplacer, retirée et détruite au prochain apply, incomplète) ;
+  - **Code** : le code Terraform que produit la déclaration, fichier par
+    fichier, et un export en `.tf` ;
+  - **Historique** : ses plans, applies et destructions, qui les a lancés
+    et ce qui a changé.
+- **Des formulaires dans la vue** : une ressource s'ouvre section par
+  section (Général, Disques, Réseaux, Premier démarrage pour une VM), avec
+  des libellés lisibles dans les cinq langues, le nom Terraform en petit
+  et une bulle d'aide sur chaque champ, et un contrôle pendant la saisie.
+  Enregistrer ne touche pas au cluster.
+- **Un plan qui se lit avant d'appliquer** : « Prévisualiser le plan »
+  calcule, sur cette seule déclaration, ce qui serait créé, modifié
+  (réglage par réglage, avant et après), remplacé (et pourquoi) ou détruit,
+  valeurs sensibles masquées. « Appliquer ce plan » applique exactement ce
+  plan ; si la déclaration a changé depuis, la console refuse et demande un
+  nouveau plan. Le dernier plan reste accessible par le bouton
+  « Appliquer ».
+- Une ressource retirée d'une déclaration est détruite par son prochain
+  apply (le plan le dit) ; une ressource détruite à l'unité depuis
+  l'onglet des ressources du cluster sort de sa déclaration. Détruire une
+  déclaration demande de taper son nom ; une déclaration qui a des
+  ressources déployées ne peut pas être supprimée. Deux opérateurs qui
+  modifient la même déclaration ne s'écrasent pas : le second est prévenu
+  et voit la version courante.
+- Une VM détruite emporte ses disques, sauf si « supprimé avec la VM » est
+  décoché sur le disque (1.52.1).
+- **Ressources du cluster** : tout ce que Terraform gère sur le cluster,
+  déclaration par déclaration ; une ressource de l'espace partagé
+  (appliquée avant la 1.54) peut être adoptée par une déclaration, qui la
+  reprend à son prochain plan sans la recréer.
 - **Mettre à jour le provider depuis la console** : installer une autre
   version de `terraform-provider-harvester` sans accès shell à l'hôte.
   Au choix : une version (la release officielle est téléchargée puis

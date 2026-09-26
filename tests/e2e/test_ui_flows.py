@@ -626,7 +626,7 @@ def _open_terraform(page):
     page.click('.tab-group-head[data-group="automation"]')
     page.wait_for_timeout(150)
     page.click('.tab-child[data-subtab="terraform"]')
-    page.wait_for_selector('#tf-decl-list', timeout=5000)
+    page.wait_for_selector('#tf-decls-view .tfd', timeout=5000)
 
 
 def test_tf_subtabs_default_to_declarations(page):
@@ -680,312 +680,6 @@ def test_tf_subtabs_persist_across_reload(page):
     assert active == "live"
 
 
-def test_decl_empty_state_shows_create_button(page):
-    """v1.5.0: a brand-new visit shows the zero-state with a + New
-    declaration button — not a free-form resource form."""
-    _open_terraform(page)
-    expect(page.locator('.tf-decl-empty')).to_be_visible()
-    expect(page.locator('#btn-tf-decl-new')).to_be_visible()
-
-
-def test_decl_create_and_persist_across_reload(page):
-    """Creating a declaration via the JS API (we bypass the prompt
-    dialog) persists it to localStorage. After F5 it must still be in
-    the list AND remain the active declaration."""
-    _open_terraform(page)
-    decl = page.evaluate("""() => {
-      const d = window.TFDecl.create('lab-batch-1', 'harv-fake');
-      return { id: d.id, name: d.name };
-    }""")
-    assert decl["name"] == "lab-batch-1"
-    page.evaluate("window.TF && TF.refresh && TF.refresh()")
-    page.wait_for_timeout(300)
-    expect(page.locator('.tf-decl-item__name', has_text="lab-batch-1")).to_be_visible()
-    # Reload — must still be there. The v1.4.33 sub-tab persistence
-    # restores Automation > Terraform automatically; no clicks needed.
-    page.reload()
-    page.wait_for_load_state("networkidle")
-    page.wait_for_selector('.tf-decl-item', timeout=8000)
-    expect(page.locator('.tf-decl-item__name', has_text="lab-batch-1")).to_be_visible()
-    active_id = page.evaluate("() => window.TFDecl.getActive()?.id")
-    assert active_id == decl["id"]
-
-
-def test_decl_add_vm_resource_renders_section_buttons(page):
-    """v1.5.5: opening a declaration in the FloatingPanel must render
-    a resource card (right pane) with 4 section buttons (Specs, Disks,
-    Networks, Cloud-init)."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('test-decl', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-resource-card', timeout=3000)
-    buttons = page.evaluate(
-        "Array.from(document.querySelectorAll('.tf-resource-card .tf-section-btn'))"
-        ".map(b => b.dataset.section)"
-    )
-    assert sorted(buttons) == ['cloudinit', 'disks', 'networks', 'specs']
-
-
-def test_decl_section_button_color_reflects_validation(page):
-    """A freshly added VM with defaults misses required fields (e.g.
-    name). The Specs button must be `--missing` (red) or `--empty`,
-    NOT `--ok`. After filling the required fields via the store, the
-    color flips to `--ok`."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('color-test', 'harv-fake');
-      const r = window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-section-btn[data-section="specs"]', timeout=3000)
-    initial_class = page.evaluate(
-        "document.querySelector('.tf-section-btn[data-section=\"specs\"]').className"
-    )
-    assert "tf-section-btn--ok" not in initial_class, initial_class
-    # Fill the required fields via the store + force a re-render
-    page.evaluate("""() => {
-      const d = window.TFDecl.getActive();
-      const r = d.resources[0];
-      window.TFDecl.replaceResourceSpec(d.id, r.id, Object.assign({}, r.spec, {
-        name: 'v1',
-        cpu: 2, memory: '2Gi',
-        run_strategy: 'RerunOnFailure',
-      }));
-      window.TF.refresh();
-    }""")
-    page.wait_for_timeout(400)
-    after_class = page.evaluate(
-        "document.querySelector('.tf-section-btn[data-section=\"specs\"]').className"
-    )
-    assert "tf-section-btn--ok" in after_class, after_class
-
-
-def test_decl_section_overlay_opens_on_click(page):
-    """Click a section button (inside the decl panel) → another
-    FloatingPanel opens with the section's form."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('overlay-test', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-section-btn[data-section="specs"]',
-                           timeout=3000)
-    page.click('.tf-section-btn[data-section="specs"]')
-    page.wait_for_timeout(250)
-    # The section overlay must be visible (a second FloatingPanel)
-    expect(page.locator('.floating-panel .tf-form[data-section="specs"]')).to_be_visible()
-    expect(page.locator('.floating-panel [name="name"]').first).to_be_visible()
-    assert page.locator('.floating-panel [name="disk[0].image"]').count() == 0
-
-
-def test_decl_section_overlay_save_persists_and_updates_button(page):
-    """Saving the section overlay merges values into the resource's spec
-    and flips the button color in the parent declaration panel."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('save-test', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'ssh_key');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-section-btn[data-section="specs"]',
-                           timeout=3000)
-    # ssh_key has 1 section (Specs)
-    page.click('.tf-section-btn[data-section="specs"]')
-    page.wait_for_timeout(250)
-    page.fill('.floating-panel [name="name"]', 'lab-key')
-    page.fill('.floating-panel [name="public_key"]', 'ssh-ed25519 AAAA me@host')
-    page.click('.floating-panel .tf-sec-save')
-    page.wait_for_timeout(250)
-    # The spec must be persisted
-    persisted = page.evaluate("""() => {
-      const d = window.TFDecl.getActive();
-      return d.resources[0].spec;
-    }""")
-    assert persisted.get("name") == "lab-key"
-    assert "ssh-ed25519" in persisted.get("public_key", "")
-    # And the button is green
-    assert "tf-section-btn--ok" in page.evaluate(
-        "document.querySelector('.tf-section-btn[data-section=\"specs\"]').className"
-    )
-
-
-def test_declarations_subtab_has_no_resource_cards_inline(page):
-    """v1.5.5: the Declarations sub-tab must show ONLY the list of
-    declarations — no inline `.tf-resource-card` even when a declaration
-    has resources. The cards live inside the FloatingPanel overlay."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('inline-check', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-    }""")
-    page.wait_for_selector('.tf-decl-item', timeout=3000)
-    # Cards are NOT inside the Declarations sub-tab; only the row.
-    assert page.locator(
-        '#tf-status-body .tf-subtab-content[data-tf-tab="decls"] '
-        '.tf-resource-card').count() == 0
-
-
-def test_decl_open_panel_lists_resources_on_the_left(page):
-    """Opening a declaration with 3 resources shows 3 left-tab entries
-    + one resource card on the right."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('left-tabs', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TFDecl.addResource(d.id, 'image');
-      window.TFDecl.addResource(d.id, 'ssh_key');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-dp-resitem', timeout=3000)
-    expect(page.locator('.tf-dp-resitem')).to_have_count(3)
-    # Only one resource card visible at a time (the active one).
-    expect(page.locator('.tf-resource-card')).to_have_count(1)
-
-
-def test_decl_open_panel_switching_resource_swaps_detail(page):
-    """Click a different left-tab entry → the right pane swaps to its
-    section buttons."""
-    _open_terraform(page)
-    decl_id = page.evaluate("""() => {
-      const d = window.TFDecl.create('swap', 'harv-fake');
-      const r1 = window.TFDecl.addResource(d.id, 'vm');
-      const r2 = window.TFDecl.addResource(d.id, 'ssh_key');
-      window.TFDecl.replaceResourceSpec(d.id, r1.id, {name: 'vm-a'});
-      window.TFDecl.replaceResourceSpec(d.id, r2.id, {name: 'key-a'});
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-      return d.id;
-    }""")
-    # First resource (vm-a) active by default → card kind = vm → 4 sections
-    page.wait_for_selector('.tf-resource-card', timeout=3000)
-    initial_kind = page.evaluate(
-        "document.querySelector('.tf-resource-card').dataset.kind")
-    assert initial_kind == "vm"
-    # Click the 2nd left-tab entry (ssh_key)
-    page.click('.tf-dp-resitem:nth-of-type(2)')
-    page.wait_for_timeout(200)
-    swapped_kind = page.evaluate(
-        "document.querySelector('.tf-resource-card').dataset.kind")
-    assert swapped_kind == "ssh_key"
-
-
-def test_decl_open_panel_two_at_once(page):
-    """Open two distinct declarations → two FloatingPanels live in the
-    DOM simultaneously."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const a = window.TFDecl.create('decl-a', 'harv-fake');
-      const b = window.TFDecl.create('decl-b', 'harv-fake');
-      window.TFDecl.addResource(a.id, 'vm');
-      window.TFDecl.addResource(b.id, 'ssh_key');
-      window.TF.refresh();
-      window.TFDeclPanel.open(a.id);
-      window.TFDeclPanel.open(b.id);
-    }""")
-    page.wait_for_timeout(300)
-    panels = page.evaluate(
-        "document.querySelectorAll('.floating-panel').length")
-    assert panels == 2, panels
-
-
-def test_decl_destroy_button_visible_on_each_declaration_row(page):
-    """v1.5.1: every declaration row carries a Destroy button — a
-    real cluster-side teardown, distinct from the local-delete."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      window.TFDecl.create('destroy-target', 'harv-fake');
-      window.TF.refresh();
-    }""")
-    page.wait_for_timeout(300)
-    expect(page.locator('.tf-decl-destroy')).to_have_count(1)
-    expect(page.locator('.tf-decl-delete')).to_have_count(1)
-
-
-def test_decl_destroy_opens_typed_confirm_modal(page):
-    """v1.5.2: Destroy on a declaration must NOT trigger via a
-    one-click confirm(). It opens a typed-confirmation modal where
-    the user has to type the declaration's exact name before the
-    Destroy button is enabled."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      window.TFDecl.create('dangerous-decl', 'harv-fake');
-      window.TFDecl.addResource(window.TFDecl.getActive().id, 'vm');
-      window.TF.refresh();
-    }""")
-    page.wait_for_timeout(300)
-    # Track fetch calls; nothing should hit destroy_declaration until
-    # the user types the name and clicks Confirm.
-    page.evaluate("""() => {
-      window.__fetchTrace = [];
-      const orig = window.fetch;
-      window.fetch = (url, init) => {
-        window.__fetchTrace.push({url: String(url), method: init?.method || 'GET'});
-        return orig(url, init);
-      };
-    }""")
-
-    page.click('.tf-decl-destroy')
-    page.wait_for_selector('.tf-confirm-modal', timeout=2000)
-    # The required text is the declaration name
-    required = page.evaluate(
-        "document.querySelector('.tf-confirm-required').textContent.trim()")
-    assert required == "dangerous-decl"
-    # Confirm button starts DISABLED
-    assert page.evaluate(
-        "document.querySelector('.tf-confirm-go').disabled") is True
-
-    # Typing the wrong name keeps it disabled
-    page.fill('.tf-confirm-input', 'wrong')
-    page.wait_for_timeout(100)
-    assert page.evaluate(
-        "document.querySelector('.tf-confirm-go').disabled") is True
-
-    # Typing the exact name enables it
-    page.fill('.tf-confirm-input', 'dangerous-decl')
-    page.wait_for_timeout(100)
-    assert page.evaluate(
-        "document.querySelector('.tf-confirm-go').disabled") is False
-
-    # No destroy_declaration request has been made yet
-    trace = page.evaluate("window.__fetchTrace")
-    assert not any('destroy_declaration' in c['url'] for c in trace), trace
-
-
-def test_decl_destroy_cancel_closes_modal_without_action(page):
-    """Cancel button + Escape both close the modal and fire NO
-    destroy_declaration request."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      window.TFDecl.create('cancel-test', 'harv-fake');
-      window.TFDecl.addResource(window.TFDecl.getActive().id, 'vm');
-      window.TF.refresh();
-      window.__fetchTrace = [];
-      const orig = window.fetch;
-      window.fetch = (url, init) => {
-        window.__fetchTrace.push({url: String(url), method: init?.method || 'GET'});
-        return orig(url, init);
-      };
-    }""")
-    page.wait_for_timeout(300)
-    page.click('.tf-decl-destroy')
-    page.wait_for_selector('.tf-confirm-modal', timeout=2000)
-    page.click('.tf-confirm-cancel:not(.btn-close)')
-    page.wait_for_timeout(150)
-    assert page.locator('.tf-confirm-modal').count() == 0
-    trace = page.evaluate("window.__fetchTrace")
-    assert not any('destroy_declaration' in c['url'] for c in trace)
-
-
 def test_state_table_shows_edit_button_only_when_sidecar_present(page):
     """v1.5.3: a deployed resource WITH a sidecar gets an Edit button; without
     one it shows the "no sidecar" hint. We force both cases by
@@ -1024,175 +718,46 @@ def test_state_table_shows_edit_button_only_when_sidecar_present(page):
     assert addr == "harvester_virtualmachine.alpha"
 
 
-def test_clicking_edit_imports_sidecar_into_new_declaration(page):
-    """Click Edit → fetch sidecar → create "Edit <addr>" declaration → set
-    active → render card with the resource's kind."""
-    _open_terraform(page)
-    # No existing declarations
-    assert page.evaluate("window.TFDecl.list().length") == 0
-    # Await the refresh so we know any background refreshes are settled
-    # AND the stubbed render is the last one to land in the DOM.
-    page.evaluate("""async () => {
-      const orig = window.fetch;
-      window.fetch = (url, init) => {
-        const u = String(url);
-        if (u.endsWith('/state')) {
-          return Promise.resolve(new Response(JSON.stringify({
-            initialized: true, workspace: '/tmp/ws',
-            resources: ['harvester_virtualmachine.deployed_vm'],
-            resources_detail: [{
-              address: 'harvester_virtualmachine.deployed_vm',
-              local_name: 'deployed_vm', has_sidecar: true, kind: 'vm',
-              declaration_name: 'lab-prod',
-            }],
-            resource_count: 1,
-          }), { status: 200 }));
-        }
-        if (u.includes('/sidecar/deployed_vm')) {
-          return Promise.resolve(new Response(JSON.stringify({
-            kind: 'vm',
-            spec: { name: 'deployed_vm', cpu: 8, memory: '32Gi',
-                    disk: [{image: 'default/img-x', size: '50Gi'}],
-                    network_interface: [{network_name: 'default/mgmt'}] },
-            declaration_name: 'lab-prod',
-            written_at: '2026-06-03T14:00:00Z',
-            schema_version: 1,
-          }), { status: 200 }));
-        }
-        return orig(url, init);
-      };
-      await window.TF.refresh();
-    }""")
-    # Switch to the Live resources sub-tab so the button is clickable
-    page.click('#tf-status-body .sub-tab[data-tf-tab="live"]')
-    page.wait_for_timeout(150)
-    page.click('.tf-edit-resource')
-    page.wait_for_timeout(500)
-    # A new declaration appeared, contains the imported resource
-    decls = page.evaluate("window.TFDecl.list()")
-    assert len(decls) == 1, decls
-    decl = decls[0]
-    assert len(decl["resources"]) == 1
-    r = decl["resources"][0]
-    assert r["kind"] == "vm"
-    assert r["spec"]["name"] == "deployed_vm"
-    assert r["spec"]["cpu"] == 8
-    assert r["spec"]["disk"][0]["image"] == "default/img-x"
-    # The new declaration is the active one
-    active = page.evaluate("window.TFDecl.getActive()?.id")
-    assert active == decl["id"]
-
-
-def test_decl_destroy_button_distinct_from_delete(page):
-    """Visual / class guard so the two buttons can't be merged in a
-    drive-by refactor — they have very different consequences."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      window.TFDecl.create('classes', 'harv-fake');
-      window.TF.refresh();
-    }""")
-    page.wait_for_timeout(300)
-    destroy_class = page.evaluate(
-        "document.querySelector('.tf-decl-destroy').className")
-    delete_class = page.evaluate(
-        "document.querySelector('.tf-decl-delete').className")
-    assert destroy_class != delete_class
-    # Destroy is btn-danger to flag its severity
-    assert "btn-danger" in destroy_class
-
-
-def test_decl_remove_resource_clears_card(page):
-    """Removing a resource via the trash button drops the card."""
-    _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('remove-test', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TFDecl.addResource(d.id, 'ssh_key');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-dp-resitem', timeout=3000)
-    # The decl panel lists 2 resources on the left
-    expect(page.locator('.tf-dp-resitem')).to_have_count(2)
-    # Stub confirm to always accept; then click the trash on the
-    # currently-active resource (which is the card's __del button).
-    page.evaluate("window.confirm = () => true")
-    page.click('.tf-resource-card .tf-resource-card__del')
-    page.wait_for_timeout(250)
-    expect(page.locator('.tf-dp-resitem')).to_have_count(1)
+def _open_editor(page, name, kind="vm"):
+    """v1.55.0 : une déclaration, une ressource, son formulaire dans la vue."""
+    page.evaluate(f"""async () => {{
+      const d = await window.TFDecl.createAsync('{name}', 'harv-fake');
+      window.TFDecl.setActive(d.id);
+      window.TFDeclView.render();
+    }}""")
+    page.click(f'.tfd-add-kind[data-kind="{kind}"]')
+    page.wait_for_selector('.tfd-edit .tfd-sec', timeout=5000)
 
 
 def test_terraform_add_kind_selector_lists_every_schema_entry(page):
-    """v1.5.5 successor: the kind dropdown lives inside the declaration
-    overlay (.tf-dp-add-kind). It must expose every TF_SCHEMA kind."""
+    """Les boutons « Ajouter » de la vue proposent chaque type du schéma."""
     _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('kind-test', 'harv-fake');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-dp-add-kind', timeout=5000)
+    page.evaluate("""async () => { const d = await window.TFDecl.createAsync('kind-test', 'harv-fake');
+      window.TFDecl.setActive(d.id); window.TFDeclView.render(); }""")
+    page.wait_for_selector('.tfd-add-kind', timeout=5000)
     schema_kinds = page.evaluate("Object.keys(window.TF_SCHEMA || {})")
-    dropdown_kinds = page.evaluate(
-        "Array.from(document.querySelector('.tf-dp-add-kind').options)"
-        ".map(o => o.value)"
-    )
-    assert sorted(schema_kinds) == sorted(dropdown_kinds), (
-        f"add-kind selector out of sync with TF_SCHEMA: "
-        f"schema={schema_kinds}, dropdown={dropdown_kinds}"
-    )
+    offered = page.evaluate("Array.from(document.querySelectorAll('.tfd-add-kind')).map(b => b.dataset.kind)")
+    assert sorted(schema_kinds) == sorted(offered), (schema_kinds, offered)
 
 
-def test_terraform_cloudinit_section_overlay_renders_block_by_default(page):
-    """v1.4.38 invariant: opening the Cloud-init section overlay must
-    render the nested cloudinit block (min:1) without a manual +Add."""
+def test_terraform_cloudinit_section_renders_block_by_default(page):
+    """v1.4.38 invariant: the cloud-init block (min:1) is there without a
+    manual +Add (in the view's form since v1.55.0)."""
     _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('ci-test', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-section-btn[data-section="cloudinit"]',
-                           timeout=3000)
-    page.click('.tf-section-btn[data-section="cloudinit"]')
-    page.wait_for_timeout(300)
-    items = page.evaluate(
-        "document.querySelectorAll("
-        "  '.floating-panel .tf-block[data-block=\"cloudinit\"] "
-        ".tf-block-item').length"
-    )
-    assert items >= 1, f"expected ≥1 cloud-init item in the overlay, got {items}"
+    _open_editor(page, "ci-test")
+    items = page.locator('.tfd-sec[data-sec="cloudinit"] .tf-block[data-block="cloudinit"] .tf-block-item').count()
+    assert items >= 1, f"expected at least one cloud-init item, got {items}"
 
 
-def test_terraform_add_disk_in_section_overlay_renders_extra_block(page):
-    """+Add disk inside the Disks section overlay appends a new block."""
+def test_terraform_add_disk_in_section_renders_extra_block(page):
+    """+Add disk inside the Disks section appends a new block."""
     _open_terraform(page)
-    page.evaluate("""() => {
-      const d = window.TFDecl.create('disk-test', 'harv-fake');
-      window.TFDecl.addResource(d.id, 'vm');
-      window.TF.refresh();
-      window.TFDeclPanel.open(d.id);
-    }""")
-    page.wait_for_selector('.tf-section-btn[data-section="disks"]',
-                           timeout=3000)
-    page.click('.tf-section-btn[data-section="disks"]')
-    page.wait_for_timeout(300)
-    before = page.evaluate(
-        "document.querySelectorAll("
-        "  '.floating-panel .tf-block[data-block=\"disk\"] "
-        ".tf-block-item').length"
-    )
-    page.click('.floating-panel .tf-block[data-block="disk"] .tf-block-add')
+    _open_editor(page, "disk-test")
+    sel = '.tfd-sec[data-sec="disks"] .tf-block[data-block="disk"] .tf-block-item'
+    before = page.locator(sel).count()
+    page.click('.tfd-sec[data-sec="disks"] .tf-block[data-block="disk"] .tf-block-add')
     page.wait_for_timeout(200)
-    after = page.evaluate(
-        "document.querySelectorAll("
-        "  '.floating-panel .tf-block[data-block=\"disk\"] "
-        ".tf-block-item').length"
-    )
-    assert after == before + 1, (
-        f"+Add disk in overlay did not append: before={before} after={after}"
-    )
+    assert page.locator(sel).count() == before + 1
 
 
 def test_automation_header_tabs_centered(page):

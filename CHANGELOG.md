@@ -4,6 +4,53 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.55.0] - 2026-09-26 - The Terraform tab redone: one view, a plan read before applying
+
+### Changed
+- **One view instead of stacked windows**: the list of declarations on the
+  left, with the state of each (never applied, up to date, N to apply,
+  changed, error); the chosen declaration on the right, renamed in place
+  and described, with three tabs: Resources (a card per resource with its
+  summary, Terraform address and state: to create, deployed, settings to
+  change, to replace, removed and destroyed at the next apply, incomplete),
+  Code (the Terraform code produced, file by file, and an export as .tf),
+  History (plans, applies and destructions, who and what).
+- **Forms in the view**, section after section, with a check as you type;
+  saving touches nothing on the cluster.
+- **A plan read before applying**: resource by resource and setting by
+  setting (before and after), replacements explained, sensitive values
+  masked. "Apply this plan" applies exactly the reviewed plan; the console
+  refuses it if the declaration changed since.
+- **The whole tab speaks the five languages**, the resource forms
+  included: readable labels, the Terraform name in small print and a
+  tooltip on every field (they showed raw Terraform names, in English or
+  French only).
+- The cluster resources tab says which declaration manages each resource
+  and opens it; a resource of the shared workspace is adopted into a
+  declaration and opened in its form.
+- "Destroy everything" opens its log like the other destructions.
+
+### Removed
+- The declaration windows and section windows (`tf-decl-panel.js`,
+  `tf-sections.js`), replaced by the view.
+
+### Fixed
+- Error messages of the Terraform tab were inserted into the page without
+  escaping.
+
+### Tests
+- The view in a browser: creation and a duplicate name refused, one click
+  one resource and its form, rename, code, the plan window and applying
+  the reviewed plan with its fingerprint, a failed plan, destroy with the
+  name typed, deletion off while deployed, history, adoption from the
+  cluster resources tab, English; the schema in five languages; the code
+  and history routes.
+- Real, on harv1, by clicks only: a declaration created, a key and a VM
+  added through the forms, planned and applied, renamed, the VM memory
+  changed (the plan showed before and after, applied through "Apply" on
+  the reviewed plan), a key removed and destroyed by the apply, history,
+  destroy and deletion.
+
 ## [1.54.0] - 2026-09-26 - Terraform declarations kept by the console, one state each
 
 ### Added

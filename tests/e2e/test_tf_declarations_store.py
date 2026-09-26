@@ -39,14 +39,14 @@ def open_decls(page):
     page.wait_for_function("window.TFDecl && window.TF")
     page.evaluate("window.TFDecl.ready")
     page.evaluate("document.querySelector('.tab-child[data-subtab=terraform]')?.click()")
-    page.wait_for_selector("#tf-decl-list", timeout=8000)
+    page.wait_for_selector("#tf-decls-view .tfd", timeout=8000)
 
 
 def test_declarations_left_in_the_browser_move_to_the_console(page):
     clean(page)
     page.evaluate(f"localStorage.setItem('harvester_ops_tf_declarations', {json.dumps(json.dumps(LEGACY))})")
     open_decls(page)
-    expect(page.locator(".tf-decl-item__name", has_text="from-the-browser")).to_be_visible(timeout=8000)
+    expect(page.locator(".tfd-card", has_text="from-the-browser")).to_be_visible(timeout=8000)
     decls = server_decls(page)
     assert [d["name"] for d in decls] == ["from-the-browser"]
     assert decls[0]["id"] == "a1a1a1a1a1a1" and decls[0]["resources"][0]["kind"] == "ssh_key"
@@ -65,22 +65,25 @@ def test_rename_in_place_and_duplicates_refused(page):
     open_decls(page)
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
-    row = page.locator(".tf-decl-item", has_text="web")
-    btn = row.locator(".tf-decl-rename-btn")
+    page.locator(".tfd-card", has_text="web").click()
+    btn = page.locator(".tfd-rename")
     assert btn.get_attribute("data-tip")
     btn.click()
-    field = page.locator("input.tf-decl-rename")
+    field = page.locator("input.tfd-name-input")
     field.fill("web-2026")
     field.press("Enter")
-    expect(page.locator(".tf-decl-item__name", has_text="web-2026")).to_be_visible(timeout=5000)
+    expect(page.locator(".tfd-name")).to_have_text("web-2026", timeout=5000)
+    page.wait_for_timeout(400)
     assert sorted(d["name"] for d in server_decls(page)) == ["db", "web-2026"]
     # un nom déjà pris est refusé par la console, et dit
-    page.locator(".tf-decl-item", has_text="db").locator(".tf-decl-rename-btn").click()
-    page.locator("input.tf-decl-rename").fill("WEB-2026")
-    page.locator("input.tf-decl-rename").press("Enter")
+    page.locator(".tfd-card", has_text="db").click()
+    page.locator(".tfd-rename").click()
+    page.locator("input.tfd-name-input").fill("WEB-2026")
+    page.locator("input.tfd-name-input").press("Enter")
     page.wait_for_timeout(800)
     assert any("existe déjà" in m or "already exists" in m for m in dialogs), dialogs
     assert sorted(d["name"] for d in server_decls(page)) == ["db", "web-2026"]
+    expect(page.locator(".tfd-name")).to_have_text("db")
     clean(page)
 
 

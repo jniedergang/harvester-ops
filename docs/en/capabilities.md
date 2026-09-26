@@ -614,29 +614,44 @@ API, through the Cluster API add-on provider for Helm (CAAPH v0.6.4):
 
 Drive the Terraform provider for Harvester from saved declarations.
 
-- **Declarations** — named, persisted bundles of N heterogeneous
-  resources (VMs, VM images, SSH keys, raw HCL), edited section by section
-  (Specs / Disks / Networks / Cloud-init) and applied in one shot.
-- **Kept by the console, one Terraform state each (1.54.0)**: declarations
-  are stored by the console (shared between operators, backed up with it),
-  no longer in each browser; those left in a browser are imported at the
-  first visit. A declaration can be renamed in place (the name is unique in
-  the cluster; neither the Terraform state nor the resources move). Each
-  declaration has its own Terraform state: applying it only touches its
-  resources. Resources applied before 1.54 are taken over from the shared
-  state at the first plan, without being recreated. A resource removed from
-  a declaration is destroyed by its next apply (the plan says so); a
-  resource destroyed on its own from the live view leaves its declaration.
-  A declaration with deployed resources cannot be deleted. Two operators
-  editing the same declaration do not overwrite each other: the later one
-  is told and sees the current version.
-- **Apply / destroy** with live plan and apply streaming; typed-confirm
-  modal on every destroy entry point. A destroyed VM takes its disks with
-  it unless "delete this disk when the VM is destroyed" is unchecked on the
-  disk (1.52.1).
-- **Edit deployed resources** — each applied resource writes a sidecar
-  JSON so its original spec can be reloaded and edited from the Live
-  sub-tab.
+- **Declarations**: named groups of resources (VMs, VM images, SSH keys,
+  Terraform code written by hand) applied together, each with its own
+  Terraform state (1.54.0). They are kept by the console (shared between
+  operators, backed up with it); those a browser still held are imported at
+  the first visit.
+- **One view (1.55.0)**: the list of declarations on the left, each with its
+  state (never applied, up to date, N to apply, changed, error); the chosen
+  declaration on the right, renamed in place (the name is unique in the
+  cluster, nothing deployed moves) and described. Three tabs:
+  - **Resources**: one card per resource with its summary, its Terraform
+    address and its state (to create, deployed, N settings to change, to
+    replace, removed and destroyed at the next apply, incomplete);
+  - **Code**: the Terraform code the declaration produces, file by file,
+    and an export as `.tf`;
+  - **History**: its plans, applies and destructions, who ran them and
+    what changed.
+- **Forms in the view**: a resource opens section by section (General,
+  Disks, Networks, First boot for a VM) with readable labels in the five
+  languages, the Terraform name in small print and a tooltip on every
+  field, and a check as you type. Saving does not touch the cluster.
+- **A plan read before applying**: "Preview the plan" computes, on this
+  declaration only, what would be created, changed (setting by setting,
+  before and after), replaced (and why) or destroyed, sensitive values
+  masked. "Apply this plan" applies exactly that plan; if the declaration
+  changed since, the console refuses and asks for a new plan. The last
+  plan stays available from the "Apply" button.
+- A resource removed from a declaration is destroyed by its next apply
+  (the plan says so); a resource destroyed on its own from the cluster
+  resources tab leaves its declaration. Destroying a declaration asks for
+  its name to be typed; a declaration with deployed resources cannot be
+  deleted. Two operators editing the same declaration do not overwrite
+  each other: the later one is told and sees the current version.
+- A destroyed VM takes its disks with it unless "delete with the VM" is
+  unchecked on the disk (1.52.1).
+- **Cluster resources**: everything Terraform manages on the cluster,
+  declaration by declaration; a resource of the shared workspace (applied
+  before 1.54) can be adopted into a declaration, which takes it over at
+  its next plan without recreating it.
 - **Provider updates from the console**: install a different build of
   `terraform-provider-harvester` without shell access to the host. Give a
   version (the official release is downloaded and checked against the

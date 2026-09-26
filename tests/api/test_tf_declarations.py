@@ -250,3 +250,33 @@ def test_the_routes_take_a_declaration_by_its_id_alone(api):
     status, out = api("POST", "/api/terraform/harv-fake/apply_declaration", expect_status=None,
                       json_body={"declaration": {"id": "f" * 12}, "dry_run": True})
     assert status == 404
+
+
+def test_code_history_and_fingerprint(api):
+    """v1.55.0 : l'onglet Code, l'historique, l'empreinte du contenu."""
+    import time
+    status, d = api("POST", "/api/tf-declarations", expect_status=None,
+                    json_body={"cluster": "harv-fake", "name": "code-hist", "resources": [sshkey("8" * 12, "ops")]})
+    assert d["content_hash"] and d["incomplete"] == []
+    status, code = api("GET", f"/api/tf-declarations/{d['id']}/code")
+    names = [f["name"] for f in code["files"]]
+    assert names == ["_providers.tf", "ops.tf"]
+    ops = code["files"][1]
+    assert 'resource "harvester_ssh_key" "ops"' in ops["content"] and ops["address"] == "harvester_ssh_key.ops"
+    assert "required_providers" not in ops["content"]                  # l'en-tête n'est qu'une fois
+    status, out = api("POST", "/api/terraform/harv-fake/apply_declaration", expect_status=None,
+                      json_body={"declaration": {"id": d["id"]}, "dry_run": True})
+    assert status == 201
+    for _ in range(40):
+        status, h = api("GET", f"/api/tf-declarations/{d['id']}/history")
+        if h["runs"] and h["runs"][0]["status"] not in ("running", "starting"):
+            break
+        time.sleep(0.5)
+    run = h["runs"][0]
+    assert run["id"] == out["action_id"] and run["mode"] == "plan"
+    # une ressource incomplète : pas d'empreinte, le rang de la ressource dit
+    status, r = api("PUT", f"/api/tf-declarations/{d['id']}", expect_status=None,
+                    json_body={"revision": d["revision"], "resources": [{"id": "9" * 12, "kind": "vm", "spec": {}}]})
+    assert r["content_hash"] is None and r["incomplete"] == [0]
+    assert api("GET", "/api/tf-declarations/zzz/history", expect_status=None)[0] == 400
+    api("DELETE", f"/api/tf-declarations/{d['id']}")

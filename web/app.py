@@ -13209,6 +13209,63 @@ def api_tf_declaration_update(decl_id):
     return jsonify(_tf_decl_view(d))
 
 
+@app.route("/api/tf-declarations/<decl_id>/code")
+@requires_auth
+def api_tf_declaration_code(decl_id):
+    """Le code Terraform que la déclaration produit, fichier par fichier
+    (onglet Code, export en .tf)."""
+    d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
+    if d is None:
+        return jsonify({"error": "declaration not found"}), 404
+    rendered, errors = _tf_render_resources(d["resources"])
+    files = [{"name": "_providers.tf", "content": _TF_HEADER}]
+    for safe, kind, spec, hcl, addr, i in rendered:
+        body = hcl[len(_TF_HEADER):] if hcl.startswith(_TF_HEADER) else hcl
+        files.append({"name": f"{safe}.tf", "content": body, "address": addr,
+                      "resource_id": d["resources"][i]["id"]})
+    return jsonify({"files": files, "errors": errors})
+
+
+@app.route("/api/tf-declarations/<decl_id>/history")
+@requires_auth
+def api_tf_declaration_history(decl_id):
+    """Les plans, applies et destructions de la déclaration, du plus récent
+    au plus ancien (actions en cours comprises)."""
+    if not _tf_decl_id_ok(decl_id):
+        return jsonify({"error": "invalid declaration id"}), 400
+    runs = {}
+    try:
+        conn = sqlite3.connect(str(ACTIONS_DB))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT id, action, status, started_at, ended_at, dry_run, error_summary, result "
+            "FROM actions WHERE result LIKE ? ORDER BY started_at DESC LIMIT 100",
+            (f'%"declaration_id": "{decl_id}"%',)).fetchall()
+        conn.close()
+    except sqlite3.Error:
+        rows = []
+    for r in rows:
+        try:
+            res = json.loads(r["result"] or "{}")
+        except ValueError:
+            res = {}
+        runs[r["id"]] = {"id": r["id"], "action": r["action"], "status": r["status"],
+                         "started_at": r["started_at"], "ended_at": r["ended_at"],
+                         "dry_run": bool(r["dry_run"]), "error_summary": r["error_summary"],
+                         "mode": res.get("mode"), "by": res.get("by"),
+                         "counts": ((res.get("plan") or {}).get("counts"))}
+    with ACTIONS_LOCK:
+        live = [a for a in ACTIONS.values() if (a.result or {}).get("declaration_id") == decl_id]
+    for a in live:
+        res = a.result or {}
+        runs[a.id] = {"id": a.id, "action": a.action, "status": a.status, "started_at": a.started_at,
+                      "ended_at": a.ended_at, "dry_run": bool(a.dry_run), "error_summary": a.error_summary,
+                      "mode": res.get("mode"), "by": res.get("by"),
+                      "counts": ((res.get("plan") or {}).get("counts"))}
+    out = sorted(runs.values(), key=lambda x: x["started_at"] or 0, reverse=True)
+    return jsonify({"runs": out[:100]})
+
+
 @app.route("/api/tf-declarations/<decl_id>", methods=["DELETE"])
 @requires_auth
 @_rate_limit("60/minute")
@@ -13501,6 +13558,11 @@ def _tf_decl_view(decl):
     d = dict(decl)
     addr = _tf_decl_resource_addresses(decl)
     d["resources"] = [dict(r, address=addr.get(r["id"])) for r in decl.get("resources") or []]
+    rendered, errors = _tf_render_resources(decl.get("resources") or [])
+    # v1.55.0 : l'empreinte du contenu, pour que la page sache si le
+    # dernier plan vaut encore pour ce qui est écrit.
+    d["content_hash"] = _tf_decl_hash(rendered) if not errors else None
+    d["incomplete"] = [e["index"] for e in errors]
     ws = None
     try:
         ws = _tf_decl_workspace_dir(decl["cluster"], decl["id"], create=False)
@@ -13546,6 +13608,8 @@ def _tf_decl_start(cluster, kc, decl_id, mode, plan_hash=None):
                     dry_run=mode in ("plan", "destroy-plan"))
     run.cluster_user = (current_cluster_identity() or {}).get("user")
     user = current_user() or ""
+    # v1.55.0 : l'historique d'une déclaration retrouve ses actions par là.
+    run.result = {"declaration_id": decl["id"], "by": user, "mode": mode}
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
     threading.Thread(target=_tf_decl_runner,
@@ -13565,7 +13629,7 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
         run.emit({"type": "log", "stream": "stdout", "message": msg[:200], "ts": time.time()})
 
     def done(result=None):
-        run.result = result or {}
+        run.result = dict(run.result or {}, **(result or {}))
         run.exit_code = 0; run.status = "done"; run.ended_at = time.time()
         run.emit({"type": "status", "status": "done", "exit_code": 0, "ts": time.time()})
         run.close()

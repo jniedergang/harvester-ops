@@ -72,8 +72,11 @@ const TFForm = (() => {
       ? ` data-required-field="${esc(rw.field)}" data-required-equals="${esc(rw.equals)}"`
       : '';
     // v1.8.0: optional bilingual label per arg; raw name stays the fallback
+    // v1.55.0 : un libellé lisible dans les cinq langues, et le nom
+    // Terraform en petit pour qui le cherche (audit D14).
     const labelText = arg.label ? t(arg.label) : arg.name;
-    const labelHtml = `<label for="${id}" class="tf-label tip"${tip}>${esc(labelText)}${req}</label>`;
+    const rawName = arg.label ? ` <span class="tf-argname">${esc(arg.name)}</span>` : '';
+    const labelHtml = `<label for="${id}" class="tf-label tip"${tip || ` data-tip="${esc(labelText)}"`}>${esc(labelText)}${req}${rawName}</label>`;
 
     let control = '';
     switch (arg.type) {

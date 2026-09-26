@@ -1,6 +1,6 @@
 # Déclarations Terraform : gardées par la console, un état chacune
 
-État : livré en v1.54.0 (moteur), interface refaite ensuite. 26/09/2026.
+État : moteur livré en v1.54.0, interface en v1.55.0. 26/09/2026.
 
 ## Pourquoi
 
@@ -56,7 +56,7 @@ déclaration**, **déclarations gardées par la console**.
   recréait, audit D8).
 - **Supprimer une déclaration** : refusé tant que son état contient des
   ressources déployées ; sinon sa ligne et son espace disparaissent.
-- **Tout détruire** (onglet Installation) : l'espace partagé et l'état de
+- **Tout détruire** (onglet des ressources du cluster) : l'espace partagé et l'état de
   chaque déclaration du cluster.
 - **Reprise des déclarations du navigateur** : à la première visite, celles
   que le localStorage garde encore partent à la console avec leur
@@ -74,6 +74,11 @@ déclaration**, **déclarations gardées par la console**.
   `{declaration: {id}}`. Sans identifiant, l'ancien comportement (état
   partagé) reste pour les clients de l'API qui s'en servent.
 - `destroy_resource` accepte `declaration_id`.
+- v1.55.0 : `GET /api/tf-declarations/<id>/code` (le code produit, fichier par
+  fichier) et `GET /api/tf-declarations/<id>/history` (ses actions, en cours
+  comprises ; chaque action d'une déclaration porte son identifiant, son
+  auteur et son mode dans son résultat). La vue d'une déclaration porte
+  aussi l'empreinte de son contenu (`content_hash`).
 
 ## Essai réel (harv1, 26/09/2026)
 
@@ -86,3 +91,36 @@ l'unité, sortie de sa déclaration, son disque parti ; suppression refusée
 tant qu'une clé était déployée, puis destruction et suppression, espaces
 effacés. L'essai a attrapé un défaut que les tests ne voyaient pas : la
 route refusait une déclaration envoyée par son seul identifiant.
+
+## L'interface (v1.55.0)
+
+D'après la maquette validée par l'exploitant (« Onglet Terraform,
+proposition ») :
+
+- **Une vue au lieu de fenêtres empilées** (une par déclaration, puis une par
+  section) : la liste à gauche, la déclaration choisie à droite, onglets
+  Ressources, Code, Historique ; les formulaires s'ouvrent dans la vue,
+  toutes les sections à la suite, avec un contrôle pendant la saisie.
+- **États** : d'une déclaration (jamais appliquée, à jour, N à appliquer,
+  modifiée depuis l'apply, erreur) et de chaque ressource (à créer,
+  déployée, N réglages à changer ou à remplacer d'après le dernier plan
+  encore valable, retirée donc détruite au prochain apply, incomplète).
+- **Le plan se lit avant d'appliquer** : fenêtre de plan, ressource par
+  ressource et réglage par réglage ; « Appliquer ce plan » envoie son
+  empreinte, la console refuse s'il ne vaut plus. Le bouton « Appliquer »
+  rouvre le dernier plan tant qu'il vaut pour le contenu écrit.
+- **Cinq langues partout**, le schéma compris : libellés lisibles, nom
+  Terraform en petit, bulle d'aide sur chaque champ (audit D14, D15).
+- Détruire tout ouvre le journal (D11) ; une ressource de l'espace partagé
+  s'adopte dans une déclaration depuis l'onglet des ressources du cluster.
+
+### Essai réel (harv1)
+
+Par les seuls clics : déclaration créée par le bouton, une clé et une VM
+ajoutées par les formulaires (contrôle vert), plan lisible « 2 à créer »,
+plan appliqué, VM et clé sur le cluster ; renommée sans rien toucher ;
+mémoire passée de 1 à 2 Gio, le plan l'a montrée avant et après, appliquée
+par le bouton « Appliquer » sur le plan relu, 2Gi lu sur la VM ; clé retirée,
+plan « 1 à détruire », clé détruite ; historique des six passages ;
+destruction par confirmation tapée, VM et disque partis ; déclaration
+supprimée.

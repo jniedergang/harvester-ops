@@ -140,21 +140,18 @@ def test_index_html_loads_tf_declarations_and_tf_sections():
     html = (ROOT / "web" / "templates" / "index.html").read_text()
     s_idx = html.find('src="/static/js/tf-schema.js"')
     d_idx = html.find('src="/static/js/tf-declarations.js"')
-    sec_idx = html.find('src="/static/js/tf-sections.js"')
+    v_idx = html.find('src="/static/js/tf-decl-view.js"')
     t_idx = html.find('src="/static/js/terraform.js"')
-    assert d_idx > 0 and sec_idx > 0
+    assert d_idx > 0 and v_idx > 0
     assert s_idx < d_idx, "tf-schema.js must load BEFORE tf-declarations.js"
-    assert d_idx < t_idx and sec_idx < t_idx, (
-        "tf-declarations.js and tf-sections.js must load BEFORE terraform.js"
+    assert d_idx < v_idx < t_idx, (
+        "tf-declarations.js, then tf-decl-view.js, must load BEFORE terraform.js"
     )
 
 
-def test_index_html_loads_tf_decl_panel():
-    """v1.5.5: tf-decl-panel.js exposes window.TFDeclPanel; terraform.js
-    calls .open() to surface the declaration overlay. Must load before
-    terraform.js."""
+def test_the_stacked_declaration_windows_are_gone():
+    """v1.55.0 : la vue des déclarations remplace les fenêtres empilées
+    (une par déclaration, une par section)."""
     html = (ROOT / "web" / "templates" / "index.html").read_text()
-    p_idx = html.find('src="/static/js/tf-decl-panel.js"')
-    t_idx = html.find('src="/static/js/terraform.js"')
-    assert p_idx > 0, "tf-decl-panel.js <script> missing from index.html"
-    assert p_idx < t_idx, "tf-decl-panel.js must load BEFORE terraform.js"
+    assert "tf-decl-panel.js" not in html and "tf-sections.js" not in html
+    assert not (ROOT / "web" / "static" / "js" / "tf-decl-panel.js").exists()

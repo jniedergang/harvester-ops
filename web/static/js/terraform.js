@@ -1,24 +1,11 @@
 /**
- * harvester-ops — Terraform tab (v1.5.0)
+ * harvester-ops : l'onglet Terraform.
  *
- * Resource creation is now organised as *Declarations* (named bundles of
- * mixed resources). The UI is a 2-level tree:
- *
- *   1) Declarations list  (top of the tab)
- *      Each row: name • #resources • last status • Open / Apply / Delete
- *
- *   2) Active declaration view  (under the list)
- *      Each resource is a card carrying one button per "section" of its
- *      schema (Specs, Disks, Networks, Cloud-init, …). Click → overlay
- *      with the section's form (FloatingPanel). Save → button colour
- *      tracks validation state (✓ green / ! red / · grey).
- *
- *      Apply on the whole declaration: posts /api/terraform/<c>/apply_declaration.
- *      Dry-run / Apply both stream into the same SSE overlay we already had.
- *
- * Backward compat: the legacy single-resource POST /apply endpoint stays
- * intact (used by the tests). The "raw HCL" flow is just a 1-section
- * resource inside a declaration.
+ * Trois sous-onglets : Déclarations (la vue TFDeclView, v1.55.0 : liste,
+ * déclaration choisie, plan lisible avant d'appliquer), Ressources du
+ * cluster (tout ce que Terraform gère ici, déclaration par déclaration) et
+ * Installation (CLI, provider, paquet airgap). Les déclarations sont gardées
+ * par la console et ont chacune leur état Terraform (v1.54.0).
  */
 const TF = (() => {
   const $  = (s) => document.querySelector(s);
@@ -71,7 +58,7 @@ const TF = (() => {
     try { info = await fetch('/api/terraform/info').then(r => r.json()); }
     catch (e) {
       if (myRev !== _refreshRev) return;
-      out.innerHTML = `<div class="summary-bar bad">${e.message}</div>`;
+      out.innerHTML = `<div class="summary-bar bad">${esc(e.message)}</div>`;
       return;
     }
     let state = { initialized: false, resources: [], resources_detail: [],
@@ -86,7 +73,7 @@ const TF = (() => {
     if (myRev !== _refreshRev) return;
 
     out.innerHTML = renderShell(info, state, cluster);
-    renderDeclarations(cluster);
+    if (window.TFDeclView) TFDeclView.mount($('#tf-decls-view'), cluster);
     activateSubtab(getSavedSubtab());
   }
 
@@ -110,15 +97,14 @@ const TF = (() => {
   }
 
   function renderShell(info, state, cluster) {
-    const tfOk = info.terraform_available;
+    const tfOk = !!info.terraform_available;
     const provOk = !!info.provider_binary;
-    const summary = (tfOk && provOk)
-      ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Terraform <code>${info.terraform_bin}</code> ·
-         provider <code>${info.provider_version}</code> ·
-         ${state.initialized ? state.resource_count + ' resource(s) in state'
-                             : 'workspace not initialized'}</div>`
-      : `<div class="summary-bar warn">${Icons.svg('warn', { size: 14 })} ${tfOk ? '' : 'terraform CLI missing — '}${
-            provOk ? '' : 'provider binary missing'}</div>`;
+    const summary = tfOk && provOk
+      ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${esc(i18n.t('tf.ui.ready', {
+          flavor: info.terraform_flavor === 'opentofu' ? 'OpenTofu' : 'Terraform',
+          version: String(info.provider_version || '').replace(/^v/, '') }))}</div>`
+      : `<div class="summary-bar warn">${Icons.svg('warn', { size: 14 })} ${esc([
+          tfOk ? '' : i18n.t('tf.ui.cliMissing'), provOk ? '' : i18n.t('tf.ui.provMissing')].filter(Boolean).join(' '))}</div>`;
     // v1.5.3: prefer `resources_detail` (carries has_sidecar + kind);
     // fall back to bare addresses for older API responses.
     const detail = Array.isArray(state.resources_detail)
@@ -127,90 +113,83 @@ const TF = (() => {
                                                 local_name: (addr.split('.')[1] || ''),
                                                 has_sidecar: false }));
     const stateRows = detail.length === 0
-      ? '<tr><td colspan="3" class="empty-state">No Terraform-managed resources yet.</td></tr>'
+      ? `<tr><td colspan="3" class="empty-state">${esc(i18n.t('tf.ui.noLive'))}</td></tr>`
       : detail.map(r => {
-          const editBtn = r.declaration_id
+          const owner = r.declaration_id
             ? `<button class="btn btn-sm tf-open-decl tip"
                        data-decl="${esc(r.declaration_id)}"
-                       data-tip="${esc(i18n.t('tf.tip.openDecl', { name: r.declaration_name || '' }))}">${Icons.svg('edit')} ${esc(r.declaration_name || 'Edit')}</button>`
+                       data-tip="${esc(i18n.t('tf.tip.openDecl', { name: r.declaration_name || '' }))}">${Icons.svg('edit')} ${esc(r.declaration_name || i18n.t('tf.ui.edit'))}</button>`
             : r.has_sidecar
             ? `<button class="btn btn-sm tf-edit-resource tip"
                        data-safe="${esc(r.local_name)}"
                        data-address="${esc(r.address)}"
-                       data-tip="${i18n.t('tf.tip.editResource')}">${Icons.svg('edit')} Edit</button>`
-            : `<span class="tf-no-sidecar tip" data-tip="${i18n.t('tf.tip.noSidecar')}">no sidecar</span>`;
+                       data-tip="${esc(i18n.t('tf.tip.adoptResource'))}">${Icons.svg('edit')} ${esc(i18n.t('tf.ui.adopt'))}</button>`
+            : `<span class="tf-no-sidecar tip" data-tip="${esc(i18n.t('tf.tip.noSidecar'))}">${esc(i18n.t('tf.ui.noSidecar'))}</span>`;
           return `
             <tr><td><code>${esc(r.address)}</code></td>
-                <td><span class="badge ok">tracked</span></td>
+                <td>${r.declaration_id ? `<span class="badge ok">${esc(i18n.t('tf.ui.inDecl'))}</span>`
+                                       : `<span class="badge">${esc(i18n.t('tf.ui.shared'))}</span>`}</td>
                 <td class="tf-state-actions">
-                  ${editBtn}
-                  <button class="btn btn-sm btn-danger tf-destroy-resource"
+                  ${owner}
+                  <button class="btn btn-sm btn-danger tf-destroy-resource tip"
                           data-address="${esc(r.address)}" data-decl="${esc(r.declaration_id || '')}"
-                  >${Icons.svg('delete')} Destroy</button>
+                          data-tip="${esc(i18n.t('tf.tip.destroyResource'))}">${Icons.svg('delete')} ${esc(i18n.t('tf.ui.destroy'))}</button>
                 </td>
             </tr>`;
         }).join('');
     return `
       ${summary}
 
-      <nav class="sub-tabs sub-tabs-2nd" role="tablist" aria-label="Terraform sections">
-        <button type="button" class="sub-tab" data-tf-tab="decls"
-                role="tab">${Icons.svg('bundle')} Declarations</button>
-        <button type="button" class="sub-tab" data-tf-tab="live"
-                role="tab">${Icons.svg('network')} Live resources</button>
-        <button type="button" class="sub-tab" data-tf-tab="install"
-                role="tab">${Icons.svg('settings')} Installation</button>
+      <nav class="sub-tabs sub-tabs-2nd" role="tablist" aria-label="Terraform">
+        <button type="button" class="sub-tab tip" data-tf-tab="decls" role="tab"
+                data-tip="${esc(i18n.t('tf.ui.t.decls'))}">${Icons.svg('bundle')} ${esc(i18n.t('tf.ui.decls'))}</button>
+        <button type="button" class="sub-tab tip" data-tf-tab="live" role="tab"
+                data-tip="${esc(i18n.t('tf.ui.t.live'))}">${Icons.svg('network')} ${esc(i18n.t('tf.ui.live'))}</button>
+        <button type="button" class="sub-tab tip" data-tf-tab="install" role="tab"
+                data-tip="${esc(i18n.t('tf.ui.t.install'))}">${Icons.svg('settings')} ${esc(i18n.t('tf.ui.install'))}</button>
       </nav>
 
       <section class="tf-subtab-content" data-tf-tab="decls" role="tabpanel">
-        <p class="form-hint">A declaration bundles one or more Harvester
-          resources (VMs, images, SSH keys…) that are applied together
-          via Terraform. Click <strong>Open</strong> to edit a
-          declaration in a floating overlay — you can open several at
-          once and arrange them side by side.</p>
-        <div id="tf-decl-list" class="tf-decl-list"></div>
+        <div id="tf-decls-view" class="tfd-host"></div>
       </section>
 
       <section class="tf-subtab-content" data-tf-tab="live" role="tabpanel">
-        <h4 style="margin-top:8px;">Resources in state (cluster: ${esc(cluster || '—')})</h4>
-        <p class="form-hint">Resources currently tracked by Terraform on
-          this cluster. Click Edit to reopen one in a fresh declaration
-          (requires a sidecar — only resources created via a declaration
-          carry one).</p>
+        <h4 style="margin-top:8px;">${esc(i18n.t('tf.ui.liveTitle', { cluster: cluster || '-' }))}</h4>
+        <p class="form-hint">${esc(i18n.t('tf.ui.liveHint'))}</p>
         <table class="data-table">
-          <thead><tr><th>Address</th><th>Status</th><th></th></tr></thead>
+          <thead><tr><th>${esc(i18n.t('tf.ui.address'))}</th><th>${esc(i18n.t('tf.ui.managedBy'))}</th><th></th></tr></thead>
           <tbody>${stateRows}</tbody>
         </table>
         <div id="tf-result" class="apply-result" style="margin-top:8px;"></div>
         <div class="apply-bar" style="margin-top:14px; gap:8px;">
-          <button class="btn btn-secondary btn-sm" id="btn-tf-clean-stale"
-                  data-tip="${i18n.t('tf.tip.cleanStale')}">
-            ${Icons.svg('clean')} Clean stale files
+          <button class="btn btn-secondary btn-sm tip" id="btn-tf-clean-stale"
+                  data-tip="${esc(i18n.t('tf.tip.cleanStale'))}">
+            ${Icons.svg('clean')} ${esc(i18n.t('tf.ui.cleanStale'))}
           </button>
-          <button class="btn btn-danger btn-sm" id="btn-tf-destroy"
-                  data-tip="${i18n.t('tf.tip.destroyWorkspace')}">
-            ${Icons.svg('destroy')} Destroy workspace
+          <button class="btn btn-danger btn-sm tip" id="btn-tf-destroy"
+                  data-tip="${esc(i18n.t('tf.tip.destroyWorkspace'))}">
+            ${Icons.svg('destroy')} ${esc(i18n.t('tf.ui.destroyAll'))}
           </button>
         </div>
       </section>
 
       <section class="tf-subtab-content" data-tf-tab="install" role="tabpanel">
-        <h4 style="margin-top:8px;">Terraform installation</h4>
+        <h4 style="margin-top:8px;">${esc(i18n.t('tf.ui.installTitle'))}</h4>
         <table class="data-table" style="margin-bottom:14px;">
           <tbody>
-            <tr><td>Terraform CLI</td>
+            <tr><td>${esc(i18n.t('tf.ui.cli'))}</td>
                 <td><code>${esc(info.terraform_bin)}</code>
                   ${info.terraform_available
-                    ? '<span class="badge ok">available</span>'
-                    : '<span class="badge bad">missing</span>'}</td></tr>
-            <tr><td>Harvester provider</td>
+                    ? `<span class="badge ok">${esc(i18n.t('tf.ui.available'))}</span>`
+                    : `<span class="badge bad">${esc(i18n.t('tf.ui.missing'))}</span>`}</td></tr>
+            <tr><td>${esc(i18n.t('tf.ui.provider'))}</td>
                 <td>${info.provider_binary
                   ? `<code>${esc(info.provider_binary)}</code>
                      ${originBadge(info.provider_origin)}
                      <span class="form-hint">v${esc(String(info.provider_version).replace(/^v/, ''))},
                        ${Math.round((info.provider_binary_size||0)/1024/1024)} MB,
                        ${esc(info.provider_arch || '')}</span>`
-                  : `<span class="badge bad">missing</span>
+                  : `<span class="badge bad">${esc(i18n.t('tf.ui.missing'))}</span>
                      <details class="tf-missing-where">
                        <summary>${esc(i18n.t('tf.whereLooked'))}</summary>
                        <p class="form-hint">${esc(i18n.t('tf.pointEnv'))}
@@ -218,21 +197,19 @@ const TF = (() => {
                        <ul class="form-hint">${(info.provider_searched || [])
                          .map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>
                      </details>`}</td></tr>
-            <tr><td>Workspace dir</td>
+            <tr><td>${esc(i18n.t('tf.ui.workspaces'))}</td>
                 <td><code>${esc(info.workspaces_dir)}</code></td></tr>
-            <tr><td>Examples bundled</td>
-                <td>${(info.example_resources || []).length} resource type(s)</td></tr>
+            <tr><td>${esc(i18n.t('tf.ui.examples'))}</td>
+                <td>${esc(i18n.t('tf.ui.nTypes', { n: (info.example_resources || []).length }))}</td></tr>
           </tbody>
         </table>
 
         ${renderProviderUpdate(info)}
 
-        <p class="form-hint">The airgap bundle packages the Terraform CLI,
-          the Harvester provider and the bundled examples into a single
-          tar.gz that can be transferred to an offline host.</p>
-        <button class="btn btn-secondary btn-sm" id="btn-tf-bundle-build"
-                data-tip="${i18n.t('tf.tip.bundleBuild')}">
-          ${Icons.svg('build')} Build airgap bundle
+        <p class="form-hint">${esc(i18n.t('tf.ui.bundleHint'))}</p>
+        <button class="btn btn-secondary btn-sm tip" id="btn-tf-bundle-build"
+                data-tip="${esc(i18n.t('tf.tip.bundleBuild'))}">
+          ${Icons.svg('build')} ${esc(i18n.t('tf.ui.bundleBuild'))}
         </button>
       </section>`;
   }
@@ -341,295 +318,6 @@ const TF = (() => {
   // -------------------------------------------------------------------------
   // Declarations list
   // -------------------------------------------------------------------------
-  function renderDeclarations(cluster) {
-    const root = $('#tf-decl-list');
-    if (!root) return;
-    if (cluster === undefined) cluster = $('#cluster-select')?.value || '';
-    const decls = window.TFDecl.list(cluster);
-    if (decls.length === 0) {
-      root.innerHTML = `
-        <div class="tf-decl-empty">
-          <p>No declarations yet. Create one to start grouping resources.</p>
-          <button class="btn btn-primary btn-sm" id="btn-tf-decl-new">+ New declaration</button>
-        </div>`;
-    } else {
-      const activeId = window.TFDecl.getActive()?.id || '';
-      root.innerHTML = `
-        ${decls.map(d => renderDeclRow(d, d.id === activeId)).join('')}
-        <button class="btn btn-secondary btn-sm" id="btn-tf-decl-new"
-                style="margin-top:6px;">+ New declaration</button>`;
-    }
-    // v1.54.0 : la liste se redessine à chaque changement du magasin ; son
-    // écouteur n'est posé qu'une fois (il s'empilait, comme dans la fenêtre
-    // d'une déclaration : un clic ouvrait plusieurs invites).
-    if (!root.dataset.wired) {
-      root.addEventListener('click', onDeclListClick);
-      root.dataset.wired = '1';
-    }
-  }
-
-  function renderDeclRow(decl, isActive) {
-    const totals = decl.resources.length;
-    let summary = '';
-    if (window.TFForm && totals > 0) {
-      const incomplete = decl.resources.filter(r => {
-        const v = window.TFForm.validateAll(r.spec, r.kind);
-        return !v.valid;
-      }).length;
-      summary = incomplete > 0
-        ? `<span class="tf-decl-summary tf-decl-summary--warn">${Icons.svg('warn', { size: 14 })} ${incomplete}/${totals} incomplete</span>`
-        : `<span class="tf-decl-summary tf-decl-summary--ok">${Icons.svg('ok', { size: 14 })} ${totals} ready</span>`;
-    } else {
-      summary = `<span class="tf-decl-summary">empty</span>`;
-    }
-    const status = decl.last_applied_status
-      ? `<span class="tf-decl-applied tf-decl-applied--${esc(decl.last_applied_status)} tip"
-              data-tip="${i18n.t('tf.tip.lastApply', {when: esc(decl.last_applied_at)})}"
-        >last: ${esc(decl.last_applied_status)}</span>` : '';
-    const deployed = (decl.deployed || []).length
-      ? `<span class="tf-decl-summary tip" data-tip="${esc((decl.deployed || []).join(', '))}">${Icons.svg('ok', { size: 14 })} ${(decl.deployed || []).length} deployed</span>` : '';
-    return `
-      <div class="tf-decl-item ${isActive ? 'tf-decl-item--active' : ''}"
-           data-decl-id="${esc(decl.id)}">
-        <div class="tf-decl-item__head">
-          <strong class="tf-decl-item__name">${esc(decl.name)}</strong>
-          <button type="button" class="btn-icon-sm tf-decl-rename-btn tip" data-id="${esc(decl.id)}"
-                  aria-label="${esc(i18n.t('tf.tip.renameDecl'))}"
-                  data-tip="${esc(i18n.t('tf.tip.renameDecl'))}">${Icons.svg('edit', { size: 13 })}</button>
-          ${summary}${deployed}${status}
-        </div>
-        ${decl.description ? `<div class="tf-decl-summary">${esc(decl.description)}</div>` : ''}
-        <div class="tf-decl-item__actions">
-          <button class="btn btn-sm tf-decl-open"  data-id="${esc(decl.id)}">Open</button>
-          <button class="btn btn-sm tf-decl-dryrun"
-                  data-id="${esc(decl.id)}" data-dry="1">Dry-run</button>
-          <button class="btn btn-sm btn-primary tf-decl-apply"
-                  data-id="${esc(decl.id)}" data-dry="0">${Icons.svg('play', { size: 12 })} Apply</button>
-          <button class="btn btn-sm btn-danger tf-decl-destroy tip"
-                  data-id="${esc(decl.id)}"
-                  data-tip="${i18n.t('tf.tip.destroyDecl')}">${Icons.svg('destroy')} Destroy</button>
-          <button class="btn btn-sm tf-decl-delete tip"
-                  data-id="${esc(decl.id)}"
-                  data-tip="${i18n.t('tf.tip.deleteDecl')}">${Icons.svg('delete')}</button>
-        </div>
-      </div>`;
-  }
-
-  function onDeclListClick(e) {
-    const cluster = $('#cluster-select')?.value || '';
-    if (e.target.closest('#btn-tf-decl-new')) {
-      const name = prompt('Name for the new declaration:', `decl-${Date.now().toString(36)}`);
-      if (!name) return;
-      window.TFDecl.createAsync(name, cluster)
-        .then(d => { if (window.TFDeclPanel) window.TFDeclPanel.open(d.id); })
-        .catch(err => declError(err));
-      return;
-    }
-    const ren = e.target.closest('.tf-decl-rename-btn');
-    if (ren) { startRename(ren.dataset.id); return; }
-    const open = e.target.closest('.tf-decl-open');
-    if (open) {
-      window.TFDecl.setActive(open.dataset.id);
-      if (window.TFDeclPanel) window.TFDeclPanel.open(open.dataset.id);
-      renderDeclarations(cluster);
-      return;
-    }
-    const apply  = e.target.closest('.tf-decl-apply');
-    const dry    = e.target.closest('.tf-decl-dryrun');
-    if (apply || dry) {
-      const id = (apply || dry).dataset.id;
-      const dryRun = !!dry;
-      applyDeclaration(id, dryRun);
-      return;
-    }
-    const destroy = e.target.closest('.tf-decl-destroy');
-    if (destroy) {
-      destroyDeclaration(destroy.dataset.id);
-      return;
-    }
-    const del = e.target.closest('.tf-decl-delete');
-    if (del) {
-      const d = window.TFDecl.get(del.dataset.id);
-      if (!d) return;
-      if ((d.deployed || []).length) {
-        declError({ code: 'deployed', data: { deployed: d.deployed } });
-        return;
-      }
-      if (!confirm(i18n.t('tf.confirmDeleteDecl', { name: d.name }))) return;
-      window.TFDecl.removeAsync(del.dataset.id).catch(err => declError(err));
-      return;
-    }
-  }
-
-  /** v1.54.0 : renommer sur place ; le nom est contrôlé par la console
-   *  (unique dans le cluster). Ni l'état Terraform ni les ressources ne
-   *  bougent. */
-  function startRename(id) {
-    const d = window.TFDecl.get(id);
-    const row = document.querySelector(`#tf-decl-list .tf-decl-item[data-decl-id="${CSS.escape(id)}"]`);
-    if (!d || !row) return;
-    const nameEl = row.querySelector('.tf-decl-item__name');
-    const input = document.createElement('input');
-    input.className = 'tf-decl-rename tip';
-    input.value = d.name;
-    input.maxLength = 80;
-    input.setAttribute('aria-label', i18n.t('tf.tip.renameDecl'));
-    input.dataset.tip = i18n.t('tf.tip.renameInput');
-    nameEl.replaceWith(input);
-    input.focus();
-    input.select();
-    let done = false;
-    const finish = (save) => {
-      if (done) return;
-      done = true;
-      const v = input.value.trim();
-      input.replaceWith(nameEl);                 // le champ cède la place tout de suite
-      if (!save || !v || v === d.name) return;
-      nameEl.textContent = v;
-      window.TFDecl.renameAsync(id, v).catch(err => { declError(err); renderDeclarations(); });
-    };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
-      if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
-    });
-    input.addEventListener('blur', () => finish(true));
-  }
-
-  /** Les refus de la console, dits clairement (nom pris, déclaration
-   *  déployée, modifiée ailleurs entre-temps). */
-  function declError(err) {
-    const d = (err && err.data) || {};
-    let msg = (err && err.message) || String(err);
-    if (err && err.code === 'name-taken') msg = i18n.t('tf.err.nameTaken', { name: d.name || '' });
-    else if (err && err.code === 'deployed') msg = i18n.t('tf.err.deployed', { resources: (d.deployed || []).join(', ') });
-    else if (err && err.code === 'conflict') msg = i18n.t('tf.err.conflict');
-    const result = $('#tf-result');
-    if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(msg)}</span>`;
-    alert(msg);
-  }
-
-  // v1.5.5: the active-declaration content moved into a FloatingPanel
-  // (tf-decl-panel.js). The sub-tab "Declarations" only carries the
-  // list of declarations now; the edit surface is the overlay panel.
-
-  // -------------------------------------------------------------------------
-  // Apply / Dry-run a declaration
-  // -------------------------------------------------------------------------
-  async function applyDeclaration(declId, dryRun) {
-    const cluster = $('#cluster-select')?.value;
-    if (!cluster) { alert('Select a cluster first.'); return; }
-    const decl = window.TFDecl.get(declId);
-    if (!decl) return;
-    if (decl.resources.length === 0) {
-      alert('This declaration has no resources to apply.');
-      return;
-    }
-
-    // Validate every resource
-    const invalid = [];
-    decl.resources.forEach((r, i) => {
-      const v = window.TFForm.validateAll(r.spec, r.kind);
-      if (!v.valid) {
-        invalid.push(`#${i + 1} ${r.kind} "${r.spec?.name || ''}" — missing: ${
-            Object.entries(v.sections)
-              .filter(([_, s]) => !s.valid)
-              .map(([id, s]) => `${id}(${s.missing.join(', ')})`)
-              .join('; ')}`);
-      }
-    });
-    if (invalid.length > 0) {
-      alert(`Declaration "${decl.name}" has incomplete resources:\n\n${invalid.join('\n')}`);
-      return;
-    }
-
-    if (!dryRun) {
-      if (!confirm(`Apply declaration "${decl.name}" (${decl.resources.length} resources) on cluster "${cluster}" — REAL?`)) return;
-    }
-
-    const result = $('#tf-result');
-    if (result) result.textContent = 'starting…';
-
-    let runId;
-    try {
-      // v1.54.0 : la console applique ce qu'elle a enregistré, dans l'état
-      // propre à la déclaration ; on attend que la dernière saisie soit partie.
-      await window.TFDecl.flush(declId);
-      const r = await fetch(
-        `/api/terraform/${encodeURIComponent(cluster)}/apply_declaration`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ declaration: { id: declId }, dry_run: dryRun }) });
-      const d = await r.json();
-      if (!r.ok) {
-        const detail = (d.errors || []).map(e =>
-          `#${e.index + 1} ${e.kind || '?'} "${e.name || ''}": ${e.error}`).join('\n');
-        if (result) result.innerHTML =
-          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
-        return;
-      }
-      runId = d.action_id;
-      if (result) result.innerHTML =
-        `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} ${dryRun ? 'plan' : 'apply'} running — dock action <code>${runId}</code></span>`;
-    } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
-      return;
-    }
-    if (runId) followRun(runId, dryRun, 'declaration', cluster,
-                          { name: decl.name, declId });
-  }
-
-  async function destroyDeclaration(declId) {
-    const cluster = $('#cluster-select')?.value;
-    if (!cluster) { alert('Select a cluster first.'); return; }
-    const decl = window.TFDecl.get(declId);
-    if (!decl) return;
-    if (decl.resources.length === 0 && !(decl.deployed || []).length) {
-      alert('This declaration has no resources to destroy.');
-      return;
-    }
-    // v1.5.2: typed confirmation instead of a click-through confirm().
-    // We force the user to type the declaration's exact name — much
-    // harder to dismiss by reflex than a generic "OUI".
-    const ok = await confirmDestructive({
-      title: `Destroy declaration "${decl.name}"`,
-      message:
-        `Every resource of this declaration currently in state will be ` +
-        `destroyed on cluster "${cluster}". Their .tf + .json files will ` +
-        `be removed from the workspace. Resources not in state are skipped.`,
-      detail:
-        decl.resources.map((r, i) =>
-          `#${i + 1} ${r.kind}  ${r.spec?.name || ''}`).join('\n'),
-      requiredText: decl.name,
-      confirmLabel: `Destroy "${decl.name}"`,
-    });
-    if (!ok) return;
-
-    const result = $('#tf-result');
-    if (result) result.textContent = 'starting destroy…';
-    let runId;
-    try {
-      const r = await fetch(
-        `/api/terraform/${encodeURIComponent(cluster)}/destroy_declaration`,
-        { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ declaration: { id: declId }, dry_run: false }) });
-      const d = await r.json();
-      if (!r.ok) {
-        const detail = (d.errors || []).map(e =>
-          `#${e.index + 1} ${e.kind || '?'} "${e.name || ''}": ${e.error}`).join('\n');
-        if (result) result.innerHTML =
-          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}${detail ? '\n' + esc(detail) : ''}</span>`;
-        return;
-      }
-      runId = d.action_id;
-      if (result) result.innerHTML =
-        `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} destroy running — dock action <code>${runId}</code></span>`;
-    } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
-      return;
-    }
-    if (runId) followRun(runId, false, 'destroy-decl', cluster,
-                          { name: decl.name, declId, isDestroy: true });
-  }
-
   // -------------------------------------------------------------------------
   // SSE log overlay (reused from v1.4.37)
   // -------------------------------------------------------------------------
@@ -637,12 +325,13 @@ const TF = (() => {
     const overlay = ensureLogOverlay();
     overlay.classList.remove('hidden');
     overlay.dataset.runId = runId;
-    overlay.querySelector('.tf-log-title').textContent =
-      `${dryRun ? 'Dry-run' : (ctx && ctx.isDestroy ? 'Destroy' : 'Apply')} — ${kindLabel}/${ctx.name || '?'} on ${cluster}`;
+    overlay.querySelector('.tf-log-title').textContent = i18n.t('tf.ui.logTitle', {
+      what: dryRun ? i18n.t('tf.ui.dryRun') : (ctx && ctx.isDestroy ? i18n.t('tf.ui.destroy') : i18n.t('tf.ui.apply')),
+      name: `${kindLabel}/${ctx.name || '?'}`, cluster });
     const body = overlay.querySelector('.tf-log-body');
     body.innerHTML = '';
     const status = overlay.querySelector('.tf-log-status');
-    status.textContent = 'running…';
+    status.textContent = i18n.t('tf.ui.running');
     status.className = 'tf-log-status running';
     const append = (cls, text) => {
       const line = document.createElement('div');
@@ -658,7 +347,7 @@ const TF = (() => {
           const cls = ev.status === 'done' ? 'ok'
                     : ev.status === 'error' ? 'err'
                     : ev.status === 'skipped' ? 'dim' : 'info';
-          append(cls, `[step] ${ev.step_id} → ${ev.status}${ev.message ? ' — ' + ev.message : ''}`);
+          append(cls, `[step] ${ev.step_id}: ${ev.status}${ev.message ? ' (' + ev.message + ')' : ''}`);
         },
         log: (e) => {
           const ev = JSON.parse(e.data);
@@ -679,29 +368,27 @@ const TF = (() => {
           try { exit = JSON.parse(e.data).exit_code ?? 0; } catch {}
           const isDestroy = !!(ctx && ctx.isDestroy);
           if (exit === 0) {
-            status.innerHTML = Icons.svg('ok', { size: 14, cls: 'icon-ok' }) + ' ' + (dryRun
-              ? 'plan ready (no changes applied)'
-              : (isDestroy ? 'destroy completed' : 'apply completed'));
+            status.innerHTML = Icons.svg('ok', { size: 14, cls: 'icon-ok' }) + ' ' + esc(dryRun
+              ? i18n.t('tf.ui.planReady')
+              : (isDestroy ? i18n.t('tf.ui.destroyDone') : i18n.t('tf.ui.applyDone')));
             status.className = 'tf-log-status ok';
-            if (ctx && ctx.declId) {
-              window.TFDecl.markApplied(ctx.declId,
-                isDestroy ? 'destroyed' : 'done');
-              if (window.TFDeclPanel) window.TFDeclPanel.refresh(ctx.declId);
-            }
+            // l'issue est enregistrée par la console : on relit la déclaration
+            if (ctx && ctx.declId) window.TFDecl.refresh(ctx.declId);
             if (!dryRun) setTimeout(refresh, 1500);
           } else {
-            status.innerHTML = `${Icons.svg('fail', { size: 14, cls: 'icon-err' })} ${dryRun ? 'plan' : (isDestroy ? 'destroy' : 'apply')} failed (exit ${exit})`;
+            status.innerHTML = `${Icons.svg('fail', { size: 14, cls: 'icon-err' })} ${esc(i18n.t('tf.ui.failedExit', {
+              what: dryRun ? i18n.t('tf.ui.dryRun') : (isDestroy ? i18n.t('tf.ui.destroy') : i18n.t('tf.ui.apply')), exit }))}`;
             status.className = 'tf-log-status err';
-            if (ctx && ctx.declId) window.TFDecl.markApplied(ctx.declId, 'error');
+            if (ctx && ctx.declId) window.TFDecl.refresh(ctx.declId);
           }
         },
       },
       onStatus: (s) => {
         if (s.state === 'retry') {
-          append('warn', `[stream] connection lost — retrying in ${Math.round(s.delay/1000)}s (${s.attempt}/5)`);
+          append('warn', i18n.t('tf.ui.streamRetry', { s: Math.round(s.delay / 1000), n: s.attempt }));
         } else if (s.state === 'dead') {
-          append('err', `[stream] reconnect failed after ${s.attempts} attempts — open Activity to see the recorded log`);
-          status.innerHTML = Icons.svg('fail', { size: 14, cls: 'icon-err' }) + ' stream lost (log preserved)';
+          append('err', i18n.t('tf.ui.streamDead', { n: s.attempts }));
+          status.innerHTML = Icons.svg('fail', { size: 14, cls: 'icon-err' }) + ' ' + esc(i18n.t('tf.ui.streamLost'));
           status.className = 'tf-log-status err';
         }
       },
@@ -719,10 +406,10 @@ const TF = (() => {
   function confirmDestructive(opts) {
     return new Promise((resolve) => {
       const requiredText = opts.requiredText || 'OUI';
-      const title = opts.title || 'Confirm destruction';
-      const message = opts.message || 'This action is irreversible.';
+      const title = opts.title || i18n.t('tf.ui.confirmTitle');
+      const message = opts.message || i18n.t('tf.ui.irreversible');
       const detail = opts.detail || '';
-      const confirmLabel = opts.confirmLabel || 'Destroy';
+      const confirmLabel = opts.confirmLabel || i18n.t('tf.ui.destroy');
       const root = document.createElement('div');
       root.className = 'modal-overlay tf-confirm-overlay active';
       root.innerHTML = `
@@ -730,7 +417,7 @@ const TF = (() => {
           <div class="modal-header">
             <div>
               <h3>${Icons.svg('destroy')} ${esc(title)}</h3>
-              <div class="modal-subtitle">Confirmation required</div>
+              <div class="modal-subtitle">${esc(i18n.t('tf.ui.confirmNeeded'))}</div>
             </div>
             <button class="btn-close tf-confirm-cancel tip" data-tip="${i18n.t('common.cancel')}">×</button>
           </div>
@@ -739,14 +426,14 @@ const TF = (() => {
             ${detail
               ? `<pre class="tf-confirm-detail">${esc(detail)}</pre>` : ''}
             <p class="tf-confirm-prompt">
-              To confirm, type
+              ${esc(i18n.t('tf.ui.typeToConfirm'))}
               <code class="tf-confirm-required">${esc(requiredText)}</code>
-              below:
             </p>
-            <input type="text" class="tf-confirm-input"
+            <input type="text" class="tf-confirm-input tip" aria-label="${esc(i18n.t('tf.ui.typeToConfirm'))}"
+                   data-tip="${esc(i18n.t('tf.ui.typeToConfirm'))}"
                    autocomplete="off" autocapitalize="off" spellcheck="false">
             <div class="tf-confirm-actions">
-              <button class="btn btn-secondary btn-sm tf-confirm-cancel">Cancel</button>
+              <button class="btn btn-secondary btn-sm tf-confirm-cancel">${esc(i18n.t('common.cancel'))}</button>
               <button class="btn btn-danger btn-sm tf-confirm-go"
                       disabled>${Icons.svg('destroy', { size: 14 })} ${esc(confirmLabel)}</button>
             </div>
@@ -786,7 +473,7 @@ const TF = (() => {
     el.className = 'tf-log-overlay hidden';
     el.innerHTML = `
       <div class="tf-log-head">
-        <strong class="tf-log-title">Terraform log</strong>
+        <strong class="tf-log-title">${esc(i18n.t('tf.ui.log'))}</strong>
         <span class="tf-log-status"></span>
         <button type="button" class="btn-icon-sm tf-log-close tip" data-tip="${i18n.t('tf.tip.hideLog')}">×</button>
       </div>
@@ -802,13 +489,13 @@ const TF = (() => {
   // -------------------------------------------------------------------------
   async function buildBundle() {
     const result = $('#tf-result');
-    if (result) result.textContent = 'starting bundle build…';
+    if (result) result.textContent = i18n.t('tf.ui.starting');
     try {
       const r = await fetch('/api/terraform/bundle/build', { method: 'POST' });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}</span>`; return; }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} build started — see dock action <code>${d.action_id}</code></span>`;
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error)}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(i18n.t('tf.ui.startedDock', { id: d.action_id }))}</span>`;
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`; }
   }
   // -------------------------------------------------------------------------
   // Provider: install / update / revert
@@ -901,39 +588,35 @@ const TF = (() => {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dry_run: true }) });
       preview = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${preview.error}</span>`; return; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(preview.error)}</span>`; return; }
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
       return;
     }
     const list = preview.would_remove || [];
     if (list.length === 0) {
-      if (result) result.innerHTML = `<span style="color:var(--text-dim)">${Icons.svg('ok', { size: 14 })} workspace is already clean</span>`;
+      if (result) result.innerHTML = `<span style="color:var(--text-dim)">${Icons.svg('ok', { size: 14 })} ${esc(i18n.t('tf.ui.alreadyClean'))}</span>`;
       return;
     }
-    if (!confirm(`Remove ${list.length} stale .tf file(s)?\n\n${list.join('\n')}\n\n(No cluster resource is touched.)`)) return;
+    if (!confirm(i18n.t('tf.ui.confirmClean', { n: list.length, files: list.join('\n') }))) return;
     try {
       const r = await fetch(`/api/terraform/${encodeURIComponent(cluster)}/clean_stale`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dry_run: false }) });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error}</span>`; return; }
-      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} removed ${d.removed.length} stale file(s)</span>`;
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error)}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(i18n.t('tf.ui.cleaned', { n: d.removed.length }))}</span>`;
       setTimeout(refresh, 800);
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; }
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`; }
   }
   async function destroyWorkspace() {
     const cluster = $('#cluster-select')?.value;
-    if (!cluster) { alert('Select a cluster first.'); return; }
+    if (!cluster) { alert(i18n.t('tf.ui.pickCluster')); return; }
     const ok = await confirmDestructive({
-      title: `Destroy entire workspace on "${cluster}"`,
-      message:
-        `This runs terraform destroy on the WHOLE workspace for ` +
-        `cluster "${cluster}". Every Terraform-managed resource on the ` +
-        `cluster will be deleted, regardless of which declaration owns ` +
-        `it. This action is irreversible.`,
+      title: i18n.t('tf.ui.destroyAllTitle', { cluster }),
+      message: i18n.t('tf.ui.destroyAllMsg', { cluster }),
       requiredText: cluster,
-      confirmLabel: `Destroy workspace`,
+      confirmLabel: i18n.t('tf.ui.destroyAll'),
     });
     if (!ok) return;
     try {
@@ -941,63 +624,51 @@ const TF = (() => {
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ dry_run: false }) });
       const d = await r.json();
-      if (!r.ok) { alert('Destroy failed: ' + (d.error || 'unknown')); return; }
-      const result = $('#tf-result');
-      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} destroy started — see dock action <code>${d.action_id}</code></span>`;
+      if (!r.ok) { alert(i18n.t('tf.ui.failed', { msg: d.error || '?' })); return; }
+      // v1.55.0 : le journal s'ouvre, comme pour les autres destructions
+      // (on ne suivait celle-ci que dans le dock, audit D11).
+      followRun(d.action_id, false, 'workspace', cluster, { name: cluster, isDestroy: true });
     } catch (e) { alert(e.message); }
   }
+
+  /** Une ressource de l'espace partagé (d'avant la v1.54) entre dans une
+   *  déclaration : celle dont elle porte le nom, sinon une nouvelle. Au
+   *  prochain plan, la déclaration la reprend sans la recréer. */
   async function importResourceForEdit(safe, address) {
     const cluster = $('#cluster-select')?.value;
     if (!cluster || !safe) return;
     const result = $('#tf-result');
+    const say = (html) => { if (result) result.innerHTML = html; };
     try {
       const r = await fetch(
         `/api/terraform/${encodeURIComponent(cluster)}/sidecar/${encodeURIComponent(safe)}`);
+      const meta = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const d = await r.json().catch(() => ({}));
-        if (result) result.innerHTML =
-          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'no sidecar found'}</span>`;
+        say(`<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(meta.error || i18n.t('tf.ui.noSidecar'))}</span>`);
         return;
       }
-      const meta = await r.json();
       const kind = meta.kind;
       const spec = meta.spec || {};
       if (!kind || !window.TF_SCHEMA[kind]) {
-        if (result) result.innerHTML =
-          `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} unsupported kind: ${esc(kind || '?')}</span>`;
+        say(`<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(i18n.t('tf.ui.unsupported', { kind: kind || '?' }))}</span>`);
         return;
       }
-      // Re-use the declaration named after the sidecar's
-      // declaration_name when it already exists locally — otherwise
-      // create a new "Imported: <addr>" declaration.
-      let target = null;
+      await window.TFDecl.ready;
       const declName = meta.declaration_name || '';
-      if (declName) {
-        target = window.TFDecl.list().find(
-          d => d.name === declName && d.cluster === cluster);
-      }
+      let target = declName ? window.TFDecl.list(cluster).find(d => d.name === declName) : null;
       if (!target) {
-        const importName = `Edit ${address}`;
-        target = window.TFDecl.create(importName, cluster);
+        target = await window.TFDecl.createAsync(declName || i18n.t('tf.ui.adoptName', { address }), cluster);
       }
-      // If the same resource already lives in the declaration (by
-      // spec.name), don't double it — set its spec to the freshly
-      // fetched sidecar.
-      let existing = (target.resources || []).find(
-        x => x.kind === kind && x.spec?.name === spec.name);
-      if (existing) {
-        window.TFDecl.replaceResourceSpec(target.id, existing.id, spec);
-      } else {
-        window.TFDecl.addResourceWithSpec(target.id, kind, spec);
-      }
-      window.TFDecl.setActive(target.id);
-      if (result) result.innerHTML =
-        `<span style="color:var(--accent)">${Icons.svg('edit')} loaded ${esc(address)} into declaration "${esc(target.name)}" — scroll up</span>`;
-      // Re-render the panel so the active declaration view shows the
-      // imported card.
-      refresh();
+      let existing = (target.resources || []).find(x => x.kind === kind && x.spec?.name === spec.name);
+      const res = existing
+        ? window.TFDecl.replaceResourceSpec(target.id, existing.id, spec)
+        : window.TFDecl.addResourceWithSpec(target.id, kind, spec);
+      await window.TFDecl.flush(target.id);
+      say(`<span style="color:var(--accent)">${Icons.svg('edit')} ${esc(i18n.t('tf.ui.adopted', { address, name: target.name }))}</span>`);
+      activateSubtab('decls');
+      if (window.TFDeclView) TFDeclView.select(target.id, res && res.id);
     } catch (e) {
-      if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`;
+      say(`<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`);
     }
   }
 
@@ -1005,28 +676,27 @@ const TF = (() => {
     const cluster = $('#cluster-select')?.value;
     if (!cluster || !address) return;
     const ok = await confirmDestructive({
-      title: `Destroy resource ${address}`,
-      message:
-        `terraform destroy -target=${address} on cluster "${cluster}", ` +
-        `then remove its .tf file from the workspace.`,
+      title: i18n.t('tf.ui.destroyResTitle', { address }),
+      message: declId ? i18n.t('tf.ui.destroyResMsgDecl', { address, cluster })
+                      : i18n.t('tf.ui.destroyResMsg', { address, cluster }),
       requiredText: address.split('.').pop(),
-      confirmLabel: `Destroy ${address}`,
+      confirmLabel: i18n.t('tf.ui.destroy'),
     });
     if (!ok) return;
     const result = $('#tf-result');
-    if (result) result.textContent = 'starting destroy…';
+    if (result) result.textContent = i18n.t('tf.ui.starting');
     let runId;
     try {
       const r = await fetch(`/api/terraform/${encodeURIComponent(cluster)}/destroy_resource`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ address, dry_run: false, declaration_id: declId || undefined }) });
       const d = await r.json();
-      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${d.error || 'failed'}</span>`; return; }
+      if (!r.ok) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || '?')}</span>`; return; }
       runId = d.action_id;
-      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} destroy running — dock action <code>${runId}</code></span>`;
-    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${e.message}</span>`; return; }
+      if (result) result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('pending', { size: 14 })} ${esc(i18n.t('tf.ui.startedDock', { id: runId }))}</span>`;
+    } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`; return; }
     // v1.52.1 : sans isDestroy, la fin s'annonçait « apply completed ».
-    if (runId) followRun(runId, false, 'destroy', cluster, { name: address, isDestroy: true });
+    if (runId) followRun(runId, false, 'destroy', cluster, { name: address, isDestroy: true, declId });
   }
 
   // -------------------------------------------------------------------------
@@ -1036,7 +706,7 @@ const TF = (() => {
     document.addEventListener('click', (e) => {
       if (e.target.closest('#btn-tf-refresh')) refresh();
       if (e.target.closest('#btn-tf-bundle-build')) {
-        if (confirm('Build a Terraform airgap bundle (~150MB)?')) buildBundle();
+        if (confirm(i18n.t('tf.ui.confirmBundle'))) buildBundle();
       }
       if (e.target.closest('#btn-tf-destroy')) destroyWorkspace();
       if (e.target.closest('#btn-tf-clean-stale')) cleanStale();
@@ -1044,7 +714,7 @@ const TF = (() => {
       const dr = e.target.closest('.tf-destroy-resource');
       if (dr) destroySingleResource(dr.dataset.address, dr.dataset.decl);
       const od = e.target.closest('.tf-open-decl');
-      if (od && window.TFDeclPanel) { activateSubtab('decls'); window.TFDeclPanel.open(od.dataset.decl); }
+      if (od && window.TFDeclView) { activateSubtab('decls'); TFDeclView.select(od.dataset.decl); }
       const ed = e.target.closest('.tf-edit-resource');
       if (ed) importResourceForEdit(ed.dataset.safe, ed.dataset.address);
       const tab = e.target.closest('#tf-status-body .sub-tab[data-tf-tab]');
@@ -1061,21 +731,9 @@ const TF = (() => {
       if (e.target?.id === 'tf-prov-form') installProvider(e);
       if (e.target?.id === 'tf-prov-file-form') uploadProvider(e);
     });
-    if (window.TFDecl) {
-      window.TFDecl.onChange(() => {
-        // pas pendant un renommage : le champ disparaîtrait sous les doigts
-        if (document.activeElement && document.activeElement.classList.contains('tf-decl-rename')) return;
-        if ($('#tf-decl-list')) renderDeclarations();
-      });
-      window.TFDecl.onError(err => { if (err && (err.code === 'conflict' || err.declId)) declError(err); });
-    }
   }
 
-  return {
-    init, refresh,
-    renderDeclarations,
-    applyDeclaration, destroyDeclaration,
-  };
+  return { init, refresh, confirmDestructive, followRun };
 })();
 
 document.addEventListener('DOMContentLoaded', TF.init);
