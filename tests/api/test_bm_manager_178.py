@@ -83,21 +83,33 @@ def test_cli_follows_the_virtual_media_link_under_the_system(monkeypatch):
     assert path == SYS + "/VirtualMedia/Cd"
 
 
-def test_slow_insert_is_waited_for(monkeypatch):
+def test_insert_waits_for_the_answer_not_the_inserted_flag(monkeypatch):
     """Vu en réel : l'émulateur Redfish ne répond à l'insertion qu'après
-    avoir téléchargé l'ISO ; la console abandonnait au bout de 20 s et
-    retirait l'image en plein téléchargement."""
-    state = {"inserted": False}
-    vm = lambda: {"MediaTypes": ["CD"], "Inserted": state["inserted"], "Image": "http://x/i.iso",
-                  "Actions": {"#VirtualMedia.InsertMedia": {"target": "/vm/insert"}}}
-    monkeypatch.setattr(wapp, "_redfish_virtualmedia_cd", lambda *a, **k: ("/vm", vm()))
-    monkeypatch.setattr(wapp, "_redfish_send",
-                        lambda *a, **k: (False, 0, "The read operation timed out"))
-    def fake_sleep(_):
-        state["inserted"] = True
-    monkeypatch.setattr(wapp.time, "sleep", fake_sleep)
-    ok, detail, _ = wapp._bm_media_insert("bmc", "u", "p", "http://x/i.iso")
-    assert ok and "slow" in detail
+    avoir téléchargé l'ISO, et dit le lecteur monté AVANT : la console doit
+    attendre la réponse (délai long), pas l'état du lecteur."""
+    seen = {}
+    monkeypatch.setattr(wapp, "_redfish_virtualmedia_cd", lambda *a, **k: ("/vm", {
+        "MediaTypes": ["CD"], "Inserted": False,
+        "Actions": {"#VirtualMedia.InsertMedia": {"target": "/vm/insert"}}}))
+    def send(host, path, u, p, method, payload=None, timeout=20):
+        seen["timeout"] = timeout
+        return True, 204, ""
+    monkeypatch.setattr(wapp, "_redfish_send", send)
+    ok, _, _ = wapp._bm_media_insert("bmc", "u", "p", "http://x/i.iso")
+    assert ok and seen["timeout"] >= 600
+
+
+def test_cli_insert_waits_for_the_answer(monkeypatch):
+    bmc = bm_discover.RedfishBmc("bmc", "u", "p")
+    seen = {}
+    monkeypatch.setattr(bmc, "_virtual_cd", lambda: ("/vm", {
+        "MediaTypes": ["CD"], "Actions": {"#VirtualMedia.InsertMedia": {"target": "/vm/insert"}}}))
+    def req(path, method="GET", payload=None, timeout=None):
+        seen["timeout"] = timeout
+        return True, None
+    monkeypatch.setattr(bmc, "_req", req)
+    ok, _ = bmc.insert("http://x/i.iso")
+    assert ok and seen["timeout"] >= 600
 
 
 def test_refused_insert_is_not_waited_for(monkeypatch):

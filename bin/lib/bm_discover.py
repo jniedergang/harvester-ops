@@ -436,7 +436,7 @@ class RedfishBmc:
         self._system = None
         self._vm_path = None
 
-    def _req(self, path, method="GET", payload=None):
+    def _req(self, path, method="GET", payload=None, timeout=None):
         data = json.dumps(payload or {}).encode() if method != "GET" else None
         req = urllib.request.Request(f"https://{self.host}{path}", data=data, method=method)
         if data is not None:
@@ -444,7 +444,7 @@ class RedfishBmc:
         cred = base64.b64encode(f"{self._user}:{self._pwd}".encode()).decode()
         req.add_header("Authorization", f"Basic {cred}")
         try:
-            with urllib.request.urlopen(req, context=self._ctx, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, context=self._ctx, timeout=timeout or self.timeout) as r:
                 body = r.read()
                 return True, (json.loads(body) if method == "GET" and body else
                               body[:400].decode("utf-8", "replace"))
@@ -529,18 +529,10 @@ class RedfishBmc:
             return False, "virtual media insert not exposed by this BMC"
         payload = {"Image": url} if is_oem else {"Image": url, "Inserted": True,
                                                   "WriteProtected": True}
-        ok, detail = self._req(target, "POST", payload)
-        if not ok and detail == "TimeoutError":
-            # Même règle que la console (v1.78.0) : un BMC qui ne répond
-            # qu'après avoir téléchargé l'image n'a pas refusé l'insertion.
-            deadline = time.time() + self.insert_wait
-            while time.time() < deadline:
-                _, vm = self._virtual_cd()
-                if (vm or {}).get("Inserted") and (not vm.get("Image") or vm.get("Image") == url):
-                    return True, "inserted after a slow answer"
-                time.sleep(10)
-            return False, "the BMC did not report the image inserted"
-        return ok, detail
+        # Même règle que la console (v1.78.0) : attendre la réponse de
+        # l'insertion elle-même, jamais l'état « monté » du lecteur, qu'un
+        # BMC peut afficher avant d'avoir fini de télécharger l'image.
+        return self._req(target, "POST", payload, timeout=self.insert_wait)
 
     def eject(self):
         _, vm = self._virtual_cd()

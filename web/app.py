@@ -4765,36 +4765,17 @@ def _bm_media_insert(host, user, pwd, image_url):
     # le dialecte OEM refuse Inserted/WriteProtected (vu sur node3)
     payload = ({"Image": image_url} if is_oem
                else {"Image": image_url, "Inserted": True, "WriteProtected": True})
-    ok, status, detail = _redfish_send(host, target, user, pwd, "POST", payload)
-    if not ok and status == 0 and _is_timeout(detail):
-        # v1.78.0, vu en réel : certains BMC (et l'émulateur Redfish du banc)
-        # ne répondent à l'insertion qu'une fois l'image entièrement
-        # téléchargée. Une réponse qui tarde n'est pas un refus : relire le
-        # lecteur jusqu'à le voir monté, au lieu de retirer l'ISO en plein
-        # téléchargement.
-        ok, detail = _bm_wait_inserted(host, user, pwd, image_url)
+    # v1.78.0, vu en réel : certains BMC (et l'émulateur Redfish du banc) ne
+    # répondent à l'insertion qu'une fois l'image entièrement téléchargée,
+    # et disent le lecteur « monté » AVANT la fin : se fier à cet état a
+    # fait démarrer la machine sur un lecteur vide. On attend donc la
+    # réponse elle-même, avec un délai à la mesure d'un ISO de 8 Go.
+    ok, _, detail = _redfish_send(host, target, user, pwd, "POST", payload,
+                                  timeout=BM_INSERT_WAIT)
     return ok, detail, vm_res
 
 
-def _is_timeout(detail):
-    d = str(detail or "").lower()
-    return "timed out" in d or "timeout" in d
-
-
 BM_INSERT_WAIT = int(os.environ.get("HARVESTER_OPS_BM_INSERT_WAIT", "900"))
-
-
-def _bm_wait_inserted(host, user, pwd, image_url, sleep=None, now=None):
-    """Attend que le lecteur virtuel dise l'image montée (`Inserted`, et
-    `Image` égale à celle demandée quand le BMC la renvoie)."""
-    sleep, now = sleep or time.sleep, now or time.time
-    deadline = now() + BM_INSERT_WAIT
-    while now() < deadline:
-        _, vm = _redfish_virtualmedia_cd(host, user, pwd)
-        if (vm or {}).get("Inserted") and (not vm.get("Image") or vm.get("Image") == image_url):
-            return True, "inserted after a slow answer"
-        sleep(10)
-    return False, "the BMC did not report the image inserted"
 
 
 def _bm_media_eject(host, user, pwd, vm_res=None):
