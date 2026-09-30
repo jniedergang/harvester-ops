@@ -472,7 +472,16 @@ class RedfishBmc:
         return None, False
 
     def _virtual_cd(self):
-        mgr = self._first_member("/redfish/v1/Managers/")
+        # Le gestionnaire de CE System (Links.ManagedBy), pas le premier de la
+        # collection : un BMC à plusieurs systèmes monterait sinon le média
+        # d'une autre machine (même règle que la console, v1.78.0).
+        mgr = None
+        for ref in (((self._get(self._system) or {}).get("Links") or {}).get("ManagedBy") or []
+                    if self._system else []):
+            if isinstance(ref, dict) and ref.get("@odata.id"):
+                mgr = ref["@odata.id"]
+                break
+        mgr = mgr or self._first_member("/redfish/v1/Managers/")
         if not mgr:
             return None, None
         coll = self._get(mgr.rstrip("/") + "/VirtualMedia/") or {}

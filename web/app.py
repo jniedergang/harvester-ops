@@ -2062,7 +2062,27 @@ def _redfish_system_path(host, user, pwd):
     return members[0]["@odata.id"] if members else None
 
 
-def _redfish_manager_path(host, user, pwd):
+def _managed_by(system):
+    """Gestionnaire d'un System d'après ses liens (`Links.ManagedBy`), ou
+    None. Seule façon sûre de trouver le média virtuel de CETTE machine."""
+    for ref in ((system or {}).get("Links") or {}).get("ManagedBy") or []:
+        if isinstance(ref, dict) and ref.get("@odata.id"):
+            return ref["@odata.id"]
+    return None
+
+
+def _redfish_manager_path(host, user, pwd, system_path=None):
+    """Gestionnaire qui pilote le System visé. v1.78.0 : on prenait le
+    premier de la collection Managers ; un BMC qui gère plusieurs systèmes
+    (châssis à lames, émulateur Redfish du banc, vu en réel : un gestionnaire
+    par VM de l'hôte) aurait alors monté le média, et lancé l'installation,
+    sur une autre machine. Le premier de la liste ne sert plus que de repli
+    quand le System ne dit pas qui le gère (iLO 4, iDRAC : un seul)."""
+    sp = system_path or _redfish_system_path(host, user, pwd)
+    if sp:
+        mp = _managed_by(_redfish_get(host, sp, user, pwd, timeout=6))
+        if mp:
+            return mp
     mroot = _redfish_get(host, "/redfish/v1/Managers/", user, pwd, timeout=6)
     members = (mroot or {}).get("Members") or []
     return members[0]["@odata.id"] if members else None
@@ -2255,7 +2275,7 @@ def _bmc_discover_one(host, user, pwd):
         })
     # v1.17.0 : ce dont l'installation zéro-touch a besoin en plus.
     boot = s.get("Boot") or {}
-    mgr_path = _redfish_manager_path(host, user, pwd)
+    mgr_path = _managed_by(s) or _redfish_manager_path(host, user, pwd, sys_path)
     vm_path, vm_res = _redfish_virtualmedia_cd(host, user, pwd, mgr_path)
     return {
         "ok": True,
