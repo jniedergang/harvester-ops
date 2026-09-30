@@ -48,7 +48,8 @@ il s'utilise aussi seul.
 
   harvester-resources host basics --cluster harv1 --node n1 [--custom-name "rack 2"] [--console-url https://10.0.0.21] [--labels-file l.json]
   harvester-resources host tags --cluster harv1 --node n1 --tags fast,ssd
-  harvester-resources host disk-add --cluster harv1 --node n1 --disk BLOCKDEVICE [--provisioner LonghornV1|LonghornV2|lvm] [--vg VG] [--format|--no-format]
+  harvester-resources host disk-add --cluster harv1 --node n1 --disk BLOCKDEVICE [--provisioner LonghornV1|LonghornV2|lvm] [--vg VG] [--format|--no-format] [--tag ssd]
+  harvester-resources pools-apply --kubeconfig new.yaml --node n1 --spec pools.json [--no-classes] [--timeout 1800]
   harvester-resources host disk-remove --cluster harv1 --node n1 --disk BLOCKDEVICE
   harvester-resources host disk-set --cluster harv1 --node n1 --disk BLOCKDEVICE [--tags a,b] [--scheduling on|off]
   harvester-resources host hugepages --cluster harv1 --node n1 [--thp-enabled madvise] [--thp-shmem never] [--thp-defrag madvise]
@@ -1444,14 +1445,8 @@ def _block_device(kube, args):
     return bd
 
 
-def host_disk_add(kube, args):
-    bd = _block_device(kube, args)
-    out = hh.disk_add(bd, force_format=args.format, provisioner=args.provisioner, vg=args.vg)
-    path = (bd.get("spec") or {}).get("devPath")
-    step("disk", "running", f"{path} added to {args.node}"
-         + (" (formatted)" if out["spec"]["fileSystem"]["forceFormatted"] else ""))
-    kube.replace(out)
-
+def _bd_provisioned(path, node):
+    """Fin du provisionnement d'un BlockDevice, pour _wait."""
     def done(obj):
         st = (obj or {}).get("status") or {}
         conds = {c.get("type"): c for c in st.get("conditions") or []}
@@ -1459,9 +1454,21 @@ def host_disk_add(kube, args):
         if fail:
             return False, fail[0]
         if st.get("provisionPhase") == "Provisioned":
-            return True, f"{path} is a storage disk of {args.node}"
+            return True, f"{path} is a storage disk of {node}"
         return None, st.get("provisionPhase") or "formatting and mounting"
-    return _wait(kube, hh.K_BD, LH_NS, args.disk, done, args.timeout, label="disk")
+    return done
+
+
+def host_disk_add(kube, args):
+    bd = _block_device(kube, args)
+    tags = _split(args.tag) if getattr(args, "tag", None) is not None else None
+    out = hh.disk_add(bd, force_format=args.format, provisioner=args.provisioner, vg=args.vg, tags=tags)
+    path = (bd.get("spec") or {}).get("devPath")
+    step("disk", "running", f"{path} added to {args.node}"
+         + (" (formatted)" if out["spec"]["fileSystem"]["forceFormatted"] else "")
+         + (f", tags {', '.join(out['spec']['tags'])}" if out["spec"].get("tags") else ""))
+    kube.replace(out)
+    return _wait(kube, hh.K_BD, LH_NS, args.disk, _bd_provisioned(path, args.node), args.timeout, label="disk")
 
 
 def host_disk_remove(kube, args):
@@ -1623,6 +1630,128 @@ def host_delete(kube, args):
     def done(o):
         return (True, f"{args.node} is no longer in the cluster") if o is None else (None, "the node is being removed")
     return _wait(kube, "nodes", None, args.node, done, args.timeout, label="host")
+
+
+# ---------------------------------------------------------------------------
+# Pools de disques de données (v1.78.0) : après une installation bare-metal
+# (étape « pools » de la console) ou dans un pipeline, les disques de chaque
+# pool provisionnés dans Longhorn avec leur étiquette, et une classe
+# `longhorn-<tag>` par pool. Vu sur le banc (NDM 1.8) : les BlockDevices
+# portent un UUID, se retrouvent par série ou WWN ; `engineVersion` n'est
+# pas mis par défaut ; NDM formate, monte sous
+# /var/lib/harvester/extra-disks/<nom> et recopie spec.tags dans Longhorn.
+# ---------------------------------------------------------------------------
+
+def _pools_find(kube, node, pools, deadline, sleep, now):
+    """{(tag, index): BlockDevice} une fois tous les disques vus par NDM.
+    Juste après l'installation, NDM (et même son CRD) n'existe pas encore :
+    on attend, puis on dit clairement ce qui manque."""
+    want = [(p["tag"], i, d) for p in pools for i, d in enumerate(p["disks"])]
+    step("find", "running", f"{len(want)} disk(s) of {node} among node-disk-manager's block devices")
+    last = None
+    while True:
+        bds = kube.list(hh.K_BD, LH_NS)
+        found, missing = {}, []
+        for tag, i, d in want:
+            bd = hh.match_block_device(bds, node, d)
+            if bd is None:
+                missing.append(hh.disk_label(d))
+            else:
+                found[(tag, i)] = bd
+        names = [(b.get("metadata") or {}).get("name") for b in found.values()]
+        if len(set(names)) != len(names):
+            raise ValueError("two pool disks resolve to the same block device")
+        if not missing:
+            step("find", "done", f"{len(found)} disk(s) found")
+            return found
+        msg = f"waiting for {', '.join(missing)}"
+        if msg != last:
+            step("find", "running", msg)
+            last = msg
+        if now() >= deadline:
+            step("find", "error", f"not found on {node} (by serial or WWN): {', '.join(missing)}")
+            return None
+        sleep(10)
+
+
+def _pools_lh_tags(kube, node, name, tag, deadline, sleep, now):
+    """L'étiquette sur le disque Longhorn (NDM la recopie ; on la pose si
+    elle manque, sans retirer les autres)."""
+    while True:
+        lh = kube.get(hh.K_LHNODE, LH_NS, node)
+        disk = (((lh or {}).get("spec") or {}).get("disks") or {}).get(name)
+        if disk is not None:
+            tags = list(disk.get("tags") or [])
+            if tag not in tags:
+                kube.patch(hh.K_LHNODE, LH_NS, node, hh.lh_node_patch(lh, disk=name, disk_tags=tags + [tag]))
+            return True
+        if now() >= deadline:
+            return False
+        sleep(5)
+
+
+def pools_apply(kube, node, pools, timeout, classes=True, sleep=time.sleep, now=time.time):
+    deadline = now() + timeout
+    # une classe existante à un autre sélecteur : refus AVANT de formater quoi que ce soit
+    existing = {}
+    if classes:
+        for p in pools:
+            existing[p["tag"]] = hh.pool_class_state(kube.get(hs.K_SC, None, hh.pool_class_name(p["tag"])), p["tag"])
+    found = _pools_find(kube, node, pools, deadline, sleep, now)
+    if found is None:
+        return EXIT_BLOCKED
+    todo = []
+    for p in pools:
+        for i, d in enumerate(p["disks"]):
+            bd = found[(p["tag"], i)]
+            name = bd["metadata"]["name"]
+            path = (bd.get("spec") or {}).get("devPath") or hh.disk_label(d)
+            if hh.pool_disk_state(bd, p["tag"]) == "done":
+                step("disk", "done", f"{path} is already in the pool {p['tag']}")
+            else:
+                todo.append((p["tag"], name, path, bd))
+            found[(p["tag"], i)] = (name, path)
+    for tag, name, path, bd in todo:
+        out = hh.disk_add(bd, force_format=True, provisioner="LonghornV1", tags=[tag])
+        step("disk", "running", f"{path} formatted into the pool {tag}")
+        kube.replace(out)
+    for tag, name, path, _ in todo:
+        rc = _wait(kube, hh.K_BD, LH_NS, name, _bd_provisioned(path, node), max(1, deadline - now()),
+                   sleep=sleep, now=now, label="disk")
+        if rc != EXIT_OK:
+            return rc
+    for p in pools:
+        for i, _ in enumerate(p["disks"]):
+            name, path = found[(p["tag"], i)]
+            if not _pools_lh_tags(kube, node, name, p["tag"], deadline, sleep, now):
+                step("longhorn", "error", f"Longhorn does not show {path} on {node} yet")
+                return EXIT_FAIL
+    step("longhorn", "done", "the disks carry their pool tag in Longhorn")
+    if not classes:
+        step("classes", "done", "joining node: the cluster's storage classes are kept as they are")
+        return EXIT_OK
+    for p in pools:
+        cname = hh.pool_class_name(p["tag"])
+        if existing[p["tag"]] == "same" or \
+                hh.pool_class_state(kube.get(hs.K_SC, None, cname), p["tag"]) == "same":
+            step("classes", "running", f"{cname} already exists")
+            continue
+        obj = ho.storageclass_manifest({"name": cname, "replicas": p["replicas"], "disk_selector": p["tag"],
+                                        "stale_timeout": 30, "migratable": True})
+        step("classes", "running", f"{cname}: {p['replicas']} replica(s) on the disks tagged {p['tag']}")
+        kube.create(obj)
+    step("classes", "done", ", ".join(hh.pool_class_name(p["tag"]) for p in pools))
+    return EXIT_OK
+
+
+def cmd_pools_apply(args):
+    hh.check_node(args.node)
+    spec = _read_json(args.spec)
+    pools = hh.check_pools((spec or {}).get("pools") if isinstance(spec, dict) else None)
+    if not pools:
+        raise ValueError("pools: at least one pool")
+    kube = kube_from(args)
+    return pools_apply(kube, args.node, pools, args.timeout, classes=not args.no_classes)
 
 
 HOST_ACTIONS = {
@@ -3546,6 +3675,17 @@ def main(argv=None):
     sp.add_argument("--password-file", help="access: file holding the password (never on the command line)")
     sp.add_argument("--keys", help="access: SSH key pairs (namespace/name), comma separated")
     sp.add_argument("--timeout", type=int, default=3600)
+    sp = sub.add_parser("pools-apply", help="data-disk pools of a host: disks provisioned with their tag, "
+                                             "and a storage class longhorn-<tag> per pool")
+    sp.set_defaults(fn=cmd_pools_apply)
+    sp.add_argument("--cluster")
+    sp.add_argument("--kubeconfig")
+    sp.add_argument("--node", required=True, help="the host (Kubernetes node name)")
+    sp.add_argument("--spec", required=True,
+                    help='JSON file: {"pools": [{"tag", "replicas", "disks": [{"serial", "wwn", "path"}]}]}')
+    sp.add_argument("--no-classes", action="store_true",
+                    help="provision only (a node joining a cluster that has its classes)")
+    sp.add_argument("--timeout", type=int, default=1800, help="seconds to wait for node-disk-manager and Longhorn")
     sp = sub.add_parser("host", help="a host's settings and actions, as in Harvester")
     sp.set_defaults(fn=cmd_host)
     sp.add_argument("action", choices=sorted(HOST_ACTIONS))
@@ -3559,6 +3699,7 @@ def main(argv=None):
     sp.add_argument("--disk", help="disk-*: the block device name")
     sp.add_argument("--provisioner", default="LonghornV1", choices=("LonghornV1", "LonghornV2", "lvm"))
     sp.add_argument("--vg", help="disk-add: the LVM volume group (lvm provisioner)")
+    sp.add_argument("--tag", help="disk-add: tags of the disk, comma separated (Longhorn disk tags, e.g. a pool)")
     fmt = sp.add_mutually_exclusive_group()
     fmt.add_argument("--format", dest="format", action="store_true", default=None, help="disk-add: format the disk")
     fmt.add_argument("--no-format", dest="format", action="store_false", help="disk-add: keep its ext4/XFS file system")

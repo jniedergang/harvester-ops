@@ -166,8 +166,11 @@ def block_devices(bds, node_name, lh_node=None):
     return out
 
 
-def disk_add(bd, force_format=None, provisioner="LonghornV1", vg=None):
-    """Le BlockDevice passé en « provisionné » (Harvester : PUT du BlockDevice)."""
+def disk_add(bd, force_format=None, provisioner="LonghornV1", vg=None, tags=None):
+    """Le BlockDevice passé en « provisionné » (Harvester : PUT du BlockDevice).
+    `tags` (v1.78.0) : étiquettes du disque, que node-disk-manager recopie
+    dans les tags du disque Longhorn (c'est ce qui range un disque dans un
+    pool : une classe à `diskSelector` n'y place que ses répliques)."""
     spec = (bd or {}).get("spec") or {}
     st = (bd or {}).get("status") or {}
     fs = (st.get("deviceStatus") or {}).get("fileSystem") or {}
@@ -190,6 +193,8 @@ def disk_add(bd, force_format=None, provisioner="LonghornV1", vg=None):
         s["provisioner"] = {"longhorn": {"engineVersion": provisioner}}
     else:
         raise ValueError("provisioner: LonghornV1, LonghornV2 or lvm")
+    if tags is not None:
+        s["tags"] = check_tags(tags)
     # vu sur harvlab : le CRD BlockDevice n'a pas de sous-ressource status,
     # un remplacement sans status est refusé (« status: Required value »)
     return out
@@ -508,3 +513,137 @@ def host_detail(node, metrics=None, lh_node=None, vmis=(), vlanstatuses=(), link
     evs.sort(key=lambda x: x["last"] or "", reverse=True)
     return {"node": name, "basics": basics, "instances": sorted(instances, key=lambda x: (x["namespace"], x["name"])),
             "vlans": vlans, "nics": nics, "events": evs[:limit]}
+
+
+# ---------------------------------------------------------------------------
+# Pools de disques de données (v1.78.0) : l'installeur de Harvester ne connaît
+# qu'un disque de données ; les autres sont provisionnés après l'installation,
+# un pool = une étiquette de disque Longhorn + une classe `longhorn-<tag>`.
+# ---------------------------------------------------------------------------
+
+POOL_TAG_RE = re.compile(r"^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$")
+SC_PROVISIONER = "driver.longhorn.io"
+
+
+def norm_wwn(value):
+    """lsblk écrit « 0x5000c500a1b2c3d4 », d'autres outils sans préfixe."""
+    v = str(value or "").strip().lower()
+    return v[2:] if v.startswith("0x") else v
+
+
+def norm_serial(value):
+    return str(value or "").strip().lower()
+
+
+def check_pools(pools):
+    """Description des pools, normalisée ; ValueError au premier défaut.
+    [{"tag", "replicas", "disks": [{"serial", "wwn", "path"}]}]"""
+    if pools is None:
+        return []
+    if not isinstance(pools, list):
+        raise ValueError("pools: a list")
+    out, tags, seen = [], set(), {}
+    for i, p in enumerate(pools):
+        if not isinstance(p, dict):
+            raise ValueError(f"pools[{i}]: an object")
+        tag = str(p.get("tag") or "").strip()
+        if not POOL_TAG_RE.match(tag):
+            raise ValueError(f"pools[{i}].tag: 1 to 32 lower-case letters, digits or dashes")
+        if tag in tags:
+            raise ValueError(f"pools[{i}].tag: {tag} is used twice")
+        tags.add(tag)
+        raw = p.get("replicas", 1)
+        if isinstance(raw, bool):
+            raise ValueError(f"pools[{i}].replicas: 1 to 3")
+        try:
+            replicas = int(raw if raw not in (None, "") else 1)
+        except (TypeError, ValueError):
+            raise ValueError(f"pools[{i}].replicas: 1 to 3") from None
+        if not 1 <= replicas <= 3 or str(raw).strip() not in (str(replicas), ""):
+            raise ValueError(f"pools[{i}].replicas: 1 to 3")
+        disks = p.get("disks")
+        if not isinstance(disks, list) or not disks:
+            raise ValueError(f"pools[{i}].disks: at least one disk")
+        clean = []
+        for j, d in enumerate(disks):
+            if not isinstance(d, dict):
+                raise ValueError(f"pools[{i}].disks[{j}]: an object")
+            serial = str(d.get("serial") or "").strip()
+            wwn = str(d.get("wwn") or "").strip()
+            path = str(d.get("path") or "").strip()
+            if not (serial or wwn):
+                raise ValueError(f"pools[{i}].disks[{j}]: a serial number or a WWN")
+            for val in (serial, wwn, path):
+                if len(val) > 256 or any(ord(c) < 32 for c in val):
+                    raise ValueError(f"pools[{i}].disks[{j}]: invalid characters")
+            for key in (("serial", norm_serial(serial)) if serial else None,
+                        ("wwn", norm_wwn(wwn)) if wwn else None):
+                if key is None:
+                    continue
+                if key in seen:
+                    raise ValueError(f"pools[{i}].disks[{j}]: this disk is already in the pool {seen[key]}")
+                seen[key] = tag
+            clean.append({"serial": serial, "wwn": wwn, "path": path})
+        out.append({"tag": tag, "replicas": replicas, "disks": clean})
+    return out
+
+
+def disk_label(disk):
+    """Nom d'un disque de pool dans un message : son chemin, sinon son identité."""
+    if disk.get("path"):
+        return disk["path"]
+    return f"serial {disk['serial']}" if disk.get("serial") else f"WWN {disk['wwn']}"
+
+
+def match_block_device(bds, node, disk):
+    """Le BlockDevice de node-disk-manager qui porte ce disque, sur ce nœud,
+    ou None. NDM nomme ses objets d'un UUID et le nom noyau peut changer au
+    redémarrage : la correspondance se fait par série ou WWN, jamais par
+    `sdX`. Un disque entier l'emporte sur ses partitions (même série) ; deux
+    disques entiers de même identité sont un refus (multipath, série vide
+    remplacée par une valeur générique)."""
+    serial, wwn = norm_serial(disk.get("serial")), norm_wwn(disk.get("wwn"))
+    hits = []
+    for bd in bds or []:
+        if ((bd.get("spec") or {}).get("nodeName")) != node:
+            continue
+        det = (((bd.get("status") or {}).get("deviceStatus") or {}).get("details") or {})
+        if (wwn and norm_wwn(det.get("wwn")) == wwn) or (serial and norm_serial(det.get("serialNumber")) == serial):
+            hits.append(bd)
+    whole = [b for b in hits if (((b.get("status") or {}).get("deviceStatus") or {}).get("details") or {})
+             .get("deviceType", "disk") == "disk"]
+    if len(whole) > 1:
+        names = ", ".join(sorted((b.get("metadata") or {}).get("name", "?") for b in whole))
+        raise ValueError(f"{disk_label(disk)}: several block devices match ({names})")
+    return whole[0] if whole else None
+
+
+def pool_disk_state(bd, tag):
+    """"todo" (à provisionner), "done" (déjà dans ce pool) ; ValueError si
+    le disque sert déjà à autre chose : on ne le touche pas."""
+    spec = (bd or {}).get("spec") or {}
+    if spec.get("provision") or (spec.get("fileSystem") or {}).get("provisioned"):
+        tags = spec.get("tags") or []
+        if tag in tags:
+            return "done"
+        path = spec.get("devPath") or (bd.get("metadata") or {}).get("name")
+        raise ValueError(f"{path} is already a storage disk (tags: {', '.join(tags) or 'none'}): left as is")
+    return "todo"
+
+
+def pool_class_name(tag):
+    return f"longhorn-{tag}"
+
+
+def pool_class_state(sc, tag):
+    """"absent", "same" (la classe existe avec ce sélecteur) ; ValueError si
+    elle existe avec un autre sélecteur : une classe existante n'est jamais
+    modifiée (des volumes s'en servent peut-être)."""
+    if sc is None:
+        return "absent"
+    params = sc.get("parameters") or {}
+    sel = sorted(t.strip() for t in str(params.get("diskSelector") or "").split(",") if t.strip())
+    if sc.get("provisioner") == SC_PROVISIONER and sel == [tag]:
+        return "same"
+    raise ValueError(f"the storage class {pool_class_name(tag)} already exists with another disk selector "
+                     f"({','.join(sel) or 'none'}): left as is")
