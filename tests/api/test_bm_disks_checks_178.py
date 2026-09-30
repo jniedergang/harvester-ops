@@ -123,3 +123,53 @@ def test_bmc_storage_route_is_protected():
     spec = block.split('@_rate_limit("', 1)[1].split('"', 1)[0]
     assert limits.parse_many(spec)
     assert any(p for p in wapp.ADMIN_ONLY_PREFIXES if "/api/bmc/storage".startswith(p))
+
+
+# --- round 3 : « effacer » coché sur le disque système ou de données --------
+
+VDA = "/dev/disk/by-path/pci-0000:05:00.0"
+
+
+def test_wiping_the_system_disk_passes_and_is_stripped_from_the_config(client, runs):
+    # disque système partitionné, son « effacer » coché : accepté
+    r = _install(client, device=SSD, wipe_disks_list=[SSD, VDA])
+    assert r.status_code == 202
+    opts = runs[-1][0]
+    cfg = wapp._bm_render_checked(opts)
+    assert cfg["install"]["device"] == SSD
+    assert cfg["install"]["wipe_disks_list"] == [VDA]
+    # désigné par un autre nom (/dev/sdd) : retiré aussi, grâce à l'inventaire
+    r = _install(client, device=SSD, wipe_disks_list=["/dev/sdd"])
+    assert r.status_code == 202
+    cfg = wapp._bm_render_checked(runs[-1][0])
+    assert "wipe_disks_list" not in cfg["install"]
+    # le disque de données de même
+    r = _install(client, device=NVME, data_disk=SSD, wipe_disks_list=[SSD])
+    assert r.status_code == 202
+    assert "wipe_disks_list" not in wapp._bm_render_checked(runs[-1][0])["install"]
+    # une valeur du client n'est jamais reprise
+    r = _install(client, device=NVME, wipe_disks_list=[VDA], own_disk_names=[VDA])
+    assert wapp._bm_render_checked(runs[-1][0])["install"]["wipe_disks_list"] == [VDA]
+
+
+def test_the_preview_shows_the_list_without_the_system_disk(client):
+    import yaml
+    r = client.post("/api/baremetal/config/preview",
+                    json=dict(BASE, device=SSD, wipe_disks_list=[SSD, VDA]))
+    assert r.status_code == 200
+    cfg = yaml.safe_load(r.get_json()["yaml"])
+    assert cfg["install"]["wipe_disks_list"] == [VDA]
+
+
+def test_an_imported_list_naming_the_system_disk_is_stripped_too():
+    import harvester_install_schema as his
+    base = {"mode": "create", "hostname": "n1", "device": "/dev/sda", "mgmt_interface": "eno1",
+            "vip": "192.0.2.50", "token": "t", "password": "pw", "method": "dhcp",
+            "iso_url": "http://192.0.2.9/h.iso"}
+    cfg = his.render_install_config(dict(
+        base, advanced_yaml="install:\n  wipe_disks_list:\n  - /dev/sda\n  - /dev/sdb\n"))
+    assert cfg["install"]["wipe_disks_list"] == ["/dev/sdb"]
+    cfg = his.render_install_config(dict(base, advanced_yaml="install:\n  wipe_disks_list:\n  - /dev/sda\n"))
+    assert "wipe_disks_list" not in cfg["install"]
+    cfg = his.render_install_config(dict(base, data_disk="/dev/sdc", wipe_disks_list="/dev/sdc\n/dev/sdd"))
+    assert cfg["install"]["wipe_disks_list"] == ["/dev/sdd"]

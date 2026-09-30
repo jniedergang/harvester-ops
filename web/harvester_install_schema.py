@@ -671,6 +671,25 @@ def _raise(errors, message):
         raise InstallConfigError(paths, message, dict(errors))
 
 
+def _strip_own_disks(cfg, aliases=None):
+    """Retire de `install.wipe_disks_list` les disques système et de
+    données (1.78.0) : l'installeur les formate lui-même et vide une liste
+    qui les contient (harvester-installer, isWipeDisksPanelNeeded). Cocher
+    « effacer » sur ces disques ne sert qu'à lever le contrôle `has-data`.
+    Comparaison au chemin écrit, plus `aliases` : tous les noms de ces deux
+    disques dans l'inventaire de la machine, fournis par la console."""
+    inst = cfg.get("install")
+    if not isinstance(inst, dict) or not isinstance(inst.get("wipe_disks_list"), list):
+        return
+    own = {str(x).strip() for x in (inst.get("device"), inst.get("data_disk")) if x}
+    own.update(str(a).strip() for a in (aliases or []) if a)
+    kept = [w for w in inst["wipe_disks_list"] if str(w).strip() not in own]
+    if kept:
+        inst["wipe_disks_list"] = kept
+    else:
+        del inst["wipe_disks_list"]
+
+
 def render_install_config(opts):
     """Configuration finale (dict) : formulaire + YAML avancé fusionnés et
     validés contre le schéma. Lève InstallConfigError."""
@@ -690,6 +709,7 @@ def render_install_config(opts):
         _merge(cfg, adv, "", errors)
         _raise(errors, "advanced YAML sets a key already set by the form")
 
+    _strip_own_disks(cfg, opts.get("own_disk_names"))
     errors = check_install_config(cfg)
     _raise(errors, "configuration does not match the installer schema")
     # Vu en réel (banc bmcfg, 30/09/2026) : dès que `os.ntp_servers` est

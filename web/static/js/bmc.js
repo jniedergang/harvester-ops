@@ -755,6 +755,9 @@ const BMC = (() => {
       }
       const id = d.action_id;
       discStatus.innerHTML = `<span class="spinner-inline"></span> ${esc(tr('bmc.disk.discoverStarted', { id }))}`;
+      // Suivi abandonné après 5 échecs de lecture de l'action d'affilée
+      // (404, réseau) : l'action reste visible dans le dock.
+      let failures = 0;
       const tick = async () => {
         // fenêtre fermée : on cesse de suivre (l'action continue, dans le dock)
         if (!document.body.contains(panel.el)) { discovering = false; return; }
@@ -763,7 +766,18 @@ const BMC = (() => {
           const r = await fetch(`/api/action/${encodeURIComponent(id)}`);
           a = r.ok ? await r.json() : null;
         } catch (e) { a = null; }
-        const st = a && a.status;
+        if (!a) {
+          failures += 1;
+          if (failures >= 5) {
+            stop(`<span class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.disk.discoverLost', { id }))}</span>`);
+            msg.innerHTML = discStatus.innerHTML;
+            return;
+          }
+          setTimeout(tick, POLL_MS);
+          return;
+        }
+        failures = 0;
+        const st = a.status;
         if (st === 'done') {
           await loadInventory();
           stop(`<span class="bm-imported">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.disk.discoverDone'))}</span>`);
@@ -936,12 +950,14 @@ const BMC = (() => {
           body.device = (pick('os') || {}).stable_path || '';
           body.data_disk = (pick('data') || {}).stable_path || '';
         }
-        // l'installeur formate lui-même les disques système et de données, et
-        // vide une liste qui les contient
-        const skip = new Set([findDisk(body.device), findDisk(body.data_disk)].filter(Boolean));
-        const wipe = disks().filter(d => !skip.has(d)
-          && (stateOf(d).role === 'wipe' || (stateOf(d).role === 'pool' && stateOf(d).wipe)))
-          .map(d => d.stable_path);
+        // « Effacer » coché sur le disque système ou de données est envoyé :
+        // il lève le contrôle `has-data` du serveur, qui retire ensuite ces
+        // deux disques de la liste rendue (l'installeur les formate lui-même
+        // et vide une liste qui les contient)
+        const wipe = disks().filter(d => {
+          const st = stateOf(d);
+          return st.role === 'wipe' || (['os', 'data', 'pool'].includes(st.role) && st.wipe);
+        }).map(d => d.stable_path);
         const extra = pendingWipe.filter(p => !wipe.includes(p));
         if (wipe.length || extra.length) body.wipe_disks_list = wipe.concat(extra);
         const g = poolGroups();

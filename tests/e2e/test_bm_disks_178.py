@@ -469,3 +469,42 @@ def test_the_preview_checks_the_disks_on_the_server(context, flask_server, test_
     expect(msg).to_contain_text("Disks refused:")
     expect(msg).to_contain_text("too small, 250 GiB at least")
     expect(notes(win, "sdb").locator(".bm-disk-refused")).to_be_visible()
+
+
+# --- round 3 ----------------------------------------------------------------
+
+def test_wipe_on_the_system_disk_is_sent(context, flask_server):
+    _, win, state = open_window(context, flask_server)
+    set_role(win, "sdd", "os")
+    expect(notes(win, "sdd")).to_contain_text("carries data")
+    row(win, "sdd").locator("[data-disk-wipe]").check()
+    expect(notes(win, "sdd")).to_be_hidden()
+    fill_required(win)
+    submit(win)
+    expect(win.locator("#bm-install-result")).to_contain_text("bm0000000178")
+    body = state["installs"][-1]
+    assert body["device"] == PATH["sdd"]
+    # envoyé pour lever `has-data` ; le serveur le retire du YAML rendu
+    assert body["wipe_disks_list"] == [PATH["sdd"]]
+    assert body["wipe_all_disks"] is False
+
+
+def test_discovery_polling_gives_up_after_five_failures(context, flask_server):
+    state = {"inventory": None, "polls": 0}
+    page, win, state = open_window(context, flask_server, state=state)
+    page.route("**/api/baremetal/discover",
+               lambda r, q: fulfill(r, {"action_id": "disc00000180", "host": HOST}, 202))
+
+    def action(route, req):
+        state["polls"] += 1
+        fulfill(route, {"error": "not found"}, 404)
+    page.route("**/api/action/disc00000180", action)
+    win.locator('[data-bm="discover-boot"]').click()
+    expect(win.locator("#bm-config-msg")).to_contain_text(
+        "Stopped following action disc00000180", timeout=25000)
+    expect(win.locator("#bm-disc-status")).to_contain_text("Stopped following")
+    expect(win.locator('[data-bm="discover-boot"]')).to_be_enabled()
+    polls = state["polls"]
+    assert polls == 5
+    page.wait_for_timeout(3500)
+    assert state["polls"] == 5

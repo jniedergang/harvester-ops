@@ -4638,6 +4638,26 @@ def _bm_disk_role_check(data):
     return errors
 
 
+def _bm_own_disk_names(data):
+    """Tous les noms (chemin stable, liens, /dev/<nom>) des disques système
+    et de données dans l'inventaire de ce BMC, pour les retirer de
+    `wipe_disks_list` au rendu quel que soit le nom employé ; [] sans
+    inventaire (le rendu compare alors au chemin écrit)."""
+    doc = _bmd.load_inventory(INVENTORY_DIR, str(data.get("bmc_host") or ""))
+    if not doc:
+        return []
+    disks = _bmdisks.parse_discovery(doc.get("raw") or "")["disks"]
+    idx = _bmdisks._index(disks)
+    names = []
+    for key in ("device", "data_disk"):
+        d = idx.get(str(data.get(key) or "").strip())
+        if d is not None:
+            links = d.get("links") or {}
+            names += [d.get("stable_path"), "/dev/" + str(d.get("name") or "")]
+            names += list(links.get("by_id") or []) + list(links.get("by_path") or [])
+    return [n for n in names if n]
+
+
 def _bm_disk_refusal(errors):
     """Réponse 400 des contrôles des disques : `reasons` chemin -> raison,
     la première raison d'un chemin (la fenêtre la range sur sa ligne)."""
@@ -5158,6 +5178,7 @@ def api_baremetal_config_preview():
         disk_errors = _bm_disk_role_check(dict(data, bmc_host=host))
         if disk_errors:
             return _bm_disk_refusal(disk_errors)
+    data["own_disk_names"] = _bm_own_disk_names(dict(data, bmc_host=host)) if isinstance(host, str) else []
     mode = data.get("mode") or "create"
     if mode not in ("create", "join"):
         return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
@@ -5248,6 +5269,8 @@ def api_baremetal_install():
     disk_errors = _bm_disk_role_check(data)
     if disk_errors:
         return _bm_disk_refusal(disk_errors)
+    # jamais une valeur du client : calculée ici, depuis l'inventaire
+    data["own_disk_names"] = _bm_own_disk_names(data)
     # v1.78.0 : un cluster créé est déclaré dans la console à la fin
     if mode == "create":
         name = _bm_cluster_name(data)
