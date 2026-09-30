@@ -44,8 +44,22 @@ DIR="/var/lib/libvirt/images/$LAB"
 # L'ISO (8 Go), le noyau et l'initrd restent partagés dans le répertoire de
 # harvlab : un second banc ne les recopie pas.
 ISO_DIR="/var/lib/libvirt/images/harvlab"
-ISO="harvester-v1.8.2-amd64.iso"
+ISO="${HARVLAB_ISO:-harvester-v1.8.2-amd64.iso}"
 ISO_LOCAL="$HOME/.local/share/harvester-ops/iso/$ISO"
+# v1.77.0 : un autre ISO garde son propre noyau et son initrd, sans écraser
+# ceux de la 1.8.2 dont harvlab et harvlab2 se servent.
+KERNEL=linux; INITRD=initrd
+if [[ "$ISO" != "harvester-v1.8.2-amd64.iso" ]]; then KERNEL="linux-${ISO%.iso}"; INITRD="initrd-${ISO%.iso}"; fi
+# v1.77.0 : banc de la configuration d'installation complète (bmcfg) :
+#   HARVLAB_CONFIG_EXTRA   fichier JSON d'options de plus pour la fonction de
+#                          configuration (mgmt_interfaces, bond_mode, data_disk,
+#                          labels, modules, advanced_yaml...)
+#   HARVLAB_EXTRA_NETWORKS cartes de plus, specs --network de virt-install
+#                          séparées par des « ; »
+#   HARVLAB_DATA_DISK_GB   un second disque (vdb), pour install.data_disk
+CONFIG_EXTRA="${HARVLAB_CONFIG_EXTRA:-}"
+EXTRA_NETWORKS="${HARVLAB_EXTRA_NETWORKS:-}"
+DATA_DISK_GB="${HARVLAB_DATA_DISK_GB:-}"
 PORT="${HARVLAB_PORT:-8099}"
 VIP="${HARVLAB_VIP:-172.16.2.60}"
 IP_PREFIX="${HARVLAB_IP_PREFIX:-172.16.2.6}"
@@ -91,7 +105,7 @@ render_config() {
     [[ "$n" == 1 ]] && mode=create
     vault_env
     HL_MODE="$mode" HL_FORM="$form" HL_ISO_URL="$iso_url" HL_IP="$(ip_of "$n")" \
-    HL_MAC="$(mac_of "$n")" HL_NAME="$(name_of "$n")" HL_VIP="$VIP" \
+    HL_MAC="$(mac_of "$n")" HL_NAME="$(name_of "$n")" HL_VIP="$VIP" HL_EXTRA="$CONFIG_EXTRA" \
     python3 - "$REPO" "$VAULT_PATH" <<'PY'
 import logging, os, subprocess, sys, tempfile
 repo, vault_path = sys.argv[1], sys.argv[2]
@@ -112,7 +126,7 @@ if os.environ["HL_FORM"] == "hash":
     password = subprocess.run(["openssl", "passwd", "-6", "-stdin"], input=password,
                               capture_output=True, text=True, check=True).stdout.strip()
 vip = os.environ["HL_VIP"]
-sys.stdout.write(app._harvester_install_config({
+opts = {
     "token": vault("token"), "hostname": os.environ["HL_NAME"], "password": password,
     "ssh_keys": open(os.path.expanduser("~/.ssh/id_ed25519.pub")).read(),
     "ntp": "0.suse.pool.ntp.org", "dns": "172.16.3.6",
@@ -120,7 +134,14 @@ sys.stdout.write(app._harvester_install_config({
     "iso_url": os.environ["HL_ISO_URL"], "mgmt_interface": os.environ["HL_MAC"],
     "method": "static", "ip": os.environ["HL_IP"], "subnet_mask": "255.255.0.0",
     "gateway": "172.16.0.1", "vip": vip, "server_url": f"https://{vip}:443",
-}))
+}
+if os.environ.get("HL_EXTRA"):
+    import json
+    with open(os.path.expanduser(os.environ["HL_EXTRA"])) as f:
+        opts.update(json.load(f))
+    if opts.get("mgmt_interfaces"):
+        opts.pop("mgmt_interface", None)
+sys.stdout.write(app._harvester_install_config(opts))
 PY
 }
 
@@ -139,9 +160,9 @@ cmd_serve() {
     local tmp rand url n form
     tmp="$(mktemp -d)"
     xorriso -osirrox on -indev "$ISO_LOCAL" \
-        -extract /boot/x86_64/loader/linux "$tmp/linux" \
-        -extract /boot/x86_64/loader/initrd "$tmp/initrd" >/dev/null 2>&1
-    rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$tmp/linux" "$tmp/initrd" "$NODE2:$ISO_DIR/"
+        -extract /boot/x86_64/loader/linux "$tmp/$KERNEL" \
+        -extract /boot/x86_64/loader/initrd "$tmp/$INITRD" >/dev/null 2>&1
+    rsync -a -e "ssh -o LogLevel=ERROR" --rsync-path="sudo rsync" "$tmp/$KERNEL" "$tmp/$INITRD" "$NODE2:$ISO_DIR/"
     rm -rf "$tmp"
     # Un chemin non devinable : les configurations portent le jeton du cluster.
     rand="$(python3 -c 'import secrets; print(secrets.token_hex(12))')"
@@ -174,7 +195,7 @@ cmd_unserve() {
 }
 
 cmd_install() {
-    local rand n name args
+    local rand n name args extra spec
     rand="$(serve_path)"
     [[ -n "$rand" ]] || { say "rien de publié : lancer « serve » d'abord"; exit 1; }
     for n in "$@"; do
@@ -187,6 +208,12 @@ cmd_install() {
         args+=" console=ttyS0 console=tty1 rd.cos.disable net.ifnames=1 ip=dhcp rd.neednet=1"
         args+=" harvester.install.automatic=true harvester.install.skipchecks=true"
         args+=" harvester.install.config_url=http://$NODE2_IP:$PORT/$rand/$name.yaml"
+        extra=""
+        if [[ -n "$EXTRA_NETWORKS" ]]; then
+            IFS=';' read -ra specs <<< "$EXTRA_NETWORKS"
+            for spec in "${specs[@]}"; do extra+=" --network $spec"; done
+        fi
+        [[ -n "$DATA_DISK_GB" ]] && extra+=" --disk path=$DIR/$name-data.qcow2,size=$DATA_DISK_GB,format=qcow2,bus=virtio,cache=unsafe,discard=unmap"
         say "installation de $name ($(ip_of "$n"))"
         # --wait -1 : virt-install enchaîne lui-même la fin de l'installation
         # (arrêt) et le premier démarrage sur le disque.
@@ -208,8 +235,8 @@ cmd_install() {
             --disk path=$DIR/$name.qcow2,size=$DISK_GB,format=qcow2,bus=virtio,cache=unsafe,discard=unmap \
             --check disk_size=off \
             --disk path=$ISO_DIR/$ISO,device=cdrom,bus=sata,readonly=on \
-            --network bridge=br0,model=virtio,mac=$(mac_of "$n") \
-            --install kernel=$ISO_DIR/linux,initrd=$ISO_DIR/initrd,kernel_args=\"$args\",kernel_args_overwrite=yes \
+            --network bridge=br0,model=virtio,mac=$(mac_of "$n") $extra \
+            --install kernel=$ISO_DIR/$KERNEL,initrd=$ISO_DIR/$INITRD,kernel_args=\"$args\",kernel_args_overwrite=yes \
             --graphics vnc,listen=127.0.0.1 --serial pty \
             --noautoconsole --wait -1 >/dev/null"
     done

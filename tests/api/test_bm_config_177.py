@@ -157,7 +157,9 @@ def test_old_fields_render_the_same_dict_as_before(opts):
 
 def test_harvlab_still_calls_the_same_function_with_the_same_fields():
     src = (ROOT / "tests/bench/harvlab/harvlab.sh").read_text()
-    assert "app._harvester_install_config({" in src
+    # depuis 1.77.0 le banc fusionne des options de plus (HARVLAB_CONFIG_EXTRA)
+    # avant d'appeler la même fonction
+    assert "app._harvester_install_config(opts)" in src
     for field in ("mgmt_interface", "server_url", "iso_url", "vip"):
         assert f'"{field}"' in src
 

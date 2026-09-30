@@ -86,7 +86,8 @@ def test_fresh_window_keeps_the_historical_defaults(context, flask_server):
     expect(win.locator('[name="bond_mode"]')).to_have_value("balance-tlb")
     expect(win.locator('[name="bond_miimon"]')).to_have_value("100")
     expect(win.locator('[name="bond_lacp_rate"]')).to_be_hidden()
-    expect(win.locator('[name="bond_xmit_hash_policy"]')).to_be_hidden()
+    # balance-tlb se sert de la politique de hachage : elle reste visible
+    expect(win.locator('[name="bond_xmit_hash_policy"]')).to_be_visible()
     expect(win.locator(".bm-wipe-warn")).to_be_visible()
     # la fenêtre tient dans l'écran, son contenu défile à l'intérieur
     box = win.bounding_box()
@@ -101,6 +102,10 @@ def test_802_3ad_shows_its_options(context, flask_server):
     expect(win.locator('[name="bond_xmit_hash_policy"]')).to_be_visible()
     win.locator('[name="bond_mode"]').select_option("active-backup")
     expect(win.locator('[name="bond_lacp_rate"]')).to_be_hidden()
+    expect(win.locator('[name="bond_xmit_hash_policy"]')).to_be_hidden()
+    win.locator('[name="bond_mode"]').select_option("balance-xor")
+    expect(win.locator('[name="bond_lacp_rate"]')).to_be_hidden()
+    expect(win.locator('[name="bond_xmit_hash_policy"]')).to_be_visible()
 
 
 def test_dhcp_hides_the_static_addressing(context, flask_server):

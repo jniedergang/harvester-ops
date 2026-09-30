@@ -129,3 +129,31 @@ n'est pas actif : quelques transferts de VM d'essai suffisent. Depuis,
 `virt-install` pose `discard=unmap` et `harvlab.sh tidy` (à lancer après une
 installation, et après une série d'essais) éjecte l'ISO, active le discard
 et lance `fstrim -a` dans chaque nœud. Premier passage : 138 Go rendus.
+
+
+## Banc bmcfg : configuration d'installation complète (1.77.0)
+
+Un nœud v1.9.0 installé avec une configuration de même forme que celle d'un
+exploitant : agrégat de gestion de deux cartes, agrégat de stockage en MTU
+9000 et un VLAN écrits par `write_files` (NetworkManager), disque de
+données, libellés, modules, chemin persistant, sysctl, réglage système.
+Adresses réservées dans NetBox et Pi-hole : VIP 172.16.2.90
+(`bmcfg.home.lo`), nœud 172.16.2.91 (`bmcfg-n1.home.lo`) ; secrets Vault
+`secret/infra/bmcfg`. Le réseau de stockage est un réseau libvirt isolé
+`bmcfg-sto` (MTU 9000, sans DHCP) défini sur node2.
+
+Variables de plus :
+
+- `HARVLAB_ISO` : un autre ISO du magasin (son noyau et son initrd sont
+  extraits sous `linux-<iso>` et `initrd-<iso>`, sans écraser ceux de la
+  1.8.2) ;
+- `HARVLAB_CONFIG_EXTRA` : un fichier JSON d'options de plus pour la
+  fonction de configuration de la console (`mgmt_interfaces`, `bond_mode`,
+  `data_disk`, `wipe_all_disks`, `labels`, `modules`, `advanced_yaml`...) ;
+- `HARVLAB_EXTRA_NETWORKS` : cartes de plus, specs `--network` de
+  virt-install séparées par des `;` ;
+- `HARVLAB_DATA_DISK_GB` : un second disque (`vdb`).
+
+Avant un `destroy`, éjecter l'ISO (`tidy`) : `virsh undefine
+--remove-all-storage` supprime aussi les fichiers encore attachés, ISO
+partagée comprise.

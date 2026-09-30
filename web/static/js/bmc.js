@@ -194,6 +194,8 @@ const BMC = (() => {
   // Installation
   // -------------------------------------------------------------------------
   // Modes d'agrégat acceptés par l'installeur (pkg/config, bond_options.mode)
+  // Modes où le noyau tient compte de xmit_hash_policy.
+  const XMIT_MODES = ['802.3ad', 'balance-xor', 'balance-tlb', 'balance-alb'];
   const BOND_MODES = ['active-backup', 'balance-tlb', 'balance-alb', '802.3ad',
                       'balance-rr', 'balance-xor', 'broadcast'];
   const LACP_RATES = ['slow', 'fast'];
@@ -320,7 +322,7 @@ const BMC = (() => {
               <input name="bond_miimon" type="number" min="0" step="1" value="100"></label>
             <label class="bm-lacp" ${tipAttr(tr('bmc.tip.lacp'))}>${esc(tr('bmc.f.lacpRate'))}
               <select name="bond_lacp_rate"><option value=""></option>${optionsHtml(LACP_RATES, '')}</select></label>
-            <label class="bm-lacp" ${tipAttr(tr('bmc.tip.xmit'))}>${esc(tr('bmc.f.xmitHash'))}
+            <label class="bm-xmit" ${tipAttr(tr('bmc.tip.xmit'))}>${esc(tr('bmc.f.xmitHash'))}
               <select name="bond_xmit_hash_policy"><option value=""></option>${optionsHtml(XMIT_POLICIES, '')}</select></label>
             <label ${tipAttr(tr('bmc.tip.vlan'))}>${esc(tr('bmc.f.vlan'))}
               <input name="vlan_id" type="number" min="1" max="4094" step="1" placeholder="200"></label>
@@ -387,7 +389,9 @@ const BMC = (() => {
     // ET lever leur `required`, sinon le formulaire refuse de partir sur des
     // champs invisibles, sans dire lesquels. Même règle pour la VIP d'un
     // nœud qui rejoint un cluster (fichier importé en `join`), et pour les
-    // options propres à 802.3ad.
+    // options propres à 802.3ad. La politique de hachage vaut aussi pour
+    // balance-xor, balance-tlb et balance-alb : le noyau s'en sert dans ces
+    // modes, et une valeur importée n'y est pas jetée en silence.
     const method = panel.el.querySelector('#bm-method');
     const bondMode = panel.el.querySelector('#bm-bond-mode');
     const syncAll = () => {
@@ -404,6 +408,8 @@ const BMC = (() => {
       });
       const lacp = bondMode.value === '802.3ad';
       panel.el.querySelectorAll('.bm-lacp').forEach(l => { l.hidden = !lacp; });
+      const xmit = XMIT_MODES.includes(bondMode.value);
+      panel.el.querySelectorAll('.bm-xmit').forEach(l => { l.hidden = !xmit; });
       for (const name of ['token', 'password']) {
         const input = field(name);
         input.required = !fromFile[name];
@@ -421,10 +427,8 @@ const BMC = (() => {
       const body = Object.fromEntries(fd.entries());
       body.mgmt_interfaces = [...form.querySelectorAll('[name="mgmt_nic"]:checked')].map(c => c.value);
       body.wipe_all_disks = field('wipe_all_disks').checked;
-      if (body.bond_mode !== '802.3ad') {
-        delete body.bond_lacp_rate;
-        delete body.bond_xmit_hash_policy;
-      }
+      if (body.bond_mode !== '802.3ad') delete body.bond_lacp_rate;
+      if (!XMIT_MODES.includes(body.bond_mode)) delete body.bond_xmit_hash_policy;
       if (body.mode === 'join') {
         delete body.vip;
         delete body.vip_mode;
