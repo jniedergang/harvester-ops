@@ -1716,7 +1716,7 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   (Harvester v1.9) before anything is powered on, and refused with its
   path when it is unknown, badly typed, set twice (by the form and the
   advanced YAML), or owned by the console (`install.iso_url`,
-  `install.mode`, `server_url`, `token`, `os.password`). A
+  `install.automatic`, `install.mode`, `server_url`, `token`, `os.password`). A
   `system_settings.ntp-servers` is refused while the NTP field is set:
   the installer would replace it with the field without a word (seen on
   a real install).

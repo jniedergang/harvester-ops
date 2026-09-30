@@ -1901,7 +1901,8 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   vérifiée contre le schéma de l'installeur (Harvester v1.9) avant toute
   mise sous tension, et refusée avec son chemin quand elle est inconnue,
   mal typée, posée deux fois (par le formulaire et le YAML avancé) ou
-  gardée par la console (`install.iso_url`, `install.mode`, `server_url`,
+  gardée par la console (`install.iso_url`, `install.automatic`,
+  `install.mode`, `server_url`,
   `token`, `os.password`). Un `system_settings.ntp-servers` est refusé tant
   que le champ NTP est rempli : l'installeur le remplacerait par ce champ
   sans rien dire (vu sur une installation réelle).

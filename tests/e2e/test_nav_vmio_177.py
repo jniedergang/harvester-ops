@@ -30,3 +30,16 @@ def test_active_entry_opens_its_folded_group(context, flask_server):
     page.goto(flask_server["base_url"])
     page.wait_for_load_state("networkidle")
     expect(page.locator('#tab-group-vmio .tab[data-tab="forklift"]')).to_be_visible()
+
+
+def test_group_heads_still_fold(page):
+    # Relecture de la 1.77.0 : setTab dépliait le groupe de l'entrée active,
+    # si bien qu'un clic sur la tête ne repliait plus Cluster ni ce groupe.
+    for group in ("cluster", "vmio"):
+        head = page.locator(f'.tab-group-head[data-group="{group}"]')
+        grp = page.locator(f"#tab-group-{group}")
+        before = "expanded" in (grp.get_attribute("class") or "")
+        head.click()
+        assert ("expanded" in (grp.get_attribute("class") or "")) is not before, group
+        head.click()
+        assert ("expanded" in (grp.get_attribute("class") or "")) is before, group

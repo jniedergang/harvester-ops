@@ -113,8 +113,8 @@ Chaque clé est vérifiée contre le schéma de l'installeur de Harvester v1.9
 avant toute mise sous tension. Une clé est refusée, avec son chemin (par
 exemple `os.write_files[2].contnt`), quand elle est inconnue, mal typée,
 posée à la fois par le formulaire et le YAML avancé, ou gardée par la
-console (`install.iso_url`, `install.mode`, `server_url`, `token`,
-`os.password`). Un `system_settings.ntp-servers` est refusé tant que le
+console (`install.iso_url`, `install.automatic`, `install.mode`,
+`server_url`, `token`, `os.password`). Un `system_settings.ntp-servers` est refusé tant que le
 champ NTP est rempli : l'installeur réécrit ce réglage depuis les serveurs
 NTP et l'autre valeur serait perdue sans rien dire.
 

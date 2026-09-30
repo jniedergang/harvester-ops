@@ -107,8 +107,8 @@ Every key is checked against the schema of the Harvester v1.9 installer
 before anything is powered on. A key is refused, with its path (for
 example `os.write_files[2].contnt`), when it is unknown, of the wrong type,
 set both by the form and the advanced YAML, or kept by the console
-(`install.iso_url`, `install.mode`, `server_url`, `token`,
-`os.password`). A `system_settings.ntp-servers` is refused while the NTP
+(`install.iso_url`, `install.automatic`, `install.mode`, `server_url`,
+`token`, `os.password`). A `system_settings.ntp-servers` is refused while the NTP
 field is filled: the installer rewrites that setting from the NTP servers
 and the other value would be lost without a word.
 

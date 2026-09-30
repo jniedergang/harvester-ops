@@ -18,6 +18,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 ### Fixed
 - A `system_settings.ntp-servers` is refused while the NTP field is set: the installer replaces it with that field without a word (seen on a real install).
 - In DHCP, the static address fields of the install window were still displayed.
+- Clicking the head of a menu group folds it again (the entry that opens with it no longer reopens the group).
+- A VLAN of 0 (no VLAN, as the installer reads it) is accepted by the form.
 
 ### Internal
 - `web/harvester_install_schema.py`: the installer schema (from harvester-installer v1.9.0-dev-20260705), build, merge, validation and import split. `harvlab.sh` installs a node from another ISO with extra NICs, a data disk and extra configuration options (bench `bmcfg`).

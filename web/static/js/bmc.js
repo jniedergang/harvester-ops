@@ -326,7 +326,7 @@ const BMC = (() => {
             <label class="bm-xmit" ${tipAttr(tr('bmc.tip.xmit'))}>${esc(tr('bmc.f.xmitHash'))}
               <select name="bond_xmit_hash_policy"><option value=""></option>${optionsHtml(XMIT_POLICIES, '')}</select></label>
             <label ${tipAttr(tr('bmc.tip.vlan'))}>${esc(tr('bmc.f.vlan'))}
-              <input name="vlan_id" type="number" min="1" max="4094" step="1" placeholder="200"></label>
+              <input name="vlan_id" type="number" min="0" max="4094" step="1" placeholder="200"></label>
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.disks'))}</legend>

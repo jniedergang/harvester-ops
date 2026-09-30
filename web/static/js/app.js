@@ -1715,14 +1715,18 @@ const App = (() => {
       if (isGroupHead) {
         const group = t.dataset.group;
         const grp = document.querySelector(`#tab-group-${group}`);
-        if (grp) grp.classList.toggle('expanded');
+        const expanded = grp ? !grp.classList.contains('expanded') : false;
+        if (grp) grp.classList.toggle('expanded', expanded);
         try { localStorage.setItem(`harvester_ops_group_${group}_expanded`,
-          grp.classList.contains('expanded') ? '1' : '0'); } catch {}
+          expanded ? '1' : '0'); } catch {}
         if (!t.dataset.tab) {
           // Pure container — pick the first child's effective main-tab
           const firstChild = grp?.querySelector('.tab-child');
           const targetTab = firstChild?.dataset.tab || `${group}`;
           setTab(targetTab);
+          // v1.77.0 : setTab déplie le groupe de l'entrée active ; un clic
+          // sur la tête doit pourtant pouvoir le replier.
+          if (grp) grp.classList.toggle('expanded', expanded);
           return;
         }
       }

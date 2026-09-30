@@ -4474,7 +4474,13 @@ def _baremetal_install_runner(run, opts):
     tokens.append(iso_token)
     iso_url = f"http://{advertise}:{port}/pxe/iso/{iso_token}.iso"
 
-    cfg_yaml = _harvester_install_config(dict(opts, iso_url=iso_url))
+    # La route a déjà validé ces mêmes champs : rien ne devrait lever ici.
+    # Si cela arrivait quand même, dire l'échec au lieu de laisser le fil
+    # mourir avec la machine allumée et les fichiers encore servis.
+    try:
+        cfg_yaml = _harvester_install_config(dict(opts, iso_url=iso_url))
+    except InstallConfigError as e:
+        return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
     cfg_path.write_text(cfg_yaml)
     cfg_path.chmod(0o600)          # contient un token et un mot de passe
