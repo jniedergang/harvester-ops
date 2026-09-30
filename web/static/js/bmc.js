@@ -193,6 +193,61 @@ const BMC = (() => {
   // -------------------------------------------------------------------------
   // Installation
   // -------------------------------------------------------------------------
+  // Modes d'agrégat acceptés par l'installeur (pkg/config, bond_options.mode)
+  const BOND_MODES = ['active-backup', 'balance-tlb', 'balance-alb', '802.3ad',
+                      'balance-rr', 'balance-xor', 'broadcast'];
+  const LACP_RATES = ['slow', 'fast'];
+  const XMIT_POLICIES = ['layer2', 'layer2+3', 'layer3+4', 'encap2+3', 'encap3+4', 'vlan+srcmac'];
+  // Champs facultatifs qu'un import vide quand le fichier ne les donne pas :
+  // sinon une valeur saisie avant l'import s'ajouterait au fichier en silence.
+  const IMPORT_CLEARED = ['data_disk', 'dns', 'ntp', 'labels', 'modules', 'ssh_keys',
+                          'vlan_id', 'bond_lacp_rate', 'bond_xmit_hash_policy', 'server_url'];
+  const IMPORT_MAX = 256 * 1024;
+
+  // Remarques d'un import, en phrases. Table littérale : chaque clé reste
+  // visible des tests de traduction.
+  function noteText(code) {
+    switch (code) {
+      case 'iso-url-replaced': return tr('bmc.note.isoUrl');
+      case 'join-detected': return tr('bmc.note.join');
+      case 'automatic-ignored': return tr('bmc.note.automatic');
+      case 'bond-default-active-backup': return tr('bmc.note.bondDefault');
+      default: return code;
+    }
+  }
+
+  // Raison d'un refus de chemin (unknown, reserved, conflict, type:<x>,
+  // range:<a-b>, format:<f>...), en phrase.
+  function reasonText(code) {
+    const c = String(code || '');
+    const [kind, detail] = [c.split(':')[0], c.slice(c.indexOf(':') + 1)];
+    switch (kind) {
+      case 'unknown': return tr('bmc.reason.unknown');
+      case 'duplicate': return tr('bmc.reason.duplicate');
+      case 'unknown-setting': return tr('bmc.reason.unknownSetting');
+      case 'reserved': return tr('bmc.reason.reserved');
+      case 'conflict': return tr('bmc.reason.conflict');
+      case 'yaml': return tr('bmc.reason.yaml');
+      case 'type': return tr('bmc.reason.type', { type: detail });
+      case 'range': return tr('bmc.reason.range', { range: detail });
+      case 'format': return tr('bmc.reason.format', { format: detail });
+      default: return c || tr('bmc.reason.refused');
+    }
+  }
+
+  // Liste lisible des chemins refusés : `chemin` : raison.
+  function refusalHtml(title, fields, reasons) {
+    const items = (fields || []).map(p => `<li><code>${esc(p)}</code> : ${
+      esc(reasonText((reasons || {})[p]))}</li>`).join('');
+    return `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(title)}
+      <ul class="bm-paths">${items}</ul></div>`;
+  }
+
+  const optionsHtml = (values, selected) => values.map(v =>
+    `<option value="${esc(v)}"${v === selected ? ' selected' : ''}>${esc(v)}</option>`).join('');
+
+  const normMac = (v) => String(v || '').trim().toLowerCase().replace(/-/g, ':');
+
   async function openInstall(host) {
     const node = lastNodes.find(n => n.host === host) || {};
     let isos = [];
@@ -200,20 +255,34 @@ const BMC = (() => {
     if (!isos.length) { alert(tr('bmc.needIso')); return; }
     // La valeur est la MAC, pas le nom Redfish : sur ces machines les deux
     // cartes s'appellent « System Ethernet Interface », et de toute façon
-    // Redfish ignore le nom que Linux donnera à l'interface.
-    const nicOpts = (node.nics || []).map((n, k) => {
+    // Redfish ignore le nom que Linux donnera à l'interface. Plusieurs cartes
+    // cochées forment un agrégat (v1.77.0).
+    const nicBoxes = (node.nics || []).map((n, k) => {
       const state = n.status ? ' · ' + esc(n.status) : '';
-      return `<option value="${esc(n.mac)}">NIC ${k + 1} · ${esc(n.mac)}${state}</option>`;
+      return `<label class="bm-check"><input type="checkbox" name="mgmt_nic" value="${esc(n.mac)}"${k === 0 ? ' checked' : ''}>
+        NIC ${k + 1} · <code>${esc(n.mac)}</code>${state}</label>`;
     }).join('');
     const isoOpts = isos.map(i => `<option value="${esc(i.name)}">${esc(i.name)}</option>`).join('');
+    const tipAttr = (text) => `class="tip" data-tip="${esc(text)}"`;
 
     const panel = FloatingPanels.open({
       id: `bm-install-${host}`,
       title: `${tr('bmc.install')} · ${host}`,
-      width: 620, height: 640,
+      // Défilement interne : la fenêtre tient dans un écran de 900 px.
+      width: 720, height: Math.max(480, Math.min(860, window.innerHeight - 80)),
       bodyHtml: `
         <form id="bm-install-form" class="capi-form" style="padding:14px;" autocomplete="off">
           <p class="form-hint vm-edit-unverified">${esc(tr('bmc.installWarn'))}</p>
+          <div class="apply-bar bm-config-tools">
+            <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="import"
+                    data-tip="${esc(tr('bmc.importTip'))}">${Icons.svg('upload')} ${esc(tr('bmc.import'))}</button>
+            <input type="file" data-bm="file" accept=".yaml,.yml,.txt,text/yaml,application/x-yaml,text/plain" hidden>
+            <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="preview"
+                    data-tip="${esc(tr('bmc.previewTip'))}">${Icons.svg('preview')} ${esc(tr('bmc.preview'))}</button>
+          </div>
+          <div class="bm-config-msg" id="bm-config-msg" role="status"></div>
+          <input type="hidden" name="mode" value="create">
+          <input type="hidden" name="server_url" value="">
           <fieldset>
             <legend>${esc(tr('bmc.fs.image'))}</legend>
             <label style="grid-column:1/-1;">${esc(tr('bmc.f.iso'))} *
@@ -224,10 +293,6 @@ const BMC = (() => {
             <label>${esc(tr('bmc.f.hostname'))} *
               <input name="hostname" required pattern="[a-z0-9]([-a-z0-9]*[a-z0-9])?"
                      value="harvester-node1"></label>
-            <label>${esc(tr('bmc.f.device'))} *
-              <input name="device" required value="/dev/sda"></label>
-            <label>${esc(tr('bmc.f.mgmt'))} *
-              <select name="mgmt_interface" required>${nicOpts}</select></label>
             <label>${esc(tr('bmc.f.method'))}
               <select name="method" id="bm-method">
                 <option value="static">static</option><option value="dhcp">dhcp</option></select></label>
@@ -237,9 +302,49 @@ const BMC = (() => {
               <input name="subnet_mask" required value="255.255.255.0"></label>
             <label class="bm-static">${esc(tr('bmc.f.gateway'))} *
               <input name="gateway" required placeholder="192.0.2.1"></label>
-            <label>${esc(tr('bmc.f.vip'))} *<input name="vip" required placeholder="192.0.2.100"></label>
+            <label class="bm-create">${esc(tr('bmc.f.vip'))} *<input name="vip" required placeholder="192.0.2.100"></label>
+            <label class="bm-create" ${tipAttr(tr('bmc.tip.vipMode'))}>${esc(tr('bmc.f.vipMode'))}
+              <select name="vip_mode">${optionsHtml(['static', 'dhcp'], 'static')}</select></label>
+          </fieldset>
+          <fieldset>
+            <legend>${esc(tr('bmc.fs.mgmt'))}</legend>
+            <div class="bm-nics tip" data-tip="${esc(tr('bmc.tip.nics'))}">
+              <span class="bm-nics-title">${esc(tr('bmc.f.mgmtNics'))} *</span>
+              ${nicBoxes}
+            </div>
+            <label ${tipAttr(tr('bmc.tip.bondMode'))}>${esc(tr('bmc.f.bondMode'))}
+              <select name="bond_mode" id="bm-bond-mode">
+                <option value="" data-unset hidden>${esc(tr('bmc.f.bondUnset'))}</option>
+                ${optionsHtml(BOND_MODES, 'balance-tlb')}</select></label>
+            <label ${tipAttr(tr('bmc.tip.miimon'))}>${esc(tr('bmc.f.miimon'))}
+              <input name="bond_miimon" type="number" min="0" step="1" value="100"></label>
+            <label class="bm-lacp" ${tipAttr(tr('bmc.tip.lacp'))}>${esc(tr('bmc.f.lacpRate'))}
+              <select name="bond_lacp_rate"><option value=""></option>${optionsHtml(LACP_RATES, '')}</select></label>
+            <label class="bm-lacp" ${tipAttr(tr('bmc.tip.xmit'))}>${esc(tr('bmc.f.xmitHash'))}
+              <select name="bond_xmit_hash_policy"><option value=""></option>${optionsHtml(XMIT_POLICIES, '')}</select></label>
+            <label ${tipAttr(tr('bmc.tip.vlan'))}>${esc(tr('bmc.f.vlan'))}
+              <input name="vlan_id" type="number" min="1" max="4094" step="1" placeholder="200"></label>
+          </fieldset>
+          <fieldset>
+            <legend>${esc(tr('bmc.fs.disks'))}</legend>
+            <label>${esc(tr('bmc.f.device'))} *
+              <input name="device" required value="/dev/sda"></label>
+            <label ${tipAttr(tr('bmc.tip.dataDisk'))}>${esc(tr('bmc.f.dataDisk'))}
+              <input name="data_disk" placeholder="/dev/sdb"></label>
+            <div class="bm-wipe" style="grid-column:1/-1;">
+              <label class="bm-check tip" data-tip="${esc(tr('bmc.tip.wipe'))}">
+                <input type="checkbox" name="wipe_all_disks"> ${esc(tr('bmc.f.wipe'))}</label>
+              <span class="form-hint vm-edit-unverified bm-wipe-warn">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.f.wipeWarn'))}</span>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>${esc(tr('bmc.fs.system'))}</legend>
             <label>${esc(tr('bmc.f.dns'))}<input name="dns" autocomplete="off" placeholder="9.9.9.9, 1.1.1.1"></label>
             <label>${esc(tr('bmc.f.ntp'))}<input name="ntp" autocomplete="off" placeholder="0.suse.pool.ntp.org, 1.suse.pool.ntp.org"></label>
+            <label style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.labels'))}>${esc(tr('bmc.f.labels'))}
+              <textarea name="labels" rows="2" placeholder="topology.kubernetes.io/zone=zone-a"></textarea></label>
+            <label style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.modules'))}>${esc(tr('bmc.f.modules'))}
+              <input name="modules" autocomplete="off" placeholder="rbd, nbd"></label>
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.access'))}</legend>
@@ -253,6 +358,10 @@ const BMC = (() => {
             <label style="grid-column:1/-1;">${esc(tr('bmc.f.extraArgs'))}
               <input name="extra_args" placeholder="console=ttyS1,115200 harvester.install.skipchecks=true">
               <span class="form-hint">${esc(tr('bmc.f.extraArgsHint'))}</span></label>
+            <label style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.advYaml'))}>${esc(tr('bmc.f.advYaml'))}
+              <textarea name="advanced_yaml" class="adv-code bm-adv-yaml" rows="10" spellcheck="false"
+                        autocapitalize="off" placeholder="os:&#10;  write_files:&#10;  - path: /etc/example.conf&#10;    content: |&#10;      key=value"></textarea>
+              <span class="form-hint">${esc(tr('bmc.f.advYamlHint'))}</span></label>
           </fieldset>
           <div class="apply-bar">
             <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
@@ -261,41 +370,235 @@ const BMC = (() => {
           </div>
         </form>`,
     });
+    // Fenêtre déjà ouverte : FloatingPanels la ramène au premier plan sans
+    // refaire son contenu ; rebrancher les écouteurs doublerait chaque envoi.
+    if (panel.el.dataset.bmBound) return;
+    panel.el.dataset.bmBound = '1';
+
+    const form = panel.el.querySelector('#bm-install-form');
+    const field = (name) => form.querySelector(`[name="${name}"]`);
+    const msg = panel.el.querySelector('#bm-config-msg');
+    // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
+    // identifiant ; le navigateur ne les voit jamais.
+    let importId = null;
+    const fromFile = { token: false, password: false };
 
     // En DHCP les trois champs statiques n'ont plus de sens : les cacher
     // ET lever leur `required`, sinon le formulaire refuse de partir sur des
-    // champs invisibles, sans dire lesquels.
+    // champs invisibles, sans dire lesquels. Même règle pour la VIP d'un
+    // nœud qui rejoint un cluster (fichier importé en `join`), et pour les
+    // options propres à 802.3ad.
     const method = panel.el.querySelector('#bm-method');
-    const syncMethod = () => {
+    const bondMode = panel.el.querySelector('#bm-bond-mode');
+    const syncAll = () => {
       const stat = method.value === 'static';
       panel.el.querySelectorAll('.bm-static').forEach(l => {
         l.hidden = !stat;
         l.querySelector('input').required = stat;
       });
+      const creating = field('mode').value !== 'join';
+      panel.el.querySelectorAll('.bm-create').forEach(l => {
+        l.hidden = !creating;
+        const input = l.querySelector('input');
+        if (input) input.required = creating;
+      });
+      const lacp = bondMode.value === '802.3ad';
+      panel.el.querySelectorAll('.bm-lacp').forEach(l => { l.hidden = !lacp; });
+      for (const name of ['token', 'password']) {
+        const input = field(name);
+        input.required = !fromFile[name];
+        input.placeholder = fromFile[name] ? tr('bmc.fromFile') : '';
+      }
     };
-    method.addEventListener('change', syncMethod);
-    syncMethod();
+    method.addEventListener('change', syncAll);
+    bondMode.addEventListener('change', syncAll);
+    syncAll();
 
-    panel.el.querySelector('#bm-install-form').addEventListener('submit', async (ev) => {
-      ev.preventDefault();
-      const fd = new FormData(ev.target);
+    // Corps envoyé à l'aperçu et à l'installation.
+    function collect() {
+      const fd = new FormData(form);
+      fd.delete('mgmt_nic');
       const body = Object.fromEntries(fd.entries());
+      body.mgmt_interfaces = [...form.querySelectorAll('[name="mgmt_nic"]:checked')].map(c => c.value);
+      body.wipe_all_disks = field('wipe_all_disks').checked;
+      if (body.bond_mode !== '802.3ad') {
+        delete body.bond_lacp_rate;
+        delete body.bond_xmit_hash_policy;
+      }
+      if (body.mode === 'join') {
+        delete body.vip;
+        delete body.vip_mode;
+      } else {
+        delete body.server_url;
+      }
+      if (importId) body.import_id = importId;
+      return body;
+    }
+
+    function setSelect(sel, value) {
+      const v = String(value);
+      if (![...sel.options].some(o => o.value === v)) {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = v;
+        sel.appendChild(o);
+      }
+      sel.value = v;
+      // l'option « non renseigné » n'apparaît que si un import l'a demandée
+      const unset = sel.querySelector('option[data-unset]');
+      if (unset && v === '') unset.hidden = false;
+    }
+
+    // Cartes du fichier : une MAC découverte est cochée ; un nom (ens1f0...)
+    // ou une MAC inconnue de Redfish est ajouté, coché, pour être gardé.
+    function setNics(values) {
+      const box = panel.el.querySelector('.bm-nics');
+      box.querySelectorAll('.bm-nic-extra').forEach(e => e.remove());
+      const boxes = [...box.querySelectorAll('[name="mgmt_nic"]')];
+      boxes.forEach(c => { c.checked = false; });
+      (values || []).forEach(v => {
+        const hit = boxes.find(c => normMac(c.value) === normMac(v));
+        if (hit) { hit.checked = true; return; }
+        const l = document.createElement('label');
+        l.className = 'bm-check bm-nic-extra';
+        l.innerHTML = `<input type="checkbox" name="mgmt_nic" value="${esc(v)}" checked>
+          <code>${esc(v)}</code> <span class="form-hint">${esc(tr('bmc.f.nicFromFile'))}</span>`;
+        box.appendChild(l);
+      });
+    }
+
+    function fillFromImport(d) {
+      const f = d.form || {};
+      IMPORT_CLEARED.forEach(k => { const el = field(k); if (el) el.value = ''; });
+      field('wipe_all_disks').checked = false;
+      field('mode').value = 'create';
+      for (const [k, v] of Object.entries(f)) {
+        if (k === 'mgmt_interfaces') { setNics(v); continue; }
+        const el = field(k);
+        if (!el) continue;
+        if (el.type === 'checkbox') el.checked = !!v;
+        else if (el.tagName === 'SELECT') setSelect(el, v == null ? '' : v);
+        else el.value = v == null ? '' : String(v);
+      }
+      field('advanced_yaml').value = d.advanced || '';
+      importId = d.import_id || null;
+      fromFile.token = !!d.has_token;
+      fromFile.password = !!d.has_password;
+      // un secret saisi avant l'import céderait la place au fichier : le vider
+      if (fromFile.token) field('token').value = '';
+      if (fromFile.password) field('password').value = '';
+      syncAll();
+    }
+
+    async function importText(name, text) {
+      msg.innerHTML = '…';
+      try {
+        const r = await fetch('/api/baremetal/config/parse', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.status === 413) {
+          msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.importTooLarge', { max: Math.round((d.max_bytes || IMPORT_MAX) / 1024) }))}</div>`;
+          return;
+        }
+        if (!r.ok) {
+          msg.innerHTML = refusalHtml(tr('bmc.importRefused'), d.fields || d.errors || [], {});
+          return;
+        }
+        fillFromImport(d);
+        const notes = (d.notes || []).map(c => `<li>${esc(noteText(c))}</li>`).join('');
+        msg.innerHTML = `<div class="bm-imported">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.imported', { name }))}
+          ${notes ? `<ul class="bm-notes">${notes}</ul>` : ''}</div>`;
+      } catch (e) {
+        msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</div>`;
+      }
+    }
+
+    const fileInput = panel.el.querySelector('[data-bm="file"]');
+    panel.el.querySelector('[data-bm="import"]').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      const file = fileInput.files && fileInput.files[0];
+      fileInput.value = '';
+      if (!file) return;
+      if (file.size > IMPORT_MAX) {
+        msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.importTooLarge', { max: IMPORT_MAX / 1024 }))}</div>`;
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => importText(file.name, String(reader.result || ''));
+      reader.onerror = () => {
+        msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(file.name)}</div>`;
+      };
+      reader.readAsText(file);
+    });
+
+    // Refus commun à l'aperçu et à l'installation.
+    function refusalFor(d, status) {
+      if (d.error === 'invalid configuration') {
+        return refusalHtml(tr('bmc.refused'), d.fields || [], d.reasons || {});
+      }
+      if (d.error === 'import expired') {
+        importId = null;
+        fromFile.token = fromFile.password = false;
+        syncAll();
+        return `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.importExpired'))}</div>`;
+      }
+      return `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(d.error || status)} ${esc((d.fields || []).join(', '))}</div>`;
+    }
+
+    panel.el.querySelector('[data-bm="preview"]').addEventListener('click', async () => {
+      msg.innerHTML = '…';
+      try {
+        const r = await fetch('/api/baremetal/config/preview', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(collect()),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { msg.innerHTML = refusalFor(d, r.status); return; }
+        msg.innerHTML = '';
+        const pv = FloatingPanels.open({
+          id: `bm-preview-${host}`,
+          title: `${tr('bmc.previewTitle')} · ${host}`,
+          width: 640, height: Math.max(360, Math.min(720, window.innerHeight - 120)),
+          bodyHtml: '',
+        });
+        pv.setBody(`<textarea class="adv-code bm-preview-text tip" readonly spellcheck="false"
+          data-tip="${esc(tr('bmc.tip.previewText'))}"></textarea>`);
+        // .value, jamais innerHTML : le YAML reste du texte
+        pv.body.querySelector('.bm-preview-text').value = d.yaml || '';
+      } catch (e) {
+        msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</div>`;
+      }
+    });
+
+    form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const body = collect();
+      const res = panel.el.querySelector('#bm-install-result');
+      if (!body.mgmt_interfaces.length) {
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.needNic'))}</span>`;
+        return;
+      }
       body.bmc_host = host;
       body.bmc_user = creds.user;
       body.bmc_password = creds.password;
       if (!body.bmc_password) { alert(tr('bmc.needCreds')); return; }
       if (!confirm(tr('bmc.confirmInstall', { host, device: body.device }))) return;
-      const res = panel.el.querySelector('#bm-install-result');
       res.textContent = '…';
       try {
         const r = await fetch('/api/baremetal/install', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         });
-        const d = await r.json();
-        res.innerHTML = r.ok
-          ? `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`
-          : `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)} ${esc((d.fields || []).join(', '))}</span>`;
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) {
+          res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`;
+        } else {
+          msg.innerHTML = refusalFor(d, r.status);
+          res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)}</span>`;
+          msg.scrollIntoView({ block: 'nearest' });
+        }
       } catch (e) {
         res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
       }
