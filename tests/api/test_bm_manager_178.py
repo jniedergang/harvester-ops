@@ -46,3 +46,10 @@ def test_cli_uses_the_manager_of_the_system(monkeypatch):
     bmc._system = SYS
     path, _ = bmc._virtual_cd()
     assert path == "/redfish/v1/Managers/mine/VirtualMedia/Cd"
+
+
+def test_local_ip_ignores_the_bmc_port():
+    """Un BMC écrit `hôte:port` publiait 127.0.0.1 dans l'adresse de l'ISO."""
+    plain = wapp._bm_local_ip_for("192.0.2.10")
+    assert wapp._bm_local_ip_for("192.0.2.10:8446") == plain
+    assert plain != "127.0.0.1"

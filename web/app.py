@@ -5030,6 +5030,14 @@ def _bm_local_ip_for(host):
     """IP locale que le BMC pourra joindre : celle de l'interface qui sert
     à lui parler. Évite de publier 127.0.0.1 dans l'URL de l'ISO."""
     import socket
+    # v1.78.0 : un BMC peut s'écrire `hôte:port` (émulateur Redfish du banc,
+    # BMC derrière une redirection) ; le port n'a rien à faire dans la
+    # résolution, qui échouait et publiait 127.0.0.1.
+    host = str(host)
+    if host.startswith("["):
+        host = host[1:host.index("]")] if "]" in host else host[1:]
+    elif host.count(":") == 1:
+        host = host.split(":", 1)[0]
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect((host, 443))
