@@ -1,0 +1,275 @@
+# Configuration Harvester (NetworkManager), copie anonymisée d'un fichier
+# d'exploitant : même structure, noms et adresses de documentation.
+
+scheme_version: 1
+
+
+token: example-token
+
+os:
+   ssh_authorized_keys:
+     - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyOne operator@example
+     - ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQExampleKeyTwo operator@example
+
+   write_files:
+
+     - path: /etc/NetworkManager/system-connections/mgmt-bond-s1.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=mgmt-bond-s1
+         type=ethernet
+         interface-name=ens1f0np0
+         master=mgmt-bond
+         slave-type=bond
+         autoconnect=true
+         [ethernet]
+         mtu=1500
+
+     - path: /etc/NetworkManager/system-connections/mgmt-bond-s2.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=mgmt-bond-s2
+         type=ethernet
+         interface-name=ens15f0np0
+         master=mgmt-bond
+         slave-type=bond
+         autoconnect=true
+         [ethernet]
+         mtu=1500
+
+     - path: /etc/NetworkManager/system-connections/mgmt-bond.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=mgmt-bond
+         type=bond
+         interface-name=mgmt-bond
+         autoconnect=true
+         [bond]
+         mode=802.3ad
+         miimon=100
+         lacp_rate=fast
+         xmit_hash_policy=layer2+3
+         [ethernet]
+         mtu=1500
+         [ipv4]
+         method=manual
+         address1=192.0.2.11/26
+         route1=192.0.2.64/26,192.0.2.1
+         route2=192.0.2.128/26,192.0.2.1
+         route3=203.0.113.0/27,192.0.2.1
+         route4=203.0.113.40/32,192.0.2.1
+         route5=203.0.113.41/32,192.0.2.1
+         route6=203.0.113.42/32,192.0.2.1
+         [ipv6]
+         method=disabled
+
+     - path: /etc/NetworkManager/system-connections/stor-bond-s1.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=stor-bond-s1
+         type=ethernet
+         interface-name=ens1f2np2
+         master=stor-bond
+         slave-type=bond
+         autoconnect=true
+         [ethernet]
+         mtu=9000
+
+     - path: /etc/NetworkManager/system-connections/stor-bond-s2.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=stor-bond-s2
+         type=ethernet
+         interface-name=ens15f2np2
+         master=stor-bond
+         slave-type=bond
+         autoconnect=true
+         [ethernet]
+         mtu=9000
+
+     - path: /etc/NetworkManager/system-connections/stor-bond.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=stor-bond
+         type=bond
+         interface-name=stor-bond
+         autoconnect=true
+         [bond]
+         mode=802.3ad
+         miimon=100
+         lacp_rate=fast
+         xmit_hash_policy=layer3+4
+         [ethernet]
+         mtu=9000
+         [ipv4]
+         method=disabled
+         [ipv6]
+         method=disabled
+
+     - path: /etc/NetworkManager/system-connections/stor-bond.114.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=stor-bond.114
+         type=vlan
+         interface-name=stor-bond.114
+         autoconnect=true
+         [vlan]
+         parent=stor-bond
+         id=114
+         [ethernet]
+         mtu=9000
+         [ipv4]
+         method=manual
+         address1=198.51.100.11/26
+         route1=198.51.100.64/26,198.51.100.1
+         route2=198.51.100.128/26,198.51.100.1
+         [ipv6]
+         method=disabled
+
+     - path: /etc/NetworkManager/system-connections/ens1f3np3.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=ens1f3np3
+         type=ethernet
+         interface-name=ens1f3np3
+         autoconnect=true
+         [ethernet]
+         mtu=1500
+         [ipv4]
+         method=disabled
+         [ipv6]
+         method=disabled
+
+     - path: /etc/NetworkManager/system-connections/ens1f3np3.201.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=ens1f3np3.201
+         type=vlan
+         interface-name=ens1f3np3.201
+         autoconnect=true
+         [vlan]
+         parent=ens1f3np3
+         id=201
+         [ethernet]
+         mtu=1500
+         [ipv4]
+         method=manual
+         address1=203.0.113.70/27
+         route1=203.0.113.96/28,203.0.113.65
+         route2=203.0.113.112/28,203.0.113.65
+         route3=203.0.113.50/32,203.0.113.65
+         route4=203.0.113.51/32,203.0.113.65
+         route5=203.0.113.52/32,203.0.113.65
+         [ipv6]
+         method=disabled
+
+     - path: /etc/NetworkManager/system-connections/ens1f3np3.204.nmconnection
+       owner: root:root
+       permissions: '0600'
+       content: |
+         [connection]
+         id=ens1f3np3.204
+         type=vlan
+         interface-name=ens1f3np3.204
+         autoconnect=true
+         [vlan]
+         parent=ens1f3np3
+         id=204
+         [ethernet]
+         mtu=1500
+         [ipv4]
+         method=manual
+         address1=203.0.113.140/27
+         [ipv6]
+         method=disabled
+
+     # sshd attend le réseau : sinon il démarre avant que l'adresse de
+     # gestion existe et ListenAddress échoue
+     - path: /etc/systemd/system/sshd.service.d/override.conf
+       owner: root:root
+       permissions: '0644'
+       content: |
+         [Unit]
+         Wants=network-online.target
+         After=network-online.target
+
+     # sshd n'écoute que sur l'adresse de gestion du nœud
+     - path: /etc/ssh/sshd_config.d/00-custom.conf
+       owner: root:root
+       permissions: '0644'
+       content: |
+         ListenAddress 192.0.2.11
+
+   persistent_state_paths:
+     - /var/lib/rook
+     - /var/lib/ceph
+
+   hostname: hv-node-01
+
+   modules:
+     - rbd
+     - nbd
+
+   dns_nameservers:
+     - 203.0.113.66
+     - 203.0.113.97
+     - 203.0.113.113
+
+   ntp_servers:
+     - 203.0.113.66
+     - 203.0.113.97
+     - 203.0.113.113
+
+   password: example-password
+
+   labels:
+     topology.kubernetes.io/zone: zone-a
+     harvester.cattle.io/nic-profile: generic-1u
+
+install:
+   mode: create
+
+   management_interface:
+     interfaces:
+       - name: ens1f1np1
+       - name: ens15f1np1
+     bond_options:
+       mode: 802.3ad
+       miimon: 100
+       lacp_rate: fast
+       xmit_hash_policy: layer3+4
+     method: static
+     ip: 203.0.113.200
+     subnet_mask: 255.255.255.224
+     gateway: 203.0.113.193
+     vlan_id: 200
+
+   device: /dev/disk/by-path/pci-0000:02:00.0-nvme-1
+   data_disk: /dev/sda
+   wipe_all_disks: true
+
+   iso_url: http://203.0.113.67/harvester/harvester-amd64.iso
+   vip: 203.0.113.220
+   vip_mode: static
+
+
+system_settings:
+   auto-disk-provision-paths: "/dev/sd*"

@@ -65,6 +65,8 @@ import yaml
 import markdown
 import y_py as Y
 import pxe_server
+import harvester_install_schema as _his
+from harvester_install_schema import InstallConfigError, split_imported_config  # noqa: F401
 import vnc_mux
 import volume_health
 import node_maintenance
@@ -4302,71 +4304,13 @@ HARVESTER_INSTALL_TIMEOUT = int(
 def _harvester_install_config(opts):
     """Rend la configuration d'installation Harvester (YAML).
 
-    Volontairement écrite à la main plutôt que par un moteur de gabarit :
-    la structure est courte, et une clé mal placée ici coûte une
-    réinstallation complète."""
-    def esc(v):
-        v = str(v)
-        return v if re.fullmatch(r"[A-Za-z0-9._:/@-]+", v) else json.dumps(v)
-
-    L = ["scheme_version: 1"]
-    joining = opts.get("mode") == "join"
-    # Champ de PREMIER niveau (HarvesterConfig.ServerURL). Placé sous
-    # `install` jusqu'en 1.44.1, il y était ignoré : un nœud ne pouvait pas
-    # rejoindre un cluster.
-    if joining:
-        L.append(f"server_url: {esc(opts['server_url'])}")
-    L.append(f"token: {esc(opts['token'])}")
-    L.append("os:")
-    L.append(f"  hostname: {esc(opts['hostname'])}")
-    if opts.get("password"):
-        L.append(f"  password: {esc(opts['password'])}")
-    keys = [k.strip() for k in (opts.get("ssh_keys") or "").splitlines() if k.strip()]
-    if keys:
-        L.append("  ssh_authorized_keys:")
-        L.extend(f"    - {json.dumps(k)}" for k in keys)
-    ntp = [n.strip() for n in (opts.get("ntp") or "").split(",") if n.strip()]
-    if ntp:
-        L.append("  ntp_servers:")
-        L.extend(f"    - {esc(n)}" for n in ntp)
-    dns = [d.strip() for d in (opts.get("dns") or "").split(",") if d.strip()]
-    if dns:
-        L.append("  dns_nameservers:")
-        L.extend(f"    - {esc(d)}" for d in dns)
-
-    L.append("install:")
-    L.append(f"  mode: {esc(opts.get('mode', 'create'))}")
-    L.append(f"  device: {esc(opts['device'])}")
-    # Obligatoire en mode automatique — l'installeur refuse la
-    # configuration sans, avec « iso_url is required in automatic
-    # installation », même quand l'image est déjà montée en média virtuel.
-    if opts.get("iso_url"):
-        L.append(f"  iso_url: {esc(opts['iso_url'])}")
-    L.append("  management_interface:")
-    L.append("    interfaces:")
-    # Désigner la carte par son ADRESSE MAC quand on l'a. Redfish ne publie
-    # pas le nom que Linux donnera à l'interface — sur les XL170r les deux
-    # NICs s'appellent toutes deux « System Ethernet Interface » — alors que
-    # la MAC, elle, identifie sans ambiguïté et survit au renommage.
-    iface = str(opts["mgmt_interface"]).strip()
-    if re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", iface):
-        L.append(f"      - hwAddr: {esc(iface.lower().replace('-', ':'))}")
-    else:
-        L.append(f"      - name: {esc(iface)}")
-    method = opts.get("method", "dhcp")
-    L.append(f"    method: {esc(method)}")
-    if method == "static":
-        L.append(f"    ip: {esc(opts['ip'])}")
-        L.append(f"    subnet_mask: {esc(opts['subnet_mask'])}")
-        L.append(f"    gateway: {esc(opts['gateway'])}")
-    L.append(f"    bond_options:")
-    L.append(f"      mode: {esc(opts.get('bond_mode', 'balance-tlb'))}")
-    L.append("      miimon: 100")
-    # La VIP appartient au cluster créé, pas à un nœud qui le rejoint.
-    if not joining:
-        L.append(f"  vip: {esc(opts['vip'])}")
-        L.append(f"  vip_mode: {esc(opts.get('vip_mode', 'static'))}")
-    return "\n".join(L) + "\n"
+    Construite en dictionnaire depuis les champs du formulaire, fusionnée
+    avec le YAML avancé (`advanced_yaml`), validée contre le schéma de
+    l'installeur (harvester_install_schema) puis sérialisée. Une clé mal
+    placée ici coûte une réinstallation complète : toute clé inconnue,
+    réservée à la console ou posée des deux côtés lève InstallConfigError
+    avec son chemin."""
+    return _his.dump_install_config(_his.render_install_config(opts))
 
 
 def _bm_wait_api(vip, deadline, run, step):
