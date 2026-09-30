@@ -53,3 +53,31 @@ def test_local_ip_ignores_the_bmc_port():
     plain = wapp._bm_local_ip_for("192.0.2.10")
     assert wapp._bm_local_ip_for("192.0.2.10:8446") == plain
     assert plain != "127.0.0.1"
+
+
+# Agencement Redfish 2020.4+ (vu sur l'émulateur Redfish du banc) : le lien
+# `VirtualMedia` du gestionnaire mène sous le System, et
+# `<gestionnaire>/VirtualMedia/` répond 404.
+MODERN = {
+    "/redfish/v1/Systems/": {"Members": [{"@odata.id": SYS}]},
+    SYS: {"Id": "target", "Links": {"ManagedBy": [{"@odata.id": "/redfish/v1/Managers/mine"}]},
+          "VirtualMedia": {"@odata.id": SYS + "/VirtualMedia"}},
+    "/redfish/v1/Managers/": {"Members": [{"@odata.id": "/redfish/v1/Managers/mine"}]},
+    "/redfish/v1/Managers/mine": {"VirtualMedia": {"@odata.id": SYS + "/VirtualMedia"}},
+    SYS + "/VirtualMedia": {"Members": [{"@odata.id": SYS + "/VirtualMedia/Cd"}]},
+    SYS + "/VirtualMedia/Cd": {"MediaTypes": ["CD", "DVD"]},
+}
+
+
+def test_console_follows_the_virtual_media_link_under_the_system(monkeypatch):
+    monkeypatch.setattr(wapp, "_redfish_get", lambda host, path, u, p, timeout=8: MODERN.get(path))
+    path, vm = wapp._redfish_virtualmedia_cd("bmc", "u", "p")
+    assert path == SYS + "/VirtualMedia/Cd" and vm["MediaTypes"]
+
+
+def test_cli_follows_the_virtual_media_link_under_the_system(monkeypatch):
+    bmc = bm_discover.RedfishBmc("bmc", "u", "p")
+    monkeypatch.setattr(bmc, "_get", lambda path: MODERN.get(path))
+    bmc._system = SYS
+    path, _ = bmc._virtual_cd()
+    assert path == SYS + "/VirtualMedia/Cd"

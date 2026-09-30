@@ -482,13 +482,26 @@ class RedfishBmc:
                 mgr = ref["@odata.id"]
                 break
         mgr = mgr or self._first_member("/redfish/v1/Managers/")
-        if not mgr:
-            return None, None
-        coll = self._get(mgr.rstrip("/") + "/VirtualMedia/") or {}
-        for m in coll.get("Members") or []:
-            vm = self._get(m["@odata.id"])
-            if vm and {"CD", "DVD"} & {t.upper() for t in vm.get("MediaTypes") or []}:
-                return m["@odata.id"], vm
+        # Suivre les liens publiés (System d'abord, Redfish 2020.4+, puis le
+        # gestionnaire), le chemin historique `<gestionnaire>/VirtualMedia/`
+        # seulement en repli (même règle que la console, v1.78.0).
+        system = self._get(self._system) if self._system else None
+        manager = self._get(mgr) if mgr else None
+        candidates = []
+        for doc in (system, manager):
+            link = ((doc or {}).get("VirtualMedia") or {}).get("@odata.id")
+            if link and link not in candidates:
+                candidates.append(link)
+        if mgr:
+            legacy = mgr.rstrip("/") + "/VirtualMedia/"
+            if legacy.rstrip("/") not in [c.rstrip("/") for c in candidates]:
+                candidates.append(legacy)
+        for cpath in candidates:
+            coll = self._get(cpath) or {}
+            for m in coll.get("Members") or []:
+                vm = self._get(m["@odata.id"])
+                if vm and {"CD", "DVD"} & {t.upper() for t in vm.get("MediaTypes") or []}:
+                    return m["@odata.id"], vm
         return None, None
 
     def profile(self):

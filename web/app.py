@@ -2088,12 +2088,40 @@ def _redfish_manager_path(host, user, pwd, system_path=None):
     return members[0]["@odata.id"] if members else None
 
 
+def _vm_collections(system, system_path, manager, manager_path):
+    """Collections VirtualMedia candidates, dans l'ordre : lien du System
+    (Redfish 2020.4 et suivants placent le média virtuel sous le système),
+    lien du gestionnaire, puis le chemin historique `<gestionnaire>/
+    VirtualMedia/` (iLO 4). v1.78.0, vu en réel : un gestionnaire dont le
+    lien `VirtualMedia` mène sous `/Systems/<id>/` était déclaré « sans
+    média virtuel » parce qu'on fabriquait le chemin au lieu de le suivre."""
+    out = []
+    for doc in (system, manager):
+        link = ((doc or {}).get("VirtualMedia") or {}).get("@odata.id")
+        if link and link not in out:
+            out.append(link)
+    if manager_path:
+        legacy = manager_path.rstrip("/") + "/VirtualMedia/"
+        if legacy.rstrip("/") not in [c.rstrip("/") for c in out]:
+            out.append(legacy)
+    return out
+
+
 def _redfish_virtualmedia_cd(host, user, pwd, manager_path=None):
     """Renvoie (chemin, ressource) du lecteur virtuel acceptant un CD/DVD."""
-    mp = manager_path or _redfish_manager_path(host, user, pwd)
-    if not mp:
-        return None, None
-    coll = _redfish_get(host, mp.rstrip("/") + "/VirtualMedia/", user, pwd, timeout=6)
+    sp = _redfish_system_path(host, user, pwd)
+    system = _redfish_get(host, sp, user, pwd, timeout=6) if sp else None
+    mp = manager_path or _managed_by(system) or _redfish_manager_path(host, user, pwd, sp)
+    manager = _redfish_get(host, mp, user, pwd, timeout=6) if mp else None
+    for cpath in _vm_collections(system, sp, manager, mp):
+        vm_path, vm = _vm_cd_in(host, user, pwd, cpath)
+        if vm_path:
+            return vm_path, vm
+    return None, None
+
+
+def _vm_cd_in(host, user, pwd, collection_path):
+    coll = _redfish_get(host, collection_path, user, pwd, timeout=6)
     for m in (coll or {}).get("Members", []) or []:
         vm = _redfish_get(host, m["@odata.id"], user, pwd, timeout=6)
         if not vm:
