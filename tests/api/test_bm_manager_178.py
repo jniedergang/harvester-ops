@@ -81,3 +81,28 @@ def test_cli_follows_the_virtual_media_link_under_the_system(monkeypatch):
     bmc._system = SYS
     path, _ = bmc._virtual_cd()
     assert path == SYS + "/VirtualMedia/Cd"
+
+
+def test_slow_insert_is_waited_for(monkeypatch):
+    """Vu en réel : l'émulateur Redfish ne répond à l'insertion qu'après
+    avoir téléchargé l'ISO ; la console abandonnait au bout de 20 s et
+    retirait l'image en plein téléchargement."""
+    state = {"inserted": False}
+    vm = lambda: {"MediaTypes": ["CD"], "Inserted": state["inserted"], "Image": "http://x/i.iso",
+                  "Actions": {"#VirtualMedia.InsertMedia": {"target": "/vm/insert"}}}
+    monkeypatch.setattr(wapp, "_redfish_virtualmedia_cd", lambda *a, **k: ("/vm", vm()))
+    monkeypatch.setattr(wapp, "_redfish_send",
+                        lambda *a, **k: (False, 0, "The read operation timed out"))
+    def fake_sleep(_):
+        state["inserted"] = True
+    monkeypatch.setattr(wapp.time, "sleep", fake_sleep)
+    ok, detail, _ = wapp._bm_media_insert("bmc", "u", "p", "http://x/i.iso")
+    assert ok and "slow" in detail
+
+
+def test_refused_insert_is_not_waited_for(monkeypatch):
+    monkeypatch.setattr(wapp, "_redfish_virtualmedia_cd", lambda *a, **k: ("/vm", {
+        "MediaTypes": ["CD"], "Actions": {"#VirtualMedia.InsertMedia": {"target": "/vm/insert"}}}))
+    monkeypatch.setattr(wapp, "_redfish_send", lambda *a, **k: (False, 400, "bad image"))
+    ok, detail, _ = wapp._bm_media_insert("bmc", "u", "p", "http://x/i.iso")
+    assert not ok and detail == "bad image"
