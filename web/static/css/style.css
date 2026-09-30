@@ -5156,6 +5156,37 @@ td.fk-reason { max-width: 260px; }
 .bm-imported { color: var(--accent); }
 .bm-paths, .bm-notes { margin: 4px 0 0; padding-left: 20px; color: var(--text); }
 .bm-paths code { color: var(--text); }
+/* 1.78.0 : tableau des disques de l'installation bare-metal */
+.capi-form .bm-disks-fs > .bm-disks-head,
+.capi-form .bm-disks-fs > .bm-disc-status,
+.capi-form .bm-disks-fs > .bm-disks,
+.capi-form .bm-disks-fs > .bm-pools { grid-column: 1 / -1; }
+.bm-disks-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.bm-disks-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.bm-disc-status { font-size: 12px; }
+.bm-disc-status:empty, .bm-pools:empty { display: none; }
+.bm-disks { overflow-x: auto; }
+.bm-disk-table { font-size: 12px; }
+.bm-disk-table td, .bm-disk-table th { padding: 4px 6px; vertical-align: middle; }
+.bm-disk-table td.bm-num { white-space: nowrap; text-align: right; }
+.bm-disk-table td.bm-disk-path code { word-break: break-all; }
+.bm-disk-table td.bm-serial { white-space: nowrap; }
+.bm-disk-table td.bm-disk-role { white-space: nowrap; }
+.bm-disk-table select, .bm-disk-table input.bm-pool-tag { font-size: 12px; padding: 2px 4px; }
+.bm-disk-table input.bm-pool-tag { width: 90px; margin-left: 4px; }
+.bm-disk-table input.bm-invalid { border-color: var(--danger); }
+.bm-disk-table tr.bm-disk-used > td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.bm-disk-table tr.bm-disk-bad > td { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.bm-disk-table tr.bm-disk-notes > td { border-top: none; padding-top: 0; }
+.bm-disk-refused { color: var(--danger); margin-right: 10px; }
+.bm-disk-hint { color: var(--warn); margin-right: 10px; font-size: 12px; }
+.bm-pools { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.bm-pools-title { color: var(--text-dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
+.bm-pool-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.bm-pool-line input[type="number"] { width: 56px; }
+.capi-form .bm-raid { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.bm-raid-vols { font-size: 12px; margin-top: 4px; }
+.bm-nic-linux:empty { display: none; }
 .capi-form textarea.bm-adv-yaml { min-height: 160px; resize: vertical; white-space: pre; }
 .bm-preview-text { box-sizing: border-box; width: 100%; height: 100%; min-height: 300px; resize: none;
   border: 0; padding: 10px; background: var(--bg); color: var(--text); white-space: pre; }

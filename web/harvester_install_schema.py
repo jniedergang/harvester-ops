@@ -726,12 +726,18 @@ def _plain_list(v, sep):
                     and sep not in x and "\n" not in x for x in v))
 
 
-def split_imported_config(text):
+def split_imported_config(text, known_disks=None):
     """Découpe un fichier de configuration en ce que le formulaire sait
     montrer (`form`), le reste en YAML avancé (`advanced`), les secrets
     (`secrets` : jeton, mot de passe, à garder côté serveur, jamais renvoyés
     au navigateur), des remarques (`notes`, codes) et les chemins refusés
-    (`errors` ; rien n'est alors rempli)."""
+    (`errors` ; rien n'est alors rempli).
+
+    `known_disks` (1.78.0) : noms des disques de l'inventaire de la machine
+    (chemins stables, liens, /dev/<nom>). `install.wipe_disks_list` ne passe
+    au formulaire (cases « effacer » du tableau des disques) que si chacun
+    de ses chemins y figure ; sinon il reste dans le YAML avancé, avec la
+    remarque `wipe-list-advanced`."""
     empty = {"form": {}, "advanced": "", "secrets": {}, "notes": [], "errors": []}
     try:
         data = parse_yaml_mapping(text, "file")
@@ -792,6 +798,13 @@ def split_imported_config(text):
         form["data_disk"] = inst.pop("data_disk")
     if inst.get("wipe_all_disks") is True:
         form["wipe_all_disks"] = inst.pop("wipe_all_disks")
+    wipe_list = inst.get("wipe_disks_list")
+    if wipe_list:
+        known = set(known_disks or ())
+        if _plain_list(wipe_list, ",") and all(w in known for w in wipe_list):
+            form["wipe_disks_list"] = list(inst.pop("wipe_disks_list"))
+        else:
+            notes.append("wipe-list-advanced")
     if mode != "join":
         # la VIP n'est écrite par le formulaire qu'en création
         if isinstance(inst.get("vip"), str):

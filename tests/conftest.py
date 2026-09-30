@@ -140,6 +140,9 @@ def flask_server(test_config):
         "HARVESTER_OPS_CAPI_BUNDLE": str(test_config["root"] / "dist" / "capi-bundle.tar.gz"),
         # v1.75.0 : le magasin d'archives VDDK du serveur de test reste le sien
         "HARVESTER_OPS_VDDK_DIR": str(test_config["root"] / "vddk"),
+        # v1.78.0 : inventaires de découverte du serveur de test, hors de
+        # ceux de la console de dev
+        "HARVESTER_OPS_INVENTORY_DIR": str(test_config["root"] / "inventory"),
         # Force no auth in tests — point to a path that won't exist, and ask
         # for the open mode explicitly (v1.57.0 : sinon la console attend son
         # premier administrateur)

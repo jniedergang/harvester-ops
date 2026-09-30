@@ -5024,7 +5024,20 @@ def api_baremetal_config_parse():
         return jsonify({"error": "missing fields", "fields": ["text"]}), 400
     if len(text.encode("utf-8", "surrogatepass")) > _BM_IMPORT_MAX:
         return jsonify({"error": "file too large", "max_bytes": _BM_IMPORT_MAX}), 413
-    out = split_imported_config(text)
+    # 1.78.0 : avec l'inventaire de la machine, la liste des disques à
+    # effacer du fichier rejoint les cases du tableau des disques
+    host = data.get("bmc_host")
+    known = None
+    if isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9.:\[\]-]{1,253}", host):
+        doc = _bmd.load_inventory(INVENTORY_DIR, host)
+        if doc:
+            known = set()
+            for d in _bmdisks.parse_discovery(doc.get("raw") or "")["disks"]:
+                links = d.get("links") or {}
+                known.update([d.get("stable_path"), "/dev/" + str(d.get("name") or "")]
+                             + list(links.get("by_id") or []) + list(links.get("by_path") or []))
+            known.discard(None)
+    out = split_imported_config(text, known)
     if out["errors"]:
         return jsonify({"error": "invalid configuration", "fields": out["errors"],
                         "errors": out["errors"]}), 400
