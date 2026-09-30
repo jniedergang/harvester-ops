@@ -4856,6 +4856,28 @@ def _bm_boot_once_target(host, user, pwd, sys_path, target):
     return ok, detail
 
 
+def _bm_power_cycle(host, user, pwd, sys_path, run, sleep=None, now=None, off_wait=120):
+    """Arrêt franc (si allumée), attente de l'état éteint, puis mise sous
+    tension. Rend (ok, détail)."""
+    sleep, now = sleep or time.sleep, now or time.time
+    state = (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState")
+    if state != "Off":
+        ok, detail = _bm_reset(host, user, pwd, sys_path, "ForceOff")
+        if not ok:
+            return False, f"power off refused: {detail}"
+        deadline = now() + off_wait
+        while now() < deadline:
+            if getattr(run, "_cancel", False):
+                return False, "cancelled by operator"
+            sleep(5)
+            if (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState") == "Off":
+                break
+        else:
+            return False, f"the machine did not power off within {off_wait} s"
+    ok, detail = _bm_reset(host, user, pwd, sys_path, "On")
+    return (True, "") if ok else (False, f"power on refused: {detail}")
+
+
 def _bm_wait_power_off(host, user, pwd, sys_path, deadline, run, step, sleep=None, now=None):
     """Attend que la machine soit éteinte (fin de l'installation, v1.78.0).
     False à l'échéance ou sur annulation."""
@@ -5115,7 +5137,12 @@ def _baremetal_install_runner(run, opts):
     step("bmc-boot", "done", "prochaine amorce : CD virtuel")
 
     step("power", "running", "redémarrage sur l'installeur")
-    ok, detail = _bm_reset(host, kc_user, kc_pwd, sys_path, "ForceRestart")
+    # v1.78.0 : un cycle complet (arrêt puis mise sous tension) plutôt qu'un
+    # redémarrage à chaud : certains BMC ne branchent le média virtuel, ou
+    # n'appliquent l'amorce programmée, qu'à une mise sous tension (vu en
+    # réel sur le banc Redfish : le CD inséré machine allumée n'était pas vu
+    # et la machine repartait sur son ancien système).
+    ok, detail = _bm_power_cycle(host, kc_user, kc_pwd, sys_path, run)
     if not ok:
         return fail("power", detail[:200])
     keep_creds[0] = True

@@ -150,7 +150,7 @@ dock the moment you confirm, and streams its steps.
 | `serve` | Publishes the ISO and the config behind one-off tokens |
 | `bmc-insert` | Mounts the ISO as virtual media, and waits for the BMC's answer (up to 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Sets a **one-shot** boot on `Cd` |
-| `power` | Resets the machine onto the ISO |
+| `power` | Powers the machine off, then on, onto the ISO: a cold boot, since some BMCs attach the virtual media or apply the one-shot boot only at power-on |
 | `wait-install` | The installer powers the machine **off** when it is done (`install.power_off`, set by the console) |
 | `boot-disk` | Ejects the media, sets a one-shot boot on the disk, powers the machine on |
 | `wait-api` | Waits for the Harvester API on the VIP |

@@ -306,3 +306,32 @@ def test_console_key_goes_to_the_canonical_list_whatever_the_spelling():
     adv = _y.safe_load(out["advanced_yaml"])
     assert adv["os"]["ssh_authorized_keys"][-1] == "ssh-ed25519 AAAAconsole console"
     assert "ssh_keys" not in out
+
+
+
+def test_power_cycle_is_a_cold_boot(monkeypatch):
+    """Vu en réel : un CD inséré machine allumée n'était pas vu après un
+    redémarrage à chaud ; l'installation fait donc arrêt puis allumage."""
+    states = iter(["On", "On", "Off"])
+    calls = []
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": next(states, "Off")})
+    monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
+    ok, _ = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
+    assert ok and calls == ["ForceOff", "On"]
+
+
+def test_power_cycle_of_a_machine_already_off_only_powers_on(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": "Off"})
+    monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
+    ok, _ = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
+    assert ok and calls == ["On"]
+
+
+def test_power_cycle_gives_up_when_the_machine_stays_on(monkeypatch):
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": "On"})
+    monkeypatch.setattr(wapp, "_bm_reset", lambda *a, **k: (True, ""))
+    t = [0.0]
+    ok, why = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(),
+                                   sleep=lambda s: t.__setitem__(0, t[0] + s), now=lambda: t[0])
+    assert not ok and "did not power off" in why

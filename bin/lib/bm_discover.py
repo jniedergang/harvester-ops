@@ -339,9 +339,20 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
             raise DiscoveryError("bmc-boot", detail[:200])
         step("bmc-boot", "done", "prochaine amorce : CD virtuel")
 
-        reset = "ForceRestart" if was_on else "On"
         step("power", "running", "redémarrage sur l'ISO" if was_on else "allumage sur l'ISO")
-        ok, detail = bmc.reset(reset)
+        # v1.78.0 : un cycle complet plutôt qu'un redémarrage à chaud (même
+        # règle que l'installation) : certains BMC ne branchent le média ou
+        # n'appliquent l'amorce qu'à une mise sous tension.
+        if was_on:
+            ok, detail = bmc.reset("ForceOff")
+            if not ok:
+                raise DiscoveryError("power", detail[:200])
+            off_deadline = clock() + 120
+            while clock() < off_deadline and bmc.power_state() != "Off":
+                sleep(5)
+            if bmc.power_state() != "Off":
+                raise DiscoveryError("power", "the machine did not power off within 120 s")
+        ok, detail = bmc.reset("On")
         if not ok:
             raise DiscoveryError("power", detail[:200])
         powered = True

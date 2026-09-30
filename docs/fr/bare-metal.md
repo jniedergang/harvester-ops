@@ -157,7 +157,7 @@ dans le dock dès la confirmation et diffuse ses étapes.
 | `serve` | Publie l'ISO et la configuration derrière des jetons à usage unique |
 | `bmc-insert` | Monte l'ISO en média virtuel, et attend la réponse du BMC (jusqu'à 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Programme une amorce **unique** sur `Cd` |
-| `power` | Redémarre la machine sur l'ISO |
+| `power` | Éteint puis rallume la machine sur l'ISO : un démarrage à froid, certains BMC ne branchant le média virtuel ou n'appliquant l'amorce unique qu'à la mise sous tension |
 | `wait-install` | L'installeur **éteint** la machine quand il a fini (`install.power_off`, posé par la console) |
 | `boot-disk` | Éjecte le média, programme une amorce unique sur le disque, rallume la machine |
 | `wait-api` | Attend l'API Harvester sur la VIP |

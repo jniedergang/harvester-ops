@@ -513,7 +513,11 @@ def test_discovery_runs_end_to_end(served, tmp_path):
     bmc2 = FakeBmc(fake, power="On")
     bmd.run(_opts(tmp_path, served), bmc2, px, fake, lambda *a: None)
     assert len(fake.calls) == 2 and fake.upload_url != first
-    assert "reset:ForceRestart" in bmc2.calls
+    # une machine allumée : cycle complet, arrêt puis mise sous tension
+    # (v1.78.0, certains BMC ne branchent le média qu'à l'allumage)
+    i_off = bmc2.calls.index("reset:ForceOff")
+    assert bmc2.calls[i_off + 1] == "reset:On"
+    assert "reset:ForceRestart" not in bmc2.calls
 
 
 def test_an_inventory_from_another_machine_is_not_stored(served, tmp_path):
