@@ -146,7 +146,16 @@ class _Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"      # nécessaire pour les Range/keep-alive
 
     def log_message(self, fmt, *args):          # noqa: A003
-        log.info("pxe %s %s", self.address_string(), fmt % args)
+        # Le chemin porte le jeton (ISO, configuration qui contient le jeton
+        # du cluster et le mot de passe, dépôt d'inventaire) : ne journaliser
+        # que la méthode, le type de ressource et le code, jamais le chemin
+        # (relecture de la 1.78.0, fuite vérifiée dans le journal).
+        req = getattr(self, "requestline", "") or ""
+        method = req.split(" ", 1)[0] if req else "-"
+        path = getattr(self, "path", "") or ""
+        kind = path.split("/")[2] if path.startswith("/pxe/") and path.count("/") >= 3 else "-"
+        code = args[1] if fmt.startswith('"%s" %s') and len(args) > 1 else ""
+        log.info("pxe %s %s %s %s", self.address_string(), method, kind, code)
 
     def _deny(self, code=404):
         self.send_response(code)

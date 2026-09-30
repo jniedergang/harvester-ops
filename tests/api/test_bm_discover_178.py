@@ -423,7 +423,7 @@ def test_binding_verdicts(raw, serial, uuid, verdict):
     got, message = bmd.check_binding(raw, serial, uuid)
     assert got == verdict, message
     if verdict == "mismatch":
-        assert "another machine" in message
+        assert "autre machine" in message
 
 
 # ---------------------------------------------------------------------------
@@ -788,3 +788,20 @@ def test_the_command_line_says_when_the_port_is_taken(tmp_path):
         sk.close()
     assert r.returncode == 1
     assert f"cannot listen on port {port}" in r.stderr and "Traceback" not in r.stderr
+
+
+def test_tokens_never_reach_the_log(served, tmp_path, caplog):
+    """Relecture de la 1.78.0 : le journal du serveur d'artefacts recopiait le
+    chemin de chaque requête, jeton compris (dont celui de la configuration
+    d'installation, qui porte le jeton du cluster et le mot de passe)."""
+    import logging
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("token: x\n")
+    token = px.issue(cfg, "config")
+    with caplog.at_level(logging.INFO, logger="harvester-ops.pxe"):
+        assert _get(served, f"/pxe/config/{token}.yaml") == 200
+        assert _get(served, "/pxe/config/not-a-token.yaml") == 404
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert token not in text
+    assert "not-a-token" not in text
+    assert "config" in text and "200" in text

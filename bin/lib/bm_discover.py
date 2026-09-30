@@ -206,13 +206,13 @@ def check_binding(raw, bmc_serial, bmc_uuid):
     checked = []
     if ds and rs:
         if ds.lower() != rs.lower():
-            return "mismatch", (f"the inventory comes from another machine: serial {ds} "
-                                f"seen by Linux, {rs} given by the BMC")
+            return "mismatch", (f"l'inventaire vient d'une autre machine : série {ds} "
+                                f"vue par Linux, {rs} donnée par le BMC")
         checked.append(f"série {rs}")
     if du and ru:
         if du not in (ru, _uuid_swapped(ru)):
-            return "mismatch", (f"the inventory comes from another machine: UUID {du} "
-                                f"seen by Linux, {ru} given by the BMC")
+            return "mismatch", (f"l'inventaire vient d'une autre machine : UUID {du} "
+                                f"vu par Linux, {ru} donné par le BMC")
         checked.append(f"UUID {ru}")
     if checked:
         return "ok", "même machine (" + ", ".join(checked) + ")"
