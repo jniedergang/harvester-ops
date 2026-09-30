@@ -15,6 +15,13 @@ l'action d'installation :
 
     GET /pxe/iso/<token>.iso     l'image remasterisée
     GET /pxe/config/<token>.yaml la configuration Harvester du node
+    POST /pxe/inventory/<token>  dépôt de l'inventaire d'un démarrage de
+                                 découverte (1.78.0) : 1 Mio au plus, un seul
+                                 envoi accepté, écrit en 0600
+
+Le script de découverte n'est PAS servi ici : il est déposé DANS l'ISO
+(`/run/initramfs/live/discover.sh`), ce qui évite toute commande entre
+guillemets sur la ligne noyau et tout téléchargement avant le réseau.
 
 Les jetons sont aléatoires, à durée de vie limitée, révoqués dès la fin de
 l'installation. Aucun listing de répertoire, aucun autre chemin : ce n'est
@@ -33,19 +40,32 @@ from pathlib import Path
 
 log = logging.getLogger("harvester-ops.pxe")
 
-# token -> {"path": Path, "kind": "iso"|"config", "expires": epoch, "hits": int}
+# token -> {"path": Path, "kind": "iso"|"config"|"inventory", "expires": epoch, "hits": int}
 _TOKENS = {}
 _LOCK = threading.Lock()
 _SERVER = None
 _THREAD = None
 
 DEFAULT_TTL = 4 * 3600      # une installation dépasse rarement 30 min
+INVENTORY_MAX = 1024 * 1024  # un inventaire réel pèse quelques dizaines de Kio
 
 
-def issue(path, kind, ttl=DEFAULT_TTL):
-    """Enregistre un artefact et renvoie son jeton."""
-    token = secrets.token_urlsafe(24)
+class TokenInUse(Exception):
+    """Le jeton demandé est déjà armé (une autre action l'utilise)."""
+
+
+def issue(path, kind, ttl=DEFAULT_TTL, token=None):
+    """Enregistre un artefact et renvoie son jeton.
+
+    `token` arme un jeton choisi par l'appelant au lieu d'en tirer un :
+    c'est le cas du dépôt d'inventaire, dont l'adresse est gravée dans une
+    ISO de découverte mise en cache. Il n'est accepté que pendant une
+    découverte (armé, puis consommé ou révoqué) ; déjà armé, il est refusé."""
     with _LOCK:
+        if token is None:
+            token = secrets.token_urlsafe(24)
+        elif token in _TOKENS and _TOKENS[token]["expires"] >= time.time():
+            raise TokenInUse(kind)
         _TOKENS[token] = {
             "path": Path(path),
             "kind": kind,
@@ -82,6 +102,36 @@ def _resolve(token, kind):
         return entry["path"]
 
 
+def _consume(token, kind):
+    """Comme `_resolve`, mais retire le jeton : un seul dépôt par jeton."""
+    with _LOCK:
+        entry = _TOKENS.get(token)
+        if not entry or entry["kind"] != kind:
+            return None
+        _TOKENS.pop(token, None)
+        if entry["expires"] < time.time():
+            return None
+        return entry["path"]
+
+
+def _write_private(target, data):
+    """Écrit en 0600 dès la création (jamais lisible par d'autres, même un
+    instant), puis renomme : le lecteur ne voit jamais un fichier partiel."""
+    target = Path(target)
+    tmp = target.with_name(f".{target.name}.{secrets.token_hex(4)}.part")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = "harvester-ops-pxe"
     protocol_version = "HTTP/1.1"      # nécessaire pour les Range/keep-alive
@@ -100,13 +150,42 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):                           # noqa: N802
         self._serve(head_only=False)
 
+    def do_POST(self):                          # noqa: N802
+        """Dépôt d'un inventaire : seul verbe d'écriture, seul type admis."""
+        token, kind = self._match()
+        if not token or kind != "inventory":
+            return self._deny(404)
+        try:
+            length = int(self.headers.get("Content-Length") or -1)
+        except ValueError:
+            length = -1
+        if length < 0:
+            return self._deny(411)
+        if length > INVENTORY_MAX:
+            # refusé avant lecture ; la connexion est fermée plutôt que de
+            # laisser traîner un corps qu'on n'a pas lu
+            self.close_connection = True
+            return self._deny(413)
+        body = self.rfile.read(length)
+        target = _consume(token, "inventory")
+        if not target:
+            return self._deny(404)
+        try:
+            _write_private(target, body)
+        except OSError:
+            return self._deny(500)
+        self.send_response(204)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def _match(self):
-        """Analyse le chemin. Rien d'autre que les deux formes attendues."""
+        """Analyse le chemin. Rien d'autre que les formes attendues."""
         path = self.path.split("?", 1)[0]
         for prefix, suffix, kind in (("/pxe/iso/", ".iso", "iso"),
-                                     ("/pxe/config/", ".yaml", "config")):
+                                     ("/pxe/config/", ".yaml", "config"),
+                                     ("/pxe/inventory/", "", "inventory")):
             if path.startswith(prefix) and path.endswith(suffix):
-                token = path[len(prefix):-len(suffix)]
+                token = path[len(prefix):len(path) - len(suffix)]
                 # un jeton est urlsafe-base64 : pas de / ni de .., donc pas
                 # de traversée possible, mais on refuse explicitement.
                 if "/" in token or ".." in token or not token:
@@ -116,7 +195,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _serve(self, head_only):
         token, kind = self._match()
-        if not token:
+        # un jeton de dépôt ne se lit jamais
+        if not token or kind == "inventory":
             return self._deny(404)
         target = _resolve(token, kind)
         if not target or not target.is_file():

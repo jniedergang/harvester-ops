@@ -117,7 +117,8 @@ install_scripts() {
     ln -sf "$PREFIX/harvester-capi.py" "$PREFIX/harvester-capi"
     ln -sf "$PREFIX/harvester-network.py" "$PREFIX/harvester-network"
     ln -sf "$PREFIX/harvester-resources.py" "$PREFIX/harvester-resources"
-    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources}"
+    ln -sf "$PREFIX/harvester-baremetal.py" "$PREFIX/harvester-baremetal"
+    ok "Scripts installed: harvester-{shutdown,startup,status,vm-transfer,forklift,capi,network,resources,baremetal}"
 }
 
 # -----------------------------------------------------------------------------

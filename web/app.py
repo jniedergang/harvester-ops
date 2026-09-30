@@ -137,6 +137,8 @@ BIN_DIR = _resolve_bin_dir()
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import longhorn_room  # noqa: E402
+import bm_discover as _bmd  # noqa: E402
+import baremetal_disks as _bmdisks  # noqa: E402
 HTPASSWD_PATH = Path(os.environ.get("HARVESTER_OPS_HTPASSWD", "/etc/harvester-ops/htpasswd"))
 LOG_DIR = Path(os.environ.get("HARVESTER_OPS_LOG_DIR", "/var/log/harvester-ops"))
 DOCS_DIR = Path(os.environ.get("HARVESTER_OPS_DOCS", str(Path(__file__).resolve().parent.parent / "docs")))
@@ -4478,6 +4480,64 @@ def _bm_apply_pools(opts, kubeconfig, run, step):
     return code, last_error
 
 
+def _bm_remaster_stream(cmd, step):
+    """Lance `harvester-iso-remaster.sh` et relaie ses STEP_EVENT comme
+    étapes de l'action. Renvoie son code de sortie."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    for line in proc.stderr:
+        line = line.strip()
+        if line.startswith("STEP_EVENT|"):
+            parts = line.split("|", 3)
+            if len(parts) == 4:
+                step(parts[1], parts[2], parts[3])
+    return proc.wait()
+
+
+def _bm_media_insert(host, user, pwd, image_url):
+    """Monte `image_url` dans le lecteur virtuel CD du BMC (éjecte d'abord
+    une image restée montée). Renvoie (ok, détail, ressource du lecteur)."""
+    _, vm_res = _redfish_virtualmedia_cd(host, user, pwd)
+    if (vm_res or {}).get("Inserted"):
+        tgt, _ = _redfish_action_target(vm_res, "EjectVirtualMedia", "EjectMedia")
+        if tgt:
+            _redfish_send(host, tgt, user, pwd, "POST", {})
+            time.sleep(3)
+            _, vm_res = _redfish_virtualmedia_cd(host, user, pwd)
+    target, is_oem = _redfish_action_target(vm_res or {}, "InsertVirtualMedia",
+                                            "InsertMedia")
+    # le dialecte OEM refuse Inserted/WriteProtected (vu sur node3)
+    payload = ({"Image": image_url} if is_oem
+               else {"Image": image_url, "Inserted": True, "WriteProtected": True})
+    ok, _, detail = _redfish_send(host, target, user, pwd, "POST", payload)
+    return ok, detail, vm_res
+
+
+def _bm_media_eject(host, user, pwd, vm_res=None):
+    if vm_res is None:
+        _, vm_res = _redfish_virtualmedia_cd(host, user, pwd)
+    tgt, _ = _redfish_action_target(vm_res or {}, "EjectVirtualMedia", "EjectMedia")
+    if tgt:
+        _redfish_send(host, tgt, user, pwd, "POST", {})
+
+
+def _bm_boot_once_cd(host, user, pwd, sys_path):
+    """`Once` : après ce démarrage, la machine reprend son ordre normal."""
+    ok, _, detail = _redfish_send(
+        host, sys_path, user, pwd, "PATCH",
+        {"Boot": {"BootSourceOverrideTarget": "Cd",
+                  "BootSourceOverrideEnabled": "Once"}})
+    return ok, detail
+
+
+def _bm_reset(host, user, pwd, sys_path, reset_type):
+    ok, _, detail = _redfish_send(
+        host, f"{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/",
+        user, pwd, "POST", {"ResetType": reset_type})
+    return ok, detail
+
+
 def _baremetal_install_runner(run, opts):
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
@@ -4609,51 +4669,26 @@ def _baremetal_install_runner(run, opts):
            "--work-dir", str(_iso_work_dir())]
     if opts.get("extra_args"):
         cmd += ["--extra-args", opts["extra_args"]]
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
-    for line in proc.stderr:
-        line = line.strip()
-        if line.startswith("STEP_EVENT|"):
-            parts = line.split("|", 3)
-            if len(parts) == 4:
-                step(parts[1], parts[2], parts[3])
-    if proc.wait() != 0:
+    if _bm_remaster_stream(cmd, step) != 0:
         return fail("remaster", "ISO remastering failed")
     step("serve", "done", f"artefacts publiés sur {advertise}:{port}")
 
     # --- média virtuel + amorce + allumage ---
     step("bmc-insert", "running", "insertion dans le lecteur virtuel")
-    vm_path, vm_res = _redfish_virtualmedia_cd(host, kc_user, kc_pwd)
-    if (vm_res or {}).get("Inserted"):
-        tgt, _ = _redfish_action_target(vm_res, "EjectVirtualMedia", "EjectMedia")
-        if tgt:
-            _redfish_send(host, tgt, kc_user, kc_pwd, "POST", {})
-            time.sleep(3)
-            _, vm_res = _redfish_virtualmedia_cd(host, kc_user, kc_pwd)
-    target, is_oem = _redfish_action_target(vm_res or {}, "InsertVirtualMedia",
-                                            "InsertMedia")
-    payload = ({"Image": iso_url} if is_oem
-               else {"Image": iso_url, "Inserted": True, "WriteProtected": True})
-    ok, _, detail = _redfish_send(host, target, kc_user, kc_pwd, "POST", payload)
+    ok, detail, vm_res = _bm_media_insert(host, kc_user, kc_pwd, iso_url)
     if not ok:
         return fail("bmc-insert", detail[:200])
     step("bmc-insert", "done", "image montée")
 
     step("bmc-boot", "running", "amorce unique sur le lecteur virtuel")
     sys_path = profile.get("system_path")
-    ok, _, detail = _redfish_send(
-        host, sys_path, kc_user, kc_pwd, "PATCH",
-        {"Boot": {"BootSourceOverrideTarget": "Cd",
-                  "BootSourceOverrideEnabled": "Once"}})
+    ok, detail = _bm_boot_once_cd(host, kc_user, kc_pwd, sys_path)
     if not ok:
         return fail("bmc-boot", detail[:200])
     step("bmc-boot", "done", "prochaine amorce : CD virtuel")
 
     step("power", "running", "redémarrage sur l'installeur")
-    ok, _, detail = _redfish_send(
-        host, f"{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/",
-        kc_user, kc_pwd, "POST", {"ResetType": "ForceRestart"})
+    ok, detail = _bm_reset(host, kc_user, kc_pwd, sys_path, "ForceRestart")
     if not ok:
         return fail("power", detail[:200])
     step("power", "done", "machine redémarrée")
@@ -4678,10 +4713,7 @@ def _baremetal_install_runner(run, opts):
         step("wait-api", "done", f"API disponible sur {opts['vip']}")
 
     # --- ménage : ne pas laisser un ISO monté ni un artefact exposé ---
-    tgt, _ = _redfish_action_target(vm_res or {}, "EjectVirtualMedia",
-                                    "EjectMedia")
-    if tgt:
-        _redfish_send(host, tgt, kc_user, kc_pwd, "POST", {})
+    _bm_media_eject(host, kc_user, kc_pwd, vm_res)
     pxe_server.revoke(*tokens)
     out_iso.unlink(missing_ok=True)
     out_iso.with_suffix(out_iso.suffix + ".sha256").unlink(missing_ok=True)
@@ -4945,6 +4977,155 @@ def api_baremetal_install():
     return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
 
 
+# --- démarrage de découverte (v1.78.0) ---------------------------------------
+#
+# Le déroulé vit dans bin/lib/bm_discover.py, partagé avec la ligne de
+# commande (`harvester-baremetal.py discover`). La console lui fournit son
+# accès au BMC, construit sur ses propres fonctions Redfish, et son serveur
+# d'artefacts ; il lance lui-même bin/harvester-iso-remaster.sh.
+INVENTORY_DIR = Path(os.environ.get(
+    "HARVESTER_OPS_INVENTORY_DIR",
+    str(Path.home() / ".local/share/harvester-ops/inventory"),
+))
+
+
+class _BmDiscoverBmc:
+    """Accès au BMC attendu par `bm_discover.run`, sur les fonctions Redfish
+    de la console. Le mot de passe reste dans cet objet."""
+
+    def __init__(self, host, user, pwd):
+        self.host, self._user, self._pwd = host, user, pwd
+        self._sys = None
+
+    def profile(self):
+        p = _bmc_discover_one(self.host, self._user, self._pwd)
+        self._sys = p.get("system_path")
+        return p
+
+    def insert(self, url):
+        ok, detail, _ = _bm_media_insert(self.host, self._user, self._pwd, url)
+        return ok, detail
+
+    def eject(self):
+        _bm_media_eject(self.host, self._user, self._pwd)
+
+    def boot_once_cd(self):
+        return _bm_boot_once_cd(self.host, self._user, self._pwd, self._sys)
+
+    def reset(self, reset_type):
+        return _bm_reset(self.host, self._user, self._pwd, self._sys, reset_type)
+
+    def power_state(self):
+        s = _redfish_get(self.host, self._sys, self._user, self._pwd, timeout=8)
+        return (s or {}).get("PowerState")
+
+
+def _baremetal_discover_runner(run, opts):
+    host = opts["bmc_host"]
+    persisted = [time.time()]
+
+    def step(sid, status, msg=""):
+        run.emit({"type": "step", "step_id": sid, "status": status,
+                  "message": msg, "ts": time.time()})
+        if time.time() - persisted[0] > 60:
+            persisted[0] = time.time()
+            try:
+                _actions_persist(run)
+            except Exception:
+                pass
+
+    def finish(status, code, summary=None):
+        if summary:
+            run.error_summary = summary[:300]
+        run.exit_code = code
+        run.status = status
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": status, "exit_code": code,
+                  "ts": time.time()})
+        run.close()
+
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    src_iso = _iso_dir() / opts["iso"]
+    if not src_iso.is_file():
+        step("remaster", "error", f"ISO not found: {opts['iso']}")
+        return finish("error", 1, f"ISO not found: {opts['iso']}")
+    try:
+        port = pxe_server.start()
+        res = _bmd.run(
+            {"host": host, "src_iso": src_iso, "cache_dir": _iso_dir() / "discover",
+             "work_dir": _iso_work_dir(), "store_dir": INVENTORY_DIR,
+             "remaster_script": BIN_DIR / "harvester-iso-remaster.sh",
+             "advertise": opts.get("advertise_host") or _bm_local_ip_for(host),
+             "port": port, "extra_args": opts.get("extra_args", ""),
+             **{k: opts[k] for k in ("inventory_timeout", "poweroff_timeout", "poll")
+                if k in opts}},
+            _BmDiscoverBmc(host, opts["bmc_user"], opts["bmc_password"]),
+            pxe_server, _bm_remaster_stream, step,
+            cancelled=lambda: getattr(run, "_cancel", False))
+    except _bmd.DiscoveryError as e:
+        cancelled = isinstance(e, _bmd.Cancelled) or getattr(run, "_cancel", False)
+        step(e.step, "error", str(e)[:300])
+        return finish("cancelled" if cancelled else "error", 3 if cancelled else 1, str(e))
+    except Exception as e:                      # jamais de détail qui porterait un secret
+        step("discover", "error", type(e).__name__)
+        return finish("error", 1, type(e).__name__)
+    inv = _bmdisks.parse_discovery(res["raw"])
+    step("parse", "done", f"{len(inv['disks'])} disque(s), {len(inv['nics'])} carte(s) réseau")
+    finish("done", 0)
+
+
+def _bm_inventory_view(doc):
+    """Inventaire enregistré, analysé à la lecture (le brut ne sort pas)."""
+    inv = _bmdisks.parse_discovery(doc.get("raw") or "")
+    return {"source": doc.get("source", "discovery"), "at": doc.get("at"),
+            "system_serial": doc.get("system_serial"),
+            "disks": inv["disks"], "nics": inv["nics"]}
+
+
+@app.route("/api/baremetal/discover", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_baremetal_discover():
+    """Démarrage de découverte : l'ISO démarre une fois, renvoie ce que
+    Linux voit (disques, liens stables, cartes) et éteint la machine."""
+    data = request.get_json(force=True, silent=True) or {}
+    missing = [k for k in ("bmc_host", "bmc_user", "bmc_password", "iso")
+               if not data.get(k)]
+    if missing:
+        return jsonify({"error": "missing fields", "fields": missing}), 400
+    if not re.fullmatch(r"[A-Za-z0-9.:\[\]-]{1,253}", str(data["bmc_host"])):
+        return jsonify({"error": "invalid bmc_host", "fields": ["bmc_host"]}), 400
+    safe_iso = _safe_artifact_name(str(data["iso"]))
+    if not safe_iso:
+        return jsonify({"error": "invalid ISO name", "fields": ["iso"]}), 400
+    try:
+        extra = _bmd.clean_extra_args(data.get("extra_args"))
+    except ValueError:
+        return jsonify({"error": "invalid extra kernel arguments",
+                        "fields": ["extra_args"]}), 400
+    opts = {"bmc_host": data["bmc_host"], "bmc_user": str(data["bmc_user"]),
+            "bmc_password": str(data["bmc_password"]), "iso": safe_iso,
+            "extra_args": extra}
+    # Le label de l'action ne porte que l'hôte.
+    action_id = track_action(f"baremetal-discover:{opts['bmc_host']}",
+                             "(local)", _baremetal_discover_runner, opts)
+    return jsonify({"action_id": action_id, "host": opts["bmc_host"]}), 202
+
+
+@app.route("/api/baremetal/inventory/<host>", methods=["GET"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_baremetal_inventory(host):
+    """Dernier inventaire de découverte reçu pour ce BMC, ou 404."""
+    if not re.fullmatch(r"[A-Za-z0-9.:\[\]-]{1,253}", host):
+        return jsonify({"error": "invalid host"}), 400
+    doc = _bmd.load_inventory(INVENTORY_DIR, host)
+    if not doc:
+        return jsonify({"error": "no inventory for this host"}), 404
+    return jsonify(_bm_inventory_view(doc))
+
+
 # =============================================================================
 # Magasin d'ISO d'installation (v1.18.0)
 #
@@ -5120,6 +5301,9 @@ def api_iso_delete(name):
         return jsonify({"error": "not found"}), 404
     path.unlink()
     path.with_suffix(path.suffix + ".sha256").unlink(missing_ok=True)
+    # v1.78.0 : son ISO de découverte en cache (7 Go) part avec elle
+    for suffix in (".discover.iso", ".discover.json"):
+        (_iso_dir() / "discover" / f"{path.stem}{suffix}").unlink(missing_ok=True)
     return jsonify({"deleted": safe})
 
 

@@ -146,6 +146,35 @@ already up. The configuration generated for a join was checked by
 installing two nodes into a three-node test cluster; the Redfish-driven
 flow in join mode has not been run on real hardware yet.
 
+### Reading the disks first: the discovery boot (API and CLI)
+
+Some BMCs publish no disks at all (HPE iLO 4 publishes none), so the console
+cannot tell which disk to install on. `POST /api/baremetal/discover`
+(`bmc_host`, `bmc_user`, `bmc_password`, `iso`, optional `extra_args`) boots
+the Harvester ISO once, with a small script of the console, and waits for
+the machine to send back what Linux sees: disks with their stable
+`by-path`/`by-id` links, partitions, NICs. The machine then powers itself
+off. `GET /api/baremetal/inventory/<bmc_host>` returns the parsed inventory
+(`source`, `at`, `system_serial`, `disks`, `nics`), or 404.
+
+- The script sits on the ISO itself (`/discover.sh`, mounted at
+  `/run/initramfs/live`); the kernel line carries only its path
+  (`systemd.run=`) and never `harvester.install.*`: nothing is installed.
+  It carries no secret, only the upload address, whose token accepts a
+  single upload of 1 MiB at most, and only while a discovery runs.
+- The remastered discovery ISO is cached beside the ISO store
+  (`discover/`) and reused as long as the source ISO, the script and the
+  console address stay the same. Deleting the source ISO removes it.
+- Waits: 15 min for the inventory, then 5 min for the machine to power
+  itself off; after that it is forced off and the step says so. The
+  virtual media is ejected in every case.
+- Inventories are kept per system serial (read over Redfish), mode 0600,
+  under `~/.local/share/harvester-ops/inventory`
+  (`HARVESTER_OPS_INVENTORY_DIR`).
+- Same flow on the command line, password never on argv:
+  `harvester-baremetal discover --bmc <host> --user <user> --password-file <0600 file> --iso <path>`
+  (or `--password-stdin`).
+
 ---
 
 ## Why the ISO gets remastered

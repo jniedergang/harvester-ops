@@ -60,7 +60,8 @@ RUN chmod +x /usr/local/bin/harvester-*.sh /usr/local/bin/harvester-*.py /usr/lo
     ln -sf /usr/local/bin/harvester-forklift.py /usr/local/bin/harvester-forklift && \
     ln -sf /usr/local/bin/harvester-capi.py /usr/local/bin/harvester-capi && \
     ln -sf /usr/local/bin/harvester-network.py /usr/local/bin/harvester-network && \
-    ln -sf /usr/local/bin/harvester-resources.py /usr/local/bin/harvester-resources
+    ln -sf /usr/local/bin/harvester-resources.py /usr/local/bin/harvester-resources && \
+    ln -sf /usr/local/bin/harvester-baremetal.py /usr/local/bin/harvester-baremetal
 
 # Copy web app (with bundled wheels for airgap)
 COPY web/                /opt/harvester-ops/web/

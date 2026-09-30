@@ -31,6 +31,13 @@
 #   harvester-iso-remaster.sh --src <iso> --out <iso> --config-url <url>
 #                             [--extra-args "..."] [--label COS_LIVE]
 #                             [--work-dir <path>]
+#   harvester-iso-remaster.sh --src <iso> --out <iso> --kernel-args "<...>"
+#                             [--add-file <src>:<chemin iso>:<mode>]...
+#
+# v1.78.0 : `--kernel-args` remplace les arguments zéro-touch
+# (`harvester.install.*`, `ip=dhcp rd.neednet=1`) par ceux donnés, et
+# `--add-file` dépose un fichier dans l'image avec son mode (Rock Ridge) :
+# c'est ainsi que le démarrage de découverte embarque son script.
 #
 # Émet des STEP_EVENT sur stderr pour s'intégrer au suivi SSE de la console.
 
@@ -48,15 +55,22 @@ else            # utilisable seul (tests)
 fi
 
 SRC="" ; OUT="" ; CONFIG_URL="" ; EXTRA_ARGS="" ; LABEL="COS_LIVE" ; WORK_DIR=""
+KERNEL_ARGS="" ; ADD_FILES=()
 
 usage() {
 cat <<'EOF'
 Usage: harvester-iso-remaster.sh --src <iso> --out <iso> --config-url <url>
+       harvester-iso-remaster.sh --src <iso> --out <iso> --kernel-args "<...>"
+                                 [--add-file <src>:<iso path>:<mode>]...
 
 Options:
       --src <path>          ISO Harvester officiel (lecture seule)
       --out <path>          ISO à produire (écrasé s'il existe)
       --config-url <url>    URL de la configuration d'installation
+      --kernel-args "<...>" arguments noyau à la place des arguments
+                            d'installation automatique (pas de --config-url)
+      --add-file <src>:<iso path>:<mode>
+                            dépose un fichier dans l'image (mode octal, ex. 0755)
       --extra-args "<...>"  arguments noyau supplémentaires
       --label <nom>         label de volume (défaut COS_LIVE — ne pas changer
                             sans savoir : le rootfs est monté par ce label)
@@ -72,6 +86,8 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --config-url) CONFIG_URL="$2"; shift 2 ;;
         --extra-args) EXTRA_ARGS="$2"; shift 2 ;;
+        --kernel-args) KERNEL_ARGS="$2"; shift 2 ;;
+        --add-file) ADD_FILES+=("$2"); shift 2 ;;
         --label) LABEL="$2"; shift 2 ;;
         --work-dir) WORK_DIR="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
@@ -79,7 +95,30 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$SRC" || -z "$OUT" || -z "$CONFIG_URL" ]] && { usage; exit 1; }
+[[ -z "$SRC" || -z "$OUT" ]] && { usage; exit 1; }
+# l'un OU l'autre : une installation automatique, ou des arguments donnés
+if [[ -n "$CONFIG_URL" && -n "$KERNEL_ARGS" ]] || [[ -z "$CONFIG_URL" && -z "$KERNEL_ARGS" ]]; then
+    log_error "--config-url ou --kernel-args, l'un des deux"; usage; exit 1
+fi
+# Les arguments finissent entre guillemets sur une ligne grub : aucun
+# guillemet, antislash, dollar ni saut de ligne qui permettrait d'en sortir.
+for a in "$KERNEL_ARGS" "$EXTRA_ARGS"; do
+    if [[ "$a" == *[\"\$\\\`\']* || "$a" == *$'\n'* ]]; then
+        log_error "caractère interdit dans les arguments noyau"; exit 1
+    fi
+done
+# Fichiers à déposer : source lisible, chemin absolu dans l'image, mode octal.
+ADD_MAPS=() ; ADD_PATHS=()
+for spec in "${ADD_FILES[@]}"; do
+    IFS=':' read -r a_src a_dst a_mode a_rest <<< "$spec"
+    if [[ -n "$a_rest" || ! -f "$a_src" || "$a_dst" != /* || "$a_dst" == *..* \
+          || ! "$a_mode" =~ ^0?[0-7]{3}$ ]]; then
+        log_error "--add-file invalide : attendu <src>:<chemin iso absolu>:<mode octal>"
+        exit 1
+    fi
+    ADD_MAPS+=(-map "$a_src" "$a_dst" -chmod "$a_mode" "$a_dst" --)
+    ADD_PATHS+=("$a_dst")
+done
 [[ ! -f "$SRC" ]] && { log_error "ISO source introuvable : $SRC"; exit 1; }
 command -v xorriso >/dev/null || { log_error "xorriso absent"; exit 1; }
 
@@ -107,8 +146,12 @@ fi
 # monté par le paramètre `ip=` du noyau ; en démarrant depuis un média
 # virtuel, personne ne l'a fait, et l'installeur reste bloqué sans jamais
 # émettre une requête. Ces deux paramètres font monter DHCP dans l'initrd.
-KARGS="harvester.install.automatic=true harvester.install.config_url=${CONFIG_URL}"
-KARGS="$KARGS ip=dhcp rd.neednet=1"
+if [[ -n "$KERNEL_ARGS" ]]; then
+    KARGS="$KERNEL_ARGS"
+else
+    KARGS="harvester.install.automatic=true harvester.install.config_url=${CONFIG_URL}"
+    KARGS="$KARGS ip=dhcp rd.neednet=1"
+fi
 [[ -n "$EXTRA_ARGS" ]] && KARGS="$KARGS $EXTRA_ARGS"
 
 # --- 1. localiser le grub d'installation et son point d'injection ---------
@@ -187,7 +230,7 @@ rm -f "$OUT"
 # C'est le point clé : l'image El Torito de cet ISO est cachée (pas un
 # fichier de l'arborescence), donc irreproductible par un mkisofs.
 xorriso -indev "$SRC" -outdev "$OUT" -boot_image any replay \
-        -volid "$LABEL" "${MAPS[@]}" -commit >/dev/null 2>&1
+        -volid "$LABEL" "${MAPS[@]}" "${ADD_MAPS[@]}" -commit >/dev/null 2>&1
 emit_event "iso-build" "done" "$(basename "$OUT") ($(du -h "$OUT" | cut -f1))"
 
 # --- 4. vérifier ce qui casse silencieusement ----------------------------
@@ -206,10 +249,18 @@ if ! xorriso -indev "$OUT" -report_el_torito plain 2>&1 | grep -q 'El Torito boo
 fi
 CHECK_ISO="${MAPS[2]}"          # chemin ISO du dernier fichier remplacé
 xorriso -osirrox on -indev "$OUT" -extract "$CHECK_ISO" "$WORK/verify.cfg" >/dev/null 2>&1
-if ! grep -qF "$CONFIG_URL" "$WORK/verify.cfg" 2>/dev/null; then
+# le premier argument suffit à prouver que la ligne posée est dans l'image
+EXPECT="${CONFIG_URL:-${KARGS%% *}}"
+if ! grep -qF -- "$EXPECT" "$WORK/verify.cfg" 2>/dev/null; then
     emit_event "iso-verify" "error" "les arguments d'installation ne sont pas dans l'image"
     exit 1
 fi
+for a_dst in "${ADD_PATHS[@]}"; do
+    if ! xorriso -indev "$OUT" -lsdl "$a_dst" 2>/dev/null | grep -q '^-'; then
+        emit_event "iso-verify" "error" "fichier absent de l'image : $a_dst"
+        exit 1
+    fi
+done
 (cd "$(dirname "$OUT")" && sha256sum "$(basename "$OUT")") > "$OUT.sha256"
 emit_event "iso-verify" "done" "label $GOT_LABEL, amorce EFI et arguments présents"
 log_ok "ISO prêt : $OUT"

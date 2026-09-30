@@ -153,6 +153,37 @@ pour une jonction a été vérifiée en installant deux nœuds dans un cluster
 de test à trois nœuds ; le déroulé par Redfish en mode jonction n'a pas
 encore été exécuté sur du vrai matériel.
 
+### Lire les disques d'abord : le démarrage de découverte (API et CLI)
+
+Certains BMC ne publient aucun disque (un iLO 4 n'en publie aucun) : la
+console ne peut alors pas dire sur quel disque installer.
+`POST /api/baremetal/discover` (`bmc_host`, `bmc_user`, `bmc_password`,
+`iso`, `extra_args` facultatif) démarre une fois l'ISO Harvester avec un
+petit script de la console, et attend que la machine renvoie ce que Linux
+voit : disques avec leurs liens stables `by-path`/`by-id`, partitions,
+cartes réseau. La machine s'éteint ensuite d'elle-même.
+`GET /api/baremetal/inventory/<bmc_host>` rend l'inventaire analysé
+(`source`, `at`, `system_serial`, `disks`, `nics`), ou 404.
+
+- Le script est sur l'ISO elle-même (`/discover.sh`, monté en
+  `/run/initramfs/live`) ; la ligne noyau ne porte que son chemin
+  (`systemd.run=`) et jamais `harvester.install.*` : rien n'est installé.
+  Il ne porte aucun secret, seulement l'adresse de dépôt, dont le jeton
+  n'accepte qu'un envoi de 1 Mio au plus, et seulement pendant une
+  découverte.
+- L'ISO de découverte est mise en cache à côté du magasin d'ISO
+  (`discover/`) et reprise tant que l'ISO source, le script et l'adresse de
+  la console ne changent pas. Supprimer l'ISO source la supprime.
+- Attentes : 15 min pour l'inventaire, puis 5 min pour que la machine
+  s'éteigne d'elle-même ; au-delà elle est éteinte de force et l'étape le
+  dit. Le média virtuel est éjecté dans tous les cas.
+- Les inventaires sont gardés par numéro de série du système (lu par
+  Redfish), en 0600, sous `~/.local/share/harvester-ops/inventory`
+  (`HARVESTER_OPS_INVENTORY_DIR`).
+- Même déroulé en ligne de commande, mot de passe jamais en argument :
+  `harvester-baremetal discover --bmc <hôte> --user <compte> --password-file <fichier 0600> --iso <chemin>`
+  (ou `--password-stdin`).
+
 ---
 
 ## Pourquoi l'ISO est remasterisé
