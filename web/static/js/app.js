@@ -29,6 +29,10 @@ const App = (() => {
     // .tab-child here or Cluster's Démarrage/Arrêt children stop
     // lighting up when selected.)
     $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    // v1.77.0 : l'entrée active reste visible, même dans un groupe replié
+    // (VM Import / Export s'ouvre replié, et un F5 ou un lien direct sur
+    // l'une de ses entrées la cachait sinon).
+    $$('.tab-child.active').forEach(t => t.closest('.tab-group')?.classList.add('expanded'));
     $$('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
     try { localStorage.setItem(TAB_STORAGE, name); } catch {}
     if (name === 'overview')   { refreshStatus({ veil: true }); mountTopology(overviewMode()); }

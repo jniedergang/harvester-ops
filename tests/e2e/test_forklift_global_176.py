@@ -102,13 +102,15 @@ def open_global(context, flask_server, data=GLOBAL_DATA, initial_cluster="harv-s
     return page
 
 
-def test_the_entry_sits_next_to_activity_not_under_cluster(context, flask_server):
+def test_the_entry_sits_in_the_vm_import_export_section(context, flask_server):
+    # 1.77.0 : l'entrée a quitté le voisinage d'Activity pour la section
+    # VM Import / Export ; jamais sous Cluster ni sous Automation
     page = open_global(context, flask_server)
-    entry = page.locator('.tab[data-tab="forkliftglobal"]')
+    entry = page.locator('#tab-group-vmio .tab[data-tab="forkliftglobal"]')
     expect(entry).to_be_visible()
     assert entry.get_attribute("data-i18n-title") or entry.get_attribute("title")
-    # ni un `.tab-child` (sous Cluster), ni dans le groupe Automation
-    assert "tab-child" not in (entry.get_attribute("class") or "")
+    assert page.locator('#tab-group-cluster .tab[data-tab="forkliftglobal"]').count() == 0
+    assert page.locator('#tab-group-automation .tab[data-tab="forkliftglobal"]').count() == 0
     assert page.locator('#tab-forkliftglobal')
 
 

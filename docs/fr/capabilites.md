@@ -1339,7 +1339,8 @@ output-apply|output-delete|flow-apply|flow-delete|amc-apply|amc-delete`.
 
 ### Importer des VMs depuis VMware, OpenStack ou une archive OVA (1.71.0)
 
-**VM Import**, dans le menu Cluster, pilote l'add-on vm-import-controller
+**VM Import**, dans la section VM Import / Export du menu (1.77.0 ; sous
+Cluster avant), pilote l'add-on vm-import-controller
 de Harvester (à activer d'abord dans Add-ons ; la section dit quand il est
 éteint).
 
@@ -1410,7 +1411,8 @@ et ne réécrit jamais son chart ni ses valeurs. Ce chemin n'est pas encore
 vérifié en réel : aucun banc ne fait tourner un Harvester qui livre cet
 add-on.
 
-**Migrations VMware**, dans le menu Cluster juste après VM Import, ouvre
+**Migrations VMware**, dans la section VM Import / Export du menu, juste
+après VM Import, ouvre
 trois onglets :
 
 - **Préparation**, trois étapes dans l'ordre où il faut les faire, chacune
@@ -1586,7 +1588,8 @@ Les objets d'une vague (NetworkMap, StorageMap, Plan avec `warm: true`,
 Migration) vivent dans le namespace `forklift`, étiquetés
 `harvester-ops.io/managed` et `harvester-ops.io/wave`.
 
-**Migrations (tous clusters)**, dans le menu à côté d'Activity : toutes
+**Migrations (tous clusters)**, troisième entrée de la section VM Import /
+Export (1.77.0 ; à côté d'Activity avant) : toutes
 les VMs de toutes les vagues de tous les clusters déclarés, dans un seul
 tableau (VM VMware, vCenter, cluster cible, vague, étape, dernière copie,
 bascule), filtrable par état et par vCenter, avec un bloc par cluster

@@ -87,14 +87,6 @@
             <span class="tab-icon" data-icon="activity"></span>
             <span class="sidebar-label" data-i18n="tab.monlog">Monitoring &amp; Logging</span>
           </a>
-          <a class="tab tab-child" data-tab="vmimport" href="#vmimport" data-i18n-title="tab.vmimportTip" title="Import VMs from VMware, OpenStack or an OVA archive">
-            <span class="tab-icon" data-icon="migrate"></span>
-            <span class="sidebar-label" data-i18n="tab.vmimport">VM Import</span>
-          </a>
-          <a class="tab tab-child" data-tab="forklift" href="#forklift" data-i18n-title="tab.forkliftTip" title="Warm migrations of VMware VMs with Forklift: preparation, vCenter sources, inventory">
-            <span class="tab-icon" data-icon="migrate"></span>
-            <span class="sidebar-label" data-i18n="tab.forklift">VMware migrations</span>
-          </a>
           <a class="tab tab-child" data-tab="advanced" href="#advanced" data-i18n-title="tab.advancedTip" title="Harvester settings, devices, backup target, support bundles and kubeconfigs">
             <span class="tab-icon" data-icon="settings"></span>
             <span class="sidebar-label" data-i18n="tab.advanced">Advanced</span>
@@ -110,6 +102,30 @@
         </div>
       </div>
       <a class="tab"        data-tab="namespaces"   href="#namespaces" data-i18n-title="tab.vms" title="Virtual machines"><span class="tab-icon" data-icon="vm"></span> <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span></a>
+      <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
+           VM Import et VMware migrations portent sur le cluster choisi ;
+           Migrations (all clusters) les voit tous. -->
+      <div class="tab-group" id="tab-group-vmio">
+        <a class="tab tab-group-head" data-group="vmio" href="#vmio" data-i18n-title="tab.vmioTip" title="Bring VMs in and move them: imports, VMware migrations, every migration across the clusters">
+          <span class="tab-icon" data-icon="switch"></span>
+          <span class="sidebar-label" data-i18n="tab.vmio">VM Import / Export</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="vmimport" href="#vmimport" data-i18n-title="tab.vmimportTip" title="Import VMs from VMware, OpenStack or an OVA archive">
+            <span class="tab-icon" data-icon="download"></span>
+            <span class="sidebar-label" data-i18n="tab.vmimport">VM Import</span>
+          </a>
+          <a class="tab tab-child" data-tab="forklift" href="#forklift" data-i18n-title="tab.forkliftTip" title="Warm migrations of VMware VMs with Forklift: preparation, vCenter sources, inventory">
+            <span class="tab-icon" data-icon="migrate"></span>
+            <span class="sidebar-label" data-i18n="tab.forklift">VMware migrations</span>
+          </a>
+          <a class="tab tab-child" data-tab="forkliftglobal" href="#forkliftglobal" data-i18n-title="tab.forkliftglobalTip" title="Every VMware migration wave running on every declared cluster">
+            <span class="tab-icon" data-icon="cloud"></span>
+            <span class="sidebar-label" data-i18n="tab.forkliftglobal">Migrations (all clusters)</span>
+          </a>
+        </div>
+      </div>
       <div class="tab-group" id="tab-group-automation">
         <a class="tab tab-group-head" data-group="automation" href="#automation" data-i18n-title="tab.automation" title="Automation">
           <span class="tab-icon" data-icon="robot"></span>
@@ -134,8 +150,6 @@
           </a>
         </div>
       </div>
-      <!-- v1.76.0 : vue globale des migrations VMware, à côté d'Activity (pas sous Cluster) -->
-      <a class="tab"        data-tab="forkliftglobal" href="#forkliftglobal" data-i18n-title="tab.forkliftglobalTip" title="Every VMware migration wave running on every declared cluster"><span class="tab-icon" data-icon="migrate"></span> <span class="sidebar-label" data-i18n="tab.forkliftglobal">Migrations (all clusters)</span></a>
       <a class="tab"        data-tab="activity"     href="#activity" data-i18n-title="tab.activity" title="Activity"><span class="tab-icon" data-icon="activity"></span> <span class="sidebar-label" data-i18n="tab.activity">Activity</span></a>
     </nav>
 

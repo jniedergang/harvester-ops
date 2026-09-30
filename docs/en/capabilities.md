@@ -1196,7 +1196,8 @@ flow-delete|amc-apply|amc-delete`.
 
 ### Importing VMs from VMware, OpenStack or an OVA archive (1.71.0)
 
-**VM Import**, in the Cluster menu, drives Harvester's vm-import-controller
+**VM Import**, in the VM Import / Export section of the menu (1.77.0;
+under Cluster before), drives Harvester's vm-import-controller
 add-on (enable it in Add-ons first; the section says when it is off).
 
 - **Sources**, one tab per provider:
@@ -1263,7 +1264,8 @@ add-on (expected from 1.9.1), the console enables it as it ships and never
 rewrites its chart or its values. That path is not verified for real yet:
 no bench runs a Harvester that ships this add-on.
 
-**VMware migrations**, in the Cluster menu right after VM Import, opens
+**VMware migrations**, in the VM Import / Export section of the menu,
+right after VM Import, opens
 three tabs:
 
 - **Preparation**, three steps in the order they must be done, each with
@@ -1424,7 +1426,8 @@ A wave's objects (NetworkMap, StorageMap, Plan with `warm: true`,
 Migration) live in the `forklift` namespace, labelled
 `harvester-ops.io/managed` and `harvester-ops.io/wave`.
 
-**Migrations (all clusters)**, in the menu next to Activity: every VM of
+**Migrations (all clusters)**, the third entry of the VM Import / Export
+section (1.77.0; next to Activity before): every VM of
 every wave of every declared cluster, in one table (VMware VM, vCenter,
 target cluster, wave, step, last copy, cutover), filtered by state and by
 vCenter, with one block per cluster (Forklift installed or not, importer
