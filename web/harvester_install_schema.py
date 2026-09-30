@@ -554,6 +554,11 @@ def build_form_config(opts, errors):
         inst["data_disk"] = str(opts["data_disk"]).strip()
     if _truthy(opts.get("wipe_all_disks")):
         inst["wipe_all_disks"] = True
+    # Disques à effacer un par un (1.78.0) : liste, ou texte séparé par
+    # des virgules ou des retours à la ligne ; absent = rendu inchangé.
+    wipe_list = _split_list(opts.get("wipe_disks_list"))
+    if wipe_list:
+        inst["wipe_disks_list"] = wipe_list
     # Obligatoire en mode automatique : l'installeur refuse la
     # configuration sans, avec « iso_url is required in automatic
     # installation », même quand l'image est déjà montée en média virtuel.
