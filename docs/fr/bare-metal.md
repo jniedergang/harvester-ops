@@ -244,7 +244,10 @@ cartes de gestion montrent alors leur nom Linux.
   le message. Si la machine ne donne que des valeurs de remplissage
   (fréquent sur une VM : vide, « Not Specified »), l'UUID sert ; si rien ne
   peut être comparé, l'inventaire est enregistré avec une étape
-  d'avertissement.
+  d'avertissement. L'installation le revérifie avant de rien allumer : si le BMC
+  mène maintenant à une autre machine (lame changée, BMC réadressé), elle
+  s'arrête et demande une nouvelle découverte, plutôt que de choisir les
+  disques d'après l'inventaire d'une autre machine.
 - Une action à la fois par BMC : une découverte ou une installation sur un
   BMC déjà piloté par une autre découverte ou installation est refusée
   (409).

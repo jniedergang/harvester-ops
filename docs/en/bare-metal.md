@@ -230,7 +230,10 @@ Linux names.
   from another machine is refused and not stored, both values in the
   message. When the machine reports only filler values (common on VMs:
   empty, "Not Specified"), the UUID is used; if nothing can be compared,
-  the inventory is stored with a warning step.
+  the inventory is stored with a warning step. The install checks this
+  again before powering anything on: if the BMC now leads to another
+  machine (blade swapped, BMC readdressed), it stops and asks for a new
+  discovery, rather than choosing disks from another machine's inventory.
 - One action at a time per BMC: a discovery or an install on a BMC that
   another discovery or install is driving is refused (409).
 - Waits: 15 min for the inventory, then 5 min for the machine to power

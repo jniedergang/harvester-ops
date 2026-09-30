@@ -200,7 +200,7 @@ def test_power_off_is_reserved_to_the_console():
 
 
 def test_wait_power_off_sees_the_end_of_the_install(monkeypatch):
-    states = iter(["On", "On", "Off"])
+    states = iter(["On", "Off", "On", "Off", "Off"])   # un « Off » isolé ne suffit pas
     monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": next(states)})
     run = _run()
     t = [0.0]
@@ -260,3 +260,49 @@ def test_a_machine_found_on_is_left_on_after_a_failure(monkeypatch):
     wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
                                          "bmc_host": "192.0.2.1", "iso": "absent.iso"})
     assert run.status == "error" and calls == []
+
+
+
+def test_a_single_off_reading_does_not_end_the_wait(monkeypatch):
+    states = iter(["Off", "On", "On"])
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": next(states, "On")})
+    run = _run()
+    t = [0.0]
+    assert not wapp._bm_wait_power_off("bmc", "u", "p", "/s", 70, run, lambda *a: None,
+                                       sleep=lambda s: t.__setitem__(0, t[0] + s), now=lambda: t[0])
+
+
+def test_an_inventory_of_another_machine_stops_the_install_before_power_on(monkeypatch):
+    """Relecture 1.78.0 : l'inventaire est rangé par BMC ; si ce BMC mène à
+    une autre machine, rien ne doit être allumé ni installé."""
+    raw = (Path(__file__).parent / "fixtures" / "bm_disks_178" / "discovery.txt").read_text()
+    calls = []
+    prof = dict(_profile([]), power_state="Off", serial="OTHER-SERIAL-9", uuid=None)
+    monkeypatch.setattr(wapp, "_bmc_discover_one", lambda *a, **k: prof)
+    monkeypatch.setattr(wapp._bmd, "load_inventory", lambda *a, **k: {"raw": raw})
+    monkeypatch.setattr(wapp._bmd, "check_binding", lambda raw, s, u: ("mismatch", "série X vue par Linux, OTHER donnée par le BMC"))
+    monkeypatch.setattr(wapp, "_redfish_send", lambda *a, **k: calls.append(a) or (True, 204, ""))
+    monkeypatch.setattr(wapp, "_bm_reset", lambda *a, **k: calls.append(a) or (True, ""))
+    run = _run()
+    wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
+                                         "bmc_host": "192.0.2.1", "iso": "absent.iso"})
+    assert run.status == "error" and "not this machine" in run.error_summary
+    assert calls == []
+
+
+def test_runner_does_not_power_on_when_the_media_stays_inserted():
+    src = (ROOT / "web" / "app.py").read_text()
+    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    i_ej = runner.index("ok_ej, detail_ej = _bm_media_eject(")
+    i_fail = runner.index('return fail("boot-disk"', i_ej)
+    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")')
+    assert i_ej < i_fail < i_on
+
+
+def test_console_key_goes_to_the_canonical_list_whatever_the_spelling():
+    import yaml as _y
+    opts = {"advanced_yaml": "os:\n  sshAuthorizedKeys:\n    - ssh-ed25519 AAAAexisting ops@example\n"}
+    out = wapp._bm_with_ssh_key(opts, "ssh-ed25519 AAAAconsole console")
+    adv = _y.safe_load(out["advanced_yaml"])
+    assert adv["os"]["ssh_authorized_keys"][-1] == "ssh-ed25519 AAAAconsole console"
+    assert "ssh_keys" not in out

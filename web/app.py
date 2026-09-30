@@ -4510,10 +4510,14 @@ def _bm_with_ssh_key(opts, pub):
             adv = yaml.safe_load(str(adv_text))
         except yaml.YAMLError:
             adv = None
+        if isinstance(adv, dict):
+            # `sshAuthorizedKeys` et les autres orthographes admises : sous leur
+            # nom canonique (relecture 1.78.0)
+            adv = _his.canonicalize(adv)
         keys = ((adv.get("os") if isinstance(adv, dict) else None) or {})
         if isinstance(keys, dict) and isinstance(keys.get("ssh_authorized_keys"), list):
             keys["ssh_authorized_keys"].append(pub)
-            return dict(opts, advanced_yaml=yaml.safe_dump(adv, sort_keys=False))
+            return dict(opts, advanced_yaml=_his.dump_install_config(adv))
     form = str(opts.get("ssh_keys") or "").strip()
     return dict(opts, ssh_keys=(form + "\n" if form else "") + pub)
 
@@ -4801,15 +4805,17 @@ def _bm_wait_power_off(host, user, pwd, sys_path, deadline, run, step, sleep=Non
     """Attend que la machine soit éteinte (fin de l'installation, v1.78.0).
     False à l'échéance ou sur annulation."""
     sleep, now = sleep or time.sleep, now or time.time
-    last = None
+    last, offs = None, 0
     while now() < deadline:
         # pause d'abord : juste après le redémarrage forcé, un BMC peut dire
-        # « Off » un instant, ce qui passerait pour la fin de l'installation
+        # « Off » un instant, ce qui passerait pour la fin de l'installation ;
+        # et deux lectures « Off » de suite sont exigées (relecture 1.78.0)
         sleep(20)
         if getattr(run, "_cancel", False):
             return False
         state = (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState")
-        if state == "Off":
+        offs = offs + 1 if state == "Off" else 0
+        if offs >= 2:
             return True
         if state != last:
             step("wait-install", "progress", f"machine {state or '?'}")
@@ -4907,8 +4913,18 @@ def _baremetal_install_runner(run, opts):
     profile_ref[0] = profile
     if not profile.get("ok"):
         return fail("preflight", profile.get("error", "BMC unreachable"))
+    # Relecture finale de la 1.78.0 : l'inventaire est rangé par BMC ; si ce
+    # BMC mène maintenant à une autre machine (lame changée, adresse
+    # réattribuée), les contrôles de disques auraient porté sur les disques
+    # d'une autre machine. Revérifier l'identité AVANT toute mise sous tension.
+    inv_bind = _bmd.load_inventory(INVENTORY_DIR, host)
+    if inv_bind:
+        verdict, why = _bmd.check_binding(inv_bind.get("raw") or "", profile.get("serial"),
+                                          profile.get("uuid"))
+        if verdict == "mismatch":
+            return fail("preflight", f"the discovery inventory of {host} is not this machine's "
+                                     f"({why}): run the discovery boot again")
     if profile.get("power_state") != "On":
-        powered_by_us[0] = True
         step("preflight", "progress", "machine éteinte, allumage pour inventaire")
         sys_path = profile.get("system_path") or "/redfish/v1/Systems/1"
         ok, _, detail = _redfish_send(
@@ -4916,6 +4932,7 @@ def _baremetal_install_runner(run, opts):
             kc_user, kc_pwd, "POST", {"ResetType": "On"})
         if not ok:
             return fail("preflight", f"power on refused: {detail[:200]}")
+        powered_by_us[0] = True
         deadline = time.time() + 900
         while time.time() < deadline:
             if getattr(run, "_cancel", False):
@@ -5067,7 +5084,10 @@ def _baremetal_install_runner(run, opts):
     step("boot-disk", "running", "éjection du média, démarrage sur le disque")
     ok_ej, detail_ej = _bm_media_eject(host, kc_user, kc_pwd, vm_res)
     if not ok_ej:
-        step("boot-disk", "warn", f"éjection refusée : {str(detail_ej)[:120]}")
+        # rallumer avec l'ISO encore montée pourrait relancer une installation
+        return fail("boot-disk", "Harvester is installed but the virtual media could not be "
+                                 f"ejected ({str(detail_ej)[:120]}): eject it from the BMC, "
+                                 "then power the machine on")
     ok, detail = _bm_boot_once_target(host, kc_user, kc_pwd, sys_path, "Hdd")
     if not ok:
         step("boot-disk", "warn", f"amorce sur le disque refusée : {str(detail)[:120]}")
@@ -5144,8 +5164,9 @@ def _baremetal_install_runner(run, opts):
                                      + (why or f"pools-apply exited with {code}"))
             step("pools", "done", "pools : " + ", ".join(p["tag"] for p in pools))
     except Exception as e:
-        return fail(current[0], f"Harvester is installed; {current[0]} failed: "
-                                f"{type(e).__name__}: {str(e)[:200]}")
+        # une OSError porterait le chemin d'un fichier privé : son type seul
+        detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
+        return fail(current[0], f"Harvester is installed; {current[0]} failed: {detail}")
     for p in scratch:
         try:
             p.unlink(missing_ok=True)

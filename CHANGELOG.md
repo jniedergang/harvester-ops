@@ -4,7 +4,7 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
-## [1.78.0] - 2026-10-01 - Disks of a bare-metal install: discovered, chosen, checked and pooled
+## [1.78.0] - 2026-09-30 - Disks of a bare-metal install: discovered, chosen, checked and pooled
 
 ### Added
 - Discovery boot: the Harvester ISO boots once with a console script, sends back what Linux sees (disks with their stable links, partitions, NICs, DMI serial and UUID) and powers the machine off; the inventory is bound to the machine (serial or UUID compared with the BMC's) and kept per machine. From the install window, the API (`POST /api/baremetal/discover`, `GET /api/baremetal/inventory/<host>`) and the command line (`harvester-baremetal discover`).
@@ -16,6 +16,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - With an inventory, the install and preview routes refuse before any power-on a disk too small for its role, holding data without its wipe, given two roles or unknown, and a pool disk that is the system or data disk.
 - The installer powers off at the end of the install; the console ejects the media, boots the disk once and powers the machine on. A BMC that ignores one-shot boots made the installer loop.
 - A machine the preflight powered on is powered off again when the run fails before the install starts.
+- The install preflight checks again, before any power-on, that the stored discovery inventory is still the machine behind that BMC (serial or UUID); a blade swapped or a BMC readdressed stops the install with a request to run the discovery again. The installer's power-off is read twice before the install is taken as finished, and the machine is not powered on when the virtual media could not be ejected.
 
 ### Fixed
 - Redfish: virtual media now goes to the manager of the target system, not the first manager a BMC lists (another machine on a multi-system BMC); the published `VirtualMedia` links are followed (Redfish 2020.4+ puts them under the system); a BMC written `host:port` no longer makes the console publish 127.0.0.1; a media insert that answers only after downloading the image is waited for, and the drive saying "inserted" is not trusted.
