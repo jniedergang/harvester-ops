@@ -171,12 +171,24 @@ cartes réseau. La machine s'éteint ensuite d'elle-même.
   Il ne porte aucun secret, seulement l'adresse de dépôt, dont le jeton
   n'accepte qu'un envoi de 1 Mio au plus, et seulement pendant une
   découverte.
-- L'ISO de découverte est mise en cache à côté du magasin d'ISO
-  (`discover/`) et reprise tant que l'ISO source, le script et l'adresse de
-  la console ne changent pas. Supprimer l'ISO source la supprime.
+- Chaque découverte remasterise sa propre ISO (une minute environ) dans le
+  répertoire de travail de la console, avec un jeton de dépôt neuf, la sert
+  pour elle seule et l'efface à la fin : prévoir la taille de l'ISO en
+  espace libre.
+- Le script envoie aussi le numéro de série et l'UUID DMI de la machine.
+  La console les compare à ceux que donne le BMC : un inventaire venu d'une
+  autre machine est refusé et n'est pas enregistré, les deux valeurs dans
+  le message. Si la machine ne donne que des valeurs de remplissage
+  (fréquent sur une VM : vide, « Not Specified »), l'UUID sert ; si rien ne
+  peut être comparé, l'inventaire est enregistré avec une étape
+  d'avertissement.
+- Une action à la fois par BMC : une découverte ou une installation sur un
+  BMC déjà piloté par une autre découverte ou installation est refusée
+  (409).
 - Attentes : 15 min pour l'inventaire, puis 5 min pour que la machine
   s'éteigne d'elle-même ; au-delà elle est éteinte de force et l'étape le
-  dit. Le média virtuel est éjecté dans tous les cas.
+  dit. Le média virtuel est éjecté dans tous les cas (un échec d'éjection
+  est signalé par une étape d'avertissement : l'éjecter depuis le BMC).
 - Les inventaires sont gardés par numéro de série du système (lu par
   Redfish), en 0600, sous `~/.local/share/harvester-ops/inventory`
   (`HARVESTER_OPS_INVENTORY_DIR`).

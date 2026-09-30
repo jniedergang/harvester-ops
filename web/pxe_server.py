@@ -17,7 +17,8 @@ l'action d'installation :
     GET /pxe/config/<token>.yaml la configuration Harvester du node
     POST /pxe/inventory/<token>  dépôt de l'inventaire d'un démarrage de
                                  découverte (1.78.0) : 1 Mio au plus, un seul
-                                 envoi accepté, écrit en 0600
+                                 envoi accepté, commençant par `== lsblk`,
+                                 écrit en 0600
 
 Le script de découverte n'est PAS servi ici : il est déposé DANS l'ISO
 (`/run/initramfs/live/discover.sh`), ce qui évite toute commande entre
@@ -32,6 +33,7 @@ Aucune dépendance nouvelle — `http.server` de la bibliothèque standard.
 
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -58,9 +60,9 @@ def issue(path, kind, ttl=DEFAULT_TTL, token=None):
     """Enregistre un artefact et renvoie son jeton.
 
     `token` arme un jeton choisi par l'appelant au lieu d'en tirer un :
-    c'est le cas du dépôt d'inventaire, dont l'adresse est gravée dans une
-    ISO de découverte mise en cache. Il n'est accepté que pendant une
-    découverte (armé, puis consommé ou révoqué) ; déjà armé, il est refusé."""
+    c'est le cas du dépôt d'inventaire, dont l'adresse est gravée dans le
+    script de l'ISO avant que le fichier soit servi. Déjà armé, il est
+    refusé."""
     with _LOCK:
         if token is None:
             token = secrets.token_urlsafe(24)
@@ -100,6 +102,13 @@ def _resolve(token, kind):
             return None
         entry["hits"] += 1
         return entry["path"]
+
+
+def _peek(token, kind):
+    """Jeton valide, du bon type et non expiré ; ne le consomme pas."""
+    with _LOCK:
+        entry = _TOKENS.get(token)
+        return bool(entry and entry["kind"] == kind and entry["expires"] >= time.time())
 
 
 def _consume(token, kind):
@@ -166,7 +175,18 @@ class _Handler(BaseHTTPRequestHandler):
             # laisser traîner un corps qu'on n'a pas lu
             self.close_connection = True
             return self._deny(413)
+        if length == 0:
+            return self._deny(400)
+        # jeton vérifié AVANT de lire le corps (sans le consommer) : un
+        # inconnu n'obtient pas qu'on lise son Mio
+        if not _peek(token, "inventory"):
+            self.close_connection = True
+            return self._deny(404)
         body = self.rfile.read(length)
+        # un inventaire commence par sa section lsblk ; autre chose est
+        # refusé sans consommer le jeton (le vrai envoi peut encore venir)
+        if not re.search(rb"(?:^|\n)== lsblk\r?\n", body):
+            return self._deny(400)
         target = _consume(token, "inventory")
         if not target:
             return self._deny(404)

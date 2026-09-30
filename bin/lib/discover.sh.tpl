@@ -33,6 +33,11 @@ udevadm settle --timeout=120 >/dev/null 2>&1
     for n in /sys/class/net/*; do
         echo "${n##*/} $(cat "$n/speed" 2>/dev/null)"
     done
+    # identité de la machine, lisible en root : la console vérifie que
+    # l'inventaire vient bien de la machine dont elle pilote le BMC
+    echo "== dmi"
+    echo "serial $(cat /sys/class/dmi/id/product_serial 2>/dev/null)"
+    echo "uuid $(cat /sys/class/dmi/id/product_uuid 2>/dev/null)"
 } > "$OUT" 2>/dev/null
 
 # Le réseau n'est pas encore monté quand le script démarre (vu en réel) :

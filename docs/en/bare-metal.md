@@ -162,12 +162,21 @@ off. `GET /api/baremetal/inventory/<bmc_host>` returns the parsed inventory
   (`systemd.run=`) and never `harvester.install.*`: nothing is installed.
   It carries no secret, only the upload address, whose token accepts a
   single upload of 1 MiB at most, and only while a discovery runs.
-- The remastered discovery ISO is cached beside the ISO store
-  (`discover/`) and reused as long as the source ISO, the script and the
-  console address stay the same. Deleting the source ISO removes it.
+- Each discovery remasters its own ISO (about a minute) in the console's
+  work directory, with a fresh upload token, serves it for that run only
+  and deletes it at the end: allow the size of the ISO in free space.
+- The script also sends the machine's DMI serial and UUID. The console
+  compares them with the serial (and UUID) the BMC gives: an inventory
+  from another machine is refused and not stored, both values in the
+  message. When the machine reports only filler values (common on VMs:
+  empty, "Not Specified"), the UUID is used; if nothing can be compared,
+  the inventory is stored with a warning step.
+- One action at a time per BMC: a discovery or an install on a BMC that
+  another discovery or install is driving is refused (409).
 - Waits: 15 min for the inventory, then 5 min for the machine to power
   itself off; after that it is forced off and the step says so. The
-  virtual media is ejected in every case.
+  virtual media is ejected in every case (a failed eject is reported as a
+  warning step: eject it from the BMC).
 - Inventories are kept per system serial (read over Redfish), mode 0600,
   under `~/.local/share/harvester-ops/inventory`
   (`HARVESTER_OPS_INVENTORY_DIR`).

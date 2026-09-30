@@ -4515,11 +4515,14 @@ def _bm_media_insert(host, user, pwd, image_url):
 
 
 def _bm_media_eject(host, user, pwd, vm_res=None):
+    """Éjecte le lecteur virtuel. Renvoie (ok, détail)."""
     if vm_res is None:
         _, vm_res = _redfish_virtualmedia_cd(host, user, pwd)
     tgt, _ = _redfish_action_target(vm_res or {}, "EjectVirtualMedia", "EjectMedia")
-    if tgt:
-        _redfish_send(host, tgt, user, pwd, "POST", {})
+    if not tgt:
+        return False, "virtual media eject not exposed by this BMC"
+    ok, _, detail = _redfish_send(host, tgt, user, pwd, "POST", {})
+    return ok, detail
 
 
 def _bm_boot_once_cd(host, user, pwd, sys_path):
@@ -4972,8 +4975,10 @@ def api_baremetal_install():
     except InstallConfigError as e:
         return _bm_config_refusal(e)
     # Le label de l'action ne porte ni token ni mot de passe.
-    action_id = track_action(f"baremetal-install:{data['hostname']}",
-                             "(local)", _baremetal_install_runner, data)
+    action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
+                                data["bmc_host"], _baremetal_install_runner, data)
+    if busy:
+        return busy
     return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
 
 
@@ -5007,7 +5012,7 @@ class _BmDiscoverBmc:
         return ok, detail
 
     def eject(self):
-        _bm_media_eject(self.host, self._user, self._pwd)
+        return _bm_media_eject(self.host, self._user, self._pwd)
 
     def boot_once_cd(self):
         return _bm_boot_once_cd(self.host, self._user, self._pwd, self._sys)
@@ -5053,8 +5058,9 @@ def _baremetal_discover_runner(run, opts):
     try:
         port = pxe_server.start()
         res = _bmd.run(
-            {"host": host, "src_iso": src_iso, "cache_dir": _iso_dir() / "discover",
-             "work_dir": _iso_work_dir(), "store_dir": INVENTORY_DIR,
+            # l'ISO de la découverte y est écrite puis effacée en fin de run ;
+            # un run tué par un redémarrage est balayé au bout d'un jour
+            {"host": host, "src_iso": src_iso, "work_dir": _iso_work_dir(), "store_dir": INVENTORY_DIR,
              "remaster_script": BIN_DIR / "harvester-iso-remaster.sh",
              "advertise": opts.get("advertise_host") or _bm_local_ip_for(host),
              "port": port, "extra_args": opts.get("extra_args", ""),
@@ -5073,6 +5079,38 @@ def _baremetal_discover_runner(run, opts):
     inv = _bmdisks.parse_discovery(res["raw"])
     step("parse", "done", f"{len(inv['disks'])} disque(s), {len(inv['nics'])} carte(s) réseau")
     finish("done", 0)
+
+
+# Une installation et une découverte pilotent la même alimentation et le même
+# lecteur virtuel : deux actions sur un BMC se marcheraient dessus (média
+# éjecté sous l'installeur, machine éteinte en pleine installation).
+_BM_LAUNCH_LOCK = threading.Lock()
+
+
+def _bm_busy(host):
+    """Installation ou découverte en cours sur ce BMC, ou None."""
+    with ACTIONS_LOCK:
+        return next((r for r in ACTIONS.values()
+                     if getattr(r, "bmc_host", None) == host
+                     and r.status in ("starting", "running")), None)
+
+
+def _bm_track(label, host, worker, opts):
+    """`track_action` refusé si le BMC est déjà piloté : (action_id, None)
+    ou (None, réponse 409). Contrôle et inscription sous un même verrou."""
+    with _BM_LAUNCH_LOCK:
+        busy = _bm_busy(host)
+        if busy:
+            return None, (jsonify({
+                "error": f"{busy.action} is already driving the BMC {host} "
+                         f"(action {busy.id}); wait for it to end or cancel it",
+                "running": busy.id, "running_action": busy.action}), 409)
+        action_id = track_action(label, "(local)", worker, opts)
+        with ACTIONS_LOCK:
+            run = ACTIONS.get(action_id)
+            if run is not None:
+                run.bmc_host = host
+    return action_id, None
 
 
 def _bm_inventory_view(doc):
@@ -5108,8 +5146,10 @@ def api_baremetal_discover():
             "bmc_password": str(data["bmc_password"]), "iso": safe_iso,
             "extra_args": extra}
     # Le label de l'action ne porte que l'hôte.
-    action_id = track_action(f"baremetal-discover:{opts['bmc_host']}",
-                             "(local)", _baremetal_discover_runner, opts)
+    action_id, busy = _bm_track(f"baremetal-discover:{opts['bmc_host']}",
+                                opts["bmc_host"], _baremetal_discover_runner, opts)
+    if busy:
+        return busy
     return jsonify({"action_id": action_id, "host": opts["bmc_host"]}), 202
 
 
@@ -5301,9 +5341,6 @@ def api_iso_delete(name):
         return jsonify({"error": "not found"}), 404
     path.unlink()
     path.with_suffix(path.suffix + ".sha256").unlink(missing_ok=True)
-    # v1.78.0 : son ISO de découverte en cache (7 Go) part avec elle
-    for suffix in (".discover.iso", ".discover.json"):
-        (_iso_dir() / "discover" / f"{path.stem}{suffix}").unlink(missing_ok=True)
     return jsonify({"deleted": safe})
 
 

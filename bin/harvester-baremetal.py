@@ -8,8 +8,8 @@ commande (1.78.0).
                                [--extra-args "console=ttyS1,115200"]
   echo "$PW" | harvester-baremetal discover --bmc 10.0.0.21 --user admin --password-stdin --iso ...
 
-`discover` : démarrage de découverte. L'ISO Harvester, remasterisée avec un
-script de découverte (mise en cache à côté), démarre une fois par le média
+`discover` : démarrage de découverte. L'ISO Harvester, remasterisée pour
+cette découverte avec un script à elle (effacée à la fin), démarre une fois par le média
 virtuel du BMC, renvoie ce que Linux voit (disques, liens stables, cartes
 réseau) puis éteint la machine. L'inventaire est enregistré dans le magasin
 de la console (même format, un fichier par numéro de série), où la fenêtre
@@ -98,8 +98,8 @@ def cmd_discover(args):
         return 2
     password = _read_password(args)
     share = Path.home() / ".local/share/harvester-ops"
-    cache_dir = Path(args.cache_dir or (src.parent / "discover"))
-    work_dir = Path(args.work_dir or (cache_dir / "work"))
+    # l'ISO de la découverte (7 Go) y est écrite puis effacée
+    work_dir = Path(args.work_dir or (src.parent / "work"))
     work_dir.mkdir(parents=True, exist_ok=True)
     work_dir.chmod(0o700)
     store_dir = Path(args.store or os.environ.get("HARVESTER_OPS_INVENTORY_DIR")
@@ -109,10 +109,17 @@ def cmd_discover(args):
     signal.signal(signal.SIGINT, lambda *a: cancelled.update(flag=True))
     signal.signal(signal.SIGTERM, lambda *a: cancelled.update(flag=True))
 
-    port = pxe.start(port=args.port)
+    started = False
     try:
+        try:
+            port = pxe.start(port=args.port)
+            started = True
+        except OSError as e:
+            print(f"cannot listen on port {args.port} ({e.strerror or e}); "
+                  "is the console running here? choose another --port", file=sys.stderr)
+            return 1
         res = bm_discover.run(
-            {"host": args.bmc, "src_iso": src, "cache_dir": cache_dir,
+            {"host": args.bmc, "src_iso": src,
              "work_dir": work_dir, "store_dir": store_dir,
              "remaster_script": HERE / "harvester-iso-remaster.sh",
              "advertise": args.advertise or _local_ip_for(args.bmc),
@@ -123,9 +130,10 @@ def cmd_discover(args):
         _step(e.step, "error", str(e)[:300])
         return 3 if isinstance(e, bm_discover.Cancelled) else 1
     finally:
-        pxe.stop()
+        if started:
+            pxe.stop()
     out = {"system_serial": res["serial"], "stored": str(res["path"]),
-           "forced_off": res["forced_off"]}
+           "forced_off": res["forced_off"], "binding": res["binding"]}
     parser = _load_web_module("baremetal_disks")
     if parser is not None:
         inv = parser.parse_discovery(res["raw"])
@@ -150,8 +158,8 @@ def main(argv=None):
     d.add_argument("--port", type=int, default=int(os.environ.get("HARVESTER_OPS_PXE_PORT", 8091)),
                    help="artifact server port (default 8091)")
     d.add_argument("--extra-args", default="", help="extra kernel arguments (console=...)")
-    d.add_argument("--cache-dir", help="where the discovery ISO is cached (default: beside the ISO)")
-    d.add_argument("--work-dir", help="scratch directory (default: <cache-dir>/work)")
+    d.add_argument("--work-dir", help="scratch directory for the discovery ISO "
+                   "(default: <ISO dir>/work, needs the ISO size free)")
     d.add_argument("--store", help="inventory store (default: the console's)")
     args = ap.parse_args(argv)
     if args.cmd == "discover":

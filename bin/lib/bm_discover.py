@@ -9,7 +9,8 @@ Ce module porte le déroulé, commun à la console (action suivie
 (`harvester-baremetal.py discover`). Chacun fournit :
 
 * `bmc` : l'accès au BMC (profil, média virtuel, amorce unique,
-  alimentation), voir `RedfishBmc` pour l'interface attendue ;
+  alimentation), voir `RedfishBmc` pour l'interface attendue ; `eject()`
+  renvoie (ok, détail) ;
 * `pxe` : le serveur d'artefacts (`web/pxe_server.py`), qui publie l'ISO et
   reçoit l'inventaire ;
 * `remaster(cmd, step)` : lance `harvester-iso-remaster.sh` et renvoie son
@@ -35,7 +36,6 @@ import os
 import re
 import secrets
 import ssl
-import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,10 +55,6 @@ UPLOAD_URL_RE = re.compile(r"http://[A-Za-z0-9.:\[\]-]+/pxe/inventory/[A-Za-z0-9
 INVENTORY_TIMEOUT = 15 * 60
 POWEROFF_TIMEOUT = 5 * 60
 
-_CACHE_LOCKS = {}
-_CACHE_LOCKS_GUARD = threading.Lock()
-
-
 class DiscoveryError(Exception):
     """Échec d'une étape : `step` et un message sans secret."""
 
@@ -74,11 +70,6 @@ class Cancelled(DiscoveryError):
 # ---------------------------------------------------------------------------
 # Script et ligne noyau
 # ---------------------------------------------------------------------------
-
-def template_version():
-    """Empreinte du gabarit : une modification du script invalide le cache."""
-    return hashlib.sha256(TEMPLATE.read_bytes()).hexdigest()[:16]
-
 
 def render_script(upload_url):
     """Le script déposé dans l'ISO. Seule l'adresse de dépôt y est écrite,
@@ -106,86 +97,128 @@ def kernel_args(extra=""):
 
 
 # ---------------------------------------------------------------------------
-# ISO de découverte, en cache
+# ISO de découverte, propre à chaque découverte
+# ---------------------------------------------------------------------------
+#
+# Pas de cache : l'adresse de dépôt, avec son jeton à usage unique, est gravée
+# dans le script de l'ISO. Une ISO par découverte, dans le répertoire de
+# travail de la découverte, effacée à la fin : aucune autre découverte ne
+# peut la remplacer pendant qu'elle est servie, ni réutiliser son jeton.
+
+def build_iso(src, work_dir, base_url, extra, remaster_script, remaster, step):
+    """Remasterise `src` pour une découverte. Renvoie (chemin de l'ISO,
+    jeton de dépôt gravé). L'appelant efface l'ISO (`iso_leftovers`)."""
+    src = Path(src)
+    work_dir = Path(work_dir)
+    token = secrets.token_urlsafe(24)
+    tag = secrets.token_hex(6)
+    iso = work_dir / f"discover-{tag}.iso"
+    part = iso.with_name(iso.name + ".part")     # écriture en cours
+    script = work_dir / f"discover-{tag}.sh"
+    try:
+        script.write_text(render_script(f"{base_url}/pxe/inventory/{token}"))
+        script.chmod(0o600)
+        step("remaster", "running", f"remasterisation de {src.name} pour la découverte")
+        cmd = ["/usr/bin/env", "bash", str(remaster_script),
+               "--src", str(src), "--out", str(part),
+               "--kernel-args", kernel_args(extra),
+               "--add-file", f"{script}:{SCRIPT_ISO_PATH}:0755",
+               "--work-dir", str(work_dir)]
+        if remaster(cmd, step) != 0:
+            raise DiscoveryError("remaster", "ISO remastering failed")
+        os.replace(part, iso)
+    except BaseException:
+        for p in iso_leftovers(iso):
+            p.unlink(missing_ok=True)
+        raise
+    finally:
+        script.unlink(missing_ok=True)
+    step("remaster", "done", f"ISO de découverte prête ({iso.name})")
+    return iso, token
+
+
+def iso_leftovers(iso):
+    """Tout ce qu'une remasterisation peut laisser pour cette ISO, y compris
+    une écriture interrompue."""
+    iso = Path(iso)
+    part = iso.with_name(iso.name + ".part")
+    return [iso, iso.with_name(iso.name + ".sha256"), part,
+            part.with_name(part.name + ".sha256")]
+
+
+# ---------------------------------------------------------------------------
+# Liaison de l'inventaire à la machine (section `== dmi`)
 # ---------------------------------------------------------------------------
 
-def source_identity(src):
-    """Identité de l'ISO source sans relire ses 7 Go : son empreinte sha256
-    si le magasin l'a posée à côté, sinon taille et date."""
-    src = Path(src)
-    sidecar = src.with_suffix(src.suffix + ".sha256")
-    if sidecar.is_file():
-        digest = (sidecar.read_text().split() or [""])[0]
-        if re.fullmatch(r"[0-9a-f]{64}", digest):
-            return f"sha256:{digest}"
-    st = src.stat()
-    return f"size:{st.st_size}:mtime:{st.st_mtime_ns}"
+# Valeurs de remplissage des firmwares : elles n'identifient rien.
+_PLACEHOLDERS = {"", "not specified", "not available", "none", "n/a", "na", "0",
+                 "default string", "to be filled by o.e.m.", "system serial number",
+                 "0123456789", "chassis serial number", "unknown"}
+_PLACEHOLDER_UUIDS = {"00000000-0000-0000-0000-000000000000",
+                      "ffffffff-ffff-ffff-ffff-ffffffffffff",
+                      "03000200-0400-0500-0006-000700080009"}
 
 
-def cache_key(src, base_url, extra=""):
-    """Même ISO, même gabarit, même adresse de la console et mêmes arguments
-    = même ISO de découverte. L'adresse en fait partie : elle est gravée
-    dans le script."""
-    blob = json.dumps({"src": source_identity(src), "tpl": template_version(),
-                       "base": base_url, "args": kernel_args(extra)},
-                      sort_keys=True)
-    return hashlib.sha256(blob.encode()).hexdigest()
+def read_dmi(raw):
+    """`{"serial": ..., "uuid": ...}` de la section `== dmi` (None si vide)."""
+    out = {"serial": None, "uuid": None}
+    cur = None
+    for line in str(raw or "").splitlines():
+        if line.startswith("== "):
+            cur = line[3:].strip()
+            continue
+        if cur == "dmi":
+            key, _, value = line.partition(" ")
+            if key in out:
+                out[key] = value.strip() or None
+    return out
 
 
-def _cache_lock(path):
-    with _CACHE_LOCKS_GUARD:
-        return _CACHE_LOCKS.setdefault(str(path), threading.Lock())
+def usable_serial(value):
+    v = (value or "").strip()
+    return v if v.lower() not in _PLACEHOLDERS else None
 
 
-def ensure_iso(src, cache_dir, base_url, extra, remaster_script, remaster, step):
-    """ISO de découverte pour `src`, remasterisée seulement si la clé a
-    changé. Renvoie (chemin, jeton de dépôt gravé, réutilisée ?).
+def usable_uuid(value):
+    v = (value or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", v):
+        return None
+    return v if v not in _PLACEHOLDER_UUIDS else None
 
-    Une seule ISO en cache par ISO source (7 Go chacune) ; le jeton gravé
-    n'est armé côté serveur que pendant une découverte, et consommé par le
-    premier dépôt."""
-    src = Path(src)
-    cache_dir = Path(cache_dir)
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_dir.chmod(0o700)
-    iso = cache_dir / f"{src.stem}.discover.iso"
-    meta = cache_dir / f"{src.stem}.discover.json"
-    key = cache_key(src, base_url, extra)
-    with _cache_lock(iso):
-        try:
-            known = json.loads(meta.read_text())
-        except (OSError, ValueError):
-            known = {}
-        if (known.get("key") == key and iso.is_file()
-                and re.fullmatch(r"[A-Za-z0-9_-]{16,}", str(known.get("slot") or ""))):
-            step("remaster", "done", f"ISO de découverte en cache ({iso.name})")
-            return iso, known["slot"], True
 
-        slot = secrets.token_urlsafe(24)
-        script = cache_dir / f".discover-{secrets.token_hex(4)}.sh"
-        tmp_iso = cache_dir / f".{iso.name}.{secrets.token_hex(4)}.part"
-        try:
-            script.write_text(render_script(f"{base_url}/pxe/inventory/{slot}"))
-            script.chmod(0o700)
-            step("remaster", "running", f"remasterisation de {src.name} pour la découverte")
-            cmd = ["/usr/bin/env", "bash", str(remaster_script),
-                   "--src", str(src), "--out", str(tmp_iso),
-                   "--kernel-args", kernel_args(extra),
-                   "--add-file", f"{script}:{SCRIPT_ISO_PATH}:0755",
-                   "--work-dir", str(cache_dir)]
-            if remaster(cmd, step) != 0:
-                raise DiscoveryError("remaster", "ISO remastering failed")
-            meta.unlink(missing_ok=True)
-            os.replace(tmp_iso, iso)
-            fd = os.open(meta, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w") as f:
-                json.dump({"key": key, "slot": slot, "source": src.name,
-                           "at": time.time()}, f)
-        finally:
-            for p in (script, tmp_iso, tmp_iso.with_suffix(tmp_iso.suffix + ".sha256")):
-                p.unlink(missing_ok=True)
-        step("remaster", "done", f"ISO de découverte prête ({iso.name})")
-        return iso, slot, False
+def _uuid_swapped(u):
+    """Les trois premiers champs en ordre d'octets inversé : certains BMC et
+    le noyau ne lisent pas la structure SMBIOS dans le même ordre."""
+    a, b, c, rest = u.split("-", 3)
+    flip = lambda h: "".join(reversed([h[i:i + 2] for i in range(0, len(h), 2)]))  # noqa: E731
+    return "-".join([flip(a), flip(b), flip(c), rest])
+
+
+def check_binding(raw, bmc_serial, bmc_uuid):
+    """Compare l'identité lue par Linux à celle du BMC piloté.
+
+    Renvoie (verdict, message) : "ok", "unchecked" (rien de comparable) ou
+    "mismatch" (l'inventaire vient d'une autre machine). Les numéros de
+    série ne sont pas des secrets : ils figurent dans le message."""
+    dmi = read_dmi(raw)
+    ds, rs = usable_serial(dmi["serial"]), usable_serial(bmc_serial)
+    du, ru = usable_uuid(dmi["uuid"]), usable_uuid(bmc_uuid)
+    checked = []
+    if ds and rs:
+        if ds.lower() != rs.lower():
+            return "mismatch", (f"the inventory comes from another machine: serial {ds} "
+                                f"seen by Linux, {rs} given by the BMC")
+        checked.append(f"série {rs}")
+    if du and ru:
+        if du not in (ru, _uuid_swapped(ru)):
+            return "mismatch", (f"the inventory comes from another machine: UUID {du} "
+                                f"seen by Linux, {ru} given by the BMC")
+        checked.append(f"UUID {ru}")
+    if checked:
+        return "ok", "même machine (" + ", ".join(checked) + ")"
+    return "unchecked", (f"liaison non vérifiée : Linux donne série {dmi['serial'] or 'vide'}, "
+                         f"UUID {dmi['uuid'] or 'vide'} ; le BMC série {bmc_serial or 'vide'}, "
+                         f"UUID {bmc_uuid or 'vide'}")
 
 
 # ---------------------------------------------------------------------------
@@ -237,15 +270,18 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
         sleep=time.sleep, clock=time.time):
     """Démarrage de découverte complet. `opts` :
 
-    host, src_iso, cache_dir, work_dir, store_dir, remaster_script,
-    advertise, port, extra_args ; facultatifs inventory_timeout,
-    poweroff_timeout, poll.
+    host, src_iso, work_dir (0700, propre à la découverte ou partagé),
+    store_dir, remaster_script, advertise, port, extra_args ; facultatifs
+    inventory_timeout, poweroff_timeout, poll.
 
-    Renvoie {"serial", "path", "raw", "forced_off"} ; lève DiscoveryError.
-    Quoi qu'il arrive, le média est éjecté et les jetons révoqués."""
+    Renvoie {"serial", "path", "raw", "forced_off", "binding"} ; lève
+    DiscoveryError. Quoi qu'il arrive : média éjecté (ou avertissement),
+    jetons révoqués, ISO et dépôt effacés."""
     poll = opts.get("poll", 5)
     tokens = []
-    inv_path = Path(opts["work_dir"]) / f"inventory-{secrets.token_hex(6)}.txt"
+    work_dir = Path(opts["work_dir"])
+    inv_path = work_dir / f"inventory-{secrets.token_hex(6)}.txt"
+    iso = None
     inserted = powered = done = False
 
     def check_cancel(sid):
@@ -253,7 +289,7 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
             raise Cancelled(sid, "cancelled by operator")
 
     try:
-        # --- préflight : le BMC, son lecteur virtuel, le numéro de série ---
+        # --- préflight : le BMC, son lecteur virtuel, son identité ---
         step("preflight", "running", f"interrogation du BMC {opts['host']}")
         profile = bmc.profile()
         if not profile.get("ok"):
@@ -262,7 +298,9 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
             raise DiscoveryError("preflight", "no CD virtual media (iLO Advanced licence?)")
         if "Cd" not in (profile.get("boot_targets") or []):
             raise DiscoveryError("preflight", "the BMC cannot boot from virtual media")
-        serial = (profile.get("serial") or "").strip() or (profile.get("uuid") or "").strip()
+        bmc_serial = (profile.get("serial") or "").strip()
+        bmc_uuid = (profile.get("uuid") or "").strip()
+        serial = bmc_serial or bmc_uuid
         if not serial:
             raise DiscoveryError("preflight", "the BMC gives no system serial")
         _serial_name(serial)
@@ -271,21 +309,17 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
              f"{profile.get('model') or '?'} (série {serial}), média virtuel OK")
         check_cancel("preflight")
 
-        # --- ISO de découverte (en cache) ---
+        # --- ISO de cette découverte, avec son jeton de dépôt ---
         base_url = f"http://{opts['advertise']}:{opts['port']}"
-        iso, slot, _ = ensure_iso(opts["src_iso"], opts["cache_dir"], base_url,
-                                  opts.get("extra_args", ""), opts["remaster_script"],
-                                  remaster, step)
+        iso, upload_token = build_iso(opts["src_iso"], work_dir, base_url,
+                                      opts.get("extra_args", ""), opts["remaster_script"],
+                                      remaster, step)
         check_cancel("remaster")
 
-        # --- publication : l'ISO, et le dépôt de l'inventaire (armé) ---
-        inv_path.unlink(missing_ok=True)
-        try:
-            tokens.append(pxe.issue(inv_path, "inventory",
-                                    ttl=opts.get("inventory_timeout", INVENTORY_TIMEOUT) + 3600,
-                                    token=slot))
-        except pxe.TokenInUse:
-            raise DiscoveryError("serve", "a discovery with this ISO is already running")
+        # --- publication : l'ISO, et le dépôt de l'inventaire ---
+        tokens.append(pxe.issue(inv_path, "inventory",
+                                ttl=opts.get("inventory_timeout", INVENTORY_TIMEOUT) + 3600,
+                                token=upload_token))
         iso_token = pxe.issue(iso, "iso")
         tokens.append(iso_token)
         iso_url = f"{base_url}/pxe/iso/{iso_token}.iso"
@@ -345,10 +379,17 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
              "extinction forcée : la machine ne s'était pas éteinte d'elle-même"
              if forced else "machine éteinte d'elle-même")
 
+        # --- l'inventaire vient-il bien de cette machine ? ---
+        binding, message = check_binding(raw, bmc_serial, bmc_uuid)
+        if binding == "mismatch":
+            raise DiscoveryError("verify", message)
+        step("verify", "done" if binding == "ok" else "warn", message)
+
         # --- enregistrement ---
         path = store_inventory(opts["store_dir"], serial, opts["host"], raw, now=clock())
         step("store", "done", f"inventaire enregistré (série {serial})")
-        return {"serial": serial, "path": path, "raw": raw, "forced_off": forced}
+        return {"serial": serial, "path": path, "raw": raw, "forced_off": forced,
+                "binding": binding}
     finally:
         # Échec ou annulation machine démarrée sur l'ISO : elle ne sert plus
         # à rien, l'éteindre plutôt que la laisser tourner sur le système live.
@@ -361,12 +402,19 @@ def run(opts, bmc, pxe, remaster, step, cancelled=lambda: False,
                 pass
         if inserted:
             try:
-                bmc.eject()
-            except Exception:           # le ménage ne masque pas la vraie erreur
-                pass
+                res = bmc.eject()
+                ok, detail = res if isinstance(res, tuple) else (True, "")
+            except Exception as e:      # le ménage ne masque pas la vraie erreur
+                ok, detail = False, type(e).__name__
+            if not ok:
+                step("bmc-eject", "warn",
+                     f"média virtuel non éjecté ({str(detail)[:120]}) : l'éjecter depuis le BMC")
         if tokens:
             pxe.revoke(*tokens)
         inv_path.unlink(missing_ok=True)
+        if iso is not None:
+            for p in iso_leftovers(iso):
+                p.unlink(missing_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -463,8 +511,9 @@ class RedfishBmc:
     def eject(self):
         _, vm = self._virtual_cd()
         target, _ = self._action(vm or {}, "EjectVirtualMedia", "EjectMedia")
-        if target:
-            self._req(target, "POST", {})
+        if not target:
+            return False, "virtual media eject not exposed by this BMC"
+        return self._req(target, "POST", {})
 
     def boot_once_cd(self):
         return self._req(self._system, "PATCH", {"Boot": {

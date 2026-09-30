@@ -79,7 +79,7 @@ def test_inventory_token_accepts_one_post_written_private(served, tmp_path):
     assert dest.read_bytes() == b"== lsblk\n{}\n"
     assert stat.S_IMODE(dest.stat().st_mode) == 0o600
     # usage unique : le second envoi est refusé et ne remplace rien
-    assert _post(served, f"/pxe/inventory/{tok}", b"forged") == 404
+    assert _post(served, f"/pxe/inventory/{tok}", b"== lsblk\nforged\n") == 404
     assert dest.read_bytes() == b"== lsblk\n{}\n"
     assert not [p for p in tmp_path.iterdir() if p.name.endswith(".part")]
 
@@ -96,7 +96,25 @@ def test_inventory_token_refuses_more_than_one_mebibyte(served, tmp_path):
     assert _post(served, f"/pxe/inventory/{tok}", b"x", {"Content-Length": "abc"}) in (400, 411)
     assert not dest.exists()
     # refus avant lecture : le jeton n'est pas consommé
-    assert _post(served, f"/pxe/inventory/{tok}", b"x" * px.INVENTORY_MAX) == 204
+    big = b"== lsblk\n" + b"x" * (px.INVENTORY_MAX - 9)
+    assert _post(served, f"/pxe/inventory/{tok}", big) == 204
+
+
+def test_inventory_post_is_checked_before_the_body_is_read(served, tmp_path):
+    """Un jeton inconnu n'obtient pas qu'on lise son corps ; un corps vide ou
+    qui n'est pas un inventaire est refusé sans consommer le jeton."""
+    import socket
+    with socket.create_connection(("127.0.0.1", served), timeout=5) as sk:
+        sk.sendall(b"POST /pxe/inventory/unknown-token HTTP/1.1\r\nHost: x\r\n"
+                   b"Content-Length: 1000\r\n\r\n")
+        assert sk.recv(64).startswith(b"HTTP/1.1 404"), "réponse sans attendre le corps"
+    dest = tmp_path / "inv.txt"
+    tok = px.issue(dest, "inventory")
+    assert _post(served, f"/pxe/inventory/{tok}", b"") == 400
+    assert _post(served, f"/pxe/inventory/{tok}", b"<html>not an inventory</html>") == 400
+    assert _post(served, f"/pxe/inventory/{tok}", b"x== lsblk\n") == 400
+    assert not dest.exists()
+    assert _post(served, f"/pxe/inventory/{tok}", b"== lsblk\n{}\n") == 204
 
 
 def test_inventory_needs_its_own_kind(served, tmp_path):
@@ -105,7 +123,7 @@ def test_inventory_needs_its_own_kind(served, tmp_path):
     iso_tok = px.issue(iso, "iso")
     inv_tok = px.issue(tmp_path / "inv.txt", "inventory")
     # un jeton d'ISO n'accepte pas de dépôt, un jeton de dépôt ne sert pas d'ISO
-    assert _post(served, f"/pxe/inventory/{iso_tok}", b"x") == 404
+    assert _post(served, f"/pxe/inventory/{iso_tok}", b"== lsblk\n{}\n") == 404
     assert _post(served, f"/pxe/iso/{iso_tok}.iso", b"x") == 404
     assert _get(served, f"/pxe/iso/{inv_tok}.iso") == 404
     assert iso.read_bytes() == b"iso"
@@ -138,6 +156,7 @@ def test_template_carries_no_secret_guards_the_initrd_and_powers_off():
     assert code[-1] == "systemctl poweroff"
     assert "--retry 60 --retry-delay 5 --retry-all-errors" in tpl
     assert "lsblk -J -b -O" in tpl and "ip -j link" in tpl and 'readlink -f "$l"' in tpl
+    assert "/sys/class/dmi/id/product_serial" in tpl and "/sys/class/dmi/id/product_uuid" in tpl
 
 
 def test_rendered_script_only_takes_a_plain_upload_url():
@@ -194,6 +213,10 @@ def _run_template(tmp_path, initrd=False):
         (net / nic).mkdir(parents=True)
         if speed:
             (net / nic / "speed").write_text(speed + "\n")
+    dmi = tmp_path / "dmi"
+    dmi.mkdir()
+    (dmi / "product_serial").write_text("SERIAL-0001\n")
+    (dmi / "product_uuid").write_text("4c4c4544-0031-3810-8052-b4c04f4e3332\n")
     guard = tmp_path / "initrd-release"
     if initrd:
         guard.write_text("x")
@@ -201,7 +224,7 @@ def _run_template(tmp_path, initrd=False):
     script = (script.replace("/etc/initrd-release", str(guard))
               .replace("/run/harvester-ops-discovery.txt", str(tmp_path / "out.txt"))
               .replace("/dev/disk/by-id", str(byid)).replace("/dev/disk/by-path", str(bypath))
-              .replace("/sys/class/net", str(net)))
+              .replace("/sys/class/net", str(net)).replace("/sys/class/dmi/id", str(dmi)))
     sh = tmp_path / "discover.sh"
     sh.write_text(script)
     env = dict(os.environ, PATH=f"{stubs}:{os.environ['PATH']}")
@@ -218,12 +241,14 @@ def test_the_script_emits_what_the_parser_reads(tmp_path):
     text = sent.read_text().replace(str(byid), "/dev/disk/by-id").replace(
         str(bypath), "/dev/disk/by-path")
     assert [ln for ln in text.splitlines() if ln.startswith("== ")] == [
-        "== lsblk", "== links", "== nics", "== speeds"]
+        "== lsblk", "== links", "== nics", "== speeds", "== dmi"]
     got = bdk.parse_discovery(text)
     want = bdk.parse_discovery(FIXTURE.read_text())
     assert [d["name"] for d in got["disks"]] == [d["name"] for d in want["disks"]]
     assert [d["stable_path"] for d in got["disks"]] == [d["stable_path"] for d in want["disks"]]
     assert got["disks"] and got["nics"]
+    assert got["dmi"] == {"serial": "SERIAL-0001", "uuid": "4c4c4544-0031-3810-8052-b4c04f4e3332"}
+    assert bmd.check_binding(text, "SERIAL-0001", None)[0] == "ok"
 
 
 def test_the_script_does_nothing_in_the_initrd(tmp_path):
@@ -301,64 +326,104 @@ def test_remaster_refuses_bad_discovery_arguments(tmp_path, args):
 
 
 # ---------------------------------------------------------------------------
-# ISO de découverte en cache
+# ISO propre à chaque découverte
 # ---------------------------------------------------------------------------
 
 class _FakeRemaster:
     """Tient lieu du script : écrit l'ISO demandée et retient le script
     déposé (donc l'adresse de dépôt gravée)."""
 
-    def __init__(self):
+    def __init__(self, rc=0):
         self.calls = []
         self.upload_url = None
+        self.rc = rc
 
     def __call__(self, cmd, step):
         self.calls.append(cmd)
         out = Path(cmd[cmd.index("--out") + 1])
         out.write_bytes(b"iso")
+        Path(str(out) + ".sha256").write_text("x")
         spec = cmd[cmd.index("--add-file") + 1]
         src = spec.split(":", 1)[0]
         m = re.search(r'UPLOAD_URL="([^"]+)"', Path(src).read_text())
         self.upload_url = m.group(1)
         step("iso-build", "done", "fake")
-        return 0
+        return self.rc
 
 
-def test_discovery_iso_is_remastered_once_per_key(tmp_path, monkeypatch):
+def test_each_discovery_gets_its_own_iso_and_token(tmp_path):
+    """Plus de cache partagé : une ISO et un jeton par découverte. Un cache
+    faisait remplacer une ISO en cours de service, révoquer le jeton de la
+    découverte suivante, et gardait un jeton réutilisable."""
     src = tmp_path / "h.iso"
     src.write_bytes(b"source")
-    cache = tmp_path / "discover"
+    work = tmp_path / "work"
+    work.mkdir()
     fake = _FakeRemaster()
-    ensure = lambda base="http://10.0.0.5:8091", extra="": bmd.ensure_iso(  # noqa: E731
-        src, cache, base, extra, BIN / "harvester-iso-remaster.sh", fake, lambda *a: None)
-    iso, slot, reused = ensure()
-    assert not reused and len(fake.calls) == 1 and iso.read_bytes() == b"iso"
-    assert fake.upload_url == f"http://10.0.0.5:8091/pxe/inventory/{slot}"
+    build = lambda: bmd.build_iso(src, work, "http://10.0.0.5:8091", "",  # noqa: E731
+                                  BIN / "harvester-iso-remaster.sh", fake, lambda *a: None)
+    iso1, tok1 = build()
+    iso2, tok2 = build()
+    assert len(fake.calls) == 2 and iso1 != iso2 and tok1 != tok2
+    assert iso1.parent == work and iso1.read_bytes() == b"iso"
+    assert fake.upload_url == f"http://10.0.0.5:8091/pxe/inventory/{tok2}"
     cmd = fake.calls[0]
     assert cmd[cmd.index("--kernel-args") + 1] == bmd.kernel_args()
     assert cmd[cmd.index("--add-file") + 1].endswith(":/discover.sh:0755")
-    meta = cache / "h.discover.json"
-    assert stat.S_IMODE(meta.stat().st_mode) == 0o600
-    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
-    assert not list(cache.glob(".discover-*.sh")), "le script local ne reste pas"
-
-    assert ensure() == (iso, slot, True) and len(fake.calls) == 1
-    ensure(base="http://10.0.0.6:8091")                     # autre adresse gravée
-    assert len(fake.calls) == 2
-    ensure(base="http://10.0.0.6:8091", extra="console=ttyS1")
-    assert len(fake.calls) == 3
-    monkeypatch.setattr(bmd, "template_version", lambda: "other")
-    ensure(base="http://10.0.0.6:8091", extra="console=ttyS1")
-    assert len(fake.calls) == 4
-    assert len(list(cache.glob("*.discover.iso"))) == 1, "une seule ISO en cache par source"
+    assert cmd[cmd.index("--out") + 1].endswith(".iso.part"), "écrite à part, puis renommée"
+    assert not list(work.glob("*.sh")), "le script local ne reste pas"
+    for leftover in bmd.iso_leftovers(iso1):
+        leftover.unlink(missing_ok=True)
+    assert not [p for p in work.iterdir() if p.name.startswith(iso1.name)]
 
 
-def test_source_identity_prefers_the_store_checksum(tmp_path):
+def test_a_failed_remaster_leaves_nothing(tmp_path):
     src = tmp_path / "h.iso"
-    src.write_bytes(b"x")
-    assert bmd.source_identity(src).startswith("size:1:")
-    (tmp_path / "h.iso.sha256").write_text("a" * 64 + "  h.iso\n")
-    assert bmd.source_identity(src) == "sha256:" + "a" * 64
+    src.write_bytes(b"source")
+    work = tmp_path / "work"
+    work.mkdir()
+    with pytest.raises(bmd.DiscoveryError) as e:
+        bmd.build_iso(src, work, "http://10.0.0.5:8091", "", BIN / "harvester-iso-remaster.sh",
+                      _FakeRemaster(rc=1), lambda *a: None)
+    assert e.value.step == "remaster"
+    assert not list(work.iterdir()), "ni .part, ni .sha256, ni script"
+
+
+# ---------------------------------------------------------------------------
+# Liaison de l'inventaire à la machine
+# ---------------------------------------------------------------------------
+
+UUID = "4c4c4544-0031-3810-8052-b4c04f4e3332"
+
+
+def _dmi(serial, uuid):
+    return f"== dmi\nserial {serial}\nuuid {uuid}\n"
+
+
+def test_parser_exposes_the_dmi_section_only_when_sent():
+    got = bdk.parse_discovery(FIXTURE.read_text() + _dmi("SERIAL-0001", UUID))
+    assert got["dmi"] == {"serial": "SERIAL-0001", "uuid": UUID}
+    assert "dmi" not in bdk.parse_discovery(FIXTURE.read_text())
+    assert bdk.parse_discovery("== dmi\nserial \n")["dmi"] == {"serial": None, "uuid": None}
+
+
+@pytest.mark.parametrize("raw,serial,uuid,verdict", [
+    (_dmi("SERIAL-0001", UUID), "SERIAL-0001", UUID, "ok"),
+    (_dmi("serial-0001", ""), "SERIAL-0001", None, "ok"),             # casse ignorée
+    (_dmi("OTHER-9", UUID), "SERIAL-0001", UUID, "mismatch"),
+    (_dmi("Not Specified", UUID), "SERIAL-0001", UUID, "ok"),          # repli sur l'UUID
+    (_dmi("Not Specified", "4c4c4544-0031-3810-8052-000000000000"), "SERIAL-0001", UUID, "mismatch"),
+    # UUID lu dans l'autre ordre d'octets (trois premiers champs)
+    (_dmi("", bmd._uuid_swapped(UUID)), "", UUID, "ok"),
+    (_dmi("Not Specified", "00000000-0000-0000-0000-000000000000"), "SERIAL-0001", UUID,
+     "unchecked"),
+    ("== lsblk\n{}\n", "SERIAL-0001", UUID, "unchecked"),              # pas de section
+])
+def test_binding_verdicts(raw, serial, uuid, verdict):
+    got, message = bmd.check_binding(raw, serial, uuid)
+    assert got == verdict, message
+    if verdict == "mismatch":
+        assert "another machine" in message
 
 
 # ---------------------------------------------------------------------------
@@ -366,15 +431,17 @@ def test_source_identity_prefers_the_store_checksum(tmp_path):
 # ---------------------------------------------------------------------------
 
 class FakeBmc:
-    def __init__(self, fake_remaster, post=True, self_off=True, power="Off"):
+    def __init__(self, fake_remaster, post=True, self_off=True, power="Off",
+                 dmi=_dmi("SERIAL-0001", UUID), eject_ok=True):
         self.fake, self.post, self.self_off = fake_remaster, post, self_off
-        self.power = power
+        self.power, self.dmi, self.eject_ok = power, dmi, eject_ok
         self.calls = []
 
     def profile(self):
         self.calls.append("profile")
         return {"ok": True, "virtualmedia_path": "/vm/2", "boot_targets": ["Hdd", "Cd"],
-                "serial": "SERIAL-0001", "model": "ProLiant", "power_state": self.power}
+                "serial": "SERIAL-0001", "uuid": UUID, "model": "ProLiant",
+                "power_state": self.power}
 
     def insert(self, url):
         self.calls.append("insert")
@@ -384,6 +451,7 @@ class FakeBmc:
 
     def eject(self):
         self.calls.append("eject")
+        return (True, "") if self.eject_ok else (False, "HTTP 500")
 
     def boot_once_cd(self):
         self.calls.append("boot")
@@ -394,7 +462,7 @@ class FakeBmc:
         if kind in ("On", "ForceRestart"):
             self.power = "On"
             if self.post:
-                body = FIXTURE.read_bytes()
+                body = FIXTURE.read_bytes() + self.dmi.encode()
                 req = urllib.request.Request(self.fake.upload_url, data=body, method="POST")
                 urllib.request.urlopen(req, timeout=5).close()
                 if self.self_off:
@@ -411,41 +479,83 @@ def _opts(tmp_path, port, **kw):
     src = tmp_path / "h.iso"
     if not src.exists():
         src.write_bytes(b"source")
-    return dict({"host": "192.0.2.21", "src_iso": src, "cache_dir": tmp_path / "discover",
-                 "work_dir": tmp_path / "work", "store_dir": tmp_path / "inventory",
+    work = tmp_path / "work"
+    work.mkdir(exist_ok=True)
+    return dict({"host": "192.0.2.21", "src_iso": src,
+                 "work_dir": work, "store_dir": tmp_path / "inventory",
                  "remaster_script": BIN / "harvester-iso-remaster.sh",
                  "advertise": "127.0.0.1", "port": port, "extra_args": "",
                  "poll": 0.01}, **kw)
 
 
 def test_discovery_runs_end_to_end(served, tmp_path):
-    (tmp_path / "work").mkdir()
     fake = _FakeRemaster()
     bmc = FakeBmc(fake)
     steps = []
     res = bmd.run(_opts(tmp_path, served), bmc, px, fake, lambda *a: steps.append(a))
     assert res["serial"] == "SERIAL-0001" and res["forced_off"] is False
+    assert res["binding"] == "ok"
     assert bmc.calls == ["profile", "insert", "boot", "reset:On", "eject"], (
         "machine éteinte : allumée, pas redémarrée ; média éjecté à la fin")
     stored = tmp_path / "inventory" / "SERIAL-0001.json"
     assert stat.S_IMODE(stored.stat().st_mode) == 0o600
     doc = json.loads(stored.read_text())
-    assert doc["raw"] == FIXTURE.read_text() and doc["bmc_host"] == "192.0.2.21"
+    assert doc["raw"].startswith(FIXTURE.read_text()) and doc["bmc_host"] == "192.0.2.21"
     assert bmd.load_inventory(tmp_path / "inventory", "192.0.2.21")["system_serial"] == "SERIAL-0001"
-    assert not list((tmp_path / "work").iterdir()), "le dépôt brut ne reste pas"
+    assert not list((tmp_path / "work").iterdir()), "ni ISO, ni .part, ni dépôt brut"
     ids = [s[0] for s in steps if s[1] == "done"]
     assert ids == ["preflight", "iso-build", "remaster", "serve", "bmc-insert", "bmc-boot",
-                   "power", "wait-inventory", "power-off", "store"]
+                   "power", "wait-inventory", "power-off", "verify", "store"]
     # jetons révoqués : l'adresse gravée n'accepte plus rien
-    assert _post(served, fake.upload_url.split(f":{served}", 1)[1], b"x") == 404
-    # une seconde découverte reprend l'ISO en cache et réarme le même jeton
+    first = fake.upload_url
+    assert _post(served, first.split(f":{served}", 1)[1], b"== lsblk\n{}\n") == 404
+    # une seconde découverte remasterise la sienne, avec un autre jeton
     bmc2 = FakeBmc(fake, power="On")
     bmd.run(_opts(tmp_path, served), bmc2, px, fake, lambda *a: None)
-    assert len(fake.calls) == 1 and "reset:ForceRestart" in bmc2.calls
+    assert len(fake.calls) == 2 and fake.upload_url != first
+    assert "reset:ForceRestart" in bmc2.calls
+
+
+def test_an_inventory_from_another_machine_is_not_stored(served, tmp_path):
+    fake = _FakeRemaster()
+    bmc = FakeBmc(fake, dmi=_dmi("OTHER-SERIAL-9", UUID))
+    with pytest.raises(bmd.DiscoveryError) as e:
+        bmd.run(_opts(tmp_path, served), bmc, px, fake, lambda *a: None)
+    assert e.value.step == "verify"
+    assert "OTHER-SERIAL-9" in str(e.value) and "SERIAL-0001" in str(e.value)
+    assert not (tmp_path / "inventory").exists()
+    assert "eject" in bmc.calls and not list((tmp_path / "work").iterdir())
+
+
+def test_an_unverifiable_binding_is_stored_with_a_warning(served, tmp_path):
+    fake = _FakeRemaster()
+    bmc = FakeBmc(fake, dmi=_dmi("Not Specified", ""))
+    steps = []
+    res = bmd.run(_opts(tmp_path, served), bmc, px, fake, lambda *a: steps.append(a))
+    assert res["binding"] == "unchecked"
+    assert (tmp_path / "inventory" / "SERIAL-0001.json").is_file()
+    warn = [s for s in steps if s[0] == "verify"]
+    assert warn and warn[0][1] == "warn" and "non vérifiée" in warn[0][2]
+
+
+def test_an_eject_failure_is_reported_not_swallowed(served, tmp_path):
+    fake = _FakeRemaster()
+    bmc = FakeBmc(fake, eject_ok=False)
+    steps = []
+    bmd.run(_opts(tmp_path, served), bmc, px, fake, lambda *a: steps.append(a))
+    warn = [s for s in steps if s[0] == "bmc-eject"]
+    assert warn and warn[0][1] == "warn" and "HTTP 500" in warn[0][2]
+
+    def boom():
+        raise OSError("down")
+    bmc = FakeBmc(fake)
+    bmc.eject = boom
+    steps.clear()
+    bmd.run(_opts(tmp_path, served), bmc, px, fake, lambda *a: steps.append(a))
+    assert any(s[0] == "bmc-eject" and s[1] == "warn" and "OSError" in s[2] for s in steps)
 
 
 def test_a_machine_that_stays_on_is_forced_off_and_said_so(served, tmp_path):
-    (tmp_path / "work").mkdir()
     fake = _FakeRemaster()
     bmc = FakeBmc(fake, self_off=False)
     steps = []
@@ -457,7 +567,6 @@ def test_a_machine_that_stays_on_is_forced_off_and_said_so(served, tmp_path):
 
 
 def test_no_inventory_times_out_forces_off_and_ejects(served, tmp_path):
-    (tmp_path / "work").mkdir()
     fake = _FakeRemaster()
     bmc = FakeBmc(fake, post=False)
     with pytest.raises(bmd.DiscoveryError) as e:
@@ -465,12 +574,11 @@ def test_no_inventory_times_out_forces_off_and_ejects(served, tmp_path):
     assert e.value.step == "wait-inventory"
     assert bmc.calls[-2:] == ["reset:ForceOff", "eject"]
     assert not (tmp_path / "inventory").exists()
-    # le jeton gravé est libéré : une nouvelle découverte peut l'armer
-    bmd.run(_opts(tmp_path, served), FakeBmc(fake), px, fake, lambda *a: None)
+    assert not list((tmp_path / "work").iterdir()), "l'ISO de la découverte est effacée"
+    assert _post(served, fake.upload_url.split(f":{served}", 1)[1], b"== lsblk\n{}\n") == 404
 
 
 def test_a_cancelled_discovery_ejects_and_says_cancelled(served, tmp_path):
-    (tmp_path / "work").mkdir()
     fake = _FakeRemaster()
     bmc = FakeBmc(fake, post=False)
     flag = {"n": 0}
@@ -621,3 +729,62 @@ def test_the_command_line_shares_the_console_code_path():
     app_src = (WEB / "app.py").read_text()
     runner = app_src.split("def _baremetal_discover_runner(", 1)[1].split("\ndef ", 1)[0]
     assert "_bmd.run(" in runner and '"harvester-iso-remaster.sh"' in runner
+
+
+def test_a_bmc_driven_by_a_discovery_or_install_is_refused(client, monkeypatch):
+    """Une découverte et une installation pilotent la même alimentation et le
+    même lecteur virtuel : une seconde action sur ce BMC est refusée (409)."""
+    runs = []
+
+    def fake_track(label, cluster, worker, *a):
+        run = wapp.ActionRun(f"bm{len(runs):010d}", label, cluster, [])
+        runs.append(run)
+        with wapp.ACTIONS_LOCK:
+            wapp.ACTIONS[run.id] = run
+        return run.id
+    monkeypatch.setattr(wapp, "track_action", fake_track)
+    install = {"bmc_host": "192.0.2.21", "bmc_user": "u", "bmc_password": "p",
+               "iso": "h.iso", "hostname": "n1", "device": "/dev/sda",
+               "mgmt_interface": "eno1", "vip": "192.0.2.50", "token": "t"}
+    try:
+        r = client.post("/api/baremetal/discover", json=BODY)
+        assert r.status_code == 202
+        r = client.post("/api/baremetal/discover", json=BODY)
+        assert r.status_code == 409 and "192.0.2.21" in r.get_json()["error"]
+        assert r.get_json()["running"] == runs[0].id
+        r = client.post("/api/baremetal/install", json=install)
+        assert r.status_code == 409 and "baremetal-discover" in r.get_json()["error"]
+        # un autre BMC n'est pas concerné
+        assert client.post("/api/baremetal/install",
+                           json=dict(install, bmc_host="192.0.2.22")).status_code == 202
+        runs[0].status = "done"
+        assert client.post("/api/baremetal/install", json=install).status_code == 202
+        assert client.post("/api/baremetal/discover", json=BODY).status_code == 409
+    finally:
+        with wapp.ACTIONS_LOCK:
+            for run in runs:
+                wapp.ACTIONS.pop(run.id, None)
+    assert len(runs) == 3
+
+
+def test_the_command_line_says_when_the_port_is_taken(tmp_path):
+    import socket
+    sk = socket.socket()
+    sk.bind(("0.0.0.0", 0))
+    sk.listen(1)
+    port = sk.getsockname()[1]
+    pw = tmp_path / "pw"
+    pw.write_text("secret\n")
+    pw.chmod(0o600)
+    iso = tmp_path / "h.iso"
+    iso.write_bytes(b"x")
+    try:
+        r = subprocess.run([sys.executable, str(BIN / "harvester-baremetal.py"), "discover",
+                            "--bmc", "192.0.2.21", "--user", "u", "--password-file", str(pw),
+                            "--iso", str(iso), "--port", str(port),
+                            "--advertise", "127.0.0.1"],
+                           capture_output=True, text=True, timeout=30)
+    finally:
+        sk.close()
+    assert r.returncode == 1
+    assert f"cannot listen on port {port}" in r.stderr and "Traceback" not in r.stderr

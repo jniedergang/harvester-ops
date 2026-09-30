@@ -13,7 +13,9 @@ ignorée, une section absente vaut vide.
   cible donnée par `readlink -f` (`/dev/sdb`, `/dev/dm-0`, ...) ;
 - `== nics` : sortie JSON de `ip -j link` ;
 - `== speeds` (facultative) : `<interface> <Mbit/s>` lu dans
-  `/sys/class/net/<interface>/speed` ; `-1` ou vide = inconnue.
+  `/sys/class/net/<interface>/speed` ; `-1` ou vide = inconnue ;
+- `== dmi` (facultative) : `serial <valeur>` et `uuid <valeur>`, lus dans
+  `/sys/class/dmi/id/product_serial` et `product_uuid`.
 
 Module pur (aucune entrée/sortie), testé sans cluster."""
 import json
@@ -224,9 +226,20 @@ def parse_discovery(text):
         if _mounted_at(dev, _LIVE_MOUNT):
             continue
         disks.append(_disk(dev, links))
-    return {"disks": disks,
-            "nics": _nics(_json_section(sec.get("nics", []), []),
-                          _speeds(sec.get("speeds", [])))}
+    out = {"disks": disks,
+           "nics": _nics(_json_section(sec.get("nics", []), []),
+                         _speeds(sec.get("speeds", [])))}
+    # 1.78.0 : identité de la machine (`serial <v>`, `uuid <v>`), présente
+    # seulement si l'inventaire porte la section ; valeurs brutes, un
+    # remplissage de firmware (« Not Specified ») est laissé tel quel.
+    if "dmi" in sec:
+        dmi = {"serial": None, "uuid": None}
+        for line in sec["dmi"]:
+            key, _, value = line.partition(" ")
+            if key in dmi:
+                dmi[key] = value.strip() or None
+        out["dmi"] = dmi
+    return out
 
 
 def _index(disks):
