@@ -95,7 +95,10 @@ ailleurs.
   d'appliquer, et fournisseur Harvester installé depuis la console ; la
   pile Cluster API, des clusters RKE2 créés depuis une fenêtre et les
   services qu'on y déploie ; Harvester installé sur
-  une machine vierge par média virtuel Redfish.
+  une machine vierge par média virtuel Redfish, avec la configuration
+  complète de l'installeur (agrégats, VLAN, disque de données, fichiers
+  NetworkManager...) ou un fichier de configuration existant importé tel
+  quel.
 - **Scriptable** : le séquençage électrique s'exécute aussi en ligne de
   commande, pour les chaînes d'automatisation et les sites hors ligne, et
   chaque opération a sa simulation.

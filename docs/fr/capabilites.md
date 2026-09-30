@@ -1879,6 +1879,41 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   le monte en média virtuel, programme une amorce unique sur `Cd` et
   allume la machine. Suivi étape par étape dans le dock, du préflight
   jusqu'à l'API Harvester qui répond sur la VIP.
+- **La configuration complète de l'installeur (1.77.0).** Au-delà des
+  champs de base, la fenêtre pose :
+  - une interface de gestion en agrégat de plusieurs cartes (cartes
+    découvertes cochées par MAC, ou noms), le mode d'agrégat, miimon, et en
+    802.3ad le rythme LACP ; la politique de hachage en 802.3ad,
+    balance-xor, balance-tlb et balance-alb ; un VLAN facultatif ;
+  - un disque de données et « effacer tous les disques » ;
+  - les libellés du nœud (un `clé=valeur` par ligne) et les modules noyau ;
+  - une section **YAML avancé** pour tout le reste de ce que l'installeur
+    accepte : `os.write_files` (connexions NetworkManager des autres
+    réseaux, réglages systemd, sshd), `os.persistent_state_paths`,
+    `os.sysctls`, `os.environment`, `system_settings`, etc.
+
+  **Importer une configuration** lit un fichier d'installeur existant :
+  les champs que le formulaire connaît le remplissent, le reste va dans le
+  YAML avancé, le jeton et le mot de passe du fichier restent sur le
+  serveur (les champs disent « repris du fichier »), et son `iso_url` est
+  remplacée par l'image que la console sert au BMC. **Aperçu** montre le
+  YAML exact que recevra l'installeur, secrets masqués. Chaque clé est
+  vérifiée contre le schéma de l'installeur (Harvester v1.9) avant toute
+  mise sous tension, et refusée avec son chemin quand elle est inconnue,
+  mal typée, posée deux fois (par le formulaire et le YAML avancé) ou
+  gardée par la console (`install.iso_url`, `install.mode`, `server_url`,
+  `token`, `os.password`). Un `system_settings.ntp-servers` est refusé tant
+  que le champ NTP est rempli : l'installeur le remplacerait par ce champ
+  sans rien dire (vu sur une installation réelle).
+
+  Vérifié en réel sur un nœud imbriqué de Harvester v1.9.0 installé avec
+  une configuration de même forme que celle d'un exploitant : agrégat de
+  gestion de deux cartes (active-backup), agrégat de stockage en MTU 9000
+  avec un VLAN et une route statique écrits par `write_files`, disque de
+  données pris comme disque par défaut de Longhorn, libellés du nœud,
+  modules, un chemin persistant, un sysctl, tous encore en place après un
+  redémarrage. Pas vérifié en réel : LACP (802.3ad, aucun commutateur du
+  banc ne le négocie) et un VLAN de gestion étiqueté.
 - **Préflight contre l'inventaire périmé** — un BMC éteint rejoue
   l'inventaire de son *dernier POST*, parfois vieux de plusieurs mois.
   L'installation allume la machine et lit le matériel réel avant de

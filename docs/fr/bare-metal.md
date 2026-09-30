@@ -80,12 +80,43 @@ et la possibilité ou non d'installer la machine.
 **Installer Harvester** ouvre un formulaire :
 
 - **Image** : quel ISO du magasin.
-- **Node** : nom d'hôte, disque d'installation (`/dev/sda`...), interface
-  de management (choisie parmi les NICs qui viennent d'être découvertes),
-  adressage (statique ou DHCP), IP / masque / passerelle, VIP du cluster,
-  DNS.
+- **Node** : nom d'hôte, adressage (statique ou DHCP), IP / masque /
+  passerelle, VIP du cluster et son mode.
+- **Réseau de gestion** : une ou plusieurs cartes, cochées parmi celles
+  qui viennent d'être découvertes (plusieurs font un agrégat), le mode
+  d'agrégat et miimon, le rythme LACP en 802.3ad, la politique de hachage
+  dans les modes qui s'en servent, un VLAN facultatif.
+- **Disques** : disque d'installation (`/dev/sda`, ou un chemin stable
+  `/dev/disk/by-path/...`), un disque de données facultatif, et « effacer
+  tous les disques ».
+- **Système** : DNS, NTP, libellés du nœud (un `clé=valeur` par ligne),
+  modules noyau.
 - **Accès** : le token du cluster, le mot de passe OS, et éventuellement
   des clés publiques SSH.
+- **YAML avancé** : tout le reste de ce que l'installeur accepte, fusionné
+  avec le formulaire : `os.write_files` (connexions NetworkManager du
+  réseau de stockage ou des autres, réglages systemd, sshd),
+  `os.persistent_state_paths`, `os.sysctls`, `os.environment`,
+  `system_settings`...
+
+**Importer une configuration** prend un fichier d'installeur existant et
+le découpe : ce que le formulaire montre le remplit, le reste va dans le
+YAML avancé. Le jeton et le mot de passe du fichier restent sur le serveur
+15 minutes (les champs disent « repris du fichier »), son `iso_url` est
+remplacée par l'image que sert la console (la fenêtre le dit),
+`install.automatic` est retiré (la console installe toujours sans
+opérateur), et un fichier sans `bond_options` reçoit `active-backup`,
+comme le ferait l'installeur. **Aperçu** montre le YAML exact que lira
+l'installeur, secrets masqués.
+
+Chaque clé est vérifiée contre le schéma de l'installeur de Harvester v1.9
+avant toute mise sous tension. Une clé est refusée, avec son chemin (par
+exemple `os.write_files[2].contnt`), quand elle est inconnue, mal typée,
+posée à la fois par le formulaire et le YAML avancé, ou gardée par la
+console (`install.iso_url`, `install.mode`, `server_url`, `token`,
+`os.password`). Un `system_settings.ntp-servers` est refusé tant que le
+champ NTP est rempli : l'installeur réécrit ce réglage depuis les serveurs
+NTP et l'autre valeur serait perdue sans rien dire.
 
 Le token et le mot de passe n'apparaissent jamais dans une réponse, dans
 un libellé d'action, ni dans une ligne de log.

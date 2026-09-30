@@ -76,11 +76,41 @@ machine can be installed.
 **Install Harvester** opens a form:
 
 - **Image**: which ISO from the store.
-- **Node**: hostname, install disk (`/dev/sda`…), management interface
-  (picked from the NICs just discovered), addressing (static or DHCP),
-  IP / mask / gateway, cluster VIP, DNS.
+- **Node**: hostname, addressing (static or DHCP), IP / mask / gateway,
+  cluster VIP and its mode.
+- **Management network**: one or several NICs, ticked among the ones just
+  discovered (several make a bond), the bond mode and miimon, the LACP
+  rate in 802.3ad, the transmit hash policy in the modes that use it, an
+  optional VLAN.
+- **Disks**: install disk (`/dev/sda`, or a stable
+  `/dev/disk/by-path/...`), an optional data disk, and "wipe all disks".
+- **System**: DNS, NTP, node labels (one `key=value` per line), kernel
+  modules.
 - **Access**: the cluster token, the OS password, and optionally SSH
   public keys.
+- **Advanced YAML**: anything else the installer accepts, merged with the
+  form: `os.write_files` (NetworkManager connections of the storage or
+  other networks, systemd drop-ins, sshd settings),
+  `os.persistent_state_paths`, `os.sysctls`, `os.environment`,
+  `system_settings`...
+
+**Import a configuration** takes an existing installer file and splits it:
+what the form shows fills it, the rest goes to the advanced YAML. The
+file's token and password stay on the server for 15 minutes (the fields
+say "taken from the file"), its `iso_url` is replaced by the image the
+console serves (the window says so), `install.automatic` is dropped (the
+console always installs unattended), and a file without `bond_options`
+gets `active-backup`, as the installer would. **Preview** shows the exact
+YAML the installer will read, secrets masked.
+
+Every key is checked against the schema of the Harvester v1.9 installer
+before anything is powered on. A key is refused, with its path (for
+example `os.write_files[2].contnt`), when it is unknown, of the wrong type,
+set both by the form and the advanced YAML, or kept by the console
+(`install.iso_url`, `install.mode`, `server_url`, `token`,
+`os.password`). A `system_settings.ntp-servers` is refused while the NTP
+field is filled: the installer rewrites that setting from the NTP servers
+and the other value would be lost without a word.
 
 The token and the password never appear in a response, in an action
 label, or in a log line.

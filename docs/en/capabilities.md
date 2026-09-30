@@ -1694,6 +1694,40 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   publishes it behind a one-off token, mounts it as virtual media, sets a
   one-shot `Cd` boot and powers the machine on. Tracked step by step in
   the dock, from preflight to the Harvester API answering on the VIP.
+- **The complete installer configuration (1.77.0).** Beyond the basic
+  fields, the window sets:
+  - a management interface bonded over several NICs (discovered cards
+    ticked by MAC, or names), the bond mode, miimon, and for 802.3ad the
+    LACP rate; the transmit hash policy in 802.3ad, balance-xor,
+    balance-tlb and balance-alb; an optional VLAN;
+  - a data disk and "wipe all disks";
+  - node labels (one `key=value` per line) and kernel modules;
+  - an **advanced YAML** section for everything else the installer
+    accepts: `os.write_files` (NetworkManager connections of the other
+    networks, systemd drop-ins, sshd settings), `os.persistent_state_paths`,
+    `os.sysctls`, `os.environment`, `system_settings`, and so on.
+
+  **Import a configuration** reads an existing installer file: the fields
+  the form knows fill it, the rest goes to the advanced YAML, the file's
+  token and password stay on the server (the fields say "taken from the
+  file"), and its `iso_url` is replaced by the image the console serves
+  to the BMC. **Preview** shows the exact YAML the installer will get,
+  secrets masked. Every key is checked against the installer's schema
+  (Harvester v1.9) before anything is powered on, and refused with its
+  path when it is unknown, badly typed, set twice (by the form and the
+  advanced YAML), or owned by the console (`install.iso_url`,
+  `install.mode`, `server_url`, `token`, `os.password`). A
+  `system_settings.ntp-servers` is refused while the NTP field is set:
+  the installer would replace it with the field without a word (seen on
+  a real install).
+
+  Checked for real on a nested node of Harvester v1.9.0 installed with a
+  configuration shaped like an operator's: management bond of two NICs
+  (active-backup), storage bond in MTU 9000 with a VLAN and a static route
+  written by `write_files`, data disk taken as Longhorn's default disk,
+  node labels, modules, a persistent path, a sysctl, all still in place
+  after a reboot. Not checked for real: LACP (802.3ad, no switch on the
+  bench negotiates it) and a tagged management VLAN.
 - **Preflight against stale inventory** — a powered-off BMC replays the
   inventory of its *last POST*, which can be months old. The install
   powers the machine on and reads the real hardware before deciding.

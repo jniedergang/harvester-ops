@@ -86,7 +86,9 @@ recorded, whether it was made from the console or somewhere else.
   applied, and the Harvester provider installed from the console; the
   Cluster API stack, RKE2 clusters created from a window and services
   deployed on them; Harvester
-  installed on a blank machine over Redfish virtual media.
+  installed on a blank machine over Redfish virtual media, with the
+  complete installer configuration (bonds, VLAN, data disk, NetworkManager
+  files...) or an existing configuration file imported as is.
 - **Scriptable**: the power sequencing also runs from the command line,
   for pipelines and airgapped sites, and every operation has a dry run.
 

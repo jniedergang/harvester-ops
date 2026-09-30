@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.77.0] - 2026-09-30 - Complete bare-metal install configuration, and a VM Import / Export section
+
+### Added
+- The bare-metal install window sets the complete installer configuration: a management bond over several NICs (mode, miimon, LACP rate, transmit hash policy), an optional VLAN, a data disk, "wipe all disks", node labels, kernel modules, and an advanced YAML section merged with the form for everything else the installer accepts (`os.write_files` for NetworkManager connections, `os.persistent_state_paths`, `os.sysctls`, `system_settings`...).
+- Import an existing installer file: the form is filled, the rest goes to the advanced YAML, the file's token and password stay on the server, its `iso_url` is replaced by the image the console serves. A preview shows the exact YAML the installer will get, secrets masked.
+- A "VM Import / Export" section in the menu gathers VM Import, VMware migrations and Migrations (all clusters).
+
+### Changed
+- Every key of an install configuration is checked against the Harvester v1.9 installer schema before any machine is powered on, and refused with its path when it is unknown, badly typed, set twice or owned by the console.
+- A folded menu group opens when one of its entries is the current page.
+
+### Fixed
+- A `system_settings.ntp-servers` is refused while the NTP field is set: the installer replaces it with that field without a word (seen on a real install).
+- In DHCP, the static address fields of the install window were still displayed.
+
+### Internal
+- `web/harvester_install_schema.py`: the installer schema (from harvester-installer v1.9.0-dev-20260705), build, merge, validation and import split. `harvlab.sh` installs a node from another ISO with extra NICs, a data disk and extra configuration options (bench `bmcfg`).
+
+### Tests
+- `test_bm_config_177.py`, `test_bm_config_routes_177.py`, `tests/e2e/test_bm_config_177.py`, `tests/e2e/test_nav_vmio_177.py`; a nested Harvester v1.9.0 node installed with a configuration shaped like an operator's (management bond, storage bond in MTU 9000 with a VLAN and a route through `write_files`, data disk, labels, modules, persistent path, sysctl), checked on the node and after a reboot. LACP and a tagged management VLAN are not checked for real.
+
 ## [1.76.1] - 2026-09-30 - Bare-metal install window: no browser autofill, NTP field
 
 ### Fixed
