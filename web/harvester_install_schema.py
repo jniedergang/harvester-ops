@@ -687,6 +687,14 @@ def render_install_config(opts):
 
     errors = check_install_config(cfg)
     _raise(errors, "configuration does not match the installer schema")
+    # Vu en réel (banc bmcfg, 30/09/2026) : dès que `os.ntp_servers` est
+    # posé, l'installeur réécrit le réglage `ntp-servers` depuis lui
+    # (updateSystemSettings, pkg/console/util.go) ; une valeur de
+    # `system_settings` serait perdue sans un mot.
+    if (cfg.get("os") or {}).get("ntp_servers") and \
+            "ntp-servers" in (cfg.get("system_settings") or {}):
+        _raise([("system_settings[ntp-servers]", "superseded")],
+               "system_settings.ntp-servers is replaced by os.ntp_servers")
     return cfg
 
 

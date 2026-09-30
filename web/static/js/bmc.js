@@ -229,6 +229,7 @@ const BMC = (() => {
       case 'unknown-setting': return tr('bmc.reason.unknownSetting');
       case 'reserved': return tr('bmc.reason.reserved');
       case 'conflict': return tr('bmc.reason.conflict');
+      case 'superseded': return tr('bmc.reason.superseded');
       case 'yaml': return tr('bmc.reason.yaml');
       case 'type': return tr('bmc.reason.type', { type: detail });
       case 'range': return tr('bmc.reason.range', { range: detail });

@@ -577,3 +577,25 @@ def test_text_maps_refuse_booleans_and_floats(section):
         assert len(errs) == 1 and errs[0][1] == "type:str", (section, literal, errs)
     for literal in ('"yes"', "100", "debug"):
         assert his.validate_install_config(yaml.safe_load(section.format(v=literal))) == []
+
+
+# Vu en réel sur le banc bmcfg (30/09/2026) : l'installeur réécrit le réglage
+# `ntp-servers` depuis `os.ntp_servers`, une valeur de `system_settings` était
+# perdue sans un mot.
+_NTP_SETTING = "system_settings:\n  ntp-servers: '{\"ntpServers\":[\"192.0.2.123\"]}'\n"
+
+
+def test_ntp_setting_is_refused_when_the_ntp_field_would_replace_it():
+    opts = dict(_HARVLAB, advanced_yaml=_NTP_SETTING)
+    with pytest.raises(app.InstallConfigError) as e:
+        app._harvester_install_config(opts)
+    assert e.value.paths == ["system_settings[ntp-servers]"]
+    assert e.value.reasons == {"system_settings[ntp-servers]": "superseded"}
+
+
+def test_ntp_setting_is_kept_without_the_ntp_field():
+    opts = dict(_HARVLAB, advanced_yaml=_NTP_SETTING)
+    opts.pop("ntp")
+    cfg = _render(opts)
+    assert cfg["system_settings"]["ntp-servers"] == '{"ntpServers":["192.0.2.123"]}'
+    assert "ntp_servers" not in cfg["os"]
