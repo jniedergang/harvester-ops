@@ -171,3 +171,92 @@ def test_redfish_drives_prove_the_disks(monkeypatch):
 def test_an_ilo_listing_no_disk_is_still_refused(monkeypatch):
     ev = _preflight(monkeypatch, uefi=["Cd.Emb.1-1", "NIC.LOM.1-1"])
     assert ev[-1][1] == "error" and "no disk visible" in ev[-1][2]
+
+
+# --- fin d'installation : l'installeur s'éteint, la console démarre sur le
+# disque (vu en réel : un BMC qui n'applique pas l'amorce « Once » ramenait
+# la machine sur le CD, l'installeur tournait en boucle) ---------------------
+
+def test_the_installer_config_powers_off_at_the_end():
+    import harvester_install_schema as his
+    cfg = his.render_install_config({"token": "t", "hostname": "h", "device": "/dev/sda",
+                                     "mgmt_interface": "eno1", "method": "dhcp",
+                                     "vip": "192.0.2.100", "power_off": True})
+    assert cfg["install"]["power_off"] is True
+
+
+def test_power_off_is_reserved_to_the_console():
+    import harvester_install_schema as his
+    try:
+        his.render_install_config({"token": "t", "hostname": "h", "device": "/dev/sda",
+                                   "mgmt_interface": "eno1", "method": "dhcp", "vip": "192.0.2.100",
+                                   "advanced_yaml": "install:\n  power_off: false\n"})
+    except his.InstallConfigError as e:
+        assert e.reasons.get("install.power_off") == "reserved"
+    else:
+        raise AssertionError("install.power_off accepted in the advanced YAML")
+    split = his.split_imported_config("install:\n  power_off: true\n  device: /dev/sda\n")
+    assert "power-off-ignored" in split["notes"]
+
+
+def test_wait_power_off_sees_the_end_of_the_install(monkeypatch):
+    states = iter(["On", "On", "Off"])
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": next(states)})
+    run = _run()
+    t = [0.0]
+    assert wapp._bm_wait_power_off("bmc", "u", "p", "/s", 1e9, run, lambda *a: None,
+                                   sleep=lambda s: t.__setitem__(0, t[0] + s), now=lambda: t[0])
+
+
+def test_wait_power_off_stops_on_cancel(monkeypatch):
+    monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": "On"})
+    run = _run()
+    run._cancel = True
+    assert not wapp._bm_wait_power_off("bmc", "u", "p", "/s", 1e9, run, lambda *a: None,
+                                       sleep=lambda s: None, now=lambda: 0.0)
+
+
+def test_runner_boots_the_disk_after_the_installer_powers_off():
+    src = (ROOT / "web" / "app.py").read_text()
+    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    i_wait = runner.index("_bm_wait_power_off(")
+    i_eject = runner.index("_bm_media_eject(", i_wait)
+    i_hdd = runner.index('_bm_boot_once_target(host, kc_user, kc_pwd, sys_path, "Hdd")')
+    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")')
+    i_api = runner.index("_bm_wait_api(")
+    assert i_wait < i_eject < i_hdd < i_on < i_api
+
+
+def test_a_machine_powered_on_by_the_preflight_is_powered_off_on_failure(monkeypatch):
+    """Le préflight allume une machine éteinte pour lire son inventaire ; si
+    le run échoue avant l'installation, elle est éteinte à nouveau."""
+    calls = []
+    profile = _profile([])
+    off = dict(profile, power_state="Off")
+    seq = iter([off, profile, profile, profile])
+    monkeypatch.setattr(wapp, "_bmc_discover_one", lambda *a, **k: next(seq))
+    monkeypatch.setattr(wapp, "_redfish_send", lambda *a, **k: (True, 204, ""))
+    monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
+    monkeypatch.setattr(wapp._bmd, "load_inventory", lambda *a, **k: None)
+    monkeypatch.setattr(wapp, "_bmc_storage", lambda *a, **k: {})
+    monkeypatch.setattr(wapp.pxe_server, "start", lambda *a, **k: 18091)
+    monkeypatch.setattr(wapp.pxe_server, "stop", lambda *a, **k: None)
+    monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
+    run = _run()
+    wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
+                                         "bmc_host": "192.0.2.1", "iso": "absent.iso"})
+    assert run.status == "error" and calls == ["ForceOff"]
+
+
+def test_a_machine_found_on_is_left_on_after_a_failure(monkeypatch):
+    calls = []
+    monkeypatch.setattr(wapp, "_bmc_discover_one", lambda *a, **k: _profile([]))
+    monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
+    monkeypatch.setattr(wapp._bmd, "load_inventory", lambda *a, **k: None)
+    monkeypatch.setattr(wapp, "_bmc_storage", lambda *a, **k: {})
+    monkeypatch.setattr(wapp.pxe_server, "start", lambda *a, **k: 18091)
+    monkeypatch.setattr(wapp.pxe_server, "stop", lambda *a, **k: None)
+    run = _run()
+    wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
+                                         "bmc_host": "192.0.2.1", "iso": "absent.iso"})
+    assert run.status == "error" and calls == []

@@ -213,6 +213,7 @@ const BMC = (() => {
       case 'iso-url-replaced': return tr('bmc.note.isoUrl');
       case 'join-detected': return tr('bmc.note.join');
       case 'automatic-ignored': return tr('bmc.note.automatic');
+      case 'power-off-ignored': return tr('bmc.note.powerOff');
       case 'bond-default-active-backup': return tr('bmc.note.bondDefault');
       case 'wipe-list-advanced': return tr('bmc.note.wipeAdvanced');
       default: return code;

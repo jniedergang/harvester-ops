@@ -426,6 +426,9 @@ def field_at(path):
 RESERVED_PATHS = (
     "install.iso_url", "install.automatic", "install.mode",
     "server_url", "token", "os.password",
+    # v1.78.0 : la console fait éteindre l'installeur à la fin, pour savoir
+    # que l'installation est finie et démarrer elle-même sur le disque.
+    "install.power_off",
 )
 
 _MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
@@ -554,6 +557,10 @@ def build_form_config(opts, errors):
         inst["data_disk"] = str(opts["data_disk"]).strip()
     if _truthy(opts.get("wipe_all_disks")):
         inst["wipe_all_disks"] = True
+    # posé par le déroulé d'installation de la console, jamais par le
+    # formulaire (clé réservée) : l'installeur s'éteint au lieu de redémarrer
+    if opts.get("power_off") is True:
+        inst["power_off"] = True
     # Disques à effacer un par un (1.78.0) : liste, ou texte séparé par
     # des virgules ou des retours à la ligne ; absent = rendu inchangé.
     wipe_list = _split_list(opts.get("wipe_disks_list"))
@@ -791,6 +798,8 @@ def split_imported_config(text, known_disks=None):
         notes.append("iso-url-replaced")
     if _pop(inst, "automatic") is not None:
         notes.append("automatic-ignored")
+    if _pop(inst, "power_off") is not None:
+        notes.append("power-off-ignored")
 
     password = _pop(os_, "password")
     if password:

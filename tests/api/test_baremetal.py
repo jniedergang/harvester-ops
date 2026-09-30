@@ -788,7 +788,7 @@ def test_iso_token_is_issued_before_the_config_is_written():
         runner.index("cfg_yaml = _harvester_install_config"), (
             "l'URL de l'ISO doit exister avant que la configuration soit rendue")
     assert runner.count("pxe_server.issue(out_iso") == 1, "un seul jeton d'ISO"
-    assert 'dict(opts, iso_url=iso_url)' in runner
+    assert 'dict(opts, iso_url=iso_url, power_off=True)' in runner
 
 
 # ---------------------------------------------------------------------------
