@@ -4593,6 +4593,139 @@ def _bm_local_ip_for(host):
         s.close()
 
 
+# --- configuration d'installation : import, aperçu (v1.77.0) ----------------
+#
+# Un fichier importé peut porter le jeton du cluster et le mot de passe OS.
+# Ils ne repartent JAMAIS vers le navigateur : gardés ici, par personne,
+# 15 minutes, et désignés par un `import_id` aléatoire. L'installation les
+# reprend quand les champs du formulaire sont vides.
+from secrets import token_urlsafe as _bm_token_urlsafe  # noqa: E402
+
+_BM_IMPORT_TTL = 15 * 60
+_BM_IMPORT_MAX = 256 * 1024          # octets du texte importé
+_BM_IMPORT_CACHE = {}                # import_id -> (horodatage, personne, secrets)
+_BM_IMPORT_LOCK = threading.Lock()
+# `iso_url` n'est connue qu'après le préflight (jeton du serveur d'artefacts) :
+# la validation d'avant l'ActionRun rend avec cette adresse de remplacement.
+_BM_ISO_URL_PLACEHOLDER = "http://console.invalid/pxe/iso/placeholder.iso"
+_BM_MASK = "•••"
+
+
+def _bm_person():
+    """Même clé que le cache global de Forklift : identité déléguée au
+    cluster et utilisateur de la console."""
+    return ((current_cluster_identity() or {}).get("user"), current_user())
+
+
+def _bm_import_purge(now):
+    for k in [k for k, v in _BM_IMPORT_CACHE.items() if now - v[0] >= _BM_IMPORT_TTL]:
+        del _BM_IMPORT_CACHE[k]
+
+
+def _bm_import_put(secrets_):
+    now = time.time()
+    import_id = _bm_token_urlsafe(16)          # 128 bits
+    with _BM_IMPORT_LOCK:
+        _bm_import_purge(now)
+        _BM_IMPORT_CACHE[import_id] = (now, _bm_person(), dict(secrets_ or {}))
+    return import_id
+
+
+def _bm_import_get(import_id):
+    """Secrets d'un import de la MÊME personne, encore valide ; None sinon
+    (inconnu, expiré ou appartenant à quelqu'un d'autre : même réponse)."""
+    if not isinstance(import_id, str) or not import_id:
+        return None
+    now = time.time()
+    with _BM_IMPORT_LOCK:
+        _bm_import_purge(now)
+        hit = _BM_IMPORT_CACHE.get(import_id)
+    if not hit or hit[1] != _bm_person():
+        return None
+    return dict(hit[2])
+
+
+def _bm_apply_import(data):
+    """Complète jeton et mot de passe vides depuis l'import désigné. Le
+    formulaire l'emporte quand les deux sont renseignés. Renvoie une réponse
+    d'erreur, ou None."""
+    import_id = data.pop("import_id", None)
+    if not import_id:
+        return None
+    secrets_ = _bm_import_get(import_id)
+    if secrets_ is None:
+        return jsonify({"error": "import expired", "fields": ["import_id"]}), 400
+    for k in ("token", "password"):
+        if not data.get(k) and secrets_.get(k):
+            data[k] = secrets_[k]
+    return None
+
+
+def _bm_config_refusal(e):
+    return jsonify({"error": "invalid configuration", "fields": e.paths,
+                    "reasons": e.reasons}), 400
+
+
+def _bm_render_checked(data):
+    """Configuration finale (dict) avec l'adresse d'ISO de remplacement, ou
+    InstallConfigError. Aucune autre exception ne doit remonter un secret."""
+    return _his.render_install_config(dict(data, iso_url=_BM_ISO_URL_PLACEHOLDER))
+
+
+@app.route("/api/baremetal/config/parse", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_baremetal_config_parse():
+    """Découpe un fichier de configuration importé : champs du formulaire,
+    reste en YAML avancé. Les secrets restent côté serveur."""
+    # le texte peut doubler en JSON (échappements) : garde large avant lecture
+    if (request.content_length or 0) > 2 * _BM_IMPORT_MAX + 4096:
+        return jsonify({"error": "file too large", "max_bytes": _BM_IMPORT_MAX}), 413
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get("text")
+    if not isinstance(text, str):
+        return jsonify({"error": "missing fields", "fields": ["text"]}), 400
+    if len(text.encode("utf-8", "surrogatepass")) > _BM_IMPORT_MAX:
+        return jsonify({"error": "file too large", "max_bytes": _BM_IMPORT_MAX}), 413
+    out = split_imported_config(text)
+    if out["errors"]:
+        return jsonify({"error": "invalid configuration", "fields": out["errors"],
+                        "errors": out["errors"]}), 400
+    secrets_ = out["secrets"]
+    return jsonify({"form": out["form"], "advanced": out["advanced"],
+                    "notes": out["notes"], "import_id": _bm_import_put(secrets_),
+                    "has_token": bool(secrets_.get("token")),
+                    "has_password": bool(secrets_.get("password"))})
+
+
+@app.route("/api/baremetal/config/preview", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_baremetal_config_preview():
+    """YAML final tel que l'installeur le recevra, jeton et mot de passe
+    masqués. Pas besoin des identifiants du BMC."""
+    data = request.get_json(force=True, silent=True) or {}
+    for k in ("bmc_host", "bmc_user", "bmc_password"):
+        data.pop(k, None)
+    mode = data.get("mode") or "create"
+    if mode not in ("create", "join"):
+        return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
+    data["mode"] = mode
+    err = _bm_apply_import(data)
+    if err:
+        return err
+    try:
+        cfg = _bm_render_checked(data)
+    except InstallConfigError as e:
+        return _bm_config_refusal(e)
+    # masquage sur le dictionnaire rendu, pas par remplacement de texte
+    if cfg.get("token"):
+        cfg["token"] = _BM_MASK
+    if isinstance(cfg.get("os"), dict) and cfg["os"].get("password"):
+        cfg["os"]["password"] = _BM_MASK
+    return jsonify({"yaml": _his.dump_install_config(cfg)})
+
+
 @app.route("/api/baremetal/install", methods=["POST"])
 @requires_auth
 @_rate_limit("6/minute")
@@ -4603,11 +4736,19 @@ def api_baremetal_install():
     if mode not in ("create", "join"):
         return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
     data["mode"] = mode
+    # v1.77.0 : jeton et mot de passe vides repris d'un fichier importé
+    err = _bm_apply_import(data)
+    if err:
+        return err
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
                 "device", "mgmt_interface", "token",
                 "vip" if mode == "create" else "server_url")
-    missing = [k for k in required if not data.get(k)]
+    # une carte (ancien champ) ou plusieurs (agrégat, v1.77.0)
+    has_iface = bool(data.get("mgmt_interface")
+                     or _his._split_list(data.get("mgmt_interfaces")))
+    missing = [k for k in required
+               if not (has_iface if k == "mgmt_interface" else data.get(k))]
     if missing:
         return jsonify({"error": "missing fields", "fields": missing}), 400
     if mode == "join":
@@ -4635,6 +4776,14 @@ def api_baremetal_install():
     if extra and not re.fullmatch(r"[A-Za-z0-9 ._:/,=@+-]*", extra):
         return jsonify({"error": "invalid extra kernel arguments"}), 400
     data["extra_args"] = extra
+    # Configuration validée AVANT l'ActionRun : le runner ne la rend qu'après
+    # le préflight, donc après avoir allumé la machine. Une clé refusée doit
+    # l'être ici, sans rien toucher.
+    data.pop("iso_url", None)
+    try:
+        _bm_render_checked(data)
+    except InstallConfigError as e:
+        return _bm_config_refusal(e)
     # Le label de l'action ne porte ni token ni mot de passe.
     action_id = track_action(f"baremetal-install:{data['hostname']}",
                              "(local)", _baremetal_install_runner, data)
