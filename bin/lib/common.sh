@@ -265,6 +265,7 @@ apply_cluster_identity() {
 # un fichier par cluster dans <état>/clusters.d. Pose _CLUSTER_FILE (le
 # fichier à lire) et _CLUSTER_Q (le chemin yq de l'entrée).
 : "${HARVESTER_OPS_STATE_DIR:=/var/lib/harvester-ops}"
+[[ "$HARVESTER_OPS_STATE_DIR" == /* ]] || HARVESTER_OPS_STATE_DIR="$PWD/$HARVESTER_OPS_STATE_DIR"
 _CLUSTER_FILE=""
 _CLUSTER_Q=""
 _CLUSTER_ORIGIN=""

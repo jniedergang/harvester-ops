@@ -32,8 +32,11 @@ NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$")
 
 
 def state_dir(default=None):
-    """Répertoire d'état de la console."""
-    return Path(os.environ.get("HARVESTER_OPS_STATE_DIR") or default or DEFAULT_STATE_DIR)
+    """Répertoire d'état de la console, toujours absolu : un chemin relatif
+    donné par l'environnement le serait au répertoire courant du processus,
+    qui diffère entre la console et les scripts qu'elle lance."""
+    return Path(os.path.abspath(str(os.environ.get("HARVESTER_OPS_STATE_DIR")
+                                    or default or DEFAULT_STATE_DIR)))
 
 
 def decl_path(state, name):

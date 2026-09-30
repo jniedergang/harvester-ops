@@ -7000,6 +7000,12 @@ def api_clusters_create():
     cluster, err = _validate_cluster_payload(data)
     if err:
         return jsonify({"error": err}), 400
+    # v1.78.0 : un chemin relatif voudrait dire « relatif au répertoire
+    # d'état » ; un chemin donné sans téléversement doit être absolu
+    for field, value in (("kubeconfig", "" if kc_file else data.get("kubeconfig")),
+                         ("ssh.key", "" if ssh_file else cluster["ssh"].get("key"))):
+        if value and not (isinstance(value, str) and os.path.isabs(value)):
+            return jsonify({"error": f"{field} must be an absolute path", "fields": [field]}), 400
 
     with CONFIG_LOCK:
         cfg = load_config()
@@ -10138,6 +10144,23 @@ def _build_bundle(job: BundleJob):
                 if job.anonymize:
                     cfg_text = _anonymize_text(cfg_text, anonymize_map)
                 (bundle_root / "config.yaml").write_text(cfg_text)
+            # v1.78.0 : les clusters déclarés par la console (déclarations
+            # seules, chemins relatifs, ni clé ni kubeconfig), anonymisés
+            # comme config.yaml
+            for decl in _cd.decl_files(_state_dir()):
+                try:
+                    decl_text = decl.read_text(errors="replace")
+                except OSError:
+                    continue
+                if job.anonymize:
+                    decl_text = _anonymize_text(decl_text, anonymize_map)
+                    decl_name = re.sub(r"[^A-Za-z0-9._-]", "_",
+                                       _anonymize_text(decl.name, anonymize_map))
+                else:
+                    decl_name = decl.name
+                out_dir = bundle_root / "clusters.d"
+                out_dir.mkdir(exist_ok=True)
+                (out_dir / Path(decl_name).name).write_text(decl_text)
             job.update_step("config", "done", "Configuration included", percent=25)
 
             # Step 3: harvester-ops logs from /var/log/harvester-ops/
@@ -17322,7 +17345,8 @@ NOTES_DB = _usable_dir(_notes_db.parent,
 ACCOUNTS_PATH = Path(os.environ.get("HARVESTER_OPS_ACCOUNTS", str(NOTES_DB.parent / "accounts.json")))
 # v1.78.0 : les scripts lancés par la console lisent les clusters qu'elle a
 # déclarés dans ce même répertoire d'état (common.sh, kube.py)
-os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(NOTES_DB.parent))
+# (absolu : un chemin relatif le serait au répertoire courant de chacun)
+os.environ["HARVESTER_OPS_STATE_DIR"] = str(_state_dir())
 
 
 def _notes_init_db():

@@ -287,10 +287,61 @@ echo "$KUBECONFIG_PATH"
 def test_the_console_hands_its_state_dir_to_the_scripts_it_runs():
     assert os.environ.get("HARVESTER_OPS_STATE_DIR")
     src = (ROOT / "web" / "app.py").read_text()
-    assert 'os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(NOTES_DB.parent))' in src
+    assert 'os.environ["HARVESTER_OPS_STATE_DIR"] = str(_state_dir())' in src
+    assert os.path.isabs(os.environ["HARVESTER_OPS_STATE_DIR"])
 
 
 def test_the_packaged_unit_names_the_state_dir():
     unit = (ROOT / "config" / "systemd" / "harvester-ops.service").read_text()
     assert "HARVESTER_OPS_STATE_DIR=/var/lib/harvester-ops" in unit
     assert "/var/lib/harvester-ops:/var/lib/harvester-ops:rw" in unit
+
+
+# -- relecture (round 2) -----------------------------------------------------------
+
+def test_a_relative_state_dir_is_made_absolute(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", "rel/state")
+    assert cluster_decl.state_dir() == tmp_path / "rel" / "state"
+    assert wapp._state_dir() == tmp_path / "rel" / "state"
+
+
+def test_path_only_create_refuses_relative_paths(env):
+    c = env["client"]
+    base = {"name": "p1", "nodes": [NODE]}
+    r = c.post("/api/clusters", json=dict(base, kubeconfig="kubeconfigs/p1.yaml"))
+    assert r.status_code == 400 and r.get_json()["fields"] == ["kubeconfig"]
+    r = c.post("/api/clusters", json=dict(base, kubeconfig="/abs/p1.yaml",
+                                          ssh={"user": "rancher", "key": "ssh/p1_id"}))
+    assert r.status_code == 400 and r.get_json()["fields"] == ["ssh.key"]
+    assert not (env["state"] / "clusters.d" / "p1.yaml").exists()
+    r = c.post("/api/clusters", json=dict(base, kubeconfig="/abs/p1.yaml",
+                                          ssh={"user": "rancher", "key": "/abs/p1_id"}))
+    assert r.status_code == 201
+    doc = yaml.safe_load((env["state"] / "clusters.d" / "p1.yaml").read_text())
+    assert doc["kubeconfig"] == "/abs/p1.yaml" and doc["ssh"]["key"] == "/abs/p1_id"
+
+
+@pytest.mark.parametrize("anonymize", [False, True])
+def test_the_support_bundle_carries_the_console_declarations(env, monkeypatch, tmp_path, anonymize):
+    import tarfile
+    _put_decl(env["state"], _decl("lab1"))
+    (env["state"] / "ssh").mkdir(parents=True)
+    (env["state"] / "ssh" / "lab1_id").write_text("-----BEGIN OPENSSH PRIVATE KEY-----\nSECRET\n")
+    monkeypatch.setattr(wapp, "BUNDLE_DIR", tmp_path / "bundles")
+    (tmp_path / "bundles").mkdir()
+    job = wapp.BundleJob("t" + str(int(anonymize)), anonymize)
+    wapp._build_bundle(job)
+    assert job.status == "done", job.error
+    with tarfile.open(job.archive_path) as tar:
+        members = {m.name.split("/", 1)[1]: m for m in tar.getmembers() if "/" in m.name}
+        decls = [n for n in members if n.startswith("clusters.d/")]
+        assert len(decls) == 1
+        text = tar.extractfile(members[decls[0]]).read().decode()
+        everything = b"".join(tar.extractfile(m).read() for m in tar.getmembers() if m.isfile())
+    assert "SECRET" not in everything.decode(errors="replace")
+    assert "kubeconfig: kubeconfigs/" in text   # chemin relatif, jamais le fichier
+    if anonymize:
+        assert "lab1" not in text and "192.0.2.50" not in text and "lab1" not in decls[0]
+    else:
+        assert decls[0] == "clusters.d/lab1.yaml" and "name: lab1" in text
