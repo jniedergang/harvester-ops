@@ -80,10 +80,10 @@ chemin, sans espace ni guillemet :
 `systemd.run=<point de montage du média>/discover.sh
 systemd.run_success_action=none`. Le script sort tout de suite dans
 l'initrd (`/etc/initrd-release`) et éteint la machine lui-même une fois
-l'inventaire déposé. Le point de montage du média dans le système live est
-à confirmer au premier essai (`/run/initramfs/live` pour un live dracut) ;
-le banc démarre pour cela l'ISO remasterisée comme un vrai CD, en UEFI,
-pas en démarrage direct du noyau. Publication
+l'inventaire déposé. Le média est monté en `/run/initramfs/live`
+(iso9660 sur `sr0`, vérifié sur le banc avec l'ISO v1.9.0) ; reste à
+vérifier que le script y garde son droit d'exécution (Rock Ridge), en
+démarrant l'ISO remasterisée comme un vrai CD, en UEFI. Publication
 par le serveur d'artefacts (`pxe_server.py`) avec deux jetons à usage unique
 (le script, le dépôt de l'inventaire ; un POST refusé au-delà de 1 Mio),
 insertion en média virtuel, démarrage unique sur le CD, mise sous tension,
