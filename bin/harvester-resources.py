@@ -1663,14 +1663,14 @@ def _pools_find(kube, node, pools, deadline, sleep, now):
             raise ValueError("two pool disks resolve to the same block device")
         if not missing:
             step("find", "done", f"{len(found)} disk(s) found")
-            return found
+            return found, bds
         msg = f"waiting for {', '.join(missing)}"
         if msg != last:
             step("find", "running", msg)
             last = msg
         if now() >= deadline:
             step("find", "error", f"not found on {node} (by serial or WWN): {', '.join(missing)}")
-            return None
+            return None, bds
         sleep(10)
 
 
@@ -1697,10 +1697,11 @@ def pools_apply(kube, node, pools, timeout, classes=True, sleep=time.sleep, now=
     if classes:
         for p in pools:
             existing[p["tag"]] = hh.pool_class_state(kube.get(hs.K_SC, None, hh.pool_class_name(p["tag"])), p["tag"])
-    found = _pools_find(kube, node, pools, deadline, sleep, now)
+    found, bds = _pools_find(kube, node, pools, deadline, sleep, now)
     if found is None:
         return EXIT_BLOCKED
     todo = []
+    lh = kube.get(hh.K_LHNODE, LH_NS, node)
     for p in pools:
         for i, d in enumerate(p["disks"]):
             bd = found[(p["tag"], i)]
@@ -1709,6 +1710,10 @@ def pools_apply(kube, node, pools, timeout, classes=True, sleep=time.sleep, now=
             if hh.pool_disk_state(bd, p["tag"]) == "done":
                 step("disk", "done", f"{path} is already in the pool {p['tag']}")
             else:
+                # jamais le disque système, le disque de données ni celui de Longhorn
+                why = hh.system_use(bd, bds, lh)
+                if why:
+                    raise ValueError(f"{why}: it cannot join the pool {p['tag']}")
                 todo.append((p["tag"], name, path, bd))
             found[(p["tag"], i)] = (name, path)
     for tag, name, path, bd in todo:

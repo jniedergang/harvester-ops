@@ -4382,25 +4382,60 @@ def _bm_wait_node_ready(cluster, hostname, deadline, run, step):
 
 HARVESTER_POOLS_TIMEOUT = int(os.environ.get("HARVESTER_OPS_POOLS_TIMEOUT", 1800))
 _BM_OS_USER = "rancher"
+# nom d'un cluster déclaré par l'installation : RFC 1123 (sous-domaine), et
+# accepté par _validate_cluster_payload (61 caractères au plus)
+_BM_CLUSTER_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9.]{0,59}[a-z0-9])?$")
 
 
-def _bm_pools_keypair(run_id):
-    """Clé SSH jetable (v1.78.0) : la console n'a aucun kubeconfig d'un
-    cluster qu'elle vient de créer. Sa clé publique part dans
-    `os.ssh_authorized_keys` de la configuration ; la privée sert une fois à
-    lire /etc/rancher/rke2/rke2.yaml puis est effacée. Rend (privée, publique)."""
-    key = _iso_work_dir() / f"pools-{run_id}.key"
-    for p in (key, key.with_suffix(".key.pub")):
-        p.unlink(missing_ok=True)
-    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"harvester-ops-pools-{run_id}",
-                    "-f", str(key)], check=True, capture_output=True, timeout=30)
-    key.chmod(0o600)
-    return key, key.with_suffix(".key.pub")
+def _bm_cluster_name(data):
+    """Nom du cluster créé : `cluster_name`, sinon le nom d'hôte du formulaire."""
+    return str(data.get("cluster_name") or data.get("hostname") or "").strip()
 
 
-def _bm_with_pool_key(opts, pub):
-    """Options de l'installation avec la clé publique jetable en plus. Là où
-    sont déjà les clés : si le YAML avancé porte `os.ssh_authorized_keys`,
+def _bm_cluster_files(name):
+    """Fichiers d'un cluster créé par la console, là où la déclaration d'un
+    cluster range déjà les siens (Settings > Clusters) : clé privée
+    `<config>/ssh/<nom>_id` (0600), sa publique, les clés d'hôte vues au
+    premier contact, et le kubeconfig `<config>/kubeconfigs/<nom>.yaml`."""
+    d = _ssh_dir()
+    return {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
+            "known_hosts": d / f"{name}_known_hosts",
+            "kubeconfig": _kubeconfigs_dir() / f"{name}.yaml"}
+
+
+def _bm_cluster_keypair(name):
+    """Paire de clés ed25519 propre au nouveau cluster (v1.78.0) : sa
+    publique part dans `os.ssh_authorized_keys`, la privée devient la clé
+    SSH du cluster déclaré. Un reste d'un essai précédent est remplacé (la
+    route a vérifié que ce nom n'est pas déclaré)."""
+    f = _bm_cluster_files(name)
+    for k in ("key", "pub", "known_hosts"):
+        f[k].unlink(missing_ok=True)
+    subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", f"harvester-ops:{name}",
+                    "-f", str(f["key"])], check=True, capture_output=True, timeout=30)
+    os.chmod(f["key"], 0o600)
+    return f
+
+
+def _bm_join_pubkey(cluster):
+    """Clé publique du cluster rejoint quand sa clé a été créée par la
+    console (`ssh.generated`) : le nouveau nœud reçoit la même. None sinon."""
+    entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
+    ssh = (entry or {}).get("ssh") or {}
+    key = ssh.get("key")
+    if not (ssh.get("generated") and key and Path(key).is_file()):
+        return None
+    try:
+        p = subprocess.run(["ssh-keygen", "-y", "-f", str(key)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    pub = (p.stdout or "").strip()
+    return pub if p.returncode == 0 and pub.startswith("ssh-") else None
+
+
+def _bm_with_ssh_key(opts, pub):
+    """Options de l'installation avec une clé publique de plus. Là où sont
+    déjà les clés : si le YAML avancé porte `os.ssh_authorized_keys`,
     l'ajouter au champ du formulaire ferait refuser la configuration (clé
     posée des deux côtés)."""
     adv_text = opts.get("advanced_yaml")
@@ -4417,10 +4452,21 @@ def _bm_with_pool_key(opts, pub):
     return dict(opts, ssh_keys=(form + "\n" if form else "") + pub)
 
 
-def _bm_fetch_kubeconfig(vip, key, out, deadline, run, step):
+def _bm_write_private(path, text):
+    """Fichier créé directement en 0600 (pas de fenêtre avant un chmod)."""
+    path = Path(path)
+    path.unlink(missing_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+
+
+def _bm_fetch_kubeconfig(vip, key, known_hosts, out, deadline, run, step):
     """Kubeconfig admin du nouveau cluster, lu par SSH sur la VIP et réécrit
-    vers https://VIP:6443 (le certificat de RKE2 porte la VIP). Harvester
-    l'écrit quelques instants après que l'API répond : on réessaie."""
+    vers https://VIP:6443 (le certificat de RKE2 porte la VIP). La clé
+    d'hôte est enregistrée au premier contact (accept-new) dans le
+    known_hosts du cluster, qui sert ensuite. Harvester écrit le fichier
+    quelques instants après que l'API répond : on réessaie."""
     last = ""
     while time.time() < deadline:
         if getattr(run, "_cancel", False):
@@ -4428,7 +4474,7 @@ def _bm_fetch_kubeconfig(vip, key, out, deadline, run, step):
         try:
             p = subprocess.run(
                 ["ssh", "-n", "-i", str(key), "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
-                 "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+                 "-o", "StrictHostKeyChecking=accept-new", "-o", f"UserKnownHostsFile={known_hosts}",
                  "-o", "ConnectTimeout=10", "-o", "LogLevel=ERROR",
                  f"{_BM_OS_USER}@{vip}", "sudo", "cat", "/etc/rancher/rke2/rke2.yaml"],
                 capture_output=True, text=True, timeout=60)
@@ -4438,31 +4484,102 @@ def _bm_fetch_kubeconfig(vip, key, out, deadline, run, step):
         if isinstance(doc, dict) and doc.get("clusters"):
             for c in doc["clusters"]:
                 (c.setdefault("cluster", {}))["server"] = f"https://{vip}:6443"
-            out.write_text(yaml.safe_dump(doc))
-            out.chmod(0o600)
+            _bm_write_private(out, yaml.safe_dump(doc))
             return True
         # jamais la sortie de ssh : elle pourrait porter le fichier lu
         msg = "SSH not ready" if not isinstance(doc, dict) else "kubeconfig not written yet"
         if msg != last:
             last = msg
-            step("pools", "progress", f"accès au nouveau cluster : {msg}")
+            step("declare", "progress", f"accès au nouveau cluster : {msg}")
         time.sleep(15)
     return False
 
 
-def _bm_apply_pools(opts, kubeconfig, run, step):
+def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
+    """Déclare le cluster créé, par le même chemin que Settings > Clusters
+    (_validate_cluster_payload, CONFIG_LOCK, _atomic_write_config)."""
+    cluster, err = _validate_cluster_payload({
+        "name": name, "description": "installed by the console (bare-metal)",
+        "ssh": {"user": _BM_OS_USER, "port": 22, "key": str(key)},
+        "nodes": [{"hostname": hostname, "ip": ip, "role": "control-plane"}]})
+    if err:
+        raise ValueError(err)
+    cluster["kubeconfig"] = str(kubeconfig)
+    # clé créée par la console : un nœud qui rejoint reçoit la même
+    cluster["ssh"]["generated"] = True
+    with CONFIG_LOCK:
+        cfg = load_config()
+        if any(c.get("name") == name for c in cfg.get("clusters", [])):
+            raise ValueError(f"cluster '{name}' already exists")
+        cfg.setdefault("clusters", []).append(cluster)
+        _atomic_write_config(cfg)
+    return cluster
+
+
+def _bm_pool_disk_refusals(data):
+    """Un disque de pool n'est jamais le disque système ni le disque de
+    données. Avec un inventaire de découverte de cette machine, chaque
+    disque de pool y est retrouvé par série ou WWN et check_disk_roles dit
+    les rôles doublés ; sans inventaire, comparaison au chemin, à la série
+    et au WWN tels que donnés. Rend [(disque, raison)]."""
+    pools = data.get("pools") or []
+    if not pools:
+        return []
+    device = str(data.get("device") or "").strip()
+    data_disk = str(data.get("data_disk") or "").strip()
+    doc = _bmd.load_inventory(INVENTORY_DIR, str(data.get("bmc_host") or ""))
+    if doc:
+        disks = _bmdisks.parse_discovery(doc.get("raw") or "")["disks"]
+        out, roles = [], {}
+        for p in pools:
+            ids = roles.setdefault(p["tag"], [])
+            for d in p["disks"]:
+                inv = next((x for x in disks
+                            if (d["wwn"] and _hh.norm_wwn(x.get("wwn")) == _hh.norm_wwn(d["wwn"]))
+                            or (d["serial"] and _hh.norm_serial(x.get("serial")) == _hh.norm_serial(d["serial"]))),
+                           None)
+                if inv is None:
+                    out.append((_hh.disk_label(d), "unknown-disk"))
+                else:
+                    ids.append(inv.get("stable_path") or "/dev/" + str(inv.get("name")))
+        errs = _bmdisks.check_disk_roles(disks, {"os": device, "data": data_disk or None, "pools": roles},
+                                         skipchecks=True, wipe_all=True)
+        return out + [e for e in errs if e[1] == "role-twice"]
+    out = []
+    for p in pools:
+        for d in p["disks"]:
+            for given in (device, data_disk):
+                g = given.lower()
+                if not g:
+                    continue
+                wwn, serial = _hh.norm_wwn(d["wwn"]), _hh.norm_serial(d["serial"])
+                if (d["path"] and d["path"] == given) or (len(wwn) >= 6 and wwn in g) \
+                        or (len(serial) >= 6 and serial in g):
+                    out.append((_hh.disk_label(d), "role-twice"))
+    return out
+
+
+def _bm_apply_pools(opts, kubeconfig, run, step, timeout):
     """Étape `pools` : bin/harvester-resources.py pools-apply, comme la
-    remasterisation passe par son script (parité CLI). Rend le code de sortie."""
+    remasterisation passe par son script (parité CLI). Un arrêt demandé
+    depuis le dock (`_cancel`) termine le processus. Rend (code, raison)."""
     spec = _iso_work_dir() / f"pools-{run.id}.json"
-    spec.write_text(json.dumps({"pools": opts["pools"]}))
-    spec.chmod(0o600)
+    _bm_write_private(spec, json.dumps({"pools": opts["pools"]}))
     cmd = [sys.executable, str(BIN_DIR / RESOURCES_SCRIPT), "pools-apply",
            "--kubeconfig", str(kubeconfig), "--node", opts["hostname"], "--spec", str(spec),
-           "--timeout", str(HARVESTER_POOLS_TIMEOUT)]
+           "--timeout", str(max(1, int(timeout)))]
     if opts.get("mode") == "join":
         cmd.append("--no-classes")
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+        def watch():
+            while proc.poll() is None:
+                if getattr(run, "_cancel", False):
+                    proc.terminate()
+                    return
+                time.sleep(1)
+        threading.Thread(target=watch, daemon=True).start()
         last_error = ""
         for line in proc.stderr:
             line = line.strip()
@@ -4549,6 +4666,11 @@ def _baremetal_install_runner(run, opts):
     # du cluster et le mot de passe OS, elle n'a rien à faire sur le disque
     # après un échec.
     scratch = []
+    # v1.78.0 : clés du nouveau cluster, effacées sur un échec tant que la
+    # machine n'a pas redémarré sur l'installeur ; gardées ensuite (le nœud
+    # porte la clé publique, et la déclaration s'en sert).
+    creds = []
+    keep_creds = [False]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
@@ -4576,6 +4698,11 @@ def _baremetal_install_runner(run, opts):
         if tokens:
             pxe_server.revoke(*tokens)
         for p in scratch:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for p in ([] if keep_creds[0] else creds):
             try:
                 p.unlink(missing_ok=True)
             except OSError:
@@ -4640,17 +4767,22 @@ def _baremetal_install_runner(run, opts):
     # La route a déjà validé ces mêmes champs : rien ne devrait lever ici.
     # Si cela arrivait quand même, dire l'échec au lieu de laisser le fil
     # mourir avec la machine allumée et les fichiers encore servis.
-    # v1.78.0 : des pools sur un cluster neuf demandent d'y accéder après
-    # l'installation ; la console n'en a pas encore de kubeconfig.
+    # v1.78.0 : un cluster créé reçoit sa propre paire de clés (la console
+    # en lira le kubeconfig et le déclarera) ; un nœud qui rejoint reçoit la
+    # clé du cluster quand celle-ci a été créée par la console.
     pools = opts.get("pools") or []
-    pool_key = None
-    if pools and opts.get("mode") != "join":
+    files = None
+    if opts.get("mode") == "join":
+        join_pub = _bm_join_pubkey(opts["cluster"])
+        if join_pub:
+            opts = _bm_with_ssh_key(opts, join_pub)
+    else:
         try:
-            pool_key, pool_pub = _bm_pools_keypair(run.id)
+            files = _bm_cluster_keypair(opts["cluster_name"])
         except (OSError, subprocess.SubprocessError) as e:
-            return fail("remaster", f"no SSH key for the pools step: {type(e).__name__}")
-        scratch.extend([pool_key, pool_pub])
-        opts = _bm_with_pool_key(opts, pool_pub.read_text().strip())
+            return fail("remaster", f"no SSH key for the new cluster: {type(e).__name__}")
+        creds.extend([files["key"], files["pub"], files["known_hosts"]])
+        opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
         cfg_yaml = _harvester_install_config(dict(opts, iso_url=iso_url))
     except InstallConfigError as e:
@@ -4694,6 +4826,7 @@ def _baremetal_install_runner(run, opts):
     ok, detail = _bm_reset(host, kc_user, kc_pwd, sys_path, "ForceRestart")
     if not ok:
         return fail("power", detail[:200])
+    keep_creds[0] = True
     step("power", "done", "machine redémarrée")
 
     # --- attente de l'installation ---
@@ -4723,32 +4856,52 @@ def _baremetal_install_runner(run, opts):
     cfg_path.unlink(missing_ok=True)
     step("cleanup", "done", "média éjecté, artefacts révoqués")
 
-    # --- pools de disques de données (v1.78.0), sautés s'il n'y en a pas ---
-    if pools:
-        step("pools", "running", f"{len(pools)} pool(s) : {', '.join(p['tag'] for p in pools)}")
-        deadline = time.time() + HARVESTER_POOLS_TIMEOUT
+    # --- après l'installation (v1.78.0) : déclaration du cluster créé, puis
+    # pools de disques ; un seul budget de temps pour les deux. Toute
+    # exception finit par fail() : le run ne reste jamais « running ».
+    current = ["declare"]
+    try:
+        post_deadline = time.time() + HARVESTER_POOLS_TIMEOUT
         if opts.get("mode") == "join":
-            # le cluster est déclaré (la route l'exige) : son kubeconfig
-            kubeconfig = _kubectl_for_cluster(opts["cluster"])
-            if not kubeconfig:
-                return fail("pools", f"Harvester is installed; the pools were not created: "
-                                     f"{opts['cluster']} is no longer declared")
+            kubeconfig = None
         else:
-            kubeconfig = _iso_work_dir() / f"pools-{run.id}.kubeconfig"
-            scratch.append(kubeconfig)
-            try:
-                got = _bm_fetch_kubeconfig(opts["vip"], pool_key, kubeconfig, deadline, run, step)
-            except RuntimeError as e:
-                return fail("pools", str(e))
-            if not got:
-                return fail("pools", f"Harvester is installed; the pools were not created: no SSH "
-                                     f"access to {opts['vip']} as {_BM_OS_USER}")
-        code, why = _bm_apply_pools(opts, kubeconfig, run, step)
-        if code != 0:
-            return fail("pools", "Harvester is installed; the pools were not created: "
-                                 + (why or f"pools-apply exited with {code}"))
-        step("pools", "done", "pools : " + ", ".join(p["tag"] for p in pools))
-    # clé jetable et kubeconfig lu : rien ne reste sur le disque
+            name = opts["cluster_name"]
+            step("declare", "running", f"lecture du kubeconfig de {name} par SSH ({opts['vip']})")
+            if not _bm_fetch_kubeconfig(opts["vip"], files["key"], files["known_hosts"],
+                                        files["kubeconfig"], post_deadline, run, step):
+                return fail("declare", f"Harvester is installed; no SSH access to {opts['vip']} as "
+                                       f"{_BM_OS_USER} to read its kubeconfig")
+            _bm_declare_cluster(name, files["kubeconfig"], files["key"], opts["hostname"],
+                                opts.get("ip") or opts["vip"])
+            kubeconfig = files["kubeconfig"]
+            step("declare", "done", f"{name} déclaré dans la console")
+        # sautés s'il n'y en a pas : aucune étape affichée
+        if pools:
+            current[0] = "pools"
+            step("pools", "running", f"{len(pools)} pool(s) : {', '.join(p['tag'] for p in pools)}")
+            if opts.get("mode") == "join":
+                # le cluster est déclaré (la route l'exige) : son kubeconfig
+                kubeconfig = _kubectl_for_cluster(opts["cluster"])
+                if not kubeconfig:
+                    return fail("pools", f"Harvester is installed; the pools were not created: "
+                                         f"{opts['cluster']} is no longer declared")
+            else:
+                for p in pools:
+                    if p["replicas"] > 1:
+                        step("pools", "progress",
+                             f"attention : {p['tag']} demande {p['replicas']} répliques sur un seul "
+                             f"nœud, ses volumes resteront dégradés tant que d'autres nœuds "
+                             f"n'auront pas rejoint")
+            code, why = _bm_apply_pools(opts, kubeconfig, run, step, post_deadline - time.time())
+            if getattr(run, "_cancel", False):
+                return fail("pools", "cancelled by operator")
+            if code != 0:
+                return fail("pools", "Harvester is installed; the pools were not created: "
+                                     + (why or f"pools-apply exited with {code}"))
+            step("pools", "done", "pools : " + ", ".join(p["tag"] for p in pools))
+    except Exception as e:
+        return fail(current[0], f"Harvester is installed; {current[0]} failed: "
+                                f"{type(e).__name__}: {str(e)[:200]}")
     for p in scratch:
         try:
             p.unlink(missing_ok=True)
@@ -4970,6 +5123,21 @@ def api_baremetal_install():
         data["pools"] = _hh.check_pools(data.get("pools"))
     except ValueError as e:
         return jsonify({"error": f"invalid pools: {e}", "fields": ["pools"]}), 400
+    refused = _bm_pool_disk_refusals(data)
+    if refused:
+        return jsonify({"error": "invalid pools: a pool disk is also the system or data disk, "
+                                 "or is not in this machine's inventory",
+                        "fields": ["pools"], "reasons": [list(r) for r in refused]}), 400
+    # v1.78.0 : un cluster créé est déclaré dans la console à la fin
+    if mode == "create":
+        name = _bm_cluster_name(data)
+        if not _BM_CLUSTER_NAME_RE.match(name):
+            return jsonify({"error": "invalid cluster name (RFC 1123: lower-case letters, digits, "
+                                     "dashes and dots)", "fields": ["cluster_name"]}), 400
+        if any(c.get("name") == name for c in load_config().get("clusters", [])):
+            return jsonify({"error": f"cluster '{name}' is already declared",
+                            "fields": ["cluster_name"]}), 400
+        data["cluster_name"] = name
     try:
         _bm_render_checked(data)
     except InstallConfigError as e:
@@ -6435,6 +6603,12 @@ def api_clusters_update(name):
         cluster["kubeconfig"] = original.get("kubeconfig", "")
         if "key" not in cluster.get("ssh", {}) or not cluster["ssh"].get("key"):
             cluster["ssh"]["key"] = original.get("ssh", {}).get("key", "")
+        # v1.78.0 : clé créée par la console (installation bare-metal), gardée
+        # comme telle tant que c'est la même clé
+        generated = bool(original.get("ssh", {}).get("generated")) and \
+            cluster["ssh"]["key"] == original.get("ssh", {}).get("key", "")
+        if generated:
+            cluster["ssh"]["generated"] = True
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
         if cluster["name"] != name:
             if (existing := next((c for c in cfg["clusters"] if c["name"] == cluster["name"] and c is not original), None)) is not None:
@@ -6455,6 +6629,14 @@ def api_clusters_update(name):
                     cluster["ssh"]["key"] = str(new_key)
                 except OSError:
                     pass
+                else:
+                    # sa publique et les clés d'hôte vues suivent la clé
+                    for old_sib, new_sib in ((f"{name}_id.pub", f"{cluster['name']}_id.pub"),
+                                             (f"{name}_known_hosts", f"{cluster['name']}_known_hosts")):
+                        try:
+                            (_ssh_dir() / old_sib).rename(_ssh_dir() / new_sib)
+                        except OSError:
+                            pass
         cfg["clusters"][idx] = cluster
         _atomic_write_config(cfg)
     return jsonify({"cluster": cluster})
@@ -6481,6 +6663,11 @@ def api_clusters_delete(name):
         if key_path.exists() and key_path.is_relative_to(_ssh_dir()):
             try: key_path.unlink()
             except OSError: pass
+            # v1.78.0 : publique et clés d'hôte d'une clé créée par la console
+            for sib in (key_path.with_name(key_path.name + ".pub"),
+                        _ssh_dir() / f"{name}_known_hosts"):
+                try: sib.unlink(missing_ok=True)
+                except OSError: pass
         _atomic_write_config(cfg)
     return jsonify({"removed": name})
 
@@ -6532,6 +6719,8 @@ def api_clusters_upload_sshkey(name):
         key_path.write_bytes(raw)
         os.chmod(key_path, 0o600)
         cluster.setdefault("ssh", {})["key"] = str(key_path)
+        # une clé téléversée n'est plus celle que la console a créée
+        cluster["ssh"].pop("generated", None)
         _atomic_write_config(cfg)
     return jsonify({"cluster": name, "ssh_key": str(key_path)})
 

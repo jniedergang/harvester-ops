@@ -295,23 +295,32 @@ def test_command_line_pools_apply_and_disk_add_tag(tmp_path, monkeypatch, steps)
 # -- la console : route et runner ----------------------------------------------------
 
 import app as wapp  # noqa: E402
+import bm_discover as bmd  # noqa: E402
 
 BASE = {"bmc_host": "192.0.2.10", "bmc_user": "u", "bmc_password": "p", "iso": "h.iso",
         "hostname": "n1", "device": "/dev/sda", "mgmt_interface": "eno1", "vip": "192.0.2.50",
         "token": "t"}
+INVENTORY = (ROOT / "tests" / "api" / "fixtures" / "bm_disks_178" / "discovery.txt").read_text()
 
 
 @pytest.fixture()
-def client(monkeypatch):
+def client(monkeypatch, tmp_path):
     wapp.app.config["TESTING"] = True
     monkeypatch.setattr(wapp, "current_user", lambda: "alice")
     monkeypatch.setattr(wapp, "current_cluster_identity", lambda: None)
+    monkeypatch.setattr(wapp, "INVENTORY_DIR", tmp_path / "inventory")
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": []})
     return wapp.app.test_client()
 
 
-def test_route_validates_pools_before_the_action_run(client, monkeypatch):
-    runs = []
-    monkeypatch.setattr(wapp, "track_action", lambda label, cluster, worker, *a: runs.append(a) or "a1")
+@pytest.fixture()
+def runs(monkeypatch):
+    seen = []
+    monkeypatch.setattr(wapp, "track_action", lambda label, cluster, worker, *a: seen.append(a) or "a1")
+    return seen
+
+
+def test_route_validates_pools_before_the_action_run(client, runs):
     for pools in ([{"tag": "SSD", "disks": [{"serial": "s"}]}],
                   [{"tag": "a", "replicas": 9, "disks": [{"serial": "s"}]}],
                   [{"tag": "a", "disks": []}],
@@ -322,20 +331,78 @@ def test_route_validates_pools_before_the_action_run(client, monkeypatch):
     r = client.post("/api/baremetal/install", json=dict(BASE, pools=POOLS))
     assert r.status_code == 202
     assert runs[0][0]["pools"] == hh.check_pools(POOLS)
-    r = client.post("/api/baremetal/install", json=BASE)
+    r = client.post("/api/baremetal/install", json=dict(BASE, bmc_host="192.0.2.11"))
     assert r.status_code == 202 and runs[1][0]["pools"] == []
 
 
-def test_runner_has_a_pools_step_after_the_api_skipped_without_pools():
+def test_replicas_null_is_one():
+    assert hh.check_pools([{"tag": "a", "replicas": None, "disks": [{"serial": "s"}]}])[0]["replicas"] == 1
+    assert hh.check_pools([{"tag": "a", "replicas": "", "disks": [{"serial": "s"}]}])[0]["replicas"] == 1
+
+
+def test_a_pool_disk_is_never_the_system_or_data_disk_without_inventory(client, runs):
+    by_path = [{"tag": "a", "disks": [{"serial": "S-1", "path": "/dev/sda"}]}]
+    by_wwn = [{"tag": "a", "disks": [{"wwn": "0x5000c500a0000009"}]}]
+    by_serial = [{"tag": "a", "disks": [{"serial": "TEST-DATA-0042"}]}]
+    for pools, extra in ((by_path, {}),
+                         (by_wwn, {"device": "/dev/disk/by-id/wwn-0x5000c500a0000009"}),
+                         (by_serial, {"data_disk": "/dev/disk/by-id/ata-MODEL_TEST-DATA-0042"})):
+        r = client.post("/api/baremetal/install", json=dict(BASE, pools=pools, **extra))
+        assert r.status_code == 400, extra
+        assert r.get_json()["fields"] == ["pools"] and r.get_json()["reasons"][0][1] == "role-twice"
+    assert not runs
+
+
+def test_a_pool_disk_is_resolved_in_the_inventory_and_checked_for_roles(client, runs, tmp_path):
+    bmd.store_inventory(tmp_path / "inventory", "SYS-0001", BASE["bmc_host"], INVENTORY)
+    ssd = "/dev/disk/by-path/pci-0000:00:17.0-ata-2.0"
+    # le disque système désigné par son chemin stable, le pool par sa série : même disque
+    r = client.post("/api/baremetal/install", json=dict(
+        BASE, device=ssd, pools=[{"tag": "a", "disks": [{"serial": "TEST-SSD-0001"}]}]))
+    assert r.status_code == 400
+    assert any(reason == "role-twice" for _, reason in r.get_json()["reasons"])
+    # le disque de données, par WWN
+    r = client.post("/api/baremetal/install", json=dict(
+        BASE, device="/dev/sdb", data_disk="/dev/sdc", pools=[{"tag": "a", "disks": [{"wwn": "5000C500A0000001"}]}]))
+    assert r.status_code == 400
+    # un disque absent de l'inventaire
+    r = client.post("/api/baremetal/install", json=dict(
+        BASE, pools=[{"tag": "a", "disks": [{"serial": "NOT-THERE"}]}]))
+    assert r.status_code == 400 and r.get_json()["reasons"] == [["serial NOT-THERE", "unknown-disk"]]
+    assert not runs
+    r = client.post("/api/baremetal/install", json=dict(
+        BASE, device="/dev/sdb", pools=[{"tag": "a", "disks": [{"serial": "TEST-NVME-0001"}]}]))
+    assert r.status_code == 202
+
+
+def test_the_new_cluster_name_is_checked_before_the_action_run(client, runs, monkeypatch):
+    r = client.post("/api/baremetal/install", json=dict(BASE, cluster_name="Bad_Name"))
+    assert r.status_code == 400 and r.get_json()["fields"] == ["cluster_name"]
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": [{"name": "n1"}]})
+    r = client.post("/api/baremetal/install", json=BASE)                 # nom d'hôte déjà déclaré
+    assert r.status_code == 400 and r.get_json()["fields"] == ["cluster_name"]
+    assert not runs
+    r = client.post("/api/baremetal/install", json=dict(BASE, cluster_name="lab.home"))
+    assert r.status_code == 202 and runs[0][0]["cluster_name"] == "lab.home"
+
+
+def test_runner_declares_then_runs_pools_under_one_budget():
     src = Path(wapp.__file__).read_text()
     body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
-    assert body.index('step("wait-api", "done"') < body.index('step("pools", "running"')
-    assert body.index('step("cleanup", "done"') < body.index('step("pools", "running"')
-    assert "    if pools:\n" in body                          # rien d'affiché sans pools
-    assert "_bm_apply_pools(opts, kubeconfig, run, step)" in body
-    # la clé jetable part dans la configuration AVANT qu'elle soit rendue
-    assert body.index("_bm_with_pool_key(") < body.index("cfg_yaml = _harvester_install_config")
-    assert "scratch.extend([pool_key, pool_pub])" in body
+    assert body.index('step("wait-api", "done"') < body.index('step("declare", "running"')
+    assert body.index('step("cleanup", "done"') < body.index('step("declare", "running"')
+    assert body.index("_bm_declare_cluster(") < body.index('step("pools", "running"')
+    assert "        if pools:\n" in body                          # rien d'affiché sans pools
+    assert "_bm_apply_pools(opts, kubeconfig, run, step, post_deadline - time.time())" in body
+    assert body.count("HARVESTER_POOLS_TIMEOUT") == 1
+    # la clé part dans la configuration AVANT qu'elle soit rendue
+    assert body.index("_bm_with_ssh_key(") < body.index("cfg_yaml = _harvester_install_config")
+    assert "_bm_join_pubkey(opts[\"cluster\"])" in body
+    # tout ce qui suit l'installation finit par fail() en cas d'exception
+    post = body.split('step("cleanup", "done"', 1)[1]
+    assert "except Exception as e:" in post and "return fail(current[0]" in post
+    # les clés sont gardées une fois la machine repartie sur l'installeur
+    assert body.index("keep_creds[0] = True") < body.index('step("power", "done"')
 
 
 def test_the_pools_step_goes_through_the_command_line_tool(monkeypatch, tmp_path):
@@ -345,9 +412,14 @@ def test_the_pools_step_goes_through_the_command_line_tool(monkeypatch, tmp_path
     class P:
         def __init__(self, cmd, **kw):
             seen["cmd"] = cmd
-            seen["spec"] = json.loads(Path(cmd[cmd.index("--spec") + 1]).read_text())
+            spec = Path(cmd[cmd.index("--spec") + 1])
+            seen["mode"] = stat.S_IMODE(spec.stat().st_mode)
+            seen["spec"] = json.loads(spec.read_text())
             self.stderr = iter(["STEP_EVENT|find|running|2 disk(s)\n",
                                 "STEP_EVENT|find|error|not found on n1: serial S\n"])
+
+        def poll(self):
+            return 2
 
         def wait(self):
             return 2
@@ -355,34 +427,66 @@ def test_the_pools_step_goes_through_the_command_line_tool(monkeypatch, tmp_path
     steps = []
     run = type("R", (), {"id": "r1"})()
     opts = {"hostname": "n1", "mode": "join", "pools": hh.check_pools(POOLS)}
-    code, why = wapp._bm_apply_pools(opts, "/kc", run, lambda *a: steps.append(a))
+    code, why = wapp._bm_apply_pools(opts, "/kc", run, lambda *a: steps.append(a), 123.7)
     assert code == 2 and why == "not found on n1: serial S"
     cmd = seen["cmd"]
     assert cmd[1].endswith("harvester-resources.py") and cmd[2] == "pools-apply"
     assert cmd[cmd.index("--node") + 1] == "n1" and "--no-classes" in cmd
-    assert seen["spec"] == {"pools": opts["pools"]}
-    assert not list(tmp_path.rglob("pools-*.json"))           # la description ne reste pas
+    assert cmd[cmd.index("--timeout") + 1] == "123"                  # le temps restant, pas 1800
+    assert seen["spec"] == {"pools": opts["pools"]} and seen["mode"] == 0o600
+    assert not list(tmp_path.rglob("pools-*.json"))
     assert all(s[0] == "pools" and s[1] == "progress" for s in steps)
-    code, _ = wapp._bm_apply_pools(dict(opts, mode="create"), "/kc", run, lambda *a: None)
+    wapp._bm_apply_pools(dict(opts, mode="create"), "/kc", run, lambda *a: None, 60)
     assert "--no-classes" not in seen["cmd"]
 
 
-def test_the_ephemeral_key_joins_the_keys_where_they_already_are():
-    out = wapp._bm_with_pool_key({"ssh_keys": "ssh-ed25519 AAAA one"}, "ssh-ed25519 BBBB pool")
+def test_cancel_from_the_dock_stops_pools_apply(monkeypatch, tmp_path):
+    import threading
+    import time as _t
+    monkeypatch.setattr(wapp, "ISO_DIR", tmp_path)
+    done = threading.Event()
+
+    class P:
+        terminated = False
+
+        def __init__(self, cmd, **kw):
+            self.stderr = self._lines()
+
+        def _lines(self):
+            done.wait(5)            # stderr ne rend rien tant que le processus vit
+            return
+            yield
+
+        def poll(self):
+            return 143 if P.terminated else None
+
+        def terminate(self):
+            P.terminated = True
+            done.set()
+
+        def wait(self):
+            return 143
+    monkeypatch.setattr(wapp.subprocess, "Popen", P)
+    run = type("R", (), {"id": "r1", "_cancel": True})()
+    t0 = _t.time()
+    code, _ = wapp._bm_apply_pools({"hostname": "n1", "pools": []}, "/kc", run, lambda *a: None, 60)
+    assert P.terminated and code == 143 and _t.time() - t0 < 5
+
+
+def test_the_cluster_key_joins_the_keys_where_they_already_are():
+    out = wapp._bm_with_ssh_key({"ssh_keys": "ssh-ed25519 AAAA one"}, "ssh-ed25519 BBBB pool")
     assert out["ssh_keys"].splitlines() == ["ssh-ed25519 AAAA one", "ssh-ed25519 BBBB pool"]
-    assert wapp._bm_with_pool_key({}, "ssh-ed25519 BBBB pool")["ssh_keys"] == "ssh-ed25519 BBBB pool"
+    assert wapp._bm_with_ssh_key({}, "ssh-ed25519 BBBB pool")["ssh_keys"] == "ssh-ed25519 BBBB pool"
     adv = "os:\n  ssh_authorized_keys:\n  - ssh-ed25519 AAAA adv\n"
-    out = wapp._bm_with_pool_key({"advanced_yaml": adv}, "ssh-ed25519 BBBB pool")
+    out = wapp._bm_with_ssh_key({"advanced_yaml": adv}, "ssh-ed25519 BBBB pool")
     assert not out.get("ssh_keys")
     import yaml
     assert yaml.safe_load(out["advanced_yaml"])["os"]["ssh_authorized_keys"] == [
         "ssh-ed25519 AAAA adv", "ssh-ed25519 BBBB pool"]
-    # la configuration reste acceptée par le schéma de l'installeur
-    wapp._his.render_install_config(dict(BASE, iso_url="http://192.0.2.1/x.iso", method="dhcp",
-                                         **out))
+    wapp._his.render_install_config(dict(BASE, iso_url="http://192.0.2.1/x.iso", method="dhcp", **out))
 
 
-def test_the_kubeconfig_is_read_over_ssh_and_pointed_at_the_vip(monkeypatch, tmp_path):
+def test_the_kubeconfig_is_read_over_ssh_with_the_cluster_known_hosts(monkeypatch, tmp_path):
     rke2 = ("apiVersion: v1\nkind: Config\nclusters:\n- name: default\n  cluster:\n"
             "    certificate-authority-data: Q0E=\n    server: https://127.0.0.1:6443\n"
             "users:\n- name: default\n  user: {client-certificate-data: Qw==}\n")
@@ -392,23 +496,114 @@ def test_the_kubeconfig_is_read_over_ssh_and_pointed_at_the_vip(monkeypatch, tmp
     monkeypatch.setattr(wapp.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or next(answers))
     monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
     out = tmp_path / "kc"
+    out.write_text("stale")
+    out.chmod(0o644)
     steps = []
-    ok = wapp._bm_fetch_kubeconfig("192.0.2.50", tmp_path / "k", out, wapp.time.time() + 60,
-                                   type("R", (), {})(), lambda *a: steps.append(a))
+    ok = wapp._bm_fetch_kubeconfig("192.0.2.50", tmp_path / "k", tmp_path / "kh", out,
+                                   wapp.time.time() + 60, type("R", (), {})(), lambda *a: steps.append(a))
     assert ok is True
     import yaml
     doc = yaml.safe_load(out.read_text())
     assert doc["clusters"][0]["cluster"]["server"] == "https://192.0.2.50:6443"
     assert stat.S_IMODE(out.stat().st_mode) == 0o600
-    assert calls[0][calls[0].index("-i") + 1] == str(tmp_path / "k")
-    assert "rancher@192.0.2.50" in calls[0] and "BatchMode=yes" in calls[0]
-    assert all("Qw==" not in str(s) for s in steps)                 # rien du fichier dans le dock
+    c = calls[0]
+    assert c[c.index("-i") + 1] == str(tmp_path / "k")
+    assert f"UserKnownHostsFile={tmp_path / 'kh'}" in c and "StrictHostKeyChecking=accept-new" in c
+    assert "rancher@192.0.2.50" in c and "BatchMode=yes" in c
+    assert all("Qw==" not in str(s) for s in steps)
+
+
+@pytest.fixture()
+def console(monkeypatch, tmp_path):
+    """Configuration de la console dans un répertoire jetable."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("clusters: []\n")
+    monkeypatch.setattr(wapp, "CONFIG_PATH", cfg)
+    monkeypatch.setattr(wapp, "load_config", lambda: __import__("yaml").safe_load(cfg.read_text()))
+    return tmp_path
 
 
 @pytest.mark.skipif(not __import__("shutil").which("ssh-keygen"), reason="ssh-keygen absent")
-def test_the_ephemeral_key_is_private_to_the_console(monkeypatch, tmp_path):
-    monkeypatch.setattr(wapp, "ISO_DIR", tmp_path)
-    key, pub = wapp._bm_pools_keypair("r1")
-    assert stat.S_IMODE(key.stat().st_mode) == 0o600
-    assert pub.read_text().startswith("ssh-ed25519 ")
-    assert key.parent == wapp._iso_work_dir()
+def test_the_new_cluster_gets_its_own_key_and_is_declared(console):
+    f = wapp._bm_cluster_keypair("lab1")
+    assert f["key"] == console / "ssh" / "lab1_id"
+    assert stat.S_IMODE(f["key"].stat().st_mode) == 0o600
+    assert f["pub"].read_text().startswith("ssh-ed25519 ")
+    kc = f["kubeconfig"]
+    wapp._bm_write_private(kc, "apiVersion: v1\n")
+    c = wapp._bm_declare_cluster("lab1", kc, f["key"], "n1", "192.0.2.50")
+    assert c["kubeconfig"] == str(console / "kubeconfigs" / "lab1.yaml")
+    assert c["ssh"] == {"user": "rancher", "port": 22, "key": str(f["key"]), "generated": True}
+    assert c["nodes"] == [{"hostname": "n1", "ip": "192.0.2.50", "role": "control-plane"}]
+    assert [x["name"] for x in wapp.load_config()["clusters"]] == ["lab1"]
+    with pytest.raises(ValueError, match="already exists"):
+        wapp._bm_declare_cluster("lab1", kc, f["key"], "n1", "192.0.2.50")
+    # un nœud qui rejoint reçoit la même clé publique
+    assert wapp._bm_join_pubkey("lab1").split()[:2] == f["pub"].read_text().split()[:2]
+    assert wapp._bm_join_pubkey("nope") is None
+
+
+def test_join_keeps_todays_keys_when_the_cluster_key_is_not_the_console_s(console):
+    (console / "id").write_text("x")
+    wapp._atomic_write_config({"clusters": [{"name": "c", "ssh": {"key": str(console / "id")}}]})
+    assert wapp._bm_join_pubkey("c") is None
+
+
+def test_settings_keep_the_generated_mark_only_for_the_same_key(console, monkeypatch):
+    import io
+    wapp.app.config["TESTING"] = True
+    monkeypatch.setattr(wapp, "current_user", lambda: "root")
+    ssh = console / "ssh"
+    ssh.mkdir(exist_ok=True)
+    for n in ("lab1_id", "lab1_id.pub", "lab1_known_hosts"):
+        (ssh / n).write_text("x")
+    node = {"hostname": "n1", "ip": "192.0.2.50", "role": "control-plane"}
+    wapp._atomic_write_config({"clusters": [{"name": "lab1", "kubeconfig": "", "description": "",
+                                             "ssh": {"user": "rancher", "port": 22, "key": str(ssh / "lab1_id"),
+                                                     "generated": True}, "nodes": [node]}]})
+    c = wapp.app.test_client()
+    r = c.put("/api/clusters/lab1", json={"name": "lab1", "description": "d", "nodes": [node]})
+    assert r.status_code == 200 and wapp.load_config()["clusters"][0]["ssh"]["generated"] is True
+    # renommé : la clé, sa publique et les clés d'hôte suivent
+    r = c.put("/api/clusters/lab1", json={"name": "lab2", "nodes": [node]})
+    assert r.status_code == 200
+    got = wapp.load_config()["clusters"][0]
+    assert got["ssh"]["key"] == str(ssh / "lab2_id") and got["ssh"]["generated"] is True
+    assert (ssh / "lab2_id.pub").exists() and (ssh / "lab2_known_hosts").exists()
+    # une clé téléversée n'est plus celle de la console
+    key = b"-----BEGIN OPENSSH PRIVATE KEY-----\nx\n"
+    r = c.post("/api/clusters/lab2/sshkey", data={"file": (io.BytesIO(key), "id")},
+               content_type="multipart/form-data")
+    assert r.status_code == 200 and "generated" not in wapp.load_config()["clusters"][0]["ssh"]
+    # supprimé : publique et clés d'hôte partent avec la clé
+    assert c.delete("/api/clusters/lab2").status_code == 200
+    assert not list(ssh.iterdir())
+
+
+# -- disque système, disque de données, disque de Longhorn ----------------------------
+
+def test_a_block_device_used_by_the_system_is_never_a_pool_disk(steps):
+    def with_child(label="", mount="", parent_name="uuid-a"):
+        child = a_bd("uuid-a-p1", serial="SER-A1", dtype="part")
+        child["status"]["deviceStatus"]["parentDevice"] = "/dev/uui"
+        child["status"]["deviceStatus"]["details"]["label"] = label
+        child["status"]["deviceStatus"]["fileSystem"]["mountPoint"] = mount
+        return child
+    for child, why in ((with_child(label="COS_STATE"), "labelled COS_STATE"),
+                       (with_child(label="HARV_LH_DEFAULT"), "labelled HARV_LH_DEFAULT"),
+                       (with_child(mount="/var/lib/harvester/defaultdisk"), "mounted on")):
+        k = FakeKube([a_bd("uuid-a", serial="SER-A1"), child])
+        with pytest.raises(ValueError, match=why):
+            run(k, POOLS[:1])
+        assert not k.replaced
+    # une partition d'un autre nœud ne compte pas
+    other = with_child(label="COS_STATE")
+    other["spec"]["nodeName"] = "n2"
+    k = FakeKube([a_bd("uuid-a", serial="SER-A1"), other])
+    assert run(k, POOLS[:1]) == hres.EXIT_OK
+    # le disque par défaut de Longhorn, déclaré sous le nom du BlockDevice
+    k = FakeKube([a_bd("uuid-a", serial="SER-A1")])
+    k.objs[(hh.K_LHNODE, NS, "n1")]["spec"]["disks"]["uuid-a"] = {"path": "/var/lib/harvester/defaultdisk"}
+    with pytest.raises(ValueError, match="Longhorn's default disk"):
+        run(k, POOLS[:1])
+    assert not k.replaced

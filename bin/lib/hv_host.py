@@ -552,15 +552,13 @@ def check_pools(pools):
         if tag in tags:
             raise ValueError(f"pools[{i}].tag: {tag} is used twice")
         tags.add(tag)
-        raw = p.get("replicas", 1)
-        if isinstance(raw, bool):
-            raise ValueError(f"pools[{i}].replicas: 1 to 3")
-        try:
-            replicas = int(raw if raw not in (None, "") else 1)
-        except (TypeError, ValueError):
-            raise ValueError(f"pools[{i}].replicas: 1 to 3") from None
-        if not 1 <= replicas <= 3 or str(raw).strip() not in (str(replicas), ""):
-            raise ValueError(f"pools[{i}].replicas: 1 to 3")
+        raw = p.get("replicas")
+        if raw in (None, ""):
+            replicas = 1                # null ou absent : une réplique
+        else:
+            if isinstance(raw, bool) or str(raw).strip() not in ("1", "2", "3"):
+                raise ValueError(f"pools[{i}].replicas: 1 to 3")
+            replicas = int(str(raw).strip())
         disks = p.get("disks")
         if not isinstance(disks, list) or not disks:
             raise ValueError(f"pools[{i}].disks: at least one disk")
@@ -629,6 +627,48 @@ def pool_disk_state(bd, tag):
         path = spec.get("devPath") or (bd.get("metadata") or {}).get("name")
         raise ValueError(f"{path} is already a storage disk (tags: {', '.join(tags) or 'none'}): left as is")
     return "todo"
+
+
+SYSTEM_LABEL_PREFIXES = ("COS_", "HARV_")
+LH_DEFAULT_DISK = "/var/lib/harvester/defaultdisk"
+
+
+def _dev_status(bd):
+    return ((bd or {}).get("status") or {}).get("deviceStatus") or {}
+
+
+def system_use(bd, bds, lh_node=None):
+    """Raison pour laquelle ce BlockDevice sert déjà au système, ou None :
+    une partition enfant (même nœud, `parentDevice` vers lui) montée ou
+    portant une étiquette COS_* / HARV_* (disque système, disque de données
+    de l'installeur), ou le disque par défaut de Longhorn. Un disque de pool
+    n'est jamais l'un d'eux."""
+    node = ((bd or {}).get("spec") or {}).get("nodeName")
+    dev = ((bd or {}).get("spec") or {}).get("devPath") or _dev_status(bd).get("devPath")
+    name = ((bd or {}).get("metadata") or {}).get("name")
+    mounts = [str((_dev_status(bd).get("fileSystem") or {}).get("mountPoint") or "")]
+    for child in bds or []:
+        if child is bd or ((child.get("spec") or {}).get("nodeName")) != node:
+            continue
+        st = _dev_status(child)
+        if not dev or st.get("parentDevice") != dev:
+            continue
+        fs = st.get("fileSystem") or {}
+        det = st.get("details") or {}
+        cdev = (child.get("spec") or {}).get("devPath") or st.get("devPath")
+        labels = [str(x or "") for x in (det.get("label"), det.get("partitionLabel"), fs.get("label"))]
+        system = [lb for lb in labels if lb.upper().startswith(SYSTEM_LABEL_PREFIXES)]
+        if system:
+            return f"{dev} holds the partition {cdev} labelled {system[0]}"
+        if fs.get("mountPoint"):
+            return f"{dev} holds the partition {cdev} mounted on {fs['mountPoint']}"
+    if any(m == LH_DEFAULT_DISK or m.startswith(LH_DEFAULT_DISK + "/") for m in mounts):
+        return f"{dev} is Longhorn's default disk"
+    for dname, d in (((lh_node or {}).get("spec") or {}).get("disks") or {}).items():
+        path = str(d.get("path") or "")
+        if path.rstrip("/") == LH_DEFAULT_DISK and dname == name:
+            return f"{dev} is Longhorn's default disk"
+    return None
 
 
 def pool_class_name(tag):
