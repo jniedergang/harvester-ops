@@ -260,21 +260,68 @@ apply_cluster_identity() {
     return 0
 }
 
+# v1.78.0 : un cluster se trouve dans config.yaml (l'opérateur, qui
+# l'emporte à nom égal) ou parmi ceux que la console a déclarés elle-même,
+# un fichier par cluster dans <état>/clusters.d. Pose _CLUSTER_FILE (le
+# fichier à lire) et _CLUSTER_Q (le chemin yq de l'entrée).
+: "${HARVESTER_OPS_STATE_DIR:=/var/lib/harvester-ops}"
+_CLUSTER_FILE=""
+_CLUSTER_Q=""
+_CLUSTER_ORIGIN=""
+
+_locate_cluster() {
+    local name="$1" found
+    if [[ -f "$HARVESTER_OPS_CONFIG" ]]; then
+        found=$(yq ".clusters[] | select(.name == \"$name\") | .name" "$HARVESTER_OPS_CONFIG" 2>/dev/null)
+        if [[ -n "$found" && "$found" != "null" ]]; then
+            _CLUSTER_FILE="$HARVESTER_OPS_CONFIG"
+            _CLUSTER_Q=".clusters[] | select(.name == \"$name\")"
+            _CLUSTER_ORIGIN="config"
+            return 0
+        fi
+    fi
+    # même règle de nom que la console : jamais de remontée de répertoire
+    [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$ ]] || return 1
+    local decl="$HARVESTER_OPS_STATE_DIR/clusters.d/$name.yaml"
+    [[ -f "$decl" ]] || return 1
+    found=$(yq -r '.name' "$decl" 2>/dev/null)
+    [[ "$found" == "$name" ]] || return 1
+    _CLUSTER_FILE="$decl"
+    _CLUSTER_Q="."
+    _CLUSTER_ORIGIN="console"
+    return 0
+}
+
+# Chemin d'une déclaration de la console : relatif au répertoire d'état.
+_state_path() {
+    local p="$1"
+    if [[ "$_CLUSTER_ORIGIN" == "console" && -n "$p" && "$p" != "null" && "$p" != /* ]]; then
+        printf '%s/%s' "$HARVESTER_OPS_STATE_DIR" "$p"
+    else
+        printf '%s' "$p"
+    fi
+}
+
 load_cluster() {
     local name="$1"
     [[ -z "$name" ]] && { log_error "Nom de cluster requis / cluster name required"; return 1; }
-    [[ ! -f "$HARVESTER_OPS_CONFIG" ]] && { log_error "Config non trouvée : $HARVESTER_OPS_CONFIG"; return 1; }
     require_yq
 
-    local found
-    found=$(yq ".clusters[] | select(.name == \"$name\") | .name" "$HARVESTER_OPS_CONFIG")
-    [[ -z "$found" || "$found" == "null" ]] && { log_error "Cluster '$name' introuvable dans la config"; return 1; }
+    if ! _locate_cluster "$name"; then
+        if [[ ! -f "$HARVESTER_OPS_CONFIG" ]]; then
+            log_error "Config non trouvée : $HARVESTER_OPS_CONFIG"
+        else
+            log_error "Cluster '$name' introuvable dans la config"
+        fi
+        return 1
+    fi
+    local f="$_CLUSTER_FILE" q="$_CLUSTER_Q"
 
     CLUSTER_NAME="$name"
-    KUBECONFIG_PATH=$(yq -r ".clusters[] | select(.name == \"$name\") | .kubeconfig" "$HARVESTER_OPS_CONFIG")
-    SSH_USER=$(yq -r ".clusters[] | select(.name == \"$name\") | .ssh.user // \"rancher\"" "$HARVESTER_OPS_CONFIG")
-    SSH_KEY=$(yq -r ".clusters[] | select(.name == \"$name\") | .ssh.key // \"\"" "$HARVESTER_OPS_CONFIG")
-    SSH_PORT=$(yq -r ".clusters[] | select(.name == \"$name\") | .ssh.port // 22" "$HARVESTER_OPS_CONFIG")
+    KUBECONFIG_PATH=$(_state_path "$(yq -r "$q | .kubeconfig" "$f")")
+    SSH_USER=$(yq -r "$q | .ssh.user // \"rancher\"" "$f")
+    SSH_KEY=$(_state_path "$(yq -r "$q | .ssh.key // \"\"" "$f")")
+    SSH_PORT=$(yq -r "$q | .ssh.port // 22" "$f")
 
     SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -p $SSH_PORT"
     [[ -n "$SSH_KEY" && "$SSH_KEY" != "null" ]] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY"
@@ -293,15 +340,15 @@ load_cluster() {
     # Load nodes
     CLUSTER_NODES=()
     local count
-    count=$(yq ".clusters[] | select(.name == \"$name\") | .nodes | length" "$HARVESTER_OPS_CONFIG")
+    count=$(yq "$q | .nodes | length" "$f")
     for ((i=0; i<count; i++)); do
         local h ip role mac
-        h=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].hostname" "$HARVESTER_OPS_CONFIG")
-        ip=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].ip" "$HARVESTER_OPS_CONFIG")
-        role=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].role" "$HARVESTER_OPS_CONFIG")
+        h=$(yq -r "$q | .nodes[$i].hostname" "$f")
+        ip=$(yq -r "$q | .nodes[$i].ip" "$f")
+        role=$(yq -r "$q | .nodes[$i].role" "$f")
         # v1.9.0 : wol_mac optionnel — permet au startup d'allumer le
         # node par Wake-on-LAN au lieu de demander un appui sur le bouton.
-        mac=$(yq -r ".clusters[] | select(.name == \"$name\") | .nodes[$i].wol_mac // \"\"" "$HARVESTER_OPS_CONFIG")
+        mac=$(yq -r "$q | .nodes[$i].wol_mac // \"\"" "$f")
         [[ "$mac" == "null" ]] && mac=""
         CLUSTER_NODES+=("$h|$ip|$role|$mac")
     done
@@ -311,8 +358,16 @@ load_cluster() {
 
 list_clusters() {
     require_yq
-    [[ ! -f "$HARVESTER_OPS_CONFIG" ]] && { log_error "Config non trouvée : $HARVESTER_OPS_CONFIG"; return 1; }
-    yq -r '.clusters[].name' "$HARVESTER_OPS_CONFIG"
+    local names="" n decl
+    [[ -f "$HARVESTER_OPS_CONFIG" ]] && names=$(yq -r '.clusters[].name' "$HARVESTER_OPS_CONFIG")
+    [[ -n "$names" ]] && printf '%s\n' "$names"
+    # v1.78.0 : puis ceux de la console, sauf un nom déjà dans config.yaml
+    for decl in "$HARVESTER_OPS_STATE_DIR"/clusters.d/*.yaml; do
+        [[ -f "$decl" ]] || continue
+        n=$(yq -r '.name' "$decl" 2>/dev/null)
+        [[ "$n" == "$(basename "$decl" .yaml)" ]] || continue
+        grep -qxF -- "$n" <<< "$names" || printf '%s\n' "$n"
+    done
 }
 
 nodes_by_role() {

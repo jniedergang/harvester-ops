@@ -145,8 +145,9 @@ Pour ajouter un cluster sans éditer `config.yaml` à la main :
 
 - Paramètres → onglet **Clusters** → *Add cluster*, OU bouton **+** à côté du sélecteur de cluster dans la sidebar.
 - Renseigner : un nom unique, une description, l'utilisateur SSH (défaut `rancher`), la liste des nœuds (hostname + IP + role : `control-plane` ou `worker`), upload kubeconfig + clé SSH privée.
-- Le cluster est persisté dans `/etc/harvester-ops/config.yaml` (écriture atomique, `.bak` de la version précédente conservée).
-- Le kubeconfig est stocké dans `/etc/harvester-ops/kubeconfigs/<nom>.yaml` (mode 0600) ; la clé SSH dans `/etc/harvester-ops/ssh/<nom>_id` (mode 0600).
+- Le cluster est persisté dans le répertoire d'état de la console (`/var/lib/harvester-ops`, `HARVESTER_OPS_STATE_DIR`), jamais dans `config.yaml` : `clusters.d/<nom>.yaml` (mode 0600, écriture atomique), avec des chemins relatifs à ce répertoire pour que sa copie déplace la console (voir « Déplacer harvops vers un autre hôte » dans le guide d'installation).
+- Le kubeconfig est stocké dans `<état>/kubeconfigs/<nom>.yaml` (mode 0600) ; la clé SSH dans `<état>/ssh/<nom>_id` (mode 0600).
+- Chaque cluster dit qui l'a déclaré : `config.yaml` (l'opérateur) ou `console`. Quand la console ne peut pas écrire `config.yaml` (le service packagé monte `/etc/harvester-ops` en lecture seule), les clusters de `config.yaml` ne se modifient ni ne se suppriment depuis l'UI (l'API répond 409) : modifier le fichier. Quand elle le peut (environnement de développement), leurs changements y sont toujours écrits, avec un `.bak` de la version précédente.
 - Depuis l'onglet Clusters tu peux aussi : remplacer le kubeconfig, remplacer la clé SSH, lancer **Test kubeconfig** (kubectl version) ou **Test SSH** (ping par nœud), éditer les métadonnées, ou supprimer le cluster (et ses fichiers associés).
 
 ## 11. Conception sécurisée

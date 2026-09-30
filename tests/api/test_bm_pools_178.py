@@ -520,20 +520,31 @@ def console(monkeypatch, tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("clusters: []\n")
     monkeypatch.setattr(wapp, "CONFIG_PATH", cfg)
-    monkeypatch.setattr(wapp, "load_config", lambda: __import__("yaml").safe_load(cfg.read_text()))
+    # v1.78.0 : et son répertoire d'état (clusters déclarés par la console)
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(tmp_path / "state"))
     return tmp_path
 
 
 @pytest.mark.skipif(not __import__("shutil").which("ssh-keygen"), reason="ssh-keygen absent")
 def test_the_new_cluster_gets_its_own_key_and_is_declared(console):
+    state = console / "state"
     f = wapp._bm_cluster_keypair("lab1")
-    assert f["key"] == console / "ssh" / "lab1_id"
+    # v1.78.0 : dans le répertoire d'état, jamais à côté de config.yaml
+    assert f["key"] == state / "ssh" / "lab1_id"
     assert stat.S_IMODE(f["key"].stat().st_mode) == 0o600
+    assert stat.S_IMODE((state / "ssh").stat().st_mode) == 0o700
     assert f["pub"].read_text().startswith("ssh-ed25519 ")
     kc = f["kubeconfig"]
     wapp._bm_write_private(kc, "apiVersion: v1\n")
     c = wapp._bm_declare_cluster("lab1", kc, f["key"], "n1", "192.0.2.50")
-    assert c["kubeconfig"] == str(console / "kubeconfigs" / "lab1.yaml")
+    assert c["kubeconfig"] == str(state / "kubeconfigs" / "lab1.yaml")
+    assert stat.S_IMODE(Path(c["kubeconfig"]).stat().st_mode) == 0o600
+    # config.yaml intact ; la déclaration porte des chemins relatifs, en 0600
+    assert (console / "config.yaml").read_text() == "clusters: []\n"
+    decl = state / "clusters.d" / "lab1.yaml"
+    assert stat.S_IMODE(decl.stat().st_mode) == 0o600
+    doc = __import__("yaml").safe_load(decl.read_text())
+    assert doc["kubeconfig"] == "kubeconfigs/lab1.yaml" and doc["ssh"]["key"] == "ssh/lab1_id"
     assert c["ssh"] == {"user": "rancher", "port": 22, "key": str(f["key"]), "generated": True}
     assert c["nodes"] == [{"hostname": "n1", "ip": "192.0.2.50", "role": "control-plane"}]
     assert [x["name"] for x in wapp.load_config()["clusters"]] == ["lab1"]

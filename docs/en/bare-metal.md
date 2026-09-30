@@ -168,13 +168,18 @@ powered on is powered off again; a machine found running is left as it
 was.
 
 **The new cluster is declared automatically** (create mode). The console
-creates an ed25519 key pair for it (`ssh/<name>_id`, 0600, next to the
-console configuration, where Settings > Clusters keeps uploaded keys),
+creates an ed25519 key pair for it (`ssh/<name>_id`, 0600, in the
+console's state directory, `/var/lib/harvester-ops` in the packaged
+service, where Settings > Clusters keeps the clusters it declares),
 puts the public key in the install config, reads
 `/etc/rancher/rke2/rke2.yaml` over SSH as `rancher` through the VIP
 (host key recorded on first contact in `ssh/<name>_known_hosts`), writes
 it 0600 with its server set to `https://<VIP>:6443`, and declares the
-cluster with that kubeconfig, that key and the node. The key stays: the
+cluster with that kubeconfig (`kubeconfigs/<name>.yaml`), that key and the
+node in `clusters.d/<name>.yaml` of that same directory, never in the
+read-only `config.yaml`. The paths in the declaration are relative to the
+state directory, so copying it moves the cluster with the console (see
+"Moving harvops to another host" in the install guide). The key stays: the
 console uses it for the graceful shutdown and startup. A node that joins
 this cluster later gets the same public key.
 

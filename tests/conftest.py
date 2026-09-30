@@ -33,6 +33,9 @@ os.environ.setdefault("HARVESTER_OPS_TF_DB", _TF_TEST_DIR + "/tf-declarations.db
 # leurs comptes éventuels restent dans leur dossier.
 os.environ.setdefault("HARVESTER_OPS_AUTH", "none")
 os.environ.setdefault("HARVESTER_OPS_ACCOUNTS", _TF_TEST_DIR + "/accounts.json")
+# v1.78.0 : les clusters déclarés par la console (clusters.d, clés,
+# kubeconfigs) des tests restent dans leur dossier
+os.environ.setdefault("HARVESTER_OPS_STATE_DIR", _TF_TEST_DIR + "/state")
 
 import pytest
 
@@ -149,6 +152,9 @@ def flask_server(test_config):
         "HARVESTER_OPS_HTPASSWD": str(test_config["root"] / "no-such-htpasswd"),
         "HARVESTER_OPS_AUTH": "none",
         "HARVESTER_OPS_ACCOUNTS": str(test_config["root"] / "accounts.json"),
+        # v1.78.0 : répertoire d'état du serveur de test (clusters déclarés
+        # par la console, leurs clés et kubeconfigs)
+        "HARVESTER_OPS_STATE_DIR": str(test_config["root"] / "state"),
         # v1.5.6: disable flask-limiter in tests; the suite hits some
         # endpoints dozens of times in a row.
         "HARVESTER_OPS_DISABLE_RATELIMIT": "1",

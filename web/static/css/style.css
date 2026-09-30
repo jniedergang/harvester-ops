@@ -3692,6 +3692,21 @@ textarea:focus-visible {
   gap: 6px;
   flex-wrap: wrap;
 }
+/* v1.78.0 : origine d'un cluster (config.yaml ou console), et actions d'un
+   cluster de config.yaml en lecture seule pour la console */
+.cluster-card h5 .cluster-origin {
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: middle;
+}
+.cluster-readonly {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  cursor: not-allowed;
+}
+.btn.disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
 .cluster-card-result {
   margin-top: 10px;
   font-size: 12px;

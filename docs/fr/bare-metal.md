@@ -175,13 +175,19 @@ préflight a allumée est éteinte à nouveau ; une machine trouvée allumée
 est laissée telle quelle.
 
 **Le nouveau cluster est déclaré tout seul** (création). La console crée
-pour lui une paire de clés ed25519 (`ssh/<nom>_id`, 0600, à côté de sa
-configuration, là où Paramètres > Clusters range les clés envoyées), pose
+pour lui une paire de clés ed25519 (`ssh/<nom>_id`, 0600, dans son
+répertoire d'état, `/var/lib/harvester-ops` pour le service packagé, là
+où elle range aussi les clusters déclarés depuis Paramètres > Clusters), pose
 la clé publique dans la configuration d'installation, lit
 `/etc/rancher/rke2/rke2.yaml` par SSH en `rancher` à travers la VIP (clé
 d'hôte retenue au premier contact dans `ssh/<nom>_known_hosts`), l'écrit
 en 0600 avec son serveur sur `https://<VIP>:6443`, et déclare le cluster
-avec ce kubeconfig, cette clé et le nœud. La clé reste : la console s'en
+avec ce kubeconfig (`kubeconfigs/<nom>.yaml`), cette clé et le nœud dans
+`clusters.d/<nom>.yaml` de ce même répertoire, jamais dans `config.yaml`,
+en lecture seule. Les chemins de la déclaration sont relatifs au
+répertoire d'état : le copier déplace le cluster avec la console (voir
+« Déplacer harvops vers un autre hôte » dans le guide d'installation). La
+clé reste : la console s'en
 sert pour l'arrêt et le démarrage gracieux. Un nœud qui rejoint plus tard
 ce cluster reçoit la même clé publique.
 

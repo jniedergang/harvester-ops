@@ -139,6 +139,7 @@ if str(BIN_DIR / "lib") not in sys.path:
 import longhorn_room  # noqa: E402
 import bm_discover as _bmd  # noqa: E402
 import baremetal_disks as _bmdisks  # noqa: E402
+import cluster_decl as _cd  # noqa: E402
 HTPASSWD_PATH = Path(os.environ.get("HARVESTER_OPS_HTPASSWD", "/etc/harvester-ops/htpasswd"))
 LOG_DIR = Path(os.environ.get("HARVESTER_OPS_LOG_DIR", "/var/log/harvester-ops"))
 DOCS_DIR = Path(os.environ.get("HARVESTER_OPS_DOCS", str(Path(__file__).resolve().parent.parent / "docs")))
@@ -383,10 +384,58 @@ def _validate_k8s_path_params():
     return None
 
 
-def load_config():
+def _load_config_file():
+    """config.yaml seul, tel que l'opérateur l'a écrit (sans les clusters
+    déclarés par la console) : c'est ce que réécrit un changement d'un
+    cluster qui y est déclaré."""
     if not CONFIG_PATH.exists():
         return {"clusters": [], "web": {}, "settings": {}}
-    return yaml.safe_load(CONFIG_PATH.read_text())
+    return yaml.safe_load(CONFIG_PATH.read_text()) or {}
+
+
+def _state_dir():
+    """Répertoire d'état de la console (v1.78.0) : tout ce qu'elle écrit
+    d'elle-même, à côté des comptes et des notes, ou HARVESTER_OPS_STATE_DIR.
+    Le répertoire de configuration est en lecture seule dans le service."""
+    notes = globals().get("NOTES_DB")
+    return _cd.state_dir(notes.parent if notes is not None else None)
+
+
+def _read_decl(path):
+    try:
+        return yaml.safe_load(Path(path).read_text())
+    except (OSError, yaml.YAMLError, UnicodeDecodeError) as e:
+        log.warning("cluster declaration %s unreadable: %s", Path(path).name, type(e).__name__)
+        return None
+
+
+def load_config():
+    """config.yaml, avec à la suite de ses clusters ceux que la console a
+    déclarés elle-même (<état>/clusters.d, chemins résolus). Un nom présent
+    dans config.yaml l'emporte ; un fichier invalide est ignoré."""
+    cfg = _load_config_file()
+    state = _state_dir()
+    decls = [(p, _read_decl(p)) for p in _cd.decl_files(state)]
+    if decls:
+        cfg["clusters"] = _cd.merge(cfg.get("clusters") or [], decls, state,
+                                    warn=lambda m: log.warning("%s", m))
+    return cfg
+
+
+def _config_cluster_names():
+    """Noms des clusters déclarés dans config.yaml par l'opérateur."""
+    try:
+        return {c.get("name") for c in (_load_config_file().get("clusters") or [])
+                if isinstance(c, dict)}
+    except (OSError, yaml.YAMLError):
+        return set()
+
+
+def _config_writable():
+    """config.yaml modifiable par la console (environnement de dev) ; faux
+    pour le service packagé, qui le monte en lecture seule."""
+    target = CONFIG_PATH if CONFIG_PATH.exists() else CONFIG_PATH.parent
+    return os.access(target, os.W_OK) and os.access(CONFIG_PATH.parent, os.W_OK)
 
 
 # -----------------------------------------------------------------------------
@@ -2624,9 +2673,13 @@ def review():
 # -----------------------------------------------------------------------------
 @app.route("/api/clusters")
 @requires_auth
+@_rate_limit("240/minute")
 def api_clusters():
     cfg = load_config()
     clusters, hidden = [], []
+    # v1.78.0 : qui a déclaré chaque cluster (config.yaml de l'opérateur ou
+    # la console), et si la console peut modifier config.yaml
+    config_names = _config_cluster_names()
     sso = _sso_session() is not None
     for c in cfg.get("clusters", []):
         if sso:
@@ -2641,8 +2694,9 @@ def api_clusters():
             "name": c["name"],
             "description": c.get("description", ""),
             "node_count": len(c.get("nodes", [])),
+            "origin": "config" if c["name"] in config_names else "console",
         })
-    out = {"clusters": clusters}
+    out = {"clusters": clusters, "config_writable": _config_writable()}
     if sso:
         out["hidden"] = hidden
     return jsonify(out)
@@ -4459,14 +4513,15 @@ def _bm_cluster_name(data):
 
 
 def _bm_cluster_files(name):
-    """Fichiers d'un cluster créé par la console, là où la déclaration d'un
-    cluster range déjà les siens (Settings > Clusters) : clé privée
-    `<config>/ssh/<nom>_id` (0600), sa publique, les clés d'hôte vues au
-    premier contact, et le kubeconfig `<config>/kubeconfigs/<nom>.yaml`."""
-    d = _ssh_dir()
+    """Fichiers d'un cluster créé par la console, dans son répertoire d'état
+    comme ceux de tout cluster qu'elle déclare (le répertoire de
+    configuration est en lecture seule dans le service) : clé privée
+    `<état>/ssh/<nom>_id` (0600), sa publique, les clés d'hôte vues au
+    premier contact, et le kubeconfig `<état>/kubeconfigs/<nom>.yaml`."""
+    d = _state_ssh_dir()
     return {"key": d / f"{name}_id", "pub": d / f"{name}_id.pub",
             "known_hosts": d / f"{name}_known_hosts",
-            "kubeconfig": _kubeconfigs_dir() / f"{name}.yaml"}
+            "kubeconfig": _state_kubeconfigs_dir() / f"{name}.yaml"}
 
 
 def _bm_cluster_keypair(name):
@@ -4523,11 +4578,12 @@ def _bm_with_ssh_key(opts, pub):
 
 
 def _bm_write_private(path, text):
-    """Fichier créé directement en 0600 (pas de fenêtre avant un chmod)."""
+    """Fichier créé directement en 0600 (pas de fenêtre avant un chmod) ;
+    texte ou octets."""
     path = Path(path)
     path.unlink(missing_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w") as f:
+    with os.fdopen(fd, "wb" if isinstance(text, (bytes, bytearray)) else "w") as f:
         f.write(text)
 
 
@@ -4567,7 +4623,8 @@ def _bm_fetch_kubeconfig(vip, key, known_hosts, out, deadline, run, step):
 
 def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     """Déclare le cluster créé, par le même chemin que Settings > Clusters
-    (_validate_cluster_payload, CONFIG_LOCK, _atomic_write_config)."""
+    (_validate_cluster_payload, CONFIG_LOCK) : dans <état>/clusters.d, avec
+    des chemins relatifs au répertoire d'état."""
     cluster, err = _validate_cluster_payload({
         "name": name, "description": "installed by the console (bare-metal)",
         "ssh": {"user": _BM_OS_USER, "port": 22, "key": str(key)},
@@ -4578,11 +4635,9 @@ def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     # clé créée par la console : un nœud qui rejoint reçoit la même
     cluster["ssh"]["generated"] = True
     with CONFIG_LOCK:
-        cfg = load_config()
-        if any(c.get("name") == name for c in cfg.get("clusters", [])):
+        if any(c.get("name") == name for c in load_config().get("clusters", [])):
             raise ValueError(f"cluster '{name}' already exists")
-        cfg.setdefault("clusters", []).append(cluster)
-        _atomic_write_config(cfg)
+        _write_console_cluster(cluster)
     return cluster
 
 
@@ -6737,20 +6792,44 @@ def _config_dir():
     return CONFIG_PATH.parent
 
 
-def _kubeconfigs_dir():
-    d = _config_dir() / "kubeconfigs"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _ssh_dir():
-    d = _config_dir() / "ssh"
+def _private_dir(d):
+    """Répertoire créé au besoin, réservé au compte du service (0700)."""
     d.mkdir(parents=True, exist_ok=True)
     try:
         os.chmod(d, 0o700)
     except OSError:
         pass
     return d
+
+
+def _kubeconfigs_dir():
+    """Kubeconfigs des clusters déclarés dans config.yaml (à côté de lui)."""
+    d = _config_dir() / "kubeconfigs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _ssh_dir():
+    """Clés SSH des clusters déclarés dans config.yaml (à côté de lui)."""
+    return _private_dir(_config_dir() / "ssh")
+
+
+def _state_kubeconfigs_dir():
+    """v1.78.0 : kubeconfigs des clusters déclarés par la console."""
+    return _private_dir(_state_dir() / _cd.KUBECONFIG_DIR)
+
+
+def _state_ssh_dir():
+    """v1.78.0 : clés SSH des clusters déclarés par la console."""
+    return _private_dir(_state_dir() / _cd.SSH_DIR)
+
+
+def _origin_dirs(origin):
+    """(kubeconfigs, ssh) où ranger les fichiers d'un cluster selon qui l'a
+    déclaré : l'opérateur (config.yaml) ou la console (état)."""
+    if origin == "config":
+        return _kubeconfigs_dir(), _ssh_dir()
+    return _state_kubeconfigs_dir(), _state_ssh_dir()
 
 
 def _atomic_write_config(cfg):
@@ -6764,6 +6843,67 @@ def _atomic_write_config(cfg):
     tmp = CONFIG_PATH.with_suffix(CONFIG_PATH.suffix + ".tmp")
     tmp.write_text(yaml.safe_dump(cfg, default_flow_style=False, sort_keys=False))
     tmp.replace(CONFIG_PATH)
+
+
+def _write_console_cluster(cluster):
+    """Écrit la déclaration d'un cluster de la console dans
+    <état>/clusters.d/<nom>.yaml (0600, remplacement atomique), chemins
+    rendus relatifs au répertoire d'état : l'état se déplace tel quel."""
+    state = _state_dir()
+    path = _cd.decl_path(state, cluster.get("name"))
+    if path is None:
+        raise ValueError("invalid cluster name")
+    _private_dir(path.parent)
+    doc = _cd.relativize(cluster, state)
+    doc.pop("origin", None)
+    tmp = path.with_name(path.name + ".tmp")
+    _bm_write_private(tmp, yaml.safe_dump(doc, default_flow_style=False, sort_keys=False))
+    tmp.replace(path)
+
+
+def _delete_console_cluster(name):
+    path = _cd.decl_path(_state_dir(), name)
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def _find_cluster(name):
+    """(origine, cluster, config brute, index) d'un cluster déclaré :
+    origine « config » (config.yaml, qui l'emporte) ou « console »
+    (clusters.d, chemins résolus). (None, None, None, None) s'il n'existe pas."""
+    raw = _load_config_file()
+    for i, c in enumerate(raw.get("clusters") or []):
+        if isinstance(c, dict) and c.get("name") == name:
+            return "config", c, raw, i
+    state = _state_dir()
+    path = _cd.decl_path(state, name)
+    if path is not None and path.is_file():
+        doc = _read_decl(path)
+        if _cd.check_decl(doc, path) is None:
+            return "console", _cd.resolve(doc, state), None, None
+    return None, None, None, None
+
+
+def _save_cluster(origin, cluster, raw=None, idx=None, old_name=None):
+    """Enregistre un cluster modifié là où il est déclaré."""
+    if origin == "config":
+        raw["clusters"][idx] = cluster
+        _atomic_write_config(raw)
+        return
+    _write_console_cluster(cluster)
+    if old_name and old_name != cluster["name"]:
+        _delete_console_cluster(old_name)
+
+
+_CONFIG_READ_ONLY = "declared by the operator in config.yaml, read-only for the console"
+
+
+def _read_only_refusal(origin):
+    """409 pour un cluster de config.yaml quand ce fichier n'est pas
+    modifiable (service packagé), plutôt qu'une erreur 500 d'écriture."""
+    if origin == "config" and not _config_writable():
+        return jsonify({"error": _CONFIG_READ_ONLY, "origin": "config"}), 409
+    return None
 
 
 def _validate_cluster_payload(data, allow_partial=False):
@@ -6830,6 +6970,7 @@ def _validate_cluster_payload(data, allow_partial=False):
 
 @app.route("/api/clusters", methods=["POST"])
 @requires_auth
+@_rate_limit("20/minute")
 def api_clusters_create():
     """Create a new cluster declaration.
 
@@ -6839,6 +6980,10 @@ def api_clusters_create():
       - ssh_key: file (optional)
     Or JSON only (no files) — kubeconfig path then must be provided
     explicitly in the payload's `kubeconfig` field.
+
+    v1.78.0 : un cluster ajouté par la console est TOUJOURS rangé dans son
+    répertoire d'état (clusters.d), même quand config.yaml est modifiable :
+    config.yaml reste le fichier de l'opérateur, et l'état se déplace tel quel.
     """
     if request.content_type and request.content_type.startswith("multipart/"):
         try:
@@ -6863,15 +7008,14 @@ def api_clusters_create():
             return jsonify({"error": f"cluster '{cluster['name']}' already exists"}), 409
 
         # Save kubeconfig
-        kc_path = _kubeconfigs_dir() / f"{cluster['name']}.yaml"
         if kc_file:
             try:
                 content = kc_file.read().decode("utf-8", errors="replace")
                 yaml.safe_load(content)   # validate YAML structure
             except (yaml.YAMLError, UnicodeDecodeError) as e:
                 return jsonify({"error": "kubeconfig is not valid YAML", "detail": str(e)}), 400
-            kc_path.write_text(content)
-            os.chmod(kc_path, 0o600)
+            kc_path = _state_kubeconfigs_dir() / f"{cluster['name']}.yaml"
+            _bm_write_private(kc_path, content)
             cluster["kubeconfig"] = str(kc_path)
         elif data.get("kubeconfig"):
             # Path-only mode (legacy/CLI flow)
@@ -6881,19 +7025,18 @@ def api_clusters_create():
 
         # Save SSH key
         if ssh_file:
-            key_path = _ssh_dir() / f"{cluster['name']}_id"
-            key_path.write_bytes(ssh_file.read())
-            os.chmod(key_path, 0o600)
+            key_path = _state_ssh_dir() / f"{cluster['name']}_id"
+            _bm_write_private(key_path, ssh_file.read())
             cluster["ssh"]["key"] = str(key_path)
 
-        cfg.setdefault("clusters", []).append(cluster)
-        _atomic_write_config(cfg)
+        _write_console_cluster(cluster)
 
-    return jsonify({"cluster": cluster}), 201
+    return jsonify({"cluster": dict(cluster, origin="console")}), 201
 
 
 @app.route("/api/clusters/<name>", methods=["PUT"])
 @requires_auth
+@_rate_limit("20/minute")
 def api_clusters_update(name):
     """Update an existing cluster (name, description, nodes, ssh).
     Files (kubeconfig, ssh_key) handled via dedicated upload endpoints below.
@@ -6904,36 +7047,38 @@ def api_clusters_update(name):
         return jsonify({"error": err}), 400
 
     with CONFIG_LOCK:
-        cfg = load_config()
-        idx = next((i for i, c in enumerate(cfg.get("clusters", [])) if c["name"] == name), -1)
-        if idx == -1:
+        origin, original, raw, idx = _find_cluster(name)
+        if origin is None:
             return jsonify({"error": f"cluster '{name}' not found"}), 404
-        original = cfg["clusters"][idx]
+        refused = _read_only_refusal(origin)
+        if refused:
+            return refused
+        kc_dir, ssh_dir = _origin_dirs(origin)
         # Preserve kubeconfig path and ssh key path
         cluster["kubeconfig"] = original.get("kubeconfig", "")
         if "key" not in cluster.get("ssh", {}) or not cluster["ssh"].get("key"):
-            cluster["ssh"]["key"] = original.get("ssh", {}).get("key", "")
+            cluster["ssh"]["key"] = (original.get("ssh") or {}).get("key", "")
         # v1.78.0 : clé créée par la console (installation bare-metal), gardée
         # comme telle tant que c'est la même clé
-        generated = bool(original.get("ssh", {}).get("generated")) and \
-            cluster["ssh"]["key"] == original.get("ssh", {}).get("key", "")
+        generated = bool((original.get("ssh") or {}).get("generated")) and \
+            cluster["ssh"]["key"] == (original.get("ssh") or {}).get("key", "")
         if generated:
             cluster["ssh"]["generated"] = True
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
         if cluster["name"] != name:
-            if (existing := next((c for c in cfg["clusters"] if c["name"] == cluster["name"] and c is not original), None)) is not None:
+            if any(c.get("name") == cluster["name"] for c in load_config().get("clusters", [])):
                 return jsonify({"error": f"cluster '{cluster['name']}' already exists"}), 409
             old_kc = Path(cluster["kubeconfig"])
-            if old_kc.exists() and old_kc.is_relative_to(_kubeconfigs_dir()):
-                new_kc = _kubeconfigs_dir() / f"{cluster['name']}.yaml"
+            if old_kc.exists() and old_kc.is_relative_to(kc_dir):
+                new_kc = kc_dir / f"{cluster['name']}.yaml"
                 try:
                     old_kc.rename(new_kc)
                     cluster["kubeconfig"] = str(new_kc)
                 except OSError:
                     pass
             old_key = Path(cluster["ssh"].get("key") or "")
-            if old_key.exists() and old_key.is_relative_to(_ssh_dir()):
-                new_key = _ssh_dir() / f"{cluster['name']}_id"
+            if old_key.exists() and old_key.is_relative_to(ssh_dir):
+                new_key = ssh_dir / f"{cluster['name']}_id"
                 try:
                     old_key.rename(new_key)
                     cluster["ssh"]["key"] = str(new_key)
@@ -6944,46 +7089,52 @@ def api_clusters_update(name):
                     for old_sib, new_sib in ((f"{name}_id.pub", f"{cluster['name']}_id.pub"),
                                              (f"{name}_known_hosts", f"{cluster['name']}_known_hosts")):
                         try:
-                            (_ssh_dir() / old_sib).rename(_ssh_dir() / new_sib)
+                            (ssh_dir / old_sib).rename(ssh_dir / new_sib)
                         except OSError:
                             pass
-        cfg["clusters"][idx] = cluster
-        _atomic_write_config(cfg)
-    return jsonify({"cluster": cluster})
+        _save_cluster(origin, cluster, raw, idx, old_name=name)
+    return jsonify({"cluster": dict(cluster, origin=origin)})
 
 
 @app.route("/api/clusters/<name>", methods=["DELETE"])
 @requires_auth
+@_rate_limit("20/minute")
 def api_clusters_delete(name):
     """Delete a cluster declaration. Removes kubeconfig + SSH key files
-    if they live inside /etc/harvester-ops/."""
+    if they live in the console's own directories."""
     with CONFIG_LOCK:
-        cfg = load_config()
-        clusters = cfg.get("clusters", [])
-        idx = next((i for i, c in enumerate(clusters) if c["name"] == name), -1)
-        if idx == -1:
+        origin, removed, raw, idx = _find_cluster(name)
+        if origin is None:
             return jsonify({"error": f"cluster '{name}' not found"}), 404
-        removed = clusters.pop(idx)
+        refused = _read_only_refusal(origin)
+        if refused:
+            return refused
+        kc_dir, ssh_dir = _origin_dirs(origin)
         # Best-effort cleanup of associated files (only if inside our dirs)
-        kc_path = Path(removed.get("kubeconfig", ""))
-        if kc_path.exists() and kc_path.is_relative_to(_kubeconfigs_dir()):
+        kc_path = Path(removed.get("kubeconfig", "") or "")
+        if kc_path.exists() and kc_path.is_relative_to(kc_dir):
             try: kc_path.unlink()
             except OSError: pass
-        key_path = Path(removed.get("ssh", {}).get("key", "") or "")
-        if key_path.exists() and key_path.is_relative_to(_ssh_dir()):
+        key_path = Path((removed.get("ssh") or {}).get("key", "") or "")
+        if key_path.exists() and key_path.is_relative_to(ssh_dir):
             try: key_path.unlink()
             except OSError: pass
             # v1.78.0 : publique et clés d'hôte d'une clé créée par la console
             for sib in (key_path.with_name(key_path.name + ".pub"),
-                        _ssh_dir() / f"{name}_known_hosts"):
+                        ssh_dir / f"{name}_known_hosts"):
                 try: sib.unlink(missing_ok=True)
                 except OSError: pass
-        _atomic_write_config(cfg)
+        if origin == "config":
+            raw["clusters"].pop(idx)
+            _atomic_write_config(raw)
+        else:
+            _delete_console_cluster(name)
     return jsonify({"removed": name})
 
 
 @app.route("/api/clusters/<name>/kubeconfig", methods=["POST"])
 @requires_auth
+@_rate_limit("20/minute")
 def api_clusters_upload_kubeconfig(name):
     """Upload (replace) the kubeconfig for an existing cluster.
     Multipart: file=<kubeconfig>"""
@@ -6996,43 +7147,46 @@ def api_clusters_upload_kubeconfig(name):
     except (yaml.YAMLError, UnicodeDecodeError) as e:
         return jsonify({"error": "kubeconfig is not valid YAML", "detail": str(e)}), 400
     with CONFIG_LOCK:
-        cfg = load_config()
-        cluster = next((c for c in cfg.get("clusters", []) if c["name"] == name), None)
-        if not cluster:
+        origin, cluster, raw, idx = _find_cluster(name)
+        if origin is None:
             return jsonify({"error": f"cluster '{name}' not found"}), 404
-        kc_path = _kubeconfigs_dir() / f"{name}.yaml"
-        kc_path.write_text(content)
-        os.chmod(kc_path, 0o600)
+        refused = _read_only_refusal(origin)
+        if refused:
+            return refused
+        kc_path = _origin_dirs(origin)[0] / f"{name}.yaml"
+        _bm_write_private(kc_path, content)
         cluster["kubeconfig"] = str(kc_path)
-        _atomic_write_config(cfg)
-    return jsonify({"cluster": name, "kubeconfig": str(kc_path)})
+        _save_cluster(origin, cluster, raw, idx)
+    return jsonify({"cluster": name, "kubeconfig": str(kc_path), "origin": origin})
 
 
 @app.route("/api/clusters/<name>/sshkey", methods=["POST"])
 @requires_auth
+@_rate_limit("20/minute")
 def api_clusters_upload_sshkey(name):
     """Upload (replace) the SSH private key for an existing cluster."""
     ssh_file = request.files.get("file")
     if not ssh_file:
         return jsonify({"error": "file field required"}), 400
-    raw = ssh_file.read()
+    raw_key = ssh_file.read()
     # Sanity check: looks like an OpenSSH or PEM key
-    head = raw[:120].decode("utf-8", errors="ignore")
+    head = raw_key[:120].decode("utf-8", errors="ignore")
     if "PRIVATE KEY" not in head:
         return jsonify({"error": "uploaded file does not look like a private key (no '-----BEGIN ... PRIVATE KEY-----' header)"}), 400
     with CONFIG_LOCK:
-        cfg = load_config()
-        cluster = next((c for c in cfg.get("clusters", []) if c["name"] == name), None)
-        if not cluster:
+        origin, cluster, raw, idx = _find_cluster(name)
+        if origin is None:
             return jsonify({"error": f"cluster '{name}' not found"}), 404
-        key_path = _ssh_dir() / f"{name}_id"
-        key_path.write_bytes(raw)
-        os.chmod(key_path, 0o600)
+        refused = _read_only_refusal(origin)
+        if refused:
+            return refused
+        key_path = _origin_dirs(origin)[1] / f"{name}_id"
+        _bm_write_private(key_path, raw_key)
         cluster.setdefault("ssh", {})["key"] = str(key_path)
         # une clé téléversée n'est plus celle que la console a créée
         cluster["ssh"].pop("generated", None)
-        _atomic_write_config(cfg)
-    return jsonify({"cluster": name, "ssh_key": str(key_path)})
+        _save_cluster(origin, cluster, raw, idx)
+    return jsonify({"cluster": name, "ssh_key": str(key_path), "origin": origin})
 
 
 @app.route("/api/clusters/<name>/test-kubeconfig", methods=["POST"])
@@ -17166,6 +17320,9 @@ NOTES_DB = _usable_dir(_notes_db.parent,
 # v1.57.0 : les comptes de la console, dans l'état persistant (à côté des
 # notes) : le répertoire de configuration est en lecture seule dans le service
 ACCOUNTS_PATH = Path(os.environ.get("HARVESTER_OPS_ACCOUNTS", str(NOTES_DB.parent / "accounts.json")))
+# v1.78.0 : les scripts lancés par la console lisent les clusters qu'elle a
+# déclarés dans ce même répertoire d'état (common.sh, kube.py)
+os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(NOTES_DB.parent))
 
 
 def _notes_init_db():

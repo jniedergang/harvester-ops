@@ -25,26 +25,39 @@ const Clusters = (() => {
         return;
       }
       out.innerHTML = '';
+      // v1.78.0 : un cluster de config.yaml est en lecture seule quand la
+      // console ne peut pas écrire ce fichier (service packagé)
+      const configWritable = data.config_writable !== false;
       for (const c of list) {
         // Fetch full detail (kubeconfig path, ssh info) — list endpoint only returns name+description
         const card = document.createElement('div');
         card.className = 'cluster-card';
+        const origin = c.origin === 'config' ? 'config' : 'console';
+        const readOnly = origin === 'config' && !configWritable;
+        const originTip = origin === 'config' ? i18n.t('clusters.origin.configTip') : i18n.t('clusters.origin.consoleTip');
+        const originLabel = origin === 'config' ? i18n.t('clusters.origin.config') : i18n.t('clusters.origin.console');
+        const dis = readOnly ? ' disabled aria-disabled="true"' : '';
+        const n = escapeHtml(c.name);
+        const mutating = `
+              <label class="btn btn-sm btn-secondary tip${readOnly ? ' disabled' : ''}" data-tip="${escapeHtml(i18n.t('clusters.replaceKubeconfigTip'))}">
+                ${Icons.svg('doc')} <input type="file" accept=".yaml,.yml,.kubeconfig" data-act="upload-kc" data-name="${n}" style="display:none;"${dis}>
+              </label>
+              <label class="btn btn-sm btn-secondary tip${readOnly ? ' disabled' : ''}" data-tip="${escapeHtml(i18n.t('clusters.replaceSshTip'))}">
+                ${Icons.svg('key')} <input type="file" data-act="upload-ssh" data-name="${n}" style="display:none;"${dis}>
+              </label>
+              <button class="btn btn-sm btn-danger" data-act="delete" data-name="${n}" data-i18n="clusters.delete"${dis}>${escapeHtml(i18n.t('clusters.delete'))}</button>`;
         card.innerHTML = `
           <div class="cluster-card-head">
             <div>
-              <h5>${escapeHtml(c.name)}</h5>
+              <h5>${n} <span class="badge cluster-origin tip" data-origin="${origin}" data-tip="${escapeHtml(originTip)}">${escapeHtml(originLabel)}</span></h5>
               <div class="form-hint">${escapeHtml(c.description || '')} — ${c.node_count} ${i18n.t('settings.connection.nodes')}</div>
             </div>
             <div class="cluster-card-actions">
-              <button class="btn btn-sm btn-secondary" data-act="test-kc" data-name="${c.name}" data-i18n="clusters.testKc">${i18n.t('clusters.testKc')}</button>
-              <button class="btn btn-sm btn-secondary" data-act="test-ssh" data-name="${c.name}" data-i18n="clusters.testSsh">${i18n.t('clusters.testSsh')}</button>
-              <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceKubeconfigTip')}">
-                ${Icons.svg('doc')} <input type="file" accept=".yaml,.yml,.kubeconfig" data-act="upload-kc" data-name="${c.name}" style="display:none;">
-              </label>
-              <label class="btn btn-sm btn-secondary tip" data-tip="${i18n.t('clusters.replaceSshTip')}">
-                ${Icons.svg('key')} <input type="file" data-act="upload-ssh" data-name="${c.name}" style="display:none;">
-              </label>
-              <button class="btn btn-sm btn-danger" data-act="delete" data-name="${c.name}" data-i18n="clusters.delete">${i18n.t('clusters.delete')}</button>
+              <button class="btn btn-sm btn-secondary" data-act="test-kc" data-name="${n}" data-i18n="clusters.testKc">${i18n.t('clusters.testKc')}</button>
+              <button class="btn btn-sm btn-secondary" data-act="test-ssh" data-name="${n}" data-i18n="clusters.testSsh">${i18n.t('clusters.testSsh')}</button>
+              ${readOnly
+                ? `<span class="cluster-readonly tip" data-tip="${escapeHtml(i18n.t('clusters.readOnlyTip'))}">${mutating}</span>`
+                : mutating}
             </div>
           </div>
           <div class="cluster-card-result" id="cluster-result-${escapeId(c.name)}" style="display:none;"></div>`;
@@ -254,7 +267,7 @@ const Clusters = (() => {
   }
 
   function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
   function escapeId(s) {
     return String(s).replace(/[^a-zA-Z0-9_-]/g, '_');

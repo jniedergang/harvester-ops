@@ -205,6 +205,45 @@ The console must reach Rancher, and each cluster must be imported in
 Rancher for a Rancher user to see it. Local accounts keep working; starting
 and stopping a cluster stays with them.
 
+## Moving harvops to another host
+
+The console keeps two directories apart, and copying both is all a move
+takes:
+
+- **The operator's configuration**, `/etc/harvester-ops/`, read-only for
+  the service: `config.yaml`, `env`, `htpasswd`, and the kubeconfigs and
+  SSH keys the operator put there for the clusters of `config.yaml`.
+- **The console's state**, `/var/lib/harvester-ops/`
+  (`HARVESTER_OPS_STATE_DIR`): everything the console writes by itself.
+  Console accounts (`accounts.json`), notes, the action history
+  (`actions.db`), the clusters declared from the console (Settings >
+  Clusters, bare-metal installs) with their keys and kubeconfigs
+  (`clusters.d/<name>.yaml`, `ssh/`, `kubeconfigs/`, 0600 files in 0700
+  directories), and the stores (exports, VDDK archives, Cluster API
+  bundles, discovery inventories).
+
+The paths inside `clusters.d/` are relative to the state directory, so
+the copy works on another host or under another path without rewriting
+anything. Absolute paths written by the operator in `config.yaml` stay as
+they are: keep the files they name at the same place.
+
+```bash
+# old host
+sudo systemctl stop harvester-ops
+sudo tar -C / -cpzf harvops-move.tgz etc/harvester-ops var/lib/harvester-ops
+# new host, after install.sh with the same release
+sudo systemctl stop harvester-ops
+sudo tar -C / -xpzf harvops-move.tgz
+sudo chown -R harvester-ops:harvester-ops /var/lib/harvester-ops
+sudo systemctl start harvester-ops
+```
+
+A cluster declared in `config.yaml` wins over a console declaration of the
+same name (the latter is ignored, with a warning in the log). In the
+packaged service the console cannot write `config.yaml`: its clusters show
+a `config.yaml` badge in Settings > Clusters and are changed in that file;
+the clusters declared from the console stay editable there.
+
 ## Uninstall
 
 ```bash

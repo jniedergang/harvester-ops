@@ -168,25 +168,39 @@ class Kube:
             return None
 
 
-def cluster_config(name):
-    """L'entrée d'un cluster dans la configuration de la console
-    (`HARVESTER_OPS_CONFIG`, lue avec yq, sinon PyYAML s'il est là)."""
-    cfg = os.environ.get("HARVESTER_OPS_CONFIG", "/etc/harvester-ops/config.yaml")
-    data = None
+def _read_yaml(path):
+    """Document YAML lu avec yq, sinon PyYAML s'il est là ; None s'il est
+    illisible."""
     try:
-        out = subprocess.run(["yq", "-o=json", ".", cfg], capture_output=True, text=True,
+        out = subprocess.run(["yq", "-o=json", ".", str(path)], capture_output=True, text=True,
                              timeout=20)
         if out.returncode == 0:
-            data = json.loads(out.stdout)
+            return json.loads(out.stdout)
     except (OSError, ValueError, subprocess.SubprocessError):
-        data = None
-    if data is None:
-        try:
-            import yaml
-            data = yaml.safe_load(Path(cfg).read_text())
-        except Exception:                      # noqa: BLE001
-            data = None
+        pass
+    try:
+        import yaml
+        return yaml.safe_load(Path(path).read_text())
+    except Exception:                      # noqa: BLE001
+        return None
+
+
+def cluster_config(name):
+    """L'entrée d'un cluster dans la configuration de la console
+    (`HARVESTER_OPS_CONFIG`, lue avec yq, sinon PyYAML s'il est là), puis
+    v1.78.0 parmi les clusters déclarés par la console elle-même
+    (`<HARVESTER_OPS_STATE_DIR>/clusters.d/<nom>.yaml`, chemins relatifs au
+    répertoire d'état). config.yaml l'emporte à nom égal."""
+    import cluster_decl
+    cfg = os.environ.get("HARVESTER_OPS_CONFIG", "/etc/harvester-ops/config.yaml")
+    data = _read_yaml(cfg) if Path(cfg).is_file() else None
     for c in (data or {}).get("clusters") or []:
-        if c.get("name") == name:
+        if isinstance(c, dict) and c.get("name") == name:
             return c
-    raise SystemExit(f"unknown cluster: {name} (not in {cfg})")
+    state = cluster_decl.state_dir()
+    path = cluster_decl.decl_path(state, name)
+    if path is not None and path.is_file():
+        doc = _read_yaml(path)
+        if cluster_decl.check_decl(doc, path) is None:
+            return cluster_decl.resolve(doc, state)
+    raise SystemExit(f"unknown cluster: {name} (not in {cfg} nor in {state / cluster_decl.DECL_DIR})")

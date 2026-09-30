@@ -210,6 +210,47 @@ La console doit joindre Rancher, et chaque cluster doit être importé dans
 Rancher pour qu'une personne de Rancher le voie. Les comptes locaux restent
 utilisables ; l'arrêt et le démarrage d'un cluster leur restent réservés.
 
+## Déplacer harvops vers un autre hôte
+
+La console sépare deux répertoires, et les copier tous les deux suffit à
+la déplacer :
+
+- **La configuration de l'opérateur**, `/etc/harvester-ops/`, en lecture
+  seule pour le service : `config.yaml`, `env`, `htpasswd`, et les
+  kubeconfigs et clés SSH que l'opérateur y a posés pour les clusters de
+  `config.yaml`.
+- **L'état de la console**, `/var/lib/harvester-ops/`
+  (`HARVESTER_OPS_STATE_DIR`) : tout ce que la console écrit d'elle-même.
+  Les comptes de la console (`accounts.json`), les notes, l'historique des
+  actions (`actions.db`), les clusters déclarés depuis la console
+  (Paramètres > Clusters, installations bare-metal) avec leurs clés et
+  kubeconfigs (`clusters.d/<nom>.yaml`, `ssh/`, `kubeconfigs/`, fichiers
+  en 0600 dans des répertoires en 0700), et les magasins (exports,
+  archives VDDK, paquets Cluster API, inventaires de découverte).
+
+Les chemins écrits dans `clusters.d/` sont relatifs au répertoire d'état :
+la copie fonctionne sur un autre hôte ou sous un autre chemin sans rien
+réécrire. Un chemin absolu écrit par l'opérateur dans `config.yaml` reste
+tel quel : garder les fichiers qu'il désigne au même endroit.
+
+```bash
+# ancien hôte
+sudo systemctl stop harvester-ops
+sudo tar -C / -cpzf harvops-move.tgz etc/harvester-ops var/lib/harvester-ops
+# nouvel hôte, après install.sh de la même version
+sudo systemctl stop harvester-ops
+sudo tar -C / -xpzf harvops-move.tgz
+sudo chown -R harvester-ops:harvester-ops /var/lib/harvester-ops
+sudo systemctl start harvester-ops
+```
+
+Un cluster déclaré dans `config.yaml` l'emporte sur une déclaration de la
+console du même nom (celle-ci est ignorée, avec un avertissement dans le
+journal). Dans le service packagé, la console ne peut pas écrire
+`config.yaml` : ses clusters portent une pastille `config.yaml` dans
+Paramètres > Clusters et se modifient dans ce fichier ; les clusters
+déclarés depuis la console y restent modifiables.
+
 ## Désinstallation
 
 ```bash
