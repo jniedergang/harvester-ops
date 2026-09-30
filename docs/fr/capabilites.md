@@ -1870,7 +1870,8 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   passent jamais par le navigateur et ne sont pas livrés dans le tarball.
 - **Installation sans opérateur** — choisir un ISO, renseigner le node
   (nom d'hôte, disque d'installation, NIC de management, adressage, VIP,
-  DNS, token, mot de passe OS), et la console remasterise l'ISO pour
+  DNS, NTP, token, mot de passe OS ; le gestionnaire de mots de passe du
+  navigateur ne remplit jamais ces champs), et la console remasterise l'ISO pour
   l'installation zéro-touch, le publie derrière un jeton à usage unique,
   le monte en média virtuel, programme une amorce unique sur `Cd` et
   allume la machine. Suivi étape par étape dans le dock, du préflight

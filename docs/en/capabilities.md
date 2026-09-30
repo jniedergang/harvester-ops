@@ -1686,8 +1686,8 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   a stream, tracked with a percentage. The 7.6 GB image never passes
   through the browser and is not shipped in the tarball.
 - **Unattended installation** — pick an ISO, fill in the node (hostname,
-  install disk, management NIC, addressing, VIP, DNS, token, OS
-  password), and the console remasters the ISO for zero-touch install,
+  install disk, management NIC, addressing, VIP, DNS, NTP, token, OS
+  password; the browser's password manager never fills these fields), and the console remasters the ISO for zero-touch install,
   publishes it behind a one-off token, mounts it as virtual media, sets a
   one-shot `Cd` boot and powers the machine on. Tracked step by step in
   the dock, from preflight to the Harvester API answering on the VIP.

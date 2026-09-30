@@ -4,6 +4,17 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.76.1] - 2026-09-30 - Bare-metal install window: no browser autofill, NTP field
+
+### Fixed
+- The bare-metal install window no longer lets the browser's password manager fill it: the saved login went into the DNS field and a saved password into the cluster token.
+
+### Added
+- An NTP servers field in the same window; the generated configuration already carried `ntp_servers`, but nothing let the operator set them.
+
+### Tests
+- `test_bm_form_1761.py`.
+
 ## [1.76.0] - 2026-09-30 - Warm VMware migrations in waves, and one view across the clusters
 
 ### Added

@@ -212,7 +212,7 @@ const BMC = (() => {
       title: `${tr('bmc.install')} · ${host}`,
       width: 620, height: 640,
       bodyHtml: `
-        <form id="bm-install-form" class="capi-form" style="padding:14px;">
+        <form id="bm-install-form" class="capi-form" style="padding:14px;" autocomplete="off">
           <p class="form-hint vm-edit-unverified">${esc(tr('bmc.installWarn'))}</p>
           <fieldset>
             <legend>${esc(tr('bmc.fs.image'))}</legend>
@@ -238,12 +238,13 @@ const BMC = (() => {
             <label class="bm-static">${esc(tr('bmc.f.gateway'))} *
               <input name="gateway" required placeholder="192.0.2.1"></label>
             <label>${esc(tr('bmc.f.vip'))} *<input name="vip" required placeholder="192.0.2.100"></label>
-            <label>${esc(tr('bmc.f.dns'))}<input name="dns" placeholder="9.9.9.9, 1.1.1.1"></label>
+            <label>${esc(tr('bmc.f.dns'))}<input name="dns" autocomplete="off" placeholder="9.9.9.9, 1.1.1.1"></label>
+            <label>${esc(tr('bmc.f.ntp'))}<input name="ntp" autocomplete="off" placeholder="0.suse.pool.ntp.org, 1.suse.pool.ntp.org"></label>
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.access'))}</legend>
-            <label>${esc(tr('bmc.f.token'))} *<input name="token" type="password" required></label>
-            <label>${esc(tr('bmc.f.ospw'))} *<input name="password" type="password" required></label>
+            <label>${esc(tr('bmc.f.token'))} *<input name="token" type="password" autocomplete="new-password" required></label>
+            <label>${esc(tr('bmc.f.ospw'))} *<input name="password" type="password" autocomplete="new-password" required></label>
             <label style="grid-column:1/-1;">${esc(tr('bmc.f.sshkeys'))}
               <textarea name="ssh_keys" rows="2" placeholder="ssh-ed25519 AAAA..."></textarea></label>
           </fieldset>
