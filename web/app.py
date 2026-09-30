@@ -4880,17 +4880,46 @@ def _baremetal_install_runner(run, opts):
             profile = _bmc_discover_one(host, kc_user, kc_pwd)
             if profile.get("post_state") == "FinishedPost":
                 break
+            # v1.78.0 : l'état du POST est propre aux iLO ; un BMC qui ne le
+            # publie pas faisait attendre 15 minutes pour rien.
+            if profile.get("post_state") is None and profile.get("power_state") == "On":
+                break
             step("preflight", "progress",
                  f"POST en cours ({profile.get('post_state') or '?'})")
     if not profile.get("virtualmedia_path"):
         return fail("preflight", "no CD virtual media (iLO Advanced licence?)")
     if "Cd" not in (profile.get("boot_targets") or []):
         return fail("preflight", "the BMC cannot boot from virtual media")
-    disks = [t for t in (profile.get("uefi_targets") or []) if t.startswith("HD.")]
-    if not disks:
+    # v1.78.0 : d'où vient la preuve qu'il y a un disque. Avant, seule la
+    # liste HPE `UefiTargetBootSourceOverrideSupported` comptait : tout BMC
+    # d'un autre constructeur était refusé d'office (vu en réel, banc
+    # Redfish). Ordre : l'inventaire de découverte de cette machine, puis la
+    # liste HPE, puis les disques que le BMC publie en Redfish.
+    n_disks, disk_src = 0, ""
+    inv_doc = _bmd.load_inventory(INVENTORY_DIR, host)
+    if inv_doc:
+        n_disks = len(_bmdisks.parse_discovery(inv_doc.get("raw") or "")["disks"])
+        disk_src = "inventaire de découverte"
+    if not n_disks:
+        n_disks = len([t for t in (profile.get("uefi_targets") or []) if t.startswith("HD.")])
+        disk_src = "BMC (cibles UEFI)" if n_disks else disk_src
+    if not n_disks:
+        try:
+            st = _bmc_storage(host, kc_user, kc_pwd, profile.get("system_path"))
+        except Exception:                                   # noqa: BLE001
+            st = {}
+        n_disks = sum(len(c.get("drives") or []) for c in (st or {}).get("controllers") or [])
+        disk_src = "BMC (Redfish Storage)" if n_disks else disk_src
+    if not n_disks and inv_doc:
+        return fail("preflight", "no disk in the discovery inventory of this machine")
+    if not n_disks and any(t.startswith("HD.") or t.startswith("Cd") for t in (profile.get("uefi_targets") or [])):
         return fail("preflight", "no disk visible on this machine")
+    if not n_disks:
+        step("preflight", "warn",
+             "le BMC ne publie pas ses disques et la machine n'a pas d'inventaire de "
+             "découverte : l'installeur vérifiera le disque lui-même")
     step("preflight", "done",
-         f"{profile.get('model')} — {len(disks)} disque(s), média virtuel OK")
+         f"{profile.get('model')} : {n_disks or '?'} disque(s) ({disk_src or 'non vus'}), média virtuel OK")
 
     # --- remasterisation ---
     port = pxe_server.start()

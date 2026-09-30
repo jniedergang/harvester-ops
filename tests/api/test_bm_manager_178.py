@@ -118,3 +118,56 @@ def test_refused_insert_is_not_waited_for(monkeypatch):
     monkeypatch.setattr(wapp, "_redfish_send", lambda *a, **k: (False, 400, "bad image"))
     ok, detail, _ = wapp._bm_media_insert("bmc", "u", "p", "http://x/i.iso")
     assert not ok and detail == "bad image"
+
+
+# --- contrôle préalable de l'installation (vu en réel, banc Redfish) --------
+
+def _run():
+    run = wapp.ActionRun("pf000000test", "baremetal-install:t", "(local)", [])
+    run.close = lambda: None
+    return run
+
+
+def _profile(uefi):
+    return {"ok": True, "power_state": "On", "post_state": None, "model": "M",
+            "system_path": "/redfish/v1/Systems/1", "virtualmedia_path": "/vm",
+            "boot_targets": ["Cd", "Hdd"], "uefi_targets": uefi}
+
+
+def _preflight(monkeypatch, uefi, inventory=None, drives=0):
+    monkeypatch.setattr(wapp, "_bmc_discover_one", lambda *a, **k: _profile(uefi))
+    monkeypatch.setattr(wapp._bmd, "load_inventory", lambda *a, **k: inventory)
+    monkeypatch.setattr(wapp, "_bmc_storage", lambda *a, **k: {
+        "controllers": [{"drives": [{}] * drives}] if drives else []})
+    monkeypatch.setattr(wapp.pxe_server, "start", lambda *a, **k: 18091)
+    monkeypatch.setattr(wapp.pxe_server, "stop", lambda *a, **k: None)
+    run = _run()
+    # l'ISO n'existe pas : le déroulé s'arrête juste après le contrôle préalable
+    wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
+                                         "bmc_host": "192.0.2.1", "iso": "absent.iso"})
+    return [(e.get("step_id"), e.get("status"), e.get("message", "")) for e in run.events
+            if e.get("type") == "step" and e.get("step_id") == "preflight"]
+
+
+def test_a_bmc_without_hpe_targets_is_not_refused(monkeypatch):
+    """Avant 1.78.0 : tout BMC hors iLO était refusé (« no disk visible »)."""
+    ev = _preflight(monkeypatch, uefi=[])
+    assert any(s == "warn" for _, s, _ in ev)
+    assert ev[-1][1] == "done"
+
+
+def test_the_discovery_inventory_proves_the_disks(monkeypatch):
+    raw = (Path(__file__).parent / "fixtures" / "bm_disks_178" / "discovery.txt").read_text()
+    ev = _preflight(monkeypatch, uefi=[], inventory={"raw": raw})
+    assert ev[-1][1] == "done" and "inventaire" in ev[-1][2]
+    assert not any(s == "warn" for _, s, _ in ev)
+
+
+def test_redfish_drives_prove_the_disks(monkeypatch):
+    ev = _preflight(monkeypatch, uefi=[], drives=2)
+    assert ev[-1][1] == "done" and "Redfish" in ev[-1][2]
+
+
+def test_an_ilo_listing_no_disk_is_still_refused(monkeypatch):
+    ev = _preflight(monkeypatch, uefi=["Cd.Emb.1-1", "NIC.LOM.1-1"])
+    assert ev[-1][1] == "error" and "no disk visible" in ev[-1][2]
