@@ -148,6 +148,10 @@ LEGACY_CASES = [
 
 @pytest.mark.parametrize("opts", LEGACY_CASES)
 def test_old_fields_render_the_same_dict_as_before(opts):
+    """Identique là où l'ancienne sortie était bien typée : l'ancien rendu
+    laissait sans guillemets une MAC tout en chiffres, que YAML 1.1 lit comme
+    un entier sexagésimal ; le nouveau l'écrit en texte (voir le test
+    suivant)."""
     assert _render(opts) == yaml.safe_load(_legacy_render(opts))
 
 
@@ -461,3 +465,113 @@ def test_import_refuses_server_url_on_create():
     r = app.split_imported_config(
         "server_url: https://192.0.2.60:443\ninstall:\n  mode: create\n")
     assert r["errors"] == ["server_url"]
+
+
+def test_all_digit_mac_is_now_text_where_the_old_render_made_an_int():
+    opts = dict(_BASE, mgmt_interface=None, mgmt_interfaces=["52:54:00:12:34:56"])
+    old = yaml.safe_load(_legacy_render(dict(_BASE, mgmt_interface="52:54:00:12:34:56")))
+    assert isinstance(old["install"]["management_interface"]["interfaces"][0]["hwAddr"], int)
+    assert _render(opts)["install"]["management_interface"]["interfaces"] == \
+        [{"hwAddr": "52:54:00:12:34:56"}]
+
+
+# ---------------------------------------------------------------------------
+# Correctifs de revue (1.77.0)
+# ---------------------------------------------------------------------------
+
+_NO_BOND = """scheme_version: 1
+token: example-token
+os:
+  hostname: hv-node-01
+install:
+  mode: create
+  device: /dev/sda
+  vip: 192.0.2.100
+  vip_mode: static
+  management_interface:
+    method: dhcp
+    interfaces:
+    - name: eno1
+"""
+
+
+def test_import_without_bond_options_keeps_the_installer_default():
+    """Sans `bond_options`, l'installeur pose active-backup (cos.go,
+    updateBond) : le formulaire aurait recomposé balance-tlb en silence."""
+    split = app.split_imported_config(_NO_BOND)
+    assert split["errors"] == []
+    assert split["form"]["bond_mode"] == "active-backup"
+    assert split["form"]["bond_miimon"] == "100"
+    assert "bond-default-active-backup" in split["notes"]
+    d = _recompose(split)
+    expected = yaml.safe_load(_NO_BOND)
+    expected["install"]["iso_url"] = "http://192.0.2.9:8091/pxe/iso/TOK.iso"
+    expected["install"]["management_interface"]["bond_options"] = \
+        {"mode": "active-backup", "miimon": 100}
+    assert d == expected
+
+
+def test_import_bond_options_without_mode_stays_without_mode():
+    text = _NO_BOND.replace("    method: dhcp\n",
+                            "    method: dhcp\n    bond_options:\n      primary: eno1\n")
+    split = app.split_imported_config(text)
+    assert split["errors"] == []
+    assert split["form"]["bond_mode"] == "" and split["form"]["bond_miimon"] == ""
+    assert "bond-default-active-backup" not in split["notes"]
+    d = _recompose(split)
+    assert d["install"]["management_interface"]["bond_options"] == {"primary": "eno1"}
+    expected = yaml.safe_load(text)
+    expected["install"]["iso_url"] = "http://192.0.2.9:8091/pxe/iso/TOK.iso"
+    assert d == expected
+
+
+def test_empty_bond_fields_write_nothing_but_absent_fields_keep_the_old_default():
+    assert _render(dict(_BASE, bond_mode="", bond_miimon=""))[
+        "install"]["management_interface"]["bond_options"] == {}
+    assert _render(_BASE)["install"]["management_interface"]["bond_options"] == \
+        {"mode": "balance-tlb", "miimon": 100}
+
+
+@pytest.mark.parametrize("vlan, ok", [(0, True), (1, True), (4094, True),
+                                      (4095, False), (-1, False)])
+def test_vlan_id_range(vlan, ok):
+    cfg = {"install": {"management_interface": {"vlan_id": vlan}}}
+    expected = [] if ok else [("install.management_interface.vlan_id", "range:0-4094")]
+    assert his.check_install_config(cfg) == expected
+
+
+def test_vlan_id_out_of_range_from_the_form_is_pointed():
+    with pytest.raises(app.InstallConfigError) as e:
+        app._harvester_install_config(dict(_BASE, vlan_id="5000"))
+    assert e.value.reasons == {"install.management_interface.vlan_id": "range:0-4094"}
+
+
+def test_uint32_fields_refuse_negative_numbers():
+    for path in ("scheme_version", "install.harvester.storage_class.replica_count",
+                 "install.harvester.longhorn.default_settings.guaranteedInstanceManagerCPU"):
+        assert his.field_at(path).type == "uint", path
+    cfg = {"scheme_version": -1,
+           "install": {"harvester": {"storage_class": {"replica_count": -2}}}}
+    assert dict(his.check_install_config(cfg)) == {
+        "scheme_version": "type:uint",
+        "install.harvester.storage_class.replica_count": "type:uint"}
+    assert his.validate_install_config(
+        {"install": {"harvester": {"storage_class": {"replica_count": 3}}}}) == []
+    # int signé : le MTU n'est pas un uint côté Go
+    assert his.field_at("install.management_interface.mtu").type == "int"
+
+
+@pytest.mark.parametrize("section", [
+    "os:\n  labels:\n    k: {v}\n",
+    "os:\n  environment:\n    K: {v}\n",
+    "os:\n  sysctls:\n    k: {v}\n",
+    "system_settings:\n  log-level: {v}\n",
+    "install:\n  management_interface:\n    bond_options:\n      k: {v}\n",
+])
+def test_text_maps_refuse_booleans_and_floats(section):
+    for literal in ("yes", "true", "on", "1.10"):
+        cfg = yaml.safe_load(section.format(v=literal))
+        errs = his.check_install_config(cfg)
+        assert len(errs) == 1 and errs[0][1] == "type:str", (section, literal, errs)
+    for literal in ('"yes"', "100", "debug"):
+        assert his.validate_install_config(yaml.safe_load(section.format(v=literal))) == []

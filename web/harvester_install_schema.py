@@ -30,7 +30,7 @@ import yaml
 HARVESTER_INSTALLER_TAG = "v1.9.0-dev-20260705"
 HARVESTER_INSTALLER_COMMIT = "8b8f0f223b67f95a60ec64a5da954a911b024c15"
 
-# Types feuilles : "str", "int", "bool", "list[str]", "dict[str,str]",
+# Types feuilles : "str", "int", "uint" (entier >= 0, uint32 côté Go), "bool", "list[str]", "dict[str,str]",
 # "dict[str,list[str]]", "any". Types composés : "object" (sous-schéma),
 # "list[object]" (liste d'objets), "dict[object]" (dictionnaire d'objets).
 Field = namedtuple("Field", "key type sub aliases json")
@@ -125,10 +125,10 @@ ADDON = _struct(
 )
 
 LH_DEFAULT_SETTINGS = _struct(
-    ("guaranteedEngineManagerCPU", "int"),
-    ("guaranteedReplicaManagerCPU", "int"),
-    ("guaranteedInstanceManagerCPU", "int"),
-    ("storageReservedPercentageForDefaultDisk", "int"),
+    ("guaranteedEngineManagerCPU", "uint"),
+    ("guaranteedReplicaManagerCPU", "uint"),
+    ("guaranteedInstanceManagerCPU", "uint"),
+    ("storageReservedPercentageForDefaultDisk", "uint"),
 )
 
 LONGHORN_CHART_VALUES = _struct(
@@ -136,7 +136,7 @@ LONGHORN_CHART_VALUES = _struct(
 )
 
 STORAGE_CLASS = _struct(
-    ("replicaCount", "int"),
+    ("replicaCount", "uint"),
 )
 
 HARVESTER_CHART_VALUES = _struct(
@@ -218,7 +218,7 @@ OS = _struct(
 )
 
 HARVESTER_CONFIG = _struct(
-    ("schemeVersion", "int"),
+    ("schemeVersion", "uint"),
     ("serverUrl", "str"),
     ("token", "str"),
     ("sans", "list[str]"),
@@ -281,8 +281,13 @@ def _map_key(path, key):
     return f"{path}[{key}]"
 
 
-def _scalar(v):
-    return isinstance(v, (str, int, float, bool)) and v is not None
+def _map_value_ok(v):
+    """Valeur d'un dictionnaire de textes. L'installeur convertit tout
+    scalaire en texte (NewToMap) : on n'accepte que ce dont la conversion ne
+    surprend pas. Texte, et entier (`miimon: 100`). Refusés : booléen
+    (`yes` ou `on` en YAML 1.1 deviennent « true » en silence) et nombre à
+    virgule (`1.10` deviendrait « 1.1 »)."""
+    return isinstance(v, str) or (isinstance(v, int) and not isinstance(v, bool))
 
 
 def _type_ok(ftype, v):
@@ -290,6 +295,8 @@ def _type_ok(ftype, v):
         return isinstance(v, str)
     if ftype == "int":
         return isinstance(v, int) and not isinstance(v, bool)
+    if ftype == "uint":
+        return isinstance(v, int) and not isinstance(v, bool) and v >= 0
     if ftype == "bool":
         return isinstance(v, bool)
     if ftype == "list[str]":
@@ -344,8 +351,7 @@ def _check(value, field, path, out):
             p = _map_key(path, k)
             if not isinstance(k, str):
                 out.append((p, "type:str"))
-            elif t == "dict[str,str]" and not _scalar(v):
-                # l'installeur convertit les scalaires en texte (NewToMap)
+            elif t == "dict[str,str]" and not _map_value_ok(v):
                 out.append((p, "type:str"))
             elif t == "dict[str,list[str]]" and not _type_ok("list[str]", v):
                 out.append((p, "type:list[str]"))
@@ -354,6 +360,9 @@ def _check(value, field, path, out):
         return
     if not _type_ok(t, value):
         out.append((path, f"type:{t}"))
+    elif path.endswith("management_interface.vlan_id") and not 0 <= value <= 4094:
+        # pkg/console/validator.go : 0 veut dire « pas de VLAN »
+        out.append((path, "range:0-4094"))
 
 
 def check_install_config(cfg):
@@ -500,7 +509,13 @@ def _parse_labels(value, errors):
 def build_form_config(opts, errors):
     """Dictionnaire produit par les champs du formulaire seuls, dans l'ordre
     d'écriture historique (le rendu d'une configuration d'avant 1.77.0 ne
-    doit pas changer)."""
+    doit pas changer).
+
+    Cette garantie vaut là où l'ancienne sortie était bien typée. L'ancien
+    rendu écrivait certaines valeurs sans guillemets : une MAC tout en
+    chiffres (`52:54:00:12:34:56`) y était lue par YAML 1.1 comme un entier
+    sexagésimal, un nom d'hôte tout en chiffres comme un entier. Le nouveau
+    rendu les écrit en texte, ce qu'attend l'installeur."""
     cfg = {"scheme_version": 1}
     joining = opts.get("mode") == "join"
     # Champ de PREMIER niveau (HarvesterConfig.ServerURL). Placé sous
@@ -564,9 +579,20 @@ def build_form_config(opts, errors):
     if method == "static":
         for k in ("ip", "subnet_mask", "gateway"):
             mi[k] = str(opts.get(k) or "")
-    bond = {"mode": str(opts.get("bond_mode") or "balance-tlb")}
+    # Champ absent : valeurs historiques de la console (balance-tlb, 100).
+    # Champ présent mais vide : rien d'écrit pour cette option (un fichier
+    # importé dont `bond_options` n'avait pas de `mode` le reste).
+    bond = {}
+    mode = opts.get("bond_mode")
+    if mode is None:
+        bond["mode"] = "balance-tlb"
+    elif str(mode).strip():
+        bond["mode"] = str(mode).strip()
     miimon = opts.get("bond_miimon")
-    bond["miimon"] = _as_int(miimon) if miimon not in (None, "") else 100
+    if miimon is None:
+        bond["miimon"] = 100
+    elif str(miimon).strip():
+        bond["miimon"] = _as_int(miimon)
     if opts.get("bond_lacp_rate"):
         bond["lacp_rate"] = str(opts["bond_lacp_rate"])
     if opts.get("bond_xmit_hash_policy"):
@@ -782,6 +808,17 @@ def split_imported_config(text):
                         ("xmit_hash_policy", "bond_xmit_hash_policy")):
             if k in bond:
                 form[name] = str(bond.pop(k))
+            elif k in ("mode", "miimon"):
+                # vide = ne pas l'écrire : le formulaire n'ajoute pas un mode
+                # que le fichier ne donnait pas
+                form[name] = ""
+    else:
+        # Sans `bond_options`, l'installeur pose active-backup et miimon 100
+        # (pkg/config/cos.go, updateBond) ; le formulaire, lui, écrirait
+        # balance-tlb. On rend explicite ce que l'installeur aurait fait.
+        form["bond_mode"] = "active-backup"
+        form["bond_miimon"] = "100"
+        notes.append("bond-default-active-backup")
     if isinstance(mi.get("vlan_id"), int):
         form["vlan_id"] = str(mi.pop("vlan_id"))
 
