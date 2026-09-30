@@ -4,6 +4,30 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.78.0] - 2026-10-01 - Disks of a bare-metal install: discovered, chosen, checked and pooled
+
+### Added
+- Discovery boot: the Harvester ISO boots once with a console script, sends back what Linux sees (disks with their stable links, partitions, NICs, DMI serial and UUID) and powers the machine off; the inventory is bound to the machine (serial or UUID compared with the BMC's) and kept per machine. From the install window, the API (`POST /api/baremetal/discover`, `GET /api/baremetal/inventory/<host>`) and the command line (`harvester-baremetal discover`).
+- The install window shows a table of the machine's disks with a role each (system, data, pool with a tag, wipe only, ignore) and a per-disk wipe (`install.wipe_disks_list`); the console writes stable paths (`by-path`, else a `by-id` link to the disk itself, never a multipath `dm-*`). "Read the disks" shows what the BMC publishes over Redfish (controllers, RAID or pass-through, volumes, drives), read only.
+- Disk pools: several data-disk pools (storage tiers) created right after the install on any Harvester, each disk found by serial or WWN, provisioned into Longhorn with the pool's tag, and a StorageClass `longhorn-<tag>` per pool. Also `harvester-resources pools-apply` and `host disk-add --tag`.
+- A cluster installed by the console is declared in the console automatically, with its own SSH key pair (kept, used for graceful shutdown and startup) and a host key recorded on first contact; a node that joins it later gets the same public key.
+
+### Changed
+- With an inventory, the install and preview routes refuse before any power-on a disk too small for its role, holding data without its wipe, given two roles or unknown, and a pool disk that is the system or data disk.
+- The installer powers off at the end of the install; the console ejects the media, boots the disk once and powers the machine on. A BMC that ignores one-shot boots made the installer loop.
+- A machine the preflight powered on is powered off again when the run fails before the install starts.
+
+### Fixed
+- Redfish: virtual media now goes to the manager of the target system, not the first manager a BMC lists (another machine on a multi-system BMC); the published `VirtualMedia` links are followed (Redfish 2020.4+ puts them under the system); a BMC written `host:port` no longer makes the console publish 127.0.0.1; a media insert that answers only after downloading the image is waited for, and the drive saying "inserted" is not trusted.
+- The install preflight refused every BMC that is not an HPE iLO and waited for a POST state only iLOs publish.
+- The artifact server wrote request paths, and so single-use tokens, to the console log (present since 1.19).
+
+### Internal
+- `web/baremetal_disks.py`, `bin/lib/bm_discover.py`, `bin/lib/discover.sh.tpl`, `bin/harvester-baremetal.py`; `harvester-iso-remaster.sh --add-file/--kernel-args`; a Redfish bench on node2 (`sushy-tools`) described in `tests/bench/harvlab/README.md`.
+
+### Tests
+- `test_bm_disks_178.py`, `test_bm_discover_178.py`, `test_bm_pools_178.py`, `test_bm_disks_checks_178.py`, `test_bm_manager_178.py`, `tests/e2e/test_bm_disks_178.py`. Checked for real through the console on a nested Harvester v1.9.0 node behind a Redfish emulator: discovery (5 disks on virtio, SATA, SCSI, NVMe, NICs, UUID binding), refusal of a partitioned disk without its wipe, install with a system disk, a data disk and two pools, the cluster declared automatically, one volume of each pool class placed on the right disk, SSH with the cluster's key. Not checked for real: a physical blade with this release (the install path was last run on an iLO 4 in 1.19), RAID volumes (read only).
+
 ## [1.77.0] - 2026-09-30 - Complete bare-metal install configuration, and a VM Import / Export section
 
 ### Added

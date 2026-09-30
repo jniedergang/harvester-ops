@@ -86,9 +86,21 @@ et la possibilité ou non d'installer la machine.
   qui viennent d'être découvertes (plusieurs font un agrégat), le mode
   d'agrégat et miimon, le rythme LACP en 802.3ad, la politique de hachage
   dans les modes qui s'en servent, un VLAN facultatif.
-- **Disques** : disque d'installation (`/dev/sda`, ou un chemin stable
-  `/dev/disk/by-path/...`), un disque de données facultatif, et « effacer
-  tous les disques ».
+- **Disques** (1.78.0) : dès que la machine a un inventaire (démarrage de
+  découverte, plus bas), un tableau de ses disques : taille, modèle, série,
+  média, bus, partitions déjà présentes, et le chemin stable que la console
+  écrira (`by-path`, sinon un lien `by-id` vers le disque lui-même, jamais
+  un `dm-*` de multipath ; un `sdX` nu seulement s'il n'y a rien d'autre, et
+  signalé). Chaque disque reçoit un rôle : **système**, **données** (disque
+  par défaut de Longhorn), **pool** avec une étiquette, **effacer
+  seulement** ou **ignorer**, et sa propre case **Effacer**
+  (`install.wipe_disks_list`), à côté de « effacer tous les disques ». Sans
+  inventaire, le disque d'installation se saisit à la main (un chemin
+  stable `/dev/disk/by-path/...` de préférence). **Lire les disques**
+  montre ce que le BMC publie en Redfish (contrôleurs, RAID ou
+  pass-through, volumes, disques), en lecture seule.
+- **Nom du cluster** (création) : le nom sous lequel la console déclare le
+  nouveau cluster, le nom d'hôte par défaut.
 - **Système** : DNS, NTP, libellés du nœud (un `clé=valeur` par ligne),
   modules noyau.
 - **Accès** : le token du cluster, le mot de passe OS, et éventuellement
@@ -114,9 +126,21 @@ avant toute mise sous tension. Une clé est refusée, avec son chemin (par
 exemple `os.write_files[2].contnt`), quand elle est inconnue, mal typée,
 posée à la fois par le formulaire et le YAML avancé, ou gardée par la
 console (`install.iso_url`, `install.automatic`, `install.mode`,
-`server_url`, `token`, `os.password`). Un `system_settings.ntp-servers` est refusé tant que le
+`server_url`, `token`, `os.password`, `install.power_off`). Un `system_settings.ntp-servers` est refusé tant que le
 champ NTP est rempli : l'installeur réécrit ce réglage depuis les serveurs
 NTP et l'autre valeur serait perdue sans rien dire.
+
+Avec un inventaire, le serveur vérifie aussi les disques avant toute mise
+sous tension, et refuse en nommant le disque et la raison : un rôle donné
+deux fois, pas de disque système, un disque trop petit (installeur v1.9 :
+250 Gio pour un disque système seul, 180 Gio avec un disque de données,
+50 Gio pour un disque de données ou de pool ;
+`harvester.install.skipchecks=true` lève les tailles), un disque qui porte
+des partitions ou un système de fichiers sans sa case Effacer (ou tout
+effacer), une étiquette de pool qui n'est pas en minuscules, chiffres et
+`-`, un disque que l'inventaire ne connaît pas. Les disques système et de
+données sont formatés par l'installeur : cocher leur case Effacer lève le
+contrôle, et ils sont retirés de la liste envoyée à l'installeur.
 
 Le token et le mot de passe n'apparaissent jamais dans une réponse, dans
 un libellé d'action, ni dans une ligne de log.
@@ -128,18 +152,54 @@ dans le dock dès la confirmation et diffuse ses étapes.
 
 | Étape | Ce qui se passe |
 |---|---|
-| `preflight` | Allume la machine, attend le POST, lit l'inventaire **réel** |
+| `preflight` | Allume la machine si besoin, attend le POST là où le BMC le publie (HPE), vérifie qu'il y a un disque : l'inventaire de découverte d'abord, puis les cibles d'amorce UEFI de HPE, puis les disques Redfish ; sans aucune de ces sources, un avertissement (l'installeur vérifie lui-même son disque) |
 | `remaster` | Patche l'ISO pour qu'il s'installe sans opérateur (voir plus bas) |
 | `serve` | Publie l'ISO et la configuration derrière des jetons à usage unique |
-| `bmc-insert` | Monte l'ISO en média virtuel |
+| `bmc-insert` | Monte l'ISO en média virtuel, et attend la réponse du BMC (jusqu'à 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Programme une amorce **unique** sur `Cd` |
-| `power-on` | Redémarre la machine sur l'ISO |
-| `wait-install` | Attend que le node s'installe et redémarre |
+| `power` | Redémarre la machine sur l'ISO |
+| `wait-install` | L'installeur **éteint** la machine quand il a fini (`install.power_off`, posé par la console) |
+| `boot-disk` | Éjecte le média, programme une amorce unique sur le disque, rallume la machine |
 | `wait-api` | Attend l'API Harvester sur la VIP |
+| `declare` | Lit le kubeconfig du nouveau cluster par SSH et déclare le cluster dans la console |
+| `pools` | Crée les pools de disques (seulement s'il y en a) |
 
-L'amorce unique compte : la machine démarre l'ISO **une seule fois**,
-puis reprend son ordre d'amorçage normal et se relève sur le système
-fraîchement installé. Rien à défaire à la main ensuite.
+Pourquoi l'extinction (1.78.0) : certains BMC n'appliquent pas l'amorce
+unique et gardent le CD virtuel en premier ; la machine revenait alors sur
+l'installeur après chaque installation, en boucle (vu sur un banc Redfish).
+L'installeur s'éteignant, la console sait que l'installation est finie et
+démarre elle-même le disque, quoi que le BMC fasse de l'amorce unique.
+
+Si le déroulé échoue avant le début de l'installation, une machine que le
+préflight a allumée est éteinte à nouveau ; une machine trouvée allumée
+est laissée telle quelle.
+
+**Le nouveau cluster est déclaré tout seul** (création). La console crée
+pour lui une paire de clés ed25519 (`ssh/<nom>_id`, 0600, à côté de sa
+configuration, là où Paramètres > Clusters range les clés envoyées), pose
+la clé publique dans la configuration d'installation, lit
+`/etc/rancher/rke2/rke2.yaml` par SSH en `rancher` à travers la VIP (clé
+d'hôte retenue au premier contact dans `ssh/<nom>_known_hosts`), l'écrit
+en 0600 avec son serveur sur `https://<VIP>:6443`, et déclare le cluster
+avec ce kubeconfig, cette clé et le nœud. La clé reste : la console s'en
+sert pour l'arrêt et le démarrage gracieux. Un nœud qui rejoint plus tard
+ce cluster reçoit la même clé publique.
+
+**Les pools de disques** sont créés juste après la réponse de l'API, avec
+ce que Harvester offre déjà après une installation : chaque disque de pool
+est retrouvé parmi les BlockDevices de node-disk-manager par sa série ou
+son WWN (jamais par son nom noyau, qui peut changer d'un démarrage à
+l'autre), provisionné dans Longhorn, formaté et étiqueté du pool, et
+chaque pool reçoit une classe de stockage `longhorn-<étiquette>`
+(`diskSelector: <étiquette>`, répliques au choix, 1 par défaut, un
+avertissement quand plus d'une est demandée sur un nœud seul). Une classe
+existante avec un autre sélecteur est refusée avant qu'aucun disque ne
+soit formaté. Un disque qui est le disque système ou de données, ou qui
+porte les partitions du système, n'est jamais pris. En mode rejoindre, les
+disques sont provisionnés et les classes laissées telles quelles. La même
+chose en ligne de commande :
+`harvester-resources pools-apply --cluster <c> --node <n> --spec <json>`
+(et `host disk-add --tag`).
 
 ### Ajouter un nœud à un cluster existant (API seulement)
 
@@ -153,7 +213,7 @@ pour une jonction a été vérifiée en installant deux nœuds dans un cluster
 de test à trois nœuds ; le déroulé par Redfish en mode jonction n'a pas
 encore été exécuté sur du vrai matériel.
 
-### Lire les disques d'abord : le démarrage de découverte (API et CLI)
+### Lire les disques d'abord : le démarrage de découverte (fenêtre, API et CLI)
 
 Certains BMC ne publient aucun disque (un iLO 4 n'en publie aucun) : la
 console ne peut alors pas dire sur quel disque installer.
@@ -163,7 +223,10 @@ petit script de la console, et attend que la machine renvoie ce que Linux
 voit : disques avec leurs liens stables `by-path`/`by-id`, partitions,
 cartes réseau. La machine s'éteint ensuite d'elle-même.
 `GET /api/baremetal/inventory/<bmc_host>` rend l'inventaire analysé
-(`source`, `at`, `system_serial`, `disks`, `nics`), ou 404.
+(`source`, `at`, `system_serial`, `disks`, `nics`), ou 404. Dans la
+fenêtre d'installation, **Démarrage de découverte** la lance comme action
+suivie et remplit le tableau des disques à l'arrivée de l'inventaire ; les
+cartes de gestion montrent alors leur nom Linux.
 
 - Le script est sur l'ISO elle-même (`/discover.sh`, monté en
   `/run/initramfs/live`) ; la ligne noyau ne porte que son chemin
@@ -195,6 +258,23 @@ cartes réseau. La machine s'éteint ensuite d'elle-même.
 - Même déroulé en ligne de commande, mot de passe jamais en argument :
   `harvester-baremetal discover --bmc <hôte> --user <compte> --password-file <fichier 0600> --iso <chemin>`
   (ou `--password-stdin`).
+
+### Redfish : ce que la 1.78.0 a changé
+
+Vérifié contre un émulateur Redfish pilotant une machine imbriquée, au-delà
+de l'iLO 4 de HPE des premières installations :
+
+- le média virtuel est celui du **gestionnaire du système visé**
+  (`Links.ManagedBy`), pas le premier gestionnaire que le BMC liste ; un BMC
+  qui gère plusieurs systèmes monterait sinon l'ISO d'une autre machine ;
+- les liens `VirtualMedia` que publie le BMC sont suivis (Redfish 2020.4 et
+  suivants placent le média virtuel sous le système) ; le chemin historique
+  `<gestionnaire>/VirtualMedia/` n'est qu'un repli ;
+- un BMC écrit `hôte:port` fonctionne ;
+- une insertion de média qui ne répond qu'une fois l'image téléchargée est
+  attendue ; l'état « inséré » du lecteur n'est pas cru, un BMC pouvant
+  l'afficher avant que l'image soit là ;
+- le préflight ne refuse plus un BMC qui n'est pas un iLO.
 
 ---
 

@@ -1915,6 +1915,21 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   modules, un chemin persistant, un sysctl, tous encore en place après un
   redémarrage. Pas vérifié en réel : LACP (802.3ad, aucun commutateur du
   banc ne le négocie) et un VLAN de gestion étiqueté.
+- **Disques choisis et vérifiés (1.78.0).** Un démarrage de découverte lit
+  ce que Linux voit sur la machine (disques, liens stables, partitions,
+  cartes réseau), même quand le BMC ne publie rien (iLO 4) ; la fenêtre
+  montre alors un tableau des disques avec un rôle chacun (système,
+  données, pool, effacer, ignorer), écrit des chemins stables, et le
+  serveur refuse un disque trop petit, portant des données sans son
+  effacement, ou utilisé deux fois. Plusieurs **pools de disques** (niveaux
+  de stockage) sont créés juste après l'installation, chacun avec sa classe
+  de stockage, sur tout Harvester. Le nouveau cluster est **déclaré tout
+  seul dans la console**, avec sa propre clé SSH. L'installeur s'éteint à
+  la fin et la console démarre elle-même le disque : un BMC qui ignore
+  l'amorce unique ne boucle plus. Vérifié de bout en bout sur un nœud
+  imbriqué piloté par un émulateur Redfish (cinq disques virtio, SATA,
+  SCSI et NVMe) ; sur une lame physique, le chemin d'installation a été
+  vérifié pour la dernière fois en 1.19 (iLO 4).
 - **Préflight contre l'inventaire périmé** — un BMC éteint rejoue
   l'inventaire de son *dernier POST*, parfois vieux de plusieurs mois.
   L'installation allume la machine et lit le matériel réel avant de

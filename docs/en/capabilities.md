@@ -1728,6 +1728,19 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   node labels, modules, a persistent path, a sysctl, all still in place
   after a reboot. Not checked for real: LACP (802.3ad, no switch on the
   bench negotiates it) and a tagged management VLAN.
+- **Disks, chosen and checked (1.78.0).** A discovery boot reads what
+  Linux sees on the machine (disks, stable links, partitions, NICs), even
+  when the BMC publishes nothing (iLO 4); the window then shows a table of
+  disks with a role each (system, data, pool, wipe, ignore), writes stable
+  paths, and the server refuses a disk too small, holding data without its
+  wipe, or used twice. Several **disk pools** (storage tiers) are created
+  right after the install, each with its StorageClass, on any Harvester.
+  The new cluster is **declared in the console automatically**, with its
+  own SSH key. The installer powers off at the end and the console boots
+  the disk itself, so a BMC that ignores one-shot boots no longer loops.
+  Checked end to end on a nested node driven through a Redfish emulator
+  (five disks on virtio, SATA, SCSI and NVMe); on a physical blade, the
+  install path was last checked in 1.19 (iLO 4).
 - **Preflight against stale inventory** — a powered-off BMC replays the
   inventory of its *last POST*, which can be months old. The install
   powers the machine on and reads the real hardware before deciding.

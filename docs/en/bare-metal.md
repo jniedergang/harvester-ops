@@ -82,8 +82,20 @@ machine can be installed.
   discovered (several make a bond), the bond mode and miimon, the LACP
   rate in 802.3ad, the transmit hash policy in the modes that use it, an
   optional VLAN.
-- **Disks**: install disk (`/dev/sda`, or a stable
-  `/dev/disk/by-path/...`), an optional data disk, and "wipe all disks".
+- **Disks** (1.78.0): once the machine has an inventory (discovery boot,
+  below), a table of its disks: size, model, serial, media, bus,
+  partitions already there, and the stable path the console will write
+  (`by-path`, else a `by-id` link to the disk itself, never a multipath
+  `dm-*`; a bare `sdX` only when nothing else exists, and flagged). Each
+  disk gets a role: **system**, **data** (Longhorn's default disk),
+  **pool** with a tag, **wipe only**, or **ignore**, and its own **Wipe**
+  box (`install.wipe_disks_list`), next to "wipe all disks". Without an
+  inventory, the install disk is typed in (a stable
+  `/dev/disk/by-path/...` is best). **Read the disks** shows what the BMC
+  publishes over Redfish (controllers, RAID or pass-through, volumes,
+  drives), read only.
+- **Cluster name** (create mode): the name under which the console
+  declares the new cluster, the hostname by default.
 - **System**: DNS, NTP, node labels (one `key=value` per line), kernel
   modules.
 - **Access**: the cluster token, the OS password, and optionally SSH
@@ -108,9 +120,20 @@ before anything is powered on. A key is refused, with its path (for
 example `os.write_files[2].contnt`), when it is unknown, of the wrong type,
 set both by the form and the advanced YAML, or kept by the console
 (`install.iso_url`, `install.automatic`, `install.mode`, `server_url`,
-`token`, `os.password`). A `system_settings.ntp-servers` is refused while the NTP
+`token`, `os.password`, `install.power_off`). A `system_settings.ntp-servers` is refused while the NTP
 field is filled: the installer rewrites that setting from the NTP servers
 and the other value would be lost without a word.
+
+With an inventory, the server also checks the disks before anything is
+powered on, and refuses with the disk and the reason: a role given twice,
+no system disk, a disk too small (installer v1.9: 250 GiB for a system
+disk alone, 180 GiB with a data disk, 50 GiB for a data or pool disk;
+`harvester.install.skipchecks=true` lifts sizes), a disk that holds
+partitions or a filesystem without its Wipe ticked (or wipe all), a pool
+tag that is not lowercase letters, digits and `-`, a disk the inventory
+does not know. The system and data disks are formatted by the installer:
+ticking their Wipe clears the check, and they are left out of the list
+sent to the installer.
 
 The token and the password never appear in a response, in an action
 label, or in a log line.
@@ -122,18 +145,52 @@ dock the moment you confirm, and streams its steps.
 
 | Step | What happens |
 |---|---|
-| `preflight` | Powers the machine on, waits for POST, reads the **real** inventory |
+| `preflight` | Powers the machine on if needed, waits for POST where the BMC publishes it (HPE), checks there is a disk: the discovery inventory first, then the HPE UEFI boot targets, then the Redfish drives; with none of them, a warning (the installer checks its disk itself) |
 | `remaster` | Patches the ISO so it installs unattended (below) |
 | `serve` | Publishes the ISO and the config behind one-off tokens |
-| `bmc-insert` | Mounts the ISO as virtual media |
+| `bmc-insert` | Mounts the ISO as virtual media, and waits for the BMC's answer (up to 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Sets a **one-shot** boot on `Cd` |
-| `power-on` | Resets the machine onto the ISO |
-| `wait-install` | Waits for the node to install and reboot |
+| `power` | Resets the machine onto the ISO |
+| `wait-install` | The installer powers the machine **off** when it is done (`install.power_off`, set by the console) |
+| `boot-disk` | Ejects the media, sets a one-shot boot on the disk, powers the machine on |
 | `wait-api` | Waits for the Harvester API on the VIP |
+| `declare` | Reads the new cluster's kubeconfig over SSH and declares the cluster in the console |
+| `pools` | Creates the disk pools (only when some are asked) |
 
-The one-shot boot matters: the machine boots the ISO **once**, then goes
-back to its normal boot order and comes up on the freshly installed
-system. Nothing to undo by hand afterwards.
+Why the power-off (1.78.0): some BMCs do not honour a one-shot boot and
+keep the virtual CD first; the machine then came back to the installer
+after every install, in a loop (seen on a Redfish test bench). With the
+installer powering off, the console knows the install is over and boots
+the disk itself, whatever the BMC does with one-shot boots.
+
+If the run fails before the install starts, a machine the preflight
+powered on is powered off again; a machine found running is left as it
+was.
+
+**The new cluster is declared automatically** (create mode). The console
+creates an ed25519 key pair for it (`ssh/<name>_id`, 0600, next to the
+console configuration, where Settings > Clusters keeps uploaded keys),
+puts the public key in the install config, reads
+`/etc/rancher/rke2/rke2.yaml` over SSH as `rancher` through the VIP
+(host key recorded on first contact in `ssh/<name>_known_hosts`), writes
+it 0600 with its server set to `https://<VIP>:6443`, and declares the
+cluster with that kubeconfig, that key and the node. The key stays: the
+console uses it for the graceful shutdown and startup. A node that joins
+this cluster later gets the same public key.
+
+**Disk pools** are created right after the API answers, with what
+Harvester already offers after an install: each pool disk is found among
+node-disk-manager's BlockDevices by its serial or WWN (never by its kernel
+name, which can change between boots), provisioned into Longhorn,
+formatted and tagged with the pool, and each pool gets a StorageClass
+`longhorn-<tag>` (`diskSelector: <tag>`, replicas as asked, 1 by default,
+a warning when more than one is asked on a single node). An existing class
+with another selector is refused before any disk is formatted. A disk that
+is the system or data disk, or that carries the system partitions, is
+never taken. In join mode the disks are provisioned and the classes are
+left as they are. The same thing on the command line:
+`harvester-resources pools-apply --cluster <c> --node <n> --spec <json>`
+(and `host disk-add --tag`).
 
 ### Adding a node to an existing cluster (API only)
 
@@ -146,7 +203,7 @@ already up. The configuration generated for a join was checked by
 installing two nodes into a three-node test cluster; the Redfish-driven
 flow in join mode has not been run on real hardware yet.
 
-### Reading the disks first: the discovery boot (API and CLI)
+### Reading the disks first: the discovery boot (window, API and CLI)
 
 Some BMCs publish no disks at all (HPE iLO 4 publishes none), so the console
 cannot tell which disk to install on. `POST /api/baremetal/discover`
@@ -155,7 +212,10 @@ the Harvester ISO once, with a small script of the console, and waits for
 the machine to send back what Linux sees: disks with their stable
 `by-path`/`by-id` links, partitions, NICs. The machine then powers itself
 off. `GET /api/baremetal/inventory/<bmc_host>` returns the parsed inventory
-(`source`, `at`, `system_serial`, `disks`, `nics`), or 404.
+(`source`, `at`, `system_serial`, `disks`, `nics`), or 404. In the install
+window, **Discovery boot** runs it as a tracked action and fills the disk
+table when the inventory arrives; the management NICs then show their
+Linux names.
 
 - The script sits on the ISO itself (`/discover.sh`, mounted at
   `/run/initramfs/live`); the kernel line carries only its path
@@ -183,6 +243,24 @@ off. `GET /api/baremetal/inventory/<bmc_host>` returns the parsed inventory
 - Same flow on the command line, password never on argv:
   `harvester-baremetal discover --bmc <host> --user <user> --password-file <0600 file> --iso <path>`
   (or `--password-stdin`).
+
+### Redfish: what 1.78.0 changed
+
+Checked against a Redfish emulator driving a nested machine, beyond the
+HPE iLO 4 of the first installs:
+
+- the virtual media is the one of the **manager of the target system**
+  (`Links.ManagedBy`), not the first manager the BMC lists; a BMC that
+  manages several systems would otherwise mount the ISO of another
+  machine;
+- the `VirtualMedia` links the BMC publishes are followed (Redfish 2020.4
+  and later put the virtual media under the system); the historical
+  `<manager>/VirtualMedia/` path is only a fallback;
+- a BMC written `host:port` works;
+- a media insert that answers only once the whole image is downloaded is
+  waited for; the drive saying "inserted" is not trusted, since a BMC can
+  say so before the image is there;
+- the preflight no longer refuses a BMC that is not an iLO.
 
 ---
 

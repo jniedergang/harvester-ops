@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "1.77.0"
+AS_OF = "1.78.0"
 DATE = "2026-09-30"
 
 S = []  # sections
@@ -247,7 +247,7 @@ r("plus", "1.48", "Clusters RKE2 par Cluster API, services par CAAPH", "RKE2 clu
   "Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher",
   "Rancher also creates them, with its Harvester node driver; the console does it without Rancher")
 r("plus", "1.19", "Installation bare-metal de Harvester par Redfish", "Bare-metal Harvester install over Redfish",
-  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77)", "complete installer configuration, import of an existing file and preview (1.77)")
+  "configuration complète de l'installeur, import d'un fichier existant et aperçu (1.77) ; découverte des disques, rôles, pools, cluster déclaré tout seul (1.78)", "complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78)")
 r("plus", "1.6", "Activité : chaque geste suivi, dock des actions", "Activity: every action tracked, action dock")
 r("plus", "1.4", "Notes collaboratives sur les VMs et nœuds", "Collaborative notes on VMs and nodes")
 r("plus", "1.29", "Allouable Longhorn réel par classe", "Real Longhorn allocatable per class")

@@ -157,3 +157,39 @@ Variables de plus :
 Avant un `destroy`, éjecter l'ISO (`tidy`) : `virsh undefine
 --remove-all-storage` supprime aussi les fichiers encore attachés, ISO
 partagée comprise.
+
+
+## Banc bmcfg piloté par Redfish (1.78.0)
+
+Pour exercer le vrai parcours de la console (Redfish, média virtuel,
+démarrage de découverte, installation, pools) contre une VM, node2 porte un
+émulateur Redfish (`sushy-tools`, dans `/opt/sushy`, environnement Python à
+part), lancé à la demande :
+
+```
+sudo systemd-run --unit=bmcfg-sushy --collect /opt/sushy/bin/sushy-emulator --config /etc/sushy/sushy.conf
+sudo firewall-cmd --add-port=8446/tcp --timeout=6h
+```
+
+HTTPS sur `172.16.1.12:8446` (certificat auto-signé), compte `admin`, mot
+de passe dans Vault `secret/infra/bmcfg` (`bmc_password`), seule la VM
+`bmcfg-n1` est exposée (`SUSHY_EMULATOR_ALLOWED_INSTANCES`). Dans la
+console, le BMC s'écrit `172.16.1.12:8446`. La VM : UEFI, deux cartes sur
+br0, cinq disques (système virtio 300 Go, données SATA, pool SCSI, pool
+NVMe, un disque SATA déjà partitionné pour vérifier les refus).
+
+Pièges payés en montant ce banc (ils ne concernent que lui) :
+
+- l'émulateur dépose l'image dans un pool de stockage libvirt nommé
+  `default` : il en faut un (ici `/var/lib/libvirt/images/bmcfg/sushy-pool`) ;
+- il branche le CD sur le bus SCSI dès que la VM a un disque SCSI ; avec le
+  contrôleur `lsilogic` par défaut, l'UEFI de QEMU ne le lit pas : mettre
+  le contrôleur en `virtio-scsi` ;
+- il n'applique pas l'amorce « une seule fois » (le CD reste premier) :
+  c'est ce qui a mené la console à faire éteindre l'installeur à la fin ;
+- il ne répond à l'insertion qu'après avoir téléchargé toute l'image, et
+  dit le lecteur « monté » avant la fin ;
+- une console série de VM écrite directement dans un fichier bloquait le
+  démarrage : `--serial pty,log.file=...`.
+
+Le port 8443 de node2 est pris (relais du banc VMware) : d'où 8446.

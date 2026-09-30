@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-09-30, console **v1.77.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-09-30, console **v1.78.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **2 partial**, **1 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -272,7 +272,7 @@ Harvester menu: *VM Imports / VM Migration*
 | VM transfer between clusters, export / import | Console only | 1.45 |  |
 | Terraform: declarations kept by the console | Console only | 1.54 |  |
 | RKE2 clusters through Cluster API, services through CAAPH | Console only | 1.48 | Rancher also creates them, with its Harvester node driver; the console does it without Rancher |
-| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77) |
+| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78) |
 | Activity: every action tracked, action dock | Console only | 1.6 |  |
 | Collaborative notes on VMs and nodes | Console only | 1.4 |  |
 | Real Longhorn allocatable per class | Console only | 1.29 |  |
