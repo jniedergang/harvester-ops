@@ -2310,6 +2310,24 @@ def api_bmc_discover():
     return jsonify({"nodes": results, "count": len(results)})
 
 
+@app.route("/api/bmc/storage", methods=["POST"])
+@requires_auth
+@_rate_limit("12/minute")
+def api_bmc_storage():
+    """Stockage vu par le BMC (1.78.0) : contrôleurs, disques, volumes.
+    Corps : {host, user, password}, comme /api/bmc/discover ; les
+    identifiants ne passent ni par l'adresse ni par un journal."""
+    data = request.get_json(force=True, silent=True) or {}
+    host = data.get("host")
+    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9.:\[\]-]{1,253}", host):
+        return jsonify({"error": "invalid host", "fields": ["host"]}), 400
+    try:
+        out = _bmc_storage(host, str(data.get("user") or ""), str(data.get("password") or ""))
+    except Exception as e:                      # jamais de détail qui porterait un secret
+        return jsonify({"error": f"storage inventory failed: {type(e).__name__}"}), 502
+    return jsonify(dict(out, host=host))
+
+
 @app.route("/api/bmc/<host>/virtualmedia", methods=["POST"])
 @requires_auth
 @_rate_limit("20/minute")
@@ -4559,6 +4577,58 @@ def _bm_pool_disk_refusals(data):
     return out
 
 
+def _bm_skipchecks(data):
+    """`harvester.install.skipchecks=true` parmi les arguments noyau, ou le
+    champ explicite `skipchecks` : l'installeur lève alors ses contrôles de
+    taille, la console aussi."""
+    if _his._truthy(data.get("skipchecks")):
+        return True
+    return "harvester.install.skipchecks=true" in str(data.get("extra_args") or "").split()
+
+
+def _bm_disk_role_check(data):
+    """Contrôles des disques (1.78.0) avec l'inventaire de découverte de ce
+    BMC : disque système, disque de données, liste à effacer et disques de
+    pool, rapprochés des disques vus par Linux, puis check_disk_roles.
+    Rend None sans inventaire (saisie libre : comportement d'avant), sinon
+    la liste [(chemin, raison)], vide si tout va. `data["pools"]` est déjà
+    normalisé par check_pools."""
+    doc = _bmd.load_inventory(INVENTORY_DIR, str(data.get("bmc_host") or ""))
+    if not doc:
+        return None
+    disks = _bmdisks.parse_discovery(doc.get("raw") or "")["disks"]
+    errors, pools = [], {}
+    for p in data.get("pools") or []:
+        ids = pools.setdefault(p["tag"], [])
+        for d in p["disks"]:
+            inv = next((x for x in disks
+                        if (d.get("wwn") and _hh.norm_wwn(x.get("wwn")) == _hh.norm_wwn(d["wwn"]))
+                        or (d.get("serial") and _hh.norm_serial(x.get("serial")) == _hh.norm_serial(d["serial"]))),
+                       None)
+            if inv is None:
+                errors.append((_hh.disk_label(d), "unknown-disk"))
+            else:
+                ids.append(inv.get("stable_path") or "/dev/" + str(inv.get("name")))
+    roles = {"os": str(data.get("device") or "").strip(),
+             "data": str(data.get("data_disk") or "").strip() or None,
+             "pools": pools,
+             "wipe": _his._split_list(data.get("wipe_disks_list"))}
+    errors += _bmdisks.check_disk_roles(disks, roles, skipchecks=_bm_skipchecks(data),
+                                        wipe_all=_his._truthy(data.get("wipe_all_disks")))
+    return errors
+
+
+def _bm_disk_refusal(errors):
+    """Réponse 400 des contrôles des disques : `reasons` chemin -> raison,
+    la première raison d'un chemin (la fenêtre la range sur sa ligne)."""
+    fields, reasons = [], {}
+    for path, reason in errors:
+        if path not in reasons:
+            fields.append(path)
+            reasons[path] = reason
+    return jsonify({"error": "invalid disks", "fields": fields, "reasons": reasons}), 400
+
+
 def _bm_apply_pools(opts, kubeconfig, run, step, timeout):
     """Étape `pools` : bin/harvester-resources.py pools-apply, comme la
     remasterisation passe par son script (parité CLI). Un arrêt demandé
@@ -5055,8 +5125,19 @@ def api_baremetal_config_preview():
     """YAML final tel que l'installeur le recevra, jeton et mot de passe
     masqués. Pas besoin des identifiants du BMC."""
     data = request.get_json(force=True, silent=True) or {}
+    # l'hôte ne sert qu'à lire l'inventaire de la machine (contrôles des
+    # disques) ; les identifiants du BMC ne sont pas utilisés ici
+    host = data.get("bmc_host")
     for k in ("bmc_host", "bmc_user", "bmc_password"):
         data.pop(k, None)
+    if isinstance(host, str) and re.fullmatch(r"[A-Za-z0-9.:\[\]-]{1,253}", host):
+        try:
+            data["pools"] = _hh.check_pools(data.get("pools"))
+        except ValueError as e:
+            return jsonify({"error": f"invalid pools: {e}", "fields": ["pools"]}), 400
+        disk_errors = _bm_disk_role_check(dict(data, bmc_host=host))
+        if disk_errors:
+            return _bm_disk_refusal(disk_errors)
     mode = data.get("mode") or "create"
     if mode not in ("create", "join"):
         return jsonify({"error": "invalid mode", "fields": ["mode"]}), 400
@@ -5141,6 +5222,12 @@ def api_baremetal_install():
         return jsonify({"error": "invalid pools: a pool disk is also the system or data disk, "
                                  "or is not in this machine's inventory",
                         "fields": ["pools"], "reasons": [list(r) for r in refused]}), 400
+    # v1.78.0 : avec un inventaire de la machine, chaque disque désigné y est
+    # retrouvé et contrôlé (taille, données présentes, rôle doublé) avant
+    # d'allumer quoi que ce soit
+    disk_errors = _bm_disk_role_check(data)
+    if disk_errors:
+        return _bm_disk_refusal(disk_errors)
     # v1.78.0 : un cluster créé est déclaré dans la console à la fin
     if mode == "create":
         name = _bm_cluster_name(data)

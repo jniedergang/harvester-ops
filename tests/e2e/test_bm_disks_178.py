@@ -391,3 +391,81 @@ def test_join_mode_hides_the_cluster_name(context, flask_server, tmp_path):
     body = state["installs"][-1]
     assert body["mode"] == "join" and "cluster_name" not in body
     assert body["device"] == PATH["sda"]
+
+
+# --- round 2 : stockage lu par le BMC, refus du serveur par chemin ----------
+
+IDRAC_STORAGE = {"source": "redfish", "supported": True, "controllers": [{
+    "id": "RAID.Integrated.1-1", "name": "PERC H730P Mini", "model": "PERC H730P Mini",
+    "raid_types": ["RAID0", "RAID1"], "can_create_volume": True,
+    "drives": [{"id": "Disk.Bay.0", "model": "MZ7LH480HAHQ", "media": "SSD", "protocol": "SATA",
+                "capacity_bytes": 480 * 10 ** 9, "serial": "TEST-BMC-0001"},
+               {"id": "Disk.Bay.1", "model": "PM1725b", "media": "SSD", "protocol": "NVMe",
+                "capacity_bytes": 1600 * 10 ** 9, "serial": "TEST-BMC-0002"}],
+    "volumes": [{"id": "Disk.Virtual.0", "name": "os-mirror", "raid_type": "RAID1",
+                 "volume_type": "Mirrored", "capacity_bytes": 480 * 10 ** 9, "health": "OK"}]}]}
+
+
+def test_read_the_disks_from_the_bmc(context, flask_server):
+    page, win, state = open_window(context, flask_server, inventory=None)
+    calls = []
+
+    def storage(route, req):
+        calls.append(req.post_data_json)
+        fulfill(route, IDRAC_STORAGE)
+    page.route("**/api/bmc/storage", storage)
+    win.locator('[data-bm="read-bmc"]').click()
+    expect(win.locator("#bm-disc-status")).to_contain_text("2 disk(s) listed by the BMC.")
+    assert calls == [{"host": HOST, "user": "admin", "password": "bmc-secret"}]
+    rows = win.locator("tr.bm-redfish-row")
+    expect(rows).to_have_count(2)
+    expect(rows.nth(1)).to_contain_text("NVMe")
+    expect(rows.nth(0)).to_contain_text("TEST-BMC-0001")
+    expect(rows.nth(0).locator(".bm-disk-path")).to_have_text("")
+    expect(win.locator("#bm-inv-source")).to_contain_text("Redfish (BMC)")
+    expect(win.locator(".bm-redfish-only")).to_contain_text("run a discovery boot")
+    # pas de chemin Linux : saisie libre imposée, aucun rôle proposé
+    expect(win.locator('[data-bm="free-text"]')).to_be_checked()
+    expect(win.locator("[data-disk-role]")).to_have_count(0)
+    raid = win.locator("#bm-raid-box fieldset.bm-raid")
+    expect(raid).to_contain_text("PERC H730P Mini")
+    expect(raid.locator(".badge")).to_have_text("RAID")
+    expect(raid).to_contain_text("os-mirror")
+    expect(raid).to_contain_text("mirrored volume (RAID 1)")
+    raid.scroll_into_view_if_needed()
+    shot(page, "bm-disks-redfish")
+
+
+def test_a_bmc_without_storage_points_to_the_discovery_boot(context, flask_server):
+    page, win, _ = open_window(context, flask_server, inventory=None)
+    page.route("**/api/bmc/storage", lambda r, q: fulfill(
+        r, {"source": None, "supported": False, "controllers": []}))
+    win.locator('[data-bm="read-bmc"]').click()
+    expect(win.locator("#bm-disc-status")).to_contain_text("publishes no storage controller")
+    expect(win.locator("#bm-disks")).to_contain_text("run a discovery boot")
+    expect(win.locator("#bm-raid-box fieldset")).to_have_count(0)
+
+
+def test_invalid_disks_by_path_land_on_the_rows(context, flask_server):
+    _, win, state = open_window(context, flask_server)
+    state["install_refusal"] = {"error": "invalid disks", "fields": [PATH["sdb"], ""],
+                                "reasons": {PATH["sdb"]: "too-small:250", "": "no-os"}}
+    set_role(win, "sdb", "os")
+    fill_required(win)
+    submit(win)
+    msg = win.locator("#bm-config-msg .bm-refusal")
+    expect(msg).to_contain_text("too small, 250 GiB at least")
+    expect(msg).to_contain_text("no system disk chosen")
+    expect(notes(win, "sdb").locator(".bm-disk-refused")).to_contain_text("too small, 250 GiB")
+
+
+def test_the_preview_checks_the_disks_on_the_server(context, flask_server, test_config):
+    # vraie route d'aperçu, avec l'inventaire enregistré du serveur de test
+    _store_inventory(test_config)
+    _, win, _ = open_window(context, flask_server)
+    set_role(win, "sdb", "os")
+    win.locator('[data-bm="preview"]').click()
+    msg = win.locator("#bm-config-msg .bm-refusal")
+    expect(msg).to_contain_text("Disks refused:")
+    expect(msg).to_contain_text("too small, 250 GiB at least")
+    expect(notes(win, "sdb").locator(".bm-disk-refused")).to_be_visible()

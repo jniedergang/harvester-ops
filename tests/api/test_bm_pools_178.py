@@ -370,8 +370,9 @@ def test_a_pool_disk_is_resolved_in_the_inventory_and_checked_for_roles(client, 
         BASE, pools=[{"tag": "a", "disks": [{"serial": "NOT-THERE"}]}]))
     assert r.status_code == 400 and r.get_json()["reasons"] == [["serial NOT-THERE", "unknown-disk"]]
     assert not runs
+    # 1.78.0 : le disque système est aussi contrôlé (taille) ; /dev/sdc fait 480 Gio
     r = client.post("/api/baremetal/install", json=dict(
-        BASE, device="/dev/sdb", pools=[{"tag": "a", "disks": [{"serial": "TEST-NVME-0001"}]}]))
+        BASE, device="/dev/sdc", pools=[{"tag": "a", "disks": [{"serial": "TEST-NVME-0001"}]}]))
     assert r.status_code == 202
 
 

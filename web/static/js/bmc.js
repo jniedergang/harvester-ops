@@ -304,8 +304,10 @@ const BMC = (() => {
     if (!ctrls.length) return '';
     const blocks = ctrls.map(c => {
       const vols = c.volumes || [];
-      const passthrough = !(c.raid_types || []).length
-        || (vols.length && vols.every(v => v.volume_type === 'RawDevice'));
+      // pass-through : aucun niveau RAID ni création de volume possible, ou
+      // des volumes qui ne sont que des disques bruts
+      const passthrough = (!(c.raid_types || []).length && !c.can_create_volume)
+        || (vols.length > 0 && vols.every(v => v.volume_type === 'RawDevice'));
       const rows = vols.map(v => `<tr><td>${esc(v.name || v.id)}</td><td>${esc(v.raid_type || v.volume_type || '')}</td>
           <td>${v.capacity_bytes ? Math.floor(v.capacity_bytes / GIB) + ' GiB' : ''}</td><td>${esc(v.health || '')}</td></tr>`).join('');
       return `<div class="bm-raid-ctrl">
@@ -412,6 +414,8 @@ const BMC = (() => {
               <span class="bm-disks-tools">
                 <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="discover-boot"
                         data-tip="${esc(tr('bmc.disk.discoverTip'))}">${Icons.svg('search')} ${esc(tr('bmc.disk.discover'))}</button>
+                <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="read-bmc"
+                        data-tip="${esc(tr('bmc.disk.readBmcTip'))}">${Icons.svg('disk')} ${esc(tr('bmc.disk.readBmc'))}</button>
                 <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="inv-reload"
                         data-tip="${esc(tr('bmc.disk.reloadTip'))}">${Icons.svg('refresh')} ${esc(tr('bmc.disk.reload'))}</button>
                 <label class="bm-check tip" data-tip="${esc(tr('bmc.disk.freeTextTip'))}">
@@ -431,7 +435,7 @@ const BMC = (() => {
               <span class="form-hint vm-edit-unverified bm-wipe-warn">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.f.wipeWarn'))}</span>
             </div>
           </fieldset>
-          ${raidHtml(node.storage)}
+          <div id="bm-raid-box">${raidHtml(node.storage)}</div>
           <fieldset>
             <legend>${esc(tr('bmc.fs.system'))}</legend>
             <label>${esc(tr('bmc.f.dns'))}<input name="dns" autocomplete="off" placeholder="9.9.9.9, 1.1.1.1"></label>
@@ -488,6 +492,7 @@ const BMC = (() => {
     let serverIssues = {};          // chemin stable -> [raisons du serveur]
     let pendingWipe = [];           // chemins d'un fichier importé pas encore placés
     let discovering = false;
+    let redfish = null;             // stockage lu par le BMC, {controllers, at}
     const freeBox = panel.el.querySelector('[data-bm="free-text"]');
     const disksBox = panel.el.querySelector('#bm-disks');
     const poolsBox = panel.el.querySelector('#bm-pools');
@@ -554,9 +559,11 @@ const BMC = (() => {
       const src = panel.el.querySelector('#bm-inv-source');
       src.textContent = inv
         ? tr('bmc.disk.source', { source: tr('bmc.disk.sourceDiscovery'), at: fmtAt(inv.at) })
-        : tr('bmc.disk.noInventory');
+        : redfish
+          ? tr('bmc.disk.source', { source: tr('bmc.disk.sourceRedfish'), at: fmtAt(redfish.at) })
+          : tr('bmc.disk.noInventory');
       if (!useTable()) {
-        disksBox.innerHTML = `<p class="form-hint">${esc(tr('bmc.disk.none'))}</p>`;
+        disksBox.innerHTML = redfish ? redfishTable() : `<p class="form-hint">${esc(tr('bmc.disk.none'))}</p>`;
         syncDisks();
         return;
       }
@@ -595,6 +602,33 @@ const BMC = (() => {
             <th>${esc(tr('bmc.disk.col.wipe'))}</th></tr></thead>
           <tbody>${rows}</tbody></table>`;
       syncDisks();
+    }
+
+    // Disques listés par le BMC (sans découverte) : information seulement.
+    // Redfish ne donne pas le nom que Linux leur donnera : aucun chemin n'est
+    // proposé, le choix passe par un démarrage de découverte ou la saisie libre.
+    function redfishTable() {
+      const ctrls = redfish.controllers || [];
+      const drives = ctrls.flatMap(c => (c.drives || []).map(d => ({ ...d, ctrl: c.name || c.id })));
+      if (!ctrls.length) return `<p class="form-hint bm-redfish-none">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.disk.redfishNone'))}</p>`;
+      if (!drives.length) return `<p class="form-hint bm-redfish-none">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.disk.redfishNoDrives'))}</p>`;
+      const media = (d) => (String(d.protocol || '').toLowerCase() === 'nvme' ? 'NVMe' : (d.media || ''));
+      const rows = drives.map(d => `<tr class="bm-redfish-row">
+          <td class="bm-num">${d.capacity_bytes ? Math.floor(d.capacity_bytes / GIB) + ' GiB' : ''}</td>
+          <td>${esc(d.model || '')}</td>
+          <td class="bm-serial"><code>${esc(d.serial || '')}</code></td>
+          <td>${esc(media(d))}</td>
+          <td>${esc(d.protocol || '')}</td>
+          <td>${esc(d.ctrl || '')}</td>
+          <td class="bm-disk-path"></td>
+        </tr>`).join('');
+      return `<table class="data-table bm-disk-table bm-redfish-table">
+          <thead><tr><th>${esc(tr('bmc.disk.col.size'))}</th><th>${esc(tr('bmc.disk.col.model'))}</th>
+            <th>${esc(tr('bmc.disk.col.serial'))}</th><th>${esc(tr('bmc.disk.col.media'))}</th>
+            <th>${esc(tr('bmc.disk.col.bus'))}</th><th>${esc(tr('bmc.disk.col.controller'))}</th>
+            <th>${esc(tr('bmc.disk.col.path'))}</th></tr></thead>
+          <tbody>${rows}</tbody></table>
+        <p class="form-hint bm-redfish-only">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.disk.redfishOnly'))}</p>`;
     }
 
     function renderPools() {
@@ -799,6 +833,38 @@ const BMC = (() => {
     ['device', 'data_disk', 'extra_args'].forEach(n => field(n).addEventListener('input', syncDisks));
     field('wipe_all_disks').addEventListener('change', syncDisks);
     panel.el.querySelector('[data-bm="inv-reload"]').addEventListener('click', () => loadInventory());
+    const bmcBtn = panel.el.querySelector('[data-bm="read-bmc"]');
+    bmcBtn.addEventListener('click', readBmcStorage);
+
+    // Stockage publié par le BMC (Redfish) : tableau d'information et cadre RAID.
+    async function readBmcStorage() {
+      if (!creds.password) { alert(tr('bmc.needCreds')); return; }
+      bmcBtn.disabled = true;
+      discStatus.textContent = '…';
+      try {
+        const r = await fetch('/api/bmc/storage', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, user: creds.user, password: creds.password }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          discStatus.innerHTML = `<span class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)}</span>`;
+          return;
+        }
+        redfish = { ...d, at: Date.now() / 1000 };
+        const ctrls = d.controllers || [];
+        const count = ctrls.reduce((n, c) => n + (c.drives || []).length, 0);
+        panel.el.querySelector('#bm-raid-box').innerHTML = raidHtml(d);
+        discStatus.innerHTML = ctrls.length
+          ? `<span class="bm-imported">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.disk.redfishRead', { count }))}</span>`
+          : `<span class="bm-disk-hint">${Icons.svg('warn', { size: 12 })} ${esc(tr('bmc.disk.redfishNone'))}</span>`;
+        renderDisks();
+      } catch (e) {
+        discStatus.innerHTML = `<span class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
+      } finally {
+        bmcBtn.disabled = false;
+      }
+    }
     discBtn.addEventListener('click', discoverBoot);
 
     // Nom du cluster créé : le nom d'hôte tant qu'il n'a pas été changé.
@@ -1015,10 +1081,13 @@ const BMC = (() => {
 
     // Refus commun à l'aperçu et à l'installation.
     function refusalFor(d, status) {
-      // refus par disque (contrôles des rôles, pools) : [disque, raison]
-      if (Array.isArray(d.reasons)) {
-        markServerIssues(d.reasons);
-        const items = d.reasons.map(([p, c]) => `<li><code>${esc(p)}</code> : ${esc(reasonText(c))}</li>`).join('');
+      // refus par disque : [disque, raison] (pools) ou chemin -> raison
+      // (« invalid disks », contrôles des rôles avec l'inventaire)
+      if (Array.isArray(d.reasons) || d.error === 'invalid disks') {
+        const pairs = Array.isArray(d.reasons) ? d.reasons
+          : (d.fields || Object.keys(d.reasons || {})).map(p => [p, (d.reasons || {})[p]]);
+        markServerIssues(pairs);
+        const items = pairs.map(([p, c]) => `<li>${p ? `<code>${esc(p)}</code> : ` : ''}${esc(reasonText(c))}</li>`).join('');
         return `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.disk.refused'))}
           <ul class="bm-paths">${items}</ul></div>`;
       }
@@ -1039,7 +1108,8 @@ const BMC = (() => {
       try {
         const r = await fetch('/api/baremetal/config/preview', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(collect()),
+          // l'hôte permet au serveur de contrôler les disques sur l'inventaire
+          body: JSON.stringify({ ...collect(), bmc_host: host }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { msg.innerHTML = refusalFor(d, r.status); return; }
