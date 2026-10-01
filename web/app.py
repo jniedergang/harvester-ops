@@ -66,6 +66,18 @@ import markdown
 import y_py as Y
 import pxe_server
 import read_share as _rsh
+import read_workers as _rw
+
+# v1.83.0 : processus lecteur (read_workers.py) : il calcule des écrans pour la
+# console principale, sans surveiller de cluster ni lancer d'action. Le
+# kubeconfig, le rôle et la personne lui sont imposés par la console.
+# « spawn » réimporte le script principal dans chaque lecteur, sous le nom
+# __mp_main__ : c'est cet import-là qui doit se savoir lecteur (vu sur le banc :
+# un second import complet doublait les métriques et tuait le lecteur).
+IS_READ_WORKER = (os.environ.get("HARVESTER_OPS_READ_WORKER") == "1"
+                  or (__name__ == "__mp_main__"
+                      and os.environ.get("HARVESTER_OPS_READ_WORKER_SPAWN") == "1"))
+_READ_WORKER_CTX = {}
 import harvester_install_schema as _his
 from harvester_install_schema import InstallConfigError, split_imported_config  # noqa: F401
 import vnc_mux
@@ -429,6 +441,34 @@ def load_config():
     return cfg
 
 
+_CONFIG_RO = {"sig": None, "cfg": None}
+_CONFIG_RO_LOCK = threading.Lock()
+
+
+def load_config_ro():
+    """La même configuration que load_config(), PARTAGÉE et sans copie, pour
+    les lectures fréquentes (v1.83.0 : la copie profonde coûtait ~40 ms par
+    écran avec 30 clusters déclarés). Ne JAMAIS la modifier. Relue dès que
+    config.yaml ou une déclaration change (date, taille, inode)."""
+    def sig_of(p):
+        try:
+            st = os.stat(p)
+            return (str(p), st.st_mtime_ns, st.st_size, st.st_ino)
+        except OSError:
+            return (str(p), None)
+    # la fonction source fait partie de la clé : une configuration fournie
+    # autrement (tests, outils) n'est jamais masquée par la précédente
+    sig = (load_config, sig_of(CONFIG_PATH),
+           tuple(sig_of(p) for p in _cd.decl_files(_state_dir())))
+    with _CONFIG_RO_LOCK:
+        if _CONFIG_RO["sig"] == sig:
+            return _CONFIG_RO["cfg"]
+    cfg = load_config()
+    with _CONFIG_RO_LOCK:
+        _CONFIG_RO.update(sig=sig, cfg=cfg)
+    return cfg
+
+
 def _config_cluster_names():
     """Noms des clusters déclarés dans config.yaml par l'opérateur."""
     try:
@@ -759,6 +799,8 @@ READ_SHARE = _rsh.ReadShare()
 READ_SHARE_TTL = float(os.environ.get("HARVESTER_OPS_READ_SHARE_TTL", "3"))
 READ_SHARE_ENABLED = os.environ.get("HARVESTER_OPS_READ_SHARE", "1") not in ("0", "false", "no")
 _READ_SHARE_SKIP_HEADERS = {"content-length", "set-cookie", "content-type"}
+# v1.83.0 : écrans calculés par les processus lecteurs (read_workers.py)
+HEAVY_READS = {"api_topology", "api_vms_list", "api_storage_map", "api_network_fabric"}
 
 
 def shared_read(ttl=None, per_user=False, scope=None):
@@ -778,7 +820,16 @@ def shared_read(ttl=None, per_user=False, scope=None):
                    _kubectl_for_cluster(cluster) if cluster else None,
                    current_role(), current_user() if per_user else None)
 
+            kc_for_worker = key[4]
+
             def load():
+                if request.endpoint in HEAVY_READS and _rw.configured() and not IS_READ_WORKER:
+                    try:
+                        return _rw.render(request.endpoint, dict(kwargs),
+                                          request.query_string.decode(), kc_for_worker,
+                                          current_role(), current_user())
+                    except Exception as e:      # lecteur indisponible : ici, comme avant
+                        log.warning("read worker failed for %s: %s", request.endpoint, e)
                 resp = app.make_response(f(*args, **kwargs))
                 if resp.is_streamed or resp.direct_passthrough:
                     return (None, resp)
@@ -944,6 +995,8 @@ def load_roles():
 
 
 def current_user():
+    if _READ_WORKER_CTX:
+        return _READ_WORKER_CTX.get("user") or ""
     sess = _sso_session()
     if sess is not None:
         return sess.login
@@ -969,6 +1022,8 @@ def roles_active():
 
 
 def current_role():
+    if _READ_WORKER_CTX:
+        return _READ_WORKER_CTX.get("role") or "viewer"
     sess = _sso_session()
     if sess is not None:
         return sess.role
@@ -3802,11 +3857,31 @@ def _note_cluster_denial(stderr):
             seen.append(item)
 
 
+def _kube_rest(argv, kwargs):
+    """v1.83.0 : un `kubectl get ... -o json` fait directement contre l'API
+    (bin/lib/kube_rest.py), même résultat sans processus ; None quand le cas
+    est laissé à kubectl. 94 % du CPU de la console partait dans kubectl."""
+    if (not argv or os.path.basename(str(argv[0])) != "kubectl"
+            or kwargs.get("input") is not None or kwargs.get("stdin") is not None):
+        return None
+    import kube_rest as _kr
+    r = _kr.run(argv, timeout=kwargs.get("timeout") or 30)
+    if r is None:
+        return None
+    if r.returncode != 0:
+        r.stdout = ""
+    if not (kwargs.get("text") or kwargs.get("universal_newlines")):
+        r.as_bytes()
+    return r
+
+
 def _kubectl_run(argv, **kwargs):
     """`subprocess.run` d'un kubectl, qui retient un refus de la RBAC. Les
     appels directs rendaient une vue vide sans dire que le cluster avait
     refusé (vu en réel avec un compte « membre du cluster » de Rancher)."""
-    r = subprocess.run(argv, **kwargs)
+    r = _kube_rest(argv, kwargs)
+    if r is None:
+        r = subprocess.run(argv, **kwargs)
     err = getattr(r, "stderr", None)
     if getattr(r, "returncode", 0) != 0 and isinstance(err, (str, bytes)):
         _note_cluster_denial(err.decode(errors="replace") if isinstance(err, bytes) else err)
@@ -3867,6 +3942,8 @@ def _kubectl_json(kc, *args, timeout=15, cluster=None):
             _note_cluster_denial(r.stderr)
             return None
         metric_kubectl_calls.labels(status="ok", cluster=name).inc()
+        if getattr(r, "data", None) is not None:
+            return r.data
         return json.loads(r.stdout)
     except subprocess.TimeoutExpired:
         log.warning("[%s] kubectl %s timeout", name, " ".join(args))
@@ -7398,7 +7475,9 @@ def _kubectl_for_cluster(cluster):
     l'appelant, et les ~50 sites d'appel kubectl en héritent sans être
     modifiés. Rendu inchangé quand la délégation est éteinte.
     """
-    cfg = load_config()
+    if _READ_WORKER_CTX:
+        return _READ_WORKER_CTX.get("kc")
+    cfg = load_config_ro()
     for c in cfg.get("clusters", []):
         if c["name"] == cluster:
             if _sso_session() is not None:
@@ -7827,8 +7906,10 @@ def _cluster_snapshot_all(kc, resources):
             "-o", "json"]
     data = None
     try:
-        r = subprocess.run(args, capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 and r.stdout.strip():
+        r = _kubectl_run(args, capture_output=True, text=True, timeout=30)
+        if r.returncode == 0 and getattr(r, "data", None) is not None:
+            data = r.data
+        elif r.returncode == 0 and r.stdout.strip():
             data = json.loads(r.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         data = None
@@ -8039,8 +8120,14 @@ def _watch_delay(base, rnd=None):
     return base * (0.9 + 0.2 * (rnd if rnd is not None else random.random()))
 
 
+_MODULE_READY = threading.Event()   # posé à la fin du module
+
+
 def _cluster_watch_thread(cluster, start_delay=0.0):
     log_watch.info("starting cluster watcher for %s", cluster)
+    # les surveillances démarrent pendant l'import : attendre la fin du module
+    # (vu sur le banc : premier tour perdu sur « ACCOUNTS_PATH is not defined »)
+    _MODULE_READY.wait(60)
     # v1.81.0 : les clusters ne sont plus tous relus au même instant. Au
     # démarrage, chaque surveillance part décalée dans le premier intervalle,
     # et l'aléa de chaque tour empêche qu'elles se resynchronisent : la
@@ -8099,12 +8186,14 @@ def _update_outcome_watch(timeout=1200, step=5):
         time.sleep(step)
 
 
-threading.Thread(target=_update_outcome_watch, daemon=True, name="update-outcome").start()
+if not IS_READ_WORKER:
+    threading.Thread(target=_update_outcome_watch, daemon=True, name="update-outcome").start()
 
 # Kick off watchers at import — the threads are daemons so Flask shutdown
 # cleans them up.
 try:
-    _start_cluster_watchers()
+    if not IS_READ_WORKER:
+        _start_cluster_watchers()
 except Exception as _e:
     log_watch.error("startup failed: %s", _e)
 
@@ -8188,9 +8277,10 @@ def api_vms_list(cluster):
     # v1.81.0 : VMs et VMIs lues de front (l'une attendait l'autre)
     from concurrent.futures import ThreadPoolExecutor
     _pool = ThreadPoolExecutor(max_workers=1)
-    _vmi_fut = _pool.submit(subprocess.check_output,
-                            ["kubectl", "--kubeconfig", kc, "get", "vmi", "-A", "-o", "json"],
-                            stderr=subprocess.DEVNULL, timeout=20)
+    # le fil rend le résultat brut : un refus des VMIs par la RBAC est retenu
+    # ensuite dans le fil de la requête (g n'existe pas dans l'autre)
+    _vmi_fut = _pool.submit(_kubectl_run, ["kubectl", "--kubeconfig", kc, "get", "vmi", "-A", "-o", "json"],
+                            capture_output=True, text=True, timeout=20)
     _pool.shutdown(wait=False)
     try:
         proc = _kubectl_run(
@@ -8202,7 +8292,7 @@ def api_vms_list(cluster):
             _note_cluster_denial(proc.stderr)
             return jsonify({"error": "kubectl failed",
                             "detail": f"exit code {proc.returncode}"}), 500
-        data = json.loads(proc.stdout)
+        data = proc.data if getattr(proc, "data", None) is not None else json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
         return jsonify({"error": "kubectl failed",
                         "detail": _safe_proc_error(e)}), 500
@@ -8210,8 +8300,12 @@ def api_vms_list(cluster):
     # Fetch VMIs to expose live phase + agent connection + paused state
     vmi_state = {}
     try:
-        out_vmi = _vmi_fut.result()
-        for v in json.loads(out_vmi).get("items", []):
+        _vr = _vmi_fut.result()
+        if _vr.returncode != 0:
+            _note_cluster_denial(_vr.stderr)
+            raise ValueError("vmi unreadable")
+        _vmi = _vr.data if getattr(_vr, "data", None) is not None else json.loads(_vr.stdout)
+        for v in _vmi.get("items", []):
             ns = v["metadata"]["namespace"]
             name = v["metadata"]["name"]
             phase = v.get("status", {}).get("phase", "Unknown")
@@ -12058,7 +12152,8 @@ def _capi_bundle_migrate_legacy():
 
 
 try:
-    _capi_bundle_migrate_legacy()
+    if not IS_READ_WORKER:
+        _capi_bundle_migrate_legacy()
 except Exception as _e:
     log_capi.error("migration error: %s", _e)
 # Order matters: cert-manager + capi first, then bootstrap, then control-plane,
@@ -21708,6 +21803,9 @@ def api_notes_get(doc_id):
 # -----------------------------------------------------------------------------
 # Entry point
 # -----------------------------------------------------------------------------
+_MODULE_READY.set()
+
+
 if __name__ == "__main__":
     cfg = load_config().get("web", {})
     host = cfg.get("bind_host", "0.0.0.0")

@@ -45,8 +45,14 @@ load_cluster "$CLUSTER_NAME" >/dev/null
 
 if [[ "$OUTPUT" == "json" ]]; then
     # Emit a compact JSON the web UI can consume
+    HOPS_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib" \
     python3 - "$KUBECONFIG_PATH" "$NAMESPACE" <<'PY'
 import json, subprocess, sys, os
+sys.path.insert(0, os.environ.get("HOPS_LIB", ""))
+try:
+    import kube_rest  # v1.83.0 : lectures directes contre l'API, sans kubectl
+except ImportError:
+    kube_rest = None
 from concurrent.futures import ThreadPoolExecutor
 
 kubeconfig, ns_filter = sys.argv[1], sys.argv[2]
@@ -57,9 +63,14 @@ denied = []
 
 
 def kc(*args):
+    argv = ["kubectl", "--kubeconfig", kubeconfig, *args]
+    r = kube_rest.run(argv) if kube_rest else None
+    if r is not None:
+        if r.returncode != 0:
+            return {"items": [], "_err": r.stderr}
+        return r.data
     try:
-        r = subprocess.run(["kubectl", "--kubeconfig", kubeconfig, *args],
-                           env=env, capture_output=True, text=True)
+        r = subprocess.run(argv, env=env, capture_output=True, text=True)
     except OSError:
         return {"items": []}
     if r.returncode != 0:

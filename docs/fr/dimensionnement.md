@@ -23,6 +23,23 @@ quand beaucoup de personnes l'utilisent en même temps.
   pas (date, taille ou inode), avec libyaml quand elle est installée. Ils
   étaient réanalysés plusieurs fois par requête, ce qui faisait l'essentiel
   du CPU de la console.
+- **Lectures sans kubectl (1.83.0).** Mesuré sur 30 clusters simulés de 200
+  VMs : 94 % du CPU de la console partait dans les `kubectl get -o json`
+  qu'elle lance (chaque appel décode puis réencode toute la liste). La
+  console et ses scripts font maintenant ces lectures directement contre l'API
+  Kubernetes, avec le même résultat que kubectl (une `List` dont les objets
+  portent leur `kind`, l'objet seul pour un nom, et le texte d'erreur de
+  kubectl quand le cluster refuse), connexions gardées ouvertes. Le reste
+  passe toujours par kubectl : écritures, autres formats de sortie,
+  kubeconfigs qui s'authentifient par un plugin `exec` ou un proxy.
+- **Processus lecteurs (1.83.0).** Une fois les lectures sorties de kubectl,
+  les écrans les plus lourds (topologie, liste des VMs, carte du stockage,
+  fabrique réseau) sont construits dans quelques processus lecteurs séparés,
+  chacun sur son cœur, au lieu d'attendre derrière l'unique processus Python.
+  Le processus principal continue de décider qui vous êtes, votre rôle et
+  l'identité présentée au cluster ; un lecteur ne fait que calculer l'écran et
+  le rendre, avec les refus éventuels du cluster. Un lecteur repart à neuf
+  toutes les 200 vues pour borner sa mémoire, et s'arrête avec la console.
 - **Les surveillances de clusters sont étalées.** Chacune démarre à son propre
   décalage dans le premier intervalle, et chaque tour varie de 10 % au plus :
   dix clusters ne sont plus relus dans la même seconde toutes les 15 secondes.
@@ -33,6 +50,9 @@ Réglages (environnement du service) :
 |---|---|---|
 | `HARVESTER_OPS_READ_SHARE` | `1` | `0` coupe les lectures partagées |
 | `HARVESTER_OPS_READ_SHARE_TTL` | `3` | secondes pendant lesquelles une lecture sert |
+| `HARVESTER_OPS_KUBE_REST` | `1` | `0` renvoie toutes les lectures à kubectl |
+| `HARVESTER_OPS_READ_WORKERS` | 4 (moins sous 5 cœurs, 0 sous 3) | processus lecteurs ; `0` construit tous les écrans dans le processus principal |
+| `HARVESTER_OPS_READ_WORKER_TASKS` | `200` | écrans construits par un lecteur avant qu'il reparte à neuf |
 | `HARVESTER_OPS_WATCH_INTERVAL` | `15` | secondes entre deux tours de surveillance |
 | `HARVESTER_OPS_WATCH_IDLE_AFTER` / `_IDLE_INTERVAL` | `300` / `120` | surveillance ralentie quand personne n'utilise la console |
 
@@ -53,15 +73,37 @@ des VMs, aperçu, topologie et usage toutes les 5 secondes. Latence médiane
 À 60 personnes, la liste des VMs est passée de 4,8 s à 0,17 s et les jauges
 d'usage de 7 s à 0,28 s. La mémoire est restée sous 140 Mo.
 
+## Mesuré avec beaucoup de clusters (1.83.0)
+
+Clusters simulés (`tests/bench/kwok`, vrais serveurs d'API sans machine
+derrière), 200 VMs chacun, une personne par cluster : rien ne se partage entre
+personnes. Médiane / 95e centile de la topologie et de la liste des VMs, et CPU
+de la console avec tous les processus qu'elle lance :
+
+| Clusters, personnes | Avant 1.83.0 | 1.83.0 |
+|---|---|---|
+| 30 clusters, surveillances seules | 1,9 cœur | 0,15 cœur |
+| 30 clusters, 30 personnes | topologie 5,4 / 8,1 s, VMs 4,4 / 7,2 s, 10,3 cœurs | topologie 1,3 / 3,7 s, VMs 0,8 / 2,7 s, 3,4 cœurs |
+| 60 clusters, surveillances seules | 3,5 cœurs | 0,3 cœur |
+| 60 clusters, 30 personnes | topologie 7,0 / 9,8 s, VMs 7,3 / 11,4 s, 9,6 cœurs | topologie 1,8 / 2,9 s, VMs 1,6 / 3,2 s, 3,7 cœurs |
+| 60 clusters, 60 personnes | topologie 16,5 / 21,1 s, VMs 11,9 / 20,2 s, 9,7 cœurs | topologie 6,3 / 8,9 s, VMs 5,6 / 7,6 s, 3,7 cœurs |
+
+Le processus de la console reste sous 450 Mo ; chaque processus lecteur prend
+environ 175 Mo. L'essai à 60 personnes était limité par la machine du banc :
+les 60 serveurs d'API simulés tournaient sur la même machine que la console
+(charge au-dessus de 40 sur 28 cœurs), ce qu'un déploiement réel ne fait pas,
+et passer de 4 à 8 lecteurs n'a rien changé. Ces chiffres sont un majorant,
+pas la limite de la console.
+
 ## Ressources recommandées
 
 | Échelle | Hôte de la console |
 |---|---|
-| Jusqu'à 10 clusters, quelques centaines de VMs, jusqu'à 60 personnes | 2 vCPU, 2 Gio |
-| 10 à 30 clusters | 4 vCPU, 4 Gio |
+| Jusqu'à 10 clusters, quelques centaines de VMs, jusqu'à 60 personnes | 2 vCPU, 2 Gio (lecteurs coupés sous 3 cœurs) |
+| Jusqu'à 30 clusters, quelques milliers de VMs, 30 personnes | 4 vCPU, 4 Gio |
+| Jusqu'à 60 clusters, environ 12 000 VMs, 30 personnes | 6 vCPU, 6 Gio |
 
-Le nombre de personnes ne fait plus le coût ; le nombre de clusters et
-d'objets par cluster, si (chaque surveillance relit son cluster toutes les 15
-secondes quand quelqu'un utilise la console). Au-delà de 30 clusters ou de
-plusieurs milliers de VMs, relever `HARVESTER_OPS_WATCH_INTERVAL` et mesurer :
-ces échelles n'ont pas encore été essayées en charge.
+Chaque processus lecteur ajoute environ 175 Mo. Au-delà de 60 clusters, ou avec
+beaucoup de personnes chacune sur un cluster différent, mesurer avec le banc
+avant de s'engager sur un chiffre ; relever `HARVESTER_OPS_WATCH_INTERVAL`
+baisse la charge constante des surveillances.

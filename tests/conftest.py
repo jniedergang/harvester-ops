@@ -22,6 +22,11 @@ from pathlib import Path
 # tests that import `app` directly (in-process test_client) don't
 # instantiate the limiter at module load.
 os.environ.setdefault("HARVESTER_OPS_DISABLE_RATELIMIT", "1")
+# v1.83.0 : les tests simulent kubectl (faux binaire, subprocess remplacé) ; les
+# lectures directes contre l'API se testent à part (test_kube_rest_183.py)
+os.environ.setdefault("HARVESTER_OPS_KUBE_REST", "0")
+# ni processus lecteurs (read_workers.py), testés à part
+os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
 # v1.54.0 : les tests qui importent `app` dans le processus ne doivent pas
 # écrire dans les espaces Terraform ni les déclarations réels (audit D17).
 import tempfile as _tempfile  # noqa: E402

@@ -191,7 +191,8 @@ def _fake_vms(wapp, monkeypatch, calls):
         stdout = '{"items": []}'
 
     def run(argv, **k):
-        calls.append(argv)
+        if "vmi" not in argv:          # une lecture = VMs + VMIs ; on compte les VMs
+            calls.append(argv)
         return R()
     monkeypatch.setattr(wapp, "_kubectl_run", run)
     monkeypatch.setattr(sp, "check_output", lambda *a, **k: b'{"items": []}')

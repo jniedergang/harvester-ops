@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.0] - 2026-10-01 - Reads without kubectl and read workers: many clusters at a fraction of the CPU
+
+### Changed
+- Reads go straight to the Kubernetes API instead of starting `kubectl get -o json`: measured on 30 simulated clusters of 200 VMs, 94 % of the console's CPU went into those kubectl processes (each decodes then re-encodes the whole list). The result is the same as kubectl's (a `List` whose objects carry their `kind` and `apiVersion`, the object alone for a name, kubectl's own error text when the cluster refuses, so refusals are still told), connections are kept open, 429 answers are retried as kubectl does. Anything else still uses kubectl: writes, other output formats, kubeconfigs authenticating through an `exec` plugin, a proxy or several impersonated groups. The overview script (`harvester-status.sh`) reads the same way. `HARVESTER_OPS_KUBE_REST=0` sends every read back to kubectl.
+- The heaviest screens (topology, VM list, storage map, network fabric) are built in read worker processes, each on its own core, instead of queuing behind the single Python process. The main process keeps deciding the person, the role and the identity presented to the cluster; a worker computes the screen and returns it with the cluster's refusals. A worker restarts after 200 screens and stops with the console. `HARVESTER_OPS_READ_WORKERS` (default 4, fewer on small hosts, `0` to build everything in the main process), `HARVESTER_OPS_READ_WORKER_TASKS`.
+- The cluster list behind every screen is read without copying the configuration (it cost about 40 ms per screen with 30 clusters declared).
+- Cluster watchers wait for the console to finish loading before their first round.
+
+### Fixed
+- A refusal of the VM instances by the cluster's RBAC is now told on the VM list (it was dropped silently).
+
+### Added
+- `tests/bench/kwok`: a load bench of simulated clusters (kwok) filled like Harvester, and a load driver reporting latency per screen and the CPU of the console and of the processes it starts. Sizing guide updated with the figures.
+
+### Tests
+- `test_kube_rest_183.py` against a fake API server: lists with kinds, grouped and named reads, label selectors, default namespace, errors worded like kubectl, impersonation headers, cases left to kubectl, unreachable server answered once, text and bytes like subprocess, a kept connection closed by the server retried on a new one (found under load on the bench). `test_read_workers_183.py`: a real worker builds the VM list with the given identity and brings the refusal back, survives the end of the request thread that created it (found on the bench: `PR_SET_PDEATHSIG` follows the thread and killed workers at birth), never watches nor tracks.
+- Checked for real: the same reads through kubectl and directly on harv1 and through Rancher's proxy (`/k8s/clusters/<id>`) give identical results, error texts included; the main screens of a console on the real configuration are identical with and without this release (live gauges and timestamps aside).
+- Load bench, before and after, one person per cluster: 30 clusters and 30 people, topology 5.4 s -> 1.3 s and VM list 4.4 s -> 0.8 s at the median, 10.3 -> 3.4 cores; 60 clusters (12,000 VMs) and 30 people, topology 7.0 s -> 1.8 s, VM list 7.3 s -> 1.6 s, 9.6 -> 3.7 cores; watchers alone on 60 clusters 3.5 -> 0.3 core; console memory under 450 MB (was up to 2 GB). Past 30 people the bench host itself saturated (60 API servers on the same machine).
+
 ## [1.82.0] - 2026-10-01 - Update the console from the interface, online or from an archive
 
 ### Added
