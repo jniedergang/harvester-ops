@@ -5307,3 +5307,11 @@ td.fk-reason { max-width: 260px; }
 #versions-pane-history { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
 #versions-pane-history[hidden] { display: none; }
 #versions-pane-history .versions-body { min-height: 0; }
+/* v1.83.3 : la fenêtre des réglages garde sa taille d'un onglet à l'autre
+   (elle suivait la hauteur du contenu, centrée : les onglets sautaient), le
+   contenu défile dedans ; les onglets tiennent sur une ligne. */
+#settings-modal .modal { width: 95%; max-width: 980px; height: min(86vh, 780px); }
+#settings-modal .settings-tabs { flex-wrap: nowrap; overflow: hidden; }
+#settings-modal .settings-tab { flex: 1 1 0; min-width: 0; padding: 10px 6px;
+  white-space: normal; text-align: center; line-height: 1.25; }
+#settings-modal .modal-body { min-height: 0; }

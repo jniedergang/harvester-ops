@@ -4,6 +4,14 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.3] - 2026-10-01 - The settings window keeps its size and its tabs
+
+### Fixed
+- The settings window no longer changes size or place from one tab to the next: it followed the height of each tab's content and stayed centred, so the window and its tabs jumped at every click. It now has a fixed size, the content scrolls inside, and the tabs share the width on one line (long labels on two lines) instead of overflowing past the window.
+
+### Tests
+- `tests/e2e/test_settings_stable_1833.py`: at two screen sizes, the window's box and every tab's position stay the same on every tab, the tabs on one line, the window inside the screen (fails without the fix).
+
 ## [1.83.2] - 2026-10-01 - A MAC conflict refused before the switchover, a real two-machine bare-metal batch, and a warm-migration video
 
 ### Fixed
