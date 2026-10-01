@@ -42,7 +42,9 @@ people use it at once.
   offset within the first interval, and every cycle varies by up to 10 %, so
   ten clusters are not read in the same second every 15 seconds.
 
-Settings (environment of the service):
+Settings (environment of the service). For the packaged service, write them
+as `VAR=value` lines in `/etc/harvester-ops/env`, then
+`systemctl restart harvester-ops`:
 
 | Variable | Default | Effect |
 |---|---|---|

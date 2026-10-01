@@ -12,6 +12,8 @@ RestartSec=10s
 TimeoutStartSec=60s
 
 # Reads ports/paths from /etc/harvester-ops/config.yaml
+# Performance settings (docs/en/sizing.md) go in /etc/harvester-ops/env, as
+# VAR=value lines; only the variables passed with -e below reach the console.
 EnvironmentFile=-/etc/harvester-ops/env
 
 ExecStartPre=-/usr/bin/podman rm -f harvester-ops
@@ -46,6 +48,14 @@ ExecStart=/bin/sh -c 'u=$$(id -u harvester-ops); g=$$(id -g harvester-ops); \
     -e HARVESTER_OPS_CAPI_BUNDLE=/var/lib/harvester-ops/capi-bundles/capi-bundle.tar.gz \
     -e HARVESTER_OPS_IMAGE_UPLOAD_PORT=$${HARVESTER_OPS_IMAGE_UPLOAD_PORT:-8092} \
     -e HARVESTER_OPS_VDDK_BASE=$${HARVESTER_OPS_VDDK_BASE:-} \
+    -e HARVESTER_OPS_KUBE_REST=$${HARVESTER_OPS_KUBE_REST:-1} \
+    -e HARVESTER_OPS_READ_WORKERS=$${HARVESTER_OPS_READ_WORKERS:-} \
+    -e HARVESTER_OPS_READ_WORKER_TASKS=$${HARVESTER_OPS_READ_WORKER_TASKS:-200} \
+    -e HARVESTER_OPS_READ_SHARE=$${HARVESTER_OPS_READ_SHARE:-1} \
+    -e HARVESTER_OPS_READ_SHARE_TTL=$${HARVESTER_OPS_READ_SHARE_TTL:-3} \
+    -e HARVESTER_OPS_WATCH_INTERVAL=$${HARVESTER_OPS_WATCH_INTERVAL:-15} \
+    -e HARVESTER_OPS_WATCH_IDLE_AFTER=$${HARVESTER_OPS_WATCH_IDLE_AFTER:-300} \
+    -e HARVESTER_OPS_WATCH_IDLE_INTERVAL=$${HARVESTER_OPS_WATCH_IDLE_INTERVAL:-120} \
     localhost/harvester-ops:latest serve'
 
 ExecStop=/usr/bin/podman stop -t 10 harvester-ops

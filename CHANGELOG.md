@@ -4,6 +4,14 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.1] - 2026-10-01 - Performance settings reach the packaged service
+
+### Fixed
+- The packaged service passes the performance settings to the console: reads without kubectl, read workers and their restart, shared reads and their duration, the cluster watcher's intervals. The systemd unit only hands the container the variables it names, and none of these were named, so `/etc/harvester-ops/env` could not tune them (found on the update test host: read workers could not be turned on). Numbers get a default, so an empty value no longer stops the console.
+
+### Tests
+- `test_unit_settings_1831.py`: every setting documented in the sizing guide reaches the container, with a numeric default where the console reads a number. Checked for real by updating the test host through the Update tab and turning read workers on in `/etc/harvester-ops/env`.
+
 ## [1.83.0] - 2026-10-01 - Reads without kubectl and read workers: many clusters at a fraction of the CPU
 
 ### Changed

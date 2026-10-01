@@ -44,7 +44,9 @@ quand beaucoup de personnes l'utilisent en même temps.
   décalage dans le premier intervalle, et chaque tour varie de 10 % au plus :
   dix clusters ne sont plus relus dans la même seconde toutes les 15 secondes.
 
-Réglages (environnement du service) :
+Réglages (environnement du service). Pour le service packagé, les écrire en
+lignes `VAR=valeur` dans `/etc/harvester-ops/env`, puis
+`systemctl restart harvester-ops` :
 
 | Variable | Défaut | Effet |
 |---|---|---|
