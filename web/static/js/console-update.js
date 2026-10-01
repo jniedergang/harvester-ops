@@ -1,5 +1,5 @@
 /**
- * harvester-ops — mise à jour de la console depuis l'interface (v1.82.0)
+ * harvester-ops : mise à jour de la console depuis l'interface (v1.82.0)
  *
  * Onglet « Mise à jour » de la fenêtre des versions. En ligne : la console lit
  * release.json à la source réglée, télécharge l'archive et sa signature. Hors
