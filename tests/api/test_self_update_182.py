@@ -361,6 +361,8 @@ def test_upload_then_apply_hands_over_to_the_agent(console, keys, tmp_path):
         assert r.get_json()["staged"]["ok"] is True
         st = c.get("/api/update/status").get_json()
         assert st["staged"][0]["version"] == "1.82.0" and st["staged"][0]["newer"]
+        # lancée depuis le dépôt git : dit, pour ne pas alarmer (1.83.5)
+        assert st["from_sources"] is True
         # pas d'agent sur l'hôte : on le dit
         r = c.post("/api/update/apply", json={"archive": a.name})
         assert r.status_code == 409 and "agent" in r.get_json()["error"]

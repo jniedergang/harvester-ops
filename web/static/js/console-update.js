@@ -89,7 +89,13 @@ const ConsoleUpdate = (() => {
     if (!c) return '';
     if (!c.ok) return `<p class="upd-err">${esc(tr('upd.check.failed', { err: c.error || '?' }))}</p>`;
     const rel = c.release;
-    if (!c.newer) return `<p>${esc(tr('upd.check.uptodate', { v: rel.version }))}</p>`;
+    const when = c.ts ? ' ' + tr('upd.check.at', { t: new Date(c.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }) : '';
+    if (!c.newer) {
+      // une source plus ancienne que la console n'est pas « à jour » : on le dit
+      const msg = rel.version === st.current ? tr('upd.check.uptodate', { v: rel.version })
+        : tr('upd.check.ahead', { v: rel.version, cur: st.current });
+      return `<p>${esc(msg + when)}</p>`;
+    }
     return `<p class="upd-ok">${esc(tr('upd.check.newer', { v: rel.version, date: rel.date || '' }))}
         ${rel.title ? ` : ${esc(rel.title)}` : ''}</p>
       ${notesBlock(rel)}
@@ -132,6 +138,7 @@ const ConsoleUpdate = (() => {
       <div class="upd-head">
         <p><strong>${esc(tr('upd.current', { v: st.current }))}</strong></p>
         ${st.agent ? `<p class="form-hint">${esc(tr('upd.agent.ok', { v: st.agent.installed || '?' }))}</p>`
+          : st.from_sources ? `<p class="form-hint">${esc(tr('upd.agent.sources'))}</p>`
           : `<p class="upd-err">${esc(tr('upd.agent.missing'))}</p>`}
         ${st.trusted_keys ? '' : `<p class="upd-err">${esc(tr('upd.keys.missing'))}</p>`}
         ${admin ? '' : `<p class="form-hint">${esc(tr('upd.adminOnly'))}</p>`}

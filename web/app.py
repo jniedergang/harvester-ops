@@ -2070,6 +2070,8 @@ def api_update_status():
         "check": check,
         "busy": len(_update_busy_actions()),
         "can_apply": current_role() == "admin",
+        # console lancée depuis un dépôt git : pas d'agent, et c'est normal
+        "from_sources": (Path(__file__).resolve().parent.parent / ".git").exists(),
     })
 
 

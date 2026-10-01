@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.5] - 2026-10-02 - Clearer update tab on a console run from the sources
+
+### Fixed
+- A console run from the sources showed "no update agent" in red, as if
+  broken: it now says, without alarm, that such a console is updated with git
+  (a packaged console without its agent still shows the error).
+- After a check, a source offering an older version than the console (seen
+  when the check ran before a release was published) read "Up to date: the
+  source offers 1.83.3" on a 1.83.4 console. The tab now says the console is
+  newer than the source, and shows the time of the check. Five languages.
+
+### Tests
+- `tests/e2e/test_update_tab_wording_1835.py`, and `from_sources` in the
+  update status API test.
+
 ## [1.83.4] - 2026-10-02 - The update tab says why it does not load
 
 ### Fixed
