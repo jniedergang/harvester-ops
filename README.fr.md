@@ -268,6 +268,7 @@ d'eux.
 [Architecture](docs/fr/architecture.md) ·
 [Installation](docs/fr/installation.md) ·
 [Bare-metal](docs/fr/bare-metal.md) ·
+[Dimensionnement](docs/fr/dimensionnement.md) ·
 [Dépannage](docs/fr/depannage.md) ·
 [Journal des versions](CHANGELOG.md) (en anglais)
 

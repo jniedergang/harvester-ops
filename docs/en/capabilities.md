@@ -2015,6 +2015,10 @@ either (the grouped read is retried kind by kind).
   count as a human, or the console would never be idle. Tune with
   `HARVESTER_OPS_WATCH_IDLE_AFTER` (default 300 s) and
   `HARVESTER_OPS_WATCH_IDLE_INTERVAL` (default 120 s).
+- **Shared reads and sizing (1.81.0)** - screens that refresh on their own are
+  read once for everyone with the same identity and role, and forgotten at
+  every write; measured figures and recommended resources in
+  [sizing.md](sizing.md).
 - **Action tracking + dock** — a persistent bottom dock shows in-progress
   and recent actions on every tab, with live step/log streaming over SSE
   (auto-reconnecting). Failed actions carry the underlying error (last

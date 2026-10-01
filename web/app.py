@@ -65,6 +65,7 @@ import yaml
 import markdown
 import y_py as Y
 import pxe_server
+import read_share as _rsh
 import harvester_install_schema as _his
 from harvester_install_schema import InstallConfigError, split_imported_config  # noqa: F401
 import vnc_mux
@@ -303,6 +304,10 @@ def _invalidate_cluster_caches(cluster):
     mutative action so the UI shows the post-change state without
     waiting for the 5s TTL to expire. Safe to call from any thread:
     each cache has its own lock."""
+    try:
+        READ_SHARE.invalidate(cluster)
+    except NameError:
+        pass
     # The cache modules import lazily so we late-bind.
     try:
         with _topology_lock:
@@ -392,7 +397,7 @@ def _load_config_file():
     cluster qui y est déclaré."""
     if not CONFIG_PATH.exists():
         return {"clusters": [], "web": {}, "settings": {}}
-    return yaml.safe_load(CONFIG_PATH.read_text()) or {}
+    return _rsh.yaml_file(CONFIG_PATH) or {}
 
 
 def _state_dir():
@@ -405,7 +410,7 @@ def _state_dir():
 
 def _read_decl(path):
     try:
-        return yaml.safe_load(Path(path).read_text())
+        return _rsh.yaml_file(path)
     except (OSError, yaml.YAMLError, UnicodeDecodeError) as e:
         log.warning("cluster declaration %s unreadable: %s", Path(path).name, type(e).__name__)
         return None
@@ -741,6 +746,70 @@ def requires_auth(f):
                         "login": "/login"}), 401
     return decorated
 
+
+
+# -----------------------------------------------------------------------------
+# v1.81.0 : lectures partagées entre les personnes connectées (read_share.py)
+# -----------------------------------------------------------------------------
+# Placé SOUS @requires_auth : une réponse partagée ne sort jamais avant la
+# vérification de l'identité. La clé porte le kubeconfig rendu pour
+# l'appelant (identité présentée au cluster) et son rôle dans la console :
+# deux personnes aux droits différents ne partagent rien.
+READ_SHARE = _rsh.ReadShare()
+READ_SHARE_TTL = float(os.environ.get("HARVESTER_OPS_READ_SHARE_TTL", "3"))
+READ_SHARE_ENABLED = os.environ.get("HARVESTER_OPS_READ_SHARE", "1") not in ("0", "false", "no")
+_READ_SHARE_SKIP_HEADERS = {"content-length", "set-cookie", "content-type"}
+
+
+def shared_read(ttl=None, per_user=False, scope=None):
+    """Décorateur d'une vue GET qui ne fait que lire. `?fresh=1` passe outre.
+    `scope` remplace le cluster en tête de clé pour une vue qui n'en a pas
+    (on l'invalide alors par ce nom)."""
+    def deco(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            if (not READ_SHARE_ENABLED or request.method != "GET"
+                    or request.args.get("fresh") == "1"):
+                return f(*args, **kwargs)
+            cluster = kwargs.get("cluster")
+            key = (scope or cluster, request.endpoint,
+                   tuple(sorted(request.args.items(multi=True))),
+                   tuple(sorted((k, str(v)) for k, v in kwargs.items())),
+                   _kubectl_for_cluster(cluster) if cluster else None,
+                   current_role(), current_user() if per_user else None)
+
+            def load():
+                resp = app.make_response(f(*args, **kwargs))
+                if resp.is_streamed or resp.direct_passthrough:
+                    return (None, resp)
+                headers = [(k, v) for k, v in resp.headers.items()
+                           if k.lower() not in _READ_SHARE_SKIP_HEADERS]
+                return (resp.status_code, resp.get_data(), resp.mimetype, headers,
+                        getattr(g, "cluster_denied", None),
+                        list(getattr(g, "cluster_denials", None) or []))
+
+            val = READ_SHARE.get(key, ttl or READ_SHARE_TTL, load,
+                                 keep=lambda v: v[0] == 200)
+            if val[0] is None:
+                return val[1]
+            status, body, mimetype, headers, denied, denials = val
+            # les refus constatés par la lecture partagée valent pour chacun
+            if denied:
+                g.cluster_denied = denied
+                g.cluster_denials = list(denials)
+            return Response(body, status=status, mimetype=mimetype, headers=headers)
+        return wrapped
+    return deco
+
+
+@app.after_request
+def _read_share_invalidate(response):
+    """Toute écriture vide les lectures partagées du cluster qu'elle touche
+    (de tous les clusters si la route n'en nomme pas)."""
+    if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        READ_SHARE.invalidate((request.view_args or {}).get("cluster"))
+        READ_SHARE.invalidate("_activity")
+    return response
 
 # =============================================================================
 # Rôles
@@ -1232,6 +1301,10 @@ class ActionRun:
         try:
             _actions_persist(self)
         except Exception:
+            pass
+        try:
+            READ_SHARE.invalidate("_activity")
+        except NameError:
             pass
         # v1.5.7: invalidate caches after the action so the UI sees the
         # post-mutation state immediately, not after the 5s TTL.
@@ -3185,6 +3258,7 @@ def api_clusters():
 
 @app.route("/api/status/<cluster>")
 @requires_auth
+@shared_read()
 def api_status(cluster):
     # Cluster déclaré mais hors tension : on le dit en deux secondes plutôt
     # que de faire patienter trente. Sans ça, l'écran tournait dans le vide
@@ -4542,6 +4616,7 @@ def api_vm_network_path(cluster, namespace, name):
 
 @app.route("/api/network-fabric/<cluster>")
 @requires_auth
+@shared_read()
 def api_network_fabric(cluster):
     """L'empilement réseau vu du côté de l'hôte."""
     kc = _kubectl_for_cluster(cluster)
@@ -4557,6 +4632,7 @@ def api_network_fabric(cluster):
 
 @app.route("/api/topology/<cluster>")
 @requires_auth
+@shared_read()
 def api_topology(cluster):
     """Hosts and VMs for the Overview's Cluster view (`cluster-map.js`).
     Cached server-side for TOPOLOGY_CACHE_TTL seconds. Pass `?fresh=1` to
@@ -4738,6 +4814,7 @@ def _reduce_cloudinit(item):
 
 @app.route("/api/namespaces/<cluster>")
 @requires_auth
+@shared_read()
 def api_list_namespaces(cluster):
     data, err = _list_k8s_resources(cluster, "ns")
     if err:
@@ -7563,8 +7640,22 @@ def _cluster_watch_iteration(cluster, kc):
         _watch_state_save(cluster, dict(prev_all))
 
 
-def _cluster_watch_thread(cluster):
+def _watch_delay(base, rnd=None):
+    """Délai jusqu'au tour suivant, avec ±10 % d'aléa : des surveillances
+    lancées ensemble ne restent pas synchronisées (v1.81.0)."""
+    import random
+    return base * (0.9 + 0.2 * (rnd if rnd is not None else random.random()))
+
+
+def _cluster_watch_thread(cluster, start_delay=0.0):
     log_watch.info("starting cluster watcher for %s", cluster)
+    # v1.81.0 : les clusters ne sont plus tous relus au même instant. Au
+    # démarrage, chaque surveillance part décalée dans le premier intervalle,
+    # et l'aléa de chaque tour empêche qu'elles se resynchronisent : la
+    # charge (processus kubectl, analyse JSON) s'étale au lieu d'arriver en
+    # rafale toutes les 15 s.
+    if start_delay:
+        time.sleep(start_delay)
     while True:
         try:
             kc = _kubectl_for_cluster(cluster)
@@ -7572,8 +7663,15 @@ def _cluster_watch_thread(cluster):
                 _cluster_watch_iteration(cluster, kc)
         except Exception as e:
             log_watch.warning("%s: %s", cluster, e)
-        time.sleep(CLUSTER_WATCH_IDLE_INTERVAL if _console_is_idle()
-                   else CLUSTER_WATCH_INTERVAL)
+        time.sleep(_watch_delay(CLUSTER_WATCH_IDLE_INTERVAL if _console_is_idle()
+                                else CLUSTER_WATCH_INTERVAL))
+
+
+def _watch_start_offsets(names, interval):
+    """Décalage de départ de chaque surveillance : réparties à pas égaux
+    sur un intervalle."""
+    n = max(1, len(names))
+    return {name: interval * i / n for i, name in enumerate(names)}
 
 
 def _start_cluster_watchers():
@@ -7582,11 +7680,13 @@ def _start_cluster_watchers():
         log_watch.info("disabled via HARVESTER_OPS_WATCH=0")
         return
     cfg = load_config()
+    offsets = _watch_start_offsets([c["name"] for c in cfg.get("clusters", [])],
+                                   CLUSTER_WATCH_INTERVAL)
     for c in cfg.get("clusters", []):
         name = c["name"]
         if name in _cluster_watch_threads:
             continue
-        t = threading.Thread(target=_cluster_watch_thread, args=(name,),
+        t = threading.Thread(target=_cluster_watch_thread, args=(name, offsets.get(name, 0.0)),
                              daemon=True, name=f"cluster-watch-{name}")
         _cluster_watch_threads[name] = t
         t.start()
@@ -7661,6 +7761,7 @@ threading.Thread(target=_memory_gc_loop, daemon=True,
 
 @app.route("/api/vms/<cluster>")
 @requires_auth
+@shared_read()
 def api_vms_list(cluster):
     """Return all VMs with their current shutdown-priority annotation, snapshot flag,
     runStrategy and live VMI phase (Running/Pending/Failed/...).
@@ -7675,6 +7776,13 @@ def api_vms_list(cluster):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    # v1.81.0 : VMs et VMIs lues de front (l'une attendait l'autre)
+    from concurrent.futures import ThreadPoolExecutor
+    _pool = ThreadPoolExecutor(max_workers=1)
+    _vmi_fut = _pool.submit(subprocess.check_output,
+                            ["kubectl", "--kubeconfig", kc, "get", "vmi", "-A", "-o", "json"],
+                            stderr=subprocess.DEVNULL, timeout=20)
+    _pool.shutdown(wait=False)
     try:
         proc = _kubectl_run(
             ["kubectl", "--kubeconfig", kc, "get", "vm", "-A", "-o", "json"],
@@ -7693,11 +7801,7 @@ def api_vms_list(cluster):
     # Fetch VMIs to expose live phase + agent connection + paused state
     vmi_state = {}
     try:
-        out_vmi = subprocess.check_output(
-            ["kubectl", "--kubeconfig", kc, "get", "vmi", "-A", "-o", "json"],
-            stderr=subprocess.DEVNULL,
-            timeout=20,
-        )
+        out_vmi = _vmi_fut.result()
         for v in json.loads(out_vmi).get("items", []):
             ns = v["metadata"]["namespace"]
             name = v["metadata"]["name"]
@@ -8702,6 +8806,7 @@ def _activity_matches(entry, cluster, status, action, q):
 
 @app.route("/api/activity")
 @requires_auth
+@shared_read(ttl=1.0, scope="_activity")
 def api_activity():
     """Return current and historical activity, optionally filtered.
 
@@ -8897,6 +9002,7 @@ def track_action(label, cluster, worker, *worker_args):
     run = ActionRun(run_id, label, cluster, [], dry_run=False)
     with ACTIONS_LOCK:
         ACTIONS[run_id] = run
+    READ_SHARE.invalidate("_activity")
     threading.Thread(target=worker, args=(run, *worker_args), daemon=True).start()
     return run_id
 
@@ -10191,6 +10297,7 @@ def _health_summary(volumes):
 
 @app.route("/api/storage-map/<cluster>")
 @requires_auth
+@shared_read()
 def api_storage_map(cluster):
     """Le stockage lu comme un datastore : classes, volumes, disques."""
     kc = _kubectl_for_cluster(cluster)
@@ -12456,6 +12563,7 @@ def _capi_spec_body():
 
 @app.route("/api/capi/<cluster>/stack")
 @requires_auth
+@shared_read()
 def api_capi_stack(cluster):
     """État de la pile Cluster API : Turtles, cœur, fournisseurs, ancienne
     installation, contournements. Lecture seule."""
@@ -12629,6 +12737,7 @@ def _net_request():
 
 @app.route("/api/kubeovn/<cluster>")
 @requires_auth
+@shared_read()
 def api_kubeovn(cluster):
     """VPC, subnets, réseaux overlay et ce qui cloche. Lecture seule, 5 s de
     cache par identité (la vue se relit toutes les 8 s)."""
@@ -12744,6 +12853,7 @@ def _ovn_extra_state(kc, cluster):
 
 @app.route("/api/kubeovn/<cluster>/extra")
 @requires_auth
+@shared_read()
 def api_kubeovn_extra(cluster):
     """Les vues Underlay et NAT : santé de kube-ovn, réseaux fournisseurs,
     VLANs, réseaux externes, passerelles, IP externes, règles."""
@@ -12757,6 +12867,7 @@ def api_kubeovn_extra(cluster):
 
 @app.route("/api/kubeovn/<cluster>/policies")
 @requires_auth
+@shared_read()
 def api_kubeovn_policies(cluster):
     """Les politiques réseau, et les VMs de chaque namespace à viser."""
     kc = _kubectl_for_cluster(cluster)
@@ -13044,6 +13155,7 @@ def _kubectl_kinds(kc, kinds, cluster):
 
 @app.route("/api/cluster-objects/<cluster>/<kind>")
 @requires_auth
+@shared_read()
 def api_cluster_objects(cluster, kind):
     """Une liste de la vue Storage, Security ou Add-ons, avec qui s'en sert.
     Un Secret ne sort qu'avec le nom de ses clés, jamais ses valeurs."""
@@ -13832,6 +13944,7 @@ _HOST_DO = ("basics", "tags", "disk-add", "disk-remove", "disk-set", "hugepages"
 
 @app.route("/api/host/<cluster>/<node>/settings")
 @requires_auth
+@shared_read()
 def api_host_settings(cluster, node):
     """Tout ce que montre la fenêtre d'un hôte. Le secret du BMC ne sort
     jamais : seulement son nom."""
@@ -14097,6 +14210,7 @@ def _rancher_projects(cluster, kc):
 
 @app.route("/api/ns-admin/<cluster>")
 @requires_auth
+@shared_read()
 def api_ns_admin_list(cluster):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -14406,6 +14520,7 @@ import hv_dash as _hd  # noqa: E402
 
 @app.route("/api/events/<cluster>")
 @requires_auth
+@shared_read()
 def api_cluster_events(cluster):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -14423,6 +14538,7 @@ def api_cluster_events(cluster):
 
 @app.route("/api/usage/<cluster>")
 @requires_auth
+@shared_read()
 def api_cluster_usage(cluster):
     kc = _kubectl_for_cluster(cluster)
     if not kc:
@@ -14845,6 +14961,7 @@ def _net_nodes(nodes):
 
 @app.route("/api/net-admin/<cluster>")
 @requires_auth
+@shared_read()
 def api_net_admin(cluster):
     """L'onglet Cluster networks : chaque réseau et ses configurations (état
     par nœud), les réseaux d'hôte, les trois réglages réseau."""
@@ -14864,6 +14981,7 @@ def api_net_admin(cluster):
 
 @app.route("/api/net-admin/<cluster>/nics")
 @requires_auth
+@shared_read()
 def api_net_admin_nics(cluster):
     """Les cartes proposables pour une configuration sur ces nœuds (toutes
     les cartes libres présentes partout, comme le formulaire de Harvester)."""
@@ -15007,6 +15125,7 @@ def api_net_admin_do(cluster, action):
 
 @app.route("/api/hv-settings/<cluster>")
 @requires_auth
+@shared_read()
 def api_hv_settings(cluster):
     """Les réglages de Harvester, secrets masqués."""
     kc = _kubectl_for_cluster(cluster)
@@ -15193,6 +15312,7 @@ _DEVICE_DO = ("pci-enable", "pci-disable", "usb-enable", "usb-disable", "sriov")
 
 @app.route("/api/devices/<cluster>")
 @requires_auth
+@shared_read()
 def api_devices(cluster):
     """Les périphériques de Harvester, leur état de passthrough et les VMs
     qui s'en servent, en une lecture."""
@@ -15315,6 +15435,7 @@ def _iso_sha512(name):
 
 @app.route("/api/upgrade/<cluster>")
 @requires_auth
+@shared_read()
 def api_upgrade(cluster):
     """Tout ce que montre la fenêtre de mise à jour : version courante,
     versions et leur éligibilité, dernière mise à jour et sa progression,
@@ -15480,6 +15601,7 @@ def _alertmanager_enabled(addon):
 
 @app.route("/api/monlog/<cluster>")
 @requires_auth
+@shared_read()
 def api_monlog(cluster):
     """Sorties, flux et AlertmanagerConfig, avec l'état réel lu dans status
     et dans les événements ; l'état des deux add-ons."""
@@ -15512,6 +15634,7 @@ def api_monlog(cluster):
 
 @app.route("/api/monlog/<cluster>/metrics")
 @requires_auth
+@shared_read()
 def api_monlog_metrics(cluster):
     """L'instantané metrics.k8s.io (hôtes, VMs) et, si rancher-monitoring
     répond, les jauges du cluster et des VMs tirées de Prometheus."""
@@ -15609,6 +15732,7 @@ _VMIMPORT_DO = ("source-apply", "source-recheck", "source-delete", "import-creat
 
 @app.route("/api/vmimport/<cluster>")
 @requires_auth
+@shared_read()
 def api_vmimport(cluster):
     """Sources et imports, avec l'état lu dans status et la progression tirée
     des images ; ce qu'il faut au formulaire (réseaux de VM, classes)."""
@@ -15753,6 +15877,7 @@ def _fk_cmd(action, kc):
 
 @app.route("/api/forklift/<cluster>")
 @requires_auth
+@shared_read()
 def api_forklift(cluster):
     """L'onglet d'un coup : installation (dans l'ordre où elle se fait), image
     VDDK retenue par le cluster, registre proposé, fournisseurs vCenter et
@@ -17059,6 +17184,7 @@ def _api_resource_names(text):
 
 @app.route("/api/capi/<cluster>/diag")
 @requires_auth
+@shared_read()
 def api_capi_diag(cluster):
     """Diagnostic of the CAPI/CAPHV stack on the target Harvester cluster."""
     # Cluster déclaré mais hors tension : répondre tout de suite. Sans cela

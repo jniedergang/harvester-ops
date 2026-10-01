@@ -2227,6 +2227,10 @@ groupée est reprise type par type).
   humain, sinon la console ne serait jamais au repos. Réglages :
   `HARVESTER_OPS_WATCH_IDLE_AFTER` (défaut 300 s) et
   `HARVESTER_OPS_WATCH_IDLE_INTERVAL` (défaut 120 s).
+- **Lectures partagées et dimensionnement (1.81.0)** : les écrans qui se
+  rafraîchissent seuls sont lus une fois pour tous ceux qui ont la même
+  identité et le même rôle, et oubliés à chaque écriture ; chiffres mesurés
+  et ressources recommandées dans [dimensionnement.md](dimensionnement.md).
 - **Tracking d'actions + dock** — un dock bas persistant montre les
   actions en cours et récentes sur chaque onglet, avec streaming live des
   steps/logs en SSE (reconnexion automatique). Une action en échec porte

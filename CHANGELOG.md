@@ -4,6 +4,21 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.81.0] - 2026-10-01 - Shared reads: the console no longer slows down with the number of people
+
+### Changed
+- Screens that refresh on their own (overview, VM list, topology, usage, networks, kube-ovn, storage, devices, host settings, upgrade, monitoring, imports, Forklift, Cluster API, activity) are read once for everyone: concurrent requests for the same view wait for the read in flight instead of starting their own `kubectl`, and its result serves 3 seconds (1 second for the activity dock). Reads are shared only between requests presenting the same identity to the cluster and the same console role. Any write request forgets the shared reads of its cluster, so does the end of any action, and a read in flight when a write arrives is not reused; `?fresh=1` always reads again. `HARVESTER_OPS_READ_SHARE=0` turns it off, `HARVESTER_OPS_READ_SHARE_TTL` sets the duration.
+- `config.yaml` and the cluster declarations are kept parsed until the file changes, with libyaml when present: they were parsed up to 12 times per request, which was most of the console's CPU (`/api/activity` went from 75 ms to 6 ms per request).
+- Cluster watchers start spread over the first interval and vary each cycle by up to 10 %, so clusters are no longer all read in the same second.
+- The VM list reads the VMs and their instances at the same time instead of one after the other.
+
+### Added
+- Sizing guide with measured figures and recommended resources: `docs/en/sizing.md`, `docs/fr/dimensionnement.md`.
+
+### Tests
+- `test_read_share_181.py`: one read for concurrent requests, errors not kept, invalidation by cluster and during a read in flight, bounded memory, YAML kept until the file is replaced, identities and roles never sharing, cluster refusals repeated to every request, every shared view placed under the authentication check, watcher offsets. API tests run with shared reads off by default (`tests/api/conftest.py`).
+- Load test on harv1, one console process: with 60 simulated people the overview went from 5.5 s to 0.54 s at the median, the VM list from 4.8 s to 0.17 s, the usage gauges from 7 s to 0.28 s, and the console CPU from 62 % to 16 %. Not load-tested: more than one cluster at that load.
+
 ## [1.80.0] - 2026-10-01 - Bare-metal install profiles for many nodes, and VMware migration lanes
 
 ### Added
