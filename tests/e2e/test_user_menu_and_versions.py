@@ -55,7 +55,7 @@ def test_the_version_opens_the_version_history(fr, flask_server):
     modal.locator("#versions-filter").fill("kube-vip")
     expect(modal.locator(".version-rel .version-num")).to_contain_text(["v1.52.0"])
     modal.locator("#versions-filter").fill("zzz-nothing-matches")
-    expect(modal.locator(".form-hint")).to_contain_text("Aucune version")
+    expect(modal.locator("#versions-body .form-hint")).to_contain_text("Aucune version")
     page.keyboard.press("Escape")
     expect(modal).to_have_class("modal-overlay")
 
