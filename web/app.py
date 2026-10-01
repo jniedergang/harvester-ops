@@ -8066,8 +8066,22 @@ def _start_cluster_watchers():
         t.start()
 
 
-# v1.82.0 : l'issue d'une mise à jour faite pendant le redémarrage
-_update_record_outcome()
+# v1.82.0 : l'issue d'une mise à jour faite pendant le redémarrage. L'agent
+# n'écrit « terminé » qu'APRÈS avoir vu cette console répondre : au démarrage
+# l'état est encore « en cours » (vu en réel). On attend donc l'issue finale.
+def _update_outcome_watch(timeout=1200, step=5):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        st = _su.read_json(_state_dir() / "updates" / _su.STATUS) or {}
+        if not st.get("started"):
+            return
+        if st.get("state") not in (None, "running"):
+            _update_record_outcome()
+            return
+        time.sleep(step)
+
+
+threading.Thread(target=_update_outcome_watch, daemon=True, name="update-outcome").start()
 
 # Kick off watchers at import — the threads are daemons so Flask shutdown
 # cleans them up.

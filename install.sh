@@ -66,14 +66,14 @@ detect_container_runtime() {
 
 check_deps() {
     local missing=()
-    for cmd in bash ssh yq python3; do
+    for cmd in bash ssh yq python3 openssl; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             missing+=("$cmd")
         fi
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
         err "Missing dependencies: ${missing[*]}"
-        info "On SLES: zypper install -y bash openssh-clients yq python3"
+        info "On SLES: zypper install -y bash openssh-clients yq python3 openssl"
         info "On RHEL/Ubuntu: see docs/en/install.md"
         exit 2
     fi

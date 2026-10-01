@@ -183,11 +183,11 @@ class Agent:
             self.finish("rolled-back", f"{info['version']} failed ({e}); {current} restored")
             return 1
         shutil.rmtree(WORK_DIR, ignore_errors=True)
-        try:
-            src.unlink()
-            sig_src.unlink(missing_ok=True)
-        except OSError:
-            pass
+        for p in (src, sig_src, staged / (name + ".check.json")):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
         self.finish("done", f"{current} -> {info['version']}")
         return 0
 

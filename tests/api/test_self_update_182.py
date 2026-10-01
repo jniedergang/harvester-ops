@@ -206,6 +206,7 @@ class FakeHost:
 def request(dirs, keys, version="1.82.0", signed=True, **extra):
     staged = dirs["state"] / "updates" / "staged"
     a = make_release(staged, version)
+    (staged / (a.name + ".check.json")).write_text("{}")
     if signed:
         sign(keys, a)
     (dirs["state"] / "updates" / "request.json").write_text(json.dumps({"archive": a.name, **extra}))
@@ -229,7 +230,8 @@ def test_agent_installs_a_signed_newer_release(agent_env, keys):
     assert [s["id"] for s in st["steps"]] == ["verify", "extract", "backup", "install", "restart", "check"]
     assert ["systemctl", "restart", "harvester-ops"] in host.calls
     assert not (dirs["state"] / "updates" / "request.json").exists()
-    assert not a.exists()                     # archive consommée
+    assert not a.exists()                     # archive consommée, avec sa fiche
+    assert not list(a.parent.glob("*.check.json")) and not list(a.parent.glob("*.sig"))
     assert (dirs["log"] / st["log"]).is_file()
 
 
@@ -485,3 +487,23 @@ def test_outcome_recorded_once_at_startup(console):
     new = [a for a in wapp.ACTIONS.values() if a.action == "console-update:1.82.0"]
     assert len(new) == 1 and new[0].status == "error" and "1.82.0 failed" in new[0].error_summary
     assert len(wapp.ACTIONS) == before + 1
+
+
+def test_outcome_waits_for_the_agent_to_finish(console, monkeypatch):
+    """Vu en réel : la console redémarrée voit encore « en cours » (l'agent
+    attend qu'elle réponde) ; l'issue est rangée quand l'agent conclut."""
+    wapp, state = console
+    d = state / "updates"
+    d.mkdir(parents=True, exist_ok=True)
+    st = {"state": "running", "from": "1.82.0", "to": "1.82.1", "started": 456.0, "steps": []}
+    (d / "status.json").write_text(json.dumps(st))
+    ticks = {"n": 0}
+
+    def fake_sleep(_):
+        ticks["n"] += 1
+        if ticks["n"] == 2:
+            (d / "status.json").write_text(json.dumps(dict(st, state="done", message="1.82.0 -> 1.82.1")))
+    monkeypatch.setattr(wapp.time, "sleep", fake_sleep)
+    wapp._update_outcome_watch(timeout=60, step=0)
+    done = [a for a in wapp.ACTIONS.values() if a.action == "console-update:1.82.1"]
+    assert len(done) == 1 and done[0].status == "done"
