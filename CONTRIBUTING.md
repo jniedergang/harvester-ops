@@ -35,14 +35,19 @@ pip install --require-hashes -r web/requirements-lock.txt
 Run the API tests:
 
 ```sh
-python3 -m pytest tests/api/ -q          # ~270 tests, < 15s
+python3 -m pytest tests/api/ -q -n 12    # ~2500 tests, about 45 s in parallel
 ```
 
 The e2e suite needs Playwright + a working headless chromium:
 
 ```sh
-python3 -m pytest tests/e2e/ -q
+python3 -m pytest tests/e2e/ -q -n 8     # ~490 tests, about 2 min 40 in parallel
 ```
+
+Both suites run in parallel with `pytest-xdist` (a development tool only,
+not part of the delivered package: `pip install --user pytest-xdist`).
+Serially they take about 4 min 30 and 18 min. While working, run only the
+test files a change touches; run both full suites before a release.
 
 `--live` runs tests that hit a reachable Harvester cluster; skipped by
 default.
