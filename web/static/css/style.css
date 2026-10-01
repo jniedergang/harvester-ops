@@ -5148,6 +5148,59 @@ td.tpl-acts .btn + .btn { margin-left: 4px; }
 td.fk-reason { max-width: 260px; }
 [data-fk="inv-table"] td:last-child { white-space: normal; overflow-wrap: anywhere; }
 [data-fk="inv-out"] { overflow-x: auto; }
+/* v1.80.0 : vagues VMware en couloirs sur un axe du temps commun. Tout est
+   placé en pourcentages de la piste : la vue suit la largeur de la carte. */
+.fk-view-toggle { margin: 4px 0 10px; justify-content: flex-start; }
+.fkl-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 8px; }
+.fkl-zooms, .fkl-maint-form, .fkl-legend { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.fkl-zooms .res-chip { margin: 0; }
+.fkl-chip.is-on { border-color: var(--accent); background: var(--accent); color: var(--bg-panel); }
+.fkl-maint-form input { max-width: 190px; }
+.fkl-key { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.fkl-sw { display: inline-block; width: 14px; height: 9px; border-radius: 2px; }
+.fkl-sw-full, .fkl-copy-full { background: var(--accent); }
+.fkl-sw-incr, .fkl-copy-incr { background: var(--info); }
+.fkl-sw-next { width: 9px; border-radius: 50%; border: 2px solid var(--info); background: var(--bg-panel); }
+.fkl-sw-cut { width: 3px; background: var(--warn); }
+.fkl-sw-win, .fkl-window { background: color-mix(in srgb, var(--warn) 28%, transparent); }
+.fkl-sw-maint, .fkl-maint {
+  background: repeating-linear-gradient(45deg, var(--selection-bg) 0 6px, transparent 6px 12px), var(--overlay-soft); }
+.fkl-body { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.fkl-row { display: grid; grid-template-columns: minmax(150px, 220px) 1fr; align-items: stretch; }
+.fkl-row + .fkl-row { border-top: 1px solid var(--border); }
+.fkl-label { padding: 6px 10px; min-width: 0; border-right: 1px solid var(--border); font-size: 12px; }
+.fkl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fkl-axis-row .fkl-label { display: flex; align-items: flex-end; }
+.fkl-axis, .fkl-track { position: relative; overflow: hidden; min-width: 0; }
+.fkl-axis { height: 34px; background: var(--bg-panel); }
+.fkl-track { min-height: 46px; }
+.fkl-lane { cursor: pointer; border-left: 3px solid var(--border); }
+.fkl-axis-row { border-left: 3px solid transparent; }
+.fkl-lane:hover, .fkl-lane:focus-visible { background: var(--overlay-soft); }
+.fkl-lane:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.fkl-st-ok { border-left-color: var(--done); }
+.fkl-st-fail { border-left-color: var(--error); }
+.fkl-st-warn { border-left-color: var(--warn); }
+.fkl-st-info { border-left-color: var(--info); }
+.fkl-tick { position: absolute; top: 0; bottom: 0; border-left: 1px solid var(--border); }
+.fkl-tick span { position: absolute; bottom: 3px; left: 3px; font-size: 11px; color: var(--text-dim); white-space: nowrap; }
+.fkl-maint, .fkl-window { position: absolute; top: 0; bottom: 0; }
+.fkl-maint { border-left: 1px dashed var(--accent); border-right: 1px dashed var(--accent); }
+.fkl-copy { position: absolute; top: 50%; height: 12px; margin-top: -6px; min-width: 3px; border-radius: 2px; opacity: .9; }
+.fkl-copy:hover, .fkl-next:hover, .fkl-cut:hover { outline: 2px solid var(--text); outline-offset: 1px; }
+.fkl-copy-run { background-image: repeating-linear-gradient(-45deg, transparent 0 4px, var(--bg-panel) 4px 8px); opacity: .7; }
+.fkl-next { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%;
+  border: 2px solid var(--info); background: var(--bg-panel); }
+.fkl-cut { position: absolute; top: 2px; bottom: 2px; width: 3px; margin-left: -1px; background: var(--warn); border-radius: 2px; }
+.fkl-cut-planned::before { content: ''; position: absolute; top: 0; left: 3px; border: 5px solid transparent;
+  border-left: 8px solid var(--warn); }
+.fkl-now { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--danger); z-index: 2; }
+.fkl-now-label b { position: absolute; top: 2px; left: 4px; font-size: 11px; color: var(--danger); white-space: nowrap; }
+.fkl-countdown { margin-top: 2px; white-space: nowrap; }
+@media (max-width: 700px) {
+  .fkl-row { grid-template-columns: 1fr; }
+  .fkl-label { border-right: 0; border-bottom: 1px solid var(--border); }
+}
 /* v1.72.0 : projets Rancher dans la fenêtre Namespaces */
 .nsw-tabs { margin-bottom: 8px; }
 .pj-qrow { display: grid; grid-template-columns: 1.2fr 1fr 1fr auto; gap: 6px; margin-bottom: 6px; align-items: center; }

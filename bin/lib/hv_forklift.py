@@ -768,9 +768,17 @@ def _vm_row(vm_id, vm, rolled, cutover_set=False):
         disk = next((s for s in vm.get("pipeline") or [] if s.get("name") == "DiskTransfer"), None)
         dprog = (disk or {}).get("progress") or {}
         done, total = int(dprog.get("completed") or 0), int(dprog.get("total") or 0)
+    # v1.80.0 (vue en couloirs) : toutes les copies avec leurs dates, pas
+    # seulement la dernière, et la fenêtre de bascule réellement vécue : du
+    # début de l'étape Cutover à la fin de la VM (ouverte tant qu'elle dure)
+    cut = next((s for s in vm.get("pipeline") or [] if s.get("name") == "Cutover" and s.get("started")), None)
+    cutover_window = {"start": cut.get("started"), "end": vm.get("completed") or None} if cut else None
     return {"id": vm_id, "name": vm.get("name") or "", "phase": phase,
             "step": step_label, "step_name": name,
             "progress": {"done": done, "total": total}, "precopies": len(pre), "last_precopy": last,
+            "copies": [_precopy(p) for p in pre if p.get("start")],
+            "started": vm.get("started") or None, "completed": vm.get("completed") or None,
+            "cutover_window": cutover_window,
             "next_precopy": (warm.get("nextPrecopyAt") or None) if copying else None,
             "error": _vm_error(vm), "rolled_back": vm_id in rolled,
             "cutover_started": cutover_started}
@@ -832,7 +840,11 @@ def wave_state(plan, migrations, now=None):
     nexts = [v["next_precopy"] for v in vms if v["next_precopy"]]
     cutover_started = cutover is not None or any(v["cutover_started"] for v in vms)
     src = ((spec.get("provider") or {}).get("source")) or {}
-    return {"name": md.get("name"), "target_namespace": spec.get("targetNamespace") or "",
+    # v1.80.0 : début et fin de la migration courante (sinon celle que
+    # résume le plan), pour placer la vague sur l'axe du temps des couloirs
+    run = ((cur.get("status") or {}) if cur is not None else (st.get("migration") or {}))
+    return {"name": md.get("name"), "created": md.get("creationTimestamp") or None,
+            "started": run.get("started") or None, "completed": run.get("completed") or None, "target_namespace": spec.get("targetNamespace") or "",
             "provider": {"namespace": src.get("namespace") or "", "name": src.get("name") or ""},
             "state": state, "message": message, "migration": ((cur or {}).get("metadata") or {}).get("name"),
             "vms": vms, "cutover": cutover, "cutover_started": cutover_started,

@@ -1597,6 +1597,22 @@ bascule), filtrable par état et par vCenter, avec un bloc par cluster
 cluster injoignable est montré tel quel, sans bloquer les autres ; la vue
 est relue au plus toutes les 15 secondes par personne.
 
+**Couloirs** (1.80.0) : l'onglet Vagues passe de **Blocs** à **Couloirs**
+(le choix est retenu par le navigateur, Blocs par défaut). Les couloirs
+placent toutes les vagues du cluster sur un même axe du temps, un
+couloir par vague : une ligne pour maintenant, une marque par copie déjà
+faite (la première copie complète, puis les incrémentales ; le survol
+d'une marque donne son début, sa fin et sa durée), la prochaine copie,
+la bascule prévue avec son compte à rebours, la fenêtre de bascule une
+fois passée, et l'état de la vague. L'axe va du début de la plus
+ancienne vague à deux heures après maintenant (ou 30 minutes après la
+dernière bascule prévue) ; les boutons 6 h, 24 h, 7 jours et Ajuster
+changent l'étendue. Une fenêtre de maintenance peut être tracée sur
+l'axe (début et fin, gardés dans ce navigateur seulement, par cluster) :
+une aide visuelle, rien n'est envoyé au cluster. Un clic sur un couloir
+ouvre la fenêtre de suivi de la vague. Migrations (tous clusters) offre
+les mêmes couloirs, un par cluster et par vague.
+
 En ligne de commande : `harvester-forklift wave-apply` (la vague en JSON
 sur l'entrée standard ou `--spec` : `name`, `target_namespace`,
 `provider`, `vms`, `networks`, `storages`, `skip_conversion`,
