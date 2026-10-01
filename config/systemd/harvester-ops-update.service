@@ -1,0 +1,13 @@
+[Unit]
+Description=harvester-ops, install the update requested from the console
+Documentation=file:///opt/harvester-ops/docs/en/install.md
+
+[Service]
+Type=oneshot
+# Checks the release signature against the trusted keys of this host
+# (/etc/harvester-ops/update-signers, or the ones shipped in
+# /opt/harvester-ops/update-signers), installs it with its own
+# `install.sh --upgrade`, restarts harvester-ops.service and rolls back by
+# itself when the new version does not answer.
+ExecStart=/usr/bin/python3 /usr/local/bin/harvester-ops-update.py
+TimeoutStartSec=45min

@@ -250,6 +250,51 @@ The console must reach Rancher, and each cluster must be imported in
 Rancher for a Rancher user to see it. Local accounts keep working; starting
 and stopping a cluster stays with them.
 
+## Updating harvops (1.82.0)
+
+From 1.82.0 on, the console updates itself from the interface: click the
+version number, then the **Update** tab (administrators).
+
+- **Online**: the console reads `release.json` at its update source (the
+  project's GitHub releases by default; an internal mirror is any HTTP
+  directory serving the same files: `release.json`, the archive and its
+  `.sig`). **Check now**, then **Download**: the archive and its signature are
+  fetched, the SHA-256 compared with `release.json`, the signature checked.
+  The console honours `HTTPS_PROXY`.
+- **Offline**: give the archive `harvester-ops-<version>.tar.gz` and its
+  `.sig` through the browser (streamed to disk, never held in memory).
+- **Install**: the console hands the release to the **update agent** of the
+  host (`harvester-ops-update.path` and `.service`, installed by
+  `install.sh`). The agent, as root, checks the signature again with the
+  host's trusted keys, keeps the current files and image, runs the release's
+  own `install.sh --upgrade` (scripts, image, embedded bundles, units; never
+  the configuration, accounts or certificates), restarts the console and
+  waits for the new version to answer. If it does not, it **puts the previous
+  version back by itself**. The page follows the restart and reloads; the
+  outcome is kept in Activity (`console-update`) and the agent's log in
+  `/var/log/harvester-ops/update-*.log`.
+
+The restart leaves the interface unavailable for a few seconds; the clusters
+are not touched. An install is refused while actions are running (they would
+stop with the restart) unless you confirm.
+
+**Trust.** The agent installs only an archive signed by a key of
+`/opt/harvester-ops/update-signers` (shipped with the installed version), or
+of `/etc/harvester-ops/update-signers` when you write one (it then wins: put
+your own key there to sign your own builds). An unsigned archive is accepted
+only if root wrote `allow_unsigned=true` in `/etc/harvester-ops/update.conf`.
+The signature is what protects the host: the agent runs the release's
+installer as root.
+
+**First time.** A console older than 1.82.0 has no agent: install 1.82.0 with
+`sudo ./install.sh` as before, or `sudo ./install.sh --upgrade` (non
+interactive, keeps the configuration). The next versions install from the
+interface. A console run from the sources has no agent; the tab says so.
+
+**By hand.** `sudo ./install.sh --upgrade` from an extracted release does the
+same install without the interface; `sudo harvester-ops-update.py --status`
+shows the agent's last outcome.
+
 ## Moving harvops to another host
 
 The console keeps two directories apart, and copying both is all a move

@@ -69,6 +69,8 @@ COPY web/                /opt/harvester-ops/web/
 # numéro) sont lus dans ces deux fichiers ; l'image affichait « v1.0.0 »,
 # valeur figée plus bas, et n'avait pas d'historique.
 COPY VERSION CHANGELOG.md /opt/harvester-ops/
+# v1.82.0 : trusted release keys (pre-check of an update from the web UI)
+COPY config/update-signers /opt/harvester-ops/update-signers
 
 # Install Python deps — prefer offline wheels if present (set during build)
 RUN if [ -d /opt/harvester-ops/web/vendor ] && [ "$(ls -A /opt/harvester-ops/web/vendor 2>/dev/null)" ]; then \

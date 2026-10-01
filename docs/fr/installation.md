@@ -259,6 +259,53 @@ La console doit joindre Rancher, et chaque cluster doit être importé dans
 Rancher pour qu'une personne de Rancher le voie. Les comptes locaux restent
 utilisables ; l'arrêt et le démarrage d'un cluster leur restent réservés.
 
+## Mettre harvops à jour (1.82.0)
+
+Depuis la 1.82.0, la console se met à jour depuis l'interface : cliquer sur
+le numéro de version, puis l'onglet **Mise à jour** (administrateurs).
+
+- **En ligne** : la console lit `release.json` à sa source de mise à jour (les
+  publications GitHub du projet par défaut ; un miroir interne est n'importe
+  quel répertoire HTTP qui sert les mêmes fichiers : `release.json`,
+  l'archive et sa `.sig`). **Vérifier**, puis **Télécharger** : l'archive et
+  sa signature sont récupérées, la SHA-256 comparée à `release.json`, la
+  signature vérifiée. La console suit `HTTPS_PROXY`.
+- **Hors ligne** : fournir l'archive `harvester-ops-<version>.tar.gz` et sa
+  `.sig` par le navigateur (écrites en flux sur le disque, jamais en mémoire).
+- **Installer** : la console confie la version à l'**agent de mise à jour**
+  de l'hôte (`harvester-ops-update.path` et `.service`, posés par
+  `install.sh`). L'agent, root, revérifie la signature avec les clés de
+  confiance de l'hôte, garde les fichiers et l'image en place, lance
+  l'`install.sh --upgrade` de la version (scripts, image, fournisseurs
+  embarqués, unités ; jamais la configuration, les comptes ni les
+  certificats), redémarre la console et attend que la nouvelle version
+  réponde. Sinon, il **remet la version précédente tout seul**. La page suit
+  le redémarrage et se recharge ; l'issue reste dans l'Activité
+  (`console-update`) et le journal de l'agent dans
+  `/var/log/harvester-ops/update-*.log`.
+
+Le redémarrage rend l'interface indisponible quelques secondes ; les clusters
+ne sont pas touchés. L'installation est refusée tant que des actions tournent
+(elles s'arrêteraient avec le redémarrage), sauf confirmation.
+
+**Confiance.** L'agent n'installe qu'une archive signée par une clé de
+`/opt/harvester-ops/update-signers` (livré avec la version installée), ou de
+`/etc/harvester-ops/update-signers` si vous en écrivez un (il prévaut alors :
+y mettre votre propre clé pour signer vos propres constructions). Une archive
+non signée n'est acceptée que si root a écrit `allow_unsigned=true` dans
+`/etc/harvester-ops/update.conf`. C'est la signature qui protège l'hôte :
+l'agent exécute en root l'installeur de la version.
+
+**Première fois.** Une console d'avant la 1.82.0 n'a pas d'agent : installer
+la 1.82.0 avec `sudo ./install.sh` comme avant, ou `sudo ./install.sh
+--upgrade` (non interactif, garde la configuration). Les versions suivantes
+s'installent depuis l'interface. Une console lancée depuis les sources n'a pas
+d'agent ; l'onglet le dit.
+
+**À la main.** `sudo ./install.sh --upgrade` depuis une version extraite fait
+la même installation sans l'interface ; `sudo harvester-ops-update.py
+--status` montre la dernière issue de l'agent.
+
 ## Déplacer harvops vers un autre hôte
 
 La console sépare deux répertoires, et les copier tous les deux suffit à

@@ -1987,6 +1987,12 @@ either (the grouped read is retried kind by kind).
   Settings > About) lists what each version brought, from the release
   notes shipped with the console: newest first, the installed one marked,
   filtered by words, or reduced to additions or to fixes.
+- **Update from the interface (1.82.0).** The same window has an Update tab:
+  check the online source (GitHub releases or an internal mirror) and
+  download, or give an archive and its signature for an air-gapped site, then
+  install. The host's update agent checks the signature, installs, restarts
+  the console and puts the previous version back by itself if the new one
+  does not answer. See [install.md](install.md#updating-harvops-1820).
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
   of icons that expands over the page while the pointer is on it, and

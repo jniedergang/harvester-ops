@@ -139,6 +139,31 @@ SHA="$(sha256sum "${DIST_DIR}/${NAME}.tar.gz" | awk '{print $1}')"
 echo "$SHA  ${NAME}.tar.gz" > "${DIST_DIR}/${NAME}.tar.gz.sha256"
 SIZE=$(du -h "${DIST_DIR}/${NAME}.tar.gz" | awk '{print $1}')
 
+# v1.82.0 : signature (la console ne s'installe une mise à jour que signée par
+# une clé de config/update-signers) et release.json, lu par la mise à jour en
+# ligne. HARVESTER_OPS_SIGNING_KEY = clé privée OpenSSH (jamais dans le dépôt).
+SIGNED=0
+rm -f "${DIST_DIR}/${NAME}.tar.gz.sig"
+if [[ -n "${HARVESTER_OPS_SIGNING_KEY:-}" ]]; then
+    ssh-keygen -q -Y sign -f "$HARVESTER_OPS_SIGNING_KEY" -n harvester-ops-release \
+        "${DIST_DIR}/${NAME}.tar.gz" || { err "signing failed"; exit 1; }
+    ssh-keygen -q -Y verify -f config/update-signers -I release@harvester-ops \
+        -n harvester-ops-release -s "${DIST_DIR}/${NAME}.tar.gz.sig" \
+        < "${DIST_DIR}/${NAME}.tar.gz" >/dev/null || { err "the signing key is not in config/update-signers"; exit 1; }
+    SIGNED=1
+    ok "Signed: ${NAME}.tar.gz.sig"
+else
+    warn "HARVESTER_OPS_SIGNING_KEY not set: unsigned, the web UI update will refuse it"
+fi
+python3 - "$VERSION" "${DIST_DIR}/${NAME}.tar.gz" "$SIGNED" > "${DIST_DIR}/release.json" <<'PY'
+import json, sys
+sys.path.insert(0, "bin/lib")
+import self_update as su
+print(json.dumps(su.release_manifest(sys.argv[1], sys.argv[2],
+                                     open("CHANGELOG.md").read(), sys.argv[3] == "1"), indent=2))
+PY
+ok "release.json written"
+
 # -----------------------------------------------------------------------------
 # 5. Summary
 # -----------------------------------------------------------------------------
@@ -151,6 +176,7 @@ ${C_GREEN}╔══════════════════════�
   Tarball:  ${DIST_DIR}/${NAME}.tar.gz   (${SIZE})
   SHA-256:  ${SHA}
   Manifest: ${DIST_DIR}/${NAME}.tar.gz.sha256
+  Release:  ${DIST_DIR}/release.json$( [[ $SIGNED == 1 ]] && echo ", ${NAME}.tar.gz.sig")
 
 Transfer to the client host, then:
 

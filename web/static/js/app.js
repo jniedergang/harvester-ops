@@ -2027,6 +2027,7 @@ const App = (() => {
   function init() {
     bind();
     if (window.Versions) Versions.init();
+    if (window.ConsoleUpdate) ConsoleUpdate.init();
     if (window.UserMenu) UserMenu.init();
     restoreActivityFilters();
     bindActivityFilters();

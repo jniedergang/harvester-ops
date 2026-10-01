@@ -5284,3 +5284,21 @@ td.fk-reason { max-width: 260px; }
 .rsrv-form select, .rsrv-creds select { padding: 8px 10px; font-size: 14px; }
 .login-rancher-server .login-form { margin-bottom: 4px; }
 .login-rancher-server .login-note { margin-top: 2px; }
+
+/* v1.82.0 : mise à jour de la console (onglet de la fenêtre des versions) */
+.versions-panes { margin: 0; padding: 8px 24px 0; }
+.upd-pane { display: flex; flex-direction: column; gap: 12px; }
+.upd-pane[hidden] { display: none; }
+.upd-card { padding: 12px 16px; }
+.upd-card h4 { margin: 0 0 6px; }
+.upd-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.upd-row input[type="url"] { flex: 1 1 280px; min-width: 0; }
+.upd-err { color: var(--danger); }
+.upd-ok { color: var(--accent); font-weight: 600; }
+.upd-steps { margin: 6px 0 0; padding-left: 18px; font-size: 12px; }
+.upd-staged td { padding: 6px 8px; vertical-align: middle; }
+.upd-actions { text-align: right; white-space: nowrap; }
+.upd-notes { margin: 6px 0 10px; }
+.upd-notes .version-rel { padding: 6px 10px; }
+.version-link.has-update::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 5px;
+  border-radius: 50%; background: var(--accent); vertical-align: middle; }

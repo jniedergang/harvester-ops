@@ -1023,6 +1023,14 @@
       </div>
       <button class="btn-close" id="btn-close-versions" data-i18n-title="common.close" title="Close" aria-label="Close">×</button>
     </div>
+    <!-- v1.82.0 : historique, et mise à jour de la console -->
+    <div class="sub-tabs sub-tabs-inline versions-panes" role="tablist">
+      <button type="button" class="sub-tab active tip" data-vpane="history" data-i18n="upd.tab.history"
+              data-tip-i18n="upd.tab.historyTip" data-i18n-title="upd.tab.historyTip" title="What each version brought">History</button>
+      <button type="button" class="sub-tab tip" data-vpane="update" data-i18n="upd.tab.update"
+              data-tip-i18n="upd.tab.updateTip" data-i18n-title="upd.tab.updateTip" title="Update this console, online or from an archive">Update</button>
+    </div>
+    <div id="versions-pane-history">
     <div class="versions-tools">
       <input type="search" id="versions-filter" class="tip" data-i18n-placeholder="versions.filter"
              placeholder="Filter (word, version)" data-tip-i18n="versions.filterTip" data-i18n-title="versions.filterTip"
@@ -1037,6 +1045,8 @@
       </div>
     </div>
     <div class="modal-body versions-body" id="versions-body"></div>
+    </div>
+    <div class="modal-body versions-body upd-pane" id="versions-pane-update" hidden></div>
   </div>
 </div>
 
@@ -1170,6 +1180,7 @@
   <script src="/static/js/forklift.js"></script>
   <script src="/static/js/forklift-global.js"></script>
 <script src="/static/js/versions.js"></script>
+<script src="/static/js/console-update.js"></script>
 <script src="/static/js/console-accounts.js"></script>
 <script src="/static/js/rancher-servers.js"></script>
 <script src="/static/js/user-menu.js"></script>

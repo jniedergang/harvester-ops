@@ -1,0 +1,4 @@
+# Trusted keys for harvester-ops releases (OpenSSH allowed_signers format).
+# The update agent refuses an archive that none of these keys signed.
+# An operator may replace this list with /etc/harvester-ops/update-signers, which wins.
+release@harvester-ops namespaces="harvester-ops-release" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFijB5cRsNNUmJJp0NJ9t4q2QkHAv/PH2xdQmsocgQHO

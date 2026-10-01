@@ -32,7 +32,9 @@ done
 
 info "Stopping systemd service..."
 systemctl disable --now harvester-ops 2>/dev/null || true
-rm -f /etc/systemd/system/harvester-ops.service
+systemctl disable --now harvester-ops-update.path 2>/dev/null || true
+rm -f /etc/systemd/system/harvester-ops.service /etc/systemd/system/harvester-ops-update.service /etc/systemd/system/harvester-ops-update.path
+rm -rf /var/lib/harvester-ops-update
 systemctl daemon-reload 2>/dev/null || true
 
 info "Removing container image..."

@@ -2197,6 +2197,13 @@ groupée est reprise type par type).
   a apporté, d'après les notes de version livrées avec la console : la plus
   récente d'abord, celle installée signalée, filtrées par mots, ou réduites
   aux ajouts ou aux corrections. Les notes sont en anglais.
+- **Mise à jour depuis l'interface (1.82.0).** La même fenêtre a un onglet
+  Mise à jour : vérifier la source en ligne (publications GitHub ou miroir
+  interne) et télécharger, ou fournir une archive et sa signature pour un site
+  isolé, puis installer. L'agent de mise à jour de l'hôte vérifie la
+  signature, installe, redémarre la console et remet la version précédente
+  tout seul si la nouvelle ne répond pas. Voir
+  [installation.md](installation.md#mettre-harvops-à-jour-1820).
 
 - **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail
   d'icônes de 56 px qui se déplie par-dessus la page sous le pointeur et se

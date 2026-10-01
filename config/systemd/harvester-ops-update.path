@@ -1,0 +1,11 @@
+[Unit]
+Description=harvester-ops, watch for an update requested from the console
+
+[Path]
+# The console (unprivileged container) drops this file to ask for an update;
+# the agent removes it first thing, so the path does not trigger again.
+PathExists=/var/lib/harvester-ops/updates/request.json
+Unit=harvester-ops-update.service
+
+[Install]
+WantedBy=multi-user.target

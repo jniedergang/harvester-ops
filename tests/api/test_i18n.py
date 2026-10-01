@@ -187,7 +187,7 @@ def test_i18n_no_orphan_keys_in_english():
     referenced = _all_referenced_keys()
     en = _lang_dicts().get("en") or set()
     orphans = sorted(en - referenced)
-    BASELINE = 104   # v1.76.0: step_name/cutover keys picked by a lookup table, invisible to i18n.t('literal') (was 98 since v1.43.0)
+    BASELINE = 108   # v1.82.0: upd.state.* picked by a lookup table (v1.76.0: step_name/cutover keys, same reason; was 98 since v1.43.0)
     if len(orphans) > BASELINE:
         pytest.fail(
             f"{len(orphans)} unused English i18n entries (baseline {BASELINE}):\n  - "

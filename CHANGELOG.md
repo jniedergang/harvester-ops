@@ -4,6 +4,18 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.82.0] - 2026-10-01 - Update the console from the interface, online or from an archive
+
+### Added
+- An Update tab in the version window (click the version number): check the online source (the project's GitHub releases by default, or an internal mirror serving `release.json`, the archive and its signature), download with the checksum compared and the signature checked (tracked in the dock), or give an archive and its `.sig` through the browser for an air-gapped site (streamed to disk); then install. A dot on the version number says when the last check found a newer version. Administrators act, everyone sees the state.
+- A host update agent (`harvester-ops-update.path` and `.service`, installed by `install.sh`): the console, unprivileged and read-only, hands it the request; the agent copies the archive out of the console's reach, checks its signature with the host's trusted keys (`/etc/harvester-ops/update-signers` if written, else the ones shipped in `/opt/harvester-ops/update-signers`), keeps the current files and image, runs the release's own `install.sh --upgrade`, restarts the console and waits for the new version to answer, else puts the previous one back by itself. Every step goes to `updates/status.json` in the state directory and to `/var/log/harvester-ops/update-*.log`; the console records the outcome in Activity (`console-update`) when it comes back.
+- `install.sh --upgrade`: a non-interactive upgrade (scripts, image, embedded bundles, units, update agent), never touching the configuration, accounts, certificates or firewall.
+- Releases are signed (`ssh-keygen -Y sign`, namespace `harvester-ops-release`) when `package.sh` gets `HARVESTER_OPS_SIGNING_KEY`, and come with `release.json` (version, archive, SHA-256, signature, notes of the last versions). An unsigned archive is installed only if root wrote `allow_unsigned=true` in `/etc/harvester-ops/update.conf`.
+- API: `GET /api/update/status`, `PUT /api/update/source`, `POST /api/update/check`, `POST /api/update/download`, `POST /api/update/upload?name=`, `DELETE /api/update/staged/<name>`, `POST /api/update/apply` (refused while actions run, unless `force`).
+
+### Tests
+- `test_self_update_182.py`: versions, archive inspection (unsafe paths and links, missing parts, mismatched directory), signatures (valid, other key, tampered, missing, no trusted key), the operator's keys winning, manifest checks; the agent installing, rolling back when the new version does not answer or the install fails, refusing unsigned or older releases and a symlinked archive; the console's upload, apply without and with an agent, refusals, mirror check and download, checksum mismatch, outcome recorded once. `tests/e2e/test_console_update_182.py`: the tab, check, source kept while typing, install followed across the restart, delete.
+
 ## [1.81.0] - 2026-10-01 - Shared reads: the console no longer slows down with the number of people
 
 ### Changed

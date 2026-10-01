@@ -458,6 +458,51 @@ secure_config() {
     ok "$CONF_DIR readable by the harvester-ops group only"
 }
 
+# v1.82.0 : l'agent de mise à jour. La console, non root, ne peut ni charger
+# une image ni se redémarrer : elle dépose une demande que cet agent, root,
+# traite après avoir vérifié la signature de l'archive avec les clés de
+# confiance livrées ici (ou celles de $CONF_DIR/update-signers, qui prévalent).
+install_update_agent() {
+    install -d -m 0755 "$INSTALL_DIR" /etc/systemd/system
+    if [[ -f "$SCRIPT_DIR/config/update-signers" ]]; then
+        install -m 0644 "$SCRIPT_DIR/config/update-signers" "$INSTALL_DIR/update-signers"
+    fi
+    install -d -m 0750 "$STATE_DIR"
+    install -d -m 0750 -o harvester-ops -g harvester-ops "$STATE_DIR/updates" "$STATE_DIR/updates/staged" 2>/dev/null \
+        || install -d -m 0750 "$STATE_DIR/updates" "$STATE_DIR/updates/staged"
+    local u
+    for u in harvester-ops-update.service harvester-ops-update.path; do
+        install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "/etc/systemd/system/$u"
+    done
+    # la console sait ainsi qu'un agent l'attend (elle ne voit pas l'hôte)
+    printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
+        > "$STATE_DIR/updates/agent.json"
+    chown harvester-ops:harvester-ops "$STATE_DIR/updates/agent.json" 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now harvester-ops-update.path >/dev/null 2>&1 \
+        && ok "Update agent installed (updates from the web UI)" \
+        || warn "could not enable harvester-ops-update.path (updates from the web UI unavailable)"
+}
+
+# v1.82.0 : mise à jour non interactive, lancée par l'agent (ou à la main) :
+# scripts, image, fournisseurs embarqués, unités. Ne touche jamais à la
+# configuration, aux comptes, aux certificats ni au pare-feu.
+upgrade() {
+    require_root
+    info "Upgrading harvester-ops to $(cat "$SCRIPT_DIR/VERSION")"
+    install_scripts
+    setup_service_account
+    install_bundles
+    install_web_ui
+    if [[ -f /etc/systemd/system/harvester-ops.service ]]; then
+        install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops.service" \
+            /etc/systemd/system/harvester-ops.service
+    fi
+    install_update_agent
+    install_uninstaller
+    ok "Upgrade to $(cat "$SCRIPT_DIR/VERSION") installed (restart harvester-ops to run it)"
+}
+
 # -----------------------------------------------------------------------------
 # Step 5: uninstall helper
 # -----------------------------------------------------------------------------
@@ -528,6 +573,10 @@ PY
 }
 
 main() {
+    if [[ "${1:-}" == "--upgrade" ]]; then
+        upgrade
+        return
+    fi
     require_root
 
     cat <<EOF
@@ -559,6 +608,7 @@ EOF
         fi
         if prompt_yesno "Install the systemd service?" "Y"; then
             install_systemd
+            install_update_agent
         fi
     fi
 

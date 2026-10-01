@@ -842,6 +842,7 @@ ROLE_RANK = {"viewer": 0, "operator": 1, "admin": 2}
 # l'outil, ou touchent au matériel.
 ADMIN_ONLY_PREFIXES = (
     "/api/action",              # séquençage électrique d'un cluster
+    "/api/update/",             # v1.82.0 : mise à jour de la console
     "/api/clusters",            # déclarations de cluster, kubeconfig, clés
     "/api/bmc/",                # alimentation et média virtuel des machines
     "/api/baremetal/",          # installation sans opérateur
@@ -1895,6 +1896,379 @@ def api_changelog():
         _CHANGELOG_CACHE.update({"mtime": mtime,
                                  "data": _parse_changelog(path.read_text(errors="replace"))})
     return jsonify({"current": _harvester_ops_version(), "releases": _CHANGELOG_CACHE["data"]})
+
+
+# =============================================================================
+# v1.82.0 : mise à jour de la console depuis l'interface
+# =============================================================================
+# La console (conteneur non root, en lecture seule) ne s'installe pas
+# elle-même : elle prépare l'archive dans <état>/updates/staged et dépose une
+# demande que l'agent root de l'hôte traite (bin/harvester-ops-update.py), après
+# avoir vérifié la SIGNATURE avec ses propres clés. Ce qui suit ne fait que
+# préparer, pré-vérifier (pour dire tôt ce qui n'ira pas) et suivre.
+# Conception : docs/design/2026-10-01-mise-a-jour-console.md.
+# =============================================================================
+import self_update as _su  # noqa: E402
+import urllib.request  # noqa: E402
+
+UPDATE_DEFAULT_SOURCE = "https://github.com/jniedergang/harvester-ops/releases/latest/download/"
+_UPDATE_SIG_MAX = 64 * 1024
+_UPDATE_MANIFEST_MAX = 2 * 1024 * 1024
+_update_lock = threading.Lock()
+_update_check = {"ts": 0, "result": None}
+
+
+def _updates_dir():
+    d = _state_dir() / "updates"
+    (d / _su.STAGED).mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _update_signers():
+    """Clés de confiance vues de la console (pré-vérification seulement)."""
+    here = Path(__file__).resolve().parent.parent
+    etc = os.environ.get("HARVESTER_OPS_ETC", "/etc/harvester-ops")
+    # dans l'image : /opt/harvester-ops/update-signers ; depuis les sources : config/
+    return _su.signers_file(etc, str(here)) or _su.signers_file(etc, str(here / "config"))
+
+
+def _update_source():
+    cfg = _su.read_json(_updates_dir() / "source.json", {}) or {}
+    return cfg.get("url") or os.environ.get("HARVESTER_OPS_UPDATE_SOURCE") or UPDATE_DEFAULT_SOURCE
+
+
+def _update_agent():
+    """L'agent de l'hôte s'annonce dans l'état à son installation."""
+    return _su.read_json(_updates_dir() / "agent.json")
+
+
+def _update_precheck(path):
+    """Pré-vérification d'une archive préparée, gardée tant qu'elle ne change
+    pas : version, contenu, signature."""
+    st = path.stat()
+    side = path.with_name(path.name + ".check.json")
+    sig = path.with_name(path.name + ".sig")
+    key = [st.st_size, st.st_mtime_ns, sig.stat().st_mtime_ns if sig.exists() else None]
+    hit = _su.read_json(side)
+    if hit and hit.get("key") == key:
+        return hit["result"]
+    res = {"name": path.name, "size": st.st_size, "signed": sig.exists()}
+    try:
+        info = _su.inspect_archive(path)
+        res.update(version=info["version"], newer=_su.is_newer(info["version"], _harvester_ops_version()))
+        if sig.exists():
+            _su.verify_signature(path, sig, _update_signers())
+            res["signature"] = "valid"
+        else:
+            res["signature"] = "missing"
+        res["ok"] = bool(sig.exists())
+    except _su.UpdateError as e:
+        res.update(ok=False, error=str(e))
+    try:
+        _su.write_json_atomic(side, {"key": key, "result": res}, mode=0o600)
+    except OSError:
+        pass
+    return res
+
+
+def _update_staged():
+    out = []
+    for p in sorted((_updates_dir() / _su.STAGED).glob("harvester-ops-*.tar.gz")):
+        if _su.ARCHIVE_RE.match(p.name):
+            out.append(_update_precheck(p))
+    return out
+
+
+def _update_busy_actions():
+    with ACTIONS_LOCK:
+        return [a.to_dict() for a in ACTIONS.values()
+                if a.status in ("starting", "running") and not str(a.action).startswith("console-update")]
+
+
+@app.route("/api/update/status")
+@requires_auth
+def api_update_status():
+    d = _updates_dir()
+    status = _su.read_json(d / _su.STATUS)
+    with _update_lock:
+        check = _update_check["result"]
+    return jsonify({
+        "current": _harvester_ops_version(),
+        "agent": _update_agent(),
+        "source": _update_source(),
+        "default_source": UPDATE_DEFAULT_SOURCE,
+        "trusted_keys": bool(_update_signers()),
+        "staged": _update_staged(),
+        "pending": (d / _su.REQUEST).exists(),
+        "last": status,
+        "check": check,
+        "busy": len(_update_busy_actions()),
+        "can_apply": current_role() == "admin",
+    })
+
+
+@app.route("/api/update/source", methods=["PUT"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_update_source():
+    url = str((request.get_json(silent=True) or {}).get("url") or "").strip()
+    if url:
+        try:
+            _su.source_url(url, "release.json")
+        except _su.UpdateError as e:
+            return jsonify({"error": str(e)}), 400
+    _su.write_json_atomic(_updates_dir() / "source.json", {"url": url} if url else {}, mode=0o640)
+    return jsonify({"source": _update_source()})
+
+
+def _update_fetch(url, timeout=20, limit=None):
+    req = urllib.request.Request(url, headers={"User-Agent": f"harvester-ops/{_harvester_ops_version()}"})
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+@app.route("/api/update/check", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_update_check():
+    src = _update_source()
+    try:
+        with _update_fetch(_su.source_url(src, "release.json")) as r:
+            raw = r.read(_UPDATE_MANIFEST_MAX + 1)
+        if len(raw) > _UPDATE_MANIFEST_MAX:
+            raise _su.UpdateError("release.json is too large")
+        man = _su.check_manifest(json.loads(raw))
+    except (OSError, ValueError, _su.UpdateError) as e:
+        res = {"ok": False, "source": src, "error": _error_text(e)}
+    else:
+        cur = _harvester_ops_version()
+        man["notes"] = [n for n in man["notes"] if isinstance(n, dict)
+                        and _su.is_newer(str(n.get("version")), cur)]
+        res = {"ok": True, "source": src, "newer": _su.is_newer(man["version"], cur), "release": man}
+    res["ts"] = time.time()
+    with _update_lock:
+        _update_check.update(ts=res["ts"], result=res)
+    return jsonify(res), (200 if res["ok"] else 502)
+
+
+def _update_download_runner(run, src, man):
+    staged = _updates_dir() / _su.STAGED
+    part = staged / (man["archive"] + ".part")
+    try:
+        run.status = "running"
+        run.emit({"type": "status", "status": "running", "ts": time.time()})
+        run.emit({"type": "step", "step_id": "download", "status": "running",
+                  "message": f"{man['archive']} from {src}", "ts": time.time()})
+        with _update_fetch(_su.source_url(src, man["archive"]), timeout=60) as r:
+            total = int(r.headers.get("Content-Length") or man.get("size") or 0)
+            prog = _vp.Progress(run.emit_progress, "download", total or None)
+            done = 0
+            h = hashlib.sha256()
+            fd = os.open(str(part), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o640)
+            with os.fdopen(fd, "wb") as f:
+                while True:
+                    if getattr(run, "_cancel", False):
+                        raise _su.UpdateError("cancelled")
+                    b = r.read(_UPLOAD_CHUNK)
+                    if not b:
+                        break
+                    f.write(b)
+                    h.update(b)
+                    done += len(b)
+                    prog.update(done)
+        if h.hexdigest() != man["sha256"]:
+            raise _su.UpdateError("checksum mismatch: the download differs from release.json")
+        prog.finish()
+        run.emit({"type": "step", "step_id": "download", "status": "done",
+                  "message": f"{_vp.fmt_bytes(done)}, SHA-256 matches release.json", "ts": time.time()})
+        if man.get("signature"):
+            with _update_fetch(_su.source_url(src, man["signature"])) as r:
+                sig = r.read(_UPDATE_SIG_MAX + 1)
+            if len(sig) > _UPDATE_SIG_MAX:
+                raise _su.UpdateError("signature file too large")
+            (staged / man["signature"]).write_bytes(sig)
+        os.replace(part, staged / man["archive"])
+        run.emit({"type": "step", "step_id": "check", "status": "running", "ts": time.time()})
+        res = _update_precheck(staged / man["archive"])
+        if not res.get("ok"):
+            raise _su.UpdateError(res.get("error") or f"signature {res.get('signature')}")
+        run.emit({"type": "step", "step_id": "check", "status": "done",
+                  "message": f"{res['version']} ready to install, signature valid", "ts": time.time()})
+        run.result = res
+        run.status, run.exit_code = "done", 0
+    except (OSError, ValueError, _su.UpdateError) as e:
+        part.unlink(missing_ok=True)
+        run.status, run.exit_code = "error", 1
+        run.error_summary = _error_text(e)
+        run.emit({"type": "step", "step_id": "download", "status": "error",
+                  "message": run.error_summary, "ts": time.time()})
+    run.close()
+
+
+@app.route("/api/update/download", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_update_download():
+    with _update_lock:
+        check = _update_check["result"]
+    if not check or not check.get("ok"):
+        return jsonify({"error": "check for an update first"}), 409
+    man = check["release"]
+    aid = track_action(f"console-update:download:{man['version']}", "", _update_download_runner,
+                       check["source"], man)
+    return jsonify({"action_id": aid}), 202
+
+
+@app.route("/api/update/upload", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_update_upload():
+    """Archive (ou sa signature .sig) reçue du navigateur, en flux vers le
+    disque : elle fait plus de 600 Mo."""
+    name = (request.args.get("name") or "").strip()
+    is_sig = name.endswith(".sig")
+    base = name[:-4] if is_sig else name
+    if not _su.ARCHIVE_RE.match(base):
+        return jsonify({"error": "expected harvester-ops-<version>.tar.gz or its .sig"}), 400
+    try:
+        length = int(request.headers.get("Content-Length") or 0)
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return jsonify({"error": "empty upload"}), 400
+    staged = _updates_dir() / _su.STAGED
+    if is_sig:
+        if length > _UPDATE_SIG_MAX:
+            return jsonify({"error": "signature file too large"}), 413
+        data = request.stream.read(length)
+        (staged / name).write_bytes(data)
+        arch = staged / base
+        return jsonify({"ok": True, "staged": _update_precheck(arch) if arch.exists() else None})
+    st = os.statvfs(staged)
+    if st.f_bavail * st.f_frsize < length + _UPLOAD_SPARE:
+        return jsonify({"error": "not enough room to receive the archive", "need": length}), 507
+    part = staged / (name + ".part")
+    run = ActionRun(uuid.uuid4().hex[:12], f"console-update:upload:{name}", "", ["upload", name])
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    run.emit({"type": "step", "step_id": "upload", "status": "running",
+              "message": f"receiving {name} ({_vp.fmt_bytes(length)})", "ts": time.time()})
+    try:
+        res = _receive_archive(run, request.stream, length, part)
+        os.chmod(part, 0o640)
+        os.replace(part, staged / name)
+    except (_UploadCancelled, ValueError, OSError) as e:
+        part.unlink(missing_ok=True)
+        run.status, run.exit_code = "error", 1
+        run.error_summary = "cancelled" if isinstance(e, _UploadCancelled) else _error_text(e)
+        run.emit({"type": "step", "step_id": "upload", "status": "error",
+                  "message": run.error_summary, "ts": time.time()})
+        run.close()
+        return jsonify({"error": run.error_summary, "action_id": run.id}), 409
+    run.emit({"type": "step", "step_id": "upload", "status": "done",
+              "message": _vp.summary("upload", res), "ts": time.time()})
+    chk = _update_precheck(staged / name)
+    run.emit({"type": "step", "step_id": "check", "status": "done" if chk.get("ok") else "error",
+              "message": (f"{chk.get('version')} ready to install" if chk.get("ok")
+                          else chk.get("error") or "signature missing: add the .sig file"),
+              "ts": time.time()})
+    run.result = chk
+    run.status, run.exit_code = "done", 0
+    run.close()
+    return jsonify({"ok": True, "action_id": run.id, "staged": chk})
+
+
+@app.route("/api/update/staged/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_update_staged_delete(name):
+    if not _su.ARCHIVE_RE.match(name):
+        return jsonify({"error": "bad name"}), 400
+    staged = _updates_dir() / _su.STAGED
+    for p in (name, name + ".sig", name + ".check.json"):
+        (staged / p).unlink(missing_ok=True)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/update/apply", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_update_apply():
+    b = request.get_json(silent=True) or {}
+    name = str(b.get("archive") or "")
+    if not _su.ARCHIVE_RE.match(name):
+        return jsonify({"error": "bad archive name"}), 400
+    if _update_agent() is None:
+        return jsonify({"error": "no update agent on this host",
+                        "hint": "the console was not installed with install.sh 1.82.0 or later "
+                                "(or runs from sources): install this release with install.sh"}), 409
+    d = _updates_dir()
+    path = d / _su.STAGED / name
+    if not path.is_file():
+        return jsonify({"error": "this archive is not staged"}), 404
+    chk = _update_precheck(path)
+    if not chk.get("ok"):
+        return jsonify({"error": chk.get("error") or "the release is not signed", "staged": chk}), 409
+    if not chk.get("newer") and not b.get("allow_older"):
+        return jsonify({"error": f"{chk['version']} is not newer than {_harvester_ops_version()}"}), 409
+    busy = _update_busy_actions()
+    if busy and not b.get("force"):
+        return jsonify({"error": "actions are running; the console restart would stop them",
+                        "busy": [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]}
+                                 for a in busy]}), 409
+    with _update_lock:
+        if (d / _su.REQUEST).exists():
+            return jsonify({"error": "an update is already requested"}), 409
+        _su.write_json_atomic(d / _su.REQUEST, {
+            "archive": name, "version": chk["version"], "from": _harvester_ops_version(),
+            "requested_by": current_user() or "?", "ts": time.time(),
+            "allow_older": bool(b.get("allow_older"))}, mode=0o640)
+    run = ActionRun(uuid.uuid4().hex[:12], f"console-update:request:{chk['version']}", "", ["apply", name])
+    run.cluster_user = current_user()
+    with ACTIONS_LOCK:
+        ACTIONS[run.id] = run
+    run.emit({"type": "step", "step_id": "request", "status": "done",
+              "message": f"{_harvester_ops_version()} -> {chk['version']} handed to the host agent; "
+                         "the console restarts in a moment", "ts": time.time()})
+    run.status, run.exit_code = "done", 0
+    run.close()
+    return jsonify({"ok": True, "action_id": run.id, "version": chk["version"]}), 202
+
+
+def _update_record_outcome():
+    """Au démarrage : l'issue de la dernière mise à jour, écrite par l'agent
+    pendant que la console redémarrait, rangée une fois dans l'activité."""
+    try:
+        d = _state_dir() / "updates"
+        st = _su.read_json(d / _su.STATUS)
+        if not st or st.get("state") in (None, "running") or not st.get("started"):
+            return
+        mark = d / "recorded.json"
+        if (_su.read_json(mark) or {}).get("started") == st.get("started"):
+            return
+        run = ActionRun(uuid.uuid4().hex[:12], f"console-update:{st.get('to') or '?'}", "",
+                        ["harvester-ops-update"])
+        run.cluster_user = st.get("requested_by")
+        run.started_at = st.get("started") or run.started_at
+        for s in st.get("steps") or []:
+            run.emit({"type": "step", "step_id": s.get("id"), "status": s.get("status"),
+                      "message": s.get("message") or "", "ts": s.get("ts") or time.time()})
+        log_file = LOG_DIR / str(st.get("log") or "")
+        if st.get("log") and log_file.is_file():
+            for line in log_file.read_text(errors="replace").splitlines()[-60:]:
+                run.emit({"type": "log", "line": line, "ts": time.time()})
+        ok = st.get("state") == "done"
+        run.status, run.exit_code = ("done", 0) if ok else ("error", 1)
+        if not ok:
+            run.error_summary = st.get("message") or st.get("state")
+        with ACTIONS_LOCK:
+            ACTIONS[run.id] = run
+        run.close()
+        _su.write_json_atomic(mark, {"started": st.get("started")}, mode=0o640)
+    except Exception as e:     # jamais bloquant au démarrage
+        log.warning("update outcome not recorded: %s", e)
+
 
 
 @app.route("/")
@@ -7691,6 +8065,9 @@ def _start_cluster_watchers():
         _cluster_watch_threads[name] = t
         t.start()
 
+
+# v1.82.0 : l'issue d'une mise à jour faite pendant le redémarrage
+_update_record_outcome()
 
 # Kick off watchers at import — the threads are daemons so Flask shutdown
 # cleans them up.
