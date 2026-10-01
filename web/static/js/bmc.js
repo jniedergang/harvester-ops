@@ -1134,7 +1134,10 @@ const BMC = (() => {
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { msg.innerHTML = refusalFor(d, r.status); return; }
-        msg.innerHTML = '';
+        // v1.80.0 : ce que l'installeur refuserait sans le dire (carte de
+        // gestion sous 10 Gbit/s sans skipchecks), vu en réel sur node4
+        msg.innerHTML = (d.warnings || []).map((w) => `<div class="bm-refusal bm-warning">${Icons.svg('warn', { size: 14 })} ${esc(
+          w.code === 'nic-speed' ? tr('bmc.warn.nicSpeed', { nics: w.nics || '' }) : (w.message || ''))}</div>`).join('');
         const pv = FloatingPanels.open({
           id: `bm-preview-${host}`,
           title: `${tr('bmc.previewTitle')} · ${host}`,

@@ -86,11 +86,17 @@ def revoke(*tokens):
 def stats(token):
     with _LOCK:
         e = _TOKENS.get(token)
-        return dict(e) if e else None
+        if not e:
+            return None
+        out = dict(e)
+        out["clients"] = sorted(e.get("clients") or ())
+        return out
 
 
-def _resolve(token, kind):
-    """Jeton -> chemin, si valide, non expiré et du bon type."""
+def _resolve(token, kind, client=None):
+    """Jeton -> chemin, si valide, non expiré et du bon type. Retient qui
+    l'a lu et quand pour la première fois (v1.80.0 : le déroulé distingue
+    le BMC, qui lit l'ISO du média virtuel, de l'installeur lui-même)."""
     with _LOCK:
         entry = _TOKENS.get(token)
         if not entry:
@@ -101,6 +107,9 @@ def _resolve(token, kind):
         if entry["kind"] != kind:
             return None
         entry["hits"] += 1
+        entry.setdefault("first_hit", time.time())
+        if client:
+            entry.setdefault("clients", set()).add(client)
         return entry["path"]
 
 
@@ -227,7 +236,7 @@ class _Handler(BaseHTTPRequestHandler):
         # un jeton de dépôt ne se lit jamais
         if not token or kind == "inventory":
             return self._deny(404)
-        target = _resolve(token, kind)
+        target = _resolve(token, kind, self.client_address[0] if self.client_address else None)
         if not target or not target.is_file():
             return self._deny(404)
 

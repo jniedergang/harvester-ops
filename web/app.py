@@ -5359,9 +5359,67 @@ def _bm_power_cycle(host, user, pwd, sys_path, run, sleep=None, now=None, off_wa
     return (True, "") if ok else (False, f"power on refused: {detail}")
 
 
-def _bm_wait_power_off(host, user, pwd, sys_path, deadline, run, step, sleep=None, now=None):
+BM_STALL_AFTER = int(os.environ.get("HARVESTER_OPS_BM_STALL_AFTER", "600"))
+BM_MIN_NIC_MBPS = 10000      # exigence de l'installeur de Harvester (contrôles matériels)
+
+
+def _bm_nic_warning(opts):
+    """v1.80.0, vu en réel sur node4 : une carte de gestion sous 10 Gbit/s
+    fait refuser l'installation automatique par les contrôles matériels de
+    l'installeur, sans rien dire à la console. Rend un message quand
+    l'inventaire de la machine montre une carte de gestion choisie plus lente
+    et que `harvester.install.skipchecks=true` n'est pas posé ; None sinon."""
+    if "harvester.install.skipchecks=true" in str(opts.get("extra_args") or ""):
+        return None
+    doc = _bmd.load_inventory(INVENTORY_DIR, str(opts.get("bmc_host") or ""))
+    if not doc:
+        return None
+    nics = _bmdisks.parse_discovery(doc.get("raw") or "").get("nics") or []
+    chosen = opts.get("mgmt_interfaces") or ([opts["mgmt_interface"]] if opts.get("mgmt_interface") else [])
+    chosen = {str(c).lower() for c in (chosen if isinstance(chosen, list) else str(chosen).split(","))}
+    slow = [n for n in nics if (str(n.get("mac") or "").lower() in chosen or n.get("name") in chosen)
+            and isinstance(n.get("speed"), int) and 0 < n["speed"] < BM_MIN_NIC_MBPS]
+    if not slow:
+        return None
+    names = ", ".join(f"{n.get('name')} ({n['speed']} Mbit/s)" for n in slow)
+    return (f"management NIC under 10 Gbit/s: {names}; the Harvester installer's hardware checks refuse "
+            "an unattended install on it unless harvester.install.skipchecks=true is added to the extra "
+            "kernel arguments")
+
+
+def _bm_install_stalled(cfg_token, iso_token, bmc_host, now=None):
+    """v1.80.0, vu en réel sur node4 : l'installeur a lu sa configuration
+    puis ne demande jamais l'image d'installation quand il refuse quelque
+    chose (contrôles matériels : carte de gestion sous 10 Gbit/s, mémoire,
+    disque). Rend un message passé `BM_STALL_AFTER` secondes après la
+    lecture de la configuration sans aucune lecture de l'ISO par un autre
+    client que le BMC, None sinon."""
+    now = now or time.time
+    cfg = pxe_server.stats(cfg_token) or {}
+    if not cfg.get("hits") or now() - cfg.get("first_hit", now()) < BM_STALL_AFTER:
+        return None
+    iso = pxe_server.stats(iso_token) or {}
+    import socket
+    h = str(bmc_host)
+    h = h[1:h.index("]")] if h.startswith("[") and "]" in h else (h.split(":", 1)[0] if h.count(":") == 1 else h)
+    try:
+        bmc_ip = socket.gethostbyname(h)
+    except OSError:
+        bmc_ip = h
+    if [c for c in iso.get("clients", []) if c != bmc_ip]:
+        return None
+    return (f"the installer read its configuration {BM_STALL_AFTER // 60} min ago but never fetched "
+            "the install image: it refused something, most often a hardware check (management NIC "
+            "under 10 Gbit/s, memory, disk). Look at the machine console; if acceptable, add "
+            "harvester.install.skipchecks=true to the extra kernel arguments")
+
+
+def _bm_wait_power_off(host, user, pwd, sys_path, deadline, run, step, sleep=None, now=None,
+                       stalled=None):
     """Attend que la machine soit éteinte (fin de l'installation, v1.78.0).
-    False à l'échéance ou sur annulation."""
+    False à l'échéance ou sur annulation. `stalled()` rend un message quand
+    l'installeur est bloqué (v1.80.0) : l'attente s'arrête alors, le message
+    est gardé dans `run._stall`."""
     sleep, now = sleep or time.sleep, now or time.time
     last, offs = None, 0
     while now() < deadline:
@@ -5371,6 +5429,11 @@ def _bm_wait_power_off(host, user, pwd, sys_path, deadline, run, step, sleep=Non
         sleep(20)
         if getattr(run, "_cancel", False):
             return False
+        if stalled:
+            why = stalled()
+            if why:
+                run._stall = why
+                return False
         state = (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState")
         offs = offs + 1 if state == "Off" else 0
         if offs >= 2:
@@ -5537,6 +5600,9 @@ def _baremetal_install_runner(run, opts):
         step("preflight", "warn",
              "le BMC ne publie pas ses disques et la machine n'a pas d'inventaire de "
              "découverte : l'installeur vérifiera le disque lui-même")
+    nic_warn = _bm_nic_warning(opts)
+    if nic_warn:
+        step("preflight", "warn", nic_warn)
     step("preflight", "done",
          f"{profile.get('model')} : {n_disks or '?'} disque(s) ({disk_src or 'non vus'}), média virtuel OK")
 
@@ -5638,9 +5704,12 @@ def _baremetal_install_runner(run, opts):
     # CD chez un BMC qui n'applique pas l'amorce « une seule fois » (vu en
     # réel sur le banc Redfish : l'installeur tournait en boucle).
     step("wait-install", "running", "installation en cours, la machine s'éteindra à la fin")
-    if not _bm_wait_power_off(host, kc_user, kc_pwd, sys_path, deadline, run, step):
+    if not _bm_wait_power_off(host, kc_user, kc_pwd, sys_path, deadline, run, step,
+                              stalled=lambda: _bm_install_stalled(cfg_token, iso_token, host)):
         if getattr(run, "_cancel", False):
             return fail("wait-install", "cancelled by operator")
+        if getattr(run, "_stall", None):
+            return fail("wait-install", run._stall)
         return fail("wait-install", f"the installer did not power the machine off after "
                                     f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
     step("wait-install", "done", "installation terminée, machine éteinte")
@@ -5924,7 +5993,9 @@ def api_baremetal_config_preview():
         cfg["token"] = _BM_MASK
     if isinstance(cfg.get("os"), dict) and cfg["os"].get("password"):
         cfg["os"]["password"] = _BM_MASK
-    return jsonify({"yaml": _his.dump_install_config(cfg)})
+    warn = _bm_nic_warning(dict(data, bmc_host=host))
+    warnings = [{"code": "nic-speed", "nics": warn.split(": ", 1)[1].split(";", 1)[0], "message": warn}] if warn else []
+    return jsonify({"yaml": _his.dump_install_config(cfg), "warnings": warnings})
 
 
 @app.route("/api/baremetal/install", methods=["POST"])
