@@ -9,6 +9,11 @@
  * bloquer les autres. Un clic sur une vague bascule vers ce cluster et
  * ouvre son onglet Vagues.
  *
+ * Seconde vue (v1.80.0) : les mêmes vagues en couloirs sur un axe du temps
+ * commun, un couloir par cluster et vague (ForkliftLanes) ; un clic ouvre
+ * la fenêtre de suivi de la vague. Tableau ou Couloirs, retenu par le
+ * navigateur.
+ *
  * Le vCenter d'une vague : celui du fournisseur que porte son plan
  * (`wave.provider`, espace et nom), retrouvé dans la liste des fournisseurs
  * du cluster ; à défaut (fournisseur supprimé), tous ceux du cluster.
@@ -28,6 +33,16 @@ const ForkliftGlobal = (() => {
   let timer = null;
   let data = null;
   const filters = { status: '', vcenter: '' };
+  const VIEW_KEY = 'harvester_ops_fkg_view';
+  const viewMode = () => {
+    try { return localStorage.getItem(VIEW_KEY) === 'lanes' ? 'lanes' : 'table'; } catch { return 'table'; }
+  };
+  function viewToggle() {
+    const mode = viewMode();
+    const tab = (m, ic, label, tip) => `<button type="button" class="sub-tab tip${mode === m ? ' active' : ''}" role="tab"
+        aria-selected="${mode === m}" data-fkg="view" data-mode="${m}" data-tip="${esc(tip)}">${icon(ic)} <span>${esc(label)}</span></button>`;
+    return `${tab('table', 'doc', tr('fkl.view.table'), tr('fkl.t.table'))}${tab('lanes', 'metrics', tr('fkl.view.lanes'), tr('fkl.t.lanesAll'))}`;
+  }
 
   // Mêmes libellés d'état que l'onglet Vagues d'un cluster (Forklift.js) :
   // clés littérales identiques, pour ne pas dupliquer les traductions.
@@ -111,6 +126,7 @@ const ForkliftGlobal = (() => {
         </div>
         <div class="res-feedback" data-fkg="feedback"></div>
         <div data-fkg="clusters" class="fk-sources"></div>
+        <div class="sub-tabs sub-tabs-inline fk-view-toggle" role="tablist" data-fkg="views"></div>
         <div data-fkg="table"><p class="form-hint">${esc(tr('common.loading'))}</p></div>
       </div>`;
     const card = host.querySelector('.fkg-card');
@@ -239,9 +255,21 @@ const ForkliftGlobal = (() => {
     fillSelect(card.querySelector('[data-fkg="f-vcenter"]'), allHosts.map((h) => [h, () => h]), filters.vcenter,
                () => tr('fkg.filter.allVcenters'));
     card.querySelector('[data-fkg="clusters"]').innerHTML = clusters.map(clusterHeader).join('');
+    card.querySelector('[data-fkg="views"]').innerHTML = viewToggle();
+    const tableHost = card.querySelector('[data-fkg="table"]');
+    if (viewMode() === 'lanes' && window.ForkliftLanes) {
+      // une vague par couloir, avec les mêmes filtres que le tableau
+      const lanes = [];
+      allRows(clusters).filter(matchesFilters).forEach((r) => {
+        if (!lanes.some((l) => l.cluster === r.cluster && l.wave.name === r.wave.name)) lanes.push({ cluster: r.cluster, wave: r.wave });
+      });
+      card.querySelector('.res-count').textContent = tr('fkl.count', { n: lanes.length });
+      ForkliftLanes.paint(tableHost, lanes, { scope: '*all', showCluster: true, stateBadge, onOpen: openFollow });
+      if (window.Forklift && Forklift.tick) Forklift.tick();
+      return;
+    }
     const rows = allRows(clusters).filter(matchesFilters);
     card.querySelector('.res-count').textContent = tr('fkg.count', { n: rows.length });
-    const tableHost = card.querySelector('[data-fkg="table"]');
     tableHost.innerHTML = rows.length
       ? `<table class="data-table"><thead><tr>
             <th>${esc(tr('fkg.col.vm'))}</th><th>${esc(tr('fkg.col.vcenter'))}</th>
@@ -262,8 +290,20 @@ const ForkliftGlobal = (() => {
     if (window.Sections) Sections.open('forklift', 'waves');
   }
 
+  /** Clic sur un couloir : la fenêtre de suivi de la vague, sans quitter la vue. */
+  function openFollow(cluster, wave) {
+    if (window.Forklift && Forklift.follow) Forklift.follow(cluster, wave);
+    else gotoWave(cluster);
+  }
+
   function onClick(e) {
     if (e.target.closest('[data-fkg="refresh"]')) { load(); return; }
+    const v = e.target.closest('[data-fkg="view"]');
+    if (v) {
+      try { localStorage.setItem(VIEW_KEY, v.dataset.mode === 'lanes' ? 'lanes' : 'table'); } catch { /* navigation privée */ }
+      render();
+      return;
+    }
     const row = e.target.closest('[data-fkg-wave]');
     if (row) gotoWave(row.dataset.fkgCluster);
   }

@@ -12,7 +12,9 @@
  *   par VM (CBT, outils VMware) et une sélection pour composer une vague ;
  * - Vagues : un bloc par vague avec ses gestes selon l'état (lancer,
  *   basculer maintenant ou à une date, revenir à la source, clore,
- *   supprimer), la fenêtre de composition et la fenêtre de suivi.
+ *   supprimer), la fenêtre de composition et la fenêtre de suivi ; ou,
+ *   au choix (v1.80.0), toutes les vagues en couloirs sur un axe du temps
+ *   (ForkliftLanes, forklift-lanes.js).
  * Toute écriture passe par l'outil harvester-forklift, en action suivie.
  */
 const Forklift = (() => {
@@ -150,7 +152,7 @@ const Forklift = (() => {
         body.innerHTML = steps.one + steps.cdi + steps.vddk + steps.sources + steps.precopy;
       }
     } else if (cur.kind === 'sources') body.innerHTML = sourcesView(d);   // U4
-    else if (cur.kind === 'waves') { body.innerHTML = wavesView(d); tick(); }   // W6
+    else if (cur.kind === 'waves') { paintWaves(body, d); tick(); }   // W6, couloirs v1.80.0
     else inventoryView(body, d);                                        // U4
   }
 
@@ -613,6 +615,37 @@ const Forklift = (() => {
         <div class="fk-source-actions">${waveButtons(w)}</div></div>`).join('')}</div>`;
   }
 
+  // v1.80.0 : Blocs ou Couloirs, retenu par le navigateur (Blocs par défaut)
+  const VIEW_KEY = 'harvester_ops_fk_waves_view';
+  function wavesMode() {
+    try { return localStorage.getItem(VIEW_KEY) === 'lanes' ? 'lanes' : 'blocks'; } catch { return 'blocks'; }
+  }
+  function viewToggle(mode) {
+    const tab = (m, ic, label, tip) => `<button type="button" class="sub-tab tip${mode === m ? ' active' : ''}" role="tab"
+        aria-selected="${mode === m}" data-fk="waves-mode" data-mode="${m}" data-tip="${esc(tip)}">${icon(ic)} <span>${esc(label)}</span></button>`;
+    return `<div class="sub-tabs sub-tabs-inline fk-view-toggle" role="tablist" data-fk="waves-view">
+        ${tab('blocks', 'general', tr('fkl.view.blocks'), tr('fkl.t.blocks'))}${tab('lanes', 'metrics', tr('fkl.view.lanes'), tr('fkl.t.lanes'))}</div>`;
+  }
+
+  /** L'onglet Vagues : bascule Blocs/Couloirs puis la vue choisie. En
+   *  couloirs, seuls les couloirs se redessinent à chaque relecture (la
+   *  barre d'outils et sa fenêtre de maintenance restent en place). */
+  function paintWaves(body, d) {
+    if (!d.install.ready || !(d.waves || []).length) { body.innerHTML = wavesView(d); return; }
+    const mode = wavesMode();
+    if (!body.querySelector(':scope > [data-fk="waves-view"]')) {
+      body.innerHTML = `${viewToggle(mode)}<div data-fk="waves-content"></div>`;
+    } else {
+      body.querySelector(':scope > [data-fk="waves-view"]').outerHTML = viewToggle(mode);
+    }
+    const content = body.querySelector('[data-fk="waves-content"]');
+    if (mode === 'blocks' || !window.ForkliftLanes) { content.innerHTML = wavesView(d); return; }
+    cur.host.querySelector('.res-count').textContent = tr('fk.w.count', { n: d.waves.length });
+    const cluster = cur.cluster;
+    ForkliftLanes.paint(content, d.waves.map((w) => ({ cluster, wave: w })),
+      { scope: cluster, showCluster: false, stateBadge, onOpen: (c, wave) => followWave(c, wave) });
+  }
+
   /** Les gestes d'une vague, confirmés quand ils touchent aux VMs. */
   function waveAction(act, w, cluster) {
     const wave = w.name;
@@ -969,6 +1002,10 @@ const Forklift = (() => {
       return Sections.open('forklift', 'inventory');
     }
     if (act === 'goto-inventory') return Sections.open('forklift', 'inventory');
+    if (act === 'waves-mode') {
+      try { localStorage.setItem(VIEW_KEY, b.dataset.mode === 'lanes' ? 'lanes' : 'blocks'); } catch { /* navigation privée */ }
+      return render();
+    }
     const wave = b.dataset.wave && (cur.data.waves || []).find(w => w.name === b.dataset.wave);
     if (wave) return waveAction(act, wave, cur.cluster);
   }
@@ -1132,6 +1169,6 @@ const Forklift = (() => {
     });
   }
 
-  return { start, stop, openInventory, backgroundRefresh, selectedVms, composeWave };
+  return { start, stop, openInventory, backgroundRefresh, selectedVms, composeWave, follow: followWave, tick };
 })();
 window.Forklift = Forklift;

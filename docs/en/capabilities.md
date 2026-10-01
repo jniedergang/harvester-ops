@@ -1435,6 +1435,21 @@ image, sources, waves). An unreachable cluster is shown as such without
 blocking the others; the view is read at most every 15 seconds per
 person.
 
+**Lanes** (1.80.0): the Waves tab switches between **Blocks** and
+**Lanes** (the choice is remembered in the browser, Blocks by default).
+Lanes put every wave of the cluster on one time axis, one lane per wave:
+a line for now, a mark for each copy already made (the first full copy,
+then the incremental ones; hovering a mark gives its start, end and
+duration), the next copy, the scheduled cutover with its countdown, the
+cutover window once it happened, and the wave state. The axis runs from
+the start of the earliest wave to two hours from now (or 30 minutes
+after the last scheduled cutover); the 6 h, 24 h, 7 days and Fit buttons
+change the span. A maintenance window can be drawn on the axis (start
+and end, kept in this browser only, per cluster): a visual aid, nothing
+is sent to the cluster. Clicking a lane opens the wave's follow window.
+Migrations (all clusters) offers the same lanes, one per cluster and
+wave.
+
 On the command line: `harvester-forklift wave-apply` (the wave as JSON on
 stdin or `--spec`: `name`, `target_namespace`, `provider`, `vms`,
 `networks`, `storages`, `skip_conversion`, `preserve_static_ips`),
