@@ -337,9 +337,12 @@ most 512 characters, without control characters.
   `--port` sets the artifact server port when a console already listens
   on 8091.
 - Verified by automated tests (substitution, store, ordering, refusals,
-  secrets) and on the window with mocked routes. **A batch has not been run
-  on real machines yet**: each row is the install already checked on its
-  own, the chaining of create then joins is not.
+  secrets) and on the window with mocked routes. **Run for real (1.83.2)**
+  on two machines behind two Redfish BMCs (the bmcfg bench): row 1 created
+  the cluster, row 2 joined it, both nodes `Ready`, the cluster declared by
+  itself with both nodes. That run found three defects, fixed in 1.83.2:
+  `skipchecks: true` did not reach the installer, a failed row did not say
+  why, and the joined node was missing from the declaration.
 
 ### Redfish: what 1.78.0 changed
 
@@ -423,6 +426,7 @@ one. Two extra kernel arguments help, both available in the
   and the BIOS setting `SerialConsolePort` has to be set to `Virtual`
   first.
 - `harvester.install.skipchecks=true` skips the hardware preflight.
+  In an install profile, `skipchecks: true` adds it (1.83.2).
   Without it, a machine that fails a minimum-requirement check aborts the
   install and says so only on that console you cannot see.
 

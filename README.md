@@ -115,6 +115,14 @@ Short clips filmed on a real three-node cluster, with captions. Waits are
 sped up, with the factor shown on screen; nothing is cut. The tour is at
 the top of this page; every clip also exists in French.
 
+### VMware to Harvester, warm (2:55)
+
+A VM running on VMware, its guest system alive on screen; the vCenter source,
+the wave copied while the VM keeps running, the lanes, a real switchover;
+then the same system alive on Harvester, its write counter carrying on.
+
+Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-fr.mp4)
+
 ### Several clusters (1:16)
 
 Switching clusters, one that is powered off, cluster declarations and accounts.
@@ -191,6 +199,8 @@ Download: [English](https://github.com/jniedergang/harvester-ops/releases/downlo
 | Storage, with a volume being rebuilt | Physical fabric of the cluster |
 | [![Graceful shutdown](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Bare-metal](docs/assets/baremetal.png)](docs/assets/baremetal.png) |
 | The eight shutdown steps | Bare-metal: Redfish discovery and unattended install |
+| [![VMware migration lanes](docs/assets/lanes.png)](docs/assets/lanes.png) | [![Update](docs/assets/update.png)](docs/assets/update.png) |
+| VMware migration waves on one time axis | Updating the console, online or from a signed archive |
 
 ## Quick start
 

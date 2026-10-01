@@ -243,3 +243,26 @@ def test_the_first_start_creates_the_administrator(browser, blank_server):
     page.goto(base + "/setup")
     assert page.url.endswith("/")                     # la porte est refermée
     ctx.close()
+
+
+def test_the_history_scrolls_inside_the_window(fr, flask_server):
+    """v1.83.2 : depuis l'onglet Mise à jour (1.82), l'historique sortait de la
+    fenêtre sans défilement (signalé par ju)."""
+    page = fr.new_page()
+    page.set_viewport_size({"width": 1000, "height": 700})
+    page.goto(flask_server["base_url"] + "/")
+    page.wait_for_function("window.Versions && window.i18n")
+    page.evaluate("Versions.open()")
+    body = page.locator("#versions-body")
+    expect(page.locator("#versions-body .version-rel").first).to_be_visible(timeout=8000)
+    box = page.locator("#versions-modal .modal").bounding_box()
+    assert box["y"] + box["height"] <= 700 + 1, box
+    dims = body.evaluate("e => [e.scrollHeight, e.clientHeight]")
+    assert dims[0] > dims[1], dims
+    body.evaluate("e => e.scrollTop = e.scrollHeight")
+    assert body.evaluate("e => e.scrollTop") > 0
+    # l'onglet Mise à jour reste caché tant qu'on ne l'ouvre pas, et inversement
+    page.click('#versions-modal [data-vpane="update"]')
+    expect(page.locator("#versions-pane-history")).to_be_hidden()
+    page.click('#versions-modal [data-vpane="history"]')
+    expect(page.locator("#versions-pane-history")).to_be_visible()

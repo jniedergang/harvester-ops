@@ -1450,6 +1450,13 @@ is sent to the cluster. Clicking a lane opens the wave's follow window.
 Migrations (all clusters) offers the same lanes, one per cluster and
 wave.
 
+Before a wave is composed, started or switched over, the console checks that
+no MAC address of its VMs is already carried by a VM of the destination
+cluster (1.83.2). Harvester refuses a duplicate MAC even on a stopped VM, and
+Forklift finds out only when it creates the VM, after the switchover has
+stopped the source: the gesture is refused with the VM holding the address.
+When the inventory cannot be read, the check is skipped and said so.
+
 On the command line: `harvester-forklift wave-apply` (the wave as JSON on
 stdin or `--spec`: `name`, `target_namespace`, `provider`, `vms`,
 `networks`, `storages`, `skip_conversion`, `preserve_static_ips`),

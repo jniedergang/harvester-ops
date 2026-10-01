@@ -221,6 +221,13 @@ def cmd_profile(args):
         os.environ["HARVESTER_OPS_PXE_PORT"] = str(args.port)
     # le cluster créé est déclaré dans le même répertoire d'état
     os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(state))
+    # v1.83.2 : la commande ne surveille aucun cluster (elle chargeait la
+    # console et lançait la surveillance de chacun), et son historique va dans
+    # le même répertoire d'état (il retombait dans /tmp)
+    os.environ.setdefault("HARVESTER_OPS_WATCH", "0")
+    os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
+    os.environ.setdefault("HARVESTER_OPS_ACTIONS_DB", str(Path(state) / "actions.db"))
+    os.environ.setdefault("HARVESTER_OPS_NOTES_DB", str(Path(state) / "notes.db"))
     app = _load_web_module("app")
     if app is None:
         print("web/app.py not found (set HARVESTER_OPS_WEB_DIR)", file=sys.stderr)

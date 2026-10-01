@@ -177,8 +177,13 @@ def main():
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True, args=["--force-device-scale-factor=1"])
+        # Une scène peut préparer, HORS caméra, ce qui ne doit pas être filmé
+        # (une connexion à un autre outil, avec son mot de passe) : elle rend
+        # l'état du navigateur, que le contexte filmé reprend.
+        state = mod.prepare(browser) if hasattr(mod, "prepare") else None
         t0 = time.time()
         ctx = browser.new_context(
+            storage_state=state, ignore_https_errors=bool(state),
             viewport={"width": WIDTH, "height": HEIGHT},
             record_video_dir=str(out), record_video_size={"width": WIDTH, "height": HEIGHT},
             locale="fr-FR" if args.lang == "fr" else "en-US",

@@ -875,3 +875,45 @@ def test_no_secret_goes_on_the_command_line():
         if name.startswith("wave") or name in ("cdi-importer", "precopy-interval"):
             opts = {o for a in sp._actions for o in a.option_strings}
             assert not {o for o in opts if "pass" in o or "user" in o or "token" in o}, name
+
+
+# --- conflit de MAC (v1.83.2, vu en réel sur harvlab2) ------------------------
+SRC_VM = [{"id": "vm-16", "name": "vmwlab-src-1", "powerState": "poweredOn", "changeTrackingEnabled": True,
+           "nics": [{"network": {"id": "network-13"}, "mac": "00:50:56:B7:AB:28", "order": 0}]}]
+
+
+def dest_vm(k, name="vmwlab-src-1", namespace="mig-ui", mac="00:50:56:b7:ab:28"):
+    k.put(hfk.K_VM, namespace, name, {"metadata": {"name": name, "namespace": namespace},
+                                     "spec": {"template": {"spec": {"domain": {"devices": {"interfaces": [
+                                         {"name": "nic-1", "macAddress": mac}]}}}}}})
+
+
+def test_mac_conflicts_pure():
+    rows = hf.inventory_rows("vms", SRC_VM)
+    assert rows[0]["macs"] == ["00:50:56:b7:ab:28"]
+    vms = [{"metadata": {"name": "old", "namespace": "mig-ui"},
+            "spec": {"template": {"spec": {"domain": {"devices": {"interfaces": [{"macAddress": "00:50:56:B7:AB:28"}]}}}}}}]
+    assert hf.mac_conflicts(rows, vms, ["vm-16"]) == [("vmwlab-src-1", "00:50:56:b7:ab:28", "mig-ui/old")]
+    assert hf.mac_conflicts(rows, vms, ["vm-99"]) == []
+    msg = hf.mac_refusal(hf.mac_conflicts(rows, vms, ["vm-16"]))
+    assert "mig-ui/old" in msg and "delete" in msg
+
+
+def test_cutover_refuses_a_mac_already_used_on_the_cluster(capsys):
+    """La bascule arrête la source : avec un conflit, Forklift ne crée pas la
+    VM d'arrivée (vu en réel) ; la console refuse avant."""
+    k = FakeKube()
+    with_wave(k)
+    running_copy(k)
+    dest_vm(k)
+    assert hfk.cmd_wave_cutover(ns(wave="vague-1", at=None), kube=k, fetch=fetcher(SRC_VM)) == hfk.EXIT_REFUSED
+    assert "mig-ui/vmwlab-src-1" in capsys.readouterr().err
+    assert "cutover" not in (k.objs[(hf.K_MIGRATION, hf.NS, "vague-1-m4")]["spec"])
+
+
+def test_cutover_passes_when_the_macs_are_free(capsys):
+    k = FakeKube()
+    with_wave(k)
+    running_copy(k)
+    dest_vm(k, mac="00:50:56:00:00:01")            # une autre MAC : pas de conflit
+    assert hfk.cmd_wave_cutover(ns(wave="vague-1", at=None), kube=k, fetch=fetcher(SRC_VM)) == hfk.EXIT_OK

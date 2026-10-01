@@ -358,9 +358,13 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   `--port` le port du serveur d'artefacts quand une console écoute déjà sur
   8091.
 - Vérifié par les tests automatiques (substitution, magasin, ordre, refus,
-  secrets) et sur la fenêtre avec des routes simulées. **Aucune série n'a
-  encore tourné sur de vraies machines** : chaque ligne est l'installation
-  déjà vérifiée seule, l'enchaînement création puis jonctions ne l'est pas.
+  secrets) et sur la fenêtre avec des routes simulées. **Faite en réel
+  (1.83.2)** sur deux machines derrière deux BMC Redfish (banc bmcfg) : la
+  ligne 1 a créé le cluster, la ligne 2 l'a rejoint, les deux nœuds `Ready`,
+  le cluster déclaré tout seul avec ses deux nœuds. Cet essai a trouvé trois
+  défauts, corrigés en 1.83.2 : `skipchecks: true` n'atteignait pas
+  l'installeur, une ligne en échec ne disait pas pourquoi, et le nœud qui
+  rejoint manquait à la déclaration.
 
 ### Redfish : ce que la 1.78.0 a changé
 
@@ -443,6 +447,7 @@ aident, tous deux disponibles dans la section **Avancé** du formulaire :
   BMC expose : sur les iLO 4 de HPE c'est `Com2`, d'où `ttyS1`, et le
   réglage BIOS `SerialConsolePort` doit d'abord être mis à `Virtual`.
 - `harvester.install.skipchecks=true` passe outre les contrôles matériels.
+  Dans un profil d'installation, `skipchecks: true` l'ajoute (1.83.2).
   Sans lui, une machine qui échoue à un prérequis minimal abandonne
   l'installation et ne le dit que sur cette console invisible.
 

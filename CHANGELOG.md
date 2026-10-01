@@ -4,6 +4,27 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.2] - 2026-10-01 - A MAC conflict refused before the switchover, a real two-machine bare-metal batch, and a warm-migration video
+
+### Fixed
+- A VMware migration wave is refused, when composed, started or switched over, if a MAC address of its VMs is already carried by a VM of the destination cluster. Harvester refuses a duplicate MAC even on a stopped VM, and Forklift finds out only when it creates the VM, after the switchover has stopped the source: the source was down with nothing to replace it (seen on the bench, a VM left by an earlier rolled-back wave). The refusal names the VM holding the address; when the inventory cannot be read the check is skipped and said so.
+- `skipchecks: true` in a bare-metal install profile now adds `harvester.install.skipchecks=true` to the installer's kernel arguments; it only lifted the console's disk-size checks, and the installer stopped on its own hardware checks (seen on the first real two-machine batch).
+- A failed row of a bare-metal batch carries its reason (in the result, the parent action's step and its summary); the command line said `error` without why.
+- A node that joins through a bare-metal install is added to the cluster declaration written by the console (the shutdown and startup read it); for a cluster declared in `config.yaml`, the action says what to add there.
+- `harvester-baremetal profile apply` no longer starts a watcher for every declared cluster, and keeps its action history in the state directory instead of `/tmp`.
+- The version history scrolls again inside its window (broken by the Update tab of 1.82.0).
+
+### Added
+- A video, English and French (2:55): a warm VMware to Harvester migration from the console, starting on the VMware console of the source with the guest system alive (a service writes its name, time, uptime and a write counter on the screen) and ending on the Harvester console of the migrated VM, the same system with its counter carrying on; in between the vCenter source, the inventory, the lanes, the wave follow window and a real switchover. README screenshots of the lanes and of the Update tab.
+- Demo tooling: a scene can prepare what must not be filmed (signing in to another tool) in an unrecorded browser context (`prepare`), and `vmwlab-alive.sh` installs the on-screen state service in the bench guests.
+
+### Known
+- A rolled-back source that VMware stops on a question at power-on (here: a serial port file that already exists) is reported as powered on; the question is visible only through vCenter's SOAP API. The bench answers it by itself; harvops does not see it yet.
+
+### Tests
+- `test_forklift_b2_cli_176.py`: conflicts found from the inventory's NICs, switchover refused with the holding VM named, allowed when the MACs are free. `test_bm_profiles_180.py`: `skipchecks` reaching the kernel arguments without duplicate, a failed row's reason, the command line neither watching nor writing to `/tmp`. `tests/e2e/test_user_menu_and_versions.py`: the history scrolls inside a 700 px high window (fails without the fix).
+- Checked for real on harvlab2 and the VMware bench: a wave holding a VM whose MAC was still on a stopped VM of the cluster was refused at composition, nothing created. On the bmcfg bench with two Redfish BMCs: the stalled install was stopped ten minutes after the configuration was read and the second row skipped with its reason; the command line ran with no watcher. Then, with the fixes, a real batch of two machines: row 1 created the cluster `bmcfg`, row 2 joined it, two nodes `Ready` on Harvester 1.9.0, declared by itself with both nodes. Two real warm migrations filmed (one per language), each source switched over to Harvester with its guest alive.
+
 ## [1.83.1] - 2026-10-01 - Performance settings reach the packaged service
 
 ### Fixed

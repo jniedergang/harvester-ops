@@ -1613,6 +1613,13 @@ une aide visuelle, rien n'est envoyé au cluster. Un clic sur un couloir
 ouvre la fenêtre de suivi de la vague. Migrations (tous clusters) offre
 les mêmes couloirs, un par cluster et par vague.
 
+Avant de composer, lancer ou basculer une vague, la console vérifie qu'aucune
+adresse MAC de ses VMs n'est déjà portée par une VM du cluster de destination
+(1.83.2). Harvester refuse une MAC en double même sur une VM arrêtée, et
+Forklift ne le découvre qu'en créant la VM, après que la bascule a arrêté la
+source : le geste est refusé, avec la VM qui porte l'adresse. Si l'inventaire
+ne répond pas, le contrôle est sauté et c'est dit.
+
 En ligne de commande : `harvester-forklift wave-apply` (la vague en JSON
 sur l'entrée standard ou `--spec` : `name`, `target_namespace`,
 `provider`, `vms`, `networks`, `storages`, `skip_conversion`,

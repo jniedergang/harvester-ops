@@ -5302,3 +5302,8 @@ td.fk-reason { max-width: 260px; }
 .upd-notes .version-rel { padding: 6px 10px; }
 .version-link.has-update::after { content: ""; display: inline-block; width: 7px; height: 7px; margin-left: 5px;
   border-radius: 50%; background: var(--accent); vertical-align: middle; }
+/* v1.83.2 : l'historique est dans son propre panneau depuis l'onglet Mise à
+   jour ; sans ceci il sortait de la fenêtre, sans défilement */
+#versions-pane-history { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+#versions-pane-history[hidden] { display: none; }
+#versions-pane-history .versions-body { min-height: 0; }

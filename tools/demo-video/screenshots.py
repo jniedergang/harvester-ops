@@ -120,5 +120,62 @@ def main(only=None):
         print(f"{name}.png : {kb} Ko")
 
 
+# v1.83.2 : captures qui ne demandent pas harvlab (banc à 3 nœuds), prises sur
+# harvlab2 avec de vraies vagues de migration VMware : la vue en couloirs et
+# l'onglet Mise à jour. `screenshots.py --base http://127.0.0.1:8125 lanes update`
+EXTRA = {"lanes", "update"}
+
+
+def extra(only, base):
+    shots = {}
+    with sync_playwright() as pw:
+        b = pw.chromium.launch()
+        ctx = b.new_context(viewport={"width": 1600, "height": 900}, device_scale_factor=2)
+        ctx.add_init_script("localStorage.setItem('harvester_ops_language','en');"
+                            "localStorage.setItem('harvester_ops_current_cluster','harvlab2');"
+                            "localStorage.setItem('harvester_ops_section_forklift','waves');"
+                            "localStorage.setItem('harvester_ops_fk_waves_view','lanes');")
+        p = ctx.new_page()
+        p.on("dialog", lambda d: d.dismiss())
+        p.goto(base + "/", wait_until="domcontentloaded")
+        p.wait_for_timeout(3000)
+
+        def snap(name):
+            p.mouse.move(1590, 890)
+            p.evaluate("() => document.activeElement && document.activeElement.blur()")
+            p.wait_for_timeout(600)
+            path = ASSETS / f"{name}.png"
+            p.screenshot(path=str(path))
+            shots[name] = shrink(path)
+
+        if "lanes" in only:
+            p.click('.tab-group-head[data-group="vmio"]')
+            p.click('.tab[data-tab="forklift"]')
+            p.wait_for_selector("#tab-forklift [data-fkl-lane]", timeout=90000)
+            p.wait_for_timeout(2000)
+            snap("lanes")
+        if "update" in only:
+            p.evaluate("Versions.open()")
+            p.click('#versions-modal [data-vpane="update"]')
+            p.wait_for_timeout(2000)
+            p.click('#versions-pane-update [data-upd="check"]')
+            p.wait_for_timeout(4000)
+            snap("update")
+        b.close()
+    for name, kb in shots.items():
+        print(f"{name}.png : {kb} Ko")
+
+
 if __name__ == "__main__":
-    main(set(sys.argv[1:]) or None)
+    args = sys.argv[1:]
+    base = BASE
+    if "--base" in args:
+        i = args.index("--base")
+        base = args[i + 1]
+        del args[i:i + 2]
+    wanted = set(args)
+    if wanted and wanted <= EXTRA:
+        extra(wanted, base)
+    else:
+        BASE = base
+        main(wanted or None)

@@ -457,6 +457,9 @@ def inventory_rows(kind, items):
                 "tools": bool(v.get("guestNameFromVmwareTools") or v.get("ipAddress")),
                 "snapshot": str(((v.get("snapshot") or {}).get("id")) or ""),
                 "uuid": str(v.get("uuid") or ""),
+                # v1.83.2 : adresses MAC des cartes, pour refuser une vague
+                # dont une VM entrerait en conflit sur le cluster de destination
+                "macs": [str(n.get("mac")).lower() for n in v.get("nics") or [] if n.get("mac")],
             })
         return out
     if kind == "networks":
@@ -465,6 +468,42 @@ def inventory_rows(kind, items):
         return [{"id": d.get("id"), "name": d.get("name"), "path": d.get("path"),
                  "capacity": d.get("capacity"), "free": d.get("free")} for d in items]
     raise ValueError(f"inventory kind: vms, networks or datastores ({kind!r})")
+
+
+def vm_macs(vm):
+    """Adresses MAC posées sur les cartes d'une VM KubeVirt."""
+    dom = ((((vm.get("spec") or {}).get("template") or {}).get("spec") or {}).get("domain") or {})
+    return [str(i["macAddress"]).lower() for i in (dom.get("devices") or {}).get("interfaces") or []
+            if i.get("macAddress")]
+
+
+def mac_conflicts(rows, dest_vms, vm_ids):
+    """[(VM source, MAC, « namespace/nom » de la VM qui la porte déjà)] pour les
+    VMs `vm_ids` de la vague. Vu en réel (v1.83.2) : Forklift ne le découvre
+    qu'en créant la VM, APRÈS avoir arrêté la source à la bascule ; Harvester
+    refuse une MAC portée par une autre VM, même arrêtée."""
+    used = {}
+    for vm in dest_vms or []:
+        md = vm.get("metadata") or {}
+        for m in vm_macs(vm):
+            used.setdefault(m, f"{md.get('namespace')}/{md.get('name')}")
+    ids = set(vm_ids)
+    out = []
+    for r in rows or []:
+        if r.get("id") in ids:
+            for m in r.get("macs") or []:
+                if m in used:
+                    out.append((r.get("name") or r.get("id"), m, used[m]))
+    return out
+
+
+def mac_refusal(conflicts):
+    if not conflicts:
+        return None
+    return "; ".join(f"{name}: MAC {mac} is already used by {owner} on this cluster "
+                     f"(Harvester refuses it even on a stopped VM, and Forklift would find it only after "
+                     f"stopping the source): delete {owner} or change its MAC first"
+                     for name, mac, owner in conflicts)
 
 
 # --- vagues à chaud (v1.76.0) ------------------------------------------------

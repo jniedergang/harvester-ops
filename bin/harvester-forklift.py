@@ -531,6 +531,9 @@ def cmd_wave_apply(args, kube=None, fetch=None, sleep=time.sleep, now=time.time)
     step("wave", "running", f"reading the inventory of {src['namespace']}/{src['name']}")
     rows = inventory(kube, src["namespace"], src["name"], "vms", fetch)
     probs = wave_problems(spec, rows)
+    mac = hf.mac_refusal(hf.mac_conflicts(rows, kube.list(K_VM), [v["id"] for v in plan_doc["spec"]["vms"]]))
+    if mac:
+        probs.append(mac)
     if probs:
         step("wave", "error", "; ".join(probs))
         return EXIT_REFUSED
@@ -539,7 +542,22 @@ def cmd_wave_apply(args, kube=None, fetch=None, sleep=time.sleep, now=time.time)
     return until(lambda: plan_ready(get_opt(kube, hf.K_PLAN, hf.NS, wave)), args.timeout, "wave", sleep, now)
 
 
-def cmd_wave_start(args, kube=None, sleep=time.sleep, now=time.time):
+def wave_mac_refusal(kube, plan, fetch=None):
+    """Le refus d'un conflit de MAC entre les VMs de la vague et celles du
+    cluster, relu au moment du geste (v1.83.2)."""
+    src = (((plan.get("spec") or {}).get("provider") or {}).get("source")) or {}
+    ids = [v.get("id") for v in (plan.get("spec") or {}).get("vms") or []]
+    try:
+        rows = inventory(kube, src.get("namespace"), src.get("name"), "vms", fetch)
+    except (KubeError, ValueError) as e:
+        # l'inventaire ne répond pas : on le dit, sans bloquer le geste (une
+        # bascule peut être urgente ; ce n'est pas pire qu'avant ce contrôle)
+        step("macs", "running", f"MAC addresses not checked: {e}")
+        return None
+    return hf.mac_refusal(hf.mac_conflicts(rows, kube.list(K_VM), ids))
+
+
+def cmd_wave_start(args, kube=None, sleep=time.sleep, now=time.time, fetch=None):
     kube = kube or kube_from(args)
     plan, migs = load_wave(kube, args.wave)
     wave = plan["metadata"]["name"]
@@ -554,6 +572,10 @@ def cmd_wave_start(args, kube=None, sleep=time.sleep, now=time.time):
                 "pending": "Forklift has not validated the plan yet"}
     if st["state"] in refusals:
         step("start", "error", f"wave {wave}: {refusals[st['state']]}")
+        return EXIT_REFUSED
+    mac = wave_mac_refusal(kube, plan, fetch)
+    if mac:
+        step("start", "error", mac)
         return EXIT_REFUSED
     doc = hf.migration_manifest(wave, next_migration_number(plan, migs))
     name = doc["metadata"]["name"]
@@ -573,12 +595,18 @@ def cmd_wave_start(args, kube=None, sleep=time.sleep, now=time.time):
     return until(started, args.timeout, "start", sleep, now)
 
 
-def cmd_wave_cutover(args, kube=None):
+def cmd_wave_cutover(args, kube=None, fetch=None):
     kube = kube or kube_from(args)
     plan, migs = load_wave(kube, args.wave)
     run = running_migration(plan, migs)
     if run is None:
         step("cutover", "error", f"wave {plan['metadata']['name']} has no migration running")
+        return EXIT_REFUSED
+    # une bascule arrête la source : un conflit de MAC la laisserait sans VM
+    # d'arrivée (vu en réel, v1.83.2)
+    mac = wave_mac_refusal(kube, plan, fetch)
+    if mac:
+        step("cutover", "error", mac)
         return EXIT_REFUSED
     patch = hf.cutover_patch(args.at)
     name = run["metadata"]["name"]

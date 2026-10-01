@@ -526,3 +526,97 @@ def test_cli_list_and_show(tmp_path, capsys):
     assert cli.main(["profile", "--state-dir", str(state), "show", "rack-a"]) == 0
     assert "{{storage_ip}}" in capsys.readouterr().out
     assert cli.main(["profile", "--state-dir", str(state), "show", "nope"]) == 2
+
+
+def test_cli_apply_neither_watches_nor_writes_to_tmp(tmp_path, monkeypatch, capsys):
+    """v1.83.2, vu en réel (lot de deux machines sur le banc bmcfg) : la
+    commande lançait la surveillance de chaque cluster déclaré et rangeait son
+    historique dans /tmp."""
+    state, nodes, sec = _cli_env(tmp_path)
+    saved = dict(os.environ)
+    try:
+        for k in ("HARVESTER_OPS_WATCH", "HARVESTER_OPS_READ_WORKERS",
+                  "HARVESTER_OPS_ACTIONS_DB", "HARVESTER_OPS_NOTES_DB"):
+            os.environ.pop(k, None)
+        seen = {}
+
+        def fake_start(prof, batch, secrets_, concurrency):
+            seen.update({k: os.environ.get(k) for k in ("HARVESTER_OPS_WATCH", "HARVESTER_OPS_ACTIONS_DB")})
+            run = wapp.ActionRun("cli2", "baremetal-batch:rack-a", "(local)", [])
+            run.status, run.result = "done", {"nodes": []}
+            with wapp.ACTIONS_LOCK:
+                wapp.ACTIONS["cli2"] = run
+            return "cli2", None
+        monkeypatch.setattr(wapp, "_bm_batch_start", fake_start)
+        monkeypatch.setitem(sys.modules, "app", wapp)
+        _cli().main(["profile", "--state-dir", str(state), "apply", "rack-a", "--nodes", str(nodes),
+                     "--cluster-name", "rack-a", "--vip", "192.0.2.100", "--secrets-file", str(sec)])
+        assert seen["HARVESTER_OPS_WATCH"] == "0"
+        assert seen["HARVESTER_OPS_ACTIONS_DB"] == str(state / "actions.db")
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
+def test_profile_skipchecks_reaches_the_installer_kernel_arguments(monkeypatch):
+    """v1.83.2, vu en réel (lot de deux machines, banc bmcfg) : `skipchecks:
+    true` d'un profil n'ajoutait pas `harvester.install.skipchecks=true` ;
+    l'installeur s'arrêtait sur ses contrôles matériels."""
+    data = {"mode": "create", "bmc_host": "198.51.100.1", "bmc_user": "admin", "bmc_password": "x",
+            "iso": "harvester-v1.9.0-amd64.iso", "hostname": "n1", "device": "/dev/vda",
+            "mgmt_interfaces": "52:54:00:00:00:01", "token": TOKEN, "vip": "192.0.2.100",
+            "method": "dhcp", "skipchecks": True, "extra_args": "console=ttyS0"}
+    with wapp.app.test_request_context("/api/baremetal/install"):
+        out, err = wapp._bm_prepare_install(dict(data), defer_join=True)
+        assert err is None or out is not None, err[0].get_json() if err else None
+    args = (out or {}).get("extra_args", "").split()
+    assert "harvester.install.skipchecks=true" in args and "console=ttyS0" in args
+    # pas de doublon quand l'argument est déjà là
+    data["extra_args"] = "harvester.install.skipchecks=true"
+    with wapp.app.test_request_context("/api/baremetal/install"):
+        out, _ = wapp._bm_prepare_install(dict(data), defer_join=True)
+    assert out["extra_args"].split().count("harvester.install.skipchecks=true") == 1
+
+
+def test_a_failed_row_carries_its_reason(monkeypatch):
+    """v1.83.2, vu en réel : le résultat d'une série disait « error » pour la
+    ligne 1 sans dire pourquoi (l'installeur arrêté par ses contrôles)."""
+    class Child:
+        status = "error"
+        error_summary = "the installer read its configuration but never asked for the image"
+
+    def fake_track(label, host, worker, opts):
+        with wapp.ACTIONS_LOCK:
+            wapp.ACTIONS["f1"] = Child()
+        return "f1", None
+    monkeypatch.setattr(wapp, "_bm_track", fake_track)
+    run = wapp.ActionRun("p2", "baremetal-batch:rack-a", "(local)", [])
+    plan = [{"hostname": "n0", "bmc_host": "h0", "mode": "create", "token": TOKEN},
+            {"hostname": "n1", "bmc_host": "h1", "mode": "join", "token": TOKEN}]
+    wapp._baremetal_batch_runner(run, plan, 2)
+    n0, n1 = run.result["nodes"]
+    assert n0["status"] == "error" and "never asked for the image" in n0["error"]
+    assert n1["status"] == "skipped"
+    assert "never asked for the image" in run.error_summary
+    assert any("never asked for the image" in (e.get("message") or "") for e in run.events)
+
+
+def test_a_joined_node_is_added_to_the_console_declaration(tmp_path, monkeypatch):
+    """v1.83.2, vu en réel (lot de deux machines) : la déclaration ne gardait
+    que le premier nœud."""
+    monkeypatch.setattr(wapp, "_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(wapp, "_load_config_file", lambda: {"clusters": []})
+    kc = tmp_path / "kubeconfigs" / "rack-a.yaml"
+    kc.parent.mkdir(parents=True)
+    kc.write_text("x")
+    wapp._write_console_cluster({"name": "rack-a", "kubeconfig": str(kc),
+                                 "ssh": {"user": "rancher", "port": 22},
+                                 "nodes": [{"hostname": "n1", "ip": "192.0.2.11", "role": "control-plane"}]})
+    assert "added" in wapp._bm_add_joined_node("rack-a", "n2", "192.0.2.12")
+    assert "already" in wapp._bm_add_joined_node("rack-a", "n2", "192.0.2.12")
+    origin, c, _, _ = wapp._find_cluster("rack-a")
+    assert [n["hostname"] for n in c["nodes"]] == ["n1", "n2"] and c["nodes"][1]["role"] == "worker"
+    # déclaré dans config.yaml : on dit quoi y ajouter, sans l'écrire
+    monkeypatch.setattr(wapp, "_load_config_file", lambda: {"clusters": [
+        {"name": "ops", "kubeconfig": "/k", "nodes": []}]})
+    assert "config.yaml" in wapp._bm_add_joined_node("ops", "n9", "192.0.2.19")

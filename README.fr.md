@@ -128,6 +128,15 @@ Les attentes sont accélérées, avec le facteur affiché à l'écran ; rien
 n'est coupé. Le tour est en haut de cette page ; chaque vidéo existe aussi
 en anglais.
 
+### De VMware à Harvester, à chaud (2:55)
+
+Une VM qui tourne sur VMware, son système vivant à l'écran ; la source
+vCenter, la vague copiée pendant que la VM tourne, les couloirs, une vraie
+bascule ; puis le même système vivant sur Harvester, son compteur
+d'écritures qui continue.
+
+Télécharger : [français](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-fr.mp4) · [anglais](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-en.mp4)
+
 ### Plusieurs clusters (1:16)
 
 Changer de cluster, dont un éteint, les déclarations et les comptes du cluster.
@@ -204,6 +213,8 @@ Télécharger : [français](https://github.com/jniedergang/harvester-ops/release
 | Le stockage, avec un volume en reconstruction | La fabrique physique du cluster |
 | [![Arrêt gracieux](docs/assets/shutdown.png)](docs/assets/shutdown.png) | [![Bare-metal](docs/assets/baremetal.png)](docs/assets/baremetal.png) |
 | Les huit étapes de l'arrêt | Bare-metal : découverte Redfish et installation sans intervention |
+| [![Couloirs des migrations VMware](docs/assets/lanes.png)](docs/assets/lanes.png) | [![Mise à jour](docs/assets/update.png)](docs/assets/update.png) |
+| Les vagues de migration VMware sur un même axe du temps | Mettre la console à jour, en ligne ou par archive signée |
 
 Les captures montrent l'interface en anglais ; elle existe dans les cinq
 langues.

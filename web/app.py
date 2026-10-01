@@ -5668,6 +5668,27 @@ def _bm_declare_cluster(name, kubeconfig, key, hostname, ip):
     return cluster
 
 
+def _bm_add_joined_node(cluster_name, hostname, ip):
+    """v1.83.2 : le nœud qui a rejoint est ajouté à la déclaration du cluster
+    (vu en réel : un lot de deux machines laissait la déclaration avec le seul
+    premier nœud, que l'arrêt et le démarrage du cluster lisent). Rend un
+    message pour l'action : ajouté, déjà présent, ou à ajouter à la main dans
+    config.yaml (lecture seule pour la console)."""
+    with CONFIG_LOCK:
+        origin, cluster, _raw, _idx = _find_cluster(cluster_name)
+        if cluster is None:
+            return f"{cluster_name} is no longer declared: {hostname} not recorded"
+        nodes = cluster.setdefault("nodes", [])
+        if any(n.get("hostname") == hostname or (ip and n.get("ip") == ip) for n in nodes):
+            return f"{hostname} already in the declaration of {cluster_name}"
+        if origin == "config":
+            return (f"{cluster_name} is declared in config.yaml: add the node "
+                    f"{{hostname: {hostname}, ip: {ip}, role: worker}} there")
+        nodes.append({"hostname": hostname, "ip": ip, "role": "worker"})
+        _write_console_cluster(cluster)
+    return f"{hostname} added to the declaration of {cluster_name}"
+
+
 def _bm_pool_disk_refusals(data):
     """Un disque de pool n'est jamais le disque système ni le disque de
     données. Avec un inventaire de découverte de cette machine, chaque
@@ -6306,6 +6327,8 @@ def _baremetal_install_runner(run, opts):
         post_deadline = time.time() + HARVESTER_POOLS_TIMEOUT
         if opts.get("mode") == "join":
             kubeconfig = None
+            if opts.get("cluster"):
+                step("declare", "done", _bm_add_joined_node(opts["cluster"], opts["hostname"], opts.get("ip")))
         else:
             name = opts["cluster_name"]
             step("declare", "running", f"lecture du kubeconfig de {name} par SSH ({opts['vip']})")
@@ -6611,6 +6634,12 @@ def _bm_prepare_install(data, defer_join=False):
     extra = " ".join(str(data.get("extra_args") or "").split())
     if extra and not re.fullmatch(r"[A-Za-z0-9 ._:/,=@+-]*", extra):
         return None, (jsonify({"error": "invalid extra kernel arguments"}), 400)
+    # v1.83.2 : le champ `skipchecks` (profils) devient l'argument noyau de
+    # l'installeur. Il ne servait qu'aux contrôles de disques de la console :
+    # vu sur le banc (lot de deux machines), l'installeur s'arrêtait sur ses
+    # contrôles matériels sans rien dire.
+    if _his._truthy(data.get("skipchecks")) and "harvester.install.skipchecks=true" not in extra.split():
+        extra = (extra + " harvester.install.skipchecks=true").strip()
     data["extra_args"] = extra
     # Configuration validée AVANT l'ActionRun : le runner ne la rend qu'après
     # le préflight, donc après avoir allumé la machine. Une clé refusée doit
@@ -6930,9 +6959,20 @@ def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
     lock = threading.Lock()
 
     def report(i, status, msg):
+        # v1.83.2 : la raison d'une ligne en échec part avec elle (vu en réel :
+        # la ligne de commande disait « error » sans dire pourquoi)
+        reason = None
+        if status in ("error", "cancelled") and nodes[i]["action_id"]:
+            with ACTIONS_LOCK:
+                child = ACTIONS.get(nodes[i]["action_id"])
+            reason = getattr(child, "error_summary", None) if child else None
         with lock:
             nodes[i]["status"] = status
+            if reason:
+                nodes[i]["error"] = str(reason)[:500]
             run.result = {"nodes": [dict(n) for n in nodes]}
+        if reason:
+            msg = f"{msg} {reason}".strip()
         n = nodes[i]
         run.emit({"type": "step", "step_id": f"node-{i + 1}",
                   "status": {"pending": "running"}.get(status, status),
@@ -6969,7 +7009,7 @@ def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
         plan.clear()                            # secrets : plus rien en mémoire du déroulé
     ok = all(s == "done" for s in states)
     if not ok and not run.error_summary:
-        bad = [f"{n['hostname']}: {n['status']}" for n in nodes if n["status"] != "done"]
+        bad = [f"{n['hostname']}: {n.get('error') or n['status']}" for n in nodes if n["status"] != "done"]
         run.error_summary = ", ".join(bad)[:300]
     cancelled = getattr(run, "_cancel", False) and not ok
     run.status = "done" if ok else ("cancelled" if cancelled else "error")
