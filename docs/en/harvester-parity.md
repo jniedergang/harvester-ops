@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-09-30, console **v1.78.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-09-30, console **v1.79.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **2 partial**, **1 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -267,6 +267,7 @@ Harvester menu: *VM Imports / VM Migration*
 
 | Function | Status | Version | Note |
 |---|---|---|---|
+| Sign-in through several Ranchers set in the interface, direct or SSO, inherited rights | Console only | 1.79 | the console registers itself in Rancher for SSO and installs the Harvester RBAC chart |
 | Several clusters in one interface, without Rancher | Console only | 1.1 | Rancher (Virtualization Management) also gathers several Harvester clusters; the console does it on its own and adds actions between clusters |
 | Graceful shutdown and startup of a whole cluster | Console only | 1.0 | Harvester documents it as a manual procedure |
 | VM transfer between clusters, export / import | Console only | 1.45 |  |

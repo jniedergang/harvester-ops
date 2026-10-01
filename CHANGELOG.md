@@ -19,6 +19,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - Kubeconfigs and Rancher calls of a session honour a Rancher set without TLS verification.
 
 ### Tests
+- Checked for real against Rancher v2.14.1 (rancher.home.zypp.fr) through a console: the Rancher set in the interface and tested, direct login with a local Rancher account (VMs of harv1 read through Rancher with that person's rights), wrong password refused, logout; SSO registered by the console, then a browser sign-in through Rancher's page back into the console, then unregistered; the Harvester RBAC chart installed (4 role templates), and a Rancher account given only "View Virtualization Resources" on harv1 gets the viewer role in the console and sees the VMs, while Kubernetes refuses it update and delete.
 - Store: defaults, validation, unique ids, relative paths after moving the state directory, 0600 files, secret never public, precedence of `config.yaml`, hot reload, chart version constraints.
 - Routes: administrators only for writers, valid rate limits, no secret in answers, the test endpoint, direct sign-in (success, refusals without detail, origin check, token deleted at sign-out, end with the token), single sign-on registration and unregistration with a simulated Rancher, the single sign-on return of a console Rancher, RBAC status, installation and version refusals, sign-in page data for several Rancher, an unreachable Rancher that does not hold the page.
 

@@ -1,6 +1,6 @@
 # Parité avec l'interface de Harvester
 
-État au 2026-09-30, console **v1.78.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
+État au 2026-09-30, console **v1.79.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
 
 Sur 136 fonctions de l'interface de Harvester : **133 faites**, **2 partielles**, **1 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
 
@@ -267,6 +267,7 @@ Menu Harvester : *VM Imports / VM Migration*
 
 | Fonction | Statut | Version | Précision |
 |---|---|---|---|
+| Connexion par plusieurs Rancher réglés dans l'interface, directe ou SSO, droits hérités | Console seulement | 1.79 | la console s'enregistre elle-même dans Rancher pour le SSO et installe le chart Harvester RBAC |
 | Plusieurs clusters dans une seule interface, sans Rancher | Console seulement | 1.1 | Rancher (Virtualization Management) réunit aussi plusieurs clusters Harvester ; la console le fait seule, et ajoute les gestes d'un cluster à l'autre |
 | Arrêt et démarrage gracieux d'un cluster entier | Console seulement | 1.0 | Harvester le décrit comme une procédure manuelle |
 | Transfert de VM entre clusters, export / import | Console seulement | 1.45 |  |

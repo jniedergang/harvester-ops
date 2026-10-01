@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "1.78.0"
+AS_OF = "1.79.0"
 DATE = "2026-09-30"
 
 S = []  # sections
@@ -235,6 +235,8 @@ r("plus", "1.76", "Toutes les migrations VMware de tous les clusters dans une vu
   "une VM déjà prise dans une vague d'un autre cluster est refusée", "a VM already in a wave on another cluster is refused")
 
 sec("console", "Ce que la console ajoute", "What the console adds", "", "")
+r("plus", "1.79", "Connexion par plusieurs Rancher réglés dans l'interface, directe ou SSO, droits hérités", "Sign-in through several Ranchers set in the interface, direct or SSO, inherited rights",
+  "la console s'enregistre elle-même dans Rancher pour le SSO et installe le chart Harvester RBAC", "the console registers itself in Rancher for SSO and installs the Harvester RBAC chart")
 r("plus", "1.1", "Plusieurs clusters dans une seule interface, sans Rancher",
   "Several clusters in one interface, without Rancher",
   "Rancher (Virtualization Management) réunit aussi plusieurs clusters Harvester ; la console le fait seule, et ajoute les gestes d'un cluster à l'autre",
