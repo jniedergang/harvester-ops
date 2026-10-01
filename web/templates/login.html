@@ -51,6 +51,8 @@
       <div class="sto-finding-title" data-i18n="login.err.config">Sign-in through Rancher is not configured on this console.</div>
       {% elif error_kind == 'credentials' %}
       <div class="sto-finding-title" data-i18n="login.err.credentials">Wrong user name or password.</div>
+      {% elif error_kind == 'throttled' %}
+      <div class="sto-finding-title" data-i18n="login.err.throttled">Too many attempts. Wait a moment, then try again.</div>
       {% else %}
       <div class="sto-finding-title" data-i18n="login.err.token">Rancher's answer could not be verified: sign-in refused.</div>
       {% endif %}
@@ -58,49 +60,132 @@
     </div>
     {% endif %}
 
+    {% set servers = rancher_servers or [] %}
+    {% if servers %}
+    <!-- v1.79.0 : les Rancher réglés dans la console. Sans JavaScript, chaque
+         Rancher a son bloc et son formulaire ; avec, une liste n'en montre
+         qu'un (le dernier choisi, retenu par le serveur). Jamais d'adresse
+         libre : on ne se connecte qu'aux Rancher réglés. -->
+    <section class="login-rancher-box" data-last="{{ rancher_last or '' }}">
+      {% if servers|length > 1 %}
+      <label class="login-field login-rancher-pick" hidden><span data-i18n="login.rancherPick">Rancher</span>
+        <select id="login-rancher-select" data-i18n-title="login.rancherPickTip"
+                title="The Rancher you sign in through. Your last choice is remembered.">
+          {% for s in servers %}<option value="{{ s.id }}"{% if s.id == rancher_last %} selected{% endif %}>{{ s.label }}</option>{% endfor %}
+        </select></label>
+      {% endif %}
+      {% for s in servers %}
+      <div class="login-rancher-server" data-server="{{ s.id }}">
+        {% if servers|length > 1 %}<h2 class="login-rancher-name">{{ s.label }}</h2>{% endif %}
+        {% if s.unavailable %}
+        <p class="login-unavailable" data-i18n="login.rancherUnavailable">This Rancher cannot be reached right now. Another one, or an account of this console, still works.</p>
+        {% else %}
+        {% if s.direct %}
+        <form class="login-form login-rancher-direct" method="post" action="/auth/rancher/{{ s.id|urlencode }}/direct" autocomplete="on">
+          <input type="hidden" name="next" value="{{ next }}">
+          {% if s.providers|length > 1 %}
+          <label class="login-field"><span data-i18n="login.provider">Account type</span>
+            <select name="provider" data-i18n-title="login.providerTip"
+                    title="Where Rancher checks your account: its local users, or a directory such as LDAP or Active Directory.">
+              {% for p in s.providers %}<option value="{{ p.id }}">{{ p.label }}</option>{% endfor %}
+            </select></label>
+          {% elif s.providers %}
+          <input type="hidden" name="provider" value="{{ s.providers[0].id }}">
+          {% endif %}
+          <label class="login-field"><span data-i18n="login.rancherUser">Rancher user name</span>
+            <input type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required
+                   data-i18n-title="login.rancherUserTip" title="Your user name in this Rancher."></label>
+          <label class="login-field"><span data-i18n="login.password">Password</span>
+            <input type="password" name="password" autocomplete="current-password" required
+                   data-i18n-title="login.rancherPasswordTip" title="Your password in this Rancher. It goes to Rancher and is not kept by the console."></label>
+          <button type="submit" class="btn btn-primary login-submit login-rancher-submit" data-i18n-title="login.rancherDirectTip"
+                  title="Signs in with your Rancher account: your rights on the clusters are the ones Rancher gives you.">
+            <span data-i18n="login.rancher" data-i18n-name="{{ s.label }}">Sign in with {{ s.label }}</span></button>
+        </form>
+        {% endif %}
+        {% if s.sso %}
+        <a class="btn {% if s.direct %}btn-secondary{% else %}btn-primary{% endif %} login-rancher login-rancher-sso" href="/auth/rancher/{{ s.id|urlencode }}/login"
+           data-i18n-title="login.rancherTip" title="Uses your Rancher session: your rights on the clusters are the ones Rancher gives you.">
+          <span data-i18n="login.sso" data-i18n-name="{{ s.label }}">Single sign-on with {{ s.label }}</span></a>
+        <p class="login-note" data-i18n="login.rancherNote">Already signed in to Rancher? You enter without typing anything. Your rights on each cluster are those Rancher gives you.</p>
+        {% endif %}
+        {% if not s.direct and not s.sso %}
+        <p class="login-unavailable" data-i18n="login.rancherNoWay">No way to sign in is enabled for this Rancher yet.</p>
+        {% endif %}
+        {% endif %}
+      </div>
+      {% endfor %}
+    </section>
+    {% elif rancher %}
+    <!-- 1.50.0 : un seul Rancher, réglé dans config.yaml (contexte d'avant la 1.79.0) -->
+    <div class="login-actions">
+      <a class="btn btn-primary login-rancher tip" href="/auth/rancher/login" data-i18n-title="login.rancherTip"
+         title="Uses your Rancher session: your rights on the clusters are the ones Rancher gives you.">
+        <span data-i18n="login.rancher" data-i18n-name="{{ rancher_label }}">Sign in with {{ rancher_label }}</span>
+      </a>
+    </div>
+    <p class="login-note" data-i18n="login.rancherNote">Already signed in to Rancher? You enter without typing anything. Your rights on each cluster are those Rancher gives you.</p>
+    {% endif %}
+
     {% if local %}
+    {% if servers or rancher %}<div class="login-or login-or-local" data-i18n="login.orLocal">or with an account of this console</div>{% endif %}
     <!-- v1.57.0 : un compte local se connecte par ce formulaire ; la session
          (cookie HttpOnly) se quitte par « Se déconnecter » -->
-    <form class="login-form" method="post" action="/login/local" autocomplete="on">
+    <form class="login-form login-local" method="post" action="/login/local" autocomplete="on">
       <input type="hidden" name="next" value="{{ next }}">
       <label class="login-field"><span data-i18n="login.username">User name</span>
         <input type="text" name="username" value="{{ username }}" autocomplete="username"
-               autocapitalize="none" spellcheck="false" required {% if not username %}autofocus{% endif %}></label>
+               autocapitalize="none" spellcheck="false" required {% if not username and not servers %}autofocus{% endif %}></label>
       <label class="login-field"><span data-i18n="login.password">Password</span>
         <input type="password" name="password" autocomplete="current-password" required
                {% if username %}autofocus{% endif %}></label>
-      <button type="submit" class="btn btn-primary login-submit tip" data-i18n-title="login.localTip"
+      <button type="submit" class="btn {% if servers or rancher %}btn-secondary{% else %}btn-primary{% endif %} login-submit tip" data-i18n-title="login.localTip"
               title="A local account of this console (user name and password).">
         <span data-i18n="login.submit">Sign in</span></button>
     </form>
     {% endif %}
 
     <div class="login-actions">
-      {% if rancher %}
-      {% if local %}<div class="login-or" data-i18n="login.or">or</div>{% endif %}
-      <a class="btn {% if local %}btn-secondary{% else %}btn-primary{% endif %} login-rancher tip" href="/auth/rancher/login" data-i18n-title="login.rancherTip"
-         title="Uses your Rancher session: your rights on the clusters are the ones Rancher gives you.">
-        <span data-i18n="login.rancher">Sign in with {{ rancher_label }}</span>
-      </a>
-      {% endif %}
-      {% if not rancher and not local %}
+      {% if not rancher and not servers and not local %}
       <!-- mode ouvert, demandé explicitement (HARVESTER_OPS_AUTH=none) -->
       <a class="btn btn-primary" href="/" data-i18n="login.open">Open the console</a>
       {% endif %}
     </div>
-    {% if rancher %}
-    <p class="login-note" data-i18n="login.rancherNote">Already signed in to Rancher? You enter without typing anything. Your rights on each cluster are those Rancher gives you.</p>
-    {% endif %}
   </main>
 <script src="/static/js/i18n.js"></script>
 <script>
   (function () {
     try {
       window.i18n.applyTranslations();
-      var btn = document.querySelector('.login-rancher span');
-      var label = {{ rancher_label|tojson }};
-      if (btn && window.i18n) btn.textContent = window.i18n.t('login.rancher', { name: label });
+      // libellés qui portent le nom d'un Rancher
+      document.querySelectorAll('[data-i18n-name]').forEach(function (el) {
+        el.textContent = window.i18n.t(el.getAttribute('data-i18n'), { name: el.getAttribute('data-i18n-name') });
+      });
     } catch (e) { /* page lisible sans traduction */ }
+    // v1.79.0 : plusieurs Rancher, une liste n'en montre qu'un
+    var sel = document.getElementById('login-rancher-select');
+    var blocks = document.querySelectorAll('.login-rancher-server');
+    function show(id, focus) {
+      for (var i = 0; i < blocks.length; i++) {
+        blocks[i].hidden = blocks[i].getAttribute('data-server') !== id;
+      }
+      if (!focus) return;
+      var cur = document.querySelector('.login-rancher-server:not([hidden]) input[name="username"]');
+      if (cur) cur.focus();
+    }
+    if (sel && blocks.length > 1) {
+      sel.closest('.login-rancher-pick').hidden = false;
+      document.querySelector('.login-rancher-box').classList.add('login-rancher-picked');
+      sel.addEventListener('change', function () { show(sel.value, true); });
+      show(sel.value, false);
+    }
+    // le premier champ du Rancher montré prend le focus, sauf retour d'un
+    // compte local refusé (son nom est déjà rempli)
+    var local = document.querySelector('.login-local input[name="username"]');
+    if (!(local && local.value)) {
+      var first = document.querySelector('.login-rancher-server:not([hidden]) input[name="username"]');
+      if (first) first.focus();
+    }
   })();
 </script>
 </body>

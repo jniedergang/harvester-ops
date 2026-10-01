@@ -814,6 +814,7 @@
       <button class="settings-tab"        data-stab="language"   data-i18n="settings.tab.language">Language</button>
       <button class="settings-tab"        data-stab="clusters"   data-i18n="settings.tab.clusters">Clusters</button>
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
+      <button class="settings-tab needs-admin" data-stab="rancher" data-i18n="settings.tab.rancher">Rancher sign-in</button>
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
       <button class="settings-tab"        data-stab="husers"     data-i18n="settings.tab.husers">Cluster accounts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
@@ -934,6 +935,18 @@
           <button class="btn btn-secondary btn-sm" id="btn-clusters-refresh" data-i18n="overview.refresh">Refresh</button>
         </div>
         <div id="clusters-list" class="clusters-list"></div>
+      </div>
+
+      <!-- v1.79.0 : les Rancher par lesquels on se connecte, réglés à chaud -->
+      <div class="settings-tab-content" id="stab-rancher">
+        <h4 data-i18n="rsrv.title">Sign-in through Rancher</h4>
+        <p class="form-hint" data-i18n="rsrv.intro">The Rancher servers people can sign in through. Changes apply at once, without a restart. Entries of config.yaml belong to the operator and are read-only here.</p>
+        <div style="margin: 10px 0;">
+          <button type="button" class="btn btn-primary btn-sm tip" data-rsrv="add" data-i18n="rsrv.add" data-tip-i18n="rsrv.addTip">+ Add a Rancher</button>
+          <button type="button" class="btn btn-secondary btn-sm tip" data-rsrv="refresh" data-i18n="overview.refresh" data-tip-i18n="rsrv.refreshTip">Refresh</button>
+        </div>
+        <div id="rsrv-feedback" class="res-feedback"></div>
+        <div id="rsrv-list" class="clusters-list"></div>
       </div>
 
       <div class="settings-tab-content" id="stab-connection">
@@ -1156,6 +1169,7 @@
   <script src="/static/js/forklift-global.js"></script>
 <script src="/static/js/versions.js"></script>
 <script src="/static/js/console-accounts.js"></script>
+<script src="/static/js/rancher-servers.js"></script>
 <script src="/static/js/user-menu.js"></script>
 <script src="/static/js/access-notice.js"></script>
 <!-- Yjs notes module (ESM) -->

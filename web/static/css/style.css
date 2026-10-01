@@ -5205,3 +5205,29 @@ td.fk-reason { max-width: 260px; }
 .capi-form textarea.bm-adv-yaml { min-height: 160px; resize: vertical; white-space: pre; }
 .bm-preview-text { box-sizing: border-box; width: 100%; height: 100%; min-height: 300px; resize: none;
   border: 0; padding: 10px; background: var(--bg); color: var(--text); white-space: pre; }
+
+/* v1.79.0 : connexion par Rancher réglable (page de connexion + Réglages) */
+.login-form[hidden], .login-field[hidden], .login-rancher-server[hidden] { display: none; }
+.login-rancher-box { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }
+.login-rancher-server { display: flex; flex-direction: column; gap: 8px; }
+.login-rancher-server + .login-rancher-server { border-top: 1px solid var(--border); padding-top: 10px; }
+.login-rancher-picked .login-rancher-server { border-top: 0; padding-top: 0; }
+.login-rancher-picked .login-rancher-name { display: none; }
+.login-rancher-name { margin: 0; font-size: 14px; color: var(--accent); }
+.login-rancher-sso { justify-content: center; text-align: center; padding: 10px 14px; }
+.login-rancher-pick select, .login-rancher-direct select { padding: 8px 10px; font-size: 14px; }
+.login-unavailable { margin: 0; padding: 8px 10px; border-left: 3px solid var(--warn); background: var(--bg); font-size: 13px; }
+.login-or-local { margin: 12px 0 2px; }
+.rsrv-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.rsrv-meta .badge { font-size: 11px; }
+.rsrv-providers { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.rsrv-window { width: min(560px, 94vw); }
+.rsrv-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.rsrv-form-actions { display: flex; gap: 8px; margin-top: 10px; }
+.rsrv-ca { font-family: var(--mono, monospace); font-size: 12px; }
+.rsrv-creds-note { margin-top: 0; }
+.rsrv-rbac-status td:first-child { color: var(--text-dim); padding-right: 14px; }
+.rsrv-msg { margin-top: 8px; font-size: 13px; }
+.rsrv-form select, .rsrv-creds select { padding: 8px 10px; font-size: 14px; }
+.login-rancher-server .login-form { margin-bottom: 4px; }
+.login-rancher-server .login-note { margin-top: 2px; }
