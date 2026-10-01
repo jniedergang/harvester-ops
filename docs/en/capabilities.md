@@ -1891,6 +1891,35 @@ Keycloak alike.
   itself, it expires at the session length. Signing out of Rancher also
   ends the console session at its next renewal.
 
+### Rancher set in the interface, direct sign-in, Harvester RBAC chart (1.79.0)
+
+Settings > Sign-in through Rancher (administrators) sets one or more
+Rancher, at once and without a restart; the `rancher:` section of
+`config.yaml` still works and shows there read-only.
+
+- **Test** reads Rancher's version (`/rancherversion`) and its
+  authentication providers (`/v3-public/authProviders`), and says which
+  ones take a password.
+- **Direct sign-in**: user name and password of a password provider (local,
+  LDAP, OpenLDAP, Active Directory, FreeIPA), sent to Rancher, never kept.
+  The Rancher token obtained is used like the single sign-on one (Rancher's
+  proxy, Rancher's rights, `default_role` in the console, administrators of
+  Rancher are console administrators). It lasts the session length, is not
+  renewed, and is deleted in Rancher at sign-out (`POST
+  /v3/tokens?action=logout`: verified on Rancher 2.14.1, a token cannot
+  `DELETE` itself). A refusal does not say whether the account exists.
+- **Single sign-on registration**: with a Rancher administrator's
+  credentials, asked once and not kept, the console creates its
+  `OIDCClient`, reads the generated secret from
+  `cattle-oidc-client-secrets` and keeps it (0600), then deletes the
+  administrator's token. Unregistering deletes the client in Rancher.
+- **Harvester RBAC chart**: state (absent, installed, version), and
+  installation in Rancher's `local` cluster as a tracked action, refused
+  with the reason when the chart's Rancher or Kubernetes requirement is not
+  met. The new roles are listed at the end.
+- Nothing secret is ever returned to the browser: no client secret, no
+  password, no token, no file path.
+
 ### Signing in is mandatory (1.57.0)
 
 There is no open console any more: without a session, every page leads to

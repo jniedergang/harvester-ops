@@ -169,11 +169,60 @@ echo HARVESTER_OPS_IMAGE_UPLOAD_PORT=8192 | sudo tee -a /etc/harvester-ops/env  
 
 Le fichier attend dans `/var/lib/harvester-ops/image-uploads` et il est
 effacé dès que l'image est importée (ou l'action annulée).
-### 10. Connexion par Rancher (facultatif, 1.50.0)
+### 10. Connexion par Rancher (facultatif, 1.50.0, réglée dans l'interface depuis la 1.79.0)
 
-Les personnes déjà connectées à Rancher Manager (2.12 et suivants) entrent
-dans la console sans rien saisir, avec les droits que Rancher leur donne sur
-chaque cluster. Déclarer la console dans Rancher, sur son cluster local :
+Les personnes qui ont un compte Rancher Manager (2.12 et suivants) se
+connectent à la console avec lui, et reçoivent les droits que Rancher leur
+donne sur chaque cluster.
+
+**Depuis l'interface (1.79.0)** : Paramètres > Connexion par Rancher, en
+administrateur de la console. Ajouter un Rancher (un libellé, son adresse
+`https://`, et son autorité de certification en PEM quand le certificat de
+Rancher n'est pas signé par une autorité publique ; « ne pas vérifier TLS »
+existe pour un banc), puis **Tester** : la console montre la version de
+Rancher et ses fournisseurs d'authentification. Plusieurs Rancher peuvent
+être réglés ; un changement vaut tout de suite, sans redémarrage.
+
+- **Connexion directe** (active par défaut) : la page de connexion demande
+  l'identifiant et le mot de passe Rancher, pour les fournisseurs à mot de
+  passe (utilisateurs locaux, LDAP, OpenLDAP, Active Directory, FreeIPA).
+  Rien à déclarer dans Rancher. La console obtient un jeton Rancher pour la
+  personne, valable la durée de session (1 à 24 heures), s'en sert
+  exactement comme du jeton de l'authentification unique, et le supprime
+  dans Rancher à la déconnexion. La session n'est pas renouvelée : elle
+  finit avec le jeton. Les fournisseurs sans mot de passe (OIDC comme
+  Keycloak, SAML, GitHub) passent par l'authentification unique.
+- **Authentification unique** (facultative) : **Enregistrer** demande une
+  fois l'identifiant et le mot de passe d'un administrateur de Rancher. La
+  console se connecte avec, crée son client OIDC dans Rancher (avec son
+  adresse de retour, prise sur l'adresse du navigateur), garde le secret
+  généré (0600) et se déconnecte ; les identifiants de l'administrateur ne
+  sont pas gardés. Une personne déjà connectée à Rancher entre alors sans
+  rien saisir. **Désenregistrer** retire le client de Rancher.
+- **Chart Harvester RBAC** : la console dit si le chart `harvester-rbac` du
+  catalogue `rancher-charts` est installé dans le cluster `local` de
+  Rancher, et l'installe (action suivie, avec les identifiants d'un
+  administrateur de Rancher, non gardés). Il apporte les rôles « View/Manage
+  Virtualization Resources », pour les clusters et les projets. La console
+  refuse en disant pourquoi quand l'exigence du chart sur Rancher ou
+  Kubernetes n'est pas remplie (109.0.0+up0.1.1 : Rancher 2.14.x,
+  Kubernetes avant 1.36).
+- La page de connexion liste les Rancher (le dernier choisi en premier),
+  jamais une adresse libre, et les comptes de la console en dessous. Un
+  Rancher qui ne répond pas en trois secondes est montré indisponible et ne
+  bloque pas la page.
+
+Ces réglages vivent dans le répertoire d'état de la console
+(`/var/lib/harvester-ops/rancher.d/<id>.yaml`, l'autorité et le secret du
+client à côté, en 0600, chemins relatifs au répertoire d'état) : ils
+suivent la console quand on la déplace (voir plus bas).
+
+**Depuis `config.yaml` (1.50.0, toujours lu)** : la section ci-dessous
+déclare un Rancher, montré en lecture seule dans l'interface (pastille
+« config.yaml »). Il l'emporte sur un Rancher réglé dans l'interface à la
+même adresse. Ajouter `direct_login: true` pour lui proposer aussi la
+connexion directe. Pour l'authentification unique, déclarer la console
+dans Rancher, sur son cluster local :
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -225,10 +274,11 @@ la déplacer :
   actions (`actions.db`), les clusters déclarés depuis la console
   (Paramètres > Clusters, installations bare-metal) avec leurs clés et
   kubeconfigs (`clusters.d/<nom>.yaml`, `ssh/`, `kubeconfigs/`, fichiers
-  en 0600 dans des répertoires en 0700), et les magasins (exports,
+  en 0600 dans des répertoires en 0700), les Rancher réglés dans
+  l'interface (`rancher.d/`, 1.79.0), et les magasins (exports,
   archives VDDK, paquets Cluster API, inventaires de découverte).
 
-Les chemins écrits dans `clusters.d/` sont relatifs au répertoire d'état :
+Les chemins écrits dans `clusters.d/` et `rancher.d/` sont relatifs au répertoire d'état :
 la copie fonctionne sur un autre hôte ou sous un autre chemin sans rien
 réécrire. Un chemin absolu écrit par l'opérateur dans `config.yaml` reste
 tel quel : garder les fichiers qu'il désigne au même endroit.

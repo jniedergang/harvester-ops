@@ -228,6 +228,29 @@ there: check their cluster and project roles in Rancher. On harv1 the
 `default` namespace was linked to a project of another Rancher
 (`field.cattle.io/projectId`), so project roles did not cover its VMs.
 
+### Direct sign-in says the user name or password is wrong (1.79.0)
+
+The console says the same thing for a wrong password and an unknown account.
+Check the account type: an LDAP or Active Directory user must pick that
+provider, not "Local". A user of an OIDC provider (Keycloak, for example)
+has no password Rancher can check: use single sign-on. On the console host,
+the log line "Rancher direct sign-in refused" gives the code (never the
+password).
+
+### A Rancher shows as unavailable on the sign-in page (1.79.0)
+
+The console did not get its providers within three seconds (retried after
+thirty seconds). Use Settings > Sign-in through Rancher > Test: the error
+says whether the address does not answer or the certificate is refused
+(give the certificate authority in PEM).
+
+### The Harvester RBAC chart is refused (1.79.0)
+
+The chart declares the Rancher and Kubernetes versions it supports
+(`catalog.cattle.io/rancher-version`, `catalog.cattle.io/kube-version`);
+the console shows both requirements and the versions it read. Upgrade
+Rancher, or wait for the chart version that matches it in `rancher-charts`.
+
 ### "starting or stopping a cluster needs a local account"
 
 By design: use a local account for power sequencing.

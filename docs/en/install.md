@@ -164,11 +164,56 @@ echo HARVESTER_OPS_IMAGE_UPLOAD_PORT=8192 | sudo tee -a /etc/harvester-ops/env  
 The file waits in `/var/lib/harvester-ops/image-uploads` and is deleted once
 the image is imported (or the action cancelled).
 
-### 10. Sign in through Rancher (optional, 1.50.0)
+### 10. Sign in through Rancher (optional, 1.50.0, set in the interface since 1.79.0)
 
-People already signed in to Rancher Manager (2.12 or later) can enter the
-console without typing anything, with the rights Rancher gives them on each
-cluster. Declare the console in Rancher, on its local cluster:
+People with a Rancher Manager account (2.12 or later) sign in to the
+console with it, and get the rights Rancher gives them on each cluster.
+
+**From the interface (1.79.0)**: Settings > Sign-in through Rancher, as a
+console administrator. Add a Rancher (a label, its `https://` address, and
+its certificate authority in PEM when Rancher's certificate is not signed
+by a public authority; "skip TLS verification" exists for a lab), then
+**Test**: the console shows Rancher's version and its authentication
+providers. Several Rancher can be set; changes apply at once, without a
+restart.
+
+- **Direct sign-in** (on by default): the sign-in page asks for the Rancher
+  user name and password, for the providers that take a password (local
+  users, LDAP, OpenLDAP, Active Directory, FreeIPA). Nothing has to be
+  declared in Rancher. The console gets a Rancher token for that person,
+  valid for the session length (1 to 24 hours), uses it exactly like the
+  single sign-on token, and deletes it in Rancher at sign-out. The session
+  is not renewed: it ends with the token. Providers without a password
+  (OIDC such as Keycloak, SAML, GitHub) go through single sign-on.
+- **Single sign-on** (optional): **Register** asks once for the user name
+  and password of a Rancher administrator. The console signs in with them,
+  creates its OIDC client in Rancher (with its return address, taken from
+  the browser's address), keeps the generated client secret (0600) and
+  signs out; the administrator's credentials are not kept. Someone already
+  signed in to Rancher then enters without typing anything. **Unregister**
+  removes the client from Rancher.
+- **Harvester RBAC chart**: the console shows whether the `harvester-rbac`
+  chart of the `rancher-charts` catalog is installed in Rancher's `local`
+  cluster and installs it (a tracked action, with a Rancher administrator's
+  credentials, not kept). It brings the "View/Manage Virtualization
+  Resources" roles, for clusters and projects. The console refuses with the
+  reason when the chart's Rancher or Kubernetes requirement is not met
+  (109.0.0+up0.1.1: Rancher 2.14.x, Kubernetes below 1.36).
+- The sign-in page lists the Rancher (the last one chosen comes first),
+  never a free address, and the console's own accounts below. A Rancher
+  that does not answer within three seconds is shown as unavailable and
+  does not hold the page.
+
+These settings live in the console's state directory
+(`/var/lib/harvester-ops/rancher.d/<id>.yaml`, the certificate authority and
+the client secret beside it, 0600, paths relative to the state directory):
+they move with the console (see below).
+
+**From `config.yaml` (1.50.0, still read)**: the section below declares one
+Rancher, shown read-only in the interface ("config.yaml" badge). It wins
+over a Rancher set in the interface with the same address. Add
+`direct_login: true` to offer direct sign-in for it too. For single
+sign-on, declare the console in Rancher, on its local cluster:
 
 ```bash
 cat <<EOF | kubectl apply -f -
@@ -219,10 +264,11 @@ takes:
   (`actions.db`), the clusters declared from the console (Settings >
   Clusters, bare-metal installs) with their keys and kubeconfigs
   (`clusters.d/<name>.yaml`, `ssh/`, `kubeconfigs/`, 0600 files in 0700
-  directories), and the stores (exports, VDDK archives, Cluster API
+  directories), the Rancher set in the interface (`rancher.d/`, 1.79.0),
+  and the stores (exports, VDDK archives, Cluster API
   bundles, discovery inventories).
 
-The paths inside `clusters.d/` are relative to the state directory, so
+The paths inside `clusters.d/` and `rancher.d/` are relative to the state directory, so
 the copy works on another host or under another path without rewriting
 anything. Absolute paths written by the operator in `config.yaml` stay as
 they are: keep the files they name at the same place.

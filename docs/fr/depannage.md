@@ -231,6 +231,31 @@ de projet dans Rancher. Sur harv1, l'espace de noms `default` était rattaché
 à un projet d'un autre Rancher (`field.cattle.io/projectId`) : les rôles de
 projet ne couvraient pas ses VMs.
 
+### La connexion directe dit que l'identifiant ou le mot de passe est faux (1.79.0)
+
+La console dit la même chose pour un mauvais mot de passe et un compte
+inconnu. Vérifier le type de compte : une personne de LDAP ou d'Active
+Directory doit choisir ce fournisseur, pas « Local ». Une personne d'un
+fournisseur OIDC (Keycloak, par exemple) n'a pas de mot de passe que
+Rancher sache vérifier : passer par l'authentification unique. Sur l'hôte
+de la console, la ligne « Rancher direct sign-in refused » du journal donne
+le code (jamais le mot de passe).
+
+### Un Rancher est indisponible sur la page de connexion (1.79.0)
+
+La console n'a pas obtenu ses fournisseurs en trois secondes (nouvel essai
+au bout de trente secondes). Paramètres > Connexion par Rancher > Tester :
+l'erreur dit si l'adresse ne répond pas ou si le certificat est refusé
+(donner l'autorité de certification en PEM).
+
+### Le chart Harvester RBAC est refusé (1.79.0)
+
+Le chart déclare les versions de Rancher et de Kubernetes qu'il accepte
+(`catalog.cattle.io/rancher-version`, `catalog.cattle.io/kube-version`) ;
+la console montre les deux exigences et les versions qu'elle a lues. Mettre
+Rancher à jour, ou attendre la version du chart qui lui correspond dans
+`rancher-charts`.
+
 ### « starting or stopping a cluster needs a local account »
 
 Voulu : l'alimentation se fait avec un compte local.

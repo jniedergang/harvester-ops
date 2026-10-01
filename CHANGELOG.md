@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.79.0] - 2026-10-01 - Rancher logins set in the interface, direct login, and the Harvester RBAC chart
+
+### Added
+- Rancher servers set in the interface (Settings > Sign-in through Rancher), several at once, applied without a restart: label, `https://` address, certificate authority in PEM or TLS verification skipped, console role by default, session length (1 to 24 hours), direct sign-in on or off. They live in the state directory (`rancher.d/<id>.yaml`, certificate authority and client secret beside it, 0600, paths relative to the state directory), so they move with the console. API: `GET/POST /api/rancher/servers`, `PUT/DELETE /api/rancher/servers/<id>`, `POST /api/rancher/servers/<id>/test` (version and authentication providers), `POST /api/rancher/test` for an address not saved yet.
+- Direct sign-in with a Rancher user name and password (local, LDAP, OpenLDAP, Active Directory, FreeIPA providers), nothing to declare in Rancher: `POST /auth/rancher/<id>/direct`. The Rancher token obtained is used like the single sign-on one (Rancher's proxy and rights, console role from Rancher), lasts the session, and is deleted in Rancher at sign-out. A refusal does not say whether the account exists.
+- Single sign-on registration from the console: with a Rancher administrator's credentials, asked once and never kept, the console creates its `OIDCClient` in Rancher, keeps the generated secret (0600) and signs the administrator out; unregistering deletes the client. `GET /auth/rancher/<id>/login` starts the single sign-on of one Rancher; the return finds it through the `state`.
+- Harvester RBAC chart: state (installed, version, available version, compatibility with the reason) and installation of `harvester-rbac` from `rancher-charts` into Rancher's `local` cluster as a tracked action, refused when the chart's Rancher or Kubernetes requirement is not met; the role templates it brings are listed at the end.
+- The sign-in page lists the Rancher servers (the last one chosen first, remembered by a cookie), with the password providers of each, read with a three-second limit so an unreachable Rancher shows as unavailable without holding the page.
+
+### Changed
+- The `rancher:` section of `config.yaml` is shown read-only in the interface and wins over a Rancher set in the interface with the same address; `direct_login: true` offers direct sign-in for it. `/auth/rancher/login` keeps working for it.
+- A Rancher session now knows its Rancher: its token renewal, cluster discovery and kubeconfigs use that Rancher's settings, and the cluster ids learnt are kept per Rancher. Removing a Rancher ends its sessions at their next request.
+- Kubeconfigs and Rancher calls of a session honour a Rancher set without TLS verification.
+
+### Tests
+- Store: defaults, validation, unique ids, relative paths after moving the state directory, 0600 files, secret never public, precedence of `config.yaml`, hot reload, chart version constraints.
+- Routes: administrators only for writers, valid rate limits, no secret in answers, the test endpoint, direct sign-in (success, refusals without detail, origin check, token deleted at sign-out, end with the token), single sign-on registration and unregistration with a simulated Rancher, the single sign-on return of a console Rancher, RBAC status, installation and version refusals, sign-in page data for several Rancher, an unreachable Rancher that does not hold the page.
+
 ## [1.78.0] - 2026-09-30 - Disks of a bare-metal install: discovered, chosen, checked and pooled
 
 ### Added

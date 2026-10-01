@@ -2094,6 +2094,37 @@ connexion, compte local ou Keycloak.
   expire à la durée de la session. Se déconnecter de Rancher ferme aussi la
   session de la console à son renouvellement suivant.
 
+### Rancher réglés dans l'interface, connexion directe, chart Harvester RBAC (1.79.0)
+
+Paramètres > Connexion par Rancher (administrateurs) règle un ou plusieurs
+Rancher, tout de suite et sans redémarrage ; la section `rancher:` de
+`config.yaml` fonctionne toujours et s'y montre en lecture seule.
+
+- **Tester** lit la version de Rancher (`/rancherversion`) et ses
+  fournisseurs d'authentification (`/v3-public/authProviders`), et dit
+  lesquels prennent un mot de passe.
+- **Connexion directe** : identifiant et mot de passe d'un fournisseur à
+  mot de passe (local, LDAP, OpenLDAP, Active Directory, FreeIPA), envoyés à
+  Rancher, jamais gardés. Le jeton Rancher obtenu sert comme celui de
+  l'authentification unique (mandataire de Rancher, droits de Rancher,
+  `default_role` dans la console, administrateurs de Rancher
+  administrateurs de la console). Il dure la session, n'est pas renouvelé,
+  et est supprimé dans Rancher à la déconnexion (`POST
+  /v3/tokens?action=logout` : vérifié sur Rancher 2.14.1, un jeton ne peut
+  pas se supprimer lui-même par `DELETE`). Un refus ne dit pas si le compte
+  existe.
+- **Enregistrement de l'authentification unique** : avec les identifiants
+  d'un administrateur de Rancher, demandés une fois et non gardés, la
+  console crée son `OIDCClient`, lit le secret généré dans
+  `cattle-oidc-client-secrets` et le garde (0600), puis supprime le jeton de
+  l'administrateur. Désenregistrer supprime le client dans Rancher.
+- **Chart Harvester RBAC** : état (absent, installé, version), et
+  installation dans le cluster `local` de Rancher en action suivie, refusée
+  en disant pourquoi quand l'exigence du chart sur Rancher ou Kubernetes
+  n'est pas remplie. Les nouveaux rôles sont listés à la fin.
+- Rien de secret ne part vers le navigateur : ni secret de client, ni mot
+  de passe, ni jeton, ni chemin de fichier.
+
 ### La connexion est obligatoire (1.57.0)
 
 Il n'y a plus de console ouverte : sans session, toute page mène à la page
