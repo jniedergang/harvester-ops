@@ -475,6 +475,18 @@ pare-feu, pensez à l'ouvrir.
 
 ## Dépannage
 
+**L'installeur a lu sa configuration, puis plus rien (1.80.0).** Vu sur une
+vraie lame aux cartes à 1 Gbit/s : les contrôles matériels de l'installeur
+de Harvester refusent une installation automatique sur une carte de gestion
+sous 10 Gbit/s (et sur trop peu de mémoire ou de disque), le disent
+seulement sur la console de la machine, et ne demandent jamais l'image
+d'installation. La console le remarque désormais dix minutes après la
+lecture de la configuration (aucune demande de l'image hors du BMC) et
+s'arrête avec cette explication, au lieu d'attendre une heure ; l'aperçu et
+le préflight préviennent déjà quand l'inventaire de découverte montre une
+carte de gestion sous 10 Gbit/s. Si la machine vous convient, ajouter
+`harvester.install.skipchecks=true` aux arguments noyau supplémentaires.
+
 **« pas de média virtuel » sur la carte du node.** Le BMC n'expose aucun
 lecteur CD ou ne sait pas amorcer dessus. Sur iLO, vérifier la licence
 Advanced. Aucun contournement depuis la console : sans média virtuel, la

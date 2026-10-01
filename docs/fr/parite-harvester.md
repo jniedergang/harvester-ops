@@ -1,6 +1,6 @@
 # Parité avec l'interface de Harvester
 
-État au 2026-09-30, console **v1.79.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
+État au 2026-09-30, console **v1.80.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
 
 Sur 136 fonctions de l'interface de Harvester : **133 faites**, **2 partielles**, **1 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
 

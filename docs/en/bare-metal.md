@@ -454,6 +454,17 @@ firewall, open it there.
 
 ## Troubleshooting
 
+**The installer read its configuration, then nothing (1.80.0).** Seen on a
+real blade with 1 Gbit/s NICs: the Harvester installer's hardware checks
+refuse an unattended install on a management NIC under 10 Gbit/s (and on
+too little memory or disk), show it on the machine console only, and never
+fetch the install image. The console now notices this ten minutes after the
+configuration was read (no image request from anyone but the BMC) and stops
+with that explanation, instead of waiting an hour; the preview and the
+preflight already warn when the discovery inventory shows a management NIC
+under 10 Gbit/s. If the machine is acceptable for you, add
+`harvester.install.skipchecks=true` to the extra kernel arguments.
+
 **"no virtual media" on the node card.** The BMC exposes no CD device or
 cannot boot from it. On iLO, check for the Advanced licence. There is no
 workaround from the console: without virtual media the machine has to be

@@ -4,6 +4,23 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.80.0] - 2026-10-01 - Bare-metal install profiles for many nodes, and VMware migration lanes
+
+### Added
+- Install profiles in the Bare-metal tab: a named install configuration with per-node variables (`{{hostname}}`, `{{ip}}`, `{{mgmt_mac}}`, `{{vip}}` and custom ones such as an admin or storage address inside NetworkManager files), kept in the console state directory (portable); a batch installs a table of machines (CSV paste), the first creates the cluster and the next ones join it, each a tracked install action under one parent action; a missing variable is refused per row before anything is powered on; secrets are asked when a batch starts and never stored. Same thing on the command line: `harvester-baremetal profile list|show|apply`.
+- A lanes view of VMware migration waves on a shared time axis, in the Waves tab and in "Migrations (all clusters)": one lane per wave with now, every past copy, the next copy, the scheduled cutover and its countdown, the cutover window, zoom, and an optional maintenance window drawn per cluster.
+
+### Fixed
+- The install no longer waits an hour when the installer refuses its configuration: ten minutes after the configuration was read without any image request (except the BMC's), it stops and says why, most often the installer's hardware checks (seen on a real blade: management NIC at 1 Gbit/s).
+- The preview and the preflight warn when the discovery inventory shows a management NIC under 10 Gbit/s and `harvester.install.skipchecks=true` is not set.
+
+### Internal
+- The artifact server remembers which clients read a token and when first.
+- `wave_state` also returns every copy of each VM with its start and end, and the cutover window.
+
+### Tests
+- `test_bm_profiles_180.py`, `test_bm_stall_180.py`, `test_forklift_lanes_180.py`, `tests/e2e/test_bm_profiles_180.py`, `tests/e2e/test_forklift_lanes_180.py`. Not checked for real: a batch of several machines (each row is the single install already verified, the chaining is covered by tests), the lanes view on a live cluster (fixtures captured on the bench).
+
 ## [1.79.0] - 2026-10-01 - Rancher logins set in the interface, direct login, and the Harvester RBAC chart
 
 ### Added
