@@ -252,6 +252,95 @@ Linux names.
   `harvester-baremetal discover --bmc <host> --user <user> --password-file <0600 file> --iso <path>`
   (or `--password-stdin`).
 
+### Many identical nodes: install profiles and batches (1.80.0)
+
+A **profile** is a named install configuration: the fields of the install
+window, written in YAML, plus the advanced YAML, where any value may hold a
+variable `{{name}}`. Built-in variables: `{{hostname}}`, `{{ip}}`
+(management address), `{{mgmt_mac}}` and `{{vip}}`; a profile declares its
+own (`storage_ip`, `admin_ip`...). Variables work anywhere, including inside
+the NetworkManager keyfiles and `sshd` snippets of `os.write_files`:
+
+```yaml
+os:
+  write_files:
+  - path: /etc/NetworkManager/system-connections/storage.nmconnection
+    permissions: '0600'
+    content: |
+      [ipv4]
+      method=manual
+      address1={{storage_ip}}/24
+```
+
+The advanced YAML is read **before** the variables are replaced, then each
+value goes into its string as is: a value holding `: ` or `#` cannot break
+the document, and a variable alone on an integer field of the installer
+schema (`vlan_id: {{vlan}}`) becomes an integer. Values are one line, at
+most 512 characters, without control characters.
+
+- **Profiles** sub-section of the Bare-metal tab: list, **New profile**,
+  edit, delete. The editor takes the fields in YAML (a template with the
+  built-in variables is offered), the advanced YAML, and can start from an
+  install configuration file (its token and password are dropped). Saving
+  checks the profile against the installer schema with sample values: an
+  unknown or reserved key, or an undeclared variable, is refused then, not
+  when a batch starts.
+- Profiles are stored in the console state directory,
+  `<state>/profiles.d/<name>.yaml` (mode 0600, RFC 1123 name), and move
+  with it like the clusters it declares. **No secret is ever stored**: the
+  cluster token, the OS password and the BMC passwords are refused in a
+  profile.
+- **Install a batch**: cluster name, VIP, ISO (the profile's by default),
+  joins at once (2 by default, 4 at most), the secrets, and the machines
+  table: one row per machine (BMC host, BMC user, optional BMC password of
+  that row, one column per variable). **Fill the table** reads a pasted CSV
+  whose first line names the columns (`bmc_host,bmc_user,hostname,ip,...`,
+  separator comma, semicolon or tab); a `bmc_password` column is ignored:
+  type the passwords in the table or once for all rows. The token and OS
+  password can also come from an install configuration file (same
+  15-minute server-side cache as the install window).
+- **Check and preview** substitutes every row and runs the same checks as
+  an install (schema, disk checks against the discovery inventory of that
+  BMC when there is one), without any secret; each row shows its mode or
+  why it is refused, and its exact YAML (token masked). A missing variable
+  is named with its row.
+- **Start the batch** checks every row again, then nothing is powered on
+  unless all pass. Row 1 creates the cluster through the usual install
+  action; the other rows join `https://<vip>:443` once row 1 is **done**
+  (cluster declared in the console, its generated SSH key given to the
+  joining nodes), two at a time. A failed create stops the batch: the
+  other rows are skipped. A parent action `baremetal-batch:<cluster>`
+  shows each machine as a step (hostname, BMC, mode, install action id);
+  each machine is its own `baremetal-install:<hostname>` action in the
+  dock. Cancelling the batch cancels the install in progress and skips
+  the rows not started.
+- API: `GET|POST /api/baremetal/profiles`, `GET|PUT|DELETE
+  /api/baremetal/profiles/<name>`, `POST .../from-config`,
+  `POST .../<name>/csv`, `POST .../<name>/render`, `POST .../<name>/batch`
+  (`cluster_name`, `vip`, `iso`, `rows`, `token`, `password`,
+  `bmc_password`, `import_id`, `concurrency`). Reads are open to every
+  role, writes need **admin**.
+- Command line, same code (the batch runs inside the command), secrets
+  never on argv:
+
+  ```
+  harvester-baremetal profile list
+  harvester-baremetal profile show rack-a
+  harvester-baremetal profile apply rack-a --nodes nodes.csv \
+      --cluster-name rack-a --vip 10.0.0.100 --secrets-file secrets.yaml
+  ```
+
+  `secrets.yaml` (mode 0600, or the same YAML on stdin with
+  `--secrets-stdin`): `token`, `password` (optional), `bmc_password`
+  (common) and `bmc_passwords` (per BMC host). The CSV must not hold
+  passwords. `--state-dir` points to the console state directory,
+  `--port` sets the artifact server port when a console already listens
+  on 8091.
+- Verified by automated tests (substitution, store, ordering, refusals,
+  secrets) and on the window with mocked routes. **A batch has not been run
+  on real machines yet**: each row is the install already checked on its
+  own, the chaining of create then joins is not.
+
 ### Redfish: what 1.78.0 changed
 
 Checked against a Redfish emulator driving a nested machine, beyond the

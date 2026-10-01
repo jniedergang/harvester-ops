@@ -17,6 +17,21 @@ d'installation le retrouve. Même déroulé que la console (bin/lib/bm_discover.
 
 Le mot de passe du BMC ne passe jamais par la ligne de commande : fichier
 privé (`--password-file`) ou entrée standard (`--password-stdin`).
+
+`profile` (1.80.0) : profils d'installation multi-nœuds de la console.
+
+  harvester-baremetal profile list
+  harvester-baremetal profile show rack-a
+  harvester-baremetal profile apply rack-a --nodes nodes.csv --cluster-name rack-a \
+                      --vip 10.0.0.100 --secrets-file secrets.yaml
+
+`apply` déroule la même série que la console (même code, chargé depuis
+web/app.py) : la première ligne crée le cluster, les suivantes le
+rejoignent, deux à la fois. Le CSV nomme ses colonnes en première ligne
+(bmc_host, bmc_user, puis les variables) et ne porte aucun mot de passe.
+Les secrets viennent d'un fichier privé (0600) ou de l'entrée standard, en
+YAML : `token`, `password` (OS, facultatif), `bmc_password` (commun) et
+`bmc_passwords` (par hôte de BMC). Jamais de la ligne de commande.
 Étapes en `STEP_EVENT|étape|état|message` sur la sortie d'erreur, résultat
 JSON sur la sortie standard. Codes : 0 fait, 1 échec, 2 usage, 3 annulé.
 """
@@ -27,12 +42,15 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "lib"))
 
 import bm_discover  # noqa: E402
+import bm_profiles  # noqa: E402
+import cluster_decl  # noqa: E402
 
 
 def _step(sid, status, msg=""):
@@ -142,6 +160,99 @@ def cmd_discover(args):
     return 0
 
 
+# --- profils (1.80.0) --------------------------------------------------------
+
+def _profiles_state(args):
+    if args.state_dir:
+        os.environ["HARVESTER_OPS_STATE_DIR"] = os.path.abspath(args.state_dir)
+    return cluster_decl.state_dir()
+
+
+def _read_secrets(args):
+    """Secrets d'une série : fichier privé ou entrée standard, en YAML."""
+    import yaml
+    if args.secrets_stdin:
+        text = sys.stdin.read()
+    else:
+        path = Path(args.secrets_file)
+        if path.stat().st_mode & 0o077:
+            raise SystemExit("--secrets-file must not be readable by others (chmod 600)")
+        text = path.read_text()
+    try:
+        doc = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        raise SystemExit("secrets: invalid YAML") from None
+    if not isinstance(doc, dict):
+        raise SystemExit("secrets: expected a mapping (token, password, bmc_password, bmc_passwords)")
+    unknown = set(doc) - {"token", "password", "bmc_password", "bmc_passwords"}
+    if unknown:
+        raise SystemExit(f"secrets: unknown keys {sorted(unknown)}")
+    return doc
+
+
+def cmd_profile(args):
+    state = _profiles_state(args)
+    if args.pcmd == "list":
+        print(json.dumps(bm_profiles.list_profiles(state), indent=2))
+        return 0
+    prof = bm_profiles.load_profile(state, args.name)
+    if prof is None:
+        print(f"no such profile: {args.name} (in {state / bm_profiles.PROFILE_DIR})", file=sys.stderr)
+        return 2
+    if args.pcmd == "show":
+        import yaml
+        print(yaml.safe_dump(prof, sort_keys=False, allow_unicode=True), end="")
+        return 0
+    try:
+        rows = bm_profiles.parse_nodes_csv(Path(args.nodes).read_text(), prof["variables"])
+    except bm_profiles.ProfileError as e:
+        for where, why in e.errors:
+            print(f"{where}: {why}", file=sys.stderr)
+        return 2
+    if any("bmc_password" in r for r in rows):
+        print("the nodes CSV must not hold passwords: use bmc_passwords in the secrets", file=sys.stderr)
+        return 2
+    sec = _read_secrets(args)
+    per_host = sec.get("bmc_passwords") or {}
+    for r in rows:
+        if per_host.get(r.get("bmc_host")):
+            r["bmc_password"] = str(per_host[r["bmc_host"]])
+    if args.port:
+        os.environ["HARVESTER_OPS_PXE_PORT"] = str(args.port)
+    # le cluster créé est déclaré dans le même répertoire d'état
+    os.environ.setdefault("HARVESTER_OPS_STATE_DIR", str(state))
+    app = _load_web_module("app")
+    if app is None:
+        print("web/app.py not found (set HARVESTER_OPS_WEB_DIR)", file=sys.stderr)
+        return 1
+    batch, secrets_ = app._bm_batch_input({
+        "cluster_name": args.cluster_name, "vip": args.vip, "iso": args.iso, "rows": rows,
+        "token": sec.get("token"), "password": sec.get("password"),
+        "bmc_password": sec.get("bmc_password")})
+    action_id, errors = app._bm_batch_start(prof, batch, secrets_, args.concurrency)
+    if errors:
+        for where, why in errors:
+            print(f"{where}: {why}", file=sys.stderr)
+        return 2
+    with app.ACTIONS_LOCK:
+        run = app.ACTIONS[action_id]
+    stop = lambda *a: setattr(run, "_cancel", True)      # noqa: E731
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+    seq = 0
+    while True:
+        events, seq = run.events_since(seq)
+        for ev in events:
+            if ev.get("type") == "step":
+                _step(ev.get("step_id"), ev.get("status"), ev.get("message", ""))
+        if run.status in ("done", "error", "cancelled") and not run.events_since(seq)[0]:
+            break
+        time.sleep(1)
+    print(json.dumps({"action_id": action_id, "status": run.status,
+                      "nodes": run.result.get("nodes", [])}, indent=2))
+    return {"done": 0, "cancelled": 3}.get(run.status, 1)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="harvester-baremetal", description=__doc__, allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -161,9 +272,30 @@ def main(argv=None):
     d.add_argument("--work-dir", help="scratch directory for the discovery ISO "
                    "(default: <ISO dir>/work, needs the ISO size free)")
     d.add_argument("--store", help="inventory store (default: the console's)")
+    p = sub.add_parser("profile", allow_abbrev=False, help="multi-node install profiles")
+    p.add_argument("--state-dir", help="console state directory (default: HARVESTER_OPS_STATE_DIR "
+                   "or /var/lib/harvester-ops)")
+    psub = p.add_subparsers(dest="pcmd", required=True)
+    psub.add_parser("list", help="list the profiles")
+    ps = psub.add_parser("show", help="print a profile")
+    ps.add_argument("name")
+    pa = psub.add_parser("apply", allow_abbrev=False, help="install a batch of nodes from a profile")
+    pa.add_argument("name")
+    pa.add_argument("--nodes", required=True, help="nodes CSV (header: bmc_host, bmc_user, variables)")
+    pa.add_argument("--cluster-name", required=True, help="name of the cluster the first node creates")
+    pa.add_argument("--vip", required=True, help="cluster VIP; the other nodes join https://<vip>:443")
+    pa.add_argument("--iso", help="ISO of the console store (default: the profile's)")
+    pa.add_argument("--concurrency", type=int, default=bm_profiles.DEFAULT_CONCURRENCY,
+                    help="joins running at once (default 2, at most 4)")
+    pa.add_argument("--port", type=int, help="artifact server port (default 8091)")
+    sg = pa.add_mutually_exclusive_group(required=True)
+    sg.add_argument("--secrets-file", help="YAML file (mode 0600): token, password, bmc_password, bmc_passwords")
+    sg.add_argument("--secrets-stdin", action="store_true", help="read the same YAML from stdin")
     args = ap.parse_args(argv)
     if args.cmd == "discover":
         return cmd_discover(args)
+    if args.cmd == "profile":
+        return cmd_profile(args)
     return 2
 
 

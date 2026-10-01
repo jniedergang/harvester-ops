@@ -5941,6 +5941,24 @@ def api_baremetal_install():
     err = _bm_apply_import(data)
     if err:
         return err
+    data, err = _bm_prepare_install(data)
+    if err:
+        return err
+    # Le label de l'action ne porte ni token ni mot de passe.
+    action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
+                                data["bmc_host"], _baremetal_install_runner, data)
+    if busy:
+        return busy
+    return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
+
+
+def _bm_prepare_install(data, defer_join=False):
+    """Contrôles d'une installation avant toute action sur la machine,
+    partagés par la route et les séries de profils (1.80.0) : (données
+    complétées, None) ou (None, réponse d'erreur). `defer_join` : le
+    cluster rejoint n'existe pas encore (série, avant que la première ligne
+    l'ait créé) ; tout le reste est contrôlé."""
+    mode = data["mode"]
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
                 "device", "mgmt_interface", "token",
@@ -5951,31 +5969,31 @@ def api_baremetal_install():
     missing = [k for k in required
                if not (has_iface if k == "mgmt_interface" else data.get(k))]
     if missing:
-        return jsonify({"error": "missing fields", "fields": missing}), 400
+        return None, (jsonify({"error": "missing fields", "fields": missing}), 400)
     if mode == "join":
         if not re.fullmatch(r"https://[A-Za-z0-9.:\[\]-]+(?::\d+)?/?",
                             str(data["server_url"])):
-            return jsonify({"error": "invalid server_url (https://host[:port])",
-                            "fields": ["server_url"]}), 400
+            return None, (jsonify({"error": "invalid server_url (https://host[:port])",
+                                   "fields": ["server_url"]}), 400)
         # Suivre l'arrivée du nœud demande de lire ce cluster.
-        data["cluster"] = _cluster_for_server(data["server_url"])
-        if not data["cluster"]:
-            return jsonify({"error": "declare the cluster of server_url first",
-                            "fields": ["server_url"]}), 400
+        data["cluster"] = None if defer_join else _cluster_for_server(data["server_url"])
+        if not data["cluster"] and not defer_join:
+            return None, (jsonify({"error": "declare the cluster of server_url first",
+                                   "fields": ["server_url"]}), 400)
     if data.get("method", "dhcp") == "static":
         for k in ("ip", "subnet_mask", "gateway"):
             if not data.get(k):
-                return jsonify({"error": "missing fields", "fields": [k]}), 400
+                return None, (jsonify({"error": "missing fields", "fields": [k]}), 400)
     safe_iso = _safe_artifact_name(data["iso"])
     if not safe_iso:
-        return jsonify({"error": "invalid ISO name"}), 400
+        return None, (jsonify({"error": "invalid ISO name"}), 400)
     data["iso"] = safe_iso
     # Arguments noyau supplémentaires : ils finissent sur une ligne de
     # commande grub, donc pas de guillemets ni de saut de ligne qui
     # permettraient d'en sortir.
     extra = " ".join(str(data.get("extra_args") or "").split())
     if extra and not re.fullmatch(r"[A-Za-z0-9 ._:/,=@+-]*", extra):
-        return jsonify({"error": "invalid extra kernel arguments"}), 400
+        return None, (jsonify({"error": "invalid extra kernel arguments"}), 400)
     data["extra_args"] = extra
     # Configuration validée AVANT l'ActionRun : le runner ne la rend qu'après
     # le préflight, donc après avoir allumé la machine. Une clé refusée doit
@@ -5987,40 +6005,436 @@ def api_baremetal_install():
     try:
         data["pools"] = _hh.check_pools(data.get("pools"))
     except ValueError as e:
-        return jsonify({"error": f"invalid pools: {e}", "fields": ["pools"]}), 400
+        return None, (jsonify({"error": f"invalid pools: {e}", "fields": ["pools"]}), 400)
     refused = _bm_pool_disk_refusals(data)
     if refused:
-        return jsonify({"error": "invalid pools: a pool disk is also the system or data disk, "
-                                 "or is not in this machine's inventory",
-                        "fields": ["pools"], "reasons": [list(r) for r in refused]}), 400
+        return None, (jsonify({"error": "invalid pools: a pool disk is also the system or data disk, "
+                                        "or is not in this machine's inventory",
+                               "fields": ["pools"], "reasons": [list(r) for r in refused]}), 400)
     # v1.78.0 : avec un inventaire de la machine, chaque disque désigné y est
     # retrouvé et contrôlé (taille, données présentes, rôle doublé) avant
     # d'allumer quoi que ce soit
     disk_errors = _bm_disk_role_check(data)
     if disk_errors:
-        return _bm_disk_refusal(disk_errors)
+        return None, _bm_disk_refusal(disk_errors)
     # jamais une valeur du client : calculée ici, depuis l'inventaire
     data["own_disk_names"] = _bm_own_disk_names(data)
     # v1.78.0 : un cluster créé est déclaré dans la console à la fin
     if mode == "create":
         name = _bm_cluster_name(data)
         if not _BM_CLUSTER_NAME_RE.match(name):
-            return jsonify({"error": "invalid cluster name (RFC 1123: lower-case letters, digits, "
-                                     "dashes and dots)", "fields": ["cluster_name"]}), 400
+            return None, (jsonify({"error": "invalid cluster name (RFC 1123: lower-case letters, digits, "
+                                            "dashes and dots)", "fields": ["cluster_name"]}), 400)
         if any(c.get("name") == name for c in load_config().get("clusters", [])):
-            return jsonify({"error": f"cluster '{name}' is already declared",
-                            "fields": ["cluster_name"]}), 400
+            return None, (jsonify({"error": f"cluster '{name}' is already declared",
+                                   "fields": ["cluster_name"]}), 400)
         data["cluster_name"] = name
     try:
         _bm_render_checked(data)
     except InstallConfigError as e:
-        return _bm_config_refusal(e)
-    # Le label de l'action ne porte ni token ni mot de passe.
-    action_id, busy = _bm_track(f"baremetal-install:{data['hostname']}",
-                                data["bmc_host"], _baremetal_install_runner, data)
-    if busy:
-        return busy
-    return jsonify({"action_id": action_id, "hostname": data["hostname"]}), 202
+        return None, _bm_config_refusal(e)
+    return data, None
+
+
+# --- profils d'installation multi-nœuds (v1.80.0) ----------------------------
+#
+# Un profil est une configuration d'installation à variables `{{nom}}`,
+# rangée dans <état>/profiles.d (bin/lib/bm_profiles.py). Une série applique
+# un profil à un tableau de machines : la première ligne crée le cluster, les
+# suivantes le rejoignent, chacune par sa propre installation suivie (la même
+# que la route /api/baremetal/install). Les secrets (jeton, mot de passe de
+# l'OS, mots de passe des BMC) ne sont saisis qu'au lancement, restent en
+# mémoire du déroulé et ne sont jamais écrits ni renvoyés.
+import bm_profiles as _bmp  # noqa: E402
+
+BM_BATCH_POLL = float(os.environ.get("HARVESTER_OPS_BATCH_POLL", 3))
+# valeur de remplacement des secrets pour les contrôles d'une série (aperçu,
+# validation avant le lancement) : jamais servie à un installeur
+_BM_CHECK_SECRET = "x"
+
+
+def _bm_field_type(path):
+    f = _his.field_at(path)
+    return f.type if f is not None else None
+
+
+def _bm_profiles_state():
+    return _state_dir()
+
+
+def _bm_errors_json(errors, error="invalid profile", status=400):
+    return jsonify({"error": error, "errors": [[w, r] for w, r in errors],
+                    "fields": [w for w, _ in errors]}), status
+
+
+def _bm_refusal_pairs(resp, where):
+    """[(où, raison)] lus dans une réponse de refus de _bm_prepare_install."""
+    body = resp[0].get_json(silent=True) or {}
+    reasons = body.get("reasons")
+    if isinstance(reasons, dict) and reasons:
+        return [(f"{where} {p}", str(r)) for p, r in reasons.items()]
+    if isinstance(reasons, list) and reasons:
+        return [(f"{where} {r[0]}", str(r[1])) for r in reasons if isinstance(r, list) and len(r) == 2]
+    fields = body.get("fields") or []
+    return [(f"{where} {', '.join(map(str, fields))}".strip(), str(body.get("error") or "refused"))]
+
+
+def _bm_profile_check_render(prof):
+    """Rendu d'essai d'un profil, chaque variable valant « 1 » : une clé
+    inconnue ou réservée est refusée à l'enregistrement, pas au lancement."""
+    sample = {v: "1" for v in _bmp.used_variables(prof)}
+    batch = {"cluster_name": "c", "vip": "1",
+             "rows": [{"bmc_host": "h", "bmc_user": "u", "values": sample}]}
+    opts = _bmp.node_opts(prof, batch, 0, _bm_field_type, _his.dump_install_config)
+    try:
+        _hh.check_pools(opts.get("pools"))
+    except ValueError as e:
+        return [("fields.pools", str(e)[:200])]
+    try:
+        _bm_render_checked(dict(opts, token=_BM_CHECK_SECRET))
+    except InstallConfigError as e:
+        return [(p, str(e.reasons.get(p) or e.message)) for p in e.paths]
+    return []
+
+
+def _bm_profile_view(prof):
+    """Profil tel que la fenêtre l'édite : les champs aussi en YAML."""
+    return dict(prof, fields_yaml=yaml.safe_dump(prof.get("fields") or {}, sort_keys=False,
+                                                 allow_unicode=True) if prof.get("fields") else "")
+
+
+def _bm_profile_payload(data, name):
+    doc = {k: data.get(k) for k in ("description", "variables", "fields", "advanced_yaml")}
+    # la fenêtre envoie les champs en YAML (`fields_yaml`), la ligne de
+    # commande et les tests en dictionnaire
+    if isinstance(data.get("fields_yaml"), str):
+        try:
+            fields = yaml.safe_load(data["fields_yaml"]) if data["fields_yaml"].strip() else {}
+        except yaml.YAMLError as e:
+            mark = getattr(e, "problem_mark", None)
+            raise _bmp.ProfileError([(f"fields (line {mark.line + 1})" if mark else "fields",
+                                      "invalid YAML")]) from None
+        if not isinstance(fields, dict):
+            raise _bmp.ProfileError([("fields", "not a mapping")])
+        doc["fields"] = fields
+    prof = _bmp.check_profile(doc)
+    errors = _bm_profile_check_render(dict(prof, name=name))
+    if errors:
+        raise _bmp.ProfileError(errors)
+    return prof
+
+
+@app.route("/api/baremetal/profiles", methods=["GET"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bm_profiles_list():
+    return jsonify({"profiles": _bmp.list_profiles(_bm_profiles_state()),
+                    "builtins": list(_bmp.BUILTIN_VARS)})
+
+
+@app.route("/api/baremetal/profiles", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_profiles_create():
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    path = _bmp.profile_path(_bm_profiles_state(), name)
+    if path is None:
+        return _bm_errors_json([("name", "invalid name (RFC 1123)")])
+    if path.exists():
+        return jsonify({"error": f"profile '{name}' already exists", "fields": ["name"]}), 409
+    try:
+        prof = _bmp.save_profile(_bm_profiles_state(), name, _bm_profile_payload(data, name))
+    except _bmp.ProfileError as e:
+        return _bm_errors_json(e.errors)
+    return jsonify(_bm_profile_view(prof)), 201
+
+
+@app.route("/api/baremetal/profiles/<name>", methods=["GET"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bm_profile_get(name):
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    return jsonify(_bm_profile_view(prof))
+
+
+@app.route("/api/baremetal/profiles/<name>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_profile_update(name):
+    path = _bmp.profile_path(_bm_profiles_state(), name)
+    if path is None or not path.is_file():
+        return jsonify({"error": "no such profile"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        prof = _bmp.save_profile(_bm_profiles_state(), name, _bm_profile_payload(data, name))
+    except _bmp.ProfileError as e:
+        return _bm_errors_json(e.errors)
+    return jsonify(_bm_profile_view(prof))
+
+
+@app.route("/api/baremetal/profiles/from-config", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_profile_from_config():
+    """Point de départ d'un profil : un fichier de configuration découpé
+    comme à l'import de la fenêtre d'installation. Jeton et mot de passe du
+    fichier sont JETÉS (un profil n'en porte pas), pas mis en cache."""
+    if (request.content_length or 0) > 2 * _BM_IMPORT_MAX + 4096:
+        return jsonify({"error": "file too large", "max_bytes": _BM_IMPORT_MAX}), 413
+    data = request.get_json(force=True, silent=True) or {}
+    text = data.get("text")
+    if not isinstance(text, str):
+        return jsonify({"error": "missing fields", "fields": ["text"]}), 400
+    out = split_imported_config(text)
+    if out["errors"]:
+        return jsonify({"error": "invalid configuration", "fields": out["errors"]}), 400
+    fields = {k: v for k, v in out["form"].items() if k in _bmp.PROFILE_FIELDS}
+    return jsonify({"fields_yaml": yaml.safe_dump(fields, sort_keys=False, allow_unicode=True)
+                    if fields else "", "advanced_yaml": out["advanced"], "notes": out["notes"],
+                    "secrets_dropped": bool(out["secrets"])})
+
+
+@app.route("/api/baremetal/profiles/<name>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_profile_delete(name):
+    if not _bmp.delete_profile(_bm_profiles_state(), name):
+        return jsonify({"error": "no such profile"}), 404
+    return jsonify({"deleted": name})
+
+
+@app.route("/api/baremetal/profiles/<name>/csv", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bm_profile_csv(name):
+    """Lignes d'une série depuis un CSV collé. Une colonne bmc_password est
+    lue puis JETÉE : un mot de passe ne revient pas au navigateur, il se
+    saisit dans le tableau ou une fois pour toute la série."""
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    if (request.content_length or 0) > 256 * 1024:
+        return jsonify({"error": "text too large"}), 413
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        rows = _bmp.parse_nodes_csv(data.get("text"), prof["variables"])
+    except _bmp.ProfileError as e:
+        return _bm_errors_json(e.errors, "invalid CSV")
+    dropped = False
+    for r in rows:
+        dropped = (r.pop("bmc_password", None) is not None) or dropped
+    return jsonify({"rows": rows, "passwords_dropped": dropped})
+
+
+def _bm_batch_input(data):
+    """(lot sans secrets, secrets) depuis le corps d'une requête ou la
+    ligne de commande."""
+    rows = []
+    for r in data.get("rows") or []:
+        if not isinstance(r, dict):
+            rows.append(r)
+            continue
+        rows.append({"bmc_host": str(r.get("bmc_host") or "").strip(),
+                     "bmc_user": str(r.get("bmc_user") or "").strip(),
+                     "bmc_password": str(r.get("bmc_password") or ""),
+                     "values": {str(k): (v if isinstance(v, str) else str(v))
+                                for k, v in (r.get("values") or {}).items()}
+                     if isinstance(r.get("values"), dict) else r.get("values")})
+    batch = {"cluster_name": str(data.get("cluster_name") or "").strip(),
+             "vip": str(data.get("vip") or "").strip(),
+             "iso": str(data.get("iso") or "").strip() or None, "rows": rows}
+    secrets_ = {k: str(data.get(k) or "") for k in ("token", "password", "bmc_password")}
+    return batch, secrets_
+
+
+def _bm_batch_plan(prof, batch, secrets_):
+    """Options d'installation complètes et contrôlées de chaque ligne
+    (jonctions contrôlées sans leur cluster, qui n'existe pas encore), ou
+    la liste des refus [(où, raison)]. Rien n'est allumé ici."""
+    errors = _bmp.check_batch(prof, batch)
+    if errors:
+        return None, errors
+    plans = []
+    for i, row in enumerate(batch["rows"]):
+        where = f"row {i + 1}"
+        try:
+            opts = _bmp.node_opts(prof, batch, i, _bm_field_type, _his.dump_install_config)
+        except _bmp.ProfileError as e:
+            errors += e.errors
+            continue
+        opts["bmc_password"] = row.get("bmc_password") or secrets_.get("bmc_password") or ""
+        opts["token"] = secrets_.get("token") or ""
+        if secrets_.get("password"):
+            opts["password"] = secrets_["password"]
+        if not opts["bmc_password"]:
+            errors.append((f"{where} bmc_password", "missing"))
+            continue
+        with app.app_context():                 # jsonify hors requête (CLI)
+            data, err = _bm_prepare_install(dict(opts), defer_join=i > 0)
+        if err:
+            errors += _bm_refusal_pairs(err, where)
+            continue
+        plans.append(data)
+    if not secrets_.get("token"):
+        errors.append(("token", "missing"))
+    return (None, errors) if errors else (plans, [])
+
+
+def _bm_wait_action(action_id, parent, sleep=None):
+    """État final d'une installation de la série. Un arrêt demandé sur la
+    série est transmis à l'installation en cours."""
+    sleep = sleep or time.sleep
+    while True:
+        with ACTIONS_LOCK:
+            child = ACTIONS.get(action_id)
+        if child is None:
+            return "error"
+        if getattr(parent, "_cancel", False) and child.status in ("starting", "running"):
+            child._cancel = True
+        if child.status in ("done", "error", "cancelled"):
+            return child.status
+        sleep(BM_BATCH_POLL)
+
+
+def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Série d'installations : ligne 1 seule (création), puis les jonctions,
+    `concurrency` à la fois, chacune une action suivie à part. Chaque nœud
+    est une étape `node-<n>` de cette action, avec l'identifiant de son
+    installation."""
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    nodes = [{"row": i + 1, "hostname": o["hostname"], "bmc_host": o["bmc_host"],
+              "mode": o["mode"], "action_id": None, "status": "pending"}
+             for i, o in enumerate(plan)]
+    run.result = {"nodes": nodes}
+    lock = threading.Lock()
+
+    def report(i, status, msg):
+        with lock:
+            nodes[i]["status"] = status
+            run.result = {"nodes": [dict(n) for n in nodes]}
+        n = nodes[i]
+        run.emit({"type": "step", "step_id": f"node-{i + 1}",
+                  "status": {"pending": "running"}.get(status, status),
+                  "message": f"{n['hostname']} ({n['bmc_host']}, {n['mode']}) "
+                             f"{n['action_id'] or ''} {'' if msg == n['action_id'] else msg}".strip(),
+                  "ts": time.time()})
+
+    def launch(i):
+        opts = plan[i]
+        if i > 0:
+            # le cluster créé par la ligne 1 est maintenant déclaré
+            with app.app_context():
+                data, err = _bm_prepare_install(dict(opts))
+            if err:
+                raise RuntimeError("; ".join(f"{w}: {r}" for w, r in _bm_refusal_pairs(err, "")))
+            opts = data
+        with app.app_context():
+            action_id, busy = _bm_track(f"baremetal-install:{opts['hostname']}",
+                                        opts["bmc_host"], _baremetal_install_runner, opts)
+        if busy:
+            raise RuntimeError(f"BMC {opts['bmc_host']} is busy")
+        with lock:
+            nodes[i]["action_id"] = action_id
+        return action_id
+
+    try:
+        states = _bmp.run_batch(len(plan), launch, lambda i, aid: _bm_wait_action(aid, run),
+                                report, concurrency=concurrency,
+                                cancelled=lambda: getattr(run, "_cancel", False))
+    except Exception as e:                      # jamais de détail qui porterait un secret
+        states = ["error"]
+        run.error_summary = type(e).__name__
+    finally:
+        plan.clear()                            # secrets : plus rien en mémoire du déroulé
+    ok = all(s == "done" for s in states)
+    if not ok and not run.error_summary:
+        bad = [f"{n['hostname']}: {n['status']}" for n in nodes if n["status"] != "done"]
+        run.error_summary = ", ".join(bad)[:300]
+    cancelled = getattr(run, "_cancel", False) and not ok
+    run.status = "done" if ok else ("cancelled" if cancelled else "error")
+    run.exit_code = 0 if ok else (3 if cancelled else 1)
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
+              "ts": time.time()})
+    run.close()
+
+
+def _bm_batch_start(prof, batch, secrets_, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Contrôle toute la série puis lance son action parente : (action_id,
+    None) ou (None, refus [(où, raison)])."""
+    plan, errors = _bm_batch_plan(prof, batch, secrets_)
+    if errors:
+        return None, errors
+    for o in plan:
+        busy = _bm_busy(o["bmc_host"])
+        if busy:
+            return None, [(o["bmc_host"], f"{busy.action} is already driving this BMC")]
+    concurrency = max(1, min(4, int(concurrency or _bmp.DEFAULT_CONCURRENCY)))
+    action_id = track_action(f"baremetal-batch:{batch['cluster_name']}", "(local)",
+                             _baremetal_batch_runner, plan, concurrency)
+    return action_id, None
+
+
+@app.route("/api/baremetal/profiles/<name>/render", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_profile_render(name):
+    """Aperçu de chaque ligne d'une série : YAML final, jeton et mot de
+    passe masqués, ou ses refus. Aucun secret n'est demandé ni utilisé."""
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    batch, _ = _bm_batch_input(request.get_json(force=True, silent=True) or {})
+    errors = _bmp.check_batch(prof, batch)
+    if errors:
+        return _bm_errors_json(errors, "invalid batch")
+    out = []
+    for i in range(len(batch["rows"])):
+        one = dict(batch, rows=batch["rows"])
+        try:
+            opts = _bmp.node_opts(prof, one, i, _bm_field_type, _his.dump_install_config)
+        except _bmp.ProfileError as e:
+            out.append({"row": i + 1, "errors": [[w, r] for w, r in e.errors]})
+            continue
+        opts.update(bmc_password=_BM_CHECK_SECRET, token=_BM_CHECK_SECRET)
+        data, err = _bm_prepare_install(dict(opts), defer_join=i > 0)
+        if err:
+            out.append({"row": i + 1, "errors": [[w, r] for w, r in _bm_refusal_pairs(err, f"row {i + 1}")]})
+            continue
+        cfg = _bm_render_checked(dict(data, power_off=True))
+        cfg["token"] = _BM_MASK
+        out.append({"row": i + 1, "hostname": data["hostname"], "mode": data["mode"],
+                    "yaml": _his.dump_install_config(cfg)})
+    return jsonify({"rows": out, "ok": all("yaml" in r for r in out)})
+
+
+@app.route("/api/baremetal/profiles/<name>/batch", methods=["POST"])
+@requires_auth
+@_rate_limit("6/minute")
+def api_bm_profile_batch(name):
+    """Lance une série. Jeton et mot de passe de l'OS : saisis ici, ou
+    repris d'un fichier importé (`import_id`, même cache de 15 min)."""
+    prof = _bmp.load_profile(_bm_profiles_state(), name)
+    if prof is None:
+        return jsonify({"error": "no such profile"}), 404
+    data = request.get_json(force=True, silent=True) or {}
+    err = _bm_apply_import(data)
+    if err:
+        return err
+    batch, secrets_ = _bm_batch_input(data)
+    try:
+        concurrency = int(data.get("concurrency") or _bmp.DEFAULT_CONCURRENCY)
+    except (TypeError, ValueError):
+        return _bm_errors_json([("concurrency", "not a number")], "invalid batch")
+    action_id, errors = _bm_batch_start(prof, batch, secrets_, concurrency)
+    if errors:
+        return _bm_errors_json(errors, "invalid batch")
+    return jsonify({"action_id": action_id, "cluster": batch["cluster_name"],
+                    "nodes": len(batch["rows"])}), 202
 
 
 # --- démarrage de découverte (v1.78.0) ---------------------------------------

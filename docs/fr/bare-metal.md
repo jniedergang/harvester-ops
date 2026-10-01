@@ -268,6 +268,100 @@ cartes de gestion montrent alors leur nom Linux.
   `harvester-baremetal discover --bmc <hôte> --user <compte> --password-file <fichier 0600> --iso <chemin>`
   (ou `--password-stdin`).
 
+### Plusieurs nœuds identiques : profils d'installation et séries (1.80.0)
+
+Un **profil** est une configuration d'installation nommée : les champs de
+la fenêtre d'installation, écrits en YAML, et le YAML avancé, où toute
+valeur peut porter une variable `{{nom}}`. Variables intégrées :
+`{{hostname}}`, `{{ip}}` (adresse de gestion), `{{mgmt_mac}}` et `{{vip}}` ;
+un profil déclare les siennes (`storage_ip`, `admin_ip`...). Elles valent
+partout, y compris dans les keyfiles NetworkManager et les extraits `sshd`
+d'`os.write_files` :
+
+```yaml
+os:
+  write_files:
+  - path: /etc/NetworkManager/system-connections/storage.nmconnection
+    permissions: '0600'
+    content: |
+      [ipv4]
+      method=manual
+      address1={{storage_ip}}/24
+```
+
+Le YAML avancé est lu **avant** le remplacement des variables, puis chaque
+valeur entre telle quelle dans sa chaîne : une valeur qui porte `: ` ou `#`
+ne casse pas le document, et une variable seule sur un champ entier du
+schéma de l'installeur (`vlan_id: {{vlan}}`) devient un entier. Une valeur
+tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
+
+- Sous-section **Profils** de l'onglet Bare-metal : liste, **Nouveau
+  profil**, modification, suppression. L'éditeur prend les champs en YAML
+  (un gabarit avec les variables intégrées est proposé), le YAML avancé, et
+  peut partir d'un fichier de configuration d'installation (son jeton et
+  son mot de passe sont jetés). L'enregistrement contrôle le profil contre
+  le schéma de l'installeur avec des valeurs d'essai : une clé inconnue ou
+  réservée, ou une variable non déclarée, est refusée à ce moment, pas au
+  lancement d'une série.
+- Les profils sont rangés dans le répertoire d'état de la console,
+  `<état>/profiles.d/<nom>.yaml` (mode 0600, nom RFC 1123), et se déplacent
+  avec lui comme les clusters qu'elle déclare. **Aucun secret n'y est
+  jamais rangé** : jeton du cluster, mot de passe de l'OS et mots de passe
+  des BMC sont refusés dans un profil.
+- **Installer une série** : nom du cluster, VIP, ISO (celle du profil par
+  défaut), jonctions simultanées (2 par défaut, 4 au plus), les secrets, et
+  le tableau des machines : une ligne par machine (hôte du BMC,
+  utilisateur, mot de passe du BMC propre à la ligne si besoin, une colonne
+  par variable). **Remplir le tableau** lit un CSV collé dont la première
+  ligne nomme les colonnes (`bmc_host,bmc_user,hostname,ip,...`, séparateur
+  virgule, point-virgule ou tabulation) ; une colonne `bmc_password` est
+  ignorée : les mots de passe se saisissent dans le tableau ou une fois pour
+  toutes les lignes. Jeton et mot de passe de l'OS peuvent aussi venir d'un
+  fichier de configuration (même cache serveur de 15 minutes que la fenêtre
+  d'installation).
+- **Contrôler et prévisualiser** remplace les variables de chaque ligne et
+  passe les mêmes contrôles qu'une installation (schéma, contrôles des
+  disques sur l'inventaire de découverte du BMC quand il existe), sans
+  aucun secret ; chaque ligne montre son mode ou la raison de son refus, et
+  son YAML exact (jeton masqué). Une variable absente est nommée avec sa
+  ligne.
+- **Lancer la série** recontrôle chaque ligne, et rien n'est allumé si une
+  seule échoue. La ligne 1 crée le cluster par l'action d'installation
+  habituelle ; les autres rejoignent `https://<vip>:443` une fois la ligne 1
+  **terminée** (cluster déclaré dans la console, sa clé SSH générée donnée
+  aux nœuds qui le rejoignent), deux à la fois. Une création ratée arrête
+  la série : les autres lignes sont sautées. Une action parente
+  `baremetal-batch:<cluster>` montre chaque machine comme une étape (nom
+  d'hôte, BMC, mode, identifiant de son installation) ; chaque machine est
+  sa propre action `baremetal-install:<hostname>` dans le dock. Arrêter la
+  série arrête l'installation en cours et saute les lignes non commencées.
+- API : `GET|POST /api/baremetal/profiles`, `GET|PUT|DELETE
+  /api/baremetal/profiles/<nom>`, `POST .../from-config`,
+  `POST .../<nom>/csv`, `POST .../<nom>/render`, `POST .../<nom>/batch`
+  (`cluster_name`, `vip`, `iso`, `rows`, `token`, `password`,
+  `bmc_password`, `import_id`, `concurrency`). La lecture est ouverte à
+  tous les rôles, l'écriture demande **admin**.
+- Ligne de commande, même code (la série tourne dans la commande), secrets
+  jamais en argument :
+
+  ```
+  harvester-baremetal profile list
+  harvester-baremetal profile show rack-a
+  harvester-baremetal profile apply rack-a --nodes nodes.csv \
+      --cluster-name rack-a --vip 10.0.0.100 --secrets-file secrets.yaml
+  ```
+
+  `secrets.yaml` (mode 0600, ou le même YAML sur l'entrée standard avec
+  `--secrets-stdin`) : `token`, `password` (facultatif), `bmc_password`
+  (commun) et `bmc_passwords` (par hôte de BMC). Le CSV ne porte aucun mot
+  de passe. `--state-dir` désigne le répertoire d'état de la console,
+  `--port` le port du serveur d'artefacts quand une console écoute déjà sur
+  8091.
+- Vérifié par les tests automatiques (substitution, magasin, ordre, refus,
+  secrets) et sur la fenêtre avec des routes simulées. **Aucune série n'a
+  encore tourné sur de vraies machines** : chaque ligne est l'installation
+  déjà vérifiée seule, l'enchaînement création puis jonctions ne l'est pas.
+
 ### Redfish : ce que la 1.78.0 a changé
 
 Vérifié contre un émulateur Redfish pilotant une machine imbriquée, au-delà

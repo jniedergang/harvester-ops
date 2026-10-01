@@ -84,6 +84,7 @@ const BMC = (() => {
     if (!out) return;
     if (!force && out.querySelector('#bmc-discover-form')) {
       renderIsoStore();
+      if (window.BMProfiles) BMProfiles.render();
       return;
     }
     out.innerHTML = `
@@ -110,8 +111,11 @@ const BMC = (() => {
           <p class="form-hint">${esc(tr('bmc.credsHint'))}</p>
         </div>
       </div>
-      <div id="bmc-discover-result" style="margin-top:12px;"></div>`;
+      <div id="bmc-discover-result" style="margin-top:12px;"></div>
+      <div id="bm-profiles" style="margin-top:12px;"></div>`;
     renderIsoStore();
+    // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
+    if (window.BMProfiles) BMProfiles.render();
   }
 
   async function discover(ev) {
