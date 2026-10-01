@@ -507,3 +507,34 @@ def test_outcome_waits_for_the_agent_to_finish(console, monkeypatch):
     wapp._update_outcome_watch(timeout=60, step=0)
     done = [a for a in wapp.ACTIONS.values() if a.action == "console-update:1.82.1"]
     assert len(done) == 1 and done[0].status == "done"
+
+
+def test_an_unreadable_staged_file_does_not_break_the_tab(console, monkeypatch, tmp_path, keys):
+    """Vu en réel : un fichier posé en root avec l'étiquette SELinux de l'hôte
+    faisait tomber l'état, l'envoi et la suppression en 500."""
+    wapp, state = console
+    a = make_release(tmp_path, "1.82.0")
+    staged = state / "updates" / "staged"
+    staged.mkdir(parents=True, exist_ok=True)
+    shutil.copy(a, staged / a.name)
+    real_stat = Path.stat
+
+    def denied(self, *args, **kw):
+        if self.name.startswith("harvester-ops-1.82.0"):
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kw)
+    monkeypatch.setattr(Path, "stat", denied)
+    real_unlink = Path.unlink
+
+    def no_unlink(self, *args, **kw):
+        if self.name.startswith("harvester-ops-1.82.0"):
+            raise PermissionError(13, "Permission denied")
+        return real_unlink(self, *args, **kw)
+    monkeypatch.setattr(Path, "unlink", no_unlink)
+    with wapp.app.test_client() as c:
+        r = c.get("/api/update/status")
+        assert r.status_code == 200
+        item = r.get_json()["staged"][0]
+        assert item["ok"] is False and "unreadable" in item["error"]
+        r = c.delete(f"/api/update/staged/{a.name}")
+        assert r.status_code == 409 and "cannot remove" in r.get_json()["error"]

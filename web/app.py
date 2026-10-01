@@ -1944,7 +1944,18 @@ def _update_agent():
 
 def _update_precheck(path):
     """Pré-vérification d'une archive préparée, gardée tant qu'elle ne change
-    pas : version, contenu, signature."""
+    pas : version, contenu, signature. Un fichier illisible (posé à la main par
+    root, étiquette SELinux de l'hôte : vu en réel) est signalé, sans faire
+    tomber l'onglet entier."""
+    try:
+        return _update_precheck_inner(path)
+    except OSError as e:
+        return {"name": path.name, "ok": False, "size": 0,
+                "error": f"unreadable by the console ({e.strerror or e}); "
+                         "put the files through the interface, or fix their owner and label"}
+
+
+def _update_precheck_inner(path):
     st = path.stat()
     side = path.with_name(path.name + ".check.json")
     sig = path.with_name(path.name + ".sig")
@@ -2140,7 +2151,10 @@ def api_update_upload():
         if length > _UPDATE_SIG_MAX:
             return jsonify({"error": "signature file too large"}), 413
         data = request.stream.read(length)
-        (staged / name).write_bytes(data)
+        try:
+            (staged / name).write_bytes(data)
+        except OSError as e:
+            return jsonify({"error": f"cannot write {name}: {e.strerror or e}"}), 409
         arch = staged / base
         return jsonify({"ok": True, "staged": _update_precheck(arch) if arch.exists() else None})
     st = os.statvfs(staged)
@@ -2186,8 +2200,12 @@ def api_update_staged_delete(name):
     if not _su.ARCHIVE_RE.match(name):
         return jsonify({"error": "bad name"}), 400
     staged = _updates_dir() / _su.STAGED
-    for p in (name, name + ".sig", name + ".check.json"):
-        (staged / p).unlink(missing_ok=True)
+    try:
+        for p in (name, name + ".sig", name + ".check.json"):
+            (staged / p).unlink(missing_ok=True)
+    except OSError as e:
+        return jsonify({"error": f"cannot remove {p}: {e.strerror or e}",
+                        "hint": "a file put by hand on the host may not be removable by the console"}), 409
     return jsonify({"ok": True})
 
 
