@@ -135,7 +135,7 @@ const translations = {
     'bmc.imported': 'Configuration imported from {name}.',
     'bmc.needNic': 'Pick at least one management interface.',
     'bmc.note.automatic': 'install.automatic from the file is ignored: the console always installs unattended.',
-    'bmc.warn.nicSpeed': 'Management NIC under 10 Gbit/s: {nics}. The Harvester installer's hardware checks refuse an unattended install on it, without telling the console: add harvester.install.skipchecks=true to the extra kernel arguments if this is acceptable.',
+    'bmc.warn.nicSpeed': 'Management NIC under 10 Gbit/s: {nics}. The Harvester installer’s hardware checks refuse an unattended install on it, without telling the console: add harvester.install.skipchecks=true to the extra kernel arguments if this is acceptable.',
     'bmc.note.powerOff': 'install.power_off from the file is ignored: the console makes the installer power off at the end, then boots the machine on its disk.',
     'bmc.note.bondDefault': 'The file sets no bond options: active-backup with miimon 100, what the installer would use, is filled in.',
     'bmc.note.isoUrl': 'The iso_url of the file is replaced: the console serves its own image to the installer.',
