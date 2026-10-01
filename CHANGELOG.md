@@ -4,6 +4,20 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.4] - 2026-10-02 - The update tab says why it does not load
+
+### Fixed
+- The Update tab of the version window stayed on "Loading..." forever when the
+  update state could not be read. Seen on a console started before 1.82.0 and
+  never restarted: the page was new, the server had no `/api/update/status`
+  (404). The tab now says so (server older than the page: restart the
+  console), shows the HTTP error or an unreachable console otherwise, and
+  offers a Retry button. Five languages.
+
+### Tests
+- `tests/e2e/test_update_tab_error_1834.py`: 404, then 500, then recovery by
+  Retry.
+
 ## [1.83.3] - 2026-10-01 - The settings window keeps its size and its tabs
 
 ### Fixed

@@ -24,6 +24,7 @@ const ConsoleUpdate = (() => {
   let following = null;      // version en cours d'installation
   let sending = '';
   let sourceDraft = null;   // saisie en cours : un rafraîchissement ne l'efface pas
+  let loadError = null;     // état illisible : dit, au lieu d'un « chargement » sans fin
 
   async function api(method, url, body) {
     const r = await fetch(url, {
@@ -38,8 +39,11 @@ const ConsoleUpdate = (() => {
   async function load() {
     try {
       const r = await api('GET', '/api/update/status');
-      if (r.ok) st = r.d;
-    } catch (_) { /* console en redémarrage */ }
+      if (r.ok) { st = r.d; loadError = null; }
+      // 404 : serveur plus ancien que la page (console non redémarrée)
+      else loadError = r.status === 404 ? tr('upd.load.missing')
+        : tr('upd.load.failed', { code: (r.d && r.d.error) || r.status });
+    } catch (_) { loadError = tr('upd.load.unreachable'); }
     render();
     badge();
   }
@@ -115,6 +119,12 @@ const ConsoleUpdate = (() => {
   function render() {
     const pane = $('#versions-pane-update');
     if (!pane) return;
+    if (!st && loadError) {
+      pane.innerHTML = `<p class="upd-err">${esc(loadError)}</p>
+        <button type="button" class="btn btn-sm tip" data-upd="reload"
+          data-tip="${esc(tr('upd.load.retryTip'))}" title="${esc(tr('upd.load.retryTip'))}">${esc(tr('upd.load.retry'))}</button>`;
+      return;
+    }
     if (!st) { pane.innerHTML = `<p class="form-hint">${esc(tr('common.loading'))}</p>`; return; }
     if (following) { renderFollow(pane); return; }
     const admin = st.can_apply;
@@ -288,6 +298,7 @@ const ConsoleUpdate = (() => {
       case 'download': download(); break;
       case 'install': install(name); break;
       case 'delete': remove(name); break;
+      case 'reload': loadError = null; render(); load(); break;
       default: break;
     }
   }
