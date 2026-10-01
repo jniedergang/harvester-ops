@@ -3387,6 +3387,9 @@ def _rancher_call(r, method, path, body=None):
     import urllib.request
     token = Path(r["token_file"]).read_text().strip() if r.get("token_file") else r.get("token")
     ctx = ssl.create_default_context(cafile=r["ca_file"]) if r.get("ca_file") else ssl.create_default_context()
+    if r.get("insecure"):
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     req = urllib.request.Request(r["url"] + path, method=method, data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Authorization": f"Bearer {token}", "Accept": "application/json",
                                           "Content-Type": "application/json"})

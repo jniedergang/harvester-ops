@@ -71,6 +71,8 @@ import vnc_mux
 import volume_health
 import node_maintenance
 import rancher_sso as _rs
+import rancher_servers as _srv
+import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
 from flask import (
@@ -455,10 +457,68 @@ SSO_POWER_ACTIONS = ("shutdown", "startup")
 
 
 def _sso_settings():
+    """Réglages SSO du Rancher de config.yaml (1.50.0), ou None."""
     try:
-        return _rs.settings(load_config())
+        st = _rs.settings(load_config())
     except Exception:
         return None
+    if st is not None:
+        st.update({"id": _config_server_id(), "origin": "config", "sso": True,
+                   "direct": bool(((load_config().get("rancher") or {}).get("direct_login")))})
+    return st
+
+
+# v1.79.0 : les Rancher réglés dans l'interface (<état>/rancher.d), plus
+# celui de config.yaml en lecture seule. Relus à chaque requête : à chaud.
+_RANCHER_STORE = _srv.Store(lambda: _state_dir())
+RANCHER_LAST_COOKIE = "harvops_rancher_last"
+
+
+def _config_server_id():
+    conf = _srv.Store._from_config(load_config())
+    return conf["id"] if conf else None
+
+
+def _rancher_servers(include_shadowed=False):
+    try:
+        return _RANCHER_STORE.servers(load_config(), include_shadowed=include_shadowed)
+    except Exception as e:  # noqa: BLE001 : un réglage illisible ne bloque pas la console
+        log.warning("Rancher servers unreadable: %s", type(e).__name__)
+        return []
+
+
+def _rancher_server(sid, include_shadowed=False):
+    return next((x for x in _rancher_servers(include_shadowed) if x["id"] == sid), None)
+
+
+def _server_settings(sid):
+    """Réglages (format rancher_sso) du Rancher `sid` ; celui de config.yaml
+    reprend exactement la lecture de la 1.50 quand son SSO est complet."""
+    srv_ = _rancher_server(sid)
+    if srv_ is None:
+        return None
+    if srv_["origin"] == "config":
+        legacy = _sso_settings()
+        if legacy is not None:
+            return legacy
+    return _srv.settings_of(srv_)
+
+
+def _session_settings(sess):
+    """Les réglages du Rancher d'une session (None : Rancher retiré, la
+    session tombe)."""
+    if sess is None:
+        return None
+    if getattr(sess, "server_id", None) is None:
+        return _sso_settings()
+    return _server_settings(sess.server_id)
+
+
+def _rancher_login_available():
+    for x in _rancher_servers():
+        if x["direct_enabled"] or _srv.sso_enabled(x):
+            return True
+    return _sso_settings() is not None
 
 
 def _sso_store():
@@ -469,7 +529,7 @@ def _sso_store():
 
 
 def _sso_http(s):
-    return _rs.Http(s.get("ca_file"))
+    return _rs.Http(s.get("ca_file"), insecure=bool(s.get("insecure")))
 
 
 def _sso_session():
@@ -483,7 +543,7 @@ def _sso_session():
         return None
     sess = _sso_store().get(sid) if sid else None
     if sess is not None:
-        st = _sso_settings()
+        st = _session_settings(sess)
         if st is None or not _sso_store().renew(sess, _sso_http(st), st):
             _sso_store().close(sess.sid)
             sess = None
@@ -505,12 +565,14 @@ def _sso_start_renewer():
     def loop():
         while True:
             time.sleep(60)
-            st = _sso_settings()
-            if st is None:
-                continue
             store = _sso_store()
             for sess in store.all():
-                if sess.expires < time.time() or not store.renew(sess, _sso_http(st), st, margin=180):
+                try:
+                    st = _session_settings(sess)
+                except Exception:  # noqa: BLE001
+                    continue
+                if (st is None or sess.expires < time.time()
+                        or not store.renew(sess, _sso_http(st), st, margin=180)):
                     store.close(sess.sid)
     threading.Thread(target=loop, daemon=True, name="rancher-token-renewer").start()
 
@@ -596,7 +658,7 @@ def local_accounts_exist():
 
 
 def auth_configured():
-    return local_accounts_exist() or _sso_settings() is not None
+    return local_accounts_exist() or _rancher_login_available()
 
 
 def open_mode():
@@ -732,6 +794,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/harvester-users",     # comptes du cluster Harvester
     "/api/kubeovn/",            # réseaux kube-ovn : un changement peut couper des VMs
     "/api/addons/",             # v1.57.0 : activer un add-on installe un chart sur le cluster
+    "/api/rancher/",            # v1.79.0 : Rancher réglés, enregistrement SSO, chart RBAC
 )
 # Sous-chemins admin qui ne se distinguent pas par un préfixe.
 ADMIN_ONLY_SUFFIXES = ("/destroy", "/install", "/uninstall", "/cleanup-legacy",
@@ -956,7 +1019,7 @@ def api_whoami():
                      else "basic" if _basic_user() else "open"),
         # peut changer son mot de passe depuis la console
         "password_managed": bool(current_user()) and _accounts().has(current_user()),
-        "rancher_login": _sso_settings() is not None,
+        "rancher_login": _rancher_login_available(),
         "session": _sso_session().public() if _sso_session() is not None else None,
     })
 
@@ -1780,7 +1843,10 @@ _LOGIN_ERROR_KINDS = {
 }
 
 
-_LOGIN_ERROR_KINDS.update({"bad-credentials": "credentials", "too-many": "throttled"})
+_LOGIN_ERROR_KINDS.update({"bad-credentials": "credentials", "too-many": "throttled",
+                           # v1.79.0 : connexion directe à un Rancher réglé
+                           "rancher-unknown": "config", "direct-disabled": "config",
+                           "sso-disabled": "config", "bad-provider": "credentials"})
 
 
 def _safe_next(value):
@@ -1801,8 +1867,13 @@ def _open_local_session(user):
 
 def _render_login(error="", status=200, username=""):
     st = _sso_settings()
+    servers = _login_rancher_servers()
+    last = request.cookies.get(RANCHER_LAST_COOKIE)
+    if not any(x["id"] == last for x in servers):
+        last = request.args.get("rancher") if any(x["id"] == request.args.get("rancher") for x in servers) else None
     return render_template("login.html", rancher=st is not None,
                            rancher_label=(st or {}).get("label", "Rancher"),
+                           rancher_servers=servers, rancher_last=last,
                            local=local_accounts_exist(), error=error,
                            signed_out=request.args.get("signed_out") == "1",
                            error_kind=(_LOGIN_ERROR_KINDS.get(error, "token") if error else ""),
@@ -1918,31 +1989,54 @@ def logout_local():
     return authenticate()
 
 
-@app.route("/auth/rancher/login")
-@_rate_limit("20/minute")
-def sso_login():
-    st = _sso_settings()
-    if st is None:
-        return redirect("/login?error=not-configured")
-    state, nonce, challenge, browser = _SSO_PENDING.start()
+def _sso_start(st, server_id):
+    state, nonce, challenge, browser = _SSO_PENDING.start(_safe_next(request.args.get("next")),
+                                                          server=server_id)
     resp = redirect(_rs.authorize_url(st, _sso_redirect_uri(st), state, nonce, challenge))
     resp.set_cookie(_rs.PENDING_COOKIE, browser, max_age=_rs.PENDING_TTL, httponly=True,
                     secure=_sso_cookie_secure(st), samesite="Lax", path="/auth/rancher")
     return resp
 
 
-@app.route("/auth/rancher/callback")
+@app.route("/auth/rancher/login")
 @_rate_limit("20/minute")
-def sso_callback():
+def sso_login():
+    """1.50.0 : le SSO du Rancher de config.yaml."""
     st = _sso_settings()
     if st is None:
         return redirect("/login?error=not-configured")
+    return _sso_start(st, None)
+
+
+@app.route("/auth/rancher/<server_id>/login")
+@_rate_limit("20/minute")
+def sso_login_server(server_id):
+    """v1.79.0 : le SSO d'un Rancher réglé ; son id voyage avec le `state`."""
+    st = _server_settings(server_id) if _srv.ID_RE.match(server_id or "") else None
+    if st is None:
+        return redirect("/login?error=rancher-unknown")
+    if not (st.get("sso") and st.get("client_secret")):
+        return redirect("/login?error=sso-disabled&rancher=" + quote(server_id))
+    return _sso_start(st, None if st.get("origin") == "config" else server_id)
+
+
+@app.route("/auth/rancher/callback")
+@_rate_limit("20/minute")
+def sso_callback():
     if request.args.get("error"):
         code = "access_denied" if request.args.get("error") == "access_denied" else "token-refused"
         return redirect("/login?error=" + code)
     try:
         pending = _SSO_PENDING.take(request.args.get("state"),
                                     request.cookies.get(_rs.PENDING_COOKIE))
+    except _rs.SSOError as e:
+        app.logger.warning("Rancher sign-in refused: %s", e.code)
+        return redirect("/login?error=" + e.code)
+    server_id = pending.get("server")
+    st = _server_settings(server_id) if server_id else _sso_settings()
+    if st is None or not st.get("client_secret"):
+        return redirect("/login?error=not-configured")
+    try:
         http = _sso_http(st)
         tok = _rs.exchange_code(http, st, request.args.get("code", ""), pending["verifier"],
                                 _sso_redirect_uri(st))
@@ -1958,13 +2052,71 @@ def sso_callback():
         app.logger.warning("Rancher sign-in refused: %s %s", e.code, e.detail)
         return redirect("/login?error=" + e.code)
     sess = _sso_store().open(ident, _rs.console_role(st, ident), tok["access_token"],
-                             tok["refresh_token"], st["session_seconds"])
+                             tok["refresh_token"], st["session_seconds"], server_id=server_id)
     _sso_start_renewer()
     app.logger.info("Rancher sign-in: %s (%s)", sess.login, sess.role)
     resp = redirect(pending.get("next") or "/")
     resp.set_cookie(_rs.COOKIE, sess.sid, max_age=st["session_seconds"], httponly=True,
                     secure=_sso_cookie_secure(st), samesite="Lax", path="/")
     resp.delete_cookie(_rs.PENDING_COOKIE, path="/auth/rancher")
+    _remember_rancher(resp, server_id or st.get("id"), st)
+    return resp
+
+
+def _remember_rancher(resp, server_id, st):
+    """Le dernier Rancher choisi, proposé en premier la fois suivante."""
+    if server_id:
+        resp.set_cookie(RANCHER_LAST_COOKIE, server_id, max_age=365 * 86400, httponly=True,
+                        secure=_sso_cookie_secure(st), samesite="Lax", path="/")
+
+
+@app.route("/auth/rancher/<server_id>/direct", methods=["POST"])
+@_rate_limit("10/minute")
+def rancher_direct_login(server_id):
+    """v1.79.0 : connexion directe par identifiant et mot de passe Rancher.
+
+    La console demande un jeton à Rancher pour la personne (fournisseur à
+    mot de passe) et s'en sert exactement comme du jeton du SSO : mandataire
+    `/k8s/clusters/<id>`, droits de Rancher. Le jeton vaut la durée de
+    session réglée, n'est pas renouvelé, et est supprimé dans Rancher à la
+    déconnexion. Un refus ne dit pas si le compte existe."""
+    if not _same_origin():
+        return jsonify({"error": "forbidden"}), 403
+    nxt = _safe_next(request.form.get("next"))
+    back = "&rancher=" + quote(server_id or "") + ("&next=" + quote(nxt, safe="") if nxt != "/" else "")
+    st = _server_settings(server_id) if _srv.ID_RE.match(server_id or "") else None
+    if st is None:
+        return redirect("/login?error=rancher-unknown")
+    if not st.get("direct"):
+        return redirect("/login?error=direct-disabled" + back)
+    user = (request.form.get("username") or "").strip()
+    pw = request.form.get("password") or ""
+    provider = (request.form.get("provider") or "local").strip()
+    if not user or not pw or len(user) > 256 or len(pw) > 1024:
+        return redirect("/login?error=bad-credentials" + back)
+    http = _sso_http(st)
+    try:
+        token, name, expires = _rs.direct_login(http, st, provider, user, pw, st["session_seconds"],
+                                                "harvester-ops session")
+    except _rs.SSOError as e:
+        app.logger.warning("Rancher direct sign-in refused on %s for %r from %s: %s",
+                           server_id, user[:40], request.remote_addr, e.code)
+        return redirect("/login?error=" + e.code + back)
+    try:
+        ident = _rs.rancher_identity(http, st, token)
+    except _rs.SSOError as e:
+        _rs.logout_token(http, st, token)
+        app.logger.warning("Rancher direct sign-in: identity unreadable on %s: %s", server_id, e.code)
+        return redirect("/login?error=identity-refused" + back)
+    ttl = max(60, int(expires - time.time()))
+    sess = _sso_store().open(ident, _rs.console_role(st, ident), token, None, ttl,
+                             server_id=server_id, kind="direct", token_name=name)
+    _sso_start_renewer()
+    app.logger.info("Rancher direct sign-in: %s (%s) via %s", sess.login, sess.role, server_id)
+    resp = redirect(nxt)
+    resp.set_cookie(_rs.COOKIE, sess.sid, max_age=ttl, httponly=True,
+                    secure=_sso_cookie_secure(st), samesite="Lax", path="/")
+    _remember_rancher(resp, server_id, st)
     return resp
 
 
@@ -1979,6 +2131,12 @@ def logout():
     if (sess is not None or local is not None) and not _same_origin():
         return jsonify({"error": "forbidden"}), 403
     if sess is not None:
+        if getattr(sess, "kind", "sso") == "direct":
+            # v1.79.0 : le jeton d'une connexion directe se supprime dans
+            # Rancher (celui du SSO ne le peut pas, voir plus haut)
+            st = _session_settings(sess)
+            if st is not None:
+                _rs.logout_token(_sso_http(st), st, sess.token)
         _sso_store().close(sess.sid)
         app.logger.info("Rancher sign-out: %s", sess.login)
     if local is not None:
@@ -1988,6 +2146,329 @@ def logout():
     resp.delete_cookie(_rs.COOKIE, path="/")
     resp.delete_cookie(_acc.COOKIE, path="/")
     return resp
+
+
+# -----------------------------------------------------------------------------
+# v1.79.0 : les Rancher réglés dans l'interface (Réglages > Connexion par
+# Rancher). Lecture pour tous, écriture par un administrateur de la console.
+# Aucun secret ne sort : ni secret du client OIDC, ni mot de passe, ni jeton.
+# Voir docs/design/2026-10-01-rancher-reglable.md.
+# -----------------------------------------------------------------------------
+_RANCHER_PROBES = {}           # id -> (instant, résultat du test)
+_RANCHER_PROBE_TTL = {True: 300, False: 30}
+LOGIN_PROBE_TIMEOUT = 3
+
+
+def _rancher_http(st, timeout=15):
+    return _rs.Http(st.get("ca_file"), timeout=timeout, insecure=bool(st.get("insecure")))
+
+
+def _rancher_probe(server, timeout=LOGIN_PROBE_TIMEOUT, force=False):
+    """Version et fournisseurs d'un Rancher, gardés cinq minutes (trente
+    secondes après un échec) : la page de connexion ne doit jamais attendre
+    un Rancher injoignable."""
+    seen = _RANCHER_PROBES.get(server["id"])
+    now = time.time()
+    if seen and not force and now - seen[0] < _RANCHER_PROBE_TTL[bool(seen[1].get("ok"))]:
+        return seen[1]
+    res = _radm.probe(_rancher_http(_srv.settings_of(server), timeout), server["url"])
+    _RANCHER_PROBES[server["id"]] = (time.time(), res)
+    return res
+
+
+def _login_rancher_servers():
+    """Les Rancher proposés à la connexion : [{id, label, sso, direct,
+    providers: [{id, label}], available, unavailable}]. Les fournisseurs
+    (à mot de passe, actifs) viennent du dernier test ou d'une lecture
+    courte, en parallèle, trois secondes au plus."""
+    servers = [x for x in _rancher_servers() if x["direct_enabled"] or _srv.sso_enabled(x)]
+    if not servers:
+        return []
+    from concurrent.futures import ThreadPoolExecutor, wait as _fwait
+    direct = [x for x in servers if x["direct_enabled"]]
+    probes = {}
+    if direct:
+        pool = ThreadPoolExecutor(max_workers=min(8, len(direct)))
+        futs = {pool.submit(_rancher_probe, x): x["id"] for x in direct}
+        done, _ = _fwait(futs, timeout=LOGIN_PROBE_TIMEOUT + 0.5)
+        for f in done:
+            try:
+                probes[futs[f]] = f.result()
+            except Exception:  # noqa: BLE001
+                pass
+        pool.shutdown(wait=False)
+    out = []
+    for x in servers:
+        sso = _srv.sso_enabled(x)
+        providers, available = [], True
+        if x["direct_enabled"]:
+            pr = probes.get(x["id"])
+            available = bool(pr and pr.get("ok"))
+            providers = [{"id": p["id"], "label": _srv.provider_label(p["id"])}
+                         for p in (pr or {}).get("providers") or [] if p.get("password") and p.get("enabled")]
+            if available and not providers:
+                available = sso      # Rancher joint mais sans fournisseur à mot de passe
+        direct_ok = bool(x["direct_enabled"] and providers)
+        out.append({"id": x["id"], "label": x["label"], "sso": sso, "direct": direct_ok,
+                    "providers": providers, "available": available or sso,
+                    "unavailable": not (available or sso)})
+    return out
+
+
+def _rancher_body():
+    body = request.get_json(silent=True)
+    return body if isinstance(body, dict) else {}
+
+
+@app.route("/api/rancher/servers")
+@requires_auth
+def api_rancher_servers():
+    return jsonify({"servers": [_srv.public(x) for x in _rancher_servers(include_shadowed=True)],
+                    "config_writable": _config_writable()})
+
+
+@app.route("/api/rancher/servers", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_rancher_server_create():
+    try:
+        x = _RANCHER_STORE.create(load_config(), _rancher_body())
+    except _srv.ServerError as e:
+        return jsonify({"error": str(e)}), e.status
+    _RANCHER_PROBES.pop(x["id"], None)
+    app.logger.info("Rancher server added by %s: %s (%s)", current_user(), x["id"], x["url"])
+    return jsonify({"server": _srv.public(x)}), 201
+
+
+@app.route("/api/rancher/servers/<server_id>", methods=["PUT"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_rancher_server_update(server_id):
+    try:
+        x = _RANCHER_STORE.update(load_config(), server_id, _rancher_body())
+    except _srv.ServerError as e:
+        return jsonify({"error": str(e)}), e.status
+    _RANCHER_PROBES.pop(server_id, None)
+    app.logger.info("Rancher server changed by %s: %s", current_user(), server_id)
+    return jsonify({"server": _srv.public(x)})
+
+
+@app.route("/api/rancher/servers/<server_id>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_rancher_server_delete(server_id):
+    try:
+        x = _RANCHER_STORE.delete(load_config(), server_id)
+    except _srv.ServerError as e:
+        return jsonify({"error": str(e)}), e.status
+    _RANCHER_PROBES.pop(server_id, None)
+    app.logger.info("Rancher server removed by %s: %s", current_user(), server_id)
+    out = {"ok": True}
+    if (x.get("sso") or {}).get("client_id"):
+        out["warning"] = ("the OIDC client stays declared in Rancher; "
+                          "unregister single sign-on first to remove it there")
+    return jsonify(out)
+
+
+def _probe_reply(res):
+    return jsonify({"ok": bool(res.get("ok")), "version": res.get("version"),
+                    "providers": res.get("providers") or [], "error": res.get("error")})
+
+
+@app.route("/api/rancher/servers/<server_id>/test", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_rancher_server_test(server_id):
+    x = _rancher_server(server_id, include_shadowed=True)
+    if x is None:
+        return jsonify({"error": "unknown Rancher"}), 404
+    return _probe_reply(_rancher_probe(x, timeout=10, force=True))
+
+
+@app.route("/api/rancher/test", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_rancher_test_unsaved():
+    """Le test d'un Rancher pas encore enregistré (le formulaire) : adresse,
+    autorité PEM ou vérification désactivée."""
+    import ssl
+    b = _rancher_body()
+    try:
+        url = _srv.check_url(b.get("url"))
+        ca = _srv.check_ca(b["ca"]) if b.get("ca") else None
+        http = _rs.Http(timeout=10, insecure=bool(b.get("insecure")), ca_data=ca)
+    except _srv.ServerError as e:
+        return jsonify({"error": str(e)}), 400
+    except (ssl.SSLError, ValueError):
+        return jsonify({"error": "the certificate authority cannot be read"}), 400
+    return _probe_reply(_radm.probe(http, url))
+
+
+def _rancher_admin_session(server_id, need_console=False):
+    """(serveur, réglages, session d'administrateur Rancher) ou une réponse
+    d'erreur. Les identifiants viennent du corps, servent une fois, et ne
+    sont ni gardés ni journalisés."""
+    x = _rancher_server(server_id, include_shadowed=True)
+    if x is None:
+        return None, (jsonify({"error": "unknown Rancher"}), 404)
+    if need_console and x["origin"] != "console":
+        return None, (jsonify({"error": "declared by the operator in config.yaml, read-only for the console"}), 409)
+    b = _rancher_body()
+    st = _srv.settings_of(x)
+    try:
+        admin = _radm.AdminSession(_rancher_http(st), st, (b.get("provider") or "local").strip(),
+                                   (b.get("admin_user") or "").strip(), b.get("admin_password") or "",
+                                   ttl=1800)
+    except _radm.AdminError as e:
+        return None, (jsonify({"error": str(e)}), e.status)
+    return (x, st, admin, b), None
+
+
+def _console_callback_uri(body):
+    """L'adresse de retour à déclarer dans Rancher : donnée, sinon celle de
+    config.yaml (`rancher.redirect_uri`), sinon l'origine vue par le
+    navigateur (derrière un mandataire TLS, c'est la seule juste)."""
+    from urllib.parse import urlparse as _up
+    v = str(body.get("redirect_uri") or "").strip()
+    if v:
+        u = _up(v)
+        if u.scheme not in ("http", "https") or not u.netloc or not u.path.endswith("/auth/rancher/callback"):
+            raise _srv.ServerError("redirect_uri must be http(s)://<console>/auth/rancher/callback")
+        return v
+    legacy = (load_config().get("rancher") or {}).get("redirect_uri")
+    if legacy:
+        return str(legacy)
+    origin = request.headers.get("Origin") or ""
+    u = _up(origin)
+    if u.scheme in ("http", "https") and u.netloc:
+        return f"{u.scheme}://{u.netloc}/auth/rancher/callback"
+    return request.url_root.rstrip("/") + "/auth/rancher/callback"
+
+
+@app.route("/api/rancher/servers/<server_id>/sso/register", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_rancher_sso_register(server_id):
+    """La console s'enregistre elle-même comme client OIDC de ce Rancher,
+    avec un administrateur de Rancher le temps du geste."""
+    try:
+        redirect_uri = _console_callback_uri(_rancher_body())
+    except _srv.ServerError as e:
+        return jsonify({"error": str(e)}), 400
+    got, err = _rancher_admin_session(server_id, need_console=True)
+    if err:
+        return err
+    x, st, admin, _ = got
+    from urllib.parse import urlparse as _up
+    name = (x.get("sso") or {}).get("oidc_client") or _radm.oidc_client_name(_up(redirect_uri).hostname)
+    try:
+        with admin:
+            client_id, secret = _radm.register_oidc(admin, name, redirect_uri,
+                                                    refresh_seconds=int(x["session_hours"]) * 3600)
+    except _radm.AdminError as e:
+        app.logger.warning("Rancher SSO registration on %s refused: %s", server_id, e)
+        return jsonify({"error": str(e)}), e.status
+    _RANCHER_STORE.set_sso(load_config(), server_id, client_id, secret, redirect_uri, name)
+    app.logger.info("Rancher SSO registered by %s on %s: client %s", current_user(), server_id, client_id)
+    return jsonify({"client_id": client_id, "redirect_uri": redirect_uri, "oidc_client": name})
+
+
+@app.route("/api/rancher/servers/<server_id>/sso/unregister", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_rancher_sso_unregister(server_id):
+    got, err = _rancher_admin_session(server_id, need_console=True)
+    if err:
+        return err
+    x, st, admin, _ = got
+    name = (x.get("sso") or {}).get("oidc_client")
+    removed = False
+    try:
+        with admin:
+            if name:
+                removed = _radm.unregister_oidc(admin, name)
+    except _radm.AdminError as e:
+        return jsonify({"error": str(e)}), e.status
+    _RANCHER_STORE.clear_sso(load_config(), server_id)
+    app.logger.info("Rancher SSO unregistered by %s on %s", current_user(), server_id)
+    return jsonify({"ok": True, "removed_from_rancher": removed})
+
+
+@app.route("/api/rancher/servers/<server_id>/rbac/status", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_rancher_rbac_status(server_id):
+    got, err = _rancher_admin_session(server_id)
+    if err:
+        return err
+    _, _, admin, _ = got
+    try:
+        with admin:
+            status = _radm.rbac_status(admin)
+    except _radm.AdminError as e:
+        return jsonify({"error": str(e)}), e.status
+    except _rs.SSOError as e:
+        return jsonify({"error": "Rancher is unreachable: " + (e.detail or e.code)}), 502
+    return jsonify(_radm.public_status(status))
+
+
+def _rancher_rbac_runner(run, admin, status):
+    def step(step_id, state, message):
+        run.emit({"type": "step", "step_id": step_id, "status": state, "message": message, "ts": time.time()})
+    run.status = "running"
+    run.emit({"type": "status", "status": "running", "ts": time.time()})
+    rc = 0
+    try:
+        roles = _radm.rbac_install(admin, status, step)
+        run.result = {"roles": roles}
+    except (_radm.AdminError, _rs.SSOError) as e:
+        msg = str(e) if isinstance(e, _radm.AdminError) else f"Rancher is unreachable: {e.detail or e.code}"
+        run.error_summary = msg
+        step("install", "error", msg)
+        rc = 1
+    except Exception as e:  # noqa: BLE001
+        run.error_summary = f"unexpected error: {type(e).__name__}"
+        step("install", "error", run.error_summary)
+        rc = 1
+    finally:
+        admin.close()
+    run.exit_code = rc
+    run.status = "done" if rc == 0 else "error"
+    run.ended_at = time.time()
+    run.emit({"type": "status", "status": run.status, "exit_code": rc, "ts": time.time()})
+    run.close()
+
+
+@app.route("/api/rancher/servers/<server_id>/rbac/install", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_rancher_rbac_install(server_id):
+    """Installe le chart Harvester RBAC dans le cluster `local` de Rancher,
+    en action suivie. Refus clair si Rancher ou Kubernetes ne conviennent pas."""
+    got, err = _rancher_admin_session(server_id)
+    if err:
+        return err
+    _, _, admin, _ = got
+    try:
+        status = _radm.rbac_status(admin)
+    except (_radm.AdminError, _rs.SSOError) as e:
+        admin.close()
+        msg = str(e) if isinstance(e, _radm.AdminError) else "Rancher is unreachable"
+        return jsonify({"error": msg}), getattr(e, "status", 502)
+    if status["installed"]:
+        admin.close()
+        return jsonify({"error": f"the chart is already installed (version {status['version']})",
+                        "status": _radm.public_status(status)}), 409
+    if not status["compatible"]:
+        admin.close()
+        return jsonify({"error": status["reason"] or "the chart does not fit this Rancher",
+                        "status": _radm.public_status(status)}), 409
+    run_id = uuid.uuid4().hex[:12]
+    run = ActionRun(run_id, f"rancher-rbac-install:{server_id}", "(local)", [], dry_run=False)
+    with ACTIONS_LOCK:
+        ACTIONS[run_id] = run
+    threading.Thread(target=_rancher_rbac_runner, args=(run, admin, status), daemon=True).start()
+    return jsonify({"action_id": run_id}), 202
 
 
 @app.route("/healthz")
@@ -6033,6 +6514,15 @@ def _node_uids(entry):
     return uids
 
 
+def _cluster_id_key(st, cluster):
+    """Clé de l'id Rancher appris pour un cluster : le nom seul pour le
+    Rancher de config.yaml (comme en 1.50), `<cluster>@<rancher>` pour un
+    Rancher réglé dans la console (deux Rancher, deux ids)."""
+    if st.get("origin", "config") == "config":
+        return cluster
+    return f"{cluster}@{st.get('id')}"
+
+
 def _sso_cluster_state(entry):
     """(kubeconfig de la session, raison) pour ce cluster. La raison dit
     pourquoi la personne ne le voit pas, pour que l'écran l'explique au lieu
@@ -6042,12 +6532,16 @@ def _sso_cluster_state(entry):
         celui-ci (pas géré par ce Rancher, ou aucun droit d'y lire) ;
       - `unidentified` : la console elle-même ne joint pas ce cluster pour le
         reconnaître."""
-    sess, st = _sso_session(), _sso_settings()
+    sess = _sso_session()
+    st = _session_settings(sess)
     if sess is None or st is None:
         return None, "no-session"
     cluster = entry["name"]
     store, http = _sso_store(), _sso_http(st)
-    cid = entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster)
+    key = _cluster_id_key(st, cluster)
+    # `rancher_cluster` d'une déclaration vise le Rancher de config.yaml
+    cid = (entry.get("rancher_cluster") if st.get("origin", "config") == "config" else None) \
+        or _SSO_CLUSTER_IDS.get(key)
     if cid:
         if not store.has_access(sess, http, st, cid):
             return None, "no-access"
@@ -6066,7 +6560,7 @@ def _sso_cluster_state(entry):
             return None, "not-found"
         # l'id d'un cluster est un fait sur le cluster, pas sur la personne :
         # il sert aux sessions suivantes, dont l'accès est vérifié à part
-        _SSO_CLUSTER_IDS[cluster] = cid
+        _SSO_CLUSTER_IDS[key] = cid
         store.grant(sess, cid)
     return store.kubeconfig(sess, st, cid), None
 
@@ -6089,7 +6583,7 @@ def _sso_kubeconfig(cluster, entry=None):
     """Le kubeconfig de la session Rancher pour ce cluster : il vise le
     mandataire de Rancher avec le jeton de la personne. None si Rancher ne
     gère pas ce cluster ou ne le lui montre pas."""
-    if _sso_session() is None or _sso_settings() is None:
+    if _sso_session() is None or _session_settings(_sso_session()) is None:
         return None
     if entry is None:
         entry = next((c for c in load_config().get("clusters", []) if c["name"] == cluster), None)
@@ -13101,10 +13595,12 @@ def _rancher_projects(cluster, kc):
         r = None
     if r is None:
         entry = next((c for c in load_config().get("clusters", []) if c["name"] == cluster), {})
-        return {"managed": False, "cid": entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster), "items": None}
+        cid = entry.get("rancher_cluster") or _SSO_CLUSTER_IDS.get(cluster) or next(
+            (v for k, v in list(_SSO_CLUSTER_IDS.items()) if k.startswith(cluster + "@")), None)
+        return {"managed": False, "cid": cid, "items": None}
     try:
         token = Path(r["token_file"]).read_text().strip() if r.get("token_file") else r.get("token")
-        st, out = _rs.Http(ca_file=r.get("ca_file")).request(
+        st, out = _rs.Http(ca_file=r.get("ca_file"), insecure=bool(r.get("insecure"))).request(
             "GET", f"{r['url']}/v3/projects?clusterId={r['cid']}",
             headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
     except (_rs.SSOError, OSError) as e:
@@ -13215,13 +13711,13 @@ _MEMBER_DO = ("add", "remove")
 
 def _rancher_get(r, path):
     token = Path(r["token_file"]).read_text().strip() if r.get("token_file") else r.get("token")
-    return _rs.Http(ca_file=r.get("ca_file")).request("GET", r["url"] + path,
+    return _rs.Http(ca_file=r.get("ca_file"), insecure=bool(r.get("insecure"))).request("GET", r["url"] + path,
                                                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
 
 
 def _rancher_post(r, path, body):
     token = Path(r["token_file"]).read_text().strip() if r.get("token_file") else r.get("token")
-    return _rs.Http(ca_file=r.get("ca_file")).request("POST", r["url"] + path, data=json.dumps(body),
+    return _rs.Http(ca_file=r.get("ca_file"), insecure=bool(r.get("insecure"))).request("POST", r["url"] + path, data=json.dumps(body),
                                                        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
 
 

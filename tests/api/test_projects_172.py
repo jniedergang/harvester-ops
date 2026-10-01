@@ -97,7 +97,7 @@ def test_rancher_is_found_in_the_session_kubeconfig_only():
                                                                    "certificate-authority": "/ca.pem"}}],
                      "users": [{"name": "u", "user": {"tokenFile": "/run/tok"}}]})
     assert pj.rancher_of(kc) == {"url": "https://rancher.lan", "cid": "c-sg2q6", "token_file": "/run/tok", "token": None,
-                                 "ca_file": "/ca.pem"}
+                                 "ca_file": "/ca.pem", "insecure": False}
     direct = "clusters:\n- cluster: {server: 'https://172.16.3.100:6443'}\nusers:\n- user: {client-certificate-data: x}\n"
     assert pj.rancher_of(direct) is None
 

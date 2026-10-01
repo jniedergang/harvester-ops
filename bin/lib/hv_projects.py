@@ -265,4 +265,6 @@ def rancher_of(kubeconfig_text):
     if not m or not (user.get("tokenFile") or user.get("token")):
         return None
     return {"url": m.group(1), "cid": m.group(2), "token_file": user.get("tokenFile"), "token": user.get("token"),
-            "ca_file": cluster.get("certificate-authority")}
+            "ca_file": cluster.get("certificate-authority"),
+            # v1.79.0 : un Rancher réglé sans vérification TLS
+            "insecure": bool(cluster.get("insecure-skip-tls-verify"))}

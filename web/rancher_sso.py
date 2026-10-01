@@ -82,8 +82,18 @@ def settings(cfg):
 # ---------------------------------------------------------------------------
 
 class Http:
-    def __init__(self, ca_file=None, timeout=15):
-        self.ctx = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
+    def __init__(self, ca_file=None, timeout=15, insecure=False, ca_data=None):
+        # v1.79.0 : un Rancher réglé dans la console peut porter son autorité
+        # (fichier, ou PEM pas encore enregistré pour un test) ou être
+        # déclaré sans vérification TLS (choix explicite de l'administrateur)
+        if insecure:
+            self.ctx = ssl.create_default_context()
+            self.ctx.check_hostname = False
+            self.ctx.verify_mode = ssl.CERT_NONE
+        elif ca_data:
+            self.ctx = ssl.create_default_context(cadata=ca_data)
+        else:
+            self.ctx = ssl.create_default_context(cafile=ca_file) if ca_file else ssl.create_default_context()
         self.timeout = timeout
 
     def request(self, method, url, headers=None, data=None):
@@ -134,13 +144,14 @@ class PendingLogins:
         self._lock = threading.Lock()
         self.now = now
 
-    def start(self, next_path="/"):
+    def start(self, next_path="/", server=None):
         verifier, challenge = pkce_pair()
         state, nonce, browser = (secrets.token_urlsafe(24) for _ in range(3))
         with self._lock:
             self._purge()
+            # v1.79.0 : le Rancher choisi voyage avec le `state`
             self._d[state] = {"verifier": verifier, "nonce": nonce, "browser": browser,
-                              "created": self.now(), "next": next_path}
+                              "created": self.now(), "next": next_path, "server": server}
         return state, nonce, challenge, browser
 
     def take(self, state, browser):
@@ -321,7 +332,9 @@ def kubeconfig_text(s, cid, token_file):
     jetons successifs, là où un jeton recopié dans son kubeconfig expirait
     au bout de dix (audit D18)."""
     cluster = {"server": f"{s['url']}/k8s/clusters/{cid}"}
-    if s.get("ca_file"):
+    if s.get("insecure"):
+        cluster["insecure-skip-tls-verify"] = True
+    elif s.get("ca_file"):
         cluster["certificate-authority"] = s["ca_file"]
     return json.dumps({
         "apiVersion": "v1", "kind": "Config", "current-context": "rancher",
@@ -336,13 +349,20 @@ def kubeconfig_text(s, cid, token_file):
 # ---------------------------------------------------------------------------
 
 class Session:
-    def __init__(self, sid, ident, role, token, refresh_token, expires):
+    def __init__(self, sid, ident, role, token, refresh_token, expires,
+                 server_id=None, kind="sso", token_name=None):
         self.sid = sid
         self.ident = ident
         self.role = role
-        self.token = token                     # jeton d'accès OIDC (court)
+        self.token = token                     # jeton d'accès OIDC (court), ou jeton Rancher (direct)
         self.refresh_token = refresh_token     # jamais hors du serveur
-        self.token_expires = expiry_of(token)
+        # v1.79.0 : le Rancher de la session, et comment elle a été ouverte.
+        # Une connexion directe porte un jeton Rancher ordinaire, valable
+        # toute la session et non renouvelable : la session finit avec lui.
+        self.server_id = server_id
+        self.kind = kind
+        self.token_name = token_name
+        self.token_expires = expires if kind == "direct" else expiry_of(token)
         self.expires = expires                 # fin de la session
         self.kubeconfigs = {}                  # cid -> chemin
         self.token_file = None                 # le jeton courant, relu par kubectl
@@ -356,7 +376,10 @@ class Session:
     def public(self):
         return {"user": self.login, "name": self.ident.get("name"), "rancher_id": self.ident["id"],
                 "groups": self.ident.get("groups", []), "role": self.role,
-                "expires": int(self.expires)}
+                "expires": int(self.expires),
+                "server": self.server_id, "kind": self.kind,
+                # direct : pas de renouvellement, la session finit à l'expiration du jeton
+                "renewable": self.kind != "direct"}
 
 
 class Sessions:
@@ -369,10 +392,12 @@ class Sessions:
         self.directory_fn = directory_fn
         self.now = now
 
-    def open(self, ident, role, token, refresh_token, ttl):
+    def open(self, ident, role, token, refresh_token, ttl, server_id=None, kind="sso",
+             token_name=None):
         sid = secrets.token_urlsafe(32)
         with self._lock:
-            self._d[sid] = Session(sid, ident, role, token, refresh_token, self.now() + ttl)
+            self._d[sid] = Session(sid, ident, role, token, refresh_token, self.now() + ttl,
+                                   server_id=server_id, kind=kind, token_name=token_name)
         return self._d[sid]
 
     def all(self):
@@ -385,6 +410,9 @@ class Sessions:
         longue le relit (kubectl à chaque appel, client-go chaque minute).
         Rend False si Rancher refuse (session à fermer)."""
         with session.lock:
+            if session.kind == "direct":
+                # rien à renouveler : valable jusqu'à son expiration
+                return session.token_expires > self.now()
             if session.token_expires - self.now() > margin:
                 return True
             try:
@@ -465,6 +493,54 @@ class Sessions:
     def grant(self, session, cid):
         """La personne vient de lire ce cluster à travers Rancher."""
         session.access[cid] = (self.now(), True)
+
+
+# ---------------------------------------------------------------------------
+# v1.79.0 : connexion directe par identifiant et mot de passe Rancher
+# ---------------------------------------------------------------------------
+
+def direct_login(http, s, provider, username, password, ttl_seconds, description):
+    """Un jeton Rancher pour cette personne, par le point de connexion du
+    fournisseur (`/v3-public/<type>s/<id>?action=login`). Rend (jeton, nom,
+    expiration). Le mot de passe ne sort pas d'ici : ni journal, ni
+    exception."""
+    import rancher_servers as _srv
+    try:
+        path = _srv.login_path(provider)
+    except _srv.ServerError:
+        raise SSOError("bad-provider")
+    status, out = http.request("POST", s["url"] + path, headers={"Accept": "application/json"},
+                               data=json.dumps({"username": username, "password": password,
+                                                "responseType": "json", "description": description,
+                                                "ttl": int(ttl_seconds) * 1000}))
+    if status in (401, 403):
+        raise SSOError("bad-credentials")
+    token = (out or {}).get("token") if status in (200, 201) else None
+    if not token:
+        raise SSOError("token-refused", str(status))
+    name = (out or {}).get("id") or (out or {}).get("name") or token.split(":")[0]
+    expires = time.time() + int(ttl_seconds)
+    at = (out or {}).get("expiresAt")
+    if at:
+        try:
+            import calendar
+            expires = min(expires, calendar.timegm(time.strptime(at, "%Y-%m-%dT%H:%M:%SZ")))
+        except (ValueError, TypeError):
+            pass
+    return token, name, expires
+
+
+def logout_token(http, s, token):
+    """Supprime dans Rancher le jeton qui fait la requête. Vu sur Rancher
+    2.14.1 : `DELETE /v3/tokens/<nom>` avec ce même jeton est refusé (400
+    « Cannot delete token for current session. Use logout instead ») ;
+    `POST /v3/tokens?action=logout` le supprime. True si Rancher l'a fait."""
+    try:
+        status, _ = http.request("POST", s["url"] + "/v3/tokens?action=logout",
+                                 headers=_bearer(token), data="{}")
+    except SSOError:
+        return False
+    return status in (200, 204)
 
 
 def _write_private(path, text):

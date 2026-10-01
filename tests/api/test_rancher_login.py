@@ -62,7 +62,9 @@ def test_without_a_session_the_page_goes_to_the_login(world):
         r = c.get("/")
         assert r.status_code == 302 and r.headers["Location"].endswith("/login")
         page = c.get("/login").get_data(as_text=True)
-        assert "/auth/rancher/login" in page and "/login/local" in page
+        # v1.79.0 : le Rancher de config.yaml est proposé par son id
+        assert "/auth/rancher/rancher-example-com/login" in page and "/login/local" in page
+        assert c.get("/auth/rancher/login").status_code == 302      # l'ancienne adresse reste
 
 
 def test_the_redirect_to_rancher(world):
