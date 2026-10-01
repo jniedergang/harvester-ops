@@ -19,6 +19,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - `wave_state` also returns every copy of each VM with its start and end, and the cutover window.
 
 ### Tests
+- The bare-metal install of 1.78 checked end to end on a real blade (HPE XL170r Gen9, iLO 4, which publishes no disk): discovery boot through the real virtual media read its 4 SSDs, then the install through the console created cluster `harv4` with the system disk, the data disk as Longhorn's default disk, two pools on their own SSDs found by serial, and the cluster declared automatically. That run found the stalled-install case above (1 Gbit/s NICs without `skipchecks`).
 - `test_bm_profiles_180.py`, `test_bm_stall_180.py`, `test_forklift_lanes_180.py`, `tests/e2e/test_bm_profiles_180.py`, `tests/e2e/test_forklift_lanes_180.py`. Not checked for real: a batch of several machines (each row is the single install already verified, the chaining is covered by tests), the lanes view on a live cluster (fixtures captured on the bench).
 
 ## [1.79.0] - 2026-10-01 - Rancher logins set in the interface, direct login, and the Harvester RBAC chart
