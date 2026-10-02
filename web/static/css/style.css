@@ -39,6 +39,9 @@
      la réserve. */
   --sidebar-rail: 56px;
   --sidebar-w-collapsed: var(--sidebar-rail);
+  /* Largeur que le contenu, le dock et la barre des fenêtres laissent au
+     menu : le rail, ou le menu entier quand il est épinglé. */
+  --sidebar-reserve: var(--sidebar-rail);
   --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
   --brand-logo-size:  24px;
@@ -420,18 +423,26 @@ html, body {
   white-space: nowrap;
 }
 
-/* L'ombre dit que le menu est posé PAR-DESSUS le contenu, ce qui est vrai
-   dans les deux cas, épinglé compris. Sans elle, un menu déplié se lit
-   comme une colonne et l'on cherche pourquoi le texte dessous est tronqué. */
-body:not(.sidebar-collapsed) #sidebar {
+/* L'ombre dit que le menu est posé PAR-DESSUS le contenu, ce qui n'est
+   vrai qu'au survol. Sans elle, un menu déplié se lit comme une colonne et
+   l'on cherche pourquoi le texte dessous est tronqué. Épinglé, il EST une
+   colonne : pas d'ombre. */
+body:not(.sidebar-collapsed):not(.sidebar-pinned) #sidebar {
   box-shadow: 6px 0 24px rgba(0, 0, 0, 0.28);
 }
 
-/* La zone de travail ne connaît QUE le rail, dans tous les cas. Le menu ne
-   redimensionne donc jamais rien : ni au survol, ni épinglé. C'est la seule
-   façon d'empêcher le panneau de détail de la topologie, les canvas et les
-   tableaux de sauter sous les yeux de l'opérateur. */
-#content { margin-left: var(--sidebar-rail); }
+/* Au survol, la zone de travail ne connaît QUE le rail : ouvrir le menu ne
+   redimensionne rien, et le panneau de détail de la topologie, les canvas
+   et les tableaux ne sautent pas sous les yeux de l'opérateur.
+
+   Épinglé, en revanche, le menu reste ouvert en permanence. Réserver le
+   seul rail le laissait posé pour de bon sur les 184 premiers pixels de la
+   page : titres, colonnes de gauche des tableaux et boutons passaient
+   dessous, sans autre moyen de les atteindre que de dépingler. L'épinglage
+   est un geste explicite et rare, le seul qui a le droit de décaler la
+   page, une fois. */
+body.sidebar-pinned { --sidebar-reserve: var(--sidebar-w); }
+#content { margin-left: var(--sidebar-reserve); }
 
 @media (prefers-reduced-motion: reduce) {
   #sidebar { transition: none; }
@@ -1437,7 +1448,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
    ============================================================================ */
 .bottom-dock {
   position: fixed;
-  left: var(--sidebar-rail);
+  left: var(--sidebar-reserve);
   right: 0;
   bottom: 0;
   height: var(--dock-height, 160px);
@@ -1712,7 +1723,7 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 /* Minimized-panel dock bar (above the actions dock) */
 .min-bar {
   position: fixed;
-  left: var(--sidebar-rail);
+  left: var(--sidebar-reserve);
   right: 0;
   bottom: 0;
   display: flex;

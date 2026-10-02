@@ -960,6 +960,37 @@ def test_pinning_the_sidebar_persists(page):
         'el => el.getBoundingClientRect().width') < 80
 
 
+def test_a_pinned_sidebar_does_not_cover_the_page(page):
+    """Épinglé, le menu restait posé par-dessus la page : le contenu, le
+    dock et la barre des fenêtres ne réservaient que le rail de 56 px, et
+    les 184 px restants du menu masquaient en permanence le bord gauche de
+    la zone de travail. Épinglé, le menu doit être une colonne."""
+    right = 'el => Math.round(el.getBoundingClientRect().right)'
+    left = 'el => Math.round(el.getBoundingClientRect().left)'
+    page.locator('#sidebar').hover()
+    page.wait_for_timeout(400)
+    page.click('#btn-sidebar-pin')
+    page.mouse.move(1200, 500)
+    page.wait_for_timeout(600)
+
+    menu_right = page.locator('#sidebar').evaluate(right)
+    assert menu_right > 200, "l'épinglage n'a pas tenu"
+    content_left = page.locator('#content').evaluate(left)
+    assert content_left >= menu_right - 1, (
+        f"le menu épinglé recouvre la page : il finit à {menu_right}px,"
+        f" le contenu commence à {content_left}px")
+    reserve = page.evaluate(
+        "() => getComputedStyle(document.body)"
+        ".getPropertyValue('--sidebar-reserve').trim()")
+    assert reserve == '240px', f"dock et barre des fenêtres réservent {reserve}"
+
+    # Dépinglé, on revient au rail : le survol ne décale plus rien.
+    page.click('#btn-sidebar-pin')
+    page.mouse.move(1200, 500)
+    page.wait_for_timeout(600)
+    assert page.locator('#content').evaluate(left) < 80
+
+
 def test_namespaces_tab_auto_selects_first(page):
     """clicking Virtual machines tab should auto-select first NS in dropdown."""
     page.click('.tab[data-tab="namespaces"]')
