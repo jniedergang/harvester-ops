@@ -140,7 +140,10 @@ class FakeKube:
 
     def patch(self, kind, ns, name, patch):
         self.calls.append(("patch", kind, name, json.dumps(patch, sort_keys=True)))
-        merge(self.objs[(kind, ns, name)], patch)
+        o = merge(self.objs[(kind, ns, name)], patch)
+        md = o.get("metadata") or {}
+        if md.get("deletionTimestamp") and not md.get("finalizers"):
+            self.objs.pop((kind, ns, name))     # plus rien ne retient l'objet
         if kind == hf.K_CONTROLLER:
             # l'opérateur redéploie le contrôleur avec la nouvelle valeur
             d = self.objs[(hf.K_DEPLOY, hf.NS, "forklift-controller")]
@@ -455,6 +458,7 @@ class FakeVSphere:
     def __init__(self, creds, on=()):
         self.creds, self.on, self.powered, self.closed = creds, set(on), [], False
         self.checked = []
+        self.question = {}         # vm -> question VMware en attente
 
     def power_state(self, vm):
         self.checked.append(vm)
@@ -463,6 +467,8 @@ class FakeVSphere:
     def power_on(self, vm):
         if vm in self.on:
             return False
+        if vm in self.question:
+            raise hfk.vs.VSphereQuestion(f"power on {vm}: VMware waits for an answer", self.question[vm])
         self.on.add(vm)
         self.powered.append(vm)
         return True
@@ -474,6 +480,7 @@ class FakeVSphere:
 def rollback(k, box, on=(), **kw):
     def factory(creds):
         box["client"] = FakeVSphere(creds, on)
+        box["client"].question.update(kw.get("question") or {})
         return box["client"]
     c = Clock()
     return hfk.cmd_wave_rollback(ns(wave="vague-1", vm=kw.get("vm", [])), kube=k, vsphere=factory,
@@ -733,16 +740,43 @@ def test_wave_close_refuses_while_a_migration_is_running(capsys):
 
 def test_wave_delete_removes_plan_migrations_and_maps_but_not_the_vms(capsys):
     k = FakeKube()
-    with_wave(k)
+    plan = with_wave(k)
     harvester_vm(k)
+    # une VM qui porterait la migration comme propriétaire : détachée, gardée
+    mig_uid = k.objs[(hf.K_MIGRATION, hf.NS, "vague-1-m3")]["metadata"]["uid"]
+    k.objs[(hfk.K_VM, "mig-b2", "vmwlab-src-1")]["metadata"]["ownerReferences"] = [
+        {"kind": "Migration", "name": "vague-1-m3", "uid": mig_uid},
+        {"kind": "Other", "name": "keep-me", "uid": "u-other"}]
+    k.put("persistentvolumeclaims", "mig-b2", "disk-0", {"metadata": {
+        "name": "disk-0", "ownerReferences": [{"kind": "Plan", "name": "vague-1", "uid": plan["metadata"]["uid"]}]}})
     for kind, n in ((hf.K_NETWORKMAP, "vague-1-net"), (hf.K_STORAGEMAP, "vague-1-sto")):
         k.put(kind, hf.NS, n, {"metadata": {"name": n, "labels": {hf.L_MANAGED: "true", hf.L_WAVE: "vague-1"}}})
     c = Clock()
     assert hfk.cmd_wave_delete(ns(wave="vague-1", timeout=120), kube=k, sleep=c.sleep, now=c.now) == hfk.EXIT_OK
     left = {(kind, n) for (kind, _, n) in k.objs if kind in KIND.values()}
     assert left == set()
-    assert (hfk.K_VM, "mig-b2", "vmwlab-src-1") in k.objs
-    assert ("delete", hf.K_PLAN, "vague-1", "orphan") in k.calls
+    vm = k.objs[(hfk.K_VM, "mig-b2", "vmwlab-src-1")]
+    assert vm["metadata"]["ownerReferences"] == [{"kind": "Other", "name": "keep-me", "uid": "u-other"}]
+    assert "ownerReferences" not in k.objs[("persistentvolumeclaims", "mig-b2", "disk-0")]["metadata"]
+    # jamais de suppression « orphan » : le webhook de Forklift la bloque
+    deletes = [c for c in k.calls if c[0] == "delete"]
+    assert ("delete", hf.K_PLAN, "vague-1", None) in deletes and all(c[3] is None for c in deletes)
+    assert "2 object(s) of mig-b2 detached from the wave" in capsys.readouterr().err
+
+
+def test_wave_delete_unblocks_a_deletion_stuck_on_the_orphan_finalizer(capsys):
+    """Vu sur harvlab2 : plans et migrations supprimés en « orphan » avant
+    1.84.0, restés en suppression avec leur finaliseur pour toujours."""
+    k = FakeKube()
+    with_wave(k)
+    for key in [x for x in k.objs if x[0] in (hf.K_PLAN, hf.K_MIGRATION)]:
+        md = k.objs[key]["metadata"]
+        md["deletionTimestamp"], md["finalizers"] = "2026-10-01T21:11:37Z", ["orphan"]
+    c = Clock()
+    assert hfk.cmd_wave_delete(ns(wave="vague-1", timeout=120), kube=k, sleep=c.sleep, now=c.now) == hfk.EXIT_OK
+    assert not [x for x in k.objs if x[0] in (hf.K_PLAN, hf.K_MIGRATION)]
+    assert not [c for c in k.calls if c[0] == "delete" and c[1] in (hf.K_PLAN, hf.K_MIGRATION)]
+    assert ("patch", hf.K_PLAN, "vague-1", json.dumps({"metadata": {"finalizers": None}})) in k.calls
 
 
 def test_wave_delete_refuses_while_a_migration_is_running(capsys):
@@ -917,3 +951,35 @@ def test_cutover_passes_when_the_macs_are_free(capsys):
     running_copy(k)
     dest_vm(k, mac="00:50:56:00:00:01")            # une autre MAC : pas de conflit
     assert hfk.cmd_wave_cutover(ns(wave="vague-1", at=None), kube=k, fetch=fetcher(SRC_VM)) == hfk.EXIT_OK
+
+
+# --- question VMware à la mise sous tension (1.84.0) --------------------------------
+
+SERIAL_Q = {"id": "3026", "text": 'The serial port output file "/vmfs/volumes/x/serial.log" already exists.',
+            "choices": ["Append", "Replace", "Cancel"]}
+
+
+def test_wave_rollback_reports_a_vmware_question_instead_of_a_running_source(capsys):
+    k, box = FakeKube(), {}
+    with_wave(k)
+    harvester_vm(k)
+    assert rollback(k, box, question={"vm-16": SERIAL_Q}) == hfk.EXIT_FAIL
+    err = capsys.readouterr().err
+    assert "left as is" not in err and "source powered on" not in err
+    assert "STEP_EVENT|rollback|error|vm-16: source not running, VMware waits for an answer" in err
+    assert "serial.log" in err and "(choices: Append, Replace, Cancel)" in err
+    assert "Answer it in vCenter, then run the rollback again" in err
+    # pas marquée revenue : la relancer après la réponse confirme
+    assert hf.A_ROLLED_BACK not in (k.objs[(hf.K_PLAN, hf.NS, "vague-1")]["metadata"].get("annotations") or {})
+
+
+def test_wave_rollback_rerun_after_the_answer_completes(capsys):
+    k, box = FakeKube(), {}
+    with_wave(k)
+    harvester_vm(k)
+    assert rollback(k, box, question={"vm-16": SERIAL_Q}) == hfk.EXIT_FAIL
+    capsys.readouterr()
+    # réponse donnée dans le vCenter : la VM tourne
+    assert rollback(k, box, on=("vm-16",)) == hfk.EXIT_OK
+    assert "vm-16: source already on, left as is" in capsys.readouterr().err
+    assert k.objs[(hf.K_PLAN, hf.NS, "vague-1")]["metadata"]["annotations"][hf.A_ROLLED_BACK] == "vm-16"

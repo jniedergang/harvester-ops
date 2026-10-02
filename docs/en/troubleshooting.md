@@ -168,6 +168,21 @@ unreachable. What remains is listed, and carries the label
 -l harvester-ops.io/transfer=<id>`. Harvester refuses to delete a volume
 while an image is exported from it: delete the images first.
 
+### A VMware wave that stays "deleting"
+
+Before 1.84.0, deleting a wave left its plan and migrations in deletion for
+good (finalizer `orphan`): the Kubernetes garbage collector must update each
+migration, and Forklift's webhook refuses any change to a migration from an
+account that cannot create VMs in the target namespace. Delete the wave again
+from 1.84.0: the console removes the finalizer itself and the VMs stay.
+
+### A rollback says "VMware waits for an answer"
+
+VMware stopped the source on a question at power-on (often a serial port
+file that already exists). The message gives the question and its choices;
+answer it in vCenter (the VM's "Answer question"), then run the rollback
+again: that VM is not marked rolled back until it runs.
+
 ### "Upload refused" when adding an archive to the store
 
 The message says why:

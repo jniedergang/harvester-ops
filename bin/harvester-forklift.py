@@ -782,6 +782,18 @@ def cmd_wave_rollback(args, kube=None, vsphere=None, sleep=time.sleep, now=time.
                 continue
             try:
                 on = client.power_on(i)
+            except vs.VSphereQuestion as e:
+                # VMware arrête la source sur une question (vu : fichier du
+                # port série déjà présent) : l'invité ne démarre pas tant
+                # qu'on n'y répond pas. On ne répond pas à la place de
+                # l'exploitant ; la VM n'est pas marquée revenue, relancer
+                # après la réponse.
+                q = e.question
+                choices = f" (choices: {', '.join(q['choices'])})" if q["choices"] else ""
+                step("rollback", "error", f"{i}: source not running, VMware waits for an answer before it starts: "
+                     f"\"{q['text']}\"{choices}. Answer it in vCenter, then run the rollback again")
+                rc = EXIT_FAIL
+                continue
             except vs.VSphereError as e:
                 step("rollback", "error", f"{i}: {e}")
                 rc = EXIT_FAIL
@@ -842,9 +854,38 @@ def cmd_wave_close(args, kube=None, vsphere=None, clock=None):
     return rc
 
 
+# Ce que Forklift crée dans le namespace cible et qui pourrait porter son plan
+# ou sa migration comme propriétaire : ce que la suppression doit laisser.
+KEPT_KINDS = (K_VM, "datavolumes.cdi.kubevirt.io", "persistentvolumeclaims")
+
+
+def _disown(kube, target, uids):
+    """Retire des objets du namespace cible toute référence de propriétaire
+    vers le plan ou ses migrations, pour que leur suppression ne les
+    emporte pas. Rend le nombre d'objets touchés."""
+    n = 0
+    for kind in KEPT_KINDS if target else ():
+        for o in kube.list(kind, target):
+            refs = (o.get("metadata") or {}).get("ownerReferences") or []
+            keep = [r for r in refs if r.get("uid") not in uids]
+            if len(keep) != len(refs):
+                kube.patch(kind, target, o["metadata"]["name"], {"metadata": {"ownerReferences": keep or None}})
+                n += 1
+    return n
+
+
 def cmd_wave_delete(args, kube=None, sleep=time.sleep, now=time.time):
     """Plan, Migrations et correspondances de la vague ; les VMs créées sur
-    Harvester restent (suppression sans cascade)."""
+    Harvester restent.
+
+    Pas de suppression « orphan » : le ramasse-miettes doit alors modifier
+    chaque Migration, et le webhook de Forklift refuse toute modification
+    d'une Migration à qui ne peut pas créer de VMs dans le namespace cible,
+    ce qui est le cas de son compte (vu en réel sur harvlab2 : plans restés en
+    suppression avec leur finaliseur `orphan` pour toujours). On retire donc
+    nous-mêmes les références de propriétaire qui pourraient emporter une VM,
+    puis on supprime normalement ; une suppression déjà coincée ainsi est
+    débloquée en retirant le finaliseur."""
     kube = kube or kube_from(args)
     plan, migs = load_wave(kube, args.wave)
     wave = plan["metadata"]["name"]
@@ -852,9 +893,18 @@ def cmd_wave_delete(args, kube=None, sleep=time.sleep, now=time.time):
     if run is not None:
         step("delete", "error", f"migration {run['metadata']['name']} of wave {wave} is still running")
         return EXIT_REFUSED
-    for m in migs:
-        kube.delete(hf.K_MIGRATION, hf.NS, m["metadata"]["name"], cascade="orphan")
-    kube.delete(hf.K_PLAN, hf.NS, wave, cascade="orphan")
+    target = (plan.get("spec") or {}).get("targetNamespace") or ""
+    uids = {(o.get("metadata") or {}).get("uid") for o in [plan, *migs]} - {None, ""}
+    kept = _disown(kube, target, uids)
+    if kept:
+        step("delete", "running", f"wave {wave}: {kept} object(s) of {target} detached from the wave, they stay")
+    for kind, name, o in [*((hf.K_MIGRATION, m["metadata"]["name"], m) for m in migs), (hf.K_PLAN, wave, plan)]:
+        md = o.get("metadata") or {}
+        if "orphan" in (md.get("finalizers") or []):
+            kube.patch(kind, hf.NS, name, {"metadata": {"finalizers": [f for f in md["finalizers"] if f != "orphan"]
+                                                        or None}})
+        if not md.get("deletionTimestamp"):
+            kube.delete(kind, hf.NS, name)
     for kind, name in ((hf.K_NETWORKMAP, f"{wave}-net"), (hf.K_STORAGEMAP, f"{wave}-sto")):
         o = get_opt(kube, kind, hf.NS, name)
         if o is not None and _labels(o).get(hf.L_WAVE) == wave and _labels(o).get(hf.L_MANAGED) == "true":

@@ -4,6 +4,48 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.84.0] - 2026-10-02 - A VMware question at rollback is seen in seconds, wave deletion completes
+
+### Fixed
+- A rolled-back VMware source that VMware stops on a question at power-on
+  (a serial port file that already exists, seen on the bench) was reported as
+  powered on, or as "already on, left as is" while it was off. The source is
+  now powered on through vCenter's `PowerOnVM_Task`, and the console reads the
+  task and the VM's pending question every 2 seconds: the rollback says
+  "source not running, VMware waits for an answer" with the question and its
+  choices, in about 3 seconds, and leaves that VM not rolled back. Answer it in
+  vCenter, then run the rollback again. Before, the REST call stayed blocked
+  as long as the question waited (the bench's ESXi answered by itself after
+  4 minutes; elsewhere the call ended as "unreachable" after 5).
+- Deleting a VMware wave never completed: the plan and its migrations were
+  deleted with `propagationPolicy=Orphan`, which makes the garbage collector
+  update each migration, and Forklift's webhook refuses that update to an
+  account that cannot create VMs in the target namespace. The plan stayed in
+  deletion with its `orphan` finalizer for good. The console now detaches
+  itself any VM, DataVolume or volume claim of the target namespace owned by
+  the wave, then deletes normally; a deletion already stuck that way is
+  unblocked by deleting the wave again.
+
+### Docs
+- Back to the source (capabilities, EN/FR): the question case. Troubleshooting
+  (EN/FR): a wave that stays "deleting", a rollback waiting for an answer.
+
+### Tests
+- `test_vsphere_api_176.py`: power-on through the task, a slow task followed,
+  a task still running after the delay, the question raised while the task
+  runs and without a new task when it was left from an earlier try, a task
+  refused as already on; the question read from a real vCenter 8.0.1 answer
+  (`label` is an internal key, the readable choice is `summary`).
+  `test_forklift_b2_cli_176.py`: a rollback reporting the question and not
+  marking the VM, then completing once answered; a deletion without orphan
+  cascade that detaches what the wave owns, and one unblocking a stuck
+  deletion.
+- Checked for real on harvlab2 and the VMware bench: the four waves stuck in
+  deletion since 1.83.2 deleted, a fresh deletion done in 2.4 seconds, the
+  question seen in 3.2 seconds instead of 4 minutes 40, and a full wave
+  (warm copy, switchover, rollback stopped on the question, answered, rollback
+  run again).
+
 ## [1.83.6] - 2026-10-02 - A pinned sidebar no longer covers the page
 
 ### Fixed

@@ -27,7 +27,6 @@ l'opération. Bibliothèque standard seulement.
 import base64
 import json
 import re
-import socket
 import ssl
 import time
 import urllib.error
@@ -38,11 +37,14 @@ from xml.sax.saxutils import escape
 
 FORKLIFT_SNAPSHOT = "forklift-migration-precopy"
 
-# Vu sur vCenter 8.0.1 (banc vmwlab) : l'appel qui allume la VM peut mettre
-# plus de 60 s a repondre alors que l'alimentation a deja eu lieu cote
-# hyperviseur. Un delai propre, plus long que le delai REST habituel, pour
-# ne pas confondre "lent" et "en panne".
+# Délai d'attente de la tâche d'allumage : vu sur vCenter 8.0.1 (banc
+# vmwlab), un démarrage peut prendre plus d'une minute sans être en panne.
 POWER_ON_TIMEOUT = 300
+# Lecture de la tâche d'allumage et de la question VMware pendant l'attente.
+POWER_ON_POLL = 2.0
+# Une question VMware est un texte libre, parfois long (chemins, explications) :
+# on la coupe pour un message d'étape.
+QUESTION_TEXT_MAX = 300
 
 NS_VIM = "urn:vim25"
 NS_SOAP = "http://schemas.xmlsoap.org/soap/envelope/"
@@ -57,12 +59,17 @@ TASK_DONE = ("success", "error")
 
 
 class VSphereError(Exception):
-    pass
+    """`kind` : type de la faute vim25 quand il y en a une (InvalidPowerState...)."""
+    kind = ""
 
 
-class _TimedOut(Exception):
-    """Marqueur interne : le delai a expire, distinct d'une vraie panne."""
-    pass
+class VSphereQuestion(VSphereError):
+    """VMware attend une réponse avant de laisser démarrer la VM ; `question`
+    porte {id, text, choices}."""
+
+    def __init__(self, msg, question):
+        super().__init__(msg)
+        self.question = question
 
 
 def forklift_snapshots(tree):
@@ -122,6 +129,7 @@ class VSphere:
         self.password = password or ""
         self.timeout = timeout
         self.power_on_timeout = power_on_timeout
+        self.power_on_poll = POWER_ON_POLL
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPSHandler(context=_ssl_context(cacert, insecure)))
         self.token = None
@@ -146,12 +154,9 @@ class VSphere:
     def _err(self, what, detail):
         return VSphereError(f"vCenter {self.host}: {what}: {self._scrub(detail)}")
 
-    def _open(self, req, what, timeout=None, raise_timeout=False):
+    def _open(self, req, what, timeout=None):
         """(code, corps). Une erreur HTTP rend son code et son corps ; une
-        panne réseau ou TLS devient une VSphereError sans URL. Si
-        `raise_timeout`, un délai dépassé lève `_TimedOut` au lieu d'une
-        VSphereError, pour permettre à l'appelant de vérifier l'état réel
-        avant de conclure à un échec."""
+        panne réseau ou TLS devient une VSphereError sans URL."""
         try:
             with self.opener.open(req, timeout=timeout if timeout is not None else self.timeout) as r:
                 return r.status, r.read()
@@ -162,14 +167,10 @@ class VSphere:
                 e.close()
         except urllib.error.URLError as e:
             reason = e.reason
-            if raise_timeout and isinstance(reason, (TimeoutError, socket.timeout)):
-                raise _TimedOut() from None
             if isinstance(reason, ssl.SSLCertVerificationError):
                 reason = "certificate not trusted"
             raise self._err(what, f"unreachable ({reason})") from None
         except TimeoutError:
-            if raise_timeout:
-                raise _TimedOut() from None
             raise self._err(what, "unreachable (TimeoutError)") from None
         except (OSError, ValueError) as e:
             raise self._err(what, f"unreachable ({type(e).__name__})") from None
@@ -195,7 +196,7 @@ class VSphere:
         self.token = token
         return True
 
-    def _rest(self, method, path, what, timeout=None, raise_timeout=False):
+    def _rest(self, method, path, what, timeout=None):
         """Appel REST authentifié ; un jeton expiré (401) fait rouvrir la
         session une fois. Rend (code, JSON ou None)."""
         for attempt in (0, 1):
@@ -205,7 +206,7 @@ class VSphere:
                                          data=b"" if method == "POST" else None,
                                          headers={"vmware-api-session-id": self.token,
                                                   "Accept": "application/json"})
-            code, body = self._open(req, what, timeout=timeout, raise_timeout=raise_timeout)
+            code, body = self._open(req, what, timeout=timeout)
             if code == 401 and attempt == 0:
                 self.token = None
                 continue
@@ -245,36 +246,56 @@ class VSphere:
     def power_on(self, vm_id):
         """Allume la VM. Déjà allumée : rien à faire, pas une erreur (le
         retour arrière doit pouvoir être rejoué). Rend True si la VM a été
-        allumée par cet appel, False si elle l'était déjà.
+        allumée par cet appel, False si elle l'était déjà ; lève
+        VSphereQuestion si VMware attend une réponse pour la démarrer.
 
-        Vu sur vCenter 8.0.1 : l'appel peut dépasser le délai REST habituel
-        (60 s) alors que l'alimentation a bien eu lieu. On lui donne son
-        propre délai, plus long (`POWER_ON_TIMEOUT`), et si même celui-là est
-        dépassé on relit l'état réel par un appel court avant d'échouer :
-        POWERED_ON veut dire que l'action a réussi malgré la réponse
-        manquante, sans quoi le retour arrière se croirait à tort en échec."""
+        Par la tâche SOAP PowerOnVM_Task, surveillée, et non par l'API REST.
+        Vu sur vCenter 8.0.1 (banc vmwlab) : quand VMware pose une question à
+        la mise sous tension (fichier du port série déjà présent), l'appel
+        REST reste bloqué tant que personne ne répond ; sur le banc l'ESXi a
+        répondu tout seul au bout de 4 min, ailleurs l'appel finissait en
+        « injoignable ». Et relancé pendant la question, il répond « déjà
+        allumée » alors que la VM est éteinte. La tâche rend la main tout de
+        suite ; on lit son état et la question toutes les
+        `power_on_poll` secondes, jusqu'à `power_on_timeout`."""
         vm = _check_moref(vm_id, "VM")
         what = f"power on {vm}"
-        try:
-            code, data = self._rest("POST", f"/api/vcenter/vm/{vm}/power?action=start", what,
-                                    timeout=self.power_on_timeout, raise_timeout=True)
-        except _TimedOut:
-            try:
-                state = self.power_state(vm)
-            except VSphereError:
-                raise self._err(what, "unreachable (TimeoutError)") from None
-            if state == "POWERED_ON":
-                return True
-            raise self._err(what, "unreachable (TimeoutError)")
-        if code in (200, 204):
-            return True
-        if code == 400 and self._rest_error_type(data).upper() == "ALREADY_IN_DESIRED_STATE":
+        if self.power_state(vm) == "POWERED_ON":
             return False
-        if code == 404:
-            raise self._err(what, "VM not found")
-        if code in (401, 403):
-            raise self._err(what, f"refused (HTTP {code})")
-        raise self._err(what, f"HTTP {code} {self._rest_message(data)}")
+        self._raise_question(vm, what)        # une question restée d'un essai précédent
+        try:
+            resp = self._soap('<PowerOnVM_Task xmlns="urn:vim25">'
+                              f'<_this type="VirtualMachine">{escape(vm)}</_this>'
+                              '</PowerOnVM_Task>', what)
+        except VSphereError as e:
+            if e.kind == "InvalidPowerState":
+                self._raise_question(vm, what)
+                return False
+            raise
+        task = resp.findtext(f"{_V}returnval")
+        if not task or not MOREF_RE.match(task):
+            raise self._err(what, "no task in the answer")
+        deadline = self.clock() + self.power_on_timeout
+        while True:
+            state, kind, msg = self._task_info(task, what)
+            if state == "success":
+                return True
+            if state == "error":
+                if kind == "InvalidPowerState":
+                    self._raise_question(vm, what)
+                    return False
+                raise self._err(what, f"failed: {msg or kind or 'no reason given'}")
+            self._raise_question(vm, what)
+            if self.clock() >= deadline:
+                raise self._err(what, f"still {state or 'starting'} after {int(self.power_on_timeout)} s")
+            self.sleep(self.power_on_poll)
+
+    def _raise_question(self, vm, what):
+        q = self.pending_question(vm)
+        if q:
+            e = VSphereQuestion(f"vCenter {self.host}: {what}: VMware waits for an answer: "
+                                f"{self._scrub(q['text'])}", q)
+            raise e
 
     def logout(self):
         """Ferme la session REST ; au mieux, une panne ici est ignorée."""
@@ -347,8 +368,11 @@ class VSphere:
         if kind == "NoPermission":
             return self._err(what, "permission denied")
         if kind == "ManagedObjectNotFound":
-            return self._err(what, "object not found")
-        return self._err(what, f"{kind or 'fault'}: {msg}")
+            e = self._err(what, "object not found")
+        else:
+            e = self._err(what, f"{kind or 'fault'}: {msg}")
+        e.kind = kind
+        return e
 
     def soap_login(self):
         """RetrieveServiceContent puis Login ; garde le cookie de session."""
@@ -420,6 +444,27 @@ class VSphere:
             return []
         return self._tree(val.findall(f"{_V}rootSnapshotList"))
 
+    def pending_question(self, vm_id):
+        """Question que VMware pose avant de laisser tourner la VM
+        (`runtime.question`, SOAP seulement : l'API REST n'en dit rien), ou
+        None. Vu sur le banc : une source rallumée par le retour arrière
+        s'arrête sur « le fichier du port série existe déjà », l'API REST
+        la dit POWERED_ON et l'invité ne démarre pas tant qu'on ne répond
+        pas. Rend {id, text, choices} ; le texte est ramené sur une ligne."""
+        vm = _check_moref(vm_id, "VM")
+        props = self._retrieve("VirtualMachine", vm, ["runtime.question"], f"question of {vm}")
+        val = props.get("runtime.question")
+        if val is None:
+            return None
+        text = " ".join((val.findtext(f"{_V}text") or "").split())
+        if len(text) > QUESTION_TEXT_MAX:
+            text = text[:QUESTION_TEXT_MAX - 3].rstrip() + "..."
+        # vu sur vCenter 8.0.1 : `label` est une clé interne
+        # (« button.serial.file.append »), le libellé lisible est `summary`
+        choices = [ci.findtext(f"{_V}summary") or ci.findtext(f"{_V}label") or ci.findtext(f"{_V}key") or ""
+                   for ci in val.iter(f"{_V}choiceInfo")]
+        return {"id": (val.findtext(f"{_V}id") or "").strip(), "text": text, "choices": [c for c in choices if c]}
+
     def remove_snapshot(self, snap_id, consolidate=True):
         """Lance RemoveSnapshot_Task (sans les enfants) ; rend l'identifiant
         de la tâche."""
@@ -436,25 +481,29 @@ class VSphere:
             raise self._err(what, "no task in the answer")
         return task
 
+    def _task_info(self, task, what):
+        """(état, type de faute, message) d'une tâche."""
+        props = self._retrieve("Task", task, ["info.state", "info.error"], what)
+        state = (props["info.state"].text or "").strip() if "info.state" in props else ""
+        kind = msg = ""
+        err = props.get("info.error")
+        if err is not None:
+            msg = err.findtext(f"{_V}localizedMessage") or ""
+            f = err.find(f"{_V}fault")
+            kind = (f.get(f"{{{NS_XSI}}}type") if f is not None else "") or ""
+        return state, kind, msg
+
     def wait_task(self, task_id, timeout=600, poll=2.0):
         """Attend la fin d'une tâche (info.state success ou error)."""
         task = _check_moref(task_id, "task")
         what = f"task {task}"
         deadline = self.clock() + timeout
         while True:
-            props = self._retrieve("Task", task, ["info.state", "info.error"], what)
-            state = (props["info.state"].text or "").strip() if "info.state" in props else ""
+            state, kind, msg = self._task_info(task, what)
             if state == "success":
                 return True
             if state == "error":
-                err = props.get("info.error")
-                msg = ""
-                if err is not None:
-                    msg = err.findtext(f"{_V}localizedMessage") or ""
-                    if not msg:
-                        f = err.find(f"{_V}fault")
-                        msg = (f.get(f"{{{NS_XSI}}}type") if f is not None else "") or ""
-                raise self._err(what, f"failed: {msg or 'no reason given'}")
+                raise self._err(what, f"failed: {msg or kind or 'no reason given'}")
             if state not in ("queued", "running"):
                 raise self._err(what, f"unknown state {state!r}")
             if self.clock() >= deadline:

@@ -1409,7 +1409,11 @@ actions:
   VM's cutover has started: the console first checks it can reach the
   vCenter, stops the Harvester VM (found by its name, or by the `vmID` and
   `plan` labels Forklift sets), then powers the source on through the
-  vCenter. Run again, it does not redo what is already done.
+  vCenter. Run again, it does not redo what is already done. If VMware
+  stops the source on a question at power-on (for example a serial port
+  file that already exists), the console says so with the question and its
+  choices instead of calling the source powered on, and leaves that VM not
+  rolled back: answer it in vCenter, then run the rollback again (1.84.0).
 - **Close**: ends the wave, so its VMs can join another one; neither the
   Harvester VMs nor the sources are touched. When ticked, it also removes
   the `forklift-migration-precopy` snapshots Forklift leaves on the

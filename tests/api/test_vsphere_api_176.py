@@ -42,6 +42,8 @@ class FakeVCenter:
         self.power = {"vm-16": "POWERED_ON", "vm-18": "POWERED_OFF"}
         self.slow_power = {}       # vm -> secondes de retard avant de repondre
         self.snapshots = {"vm-16": "snapshots_forklift_chain.xml", "vm-18": "snapshots_none.xml"}
+        self.questions = {}        # vm -> lectures sans question avant qu'elle apparaisse
+        self.power_tasks = {}      # tâche d'allumage -> vm
         self.cookies = set()
         self.removed = []          # (snapshot, removeChildren, consolidate)
         self.fail_snaps = set()    # instantanés dont la tâche échoue
@@ -148,6 +150,15 @@ class FakeVCenter:
                 if name == "Logout":
                     fake.cookies.discard("abc123")
                     return self._xml("logout.xml")
+                if name == "PowerOnVM_Task":
+                    vm = op.findtext(f"{V}_this")
+                    if vm not in fake.power:
+                        return self._xml("fault_object_not_found.xml", 500)
+                    task = f"task-p{len(fake.power_tasks) + 1}"
+                    fake.power_tasks[task] = vm
+                    if fake.power[vm] == "POWERED_ON":
+                        fake.task_final[task] = "already"
+                    return self._xml("power_on_task.xml", task=task)
                 if name == "RemoveSnapshot_Task":
                     snap = op.findtext(f"{V}_this")
                     fake.removed.append((snap, op.findtext(f"{V}removeChildren"), op.findtext(f"{V}consolidate")))
@@ -160,7 +171,25 @@ class FakeVCenter:
                     if kind == "VirtualMachine":
                         if oid not in fake.snapshots:
                             return self._xml("fault_object_not_found.xml", 500)
+                        if op.findtext(f"{V}specSet/{V}propSet/{V}pathSet") == "runtime.question":
+                            left = fake.questions.get(oid)
+                            if left is None or left > 0:
+                                if left:
+                                    fake.questions[oid] = left - 1
+                                return self._xml("snapshots_none.xml")
+                            return self._xml("question_serial.xml")
                         return self._xml(fake.snapshots[oid])
+                    if kind == "Task" and oid in fake.power_tasks:
+                        vm = fake.power_tasks[oid]
+                        if fake.task_final.get(oid) == "already":
+                            return self._xml("task_error_power.xml", task=oid)
+                        left = fake.task_polls.get(oid, 0)
+                        # une question pendante retient la tâche
+                        if vm in fake.questions or left:
+                            fake.task_polls[oid] = max(left - 1, 0)
+                            return self._xml("task_state.xml", task=oid, state="running")
+                        fake.power[vm] = "POWERED_ON"
+                        return self._xml("task_state.xml", task=oid, state="success")
                     if kind == "Task":
                         left = fake.task_polls.get(oid, 0)
                         if left:
@@ -221,9 +250,11 @@ def test_power_state_and_power_on(vc):
     assert c.power_state("vm-18") == "POWERED_OFF"
     assert c.power_on("vm-18") is True
     assert vc.power["vm-18"] == "POWERED_ON"
-    # Déjà allumée : rejouable, pas une erreur.
+    # Déjà allumée : rejouable, pas une erreur, et aucune tâche lancée.
     assert c.power_on("vm-16") is False
-    assert ("POST", "/api/vcenter/vm/vm-18/power", "action=start") in vc.rest_calls
+    assert list(vc.power_tasks.values()) == ["vm-18"]
+    # par la tâche SOAP, plus par l'API REST (qui reste bloquée sur une question)
+    assert not [x for x in vc.rest_calls if x[0] == "POST" and x[1].endswith("/power")]
     tok = c.token
     c.logout()
     assert c.token is None and tok not in vc.tokens
@@ -245,31 +276,61 @@ def test_expired_token_reopens_session_once(vc):
     assert sum(1 for m, p, _ in vc.rest_calls if p == "/api/session" and m == "POST") == 2
 
 
-def test_power_on_survives_a_slow_answer(vc):
-    """vCenter met plus longtemps que le delai REST habituel a repondre,
-    mais a bien allume la VM : power_on relit l'etat au lieu d'echouer."""
-    vc.slow_power["vm-18"] = 0.3
+def clocked(c):
+    t = [0.0]
+    c.clock = lambda: t[0]
+    c.sleep = lambda s: t.__setitem__(0, t[0] + s)
+    return t
+
+
+def test_power_on_waits_for_a_slow_task(vc):
+    """Un démarrage lent n'est pas une panne : la tâche est suivie."""
+    vc.task_polls["task-p1"] = 3
     c = client(vc)
-    c.timeout = 0.05           # delai REST court : dépassé sans le délai dédié
-    c.power_on_timeout = 2
+    t = clocked(c)
     assert c.power_on("vm-18") is True
-    assert vc.power["vm-18"] == "POWERED_ON"
+    assert vc.power["vm-18"] == "POWERED_ON" and t[0] == 3 * vs.POWER_ON_POLL
 
 
-def test_power_on_slow_answer_still_off_is_an_error(vc):
-    """Le délai dédié expire aussi, et l'état relu montre que rien n'a eu
-    lieu : un vrai échec, pas un succès muet."""
-    vc.slow_power["vm-16"] = 0.3
-    vc.power["vm-16"] = "POWERED_OFF"
+def test_power_on_task_still_running_after_the_delay_is_an_error(vc):
+    vc.task_polls["task-p1"] = 1000
     c = client(vc)
-    c.power_on_timeout = 0.05
-    real_power_state = c.power_state
-    c.power_state = lambda vm: "POWERED_OFF"
+    c.power_on_timeout = 10
+    clocked(c)
     with pytest.raises(vs.VSphereError) as e:
-        c.power_on("vm-16")
-    assert "unreachable (TimeoutError)" in str(e.value)
+        c.power_on("vm-18")
+    assert "power on vm-18: still running after 10 s" in str(e.value)
+    assert not isinstance(e.value, vs.VSphereQuestion)
     assert_clean(str(e.value))
-    c.power_state = real_power_state
+
+
+def test_power_on_raises_the_question_vmware_asks_while_starting(vc):
+    """Vu sur vCenter 8.0.1 : la tâche reste en cours tant que la question du
+    port série attend ; on la voit en secondes, pas après 5 minutes."""
+    vc.questions["vm-18"] = 1          # la question paraît à la 2e lecture
+    c = client(vc)
+    t = clocked(c)
+    with pytest.raises(vs.VSphereQuestion) as e:
+        c.power_on("vm-18")
+    assert e.value.question["choices"] == ["Append", "Replace", "Cancel"]
+    assert "VMware waits for an answer: The serial port output file" in str(e.value)
+    assert t[0] <= vs.POWER_ON_POLL and vc.power["vm-18"] == "POWERED_OFF"
+    assert_clean(str(e.value))
+
+
+def test_power_on_a_question_left_from_an_earlier_try_is_raised_without_a_new_task(vc):
+    vc.questions["vm-18"] = 0
+    c = client(vc)
+    with pytest.raises(vs.VSphereQuestion):
+        c.power_on("vm-18")
+    assert vc.power_tasks == {}
+
+
+def test_power_on_task_refused_as_already_on_is_not_an_error(vc):
+    """L'état a changé entre la lecture et la tâche : InvalidPowerState."""
+    c = client(vc)
+    c.power_state = lambda vm: "POWERED_OFF"
+    assert c.power_on("vm-16") is False
 
 
 def test_power_unknown_vm(vc):
@@ -413,3 +474,25 @@ def test_fault_message_scrubs_credentials(vc):
     msg = str(c._fault(fault, "probe"))
     assert "***" in msg
     assert_clean(msg)
+
+
+# -- question VMware (1.84.0) ------------------------------------------------------
+
+def test_pending_question_none_when_vmware_asks_nothing(vc):
+    assert client(vc).pending_question("vm-16") is None
+
+
+def test_pending_question_reads_text_and_choices_on_one_line(vc):
+    vc.questions["vm-16"] = 0
+    q = client(vc).pending_question("vm-16")
+    # réponse réelle d'un vCenter 8.0.1 (banc vmwlab) : `label` est une clé
+    # interne, le libellé lisible est `summary`
+    assert q["id"] == "3026" and q["choices"] == ["Append", "Replace", "Cancel"]
+    assert q["text"].startswith('The serial port output file "/vmfs/volumes/') and "\n" not in q["text"]
+
+
+def test_pending_question_text_is_capped(vc, monkeypatch):
+    vc.questions["vm-16"] = 0
+    monkeypatch.setattr(vs, "QUESTION_TEXT_MAX", 40)
+    q = client(vc).pending_question("vm-16")
+    assert len(q["text"]) <= 40 and q["text"].endswith("...")

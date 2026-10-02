@@ -170,6 +170,23 @@ d'un cluster est injoignable. Ce qui reste est listé, et porte l'étiquette
 -A -l harvester-ops.io/transfer=<id>`. Harvester refuse de supprimer un
 volume tant qu'une image en est exportée : supprimer les images d'abord.
 
+### Une vague VMware qui reste « en suppression »
+
+Avant 1.84.0, supprimer une vague laissait son plan et ses migrations en
+suppression pour toujours (finaliseur `orphan`) : le ramasse-miettes de
+Kubernetes doit modifier chaque migration, et le webhook de Forklift refuse
+toute modification d'une migration à un compte qui ne peut pas créer de VMs
+dans le namespace cible. Supprimer de nouveau la vague à partir de 1.84.0 :
+la console retire elle-même le finaliseur, et les VMs restent.
+
+### Un retour arrière dit « VMware waits for an answer »
+
+VMware a arrêté la source sur une question à la mise sous tension (souvent
+un fichier de port série déjà présent). Le message donne la question et ses
+choix ; y répondre dans le vCenter (« Répondre à la question » de la VM),
+puis relancer le retour arrière : cette VM n'est pas marquée revenue tant
+qu'elle ne tourne pas.
+
 ### « Dépôt refusé » en déposant une archive dans le magasin
 
 Le message dit pourquoi :

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<soapenv:Envelope xmlns:soapenc="http://schemas.xmlsoap.org/soap/encoding/"
+ xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"
+ xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<soapenv:Body>
+<!-- vim25 schema shape (Task info.state / info.error). -->
+<RetrievePropertiesExResponse xmlns="urn:vim25"><returnval><objects><obj type="Task">__TASK__</obj><propSet><name>info.error</name><val xsi:type="LocalizedMethodFault"><fault xsi:type="InvalidPowerState"><requestedState>poweredOn</requestedState><existingState>poweredOn</existingState></fault><localizedMessage>The attempted operation cannot be performed in the current state (Powered on).</localizedMessage></val></propSet><propSet><name>info.state</name><val xsi:type="TaskInfoState">error</val></propSet></objects></returnval></RetrievePropertiesExResponse>
+</soapenv:Body>
+</soapenv:Envelope>

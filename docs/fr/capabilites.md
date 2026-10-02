@@ -1570,7 +1570,11 @@ Les gestes :
   joint le vCenter, arrête la VM Harvester (retrouvée par son nom, ou par
   les étiquettes `vmID` et `plan` que pose Forklift), puis rallume la
   source par le vCenter. Relancé, il ne refait rien de ce qui est déjà
-  fait.
+  fait. Si VMware arrête la source sur une question à la mise sous tension
+  (par exemple un fichier de port série déjà présent), la console le dit,
+  avec la question et ses choix, au lieu de la déclarer rallumée, et laisse
+  cette VM non revenue : y répondre dans le vCenter, puis relancer le retour
+  arrière (1.84.0).
 - **Clore** : termine la vague, pour que ses VMs puissent entrer dans une
   autre ; ni les VMs Harvester ni les sources ne sont touchées. Coché, il
   retire aussi les instantanés `forklift-migration-precopy` que Forklift
