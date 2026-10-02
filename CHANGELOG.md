@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.83.6] - 2026-10-02 - A pinned sidebar no longer covers the page
+
+### Fixed
+- Pinning the side menu open left it lying over the first 184 px of the page
+  for good: tab titles, the first column of tables and the dock title sat
+  underneath, reachable only by unpinning. Pinned, the menu is now a column:
+  the page, the actions dock and the window bar make room for it, and its
+  overlay shadow only shows while it opens on hover. Opening it on hover
+  still moves nothing. Contributed by @Paul1404 (#2).
+
+### Docs
+- The sidebar paragraph of the capabilities page (EN/FR) says what pinning
+  does to the page.
+
+### Tests
+- `test_a_pinned_sidebar_does_not_cover_the_page` (e2e): pinned, the content
+  starts where the menu ends and the dock and window bar reserve its width;
+  unpinned, back to the rail.
+
 ## [1.83.5] - 2026-10-02 - Clearer update tab on a console run from the sources
 
 ### Fixed

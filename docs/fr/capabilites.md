@@ -2218,7 +2218,9 @@ groupée est reprise type par type).
   redimensionne jamais la zone de travail, si bien que le panneau de détail
   de la topologie, les canvas et les tableaux ne sautent pas sous les yeux.
   Il s'épingle depuis son pied de menu quand on veut les libellés en
-  permanence, et l'épinglage est mémorisé.
+  permanence : épinglé, il devient une colonne, et la page, le dock et la
+  barre des fenêtres se décalent une fois pour lui faire place, si bien que
+  rien ne reste caché dessous. L'épinglage est mémorisé.
 - **Une barre qui liste toutes les fenêtres ouvertes.** Consoles, réglages
   de VM, snapshots, migrations et notes gardent chacun une puce au-dessus
   du dock tant qu'ils sont ouverts, et pas seulement une fois minimisés. Un

@@ -2006,7 +2006,9 @@ either (the grouped read is retried kind by kind).
   collapses when it leaves. It is a layer, not a column: opening it never
   resizes the work area, so the topology detail panel, canvases and tables
   do not jump under the operator. Pin it open from its footer when you want
-  the labels permanently; the pin is remembered.
+  the labels permanently: pinned, it becomes a column and the page, the dock
+  and the window bar move over once to make room, so nothing stays hidden
+  under it. The pin is remembered.
 - **A window bar that lists every open window.** Consoles, VM settings,
   snapshots, migrations and notes each keep a chip above the dock for as
   long as they are open, not only once minimised. Clicking a chip sends its
