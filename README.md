@@ -121,7 +121,7 @@ A VM running on VMware, its guest system alive on screen; the vCenter source,
 the wave copied while the VM keeps running, the lanes, a real switchover;
 then the same system alive on Harvester, its write counter carrying on.
 
-https://github.com/user-attachments/assets/ff3d4bf1-bfb0-43c5-a3b1-002c56441d7f
+https://github.com/user-attachments/assets/434ce128-b815-4239-876c-42da9698c53d
 
 Download: [English](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-en.mp4) · [Français](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-fr.mp4)
 
