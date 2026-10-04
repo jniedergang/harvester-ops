@@ -135,6 +135,8 @@ vCenter, la vague copiée pendant que la VM tourne, les couloirs, une vraie
 bascule ; puis le même système vivant sur Harvester, son compteur
 d'écritures qui continue.
 
+https://github.com/user-attachments/assets/434ce128-b815-4239-876c-42da9698c53d
+
 Télécharger : [français](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-fr.mp4) · [anglais](https://github.com/jniedergang/harvester-ops/releases/download/v1.83.2/vmware-migration-en.mp4)
 
 ### Plusieurs clusters (1:16)
