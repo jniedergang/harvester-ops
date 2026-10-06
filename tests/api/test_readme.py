@@ -67,3 +67,11 @@ def test_each_readme_plays_every_clip_in_its_own_language():
             assert text[i - 2:i] == "\n\n" and text[i + len(u):i + len(u) + 2] == "\n\n", (lang, u)
         found[lang] = set(urls)
     assert not found["en"] & found["fr"]
+
+
+def test_each_readme_links_the_site_and_the_demo_in_its_language():
+    """v1.86.0 : le site de présentation et sa démo vivante, sur GitHub Pages."""
+    base = "https://jniedergang.github.io/harvester-ops"
+    for lang, page in (("en", "en"), ("fr", "fr")):
+        text = _text(lang)
+        assert f"{base}/{page}/" in text and f"{base}/demo/?lang={page}" in text, lang

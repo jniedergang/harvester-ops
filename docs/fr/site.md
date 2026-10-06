@@ -77,8 +77,19 @@ WebSockets de la console pour tout ce qui est sous `/api/` :
 
 ## Publication
 
-Le site ne part sur GitHub Pages qu'après relecture (c'est `dist/site/` qui se
-publie ; `.nojekyll` est écrit pour Pages). D'ici là, il est relu en privé.
+Le site est publié sur GitHub Pages :
+**https://jniedergang.github.io/harvester-ops/** (démo vivante sous `demo/`).
+
+```bash
+tools/demo-site/publish-pages.sh            # remote « github » par défaut
+```
+
+Le script refuse de tourner s'il reste des modifications non commitées dans
+`site/`, `tools/demo-site/`, `web/` ou `VERSION`, construit `dist/site/`
+depuis le commit courant, le pose seul sur la branche `gh-pages` (un commit
+par publication, `.nojekyll` compris) et la pousse. Pages sert cette branche
+depuis sa racine. Publier une fois la release testée, pour que le site et la
+démo montrent l'interface publiée.
 
 ## Tests
 

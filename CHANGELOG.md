@@ -28,6 +28,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   only), `sanitize.py` (fictional names, addresses and domains, cloud-init and
   passwords neutralized, refuses to write if a forbidden pattern is left),
   `techinfo.py`, `shots.py`, `pages.py`, `build.py`.
+- Published on GitHub Pages: https://jniedergang.github.io/harvester-ops/
+  (`tools/demo-site/publish-pages.sh` builds the site and pushes it alone on
+  the `gh-pages` branch). Both READMEs link the site and the demo in their
+  language.
+
+### Changed
+- Em dashes and arrows coming from the console API are kept out of the
+  public demo data.
 
 ### Docs
 - `docs/en/site.md`, `docs/fr/site.md`: how the site and the demo are made,
