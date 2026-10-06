@@ -1,0 +1,8 @@
+/* harvester-ops : bandeau de la démo (v1.86.0) */
+#demo-banner { position: fixed; top: 0; left: 50%; transform: translateX(-50%); z-index: 99999;
+  display: flex; align-items: center; gap: 12px; padding: 5px 14px; border-radius: 0 0 10px 10px;
+  background: #0c322c; color: #fff; font: 13px/1.4 system-ui, sans-serif; box-shadow: 0 2px 10px rgba(0,0,0,.25);
+  max-width: calc(100vw - 32px); }
+#demo-banner strong { color: #30ba78; white-space: nowrap; }
+#demo-banner a { color: #fff; text-decoration: underline; white-space: nowrap; }
+@media (max-width: 700px) { #demo-banner span { display: none; } }

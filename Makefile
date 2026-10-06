@@ -1,7 +1,7 @@
 VERSION := $(shell cat VERSION)
 RUNTIME := $(shell command -v podman || command -v docker)
 
-.PHONY: help lint test test-api test-e2e test-live test-smoke image package install clean
+.PHONY: help lint test test-api test-e2e test-live test-smoke image package install clean site
 
 help:
 	@echo "harvester-ops $(VERSION)"
@@ -15,6 +15,7 @@ help:
 	@echo "  image       Build the container image"
 	@echo "  package     Build the airgap tarball under dist/"
 	@echo "  install     Run ./install.sh (requires root)"
+	@echo "  site        Build the presentation site and its live demo under dist/site"
 	@echo "  clean       Remove dist/, web/vendor/, .pytest_cache, __pycache__"
 
 lint:
@@ -52,6 +53,9 @@ package:
 
 install:
 	sudo ./install.sh
+
+site:
+	python3 tools/demo-site/build.py --out dist/site
 
 clean:
 	rm -rf dist web/vendor images/*.tar .pytest_cache

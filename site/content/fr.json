@@ -1,0 +1,257 @@
+{
+  "lang_name": "Français",
+  "meta": {
+    "title": "harvester-ops : une console moderne pour tous vos clusters Harvester",
+    "description": "harvester-ops est une console moderne, prête pour l'air gap, pour piloter de nombreux clusters SUSE Harvester HCI depuis une seule interface : tous les clusters au même endroit, une automatisation simplifiée, chaque événement suivi."
+  },
+  "nav": {
+    "features": "Fonctionnalités",
+    "demo": "Démo en ligne",
+    "tech": "Technologie",
+    "install": "Installation",
+    "github": "GitHub"
+  },
+  "hero": {
+    "kicker": "Pour les équipes qui exploitent SUSE Harvester HCI",
+    "title": "Une console moderne pour tous vos clusters Harvester",
+    "lead": "harvester-ops réunit tous vos clusters dans une seule interface, transforme les opérations longues en un geste suivi, et conserve la trace de tout ce qui se passe, depuis votre console ou depuis n'importe où ailleurs.",
+    "cta_demo": "Essayer la démo en ligne",
+    "cta_github": "Voir sur GitHub",
+    "cta_install": "L'installer",
+    "note": "Open source. Prêt pour l'air gap. Cinq langues."
+  },
+  "pillars": [
+    {"icon": "layers", "title": "Tous vos clusters, une seule interface", "text": "Déclarez autant de clusters Harvester que vous en exploitez. Basculez en un clic, listez toutes les VM de tous les clusters dans un seul tableau, voyez quel cluster est éteint ou vous refuse l'accès, sans que les autres attendent."},
+    {"icon": "zap", "title": "Une automatisation simplifiée", "text": "Arrêt et démarrage gracieux, mises à jour, migrations VMware à chaud, clusters Kubernetes, installations bare-metal, Terraform : les opérations longues deviennent un seul geste, avec les mêmes scripts derrière le bouton et la ligne de commande."},
+    {"icon": "activity", "title": "Chaque événement suivi", "text": "Chaque action s'exécute comme une tâche suivie avec des étapes en direct, des journaux et un historique. Les changements effectués hors de la console, dans Harvester, kubectl ou Rancher, apparaissent aussi."}
+  ],
+  "demo_band": {
+    "title": "Voyez-la vivre, dans votre navigateur",
+    "text": "La démo est l'interface réelle de cette version, exécutée sur des clusters simulés : cinq clusters, des VM à démarrer et arrêter, des migrations VMware en cours, un dock d'actions qui bouge. Chaque geste fonctionne et rien n'est modifié.",
+    "cta": "Ouvrir la démo en ligne"
+  },
+  "features_title": "Tout ce que fait harvester-ops",
+  "features_lead": "Regroupé comme les opérateurs pensent leur travail. Chaque famille renvoie vers l'écran de démo où vous pouvez l'essayer.",
+  "try": "Essayer dans la démo",
+  "families": [
+    {
+      "id": "multi",
+      "title": "Tous vos clusters au même endroit",
+      "lead": "Une seule console pour une flotte de clusters Harvester, physiques ou imbriqués, proches ou distants.",
+      "shot": "allvms",
+      "demo": "allvms",
+      "items": [
+        "Déclarez les clusters depuis l'interface ou le fichier de configuration ; changer de cluster change vraiment chaque vue.",
+        "Toutes les VM des clusters : chaque VM de chaque cluster dans un seul tableau, filtré par cluster, état, namespace ou texte, trié sur n'importe quelle colonne, avec démarrage, arrêt, redémarrage, migration et le menu d'actions complet sur une sélection qui traverse les clusters.",
+        "Les clusters éteints ou inaccessibles sont signalés comme tels, instantanément, au lieu de figer la page.",
+        "Les migrations de tous les clusters dans un seul tableau ou sur une chronologie partagée.",
+        "Des notes sur les clusters, les nœuds et les VM, conservées par la console."
+      ]
+    },
+    {
+      "id": "vms",
+      "title": "Machines virtuelles, comme dans Harvester et plus encore",
+      "lead": "Tout ce que Harvester propose sur une VM, dans des fenêtres modernes qui restent ouvertes côte à côte.",
+      "shot": "vms",
+      "demo": "namespaces",
+      "items": [
+        "Créez des VM avec images, modèles, cloud-init, réseaux, disques et placement, vérifiés par rapport à l'espace réellement allouable.",
+        "Le menu d'actions complet : démarrer, arrêter, redémarrer, mettre en pause, redémarrage logiciel, cloner, transformer en modèle, YAML, sauvegardes, snapshots, suppression avec ses volumes.",
+        "Modifications à chaud : ajout à chaud de CPU et de mémoire, CD-ROM, cartes réseau, migration de stockage, identifiants d'accès.",
+        "Une console VNC que plusieurs personnes peuvent partager à la fois, avec un clavier compatible AZERTY, et une console série.",
+        "Snapshots, sauvegardes, restaurations et leurs planifications ; migration à chaud entre nœuds.",
+        "Déplacez une VM vers un autre cluster, exportez-la en archive, importez-la ailleurs, avec débit, temps restant et contrôle de la vitesse."
+      ]
+    },
+    {
+      "id": "views",
+      "title": "Voir le cluster tel qu'il est construit",
+      "lead": "Des vues tirées du cluster en direct, un bloc par objet, dans l'esprit des outils VMware.",
+      "shot": "overview",
+      "demo": "overview",
+      "items": [
+        "Vue d'ensemble avec métriques, carte du cluster des nœuds et des VM, événements et jauges d'usage.",
+        "Cartes de fabrique, de réseau et de stockage : un bloc par switch, réseau, volume et disque.",
+        "Le chemin réseau d'une VM, de sa carte jusqu'au port physique.",
+        "Les hôtes comme dans Harvester : disques, tags, huge pages, KSM, gestionnaire de CPU, gestion hors bande via harvester-seeder, mode maintenance avec suivi du drain en direct.",
+        "Namespaces, projets Rancher, quotas et membres."
+      ]
+    },
+    {
+      "id": "storage",
+      "title": "Un stockage auquel vous pouvez faire confiance",
+      "lead": "Longhorn et les images, expliqués plutôt que simplement listés.",
+      "shot": "storage",
+      "demo": "storage",
+      "items": [
+        "Volumes, images, classes de stockage (y compris chiffrées), snapshots et sauvegardes, avec création, modification et suppression en fenêtres.",
+        "Volumes dégradés expliqués et corrigés en toute sécurité : répliques manquantes, répliques non placées, reconstructions en cours.",
+        "Espace allouable calculé comme Longhorn le décide, pour qu'une VM ne soit jamais planifiée là où elle ne peut pas tenir.",
+        "Stockage LVM et téléchargements d'images CDI là où Harvester les prend en charge.",
+        "Réglages de la cible de sauvegarde et paquets de support."
+      ]
+    },
+    {
+      "id": "network",
+      "title": "Réseaux, overlay et underlay",
+      "lead": "Des réseaux de VM aux VPC kube-ovn, avec des formulaires et un schéma en direct.",
+      "shot": "network",
+      "demo": "network",
+      "items": [
+        "Réseaux de VM, réseaux de cluster et leurs configurations, équilibreurs de charge et pools d'IP, réseaux d'hôte.",
+        "Réseaux de stockage, de migration et RWX réglés au même endroit.",
+        "kube-ovn : VPC, sous-réseaux, passerelles NAT, réseaux fournisseurs, politiques réseau, santé.",
+        "IP statiques appliquées pour de vrai sur les réseaux overlay.",
+        "Périphériques PCI, USB et SR-IOV transmis en passthrough aux VM."
+      ]
+    },
+    {
+      "id": "vmware",
+      "title": "Quitter VMware, à chaud et en toute visibilité",
+      "lead": "Des dizaines de VM déplacées de vCenter vers Harvester avec Forklift, avec la bascule la plus courte possible.",
+      "shot": "lanes",
+      "demo": "forkliftglobal",
+      "items": [
+        "Forklift installé pour vous, avec son image VDDK construite et poussée vers votre registre.",
+        "Sources vCenter déclarées, inventaire parcouru, vagues composées avec les correspondances réseau et stockage.",
+        "Migration à chaud : copies incrémentales pendant que la VM continue de tourner, puis une bascule planifiée ou immédiate.",
+        "Vagues affichées en blocs ou en couloirs sur une chronologie, pour tous les clusters.",
+        "Retour à la source, qui indique quand VMware arrête la source sur une question posée, et des vérifications qui refusent une vague dont l'adresse MAC est déjà prise.",
+        "Imports de VM depuis VMware, OpenStack ou une archive OVA."
+      ]
+    },
+    {
+      "id": "lifecycle",
+      "title": "Le cycle de vie du cluster sans le stress",
+      "lead": "Les opérations que personne ne veut faire à la main à 2 h du matin.",
+      "shot": "shutdown",
+      "demo": "shutdown",
+      "items": [
+        "Arrêt gracieux en huit étapes ordonnées : vérifications préalables, snapshot etcd, snapshots de VM, arrêt ordonné des VM, maintenance du stockage, mise en cordon, workers, plan de contrôle.",
+        "Démarrage en cinq étapes, Wake-on-LAN inclus, ne redémarrant que les VM que l'arrêt avait stoppées, dans leurs groupes et leur ordre.",
+        "Des groupes de VM qui s'arrêtent et démarrent en séquence entre les groupes et en parallèle à l'intérieur d'un groupe.",
+        "Mises à jour de Harvester depuis l'interface, avec une image ISO air gap en l'absence d'internet.",
+        "Maintenance des nœuds avec le drain suivi en direct et les blocages expliqués."
+      ]
+    },
+    {
+      "id": "automation",
+      "title": "Infrastructure as code et bare metal",
+      "lead": "Des serveurs vides aux clusters Kubernetes, depuis une seule console.",
+      "shot": "automation",
+      "demo": "automation",
+      "items": [
+        "Installations bare-metal de Harvester via les médias virtuels Redfish : découverte, disques et pools, profils multi-nœuds, installations par lots, le cluster se déclarant lui-même.",
+        "Clusters Kubernetes (RKE2) créés sur Harvester avec Cluster API, avec des services équilibrés via CAAPH et kube-vip.",
+        "Déclarations Terraform conservées par la console, un état chacune, le plan lu avant application ; OpenTofu et le provider Harvester embarqués.",
+        "Monitoring et logging : métriques Prometheus, règles d'alerte, flux et sorties de logs, avec les vérifications de configuration que Harvester laisse silencieuses."
+      ]
+    },
+    {
+      "id": "activity",
+      "title": "Chaque action suivie, chaque événement visible",
+      "lead": "Savoir ce qui s'est passé, qui l'a fait et comment ça s'est terminé.",
+      "shot": "activity",
+      "demo": "activity",
+      "items": [
+        "Chaque geste est une action suivie avec des étapes en direct dans le dock d'actions, puis des journaux et un historique dans l'onglet Activity.",
+        "Les changements effectués hors de la console (interface Harvester, kubectl, Rancher) sont aussi détectés et listés.",
+        "Activité filtrée par cluster, statut et texte ; un historique durable des dernières exécutions avec leurs journaux.",
+        "Événements du cluster et usage sur la vue d'ensemble ; ce que le cluster vous a refusé est annoncé au lieu d'une vue vide."
+      ]
+    },
+    {
+      "id": "security",
+      "title": "Sécurisé par défaut",
+      "lead": "Conçu pour des équipes de production, avec le moindre privilège partout.",
+      "shot": "security",
+      "demo": "security",
+      "items": [
+        "La connexion est obligatoire, avec des comptes et des rôles de console (lecteur, opérateur, administrateur).",
+        "Authentification unique via Rancher : les actions s'exécutent avec les droits Rancher propres à la personne, jamais avec un compte admin partagé.",
+        "Identité déléguée au cluster par usurpation Kubernetes (impersonation), pour que le RBAC du cluster s'applique à chaque personne.",
+        "Limitation de débit, entrées validées, kubeconfigs à portée restreinte, secrets jamais révélés.",
+        "Secrets et clés SSH du cluster gérés dans des formulaires typés."
+      ]
+    },
+    {
+      "id": "delivery",
+      "title": "Prêt pour la production, même hors ligne",
+      "lead": "Une archive signée qui s'installe et se met à jour seule, sans internet.",
+      "shot": "update",
+      "demo": "overview",
+      "items": [
+        "Une archive tar signée unique avec l'image du conteneur, le paquet Cluster API, OpenTofu et le provider Terraform : prête à l'emploi sur un site air gap.",
+        "Mises à jour depuis l'interface, en ligne ou depuis une archive envoyée, signature vérifiée, retour arrière automatique si la nouvelle version ne répond pas.",
+        "Pensé pour de grandes flottes : lectures partagées et processus de travail, 60 clusters pour environ quatre cœurs de CPU.",
+        "Cinq langues (anglais, français, allemand, espagnol, italien), cinq thèmes clair et sombre, bulles d'aide partout, navigable au clavier."
+      ]
+    }
+  ],
+  "parity": {
+    "title": "Au moins tout ce que fait l'interface de Harvester",
+    "text": "Chaque menu de harvester-ops offre au moins les fonctions de l'interface Harvester 1.9, avec une expérience moderne en plus. Un tableau de parité fonction par fonction est publié à chaque version.",
+    "link": "Lire le tableau de parité"
+  },
+  "tech": {
+    "title": "Sous le capot",
+    "lead": "Une pile petite et auditable : pas de framework JavaScript, pas de téléchargement à l'exécution, chaque action un script que vous pouvez lancer vous-même.",
+    "arch_title": "Architecture",
+    "arch": [
+      {"title": "Navigateur", "text": "Modules JavaScript natifs (vanilla), Server-Sent Events pour les étapes en direct, WebSockets pour les consoles."},
+      {"title": "Console", "text": "Application Flask servant l'interface et une API REST, avec connexion, rôles, limitation de débit et un moteur d'actions (SQLite en mode WAL)."},
+      {"title": "Scripts", "text": "Chaque opération est un script bash ou Python sous bin/, exécuté par la console comme une action suivie et utilisable seul depuis la ligne de commande."},
+      {"title": "Clusters", "text": "Lus directement via l'API Kubernetes (connexions mutualisées, lectures partagées, processus de travail) ou kubectl ; agit avec l'identité de la personne."}
+    ],
+    "principles_title": "Principes de conception",
+    "principles": [
+      "La ligne de commande et l'interface sont égales : l'interface ne contourne jamais les scripts.",
+      "Chaque geste qui modifie l'état est une action suivie, visible en direct et conservée dans l'historique.",
+      "Air gap d'abord : aucun accès réseau nécessaire à l'exécution, tout est livré dans l'archive.",
+      "Moindre privilège : le cluster voit la personne, pas la console.",
+      "Testé pour de vrai sur des clusters Harvester avant chaque version, pas seulement en tests unitaires."
+    ],
+    "stack_title": "Technologies et versions",
+    "stack_lead": "Lues depuis la version elle-même au moment où cette page a été construite.",
+    "col_component": "Composant",
+    "col_version": "Version",
+    "col_role": "Rôle",
+    "groups": {
+      "runtime": "Exécution",
+      "python": "Bibliothèques Python",
+      "frontend": "Bibliothèques navigateur embarquées",
+      "tools": "Outils dans l'image",
+      "capi": "Paquet Cluster API",
+      "harvester": "Harvester"
+    }
+  },
+  "install": {
+    "title": "Installez-le en quelques minutes",
+    "lead": "Téléchargez l'archive signée depuis les releases GitHub, vérifiez-la, lancez l'installeur. Il pose les quelques questions nécessaires, y compris vos propres certificats si vous le souhaitez.",
+    "steps": ["Téléchargez la version et sa signature", "Vérifiez la somme de contrôle", "Lancez l'installeur en root", "Ouvrez la console et connectez-vous"],
+    "need": "Nécessite un hôte Linux avec Podman et systemd, et un accès à l'API Kubernetes de vos clusters."
+  },
+  "videos": {
+    "title": "Regardez-le fonctionner",
+    "text": "De courts clips sous-titrés filmés sur des clusters réels, en anglais et en français.",
+    "link": "Voir les vidéos sur GitHub"
+  },
+  "footer": {
+    "license": "Publié sous licence Apache License 2.0.",
+    "made": "harvester-ops est un projet indépendant. SUSE, Harvester, Rancher et VMware sont des marques déposées de leurs propriétaires respectifs.",
+    "version": "Version"
+  },
+  "shots_alt": {
+    "allvms": "Toutes les VM des clusters : un tableau de chaque VM de chaque cluster, avec des badges de cluster et des filtres",
+    "vms": "La liste des VM d'un cluster avec ses actions",
+    "overview": "Vue d'ensemble du cluster avec métriques et carte du cluster",
+    "storage": "Vues de stockage : volumes, images et classes",
+    "network": "Vues réseau : réseaux de VM, overlay et underlay",
+    "lanes": "Vagues de migration VMware en couloirs sur une chronologie",
+    "shutdown": "Séquence d'arrêt gracieux d'un cluster",
+    "automation": "Automatisation : Cluster API, Terraform et bare metal",
+    "activity": "Activity : actions suivies avec leurs étapes et journaux",
+    "security": "Sécurité : secrets et clés SSH",
+    "update": "Historique des versions et mise à jour depuis l'interface"
+  }
+}

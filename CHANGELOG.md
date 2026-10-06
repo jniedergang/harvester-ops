@@ -4,6 +4,45 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.86.0] - 2026-10-06 - A presentation site in five languages, with a live demo
+
+### Added
+- **Presentation site** built from the repository (`make site`): one page per
+  language (English, French, Spanish, Italian, German) presenting every
+  feature family with a screenshot and a link to the matching screen of the
+  demo, the Harvester parity, the architecture, the design principles, the
+  technologies with their versions, the install and the videos. Light or dark
+  with the system, readable on a phone. The versions are read from the release
+  itself (Python lockfile, Containerfile, Cluster API bundle, embedded
+  libraries), the screenshots are taken in the demo at build time in the
+  language of the page.
+- **Live demo**: the real interface of the release served as static files,
+  answered in the browser by a simulated API (`site/demo/demo-api.js`) over an
+  anonymized recording of a real console on five clusters. Every gesture
+  works and nothing is changed: writes become actions shown in the dock and
+  Activity, starting or stopping a VM changes its state, VMware migrations are
+  in progress, dates slide to the moment the demo is opened, a week of history
+  is seeded. The address chooses the tab (`#allvms`) and the language
+  (`?lang=fr`).
+- Tools in `tools/demo-site/`: `record.py` (records what a console reads, tabs
+  only), `sanitize.py` (fictional names, addresses and domains, cloud-init and
+  passwords neutralized, refuses to write if a forbidden pattern is left),
+  `techinfo.py`, `shots.py`, `pages.py`, `build.py`.
+
+### Docs
+- `docs/en/site.md`, `docs/fr/site.md`: how the site and the demo are made,
+  refreshed and published.
+
+### Tests
+- `tests/api/test_site_186.py`: same structure in the five languages, no
+  typographic trace, families pointing at real tabs and screenshots, versions
+  matching the release, the published demo data free of every forbidden
+  pattern, the anonymizer on a crafted recording and its refusal to write a
+  leak, the build of the pages and the demo.
+- `tests/e2e/test_demo_site_186.py`: the demo opened with no request leaving
+  the page, a VM stopped and started with its action in the dock, the history
+  dated today and filtered, the anchor choosing the tab.
+
 ## [1.85.0] - 2026-10-06 - Every VM of every cluster in one list
 
 ### Added
