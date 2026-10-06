@@ -44,7 +44,7 @@ SECRET_LINE = re.compile(r"(?i)(password|passwd|chpasswd|ssh_pwauth|hashed_passw
 FORBIDDEN = [r"172\.16\.", r"home\.lo", r"zypp\.fr", r"harvlab", r"\bharv[14]\b", r"vmwlab", r"julien",
              r"niedergang(?!/harvester-ops)", r"hotmail", r"USE6236", r"CNFCP", r"BEGIN [A-Z ]*KEY",
              r"(?i)password\s*[:=]\s*\S", r"\bbmcfg\b", r"/home/ju", r"\bju@", r"xl170", r"aiscale",
-             r"(?i)homelab", r"\bnode[1-5]\b", r"tests/bench", r"(?i)imbriqu", r"\"ju\""]
+             r"(?i)homelab", r"\bnode[1-5]\b", r"tests/bench", r"(?i)imbriqu", r"\"ju\"", "\u2014", "\u2192"]
 
 
 def fake_b64(seed, n):
@@ -85,6 +85,8 @@ def text(s):
     s = re.sub(r"(?i)\b[0-9a-f]{2}(:[0-9a-f]{2}){5}\b", mac, s)
     s = re.sub(r"(ssh-(?:rsa|ed25519) )([A-Za-z0-9+/=]{20,})",
                lambda m: m.group(1) + fake_b64(m.group(2), len(m.group(2))), s)
+    # le site public ne montre ni tiret cadratin ni flèche, même venus de l'API
+    s = s.replace(" \u2014 ", " · ").replace("\u2014", "-").replace("\u2192", "->")
     if "\n" in s and SECRET_LINE.search(s):
         s = "\n".join(line for line in s.split("\n") if not SECRET_LINE.search(line))
     return s
