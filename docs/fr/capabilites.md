@@ -198,6 +198,34 @@ reste de cette page a été exercé pour de vrai. L'onglet
 La CLI expose le sous-ensemble start/stop via `harvester-status` /
 `-shutdown -N <ns>`.
 
+### Toutes les VMs de tous les clusters en une liste (1.85.0)
+
+**Virtual machines** est un groupe de deux entrées : **VMs du cluster
+courant** (les VMs du cluster choisi en haut, par namespace, comme avant) et
+**VMs de tous les clusters**, toutes les VMs de tous les clusters déclarés
+dans un tableau avec une colonne **Cluster**.
+
+- Chaque cluster est lu en parallèle, avec l'identité de la personne
+  connectée. Un cluster éteint, injoignable, qui refuse la lecture ou sans
+  accès dans cette session est dit tel quel sur sa puce, sans retenir les
+  autres.
+- **Filtres** : puces de clusters (un ou plusieurs, ou Tous les clusters),
+  état (en marche, arrêtées, en démarrage, en pause, en échec, autre),
+  namespace, et texte libre (nom, IP, nœud, cluster, étiquette `clé=valeur`).
+  **Tri** sur chaque colonne, dans les deux sens. Filtres et tri sont
+  retenus par le navigateur. La liste se rafraîchit toutes les 15 secondes
+  tant qu'elle est à l'écran.
+- **Gestes**, avec le cluster de la ligne : démarrer ou arrêter, console,
+  snapshots, migration, réglages, notes, et le menu d'actions complet. La
+  **sélection peut mêler plusieurs clusters** : démarrer, arrêter,
+  redémarrer, arrêt forcé et migrer partent cluster par cluster, chaque
+  geste étant une action suivie.
+
+Vérifié en réel sur cinq clusters (deux physiques, deux imbriqués, un
+éteint) : 19 VMs lues en 40 ms grâce aux lectures partagées, une VM de
+`harvlab` arrêtée depuis sa ligne puis redémarrée par une action groupée,
+`kubectl` confirmant chaque étape.
+
 ### Le menu d'actions d'une VM, comme dans Harvester (1.60.0)
 
 Chaque VM de la liste a un bouton **⋮**. Il ouvre un menu rangé comme celui

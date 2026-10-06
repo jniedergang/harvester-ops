@@ -5326,3 +5326,26 @@ td.fk-reason { max-width: 260px; }
 #settings-modal .settings-tab { flex: 1 1 0; min-width: 0; padding: 10px 6px;
   white-space: normal; text-align: center; line-height: 1.25; }
 #settings-modal .modal-body { min-height: 0; }
+
+/* v1.85.0 : toutes les VMs, de tous les clusters */
+.avm-clusters { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 10px; }
+.avm-chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border: 1px solid var(--border);
+  border-radius: 14px; background: var(--bg-panel); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.avm-chip:hover { border-color: var(--accent); }
+.avm-chip.active { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+.avm-chip-n { min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--bg-elev); color: var(--text-dim);
+  font-size: 11px; text-align: center; }
+.avm-chip-warn, .avm-chip-fail { color: var(--text-dim); }
+.avm-chip .badge { font-size: 10px; }
+.avm-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 8px; }
+.avm-field { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-dim); }
+.avm-search { flex: 1 1 260px; max-width: 460px; }
+.avm-count { margin-left: auto; font-size: 12px; color: var(--text-dim); }
+.avm-bulk[hidden], .avm-empty[hidden], .avm-log[hidden] { display: none; }
+.avm-cluster { font-weight: 600; }
+.avm-empty { margin: 14px 0; }
+.avm-log { margin-top: 10px; max-height: 220px; overflow: auto; }
+.avm-log-cluster { margin-top: 6px; font-weight: 600; }
+@media (max-width: 900px) {
+  .avm-count { margin-left: 0; width: 100%; }
+}

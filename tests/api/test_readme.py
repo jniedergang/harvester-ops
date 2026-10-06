@@ -54,13 +54,14 @@ UA = re.compile(r"^https://github\.com/user-attachments/assets/[0-9a-f-]{36}$", 
 def test_each_readme_plays_every_clip_in_its_own_language():
     """GitHub n'affiche un lecteur que pour une vidéo téléversée par son
     interface web, dont l'adresse est SEULE sur sa ligne, entourée de lignes
-    vides. Neuf vidéos par langue (le tour en tête de page, les huit autres
-    dans « Watch it work »), et aucune n'est partagée entre les deux langues."""
+    vides. Dix vidéos par langue (le tour en tête de page, les neuf autres
+    dans « Watch it work », dont la migration VMware à chaud depuis 1.83.2),
+    et aucune n'est partagée entre les deux langues."""
     found = {}
     for lang in READMES:
         text = _text(lang)
         urls = UA.findall(text)
-        assert len(urls) == 9 and len(set(urls)) == 9, (lang, len(urls))
+        assert len(urls) == 10 and len(set(urls)) == 10, (lang, len(urls))
         for u in urls:
             i = text.index(u)
             assert text[i - 2:i] == "\n\n" and text[i + len(u):i + len(u) + 2] == "\n\n", (lang, u)

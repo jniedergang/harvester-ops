@@ -4,6 +4,46 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.85.0] - 2026-10-06 - Every VM of every cluster in one list
+
+### Added
+- **All clusters VMs**: every VM of every declared cluster in one table, with
+  a Cluster column. Each cluster is read in parallel with the identity of the
+  person signed in (`/api/vms-all`); a cluster that is off, unreachable,
+  refuses the read or has no access in the session is said on its chip
+  without holding the others. Filters by cluster chips (one or more), state,
+  namespace and free text (name, IP, node, cluster, label `key=value`), sort
+  on any column, both remembered by the browser; refreshed every 15 seconds
+  while on screen. The gestures of the VM list, with the cluster of the row
+  (start or stop, console, snapshots, migration, settings, notes, actions
+  menu), and bulk start, stop, restart, force stop and migrate on a selection
+  that can span clusters, sent cluster by cluster.
+
+### Changed
+- **Virtual machines** is now a group of two entries, open by default:
+  **Current cluster's VMs** (the former tab, unchanged) and **All clusters
+  VMs**.
+
+### Internal
+- The VM list of one cluster is read by `_vms_collect`, which needs no
+  request context, so the aggregated view can call it from worker threads;
+  refusals are still recorded in the request thread. `/api/vms/<cluster>`
+  keeps its shape.
+
+### Docs
+- Capabilities (EN/FR): every VM of every cluster in one list.
+
+### Tests
+- `tests/api/test_vms_all_185.py`: three clusters (answering, off, denied),
+  rows tagged with their cluster, a crashing cluster that does not take the
+  view down, the single-cluster list unchanged.
+- `tests/e2e/test_all_vms_185.py`: the group and its two entries, cluster
+  chips with their state, sort both ways, filters remembered across a reload,
+  a bulk start across two clusters sent to each VM's cluster, row gestures
+  and the actions menu opened with the row's cluster.
+- Checked for real on five clusters: 19 VMs read, a `harvlab` VM stopped from
+  its row and started again by a bulk action, confirmed with `kubectl`.
+
 ## [1.84.0] - 2026-10-02 - A VMware question at rollback is seen in seconds, wave deletion completes
 
 ### Fixed

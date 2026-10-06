@@ -101,7 +101,25 @@
           </a>
         </div>
       </div>
-      <a class="tab"        data-tab="namespaces"   href="#namespaces" data-i18n-title="tab.vms" title="Virtual machines"><span class="tab-icon" data-icon="vm"></span> <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span></a>
+      <!-- v1.85.0 : Virtual machines devient un groupe : les VMs du cluster
+           choisi (l'onglet d'avant, inchangé) et celles de tous les clusters -->
+      <div class="tab-group expanded" id="tab-group-vms">
+        <a class="tab tab-group-head" data-group="vms" href="#vms" data-i18n-title="tab.vmsGroupTip" title="The VMs of the chosen cluster, or of every cluster">
+          <span class="tab-icon" data-icon="vm"></span>
+          <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="namespaces" href="#namespaces" data-i18n-title="tab.vmsCurrentTip" title="The VMs of the cluster chosen at the top, by namespace">
+            <span class="tab-icon" data-icon="vm"></span>
+            <span class="sidebar-label" data-i18n="tab.vmsCurrent">Current cluster's VMs</span>
+          </a>
+          <a class="tab tab-child" data-tab="allvms" href="#allvms" data-i18n-title="tab.allvmsTip" title="Every VM of every declared cluster in one list: filter, sort and act on them">
+            <span class="tab-icon" data-icon="compute"></span>
+            <span class="sidebar-label" data-i18n="tab.allvms">All clusters VMs</span>
+          </a>
+        </div>
+      </div>
       <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
            VM Import et VMware migrations portent sur le cluster choisi ;
            Migrations (all clusters) les voit tous. -->
@@ -714,6 +732,13 @@
       </div>
     </section>
 
+    <!-- ALL VMS : v1.85.0, les VMs de tous les clusters -->
+    <section id="tab-allvms" class="tab-content">
+      <h1 data-i18n="avm.title">All clusters VMs</h1>
+      <p class="hint" data-i18n="avm.hint">Every VM of every declared cluster, in one list. Click clusters to keep only theirs, filter by state, namespace or text, sort any column; the selection can span clusters. A cluster that is off or refuses the read is shown as such.</p>
+      <div class="avm-host" id="all-vms-host"></div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>
@@ -1179,6 +1204,7 @@
   <script src="/static/js/forklift-lanes.js"></script>
   <script src="/static/js/forklift.js"></script>
   <script src="/static/js/forklift-global.js"></script>
+  <script src="/static/js/all-vms.js"></script>
 <script src="/static/js/versions.js"></script>
 <script src="/static/js/console-update.js"></script>
 <script src="/static/js/console-accounts.js"></script>

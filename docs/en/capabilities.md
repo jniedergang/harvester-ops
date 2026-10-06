@@ -182,6 +182,30 @@ was exercised for real. The Cloud-init tab gains an
 
 CLI exposes the start/stop subset via `harvester-status`/`-shutdown -N <ns>`.
 
+### Every VM of every cluster in one list (1.85.0)
+
+**Virtual machines** is a group of two entries: **Current cluster's VMs** (the
+VMs of the cluster chosen at the top, by namespace, as before) and **All
+clusters VMs**, every VM of every declared cluster in one table with a
+**Cluster** column.
+
+- Each cluster is read in parallel, with the identity of the person signed
+  in. A cluster that is off, unreachable, refuses the read or has no access
+  in this session is shown as such on its chip, without holding the others.
+- **Filters**: cluster chips (one or more, or All clusters), state (running,
+  stopped, starting, paused, failed, other), namespace, and free text (name,
+  IP, node, cluster, label `key=value`). **Sort** on any column, both ways.
+  Filters and sort are remembered by the browser. The list refreshes every
+  15 seconds while it is on screen.
+- **Gestures**, with the cluster of the row: start or stop, console,
+  snapshots, migration, settings, notes, and the full actions menu. The
+  **selection can span clusters**: start, stop, restart, force stop and
+  migrate go cluster by cluster, each gesture a tracked action.
+
+Checked for real on five clusters (two physical, two nested, one off): 19
+VMs read in 40 ms from the shared reads, a VM of `harvlab` stopped from its
+row, then started again from a bulk action, `kubectl` confirming each step.
+
 ### The actions menu of a VM, as in Harvester (1.60.0)
 
 Each VM row has a **⋮** button. It opens a menu grouped the way Harvester's

@@ -8312,10 +8312,20 @@ def api_vms_list(cluster):
     kc = _kubectl_for_cluster(cluster)
     if _cluster_reachable(kc) is False:
         return jsonify(_unreachable_payload(cluster, kc)), 200
-
-    kc = _kubectl_for_cluster(cluster)
     if not kc:
         return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    payload, status, denials = _vms_collect(cluster, kc)
+    for d in denials:
+        _note_cluster_denial(d)
+    return jsonify(payload), status
+
+
+def _vms_collect(cluster, kc):
+    """Les VMs d'un cluster, sans contexte de requête (v1.85.0) : appelable
+    depuis un fil de travail, pour la vue de toutes les VMs. Rend (corps,
+    statut HTTP, sorties d'erreur refusées par la RBAC) ; c'est l'appelant,
+    dans le fil de la requête, qui retient les refus."""
+    denials = []
     # v1.81.0 : VMs et VMIs lues de front (l'une attendait l'autre)
     from concurrent.futures import ThreadPoolExecutor
     _pool = ThreadPoolExecutor(max_workers=1)
@@ -8331,20 +8341,18 @@ def api_vms_list(cluster):
         )
         if proc.returncode != 0:
             # stderr était jeté ici : un refus de la RBAC devenait un 500 muet.
-            _note_cluster_denial(proc.stderr)
-            return jsonify({"error": "kubectl failed",
-                            "detail": f"exit code {proc.returncode}"}), 500
+            denials.append(proc.stderr)
+            return {"error": "kubectl failed", "detail": f"exit code {proc.returncode}"}, 500, denials
         data = proc.data if getattr(proc, "data", None) is not None else json.loads(proc.stdout)
     except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        return jsonify({"error": "kubectl failed",
-                        "detail": _safe_proc_error(e)}), 500
+        return {"error": "kubectl failed", "detail": _safe_proc_error(e)}, 500, denials
 
     # Fetch VMIs to expose live phase + agent connection + paused state
     vmi_state = {}
     try:
         _vr = _vmi_fut.result()
         if _vr.returncode != 0:
-            _note_cluster_denial(_vr.stderr)
+            denials.append(_vr.stderr)
             raise ValueError("vmi unreadable")
         _vmi = _vr.data if getattr(_vr, "data", None) is not None else json.loads(_vr.stdout)
         for v in _vmi.get("items", []):
@@ -8434,7 +8442,51 @@ def api_vms_list(cluster):
     # Sort: (group_priority, group, priority, name) so the UI sees the
     # same ordering the shutdown script will use.
     vms.sort(key=lambda v: (v["group_priority"], v["group"], v["priority"], v["name"]))
-    return jsonify({"cluster": cluster, "vms": vms})
+    return {"cluster": cluster, "vms": vms}, 200, denials
+
+
+@app.route("/api/vms-all")
+@requires_auth
+@shared_read()
+def api_vms_all():
+    """Toutes les VMs de tous les clusters déclarés, en une liste (v1.85.0).
+    Chaque cluster est lu en parallèle avec l'identité de la personne (le
+    kubeconfig est préparé dans le fil de la requête, qui seul la connaît).
+    Un cluster éteint, injoignable ou qui refuse la lecture est dit dans
+    `clusters`, sans retenir les autres."""
+    cfg = load_config_ro()
+    todo = []
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if name:
+            todo.append((name, _kubectl_for_cluster(name)))
+
+    def one(item):
+        name, kc = item
+        if not kc:
+            return {"cluster": name, "state": "unknown"}, [], []
+        if _cluster_reachable(kc) is False:
+            return {"cluster": name, "state": "unreachable"}, [], []
+        try:
+            payload, status, denials = _vms_collect(name, kc)
+        except Exception as e:  # un cluster ne doit pas faire tomber la vue
+            return {"cluster": name, "state": "error", "error": _safe_proc_error(e)}, [], []
+        if status != 200:
+            denied = any(m in (d or "").lower() for d in denials for m in _DENIAL_MARKERS)
+            return ({"cluster": name, "state": "denied" if denied else "error",
+                     "error": payload.get("detail") or payload.get("error")}, [], denials)
+        vms = [dict(v, cluster=name) for v in payload["vms"]]
+        return {"cluster": name, "state": "ok", "count": len(vms)}, vms, denials
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(todo), 16))) as pool:
+        results = list(pool.map(one, todo))
+    clusters, vms = [], []
+    for info, rows, _denials in results:
+        clusters.append(info)
+        vms.extend(rows)
+    vms.sort(key=lambda v: (v["name"], v["cluster"], v["namespace"]))
+    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "vms": vms})
 
 
 # -----------------------------------------------------------------------------

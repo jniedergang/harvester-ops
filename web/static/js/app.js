@@ -43,6 +43,9 @@ const App = (() => {
     // les sections de Cluster (démarré/arrêté avec l'onglet, jamais en fond)
     if (name === 'forkliftglobal') { if (window.ForkliftGlobal) ForkliftGlobal.start($('#forklift-global-host')); }
     else if (window.ForkliftGlobal) ForkliftGlobal.stop();
+    // v1.85.0 : toutes les VMs, même cycle (rafraîchie seulement à l'écran)
+    if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host')); }
+    else if (window.AllVMs) AllVMs.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -251,6 +254,7 @@ const App = (() => {
     if (active === 'forkliftglobal' && window.ForkliftGlobal) {
       jobs.push(ForkliftGlobal.start($('#forklift-global-host')));
     }
+    if (active === 'allvms' && window.AllVMs) jobs.push(AllVMs.load());
     if (active === 'overview') {
       const mode = savedOverviewMode();
       if (mode !== 'metrics') {
