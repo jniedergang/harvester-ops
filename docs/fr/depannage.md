@@ -179,6 +179,28 @@ toute modification d'une migration à un compte qui ne peut pas créer de VMs
 dans le namespace cible. Supprimer de nouveau la vague à partir de 1.84.0 :
 la console retire elle-même le finaliseur, et les VMs restent.
 
+### Une VM Windows échoue à « conversion de l'invité »
+
+Le pod `<vague>-<vm>-…` du namespace cible affiche `inspect_os: unhandled
+exception thrown: Hivex.Error` : la conversion de l'invité du Forklift livré
+pour Harvester 1.9 (virt-v2v 2.7.7) ne sait pas lire le registre d'un Windows
+récent (vu sur Windows Server 2025). La bascule a arrêté la source : revenir
+à la source (elle se rallume), clore et supprimer la vague, puis composer une
+nouvelle vague en **copie brute** avec le **mode compatibilité** (le choix par
+défaut pour Windows depuis 1.87.0).
+
+### Une vague VMware affiche « Copie en attente de stockage »
+
+La classe de stockage cible ne peut pas placer un disque de la vague : Longhorn
+laisse le volume détaché (« insufficient storage », « un-schedulable
+replicas ») et la copie ne peut pas commencer. Libérer de la place sur le
+cluster, ajouter un disque, associer le datastore à une autre classe, ou
+relever `storage-over-provisioning-percentage` de Longhorn (les volumes sont
+alloués à la demande : un disque Windows de 40 Gio en occupe souvent bien
+moins). La copie démarre d'elle-même dès que le volume s'attache. Depuis
+1.87.0, une telle vague est refusée à la composition quand les chiffres
+montrent qu'elle ne tient pas.
+
 ### Un retour arrière dit « VMware waits for an answer »
 
 VMware a arrêté la source sur une question à la mise sous tension (souvent

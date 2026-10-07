@@ -823,7 +823,7 @@ def _vm_row(vm_id, vm, rolled, cutover_set=False):
             "cutover_started": cutover_started}
 
 
-def wave_state(plan, migrations, now=None):
+def wave_state(plan, migrations, now=None, blockers=None):
     """L'état d'une vague lu dans son Plan et ses Migrations.
 
     Ordre : close (annotation ou spec.archived), revenue à la source (toutes
@@ -844,6 +844,12 @@ def wave_state(plan, migrations, now=None):
         status_vms = {v.get("id"): v for v in ((cur.get("status") or {}).get("vms") or [])}
     cutover = ((cur or {}).get("spec") or {}).get("cutover") or None
     vms = [_vm_row(i, status_vms.get(i), rolled, cutover is not None) for i in ids]
+    # v1.87.0 : une copie qui n'a pas commencé parce que son volume ne vient
+    # pas (disk_blockers) le dit, au lieu d'un « 0 % » muet
+    for v in vms:
+        msg = (blockers or {}).get(v["id"])
+        v["blocked"] = msg if msg and not v["error"] and not v["progress"]["done"] \
+            and v["step_name"] in ("DiskTransfer", "Initialize", "") else ""
     message = ""
     errors = "; ".join(v["error"] for v in vms if v["error"])
     critical = [c for c in st.get("conditions") or []
@@ -876,6 +882,9 @@ def wave_state(plan, migrations, now=None):
             state = "ready"
         else:
             state = "pending"
+    blocked = [v for v in vms if v.get("blocked")]
+    if blocked and not message and state in ("copying", "cutover-scheduled", "cutting-over"):
+        message = "; ".join(f"{v['name'] or v['id']}: {v['blocked']}" for v in blocked)
     nexts = [v["next_precopy"] for v in vms if v["next_precopy"]]
     cutover_started = cutover is not None or any(v["cutover_started"] for v in vms)
     src = ((spec.get("provider") or {}).get("source")) or {}
@@ -888,6 +897,113 @@ def wave_state(plan, migrations, now=None):
             "state": state, "message": message, "migration": ((cur or {}).get("metadata") or {}).get("name"),
             "vms": vms, "cutover": cutover, "cutover_started": cutover_started,
             "next_precopy": min(nexts) if nexts and state in ("copying", "cutover-scheduled") else None}
+
+
+# --- place des disques et copies bloquées (v1.87.0) ----------------------------
+#
+# Vu en réel le 07/10/2026 (VM Windows de 40 Gio vers harvlab2) : la classe de
+# stockage cible ne pouvait pas placer le disque. Longhorn laissait le volume
+# détaché (« insufficient storage »), l'importeur attendait son attachement et
+# la vague affichait « copie des disques 0 % » sans un mot, indéfiniment.
+
+GIB = 1024 ** 3
+DISK_WAIT_RE = re.compile(r"insufficient storage|un-?schedulable replicas|not ready for workloads"
+                          r"|unbound immediate PersistentVolumeClaims|exceeded quota", re.I)
+DISK_ROOM_RE = re.compile(r"insufficient storage|un-?schedulable replicas", re.I)
+
+
+def room_shortfall(rows, vm_ids, storage_map, classes):
+    """[(classe, octets demandés, octets plaçables)] pour chaque classe de
+    stockage Longhorn qui ne peut pas recevoir les disques des VMs `vm_ids`.
+    `storage_map` : {datastore: classe} ; `classes` : celles de
+    longhorn_room.storage_room, avec `degraded_allocatable` quand il y a
+    moins de nœuds que de répliques (Longhorn crée alors un volume dégradé).
+    Une classe absente de `classes` (LVM, autre pilote) n'est pas jugée :
+    rien ne permet de la mesurer ici."""
+    ids = set(vm_ids)
+    needed = {}
+    for r in rows or []:
+        if r.get("id") not in ids:
+            continue
+        for d in r.get("disks") or []:
+            sc = storage_map.get(d.get("datastore"))
+            if sc:
+                needed[sc] = needed.get(sc, 0) + int(d.get("capacity") or 0)
+    out = []
+    for sc, n in sorted(needed.items()):
+        info = classes.get(sc)
+        if info is None:
+            continue
+        alloc = int(info.get("allocatable") or info.get("degraded_allocatable") or 0)
+        if n > alloc:
+            out.append((sc, n, alloc))
+    return out
+
+
+def _gib(n):
+    return f"{n / GIB:.1f} GiB"
+
+
+def room_refusal(short):
+    if not short:
+        return None
+    return "; ".join(
+        f"storage class {sc} can place {_gib(alloc)}, the disks of this wave need {_gib(n)} "
+        f"(Longhorn counts each disk at its full size, even thin): free space, add a disk, raise "
+        f"Longhorn's storage-over-provisioning-percentage, or map the datastore to another class"
+        for sc, n, alloc in short)
+
+
+def _ev_time(ev):
+    return _parse_ts(ev.get("lastTimestamp") or ev.get("eventTime")
+                     or ((ev.get("series") or {}).get("lastObservedTime")) or ev.get("firstTimestamp"))
+
+
+def disk_blockers(plan, pvcs, pods, events, now=None, window=900):
+    """{vm-NN: message} des disques d'une vague dont la copie attend un volume
+    que Kubernetes ou Longhorn ne peut pas fournir, lus dans les événements
+    récents (`window` secondes) des volumes de la vague et des pods
+    d'import qui les montent. Les volumes portent les étiquettes `plan` (uid
+    du plan) et `vmID` de Forklift, le volume intermédiaire `prime-…` monté
+    par l'importeur compris."""
+    uid = (plan.get("metadata") or {}).get("uid")
+    if not uid:
+        return {}
+    claim_vm = {}
+    for c in pvcs or []:
+        lab = (c.get("metadata") or {}).get("labels") or {}
+        if lab.get("plan") == uid and lab.get("vmID"):
+            claim_vm[c["metadata"]["name"]] = lab["vmID"]
+    pod_vm = {}
+    for p in pods or []:
+        for v in ((p.get("spec") or {}).get("volumes")) or []:
+            claim = (v.get("persistentVolumeClaim") or {}).get("claimName")
+            if claim in claim_vm:
+                pod_vm[(p.get("metadata") or {}).get("name")] = claim_vm[claim]
+    latest = {}
+    limit = _now(now) - timedelta(seconds=window)
+    for ev in events or []:
+        if ev.get("type") != "Warning":
+            continue
+        obj = ev.get("involvedObject") or {}
+        vm = (claim_vm if obj.get("kind") == "PersistentVolumeClaim" else
+              pod_vm if obj.get("kind") == "Pod" else {}).get(obj.get("name"))
+        msg = str(ev.get("message") or "")
+        if not vm or not DISK_WAIT_RE.search(msg):
+            continue
+        at = _ev_time(ev)
+        if at is None or at < limit:
+            continue
+        if vm not in latest or at > latest[vm][0]:
+            latest[vm] = (at, msg)
+    out = {}
+    for vm, (_, msg) in latest.items():
+        if DISK_ROOM_RE.search(msg):
+            out[vm] = ("the target storage cannot place this disk (Longhorn: insufficient storage), the copy "
+                       "waits for it: free space, add a disk, or raise storage-over-provisioning-percentage")
+        else:
+            out[vm] = "the disk copy waits for its volume: " + " ".join(msg.split())[:220]
+    return out
 
 
 def vm_warm_blockers(row):

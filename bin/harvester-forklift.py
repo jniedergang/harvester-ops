@@ -51,6 +51,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import hv_forklift as hf  # noqa: E402
+import longhorn_room  # noqa: E402
 import oci_push as op  # noqa: E402
 import vsphere_api as vs  # noqa: E402
 from kube import Kube, KubeError, cluster_config  # noqa: E402
@@ -534,12 +535,87 @@ def cmd_wave_apply(args, kube=None, fetch=None, sleep=time.sleep, now=time.time)
     mac = hf.mac_refusal(hf.mac_conflicts(rows, kube.list(K_VM), [v["id"] for v in plan_doc["spec"]["vms"]]))
     if mac:
         probs.append(mac)
+    if not probs:
+        room = wave_room_refusal(kube, rows, [v["id"] for v in plan_doc["spec"]["vms"]],
+                                 {m["source"]["id"]: m["destination"]["storageClass"] for m in docs[1]["spec"]["map"]})
+        if room:
+            probs.append(room)
     if probs:
         step("wave", "error", "; ".join(probs))
         return EXIT_REFUSED
     kube.apply(docs)
     step("wave", "running", f"wave {wave} applied ({len(plan_doc['spec']['vms'])} VMs): Forklift checks the plan")
     return until(lambda: plan_ready(get_opt(kube, hf.K_PLAN, hf.NS, wave)), args.timeout, "wave", sleep, now)
+
+
+def longhorn_classes(kube):
+    """Place plaçable par classe de stockage Longhorn (longhorn_room), avec la
+    règle de l'ordonnanceur pour un volume neuf : la marge de
+    sur-provisionnement limite la taille, la place libre n'est qu'un seuil ;
+    une réplique par nœud, volume dégradé quand il manque des nœuds."""
+    nums = {}
+    for name, default in (("storage-over-provisioning-percentage", 200.0),
+                          ("storage-minimal-available-percentage", 25.0)):
+        st = get_opt(kube, "settings.longhorn.io", "longhorn-system", name) or {}
+        try:
+            nums[name] = float(st.get("value"))
+        except (TypeError, ValueError):
+            nums[name] = default
+    over, minimal = nums["storage-over-provisioning-percentage"], nums["storage-minimal-available-percentage"]
+    nodes = kube.list("nodes.longhorn.io", "longhorn-system")
+    scs = kube.list("storageclasses")
+    # la règle de placement de Longhorn pour un volume neuf (v1.87.0)
+    room = longhorn_room.storage_room(nodes, scs, over, minimal, new_volume=True)
+    classes = {}
+    for sc in scs:
+        name = sc["metadata"]["name"]
+        info = room["classes"].get(name)
+        if info is None:
+            continue
+        info = dict(info)
+        if info["replicas"] > room["schedulable_nodes"] > 0:
+            fake = dict(sc, parameters=dict(sc.get("parameters") or {},
+                                            numberOfReplicas=str(room["schedulable_nodes"])))
+            info["degraded_allocatable"] = longhorn_room.storage_room(
+                nodes, [fake], over, minimal, new_volume=True)["classes"][name]["allocatable"]
+        classes[name] = info
+    return classes
+
+
+def wave_room_refusal(kube, rows, vm_ids, storage_map):
+    """Le refus d'une vague dont les disques ne tiennent pas dans leur classe
+    de stockage (v1.87.0) ; une lecture impossible de Longhorn est dite sans
+    bloquer (ce n'est pas pire qu'avant ce contrôle)."""
+    try:
+        classes = longhorn_classes(kube)
+    except KubeError as e:
+        step("room", "running", f"storage room not checked: {e}")
+        return None
+    return hf.room_refusal(hf.room_shortfall(rows, vm_ids, storage_map, classes))
+
+
+def wave_storage_map(kube, wave):
+    sto = get_opt(kube, hf.K_STORAGEMAP, hf.NS, f"{wave}-sto") or {}
+    return {((m.get("source") or {}).get("id")): ((m.get("destination") or {}).get("storageClass"))
+            for m in (sto.get("spec") or {}).get("map") or []}
+
+
+def wave_blockers(kube, plan, migs):
+    """Les copies arrêtées faute de volume (hf.disk_blockers), lues seulement
+    quand un disque de la vague est encore à 0 % : la liste des vagues ne
+    coûte rien de plus tant que tout avance."""
+    st = hf.wave_state(plan, migs)
+    if st["state"] not in ("copying", "cutover-scheduled", "cutting-over"):
+        return {}
+    if not any(not v["error"] and not v["progress"]["done"] and v["step_name"] in ("DiskTransfer", "Initialize", "")
+               for v in st["vms"]):
+        return {}
+    ns = st["target_namespace"]
+    try:
+        return hf.disk_blockers(plan, kube.list("persistentvolumeclaims", ns), kube.list("pods", ns),
+                                kube.list("events", ns))
+    except KubeError:
+        return {}
 
 
 def wave_mac_refusal(kube, plan, fetch=None):
@@ -577,6 +653,21 @@ def cmd_wave_start(args, kube=None, sleep=time.sleep, now=time.time, fetch=None)
     if mac:
         step("start", "error", mac)
         return EXIT_REFUSED
+    if not migs:
+        # la place a pu changer depuis la composition ; après une première
+        # migration, les volumes de la vague existent déjà et comptent dans
+        # la place prise : ne pas les compter deux fois
+        src = ((plan.get("spec") or {}).get("provider") or {}).get("source") or {}
+        ids = [v.get("id") for v in (plan.get("spec") or {}).get("vms") or []]
+        try:
+            rows = inventory(kube, src.get("namespace"), src.get("name"), "vms", fetch)
+        except (KubeError, ValueError) as e:
+            rows = None
+            step("room", "running", f"storage room not checked: {e}")
+        room = wave_room_refusal(kube, rows, ids, wave_storage_map(kube, wave)) if rows is not None else None
+        if room:
+            step("start", "error", room)
+            return EXIT_REFUSED
     doc = hf.migration_manifest(wave, next_migration_number(plan, migs))
     name = doc["metadata"]["name"]
     kube.create(doc)
@@ -620,7 +711,7 @@ def cmd_wave_cutover(args, kube=None, fetch=None):
 def cmd_wave_status(args, kube=None):
     kube = kube or kube_from(args)
     plan, migs = load_wave(kube, args.wave)
-    print(json.dumps(hf.wave_state(plan, migs)))
+    print(json.dumps(hf.wave_state(plan, migs, blockers=wave_blockers(kube, plan, migs))))
     return EXIT_OK
 
 
@@ -631,7 +722,7 @@ def cmd_waves(args, kube=None):
     for p in kube.list(hf.K_PLAN, hf.NS):
         lab = _labels(p)
         if lab.get(hf.L_MANAGED) == "true" and lab.get(hf.L_WAVE):
-            out.append(hf.wave_state(p, migs))
+            out.append(hf.wave_state(p, migs, blockers=wave_blockers(kube, p, migs)))
     print(json.dumps(sorted(out, key=lambda w: w["name"] or "")))
     return EXIT_OK
 

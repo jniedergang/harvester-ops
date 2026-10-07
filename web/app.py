@@ -16524,8 +16524,7 @@ def api_forklift(cluster):
                           "vddk_image": (spec.get("settings") or {}).get("vddkInitImage", ""),
                           "plans": _hf.plans_using(m.get("namespace"), m.get("name"), items("plans")),
                           "managed": (m.get("labels") or {}).get(_hf.L_MANAGED) == "true"})
-    waves = sorted((_hf.wave_state(p, items("migrations")) for p in items("plans") if _fk_is_wave(p)),
-                   key=lambda w: w["name"] or "")
+    waves = _fk_wave_states(kc, cluster, [p for p in items("plans") if _fk_is_wave(p)], items("migrations"))
     extra = _fk_wave_targets(items("nads"), items("classes"), items("namespaces")) if targets else {}
     return jsonify({
         **extra,
@@ -16879,11 +16878,33 @@ def _fk_global_cluster(name, kc):
     providers = sorted((_fk_provider_row(p) for p in items("providers")
                         if (p.get("spec") or {}).get("type") == "vsphere"),
                        key=lambda r: r["name"] or "")
-    waves = sorted((_hf.wave_state(p, items("migrations")) for p in items("plans") if _fk_is_wave(p)),
-                   key=lambda w: w["name"] or "")
+    waves = _fk_wave_states(kc, name, [p for p in items("plans") if _fk_is_wave(p)], items("migrations"))
     return {"cluster": name, "reachable": True, "forklift_ready": install["ready"],
             "cdi_importer_kind": _hf.cdi_importer_state(got["cdi_deploy"])["kind"],
             "providers": providers, "waves": waves}
+
+
+def _fk_wave_states(kc, cluster, plans, migrations):
+    """L'état des vagues, avec les copies arrêtées faute de volume (v1.87.0) :
+    les volumes, pods et événements d'un namespace cible ne sont lus que si
+    une de ses vagues a un disque encore à 0 %, une fois par namespace."""
+    states = [(p, _hf.wave_state(p, migrations)) for p in plans]
+    stalled = {st["target_namespace"] for _, st in states
+               if st["state"] in ("copying", "cutover-scheduled", "cutting-over") and st["target_namespace"]
+               and any(not v["error"] and not v["progress"]["done"]
+                       and v["step_name"] in ("DiskTransfer", "Initialize", "") for v in st["vms"])}
+    seen = {}
+    for ns in stalled:
+        got = [_kubectl_json(kc, "get", kind, "-n", ns, timeout=20, cluster=cluster)
+               for kind in ("persistentvolumeclaims", "pods", "events")]
+        seen[ns] = [(g or {}).get("items") or [] for g in got]
+    out = []
+    for p, st in states:
+        if st["target_namespace"] in seen:
+            pvcs, pods, events = seen[st["target_namespace"]]
+            st = _hf.wave_state(p, migrations, blockers=_hf.disk_blockers(p, pvcs, pods, events))
+        out.append(st)
+    return sorted(out, key=lambda w: w["name"] or "")
 
 
 @app.route("/api/forklift-global")

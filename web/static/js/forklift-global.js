@@ -220,6 +220,7 @@ const ForkliftGlobal = (() => {
    *  ne montre plus sa dernière étape Forklift, mais qu'elle est repartie
    *  sur son hôte d'origine. */
   function vmStepText(wave, vm) {
+    if (vm.blocked) return `<span class="fk-blocked tip" data-tip="${esc(vm.blocked)}">${icon('warn', 12)} ${esc(tr('fk.w.blocked'))}</span>`;
     if ((wave.state === 'closed' || wave.state === 'rolled-back') && vm.rolled_back) return esc(tr('fk.stepName.rolledBack'));
     return stepText(vm);
   }

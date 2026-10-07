@@ -740,6 +740,8 @@ const Forklift = (() => {
   // simplement son prochain tour : on le dit avec le prochain moment de
   // copie quand il est connu.
   function stepText(v) {
+    // v1.87.0 : copie arrêtée faute de volume (place, attachement), dite
+    if (v.blocked) return `<span class="fk-blocked tip" data-tip="${esc(v.blocked)}">${icon('warn', 12)} ${esc(tr('fk.w.blocked'))}</span>`;
     if (v.step_name === 'CopyingPaused') return `${esc(tr('fk.w.copyingPaused'))}${v.next_precopy ? ` ${countdown(v.next_precopy)}` : ''}`;
     const key = STEP_NAME_I18N[v.step_name];
     return key ? esc(tr(key)) : esc(v.step || v.phase || '–');
@@ -879,11 +881,12 @@ const Forklift = (() => {
           tr('fk.t.stoMap', { name: stoName[id] || id }))).join('') : `<p class="form-hint">${esc(tr('fk.w.noStorage'))}</p>`}
       </fieldset>
       <fieldset class="fk-tls"><legend>${esc(tr('fk.w.options'))}</legend>
-        <label class="fk-check tip" data-tip="${esc(tr('fk.t.rawCopy'))}"><input type="checkbox" name="skip_conversion" ${linux ? 'checked' : ''}> ${esc(tr('fk.f.rawCopy'))}</label>
+        <label class="fk-check tip" data-tip="${esc(tr('fk.t.rawCopy'))}"><input type="checkbox" name="skip_conversion" ${linux || windows ? 'checked' : ''}> ${esc(tr('fk.f.rawCopy'))}</label>
         <p class="form-hint">${esc(tr('fk.w.rawCopyHint'))}</p>
         ${linux ? `<p class="form-hint" data-fk="raw-linux">${icon('info', 12)} ${esc(tr('fk.w.rawCopyLinux'))}</p>` : ''}
-        ${windows ? `<p class="form-hint" data-fk="raw-windows">${icon('warn', 12)} ${esc(tr('fk.w.rawCopyWindows'))}</p>` : ''}
-        <label class="fk-check tip" data-tip="${esc(tr('fk.t.compatMode'))}"><input type="checkbox" name="compat_mode" ${linux ? '' : 'disabled'}> ${esc(tr('fk.f.compatMode'))}</label>
+        ${windows ? `<p class="form-hint" data-fk="raw-windows">${icon('warn', 12)} ${esc(tr('fk.w.rawCopyWindows'))}</p>
+        <p class="form-hint" data-fk="raw-windows-ip">${icon('info', 12)} ${esc(tr('fk.w.rawCopyWindowsIp'))}</p>` : ''}
+        <label class="fk-check tip" data-tip="${esc(tr('fk.t.compatMode'))}"><input type="checkbox" name="compat_mode" ${windows ? 'checked' : linux ? '' : 'disabled'}> ${esc(tr('fk.f.compatMode'))}</label>
         <label class="fk-check tip" data-tip="${esc(tr('fk.t.staticIps'))}"><input type="checkbox" name="preserve_static_ips"> ${esc(tr('fk.f.staticIps'))}</label>
       </fieldset>`;
     // sans classe de stockage utilisable, la vague ne pourra jamais créer de

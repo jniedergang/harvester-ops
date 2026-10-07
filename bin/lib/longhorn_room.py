@@ -7,14 +7,24 @@ la console.
 """
 
 
-def storage_room(lh_nodes, storage_classes, over, minimal):
+def storage_room(lh_nodes, storage_classes, over, minimal, new_volume=False):
     """Place allouable, par disque et par storage class Longhorn.
 
     Fonction pure, partagée par le panneau de création de VM, la vue
     Stockage et le transfert de VM entre clusters (v1.45.0, qui tourne aussi
     en ligne de commande sans la console) : deux calculs de « place
     restante » finiraient par diverger, et l'exploitant verrait deux
-    chiffres pour la même question."""
+    chiffres pour la même question.
+
+    `new_volume` (v1.87.0, vagues de migration) : la place qu'accepte
+    l'ordonnanceur de Longhorn pour un volume NEUF. Il ne retranche pas la
+    taille du volume de la place libre (rien n'y est encore écrit) : la
+    place libre n'est qu'un seuil (le disque doit rester au-dessus de
+    `minimal`), et seul le sur-provisionnement limite la taille. Vu en réel le
+    07/10/2026 : un disque de 40 Gio placé avec 19,5 Gio de « place libre »
+    mais 77,8 Gio de marge de sur-provisionnement, refusé à 28,9 Gio de
+    marge. Le calcul par défaut, plus prudent, reste celui de la création et
+    du transfert de VM, qui écrivent leurs données aussitôt."""
     disks = []
     for node in lh_nodes:
         node_name = (node.get("metadata") or {}).get("name")
@@ -32,7 +42,10 @@ def storage_room(lh_nodes, storage_classes, over, minimal):
             reserved = spec_disk.get("storageReserved") or 0
             room_over = (maximum - reserved) * over / 100.0 - scheduled
             room_free = available - maximum * minimal / 100.0
-            room = max(0, int(min(room_over, room_free)))
+            if new_volume:
+                room = max(0, int(room_over)) if room_free > 0 else 0
+            else:
+                room = max(0, int(min(room_over, room_free)))
             disks.append({
                 "node": node_name, "disk": disk_name,
                 "path": spec_disk.get("path") or ds.get("diskPath"),
@@ -44,7 +57,8 @@ def storage_room(lh_nodes, storage_classes, over, minimal):
                 # Dire LAQUELLE des deux contraintes serre : sinon un
                 # opérateur qui voit un chiffre bas cherche de la place là
                 # où il n'y a rien à gagner.
-                "limited_by": "over-provisioning" if room_over < room_free else "free-space",
+                "limited_by": ("free-space" if new_volume and room_free <= 0 else "over-provisioning"
+                               if new_volume or room_over < room_free else "free-space"),
             })
 
     # Meilleure place par NODE : deux répliques ne vont pas sur le même.

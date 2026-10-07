@@ -5349,3 +5349,6 @@ td.fk-reason { max-width: 260px; }
 @media (max-width: 900px) {
   .avm-count { margin-left: 0; width: 100%; }
 }
+
+/* v1.87.0 : copie d'une vague arrêtée faute de stockage */
+.fk-blocked { color: var(--warn); font-weight: 600; white-space: nowrap; }

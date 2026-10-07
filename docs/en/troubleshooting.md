@@ -176,6 +176,26 @@ migration, and Forklift's webhook refuses any change to a migration from an
 account that cannot create VMs in the target namespace. Delete the wave again
 from 1.84.0: the console removes the finalizer itself and the VMs stay.
 
+### A Windows VM fails at "converting guest"
+
+The pod `<wave>-<vm>-…` of the namespace target shows `inspect_os: unhandled
+exception thrown: Hivex.Error`: the guest conversion of the Forklift shipped
+for Harvester 1.9 (virt-v2v 2.7.7) cannot read the registry of a recent
+Windows (seen on Windows Server 2025). The source was stopped by the
+switchover: roll the wave back (the source powers on), close and delete it,
+then compose a new wave with **raw copy** and **compatibility mode** (the
+default for Windows from 1.87.0).
+
+### A VMware wave says "Disk copy waiting for storage"
+
+The target storage class cannot place a disk of the wave: Longhorn leaves the
+volume detached ("insufficient storage", "un-schedulable replicas") and the
+copy cannot start. Free space on the cluster, add a disk, map the datastore to
+another class, or raise Longhorn's `storage-over-provisioning-percentage`
+(volumes are thin: a 40 GiB Windows disk often holds far less). The copy
+starts by itself once the volume attaches. From 1.87.0 such a wave is refused
+at composition when the figures show it cannot fit.
+
 ### A rollback says "VMware waits for an answer"
 
 VMware stopped the source on a question at power-on (often a serial port

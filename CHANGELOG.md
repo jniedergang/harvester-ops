@@ -4,6 +4,54 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.87.0] - 2026-10-07 - Windows VMs from VMware, verified, and waves that say when their disks cannot fit
+
+### Fixed
+- Windows guests: the wave composition now ticks **raw copy in compatibility
+  mode** (SATA disks, e1000e cards) when a Windows VM is selected, with a hint
+  explaining why and warning that a static IP does not follow. Checked for
+  real: the guest conversion of the Forklift shipped for Harvester 1.9
+  (virt-v2v 2.7.7) fails on Windows Server 2025 while reading its registry
+  (`Hivex.Error`), after the switchover stopped the source; the raw copy in
+  compatibility mode booted the same Windows on Harvester. Untick raw copy to
+  try the conversion on an older Windows.
+- A wave whose disks did not fit its target storage class stayed on
+  "copying disks 0 %" forever, with no word: Longhorn left the volume
+  detached ("insufficient storage") and the import waited. The composition
+  and the first start of a wave now refuse it with the figures (room of the
+  class, size of the disks) and what to do. The room follows the rule of
+  Longhorn's scheduler for a new volume: the over-provisioning margin, the
+  free space being only a threshold (a new volume holds no data yet).
+- A copy waiting for a volume Kubernetes or Longhorn cannot provide now shows
+  **Disk copy waiting for storage**, with the reason read in the events of the
+  volume and of the import pod, in the wave windows, the global migrations
+  view and the CLI (`wave-status`, `waves`). These events are read only when a
+  disk of a wave is still at 0 %.
+
+### Docs
+- Capabilities (EN/FR): Windows guests, room of the disks, blocked copies.
+  Troubleshooting (EN/FR): "Disk copy waiting for storage", a Windows VM
+  failing at "converting guest".
+
+### Tests
+- `tests/api/test_forklift_room_187.py`: room of a new volume on the real
+  figures of the test cluster (40 GiB placed at 200 % over-provisioning with
+  19.5 GiB of free space, refused at 100 %), the shortfall of a wave, the
+  refusal text, the blockers followed from the import pod to its VM, old or
+  foreign events ignored, a blocked copy said by the VM and the wave, the CLI
+  refusing at composition and at the first start only.
+- `tests/e2e/test_forklift_blocked_187.py`: the blocked copy with its reason
+  in the global migrations view. `test_forklift_b2_176.py`: a Windows guest
+  gets raw copy and compatibility mode, unticking raw copy returns to the
+  conversion.
+- Checked for real on harvlab2 and the VMware bench: VMware Tools installed
+  in the Windows Server 2025 source, a first wave with conversion failing at
+  "converting guest" (rolled back, the source powered on), the room check
+  refusing a 40 GiB disk then fixed to Longhorn's real rule, a second wave in
+  raw copy and compatibility mode: switchover in 2 min 03 s, Windows booted
+  on Harvester with its MAC (new card, DHCP), then rolled back in 37 s and the
+  source answering again on its static IP.
+
 ## [1.86.0] - 2026-10-06 - A presentation site in five languages, with a live demo
 
 ### Added

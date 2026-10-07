@@ -407,15 +407,24 @@ def test_composing_a_wave_from_the_inventory_sends_the_maps_and_ticks_raw_copy_f
                              "skip_conversion": True, "compat_mode": False, "preserve_static_ips": False}}
 
 
-def test_a_windows_guest_keeps_the_conversion_and_an_unknown_network_goes_to_the_pod_network(context, flask_server):
+def test_a_windows_guest_gets_the_verified_raw_copy_and_can_still_ask_for_the_conversion(context, flask_server):
+    """v1.87.0 : vu en réel, la conversion de Harvester 1.9 (virt-v2v 2.7.7)
+    échoue sur Windows Server 2025 après l'arrêt de la source ; la copie
+    brute en mode compatibilité démarre. C'est elle qui est cochée, avec
+    l'avertissement sur l'IP fixe ; décocher revient à la conversion."""
     page, sent, _ = open_waves(context, flask_server, [])
     page.evaluate("vms => Forklift.composeWave(vms)",
                   [{**VMS_ROWS[0], "namespace": "forklift", "source": "vmwlab"},
                    {**WINDOWS_VM, "namespace": "forklift", "source": "vmwlab"}])
     win = page.locator("#fp-fk-wave-new-harv-fake")
-    expect(win.locator('[data-fk="raw-windows"]')).to_be_visible()
-    expect(win.locator('[name="skip_conversion"]')).not_to_be_checked()
+    expect(win.locator('[data-fk="raw-windows"]')).to_contain_text("Windows Server 2025")
+    expect(win.locator('[data-fk="raw-windows-ip"]')).to_contain_text("DHCP")
+    expect(win.locator('[name="skip_conversion"]')).to_be_checked()
+    expect(win.locator('[name="compat_mode"]')).to_be_checked()
+    expect(win.locator('[name="compat_mode"]')).to_be_enabled()
+    win.locator('[name="skip_conversion"]').uncheck()
     expect(win.locator('[name="compat_mode"]')).to_be_disabled()
+    expect(win.locator('[name="compat_mode"]')).not_to_be_checked()
     expect(win.locator('[data-fk-net="network-14"]')).to_have_value("pod")
     for el in win.locator("select, input:not([type=hidden]), button").all():
         assert el.get_attribute("data-tip") or el.get_attribute("title") or el.evaluate(

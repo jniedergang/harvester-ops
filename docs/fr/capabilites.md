@@ -1575,12 +1575,35 @@ pour chaque datastore une classe de stockage, et deux options :
 conserver les IP statiques, et la **copie brute** (sans conversion de
 l'invité). La conversion est faite par défaut ; la copie brute raccourcit
 la coupure mais l'invité doit déjà avoir les pilotes virtio (la plupart
-des Linux, pas Windows) : elle est cochée d'office quand toutes les VMs
-sont sous Linux, et un invité Windows coché le signale. Une VM déjà prise
+des Linux) : elle est cochée d'office quand toutes les VMs sont sous
+Linux. Quand un invité Windows est choisi, c'est la copie brute **en mode
+compatibilité** (disques SATA, cartes e1000e, que Windows pilote sans
+pilote supplémentaire) qui est cochée, la voie vérifiée en réel en
+1.87.0 : une VM Windows Server 2025 (40 Gio, BIOS, LSI SAS, e1000e) passée à
+chaud de vCenter à Harvester 1.9 en 2 min 03 s de bascule, qui a démarré en
+gardant son MAC. La conversion de l'invité du Forklift livré pour Harvester
+1.9 (virt-v2v 2.7.7) échoue sur ce Windows en lisant son registre
+(`Hivex.Error`), une fois la source arrêtée ; décocher la copie brute pour
+la tenter sur un Windows plus ancien. En copie brute, Windows voit une
+nouvelle carte réseau : une IP fixe ne suit pas, l'invité repasse en DHCP.
+Installer ensuite les pilotes virtio pour de meilleures performances disque
+et réseau. Une VM déjà prise
 par une vague ouverte, sur ce cluster ou sur un autre cluster déclaré
 dans la console, est refusée (une même VM est reconnue par son vCenter et
 son identifiant `vm-NN`) ; un cluster injoignable est nommé dans la
 réponse, sans bloquer la composition.
+Les disques doivent aussi tenir (1.87.0) : pour chaque classe de stockage
+cible, la console additionne les disques de la vague et les compare à la
+place que l'ordonnanceur de Longhorn accorde à un volume neuf : la marge de
+sur-provisionnement, tant que chaque disque reste au-dessus de la place libre
+minimale (un volume neuf ne contient encore rien, sa taille n'est pas prise
+sur la place libre), une réplique par nœud, un volume dégradé quand il y a
+moins de nœuds que de répliques. Une vague qui ne tient pas
+est refusée avec les chiffres, à la composition puis au lancement de sa
+première migration. Pendant la copie, un disque encore à 0 % parce que
+Kubernetes ou Longhorn ne fournit pas son volume affiche **Copie en attente de
+stockage**, avec la raison lue dans les événements du volume et du pod
+d'import, au lieu d'un « copie des disques » sans fin.
 
 **Vagues**, nouvel onglet : un bloc par vague, avec son état (prête à
 lancer, en validation, refusée par Forklift, copie en cours, bascule

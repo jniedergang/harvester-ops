@@ -1413,11 +1413,32 @@ Harvester VM network or the pod network, for each datastore a storage
 class, and two options: keep static IPs, and **raw copy** (no guest
 conversion). Conversion is on by default; a raw copy shortens the
 downtime but the guest must already have virtio drivers (most Linux
-guests, not Windows): it is ticked by default when every VM runs Linux,
-and a ticked Windows guest is flagged. A VM already in an open wave, on
+guests): it is ticked by default when every VM runs Linux. When a Windows
+guest is selected, raw copy **in compatibility mode** (SATA disks, e1000e
+cards, devices Windows drives without extra drivers) is ticked instead, the
+path verified for real in 1.87.0: a Windows Server 2025 VM (40 GiB, BIOS, LSI
+SAS, e1000e) moved warm from vCenter to Harvester 1.9 in 2 min 03 s of
+switchover and booted, its MAC kept. The guest conversion of the Forklift
+shipped for Harvester 1.9 (virt-v2v 2.7.7) fails on that Windows while
+reading its registry (`Hivex.Error`), after the source was stopped; untick
+raw copy to try it on an older Windows. With a raw copy Windows sees a new
+network card: a static IP is not carried over, the guest falls back to
+DHCP. Install the virtio drivers later for better disk and network
+performance. A VM already in an open wave, on
 this cluster or on another cluster declared in the console, is refused
 (a VM is identified by its vCenter and its `vm-NN` id); an unreachable
 cluster is named in the answer without blocking the compose.
+The disks must also fit (1.87.0): for each target storage class, the
+console adds up the disks of the wave and compares them with the room
+Longhorn's scheduler gives a new volume: the over-provisioning margin, as long
+as each disk stays above the minimal free space (a new volume holds no data
+yet, its size is not taken from the free space), one replica per node, a
+degraded volume when there are fewer nodes than replicas. A wave that does not fit is refused with the
+figures, at composition and again when its first migration starts. During
+the copy, a disk still at 0 % because Kubernetes or Longhorn cannot provide
+its volume shows **Disk copy waiting for storage**, with the reason read in
+the events of the volume and of the import pod, instead of an endless
+"copying disks".
 
 **Waves**, a new tab: one block per wave, with its state (ready to start,
 validating, refused by Forklift, copying, cutover scheduled, cutting
