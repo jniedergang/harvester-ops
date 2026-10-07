@@ -7,7 +7,7 @@
 | OS | SUSE / openSUSE | Supported targets (uses `zypper` for dependencies) |
 | `bash` | ≥ 4.0 | Scripts |
 | `kubectl` | matching cluster minor version | API client |
-| `ssh` | OpenSSH 7+ | Node shutdown |
+| `ssh` / `ssh-keygen` | OpenSSH 7+; `ssh-keygen -Y` (8.2+) for updates | Node shutdown + release signature verification |
 | `yq` | ≥ 4.0 (mikefarah) | Config parsing |
 | `python3` | ≥ 3.9 | JSON helpers + Flask UI |
 | `podman` | recent | Required only if you install the web UI |
@@ -17,6 +17,19 @@ One-liner to install dependencies:
 ```bash
 sudo zypper install -y bash openssh-clients kubectl yq python3 podman
 ```
+
+The update agent runs on the host, outside the UI container. The installer
+selects a Python >= 3.9 (`python3`, or a versioned `python3.9`–`python3.14`)
+and pins its absolute path in `harvester-ops-update.service`. It refuses to
+install the agent if none is available, without changing the system Python
+alternative. A current Python inside the container does not satisfy this
+host requirement.
+
+Existing installations with an older interpreter in the updater unit need a
+one-time host repair before they can install this fix through the UI. Set
+`ExecStart` in a systemd override to a supported host interpreter (for example
+`/usr/bin/python3.12 /usr/local/bin/harvester-ops-update.py`, preceded by an
+empty `ExecStart=`), run `systemctl daemon-reload`, then retry from the UI.
 
 ## Install steps
 

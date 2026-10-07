@@ -78,6 +78,8 @@ check_deps() {
         exit 2
     fi
 
+    detect_update_python >/dev/null || return 2
+
     if ! command -v kubectl >/dev/null 2>&1; then
         warn "kubectl not found — required to operate clusters"
         info "Install: https://kubernetes.io/docs/tasks/tools/"
@@ -458,11 +460,40 @@ secure_config() {
     ok "$CONF_DIR readable by the harvester-ops group only"
 }
 
+# The host default can still be Python 3.6 on RHEL 8, even when a newer
+# interpreter is installed. Pin a supported interpreter in the updater unit;
+# do not change the system-wide python3 alternative.
+detect_update_python() {
+    local candidate resolved
+    for candidate in python3 python3.14 python3.13 python3.12 python3.11 python3.10 python3.9; do
+        resolved="$(command -v "$candidate" 2>/dev/null)" || continue
+        [[ "$resolved" == /* && -x "$resolved" ]] || continue
+        if "$resolved" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+            printf '%s\n' "$resolved"
+            return 0
+        fi
+    done
+    err "The update agent requires Python >= 3.9 on the host; install python3.9 or newer."
+    return 2
+}
+
+render_update_service() {
+    local python="$1"
+    # Escape sed replacement characters in the resolved executable path.
+    python="${python//\\/\\\\}"
+    python="${python//&/\\&}"
+    python="${python//|/\\|}"
+    sed "s|^ExecStart=/usr/bin/python3 |ExecStart=$python |" \
+        "$SCRIPT_DIR/config/systemd/harvester-ops-update.service"
+}
+
 # v1.82.0 : l'agent de mise à jour. La console, non root, ne peut ni charger
 # une image ni se redémarrer : elle dépose une demande que cet agent, root,
 # traite après avoir vérifié la signature de l'archive avec les clés de
 # confiance livrées ici (ou celles de $CONF_DIR/update-signers, qui prévalent).
 install_update_agent() {
+    local update_python
+    update_python="$(detect_update_python)" || return 2
     install -d -m 0755 "$INSTALL_DIR" /etc/systemd/system
     if [[ -f "$SCRIPT_DIR/config/update-signers" ]]; then
         install -m 0644 "$SCRIPT_DIR/config/update-signers" "$INSTALL_DIR/update-signers"
@@ -474,6 +505,7 @@ install_update_agent() {
     for u in harvester-ops-update.service harvester-ops-update.path; do
         install -m 0644 "$SCRIPT_DIR/config/systemd/$u" "/etc/systemd/system/$u"
     done
+    render_update_service "$update_python" > /etc/systemd/system/harvester-ops-update.service
     # la console sait ainsi qu'un agent l'attend (elle ne voit pas l'hôte)
     printf '{"installed": "%s", "ts": %s}\n' "$(cat "$SCRIPT_DIR/VERSION")" "$(date +%s)" \
         > "$STATE_DIR/updates/agent.json"
@@ -489,6 +521,7 @@ install_update_agent() {
 # configuration, aux comptes, aux certificats ni au pare-feu.
 upgrade() {
     require_root
+    detect_update_python >/dev/null || return 2
     info "Upgrading harvester-ops to $(cat "$SCRIPT_DIR/VERSION")"
     install_scripts
     setup_service_account

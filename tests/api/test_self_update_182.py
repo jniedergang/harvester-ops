@@ -289,6 +289,26 @@ def test_agent_refuses_a_symlinked_archive(agent_env, keys, tmp_path):
     assert st["state"] == "failed" and "staging" in st["message"]
 
 
+@pytest.mark.parametrize("error", [TypeError("unsupported subprocess option"), OSError("host tool unavailable")])
+def test_agent_unexpected_verification_error_is_terminal(agent_env, keys, monkeypatch, capsys, error):
+    ag, dirs = agent_env
+    a = request(dirs, keys, signed=False)
+    host = FakeHost(dirs, "1.82.0")
+
+    def fail(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(ag.su, "verify_signature", fail)
+    rc, st = run_agent(ag, host, lambda run: (True, "1.82.0"))
+    assert rc == 1 and st["state"] == "failed"
+    assert type(error).__name__ in st["message"] and st["ended"] >= st["started"]
+    assert "Traceback" in capsys.readouterr().err
+    assert not host.calls                  # no install, restart or retry
+    assert a.exists()                      # retain the staged release
+    assert (dirs["opt"] / "VERSION").read_text().strip() == "1.81.0"
+    assert not (dirs["state"] / "updates" / "request.json").exists()
+
+
 def test_agent_with_no_request_does_nothing(agent_env):
     ag, dirs = agent_env
     assert ag.Agent(run=lambda *a, **k: None).process() == 0
