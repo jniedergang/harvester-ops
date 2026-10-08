@@ -129,6 +129,17 @@ attend avant de conclure : le cas ne se présente plus.
 
 ## Déplacer une VM entre clusters
 
+### « Le cluster cible ne répond pas » derrière un proxy Rancher
+
+Un proxy Rancher peut retourner 404 pour `/readyz` alors que les lectures
+authentifiées des ressources Kubernetes fonctionnent. Les anciens contrôles
+utilisaient cette adresse et pouvaient déclarer la cible à tort injoignable.
+Le contrôle utilise maintenant l'inventaire des CRD nécessaire au transfert.
+Les erreurs de connexion, d'authentification et de certificat bloquent toujours
+le contrôle ; le kubeconfig cible doit autoriser la lecture des définitions
+de ressources personnalisées.
+
+
 ### « The target cluster never fetched the disk »
 
 La copie par la console exige que les nœuds de la cible joignent l'hôte de

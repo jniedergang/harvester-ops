@@ -128,6 +128,16 @@ before concluding, so this no longer happens.
 
 ## Moving a VM between clusters
 
+### "The target cluster does not answer" through a Rancher proxy
+
+A Rancher proxy can return 404 for `/readyz` even when authenticated
+Kubernetes resource reads succeed. Earlier transfer checks used that
+endpoint and could report the target as unreachable. The pre-check now
+uses the CRD inventory required for the transfer instead. API connection,
+authentication and certificate failures still block the check; the target
+kubeconfig must permit reading custom resource definitions.
+
+
 ### "The target cluster never fetched the disk"
 
 The copy through the console needs the target's nodes to reach the console

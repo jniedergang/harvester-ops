@@ -147,11 +147,14 @@ def collect_source(kube, ns, name, cluster=""):
 
 
 def collect_target(kube, namespace, name, cluster=""):
+    # Rancher proxies may return 404 for /readyz while resource reads work.
+    # Probe with the CRD inventory needed below, preserving the bounded read.
     try:
-        kube.run("get", "--raw", "/readyz", timeout=15)
+        crd_list = json.loads(kube.run("get", "customresourcedefinitions",
+                                     "-o", "json", timeout=15))
     except (KubeError, subprocess.SubprocessError):
         return {"cluster": cluster, "reachable": False}
-    crd_objs = {c["metadata"]["name"]: c for c in kube.list("customresourcedefinitions")}
+    crd_objs = {c["metadata"]["name"]: c for c in crd_list.get("items", [])}
     crds = set(crd_objs)
     cdi_ok = False
     if "datavolumes.cdi.kubevirt.io" in crds:
