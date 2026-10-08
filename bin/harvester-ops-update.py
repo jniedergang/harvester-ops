@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tarfile
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 
@@ -112,6 +113,13 @@ class Agent:
             return self._process(req, current)
         except su.UpdateError as e:
             self.finish("failed", str(e))
+            return 1
+        except Exception as e:
+            # An unexpected host/runtime error must not leave the console
+            # showing an update in progress. Keep the traceback in journald;
+            # do not retry commands or initiate another installation here.
+            traceback.print_exc()
+            self.finish("failed", f"Unexpected {type(e).__name__}; see journalctl -u harvester-ops-update.service")
             return 1
         finally:
             _give_to_service(self.log_path)

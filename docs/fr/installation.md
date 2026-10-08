@@ -7,7 +7,7 @@
 | OS | SUSE / openSUSE | Cibles supportées (dépendances installées via `zypper`) |
 | `bash` | ≥ 4.0 | Scripts |
 | `kubectl` | version mineure du cluster | Client API |
-| `ssh` | OpenSSH 7+ | Extinction des nodes |
+| `ssh` / `ssh-keygen` | OpenSSH 7+ ; `ssh-keygen -Y` (8.2+) pour les mises à jour | Extinction des nodes + vérification des signatures |
 | `yq` | ≥ 4.0 (mikefarah) | Parsing config |
 | `python3` | ≥ 3.9 | Helpers JSON + UI Flask |
 | `podman` | récent | Requis uniquement pour l'UI web |
@@ -17,6 +17,19 @@ One-liner pour installer les dépendances :
 ```bash
 sudo zypper install -y bash openssh-clients kubectl yq python3 podman
 ```
+
+L'agent de mise à jour tourne sur l'hôte, hors du conteneur de la console.
+L'installeur choisit un Python >= 3.9 (`python3`, ou `python3.9`–`python3.14`)
+et inscrit son chemin absolu dans `harvester-ops-update.service`. Sans
+interpréteur compatible, il refuse d'installer l'agent ; il ne change pas
+l'alternative Python du système. Le Python du conteneur ne suffit pas.
+
+Pour une installation existante dont l'unité utilise un ancien Python, une
+correction sur l'hôte est nécessaire avant de recevoir ce correctif depuis
+l'interface : définir `ExecStart` dans une surcharge systemd avec un Python
+compatible (par exemple `/usr/bin/python3.12 /usr/local/bin/harvester-ops-update.py`,
+précédé d'un `ExecStart=` vide), lancer `systemctl daemon-reload`, puis
+réessayer depuis l'interface.
 
 ## Étapes d'installation
 
