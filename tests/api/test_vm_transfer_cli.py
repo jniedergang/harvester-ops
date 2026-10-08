@@ -6,6 +6,7 @@ en `check` ni en `--dry-run`. Le faux kubectl répond depuis un état JSON
 (le « kubeconfig » EST ce fichier d'état) et journalise chaque appel.
 """
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -28,10 +29,14 @@ rest = args[:i] + args[i + 2:]
 with open(os.environ["FAKE_KUBECTL_LOG"], "a") as f:
     f.write(json.dumps({"kc": os.path.basename(kc), "args": rest}) + "\n")
 state = json.load(open(kc))
+if rest[0] == "get" and state.get("down"):
+    sys.stderr.write("Unable to connect to the server\n"); sys.exit(1)
 if rest[:2] == ["get", "--raw"]:
-    if state.get("down"):
-        sys.stderr.write("Unable to connect to the server\n"); sys.exit(1)
+    if state.get("readyz_error") and rest[2] == "/readyz":
+        sys.stderr.write(state["readyz_error"] + "\n"); sys.exit(1)
     print("ok"); sys.exit(0)
+if rest[:2] == ["get", "customresourcedefinitions"] and state.get("crd_error"):
+    sys.stderr.write(state["crd_error"] + "\n"); sys.exit(1)
 if rest[0] == "config":
     print(state.get("server", "https://127.0.0.1:6443")); sys.exit(0)
 if rest[0] in ("create", "patch", "delete", "replace"):
@@ -212,6 +217,66 @@ def test_unreachable_target(sandbox):
                      "--to-kubeconfig", str(d), "--json")
     assert r.returncode == 2
     assert [f["code"] for f in json.loads(r.stdout)["findings"]] == ["target-unreachable"]
+
+
+def test_rancher_proxy_without_readyz_uses_resource_inventory(sandbox):
+    s = sandbox.write("harvlab", source_state())
+    target = target_state()
+    target["server"] = "https://rancher.example/k8s/clusters/local"
+    target["readyz_error"] = "Error from server (NotFound): the server could not find the requested resource"
+    d = sandbox.write("harvlab2", target)
+    probe_env = dict(os.environ, FAKE_KUBECTL_LOG=str(sandbox.tmp / "calls.log"))
+    probe = subprocess.run([str(sandbox.tmp / "bin" / "kubectl"), "--kubeconfig", str(d),
+                            "get", "--raw", "/readyz"], env=probe_env,
+                           capture_output=True, text=True)
+    assert probe.returncode == 1 and "NotFound" in probe.stderr
+    (sandbox.tmp / "calls.log").write_text("")
+    r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
+                     "--to-kubeconfig", str(d), "--json")
+    assert r.returncode == 0, r.stdout + r.stderr
+    out = json.loads(r.stdout)
+    assert not [f for f in out["findings"] if f["level"] == "block"]
+    assert out["target"]["networks"] == ["default/production"]
+    calls = sandbox.calls()
+    target_calls = [c["args"] for c in calls if c["kc"] == d.name]
+    assert ["get", "customresourcedefinitions", "-o", "json"] in target_calls
+    assert not any("--raw" in args for args in target_calls)
+    assert not any(c["args"][0] in ("create", "patch", "delete", "replace") for c in calls)
+
+
+@pytest.mark.parametrize("error", [
+    "Error from server (Forbidden): customresourcedefinitions is forbidden",
+    "Error from server (Unauthorized): Unauthorized",
+    "Unable to connect to the server: x509: certificate signed by unknown authority",
+    "Unable to connect to the server: connection refused",
+])
+def test_target_inventory_errors_still_block_without_writes(sandbox, error):
+    s = sandbox.write("harvlab", source_state())
+    target = target_state()
+    target["crd_error"] = error
+    d = sandbox.write("harvlab2", target)
+    r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
+                     "--to-kubeconfig", str(d), "--json")
+    assert r.returncode == 2
+    assert [f["code"] for f in json.loads(r.stdout)["findings"]] == ["target-unreachable"]
+    calls = sandbox.calls()
+    assert not any(c["args"][0] in ("create", "patch", "delete", "replace") for c in calls)
+
+
+def test_target_inventory_probe_remains_bounded():
+    spec = importlib.util.spec_from_file_location("transfer_probe_test", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    calls = []
+
+    class TimedOutKube:
+        def run(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            raise subprocess.TimeoutExpired("kubectl", kwargs["timeout"])
+
+    assert module.collect_target(TimedOutKube(), "default", "test", "target") == {
+        "cluster": "target", "reachable": False}
+    assert calls == [(("get", "customresourcedefinitions", "-o", "json"), {"timeout": 15})]
 
 
 def test_file_engine_when_targets_differ(sandbox):
