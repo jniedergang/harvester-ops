@@ -2001,9 +2001,13 @@ def _update_precheck(path):
     """Pré-vérification d'une archive préparée, gardée tant qu'elle ne change
     pas : version, contenu, signature. Un fichier illisible (posé à la main par
     root, étiquette SELinux de l'hôte : vu en réel) est signalé, sans faire
-    tomber l'onglet entier."""
+    tomber l'onglet entier. « Plus récente » ne se garde pas : elle dépend de
+    la version qui tourne, qui change à chaque mise à jour (1.87.4)."""
     try:
-        return _update_precheck_inner(path)
+        res = _update_precheck_inner(path)
+        if res.get("version"):
+            res = dict(res, newer=_su.is_newer(res["version"], _harvester_ops_version()))
+        return res
     except OSError as e:
         return {"name": path.name, "ok": False, "size": 0,
                 "error": f"unreadable by the console ({e.strerror or e}); "
@@ -2021,7 +2025,7 @@ def _update_precheck_inner(path):
     res = {"name": path.name, "size": st.st_size, "signed": sig.exists()}
     try:
         info = _su.inspect_archive(path)
-        res.update(version=info["version"], newer=_su.is_newer(info["version"], _harvester_ops_version()))
+        res["version"] = info["version"]
         if sig.exists():
             _su.verify_signature(path, sig, _update_signers())
             res["signature"] = "valid"

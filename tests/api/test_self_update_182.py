@@ -422,6 +422,28 @@ def test_apply_refuses_unsigned_older_and_while_actions_run(console, keys, tmp_p
                 wapp.ACTIONS.pop("busy1", None)
 
 
+def test_newer_follows_the_running_version_not_the_cached_check(console, keys, tmp_path,
+                                                                 monkeypatch):
+    """Vu sur le banc client (1.87.3) : une archive 1.82.2 préparée sous 1.82.1
+    restait « plus récente » une fois la console en 1.87.3, la vérification
+    gardée en cache avec l'archive ; et la demande d'application s'y fiait
+    pour refuser un retour arrière non demandé."""
+    wapp, state = console
+    (state / "updates").mkdir(parents=True, exist_ok=True)
+    (state / "updates" / "agent.json").write_text("{}")
+    a = make_release(tmp_path, "1.82.0"); sign(keys, a)
+    with wapp.app.test_client() as c:
+        upload(c, a); upload(c, Path(str(a) + ".sig"))
+        assert c.get("/api/update/status").get_json()["staged"][0]["newer"] is True
+        monkeypatch.setattr(wapp, "_harvester_ops_version", lambda: "1.87.3")
+        st = c.get("/api/update/status").get_json()["staged"][0]
+        assert st["newer"] is False and st["signature"] == "valid"
+        r = c.post("/api/update/apply", json={"archive": a.name})
+        assert r.status_code == 409 and "not newer" in r.get_json()["error"]
+        assert c.post("/api/update/apply",
+                      json={"archive": a.name, "allow_older": True}).status_code == 202
+
+
 def test_upload_refuses_other_names(console):
     wapp, _ = console
     with wapp.app.test_client() as c:

@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.87.4] - 2026-10-08 - An older staged release is no longer offered as an update
+
+### Fixed
+- The update tab kept offering an archive staged before the last update as
+  newer: on the client test host, a 1.82.2 archive prepared under 1.82.1
+  still read "newer" once the console ran 1.87.3. The archive check is kept
+  on disk next to the archive, and whether it is newer was kept with it.
+  It is now worked out on each read, against the running version.
+- No downgrade could happen: the host update agent compares the versions
+  itself and refuses an older one unless asked. But the tab showed an
+  install button, and the request then failed on the host.
+
+### Tests
+- `tests/api/test_self_update_182.py`: an archive staged as newer turns
+  older once the running version passes it, its signature still valid; the
+  apply request refuses it, and accepts it with `allow_older`. Removing the
+  recomputation makes three tests fail.
+
 ## [1.87.3] - 2026-10-08 - VM transfer pre-check through Rancher proxies
 
 ### Fixed
