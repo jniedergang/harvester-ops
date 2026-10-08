@@ -7,7 +7,7 @@
 | OS | SUSE / openSUSE | Supported targets (uses `zypper` for dependencies) |
 | `bash` | ≥ 4.0 | Scripts |
 | `kubectl` | matching cluster minor version | API client |
-| `ssh` / `ssh-keygen` | OpenSSH 7+; `ssh-keygen -Y` (8.2+) for updates | Node shutdown + release signature verification |
+| `ssh` / `ssh-keygen` | OpenSSH 7+; `ssh-keygen -Y` (8.2+) for updates, otherwise the console image checks the signature (1.87.2) | Node shutdown + release signature verification |
 | `yq` | ≥ 4.0 (mikefarah) | Config parsing |
 | `python3` | ≥ 3.9 | JSON helpers + Flask UI |
 | `podman` | recent | Required only if you install the web UI |
@@ -24,6 +24,13 @@ and pins its absolute path in `harvester-ops-update.service`. It refuses to
 install the agent if none is available, without changing the system Python
 alternative. A current Python inside the container does not satisfy this
 host requirement.
+
+When the host's `ssh-keygen` does not know `-Y` (OpenSSH before 8.2, as on
+RHEL 8), the update agent has the signature checked by the `ssh-keygen` of
+the installed console image (1.87.2): a throwaway container with no network
+and a read-only file system, which sees only the signature and the trusted
+keys and reads the archive on its standard input. Nothing is downloaded and
+the check stays mandatory.
 
 Existing installations with an older interpreter in the updater unit need a
 one-time host repair before they can install this fix through the UI. Set

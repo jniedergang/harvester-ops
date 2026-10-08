@@ -169,18 +169,43 @@ def signers_file(etc_dir="/etc/harvester-ops", opt_dir="/opt/harvester-ops"):
     return None
 
 
-def verify_signature(archive, signature, signers, runner=subprocess.run):
+# OpenSSH avant 8.2 (RHEL 8 : 8.0) ne connaît pas `ssh-keygen -Y` : il répond
+# par son mode d'emploi. Vu par un contributeur (PR #3), puis 1.87.2.
+_NO_Y_RE = re.compile(r"(unknown|illegal|invalid) option -- ?'?Y|usage: ssh-keygen", re.I)
+
+
+def _no_y(r):
+    return r is not None and r.returncode != 0 and bool(_NO_Y_RE.search((r.stderr or "") + (r.stdout or "")))
+
+
+def verify_signature(archive, signature, signers, runner=subprocess.run, in_image=None):
     """True si `signature` est une signature valide de `archive` par une clé
     de `signers` (format allowed_signers d'OpenSSH). Lève UpdateError avec la
-    raison sinon."""
+    raison sinon.
+
+    `in_image(archive, signature, signers)` (v1.87.2) : quand le
+    `ssh-keygen` de l'hôte manque ou ne connaît pas `-Y`, la même
+    vérification faite par celui de l'image de la console installée (rend un
+    CompletedProcess). Sans lui, l'erreur dit ce qu'il faut."""
     if not signature or not Path(signature).is_file():
         raise UpdateError("the release has no signature (.sig)")
     if not signers:
         raise UpdateError("no trusted release key on this host")
-    with open(archive, "rb") as data:
-        r = runner(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", SIG_IDENTITY,
-                    "-n", SIG_NAMESPACE, "-s", str(signature)],
-                   stdin=data, capture_output=True, text=True, timeout=600)
+    try:
+        with open(archive, "rb") as data:
+            r = runner(["ssh-keygen", "-Y", "verify", "-f", str(signers), "-I", SIG_IDENTITY,
+                        "-n", SIG_NAMESPACE, "-s", str(signature)],
+                       stdin=data, capture_output=True, text=True, timeout=600)
+    except FileNotFoundError:
+        r = None
+    if r is None or _no_y(r):
+        if in_image is None:
+            raise UpdateError("this host's ssh-keygen cannot verify signatures (OpenSSH 8.2 or newer "
+                              "needed, `ssh-keygen -Y`)")
+        r = in_image(archive, signature, signers)
+        if r is None or _no_y(r):
+            raise UpdateError("neither this host's ssh-keygen nor the console image can verify "
+                              "signatures (OpenSSH 8.2 or newer needed, `ssh-keygen -Y`)")
     if r.returncode != 0:
         why = (r.stderr or r.stdout or "").strip().splitlines()
         raise UpdateError("signature refused: " + (why[-1] if why else "invalid signature"))

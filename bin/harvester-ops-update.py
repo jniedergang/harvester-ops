@@ -91,6 +91,33 @@ class Agent:
             raise su.UpdateError(f"{argv[0]} {argv[1] if len(argv) > 1 else ''}: {tail}")
         return r
 
+    def verify_in_image(self, archive, signature, signers):
+        """La vérification de signature faite par le ssh-keygen de l'image de
+        la console installée (v1.87.2), pour un hôte dont l'OpenSSH ne connaît
+        pas `-Y` (RHEL 8). Conteneur jetable, sans réseau, système en lecture
+        seule ; il ne voit que la signature et les clés de confiance, copiées
+        à part, et lit l'archive sur son entrée standard. L'image est déjà
+        installée et approuvée : rien n'est téléchargé."""
+        runtime = _runtime()
+        vdir = WORK_DIR / "verify"
+        shutil.rmtree(vdir, ignore_errors=True)
+        vdir.mkdir(mode=0o755)
+        shutil.copyfile(signature, vdir / "release.sig")
+        shutil.copyfile(signers, vdir / "signers")
+        for f in vdir.iterdir():
+            f.chmod(0o644)
+        argv = [runtime, "run", "--rm", "-i", "--network", "none", "--read-only", "--user", "0",
+                "--entrypoint", "ssh-keygen", "-v", f"{vdir}:/verify:ro,Z", IMAGE,
+                "-Y", "verify", "-f", "/verify/signers", "-I", su.SIG_IDENTITY,
+                "-n", su.SIG_NAMESPACE, "-s", "/verify/release.sig"]
+        try:
+            with open(archive, "rb") as data:
+                return self.run_cmd(argv, stdin=data, capture_output=True, text=True, timeout=600)
+        except FileNotFoundError:
+            return None
+        finally:
+            shutil.rmtree(vdir, ignore_errors=True)
+
     # -- traitement ------------------------------------------------------
     def process(self):
         req_path = self.updates / su.REQUEST
@@ -149,7 +176,7 @@ class Agent:
         self.status["to"] = info["version"]
         signers = su.signers_file(ETC_DIR, OPT_DIR)
         if sig is not None or not su.allow_unsigned(ETC_DIR / "update.conf"):
-            su.verify_signature(archive, sig, signers, runner=self.run_cmd)
+            su.verify_signature(archive, sig, signers, runner=self.run_cmd, in_image=self.verify_in_image)
             how = f"signature checked with {signers}"
         else:
             how = "UNSIGNED, accepted because allow_unsigned=true in update.conf"

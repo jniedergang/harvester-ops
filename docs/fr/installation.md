@@ -7,7 +7,7 @@
 | OS | SUSE / openSUSE | Cibles supportées (dépendances installées via `zypper`) |
 | `bash` | ≥ 4.0 | Scripts |
 | `kubectl` | version mineure du cluster | Client API |
-| `ssh` / `ssh-keygen` | OpenSSH 7+ ; `ssh-keygen -Y` (8.2+) pour les mises à jour | Extinction des nodes + vérification des signatures |
+| `ssh` / `ssh-keygen` | OpenSSH 7+ ; `ssh-keygen -Y` (8.2+) pour les mises à jour, sinon l'image de la console vérifie la signature (1.87.2) | Extinction des nodes + vérification des signatures |
 | `yq` | ≥ 4.0 (mikefarah) | Parsing config |
 | `python3` | ≥ 3.9 | Helpers JSON + UI Flask |
 | `podman` | récent | Requis uniquement pour l'UI web |
@@ -23,6 +23,13 @@ L'installeur choisit un Python >= 3.9 (`python3`, ou `python3.9`–`python3.14`)
 et inscrit son chemin absolu dans `harvester-ops-update.service`. Sans
 interpréteur compatible, il refuse d'installer l'agent ; il ne change pas
 l'alternative Python du système. Le Python du conteneur ne suffit pas.
+
+Quand le `ssh-keygen` de l'hôte ne connaît pas `-Y` (OpenSSH avant 8.2, comme
+sur RHEL 8), l'agent de mise à jour fait vérifier la signature par le
+`ssh-keygen` de l'image de la console installée (1.87.2) : un conteneur jetable,
+sans réseau, au système de fichiers en lecture seule, qui ne voit que la
+signature et les clés de confiance et lit l'archive sur son entrée standard.
+Rien n'est téléchargé et le contrôle reste obligatoire.
 
 Pour une installation existante dont l'unité utilise un ancien Python, une
 correction sur l'hôte est nécessaire avant de recevoir ce correctif depuis

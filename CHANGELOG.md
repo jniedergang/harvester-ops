@@ -4,6 +4,32 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.87.2] - 2026-10-08 - Update signatures checked on hosts with an old OpenSSH
+
+### Fixed
+- The update agent checks the release signature with `ssh-keygen -Y`, which
+  OpenSSH learned in 8.2: on a RHEL 8 host (OpenSSH 8.0, reported in #3) an
+  update from the interface could not get past the signature check. When the
+  host's `ssh-keygen` is missing or does not know `-Y`, the agent now has the
+  same check done by the `ssh-keygen` of the installed console image: a
+  throwaway container with no network and a read-only file system, which sees
+  only a copy of the signature and of the trusted keys and reads the archive
+  on its standard input. The image is the one already installed and trusted;
+  nothing is downloaded, and the check stays mandatory. A signature the host
+  refuses is never "retried" in the image.
+
+### Docs
+- Installation (EN/FR): `ssh-keygen -Y` is no longer required on the host.
+
+### Tests
+- `tests/api/test_update_sig_fallback_1872.py`: an OpenSSH 8.0 host (its usage
+  text) and a host without ssh-keygen falling back to the image, a tampered
+  archive still refused, the error without an image, a recent host never
+  starting a container, the agent's container locked down (no network,
+  read-only, archive on standard input, nothing left behind).
+- Checked for real on a Podman host: the console image (OpenSSH 9.6) accepts
+  the signed 1.87.1 archive and refuses an altered one.
+
 ## [1.87.1] - 2026-10-08 - Console updates use a supported host Python and report their failures
 
 ### Fixed
