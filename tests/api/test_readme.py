@@ -69,9 +69,8 @@ def test_each_readme_plays_every_clip_in_its_own_language():
     assert not found["en"] & found["fr"]
 
 
-def test_each_readme_links_the_site_and_the_demo_in_its_language():
-    """v1.86.0 : le site de présentation et sa démo vivante, sur GitHub Pages."""
-    base = "https://jniedergang.github.io/harvester-ops"
-    for lang, page in (("en", "en"), ("fr", "fr")):
-        text = _text(lang)
-        assert f"{base}/{page}/" in text and f"{base}/demo/?lang={page}" in text, lang
+def test_no_readme_links_the_withdrawn_public_site():
+    """Le site de présentation public a été retiré (08/10/2026, décision de
+    l'auteur) : aucun lien ne doit mener à une page 404."""
+    for lang in READMES:
+        assert "github.io/harvester-ops" not in _text(lang), lang

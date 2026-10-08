@@ -73,14 +73,17 @@ console WebSockets for everything under `/api/`:
 
 ## Publishing
 
-The site is published on GitHub Pages:
-**https://jniedergang.github.io/harvester-ops/** (live demo under `demo/`).
+The site is not published at the moment: the public GitHub Pages site was
+withdrawn on 2026-10-08 (the `gh-pages` branch was deleted, which unpublishes
+it). Build it with `make site` and serve `dist/site/` privately to review it.
+To publish it again on GitHub Pages:
 
 ```bash
 tools/demo-site/publish-pages.sh            # remote "github" by default
 ```
 
-The script refuses to run with uncommitted changes in `site/`,
+then enable Pages on the `gh-pages` branch in the repository settings. The
+script refuses to run with uncommitted changes in `site/`,
 `tools/demo-site/`, `web/` or `VERSION`, builds `dist/site/` from the current
 commit, puts it alone on the `gh-pages` branch (one commit per publication,
 `.nojekyll` included) and pushes it. Pages serves that branch from its root.

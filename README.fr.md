@@ -6,9 +6,6 @@ courantes automatisées, chaque événement conservé.**
 
 [English](README.md) · Français
 
-**[Site](https://jniedergang.github.io/harvester-ops/fr/) · [Démo vivante](https://jniedergang.github.io/harvester-ops/demo/?lang=fr)** : la vraie interface sur
-des clusters simulés, dans votre navigateur, rien à installer.
-
 [![Licence : Apache 2.0](https://img.shields.io/badge/Licence-Apache_2.0-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/github/v/release/jniedergang/harvester-ops)](https://github.com/jniedergang/harvester-ops/releases/latest)
 [![Tests](https://img.shields.io/badge/tests-2500%2B_au_vert-green.svg)](tests/)

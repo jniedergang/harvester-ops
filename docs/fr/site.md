@@ -77,14 +77,17 @@ WebSockets de la console pour tout ce qui est sous `/api/` :
 
 ## Publication
 
-Le site est publié sur GitHub Pages :
-**https://jniedergang.github.io/harvester-ops/** (démo vivante sous `demo/`).
+Le site n'est pas publié pour l'instant : le site public sur GitHub Pages a été
+retiré le 08/10/2026 (la branche `gh-pages` a été supprimée, ce qui le
+dépublie). Le construire avec `make site` et servir `dist/site/` en privé pour
+le relire. Pour le republier sur GitHub Pages :
 
 ```bash
 tools/demo-site/publish-pages.sh            # remote « github » par défaut
 ```
 
-Le script refuse de tourner s'il reste des modifications non commitées dans
+puis activer Pages sur la branche `gh-pages` dans les réglages du dépôt. Le
+script refuse de tourner s'il reste des modifications non commitées dans
 `site/`, `tools/demo-site/`, `web/` ou `VERSION`, construit `dist/site/`
 depuis le commit courant, le pose seul sur la branche `gh-pages` (un commit
 par publication, `.nojekyll` compris) et la pousse. Pages sert cette branche

@@ -77,8 +77,9 @@ which covers one cluster; Rancher, which is generic) do not offer together:
 - The interface stays homogeneous: reuse existing patterns (`.btn`, `.card`,
   `.sub-tabs-inline`, `.modal-overlay`, theme tokens) before adding new ones.
 - Public content (docs, site, commits) carries no em dash and no Unicode arrow.
-- Presentation site and live demo: `site/`, `tools/demo-site/`, published at
-  https://jniedergang.github.io/harvester-ops/ (see `docs/en/site.md`).
+- Presentation site and live demo: `site/`, `tools/demo-site/` (see
+  `docs/en/site.md`); the public site was withdrawn on 2026-10-08 and is only
+  built for private review.
 
 ## Brand Commitments
 

@@ -2,8 +2,9 @@
 # harvester-ops : publie le site de présentation et sa démo sur GitHub Pages
 # (v1.86.0). Construit dist/site depuis le commit courant, puis le pose seul
 # sur la branche gh-pages (un commit par publication) et la pousse sur le
-# remote donné. GitHub Pages sert cette branche à la racine :
-# https://jniedergang.github.io/harvester-ops/
+# remote donné. GitHub Pages sert cette branche à la racine, une fois Pages
+# activé sur elle dans les réglages du dépôt (le site public a été retiré le
+# 08/10/2026 : ne relancer qu'à la demande de l'auteur).
 #
 #   tools/demo-site/publish-pages.sh [remote]        # défaut : github
 set -euo pipefail

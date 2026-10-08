@@ -5,9 +5,6 @@ in one interface, everyday operations automated, every event on record.**
 
 English · [Français](README.fr.md)
 
-**[Website](https://jniedergang.github.io/harvester-ops/en/) · [Live demo](https://jniedergang.github.io/harvester-ops/demo/?lang=en)**: the real interface on
-simulated clusters, in your browser, nothing to install.
-
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/jniedergang/harvester-ops)](https://github.com/jniedergang/harvester-ops/releases/latest)
 [![Tests](https://img.shields.io/badge/tests-2500%2B_passing-green.svg)](tests/)
