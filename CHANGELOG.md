@@ -4,6 +4,33 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.87.1] - 2026-10-08 - Console updates use a supported host Python and report their failures
+
+### Fixed
+- Updating the console from the interface failed on a RHEL 8 host: the update
+  agent runs on the host, not in the console container, and its unit started
+  `/usr/bin/python3`, there Python 3.6, which lacks `capture_output`. The
+  installer now selects a host Python 3.9 or newer (`python3`, then
+  `python3.14` down to `python3.9`), refuses before changing anything when
+  none exists, and writes its absolute path in `harvester-ops-update.service`;
+  `upgrade` rewrites the unit, so the fix propagates. The system Python
+  alternative is left alone. Contributed by @Paul1404 (#3).
+- An unexpected error in the update agent left the interface showing an
+  update in progress for good: it now records a failed outcome, the traceback
+  kept in the journal, without retrying anything or starting another
+  installation. Contributed by @Paul1404 (#3).
+
+### Docs
+- Installation (EN/FR): the host Python requirement of the update agent, the
+  one-time repair of an installation whose updater unit uses an older Python,
+  and `ssh-keygen -Y` (OpenSSH 8.2 or newer) for the signature check of
+  updates.
+
+### Tests
+- `tests/api/test_update_host_python.py` (interpreter fallback and refusal,
+  the rendered unit) and `test_self_update_182.py` (a failed outcome after an
+  unexpected verification error, nothing installed or restarted).
+
 ## [1.87.0] - 2026-10-07 - Windows VMs from VMware, verified, and waves that say when their disks cannot fit
 
 ### Fixed
