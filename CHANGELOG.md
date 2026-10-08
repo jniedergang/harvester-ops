@@ -21,6 +21,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   older once the running version passes it, its signature still valid; the
   apply request refuses it, and accepts it with `allow_older`. Removing the
   recomputation makes three tests fail.
+- The 1.87.3 transfer pre-check, checked for real through a Rancher 2.13.1
+  proxy to harv1:
+  - admin token: the target is read (probe 0.1 to 0.4 s, full list 3.9 to
+    4.3 s warm; 5.1 s and 9.1 s right after Rancher started);
+  - token refused by Rancher: "refuses this reader" in 2.2 s, where 1.87.2
+    said "does not answer";
+  - a temporary Rancher user, member of the cluster only: Kubernetes denies
+    it the definitions list. 1.87.4 says "refuses this reader"; 1.87.2 ended
+    on the raw Forbidden error with no finding.
+  - `/readyz` answered `ok` through this Rancher for both accounts: the 404
+    of #4 did not show here.
 
 ## [1.87.3] - 2026-10-08 - VM transfer pre-check through Rancher proxies
 
@@ -55,8 +66,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   at a time to check that a test fails.
 - Checked for real against harv1: a healthy target goes through the probe,
   an invalid token gives "refuses this reader" in 1.9 s, an address that
-  does not answer gives "does not answer" in 5.3 s. Not checked through a
-  live Rancher proxy (its VM is stopped); #4 was.
+  does not answer gives "does not answer" in 5.3 s. Checked through a live
+  Rancher proxy (Rancher 2.13.1) in 1.87.4.
 
 ## [1.87.2] - 2026-10-08 - Update signatures checked on hosts with an old OpenSSH
 
