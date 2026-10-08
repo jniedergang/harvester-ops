@@ -16,8 +16,8 @@ record of what happened. They work in it daily, under time pressure during
 incidents and maintenance windows, and are technical (kubectl, Kubernetes RBAC,
 Longhorn, KubeVirt are familiar terms).
 
-Secondary: people discovering the project on its presentation site and live
-demo (prospects, community), who decide whether to try it.
+Secondary: people discovering the project on GitHub (README, videos), who
+decide whether to try it.
 
 ## Product Purpose
 
