@@ -146,13 +146,23 @@ def collect_source(kube, ns, name, cluster=""):
             "default_storage_class": _default_class(scs)}
 
 
+# Une lecture d'un seul élément : authentifiée et servie par un proxy Rancher
+# comme toute ressource (son /readyz peut répondre 404), et bornée à 15 s
+# sans dépendre de la taille de la liste entière (37 Mo sur harv1, v1.9.0).
+CRD_PROBE = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions?limit=1"
+# messages de kubectl relevés sur harv1 : 403, puis 401 sur la sonde et sur
+# une liste (où seules les lignes de memcache tiennent dans l'erreur gardée)
+_DENIED = ("forbidden", "unauthorized", "provide credentials")
+
+
 def collect_target(kube, namespace, name, cluster=""):
-    # Rancher proxies may return 404 for /readyz while resource reads work.
-    # Probe with the CRD inventory needed below, preserving the bounded read.
     try:
-        crd_list = json.loads(kube.run("get", "customresourcedefinitions",
-                                     "-o", "json", timeout=15))
-    except (KubeError, subprocess.SubprocessError):
+        kube.run("get", "--raw", CRD_PROBE, timeout=15)
+        crd_list = json.loads(kube.run("get", "customresourcedefinitions", "-o", "json"))
+    except KubeError as e:
+        if any(m in str(e).lower() for m in _DENIED):
+            # la cible répond mais refuse ce lecteur : à dire comme tel
+            return {"cluster": cluster, "reachable": True, "denied": True}
         return {"cluster": cluster, "reachable": False}
     crd_objs = {c["metadata"]["name"]: c for c in crd_list.get("items", [])}
     crds = set(crd_objs)

@@ -134,11 +134,19 @@ attend avant de conclure : le cas ne se présente plus.
 Un proxy Rancher peut retourner 404 pour `/readyz` alors que les lectures
 authentifiées des ressources Kubernetes fonctionnent. Les anciens contrôles
 utilisaient cette adresse et pouvaient déclarer la cible à tort injoignable.
-Le contrôle utilise maintenant l'inventaire des CRD nécessaire au transfert.
-Les erreurs de connexion, d'authentification et de certificat bloquent toujours
-le contrôle ; le kubeconfig cible doit autoriser la lecture des définitions
-de ressources personnalisées.
 
+Depuis la 1.87.3, le contrôle lit d'abord une seule définition de ressource
+personnalisée (`?limit=1`, 15 secondes au plus), qui passe par le proxy comme
+toute ressource. Il lit ensuite la liste entière dont il a besoin avec les
+60 secondes habituelles : elle pèse environ 37 Mo sur un cluster Harvester 1.9.
+Une cible qui met plus longtemps à la rendre est annoncée comme ne répondant pas.
+
+- Une cible qui ne répond pas, ou dont le certificat est refusé, reste
+  annoncée « Le cluster cible ne répond pas ».
+- Une cible qui répond mais refuse le lecteur (403, ou 401 pour des
+  identifiants expirés) est annoncée comme telle : vérifier les droits ou les
+  identifiants de son kubeconfig. Il doit autoriser la lecture des définitions
+  de ressources personnalisées.
 
 ### « The target cluster never fetched the disk »
 

@@ -40,6 +40,7 @@ const VMTransfer = (() => {
   // voit que ces formes, pas une clé composée à l'exécution.
   const FINDINGS = {
     'target-unreachable': (v) => tr('transfer.finding.target-unreachable', v),
+    'target-denied': (v) => tr('transfer.finding.target-denied', v),
     'kubevirt-missing': (v) => tr('transfer.finding.kubevirt-missing', v),
     'version-older': (v) => tr('transfer.finding.version-older', v),
     'namespace-missing': (v) => (v.create ? tr('transfer.finding.namespace-created', v)

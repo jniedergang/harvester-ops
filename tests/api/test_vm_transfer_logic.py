@@ -410,9 +410,13 @@ def test_a_nominal_transfer_has_no_blocker():
     assert eng["level"] == "ok" and eng["facts"] == {"engine": "backup", "reason": "shared-target"}
 
 
-def test_an_unreachable_target_stops_the_check_there():
-    f = vt.check(src_facts(), dst_facts(reachable=False), req())
-    assert codes(f) == ["target-unreachable"] and vt.blocking(f)
+@pytest.mark.parametrize("facts,code", [
+    ({"reachable": False}, "target-unreachable"),
+    ({"reachable": True, "denied": True}, "target-denied"),
+])
+def test_a_target_that_cannot_be_read_stops_the_check_there(facts, code):
+    f = vt.check(src_facts(), dst_facts(**facts), req())
+    assert codes(f) == [code] and vt.blocking(f)
 
 
 def test_kubevirt_missing_blocks():

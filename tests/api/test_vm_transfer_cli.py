@@ -20,6 +20,9 @@ SCRIPT = ROOT / "bin" / "harvester-vm-transfer.py"
 FIX = ROOT / "tests" / "fixtures" / "vm_transfer"
 GIB = 1024 ** 3
 
+sys.path.insert(0, str(ROOT / "bin" / "lib"))
+from kube import KubeError  # noqa: E402
+
 FAKE_KUBECTL = r'''#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -34,6 +37,8 @@ if rest[0] == "get" and state.get("down"):
 if rest[:2] == ["get", "--raw"]:
     if state.get("readyz_error") and rest[2] == "/readyz":
         sys.stderr.write(state["readyz_error"] + "\n"); sys.exit(1)
+    if state.get("probe_error") and rest[2].startswith("/apis/apiextensions.k8s.io/"):
+        sys.stderr.write(state["probe_error"] + "\n"); sys.exit(1)
     print("ok"); sys.exit(0)
 if rest[:2] == ["get", "customresourcedefinitions"] and state.get("crd_error"):
     sys.stderr.write(state["crd_error"] + "\n"); sys.exit(1)
@@ -219,6 +224,9 @@ def test_unreachable_target(sandbox):
     assert [f["code"] for f in json.loads(r.stdout)["findings"]] == ["target-unreachable"]
 
 
+PROBE = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions?limit=1"
+
+
 def test_rancher_proxy_without_readyz_uses_resource_inventory(sandbox):
     s = sandbox.write("harvlab", source_state())
     target = target_state()
@@ -239,44 +247,96 @@ def test_rancher_proxy_without_readyz_uses_resource_inventory(sandbox):
     assert out["target"]["networks"] == ["default/production"]
     calls = sandbox.calls()
     target_calls = [c["args"] for c in calls if c["kc"] == d.name]
+    # v1.87.3 : une lecture d'un seul élément sonde la cible, puis la liste entière
+    assert target_calls[0] == ["get", "--raw", PROBE]
     assert ["get", "customresourcedefinitions", "-o", "json"] in target_calls
-    assert not any("--raw" in args for args in target_calls)
+    assert not any("/readyz" in args for args in target_calls)
     assert not any(c["args"][0] in ("create", "patch", "delete", "replace") for c in calls)
 
 
-@pytest.mark.parametrize("error", [
-    "Error from server (Forbidden): customresourcedefinitions is forbidden",
-    "Error from server (Unauthorized): Unauthorized",
-    "Unable to connect to the server: x509: certificate signed by unknown authority",
-    "Unable to connect to the server: connection refused",
+@pytest.mark.parametrize("stage,error,code", [
+    ("probe_error", "Error from server (Forbidden): customresourcedefinitions.apiextensions.k8s.io "
+     "is forbidden: User \"u-x\" cannot list resource", "target-denied"),
+    ("probe_error", "error: You must be logged in to the server (Unauthorized)", "target-denied"),
+    ("probe_error", "Unable to connect to the server: x509: certificate signed by unknown authority",
+     "target-unreachable"),
+    ("probe_error", "Unable to connect to the server: connection refused", "target-unreachable"),
+    ("crd_error", "Error from server (Forbidden): customresourcedefinitions is forbidden",
+     "target-denied"),
+    ("crd_error", 'E1008 16:05:11.865667 2615688 memcache.go:265] "Unhandled Error" '
+     'err="couldn\'t get current server API group list: the server has asked for the client '
+     'to provide credentials"', "target-denied"),
+    ("crd_error", "Unable to connect to the server: x509: certificate signed by unknown authority",
+     "target-unreachable"),
+    ("crd_error", "Unable to connect to the server: connection refused", "target-unreachable"),
 ])
-def test_target_inventory_errors_still_block_without_writes(sandbox, error):
+def test_target_inventory_errors_still_block_without_writes(sandbox, stage, error, code):
     s = sandbox.write("harvlab", source_state())
     target = target_state()
-    target["crd_error"] = error
+    target[stage] = error
     d = sandbox.write("harvlab2", target)
     r = sandbox.call("check", "--from-kubeconfig", str(s), "--vm", "default/leap156",
                      "--to-kubeconfig", str(d), "--json")
     assert r.returncode == 2
-    assert [f["code"] for f in json.loads(r.stdout)["findings"]] == ["target-unreachable"]
+    findings = json.loads(r.stdout)["findings"]
+    assert [f["code"] for f in findings] == [code]
+    assert findings[0]["facts"] == {"cluster": "harvlab2"}
     calls = sandbox.calls()
     assert not any(c["args"][0] in ("create", "patch", "delete", "replace") for c in calls)
 
 
-def test_target_inventory_probe_remains_bounded():
+def _transfer_module():
     spec = importlib.util.spec_from_file_location("transfer_probe_test", SCRIPT)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    calls = []
+    return module
 
-    class TimedOutKube:
-        def run(self, *args, **kwargs):
-            calls.append((args, kwargs))
-            raise subprocess.TimeoutExpired("kubectl", kwargs["timeout"])
 
-    assert module.collect_target(TimedOutKube(), "default", "test", "target") == {
-        "cluster": "target", "reachable": False}
-    assert calls == [(("get", "customresourcedefinitions", "-o", "json"), {"timeout": 15})]
+class _ScriptedKube:
+    """Rejoue une réponse par appel : une exception est levée, le reste rendu."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def run(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        a = self.answers.pop(0)
+        if isinstance(a, BaseException):
+            raise a
+        return a
+
+
+@pytest.mark.parametrize("answers,expected,calls", [
+    # la sonde dépasse 15 s (Kube.run rend un KubeError) : pas de liste entière
+    ([KubeError("kubectl get --raw timed out after 15 s")],
+     {"cluster": "target", "reachable": False},
+     [(("get", "--raw", PROBE), {"timeout": 15})]),
+    # la sonde répond, la liste entière dépasse le délai par défaut du client
+    (['{"items": []}', KubeError("kubectl get customresourcedefinitions timed out after 60 s")],
+     {"cluster": "target", "reachable": False},
+     [(("get", "--raw", PROBE), {"timeout": 15}),
+      (("get", "customresourcedefinitions", "-o", "json"), {})]),
+    # un refus est dit comme tel, la cible répond
+    ([KubeError("Error from server (Forbidden): customresourcedefinitions is forbidden")],
+     {"cluster": "target", "reachable": True, "denied": True},
+     [(("get", "--raw", PROBE), {"timeout": 15})]),
+    # la sonde passe, la liste entière est refusée
+    (['{"items": []}', KubeError("Error from server (Forbidden): customresourcedefinitions is "
+                                 "forbidden")],
+     {"cluster": "target", "reachable": True, "denied": True},
+     [(("get", "--raw", PROBE), {"timeout": 15}),
+      (("get", "customresourcedefinitions", "-o", "json"), {})]),
+    ([KubeError("Unable to connect to the server: dial tcp: i/o timeout")],
+     {"cluster": "target", "reachable": False},
+     [(("get", "--raw", PROBE), {"timeout": 15})]),
+])
+def test_target_probe_is_bounded_and_the_full_list_keeps_the_client_timeout(answers, expected,
+                                                                            calls):
+    module = _transfer_module()
+    kube = _ScriptedKube(*answers)
+    assert module.collect_target(kube, "default", "test", "target") == expected
+    assert kube.calls == calls
 
 
 def test_file_engine_when_targets_differ(sandbox):

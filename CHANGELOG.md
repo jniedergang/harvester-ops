@@ -4,6 +4,42 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.87.3] - 2026-10-08 - VM transfer pre-check through Rancher proxies
+
+### Fixed
+- Moving a VM to a cluster reached through a Rancher proxy stopped at "The
+  target cluster does not answer": the pre-check asked the target for
+  `/readyz`, which a Rancher proxy can answer with 404 while resource reads
+  work. Reported and fixed by Paul Dresch (@pauld-0110) in #4, which reads
+  the custom resource definitions instead.
+- That list weighs about 37 MB on a Harvester 1.9 cluster (310 definitions,
+  3 to 4 s on the LAN), and #4 read it within 15 s, the slowest read on the
+  slowest path. The target is now probed with a single definition
+  (`?limit=1`, 15 s, 11 KB on harv1), then the full list keeps the usual
+  60 s.
+
+### Changed
+- A target that answers but refuses the reader (403, or 401 for expired
+  credentials) is now reported as such ("refuses this reader: check the
+  rights or the credentials of its kubeconfig") instead of "does not answer".
+  Five languages.
+
+### Docs
+- Troubleshooting (EN/FR): the Rancher proxy case, the probe, and the two
+  findings.
+
+### Tests
+- `tests/api/test_vm_transfer_cli.py`, in tables: the proxy without
+  `/readyz`, each refusal and connection error at the probe and at the full
+  list (403, 401 with the real kubectl messages captured on harv1, x509,
+  connection refused), the probe bounded at 15 s while the full list keeps
+  the client default. Every denial marker and both timeouts were removed one
+  at a time to check that a test fails.
+- Checked for real against harv1: a healthy target goes through the probe,
+  an invalid token gives "refuses this reader" in 1.9 s, an address that
+  does not answer gives "does not answer" in 5.3 s. Not checked through a
+  live Rancher proxy (its VM is stopped); #4 was.
+
 ## [1.87.2] - 2026-10-08 - Update signatures checked on hosts with an old OpenSSH
 
 ### Fixed

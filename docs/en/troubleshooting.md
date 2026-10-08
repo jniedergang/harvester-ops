@@ -132,11 +132,19 @@ before concluding, so this no longer happens.
 
 A Rancher proxy can return 404 for `/readyz` even when authenticated
 Kubernetes resource reads succeed. Earlier transfer checks used that
-endpoint and could report the target as unreachable. The pre-check now
-uses the CRD inventory required for the transfer instead. API connection,
-authentication and certificate failures still block the check; the target
-kubeconfig must permit reading custom resource definitions.
+endpoint and could report the target as unreachable.
 
+Since 1.87.3 the pre-check first reads a single custom resource definition
+(`?limit=1`, at most 15 seconds), which goes through the proxy like any
+resource. It then reads the full list it needs with the usual 60 seconds:
+that list weighs about 37 MB on a Harvester 1.9 cluster. A target whose
+list takes longer than that is reported as not answering.
+
+- A target that does not answer, or whose certificate is refused, is still
+  reported as "The target cluster does not answer".
+- A target that answers but refuses the reader (403, or 401 for expired
+  credentials) is reported as such: check the rights or the credentials of
+  its kubeconfig. It must permit reading custom resource definitions.
 
 ### "The target cluster never fetched the disk"
 

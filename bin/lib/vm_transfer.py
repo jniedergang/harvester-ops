@@ -486,6 +486,8 @@ def check(src, dst, req):
     kind = req.get("kind", "migrate")
     out = []
     if kind != "export":
+        if dst and dst.get("denied"):
+            return [_finding("target-denied", "block", cluster=dst.get("cluster"))]
         if not dst or not dst.get("reachable"):
             return [_finding("target-unreachable", "block",
                              cluster=(dst or {}).get("cluster"))]
