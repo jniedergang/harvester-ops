@@ -356,23 +356,22 @@ def test_a_join_waits_for_the_node_to_be_ready(monkeypatch):
     answers = iter([None,
                     {"status": {"conditions": [{"type": "Ready", "status": "False"}]}},
                     {"status": {"conditions": [{"type": "Ready", "status": "True"}]}}])
-    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/kc")
-    monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: next(answers))
+    seen = []
+    monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: seen.append(kc) or next(answers))
     monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
     steps = []
     run = type("R", (), {})()
-    ok = wapp._bm_wait_node_ready("harvlab", "n2", wapp.time.time() + 60, run,
+    ok = wapp._bm_wait_node_ready("harvlab", "/kc-frozen", "n2", wapp.time.time() + 60, run,
                                   lambda *a: steps.append(a))
-    assert ok is True
+    assert ok is True and set(seen) == {"/kc-frozen"}
     assert any("n2" in str(a) for a in steps)
 
 
 def test_a_join_that_never_comes_times_out(monkeypatch):
-    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/kc")
     monkeypatch.setattr(wapp, "_kubectl_json", lambda kc, *a, **k: None)
     monkeypatch.setattr(wapp.time, "sleep", lambda s: None)
     run = type("R", (), {})()
-    assert wapp._bm_wait_node_ready("harvlab", "n2", wapp.time.time() - 1, run,
+    assert wapp._bm_wait_node_ready("harvlab", "/kc", "n2", wapp.time.time() - 1, run,
                                     lambda *a: None) is False
 
 
@@ -380,7 +379,54 @@ def test_the_runner_follows_a_join_on_the_node_not_the_vip():
     src = (Path(wapp.__file__)).read_text()
     body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
     assert 'if opts.get("mode") == "join":' in body
-    assert "_bm_wait_node_ready(opts[\"cluster\"], opts[\"hostname\"]" in body
+    assert "_bm_wait_node_ready(opts[\"cluster\"], _bm_cluster_kubeconfig(opts)" in body
+
+
+@pytest.mark.parametrize("frozen,expected", [
+    ("/identity-copy", "/identity-copy"),   # figé côté requête : gardé
+    (None, "/console-kc"),                  # sans lui (ancienne action) : repli
+])
+def test_the_joined_cluster_kubeconfig_is_the_one_frozen_on_the_request_side(
+        monkeypatch, frozen, expected):
+    """v1.88.1 : dans le fil de l'installation, current_cluster_identity()
+    rend None, et _kubectl_for_cluster retombait sur le kubeconfig de la
+    console (system:masters) pour attendre le nœud et créer les pools."""
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: "/console-kc")
+    opts = {"cluster": "harvlab"}
+    if frozen:
+        opts["_cluster_kc"] = frozen
+    assert wapp._bm_cluster_kubeconfig(opts) == expected
+
+
+@pytest.mark.parametrize("identity,frozen", [
+    (None, "console"),                                   # pas de délégation
+    ({"user": "alice", "groups": ["ops"]}, "identity"),  # délégation active
+])
+def test_a_join_carries_the_person_s_kubeconfig_to_the_worker(
+        client, monkeypatch, tmp_path, identity, frozen):
+    """v1.88.1 : le kubeconfig du cluster rejoint est résolu dans la requête,
+    là où l'identité de la personne existe, et transmis au fil."""
+    runs = []
+    monkeypatch.setattr(wapp, "track_action",
+                        lambda label, cluster, worker, *args: runs.append(args) or "a1")
+    _declared(monkeypatch, tmp_path)
+    monkeypatch.setattr(wapp, "load_config_ro", wapp.load_config)
+    monkeypatch.setattr(wapp, "current_cluster_identity", lambda: identity)
+    monkeypatch.setattr(wapp, "_identity_kubeconfig",
+                        lambda src, ident: "/identity-copy" if ident else src)
+    r = client.post("/api/baremetal/install", json=JOIN)
+    assert r.status_code == 202, r.get_json()
+    kc = runs[0][0]["_cluster_kc"]
+    assert (kc == "/identity-copy") is (frozen == "identity")
+    assert kc.endswith("harvlab.yaml") is (frozen == "console")
+    # jamais renvoyé à l'appelant
+    assert "_cluster_kc" not in r.get_data(as_text=True)
+
+
+def test_the_runner_never_resolves_the_cluster_kubeconfig_itself():
+    src = (Path(wapp.__file__)).read_text()
+    body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
+    assert "_kubectl_for_cluster(" not in body, "le fil n'a pas l'identité de la personne"
 
 
 def test_install_action_label_carries_no_secret(client, monkeypatch):

@@ -213,6 +213,12 @@ already up. The configuration generated for a join was checked by
 installing two nodes into a three-node test cluster; the Redfish-driven
 flow in join mode has not been run on real hardware yet.
 
+Since 1.88.1, waiting for the node and creating the disk pools use your own
+rights on the joined cluster (delegated identity, or your Rancher session),
+resolved when you start the install. Before, the install thread fell back
+to the console's own kubeconfig. Someone without the rights to read nodes
+or write block devices there now sees those steps refused.
+
 ### Reading the disks first: the discovery boot (window, API and CLI)
 
 Some BMCs publish no disks at all (HPE iLO 4 publishes none), so the console

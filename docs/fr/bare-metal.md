@@ -223,6 +223,13 @@ pour une jonction a été vérifiée en installant deux nœuds dans un cluster
 de test à trois nœuds ; le déroulé par Redfish en mode jonction n'a pas
 encore été exécuté sur du vrai matériel.
 
+Depuis la 1.88.1, l'attente du nœud et la création des pools de disques se
+font avec vos propres droits sur le cluster rejoint (identité déléguée, ou
+votre session Rancher), résolus au lancement de l'installation. Avant, le
+fil de l'installation retombait sur le kubeconfig de la console. Une
+personne sans droit de lire les nœuds ou d'écrire les périphériques de
+stockage de ce cluster voit maintenant ces étapes refusées.
+
 ### Lire les disques d'abord : le démarrage de découverte (fenêtre, API et CLI)
 
 Certains BMC ne publient aucun disque (un iLO 4 n'en publie aucun) : la

@@ -123,38 +123,19 @@ def test_i18n_no_missing_keys_in_english():
 
 
 def test_i18n_dict_parity_across_languages():
-    """Soft check: every other language should ideally cover the same keys
-    as English. Reported as a single failure with the diff per lang so the
-    author can address them all at once. NOT a blocker — at runtime missing
-    locale keys fall through to English.
-    """
+    """Every language covers the same keys as English. The five languages
+    are complete since v1.10.0; the old tolerance (1129 holes) stayed in
+    place for months and let a PR add six strings without Italian and
+    Spanish unnoticed (v1.88.1)."""
     dicts = _lang_dicts()
     en = dicts.get("en") or set()
     holes = {}
     for lang in ("fr", "it", "es", "de"):
-        l = dicts.get(lang) or set()
-        delta = sorted(en - l)
+        delta = sorted(en - (dicts.get(lang) or set()))
         if delta:
             holes[lang] = delta
-    if holes:
-        # Baseline tech debt: ~390 holes today (IT/ES/DE never had the
-        # automation/clusters/vms/snapshots/migrate/vm-edit/console keys).
-        # Block only on regressions ABOVE the baseline so CI doesn't stall
-        # while still catching "I added an EN key and forgot all 4 others".
-        # +6 in v1.6.4: topology.action.console / .migrate added to EN+FR;
-        # IT/ES/DE deferred to the i18n completion task (#126).
-        BASELINE = 1129  # v1.8.9: shutdown force option (EN+FR done; IT/ES/DE fall back to EN)
-        total = sum(len(v) for v in holes.values())
-        if total > BASELINE:
-            lines = []
-            for lang, keys in holes.items():
-                lines.append(f"  {lang}: {len(keys)} missing — first 5: {keys[:5]}")
-            pytest.fail(
-                f"Translations parity regressed: {total} holes > baseline {BASELINE}.\n"
-                + "\n".join(lines)
-                + "\n\n(Bump BASELINE if you added new EN keys and intentionally "
-                "delay translating to IT/ES/DE; ideally translate them.)"
-            )
+    assert not holes, "missing translations:\n" + "\n".join(
+        f"  {lang}: {len(keys)} missing, first 5: {keys[:5]}" for lang, keys in holes.items())
 
 
 def test_i18n_resolves_data_tip_i18n_attribute():

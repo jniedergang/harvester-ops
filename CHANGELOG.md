@@ -4,6 +4,35 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.88.1] - 2026-10-15 - Bare-metal joins act with the person's rights; strict translation check
+
+### Fixed
+- When a bare-metal install joined a declared cluster, waiting for the node
+  and creating the disk pools ran in the install thread, where the person's
+  identity does not exist: the console fell back to its own kubeconfig
+  (`system:masters`). The joined cluster's kubeconfig is now resolved in the
+  request (delegated identity, or the Rancher session) and handed to the
+  thread. Joins in a batch inherit it from the first row when they join the
+  same declared cluster; a cluster created by the batch is the console's
+  own.
+- The translation parity test tolerated 1129 missing keys although the five
+  languages are complete since 1.10.0. A contribution adding six strings
+  without Italian and Spanish passed it. The test now fails on any key
+  missing in a language.
+
+### Docs
+- Bare-metal (EN/FR): the rights used when joining a cluster.
+
+### Tests
+- `tests/api/test_baremetal.py`: a join started with and without a delegated
+  identity carries the matching kubeconfig to the thread, never in the
+  response; the install thread never resolves a cluster kubeconfig itself;
+  the node wait reads with the kubeconfig it is given.
+- `tests/api/test_bm_profiles_180.py`: batch joins inherit the frozen
+  kubeconfig only for the same declared cluster.
+- `tests/api/test_i18n.py`: strict parity. Each change removed in turn makes
+  a test fail.
+
 ## [1.88.0] - 2026-10-15 - Bare-metal installs boot tagged bonds with stable NIC identity
 
 ### Fixed

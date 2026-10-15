@@ -5544,15 +5544,22 @@ def _cluster_for_server(server_url):
     return None
 
 
-def _bm_wait_node_ready(cluster, hostname, deadline, run, step):
+def _bm_cluster_kubeconfig(opts):
+    """Kubeconfig du cluster rejoint, tel que figé côté requête par
+    _bm_prepare_install. Jamais rendu dans une réponse : il peut porter les
+    identifiants de la personne."""
+    return opts.get("_cluster_kc") or _kubectl_for_cluster(opts["cluster"])
+
+
+def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
     """Attend que le nœud qui rejoint soit prêt dans le cluster. L'API de ce
-    cluster répond déjà : l'attendre ne prouverait rien."""
+    cluster répond déjà : l'attendre ne prouverait rien. `kubeconfig` : celui
+    figé côté requête (_bm_cluster_kubeconfig)."""
     last = ""
     while time.time() < deadline:
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
-        node = _kubectl_json(_kubectl_for_cluster(cluster), "get", "node", hostname,
-                             cluster=cluster)
+        node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
         if conds.get("Ready") == "True":
@@ -6347,7 +6354,8 @@ def _baremetal_install_runner(run, opts):
     if opts.get("mode") == "join":
         step("wait-node", "running",
              f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
-        if not _bm_wait_node_ready(opts["cluster"], opts["hostname"], deadline, run, step):
+        if not _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
+                                   opts["hostname"], deadline, run, step):
             return fail("wait-node",
                         f"{opts['hostname']} not Ready in {opts['cluster']} after "
                         f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
@@ -6396,7 +6404,7 @@ def _baremetal_install_runner(run, opts):
             step("pools", "running", f"{len(pools)} pool(s) : {', '.join(p['tag'] for p in pools)}")
             if opts.get("mode") == "join":
                 # le cluster est déclaré (la route l'exige) : son kubeconfig
-                kubeconfig = _kubectl_for_cluster(opts["cluster"])
+                kubeconfig = _bm_cluster_kubeconfig(opts)
                 if not kubeconfig:
                     return fail("pools", f"Harvester is installed; the pools were not created: "
                                          f"{opts['cluster']} is no longer declared")
@@ -6719,6 +6727,11 @@ def _bm_prepare_install(data, defer_join=False):
         if not data["cluster"] and not defer_join:
             return None, (jsonify({"error": "declare the cluster of server_url first",
                                    "fields": ["server_url"]}), 400)
+        if data["cluster"]:
+            # v1.88.1 : l'identité de la personne (délégation, session Rancher)
+            # n'existe que dans la requête ; le fil de l'installation, lui,
+            # retombait sur le kubeconfig de la console (system:masters).
+            data["_cluster_kc"] = _kubectl_for_cluster(data["cluster"])
     if data.get("method", "dhcp") == "static":
         for k in ("ip", "subnet_mask", "gateway"):
             if not data.get(k):
@@ -7096,6 +7109,11 @@ def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
                 data, err = _bm_prepare_install(dict(opts))
             if err:
                 raise RuntimeError("; ".join(f"{w}: {r}" for w, r in _bm_refusal_pairs(err, "")))
+            # préparée dans ce fil, la ligne n'a plus l'identité de la personne :
+            # celle de la ligne 1 vaut pour le même cluster déjà déclaré ; un
+            # cluster créé par la ligne 1 l'a été par la console elle-même
+            if plan[0].get("_cluster_kc") and data.get("cluster") == plan[0].get("cluster"):
+                data["_cluster_kc"] = plan[0]["_cluster_kc"]
             opts = data
         with app.app_context():
             action_id, busy = _bm_track(f"baremetal-install:{opts['hostname']}",

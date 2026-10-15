@@ -452,6 +452,45 @@ def test_batch_runner_waits_for_the_create_then_joins(monkeypatch):
     assert TOKEN not in json.dumps(list(run.events)) + json.dumps(run.result)
 
 
+@pytest.mark.parametrize("first,frozen,expected", [
+    # série qui rejoint un cluster déjà déclaré : la ligne 1 porte le
+    # kubeconfig figé dans la requête, les suivantes l'héritent
+    ({"mode": "join", "cluster": "rack-a"}, "/identity-copy", ["/identity-copy"] * 2),
+    # série qui crée le cluster : créé par la console, rien à hériter
+    ({"mode": "create"}, None, [None, None]),
+    # autre cluster que celui de la ligne 1 : rien n'est recopié
+    ({"mode": "join", "cluster": "other"}, "/identity-copy", [None, None]),
+])
+def test_batch_joins_inherit_the_kubeconfig_frozen_on_the_request_side(monkeypatch, first,
+                                                                       frozen, expected):
+    """v1.88.1 : les lignes 2 et suivantes sont préparées dans le fil de la
+    série, où l'identité de la personne n'existe plus."""
+    got = []
+
+    class Child:
+        status = "done"
+
+    def fake_track(label, host, worker, opts):
+        got.append(opts.get("_cluster_kc"))
+        aid = f"k{len(got)}"
+        with wapp.ACTIONS_LOCK:
+            wapp.ACTIONS[aid] = Child()
+        return aid, None
+
+    monkeypatch.setattr(wapp, "_bm_track", fake_track)
+    monkeypatch.setattr(wapp, "_bm_prepare_install",
+                        lambda d, defer_join=False: (dict(d, cluster="rack-a"), None))
+    row0 = dict(first, hostname="n0", bmc_host="h0", token=TOKEN)
+    if frozen:
+        row0["_cluster_kc"] = frozen
+    plan = [row0] + [{"hostname": f"n{i}", "bmc_host": f"h{i}", "mode": "join", "token": TOKEN}
+                     for i in (1, 2)]
+    run = wapp.ActionRun("p2", "baremetal-batch:rack-a", "(local)", [])
+    wapp._baremetal_batch_runner(run, plan, 2)
+    assert run.status == "done"
+    assert got[0] == frozen and sorted(got[1:], key=str) == expected
+
+
 # --- ligne de commande -------------------------------------------------------
 
 def _cli():
