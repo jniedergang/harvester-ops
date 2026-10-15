@@ -538,36 +538,3 @@ verified against the known dracut ifname generator, identical in Harvester
 before any power change; another ISO version needs verification first.
 Hardware validation is not bypassed. The generic no-image-download timeout
 is not proof of a hardware-check failure: inspect the actual console error.
-
-## Optional VM/customer uplinks when joining a cluster
-
-Import the join YAML as usual. In **VM/customer network**, enable **Configure VM
-uplinks after joining**, choose an existing network configuration as the template,
-and tick the separate customer NICs by MAC address. Discovery inventory, when
-available, also shows their Linux names. Management and VM NICs must be distinct.
-The template supplies the cluster network and all bond/link attributes, including
-mode and MTU; its NIC names and node selector are replaced for the new host.
-
-**Preview** shows the installer YAML followed by a separate post-join plan. This
-plan is console orchestration, not a supported key in Harvester's installer YAML.
-It is currently offered for joins to declared clusters, not cluster creation or
-migration of existing hosts. Unchecked, the feature makes no extra API calls.
-
-A catch-all configuration such as `vm-bond` must first be scoped to its existing
-hosts under **Networks**. The install is refused if that configuration would
-also select the new host. The wizard never rewrites existing network configurations.
-Do not change active hosts' coverage when preparing that selector.
-
-After the node joins, the console rechecks the actual node labels, template and
-cluster network. The network-controller LinkMonitor must report each selected MAC
-as exactly one free, physical NIC with link up. The target must have no VMIs.
-The console server-dry-runs and then creates one host-specific VlanConfig, using
-`kubernetes.io/hostname`, and reports success only after its VlanStatus is ready.
-No existing bond, management configuration, storage configuration or maintenance
-state is changed. Missing inventory, changed templates and overlapping selectors
-stop this step with an explicit error. The Harvester installation remains in place.
-
-On a create timeout or readiness failure, inspect the named configuration under
-**Networks**. There is no automatic reinstall, retry of an uncertain create,
-or teardown of the possibly active VM bond. Complete the network configuration
-there before using the host for VM workloads.
