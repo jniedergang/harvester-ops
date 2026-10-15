@@ -49,12 +49,20 @@ def _boot_interface_bindings(cfg):
     return bindings
 
 
-def boot_network_args(cfg, extra_args=''):
-    managed = {'ip', 'ifname', 'bond', 'vlan', 'bootdev', 'BOOTIF', 'nameserver',
-               'rd.neednet', 'rd.bootif', 'rd.route', 'net.ifnames', 'biosdevname'}
+MANAGED_ARGS = {'ip', 'ifname', 'bond', 'vlan', 'bootdev', 'BOOTIF', 'nameserver',
+                'rd.neednet', 'rd.bootif', 'rd.route', 'net.ifnames', 'biosdevname'}
+
+
+def check_extra_args(extra_args):
+    """The early network is built from the management config: refuse extra
+    kernel arguments that would compete with it (also at profile save)."""
     for token in str(extra_args or '').split():
-        if token.split('=', 1)[0] in managed:
+        if token.split('=', 1)[0] in MANAGED_ARGS:
             _fail('extra_args', 'conflicting-network-argument')
+
+
+def boot_network_args(cfg, extra_args=''):
+    check_extra_args(extra_args)
     os_cfg = cfg.get('os') or {}
     net = (cfg.get('install') or {}).get('management_interface') or {}
     bindings = _boot_interface_bindings(cfg)
@@ -65,7 +73,8 @@ def boot_network_args(cfg, extra_args=''):
         if mac:
             args.append('ifname=%s:%s' % (name, mac))
     bond = net.get('bond_options') or {}
-    # An omitted mode uses the installer's active-backup default.
+    # The rendered config always carries a mode (the console renders
+    # balance-tlb by default); these defaults only cover a bare config.
     options = dict(bond)
     options.setdefault('mode', 'active-backup')
     options.setdefault('miimon', '100')

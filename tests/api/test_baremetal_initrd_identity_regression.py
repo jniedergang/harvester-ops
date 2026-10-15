@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
-spec = importlib.util.spec_from_file_location('identity', os.environ.get('INITRD_TEST_HELPER', str(ROOT / 'bin/lib/baremetal_initrd_identity.py')))
+spec = importlib.util.spec_from_file_location('identity', str(ROOT / 'bin/lib/baremetal_initrd_identity.py'))
 m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 ORIGINAL = ROOT / 'tests/fixtures/ifname-genrules.sh'

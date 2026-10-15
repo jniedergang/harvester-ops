@@ -627,7 +627,7 @@ def test_management_interface_is_designated_by_mac():
     cfg = yaml.safe_load(wapp._harvester_install_config(
         dict(base, mgmt_interface="D0:67:26:D5:4A:F8")))
     iface = cfg["install"]["management_interface"]["interfaces"][0]
-    assert iface == {"hwAddr": "d0:67:26:d5:4a:f8", "name": "hvboot0"}, iface
+    assert iface == {"hwAddr": "d0:67:26:d5:4a:f8"}, iface
 
     # un vrai nom d'interface reste accepté tel quel
     cfg = yaml.safe_load(wapp._harvester_install_config(

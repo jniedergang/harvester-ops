@@ -1,4 +1,4 @@
-"""Patch the pinned Harvester 1.8.2 ifname generator without rebuilding initrd.
+"""Patch the pinned dracut ifname generator (identical in Harvester 1.8.2 and 1.9.0)
 
 The kernel accepts concatenated compressed cpio archives. A last overlay
 replaces only this hook; original microcode, modules and boot files stay intact.

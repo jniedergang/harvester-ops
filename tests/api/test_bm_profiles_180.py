@@ -620,3 +620,23 @@ def test_a_joined_node_is_added_to_the_console_declaration(tmp_path, monkeypatch
     monkeypatch.setattr(wapp, "_load_config_file", lambda: {"clusters": [
         {"name": "ops", "kubeconfig": "/k", "nodes": []}]})
     assert "config.yaml" in wapp._bm_add_joined_node("ops", "n9", "192.0.2.19")
+
+
+@pytest.mark.parametrize("extra,refused", [
+    ("console=ttyS1,115200", False),
+    ("ip=dhcp", True),
+    ("console=ttyS0 nameserver=192.0.2.53", True),
+    ("rd.neednet=1 console=ttyS0", True),
+])
+def test_profile_refuses_extra_args_that_compete_with_the_boot_network(env, extra, refused):
+    """1.88.0 : le réseau du démarrage vient de la configuration de gestion ;
+    un argument concurrent était refusé au lancement mais accepté à
+    l'enregistrement du profil."""
+    fields = dict(FIELDS, extra_args=extra)
+    r = env["client"].post("/api/baremetal/profiles",
+                           json=dict(body_of(profile(fields=fields)), name="rack-x"))
+    if refused:
+        assert r.status_code == 400, r.get_json()
+        assert "extra_args" in json.dumps(r.get_json())
+    else:
+        assert r.status_code == 201, r.get_json()

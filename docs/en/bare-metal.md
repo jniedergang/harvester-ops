@@ -149,10 +149,10 @@ dock the moment you confirm, and streams its steps.
 | `preflight` | Reads BMC inventory without powering on the old OS; validates saved discovery identity and checks there is a disk: the discovery inventory first, then the HPE UEFI boot targets, then the Redfish drives; with none of them, a warning (the installer checks its disk itself) |
 | `remaster` | Patches the ISO so it installs unattended (below) |
 | `serve` | Publishes the ISO and the config behind one-off tokens |
-| `power-off` | Confirms the machine is off before mounting media or changing boot settings |
+| `power-off` | Powers the machine off (any state other than `Off`, including a transient or unreadable one, gets a forced power-off) before mounting media or changing boot settings |
 | `bmc-insert` | Mounts the ISO as virtual media, and waits for the BMC's answer (up to 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Sets a **one-shot** boot on `Cd` |
-| `power` | Verifies the host is still off and the one-shot CD override is set, then powers on once |
+| `power` | Verifies the host is still off and the boot target reads back as `Cd`, then powers on once. A BMC that does not read back `Once` (the sushy-tools emulator always says `Continuous`) gets a warning, not a refusal |
 | `wait-install` | The installer powers the machine **off** when it is done (`install.power_off`, set by the console) |
 | `boot-disk` | Ejects the media, sets a one-shot boot on the disk, powers the machine on |
 | `wait-api` | Waits for the Harvester API on the VIP |
@@ -167,7 +167,10 @@ the disk itself, whatever the BMC does with one-shot boots.
 
 Preflight and ISO preparation do not change host power. Once preparation
 succeeds, installation powers the host off before mounting virtual media.
-If setting or verifying CD boot fails, the console does not power it on.
+If the mount fails (for example the BMC cannot reach the ISO address), a
+machine that was found running is powered on again. Once the boot settings
+are touched, the console never powers the host on unless the `Cd` target
+is confirmed: powering on then could start the installer.
 
 **The new cluster is declared automatically** (create mode). The console
 creates an ed25519 key pair for it (`ssh/<name>_id`, 0600, in the
@@ -511,8 +514,10 @@ creating an installation action.
 On a multihomed console, virtual media uses the address routed toward the
 BMC, while configuration and installation-image downloads use the address
 routed toward the planned static management IP. API callers can override
-these with `advertise_host` and `installer_advertise_host`, respectively.
-For DHCP installations the installer address defaults to the media address.
+these: `advertise_host` sets the address for both sides, as before, and
+`installer_advertise_host` sets the installer side only. The installer
+address is derived from the route to the planned static IP only when
+neither is set; for DHCP installations it defaults to the media address.
 Both networks must be able to reach the corresponding HTTP address/port.
 
 Bond slaves can share a current MAC address. Matching names against that
@@ -521,9 +526,15 @@ address during normal-system udev coldplug can rename the wrong slave
 console gives the boot and installer the same names, matches existing bond
 slaves by `bonding_slave/perm_hwaddr`, and writes equivalent final naming
 rules for installed boots. It never changes the selected original MACs.
+These names (`hvbootN`) and their `ifname=` arguments are only written into
+the configuration served by the remastered ISO, which carries the matching
+boot arguments. A configuration rendered for another boot path (your own
+PXE, a nested test bench) keeps the selected MACs without these names.
 
-The initrd overlay is verified against the known Harvester 1.8.2 dracut
-ifname generator. An unknown generator is refused during ISO preparation,
+The initrd overlay is only added when the bond has two or more
+MAC-selected members: a single member shares its MAC with nobody. It is
+verified against the known dracut ifname generator, identical in Harvester
+1.8.2 and 1.9.0. An unknown generator is refused during ISO preparation,
 before any power change; another ISO version needs verification first.
 Hardware validation is not bypassed. The generic no-image-download timeout
 is not proof of a hardware-check failure: inspect the actual console error.

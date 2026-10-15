@@ -3096,7 +3096,14 @@ def _redfish_send(host, path, user, pwd, method, payload=None, timeout=20):
                            "UefiTargetBootSourceOverride", "BootSourceOverrideMode"}
             args = [arg for info in infos if isinstance(info, dict)
                     for arg in (info.get("MessageArgs") or []) if isinstance(arg, str) and arg in boot_fields]
-            body = "; ".join(ids[:4]) or f"HTTP {e.code}"
+            body = "; ".join(ids[:4])
+            message = error.get("message")
+            if isinstance(message, str) and message.strip():
+                # le message ne porte pas d'identifiants, mais peut citer
+                # l'URL à jeton de l'ISO : elle est masquée
+                message = re.sub(r"\b(?:https?|ftp)://\S+", "<url>", message.strip())[:200]
+                body = f"{body}: {message}" if body else message
+            body = body or f"HTTP {e.code}"
             if args:
                 body += " (" + ", ".join(dict.fromkeys(args)) + ")"
         except Exception:
@@ -5470,11 +5477,12 @@ HARVESTER_INSTALL_TIMEOUT = int(
 
 
 from baremetal_boot_network import (boot_network_args as _bm_boot_network_args,
+                                   check_extra_args as _bm_check_extra_args,
                                    installer_boot_identity as _bm_installer_boot_identity,
                                    BootNetworkError)
 
 
-def _harvester_install_config(opts):
+def _harvester_install_config(opts, boot_identity=False):
     """Rend la configuration d'installation Harvester (YAML).
 
     Construite en dictionnaire depuis les champs du formulaire, fusionnée
@@ -5483,7 +5491,13 @@ def _harvester_install_config(opts):
     placée ici coûte une réinstallation complète : toute clé inconnue,
     réservée à la console ou posée des deux côtés lève InstallConfigError
     avec son chemin."""
-    return _his.dump_install_config(_bm_with_installer_identity(_his.render_install_config(opts)))
+    cfg = _his.render_install_config(opts)
+    # Les noms hvbootN ne valent qu'avec les ifname= que porte l'ISO
+    # remasterisée : un appelant qui démarre l'installeur lui-même (banc
+    # harvlab, PXE de l'exploitant) garde la configuration sans eux.
+    if boot_identity:
+        cfg = _bm_with_installer_identity(cfg)
+    return _his.dump_install_config(cfg)
 
 
 def _bm_wait_api(vip, deadline, run, step):
@@ -5936,8 +5950,8 @@ def _bm_power_off(host, user, pwd, sys_path, run, sleep=None, now=None, off_wait
     state = (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState")
     if state == "Off":
         return True, ""
-    if state != "On":
-        return False, "cannot verify the machine power state"
+    # Un état transitoire (PoweringOn) ou une lecture sans réponse ne doit
+    # pas faire abandonner : arrêt franc puis attente de Off, comme en 1.78.
     ok, detail = _bm_reset(host, user, pwd, sys_path, "ForceOff")
     if not ok:
         return False, f"power off refused: {detail}"
@@ -6209,7 +6223,8 @@ def _baremetal_install_runner(run, opts):
         creds.extend([files["key"], files["pub"], files["known_hosts"]])
         opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
-        cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True))
+        cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True),
+                                             boot_identity=True)
     except InstallConfigError as e:
         return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
@@ -6239,38 +6254,56 @@ def _baremetal_install_runner(run, opts):
     step("serve", "done", f"média virtuel : {media_base}; installeur : {installer_base}")
 
     # --- média virtuel + amorce + allumage ---
+    # Machine éteinte d'abord, média inséré ensuite, amorce enfin. Si
+    # l'insertion échoue (URL de l'ISO injoignable depuis le BMC), une machine
+    # trouvée allumée est rallumée : elle revient à son état de départ. Jamais
+    # après l'amorce : rallumer lancerait l'installeur sur une cible Cd posée.
     sys_path = profile.get("system_path")
+    if getattr(run, "_cancel", False):
+        return fail("power-off", "cancelled by operator")
+    was_on = (_redfish_get(host, sys_path, kc_user, kc_pwd, timeout=8) or {}).get("PowerState") == "On"
     step("power-off", "running", "extinction avant montage du média et configuration de l'amorce")
     ok, detail = _bm_power_off(host, kc_user, kc_pwd, sys_path, run)
     if not ok:
         return fail("power-off", detail)
-    step("power-off", "done", "machine éteinte, configuration de l'amorce autorisée")
+    step("power-off", "done", "machine éteinte")
+
+    def restore_power():
+        if not was_on:
+            return
+        ok_on, _ = _bm_reset(host, kc_user, kc_pwd, sys_path, "On")
+        step("bmc-insert", "warn", "machine trouvée allumée : rallumée" if ok_on
+             else "machine trouvée allumée : la rallumer à la main")
+
     if getattr(run, "_cancel", False):
+        restore_power()
         return fail("bmc-insert", "cancelled by operator")
     step("bmc-insert", "running", "insertion dans le lecteur virtuel")
     ok, detail, vm_res = _bm_media_insert(host, kc_user, kc_pwd, iso_url)
     if not ok:
+        restore_power()
         return fail("bmc-insert", detail[:200])
     step("bmc-insert", "done", "image montée")
 
     if getattr(run, "_cancel", False):
         return fail("bmc-boot", "cancelled by operator")
     step("bmc-boot", "running", "amorce unique sur le lecteur virtuel")
-    sys_path = profile.get("system_path")
     ok, detail = _bm_boot_once_cd(host, kc_user, kc_pwd, sys_path)
     if not ok:
         return fail("bmc-boot", detail[:200])
-    step("bmc-boot", "done", "prochaine amorce : CD virtuel")
-
-    if getattr(run, "_cancel", False):
-        return fail("power", "cancelled by operator")
-    # Refuse to power on unless the BMC confirms the requested one-shot CD boot.
+    # Pas d'allumage sans relire la cible Cd machine éteinte. Le mode n'est
+    # pas exigé : sushy-tools répond toujours « Continuous », et un BMC peut
+    # ne pas renvoyer « Once » ; l'installeur s'éteint de toute façon à la
+    # fin (install.power_off) et la console démarre ensuite le disque.
     fresh = _redfish_get(host, sys_path, kc_user, kc_pwd, timeout=8) or {}
     fresh_boot = fresh.get("Boot") or {}
-    if (fresh.get("PowerState") != "Off"
-            or fresh_boot.get("BootSourceOverrideTarget") != "Cd"
-            or fresh_boot.get("BootSourceOverrideEnabled") != "Once"):
+    if fresh.get("PowerState") != "Off" or fresh_boot.get("BootSourceOverrideTarget") != "Cd":
         return fail("bmc-boot", "boot/power state verification failed; no power-on requested")
+    if fresh_boot.get("BootSourceOverrideEnabled") != "Once":
+        step("bmc-boot", "warn", "le BMC ne relit pas l'amorce unique "
+             f"({fresh_boot.get('BootSourceOverrideEnabled') or '?'}) : cible Cd confirmée")
+    step("bmc-boot", "done", "prochaine amorce : CD virtuel")
+
     if getattr(run, "_cancel", False):
         return fail("power", "cancelled by operator")
     step("power", "running", "mise sous tension sur l'installeur")
@@ -6404,7 +6437,9 @@ def _bm_artifact_base_urls(opts, port, route_ip=None):
     import ipaddress
     route_ip = route_ip or _bm_local_ip_for
     media_host = opts.get("advertise_host") or route_ip(opts["bmc_host"])
-    installer_host = opts.get("installer_advertise_host")
+    # Une adresse posée par l'exploitant (NAT, DNS) vaut pour les deux côtés,
+    # comme avant ; l'adresse vers l'IP prévue n'est déduite que sans elle.
+    installer_host = opts.get("installer_advertise_host") or opts.get("advertise_host")
     if not installer_host:
         if opts.get("method", "dhcp") == "static" and opts.get("ip"):
             installer_host = route_ip(opts["ip"])
@@ -6412,7 +6447,10 @@ def _bm_artifact_base_urls(opts, port, route_ip=None):
             installer_host = media_host
     for field, host in (("advertise_host", media_host),
                         ("installer_advertise_host", installer_host)):
-        if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
+        # nom RFC 1123 (étiquettes de 63 caractères au plus) ou adresse IPv4
+        if not isinstance(host, str) or not re.fullmatch(
+                r"(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+                r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*", host):
             raise ValueError("invalid artifact host: " + field)
         try:
             addr = ipaddress.ip_address(host)
@@ -6806,6 +6844,10 @@ def _bm_profile_check_render(prof):
         _bm_render_checked(dict(opts, token=_BM_CHECK_SECRET))
     except InstallConfigError as e:
         return [(p, str(e.reasons.get(p) or e.message)) for p in e.paths]
+    try:
+        _bm_check_extra_args(opts.get("extra_args", ""))
+    except BootNetworkError as e:
+        return [(e.path, e.reason)]
     return []
 
 

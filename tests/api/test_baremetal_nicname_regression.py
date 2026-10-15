@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 BASE=Path(__file__).resolve().parents[2]
-WEB=Path(os.environ.get('NIC_TEST_WEB',str(BASE/'web')))
+WEB=Path(str(BASE/'web'))
 sys.path.insert(0,str(WEB))
 from baremetal_boot_network import installer_boot_identity,boot_network_args,BootNetworkError
 
@@ -75,8 +75,8 @@ class NicIdentityTests(unittest.TestCase):
         self.assertEqual(out['install']['management_interface']['interfaces'],[{'name':'ens3f0'}])
         self.assertNotIn('additional_kernel_arguments',out['os'])
     def test_real_render_and_preview_paths_produce_same_identity(self):
-        app=Path(os.environ.get('NIC_TEST_APP',str(BASE/'web/app.py'))).read_text()
-        schema=Path(os.environ.get('NIC_TEST_SCHEMA',str(BASE/'web/harvester_install_schema.py')))
+        app=Path(str(BASE/'web/app.py')).read_text()
+        schema=Path(str(BASE/'web/harvester_install_schema.py'))
         spec=importlib.util.spec_from_file_location('test_schema',str(schema));his=importlib.util.module_from_spec(spec);spec.loader.exec_module(his)
         env={'_his':his,'InstallConfigError':his.InstallConfigError,'BootNetworkError':BootNetworkError,
              '_bm_installer_boot_identity':installer_boot_identity,'_bm_boot_network_args':boot_network_args,
@@ -86,7 +86,12 @@ class NicIdentityTests(unittest.TestCase):
         exec(compile(module,'<actual-render-functions>','exec'),env)
         opts=his.split_imported_config(his.dump_install_config(self.cfg))['form']
         import yaml
-        actual=yaml.safe_load(env['_harvester_install_config'](dict(opts,iso_url='http://fixture.invalid/iso')))
+        actual=yaml.safe_load(env['_harvester_install_config'](dict(opts,iso_url='http://fixture.invalid/iso'),boot_identity=True))
+        # 1.88.0 : sans l'ISO remasterisée (banc harvlab, PXE de l'exploitant),
+        # ni noms hvbootN ni ifname= : l'installeur ne les trouverait pas
+        plain=yaml.safe_load(env['_harvester_install_config'](dict(opts,iso_url='http://fixture.invalid/iso')))
+        self.assertFalse([i for i in plain['install']['management_interface']['interfaces'] if str(i.get('name','')).startswith('hvboot')])
+        self.assertNotIn('ifname=',str(plain['os'].get('additional_kernel_arguments') or ''))
         preview=env['_bm_render_boot_checked'](opts)
         self.assertEqual(actual,preview)
         self.assertEqual(actual['install']['management_interface']['interfaces'][1],{'name':'hvboot1','hwAddr':'f6:66:60:a0:05:46'})

@@ -1,11 +1,10 @@
 import ast
-import os
 import re
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-APP = Path(os.environ.get('ADDRESS_TEST_APP', str(Path(__file__).resolve().parents[2]/'web/app.py'))).read_text()
+APP = (Path(__file__).resolve().parents[2]/'web/app.py').read_text()
 TREE = ast.parse(APP)
 
 
@@ -39,9 +38,19 @@ class AddressTests(unittest.TestCase):
     def test_separate_source_interfaces_are_selected(self):
         self.assertEqual(self.fn(self.opts,8091),('http://198.51.100.196:8091','http://203.0.113.9:8091'))
         self.assertEqual(self.calls,['198.51.100.115','192.0.2.73'])
-    def test_manual_media_host_does_not_override_node_route(self):
+    def test_manual_media_host_serves_both_sides_as_before(self):
+        # 1.88.0 : une adresse posée par l'exploitant (NAT, DNS) vaut pour
+        # l'installeur aussi, comme avant le PR ; aucune route n'est cherchée.
         opts=dict(self.opts,advertise_host='198.51.100.197')
-        self.assertEqual(self.fn(opts,8091),('http://198.51.100.197:8091','http://203.0.113.9:8091'))
+        self.assertEqual(self.fn(opts,8091),('http://198.51.100.197:8091','http://198.51.100.197:8091'))
+        self.assertEqual(self.calls,[])
+    def test_installer_host_wins_over_media_host(self):
+        opts=dict(self.opts,advertise_host='198.51.100.197',installer_advertise_host='203.0.113.10')
+        self.assertEqual(self.fn(opts,8091),('http://198.51.100.197:8091','http://203.0.113.10:8091'))
+    def test_hostname_labels_follow_rfc1123(self):
+        for bad in ('a..b','-a.example','a-.example','x'*64+'.example'):
+            with self.assertRaises(ValueError):self.fn(dict(self.opts,installer_advertise_host=bad),8091)
+        self.assertEqual(self.fn(dict(self.opts,installer_advertise_host='harvops.home.lo'),8091)[1],'http://harvops.home.lo:8091')
     def test_manual_installer_host_is_supported(self):
         opts=dict(self.opts,installer_advertise_host='203.0.113.10')
         self.assertEqual(self.fn(opts,8091)[1],'http://203.0.113.10:8091')
@@ -61,7 +70,7 @@ class AddressTests(unittest.TestCase):
     def test_real_runner_uses_node_address_for_both_installer_downloads(self):
         opts=dict(self.opts,mode='join',cluster='fixture',iso='fixture.iso')
         record={}
-        def config(data):record.update(data);return 'fixture-yaml'
+        def config(data,boot_identity=False):record.update(data,boot_identity=boot_identity);return 'fixture-yaml'
         tokens=iter(['iso-fixture','config-fixture'])
         env={'initial_opts':opts,'host':opts['bmc_host'],'run':SimpleNamespace(id='fixture'),
              'pxe_server':SimpleNamespace(start=lambda:8091,issue=lambda *a:next(tokens)),
@@ -79,6 +88,7 @@ class AddressTests(unittest.TestCase):
         self.assertEqual(record['iso_url'],iso)
         self.assertEqual(record['mode'],'join')
         self.assertTrue(record['power_off'])
+        self.assertTrue(record['boot_identity'])
         self.assertEqual(env['tokens'],['iso-fixture','config-fixture'])
 
 

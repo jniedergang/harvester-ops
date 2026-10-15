@@ -1,14 +1,14 @@
 import ast
 import io
 import json
-import os
+import re
 import unittest
 import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-SOURCE = Path(os.environ.get('SVPADM_TEST_APP_SOURCE', str(Path(__file__).resolve().parents[2]/'web/app.py'))).read_text()
+SOURCE = (Path(__file__).resolve().parents[2] / 'web/app.py').read_text()
 TREE = ast.parse(SOURCE)
 
 
@@ -20,7 +20,7 @@ def functions(names, env):
 
 def sequence(initial='Off', off_ok=True, mount_ok=True, boot_ok=True,
              verified=True, cancelled=False, cancel_after_mount=False,
-             fresh_power='Off', stuck_on=False):
+             fresh_power='Off', stuck_on=False, mode='Once'):
     events = []
     state = [initial]
     run = SimpleNamespace(_cancel=cancelled)
@@ -32,7 +32,7 @@ def sequence(initial='Off', off_ok=True, mount_ok=True, boot_ok=True,
         if events and any(e[0] == 'boot' for e in events):
             return {'PowerState': fresh_power, 'Boot': {
                 'BootSourceOverrideTarget': 'Cd' if verified else 'Hdd',
-                'BootSourceOverrideEnabled': 'Once'}}
+                'BootSourceOverrideEnabled': mode}}
         return {'PowerState': state[0]}
     def reset(host, user, pwd, path, kind):
         events.append(('reset', kind))
@@ -66,6 +66,8 @@ def sequence(initial='Off', off_ok=True, mount_ok=True, boot_ok=True,
 
 
 class BootSequenceTests(unittest.TestCase):
+    # 1.88.0 : extinction, média inséré machine éteinte, amorce, allumage ;
+    # une machine trouvée allumée est rallumée si l'insertion échoue.
     def test_off_host_never_boots_old_os(self):
         result, events = sequence()
         self.assertEqual(result, 'booted')
@@ -76,10 +78,26 @@ class BootSequenceTests(unittest.TestCase):
         self.assertEqual(result, 'booted')
         self.assertEqual([e for e in events if e[0] != 'read'],
                          [('reset','ForceOff'), ('mount','Off'), ('boot','Off'), ('reset','On')])
-    def test_unknown_state_blocks_all_mutations(self):
-        result, events = sequence(initial=None)
-        self.assertEqual(result[1], 'power-off')
-        self.assertFalse([e for e in events if e[0] != 'read'])
+    def test_failed_mount_powers_a_running_host_back_on(self):
+        result, events = sequence(initial='On', mount_ok=False)
+        self.assertEqual(result[1], 'bmc-insert')
+        self.assertEqual([e for e in events if e[0] != 'read'],
+                         [('reset','ForceOff'), ('mount','Off'), ('reset','On')])
+    def test_failed_mount_leaves_an_off_or_unknown_host_off(self):
+        for initial in ('Off', None):
+            result, events = sequence(initial=initial, mount_ok=False)
+            self.assertEqual(result[1], 'bmc-insert')
+            self.assertNotIn(('reset','On'), events)
+    def test_unknown_or_transient_state_is_forced_off(self):
+        for initial in (None, 'PoweringOn'):
+            result, events = sequence(initial=initial)
+            self.assertEqual(result, 'booted')
+            self.assertEqual([e for e in events if e[0] != 'read'],
+                             [('reset','ForceOff'), ('mount','Off'), ('boot','Off'), ('reset','On')])
+    def test_bmc_without_once_readback_still_boots_on_cd(self):
+        result, events = sequence(mode='Continuous')
+        self.assertEqual(result, 'booted')
+        self.assertIn(('reset','On'), events)
     def test_off_rejected_does_not_mount_or_boot(self):
         result, events = sequence(initial='On', off_ok=False)
         self.assertEqual(result[1], 'power-off')
@@ -104,10 +122,10 @@ class BootSequenceTests(unittest.TestCase):
         result, events = sequence(cancelled=True)
         self.assertEqual(result[1], 'power-off')
         self.assertEqual(events, [])
-    def test_cancellation_after_mount_does_not_set_boot(self):
+    def test_cancellation_after_mount_does_not_set_boot_or_power_on(self):
         result, events = sequence(cancel_after_mount=True)
         self.assertEqual(result[1], 'bmc-boot')
-        self.assertFalse([e for e in events if e[0] in ('boot','reset')])
+        self.assertFalse([e for e in events if e[0] == 'boot' or e == ('reset','On')])
     def test_failed_mount_never_sets_boot(self):
         result, events = sequence(mount_ok=False)
         self.assertEqual(result[1], 'bmc-insert')
@@ -125,7 +143,7 @@ class BootSequenceTests(unittest.TestCase):
 
 class ErrorDetailsTests(unittest.TestCase):
     def call_error(self, body):
-        env = {'json': json, '_redfish_etag': lambda *args: None}
+        env = {'json': json, 're': re, '_redfish_etag': lambda *args: None}
         functions({'_redfish_send'}, env)
         error = urllib.error.HTTPError('https://fixture.invalid', 400, 'bad', {}, io.BytesIO(body))
         with patch('urllib.request.urlopen', side_effect=error):
@@ -140,6 +158,10 @@ class ErrorDetailsTests(unittest.TestCase):
         self.assertIn(message_id, detail)
         self.assertIn('BootSourceOverrideTarget', detail)
         self.assertNotIn('SENSITIVE_FIXTURE', detail)
+    def test_keeps_the_message_with_urls_masked(self):
+        body = json.dumps({'error': {'message': 'Unable to fetch http://192.0.2.9:8091/pxe/iso/SECRET_TOKEN.iso now'}}).encode()
+        ok, status, detail = self.call_error(body)
+        self.assertEqual(detail, 'Unable to fetch <url> now')
     def test_non_json_error_is_not_logged_raw(self):
         self.assertEqual(self.call_error(b'SENSITIVE_FIXTURE'), (False,400,'HTTP 400'))
 

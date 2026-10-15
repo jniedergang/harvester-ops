@@ -239,10 +239,22 @@ emit_event "iso-patch" "done" "$PATCH_MODE"
 
 # Bond slaves share the current MAC; preserve their permanent identity on
 # normal-system udev coldplug. Only the known original hook is accepted.
-if [[ -n "$NETWORK_ARGS" && " $NETWORK_ARGS " == *" bond="* && " $NETWORK_ARGS " == *" ifname="* ]]; then
+# A single member shares its MAC with nobody: no overlay, so a Harvester
+# release with another hook still installs single-NIC machines.
+bond_members=0
+for boot_token in $NETWORK_ARGS; do
+    if [[ "$boot_token" == bond=* ]]; then
+        IFS=: read -r _ bond_slaves _ <<< "${boot_token#bond=}"
+        IFS=, read -r -a bond_list <<< "$bond_slaves"
+        bond_members=${#bond_list[@]}
+    fi
+done
+if [[ "$bond_members" -ge 2 && " $NETWORK_ARGS " == *" ifname="* ]]; then
     emit_event "iso-identity" "running" "stabilisation des noms des interfaces agrégées"
-    xorriso -osirrox on -indev "$SRC" -extract /boot/x86_64/loader/initrd "$WORK/original-initrd" >/dev/null 2>&1
-    python3 "$SCRIPT_DIR/lib/baremetal_initrd_identity.py" "$WORK/original-initrd" "$WORK/identity-initrd"
+    xorriso -osirrox on -indev "$SRC" -extract /boot/x86_64/loader/initrd "$WORK/original-initrd" >/dev/null 2>&1 \
+        || { emit_event "iso-identity" "error" "initrd introuvable dans l'image"; log_error "extraction de l'initrd impossible"; exit 1; }
+    python3 "$SCRIPT_DIR/lib/baremetal_initrd_identity.py" "$WORK/original-initrd" "$WORK/identity-initrd" \
+        || { emit_event "iso-identity" "error" "script ifname de l'initrd non reconnu"; exit 1; }
     MAPS+=(-map "$WORK/identity-initrd" /boot/x86_64/loader/initrd)
     emit_event "iso-identity" "done" "identité permanente des membres du bond"
 fi

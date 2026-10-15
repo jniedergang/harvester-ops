@@ -4,6 +4,70 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.88.0] - 2026-10-15 - Bare-metal installs boot tagged bonds with stable NIC identity
+
+### Fixed
+- Adding a host to a cluster through iLO 5 failed in three steps on an HPE
+  Synergy blade with a tagged VLAN bond (reported and fixed by Paul Dresch,
+  @pauld-0110, in #5):
+  - the preflight powered the machine on to read its inventory, which booted
+    the old ESXi;
+  - the installer could not fetch its configuration: its first network was
+    plain DHCP on every NIC, not the bond, VLAN and static address of the
+    management settings;
+  - the installed system stopped with `interface not found: hvboot0`. Bond
+    members share their current MAC, and the MAC-based `ifname` rules renamed
+    the wrong member at the next udev coldplug.
+- The installer's first network is now built from the management settings
+  (members, bond options, VLAN, static IPv4 or DHCP, gateway, DNS) and shown
+  in the preview (`boot_network_args`). Extra kernel arguments that compete
+  with it are refused, at launch and when a profile is saved.
+- MAC-selected interfaces get the same names (`hvbootN`) at boot and in the
+  installer, existing bond members are matched by their permanent MAC
+  (`bonding_slave/perm_hwaddr`), and the installed system keeps equivalent
+  rules. With two or more members, the ISO's initrd gets a small overlay
+  that fixes the dracut ifname generator; it is accepted only for the known
+  generator, identical in Harvester 1.8.2 and 1.9.0, and refused before any
+  power change otherwise.
+
+### Changed
+- The preflight no longer powers a machine on: it reads the BMC inventory of
+  the last POST, checks the saved discovery identity, and warns when the
+  machine is off.
+- Order of the install: power off (any state other than `Off` gets a forced
+  power-off), mount the virtual media, set the one-shot `Cd` boot, read it
+  back, power on once. A running machine is powered on again if the mount
+  fails. The console never powers the host on without reading back the `Cd`
+  target; a BMC that does not read back `Once` (the sushy-tools emulator
+  always says `Continuous`) gets a warning.
+- The console can serve the BMC and the installer on two addresses: the one
+  routed toward the BMC, and the one routed toward the planned static IP.
+  `advertise_host` still sets both, `installer_advertise_host` (API) sets
+  the installer side only.
+- Redfish errors keep their message IDs and message, with any URL masked,
+  instead of 400 raw characters that could echo the tokenised ISO address.
+
+### Internal
+- On top of #5: the `hvbootN` names and `ifname=` only go into the
+  configuration served by the remastered ISO (a nested bench or an
+  operator's own PXE boots with `ip=dhcp` and would not find `hvboot0`); the
+  initrd overlay only with two or more members; no refusal on a BMC that does
+  not echo `Once`; a running host powered back on after a failed mount;
+  `advertise_host` kept for both sides; host names checked as RFC 1123.
+
+### Docs
+- Bare-metal (EN/FR): boot order, power handling, the two artifact
+  addresses, NIC naming, the initrd overlay.
+
+### Tests
+- #5's tests (boot sequence, early network, NIC names, initrd overlay,
+  artifact addresses) adapted to the changes above.
+- `tests/api/test_bm_boot_followup_188.py`: names only for the remastered
+  ISO (one and two NICs), overlay only with two MAC-selected members, power
+  off from On, a transient or an unreadable state;
+  `test_bm_profiles_180.py`: a profile with competing network arguments is
+  refused at save. Each change removed in turn makes a test fail.
+
 ## [1.87.4] - 2026-10-08 - An older staged release is no longer offered as an update
 
 ### Fixed

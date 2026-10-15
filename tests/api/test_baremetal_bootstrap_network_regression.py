@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parents[2]
-WEB = Path(os.environ.get('BOOT_TEST_WEB', str(BASE/'web')))
+WEB = Path(str(BASE/'web'))
 sys.path.insert(0, str(WEB))
 from baremetal_boot_network import boot_network_args, BootNetworkError
 
@@ -16,8 +16,8 @@ CFG = {'os': {'hostname':'node4.example.test', 'dns_nameservers':['198.51.100.13
            'interfaces':[{'hwAddr':'F6:66:60:A0:05:45'},{'hwAddr':'F6:66:60:A0:05:46'}],
            'bond_options':{'mode':'802.3ad','miimon':'100','lacp_rate':'slow','xmit_hash_policy':'layer2'},
            'method':'static','ip':'192.0.2.73','subnet_mask':'255.255.255.0','gateway':'192.0.2.1','vlan_id':1324}}}
-SCRIPT = Path(os.environ.get('BOOT_TEST_SCRIPT', str(BASE/'bin/harvester-iso-remaster.sh'))).read_text()
-APP = Path(os.environ.get('BOOT_TEST_APP', str(BASE/'web/app.py'))).read_text()
+SCRIPT = Path(str(BASE/'bin/harvester-iso-remaster.sh')).read_text()
+APP = Path(str(BASE/'web/app.py')).read_text()
 
 
 def assemble(network='', extra='', kernel=''):
