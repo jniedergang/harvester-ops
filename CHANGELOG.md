@@ -4,6 +4,25 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [Unreleased]
+
+### Added
+- Optional VM/customer NIC selection by MAC when joining a declared cluster.
+  An existing network configuration supplies bond/link settings; after the
+  join, the console resolves the selected MACs through LinkMonitor, creates
+  a host-specific VlanConfig and waits for its ready status. The preview
+  shows this post-join plan separately from the installer YAML.
+- Management NIC reuse, overlapping selectors, changed templates, occupied
+  NICs and VMIs on the target block the VM-network step. Existing network,
+  storage and maintenance settings are not rewritten. An uncertain create
+  is left for inspection rather than retried or torn down.
+
+### Tests
+- VM uplinks: pure planning and real app-helper tests cover validation,
+  preflight, runtime NIC identity, server dry-run, cancellation, uncertain
+  writes and readiness; an isolated browser test exercises selection,
+  preview, launch payload and the disabled option with mocked APIs.
+
 ## [1.88.0] - 2026-10-15 - Bare-metal installs boot tagged bonds with stable NIC identity
 
 ### Fixed
