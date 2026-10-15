@@ -77,7 +77,7 @@ const VMEdit = (() => {
         label: { en: 'Disks', fr: 'Disques' },
         itemTitle: (v) => ({ icon: 'disk', text:
           `${v.name || tr('vm.edit.newDisk', 'new disk')}`
-          + `${v.bus ? ' — ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
+          + `${v.bus ? ': ' + v.bus : ''}${v.size ? ' · ' + v.size : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}` }),
         // Le premier disque doit faire DÉMARRER la VM, donc une image ; les
         // suivants sont des disques de données, donc vierges. Le défaut était
@@ -122,32 +122,32 @@ const VMEdit = (() => {
           { name: 'size', type: 'text', validate: /^[0-9]+(Mi|Gi|Ti)$/,
             suggest: ['10Gi', '20Gi', '40Gi', '80Gi', '100Gi', '200Gi'],
             label: { en: 'Size (new disk)', fr: 'Taille (nouveau disque)' },
-            description: { en: 'e.g. 10Gi — for image sources, at least the image size',
-                           fr: 'ex. 10Gi — pour une image, au moins la taille de l’image' } },
+            description: { en: 'e.g. 10Gi: for image sources, at least the image size',
+                           fr: 'ex. 10Gi: pour une image, au moins la taille de l’image' } },
           { name: 'storage_class', type: 'ref', ref_endpoint: '/api/storageclasses',
             label: { en: 'Storage class', fr: 'Storage class' },
             description: { en: 'Blank disks only (image disks inherit theirs); empty = cluster default',
                            fr: 'Disques vierges seulement (hérité pour les images) ; vide = défaut du cluster' } },
           { name: 'serial', type: 'text', validate: /^[A-Za-z0-9_.+-]{0,36}$/,
             label: { en: 'Serial', fr: 'Numéro de série' },
-            description: { en: 'Shown to the guest (/dev/disk/by-id) — handy to identify a disk from inside the VM',
-                           fr: 'Vu par l’invité (/dev/disk/by-id) — pratique pour identifier un disque depuis la VM' } },
+            description: { en: 'Shown to the guest (/dev/disk/by-id): handy to identify a disk from inside the VM',
+                           fr: 'Vu par l’invité (/dev/disk/by-id): pratique pour identifier un disque depuis la VM' } },
           { name: 'cache', type: 'enum', enum_values: ['none', 'writethrough', 'writeback'],
             label: { en: 'Cache mode', fr: 'Mode de cache' },
             description: { en: 'Empty = hypervisor default. none is the safest for shared storage',
                            fr: 'Vide = défaut de l’hyperviseur. none est le plus sûr sur stockage partagé' } },
           { name: 'shareable', type: 'bool', default: false,
             label: { en: 'Shareable', fr: 'Partageable' },
-            description: { en: 'Allows several VMs to attach this volume (clustering) — the guests must coordinate writes',
-                           fr: 'Permet à plusieurs VMs d’attacher ce volume (clustering) — aux invités de coordonner les écritures' } },
+            description: { en: 'Allows several VMs to attach this volume (clustering): the guests must coordinate writes',
+                           fr: 'Permet à plusieurs VMs d’attacher ce volume (clustering): aux invités de coordonner les écritures' } },
           { name: 'readonly', type: 'bool', default: false,
             label: { en: 'Read-only', fr: 'Lecture seule' },
             description: { en: 'The guest cannot write to it (typical for an ISO)',
                            fr: 'L’invité ne peut pas y écrire (typique d’une ISO)' } },
           { name: 'io_thread', type: 'bool', default: false,
             label: { en: 'Dedicated I/O thread', fr: 'Thread d’E/S dédié' },
-            description: { en: 'A thread of its own for this disk — helps a latency-sensitive workload',
-                           fr: 'Un thread rien que pour ce disque — utile pour une charge sensible à la latence' } },
+            description: { en: 'A thread of its own for this disk: helps a latency-sensitive workload',
+                           fr: 'Un thread rien que pour ce disque: utile pour une charge sensible à la latence' } },
         ],
       },
     },
@@ -250,7 +250,7 @@ const VMEdit = (() => {
         label: { en: 'Passthrough devices', fr: 'Périphériques en passthrough' },
         itemTitle: (v) => ({ icon: v.kind === 'gpu' ? 'gamepad' : 'plug', text:
           `${v.name || tr('vm.edit.newDev', 'new device')}`
-          + `${v.device_name ? ' — ' + v.device_name : ''}` }),
+          + `${v.device_name ? ': ' + v.device_name : ''}` }),
         newItem: (items) => ({ kind: 'host', name: nextFree('dev-', 1, items.map(i => i.name)) }),
         args: [
           { name: 'name', type: 'text', required: true, validate: K8S_NAME_RE,
@@ -313,7 +313,7 @@ const VMEdit = (() => {
         label: { en: 'Network interfaces', fr: 'Interfaces réseau' },
         itemTitle: (v) => ({ icon: 'plug', text:
           `${v.name || tr('vm.edit.newNic', 'new interface')}`
-          + `${v.type ? ' — ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`
+          + `${v.type ? ': ' + v.type : ''}${v.network ? ' · ' + v.network : ''}`
           + `${v.boot_order > 0 ? ' · boot #' + v.boot_order : ''}` }),
         newItem: (items) => ({ name: nextFree('nic-', 1, items.map(i => i.name)) }),
         args: [
@@ -328,8 +328,8 @@ const VMEdit = (() => {
                            fr: 'bridge = L2 sur un réseau VLAN (défaut Harvester) · masquerade = NAT sur le réseau des pods · macvtap/sriov = rattachement direct, exige un réseau et du matériel adaptés (NON vérifié sur ce cluster). Sur Harvester, le SR-IOV passe par une fonction virtuelle en passthrough PCI (section Firmware), vérifié sur un cluster de test.' } },
           { name: 'network', type: 'ref', ref_endpoint: '/api/networks', ref_namespaced: true,
             label: { en: 'Network (multus)', fr: 'Réseau (multus)' },
-            description: { en: 'NetworkAttachmentDefinition — bridge mode only',
-                           fr: 'NetworkAttachmentDefinition — mode bridge uniquement' } },
+            description: { en: 'NetworkAttachmentDefinition: bridge mode only',
+                           fr: 'NetworkAttachmentDefinition: mode bridge uniquement' } },
           { name: 'model', type: 'enum', default: 'virtio',
             enum_values: ['virtio', 'e1000', 'e1000e', 'rtl8139'],
             label: { en: 'Model', fr: 'Modèle' },
@@ -463,8 +463,8 @@ const VMEdit = (() => {
             description: { en: 'The account to create', fr: 'Le compte à créer' } },
           { name: 'password', type: 'text',
             label: { en: 'Password', fr: 'Mot de passe' },
-            description: { en: 'Stored as plain text in the cloud-init Secret — prefer SSH keys',
-                           fr: 'Stocké en clair dans le Secret cloud-init — préférez les clés SSH' } },
+            description: { en: 'Stored as plain text in the cloud-init Secret: prefer SSH keys',
+                           fr: 'Stocké en clair dans le Secret cloud-init: préférez les clés SSH' } },
           { name: 'sudo', type: 'bool', default: true,
             label: { en: 'Passwordless sudo', fr: 'sudo sans mot de passe' },
             description: { en: 'ALL=(ALL) NOPASSWD:ALL', fr: 'ALL=(ALL) NOPASSWD:ALL' } },
@@ -543,7 +543,7 @@ const VMEdit = (() => {
         min: 0, max: 4,
         label: { en: 'Interfaces', fr: 'Interfaces' },
         itemTitle: (v) => ({ icon: 'plug', text:
-          `${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}` }),
+          `${v.iface || 'eth0'}: ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}` }),
         newItem: (items) => ({ iface: nextFree('eth', 0, items.map(i => i.iface)) }),
         args: [
           { name: 'iface', type: 'text', required: true, default: 'eth0',
@@ -817,7 +817,7 @@ const VMEdit = (() => {
     const clash = taken.get(order);
     if (clash) {
       throw new Error(tr('vm.edit.errBootDup',
-        'boot order already used by another device') + `: #${order} — ${otherLabel} "${clash}"`);
+        'boot order already used by another device') + `: #${order}: ${otherLabel} "${clash}"`);
     }
     taken.set(order, name);
   }
@@ -1020,7 +1020,7 @@ const VMEdit = (() => {
   async function open(cluster, namespace, name) {
     const panelId = `vm-edit-${cluster}-${namespace}-${name}`;
     const existing = document.getElementById('fp-' + panelId);
-    const title = `${tr('vm.edit.title', 'Edit')} — ${namespace}/${name}`;
+    const title = `${tr('vm.edit.title', 'Edit')}: ${namespace}/${name}`;
     if (existing) {
       // Already open: FloatingPanels restores/focuses it. Re-running the
       // setup below would stack duplicate nav listeners (v1.6.x bug).
@@ -1128,7 +1128,7 @@ const VMEdit = (() => {
 
   function restartBanner() {
     return `<p class="form-hint vm-edit-banner">${Icons.svg('warn', { size: 14 })} ${esc(tr('vm.edit.restartHint',
-      'Changes apply at the next VM restart (the running instance keeps the old layout — use the console reset button).'))}</p>`;
+      'Changes apply at the next VM restart (the running instance keeps the old layout: use the console reset button).'))}</p>`;
   }
 
   // La storage class d'une image ne se DÉDUIT pas de son nom. Harvester en
@@ -1262,7 +1262,7 @@ const VMEdit = (() => {
                   disks: ((template.domain || {}).devices || {}).disks || [] };
     const locked = passthrough.volumes
       .filter(v => v.cloudInitNoCloud || v.cloudInitConfigDrive)
-      .map(v => `<div class="vm-edit-locked">${Icons.svg('cloud')} <code>${esc(v.name)}</code> — ${esc(tr('vm.edit.cloudinitVol', 'cloud-init volume, managed by the Cloud-init tab'))}</div>`)
+      .map(v => `<div class="vm-edit-locked">${Icons.svg('cloud')} <code>${esc(v.name)}</code>: ${esc(tr('vm.edit.cloudinitVol', 'cloud-init volume, managed by the Cloud-init tab'))}</div>`)
       .join('');
     return `
       <h3>${esc(tr('vm.edit.disksTitle', 'Disks & Volumes'))}</h3>
@@ -1595,7 +1595,7 @@ const VMEdit = (() => {
         <span class="form-hint">${esc(tr('vm.edit.hostnameHint', 'Empty = the VM name is used'))}</span>
       </div>
       <h3>${Icons.svg('tag')} ${esc(tr('vm.edit.tags', 'Tags'))}</h3>
-      <p class="form-hint">${esc(tr('vm.edit.tagsHint', 'Harvester tags (labels tag.harvesterhci.io/<key>) — also shown in the Harvester UI.'))}</p>
+      <p class="form-hint">${esc(tr('vm.edit.tagsHint', 'Harvester tags (labels tag.harvesterhci.io/<key>): also shown in the Harvester UI.'))}</p>
       <div class="vm-edit-cards" data-cards="tags">
         ${TFForm.render(TAG_SCHEMA, cluster, { tag: tagItems }, { hideHeader: true })}
       </div>
@@ -1687,7 +1687,7 @@ const VMEdit = (() => {
       </div>
       <details class="vm-edit-adv">
         <summary>${esc(tr('vm.edit.resAdvanced', 'Scheduling reservations (advanced)'))}</summary>
-        <p class="form-hint">${esc(tr('vm.edit.resHint', 'What Kubernetes actually schedules. Harvester derives these from the overcommit ratio — override only if you know why. Empty = leave as-is.'))}</p>
+        <p class="form-hint">${esc(tr('vm.edit.resHint', 'What Kubernetes actually schedules. Harvester derives these from the overcommit ratio: override only if you know why. Empty = leave as-is.'))}</p>
         <div class="grid-2">
           <div class="form-row">
             <label>limits.cpu</label>
@@ -1740,7 +1740,7 @@ const VMEdit = (() => {
           ${opt('uefi', mode, 'UEFI')}
           ${opt('uefi-sb', mode, 'UEFI + Secure Boot')}
         </select>
-        <span class="form-hint">${esc(tr('vm.edit.bootModeHint', 'Windows 11 and recent SLES/openSUSE images need UEFI; Secure Boot additionally enables the SMM feature. Switching mode on an installed guest usually makes it unbootable — set it before the first install.'))}</span>
+        <span class="form-hint">${esc(tr('vm.edit.bootModeHint', 'Windows 11 and recent SLES/openSUSE images need UEFI; Secure Boot additionally enables the SMM feature. Switching mode on an installed guest usually makes it unbootable: set it before the first install.'))}</span>
       </div>
       <div class="form-row">
         <label class="opt-row">
@@ -1951,7 +1951,7 @@ const VMEdit = (() => {
       <h3>Cloud-init</h3>
       <p class="form-hint">Edit user-data and network-data. Saved to the VM's cloud-init Secret.</p>
       <details class="vm-edit-adv vm-edit-ci-wizard">
-        <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant — generate the YAML below'))}</summary>
+        <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant: generate the YAML below'))}</summary>
         <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
           'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
         <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
@@ -2162,7 +2162,7 @@ const VMEdit = (() => {
               && !confirm(tr('vm.edit.ci.confirmReplace',
                 'Replace the current editor content with the generated YAML?'))) return;
           target.value = yaml;
-          result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated — review below, then Save'))}</span>`;
+          result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated: review below, then Save'))}</span>`;
         } catch (e) {
           result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
         }

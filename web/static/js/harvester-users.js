@@ -102,7 +102,7 @@ const HUsers = (() => {
           ${Icons.svg('warn', { size: 14 })} ${esc(tr('husers.orphans',
             'These accounts no longer exist but still hold cluster administration. Recreating an account with the same id would silently give it back.'))}
           <ul class="form-hint">${orphans.map(o =>
-            `<li><code>${esc(o.name)}</code> — <code>${esc((o.bindings || []).join(', '))}</code></li>`).join('')}</ul>
+            `<li><code>${esc(o.name)}</code>: <code>${esc((o.bindings || []).join(', '))}</code></li>`).join('')}</ul>
         </div>` : ''}
       ${groups.length ? `
         <p class="form-hint" style="margin-top:10px;">${esc(tr('husers.groups',

@@ -26,10 +26,10 @@ const Notes = (() => {
     const id = docId(kind, cluster, namespace, name);
     const panelId = 'notes-' + id.replace(/[^a-zA-Z0-9_-]/g, '_');
     const title = kind === 'vm'
-      ? `Notes — ${namespace}/${name}`
+      ? `Notes: ${namespace}/${name}`
       : kind === 'node'
-        ? `Notes — node ${namespace}`
-        : `Notes — namespace ${namespace}`;
+        ? `Notes: node ${namespace}`
+        : `Notes: namespace ${namespace}`;
 
     if (openDocs.has(id)) {
       FloatingPanels.restore(panelId);
@@ -172,7 +172,7 @@ const Notes = (() => {
     });
 
     ws.addEventListener('close', () => {
-      if (statusEl) { statusEl.innerHTML = Icons.svg('dotOff', { size: 10 }) + ' disconnected — reconnecting…'; statusEl.classList.remove('connected'); }
+      if (statusEl) { statusEl.innerHTML = Icons.svg('dotOff', { size: 10 }) + ' disconnected: reconnecting…'; statusEl.classList.remove('connected'); }
       entry.ws = null;
       if (openDocs.has(id)) {
         entry.reconnectTimer = setTimeout(() => connect(id, entry, statusEl, statsEl), 3000);

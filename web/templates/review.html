@@ -2,7 +2,8 @@
 <html lang="fr">
 <head>
 <meta charset="utf-8">
-<title>harvester-ops — Revue (v{{ version }})</title>
+<title>harvester-ops: Revue (v{{ version }})</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ version }}">
 <link rel="stylesheet" href="/static/css/style.css">
 <style>
   body { padding: 20px; max-width: 1280px; margin: 0 auto; }
@@ -41,7 +42,7 @@
   <a href="#tests">Tests</a>
 </div>
 
-<h1><span data-icon="general" data-icon-size="22"></span> harvester-ops — Revue {{ version }}</h1>
+<h1><span data-icon="general" data-icon-size="22"></span> harvester-ops: Revue {{ version }}</h1>
 <p class="form-hint">Snapshot généré {{ now }}. Auto-refresh toutes les 30 s.</p>
 
 <section id="kpi">
@@ -57,7 +58,7 @@
     </div>
   </div>
   <div class="card">
-    <div class="stat-label">CAPHV stack — cluster ({{ harvester_version }})</div>
+    <div class="stat-label">CAPHV stack: cluster ({{ harvester_version }})</div>
     <table class="review">
       <tbody>{% for c in capi_components %}
         <tr><td>{% if c.installed %}<span class="ok" data-icon="ok"></span>{% else %}<span class="err" data-icon="fail"></span>{% endif %}</td>
@@ -148,7 +149,7 @@
   <div class="card">
     <div class="stat-label">Tâches restantes (pending)</div>
     <ul>{% for t in tasks_pending_list %}
-      <li>#{{ t.id }} — {{ t.subject }}</li>
+      <li>#{{ t.id }}: {{ t.subject }}</li>
     {% endfor %}</ul>
   </div>
 </div>
@@ -176,7 +177,7 @@
 <section id="tests">
 <h2><span data-icon="test" data-icon-size="18"></span> Tests</h2>
 <div class="card">
-  <p><strong>API:</strong> {{ tests_api_pass }}/{{ tests_api_total }} passing — last run {{ tests_when }}</p>
+  <p><strong>API:</strong> {{ tests_api_pass }}/{{ tests_api_total }} passing: last run {{ tests_when }}</p>
   <p><strong>e2e (Playwright):</strong> {{ tests_e2e_pass }}/{{ tests_e2e_total }} passing</p>
   <p class="form-hint">Commande : <code>make test-api</code> et <code>make test-e2e</code></p>
 </div>

@@ -149,7 +149,7 @@ const BMC = (() => {
     nodes.forEach(n => {
       if (!n.ok) {
         html += `<div class="card" style="margin-top:10px;"><div class="card-header">
-          <h2><code>${esc(n.host)}</code> — <span class="err">${esc(n.error || '')}</span></h2>
+          <h2><code>${esc(n.host)}</code>: <span class="err">${esc(n.error || '')}</span></h2>
         </div></div>`;
         return;
       }
@@ -164,7 +164,7 @@ const BMC = (() => {
         && (n.boot_targets || []).includes('Cd');
       html += `<div class="card" style="margin-top:10px;">
         <div class="card-header">
-          <h2><code>${esc(n.host)}</code> — ${esc(n.model || '')}
+          <h2><code>${esc(n.host)}</code>: ${esc(n.model || '')}
             <span class="badge ${n.power_state === 'On' ? 'ok' : 'warn'}">${esc(n.power_state || '?')}</span></h2>
           <span class="form-hint">SN <code>${esc(n.serial || '—')}</code> · BIOS <code>${esc(n.bios_version || '—')}</code>
             · ${esc(n.memory_gib || '?')} GiB · ${disks} ${esc(tr('bmc.disks'))}</span>

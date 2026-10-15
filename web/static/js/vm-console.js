@@ -150,7 +150,7 @@ const VMConsole = (() => {
           // reconnect churn: retry too. Other errors are terminal.
           if (r.status === 409) {
             setStatus('retrying', tr('console.vmNotRunning',
-              'The VM is not running — start it to catch the boot.'));
+              'The VM is not running: start it to catch the boot.'));
             scheduleRetry();
           } else if (r.status === 429) {
             setStatus('retrying', body.error || 'busy');
@@ -291,7 +291,7 @@ const VMConsole = (() => {
 
     const panel = FloatingPanels.open({
       id: panelId,
-      title: `Console — ${namespace}/${name}`,
+      title: `Console: ${namespace}/${name}`,
       icon: 'console',
       bodyNode: wrap,
       width: 900, height: 620,

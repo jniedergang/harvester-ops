@@ -2,6 +2,8 @@
 
 > Target audience: cluster operators with `cluster-admin` access and physical (iLO/iDRAC/IPMI) access to the nodes.
 
+The browser tab uses the same hexagon symbol as the default application header.
+
 ## 1. Theory of operation
 
 A Harvester cluster combines:

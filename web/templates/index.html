@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title data-i18n="header.title">harvester-ops</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ version }}">
 <!-- v1.4.34: apply saved theme/mode BEFORE style.css parses to avoid FOUC.
      The inline block reads localStorage + sets data-theme/data-mode on
      <html> so the right :root palette wins on first paint. -->
@@ -152,7 +152,7 @@
         </a>
         <div class="tab-group-children">
           <a class="tab tab-child" data-subtab="capi"
-             href="#automation/capi" data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2) — declarative cluster provisioning via CAPHV">
+             href="#automation/capi" data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2): declarative cluster provisioning via CAPHV">
             <span class="tab-icon" data-icon="capi"></span>
             <span class="sidebar-label" data-i18n="automation.tab.capi">Cluster API</span>
           </a>
@@ -220,7 +220,7 @@
     <section id="tab-overview" class="tab-content active">
       <div class="shutdown-header">
         <div class="automation-header-text">
-          <h1><span data-i18n="overview.title">Overview</span> — <span class="cluster-name"></span></h1>
+          <h1><span data-i18n="overview.title">Overview</span>: <span class="cluster-name"></span></h1>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Overview sub-tabs">
           <button type="button" class="sub-tab active" data-overview-tab="metrics"><span class="tab-icon" data-icon="metrics"></span> <span data-i18n="overview.tabMetrics">Metrics</span></button>
@@ -437,7 +437,7 @@
     <section id="tab-shutdown" class="tab-content">
       <div class="shutdown-header">
         <div class="automation-header-text">
-          <h1><span data-i18n="shutdown.title">Shutdown</span> — <span class="cluster-name"></span></h1>
+          <h1><span data-i18n="shutdown.title">Shutdown</span>: <span class="cluster-name"></span></h1>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Shutdown sub-tabs">
           <button type="button" class="sub-tab active" data-shutdown-tab="cluster" data-i18n="shutdown.subtabCluster">Arrêt du cluster</button>
@@ -505,7 +505,7 @@
           <div style="padding:12px 16px;">
             <p class="hint groups-intro" style="margin:0 0 10px;" data-i18n="shutdown.groupsIntro">
               VMs in the same group stop in parallel. Groups are processed sequentially in the order shown.
-              The "Default" group is the catch-all for VMs without explicit assignment — its VMs all stop together.
+              The "Default" group is the catch-all for VMs without explicit assignment: its VMs all stop together.
             </p>
             <div class="vm-order-toolbar">
               <label class="form-inline">
@@ -535,13 +535,13 @@
 
     <!-- STARTUP -->
     <section id="tab-startup" class="tab-content">
-      <h1><span data-i18n="startup.title">Startup</span> — <span class="cluster-name"></span></h1>
+      <h1><span data-i18n="startup.title">Startup</span>: <span class="cluster-name"></span></h1>
       <p class="hint" data-i18n="startup.hint">Bring the cluster back online.</p>
 
       <p class="hint groups-intro" data-i18n="startup.groupsIntro">
         VMs start in the reverse order of shutdown: the last group stopped is the first to come back up.
         Within each group, all VMs start in parallel and are waited on together before the next group fires.
-        Edit groups from the Shutdown tab — the same configuration drives both.
+        Edit groups from the Shutdown tab: the same configuration drives both.
       </p>
 
       <div class="steps-panel">
@@ -570,7 +570,7 @@
 
     <!-- VIRTUAL MACHINES (data-tab kept as 'namespaces' for backward compat) -->
     <section id="tab-namespaces" class="tab-content">
-      <h1><span data-i18n="vms.title">Virtual machines</span> — <span class="cluster-name"></span></h1>
+      <h1><span data-i18n="vms.title">Virtual machines</span>: <span class="cluster-name"></span></h1>
       <p class="hint" data-i18n="vms.hint">Manage VMs of a namespace. Pick the namespace below.</p>
 
       <div class="ns-selector-row">
@@ -997,7 +997,7 @@
         <label class="opt-row" style="margin-top:14px;">
           <input type="checkbox" id="sup-anonymize" checked>
           <span><strong data-i18n="settings.support.anonymize">Anonymize sensitive data</strong>
-            <span class="opt-hint" data-i18n="settings.support.anonymizeHint">Replaces IPs, hostnames, VM and namespace names with unique unambiguous placeholders (&lt;&lt;NODE-1&gt;&gt;, &lt;&lt;IP-NODE-1&gt;&gt;, &lt;&lt;VM-1&gt;&gt;...). The full correspondence table is included as <code>mapping.json</code> inside the archive AND available as a separate download — keep it safe to be able to de-anonymize logs later.</span>
+            <span class="opt-hint" data-i18n="settings.support.anonymizeHint">Replaces IPs, hostnames, VM and namespace names with unique unambiguous placeholders (&lt;&lt;NODE-1&gt;&gt;, &lt;&lt;IP-NODE-1&gt;&gt;, &lt;&lt;VM-1&gt;&gt;...). The full correspondence table is included as <code>mapping.json</code> inside the archive AND available as a separate download: keep it safe to be able to de-anonymize logs later.</span>
           </span>
         </label>
         <div style="margin-top:14px; display:flex; gap:8px;">

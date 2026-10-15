@@ -2,6 +2,8 @@
 
 > Public cible : opérateurs cluster disposant des droits `cluster-admin` et d'un accès physique (iLO/iDRAC/IPMI) aux nœuds.
 
+L'onglet du navigateur utilise le même hexagone que l'en-tête par défaut de l'application.
+
 ## 1. Principe de fonctionnement
 
 Un cluster Harvester combine :

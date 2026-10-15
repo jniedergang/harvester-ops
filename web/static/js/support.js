@@ -91,7 +91,7 @@ const Support = (() => {
           li.classList.add(ev.status);
           const ico = li.querySelector('.ico');
           ico.innerHTML = Icons.svg(ev.status === 'done' ? 'ok' : ev.status === 'error' ? 'fail' : 'pending', { size: 14 });
-          li.querySelector('.text').textContent = `${labelFor(ev.step_id)}${ev.message ? ' — ' + ev.message : ''}`;
+          li.querySelector('.text').textContent = `${labelFor(ev.step_id)}${ev.message ? ': ' + ev.message : ''}`;
 
           if (typeof ev.percent === 'number') {
             $('#support-progress-fill').style.width = ev.percent + '%';

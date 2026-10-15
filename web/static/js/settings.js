@@ -202,7 +202,7 @@ const Settings = (() => {
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 256 * 1024) {
-      alert('Logo > 256KB — please pick a smaller one');
+      alert('Logo > 256KB: please pick a smaller one');
       return;
     }
     const reader = new FileReader();
@@ -257,7 +257,7 @@ const Settings = (() => {
       (data.clusters || []).forEach(c => {
         const opt = document.createElement('option');
         opt.value = c.name;
-        opt.textContent = `${c.name}${c.description ? ' — ' + c.description : ''}`;
+        opt.textContent = `${c.name}${c.description ? ': ' + c.description : ''}`;
         if (c.name === current) opt.selected = true;
         sel.appendChild(opt);
       });
@@ -362,7 +362,7 @@ const Settings = (() => {
         card.innerHTML = `
           <div>
             <div class="name">${c.name}</div>
-            <div class="meta">${c.description || ''} — ${c.node_count} ${i18n.t('settings.connection.nodes')}</div>
+            <div class="meta">${c.description || ''}: ${c.node_count} ${i18n.t('settings.connection.nodes')}</div>
           </div>
           <button class="btn btn-sm btn-secondary" data-cluster="${c.name}">${i18n.t('settings.connection.test')}</button>`;
         card.querySelector('button').addEventListener('click', () => {

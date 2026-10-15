@@ -23,6 +23,18 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   writes and readiness; an isolated browser test exercises selection,
   preview, launch payload and the disabled option with mocked APIs.
 
+## [1.88.1] - 2026-10-15 - UI punctuation and matching browser icon
+
+### Changed
+- Replace dash separators in primary UI headings, dialogs, tooltips and
+  translated messages with simpler punctuation. Keep missing-value markers
+  and numeric ranges where they carry meaning.
+
+### Fixed
+- Use the header's hexagon brand shape as the SVG favicon on the main,
+  sign-in, setup and review pages. Version the icon URL so an older cached
+  watchtower icon is refreshed.
+
 ## [1.88.0] - 2026-10-15 - Bare-metal installs boot tagged bonds with stable NIC identity
 
 ### Fixed
