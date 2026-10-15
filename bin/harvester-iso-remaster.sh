@@ -55,7 +55,7 @@ else            # utilisable seul (tests)
 fi
 
 SRC="" ; OUT="" ; CONFIG_URL="" ; EXTRA_ARGS="" ; LABEL="COS_LIVE" ; WORK_DIR=""
-KERNEL_ARGS="" ; ADD_FILES=()
+KERNEL_ARGS="" ; NETWORK_ARGS="" ; ADD_FILES=()
 
 usage() {
 cat <<'EOF'
@@ -71,6 +71,7 @@ Options:
                             d'installation automatique (pas de --config-url)
       --add-file <src>:<iso path>:<mode>
                             dépose un fichier dans l'image (mode octal, ex. 0755)
+      --network-args "<...>" réseau initial (remplace ip=dhcp rd.neednet=1)
       --extra-args "<...>"  arguments noyau supplémentaires
       --label <nom>         label de volume (défaut COS_LIVE — ne pas changer
                             sans savoir : le rootfs est monté par ce label)
@@ -86,6 +87,7 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --config-url) CONFIG_URL="$2"; shift 2 ;;
         --extra-args) EXTRA_ARGS="$2"; shift 2 ;;
+        --network-args) NETWORK_ARGS="$2"; shift 2 ;;
         --kernel-args) KERNEL_ARGS="$2"; shift 2 ;;
         --add-file) ADD_FILES+=("$2"); shift 2 ;;
         --label) LABEL="$2"; shift 2 ;;
@@ -102,7 +104,7 @@ if [[ -n "$CONFIG_URL" && -n "$KERNEL_ARGS" ]] || [[ -z "$CONFIG_URL" && -z "$KE
 fi
 # Les arguments finissent entre guillemets sur une ligne grub : aucun
 # guillemet, antislash, dollar ni saut de ligne qui permettrait d'en sortir.
-for a in "$KERNEL_ARGS" "$EXTRA_ARGS"; do
+for a in "$KERNEL_ARGS" "$EXTRA_ARGS" "$NETWORK_ARGS"; do
     if [[ "$a" == *[\"\$\\\`\']* || "$a" == *$'\n'* ]]; then
         log_error "caractère interdit dans les arguments noyau"; exit 1
     fi
@@ -150,9 +152,21 @@ if [[ -n "$KERNEL_ARGS" ]]; then
     KARGS="$KERNEL_ARGS"
 else
     KARGS="harvester.install.automatic=true harvester.install.config_url=${CONFIG_URL}"
-    KARGS="$KARGS ip=dhcp rd.neednet=1"
+    KARGS="$KARGS ${NETWORK_ARGS:-ip=dhcp rd.neednet=1}"
 fi
 [[ -n "$EXTRA_ARGS" ]] && KARGS="$KARGS $EXTRA_ARGS"
+if [[ -n "$CONFIG_URL" ]]; then
+    read -r -a boot_tokens <<< "$KARGS"
+    boot_ips=0
+    for boot_token in "${boot_tokens[@]}"; do
+        if [[ "$boot_token" == ip=* ]]; then
+            boot_ips=$((boot_ips + 1))
+        fi
+    done
+    if [[ "$boot_ips" -ne 1 ]]; then
+        log_error "exactement un paramètre ip= est requis"; exit 1
+    fi
+fi
 
 # --- 1. localiser le grub d'installation et son point d'injection ---------
 emit_event "iso-patch" "running" "lecture de la configuration d'amorçage"
@@ -222,6 +236,16 @@ else
     PATCH_MODE="ligne noyau de $GRUB_ISO"
 fi
 emit_event "iso-patch" "done" "$PATCH_MODE"
+
+# Bond slaves share the current MAC; preserve their permanent identity on
+# normal-system udev coldplug. Only the known original hook is accepted.
+if [[ -n "$NETWORK_ARGS" && " $NETWORK_ARGS " == *" bond="* && " $NETWORK_ARGS " == *" ifname="* ]]; then
+    emit_event "iso-identity" "running" "stabilisation des noms des interfaces agrégées"
+    xorriso -osirrox on -indev "$SRC" -extract /boot/x86_64/loader/initrd "$WORK/original-initrd" >/dev/null 2>&1
+    python3 "$SCRIPT_DIR/lib/baremetal_initrd_identity.py" "$WORK/original-initrd" "$WORK/identity-initrd"
+    MAPS+=(-map "$WORK/identity-initrd" /boot/x86_64/loader/initrd)
+    emit_event "iso-identity" "done" "identité permanente des membres du bond"
+fi
 
 # --- 3. recopier l'image en rejouant son amorçage -------------------------
 emit_event "iso-build" "running" "écriture de l'image (copie de $(du -h "$SRC" | cut -f1))"

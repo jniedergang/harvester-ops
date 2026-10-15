@@ -71,9 +71,9 @@ et la possibilité ou non d'installer la machine.
 > **Attention avec une machine éteinte.** Un BMC ne relit pas le matériel
 > hors tension : il rejoue l'inventaire du **dernier POST**. Sur une
 > machine qui n'a pas démarré depuis des mois, cet inventaire peut être
-> vieux de plusieurs mois. L'installation commence donc par un préflight
-> qui allume la machine et lit la réalité avant de décider quoi que ce
-> soit.
+> vieux de plusieurs mois. Le préflight lit cet inventaire sans démarrer
+> l’ancien système et vérifie l’identité de toute découverte sauvegardée.
+> Un démarrage de découverte permet de rafraîchir les informations.
 
 ### 3. Renseigner le node
 
@@ -152,12 +152,13 @@ dans le dock dès la confirmation et diffuse ses étapes.
 
 | Étape | Ce qui se passe |
 |---|---|
-| `preflight` | Allume la machine si besoin, attend le POST là où le BMC le publie (HPE), vérifie qu'il y a un disque : l'inventaire de découverte d'abord, puis les cibles d'amorce UEFI de HPE, puis les disques Redfish ; sans aucune de ces sources, un avertissement (l'installeur vérifie lui-même son disque) |
+| `preflight` | Lit l’inventaire BMC sans allumer l’ancien système, vérifie l’identité de découverte et la présence d’un disque : l'inventaire de découverte d'abord, puis les cibles d'amorce UEFI de HPE, puis les disques Redfish ; sans aucune de ces sources, un avertissement (l'installeur vérifie lui-même son disque) |
 | `remaster` | Patche l'ISO pour qu'il s'installe sans opérateur (voir plus bas) |
 | `serve` | Publie l'ISO et la configuration derrière des jetons à usage unique |
+| `power-off` | Confirme l’extinction avant le montage du média et le réglage de l’amorce |
 | `bmc-insert` | Monte l'ISO en média virtuel, et attend la réponse du BMC (jusqu'à 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Programme une amorce **unique** sur `Cd` |
-| `power` | Éteint puis rallume la machine sur l'ISO : un démarrage à froid, certains BMC ne branchant le média virtuel ou n'appliquant l'amorce unique qu'à la mise sous tension |
+| `power` | Vérifie l’état éteint et l’amorce CD unique, puis allume la machine une seule fois |
 | `wait-install` | L'installeur **éteint** la machine quand il a fini (`install.power_off`, posé par la console) |
 | `boot-disk` | Éjecte le média, programme une amorce unique sur le disque, rallume la machine |
 | `wait-api` | Attend l'API Harvester sur la VIP |
@@ -170,9 +171,10 @@ l'installeur après chaque installation, en boucle (vu sur un banc Redfish).
 L'installeur s'éteignant, la console sait que l'installation est finie et
 démarre elle-même le disque, quoi que le BMC fasse de l'amorce unique.
 
-Si le déroulé échoue avant le début de l'installation, une machine que le
-préflight a allumée est éteinte à nouveau ; une machine trouvée allumée
-est laissée telle quelle.
+Le préflight et la préparation de l’ISO ne changent pas l’alimentation.
+Une fois la préparation terminée, la machine est éteinte avant le montage
+du média. Un échec du réglage ou de la vérification de l’amorce CD
+n’entraîne pas de remise sous tension.
 
 **Le nouveau cluster est déclaré tout seul** (création). La console crée
 pour lui une paire de clés ed25519 (`ssh/<nom>_id`, 0600, dans son
@@ -519,3 +521,31 @@ est déjà prise. Vérifier qu'elle est libre avant de lancer.
 
 Voir [capabilites.md](capabilites.md) pour le reste du toolkit et
 [architecture.md](architecture.md) pour l'articulation des surfaces.
+
+### Réseau initial et identité des interfaces agrégées
+
+L’installeur télécharge sa configuration avant d’en appliquer le réseau.
+La console dérive donc les arguments dracut des paramètres rendus : cartes,
+bond, VLAN, IPv4 statique ou DHCP, passerelle et DNS. L’aperçu expose
+`boot_network_args` ; un argument réseau contradictoire est refusé avant
+la création de l’action.
+
+Sur une console avec plusieurs réseaux, le média virtuel utilise l’adresse
+routée vers le BMC ; la configuration et l’image d’installation utilisent
+celle routée vers l’IP de gestion statique prévue. L’API accepte les
+surcharges `advertise_host` et `installer_advertise_host`. En DHCP, la
+seconde adresse reprend celle du média par défaut. Chaque réseau doit
+pouvoir joindre son adresse HTTP et son port.
+
+Les membres d’un bond peuvent partager leur MAC courante. Pour éviter les
+renommages udev (`rename4`, puis `interface not found`), les règles utilisent
+`bonding_slave/perm_hwaddr` pour les membres déjà agrégés. Les noms sont
+communs au démarrage et au YAML ; des règles équivalentes sont conservées
+pour le système installé, sans modifier les MAC sélectionnées.
+
+Le correctif initrd accepte uniquement le générateur ifname vérifié de
+Harvester 1.8.2. Un générateur inconnu est refusé pendant la préparation de
+l’ISO, avant toute modification d’alimentation. Une autre version d’ISO
+demande une vérification préalable. Les contrôles matériels restent actifs.
+Le timeout sans téléchargement de l’image n’identifie pas l’erreur réelle :
+consulter la console de l’installeur.

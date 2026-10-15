@@ -3085,10 +3085,23 @@ def _redfish_send(host, path, user, pwd, method, payload=None, timeout=20):
     except urllib.error.HTTPError as e:
         body = ""
         try:
-            body = (e.read() or b"")[:400].decode("utf-8", "replace")
+            # Parse structured IDs before shortening; never log raw response
+            # payloads that could echo credentials or served artifact URLs.
+            error_doc = json.loads((e.read(65536) or b"{}").decode("utf-8", "replace"))
+            error = error_doc.get("error") or {}
+            infos = error.get("@Message.ExtendedInfo") or []
+            ids = [str(info.get("MessageId")) for info in infos
+                   if isinstance(info, dict) and info.get("MessageId")]
+            boot_fields = {"BootSourceOverrideTarget", "BootSourceOverrideEnabled",
+                           "UefiTargetBootSourceOverride", "BootSourceOverrideMode"}
+            args = [arg for info in infos if isinstance(info, dict)
+                    for arg in (info.get("MessageArgs") or []) if isinstance(arg, str) and arg in boot_fields]
+            body = "; ".join(ids[:4]) or f"HTTP {e.code}"
+            if args:
+                body += " (" + ", ".join(dict.fromkeys(args)) + ")"
         except Exception:
             pass
-        return False, e.code, body or str(e)
+        return False, e.code, body or f"HTTP {e.code}"
     except (urllib.error.URLError, ssl.SSLError, TimeoutError, OSError) as e:
         return False, 0, str(e)
 
@@ -5456,6 +5469,11 @@ HARVESTER_INSTALL_TIMEOUT = int(
     os.environ.get("HARVESTER_OPS_INSTALL_TIMEOUT", 3600))
 
 
+from baremetal_boot_network import (boot_network_args as _bm_boot_network_args,
+                                   installer_boot_identity as _bm_installer_boot_identity,
+                                   BootNetworkError)
+
+
 def _harvester_install_config(opts):
     """Rend la configuration d'installation Harvester (YAML).
 
@@ -5465,7 +5483,7 @@ def _harvester_install_config(opts):
     placée ici coûte une réinstallation complète : toute clé inconnue,
     réservée à la console ou posée des deux côtés lève InstallConfigError
     avec son chemin."""
-    return _his.dump_install_config(_his.render_install_config(opts))
+    return _his.dump_install_config(_bm_with_installer_identity(_his.render_install_config(opts)))
 
 
 def _bm_wait_api(vip, deadline, run, step):
@@ -5910,26 +5928,27 @@ def _bm_boot_once_target(host, user, pwd, sys_path, target):
     return ok, detail
 
 
-def _bm_power_cycle(host, user, pwd, sys_path, run, sleep=None, now=None, off_wait=120):
-    """Arrêt franc (si allumée), attente de l'état éteint, puis mise sous
-    tension. Rend (ok, détail)."""
+def _bm_power_off(host, user, pwd, sys_path, run, sleep=None, now=None, off_wait=120):
+    """Confirm Off before virtual-media boot changes; never powers the host on."""
     sleep, now = sleep or time.sleep, now or time.time
+    if getattr(run, "_cancel", False):
+        return False, "cancelled by operator"
     state = (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState")
-    if state != "Off":
-        ok, detail = _bm_reset(host, user, pwd, sys_path, "ForceOff")
-        if not ok:
-            return False, f"power off refused: {detail}"
-        deadline = now() + off_wait
-        while now() < deadline:
-            if getattr(run, "_cancel", False):
-                return False, "cancelled by operator"
-            sleep(5)
-            if (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState") == "Off":
-                break
-        else:
-            return False, f"the machine did not power off within {off_wait} s"
-    ok, detail = _bm_reset(host, user, pwd, sys_path, "On")
-    return (True, "") if ok else (False, f"power on refused: {detail}")
+    if state == "Off":
+        return True, ""
+    if state != "On":
+        return False, "cannot verify the machine power state"
+    ok, detail = _bm_reset(host, user, pwd, sys_path, "ForceOff")
+    if not ok:
+        return False, f"power off refused: {detail}"
+    deadline = now() + off_wait
+    while now() < deadline:
+        if getattr(run, "_cancel", False):
+            return False, "cancelled by operator"
+        sleep(5)
+        if (_redfish_get(host, sys_path, user, pwd, timeout=8) or {}).get("PowerState") == "Off":
+            return True, ""
+    return False, f"the machine did not power off within {off_wait} s"
 
 
 BM_STALL_AFTER = int(os.environ.get("HARVESTER_OPS_BM_STALL_AFTER", "600"))
@@ -6046,12 +6065,6 @@ def _baremetal_install_runner(run, opts):
     # porte la clé publique, et la déclaration s'en sert).
     creds = []
     keep_creds = [False]
-    # v1.78.0 : une machine allumée par le préflight est éteinte si le run
-    # échoue avant d'avoir lancé l'installation (jamais une machine trouvée
-    # déjà allumée).
-    powered_by_us = [False]
-    install_started = [False]
-    profile_ref = [None]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
@@ -6074,14 +6087,6 @@ def _baremetal_install_runner(run, opts):
         run.exit_code = 3 if cancelled else code
         run.status = "cancelled" if cancelled else "error"
         run.ended_at = time.time()
-        if powered_by_us[0] and not install_started[0]:
-            try:
-                sp_off = (profile_ref[0] or {}).get("system_path")
-                if sp_off:
-                    _bm_reset(host, kc_user, kc_pwd, sp_off, "ForceOff")
-                    step(sid, "warn", "machine rallumée pour l'inventaire : éteinte à nouveau")
-            except Exception:                                   # noqa: BLE001
-                step(sid, "warn", "machine allumée pour l'inventaire : l'éteindre à la main")
         run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
                   "ts": time.time()})
         if tokens:
@@ -6101,10 +6106,9 @@ def _baremetal_install_runner(run, opts):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
 
-    # --- préflight : le BMC dit la vérité seulement machine allumée ---
+    # --- preflight: read-only BMC and saved inventory checks; no old-OS boot ---
     step("preflight", "running", f"interrogation du BMC {host}")
     profile = _bmc_discover_one(host, kc_user, kc_pwd)
-    profile_ref[0] = profile
     if not profile.get("ok"):
         return fail("preflight", profile.get("error", "BMC unreachable"))
     # Relecture finale de la 1.78.0 : l'inventaire est rangé par BMC ; si ce
@@ -6118,29 +6122,12 @@ def _baremetal_install_runner(run, opts):
         if verdict == "mismatch":
             return fail("preflight", f"the discovery inventory of {host} is not this machine's "
                                      f"({why}): run the discovery boot again")
-    if profile.get("power_state") != "On":
-        step("preflight", "progress", "machine éteinte, allumage pour inventaire")
-        sys_path = profile.get("system_path") or "/redfish/v1/Systems/1"
-        ok, _, detail = _redfish_send(
-            host, f"{sys_path.rstrip('/')}/Actions/ComputerSystem.Reset/",
-            kc_user, kc_pwd, "POST", {"ResetType": "On"})
-        if not ok:
-            return fail("preflight", f"power on refused: {detail[:200]}")
-        powered_by_us[0] = True
-        deadline = time.time() + 900
-        while time.time() < deadline:
-            if getattr(run, "_cancel", False):
-                return fail("preflight", "cancelled by operator")
-            time.sleep(20)
-            profile = _bmc_discover_one(host, kc_user, kc_pwd)
-            if profile.get("post_state") == "FinishedPost":
-                break
-            # v1.78.0 : l'état du POST est propre aux iLO ; un BMC qui ne le
-            # publie pas faisait attendre 15 minutes pour rien.
-            if profile.get("post_state") is None and profile.get("power_state") == "On":
-                break
-            step("preflight", "progress",
-                 f"POST en cours ({profile.get('post_state') or '?'})")
+    # Do not boot the previous OS just to refresh inventory. Powered-off
+    # Redfish inventory can be stale; saved discovery binding is checked above,
+    # and the installer still performs its own hardware/disk validation.
+    if profile.get("power_state") == "Off":
+        step("preflight", "warn", "machine éteinte : inventaire BMC du dernier POST ; "
+             "aucun démarrage de l'ancien système")
     if not profile.get("virtualmedia_path"):
         return fail("preflight", "no CD virtual media (iLO Advanced licence?)")
     if "Cd" not in (profile.get("boot_targets") or []):
@@ -6181,7 +6168,10 @@ def _baremetal_install_runner(run, opts):
 
     # --- remasterisation ---
     port = pxe_server.start()
-    advertise = opts.get("advertise_host") or _bm_local_ip_for(host)
+    try:
+        media_base, installer_base = _bm_artifact_base_urls(opts, port)
+    except ValueError:
+        return fail("remaster", "cannot determine reachable artifact addresses")
 
     src_iso = _iso_dir() / opts["iso"]
     if not src_iso.is_file():
@@ -6196,7 +6186,8 @@ def _baremetal_install_runner(run, opts):
     # première requête, qui n'a lieu qu'une fois la machine démarrée.
     iso_token = pxe_server.issue(out_iso, "iso")
     tokens.append(iso_token)
-    iso_url = f"http://{advertise}:{port}/pxe/iso/{iso_token}.iso"
+    iso_url = f"{media_base}/pxe/iso/{iso_token}.iso"
+    install_iso_url = f"{installer_base}/pxe/iso/{iso_token}.iso"
 
     # La route a déjà validé ces mêmes champs : rien ne devrait lever ici.
     # Si cela arrivait quand même, dire l'échec au lieu de laisser le fil
@@ -6218,7 +6209,7 @@ def _baremetal_install_runner(run, opts):
         creds.extend([files["key"], files["pub"], files["known_hosts"]])
         opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
-        cfg_yaml = _harvester_install_config(dict(opts, iso_url=iso_url, power_off=True))
+        cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True))
     except InstallConfigError as e:
         return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
@@ -6227,7 +6218,7 @@ def _baremetal_install_runner(run, opts):
     scratch.append(cfg_path)
     cfg_token = pxe_server.issue(cfg_path, "config")
     tokens.append(cfg_token)
-    config_url = f"http://{advertise}:{port}/pxe/config/{cfg_token}.yaml"
+    config_url = f"{installer_base}/pxe/config/{cfg_token}.yaml"
 
     step("remaster", "running", f"remasterisation de {src_iso.name}")
     script = BIN_DIR / "harvester-iso-remaster.sh"
@@ -6236,19 +6227,34 @@ def _baremetal_install_runner(run, opts):
            # le magasin d'ISO est sur disque ; /tmp est un tmpfs sur
            # beaucoup d'hôtes et l'extraction y tiendrait en RAM.
            "--work-dir", str(_iso_work_dir())]
+    try:
+        network_args = _bm_boot_network_args(yaml.safe_load(cfg_yaml), opts.get("extra_args", ""))
+    except BootNetworkError as e:
+        return fail("remaster", f"invalid bootstrap network: {e.path}")
+    cmd += ["--network-args", network_args]
     if opts.get("extra_args"):
         cmd += ["--extra-args", opts["extra_args"]]
     if _bm_remaster_stream(cmd, step) != 0:
         return fail("remaster", "ISO remastering failed")
-    step("serve", "done", f"artefacts publiés sur {advertise}:{port}")
+    step("serve", "done", f"média virtuel : {media_base}; installeur : {installer_base}")
 
     # --- média virtuel + amorce + allumage ---
+    sys_path = profile.get("system_path")
+    step("power-off", "running", "extinction avant montage du média et configuration de l'amorce")
+    ok, detail = _bm_power_off(host, kc_user, kc_pwd, sys_path, run)
+    if not ok:
+        return fail("power-off", detail)
+    step("power-off", "done", "machine éteinte, configuration de l'amorce autorisée")
+    if getattr(run, "_cancel", False):
+        return fail("bmc-insert", "cancelled by operator")
     step("bmc-insert", "running", "insertion dans le lecteur virtuel")
     ok, detail, vm_res = _bm_media_insert(host, kc_user, kc_pwd, iso_url)
     if not ok:
         return fail("bmc-insert", detail[:200])
     step("bmc-insert", "done", "image montée")
 
+    if getattr(run, "_cancel", False):
+        return fail("bmc-boot", "cancelled by operator")
     step("bmc-boot", "running", "amorce unique sur le lecteur virtuel")
     sys_path = profile.get("system_path")
     ok, detail = _bm_boot_once_cd(host, kc_user, kc_pwd, sys_path)
@@ -6256,18 +6262,23 @@ def _baremetal_install_runner(run, opts):
         return fail("bmc-boot", detail[:200])
     step("bmc-boot", "done", "prochaine amorce : CD virtuel")
 
-    step("power", "running", "redémarrage sur l'installeur")
-    # v1.78.0 : un cycle complet (arrêt puis mise sous tension) plutôt qu'un
-    # redémarrage à chaud : certains BMC ne branchent le média virtuel, ou
-    # n'appliquent l'amorce programmée, qu'à une mise sous tension (vu en
-    # réel sur le banc Redfish : le CD inséré machine allumée n'était pas vu
-    # et la machine repartait sur son ancien système).
-    ok, detail = _bm_power_cycle(host, kc_user, kc_pwd, sys_path, run)
+    if getattr(run, "_cancel", False):
+        return fail("power", "cancelled by operator")
+    # Refuse to power on unless the BMC confirms the requested one-shot CD boot.
+    fresh = _redfish_get(host, sys_path, kc_user, kc_pwd, timeout=8) or {}
+    fresh_boot = fresh.get("Boot") or {}
+    if (fresh.get("PowerState") != "Off"
+            or fresh_boot.get("BootSourceOverrideTarget") != "Cd"
+            or fresh_boot.get("BootSourceOverrideEnabled") != "Once"):
+        return fail("bmc-boot", "boot/power state verification failed; no power-on requested")
+    if getattr(run, "_cancel", False):
+        return fail("power", "cancelled by operator")
+    step("power", "running", "mise sous tension sur l'installeur")
+    ok, detail = _bm_reset(host, kc_user, kc_pwd, sys_path, "On")
     if not ok:
-        return fail("power", detail[:200])
+        return fail("power", detail)
     keep_creds[0] = True
-    install_started[0] = True
-    step("power", "done", "machine redémarrée")
+    step("power", "done", "machine démarrée sur le CD virtuel")
 
     # --- attente de l'installation ---
     deadline = time.time() + HARVESTER_INSTALL_TIMEOUT
@@ -6388,6 +6399,32 @@ def _baremetal_install_runner(run, opts):
     run.close()
 
 
+def _bm_artifact_base_urls(opts, port, route_ip=None):
+    """Keep the BMC media path separate from the installer management path."""
+    import ipaddress
+    route_ip = route_ip or _bm_local_ip_for
+    media_host = opts.get("advertise_host") or route_ip(opts["bmc_host"])
+    installer_host = opts.get("installer_advertise_host")
+    if not installer_host:
+        if opts.get("method", "dhcp") == "static" and opts.get("ip"):
+            installer_host = route_ip(opts["ip"])
+        else:
+            installer_host = media_host
+    for field, host in (("advertise_host", media_host),
+                        ("installer_advertise_host", installer_host)):
+        if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,252}", host):
+            raise ValueError("invalid artifact host: " + field)
+        try:
+            addr = ipaddress.ip_address(host)
+        except ValueError:
+            if host.lower() == "localhost":
+                raise ValueError("unreachable artifact host: " + field)
+        else:
+            if addr.is_loopback or addr.is_unspecified:
+                raise ValueError("unreachable artifact host: " + field)
+    return (f"http://{media_host}:{port}", f"http://{installer_host}:{port}")
+
+
 def _bm_local_ip_for(host):
     """IP locale que le BMC pourra joindre : celle de l'interface qui sert
     à lui parler. Évite de publier 127.0.0.1 dans l'URL de l'ISO."""
@@ -6489,6 +6526,23 @@ def _bm_render_checked(data):
     return _his.render_install_config(dict(data, iso_url=_BM_ISO_URL_PLACEHOLDER))
 
 
+def _bm_with_installer_identity(cfg):
+    try:
+        return _bm_installer_boot_identity(cfg)
+    except BootNetworkError as e:
+        raise InstallConfigError([e.path], "invalid NIC identity", {e.path: e.reason}) from e
+
+
+def _bm_render_boot_checked(data):
+    # Real launch/preview values only; profile-schema checks use placeholders.
+    cfg = _bm_with_installer_identity(_bm_render_checked(data))
+    try:
+        _bm_boot_network_args(cfg, data.get("extra_args", ""))
+    except BootNetworkError as e:
+        raise InstallConfigError([e.path], "invalid bootstrap network", {e.path: e.reason}) from e
+    return cfg
+
+
 @app.route("/api/baremetal/config/parse", methods=["POST"])
 @requires_auth
 @_rate_limit("30/minute")
@@ -6560,7 +6614,7 @@ def api_baremetal_config_preview():
     if err:
         return err
     try:
-        cfg = _bm_render_checked(data)
+        cfg = _bm_render_boot_checked(data)
     except InstallConfigError as e:
         return _bm_config_refusal(e)
     # masquage sur le dictionnaire rendu, pas par remplacement de texte
@@ -6570,7 +6624,8 @@ def api_baremetal_config_preview():
         cfg["os"]["password"] = _BM_MASK
     warn = _bm_nic_warning(dict(data, bmc_host=host))
     warnings = [{"code": "nic-speed", "nics": warn.split(": ", 1)[1].split(";", 1)[0], "message": warn}] if warn else []
-    return jsonify({"yaml": _his.dump_install_config(cfg), "warnings": warnings})
+    return jsonify({"yaml": _his.dump_install_config(cfg), "warnings": warnings,
+                    "boot_network_args": _bm_boot_network_args(cfg, data.get("extra_args", ""))})
 
 
 @app.route("/api/baremetal/install", methods=["POST"])
@@ -6682,9 +6737,14 @@ def _bm_prepare_install(data, defer_join=False):
                                    "fields": ["cluster_name"]}), 400)
         data["cluster_name"] = name
     try:
-        _bm_render_checked(data)
+        _bm_render_boot_checked(data)
     except InstallConfigError as e:
         return None, _bm_config_refusal(e)
+    try:
+        _bm_artifact_base_urls(data, 8091)
+    except ValueError:
+        return None, (jsonify({"error": "invalid artifact address",
+                               "fields": ["advertise_host", "installer_advertise_host"]}), 400)
     return data, None
 
 

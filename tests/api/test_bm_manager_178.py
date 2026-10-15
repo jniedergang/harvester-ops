@@ -222,14 +222,13 @@ def test_runner_boots_the_disk_after_the_installer_powers_off():
     i_wait = runner.index("_bm_wait_power_off(")
     i_eject = runner.index("_bm_media_eject(", i_wait)
     i_hdd = runner.index('_bm_boot_once_target(host, kc_user, kc_pwd, sys_path, "Hdd")')
-    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")')
+    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")', i_eject)
     i_api = runner.index("_bm_wait_api(")
     assert i_wait < i_eject < i_hdd < i_on < i_api
 
 
-def test_a_machine_powered_on_by_the_preflight_is_powered_off_on_failure(monkeypatch):
-    """Le préflight allume une machine éteinte pour lire son inventaire ; si
-    le run échoue avant l'installation, elle est éteinte à nouveau."""
+def test_a_powered_off_machine_is_not_booted_for_preflight(monkeypatch):
+    """Preflight does not boot the previous OS or change power on failure."""
     calls = []
     profile = _profile([])
     off = dict(profile, power_state="Off")
@@ -245,7 +244,7 @@ def test_a_machine_powered_on_by_the_preflight_is_powered_off_on_failure(monkeyp
     run = _run()
     wapp._baremetal_install_runner(run, {"bmc_user": "u", "bmc_password": "p",
                                          "bmc_host": "192.0.2.1", "iso": "absent.iso"})
-    assert run.status == "error" and calls == ["ForceOff"]
+    assert run.status == "error" and calls == []
 
 
 def test_a_machine_found_on_is_left_on_after_a_failure(monkeypatch):
@@ -295,7 +294,7 @@ def test_runner_does_not_power_on_when_the_media_stays_inserted():
     runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
     i_ej = runner.index("ok_ej, detail_ej = _bm_media_eject(")
     i_fail = runner.index('return fail("boot-disk"', i_ej)
-    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")')
+    i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")', i_ej)
     assert i_ej < i_fail < i_on
 
 
@@ -309,29 +308,29 @@ def test_console_key_goes_to_the_canonical_list_whatever_the_spelling():
 
 
 
-def test_power_cycle_is_a_cold_boot(monkeypatch):
+def test_power_off_confirms_off_before_media_mount(monkeypatch):
     """Vu en réel : un CD inséré machine allumée n'était pas vu après un
     redémarrage à chaud ; l'installation fait donc arrêt puis allumage."""
     states = iter(["On", "On", "Off"])
     calls = []
     monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": next(states, "Off")})
     monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
-    ok, _ = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
-    assert ok and calls == ["ForceOff", "On"]
+    ok, _ = wapp._bm_power_off("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
+    assert ok and calls == ["ForceOff"]
 
 
-def test_power_cycle_of_a_machine_already_off_only_powers_on(monkeypatch):
+def test_power_off_of_an_off_machine_does_not_send_reset(monkeypatch):
     calls = []
     monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": "Off"})
     monkeypatch.setattr(wapp, "_bm_reset", lambda h, u, p, sp, t: calls.append(t) or (True, ""))
-    ok, _ = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
-    assert ok and calls == ["On"]
+    ok, _ = wapp._bm_power_off("bmc", "u", "p", "/s", _run(), sleep=lambda s: None)
+    assert ok and calls == []
 
 
-def test_power_cycle_gives_up_when_the_machine_stays_on(monkeypatch):
+def test_power_off_gives_up_when_the_machine_stays_on(monkeypatch):
     monkeypatch.setattr(wapp, "_redfish_get", lambda *a, **k: {"PowerState": "On"})
     monkeypatch.setattr(wapp, "_bm_reset", lambda *a, **k: (True, ""))
     t = [0.0]
-    ok, why = wapp._bm_power_cycle("bmc", "u", "p", "/s", _run(),
+    ok, why = wapp._bm_power_off("bmc", "u", "p", "/s", _run(),
                                    sleep=lambda s: t.__setitem__(0, t[0] + s), now=lambda: t[0])
     assert not ok and "did not power off" in why

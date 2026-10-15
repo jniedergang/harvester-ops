@@ -627,7 +627,7 @@ def test_management_interface_is_designated_by_mac():
     cfg = yaml.safe_load(wapp._harvester_install_config(
         dict(base, mgmt_interface="D0:67:26:D5:4A:F8")))
     iface = cfg["install"]["management_interface"]["interfaces"][0]
-    assert iface == {"hwAddr": "d0:67:26:d5:4a:f8"}, iface
+    assert iface == {"hwAddr": "d0:67:26:d5:4a:f8", "name": "hvboot0"}, iface
 
     # un vrai nom d'interface reste accepté tel quel
     cfg = yaml.safe_load(wapp._harvester_install_config(
@@ -788,7 +788,7 @@ def test_iso_token_is_issued_before_the_config_is_written():
         runner.index("cfg_yaml = _harvester_install_config"), (
             "l'URL de l'ISO doit exister avant que la configuration soit rendue")
     assert runner.count("pxe_server.issue(out_iso") == 1, "un seul jeton d'ISO"
-    assert 'dict(opts, iso_url=iso_url, power_off=True)' in runner
+    assert 'dict(opts, iso_url=install_iso_url, power_off=True)' in runner
 
 
 # ---------------------------------------------------------------------------

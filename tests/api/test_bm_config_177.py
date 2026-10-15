@@ -152,7 +152,18 @@ def test_old_fields_render_the_same_dict_as_before(opts):
     laissait sans guillemets une MAC tout en chiffres, que YAML 1.1 lit comme
     un entier sexagésimal ; le nouveau l'écrit en texte (voir le test
     suivant)."""
-    assert _render(opts) == yaml.safe_load(_legacy_render(opts))
+    actual = _render(opts)
+    expected = yaml.safe_load(_legacy_render(opts))
+    # Boot identity adds only deterministic names and their persistent rules;
+    # all original installation values still match the legacy renderer.
+    if any(i.get('hwAddr') for i in actual['install']['management_interface']['interfaces']):
+        for index, iface in enumerate(actual['install']['management_interface']['interfaces']):
+            if iface.get('hwAddr'):
+                assert iface.pop('name') == 'hvboot%d' % index
+        assert actual['os'].pop('additional_kernel_arguments').startswith('ifname=')
+        files = actual['os'].pop('write_files')
+        assert len(files) == 1 and files[0]['path'].endswith('/79-harvester-bond-identity.rules')
+    assert actual == expected
 
 
 def test_harvlab_still_calls_the_same_function_with_the_same_fields():
@@ -268,7 +279,7 @@ def test_bonded_vlan_management_interface():
                      labels="topology.kubernetes.io/zone=zone-a\n\nrack = r1",
                      modules="rbd,nbd"))
     mi = d["install"]["management_interface"]
-    assert mi["interfaces"] == [{"hwAddr": "d0:67:26:d5:4a:f8"}, {"name": "ens15f1np1"}]
+    assert mi["interfaces"] == [{"hwAddr": "d0:67:26:d5:4a:f8", "name": "hvboot0"}, {"name": "ens15f1np1"}]
     assert mi["bond_options"] == {"mode": "802.3ad", "miimon": 200,
                                   "lacp_rate": "fast", "xmit_hash_policy": "layer3+4"}
     assert mi["vlan_id"] == 200
@@ -474,7 +485,7 @@ def test_all_digit_mac_is_now_text_where_the_old_render_made_an_int():
     old = yaml.safe_load(_legacy_render(dict(_BASE, mgmt_interface="52:54:00:12:34:56")))
     assert isinstance(old["install"]["management_interface"]["interfaces"][0]["hwAddr"], int)
     assert _render(opts)["install"]["management_interface"]["interfaces"] == \
-        [{"hwAddr": "52:54:00:12:34:56"}]
+        [{"hwAddr": "52:54:00:12:34:56", "name": "hvboot0"}]
 
 
 # ---------------------------------------------------------------------------

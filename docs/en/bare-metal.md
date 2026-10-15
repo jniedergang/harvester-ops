@@ -68,8 +68,9 @@ machine can be installed.
 > **Careful with a powered-off machine.** A BMC does not re-read hardware
 > while the server is off: it replays the inventory of the **last POST**.
 > On a machine that has not booted in months, that inventory can be
-> months stale. The installation runs a preflight that powers the machine
-> on and reads the real thing before deciding anything.
+> months stale. Installation preflight reads that inventory without booting
+> the previous OS and checks any saved discovery identity. Use a discovery
+> boot when fresh inventory is needed; installer checks still apply.
 
 ### 3. Fill in the node
 
@@ -145,12 +146,13 @@ dock the moment you confirm, and streams its steps.
 
 | Step | What happens |
 |---|---|
-| `preflight` | Powers the machine on if needed, waits for POST where the BMC publishes it (HPE), checks there is a disk: the discovery inventory first, then the HPE UEFI boot targets, then the Redfish drives; with none of them, a warning (the installer checks its disk itself) |
+| `preflight` | Reads BMC inventory without powering on the old OS; validates saved discovery identity and checks there is a disk: the discovery inventory first, then the HPE UEFI boot targets, then the Redfish drives; with none of them, a warning (the installer checks its disk itself) |
 | `remaster` | Patches the ISO so it installs unattended (below) |
 | `serve` | Publishes the ISO and the config behind one-off tokens |
+| `power-off` | Confirms the machine is off before mounting media or changing boot settings |
 | `bmc-insert` | Mounts the ISO as virtual media, and waits for the BMC's answer (up to 15 min, `HARVESTER_OPS_BM_INSERT_WAIT`) |
 | `bmc-boot` | Sets a **one-shot** boot on `Cd` |
-| `power` | Powers the machine off, then on, onto the ISO: a cold boot, since some BMCs attach the virtual media or apply the one-shot boot only at power-on |
+| `power` | Verifies the host is still off and the one-shot CD override is set, then powers on once |
 | `wait-install` | The installer powers the machine **off** when it is done (`install.power_off`, set by the console) |
 | `boot-disk` | Ejects the media, sets a one-shot boot on the disk, powers the machine on |
 | `wait-api` | Waits for the Harvester API on the VIP |
@@ -163,9 +165,9 @@ after every install, in a loop (seen on a Redfish test bench). With the
 installer powering off, the console knows the install is over and boots
 the disk itself, whatever the BMC does with one-shot boots.
 
-If the run fails before the install starts, a machine the preflight
-powered on is powered off again; a machine found running is left as it
-was.
+Preflight and ISO preparation do not change host power. Once preparation
+succeeds, installation powers the host off before mounting virtual media.
+If setting or verifying CD boot fails, the console does not power it on.
 
 **The new cluster is declared automatically** (create mode). The console
 creates an ed25519 key pair for it (`ssh/<name>_id`, 0600, in the
@@ -496,3 +498,32 @@ Check it is free before starting.
 
 See [capabilities.md](capabilities.md) for the rest of the toolkit and
 [architecture.md](architecture.md) for how these surfaces fit together.
+
+### Static management networking and bonded NIC identity
+
+The installer downloads its configuration before applying the network in
+that file. The console therefore derives the initial dracut network from
+the rendered management settings: interface mappings, bond options, VLAN,
+static IPv4 address or DHCP, gateway and DNS. Preview includes
+`boot_network_args`; conflicting network arguments are rejected before
+creating an installation action.
+
+On a multihomed console, virtual media uses the address routed toward the
+BMC, while configuration and installation-image downloads use the address
+routed toward the planned static management IP. API callers can override
+these with `advertise_host` and `installer_advertise_host`, respectively.
+For DHCP installations the installer address defaults to the media address.
+Both networks must be able to reach the corresponding HTTP address/port.
+
+Bond slaves can share a current MAC address. Matching names against that
+address during normal-system udev coldplug can rename the wrong slave
+(`rename4`, then `interface not found`). For MAC-selected interfaces the
+console gives the boot and installer the same names, matches existing bond
+slaves by `bonding_slave/perm_hwaddr`, and writes equivalent final naming
+rules for installed boots. It never changes the selected original MACs.
+
+The initrd overlay is verified against the known Harvester 1.8.2 dracut
+ifname generator. An unknown generator is refused during ISO preparation,
+before any power change; another ISO version needs verification first.
+Hardware validation is not bypassed. The generic no-image-download timeout
+is not proof of a hardware-check failure: inspect the actual console error.
