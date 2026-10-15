@@ -54,6 +54,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   initrd overlay only with two or more members; no refusal on a BMC that does
   not echo `Once`; a running host powered back on after a failed mount;
   `advertise_host` kept for both sides; host names checked as RFC 1123.
+- Found by the real install, not by the tests: harvester-installer passes
+  `multipath=off` unless external storage is enabled, but any
+  `additional_kernel_arguments` value replaces that default. Writing only
+  the `ifname=` arguments turned multipath on for local disks,
+  node-disk-manager saw them as `/dev/mapper` devices, and the disk pools
+  were never created. The console now puts `multipath=off` first when the
+  field was empty and external storage is off.
 
 ### Docs
 - Bare-metal (EN/FR): boot order, power handling, the two artifact
@@ -67,6 +74,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   off from On, a transient or an unreadable state;
   `test_bm_profiles_180.py`: a profile with competing network arguments is
   refused at save. Each change removed in turn makes a test fail.
+- Checked for real, Harvester 1.9.0, both installs reaching Ready with their
+  disk pools:
+  - an iLO 4 blade (one NIC, static IP): no power-on at preflight, power
+    off, mount, one-shot `Cd` read back as `Once`, `hvboot0` in `mgmt-bo`,
+    `multipath=off` kept;
+  - a Redfish emulator VM (sushy-tools, two-member active-backup bond): the
+    initrd overlay added, `Continuous` read back with a warning and the
+    install carried on, both members sharing the current MAC and keeping
+    their names from the permanent MAC.
+- The first run of both installs found the multipath regression above (no
+  pools); the second, with the fix, created them.
 
 ## [1.87.4] - 2026-10-08 - An older staged release is no longer offered as an update
 
