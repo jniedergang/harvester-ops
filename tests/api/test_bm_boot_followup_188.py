@@ -40,7 +40,31 @@ def test_names_only_go_to_the_remastered_iso(macs):
     assert boot["install"]["management_interface"]["interfaces"] == [
         {"hwAddr": m, "name": f"hvboot{i}"} for i, m in enumerate(macs)]
     args = boot["os"]["additional_kernel_arguments"].split()
-    assert args == [f"ifname=hvboot{i}:{m}" for i, m in enumerate(macs)]
+    assert args == ["multipath=off"] + [f"ifname=hvboot{i}:{m}" for i, m in enumerate(macs)]
+
+
+from baremetal_boot_network import installer_boot_identity  # noqa: E402
+
+MAC = "52:54:00:aa:bb:01"
+
+
+@pytest.mark.parametrize("os_cfg,expected", [
+    # le défaut de l'installeur (multipath=off) serait perdu : on le garde
+    ({}, ["multipath=off", f"ifname=hvboot0:{MAC}"]),
+    ({"external_storage_config": {"enabled": False}}, ["multipath=off", f"ifname=hvboot0:{MAC}"]),
+    # stockage externe : l'installeur ne poserait pas multipath=off
+    ({"external_storage_config": {"enabled": True}}, [f"ifname=hvboot0:{MAC}"]),
+    ({"externalStorageConfig": {"enabled": True}}, [f"ifname=hvboot0:{MAC}"]),
+    # arguments écrits par l'exploitant : ils remplacent déjà le défaut
+    ({"additional_kernel_arguments": "console=ttyS1"}, ["console=ttyS1", f"ifname=hvboot0:{MAC}"]),
+])
+def test_installer_default_multipath_off_survives_the_ifname_arguments(os_cfg, expected):
+    """Vu en réel sur node4 (Harvester 1.9.0) : les seuls ifname= écrits dans
+    additional_kernel_arguments ont remplacé le multipath=off de l'installeur,
+    multipath a pris les disques locaux et les pools n'ont pas été créés."""
+    cfg = {"os": dict(os_cfg), "install": {"management_interface": {"interfaces": [{"hwAddr": MAC}]}}}
+    out = installer_boot_identity(cfg)
+    assert out["os"]["additional_kernel_arguments"].split() == expected
 
 
 SCRIPT = (ROOT / "bin" / "harvester-iso-remaster.sh").read_text()

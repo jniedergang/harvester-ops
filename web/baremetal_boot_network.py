@@ -155,6 +155,15 @@ def installer_boot_identity(cfg):
         canonical = 'ifname=%s:%s' % (name, mac.lower())
         if (name in selected_names or mac.lower() in selected_macs) and canonical not in wanted:
             _fail('os.additional_kernel_arguments', 'conflicting-ifname')
+    if wanted and not current:
+        # harvester-installer (pkg/console/util.go, multipathOff) passes
+        # multipath=off unless external storage is enabled, but ANY
+        # additional_kernel_arguments value replaces that default. Writing
+        # only our ifname= would turn multipath on for local disks, and
+        # node-disk-manager would then see them as /dev/mapper devices.
+        storage = os_cfg.get('external_storage_config') or os_cfg.get('externalStorageConfig') or {}
+        if not storage.get('enabled'):
+            current.append('multipath=off')
     existing = {token.lower() for token in current}
     for token in wanted:
         if token.lower() not in existing:

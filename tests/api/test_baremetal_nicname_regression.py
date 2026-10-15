@@ -29,7 +29,9 @@ class NicIdentityTests(unittest.TestCase):
     def test_mapping_survives_installed_boot(self):
         out=installer_boot_identity(self.cfg)
         persisted=out['os']['additional_kernel_arguments'].split()
-        self.assertEqual(persisted,['ifname=hvboot0:f6:66:60:a0:05:45','ifname=hvboot1:f6:66:60:a0:05:46'])
+        # 1.88.0 : multipath=off, défaut de l'installeur sans stockage externe, est gardé
+        self.assertEqual(persisted,['multipath=off','ifname=hvboot0:f6:66:60:a0:05:45','ifname=hvboot1:f6:66:60:a0:05:46'])
+        persisted=[x for x in persisted if x.startswith('ifname=')]
         early=[x for x in boot_network_args(out).split() if x.startswith('ifname=')]
         self.assertEqual(early,persisted)
     def test_identity_transform_does_not_modify_plan_or_secrets(self):
