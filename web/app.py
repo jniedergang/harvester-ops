@@ -5480,6 +5480,126 @@ from baremetal_boot_network import (boot_network_args as _bm_boot_network_args,
                                    check_extra_args as _bm_check_extra_args,
                                    installer_boot_identity as _bm_installer_boot_identity,
                                    BootNetworkError)
+import baremetal_vm_network as _bmvm
+
+
+def _bm_vm_items(kc, kind, *args):
+    doc = _kubectl_json(kc, "get", kind, *args, timeout=30)
+    if doc is None or not isinstance(doc.get("items"), list):
+        raise ValueError("VM network: cannot read " + kind)
+    return doc["items"]
+
+
+def _bm_vm_plan(data, cfg):
+    if not data.get("vm_network"):
+        return None
+    if data.get("mode") != "join":
+        raise ValueError("VM network selection is available when joining a declared cluster")
+    cluster = _cluster_for_server(data.get("server_url", ""))
+    kc = _kubectl_for_cluster(cluster) if cluster else None
+    if not kc:
+        raise ValueError("VM network: declare the target cluster first")
+    management = cfg.get("install", {}).get("management_interface", {}).get("interfaces", [])
+    choice = _bmvm.selection(data["vm_network"], [i.get("hwAddr", "") for i in management])
+    os_cfg = cfg.get("os", {})
+    prepared = _bmvm.plan(choice, os_cfg.get("hostname"), os_cfg.get("labels"),
+                          _bm_vm_items(kc, _bmvm.VC), _bm_vm_items(kc, _bmvm.CN))
+    prepared["cluster"] = cluster
+    return prepared
+
+
+@app.route("/api/baremetal/vm-network/options")
+@requires_auth
+@_rate_limit("30/minute")
+def api_bm_vm_network_options():
+    cluster = _cluster_for_server(request.args.get("server_url", ""))
+    kc = _kubectl_for_cluster(cluster) if cluster else None
+    if not kc:
+        return jsonify({"error": "declare the target cluster first"}), 400
+    try:
+        configs = _bm_vm_items(kc, _bmvm.VC)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"templates": [{"name": c["metadata"]["name"], "spec": c["spec"]}
+                                  for c in configs if c.get("spec", {}).get("clusterNetwork") != "mgmt"
+                                  and not c["metadata"].get("deletionTimestamp")]})
+
+
+def _bm_vm_apply(opts, run, step, deadline):
+    prepared = opts["_vm_network_plan"]
+    kc = _bm_cluster_kubeconfig(opts)
+    if not kc:
+        raise ValueError("VM network: target cluster is no longer declared")
+    def check_cancel():
+        if getattr(run, "_cancel", False):
+            raise ValueError("VM network: cancelled by operator")
+        if time.time() >= deadline:
+            raise ValueError("VM network: post-install time budget exhausted")
+    check_cancel()
+    # Node Ready can precede the network-controller's first NIC report.
+    inventory_deadline = min(deadline, time.time() + 60)
+    while True:
+        check_cancel()
+        lm = _kubectl_json(kc, "get", _bmvm.LM, "nic", timeout=15)
+        links = ((lm or {}).get("status", {}).get("linkStatus") or {}).get(prepared["hostname"], [])
+        seen = {str(link.get("mac") or "").lower() for link in links}
+        if set(prepared["macs"]) <= seen:
+            break
+        if time.time() >= inventory_deadline:
+            raise ValueError("VM network: selected NICs were not reported by LinkMonitor; inspect the joined host")
+        time.sleep(3)
+    nodes = _bm_vm_items(kc, "nodes")
+    targets = [n for n in nodes if n["metadata"]["name"] == prepared["hostname"]]
+    if len(targets) != 1:
+        raise ValueError("VM network: joined node not found")
+    desired = _bmvm.manifest(prepared, targets[0], _bm_vm_items(kc, _bmvm.VC),
+                             _bm_vm_items(kc, _bmvm.CN), links)
+    matching = [n for n in nodes if _bmvm.matches(desired, n["metadata"].get("labels") or {})]
+    if len(matching) != 1:
+        raise ValueError("VM network: hostname selector does not uniquely identify the joined host")
+    down = [link["name"] for link in links
+            if link.get("name") in desired["spec"]["uplink"]["nics"] and link.get("state") != "up"]
+    if down:
+        step("vm-network", "progress", "Warning: NIC links are not up yet: " + ", ".join(down)
+             + "; the network agent will configure the bond")
+    payload = json.dumps(desired)
+    argv = ["kubectl", "--kubeconfig", kc, "create", "-f", "-", "-o", "json"]
+    dry = _kubectl_run(argv + ["--dry-run=server"], input=payload,
+                       capture_output=True, text=True, timeout=30)
+    if dry.returncode:
+        raise ValueError("VM network: server dry-run refused; review the target network in Networks")
+    admitted = json.loads(dry.stdout)
+    if admitted.get("spec") != desired["spec"]:
+        raise ValueError("VM network: admission changed the planned spec; review in Networks")
+    check_cancel()
+    # Exactly one create. On timeout/transport uncertainty, leave the resource
+    # for inspection; never retry the install or delete a possibly active bond.
+    try:
+        result = _kubectl_run(argv, input=payload, capture_output=True, text=True, timeout=30)
+    except (subprocess.TimeoutExpired, OSError):
+        raise ValueError("VM network: create result is uncertain; inspect " + prepared["name"] + " in Networks") from None
+    if result.returncode:
+        raise ValueError("VM network: create was not confirmed; inspect " + prepared["name"] + " in Networks")
+    step("vm-network", "progress", prepared["name"] + ": " + ", ".join(desired["spec"]["uplink"]["nics"]))
+    last = ""
+    while time.time() < deadline:
+        check_cancel()
+        try:
+            statuses = _bm_vm_items(kc, _bmvm.VS)
+        except (ValueError, subprocess.TimeoutExpired, OSError):
+            # A transient read does not prove that the agent failed.
+            step("vm-network", "progress", "Status read failed; retrying")
+        else:
+            if _bmvm.ready(statuses, prepared["name"], prepared["hostname"]):
+                step("vm-network", "done", prepared["name"] + ": Ready")
+                return
+            message = _bmvm.readiness_message(statuses, prepared["name"], prepared["hostname"])
+            if message and message != last:
+                last = message
+                step("vm-network", "progress", prepared["name"] + ": " + message)
+        time.sleep(3)
+    raise ValueError("VM network: readiness timeout; inspect " + prepared["name"] + " in Networks"
+                     + (": " + last if last else ""))
 
 
 def _harvester_install_config(opts, boot_identity=False):
@@ -6422,6 +6542,10 @@ def _baremetal_install_runner(run, opts):
                 return fail("pools", "Harvester is installed; the pools were not created: "
                                      + (why or f"pools-apply exited with {code}"))
             step("pools", "done", "pools : " + ", ".join(p["tag"] for p in pools))
+        if opts.get("_vm_network_plan"):
+            current[0] = "vm-network"
+            step("vm-network", "running", "configuring this host's VM uplinks")
+            _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
     except Exception as e:
         # une OSError porterait le chemin d'un fichier privé : son type seul
         detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
@@ -6661,8 +6785,11 @@ def api_baremetal_config_preview():
         return err
     try:
         cfg = _bm_render_boot_checked(data)
+        vm_plan = _bm_vm_plan(data, cfg)
     except InstallConfigError as e:
         return _bm_config_refusal(e)
+    except ValueError as e:
+        return jsonify({"error": str(e), "fields": ["vm_network"]}), 400
     # masquage sur le dictionnaire rendu, pas par remplacement de texte
     if cfg.get("token"):
         cfg["token"] = _BM_MASK
@@ -6671,6 +6798,7 @@ def api_baremetal_config_preview():
     warn = _bm_nic_warning(dict(data, bmc_host=host))
     warnings = [{"code": "nic-speed", "nics": warn.split(": ", 1)[1].split(";", 1)[0], "message": warn}] if warn else []
     return jsonify({"yaml": _his.dump_install_config(cfg), "warnings": warnings,
+                    "vm_network": vm_plan,
                     "boot_network_args": _bm_boot_network_args(cfg, data.get("extra_args", ""))})
 
 
@@ -6788,9 +6916,14 @@ def _bm_prepare_install(data, defer_join=False):
                                    "fields": ["cluster_name"]}), 400)
         data["cluster_name"] = name
     try:
-        _bm_render_boot_checked(data)
+        cfg = _bm_render_boot_checked(data)
+        # Internal plan is always computed here, never accepted from the caller.
+        data.pop("_vm_network_plan", None)
+        data["_vm_network_plan"] = _bm_vm_plan(data, cfg)
     except InstallConfigError as e:
         return None, _bm_config_refusal(e)
+    except ValueError as e:
+        return None, (jsonify({"error": str(e), "fields": ["vm_network"]}), 400)
     try:
         _bm_artifact_base_urls(data, 8091)
     except ValueError:

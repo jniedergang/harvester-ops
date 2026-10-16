@@ -395,7 +395,7 @@ const BMC = (() => {
           </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.mgmt'))}</legend>
-            <div class="bm-nics tip" data-tip="${esc(tr('bmc.tip.nics'))}">
+            <div class="bm-nics bm-mgmt-nics tip" data-tip="${esc(tr('bmc.tip.nics'))}">
               <span class="bm-nics-title">${esc(tr('bmc.f.mgmtNics'))} *</span>
               ${nicBoxes}
             </div>
@@ -411,6 +411,15 @@ const BMC = (() => {
               <select name="bond_xmit_hash_policy"><option value=""></option>${optionsHtml(XMIT_POLICIES, '')}</select></label>
             <label ${tipAttr(tr('bmc.tip.vlan'))}>${esc(tr('bmc.f.vlan'))}
               <input name="vlan_id" type="number" min="0" max="4094" step="1" placeholder="200"></label>
+          </fieldset>
+          <fieldset class="bm-vm-network" hidden>
+            <legend>${esc(tr('bmc.vm.title'))}</legend>
+            <label ${tipAttr(tr('bmc.vm.hint'))}><input type="checkbox" name="vm_enabled"> ${esc(tr('bmc.vm.enable'))}</label>
+            <p class="form-hint">${esc(tr('bmc.vm.hint'))}</p>
+            <label ${tipAttr(tr('bmc.vm.hint'))}>${esc(tr('bmc.vm.template'))}<select name="vm_template"><option value="">—</option></select></label>
+            <button type="button" class="btn btn-sm btn-secondary tip" data-bm="vm-reload" data-tip="${esc(tr('bmc.vm.reload'))}">${esc(tr('bmc.vm.reload'))}</button>
+            <span class="bm-vm-message form-hint"></span>
+            <div class="bm-nics tip" data-tip="${esc(tr('bmc.vm.hint'))}">${nicBoxes.replaceAll('name="mgmt_nic"', 'name="vm_nic"').replaceAll(' checked', '')}</div>
           </fieldset>
           <fieldset class="bm-disks-fs">
             <legend>${esc(tr('bmc.fs.disks'))}</legend>
@@ -689,7 +698,7 @@ const BMC = (() => {
     // Nom Linux et état du lien des cartes, quand la découverte les a vus.
     function renderNicNames() {
       const nics = (inv && inv.nics) || [];
-      panel.el.querySelectorAll('.bm-nics [name="mgmt_nic"]').forEach(c => {
+      panel.el.querySelectorAll('.bm-nics [name="mgmt_nic"], .bm-nics [name="vm_nic"]').forEach(c => {
         const span = c.parentElement.querySelector('.bm-nic-linux');
         if (!span) return;
         const n = nics.find(x => normMac(x.mac) === normMac(c.value));
@@ -902,6 +911,29 @@ const BMC = (() => {
     // modes, et une valeur importée n'y est pas jetée en silence.
     const method = panel.el.querySelector('#bm-method');
     const bondMode = panel.el.querySelector('#bm-bond-mode');
+    let vmServer = '';
+    async function loadVmTemplates(force = false) {
+      const server = field('server_url').value;
+      if (!force && server === vmServer) return;
+      vmServer = server;
+      const select = field('vm_template');
+      select.innerHTML = '<option value="">—</option>';
+      const message = form.querySelector('.bm-vm-message');
+      message.textContent = '';
+      if (!server) return;
+      try {
+        const response = await fetch('/api/baremetal/vm-network/options?server_url=' + encodeURIComponent(server));
+        const data = await response.json();
+        if (vmServer !== server) return;
+        if (!response.ok) throw new Error(data.error || response.status);
+        const vmTemplates = data.templates || [];
+        select.innerHTML += vmTemplates.map(c => `<option value="${esc(c.name)}">${esc(c.spec.clusterNetwork)} · ${esc(c.name)} · ${esc(c.spec.uplink?.bondOptions?.mode || '')} · MTU ${esc(c.spec.uplink?.linkAttributes?.mtu || 1500)}</option>`).join('');
+      } catch (e) {
+        if (vmServer === server) message.textContent = e.message;
+      }
+    }
+    form.querySelector('[data-bm="vm-reload"]').addEventListener('click', () => loadVmTemplates(true));
+    field('vm_enabled').addEventListener('change', () => { if (field('vm_enabled').checked) loadVmTemplates(); });
     const syncAll = () => {
       const stat = method.value === 'static';
       panel.el.querySelectorAll('.bm-static').forEach(l => {
@@ -909,6 +941,8 @@ const BMC = (() => {
         l.querySelector('input').required = stat;
       });
       const creating = field('mode').value !== 'join';
+      form.querySelector('.bm-vm-network').hidden = creating;
+      if (!creating && field('vm_enabled').checked) loadVmTemplates();
       panel.el.querySelectorAll('.bm-create').forEach(l => {
         l.hidden = !creating;
         const input = l.querySelector('input');
@@ -935,8 +969,13 @@ const BMC = (() => {
     function collect() {
       const fd = new FormData(form);
       fd.delete('mgmt_nic');
+      for (const name of ['vm_nic', 'vm_enabled', 'vm_template']) fd.delete(name);
       const body = Object.fromEntries(fd.entries());
       body.mgmt_interfaces = [...form.querySelectorAll('[name="mgmt_nic"]:checked')].map(c => c.value);
+      if (body.mode === 'join' && field('vm_enabled').checked) {
+        body.vm_network = {template: field('vm_template').value,
+          macs: [...form.querySelectorAll('[name="vm_nic"]:checked')].map(c => c.value)};
+      }
       body.wipe_all_disks = field('wipe_all_disks').checked;
       if (body.bond_mode !== '802.3ad') delete body.bond_lacp_rate;
       if (!XMIT_MODES.includes(body.bond_mode)) delete body.bond_xmit_hash_policy;
@@ -996,7 +1035,7 @@ const BMC = (() => {
     // Cartes du fichier : une MAC découverte est cochée ; un nom (ens1f0...)
     // ou une MAC inconnue de Redfish est ajouté, coché, pour être gardé.
     function setNics(values) {
-      const box = panel.el.querySelector('.bm-nics');
+      const box = panel.el.querySelector('.bm-mgmt-nics');
       box.querySelectorAll('.bm-nic-extra').forEach(e => e.remove());
       const boxes = [...box.querySelectorAll('[name="mgmt_nic"]')];
       boxes.forEach(c => { c.checked = false; });
@@ -1147,7 +1186,15 @@ const BMC = (() => {
         pv.setBody(`<textarea class="adv-code bm-preview-text tip" readonly spellcheck="false"
           data-tip="${esc(tr('bmc.tip.previewText'))}"></textarea>`);
         // .value, jamais innerHTML : le YAML reste du texte
-        pv.body.querySelector('.bm-preview-text').value = d.yaml || '';
+        let preview = d.yaml || '';
+        if (d.vm_network) {
+          const p = d.vm_network;
+          preview += '\n# ' + tr('bmc.vm.afterJoin') + '\n'
+            + JSON.stringify({name: p.name, clusterNetwork: p.cluster_network,
+              nodeSelector: p.nodeSelector, macs: p.macs,
+              template: p.template.metadata.name, uplink: {...p.template.spec.uplink, nics: p.macs}}, null, 2);
+        }
+        pv.body.querySelector('.bm-preview-text').value = preview;
       } catch (e) {
         msg.innerHTML = `<div class="bm-refusal">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</div>`;
       }

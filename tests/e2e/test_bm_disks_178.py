@@ -147,8 +147,9 @@ def test_table_shows_the_inventory_with_its_badges(context, flask_server):
     expect(win.locator('[data-bm="free-text"]')).not_to_be_checked()
     expect(win.locator('[name="device"]')).to_be_hidden()
     # cartes : nom Linux et état du lien à côté de la MAC
-    expect(win.locator(".bm-nics")).to_contain_text("enp3s0 · UP · 1000 Mbps")
-    expect(win.locator(".bm-nics")).to_contain_text("enp4s0 · UP")
+    # 1.90.0 : la fenêtre a aussi une liste de cartes VM, même classe .bm-nics
+    expect(win.locator(".bm-mgmt-nics")).to_contain_text("enp3s0 · UP · 1000 Mbps")
+    expect(win.locator(".bm-mgmt-nics")).to_contain_text("enp4s0 · UP")
     # cadre RAID en lecture seule quand le BMC publie son stockage
     raid = win.locator("fieldset.bm-raid")
     expect(raid).to_contain_text("HBA330 Mini")

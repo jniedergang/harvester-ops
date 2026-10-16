@@ -4,6 +4,39 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.90.0] - 2026-10-16 - VM uplinks chosen per host when a bare-metal node joins
+
+### Added
+- When a bare-metal node joins a declared cluster, the VM/customer NICs can
+  be chosen by MAC, with an existing network configuration as the template
+  (cluster network, bond options, link attributes and MTU). After the join,
+  the console resolves those MACs through LinkMonitor, creates a VlanConfig
+  for that host only and waits for its ready status. The preview shows this
+  post-join plan apart from the installer YAML. Contributed by Paul Dresch
+  (@pauld-0110) in #6: on his HPE Synergy, the customer NICs of a new host
+  had other Linux names than on the existing hosts, so the shared VM network
+  configuration left the new host's VM network down.
+- Refused before the install starts: a management NIC reused as a VM NIC, a
+  configuration whose selector would also take the new host (scope it to the
+  existing hosts under Networks first). Existing network, storage and
+  maintenance settings are never rewritten; an uncertain create is left for
+  inspection, not retried or deleted.
+- Free NICs that are down are accepted with a warning (the network agent
+  brings them up in the bond); the template's bond MAC is not copied; the
+  server dry-run decides what Harvester refuses. Disk pools run before the
+  VM network, and a Ready=False status shows the agent's message. Reads and
+  writes use the person's rights frozen in the request (1.88.1).
+
+### Tests
+- VM uplinks: planning, route tests through the Flask client (options,
+  preview, install), the real runner with mocked cluster calls (pools
+  before VM networking, failures, down NICs, agent messages, delegated
+  credentials), and a browser test on the real page.
+- Checked for real on the Redfish emulator bench: a second node joined the
+  two-node test cluster with its management NIC and a separate VM NIC, its
+  disk pool was created, then its VlanConfig was created from the template
+  of the first node and reported ready by Harvester.
+
 ## [1.89.0] - 2026-10-16 - One logo: the honeycomb
 
 ### Changed

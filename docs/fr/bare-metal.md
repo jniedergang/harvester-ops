@@ -566,3 +566,35 @@ l'ISO, avant toute modification d'alimentation. Une autre version d'ISO
 demande une vérification préalable. Les contrôles matériels restent actifs.
 Le timeout sans téléchargement de l'image n'identifie pas l'erreur réelle :
 consulter la console de l'installeur.
+
+## Cartes VM/client facultatives lors de la jonction
+
+Après l'import du YAML de jonction, activer **Configurer les cartes VM après la
+jonction** dans **Réseau VM/client**, sélectionner une configuration réseau comme
+modèle et choisir les cartes client par MAC. Les cartes de gestion restent
+séparées. Le modèle fournit le réseau de cluster et les attributs du bond,
+notamment son mode et son MTU. Ses noms de cartes et son sélecteur sont remplacés.
+
+L'aperçu présente le YAML d'installation puis un plan distinct exécuté après la
+jonction. Ce plan appartient à la console, pas au schéma YAML de l'installeur.
+Cette option concerne uniquement la jonction à un cluster déclaré. Désactivée,
+elle ne provoque aucune lecture API supplémentaire.
+
+Limiter d'abord les configurations générales, par exemple `vm-bond`, à leurs
+hôtes existants dans **Réseaux**, en conservant leur couverture. La console refuse
+les sélecteurs qui incluraient aussi le nouvel hôte ; elle ne modifie jamais les
+configurations existantes.
+
+Après la jonction, la console vérifie à nouveau les labels réels du nœud, le
+modèle et le réseau. LinkMonitor doit résoudre chaque MAC en une seule carte
+physique libre. Un lien inactif produit un avertissement sans bloquer la création
+du bond. L’adresse MAC du bond du modèle n’est pas copiée. Les pools de disques
+sont configurés avant cette étape réseau facultative.
+La console valide la création avec un dry-run serveur, crée une VlanConfig propre
+à cet hôte puis attend son VlanStatus prêt. La gestion, le stockage et le mode
+maintenance restent inchangés.
+
+Une erreur de création ou d'attente laisse Harvester installé. Vérifier la
+configuration indiquée dans **Réseaux** avant d'utiliser l'hôte pour des VM.
+Aucune réinstallation, nouvelle tentative d'une création incertaine ni suppression
+d'un bond potentiellement actif n'est effectuée automatiquement.

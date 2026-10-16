@@ -17,6 +17,13 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    "bmc.vm.title": "VM/customer network (optional)",
+    "bmc.vm.enable": "Configure VM uplinks after joining",
+    "bmc.vm.hint": "Choose separate NICs by MAC. The selected template supplies the cluster network, bond mode and MTU. Overlapping configurations must first be scoped to their existing hosts in Networks.",
+    "bmc.vm.template": "Existing network configuration to copy",
+    "bmc.vm.reload": "Reload configurations",
+    "bmc.vm.afterJoin": "Post-join plan (MACs are resolved to Linux NIC names on the joined host)",
+
     'bmc.confirmInstall': 'Install Harvester on {host}? Everything on {device} will be erased.',
     'bmc.confirmPower': 'Send "{action}" to {host}?',
     'bmc.credsHint': 'Supports iLO 4/5, iDRAC 9 and any BMC speaking standard Redfish. The credentials are never stored on the server; they stay in this page for the session.',
@@ -4957,6 +4964,13 @@ const translations = {
   },
 
   fr: {
+    "bmc.vm.title": "Réseau VM/client (facultatif)",
+    "bmc.vm.enable": "Configurer les cartes VM après la jonction",
+    "bmc.vm.hint": "Choisir des cartes distinctes par MAC. Le modèle fournit le réseau de cluster, le mode du bond et le MTU. Limiter auparavant les configurations en conflit à leurs hôtes existants dans Réseaux.",
+    "bmc.vm.template": "Configuration réseau existante à copier",
+    "bmc.vm.reload": "Recharger les configurations",
+    "bmc.vm.afterJoin": "Plan après jonction (les MAC sont résolues en noms Linux sur le nouvel hôte)",
+
     'bmc.confirmInstall': 'Installer Harvester sur {host} ? Tout le contenu de {device} sera effacé.',
     'bmc.confirmPower': 'Envoyer « {action} » à {host} ?',
     'bmc.credsHint': 'Compatible iLO 4/5, iDRAC 9 et tout BMC parlant le Redfish standard. Les identifiants ne sont jamais stockés sur le serveur ; ils restent dans cette page le temps de la session.',
@@ -9898,6 +9912,12 @@ const translations = {
   },
 
   it: {
+    "bmc.vm.title": "Rete VM/cliente (facoltativa)",
+    "bmc.vm.enable": "Configurare le NIC VM dopo l’aggiunta al cluster",
+    "bmc.vm.hint": "Scegliere NIC separate tramite MAC. Il modello fornisce rete del cluster, modalità del bond e MTU. Limitare prima le configurazioni sovrapposte ai rispettivi host in Reti.",
+    "bmc.vm.template": "Configurazione di rete esistente da copiare",
+    "bmc.vm.reload": "Ricaricare le configurazioni",
+    "bmc.vm.afterJoin": "Piano dopo l’aggiunta al cluster (i MAC vengono risolti nei nomi delle NIC Linux sul nuovo host)",
     'bmc.confirmInstall': 'Installare Harvester su {host}? Tutto il contenuto di {device} sarà cancellato.',
     'bmc.confirmPower': 'Inviare «{action}» a {host}?',
     'bmc.credsHint': 'Compatibile con iLO 4/5, iDRAC 9 e qualsiasi BMC con Redfish standard. Le credenziali non vengono mai memorizzate sul server; restano in questa pagina per la sessione.',
@@ -14838,6 +14858,12 @@ const translations = {
   },
 
   es: {
+    "bmc.vm.title": "Red de VM/cliente (opcional)",
+    "bmc.vm.enable": "Configurar las NIC de VM después de unirse al clúster",
+    "bmc.vm.hint": "Seleccione NIC separadas por MAC. La plantilla proporciona la red del clúster, el modo del bond y la MTU. Limite primero las configuraciones superpuestas a sus hosts existentes en Redes.",
+    "bmc.vm.template": "Configuración de red existente para copiar",
+    "bmc.vm.reload": "Recargar configuraciones",
+    "bmc.vm.afterJoin": "Plan posterior a la unión (las MAC se resuelven en nombres de NIC Linux en el nuevo host)",
     'bmc.confirmInstall': '¿Instalar Harvester en {host}? Se borrará todo el contenido de {device}.',
     'bmc.confirmPower': '¿Enviar «{action}» a {host}?',
     'bmc.credsHint': 'Compatible con iLO 4/5, iDRAC 9 y cualquier BMC con Redfish estándar. Las credenciales nunca se almacenan en el servidor; permanecen en esta página durante la sesión.',
@@ -19778,6 +19804,13 @@ const translations = {
   },
 
   de: {
+    "bmc.vm.title": "VM-/Kundennetzwerk (optional)",
+    "bmc.vm.enable": "VM-Uplinks nach dem Clusterbeitritt konfigurieren",
+    "bmc.vm.hint": "Separate NICs anhand ihrer MAC wählen. Die Vorlage liefert Cluster-Netzwerk, Bond-Modus und MTU. Überlappende Konfigurationen zuvor unter Netzwerke auf ihre bisherigen Hosts begrenzen.",
+    "bmc.vm.template": "Bestehende Netzwerkkonfiguration als Vorlage",
+    "bmc.vm.reload": "Konfigurationen neu laden",
+    "bmc.vm.afterJoin": "Plan nach Clusterbeitritt (MACs werden auf dem neuen Host den Linux-NICs zugeordnet)",
+
     'bmc.confirmInstall': 'Harvester auf {host} installieren? Alles auf {device} wird gelöscht.',
     'bmc.confirmPower': '„{action}“ an {host} senden?',
     'bmc.credsHint': 'Unterstützt iLO 4/5, iDRAC 9 und jedes BMC mit Standard-Redfish. Die Zugangsdaten werden nie auf dem Server gespeichert; sie bleiben für die Sitzung in dieser Seite.',
