@@ -1,15 +1,15 @@
 """Real bare-metal dialog, isolated browser and mocked APIs: no host actions."""
 import json
-from pathlib import Path
+import re
 
 from playwright.sync_api import expect
 
-ROOT = Path(__file__).resolve().parents[2]
 HOST = '192.0.2.31'
 MACS = ['02:00:00:00:00:%02x' % i for i in range(1, 5)]
 
 
-def test_optional_vm_nics_preview_and_launch_payload(context):
+def test_optional_vm_nics_preview_and_launch_payload(context, flask_server):
+    context.add_init_script("localStorage.setItem('harvester_ops_language', 'en');")
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -38,16 +38,18 @@ def test_optional_vm_nics_preview_and_launch_payload(context):
         elif path == 'baremetal/install':
             captured.append(route.request.post_data_json)
             body = {'action_id': 'mock-install-only'}
-        else: body = {}
-        route.fulfill(content_type='application/json', body=json.dumps(body))
-    page.route('https://uplinks.test/api/**', api)
-    page.route('https://uplinks.test/', lambda r: r.fulfill(content_type='text/html', body='<div id="bmc-body"></div>'))
-    page.goto('https://uplinks.test/')
-    page.evaluate("localStorage.setItem('harvester_ops_language', 'en')")
-    page.add_style_tag(path=str(ROOT / 'web/static/css/style.css'))
-    for name in ('icons.js', 'i18n.js', 'floating-panels.js', 'bmc.js'):
-        page.add_script_tag(path=str(ROOT / 'web/static/js' / name))
-    page.evaluate('BMC.init(); BMC.render()')
+        else:
+            route.fallback()
+            return
+        route.fulfill(status=202 if path == 'baremetal/install' else 200,
+                      content_type='application/json', body=json.dumps(body))
+    base = flask_server['base_url']
+    page.route(base + '/api/**', api)
+    page.goto(base, wait_until="domcontentloaded")
+    page.wait_for_function("window.BMC && window.FloatingPanels && window.i18n")
+    page.click('.tab-group-head[data-group="automation"]')
+    page.click('.tab-child[data-subtab="pxe"]')
+    page.mouse.move(1300, 450)
     form = page.locator('#bmc-discover-form')
     form.locator('[name="hosts"]').fill(HOST)
     form.locator('[name="password"]').fill('mock-bmc-password')
@@ -57,6 +59,9 @@ def test_optional_vm_nics_preview_and_launch_payload(context):
     expect(win.locator('.bm-vm-network')).to_be_hidden()
     win.locator('[data-bm="file"]').set_input_files({'name': 'join.yaml', 'mimeType': 'text/yaml', 'buffer': b'install: {mode: join}'})
     expect(win.locator('.bm-vm-network')).to_be_visible()
+    expect(win.locator('[name="vm_enabled"]').locator('..')).to_have_class('tip')
+    expect(win.locator('[name="vm_template"]').locator('..')).to_have_class('tip')
+    expect(win.locator('.bm-vm-network .bm-nics')).to_have_attribute('data-tip', re.compile('.+'))
     expect(win.locator('[name="vm_nic"]:checked')).to_have_count(0)
     expect(win.locator('[name="mgmt_nic"]:checked')).to_have_count(2)
     win.locator('[name="vm_enabled"]').check()

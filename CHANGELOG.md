@@ -13,27 +13,61 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   a host-specific VlanConfig and waits for its ready status. The preview
   shows this post-join plan separately from the installer YAML.
 - Management NIC reuse, overlapping selectors, changed templates, occupied
-  NICs and VMIs on the target block the VM-network step. Existing network,
+  NICs on the target block the VM-network step. Existing network,
   storage and maintenance settings are not rewritten. An uncertain create
   is left for inspection rather than retried or torn down.
+
+### Fixed
+- Use the header's hexagon brand shape as the SVG favicon on the main,
+  sign-in, setup and review pages. Version the icon URL so an older cached
+  watchtower icon is refreshed.
+- Allow free NICs whose links are down, with a warning; omit template bond
+  MACs and use server admission rather than an extra VMI restriction.
+- Configure disk pools before VM uplinks. Retry transient status reads and
+  show the network agent's Ready=False message. Use the frozen join identity
+  for VM-network reads and writes.
 
 ### Tests
 - VM uplinks: pure planning and real app-helper tests cover validation,
   preflight, runtime NIC identity, server dry-run, cancellation, uncertain
   writes and readiness; an isolated browser test exercises selection,
-  preview, launch payload and the disabled option with mocked APIs.
-
-## [1.88.1] - 2026-10-15 - UI punctuation and matching browser icon
+  preview, launch payload and the disabled option against the Flask fixture
+  with mocked cluster APIs. Real app tests cover delegated credentials, pools
+  before VM networking, failures, down NICs and agent status messages.
 
 ### Changed
 - Replace dash separators in primary UI headings, dialogs, tooltips and
   translated messages with simpler punctuation. Keep missing-value markers
   and numeric ranges where they carry meaning.
 
+## [1.88.1] - 2026-10-15 - Bare-metal joins act with the person's rights; strict translation check
+
 ### Fixed
-- Use the header's hexagon brand shape as the SVG favicon on the main,
-  sign-in, setup and review pages. Version the icon URL so an older cached
-  watchtower icon is refreshed.
+- When a bare-metal install joined a declared cluster, waiting for the node
+  and creating the disk pools ran in the install thread, where the person's
+  identity does not exist: the console fell back to its own kubeconfig
+  (`system:masters`). The joined cluster's kubeconfig is now resolved in the
+  request (delegated identity, or the Rancher session) and handed to the
+  thread. Joins in a batch inherit it from the first row when they join the
+  same declared cluster; a cluster created by the batch is the console's
+  own.
+- The translation parity test tolerated 1129 missing keys although the five
+  languages are complete since 1.10.0. A contribution adding six strings
+  without Italian and Spanish passed it. The test now fails on any key
+  missing in a language.
+
+### Docs
+- Bare-metal (EN/FR): the rights used when joining a cluster.
+
+### Tests
+- `tests/api/test_baremetal.py`: a join started with and without a delegated
+  identity carries the matching kubeconfig to the thread, never in the
+  response; the install thread never resolves a cluster kubeconfig itself;
+  the node wait reads with the kubeconfig it is given.
+- `tests/api/test_bm_profiles_180.py`: batch joins inherit the frozen
+  kubeconfig only for the same declared cluster.
+- `tests/api/test_i18n.py`: strict parity. Each change removed in turn makes
+  a test fail.
 
 ## [1.88.0] - 2026-10-15 - Bare-metal installs boot tagged bonds with stable NIC identity
 
@@ -85,6 +119,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   initrd overlay only with two or more members; no refusal on a BMC that does
   not echo `Once`; a running host powered back on after a failed mount;
   `advertise_host` kept for both sides; host names checked as RFC 1123.
+- Found by the real install, not by the tests: harvester-installer passes
+  `multipath=off` unless external storage is enabled, but any
+  `additional_kernel_arguments` value replaces that default. Writing only
+  the `ifname=` arguments turned multipath on for local disks,
+  node-disk-manager saw them as `/dev/mapper` devices, and the disk pools
+  were never created. The console now puts `multipath=off` first when the
+  field was empty and external storage is off.
 
 ### Docs
 - Bare-metal (EN/FR): boot order, power handling, the two artifact
@@ -98,6 +139,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   off from On, a transient or an unreadable state;
   `test_bm_profiles_180.py`: a profile with competing network arguments is
   refused at save. Each change removed in turn makes a test fail.
+- Checked for real, Harvester 1.9.0, both installs reaching Ready with their
+  disk pools:
+  - an iLO 4 blade (one NIC, static IP): no power-on at preflight, power
+    off, mount, one-shot `Cd` read back as `Once`, `hvboot0` in `mgmt-bo`,
+    `multipath=off` kept;
+  - a Redfish emulator VM (sushy-tools, two-member active-backup bond): the
+    initrd overlay added, `Continuous` read back with a warning and the
+    install carried on, both members sharing the current MAC and keeping
+    their names from the permanent MAC.
+- The first run of both installs found the multipath regression above (no
+  pools); the second, with the fix, created them.
 
 ## [1.87.4] - 2026-10-08 - An older staged release is no longer offered as an update
 

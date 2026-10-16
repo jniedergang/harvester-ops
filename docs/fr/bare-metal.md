@@ -223,6 +223,13 @@ pour une jonction a été vérifiée en installant deux nœuds dans un cluster
 de test à trois nœuds ; le déroulé par Redfish en mode jonction n'a pas
 encore été exécuté sur du vrai matériel.
 
+Depuis la 1.88.1, l'attente du nœud et la création des pools de disques se
+font avec vos propres droits sur le cluster rejoint (identité déléguée, ou
+votre session Rancher), résolus au lancement de l'installation. Avant, le
+fil de l'installation retombait sur le kubeconfig de la console. Une
+personne sans droit de lire les nœuds ou d'écrire les périphériques de
+stockage de ce cluster voit maintenant ces étapes refusées.
+
 ### Lire les disques d'abord : le démarrage de découverte (fenêtre, API et CLI)
 
 Certains BMC ne publient aucun disque (un iLO 4 n'en publie aucun) : la
@@ -580,7 +587,9 @@ configurations existantes.
 
 Après la jonction, la console vérifie à nouveau les labels réels du nœud, le
 modèle et le réseau. LinkMonitor doit résoudre chaque MAC en une seule carte
-physique libre avec lien actif. Aucune VMI ne doit être présente sur l'hôte cible.
+physique libre. Un lien inactif produit un avertissement sans bloquer la création
+du bond. L’adresse MAC du bond du modèle n’est pas copiée. Les pools de disques
+sont configurés avant cette étape réseau facultative.
 La console valide la création avec un dry-run serveur, crée une VlanConfig propre
 à cet hôte puis attend son VlanStatus prêt. La gestion, le stockage et le mode
 maintenance restent inchangés.

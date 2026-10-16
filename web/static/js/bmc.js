@@ -414,12 +414,12 @@ const BMC = (() => {
           </fieldset>
           <fieldset class="bm-vm-network" hidden>
             <legend>${esc(tr('bmc.vm.title'))}</legend>
-            <label><input type="checkbox" name="vm_enabled"> ${esc(tr('bmc.vm.enable'))}</label>
+            <label ${tipAttr(tr('bmc.vm.hint'))}><input type="checkbox" name="vm_enabled"> ${esc(tr('bmc.vm.enable'))}</label>
             <p class="form-hint">${esc(tr('bmc.vm.hint'))}</p>
-            <label>${esc(tr('bmc.vm.template'))}<select name="vm_template"><option value="">—</option></select></label>
-            <button type="button" class="btn btn-sm btn-secondary" data-bm="vm-reload">${esc(tr('bmc.vm.reload'))}</button>
+            <label ${tipAttr(tr('bmc.vm.hint'))}>${esc(tr('bmc.vm.template'))}<select name="vm_template"><option value="">—</option></select></label>
+            <button type="button" class="btn btn-sm btn-secondary tip" data-bm="vm-reload" data-tip="${esc(tr('bmc.vm.reload'))}">${esc(tr('bmc.vm.reload'))}</button>
             <span class="bm-vm-message form-hint"></span>
-            <div class="bm-nics">${nicBoxes.replaceAll('name="mgmt_nic"', 'name="vm_nic"').replaceAll(' checked', '')}</div>
+            <div class="bm-nics tip" data-tip="${esc(tr('bmc.vm.hint'))}">${nicBoxes.replaceAll('name="mgmt_nic"', 'name="vm_nic"').replaceAll(' checked', '')}</div>
           </fieldset>
           <fieldset class="bm-disks-fs">
             <legend>${esc(tr('bmc.fs.disks'))}</legend>

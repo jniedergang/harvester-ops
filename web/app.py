@@ -5527,7 +5527,7 @@ def api_bm_vm_network_options():
 
 def _bm_vm_apply(opts, run, step, deadline):
     prepared = opts["_vm_network_plan"]
-    kc = _kubectl_for_cluster(prepared["cluster"])
+    kc = _bm_cluster_kubeconfig(opts)
     if not kc:
         raise ValueError("VM network: target cluster is no longer declared")
     def check_cancel():
@@ -5553,11 +5553,15 @@ def _bm_vm_apply(opts, run, step, deadline):
     if len(targets) != 1:
         raise ValueError("VM network: joined node not found")
     desired = _bmvm.manifest(prepared, targets[0], _bm_vm_items(kc, _bmvm.VC),
-                             _bm_vm_items(kc, _bmvm.CN), links,
-                             _bm_vm_items(kc, "virtualmachineinstances.kubevirt.io", "-A"))
+                             _bm_vm_items(kc, _bmvm.CN), links)
     matching = [n for n in nodes if _bmvm.matches(desired, n["metadata"].get("labels") or {})]
     if len(matching) != 1:
         raise ValueError("VM network: hostname selector does not uniquely identify the joined host")
+    down = [link["name"] for link in links
+            if link.get("name") in desired["spec"]["uplink"]["nics"] and link.get("state") != "up"]
+    if down:
+        step("vm-network", "progress", "Warning: NIC links are not up yet: " + ", ".join(down)
+             + "; the network agent will configure the bond")
     payload = json.dumps(desired)
     argv = ["kubectl", "--kubeconfig", kc, "create", "-f", "-", "-o", "json"]
     dry = _kubectl_run(argv + ["--dry-run=server"], input=payload,
@@ -5577,13 +5581,25 @@ def _bm_vm_apply(opts, run, step, deadline):
     if result.returncode:
         raise ValueError("VM network: create was not confirmed; inspect " + prepared["name"] + " in Networks")
     step("vm-network", "progress", prepared["name"] + ": " + ", ".join(desired["spec"]["uplink"]["nics"]))
+    last = ""
     while time.time() < deadline:
         check_cancel()
-        if _bmvm.ready(_bm_vm_items(kc, _bmvm.VS), prepared["name"], prepared["hostname"]):
-            step("vm-network", "done", prepared["name"] + ": Ready")
-            return
+        try:
+            statuses = _bm_vm_items(kc, _bmvm.VS)
+        except (ValueError, subprocess.TimeoutExpired, OSError):
+            # A transient read does not prove that the agent failed.
+            step("vm-network", "progress", "Status read failed; retrying")
+        else:
+            if _bmvm.ready(statuses, prepared["name"], prepared["hostname"]):
+                step("vm-network", "done", prepared["name"] + ": Ready")
+                return
+            message = _bmvm.readiness_message(statuses, prepared["name"], prepared["hostname"])
+            if message and message != last:
+                last = message
+                step("vm-network", "progress", prepared["name"] + ": " + message)
         time.sleep(3)
-    raise ValueError("VM network: readiness timeout; inspect " + prepared["name"] + " in Networks")
+    raise ValueError("VM network: readiness timeout; inspect " + prepared["name"] + " in Networks"
+                     + (": " + last if last else ""))
 
 
 def _harvester_install_config(opts, boot_identity=False):
@@ -5648,15 +5664,22 @@ def _cluster_for_server(server_url):
     return None
 
 
-def _bm_wait_node_ready(cluster, hostname, deadline, run, step):
+def _bm_cluster_kubeconfig(opts):
+    """Kubeconfig du cluster rejoint, tel que figé côté requête par
+    _bm_prepare_install. Jamais rendu dans une réponse : il peut porter les
+    identifiants de la personne."""
+    return opts.get("_cluster_kc") or _kubectl_for_cluster(opts["cluster"])
+
+
+def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
     """Attend que le nœud qui rejoint soit prêt dans le cluster. L'API de ce
-    cluster répond déjà : l'attendre ne prouverait rien."""
+    cluster répond déjà : l'attendre ne prouverait rien. `kubeconfig` : celui
+    figé côté requête (_bm_cluster_kubeconfig)."""
     last = ""
     while time.time() < deadline:
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
-        node = _kubectl_json(_kubectl_for_cluster(cluster), "get", "node", hostname,
-                             cluster=cluster)
+        node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
         if conds.get("Ready") == "True":
@@ -6451,7 +6474,8 @@ def _baremetal_install_runner(run, opts):
     if opts.get("mode") == "join":
         step("wait-node", "running",
              f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
-        if not _bm_wait_node_ready(opts["cluster"], opts["hostname"], deadline, run, step):
+        if not _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
+                                   opts["hostname"], deadline, run, step):
             return fail("wait-node",
                         f"{opts['hostname']} not Ready in {opts['cluster']} after "
                         f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
@@ -6494,17 +6518,13 @@ def _baremetal_install_runner(run, opts):
                                 opts.get("ip") or opts["vip"])
             kubeconfig = files["kubeconfig"]
             step("declare", "done", f"{name} déclaré dans la console")
-        if opts.get("_vm_network_plan"):
-            current[0] = "vm-network"
-            step("vm-network", "running", "configuring this host's VM uplinks")
-            _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
         # sautés s'il n'y en a pas : aucune étape affichée
         if pools:
             current[0] = "pools"
             step("pools", "running", f"{len(pools)} pool(s) : {', '.join(p['tag'] for p in pools)}")
             if opts.get("mode") == "join":
                 # le cluster est déclaré (la route l'exige) : son kubeconfig
-                kubeconfig = _kubectl_for_cluster(opts["cluster"])
+                kubeconfig = _bm_cluster_kubeconfig(opts)
                 if not kubeconfig:
                     return fail("pools", f"Harvester is installed; the pools were not created: "
                                          f"{opts['cluster']} is no longer declared")
@@ -6522,6 +6542,10 @@ def _baremetal_install_runner(run, opts):
                 return fail("pools", "Harvester is installed; the pools were not created: "
                                      + (why or f"pools-apply exited with {code}"))
             step("pools", "done", "pools : " + ", ".join(p["tag"] for p in pools))
+        if opts.get("_vm_network_plan"):
+            current[0] = "vm-network"
+            step("vm-network", "running", "configuring this host's VM uplinks")
+            _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
     except Exception as e:
         # une OSError porterait le chemin d'un fichier privé : son type seul
         detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
@@ -6831,6 +6855,11 @@ def _bm_prepare_install(data, defer_join=False):
         if not data["cluster"] and not defer_join:
             return None, (jsonify({"error": "declare the cluster of server_url first",
                                    "fields": ["server_url"]}), 400)
+        if data["cluster"]:
+            # v1.88.1 : l'identité de la personne (délégation, session Rancher)
+            # n'existe que dans la requête ; le fil de l'installation, lui,
+            # retombait sur le kubeconfig de la console (system:masters).
+            data["_cluster_kc"] = _kubectl_for_cluster(data["cluster"])
     if data.get("method", "dhcp") == "static":
         for k in ("ip", "subnet_mask", "gateway"):
             if not data.get(k):
@@ -7213,6 +7242,11 @@ def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
                 data, err = _bm_prepare_install(dict(opts))
             if err:
                 raise RuntimeError("; ".join(f"{w}: {r}" for w, r in _bm_refusal_pairs(err, "")))
+            # préparée dans ce fil, la ligne n'a plus l'identité de la personne :
+            # celle de la ligne 1 vaut pour le même cluster déjà déclaré ; un
+            # cluster créé par la ligne 1 l'a été par la console elle-même
+            if plan[0].get("_cluster_kc") and data.get("cluster") == plan[0].get("cluster"):
+                data["_cluster_kc"] = plan[0]["_cluster_kc"]
             opts = data
         with app.app_context():
             action_id, busy = _bm_track(f"baremetal-install:{opts['hostname']}",

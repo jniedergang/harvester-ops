@@ -213,6 +213,12 @@ already up. The configuration generated for a join was checked by
 installing two nodes into a three-node test cluster; the Redfish-driven
 flow in join mode has not been run on real hardware yet.
 
+Since 1.88.1, waiting for the node and creating the disk pools use your own
+rights on the joined cluster (delegated identity, or your Rancher session),
+resolved when you start the install. Before, the install thread fell back
+to the console's own kubeconfig. Someone without the rights to read nodes
+or write block devices there now sees those steps refused.
+
 ### Reading the disks first: the discovery boot (window, API and CLI)
 
 Some BMCs publish no disks at all (HPE iLO 4 publishes none), so the console
@@ -560,7 +566,9 @@ Do not change active hosts' coverage when preparing that selector.
 
 After the node joins, the console rechecks the actual node labels, template and
 cluster network. The network-controller LinkMonitor must report each selected MAC
-as exactly one free, physical NIC with link up. The target must have no VMIs.
+as exactly one free, physical NIC. Down links produce a warning and are allowed;
+the network agent brings up the bond. The template bond MAC is not copied.
+Disk pools run before this optional network step.
 The console server-dry-runs and then creates one host-specific VlanConfig, using
 `kubernetes.io/hostname`, and reports success only after its VlanStatus is ready.
 No existing bond, management configuration, storage configuration or maintenance

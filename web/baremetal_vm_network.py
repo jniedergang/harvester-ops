@@ -61,15 +61,13 @@ def plan(choice, hostname, labels, configs, networks):
             'nodeSelector': {'kubernetes.io/hostname': hostname}}
 
 
-def manifest(prepared, node, configs, networks, links, vmis):
+def manifest(prepared, node, configs, networks, links):
     if node.get('metadata', {}).get('name') != prepared['hostname']:
         raise ValueError('VM network: joined node identity does not match')
     labels = node['metadata'].get('labels') or {}
     if (labels.get('kubernetes.io/hostname') != prepared['hostname']
             or 'node-role.harvesterhci.io/witness' in labels):
         raise ValueError('VM network: target hostname label is missing, different or belongs to a witness')
-    if any(v.get('status', {}).get('nodeName') == prepared['hostname'] for v in vmis):
-        raise ValueError('VM network: target host has VMIs; leave its networks unchanged')
     # Re-run selector/network checks with actual post-join labels and fresh inventory.
     fresh = plan({'template': prepared['template']['metadata']['name'], 'macs': prepared['macs']},
                  prepared['hostname'], node['metadata'].get('labels'), configs, networks)
@@ -85,12 +83,11 @@ def manifest(prepared, node, configs, networks, links, vmis):
         nic = found[0].get('name', '')
         if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,15}', nic) or nic == 'lo' or found[0].get('type') != 'device':
             raise ValueError('VM network: expected a physical NIC for ' + mac)
-        if found[0].get('state') != 'up':
-            raise ValueError('VM network: NIC link is not up: ' + nic)
         nics.append(nic)
     if len(set(nics)) != len(nics):
         raise ValueError('VM network: MACs resolved to the same NIC')
     uplink = copy.deepcopy(template['spec']['uplink'])
+    uplink.get('linkAttributes', {}).pop('hardwareAddr', None)
     uplink['nics'] = nics
     return {'apiVersion': 'network.harvesterhci.io/v1beta1', 'kind': 'VlanConfig',
             'metadata': {'name': prepared['name'], 'labels': {OWNER: 'true'}},
@@ -104,3 +101,15 @@ def ready(statuses, name, hostname):
     return len(relevant) == 1 and not relevant[0].get('metadata', {}).get('deletionTimestamp') and any(
         str(c.get('type', '')).lower() == 'ready' and c.get('status') == 'True'
         for c in relevant[0].get('status', {}).get('conditions', []))
+
+
+def readiness_message(statuses, name, hostname):
+    """Agent diagnostics for this exact host/configuration, never another node."""
+    for status in statuses:
+        state = status.get('status', {})
+        if state.get('vlanConfig') != name or state.get('node') != hostname:
+            continue
+        for condition in state.get('conditions', []):
+            if str(condition.get('type', '')).lower() == 'ready' and condition.get('status') == 'False':
+                return str(condition.get('message') or condition.get('reason') or '')[:500]
+    return ''
