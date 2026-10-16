@@ -147,7 +147,8 @@ MANIFEST = [
         "star": "star",
         "news": "newspaper",
         "test": "flask-conical",
-        "brand": "hexagon",
+        # « brand » n'est plus un glyphe Lucide : logo dessiné à la main (1.89.0),
+        # hors du bloc généré de icons.js.
     }),
     ("Interface", {
         "chevronDown": "chevron-down",

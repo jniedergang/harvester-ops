@@ -4,6 +4,28 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.89.0] - 2026-10-16 - One logo: the honeycomb
+
+### Changed
+- harvester-ops has one logo: a honeycomb of seven hexagons, the filled one
+  in the middle. It stands for the fleet of clusters in one console. The
+  browser tab showed a watchtower while the header showed a plain hexagon,
+  which Paul Dresch (@pauld-0110) pointed out. The tab, the header, and the
+  sign-in, setup and review pages now draw the same mark.
+- The favicon address carries the version (`favicon.svg?v=<version>`), so
+  browsers drop the old cached icon after an update.
+
+### Internal
+- The mark is drawn by hand in the 24-unit grid of the icon set, outside the
+  generated Lucide block of `icons.js` (`scripts/gen-icons.py` no longer maps
+  `brand` to Lucide's hexagon). It was chosen from 24 generated candidates
+  and redrawn as vector paths, legible at 16 px.
+
+### Tests
+- `tests/api/test_icons.py`: the favicon uses exactly the header's paths
+  (filled centre, six cells), every page asks for the favicon of its
+  version, and hand-drawn icons count as defined.
+
 ## [1.88.2] - 2026-10-16 - Graceful shutdown no longer stops silently when a worker is declared last
 
 ### Fixed

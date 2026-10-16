@@ -177,8 +177,14 @@ def test_css_content_has_no_glyphs():
         assert f"var({var})" in css, f"generated mask {var} is unused"
 
 
+def _hand_drawn_keys() -> set:
+    """Entrées de PATHS hors du bloc Lucide (le logo, depuis 1.89.0)."""
+    block = ICONS.split("END GENERATED", 1)[1].split("};", 1)[0]
+    return set(re.findall(r"^\s{4}([A-Za-z_][A-Za-z0-9_]*):", block, flags=re.M))
+
+
 def test_every_referenced_icon_exists():
-    keys = _paths_keys()
+    keys = _paths_keys() | _hand_drawn_keys()
     assert len(keys) >= 80
     missing = set()
     for path in SHIPPED_SOURCES:
@@ -262,3 +268,25 @@ def test_floating_panel_renders_icon_option():
     assert fp.count("floating-panel-icon") >= 2, (
         "header and minimised chip must both render opts.icon")
     assert "opts.icon" in fp and "p.opts.icon" in fp
+
+
+def test_favicon_and_header_share_the_honeycomb_mark():
+    """1.89.0 : l'onglet et l'en-tête montraient deux logos différents (tour de
+    guet et hexagone), relevé par un contributeur. Un seul tracé, la ruche de
+    sept hexagones : le favicon reprend exactement les chemins de `brand`."""
+    import xml.etree.ElementTree as ET
+    ns = "{http://www.w3.org/2000/svg}"
+    root = ET.fromstring((WEB / "static" / "favicon.svg").read_text())
+    brand = re.search(r"brand:\s*'([^']+)'", (JS / "icons.js").read_text()).group(1)
+    header = ET.fromstring('<svg xmlns="http://www.w3.org/2000/svg">' + brand + "</svg>")
+    fav_paths = [e.attrib for e in root if e.tag == ns + "path"]
+    assert root.attrib["viewBox"] == "0 0 24 24"
+    assert fav_paths == [e.attrib for e in header]
+    assert len(fav_paths) == 2 and fav_paths[0]["fill"] == "currentColor"   # cœur plein
+    assert fav_paths[1]["d"].count("Z") == 6                                 # six alvéoles
+
+
+def test_every_page_asks_for_the_favicon_of_its_version():
+    for page in ("index.html", "login.html", "setup.html", "review.html"):
+        src = (TEMPLATES / page).read_text()
+        assert 'rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ version }}"' in src, page

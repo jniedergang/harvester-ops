@@ -115,7 +115,6 @@ const Icons = (() => {
     star: '<path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"/>',  // star
     news: '<path d="M15 18h-5"/><path d="M18 14h-8"/><path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-4 0v-9a2 2 0 0 1 2-2h2"/><rect width="8" height="4" x="10" y="6" rx="1"/>',  // newspaper
     test: '<path d="M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2"/><path d="M6.453 15h11.094"/><path d="M8.5 2h7"/>',  // flask-conical
-    brand: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>',  // hexagon
     // Interface
     chevronDown: '<path d="m6 9 6 6 6-6"/>',  // chevron-down
     chevronRight: '<path d="m9 18 6-6-6-6"/>',  // chevron-right
@@ -134,6 +133,8 @@ const Icons = (() => {
     eject: '<circle cx="12" cy="12" r="10"/><path d="M6 12c0-1.7.7-3.2 1.8-4.2"/><circle cx="12" cy="12" r="2"/><path d="M18 12c0 1.7-.7 3.2-1.8 4.2"/>',  // disc-3
     hotplug: '<path d="M12 2v8"/><path d="m16 6-4 4-4-4"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 18h.01"/><path d="M10 18h.01"/>',  // hard-drive-download
   // END GENERATED
+    // Hors Lucide, dessiné à la main (1.89.0) : ruche de sept hexagones (la flotte), le même tracé que favicon.svg
+    brand: '<path d="M15.30 12.00L13.65 14.86L10.35 14.86L8.70 12.00L10.35 9.14L13.65 9.14Z" fill="currentColor" stroke="none"/><path d="M20.68 15.48L19.36 17.78L16.71 17.78L15.38 15.48L16.71 13.19L19.36 13.19ZM14.65 18.97L13.32 21.26L10.68 21.26L9.35 18.97L10.67 16.67L13.32 16.67ZM8.62 15.48L7.29 17.78L4.64 17.78L3.32 15.48L4.64 13.19L7.29 13.19ZM8.62 8.52L7.29 10.81L4.64 10.81L3.32 8.52L4.64 6.22L7.29 6.22ZM14.65 5.03L13.32 7.33L10.67 7.33L9.35 5.03L10.67 2.74L13.32 2.74ZM20.68 8.52L19.36 10.81L16.71 10.81L15.38 8.52L16.71 6.22L19.36 6.22Z" stroke-width="1.3"/>',
   };
 
   const DEFAULT_STROKE = 2;
