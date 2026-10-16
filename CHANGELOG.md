@@ -4,6 +4,28 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.88.2] - 2026-10-16 - Graceful shutdown no longer stops silently when a worker is declared last
+
+### Fixed
+- The graceful shutdown stopped at "Snapshot etcd" with exit code 1 and no
+  message on any cluster whose last declared node is not a control plane.
+  `nodes_by_role` ended on `[[ ... ]] && echo`, so it returned 1 when the
+  last node had another role, and `set -eo pipefail` ended the script on the
+  assignment that reads the first control plane. The final step that stops
+  the control planes had the same flaw. Seen for real on a test cluster just
+  after a worker joined it.
+- An unexpected failure of the shutdown or startup script is now reported
+  (`log_error` and a `complete` error event for the console) instead of
+  ending the action without a word.
+
+### Tests
+- `tests/api/test_nodes_by_role_1882.py`: the helper never fails its caller
+  (control plane first or last, workers only, several workers), and both
+  scripts trap unexpected failures. Restoring the old helper makes four
+  cases fail.
+- Checked for real: the shutdown of the two-node test cluster, worker
+  declared last, runs again.
+
 ## [1.88.1] - 2026-10-15 - Bare-metal joins act with the person's rights; strict translation check
 
 ### Fixed

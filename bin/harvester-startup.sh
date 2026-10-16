@@ -14,6 +14,8 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
+# v1.88.2 : une sortie imprévue (set -e) est dite, jamais muette.
+trap 'rc=$?; log_error "Unexpected failure at line $LINENO: $BASH_COMMAND (rc=$rc)"; emit_event "complete" "error" "Unexpected failure at line $LINENO (rc=$rc)"' ERR
 
 API_TIMEOUT=600
 NODE_READY_TIMEOUT=900

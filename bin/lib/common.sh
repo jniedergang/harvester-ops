@@ -372,11 +372,16 @@ list_clusters() {
 }
 
 nodes_by_role() {
-    local role="$1"
+    # v1.88.2 : `[[ ]] && echo` en dernière commande rendait 1 quand le
+    # dernier nœud n'avait pas ce rôle ; sous `set -eo pipefail`, l'appelant
+    # s'arrêtait (arrêt gracieux muet dès qu'un worker était déclaré en
+    # dernier). `local` : ne pas écraser h/ip/r de l'appelant.
+    local role="$1" entry h ip r _mac
     for entry in "${CLUSTER_NODES[@]}"; do
         IFS='|' read -r h ip r _mac <<< "$entry"
-        [[ "$r" == "$role" ]] && echo "$h|$ip"
+        if [[ "$r" == "$role" ]]; then echo "$h|$ip"; fi
     done
+    return 0
 }
 
 # v1.9.0 : lit l'annotation previous-runStrategy d'une VM ("" si absente).
