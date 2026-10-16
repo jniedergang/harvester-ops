@@ -1260,14 +1260,14 @@ const App = (() => {
     if (stepPanel) resetSteps(stepPanel);
     $(logSel).innerHTML = '';
 
-    appendLog(logSel, `[run ${runId}] started: ${new Date().toISOString()}`, 'info');
+    appendLog(logSel, `[run ${runId}] started — ${new Date().toISOString()}`, 'info');
 
     currentSSE = SSEReconnect.connect(`/api/stream/${runId}`, {
       on: {
         step: (e) => {
           const ev = JSON.parse(e.data);
           if (stepPanel) setStepStatus(stepPanel, ev.step_id, ev.status, ev.message);
-          appendLog(logSel, `[step] ${ev.step_id} → ${ev.status} ${ev.message ? ': ' + ev.message : ''}`,
+          appendLog(logSel, `[step] ${ev.step_id} → ${ev.status} ${ev.message ? '— ' + ev.message : ''}`,
                     ev.status === 'error' ? 'err' :
                     ev.status === 'done'  ? 'ok'  :
                     ev.status === 'warn'  ? 'warn' : 'info');
@@ -1296,9 +1296,9 @@ const App = (() => {
       },
       onStatus: (s) => {
         if (s.state === 'retry') {
-          appendLog(logSel, `[stream] connection lost: retrying in ${Math.round(s.delay/1000)}s (${s.attempt}/5)`, 'warn');
+          appendLog(logSel, `[stream] connection lost — retrying in ${Math.round(s.delay/1000)}s (${s.attempt}/5)`, 'warn');
         } else if (s.state === 'dead') {
-          appendLog(logSel, `[stream] reconnect failed: see Activity tab for the recorded run`, 'err');
+          appendLog(logSel, `[stream] reconnect failed — see Activity tab for the recorded run`, 'err');
         }
       },
     });
@@ -1626,7 +1626,7 @@ const App = (() => {
     const fmt = (e) => {
       const ts = new Date((e.ts || 0) * 1000).toLocaleTimeString();
       if (e.type === 'step')
-        return `[${ts}] step  ${e.step_id} → ${e.status}${e.message ? ': ' + e.message : ''}`;
+        return `[${ts}] step  ${e.step_id} → ${e.status}${e.message ? ' — ' + e.message : ''}`;
       if (e.type === 'log')
         return `[${ts}] log   ${e.message || ''}`;
       if (e.type === 'status')
@@ -1648,7 +1648,7 @@ const App = (() => {
         status: onEvent,
         end: () => {
           if (lines.length === 0) {
-            logEl.textContent = '(no events recorded: this action has no replay)';
+            logEl.textContent = '(no events recorded — this action has no replay)';
           }
         },
       },

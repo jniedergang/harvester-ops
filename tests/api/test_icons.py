@@ -262,20 +262,3 @@ def test_floating_panel_renders_icon_option():
     assert fp.count("floating-panel-icon") >= 2, (
         "header and minimised chip must both render opts.icon")
     assert "opts.icon" in fp and "p.opts.icon" in fp
-
-
-def test_favicon_uses_the_same_geometry_as_header_brand():
-    import xml.etree.ElementTree as ET
-    root = ET.fromstring((WEB / 'static' / 'favicon.svg').read_text())
-    icon_source = (JS / 'icons.js').read_text()
-    brand = re.search(r"brand:\s*'([^']+)'", icon_source).group(1)
-    header = ET.fromstring('<svg xmlns="http://www.w3.org/2000/svg">' + brand + '</svg>')
-    assert root.attrib['viewBox'] == '0 0 24 24'
-    assert [(e.tag, e.attrib) for e in root] == [(e.tag, e.attrib) for e in header]
-    assert root.attrib['stroke'] != 'currentColor'  # standalone tab icon has no app CSS
-
-
-def test_all_pages_use_versioned_favicon():
-    for page in ('index.html', 'login.html', 'setup.html', 'review.html'):
-        source = (TEMPLATES / page).read_text()
-        assert 'rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ version }}"' in source

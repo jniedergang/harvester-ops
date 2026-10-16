@@ -243,7 +243,7 @@ const Dock = (() => {
               if (msgPct !== null) pct = msgPct;
               if (pct == null) pct = (liveSteps[a.id]?.pct || 0);
               liveSteps[a.id] = { step_id: ev.step_id, status: ev.status, message: ev.message, pct };
-              push(`[step] ${ev.step_id} → ${ev.status}${ev.message ? ': ' + ev.message : ''}`,
+              push(`[step] ${ev.step_id} → ${ev.status}${ev.message ? ' — ' + ev.message : ''}`,
                    ev.status === 'done' ? 'ok' : ev.status === 'error' ? 'err' : 'info');
               updateCard(a.id);
             },
@@ -277,7 +277,7 @@ const Dock = (() => {
             if (s.state === 'retry') {
               push(`[stream] reconnecting in ${Math.round(s.delay/1000)}s (${s.attempt}/5)`, 'warn');
             } else if (s.state === 'dead') {
-              push(`[stream] reconnect failed: action may still be running`, 'err');
+              push(`[stream] reconnect failed — action may still be running`, 'err');
               delete activeSSE[a.id];
             }
           },
@@ -309,9 +309,9 @@ const Dock = (() => {
       // v1.6.5 : une erreur montre POURQUOI (stderr kubectl/script), pas
       // seulement "exit 1" — le message complet reste lisible au survol.
       const errSuffix = (!isRunning && !isDone && a.error_summary)
-        ? ': ' + escapeHtml(a.error_summary) : '';
+        ? ' — ' + escapeHtml(a.error_summary) : '';
       const stepText = isRunning
-        ? `${live.step_id}${live.message ? ': ' + live.message : ''}`
+        ? `${live.step_id}${live.message ? ' — ' + live.message : ''}`
         : (isDone ? Icons.svg('ok', { size: 12, cls: 'icon-ok' }) + ' completed'
                   : Icons.svg('fail', { size: 12, cls: 'icon-err' }) + ' ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
       const stepTitle = (!isRunning && !isDone && a.error_summary)
@@ -428,7 +428,7 @@ const Dock = (() => {
     const msgEl = card.querySelector('.step-msg');
     const fillEl = card.querySelector('.progress-mini .fill');
     if (msgEl && liveSteps[runId]) {
-      msgEl.textContent = live.step_id + (live.message ? ': ' + live.message : '');
+      msgEl.textContent = live.step_id + (live.message ? ' — ' + live.message : '');
       msgEl.title = live.step_id;
     }
     if (fillEl) fillEl.style.width = live.pct + '%';

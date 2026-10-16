@@ -276,7 +276,7 @@ const VMCreate = (() => {
           const id = `${tp.namespace}/${tp.name}`;
           const o = document.createElement('option');
           o.value = id;
-          o.textContent = tp.description ? `${id}: ${tp.description}` : id;
+          o.textContent = tp.description ? `${id} — ${tp.description}` : id;
           sel.appendChild(o);
         });
       } catch { /* pas de template : le choix « depuis zéro » suffit */ }
@@ -424,7 +424,7 @@ const VMCreate = (() => {
         if (!r.ok) { say(esc(d.error || 'error'), true); return; }
         say(`${esc(dryRun ? tr('vm.create.validating', 'Validation started')
                           : tr('vm.create.started', 'Creation started'))} `
-            + `<code>${esc(d.action_id)}</code>: ${esc((d.names || []).join(', '))}`);
+            + `<code>${esc(d.action_id)}</code> — ${esc((d.names || []).join(', '))}`);
         if (!dryRun) setTimeout(() => window.App && App.refreshNamespaces
                                 && App.refreshNamespaces(false), 4000);
       } catch (e) { say(esc(e.message), true); }

@@ -50,7 +50,7 @@ const Clusters = (() => {
           <div class="cluster-card-head">
             <div>
               <h5>${n} <span class="badge cluster-origin tip" data-origin="${origin}" data-tip="${escapeHtml(originTip)}">${escapeHtml(originLabel)}</span></h5>
-              <div class="form-hint">${escapeHtml(c.description || '')}: ${c.node_count} ${i18n.t('settings.connection.nodes')}</div>
+              <div class="form-hint">${escapeHtml(c.description || '')} — ${c.node_count} ${i18n.t('settings.connection.nodes')}</div>
             </div>
             <div class="cluster-card-actions">
               <button class="btn btn-sm btn-secondary" data-act="test-kc" data-name="${n}" data-i18n="clusters.testKc">${i18n.t('clusters.testKc')}</button>
@@ -89,7 +89,7 @@ const Clusters = (() => {
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}/test-kubeconfig`, { method: 'POST' });
         const d = await r.json();
         resEl.innerHTML = d.ok
-          ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${escapeHtml(i18n.t('settings.connection.reachable'))}: server ${escapeHtml(d.server_version || '')}</div>`
+          ? `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} ${escapeHtml(i18n.t('settings.connection.reachable'))} — server ${escapeHtml(d.server_version || '')}</div>`
           : `<div class="summary-bar bad">${Icons.svg('fail', { size: 14 })} ${escapeHtml(d.error || 'failed')}</div>`;
       } else if (act === 'test-ssh') {
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}/test-ssh`, { method: 'POST' });

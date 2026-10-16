@@ -232,8 +232,8 @@ const TF_SCHEMA = {
           },
           { name: 'network_data', type: 'textarea', rows: 4,
             description: {
-              en: 'Inline cloud-init network-data YAML (DHCP by default: leave blank).',
-              fr: 'YAML cloud-init network-data inline (DHCP par défaut: laisser vide).',
+              en: 'Inline cloud-init network-data YAML (DHCP by default — leave blank).',
+              fr: 'YAML cloud-init network-data inline (DHCP par défaut — laisser vide).',
             }
           },
           { name: 'user_data_secret_name', type: 'ref',
@@ -336,8 +336,8 @@ const TF_SCHEMA = {
   raw: {
     label: { en: 'Raw HCL', fr: 'HCL brut' },
     description: {
-      en: 'Free-form Terraform HCL (advanced: bypasses the schema).',
-      fr: 'HCL Terraform libre (avancé: court-circuite le schéma).',
+      en: 'Free-form Terraform HCL (advanced — bypasses the schema).',
+      fr: 'HCL Terraform libre (avancé — court-circuite le schéma).',
     },
     sections: [
       { id: 'specs', label: { en: 'HCL', fr: 'HCL' },

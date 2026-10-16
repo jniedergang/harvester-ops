@@ -7,7 +7,7 @@ const VMSnapshots = (() => {
 
   async function open(cluster, namespace, name) {
     const panelId = `vm-snapshots-${cluster}-${namespace}-${name}`;
-    const title = `Snapshots: ${namespace}/${name}`;
+    const title = `Snapshots — ${namespace}/${name}`;
     const body = `
       <div class="snapshots-panel">
         <div class="apply-bar" style="margin: 0 0 14px; padding: 0; border: 0;">

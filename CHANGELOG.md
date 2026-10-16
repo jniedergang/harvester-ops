@@ -18,9 +18,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   is left for inspection rather than retried or torn down.
 
 ### Fixed
-- Use the header's hexagon brand shape as the SVG favicon on the main,
-  sign-in, setup and review pages. Version the icon URL so an older cached
-  watchtower icon is refreshed.
 - Allow free NICs whose links are down, with a warning; omit template bond
   MACs and use server admission rather than an extra VMI restriction.
 - Configure disk pools before VM uplinks. Retry transient status reads and
@@ -34,11 +31,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   preview, launch payload and the disabled option against the Flask fixture
   with mocked cluster APIs. Real app tests cover delegated credentials, pools
   before VM networking, failures, down NICs and agent status messages.
-
-### Changed
-- Replace dash separators in primary UI headings, dialogs, tooltips and
-  translated messages with simpler punctuation. Keep missing-value markers
-  and numeric ranges where they carry meaning.
 
 ## [1.88.1] - 2026-10-15 - Bare-metal joins act with the person's rights; strict translation check
 
