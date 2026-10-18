@@ -132,3 +132,48 @@ de classe 0300 y figure.
   de test avec API simulée.
 - Réel : harv1, en déployant une charge de conteneurs de test dans un
   namespace dédié, puis en la supprimant.
+
+## Suite décidée le 18/10/2026, après une première évaluation
+
+ju ne pouvait rien évaluer en lecture seule : aucun conteneur à créer, aucun
+GPU à réserver. Décisions :
+
+### 1.93.0 : section « Shared resources » et gestes des Containers
+
+- **Shared resources**, section de premier niveau du menu, après Containers.
+  Elle n'appartient ni aux VM ni aux conteneurs : les GPU d'un nœud servent
+  les deux (passthrough, vGPU, vGPU adossé à MIG pour les VM ; GPU entier
+  pour les conteneurs, vGPU à partir de Harvester 1.10). Entrées : **GPU**
+  (l'inventaire de 1.92.0, déplacé, vue de la flotte avec filtre par cluster),
+  **Bookings** (1.94.0), plus tard **Usage** (décompte, quotas).
+- L'onglet Advanced > GPU est retiré ; Advanced ne gardera que les gestes de
+  parité avec Harvester (activer un vGPU, régler le MIG) quand ils viendront.
+- **Gestes des Containers**, chacun une action suivie (ActionRun, dock,
+  Activity) et une commande de `bin/harvester-containers.py` (parité CLI) :
+  créer une charge (formulaire : nom, namespace, type Deployment / Job, image,
+  nombre de pods, commande, variables, GPU demandés, limites CPU et mémoire ;
+  ou par YAML), mettre à l'échelle, redémarrer (rollout restart), supprimer.
+  Refus dans les namespaces système ; écritures avec l'identité de la
+  personne ; contrôle à blanc du serveur avant d'écrire.
+
+### 1.94.0 : Bookings, version 1
+
+- Réserver une ou plusieurs unités (GPU entier, vGPU d'un type, instances MIG
+  d'un profil, GPU de conteneurs) sur un cluster, pour une personne ou un
+  groupe, sur un créneau (début, fin), avec une cible facultative (VM ou
+  charge de conteneurs) et une note.
+- Conflits refusés à la création (même unité, créneaux qui se chevauchent,
+  ou plus d'unités d'un type que le cluster n'en a). Calendrier par unité et
+  par semaine, « mes réservations », annuler.
+- Stockage SQLite de la console (comme les notes), sans écriture sur les
+  clusters : l'application réelle (attacher, quotas, arrêt en fin de créneau)
+  vient plus tard et n'est pas promise par la version 1.
+- Dans les formulaires de VM (GPU, vGPU) et de création de charge (GPU
+  demandés) : disponibilité, réservations en cours, et lien vers l'unité.
+
+### Banc : cluster de démonstration simulé avec des GPU
+
+Un cluster kwok (`tests/bench/kwok`) portant les CRD de pcidevices et des
+objets GPU d'exemple (GPU entiers, vGPU, MIG) et des nœuds qui annoncent
+`nvidia.com/gpu` : l'inventaire et la réservation s'évaluent dans la vraie
+interface sans matériel. Déclaré dans la console de dev seulement.
