@@ -4,6 +4,73 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.94.0] - 2026-10-18 - GPU bookings: reserve units on a time slot, conflicts refused
+
+### Added
+- Shared resources > Bookings, after GPU. Book GPU units of a cluster on a
+  time slot, for a person or a group: one specific whole GPU or vGPU, or a
+  number of vGPUs of a type, MIG instances of a profile, container GPUs of
+  a resource, or whole GPUs of a model. Optional target (VM or container
+  workload) and note.
+- A booking reserves the slot in the console. It is not yet enforced on the
+  cluster: nothing is written there. The view and the form say so.
+- Three views: Calendar (one row per type and model of each cluster, a
+  week, bars, a marker for now, previous and next week), My bookings, All
+  bookings. Cancel is confirmed in the page.
+- New booking form: cluster, type, what (with how many are free now),
+  count, holder (me, another person, a group), start and end, target,
+  note. The slot is checked while you type, and the form says why it would
+  be refused.
+- The GPU inventory shows on each unit whether it is booked now or within a
+  day, and a Book button that opens the form prefilled.
+- The container create form and the VM passthrough section show what is
+  free now, what is booked now, and whether you hold a booking, with a link
+  to Bookings. Read-only.
+- `bin/harvester-bookings.py list|check|create|cancel`, the same bookings on
+  the command line.
+- `GET /api/bookings`, `GET /api/bookings/options/<cluster>`,
+  `POST /api/bookings/check`, `POST /api/bookings` (202 with the action id,
+  409 with the reasons), `POST /api/bookings/<id>/cancel`.
+
+### Changed
+- Conflicts are refused at creation: the same unit on overlapping slots, or
+  more units of a type and model at one instant than the cluster has.
+  Back-to-back slots are allowed. A slot lasts 90 days at most.
+- Capacity comes from the GPU inventory read with the person's identity:
+  units not disabled, MIG instances created for the profile, allocatable
+  GPUs of nodes not cordoned. A specific unit counts in its model.
+- A viewer reads. An operator creates and cancels the bookings they created
+  or hold. An admin cancels anyone's. Create and cancel are tracked
+  actions.
+
+### Internal
+- `bin/lib/hv_bookings.py`: pure model (validation, capacity, sweep-line
+  conflicts, states, rights). `bin/lib/bookings_db.py`: `bookings.db` next
+  to `notes.db` (or `HARVESTER_OPS_BOOKINGS_DB`), WAL, conflicts checked
+  again inside the write transaction.
+- The console passes the inventory to the script in the request, so the
+  script needs no cluster access. Alone, it reads `--inventory` or the
+  cluster.
+- `_cli_action` takes `check_busy=False` for tools that write nothing on a
+  cluster, and hides `--db` from the shown command.
+
+### Tests
+- `test_bookings_model_194.py`: edges and back-to-back slots, the same
+  unit, capacity exceeded at one instant only, MIG profile capacity,
+  cancelled bookings ignored, invalid slots, the 90-day cap, states,
+  rights.
+- `test_bookings_cli_194.py`: create, list, check, cancel, refusals,
+  permissions, WAL and the check inside the write transaction.
+- `test_bookings_routes_194.py`: tracked actions, the real script run on a
+  temporary database, 409 with the reasons, roles, authentication and rate
+  limits.
+- `test_bookings_ui_194.py` and e2e `test_bookings_194.py`: menu, notice,
+  calendar bars, tables and in-page cancel, the form and its live check,
+  the GPU inventory badge and Book prefill, the container form hint.
+- Deliberate mutations, one per key rule, each caught by these tests.
+- Checked for real on the simulated GPU cluster `gpudemo`, on a temporary
+  database. Not checked on real GPU hardware.
+
 ## [1.93.0] - 2026-10-18 - Container workloads can be created, scaled, restarted and deleted; GPUs move to Shared resources
 
 ### Added

@@ -1230,7 +1230,7 @@ Its first entry, **GPU**, lists the GPUs of every declared cluster. The
 view does not follow the cluster chosen at the top: it shows the whole
 fleet, with a **Cluster** filter (all clusters by default) and a Cluster
 column. Since 1.93.0 it is no longer under Cluster > Advanced. It is
-read-only. A unit is what a future reservation will hand out:
+read-only. A unit is what a booking hands out (Bookings, 1.94.0):
 
 - **Whole GPU**: a PCI device of class `0300` (VGA) or `0302` (3D) from
   NVIDIA (`10de`) or AMD (`1002`), given to a VM in passthrough. An Intel
@@ -1277,6 +1277,100 @@ harvester/pcidevices), reproduced as test fixtures. They are **not
 verified on real vGPU or MIG hardware**: our benches have none. The real
 read was done on harv1 (Harvester 1.9.0, add-on on, every resource type
 present, one Intel integrated GPU): the view says "No GPU on this cluster".
+
+### GPU bookings (1.94.0)
+
+**Shared resources > Bookings** books GPU units of a cluster on a time
+slot, for a person or a group. **A booking reserves the slot in the
+console; it is not yet enforced on the cluster**: nothing is attached,
+no quota is set, nothing is stopped at the end of the slot. The view and
+the form say so.
+
+What can be booked:
+
+- one **specific unit** of the inventory: a whole GPU or a vGPU (one unit,
+  one slot);
+- a **number of units of a model** on the cluster: whole GPUs of a model,
+  vGPUs of a type (`NVIDIA H100-20C`), MIG instances of a profile
+  (`MIG 3g.40gb`), container GPUs of a resource (`nvidia.com/gpu`).
+
+A booking has a holder (you by default, another console account, or a
+group: a console role or a Rancher group name, free text), a start and an
+end (the end after the start, 90 days at most, not already over), an
+optional target (a VM or a container workload of the cluster) and a note.
+Its state is computed: **upcoming**, **active**, **ended**, or
+**cancelled**.
+
+**Conflicts are refused at creation**, with the reason:
+
+- the same unit booked on overlapping slots;
+- at some instant of the slot, more units of a type and model booked than
+  the cluster has. A booking of a specific unit counts in its model.
+
+Slots are half-open: a slot that ends at 13:00 and one that starts at 13:00
+do not overlap. The capacity comes from the GPU inventory of the cluster,
+read with your identity: the units that are not disabled; for MIG, the
+instances **created** for the profile (a possible instance that is not
+created cannot be handed out); for containers, the allocatable resource of
+the nodes that are not cordoned. "Free now" is the capacity minus the
+larger of the units in use and the units booked now. A MIG-backed vGPU and
+the MIG instance behind it are counted apart (known limit).
+
+Views:
+
+- **Calendar**: one row per type and model of each cluster that has a
+  booking that week, the week from Monday, booked slots as bars (stacked
+  when they overlap, yours outlined), a marker for now, previous and next
+  week.
+- **My bookings**: those you created or hold.
+- **All bookings**: every booking, with **Cancel** for those you may
+  cancel, confirmed in the page.
+
+**New booking** opens a form: cluster, type, what (any unit of a model, with
+how many are free now, or one specific unit), count, holder, start and end
+in your local time (default: in one hour, for four hours), target, note.
+The slot is checked while you type and the form says why it would be
+refused.
+
+Elsewhere:
+
+- **Shared resources > GPU** shows on each unit whether it is booked now or
+  within a day (holder and end), and a **Book** button that opens the form
+  prefilled (the unit for a GPU or vGPU, the profile or resource otherwise).
+- The container create form (container GPUs) and the VM settings
+  (passthrough section: GPUs, vGPUs, MIG) show what is free now, what is
+  booked now, whether you hold a booking, and a link to Bookings. These
+  hints are read-only.
+
+Rights: a viewer reads; an operator creates and cancels the bookings they
+created or hold; an admin cancels anyone's. Creating and cancelling are
+tracked actions (dock, Activity). A cancelled booking stays in the
+history.
+
+Storage: a SQLite database of the console, `bookings.db` next to
+`notes.db` (or `HARVESTER_OPS_BOOKINGS_DB`), in WAL mode. The console
+reads it; only the command line writes, and it checks the conflicts again
+inside its write transaction, so two bookings started at once cannot both
+pass.
+
+API: `GET /api/bookings` (`?cluster=`, `?scope=mine`),
+`GET /api/bookings/options/<cluster>`, `POST /api/bookings/check` (nothing
+written), `POST /api/bookings` (202 with the action id, 409 with the
+reasons), `POST /api/bookings/<id>/cancel`.
+
+Command line: `bin/harvester-bookings.py list|check|create|cancel`. The
+console reads the GPU inventory with your identity and passes it in the
+request (`inventory` in `--spec`), so the script does not need the
+cluster. On its own, the script takes `--inventory FILE` (the JSON of
+`harvester-gpus.py list --json`), or reads the cluster with
+`--kubeconfig`, or the declared cluster of the same name.
+
+**What is verified.** Checked for real on the simulated GPU cluster
+`gpudemo` (kwok bench, real-shaped pcidevices objects): capacities read
+from its inventory, a specific vGPU refused on an overlapping slot and
+accepted back to back, three `MIG 3g.40gb` refused (two created), a
+disabled vGPU refused, create and cancel as tracked actions. Bookings are
+not checked against real GPU hardware.
 
 ### Upgrading Harvester (1.69.0)
 

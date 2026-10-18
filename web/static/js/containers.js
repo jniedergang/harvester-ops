@@ -311,6 +311,7 @@ const Containers = (() => {
           ${field(tr('cw.create.gpuResource'), '<input name="gpu_resource" value="nvidia.com/gpu">', tr('cw.create.gpuResourceTip'))}
         </div>
         <p class="form-hint ct-gpu-hint" data-ct-gpu-hint></p>
+        <div class="form-hint bkg-hint" data-bkg-hint></div>
         <div class="ct-create-row">
           ${field(tr('cw.create.cpu'), '<input name="cpu" placeholder="500m">', tr('cw.create.cpuTip'))}
           ${field(tr('cw.create.memory'), '<input name="memory" value="256Mi">', tr('cw.create.memoryTip'))}
@@ -359,7 +360,10 @@ const Containers = (() => {
           root.querySelectorAll('[data-ct-pane]').forEach((p) => { p.hidden = p.dataset.ctPane !== b.dataset.ctMode; });
           root.querySelector('.of-msg').innerHTML = '';
         }));
-        f.cluster.addEventListener('change', () => gpuHint(root, f.cluster.value));
+        // v1.94.0 : GPU de conteneurs libres, réservations en cours (lecture seule)
+        const bookingHint = () => { if (window.Bookings) Bookings.hint(root.querySelector('[data-bkg-hint]'), f.cluster.value, ['node']); };
+        f.cluster.addEventListener('change', () => { gpuHint(root, f.cluster.value); bookingHint(); });
+        bookingHint();
         f.kind.addEventListener('change', () => {
           if (f.kind.value === 'Job' && Number(f.replicas.value) < 1) f.replicas.value = '1';
         });

@@ -139,7 +139,7 @@
         </div>
       </div>
       <!-- v1.93.0 : les ressources partagées par les VM et les conteneurs
-           (les GPU d'un nœud servent les deux) ; Bookings viendra ensuite -->
+           (les GPU d'un nœud servent les deux) ; Bookings depuis la v1.94.0 -->
       <div class="tab-group expanded" id="tab-group-shared">
         <a class="tab tab-group-head" data-group="shared" href="#gpus" data-i18n-title="tab.sharedTip" title="Resources that VMs and containers share across the clusters, such as GPUs">
           <span class="tab-icon" data-icon="placement"></span>
@@ -150,6 +150,11 @@
           <a class="tab tab-child" data-tab="gpus" href="#gpus" data-i18n-title="tab.gpusTip" title="GPU inventory of every declared cluster: whole GPUs, vGPUs, MIG instances and container GPUs, free or used">
             <span class="tab-icon" data-icon="gamepad"></span>
             <span class="sidebar-label" data-i18n="tab.gpus">GPU</span>
+          </a>
+          <!-- v1.94.0 : réserver des GPU sur un créneau (gardé par la console) -->
+          <a class="tab tab-child" data-tab="bookings" href="#bookings" data-i18n-title="tab.bookingsTip" title="Book GPUs, vGPUs, MIG instances or container GPUs on a time slot for a person or a group; kept by the console, not yet enforced on the cluster">
+            <span class="tab-icon" data-icon="timer"></span>
+            <span class="sidebar-label" data-i18n="tab.bookings">Bookings</span>
           </a>
         </div>
       </div>
@@ -792,6 +797,13 @@
       <div class="na-host" id="gpus-host"></div>
     </section>
 
+    <!-- BOOKINGS : v1.94.0, réservations de GPU (Shared resources) -->
+    <section id="tab-bookings" class="tab-content">
+      <h1 data-i18n="bkg.title">Bookings</h1>
+      <p class="hint" data-i18n="bkg.hint">Book GPU units of a cluster on a time slot, for a person or a group: a whole GPU or a vGPU, or a number of vGPUs of a type, MIG instances of a profile or container GPUs. Overlapping bookings of the same unit, or more units than the cluster has, are refused.</p>
+      <div class="na-host" id="bookings-host"></div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>
@@ -1252,6 +1264,7 @@
   <script src="/static/js/advanced.js"></script>
   <script src="/static/js/devices.js"></script>
   <script src="/static/js/gpus.js"></script>
+  <script src="/static/js/bookings.js"></script>
   <script src="/static/js/upgrade.js"></script>
   <script src="/static/js/monlog.js"></script>
   <script src="/static/js/vmimport.js"></script>

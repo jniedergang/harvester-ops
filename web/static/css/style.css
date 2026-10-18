@@ -5372,3 +5372,39 @@ td.fk-reason { max-width: 260px; }
 .ct-form [data-ct-pane][hidden] { display: none; }
 .ct-form [aria-invalid="true"] { border-color: var(--danger, #d33); outline-color: var(--danger, #d33); }
 .ct-gpu-hint:empty { display: none; }
+/* v1.94.0 : Shared resources > Bookings */
+.bkg-card .res-tools .bkg-new { margin-left: auto; }
+.bkg-notice { margin-bottom: 10px; }
+.bkg-views { margin: 0; }
+.bkg-table td.bkg-actions { white-space: nowrap; }
+.bkg-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.bkg-confirm .of-msg:empty { display: none; }
+.bkg-cal-nav { display: flex; align-items: center; gap: 6px; margin: 6px 0 10px; }
+.bkg-cal-nav .bkg-range { margin-left: 8px; }
+.bkg-cal { display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.bkg-row { display: grid; grid-template-columns: 220px 1fr; border-top: 1px solid var(--border); }
+.bkg-row:first-child { border-top: 0; }
+.bkg-row-head { background: var(--bg); font-size: 12px; }
+.bkg-label { padding: 6px 10px; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; border-right: 1px solid var(--border); }
+.bkg-track { position: relative; min-height: 32px; }
+.bkg-track-head { display: grid; grid-template-columns: repeat(7, 1fr); min-height: 0; }
+.bkg-dayname { padding: 4px 6px; text-align: center; border-left: 1px solid var(--border); }
+.bkg-dayname:first-child { border-left: 0; }
+.bkg-dayname.is-today { color: var(--accent); font-weight: 600; }
+.bkg-days { position: absolute; inset: 0; display: grid; grid-template-columns: repeat(7, 1fr); pointer-events: none; }
+.bkg-day { border-left: 1px solid var(--border); }
+.bkg-day:first-child { border-left: 0; }
+.bkg-day.is-today { background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.bkg-bar { position: absolute; height: 20px; border-radius: 4px; padding: 0 6px; font-size: 11.5px; line-height: 20px;
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: #fff; background: var(--accent); box-sizing: border-box; }
+.bkg-bar.bkg-upcoming { background: color-mix(in srgb, var(--accent) 70%, #555); }
+.bkg-bar.bkg-ended { background: #8a8f98; }
+.bkg-bar.is-mine { outline: 2px solid color-mix(in srgb, var(--accent) 40%, #fff); outline-offset: -2px; }
+.bkg-today { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--danger, #d33); z-index: 2; }
+.bkg-check:empty { display: none; }
+.bkg-why { margin: 4px 0 0 18px; padding: 0; }
+.bkg-hint:empty { display: none; }
+.bkg-hint-list { margin: 2px 0 4px 18px; padding: 0; }
+.bkg-hint-title { font-weight: 600; }
+.gpu-booking { white-space: nowrap; }
+.gpu-booking .bkg-badge { margin-left: 4px; }
