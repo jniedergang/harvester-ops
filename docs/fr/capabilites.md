@@ -1374,7 +1374,7 @@ clusters déclarés. La vue ne suit pas le cluster choisi en haut : elle montre
 toute la flotte, avec un filtre **Cluster** (tous par défaut) et une colonne
 Cluster. Depuis 1.93.0, elle n'est plus dans Cluster > Advanced. C'est en
 lecture seule. Une unité
-est ce qu'une future réservation donnera :
+est ce qu'une réservation donne (Bookings, 1.94.0) :
 
 - **GPU entier** : un périphérique PCI de classe `0300` (VGA) ou `0302` (3D),
   NVIDIA (`10de`) ou AMD (`1002`), donné à une VM en passthrough. Un GPU
@@ -1425,6 +1425,106 @@ vérifiés sur du vrai matériel vGPU ou MIG** : nos bancs n'en ont pas. La
 lecture réelle a été faite sur harv1 (Harvester 1.9.0, add-on activé, tous
 les types de ressource présents, un GPU intégré Intel) : la vue dit
 « Aucun GPU sur ce cluster ».
+
+### Réservations de GPU (1.94.0)
+
+**Shared resources > Bookings** réserve des unités GPU d'un cluster sur un
+créneau, pour une personne ou un groupe. **Une réservation retient le
+créneau dans la console ; elle n'est pas encore appliquée sur le
+cluster** : rien n'est attaché, aucun quota n'est posé, rien n'est arrêté
+en fin de créneau. La vue et le formulaire le disent.
+
+Ce qui se réserve :
+
+- une **unité précise** de l'inventaire : un GPU entier ou un vGPU (une
+  unité, un créneau) ;
+- un **nombre d'unités d'un modèle** sur le cluster : des GPU entiers d'un
+  modèle, des vGPU d'un type (`NVIDIA H100-20C`), des instances MIG d'un
+  profil (`MIG 3g.40gb`), des GPU de conteneurs d'une ressource
+  (`nvidia.com/gpu`).
+
+Une réservation a un titulaire (vous par défaut, un autre compte de la
+console, ou un groupe : un rôle de la console ou un nom de groupe Rancher,
+en texte libre), un début et une fin (la fin après le début, 90 jours au
+plus, pas déjà passée), une cible facultative (une VM ou une charge de
+conteneurs du cluster) et une note. Son état est calculé : **à venir**,
+**en cours**, **terminée** ou **annulée**.
+
+**Les conflits sont refusés à la création**, avec la raison :
+
+- la même unité réservée sur des créneaux qui se chevauchent ;
+- à un instant du créneau, plus d'unités d'un type et d'un modèle
+  réservées que le cluster n'en a. Une réservation d'une unité précise
+  compte dans son modèle.
+
+Les créneaux sont semi-ouverts : un créneau qui finit à 13 h et un autre
+qui commence à 13 h ne se chevauchent pas. La capacité vient de
+l'inventaire GPU du cluster, lu avec votre identité : les unités qui ne
+sont pas désactivées ; pour le MIG, les instances **créées** du profil
+(une instance possible mais pas créée ne se donne à personne) ; pour les
+conteneurs, la ressource allouable des nœuds non cordonnés. « Libres
+maintenant » est la capacité moins le plus grand des deux nombres : unités
+utilisées, unités réservées maintenant. Un vGPU adossé à MIG et l'instance
+MIG derrière lui sont comptés à part (limite connue).
+
+Vues :
+
+- **Calendrier** : une ligne par type et modèle de chaque cluster qui a une
+  réservation cette semaine, la semaine à partir du lundi, les créneaux en
+  barres (empilées quand elles se chevauchent, les vôtres soulignées), une
+  marque pour maintenant, semaine précédente et suivante.
+- **Mes réservations** : celles que vous avez créées ou dont vous êtes
+  titulaire.
+- **Toutes les réservations** : toutes, avec **Annuler** pour celles que
+  vous pouvez annuler, confirmé dans la page.
+
+**Nouvelle réservation** ouvre un formulaire : cluster, type, quoi
+(n'importe quelle unité d'un modèle, avec combien sont libres maintenant,
+ou une unité précise), nombre, titulaire, début et fin à votre heure locale
+(par défaut : dans une heure, pour quatre heures), cible, note. Le créneau
+est contrôlé pendant la saisie et le formulaire dit pourquoi il serait
+refusé.
+
+Ailleurs :
+
+- **Shared resources > GPU** dit sur chaque unité si elle est réservée
+  maintenant ou dans la journée (titulaire et fin), et un bouton **Book**
+  ouvre le formulaire prérempli (l'unité pour un GPU ou un vGPU, le profil
+  ou la ressource sinon).
+- Le formulaire de création de charge (GPU de conteneurs) et les réglages
+  d'une VM (section passthrough : GPU, vGPU, MIG) disent ce qui est libre
+  maintenant, ce qui est réservé maintenant, si vous tenez une réservation,
+  avec un lien vers Bookings. Ces indications sont en lecture seule.
+
+Droits : un lecteur lit ; un opérateur crée et annule les réservations
+qu'il a créées ou dont il est titulaire ; un admin annule celles de tout le
+monde. Créer et annuler sont des actions suivies (dock, Activité). Une
+réservation annulée reste dans l'historique.
+
+Stockage : une base SQLite de la console, `bookings.db` à côté de
+`notes.db` (ou `HARVESTER_OPS_BOOKINGS_DB`), en mode WAL. La console la
+lit ; seule la ligne de commande écrit, et elle refait le contrôle des
+conflits dans sa transaction d'écriture : deux réservations lancées en même
+temps ne peuvent pas passer toutes les deux.
+
+API : `GET /api/bookings` (`?cluster=`, `?scope=mine`),
+`GET /api/bookings/options/<cluster>`, `POST /api/bookings/check` (rien
+n'est écrit), `POST /api/bookings` (202 avec l'identifiant de l'action, 409
+avec les raisons), `POST /api/bookings/<id>/cancel`.
+
+Ligne de commande : `bin/harvester-bookings.py list|check|create|cancel`.
+La console lit l'inventaire GPU avec votre identité et le passe dans la
+demande (`inventory` de `--spec`) : le script n'a pas besoin du cluster.
+Seul, le script prend `--inventory FICHIER` (le JSON de
+`harvester-gpus.py list --json`), ou lit le cluster par `--kubeconfig`, ou
+le cluster déclaré du même nom.
+
+**Ce qui est vérifié.** Essayé pour de vrai sur le cluster GPU simulé
+`gpudemo` (banc kwok, objets pcidevices de forme réelle) : capacités lues
+dans son inventaire, un vGPU précis refusé sur un créneau qui chevauche et
+accepté bout à bout, trois `MIG 3g.40gb` refusées (deux créées), un vGPU
+désactivé refusé, création et annulation en actions suivies. Les
+réservations ne sont pas vérifiées sur du vrai matériel GPU.
 
 ### Mettre à jour Harvester (1.69.0)
 

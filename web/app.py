@@ -9138,6 +9138,217 @@ def api_gpus_all():
                     "units": units, "summary": _hgpu.summarize(units)})
 
 
+
+# -----------------------------------------------------------------------------
+# v1.94.0 : réservations de GPU (Bookings, version 1)
+#
+# Le registre est une base SQLite de la console (bookings.db, à côté de
+# notes.db, ou HARVESTER_OPS_BOOKINGS_DB). La console la LIT ; créer et
+# annuler passent par `bin/harvester-bookings.py` (parité CLI) en action
+# suivie. La capacité vient de l'inventaire GPU lu ICI avec l'identité de la
+# personne, et part dans la demande (`inventory`) : le script n'a pas besoin
+# du cluster. Il refait le contrôle des conflits dans sa transaction
+# d'écriture. Rien n'est écrit sur un cluster : une réservation retient le
+# créneau dans la console, elle n'est pas encore appliquée sur le cluster.
+# -----------------------------------------------------------------------------
+import bookings_db as _bkdb  # noqa: E402
+import hv_bookings as _hbk  # noqa: E402
+
+BOOKINGS_SCRIPT = "harvester-bookings.py"
+BOOKINGS_HISTORY_DAYS = 35          # le calendrier remonte de quelques semaines
+
+
+def _bookings_db_path():
+    env = os.environ.get("HARVESTER_OPS_BOOKINGS_DB")
+    return Path(env) if env else NOTES_DB.parent / "bookings.db"
+
+
+def _bookings_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _bookings_me():
+    return current_user() or "anonymous"
+
+
+def _bookings_read(cluster=None, since=None):
+    conn = _bkdb.connect(_bookings_db_path())
+    try:
+        return _bkdb.list_bookings(conn, cluster=cluster, since=since)
+    finally:
+        conn.close()
+
+
+def _booking_view(b, now, user, role):
+    st = _hbk.state(b, now)
+    return dict(b, state=st, mine=_hbk.is_mine(b, user),
+                can_cancel=_hbk.can_cancel(b, user, role) and st in ("upcoming", "active"))
+
+
+def _bookings_inventory(cluster):
+    """(unités GPU du cluster, None) ou (None, réponse d'erreur)."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    if _cluster_reachable(kc) is False:
+        body = _unreachable_payload(cluster, kc)
+        body["hint"] = "the GPU inventory of this cluster is needed to check the capacity"
+        return None, (jsonify(body), 503)
+    payload, status, denials = _gpus_collect(cluster, kc)
+    for d in denials:
+        _note_cluster_denial(d)
+    if status != 200:
+        return None, (jsonify({"error": "the GPU inventory of this cluster could not be read",
+                               "denied": payload.get("denied"), "detail": payload.get("detail"),
+                               "hint": "a booking needs the GPU inventory to check the capacity"}),
+                      403 if payload.get("denied") else 503)
+    return payload["units"], None
+
+
+def _booking_prepare(body):
+    """(réservation normalisée et résolue, unités, capacité, None) ou
+    (None, None, None, réponse d'erreur). Le titulaire par défaut est la
+    personne."""
+    if not isinstance(body, dict):
+        return None, None, None, (jsonify({"error": "a JSON object is expected"}), 400)
+    req = dict(body)
+    if not req.get("holder"):
+        req["holder"] = {"kind": "user", "name": _bookings_me()}
+    try:
+        booking = _hbk.normalize(req, _bookings_now())
+    except ValueError as e:
+        return None, None, None, (jsonify({"error": str(e)}), 400)
+    units, err = _bookings_inventory(booking["cluster"])
+    if err:
+        return None, None, None, err
+    try:
+        booking = _hbk.resolve(booking, units)
+    except ValueError as e:
+        return None, None, None, (jsonify({"error": str(e)}), 400)
+    return booking, units, _hbk.capacity(units, booking["type"], booking["model"]), None
+
+
+def _booking_conflicts(booking, cap):
+    existing = _bookings_read(cluster=booking["cluster"], since=booking["start"])
+    return [dict(r, message=_hbk.describe(r)) for r in _hbk.conflicts(booking, existing, cap)]
+
+
+@app.route("/api/bookings")
+@requires_auth
+def api_bookings_list():
+    """Les réservations (annulées et passées récentes comprises, pour le
+    calendrier), avec leur état, `mine` et `can_cancel` pour la personne.
+    `?cluster=` filtre, `?scope=mine` ne garde que les siennes."""
+    from datetime import timedelta
+    now = _bookings_now()
+    user, role = _bookings_me(), current_role()
+    rows = [_booking_view(b, now, user, role)
+            for b in _bookings_read(cluster=request.args.get("cluster") or None,
+                                    since=now - timedelta(days=BOOKINGS_HISTORY_DAYS))]
+    if request.args.get("scope") == "mine":
+        rows = [b for b in rows if b["mine"]]
+    return jsonify({"bookings": rows, "user": user, "role": role, "now": _hbk.iso(now),
+                    "enforced": False, "max_days": _hbk.MAX_DAYS})
+
+
+@app.route("/api/bookings/options/<cluster>")
+@requires_auth
+def api_bookings_options(cluster):
+    """Ce qui se réserve sur un cluster : une entrée par type et modèle avec
+    sa capacité, ce qui est utilisé et réservé maintenant, les unités
+    réservables une à une, et les réservations en cours de la personne."""
+    units, err = _bookings_inventory(cluster)
+    if err:
+        return err
+    now = _bookings_now()
+    user = _bookings_me()
+    live = [b for b in _bookings_read(cluster=cluster, since=now) if not b.get("cancelled_at")]
+    t = _hbk.iso(now)
+    out = []
+    for e in _hbk.catalog(units):
+        booked = _hbk.booked_at(live, e["type"], e["model"], now)
+        pool = [b for b in live if b["type"] == e["type"] and b["model"] == e["model"]]
+        mine_now = [b["id"] for b in pool if b["start"] <= t < b["end"] and _hbk.is_mine(b, user)]
+        for u in e["units"]:
+            u["booked_now"] = any(b.get("unit") == u["id"] and b["start"] <= t < b["end"] for b in pool)
+        out.append(dict(e, booked_now=booked, free_now=max(0, e["capacity"] - max(e["used"], booked)),
+                        mine_now=mine_now))
+    return jsonify({"cluster": cluster, "catalog": out, "now": t, "enforced": False})
+
+
+@app.route("/api/bookings/check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bookings_check():
+    """Le contrôle à blanc du formulaire : la réservation passerait-elle ?
+    Rien n'est écrit."""
+    booking, _units, cap, err = _booking_prepare(request.get_json(silent=True))
+    if err:
+        return err
+    reasons = _booking_conflicts(booking, cap)
+    return jsonify({"ok": not reasons, "conflicts": reasons, "capacity": cap, "booking": booking})
+
+
+@app.route("/api/bookings", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_bookings_create():
+    """Réserve un créneau : refus tout de suite (400, 409 avec les raisons),
+    sinon action suivie qui lance harvester-bookings.py create."""
+    booking, units, cap, err = _booking_prepare(request.get_json(silent=True))
+    if err:
+        return err
+    reasons = _booking_conflicts(booking, cap)
+    if reasons:
+        return jsonify({"error": "conflict", "conflicts": reasons, "capacity": cap,
+                        "hint": "; ".join(r["message"] for r in reasons)}), 409
+    script = BIN_DIR / BOOKINGS_SCRIPT
+    if not script.is_file():
+        return jsonify({"error": f"{BOOKINGS_SCRIPT} not deployed"}), 503
+    bid = _bkdb.new_id()
+    cmd = [sys.executable, str(script), "create", "--db", str(_bookings_db_path()),
+           "--as", _bookings_me(), "--id", bid]
+    run, err = _cli_action(booking["cluster"], f"bookings:create:{bid}", cmd, "harvester-bookings",
+                           spec=dict(booking, inventory=units), check_busy=False)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "id": bid, "enforced": False}), 202
+
+
+@app.route("/api/bookings/<bid>/cancel", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_bookings_cancel(bid):
+    """Annule une réservation : la sienne (opérateur), ou celle de tout le
+    monde (admin). Action suivie qui lance harvester-bookings.py cancel."""
+    if not _hbk.ID_RE.match(bid):
+        return jsonify({"error": "invalid booking id"}), 400
+    conn = _bkdb.connect(_bookings_db_path())
+    try:
+        b = _bkdb.get(conn, bid)
+    finally:
+        conn.close()
+    if not b:
+        return jsonify({"error": f"no booking {bid}"}), 404
+    user, role = _bookings_me(), current_role()
+    if not _hbk.can_cancel(b, user, role):
+        return jsonify({"error": "forbidden", "role": role,
+                        "hint": "an operator cancels only the bookings they created or hold; an admin cancels any"}), 403
+    st = _hbk.state(b, _bookings_now())
+    if st in ("cancelled", "ended"):
+        return jsonify({"error": f"booking {bid} is already {st}"}), 409
+    script = BIN_DIR / BOOKINGS_SCRIPT
+    if not script.is_file():
+        return jsonify({"error": f"{BOOKINGS_SCRIPT} not deployed"}), 503
+    cmd = [sys.executable, str(script), "cancel", "--db", str(_bookings_db_path()),
+           "--id", bid, "--as", user, "--role", "admin" if role == "admin" else "operator"]
+    run, err = _cli_action(b["cluster"], f"bookings:cancel:{bid}", cmd, "harvester-bookings", check_busy=False)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "id": bid}), 202
+
+
 # -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
@@ -13897,11 +14108,13 @@ def api_capi_cluster_preview(cluster):
     return jsonify({"yaml": proc.stdout})
 
 
-def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None):
+def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
-    montrée ne porte ni chemin ni kubeconfig."""
-    busy = _transfer_busy((cluster,), label)
+    montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
+    qui n'écrit rien sur le cluster (réservations, v1.94.0) : l'arrêt d'un
+    cluster en cours ne le bloque pas."""
+    busy = _transfer_busy((cluster,), label) if check_busy else None
     if busy:
         return None, _busy_response(busy)
     wd = _capi_work_dir()
@@ -13914,7 +14127,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None)
         cmd = cmd + ["--spec", spec_file]
     run_id = uuid.uuid4().hex[:12]
     public = [tool] + [a for a in cmd[2:] if not a.startswith("/")
-                       and a not in ("--kubeconfig",)]
+                       and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = (current_cluster_identity() or {}).get("user")
     with ACTIONS_LOCK:

@@ -171,6 +171,24 @@ GPU à réserver. Décisions :
 - Dans les formulaires de VM (GPU, vGPU) et de création de charge (GPU
   demandés) : disponibilité, réservations en cours, et lien vers l'unité.
 
+Choix de la réalisation (livrée en 1.94.0) :
+
+- Modèle pur `bin/lib/hv_bookings.py` (validation, capacité, conflits par
+  balayage, états, droits), registre `bin/lib/bookings_db.py`
+  (`bookings.db` à côté de `notes.db`, WAL), ligne de commande
+  `bin/harvester-bookings.py` qui seule écrit.
+- La console lit l'inventaire GPU avec l'identité de la personne et le passe
+  au script dans la demande ; le script refait le contrôle des conflits dans
+  sa transaction d'écriture (`BEGIN IMMEDIATE`). Seul, il lit le cluster.
+- Unité précise pour les GPU entiers et les vGPU ; MIG et GPU de conteneurs
+  par nombre. Une unité précise compte dans la capacité de son modèle.
+- Capacité MIG = instances CRÉÉES du profil (pas le maximum possible : on ne
+  donne pas une instance qui n'existe pas). Unités désactivées et nœuds
+  cordonnés hors capacité.
+- Créneaux semi-ouverts, 90 jours au plus, pas déjà passés.
+- Limite connue : un vGPU adossé à MIG et son instance MIG sont comptés à
+  part.
+
 ### Banc : cluster de démonstration simulé avec des GPU
 
 Un cluster kwok (`tests/bench/kwok`) portant les CRD de pcidevices et des

@@ -54,6 +54,9 @@ const App = (() => {
     // v1.93.0 : Shared resources > GPU, l'inventaire de la flotte
     if (name === 'gpus') { if (window.Gpus) Gpus.start($('#gpus-host')); }
     else if (window.Gpus) Gpus.stop();
+    // v1.94.0 : Shared resources > Bookings
+    if (name === 'bookings') { if (window.Bookings) Bookings.start($('#bookings-host')); }
+    else if (window.Bookings) Bookings.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -266,6 +269,7 @@ const App = (() => {
     if (active === 'containers' && window.Containers) jobs.push(Containers.current.load());
     if (active === 'allcontainers' && window.Containers) jobs.push(Containers.all.load());
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
+    if (active === 'bookings' && window.Bookings) jobs.push(Bookings.load());
     if (active === 'overview') {
       const mode = savedOverviewMode();
       if (mode !== 'metrics') {

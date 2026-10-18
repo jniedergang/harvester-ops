@@ -1812,6 +1812,7 @@ const VMEdit = (() => {
       </div>
       <h3>${esc(tr('vm.edit.passthrough', 'PCI / GPU passthrough'))}</h3>
       <p class="form-hint">${esc(tr('vm.edit.passthroughHint', 'The picker lists the PCI devices Harvester discovered, as address · node · driver. Only a device claimed in Harvester (driver vfio-pci) can be used; harvester-ops never claims one for you. Verified on a test cluster: a network card and an SR-IOV virtual function reached the guest.'))}</p>
+      <div class="form-hint bkg-hint" data-bkg-hint></div>
       <div class="vm-edit-cards" data-cards="hostdev">
         ${TFForm.render(HOSTDEV_SCHEMA, cluster, { dev: hostDevs }, { hideHeader: true })}
       </div>
@@ -2190,6 +2191,8 @@ const VMEdit = (() => {
     if (sectionId === 'firmware') {
       const devEditor = sectionEl.querySelector('[data-cards="hostdev"] .tf-form');
       if (devEditor) TFForm.wire(devEditor, HOSTDEV_SCHEMA, cluster);
+      // v1.94.0 : GPU, vGPU et MIG libres, réservations en cours (lecture seule)
+      if (window.Bookings) Bookings.hint(sectionEl.querySelector('[data-bkg-hint]'), cluster, ['gpu', 'vgpu', 'mig']);
     }
 
     if (sectionId === 'disks' || sectionId === 'network') {

@@ -9,7 +9,9 @@
  * cluster choisi en haut, avec un filtre par cluster (tous par défaut). Une
  * carte par type (total, utilisées, libres), puis le tableau filtrable par
  * cluster, nœud, type, état ; le consommateur ouvre la VM, ou la charge dans
- * la vue Containers.
+ * la vue Containers. v1.94.0 : chaque unité dit si elle est réservée
+ * maintenant ou bientôt, et son bouton « Book » ouvre le formulaire de
+ * réservation prérempli.
  */
 const Gpus = (() => {
   const tr = (k, p) => (window.i18n ? i18n.t(k, p) : k);
@@ -75,13 +77,17 @@ const Gpus = (() => {
     if (!cur) return;
     const c = cur;
     let d = null;
+    // v1.94.0 : les réservations, pour les badges de chaque unité
+    const bk = window.Bookings ? Bookings.list(true) : Promise.resolve(null);
     try {
       const r = await fetch('/api/gpus-all');
       d = await r.json().catch(() => null);
       if (d && !r.ok && !d.error) d.error = `HTTP ${r.status}`;
     } catch { d = null; }
+    const b = await bk;
     if (c !== cur) return;
     c.data = d;
+    c.bookings = b;
     render();
   }
 
@@ -241,9 +247,11 @@ const Gpus = (() => {
     }
     if (!rows.length) { body.innerHTML = `<p class="form-hint gpu-empty">${esc(tr('gpu.noMatch'))}</p>`; return; }
     const th = (text) => `<th>${esc(text)}</th>`;
+    const bookings = (cur.bookings && cur.bookings.bookings) || [];
+    const canBook = !cur.bookings || cur.bookings.role === 'operator' || cur.bookings.role === 'admin';
     body.innerHTML = `<table class="data-table dev-table gpu-table"><thead><tr>
         ${th(tr('gpu.col.cluster'))}${th(tr('gpu.col.node'))}${th(tr('gpu.col.type'))}${th(tr('gpu.col.unit'))}${th(tr('gpu.col.model'))}
-        ${th(tr('gpu.col.parent'))}${th(tr('gpu.col.state'))}${th(tr('gpu.col.used'))}${th(tr('gpu.col.consumer'))}</tr></thead><tbody>
+        ${th(tr('gpu.col.parent'))}${th(tr('gpu.col.state'))}${th(tr('gpu.col.used'))}${th(tr('gpu.col.consumer'))}${th(tr('gpu.col.booking'))}</tr></thead><tbody>
       ${rows.map(u => `<tr data-unit="${esc(u.cluster)}|${esc(u.id)}" data-type="${esc(u.type)}">
         <td>${esc(u.cluster)}</td><td>${esc(u.node || '–')}</td>
         <td><span class="tip" data-tip="${esc(TYPE_TIP[u.type] ? TYPE_TIP[u.type]() : '')}">${esc(TYPE_LABEL[u.type] ? TYPE_LABEL[u.type]() : u.type)}</span></td>
@@ -252,8 +260,19 @@ const Gpus = (() => {
         <td>${u.parent ? `<code class="res-key">${esc(u.parent)}</code>` : '–'}</td>
         <td>${stateHtml(u)}</td>
         <td class="tip" data-tip="${esc(tr('gpu.t.used', { used: u.used, total: u.total }))}">${esc(u.used)}/${esc(u.total)}</td>
-        <td>${(u.consumers || []).length ? u.consumers.map(consumerHtml).join(' ') : '–'}</td></tr>`).join('')}
+        <td>${(u.consumers || []).length ? u.consumers.map(consumerHtml).join(' ') : '–'}</td>
+        <td class="gpu-booking">${bookingHtml(u, bookings, canBook)}</td></tr>`).join('')}
       </tbody></table>`;
+  }
+
+  /** v1.94.0 : réservée maintenant ou bientôt (badge), et le bouton Réserver
+   *  qui ouvre le formulaire prérempli. Une unité désactivée ne se réserve pas. */
+  function bookingHtml(u, bookings, canBook) {
+    const b = window.Bookings ? Bookings.badges(u, bookings) : '';
+    if (u.state === 'disabled' || !window.Bookings) return b || '–';
+    const btn = `<button type="button" class="btn btn-sm btn-secondary tip" data-gpu="book" data-cluster="${esc(u.cluster)}" data-id="${esc(u.id)}"
+        data-tip="${esc(canBook ? tr('gpu.t.book') : tr('bkg.viewerTip'))}"${canBook ? '' : ' disabled'}>${icon('timer', 11)} ${esc(tr('gpu.book'))}</button>`;
+    return `${btn}${b}`;
   }
 
   function onClick(e) {
@@ -261,6 +280,11 @@ const Gpus = (() => {
     if (!b || !cur || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
     const act = b.dataset.gpu;
     if (act === 'refresh') return load();
+    if (act === 'book') {
+      const u = ((cur.data && cur.data.units) || []).find(x => x.cluster === b.dataset.cluster && x.id === b.dataset.id);
+      if (u && window.Bookings) Bookings.open(Bookings.prefillFor(u));
+      return;
+    }
     if (act === 'open-addons' && window.Sections) {
       // Add-ons porte sur le cluster choisi en haut : on y passe d'abord
       const sel = document.getElementById('cluster-select');
