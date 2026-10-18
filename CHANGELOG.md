@@ -18,8 +18,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (node, state, restarts, age). Its menu shows the YAML, read-only, and the
   logs of a pod (500 lines at most, container of your choice).
 - System namespaces are hidden (`kube-*`, `cattle-*`, `harvester-*`,
-  `longhorn-system`, `fleet-*`, `cdi`, `local`), as are the pods of the VMs
-  and of CDI imports. One shared list, `SYSTEM_NAMESPACES`, in
+  `longhorn-system`, `fleet-*`, `cluster-fleet-*`, `*-system`, `kubeovn-*`,
+  Rancher's `user-?????`, `cdi`, `local`), as are the pods of the VMs and of
+  CDI imports. `*-system` hides the Rancher Turtles and Cluster API
+  controllers seen on a real cluster. One shared list, `SYSTEM_NAMESPACES`, in
   `bin/lib/hv_containers.py`.
 - Filters and sort as in All clusters VMs: text, cluster, namespace, type,
   state. A banner says the feature is experimental before Harvester 1.9.1
@@ -45,8 +47,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refuses them.
 - e2e `test_containers_191.py`: menu place, filters, sort, unfolding, logs,
   YAML, a refusal said.
-- Read-only check on harv1 (Harvester 1.9.0). The test with a workload
-  deployed for the purpose is left to the maintainer.
+- Checked for real on harv1 (Harvester 1.9.0): a Deployment of two
+  replicas, a Job and a lone pod deployed in a test namespace appear in both
+  views and in the command line, with their states (Running, Completed), the
+  pod logs are read, the logs of a system namespace are refused, then the
+  namespace was deleted.
 
 ## [1.90.0] - 2026-10-16 - VM uplinks chosen per host when a bare-metal node joins
 

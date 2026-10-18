@@ -241,7 +241,9 @@ clusters déclarés dans un tableau avec une colonne **Cluster**.
 - **Ce qui est listé** : Deployments, StatefulSets, DaemonSets, Jobs,
   CronJobs et pods seuls, lus en une passe par cluster. **Les namespaces
   système sont masqués** : `kube-*`, `cattle-*`, `harvester-*`,
-  `longhorn-system`, `fleet-*`, `cdi`, `local` (`default` est montré). Les
+  `longhorn-system`, `fleet-*`, `cluster-fleet-*`, `*-system` (contrôleurs
+  de Rancher Turtles et de Cluster API), `kubeovn-*`, les `user-?????` de
+  Rancher, `cdi`, `local` (`default` est montré). Les
   pods des VM (`kubevirt.io=virt-launcher`) et des imports CDI sont écartés.
   Un pod est rangé sous sa charge (pod, ReplicaSet, Deployment ; pod, Job,
   CronJob) ; un pod seul est une charge à lui.

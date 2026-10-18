@@ -99,7 +99,12 @@ def lists(*objs):
     ("harvester-system", True), ("harvester-public", True), ("longhorn-system", True),
     ("fleet-local", True), ("fleet-default", True), ("cdi", True), ("local", True),
     ("default", False), ("apps", False), ("longhorn", False), ("my-kube-app", False),
-    ("cdi-imports", False), ("caphv-system", False), ("", False), (None, False),
+    ("cdi-imports", False), ("", False), (None, False),
+    # vus sur harv1 (Harvester 1.9.0, Turtles, fournisseurs Cluster API)
+    ("caphv-system", True), ("caaph-system", True), ("rke2-bootstrap-system", True),
+    ("rke2-control-plane-system", True), ("cluster-fleet-local-local-1a3d67d0a899", True),
+    ("kubeovn-owner-namespace", True), ("user-2fhwx", True),
+    ("user-team", False), ("system", False), ("my-system-app", False),
 ])
 def test_system_namespaces(ns, system):
     assert hc.is_system_namespace(ns) is system
@@ -107,7 +112,8 @@ def test_system_namespaces(ns, system):
 
 def test_the_shared_list_is_the_one_of_the_spec():
     assert hc.SYSTEM_NAMESPACES == ("kube-*", "cattle-*", "harvester-*", "longhorn-system",
-                                    "fleet-*", "cdi", "local")
+                                    "fleet-*", "cluster-fleet-*", "*-system", "kubeovn-*",
+                                    "user-?????", "cdi", "local")
 
 
 # -- pods écartés --------------------------------------------------------------

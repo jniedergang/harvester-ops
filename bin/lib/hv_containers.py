@@ -25,8 +25,12 @@ from fnmatch import fnmatchcase
 
 # Namespaces masqués : ceux de Kubernetes, Rancher, Harvester, Longhorn, Fleet
 # et CDI. Une seule liste, partagée par la console et la ligne de commande.
+# `*-system` : les contrôleurs posés par Rancher Turtles et les fournisseurs
+# Cluster API (caphv-system, rke2-bootstrap-system...), vus sur harv1 ;
+# `user-?????` : les namespaces de comptes que Rancher crée (user-2fhwx).
 SYSTEM_NAMESPACES = ("kube-*", "cattle-*", "harvester-*", "longhorn-system",
-                     "fleet-*", "cdi", "local")
+                     "fleet-*", "cluster-fleet-*", "*-system", "kubeovn-*",
+                     "user-?????", "cdi", "local")
 
 # Les types lus, dans l'ordre d'affichage (ressource kubectl, type Kubernetes).
 WORKLOAD_RESOURCES = (

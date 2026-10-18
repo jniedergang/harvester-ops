@@ -220,7 +220,9 @@ declared cluster in one table with a **Cluster** column.
 - **What is listed**: Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
   and lone pods, read in one pass per cluster. **System namespaces are
   hidden**: `kube-*`, `cattle-*`, `harvester-*`, `longhorn-system`,
-  `fleet-*`, `cdi`, `local` (`default` is shown). The pods of the VMs
+  `fleet-*`, `cluster-fleet-*`, `*-system` (Rancher Turtles and Cluster API
+  controllers), `kubeovn-*`, Rancher's `user-?????`, `cdi`, `local`
+  (`default` is shown). The pods of the VMs
   (`kubevirt.io=virt-launcher`) and of CDI imports are left out. A pod is
   shown under its workload (pod, ReplicaSet, Deployment; pod, Job,
   CronJob); a lone pod is a workload of its own.
