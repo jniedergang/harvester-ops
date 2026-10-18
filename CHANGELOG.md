@@ -4,6 +4,50 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.92.0] - 2026-10-18 - GPU inventory of one cluster or of the whole fleet, read-only
+
+### Added
+- A GPU tab in Cluster > Advanced, next to PCI Devices and USB Devices. It
+  lists what a future GPU reservation will hand out. A switch shows this
+  cluster or all clusters.
+- Four unit types. Whole GPUs: PCI devices of class 0300 or 0302 from NVIDIA
+  or AMD, the virtual functions of an SR-IOV GPU left out. vGPUs, with their
+  type and parent GPU. MIG instances, one row per GPU, with created and
+  possible instances per profile and the sync state. Container GPUs: the
+  `nvidia.com/*` and `amd.com/gpu` resources of nodes marked
+  `harvesterhci.io/gpu-baremetal-workloads=true`.
+- Each unit is free, used or disabled. A tooltip says why a whole GPU is
+  disabled: passthrough off, split into vGPUs, partitioned with MIG, or
+  given to containers.
+- The consumer is a VM or a pod, in one shape for both. A VM opens its
+  settings. A pod opens All clusters containers, filtered on it. Pods of
+  system namespaces count too, marked.
+- One card per type with total, used and free. Filters by cluster, node,
+  type, state and text.
+- Empty states speak: no GPU on this cluster, add-on not enabled, vGPU or
+  MIG not available. A missing resource type is never an error. A cluster
+  that is off or refuses the read is said.
+- `GET /api/gpus/<cluster>` and `GET /api/gpus-all`, read with your
+  identity. `bin/harvester-gpus.py list [--cluster NAME | --kubeconfig
+  FILE] [--json]` gives the same reading.
+
+### Tests
+- `test_gpu_model_192.py`: GPU class and vendor, each unit type, parent
+  links, used and free, disabled vGPU, MIG out of sync, absent resource
+  types, several GPUs on several nodes, a VM with two vGPUs, a pod with two
+  GPUs, incomplete objects.
+- `test_gpu_routes_192.py`: both routes, add-on off, absent types, partial
+  and total refusals, errors without the kubeconfig path, no write route.
+- `test_gpu_cli_192.py`: reading, cluster states, table, exit codes.
+- e2e `test_gpus_192.py`: tab place, tooltips, cards, filters, scope
+  switch, empty states, links to the VM and the pod.
+- vGPU, MIG and container GPU units are verified against the Harvester
+  object shapes from harvester/pcidevices, as test fixtures. They are not
+  verified on real vGPU or MIG hardware: our benches have none.
+- The real read on harv1 (Harvester 1.9.0) found the add-on on, every
+  resource type present and no NVIDIA or AMD GPU. Its Intel integrated GPU
+  is not counted.
+
 ## [1.91.0] - 2026-10-18 - Container workloads shown next to the VMs, read-only
 
 ### Added

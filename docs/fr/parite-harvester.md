@@ -2,7 +2,7 @@
 
 État au 2026-09-30, console **v1.80.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
 
-Sur 136 fonctions de l'interface de Harvester : **133 faites**, **2 partielles**, **1 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
+Sur 136 fonctions de l'interface de Harvester : **133 faites**, **3 partielles**, **0 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
 
 Statuts : Fait, Partiel (ce qui manque est dit), Manquant (version prévue), Console seulement (ce que Harvester n'a pas), Hors périmètre.
 
@@ -214,7 +214,7 @@ Menu Harvester : *Advanced*
 | Classes de stockage (Longhorn v1, chiffrement, topologies, LVM, par défaut, supprimer) | Partiel | 1.74 | LVM vérifié en réel en 1.74 (add-on expérimental, disque de réserve) ; Longhorn v2 proposé mais pas vérifié (absent des bancs) |
 | Périphériques PCI | Fait | 1.68 | activer ou désactiver le passthrough, par sélection ; groupe IOMMU et VMs qui s'en servent dits |
 | SR-IOV réseau (nombre de VF) | Fait | 1.68 | carte igb émulée sur le banc |
-| GPU SR-IOV, vGPU, configurations MIG | Manquant |  | non livré : aucun GPU compatible sous Harvester sur les bancs, rien ne peut y être essayé en réel |
+| GPU SR-IOV, vGPU, configurations MIG | Partiel | 1.92 | lecture seule : onglet GPU (GPU entiers, vGPU, instances MIG, GPU des conteneurs, libres ou utilisés). Vérifié sur les formes des objets de Harvester, pas sur du matériel vGPU ou MIG (aucun sur les bancs). Activer un vGPU ou configurer MIG : non livré |
 | Périphériques USB (passthrough) | Fait | 1.68 |  |
 | Add-ons : activer, désactiver, configurer | Fait | 1.57 |  |
 | Secrets (Opaque, TLS, Basic, Registry, SSH, chiffrement : créer, nouvelles valeurs, supprimer) | Fait | 1.64 |  |

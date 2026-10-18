@@ -8898,6 +8898,132 @@ def api_container_pod_logs(cluster, namespace, oname):
 
 
 # -----------------------------------------------------------------------------
+# v1.92.0 : inventaire des GPU (lecture seule), d'un cluster ou de tous
+# -----------------------------------------------------------------------------
+import hv_devices as _hdev  # noqa: E402
+import hv_gpu as _hgpu  # noqa: E402
+
+# « la CRD n'existe pas sur ce cluster » : non disponible, pas une erreur
+_ABSENT_MARKERS = ("doesn't have a resource type", "could not find the requested resource")
+
+
+def _gpus_collect(cluster, kc):
+    """L'inventaire GPU d'un cluster, sans contexte de requête (appelable
+    depuis un fil de travail). Chaque objet est lu à part, en parallèle ; une
+    CRD absente (add-on coupé, vGPU ou MIG non installés) est dite
+    « non disponible », un refus de la RBAC est dit dans `denials`. Rend
+    (corps, statut, sorties refusées)."""
+    from concurrent.futures import ThreadPoolExecutor
+    optional = {k for _res, k in _hgpu.DEVICE_RESOURCES} | {"addon"}
+    reads = {k: ["get", res] for res, k in _hgpu.DEVICE_RESOURCES}
+    reads.update({"addon": ["get", "addons.harvesterhci.io", "-n", _hdev.ADDON[0]],
+                  "nodes": ["get", "nodes"], "pods": ["get", "pods", "-A"],
+                  "vms": ["get", "virtualmachines.kubevirt.io", "-A"],
+                  "vmis": ["get", "virtualmachineinstances.kubevirt.io", "-A"]})
+
+    def read(item):
+        key, args = item
+        try:
+            r = _kubectl_run(["kubectl", "--kubeconfig", kc, *args, "-o", "json"],
+                             capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired as e:
+            return key, None, _safe_proc_error(e)
+        if r.returncode != 0:
+            return key, None, (r.stderr or "").strip() or f"exit code {r.returncode}"
+        try:
+            data = r.data if getattr(r, "data", None) is not None else json.loads(r.stdout)
+        except (json.JSONDecodeError, TypeError) as e:
+            return key, None, _safe_proc_error(e)
+        return key, data, None
+
+    with ThreadPoolExecutor(max_workers=len(reads)) as pool:
+        results = list(pool.map(read, list(reads.items())))
+    lists, absent, denials, others = {}, set(), [], []
+    for key, data, err in results:
+        if err is None:
+            lists[key] = [it for it in (data or {}).get("items") or [] if isinstance(it, dict)]
+            continue
+        err = err.replace(kc, "<kubeconfig>")      # jamais le chemin du kubeconfig
+        low = err.lower()
+        if key in optional and any(m in low for m in _ABSENT_MARKERS):
+            absent.add(key)
+        elif any(m in low for m in _DENIAL_MARKERS):
+            denials.append(err)
+        else:
+            others.append(err)
+    if others or not lists:
+        # rien de lu, ou un objet illisible pour une autre raison que la RBAC :
+        # rien de partiel qui passerait pour l'inventaire complet
+        return {"error": "kubectl failed", "denied": not others,
+                "detail": (others or denials or [""])[0][:300]}, 500, denials
+    addon = _hdev.addon_enabled(lists.get("addon"))
+    inv = _hgpu.build(lists, cluster=cluster, absent=absent, addon=addon)
+    return dict(inv, cluster=cluster, addon=addon, denials=[d[:300] for d in denials]), 200, denials
+
+
+@app.route("/api/gpus/<cluster>")
+@requires_auth
+@shared_read()
+def api_gpus_list(cluster):
+    """L'inventaire GPU du cluster : GPU entiers, vGPU, instances MIG et
+    ressources GPU des nœuds, avec leur état et leur consommateur."""
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    payload, status, denials = _gpus_collect(cluster, kc)
+    for d in denials:
+        _note_cluster_denial(d)
+    return jsonify(payload), status
+
+
+@app.route("/api/gpus-all")
+@requires_auth
+@shared_read()
+def api_gpus_all():
+    """L'inventaire GPU de tous les clusters déclarés, lu en parallèle avec
+    l'identité de la personne, comme /api/containers-all. Un cluster éteint,
+    injoignable, qui refuse la lecture ou sans l'add-on des périphériques
+    est dit dans `clusters`."""
+    cfg = load_config_ro()
+    todo = [(c.get("name"), _kubectl_for_cluster(c.get("name")))
+            for c in cfg.get("clusters", []) if c.get("name")]
+
+    def one(item):
+        name, kc = item
+        if not kc:
+            return {"cluster": name, "state": "unknown"}, []
+        if _cluster_reachable(kc) is False:
+            return {"cluster": name, "state": "unreachable"}, []
+        try:
+            payload, status, _denials = _gpus_collect(name, kc)
+        except Exception as e:  # un cluster ne doit pas faire tomber la vue
+            return {"cluster": name, "state": "error", "error": _safe_proc_error(e)}, []
+        if status != 200:
+            return {"cluster": name, "state": "denied" if payload.get("denied") else "error",
+                    "error": payload.get("detail") or payload.get("error")}, []
+        units = payload["units"]
+        info = {"cluster": name, "state": "ok" if units or payload["addon"] else "no-addon",
+                "count": len(units), "addon": payload["addon"], "available": payload["available"]}
+        if payload.get("denials"):
+            info["denials"] = payload["denials"]
+        return info, units
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(todo), 16))) as pool:
+        results = list(pool.map(one, todo))
+    clusters, units = [], []
+    for info, part in results:
+        clusters.append(info)
+        units.extend(part)
+    order = {t: i for i, t in enumerate(_hgpu.TYPES)}
+    units.sort(key=lambda u: (u["cluster"], order[u["type"]], u["node"], u["address"], u["name"]))
+    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]),
+                    "units": units, "summary": _hgpu.summarize(units)})
+
+
+# -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
 CONFIG_LOCK = threading.Lock()

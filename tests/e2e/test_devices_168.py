@@ -66,7 +66,7 @@ def tab(page, kind, rows):
 def test_the_device_tabs_sit_in_advanced(ui):
     page, _, _ = ui
     assert page.locator("#tab-advanced [data-section-tab]").evaluate_all("els => els.map(e => e.dataset.sectionTab)") \
-        == ["settings", "pci", "usb", "sriov", "support"]
+        == ["settings", "pci", "usb", "gpu", "sriov", "support"]
 
 
 def test_pci_rows_say_their_state_and_enable_one(ui):

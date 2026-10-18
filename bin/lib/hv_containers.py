@@ -100,11 +100,12 @@ def _pod_template(kind, obj):
     return ((spec.get("template") or {}).get("spec") or {})
 
 
-def gpu_count(pod_spec):
-    """Somme des GPU demandés par les conteneurs d'un pod (`nvidia.com/*`,
-    `amd.com/gpu`). Une ressource étendue peut n'être écrite qu'en limite :
-    Kubernetes en fait alors la demande, on la lit donc à défaut."""
-    total = 0
+def gpu_requests(pod_spec):
+    """{ressource GPU: nombre} demandés par les conteneurs d'un pod
+    (`nvidia.com/*`, `amd.com/gpu`). Une ressource étendue peut n'être écrite
+    qu'en limite : Kubernetes en fait alors la demande, on la lit donc à
+    défaut. Une valeur illisible est ignorée."""
+    out = {}
     for c in (pod_spec or {}).get("containers") or []:
         res = (c or {}).get("resources") or {}
         req = res.get("requests") or {}
@@ -114,10 +115,15 @@ def gpu_count(pod_spec):
                 continue
             val = req.get(key, lim.get(key))
             try:
-                total += int(str(val))
+                out[key] = out.get(key, 0) + int(str(val))
             except (TypeError, ValueError):
                 continue
-    return total
+    return out
+
+
+def gpu_count(pod_spec):
+    """Somme des GPU demandés par les conteneurs d'un pod (`gpu_requests`)."""
+    return sum(gpu_requests(pod_spec).values())
 
 
 def images(pod_spec):

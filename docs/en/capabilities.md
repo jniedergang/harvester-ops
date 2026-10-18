@@ -1176,6 +1176,59 @@ given back to its driver after; two virtual functions created on the igb,
 one passed then given back, SR-IOV refused off while it was taken, then
 disabled; the tablet passed to a VM on another host and given back.
 
+### GPU inventory (1.92.0)
+
+**Advanced > GPU**, next to PCI Devices and USB Devices, lists the GPUs of a
+cluster or of every declared cluster. It is read-only. A unit is what a
+future reservation will hand out:
+
+- **Whole GPU**: a PCI device of class `0300` (VGA) or `0302` (3D) from
+  NVIDIA (`10de`) or AMD (`1002`), given to a VM in passthrough. An Intel
+  integrated GPU is not counted. The virtual functions of an SR-IOV GPU are
+  not counted as whole GPUs.
+- **vGPU**: a `VGPUDevice`, with its vGPU type (`NVIDIA A2-4Q`) and its
+  parent GPU (the `harvesterhci.io/parentSRIOVGPUDevice` label, or the
+  parent address and the node).
+- **MIG instances**: one row per GPU with a `MigConfiguration`. It shows
+  the instances created per profile, how many more are possible, and the
+  sync state (`synced`, `out-of-sync` with Harvester's message, `disabled`).
+  An instance is used through a MIG-backed vGPU: the used instances of a
+  GPU are its used vGPUs.
+- **Container GPUs**: the `nvidia.com/*` and `amd.com/gpu` resources of a
+  node marked `harvesterhci.io/gpu-baremetal-workloads=true`. The resource
+  names of passthrough devices and vGPUs, which nodes also announce for
+  KubeVirt, are left out.
+
+Each unit has a state: **free**, **used** or **disabled**. A whole GPU is
+disabled when its passthrough is off, or when it is split into vGPUs,
+partitioned with MIG or given to containers; the tooltip says which. The
+consumer is a VM (its spec and the allocation annotation Harvester writes
+when it starts) or a pod (its GPU requests). A VM opens its settings; a pod
+opens All clusters containers, filtered on it. Pods of system namespaces
+count too, marked, without a link (the Containers view hides them).
+
+On top, one card per type: total, used, free. A disabled unit counts in the
+total, not in the free ones. Filters: cluster (all clusters scope), node,
+type, state, text. The cards follow the cluster and node filters.
+
+Nothing is left silent. Without the `pcidevices-controller` add-on, the
+view says so and links to Add-ons; container GPUs stay listed. A missing
+vGPU or MIG resource type is said as "not available", never an error. A
+cluster with no GPU says "No GPU on this cluster". In the all clusters
+scope, a cluster that is off, refuses the read or has no add-on is said.
+
+API: `GET /api/gpus/<cluster>`, `GET /api/gpus-all`, read with your
+identity. Command line:
+`bin/harvester-gpus.py list [--cluster NAME | --kubeconfig FILE] [--json]`.
+
+**What is verified, and what is not.** The vGPU, MIG and container GPU
+cases are verified against the Harvester object shapes (the
+`devices.harvesterhci.io/v1beta1` resources and controllers of
+harvester/pcidevices), reproduced as test fixtures. They are **not
+verified on real vGPU or MIG hardware**: our benches have none. The real
+read was done on harv1 (Harvester 1.9.0, add-on on, every resource type
+present, one Intel integrated GPU): the view says "No GPU on this cluster".
+
 ### Upgrading Harvester (1.69.0)
 
 **Upgrade**, in the Overview header (and on the `server-version` setting, as

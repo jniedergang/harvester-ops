@@ -440,6 +440,8 @@
           <!-- v1.68.0 : les périphériques de Harvester -->
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="pci" data-i18n-title="section.pciTip" title="PCI devices of every host: enable or disable their passthrough to VMs"><span class="tab-icon" data-icon="plug"></span> <span data-i18n="section.pci">PCI Devices</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="usb" data-i18n-title="section.usbTip" title="USB devices of every host: enable or disable their passthrough to VMs"><span class="tab-icon" data-icon="hotplug"></span> <span data-i18n="section.usb">USB Devices</span></button>
+          <!-- v1.92.0 : l'inventaire des GPU, d'un cluster ou de tous -->
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="gpu" data-i18n-title="section.gpuTip" title="GPU inventory: whole GPUs, vGPUs, MIG instances and container GPU resources, free or used, on this cluster or all clusters"><span class="tab-icon" data-icon="compute"></span> <span data-i18n="section.gpu">GPU</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="sriov" data-i18n-title="section.sriovTip" title="SR-IOV network cards: the number of virtual functions they expose"><span class="tab-icon" data-icon="switch"></span> <span data-i18n="section.sriov">SR-IOV Networks</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="support" data-i18n-title="section.supportTip" title="Harvester support bundles and kubeconfigs limited to a role, with a token that expires"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="section.support">Support</span></button>
         </div>
@@ -447,6 +449,7 @@
       <div class="section-pane" data-pane="settings" hidden><div class="na-host" data-adv="settings"></div></div>
       <div class="section-pane" data-pane="pci" hidden><div class="na-host" data-adv="pci"></div></div>
       <div class="section-pane" data-pane="usb" hidden><div class="na-host" data-adv="usb"></div></div>
+      <div class="section-pane" data-pane="gpu" hidden><div class="na-host" data-adv="gpu"></div></div>
       <div class="section-pane" data-pane="sriov" hidden><div class="na-host" data-adv="sriov"></div></div>
       <div class="section-pane" data-pane="support" hidden><div class="na-host" data-adv="support"></div></div>
     </section>
@@ -1229,6 +1232,7 @@
   <script src="/static/js/ovnextra.js"></script>
   <script src="/static/js/advanced.js"></script>
   <script src="/static/js/devices.js"></script>
+  <script src="/static/js/gpus.js"></script>
   <script src="/static/js/upgrade.js"></script>
   <script src="/static/js/monlog.js"></script>
   <script src="/static/js/vmimport.js"></script>

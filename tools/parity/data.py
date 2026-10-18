@@ -178,7 +178,9 @@ r("part", "1.74", "Classes de stockage (Longhorn v1, chiffrement, topologies, LV
   "LVM verified for real in 1.74 (experimental add-on, spare disk); Longhorn v2 offered but not verified (absent from the benches)")
 r("ok", "1.68", "Périphériques PCI", "PCI devices", "activer ou désactiver le passthrough, par sélection ; groupe IOMMU et VMs qui s'en servent dits", "enable or disable passthrough, by selection; IOMMU group and the VMs using them said")
 r("ok", "1.68", "SR-IOV réseau (nombre de VF)", "SR-IOV network devices (VF count)", "carte igb émulée sur le banc", "emulated igb card on the bench")
-r("todo", "", "GPU SR-IOV, vGPU, configurations MIG", "SR-IOV GPU, vGPU, MIG configurations", "non livré : aucun GPU compatible sous Harvester sur les bancs, rien ne peut y être essayé en réel", "not shipped: no compatible GPU under Harvester on the benches, nothing can be tried for real")
+r("part", "1.92", "GPU SR-IOV, vGPU, configurations MIG", "SR-IOV GPU, vGPU, MIG configurations",
+  "lecture seule : onglet GPU (GPU entiers, vGPU, instances MIG, GPU des conteneurs, libres ou utilisés). Vérifié sur les formes des objets de Harvester, pas sur du matériel vGPU ou MIG (aucun sur les bancs). Activer un vGPU ou configurer MIG : non livré",
+  "read-only: GPU tab (whole GPUs, vGPUs, MIG instances, container GPUs, free or used). Verified against Harvester's object shapes, not on vGPU or MIG hardware (none on the benches). Enabling a vGPU or configuring MIG: not shipped")
 r("ok", "1.68", "Périphériques USB (passthrough)", "USB devices (passthrough)")
 r("ok", "1.57", "Add-ons : activer, désactiver, configurer", "Add-ons: enable, disable, configure")
 r("ok", "1.64", "Secrets (Opaque, TLS, Basic, Registry, SSH, chiffrement : créer, nouvelles valeurs, supprimer)", "Secrets (Opaque, TLS, Basic, Registry, SSH, encryption: create, new values, delete)")

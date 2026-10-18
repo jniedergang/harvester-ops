@@ -2,7 +2,7 @@
 
 Status on 2026-09-30, console **v1.80.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
-Of 136 functions of the Harvester UI: **133 done**, **2 partial**, **1 missing**; 1 out of scope. A missing function shows the version it is planned for.
+Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
 Statuses: Done, Partial (what is missing is said), Missing (planned version), Console only (what Harvester does not have), Out of scope.
 
@@ -214,7 +214,7 @@ Harvester menu: *Advanced*
 | Storage classes (Longhorn v1, encryption, topologies, LVM, default, delete) | Partial | 1.74 | LVM verified for real in 1.74 (experimental add-on, spare disk); Longhorn v2 offered but not verified (absent from the benches) |
 | PCI devices | Done | 1.68 | enable or disable passthrough, by selection; IOMMU group and the VMs using them said |
 | SR-IOV network devices (VF count) | Done | 1.68 | emulated igb card on the bench |
-| SR-IOV GPU, vGPU, MIG configurations | Missing |  | not shipped: no compatible GPU under Harvester on the benches, nothing can be tried for real |
+| SR-IOV GPU, vGPU, MIG configurations | Partial | 1.92 | read-only: GPU tab (whole GPUs, vGPUs, MIG instances, container GPUs, free or used). Verified against Harvester's object shapes, not on vGPU or MIG hardware (none on the benches). Enabling a vGPU or configuring MIG: not shipped |
 | USB devices (passthrough) | Done | 1.68 |  |
 | Add-ons: enable, disable, configure | Done | 1.57 |  |
 | Secrets (Opaque, TLS, Basic, Registry, SSH, encryption: create, new values, delete) | Done | 1.64 |  |

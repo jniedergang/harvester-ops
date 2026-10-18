@@ -497,7 +497,17 @@ const Containers = (() => {
       timer = null;
     }
 
-    return { start, stop, load, _visible: visible };
+    /** v1.92.0 : la vue s'ouvre sur une charge (lien depuis l'inventaire GPU) :
+     *  filtres remis à zéro, texte et cluster posés, appliqués au prochain start. */
+    function focus(p) {
+      loadPrefs();
+      Object.assign(prefs, { state: '', kind: '', ns: p.namespace || '', text: p.text || '',
+                             clusters: ALL && p.cluster ? [p.cluster] : [] });
+      savePrefs();
+      host = null;
+    }
+
+    return { start, stop, load, focus, _visible: visible };
   }
 
   return { current: makeView('cluster'), all: makeView('all'), logsWindow, _age: age };
