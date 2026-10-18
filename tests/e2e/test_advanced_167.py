@@ -90,7 +90,7 @@ def test_the_advanced_section_sits_under_cluster(ui):
     link = page.locator('.tab[data-tab="advanced"]')
     assert link.count() == 1 and link.get_attribute("data-i18n-title") == "tab.advancedTip"
     assert page.locator("#tab-advanced [data-section-tab]").evaluate_all("els => els.map(e => e.dataset.sectionTab)") \
-        == ["settings", "pci", "usb", "gpu", "sriov", "support"]            # v1.68.0 : les périphériques
+        == ["settings", "pci", "usb", "sriov", "support"]       # v1.68.0 : les périphériques ; v1.93.0 : GPU parti dans Shared resources
 
 
 def test_settings_show_their_state_and_filter_by_group(ui):

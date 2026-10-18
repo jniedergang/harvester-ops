@@ -235,9 +235,9 @@ deux entrées, juste sous Virtual machines : **Conteneurs du cluster choisi**
 (le cluster choisi en haut) et **Conteneurs de tous les clusters**, tous les
 clusters déclarés dans un tableau avec une colonne **Cluster**.
 
-- **En lecture seule pour l'instant.** Créer, modifier, mettre à l'échelle,
-  redémarrer ou supprimer une charge viendra ensuite, chaque geste comme
-  action suivie et par un script de `bin/`.
+- **Gestes (1.93.0)** : créer, mettre à l'échelle, redémarrer et supprimer,
+  chacun une action suivie (dock, Activité) exécutée par
+  `bin/harvester-containers.py`. Voir plus bas.
 - **Ce qui est listé** : Deployments, StatefulSets, DaemonSets, Jobs,
   CronJobs et pods seuls, lus en une passe par cluster. **Les namespaces
   système sont masqués** : `kube-*`, `cattle-*`, `harvester-*`,
@@ -277,6 +277,54 @@ Vérifié en lecture sur harv1 (Harvester 1.9.0) : 118 pods lus, namespaces
 système et pods de VM écartés, les quatre contrôleurs Cluster API de la
 console listés avec leur pod. L'essai avec une charge déployée pour
 l'occasion revient au mainteneur.
+
+#### Gestes sur les charges de conteneurs (1.93.0)
+
+- **Créer** : le bouton **Créer** des deux vues ouvre une fenêtre à deux
+  onglets. **Formulaire** : cluster, nom, namespace, type (Deployment ou
+  Job), image, nombre de pods (un Job les lance tous en parallèle),
+  commande, variables (une ligne `NOM=valeur` chacune), GPU demandés et leur
+  ressource (`nvidia.com/gpu` par défaut), limite CPU, limite mémoire.
+  **YAML** : coller le manifeste d'un Deployment, StatefulSet, DaemonSet,
+  Job, CronJob ou Pod. Une case crée le namespace s'il manque ; sans elle,
+  un namespace absent est refusé. Le champ GPU dit combien de GPU de
+  conteneurs sont libres sur le cluster choisi.
+- **Chaque conteneur a une limite mémoire.** 256Mi si aucune n'est donnée,
+  avec des demandes de mémoire et de CPU assorties (100m de CPU par
+  défaut). Un manifeste collé garde ce qu'il dit et ne reçoit que ce qui
+  manque.
+- **Menu de la ligne** : **Mettre à l'échelle** (Deployment, StatefulSet,
+  ReplicaSet ; 0 arrête sans supprimer), **Redémarrer** (redémarrage
+  progressif d'un Deployment, StatefulSet ou DaemonSet : l'annotation
+  `kubectl.kubernetes.io/restartedAt`, comme `kubectl rollout restart`),
+  **Supprimer** (tout type, après une confirmation dans la page). Une entrée
+  qu'un type ne prend pas est grisée et dit pourquoi.
+- **Sûreté** : les namespaces système sont refusés, par la console puis par
+  le script. Le formulaire est contrôlé avant tout envoi. Le serveur
+  contrôle chaque écriture d'abord (`--dry-run=server` : webhooks, quotas,
+  droits) ; rien n'est écrit si ce contrôle échoue, et un namespace créé
+  pour une charge refusée est retiré. Les écritures se font avec votre
+  identité.
+- À la fin de l'action, la liste est relue.
+
+API : `POST /api/containers/<cluster>/create` (`{spec: {...}}` ou
+`{yaml: "..."}`, `create_namespace`), `POST
+/api/containers/<cluster>/<namespace>/<type>/<nom>/scale` (`{replicas}`),
+`POST .../restart`, `DELETE /api/containers/<cluster>/<namespace>/<type>/<nom>`.
+Chacune répond `202 {action_id}` tout de suite. En ligne de commande :
+`bin/harvester-containers.py create|scale|restart|delete`, avec `--cluster`
+ou `--kubeconfig`, `--dry-run` pour le seul contrôle du serveur, et
+`create --file MANIFESTE` ou les options du formulaire (`--name`,
+`--namespace`, `--kind`, `--image`, `--replicas`, `--command`, `--env`,
+`--gpus`, `--gpu-resource`, `--cpu`, `--memory`, `--create-namespace`).
+
+Vérifié en réel sur harv1 (Harvester 1.9.0), dans un namespace d'essai créé
+pour l'occasion puis supprimé : un Deployment et un Job créés en ligne de
+commande, un Deployment et un pod créés par les routes de la console, mise
+à l'échelle à 2 puis 0, redémarrage progressif (nouveaux pods, anciens
+partis), une création refusée par le contrôle du serveur (nom déjà pris),
+une mise à l'échelle dans `kube-system` refusée, puis toutes les charges
+supprimées.
 
 ### Le menu d'actions d'une VM, comme dans Harvester (1.60.0)
 
@@ -1316,10 +1364,16 @@ fonctions virtuelles créées sur l'igb, l'une passée puis rendue, le SR-IOV
 refusé à l'arrêt tant qu'elle était prise, puis désactivé ; la tablette
 passée à une VM d'un autre hôte puis rendue.
 
-### Inventaire des GPU (1.92.0)
+### Inventaire des GPU (1.92.0, Shared resources depuis 1.93.0)
 
-**Advanced > GPU**, à côté de PCI Devices et USB Devices, liste les GPU d'un
-cluster ou de tous les clusters déclarés. C'est en lecture seule. Une unité
+**Shared resources** est un groupe de premier niveau du menu, juste après
+Containers : ce que VM et conteneurs se partagent. Les GPU d'un nœud servent
+les deux (passthrough, vGPU, vGPU adossé à MIG pour les VM ; GPU entiers
+pour les conteneurs). Sa première entrée, **GPU**, liste les GPU de tous les
+clusters déclarés. La vue ne suit pas le cluster choisi en haut : elle montre
+toute la flotte, avec un filtre **Cluster** (tous par défaut) et une colonne
+Cluster. Depuis 1.93.0, elle n'est plus dans Cluster > Advanced. C'est en
+lecture seule. Une unité
 est ce qu'une future réservation donnera :
 
 - **GPU entier** : un périphérique PCI de classe `0300` (VGA) ou `0302` (3D),
@@ -1349,16 +1403,15 @@ Les pods des namespaces système comptent aussi, marqués, sans lien (la vue
 Containers les masque).
 
 En tête, une carte par type : total, utilisées, libres. Une unité
-désactivée compte dans le total, pas dans les libres. Filtres : cluster
-(portée tous les clusters), nœud, type, état, texte. Les cartes suivent les
+désactivée compte dans le total, pas dans les libres. Filtres : cluster,
+nœud, type, état, texte. Les cartes suivent les
 filtres de cluster et de nœud.
 
 Rien n'est muet. Sans l'add-on `pcidevices-controller`, la vue le dit et
 renvoie vers Add-ons ; les GPU des conteneurs restent listés. Un type de
 ressource vGPU ou MIG absent est dit « non disponible », jamais une erreur.
-Un cluster sans GPU dit « Aucun GPU sur ce cluster ». En portée tous les
-clusters, un cluster éteint, qui refuse la lecture ou sans l'add-on est
-dit.
+Un cluster sans GPU dit « Aucun GPU sur ce cluster » quand il est le filtre
+choisi. Un cluster éteint, qui refuse la lecture ou sans l'add-on est dit.
 
 API : `GET /api/gpus/<cluster>`, `GET /api/gpus-all`, lues avec votre
 identité. Ligne de commande :

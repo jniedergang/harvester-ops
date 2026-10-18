@@ -102,7 +102,7 @@ def test_banner_clusters_and_count(view):
     banner = page.locator("#all-containers-host .ct-banner")
     expect(banner).to_contain_text("experimental before Harvester 1.9.1")
     expect(banner).to_contain_text("System namespaces are hidden")
-    expect(banner).to_contain_text("read-only")
+    expect(banner).not_to_contain_text("read-only")                # v1.93.0 : les gestes sont là
     expect(page.locator("#all-containers-host [data-ct-cluster]")).to_have_count(5)
     expect(page.locator('#all-containers-host [data-ct-cluster="charlie"] .badge')).to_have_text("unreachable")
     expect(page.locator('#all-containers-host [data-ct-cluster="delta"] .badge')).to_have_text("denied")

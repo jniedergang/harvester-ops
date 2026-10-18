@@ -8897,6 +8897,121 @@ def api_container_pod_logs(cluster, namespace, oname):
                     "container": container or None, "tail": tail, "logs": r.stdout or ""})
 
 
+# v1.93.0 : les gestes des Containers. La console ne les refait pas : elle
+# lance `bin/harvester-containers.py` (parité CLI) en action suivie, avec le
+# kubeconfig préparé ICI, dans le thread de la requête (identité de la
+# personne). La demande est validée avant de partir (400 tout de suite) ; le
+# script la revalide, refuse les namespaces système et fait contrôler chaque
+# écriture à blanc par le serveur avant d'écrire.
+CONTAINERS_SCRIPT = "harvester-containers.py"
+CONTAINER_YAML_MAX = 256 * 1024
+
+
+def _containers_base(cluster, sub):
+    script = BIN_DIR / CONTAINERS_SCRIPT
+    if not script.is_file():
+        return None, (jsonify({"error": f"{CONTAINERS_SCRIPT} not deployed"}), 503)
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return None, (jsonify({"error": f"unknown cluster: {cluster}"}), 404)
+    return [sys.executable, str(script), sub, "--kubeconfig", kc], None
+
+
+def _containers_spec(body):
+    """(spec pour le script, namespace, nom, type) depuis le corps : un
+    formulaire (`spec`) ou un manifeste collé (`yaml`). ValueError sinon."""
+    text = body.get("yaml")
+    if text not in (None, ""):
+        if not isinstance(text, str) or len(text) > CONTAINER_YAML_MAX:
+            raise ValueError("the manifest must be YAML text of 256 KiB at most")
+        try:
+            docs = [d for d in yaml.safe_load_all(text) if d is not None]
+        except yaml.YAMLError as e:
+            raise ValueError(f"unreadable YAML: {str(e).splitlines()[0][:200]}") from None
+        if len(docs) != 1:
+            raise ValueError("one workload at a time: the YAML must hold exactly one object")
+        ns = body.get("namespace") or None
+        manifest = _hct.check_manifest(docs[0], ns)
+        meta = manifest["metadata"]
+        return {"manifest": manifest}, meta["namespace"], meta["name"], manifest["kind"]
+    spec = body.get("spec")
+    if not isinstance(spec, dict):
+        raise ValueError("a spec (form) or a yaml (manifest) is expected")
+    norm = _hct.normalize_spec(spec)
+    _hct.build_manifest(norm)                # même chemin que le script
+    return norm, norm["namespace"], norm["name"], norm["kind"]
+
+
+@app.route("/api/containers/<cluster>/create", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_containers_create(cluster):
+    """Crée une charge (Deployment ou Job du formulaire, ou le manifeste
+    collé) : action suivie, réponse immédiate."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    try:
+        spec, ns, name, kind = _containers_spec(body)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    cmd, err = _containers_base(cluster, "create")
+    if err:
+        return err
+    if body.get("create_namespace"):
+        cmd.append("--create-namespace")
+    run, err = _cli_action(cluster, f"containers:create:{ns}/{name}", cmd,
+                           "harvester-containers", spec=spec)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "namespace": ns, "name": name, "kind": kind}), 202
+
+
+def _containers_gesture(cluster, namespace, kind, oname, verb, allowed, extra=()):
+    try:
+        _ns, k, _n = _hct.check_target(namespace, kind, oname, allowed)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    cmd, err = _containers_base(cluster, verb)
+    if err:
+        return err
+    cmd += ["--namespace", namespace, "--kind", k, "--name", oname, *extra]
+    run, err = _cli_action(cluster, f"containers:{verb}:{namespace}/{oname}", cmd,
+                           "harvester-containers")
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "namespace": namespace, "name": oname, "kind": k}), 202
+
+
+@app.route("/api/containers/<cluster>/<namespace>/<kind>/<oname>/scale", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_containers_scale(cluster, namespace, kind, oname):
+    """Met une charge à `replicas` pods (Deployment, StatefulSet, ReplicaSet)."""
+    body = request.get_json(silent=True) or {}
+    rep = body.get("replicas")
+    if isinstance(rep, bool) or not isinstance(rep, int) or not 0 <= rep <= _hct.MAX_REPLICAS:
+        return jsonify({"error": f"replicas must be a whole number from 0 to {_hct.MAX_REPLICAS}"}), 400
+    return _containers_gesture(cluster, namespace, kind, oname, "scale", _hct.SCALABLE_KINDS,
+                               ("--replicas", str(rep)))
+
+
+@app.route("/api/containers/<cluster>/<namespace>/<kind>/<oname>/restart", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_containers_restart(cluster, namespace, kind, oname):
+    """Redémarrage progressif (Deployment, StatefulSet, DaemonSet)."""
+    return _containers_gesture(cluster, namespace, kind, oname, "restart", _hct.RESTARTABLE_KINDS)
+
+
+@app.route("/api/containers/<cluster>/<namespace>/<kind>/<oname>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_containers_delete(cluster, namespace, kind, oname):
+    """Supprime une charge (ses pods suivent)."""
+    return _containers_gesture(cluster, namespace, kind, oname, "delete", _hct.KINDS)
+
+
 # -----------------------------------------------------------------------------
 # v1.92.0 : inventaire des GPU (lecture seule), d'un cluster ou de tous
 # -----------------------------------------------------------------------------

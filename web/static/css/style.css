@@ -5365,3 +5365,10 @@ td.fk-reason { max-width: 260px; }
 .ct-pods-row > td { padding: 4px 8px 10px 36px; background: var(--bg); }
 .ct-pods { width: 100%; font-size: 12.5px; }
 .ct-pods td.num, .ct-pods th.num { font-variant-numeric: tabular-nums; }
+/* v1.93.0 : gestes des Containers */
+.avm-toolbar .ct-create-btn { margin-left: auto; }
+.ct-create-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.ct-form [data-ct-pane] { display: flex; flex-direction: column; gap: 10px; }
+.ct-form [data-ct-pane][hidden] { display: none; }
+.ct-form [aria-invalid="true"] { border-color: var(--danger, #d33); outline-color: var(--danger, #d33); }
+.ct-gpu-hint:empty { display: none; }
