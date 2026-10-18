@@ -168,6 +168,11 @@ MANIFEST = [
         "eject": "disc-3",
         "hotplug": "hard-drive-download",
     }),
+    ("Conteneurs", {
+        "container": "container",
+        "containers": "boxes",
+        "logs": "scroll-text",
+    }),
 ]
 
 ICONS = {name: lucide for _, group in MANIFEST for name, lucide in group.items()}

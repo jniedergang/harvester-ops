@@ -87,8 +87,10 @@ def test_who_reads_and_writes_what():
     for kind in ("secret", "setting", "addon"):             # leur YAML porte des valeurs
         assert not hy.allowed(kind, "operator") and hy.allowed(kind, "admin")
     assert hy.allowed("storageclass", "operator") and not hy.allowed("storageclass", "operator", write=True)
+    for kind in hy.CONTAINER_KINDS:                         # v1.91.0 : lecture seule, même en admin
+        assert hy.allowed(kind, "viewer") and not hy.allowed(kind, "admin", write=True)
     with pytest.raises(ValueError):
-        hy.spec_of("pod")
+        hy.spec_of("widget")
 
 
 # -- l'outil ------------------------------------------------------------------------
@@ -121,6 +123,15 @@ def test_the_tool_checks_then_replaces(tmp_path, monkeypatch, capsys):
     assert verbs == [("replace", True), ("replace", False)]
     assert kube.calls[1][1]["metadata"]["resourceVersion"] == "42"      # garde contre l'écrasement
     assert "STEP_EVENT|replace|done|default/web saved (version 43)" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", ["deployment", "pod", "cronjob"])
+def test_the_tool_refuses_to_write_a_container_workload(tmp_path, monkeypatch, kind):
+    """v1.91.0 : les charges de conteneurs sont en lecture seule, en ligne de
+    commande comme dans la console."""
+    obj = {"apiVersion": "apps/v1", "kind": kind.capitalize(), "metadata": {"name": "web", "namespace": "apps"}}
+    code, kube = run_tool(tmp_path, monkeypatch, obj, "--kind", kind, "--namespace", "apps", "--name", "web")
+    assert code != hres.EXIT_OK and kube.calls == []
 
 
 def test_the_tool_refuses_another_target(tmp_path, monkeypatch, capsys):
@@ -219,7 +230,7 @@ def test_reading_and_downloading_a_vm(world):
         r = c.get("/api/yaml/harv1/vm/web?namespace=default&download=1", headers=auth("eye"))
         assert r.status_code == 200 and 'filename="web.yaml"' in r.headers["Content-Disposition"]
         assert c.get("/api/yaml/harv1/vm/nope?namespace=default", headers=auth("eye")).status_code == 404
-        assert c.get("/api/yaml/harv1/pod/web?namespace=default", headers=auth("eye")).status_code == 400
+        assert c.get("/api/yaml/harv1/widget/web?namespace=default", headers=auth("eye")).status_code == 400
         assert c.get("/api/yaml/harv1/vm/web", headers=auth("eye")).status_code == 400      # sans namespace
 
 

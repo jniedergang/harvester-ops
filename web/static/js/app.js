@@ -46,6 +46,11 @@ const App = (() => {
     // v1.85.0 : toutes les VMs, même cycle (rafraîchie seulement à l'écran)
     if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host')); }
     else if (window.AllVMs) AllVMs.stop();
+    // v1.91.0 : les charges de conteneurs, même cycle que les VMs
+    if (name === 'containers') { if (window.Containers) Containers.current.start($('#containers-host')); }
+    else if (window.Containers) Containers.current.stop();
+    if (name === 'allcontainers') { if (window.Containers) Containers.all.start($('#all-containers-host')); }
+    else if (window.Containers) Containers.all.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -255,6 +260,8 @@ const App = (() => {
       jobs.push(ForkliftGlobal.start($('#forklift-global-host')));
     }
     if (active === 'allvms' && window.AllVMs) jobs.push(AllVMs.load());
+    if (active === 'containers' && window.Containers) jobs.push(Containers.current.load());
+    if (active === 'allcontainers' && window.Containers) jobs.push(Containers.all.load());
     if (active === 'overview') {
       const mode = savedOverviewMode();
       if (mode !== 'metrics') {

@@ -659,6 +659,8 @@ def _load_doc(kube, path):
 def cmd_yaml(args):
     kube = kube_from(args)
     s = hy.spec_of(args.kind)
+    if s["write"] == hy.NOBODY:
+        raise ValueError(f"a {s['kind']} is read-only in this version")
     obj = _load_doc(kube, args.file)
     creating = bool(args.create)
     if not creating and not args.name:

@@ -226,6 +226,56 @@ Vérifié en réel sur cinq clusters (deux physiques, deux imbriqués, un
 `harvlab` arrêtée depuis sa ligne puis redémarrée par une action groupée,
 `kubectl` confirmant chaque étape.
 
+### Charges de conteneurs (1.91.0)
+
+Harvester 1.9.1 passe en GA les conteneurs bare-metal : des charges
+Kubernetes ordinaires déployées sur le cluster Harvester lui-même, à côté
+des VM (expérimental depuis Harvester 1.2). **Containers** est un groupe de
+deux entrées, juste sous Virtual machines : **Conteneurs du cluster choisi**
+(le cluster choisi en haut) et **Conteneurs de tous les clusters**, tous les
+clusters déclarés dans un tableau avec une colonne **Cluster**.
+
+- **En lecture seule pour l'instant.** Créer, modifier, mettre à l'échelle,
+  redémarrer ou supprimer une charge viendra ensuite, chaque geste comme
+  action suivie et par un script de `bin/`.
+- **Ce qui est listé** : Deployments, StatefulSets, DaemonSets, Jobs,
+  CronJobs et pods seuls, lus en une passe par cluster. **Les namespaces
+  système sont masqués** : `kube-*`, `cattle-*`, `harvester-*`,
+  `longhorn-system`, `fleet-*`, `cdi`, `local` (`default` est montré). Les
+  pods des VM (`kubevirt.io=virt-launcher`) et des imports CDI sont écartés.
+  Un pod est rangé sous sa charge (pod, ReplicaSet, Deployment ; pod, Job,
+  CronJob) ; un pod seul est une charge à lui.
+- **Une ligne par charge** : nom, type, namespace, cluster, prêts / voulus,
+  images, GPU demandés (somme des `nvidia.com/*` et `amd.com/gpu` des
+  conteneurs d'un pod), âge, état (`Running`, `Progressing`, `Degraded`,
+  `Failed`, `Completed`, `Suspended`). **On déplie une ligne** pour voir ses
+  pods : nœud, état, redémarrages, âge.
+- **Menu de la ligne** : le YAML (fenêtre en lecture seule, ou
+  téléchargement) et les **journaux d'un pod**, les 500 dernières lignes au
+  plus, conteneur au choix.
+- **Filtres et tri** comme la vue de toutes les VM : texte (nom, image, pod,
+  nœud, étiquette), cluster, namespace, type, état ; chaque colonne se trie
+  dans les deux sens.
+- Un bandeau dit, sans alarmer, que la fonction est expérimentale avant
+  Harvester 1.9.1, que les namespaces système sont masqués et que les
+  conteneurs vont dans d'autres namespaces que les VM.
+- Un cluster éteint, injoignable ou qui refuse la lecture est dit, jamais
+  une liste vide muette. Un cluster qui ne refuse qu'un type est listé avec
+  ce qui a été lu, et le refus est dit.
+
+API : `GET /api/containers/<cluster>`, `GET /api/containers-all`,
+`GET /api/containers/<cluster>/<namespace>/pod/<pod>/logs?container=&tail=` ;
+le YAML passe par la route générique `/api/yaml/<cluster>/<type>/<nom>`
+(types `deployment`, `statefulset`, `daemonset`, `replicaset`, `job`,
+`cronjob`, `pod`, jamais modifiables). En ligne de commande :
+`bin/harvester-containers.py list [--cluster NOM | --kubeconfig FICHIER] [--json]`
+donne la même lecture, tous les clusters déclarés par défaut.
+
+Vérifié en lecture sur harv1 (Harvester 1.9.0) : 118 pods lus, namespaces
+système et pods de VM écartés, les quatre contrôleurs Cluster API de la
+console listés avec leur pod. L'essai avec une charge déployée pour
+l'occasion revient au mainteneur.
+
 ### Le menu d'actions d'une VM, comme dans Harvester (1.60.0)
 
 Chaque VM de la liste a un bouton **⋮**. Il ouvre un menu rangé comme celui

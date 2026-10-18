@@ -4,6 +4,50 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.91.0] - 2026-10-18 - Container workloads shown next to the VMs, read-only
+
+### Added
+- A Containers group in the menu, right below Virtual machines: Current
+  cluster's containers and All clusters containers. Harvester 1.9.1 makes
+  bare-metal container workloads generally available; the console now shows
+  them as it shows the VMs. Read-only for now: creating, changing, scaling,
+  restarting or deleting a workload comes later, as tracked actions.
+- One row per workload (Deployment, StatefulSet, DaemonSet, Job, CronJob,
+  lone pod): type, namespace, cluster, ready / wanted, images, GPUs requested
+  (`nvidia.com/*` and `amd.com/gpu`), age, state. A row unfolds to its pods
+  (node, state, restarts, age). Its menu shows the YAML, read-only, and the
+  logs of a pod (500 lines at most, container of your choice).
+- System namespaces are hidden (`kube-*`, `cattle-*`, `harvester-*`,
+  `longhorn-system`, `fleet-*`, `cdi`, `local`), as are the pods of the VMs
+  and of CDI imports. One shared list, `SYSTEM_NAMESPACES`, in
+  `bin/lib/hv_containers.py`.
+- Filters and sort as in All clusters VMs: text, cluster, namespace, type,
+  state. A banner says the feature is experimental before Harvester 1.9.1
+  and that containers go in other namespaces than the VMs.
+- A cluster that is off, unreachable or refuses the read is said. A cluster
+  that refuses one type only is listed with what was read, and the refusal
+  is said.
+- `GET /api/containers/<cluster>`, `GET /api/containers-all` and
+  `GET /api/containers/<cluster>/<namespace>/pod/<pod>/logs`. The generic
+  YAML route reads the workload kinds and never writes them, in the console
+  and in `harvester-resources.py yaml`.
+- `bin/harvester-containers.py list [--cluster NAME | --kubeconfig FILE]
+  [--json]`: the same reading on the command line.
+
+### Tests
+- `test_containers_model_191.py`: system namespaces, VM and CDI pods, pods
+  under their workload, states, GPU sums, incomplete objects.
+- `test_containers_routes_191.py`: both lists, partial and total refusals,
+  errors without the kubeconfig path, log tail capped at 500, refused
+  parameters, YAML read-only.
+- `test_containers_cli_191.py`: reading, cluster states, table, exit codes.
+- `test_yaml_edit.py`: the workload kinds are never writable, the tool
+  refuses them.
+- e2e `test_containers_191.py`: menu place, filters, sort, unfolding, logs,
+  YAML, a refusal said.
+- Read-only check on harv1 (Harvester 1.9.0). The test with a workload
+  deployed for the purpose is left to the maintainer.
+
 ## [1.90.0] - 2026-10-16 - VM uplinks chosen per host when a bare-metal node joins
 
 ### Added

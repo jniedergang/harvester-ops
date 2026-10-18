@@ -5352,3 +5352,16 @@ td.fk-reason { max-width: 260px; }
 
 /* v1.87.0 : copie d'une vague arrêtée faute de stockage */
 .fk-blocked { color: var(--warn); font-weight: 600; white-space: nowrap; }
+
+/* v1.91.0 : section Containers (reprend les classes de « All clusters VMs ») */
+.ct-banner { display: flex; align-items: flex-start; gap: 8px; margin: 0 0 10px; padding: 8px 12px;
+  border: 1px solid var(--border); border-left: 3px solid var(--info); border-radius: 6px;
+  background: var(--bg-panel); color: var(--text-dim); font-size: 13px; }
+.ct-banner svg { flex: none; margin-top: 2px; color: var(--info); }
+.ct-notice[hidden] { display: none; }
+.ct-table .ct-expand { width: 24px; }
+.ct-table .ct-images code { display: inline-block; max-width: 340px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; }
+.ct-pods-row > td { padding: 4px 8px 10px 36px; background: var(--bg); }
+.ct-pods { width: 100%; font-size: 12.5px; }
+.ct-pods td.num, .ct-pods th.num { font-variant-numeric: tabular-nums; }

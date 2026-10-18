@@ -68,9 +68,21 @@ KINDS = {
                   "devices.harvesterhci.io/v1beta1", "USBDevice"),
     "sriovnetworkdevice": ("sriovnetworkdevices.devices.harvesterhci.io", False, "viewer", "admin",
                            "devices.harvesterhci.io/v1beta1", "SRIOVNetworkDevice"),
+    # v1.91.0 : les charges de conteneurs, en lecture seule (NOBODY n'est
+    # aucun rôle : ni Enregistrer ni Vérifier ne s'ouvrent)
+    "deployment": ("deployments.apps", True, "viewer", "nobody", "apps/v1", "Deployment"),
+    "statefulset": ("statefulsets.apps", True, "viewer", "nobody", "apps/v1", "StatefulSet"),
+    "daemonset": ("daemonsets.apps", True, "viewer", "nobody", "apps/v1", "DaemonSet"),
+    "replicaset": ("replicasets.apps", True, "viewer", "nobody", "apps/v1", "ReplicaSet"),
+    "job": ("jobs.batch", True, "viewer", "nobody", "batch/v1", "Job"),
+    "cronjob": ("cronjobs.batch", True, "viewer", "nobody", "batch/v1", "CronJob"),
+    "pod": ("pods", True, "viewer", "nobody", "v1", "Pod"),
 }
 
 RANK = {"viewer": 0, "operator": 1, "admin": 2}
+# rôle qu'aucun compte ne porte : un type en lecture seule
+NOBODY = "nobody"
+CONTAINER_KINDS = ("deployment", "statefulset", "daemonset", "replicaset", "job", "cronjob", "pod")
 
 # Ce qui n'aide pas à relire ni à modifier un objet : l'historique d'écriture
 # de chaque champ (des centaines de lignes sur une VM) et l'état, que le
@@ -90,7 +102,10 @@ def spec_of(kind):
 
 def allowed(kind, role, write=False):
     s = spec_of(kind)
-    return RANK.get(role, -1) >= RANK[s["write" if write else "read"]]
+    need = s["write" if write else "read"]
+    if need == NOBODY:
+        return False
+    return RANK.get(role, -1) >= RANK[need]
 
 
 def clean(obj):
@@ -152,7 +167,13 @@ def check_target(kind, obj, ns, name, creating=False):
 
 
 def check_readable(kind, obj):
-    """Une ConfigMap n'est lue ici que si c'est un modèle cloud-init."""
+    """Une ConfigMap n'est lue ici que si c'est un modèle cloud-init ; une
+    charge de conteneurs, hors des namespaces système (masqués par la vue)."""
+    if kind in CONTAINER_KINDS:
+        import hv_containers
+        ns = ((obj or {}).get("metadata") or {}).get("namespace")
+        if hv_containers.is_system_namespace(ns):
+            raise ValueError(f"{ns} is a system namespace: its workloads are not read here")
     if kind == "cloudtemplate":
         labels = ((obj or {}).get("metadata") or {}).get("labels") or {}
         if CLOUD_TEMPLATE_LABEL not in labels:

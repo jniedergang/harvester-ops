@@ -120,6 +120,24 @@
           </a>
         </div>
       </div>
+      <!-- v1.91.0 : les charges de conteneurs, sur le modèle des VMs -->
+      <div class="tab-group expanded" id="tab-group-containers">
+        <a class="tab tab-group-head" data-group="containers" href="#containers" data-i18n-title="tab.containersGroupTip" title="The container workloads of the chosen cluster, or of every cluster">
+          <span class="tab-icon" data-icon="container"></span>
+          <span class="sidebar-label" data-i18n="tab.containersGroup">Containers</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="containers" href="#containers" data-i18n-title="tab.containersTip" title="The container workloads of the cluster chosen at the top">
+            <span class="tab-icon" data-icon="container"></span>
+            <span class="sidebar-label" data-i18n="tab.containers">Current cluster's containers</span>
+          </a>
+          <a class="tab tab-child" data-tab="allcontainers" href="#allcontainers" data-i18n-title="tab.allcontainersTip" title="The container workloads of every declared cluster in one list">
+            <span class="tab-icon" data-icon="containers"></span>
+            <span class="sidebar-label" data-i18n="tab.allcontainers">All clusters containers</span>
+          </a>
+        </div>
+      </div>
       <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
            VM Import et VMware migrations portent sur le cluster choisi ;
            Migrations (all clusters) les voit tous. -->
@@ -739,6 +757,19 @@
       <div class="avm-host" id="all-vms-host"></div>
     </section>
 
+    <!-- CONTAINERS : v1.91.0, les charges de conteneurs (lecture seule) -->
+    <section id="tab-containers" class="tab-content">
+      <h1><span data-i18n="cw.title">Containers</span> · <span class="cluster-name"></span></h1>
+      <p class="hint" data-i18n="cw.hint">The container workloads of the cluster chosen at the top: Deployments, StatefulSets, DaemonSets, Jobs, CronJobs and lone pods. Unfold a row to see its pods; its menu shows the YAML and the logs of a pod.</p>
+      <div class="avm-host ct-host" id="containers-host"></div>
+    </section>
+
+    <section id="tab-allcontainers" class="tab-content">
+      <h1 data-i18n="acw.title">All clusters containers</h1>
+      <p class="hint" data-i18n="acw.hint">The container workloads of every declared cluster, in one list. Click clusters to keep only theirs, filter by state, type, namespace or text, sort any column. A cluster that is off or refuses the read is shown as such.</p>
+      <div class="avm-host ct-host" id="all-containers-host"></div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>
@@ -1205,6 +1236,7 @@
   <script src="/static/js/forklift.js"></script>
   <script src="/static/js/forklift-global.js"></script>
   <script src="/static/js/all-vms.js"></script>
+  <script src="/static/js/containers.js"></script>
 <script src="/static/js/versions.js"></script>
 <script src="/static/js/console-update.js"></script>
 <script src="/static/js/console-accounts.js"></script>

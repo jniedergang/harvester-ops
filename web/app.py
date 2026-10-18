@@ -8747,6 +8747,157 @@ def api_vms_all():
 
 
 # -----------------------------------------------------------------------------
+# v1.91.0 : charges de conteneurs (lecture seule), comme les VMs
+# -----------------------------------------------------------------------------
+import hv_containers as _hct  # noqa: E402
+
+CONTAINER_LOG_TAIL_MAX = 500
+
+
+def _containers_collect(cluster, kc):
+    """Les charges de conteneurs d'un cluster, sans contexte de requête
+    (appelable depuis un fil de travail, comme `_vms_collect`). Chaque type
+    est lu à part, en parallèle : un type refusé par la RBAC est dit dans
+    `denials` sans cacher les autres. Rend (corps, statut, sorties refusées)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def read(res):
+        try:
+            r = _kubectl_run(["kubectl", "--kubeconfig", kc, "get", res, "-A", "-o", "json"],
+                             capture_output=True, text=True, timeout=20)
+        except subprocess.TimeoutExpired as e:
+            return res, None, _safe_proc_error(e)
+        if r.returncode != 0:
+            return res, None, (r.stderr or "").strip() or f"exit code {r.returncode}"
+        try:
+            data = r.data if getattr(r, "data", None) is not None else json.loads(r.stdout)
+        except (json.JSONDecodeError, TypeError) as e:
+            return res, None, _safe_proc_error(e)
+        return res, data, None
+
+    kinds = dict(_hct.WORKLOAD_RESOURCES)
+    with ThreadPoolExecutor(max_workers=len(kinds)) as pool:
+        results = list(pool.map(read, list(kinds)))
+    lists, errors = {}, []
+    for res, data, err in results:
+        if err is not None:
+            errors.append(err)
+        else:
+            lists[kinds[res]] = [it for it in (data or {}).get("items") or [] if isinstance(it, dict)]
+    # jamais le chemin du kubeconfig dans une réponse (kubectl le cite s'il manque)
+    errors = [e.replace(kc, "<kubeconfig>") for e in errors]
+    denials = [e for e in errors if any(m in e.lower() for m in _DENIAL_MARKERS)]
+    others = [e for e in errors if e not in denials]
+    if others or not lists:
+        # rien de lu, ou un type illisible pour une autre raison que la RBAC :
+        # rien de partiel qui passerait pour la liste complète. Un refus de la
+        # RBAC devient 403 (after_request), le reste 500.
+        return {"error": "kubectl failed", "denied": not others,
+                "detail": (others or denials or [""])[0][:300]}, 500, denials
+    workloads = _hct.build(lists)
+    return {"cluster": cluster, "workloads": workloads,
+            "denials": [d[:300] for d in denials]}, 200, denials
+
+
+@app.route("/api/containers/<cluster>")
+@requires_auth
+@shared_read()
+def api_containers_list(cluster):
+    """Les charges de conteneurs du cluster (namespaces système masqués,
+    pods de VM et de CDI écartés), chacune avec ses pods."""
+    kc = _kubectl_for_cluster(cluster)
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 200
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    payload, status, denials = _containers_collect(cluster, kc)
+    for d in denials:
+        _note_cluster_denial(d)
+    return jsonify(payload), status
+
+
+@app.route("/api/containers-all")
+@requires_auth
+@shared_read()
+def api_containers_all():
+    """Les charges de conteneurs de tous les clusters déclarés, lues en
+    parallèle avec l'identité de la personne, comme /api/vms-all. Un cluster
+    éteint, injoignable ou qui refuse la lecture est dit dans `clusters`."""
+    cfg = load_config_ro()
+    todo = []
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if name:
+            todo.append((name, _kubectl_for_cluster(name)))
+
+    def one(item):
+        name, kc = item
+        if not kc:
+            return {"cluster": name, "state": "unknown"}, [], []
+        if _cluster_reachable(kc) is False:
+            return {"cluster": name, "state": "unreachable"}, [], []
+        try:
+            payload, status, denials = _containers_collect(name, kc)
+        except Exception as e:  # un cluster ne doit pas faire tomber la vue
+            return {"cluster": name, "state": "error", "error": _safe_proc_error(e)}, [], []
+        if status != 200:
+            return ({"cluster": name, "state": "denied" if payload.get("denied") else "error",
+                     "error": payload.get("detail") or payload.get("error")}, [], denials)
+        rows = [dict(w, cluster=name) for w in payload["workloads"]]
+        info = {"cluster": name, "state": "ok", "count": len(rows)}
+        if payload.get("denials"):
+            info["denials"] = payload["denials"]
+        return info, rows, denials
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(todo), 16))) as pool:
+        results = list(pool.map(one, todo))
+    clusters, rows = [], []
+    for info, part, _denials in results:
+        clusters.append(info)
+        rows.extend(part)
+    rows.sort(key=lambda w: (w["name"], w["cluster"], w["namespace"], w["kind"]))
+    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows})
+
+
+@app.route("/api/containers/<cluster>/<namespace>/pod/<oname>/logs")
+@requires_auth
+def api_container_pod_logs(cluster, namespace, oname):
+    """Les dernières lignes du journal d'un conteneur d'un pod (500 au plus).
+    Les namespaces système, masqués par la vue, ne se lisent pas ici."""
+    if _hct.is_system_namespace(namespace):
+        return jsonify({"error": "system namespace",
+                        "hint": "the logs of system namespaces are not read from the Containers view"}), 400
+    container = request.args.get("container") or ""
+    if container and not _K8S_NAME_RE.match(container):
+        return jsonify({"error": "invalid container",
+                        "hint": "RFC 1123 label: a-z, 0-9, '-'; max 63 chars"}), 400
+    try:
+        tail = int(request.args.get("tail") or CONTAINER_LOG_TAIL_MAX)
+    except ValueError:
+        return jsonify({"error": "tail must be a number of lines"}), 400
+    tail = max(1, min(tail, CONTAINER_LOG_TAIL_MAX))
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return jsonify({"error": f"unknown cluster: {cluster}"}), 404
+    if _cluster_reachable(kc) is False:
+        return jsonify(_unreachable_payload(cluster, kc)), 503
+    argv = ["kubectl", "--kubeconfig", kc, "logs", oname, "-n", namespace, f"--tail={tail}"]
+    if container:
+        argv += ["-c", container]
+    try:
+        r = _kubectl_run(argv, capture_output=True, text=True, timeout=20)
+    except subprocess.TimeoutExpired as e:
+        return jsonify({"error": "kubectl failed", "detail": _safe_proc_error(e)}), 504
+    if r.returncode != 0:
+        detail = (r.stderr or "").strip().replace(kc, "<kubeconfig>")[:500]
+        code = 404 if "NotFound" in detail or "not found" in detail else 500
+        return jsonify({"error": "kubectl failed", "detail": detail}), code
+    return jsonify({"cluster": cluster, "namespace": namespace, "pod": oname,
+                    "container": container or None, "tail": tail, "logs": r.stdout or ""})
+
+
+# -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
 CONFIG_LOCK = threading.Lock()
@@ -14470,6 +14621,9 @@ def _yaml_target(kind, write=False, need_ns=True):
         return None, None, (jsonify({"error": str(e)}), 400)
     if not _hy.allowed(kind, current_role(), write=write):
         need = s["write" if write else "read"]
+        if need == _hy.NOBODY:
+            return None, None, (jsonify({"error": "read-only",
+                                         "hint": f"a {s['kind']} is read-only in this version"}), 403)
         return None, None, (jsonify({"error": "forbidden", "role": current_role(), "required": need,
                                      "hint": f"a {s['kind']} is {'changed' if write else 'read in YAML'} "
                                              f"by the '{need}' role"}), 403)

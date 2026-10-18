@@ -206,6 +206,53 @@ Checked for real on five clusters (two physical, two nested, one off): 19
 VMs read in 40 ms from the shared reads, a VM of `harvlab` stopped from its
 row, then started again from a bulk action, `kubectl` confirming each step.
 
+### Container workloads (1.91.0)
+
+Harvester 1.9.1 makes bare-metal container workloads generally available:
+ordinary Kubernetes workloads deployed on the Harvester cluster itself, next
+to the VMs (experimental since Harvester 1.2). **Containers** is a group of
+two entries, right below Virtual machines: **Current cluster's containers**
+(the cluster chosen at the top) and **All clusters containers**, every
+declared cluster in one table with a **Cluster** column.
+
+- **Read-only for now.** Creating, changing, scaling, restarting or deleting
+  a workload comes later, each as a tracked action and a `bin/` script.
+- **What is listed**: Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
+  and lone pods, read in one pass per cluster. **System namespaces are
+  hidden**: `kube-*`, `cattle-*`, `harvester-*`, `longhorn-system`,
+  `fleet-*`, `cdi`, `local` (`default` is shown). The pods of the VMs
+  (`kubevirt.io=virt-launcher`) and of CDI imports are left out. A pod is
+  shown under its workload (pod, ReplicaSet, Deployment; pod, Job,
+  CronJob); a lone pod is a workload of its own.
+- **One row per workload**: name, type, namespace, cluster, ready / wanted,
+  images, GPUs requested (sum of `nvidia.com/*` and `amd.com/gpu` of the
+  containers of a pod), age, state (`Running`, `Progressing`, `Degraded`,
+  `Failed`, `Completed`, `Suspended`). **Unfold a row** to see its pods:
+  node, state, restarts, age.
+- **Row menu**: the YAML (read-only window, or download) and the **logs of
+  a pod**, the last 500 lines at most, container of your choice.
+- **Filters and sort** as in All clusters VMs: text (name, image, pod, node,
+  label), cluster, namespace, type, state; every column sorts both ways.
+- A banner says, without alarm, that the feature is experimental before
+  Harvester 1.9.1, that system namespaces are hidden and that containers go
+  in other namespaces than the VMs.
+- A cluster that is off, unreachable or refuses the read is said, never an
+  empty list. A cluster that refuses one type only is listed with what was
+  read, and the refusal is said.
+
+API: `GET /api/containers/<cluster>`, `GET /api/containers-all`,
+`GET /api/containers/<cluster>/<namespace>/pod/<pod>/logs?container=&tail=`;
+the YAML goes through the generic `/api/yaml/<cluster>/<kind>/<name>` route
+(kinds `deployment`, `statefulset`, `daemonset`, `replicaset`, `job`,
+`cronjob`, `pod`, never writable). Command line:
+`bin/harvester-containers.py list [--cluster NAME | --kubeconfig FILE] [--json]`
+gives the same reading, every declared cluster by default.
+
+Checked read-only on harv1 (Harvester 1.9.0): 118 pods read, the system
+namespaces and VM pods left out, the four Cluster API controllers of the
+console listed with their pod. The test with a workload deployed for the
+purpose is left to the maintainer.
+
 ### The actions menu of a VM, as in Harvester (1.60.0)
 
 Each VM row has a **⋮** button. It opens a menu grouped the way Harvester's
