@@ -138,6 +138,21 @@
           </a>
         </div>
       </div>
+      <!-- v1.93.0 : les ressources partagées par les VM et les conteneurs
+           (les GPU d'un nœud servent les deux) ; Bookings viendra ensuite -->
+      <div class="tab-group expanded" id="tab-group-shared">
+        <a class="tab tab-group-head" data-group="shared" href="#gpus" data-i18n-title="tab.sharedTip" title="Resources that VMs and containers share across the clusters, such as GPUs">
+          <span class="tab-icon" data-icon="placement"></span>
+          <span class="sidebar-label" data-i18n="tab.shared">Shared resources</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="gpus" href="#gpus" data-i18n-title="tab.gpusTip" title="GPU inventory of every declared cluster: whole GPUs, vGPUs, MIG instances and container GPUs, free or used">
+            <span class="tab-icon" data-icon="gamepad"></span>
+            <span class="sidebar-label" data-i18n="tab.gpus">GPU</span>
+          </a>
+        </div>
+      </div>
       <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
            VM Import et VMware migrations portent sur le cluster choisi ;
            Migrations (all clusters) les voit tous. -->
@@ -440,8 +455,6 @@
           <!-- v1.68.0 : les périphériques de Harvester -->
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="pci" data-i18n-title="section.pciTip" title="PCI devices of every host: enable or disable their passthrough to VMs"><span class="tab-icon" data-icon="plug"></span> <span data-i18n="section.pci">PCI Devices</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="usb" data-i18n-title="section.usbTip" title="USB devices of every host: enable or disable their passthrough to VMs"><span class="tab-icon" data-icon="hotplug"></span> <span data-i18n="section.usb">USB Devices</span></button>
-          <!-- v1.92.0 : l'inventaire des GPU, d'un cluster ou de tous -->
-          <button type="button" class="sub-tab tip" role="tab" data-section-tab="gpu" data-i18n-title="section.gpuTip" title="GPU inventory: whole GPUs, vGPUs, MIG instances and container GPU resources, free or used, on this cluster or all clusters"><span class="tab-icon" data-icon="compute"></span> <span data-i18n="section.gpu">GPU</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="sriov" data-i18n-title="section.sriovTip" title="SR-IOV network cards: the number of virtual functions they expose"><span class="tab-icon" data-icon="switch"></span> <span data-i18n="section.sriov">SR-IOV Networks</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="support" data-i18n-title="section.supportTip" title="Harvester support bundles and kubeconfigs limited to a role, with a token that expires"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="section.support">Support</span></button>
         </div>
@@ -449,7 +462,6 @@
       <div class="section-pane" data-pane="settings" hidden><div class="na-host" data-adv="settings"></div></div>
       <div class="section-pane" data-pane="pci" hidden><div class="na-host" data-adv="pci"></div></div>
       <div class="section-pane" data-pane="usb" hidden><div class="na-host" data-adv="usb"></div></div>
-      <div class="section-pane" data-pane="gpu" hidden><div class="na-host" data-adv="gpu"></div></div>
       <div class="section-pane" data-pane="sriov" hidden><div class="na-host" data-adv="sriov"></div></div>
       <div class="section-pane" data-pane="support" hidden><div class="na-host" data-adv="support"></div></div>
     </section>
@@ -771,6 +783,13 @@
       <h1 data-i18n="acw.title">All clusters containers</h1>
       <p class="hint" data-i18n="acw.hint">The container workloads of every declared cluster, in one list. Click clusters to keep only theirs, filter by state, type, namespace or text, sort any column. A cluster that is off or refuses the read is shown as such.</p>
       <div class="avm-host ct-host" id="all-containers-host"></div>
+    </section>
+
+    <!-- GPU : v1.93.0, l'inventaire des GPU de la flotte (Shared resources) -->
+    <section id="tab-gpus" class="tab-content">
+      <h1 data-i18n="gpu.title">GPU</h1>
+      <p class="hint" data-i18n="gpu.hint">The GPUs of every declared cluster, for VMs and containers alike: whole GPUs, vGPUs, MIG instances and the GPU resources nodes give to containers. Pick a cluster to keep only its units.</p>
+      <div class="na-host" id="gpus-host"></div>
     </section>
 
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->

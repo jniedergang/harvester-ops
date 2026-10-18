@@ -1,18 +1,30 @@
 #!/usr/bin/env python3
-"""harvester-containers : les charges de conteneurs des clusters Harvester (v1.91.0).
+"""harvester-containers : les charges de conteneurs des clusters Harvester (v1.91.0, gestes v1.93.0).
 
-Lecture seule. Même modèle que la section Containers de la console
+Même modèle que la section Containers de la console
 (bin/lib/hv_containers.py) : namespaces système masqués, pods des VM et de
 CDI écartés, pods rangés sous leur charge.
 
   harvester-containers.py list [--cluster NAME | --kubeconfig FILE] [--json]
+  harvester-containers.py create (--cluster NAME | --kubeconfig FILE)
+        (--file MANIFEST | --name N --namespace NS --image IMG [--kind Deployment|Job]
+         [--replicas N] [--command CMD] [--env K=V ...] [--gpus N] [--gpu-resource R]
+         [--cpu Q] [--memory Q]) [--create-namespace] [--dry-run]
+  harvester-containers.py scale   ... --namespace NS --kind K --name N --replicas N [--dry-run]
+  harvester-containers.py restart ... --namespace NS --kind K --name N [--dry-run]
+  harvester-containers.py delete  ... --namespace NS --kind K --name N [--dry-run]
 
-Sans --cluster ni --kubeconfig, tous les clusters déclarés sont lus (ceux de
-config.yaml puis ceux de la console). Un cluster injoignable ou qui refuse
-la lecture est dit, sans arrêter les autres.
+Sans --cluster ni --kubeconfig, `list` lit tous les clusters déclarés (ceux
+de config.yaml puis ceux de la console). Un cluster injoignable ou qui
+refuse la lecture est dit, sans arrêter les autres.
 
-Codes de sortie : 0 tout est lu, 1 au moins un cluster n'a pas été lu,
-2 erreur d'usage.
+Les gestes refusent les namespaces système, font contrôler chaque écriture
+à blanc par le serveur (--dry-run=server) avant d'écrire, et posent une
+limite mémoire sur tout conteneur créé (256Mi par défaut). Progression sur
+stderr en STEP_EVENT|étape|statut|message.
+
+Codes de sortie : 0 fait, 1 au moins un cluster non lu ou une écriture
+refusée, 2 erreur d'usage ou demande refusée avant le cluster.
 """
 
 import argparse
@@ -164,21 +176,214 @@ def cmd_list(args):
     return EXIT_OK if all(c["state"] == "ok" for c in clusters) else EXIT_FAIL
 
 
+# ---------------------------------------------------------------------------
+# v1.93.0 : les gestes. Chacun valide la demande sans cluster, refuse les
+# namespaces système, fait contrôler l'écriture à blanc par le serveur
+# (--dry-run=server : webhooks, quotas, droits), puis écrit. Rien n'est écrit
+# si le contrôle échoue. La progression part sur stderr en STEP_EVENT.
+# ---------------------------------------------------------------------------
+
+def step(sid, status, msg=""):
+    clean = " ".join(str(msg).split())
+    sys.stderr.write(f"STEP_EVENT|{sid}|{status}|{clean}\n")
+    sys.stderr.flush()
+
+
+class GestureError(Exception):
+    """Une étape a échoué ; le message est déjà dit en STEP_EVENT."""
+
+
+def one_target(args):
+    """Le seul cluster d'un geste : --kubeconfig, ou --cluster déclaré."""
+    if not args.kubeconfig and not args.cluster:
+        raise ValueError("give --cluster or --kubeconfig")
+    return targets_from(args)[0][1]
+
+
+def _kube_call(kube, sid, *a, input=None):
+    """kubectl, et l'échec dit sans le chemin du kubeconfig."""
+    try:
+        return kube.run(*a, input=input)
+    except KubeError as e:
+        msg = _short(str(e).replace(str(kube.kubeconfig), "<kubeconfig>"))
+        step(sid, "error", msg)
+        raise GestureError(msg) from None
+
+
+def _checked_write(kube, label, *a, input=None, dry=False):
+    """Le contrôle à blanc du serveur, puis l'écriture."""
+    step("dry-run", "running", f"server-side check of {label}")
+    _kube_call(kube, "dry-run", *a, "--dry-run=server", input=input)
+    step("dry-run", "done", "accepted by the server")
+    if dry:
+        step("write", "skipped", "dry run: nothing written")
+        return ""
+    step("write", "running", label)
+    out = _kube_call(kube, "write", *a, input=input)
+    step("write", "done", label)
+    return out
+
+
+def _namespace_absent(kube, ns):
+    """True si le namespace n'existe pas, False s'il existe, None si on ne
+    peut pas le dire (lecture refusée : le contrôle à blanc tranchera)."""
+    try:
+        kube.run("get", "namespace", ns, "-o", "name")
+        return False
+    except KubeError as e:
+        low = str(e).lower()
+        if "notfound" in low or "not found" in low:
+            return True
+        return None
+
+
+def load_spec(args):
+    """Le manifeste à créer, depuis --spec (JSON de la console), --file
+    (YAML ou JSON) ou les options."""
+    if args.spec:
+        try:
+            data = json.loads(Path(args.spec).read_text())
+        except (OSError, ValueError) as e:
+            raise ValueError(f"unreadable spec: {e}") from None
+        if isinstance(data, dict) and "manifest" in data:
+            return hc.check_manifest(data["manifest"], args.namespace)
+        return hc.build_manifest(data)
+    if args.file:
+        doc = _read_yaml(args.file)
+        if doc is None:
+            raise ValueError(f"unreadable manifest: {args.file}")
+        return hc.check_manifest(doc, args.namespace)
+    return hc.build_manifest({
+        "name": args.name, "namespace": args.namespace, "kind": args.kind, "image": args.image,
+        "replicas": args.replicas, "command": args.command, "env": args.env or [],
+        "gpus": args.gpus, "gpu_resource": args.gpu_resource, "cpu": args.cpu, "memory": args.memory})
+
+
+def cmd_create(args):
+    step("validate", "running", "checking the request")
+    manifest = load_spec(args)
+    ns, name, kind = manifest["metadata"]["namespace"], manifest["metadata"]["name"], manifest["kind"]
+    step("validate", "done", f"{kind} {ns}/{name}")
+    kube = one_target(args)
+    made_ns = False
+    absent = _namespace_absent(kube, ns)
+    if absent:
+        if not args.create_namespace:
+            step("namespace", "error", f"namespace {ns} does not exist (ask to create it)")
+            raise GestureError(f"namespace {ns} does not exist")
+        if args.dry_run:
+            # le contrôle de la charge échouerait faute de namespace
+            _checked_write(kube, f"namespace {ns}", "create", "namespace", ns, dry=args.dry_run)
+            step("dry-run", "skipped", f"the {kind} is checked once the namespace exists")
+            return EXIT_OK
+        _checked_write(kube, f"namespace {ns}", "create", "namespace", ns, dry=args.dry_run)
+        made_ns = True
+    body = json.dumps(manifest)
+    try:
+        _checked_write(kube, f"{kind} {ns}/{name}", "create", "-f", "-", "-o", "name", input=body,
+                       dry=args.dry_run)
+    except GestureError:
+        if made_ns:
+            # rien de laissé à moitié : le namespace créé pour rien repart
+            try:
+                kube.run("delete", "namespace", ns, "--wait=false")
+                step("namespace", "done", f"namespace {ns} removed again")
+            except KubeError:
+                step("namespace", "warn", f"namespace {ns} was created and could not be removed")
+        raise
+    step("create", "done", f"{kind} {ns}/{name} created")
+    return EXIT_OK
+
+
+def cmd_scale(args):
+    if args.replicas is None or not 0 <= args.replicas <= hc.MAX_REPLICAS:
+        raise ValueError(f"--replicas must be between 0 and {hc.MAX_REPLICAS}")
+    ns, kind, name = hc.check_target(args.namespace, args.kind, args.name, hc.SCALABLE_KINDS)
+    kube = one_target(args)
+    _checked_write(kube, f"{kind} {ns}/{name} to {args.replicas}", "scale",
+                   f"{hc.resource_of(kind)}/{name}", "-n", ns, f"--replicas={args.replicas}", dry=args.dry_run)
+    step("scale", "done", f"{kind} {ns}/{name} scaled to {args.replicas}")
+    return EXIT_OK
+
+
+def cmd_restart(args, now=None):
+    ns, kind, name = hc.check_target(args.namespace, args.kind, args.name, hc.RESTARTABLE_KINDS)
+    kube = one_target(args)
+    _checked_write(kube, f"rolling restart of {kind} {ns}/{name}", "patch", hc.resource_of(kind),
+                   name, "-n", ns, "--type", "merge", "-p", json.dumps(hc.restart_patch(now)), dry=args.dry_run)
+    step("restart", "done", f"{kind} {ns}/{name} restarting")
+    return EXIT_OK
+
+
+def cmd_delete(args):
+    ns, kind, name = hc.check_target(args.namespace, args.kind, args.name, hc.KINDS)
+    kube = one_target(args)
+    _checked_write(kube, f"deletion of {kind} {ns}/{name}", "delete", hc.resource_of(kind),
+                   name, "-n", ns, "--wait=false", dry=args.dry_run)
+    step("delete", "done", f"{kind} {ns}/{name} deleted")
+    return EXIT_OK
+
+
+def _target_args(sp, write=True):
+    sp.add_argument("--cluster", help="a declared cluster")
+    sp.add_argument("--kubeconfig", help="a kubeconfig, instead of a declared cluster")
+    if write:
+        sp.add_argument("--dry-run", action="store_true",
+                        help="the server-side check only, nothing written")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="harvester-containers",
-                                 description="Container workloads of Harvester clusters (read-only).")
+                                 description="Container workloads of Harvester clusters.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sp = sub.add_parser("list", help="the container workloads, system namespaces hidden")
     sp.add_argument("--cluster", help="a declared cluster (default: every declared cluster)")
     sp.add_argument("--kubeconfig", help="a kubeconfig, instead of a declared cluster")
     sp.add_argument("--json", action="store_true", help="JSON output")
     sp.set_defaults(fn=cmd_list)
+
+    sp = sub.add_parser("create", help="create a Deployment or a Job (or a workload from a manifest)")
+    _target_args(sp)
+    src = sp.add_mutually_exclusive_group()
+    src.add_argument("--file", help="a YAML or JSON manifest of one workload")
+    src.add_argument("--spec", help=argparse.SUPPRESS)          # JSON écrit par la console
+    sp.add_argument("--name")
+    sp.add_argument("--namespace")
+    sp.add_argument("--kind", default="Deployment", choices=hc.CREATE_KINDS)
+    sp.add_argument("--image")
+    sp.add_argument("--replicas", type=int, default=1, help="pods of a Deployment, runs of a Job")
+    sp.add_argument("--command", help="the command, split like a shell would")
+    sp.add_argument("--env", action="append", metavar="NAME=VALUE")
+    sp.add_argument("--gpus", type=int, default=0, help="GPUs requested by the container")
+    sp.add_argument("--gpu-resource", default=hc.DEFAULT_GPU_RESOURCE)
+    sp.add_argument("--cpu", help="CPU limit (500m, 2)")
+    sp.add_argument("--memory", default=hc.DEFAULT_MEMORY, help="memory limit (default 256Mi)")
+    sp.add_argument("--create-namespace", action="store_true", help="create the namespace if it is missing")
+    sp.set_defaults(fn=cmd_create)
+
+    for verb, fn, helptext in (("scale", cmd_scale, "set the number of pods"),
+                               ("restart", cmd_restart, "rolling restart (new pods)"),
+                               ("delete", cmd_delete, "delete a workload")):
+        sp = sub.add_parser(verb, help=helptext)
+        _target_args(sp)
+        sp.add_argument("--namespace", required=True)
+        sp.add_argument("--kind", required=True, help="Deployment, StatefulSet, Job...")
+        sp.add_argument("--name", required=True)
+        if verb == "scale":
+            sp.add_argument("--replicas", type=int, required=True)
+        sp.set_defaults(fn=fn)
+
     args = ap.parse_args(argv)
     try:
         return args.fn(args)
     except ValueError as e:
+        if args.cmd != "list":
+            step("validate", "error", str(e))
         print(f"error: {e}", file=sys.stderr)
         return EXIT_USAGE
+    except GestureError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_FAIL
 
 
 if __name__ == "__main__":

@@ -4,6 +4,66 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.93.0] - 2026-10-18 - Container workloads can be created, scaled, restarted and deleted; GPUs move to Shared resources
+
+### Added
+- A Shared resources group in the menu, right after Containers. VMs and
+  containers share what it lists. Its first entry is GPU.
+- A Create button in both Containers views. A form asks for the cluster,
+  name, namespace, type (Deployment or Job), image, number of pods,
+  command, environment, GPUs and their resource, CPU and memory limits. A
+  YAML tab takes the manifest of one workload instead.
+- The GPU field shows how many container GPUs are free on the chosen
+  cluster.
+- Scale, Restart and Delete in the row menu. Restart is a rolling restart.
+  Delete asks for a confirmation in the page. An entry a type cannot take
+  is greyed out and says why.
+- Each gesture is a tracked action, with its steps in the dock and in
+  Activity. The list is read again when it ends.
+- `bin/harvester-containers.py create|scale|restart|delete`, the same
+  gestures on the command line. `--dry-run` runs the server check only.
+  `create --file` takes a manifest.
+- `POST /api/containers/<cluster>/create`, `POST
+  /api/containers/<cluster>/<namespace>/<kind>/<name>/scale` and
+  `.../restart`, `DELETE /api/containers/<cluster>/<namespace>/<kind>/<name>`.
+  Each answers with the action id at once.
+
+### Changed
+- The GPU inventory leaves Cluster > Advanced for Shared resources > GPU.
+  It always shows the whole fleet, with a cluster filter (all clusters by
+  default) and a Cluster column. The "This cluster / All clusters" switch
+  is gone. A chosen cluster without GPUs says why: no GPU, add-on off, off
+  or refused.
+- Every created container gets a memory limit: 256Mi unless one is given,
+  with memory and CPU requests. A pasted manifest only gets what it lacks.
+- System namespaces are refused by the console and by the script. The
+  server checks each write first (`--dry-run=server`). Nothing is written
+  if that check fails. A namespace is created only when asked, and removed
+  again if its workload is refused.
+- Writes use the person's identity: the console passes the kubeconfig
+  prepared for the request to the script.
+- The Containers banner no longer says the view is read-only.
+
+### Tests
+- `test_containers_gestures_model_193.py`: Deployment and Job manifests,
+  resources and the default memory limit, GPU count and resource, command
+  and environment, every refusal (names, system namespaces, quantities),
+  pasted manifests, gesture targets, the restart patch.
+- `test_containers_cli_193.py`: a fake kubectl. The server check runs
+  before each write with the same arguments. Refusals ask nothing of the
+  cluster. A failed check writes nothing and never shows the kubeconfig
+  path. Namespace created only on request, and taken back.
+- `test_containers_routes_193.py`: tracked actions started with the
+  person's kubeconfig, no path in the shown command, refusals start
+  nothing, a running shutdown blocks a gesture, authentication and rate
+  limits on every route.
+- e2e: `test_containers_gestures_193.py` (Create form and its checks, YAML
+  tab, GPU hint, greyed entries, scale, restart, delete confirmed in the
+  page, list read again). `test_gpus_192.py` moved to Shared resources,
+  with the cluster filter. Advanced lists its tabs without GPU.
+- Fourteen deliberate mutations, one per rule, each caught by these tests.
+- Checked for real on harv1, in a test namespace created then deleted.
+
 ## [1.92.0] - 2026-10-18 - GPU inventory of one cluster or of the whole fleet, read-only
 
 ### Added

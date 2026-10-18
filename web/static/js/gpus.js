@@ -1,16 +1,18 @@
 /**
- * harvester-ops : l'inventaire des GPU (v1.92.0), onglet Advanced > GPU.
+ * harvester-ops : l'inventaire des GPU (v1.92.0), Shared resources > GPU
+ * depuis v1.93.0.
  *
  * Lecture seule. Une unité est ce qu'on pourra réserver : un GPU entier
  * (passthrough), un vGPU, les instances MIG d'un GPU, ou la ressource GPU
- * d'un nœud pour les conteneurs. Un sélecteur « Ce cluster / Tous les
- * clusters » (/api/gpus/<c> ou /api/gpus-all), une carte par type (total,
- * utilisées, libres), puis le tableau filtrable par cluster, nœud, type,
- * état ; le consommateur ouvre la VM, ou la charge dans la vue Containers.
+ * d'un nœud pour les conteneurs. Les GPU servent les VM comme les
+ * conteneurs : la vue est celle de la flotte (/api/gpus-all), indépendante du
+ * cluster choisi en haut, avec un filtre par cluster (tous par défaut). Une
+ * carte par type (total, utilisées, libres), puis le tableau filtrable par
+ * cluster, nœud, type, état ; le consommateur ouvre la VM, ou la charge dans
+ * la vue Containers.
  */
 const Gpus = (() => {
   const tr = (k, p) => (window.i18n ? i18n.t(k, p) : k);
-  const enc = encodeURIComponent;
   const esc = (v) => String(v == null ? '' : v)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -37,15 +39,15 @@ const Gpus = (() => {
     'no-addon': ['dim', () => tr('gpu.cl.noAddon'), () => tr('gpu.noAddon')],
   };
 
-  let cur = null;   // { cluster, host, timer, data, prefs }
+  let cur = null;   // { host, timer, data, prefs }
 
   const badge = (cls, text, tip) =>
     `<span class="badge ${cls}${tip ? ' tip' : ''}"${tip ? ` data-tip="${esc(tip)}"` : ''}>${esc(text)}</span>`;
 
   function loadPrefs() {
-    const p = { scope: 'cluster', cluster: '', node: '', type: '', state: '', text: '' };
+    const p = { cluster: '', node: '', type: '', state: '', text: '' };
     try { Object.assign(p, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch { /* réglages illisibles */ }
-    if (p.scope !== 'all') p.scope = 'cluster';
+    delete p.scope;                // v1.92.0 : « ce cluster / tous », remplacé par le filtre
     return p;
   }
   function savePrefs() {
@@ -53,9 +55,10 @@ const Gpus = (() => {
   }
 
   // -- cycle de vie (appelé par Sections) -------------------------------------
-  function start(cluster, host) {
+  function start(host) {
     stop();
-    cur = { cluster, host, data: null, prefs: loadPrefs() };
+    if (!host) return Promise.resolve();
+    cur = { host, data: null, prefs: loadPrefs() };
     shell();
     cur.timer = setInterval(() => {
       if (cur && cur.host.isConnected && !cur.host.closest('[hidden]') && !document.hidden) load();
@@ -71,30 +74,24 @@ const Gpus = (() => {
   async function load() {
     if (!cur) return;
     const c = cur;
-    const all = c.prefs.scope === 'all';
     let d = null;
     try {
-      const r = await fetch(all ? '/api/gpus-all' : `/api/gpus/${enc(c.cluster)}`);
+      const r = await fetch('/api/gpus-all');
       d = await r.json().catch(() => null);
       if (d && !r.ok && !d.error) d.error = `HTTP ${r.status}`;
     } catch { d = null; }
-    if (c !== cur || all !== (c.prefs.scope === 'all')) return;
+    if (c !== cur) return;
     c.data = d;
     render();
   }
 
   function shell() {
     const p = cur.prefs;
-    const scope = (v, label, tip) => `<button type="button" class="res-chip adv-chip tip${p.scope === v ? ' is-on' : ''}"
-        data-gpu="scope" data-scope="${v}" aria-pressed="${p.scope === v}" data-tip="${esc(tip)}">${esc(label)}</button>`;
     const opts = (list, label, all) => `<option value="">${esc(all)}</option>`
       + list.map(v => `<option value="${esc(v)}">${esc(label(v))}</option>`).join('');
     cur.host.innerHTML = `<div class="card na-card gpu-card">
         <div class="res-tools">
-          <span class="gpu-scope" role="group" aria-label="${esc(tr('gpu.t.scope'))}">
-            ${scope('cluster', tr('gpu.scope.cluster'), tr('gpu.t.scopeCluster'))}
-            ${scope('all', tr('gpu.scope.all'), tr('gpu.t.scopeAll'))}</span>
-          <select class="tip" data-gpu="cluster" data-tip="${esc(tr('gpu.t.cluster'))}" ${p.scope === 'all' ? '' : 'hidden'}><option value="">${esc(tr('avm.filter.allClusters'))}</option></select>
+          <select class="tip" data-gpu="cluster" data-tip="${esc(tr('gpu.t.cluster'))}"><option value="">${esc(tr('avm.filter.allClusters'))}</option></select>
           <select class="tip" data-gpu="node" data-tip="${esc(tr('gpu.t.node'))}"><option value="">${esc(tr('dev.allNodes'))}</option></select>
           <select class="tip" data-gpu="type" data-tip="${esc(tr('gpu.t.type'))}">${opts(TYPES, (t) => TYPE_LABEL[t](), tr('gpu.allTypes'))}</select>
           <select class="tip" data-gpu="state" data-tip="${esc(tr('gpu.t.state'))}">${opts(STATES, (s) => STATE_LABEL[s](), tr('gpu.allStates'))}</select>
@@ -168,59 +165,55 @@ const Gpus = (() => {
     return `${esc(u.model || '–')}${u.resource && u.resource !== u.model ? `<div class="res-dim"><code>${esc(u.resource)}</code></div>` : ''}${sub}`;
   }
 
-  function emptyText(d, all) {
-    if (all) return tr('gpu.noneAll');
-    if (!d.addon) return tr('gpu.noneNoAddon');
+  /** Ce que dit une vue vide : la flotte entière, ou le cluster filtré
+   *  (sans l'add-on, éteint, refusé, ou vraiment sans GPU). */
+  function emptyText(info) {
+    if (!info) return tr('gpu.noneAll');
+    if (info.state === 'no-addon') return tr('gpu.noneNoAddon');
+    if (CL_STATE[info.state]) return `${CL_STATE[info.state][2]()}${info.error ? ` (${info.error})` : ''}`;
     return tr('gpu.none');
   }
 
   function render() {
     if (!cur || !cur.host.isConnected) return;
     const p = cur.prefs;
-    const all = p.scope === 'all';
     const body = cur.host.querySelector('[data-gpu="body"]');
     const notice = cur.host.querySelector('[data-gpu="notice"]');
     const sumEl = cur.host.querySelector('[data-gpu="summary"]');
-    cur.host.querySelector('[data-gpu="cluster"]').hidden = !all;
-    cur.host.querySelectorAll('[data-gpu="scope"]').forEach(b => {
-      const on = b.dataset.scope === p.scope;
-      b.classList.toggle('is-on', on);
-      b.setAttribute('aria-pressed', String(on));
-    });
     const d = cur.data;
-    if (!d) { sumEl.innerHTML = ''; notice.innerHTML = ''; body.innerHTML = `<p class="res-error">${esc(tr('fabric.unreachable'))}</p>`; return; }
-    if (!all && (d.unreachable || d.error)) {
-      sumEl.innerHTML = '';
-      notice.innerHTML = '';
-      const msg = d.unreachable ? tr('fabric.unreachable') : (d.denied ? tr('gpu.cl.deniedTip') : (d.detail || d.error));
-      body.innerHTML = `<div class="sto-finding sev-critical"><div class="sto-finding-title">${esc(msg)}</div></div>`;
+    if (!d || d.error) {
+      sumEl.innerHTML = ''; notice.innerHTML = '';
+      body.innerHTML = `<p class="res-error">${esc(d && d.error ? (d.detail || d.error) : tr('fabric.unreachable'))}</p>`;
       return;
     }
-    // ce qui n'a pas été lu : add-on coupé, CRD absentes, clusters muets, refus
+    const clusters = d.clusters || [];
+    // la liste vient des clusters déclarés, pas des unités : un cluster sans
+    // GPU se choisit aussi, et sa vue vide dit pourquoi
+    fillSelect('cluster', clusters.map(c => c.cluster).sort(), tr('avm.filter.allClusters'));
+    const info = p.cluster ? clusters.find(c => c.cluster === p.cluster) : null;
+    // ce qui n'a pas été lu : clusters muets, sans l'add-on, refus
     const notes = [];
-    if (all) {
-      const bad = (d.clusters || []).filter(c => c.state !== 'ok');
-      if (bad.length) {
-        notes.push(`<div class="avm-clusters" data-gpu="clusters">${bad.map(c => {
-          const st = CL_STATE[c.state] || CL_STATE.error;
-          return `<span class="avm-chip tip" data-tip="${esc(st[2]() + (c.error ? ` (${c.error})` : ''))}">${esc(c.cluster)} ${badge(st[0], st[1]())}</span>`;
-        }).join('')}</div>`);
-      }
-    } else {
-      if (!d.addon) {
-        notes.push(`<div class="sto-finding sev-action"><div class="sto-finding-title">${icon('warn')} ${esc(tr('gpu.noAddon'))}</div>
-          <button type="button" class="btn btn-sm btn-secondary tip" data-gpu="open-addons" data-tip="${esc(tr('dev.t.openAddons'))}">${icon('plug')} ${esc(tr('tab.addons'))}</button></div>`);
-      } else {
-        const off = ['vgpu', 'mig'].filter(t => d.available && d.available[t] === false);
-        if (off.length) notes.push(`<p class="form-hint">${esc(tr('gpu.notAvailable', { list: off.map(t => TYPE_LABEL[t]()).join(', ') }))}</p>`);
-      }
-      if ((d.denials || []).length) notes.push(`<p class="form-hint">${icon('lock')} ${esc(tr('gpu.partial'))}</p>`);
+    const bad = clusters.filter(c => c.state !== 'ok' && (!p.cluster || c.cluster === p.cluster));
+    if (bad.length) {
+      notes.push(`<div class="avm-clusters" data-gpu="clusters">${bad.map(c => {
+        const st = CL_STATE[c.state] || CL_STATE.error;
+        return `<span class="avm-chip tip" data-tip="${esc(st[2]() + (c.error ? ` (${c.error})` : ''))}">${esc(c.cluster)} ${badge(st[0], st[1]())}</span>`;
+      }).join('')}</div>`);
+    }
+    if (info && info.state === 'no-addon') {
+      notes.push(`<div class="sto-finding sev-action"><div class="sto-finding-title">${icon('warn')} ${esc(tr('gpu.noAddon'))}</div>
+        <button type="button" class="btn btn-sm btn-secondary tip" data-gpu="open-addons" data-cluster="${esc(info.cluster)}" data-tip="${esc(tr('dev.t.openAddons'))}">${icon('plug')} ${esc(tr('tab.addons'))}</button></div>`);
+    } else if (info && info.state === 'ok') {
+      const off = ['vgpu', 'mig'].filter(t => info.available && info.available[t] === false);
+      if (off.length) notes.push(`<p class="form-hint">${esc(tr('gpu.notAvailable', { list: off.map(t => TYPE_LABEL[t]()).join(', ') }))}</p>`);
+    }
+    if (clusters.some(c => (c.denials || []).length && (!p.cluster || c.cluster === p.cluster))) {
+      notes.push(`<p class="form-hint">${icon('lock')} ${esc(tr('gpu.partial'))}</p>`);
     }
     notice.innerHTML = notes.join('');
 
     const units = d.units || [];
-    if (all) fillSelect('cluster', [...new Set(units.map(u => u.cluster))].sort(), tr('avm.filter.allClusters'));
-    const inCluster = units.filter(u => !all || !p.cluster || u.cluster === p.cluster);
+    const inCluster = units.filter(u => !p.cluster || u.cluster === p.cluster);
     fillSelect('node', [...new Set(inCluster.map(u => u.node).filter(Boolean))].sort(), tr('dev.allNodes'));
     const words = p.text.toLowerCase().split(/\s+/).filter(Boolean);
     const rows = inCluster.filter(u => (!p.node || u.node === p.node) && (!p.type || u.type === p.type)
@@ -242,17 +235,17 @@ const Gpus = (() => {
         <div class="res-dim">${esc(tr('gpu.sumLine', { used: sum[t].used, free: sum[t].free }))}</div></div>`).join('');
 
     cur.host.querySelector('.res-count').textContent = tr('gpu.count', { n: rows.length });
-    if (!units.length) {
-      body.innerHTML = `<p class="form-hint gpu-empty">${esc(emptyText(d, all))}</p>`;
+    if (!inCluster.length) {
+      body.innerHTML = `<p class="form-hint gpu-empty">${esc(emptyText(info))}</p>`;
       return;
     }
     if (!rows.length) { body.innerHTML = `<p class="form-hint gpu-empty">${esc(tr('gpu.noMatch'))}</p>`; return; }
     const th = (text) => `<th>${esc(text)}</th>`;
     body.innerHTML = `<table class="data-table dev-table gpu-table"><thead><tr>
-        ${all ? th(tr('gpu.col.cluster')) : ''}${th(tr('gpu.col.node'))}${th(tr('gpu.col.type'))}${th(tr('gpu.col.unit'))}${th(tr('gpu.col.model'))}
+        ${th(tr('gpu.col.cluster'))}${th(tr('gpu.col.node'))}${th(tr('gpu.col.type'))}${th(tr('gpu.col.unit'))}${th(tr('gpu.col.model'))}
         ${th(tr('gpu.col.parent'))}${th(tr('gpu.col.state'))}${th(tr('gpu.col.used'))}${th(tr('gpu.col.consumer'))}</tr></thead><tbody>
       ${rows.map(u => `<tr data-unit="${esc(u.cluster)}|${esc(u.id)}" data-type="${esc(u.type)}">
-        ${all ? `<td>${esc(u.cluster)}</td>` : ''}<td>${esc(u.node || '–')}</td>
+        <td>${esc(u.cluster)}</td><td>${esc(u.node || '–')}</td>
         <td><span class="tip" data-tip="${esc(TYPE_TIP[u.type] ? TYPE_TIP[u.type]() : '')}">${esc(TYPE_LABEL[u.type] ? TYPE_LABEL[u.type]() : u.type)}</span></td>
         <td><strong>${esc(u.type === 'node' ? u.name : (u.address || u.name))}</strong>${u.type !== 'node' && u.address ? `<div class="res-dim">${esc(u.name)}</div>` : ''}</td>
         <td>${modelHtml(u)}</td>
@@ -268,15 +261,15 @@ const Gpus = (() => {
     if (!b || !cur || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
     const act = b.dataset.gpu;
     if (act === 'refresh') return load();
-    if (act === 'scope') {
-      if (cur.prefs.scope === b.dataset.scope) return;
-      cur.prefs.scope = b.dataset.scope;
-      savePrefs();
-      cur.data = null;
-      render();
-      return load();
+    if (act === 'open-addons' && window.Sections) {
+      // Add-ons porte sur le cluster choisi en haut : on y passe d'abord
+      const sel = document.getElementById('cluster-select');
+      if (sel && b.dataset.cluster && sel.value !== b.dataset.cluster) {
+        sel.value = b.dataset.cluster;
+        sel.dispatchEvent(new Event('change'));
+      }
+      return Sections.open('addons', 'list');
     }
-    if (act === 'open-addons' && window.Sections) return Sections.open('addons', 'list');
     if (act === 'open-vm') {
       e.preventDefault();
       if (window.VMEdit && VMEdit.open) VMEdit.open(b.dataset.cluster, b.dataset.ns, b.dataset.name);
@@ -291,6 +284,6 @@ const Gpus = (() => {
     }
   }
 
-  return { start, stop };
+  return { start, stop, load };
 })();
 window.Gpus = Gpus;

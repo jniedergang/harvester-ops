@@ -39,13 +39,11 @@ const Sections = (() => {
                                             // v1.68.0 : les périphériques de Harvester
                                             pci: { mod: 'Devices' },
                                             usb: { mod: 'Devices' },
-                                            // v1.92.0 : l'inventaire des GPU
-                                            gpu: { mod: 'Gpus' },
                                             sriov: { mod: 'Devices' },
                                             support: { mod: 'Advanced' } } },
   };
   // les modules qui tiennent leur onglet eux-mêmes : un seul vit à la fois
-  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'Gpus', 'MonLog', 'VMImport', 'Forklift'];
+  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'MonLog', 'VMImport', 'Forklift'];
   const KEY = (sec) => `harvester_ops_section_${sec}`;
 
   function isSection(name) { return Object.prototype.hasOwnProperty.call(DEF, name); }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """harvester-gpus : l'inventaire des GPU des clusters Harvester (v1.92.0).
 
-Lecture seule. Même modèle que l'onglet Advanced > GPU de la console
+Lecture seule. Même modèle que l'onglet Shared resources > GPU de la console
 (bin/lib/hv_gpu.py) : GPU entiers, vGPU, instances MIG et ressources GPU
 des nœuds pour les conteneurs, avec leur état (libre, utilisée, désactivée)
 et leur consommateur (VM ou pod).

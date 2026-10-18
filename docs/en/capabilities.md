@@ -215,8 +215,8 @@ two entries, right below Virtual machines: **Current cluster's containers**
 (the cluster chosen at the top) and **All clusters containers**, every
 declared cluster in one table with a **Cluster** column.
 
-- **Read-only for now.** Creating, changing, scaling, restarting or deleting
-  a workload comes later, each as a tracked action and a `bin/` script.
+- **Gestures (1.93.0)**: create, scale, restart and delete, each a tracked
+  action (dock, Activity) run by `bin/harvester-containers.py`. See below.
 - **What is listed**: Deployments, StatefulSets, DaemonSets, Jobs, CronJobs
   and lone pods, read in one pass per cluster. **System namespaces are
   hidden**: `kube-*`, `cattle-*`, `harvester-*`, `longhorn-system`,
@@ -254,6 +254,51 @@ Checked read-only on harv1 (Harvester 1.9.0): 118 pods read, the system
 namespaces and VM pods left out, the four Cluster API controllers of the
 console listed with their pod. The test with a workload deployed for the
 purpose is left to the maintainer.
+
+#### Gestures on container workloads (1.93.0)
+
+- **Create**: the **Create** button of both views opens a window with two
+  tabs. **Form**: cluster, name, namespace, type (Deployment or Job), image,
+  number of pods (a Job runs them all in parallel), command, environment
+  (one `NAME=value` per line), GPUs requested and their resource
+  (`nvidia.com/gpu` by default), CPU limit, memory limit. **YAML**: paste
+  the manifest of one Deployment, StatefulSet, DaemonSet, Job, CronJob or
+  Pod. A box creates the namespace when it is missing; without it, a
+  missing namespace is refused. The GPU field says how many container GPUs
+  are free on the chosen cluster.
+- **Every container gets a memory limit.** 256Mi when none is given, with
+  matching memory and CPU requests (100m CPU by default). A pasted manifest
+  keeps what it says and gets only what is missing.
+- **Row menu**: **Scale** (Deployment, StatefulSet, ReplicaSet; 0 stops
+  without deleting), **Restart** (rolling restart of a Deployment,
+  StatefulSet or DaemonSet: the `kubectl.kubernetes.io/restartedAt`
+  annotation, as `kubectl rollout restart` does), **Delete** (any type,
+  after a confirmation in the page). An entry a type cannot take is greyed
+  out and says why.
+- **Safety**: system namespaces are refused, by the console and again by
+  the script. The form is checked before anything is sent. The server
+  checks each write first (`--dry-run=server`: webhooks, quotas, rights);
+  nothing is written if that check fails, and a namespace created for a
+  refused workload is removed again. Writes use your identity.
+- When the action ends, the list is read again.
+
+API: `POST /api/containers/<cluster>/create` (`{spec: {...}}` or
+`{yaml: "..."}`, `create_namespace`), `POST
+/api/containers/<cluster>/<namespace>/<kind>/<name>/scale` (`{replicas}`),
+`POST .../restart`, `DELETE /api/containers/<cluster>/<namespace>/<kind>/<name>`.
+Each answers `202 {action_id}` at once. Command line:
+`bin/harvester-containers.py create|scale|restart|delete`, with `--cluster`
+or `--kubeconfig`, `--dry-run` for the server check only, and
+`create --file MANIFEST` or the form options (`--name`, `--namespace`,
+`--kind`, `--image`, `--replicas`, `--command`, `--env`, `--gpus`,
+`--gpu-resource`, `--cpu`, `--memory`, `--create-namespace`).
+
+Checked for real on harv1 (Harvester 1.9.0), in a test namespace created
+for the purpose and then deleted: a Deployment and a Job created from the
+command line, a Deployment and a pod created through the console routes,
+scale to 2 then 0, rolling restart (new pods, old ones gone), a create
+refused by the server check (name already taken), a scale in
+`kube-system` refused, then every workload deleted.
 
 ### The actions menu of a VM, as in Harvester (1.60.0)
 
@@ -1176,11 +1221,16 @@ given back to its driver after; two virtual functions created on the igb,
 one passed then given back, SR-IOV refused off while it was taken, then
 disabled; the tablet passed to a VM on another host and given back.
 
-### GPU inventory (1.92.0)
+### GPU inventory (1.92.0, Shared resources since 1.93.0)
 
-**Advanced > GPU**, next to PCI Devices and USB Devices, lists the GPUs of a
-cluster or of every declared cluster. It is read-only. A unit is what a
-future reservation will hand out:
+**Shared resources** is a top-level group of the menu, right after
+Containers: what VMs and containers share. The GPUs of a node serve both
+(passthrough, vGPU, MIG-backed vGPU for VMs; whole GPUs for containers).
+Its first entry, **GPU**, lists the GPUs of every declared cluster. The
+view does not follow the cluster chosen at the top: it shows the whole
+fleet, with a **Cluster** filter (all clusters by default) and a Cluster
+column. Since 1.93.0 it is no longer under Cluster > Advanced. It is
+read-only. A unit is what a future reservation will hand out:
 
 - **Whole GPU**: a PCI device of class `0300` (VGA) or `0302` (3D) from
   NVIDIA (`10de`) or AMD (`1002`), given to a VM in passthrough. An Intel
@@ -1208,14 +1258,13 @@ opens All clusters containers, filtered on it. Pods of system namespaces
 count too, marked, without a link (the Containers view hides them).
 
 On top, one card per type: total, used, free. A disabled unit counts in the
-total, not in the free ones. Filters: cluster (all clusters scope), node,
-type, state, text. The cards follow the cluster and node filters.
+total, not in the free ones. Filters: cluster, node, type, state, text. The cards follow the cluster and node filters.
 
 Nothing is left silent. Without the `pcidevices-controller` add-on, the
 view says so and links to Add-ons; container GPUs stay listed. A missing
 vGPU or MIG resource type is said as "not available", never an error. A
-cluster with no GPU says "No GPU on this cluster". In the all clusters
-scope, a cluster that is off, refuses the read or has no add-on is said.
+cluster with no GPU says "No GPU on this cluster" when it is the chosen
+filter. A cluster that is off, refuses the read or has no add-on is said.
 
 API: `GET /api/gpus/<cluster>`, `GET /api/gpus-all`, read with your
 identity. Command line:
