@@ -54,3 +54,22 @@ All simulated API servers run on the bench host: past a few dozen people they
 compete with the console for CPU, which a real deployment does not do (each
 cluster has its own API server). Watch the host load (`/proc/loadavg`) and
 read the results with that in mind.
+
+## Simulated GPU cluster (inventory and bookings without hardware)
+
+`gpu_demo.py` creates one kwok cluster, `gpudemo`, that carries the CRDs of
+Harvester's pcidevices controller (copied from a real Harvester) and sample
+GPU objects shaped like the real ones: a whole H100 passed through to a VM,
+an H100 split into vGPUs (one held by a VM, two disabled), an A100 partitioned
+in MIG with a MIG-backed vGPU held by a VM, and a node serving four GPUs to
+containers, two of them taken by a Deployment. It is declared in the dev
+console's state (`clusters.d/`), never in an operator configuration.
+
+```bash
+python3 tests/bench/kwok/gpu_demo.py prepare --from ~/.kube/harvester.yaml
+python3 tests/bench/kwok/gpu_demo.py up      # then restart the dev console
+python3 tests/bench/kwok/gpu_demo.py down
+```
+
+Nothing runs behind it: assigning a GPU to a VM or applying a booking for real
+is not exercised by this cluster.
