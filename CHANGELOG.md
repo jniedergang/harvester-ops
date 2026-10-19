@@ -4,6 +4,75 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.95.0] - 2026-10-19 - Usage: GPU-hours booked and consumed, waste, quotas
+
+### Added
+- **Shared resources > Usage**, third entry after GPU and Bookings: the
+  GPU-hours of a period (this week, this month, last month, a range of
+  days) per person, group or namespace. Booked hours come from the
+  bookings, cut at the period's edges; a cancelled booking counts from its
+  start until its cancellation if the slot had started. Consumed hours come
+  from samples taken by the console. A consumer is tied to its holder by a
+  booking that targets its VM or workload on that cluster at that time,
+  else it is listed "without booking" under its namespace. Waste (booked,
+  not used, on the part already past) and out of rule (used without a
+  booking, or beyond the booked count) are shown. Four totals, a chart of
+  GPU-hours per day (plain SVG, theme colors), a table per holder with the
+  quota of the month, a progress bar and what is left, and a detail per
+  cluster and unit type. CSV export served by the console. Empty states
+  say whether the sampler has run and which clusters it could not read.
+- GPU sampler: one background thread of the console (never in a reader
+  process) reads the GPU inventory of every declared cluster every
+  `HARVESTER_OPS_USAGE_INTERVAL` seconds (default 300, 30 to 3600) with the
+  console's own kubeconfig, through the collector of the GPU view, and
+  writes the held units into `usage.db` (next to `bookings.db`, or
+  `HARVESTER_OPS_USAGE_DB`, WAL, 400 days kept). A sample stands for the
+  time since the previous one of the same consumer, at most two intervals:
+  a longer gap is not filled. An unreachable, unknown or unreadable cluster
+  is noted and skipped. `HARVESTER_OPS_USAGE=0` turns it off.
+- Quotas per person or group: a monthly cap of booked GPU-hours (calendar
+  month, UTC) and an optional maximum of units booked at the same time (all
+  clusters), kept in `bookings.db` (new `quotas` table, additive). An admin
+  sets them in the Quotas window of the view; a booking over the quota of
+  its holder is refused with the reason, on the same path as the conflicts
+  (form check while typing, and again in the write transaction of the
+  command line). Nothing is enforced on the clusters.
+- Command line: `harvester-bookings.py usage [--from --to] [--tz]
+  [--json | --csv]` and `harvester-bookings.py quota list|set|delete`.
+- API: `GET /api/usage`, `GET /api/usage.csv`, `GET /api/usage/quotas`
+  (viewer and up), `POST` and `DELETE /api/usage/quotas` (admin, tracked
+  action through the command line).
+
+### Changed
+- GPU inventory: a pod consumer now carries the name of its workload
+  (`workload`, from its owner references: a ReplicaSet named
+  `<deployment>-<pod-template-hash>` leads to its Deployment), so that a
+  booking of a container workload can be matched to its pods.
+
+### Internal
+- `bin/lib/hv_usage.py` (pure model: booked and consumed hours,
+  attribution, report, quotas, CSV) and `bin/lib/usage_db.py` (samples and
+  runs). Known limits: a MIG instance is counted as the MIG-backed vGPU
+  that holds it; the days of the chart use the browser's time zone offset
+  at the time of the request.
+
+### Tests
+- API: hours at the period's edges and the cancellation rules, sample
+  gaps, attribution by target versus namespace, waste and out of rule,
+  monthly and concurrent quotas, multi-holder and multi-cluster report,
+  CSV without formulas; sampler with a fake collector and a temporary
+  database (writes, unreachable, denied and failing clusters, retention,
+  one thread, never in a reader process); command line usage and quota,
+  booking refused over a quota, additive migration; routes (roles, rate
+  limit, tracked action, CSV, quota said by the booking check).
+- e2e: navigation, period switch, table, quota bar, detail rows, chart,
+  CSV link served by the console, empty states, quota editor for admins
+  only with an in-page confirmation. Each key rule was mutated once to see
+  its tests fail.
+- Real: the sampler ran against the kwok cluster `gpudemo` with temporary
+  databases and recorded the units of `prod/train`, `ml/notebook`,
+  `ml/big` and `ml/trainer`; a booking over a group quota was refused.
+
 ## [1.94.1] - 2026-10-19 - Bookings: every pool in the calendar, counted bookings said per pool, forms that close
 
 ### Fixed

@@ -1283,8 +1283,9 @@ present, one Intel integrated GPU): the view says "No GPU on this cluster".
 **Shared resources > Bookings** books GPU units of a cluster on a time
 slot, for a person or a group. **A booking reserves the slot in the
 console; it is not yet enforced on the cluster**: nothing is attached,
-no quota is set, nothing is stopped at the end of the slot. The view and
-the form say so.
+nothing is stopped at the end of the slot. The view and the form say so.
+Quotas (1.95.0, see below) are checked by the console when a booking is
+created, not on the cluster.
 
 What can be booked:
 
@@ -1379,6 +1380,82 @@ from its inventory, a specific vGPU refused on an overlapping slot and
 accepted back to back, three `MIG 3g.40gb` refused (two created), a
 disabled vGPU refused, create and cancel as tracked actions. Bookings are
 not checked against real GPU hardware.
+
+### GPU usage and quotas (1.95.0)
+
+**Shared resources > Usage** counts GPU-hours over a period (this week,
+this month, last month, or a range of days) and sets quotas. Two measures,
+side by side, per holder:
+
+- **Booked**: units x duration of the bookings in the period, cut at its
+  edges. A cancelled booking counts from its start until its cancellation
+  if the slot had started, and not at all otherwise.
+- **Consumed**: the GPU units really held, sampled by the console. A
+  background sampler of the console reads the GPU inventory of every
+  declared cluster every 5 minutes (`HARVESTER_OPS_USAGE_INTERVAL`, in
+  seconds, 30 to 3600) with the console's own kubeconfig (read-only, like
+  the cluster watchers, and with the same collector as the GPU view), and
+  writes one sample per held unit into `usage.db` (next to `bookings.db`,
+  or `HARVESTER_OPS_USAGE_DB`; samples kept 400 days). A sample counts the
+  time since the previous sample of the same consumer on the same unit when
+  that one is at most two intervals old, one interval otherwise: a longer
+  gap (console stopped, cluster unreachable) is not filled. An unreachable,
+  powered-off or unreadable cluster is noted and skipped. `HARVESTER_OPS_USAGE=0`
+  turns the sampler off.
+
+A consumer (a VM, or a pod) is tied to a person or a group by a booking
+that **targets** it (the VM, or the container workload the pod belongs to)
+on the same cluster at that time. Otherwise it stays **without booking**,
+listed under its namespace. The gap between the two measures is shown:
+**waste** is booked time left unused (booking by booking, on the part
+already past), **out of rule** is use without a booking, or beyond the
+number of units booked.
+
+The view: four totals, a chart of GPU-hours per day (booked as outlined
+bars, consumed as solid bars, days in your time zone), and a table per
+holder (booked, consumed, the quota of the month with a progress bar and
+what is left, waste, out of rule). A row unfolds into its detail per
+cluster and unit type. **CSV** downloads the same report from the console
+(one row per holder, then one per cluster and type). The view says when
+the sampler last ran and which clusters it could not read, and says so when
+nothing has been sampled yet.
+
+**Quotas**, per person or group: a cap of **booked** GPU-hours per
+calendar month (UTC) and, optional, a maximum of units booked at the same
+time (all clusters). An admin sets them in the **Quotas** window of the
+view (or the **Quota** button of a holder's row); viewers and operators see
+them. They apply when a booking is created: it is refused, with the reason,
+on the same path as the conflicts (the booking form says it while you type,
+the command line checks again in its write transaction). Bookings already
+made stay. Nothing is enforced on the clusters. The quota is the holder's:
+an operator booking for a group uses the group's quota.
+
+Known limits: a MIG instance is held by a MIG-backed vGPU, so its use is
+counted as that vGPU (type `vgpu`); a unit used by a consumer the inventory
+cannot name is not counted; the days of the chart use the time zone offset
+of the browser at the time of the request.
+
+Rights: everyone reads the report and the quotas; setting or removing a
+quota needs the admin role and is a tracked action (dock, Activity).
+
+API: `GET /api/usage?from=&to=&tz=` (ISO 8601 bounds, default this month
+UTC; `tz` in minutes east of UTC), `GET /api/usage.csv` (same parameters),
+`GET /api/usage/quotas`, `POST /api/usage/quotas`
+(`{holder: {kind, name}, monthly_hours, max_units}`, 202 with the action
+id), `DELETE /api/usage/quotas` (`{holder}`).
+
+Command line: `bin/harvester-bookings.py usage [--from --to] [--tz]
+[--json | --csv]` and `bin/harvester-bookings.py quota list|set|delete`
+(`set --holder USER | --group NAME [--monthly-hours H] [--max-units N]`).
+
+**What is verified.** The sampler ran for real against the simulated GPU
+cluster `gpudemo` (kwok bench) with temporary databases: it recorded the
+units held by the VMs `prod/train`, `ml/notebook`, `ml/big` and the pods
+of the Deployment `ml/trainer` (two GPUs, workload resolved from the pod),
+noted an undeclared kubeconfig as unknown, and the report tied
+`ml/notebook` and `ml/trainer` to their bookings and the other two to
+their namespaces. A booking over a group's monthly quota was refused with
+its reason. Not checked against real GPU hardware.
 
 ### Upgrading Harvester (1.69.0)
 

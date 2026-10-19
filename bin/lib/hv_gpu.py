@@ -124,6 +124,23 @@ def _state(disabled, total, used):
     return "used" if used >= total else "free"
 
 
+def pod_workload(pod):
+    """La charge d'un pod, d'après ses seuls propriétaires (v1.95.0) : un
+    ReplicaSet `<deployment>-<pod-template-hash>` remonte à son Deployment ;
+    StatefulSet, DaemonSet, Job : leur nom ; un pod seul : le sien. Rend le
+    nom (la cible d'une réservation de charge)."""
+    meta = _meta(pod)
+    ref = _hc._controller_ref(pod or {}, _hc._PARENT_KINDS["Pod"])
+    if not ref:
+        return meta.get("name") or ""
+    name = ref["name"]
+    if ref["kind"] == "ReplicaSet":
+        h = (meta.get("labels") or {}).get("pod-template-hash")
+        if h and name.endswith("-" + h):
+            return name[:-len(h) - 1]
+    return name
+
+
 def pod_gpu_holders(pods, cluster=""):
     """{(nœud, ressource): [(consommateur, nombre)]} des pods qui tiennent des
     GPU : planifiés, ni terminés ni des pods de VM ou de CDI."""
@@ -136,7 +153,8 @@ def pod_gpu_holders(pods, cluster=""):
         if ((p.get("status") or {}).get("phase")) in ("Succeeded", "Failed"):
             continue
         ns = meta.get("namespace") or ""
-        who = consumer("pod", cluster, ns, meta["name"], system=_hc.is_system_namespace(ns))
+        who = consumer("pod", cluster, ns, meta["name"], system=_hc.is_system_namespace(ns),
+                       workload=pod_workload(p))
         for key, n in _hc.gpu_requests(spec).items():
             if n > 0:
                 out.setdefault((node, key), []).append((who, n))

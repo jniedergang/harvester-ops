@@ -145,7 +145,7 @@ def open_bookings(page):
 def test_bookings_lives_under_shared_resources_and_says_it_is_not_enforced(ui):
     page, _, _ = ui
     group = page.locator("#tab-group-shared")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings"]
+    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings", "usage"]
     assert group.locator('.tab[data-tab="bookings"]').get_attribute("title")
     pane = open_bookings(page)
     expect(group.locator('.tab[data-tab="bookings"]')).to_have_class(re.compile("active"))

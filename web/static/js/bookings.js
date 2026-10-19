@@ -514,6 +514,9 @@ const Bookings = (() => {
     function reasonText(r) {
       if (r.code === 'unit-taken') return tr('bkg.why.unit', { holder: holderText(r.holder), start: when(r.start), end: when(r.end) });
       if (r.code === 'capacity') return tr('bkg.why.capacity', { peak: r.peak, cap: r.capacity, model: r.model, at: when(r.at) });
+      // v1.95.0 : le quota du titulaire (Shared resources > Usage)
+      if (r.code === 'quota-hours') return tr('bkg.why.quotaHours', { holder: holderText(r.holder), used: r.used, month: r.month, adding: r.adding, cap: r.cap });
+      if (r.code === 'quota-units') return tr('bkg.why.quotaUnits', { holder: holderText(r.holder), peak: r.peak, at: when(r.at), max: r.max });
       return r.message || r.code;
     }
     function showCheck(state, lines) {

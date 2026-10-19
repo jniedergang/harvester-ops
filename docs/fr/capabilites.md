@@ -1431,8 +1431,10 @@ les types de ressource présents, un GPU intégré Intel) : la vue dit
 **Shared resources > Bookings** réserve des unités GPU d'un cluster sur un
 créneau, pour une personne ou un groupe. **Une réservation retient le
 créneau dans la console ; elle n'est pas encore appliquée sur le
-cluster** : rien n'est attaché, aucun quota n'est posé, rien n'est arrêté
-en fin de créneau. La vue et le formulaire le disent.
+cluster** : rien n'est attaché, rien n'est arrêté en fin de créneau. La
+vue et le formulaire le disent. Les quotas (1.95.0, plus bas) sont
+contrôlés par la console à la création d'une réservation, pas sur le
+cluster.
 
 Ce qui se réserve :
 
@@ -1535,6 +1537,87 @@ dans son inventaire, un vGPU précis refusé sur un créneau qui chevauche et
 accepté bout à bout, trois `MIG 3g.40gb` refusées (deux créées), un vGPU
 désactivé refusé, création et annulation en actions suivies. Les
 réservations ne sont pas vérifiées sur du vrai matériel GPU.
+
+### Usage des GPU et quotas (1.95.0)
+
+**Shared resources > Usage** compte les GPU-heures d'une période (cette
+semaine, ce mois, le mois précédent, ou une plage de jours) et règle les
+quotas. Deux mesures, côte à côte, par titulaire :
+
+- **Réservé** : unités x durée des réservations de la période, coupées à
+  ses bornes. Une réservation annulée compte de son début jusqu'à son
+  annulation si le créneau avait commencé, et pas du tout sinon.
+- **Consommé** : les unités GPU réellement tenues, relevées par la console.
+  Un échantillonneur de fond lit l'inventaire GPU de chaque cluster déclaré
+  toutes les 5 minutes (`HARVESTER_OPS_USAGE_INTERVAL`, en secondes, de 30
+  à 3600) avec le kubeconfig de la console (lecture seule, comme les
+  surveillances de cluster, et avec le collecteur de la vue GPU), et range
+  un relevé par unité tenue dans `usage.db` (à côté de `bookings.db`, ou
+  `HARVESTER_OPS_USAGE_DB` ; relevés gardés 400 jours). Un relevé vaut le
+  temps écoulé depuis le relevé précédent du même consommateur sur la même
+  unité quand ce dernier date d'au plus deux intervalles, un intervalle
+  sinon : un trou plus long (console arrêtée, cluster injoignable) n'est
+  pas comblé. Un cluster injoignable, éteint ou illisible est noté et
+  passé. `HARVESTER_OPS_USAGE=0` coupe l'échantillonneur.
+
+Un consommateur (une VM, ou un pod) est rattaché à une personne ou un
+groupe par une réservation qui le **cible** (la VM, ou la charge de
+conteneurs dont le pod fait partie) sur le même cluster à cet instant.
+Sinon il reste **sans réservation**, rangé sous son namespace. L'écart
+entre les deux mesures est montré : le **gaspillage** est le temps réservé
+et pas utilisé (réservation par réservation, sur la partie déjà passée),
+le **hors règle** l'usage sans réservation, ou au-delà du nombre d'unités
+réservées.
+
+La vue : quatre totaux, un graphique des GPU-heures par jour (réservé en
+barres cerclées, consommé en barres pleines, jours de votre fuseau), et un
+tableau par titulaire (réservé, consommé, quota du mois avec une barre de
+progression et le reste, gaspillage, hors règle). Une ligne se déplie sur
+son détail par cluster et type d'unité. **CSV** télécharge le même rapport
+depuis la console (une ligne par titulaire, puis une par cluster et type).
+La vue dit quand l'échantillonneur est passé pour la dernière fois et
+quels clusters il n'a pas pu lire, et le dit quand rien n'a encore été
+relevé.
+
+**Quotas**, par personne ou par groupe : un plafond de GPU-heures
+**réservées** par mois calendaire (UTC) et, facultatif, un nombre maximal
+d'unités réservées en même temps (tous clusters). Un administrateur les
+règle dans la fenêtre **Quotas** de la vue (ou par le bouton **Quota**
+d'une ligne) ; lecteurs et opérateurs les voient. Ils s'appliquent à la
+création d'une réservation : elle est refusée, avec la raison, par le même
+chemin que les conflits (le formulaire le dit pendant la saisie, la ligne
+de commande refait le contrôle dans sa transaction d'écriture). Les
+réservations déjà faites restent. Rien n'est appliqué sur les clusters. Le
+quota est celui du titulaire : un opérateur qui réserve pour un groupe
+consomme le quota du groupe.
+
+Limites connues : une instance MIG est tenue par un vGPU adossé à MIG, son
+usage compte donc comme ce vGPU (type `vgpu`) ; une unité tenue par un
+consommateur que l'inventaire ne nomme pas n'est pas comptée ; les jours
+du graphique suivent le décalage horaire du navigateur au moment de la
+demande.
+
+Droits : tout le monde lit le rapport et les quotas ; régler ou retirer un
+quota demande le rôle admin et est une action suivie (dock, Activity).
+
+API : `GET /api/usage?from=&to=&tz=` (bornes ISO 8601, par défaut le mois
+en cours en UTC ; `tz` en minutes à l'est d'UTC), `GET /api/usage.csv`
+(mêmes paramètres), `GET /api/usage/quotas`, `POST /api/usage/quotas`
+(`{holder: {kind, name}, monthly_hours, max_units}`, 202 avec l'action),
+`DELETE /api/usage/quotas` (`{holder}`).
+
+Ligne de commande : `bin/harvester-bookings.py usage [--from --to] [--tz]
+[--json | --csv]` et `bin/harvester-bookings.py quota list|set|delete`
+(`set --holder USER | --group NOM [--monthly-hours H] [--max-units N]`).
+
+**Ce qui est vérifié.** L'échantillonneur a tourné pour de vrai sur le
+cluster GPU simulé `gpudemo` (banc kwok) avec des bases temporaires : il a
+relevé les unités tenues par les VM `prod/train`, `ml/notebook`, `ml/big`
+et les pods du Deployment `ml/trainer` (deux GPU, charge retrouvée depuis
+le pod), noté un kubeconfig absent comme inconnu, et le rapport a rattaché
+`ml/notebook` et `ml/trainer` à leurs réservations, les deux autres à leur
+namespace. Une réservation au-delà du quota mensuel d'un groupe a été
+refusée avec sa raison. Non vérifié sur du vrai matériel GPU.
 
 ### Mettre à jour Harvester (1.69.0)
 

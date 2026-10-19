@@ -156,6 +156,11 @@
             <span class="tab-icon" data-icon="timer"></span>
             <span class="sidebar-label" data-i18n="tab.bookings">Bookings</span>
           </a>
+          <!-- v1.95.0 : GPU-heures réservées et consommées, quotas -->
+          <a class="tab tab-child" data-tab="usage" href="#usage" data-i18n-title="tab.usageTip" title="GPU-hours booked and consumed per person, group or namespace over a period, waste, use without booking, and quotas">
+            <span class="tab-icon" data-icon="metrics"></span>
+            <span class="sidebar-label" data-i18n="tab.usage">Usage</span>
+          </a>
         </div>
       </div>
       <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
@@ -804,6 +809,13 @@
       <div class="na-host" id="bookings-host"></div>
     </section>
 
+    <!-- USAGE : v1.95.0, GPU-heures réservées et consommées, quotas (Shared resources) -->
+    <section id="tab-usage" class="tab-content">
+      <h1 data-i18n="usg.title">Usage</h1>
+      <p class="hint" data-i18n="usg.hint">GPU-hours over a period, per person, group or namespace: booked (from the bookings) and consumed (sampled by the console on every cluster). Waste is booked time left unused; out of rule is use without a booking. Quotas cap the booked GPU-hours per month.</p>
+      <div class="na-host" id="usage-host"></div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>
@@ -1265,6 +1277,7 @@
   <script src="/static/js/devices.js"></script>
   <script src="/static/js/gpus.js"></script>
   <script src="/static/js/bookings.js"></script>
+  <script src="/static/js/usage.js"></script>
   <script src="/static/js/upgrade.js"></script>
   <script src="/static/js/monlog.js"></script>
   <script src="/static/js/vmimport.js"></script>

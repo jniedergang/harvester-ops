@@ -314,6 +314,15 @@ def describe(reason):
     if reason["code"] == "capacity":
         return (f"{reason['peak']} x {reason['type']} {reason['model']} would be booked at "
                 f"{reason['at']}, the cluster has {reason['capacity']}")
+    # v1.95.0 : quotas du titulaire (hv_usage.quota_reasons)
+    if reason["code"] in ("quota-hours", "quota-units"):
+        h = reason.get("holder") or {}
+        who = f"{h.get('kind')} {h.get('name')}"
+        if reason["code"] == "quota-hours":
+            return (f"over the quota of {who}: {reason['used']} GPU-hours already booked in {reason['month']}, "
+                    f"this booking adds {reason['adding']}, the monthly cap is {reason['cap']}")
+        return (f"over the quota of {who}: {reason['peak']} units would be booked at the same time at "
+                f"{reason['at']}, the maximum is {reason['max']}")
     return reason.get("code", "refused")
 
 

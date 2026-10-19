@@ -27,6 +27,8 @@ os.environ.setdefault("HARVESTER_OPS_DISABLE_RATELIMIT", "1")
 os.environ.setdefault("HARVESTER_OPS_KUBE_REST", "0")
 # ni processus lecteurs (read_workers.py), testés à part
 os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
+# v1.95.0 : ni échantillonneur des GPU (fil de fond), testé à part
+os.environ.setdefault("HARVESTER_OPS_USAGE", "0")
 # v1.54.0 : les tests qui importent `app` dans le processus ne doivent pas
 # écrire dans les espaces Terraform ni les déclarations réels (audit D17).
 import tempfile as _tempfile  # noqa: E402
@@ -163,6 +165,8 @@ def flask_server(test_config):
         # v1.5.6: disable flask-limiter in tests; the suite hits some
         # endpoints dozens of times in a row.
         "HARVESTER_OPS_DISABLE_RATELIMIT": "1",
+        # v1.95.0 : l'échantillonneur des GPU ne tourne pas sur le serveur de test
+        "HARVESTER_OPS_USAGE": "0",
         "NO_COLOR": "1",
     }
     # Override bind_port via env injection: we patch the app's port read

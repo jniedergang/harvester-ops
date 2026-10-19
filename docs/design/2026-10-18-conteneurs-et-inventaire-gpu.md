@@ -244,3 +244,30 @@ GPU-heures par jour sur la période. Export CSV.
 Unitaires (calcul des heures aux bornes, annulations, rattachement par cible
 et par namespace, quotas). Réel : l'échantillonneur sur `gpudemo` relève les
 unités tenues par `prod/train`, `ml/notebook`, `ml/big` et `ml/trainer`.
+
+### Choix de la réalisation (livrée en 1.95.0)
+
+- Modèle pur `bin/lib/hv_usage.py`, registre des relevés
+  `bin/lib/usage_db.py` (tables `samples` et `runs`, WAL, 400 jours) ;
+  quotas dans une nouvelle table `quotas` de `bookings.db` (migration
+  additive).
+- Un relevé vaut l'écart avec le relevé précédent du même consommateur sur
+  la même unité, au plus deux intervalles ; un trou plus long n'est pas
+  comblé. L'intervalle est rangé avec chaque relevé : changer le réglage ne
+  fausse pas l'historique.
+- Rattachement par la cible seulement (la VM, ou la charge du pod, retrouvée
+  par ses propriétaires : un ReplicaSet `<deployment>-<hash>` remonte au
+  Deployment). Entre plusieurs réservations, celle du même type d'unité,
+  puis la plus ancienne.
+- Gaspillage compté réservation par réservation, sur la partie déjà passée.
+  Hors règle : l'usage sans réservation, et l'usage au-delà du nombre
+  d'unités réservées (plafonné par réservation et par tour).
+- Quota mensuel par mois calendaire UTC, sur les heures RÉSERVÉES (une
+  réservation annulée compte ce qui a été tenu) ; unités simultanées sur
+  tous les clusters, réservations non annulées. Le quota est celui du
+  titulaire, pas de la personne qui réserve.
+- Une instance MIG est tenue par un vGPU adossé à MIG : son usage est relevé
+  comme ce vGPU (les unités MIG ne sont pas relevées, pour ne pas compter
+  deux fois).
+- L'échantillonneur lit avec le kubeconfig déclaré de la console, sans
+  identité de personne, et ne tourne que dans le processus principal.
