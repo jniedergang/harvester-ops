@@ -283,8 +283,10 @@ def test_a_pod_requesting_two_gpus_and_system_pods():
     assert (u["id"], u["node"], u["name"], u["state"]) == ("n1/nvidia.com/gpu", "n1", "nvidia.com/gpu", "free")
     assert (u["total"], u["used"], u["free"]) == (4, 3, 1)
     assert u["consumers"] == [
-        {"kind": "pod", "cluster": "c1", "namespace": "ml", "name": "trainer-0", "system": False, "count": 2},
-        {"kind": "pod", "cluster": "c1", "namespace": "gpu-operator-system", "name": "validator", "system": True, "count": 1}]
+        {"kind": "pod", "cluster": "c1", "namespace": "ml", "name": "trainer-0", "system": False,
+         "workload": "trainer-0", "count": 2},
+        {"kind": "pod", "cluster": "c1", "namespace": "gpu-operator-system", "name": "validator", "system": True,
+         "workload": "validator", "count": 1}]
 
 
 @pytest.mark.parametrize("case,n,state", [

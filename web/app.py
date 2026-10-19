@@ -904,6 +904,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/ns-admin/",           # v1.62.0 : créer, modifier, supprimer un namespace
     "/api/templates/",          # v1.64.0 : versions des modèles partagés du cluster
     "/api/net-admin/",          # v1.65.0 : réseaux de cluster, liens, équilibreurs, réglages réseau
+    "/api/usage/quotas",        # v1.95.0 : quotas de GPU-heures (la lecture reste ouverte à tous)
     "/api/hv-settings/",        # v1.67.0 : réglages de Harvester (certains coupent l'accès)
     "/api/hv-support/",         # v1.67.0 : paquet de support, kubeconfigs délivrés
     "/api/devices/",            # v1.68.0 : passthrough PCI et USB, SR-IOV (détache un périphérique de l'hôte)
@@ -9238,7 +9239,14 @@ def _booking_prepare(body):
 
 def _booking_conflicts(booking, cap):
     existing = _bookings_read(cluster=booking["cluster"], since=booking["start"])
-    return [dict(r, message=_hbk.describe(r)) for r in _hbk.conflicts(booking, existing, cap)]
+    reasons = _hbk.conflicts(booking, existing, cap)
+    # v1.95.0 : le quota du titulaire, même contrôle que le script
+    conn = _bkdb.connect(_bookings_db_path())
+    try:
+        reasons += _bkdb.quota_reasons(conn, booking)
+    finally:
+        conn.close()
+    return [dict(r, message=_hbk.describe(r)) for r in reasons]
 
 
 @app.route("/api/bookings")
@@ -9354,6 +9362,217 @@ def api_bookings_cancel(bid):
     if err:
         return err
     return jsonify({"action_id": run.id, "id": bid}), 202
+
+
+# -----------------------------------------------------------------------------
+# v1.95.0 : Usage, le décompte des GPU-heures et les quotas
+#
+# Un échantillonneur, UN fil du processus principal (jamais dans les
+# processus lecteurs), lit toutes les HARVESTER_OPS_USAGE_INTERVAL secondes
+# l'inventaire GPU de chaque cluster déclaré avec le kubeconfig de la
+# console (lecture seule, comme les surveillances), par le même collecteur
+# que /api/gpus-all, et range les unités tenues dans usage.db (à côté de
+# bookings.db, ou HARVESTER_OPS_USAGE_DB). Un cluster éteint, injoignable
+# ou illisible est noté comme tel, jamais fatal. Les relevés de plus de
+# 400 jours sont effacés.
+#
+# Le rapport se lit ici (bookings.db + usage.db) ; les quotas se règlent par
+# `bin/harvester-bookings.py quota` en action suivie (admin seulement), et
+# s'appliquent à la création d'une réservation. Rien n'est écrit sur un
+# cluster.
+# -----------------------------------------------------------------------------
+import hv_usage as _hu  # noqa: E402
+import usage_db as _udb  # noqa: E402
+
+USAGE_INTERVAL = _hu.interval_from(os.environ.get("HARVESTER_OPS_USAGE_INTERVAL", _hu.DEFAULT_INTERVAL))
+USAGE_ENABLED = os.environ.get("HARVESTER_OPS_USAGE", "1") not in ("0", "false", "no")
+_usage_sampler_thread = None
+_usage_sampler_lock = threading.Lock()
+
+
+def _usage_db_path():
+    env = os.environ.get("HARVESTER_OPS_USAGE_DB")
+    return Path(env) if env else _bookings_db_path().parent / "usage.db"
+
+
+def _usage_sample_once(collect=None, now=None):
+    """Un tour de l'échantillonneur : chaque cluster déclaré, lu en
+    parallèle avec le kubeconfig de la console. Rend {cluster: (état,
+    unités tenues)}. `collect` : le collecteur (celui de /api/gpus-all par
+    défaut), remplaçable pour les tests."""
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import timedelta
+    collect = collect or _gpus_collect
+    now = now or _bookings_now()
+    clusters = [(c.get("name"), c.get("kubeconfig")) for c in load_config_ro().get("clusters", [])
+                if c.get("name")]
+
+    def one(item):
+        name, kc = item
+        try:
+            if not kc or not Path(kc).exists():
+                return name, "unknown", [], "no kubeconfig"
+            if _cluster_reachable(kc) is False:
+                return name, "unreachable", [], ""
+            payload, status, _denials = collect(name, kc)
+            if status != 200:
+                return name, "denied" if payload.get("denied") else "error", [], \
+                    str(payload.get("detail") or payload.get("error") or "")
+            return name, "ok", _hu.samples_from_units(payload.get("units"), name), ""
+        except Exception as e:  # un cluster ne doit pas arrêter l'échantillonneur
+            return name, "error", [], _safe_proc_error(e)
+
+    with ThreadPoolExecutor(max_workers=max(1, min(len(clusters), 8))) as pool:
+        results = list(pool.map(one, clusters))
+    out = {}
+    conn = _udb.connect(_usage_db_path())
+    try:
+        for name, state, samples, detail in results:
+            _udb.record(conn, now, USAGE_INTERVAL, name, state, samples, detail)
+            out[name] = (state, sum(x["count"] for x in samples))
+        _udb.prune(conn, now - timedelta(days=_hu.RETENTION_DAYS))
+    finally:
+        conn.close()
+    return out
+
+
+def _usage_sampler_loop(interval=None):
+    _MODULE_READY.wait(60)
+    interval = interval or USAGE_INTERVAL
+    # premier tour après une minute : le démarrage de la console passe d'abord
+    time.sleep(min(60, interval))
+    while True:
+        try:
+            res = _usage_sample_once()
+            log_watch.info("usage sample: %s", {k: v[0] for k, v in res.items()})
+        except Exception as e:
+            log_watch.warning("usage sampler: %s", e)
+        time.sleep(interval)
+
+
+def _start_usage_sampler():
+    """Démarre l'échantillonneur, une seule fois par processus principal."""
+    global _usage_sampler_thread
+    if not USAGE_ENABLED or IS_READ_WORKER:
+        return None
+    with _usage_sampler_lock:
+        if _usage_sampler_thread is not None and _usage_sampler_thread.is_alive():
+            return _usage_sampler_thread
+        _usage_sampler_thread = threading.Thread(target=_usage_sampler_loop, daemon=True, name="usage-sampler")
+        _usage_sampler_thread.start()
+        return _usage_sampler_thread
+
+
+try:
+    _start_usage_sampler()
+except Exception as _e:
+    log_watch.error("usage sampler startup failed: %s", _e)
+
+
+def _usage_report_from_args():
+    """(rapport, None) ou (None, réponse d'erreur) pour ?from=&to=&tz=."""
+    now = _bookings_now()
+    try:
+        start, end = _hu.period(request.args.get("from"), request.args.get("to"), now)
+    except ValueError as e:
+        return None, (jsonify({"error": str(e)}), 400)
+    bconn, uconn = _bkdb.connect(_bookings_db_path()), _udb.connect(_usage_db_path())
+    try:
+        rep = _udb.build_report(bconn, uconn, start, end, _hu.tz_from(request.args.get("tz")), now)
+    finally:
+        bconn.close()
+        uconn.close()
+    rep.update(now=_hbk.iso(now), interval=USAGE_INTERVAL, sampling=USAGE_ENABLED,
+               role=current_role(), user=_bookings_me(), enforced=False)
+    return rep, None
+
+
+@app.route("/api/usage")
+@requires_auth
+def api_usage():
+    """Les GPU-heures réservées et consommées par titulaire sur une période,
+    le détail par cluster et type, la série par jour, les quotas et l'état
+    de l'échantillonneur."""
+    rep, err = _usage_report_from_args()
+    return err if err else jsonify(rep)
+
+
+@app.route("/api/usage.csv")
+@requires_auth
+def api_usage_csv():
+    """Le même rapport en CSV, à télécharger."""
+    rep, err = _usage_report_from_args()
+    if err:
+        return err
+    name = f"gpu-usage-{rep['from'][:10]}-{rep['to'][:10]}.csv"
+    return Response(_hu.to_csv(rep), mimetype="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.route("/api/usage/quotas")
+@requires_auth
+def api_usage_quotas():
+    conn = _bkdb.connect(_bookings_db_path())
+    try:
+        rows = _bkdb.list_quotas(conn)
+    finally:
+        conn.close()
+    return jsonify({"quotas": rows, "role": current_role()})
+
+
+def _usage_quota_action(op, body):
+    # admin seulement : le modèle de rôles le garantit (ADMIN_ONLY_PREFIXES)
+    if not isinstance(body, dict):
+        return jsonify({"error": "a JSON object is expected"}), 400
+    try:
+        if op == "set":
+            quota = _hu.normalize_quota(body)
+        else:
+            quota = _hu.normalize_quota(dict(body, monthly_hours=0))     # même contrôle du titulaire
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    h = quota["holder"]
+    if op == "delete":
+        conn = _bkdb.connect(_bookings_db_path())
+        try:
+            found = _bkdb.get_quota(conn, h)
+        finally:
+            conn.close()
+        if not found:
+            return jsonify({"error": f"no quota for {h['kind']} {h['name']}"}), 404
+    script = BIN_DIR / BOOKINGS_SCRIPT
+    if not script.is_file():
+        return jsonify({"error": f"{BOOKINGS_SCRIPT} not deployed"}), 503
+    who = f"--group={h['name']}" if h["kind"] == "group" else f"--holder={h['name']}"
+    cmd = [sys.executable, str(script), "quota", op, "--db", str(_bookings_db_path()), who,
+           "--as", _bookings_me()]
+    if op == "set":
+        if quota["monthly_hours"] is not None:
+            cmd += ["--monthly-hours", str(quota["monthly_hours"])]
+        if quota["max_units"] is not None:
+            cmd += ["--max-units", str(quota["max_units"])]
+    run, err = _cli_action(None, f"usage:quota-{op}:{h['kind']}:{h['name']}", cmd, "harvester-bookings",
+                           check_busy=False)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "holder": h}), 202
+
+
+@app.route("/api/usage/quotas", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_usage_quota_set():
+    """Règle (ou remplace) le quota d'une personne ou d'un groupe : action
+    suivie qui lance harvester-bookings.py quota set. Admin seulement."""
+    return _usage_quota_action("set", request.get_json(silent=True))
+
+
+@app.route("/api/usage/quotas", methods=["DELETE"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_usage_quota_delete():
+    """Retire le quota d'une personne ou d'un groupe (corps : {holder})."""
+    return _usage_quota_action("delete", request.get_json(silent=True))
 
 
 # -----------------------------------------------------------------------------

@@ -5416,3 +5416,49 @@ td.fk-reason { max-width: 260px; }
 /* v1.94.1 : ce qui reste libre sur chaque lot du calendrier */
 .bkg-free-now { margin-top: 2px; font-size: 11.5px; color: var(--done); }
 .bkg-free-now.is-full { color: var(--warn); }
+/* v1.95.0 : Shared resources > Usage */
+.usg-card .res-tools { flex-wrap: wrap; }
+.usg-periods { margin: 0; }
+.usg-custom { display: inline-flex; align-items: center; gap: 4px; }
+.usg-custom[hidden] { display: none; }
+.usg-spacer { flex: 1 1 auto; }
+.usg-range { font-size: 13px; }
+.usg-sampler { margin: 4px 0 10px; }
+.usg-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 6px 0 14px; }
+.usg-tile { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; background: var(--bg-elev); }
+.usg-tile-value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.usg-tile-label { font-size: 12px; color: var(--text-dim); }
+.usg-h { font-size: 14px; margin: 12px 0 6px; }
+.usg-chart-wrap { margin-bottom: 8px; }
+.usg-chart { display: block; width: 100%; height: auto; max-height: 190px; }
+.usg-grid { stroke: var(--border); stroke-width: 1; }
+.usg-baseline { stroke: var(--text-dim); stroke-width: 1; }
+.usg-axis { fill: var(--text-dim); font-size: 10.5px; }
+.usg-hit { fill: transparent; }
+.usg-day:hover .usg-hit { fill: var(--overlay-soft); }
+.usg-bar-booked { fill: color-mix(in srgb, var(--info) 35%, transparent); stroke: var(--info); stroke-width: 1; }
+.usg-bar-consumed { fill: var(--accent); }
+.usg-legend { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); margin-top: 2px; }
+.usg-key { display: inline-block; width: 12px; height: 10px; border-radius: 2px; margin-left: 8px; }
+.usg-key:first-child { margin-left: 0; }
+.usg-key-booked { background: color-mix(in srgb, var(--info) 35%, transparent); border: 1px solid var(--info); }
+.usg-key-consumed { background: var(--accent); }
+.usg-table td.usg-num, .usg-table th { white-space: nowrap; }
+.usg-table td.usg-num { text-align: right; font-variant-numeric: tabular-nums; }
+.usg-table td.usg-num.is-waste { color: var(--warn); }
+.usg-table td.usg-num.is-out { color: var(--danger); }
+.usg-table tr.is-unbooked td:first-child { color: var(--text-dim); }
+.usg-table tr.usg-sub td { font-size: 12px; background: var(--overlay-soft); }
+.usg-table tr.usg-sub[hidden] { display: none; }
+.usg-table .usg-sub-label { padding-left: 34px; }
+.usg-table tfoot td { font-weight: 600; border-top: 2px solid var(--border); }
+.usg-toggle { margin-right: 4px; }
+.usg-quota { display: flex; align-items: center; gap: 8px; min-width: 200px; }
+.usg-quota-bar { flex: 0 0 90px; height: 8px; border-radius: 4px; background: var(--bg-elev); border: 1px solid var(--border); overflow: hidden; }
+.usg-quota-fill { height: 100%; background: var(--accent); }
+.usg-quota.is-over .usg-quota-fill { background: var(--danger); }
+.usg-quota-text { font-size: 12px; white-space: nowrap; }
+.usg-maxunits { font-size: 12px; }
+.usg-actions { white-space: nowrap; }
+.usg-quota-panel { display: flex; flex-direction: column; gap: 10px; }
+.usg-quota-panel > .form-hint, .usg-quota-panel > [data-usgq="list"] { padding: 0 16px; }

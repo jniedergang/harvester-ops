@@ -101,7 +101,7 @@ def test_gpu_lives_in_shared_resources_after_containers(ui):
     assert groups[groups.index("tab-group-containers") + 1] == "tab-group-shared"
     group = page.locator("#tab-group-shared")
     expect(group.locator(".tab-group-head .sidebar-label")).to_have_text("Shared resources")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings"]
+    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings", "usage"]
     for t in group.locator(".tab").all():
         assert t.get_attribute("title")
     expect(group.locator('.tab[data-tab="gpus"]')).to_have_class(re.compile("active"))

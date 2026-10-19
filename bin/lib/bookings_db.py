@@ -16,6 +16,7 @@ from pathlib import Path
 
 import cluster_decl
 import hv_bookings as hb
+import hv_usage as hu
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS bookings (
@@ -39,6 +40,16 @@ CREATE TABLE IF NOT EXISTS bookings (
     cancelled_by TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS bookings_slot ON bookings (cluster, type, "end");
+-- v1.95.0 : quotas par personne ou par groupe (migration additive)
+CREATE TABLE IF NOT EXISTS quotas (
+    holder_kind TEXT NOT NULL,
+    holder TEXT NOT NULL,
+    monthly_hours REAL,
+    max_units INTEGER,
+    updated_by TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (holder_kind, holder)
+);
 """
 
 
@@ -114,6 +125,7 @@ def insert_checked(conn, booking, cap, created_by, now, bid=None):
         existing = [b for b in list_bookings(conn, cluster=booking["cluster"], since=booking["start"])
                     if b["type"] == booking["type"]]
         reasons = hb.conflicts(dict(booking, id=bid), existing, cap)
+        reasons += quota_reasons(conn, dict(booking, id=bid))
         if reasons:
             raise Conflict(reasons)
         t = booking.get("target") or {}
@@ -137,3 +149,50 @@ def cancel(conn, bid, by, now):
     conn.execute("UPDATE bookings SET cancelled_at = ?, cancelled_by = ? WHERE id = ? AND cancelled_at = ''",
                  (hb.iso(now), by or "", bid))
     return get(conn, bid)
+
+
+# -- v1.95.0 : quotas ------------------------------------------------------------
+
+def _quota_row(r):
+    return {"holder": {"kind": r["holder_kind"], "name": r["holder"]}, "monthly_hours": r["monthly_hours"],
+            "max_units": r["max_units"], "updated_by": r["updated_by"], "updated_at": r["updated_at"]}
+
+
+def list_quotas(conn):
+    return [_quota_row(r) for r in conn.execute("SELECT * FROM quotas ORDER BY holder_kind DESC, holder")]
+
+
+def get_quota(conn, holder):
+    r = conn.execute("SELECT * FROM quotas WHERE holder_kind = ? AND holder = ?",
+                     (holder.get("kind"), holder.get("name"))).fetchone()
+    return _quota_row(r) if r else None
+
+
+def set_quota(conn, quota, by, now):
+    """Range un quota normalisé (hv_usage.normalize_quota), le remplace s'il
+    existe."""
+    h = quota["holder"]
+    conn.execute("INSERT INTO quotas (holder_kind, holder, monthly_hours, max_units, updated_by, updated_at)"
+                 " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (holder_kind, holder) DO UPDATE SET"
+                 " monthly_hours = excluded.monthly_hours, max_units = excluded.max_units,"
+                 " updated_by = excluded.updated_by, updated_at = excluded.updated_at",
+                 (h["kind"], h["name"], quota.get("monthly_hours"), quota.get("max_units"), by or "", hb.iso(now)))
+    return get_quota(conn, h)
+
+
+def delete_quota(conn, holder):
+    cur = conn.execute("DELETE FROM quotas WHERE holder_kind = ? AND holder = ?",
+                       (holder.get("kind"), holder.get("name")))
+    return cur.rowcount > 0
+
+
+def quota_reasons(conn, booking):
+    """Les raisons de refuser une réservation au regard du quota de son
+    titulaire (vide sans quota). Lit les réservations du titulaire sur les
+    mois que touche le créneau, tous clusters confondus."""
+    quota = get_quota(conn, booking["holder"])
+    if not quota:
+        return []
+    since = hu.month_start(booking["start"])
+    mine = [b for b in list_bookings(conn, since=since) if b["holder"] == booking["holder"]]
+    return hu.quota_reasons(booking, mine, quota)
