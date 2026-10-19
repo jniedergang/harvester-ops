@@ -271,3 +271,47 @@ unités tenues par `prod/train`, `ml/notebook`, `ml/big` et `ml/trainer`.
   deux fois).
 - L'échantillonneur lit avec le kubeconfig déclaré de la console, sans
   identité de personne, et ne tourne que dans le processus principal.
+
+## Préemption dans les réservations, décidée le 19/10/2026
+
+Retour d'un collègue SUSE (AI Factory) : une réservation de GPU ne tient pas
+compte du caractère préemptible d'une charge. Retenu : un GPU réservé mais
+inutilisé doit pouvoir servir à des charges préemptibles, et leur être repris
+au début du créneau. C'est ce qui réduit le gaspillage que mesure Usage.
+
+### Modèle
+
+- Une réservation porte une priorité : `guaranteed` (défaut, ce qui existe)
+  ou `preemptible`. Une réservation préemptible peut dépasser la capacité
+  libre, mais seulement sur les unités réservées par d'autres et pas encore
+  utilisées ; elle est marquée « peut être reprise ».
+- Le contrôle de conflit compte d'abord les réservations garanties (règle
+  actuelle, inchangée), puis vérifie qu'une préemptible ne dépasse pas la
+  capacité totale du pool.
+- Une charge est préemptible par un label ou une annotation
+  (`harvester-ops.io/preemptible=true` sur la VM ou la charge), ou par la
+  réservation qui la cible.
+
+### Tant que les réservations ne sont pas appliquées (version actuelle)
+
+- Usage : la consommation d'une charge préemptible sur une unité réservée
+  par d'autres n'est pas « hors règle » mais « prêtée » ; le réservé qu'elle
+  occupe ne compte plus comme gaspillage.
+- Calendrier et inventaire : les réservations préemptibles s'affichent à
+  part (hachurées), avec qui les reprendrait et quand.
+- Au début d'un créneau garanti, la console signale les charges préemptibles
+  qui occupent les unités : notification dans le dock et dans Activity.
+  Elle ne les arrête pas tant que l'application n'existe pas.
+
+### Quand les réservations seront appliquées (plus tard)
+
+Au début d'un créneau garanti, la console reprend les unités : arrêt de la
+VM préemptible ou mise à zéro de la charge de conteneurs, avec préavis
+réglable, en action suivie. Pour les conteneurs, Kueue et KAI savent déjà
+préempter : la console s'appuiera sur eux quand ils sont installés.
+
+### Profils réservables : en attente
+
+Réserver un « profil de calcul » (GPU, CPU, mémoire, stockage, règles de
+sécurité) plutôt qu'une unité est attendu tant qu'AI Factory n'a pas figé ses
+profils de calcul (SUSEAI-1124) : s'aligner dessus plutôt que d'en inventer.
