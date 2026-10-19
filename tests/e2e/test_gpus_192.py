@@ -203,3 +203,48 @@ def test_consumer_links_open_the_vm_and_the_pod(ui):
     pane.locator('[data-gpu="open-pod"]').click()
     expect(page.locator("#tab-allcontainers")).to_be_visible()
     expect(page.locator('#all-containers-host [data-ct="text"]')).to_have_value("trainer-0")
+
+
+def test_a_booking_by_count_is_said_at_pool_level_not_pinned_on_each_unit(ui):
+    """v1.94.1 : « 1 x vGPU NVIDIA A2-4Q » peignait « Booked by bob » sur
+    CHAQUE vGPU du modèle, comme si tous étaient pris. Chaque unité du lot
+    dit « 1 of 2 booked now » ; le nom du titulaire n'est que dans la bulle.
+    Une réservation de l'unité précise garde son badge « Booked by »."""
+    page, pane, state = ui
+    expect(rows(pane)).to_have_count(6, timeout=8000)
+    now = page.evaluate("Date.now()")
+
+    def iso(ms):
+        return page.evaluate(f"new Date({ms}).toISOString()")
+
+    def bk(bid, typ, model, count, holder, unit=""):
+        return {"id": bid, "cluster": "alpha", "type": typ, "model": model, "unit": unit, "count": count,
+                "holder": {"kind": "user", "name": holder}, "start": iso(now - 3600000), "end": iso(now + 3600000),
+                "state": "active", "cancelled_at": "", "target": None, "note": ""}
+    listing = {"user": "alice", "role": "operator", "bookings": [
+        bk("bk-1", "vgpu", "NVIDIA A2-4Q", 1, "bob"),
+        bk("bk-2", "node", "NVIDIA A2", 4, "ml-team"),                  # ressource vide : le modèle
+        bk("bk-3", "gpu", "NVIDIA A2", 1, "carol", unit="n1-00003b000")]}
+    page.route(re.compile(r".*/api/bookings(\?.*)?$"), lambda r, q: r.fulfill(
+        status=200, content_type="application/json", body=json.dumps(listing)))
+    state["all"] = dict(ALL, pools=[
+        {"cluster": "alpha", "type": "gpu", "model": "NVIDIA A2", "capacity": 1, "used": 1},
+        {"cluster": "alpha", "type": "vgpu", "model": "NVIDIA A2-4Q", "capacity": 2, "used": 0},
+        {"cluster": "alpha", "type": "node", "model": "NVIDIA A2", "capacity": 4, "used": 2}])
+    pane.locator('[data-gpu="refresh"]').click()
+    vg = pane.locator('tr[data-unit="alpha|n1-0000af004"] .bkg-badge')
+    expect(vg).to_have_count(1, timeout=8000)
+    expect(vg).to_have_text(re.compile(r"1 of 2 booked now$"))
+    expect(vg).to_have_attribute("data-bkg-badge", "pool")
+    expect(vg).to_have_class(re.compile(r"\binfo\b"))
+    expect(vg).not_to_contain_text("bob")
+    assert "bob" in vg.get_attribute("data-tip") and "NVIDIA A2-4Q" in vg.get_attribute("data-tip")
+    # le lot plein : 4 of 4, en alerte
+    node = pane.locator('tr[data-unit="alpha|n3/nvidia.com/gpu"] .bkg-badge')
+    expect(node).to_have_text(re.compile(r"4 of 4 booked now$"))
+    expect(node).to_have_class(re.compile(r"\bwarn\b"))
+    # l'unité réservée pour elle-même garde « Booked by »
+    own = pane.locator('tr[data-unit="alpha|n1-00003b000"] .bkg-badge')
+    expect(own).to_have_count(1)
+    expect(own).to_have_attribute("data-bkg-badge", "unit")
+    expect(own).to_contain_text("Booked by carol until")

@@ -76,6 +76,13 @@ def view(context, flask_server):
     return page, rows, sent, lists, dialogs
 
 
+def closed_with_toast(page, panel, text):
+    """v1.94.1 : demande acceptée, la fenêtre se ferme ; l'action suivie reste
+    dans le dock et sa fin s'annonce par une notification."""
+    expect(panel).to_have_count(0)
+    expect(page.locator(".vma-toast").filter(has_text=text)).to_have_count(1)
+
+
 def menu_of(page, rows, name):
     rows.filter(has=page.locator(f'td:text-is("{name}")')).locator('[data-ct-act="more"]').click()
     menu = page.locator(".ct-menu")
@@ -113,7 +120,7 @@ def test_scale_sends_the_number_and_refreshes(view):
     before = len(lists)
     panel.locator('[name="replicas"]').fill("5")
     panel.locator("[data-ct-submit]").click()
-    expect(panel.locator(".of-msg")).to_contain_text("apps/web set to 5 pods.")
+    closed_with_toast(page, panel, "apps/web set to 5 pods.")
     assert sent == [("POST", "containers/harv-fake/apps/deployment/web/scale", {"replicas": 5})]
     for _ in range(30):
         if any("fresh=1" in u for u in lists[before:]):
@@ -128,7 +135,7 @@ def test_restart(view):
     panel = page.locator(".floating-panel", has_text="replace the old ones")
     expect(panel).to_contain_text("DaemonSet ops/agent")
     panel.locator("[data-ct-submit]").click()
-    expect(panel.locator(".of-msg")).to_contain_text("ops/agent is restarting.")
+    closed_with_toast(page, panel, "ops/agent is restarting.")
     assert sent == [("POST", "containers/harv-fake/ops/daemonset/agent/restart", {})]
 
 
@@ -141,7 +148,7 @@ def test_delete_asks_in_the_page_never_with_confirm(view):
     btn = panel.locator("[data-ct-submit]")
     expect(btn).to_have_class(re.compile("btn-danger"))
     btn.click()
-    expect(panel.locator(".of-msg")).to_contain_text("apps/web deleted.")
+    closed_with_toast(page, panel, "apps/web deleted.")
     assert sent == [("DELETE", "containers/harv-fake/apps/deployment/web", None)]
     assert dialogs == []                                                # jamais de confirm() du navigateur
 
@@ -200,7 +207,7 @@ def test_create_from_the_form(view):
     panel.locator('[name="cpu"]').fill("2")
     panel.locator('[name="create_namespace"]').check()
     panel.locator("[data-ct-submit]").click()
-    expect(panel.locator(".of-msg")).to_contain_text("created on harv-fake.")
+    closed_with_toast(page, panel, "created on harv-fake.")
     assert sent == [("POST", "containers/harv-fake/create", {"spec": {
         "name": "trainer", "namespace": "ml", "kind": "Job", "image": "cuda:12", "replicas": 2,
         "command": "python train.py", "env": ["EPOCHS=3", "LR=0.1"], "gpus": 1,
@@ -217,14 +224,15 @@ def test_create_from_yaml_and_a_server_refusal_said(view):
     assert sent == []
     panel.locator('[name="yaml"]').fill("apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n")
     panel.locator("[data-ct-submit]").click()
-    expect(panel.locator(".of-msg")).to_contain_text("created on harv-fake.")
+    closed_with_toast(page, panel, "created on harv-fake.")
     assert sent[-1] == ("POST", "containers/harv-fake/create",
                         {"yaml": "apiVersion: v1\nkind: Pod\nmetadata:\n  name: p\n", "create_namespace": False})
-    # un refus du serveur est dit dans la fenêtre
-    panel.locator('[data-ct-mode="form"]').click()
+    # un refus du serveur est dit dans la fenêtre, qui reste ouverte
+    panel = create_panel(page)
     panel.locator('[name="name"]').fill("refused")
     panel.locator('[name="namespace"]').fill("apps")
     panel.locator('[name="image"]').fill("nginx")
-    page.wait_for_timeout(1600)                                          # le bouton se réactive
     panel.locator("[data-ct-submit]").click()
     expect(panel.locator(".of-msg .res-error")).to_contain_text("system namespace")
+    expect(panel).to_be_visible()
+    expect(panel.locator("[data-ct-submit]")).to_be_enabled()           # on peut corriger et renvoyer

@@ -1469,10 +1469,14 @@ MIG derrière lui sont comptés à part (limite connue).
 
 Vues :
 
-- **Calendrier** : une ligne par type et modèle de chaque cluster qui a une
-  réservation cette semaine, la semaine à partir du lundi, les créneaux en
-  barres (empilées quand elles se chevauchent, les vôtres soulignées), une
-  marque pour maintenant, semaine précédente et suivante.
+- **Calendrier** : une ligne par type et modèle réservable de chaque
+  cluster affiché, réservé ou non (une ligne vide : rien de réservé cette
+  semaine), avec le nombre d'unités libres maintenant (« Libres maintenant : 1
+  sur 2 »). Plus une ligne pour un modèle qui n'a plus que des
+  réservations. La semaine à partir du lundi, les créneaux en barres
+  (empilées quand elles se chevauchent, les vôtres soulignées), une marque
+  pour maintenant, semaine précédente et suivante. Le filtre par cluster
+  s'applique aux lignes.
 - **Mes réservations** : celles que vous avez créées ou dont vous êtes
   titulaire.
 - **Toutes les réservations** : toutes, avec **Annuler** pour celles que
@@ -1483,14 +1487,20 @@ Vues :
 ou une unité précise), nombre, titulaire, début et fin à votre heure locale
 (par défaut : dans une heure, pour quatre heures), cible, note. Le créneau
 est contrôlé pendant la saisie et le formulaire dit pourquoi il serait
-refusé.
+refusé. Une fois la réservation acceptée, le formulaire se ferme : l'action
+reste dans le dock et une notification dit quand elle est finie. Un refus
+garde le formulaire ouvert avec la raison.
 
 Ailleurs :
 
 - **Shared resources > GPU** dit sur chaque unité si elle est réservée
-  maintenant ou dans la journée (titulaire et fin), et un bouton **Book**
-  ouvre le formulaire prérempli (l'unité pour un GPU ou un vGPU, le profil
-  ou la ressource sinon).
+  maintenant ou dans la journée, et un bouton **Book** ouvre le formulaire
+  prérempli (l'unité pour un GPU ou un vGPU, le profil ou la ressource
+  sinon). Une réservation de cette unité précise dit « Réservée par
+  <titulaire> jusqu'au <fin> ». Une réservation par nombre ne prend aucune
+  unité en particulier : chaque unité du modèle dit « 1 sur 2 réservées
+  maintenant » (en orange quand le modèle est entièrement réservé), les
+  titulaires sont dans la bulle.
 - Le formulaire de création de charge (GPU de conteneurs) et les réglages
   d'une VM (section passthrough : GPU, vGPU, MIG) disent ce qui est libre
   maintenant, ce qui est réservé maintenant, si vous tenez une réservation,

@@ -11,7 +11,8 @@
  * cluster, nœud, type, état ; le consommateur ouvre la VM, ou la charge dans
  * la vue Containers. v1.94.0 : chaque unité dit si elle est réservée
  * maintenant ou bientôt, et son bouton « Book » ouvre le formulaire de
- * réservation prérempli.
+ * réservation prérempli. v1.94.1 : une réservation par nombre se dit au lot
+ * (« 1 sur 2 réservées »), jamais comme si chaque unité était prise.
  */
 const Gpus = (() => {
   const tr = (k, p) => (window.i18n ? i18n.t(k, p) : k);
@@ -268,7 +269,7 @@ const Gpus = (() => {
   /** v1.94.0 : réservée maintenant ou bientôt (badge), et le bouton Réserver
    *  qui ouvre le formulaire prérempli. Une unité désactivée ne se réserve pas. */
   function bookingHtml(u, bookings, canBook) {
-    const b = window.Bookings ? Bookings.badges(u, bookings) : '';
+    const b = window.Bookings ? Bookings.badges(u, bookings, undefined, (cur.data && cur.data.pools) || []) : '';
     if (u.state === 'disabled' || !window.Bookings) return b || '–';
     const btn = `<button type="button" class="btn btn-sm btn-secondary tip" data-gpu="book" data-cluster="${esc(u.cluster)}" data-id="${esc(u.id)}"
         data-tip="${esc(canBook ? tr('gpu.t.book') : tr('bkg.viewerTip'))}"${canBook ? '' : ' disabled'}>${icon('timer', 11)} ${esc(tr('gpu.book'))}</button>`;

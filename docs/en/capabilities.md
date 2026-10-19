@@ -1318,10 +1318,12 @@ the MIG instance behind it are counted apart (known limit).
 
 Views:
 
-- **Calendar**: one row per type and model of each cluster that has a
-  booking that week, the week from Monday, booked slots as bars (stacked
-  when they overlap, yours outlined), a marker for now, previous and next
-  week.
+- **Calendar**: one row per bookable type and model of each cluster
+  shown, booked or not (an empty row means nothing is booked that week),
+  with how many units are free now ("1 of 2 free now"). Plus a row for a
+  model that only has bookings left. The week from Monday, booked slots as
+  bars (stacked when they overlap, yours outlined), a marker for now,
+  previous and next week. The cluster filter applies to the rows.
 - **My bookings**: those you created or hold.
 - **All bookings**: every booking, with **Cancel** for those you may
   cancel, confirmed in the page.
@@ -1330,13 +1332,19 @@ Views:
 how many are free now, or one specific unit), count, holder, start and end
 in your local time (default: in one hour, for four hours), target, note.
 The slot is checked while you type and the form says why it would be
-refused.
+refused. Once the booking is accepted, the form closes: the action stays in
+the dock and a notification says when it is done. A refusal keeps the form
+open with the reason.
 
 Elsewhere:
 
 - **Shared resources > GPU** shows on each unit whether it is booked now or
-  within a day (holder and end), and a **Book** button that opens the form
-  prefilled (the unit for a GPU or vGPU, the profile or resource otherwise).
+  within a day, and a **Book** button that opens the form prefilled (the
+  unit for a GPU or vGPU, the profile or resource otherwise). A booking of
+  that very unit says "Booked by <holder> until <end>". A booking by count
+  takes no unit in particular: every unit of the model says "1 of 2 booked
+  now" (amber when the model is fully booked), the holders are in the
+  tooltip.
 - The container create form (container GPUs) and the VM settings
   (passthrough section: GPUs, vGPUs, MIG) show what is free now, what is
   booked now, whether you hold a booking, and a link to Bookings. These

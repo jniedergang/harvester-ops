@@ -167,7 +167,7 @@ const Containers = (() => {
   function follow(actionId, msg, doneText, onDone) {
     const end = (ok) => { refreshViews(); if (onDone) onDone(ok); };
     if (window.VMActions && VMActions.follow) VMActions.follow(actionId, msg, doneText, end);
-    else { msg.textContent = tr('bk.started', { id: actionId }); end(true); }
+    else { if (msg) msg.textContent = tr('bk.started', { id: actionId }); end(true); }
   }
 
   /** Une fenêtre à formulaire, sur le modèle des gestes des VM. */
@@ -191,7 +191,11 @@ const Containers = (() => {
       try {
         const out = await onSubmit(form, msg);
         if (!out) { btn.disabled = false; return; }
-        follow(out.action_id, msg, out.doneText, () => { setTimeout(() => { btn.disabled = false; }, 1500); });
+        // v1.94.1 : la demande est acceptée, la fenêtre se ferme ; l'action
+        // reste dans le dock et sa fin s'annonce par une notification. Un
+        // refus garde la fenêtre ouverte avec l'erreur (catch ci-dessous).
+        FloatingPanels.close(id);
+        follow(out.action_id, null, out.doneText);
       } catch (err) {
         btn.disabled = false;
         msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(err.message)}</span>`;

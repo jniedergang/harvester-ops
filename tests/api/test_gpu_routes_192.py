@@ -153,6 +153,10 @@ def test_all_clusters_with_their_state(world):
     assert st["foxtrot"]["state"] == "ok" and st["foxtrot"]["denials"]
     assert [(u["cluster"], u["type"]) for u in d["units"]] == [("alpha", "gpu"), ("alpha", "node")]
     assert d["summary"]["node"] == {"total": 2, "used": 2, "free": 0}
+    # v1.94.1 : les lots réservables, même calcul que le formulaire de réservation
+    assert d["pools"] == [dict(cluster="alpha", type=e["type"], model=e["model"], capacity=e["capacity"],
+                               used=e["used"]) for e in wapp._hbk.catalog(d["units"])]
+    assert {(p["type"], p["capacity"]) for p in d["pools"]} == {("gpu", 1), ("node", 2)}
 
 
 def test_a_cluster_that_crashes_does_not_take_the_view_down(world, monkeypatch):
