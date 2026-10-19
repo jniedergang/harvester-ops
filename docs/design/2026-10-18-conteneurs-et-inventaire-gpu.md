@@ -195,3 +195,52 @@ Un cluster kwok (`tests/bench/kwok`) portant les CRD de pcidevices et des
 objets GPU d'exemple (GPU entiers, vGPU, MIG) et des nœuds qui annoncent
 `nvidia.com/gpu` : l'inventaire et la réservation s'évaluent dans la vraie
 interface sans matériel. Déclaré dans la console de dev seulement.
+
+## 1.95.0 : Usage (décompte et quotas), décidé le 19/10/2026
+
+Troisième entrée de « Shared resources », après GPU et Bookings. Faisable sans
+matériel : tout part de l'inventaire et des réservations.
+
+### Deux mesures, côte à côte
+
+- **Réservé** : les GPU-heures des réservations (nombre d'unités x durée),
+  par personne et par groupe, sur une période (cette semaine, ce mois, le
+  mois précédent, une plage au choix). Calculé depuis `bookings.db`, les
+  réservations annulées ne comptent qu'à partir de leur création jusqu'à
+  leur annulation si le créneau avait commencé.
+- **Consommé** : les GPU-heures réellement tenues, relevées par la console.
+  Un échantillonneur côté serveur lit l'inventaire de chaque cluster toutes
+  les 5 minutes (réglable, `HARVESTER_OPS_USAGE_INTERVAL`) et note, pour
+  chaque unité utilisée, son consommateur (VM ou pod, namespace) dans
+  `usage.db`. Les heures se comptent par intervalle. Le consommateur est
+  rattaché à une personne ou un groupe par la réservation qui le cible
+  (cible de la réservation = la VM ou la charge), sinon par son namespace
+  (« sans réservation »).
+- L'écart entre les deux est montré : réservé et pas utilisé (gaspillage),
+  utilisé sans réservation (hors règle).
+
+### Quotas
+
+- Un quota par personne ou par groupe : un plafond de GPU-heures réservées
+  par mois et, facultatif, un nombre maximal d'unités tenues en même temps.
+  Réglés par un administrateur dans la vue Usage, gardés dans `bookings.db`.
+- Appliqués à la création d'une réservation : refusée au-delà du quota, avec
+  la raison (même chemin que les conflits, script `harvester-bookings.py`).
+  Rien n'est appliqué sur les clusters.
+
+### Vue
+
+Un tableau par détenteur : réservé, consommé, quota et reste, barre de
+progression, et le détail par cluster et par type d'unité ; un graphique des
+GPU-heures par jour sur la période. Export CSV.
+
+### CLI
+
+`bin/harvester-bookings.py usage [--from --to] [--json]` et
+`bin/harvester-bookings.py quota set|list|delete`.
+
+### Vérification
+
+Unitaires (calcul des heures aux bornes, annulations, rattachement par cible
+et par namespace, quotas). Réel : l'échantillonneur sur `gpudemo` relève les
+unités tenues par `prod/train`, `ml/notebook`, `ml/big` et `ml/trainer`.
