@@ -69,7 +69,27 @@ const Bookings = (() => {
     return shared.promise;
   }
 
-  let cur = null;   // { host, timer, data, prefs }
+  // -- lots réservables (type et modèle d'un cluster) ----------------------------
+  // `pools` vient de /api/gpus-all (même calcul de capacité que le formulaire).
+  const poolKey = (cluster, type, model) => `${cluster}|${type}|${model}`;
+  /** Unités d'un lot réservées à l'instant `t` (ms) : réservations par nombre
+   *  et réservations d'une unité précise, non annulées (comme le serveur). */
+  function bookedAt(bookings, cluster, type, model, t) {
+    return (bookings || []).reduce((n, b) => n + (b.cluster === cluster && b.type === type && b.model === model
+      && b.state !== 'cancelled' && !b.cancelled_at && Date.parse(b.start) <= t && t < Date.parse(b.end)
+      ? Number(b.count) || 1 : 0), 0);
+  }
+  /** Libres maintenant : la capacité moins le plus grand de « utilisées » et
+   *  « réservées » (le calcul de /api/bookings/options). */
+  const freeOf = (pool, booked) => Math.max(0, pool.capacity - Math.max(pool.used || 0, booked));
+  function inventory() {
+    return fetch('/api/gpus-all').then(async (r) => {
+      const d = await r.json().catch(() => null);
+      return d && Array.isArray(d.pools) ? d.pools : null;
+    }).catch(() => null);
+  }
+
+  let cur = null;   // { host, timer, data, prefs, pools }
 
   function loadPrefs() {
     const p = { view: 'calendar', week: 0, cluster: '' };
@@ -102,10 +122,15 @@ const Bookings = (() => {
   async function load() {
     if (!cur) return;
     const c = cur;
+    // l'inventaire (plus lent : tous les clusters) arrive après la liste
+    const inv = inventory();
     const d = await list(true);
     if (c !== cur) return;
     c.data = d;
     render();
+    const pools = await inv;
+    if (c !== cur) return;
+    if (pools) { c.pools = pools; render(); }
   }
 
   function shell() {
@@ -164,7 +189,8 @@ const Bookings = (() => {
     nb.dataset.tip = canBook ? tr('bkg.newTip') : tr('bkg.viewerTip');
     if (cur.prefs.view === 'calendar') {
       cur.host.querySelector('.res-count').textContent = '';
-      body.innerHTML = calendarHtml(inCluster, d.now);
+      const pools = (cur.pools || []).filter((p) => !cur.prefs.cluster || p.cluster === cur.prefs.cluster);
+      body.innerHTML = calendarHtml(inCluster, d.now, pools);
       return;
     }
     const rows = cur.prefs.view === 'mine' ? inCluster.filter((b) => b.mine) : inCluster;
@@ -229,17 +255,22 @@ const Bookings = (() => {
     return d;
   }
 
-  function calendarHtml(bookings, nowIso) {
+  function calendarHtml(bookings, nowIso, inventoryPools) {
     const ws = weekStart(cur.prefs.week);
     const we = new Date(ws); we.setDate(we.getDate() + 7);
     const span = we - ws;
     const days = [...Array(7)].map((_, i) => { const x = new Date(ws); x.setDate(x.getDate() + i); return x; });
     const now = Date.parse(nowIso || '') || Date.now();
     const shown = bookings.filter((b) => b.state !== 'cancelled' && Date.parse(b.start) < we && Date.parse(b.end) > ws);
+    // v1.94.1 : tous les lots réservables des clusters affichés, avec ou sans
+    // réservation cette semaine, puis ceux qui n'ont plus que des réservations
     const pools = new Map();
+    (inventoryPools || []).forEach((p) => {
+      pools.set(poolKey(p.cluster, p.type, p.model), { cluster: p.cluster, type: p.type, model: p.model, inv: p, items: [] });
+    });
     shown.forEach((b) => {
-      const k = `${b.cluster}|${b.type}|${b.model}`;
-      if (!pools.has(k)) pools.set(k, { cluster: b.cluster, type: b.type, model: b.model, items: [] });
+      const k = poolKey(b.cluster, b.type, b.model);
+      if (!pools.has(k)) pools.set(k, { cluster: b.cluster, type: b.type, model: b.model, inv: null, items: [] });
       pools.get(k).items.push(b);
     });
     const fmtDay = (x) => x.toLocaleDateString(lang(), { weekday: 'short', day: 'numeric', month: 'numeric' });
@@ -278,11 +309,21 @@ const Bookings = (() => {
             <span>${esc(holderText(b.holder))}${b.unit ? '' : ` ×${esc(b.count)}`}</span></div>`;
       }).join('');
       const h = 8 + Math.max(1, lanes.length) * 24;
-      return `<div class="bkg-row" data-pool="${esc(`${p.cluster}|${p.type}|${p.model}`)}">
-          <div class="bkg-label"><strong>${esc(p.model)}</strong><div class="res-dim">${esc(p.cluster)} · ${esc(typeLabel(p.type))}</div></div>
-          <div class="bkg-track" style="height:${h}px">${grid}${bars}${marker}</div></div>`;
+      let free = '';
+      if (p.inv) {
+        const booked = bookedAt(bookings, p.cluster, p.type, p.model, now);
+        const n = freeOf(p.inv, booked);
+        free = `<div class="bkg-free-now tip${n ? '' : ' is-full'}" data-free="${n}" data-tip="${esc(tr('bkg.f.freeLine',
+          { free: n, cap: p.inv.capacity, used: p.inv.used, booked }))}">${esc(tr('bkg.cal.free', { free: n, cap: p.inv.capacity }))}</div>`;
+      }
+      return `<div class="bkg-row${p.items.length ? '' : ' is-empty'}" data-pool="${esc(poolKey(p.cluster, p.type, p.model))}">
+          <div class="bkg-label"><strong>${esc(p.model)}</strong><div class="res-dim">${esc(p.cluster)} · ${esc(typeLabel(p.type))}</div>${free}</div>
+          <div class="bkg-track" style="min-height:${h}px">${grid}${bars}${marker}</div></div>`;
     }).join('');
-    return `${head}<div class="bkg-cal">${daysHead}${rowsHtml}</div>`;
+    // des lots sans aucune réservation cette semaine : les lignes vides le
+    // montrent, la phrase le dit
+    const none = shown.length ? '' : `<p class="form-hint bkg-empty">${esc(tr('bkg.noneWeek'))}</p>`;
+    return `${head}<div class="bkg-cal">${daysHead}${rowsHtml}</div>${none}`;
   }
 
   // -- envoi et suivi ---------------------------------------------------------------
@@ -305,7 +346,7 @@ const Bookings = (() => {
   function follow(actionId, msg, doneText, onDone) {
     const end = (ok) => { list(true); if (onDone) onDone(ok); };
     if (window.VMActions && VMActions.follow) VMActions.follow(actionId, msg, doneText, end);
-    else { msg.textContent = tr('bk.started', { id: actionId }); end(true); }
+    else { if (msg) msg.textContent = tr('bk.started', { id: actionId }); end(true); }
   }
 
   function clusterNames() {
@@ -516,11 +557,12 @@ const Bookings = (() => {
       btn.disabled = true;
       try {
         const out = await send('POST', '/api/bookings', p);
-        follow(out.action_id, msg, tr('bkg.done.create'), (ok) => {
-          setTimeout(() => { btn.disabled = false; }, 1500);
-          if (ok && cur) load();
-          if (ok) scheduleCheck();
-        });
+        // v1.94.1 : acceptée, la fenêtre se ferme ; l'action reste dans le
+        // dock et sa fin s'annonce par une notification
+        clearTimeout(st.timer);
+        st.seq += 1;
+        FloatingPanels.close('bkg-new');
+        follow(out.action_id, null, tr('bkg.done.create'), (ok) => { if (ok && cur) load(); });
       } catch (err) {
         btn.disabled = false;
         if (err.status === 409 && err.data && err.data.conflicts) showCheck('refused', err.data.conflicts.map(reasonText));
@@ -567,16 +609,43 @@ const Bookings = (() => {
       && (b.unit ? b.unit === u.id : models.includes(b.model)));
   }
 
-  function badges(u, bookings, nowMs) {
+  /** Badges d'une unité de l'inventaire. Une réservation de CETTE unité :
+   *  « Réservée par X jusqu'au ... ». Une réservation par nombre ne tient
+   *  aucune unité en particulier (v1.94.1) : chaque unité du lot porte alors
+   *  « n sur N réservées maintenant », jamais le nom du titulaire. `pools` :
+   *  les lots de /api/gpus-all, pour la capacité N. */
+  function badges(u, bookings, nowMs, pools) {
     const hits = forUnit(u, bookings, nowMs);
     if (!hits.length) return '';
     const now = nowMs || Date.now();
-    const active = hits.filter((b) => Date.parse(b.start) <= now);
-    const first = (active[0] || hits[0]);
-    const tip = hits.map((b) => tr('bkg.t.bar', { what: whatText(b), holder: holderText(b.holder), start: when(b.start), end: when(b.end) })).join(' · ');
-    const text = active.length ? tr('bkg.badgeNow', { holder: holderText(first.holder), end: when(first.end) })
-      : tr('bkg.badgeSoon', { holder: holderText(first.holder), start: when(first.start) });
-    return ` <span class="badge ${active.length ? 'info' : 'dim'} tip bkg-badge" data-tip="${esc(tip)}">${icon('timer', 11)} ${esc(text)}${hits.length > 1 ? ` +${hits.length - 1}` : ''}</span>`;
+    const barTip = (b) => tr('bkg.t.bar', { what: whatText(b), holder: holderText(b.holder), start: when(b.start), end: when(b.end) });
+    let out = '';
+    const own = hits.filter((b) => b.unit);
+    if (own.length) {
+      const active = own.filter((b) => Date.parse(b.start) <= now);
+      const first = (active[0] || own[0]);
+      const text = active.length ? tr('bkg.badgeNow', { holder: holderText(first.holder), end: when(first.end) })
+        : tr('bkg.badgeSoon', { holder: holderText(first.holder), start: when(first.start) });
+      out += ` <span class="badge ${active.length ? 'info' : 'dim'} tip bkg-badge" data-bkg-badge="unit" data-tip="${esc(own.map(barTip).join(' · '))}">${icon('timer', 11)} ${esc(text)}${own.length > 1 ? ` +${own.length - 1}` : ''}</span>`;
+    }
+    // par lot (un profil MIG par lot ; un seul lot pour les autres types)
+    const byModel = new Map();
+    hits.filter((b) => !b.unit).forEach((b) => {
+      if (!byModel.has(b.model)) byModel.set(b.model, []);
+      byModel.get(b.model).push(b);
+    });
+    byModel.forEach((counted, model) => {
+      const pool = (pools || []).find((p) => p.cluster === u.cluster && p.type === u.type && p.model === model);
+      const cap = pool ? pool.capacity : '?';
+      const activeNow = counted.some((b) => Date.parse(b.start) <= now);
+      const at = activeNow ? now : Math.min(...counted.map((b) => Date.parse(b.start)));
+      const n = bookedAt(bookings, u.cluster, u.type, model, at);
+      const full = pool && n >= pool.capacity;
+      const text = activeNow ? tr('bkg.badgePoolNow', { n, cap }) : tr('bkg.badgePoolSoon', { n, cap, start: when(new Date(at).toISOString()) });
+      const tip = tr('bkg.t.pool', { model, list: counted.map(barTip).join(' · ') });
+      out += ` <span class="badge ${activeNow ? (full ? 'warn' : 'info') : 'dim'} tip bkg-badge" data-bkg-badge="pool" data-tip="${esc(tip)}">${icon('timer', 11)} ${esc(text)}</span>`;
+    });
+    return out;
   }
 
   /** Préremplissage du formulaire depuis une ligne de l'inventaire. */

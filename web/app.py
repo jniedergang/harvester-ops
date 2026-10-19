@@ -9134,8 +9134,15 @@ def api_gpus_all():
         units.extend(part)
     order = {t: i for i, t in enumerate(_hgpu.TYPES)}
     units.sort(key=lambda u: (u["cluster"], order[u["type"]], u["node"], u["address"], u["name"]))
+    # v1.94.1 : ce qui se réserve, par type et modèle de chaque cluster (la
+    # capacité du formulaire de réservation, même calcul) : le calendrier
+    # montre aussi les lots sans réservation, l'inventaire dit « n sur N »
+    pools = []
+    for info, part in results:
+        pools.extend({"cluster": info["cluster"], "type": e["type"], "model": e["model"],
+                      "capacity": e["capacity"], "used": e["used"]} for e in _hbk.catalog(part))
     return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]),
-                    "units": units, "summary": _hgpu.summarize(units)})
+                    "units": units, "summary": _hgpu.summarize(units), "pools": pools})
 
 
 

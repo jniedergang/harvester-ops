@@ -4,6 +4,40 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.94.1] - 2026-10-19 - Bookings: every pool in the calendar, counted bookings said per pool, forms that close
+
+### Fixed
+- Bookings calendar: it showed only the models booked that week. Every
+  bookable type and model of the clusters shown now has a row, empty when
+  nothing is booked, with how many units are free now. The cluster filter
+  applies to these rows. `/api/gpus-all` returns `pools` (the same capacity
+  as the booking form).
+- GPU inventory: a booking by count (for example 1 x vGPU NVIDIA H100-20C)
+  painted "Booked by <holder>" on every unit of the model, as if all were
+  taken. Each unit of the pool now says "1 of 2 booked now" (amber when
+  full), holders in the tooltip. "Booked by <holder> until <end>" stays for
+  a booking of that very unit. The form's "free now" figure already
+  followed the server formula and is unchanged.
+- Container create, scale, restart and delete windows, and the New booking
+  form, stayed open after an accepted request. They now close: the action
+  stays in the dock and a notification says when it ends. A refused request
+  keeps the window open with the error.
+- The danger button ("Delete permanently", "Yes, cancel it") looked
+  disabled: pale pink or dark maroon background depending on the theme. It
+  is now solid in the theme's danger color with readable text (4.6:1 or
+  more in the five themes, dark and light), and dims only while the request
+  is in flight.
+
+### Tests
+- e2e: calendar rows from the pools (empty row, free figure, full pool,
+  cluster filter), pool badge versus unit badge in the GPU inventory,
+  windows closed on success and kept open on a refusal, danger button
+  contrast and fill in the ten theme and mode pairs.
+- API: `pools` of `/api/gpus-all` equal the booking catalog; source checks
+  for the calendar, the badges, the free formula, the closing forms and the
+  danger token in every theme. Each fix was reverted once to see its tests
+  fail.
+
 ## [1.94.0] - 2026-10-18 - GPU bookings: reserve units on a time slot, conflicts refused
 
 ### Added

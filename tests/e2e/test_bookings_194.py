@@ -58,11 +58,16 @@ def unit(uid, typ, model, state="free", **extra):
 
 GPUS_ALL = {"clusters": [{"cluster": "harv-fake", "state": "ok", "count": 3, "addon": True,
                           "available": {"addon": True, "gpu": True, "vgpu": True, "mig": True, "node": True}}],
-            "units": [unit("gpu-n1-0000af005", "vgpu", "NVIDIA H100-20C"),
+            "units": [unit("gpu-n1-0000af004", "vgpu", "NVIDIA H100-20C", "used", used=1, free=0),
+                      unit("gpu-n1-0000af005", "vgpu", "NVIDIA H100-20C"),
                       unit("gpu-n1-0000af006", "vgpu", "", "disabled"),
                       unit("gpu-n3/nvidia.com/gpu", "node", "nvidia.com/gpu", total=4, used=2, free=2,
                            resource="nvidia.com/gpu", address="")],
-            "summary": {t: {"total": 0, "used": 0, "free": 0} for t in ("gpu", "vgpu", "mig", "node")}}
+            "summary": {t: {"total": 0, "used": 0, "free": 0} for t in ("gpu", "vgpu", "mig", "node")},
+            # v1.94.1 : les lots réservables ; l'A100 n'a aucune réservation
+            "pools": [{"cluster": "harv-fake", "type": "gpu", "model": "NVIDIA A100", "capacity": 1, "used": 0},
+                      {"cluster": "harv-fake", "type": "vgpu", "model": "NVIDIA H100-20C", "capacity": 2, "used": 1},
+                      {"cluster": "harv-fake", "type": "node", "model": "nvidia.com/gpu", "capacity": 4, "used": 3}]}
 
 
 @pytest.fixture
@@ -152,7 +157,7 @@ def test_bookings_lives_under_shared_resources_and_says_it_is_not_enforced(ui):
 def test_calendar_renders_bars_lanes_today_marker_and_weeks(ui):
     page, _, _ = ui
     pane = open_bookings(page)
-    expect(pane.locator(".bkg-row[data-pool]")).to_have_count(2)
+    expect(pane.locator(".bkg-row[data-pool]")).to_have_count(3)
     vg = pane.locator('.bkg-row[data-pool="harv-fake|vgpu|NVIDIA H100-20C"]')
     expect(vg.locator(".bkg-bar")).to_have_count(2)
     # deux créneaux qui se chevauchent : deux voies
@@ -166,6 +171,7 @@ def test_calendar_renders_bars_lanes_today_marker_and_weeks(ui):
     pane.locator('[data-bkg="week-next"]').click()
     pane.locator('[data-bkg="week-next"]').click()
     expect(pane.locator(".bkg-bar")).to_have_count(0)
+    expect(pane.locator(".bkg-row[data-pool]")).to_have_count(3)         # les lots restent, vides
     expect(pane.locator(".bkg-empty")).to_contain_text("No booking this week")
     pane.locator('[data-bkg="week-today"]').click()
     expect(pane.locator(".bkg-bar")).to_have_count(3)
@@ -225,7 +231,9 @@ def test_new_booking_form_checks_the_slot_and_says_why(ui):
     panel.locator('[name="end"]').fill(panel.locator('[name="start"]').input_value()[:11] + "23:59")
     sent.clear()
     panel.locator("[data-bkg-submit]").click()
-    expect(panel.locator(".of-msg")).to_contain_text("Slot booked")
+    # v1.94.1 : acceptée, la fenêtre se ferme ; la fin se dit par une notification
+    expect(panel).to_have_count(0)
+    expect(page.locator(".vma-toast")).to_contain_text("Slot booked")
     [post] = [s for s in sent if s[1] == "bookings"]
     body = post[2]
     assert body["cluster"] == "harv-fake" and body["type"] == "vgpu" and body["model"] == "NVIDIA H100-20C"
@@ -238,8 +246,17 @@ def test_gpu_inventory_badge_and_book_prefills_the_form(ui):
     page.evaluate("App.setTab('gpus')")
     pane = page.locator("#tab-gpus")
     row = pane.locator('tr[data-unit="harv-fake|gpu-n1-0000af005"]')
-    expect(row.locator(".bkg-badge")).to_contain_text("Booked by alice until", timeout=8000)
-    expect(pane.locator('tr[data-unit="harv-fake|gpu-n3/nvidia.com/gpu"] .bkg-badge')).to_contain_text("ml-team")
+    expect(row.locator('.bkg-badge[data-bkg-badge="unit"]')).to_contain_text("Booked by alice until", timeout=8000)
+    # v1.94.1 : la réservation par nombre de bob se dit au lot, sur chaque unité
+    expect(row.locator('.bkg-badge[data-bkg-badge="pool"]')).to_have_text(re.compile(r"2 of 2 booked now"))
+    other = pane.locator('tr[data-unit="harv-fake|gpu-n1-0000af004"]')
+    expect(other.locator(".bkg-badge")).to_have_count(1)
+    expect(other.locator(".bkg-badge")).to_have_text(re.compile(r"2 of 2 booked now"))
+    expect(other).not_to_contain_text("Booked by")
+    node = pane.locator('tr[data-unit="harv-fake|gpu-n3/nvidia.com/gpu"] .bkg-badge')
+    expect(node).to_have_text(re.compile(r"2 of 4 booked now"))
+    expect(node).not_to_contain_text("ml-team")
+    assert "ml-team" in node.get_attribute("data-tip")
     expect(pane.locator('tr[data-unit="harv-fake|gpu-n1-0000af006"] [data-gpu="book"]')).to_have_count(0)   # désactivée
     assert row.locator('[data-gpu="book"]').get_attribute("data-tip")
     row.locator('[data-gpu="book"]').click()
@@ -259,3 +276,79 @@ def test_container_form_hints_availability_and_links_to_bookings(ui):
     expect(hint).not_to_contain_text("H100")                               # les GPU de conteneurs seulement
     hint.locator("[data-bkg-open]").click()
     expect(page.locator('#tab-group-shared .tab[data-tab="bookings"]')).to_have_class(re.compile("active"))
+
+
+def test_calendar_shows_every_bookable_pool_with_what_is_free(ui):
+    """v1.94.1 : le calendrier montrait seulement les lots réservés dans la
+    semaine. Tous les lots réservables des clusters affichés ont une ligne,
+    vide s'il n'y a rien, avec ce qui reste libre maintenant."""
+    page, _, _ = ui
+    pane = open_bookings(page)
+    a100 = pane.locator('.bkg-row[data-pool="harv-fake|gpu|NVIDIA A100"]')
+    expect(a100).to_have_class(re.compile("is-empty"), timeout=8000)
+    expect(a100.locator(".bkg-bar")).to_have_count(0)
+    expect(a100.locator(".bkg-free-now")).to_have_text("1 of 1 free now")
+    # 2 unités, 1 utilisée, 2 réservées maintenant : plus rien de libre
+    vg = pane.locator('.bkg-row[data-pool="harv-fake|vgpu|NVIDIA H100-20C"] .bkg-free-now')
+    expect(vg).to_have_text("0 of 2 free now")
+    expect(vg).to_have_class(re.compile("is-full"))
+    assert "2 booked now" in vg.get_attribute("data-tip")
+    expect(pane.locator('.bkg-row[data-pool="harv-fake|node|nvidia.com/gpu"] .bkg-free-now')).to_have_text("1 of 4 free now")  # 3 en service, 2 réservées
+
+
+def test_calendar_cluster_filter_applies_to_pools(ui):
+    page, _, _ = ui
+    GPUS_ALL["pools"].append({"cluster": "elsewhere", "type": "gpu", "model": "NVIDIA L4", "capacity": 3, "used": 0})
+    try:
+        pane = open_bookings(page)
+        expect(pane.locator('.bkg-row[data-pool="elsewhere|gpu|NVIDIA L4"]')).to_have_count(1, timeout=8000)
+        pane.locator('[data-bkg="cluster"]').select_option("harv-fake")
+        expect(pane.locator('.bkg-row[data-pool="elsewhere|gpu|NVIDIA L4"]')).to_have_count(0)
+        expect(pane.locator(".bkg-row[data-pool]")).to_have_count(3)
+    finally:
+        GPUS_ALL["pools"].pop()
+
+
+DANGER_METRICS = """
+(el) => {
+  const rgb = (c) => (c.match(/\\d+(\\.\\d+)?/g) || []).slice(0, 3).map(Number);
+  const lum = ([r, g, b]) => {
+    const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  };
+  const cs = getComputedStyle(el);
+  const probe = document.createElement('span');
+  probe.style.color = 'var(--danger)';
+  document.body.appendChild(probe);
+  const danger = getComputedStyle(probe).color;
+  probe.remove();
+  const a = lum(rgb(cs.color)), b = lum(rgb(cs.backgroundColor));
+  return { text: (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05), bg: rgb(cs.backgroundColor).join(','),
+           danger: rgb(danger).join(','), opacity: cs.opacity };
+}
+"""
+
+
+def test_danger_button_is_solid_and_readable_in_every_theme(ui):
+    """v1.94.1 : « Yes, cancel it » et « Delete permanently » semblaient
+    grisés (fond --danger-bg pâle ou sombre). Plein, lisible (AA) dans les
+    cinq thèmes et les deux modes ; grisé seulement pendant l'envoi."""
+    page, _, _ = ui
+    pane = open_bookings(page)
+    pane.locator('[data-bkg-view="mine"]').click()
+    row = pane.locator('tr[data-booking="bk-aaaaaaaa0001"]')
+    row.locator('[data-bkg="cancel"]').click()
+    btn = row.locator('[data-bkg="cancel-yes"]')
+    expect(btn).to_be_enabled()
+    page.add_style_tag(content=".btn { transition: none !important; }")
+    for theme in ("suse", "nord", "solarized", "catppuccin", "tokyo"):
+        for mode in ("dark", "light"):
+            page.evaluate(f"document.documentElement.setAttribute('data-theme','{theme}');"
+                          f"document.documentElement.setAttribute('data-mode','{mode}')")
+            m = btn.evaluate(DANGER_METRICS)
+            assert m["text"] >= 4.5, f"{theme}/{mode}: text {m}"
+            assert m["bg"] == m["danger"], f"{theme}/{mode}: fond {m}"      # le rouge du thème, plein
+            assert m["opacity"] == "1", f"{theme}/{mode}: {m}"
+    # pendant l'envoi seulement : grisé
+    btn.evaluate("b => { b.disabled = true; }")
+    assert float(btn.evaluate("b => getComputedStyle(b).opacity")) < 0.6

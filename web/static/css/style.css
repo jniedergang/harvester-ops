@@ -90,7 +90,7 @@ html[data-theme="suse"][data-mode="dark"] {
   --shadow-soft: 0 4px 12px rgba(2,16,13,0.45);
   --btn-primary-text: #06201c;   /* pine text on jade — AA, and very SUSE */
   --btn-warn-text: #331303;
-  --danger-bg: #5c1a1d;
+  --btn-danger-text: #000000;    /* on --danger, 5.4:1 */
   color-scheme: dark;
 }
 
@@ -120,7 +120,7 @@ html[data-theme="suse"][data-mode="light"] {
   --shadow-soft: 0 4px 12px rgba(12,50,44,0.10);
   --btn-primary-text: #ffffff;
   --btn-warn-text: #ffffff;
-  --danger-bg: #f7d9da;
+  --btn-danger-text: #ffffff;    /* on --danger, 5.4:1 */
   color-scheme: light;
 }
 
@@ -152,7 +152,7 @@ html[data-theme="nord"][data-mode="dark"] {
   --shadow-soft: 0 4px 12px rgba(0,0,0,0.35);
   --btn-primary-text: #2e3440;
   --btn-warn-text: #2e3440;
-  --danger-bg: #6f3036;
+  --btn-danger-text: #000000;    /* on --danger, 5.1:1 */
   color-scheme: dark;
 }
 
@@ -181,7 +181,7 @@ html[data-theme="nord"][data-mode="light"] {
   --shadow-soft: 0 4px 12px rgba(46,52,64,0.10);
   --btn-primary-text: #eceff4;
   --btn-warn-text: #2e3440;
-  --danger-bg: #bf616a;
+  --btn-danger-text: #000000;    /* on --danger, 5.1:1 */
   color-scheme: light;
 }
 
@@ -213,7 +213,7 @@ html[data-theme="solarized"][data-mode="dark"] {
   --shadow-soft: 0 4px 12px rgba(0,0,0,0.4);
   --btn-primary-text: #fdf6e3;
   --btn-warn-text: #002b36;
-  --danger-bg: #6e1d1c;
+  --btn-danger-text: #ffffff;    /* on --danger, 4.6:1 */
   color-scheme: dark;
 }
 
@@ -242,7 +242,7 @@ html[data-theme="solarized"][data-mode="light"] {
   --shadow-soft: 0 4px 12px rgba(7,54,66,0.10);
   --btn-primary-text: #fdf6e3;
   --btn-warn-text: #fdf6e3;
-  --danger-bg: #dc322f;
+  --btn-danger-text: #ffffff;    /* on --danger, 4.6:1 */
   color-scheme: light;
 }
 
@@ -274,7 +274,7 @@ html[data-theme="catppuccin"][data-mode="dark"] {
   --shadow-soft: 0 4px 12px rgba(0,0,0,0.35);
   --btn-primary-text: #1e1e2e;
   --btn-warn-text: #1e1e2e;
-  --danger-bg: #8c3a4e;
+  --btn-danger-text: #1e1e2e;    /* on --danger, 7.1:1 */
   color-scheme: dark;
 }
 
@@ -303,7 +303,7 @@ html[data-theme="catppuccin"][data-mode="light"] {
   --shadow-soft: 0 4px 12px rgba(76,79,105,0.10);
   --btn-primary-text: #eff1f5;
   --btn-warn-text: #eff1f5;
-  --danger-bg: #d20f39;
+  --btn-danger-text: #ffffff;    /* on --danger, 5.4:1 */
   color-scheme: light;
 }
 
@@ -336,7 +336,7 @@ html[data-theme="tokyo"][data-mode="dark"] {
   --shadow-soft: 0 4px 12px rgba(0,0,0,0.4);
   --btn-primary-text: #1a1b26;
   --btn-warn-text: #1a1b26;
-  --danger-bg: #7a313e;
+  --btn-danger-text: #1a1b26;    /* on --danger, 6.5:1 */
   color-scheme: dark;
 }
 
@@ -368,7 +368,7 @@ html:not([data-theme]) {
   --shadow-soft: 0 4px 12px rgba(52,59,89,0.10);
   --btn-primary-text: #ffffff;
   --btn-warn-text: #ffffff;
-  --danger-bg: #f52a65;
+  --btn-danger-text: #000000;    /* on --danger, 5.4:1 */
   color-scheme: light;
 }
 
@@ -928,8 +928,13 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--accent-dim); border-color: var(--accent-dim); color: var(--btn-primary-text); }
 .btn-primary:hover:not(:disabled) { background: var(--accent); border-color: var(--accent); }
-.btn-danger { background: var(--danger-bg); border-color: var(--danger-bg); color: var(--btn-primary-text); }
-.btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--danger); }
+/* v1.94.1 : plein, comme .btn-primary. L'ancien fond (--danger-bg, rose pâle
+   ou bordeaux sombre selon le thème) faisait passer le bouton pour grisé.
+   Grisé seulement pendant l'envoi (disabled). */
+.btn-danger { background: var(--danger); border-color: var(--danger); color: var(--btn-danger-text); font-weight: 600; }
+.btn-danger:hover:not(:disabled) { background: var(--danger); border-color: var(--text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 35%, transparent); }
+.btn-danger:disabled { opacity: 0.45; cursor: progress; }
 .btn-secondary { background: var(--bg-elev); }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 
@@ -5408,3 +5413,6 @@ td.fk-reason { max-width: 260px; }
 .bkg-hint-title { font-weight: 600; }
 .gpu-booking { white-space: nowrap; }
 .gpu-booking .bkg-badge { margin-left: 4px; }
+/* v1.94.1 : ce qui reste libre sur chaque lot du calendrier */
+.bkg-free-now { margin-top: 2px; font-size: 11.5px; color: var(--done); }
+.bkg-free-now.is-full { color: var(--warn); }
