@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="fr" data-theme="suse" data-mode="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>harvester-ops, réplication (maquette)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=SUSE:wght@400..700&display=swap" rel="stylesheet">
+<style>
+/* Jetons du thème SUSE Slate, repris de web/static/css/style.css */
+:root{--sidebar-w:240px;--font-ui:'SUSE',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;--font-mono:ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace}
+html[data-mode="light"]{--bg:#ffffff;--bg-panel:#f4f8f6;--bg-elev:#ebf2ef;--border:#d3e0da;--text:#0c322c;--text-dim:#4f6b62;--accent:#1d8653;--accent-dim:#30ba78;--danger:#c6323b;--warn:#c75418;--info:#2453ff;--done:#1d8653;--error:#c6323b;--overlay-soft:rgba(12,50,44,.05);--selection-bg:rgba(48,186,120,.15);--backdrop:rgba(12,50,44,.35);--shadow-soft:0 4px 12px rgba(12,50,44,.10);--btn-primary-text:#fff;--btn-danger-text:#fff;color-scheme:light}
+html[data-mode="dark"]{--bg:#0c322c;--bg-panel:#103b34;--bg-elev:#15453d;--border:#1f5348;--text:#e8f2ee;--text-dim:#8fb0a6;--accent:#30ba78;--accent-dim:#23895a;--danger:#e5484d;--warn:#fe7c3f;--info:#62a9ff;--done:#30ba78;--error:#e5484d;--overlay-soft:rgba(255,255,255,.05);--selection-bg:rgba(48,186,120,.14);--backdrop:rgba(4,24,20,.65);--shadow-soft:0 4px 12px rgba(2,16,13,.45);--btn-primary-text:#06201c;--btn-danger-text:#000;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;font-family:var(--font-ui);font-variant-ligatures:none;font-feature-settings:"liga" 0,"calt" 0;background:var(--bg);color:var(--text);font-size:13px;line-height:1.45}
+a{color:var(--accent)}
+code,.mono{font-family:var(--font-mono);font-size:12px}
+.mock-banner{position:sticky;top:0;z-index:950;background:#9a3d0c;color:#fff;text-align:center;font-weight:600;padding:4px 8px;font-size:12px}
+.layout{display:flex;min-height:calc(100vh - 24px)}
+#sidebar{width:var(--sidebar-w);background:var(--bg-panel);border-right:1px solid var(--border);padding:16px 0;flex-shrink:0;white-space:nowrap;overflow:hidden;position:sticky;top:24px;height:calc(100vh - 24px);overflow-y:auto}
+#sidebar header{padding:0 18px 14px;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px}
+.version{font-size:11px;color:var(--text-dim)}
+.cluster-selector{padding:12px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.cluster-selector label{display:block;font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px}
+select,input[type=text],input[type=number],textarea{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:5px 8px;max-width:100%}
+select:focus,input:focus,textarea:focus{outline:2px solid var(--accent);outline-offset:-1px}
+.cluster-selector select{width:100%}
+nav{padding-top:6px}
+.tab{display:flex;align-items:center;gap:10px;color:var(--text-dim);text-decoration:none;padding:9px 18px;border-left:3px solid transparent;font-size:13px;cursor:pointer;overflow:hidden;background:none;border-top:0;border-right:0;border-bottom:0;width:100%;font-family:inherit;text-align:left}
+.tab:hover{background:var(--bg-elev);color:var(--text)}
+.tab.active{background:var(--bg-elev);color:var(--accent);border-left-color:var(--accent)}
+.tab-icon{display:inline-flex;width:16px;height:16px;flex:none}
+.tab-icon svg,.ico{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.tab-group-children{margin-left:14px;border-left:1px solid var(--border);padding-left:4px;display:flex;flex-direction:column}
+.tab-child{font-size:12px;padding:7px 14px}
+.tab-group-chevron{margin-left:auto;font-size:10px}
+.new-pill{font-size:11px;background:var(--accent);color:var(--btn-primary-text);border-radius:8px;padding:0 6px;margin-left:auto}
+#content{flex:1;min-width:0;padding:24px 32px 90px}
+.page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.page-head h1{margin:0 0 2px;font-size:22px;font-weight:600}
+.hint{color:var(--text-dim);margin:4px 0 14px}
+.form-hint{color:var(--text-dim);font-size:11px;margin-top:4px}
+.view{display:none}.view.active{display:block}
+.card{background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;margin-bottom:16px;overflow:hidden}
+.card-header{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg-elev)}
+.card-header h3{margin:0;font-size:14px;font-weight:600}
+.card-body{padding:12px 16px}
+.btn{background:var(--bg-elev);color:var(--text);border:1px solid var(--border);padding:7px 14px;border-radius:4px;cursor:pointer;font-size:13px;font-family:inherit;transition:all .15s ease;display:inline-flex;align-items:center;gap:6px}
+.btn:hover:not(:disabled){background:var(--bg-panel);border-color:var(--accent)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-primary{background:var(--accent-dim);border-color:var(--accent-dim);color:var(--btn-primary-text)}
+html[data-mode="light"] .btn-primary{background:var(--accent);border-color:var(--accent)}
+.btn-primary:hover:not(:disabled){background:var(--accent);border-color:var(--accent)}
+.btn-danger{background:var(--danger);border-color:var(--danger);color:var(--btn-danger-text);font-weight:600}
+.btn-danger:hover:not(:disabled){background:var(--danger);border-color:var(--text)}
+.btn-sm{padding:3px 9px;font-size:12px}
+.btn-row{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.badge{display:inline-block;padding:1px 7px;border-radius:9px;font-size:11px;border:1px solid var(--border);color:var(--text-dim);background:var(--bg-elev);white-space:nowrap}
+.badge.ok{color:var(--done);border-color:var(--done)}.badge.warn{color:var(--warn);border-color:var(--warn)}.badge.fail{color:var(--error);border-color:var(--error)}.badge.info{color:var(--info);border-color:var(--info)}
+.res-chip{display:inline-flex;align-items:center;gap:4px;margin:0 4px 3px 0;padding:2px 9px;border:1px solid var(--border);border-radius:10px;background:var(--bg-panel);color:var(--text);font:inherit;font-size:12px;cursor:pointer}
+.res-chip:hover{border-color:var(--accent);color:var(--accent)}
+.res-chip.is-on{border-color:var(--accent);background:var(--accent);color:var(--btn-primary-text)}
+.sub-tabs-inline{display:inline-flex;gap:4px;border:1px solid var(--border);border-radius:6px;padding:2px;background:var(--bg-panel)}
+.sub-tabs-inline button{background:none;border:0;padding:5px 12px;border-radius:4px;cursor:pointer;color:var(--text-dim);font:inherit}
+.sub-tabs-inline button.active{background:var(--bg-elev);color:var(--accent);font-weight:600}
+table.data{width:100%;border-collapse:collapse;font-size:12.5px}
+table.data th{text-align:left;font-weight:600;color:var(--text-dim);font-size:11px;text-transform:uppercase;letter-spacing:.03em;padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap}
+table.data td{padding:7px 8px;border-bottom:1px solid var(--border);vertical-align:middle}
+table.data tr:last-child td{border-bottom:0}
+table.data td>b:first-child{white-space:nowrap}
+.tw{overflow-x:auto}
+/* Blocs numérotés, motif Forklift (.fk-step) */
+.fk-step{border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:12px;background:var(--bg)}
+.fk-step-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.fk-step-head b{font-size:14px}
+.fk-step-n{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:600;font-size:12px}
+.fk-sources{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px}
+.fk-source{border:1px solid var(--border);border-radius:8px;padding:12px 14px;background:var(--bg)}
+.fk-concerns span{white-space:normal}
+.fk-check{display:flex;align-items:center;gap:6px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.field{display:grid;gap:3px;margin-bottom:8px}
+.field>label{font-size:11px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.03em}
+.sub{border:1px dashed var(--border);border-radius:6px;padding:10px 12px;margin-top:10px;background:var(--bg-panel)}
+.sub h4{margin:0 0 6px;font-size:13px}
+.muted{color:var(--text-dim)}
+.ok-t{color:var(--done)}.warn-t{color:var(--warn)}.fail-t{color:var(--error)}
+.kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:10px;margin:8px 0}
+.kpi div{border:1px solid var(--border);border-radius:6px;padding:8px 10px;background:var(--bg)}
+.kpi small{display:block;color:var(--text-dim);font-size:11px}
+.kpi b{font-size:18px;font-weight:600}
+.formula{font-family:var(--font-mono);font-size:12px;background:var(--bg-elev);border-radius:6px;padding:8px 10px;margin:8px 0;line-height:1.7}
+.field>label.fk-check{text-transform:none;font-size:13px;color:var(--text);letter-spacing:0}
+.sub .leg-line span{background:var(--bg-panel)}
+.verdict{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:6px;border:1px solid var(--border);border-left-width:4px}
+.verdict.ok{border-left-color:var(--done)}.verdict.warn{border-left-color:var(--warn)}.verdict.fail{border-left-color:var(--error)}
+.verdict b.big{font-size:20px}
+.progress{height:8px;background:var(--bg-elev);border-radius:4px;overflow:hidden;border:1px solid var(--border)}
+.progress>i{display:block;height:100%;background:var(--accent);width:0;transition:width .2s}
+.gauge{position:relative;height:10px;width:140px;background:var(--bg-elev);border-radius:5px;border:1px solid var(--border);overflow:hidden;display:inline-block;vertical-align:middle}
+.gauge>i{position:absolute;left:0;top:0;bottom:0;border-radius:5px}
+.gauge>em{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--text)}
+.plan-card h3{margin:0;font-size:15px}
+.plan-meta{display:grid;grid-template-columns:1fr 1fr;gap:6px 14px;margin:10px 0;font-size:12px}
+.plan-meta small{display:block;color:var(--text-dim);font-size:11px}
+.code{font-family:var(--font-mono);font-size:12px;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;padding:10px 12px;white-space:pre-wrap;word-break:break-all;margin:0}
+/* Fenêtre */
+.modal-overlay{position:fixed;inset:0;background:var(--backdrop);display:none;align-items:center;justify-content:center;z-index:1000;backdrop-filter:blur(2px)}
+.modal-overlay.active{display:flex}
+.modal{background:var(--bg-panel);border:1px solid var(--border);border-radius:8px;width:95%;max-width:1080px;max-height:92vh;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.4)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 20px;border-bottom:1px solid var(--border)}
+.modal-header h3{margin:0;font-size:18px;font-weight:500}
+.modal-subtitle{color:var(--text-dim);font-size:12px;margin-top:2px}
+.btn-close{background:transparent;border:0;color:var(--text-dim);font-size:26px;line-height:1;cursor:pointer;padding:4px 10px;border-radius:4px}
+.btn-close:hover{background:var(--bg-elev);color:var(--danger)}
+.modal-body{padding:16px 20px;overflow-y:auto;flex:1}
+.modal-foot{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid var(--border);align-items:center}
+.jump{display:flex;gap:4px;flex-wrap:wrap}
+.jump button{font:inherit;font-size:11px;border:1px solid var(--border);background:var(--bg);color:var(--text-dim);border-radius:10px;padding:1px 8px;cursor:pointer}
+.jump button:hover{border-color:var(--accent);color:var(--accent)}
+/* Vagues */
+.waves{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.wave{border:1px solid var(--border);border-radius:8px;padding:8px;background:var(--bg-panel);min-height:120px}
+.wave.over{border-color:var(--accent);background:var(--selection-bg)}
+.wave h5{margin:0 0 6px;font-size:12px;display:flex;justify-content:space-between;gap:6px}
+.vmchip{display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid var(--border);border-radius:6px;padding:4px 8px;margin-bottom:5px;background:var(--bg);cursor:grab;font-size:12px}
+.vmchip select{font-size:11px;padding:1px 4px}
+.gate{display:grid;gap:4px;margin-top:6px;border-top:1px dashed var(--border);padding-top:6px;font-size:12px}
+/* Dock */
+.dock{position:fixed;right:16px;bottom:16px;z-index:1100;display:flex;flex-direction:column;gap:8px;max-width:360px}
+.toast{background:var(--bg-panel);border:1px solid var(--border);border-left:4px solid var(--accent);border-radius:6px;padding:10px 12px;box-shadow:var(--shadow-soft);font-size:12px}
+.toast b{display:block;font-size:13px}
+.menu{position:absolute;right:0;top:100%;z-index:50;background:var(--bg-panel);border:1px solid var(--border);border-radius:6px;box-shadow:var(--shadow-soft);min-width:180px;padding:4px;display:none}
+.menu.open{display:block}
+.menu button{display:flex;width:100%;gap:8px;align-items:center;background:none;border:0;padding:6px 10px;text-align:left;font:inherit;color:var(--text);border-radius:4px;cursor:pointer}
+.menu button:hover{background:var(--bg-elev)}
+.menu button.hl{color:var(--accent);font-weight:600}
+.rel{position:relative}
+.steps{list-style:none;margin:6px 0;padding:0}
+.steps li{display:flex;gap:8px;align-items:flex-start;padding:4px 0}
+.steps li .st{flex:none;width:16px;height:16px;border-radius:50%;border:2px solid var(--border);margin-top:1px}
+.steps li.done .st{background:var(--done);border-color:var(--done)}
+.steps li.run .st{border-color:var(--warn);border-top-color:transparent;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.chart{width:100%;height:auto;display:block}
+.chart text{font-family:var(--font-ui);font-size:11px;fill:var(--text-dim)}
+.chart .grid{stroke:var(--border);stroke-width:1}
+.charts{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.chart-box{border:1px solid var(--border);border-radius:6px;padding:8px 10px;background:var(--bg)}
+.chart-box h4{margin:0 0 4px;font-size:12px;font-weight:600}
+.legend{display:flex;gap:10px;font-size:11px;color:var(--text-dim);flex-wrap:wrap}
+.legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:4px}
+.leg-flow{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:6px 0}
+.leg-node{border:1px solid var(--border);border-radius:6px;padding:4px 8px;background:var(--bg);font-weight:600;font-size:12px}
+.leg-line{flex:1;min-width:60px;border-top:2px dashed var(--border);position:relative;text-align:center;font-size:11px;color:var(--text-dim)}
+.leg-line.slow{border-top-color:var(--warn)}
+.leg-line span{position:relative;top:-9px;background:var(--bg);padding:0 4px}
+.secret{font-family:var(--font-mono);letter-spacing:2px}
+.confirm{border:1px solid var(--danger);border-left-width:4px;border-radius:6px;padding:12px 14px;background:var(--bg);margin:12px 0;display:none}
+.confirm.open{display:block}
+.mini-vm{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.hidden{display:none!important}
+tr.override td{background:var(--bg-panel)}
+@media (max-width:1000px){.charts,.grid3{grid-template-columns:1fr 1fr}}
+@media (max-width:760px){
+ #sidebar{width:56px}#sidebar .lbl,#sidebar .version,.cluster-selector,.tab-group-chevron,.new-pill{display:none}
+ .tab-group-children{margin-left:0;border-left:0;padding-left:0}.tab,.tab-child{padding:10px 0;justify-content:center}
+ #content{padding:16px 12px 90px}.grid2,.grid3,.charts,.waves,.plan-meta{grid-template-columns:1fr}
+ .fk-sources{grid-template-columns:1fr}.modal{width:100%;max-height:100vh;border-radius:0}.modal-body{padding:12px}
+ .gauge{width:90px}.jump{display:none}
+}
+</style>
+</head>
+<body>
+<div class="mock-banner" role="note">Maquette, données fictives</div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+ <symbol id="i-node" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1"/><rect x="3" y="14" width="18" height="6" rx="1"/><path d="M7 7h.01M7 17h.01"/></symbol>
+ <symbol id="i-vm" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+ <symbol id="i-share" viewBox="0 0 24 24"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.6 10.7 6.8-3.4M8.6 13.3l6.8 3.4"/></symbol>
+ <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></symbol>
+ <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+ <symbol id="i-drill" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/></symbol>
+ <symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></symbol>
+ <symbol id="i-act" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+ <symbol id="i-io" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></symbol>
+ <symbol id="i-auto" viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></symbol>
+ <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></symbol>
+ <symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/></symbol>
+ <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+</svg>
+<div class="layout">
+<aside id="sidebar">
+ <header><div class="brand"><svg class="ico" style="color:var(--accent)"><use href="#i-shield"/></svg><span class="lbl">harvester-ops</span></div><span class="version">v1.96.0</span></header>
+ <div class="cluster-selector"><label for="cl">Cluster</label>
+  <select id="cl" title="Cluster courant de la console"><option>harv-paris</option><option>harv-lyon</option></select></div>
+ <nav>
+  <button class="tab" data-go="vms" title="Machines virtuelles du cluster courant"><span class="tab-icon"><svg class="ico"><use href="#i-vm"/></svg></span><span class="lbl">Machines virtuelles</span></button>
+  <button class="tab" title="Conteneurs (inchangé)" disabled style="opacity:.6"><span class="tab-icon"><svg class="ico"><use href="#i-node"/></svg></span><span class="lbl">Conteneurs</span></button>
+  <button class="tab" title="GPU, réservations, usage (inchangé)" disabled style="opacity:.6"><span class="tab-icon"><svg class="ico"><use href="#i-share"/></svg></span><span class="lbl">Ressources partagées</span></button>
+  <div class="tab-group">
+   <div class="tab" style="cursor:default;color:var(--text)" title="Nouvelle section : protéger des VM par réplication vers un autre cluster"><span class="tab-icon"><svg class="ico"><use href="#i-shield"/></svg></span><span class="lbl">Protection</span><span class="new-pill">nouveau</span></div>
+   <div class="tab-group-children">
+    <button class="tab tab-child active" data-go="plans" title="Plans de réplication : quelles VM, vers quel cluster, avec quel objectif"><span class="tab-icon"><svg class="ico"><use href="#i-copy"/></svg></span><span class="lbl">Plans de réplication</span></button>
+    <button class="tab tab-child" data-go="drills" title="Exercices planifiés, historique des exercices et des bascules"><span class="tab-icon"><svg class="ico"><use href="#i-drill"/></svg></span><span class="lbl">Exercices et bascules</span></button>
+    <button class="tab tab-child" data-go="links" title="Liens entre clusters et cible de sauvegarde : débit et latence mesurés"><span class="tab-icon"><svg class="ico"><use href="#i-link"/></svg></span><span class="lbl">Liens entre clusters</span></button>
+   </div>
+  </div>
+  <button class="tab" title="Imports et migrations (inchangé)" disabled style="opacity:.6"><span class="tab-icon"><svg class="ico"><use href="#i-io"/></svg></span><span class="lbl">Import / export de VM</span></button>
+  <button class="tab" title="Cluster API, Terraform, bare-metal (inchangé)" disabled style="opacity:.6"><span class="tab-icon"><svg class="ico"><use href="#i-auto"/></svg></span><span class="lbl">Automatisation</span></button>
+  <button class="tab" title="Activité : toutes les actions suivies" disabled style="opacity:.6"><span class="tab-icon"><svg class="ico"><use href="#i-act"/></svg></span><span class="lbl">Activité</span></button>
+  <button class="tab" id="themeBtn" title="Basculer entre thème clair et sombre" style="margin-top:12px;border-top:1px solid var(--border)"><span class="tab-icon"><svg class="ico"><use href="#i-moon"/></svg></span><span class="lbl">Thème clair / sombre</span></button>
+ </nav>
+</aside>
+
+<main id="content">
+
+<!-- ===================== VMs (menu d'action) ===================== -->
+<section class="view" id="v-vms">
+ <div class="page-head"><div><h1>Machines virtuelles</h1><p class="hint">Extrait : le menu d'action d'une VM gagne « Protéger... », qui ouvre la même fenêtre que la création de plan, VM déjà cochée.</p></div></div>
+ <div class="card"><div class="tw"><table class="data">
+  <thead><tr><th>Nom</th><th>Namespace</th><th>État</th><th>Protection</th><th></th></tr></thead>
+  <tbody id="vmTable"></tbody></table></div></div>
+</section>
+
+<!-- ===================== Plans ===================== -->
+<section class="view active" id="v-plans">
+ <div class="page-head">
+  <div><h1>Plans de réplication</h1><p class="hint">Réplication asynchrone entre clusters par la cible de sauvegarde. Les volumes de secours restent en attente sur le site de reprise et ne servent qu'à la bascule.</p></div>
+  <button class="btn btn-primary" data-open="create" title="Créer un plan de réplication (fenêtre en six blocs)"><svg class="ico"><use href="#i-plus"/></svg>Nouveau plan</button>
+ </div>
+ <div class="fk-sources" id="planCards"></div>
+</section>
+
+<!-- ===================== Vue d'un plan ===================== -->
+<section class="view" id="v-plan">
+ <div class="page-head">
+  <div><h1>Plan erp <span class="badge ok" id="planState">Protégé</span></h1>
+  <p class="hint">harv-paris (3 nœuds) -&gt; harv-lyon, par <code>nfs://nas-dr:/volume1/BACKUP/dr/</code>. Objectif 15 min, intervalle dérivé 7 min, 24 points gardés.</p></div>
+  <div class="btn-row">
+   <button class="btn" data-go="plans" title="Revenir à la liste des plans">Retour à la liste</button>
+   <button class="btn" id="btnDrill" title="Lancer un exercice de routine sur une copie séparée (ne touche pas aux volumes de secours)">Exercice</button>
+   <button class="btn btn-danger" id="btnFailover" title="Basculer le plan sur harv-lyon (confirmation demandée)">Basculer</button>
+   <button class="btn" id="btnFailback" title="Après une bascule : répliquer en sens inverse puis revenir sur harv-paris">Retour au site principal</button>
+  </div>
+ </div>
+ <div class="confirm" id="failoverPanel">
+  <b class="fail-t">Basculer le plan erp sur harv-lyon</b>
+  <p class="muted" style="margin:4px 0">Les VM de harv-paris sont arrêtées si le site répond encore. Les modifications postérieures au dernier point appliqué sont perdues (au plus 13 min à cet instant).</p>
+  <ol class="steps" id="foSteps"></ol>
+  <div class="field" style="max-width:360px"><label for="foName">Tapez le nom du plan pour confirmer</label>
+   <input type="text" id="foName" placeholder="erp" title="Saisir exactement « erp » pour activer le bouton" autocomplete="off"></div>
+  <div class="btn-row"><button class="btn btn-danger" id="foGo" disabled title="Disponible une fois le nom du plan saisi">Basculer maintenant</button>
+   <button class="btn" id="foCancel" title="Fermer sans rien faire">Annuler</button></div>
+ </div>
+ <div class="confirm" id="failbackPanel" style="border-color:var(--info)">
+  <b>Retour au site principal</b>
+  <ol class="steps">
+   <li><span class="st"></span><span>Créer le plan inverse harv-lyon -&gt; harv-paris (mêmes correspondances, inversées).</span></li>
+   <li><span class="st"></span><span>Copie vers harv-paris : incrémentale si les anciens volumes sont intacts, complète sinon.</span></li>
+   <li><span class="st"></span><span>Fenêtre de retour planifiée : arrêt sur harv-lyon, dernier point, activation sur harv-paris.</span></li>
+   <li><span class="st"></span><span>Réarmer le plan d'origine (volumes de secours recréés sur harv-lyon).</span></li>
+  </ol>
+  <p class="muted" style="margin:4px 0">Disponible seulement après une bascule. Ici le plan tourne sur son site principal.</p>
+  <button class="btn" id="fbClose" title="Fermer">Fermer</button>
+ </div>
+ <div class="kpi">
+  <div title="Âge du plus vieux point appliqué parmi les VM du plan"><small>RPO tenu maintenant</small><b>13 min</b> <span class="badge warn">objectif 15</span> <span class="muted">(erp-web-01)</span></div>
+  <div title="95e centile de l'âge du dernier point appliqué sur 24 h"><small>RPO tenu (p95, 24 h)</small><b>11 min</b></div>
+  <div title="Durée de reprise mesurée au dernier exercice complet"><small>RTO mesuré</small><b>18 min</b> <span class="muted">(exercice complet du 12/09)</span></div>
+  <div title="Taille occupée en entier par les volumes de secours sur harv-lyon"><small>Volumes de secours</small><b>1 230 Gi</b> <span class="muted">sur harv-lyon, répliques comprises</span></div>
+ </div>
+ <div class="card"><div class="card-header"><h3>VM du plan</h3><span class="legend"><span><i style="background:var(--done)"></i>dans l'objectif</span><span><i style="background:var(--warn)"></i>au-delà de 80 %</span><span><i style="background:var(--text)"></i>objectif</span></span></div>
+  <div class="tw"><table class="data"><thead><tr><th>VM</th><th>Âge du dernier point / objectif</th><th>Volume de secours</th><th>Dernier envoi</th><th>Prochain envoi</th><th>En attente</th></tr></thead><tbody id="planVmRows"></tbody></table></div></div>
+ <div class="charts">
+  <div class="chart-box"><h4>Données modifiées par intervalle (6 h)</h4><svg class="chart" id="chChanged" viewBox="0 0 320 170" role="img" aria-label="Données modifiées par intervalle"></svg><div class="legend"><span><i style="background:var(--accent)"></i>GiB par intervalle de 7 min, comptés en blocs de 2 MiB</span></div></div>
+  <div class="chart-box"><h4>Débit utile des envois (6 h)</h4><svg class="chart" id="chThroughput" viewBox="0 0 320 170" role="img" aria-label="Débit des envois"></svg><div class="legend"><span><i style="background:var(--info)"></i>source -&gt; cible</span><span><i style="background:var(--warn)"></i>cible -&gt; harv-lyon</span></div></div>
+  <div class="chart-box"><h4>RPO tenu sur 24 h</h4><svg class="chart" id="chRpo" viewBox="0 0 320 170" role="img" aria-label="RPO tenu sur 24 heures"></svg><div class="legend"><span><i style="background:var(--accent)"></i>âge du dernier point</span><span><i style="background:var(--danger)"></i>objectif 15 min</span></div></div>
+ </div>
+</section>
+
+<!-- ===================== Exercices et bascules ===================== -->
+<section class="view" id="v-drills">
+ <div class="page-head"><div><h1>Exercices et bascules</h1><p class="hint">Un exercice de routine prouve que les points se restaurent. Un exercice complet mesure le vrai RTO. Une bascule est réelle.</p></div></div>
+ <div class="fk-sources" style="margin-bottom:16px">
+  <div class="fk-source"><b>Prochains exercices</b>
+   <table class="data" style="margin-top:6px"><tbody>
+    <tr><td>erp</td><td>Routine</td><td>1er novembre, 03:00</td><td><button class="btn btn-sm" title="Lancer cet exercice maintenant" data-toast="Exercice de routine erp lancé">Lancer</button></td></tr>
+    <tr><td>intranet</td><td>Routine</td><td>3 novembre, 02:00</td><td><button class="btn btn-sm" title="Lancer cet exercice maintenant" data-toast="Exercice de routine intranet lancé">Lancer</button></td></tr>
+    <tr><td>erp</td><td>Complet</td><td>12 mars, 22:00</td><td><button class="btn btn-sm" title="Décaler cette date">Décaler</button></td></tr>
+   </tbody></table></div>
+  <div class="fk-source"><b>Exercice en cours</b><p class="muted" style="margin:4px 0">intranet, routine, démarré il y a 6 min sur des copies séparées, réseau d'exercice isolé.</p>
+   <ol class="steps"><li class="done"><span class="st"></span>Copie du dernier point en volumes neufs</li><li class="done"><span class="st"></span>Vague 1 démarrée, agent prêt</li><li class="run"><span class="st"></span>Vague 2 : attente du port TCP 443</li><li><span class="st"></span>Rapport, puis nettoyage automatique</li></ol></div>
+ </div>
+ <div class="card"><div class="card-header"><h3>Historique</h3></div><div class="tw"><table class="data">
+  <thead><tr><th>Date</th><th>Plan</th><th>Type</th><th>Résultat</th><th>RPO au moment</th><th>Durée de reprise</th><th></th></tr></thead><tbody>
+  <tr><td>01/10, 03:00</td><td>erp</td><td>Routine</td><td><span class="badge ok">réussi</span></td><td>8 min</td><td>34 min <span class="muted">(copie comprise, plus long que le réel)</span></td><td><button class="btn btn-sm" title="Ouvrir le rapport de l'exercice">Rapport</button></td></tr>
+  <tr><td>12/09, 22:00</td><td>erp</td><td>Complet</td><td><span class="badge ok">réussi</span></td><td>11 min</td><td>18 min <span class="muted">(RTO réel)</span></td><td><button class="btn btn-sm" title="Ouvrir le rapport de l'exercice">Rapport</button></td></tr>
+  <tr><td>03/09, 02:00</td><td>intranet</td><td>Routine</td><td><span class="badge fail">échec</span></td><td>7 min</td><td>arrêté à 45 min</td><td><button class="btn btn-sm" title="Ouvrir le rapport : port 443 jamais ouvert sur intra-web-01">Rapport</button></td></tr>
+  <tr><td>14/06, 21:40</td><td>crm</td><td>Bascule réelle</td><td><span class="badge warn">réussie, retour fait</span></td><td>22 min</td><td>27 min</td><td><button class="btn btn-sm" title="Ouvrir le rapport de bascule">Rapport</button></td></tr>
+ </tbody></table></div></div>
+</section>
+
+<!-- ===================== Liens ===================== -->
+<section class="view" id="v-links">
+ <div class="page-head"><div><h1>Liens entre clusters</h1><p class="hint">Chaque réplication passe par deux jambes. La plus lente décide du RPO atteignable. Le test envoie 2 Gi de données incompressibles et mesure le débit utile.</p></div></div>
+ <div class="fk-sources" id="linkCards"></div>
+</section>
+</main>
+</div>
+
+<!-- ===================== Fenêtre de création ===================== -->
+<div class="modal-overlay" id="m-create" role="dialog" aria-modal="true" aria-labelledby="mcTitle">
+<div class="modal">
+ <div class="modal-header"><div><h3 id="mcTitle">Nouveau plan de réplication</h3><div class="modal-subtitle">Six blocs sur une seule page. Chaque bloc dit s'il est prêt.</div></div>
+  <div class="jump" id="jump"></div>
+  <button class="btn-close" data-close title="Fermer sans créer">&times;</button></div>
+ <div class="modal-body" id="mcBody">
+
+ <!-- 1 -->
+ <div class="fk-step" id="b1"><div class="fk-step-head"><span class="fk-step-n">1</span><b>Quoi et vers où</b> <span class="badge" data-st="1"></span></div>
+  <div class="grid3">
+   <div class="field"><label for="pName">Nom du plan</label><input type="text" id="pName" value="erp" title="Nom du plan, RFC 1123 (minuscules, chiffres, tirets)"></div>
+   <div class="field"><label for="pSrc">Cluster source</label><select id="pSrc" title="Cluster où tournent les VM"><option>harv-paris (3 nœuds, v1.9.1)</option></select></div>
+   <div class="field"><label for="pDst">Cluster de reprise</label><select id="pDst" title="Cluster qui garde les volumes de secours"><option>harv-lyon (3 nœuds, v1.9.1)</option><option disabled>harvlab2 (cible de sauvegarde différente)</option></select></div>
+  </div>
+  <div class="form-hint" style="margin:-4px 0 8px">Cible de sauvegarde partagée : <code>nfs://nas-dr:/volume1/BACKUP/dr/</code> <span class="badge ok">vue par les deux clusters</span></div>
+  <div class="sub-tabs-inline" role="tablist"><button class="active" data-sel="list" title="Choisir les VM une à une">Liste de VM</button><button data-sel="rule" title="Protéger toute VM qui porte une étiquette">Règle d'étiquette</button></div>
+  <div id="selRule" class="sub hidden"><div class="mini-vm"><label for="ruleIn">Étiquette</label><input type="text" id="ruleIn" value="dr=gold" class="mono" title="Sélecteur d'étiquettes Kubernetes"><span class="badge ok">4 VM correspondent</span></div>
+   <div class="form-hint">Une VM qui reçoit l'étiquette plus tard rejoint le plan au cycle suivant, par une copie complète. Une VM qui la perd sort du plan, ses volumes de secours sont gardés 7 jours.</div></div>
+  <div class="tw" style="margin-top:8px"><table class="data"><thead><tr><th></th><th>VM</th><th>Disques</th><th>Longhorn v1</th><th>Image de base</th><th>Agent invité</th></tr></thead><tbody id="eligRows"></tbody></table></div>
+ </div>
+
+ <!-- 2 -->
+ <div class="fk-step" id="b2"><div class="fk-step-head"><span class="fk-step-n">2</span><b>Objectif</b> <span class="badge" data-st="2"></span></div>
+  <p class="muted" style="margin:0 0 8px">Le RPO est un objectif, pas un réglage. La console mesure ce que les VM modifient et ce que les liens transportent, puis en déduit l'intervalle des points et dit si l'objectif tient.</p>
+  <div class="grid3">
+   <div class="field"><label>Objectif de RPO</label><div class="btn-row" id="rpoPresets">
+    <button class="res-chip" data-rpo="5" title="Perte de données acceptable : 5 minutes">5 min</button><button class="res-chip is-on" data-rpo="15" title="Perte de données acceptable : 15 minutes">15 min</button><button class="res-chip" data-rpo="60" title="Perte de données acceptable : 60 minutes">60 min</button>
+    <input type="number" id="rpoCustom" min="1" max="1440" value="15" style="width:72px" title="Objectif personnalisé, en minutes"><span class="muted">min</span></div></div>
+   <div class="field"><label for="keep">Points de restauration gardés</label><select id="keep" title="Nombre de points gardés sur la cible de sauvegarde"><option>12</option><option selected>24</option><option>48</option><option>96</option></select><span class="form-hint" id="keepHint"></span></div>
+   <div class="field"><label>Cohérence</label>
+    <label class="fk-check" title="Copie telle qu'après une coupure de courant"><input type="radio" name="cons" value="crash" title="Cohérence au crash"> Au crash</label>
+    <label class="fk-check" title="Gel des systèmes de fichiers par l'agent invité le temps de l'instantané"><input type="radio" name="cons" value="freeze" checked title="Gel par l'agent invité"> Gel par l'agent invité</label>
+    <span class="form-hint" style="opacity:.6" title="Gel impossible : erp-web-01 n'a pas d'agent invité"><input type="checkbox" disabled title="Gel indisponible pour erp-web-01"> erp-web-01 : gel grisé, pas d'agent invité, reste au crash.</span></div>
+  </div>
+  <div class="sub" id="measure"><h4>Phase de mesure</h4>
+   <div class="mini-vm"><button class="btn" id="btnMeasure" title="Lire les instantanés Longhorn existants et mesurer les deux jambes du lien">Mesurer</button>
+    <div class="progress" style="flex:1;min-width:120px"><i id="mBar"></i></div><span class="muted" id="mText">Pas encore mesuré. 30 min en réel, accéléré ici.</span></div>
+   <div id="mOut" class="hidden">
+    <div class="tw" style="margin-top:8px"><table class="data"><thead><tr><th>VM</th><th>Modifié par intervalle (moyenne)</th><th>Au pic</th><th>Écrit par l'invité</th><th>Amplification</th></tr></thead><tbody id="mRows"></tbody></table></div>
+    <div class="form-hint">Mesuré par différence entre instantanés Longhorn successifs, sur 7 jours d'historique. Compté en blocs de 2 MiB : une écriture de 4 Ki marque un bloc entier, d'où l'amplification. Une base qui écrit partout en petits blocs coûte plus cher qu'elle n'en a l'air.</div>
+    <div class="leg-flow" id="legFlow"></div>
+    <div class="formula" id="formula"></div>
+    <div class="verdict" id="verdict"></div>
+    <div class="kpi" id="initCopy"></div>
+   </div>
+  </div>
+ </div>
+
+ <!-- 3 -->
+ <div class="fk-step" id="b3"><div class="fk-step-head"><span class="fk-step-n">3</span><b>Correspondances</b> <span class="badge" data-st="3"></span></div>
+  <h4 style="margin:4px 0">Réseaux</h4>
+  <div class="tw"><table class="data"><thead><tr><th>Réseau source</th><th>VLAN</th><th>Réseau sur harv-lyon</th><th>État</th><th>Réseau d'exercice</th></tr></thead><tbody id="netRows"></tbody></table></div>
+  <h4 style="margin:12px 0 4px">Classes de stockage</h4>
+  <div class="tw"><table class="data"><thead><tr><th>Classe source</th><th>Volumes</th><th>Classe sur harv-lyon</th><th>Besoin / allouable</th><th>État</th></tr></thead><tbody id="scRows"></tbody></table></div>
+  <h4 style="margin:12px 0 4px">Images et namespaces</h4>
+  <div class="tw"><table class="data"><tbody>
+   <tr><td>Image <code>sles15-sp7</code> (image-nhtf9)</td><td>présente sur harv-lyon (image-a81kd), même somme</td><td><span class="badge ok">ok</span></td></tr>
+   <tr><td>Image <code>ubuntu-22.04</code> (image-k2x9p)</td><td><select id="imgSel" title="Que faire de l'image de base absente sur la cible"><option value="copy">Copier vers harv-lyon (2,3 Gi)</option><option value="flat">Aplatir le disque (sans image de base)</option></select></td><td><span class="badge info">copie au premier envoi</span></td></tr>
+   <tr><td>Namespace <code>erp</code></td><td>-&gt; <code>erp</code> (existe sur harv-lyon)</td><td><span class="badge ok">ok</span></td></tr>
+   <tr><td>Namespace d'exercice</td><td><code>erp-drill</code>, créé à chaque exercice, supprimé après</td><td><span class="badge ok">ok</span></td></tr>
+  </tbody></table></div>
+  <div class="verdict warn" id="capSum" style="margin-top:10px"></div>
+  <h4 style="margin:12px 0 4px">Réglages par VM sur le site de reprise</h4>
+  <div class="tw"><table class="data"><thead><tr><th>VM</th><th>CPU / mémoire</th><th>Adresse MAC</th><th>Placement</th><th></th></tr></thead><tbody id="ovRows"></tbody></table></div>
+ </div>
+
+ <!-- 4 -->
+ <div class="fk-step" id="b4"><div class="fk-step-head"><span class="fk-step-n">4</span><b>Reprise : ordre et adaptation</b> <span class="badge ok" data-st="4">ok</span></div>
+  <p class="muted" style="margin:0 0 6px">Glissez les VM d'une vague à l'autre (ou utilisez le menu de chaque VM). Une vague démarre quand la précédente a passé sa condition.</p>
+  <div class="waves" id="waves"></div>
+  <h4 style="margin:12px 0 4px">Adaptation de l'invité</h4>
+  <div class="tw"><table class="data"><thead><tr><th>VM</th><th>Réseau dans l'invité</th><th>cloud-init</th></tr></thead><tbody id="guestRows"></tbody></table></div>
+  <div class="sub" id="ciEditor"><h4>Modèle network-config pour <span id="ciVm">erp-app-01</span></h4>
+   <textarea id="ciText" rows="9" style="width:100%" class="mono" title="Modèle cloud-init network-config v2, variables entre accolades doubles" spellcheck="false"></textarea>
+   <div class="form-hint">Variables : <code>{{ip}}</code> pris dans le pool <code>10.62.20.0/24</code> de harv-lyon, <code>{{gw}}</code>, <code>{{dns}}</code>. Prévisualisé pour la reprise, appliqué seulement si « Rejouer cloud-init » est coché.</div></div>
+  <h4 style="margin:12px 0 4px">Actions annexes</h4>
+  <div class="tw"><table class="data"><thead><tr><th>Quand</th><th>Action</th><th>Appel</th><th>Secret</th><th></th></tr></thead><tbody>
+   <tr><td>Après vague 3</td><td>DNS : <code>erp.corp.lan</code> vers les IP de harv-lyon</td><td class="mono">PUT https://dns-api.corp.lan/v1/zones/corp.lan/records/erp</td><td><span class="secret" title="Valeur masquée, lue dans le magasin de secrets de la console">••••••••</span> <span class="muted">dr/dns-api</span></td><td><button class="btn btn-sm" title="Appel d'essai sans rien modifier (dry-run de l'API)" data-toast="Essai DNS : 200, rien modifié">Essayer</button></td></tr>
+   <tr><td>Après vague 3</td><td>Équilibreur : pool <code>erp-web</code> vers harv-lyon</td><td class="mono">POST https://lb.corp.lan/api/pools/erp-web/members</td><td><span class="secret" title="Valeur masquée, lue dans le magasin de secrets de la console">••••••••</span> <span class="muted">dr/lb-token</span></td><td><button class="btn btn-sm" title="Appel d'essai sans rien modifier" data-toast="Essai équilibreur : 200, rien modifié">Essayer</button></td></tr>
+   <tr><td>Avant vague 1</td><td>Supervision : silence de 30 min sur <code>erp-*</code></td><td class="mono">POST https://alerts.corp.lan/api/v2/silences</td><td><span class="secret" title="Valeur masquée, lue dans le magasin de secrets de la console">••••••••</span> <span class="muted">dr/alertmanager</span></td><td><button class="btn btn-sm" title="Appel d'essai sans rien modifier" data-toast="Essai supervision : 200, rien modifié">Essayer</button></td></tr>
+  </tbody></table></div>
+  <button class="btn btn-sm" style="margin-top:6px" title="Ajouter un appel HTTP à une étape de la reprise"><svg class="ico"><use href="#i-plus"/></svg>Ajouter une action</button>
+ </div>
+
+ <!-- 5 -->
+ <div class="fk-step" id="b5"><div class="fk-step-head"><span class="fk-step-n">5</span><b>Exercices</b> <span class="badge ok" data-st="5">ok</span></div>
+  <div class="grid2">
+   <div class="fk-source"><b>Exercice de routine</b> <span class="badge info">sur une copie</span>
+    <p class="muted" style="margin:4px 0">Restaure le dernier point dans des volumes neufs, démarre les vagues sur les réseaux d'exercice, vérifie les conditions, puis nettoie. Les volumes de secours ne sont pas touchés : la protection continue. La durée mesurée est plus longue que le vrai RTO (copie comprise).</p>
+    <div class="field"><label for="drFreq">Fréquence</label><select id="drFreq" title="Fréquence de l'exercice de routine"><option>Chaque semaine</option><option selected>Chaque mois</option><option>Chaque trimestre</option><option>Jamais</option></select></div></div>
+   <div class="fk-source"><b>Exercice complet</b> <span class="badge warn">rare</span>
+    <p class="muted" style="margin:4px 0">Active les volumes de secours, démarre les vagues, mesure le vrai RTO, puis réarme le plan. Pendant le réarmement, il n'y a plus de point récent sur harv-lyon : à faire dans une fenêtre décidée.</p>
+    <div class="field"><label for="drFull">Fréquence</label><select id="drFull" title="Fréquence de l'exercice complet"><option>Chaque trimestre</option><option selected>Deux fois par an</option><option>À la demande seulement</option></select></div></div>
+  </div>
+  <div class="grid3" style="margin-top:10px">
+   <label class="fk-check" title="Les exercices démarrent les VM sur les réseaux d'exercice isolés du bloc 3, jamais sur les réseaux de production"><input type="checkbox" checked disabled title="Toujours actif"> Réseaux d'exercice isolés (imposé)</label>
+   <label class="fk-check" title="Supprimer les VM et volumes de l'exercice après le rapport"><input type="checkbox" checked title="Nettoyage automatique"> Nettoyer après <input type="number" value="2" min="0" style="width:56px" title="Délai avant nettoyage, en heures"> h</label>
+   <label class="fk-check" title="Durée au-delà de laquelle l'exercice est déclaré en échec"><span>Échec après</span> <input type="number" value="45" min="5" style="width:60px" title="Délai d'échec, en minutes"> min</label>
+  </div>
+ </div>
+
+ <!-- 6 -->
+ <div class="fk-step" id="b6"><div class="fk-step-head"><span class="fk-step-n">6</span><b>Récapitulatif</b> <span class="badge" data-st="6"></span></div>
+  <div class="grid2">
+   <div><h4 style="margin:0 0 4px">Points à voir</h4><ul class="fk-concerns" id="concerns" style="margin:0;padding-left:0;list-style:none"></ul></div>
+   <div><h4 style="margin:0 0 4px">Prévision</h4><div class="kpi" id="forecast" style="margin-top:0"></div></div>
+  </div>
+  <h4 style="margin:10px 0 4px">Commande équivalente</h4>
+  <pre class="code" id="cli"></pre>
+  <div class="btn-row" style="margin-top:6px"><button class="btn btn-sm" id="copyCli" title="Copier la commande dans le presse-papiers">Copier</button></div>
+ </div>
+ </div>
+ <div class="modal-foot"><span class="muted" id="footState"></span>
+  <div class="btn-row"><button class="btn" data-close title="Fermer sans créer">Annuler</button>
+  <button class="btn btn-primary" id="btnCreate" title="Créer le plan : action suivie dans le dock">Créer</button></div></div>
+</div></div>
+
+<div class="dock" id="dock" aria-live="polite"></div>
+
+<script>
+(function(){
+'use strict';
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const esc=v=>String(v==null?'':v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+const fr=(n,d=1)=>Number(n).toLocaleString('fr-FR',{maximumFractionDigits:d,minimumFractionDigits:0});
+const fmtMin=m=>m<60?fr(m,m<10?1:0)+' min':Math.floor(m/60)+' h '+String(Math.round(m%60)).padStart(2,'0');
+
+/* ---------- Données fictives ---------- */
+const VMS=[
+ {n:'erp-db-01',disks:[200,50],agent:true,img:'sles15-sp7',sc:'longhorn-fast',avg15:1.8,peak15:4.6,guest:0.6,cpu:8,mem:32,nets:['default/erp-backend'],state:'Running'},
+ {n:'erp-app-01',disks:[60],agent:true,img:'sles15-sp7',sc:'harvester-longhorn',avg15:0.35,peak15:0.9,guest:0.21,cpu:4,mem:16,nets:['default/erp-backend','default/erp-front'],state:'Running'},
+ {n:'erp-app-02',disks:[60],agent:true,img:'sles15-sp7',sc:'harvester-longhorn',avg15:0.33,peak15:0.85,guest:0.2,cpu:4,mem:16,nets:['default/erp-backend','default/erp-front'],state:'Running'},
+ {n:'erp-web-01',disks:[40],agent:false,img:'ubuntu-22.04',sc:'harvester-longhorn',avg15:0.08,peak15:0.22,guest:0.05,cpu:2,mem:4,nets:['default/erp-front','default/dmz'],state:'Running'}
+];
+const LEGS={a:{from:'harv-paris',to:'nas-dr',mibs:112,lat:0.6,when:'il y a 2 h'},b:{from:'nas-dr',to:'harv-lyon',mibs:38,lat:9.4,when:'il y a 2 h'}};
+const C={minI:2,snap:0.75,poll:1,applyRate:150,applyFixed:20,usedGi:236};
+const st={rpo:15,measured:false,sel:new Set(VMS.map(v=>v.n)),dmz:false,dmzVlan:300,sc:{'longhorn-fast':'lyon-nvme','harvester-longhorn':'harvester-longhorn'},cons:'freeze',created:false};
+
+/* ---------- Navigation ---------- */
+function go(view){
+ $$('.view').forEach(v=>v.classList.toggle('active',v.id==='v-'+view));
+ $$('#sidebar [data-go]').forEach(t=>t.classList.toggle('active',t.dataset.go===view||(view==='plan'&&t.dataset.go==='plans')));
+ if(view==='plan') drawCharts();
+ window.scrollTo(0,0);
+}
+document.addEventListener('click',e=>{
+ const g=e.target.closest('[data-go]'); if(g){go(g.dataset.go);return;}
+ const o=e.target.closest('[data-open="create"]'); if(o){openCreate(o.dataset.vm||null);return;}
+ const c=e.target.closest('[data-close]'); if(c){$('#m-create').classList.remove('active');return;}
+ const t=e.target.closest('[data-toast]'); if(t){toast(t.dataset.toast,'Action suivie dans le dock');return;}
+ if(!e.target.closest('.rel')) $$('.menu.open').forEach(m=>m.classList.remove('open'));
+});
+document.addEventListener('keydown',e=>{if(e.key==='Escape') $('#m-create').classList.remove('active');});
+$('#themeBtn').addEventListener('click',()=>{const h=document.documentElement;h.dataset.mode=h.dataset.mode==='light'?'dark':'light';if($('#v-plan').classList.contains('active'))drawCharts();});
+
+function toast(title,sub){
+ const d=document.createElement('div');d.className='toast';
+ d.innerHTML='<b>'+esc(title)+'</b><span class="muted">'+esc(sub||'')+'</span><div class="progress" style="margin-top:6px"><i></i></div>';
+ $('#dock').appendChild(d);const bar=$('i',d);let p=0;
+ const iv=setInterval(()=>{p+=7;bar.style.width=Math.min(p,100)+'%';if(p>=100){clearInterval(iv);setTimeout(()=>d.remove(),2500);}},120);
+}
+
+/* ---------- Liste des VM (menu Protéger...) ---------- */
+function renderVms(){
+ const rows=VMS.map(v=>'<tr><td><b>'+esc(v.n)+'</b></td><td>erp</td><td><span class="badge ok">'+esc(v.state)+'</span></td><td>'+(st.created||v.n!=='erp-web-01'?'<span class="badge ok">plan erp</span>':'<span class="badge">aucune</span>')+'</td><td class="rel" style="text-align:right"><button class="btn btn-sm" data-menu title="Actions sur la VM '+esc(v.n)+'"><svg class="ico"><use href="#i-dots"/></svg></button><div class="menu"><button title="Démarrer la VM">Démarrer</button><button title="Migrer la VM vers un autre nœud">Migrer...</button><button title="Prendre un instantané">Instantané...</button><button class="hl" data-open="create" data-vm="'+esc(v.n)+'" title="Ajouter cette VM à un plan de réplication">Protéger...</button></div></td></tr>');
+ rows.push('<tr><td><b>crm-app-01</b></td><td>crm</td><td><span class="badge ok">Running</span></td><td><span class="badge info">plan crm</span></td><td></td></tr>');
+ $('#vmTable').innerHTML=rows.join('');
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-menu]');if(b){const m=b.nextElementSibling;$$('.menu.open').forEach(x=>{if(x!==m)x.classList.remove('open')});m.classList.toggle('open');}});
+
+/* ---------- Liste des plans ---------- */
+function planCard(p){
+ const pct=p.held==null?0:Math.min(100,p.held/p.obj*100);
+ const col=p.held==null?'var(--info)':(p.held>p.obj?'var(--error)':p.held>0.8*p.obj?'var(--warn)':'var(--done)');
+ return '<div class="fk-source plan-card"><div class="mini-vm" style="justify-content:space-between"><h3>'+esc(p.name)+'</h3><span class="badge '+p.cls+'">'+esc(p.state)+'</span></div>'+
+ '<div class="muted">'+esc(p.from)+' -&gt; '+esc(p.to)+', '+p.vms+' VM, '+esc(p.size)+'</div>'+
+ '<div class="plan-meta"><div><small>Objectif de RPO</small><b>'+p.obj+' min</b></div><div><small>RPO tenu (p95, 24 h)</small><b>'+(p.held==null?'pas encore':p.held+' min')+'</b></div>'+
+ '<div><small>Dernier point appliqué</small>'+esc(p.last)+'</div><div><small>Dernier exercice</small>'+esc(p.drill)+'</div></div>'+
+ '<div title="RPO tenu rapporté à l\'objectif"><span class="gauge" style="width:100%"><i style="width:'+pct+'%;background:'+col+'"></i><em style="left:calc(100% - 2px)"></em></span></div>'+
+ (p.note?'<div class="form-hint">'+esc(p.note)+'</div>':'')+
+ '<div class="fk-source-actions btn-row" style="margin-top:10px"><button class="btn btn-sm btn-primary" '+(p.name==='erp'?'data-go="plan"':'')+' title="Ouvrir la vue du plan '+esc(p.name)+'">Voir</button><button class="btn btn-sm" data-toast="Exercice de routine '+esc(p.name)+' lancé" title="Lancer un exercice de routine (copie séparée)">Exercice</button><button class="btn btn-sm" '+(p.name==='erp'?'data-go="plan"':'')+' title="Ouvre la vue du plan, où la bascule se confirme">Basculer...</button></div></div>';
+}
+function renderPlans(){
+ const P=[
+  {name:'erp',from:'harv-paris',to:'harv-lyon',vms:4,size:'410 Gi',obj:15,held:11,last:'il y a 6 min',drill:'01/10, routine réussie',state:'Protégé',cls:'ok'},
+  {name:'intranet',from:'harv-paris',to:'harv-lyon',vms:3,size:'180 Gi',obj:5,held:9,last:'il y a 12 min',drill:'03/09, échec',state:'Objectif dépassé',cls:'warn',note:'Retard : 3,4 Gi en attente sur la jambe nas-dr -> harv-lyon depuis 08:40.'},
+  {name:'crm',from:'harv-lyon',to:'harv-paris',vms:5,size:'620 Gi',obj:60,held:null,last:'aucun',drill:'jamais',state:'Copie initiale 62 %',cls:'info',note:'Fin estimée de la copie complète : dans 1 h 10.'}
+ ];
+ $('#planCards').innerHTML=P.map(planCard).join('');
+}
+
+/* ---------- Bloc 1 ---------- */
+function renderElig(){
+ $('#eligRows').innerHTML=VMS.map(v=>{
+  const img=v.img==='ubuntu-22.04'?'<span class="badge warn" title="Image absente sur harv-lyon">'+esc(v.img)+', à copier</span>':'<span class="badge ok" title="Image présente sur la cible">'+esc(v.img)+'</span>';
+  const ag=v.agent?'<span class="badge ok">présent</span>':'<span class="badge warn" title="Sans agent : pas de gel, pas de condition « agent prêt »">absent</span>';
+  return '<tr><td><input type="checkbox" data-vmsel="'+esc(v.n)+'" '+(st.sel.has(v.n)?'checked':'')+' title="Inclure '+esc(v.n)+' dans le plan"></td><td><b>'+esc(v.n)+'</b></td><td>'+v.disks.map(d=>d+' Gi').join(' + ')+'</td><td><span class="badge ok">oui</span></td><td>'+img+'</td><td>'+ag+'</td></tr>';
+ }).join('');
+}
+$('#eligRows').addEventListener('change',e=>{const c=e.target.closest('[data-vmsel]');if(!c)return;c.checked?st.sel.add(c.dataset.vmsel):st.sel.delete(c.dataset.vmsel);refresh();});
+$$('[data-sel]').forEach(b=>b.addEventListener('click',()=>{$$('[data-sel]').forEach(x=>x.classList.toggle('active',x===b));$('#selRule').classList.toggle('hidden',b.dataset.sel!=='rule');$$('[data-vmsel]').forEach(c=>c.disabled=b.dataset.sel==='rule');}));
+
+/* ---------- Bloc 2 : calcul ---------- */
+const selVms=()=>VMS.filter(v=>st.sel.has(v.n));
+const scale=I=>(I/15)*Math.pow(15/I,0.12);           /* les réécritures se fondent sur un intervalle long */
+const changedGi=(v,I,k)=>(k==='peak'?v.peak15:v.avg15)*scale(I);
+const slowLeg=()=>LEGS.a.mibs<=LEGS.b.mibs?'a':'b';
+function rpoFor(I,k){
+ const mib=selVms().reduce((s,v)=>s+changedGi(v,I,k),0)*1024;
+ const send=mib/LEGS[slowLeg()].mibs/60, apply=(mib/C.applyRate+C.applyFixed)/60;
+ return {I,mib,send,apply,total:I+C.snap+send+C.poll+apply};
+}
+/* L'intervalle vise 80 % de l'objectif au pic (marge pour les pics) ; à défaut, 100 %. */
+function derive(B){
+ for(let I=Math.floor(B);I>=C.minI;I--){const r=rpoFor(I,'peak');if(r.total<=B)return r;}
+ return null;
+}
+function verdict(){
+ const O=st.rpo, r=derive(0.8*O);
+ if(r) return {cls:'ok',label:'tenable',r,I:r.I};
+ const r2=derive(O);
+ if(r2) return {cls:'warn',label:'tenable avec peu de marge',r:r2,I:r2.I};
+ return {cls:'fail',label:'non tenable',r:rpoFor(C.minI,'peak'),I:null};
+}
+function renderMeasure(){
+ const v=verdict(), I=v.I||1, sl=slowLeg();
+ $('#mRows').innerHTML=selVms().map(x=>{
+  const a=changedGi(x,I,'avg'),p=changedGi(x,I,'peak'),g=x.guest*scale(I);
+  return '<tr><td><b>'+esc(x.n)+'</b></td><td>'+fr(a,2)+' GiB</td><td>'+fr(p,2)+' GiB</td><td>'+fr(g,2)+' GiB</td><td>x'+fr(a/g,1)+'</td></tr>';
+ }).join('')+'<tr><td colspan="5" class="muted">Par intervalle de '+I+' min (l\'intervalle dérivé de l\'objectif).</td></tr>';
+ $('#legFlow').innerHTML='<span class="leg-node">harv-paris</span><span class="leg-line'+(sl==='a'?' slow':'')+'"><span>'+fr(LEGS.a.mibs,0)+' MiB/s, '+fr(LEGS.a.lat)+' ms</span></span><span class="leg-node">nas-dr</span><span class="leg-line'+(sl==='b'?' slow':'')+'"><span>'+fr(LEGS.b.mibs,0)+' MiB/s, '+fr(LEGS.b.lat)+' ms</span></span><span class="leg-node">harv-lyon</span><span class="badge warn" title="La jambe la plus lente décide">la plus lente : '+(sl==='a'?'source -> cible':'cible -> harv-lyon')+'</span>';
+ const r=v.r;
+ $('#formula').innerHTML='RPO atteignable = intervalle '+fr(r.I,0)+' min + instantané et sauvegarde '+fr(C.snap*60,0)+' s + envoi des modifications '+fr(r.send*60,0)+' s ('+fr(r.mib/1024,2)+' GiB au pic) + détection '+fr(C.poll*60,0)+' s + application '+fr(r.apply*60,0)+' s = <b>'+fr(r.total,1)+' min</b>';
+ const avg=v.I?rpoFor(v.I,'avg').total:null;
+ $('#verdict').className='verdict '+v.cls;
+ $('#verdict').innerHTML='<span class="badge '+v.cls+'">'+esc(v.label)+'</span>'+(v.I?'<span>Objectif <b>'+st.rpo+' min</b>, atteignable <b class="big">'+fr(r.total,1)+' min</b> au pic ('+fr(avg,1)+' min en moyenne). Intervalle des points dérivé : <b>'+v.I+' min</b>.</span>':'<span>Objectif <b>'+st.rpo+' min</b>. Même avec l\'intervalle minimal de '+C.minI+' min (Longhorn ne tient pas moins sur 5 volumes), le RPO atteignable est de <b class="big">'+fr(r.total,1)+' min</b> au pic. Relevez l\'objectif ou augmentez le débit de la jambe '+(sl==='a'?'source -> cible':'cible -> harv-lyon')+'.</span>');
+ const used=selVms().reduce((s,x)=>s+x.disks.reduce((a,b)=>a+b,0),0)/410*C.usedGi;
+ const sendS=used*1024/LEGS[sl].mibs, appS=used*1024/C.applyRate;
+ $('#initCopy').innerHTML='<div><small>Copie complète initiale</small><b>'+fmtMin((sendS+appS)/60)+'</b></div><div><small>Données réellement écrites</small><b>'+fr(used,0)+' Gi</b></div><div><small>Envoi</small><b>'+fmtMin(sendS/60)+'</b></div><div><small>Application sur harv-lyon</small><b>'+fmtMin(appS/60)+'</b></div>';
+ const keep=+$('#keep').value; $('#keepHint').textContent=v.I?'Soit '+fmtMin(keep*v.I)+' d\'historique.':'';
+}
+$('#rpoPresets').addEventListener('click',e=>{const b=e.target.closest('[data-rpo]');if(!b)return;st.rpo=+b.dataset.rpo;$('#rpoCustom').value=st.rpo;refresh();});
+$('#rpoCustom').addEventListener('input',e=>{const n=Math.max(1,Math.min(1440,+e.target.value||1));st.rpo=n;refresh();});
+$('#keep').addEventListener('change',refresh);
+$$('[name=cons]').forEach(r=>r.addEventListener('change',e=>{st.cons=e.target.value;refresh();}));
+$('#btnMeasure').addEventListener('click',()=>{
+ const b=$('#btnMeasure');b.disabled=true;let p=0;
+ const msgs=['Lecture des instantanés Longhorn (5 volumes)...','Comptage des blocs de 2 MiB modifiés...','Test de la jambe harv-paris -> nas-dr...','Test de la jambe nas-dr -> harv-lyon...','Calcul de l\'intervalle...'];
+ const iv=setInterval(()=>{p+=4;$('#mBar').style.width=p+'%';$('#mText').textContent=msgs[Math.min(4,Math.floor(p/20))];
+  if(p>=100){clearInterval(iv);st.measured=true;b.disabled=false;b.textContent='Mesurer à nouveau';$('#mText').textContent='Mesuré aujourd\'hui à 10:42, 7 jours d\'historique.';$('#mOut').classList.remove('hidden');refresh();}},70);
+});
+
+/* ---------- Bloc 3 ---------- */
+const TGT={'lyon-nvme':{rep:3,alloc:820},'harvester-longhorn':{rep:3,alloc:1126},'lh-rep2':{rep:2,alloc:2662}};
+function scNeed(src){return selVms().filter(v=>v.sc===src).reduce((s,v)=>s+v.disks.reduce((a,b)=>a+b,0),0);}
+function renderNets(){
+ const N=[['default/erp-backend',210,'default/erp-backend (VLAN 210)','drill/erp-backend-iso (VLAN 910)'],['default/erp-front',220,'default/erp-front (VLAN 220)','drill/erp-front-iso (VLAN 920)'],['default/dmz',300,null,'drill/dmz-iso (VLAN 930)']];
+ $('#netRows').innerHTML=N.map(n=>{
+  let tgt,stc;
+  if(n[2]){tgt='<select title="Réseau de destination sur harv-lyon"><option>'+esc(n[2])+'</option><option>default/lyon-flat (VLAN 1)</option></select>';stc='<span class="badge ok" title="Trouvé par le nom">même nom</span>';}
+  else if(st.dmz){tgt='<select title="Réseau de destination sur harv-lyon"><option>default/dmz (VLAN '+st.dmzVlan+')</option></select>';stc='<span class="badge ok">créé</span>';}
+  else{tgt='<span class="fail-t">absent sur harv-lyon</span> <button class="btn btn-sm" id="mkDmz" title="Créer ce réseau sur harv-lyon (action suivie)">Créer sur la cible</button><div id="dmzForm" class="sub hidden"><div class="mini-vm"><label>Nom <input type="text" value="dmz" style="width:90px" title="Nom du réseau à créer"></label><label>VLAN <input type="number" id="dmzVlan" value="'+st.dmzVlan+'" min="1" max="4094" style="width:80px" title="VLAN du réseau sur harv-lyon"></label><label>Réseau de cluster <select title="Réseau de cluster porteur"><option>mgmt</option><option>dc-trunk</option></select></label><button class="btn btn-sm btn-primary" id="dmzOk" title="Créer le réseau sur harv-lyon">Créer</button></div></div>';stc='<span class="badge fail">bloquant</span>';}
+  return '<tr><td><code>'+esc(n[0])+'</code></td><td>'+n[1]+'</td><td>'+tgt+'</td><td>'+stc+'</td><td><select title="Réseau isolé utilisé pendant les exercices"><option>'+esc(n[3])+'</option><option>Aucune carte pendant l\'exercice</option></select></td></tr>';
+ }).join('');
+}
+$('#netRows').addEventListener('click',e=>{
+ if(e.target.id==='mkDmz'){$('#dmzForm').classList.toggle('hidden');}
+ if(e.target.id==='dmzOk'){st.dmzVlan=+$('#dmzVlan').value||300;st.dmz=true;toast('Réseau default/dmz créé sur harv-lyon','Action suivie dans le dock');renderNets();refresh();}
+});
+function renderSc(){
+ const S=[['longhorn-fast',3],['harvester-longhorn',3]];
+ $('#scRows').innerHTML=S.map(([s,rep])=>{
+  const need=scNeed(s), t=TGT[st.sc[s]], full=need*t.rep, ok=full<=t.alloc, tight=ok&&full>0.85*t.alloc;
+  const opts=Object.keys(TGT).map(k=>'<option value="'+k+'" '+(st.sc[s]===k?'selected':'')+'>'+k+' ('+TGT[k].rep+' répliques, '+fr(TGT[k].alloc,0)+' Gi allouables)</option>').join('');
+  return '<tr><td><code>'+esc(s)+'</code> <span class="muted">('+rep+' répliques)</span></td><td>'+need+' Gi</td><td><select data-sc="'+s+'" title="Classe de stockage des volumes de secours sur harv-lyon">'+opts+'</select></td><td>'+fr(full,0)+' / '+fr(t.alloc,0)+' Gi</td><td><span class="badge '+(!ok?'fail':tight?'warn':'ok')+'">'+(!ok?'place insuffisante':tight?'marge '+Math.round((1-full/t.alloc)*100)+' %':'ok')+'</span></td></tr>';
+ }).join('');
+ const tot=S.reduce((a,[s])=>a+scNeed(s),0), totR=S.reduce((a,[s])=>a+scNeed(s)*TGT[st.sc[s]].rep,0);
+ $('#capSum').innerHTML='<b>Capacité sur harv-lyon.</b> <span>Les volumes de secours occupent leur taille entière dès leur création, avant le premier envoi : '+tot+' Gi de volumes, soit <b>'+fr(totR,0)+' Gi</b> avec les répliques. Sur la cible de sauvegarde : environ '+C.usedGi+' Gi pour la copie complète, plus les incréments de '+$('#keep').value+' points.</span>';
+}
+$('#scRows').addEventListener('change',e=>{const s=e.target.closest('[data-sc]');if(s){st.sc[s.dataset.sc]=s.value;refresh();}});
+function renderOv(){
+ $('#ovRows').innerHTML=selVms().map(v=>'<tr><td><b>'+esc(v.n)+'</b></td><td>'+v.cpu+' vCPU, '+v.mem+' Gi <span class="muted">(comme la source)</span></td><td>Garder</td><td><span class="muted">aucun</span></td><td><button class="btn btn-sm" data-ov="'+esc(v.n)+'" title="Modifier CPU, mémoire, MAC et placement sur harv-lyon">Modifier</button></td></tr><tr class="override hidden" data-ovrow="'+esc(v.n)+'"><td colspan="5"><div class="grid3"><div class="field"><label>CPU / mémoire sur harv-lyon</label><div class="mini-vm"><input type="number" value="'+v.cpu+'" style="width:64px" title="vCPU sur le site de reprise"> vCPU <input type="number" value="'+v.mem+'" style="width:64px" title="Mémoire sur le site de reprise, en Gi"> Gi</div></div><div class="field"><label>Adresse MAC</label><label class="fk-check" title="Même MAC que la source : licences liées à la MAC, baux DHCP réservés"><input type="radio" name="mac-'+esc(v.n)+'" checked title="Garder la MAC"> Garder la MAC</label><label class="fk-check" title="Nouvelle MAC : évite un doublon si la source revient"><input type="radio" name="mac-'+esc(v.n)+'" title="Nouvelle MAC"> Nouvelle MAC</label></div><div class="field"><label>Étiquettes de placement</label><input type="text" placeholder="zone=lyon-b, gpu=none" class="mono" title="Sélecteur de nœuds sur harv-lyon"></div></div></td></tr>').join('');
+}
+$('#ovRows').addEventListener('click',e=>{const b=e.target.closest('[data-ov]');if(b)$('[data-ovrow="'+b.dataset.ov+'"]').classList.toggle('hidden');});
+
+/* ---------- Bloc 4 ---------- */
+const WAVES=[{name:'Base de données',vms:['erp-db-01'],gate:'agent',param:'5432'},{name:'Applications',vms:['erp-app-01','erp-app-02'],gate:'tcp',param:'8080'},{name:'Web',vms:['erp-web-01'],gate:'delay',param:'60'}];
+function renderWaves(){
+ $('#waves').innerHTML=WAVES.map((w,i)=>'<div class="wave" data-wave="'+i+'"><h5><span>Vague '+(i+1)+' : '+esc(w.name)+'</span><span class="badge">'+w.vms.filter(n=>st.sel.has(n)).length+' VM</span></h5>'+(w.vms.some(n=>st.sel.has(n))?'':'<div class="muted" style="border:1px dashed var(--border);border-radius:6px;padding:8px;text-align:center">Déposez une VM ici</div>')+
+  w.vms.filter(n=>st.sel.has(n)).map(n=>'<div class="vmchip" draggable="true" data-chip="'+esc(n)+'" title="Glisser vers une autre vague"><span>'+esc(n)+'</span><select data-move="'+esc(n)+'" title="Déplacer '+esc(n)+' vers une autre vague">'+WAVES.map((x,j)=>'<option value="'+j+'" '+(j===i?'selected':'')+'>vague '+(j+1)+'</option>').join('')+'</select></div>').join('')+
+  '<div class="gate"><label>Condition avant la vague suivante</label><select data-gate="'+i+'" title="Ce qui doit être vrai avant de démarrer la vague suivante"><option value="agent" '+(w.gate==='agent'?'selected':'')+'>Agent invité prêt</option><option value="tcp" '+(w.gate==='tcp'?'selected':'')+'>Port TCP ouvert</option><option value="delay" '+(w.gate==='delay'?'selected':'')+'>Délai</option></select>'+
+  (w.gate==='agent'?'<span class="muted">et port TCP <input type="text" value="'+esc(w.param)+'" style="width:60px" title="Port vérifié en plus"></span>':w.gate==='tcp'?'<span>Port <input type="text" value="'+esc(w.param)+'" style="width:60px" title="Port TCP à attendre"></span>':'<span><input type="number" value="'+esc(w.param)+'" style="width:60px" title="Délai en secondes"> s</span>')+
+  (w.gate==='agent'&&w.vms.some(n=>!VMS.find(v=>v.n===n).agent)?'<span class="badge warn">une VM sans agent : condition jamais vraie</span>':'')+'</div></div>').join('');
+}
+function moveVm(n,to){WAVES.forEach(w=>w.vms=w.vms.filter(x=>x!==n));WAVES[to].vms.push(n);renderWaves();refresh();}
+$('#waves').addEventListener('dragstart',e=>{const c=e.target.closest('[data-chip]');if(c)e.dataTransfer.setData('text/plain',c.dataset.chip);});
+$('#waves').addEventListener('dragover',e=>{const w=e.target.closest('[data-wave]');if(w){e.preventDefault();w.classList.add('over');}});
+$('#waves').addEventListener('dragleave',e=>{const w=e.target.closest('[data-wave]');if(w)w.classList.remove('over');});
+$('#waves').addEventListener('drop',e=>{const w=e.target.closest('[data-wave]');if(!w)return;e.preventDefault();const n=e.dataTransfer.getData('text/plain');if(n)moveVm(n,+w.dataset.wave);});
+$('#waves').addEventListener('change',e=>{const m=e.target.closest('[data-move]');if(m){moveVm(m.dataset.move,+m.value);return;}const g=e.target.closest('[data-gate]');if(g){WAVES[+g.dataset.gate].gate=g.value;renderWaves();}});
+const CI={static:"version: 2\nethernets:\n  eth0:\n    match: {macaddress: \"{{mac}}\"}\n    addresses: [\"{{ip}}/24\"]\n    routes:\n      - {to: default, via: {{gw}}}\n    nameservers:\n      addresses: [{{dns}}]",dhcp:"version: 2\nethernets:\n  eth0:\n    match: {macaddress: \"{{mac}}\"}\n    dhcp4: true"};
+const GUEST={'erp-db-01':'keep','erp-app-01':'static','erp-app-02':'static','erp-web-01':'dhcp'};
+function renderGuest(){
+ $('#guestRows').innerHTML=selVms().map(v=>'<tr><td><b>'+esc(v.n)+'</b></td><td><select data-guest="'+esc(v.n)+'" title="Adresse réseau de la VM après reprise"><option value="keep" '+(GUEST[v.n]==='keep'?'selected':'')+'>Garder l\'IP (sous-réseau étendu)</option><option value="static" '+(GUEST[v.n]==='static'?'selected':'')+'>cloud-init : IP statique sur 10.62.20.0/24</option><option value="dhcp" '+(GUEST[v.n]==='dhcp'?'selected':'')+'>cloud-init : DHCP</option></select> '+(GUEST[v.n]!=='keep'?'<button class="btn btn-sm" data-edit="'+esc(v.n)+'" title="Afficher le modèle network-config de cette VM">Modèle</button>':'')+'</td><td><label class="fk-check" title="Nouvel instance-id : cloud-init rejoue sa configuration réseau au démarrage sur harv-lyon"><input type="checkbox" '+(GUEST[v.n]!=='keep'?'checked':'')+' '+(GUEST[v.n]==='keep'?'disabled':'')+' title="Rejouer cloud-init avec un nouvel instance-id"> Rejouer cloud-init (nouvel instance-id)</label></td></tr>').join('');
+}
+function showCi(n){$('#ciVm').textContent=n;$('#ciText').value=CI[GUEST[n]==='dhcp'?'dhcp':'static'];$('#ciEditor').classList.toggle('hidden',GUEST[n]==='keep');}
+$('#guestRows').addEventListener('change',e=>{const s=e.target.closest('[data-guest]');if(s){GUEST[s.dataset.guest]=s.value;renderGuest();showCi(s.dataset.guest);refresh();}});
+$('#guestRows').addEventListener('click',e=>{const b=e.target.closest('[data-edit]');if(b)showCi(b.dataset.edit);});
+
+/* ---------- Bloc 6 et états ---------- */
+function concerns(){
+ const L=[], v=verdict();
+ if(!st.sel.size) L.push(['fail','Aucune VM choisie.',1]);
+ if(st.sel.has('erp-web-01')&&!st.dmz) L.push(['fail','Réseau default/dmz absent sur harv-lyon (erp-web-01).',3]);
+ Object.keys(st.sc).forEach(s=>{const t=TGT[st.sc[s]],f=scNeed(s)*t.rep;if(f>t.alloc)L.push(['fail','Classe '+st.sc[s]+' : '+fr(f,0)+' Gi demandés, '+fr(t.alloc,0)+' Gi allouables.',3]);else if(f>0.85*t.alloc)L.push(['warn','Classe '+st.sc[s]+' : marge de '+Math.round((1-f/t.alloc)*100)+' % après création des volumes de secours.',3]);});
+ if(!st.measured) L.push(['warn','Objectif non vérifié : lancez la mesure.',2]);
+ else if(v.cls==='fail') L.push(['fail','Objectif de '+st.rpo+' min non tenable (minimum '+fr(v.r.total,1)+' min).',2]);
+ else if(v.cls==='warn') L.push(['warn','Objectif de '+st.rpo+' min tenu avec peu de marge : un pic d\'écriture le dépassera.',2]);
+ if(st.sel.has('erp-web-01')){L.push(['warn','erp-web-01 sans agent invité : copie cohérente au crash seulement.',1]);}
+ if(st.sel.has('erp-web-01')) L.push(['info','Image ubuntu-22.04 copiée sur harv-lyon au premier envoi (2,3 Gi).',3]);
+ L.push(['info','La première copie complète précède toute protection.',2]);
+ return L;
+}
+function setSt(n,cls,txt){const b=$('[data-st="'+n+'"]');b.className='badge '+cls;b.textContent=txt;}
+function refresh(){
+ renderSc();renderOv();renderGuest();renderWaves();if(st.measured)renderMeasure();
+ const L=concerns(), worst=n=>{const x=L.filter(c=>c[2]===n);return x.some(c=>c[0]==='fail')?'fail':x.some(c=>c[0]==='warn')?'warn':'ok';};
+ const lab={ok:'ok',warn:'à voir',fail:'bloquant'};
+ [1,2,3].forEach(n=>setSt(n,worst(n),lab[worst(n)]));
+ const nf=L.filter(c=>c[0]==='fail').length, nw=L.filter(c=>c[0]==='warn').length;
+ setSt(6,nf?'fail':nw?'warn':'ok',nf?nf+' bloquant'+(nf>1?'s':''):nw?nw+' avertissement'+(nw>1?'s':''):'ok');
+ const ic={fail:'fail-t',warn:'warn-t',info:'muted'}, tag={fail:'Bloquant',warn:'Avertissement',info:'Info'};
+ $('#concerns').innerHTML=L.map(c=>'<li style="padding:3px 0"><span class="badge '+(c[0]==='info'?'info':c[0])+'">'+tag[c[0]]+'</span> <span class="'+ic[c[0]]+'" style="color:inherit">'+esc(c[1])+'</span> <button class="btn btn-sm" data-jump="b'+c[2]+'" title="Aller au bloc '+c[2]+'">bloc '+c[2]+'</button></li>').join('');
+ const v=verdict(), totR=Object.keys(st.sc).reduce((a,s)=>a+scNeed(s)*TGT[st.sc[s]].rep,0);
+ $('#forecast').innerHTML='<div><small>RPO atteignable</small><b>'+(st.measured?fr(v.r.total,1)+' min':'à mesurer')+'</b></div><div><small>Intervalle des points</small><b>'+(st.measured&&v.I?v.I+' min':'-')+'</b></div><div><small>Volumes de secours</small><b>'+fr(totR,0)+' Gi</b></div><div><small>VM / vagues</small><b>'+st.sel.size+' / '+WAVES.filter(w=>w.vms.some(n=>st.sel.has(n))).length+'</b></div>';
+ const vm=[...st.sel].join(',');
+ $('#cli').textContent='harvester-replication.py create --plan '+($('#pName').value||'erp')+' \\\n  --from harv-paris --to harv-lyon \\\n  --target nfs://nas-dr:/volume1/BACKUP/dr/ \\\n  --vms '+vm+' \\\n  --rpo '+st.rpo+'m --keep '+$('#keep').value+' --consistency '+st.cons+' \\\n  --map-net default/erp-backend=default/erp-backend,default/erp-front=default/erp-front'+(st.dmz?',default/dmz=default/dmz':'')+' \\\n  --map-sc '+Object.keys(st.sc).map(s=>s+'='+st.sc[s]).join(',')+' \\\n  --waves "'+WAVES.map(w=>w.vms.filter(n=>st.sel.has(n)).join('+')).filter(Boolean).join(';')+'" \\\n  --drill monthly --drill-full twice-a-year --drill-timeout 45m';
+ $('#btnCreate').disabled=nf>0;
+ $('#btnCreate').title=nf?'Indisponible : '+nf+' point(s) bloquant(s) au bloc 6':'Créer le plan : action suivie dans le dock';
+ $('#footState').textContent=nf?nf+' point(s) bloquant(s), voir le bloc 6.':nw?'Prêt, avec '+nw+' avertissement(s).':'Prêt.';
+}
+$('#concerns').addEventListener('click',e=>{const b=e.target.closest('[data-jump]');if(b)document.getElementById(b.dataset.jump).scrollIntoView({behavior:'smooth',block:'start'});});
+$('#pName').addEventListener('input',refresh);
+$('#copyCli').addEventListener('click',()=>{navigator.clipboard&&navigator.clipboard.writeText($('#cli').textContent).catch(()=>{});toast('Commande copiée','');});
+$('#jump').innerHTML=['Quoi','Objectif','Correspondances','Reprise','Exercices','Récap'].map((t,i)=>'<button data-jump="b'+(i+1)+'" title="Aller au bloc '+(i+1)+'">'+(i+1)+'. '+t+'</button>').join('');
+$('#jump').addEventListener('click',e=>{const b=e.target.closest('[data-jump]');if(b)document.getElementById(b.dataset.jump).scrollIntoView({behavior:'smooth',block:'start'});});
+$('#btnCreate').addEventListener('click',()=>{
+ $('#m-create').classList.remove('active');st.created=true;renderVms();
+ toast('Création du plan '+($('#pName').value||'erp'),'Action suivie dans le dock : volumes de secours, tâches de sauvegarde, copie complète.');
+ setTimeout(()=>go('plan'),400);
+});
+function openCreate(vm){
+ if(vm){st.sel=new Set([vm]);}else st.sel=new Set(VMS.map(v=>v.n));
+ renderElig();refresh();$('#m-create').classList.add('active');$('#mcBody').scrollTop=0;
+ $$('.menu.open').forEach(m=>m.classList.remove('open'));
+}
+
+/* ---------- Vue du plan ---------- */
+function renderPlanVms(){
+ const R=[['erp-db-01',9,'En attente, à jour',36,'dans 1 min',0],['erp-app-01',6,'En attente, à jour',34,'dans 4 min',0],['erp-app-02',6,'En attente, à jour',35,'dans 4 min',0],['erp-web-01',13,'En attente, application en cours',22,'dans 7 min',412]];
+ $('#planVmRows').innerHTML=R.map(r=>{const pct=Math.min(100,r[1]/15*100),col=r[1]>15?'var(--error)':r[1]>12?'var(--warn)':'var(--done)';
+  return '<tr><td><b>'+esc(r[0])+'</b></td><td><span class="gauge" title="'+r[1]+' min sur 15"><i style="width:'+pct+'%;background:'+col+'"></i><em style="left:calc(100% - 2px)"></em></span> '+r[1]+' / 15 min</td><td><span class="badge '+(r[5]?'warn':'ok')+'">'+esc(r[2])+'</span></td><td>'+r[3]+' MiB/s</td><td>'+esc(r[4])+'</td><td>'+(r[5]?'<span class="warn-t" title="Données modifiées pas encore appliquées sur harv-lyon">'+r[5]+' MiB</span>':'<span class="muted">rien</span>')+'</td></tr>';}).join('');
+}
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim();}
+function niceMax(v){const q=v/4,p=Math.pow(10,Math.floor(Math.log10(q))),m=q/p;return (m<=1?1:m<=2?2:m<=2.5?2.5:m<=5?5:10)*p*4;}
+function axes(svg,yMax,yUnit,xLabels){
+ const W=320,H=170,L=34,R=8,T=8,B=22,ih=H-T-B,iw=W-L-R;let s='';
+ for(let i=0;i<=4;i++){const y=T+ih-ih*i/4,val=yMax*i/4;s+='<line class="grid" x1="'+L+'" x2="'+(W-R)+'" y1="'+y+'" y2="'+y+'"/><text x="'+(L-4)+'" y="'+(y+3)+'" text-anchor="end">'+fr(val,1)+'</text>';}
+ s+='<text x="'+(L-4)+'" y="'+(T-0)+'" text-anchor="end" dy="-1">'+'</text><text x="'+L+'" y="'+(H-2)+'">'+esc(xLabels[0])+'</text><text x="'+(L+iw/2)+'" y="'+(H-2)+'" text-anchor="middle">'+esc(xLabels[1])+'</text><text x="'+(W-R)+'" y="'+(H-2)+'" text-anchor="end">'+esc(xLabels[2])+'</text><text x="'+(W-R)+'" y="'+(T+8)+'" text-anchor="end">'+esc(yUnit)+'</text>';
+ return {s,L,T,iw,ih};
+}
+function seeded(n,f){const a=[];let x=7;for(let i=0;i<n;i++){x=(x*9301+49297)%233280;a.push(f(i,x/233280));}return a;}
+function drawCharts(){
+ const acc=css('--accent'),info=css('--info'),warn=css('--warn'),dan=css('--danger');
+ /* données modifiées : 36 intervalles de 10 min */
+ const ch=seeded(51,(i,r)=>{const base=1.1+0.6*Math.sin(i/51*Math.PI*1.2);return +(base+r*0.6+(i===38?1.6:0)).toFixed(2);});
+ let ym=niceMax(Math.max(...ch)), a=axes(null,ym,'GiB',['-6 h','-3 h','maintenant']), s=a.s, bw=a.iw/ch.length;
+ ch.forEach((v,i)=>{const h=v/ym*a.ih;s+='<rect x="'+(a.L+i*bw+1).toFixed(1)+'" y="'+(a.T+a.ih-h).toFixed(1)+'" width="'+(bw-2).toFixed(1)+'" height="'+h.toFixed(1)+'" fill="'+acc+'" rx="1"><title>'+fr(v,2)+' GiB</title></rect>';});
+ $('#chChanged').innerHTML=s;
+ /* débit des deux jambes par envoi */
+ const ta=seeded(36,(i,r)=>98+r*16), tb=seeded(36,(i,r)=>31+r*9-(i>26&&i<30?8:0));
+ ym=niceMax(Math.max(...ta));a=axes(null,ym,'MiB/s',['-6 h','-3 h','maintenant']);s=a.s;
+ const line=(arr,col,mx)=>'<polyline fill="none" stroke="'+col+'" stroke-width="1.8" points="'+arr.map((v,i)=>(a.L+i*a.iw/(arr.length-1)).toFixed(1)+','+(a.T+a.ih-v/mx*a.ih).toFixed(1)).join(' ')+'"/>';
+ s+=line(ta,info,ym)+line(tb,warn,ym);$('#chThroughput').innerHTML=s;
+ /* RPO tenu sur 24 h : dents de scie (âge croît puis retombe à chaque point appliqué) */
+ /* âge maximal du dernier point appliqué, par fenêtre de 15 min */
+ const pts=seeded(97,(i,r)=>{const m=i*15;let v=8.6+r*1.6;if(m>=900&&m<=960)v=13+(m-900)/15;if(m>960&&m<=1005)v=17-(m-960)/9;return [m,+v.toFixed(1)];});
+ ym=20;a=axes(null,ym,'min',['-24 h','-12 h','maintenant']);s=a.s;
+ const yObj=a.T+a.ih-15/ym*a.ih;
+ s+='<line x1="'+a.L+'" x2="'+(a.L+a.iw)+'" y1="'+yObj+'" y2="'+yObj+'" stroke="'+dan+'" stroke-dasharray="4 3" stroke-width="1.5"/>';
+ s+='<polyline fill="none" stroke="'+acc+'" stroke-width="1.4" points="'+pts.map(p=>(a.L+p[0]/1440*a.iw).toFixed(1)+','+(a.T+a.ih-p[1]/ym*a.ih).toFixed(1)).join(' ')+'"/>';
+ s+='<text x="'+(a.L+960/1440*a.iw-4)+'" y="'+(yObj-6)+'" text-anchor="end" style="fill:'+dan+'">pic d\'écriture, 17 min</text>';
+ $('#chRpo').innerHTML=s;
+}
+const FO=['Vérifier harv-lyon et la cible de sauvegarde','Arrêter les VM sur harv-paris (si joignable) et prendre un dernier point','Appliquer le dernier point sur les volumes de secours','Activer les volumes de secours (ils deviennent des volumes normaux)','Créer les VM sur harv-lyon avec les correspondances','Supervision : silence de 30 min','Vague 1 : erp-db-01, attendre agent prêt et port 5432','Vague 2 : erp-app-01, erp-app-02, attendre port 8080','Vague 3 : erp-web-01, attendre 60 s','DNS et équilibreur vers harv-lyon','Rapport : RPO et RTO réels'];
+function renderFo(done,run){$('#foSteps').innerHTML=FO.map((t,i)=>'<li class="'+(i<done?'done':i===run?'run':'')+'"><span class="st"></span><span>'+esc(t)+'</span></li>').join('');}
+$('#btnFailover').addEventListener('click',()=>{$('#failbackPanel').classList.remove('open');$('#failoverPanel').classList.add('open');renderFo(0,-1);$('#foName').value='';$('#foGo').disabled=true;$('#foName').focus();});
+$('#foName').addEventListener('input',e=>{$('#foGo').disabled=e.target.value!=='erp';});
+$('#foCancel').addEventListener('click',()=>$('#failoverPanel').classList.remove('open'));
+$('#foGo').addEventListener('click',()=>{
+ $('#foGo').disabled=true;$('#foName').disabled=true;toast('Bascule du plan erp sur harv-lyon','Action suivie dans le dock');
+ let i=0;const iv=setInterval(()=>{renderFo(i,i);i++;if(i>FO.length){clearInterval(iv);renderFo(FO.length,-1);$('#planState').className='badge warn';$('#planState').textContent='Basculé sur harv-lyon';toast('Bascule terminée','RPO réel 13 min, RTO 17 min. Rapport dans Exercices et bascules.');$('#foName').disabled=false;}},450);
+});
+$('#btnFailback').addEventListener('click',()=>{$('#failoverPanel').classList.remove('open');$('#failbackPanel').classList.add('open');});
+$('#fbClose').addEventListener('click',()=>$('#failbackPanel').classList.remove('open'));
+$('#btnDrill').addEventListener('click',()=>toast('Exercice de routine erp','Action suivie dans le dock : copie du dernier point, réseaux isolés.'));
+
+/* ---------- Liens ---------- */
+function renderLinks(){
+ const L=[['a','Source vers cible de sauvegarde','harv-paris','nas-dr','LAN 10 Gbit/s partagé, NFS v4.1'],['b','Cible de sauvegarde vers site de reprise','nas-dr','harv-lyon','WAN 1 Gbit/s, VPN IPsec'],['c','Retour (pour le retour au site principal)','harv-lyon','nas-dr','WAN 1 Gbit/s, VPN IPsec']];
+ if(!LEGS.c) LEGS.c={mibs:41,lat:9.1,when:'il y a 3 jours'};
+ const sl=slowLeg();
+ $('#linkCards').innerHTML=L.map(([k,t,f,to,net])=>{const g=LEGS[k];return '<div class="fk-source"><div class="mini-vm" style="justify-content:space-between"><b>'+esc(t)+'</b>'+(k===sl?'<span class="badge warn" title="Décide du RPO atteignable des plans harv-paris vers harv-lyon">la plus lente</span>':'<span class="badge ok">ok</span>')+'</div><div class="leg-flow"><span class="leg-node">'+esc(f)+'</span><span class="leg-line'+(k===sl?' slow':'')+'"><span>'+esc(net)+'</span></span><span class="leg-node">'+esc(to)+'</span></div><div class="kpi"><div><small>Débit utile</small><b data-mibs="'+k+'">'+fr(g.mibs,0)+' MiB/s</b></div><div><small>Latence</small><b>'+fr(g.lat)+' ms</b></div><div><small>Dernier test</small><b style="font-size:13px" data-when="'+k+'">'+esc(g.when)+'</b></div></div><div class="progress hidden" data-pg="'+k+'"><i></i></div><div class="btn-row" style="margin-top:8px"><button class="btn btn-sm" data-test="'+k+'" title="Envoyer 2 Gi de test et mesurer le débit utile (action suivie)">Tester le débit</button><span class="muted">Plans concernés : '+(k==='c'?'crm':'erp, intranet')+'</span></div></div>';}).join('');
+}
+$('#linkCards').addEventListener('click',e=>{const b=e.target.closest('[data-test]');if(!b)return;const k=b.dataset.test,pg=$('[data-pg="'+k+'"]'),bar=$('i',pg);b.disabled=true;pg.classList.remove('hidden');let p=0;
+ const iv=setInterval(()=>{p+=5;bar.style.width=p+'%';if(p>=100){clearInterval(iv);LEGS[k].mibs=Math.round(LEGS[k].mibs*(0.93+Math.random()*0.12));LEGS[k].when='à l\'instant';renderLinks();if(st.measured)refresh();toast('Test de débit terminé',LEGS[k].mibs+' MiB/s mesurés');}},90);});
+
+/* ---------- Démarrage ---------- */
+renderVms();renderPlans();renderNets();renderElig();renderPlanVms();renderLinks();showCi('erp-app-01');refresh();
+})();
+</script>
+</body>
+</html>
