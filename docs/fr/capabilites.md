@@ -2754,7 +2754,14 @@ resources.
   transfert, pont, adresses avec la plage DHCP, démarrage automatique,
   transitoire).
 - Un hôte injoignable, ou qui refuse la clé ou le compte, est montré avec
-  la raison. Les autres hôtes sont lus quand même, en parallèle.
+  la raison. Les autres hôtes sont lus quand même, en parallèle. La lecture
+  de l'ensemble a une échéance, 25 s par défaut
+  (`HARVESTER_OPS_KVM_READ_DEADLINE`) : un hôte qui n'a pas répondu à temps
+  est montré en `timeout`, et les autres sont montrés.
+- **Actualiser** relit les hôtes au plus une fois toutes les 5 s pour une
+  même vue : un second clic dans les 5 s, ou dix personnes sur la même vue,
+  reçoivent la lecture qui vient d'être faite. Stockage et Réseaux lisent
+  chaque hôte une seule fois.
 
 **Déclarer un hôte.** La fenêtre **Déclarer un hôte** prend l'adresse et
 le port, puis relève les empreintes de la clé de l'hôte. Vous choisissez
@@ -2790,10 +2797,21 @@ l'état réel du domaine jusqu'à l'état attendu :
 - Un domaine **transitoire** (créé sans définition) disparaît quand il
   s'arrête. Arrêter ou forcer l'arrêt le signale alors disparu, comme une
   réussite.
+- **Reprendre** ne vaut que pour une VM en pause, ou suspendue par son
+  invité.
+
+**Annuler.** **Annuler** dans le dock arrête le script. Une déclaration
+d'hôte annulée en cours est défaite : ni déclaration, ni clé, ni ligne
+épinglée ne restent, et l'action finit `cancelled` avec « nothing saved ».
+Un geste annulé a peut-être déjà atteint libvirt : l'action le dit et ne
+prétend pas avoir rien défait. Annuler une action demande le rôle qu'il a
+fallu pour la lancer : un opérateur n'annule pas la déclaration d'hôte
+lancée par un administrateur.
 
 **Droits.** Un lecteur lit. Un opérateur lance les gestes, arrêt forcé
 compris, et teste un hôte. Un administrateur relève les clés d'hôte,
-déclare et retire les hôtes.
+déclare et retire les hôtes. Le nom d'hôte `scan` est réservé par la
+console.
 
 **Stockage des déclarations.** Un fichier par hôte, `kvm.d/<nom>.yaml`
 dans le répertoire d'état, écrit en JSON (du YAML valide), droits 0600. La
@@ -2817,11 +2835,14 @@ supervision. Ils sont prévus de la 1.97.0 à la 1.99.0.
 API : `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, réseaux), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
 `POST /api/kvm/hosts/scan` (`{address, port}`), `POST /api/kvm/hosts`
-(multipart : `payload` avec nom, adresse, port, utilisateur, empreinte et
+(multipart, 256 Kio au plus : `payload` avec nom, adresse, port, utilisateur, empreinte et
 étiquettes, et `key`), `DELETE /api/kvm/hosts/<host>`,
 `POST /api/kvm/hosts/<host>/test`,
 `POST /api/kvm/vms/<host>/<domain>/<gesture>` (`{timeout}` facultatif, de
 1 à 3600 s). Les écritures répondent `202 {action_id}` tout de suite.
+`GET /api/kvm/hosts?declared=1` liste les déclarations sans interroger les
+hôtes ; `?fresh=1` sur une lecture est suivi une fois toutes les 5 s par
+lecture.
 
 Ligne de commande : `bin/harvester-kvm.py host scan --address A [--port P]`,
 `host add --name N --address A --user U --ssh-key FICHIER --fingerprint
@@ -2831,7 +2852,8 @@ SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
 `vm start|shutdown|reboot|destroy|suspend|resume --host N --name D
 [--timeout S]`. `--json` sur chaque commande, `--state-dir` (par défaut
 `HARVESTER_OPS_STATE_DIR`). La console lance ce script pour chaque
-écriture.
+écriture. Codes de sortie : 0 fait, 1 échec, 2 refusé avant l'hôte,
+3 annulé (SIGTERM ou SIGHUP, ce qui était commencé est défait).
 
 **Ce qui est vérifié.** Vérifié en réel sur un hôte de banc (openSUSE,
 libvirt 12.7.0, QEMU 10.2.2) : déclaré depuis la fenêtre, ses 15 domaines
@@ -2843,7 +2865,10 @@ ACPI et l'arrêt a proposé l'arrêt forcé. Un domaine transitoire arrêté de
 force a été signalé disparu, comme une réussite. Domaine d'essai en marche,
 son affichage VNC sur `127.0.0.1` a été signalé non exposé. Une seconde
 déclaration du même hôte a été ajoutée, testée puis retirée, ses fichiers
-supprimés.
+supprimés. Un invité SLES 16 qui suit l'ACPI est arrivé à `shut off` 2,4 s
+après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
+console pendant son test de connexion, déjà enregistrée, a été défaite :
+aucun fichier de déclaration ni de clé n'est resté.
 
 ---
 

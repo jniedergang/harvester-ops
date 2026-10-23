@@ -52,6 +52,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `DELETE /api/kvm/hosts/<host>`, `POST /api/kvm/hosts/<host>/test`,
   `POST /api/kvm/vms/<host>/<domain>/<gesture>`. Writes answer
   `202 {action_id}` at once.
+- **Cancel** from the dock: a host declaration cancelled while it runs is
+  undone (no declaration, key or pinned line kept) and ends `cancelled`.
+  The script handles SIGTERM and SIGHUP, runs its rollback and exits 3. A
+  cancelled gesture says it may already have reached libvirt.
+
+### Security
+- The Activity tab (running, history, detail window) and the dock escape
+  action labels, clusters, states, step messages and errors. KVM action
+  labels carry raw libvirt VM names, which could otherwise run a script in
+  the page of whoever opened Activity.
+- Cancelling an action needs the role that started it. An operator can
+  cancel his own KVM gesture, not a host declaration started by an admin;
+  an action that names no role still needs an admin, as before.
 
 ### Changed
 - Roles: a viewer reads the KVM views. An operator runs the gestures,
@@ -60,6 +73,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - A tracked action can now keep the JSON result of its script, shown in
   the action and in its end event. The command line shown for an action
   hides `--opt=/path` values.
+- KVM reads: `?fresh=1` is honoured once every 5 s per read, the read of
+  all hosts has a deadline (25 s by default,
+  `HARVESTER_OPS_KVM_READ_DEADLINE`) after which a silent host is shown as
+  `timeout`, and Storage and Networks read each host once
+  (`GET /api/kvm/hosts?declared=1` gives the declarations without asking
+  the hosts). The host name `scan` is reserved. The declaration form is
+  refused above 256 KiB, before it is parsed.
+
+### Fixed
+- Switching tab while a KVM host test or gesture ran could stop the
+  automatic refresh of the new view.
+- Resume is refused from every state that is not paused (crashed, shutting
+  down, blocked), from one table in the script that the page reads.
+- A KVM write no longer empties the shared reads of every cluster, and the
+  host key scan, a read, empties none.
 
 ### Internal
 - `bin/lib/kvm_host.py`: `virsh` run on the host over SSH, every remote
@@ -101,6 +129,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   menu per state, force off confirmation, a failed shutdown offering force
   off, a hostile VM name escaped, storage, networks and the declaration
   window. Each key rule was mutated once to see its tests fail.
+- Activity and dock escaping: a source check of every action field put in
+  HTML, and a browser test with a hostile label in the running list, the
+  history, the detail window and the dock. A real `host add` process is
+  stopped by SIGTERM and SIGHUP during its connection test and leaves no
+  file. Fresh read throttling, the read deadline with a slow host, two
+  simultaneous gestures on one VM, the cancel role and the cancel message
+  have their own tests.
 - Real, on a lab host (openSUSE, libvirt 12.7.0): the host declared from
   the window, its 15 existing domains, 9 pools and 3 networks read and
   left untouched. On a test domain created for the purpose: start,
@@ -109,7 +144,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   ignored the ACPI shutdown and the action offered force off. A transient
   domain forced off was reported gone, as a success. A second declaration
   of the same host was added, tested and removed, with its files deleted.
-  The test domains were then deleted.
+  The test domains were then deleted. After review: a SLES 16 guest that
+  honours ACPI reached `shut off` 2.4 s after the shutdown request, and a
+  declaration cancelled from the console after it was saved was undone.
 
 ## [1.95.0] - 2026-10-19 - Usage: GPU-hours booked and consumed, waste, quotas
 

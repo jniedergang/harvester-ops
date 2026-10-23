@@ -2501,7 +2501,13 @@ resources.
   forwarding mode, bridge, addresses with the DHCP range, autostart,
   transient).
 - A host that is unreachable, refuses the key or the account is shown with
-  the reason. The other hosts are still read, in parallel.
+  the reason. The other hosts are still read, in parallel. The whole read
+  has a deadline, 25 s by default (`HARVESTER_OPS_KVM_READ_DEADLINE`): a
+  host that has not answered by then is shown as `timeout`, and the others
+  are shown.
+- **Refresh** reads the hosts again, at most once every 5 s for the same
+  view: a second click within 5 s, or ten people on the same view, get the
+  read that was just made. Storage and Networks read each host once.
 
 **Declaring a host.** The **Declare a host** window takes the address and
 the port, then reads the host key fingerprints from the host. You choose
@@ -2535,10 +2541,19 @@ reached:
   running", and the result carries `confirmed: false`.
 - A **transient** domain (created without a definition) disappears when it
   stops. Shut down or force off then reports it gone, as a success.
+- **Resume** applies only to a paused VM, or one suspended by its guest.
+
+**Cancel.** **Cancel** in the dock stops the script. A host declaration
+cancelled while it runs is undone: no declaration, key or pinned line is
+kept, and the action ends `cancelled` with "nothing saved". A cancelled
+gesture may already have reached libvirt: the action says so and does not
+claim that anything was undone. Cancelling an action needs the role that
+started it: an operator cannot cancel a host declaration started by an
+admin.
 
 **Rights.** A viewer reads. An operator runs the gestures, force off
 included, and tests a host. An admin reads host keys, declares and removes
-hosts.
+hosts. The host name `scan` is reserved by the console.
 
 **Storage of the declarations.** One file per host, `kvm.d/<name>.yaml`
 in the state directory, written as JSON (valid YAML), 0600. The private
@@ -2562,11 +2577,13 @@ between hosts, host maintenance and monitoring. They are planned for
 API: `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, networks), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
 `POST /api/kvm/hosts/scan` (`{address, port}`), `POST /api/kvm/hosts`
-(multipart: `payload` with name, address, port, user, fingerprint and
-labels, and `key`), `DELETE /api/kvm/hosts/<host>`,
+(multipart, 256 KiB at most: `payload` with name, address, port, user,
+fingerprint and labels, and `key`), `DELETE /api/kvm/hosts/<host>`,
 `POST /api/kvm/hosts/<host>/test`,
 `POST /api/kvm/vms/<host>/<domain>/<gesture>` (`{timeout}` optional, 1 to
-3600 s). Writes answer `202 {action_id}` at once.
+3600 s). Writes answer `202 {action_id}` at once. `GET /api/kvm/hosts?declared=1`
+lists the declarations without asking the hosts; `?fresh=1` on a read is
+honoured once every 5 s per read.
 
 Command line: `bin/harvester-kvm.py host scan --address A [--port P]`,
 `host add --name N --address A --user U --ssh-key FILE --fingerprint
@@ -2576,6 +2593,8 @@ SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
 `vm start|shutdown|reboot|destroy|suspend|resume --host N --name D
 [--timeout S]`. `--json` on every command, `--state-dir` (default
 `HARVESTER_OPS_STATE_DIR`). The console runs this script for every write.
+Exit codes: 0 done, 1 failed, 2 refused before the host, 3 cancelled
+(SIGTERM or SIGHUP, what was started is undone).
 
 **What is verified.** Checked for real on a lab host (openSUSE, libvirt
 12.7.0, QEMU 10.2.2): declared from the window, its 15 existing domains,
@@ -2586,7 +2605,10 @@ by `virsh domstate`. The guest ignored the ACPI request and the shutdown
 offered force off. A transient domain forced off was reported gone, as a
 success. With the test domain running, its VNC display on `127.0.0.1` was
 reported not exposed. A second declaration of the same host was added,
-tested and removed, with its files deleted.
+tested and removed, with its files deleted. A SLES 16 guest that honours
+ACPI reached `shut off` 2.4 s after the request (action done in 3.5 s). A
+declaration cancelled from the console during its connection test, after
+it was saved, was undone: no declaration or key file was left.
 
 ---
 
