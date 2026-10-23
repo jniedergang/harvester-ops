@@ -18,6 +18,8 @@ const App = (() => {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const TAB_STORAGE = 'harvester_ops_current_tab';
+  // v1.96.0 : onglets du groupe KVM -> vue du module KVM
+  const KVM_TABS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
 
   function setTab(name) {
     // Highlight every `.tab` whose data-tab matches the current name. The
@@ -60,6 +62,9 @@ const App = (() => {
     // v1.95.0 : Shared resources > Usage
     if (name === 'usage') { if (window.Usage) Usage.start($('#usage-host')); }
     else if (window.Usage) Usage.stop();
+    // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
+    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`)); }
+    else if (window.KVM) KVM.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -274,6 +279,8 @@ const App = (() => {
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
     if (active === 'bookings' && window.Bookings) jobs.push(Bookings.load());
     if (active === 'usage' && window.Usage) jobs.push(Usage.load());
+    // KVM ne dépend pas du cluster choisi ; relu comme Activity
+    if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
     if (active === 'overview') {
       const mode = savedOverviewMode();
       if (mode !== 'metrics') {
@@ -1361,12 +1368,12 @@ const App = (() => {
         running.forEach(a => {
           const tr = document.createElement('tr');
           tr.innerHTML = `
-            <td><code>${a.id}</code></td>
-            <td>${a.cluster}</td>
-            <td>${a.action}${a.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
-            <td><span class="phase Pending">${a.status}</span></td>
+            <td><code>${escapeHtml(a.id)}</code></td>
+            <td>${escapeHtml(a.cluster)}</td>
+            <td>${escapeHtml(a.action)}${a.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
+            <td><span class="phase Pending">${escapeHtml(a.status)}</span></td>
             <td>${new Date(a.started_at * 1000).toLocaleString()}</td>
-            <td><button class="btn btn-sm btn-danger" data-cancel="${a.id}">Cancel</button></td>`;
+            <td><button class="btn btn-sm btn-danger" data-cancel="${escapeHtml(a.id)}">Cancel</button></td>`;
           tr.querySelector('[data-cancel]').addEventListener('click', () => cancelAction(a.id));
           runBody.appendChild(tr);
         });
@@ -1439,15 +1446,15 @@ const App = (() => {
           tr.classList.add('clickable');
           const statusBadge = it.status === 'done' ? '<span class="phase Running">done</span>'
                             : it.status === 'error' ? '<span class="phase Failed">error</span>'
-                            : `<span class="phase Stopped">${it.status}</span>`;
+                            : `<span class="phase Stopped">${escapeHtml(it.status)}</span>`;
           const typeBadge = `<span class="activity-type-badge ${it.kind === 'action' ? 'web' : 'file'}">${it.kind === 'action' ? 'web' : 'cli'}</span>`;
           const dur = it.duration ? `${it.duration.toFixed(1)}s` : '—';
           const tsStr = new Date(it.ts * 1000).toLocaleString();
           tr.innerHTML = `
             <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
             <td>${typeBadge}</td>
-            <td>${it.cluster}</td>
-            <td>${it.action}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
+            <td>${escapeHtml(it.cluster)}</td>
+            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
             <td>${statusBadge}</td>
             <td>${tsStr}</td>
             <td>${dur}</td>`;
@@ -1604,14 +1611,14 @@ const App = (() => {
                 title="${i18n.t('activity.newerTip')}">${i18n.t('activity.newer')} ${Icons.svg('arrowRight', { size: 14 })}</button>
       </div>
       <div class="activity-detail-meta">
-        <div><strong>Action</strong> <code>${it.action}</code></div>
-        <div><strong>Cluster</strong> <code>${it.cluster}</code></div>
-        <div><strong>Run ID</strong> <code>${it.id}</code></div>
+        <div><strong>Action</strong> <code>${escapeHtml(it.action)}</code></div>
+        <div><strong>Cluster</strong> <code>${escapeHtml(it.cluster)}</code></div>
+        <div><strong>Run ID</strong> <code>${escapeHtml(it.id)}</code></div>
         <div><strong>Status</strong> <span class="phase ${
           it.status === 'done' ? 'Running' :
           it.status === 'error' ? 'Failed' :
           it.status === 'cancelled' ? 'Stopped' :
-          it.status === 'running' ? 'Pending' : 'Stopped'}">${it.status}</span></div>
+          it.status === 'running' ? 'Pending' : 'Stopped'}">${escapeHtml(it.status)}</span></div>
         <div><strong>When</strong> ${new Date(it.ts * 1000).toLocaleString()}</div>
         ${it.duration ? `<div><strong>Duration</strong> ${it.duration.toFixed(1)}s</div>` : ''}
         ${it.error_summary ? `<div class="activity-detail-error"><strong data-i18n="activity.errorLabel">Error</strong> <code title="${escapeHtml(it.error_summary)}">${escapeHtml(it.error_summary)}</code></div>` : ''}

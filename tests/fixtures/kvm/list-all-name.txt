@@ -1,0 +1,16 @@
+harvlab-n1
+harvlab-n2
+harvlab-n3
+harvlab2-n1
+bmcfg-n1
+bmcfg-n2
+hardpipe-node0
+mlm-dst
+mlm-src
+netperf
+sles15sp6
+sles15sp7
+vmwlab-esx1
+xen-build
+xen-sles16
+

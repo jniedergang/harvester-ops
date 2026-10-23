@@ -1,0 +1,17 @@
+Id:             7
+Name:           scratch
+UUID:           3f0c6a52-9b1e-4c2d-8f7a-1d2e3c4b5a69
+OS Type:        hvm
+State:          running
+CPU(s):         2
+CPU time:       12.3s
+Max memory:     2097152 KiB
+Used memory:    2097152 KiB
+Persistent:     no
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: system_u:system_r:svirt_t:s0:c12,c345 (enforcing)
+

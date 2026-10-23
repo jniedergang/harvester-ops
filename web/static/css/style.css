@@ -5462,3 +5462,23 @@ td.fk-reason { max-width: 260px; }
 .usg-actions { white-space: nowrap; }
 .usg-quota-panel { display: flex; flex-direction: column; gap: 10px; }
 .usg-quota-panel > .form-hint, .usg-quota-panel > [data-usgq="list"] { padding: 0 16px; }
+
+/* v1.96.0 : section KVM (hôtes, VMs, stockage, réseaux) */
+.kvm-card [data-kvm="body"] { padding: 8px 10px 10px; }
+.kvm-host.is-error { border-color: var(--error); }
+.kvm-host-facts { display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.kvm-labels, .kvm-tile-actions, .kvm-host-states { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.kvm-host-states { margin-bottom: 8px; font-size: 12px; }
+.kvm-checks, .kvm-steps { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px;
+  font-size: 12px; }
+.kvm-steps:empty { display: none; }
+.kvm-detail { padding: 6px 4px; font-size: 12.5px; }
+.kvm-detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 4px 14px; margin-bottom: 8px; }
+.kvm-detail-lists { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.kvm-detail-lists ul { margin: 4px 0 0; padding-left: 16px; overflow-wrap: anywhere; }
+.kvm-host-block + .kvm-host-block { margin-top: 16px; }
+.kvm-host-block h3 { display: flex; align-items: center; gap: 6px; font-size: 14px; margin: 4px 0 8px; }
+.kvm-fps { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 0; display: flex; flex-direction: column; gap: 4px; }
+.kvm-fps legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+.kvm-fp { display: flex; align-items: center; gap: 6px; font-size: 12.5px; overflow-wrap: anywhere; }
+.kvm-pools details table { margin-top: 6px; }

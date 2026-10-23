@@ -2724,6 +2724,154 @@ groupée est reprise type par type).
 
 ---
 
+## 10. Hyperviseurs KVM (console + CLI)
+
+### Hôtes, VMs, stockage et réseaux (1.96.0)
+
+La console gère aussi des hôtes KVM (libvirt), à côté des clusters
+Harvester. Un hôte KVM reste ce qu'il est : il ne devient pas un cluster,
+et libvirt reste la seule source de vérité. Aucun agent n'est installé sur
+l'hôte. La console lance `virsh` sur l'hôte par SSH et lit ce qu'il rend.
+**KVM** est un groupe de quatre entrées dans le menu latéral, après Shared
+resources.
+
+- **Hôtes** : un bloc par hôte. Nom de l'hôte, `utilisateur@adresse`, CPU
+  (nombre, modèle, fréquence, sockets), mémoire (totale, libre,
+  disponible), versions de libvirt et de QEMU, VMs par état, étiquettes. Un
+  filtre par étiquette. **Tester** relance le test de connexion, une ligne
+  par point. **Retirer** oublie l'hôte après une confirmation dans la
+  page ; rien ne change sur l'hôte.
+- **Machines virtuelles** : toutes les VMs de tous les hôtes dans un
+  tableau. Nom, hôte, état, vCPU, mémoire, et un badge transitoire ou
+  démarrage automatique. Filtres par hôte, état et texte ; chaque colonne
+  se trie. **Déplier une ligne** donne son détail : vCPU, mémoire,
+  persistante ou transitoire, démarrage automatique, épinglage CPU, machine
+  et micrologiciel, disques, cartes, affichages.
+- **Stockage** : un bloc par hôte avec ses pools libvirt (état, démarrage
+  automatique, capacité, allocation, disponible) et, dépliés, leurs
+  volumes. Un pool inactif le dit.
+- **Réseaux** : un bloc par hôte avec ses réseaux libvirt (état, mode de
+  transfert, pont, adresses avec la plage DHCP, démarrage automatique,
+  transitoire).
+- Un hôte injoignable, ou qui refuse la clé ou le compte, est montré avec
+  la raison. Les autres hôtes sont lus quand même, en parallèle. La lecture
+  de l'ensemble a une échéance, 25 s par défaut
+  (`HARVESTER_OPS_KVM_READ_DEADLINE`) : un hôte qui n'a pas répondu à temps
+  est montré en `timeout`, et les autres sont montrés.
+- **Actualiser** relit les hôtes au plus une fois toutes les 5 s pour une
+  même vue : un second clic dans les 5 s, ou dix personnes sur la même vue,
+  reçoivent la lecture qui vient d'être faite. Stockage et Réseaux lisent
+  chaque hôte une seule fois.
+
+**Déclarer un hôte.** La fenêtre **Déclarer un hôte** prend l'adresse et
+le port, puis relève les empreintes de la clé de l'hôte. Vous choisissez
+celle à épingler : rien n'est présélectionné, et changer l'adresse vide la
+liste. Puis le nom, l'utilisateur, le fichier de clé privée (sans phrase de
+passe) et les étiquettes (`clé=valeur`). La clé est contrôlée avant toute
+connexion. Le test de connexion s'affiche point par point : SSH, `virsh`,
+droits sur `qemu:///system`, `qemu-img`, et affichages VNC des VMs en
+marche joignables depuis le réseau sans mot de passe. Un affichage qui
+écoute sur `127.0.0.1` n'est pas exposé. Une déclaration en échec ne laisse
+rien derrière elle.
+
+**L'empreinte de la clé d'hôte est épinglée.** La console se connecte avec
+`StrictHostKeyChecking=yes` et la seule ligne épinglée. Un hôte dont la clé
+a changé est refusé, jamais accepté en silence. Une connexion SSH par hôte
+est réutilisée un court moment, pour qu'une lecture ne paie pas une
+poignée de main par commande.
+
+**Gestes de cycle de vie.** Le menu d'une VM propose **Démarrer**,
+**Arrêter**, **Redémarrer**, **Arrêt forcé**, **Suspendre** et
+**Reprendre**. Un geste que l'état n'autorise pas est grisé et dit
+pourquoi. Chaque geste est une action suivie (dock, Activité) qui suit
+l'état réel du domaine jusqu'à l'état attendu :
+
+- **Arrêter** demande à l'invité de s'arrêter (ACPI) et attend `shut off`,
+  120 s par défaut. Un invité qui ne s'arrête pas à temps fait échouer
+  l'action, et la console propose l'**Arrêt forcé**.
+- **Arrêt forcé** se confirme dans la page. Il arrête le domaine tout de
+  suite, comme on débranche la prise.
+- **Redémarrer** attend que le domaine tourne de nouveau. libvirt ne peut
+  pas prouver que l'invité a redémarré : la console dit « redémarrage
+  demandé, la VM tourne », et le résultat porte `confirmed: false`.
+- Un domaine **transitoire** (créé sans définition) disparaît quand il
+  s'arrête. Arrêter ou forcer l'arrêt le signale alors disparu, comme une
+  réussite.
+- **Reprendre** ne vaut que pour une VM en pause, ou suspendue par son
+  invité.
+
+**Annuler.** **Annuler** dans le dock arrête le script. Une déclaration
+d'hôte annulée en cours est défaite : ni déclaration, ni clé, ni ligne
+épinglée ne restent, et l'action finit `cancelled` avec « nothing saved ».
+Un geste annulé a peut-être déjà atteint libvirt : l'action le dit et ne
+prétend pas avoir rien défait. Annuler une action demande le rôle qu'il a
+fallu pour la lancer : un opérateur n'annule pas la déclaration d'hôte
+lancée par un administrateur.
+
+**Droits.** Un lecteur lit. Un opérateur lance les gestes, arrêt forcé
+compris, et teste un hôte. Un administrateur relève les clés d'hôte,
+déclare et retire les hôtes. Le nom d'hôte `scan` est réservé par la
+console.
+
+**Stockage des déclarations.** Un fichier par hôte, `kvm.d/<nom>.yaml`
+dans le répertoire d'état, écrit en JSON (du YAML valide), droits 0600. La
+clé privée est copiée dans `ssh/<nom>_id` et la ligne épinglée dans
+`ssh/<nom>_known`. Les chemins sont relatifs au répertoire d'état. Retirer
+un hôte supprime ces trois fichiers et eux seuls.
+
+**Prérequis sur un hôte** : libvirt (démons modulaires ou `libvirtd`), un
+compte membre du groupe `libvirt` (ou root) joignable en SSH par clé.
+`qemu-img` est facultatif ; le test le signale. OpenSSH 9.8 et suivants
+pénalisent les connexions qui ne s'authentifient pas (`PerSourcePenalties`),
+et le relevé de la clé d'hôte en est une. Juste après un relevé, l'hôte
+peut couper les nouvelles connexions une quinzaine de secondes. La
+déclaration d'un hôte refait une fois son test SSH après 20 s.
+
+**Pas dans cette version** : console graphique (VNC), instantanés,
+clonage, création et modification de VMs, de pools, de volumes et de
+réseaux, migration à chaud entre hôtes, maintenance d'un hôte et
+supervision. Ils sont prévus de la 1.97.0 à la 1.99.0.
+
+API : `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
+volumes, réseaux), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
+`POST /api/kvm/hosts/scan` (`{address, port}`), `POST /api/kvm/hosts`
+(multipart, 256 Kio au plus : `payload` avec nom, adresse, port, utilisateur, empreinte et
+étiquettes, et `key`), `DELETE /api/kvm/hosts/<host>`,
+`POST /api/kvm/hosts/<host>/test`,
+`POST /api/kvm/vms/<host>/<domain>/<gesture>` (`{timeout}` facultatif, de
+1 à 3600 s). Les écritures répondent `202 {action_id}` tout de suite.
+`GET /api/kvm/hosts?declared=1` liste les déclarations sans interroger les
+hôtes ; `?fresh=1` sur une lecture est suivi une fois toutes les 5 s par
+lecture.
+
+Ligne de commande : `bin/harvester-kvm.py host scan --address A [--port P]`,
+`host add --name N --address A --user U --ssh-key FICHIER --fingerprint
+SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
+`host remove N`, `inventory [--host N] [--details]`,
+`vm list [--host N]`, `vm show --host N --name D`,
+`vm start|shutdown|reboot|destroy|suspend|resume --host N --name D
+[--timeout S]`. `--json` sur chaque commande, `--state-dir` (par défaut
+`HARVESTER_OPS_STATE_DIR`). La console lance ce script pour chaque
+écriture. Codes de sortie : 0 fait, 1 échec, 2 refusé avant l'hôte,
+3 annulé (SIGTERM ou SIGHUP ; une déclaration d'hôte est défaite, un geste a pu déjà atteindre libvirt).
+
+**Ce qui est vérifié.** Vérifié en réel sur un hôte de banc (openSUSE,
+libvirt 12.7.0, QEMU 10.2.2) : déclaré depuis la fenêtre, ses 15 domaines
+existants, 9 pools et 3 réseaux lus et laissés intacts. Sur un domaine
+d'essai créé pour l'occasion (cirros) : démarrer, suspendre, reprendre,
+redémarrer, arrêter, arrêt forcé et redémarrage par la console, chacun
+suivi jusqu'à l'état vu par `virsh domstate`. L'invité a ignoré la demande
+ACPI et l'arrêt a proposé l'arrêt forcé. Un domaine transitoire arrêté de
+force a été signalé disparu, comme une réussite. Domaine d'essai en marche,
+son affichage VNC sur `127.0.0.1` a été signalé non exposé. Une seconde
+déclaration du même hôte a été ajoutée, testée puis retirée, ses fichiers
+supprimés. Un invité SLES 16 qui suit l'ACPI est arrivé à `shut off` 2,4 s
+après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
+console pendant son test de connexion, déjà enregistrée, a été défaite :
+aucun fichier de déclaration ni de clé n'est resté.
+
+---
+
 ## Ce qui nécessite quoi
 
 | Vous voulez… | Il vous faut |
@@ -2733,6 +2881,7 @@ groupée est reprise type par type).
 | Provisionner des clusters downstream | Console web + un bundle airgap CAPHV |
 | Des VMs gérées par Terraform | Console web + le binaire du provider Terraform |
 | Un fonctionnement 100 % hors-ligne | Le tarball : wheels bundlés + image OCI |
+| Des hôtes KVM et leurs VMs | La console web ou `bin/harvester-kvm.py`, et un accès SSH par clé à un compte du groupe `libvirt` de chaque hôte |
 
 Voir [architecture.md](architecture.md) pour la façon dont les surfaces se
 posent sur le moteur partagé, et [installation.md](installation.md) pour

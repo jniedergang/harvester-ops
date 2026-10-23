@@ -1,0 +1,83 @@
+<!-- Composé à la main au format du XML vivant de libvirt 12.7.0 (domaine
+     en marche, transitoire) : carte `network` avec bridge='virbr0' ajouté
+     par libvirt, disque NVMe en passthrough, lecteur CD vide, disques block,
+     network et volume, pas d'affichage. -->
+<domain type='kvm' id='7'>
+  <name>scratch</name>
+  <uuid>3f0c6a52-9b1e-4c2d-8f7a-1d2e3c4b5a69</uuid>
+  <memory unit='KiB'>2097152</memory>
+  <currentMemory unit='KiB'>2097152</currentMemory>
+  <vcpu placement='static'>2</vcpu>
+  <os>
+    <type arch='x86_64' machine='pc-q35-10.2'>hvm</type>
+    <boot dev='hd'/>
+  </os>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='nvme' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source type='pci' managed='yes' namespace='1' index='1'>
+        <address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/>
+      </source>
+      <backingStore/>
+      <target dev='nvme0n1' bus='nvme'/>
+      <alias name='nvme0'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+      <alias name='sata0-0-1'/>
+    </disk>
+    <disk type='block' device='disk'>
+      <driver name='qemu' type='raw' cache='none' io='native'/>
+      <source dev='/dev/vg0/scratch' index='3'/>
+      <backingStore/>
+      <target dev='vdb' bus='virtio'/>
+    </disk>
+    <disk type='network' device='disk'>
+      <driver name='qemu' type='raw'/>
+      <source protocol='rbd' name='pool/scratch-data' index='4'>
+        <host name='10.0.0.30' port='6789'/>
+      </source>
+      <target dev='vdc' bus='virtio'/>
+    </disk>
+    <disk type='volume' device='disk'>
+      <driver name='qemu' type='qcow2'/>
+      <source pool='images' volume='scratch.qcow2' index='5'/>
+      <backingStore/>
+      <target dev='vdd' bus='virtio'/>
+    </disk>
+    <interface type='network'>
+      <mac address='52:54:00:aa:bb:01'/>
+      <source network='default' portid='9b0a1c2d-3e4f-4a5b-8c6d-7e8f9a0b1c2d' bridge='virbr0'/>
+      <target dev='vnet12'/>
+      <model type='virtio'/>
+      <alias name='net0'/>
+    </interface>
+    <interface type='bridge'>
+      <mac address='52:54:00:aa:bb:02'/>
+      <source bridge='br0'/>
+      <target dev='vnet13'/>
+      <model type='virtio'/>
+    </interface>
+    <interface type='direct'>
+      <mac address='52:54:00:aa:bb:03'/>
+      <source dev='eno1' mode='bridge'/>
+      <target dev='macvtap0'/>
+      <model type='virtio'/>
+    </interface>
+    <interface type='user'>
+      <mac address='52:54:00:aa:bb:04'/>
+      <model type='e1000e'/>
+    </interface>
+    <interface type='vhostuser'>
+      <mac address='52:54:00:aa:bb:05'/>
+      <source type='unix' path='/run/vhost/sock0' mode='server'/>
+      <model type='virtio'/>
+    </interface>
+    <console type='pty' tty='/dev/pts/4'>
+      <target type='serial' port='0'/>
+    </console>
+  </devices>
+</domain>

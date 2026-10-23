@@ -2473,6 +2473,146 @@ either (the grouped read is retried kind by kind).
 
 ---
 
+## 10. KVM hypervisors (console + CLI)
+
+### Hosts, VMs, storage and networks (1.96.0)
+
+The console also manages KVM hosts (libvirt), next to the Harvester
+clusters. A KVM host stays what it is: it is not turned into a cluster,
+and libvirt remains the only source of truth. No agent is installed on a
+host. The console runs `virsh` on the host over SSH and reads what it
+returns. **KVM** is a group of four entries in the sidebar, after Shared
+resources.
+
+- **Hosts**: one block per host. Host name, `user@address`, CPU (count,
+  model, frequency, sockets), memory (total, free, available), libvirt and
+  QEMU versions, VMs by state, labels. A label filter. **Test** runs the
+  connection test again, one line per check. **Remove** forgets the host
+  after a confirmation in the page; nothing changes on the host.
+- **Virtual machines**: every VM of every host in one table. Name, host,
+  state, vCPU, memory, and a transient or autostart badge. Filters by host,
+  state and text; every column sorts. **Unfold a row** for its detail:
+  vCPU, memory, persistent or transient, autostart, CPU pinning, machine
+  and firmware, disks, cards, displays.
+- **Storage**: one block per host with its libvirt pools (state,
+  autostart, capacity, allocation, available) and, unfolded, their
+  volumes. An inactive pool says so.
+- **Networks**: one block per host with its libvirt networks (state,
+  forwarding mode, bridge, addresses with the DHCP range, autostart,
+  transient).
+- A host that is unreachable, refuses the key or the account is shown with
+  the reason. The other hosts are still read, in parallel. The whole read
+  has a deadline, 25 s by default (`HARVESTER_OPS_KVM_READ_DEADLINE`): a
+  host that has not answered by then is shown as `timeout`, and the others
+  are shown.
+- **Refresh** reads the hosts again, at most once every 5 s for the same
+  view: a second click within 5 s, or ten people on the same view, get the
+  read that was just made. Storage and Networks read each host once.
+
+**Declaring a host.** The **Declare a host** window takes the address and
+the port, then reads the host key fingerprints from the host. You choose
+the one to pin: nothing is preselected, and changing the address clears
+the list. Then the name, the user, the private key file (without a
+passphrase) and labels (`key=value`). The key is checked before any
+connection. The connection test is shown check by check: SSH, `virsh`,
+rights on `qemu:///system`, `qemu-img`, and VNC displays of running VMs
+reachable from the network without a password. A display that listens on
+`127.0.0.1` is not exposed. A failed declaration leaves nothing behind.
+
+**The host key is pinned.** The console connects with
+`StrictHostKeyChecking=yes` and the pinned line only. A host whose key has
+changed is refused, never accepted in silence. One SSH connection per host
+is reused for a short while, so a read does not pay a handshake per
+command.
+
+**Lifecycle gestures.** The menu of a VM offers **Start**, **Shut down**,
+**Reboot**, **Force off**, **Suspend** and **Resume**. A gesture the state
+does not allow is greyed out and says why. Each gesture is a tracked action
+(dock, Activity) that follows the real state of the domain until it is
+reached:
+
+- **Shut down** asks the guest to stop (ACPI) and waits for `shut off`,
+  120 s by default. A guest that does not stop in time makes the action
+  fail, and the console offers **Force off**.
+- **Force off** is confirmed in the page. It stops the domain at once, like
+  pulling the plug.
+- **Reboot** waits for the domain to run again. libvirt cannot prove that
+  the guest restarted: the console says "reboot requested, the VM is
+  running", and the result carries `confirmed: false`.
+- A **transient** domain (created without a definition) disappears when it
+  stops. Shut down or force off then reports it gone, as a success.
+- **Resume** applies only to a paused VM, or one suspended by its guest.
+
+**Cancel.** **Cancel** in the dock stops the script. A host declaration
+cancelled while it runs is undone: no declaration, key or pinned line is
+kept, and the action ends `cancelled` with "nothing saved". A cancelled
+gesture may already have reached libvirt: the action says so and does not
+claim that anything was undone. Cancelling an action needs the role that
+started it: an operator cannot cancel a host declaration started by an
+admin.
+
+**Rights.** A viewer reads. An operator runs the gestures, force off
+included, and tests a host. An admin reads host keys, declares and removes
+hosts. The host name `scan` is reserved by the console.
+
+**Storage of the declarations.** One file per host, `kvm.d/<name>.yaml`
+in the state directory, written as JSON (valid YAML), 0600. The private
+key is copied to `ssh/<name>_id` and the pinned line to `ssh/<name>_known`.
+Paths are relative to the state directory. Removing a host deletes these
+three files only.
+
+**Prerequisites on a host**: libvirt (modular daemons or `libvirtd`), an
+account in the `libvirt` group (or root) reachable over SSH with a key.
+`qemu-img` is optional; the test reports it. OpenSSH 9.8 and later
+penalise connections that do not authenticate (`PerSourcePenalties`), and
+reading the host key is one. Right after a read, the host may drop new
+connections for about 15 s. Declaring a host retries its SSH check once
+after 20 s.
+
+**Not in this version**: graphical console (VNC), snapshots, cloning,
+creating and editing VMs, pools, volumes and networks, live migration
+between hosts, host maintenance and monitoring. They are planned for
+1.97.0 to 1.99.0.
+
+API: `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
+volumes, networks), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
+`POST /api/kvm/hosts/scan` (`{address, port}`), `POST /api/kvm/hosts`
+(multipart, 256 KiB at most: `payload` with name, address, port, user,
+fingerprint and labels, and `key`), `DELETE /api/kvm/hosts/<host>`,
+`POST /api/kvm/hosts/<host>/test`,
+`POST /api/kvm/vms/<host>/<domain>/<gesture>` (`{timeout}` optional, 1 to
+3600 s). Writes answer `202 {action_id}` at once. `GET /api/kvm/hosts?declared=1`
+lists the declarations without asking the hosts; `?fresh=1` on a read is
+honoured once every 5 s per read.
+
+Command line: `bin/harvester-kvm.py host scan --address A [--port P]`,
+`host add --name N --address A --user U --ssh-key FILE --fingerprint
+SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
+`host remove N`, `inventory [--host N] [--details]`,
+`vm list [--host N]`, `vm show --host N --name D`,
+`vm start|shutdown|reboot|destroy|suspend|resume --host N --name D
+[--timeout S]`. `--json` on every command, `--state-dir` (default
+`HARVESTER_OPS_STATE_DIR`). The console runs this script for every write.
+Exit codes: 0 done, 1 failed, 2 refused before the host, 3 cancelled
+(SIGTERM or SIGHUP; a host declaration is undone, a gesture may already have
+reached libvirt).
+
+**What is verified.** Checked for real on a lab host (openSUSE, libvirt
+12.7.0, QEMU 10.2.2): declared from the window, its 15 existing domains,
+9 pools and 3 networks read and left untouched. On a test domain created
+for the purpose (cirros): start, suspend, resume, reboot, shutdown, force
+off and start again through the console, each followed to the state seen
+by `virsh domstate`. The guest ignored the ACPI request and the shutdown
+offered force off. A transient domain forced off was reported gone, as a
+success. With the test domain running, its VNC display on `127.0.0.1` was
+reported not exposed. A second declaration of the same host was added,
+tested and removed, with its files deleted. A SLES 16 guest that honours
+ACPI reached `shut off` 2.4 s after the request (action done in 3.5 s). A
+declaration cancelled from the console during its connection test, after
+it was saved, was undone: no declaration or key file was left.
+
+---
+
 ## What needs what
 
 | You want… | You need |
@@ -2482,6 +2622,7 @@ either (the grouped read is retried kind by kind).
 | Provision downstream clusters | Web console + a CAPHV airgap bundle |
 | Terraform-managed VMs | Web console + the Terraform provider binary |
 | Fully offline operation | The tarball: bundled wheels + OCI image |
+| KVM hosts and their VMs | Web console or `bin/harvester-kvm.py`, and SSH access by key to an account in the `libvirt` group of each host |
 
 See [architecture.md](architecture.md) for how the surfaces sit on top of
 the shared engine, and [install.md](install.md) to get started.

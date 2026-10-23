@@ -311,11 +311,11 @@ const Dock = (() => {
       const errSuffix = (!isRunning && !isDone && a.error_summary)
         ? ' — ' + escapeHtml(a.error_summary) : '';
       const stepText = isRunning
-        ? `${live.step_id}${live.message ? ' — ' + live.message : ''}`
+        ? escapeHtml(`${live.step_id}${live.message ? ' — ' + live.message : ''}`)
         : (isDone ? Icons.svg('ok', { size: 12, cls: 'icon-ok' }) + ' completed'
-                  : Icons.svg('fail', { size: 12, cls: 'icon-err' }) + ' ' + (a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
+                  : Icons.svg('fail', { size: 12, cls: 'icon-err' }) + ' ' + escapeHtml(a.exit_code !== null ? 'exit ' + a.exit_code : (a.status || 'failed')) + errSuffix);
       const stepTitle = (!isRunning && !isDone && a.error_summary)
-        ? escapeHtml(a.error_summary) : live.step_id;
+        ? escapeHtml(a.error_summary) : escapeHtml(live.step_id);
 
       const icon = Icons.svg(isRunning ? 'running' : (isDone ? 'ok' : 'fail'), { size: 18 });
 
@@ -325,7 +325,7 @@ const Dock = (() => {
           <div class="info">
             <div class="name">${escapeHtml(a.action)} → ${escapeHtml(a.cluster)}${dryBadge}</div>
             <div class="meta">
-              <code class="aid">${a.id}</code> ·
+              <code class="aid">${escapeHtml(a.id)}</code> ·
               <span class="started" title="${tr('dock.startedTip', 'started')}">${startedHuman}</span>
               <span class="elapsed"></span>
             </div>
@@ -334,21 +334,26 @@ const Dock = (() => {
           </div>
           <div class="step-msg" title="${stepTitle}">${stepText}</div>
           <div class="progress-mini"><div class="fill" style="width:${pctValue}%"></div></div>
-          <button class="btn-mini toggle-details" data-id="${a.id}"
+          <button class="btn-mini toggle-details" data-id="${escapeHtml(a.id)}"
                   title="${expanded.has(a.id) ? tr('dock.hideDetails', 'Hide the live logs') : tr('dock.showDetails', 'Show live logs')}"
                   data-i18n-title="${expanded.has(a.id) ? 'dock.hideDetails' : 'dock.showDetails'}">${expanded.has(a.id) ? tr('dock.hide', 'Hide') : tr('dock.details', 'Details')}</button>
           ${isRunning
-            ? `<button class="btn-mini" data-cancel="${a.id}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
+            ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
         </div>
-        <pre class="dock-action-log" id="dock-log-${a.id}"></pre>`;
+        <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
       if (cancelBtn) cancelBtn.addEventListener('click', async (e) => {
         e.stopPropagation();
         if (!confirm(tr('dock.cancelConfirm', `Cancel ${a.action} on ${a.cluster}?`,
                         { action: a.action, cluster: a.cluster }))) return;
         try {
-          await fetch(`/api/action/${a.id}`, { method: 'DELETE' });
+          const r = await fetch(`/api/action/${a.id}`, { method: 'DELETE' });
+          // un refus (droits insuffisants pour annuler) doit se voir
+          if (!r.ok) {
+            const d = await r.json().catch(() => ({}));
+            alert(d.error || `HTTP ${r.status}`);
+          }
           poll();
         } catch (err) { alert(err.message); }
       });

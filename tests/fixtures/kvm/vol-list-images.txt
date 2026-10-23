@@ -1,0 +1,15 @@
+ Name                                          Path                                                                  Type   Capacity    Allocation
+----------------------------------------------------------------------------------------------------------------------------------------------------
+ bmcfg                                         /var/lib/libvirt/images/bmcfg                                         dir    0.00 B      0.00 B
+ cloud-images                                  /var/lib/libvirt/images/cloud-images                                  dir    0.00 B      0.00 B
+ hardpipe-baselines                            /var/lib/libvirt/images/hardpipe-baselines                            dir    0.00 B      0.00 B
+ hardpipe-test                                 /var/lib/libvirt/images/hardpipe-test                                 dir    0.00 B      0.00 B
+ harvlab                                       /var/lib/libvirt/images/harvlab                                       dir    0.00 B      0.00 B
+ harvlab2                                      /var/lib/libvirt/images/harvlab2                                      dir    0.00 B      0.00 B
+ mlm-lab                                       /var/lib/libvirt/images/mlm-lab                                       dir    0.00 B      0.00 B
+ sles-16.0-minimal-vm.x86_64-cloud-qu0.qcow2   /var/lib/libvirt/images/sles-16.0-minimal-vm.x86_64-cloud-qu0.qcow2   file   1.31 GiB    301.00 MiB
+ xen-build-guests.qcow2                        /var/lib/libvirt/images/xen-build-guests.qcow2                        file   20.00 GiB   196.00 KiB
+ xen-build.qcow2                               /var/lib/libvirt/images/xen-build.qcow2                               file   40.00 GiB   4.11 GiB
+ xen-sles16-guests.qcow2                       /var/lib/libvirt/images/xen-sles16-guests.qcow2                       file   20.00 GiB   2.07 GiB
+ xen-sles16.qcow2                              /var/lib/libvirt/images/xen-sles16.qcow2                              file   40.00 GiB   3.80 GiB
+

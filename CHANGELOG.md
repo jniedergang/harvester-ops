@@ -4,6 +4,150 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.96.0] - 2026-10-23 - KVM hypervisors: hosts, inventory and lifecycle gestures
+
+### Added
+- **KVM** section in the sidebar, after Shared resources, with four
+  entries. It manages libvirt hosts next to the Harvester clusters, as
+  they are: a KVM host is not turned into a cluster.
+  - **Hosts**: one block per host with CPU, memory total and free,
+    libvirt and QEMU versions, VMs by state and labels. A label filter.
+    An unreachable host is shown with the reason, the others are still
+    read.
+  - **Virtual machines**: every VM of every host in one table, with host,
+    state and text filters, sort on every column and a detail row (vCPU,
+    memory, persistent or transient, autostart, CPU pinning, machine,
+    firmware, disks, cards, displays). A menu per VM offers the six
+    gestures; a gesture the state does not allow is greyed out and says
+    why.
+  - **Storage**: libvirt pools per host (state, capacity, allocation,
+    available) and their volumes.
+  - **Networks**: libvirt networks per host (state, forwarding mode,
+    bridge, addresses and DHCP range).
+- **Declare a host** window: address and port, the host key fingerprints
+  read from the host, an explicit choice of the one to pin (nothing is
+  preselected), user, private key and labels. The connection test is shown
+  check by check: SSH, `virsh`, rights on `qemu:///system`, `qemu-img`, and
+  VNC displays reachable from the network without a password. A host can
+  be tested again and removed from its block.
+- **The host key is pinned.** The console connects with
+  `StrictHostKeyChecking=yes` and the pinned line only. A host whose key
+  changes is refused, never accepted in silence.
+- **Lifecycle gestures**: start, shut down, reboot, force off, suspend and
+  resume. Each one is a tracked action (dock, Activity) that follows the
+  real state of the domain until it is reached: `shut off` for a shutdown,
+  `running` again for a reboot. A shutdown waits 120 s by default (1 to
+  3600 s on request). When the guest does not stop in time, the action
+  fails and offers to force it off. Force off is confirmed in the page. A
+  transient domain that disappears on a shutdown or a force off is a
+  success, said as such.
+- Command line: `bin/harvester-kvm.py` with `host scan|add|test|list|remove`,
+  `inventory [--host] [--details]`, `vm list|show` and
+  `vm start|shutdown|reboot|destroy|suspend|resume --host --name
+  [--timeout]`, `--json` on every command. The console runs this script
+  for every write.
+- API: `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>`, `GET /api/kvm/vms`,
+  `GET /api/kvm/vms/<host>/<domain>`, `POST /api/kvm/hosts/scan`,
+  `POST /api/kvm/hosts` (multipart: `payload` and `key`),
+  `DELETE /api/kvm/hosts/<host>`, `POST /api/kvm/hosts/<host>/test`,
+  `POST /api/kvm/vms/<host>/<domain>/<gesture>`. Writes answer
+  `202 {action_id}` at once.
+- **Cancel** from the dock: a host declaration cancelled while it runs is
+  undone (no declaration, key or pinned line kept) and ends `cancelled`.
+  The script handles SIGTERM and SIGHUP, runs its rollback and exits 3. A
+  cancelled gesture says it may already have reached libvirt.
+
+### Security
+- The Activity tab (running, history, detail window) and the dock escape
+  action labels, clusters, states, step messages and errors. KVM action
+  labels carry raw libvirt VM names, which could otherwise run a script in
+  the page of whoever opened Activity.
+- Cancelling an action needs the role that started it. Any operator can
+  cancel a KVM gesture, but not a host declaration, which needs an admin;
+  an action that names no role still needs an admin, as before.
+
+### Changed
+- Roles: a viewer reads the KVM views. An operator runs the gestures,
+  force off included, and tests a host. An admin reads host keys,
+  declares and removes hosts.
+- A tracked action can now keep the JSON result of its script, shown in
+  the action and in its end event. The command line shown for an action
+  hides `--opt=/path` values.
+- KVM reads: `?fresh=1` is honoured once every 5 s per read, the read of
+  all hosts has a deadline (25 s by default,
+  `HARVESTER_OPS_KVM_READ_DEADLINE`) after which a silent host is shown as
+  `timeout`, and Storage and Networks read each host once
+  (`GET /api/kvm/hosts?declared=1` gives the declarations without asking
+  the hosts). The host name `scan` is reserved. The declaration form is
+  refused above 256 KiB, before it is parsed.
+
+### Fixed
+- Switching tab while a KVM host test or gesture ran could stop the
+  automatic refresh of the new view.
+- Resume is refused from every state that is not paused (crashed, shutting
+  down, blocked), from one table in the script that the page reads.
+- A KVM write no longer empties the shared reads of every cluster, and the
+  host key scan, a read, empties none.
+
+### Internal
+- `bin/lib/kvm_host.py`: `virsh` run on the host over SSH, every remote
+  argument quoted. One SSH connection per host is reused
+  (`ControlMaster`, socket in the state directory). Several `virsh`
+  commands go in one SSH call, each with its own time limit. Pure parsers
+  for the domain XML, `domstats`, pools, volumes and networks. Errors are
+  classified (`unreachable`, `hostkey`, `auth`, `denied`, `notfound`,
+  `timeout`, `failed`).
+- `bin/lib/kvm_decl.py`: host declarations in `kvm.d/<name>.yaml` under the
+  state directory, written as JSON (valid YAML), 0600, with relative
+  paths. The private key is copied to `ssh/<name>_id` and the pinned line
+  to `ssh/<name>_known`. Removing a host deletes these three files only.
+- Prerequisites on a host: libvirt (modular daemons or `libvirtd`), an
+  account in the `libvirt` group (or root), and SSH access by key.
+  `qemu-img` is optional; the test reports it.
+- OpenSSH 9.8 and later penalise connections that do not authenticate
+  (`PerSourcePenalties`), and a host key scan is one. Right after a scan,
+  the host may drop connections for about 15 s. Declaring a host retries
+  its SSH check once after 20 s, and a scan that gets no key says why.
+- Not in this version: graphical console (VNC), snapshots, cloning,
+  creating and editing VMs, pools, volumes and networks, live migration
+  between hosts, host maintenance and monitoring. They are planned for
+  1.97.0 to 1.99.0.
+- Known limit: a reboot cannot prove that the guest restarted. libvirt
+  only sees the domain running before and after. The action says "reboot
+  requested, the VM is running" and its result carries `confirmed: false`.
+
+### Tests
+- API: parsers on outputs captured from a libvirt 12.7.0 host, SSH argument
+  lists with hostile VM names kept as one remote argument, error
+  classification, declarations (paths, rights, removal), the command line
+  (every failure path answers one JSON object, rollback of a failed
+  declaration, lock, state following with retries and deadlines), and the
+  routes (roles, rate limits, tracked actions, refusals before any
+  connection, no path or key in a response).
+- e2e (`tests/e2e/test_kvm_196.py`): sidebar, host blocks with an
+  unreachable host, test and removal, VM table, filters, sort, detail,
+  menu per state, force off confirmation, a failed shutdown offering force
+  off, a hostile VM name escaped, storage, networks and the declaration
+  window. Each key rule was mutated once to see its tests fail.
+- Activity and dock escaping: a source check of every action field put in
+  HTML, and a browser test with a hostile label in the running list, the
+  history, the detail window and the dock. A real `host add` process is
+  stopped by SIGTERM and SIGHUP during its connection test and leaves no
+  file. Fresh read throttling, the read deadline with a slow host, two
+  simultaneous gestures on one VM, the cancel role and the cancel message
+  have their own tests.
+- Real, on a lab host (openSUSE, libvirt 12.7.0): the host declared from
+  the window, its 15 existing domains, 9 pools and 3 networks read and
+  left untouched. On a test domain created for the purpose: start,
+  suspend, resume, reboot, shutdown, force off and start again through the
+  console, each followed to the state seen by `virsh domstate`. The guest
+  ignored the ACPI shutdown and the action offered force off. A transient
+  domain forced off was reported gone, as a success. A second declaration
+  of the same host was added, tested and removed, with its files deleted.
+  The test domains were then deleted. After review: a SLES 16 guest that
+  honours ACPI reached `shut off` 2.4 s after the shutdown request, and a
+  declaration cancelled from the console after it was saved was undone.
+
 ## [1.95.0] - 2026-10-19 - Usage: GPU-hours booked and consumed, waste, quotas
 
 ### Added
