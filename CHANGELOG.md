@@ -62,8 +62,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   action labels, clusters, states, step messages and errors. KVM action
   labels carry raw libvirt VM names, which could otherwise run a script in
   the page of whoever opened Activity.
-- Cancelling an action needs the role that started it. An operator can
-  cancel his own KVM gesture, not a host declaration started by an admin;
+- Cancelling an action needs the role that started it. Any operator can
+  cancel a KVM gesture, but not a host declaration, which needs an admin;
   an action that names no role still needs an admin, as before.
 
 ### Changed

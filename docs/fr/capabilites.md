@@ -2853,7 +2853,7 @@ SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
 [--timeout S]`. `--json` sur chaque commande, `--state-dir` (par défaut
 `HARVESTER_OPS_STATE_DIR`). La console lance ce script pour chaque
 écriture. Codes de sortie : 0 fait, 1 échec, 2 refusé avant l'hôte,
-3 annulé (SIGTERM ou SIGHUP, ce qui était commencé est défait).
+3 annulé (SIGTERM ou SIGHUP ; une déclaration d'hôte est défaite, un geste a pu déjà atteindre libvirt).
 
 **Ce qui est vérifié.** Vérifié en réel sur un hôte de banc (openSUSE,
 libvirt 12.7.0, QEMU 10.2.2) : déclaré depuis la fenêtre, ses 15 domaines

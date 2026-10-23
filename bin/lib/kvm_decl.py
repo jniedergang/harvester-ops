@@ -177,7 +177,8 @@ def load_all(state, warn=None):
         try:
             out.append(load(state, p.stem))
         except (DeclError, OSError) as e:
-            warn(f"host declaration {p.name} ignored: {e}")
+            # Jamais le texte de l'erreur : il porte le chemin du répertoire d'état
+            warn(f"host declaration {p.name} ignored: {type(e).__name__}")
     return out
 
 

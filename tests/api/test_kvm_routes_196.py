@@ -322,7 +322,9 @@ def test_host_add_spawns_the_cli_with_a_private_key_file(client, env):
     cmd = script_cmd()
     assert cmd[1].endswith("bin/harvester-kvm.py") and cmd[2:6] == ["host", "add", "--json", f"--state-dir={env['state']}"]
     key = Path(next(a for a in cmd if a.startswith("--ssh-key=")).split("=", 1)[1])
-    assert key.parent == env["work"] and key.read_bytes() == KEY
+    # La copie va dans ssh/ du répertoire d'état, forcé en 0700 (jamais /tmp)
+    assert key.parent == env["state"] / "ssh" and key.read_bytes() == KEY
+    assert (key.parent.stat().st_mode & 0o777) == 0o700
     assert stat.S_IMODE(key.stat().st_mode) == 0o600
     assert cmd[6:] == ["--name=node3", "--address=172.16.1.13", "--port=22", "--user=ju", f"--ssh-key={key}",
                        f"--fingerprint={FP}", "--label=rack=-b2", "--label=site=cave"]
@@ -701,7 +703,9 @@ def test_host_add_body_too_large_is_refused_before_parsing(client, env, monkeypa
 
 
 def test_host_add_without_a_private_work_dir_is_refused(client, env, monkeypatch):
-    monkeypatch.setattr(wapp, "_capi_work_dir", lambda: None)
+    def no_dir(state):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(wapp._kd, "ensure_ssh_dir", no_dir)
     before = set(Path(tempfile.gettempdir()).glob("kvm-key-*"))
     r = client.post("/api/kvm/hosts", data=add_form(), content_type="multipart/form-data")
     assert r.status_code == 503 and wapp.ACTIONS == {}

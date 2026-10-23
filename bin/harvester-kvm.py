@@ -686,7 +686,7 @@ def read_all(hosts, details=False, deadline=None):
             return {"name": host.name, "address": host.decl.get("address"), "error": err_info(e)}
         except Exception as e:                 # noqa: BLE001 : jamais fatal pour les autres
             return {"name": host.name, "address": host.decl.get("address"),
-                    "error": {"kind": "failed", "message": f"{host.name}: failed: {e}"}}
+                    "error": {"kind": "failed", "message": f"{host.name}: failed: {type(e).__name__}"}}
     if not hosts:
         return []
     pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(hosts)))

@@ -2594,7 +2594,8 @@ SHA256:... [--port P] [--label k=v]`, `host test N`, `host list`,
 [--timeout S]`. `--json` on every command, `--state-dir` (default
 `HARVESTER_OPS_STATE_DIR`). The console runs this script for every write.
 Exit codes: 0 done, 1 failed, 2 refused before the host, 3 cancelled
-(SIGTERM or SIGHUP, what was started is undone).
+(SIGTERM or SIGHUP; a host declaration is undone, a gesture may already have
+reached libvirt).
 
 **What is verified.** Checked for real on a lab host (openSUSE, libvirt
 12.7.0, QEMU 10.2.2): declared from the window, its 15 existing domains,

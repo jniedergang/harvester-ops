@@ -9968,8 +9968,9 @@ def api_kvm_host_add():
         return _kvm_err("the private key file is missing")
     if len(data) > KVM_KEY_MAX:
         return _kvm_err("the SSH key file is too large")
-    wd = _capi_work_dir()
-    if wd is None:                             # jamais la clé dans /tmp
+    try:                                       # jamais la clé dans /tmp : ssh/ est forcé en 0700
+        wd = _kd.ensure_ssh_dir(state)
+    except OSError:
         return _kvm_err("no private work directory for the key: check the console state", 503)
     fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd))   # 0600
     with os.fdopen(fd, "wb") as out:
