@@ -20,7 +20,7 @@ from playwright.sync_api import expect  # noqa: E402
 EVIL = "<img src=x onerror=alert(1)>"
 FP_ED = "SHA256:81Nop5uq4NBaqU/hzSyopOIxSoyytc6DgyLZd5/xXJY"
 FP_RSA = "SHA256:9DcPqiJ5rsafakefingerprintAAAAAAAAAAAAAAAAAA"
-GESTURES = {"destroy": ["shut off"], "reboot": ["paused", "shut off"], "resume": ["idle", "running", "shut off"],
+GESTURES = {"destroy": ["shut off"], "reboot": ["paused", "shut off"], "resume": ["blocked", "crashed", "idle", "in shutdown", "running", "shut off"],
             "shutdown": ["paused", "shut off"],
             "start": ["crashed", "idle", "in shutdown", "paused", "pmsuspended", "running"],
             "suspend": ["paused", "pmsuspended", "shut off"]}
@@ -67,7 +67,7 @@ def ui(context, flask_server):
         "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvm-init','1'); }")
     page = context.new_page()
-    state = {"sent": [], "streams": {}, "role": "admin"}
+    state = {"sent": [], "streams": {}, "role": "admin", "gets": []}
 
     def ok(route, body, status=200):
         return route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
@@ -76,6 +76,12 @@ def ui(context, flask_server):
         path = unquote(req.url.split("/api/kvm/", 1)[1].split("?", 1)[0])
         m = req.method
         if m == "GET":
+            state["gets"].append(req.url.split("/api/kvm/", 1)[1])
+            if path == "hosts" and "declared=1" in req.url:
+                decls = [{k: h[k] for k in ("name", "address", "port", "user", "uri", "labels")} for h in (NODE2, GHOST)]
+                return ok(route, {"hosts": decls, "warnings": [], "role": state["role"], "gestures": GESTURES})
+            if path == "hosts/ghost":
+                return ok(route, GHOST, 502)
             if path == "hosts":
                 return ok(route, {"hosts": [NODE2, GHOST], "warnings": [], "role": state["role"], "gestures": GESTURES})
             if path == "vms":
@@ -303,7 +309,7 @@ def test_hostile_vm_name_is_escaped(ui):
 
 
 def test_storage_and_networks(ui):
-    page, _, _ = ui
+    page, state, _ = ui
     pane = open_tab(page, "kvmstorage")
     block = pane.locator('[data-kvm-block="node2"]')
     expect(block.locator('tr[data-kvm-pool="default"]')).to_contain_text("100.0 GiB")
@@ -317,6 +323,9 @@ def test_storage_and_networks(ui):
     expect(row).to_contain_text("nat")
     expect(row).to_contain_text("virbr0")
     expect(row).to_contain_text("192.168.122.1/24")
+    # une lecture par hôte, jamais l'inventaire complet de tous les hôtes en plus
+    assert "hosts" not in state["gets"] and "hosts?fresh=1" not in state["gets"]
+    assert "hosts?declared=1" in state["gets"] and "hosts/node2" in state["gets"]
 
 
 def test_declare_window_requires_an_explicit_fingerprint(ui):
@@ -357,3 +366,26 @@ def test_declare_window_requires_an_explicit_fingerprint(ui):
     f.locator('[name="address"]').fill("172.16.1.13")
     expect(radios).to_have_count(0)
     assert dialogs == []
+
+
+def test_switching_tab_during_a_host_test_keeps_auto_refresh(ui):
+    """Le test d'un hôte fini APRÈS un changement d'onglet ne touche pas le
+    compteur de la nouvelle vue : à -1, l'actualisation automatique
+    (`!cur.busy`) ne repartait plus jamais."""
+    page, state, _ = ui
+    held = []
+    page.route(re.compile(r".*/api/stream/kvm\d+$"), lambda r, q: held.append(r))
+    pane = open_tab(page, "kvmhosts")
+    pane.locator('[data-kvm-host="node2"] [data-kvm="test"]').click()
+    for _ in range(100):
+        if held:
+            break
+        page.wait_for_timeout(50)
+    assert held and page.evaluate("KVM.busy()") == 1
+    open_tab(page, "kvmvms")
+    assert page.evaluate("KVM.busy()") == 0
+    held.pop().fulfill(status=200, content_type="text/event-stream",
+                       body=sse([{"step_id": "check-ssh", "status": "ok", "message": "connected"}],
+                                output={"ok": True, "checks": []}))
+    page.wait_for_timeout(500)
+    assert page.evaluate("KVM.busy()") == 0

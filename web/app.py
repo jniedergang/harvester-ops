@@ -803,19 +803,46 @@ _READ_SHARE_SKIP_HEADERS = {"content-length", "set-cookie", "content-type"}
 HEAVY_READS = {"api_topology", "api_vms_list", "api_storage_map", "api_network_fabric"}
 
 
-def shared_read(ttl=None, per_user=False, scope=None):
+_FRESH_LAST = {}               # clé -> instant de la dernière lecture forcée
+_FRESH_LOCK = threading.Lock()
+_FRESH_CLOCK = time.monotonic  # point d'injection des tests
+
+
+def _fresh_allowed(key, min_interval):
+    """v1.96.0 : True si `?fresh=1` peut relire maintenant ; False si la même
+    lecture a déjà été forcée il y a moins de `min_interval` s (un clic
+    répété ou dix personnes sur « Actualiser » ne relancent pas dix SSH)."""
+    now = _FRESH_CLOCK()
+    with _FRESH_LOCK:
+        last = _FRESH_LAST.get(key)
+        if last is not None and now - last < min_interval:
+            return False
+        if len(_FRESH_LAST) >= 2048:
+            for k in [k for k, t in _FRESH_LAST.items() if now - t >= min_interval]:
+                del _FRESH_LAST[k]
+        _FRESH_LAST[key] = now
+        return True
+
+
+def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None):
     """Décorateur d'une vue GET qui ne fait que lire. `?fresh=1` passe outre.
     `scope` remplace le cluster en tête de clé pour une vue qui n'en a pas
-    (on l'invalide alors par ce nom)."""
+    (on l'invalide alors par ce nom). `fresh_min` (v1.96.0) : `?fresh=1`
+    relit au plus une fois par `fresh_min` s pour une même clé ; entre-temps
+    la lecture partagée de moins de `fresh_min` s sert."""
     def deco(f):
         @wraps(f)
         def wrapped(*args, **kwargs):
+            fresh = request.args.get("fresh") == "1"
             if (not READ_SHARE_ENABLED or request.method != "GET"
-                    or request.args.get("fresh") == "1"):
+                    or (fresh and not fresh_min)):
                 return f(*args, **kwargs)
             cluster = kwargs.get("cluster")
+            qargs = request.args.items(multi=True)
+            if fresh_min:                      # lecture forcée ou non : même clé
+                qargs = [(k, v) for k, v in qargs if k != "fresh"]
             key = (scope or cluster, request.endpoint,
-                   tuple(sorted(request.args.items(multi=True))),
+                   tuple(sorted(qargs)),
                    tuple(sorted((k, str(v)) for k, v in kwargs.items())),
                    _kubectl_for_cluster(cluster) if cluster else None,
                    current_role(), current_user() if per_user else None)
@@ -839,7 +866,10 @@ def shared_read(ttl=None, per_user=False, scope=None):
                         getattr(g, "cluster_denied", None),
                         list(getattr(g, "cluster_denials", None) or []))
 
-            val = READ_SHARE.get(key, ttl or READ_SHARE_TTL, load,
+            eff_ttl = ttl or READ_SHARE_TTL
+            if fresh:
+                eff_ttl = 0 if _fresh_allowed(key, fresh_min) else max(eff_ttl, fresh_min)
+            val = READ_SHARE.get(key, eff_ttl, load,
                                  keep=lambda v: v[0] == 200)
             if val[0] is None:
                 return val[1]
@@ -858,6 +888,13 @@ def _read_share_invalidate(response):
     """Toute écriture vide les lectures partagées du cluster qu'elle touche
     (de tous les clusters si la route n'en nomme pas)."""
     if request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if request.path.startswith("/api/kvm/"):
+            # v1.96.0 : un hôte KVM n'est pas un cluster ; le relevé des
+            # empreintes ne fait que lire
+            if request.path != "/api/kvm/hosts/scan":
+                READ_SHARE.invalidate(KVM_SCOPE)
+                READ_SHARE.invalidate("_activity")
+            return response
         READ_SHARE.invalidate((request.view_args or {}).get("cluster"))
         READ_SHARE.invalidate("_activity")
     return response
@@ -1071,6 +1108,11 @@ def required_role_for(path, method):
         return "viewer"
     if path.startswith("/api/kvm/"):
         return _kvm_required_role(path, method)
+    # v1.96.0 : annuler une action demande le rôle qu'il a fallu pour la
+    # lancer (contrôlé par api_action_cancel ; admin pour une action qui ne
+    # le dit pas) : un opérateur annule son propre geste sur une VM KVM
+    if method == "DELETE" and path.startswith("/api/action/"):
+        return "operator"
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
         return "admin"
     return "operator"
@@ -1340,6 +1382,12 @@ class ActionRun:
         # v1.47.0 : ce que l'action a produit et que l'interface doit pouvoir
         # désigner à la fin (le nom de l'archive d'un export, par exemple)
         self.result = {}
+        # v1.96.0 : rôle qu'il a fallu pour lancer l'action ; l'annuler en
+        # demande autant (un opérateur n'annule pas l'ajout d'hôte d'un admin)
+        self.required_role = None
+        # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
+        # tout (None : celui des transferts, « transfer undone »)
+        self.cancel_summary = None
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -9618,6 +9666,12 @@ KVM_DOMAIN_MAX = 255
 KVM_KEY_MAX = 64 * 1024
 KVM_GESTURE_TIMEOUT_MAX = 3600
 KVM_SCOPE = "_kvm"             # clé des lectures partagées
+# échéance globale de la lecture de tous les hôtes : un hôte qui n'a pas
+# répondu à temps est rendu {kind: "timeout"}, les autres sont servis
+KVM_READ_DEADLINE = float(os.environ.get("HARVESTER_OPS_KVM_READ_DEADLINE", "25"))
+KVM_FRESH_MIN = 5              # s entre deux `?fresh=1` d'une même lecture
+KVM_ADD_MAX_BODY = 256 * 1024  # corps du formulaire de déclaration (clé + JSON)
+_KVM_GESTURE_LOCK = threading.Lock()   # contrôle « geste en cours » + création, d'un bloc
 
 
 def _load_kvm_cli():
@@ -9681,7 +9735,7 @@ def _kvm_read_all(details=False):
     warnings = []
     decls = _kd.load_all(state, warn=warnings.append)
     hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
-    entries = _kvm_cli.read_all(hosts, details=details) if hosts else []
+    entries = _kvm_cli.read_all(hosts, details=details, deadline=KVM_READ_DEADLINE) if hosts else []
     public = {d["name"]: _kvm_public(d) for d in decls}
     return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
 
@@ -9694,21 +9748,28 @@ def _kvm_unavailable():
 
 @app.route("/api/kvm/hosts")
 @requires_auth
-@shared_read(scope=KVM_SCOPE)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_hosts():
     """Résumé de chaque hôte KVM déclaré (CPU, mémoire, versions, VMs),
-    lus en parallèle ; un hôte injoignable rend son erreur classée."""
+    lus en parallèle ; un hôte injoignable rend son erreur classée.
+    `?declared=1` : les déclarations seules, sans rien demander aux hôtes
+    (les vues Stockage et Réseaux lisent ensuite le détail de chacun)."""
     err = _kvm_unavailable()
     if err:
         return err
-    entries, warnings = _kvm_read_all()
+    if request.args.get("declared") == "1":
+        warnings = []
+        decls = _kd.load_all(_state_dir(), warn=warnings.append)
+        entries = [_kvm_public(d) for d in decls]
+    else:
+        entries, warnings = _kvm_read_all()
     return jsonify({"hosts": entries, "warnings": warnings, "role": current_role(),
                     "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
 
 
 @app.route("/api/kvm/hosts/<host>")
 @requires_auth
-@shared_read(scope=KVM_SCOPE)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_host(host):
     """Inventaire complet d'un hôte : VMs, pools et leurs volumes, réseaux."""
     err = _kvm_unavailable()
@@ -9721,6 +9782,10 @@ def api_kvm_host(host):
         inv = _kh.host_inventory(vh, details=True)
     except _kh.KvmError as e:
         return jsonify(dict(_kvm_public(vh.decl), error={"kind": e.kind, "message": e.message})), 502
+    except Exception as e:                     # noqa: BLE001 : erreur classée, jamais un 500 nu
+        log.warning("KVM: reading %s failed: %s", host, e)
+        return jsonify(dict(_kvm_public(vh.decl), error={
+            "kind": "failed", "message": f"{host}: failed: unexpected error ({type(e).__name__})"})), 502
     _kvm_network_details(vh, inv)
     return jsonify(dict(_kvm_public(vh.decl), **inv))
 
@@ -9753,7 +9818,7 @@ def _kvm_network_details(vh, inv):
 
 @app.route("/api/kvm/vms")
 @requires_auth
-@shared_read(scope=KVM_SCOPE)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_vms():
     """Toutes les VMs de tous les hôtes (triées par nom puis hôte), et l'état
     de lecture de chaque hôte."""
@@ -9776,7 +9841,7 @@ def api_kvm_vms():
 
 @app.route("/api/kvm/vms/<host>/<domain>")
 @requires_auth
-@shared_read(scope=KVM_SCOPE)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_vm(host, domain):
     """Détail d'une VM : vCPU, mémoire, disques, cartes, affichages,
     persistance, démarrage automatique, épinglage CPU, statistiques."""
@@ -9839,6 +9904,10 @@ def _kvm_action(host, label, cmd, cleanup=None):
         if cleanup:
             cleanup()
         return None, err
+    # l'annuler demande le rôle qu'il a fallu pour la lancer ; le script dit
+    # lui-même ce que l'annulation laisse (jamais « transfer undone »)
+    run.required_role = required_role_for(request.path, request.method)
+    run.cancel_summary = "cancelled"
     return run, None
 
 
@@ -9883,6 +9952,11 @@ def api_kvm_host_add():
     err = _kvm_unavailable()
     if err:
         return err
+    # avant toute lecture du formulaire : pas de limite globale (elle
+    # gênerait les ISO et les archives), une limite pour cette route
+    size = request.content_length
+    if size is None or size > KVM_ADD_MAX_BODY:
+        return _kvm_err(f"the request body must be at most {KVM_ADD_MAX_BODY // 1024} KiB", 413)
     state = _state_dir()
     req, err = _kvm_add_request(state)
     if err:
@@ -9895,7 +9969,9 @@ def api_kvm_host_add():
     if len(data) > KVM_KEY_MAX:
         return _kvm_err("the SSH key file is too large")
     wd = _capi_work_dir()
-    fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd) if wd else None)   # 0600
+    if wd is None:                             # jamais la clé dans /tmp
+        return _kvm_err("no private work directory for the key: check the console state", 503)
+    fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd))   # 0600
     with os.fdopen(fd, "wb") as out:
         out.write(data)
     cleanup = lambda: Path(key_path).unlink(missing_ok=True)  # noqa: E731
@@ -9979,8 +10055,9 @@ def api_kvm_vm_gesture(host, domain, gesture):
         return _kvm_err("invalid host name")
     if not _kvm_check_domain(domain):
         return _kvm_err("invalid domain name")
-    if not _kd.decl_path(_state_dir(), host).exists():
-        return _kvm_err(f"host {host} is not declared", 404)
+    _vh, err = _kvm_host(_state_dir(), host)      # hôte déclaré ET déclaration lisible
+    if err:
+        return err
     body = request.get_json(silent=True) or {}
     if not isinstance(body, dict):
         return _kvm_err("a JSON object is expected")
@@ -9988,13 +10065,16 @@ def api_kvm_vm_gesture(host, domain, gesture):
     if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)
                                 or not 1 <= timeout <= KVM_GESTURE_TIMEOUT_MAX):
         return _kvm_err(f"timeout must be a whole number of seconds from 1 to {KVM_GESTURE_TIMEOUT_MAX}")
-    busy = _kvm_vm_busy(host, domain)
-    if busy:
-        return _busy_response(busy)
     cmd = _kvm_base("vm", gesture) + [f"--host={host}", f"--name={domain}"]
     if timeout is not None:
         cmd.append(f"--timeout={timeout}")
-    run, err = _kvm_action(host, f"kvm:vm-{gesture}:{host}/{domain}", cmd)
+    # contrôle et création d'un bloc : deux clics simultanés ne lancent pas
+    # deux gestes sur la même VM
+    with _KVM_GESTURE_LOCK:
+        busy = _kvm_vm_busy(host, domain)
+        if busy:
+            return _busy_response(busy)
+        run, err = _kvm_action(host, f"kvm:vm-{gesture}:{host}/{domain}", cmd)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host, "name": domain, "gesture": gesture}), 202
@@ -10812,6 +10892,11 @@ def api_action_cancel(run_id):
         run = ACTIONS.get(run_id)
     if not run:
         abort(404)
+    need = run.required_role or "admin"
+    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK.get(need, 2):
+        return jsonify({"error": "forbidden", "role": current_role(), "required": need,
+                        "hint": f"cancelling this action needs the '{need}' role, "
+                                f"like starting it"}), 403
     if run.proc and run.proc.poll() is None:
         run.proc.terminate()
         run.status = "cancelled"
@@ -19686,7 +19771,10 @@ def _vm_transfer_runner(run, cmd, capture=False):
             run.status = "done"
         elif rc == 3 or run.status == "cancelled":
             run.status = "cancelled"
-            run.error_summary = "cancelled, transfer undone"
+            if run.cancel_summary is None:
+                run.error_summary = "cancelled, transfer undone"
+            else:                              # l'outil dit lui-même ce qui reste
+                run.error_summary = (last_error or run.cancel_summary)[:300]
         else:
             run.status = "error"
             run.error_summary = (last_error or f"exit {rc}")[:300]

@@ -84,8 +84,9 @@ const KVM = (() => {
    *  (celle du script) ; reprendre ne vaut que pour une VM en pause. */
   function gestureWhy(gestures, g, state) {
     const refused = (gestures && gestures[g]) || [];
+    // la table des refus est celle du script (servie par la console) : pas
+    // de règle à part ici
     if (refused.includes(state)) return tr('kvm.why.state', { state: stateLabel(state) });
-    if (g === 'resume' && !['paused', 'pmsuspended'].includes(state)) return tr('kvm.why.notPaused');
     return '';
   }
 
@@ -186,10 +187,15 @@ const KVM = (() => {
     if (!cur) return;
     const c = cur;
     const q = fresh ? '?fresh=1' : '';
-    const d = await getJson((c.view === 'vms' ? '/api/kvm/vms' : '/api/kvm/hosts') + q);
+    const perHostView = c.view === 'storage' || c.view === 'networks';
+    // Stockage et Réseaux : les déclarations (sans SSH), puis le détail de
+    // chaque hôte, une lecture par hôte et non l'inventaire entier en plus
+    const url = c.view === 'vms' ? `/api/kvm/vms${q}`
+      : perHostView ? '/api/kvm/hosts?declared=1' : `/api/kvm/hosts${q}`;
+    const d = await getJson(url);
     if (c !== cur) return;
     c.data = d;
-    if (c.view === 'storage' || c.view === 'networks') {
+    if (perHostView) {
       render();
       const names = (d.hosts || []).filter((h) => !h.error).map((h) => h.name);
       const got = await Promise.all(names.map((n) => getJson(`/api/kvm/hosts/${enc(n)}${q}`)));
@@ -301,18 +307,21 @@ const KVM = (() => {
     const tile = tileOf(name);
     const msg = tile && tile.querySelector('.kvm-tile-msg');
     if (!msg) return;
-    cur.busy += 1;
+    // la vue de départ : un changement d'onglet pendant le test en crée une
+    // autre, dont le compteur ne doit pas être touché
+    const c = cur;
+    c.busy += 1;
     msg.textContent = tr('kvm.testing');
     try {
       const out = await send('POST', `/api/kvm/hosts/${enc(name)}/test`, {});
       follow(out.action_id, (s) => { if (s.message) msg.textContent = s.message; }, (ok, run) => {
         const o = (run.result && run.result.output) || {};
         msg.innerHTML = `<span class="${ok ? '' : 'res-error'}">${icon(ok ? 'ok' : 'fail')} ${esc(ok ? tr('kvm.testOk') : (o.error || run.error_summary || tr('kvm.testFailed')))}</span>${checksHtml(o.checks)}`;
-        if (cur) cur.busy -= 1;
+        c.busy = Math.max(0, c.busy - 1);
       });
     } catch (e) {
       msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
-      cur.busy -= 1;
+      c.busy = Math.max(0, c.busy - 1);
     }
   }
 
@@ -332,15 +341,17 @@ const KVM = (() => {
     const tile = tileOf(name);
     const msg = tile.querySelector('.kvm-tile-msg');
     tile.querySelectorAll('.kvm-confirm button').forEach((b) => { b.disabled = true; });
+    const c = cur;
     try {
       const out = await send('DELETE', `/api/kvm/hosts/${enc(name)}`);
       follow(out.action_id, (s) => { if (s.message) msg.textContent = s.message; }, (ok, run) => {
         msg.innerHTML = `<span class="${ok ? '' : 'res-error'}">${icon(ok ? 'ok' : 'fail')} ${esc(ok ? tr('kvm.removed', { name }) : (run.error_summary || '?'))}</span>`;
-        if (cur) { cur.busy = Math.max(0, cur.busy - 1); setTimeout(() => load(true), ok ? 900 : 0); }
+        c.busy = Math.max(0, c.busy - 1);
+        if (c === cur) setTimeout(() => load(true), ok ? 900 : 0);
       });
     } catch (e) {
       msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
-      cur.busy = Math.max(0, cur.busy - 1);
+      c.busy = Math.max(0, c.busy - 1);
     }
   }
 
@@ -523,12 +534,13 @@ const KVM = (() => {
   async function gesture(v, g) {
     const fb = cur.host.querySelector('[data-kvm="feedback"]');
     fb.textContent = tr('kvm.sending', { gesture: GESTURE_LABEL[g](), name: v.name });
-    cur.busy += 1;
+    const c = cur;
+    c.busy += 1;
     try {
       const out = await send('POST', `/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/${enc(g)}`, {});
       follow(out.action_id, (s) => { if (s.message && cur) fb.textContent = s.message; }, (ok, run) => {
-        if (!cur) return;
-        cur.busy = Math.max(0, cur.busy - 1);
+        c.busy = Math.max(0, c.busy - 1);
+        if (c !== cur) return;
         const o = (run.result && run.result.output) || {};
         if (ok) {
           fb.innerHTML = `<span>${icon('ok')} ${esc(doneText(v, g, o))}</span>`;
@@ -541,7 +553,7 @@ const KVM = (() => {
         load(true);
       });
     } catch (e) {
-      cur.busy = Math.max(0, cur.busy - 1);
+      c.busy = Math.max(0, c.busy - 1);
       fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
     }
   }
@@ -752,7 +764,9 @@ const KVM = (() => {
     return root;
   }
 
-  return { start, stop, load, openDeclare, gestureWhy };
+  // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
+  // l'actualisation automatique), lu par les tests
+  return { start, stop, load, openDeclare, gestureWhy, busy: () => (cur ? cur.busy : null) };
 })();
 
 if (typeof window !== 'undefined') window.KVM = KVM;

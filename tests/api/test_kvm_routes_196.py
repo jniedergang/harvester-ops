@@ -181,7 +181,7 @@ def test_hosts_list_isolates_an_unreachable_host(client, env):
     assert by["node2"]["libvirt_version"] == "12.7.0" and len(by["node2"]["vms"]) == 2
     # la déclaration publique est jointe, sans chemin
     assert by["node2"]["user"] == "ju" and by["node2"]["port"] == 22 and by["ghost"]["address"] == "172.16.1.250"
-    assert d["role"] == "admin" and d["gestures"]["resume"] == ["idle", "running", "shut off"]
+    assert d["role"] == "admin" and d["gestures"]["resume"] == ["blocked", "crashed", "idle", "in shutdown", "running", "shut off"]
     # lecture parallèle, sans détails, avec le budget de la console
     assert sorted(env["calls"]["inventory"]) == [("ghost", False, wapp.KVM_READ_TIMEOUT),
                                                  ("node2", False, wapp.KVM_READ_TIMEOUT)]
@@ -529,9 +529,249 @@ def test_every_kvm_mutation_is_authenticated_and_rate_limited(route):
 @pytest.mark.parametrize("route", ['"/api/kvm/hosts"', '"/api/kvm/hosts/<host>"', '"/api/kvm/vms"',
                                    '"/api/kvm/vms/<host>/<domain>"'])
 def test_every_kvm_read_is_authenticated_and_shared(route):
-    assert re.search(r'@app\.route\(' + re.escape(route) + r'\)\n@requires_auth\n@shared_read\(scope=KVM_SCOPE\)', SRC), route
+    assert re.search(r'@app\.route\(' + re.escape(route) + r'\)\n@requires_auth\n@shared_read\(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN\)', SRC), route
 
 
 def test_the_gestures_come_from_the_cli_table():
     assert wapp.KVM_GESTURES == tuple(wapp._kvm_cli.GESTURES)
     assert set(wapp.KVM_GESTURES) == {"start", "shutdown", "reboot", "destroy", "suspend", "resume"}
+
+
+# --- corrections après revue (1.96.0) --------------------------------------------------------
+
+def _e2e_gestures():
+    """La copie de la table des refus dans le test Playwright."""
+    import ast
+    src = (ROOT / "tests" / "e2e" / "test_kvm_196.py").read_text()
+    node = next(n for n in ast.parse(src).body if isinstance(n, ast.Assign)
+                and getattr(n.targets[0], "id", None) == "GESTURES")
+    return ast.literal_eval(node.value)
+
+
+def test_the_refusal_table_has_one_source_and_the_e2e_copy_matches():
+    served = {a: sorted(r[1]) for a, r in wapp._kvm_cli.GESTURES.items()}
+    assert _e2e_gestures() == served
+    # reprendre : seulement depuis paused ou pmsuspended (états libvirt connus)
+    for st in ("running", "idle", "shut off", "crashed", "in shutdown", "blocked"):
+        assert st in served["resume"], st
+    assert "paused" not in served["resume"] and "pmsuspended" not in served["resume"]
+    # l'interface n'a plus de règle à elle
+    js = (ROOT / "web" / "static" / "js" / "kvm.js").read_text()
+    body = js[js.index("function gestureWhy"):js.index("// -- requêtes")]
+    assert "resume" not in body
+
+
+@pytest.fixture
+def shared(monkeypatch):
+    """Lectures partagées actives, horloge des relectures forcées injectée."""
+    monkeypatch.setattr(wapp, "READ_SHARE_ENABLED", True)
+    wapp.READ_SHARE.invalidate()
+    wapp._FRESH_LAST.clear()
+    now = [1000.0]
+    monkeypatch.setattr(wapp, "_FRESH_CLOCK", lambda: now[0])
+    yield now
+    wapp.READ_SHARE.invalidate()
+    wapp._FRESH_LAST.clear()
+
+
+@pytest.mark.parametrize("url", ["/api/kvm/hosts", "/api/kvm/vms", "/api/kvm/hosts/node2"])
+def test_fresh_reads_are_throttled_per_key(client, env, shared, url):
+    reads = lambda: len(env["calls"]["inventory"])  # noqa: E731
+    assert client.get(url + "?fresh=1").status_code in (200, 502)
+    first = reads()
+    assert first >= 1
+    # un second « Actualiser » dans les 5 s : la lecture qui vient d'être faite sert
+    client.get(url + "?fresh=1")
+    client.get(url)
+    assert reads() == first
+    shared[0] += 5.1
+    client.get(url + "?fresh=1")
+    assert reads() == 2 * first
+
+
+def test_fresh_reads_of_other_routes_are_not_throttled(monkeypatch, shared):
+    calls = []
+    app2 = wapp.Flask("t")
+
+    @app2.route("/x")
+    @wapp.shared_read(scope="_t")
+    def x():
+        calls.append(1)
+        return "ok"
+    monkeypatch.setattr(wapp, "current_role", lambda: "admin")
+    c = app2.test_client()
+    c.get("/x?fresh=1")
+    c.get("/x?fresh=1")
+    assert len(calls) == 2
+
+
+def test_hosts_declared_only_asks_no_host(client, env):
+    r = client.get("/api/kvm/hosts?declared=1")
+    d = r.get_json()
+    assert r.status_code == 200 and env["calls"]["inventory"] == []
+    assert sorted(h["name"] for h in d["hosts"]) == ["ghost", "node2"]
+    assert all("error" not in h and "vms" not in h and "ssh_key" not in h for h in d["hosts"])
+    assert str(env["state"]) not in r.get_data(as_text=True)
+
+
+def test_a_slow_host_is_cut_at_the_deadline_and_the_others_are_returned(client, env, monkeypatch):
+    release = threading.Event()
+    monkeypatch.setattr(wapp, "KVM_READ_DEADLINE", 0.3)
+    real = kh.host_inventory
+
+    def slow(host, details=False):
+        if host.name == "node2":
+            release.wait(5)
+        return real(host, details)
+    monkeypatch.setattr(kh, "host_inventory", slow)
+    import time as _t
+    t0 = _t.monotonic()
+    try:
+        r = client.get("/api/kvm/hosts")
+        took = _t.monotonic() - t0
+    finally:
+        release.set()
+    by = {h["name"]: h for h in r.get_json()["hosts"]}
+    assert r.status_code == 200 and took < 2
+    assert by["node2"]["error"] == {"kind": "timeout", "message": "node2: timeout: no answer within 0.3s"}
+    assert by["node2"]["address"] == "172.16.1.12" and by["node2"]["user"] == "ju"
+    assert by["ghost"]["error"]["kind"] == "unreachable"
+    r = client.get("/api/kvm/vms")
+    hosts = {h["name"]: h for h in r.get_json()["hosts"]}
+    assert hosts["node2"]["state"] in ("timeout", "ok")
+
+
+def test_the_cli_read_all_without_deadline_waits_for_everyone():
+    host = type("H", (), {"name": "a", "decl": {"address": "x"}})()
+    import time as _t
+
+    def inv(h, details=False):
+        _t.sleep(0.2)
+        return {"name": h.name}
+    saved = kh.host_inventory
+    kh.host_inventory = inv
+    try:
+        assert wapp._kvm_cli.read_all([host]) == [{"name": "a"}]
+        assert wapp._kvm_cli.read_all([host], deadline=0.05)[0]["error"]["kind"] == "timeout"
+    finally:
+        kh.host_inventory = saved
+
+
+def _share_keys():
+    return {k[0] for k in wapp.READ_SHARE._done}
+
+
+def test_scan_invalidates_nothing_and_kvm_writes_only_kvm(client, env, shared, monkeypatch):
+    monkeypatch.setattr(kd, "scan_host_key", lambda a, p, timeout=15: [])
+    for scope in ("harv1", wapp.KVM_SCOPE):
+        wapp.READ_SHARE.get((scope, "x"), 60, lambda: (200, b"", "application/json", [], None, []))
+    assert client.post("/api/kvm/hosts/scan", json={"address": "172.16.1.12"}).status_code == 200
+    assert _share_keys() == {"harv1", wapp.KVM_SCOPE}
+    assert client.post("/api/kvm/vms/node2/web/start", json={}).status_code == 202
+    assert _share_keys() == {"harv1"}
+
+
+def test_reserved_host_name_is_refused(client, env):
+    r = client.post("/api/kvm/hosts", data=add_form(name="scan"), content_type="multipart/form-data")
+    assert r.status_code == 400 and "reserved" in r.get_json()["error"]
+    assert wapp.ACTIONS == {} and list(env["work"].iterdir()) == []
+
+
+def test_host_detail_unexpected_error_is_classified(client, env, monkeypatch):
+    def boom(host, details=False):
+        raise ValueError("parser exploded at /secret/path")
+    monkeypatch.setattr(kh, "host_inventory", boom)
+    r = client.get("/api/kvm/hosts/node2")
+    d = r.get_json()
+    assert r.status_code == 502 and d["error"] == {
+        "kind": "failed", "message": "node2: failed: unexpected error (ValueError)"}
+    assert "/secret" not in r.get_data(as_text=True)
+
+
+def test_host_add_body_too_large_is_refused_before_parsing(client, env, monkeypatch):
+    def never():
+        raise AssertionError("form parsed")
+    monkeypatch.setattr(wapp, "_kvm_add_request", lambda state: never())
+    data = add_form(key=b"x" * (256 * 1024))
+    r = client.post("/api/kvm/hosts", data=data, content_type="multipart/form-data")
+    assert r.status_code == 413 and "256 KiB" in r.get_json()["error"]
+    assert wapp.ACTIONS == {} and list(env["work"].iterdir()) == []
+    # la limite ne vaut que pour cette route
+    assert wapp.app.config.get("MAX_CONTENT_LENGTH") is None
+
+
+def test_host_add_without_a_private_work_dir_is_refused(client, env, monkeypatch):
+    monkeypatch.setattr(wapp, "_capi_work_dir", lambda: None)
+    before = set(Path(tempfile.gettempdir()).glob("kvm-key-*"))
+    r = client.post("/api/kvm/hosts", data=add_form(), content_type="multipart/form-data")
+    assert r.status_code == 503 and wapp.ACTIONS == {}
+    assert set(Path(tempfile.gettempdir()).glob("kvm-key-*")) == before
+
+
+def test_gesture_on_an_unreadable_declaration_is_refused(client, env):
+    (env["state"] / "kvm.d" / "node2.yaml").write_text("{not json")
+    r = client.post("/api/kvm/vms/node2/web/start", json={})
+    assert r.status_code == 500 and wapp.ACTIONS == {}
+
+
+def test_two_simultaneous_gestures_on_one_vm_start_one_action(client, env, monkeypatch):
+    import time as _t
+    real = wapp._cli_action
+
+    def slow(*a, **k):
+        _t.sleep(0.2)                         # fenêtre entre le contrôle et la création
+        return real(*a, **k)
+    monkeypatch.setattr(wapp, "_cli_action", slow)
+    codes, barrier = [], threading.Barrier(2)
+
+    def go(g):
+        barrier.wait()
+        with wapp.app.test_client() as c:
+            codes.append(c.post(f"/api/kvm/vms/node2/web/{g}", json={}).status_code)
+    ts = [_RealThread(target=go, args=(g,)) for g in ("shutdown", "destroy")]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(10)
+    assert sorted(codes) == [202, 409] and len(wapp.ACTIONS) == 1
+
+
+def test_cancel_needs_the_role_that_started_the_action(as_user, env):
+    r = as_user("patronne", "POST", "/api/kvm/hosts", data=add_form(), content_type="multipart/form-data")
+    assert r.status_code == 202, r.get_json()
+    aid = r.get_json()["action_id"]
+    assert wapp.ACTIONS[aid].required_role == "admin"
+    r = as_user("alice", "DELETE", f"/api/action/{aid}")
+    assert r.status_code == 403 and r.get_json()["required"] == "admin"
+    assert not getattr(wapp.ACTIONS[aid], "_cancel", False)
+    assert as_user("patronne", "DELETE", f"/api/action/{aid}").status_code == 200
+    assert wapp.ACTIONS[aid]._cancel is True
+    # un geste lancé par un opérateur, il peut l'annuler
+    r = as_user("alice", "POST", "/api/kvm/vms/node2/web/start", json={})
+    gid = r.get_json()["action_id"]
+    assert wapp.ACTIONS[gid].required_role == "operator"
+    assert as_user("alice", "DELETE", f"/api/action/{gid}").status_code == 200
+
+
+@pytest.mark.parametrize("summary,want", [
+    (None, "cancelled, transfer undone"),       # les autres outils : inchangé
+    ("cancelled", "host add cancelled (SIGTERM): nothing saved"),
+])
+def test_runner_cancel_message_is_the_tool_s_own(summary, want):
+    run = wapp.ActionRun("kvmtest00009", "kvm:host-add:n", "kvm:n", ["harvester-kvm"])
+    run.cancel_summary = summary
+    script = ("import sys,json;sys.stderr.write('STEP_EVENT|cancelled|error|host add cancelled (SIGTERM): nothing saved\\n');"
+              "print(json.dumps({'ok': False, 'kind': 'cancelled'}));sys.exit(3)")
+    wapp._vm_transfer_runner(run, [sys.executable, "-c", script], capture=True)
+    assert run.status == "cancelled" and run.error_summary == want
+
+
+def test_cancel_of_an_action_that_names_no_role_stays_admin(as_user, env):
+    run = wapp.ActionRun("legacy000001", "shutdown", "harv1", ["harvester-shutdown"])
+    wapp.ACTIONS[run.id] = run
+    assert wapp.required_role_for(f"/api/action/{run.id}", "DELETE") == "operator"
+    assert wapp.required_role_for("/api/action", "POST") == "admin"
+    r = as_user("alice", "DELETE", f"/api/action/{run.id}")
+    assert r.status_code == 403 and r.get_json()["required"] == "admin"
+    assert as_user("curieux", "DELETE", f"/api/action/{run.id}").status_code == 403
+    assert as_user("patronne", "DELETE", f"/api/action/{run.id}").status_code == 200
