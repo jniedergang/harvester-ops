@@ -78,7 +78,7 @@ def test_helper_loaded_before_consumers_in_template():
 # No raw EventSource left outside the helper
 # ---------------------------------------------------------------------------
 
-CONSUMERS = ["app.js", "dock.js", "support.js", "terraform.js", "capi.js"]
+CONSUMERS = ["app.js", "dock.js", "support.js", "terraform.js", "capi.js", "kvm.js"]
 
 
 def test_no_raw_eventsource_in_migrated_consumers():

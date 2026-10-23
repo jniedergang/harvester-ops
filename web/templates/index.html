@@ -163,6 +163,33 @@
           </a>
         </div>
       </div>
+      <!-- v1.96.0 : les hyperviseurs KVM (libvirt) déclarés, au même niveau
+           que les clusters : hôtes, leurs VMs, leur stockage, leurs réseaux -->
+      <div class="tab-group" id="tab-group-kvm">
+        <a class="tab tab-group-head" data-group="kvm" href="#kvmhosts" data-i18n-title="tab.kvmTip" title="KVM hypervisors declared in the console: their hosts, VMs, storage pools and networks">
+          <span class="tab-icon" data-icon="node"></span>
+          <span class="sidebar-label" data-i18n="tab.kvm">KVM</span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="kvmhosts" href="#kvmhosts" data-i18n-title="tab.kvmHostsTip" title="The KVM hosts: CPU, memory, versions, VMs by state; declare, test or remove a host">
+            <span class="tab-icon" data-icon="node"></span>
+            <span class="sidebar-label" data-i18n="tab.kvmHosts">Hosts</span>
+          </a>
+          <a class="tab tab-child" data-tab="kvmvms" href="#kvmvms" data-i18n-title="tab.kvmVmsTip" title="Every VM of every KVM host: filter, sort, start, stop, reboot, suspend">
+            <span class="tab-icon" data-icon="vm"></span>
+            <span class="sidebar-label" data-i18n="tab.kvmVms">Virtual machines</span>
+          </a>
+          <a class="tab tab-child" data-tab="kvmstorage" href="#kvmstorage" data-i18n-title="tab.kvmStorageTip" title="The storage pools of every KVM host, with their capacity and volumes">
+            <span class="tab-icon" data-icon="storage"></span>
+            <span class="sidebar-label" data-i18n="tab.kvmStorage">Storage</span>
+          </a>
+          <a class="tab tab-child" data-tab="kvmnetworks" href="#kvmnetworks" data-i18n-title="tab.kvmNetworksTip" title="The libvirt networks of every KVM host">
+            <span class="tab-icon" data-icon="network"></span>
+            <span class="sidebar-label" data-i18n="tab.kvmNetworks">Networks</span>
+          </a>
+        </div>
+      </div>
       <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
            VM Import et VMware migrations portent sur le cluster choisi ;
            Migrations (all clusters) les voit tous. -->
@@ -816,6 +843,28 @@
       <div class="na-host" id="usage-host"></div>
     </section>
 
+    <!-- KVM : v1.96.0, hyperviseurs KVM déclarés (hôtes, VMs, stockage, réseaux) -->
+    <section id="tab-kvmhosts" class="tab-content">
+      <h1 data-i18n="kvm.hosts.title">KVM hosts</h1>
+      <p class="hint" data-i18n="kvm.hosts.hint">The KVM hypervisors declared in the console. The console drives each one with virsh over SSH, pinned to the host key chosen at declaration. A host that cannot be reached shows why, without hiding the others.</p>
+      <div class="na-host" id="kvm-hosts-host"></div>
+    </section>
+    <section id="tab-kvmvms" class="tab-content">
+      <h1 data-i18n="kvm.vms.title">KVM virtual machines</h1>
+      <p class="hint" data-i18n="kvm.vms.hint">Every VM of every KVM host in one list. Filter by host, state or text, sort any column, unfold a row for its details. Gestures follow the real state until it is reached.</p>
+      <div class="na-host" id="kvm-vms-host"></div>
+    </section>
+    <section id="tab-kvmstorage" class="tab-content">
+      <h1 data-i18n="kvm.storage.title">KVM storage</h1>
+      <p class="hint" data-i18n="kvm.storage.hint">The storage pools of every KVM host, with their capacity, allocation and volumes.</p>
+      <div class="na-host" id="kvm-storage-host"></div>
+    </section>
+    <section id="tab-kvmnetworks" class="tab-content">
+      <h1 data-i18n="kvm.networks.title">KVM networks</h1>
+      <p class="hint" data-i18n="kvm.networks.hint">The libvirt networks of every KVM host: state, forwarding mode, bridge and addresses.</p>
+      <div class="na-host" id="kvm-networks-host"></div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>
@@ -1278,6 +1327,7 @@
   <script src="/static/js/gpus.js"></script>
   <script src="/static/js/bookings.js"></script>
   <script src="/static/js/usage.js"></script>
+  <script src="/static/js/kvm.js"></script>
   <script src="/static/js/upgrade.js"></script>
   <script src="/static/js/monlog.js"></script>
   <script src="/static/js/vmimport.js"></script>

@@ -18,6 +18,8 @@ const App = (() => {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
   const TAB_STORAGE = 'harvester_ops_current_tab';
+  // v1.96.0 : onglets du groupe KVM -> vue du module KVM
+  const KVM_TABS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
 
   function setTab(name) {
     // Highlight every `.tab` whose data-tab matches the current name. The
@@ -60,6 +62,9 @@ const App = (() => {
     // v1.95.0 : Shared resources > Usage
     if (name === 'usage') { if (window.Usage) Usage.start($('#usage-host')); }
     else if (window.Usage) Usage.stop();
+    // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
+    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`)); }
+    else if (window.KVM) KVM.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -274,6 +279,8 @@ const App = (() => {
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
     if (active === 'bookings' && window.Bookings) jobs.push(Bookings.load());
     if (active === 'usage' && window.Usage) jobs.push(Usage.load());
+    // KVM ne dépend pas du cluster choisi ; relu comme Activity
+    if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
     if (active === 'overview') {
       const mode = savedOverviewMode();
       if (mode !== 'metrics') {
