@@ -323,7 +323,11 @@ def scan_host_key(address, port=DEFAULT_PORT, runner=subprocess.run, timeout=15)
         m = FINGERPRINT_RE.search(fp.stdout or "")
         if fp.returncode != 0 or not m:
             continue
-        out.append({"type": parts[1], "line": line, "fingerprint": m.group(0)})
+        # champ d'hôte reconstruit : ssh cherche `[adresse]:port` hors du
+        # port 22, quelle que soit la forme rendue par le relevé
+        host_field = address if port == DEFAULT_PORT else f"[{address}]:{port}"
+        out.append({"type": parts[1], "line": f"{host_field} {parts[1]} {parts[2]}",
+                    "fingerprint": m.group(0)})
     if not out:
         raise KvmError("failed", f"{address}: failed: no host key received on port {port}",
                        host=address)

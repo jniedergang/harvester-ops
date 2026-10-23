@@ -305,10 +305,24 @@ def test_scan_host_key_lists_types_lines_and_fingerprints():
     assert [(k["type"], k["fingerprint"]) for k in keys] == [
         ("ssh-ed25519", "SHA256:8gT5OWW2NYNipdMYH7US+nIEmhFuR/oWpsSingGgDJk"),
         ("ecdsa-sha2-nistp256", "SHA256:UueQADEeOOneMBDPJF8Dj56EQZDYwCzt2zh0M7qvZyU")]
-    assert keys[0]["line"] == "10.0.0.21 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"
+    # hors du port 22, ssh cherche `[adresse]:port` dans le fichier épinglé
+    assert keys[0]["line"] == "[10.0.0.21]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"
     assert r.calls[0][0] == ["ssh-keyscan", "-T", "10", "-p", "2222", "--", "10.0.0.21"]
     assert r.calls[0][1]["stdin"] is subprocess.DEVNULL
     assert r.calls[1][0] == ["ssh-keygen", "-l", "-E", "sha256", "-f", "-"]
+
+
+@pytest.mark.parametrize("port,scanned,line", [
+    (22, "10.0.0.21", "10.0.0.21 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"),
+    (2222, "[10.0.0.21]:2222", "[10.0.0.21]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"),
+    (2222, "10.0.0.21", "[10.0.0.21]:2222 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"),
+])
+def test_scan_host_key_pinned_line_form(port, scanned, line):
+    # le relevé réel écrit déjà `[adresse]:port` ; la ligne épinglée ne
+    # dépend pas de lui (commentaire final retiré aussi)
+    keyscan = f"{scanned} ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY trailing-comment\n"
+    keys = kvm_decl.scan_host_key("10.0.0.21", port, runner=ScanRunner(keyscan=keyscan))
+    assert [k["line"] for k in keys] == [line]
 
 
 @pytest.mark.parametrize("runner,address,port,match", [

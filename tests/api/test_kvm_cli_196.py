@@ -30,6 +30,9 @@ import kvm_host as kh  # noqa: E402
 FIX = ROOT / "tests" / "fixtures" / "kvm"
 URI = "qemu:///system"
 PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----\n"
+# repères lus par le faux ssh-keygen -y dans la copie de la clé
+ENCRYPTED_KEY = PRIVATE_KEY.replace("AAAAfake", "AAAAfake-ENCRYPTED")
+BROKEN_KEY = PRIVATE_KEY.replace("AAAAfake", "AAAAfake-BROKEN")
 HOST_KEYS = [("ssh-rsa", "AAAArsa", "SHA256:rsaFingerprint0000000000000000000000000000"),
              ("ssh-ed25519", "AAAAed", "SHA256:edFingerprint00000000000000000000000000000")]
 DENIED = ("error: failed to connect to the hypervisor\nerror: authentication unavailable: "
@@ -96,17 +99,32 @@ class FakeNet:
         self.argvs = []                       # tous les argv lancés
         self.closed = []                      # adresses dont le ControlMaster a été fermé
         self.closed_paths = []                # et le ControlPath utilisé
+        self.key_checks = []                  # contenus vus par ssh-keygen -y
 
     def __call__(self, argv, capture_output=False, text=False, timeout=None, input=None,
                  stdin=None):
         assert capture_output and text and timeout
-        # ssh et ssh-keyscan ne lisent jamais l'entrée de la console
-        assert argv[0] == "ssh-keygen" or stdin is subprocess.DEVNULL
+        # ssh, ssh-keyscan et ssh-keygen -y ne lisent jamais l'entrée de la console
+        assert argv[:2] == ["ssh-keygen", "-l"] or stdin is subprocess.DEVNULL
         self.argvs.append(argv)
         if argv[0] == "ssh-keyscan":
             sim = self.sims.get(argv[-1])
-            out = "".join(f"{argv[-1]} {t} {k}\n" for t, k, _ in sim.keys) if sim else ""
+            # forme réelle du relevé : `[adresse]:port` hors du port 22
+            port = argv[argv.index("-p") + 1]
+            field = argv[-1] if port == "22" else f"[{argv[-1]}]:{port}"
+            out = "".join(f"{field} {t} {k}\n" for t, k, _ in sim.keys) if sim else ""
             return SimpleNamespace(returncode=0, stdout="# banner\n" + out, stderr="")
+        if argv[:2] == ["ssh-keygen", "-y"]:
+            assert argv[2:5] == ["-P", "", "-f"]
+            data = Path(argv[5]).read_text()
+            assert Path(argv[5]).stat().st_mode & 0o077 == 0     # copie privée
+            self.key_checks.append(data)
+            if "ENCRYPTED" in data:
+                return SimpleNamespace(returncode=255, stdout="", stderr=(
+                    f'Load key "{argv[5]}": incorrect passphrase supplied to decrypt private key\n'))
+            if "BROKEN" in data:
+                return SimpleNamespace(returncode=255, stdout="", stderr=f'Load key "{argv[5]}": invalid format\n')
+            return SimpleNamespace(returncode=0, stdout="ssh-ed25519 AAAApublicPART\n", stderr="")
         if argv[0] == "ssh-keygen":
             fp = next((f for sim in self.sims.values() for t, k, f in sim.keys if k in input), None)
             return SimpleNamespace(returncode=0 if fp else 1,
@@ -118,8 +136,11 @@ class FakeNet:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         assert argv[-3] == "--"
         sim = self.sims[argv[-2]]
-        if sim.ssh_fail:
-            return SimpleNamespace(returncode=255, stdout="", stderr=sim.ssh_fail)
+        fail = sim.ssh_fail
+        if isinstance(fail, list):             # échecs rejoués dans l'ordre, None = passe
+            fail = fail.pop(0) if fail else None
+        if fail:
+            return SimpleNamespace(returncode=255, stdout="", stderr=fail)
         rem = shlex.split(argv[-1])
         sim.calls.append(rem)
         if rem[:2] == ["sh", "-c"]:
@@ -203,52 +224,63 @@ def virsh_argv(env, name, *args, address="10.0.0.5"):
 
 # --- gestes de cycle de vie ----------------------------------------------
 
-# geste, états successifs de domstate (le premier = avant), état final, secondes
+# geste, états successifs de domstate (le premier = avant), état final,
+# secondes, commande virsh envoyée
 GESTURE_CASES = [
-    ("start", ["shut off", "running"], "running", 0),
-    ("start", ["crashed", "shut off", "running"], "running", 2),            # libvirt décide
-    ("shutdown", ["running", "running", "in shutdown", "shut off"], "shut off", 4),
-    ("reboot", ["running", "running"], "running", 2),                       # attend un tour d'abord
-    ("reboot", ["running", "shut off", "running"], "running", 4),
-    ("destroy", ["running", "shut off"], "shut off", 0),
-    ("destroy", ["paused", "shut off"], "shut off", 0),
-    ("suspend", ["running", "paused"], "paused", 0),
-    ("resume", ["paused", "running"], "running", 0),
+    ("start", ["shut off", "running"], "running", 0, "start"),
+    ("shutdown", ["running", "running", "in shutdown", "shut off"], "shut off", 4, "shutdown"),
+    ("reboot", ["running", "running"], "running", 2, "reboot"),             # attend un tour d'abord
+    ("reboot", ["running", "shut off", "running"], "running", 4, "reboot"),
+    ("destroy", ["running", "shut off"], "shut off", 0, "destroy"),
+    ("destroy", ["paused", "shut off"], "shut off", 0, "destroy"),
+    ("destroy", ["crashed", "shut off"], "shut off", 0, "destroy"),        # on_crash=preserve
+    ("suspend", ["running", "paused"], "paused", 0, "suspend"),
+    ("resume", ["paused", "running"], "running", 0, "resume"),
+    # suspendue par l'invité (S3) : réveil par dompmwakeup, pas par resume
+    ("resume", ["pmsuspended", "running"], "running", 0, "dompmwakeup"),
 ]
 
 
-@pytest.mark.parametrize("action,states,final,seconds", GESTURE_CASES)
-def test_gesture_follows_the_real_state(env, capsys, action, states, final, seconds):
+@pytest.mark.parametrize("action,states,final,seconds,command", GESTURE_CASES)
+def test_gesture_follows_the_real_state(env, capsys, action, states, final, seconds, command):
     sim = declare(env, virsh={("domstate", "--domain", "web"): [ok(s + "\n\n") for s in states],
-                              (action, "--domain", "web"): ok(f"Domain 'web' {action}\n")})
+                              (command, "--domain", "web"): ok(f"Domain 'web' {action}\n")})
     rc, data, steps = run_json(capsys, "vm", action, "--host", "lab", "--name", "web")
     assert rc == 0
     assert data == {"host": "lab", "name": "web", "action": action, "ok": True,
-                    "from": states[0], "state": final, "elapsed_s": float(seconds)}
+                    "from": states[0], "state": final, "elapsed_s": float(seconds),
+                    "gone": False, "confirmed": action != "reboot"}
     # le geste part une fois, avec l'argv construit par ssh_argv
-    assert sum(1 for a in env.net.argvs if a == virsh_argv(env, "lab", action, "--domain", "web")) == 1
-    assert [c for c in sim.calls if c[5:6] == [action]] == [["env", "LC_ALL=C", "virsh", "-c", URI,
-                                                             action, "--domain", "web"]]
+    assert sum(1 for a in env.net.argvs if a == virsh_argv(env, "lab", command, "--domain", "web")) == 1
+    assert [c[5:] for c in sim.calls if c[5:6] != ["domstate"]] == [[command, "--domain", "web"]]
     assert set(env.clock.sleeps) <= {cli.POLL_INTERVAL}
-    assert ["wait", "done", f"web: {final} after {seconds}s"] in steps
+    done = "web: reboot requested; the domain is running" if action == "reboot" else f"web: {final}"
+    assert ["wait", "done", f"{done} after {seconds}s"] in steps
     # chaque changement d'état est dit
     seen = [s[2] for s in steps if s[:2] == ["wait", "running"]]
     assert seen[-1] == f"web: {final}" and len(seen) == len(set(seen))
 
 
-@pytest.mark.parametrize("action,timeout,stuck,hint", [
-    ("shutdown", 120, "running", "use destroy to force it off"),
-    ("reboot", 120, "shut off", "did not come back to running"),
-    ("start", 30, "shut off", "expected running"),
-    ("suspend", 30, "running", "expected paused"),
+GESTURE_FAIL_KEYS = {"host", "name", "action", "ok", "from", "state", "suggest", "error", "kind"}
+
+
+@pytest.mark.parametrize("action,timeout,stuck,hint,suggest", [
+    ("shutdown", 120, "running", "use destroy to force it off", ["destroy"]),
+    ("reboot", 120, "in shutdown", "use destroy then start to force a restart", ["destroy", "start"]),
+    ("reboot", 120, "shut off", "did not come back to running; use start to boot it", ["start"]),
+    ("start", 30, "shut off", "expected running", []),
+    ("suspend", 30, "running", "expected paused", []),
+    ("destroy", 30, "running", "expected shut off", []),
 ])
-def test_gesture_default_timeouts(env, capsys, action, timeout, stuck, hint):
-    before = "running" if action in ("shutdown", "reboot", "suspend") else "shut off"
+def test_gesture_default_timeouts(env, capsys, action, timeout, stuck, hint, suggest):
+    before = "running" if action in ("shutdown", "reboot", "suspend", "destroy") else "shut off"
     seq = [ok(before)] + [ok(stuck)]
     declare(env, virsh={("domstate", "--domain", "web"): seq, (action, "--domain", "web"): ok()})
     rc, data, steps = run_json(capsys, "vm", action, "--host", "lab", "--name", "web")
     assert rc == 1
+    assert set(data) == GESTURE_FAIL_KEYS
     assert data["ok"] is False and data["kind"] == "timeout" and data["state"] == stuck
+    assert data["suggest"] == suggest and data["from"] == before
     assert hint in data["error"] and f"after {timeout}s" in data["error"]
     assert steps[-1][:2] == ["wait", "error"]
     assert sum(env.clock.sleeps) == timeout and set(env.clock.sleeps) == {2}
@@ -272,6 +304,9 @@ INVALID = [
     ("destroy", "shut off", "already shut off"),
     ("suspend", "paused", "already paused"),
     ("suspend", "shut off", "is shut off"),
+    ("suspend", "pmsuspended", "already suspended by the guest"),
+    ("start", "crashed", "use destroy, then start"),
+    ("start", "pmsuspended", "resume it instead"),
 ]
 
 
@@ -280,6 +315,7 @@ def test_gesture_refuses_invalid_transition_without_calling_libvirt(env, capsys,
     sim = declare(env, virsh={("domstate", "--domain", "web"): ok(state)})
     rc, data, steps = run_json(capsys, "vm", action, "--host", "lab", "--name", "web")
     assert rc == 1 and data["kind"] == "invalid" and why in data["error"]
+    assert set(data) == GESTURE_FAIL_KEYS and data["from"] == state and data["state"] is None
     assert steps[-1][:2] == ["validate", "error"]
     assert [c[5:] for c in sim.calls] == [["domstate", "--domain", "web"]]     # rien d'autre
 
@@ -330,13 +366,118 @@ def test_gesture_hostile_names_stay_one_argument(env, capsys, name):
 
 def test_follow_state_direct():
     states = iter(["running", "in shutdown", "shut off"])
-    host = SimpleNamespace(virsh=lambda *a: next(states) + "\n")
+    host = SimpleNamespace(virsh=lambda *a, **kw: next(states) + "\n")
     clock = Clock()
     assert cli.follow_state(host, "web", {"shut off"}, 120, clock=clock, sleep=clock.sleep) == ("shut off", 4)
     with pytest.raises(cli.StateTimeout) as e:
-        cli.follow_state(SimpleNamespace(virsh=lambda *a: "running"), "web", {"shut off"}, 5,
+        cli.follow_state(SimpleNamespace(virsh=lambda *a, **kw: "running"), "web", {"shut off"}, 5,
                          clock=clock, sleep=clock.sleep)
-    assert e.value.state == "running" and e.value.elapsed == 6
+    # la dernière attente est raccourcie au temps restant : pas de dépassement
+    assert e.value.state == "running" and e.value.elapsed == 5 and clock.sleeps[-3:] == [2, 2, 1]
+
+
+class FlakyHost:
+    """Hôte de suivi : `script` = états ou KvmError rejoués dans l'ordre (le
+    dernier répété). Un appel qui échoue en `timeout` consomme le délai
+    qu'on lui a donné, comme ssh qui attend."""
+
+    def __init__(self, clock, script, timeout=30):
+        self.clock, self.script, self.timeout, self.budgets = clock, list(script), timeout, []
+
+    def virsh(self, *args, timeout=None):
+        assert args[0] == "domstate"
+        self.budgets.append((timeout, self.clock()))
+        item = self.script.pop(0) if len(self.script) > 1 else self.script[0]
+        if isinstance(item, kh.KvmError):
+            if item.kind == "timeout":
+                self.clock.t += timeout
+            raise item
+        return item + "\n"
+
+
+def kerr(kind):
+    return kh.KvmError(kind, f"lab: {kind}: simulated", host="lab")
+
+
+@pytest.mark.parametrize("script,result,warns", [
+    # un trou réseau, puis l'état attendu
+    ([kerr("unreachable"), "shut off"], ("shut off", 2), 1),
+    # deux séries séparées par une lecture réussie : un avertissement chacune
+    ([kerr("unreachable"), kerr("timeout"), "running", kerr("unreachable"), "shut off"], None, 2),
+    ([kerr("timeout"), "shut off"], None, 1),
+])
+def test_follow_state_retries_transient_errors(capsys, script, result, warns):
+    clock = Clock()
+    host = FlakyHost(clock, script)
+    got = cli.follow_state(host, "web", {"shut off"}, 120, clock=clock, sleep=clock.sleep)
+    assert got[0] == "shut off" and (result is None or got == result)
+    err = capsys.readouterr().err
+    assert err.count("STEP_EVENT|wait|warn|web: cannot read the state") == warns
+
+
+@pytest.mark.parametrize("kind", ["denied", "auth", "hostkey", "failed", "notfound"])
+def test_follow_state_other_errors_fail_at_once(kind):
+    clock = Clock()
+    host = FlakyHost(clock, [kerr(kind), "shut off"])
+    with pytest.raises(kh.KvmError) as e:
+        cli.follow_state(host, "web", {"shut off"}, 120, clock=clock, sleep=clock.sleep)
+    assert e.value.kind == kind and len(host.budgets) == 1 and clock.sleeps == []
+
+
+@pytest.mark.parametrize("kind,timeout", [("timeout", 120), ("timeout", 10), ("unreachable", 7)])
+def test_follow_state_respects_the_deadline(kind, timeout):
+    clock = Clock()
+    start = clock()
+    host = FlakyHost(clock, [kerr(kind)])
+    with pytest.raises(kh.KvmError) as e:
+        cli.follow_state(host, "web", {"shut off"}, timeout, clock=clock, sleep=clock.sleep)
+    assert e.value.kind == kind
+    # jamais plus que l'échéance, au minimum d'un appel près
+    assert clock() - start <= timeout + cli.MIN_CALL_TIMEOUT
+    for budget, at in host.budgets:
+        # chaque appel reçoit au plus le temps restant (minimum MIN_CALL_TIMEOUT)
+        assert budget <= max(cli.MIN_CALL_TIMEOUT, start + timeout - at + 1)
+        assert budget <= host.timeout
+    assert all(s <= cli.POLL_INTERVAL for s in clock.sleeps)
+
+
+def test_gesture_survives_a_polling_hiccup(env, capsys):
+    declare(env, virsh={("domstate", "--domain", "web"): [
+        ok("running"), (255, "", UNREACHABLE), ok("shut off")],
+        ("shutdown", "--domain", "web"): ok()})
+    # le faux réseau rend 255 comme un ssh qui n'aboutit pas : classé unreachable
+    rc, data, steps = run_json(capsys, "vm", "shutdown", "--host", "lab", "--name", "web")
+    assert rc == 0 and data["state"] == "shut off"
+    assert [s[:2] for s in steps].count(["wait", "warn"]) == 1
+
+
+@pytest.mark.parametrize("action", ["destroy", "shutdown"])
+def test_gesture_transient_domain_gone_is_success(env, capsys, action):
+    gone = (1, "", "error: failed to get domain 'web'\n")
+    declare(env, virsh={("domstate", "--domain", "web"): [ok("running"), gone],
+                        (action, "--domain", "web"): ok()})
+    rc, data, steps = run_json(capsys, "vm", action, "--host", "lab", "--name", "web")
+    assert rc == 0
+    assert data == {"host": "lab", "name": "web", "action": action, "ok": True, "from": "running",
+                    "state": None, "elapsed_s": 0.0, "gone": True, "confirmed": True}
+    assert steps[-1][:2] == ["wait", "done"] and "no longer exists" in steps[-1][2]
+
+
+@pytest.mark.parametrize("action", ["suspend", "start", "reboot", "resume"])
+def test_gesture_domain_vanishing_otherwise_is_a_failure(env, capsys, action):
+    before = {"start": "shut off", "resume": "paused"}.get(action, "running")
+    declare(env, virsh={("domstate", "--domain", "web"): [ok(before), (1, "", "error: failed to get domain 'web'\n")],
+                        (action, "--domain", "web"): ok()})
+    rc, data, steps = run_json(capsys, "vm", action, "--host", "lab", "--name", "web")
+    assert rc == 1 and data["kind"] == "notfound" and "not confirmed" in data["error"]
+
+
+def test_reboot_success_does_not_claim_the_guest_restarted(env, capsys):
+    declare(env, virsh={("domstate", "--domain", "web"): [ok("running")], ("reboot", "--domain", "web"): ok()})
+    rc, out, err, steps = run(capsys, "vm", "reboot", "--host", "lab", "--name", "web")
+    assert rc == 0 and out.strip() == "web: reboot requested; the domain is running"
+    rc, data, _ = run_json(capsys, "vm", "reboot", "--host", "lab", "--name", "web")
+    assert data["confirmed"] is False and data["ok"] is True
 
 
 # --- host scan / add -----------------------------------------------------
@@ -382,8 +523,9 @@ def add_argv(env, fingerprint=HOST_KEYS[1][2], name="lab", *extra):
 
 
 def state_files(env):
-    return sorted(str(p.relative_to(env.state)) for p in env.state.rglob("*") if p.is_file()) \
-        if env.state.exists() else []
+    # le fichier de verrou reste (vide) : ce n'est pas une donnée d'hôte
+    return sorted(str(p.relative_to(env.state)) for p in env.state.rglob("*")
+                  if p.is_file() and p.name != ".lock") if env.state.exists() else []
 
 
 def test_host_add_pins_only_the_matching_key_and_tests(env, capsys):
@@ -429,12 +571,133 @@ def test_host_add_failed_test_rolls_back_unless_asked(env, capsys, keep):
     assert state_files(env) == (["kvm.d/lab.yaml", "ssh/lab_id", "ssh/lab_known"] if keep else [])
 
 
-def test_host_add_unexpected_error_during_test_rolls_back(env, capsys, monkeypatch):
+def boom(*a, **kw):
+    raise ZeroDivisionError("/secret/path/inside")
+
+
+@pytest.mark.parametrize("target", ["run_checks", "close_master"])
+@pytest.mark.parametrize("keep", [False, True])
+def test_host_add_unexpected_error_rolls_back(env, capsys, monkeypatch, target, keep):
     env.net.sims["10.0.0.5"] = Sim()
-    monkeypatch.setattr(cli, "run_checks", lambda host: 1 / 0)
-    with pytest.raises(ZeroDivisionError):
-        cli.main(add_argv(env))
+    if target == "close_master":
+        # la première fermeture (avant le test) échoue ; celle du retrait passe
+        real, calls = cli.close_master, []
+
+        def flaky(decl, state):
+            calls.append(1)
+            if len(calls) == 1:
+                boom()
+            return real(decl, state)
+        monkeypatch.setattr(cli, "close_master", flaky)
+    else:
+        monkeypatch.setattr(cli, target, boom)
+    rc, data, steps = run_json(capsys, *add_argv(env), *(["--keep-on-failure"] if keep else []))
+    assert rc == 1
+    # erreur imprévue : message générique, ni trace ni chemin
+    assert data == {"ok": False, "kind": "failed", "error": "unexpected internal error (ZeroDivisionError)"}
+    assert state_files(env) == (["kvm.d/lab.yaml", "ssh/lab_id", "ssh/lab_known"] if keep else [])
+    assert steps[-1][:2] == ["internal", "error"]
+
+
+def test_host_add_rollback_closes_the_master(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim(virsh={("version",): (1, "", DENIED)})
+    rc, data, _ = run_json(capsys, *add_argv(env))
+    assert rc == 1 and data["kept"] is False
+    assert data["error"].startswith("connection test failed at uri:") and data["kind"] == "denied"
+    # avant le test, puis au retrait : même socket, celui de la déclaration
+    assert env.net.closed == ["10.0.0.5", "10.0.0.5"]
+    assert len(set(env.net.closed_paths)) == 1 and "cm-lab-" in env.net.closed_paths[0]
+
+
+@pytest.mark.parametrize("err,reason", [
+    (PermissionError(13, "Permission denied", "/tmp/x/state/ssh/lab_id"), "EACCES"),
+    (OSError(28, "No space left on device", "/tmp/x/state/kvm.d/lab.yaml"), "ENOSPC"),
+    (kvm_decl.DeclError("path /tmp/x/state escapes"), "invalid data"),
+])
+def test_host_add_save_error_shows_no_path(env, capsys, monkeypatch, err, reason):
+    env.net.sims["10.0.0.5"] = Sim()
+
+    def failing(state, decl):
+        raise err
+    monkeypatch.setattr(cli.kvm_decl, "write", failing)
+    rc, out, errout, steps = run(capsys, *add_argv(env), "--json")
+    data = json.loads(out)
+    assert rc == 1 and data == {"ok": False, "kind": "failed",
+                                "error": f"cannot save the host declaration ({reason})"}
+    assert "/tmp/x" not in out + errout and str(env.state) not in out + errout
+    assert steps[-1] == ["save", "error", f"cannot save the host declaration ({reason})"]
     assert state_files(env) == []
+
+
+def test_host_add_pins_the_bracketed_line_on_another_port(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, data, _ = run_json(capsys, *add_argv(env), "--port=2222")
+    assert rc == 0 and data["host"]["port"] == 2222
+    assert (env.state / "ssh/lab_known").read_text() == "[10.0.0.5]:2222 ssh-ed25519 AAAAed\n"
+
+
+@pytest.mark.parametrize("key,rc,kind,msg", [
+    (ENCRYPTED_KEY, 2, "auth", "the key is protected by a passphrase; provide an unencrypted key"),
+    (BROKEN_KEY, 2, "usage", "the SSH key file is not a valid private key"),
+])
+def test_host_add_checks_the_key_before_the_network(env, capsys, key, rc, kind, msg):
+    env.net.sims["10.0.0.5"] = Sim()
+    path = env.tmp / "upload.key"
+    path.write_text(key)
+    path.chmod(0o644)                          # ssh-keygen lit une copie 0600
+    code, out, err, steps = run(capsys, *add_argv(env), "--json")
+    data = json.loads(out)
+    assert code == rc and data["kind"] == kind and data["error"].startswith(msg)
+    # seul ssh-keygen -y a tourné, sur une copie supprimée ensuite
+    assert [a[:2] for a in env.net.argvs] == [["ssh-keygen", "-y"]]
+    assert not Path(env.net.argvs[0][5]).exists() and env.net.key_checks == [key]
+    assert "AAAAfake" not in out + err and str(env.tmp) not in out + err and state_files(env) == []
+
+
+def test_host_add_never_shows_the_key(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, out, err, _ = run(capsys, *add_argv(env), "--json")
+    assert rc == 0 and env.net.argvs[0][:2] == ["ssh-keygen", "-y"]
+    assert "AAAAfake" not in out + err and "AAAApublicPART" not in out + err
+
+
+@pytest.mark.parametrize("exc,kind", [
+    (subprocess.TimeoutExpired("ssh-keygen", 10), "timeout"),
+    (FileNotFoundError(2, "No such file or directory", "ssh-keygen"), "failed"),
+])
+def test_host_add_key_check_cannot_run(env, capsys, monkeypatch, exc, kind):
+    def runner(argv, **kw):
+        raise exc
+    monkeypatch.setattr(cli, "RUNNER", runner)
+    rc, data, _ = run_json(capsys, *add_argv(env))
+    assert rc == 1 and data["kind"] == kind and state_files(env) == []
+
+
+def test_host_add_and_remove_take_the_lock(env, capsys):
+    import fcntl
+    import os
+    env.net.sims["10.0.0.5"] = Sim()
+    d = kvm_decl.decl_dir(env.state)
+    d.mkdir(parents=True, mode=0o700)
+    fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        rc, data, _ = run_json(capsys, *add_argv(env))
+        assert rc == 2 and data["kind"] == "busy" and "in progress" in data["error"]
+        assert env.net.sims["10.0.0.5"].calls == [] and state_files(env) == []
+    finally:
+        os.close(fd)
+    assert run(capsys, *add_argv(env))[0] == 0
+    fd = os.open(d / ".lock", os.O_RDWR)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        rc, data, _ = run_json(capsys, "host", "remove", "lab")
+        assert rc == 2 and data["kind"] == "busy" and (env.state / "ssh/lab_id").exists()
+    finally:
+        os.close(fd)
+    assert run(capsys, "host", "remove", "lab")[0] == 0
+    # le verrou n'est pas pris pour une déclaration (glob *.yaml)
+    assert run_json(capsys, "host", "list")[1]["warnings"] == []
 
 
 @pytest.mark.parametrize("opt,value,msg", [
@@ -484,6 +747,12 @@ def running(*names):
     return ok("".join(n + "\n" for n in names) + "\n")
 
 
+BASE_CHECK = {"check", "status", "message", "kind"}
+CHECK_KEYS = {"ssh": BASE_CHECK, "virsh": BASE_CHECK | {"version"},
+              "uri": BASE_CHECK | {"libvirt", "qemu"}, "qemu-img": BASE_CHECK,
+              "vnc": BASE_CHECK | {"domains", "exposed"}}
+
+
 @pytest.mark.parametrize("sim_kw,rc,expect", [
     ({"virsh": {("list", "--name"): running()}}, 0,
      {"ssh": "ok", "virsh": "ok", "uri": "ok", "qemu-img": "ok", "vnc": "ok"}),
@@ -513,8 +782,11 @@ def test_host_test_one_result_per_check(env, capsys, sim_kw, rc, expect):
     assert code == rc and data["ok"] is (rc == 0) and data["host"] == "lab"
     assert {c["check"]: c["status"] for c in data["checks"]} == expect
     assert [c["check"] for c in data["checks"]] == list(cli.CHECK_IDS)
+    assert set(data) == {"host", "ok", "error", "kind", "checks"}
+    assert (data["error"] is None) is (rc == 0) and (data["kind"] is None) is (rc == 0)
     for c in data["checks"]:
-        assert set(c) >= {"check", "status", "message"}
+        # chaque point a toujours les mêmes clés, quel que soit son statut
+        assert set(c) == CHECK_KEYS[c["check"]]
         assert [f"check-{c['check']}", c["status"], " ".join(c["message"].split())] in steps
 
 
@@ -529,6 +801,47 @@ def test_host_test_vnc_warning_names_the_domain_and_hides_the_password(env, caps
     assert vnc["domains"] == [{"domain": "open", "type": "vnc", "listen": "0.0.0.0", "port": 5900, "password": False},
                               {"domain": "safe", "type": "vnc", "listen": "0.0.0.0", "port": 5901, "password": True}]
     assert "s3cret" not in out + err
+
+
+def vnc_xml_sub(name, listen_el):
+    return (f"<domain type='kvm'><name>{name}</name><devices><graphics type='vnc' port='5900'>"
+            f"{listen_el}</graphics></devices></domain>")
+
+
+@pytest.mark.parametrize("xml,exposed", [
+    (vnc_xml("d", "127.0.0.1"), False),
+    (vnc_xml("d", "127.0.1.1"), False),                   # 127.0.0.0/8
+    (vnc_xml("d", "::1"), False),
+    (vnc_xml("d", "[::1]"), False),
+    (vnc_xml("d", "localhost"), False),
+    (vnc_xml_sub("d", "<listen type='socket' socket='/run/libvirt/qemu/d.sock'/>"), False),
+    (vnc_xml_sub("d", "<listen type='none'/>"), False),
+    (vnc_xml("d", "0.0.0.0"), True),
+    (vnc_xml("d", "::"), True),
+    (vnc_xml("d", "172.16.1.12"), True),                  # adresse du LAN : exposé
+    (vnc_xml("d", "fd00::12"), True),
+    (vnc_xml("d", "node2.home.lo"), True),                # nom d'hôte : exposé
+    (vnc_xml("d", "172.16.1.12", "s3cret"), False),       # mot de passe : pas d'alerte
+])
+def test_vnc_check_flags_any_non_loopback_listen(env, capsys, xml, exposed):
+    declare(env, sim=Sim(virsh={("list", "--name"): running("d"),
+                                ("dumpxml", "--security-info", "--domain", "d"): ok(xml)}))
+    rc, data, _ = run_json(capsys, "host", "test", "lab")
+    vnc = data["checks"][-1]
+    assert rc == 0 and vnc["exposed"] == int(exposed)
+    assert vnc["status"] == ("warn" if exposed else "ok")
+    assert ("security:" in vnc["message"]) is exposed and "s3cret" not in json.dumps(data)
+
+
+@pytest.mark.parametrize("sim_kw,status", [
+    ({"virsh": {("list", "--name"): running()}}, "ok"),
+    ({"virsh": {("list", "--name"): (1, "", "error: unexpected\n")}}, "warn"),
+    ({"ssh_fail": UNREACHABLE}, "skipped"),
+])
+def test_vnc_check_always_has_its_keys(env, capsys, sim_kw, status):
+    declare(env, sim=Sim(**sim_kw))
+    vnc = run_json(capsys, "host", "test", "lab")[1]["checks"][-1]
+    assert vnc["status"] == status and vnc["exposed"] == 0 and vnc["domains"] == []
 
 
 def test_host_test_uses_ssh_argv(env, capsys):
@@ -642,3 +955,101 @@ def test_vm_show(env, capsys):
     assert {"disks", "nics", "graphics", "cpu_pinned", "persistent", "autostart", "stats"} <= set(data)
     rc, out, err, steps = run(capsys, "vm", "show", "--host", "lab", "--name", "ghost")
     assert rc == 1 and steps[-1][:2] == ["show", "error"]
+
+
+# --- protocole : STEP_EVENT, JSON à chaque sortie, options -------------------
+
+def test_step_event_message_with_pipe_and_newline(capsys):
+    cli.step("wait", "warn", "a|b\nc | d")
+    err = capsys.readouterr().err
+    assert err == "STEP_EVENT|wait|warn|a|b c | d\n"
+    # découpe du consommateur : maxsplit=3, le message garde ses `|`
+    assert err.rstrip("\n").split("|", 3) == ["STEP_EVENT", "wait", "warn", "a|b c | d"]
+
+
+@pytest.mark.parametrize("argv,rc,kind,msg", [
+    (["vm", "start", "--host", "lab"], 2, "usage", "--name"),                     # option requise
+    (["vm", "start", "--host", "lab", "--name", "web", "--timeout", "x"], 2, "usage", "invalid int"),
+    (["vm", "frobnicate", "--host", "lab", "--name", "web"], 2, "usage", "invalid choice"),
+    (["vm", "start", "--host", "lab", "--name", "web", "--bogus"], 2, "usage", "unrecognized"),
+    (["vm", "start", "--host", "nope", "--name", "web"], 2, "usage", "not declared"),
+    (["host", "test", "nope"], 2, "usage", "not declared"),
+    (["host", "remove", "nope"], 2, "usage", "not declared"),
+    (["inventory", "--host", "nope"], 2, "usage", "not declared"),
+    (["vm", "show", "--host", "lab", "--name", "ghost"], 1, "notfound", "ghost"),
+    (["host", "scan", "--address", "10.0.0.77"], 1, "failed", "no host key received on port 22; "
+     "if the host runs OpenSSH 9.8 or later, repeated scans are penalised"),
+    (["host", "scan", "--address=-x"], 2, "usage", "invalid address"),
+])
+def test_json_on_every_failure_path(env, capsys, argv, rc, kind, msg):
+    declare(env, virsh={("dumpxml", "--domain", "ghost"): (1, "", "error: failed to get domain 'ghost'\n")})
+    code, out, err, steps = run(capsys, *argv, "--json")
+    data = json.loads(out)                     # exactement un objet JSON
+    assert code == rc and data["ok"] is False and data["kind"] == kind and msg in data["error"]
+    assert set(data) == {"ok", "error", "kind"}
+    assert "Traceback" not in err
+
+
+def test_json_on_fingerprint_mismatch(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, data, _ = run_json(capsys, *add_argv(env, "SHA256:someoneElse000000000000000000000000000000"))
+    assert rc == 1 and data["kind"] == "hostkey" and "matches none" in data["error"]
+
+
+def test_json_on_unexpected_error_hides_details(env, capsys, monkeypatch):
+    declare(env)
+    monkeypatch.setattr(cli, "read_all", boom)
+    rc, out, err, _ = run(capsys, "inventory", "--json")
+    assert rc == 1 and json.loads(out) == {"ok": False, "kind": "failed",
+                                           "error": "unexpected internal error (ZeroDivisionError)"}
+    assert "/secret/path" not in out + err and "Traceback" not in err
+
+
+def test_usage_error_without_json_writes_nothing_on_stdout(env, capsys):
+    rc, out, err, steps = run(capsys, "vm", "start", "--host", "lab")
+    assert rc == 2 and out == "" and "--name" in err and steps[-1][:2] == ["validate", "error"]
+
+
+@pytest.mark.parametrize("opt,value,msg", [
+    # forme --option=valeur : la valeur arrive à NOTRE contrôle, pas à argparse
+    ("--label", "-x=y", "label"),
+    ("--uri", "-qemu:///system", "uri must be"),
+    ("--name", "-lab", "name"),
+    ("--user", "-root", "user"),
+    ("--fingerprint", "-SHA256:x", "invalid fingerprint"),
+])
+def test_dash_values_reach_validation(env, capsys, opt, value, msg):
+    env.net.sims["10.0.0.5"] = Sim()
+    argv = [a for a in add_argv(env) if not a.startswith(opt + "=")] + [f"{opt}={value}"]
+    rc, data, _ = run_json(capsys, *argv)
+    assert rc == 2 and msg in data["error"] and "expected one argument" not in data["error"]
+    assert env.net.argvs == []
+
+
+def test_dash_label_value_is_kept(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, data, _ = run_json(capsys, *add_argv(env), "--label=site=-paris", "--uri=qemu:///system")
+    assert rc == 0 and data["host"]["labels"] == {"site": "-paris"}
+
+
+PENALTY = ("kex_exchange_identification: read: Connection reset by peer\n"
+           "Connection reset by 10.0.0.5 port 22\n")
+
+
+@pytest.mark.parametrize("fails,rc,sleeps", [
+    ([PENALTY], 0, [cli.SSH_RETRY_AFTER_SCAN]),                 # pénalité levée : ajouté
+    ([PENALTY, PENALTY], 1, [cli.SSH_RETRY_AFTER_SCAN]),        # une seule nouvelle tentative
+    (["ju@10.0.0.5: Permission denied (publickey).\n"], 1, []),  # pas d'attente sur un refus de clé
+])
+def test_host_add_retries_ssh_once_after_the_scan(env, capsys, fails, rc, sleeps):
+    # OpenSSH >= 9.8 pénalise les connexions du relevé (PerSourcePenalties)
+    env.net.sims["10.0.0.5"] = Sim(ssh_fail=list(fails))
+    code, data, steps = run_json(capsys, *add_argv(env))
+    assert code == rc and env.clock.sleeps == sleeps
+    assert (["check-ssh", "warn"] in [s[:2] for s in steps]) is bool(sleeps)
+
+
+def test_host_test_does_not_wait_on_unreachable(env, capsys):
+    declare(env, sim=Sim(ssh_fail=[PENALTY]))
+    rc, data, _ = run_json(capsys, "host", "test", "lab")
+    assert rc == 1 and data["kind"] == "unreachable" and env.clock.sleeps == []
