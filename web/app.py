@@ -1069,7 +1069,22 @@ def required_role_for(path, method):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
         return "viewer"
+    if path.startswith("/api/kvm/"):
+        return _kvm_required_role(path, method)
     if path.startswith(ADMIN_ONLY_PREFIXES) or path.endswith(ADMIN_ONLY_SUFFIXES):
+        return "admin"
+    return "operator"
+
+
+# v1.96.0 : hôtes KVM. Déclarer un hôte (et en relever les empreintes, ce qui
+# ouvre une connexion vers une adresse choisie) ou le retirer = admin. Tester
+# un hôte et les gestes sur une VM = opérateur : l'arrêt forcé d'une VM KVM
+# (`.../destroy`) n'est pas le `/destroy` réservé des espaces Terraform.
+KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
+
+
+def _kvm_required_role(path, method):
+    if path in KVM_ADMIN_PATHS or (method == "DELETE" and path.startswith("/api/kvm/hosts/")):
         return "admin"
     return "operator"
 
@@ -9576,6 +9591,416 @@ def api_usage_quota_delete():
 
 
 # -----------------------------------------------------------------------------
+# v1.96.0 : hyperviseurs KVM (libvirt), voir docs/design/2026-10-23-hyperviseurs-kvm.md
+#
+# Les lectures passent par bin/lib/kvm_host.py et kvm_decl.py (virsh lancé sur
+# l'hôte par SSH, déclarations dans le répertoire d'état). Toute écriture
+# (déclarer, retirer, tester un hôte, gestes sur une VM) lance
+# bin/harvester-kvm.py en action suivie : la console ne refait aucun geste.
+# Les valeurs partent en `--option=valeur` (un nom de VM qui commence par un
+# tiret reste une valeur). Un hôte injoignable rend son erreur classée (kind)
+# sans faire échouer les autres. Ni chemin de clé ni secret dans une réponse.
+#
+# Les paramètres d'URL s'appellent `host` et `domain`, pas `name` ni `vm` :
+# ceux-là sont contrôlés comme des noms Kubernetes par
+# _validate_k8s_path_params, et un nom libvirt (majuscules, espaces...) y
+# serait refusé. Ils sont contrôlés ici : NAME_RE pour un hôte, et pour une
+# VM tout nom libvirt sauf vide, trop long ou à caractères de contrôle.
+# -----------------------------------------------------------------------------
+import importlib.util as _ilu  # noqa: E402
+import kvm_decl as _kd  # noqa: E402
+import kvm_host as _kh  # noqa: E402
+
+KVM_SCRIPT = "harvester-kvm.py"
+KVM_READ_TIMEOUT = 20          # s, budget SSH d'une lecture (ConnectTimeout=10 compris)
+KVM_SCAN_TIMEOUT = 15
+KVM_DOMAIN_MAX = 255
+KVM_KEY_MAX = 64 * 1024
+KVM_GESTURE_TIMEOUT_MAX = 3600
+KVM_SCOPE = "_kvm"             # clé des lectures partagées
+
+
+def _load_kvm_cli():
+    """Le script lui-même, chargé comme module : sa table des gestes, son
+    contrôle de nom de VM et sa lecture parallèle servent tels quels."""
+    path = BIN_DIR / KVM_SCRIPT
+    saved = list(sys.path)              # le script se met bin/lib en tête : pas ici
+    try:
+        spec = _ilu.spec_from_file_location("harvester_kvm_cli", path)
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except (OSError, ImportError, AttributeError) as e:      # script absent du livrable
+        log.warning("KVM: %s not loadable (%s)", KVM_SCRIPT, e)
+        return None
+    finally:
+        sys.path[:] = saved
+
+
+_kvm_cli = _load_kvm_cli()
+KVM_GESTURES = tuple(_kvm_cli.GESTURES) if _kvm_cli else ()
+
+
+def _kvm_err(msg, status=400, **extra):
+    return jsonify(dict({"error": msg}, **extra)), status
+
+
+def _kvm_check_host(name):
+    return isinstance(name, str) and bool(_kd.NAME_RE.match(name))
+
+
+def _kvm_check_domain(name):
+    """Un nom libvirt : tout sauf vide, trop long ou à caractères de contrôle."""
+    return (isinstance(name, str) and 0 < len(name) <= KVM_DOMAIN_MAX
+            and not any(ord(c) < 32 or ord(c) == 127 for c in name))
+
+
+def _kvm_public(decl):
+    """La déclaration sans chemin de clé ni d'empreinte."""
+    d = _kd.normalize(decl)
+    return {k: d.get(k) for k in ("name", "address", "port", "user", "uri", "labels")}
+
+
+def _kvm_host(state, name):
+    """(VirshHost, None) d'un hôte déclaré, ou (None, réponse d'erreur)."""
+    if not _kvm_check_host(name):
+        return None, _kvm_err("invalid host name")
+    try:
+        decl = _kd.load(state, name)
+    except FileNotFoundError:
+        return None, _kvm_err(f"host {name} is not declared", 404)
+    except _kd.DeclError as e:
+        return None, _kvm_err(str(e), 500)
+    return _kh.VirshHost(decl, state, timeout=KVM_READ_TIMEOUT), None
+
+
+def _kvm_read_all(details=False):
+    """Inventaire de chaque hôte déclaré, en parallèle ; un hôte en échec
+    rend {name, address, error: {kind, message}}. Rend (entrées, avertissements)."""
+    state = _state_dir()
+    warnings = []
+    decls = _kd.load_all(state, warn=warnings.append)
+    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    entries = _kvm_cli.read_all(hosts, details=details) if hosts else []
+    public = {d["name"]: _kvm_public(d) for d in decls}
+    return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
+
+
+def _kvm_unavailable():
+    if _kvm_cli is None or not (BIN_DIR / KVM_SCRIPT).is_file():
+        return _kvm_err(f"{KVM_SCRIPT} not deployed", 503)
+    return None
+
+
+@app.route("/api/kvm/hosts")
+@requires_auth
+@shared_read(scope=KVM_SCOPE)
+def api_kvm_hosts():
+    """Résumé de chaque hôte KVM déclaré (CPU, mémoire, versions, VMs),
+    lus en parallèle ; un hôte injoignable rend son erreur classée."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    entries, warnings = _kvm_read_all()
+    return jsonify({"hosts": entries, "warnings": warnings, "role": current_role(),
+                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
+
+
+@app.route("/api/kvm/hosts/<host>")
+@requires_auth
+@shared_read(scope=KVM_SCOPE)
+def api_kvm_host(host):
+    """Inventaire complet d'un hôte : VMs, pools et leurs volumes, réseaux."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        return err
+    try:
+        inv = _kh.host_inventory(vh, details=True)
+    except _kh.KvmError as e:
+        return jsonify(dict(_kvm_public(vh.decl), error={"kind": e.kind, "message": e.message})), 502
+    _kvm_network_details(vh, inv)
+    return jsonify(dict(_kvm_public(vh.decl), **inv))
+
+
+def _kvm_network_details(vh, inv):
+    """Mode de transfert, pont et adresses de chaque réseau (net-dumpxml, un
+    seul appel). Une définition illisible laisse le réseau tel quel et
+    s'ajoute à `errors`."""
+    nets = inv.get("networks") or []
+    if not nets:
+        return
+    try:
+        out = vh.batch({n["name"]: ("net-dumpxml", "--network", n["name"]) for n in nets})
+    except _kh.KvmError as e:
+        inv["errors"].append({"command": "net-dumpxml", "kind": e.kind, "message": e.message})
+        return
+    for n in nets:
+        v = out.get(n["name"])
+        if v is None or not v.ok:
+            if v is not None:
+                inv["errors"].append({"command": f"net-dumpxml {n['name']}", "kind": v.error.kind,
+                                      "message": v.error.message})
+            continue
+        try:
+            x = _kh.parse_net_xml(str(v))
+        except Exception:                      # noqa: BLE001 : XML illisible, on garde la ligne
+            continue
+        n.update({k: x[k] for k in ("forward", "bridge", "ips")})
+
+
+@app.route("/api/kvm/vms")
+@requires_auth
+@shared_read(scope=KVM_SCOPE)
+def api_kvm_vms():
+    """Toutes les VMs de tous les hôtes (triées par nom puis hôte), et l'état
+    de lecture de chaque hôte."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    entries, warnings = _kvm_read_all()
+    vms, hosts = [], []
+    for inv in entries:
+        if "error" in inv:
+            hosts.append({"name": inv["name"], "state": inv["error"]["kind"],
+                          "error": inv["error"]["message"]})
+            continue
+        hosts.append({"name": inv["name"], "state": "ok", "count": len(inv["vms"])})
+        vms.extend(inv["vms"])
+    vms.sort(key=lambda v: (v["name"], v["host"]))
+    return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
+                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>")
+@requires_auth
+@shared_read(scope=KVM_SCOPE)
+def api_kvm_vm(host, domain):
+    """Détail d'une VM : vCPU, mémoire, disques, cartes, affichages,
+    persistance, démarrage automatique, épinglage CPU, statistiques."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        return err
+    try:
+        return jsonify(_kh.vm_detail(vh, domain))
+    except _kh.KvmError as e:
+        return jsonify({"host": host, "name": domain,
+                        "error": {"kind": e.kind, "message": e.message}}), 404 if e.kind == "notfound" else 502
+
+
+@app.route("/api/kvm/hosts/scan", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_scan():
+    """Empreintes des clés SSH d'une adresse (ssh-keyscan), à épingler à la
+    déclaration. Ne modifie rien."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return _kvm_err("a JSON object is expected")
+    address, port = body.get("address"), body.get("port", _kd.DEFAULT_PORT)
+    if not isinstance(address, str) or not _kd.ADDRESS_RE.match(address):
+        return _kvm_err("invalid address")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        return _kvm_err("port must be between 1 and 65535")
+    try:
+        keys = _kd.scan_host_key(address, port, timeout=KVM_SCAN_TIMEOUT)
+    except _kd.DeclError as e:
+        return _kvm_err(str(e))
+    except _kh.KvmError as e:
+        return _kvm_err(_kvm_cli.scan_error(e), 502, kind=e.kind)
+    return jsonify({"address": address, "port": port,
+                    "keys": [{"type": k["type"], "fingerprint": k["fingerprint"]} for k in keys]})
+
+
+def _kvm_base(*sub):
+    """Ligne de commande du script, sortie JSON, répertoire d'état de la console."""
+    return [sys.executable, str(BIN_DIR / KVM_SCRIPT), *sub, "--json",
+            f"--state-dir={_state_dir()}"]
+
+
+def _kvm_action(host, label, cmd, cleanup=None):
+    def after():
+        if cleanup:
+            cleanup()
+        READ_SHARE.invalidate(KVM_SCOPE)
+    run, err = _cli_action(f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
+                           check_busy=False, capture=True)
+    if err:
+        if cleanup:
+            cleanup()
+        return None, err
+    return run, None
+
+
+def _kvm_add_request(state):
+    """(décl. publique, empreinte, étiquettes) de la partie `payload` du
+    formulaire, ou une réponse 400/409."""
+    raw = request.form.get("payload")
+    try:
+        body = json.loads(raw) if raw else None
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        return None, _kvm_err("a JSON payload is expected")
+    port = body.get("port", _kd.DEFAULT_PORT)
+    labels = body.get("labels") or {}
+    decl = {"name": body.get("name"), "address": body.get("address"), "port": port,
+            "user": body.get("user"), "labels": labels}
+    if not _kvm_check_host(decl["name"]):
+        return None, _kvm_err("invalid host name")
+    decl.update(ssh_key=_kd.key_rel(decl["name"]), known_hosts=_kd.known_hosts_rel(decl["name"]))
+    problem = _kd.check_decl(decl)
+    if problem:
+        return None, _kvm_err(problem)
+    for k, v in labels.items():                  # types déjà contrôlés par check_decl
+        if any(ord(c) < 32 for c in v):
+            return None, _kvm_err(f"invalid label {k!r}")
+    fp = body.get("fingerprint")
+    if not isinstance(fp, str) or not _kd.FINGERPRINT_RE.fullmatch(fp):
+        return None, _kvm_err("choose the host key fingerprint to pin (SHA256:...)")
+    if _kd.decl_path(state, decl["name"]).exists():
+        return None, _kvm_err(f"host {decl['name']} is already declared", 409)
+    return (decl, fp), None
+
+
+@app.route("/api/kvm/hosts", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_host_add():
+    """Déclare un hôte : multipart avec `payload` (JSON : name, address,
+    port, user, fingerprint, labels) et `key` (clé privée). La clé passe par
+    un fichier privé 0600, effacé à la fin de l'action `host add`."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    state = _state_dir()
+    req, err = _kvm_add_request(state)
+    if err:
+        return err
+    decl, fp = req
+    f = request.files.get("key")
+    data = f.read(KVM_KEY_MAX + 1) if f else b""
+    if not data:
+        return _kvm_err("the private key file is missing")
+    if len(data) > KVM_KEY_MAX:
+        return _kvm_err("the SSH key file is too large")
+    wd = _capi_work_dir()
+    fd, key_path = tempfile.mkstemp(prefix="kvm-key-", dir=str(wd) if wd else None)   # 0600
+    with os.fdopen(fd, "wb") as out:
+        out.write(data)
+    cleanup = lambda: Path(key_path).unlink(missing_ok=True)  # noqa: E731
+    try:
+        _kvm_cli.read_private_key(key_path)
+    except _kvm_cli.UsageError as e:
+        cleanup()
+        return _kvm_err(str(e))
+    name = decl["name"]
+    cmd = _kvm_base("host", "add") + [
+        f"--name={name}", f"--address={decl['address']}", f"--port={decl['port']}",
+        f"--user={decl['user']}", f"--ssh-key={key_path}", f"--fingerprint={fp}",
+    ] + [f"--label={k}={v}" for k, v in sorted(decl["labels"].items())]
+    run, err = _kvm_action(name, f"kvm:host-add:{name}", cmd, cleanup=cleanup)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": name}), 202
+
+
+@app.route("/api/kvm/hosts/<host>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_host_remove(host):
+    """Retire un hôte (sa déclaration, sa clé et son empreinte épinglée)."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kd.decl_path(_state_dir(), host).exists():
+        return _kvm_err(f"host {host} is not declared", 404)
+    run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host}), 202
+
+
+@app.route("/api/kvm/hosts/<host>/test", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_kvm_host_test(host):
+    """Test de connexion d'un hôte : SSH, virsh, droits sur l'URI, qemu-img,
+    écoute des affichages. Un résultat par point dans l'action."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kd.decl_path(_state_dir(), host).exists():
+        return _kvm_err(f"host {host} is not declared", 404)
+    run, err = _kvm_action(host, f"kvm:host-test:{host}", _kvm_base("host", "test") + [host])
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host}), 202
+
+
+def _kvm_vm_busy(host, domain):
+    """Un geste encore en cours sur la même VM (double clic, deux personnes)."""
+    suffix = f":{host}/{domain}"
+    with ACTIONS_LOCK:
+        for r in ACTIONS.values():
+            if (r.status in ("starting", "running") and r.action.startswith("kvm:vm-")
+                    and r.action.endswith(suffix) and r.cluster == f"kvm:{host}"):
+                return r
+    return None
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/<gesture>", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_kvm_vm_gesture(host, domain, gesture):
+    """Geste de cycle de vie (start, shutdown, reboot, destroy, suspend,
+    resume) ; corps facultatif {"timeout": secondes}. Le script suit l'état
+    réel jusqu'à l'état attendu."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if gesture not in KVM_GESTURES:
+        return _kvm_err(f"unknown gesture (one of {', '.join(KVM_GESTURES)})", 404)
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    if not _kd.decl_path(_state_dir(), host).exists():
+        return _kvm_err(f"host {host} is not declared", 404)
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return _kvm_err("a JSON object is expected")
+    timeout = body.get("timeout")
+    if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, int)
+                                or not 1 <= timeout <= KVM_GESTURE_TIMEOUT_MAX):
+        return _kvm_err(f"timeout must be a whole number of seconds from 1 to {KVM_GESTURE_TIMEOUT_MAX}")
+    busy = _kvm_vm_busy(host, domain)
+    if busy:
+        return _busy_response(busy)
+    cmd = _kvm_base("vm", gesture) + [f"--host={host}", f"--name={domain}"]
+    if timeout is not None:
+        cmd.append(f"--timeout={timeout}")
+    run, err = _kvm_action(host, f"kvm:vm-{gesture}:{host}/{domain}", cmd)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "gesture": gesture}), 202
+
+
+# -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
 CONFIG_LOCK = threading.Lock()
@@ -14334,12 +14759,14 @@ def api_capi_cluster_preview(cluster):
     return jsonify({"yaml": proc.stdout})
 
 
-def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True):
+def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
+                capture=False):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
     qui n'écrit rien sur le cluster (réservations, v1.94.0) : l'arrêt d'un
-    cluster en cours ne le bloque pas."""
+    cluster en cours ne le bloque pas. `capture=True` (v1.96.0) garde l'objet
+    JSON que l'outil écrit sur stdout dans `run.result["output"]`."""
     busy = _transfer_busy((cluster,), label) if check_busy else None
     if busy:
         return None, _busy_response(busy)
@@ -14352,7 +14779,9 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
             json.dump(spec, f)
         cmd = cmd + ["--spec", spec_file]
     run_id = uuid.uuid4().hex[:12]
+    # v1.96.0 : un chemin passé en `--option=/chemin` est masqué lui aussi
     public = [tool] + [a for a in cmd[2:] if not a.startswith("/")
+                       and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = (current_cluster_identity() or {}).get("user")
@@ -14361,7 +14790,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
 
     def work():
         try:
-            _vm_transfer_runner(run, cmd)
+            _vm_transfer_runner(run, cmd, capture=capture)
         finally:
             if spec_file:
                 Path(spec_file).unlink(missing_ok=True)
@@ -19207,8 +19636,13 @@ def _transfer_busy(clusters, label):
     return None
 
 
-def _vm_transfer_runner(run, cmd):
-    """Relaie les étapes du script, comme pour l'installateur du provider."""
+CLI_OUTPUT_MAX = 1024 * 1024
+
+
+def _vm_transfer_runner(run, cmd, capture=False):
+    """Relaie les étapes du script, comme pour l'installateur du provider.
+    `capture` : l'objet JSON de stdout va dans `run.result["output"]`
+    (fichier temporaire anonyme, pas de tube qui se remplirait)."""
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
@@ -19216,8 +19650,9 @@ def _vm_transfer_runner(run, cmd):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
+    out_file = tempfile.TemporaryFile() if capture else None
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+        proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
         for line in proc.stderr:
@@ -19239,6 +19674,14 @@ def _vm_transfer_runner(run, cmd):
                     run.emit_progress(snap)
         rc = proc.wait()
         run.exit_code = rc
+        if out_file is not None:
+            out_file.seek(0)
+            try:
+                data = json.loads(out_file.read(CLI_OUTPUT_MAX).decode("utf-8", "replace"))
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                run.result = dict(run.result or {}, output=data)
         if rc == 0:
             run.status = "done"
         elif rc == 3 or run.status == "cancelled":
@@ -19252,6 +19695,9 @@ def _vm_transfer_runner(run, cmd):
         step("transfer", "error", str(e)[:300])
         run.exit_code = 1
         run.status = "error"
+    finally:
+        if out_file is not None:
+            out_file.close()
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
