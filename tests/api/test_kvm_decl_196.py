@@ -63,6 +63,14 @@ def test_check_decl_not_a_mapping():
     assert kvm_decl.check_decl(["x"]) == "not a mapping"
 
 
+@pytest.mark.parametrize("lines", ["10.0.0.21 ssh-ed25519 AAAA", b"10.0.0.21 ssh-ed25519 AAAA"])
+def test_write_known_hosts_refuses_a_string(tmp_path, lines):
+    # une chaîne serait écrite un caractère par ligne : refusée, rien d'écrit
+    with pytest.raises(TypeError):
+        kvm_decl.write_known_hosts(tmp_path, GOOD["name"], lines)
+    assert not (tmp_path / kvm_decl.known_hosts_rel(GOOD["name"])).exists()
+
+
 def test_write_load_roundtrip_relative_paths_and_permissions(tmp_path):
     key = kvm_decl.write_key(tmp_path, GOOD["name"], b"-----BEGIN KEY-----\nabc")
     kh = kvm_decl.write_known_hosts(tmp_path, GOOD["name"], ["10.0.0.21 ssh-ed25519 AAAA"])

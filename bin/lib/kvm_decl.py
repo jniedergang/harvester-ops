@@ -244,6 +244,9 @@ def write_key(state, name, data):
 def write_known_hosts(state, name, lines):
     """Range la ou les lignes d'empreinte épinglées (0600) ; rend le chemin relatif."""
     decl_path(state, name)
+    if isinstance(lines, (str, bytes)):
+        # une chaîne serait lue caractère par caractère, une ligne chacun
+        raise TypeError("lines must be a list of known_hosts lines, not a string")
     text = "".join(line.rstrip("\n") + "\n" for line in lines)
     write_private(Path(state) / known_hosts_rel(name), text)
     return known_hosts_rel(name)
