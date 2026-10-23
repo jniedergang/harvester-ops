@@ -10,7 +10,10 @@ import importlib.util
 import json
 import re
 import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,7 +53,8 @@ INVENTORY = {
     ("list", "--all"): ok(fx("list-all.txt")),
     ("list", "--all", "--autostart", "--name"): ok("harvlab-n1\n"),
     ("list", "--all", "--transient", "--name"): ok(""),
-    ("domstats", "--raw", "--state", "--cpu-total", "--balloon", "--vcpu"): ok(fx("domstats-raw.txt")),
+    ("domstats", "--raw", "--nowait", "--state", "--cpu-total", "--balloon", "--vcpu"):
+        ok(fx("domstats-raw.txt")),
 }
 BASE_COMMANDS = {
     ("true",): ok(),
@@ -91,9 +95,13 @@ class FakeNet:
         self.sims = sims                      # adresse -> Sim
         self.argvs = []                       # tous les argv lancés
         self.closed = []                      # adresses dont le ControlMaster a été fermé
+        self.closed_paths = []                # et le ControlPath utilisé
 
-    def __call__(self, argv, capture_output=False, text=False, timeout=None, input=None):
+    def __call__(self, argv, capture_output=False, text=False, timeout=None, input=None,
+                 stdin=None):
         assert capture_output and text and timeout
+        # ssh et ssh-keyscan ne lisent jamais l'entrée de la console
+        assert argv[0] == "ssh-keygen" or stdin is subprocess.DEVNULL
         self.argvs.append(argv)
         if argv[0] == "ssh-keyscan":
             sim = self.sims.get(argv[-1])
@@ -106,6 +114,7 @@ class FakeNet:
         assert argv[0] == "ssh"
         if argv[1:3] == ["-O", "exit"]:
             self.closed.append(argv[-1])
+            self.closed_paths.append(next(a for a in argv if a.startswith("ControlPath=")))
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         assert argv[-3] == "--"
         sim = self.sims[argv[-2]]
@@ -123,13 +132,14 @@ class FakeNet:
 
     @staticmethod
     def batch(sim, script):
-        head, body = script.split("\n", 1)
-        assert head == "export LC_ALL=C"
-        stdout = stderr = ""
-        for i, line in enumerate(ln for ln in re.split(r" >&2(?:\n|$)", body) if ln):
-            cmd, rest = line.split(" </dev/null; ", 1)
-            token = shlex.split(rest.split(";")[0])[2]
-            words = shlex.split(cmd)
+        # même protocole que kvm_host.VirshHost.batch_script : repère de
+        # départ, puis `_kvm_run <i> virsh ...` une commande par appel
+        assert script.split("\n", 1)[0] == "export LC_ALL=C"
+        token = re.search(r"^T=(@@kvm-[0-9a-f]+)$", script, re.M).group(1)
+        stdout, stderr = f"{token} start 1\n", f"{token} start\n"
+        for chunk in re.split(r"\n_kvm_run (?=\d+ )", script)[1:]:
+            words = shlex.split(chunk)
+            i, words = int(words[0]), words[1:]
             assert words[:3] == ["virsh", "-c", URI]
             sim.calls.append(["batch", *words[3:]])
             rc, out, err = sim.answer_virsh(words[3:])
@@ -152,13 +162,16 @@ class Clock:
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """Répertoire d'état, réseau simulé et horloge injectés dans le script."""
+    """Répertoire d'état, réseau simulé et horloge injectés dans le script.
+    L'état est court : le socket ControlMaster doit tenir en 90 octets."""
     net, clock = FakeNet({}), Clock()
+    short = Path(tempfile.mkdtemp(prefix="kvm-", dir="/tmp"))
     monkeypatch.setattr(cli, "RUNNER", net)
     monkeypatch.setattr(cli, "CLOCK", clock)
     monkeypatch.setattr(cli, "SLEEP", clock.sleep)
-    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(tmp_path / "state"))
-    return SimpleNamespace(state=tmp_path / "state", tmp=tmp_path, net=net, clock=clock)
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", str(short / "state"))
+    yield SimpleNamespace(state=short / "state", tmp=tmp_path, net=net, clock=clock)
+    shutil.rmtree(short, ignore_errors=True)
 
 
 def declare(env, name="lab", address="10.0.0.5", sim=None, virsh=None, **extra):
@@ -347,6 +360,18 @@ def test_host_scan_errors(env, capsys, argv, rc):
     assert run(capsys, "host", "scan", *argv)[0] == rc
 
 
+@pytest.mark.parametrize("exc,msg", [
+    (subprocess.TimeoutExpired("ssh-keyscan", 15), "timed out"),
+    (FileNotFoundError(2, "No such file or directory", "ssh-keyscan"), "cannot run ssh-keyscan"),
+])
+def test_host_scan_failure_is_an_error_not_a_crash(env, capsys, monkeypatch, exc, msg):
+    def runner(argv, **kw):
+        raise exc
+    monkeypatch.setattr(cli, "RUNNER", runner)
+    rc, out, err, steps = run(capsys, "host", "scan", "--address", "10.0.0.5")
+    assert rc == 1 and msg in err and steps[-1][:2] == ["scan", "error"]
+
+
 def add_argv(env, fingerprint=HOST_KEYS[1][2], name="lab", *extra):
     key = env.tmp / "upload.key"
     if not key.exists():
@@ -375,6 +400,9 @@ def test_host_add_pins_only_the_matching_key_and_tests(env, capsys):
     assert (env.state / "ssh/lab_id").read_text() == PRIVATE_KEY
     # l'ancienne connexion partagée est fermée avant le test
     assert env.net.closed == ["10.0.0.5"] and sim.calls[0] == ["true"]
+    # le socket fermé est celui de CETTE déclaration (nom dans le chemin)
+    cpath = kh.control_path(kvm_decl.load(env.state, "lab"), env.state)
+    assert env.net.closed_paths == [f"ControlPath={cpath}"] and cpath.name.startswith("cm-lab-")
     # aucun chemin dans la sortie
     assert str(env.state) not in json.dumps(data) and str(env.tmp) not in json.dumps(data)
 
@@ -417,12 +445,24 @@ def test_host_add_unexpected_error_during_test_rolls_back(env, capsys, monkeypat
     ("--ssh-key", "/nonexistent/key", "does not exist"),
     ("--label", "novalue", "invalid label"),
     ("--uri", "xen:///", "uri must be"),
+    ("--uri", "qemu+ext:///system?command=/tmp/x", "uri must be"),
 ])
 def test_host_add_refused_before_the_host(env, capsys, opt, value, msg):
     env.net.sims["10.0.0.5"] = Sim()
     argv = [a for a in add_argv(env) if not a.startswith(opt + "=")] + [f"{opt}={value}"]
     rc, out, err, steps = run(capsys, *argv)
     assert rc == 2 and msg in err and env.net.argvs == [] and state_files(env) == []
+
+
+@pytest.mark.parametrize("state_dir,msg", [
+    ("/tmp/" + "s" * 80, "state directory takes 85 bytes"),
+    ("/tmp/kvm%Cstate", "must not contain '%'"),
+])
+def test_host_add_refuses_a_state_dir_ssh_cannot_use(env, capsys, monkeypatch, state_dir, msg):
+    env.net.sims["10.0.0.5"] = Sim()
+    monkeypatch.setenv("HARVESTER_OPS_STATE_DIR", state_dir)
+    rc, out, err, steps = run(capsys, *add_argv(env))
+    assert rc == 2 and msg in err and env.net.argvs == [] and not Path(state_dir).exists()
 
 
 def test_host_add_refuses_a_public_key_and_an_existing_host(env, capsys):
@@ -510,8 +550,10 @@ def test_host_list_and_remove(env, capsys):
     assert data["hosts"][0] == {"name": "a", "address": "10.0.0.5", "port": 22, "user": "virtops",
                                 "uri": URI, "labels": {"site": "x"}}
     assert len(data["warnings"]) == 1 and "broken.yaml" in data["warnings"][0]
+    cpath = kh.control_path(kvm_decl.load(env.state, "a"), env.state)
     rc, data, steps = run_json(capsys, "host", "remove", "a")
     assert rc == 0 and data == {"host": "a", "removed": True} and env.net.closed == ["10.0.0.5"]
+    assert env.net.closed_paths == [f"ControlPath={cpath}"]
     assert not (env.state / "ssh/a_id").exists() and not (env.state / "ssh/a_known").exists()
     assert run(capsys, "host", "remove", "a")[0] == 2
 

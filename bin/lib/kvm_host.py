@@ -20,7 +20,9 @@ Les erreurs sont des `KvmError` classées (`kind`) ; leur message nomme
 l'hôte, jamais un chemin de clé ni un secret.
 """
 
+import hashlib
 import ipaddress
+import os
 import re
 import secrets
 import shlex
@@ -32,23 +34,36 @@ import kvm_decl
 
 KINDS = ("unreachable", "hostkey", "auth", "denied", "notfound", "timeout", "failed")
 
-# Classement des erreurs de ssh puis de virsh, dans cet ordre : le refus de
-# clé de ssh (« Permission denied (publickey ») passe avant le refus de
-# libvirt (« ...virtqemud-sock': Permission denied »).
-_ERROR_MARKERS = (
+# Classement des erreurs, en deux familles qui ne se mélangent jamais :
+# - celles de ssh lui-même (empreinte, clé, réseau), lues seulement quand le
+#   processus ssh rend 255 et seulement sur SA sortie d'erreur ;
+# - celles de virsh/libvirt sur l'hôte, lues sur la sortie d'erreur de la
+#   commande. Un domaine nommé « connection refused » reste donc `notfound`,
+#   et un démon libvirt arrêté (« virtqemud-sock': Connection refused ») n'est
+#   pas un hôte injoignable.
+SSH_RC = 255
+_SSH_MARKERS = (
     ("hostkey", ("host key verification failed", "remote host identification has changed",
                  "no matching host key", "host key for")),
     ("auth", ("permission denied (publickey", "permission denied (password",
+              "permission denied (keyboard-interactive",
               "too many authentication failures", "no supported authentication methods")),
     ("unreachable", ("connection refused", "connection timed out", "no route to host",
                      "could not resolve hostname", "network is unreachable",
                      "operation timed out", "connection closed by", "connection reset")),
+)
+_REMOTE_MARKERS = (
     ("notfound", ("failed to get domain", "domain not found", "failed to get pool",
                   "storage pool not found", "failed to get network", "network not found",
                   "failed to get vol", "storage volume not found")),
     ("denied", ("authentication unavailable", "permission denied", "access denied",
                 "authentication failed")),
 )
+# démon libvirt absent ou arrêté : classé `failed`, message explicite
+_LIBVIRT_DOWN = ("failed to connect socket", "failed to connect to the hypervisor",
+                 "no connection driver available", "end of file while reading data")
+# codes de sortie de `timeout` (coreutils) : délai atteint, puis SIGKILL
+_TIMEOUT_RCS = (124, 137)
 
 # virDomainState -> libellé de `virsh domstate`
 DOMAIN_STATES = {0: "no state", 1: "running", 2: "idle", 3: "paused", 4: "in shutdown",
@@ -88,13 +103,19 @@ class CmdOutput(str):
         return self.rc == 0 and self.error is None
 
 
-def classify(stderr):
-    """Genre d'une erreur ssh/virsh d'après son texte."""
-    low = (stderr or "").lower()
-    for kind, markers in _ERROR_MARKERS:
-        if any(m in low for m in markers):
+def _match(markers, text):
+    low = (text or "").lower()
+    for kind, words in markers:
+        if any(w in low for w in words):
             return kind
     return "failed"
+
+
+def classify(stderr, ssh_level=False):
+    """Genre d'une erreur. `ssh_level` : stderr de ssh lui-même (processus
+    ssh en 255), seuls ses repères comptent ; sinon stderr d'une commande
+    distante, seuls ceux de virsh/libvirt comptent."""
+    return _match(_SSH_MARKERS if ssh_level else _REMOTE_MARKERS, stderr)
 
 
 def _redact(text, paths):
@@ -111,10 +132,17 @@ def _error_detail(stderr, paths):
     return _redact(lines[-1], paths)[:300] if lines else ""
 
 
-def make_error(host, stderr, rc, paths=()):
-    kind = classify(stderr)
+def make_error(host, stderr, rc, paths=(), ssh_level=False):
+    """KvmError classée. `ssh_level` : l'échec vient de ssh (code 255, stderr
+    de ssh) ; sinon de la commande distante."""
+    kind = classify(stderr, ssh_level)
     detail = _error_detail(stderr, paths)
-    return KvmError(kind, f"{host}: {kind}" + (f": {detail}" if detail else ""), host=host, rc=rc)
+    if not ssh_level and kind == "failed" and any(m in (stderr or "").lower()
+                                                  for m in _LIBVIRT_DOWN):
+        detail = "libvirt is not reachable on the host: " + detail
+    if not detail:
+        detail = f"{'ssh' if ssh_level else 'command'} exited with status {rc}"
+    return KvmError(kind, f"{host}: {kind}: {detail}", host=host, rc=rc)
 
 
 def _ssh_opt_path(path):
@@ -123,21 +151,52 @@ def _ssh_opt_path(path):
     return f'"{path}"' if re.search(r"\s", path) else path
 
 
-def control_path(state):
-    return Path(state) / kvm_decl.SSH_DIR / "cm-%C"
+# sun_path de Linux : 108 octets, NUL compris. ssh lie d'abord le socket
+# maître sous un nom temporaire `<ControlPath>.<16 caractères>` puis le
+# renomme : le chemin final doit donc tenir en 107 - 17 = 90 octets (vérifié
+# avec OpenSSH 10.5 : 90 passe, 91 échoue en « too long for Unix domain
+# socket »).
+MAX_CONTROL_PATH = 107 - 17
+CONTROL_HASH_LEN = 8
 
 
-def ssh_argv(decl, state, remote_argv):
-    """Ligne de commande ssh qui lance `remote_argv` sur l'hôte. Chaque
-    élément distant est cité (shlex.quote) et le tout part en UN argument :
-    le shell distant le redécoupe exactement en `remote_argv`."""
-    why = kvm_decl.check_decl(kvm_decl.normalize(decl))
+def control_path(decl, state):
+    """Socket ControlMaster d'une déclaration : `<état>/ssh/cm-<nom>-<hash>`.
+    Le nom sépare deux déclarations vers le même hôte ; le hash (adresse,
+    port, utilisateur) fait qu'une déclaration modifiée n'hérite jamais de
+    l'ancienne connexion. On n'utilise pas `%C` de ssh : ses 40 caractères
+    ne laisseraient que quelques octets au nom sous le répertoire d'état de
+    la console de dev. KvmError (`failed`) si le chemin est trop long."""
+    name = decl.get("name")
+    st = str(state)
+    if "%" in st:
+        # ssh développe `%` dans ControlPath, IdentityFile, UserKnownHostsFile
+        raise KvmError("failed", f"{name}: failed: the state directory must not contain '%'",
+                       host=name)
+    ident = f"{decl.get('user')}@{decl.get('address')}:{decl.get('port', kvm_decl.DEFAULT_PORT)}"
+    digest = hashlib.sha256(ident.encode()).hexdigest()[:CONTROL_HASH_LEN]
+    path = Path(state) / kvm_decl.SSH_DIR / f"cm-{name}-{digest}"
+    size = len(os.fsencode(str(path)))
+    if size > MAX_CONTROL_PATH:
+        raise KvmError("failed", f"{name}: failed: the SSH control socket path would be {size} "
+                       f"bytes, over the {MAX_CONTROL_PATH} ssh can bind; the state directory "
+                       f"takes {len(os.fsencode(st))} bytes: shorten it or the host name",
+                       host=name)
+    return path
+
+
+def _ssh_base(decl, state):
+    """ssh et ses options pour une déclaration, sans destination."""
+    name = decl.get("name") if isinstance(decl, dict) else "?"
+    why = kvm_decl.check_decl(kvm_decl.normalize(decl)) if isinstance(decl, dict) else "not a mapping"
     if why:
-        raise KvmError("failed", f"{decl.get('name') if isinstance(decl, dict) else '?'}: "
-                       f"invalid declaration: {why}")
-    key = kvm_decl.resolve(state, decl["ssh_key"])
-    known = kvm_decl.resolve(state, decl["known_hosts"])
-    remote = " ".join(shlex.quote(str(a)) for a in remote_argv)
+        raise KvmError("failed", f"{name}: failed: invalid declaration: {why}", host=name)
+    try:
+        key = kvm_decl.resolve(state, decl["ssh_key"])
+        known = kvm_decl.resolve(state, decl["known_hosts"])
+    except kvm_decl.DeclError as e:
+        raise KvmError("failed", f"{name}: failed: invalid declaration: {e}", host=name) from None
+    cpath = control_path(decl, state)
     return [
         "ssh",
         "-o", "BatchMode=yes",
@@ -148,24 +207,53 @@ def ssh_argv(decl, state, remote_argv):
         "-o", "GlobalKnownHostsFile=/dev/null",
         "-o", "IdentitiesOnly=yes",
         "-o", "ControlMaster=auto",
-        "-o", f"ControlPath={_ssh_opt_path(control_path(state))}",
+        "-o", f"ControlPath={_ssh_opt_path(cpath)}",
         "-o", "ControlPersist=60",
         "-i", str(key),
         "-p", str(decl.get("port", kvm_decl.DEFAULT_PORT)),
         "-l", decl["user"],
-        "--", decl["address"],
-        remote,
     ]
+
+
+def ssh_argv(decl, state, remote_argv):
+    """Ligne de commande ssh qui lance `remote_argv` sur l'hôte. Chaque
+    élément distant est cité (shlex.quote) et le tout part en UN argument :
+    le shell distant le redécoupe exactement en `remote_argv`. KvmError
+    (`failed`) pour une déclaration ou un chemin rangé invalide."""
+    remote = " ".join(shlex.quote(str(a)) for a in remote_argv)
+    return [*_ssh_base(decl, state), "--", decl["address"], remote]
+
+
+def close_master(decl, state, runner=subprocess.run, timeout=10):
+    """Ferme la connexion ControlMaster d'une déclaration (`ssh -O exit`,
+    mêmes options). À appeler avant un ajout, une modification ou un
+    retrait : sinon une commande suivante passerait par l'ancienne connexion
+    sans revérifier ni la clé ni l'empreinte. Rend True si ssh a fermé une
+    connexion ; jamais d'exception (rien à fermer n'est pas une erreur)."""
+    try:
+        base = _ssh_base(decl, state)
+    except KvmError:
+        return False
+    argv = [base[0], "-O", "exit", *base[1:], "--", decl["address"]]
+    try:
+        res = runner(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                     timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return getattr(res, "returncode", 1) == 0
 
 
 class VirshHost:
     """Un hôte KVM déclaré, interrogé par `virsh` à travers SSH."""
 
-    def __init__(self, decl, state, runner=subprocess.run, timeout=30):
+    def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20):
         self.decl = kvm_decl.normalize(decl)
         self.state = state
         self.runner = runner
         self.timeout = timeout
+        # délai de CHAQUE commande d'un batch, appliqué sur l'hôte par
+        # `timeout` quand il y existe
+        self.cmd_timeout = cmd_timeout
         self.name = self.decl.get("name")
 
     def _secret_paths(self):
@@ -187,7 +275,8 @@ class VirshHost:
         except OSError:
             pass                            # ssh dira lui-même ce qui manque
         try:
-            return self.runner(argv, capture_output=True, text=True,
+            # stdin fermé : ssh ne lit jamais l'entrée de la console
+            return self.runner(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                timeout=timeout or self.timeout)
         except subprocess.TimeoutExpired as e:
             raise KvmError("timeout", f"{self.name}: timeout after {timeout or self.timeout}s",
@@ -200,40 +289,73 @@ class VirshHost:
         """Lance une commande quelconque sur l'hôte ; rend sa sortie."""
         res = self._ssh(remote_argv, timeout)
         if res.returncode != 0:
-            raise make_error(self.name, res.stderr, res.returncode, self._secret_paths())
+            raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
+                             ssh_level=res.returncode == SSH_RC)
         return res.stdout or ""
 
     def virsh(self, *args, timeout=None):
         """Une commande virsh ; rend sa sortie, KvmError classée sinon."""
         return self.run(["env", "LC_ALL=C", *self._virsh_argv(args)], timeout=timeout)
 
-    def batch(self, commands, timeout=None):
+    def batch_script(self, items, token, cmd_timeout):
+        """Script `sh` d'un batch : une ligne repère de départ (ce que le
+        shell distant affiche avant, un `echo` de .bashrc par exemple, est
+        jeté), puis chaque commande suivie de `<jeton> <i> <rc>` sur stdout
+        et `<jeton> <i>` sur stderr. Chaque commande passe par
+        `timeout -k 5 <N>` si l'hôte l'a (et comprend `-k`) : une commande
+        bloquée rend son propre échec au lieu d'emporter tout le lot."""
+        lines = [
+            "export LC_ALL=C",
+            f"T={token}",
+            "W=; S=0",
+            "if command -v timeout >/dev/null 2>&1 && timeout -k 1 5 true </dev/null "
+            f">/dev/null 2>&1; then W='timeout -k 5 {int(cmd_timeout)}'; S=1; fi",
+            '_kvm_run() { i=$1; shift; $W "$@" </dev/null; rc=$?; '
+            "printf '\\n%s %d %d\\n' \"$T\" \"$i\" \"$rc\"; "
+            "printf '\\n%s %d\\n' \"$T\" \"$i\" >&2; }",
+            "printf '%s start %d\\n' \"$T\" \"$S\"; printf '%s start\\n' \"$T\" >&2",
+        ]
+        for i, (_, args) in enumerate(items):
+            lines.append(f"_kvm_run {i} " + " ".join(shlex.quote(a)
+                                                     for a in self._virsh_argv(args)))
+        return "\n".join(lines)
+
+    def batch(self, commands, timeout=None, cmd_timeout=None):
         """Plusieurs commandes virsh en UN appel SSH. `commands` : un dict
         {clé: (arguments virsh)} ou une suite de tuples (clé = arguments
         joints par des espaces). Rend {clé: CmdOutput} ; une commande en échec
-        n'efface pas les autres, sa valeur porte son erreur (`.error`).
+        n'efface pas les autres, sa valeur porte son erreur (`.error`), y
+        compris `timeout` quand elle dépasse `cmd_timeout` sur l'hôte.
 
-        Chaque commande est suivie d'une ligne repère `<jeton> <i> <rc>` sur
-        stdout et `<jeton> <i>` sur stderr ; le jeton est tiré au hasard à
-        chaque appel, une sortie ne peut donc pas l'imiter."""
+        Le jeton des repères est tiré au hasard à chaque appel : une sortie
+        ne peut pas l'imiter. Délai de l'appel ssh entier : `timeout`, par
+        défaut celui de l'hôte plus un délai de commande (une commande
+        bloquée ne fait pas perdre les autres)."""
         if isinstance(commands, dict):
-            items = [(str(k), tuple(v)) for k, v in commands.items()]
+            items = [(str(k), tuple(map(str, v))) for k, v in commands.items()]
         else:
-            items = [(" ".join(map(str, c)), tuple(c)) for c in commands]
+            items = [(" ".join(map(str, c)), tuple(map(str, c))) for c in commands]
         if not items:
             return {}
+        # `timeout 0` voudrait dire « sans délai » : au moins une seconde
+        cmd_timeout = max(1, int(cmd_timeout or self.cmd_timeout))
         token = "@@kvm-" + secrets.token_hex(12)
-        lines = ["export LC_ALL=C"]
-        for i, (_, args) in enumerate(items):
-            cmd = " ".join(shlex.quote(a) for a in self._virsh_argv(args))
-            lines.append(f"{cmd} </dev/null; printf '\\n%s %d %d\\n' {token} {i} \"$?\"; "
-                         f"printf '\\n%s %d\\n' {token} {i} >&2")
-        res = self._ssh(["sh", "-c", "\n".join(lines)], timeout)
-        out_parts = re.split(rf"\n{re.escape(token)} (\d+) (-?\d+)\n", res.stdout or "")
-        err_parts = re.split(rf"\n{re.escape(token)} (\d+)\n", res.stderr or "")
-        if len(out_parts) < 3:
-            # aucun repère : ssh n'a rien lancé (hôte, empreinte, clé)
-            raise make_error(self.name, res.stderr, res.returncode, self._secret_paths())
+        res = self._ssh(["sh", "-c", self.batch_script(items, token, cmd_timeout)],
+                        timeout or (self.timeout + cmd_timeout))
+        tok = re.escape(token)
+        paths = self._secret_paths()
+        m_out = re.search(rf"(?:^|\n){tok} start (\d+)\n", res.stdout or "")
+        if not m_out:
+            # pas de repère de départ : le script n'a pas tourné ; en 255,
+            # c'est ssh (hôte, empreinte, clé) et stderr est le sien
+            raise make_error(self.name, res.stderr, res.returncode, paths,
+                             ssh_level=res.returncode == SSH_RC)
+        wrapped = m_out.group(1) == "1"
+        stdout = (res.stdout or "")[m_out.end():]
+        m_err = re.search(rf"(?:^|\n){tok} start\n", res.stderr or "")
+        stderr = (res.stderr or "")[m_err.end():] if m_err else ""
+        out_parts = re.split(rf"\n{tok} (\d+) (-?\d+)\n", stdout)
+        err_parts = re.split(rf"\n{tok} (\d+)\n", stderr)
         outs, rcs = {}, {}
         for j in range(0, len(out_parts) - 2, 3):
             idx = int(out_parts[j + 1])
@@ -241,14 +363,19 @@ class VirshHost:
         errs = {}
         for j in range(0, len(err_parts) - 1, 2):
             errs[int(err_parts[j + 1])] = err_parts[j]
-        paths = self._secret_paths()
         result = {}
         for i, (key, _) in enumerate(items):
             if i not in rcs:                 # coupure en cours de route
-                err = KvmError("failed", f"{self.name}: failed: no output for '{key}'",
+                err = KvmError("failed", f"{self.name}: failed: no output for '{key}' "
+                               f"(connection lost, ssh status {res.returncode})",
                                host=self.name, rc=res.returncode)
                 result[key] = CmdOutput(err.message, rc=-1, error=err)
+            elif rcs[i] != 0 and wrapped and rcs[i] in _TIMEOUT_RCS:
+                err = KvmError("timeout", f"{self.name}: timeout: '{key}' did not finish "
+                               f"within {cmd_timeout}s on the host", host=self.name, rc=rcs[i])
+                result[key] = CmdOutput(err.message, rc=rcs[i], error=err)
             elif rcs[i] != 0:
+                # erreur d'UNE commande : repères de virsh/libvirt seulement
                 err = make_error(self.name, errs.get(i, ""), rcs[i], paths)
                 result[key] = CmdOutput(_redact(errs.get(i, ""), paths) or err.message,
                                         rc=rcs[i], error=err)
@@ -376,16 +503,71 @@ def _to_kib(el):
     return _int(el.text) * _XML_UNITS.get(unit, 1024) // 1024
 
 
-def _source(el):
-    """Source d'un disque ou d'une carte : le premier attribut porteur."""
+def _pci_address(el):
+    """`<address domain= bus= slot= function=>` -> « 0000:01:00.0 »."""
     if el is None:
         return None
-    for attr in ("file", "dev", "bridge", "network", "name", "path", "dir", "volume"):
+    try:
+        dom, bus, slot, fn = (int(el.get(a, "0"), 0) for a in ("domain", "bus", "slot", "function"))
+    except ValueError:
+        return None
+    return f"{dom:04x}:{bus:02x}:{slot:02x}.{fn:x}"
+
+
+def _first_attr(el, attrs):
+    for attr in attrs:
         if el.get(attr):
-            if attr == "volume" and el.get("pool"):
-                return f"{el.get('pool')}/{el.get('volume')}"
             return el.get(attr)
     return None
+
+
+def _disk_source(disk):
+    """Source d'un disque selon son type (libvirt formatdomain, « Hard drives,
+    floppy disks, CDROMs ») ; None pour un lecteur vide."""
+    src = disk.find("source")
+    if src is None:
+        return None
+    dtype = disk.get("type")
+    if dtype == "file":
+        return src.get("file")
+    if dtype == "block":
+        return src.get("dev")
+    if dtype == "dir":
+        return src.get("dir")
+    if dtype == "network":
+        proto, name = src.get("protocol"), src.get("name")
+        return f"{proto}:{name}" if proto and name else (name or proto)
+    if dtype == "volume":
+        pool, vol = src.get("pool"), src.get("volume")
+        return f"{pool}/{vol}" if pool and vol else (vol or pool)
+    if dtype == "nvme":
+        return _pci_address(src.find("address"))
+    if dtype == "vhostuser":
+        return src.get("path")
+    # type inconnu : au mieux
+    return _first_attr(src, ("file", "dev", "dir", "path", "name", "volume"))
+
+
+def _nic_source(iface):
+    """Source d'une carte selon son type (libvirt formatdomain, « Network
+    interfaces ») : le XML vivant d'une carte `network` porte aussi
+    `bridge='virbr0'`, c'est le réseau qui compte."""
+    itype = iface.get("type")
+    src = iface.find("source")
+    if itype == "user" or src is None:
+        return None
+    if itype == "network":
+        return src.get("network")
+    if itype == "bridge":
+        return src.get("bridge")
+    if itype == "direct":
+        return src.get("dev")
+    if itype in ("vhostuser", "vdpa"):
+        return src.get("path") or src.get("dev")
+    if itype == "hostdev":
+        return _pci_address(src.find("address"))
+    # ethernet, server, client, mcast, udp... : au mieux
+    return _first_attr(src, ("network", "bridge", "dev", "path", "address"))
 
 
 def parse_domain_xml(text):
@@ -416,13 +598,13 @@ def parse_domain_xml(text):
         tgt, drv = d.find("target"), d.find("driver")
         disks.append({"target": tgt.get("dev") if tgt is not None else None,
                       "device": d.get("device", "disk"), "type": d.get("type"),
-                      "source": _source(d.find("source")),
+                      "source": _disk_source(d),
                       "format": drv.get("type") if drv is not None else None,
                       "bus": tgt.get("bus") if tgt is not None else None})
     nics = []
     for n in devices.findall("interface"):
         mac, model = n.find("mac"), n.find("model")
-        nics.append({"type": n.get("type"), "source": _source(n.find("source")),
+        nics.append({"type": n.get("type"), "source": _nic_source(n),
                      "mac": mac.get("address") if mac is not None else None,
                      "model": model.get("type") if model is not None else None})
     graphics = []
@@ -532,6 +714,8 @@ def parse_net_xml(text):
 
 # --- lectures composées -------------------------------------------------
 
+# --nowait : un domaine dont le moniteur QEMU est occupé (job en cours) ne
+# bloque pas la lecture, ses statistiques sont rendues partielles
 DOMSTATS_GROUPS = ("--state", "--cpu-total", "--balloon", "--vcpu", "--interface", "--block")
 
 INVENTORY_COMMANDS = {
@@ -542,7 +726,7 @@ INVENTORY_COMMANDS = {
     "list": ("list", "--all"),
     "autostart": ("list", "--all", "--autostart", "--name"),
     "transient": ("list", "--all", "--transient", "--name"),
-    "domstats": ("domstats", "--raw", "--state", "--cpu-total", "--balloon", "--vcpu"),
+    "domstats": ("domstats", "--raw", "--nowait", "--state", "--cpu-total", "--balloon", "--vcpu"),
 }
 DETAIL_COMMANDS = {
     "pools": ("pool-list", "--all", "--details"),
@@ -613,7 +797,8 @@ def vm_detail(host, name):
     pas ; une statistique illisible laisse `stats` vide."""
     out = host.batch({"xml": ("dumpxml", "--domain", name),
                       "info": ("dominfo", "--domain", name),
-                      "stats": ("domstats", "--raw", *DOMSTATS_GROUPS, "--domain", name)})
+                      "stats": ("domstats", "--raw", "--nowait", *DOMSTATS_GROUPS,
+                                "--domain", name)})
     for key in ("xml", "info"):
         if not out[key].ok:
             raise out[key].error

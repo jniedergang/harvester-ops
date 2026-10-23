@@ -141,19 +141,11 @@ def check_vm_name(name):
 
 
 def close_master(decl, state):
-    """Ferme une connexion ControlMaster restée ouverte vers cet hôte. Le
-    socket ne dépend que de l'adresse, du port et de l'utilisateur : sans
-    cela, un test juste après un retrait passerait par l'ancienne connexion,
-    sans vérifier ni la clé ni l'empreinte."""
-    try:
-        argv = kh.ssh_argv(decl, state, [])[:-1]
-    except (kh.KvmError, kvm_decl.DeclError):
-        return
-    argv[1:1] = ["-O", "exit"]
-    try:
-        RUNNER(argv, capture_output=True, text=True, timeout=10)
-    except (OSError, subprocess.SubprocessError):
-        pass
+    """Ferme la connexion ControlMaster restée ouverte vers cet hôte
+    (kvm_host.close_master) : sans cela, un test juste après un retrait ou
+    un nouvel ajout passerait par l'ancienne connexion, sans vérifier ni la
+    clé ni l'empreinte."""
+    kh.close_master(decl, state, runner=RUNNER)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +164,7 @@ def cmd_host_scan(args):
     step("scan", "running", f"reading the host keys of {args.address}:{args.port}")
     try:
         keys = kvm_decl.scan_host_key(args.address, args.port, runner=RUNNER)
-    except kvm_decl.DeclError as e:
+    except (kh.KvmError, kvm_decl.DeclError) as e:
         step("scan", "error", str(e))
         raise GestureError(str(e)) from None
     step("scan", "done", f"{len(keys)} host key(s)")
@@ -221,6 +213,10 @@ def cmd_host_add(args):
     if why:
         raise UsageError(why)
     state = state_of(args)
+    try:
+        kh.control_path(decl, state)           # socket trop long, `%` : refusé avant tout
+    except kh.KvmError as e:
+        raise UsageError(e.message) from None
     if kvm_decl.decl_path(state, name).exists():
         raise UsageError(f"host {name} is already declared (remove it first)")
     key = read_private_key(args.ssh_key)
@@ -229,7 +225,7 @@ def cmd_host_add(args):
     step("scan", "running", f"reading the host keys of {args.address}:{args.port}")
     try:
         keys = kvm_decl.scan_host_key(args.address, args.port, runner=RUNNER)
-    except kvm_decl.DeclError as e:
+    except (kh.KvmError, kvm_decl.DeclError) as e:
         step("scan", "error", str(e))
         raise GestureError(str(e)) from None
     match = [k for k in keys if k["fingerprint"] == args.fingerprint]

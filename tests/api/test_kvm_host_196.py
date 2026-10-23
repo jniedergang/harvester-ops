@@ -6,10 +6,14 @@ Les analyseurs sont joués sur les sorties réelles de tests/fixtures/kvm/
 distante avec shlex, comme le ferait le shell de l'hôte.
 """
 
+import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,43 +38,58 @@ def remote_argv(argv):
     return shlex.split(argv[-1])
 
 
+def split_batch(script):
+    """Jeton et commandes d'un script de `batch` : [(i, [mots virsh])]. Le
+    découpage se fait sur l'appel `_kvm_run <i> ` en début de ligne, puis
+    shlex redécoupe comme le ferait le shell (un nom peut contenir un saut
+    de ligne, cité)."""
+    lines = script.split("\n")
+    assert lines[0] == "export LC_ALL=C"
+    token = re.search(r"^T=(@@kvm-[0-9a-f]+)$", script, re.M).group(1)
+    cmds = []
+    for chunk in re.split(r"\n_kvm_run (?=\d+ )", script)[1:]:
+        words = shlex.split(chunk)
+        cmds.append((int(words[0]), words[1:]))
+    return token, cmds
+
+
 class FakeHost:
     """Rejoue un hôte : `answers` {arguments virsh (tuple): (rc, stdout, stderr)}.
-    Comprend `virsh` direct et le script de `batch` (sh -c)."""
+    Comprend `virsh` direct et le script de `batch` (sh -c). `noise` : ce
+    qu'un .bashrc afficherait avant le script ; `ssh_rc` : code rendu par
+    ssh quand `ssh_fail` est donné."""
 
-    def __init__(self, answers=None, ssh_fail=None, timeout=False, cut_after=None):
+    def __init__(self, answers=None, ssh_fail=None, timeout=False, cut_after=None, noise="",
+                 ssh_rc=255):
         self.answers = answers or {}
         self.ssh_fail, self.timeout, self.cut_after = ssh_fail, timeout, cut_after
-        self.calls = []
+        self.noise, self.ssh_rc = noise, ssh_rc
+        self.calls, self.kwargs = [], []
 
     def answer(self, args):
         return self.answers.get(tuple(args), (1, "", "error: unexpected command\n"))
 
-    def __call__(self, argv, capture_output=False, text=False, timeout=None):
+    def __call__(self, argv, stdin=None, capture_output=False, text=False, timeout=None):
         assert capture_output and text and timeout
+        assert stdin is subprocess.DEVNULL           # ssh ne lit jamais la console
         self.calls.append(argv)
+        self.kwargs.append({"stdin": stdin, "timeout": timeout})
         if self.timeout:
             raise subprocess.TimeoutExpired(argv, timeout)
-        if self.ssh_fail:
-            return SimpleNamespace(returncode=255, stdout="", stderr=self.ssh_fail)
+        if self.ssh_fail is not None:
+            return SimpleNamespace(returncode=self.ssh_rc, stdout="", stderr=self.ssh_fail)
         rem = remote_argv(argv)
         if rem[:2] == ["env", "LC_ALL=C"]:
             assert rem[2:5] == ["virsh", "-c", "qemu:///system"]
             rc, out, err = self.answer(rem[5:])
             return SimpleNamespace(returncode=rc, stdout=out, stderr=err)
         assert rem[:2] == ["sh", "-c"] and len(rem) == 3
-        head, body = rem[2].split("\n", 1)
-        assert head == "export LC_ALL=C"
-        # une commande par ligne ; un nom peut lui-même contenir un saut de
-        # ligne (cité), d'où le découpage sur la fin de ligne réelle
-        lines = [ln for ln in re.split(r" >&2(?:\n|$)", body) if ln]
-        stdout, stderr = "", ""
-        for i, line in enumerate(lines):
+        token, cmds = split_batch(rem[2])
+        stdout = f"{self.noise}{token} start 1\n"
+        stderr = f"{self.noise}{token} start\n"
+        for i, words in cmds:
             if self.cut_after is not None and i >= self.cut_after:
-                break
-            cmd, rest = line.split(" </dev/null; ", 1)
-            token = shlex.split(rest.split(";")[0])[2]
-            words = shlex.split(cmd)
+                return SimpleNamespace(returncode=255, stdout=stdout, stderr=stderr)
             assert words[:3] == ["virsh", "-c", "qemu:///system"]
             rc, out, err = self.answer(words[3:])
             stdout += f"{out}\n{token} {i} {rc}\n"
@@ -78,47 +97,136 @@ class FakeHost:
         return SimpleNamespace(returncode=0, stdout=stdout, stderr=stderr)
 
 
-def host(fake, state="/var/lib/harvester-ops"):
-    return kh.VirshHost(DECL, state, runner=fake, timeout=30)
+def host(fake, state="/var/lib/harvester-ops", **kw):
+    return kh.VirshHost(DECL, state, runner=fake, timeout=30, **kw)
+
+
+@pytest.fixture
+def state():
+    """Répertoire d'état court : le socket ControlMaster doit tenir en 90
+    octets, ce que les répertoires de tmp_path dépassent."""
+    d = tempfile.mkdtemp(prefix="kvm-", dir="/tmp")
+    yield Path(d)
+    shutil.rmtree(d, ignore_errors=True)
 
 
 # --- ssh_argv -----------------------------------------------------------
 
-def test_ssh_argv_contract(tmp_path):
-    argv = kh.ssh_argv({**DECL, "port": 2222}, tmp_path, ["virsh", "list"])
+def test_ssh_argv_contract(state):
+    argv = kh.ssh_argv({**DECL, "port": 2222}, state, ["virsh", "list"])
     opts = [argv[i + 1] for i, a in enumerate(argv) if a == "-o"]
+    cpath = kh.control_path({**DECL, "port": 2222}, state)
+    assert re.fullmatch(rf"{state}/ssh/cm-node2-[0-9a-f]{{8}}", str(cpath))
     assert opts == ["BatchMode=yes", "ConnectTimeout=10", "StrictHostKeyChecking=yes",
-                    f"UserKnownHostsFile={tmp_path}/ssh/node2_known",
+                    f"UserKnownHostsFile={state}/ssh/node2_known",
                     "GlobalKnownHostsFile=/dev/null", "IdentitiesOnly=yes",
-                    "ControlMaster=auto", f"ControlPath={tmp_path}/ssh/cm-%C", "ControlPersist=60"]
-    assert argv[argv.index("-i") + 1] == f"{tmp_path}/ssh/node2_id"
+                    "ControlMaster=auto", f"ControlPath={cpath}", "ControlPersist=60"]
+    assert argv[argv.index("-i") + 1] == f"{state}/ssh/node2_id"
     assert argv[argv.index("-p") + 1] == "2222" and argv[argv.index("-l") + 1] == "ju"
     assert argv[-3:] == ["--", "172.16.1.12", "virsh list"]
     assert "accept-new" not in " ".join(argv)
 
 
 @pytest.mark.parametrize("name", ["a;rm -rf /", "$(id)", "x y", "'q'", "`id`", "a\nb", "-x", "&&", ""])
-def test_ssh_argv_quotes_each_remote_argument(tmp_path, name):
-    argv = kh.ssh_argv(DECL, tmp_path, ["virsh", "dominfo", "--domain", name])
+def test_ssh_argv_quotes_each_remote_argument(state, name):
+    argv = kh.ssh_argv(DECL, state, ["virsh", "dominfo", "--domain", name])
     assert shlex.split(argv[-1]) == ["virsh", "dominfo", "--domain", name]
 
 
-def test_ssh_argv_quotes_option_paths_with_spaces(tmp_path):
-    state = tmp_path / "a b"
+def test_ssh_argv_quotes_option_paths_with_spaces(state):
+    state = state / "a b"
     argv = kh.ssh_argv(DECL, state, ["true"])
     assert f'UserKnownHostsFile="{state}/ssh/node2_known"' in argv
 
 
 @pytest.mark.parametrize("patch", [{"address": "-oProxyCommand=id"}, {"name": "../x"},
-                                   {"port": 0}, {"ssh_key": "../../id"}])
-def test_ssh_argv_refuses_bad_declaration(tmp_path, patch):
-    with pytest.raises((kh.KvmError, kh.kvm_decl.DeclError)):
-        kh.ssh_argv({**DECL, **patch}, tmp_path, ["true"])
+                                   {"port": 0}, {"ssh_key": "../../id"}, {"ssh_key": "actions.db"},
+                                   {"known_hosts": "/etc/ssh/ssh_known_hosts"},
+                                   {"uri": "qemu+ext:///system?command=/tmp/x"}])
+def test_ssh_argv_refuses_bad_declaration(state, patch):
+    # toujours KvmError `failed`, jamais un DeclError qui fuit
+    with pytest.raises(kh.KvmError) as e:
+        kh.ssh_argv({**DECL, **patch}, state, ["true"])
+    assert e.value.kind == "failed" and "invalid declaration" in e.value.message
+
+
+def test_ssh_argv_wraps_a_resolve_error(state, monkeypatch):
+    def boom(st, path):
+        raise kh.kvm_decl.DeclError("path escapes the state directory")
+    monkeypatch.setattr(kh.kvm_decl, "resolve", boom)
+    with pytest.raises(kh.KvmError) as e:
+        kh.ssh_argv(DECL, state, ["true"])
+    assert e.value.kind == "failed" and "escapes" in e.value.message
+
+
+# --- ControlMaster ---------------------------------------------------------
+
+def test_control_path_per_declaration(state):
+    base = kh.control_path(DECL, state)
+    # un autre nom, une autre adresse, un autre port ou utilisateur : un autre socket
+    others = [kh.control_path({**DECL, **p}, state) for p in (
+        {"name": "node2b", "ssh_key": "ssh/node2b_id", "known_hosts": "ssh/node2b_known"},
+        {"address": "172.16.1.13"}, {"port": 2222}, {"user": "root"})]
+    assert len({base, *others}) == 5
+    assert others[0].name.startswith("cm-node2b-") and base.name.startswith("cm-node2-")
+    assert kh.control_path(DECL, state) == base          # stable
+
+
+@pytest.mark.parametrize("extra,ok", [(90, True), (91, False), (200, False)])
+def test_control_path_length_limit(extra, ok):
+    # le chemin final doit tenir en 90 octets (ssh lie d'abord <chemin>.<16>)
+    fixed = len("/ssh/cm-node2-") + kh.CONTROL_HASH_LEN
+    st = "/" + "s" * (extra - fixed - 1)
+    if ok:
+        assert len(str(kh.control_path(DECL, st))) == extra
+        return
+    with pytest.raises(kh.KvmError) as e:
+        kh.control_path(DECL, st)
+    assert e.value.kind == "failed" and f"state directory takes {len(st)} bytes" in e.value.message
+    with pytest.raises(kh.KvmError):
+        kh.ssh_argv(DECL, st, ["true"])
+
+
+def test_control_path_refuses_percent_in_state():
+    with pytest.raises(kh.KvmError, match="must not contain '%'"):
+        kh.control_path(DECL, "/tmp/st%C")
+
+
+class CloseRunner:
+    def __init__(self, rc=0, exc=None):
+        self.rc, self.exc, self.calls = rc, exc, []
+
+    def __call__(self, argv, **kw):
+        self.calls.append((argv, kw))
+        if self.exc:
+            raise self.exc
+        return SimpleNamespace(returncode=self.rc, stdout="", stderr="")
+
+
+@pytest.mark.parametrize("runner,expected", [
+    (CloseRunner(0), True), (CloseRunner(255), False),
+    (CloseRunner(exc=subprocess.TimeoutExpired("ssh", 10)), False),
+    (CloseRunner(exc=FileNotFoundError(2, "No such file", "ssh")), False),
+])
+def test_close_master_same_options(state, runner, expected):
+    assert kh.close_master(DECL, state, runner=runner) is expected
+    argv, kw = runner.calls[0]
+    assert argv[:3] == ["ssh", "-O", "exit"] and argv[-2:] == ["--", "172.16.1.12"]
+    # mêmes options que les commandes, donc le même socket
+    assert argv[3:-2] == kh.ssh_argv(DECL, state, [])[1:-3]
+    assert kw["stdin"] is subprocess.DEVNULL and kw["timeout"] == 10
+
+
+def test_close_master_bad_declaration_never_runs_ssh(state):
+    r = CloseRunner()
+    assert kh.close_master({**DECL, "ssh_key": "actions.db"}, state, runner=r) is False
+    assert r.calls == []
 
 
 # --- classement des erreurs ----------------------------------------------
 
 ERRORS = [
+    # ssh lui-même (code 255) : ses repères, sur sa sortie d'erreur
     ("hostkey", 255, "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
                      "@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n"
                      "Host key verification failed.\n"),
@@ -129,27 +237,71 @@ ERRORS = [
     ("unreachable", 255, "ssh: connect to host 172.16.1.12 port 22: Connection timed out\n"),
     ("unreachable", 255, "ssh: connect to host 172.16.1.12 port 22: No route to host\n"),
     ("unreachable", 255, "ssh: Could not resolve hostname kvm9: Name or service not known\n"),
+    ("failed", 255, ""),
+    # commande distante : seulement les repères de virsh/libvirt
     ("notfound", 1, "error: failed to get domain 'nope'\n"),
+    ("notfound", 1, "error: failed to get domain 'connection refused'\n"),
+    ("notfound", 1, "error: failed to get domain 'Host key verification failed'\n"),
     ("notfound", 1, "error: failed to get pool 'nope'\nerror: Storage pool not found: no storage "
                     "pool with matching name 'nope'\n"),
     ("denied", 1, "error: failed to connect to the hypervisor\nerror: authentication unavailable: "
                   "no polkit agent available to authenticate action 'org.libvirt.unix.manage'\n"),
     ("denied", 1, "error: failed to connect to the hypervisor\nerror: Failed to connect socket to "
                   "'/var/run/libvirt/virtqemud-sock': Permission denied\n"),
+    ("failed", 1, "error: failed to connect to the hypervisor\nerror: Failed to connect socket to "
+                  "'/var/run/libvirt/virtqemud-sock': Connection refused\n"),
+    ("failed", 1, "error: failed to connect to the hypervisor\nerror: Failed to connect socket to "
+                  "'/var/run/libvirt/virtqemud-sock': No such file or directory\n"),
     ("failed", 1, "error: Requested operation is not valid: domain is not running\n"),
+    ("failed", 1, ""),
     ("failed", 127, "sh: virsh: command not found\n"),
+    # code distant hors 255 : un texte de ssh dans la sortie d'une commande ne compte pas
+    ("failed", 1, "Connection timed out\n"),
 ]
 
 
 @pytest.mark.parametrize("kind,rc,stderr", ERRORS)
 def test_virsh_error_kinds(kind, rc, stderr):
-    fake = FakeHost({("domstate", "--domain", "x"): (rc, "", stderr)})
     if rc == 255:
         fake = FakeHost(ssh_fail=stderr)
+    else:
+        fake = FakeHost({("domstate", "--domain", "x"): (rc, "", stderr)})
     with pytest.raises(kh.KvmError) as e:
         host(fake).virsh("domstate", "--domain", "x")
     assert e.value.kind == kind and e.value.host == "node2" and e.value.rc == rc
-    assert str(e.value).startswith(f"node2: {kind}")
+    assert str(e.value).startswith(f"node2: {kind}: ")
+
+
+@pytest.mark.parametrize("kind,rc,stderr", [e for e in ERRORS if e[1] != 255])
+def test_batch_error_kinds_use_libvirt_markers_only(kind, rc, stderr):
+    fake = FakeHost({("domstate", "--domain", "x"): (rc, "", stderr), ("hostname",): (0, "h\n", "")})
+    out = host(fake).batch({"s": ("domstate", "--domain", "x"), "h": ("hostname",)})
+    assert out["s"].error.kind == kind and out["s"].rc == rc and out["h"] == "h\n"
+
+
+@pytest.mark.parametrize("rc,stderr,message", [
+    (1, "", "node2: failed: command exited with status 1"),
+    (255, "", "node2: failed: ssh exited with status 255"),
+    (1, "error: failed to connect to the hypervisor\nerror: Failed to connect socket to "
+        "'/var/run/libvirt/virtqemud-sock': Connection refused\n",
+     "node2: failed: libvirt is not reachable on the host: error: Failed to connect socket to "
+     "'/var/run/libvirt/virtqemud-sock': Connection refused"),
+])
+def test_error_messages_explain(rc, stderr, message):
+    fake = FakeHost(ssh_fail=stderr) if rc == 255 else FakeHost({("list",): (rc, "", stderr)})
+    with pytest.raises(kh.KvmError) as e:
+        host(fake).virsh("list")
+    assert e.value.message == message
+
+
+def test_ssh_markers_need_rc_255():
+    # même texte, code 1 (la commande distante) : pas un problème de ssh
+    with pytest.raises(kh.KvmError) as e:
+        host(FakeHost(ssh_fail="Permission denied (publickey).\n", ssh_rc=1)).virsh("list")
+    assert e.value.kind == "denied"
+    with pytest.raises(kh.KvmError) as e:
+        host(FakeHost(ssh_fail="Host key verification failed.\n", ssh_rc=1)).virsh("list")
+    assert e.value.kind == "failed"
 
 
 def test_timeout_is_classified():
@@ -166,8 +318,8 @@ def test_missing_ssh_binary_is_failed():
     assert e.value.kind == "failed"
 
 
-def test_error_messages_never_carry_key_or_state_paths(tmp_path):
-    state = tmp_path / "secret-state"
+def test_error_messages_never_carry_key_or_state_paths(state):
+    state = state / "secret"
     stderr = (f"Warning: Identity file {state}/ssh/node2_id not accessible: No such file\n"
               f"Load key \"{state}/ssh/node2_id\": bad permissions\n"
               "ju@172.16.1.12: Permission denied (publickey).\n")
@@ -185,9 +337,17 @@ def test_virsh_returns_stdout_and_runs_with_c_locale():
     assert remote_argv(fake.calls[0])[:5] == ["env", "LC_ALL=C", "virsh", "-c", "qemu:///system"]
 
 
-def test_virsh_creates_control_dir_0700(tmp_path):
-    host(FakeHost({("list",): (0, "", "")}), tmp_path).virsh("list")
-    assert (tmp_path / "ssh").stat().st_mode & 0o777 == 0o700
+def test_virsh_creates_control_dir_0700(state):
+    host(FakeHost({("list",): (0, "", "")}), state).virsh("list")
+    assert (state / "ssh").stat().st_mode & 0o777 == 0o700
+
+
+def test_every_ssh_call_closes_stdin():
+    # le faux hôte refuse tout appel sans stdin=DEVNULL ; on le vérifie ici aussi
+    fake = FakeHost({("list",): (0, "", ""), ("hostname",): (0, "h\n", "")})
+    host(fake).virsh("list")
+    host(fake).batch({"h": ("hostname",)})
+    assert [k["stdin"] for k in fake.kwargs] == [subprocess.DEVNULL] * 2
 
 
 # --- batch --------------------------------------------------------------
@@ -221,8 +381,7 @@ def test_batch_marker_is_random_and_output_cannot_forge_it():
     for _ in range(2):
         fake = Spy()
         out = host(fake).batch({"a": ("x",), "b": ("y",)})
-        script = remote_argv(fake.calls[0])[2]
-        seen.append(re.search(r"(@@kvm-[0-9a-f]+) 0 ", script.replace("'", " ")).group(1))
+        seen.append(split_batch(remote_argv(fake.calls[0])[2])[0])
         assert out["a"] == "@@kvm-deadbeef 0 0\nfake marker line\n" and out["b"].ok
     assert seen[0] != seen[1] and all(s.startswith("@@kvm-") and len(s) > 20 for s in seen)
 
@@ -240,22 +399,49 @@ def test_batch_hostile_names_stay_one_argument(name):
     assert out["d"] == "ok\n"            # le faux hôte n'a reconnu que l'argument exact
 
 
-def test_batch_ssh_failure_raises_classified():
+@pytest.mark.parametrize("rc,stderr,kind", [
+    (255, "Host key verification failed.\n", "hostkey"),
+    (255, "ssh: connect to host 172.16.1.12 port 22: Connection refused\n", "unreachable"),
+    (255, "", "failed"),
+    # pas de repère de départ mais pas 255 : le script n'a pas tourné (shell absent)
+    (127, "bash: sh: command not found\nConnection refused\n", "failed"),
+])
+def test_batch_ssh_failure_raises_classified(rc, stderr, kind):
     with pytest.raises(kh.KvmError) as e:
-        host(FakeHost(ssh_fail="Host key verification failed.\n")).batch({"a": ("list",)})
-    assert e.value.kind == "hostkey"
+        host(FakeHost(ssh_fail=stderr, ssh_rc=rc)).batch({"a": ("list",)})
+    assert e.value.kind == kind and e.value.rc == rc
+
+
+def test_batch_discards_shell_noise_before_the_start_marker():
+    # un .bashrc qui affiche quelque chose, sur stdout et stderr
+    fake = FakeHost({("hostname",): (0, "node2\n", ""),
+                     ("dominfo", "--domain", "x"): (1, "", "error: failed to get domain 'x'\n")},
+                    noise="Welcome to node2\nHost key verification failed.\n")
+    out = host(fake).batch({"h": ("hostname",), "d": ("dominfo", "--domain", "x")})
+    assert out["h"] == "node2\n" and out["d"].error.kind == "notfound"
+    assert "Welcome" not in out["d"]
 
 
 def test_batch_cut_midway_marks_missing_commands():
     fake = FakeHost({("a",): (0, "A\n", ""), ("b",): (0, "B\n", "")}, cut_after=1)
     out = host(fake).batch({"a": ("a",), "b": ("b",)})
     assert out["a"] == "A\n" and not out["b"].ok and out["b"].error.kind == "failed"
+    assert "connection lost" in out["b"].error.message
 
 
 def test_batch_timeout():
     with pytest.raises(kh.KvmError) as e:
         host(FakeHost(timeout=True)).batch({"a": ("list",)})
     assert e.value.kind == "timeout"
+
+
+@pytest.mark.parametrize("kw,cmd,total", [({}, 20, 50), ({"cmd_timeout": 5}, 5, 35),
+                                          ({"cmd_timeout": 0.2}, 1, 31)])
+def test_batch_per_command_timeout_and_ssh_budget(kw, cmd, total):
+    fake = FakeHost({("list",): (0, "", "")})
+    host(fake, **kw).batch({"a": ("list",)})
+    script = remote_argv(fake.calls[0])[2]
+    assert f"W='timeout -k 5 {cmd}'" in script and fake.kwargs[0]["timeout"] == total
 
 
 # --- analyseurs sur les relevés réels -------------------------------------
@@ -286,6 +472,8 @@ def test_parse_list_all():
 
 
 @pytest.mark.parametrize("fixture,expected", [
+    ("dominfo-transient.txt", {"id": 7, "name": "scratch", "state": "running", "vcpus": 2,
+                               "persistent": False, "autostart": False, "managed_save": False}),
     ("dominfo-harvlab-n1.txt", {"id": 1, "name": "harvlab-n1", "state": "running", "vcpus": 8,
                                 "cpu_time_s": 1074.5, "max_memory_kib": 16777216,
                                 "persistent": True, "autostart": False, "managed_save": False}),
@@ -342,6 +530,42 @@ def test_parse_domain_xml_vmwlab_esx1():
     assert d["nics"] == [{"type": "bridge", "source": "br0", "mac": "52:54:00:4c:ae:80",
                           "model": "e1000e"}]
     assert d["graphics"] == [{"type": "vnc", "port": None, "listen": "127.0.0.1", "autoport": True}]
+
+
+def test_parse_domain_xml_live_network_nvme_cdrom_no_graphics():
+    d = kh.parse_domain_xml(fx("dumpxml-live-network-nvme.xml"))
+    assert (d["name"], d["id"], d["graphics"]) == ("scratch", 7, [])
+    assert d["disks"] == [
+        {"target": "nvme0n1", "device": "disk", "type": "nvme", "bus": "nvme", "format": "raw",
+         "source": "0000:01:00.0"},
+        {"target": "sdb", "device": "cdrom", "type": "file", "bus": "sata", "format": "raw",
+         "source": None},
+        {"target": "vdb", "device": "disk", "type": "block", "bus": "virtio", "format": "raw",
+         "source": "/dev/vg0/scratch"},
+        {"target": "vdc", "device": "disk", "type": "network", "bus": "virtio", "format": "raw",
+         "source": "rbd:pool/scratch-data"},
+        {"target": "vdd", "device": "disk", "type": "volume", "bus": "virtio", "format": "qcow2",
+         "source": "images/scratch.qcow2"}]
+    assert d["nics"] == [
+        # le XML vivant porte aussi bridge='virbr0' : c'est le réseau qui compte
+        {"type": "network", "source": "default", "mac": "52:54:00:aa:bb:01", "model": "virtio"},
+        {"type": "bridge", "source": "br0", "mac": "52:54:00:aa:bb:02", "model": "virtio"},
+        {"type": "direct", "source": "eno1", "mac": "52:54:00:aa:bb:03", "model": "virtio"},
+        {"type": "user", "source": None, "mac": "52:54:00:aa:bb:04", "model": "e1000e"},
+        {"type": "vhostuser", "source": "/run/vhost/sock0", "mac": "52:54:00:aa:bb:05",
+         "model": "virtio"}]
+
+
+@pytest.mark.parametrize("disk,source", [
+    ("<disk type='dir' device='disk'><source dir='/srv/d'/><target dev='vde'/></disk>", "/srv/d"),
+    ("<disk type='network' device='disk'><source protocol='nbd'/><target dev='vdf'/></disk>", "nbd"),
+    ("<disk type='nvme' device='disk'><source type='pci'><address domain='0x0001' bus='0x3b' "
+     "slot='0x1f' function='0x7'/></source><target dev='nvme1'/></disk>", "0001:3b:1f.7"),
+    ("<disk type='weird' device='disk'><source path='/p'/><target dev='vdg'/></disk>", "/p"),
+])
+def test_parse_domain_xml_disk_source_by_type(disk, source):
+    xml = f"<domain><name>d</name><devices>{disk}</devices></domain>"
+    assert kh.parse_domain_xml(xml)["disks"][0]["source"] == source
 
 
 @pytest.mark.parametrize("unit,value,kib", [("KiB", 1024, 1024), ("MiB", 2, 2048),
@@ -504,7 +728,11 @@ def test_host_inventory_unreachable_raises():
 
 def detail_answers(name, xml, info, stats=(0, "", "")):
     return {("dumpxml", "--domain", name): xml, ("dominfo", "--domain", name): info,
-            ("domstats", "--raw", *kh.DOMSTATS_GROUPS, "--domain", name): stats}
+            ("domstats", "--raw", "--nowait", *kh.DOMSTATS_GROUPS, "--domain", name): stats}
+
+
+def test_domstats_never_waits_for_a_busy_domain():
+    assert "--nowait" in kh.INVENTORY_COMMANDS["domstats"]
 
 
 def test_vm_detail():
@@ -527,3 +755,95 @@ def test_vm_detail_notfound_and_stats_failure():
                                    (0, fx("dominfo-harvlab-n1.txt"), ""), (1, "", "error: boom\n")))
     vm = kh.vm_detail(host(fake), "harvlab-n1")
     assert vm["state"] == "running" and vm["stats"] == {}
+
+
+# --- le VRAI script de batch, exécuté localement ---------------------------
+# Le faux runner remplace seulement ssh : il lance localement, par `sh -c`, la
+# ligne que le shell distant recevrait, avec un faux `virsh` en tête du PATH.
+# Le protocole des repères, `timeout` et la citation sont donc éprouvés pour
+# de vrai.
+
+FAKE_VIRSH = r"""#!/bin/sh
+# faux virsh : « virsh -c URI commande args... »
+shift 2
+case "$1" in
+  hostname) echo node2-xl170r ;;
+  version) cat "$FIX/version.txt" ;;
+  dominfo) echo "error: failed to get domain '$3'" >&2; exit 1 ;;
+  echo-arg) printf '%s' "$3" ;;
+  noeol) printf 'no-newline' ;;
+  hang) sleep 30 ;;
+  rc124) echo "exit 124 from virsh" >&2; exit 124 ;;
+  *) echo "error: unknown command '$1'" >&2; exit 1 ;;
+esac
+"""
+
+
+class LocalShell:
+    """Joue la commande distante d'un argv ssh dans un `sh` local."""
+
+    def __init__(self, path, noise=False):
+        self.path, self.noise, self.calls = path, noise, 0
+
+    def __call__(self, argv, stdin=None, capture_output=False, text=False, timeout=None):
+        assert argv[0] == "ssh" and argv[-3] == "--" and stdin is subprocess.DEVNULL
+        self.calls += 1
+        remote = argv[-1]
+        if self.noise:                   # ce qu'afficherait un .bashrc
+            remote = "echo 'Welcome'; echo 'Host key verification failed.' >&2; " + remote
+        return subprocess.run(["/bin/sh", "-c", remote], stdin=stdin, capture_output=True, text=True,
+                              timeout=timeout, env={"PATH": self.path, "FIX": str(FIX)})
+
+
+@pytest.fixture
+def fake_bin(state):
+    """bin/ : le faux virsh ; tools/ : sh, cat et sleep seulement (pas de timeout)."""
+    bindir, tools = state / "bin", state / "tools"
+    bindir.mkdir()
+    tools.mkdir()
+    (bindir / "virsh").write_text(FAKE_VIRSH)
+    (bindir / "virsh").chmod(0o755)
+    for tool in ("sh", "cat", "sleep"):
+        os.symlink(shutil.which(tool), tools / tool)
+    return SimpleNamespace(bin=bindir, tools=tools)
+
+
+HOSTILE = ["a'b; touch /tmp/kvm-pwned", "$(id)", "x\ny", "`id`", "--help"]
+
+
+def test_real_script_marker_protocol(state, fake_bin):
+    runner = LocalShell(f"{fake_bin.bin}:/usr/bin:/bin", noise=True)
+    cmds = {"h": ("hostname",), "v": ("version",), "d": ("dominfo", "--domain", "nope"),
+            "n": ("noeol",)}
+    cmds.update({f"q{i}": ("echo-arg", "--domain", name) for i, name in enumerate(HOSTILE)})
+    out = host(runner, state).batch(cmds)
+    assert runner.calls == 1
+    assert out["h"] == "node2-xl170r\n" and out["v"] == fx("version.txt")
+    assert out["n"] == "no-newline"
+    assert out["d"].error.kind == "notfound" and out["d"].rc == 1
+    assert "Welcome" not in out["h"] and "Host key" not in out["d"]    # bruit jeté
+    for i, name in enumerate(HOSTILE):
+        assert out[f"q{i}"] == name
+    assert not os.path.exists("/tmp/kvm-pwned")
+
+
+def test_real_script_one_hung_command_times_out_alone(state, fake_bin):
+    runner = LocalShell(f"{fake_bin.bin}:/usr/bin:/bin")
+    t0 = time.monotonic()
+    out = host(runner, state, cmd_timeout=1).batch(
+        {"h": ("hostname",), "x": ("hang",), "v": ("version",)})
+    assert time.monotonic() - t0 < 10
+    assert out["h"] == "node2-xl170r\n" and out["v"] == fx("version.txt")
+    assert out["x"].error.kind == "timeout" and out["x"].rc == 124
+    assert "within 1s" in out["x"].error.message
+
+
+def test_real_script_without_timeout_on_the_host(state, fake_bin):
+    # pas de `timeout` : commandes lancées telles quelles, un code 124 n'est
+    # alors pas pris pour un délai
+    runner = LocalShell(f"{fake_bin.bin}:{fake_bin.tools}")
+    out = host(runner, state).batch({"h": ("hostname",), "r": ("rc124",),
+                                     "d": ("dominfo", "--domain", "connection refused")})
+    assert out["h"] == "node2-xl170r\n"
+    assert out["r"].error.kind == "failed" and out["r"].rc == 124
+    assert out["d"].error.kind == "notfound"

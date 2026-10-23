@@ -18,6 +18,12 @@ GOOD = {"name": "kvm-paris-01", "address": "10.0.0.21", "user": "virtops",
         "ssh_key": "ssh/kvm-paris-01_id", "known_hosts": "ssh/kvm-paris-01_known"}
 
 
+def named(name, **extra):
+    """GOOD sous un autre nom, chemins dérivés du nom."""
+    return {**GOOD, "name": name, "ssh_key": kvm_decl.key_rel(name),
+            "known_hosts": kvm_decl.known_hosts_rel(name), **extra}
+
+
 def mode(p):
     return stat.S_IMODE(os.stat(p).st_mode)
 
@@ -38,11 +44,18 @@ def mode(p):
     ({"port": True}, "port must be between 1 and 65535"),
     ({"user": ""}, "invalid or missing user"),
     ({"user": "-l root"}, "invalid or missing user"),
-    ({"ssh_key": ""}, "missing ssh_key"),
-    ({"known_hosts": None}, "missing known_hosts"),
-    ({"uri": "qemu:///session"}, "uri must be"),
-    ({"uri": "xen:///system"}, "uri must be"),
-    ({"uri": "test:///default"}, "uri must be"),
+    ({"ssh_key": ""}, "ssh_key must be ssh/kvm-paris-01_id"),
+    ({"known_hosts": None}, "known_hosts must be ssh/kvm-paris-01_known"),
+    # la clé et l'empreinte sont TOUJOURS les chemins dérivés du nom
+    ({"ssh_key": "actions.db"}, "ssh_key must be"),
+    ({"ssh_key": "kvm.d/other.yaml"}, "ssh_key must be"),
+    ({"ssh_key": "ssh/h2_id"}, "ssh_key must be"),
+    ({"ssh_key": "/home/x/.ssh/id_ed25519"}, "ssh_key must be"),
+    ({"ssh_key": "ssh/kvm-paris-01_known"}, "ssh_key must be"),
+    ({"known_hosts": "actions.db"}, "known_hosts must be"),
+    ({"known_hosts": "ssh/h2_known"}, "known_hosts must be"),
+    ({"known_hosts": "/etc/ssh/ssh_known_hosts"}, "known_hosts must be"),
+    ({"known_hosts": "ssh/../ssh/kvm-paris-01_known"}, "known_hosts must be"),
     ({"labels": ["a"]}, "labels must map"),
     ({"labels": {"site": 3}}, "labels must map"),
 ])
@@ -51,12 +64,42 @@ def test_check_decl_refuses(patch, why):
 
 
 @pytest.mark.parametrize("patch", [
-    {}, {"port": 2222}, {"port": 1}, {"port": 65535}, {"uri": "qemu+ssh://h/system"},
-    {"uri": "qemu+tls://h/system"}, {"address": "kvm1.example.com"}, {"address": "fe80::1"},
-    {"labels": {"site": "paris", "groupe": "prod"}},
+    {}, {"port": 2222}, {"port": 1}, {"port": 65535}, {"address": "kvm1.example.com"},
+    {"address": "fe80::1"}, {"labels": {"site": "paris", "groupe": "prod"}},
 ])
 def test_check_decl_accepts(patch):
     assert kvm_decl.check_decl(kvm_decl.normalize({**GOOD, **patch})) is None
+
+
+# l'URI part telle quelle à virsh sur l'hôte : liste blanche de transports,
+# aucune requête (`ext` + `command=` lancerait n'importe quel programme)
+@pytest.mark.parametrize("uri,accepted", [
+    ("qemu:///system", True),
+    ("qemu+ssh://h/system", True),
+    ("qemu+ssh://root@h:2222/system", True),
+    ("qemu+tls://h/system", True),
+    ("qemu+tcp://h/system", True),
+    ("qemu+unix:///system", True),
+    ("qemu+ext:///system?command=/tmp/x", False),
+    ("qemu+ext:///system", False),
+    ("qemu+libssh2://h/system", False),
+    ("qemu+libssh://h/system?known_hosts=/x", False),
+    ("qemu+ssh://h/system?command=/tmp/x", False),
+    ("qemu+ssh://h/system?keyfile=/root/.ssh/id", False),
+    ("qemu+unix:///system?socket=/tmp/s", False),
+    ("qemu:///system?x=1", False),
+    ("qemu:///session", False),
+    ("xen:///system", False),
+    ("test:///default", False),
+    ("qemu+ssh://h/sys tem", False),
+    ("", False),
+    (None, False),
+])
+def test_check_decl_uri_whitelist(uri, accepted):
+    why = kvm_decl.check_decl({**GOOD, "uri": uri})
+    assert (why is None) is accepted, why
+    if not accepted:
+        assert why.startswith("uri must be")
 
 
 def test_check_decl_not_a_mapping():
@@ -71,12 +114,33 @@ def test_write_known_hosts_refuses_a_string(tmp_path, lines):
     assert not (tmp_path / kvm_decl.known_hosts_rel(GOOD["name"])).exists()
 
 
+@pytest.mark.parametrize("lines,why", [
+    (["10.0.0.21 ssh-ed25519"], "hosts keytype key"),
+    ([""], "hosts keytype key"),
+    (["10.0.0.21 ssh-ed25519 AAAA\nevil.example ssh-ed25519 BBBB"], "line break"),
+    (["10.0.0.21 ssh-ed25519 AAAA\r"], "line break"),
+    (["@cert-authority *.example ssh-ed25519 AAAA"], "markers"),
+    (["@revoked 10.0.0.21 ssh-ed25519 AAAA"], "markers"),
+    (["10.0.0.21 ssh-ed25519 AAAA", None], "must be a string"),
+])
+def test_write_known_hosts_validates_each_line(tmp_path, lines, why):
+    with pytest.raises(kvm_decl.DeclError, match=why):
+        kvm_decl.write_known_hosts(tmp_path, GOOD["name"], lines)
+    assert not (tmp_path / kvm_decl.known_hosts_rel(GOOD["name"])).exists()
+
+
+def test_write_known_hosts_accepts_one_trailing_newline(tmp_path):
+    kvm_decl.write_known_hosts(tmp_path, "h1", ["[10.0.0.21]:2222 ssh-ed25519 AAAA\n",
+                                               "10.0.0.21 ecdsa-sha2-nistp256 BBBB c"])
+    assert (tmp_path / "ssh" / "h1_known").read_text() == (
+        "[10.0.0.21]:2222 ssh-ed25519 AAAA\n10.0.0.21 ecdsa-sha2-nistp256 BBBB c\n")
+
+
 def test_write_load_roundtrip_relative_paths_and_permissions(tmp_path):
     key = kvm_decl.write_key(tmp_path, GOOD["name"], b"-----BEGIN KEY-----\nabc")
     kh = kvm_decl.write_known_hosts(tmp_path, GOOD["name"], ["10.0.0.21 ssh-ed25519 AAAA"])
-    # chemins absolus sous l'état : rangés relatifs
-    path = kvm_decl.write(tmp_path, {**GOOD, "ssh_key": str(tmp_path / key),
-                                     "known_hosts": str(tmp_path / kh), "labels": {"site": "paris"}})
+    path = kvm_decl.write(tmp_path, {**GOOD, "ssh_key": key, "known_hosts": kh,
+                                     "labels": {"site": "paris"}})
     doc = json.loads(path.read_text())
     assert doc["ssh_key"] == "ssh/kvm-paris-01_id" and doc["known_hosts"] == "ssh/kvm-paris-01_known"
     assert doc["port"] == 22 and doc["uri"] == "qemu:///system"
@@ -91,12 +155,16 @@ def test_write_load_roundtrip_relative_paths_and_permissions(tmp_path):
     assert sorted(p.name for p in path.parent.iterdir()) == ["kvm-paris-01.yaml"]
 
 
-def test_write_keeps_operator_absolute_path_outside_state(tmp_path):
-    kvm_decl.write(tmp_path, {**GOOD, "ssh_key": "/etc/harvester-ops/keys/k"})
-    assert kvm_decl.load(tmp_path, GOOD["name"])["ssh_key"] == "/etc/harvester-ops/keys/k"
+@pytest.mark.parametrize("path", ["/etc/harvester-ops/keys/k", "ssh/kvm-paris-01_id-abs"])
+def test_write_refuses_any_other_key_path(tmp_path, path):
+    # un chemin absolu, même sous l'état, n'est plus rangé tel quel
+    for p in (path, str(tmp_path / kvm_decl.key_rel(GOOD["name"]))):
+        with pytest.raises(kvm_decl.DeclError, match="ssh_key must be"):
+            kvm_decl.write(tmp_path, {**GOOD, "ssh_key": p})
+    assert not (tmp_path / "kvm.d").exists()
 
 
-@pytest.mark.parametrize("path", ["../outside", "ssh/../../etc/passwd", "..", ""])
+@pytest.mark.parametrize("path", ["../outside", "ssh/../../etc/passwd", "..", "", "/etc/passwd"])
 def test_resolve_and_write_refuse_traversal(tmp_path, path):
     with pytest.raises(kvm_decl.DeclError):
         kvm_decl.resolve(tmp_path, path)
@@ -133,10 +201,10 @@ def test_load_missing_and_mismatched(tmp_path):
 
 
 def test_load_all_skips_bad_files_and_sorts(tmp_path):
-    kvm_decl.write(tmp_path, {**GOOD, "name": "b"})
-    kvm_decl.write(tmp_path, {**GOOD, "name": "a"})
+    kvm_decl.write(tmp_path, named("b"))
+    kvm_decl.write(tmp_path, named("a"))
     (tmp_path / "kvm.d" / "broken.yaml").write_text("{not json")
-    (tmp_path / "kvm.d" / "badport.yaml").write_text(json.dumps({**GOOD, "name": "badport", "port": 0}))
+    (tmp_path / "kvm.d" / "badport.yaml").write_text(json.dumps(named("badport", port=0)))
     warns = []
     assert [d["name"] for d in kvm_decl.load_all(tmp_path, warn=warns.append)] == ["a", "b"]
     assert len(warns) == 2 and any("badport" in w for w in warns)
@@ -152,10 +220,9 @@ def test_load_reads_yaml_written_by_hand(tmp_path):
     assert kvm_decl.load(tmp_path, "h1")["labels"] == {"site": "paris"}
 
 
-def test_remove_deletes_decl_key_pub_and_known_hosts(tmp_path):
+def test_remove_deletes_decl_key_and_known_hosts_only(tmp_path):
     kvm_decl.write_key(tmp_path, "h1", "k")
-    (tmp_path / "ssh" / "h1_id.pub").write_text("pub")
-    kvm_decl.write_known_hosts(tmp_path, "h1", ["l"])
+    kvm_decl.write_known_hosts(tmp_path, "h1", ["10.0.0.1 ssh-ed25519 AAAA"])
     kvm_decl.write_key(tmp_path, "h2", "k")
     kvm_decl.write(tmp_path, {**GOOD, "name": "h1", "ssh_key": "ssh/h1_id", "known_hosts": "ssh/h1_known"})
     assert kvm_decl.remove(tmp_path, "h1") is True
@@ -164,13 +231,46 @@ def test_remove_deletes_decl_key_pub_and_known_hosts(tmp_path):
     assert kvm_decl.remove(tmp_path, "h1") is False
 
 
-def test_remove_never_deletes_outside_state(tmp_path):
-    outside = tmp_path / "operator_key"
-    outside.write_text("k")
+# une déclaration forgée à la main (le fichier n'est pas relu par check_decl
+# au retrait) ne fait effacer QUE les deux chemins dérivés du nom
+@pytest.mark.parametrize("field,value", [
+    ("ssh_key", "actions.db"), ("ssh_key", "kvm.d/other.yaml"), ("ssh_key", "ssh/h2_id"),
+    ("ssh_key", "/home/x/.ssh/id_ed25519"), ("known_hosts", "ssh/h2_known"),
+    ("known_hosts", "notes.db"),
+])
+def test_remove_never_touches_other_files(tmp_path, field, value):
     state = tmp_path / "state"
-    kvm_decl.write(state, {**GOOD, "ssh_key": str(outside)})
-    assert kvm_decl.remove(state, GOOD["name"]) is True
-    assert outside.exists()
+    victims = {"actions.db", "notes.db", "kvm.d/other.yaml", "ssh/h2_id", "ssh/h2_known"}
+    for rel in victims:
+        (state / rel).parent.mkdir(parents=True, exist_ok=True)
+        (state / rel).write_text("keep")
+    outside = tmp_path / "home_x_key"
+    outside.write_text("keep")
+    if value.startswith("/"):
+        value = str(outside)
+    doc = {**GOOD, "name": "h1", "ssh_key": "ssh/h1_id", "known_hosts": "ssh/h1_known", field: value}
+    (state / "kvm.d" / "h1.yaml").write_text(json.dumps(doc))
+    assert kvm_decl.remove(state, "h1") is True
+    assert all((state / rel).read_text() == "keep" for rel in victims) and outside.exists()
+    assert not (state / "kvm.d" / "h1.yaml").exists()
+
+
+def test_remove_tolerates_missing_files_and_deletes_decl_first(tmp_path, monkeypatch):
+    # clé et empreinte déjà absentes : pas d'erreur
+    kvm_decl.write(tmp_path, {**GOOD, "name": "h1", "ssh_key": "ssh/h1_id", "known_hosts": "ssh/h1_known"})
+    assert kvm_decl.remove(tmp_path, "h1") is True
+    # ordre : la déclaration part avant la clé et l'empreinte
+    kvm_decl.write_key(tmp_path, "h1", "k")
+    kvm_decl.write_known_hosts(tmp_path, "h1", ["10.0.0.1 ssh-ed25519 AAAA"])
+    kvm_decl.write(tmp_path, {**GOOD, "name": "h1", "ssh_key": "ssh/h1_id", "known_hosts": "ssh/h1_known"})
+    order, real = [], Path.unlink
+
+    def spy(self, missing_ok=False):
+        order.append(self.name)
+        return real(self, missing_ok=missing_ok)
+    monkeypatch.setattr(Path, "unlink", spy)
+    assert kvm_decl.remove(tmp_path, "h1") is True
+    assert order == ["h1.yaml", "h1_id", "h1_known"]
 
 
 # --- relevé des empreintes ----------------------------------------------
@@ -183,11 +283,14 @@ FPS = {"ssh-ed25519": "256 SHA256:8gT5OWW2NYNipdMYH7US+nIEmhFuR/oWpsSingGgDJk 10
 
 
 class ScanRunner:
-    def __init__(self, keyscan=KEYSCAN, keygen_rc=0, timeout=False):
+    def __init__(self, keyscan=KEYSCAN, keygen_rc=0, timeout=False, missing=None):
         self.keyscan, self.keygen_rc, self.timeout, self.calls = keyscan, keygen_rc, timeout, []
+        self.missing = missing                # programme absent (FileNotFoundError)
 
     def __call__(self, argv, **kw):
         self.calls.append((argv, kw))
+        if argv[0] == self.missing:
+            raise FileNotFoundError(2, "No such file or directory", argv[0])
         if argv[0] == "ssh-keyscan":
             if self.timeout:
                 raise subprocess.TimeoutExpired(argv, 15)
@@ -204,16 +307,29 @@ def test_scan_host_key_lists_types_lines_and_fingerprints():
         ("ecdsa-sha2-nistp256", "SHA256:UueQADEeOOneMBDPJF8Dj56EQZDYwCzt2zh0M7qvZyU")]
     assert keys[0]["line"] == "10.0.0.21 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEDKEY"
     assert r.calls[0][0] == ["ssh-keyscan", "-T", "10", "-p", "2222", "--", "10.0.0.21"]
+    assert r.calls[0][1]["stdin"] is subprocess.DEVNULL
     assert r.calls[1][0] == ["ssh-keygen", "-l", "-E", "sha256", "-f", "-"]
 
 
 @pytest.mark.parametrize("runner,address,port,match", [
-    (ScanRunner(keyscan=""), "10.0.0.21", 22, "no host key"),
-    (ScanRunner(keygen_rc=1), "10.0.0.21", 22, "no host key"),
-    (ScanRunner(timeout=True), "10.0.0.21", 22, "timed out"),
     (ScanRunner(), "-oProxyCommand=id", 22, "invalid address"),
     (ScanRunner(), "10.0.0.21", 0, "port"),
 ])
-def test_scan_host_key_errors(runner, address, port, match):
+def test_scan_host_key_refuses_bad_input(runner, address, port, match):
     with pytest.raises(kvm_decl.DeclError, match=match):
         kvm_decl.scan_host_key(address, port, runner=runner)
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("runner,kind,match", [
+    (ScanRunner(keyscan=""), "failed", "no host key"),
+    (ScanRunner(keygen_rc=1), "failed", "no host key"),
+    (ScanRunner(timeout=True), "timeout", "timed out"),
+    (ScanRunner(missing="ssh-keyscan"), "failed", "cannot run ssh-keyscan"),
+    (ScanRunner(missing="ssh-keygen"), "failed", "cannot run ssh-keygen"),
+])
+def test_scan_host_key_failures_are_classified(runner, kind, match):
+    import kvm_host
+    with pytest.raises(kvm_host.KvmError, match=match) as e:
+        kvm_decl.scan_host_key("10.0.0.21", 22, runner=runner)
+    assert e.value.kind == kind and e.value.host == "10.0.0.21"

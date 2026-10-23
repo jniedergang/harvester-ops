@@ -6,7 +6,11 @@ répertoire d'état de la console, les chemins rangés sont RELATIFS à lui.
     <état>/kvm.d/<nom>.yaml     une déclaration par hôte (0600)
     <état>/ssh/<nom>_id         sa clé privée (0600)
     <état>/ssh/<nom>_known      l'empreinte épinglée de l'hôte (0600)
-    <état>/ssh/cm-<hash>        sockets ControlMaster (répertoire 0700)
+    <état>/ssh/cm-<nom>-<hash>  sockets ControlMaster (répertoire 0700)
+
+La clé et l'empreinte d'un hôte sont TOUJOURS ces deux chemins dérivés de
+son nom : une déclaration qui pointe ailleurs (autre hôte, actions.db, clé
+de l'exploitant) est refusée, et un retrait n'efface jamais rien d'autre.
 
 Le fichier est écrit en JSON, sous-ensemble de YAML : le module reste dans la
 bibliothèque standard, et un fichier corrigé à la main en YAML se relit quand
@@ -66,13 +70,13 @@ def known_hosts_rel(name):
 
 
 def resolve(state, path):
-    """Chemin absolu d'un chemin rangé dans une déclaration. Relatif : sous
-    le répertoire d'état, sans jamais en sortir (`../`) ; absolu (donné par
-    l'exploitant) : tel quel."""
+    """Chemin absolu d'un chemin rangé dans une déclaration : relatif, sous
+    le répertoire d'état, sans jamais en sortir (`../`). Un chemin absolu est
+    refusé : la console ne lit que ce qu'elle a rangé elle-même."""
     if not isinstance(path, str) or not path:
         raise DeclError("empty path")
     if os.path.isabs(path):
-        return Path(path)
+        raise DeclError("absolute path refused")
     base = os.path.abspath(str(state))
     full = os.path.abspath(os.path.join(base, path))
     if not full.startswith(base + os.sep):
@@ -80,21 +84,14 @@ def resolve(state, path):
     return Path(full)
 
 
-def relativize(state, path):
-    """Chemin situé sous le répertoire d'état rendu relatif à lui ; un autre
-    chemin absolu reste tel quel."""
-    if not isinstance(path, str) or not os.path.isabs(path):
-        return path
-    base = os.path.abspath(str(state))
-    ap = os.path.abspath(path)
-    if not ap.startswith(base + os.sep):
-        return path
-    return Path(os.path.relpath(ap, base)).as_posix()
+# transports de libvirt acceptés ; `ext` (commande arbitraire), `libssh`,
+# `libssh2` et toute requête (`?command=`, `?socket=`, `?keyfile=`) sont
+# refusés : l'URI part telle quelle à virsh sur l'hôte
+URI_RE = re.compile(r"^qemu\+(?:ssh|tls|tcp|unix)://[^?\s]*$")
 
 
 def _valid_uri(uri):
-    # qemu:///system, ou un transport explicite (qemu+ssh://, qemu+tls://...)
-    return uri == DEFAULT_URI or (isinstance(uri, str) and re.match(r"^qemu\+[a-z]+://\S*$", uri))
+    return isinstance(uri, str) and (uri == DEFAULT_URI or bool(URI_RE.match(uri)))
 
 
 def check_decl(decl):
@@ -113,11 +110,12 @@ def check_decl(decl):
         return "port must be between 1 and 65535"
     if not isinstance(decl.get("user"), str) or not USER_RE.match(decl["user"]):
         return "invalid or missing user"
-    for field in ("ssh_key", "known_hosts"):
-        if not isinstance(decl.get(field), str) or not decl[field]:
-            return f"missing {field}"
+    for field, expected in (("ssh_key", key_rel(decl["name"])),
+                            ("known_hosts", known_hosts_rel(decl["name"]))):
+        if decl.get(field) != expected:
+            return f"{field} must be {expected}"
     if not _valid_uri(decl.get("uri", DEFAULT_URI)):
-        return "uri must be qemu:///system or qemu+<transport>://..."
+        return "uri must be qemu:///system or qemu+ssh|tls|tcp|unix://... without a query"
     labels = decl.get("labels", {})
     if not isinstance(labels, dict) or any(
             not isinstance(k, str) or not LABEL_KEY_RE.match(k) or not isinstance(v, str)
@@ -215,16 +213,13 @@ def write_private(path, data):
 
 
 def write(state, decl):
-    """Écrit la déclaration (0600, répertoire 0700), chemins rendus relatifs
-    au répertoire d'état. DeclError si elle est invalide."""
+    """Écrit la déclaration (0600, répertoire 0700). DeclError si elle est
+    invalide (dont des chemins de clé ou d'empreinte autres que ceux dérivés
+    du nom)."""
     doc = normalize(decl)
-    for field in ("ssh_key", "known_hosts"):
-        doc[field] = relativize(state, doc.get(field))
     why = check_decl(doc)
     if why:
         raise DeclError(why)
-    for field in ("ssh_key", "known_hosts"):
-        resolve(state, doc[field])          # refuse un chemin qui sort de l'état
     path = decl_path(state, doc["name"])
     write_private(path, json.dumps(doc, indent=2, sort_keys=True) + "\n")
     return path
@@ -241,56 +236,73 @@ def write_key(state, name, data):
     return key_rel(name)
 
 
+def _check_known_line(line):
+    """Ligne known_hosts épinglable : `hôtes type clé`, sur une seule ligne,
+    sans marqueur `@cert-authority` / `@revoked` (qui changerait son sens)."""
+    if not isinstance(line, str):
+        raise DeclError("known_hosts line must be a string")
+    if line.endswith("\n"):
+        line = line[:-1]
+    if "\n" in line or "\r" in line:
+        raise DeclError("known_hosts line must not contain a line break")
+    if line.lstrip().startswith("@"):
+        raise DeclError("known_hosts markers (@cert-authority, @revoked) are refused")
+    if len(line.split()) < 3:
+        raise DeclError("known_hosts line must read: hosts keytype key")
+    return line
+
+
 def write_known_hosts(state, name, lines):
-    """Range la ou les lignes d'empreinte épinglées (0600) ; rend le chemin relatif."""
+    """Range la ou les lignes d'empreinte épinglées (0600) ; rend le chemin
+    relatif. TypeError pour une chaîne, DeclError pour une ligne invalide :
+    rien n'est écrit dans les deux cas."""
     decl_path(state, name)
     if isinstance(lines, (str, bytes)):
         # une chaîne serait lue caractère par caractère, une ligne chacun
         raise TypeError("lines must be a list of known_hosts lines, not a string")
-    text = "".join(line.rstrip("\n") + "\n" for line in lines)
+    text = "".join(_check_known_line(line) + "\n" for line in lines)
     write_private(Path(state) / known_hosts_rel(name), text)
     return known_hosts_rel(name)
 
 
 def remove(state, name):
-    """Supprime la déclaration, la clé et l'empreinte de l'hôte. Seuls les
-    fichiers situés sous le répertoire d'état sont effacés : une clé donnée
-    ailleurs par l'exploitant reste à lui. Rend True si la déclaration
-    existait."""
+    """Supprime la déclaration, puis la clé et l'empreinte de l'hôte : les
+    deux chemins dérivés de son nom, jamais un chemin lu dans le fichier (une
+    déclaration abîmée ou forgée ne fait rien effacer d'autre). Un fichier
+    déjà absent est toléré. Rend True si la déclaration existait.
+
+    L'appelant ferme d'abord la connexion ControlMaster
+    (kvm_host.close_master) : elle survivrait sinon au retrait."""
     path = decl_path(state, name)
-    targets = {key_rel(name), key_rel(name) + ".pub", known_hosts_rel(name)}
-    try:
-        doc = _read(path)
-    except OSError:
-        doc = None
-    if isinstance(doc, dict):
-        for field in ("ssh_key", "known_hosts"):
-            if isinstance(doc.get(field), str) and not os.path.isabs(doc[field]):
-                targets.add(doc[field])
     existed = path.is_file()
-    for rel in sorted(targets):
-        try:
-            resolve(state, rel).unlink()
-        except (DeclError, FileNotFoundError):
-            pass
-    if existed:
-        path.unlink()
+    # la déclaration d'abord : un retrait interrompu ne laisse jamais une
+    # déclaration qui pointe vers une clé effacée
+    path.unlink(missing_ok=True)
+    for rel in (key_rel(name), known_hosts_rel(name)):
+        (Path(state) / rel).unlink(missing_ok=True)
     return existed
 
 
 def scan_host_key(address, port=DEFAULT_PORT, runner=subprocess.run, timeout=15):
     """Clés publiques de l'hôte et leurs empreintes, à montrer à l'exploitant
     avant de les épingler : [{"type", "line", "fingerprint"}]. `line` est la
-    ligne known_hosts telle que ssh la cherchera ([adresse]:port hors 22)."""
+    ligne known_hosts telle que ssh la cherchera ([adresse]:port hors 22).
+    DeclError pour une adresse ou un port refusé ; kvm_host.KvmError
+    (`timeout`, `failed`) quand le relevé échoue."""
     if not isinstance(address, str) or not ADDRESS_RE.match(address):
         raise DeclError("invalid address")
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise DeclError("port must be between 1 and 65535")
+    from kvm_host import KvmError           # import tardif : kvm_host importe ce module
     try:
         res = runner(["ssh-keyscan", "-T", "10", "-p", str(port), "--", address],
-                     capture_output=True, text=True, timeout=timeout)
+                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as e:
-        raise DeclError(f"{address}: host key scan timed out") from e
+        raise KvmError("timeout", f"{address}: timeout: host key scan timed out",
+                       host=address) from e
+    except OSError as e:
+        raise KvmError("failed", f"{address}: failed: cannot run ssh-keyscan ({e.strerror})",
+                       host=address) from e
     out = []
     for line in (res.stdout or "").splitlines():
         line = line.strip()
@@ -299,12 +311,20 @@ def scan_host_key(address, port=DEFAULT_PORT, runner=subprocess.run, timeout=15)
         parts = line.split()
         if len(parts) < 3:
             continue
-        fp = runner(["ssh-keygen", "-l", "-E", "sha256", "-f", "-"], input=line + "\n",
-                    capture_output=True, text=True, timeout=timeout)
+        try:
+            fp = runner(["ssh-keygen", "-l", "-E", "sha256", "-f", "-"], input=line + "\n",
+                        capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            raise KvmError("timeout", f"{address}: timeout: fingerprint computation timed out",
+                           host=address) from e
+        except OSError as e:
+            raise KvmError("failed", f"{address}: failed: cannot run ssh-keygen ({e.strerror})",
+                           host=address) from e
         m = FINGERPRINT_RE.search(fp.stdout or "")
         if fp.returncode != 0 or not m:
             continue
         out.append({"type": parts[1], "line": line, "fingerprint": m.group(0)})
     if not out:
-        raise DeclError(f"{address}: no host key received on port {port}")
+        raise KvmError("failed", f"{address}: failed: no host key received on port {port}",
+                       host=address)
     return out
