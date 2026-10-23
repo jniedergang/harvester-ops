@@ -99,6 +99,12 @@ ailleurs.
   complète de l'installeur (agrégats, VLAN, disque de données, fichiers
   NetworkManager...) ou un fichier de configuration existant importé tel
   quel.
+- **Des hôtes KVM à côté des clusters** : des hôtes libvirt déclarés avec
+  une empreinte de clé épinglée, leurs VMs, pools de stockage et réseaux
+  dans une même vue, et les gestes de cycle de vie (démarrer, arrêter,
+  redémarrer, arrêt forcé, suspendre, reprendre) suivis jusqu'à l'état
+  réel. Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
+  commande.
 - **Scriptable** : le séquençage électrique s'exécute aussi en ligne de
   commande, pour les chaînes d'automatisation et les sites hors ligne, et
   chaque opération a sa simulation.
