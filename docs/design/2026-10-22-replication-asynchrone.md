@@ -1,6 +1,6 @@
 # Réplication asynchrone de VMs entre clusters (reprise après sinistre)
 
-Statut : conception, essai technique fait le 22/10/2026 sur harvlab -> harvlab2.
+Statut : conception, essais faits les 22 et 23/10/2026 sur harvlab et harvlab2.
 Maquette cliquable : `2026-10-22-replication-maquette.html` (données fictives).
 
 ## Besoin
@@ -67,18 +67,37 @@ Banc : harvlab (Harvester v1.8.2, Longhorn 1.11.2, 3 nœuds) vers harvlab2 (v1.9
 
 **cloud-init.** Pour une source NoCloud, KubeVirt prend comme `instance-id` le `firmware.uuid` de la VM (`cloudInitUUIDFromVMI`). Recopier l'UUID de la source : cloud-init ne se rejoue pas. Laisser un nouvel UUID : cloud-init se rejoue, applique la nouvelle configuration, et régénère aussi les clés d'hôte SSH. L'interface doit le dire.
 
+## Essais complémentaires (23/10/2026)
+
+**Écritures dispersées.** Disque de 2 Gio rempli de données aléatoires, puis 200 écritures de 4 Kio par minute à des adresses aléatoires.
+
+| Mesure, par intervalle de 3 min | Valeur |
+|---|---|
+| Données écrites | 2 457 600 octets (600 x 4 Kio) |
+| Taille de l'instantané Longhorn | 2,47 Mo (à 1 % près ce qui est écrit) |
+| Données envoyées par la sauvegarde | 944 à 960 Mo (450 à 458 blocs de 2 Mio), 14 s |
+| Prévision par blocs distincts : 1024 x (1 - (1023/1024)^600) | 454 blocs, 952,6 Mo |
+
+La taille d'un instantané sous-estime l'envoi d'un facteur pouvant aller jusqu'à 512. La phase de mesure compte donc des **blocs de 2 Mio distincts** : par la valeur `newlyUploadDataSize` de vraies sauvegardes (la mesure de référence), ou par la formule N x (1 - (1 - 1/N)^écritures) quand on ne connaît que le nombre d'écritures. Première sauvegarde complète du disque : 30 s, environ 72 Mo/s vers le NAS.
+
+**Retour au site principal.** Bascule vers harvlab2 en 23 s (source arrêtée, volumes activés, VM démarrée), environ 1,5 min d'écritures perdues côté source (après sa dernière sauvegarde). Réplication inverse, puis retour sur harvlab en **67 s, sans perte** : arrêt de la VM, instantané et sauvegarde finale, application, activation, VM démarrée. Le compteur lu sur le disque continue sans trou d'un site à l'autre.
+
+- **Reprotéger coûte une copie complète, dans les deux sens.** Le volume activé porte un nouveau nom : ses sauvegardes ouvrent un nouveau `BackupVolume`, et l'incrémental ne traverse jamais deux `BackupVolume`. Les sauvegardes suivantes redeviennent incrémentales.
+- **Ce que l'ancien site a écrit après sa dernière sauvegarde est perdu**, et le retour l'écrase. L'interface doit le dire avant un retour.
+- **Bascule planifiée** (les deux sites vivants) : arrêter la VM, puis instantané et sauvegarde finale avant d'activer. C'est ce qui donne zéro perte.
+
+**Backing image absente côté secours.** Le webhook de Longhorn refuse le volume de secours (`failed to get backing image ...`). Mais Longhorn sauvegarde déjà la backing image avec la première sauvegarde du volume (`BackupBackingImage` créé tout seul). La console crée côté secours une `BackingImage` en `sourceType: restore` (paramètres `backup-target-name`, `backup-url`), prête en 11 s pour 21,7 Mo, puis le volume de secours. Harvester ne se plaint pas d'une backing image sans `VirtualMachineImage`. Pour démarrer une VM sur ce disque, il faudra en plus faire correspondre la classe de stockage de l'image (bloc 3 de la maquette).
+
 ## Pièges et points encore ouverts
 
 - **L'activation est définitive.** Un volume activé redevient un volume normal. Pour réarmer, il faut recréer le volume de secours, donc tout recopier. D'où deux exercices : l'exercice courant restaure une copie séparée depuis la même sauvegarde sur un réseau isolé ; l'exercice complet (activation puis réarmement) mesure le vrai RTO, rarement.
 - **Un volume de secours occupe sa taille dès sa création** sur le cluster de secours, pas seulement le jour de la bascule.
 - **La relecture naturelle de la cible coûte 1 à 3 min de RPO.** La console doit déclencher la relecture à la fin de chaque sauvegarde.
-- **Phase de mesure à valider.** La taille d'un instantané Longhorn compte les données écrites (granularité 4 Kio). La sauvegarde, elle, envoie des blocs de 2 Mio. Pour des écritures dispersées, l'instantané sous-estime le volume envoyé. L'essai n'a écrit que des blocs contigus de 8 Mio. À mesurer avec des écritures dispersées avant de fonder la prévision dessus.
-- **Une tâche récurrente supprime les instantanés précédents.** Pendant la réplication, la mesure exacte est `newlyUploadDataSize` de chaque `Backup`. La phase de mesure, avant réplication, doit garder ses propres instantanés.
+- **Une tâche récurrente supprime les instantanés précédents.** Pendant la réplication, la mesure exacte est `newlyUploadDataSize` de chaque `Backup`.
 - **Volumes Longhorn v2 non couverts.**
-- **Backing image absente côté secours** : non essayé. Longhorn sait la sauvegarder et la restaurer ; à vérifier.
 - **Cohérence** : la sauvegarde Longhorn récurrente est cohérente comme après une coupure de courant. Le gel par l'agent invité de Harvester ne s'applique qu'à ses propres sauvegardes.
-- **Retour au site principal** : non essayé.
 - **La cible ne doit être sur aucun des deux sites**, et la console doit tourner du côté du secours ou à l'extérieur.
+- **Santé du banc** : pendant les essais, le disque Longhorn de harvlab-n3 était indisponible (volumes à 2 répliques sur 3). Sans effet sur les mesures, à réparer sur le banc.
 
 ## Interface (voir la maquette)
 
@@ -96,6 +115,4 @@ Banc : harvlab (Harvester v1.8.2, Longhorn 1.11.2, 3 nœuds) vers harvlab2 (v1.9
 
 ## Étapes suivantes
 
-1. Mesurer la phase de mesure avec des écritures dispersées.
-2. Essayer le retour au site principal et une backing image absente côté secours.
-3. Découper la réalisation : moteur CLI (`bin/harvester-replication.py`), puis vue de suivi, puis fenêtre de création, puis exercices et bascule.
+1. Découper la réalisation : moteur CLI (`bin/harvester-replication.py`), puis vue de suivi, puis fenêtre de création, puis exercices et bascule.
