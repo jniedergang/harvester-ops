@@ -1,0 +1,17 @@
+Id:             1
+Name:           harvlab-n1
+UUID:           be02dfd3-538b-4ee2-80de-a0e7f0b12548
+OS Type:        hvm
+State:          running
+CPU(s):         8
+CPU time:       1074.5s
+Max memory:     16777216 KiB
+Used memory:    16777216 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+Security label: system_u:system_r:svirt_t:s0:c70,c551 (enforcing)
+

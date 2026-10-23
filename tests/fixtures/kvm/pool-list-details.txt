@@ -1,0 +1,12 @@
+ Name            State     Autostart   Persistent   Capacity     Allocation   Available
+------------------------------------------------------------------------------------------
+ bmcfg           running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ default         running   no          yes          931.06 GiB   751.15 GiB   179.91 GiB
+ hardpipe-test   running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ harvlab         running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ harvlab2        running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ images          running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ mlm-lab         running   yes         yes          931.06 GiB   751.15 GiB   179.91 GiB
+ vmware-lab      running   yes         yes          461.26 GiB   243.43 GiB   217.83 GiB
+ xen-bench       running   yes         yes          461.26 GiB   243.43 GiB   217.83 GiB
+

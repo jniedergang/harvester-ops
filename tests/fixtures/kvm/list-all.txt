@@ -1,0 +1,18 @@
+ Id   Name             State
+---------------------------------
+ 1    harvlab-n1       running
+ 2    harvlab-n2       running
+ 3    harvlab-n3       running
+ 4    harvlab2-n1      running
+ -    bmcfg-n1         shut off
+ -    bmcfg-n2         shut off
+ -    hardpipe-node0   shut off
+ -    mlm-dst          shut off
+ -    mlm-src          shut off
+ -    netperf          shut off
+ -    sles15sp6        shut off
+ -    sles15sp7        shut off
+ -    vmwlab-esx1      shut off
+ -    xen-build        shut off
+ -    xen-sles16       shut off
+

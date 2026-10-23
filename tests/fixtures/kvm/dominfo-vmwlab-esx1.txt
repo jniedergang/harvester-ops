@@ -1,0 +1,15 @@
+Id:             -
+Name:           vmwlab-esx1
+UUID:           a69ce12b-eabc-4bfb-b0a6-217f28ca70ed
+OS Type:        hvm
+State:          shut off
+CPU(s):         8
+Max memory:     29360128 KiB
+Used memory:    29360128 KiB
+Persistent:     yes
+Autostart:      disable
+Autostart Once: disable
+Managed save:   no
+Security model: selinux
+Security DOI:   0
+

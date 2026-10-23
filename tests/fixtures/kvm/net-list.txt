@@ -1,0 +1,6 @@
+ Name           State      Autostart   Persistent
+---------------------------------------------------
+ bmcfg-sto      inactive   no          yes
+ default        inactive   no          yes
+ hardpipe-net   active     yes         yes
+
