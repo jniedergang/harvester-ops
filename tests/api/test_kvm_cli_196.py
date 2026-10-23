@@ -1053,3 +1053,124 @@ def test_host_test_does_not_wait_on_unreachable(env, capsys):
     declare(env, sim=Sim(ssh_fail=[PENALTY]))
     rc, data, _ = run_json(capsys, "host", "test", "lab")
     assert rc == 1 and data["kind"] == "unreachable" and env.clock.sleeps == []
+
+
+# --- annulation (SIGTERM / SIGHUP), copie de contrôle de la clé -------------
+
+def test_host_add_key_check_copy_lives_in_the_private_state_dir(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, _, _ = run_json(capsys, *add_argv(env))
+    copy = Path(env.net.argvs[0][5])
+    assert rc == 0 and copy.parent == env.state / "ssh" and not copy.exists()
+    assert (env.state / "ssh").stat().st_mode & 0o777 == 0o700
+
+
+def test_host_add_key_check_copy_error_is_specific(env, capsys, monkeypatch):
+    def refuse(*a, **kw):
+        raise PermissionError(13, "Permission denied")
+    monkeypatch.setattr(cli.tempfile, "mkstemp", refuse)
+    rc, data, _ = run_json(capsys, *add_argv(env))
+    assert rc == 1 and data["error"] == "cannot check the SSH key (EACCES)"
+    assert env.net.argvs == [] and state_files(env) == []
+
+
+def test_rollback_survives_a_failing_close_master(env, capsys, monkeypatch):
+    sim = Sim(ssh_fail=UNREACHABLE)
+    env.net.sims["10.0.0.5"] = sim
+    calls = []
+
+    def boom(decl, state):
+        calls.append(decl["name"])
+        raise OSError("socket vanished")
+    monkeypatch.setattr(cli, "close_master", boom)
+    monkeypatch.setattr(cli, "run_checks", lambda h, ssh_retry=0: [
+        {"check": "ssh", "status": "error", "message": "unreachable", "kind": "unreachable"}])
+    rc, data, _ = run_json(capsys, *add_argv(env))
+    # close_master échoue deux fois (avant le test, au retour arrière) : la
+    # première fait échouer l'ajout, le retour arrière va quand même au bout
+    assert rc == 1 and state_files(env) == [] and calls
+
+
+@pytest.mark.parametrize("cmd,vcmd,want", [
+    ("host", "add", "host add cancelled (SIGTERM): nothing saved"),
+    ("vm", "shutdown", "shutdown cancelled (SIGTERM): it may already have been requested; "
+                       "its result was not followed"),
+    ("host", "test", "cancelled (SIGTERM)"),
+])
+def test_cancel_message_never_claims_an_undo_for_a_gesture(cmd, vcmd, want):
+    args = SimpleNamespace(cmd=cmd, hcmd=vcmd, vcmd=vcmd)
+    assert cli.cancel_message(args, "SIGTERM") == want
+
+
+SHIM = {
+    # relevé : la clé d'hôte générée pour le test
+    "ssh-keyscan": '#!/bin/sh\necho "# banner"\necho "$KVMT_ADDR $(cat "$KVMT_HOSTPUB")"\n',
+    # ssh -O exit répond, une vraie connexion reste pendue (hôte qui ne répond plus)
+    "ssh": '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-O" ] && exit 0; done\n'
+           'touch "$KVMT_MARK"\nexec sleep 30\n',
+}
+
+
+@pytest.mark.parametrize("sig", ["SIGTERM", "SIGHUP"])
+def test_a_signal_during_host_add_rolls_back_everything(tmp_path, sig):
+    """Vrai processus : `host add` est arrêté par le bouton « Annuler » de la
+    console (SIGTERM) pendant le test de connexion, déclaration déjà écrite.
+    Rien ne reste : ni déclaration, ni clé, ni empreinte ; code 3 et un objet
+    JSON {"ok": false, "kind": "cancelled"}."""
+    import os
+    import signal
+    import time
+    if not shutil.which("ssh-keygen"):
+        pytest.skip("ssh-keygen absent")
+    shim = tmp_path / "bin"
+    shim.mkdir()
+    for name, body in SHIM.items():
+        (shim / name).write_text(body)
+        (shim / name).chmod(0o755)
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    for k in ("host", "client"):
+        subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(keys / k)],
+                       check=True, stdin=subprocess.DEVNULL)
+    host_pub = keys / "host.pub"
+    host_pub.write_text(" ".join(host_pub.read_text().split()[:2]) + "\n")
+    fp = subprocess.run(["ssh-keygen", "-l", "-E", "sha256", "-f", str(host_pub)],
+                        capture_output=True, text=True, check=True).stdout.split()[1]
+    short = Path(tempfile.mkdtemp(prefix="kvmc-", dir="/tmp"))
+    state, mark = short / "state", tmp_path / "connected"
+    env = dict(os.environ, PATH=f"{shim}:{os.environ['PATH']}", KVMT_ADDR="10.0.0.5",
+               KVMT_HOSTPUB=str(host_pub), KVMT_MARK=str(mark))
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "bin" / "harvester-kvm.py"), "host", "add", "--json",
+             f"--state-dir={state}", "--name=lab", "--address=10.0.0.5", "--user=virtops",
+             f"--ssh-key={keys / 'client'}", f"--fingerprint={fp}"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+        deadline = time.monotonic() + 20
+        while not mark.exists() and time.monotonic() < deadline and proc.poll() is None:
+            time.sleep(0.05)
+        assert mark.exists(), proc.communicate(timeout=5)
+        # le test de connexion tourne : la déclaration et la clé sont écrites
+        assert (state / "kvm.d" / "lab.yaml").exists() and (state / "ssh" / "lab_id").exists()
+        proc.send_signal(getattr(signal, sig))
+        out, err = proc.communicate(timeout=15)
+        assert proc.returncode == 3, err
+        data = json.loads(out)
+        assert data["ok"] is False and data["kind"] == "cancelled"
+        assert data["error"] == f"host add cancelled ({sig}): nothing saved"
+        left = sorted(p.name for p in state.rglob("*") if p.is_file() and p.name != ".lock")
+        assert left == []
+        assert "BEGIN" not in out + err and str(state) not in out
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        shutil.rmtree(short, ignore_errors=True)
+
+
+def test_host_add_refuses_a_name_taken_by_a_console_route(env, capsys):
+    env.net.sims["10.0.0.5"] = Sim()
+    rc, data, _ = run_json(capsys, *add_argv(env, HOST_KEYS[1][2], "scan"))
+    assert rc == 2 and "reserved" in data["error"] and env.net.argvs == []
+    assert kvm_decl.check_decl({"name": "scanner", "address": "h", "user": "u",
+                                "ssh_key": kvm_decl.key_rel("scanner"),
+                                "known_hosts": kvm_decl.known_hosts_rel("scanner")}) is None

@@ -49,7 +49,8 @@ a redémarré. Un geste manifestement impossible dans l'état courant
 reste, libvirt décide.
 
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
-ou demande refusée avant l'hôte.
+ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
+commencé est défait, `host add` ne laisse ni déclaration ni clé).
 """
 
 import argparse
@@ -60,11 +61,13 @@ import ipaddress
 import json
 import math
 import os
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -73,6 +76,9 @@ import kvm_decl  # noqa: E402
 import kvm_host as kh  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
+# code que la console lit comme « annulé » (même valeur que les autres outils)
+EXIT_CANCELLED = 3
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
 # points d'injection des tests : exécution, horloge, attente
 RUNNER = subprocess.run
@@ -114,9 +120,14 @@ GESTURES = {
     "suspend": ({"paused"}, {"shut off": "is shut off",
                              "paused": "is already paused",
                              "pmsuspended": "is already suspended by the guest"}),
+    # seules une VM en pause (paused) ou suspendue par l'invité (pmsuspended)
+    # se reprennent ; l'interface lit cette table, elle n'a pas de règle à elle
     "resume": ({"running"}, {"running": "is not paused (it is running)",
                              "idle": "is not paused (it is running)",
-                             "shut off": "is shut off: use start"}),
+                             "shut off": "is shut off: use start",
+                             "crashed": "has crashed: use destroy, then start",
+                             "in shutdown": "is shutting down: wait for it to stop",
+                             "blocked": "is blocked on a resource, not paused"}),
 }
 
 # commande virsh d'un geste selon l'état de départ (défaut : le nom du geste)
@@ -125,6 +136,34 @@ ACTION_COMMANDS = {("resume", "pmsuspended"): "dompmwakeup"}
 
 # à l'échéance, le geste forcé à proposer (rien pour les autres)
 FORCED = {"shutdown": ["destroy"], "reboot": ["destroy", "start"]}
+
+
+class Cancelled(BaseException):
+    """SIGTERM ou SIGHUP (bouton « Annuler » de la console) : levée dans le
+    fil principal pour que les `finally` et le retour arrière de `host add`
+    s'exécutent. BaseException : aucun `except Exception` ne l'avale."""
+
+
+def _on_cancel_signal(signum, _frame):
+    # un seul coup : un second signal ne doit pas interrompre le retour arrière
+    for sig in CANCEL_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    raise Cancelled(signal.Signals(signum).name)
+
+
+@contextlib.contextmanager
+def cancel_on_signals():
+    """Installe le gestionnaire le temps de la commande (fil principal
+    seulement : la console charge ce module et n'appelle pas main)."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    saved = {sig: signal.signal(sig, _on_cancel_signal) for sig in CANCEL_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, h in saved.items():
+            signal.signal(sig, h)
 
 
 class UsageError(ValueError):
@@ -294,13 +333,15 @@ def read_private_key(path):
     return data
 
 
-def check_private_key(data):
+def check_private_key(data, state):
     """La clé est lue par ssh-keygen AVANT tout appel réseau : une clé
     protégée par une phrase de passe ne marcherait jamais en BatchMode.
-    Contrôle sur une copie 0600 (ssh-keygen refuse un fichier trop ouvert) ;
-    la clé publique rendue n'est jamais montrée."""
-    fd, tmp = tempfile.mkstemp(prefix="kvm-key-")
+    Contrôle sur une copie 0600 (ssh-keygen refuse un fichier trop ouvert)
+    rangée dans le répertoire privé (0700) des clés de l'état, jamais dans
+    /tmp ; la clé publique rendue n'est jamais montrée."""
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(prefix=".kvm-key-check-", dir=kvm_decl.ensure_ssh_dir(state))
         with os.fdopen(fd, "w") as f:
             f.write(data)
         res = RUNNER(["ssh-keygen", "-y", "-P", "", "-f", tmp], stdin=subprocess.DEVNULL,
@@ -310,8 +351,9 @@ def check_private_key(data):
     except OSError as e:
         raise Failure(f"cannot check the SSH key ({errno.errorcode.get(e.errno, 'error')})") from None
     finally:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
+        if tmp:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
     if res.returncode != 0:
         if "passphrase" in (res.stderr or "").lower():
             raise UsageError("the key is protected by a passphrase; provide an unencrypted key",
@@ -340,7 +382,7 @@ def cmd_host_add(args):
     if kvm_decl.decl_path(state, name).exists():
         raise UsageError(f"host {name} is already declared (remove it first)")
     key = read_private_key(args.ssh_key)
-    check_private_key(key)
+    check_private_key(key, state)
     with host_lock(state):
         # revu sous le verrou : un ajout concurrent a pu finir entre-temps
         if kvm_decl.decl_path(state, name).exists():
@@ -368,7 +410,8 @@ def _add_locked(args, state, decl, key):
 
     def rollback():
         # jamais d'exception ici : elle masquerait la cause
-        close_master(decl, state)
+        with contextlib.suppress(Exception):
+            close_master(decl, state)
         with contextlib.suppress(Exception):
             kvm_decl.remove(state, name)
 
@@ -631,9 +674,11 @@ def targets(args):
             for d in kvm_decl.load_all(state, warn=lambda m: step("hosts", "warn", m))]
 
 
-def read_all(hosts, details=False):
+def read_all(hosts, details=False, deadline=None):
     """Inventaire de chaque hôte, en parallèle ; un hôte en échec rend son
-    erreur sans gêner les autres."""
+    erreur sans gêner les autres. `deadline` (s) : échéance de l'ensemble ;
+    un hôte qui n'a pas répondu à temps rend {kind: "timeout"} et les autres
+    sont rendus (sa lecture finit en arrière-plan, bornée par le délai SSH)."""
     def one(host):
         try:
             return kh.host_inventory(host, details=details)
@@ -644,8 +689,21 @@ def read_all(hosts, details=False):
                     "error": {"kind": "failed", "message": f"{host.name}: failed: {e}"}}
     if not hosts:
         return []
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(hosts))) as pool:
-        return list(pool.map(one, hosts))
+    pool = ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, len(hosts)))
+    try:
+        futures = [pool.submit(one, h) for h in hosts]
+        wait(futures, timeout=deadline)
+        out = []
+        for host, fut in zip(hosts, futures):
+            if fut.done():
+                out.append(fut.result())
+            else:
+                out.append({"name": host.name, "address": host.decl.get("address"), "error": {
+                    "kind": "timeout",
+                    "message": f"{host.name}: timeout: no answer within {deadline:g}s"}})
+        return out
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 def _gib(kib):
@@ -860,7 +918,12 @@ def main(argv=None):
     try:
         args = build_parser().parse_args(argv)
         want_json = args.json
-        return args.fn(args)
+        with cancel_on_signals():
+            try:
+                return args.fn(args)
+            except Cancelled as e:
+                return fail_exit(want_json, "cancelled", cancel_message(args, e), "cancelled",
+                                 EXIT_CANCELLED)
     except (UsageError, kvm_decl.DeclError) as e:
         kind = getattr(e, "kind", "usage")
         return fail_exit(want_json, "validate", str(e), kind, EXIT_USAGE)
@@ -871,6 +934,17 @@ def main(argv=None):
     except Exception as e:                     # noqa: BLE001 : ni trace ni chemin à l'appelant
         return fail_exit(want_json, "internal", f"unexpected internal error ({type(e).__name__})",
                          "failed", EXIT_FAIL)
+
+
+def cancel_message(args, sig):
+    """Ce qu'une annulation laisse, selon la commande (jamais « défait » pour
+    un geste : virsh a peut-être déjà reçu la demande)."""
+    if args.cmd == "host" and args.hcmd == "add":
+        return f"host add cancelled ({sig}): nothing saved"
+    if args.cmd == "vm" and args.vcmd in GESTURES:
+        return (f"{args.vcmd} cancelled ({sig}): it may already have been requested; "
+                f"its result was not followed")
+    return f"cancelled ({sig})"
 
 
 def fail_exit(want_json, sid, message, kind, code, data=None):

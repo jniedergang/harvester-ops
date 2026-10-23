@@ -40,6 +40,9 @@ ADDRESS_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9._:-]{0,252}$")
 USER_RE = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,63}$")
 LABEL_KEY_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,62}$")
 FINGERPRINT_RE = re.compile(r"\bSHA256:[A-Za-z0-9+/=]+")
+# noms pris par une route fixe de la console (/api/kvm/hosts/scan) : un
+# hôte de ce nom serait inatteignable par ses propres routes
+RESERVED_NAMES = frozenset({"scan"})
 
 
 class DeclError(ValueError):
@@ -100,6 +103,8 @@ def check_decl(decl):
         return "not a mapping"
     if not isinstance(decl.get("name"), str) or not NAME_RE.match(decl["name"]):
         return "invalid or missing name"
+    if decl["name"] in RESERVED_NAMES:
+        return f"the host name {decl['name']!r} is reserved by the console; choose another name"
     addr = decl.get("address")
     if not isinstance(addr, str) or not addr.strip():
         return "empty address"
