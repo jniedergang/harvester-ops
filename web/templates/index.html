@@ -91,6 +91,12 @@
             <span class="tab-icon" data-icon="settings"></span>
             <span class="sidebar-label" data-i18n="tab.advanced">Advanced</span>
           </a>
+          <!-- Disaster Recovery : contrats où ce cluster est source ou secours -->
+          <a class="tab tab-child" data-tab="clusterdr" href="#clusterdr" data-i18n-title="tab.clusterdrTip" title="Replication contracts where this cluster is the source or the recovery site">
+            <span class="tab-icon" data-icon="shield"></span>
+            <span class="sidebar-label" data-i18n="tab.dr">Disaster Recovery</span>
+            <span class="rp-menu-badge tip" data-rp-badge="cluster" hidden></span>
+          </a>
           <a class="tab tab-child" data-tab="startup" href="#startup" data-i18n-title="tab.startup" title="Startup">
             <span class="tab-icon icon-green" data-icon="play"></span>
             <span class="sidebar-label" data-i18n="tab.startup">Startup</span>
@@ -187,6 +193,25 @@
           <a class="tab tab-child" data-tab="kvmnetworks" href="#kvmnetworks" data-i18n-title="tab.kvmNetworksTip" title="The libvirt networks of every KVM host">
             <span class="tab-icon" data-icon="network"></span>
             <span class="sidebar-label" data-i18n="tab.kvmNetworks">Networks</span>
+          </a>
+        </div>
+      </div>
+      <!-- Disaster Recovery : réplication asynchrone des VMs entre clusters -->
+      <div class="tab-group" id="tab-group-dr">
+        <a class="tab tab-group-head" data-group="dr" href="#drplans" data-i18n-title="tab.drTip" title="Disaster recovery: asynchronous VM replication between clusters, contracts, links and failover">
+          <span class="tab-icon" data-icon="shield"></span>
+          <span class="sidebar-label" data-i18n="tab.dr">Disaster Recovery</span>
+          <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
+          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        </a>
+        <div class="tab-group-children">
+          <a class="tab tab-child" data-tab="drplans" href="#drplans" data-i18n-title="tab.drplansTip" title="Every replication contract: RPO held against the objective, direction, VMs, last transfer">
+            <span class="tab-icon" data-icon="doc"></span>
+            <span class="sidebar-label" data-i18n="tab.drplans">Contracts</span>
+          </a>
+          <a class="tab tab-child" data-tab="drlinks" href="#drlinks" data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
+            <span class="tab-icon" data-icon="network"></span>
+            <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
           </a>
         </div>
       </div>
@@ -829,6 +854,22 @@
       <div class="na-host" id="gpus-host"></div>
     </section>
 
+    <!-- DISASTER RECOVERY : contrats de réplication, liens, sous-onglet d'un cluster -->
+    <section id="tab-drplans" class="tab-content">
+      <h1 data-i18n="rp.title">Replication contracts</h1>
+      <p class="hint" data-i18n="rp.hint">Asynchronous replication of VMs to a second Harvester cluster through the shared backup target. Standby volumes wait on the recovery site and only serve a failover.</p>
+      <div class="na-host" id="rp-plans-host"></div>
+    </section>
+    <section id="tab-drlinks" class="tab-content">
+      <h1 data-i18n="rp.links.title">Links between clusters</h1>
+      <div class="na-host" id="rp-links-host"></div>
+    </section>
+    <section id="tab-clusterdr" class="tab-content">
+      <h1><span data-i18n="tab.dr">Disaster Recovery</span> · <span class="cluster-name"></span></h1>
+      <p class="hint" data-i18n="rp.clusterHint">The replication contracts where this cluster is the source or the recovery site, and its VMs held by them.</p>
+      <div class="na-host" id="rp-cluster-host"></div>
+    </section>
+
     <!-- BOOKINGS : v1.94.0, réservations de GPU (Shared resources) -->
     <section id="tab-bookings" class="tab-content">
       <h1 data-i18n="bkg.title">Bookings</h1>
@@ -1327,6 +1368,9 @@
   <script src="/static/js/gpus.js"></script>
   <script src="/static/js/bookings.js"></script>
   <script src="/static/js/usage.js"></script>
+  <script src="/static/js/replication.js"></script>
+  <script src="/static/js/replication-create.js"></script>
+  <script src="/static/js/replication-plan.js"></script>
   <script src="/static/js/kvm.js"></script>
   <script src="/static/js/kvm-vm.js"></script>
   <script src="/static/js/upgrade.js"></script>
