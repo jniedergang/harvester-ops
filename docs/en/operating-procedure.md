@@ -167,6 +167,12 @@ setting `backup-target`), and it lives on neither site. Run the console
 that follows the plans on the backup site or outside both sites, never
 only on the source site: it would be lost with it.
 
+**From the console.** The same steps exist in Disaster Recovery >
+Contracts: **New contract** (blocks 1 to 5, measure first or protect
+directly), then the contract window (Check, Measure, Protect, the Charts
+and Journal tabs) and **Failover...** (admin, contract name typed). See
+[capabilities.md, Disaster Recovery screens](capabilities.md#disaster-recovery-screens).
+
 **First protection.**
 1. `plan create --name web --from harv1 --to harv2 --vm default/web-01
    --rpo 15m --map-net default/prod=default/prod --map-sc

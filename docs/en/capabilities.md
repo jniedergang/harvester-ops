@@ -2796,9 +2796,9 @@ both clusters, Longhorn recurring backups on the source, and Longhorn
 **standby volumes** on the target that apply each new backup as it lands.
 Nothing is installed on the clusters. This release delivers the engine,
 the command line `harvester-replication` and the console routes. The
-console windows (follow-up view, creation window, drills) come in later
-releases: until then the console shows replication actions in the dock
-and in Activity, and the command line does the rest.
+screens (contracts, creation window, contract view, failover, links,
+alerts) are described below in "Disaster Recovery screens"; drills will
+come with their engine.
 
 **The contract is the plan.** A plan names a source cluster, a target
 cluster, the VMs (a list `ns/name`, or a label selector in a namespace),
@@ -3359,6 +3359,120 @@ that talk to clusters take `--from-kubeconfig`, `--to-kubeconfig` and
 `--timeout NAME=S`; every command takes `--json`.
 
 ---
+
+### Disaster Recovery screens
+
+The console has a root menu group **Disaster Recovery** with two entries,
+**Contracts** and **Links**, and a **Disaster Recovery** entry inside each
+Harvester cluster's menu group. Every gesture runs the command line
+`harvester-replication` as a tracked action (dock and Activity); the
+screens never write by another path.
+
+**Contracts.** All the contracts, as cards or as a table (the toggle is
+kept per browser). Each contract shows: its state (the worst state of its
+VMs when protected), a gauge of the RPO held against the objective (the
+mark is the objective; the bar turns orange past 80 % and red past the
+objective), the direction source -> recovery site with a dot per cluster
+(green: it answers the follower, red: it does not, grey: not read yet),
+the number of VMs and their states, the VMs that carry the label of a
+rule but are not protected yet, the last event, and the last transfer
+(data sent by the last pass, upload throughput to the backup target, apply
+throughput on the recovery site, and the amount sent in 24 hours). A
+search box and a state filter narrow the list. The active alerts are listed
+on top. The **Notifications** button opens the external notification
+settings (Matrix room, Slack incoming webhook, mail by SMTP or a generic
+JSON webhook; an administrator edits them, secrets are never shown again,
+a masked value kept as is keeps the stored secret; each channel has a
+**Send a test** button).
+
+**New contract window.** Five blocks on one page, each one says whether it
+is ready, and nothing is written before **Create**:
+1. *What and where*: name, source and recovery clusters, VMs chosen from a
+   list (VMs that cannot be replicated are greyed with the reason), or by a
+   label rule `key=value` in a namespace. With a rule, **Protect new VMs
+   that get the label automatically** lets the console protect a VM that
+   receives the label later (otherwise an alert waits for you).
+2. *Objective*: RPO objective (5, 15, 60 minutes or any value), points
+   kept, and the measurement phase. **Measure first** creates the contract
+   and starts the measure; **Protect directly** creates and protects at
+   once and shows a warning with the estimated interval, a reachable RPO
+   that ignores the change rate, and the duration of the first full copy
+   from the throughput known for the link.
+3. *Mappings*: one line per network used by the chosen VMs. A network
+   missing on the recovery site blocks the creation until it is mapped to
+   an existing network or created there with **Create on the target**
+   (name, VLAN and cluster network editable; it runs the usual network
+   creation, admin). The **Drill network** column is stored for the drills
+   to come. Storage is chosen **disk by disk**; the same class name is
+   proposed when it exists on the recovery site. A namespace missing there
+   is mapped to another one or created at the failover.
+4. *Recovery*: start waves (drag the VMs from one wave to another, or use
+   the menu on each VM; each wave has a gate: VMs running, guest agent
+   connected within a delay, or running then a delay), cloud-init kept or
+   rerun with a per-VM recovery network configuration, MAC addresses kept
+   or new, CPU and memory per VM on the recovery site, VMs started or
+   stopped after the failover, and annex HTTP actions (when, method, URL,
+   headers, one secret header whose value is masked once kept, body,
+   timeout). An annex action can be tried once the contract exists.
+5. *Summary and pre-checks*: your role, the source and recovery clusters
+   readable with your rights, every mapping present, the measured
+   throughput of the link; free space and the backup target are checked by
+   the pre-check that runs before the protection. Then what still blocks,
+   the equivalent command line (without secrets) and the create button.
+
+**Contract window.** Opened from a card or a line, with the gestures the
+contract allows (each greyed button says why: role, or backups in use):
+Check, Measure, Stop measuring, Protect, Pause, Unpause, Resume command
+(after an interruption) and Failover. Four tabs:
+- *Overview*: RPO held, interval, next pass, passes waiting, skew, upload
+  and apply throughput, data sent in 24 hours, one line per VM with its
+  reasons, and the last failovers and unprotects;
+- *Charts*: RPO held against the objective, upload and apply throughput,
+  and data sent per period, over 24 hours by default, or 1 hour, 7 days, 30
+  days (hover shows the values);
+- *Journal*: every operation of the contract and of its VMs, newest first,
+  warnings only on demand, linked to the Activity action;
+- *Settings*: objective, skew tolerance, follower and pause (hot), the
+  interval and retention (applied by protecting again), the recovery block
+  of the creation window (saved for the next failover; a protected contract
+  rewrites its carnets at the next protect), and the danger zone (unprotect,
+  unprotect and delete the backups, delete the contract, each with the
+  contract name typed). A saved change offers **Undo**, which sends the
+  previous values back as a new tracked action; pause and unpause do too.
+
+**Failover window.** Admin only: for another role it opens read only and
+says why. It lists the steps of the chosen mode (planned: pause the
+follower, stop the source VMs, fence, final backup, apply, activation as
+the point of no return, objects, waves, annex actions; unplanned: last
+read of the backup target, catch-up, points and skew, activation, objects,
+waves, annex actions, late fence), what may be lost, and pre-checks: role,
+state of the contract, reachability of both clusters, and a dry run started
+on opening. The VMs can be restricted, and the button unlocks once the
+contract name is typed.
+
+**Links.** One block per pair of clusters with a contract or a test: the
+two legs source -> backup target -> recovery site with the median
+throughput of the real backups over 24 hours (the slower leg is marked),
+the last pass, a 24-hour curve per leg, and the **active test**: a
+temporary pod writes random data (256 MiB to 2 GiB) to the NFS backup
+target from the source and a pod reads it back from the recovery site,
+both removed afterwards (operator). A pair without a contract can be
+tested before creating one.
+
+**Disaster Recovery of a cluster.** The contracts where this cluster is
+the source or the recovery site, with a badge for its role and a filter
+(all, as source, as recovery site), and the list of its VMs held by a
+contract.
+
+**Alerts.** Objective exceeded, a disk that never backs up, a source VM
+running again after a failover, a backup in error, a degraded standby
+volume, an unreachable source, a VM spec changed, a contract in error, a
+new VM matching a rule. They show as a badge on the Disaster Recovery menu
+entries (root and current cluster), in the **Events** tab of the cluster
+overview (group Disaster Recovery, also when the cluster does not answer),
+and are sent to the configured notifications.
+
+Not in this release: drills (the drill network column is only stored).
 
 ## What needs what
 

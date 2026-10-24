@@ -216,7 +216,7 @@ def ui_factory(context, flask_server):
             if bare == "links":
                 return route.fulfill(**ok(LINKS))
             if bare == "notify":
-                return route.fulfill(**ok(NOTIFY))
+                return route.fulfill(**ok({"notify": NOTIFY, "codes": [], "kinds": ["matrix", "slack", "webhook", "email"]}))
             return route.fulfill(**ok({"error": "unexpected " + bare}, 404))
         page.route(re.compile(r".*/api/replication/.*"), repl)
         tnets = [{"name": "prod", "namespace": "default", "vlan": "200", "cluster_network": "mgmt"}]
@@ -456,6 +456,7 @@ def test_create_window_per_disk_class_waves_hooks_and_skip_measure(ui):
     assert b["map_drill_net"] == {"default/lab-net": "default/prod"}
     assert b["map_disk_class"] == {"default/ui-cirros/data": "dr-nvme", "default/ui-cirros/rootdisk": "dr-nvme"}
     assert b["cloud_init"] == "rerun" and b["rpo"] == "15m"
+    assert b["interval"] == "360s"             # protection directe : l'intervalle estimé part avec le contrat
     r = b["recovery"]
     assert r["waves"] == [{"vms": ["default/ui-cirros"], "gate": {"kind": "delay", "seconds": 45}},
                           {"vms": ["default/ui-cirros-2"], "gate": {"kind": "running"}}]
@@ -482,7 +483,7 @@ def test_create_window_label_rule_and_measure_first(ui):
     panel.locator('[data-rpc="create"]').click()
     [post] = wait_sent(page, sent, lambda s: s[0] == "POST" and s[1] == "plans")
     assert post[2]["selector"] == "dr=gold" and post[2]["namespace"] == "default" and "vms" not in post[2]
-    assert post[2]["recovery"]["auto_protect"] is True
+    assert post[2]["recovery"]["auto_protect"] is True and "interval" not in post[2]
     [m] = wait_sent(page, sent, lambda s: s[0] == "POST" and s[1] == f"plans/{PID}/measure")
     assert m[2] == {"op": "start"}
 
@@ -630,6 +631,8 @@ def test_links_passive_and_active_test(ui):
     link.locator('[data-rpl="test"]').click()
     [t] = wait_sent(page, sent, lambda s: s[1] == "links/test")
     assert t[2] == {"from": "harv-fake", "to": "harv-dr", "size_mib": 1024}
+    # le résultat reste affiché après la relecture qui suit l'essai
+    expect(pane.locator('[data-rp-link="harv-fake|harv-dr"] [data-rpl="msg"]')).to_contain_text("Link test finished")
 
 
 def test_notifications_window_keeps_masked_secrets(ui):
@@ -646,7 +649,9 @@ def test_notifications_window_keeps_masked_secrets(ui):
     [put] = wait_sent(page, sent, lambda s: s[0] == "PUT")
     body = put[2]
     assert body["channels"][0]["token"] == "********" and body["channels"][0]["id"] == "c1"
-    assert body["channels"][1] == {"kind": "slack", "name": "", "url": "https://hooks.slack.example/T/B/x"}
+    new = dict(body["channels"][1])
+    assert re.match(r"^c-[a-z0-9]+-[a-z0-9]+$", new.pop("id"))
+    assert new == {"kind": "slack", "name": "", "url": "https://hooks.slack.example/T/B/x"}
     ch.locator('[data-rpn="test"]').click()
     [t] = wait_sent(page, sent, lambda s: s[1] == "notify/test")
     assert t[2] == {"channel": "c1"}

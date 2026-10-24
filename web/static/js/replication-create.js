@@ -524,12 +524,14 @@ const ReplicationCreate = (() => {
             <td>${exists ? okBadge('ok', tr('rp.c.nsExists')) : (st.createNs[ns] ? okBadge('warn', tr('rp.c.nsCreated')) : okBadge('fail', tr('rp.c.nsMissing')))}</td></tr>`;
         }).join('')}</tbody></table></div>`;
     }
+    /** Intervalle sans mesure : le plus long pas de Longhorn qui tient deux fois dans l'objectif. */
+    const estInterval = () => STEPS.filter((x) => x <= (Number(f.rpo.value) * 60) / 2).pop() || 60;
     /** Estimation sans mesure : intervalle déduit de l'objectif, débit du lien, première copie. */
     function estimateHtml(vms) {
       const measure = (f.querySelector('[name="measure"]:checked') || {}).value !== 'no';
       if (measure) return `<p class="hint">${icon('info')} ${esc(tr('rp.c.measureInfo'))}</p>`;
       const obj = Number(f.rpo.value) * 60;
-      const interval = STEPS.filter((s) => s <= obj / 2).pop() || 60;
+      const interval = estInterval();
       const link = ((st.links && st.links.links) || []).find((l) => l.source === st.from && l.target === st.to);
       const p = (link && link.passive) || {}, a = (link && link.active) || {};
       const up = p.upload_bps_p50_24h || a.write_bps, ap = p.apply_bps_p50_24h || a.read_bps;
@@ -545,6 +547,8 @@ const ReplicationCreate = (() => {
     function body() {
       const vms = chosenVms();
       const b = { name: f.name.value.trim(), from: st.from, to: st.to, rpo: `${Number(f.rpo.value)}m`, retain: Number(f.retain.value) };
+      // protéger sans mesurer : la protection prend l'intervalle estimé, rangé dans le contrat
+      if ((f.querySelector('[name="measure"]:checked') || {}).value === 'no') b.interval = `${estInterval()}s`;
       if (st.mode === 'rule') { b.selector = st.ruleKey; b.namespace = st.ns; } else b.vms = vms.map(vmKey);
       const nets = srcNetworks(vms);
       const mapNet = {}, drill = {};
@@ -575,6 +579,7 @@ const ReplicationCreate = (() => {
     function cliText(b) {
       const q = (s) => (/^[\w./=:@-]+$/.test(s) ? s : `'${String(s).replace(/'/g, "'\\''")}'`);
       const parts = ['harvester-replication plan create', `--name ${q(b.name || '<name>')}`, `--from ${q(b.from)}`, `--to ${q(b.to)}`, `--rpo ${q(b.rpo)}`, `--retain ${b.retain}`];
+      if (b.interval) parts.push(`--interval ${b.interval}`);
       (b.vms || []).forEach((v) => parts.push(`--vm ${q(v)}`));
       if (b.selector) parts.push(`--selector ${q(b.selector)}`, `--namespace ${q(b.namespace)}`);
       Object.entries(b.map_net || {}).forEach(([a, c]) => parts.push(`--map-net ${q(`${a}=${c}`)}`));

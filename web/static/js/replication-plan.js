@@ -444,10 +444,8 @@ const ReplicationPlan = (() => {
   async function act(planId, name, btn, onDone) {
     const d = await getPlan(planId);
     if (d.error) { if (window.VMActions && VMActions.toast) VMActions.toast(d.error, true); return; }
-    const card = btn && btn.closest('[data-rp-plan]');
-    let msg = card && card.querySelector('.rp-card-msg');
-    if (card && !msg) { msg = document.createElement('div'); msg.className = 'of-msg rp-card-msg'; msg.setAttribute('role', 'status'); card.appendChild(msg); }
-    actOn(d, name, msg, onDone);
+    // depuis la liste : la liste se repeint, le résultat se dit par une notification (et reste au dock)
+    actOn(d, name, null, onDone);
   }
   async function actOn(d, name, msg, onDone) {
     const id = d.plan.id;

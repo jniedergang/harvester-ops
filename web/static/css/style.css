@@ -5651,3 +5651,7 @@ body.sidebar-collapsed .rp-menu-badge { position: absolute; margin: 0; right: 4p
 @media (max-width: 900px) { .rp-link-grid { grid-template-columns: 1fr; } }
 .rp-issues li.warn { color: var(--text-dim); }
 .rp-checks { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; background: var(--bg); }
+/* les contrôles des écrans de réplication prennent la police de l'interface */
+:is(.rp-create, .rp-view, .rp-failover, .rp-notify, .rp-confirm, .rp-card, .rp-links-card) :is(button, input, select) { font-family: inherit; }
+.rp-presets .bk-field { width: 170px; }
+.rp-presets .bk-field input { width: 100%; }

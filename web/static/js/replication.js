@@ -550,7 +550,7 @@ const Replication = (() => {
   function startLinks(host) {
     stopLinks();
     if (!host) return Promise.resolve();
-    links = { host, data: null, timer: null };
+    links = { host, data: null, timer: null, busy: 0, flash: null };
     host.innerHTML = `<div class="card na-card rp-links-card">
       <div class="res-tools"><span class="res-count"></span>
         <button type="button" class="btn btn-sm btn-secondary tip" data-rpl="refresh" data-tip="${esc(tr('res.refreshTip'))}">${icon('refresh')} ${esc(tr('overview.refresh'))}</button>
@@ -558,7 +558,8 @@ const Replication = (() => {
       <div data-rpl="body"><p class="form-hint">${esc(tr('common.loading'))}</p></div>
       <div class="fk-step rp-linktest-new" data-rpl="new"></div></div>`;
     host.querySelector('.rp-links-card').addEventListener('click', onLinksClick);
-    links.timer = setInterval(() => { if (links && !links.host.closest('[hidden]') && !document.hidden) loadLinks(); }, 60000);
+    // pas de repeinte pendant un essai : le message de suivi serait remplacé
+    links.timer = setInterval(() => { if (links && !links.busy && !links.host.closest('[hidden]') && !document.hidden) loadLinks(); }, 60000);
     return loadLinks();
   }
   function stopLinks() { if (links && links.timer) clearInterval(links.timer); links = null; }
@@ -646,6 +647,16 @@ const Replication = (() => {
         <select data-rpl="to" class="tip" data-tip="${esc(tr('rp.f.toTip'))}" aria-label="${esc(tr('rp.f.to'))}">${opts(1)}</select>${sizeSelect()}
         <button type="button" class="btn btn-sm btn-primary tip" data-rpl="test-new" data-tip="${esc(canTest ? tr('rp.links.testTip') : tr('rp.viewerTip'))}"${canTest ? '' : ' disabled'}>${icon('test')} ${esc(tr('rp.links.test'))}</button></div>
       <div class="of-msg" data-rpl="msg" role="status"></div>`;
+    showFlash();
+  }
+  /** Le résultat du dernier essai reste affiché après la relecture qui suit. */
+  function showFlash() {
+    const f = links && links.flash;
+    if (!f) return;
+    const box = f.key === 'new' ? links.host.querySelector('.rp-linktest-new')
+      : links.host.querySelector(`[data-rp-link="${CSS.escape(f.key)}"]`);
+    const msg = box && box.querySelector('[data-rpl="msg"]');
+    if (msg) msg.innerHTML = f.html;
   }
 
   async function onLinksClick(e) {
@@ -659,9 +670,17 @@ const Replication = (() => {
     const msg = box.querySelector('[data-rpl="msg"]');
     if (!from || !to || from === to) { msg.innerHTML = `<span class="res-error">${esc(tr('rp.links.pickTwo'))}</span>`; return; }
     b.disabled = true;
+    const key = b.dataset.rpl === 'test' ? `${from}|${to}` : 'new';
+    const l = links;
     try {
       const out = await U.api('POST', '/api/replication/links/test', { from, to, size_mib: Number(box.querySelector('[data-rpl="size"]').value) });
-      U.follow(out.action_id, msg, tr('rp.links.testDone'), () => { b.disabled = false; loadLinks(); });
+      l.busy += 1;
+      U.follow(out.action_id, msg, tr('rp.links.testDone'), () => {
+        l.busy -= 1;
+        l.flash = { key, html: msg.innerHTML };
+        b.disabled = false;
+        loadLinks();
+      });
     } catch (err) {
       b.disabled = false;
       msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(err.message)}</span>`;
@@ -723,7 +742,8 @@ const Replication = (() => {
       c.headers = {};
       c.secret_headers = hn ? { [hn]: val('secret_header_value') } : {};
     }
-    if (!c.id) delete c.id;
+    // un canal neuf reçoit son identifiant ici (le serveur l'exige, stable ensuite)
+    if (!c.id) c.id = `c-${Date.now().toString(36)}-${Math.floor(Math.random() * 1296).toString(36)}`;
     return c;
   }
   async function openNotify() {
@@ -734,7 +754,8 @@ const Replication = (() => {
     const role = (p && p.role) || 'viewer';
     if (d.error) { root.innerHTML = `<p class="res-error">${esc(d.error)}</p>`; return; }
     const canEdit = role === 'admin';
-    const st = { cfg: JSON.parse(JSON.stringify(d)) };
+    // GET /api/replication/notify : {notify: <réglage masqué>, codes, kinds}
+    const st = { cfg: JSON.parse(JSON.stringify(d.notify || d)) };
     st.cfg.channels = st.cfg.channels || [];
     const draw = () => {
       root.innerHTML = `<p class="hint">${esc(tr('rp.notify.hint'))}</p>

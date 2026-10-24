@@ -3071,11 +3071,10 @@ de sauvegarde commune aux deux clusters, des sauvegardes récurrentes
 Longhorn sur la source, et des **volumes de secours** Longhorn (standby)
 sur la cible, qui appliquent chaque nouvelle sauvegarde dès qu'elle arrive.
 Rien n'est installé sur les clusters. Cette version livre le moteur, la
-ligne de commande `harvester-replication` et les routes de la console. Les
-fenêtres de la console (vue de suivi, fenêtre de création, exercices)
-viennent dans les versions suivantes : d'ici là, la console montre les
-actions de réplication dans le dock et dans l'Activité, et la ligne de
-commande fait le reste.
+ligne de commande `harvester-replication` et les routes de la console.
+Les écrans (contrats, fenêtre de création, vue d'un contrat, bascule,
+liens, alertes) sont décrits plus bas dans « Écrans Disaster Recovery » ;
+les exercices de reprise viendront avec leur moteur.
 
 **Le contrat, c'est le plan.** Un plan nomme un cluster source, un cluster
 cible, les VMs (une liste `ns/nom`, ou un sélecteur d'étiquettes dans un
@@ -3676,6 +3675,130 @@ commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 `--to-kubeconfig` et `--timeout NOM=S` ; toutes prennent `--json`.
 
 ---
+
+### Écrans Disaster Recovery
+
+La console a un groupe de menu racine **Disaster Recovery** avec deux
+entrées, **Contrats** et **Liens**, et une entrée **Disaster Recovery** dans
+le groupe de menu de chaque cluster Harvester. Chaque geste lance la ligne
+de commande `harvester-replication` en action suivie (dock et Activité) ;
+les écrans n'écrivent jamais par un autre chemin.
+
+**Contrats.** Tous les contrats, en cartes ou en tableau (la bascule est
+gardée par navigateur). Chaque contrat montre : son état (le pire de ses
+VMs quand il est protégé), une jauge du RPO tenu face à l'objectif (le
+repère est l'objectif ; la barre passe à l'orange au-delà de 80 % et au
+rouge au-delà de l'objectif), le sens source -> secours avec un point par
+cluster (vert : il répond au suiveur, rouge : il ne répond pas, gris : pas
+encore lu), le nombre de VMs et leurs états, les VMs qui portent
+l'étiquette d'une règle sans être encore protégées, le dernier événement et
+le dernier transfert (données envoyées par le dernier passage, débit
+d'envoi vers la cible de sauvegarde, débit d'application sur le secours, et
+la quantité envoyée en 24 heures). Une recherche et un filtre d'état
+resserrent la liste. Les alertes actives sont en tête. Le bouton
+**Notifications** ouvre le réglage des notifications externes (salon
+Matrix, webhook entrant Slack, courriel par SMTP ou webhook JSON générique ;
+un administrateur les modifie, les secrets ne sont plus jamais montrés, une
+valeur masquée laissée telle quelle garde le secret rangé ; chaque canal a
+un bouton **Envoyer un essai**).
+
+**Fenêtre Nouveau contrat.** Cinq blocs sur une page, chacun dit s'il est
+prêt, et rien n'est écrit avant **Créer** :
+1. *Quoi et vers où* : nom, clusters source et de secours, VMs choisies
+   dans une liste (celles qui ne se répliquent pas sont grisées avec la
+   raison) ou par une règle d'étiquette `clé=valeur` dans un namespace.
+   Avec une règle, **Protéger d'office les nouvelles VMs étiquetées**
+   laisse la console protéger une VM qui reçoit l'étiquette plus tard
+   (sinon une alerte vous attend).
+2. *Objectif* : objectif de RPO (5, 15, 60 minutes ou toute valeur), points
+   gardés et phase de mesure. **Mesurer d'abord** crée le contrat et lance
+   la mesure ; **Protéger directement** crée et protège tout de suite et
+   affiche un avertissement avec l'intervalle estimé, un RPO atteignable
+   qui ignore le volume des changements, et la durée de la première copie
+   complète d'après le débit connu du lien.
+3. *Correspondances* : une ligne par réseau des VMs choisies. Un réseau
+   absent du secours bloque la création tant qu'il n'est pas associé à un
+   réseau existant ou créé là-bas par **Créer sur la cible** (nom, VLAN et
+   réseau de cluster modifiables ; c'est la création de réseau habituelle,
+   administrateur). La colonne **Réseau d'exercice** est gardée pour les
+   exercices à venir. Le stockage se choisit **disque par disque** ; la
+   classe de même nom est proposée quand elle existe sur le secours. Un
+   namespace absent là-bas est associé à un autre ou créé à la bascule.
+4. *Reprise* : vagues de démarrage (glisser les VMs d'une vague à l'autre,
+   ou le menu de chaque VM ; chaque vague a une condition de passage : VMs
+   en marche, agent invité connecté dans un délai, ou en marche puis un
+   délai), cloud-init gardé ou rejoué avec une configuration réseau de
+   secours par VM, adresses MAC gardées ou nouvelles, CPU et mémoire par VM
+   sur le secours, VMs démarrées ou arrêtées après la bascule, et actions
+   annexes HTTP (moment, méthode, URL, en-têtes, un en-tête secret masqué
+   une fois gardé, corps, délai). Une action annexe s'essaie une fois le
+   contrat créé.
+5. *Récapitulatif et contrôles* : votre rôle, les clusters source et de
+   secours lisibles avec vos droits, chaque correspondance présente, le
+   débit mesuré du lien ; la place libre et la cible de sauvegarde sont
+   contrôlées par le contrôle préalable de la protection. Puis ce qui
+   bloque encore, la ligne de commande équivalente (sans secret) et le
+   bouton de création.
+
+**Fenêtre d'un contrat.** Ouverte depuis une carte ou une ligne, avec les
+gestes que le contrat permet (un bouton grisé dit pourquoi : rôle, ou
+sauvegardes tenues) : Contrôler, Mesurer, Arrêter la mesure, Protéger,
+Pause, Reprendre le suivi, Reprendre la commande (après une interruption)
+et Basculer. Quatre onglets :
+- *Vue d'ensemble* : RPO tenu, intervalle, prochain passage, passages en
+  attente, écart, débits d'envoi et d'application, données envoyées en 24
+  heures, une ligne par VM avec ses raisons, et les dernières bascules et
+  déprotections ;
+- *Graphiques* : RPO tenu face à l'objectif, débits d'envoi et
+  d'application, et données envoyées par période, sur 24 heures par
+  défaut, ou 1 heure, 7 jours, 30 jours (le survol montre les valeurs) ;
+- *Journal* : chaque opération du contrat et de ses VMs, la plus récente
+  d'abord, avertissements seuls à la demande, avec le lien vers l'action
+  d'Activité ;
+- *Réglages* : objectif, tolérance d'écart, suiveur et pause (à chaud),
+  intervalle et rétention (appliqués en protégeant de nouveau), le bloc
+  Reprise de la fenêtre de création (gardé pour la prochaine bascule ; un
+  contrat protégé réécrit ses carnets à la prochaine protection), et la zone
+  dangereuse (déprotéger, déprotéger et supprimer les sauvegardes, supprimer
+  le contrat, chacun avec le nom du contrat tapé). Un changement enregistré
+  propose **Annuler**, qui renvoie les valeurs d'avant dans une nouvelle
+  action suivie ; la pause et sa levée aussi.
+
+**Fenêtre de bascule.** Réservée aux administrateurs : pour un autre rôle
+elle s'ouvre en lecture et dit pourquoi. Elle liste les étapes du mode
+choisi (planifiée : pause du suiveur, arrêt des VMs source, clôture,
+sauvegarde finale, application, activation comme point de non-retour,
+objets, vagues, actions annexes ; non planifiée : dernière lecture de la
+cible de sauvegarde, rattrapage, points et écart, activation, objets,
+vagues, actions annexes, clôture tardive), ce qui peut être perdu, et des
+contrôles : rôle, état du contrat, joignabilité des deux clusters, et un
+essai à blanc lancé à l'ouverture. Les VMs peuvent être restreintes, et le
+bouton se déverrouille une fois le nom du contrat tapé.
+
+**Liens.** Un bloc par paire de clusters ayant un contrat ou un essai : les
+deux trajets source -> cible de sauvegarde -> secours avec le débit médian
+des vraies sauvegardes sur 24 heures (le trajet le plus lent est marqué),
+le dernier passage, une courbe de 24 heures par trajet, et l'**essai
+actif** : un pod temporaire écrit des données aléatoires (256 Mio à 2 Gio)
+vers la cible de sauvegarde NFS depuis la source et un pod les relit depuis
+le secours, tous deux supprimés ensuite (opérateur). Une paire sans contrat
+s'essaie avant d'en créer un.
+
+**Disaster Recovery d'un cluster.** Les contrats où ce cluster est source
+ou secours, avec un badge de son rôle et un filtre (tous, comme source,
+comme secours), et la liste de ses VMs tenues par un contrat.
+
+**Alertes.** Objectif dépassé, disque qui ne se sauvegarde jamais, VM
+source rallumée après une bascule, sauvegarde en erreur, volume de secours
+dégradé, source injoignable, spec d'une VM changée, contrat en erreur,
+nouvelle VM qui répond à une règle. Elles s'affichent en pastille sur les
+entrées Disaster Recovery du menu (racine et cluster courant), dans
+l'onglet **Événements** de l'aperçu du cluster (groupe Disaster Recovery,
+même quand le cluster ne répond pas), et partent vers les notifications
+réglées.
+
+Pas dans cette version : les exercices de reprise (la colonne réseau
+d'exercice est seulement gardée).
 
 ## Ce qui nécessite quoi
 
