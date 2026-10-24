@@ -3048,8 +3048,9 @@ already use the same backup target. Each disk is backed up for itself:
 there is no atomic snapshot of several volumes, the barrier only narrows
 the gap, and the skew is shown and checked at failover. A VM with a
 container disk, host disk or empty disk is replicated without those disks
-(reported). Returning to the first site (failback), drills, waves and
-guest freeze are not in this release. A Longhorn backup is consistent
+(reported). Returning to the first site (failback), drills and guest
+freeze are not in this release (drill networks can already be mapped,
+see below). A Longhorn backup is consistent
 like after a power cut (the guest is not frozen). A standby volume takes
 its room on the target from the protection on, not only on the failover
 day. An activation is definitive: to protect again, the standby volume is
@@ -3104,6 +3105,104 @@ name and a taken MAC. The dry unplanned check judges `caught-up` against
 the backups the target sees at that moment, which may lag the source by 1
 to 4 minutes; the real failover resyncs first.
 
+### Recovery options: waves, hooks, size, network data, per-disk class
+
+A plan also carries a **recovery** block, set at creation or changed later
+(`recovery` in the console, `--spec FILE` on the command line), plus two
+more mapping kinds. Nothing here is verified on a cluster yet: unit tests
+only.
+
+**Per-disk storage class** (`disk_classes`, `{"ns/vm/disk": "class"}`,
+disk = the KubeVirt disk name). It wins over the image and storage class
+mappings for that disk. A class missing on the target blocks the check
+(`storage-class-unmapped`, with the `disk` fact). A disk with its own class
+does not get the target image annotation (the image would point to
+another class). It changes what protect creates, so it can change only on
+a draft plan.
+
+**Drill networks** (`drill_networks`, `{"ns/net": "ns/net"}`) are stored
+and checked like the network mappings. Drills come in a later release.
+
+**Waves** (at most 10): `{"name", "vms": ["ns/name", ...], "gate": {"kind",
+"seconds"}}`. After the activation, the failover brings the VMs up wave by
+wave. A VM listed in no wave goes in an implicit last wave. Each wave
+passes a gate before the next one starts: `running` (default, the VMs
+run), `agent` (the guest agent answers, VMI condition `AgentConnected`,
+for at most `seconds`, 300 by default, 10 to 3600) or `delay` (`seconds`
+after the VMs run, 1 to 3600). An `agent` gate not met in time warns
+(`wave-gate-timeout`) and the failover goes on. A VM left stopped
+(`start: stopped`) does not wait for any gate. A VM listed twice is
+refused. A selector plan may list VMs that do not exist yet. When only
+part of a plan fails over, a wave without any of its VMs is skipped, with
+its hooks. The journal gets `wave-start`, `wave-passed` or
+`wave-gate-timeout` (step `wave`) for each wave.
+
+**HTTP hooks** (at most 20): `{"name", "at", "method", "url", "headers",
+"secret_headers", "body", "timeout_s"}`. `at` is `start` (after the
+activation, before the first wave), `wave:<n>` (after wave n passed its
+gate; n can be the implicit last wave) or `end`. The method is GET, POST
+(default), PUT, PATCH or DELETE; the body is at most 16 KiB; the timeout
+is 1 to 120 s (15 by default). The URL is `http://` or `https://`, without
+credentials: they go in `secret_headers`. A hook that fails (refused, timed
+out, status 400 or more) warns (`hook-failed`) and the failover goes on: the
+activation is definitive. Each call writes its status and duration to the
+journal (step `hook`, `hook-ok` or `hook-failed`), never a header value nor
+the response body. A failover resumed after an interruption does not call
+again a hook it already called. `hook test` calls one hook at once.
+
+**Secret headers** are stored in `replication.db` and shown as `********`
+everywhere else: the plan read by the console, `plan show --json`, `plan
+create` and `plan set` outputs, the journal and Activity. Sending
+`********` back on a change keeps the stored value of that header; a
+`********` without a stored value is refused. They never travel on a
+command line: the console passes them to the script in its private spec
+file.
+
+**Size at the backup site** (`resize`, `{"ns/vm": {"cpu": 1..256,
+"memory": "<n>Mi|<n>Gi"}}`). The target VM is written the way Harvester
+writes it: CPUs in `domain.cpu.cores` and `resources.limits.cpu`, memory
+in `resources.limits.memory`, the source `requests` removed (the target's
+VM mutator computes them from its overcommit setting) and
+`domain.memory.guest` keeping the source gap between limit and guest (or
+the `harvesterhci.io/reservedMemory` annotation). A VM with CPU and memory
+hotplug counts its CPUs in `sockets` and keeps the memory in
+`memory.guest` (this case was not tried on a cluster).
+
+**Network data** (`network_data`, `{"ns/vm": "<cloud-init network-config,
+16 KiB at most>"}`) needs `cloud_init: rerun`. The cloud-init volume of the
+target VM (NoCloud or ConfigDrive) carries it inline (`networkData`) and
+loses its network data secret reference; a VM without a cloud-init volume
+gets a NoCloud one.
+
+**Auto protect** (`auto_protect`, true or false) is stored for selector
+plans; the console side of it is described with the follower.
+
+**Changing them.** `PATCH .../settings` and `plan set` change `recovery`
+(each given key replaces the stored one), `cloud_init`, `mac` and `start`
+in every state except `failing_over`, the `networks` and `drill_networks`
+mappings in the same states, and the other mappings on a draft plan only
+(otherwise `state-forbids`). Size, network data, cloud-init, MAC, start
+and the network mapping change the recovery carnet: on a protected plan
+the answer says `protect_needed: true`, and the next protect rewrites the
+carnet (the follower reports `carnet-stale` until then).
+
+**Dry run.** `failover --dry-run` (and `check --phase failover`) lists the
+waves (`index`, `name`, `vms`, `gate`, `implicit` for the last one) and the
+hooks (`name`, `at`, `method`, `url`) without calling anything. A real
+failover reports the calls in `hook_results`.
+
+**Candidates.** `candidates --cluster C [--namespace NS [--selector
+k=v]] --json`, and `GET /api/replication/candidates/<cluster>` in the
+console (viewer, with the person's kubeconfig), list the VMs of a source
+cluster a plan can protect: CPU, memory, networks, cloud-init kind, labels,
+running or not, and per disk the claim, size, used size, storage class,
+image and whether it is eligible. Reasons: `not-longhorn`, `longhorn-v2`,
+`encrypted`, `rwx-not-migratable`, `containerDisk`, `hostDisk`,
+`emptyDisk`, `no-disk`. A disk the replication does not copy (container
+disk) is listed as not eligible without making the VM not eligible.
+`plans` lists the plans already holding the VM (any state except
+`unprotected`).
+
 The operator procedure (first protection, failover, unprotect) is in
 [operating-procedure.md](operating-procedure.md#12-disaster-recovery-asynchronous-replication).
 
@@ -3112,8 +3211,11 @@ API: reads `GET /api/replication/plans?side=any|source|target&host=`,
 lock, lease), `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
 `GET /api/replication/hosts/<cluster>/resources?side=`,
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
-`GET /api/replication/follower`; writes (answer `202 {action_id}`)
-`POST /api/replication/plans`,
+`GET /api/replication/follower`,
+`GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
+`source-denied`, 404 `unknown-cluster`); writes (answer `202 {action_id}`)
+`POST /api/replication/plans` (also `map_disk_class`, `map_drill_net` and
+`recovery {waves, hooks, network_data, resize, auto_protect}`),
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
 `POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
@@ -3122,8 +3224,12 @@ force_unplanned, accept_skew, dry_run, confirm}`, admin),
 `POST /api/replication/plans/<id>/resume`,
 `POST /api/replication/plans/<id>/unprotect` (`{confirm, delete_backups}`),
 `PATCH /api/replication/plans/<id>/settings` (`{rpo, paused, follow,
-skew_tolerance, timeouts}`; `interval` and `retain` answer
-`not-settable`), `DELETE /api/replication/plans/<id>`. Each write runs the
+skew_tolerance, timeouts, recovery, mappings, cloud_init, mac, start}`;
+`interval` and `retain` answer `not-settable`, a change the state does not
+allow answers `state-forbids`, the answer adds `protect_needed: true` when
+the carnet of a protected plan changes),
+`POST /api/replication/plans/<id>/hooks/test` (`{name}`, operator),
+`DELETE /api/replication/plans/<id>`. Each write runs the
 command line with the person's own kubeconfigs (403 `target-denied` or
 `source-denied` when the session cannot see a cluster, never the
 console's).
@@ -3136,7 +3242,11 @@ start|stop|report P`, `measure formula`, `protect P [--dry-run]
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/name ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
-`unprotect P --yes [--delete-backups]`. P is a plan id or name. Commands
+`unprotect P --yes [--delete-backups]`, `hook test P --name N`,
+`candidates --cluster C [--namespace NS [--selector k=v]]`. `plan create`
+also takes `--map-disk-class ns/vm/disk=class` and `--map-drill-net S=D`;
+`plan set` takes `--cloud-init`, `--mac` and `--start`; `recovery` and
+`mappings` objects come only through `--spec FILE`. P is a plan id or name. Commands
 that talk to clusters take `--from-kubeconfig`, `--to-kubeconfig` and
 `--timeout NAME=S`; every command takes `--json`.
 
