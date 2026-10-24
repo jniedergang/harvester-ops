@@ -22,6 +22,7 @@ l'hôte, jamais un chemin de clé ni un secret.
 
 import datetime
 import hashlib
+import html
 import ipaddress
 import os
 import re
@@ -126,6 +127,33 @@ def _redact(text, paths):
     return text
 
 
+# attribut `passwd` d'un XML de libvirt (graphics VNC/SPICE), même tronqué :
+# sa valeur ne doit jamais apparaître dans une erreur
+_PASSWD_ATTR_RE = re.compile(r"""(passwd\s*=\s*)(['"])[^'"\n]*\2?""")
+
+
+def input_secrets(data, known=()):
+    """Valeurs secrètes d'une entrée (XML) : les `passwd` lus dans le texte,
+    sous leur forme brute et décodée (entités XML), plus `known` (valeurs déjà
+    analysées par l'appelant)."""
+    found = {str(v) for v in known if v}
+    for m in re.finditer(r"""passwd\s*=\s*(['"])([^'"]*)\1""", data or ""):
+        if m.group(2):
+            found.add(m.group(2))
+            found.add(html.unescape(m.group(2)))
+    return sorted((v for v in found if v), key=len, reverse=True)
+
+
+def scrub_secrets(text, secrets=()):
+    """Texte sans aucune occurrence des valeurs secrètes connues ni d'un
+    attribut `passwd='...'`/`passwd="..."`."""
+    text = text or ""
+    for v in secrets or ():
+        if v:
+            text = text.replace(v, "***")
+    return _PASSWD_ATTR_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}***{m.group(2)}", text)
+
+
 def _error_detail(stderr, paths):
     """Dernière ligne utile de stderr, chemins de l'état masqués."""
     lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
@@ -133,9 +161,11 @@ def _error_detail(stderr, paths):
     return _redact(lines[-1], paths)[:300] if lines else ""
 
 
-def make_error(host, stderr, rc, paths=(), ssh_level=False):
+def make_error(host, stderr, rc, paths=(), ssh_level=False, secrets=()):
     """KvmError classée. `ssh_level` : l'échec vient de ssh (code 255, stderr
-    de ssh) ; sinon de la commande distante."""
+    de ssh) ; sinon de la commande distante. `secrets` : valeurs retirées du
+    texte avant tout (un attribut `passwd` l'est toujours)."""
+    stderr = scrub_secrets(stderr, secrets)
     kind = classify(stderr, ssh_level)
     detail = _error_detail(stderr, paths)
     if not ssh_level and kind == "failed" and any(m in (stderr or "").lower()
@@ -330,17 +360,20 @@ class VirshHost:
                              ssh_level=res.returncode == SSH_RC)
         return res.stdout or ""
 
-    def run_input(self, remote_argv, data, timeout=None):
+    def run_input(self, remote_argv, data, timeout=None, secrets=()):
         """Comme `run()`, mais `data` (texte) part sur l'entrée standard de la
         commande distante. Sert à `virsh define /dev/stdin` : le XML, qui peut
         porter le mot de passe VNC, ne passe ni par un fichier temporaire ni
-        par la ligne de commande. Le message d'erreur ne cite jamais `data`."""
+        par la ligne de commande. Une erreur qui recopierait l'entrée est
+        expurgée : chaque `passwd` lu dans `data`, chaque valeur de `secrets`
+        et tout attribut `passwd=` sont masqués avant de bâtir le message."""
         if not isinstance(data, str):
             raise TypeError("data must be a str")
         res = self._ssh(remote_argv, timeout, data=data)
         if res.returncode != 0:
             raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
-                             ssh_level=res.returncode == SSH_RC)
+                             ssh_level=res.returncode == SSH_RC,
+                             secrets=input_secrets(data, secrets))
         return res.stdout or ""
 
     def virsh(self, *args, timeout=None):

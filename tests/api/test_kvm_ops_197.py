@@ -186,12 +186,13 @@ class Sim:
                 err, rc=rc, error=kh.make_error(self.name, err, rc))
         return res
 
-    def run_input(self, argv, data, timeout=None):
+    def run_input(self, argv, data, timeout=None, secrets=()):
         self.calls.append(("input", tuple(argv), data))
         assert argv[:5] == ["env", "LC_ALL=C", "virsh", "-c", "qemu:///system"]
         rc, out, err = self._answer(argv[5:], data)
         if rc:
-            raise kh.make_error(self.name, err, rc)
+            # même expurgation que VirshHost.run_input
+            raise kh.make_error(self.name, err, rc, secrets=kh.input_secrets(data, secrets))
         return out
 
     def run(self, argv, timeout=None):
@@ -1762,8 +1763,11 @@ def test_unreadable_files_are_listed_and_keep_everything_by_default():
     plan = ko.delete_plan(sim, "target", remove_storage=True)
     assert plan["unreadable"] == [SECRET] and plan["acknowledged_unreadable"] == []
     assert plan["delete"] == [] and {d["reason"] for d in plan["keep"]} == {ko.REASON_UNKNOWN}
-    res = ko.delete_vm(sim, "target", remove_storage=True)
-    assert res["deleted"] == [] and LONELY in sim.exists and res["unreadable"] == [SECRET]
+    # disques demandés mais non prouvés : la VM n'est pas retirée sans eux
+    with pytest.raises(ko.OpError) as e:
+        ko.delete_vm(sim, "target", remove_storage=True)
+    assert e.value.kind == "refused" and e.value.data["plan"]["unreadable"] == [SECRET]
+    assert LONELY in sim.exists and "target" in sim.domains and not sim.virsh_calls("undefine")
 
 
 def test_acknowledged_unreadable_files_let_the_proof_proceed():
@@ -2169,3 +2173,258 @@ def test_real_kill_checks_the_pid_is_our_qemu_img(local):
     finally:
         victim.kill()
         victim.wait()
+
+
+# --- corrections de revue (1.97, tâche 2) -------------------------------------------------------
+
+def _keep_backing(sim):
+    # b a pour base le disque vdc de victim : gardé, raison voulue
+    sim.files[f"{OUT}/ov.qcow2"] = [{"filename": f"{OUT}/ov.qcow2"},
+                                    {"filename": f"{OUT}/own.qcow2"}]
+    sim.add_domain("b", dom("b", [disk("vda", f"{OUT}/ov.qcow2")]))
+
+
+def _keep_block(sim):
+    sim.domains["victim"]["xml"] = sim.domains["victim"]["xml"].replace(
+        "</devices>", disk("vdd", "/dev/vg/lv", type="block", fmt="raw") + "</devices>")
+
+
+def _keep_shared_fs(sim):
+    sim.fstypes[OUT] = "nfs4"
+
+
+def _unreadable_neighbour(sim):
+    sim.add_domain("stopped", dom("stopped", [disk("vda", SECRET)]))
+    sim.files[SECRET] = None
+
+
+def _unreadable_domain(sim):
+    sim.add_domain("weird", "<domain><name>weird</name><devices>")
+
+
+def _unreadable_fs(sim):
+    real = sim._shell
+
+    def shell(argv):
+        if argv[:4] == ["stat", "-f", "-c", "%T"] and argv[-1].endswith("own.qcow2"):
+            return 1, "stat: cannot read file system information: Input/output error"
+        return real(argv)
+    sim._shell = shell
+
+
+# libellé, préparation, refusée, raisons de conservation attendues (sous-ensemble)
+I1_CASES = [
+    ("shared and read-only disks only", lambda sim: None, False,
+     {("vdb", "shared with other"), ("sda", ko.REASON_RO)}),
+    ("backing file of another VM", _keep_backing, False,
+     {("vdc", f"backing file of {OUT}/ov.qcow2")}),
+    ("block device", _keep_block, False, {("vdd", ko.REASON_BLOCK)}),
+    ("shared storage", _keep_shared_fs, False, {("vdc", ko.REASON_SHARED_STORAGE)}),
+    ("unreadable file of another VM", _unreadable_neighbour, True,
+     {("vda", ko.REASON_UNKNOWN), ("vdc", ko.REASON_UNKNOWN)}),
+    ("failed libvirt read", _unreadable_domain, True, {("vda", ko.REASON_UNKNOWN)}),
+    ("unreadable file system", _unreadable_fs, True, {("vdc", ko.REASON_UNKNOWN)}),
+]
+
+
+@pytest.mark.parametrize("label,setup,refused,kept", I1_CASES, ids=[c[0] for c in I1_CASES])
+def test_unproven_disk_refuses_a_delete_with_storage(label, setup, refused, kept):
+    sim = delete_sim()
+    setup(sim)
+    plan = ko.delete_plan(sim, "victim", remove_storage=True)
+    assert kept <= {(d["target"], d["reason"]) for d in plan["keep"]}
+    assert bool(plan["refusals"]) is refused
+    if refused:
+        assert "could not be proven unused by another VM" in plan["refusals"][0]
+        with pytest.raises(ko.OpError) as e:
+            ko.delete_vm(sim, "victim", remove_storage=True)
+        assert e.value.kind == "refused"
+        assert "victim" in sim.domains and not sim.virsh_calls("undefine")
+        assert f"{OUT}/own.qcow2" in sim.exists
+    else:
+        res = ko.delete_vm(sim, "victim", remove_storage=True)
+        assert "victim" not in sim.domains and res["deleted"]
+        for target, _ in kept:
+            assert target in {d["target"] for d in res["kept"]}
+
+
+def test_unproven_refusal_names_what_to_acknowledge_and_what_cannot_be():
+    sim = delete_sim()
+    _unreadable_neighbour(sim)
+    _unreadable_domain(sim)
+    (msg,) = ko.delete_plan(sim, "victim", remove_storage=True)["refusals"]
+    assert f"files the SSH user cannot read: {SECRET}" in msg
+    assert "reads that failed on the host: domain weird" in msg
+    # sans demande de disques : rien à prouver, rien à refuser
+    assert ko.delete_plan(sim, "victim")["refusals"] == []
+
+
+def test_acknowledged_output_is_the_intersection_with_the_unreadable_set():
+    sim = d46_sim()
+    plan = ko.delete_plan(sim, "target", remove_storage=True,
+                          acknowledged_unreadable=[f"{OUT}/elsewhere.qcow2", SECRET])
+    assert plan["acknowledged_unreadable"] == [SECRET] and plan["refusals"] == []
+    res = ko.delete_vm(sim, "target", remove_storage=True,
+                       acknowledged_unreadable=[f"{OUT}/elsewhere.qcow2", SECRET])
+    assert res["acknowledged_unreadable"] == [SECRET]
+
+
+def test_delete_digest_is_the_sorted_set_and_the_uuid():
+    a = ko.delete_digest("u1", ["/b", "/a"])
+    assert a == ko.delete_digest("u1", ["/a", "/b", "/a"]) and len(a) == 64
+    assert a != ko.delete_digest("u2", ["/a", "/b"]) and a != ko.delete_digest("u1", ["/a"])
+    plan = ko.delete_plan(delete_sim(), "victim", remove_storage=True)
+    assert plan["digest"] == ko.delete_digest(plan["uuid"], [LONELY, f"{OUT}/own.qcow2"])
+
+
+def _late_sharer(sim):
+    sim.add_domain("late", dom("late", [disk("vda", LONELY)]))
+
+
+def _sharer_gone(sim):
+    del sim.domains["other"]                 # shared.qcow2 devient supprimable
+
+
+def _redefined(sim):
+    xml = sim.domains["victim"]["xml"]
+    sim.domains["victim"]["xml"] = re.sub(r"<uuid>[^<]+</uuid>",
+                                          f"<uuid>{uuidlib.uuid4()}</uuid>", xml)
+
+
+# libellé, changement entre l'aperçu et l'exécution, résultat (None = changé), ignorés
+DIGEST_CASES = [
+    ("unchanged", lambda sim: None, ["vda", "vdc"], []),
+    ("a disk became shared: smaller set proceeds", _late_sharer, ["vdc"], ["vda"]),
+    ("a shared disk became deletable", _sharer_gone, None, None),
+    ("the domain was redefined", _redefined, None, None),
+]
+
+
+@pytest.mark.parametrize("label,change,deleted,skipped", DIGEST_CASES,
+                         ids=[c[0] for c in DIGEST_CASES])
+def test_delete_runs_only_what_the_preview_showed(label, change, deleted, skipped):
+    sim = delete_sim()
+    preview = ko.delete_plan(sim, "victim", remove_storage=True)
+    change(sim)
+    if deleted is None:
+        with pytest.raises(ko.OpError) as e:
+            ko.delete_vm(sim, "victim", remove_storage=True, expect_delete=preview["digest"])
+        assert e.value.kind == "plan-changed" and "nothing was done" in e.value.message
+        assert "victim" in sim.domains and not sim.virsh_calls("undefine")
+        assert f"{POOL}/shared.qcow2" in sim.exists and f"{OUT}/own.qcow2" in sim.exists
+        return
+    res = ko.delete_vm(sim, "victim", remove_storage=True, expect_delete=preview["digest"])
+    assert sorted(d["target"] for d in res["deleted"]) == deleted
+    assert [d["target"] for d in res["skipped"]] == skipped
+    if skipped:
+        assert res["skipped"][0] == {"target": "vda", "path": LONELY,
+                                     "reason": "shared with late"}
+
+
+def test_a_preview_without_storage_does_not_allow_deleting_storage():
+    sim = delete_sim()
+    preview = ko.delete_plan(sim, "victim")
+    with pytest.raises(ko.OpError) as e:
+        ko.delete_vm(sim, "victim", remove_storage=True, expect_delete=preview["digest"])
+    assert e.value.kind == "plan-changed" and "victim" in sim.domains
+
+
+@pytest.mark.parametrize("digest", ["abc", "G" * 64, "A" * 64, 3, "a" * 65])
+def test_invalid_expected_digest_makes_no_call(digest):
+    sim = delete_sim()
+    with pytest.raises(ko.OpError) as e:
+        ko.delete_vm(sim, "victim", remove_storage=True, expect_delete=digest)
+    assert e.value.kind == "invalid" and sim.calls == []
+
+
+def test_vm_started_after_the_plan_is_never_undefined():
+    # un geste lancé ailleurs démarre la VM pendant le relevé des disques
+    sim = delete_sim()
+    real = sim.v_vol_dumpxml
+
+    def start_meanwhile(o, p, data):
+        sim.domains["victim"]["state"] = "running"
+        return real(o, p, data)
+    sim.v_vol_dumpxml = start_meanwhile
+    seen = []
+    with pytest.raises(ko.OpError) as e:
+        ko.delete_vm(sim, "victim", remove_storage=True,
+                     progress=lambda s, st, m="": seen.append((s, st)))
+    assert e.value.kind == "plan-changed" and "is now running" in e.value.message
+    assert not sim.virsh_calls("undefine") and "victim" in sim.domains
+    assert seen[-1] == ("undefine", "failed")
+    assert e.value.delete_progress == {"undefine_started": False, "pending": []}
+
+
+def test_files_are_never_removed_while_the_domain_is_still_defined():
+    # undefine répond « fait » mais le domaine est toujours là : aucun rm
+    sim = delete_sim()
+    sim.v_undefine = lambda o, p, data: (0, "Domain 'victim' has been undefined\n", "")
+    with pytest.raises(ko.OpError, match="still defined"):
+        ko.delete_vm(sim, "victim", remove_storage=True)
+    assert f"{OUT}/own.qcow2" in sim.exists
+    assert not [c for c in sim.calls if c[0] == "run" and "rm -f" in " ".join(c[1])]
+
+
+def test_cancel_during_undefine_names_the_disks_not_confirmed_removed():
+    sim = delete_sim()
+
+    def cancel(o, p, data):
+        raise Stop()
+    sim.v_undefine = cancel
+    with pytest.raises(Stop) as e:
+        ko.delete_vm(sim, "victim", remove_storage=True)
+    assert e.value.delete_progress == {"undefine_started": True,
+                                       "pending": [LONELY, f"{OUT}/own.qcow2"]}
+
+
+def test_survey_timeout_reaches_every_read_of_the_survey():
+    sim = delete_sim()
+    seen = []
+    real_batch, real_run = sim.batch, sim.run
+
+    def batch(commands, timeout=None, cmd_timeout=None):
+        seen.append(("batch", timeout))
+        return real_batch(commands, timeout, cmd_timeout)
+
+    def run(argv, timeout=None):
+        seen.append(("run", timeout))
+        return real_run(argv, timeout)
+    sim.batch, sim.run = batch, run
+    ko.delete_plan(sim, "victim", remove_storage=True, survey_timeout=77)
+    # premier lot : dominfo/dumpxml du plan (délai de l'hôte), puis le relevé
+    assert seen[0] == ("batch", None) and len(seen) >= 4
+    assert all(t == 77 for _, t in seen[1:])
+
+
+def test_define_error_echoing_the_input_never_shows_the_password():
+    sim = clone_sim()
+    sim.v_define = lambda o, p, data: (1, "", f"error: XML error in {data}\n"
+                                       "error: bad passwd=\"another-one\"\n")
+    with pytest.raises(kh.KvmError) as e:
+        ko.clone_vm(sim, "src", "src-2")
+    texts = [str(e.value), repr(e.value), e.value.message, json.dumps(e.value.leftovers)]
+    assert any("passwd=" in t for t in texts)
+    for t in texts:
+        assert FAKE_PASSWORD not in t and "another-one" not in t
+
+
+@pytest.mark.parametrize("stderr", [
+    lambda data: f"error: {data}",
+    lambda data: f"error: {data}\nerror: last line\n",
+    lambda data: f"error: unexpected value {FAKE_PASSWORD}",
+    lambda data: "error: passwd='" + FAKE_PASSWORD[:4],              # tronqué
+    lambda data: f"error: {data.replace(chr(39), chr(34))}",          # autres guillemets
+])
+def test_run_input_scrubs_the_password_from_errors(stderr, tmp_path):
+    data = f"<domain><devices><graphics type='vnc' passwd='{FAKE_PASSWORD}'/></devices></domain>"
+
+    def runner(argv, **kw):
+        return SimpleNamespace(returncode=1, stdout="", stderr=stderr(kw["input"]))
+    host = kh.VirshHost({"name": "lab", "address": "10.0.0.5", "user": "u",
+                         "ssh_key": "ssh/lab_id", "known_hosts": "ssh/lab_known_hosts"},
+                        tmp_path, runner=runner)
+    with pytest.raises(kh.KvmError) as e:
+        host.run_input(["virsh", "define", "/dev/stdin"], data, secrets=[FAKE_PASSWORD])
+    assert FAKE_PASSWORD not in str(e.value) + repr(e.value) + e.value.message
+    assert FAKE_PASSWORD[:4] + "'" not in e.value.message

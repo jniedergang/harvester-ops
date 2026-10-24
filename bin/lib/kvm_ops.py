@@ -21,8 +21,10 @@ Les refus et échecs propres à ces opérations sont des `OpError` (genre dans
 OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 """
 
+import hashlib
 import io
 import ipaddress
+import itertools
 import json
 import posixpath
 import re
@@ -33,7 +35,8 @@ import xml.etree.ElementTree as ET
 
 import kvm_host as kh
 
-OP_KINDS = ("invalid", "refused", "notfound", "needs-force", "timeout", "failed")
+OP_KINDS = ("invalid", "refused", "notfound", "needs-force", "timeout", "failed",
+            "plan-changed")
 
 # nom d'un instantané créé par la console (un instantané existant, créé
 # ailleurs, est désigné par tout nom accepté par check_vm_name)
@@ -464,13 +467,15 @@ class _Survey:
     ou `qemu-img` répond « Permission denied ») : rien n'est alors prouvé,
     et seul `unreadable` peut être accepté par l'opérateur (décision 46)."""
 
-    def __init__(self, host, exclude=None, extra=()):
-        self.host, self.exclude = host, exclude
+    def __init__(self, host, exclude=None, extra=(), timeout=None):
+        # `timeout` : délai de CHAQUE appel ssh du relevé (None : celui de
+        # l'hôte) ; un hôte chargé de domaines et de volumes peut en demander plus
+        self.host, self.exclude, self.timeout = host, exclude, timeout
         self.unknown = []               # lectures manquées, jamais acceptables (libvirt ou E/S)
         self.unreadable = set()         # fichiers d'autres domaines illisibles
         self.self_unreadable = set()    # fichiers du domaine visé dont la chaîne est illisible
         first = host.batch({"all": ("list", "--all", "--name"), "active": ("list", "--name"),
-                            "pools": ("pool-list", "--name")})
+                            "pools": ("pool-list", "--name")}, timeout=timeout)
         names = kh.parse_names(_need(first, "all"))
         active = set(kh.parse_names(_need(first, "active")))
         pools = kh.parse_names(_need(first, "pools"))
@@ -482,7 +487,7 @@ class _Survey:
         for p in pools:
             cmds[f"pool\0{p}"] = ("pool-dumpxml", "--pool", p)
             cmds[f"vols\0{p}"] = ("vol-list", "--pool", p, "--details")
-        out = host.batch(cmds) if cmds else {}
+        out = host.batch(cmds, timeout=timeout) if cmds else {}
         self.pools, vol_names = {}, {}
         for p in pools:
             v, vl = out.get(f"pool\0{p}"), out.get(f"vols\0{p}")
@@ -496,7 +501,7 @@ class _Survey:
         # tous les volumes de tous les pools, en un lot
         vcmds = {f"{p}\0{n}": ("vol-dumpxml", "--pool", p, "--vol", n)
                  for p, ns in vol_names.items() for n in ns}
-        vout = host.batch(vcmds) if vcmds else {}
+        vout = host.batch(vcmds, timeout=timeout) if vcmds else {}
         self.vols = {p: {} for p in vol_names}
         for key in vcmds:
             p, n = key.split("\0", 1)
@@ -649,7 +654,7 @@ class _Survey:
                 + [["qemu-img", "info", "--force-share", "--output=json", "--backing-chain",
                     "--", q] for q in pending]
                 + [["stat", "-f", "-c", "%T", "--", p] for p in fs_paths])
-        res = _sh_batch(self.host, cmds) if cmds else []
+        res = _sh_batch(self.host, cmds, timeout=self.timeout) if cmds else []
         self.inode, self.absent, stat_failed = {}, set(), set()
         self._read_stats(stat_list, res[:len(stat_list)], stat_failed)
         base = len(stat_list)
@@ -677,7 +682,8 @@ class _Survey:
         # identité des maillons découverts par qemu-img (second appel)
         more = sorted({c for ch in chains.values() for c in ch if _is_path(c)} - stat_paths)
         if more:
-            res2 = _sh_batch(self.host, [["stat", "-L", "-c", "%d:%i", "--", p] for p in more])
+            res2 = _sh_batch(self.host, [["stat", "-L", "-c", "%d:%i", "--", p] for p in more],
+                             timeout=self.timeout)
             self._read_stats(more, res2, stat_failed)
         for r in all_refs:
             q = r.pop("pending")
@@ -1381,6 +1387,16 @@ def _rollback(host, created):
     return leftovers
 
 
+def _passwords(xml_text):
+    """Valeurs `passwd` d'un XML de domaine (lu par --security-info), pour
+    les masquer dans une erreur ; jamais rendues ailleurs."""
+    try:
+        root = kh._safe_xml(xml_text)
+    except (ET.ParseError, ValueError):
+        return []
+    return [g.get("passwd") for g in root.iter("graphics") if g.get("passwd")]
+
+
 def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
              poll=COPY_POLL):
     """Copie complète d'une VM arrêtée : plan recalculé, volumes copiés
@@ -1447,7 +1463,8 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
                           "the copy is discarded")
         new_xml = clone_xml(xml, new_name, disk_map)
         created.append({"kind": "domain", "name": new_name, "sources": sources})
-        host.run_input(["env", "LC_ALL=C", *host._virsh_argv(("define", "/dev/stdin"))], new_xml)
+        host.run_input(["env", "LC_ALL=C", *host._virsh_argv(("define", "/dev/stdin"))], new_xml,
+                       secrets=_passwords(xml))
         step("define", "done", new_name)
         step("verify", "running", new_name)
         out = host.batch({"info": ("dominfo", "--domain", new_name),
@@ -1471,19 +1488,75 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
 
 # --- suppression ---------------------------------------------------------------
 
-def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None):
-    """Plan de suppression (lecture seule). Rend {"name", "state",
+DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
+# au-delà de ce nombre d'autres disques, seul un aperçu identique est reconnu
+_DIGEST_SUBSET_MAX = 16
+
+
+def _delete_key(d):
+    """Identité d'un disque dans l'ensemble supprimé : son chemin normalisé."""
+    return _norm(d.get("path") or d.get("source") or "")
+
+
+def delete_digest(uuid, keys):
+    """Empreinte d'un ensemble de suppression : sha256 de l'uuid du domaine et
+    de la liste triée des chemins qui seraient supprimés."""
+    doc = json.dumps({"uuid": uuid or "", "delete": sorted(set(keys))}, sort_keys=True,
+                     separators=(",", ":"))
+    return hashlib.sha256(doc.encode()).hexdigest()
+
+
+def check_digest(value):
+    """Empreinte d'aperçu attendue (`delete_plan()["digest"]`) ou None."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not DIGEST_RE.match(value):
+        raise OpError("invalid", "invalid delete digest: 64 lowercase hexadecimal characters")
+    return value
+
+
+def previewed_set(plan, digest):
+    """Ensemble montré à l'aperçu (empreinte `digest`) s'il contient tout ce
+    que le plan courant supprimerait : on essaie l'ensemble courant complété
+    de chaque combinaison des autres disques de la VM (une VM a peu de
+    disques). None si aucun ne correspond : quelque chose de nouveau serait
+    supprimé, ou ce n'est plus le même domaine (uuid)."""
+    current = {_delete_key(d) for d in plan["delete"]}
+    others = sorted({_delete_key(d) for d in plan["keep"] if _delete_key(d)} - current)
+    sizes = range(len(others) + 1) if len(others) <= _DIGEST_SUBSET_MAX else (0,)
+    for n in sizes:
+        for extra in itertools.combinations(others, n):
+            cand = current | set(extra)
+            if delete_digest(plan["uuid"], cand) == digest:
+                return cand
+    return None
+
+
+def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None,
+                survey_timeout=None):
+    """Plan de suppression (lecture seule). Rend {"name", "uuid", "state",
     "persistent", "refusals", "internal_snapshots", "external_snapshots",
     "managed_save", "managed_save_lost", "nvram", "tpm_state",
     "remove_storage", "delete": [disques], "keep": [disques avec raison],
-    "unreadable", "acknowledged_unreadable", "notes"}.
+    "unreadable", "acknowledged_unreadable", "notes", "digest"}.
 
     `unreadable` : fichiers d'autres domaines (ou maillons) que le compte SSH
     n'a pas pu lire ; tant qu'il en reste, aucun disque n'est supprimé.
     `acknowledged_unreadable` (décision 46, désactivé par défaut) : liste de
     chemins que l'opérateur accepte explicitement de considérer comme ne
     citant aucun disque de cette VM ; si TOUT ce qui manque est un fichier
-    illisible de cette liste, la preuve se fait sans eux."""
+    illisible de cette liste, la preuve se fait sans eux. Le plan rend
+    l'intersection avec `unreadable` (ce qui a réellement servi).
+
+    Avec `remove_storage`, un disque gardé faute de preuve (`could not prove
+    that no other VM uses it`) REFUSE la suppression : l'opérateur a demandé
+    ses disques, la VM n'est pas retirée en les laissant derrière elle. Les
+    disques gardés pour une raison voulue (partagé, image de base, lecture
+    seule, bloc, stockage partagé) restent et n'empêchent rien.
+
+    `digest` : empreinte de l'ensemble supprimé (voir delete_digest), à
+    rendre à delete_vm(expect_delete=...). `survey_timeout` : délai de chaque
+    appel ssh du relevé des disques."""
     check_vm_name(name)
     ack = check_acknowledged(acknowledged_unreadable)
     out = host.batch({"info": ("dominfo", "--domain", name),
@@ -1502,7 +1575,7 @@ def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None):
     if external:
         refusals.append("this VM uses external snapshots: not managed by the console "
                         "in this version")
-    notes, unreadable = [], []
+    notes, unreadable, unknown = [], [], []
     if info["managed_save"]:
         notes.append("the saved memory state (managed save) is discarded with the VM")
     tpm = vm.get("tpm")
@@ -1514,9 +1587,10 @@ def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None):
                      if tpm_state == "kept" else "the vTPM state is removed with the VM")
     if remove_storage:
         # relevé en dernier : l'exécution enchaîne le undefine juste après
-        survey = _Survey(host, exclude=name)
+        survey = _Survey(host, exclude=name, timeout=survey_timeout)
         disks = _owned(survey, survey.target or vm, ack)
         unreadable = _unreadable_list(survey)
+        unknown = sorted(set(survey.unknown))
     else:
         disks = [{"target": d.get("target"), "source": d.get("source"), "pool": None,
                   "volume": None, "path": d.get("source"), "format": d.get("format"),
@@ -1525,17 +1599,32 @@ def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None):
         if internal:
             notes.append("internal snapshot data stays in the kept disk files "
                          "(qemu-img snapshot -l)")
+    delete = [d for d in disks if d["deletable"]]
+    keep = [d for d in disks if not d["deletable"] and d.get("source")]
+    unproven = [d for d in keep if d["reason"] == REASON_UNKNOWN]
+    if remove_storage and unproven:
+        msg = (f"storage removal requested, but {len(unproven)} disk(s) could not be proven "
+               f"unused by another VM ({', '.join(str(d.get('target')) for d in unproven)}): "
+               "the VM is kept")
+        left = [p for p in unreadable if p not in ack]
+        if left:
+            msg += (f"; files the SSH user cannot read: {', '.join(left)} (acknowledge each "
+                    "one only if none of them uses a disk of this VM)")
+        if unknown:
+            msg += f"; reads that failed on the host: {', '.join(unknown)} (try again)"
+        refusals.append(msg)
     nv = vm.get("nvram")
-    return {"name": name, "state": info["state"], "persistent": info["persistent"],
+    return {"name": name, "uuid": info["uuid"], "state": info["state"],
+            "persistent": info["persistent"],
             "refusals": refusals, "internal_snapshots": len(internal),
             "external_snapshots": len(external), "managed_save": info["managed_save"],
             "managed_save_lost": bool(info["managed_save"]),
             "nvram": (nv.get("path") or True) if nv else None, "tpm_state": tpm_state,
-            "remove_storage": bool(remove_storage),
-            "delete": [d for d in disks if d["deletable"]],
-            "keep": [d for d in disks if not d["deletable"] and d.get("source")],
-            "unreadable": unreadable, "acknowledged_unreadable": sorted(ack),
-            "notes": notes}
+            "remove_storage": bool(remove_storage), "delete": delete, "keep": keep,
+            "unreadable": unreadable,
+            "acknowledged_unreadable": sorted(ack & set(unreadable)),
+            "notes": notes,
+            "digest": delete_digest(info["uuid"], [_delete_key(d) for d in delete])}
 
 
 def undefine_argv(name, plan):
@@ -1553,29 +1642,75 @@ def undefine_argv(name, plan):
 
 
 def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unreadable=None,
-              progress=None):
+              progress=None, expect_delete=None, survey_timeout=None):
     """Supprime une VM arrêtée et persistante : plan recalculé ici, puis
     `undefine` aussitôt (fenêtre minimale après le relevé). Les volumes
     possédés partent par `undefine --storage`, les fichiers possédés hors
     pool par `rm` après le `undefine` (si `test -f`). Rend {"name",
-    "undefined", "deleted", "kept", "leftovers", "unreadable", "notes",
-    "remove_storage", "internal_snapshots", "managed_save_lost", "nvram",
-    "tpm_state", "acknowledged_unreadable"} (les derniers repris du plan).
-    `progress(étape, statut, message)` reçoit `plan`, `undefine`, `storage`
-    (avec suppression des disques) et `verify`."""
+    "undefined", "deleted", "kept", "skipped", "leftovers", "unreadable",
+    "notes", "remove_storage", "internal_snapshots", "managed_save_lost",
+    "nvram", "tpm_state", "acknowledged_unreadable"} (les derniers repris du
+    plan). `progress(étape, statut, message)` reçoit `plan`, `undefine`,
+    `storage` (avec suppression des disques) et `verify`.
+
+    `expect_delete` : `digest` de l'aperçu montré. Si le plan recalculé
+    supprimerait un disque absent de cet aperçu (ou si le domaine a changé
+    d'uuid), OpError `plan-changed` et rien n'est fait ; un ensemble plus
+    petit est accepté, les disques retirés de l'aperçu sont rendus dans
+    `skipped` avec leur raison. L'état est relu juste avant le `undefine` :
+    une VM démarrée depuis le plan donne aussi `plan-changed`.
+
+    Sur toute exception levée après le plan (annulation comprise),
+    `exc.delete_progress` = {"undefine_started": bool, "pending": [chemins
+    des disques possédés dont la suppression n'est pas confirmée]}."""
+    check_digest(expect_delete)
+
     def step(sid, status, msg=""):
         if progress:
             progress(sid, status, msg)
 
     step("plan", "running", f"what {name} owns")
-    plan = delete_plan(host, name, remove_storage, acknowledged_unreadable)
+    plan = delete_plan(host, name, remove_storage, acknowledged_unreadable,
+                       survey_timeout=survey_timeout)
     if plan["refusals"]:
         step("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"],
                                                                 "plan": plan})
-    step("plan", "done", f"{len(plan['delete'])} disk(s) to delete, {len(plan['keep'])} kept")
+    skipped = []
+    if expect_delete is not None:
+        seen = previewed_set(plan, expect_delete)
+        if seen is None:
+            msg = ("the disks to delete changed since the preview (or the VM was redefined): "
+                   "nothing was done; preview again")
+            step("plan", "failed", msg)
+            raise OpError("plan-changed", msg, {"refusals": [], "plan": plan})
+        gone_from_preview = seen - {_delete_key(d) for d in plan["delete"]}
+        skipped = [{"target": d.get("target"), "path": _delete_key(d), "reason": d["reason"]}
+                   for d in plan["keep"] if _delete_key(d) in gone_from_preview]
+    step("plan", "done", f"{len(plan['delete'])} disk(s) to delete, {len(plan['keep'])} kept"
+         + (f", {len(skipped)} no longer deleted since the preview" if skipped else ""))
+    stage = {"undefine": False, "pending": [_delete_key(d) for d in plan["delete"]]}
+    try:
+        return _delete_execute(host, name, plan, skipped, stage, step, timeout)
+    except BaseException as exc:
+        exc.delete_progress = {"undefine_started": stage["undefine"],
+                               "pending": list(stage["pending"]) if stage["undefine"] else []}
+        raise
+
+
+def _delete_execute(host, name, plan, skipped, stage, step, timeout):
+    """Exécution d'un plan de suppression accepté (voir delete_vm)."""
     error = None
     step("undefine", "running", name)
+    # état relu juste avant le undefine : une VM démarrée entre-temps (geste
+    # d'une autre console, virsh à la main) deviendrait transitoire
+    state = host.virsh("domstate", "--domain", name).strip()
+    if state != plan["state"]:
+        msg = (f"{name} is now {state} (it was {plan['state']} when the plan was made): "
+               "nothing was done")
+        step("undefine", "failed", msg)
+        raise OpError("plan-changed", msg, {"refusals": [], "plan": plan})
+    stage["undefine"] = True
     try:
         host.virsh(*undefine_argv(name, plan), timeout=timeout)
     except kh.KvmError as e:
@@ -1612,13 +1747,15 @@ def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unread
         else:
             leftovers.append({**d, "error": (error.message if error else
                                              "the volume is still present")})
+    done = {_delete_key(d) for d in deleted}
+    stage["pending"] = [p for p in stage["pending"] if p not in done]
     if plan["delete"]:
         step("storage", "warn" if leftovers else "done",
              f"{len(deleted)} deleted, {len(leftovers)} left in place")
     step("verify", "done", f"{name} no longer exists")
     return {"name": name, "undefined": True, "deleted": deleted, "kept": plan["keep"],
-            "leftovers": leftovers, "unreadable": plan["unreadable"], "notes": plan["notes"],
-            "remove_storage": plan["remove_storage"],
+            "skipped": skipped, "leftovers": leftovers, "unreadable": plan["unreadable"],
+            "notes": plan["notes"], "remove_storage": plan["remove_storage"],
             "internal_snapshots": plan["internal_snapshots"],
             "managed_save_lost": plan["managed_save_lost"], "nvram": plan["nvram"],
             "tpm_state": plan["tpm_state"],

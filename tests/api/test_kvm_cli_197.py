@@ -59,6 +59,7 @@ class SimNet:
         self.remotes = []                     # lignes distantes redécoupées
         self.raw = []                         # lignes distantes telles qu'envoyées
         self.inputs = []                      # (ligne, entrée standard)
+        self.timeouts = []                    # délai de chaque appel ssh
 
     def __call__(self, argv, capture_output=False, text=False, timeout=None, input=None,
                  stdin=None):
@@ -69,6 +70,7 @@ class SimNet:
         # l'entrée de la console ne part jamais, sauf les données de run_input
         assert (input is None) == (stdin is subprocess.DEVNULL)
         rem = shlex.split(argv[-1])
+        self.timeouts.append(timeout)
         self.raw.append(argv[-1])
         self.remotes.append(rem)
         sim = self.sim
@@ -571,6 +573,17 @@ def test_vm_delete_unreadable_neighbour_keeps_disks_unless_acknowledged(env, cap
     assert f"unreadable by the SSH user: {W.SECRET}" in text
     assert "--acknowledge-unreadable=PATH" in text
     assert net.virsh_commands("undefine") == []
+    # sans acquittement : refus, la VM reste, le fichier illisible et l'indice sont dits
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage")
+    assert res.rc == 1 and res.data["kind"] == "refused"
+    assert res.data["unreadable"] == [W.SECRET] and res.data["leftovers"] == []
+    assert f"--acknowledge-unreadable=PATH for each of: {W.SECRET}" in res.data["error"]
+    assert "could not be proven unused" in res.data["refusals"][0]
+    assert step_ids(res) == [("plan", "running"), ("plan", "error")]
+    text = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage",
+               as_json=False)
+    assert text.rc == 1 and "--acknowledge-unreadable=PATH" in text.err and W.SECRET in text.err
+    assert net.virsh_commands("undefine") == [] and "target" in net.sim.domains
     res = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage",
               f"--acknowledge-unreadable={W.SECRET}")
     assert res.rc == 0, res.data
@@ -625,7 +638,7 @@ SCHEMAS = [
      ["clone", "--name=src", "--new-name=c"], 1,
      {"ok", "error", "kind", "host", "source", "new_name", "refusals", "leftovers"}),
     ("vm delete", lambda: W.delete_sim(), ["vm", "delete", "--name=victim"], 0,
-     {"ok", "host", "dry_run", "name", "undefined", "deleted", "kept", "leftovers",
+     {"ok", "host", "dry_run", "name", "undefined", "deleted", "kept", "skipped", "leftovers",
       "unreadable", "notes", "remove_storage", "internal_snapshots", "managed_save_lost",
       "nvram", "tpm_state", "acknowledged_unreadable"}),
     ("vm delete dry run", lambda: W.delete_sim(), ["vm", "delete", "--name=victim",
@@ -634,6 +647,9 @@ SCHEMAS = [
     ("vm delete refused", lambda: W.delete_sim(state="running"),
      ["vm", "delete", "--name=victim"], 1,
      {"ok", "error", "kind", "host", "name", "refusals", "leftovers", "unreadable"}),
+    ("vm delete plan changed", lambda: W.delete_sim(),
+     ["vm", "delete", "--name=victim", "--expect-delete=" + "0" * 64], 1,
+     {"ok", "error", "kind", "host", "name", "refusals", "leftovers", "unreadable"}),
 ]
 PLAN_KEYS = {
     "clone": {"source", "new_name", "refusals", "disks", "shared", "space", "nics", "nvram",
@@ -641,7 +657,7 @@ PLAN_KEYS = {
     "vm": {"name", "state", "persistent", "refusals", "internal_snapshots",
            "external_snapshots", "managed_save", "managed_save_lost", "nvram", "tpm_state",
            "remove_storage", "delete", "keep", "unreadable", "acknowledged_unreadable",
-           "notes"},
+           "notes", "uuid", "digest"},
 }
 
 
@@ -674,8 +690,8 @@ def test_json_schema_is_stable(env, capsys, label, world, argv, rc, keys):
     (SimpleNamespace(cmd="snapshot", scmd="delete"), "SIGTERM",
      "snapshot delete cancelled (SIGTERM): it may already have been deleted: list the snapshots"),
     (SimpleNamespace(cmd="snapshot", scmd="list"), "SIGTERM", "cancelled (SIGTERM)"),
-    (SimpleNamespace(cmd="vm", vcmd="delete", dry_run=False), "SIGTERM",
-     "vm delete cancelled (SIGTERM): it may already have been undefined: check the VM list"),
+    (SimpleNamespace(cmd="vm", vcmd="delete", dry_run=False, name="v"), "SIGTERM",
+     "vm delete cancelled (SIGTERM) before anything was changed: the VM is kept"),
     (SimpleNamespace(cmd="vm", vcmd="delete", dry_run=True), "SIGTERM", "cancelled (SIGTERM)"),
     (SimpleNamespace(cmd="clone", dry_run=False), "SIGTERM",
      "clone cancelled (SIGTERM) before any copy: nothing created"),
@@ -809,3 +825,235 @@ def test_a_signal_during_the_copy_rolls_back_for_real(tmp_path, sig):
         if proc.poll() is None:
             proc.kill()
         shutil.rmtree(short, ignore_errors=True)
+
+
+# --- corrections de revue (1.97, tâche 2) -------------------------------------------------------
+
+class Prog(BaseException):
+    """Annulation portant ce que la bibliothèque ou la CLI y attachent."""
+
+    def __init__(self, name, **attrs):
+        super().__init__(name)
+        for k, v in attrs.items():
+            setattr(self, k, v)
+
+    def __str__(self):
+        return self.args[0]
+
+
+DELETE = SimpleNamespace(cmd="vm", vcmd="delete", dry_run=False, name="web")
+CLONE = SimpleNamespace(cmd="clone", dry_run=False, new_name="web-2")
+CANCEL_CASES = [
+    ("delete during the plan", DELETE, Prog("SIGTERM"),
+     "vm delete cancelled (SIGTERM) before anything was changed: the VM is kept", None),
+    ("delete before undefine", DELETE,
+     Prog("SIGTERM", delete_progress={"undefine_started": False, "pending": []}),
+     "vm delete cancelled (SIGTERM) before anything was changed: the VM is kept", None),
+    ("delete during undefine", DELETE,
+     Prog("SIGHUP", delete_progress={"undefine_started": True, "pending": ["/a", "/b"]}),
+     "vm delete cancelled (SIGHUP): it may already have been undefined: check the VM list; "
+     "owned disks not confirmed removed (possibly partly deleted, check them): /a, /b",
+     {"pending": ["/a", "/b"]}),
+    ("delete after the disks", DELETE,
+     Prog("SIGTERM", delete_progress={"undefine_started": True, "pending": []}),
+     "vm delete cancelled (SIGTERM): it may already have been undefined: check the VM list",
+     {"pending": []}),
+    ("delete already complete", DELETE, Prog("SIGTERM", last_step=("verify", "done")),
+     "vm delete cancelled (SIGTERM) after it completed: web was deleted", None),
+    ("clone already complete", CLONE, Prog("SIGTERM", last_step=("verify", "done")),
+     "clone cancelled (SIGTERM) after the copy was complete: web-2 was created",
+     {"leftovers": [], "created": "web-2"}),
+    ("clone before any copy", CLONE, Prog("SIGTERM", last_step=("plan", "done")),
+     "clone cancelled (SIGTERM) before any copy: nothing created", None),
+]
+
+
+@pytest.mark.parametrize("label,args,sig,message,data", CANCEL_CASES,
+                         ids=[c[0] for c in CANCEL_CASES])
+def test_cancel_reports_what_was_really_done(label, args, sig, message, data):
+    assert cli.cancel_message(args, sig) == message
+    assert cli.cancel_data(args, sig) == data
+
+
+def test_clone_cancelled_after_it_returned_says_the_clone_exists(env, capsys, monkeypatch):
+    sim = W.clone_sim()
+    env.use(sim)
+
+    def late_signal(*a, **k):
+        raise cli.Cancelled("SIGTERM")
+    monkeypatch.setattr(cli, "emit", late_signal)
+    res = run(capsys, "clone", "--host=lab", "--name=src", "--new-name=src-2")
+    assert res.rc == 3 and "src-2" in sim.domains
+    assert res.data == {"ok": False, "kind": "cancelled", "leftovers": [], "created": "src-2",
+                        "error": "clone cancelled (SIGTERM) after the copy was complete: "
+                                 "src-2 was created"}
+
+
+def test_delete_cancelled_after_it_returned_says_it_is_done(env, capsys, monkeypatch):
+    sim = W.delete_sim()
+    env.use(sim)
+    monkeypatch.setattr(cli, "emit", lambda *a, **k: (_ for _ in ()).throw(
+        cli.Cancelled("SIGTERM")))
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim")
+    assert res.rc == 3 and "victim" not in sim.domains
+    assert res.data["error"] == "vm delete cancelled (SIGTERM) after it completed: victim " \
+                                "was deleted"
+
+
+def test_delete_cancelled_during_undefine_lists_the_owned_disks(env, capsys):
+    sim = W.delete_sim()
+
+    def cancel(o, p, data):
+        raise cli.Cancelled("SIGTERM")
+    sim.v_undefine = cancel
+    env.use(sim)
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    assert res.rc == 3
+    assert res.data["pending"] == [f"{W.POOL}/lonely.qcow2", f"{OUT}/own.qcow2"]
+    assert res.data["error"].endswith(
+        f"(possibly partly deleted, check them): {W.POOL}/lonely.qcow2, {OUT}/own.qcow2")
+
+
+def test_delete_with_the_previewed_digest(env, capsys):
+    net = env.use(W.delete_sim())
+    prev = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+               "--dry-run")
+    digest = prev.data["plan"]["digest"]
+    text = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+               "--dry-run", as_json=False).out
+    assert f"--expect-delete={digest}" in text
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+              f"--expect-delete={digest}")
+    assert res.rc == 0 and res.data["skipped"] == []
+    assert sorted(d["target"] for d in res.data["deleted"]) == ["vda", "vdc"]
+    assert "victim" not in net.sim.domains
+
+
+@pytest.mark.parametrize("change,rc,kind", [
+    ("other-removed", 1, "plan-changed"),          # le disque partagé deviendrait supprimable
+    ("late-sharer", 0, None),                      # un disque devient partagé : moins supprimé
+])
+def test_delete_refuses_a_plan_that_grew_since_the_preview(env, capsys, change, rc, kind):
+    sim = W.delete_sim()
+    net = env.use(sim)
+    digest = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+                 "--dry-run").data["plan"]["digest"]
+    if change == "other-removed":
+        del sim.domains["other"]
+    else:
+        sim.add_domain("late", W.dom("late", [W.disk("vda", f"{W.POOL}/lonely.qcow2")]))
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+              f"--expect-delete={digest}")
+    assert res.rc == rc, res.data
+    if kind:
+        assert res.data["kind"] == kind and "preview again" in res.data["error"]
+        assert net.virsh_commands("undefine") == [] and "victim" in sim.domains
+        assert f"{W.POOL}/shared.qcow2" in sim.exists
+        assert step_ids(res) == [("plan", "running"), ("plan", "error")]
+    else:
+        assert [d["target"] for d in res.data["skipped"]] == ["vda"]
+        assert [d["target"] for d in res.data["deleted"]] == ["vdc"]
+
+
+@pytest.mark.parametrize("argv,msg", [
+    (["--expect-delete=abc"], "invalid delete digest"),
+    (["--expect-delete=" + "F" * 64], "invalid delete digest"),
+    (["--survey-timeout=0"], "--timeout must be positive"),
+])
+def test_delete_new_options_are_checked_before_the_host(env, capsys, argv, msg):
+    net = env.use(W.delete_sim())
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage", *argv)
+    assert res.rc == 2 and res.data["kind"] == "usage" and msg in res.data["error"]
+    assert net.remotes == []
+
+
+@pytest.mark.parametrize("argv,want", [([], cli.DELETE_SURVEY_TIMEOUT),
+                                       (["--survey-timeout=77"], 77)])
+def test_delete_survey_timeout(env, capsys, argv, want):
+    net = env.use(W.delete_sim())
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage",
+              "--dry-run", *argv)
+    assert res.rc == 0
+    # le premier appel lit le domaine (délai de l'hôte), les suivants font le relevé
+    assert net.timeouts[0] != want and set(net.timeouts[1:]) == {want}
+
+
+def gesture_sim(state="shut off"):
+    sim = W.delete_sim(state=state)
+
+    def start(o, p, data):
+        sim.domains[o["domain"]]["state"] = "running"
+        return 0, "Domain started\n", ""
+    sim.v_start = start
+    return sim
+
+
+def test_a_gesture_waits_for_no_one_while_a_delete_holds_the_vm(env, capsys):
+    net = env.use(gesture_sim())
+    with cli.vm_lock(env.state, "lab", "victim"):          # suppression en cours
+        res = run(capsys, "vm", "start", "--host=lab", "--name=victim")
+    assert res.rc == 2 and res.data["kind"] == "busy" and net.remotes == []
+    res = run(capsys, "vm", "start", "--host=lab", "--name=victim")
+    assert res.rc == 0 and res.data["state"] == "running"
+
+
+def test_a_delete_cannot_start_while_a_gesture_runs(env, capsys):
+    """Course simulée : pendant que `vm start` agit (verrou tenu), une
+    suppression de la même VM essaie de prendre le verrou : occupée."""
+    sim = gesture_sim()
+    seen = []
+    real = sim.v_start
+
+    def start_while_delete_tries(o, p, data):
+        try:
+            with cli.vm_lock(env.state, "lab", "victim"):
+                seen.append("delete ran")
+        except cli.UsageError as e:
+            seen.append(e.kind)
+        return real(o, p, data)
+    sim.v_start = start_while_delete_tries
+    env.use(sim)
+    res = run(capsys, "vm", "start", "--host=lab", "--name=victim")
+    assert res.rc == 0 and seen == ["busy"]
+
+
+def test_delete_refuses_a_vm_started_after_its_plan(env, capsys):
+    sim = W.delete_sim()
+    real = sim.v_vol_dumpxml
+
+    def started(o, p, data):
+        sim.domains["victim"]["state"] = "running"     # un geste d'une autre console
+        return real(o, p, data)
+    sim.v_vol_dumpxml = started
+    net = env.use(sim)
+    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    assert res.rc == 1 and res.data["kind"] == "plan-changed"
+    assert net.virsh_commands("undefine") == [] and "victim" in sim.domains
+    assert step_ids(res)[-1] == ("undefine", "error")
+
+
+def test_define_error_echoing_the_xml_never_leaks_the_password(env, capsys):
+    sim = W.clone_sim()
+    sim.v_define = lambda o, p, data: (1, "", f"error: XML error: {data}\n"
+                                       f"error: invalid passwd='{PASSWORD}x'\n")
+    net = env.use(sim)
+    res = run(capsys, "clone", "--host=lab", "--name=src", "--new-name=src-2")
+    assert res.rc == 1 and res.data["kind"] == "failed"
+    (define_input,) = [d for r, d in net.inputs if "define" in r]
+    assert PASSWORD in define_input                       # la copie garde son accès
+    assert "passwd='***'" in res.data["error"]
+    steps = [ln for ln in res.err.splitlines() if ln.startswith("STEP_EVENT|")]
+    assert steps and PASSWORD not in res.out + res.err + "".join(steps)
+    text = run(capsys, "clone", "--host=lab", "--name=src", "--new-name=src-3", as_json=False)
+    assert text.rc == 1 and PASSWORD not in text.out + text.err
+
+
+def test_revert_of_a_running_vm_to_a_shut_off_snapshot_says_it_powers_off(env, capsys):
+    env.use(snap_world(state="running"))
+    res = run(capsys, "snapshot", "revert", "--host=lab", "--name=kvmtest-1", "--snapshot=s2")
+    assert res.rc == 0 and res.data["state"] == "shut off"
+    (plan,) = [s for s in res.steps if s[:2] == ["plan", "done"]]
+    assert "reverting powers kvmtest-1 off" in plan[2]
+    res = run(capsys, "snapshot", "revert", "--host=lab", "--name=kvmtest-1", "--snapshot=s1")
+    (plan,) = [s for s in res.steps if s[:2] == ["plan", "done"]]
+    assert "powers" not in plan[2]

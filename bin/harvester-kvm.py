@@ -17,7 +17,8 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py vm start|shutdown|reboot|destroy|suspend|resume --host N --name D [--timeout S]
   harvester-kvm.py vm display --host N --name D
   harvester-kvm.py vm delete --host N --name D [--remove-storage]
-        [--acknowledge-unreadable=PATH ...] [--dry-run] [--timeout S]
+        [--acknowledge-unreadable=PATH ...] [--expect-delete=DIGEST] [--dry-run]
+        [--timeout S] [--survey-timeout S]
   harvester-kvm.py snapshot list --host N --name D
   harvester-kvm.py snapshot create --host N --name D --snapshot S [--description T] [--timeout S]
   harvester-kvm.py snapshot revert|delete --host N --name D --snapshot S [--timeout S]
@@ -61,9 +62,10 @@ ce qui a été fait (`deleted`, `kept` avec leur raison, `leftovers`). Une
 demande refusée par l'état de la VM (en marche, disque raw...) sort en 1,
 kind `refused`, avec la liste `refusals`. Deux opérations sur la même VM
 (clonage : la source et le nom du clone) ne tournent jamais en même temps :
-la seconde sort en 2, kind `busy`. `vm display` dit où joindre l'affichage
-VNC et la commande `ssh -L` à lancer soi-même ; le mot de passe VNC n'est
-jamais lu par ce script, seule sa présence est dite.
+la seconde sort en 2, kind `busy` ; les gestes de la 1.96 prennent le même
+verrou. `vm display` dit où joindre l'affichage VNC et la commande `ssh -L`
+à lancer soi-même ; le XML est lu avec --security-info, en mémoire, pour
+savoir SI un mot de passe VNC existe : sa valeur n'est jamais écrite.
 
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
 ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
@@ -161,6 +163,8 @@ FORCED = {"shutdown": ["destroy"], "reboot": ["destroy", "start"]}
 SNAPSHOT_TIMEOUTS = {"create": 600, "revert": 300, "delete": 300}
 CLONE_TIMEOUT = 3600
 DELETE_TIMEOUT = 300
+# délai de chaque appel ssh du relevé des disques de l'hôte (suppression)
+DELETE_SURVEY_TIMEOUT = 120
 # participe passé des messages d'annulation des instantanés
 SNAPSHOT_DONE = {"create": "taken", "revert": "reverted", "delete": "deleted"}
 
@@ -883,6 +887,13 @@ def gesture(args, action):
     timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUTS.get(action, DEFAULT_TIMEOUT)
     if timeout <= 0:
         raise UsageError("--timeout must be positive")
+    # même verrou par VM que les opérations de la 1.97 : un geste ne croise
+    # jamais un clonage, une suppression ou un instantané de la même VM
+    with vm_lock(state_of(args), host.name, name):
+        return _gesture_locked(args, action, host, name, timeout)
+
+
+def _gesture_locked(args, action, host, name, timeout):
     accept, refused = GESTURES[action]
     result = {"host": host.name, "name": name, "action": action, "ok": False,
               "from": None, "state": None, "suggest": []}
@@ -1047,8 +1058,9 @@ def tunnel_command(decl, address, port):
 
 def cmd_vm_display(args):
     """Où joindre l'affichage VNC d'une VM. Le XML est lu avec
-    --security-info pour savoir SI un mot de passe existe ; sa valeur ne
-    quitte jamais l'analyseur (parse_domain_xml ne rend qu'un booléen)."""
+    --security-info : le mot de passe VNC est donc lu, en mémoire, pour
+    savoir s'il en existe un ; il n'est jamais écrit (ni sortie, ni étape,
+    ni erreur), parse_domain_xml n'en rend qu'un booléen."""
     host = load_host(state_of(args), args.host)
     name = check_vm_name(args.name)
     step("display", "running", f"reading the display of {name}")
@@ -1186,8 +1198,13 @@ def cmd_snapshot_revert(args):
         s = next((x for x in listing["snapshots"] if x["name"] == snap), None)
         if s is None:
             return f"snapshot {snap} not listed"
-        return (f"back to {snap} (taken {s.get('state') or 'in an unknown state'}): the "
-                f"current state of {name} that was not saved is lost")
+        taken = s.get("state") or "in an unknown state"
+        text = (f"back to {snap} (taken {taken}): the current state of {name} that was not "
+                "saved is lost")
+        if listing["state"] != "shut off" and taken in ("shutoff", "shut off"):
+            text += (f"; {name} is {listing['state']} and the snapshot was taken shut off: "
+                     f"reverting powers {name} off")
+        return text
     with vm_lock(state_of(args), host.name, name):
         try:
             _snapshot_plan(prog, host, name, what)
@@ -1264,7 +1281,7 @@ def cmd_clone(args):
              plan_text(f"clone {name} -> {new} on {host.name} (dry run)", plan["refusals"],
                        lines))
         return EXIT_OK
-    with vm_lock(state_of(args), host.name, name, new):
+    with vm_lock(state_of(args), host.name, name, new), noting_progress(prog):
         t0 = CLOCK()
         try:
             res = ko.clone_vm(host, name, new, timeout=timeout, progress=prog, sleep=SLEEP)
@@ -1279,15 +1296,31 @@ def cmd_clone(args):
             raise Failure(msg, data={**data, "leftovers": list(getattr(e, "leftovers", []))}) \
                 from None
         elapsed = CLOCK() - t0
-    lines = [f"disk {d['target']}: {d['destination']}" for d in res["disks"]]
-    lines += [f"note: {w}" for w in res["warnings"]]
-    if res["uefi_entries_lost"]:
-        lines.append("note: new UEFI variables (boot entries are not copied)")
-    emit(args, {"ok": True, "host": host.name, "dry_run": False,
-                "elapsed_s": round(elapsed, 1), **res},
-         plan_text(f"{new}: copy of {name} on {host.name}, uuid {res['uuid']}, {res['state']}",
-                   [], lines))
+        lines = [f"disk {d['target']}: {d['destination']}" for d in res["disks"]]
+        lines += [f"note: {w}" for w in res["warnings"]]
+        if res["uefi_entries_lost"]:
+            lines.append("note: new UEFI variables (boot entries are not copied)")
+        emit(args, {"ok": True, "host": host.name, "dry_run": False,
+                    "elapsed_s": round(elapsed, 1), **res},
+             plan_text(f"{new}: copy of {name} on {host.name}, uuid {res['uuid']}, "
+                       f"{res['state']}", [], lines))
     return EXIT_OK
+
+
+@contextlib.contextmanager
+def noting_progress(prog):
+    """Une annulation emporte la dernière étape dite : une annulation qui
+    arrive après `verify|done` (opération déjà complète) n'est alors jamais
+    annoncée comme « rien n'a été fait »."""
+    try:
+        yield
+    except Cancelled as c:
+        c.last_step = (prog.sid, prog.status)
+        raise
+
+
+def _completed(sig):
+    return getattr(sig, "last_step", None) == ("verify", "done")
 
 
 def rollback_step(e):
@@ -1308,7 +1341,9 @@ def cmd_vm_delete(args):
     if ack and not args.remove_storage:
         raise UsageError("--acknowledge-unreadable only applies with --remove-storage")
     checked(ko.check_acknowledged, ack)
+    expect = checked(ko.check_digest, args.expect_delete)
     timeout = positive_timeout(args.timeout, DELETE_TIMEOUT)
+    survey_timeout = positive_timeout(args.survey_timeout, DELETE_SURVEY_TIMEOUT)
     data = {"host": host.name, "name": name, "refusals": [], "leftovers": [],
             "unreadable": []}
     prog = Progress()
@@ -1318,7 +1353,8 @@ def cmd_vm_delete(args):
     if args.dry_run:
         prog("plan", "running", f"what {name} owns (dry run)")
         try:
-            plan = ko.delete_plan(host, name, args.remove_storage, ack)
+            plan = ko.delete_plan(host, name, args.remove_storage, ack,
+                                  survey_timeout=survey_timeout)
         except (ko.OpError, kh.KvmError) as e:
             raise op_failure(prog, e, data) from None
         prog("plan", "warn" if plan["refusals"] else "done",
@@ -1328,26 +1364,39 @@ def cmd_vm_delete(args):
         lines += [f"keep {d['target']}: {disk_lines(d)} ({d['reason']})" for d in plan["keep"]]
         lines += unreadable_lines(plan["unreadable"], plan["acknowledged_unreadable"])
         lines += [f"note: {n}" for n in plan["notes"]]
+        if not plan["refusals"]:
+            lines.append(f"to delete exactly this, add --expect-delete={plan['digest']}")
         emit(args, {"ok": True, "host": host.name, "name": name, "dry_run": True,
                     "possible": not plan["refusals"], "plan": plan},
              plan_text(f"delete {name} on {host.name} (dry run)", plan["refusals"], lines))
         return EXIT_OK
-    with vm_lock(state_of(args), host.name, name):
+    with vm_lock(state_of(args), host.name, name), noting_progress(prog):
         try:
             res = ko.delete_vm(host, name, args.remove_storage, timeout=timeout,
-                               acknowledged_unreadable=ack, progress=prog)
+                               acknowledged_unreadable=ack, progress=prog,
+                               expect_delete=expect, survey_timeout=survey_timeout)
         except (ko.OpError, kh.KvmError) as e:
+            failure = op_failure(prog, e, data)
             if isinstance(e, ko.OpError):
-                data["unreadable"] = list((e.data.get("plan") or {}).get("unreadable") or [])
-            raise op_failure(prog, e, data) from None
-    lines = [f"deleted {d['target']}: {disk_lines(d)}" for d in res["deleted"]]
-    lines += [f"kept {d['target']}: {disk_lines(d)} ({d['reason']})" for d in res["kept"]]
-    lines += [f"left in place {d['target']}: {disk_lines(d)} ({d['error']})"
-              for d in res["leftovers"]]
-    lines += unreadable_lines(res["unreadable"], res["acknowledged_unreadable"])
-    lines += [f"note: {n}" for n in res["notes"]]
-    emit(args, {"ok": True, "host": host.name, "dry_run": False, **res},
-         plan_text(f"{name} deleted from {host.name}", [], lines))
+                plan = e.data.get("plan") or {}
+                failure.data["unreadable"] = list(plan.get("unreadable") or [])
+                left = [p for p in failure.data["unreadable"]
+                        if p not in set(plan.get("acknowledged_unreadable") or [])]
+                if e.kind == "refused" and left:
+                    failure.message = (f"{failure.message}; if you are sure, add "
+                                       "--acknowledge-unreadable=PATH for each of: "
+                                       + ", ".join(left))
+            raise failure from None
+        lines = [f"deleted {d['target']}: {disk_lines(d)}" for d in res["deleted"]]
+        lines += [f"kept {d['target']}: {disk_lines(d)} ({d['reason']})" for d in res["kept"]]
+        lines += [f"no longer deleted since the preview {d['target']}: {d['path']} "
+                  f"({d['reason']})" for d in res["skipped"]]
+        lines += [f"left in place {d['target']}: {disk_lines(d)} ({d['error']})"
+                  for d in res["leftovers"]]
+        lines += unreadable_lines(res["unreadable"], res["acknowledged_unreadable"])
+        lines += [f"note: {n}" for n in res["notes"]]
+        emit(args, {"ok": True, "host": host.name, "dry_run": False, **res},
+             plan_text(f"{name} deleted from {host.name}", [], lines))
     return EXIT_OK
 
 
@@ -1373,11 +1422,8 @@ def main(argv=None):
             try:
                 return args.fn(args)
             except Cancelled as e:
-                # un clonage interrompu nomme ce que son retour arrière a laissé
-                data = ({"leftovers": list(e.leftovers)} if getattr(e, "leftovers", None)
-                        is not None else None)
                 return fail_exit(want_json, "cancelled", cancel_message(args, e), "cancelled",
-                                 EXIT_CANCELLED, data)
+                                 EXIT_CANCELLED, cancel_data(args, e))
     except (UsageError, kvm_decl.DeclError) as e:
         kind = getattr(e, "kind", "usage")
         return fail_exit(want_json, "validate", str(e), kind, EXIT_USAGE)
@@ -1409,6 +1455,9 @@ def cancel_message(args, sig):
                 f"{SNAPSHOT_DONE[args.scmd]}: list the snapshots")
     if args.cmd == "clone":
         left = getattr(sig, "leftovers", None)
+        if left is None and _completed(sig):
+            return (f"clone cancelled ({sig}) after the copy was complete: "
+                    f"{args.new_name} was created")
         if left is None:
             return f"clone cancelled ({sig}) before any copy: nothing created"
         if not left:
@@ -1416,9 +1465,34 @@ def cancel_message(args, sig):
         return (f"clone cancelled ({sig}): rollback incomplete, left on the host: "
                 + ", ".join(describe_leftover(x) for x in left))
     if args.cmd == "vm" and args.vcmd == "delete":
-        return (f"vm delete cancelled ({sig}): it may already have been undefined: "
-                "check the VM list")
+        prog = getattr(sig, "delete_progress", None)
+        if prog is None and _completed(sig):
+            return f"vm delete cancelled ({sig}) after it completed: {args.name} was deleted"
+        if prog is None or not prog["undefine_started"]:
+            return f"vm delete cancelled ({sig}) before anything was changed: the VM is kept"
+        msg = (f"vm delete cancelled ({sig}): it may already have been undefined: "
+               "check the VM list")
+        if prog["pending"]:
+            msg += ("; owned disks not confirmed removed (possibly partly deleted, check "
+                    "them): " + ", ".join(prog["pending"]))
+        return msg
     return f"cancelled ({sig})"
+
+
+def cancel_data(args, sig):
+    """Champs du JSON d'annulation : `leftovers` (et `created`) d'un clonage
+    commencé, `pending` d'une suppression dont le undefine était parti."""
+    if args.cmd == "clone" and not getattr(args, "dry_run", False):
+        left = getattr(sig, "leftovers", None)
+        if left is not None:
+            return {"leftovers": list(left)}
+        if _completed(sig):
+            return {"leftovers": [], "created": args.new_name}
+    if args.cmd == "vm" and args.vcmd == "delete" and not getattr(args, "dry_run", False):
+        prog = getattr(sig, "delete_progress", None)
+        if prog and prog["undefine_started"]:
+            return {"pending": list(prog["pending"])}
+    return None
 
 
 def fail_exit(want_json, sid, message, kind, code, data=None):
@@ -1499,8 +1573,13 @@ def build_parser():
     sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH",
                     help="file the SSH user cannot read, accepted as using no disk of this VM "
                          "(repeatable)")
+    sp.add_argument("--expect-delete", metavar="DIGEST",
+                    help="digest of the previewed plan: refused if more would be deleted")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
     sp.add_argument("--timeout", type=int, help=f"seconds (default {DELETE_TIMEOUT})")
+    sp.add_argument("--survey-timeout", type=int,
+                    help=f"seconds for each read of the host's disks "
+                         f"(default {DELETE_SURVEY_TIMEOUT})")
     sp.set_defaults(fn=cmd_vm_delete)
 
     np = sub.add_parser("snapshot", help="internal snapshots of a VM").add_subparsers(

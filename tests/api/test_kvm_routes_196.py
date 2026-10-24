@@ -449,6 +449,25 @@ def test_second_gesture_on_the_same_vm_waits(client):
     assert client.post("/api/kvm/vms/node2/web/destroy", json={}).status_code == 202
 
 
+@pytest.mark.parametrize("label", ["kvm:vm-snapshot-create:node2/web",
+                                   "kvm:vm-snapshot-revert:node2/web",
+                                   "kvm:vm-clone:node2/web", "kvm:vm-delete:node2/web"])
+def test_every_kvm_vm_action_blocks_a_gesture_on_the_same_vm(client, label):
+    """Les opérations par VM de la 1.97 (libellés `kvm:vm-<verbe>:`) et les
+    gestes se bloquent mutuellement, comme le verrou par VM de la CLI."""
+    run = wapp.ActionRun("kvmbusy0001", label, "kvm:node2", ["harvester-kvm"])
+    run.status = "running"
+    with wapp.ACTIONS_LOCK:
+        wapp.ACTIONS[run.id] = run
+    try:
+        r = client.post("/api/kvm/vms/node2/web/start", json={})
+        assert r.status_code == 409 and r.get_json()["running_action"] == label
+        assert client.post("/api/kvm/vms/node2/web2/start", json={}).status_code == 202
+    finally:
+        with wapp.ACTIONS_LOCK:
+            wapp.ACTIONS.pop(run.id, None)
+
+
 # --- le relais des actions : résultat JSON du script --------------------------------------
 
 def test_runner_keeps_the_json_output_and_the_steps():
