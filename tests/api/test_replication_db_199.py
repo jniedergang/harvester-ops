@@ -577,10 +577,74 @@ def test_prune_keeps_the_last_applied_point_of_each_volume(conn):
                                   "generation": 1})
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=old)
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=NOW)
-    assert db.prune(conn, db.retention_cutoff(NOW)) == {"ticks": 2, "measures": 1, "events": 1, "stats": 0,
-                                                         "stats_downsampled": 0}
+    assert db.prune(conn, db.retention_cutoff(NOW), now=NOW) == {
+        "ticks": 2, "measures": 1, "events": 1, "stats": 0, "tick_hours": 0,
+        "stats_downsampled": 0, "ticks_downsampled": 0}
     assert [t["backup"] for t in db.list_ticks(conn, PID)] == ["b1", "recent"]
     assert len(db.resource_events(conn, "u1")) == 1
+
+
+def _tick(vol, backup, at, state="applied", newly=0, lag=None, vm="u1"):
+    t = {"source_volume": vol, "backup": backup, "state": state, "generation": 1, "vm_uid": vm,
+         "snapshot_at": db._iso(at), "newly_uploaded": newly}
+    if lag is not None:
+        t["backup_done_at"] = db._iso(at + timedelta(seconds=20))
+        t["applied_at"] = db._iso(at + timedelta(seconds=20 + lag))
+    return t
+
+
+# v1.99.0, décision 55 : passages de plus de 30 jours réduits à l'heure par volume
+@pytest.mark.parametrize("ticks,expected_hours,kept", [
+    # trois passages dans la même heure, le dernier appliqué reste dans `ticks`
+    ([("pvc-1", "a", 0, "applied", 10, 5), ("pvc-1", "b", 3, "skipped", 20, None),
+      ("pvc-1", "c", 6, "error", 0, None), ("pvc-1", "d", 9, "applied", 40, 12)],
+     [("pvc-1", "10", 3, 1, 1, 1, 30, 5.0)], ["d"]),
+    # deux heures, deux volumes ; les passages récents ne bougent pas
+    ([("pvc-1", "a", 0, "applied", 10, 5), ("pvc-1", "b", 61, "applied", 20, 9),
+      ("pvc-1", "e", 62, "applied", 30, 7),
+      ("pvc-2", "c", 2, "applied", 5, 3), ("pvc-2", "d", 4, "applied", 6, 4),
+      ("pvc-1", "recent", 60 * 24 * 39, "completed", 1, None)],
+     [("pvc-1", "10", 1, 1, 0, 0, 10, 5.0), ("pvc-1", "11", 1, 1, 0, 0, 20, 9.0),
+      ("pvc-2", "10", 1, 1, 0, 0, 5, 3.0)], ["d", "e", "recent"]),
+    # rien de plus de 30 jours : rien n'est réduit
+    ([("pvc-1", "a", 60 * 24 * 35, "applied", 10, 5)], [], ["a"]),
+])
+def test_prune_downsamples_old_ticks_hourly_per_volume(conn, ticks, expected_hours, kept):
+    new_plan(conn)
+    base = NOW - timedelta(days=40)
+    base = base.replace(hour=10, minute=0)
+    for vol, backup, minutes, state, newly, lag in ticks:
+        db.record_tick(conn, PID, _tick(vol, backup, base + timedelta(minutes=minutes), state, newly, lag))
+    out = db.prune(conn, db.retention_cutoff(NOW), now=NOW)
+    hours = [(h["source_volume"], h["hour"][11:13], h["count"], h["applied"], h["skipped"], h["errors"],
+              h["newly_uploaded"], h["max_apply_lag_s"]) for h in db.list_tick_hours(conn, PID)]
+    assert sorted(hours) == sorted(expected_hours)
+    assert out["ticks_downsampled"] == sum(h[2] for h in expected_hours)
+    assert sorted(t["backup"] for t in db.list_ticks(conn, PID)) == sorted(kept)
+    # idempotent : une relance ne change rien
+    again = db.prune(conn, db.retention_cutoff(NOW), now=NOW)
+    assert again["ticks_downsampled"] == 0
+    assert sorted((h["source_volume"], h["hour"][11:13], h["count"], h["applied"], h["skipped"], h["errors"],
+                   h["newly_uploaded"], h["max_apply_lag_s"]) for h in db.list_tick_hours(conn, PID)) \
+        == sorted(expected_hours)
+
+
+def test_ticks_joining_an_hour_already_downsampled_add_up(conn):
+    # le dernier appliqué gardé rejoint son heure dès qu'un plus récent l'a remplacé
+    new_plan(conn)
+    base = (NOW - timedelta(days=40)).replace(hour=10, minute=0)
+    db.record_tick(conn, PID, _tick("pvc-1", "a", base, "applied", 10, 5))
+    db.record_tick(conn, PID, _tick("pvc-1", "b", base + timedelta(minutes=3), "applied", 20, 8))
+    db.prune(conn, db.retention_cutoff(NOW), now=NOW)
+    assert [t["backup"] for t in db.list_ticks(conn, PID)] == ["b"]
+    db.record_tick(conn, PID, _tick("pvc-1", "c", NOW, "applied", 1, 1))
+    db.prune(conn, db.retention_cutoff(NOW), now=NOW)
+    (h,) = db.list_tick_hours(conn, PID)
+    assert (h["count"], h["applied"], h["newly_uploaded"], h["max_apply_lag_s"]) == (2, 2, 30, 8.0)
+    assert [t["backup"] for t in db.list_ticks(conn, PID)] == ["c"]
+    # passé la rétention, l'heure part aussi
+    out = db.prune(conn, NOW + timedelta(days=1), now=NOW + timedelta(days=500))
+    assert out["tick_hours"] == 1 and db.list_tick_hours(conn, PID) == []
 
 
 # -- actions proposées en `error` = sorties acceptées par le registre ----------

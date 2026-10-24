@@ -33,6 +33,14 @@ RETENTION_DAYS = 400
 # à 3 min d'intervalle ; avec la réduction, environ 30 x 480 + 370 x 24 =
 # 23 280 lignes par VM au lieu de 192 000.
 STATS_FULL_DAYS = 30
+# Passages (`ticks`, une ligne par sauvegarde et par volume) : même règle
+# depuis la 1.99.0 (décision 55). Au-delà de TICKS_FULL_DAYS jours, ils sont
+# réduits à une ligne par heure et par volume dans `tick_hours` (nombre,
+# octets envoyés, pire retard d'application), puis effacés ; le dernier
+# passage appliqué de chaque volume reste dans `ticks`. Volume : 480 lignes
+# par volume et par jour à 3 min, soit environ 30 x 480 + 370 x 24 = 23 280
+# lignes par volume au lieu de 192 000.
+TICKS_FULL_DAYS = 30
 # Verrou d'une commande : le détenteur le renouvelle (`lock_heartbeat`) au
 # moins toutes les LOCK_TTL_S / 3 secondes ; sans quoi un autre hôte le
 # reprend passé ce délai.
@@ -183,6 +191,21 @@ TABLES = {
         # l'heure des statistiques de plus de STATS_FULL_DAYS jours
         ("passes", "INTEGER NOT NULL DEFAULT 1"),
     ],
+    # v1.99.0 : passages de plus de TICKS_FULL_DAYS jours, réduits à l'heure
+    "tick_hours": [
+        ("plan_id", "TEXT NOT NULL"),
+        ("generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("source_volume", "TEXT NOT NULL"),
+        ("hour", "TEXT NOT NULL"),
+        ("vm_uid", "TEXT NOT NULL DEFAULT ''"),
+        ("count", "INTEGER NOT NULL DEFAULT 0"),
+        ("applied", "INTEGER NOT NULL DEFAULT 0"),
+        ("skipped", "INTEGER NOT NULL DEFAULT 0"),
+        ("errors", "INTEGER NOT NULL DEFAULT 0"),
+        ("newly_uploaded", "INTEGER NOT NULL DEFAULT 0"),
+        # pire écart fin de sauvegarde -> appliquée sur la cible
+        ("max_apply_lag_s", "REAL"),
+    ],
     "runs": [
         ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
         ("plan_id", "TEXT NOT NULL"),
@@ -222,6 +245,7 @@ KEYS = {
     "ticks": ("plan_id", "generation", "source_volume", "backup"),
     "measures": ("plan_id", "generation", "source_volume", "backup"),
     "stats": ("plan_id", "generation", "resource_uid", "pass_at"),
+    "tick_hours": ("plan_id", "generation", "source_volume", "hour"),
 }
 INDEXES = (
     "CREATE INDEX IF NOT EXISTS resources_source ON plan_resources (source_host)",
@@ -592,7 +616,7 @@ def delete_plan(conn, plan_id):
             return False
         if p["state"] not in ("draft", "unprotected"):
             raise StateConflict(plan_id, p["state"], "deleted", "only a draft or unprotected plan can be deleted")
-        for t in ("plan_resources", "plan_volumes", "ticks", "measures", "leases", "locks"):
+        for t in ("plan_resources", "plan_volumes", "ticks", "tick_hours", "measures", "leases", "locks"):
             conn.execute(f'DELETE FROM "{t}" WHERE plan_id = ?', (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
     return True
@@ -1293,27 +1317,98 @@ def downsample_stats(conn, before):
     return removed
 
 
+_LAST_APPLIED_TICKS = (
+    "SELECT t.rowid FROM ticks t JOIN (SELECT plan_id, generation, source_volume,"
+    "  MAX(snapshot_at) AS m FROM ticks WHERE state = 'applied'"
+    "  GROUP BY plan_id, generation, source_volume) k"
+    " ON t.plan_id = k.plan_id AND t.generation = k.generation AND t.source_volume = k.source_volume"
+    " AND t.snapshot_at = k.m AND t.state = 'applied'")
+
+
+def _lag_s(tick):
+    try:
+        if tick.get("backup_done_at") and tick.get("applied_at"):
+            return max(0.0, rp._secs(rp._t(tick["backup_done_at"]), rp._t(tick["applied_at"])))
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def downsample_ticks(conn, before):
+    """Passages d'avant `before` réduits à une ligne par heure et par volume
+    dans `tick_hours` (v1.99.0, décision 55) : nombre, appliqués, sautés, en
+    erreur, octets envoyés, pire retard d'application. Les passages réduits
+    sont effacés dans la même transaction, sauf le dernier appliqué de
+    chaque volume (le RPO d'un plan figé en dépend) : une relance ne compte
+    donc jamais deux fois (idempotent). Une heure déjà réduite reçoit les
+    passages qui la rejoignent. Rend le nombre de passages réduits."""
+    with _tx(conn):
+        rows = [dict(r) for r in conn.execute(
+            "SELECT rowid AS rid, * FROM ticks WHERE snapshot_at != '' AND snapshot_at < ?"
+            " AND state NOT IN ('in_progress') AND rowid NOT IN (" + _LAST_APPLIED_TICKS + ")",
+            (_iso(before),))]
+        groups = {}
+        for r in rows:
+            groups.setdefault((r["plan_id"], r["generation"], r["source_volume"], r["snapshot_at"][:13]),
+                              []).append(r)
+        for (plan_id, gen, vol, hour), items in groups.items():
+            cur = conn.execute("SELECT * FROM tick_hours WHERE plan_id = ? AND generation = ?"
+                               " AND source_volume = ? AND hour = ?",
+                               (plan_id, gen, vol, hour + ":00:00Z")).fetchone()
+            cur = dict(cur) if cur else {}
+            lags = [x for x in (_lag_s(r) for r in items) if x is not None]
+            if cur.get("max_apply_lag_s") is not None:
+                lags.append(cur["max_apply_lag_s"])
+            _insert(conn, "tick_hours", {
+                "plan_id": plan_id, "generation": gen, "source_volume": vol, "hour": hour + ":00:00Z",
+                "vm_uid": cur.get("vm_uid") or next((r["vm_uid"] for r in items if r["vm_uid"]), ""),
+                "count": int(cur.get("count") or 0) + len(items),
+                "applied": int(cur.get("applied") or 0) + sum(r["state"] == "applied" for r in items),
+                "skipped": int(cur.get("skipped") or 0) + sum(r["state"] == "skipped" for r in items),
+                "errors": int(cur.get("errors") or 0) + sum(r["state"] == "error" for r in items),
+                "newly_uploaded": int(cur.get("newly_uploaded") or 0)
+                + sum(int(r["newly_uploaded"] or 0) for r in items),
+                "max_apply_lag_s": max(lags) if lags else None}, upsert=True)
+            conn.execute(f"DELETE FROM ticks WHERE rowid IN ({','.join('?' for _ in items)})",
+                         [r["rid"] for r in items])
+    return len(rows)
+
+
+def list_tick_hours(conn, plan_id, source_volume=None, since=None, limit=10000):
+    """Passages réduits à l'heure (`downsample_ticks`), plus anciens d'abord."""
+    q, args = "SELECT * FROM tick_hours WHERE plan_id = ?", [plan_id]
+    if source_volume:
+        q += " AND source_volume = ?"
+        args.append(source_volume)
+    if since:
+        q += " AND hour >= ?"
+        args.append(_iso(since))
+    q += " ORDER BY hour DESC, source_volume LIMIT ?"
+    return [dict(r) for r in conn.execute(q, args + [max(1, min(int(limit or 10000), 100000))])][::-1]
+
+
 def prune(conn, before, now=None):
     """Efface passages, mesures et événements d'avant `before` (400 jours
     en usage normal), et réduit à l'heure les statistiques de plus de
-    STATS_FULL_DAYS jours (`now` : maintenant par défaut). Le dernier
-    passage appliqué de chaque volume est gardé : sans lui, le RPO d'un plan
-    figé deviendrait inconnu. Rend {"ticks", "measures", "events", "stats",
-    "stats_downsampled"} (lignes effacées)."""
+    STATS_FULL_DAYS jours et les passages de plus de TICKS_FULL_DAYS jours
+    (`now` : maintenant par défaut). Le dernier passage appliqué de chaque
+    volume est gardé : sans lui, le RPO d'un plan figé deviendrait inconnu.
+    Rend {"ticks", "measures", "events", "stats", "tick_hours",
+    "stats_downsampled", "ticks_downsampled"} (lignes effacées ou
+    réduites)."""
     t, te = _iso(before), _event_ts(before)
     with _tx(conn):
         n_ticks = conn.execute(
-            "DELETE FROM ticks WHERE snapshot_at < ? AND rowid NOT IN ("
-            " SELECT t.rowid FROM ticks t JOIN (SELECT plan_id, generation, source_volume,"
-            "  MAX(snapshot_at) AS m FROM ticks WHERE state = 'applied'"
-            "  GROUP BY plan_id, generation, source_volume) k"
-            " ON t.plan_id = k.plan_id AND t.generation = k.generation AND t.source_volume = k.source_volume"
-            " AND t.snapshot_at = k.m AND t.state = 'applied')", (t,)).rowcount
+            "DELETE FROM ticks WHERE snapshot_at < ? AND rowid NOT IN (" + _LAST_APPLIED_TICKS + ")",
+            (t,)).rowcount
         n_meas = conn.execute("DELETE FROM measures WHERE snapshot_at < ?", (t,)).rowcount
         n_ev = conn.execute("DELETE FROM events WHERE ts < ?", (te,)).rowcount
         n_stats = conn.execute("DELETE FROM stats WHERE pass_at < ?", (t,)).rowcount
+        n_hours = conn.execute("DELETE FROM tick_hours WHERE hour < ?", (t,)).rowcount
     n_down = downsample_stats(conn, _now(now) - timedelta(days=STATS_FULL_DAYS))
-    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev, "stats": n_stats, "stats_downsampled": n_down}
+    n_tdown = downsample_ticks(conn, _now(now) - timedelta(days=TICKS_FULL_DAYS))
+    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev, "stats": n_stats, "tick_hours": n_hours,
+            "stats_downsampled": n_down, "ticks_downsampled": n_tdown}
 
 
 # Constats du suiveur et leur fin (`replication_follow`) : relus au démarrage
