@@ -633,3 +633,29 @@ def test_error_actions_offered_are_exactly_the_exits_the_store_accepts(conn, ori
     hidden = {"failing_over"} if side == "source" else set()
     assert reached == accepted - hidden
     assert accepted                                         # jamais d'impasse : une sortie au moins
+
+
+# -- vue d'un plan (liste des plans, liste par hôte, état) ----------------------
+
+def test_plan_view_reads_recent_ticks_the_last_point_and_three_events_each(conn):
+    new_plan(conn)
+    plan = db.update_plan(conn, PID, interval_s=180)
+    for uid in ("u1", "u2"):
+        db.upsert_resource(conn, PID, resource(uid), now=NOW)
+    db.set_health(conn, PID, "u1", 1, {"running": False, "stopped_at": "2026-10-24T09:00:00Z"}, now=NOW)
+    old = {"source_volume": "pvc-1", "vm_uid": "u1", "generation": 1, "backup": "b-old",
+           "snapshot_at": "2026-10-20T10:00:00Z", "backup_done_at": "2026-10-20T10:00:05Z"}
+    db.record_tick(conn, PID, old)
+    db.mark_applied(conn, PID, "pvc-1", "b-old", at(-4 * 86400), 1)
+    db.record_tick(conn, PID, dict(old, backup="b-mid", snapshot_at="2026-10-21T10:00:00Z"))   # ni récent ni appliqué
+    db.record_tick(conn, PID, dict(old, backup="b-new", snapshot_at="2026-10-24T09:58:00Z"))
+    for i in range(5):
+        db.record_event(conn, "plan", step=f"p{i}", plan_id=PID, now=at(i))
+        db.record_event(conn, "follow", step=f"u1-{i}", plan_id=PID, resource_uid="u1", now=at(i))
+    db.record_event(conn, "follow", step="other-plan", plan_id="rp-ffffffffffff", resource_uid="u2", now=at(9))
+    v = db.plan_view(conn, plan, at(10))
+    assert sorted(t["backup"] for t in v["ticks"]) == ["b-new", "b-old"]
+    assert [e["step"] for e in v["events"]] == ["p4", "p3", "p2", "u1-4", "u1-3", "u1-2"]
+    assert [r["resource_uid"] for r in v["resources"]] == ["u1", "u2"]
+    assert v["vm_running"] == {"u1": {"running": False, "stopped_at": "2026-10-24T09:00:00Z"}}
+    assert set(v["health"]) == {"u1", "u2"}

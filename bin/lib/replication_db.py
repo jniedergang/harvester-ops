@@ -823,6 +823,35 @@ def health_map(conn, plan_id, generation=None):
             for r in list_resources(conn, plan_id, generation)}
 
 
+VIEW_EVENTS = 3
+
+
+def plan_view(conn, plan, now):
+    """Ce que lisent les vues d'un plan (liste des plans, liste par hôte,
+    état) pour `replication.plan_row`, `resource_row` et `plan_status` :
+    ressources et volumes de la génération courante, passages récents plus
+    le dernier point appliqué de chaque volume (même lecture que le suiveur),
+    derniers événements du plan et de chaque ressource, santé et marche des
+    VMs relevées par le suiveur. La ligne de commande et la console passent
+    par ici : un hôte montre exactement ce que montre la liste des plans."""
+    pid, gen = plan["id"], int(plan["generation"])
+    interval = int(plan.get("interval_s") or 300)
+    t = rp._t(now)
+    since = t - timedelta(seconds=max(3600, (int(plan.get("retain") or rp.DEFAULT_RETAIN) + 2) * interval))
+    ticks = list_ticks(conn, pid, gen, since=since)
+    seen = {(x["source_volume"], x["backup"]) for x in ticks}
+    ticks += [x for x in last_applied_ticks(conn, pid, gen) if (x["source_volume"], x["backup"]) not in seen]
+    resources = list_resources(conn, pid, gen)
+    events = _events(conn, "plan_id = ? AND resource_uid = ''", [pid], VIEW_EVENTS, None)
+    for r in resources:
+        events += _events(conn, "plan_id = ? AND resource_uid = ?", [pid, r["resource_uid"]], VIEW_EVENTS, None)
+    health = health_map(conn, pid, gen)
+    vm_running = {uid: {"running": h.get("running", True), "stopped_at": h.get("stopped_at")}
+                  for uid, h in health.items() if "running" in h}
+    return {"resources": resources, "volumes": list_volumes(conn, pid, gen), "ticks": ticks,
+            "events": events, "health": health, "vm_running": vm_running}
+
+
 def record_stats(conn, plan_id, row):
     """Range (idempotent) le bilan d'un passage appliqué d'une VM ; clé
     (plan, génération, ressource, `pass_at`)."""

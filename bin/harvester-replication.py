@@ -1,0 +1,1071 @@
+#!/usr/bin/env python3
+"""harvester-replication : réplication asynchrone de VMs entre clusters (v1.97.0).
+
+Seul chemin d'écriture de la réplication : la console lance ces commandes en
+actions suivies, et son fil de suivi lance `follow --all --console`.
+
+  harvester-replication plan create --name N --from A --to B
+        (--vm ns/nom ... | --selector k=v --namespace ns) --rpo 15m
+        [--map-net S=D] [--map-sc S=D] [--map-ns S=D] [--map-image S=D]
+        [--map-claim ns/pvc=nom] [--target-name ns/vm=nom] [--cloud-init rerun|keep]
+        [--mac keep|new] [--create-namespace] [--start started|stopped]
+        [--retain N] [--interval 5m] [--follow console|cli|off]
+        [--skew-tolerance 10s] [--timeout NOM=S ...]
+  harvester-replication plan list [--host H] [--role R]
+  harvester-replication plan show P [--role R]
+  harvester-replication plan delete P
+  harvester-replication plan set P [--rpo D] [--paused true|false] [--follow M]
+        [--skew-tolerance D] [--timeout NOM=S ...]   (NOM= retire la surcharge)
+  harvester-replication check P [--phase protect|failover|failover-unplanned] [--force-unplanned]
+  harvester-replication measure start P [--interval 5m]
+  harvester-replication measure stop P
+  harvester-replication measure report P [--margin 0.2]
+  harvester-replication measure formula --size 2Gi --writes N --interval 5m
+        [--block 2Mi] [--throughput 72Mi] [--write-size 4096]
+  harvester-replication protect P [--dry-run] [--interval 5m]
+  harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console]
+  harvester-replication status [P] [--host H]
+  harvester-replication resources --host H [--side source|target|any] [--role R]
+  harvester-replication events (--resource UID | --plan P | --host H) [--limit N] [--before ID|DATE]
+  harvester-replication failover P [--vm ns/nom ...] [--unplanned --yes]
+        [--force-unplanned] [--accept-skew] [--dry-run]
+  harvester-replication resume P [--yes]
+  harvester-replication unprotect P [--delete-backups --yes]
+
+P : l'identifiant (`rp-<12 hex>`) ou le nom du plan.
+
+Options communes : --json (sortie JSON sur stdout), --db (sinon
+HARVESTER_OPS_REPLICATION_DB, sinon `replication.db` du répertoire d'état),
+--state-dir (défaut HARVESTER_OPS_STATE_DIR), --spec FICHIER (JSON, `-`
+pour l'entrée standard : chaque clé est le nom long d'une option, la valeur
+celle qu'elle prendrait ; les options de la ligne de commande l'emportent).
+Commandes qui parlent aux clusters : --from-kubeconfig / --to-kubeconfig
+(kubeconfig de la personne, passé par la console ; sinon celui du cluster
+nommé dans la configuration ou les déclarations de la console), --timeout
+NOM=S (répétable : délais de `replication.TIMEOUTS`, plus `client`, le délai
+d'un appel kubectl, 30 s par défaut), --by (auteur écrit au journal, sinon
+l'utilisateur système), --id (action de la console, lien vers Activité).
+
+Progression sur stderr en STEP_EVENT|étape|statut|message (le message peut
+contenir `|` : découper avec maxsplit=3) et PROGRESS_EVENT|phase|json.
+
+Avec --json, CHAQUE sortie écrit exactement un objet JSON sur stdout. Une
+erreur d'usage ou un refus avant le registre donne {"ok": false, "error",
+"kind"} ; le résultat d'une commande porte toujours `ok`, `error` et `kind`
+(null en cas de réussite) en plus de ses champs. Une erreur imprévue rend un
+message générique, sans trace. Aucun chemin (kubeconfig, base, répertoire
+d'état) ni secret n'apparaît dans une sortie ou au journal.
+
+Les valeurs se passent sous la forme `--option=valeur` (ce que construit la
+console) : une valeur qui commence par un tiret reste une valeur.
+
+Codes de sortie : 0 réussite, 1 échec, 2 refus du contrôle préalable ou
+erreur d'usage, 3 annulation (SIGTERM, SIGHUP ou SIGINT : `protect` et une
+bascule pas encore activée défont ce qu'elles ont posé ; après une
+activation rien n'est défait, la relance termine), 4 objectif de RPO dépassé
+(`status` seulement, pour une sonde). `follow` arrêté par un signal sort en 0
+après avoir rendu ses baux : c'est sa fin normale.
+
+La ligne de commande agit avec les droits du kubeconfig qu'elle reçoit ; les
+rôles de la console (lecture, opérateur, administrateur) sont appliqués par
+la console avant de la lancer. `--role` sur les lectures ne fait que remplir
+`allowed` des actions rendues.
+
+Bibliothèque standard seulement : le script tourne sur un hôte airgap.
+"""
+
+import argparse
+import contextlib
+import getpass
+import json
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import cluster_decl  # noqa: E402
+import replication as rp  # noqa: E402
+import replication_db as db  # noqa: E402
+import replication_follow as rf  # noqa: E402
+import replication_run as rr  # noqa: E402
+import vm_transfer as vt  # noqa: E402
+from kube import Kube, cluster_config  # noqa: E402
+
+EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_CANCELLED, EXIT_RPO = 0, 1, 2, 3, 4
+CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+# délai d'un appel kubectl : un cluster pendu coûte au plus 30 s par appel
+# (et par tour au suiveur, qui ne relit pas un cluster tombé dans le tour)
+CLIENT_TIMEOUT = 30
+ROLES = rp.ROLES
+
+# points d'injection des tests : clients des clusters, horloge, attente
+KUBE_FACTORY = None            # fn(nom du cluster, kubeconfig ou None) -> client ou None
+NOW = time.time
+SLEEP = time.sleep
+
+# ce qu'une sortie ne doit jamais montrer (chemins), rempli au démarrage
+_HIDDEN = []
+_CANCEL = {"signal": None}
+
+
+class Cancelled(rr.Cancelled):
+    """SIGTERM, SIGHUP ou SIGINT : levée dans le fil principal. Sous-classe
+    de `replication_run.Cancelled` : le déroulé la reconnaît et fait son
+    retour arrière (sauf après une activation)."""
+
+
+class UsageError(ValueError):
+    """Demande refusée avant tout appel à un cluster (code 2)."""
+
+    def __init__(self, message, kind="usage"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class Failure(Exception):
+    """Échec hors du déroulé (base illisible, par exemple) : code 1."""
+
+    def __init__(self, message, kind="failed"):
+        super().__init__(message)
+        self.kind = kind
+
+
+class Parser(argparse.ArgumentParser):
+    """argparse qui lève UsageError au lieu de quitter : même chemin (et
+    même JSON) que les autres refus."""
+
+    def error(self, message):
+        raise UsageError(message)
+
+
+# ---------------------------------------------------------------------------
+# Sorties
+# ---------------------------------------------------------------------------
+
+def scrub(text):
+    """Retire les chemins connus (kubeconfigs, base, répertoire d'état,
+    configuration, répertoire personnel) d'un texte sorti."""
+    s = str(text)
+    for h in sorted(set(_HIDDEN), key=len, reverse=True):
+        if h and len(h) > 1:
+            s = s.replace(h, "<hidden>")
+    return s
+
+
+def _scrub_obj(obj):
+    if isinstance(obj, str):
+        return scrub(obj)
+    if isinstance(obj, dict):
+        return {k: _scrub_obj(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_scrub_obj(v) for v in obj]
+    return obj
+
+
+def _hide(*paths):
+    for p in paths:
+        if p:
+            _HIDDEN.append(str(p))
+            try:
+                _HIDDEN.append(os.path.abspath(str(p)))
+            except (TypeError, ValueError):
+                pass
+
+
+def step(sid, status, msg=""):
+    # une ligne ; le message peut contenir `|` (découpe maxsplit=3)
+    clean = " ".join(scrub(msg).split())
+    sys.stderr.write(f"STEP_EVENT|{sid}|{status}|{clean}\n")
+    sys.stderr.flush()
+
+
+def print_json(obj):
+    print(scrub(json.dumps(obj, indent=1, default=str)))
+
+
+def fail_exit(want_json, sid, message, kind, code, data=None):
+    """Un échec : STEP_EVENT, message sur stderr, et avec --json un seul
+    objet {"ok": false, "error", "kind"} sur stdout."""
+    if sid:
+        step(sid, "error", message)
+    print(f"error: {scrub(message)}", file=sys.stderr)
+    if want_json:
+        print_json({**(data or {}), "ok": False, "error": message, "kind": kind})
+    return code
+
+
+def emit(args, data, text_lines=()):
+    """Une réussite (ou un résultat) : l'objet avec --json, sinon les lignes."""
+    if args.json:
+        print_json(data)
+    else:
+        for line in text_lines:
+            print(scrub(line))
+
+
+@contextlib.contextmanager
+def scrubbed_journal():
+    """Le journal de la réplication ne garde aucun chemin : un message
+    d'erreur de kubectl peut citer le kubeconfig."""
+    orig = db.record_event
+
+    def record_event(conn, operation, *a, **kw):
+        if "message" in kw:
+            kw["message"] = scrub(kw["message"])
+        if kw.get("facts"):
+            kw["facts"] = _scrub_obj(kw["facts"])
+        return orig(conn, operation, *a, **kw)
+    db.record_event = record_event
+    try:
+        yield
+    finally:
+        db.record_event = orig
+
+
+def _on_cancel_signal(signum, _frame):
+    # un seul coup : un second signal n'interrompt pas le retour arrière
+    for sig in CANCEL_SIGNALS:
+        signal.signal(sig, signal.SIG_IGN)
+    _CANCEL["signal"] = signal.Signals(signum).name
+    raise Cancelled(signal.Signals(signum).name)
+
+
+@contextlib.contextmanager
+def cancel_on_signals():
+    """Gestionnaire posé le temps de la commande (fil principal seulement :
+    la console peut charger ce module sans appeler main)."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    saved = {sig: signal.signal(sig, _on_cancel_signal) for sig in CANCEL_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, h in saved.items():
+            signal.signal(sig, h)
+
+
+# ---------------------------------------------------------------------------
+# Registre, plans, clusters
+# ---------------------------------------------------------------------------
+
+def open_db(args):
+    try:
+        return db.connect(args.db or None)
+    except Exception as e:                      # noqa: BLE001
+        raise Failure(f"cannot open the replication database ({type(e).__name__})") from None
+
+
+def find_plan(conn, ref):
+    plan = db.get_plan(conn, ref) if rp.PLAN_ID_RE.match(ref or "") else db.get_plan_by_name(conn, ref)
+    if plan is None:
+        raise UsageError(f"unknown plan: {str(ref)[:80]}", "unknown-plan")
+    return plan
+
+
+class Unreachable:
+    """Client d'un cluster que cette console ne connaît pas (ou plus) :
+    chaque appel échoue comme un cluster injoignable. La déprotection et la
+    bascule non planifiée continuent alors avec l'autre côté."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def _fail(self, *_a, **_k):
+        raise RuntimeError(f"Unable to connect to the server: cluster {self.name} is not declared on this console")
+
+    get = list = create = replace = patch = delete = _fail
+
+
+def cluster_client(name, kubeconfig=None, timeout=CLIENT_TIMEOUT):
+    """Client kubectl d'un cluster : le kubeconfig donné, sinon celui de la
+    configuration ou des déclarations de la console. None s'il est inconnu."""
+    if KUBE_FACTORY is not None:
+        return KUBE_FACTORY(name, kubeconfig)
+    if not kubeconfig:
+        try:
+            kubeconfig = cluster_config(name).get("kubeconfig")
+        except SystemExit:
+            # son message cite les chemins de la configuration : jamais montré
+            return None
+        if not kubeconfig:
+            return None
+    _hide(kubeconfig)
+    return Kube(kubeconfig, timeout=timeout)
+
+
+_RANCHER_RE = re.compile(r"server:\s*['\"]?https?://\S+/k8s/clusters/")
+
+
+def through_rancher(kubeconfig, client):
+    """La cible est-elle jointe par le mandataire de Rancher ? (avertissement
+    `target-through-rancher` du contrôle)"""
+    if getattr(client, "through_rancher", None) is not None:
+        return bool(client.through_rancher)
+    path = kubeconfig or getattr(client, "kubeconfig", None)
+    if not path:
+        return False
+    try:
+        return bool(_RANCHER_RE.search(Path(path).read_text(errors="replace")))
+    except OSError:
+        return False
+
+
+def _pairs(values, kind, what):
+    out = {}
+    for v in values or []:
+        a, sep, b = str(v).partition("=")
+        if not sep or not a:
+            raise UsageError(f"{what}: expected source=target, got {str(v)[:80]!r}", kind)
+        out[a] = b
+    return out
+
+
+def parse_timeouts(values):
+    """`--timeout NOM=S` d'une commande : (surcharges, délai client)."""
+    raw = _pairs(values, "bad-timeout", "--timeout")
+    client = CLIENT_TIMEOUT
+    if "client" in raw:
+        try:
+            client = rp.parse_duration(raw.pop("client"))
+        except rp.PlanError:
+            raise UsageError("--timeout client: a duration is expected", "bad-timeout") from None
+        if not 1 <= client <= 3600:
+            raise UsageError("--timeout client: 1 s to 1 h", "bad-timeout")
+    try:
+        return rp.normalize_timeouts(raw), client
+    except rp.PlanError as e:
+        raise UsageError(str(e), e.code) from None
+
+
+def system_user():
+    try:
+        return getpass.getuser()
+    except Exception:                           # noqa: BLE001
+        return ""
+
+
+def make_ctx(args, conn, plan):
+    overrides, client_timeout = parse_timeouts(getattr(args, "timeout", None))
+    fk, tk = getattr(args, "from_kubeconfig", None), getattr(args, "to_kubeconfig", None)
+    _hide(fk, tk)
+    src = cluster_client(plan["source_cluster"], fk, client_timeout) or Unreachable(plan["source_cluster"])
+    dst = cluster_client(plan["target_cluster"], tk, client_timeout) or Unreachable(plan["target_cluster"])
+    return rr.Ctx(conn, plan["id"], src, dst, emit=step, sleep=SLEEP, now=NOW, timeouts=overrides,
+                  by=args.by or system_user(), action_id=args.id or "",
+                  through_rancher=through_rancher(tk, dst))
+
+
+def utcnow():
+    return datetime.fromtimestamp(NOW(), timezone.utc)
+
+
+def _text_result(res):
+    lines = [f"{res.get('code')}: {res.get('message') or ''}".rstrip(": ")]
+    for f in res.get("findings") or []:
+        facts = ", ".join(f"{k}={v}" for k, v in (f.get("facts") or {}).items())
+        lines.append(f"  [{f.get('level')}] {f.get('code')}" + (f": {facts}" if facts else ""))
+    for d in res.get("dry_run") or []:
+        lines.append(f"  dry-run {d.get('object')} {d.get('name')}: {'ok' if d.get('ok') else d.get('message')}")
+    for k in ("left", "pending"):
+        for x in res.get(k) or []:
+            lines.append(f"  {k}: {x}")
+    for vm, at in (res.get("lost_after") or {}).items():
+        lines.append(f"  {vm}: writes after {at} are lost (skew {(res.get('skew_s') or {}).get(vm, 0)} s)")
+    return lines
+
+
+def finish(args, res):
+    """Le résultat d'une commande du déroulé : code de sortie et objet."""
+    code = int(res.get("exit", EXIT_FAIL))
+    if _CANCEL["signal"] and code == EXIT_FAIL:
+        # annulation reçue pendant une étape qui ne la distingue pas d'un échec
+        code = EXIT_CANCELLED
+    ok = code == EXIT_OK
+    out = {"ok": ok, "error": None if ok else (res.get("message") or res.get("code") or "failed"),
+           "kind": None if ok else ("cancelled" if code == EXIT_CANCELLED else res.get("code") or "failed")}
+    out.update({k: v for k, v in res.items() if k != "exit"})
+    if not ok:
+        print(f"error: {scrub(out['error'])}", file=sys.stderr)
+    emit(args, out, _text_result(res))
+    return code
+
+
+# ---------------------------------------------------------------------------
+# plan
+# ---------------------------------------------------------------------------
+
+def _plan_event(conn, plan, step_name, code, message, facts, args):
+    db.record_event(conn, "plan", step=step_name, plan_id=plan["id"], host=plan["target_cluster"],
+                    code=code, message=message, facts=facts, by=args.by or system_user(),
+                    action_id=args.id or "")
+
+
+def _known(name):
+    try:
+        return cluster_client(name) is not None
+    except Exception:                           # noqa: BLE001
+        return False
+
+
+def plan_request(args):
+    """Demande de `plan create`, telle que la lit `replication.normalize_plan`."""
+    mappings = {"networks": _pairs(args.map_net, "bad-mapping", "--map-net"),
+                "storage_classes": _pairs(args.map_sc, "bad-mapping", "--map-sc"),
+                "namespaces": _pairs(args.map_ns, "bad-mapping", "--map-ns"),
+                "images": _pairs(args.map_image, "bad-mapping", "--map-image"),
+                "claims": _pairs(args.map_claim, "bad-mapping", "--map-claim"),
+                "target_names": _pairs(args.target_name, "bad-mapping", "--target-name")}
+    options = {}
+    for key, val in (("cloud_init", args.cloud_init), ("mac", args.mac), ("start", args.start),
+                     ("follow", args.follow), ("skew_tolerance_s", args.skew_tolerance)):
+        if val is not None:
+            options[key] = val
+    if args.create_namespace:
+        options["create_namespace"] = True
+    if args.timeout:
+        options["timeouts"] = _pairs(args.timeout, "bad-timeout", "--timeout")
+    req = {"name": args.name, "source_cluster": args.source, "target_cluster": args.target,
+           "rpo_objective_s": args.rpo, "interval_s": args.interval, "vms": args.vm or [],
+           "selector": args.selector or "", "namespace": args.namespace or "",
+           "mappings": {k: v for k, v in mappings.items() if v}, "options": options}
+    if args.retain is not None:
+        req["retain"] = args.retain
+    return req
+
+
+def cmd_plan_create(args):
+    req = plan_request(args)
+    try:
+        plan = rp.normalize_plan(req)
+    except rp.PlanError as e:
+        raise UsageError(str(e), e.code) from None
+    for side in ("source_cluster", "target_cluster"):
+        if not _known(plan[side]):
+            raise UsageError(f"unknown cluster: {plan[side]}", "unknown-cluster")
+    conn = open_db(args)
+    try:
+        stored = db.insert_plan(conn, plan, created_by=args.by or system_user(), now=utcnow())
+    except db.NameTaken as e:
+        raise UsageError(str(e), "name-taken") from None
+    _plan_event(conn, stored, "create", "draft", f"plan {stored['name']} created", {"name": stored["name"]}, args)
+    step("plan", "done", f"plan {stored['name']} created ({stored['id']})")
+    emit(args, {"ok": True, "error": None, "kind": None, "plan": stored},
+         [f"plan {stored['name']} created: {stored['id']} ({stored['source_cluster']} to "
+          f"{stored['target_cluster']}, RPO objective {stored['rpo_objective_s']} s)"])
+    return EXIT_OK
+
+
+def _role(args):
+    return getattr(args, "role", None) or None
+
+
+def plan_rows(conn, plans, role=None, side="any"):
+    now = utcnow()
+    rows = []
+    for p in plans:
+        v = db.plan_view(conn, p, now)
+        rows.append(rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                                role=role, health=v["health"], side=side))
+    return rows
+
+
+def cmd_plan_list(args):
+    conn = open_db(args)
+    rows = plan_rows(conn, db.list_plans(conn, host=args.host or None), _role(args))
+    emit(args, {"ok": True, "error": None, "kind": None, "plans": rows},
+         [f"{r['name']:24} {r['id']}  {r['state']:13} {r['source_host']} to {r['target_host']}  "
+          f"RPO {r['rpo_held_s'] if r['rpo_held_s'] is not None else '-'}/{r['rpo_objective_s']} s  "
+          f"{len(r['resources'])} VM(s)" for r in rows] or ["no plan"])
+    return EXIT_OK
+
+
+def cmd_plan_show(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    now = utcnow()
+    v = db.plan_view(conn, plan, now)
+    row = rp.plan_row(plan, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                      role=_role(args), health=v["health"])
+    status = rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
+    runs = db.list_runs(conn, plan["id"])[-10:]
+    data = {"ok": True, "error": None, "kind": None, "plan": plan, "row": row, "status": status,
+            "volumes": v["volumes"], "runs": runs, "lock": db.get_lock(conn, plan["id"]),
+            "lease": db.get_lease(conn, plan["id"])}
+    lines = [f"{plan['name']} ({plan['id']}): {plan['state']}, {plan['source_cluster']} to {plan['target_cluster']}",
+             f"  RPO objective {plan['rpo_objective_s']} s, interval {plan.get('interval_s') or '-'} s, "
+             f"retain {plan['retain']}"]
+    for r in row["resources"]:
+        lines.append(f"  {r['namespace']}/{r['name']}: {r['state']}, RPO held "
+                     f"{r['rpo_held_s'] if r['rpo_held_s'] is not None else '-'} s")
+    emit(args, data, lines)
+    return EXIT_OK
+
+
+def cmd_plan_delete(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    try:
+        db.delete_plan(conn, plan["id"])
+    except db.StateConflict as e:
+        raise UsageError(f"plan {plan['name']} is {e.current}: only a draft or unprotected plan can be deleted",
+                         "state") from None
+    _plan_event(conn, plan, "delete", "deleted", f"plan {plan['name']} deleted", {"name": plan["name"]}, args)
+    step("plan", "done", f"plan {plan['name']} deleted")
+    emit(args, {"ok": True, "error": None, "kind": None, "plan": plan["id"], "deleted": True},
+         [f"plan {plan['name']} deleted"])
+    return EXIT_OK
+
+
+def _bool(value, what):
+    v = str(value).lower()
+    if v in ("true", "yes", "on", "1"):
+        return True
+    if v in ("false", "no", "off", "0"):
+        return False
+    raise UsageError(f"{what}: true or false", "bad-option")
+
+
+def cmd_plan_set(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    fields, options = {}, {}
+    if args.rpo is not None:
+        fields["rpo_objective_s"] = args.rpo
+    if args.paused is not None:
+        options["paused"] = _bool(args.paused, "--paused")
+    if args.follow is not None:
+        options["follow"] = args.follow
+    if args.skew_tolerance is not None:
+        options["skew_tolerance_s"] = args.skew_tolerance
+    if args.timeout:
+        cur = dict((plan.get("options") or {}).get("timeouts") or {})
+        for k, v in _pairs(args.timeout, "bad-timeout", "--timeout").items():
+            if v == "":
+                cur.pop(k, None)               # NOM= : retour à la valeur par défaut
+            else:
+                cur[k] = v
+        options["timeouts"] = cur
+    if options:
+        fields["options"] = options
+    if not fields:
+        raise UsageError("nothing to set: give --rpo, --paused, --follow, --skew-tolerance or --timeout")
+    try:
+        new = db.update_plan(conn, plan["id"], now=utcnow(), **fields)
+    except rp.PlanError as e:
+        raise UsageError(str(e), e.code) from None
+    changed = {k: new[k] for k in ("rpo_objective_s",) if "rpo_objective_s" in fields}
+    changed.update({k: (new.get("options") or {}).get(k) for k in options})
+    _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(sorted(changed)), changed, args)
+    step("plan", "done", "settings changed: " + ", ".join(sorted(changed)))
+    emit(args, {"ok": True, "error": None, "kind": None, "plan": new, "changed": changed},
+         [f"{plan['name']}: " + ", ".join(f"{k}={v}" for k, v in sorted(changed.items()))])
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# check, mesure, protection, bascule, déprotection, reprise
+# ---------------------------------------------------------------------------
+
+def _plan_ctx(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    return conn, plan, make_ctx(args, conn, plan)
+
+
+def cmd_check(args):
+    if args.force_unplanned and args.phase != "failover-unplanned":
+        raise UsageError("--force-unplanned goes with --phase failover-unplanned")
+    _conn, plan, ctx = _plan_ctx(args)
+    if args.phase != "protect":
+        # la bascule à blanc : contrôles, carnets et dry-run serveur, rien d'écrit
+        return finish(args, rr.failover(ctx, planned=args.phase == "failover",
+                                        force_unplanned=args.force_unplanned, dry_run=True))
+    step("check", "running", "reading both clusters")
+    try:
+        src = rr.collect_source(ctx)
+        skipped = rr._failed_over(ctx, src)
+        src["vms"] = [v for v in src.get("vms") or [] if v["uid"] not in skipped]
+        dst = rr.collect_target(ctx, [rp.target_ref(ctx.plan, {"namespace": v["namespace"], "name": v["name"]})[0]
+                                      for v in src.get("vms") or []])
+        findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase="protect"))
+    except Exception as e:                      # noqa: BLE001
+        if isinstance(e, rr.Cancelled):
+            raise
+        step("check", "error", str(e)[:400])
+        return finish(args, {"exit": EXIT_FAIL, "plan": plan["id"], "state": plan["state"],
+                             "code": rr.error_code(e), "message": f"pre-check failed: {e}"})
+    blocked = rp.blocking(findings)
+    step("check", "error" if blocked else "done",
+         "the pre-check refuses this protection" if blocked else "no blocker")
+    return finish(args, {"exit": EXIT_USAGE if blocked else EXIT_OK, "plan": plan["id"], "state": plan["state"],
+                         "code": "check" if blocked else "ok", "phase": "protect",
+                         "message": "the pre-check refuses this protection" if blocked else "no blocker",
+                         "findings": findings, "skipped": sorted(skipped)})
+
+
+def cmd_measure_start(args):
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.measure_start(ctx, interval=args.interval or 300))
+
+
+def cmd_measure_stop(args):
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.measure_stop(ctx))
+
+
+def cmd_measure_report(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    if not 0 <= args.margin < 1:
+        raise UsageError("--margin: from 0 to below 1")
+    rep = rr.measure_report(conn, plan["id"], margin=args.margin)
+    lines = [f"measured every {rep['measured_step_s']} s, objective {rep['objective_s']} s, "
+             f"recommended interval {rep.get('recommended_interval_s') or '-'} s"]
+    for vm in rep["vms"]:
+        lines.append(f"  {vm['vm_uid']}: {vm['passes']} pass(es), interval {vm.get('recommended_interval_s') or '-'}"
+                     f" s, tenable {vm.get('tenable')}" + (" (insufficient data)" if vm.get("insufficient") else ""))
+    emit(args, {"ok": True, "error": None, "kind": None, "plan": plan["id"], "report": rep}, lines)
+    return EXIT_OK
+
+
+def _quantity(value, what):
+    n = vt.parse_quantity(str(value))
+    if not n or n <= 0:
+        raise UsageError(f"{what}: a size is expected (2Gi, 512Mi, 1073741824)")
+    return int(n)
+
+
+def cmd_measure_formula(args):
+    size = _quantity(args.size, "--size")
+    block = _quantity(args.block, "--block")
+    if block not in rp.BLOCK_SIZES:
+        raise UsageError("--block: 2Mi or 16Mi")
+    try:
+        interval = rp.parse_duration(args.interval)
+    except rp.PlanError:
+        raise UsageError("--interval: a duration is expected (5m)", "bad-interval") from None
+    if interval <= 0:
+        raise UsageError("--interval: a duration is expected (5m)", "bad-interval")
+    if args.writes < 0 or args.write_size <= 0:
+        raise UsageError("--writes and --write-size: positive numbers")
+    throughput = _quantity(args.throughput, "--throughput") if args.throughput else None
+    f = rr.measure_formula(size, args.writes, interval, block, throughput, args.write_size)
+    fc = f["forecast"]
+    lines = [f"blocks of {block} B over {size} B: sequential {fc['sequential_bytes']} B, scattered "
+             f"{fc['scattered_estimate_bytes']} B, worst case {fc['worst_case_bytes']} B"]
+    if throughput:
+        for k in ("sequential", "scattered_estimate", "worst_case"):
+            lines.append(f"  {k}: send {f[k]['send_s']:.1f} s, RPO {f[k]['rpo_s']:.0f} s")
+    emit(args, {"ok": True, "error": None, "kind": None, "formula": f}, lines)
+    return EXIT_OK
+
+
+def cmd_protect(args):
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.protect(ctx, interval=args.interval, dry_run=args.dry_run))
+
+
+def _vm_refs(values):
+    try:
+        return [rp._ref(v, "--vm") for v in values or []] or None
+    except rp.PlanError as e:
+        raise UsageError(str(e), e.code) from None
+
+
+def cmd_failover(args):
+    vms = _vm_refs(args.vm)
+    if args.force_unplanned and not args.unplanned:
+        raise UsageError("--force-unplanned goes with --unplanned")
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.failover(ctx, vms=vms, planned=not args.unplanned, accept_skew=args.accept_skew,
+                                    force_unplanned=args.force_unplanned, yes=args.yes, dry_run=args.dry_run))
+
+
+def cmd_resume(args):
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.resume(ctx, yes=args.yes))
+
+
+def cmd_unprotect(args):
+    _conn, _plan, ctx = _plan_ctx(args)
+    return finish(args, rr.unprotect(ctx, delete_backups=args.delete_backups, yes=args.yes))
+
+
+# ---------------------------------------------------------------------------
+# Suiveur
+# ---------------------------------------------------------------------------
+
+def _follow_client(name):
+    c = cluster_client(name)
+    if c is None:
+        raise LookupError(f"unknown cluster {name}")
+    return c
+
+
+def _round_line(report):
+    if report.get("error"):
+        return f"round failed: {report['error']}"
+    return (f"followed {len(report.get('followed') or [])}, skipped {len(report.get('skipped') or {})}, "
+            f"resyncs {report.get('resyncs', 0)}, applied {report.get('applied', 0)}, "
+            f"events {report.get('events', 0)}, unreachable {', '.join(report.get('unreachable') or []) or 'none'}")
+
+
+def cmd_follow(args):
+    conn = open_db(args)
+    plan_ids = None
+    if args.plan:
+        plan_ids = [find_plan(conn, args.plan)["id"]]
+        modes = ("console", "cli")
+    else:
+        # le fil de la console prend les plans `follow: console`, un --all à
+        # la main ceux en `cli` ; --plan P suit l'un ou l'autre
+        modes = ("console",) if args.console else ("cli",)
+    owner = db.owner_id("console" if args.console else "cli")
+
+    def log(code, level, message):
+        if args.console:
+            sys.stderr.write(f"{utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')} {level} {code}: "
+                             f"{' '.join(scrub(message).split())}\n")
+            sys.stderr.flush()
+
+    follower = rf.Follower(conn, _follow_client, owner, now=NOW, modes=modes, plan_ids=plan_ids,
+                           take_over=args.take_over, emit=log)
+    stopper = rf.Stopper()
+    saved = {s: signal.getsignal(s) for s in CANCEL_SIGNALS}
+    if threading.current_thread() is threading.main_thread():
+        stopper.install(CANCEL_SIGNALS)
+    try:
+        if args.once:
+            follower.stopper = stopper
+            try:
+                report = follower.once_safe()
+            except rf.Interrupted:
+                follower.close()
+                return fail_exit(args.json, "follow", "follow cancelled during a cluster call", "cancelled",
+                                 EXIT_CANCELLED)
+            follower.close()
+            step("follow", "error" if report.get("error") else "done", _round_line(report))
+            data = {"ok": not report.get("error"), "error": report.get("error"),
+                    "kind": "failed" if report.get("error") else None, "report": report}
+            emit(args, data, [_round_line(report)])
+            return EXIT_FAIL if report.get("error") else EXIT_OK
+
+        def on_round(report):
+            if args.console:
+                log("round", "error" if report.get("error") else "info", _round_line(report))
+            else:
+                step("follow", "error" if report.get("error") else "done", _round_line(report))
+            on_round.last = report
+        on_round.last = None
+        res = rf.follow_loop(follower, stopper, sleep=SLEEP, on_round=on_round)
+        sig = signal.Signals(res["signal"]).name if res.get("signal") else None
+        step("follow", "done", f"stopped after {res['rounds']} round(s)" + (f" ({sig})" if sig else ""))
+        emit(args, {"ok": True, "error": None, "kind": None, "rounds": res["rounds"], "stopped": res["stopped"],
+                    "signal": sig, "last": on_round.last},
+             [f"follower stopped after {res['rounds']} round(s)"])
+        return EXIT_OK
+    finally:
+        if threading.current_thread() is threading.main_thread():
+            for s, h in saved.items():
+                signal.signal(s, h)
+
+
+# ---------------------------------------------------------------------------
+# Lectures : état, ressources, journal
+# ---------------------------------------------------------------------------
+
+def cmd_status(args):
+    conn = open_db(args)
+    plans = [find_plan(conn, args.plan)] if args.plan else db.list_plans(conn, host=args.host or None)
+    if args.plan and args.host and args.host not in (plans[0]["source_cluster"], plans[0]["target_cluster"]):
+        plans = []
+    now = utcnow()
+    out, lines = [], []
+    for p in plans:
+        v = db.plan_view(conn, p, now)
+        st = rp.plan_status(p, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
+        st.update(name=p["name"], source_host=p["source_cluster"], target_host=p["target_cluster"],
+                  last_events=db.plan_events(conn, p["id"], limit=db.VIEW_EVENTS))
+        out.append(st)
+        lines.append(f"{p['name']}: {p['state']}, RPO held {st['rpo_held_s'] if st['rpo_held_s'] is not None else '-'}"
+                     f"/{st['rpo_objective_s']} s, backlog {st['backlog']}, skew {st['skew_s']} s"
+                     + (", OBJECTIVE EXCEEDED" if st["exceeded"] else ""))
+        for vm in st["vms"]:
+            lines.append(f"  {vm['namespace']}/{vm['name']}: {vm['state']}, RPO held "
+                         f"{vm['rpo_held_s'] if vm['rpo_held_s'] is not None else '-'} s")
+    exceeded = any(s["exceeded"] for s in out)
+    emit(args, {"ok": True, "error": None, "kind": None, "exceeded": exceeded, "plans": out}, lines or ["no plan"])
+    return EXIT_RPO if exceeded else EXIT_OK
+
+
+def cmd_resources(args):
+    conn = open_db(args)
+    now = utcnow()
+    rows, views, plans = [], {}, {}
+    for r in db.list_resources_by_host(conn, args.host, args.side):
+        pid = r["plan_id"]
+        if pid not in plans:
+            plans[pid] = db.get_plan(conn, pid)
+            views[pid] = db.plan_view(conn, plans[pid], now)
+        p, v = plans[pid], views[pid]
+        res = next((x for x in v["resources"] if x["resource_uid"] == r["resource_uid"]), r)
+        rows.append(rp.resource_row(p, res, r["side"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                                    role=_role(args), health=v["health"].get(r["resource_uid"])))
+    emit(args, {"ok": True, "error": None, "kind": None, "host": args.host, "side": args.side, "resources": rows},
+         [f"{x['plan_name']:20} {x['side']:6} {x['namespace']}/{x['name']}: {x['state']}, peer "
+          f"{x['peer_host']}, actions {', '.join(a['name'] for a in x['actions']) or '-'}" for x in rows]
+         or [f"no resource of {args.host} in a plan"])
+    return EXIT_OK
+
+
+def cmd_events(args):
+    conn = open_db(args)
+    try:
+        if args.resource:
+            evs = db.resource_events(conn, args.resource, limit=args.limit, before=args.before)
+        elif args.plan:
+            evs = db.plan_events(conn, find_plan(conn, args.plan)["id"], limit=args.limit, before=args.before)
+        else:
+            evs = db.host_events(conn, args.host, limit=args.limit, before=args.before)
+    except ValueError as e:
+        raise UsageError(str(e)) from None
+    nxt = evs[-1]["id"] if len(evs) >= max(1, min(args.limit, 500)) else None
+    emit(args, {"ok": True, "error": None, "kind": None, "events": evs, "next_before": nxt},
+         [f"{e['ts']} {e['level']:5} {e['operation']}/{e['step']} {e['code']}: {e['message']}" for e in evs]
+         or ["no event"])
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Ligne de commande
+# ---------------------------------------------------------------------------
+
+def _spec_tokens(path):
+    """Les options d'un fichier --spec, en `--option=valeur`."""
+    try:
+        text = sys.stdin.read() if path == "-" else Path(path).read_text()
+        data = json.loads(text)
+    except (OSError, ValueError):
+        raise UsageError("--spec: unreadable JSON request") from None
+    if not isinstance(data, dict):
+        raise UsageError("--spec: a JSON object is expected")
+    out = []
+    for key, val in data.items():
+        if not isinstance(key, str) or not re.match(r"^[a-z][a-z0-9_-]*$", key) or key in ("spec", "json"):
+            raise UsageError(f"--spec: invalid key {str(key)[:40]!r}")
+        opt = "--" + key.replace("_", "-")
+        for v in (val if isinstance(val, list) else [val]):
+            if isinstance(v, bool):
+                if v:
+                    out.append(opt)
+            elif isinstance(v, (str, int, float)):
+                out.append(f"{opt}={v}")
+            elif v is not None:
+                raise UsageError(f"--spec: {key}: a string, number, boolean or list is expected")
+    return out
+
+
+def build_parser():
+    common = Parser(add_help=False)
+    common.add_argument("--json", action="store_true", help="JSON output on stdout")
+    common.add_argument("--db", help="replication database (default: replication.db in the state directory)")
+    common.add_argument("--state-dir", help="console state directory (default HARVESTER_OPS_STATE_DIR)")
+    common.add_argument("--spec", help="JSON request: option names as keys ('-' for stdin)")
+    common.add_argument("--by", help="author written to the journal (default: the system user)")
+    common.add_argument("--id", help="console action id (link to Activity)")
+
+    clusters = Parser(add_help=False)
+    clusters.add_argument("--from-kubeconfig", help="kubeconfig for the source cluster")
+    clusters.add_argument("--to-kubeconfig", help="kubeconfig for the target cluster")
+    clusters.add_argument("--timeout", action="append", metavar="NAME=SECONDS",
+                          help="bounded wait override (repeatable), or client=S for each kubectl call")
+
+    role = Parser(add_help=False)
+    role.add_argument("--role", choices=ROLES, help="fill `allowed` of the actions for this console role")
+
+    ap = Parser(prog="harvester-replication", description="Asynchronous VM replication between Harvester clusters.")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def leaf(subs, name, fn, parents, words, help_):
+        sp = subs.add_parser(name, parents=parents, help=help_)
+        sp.set_defaults(fn=fn)
+        return sp
+
+    pp = sub.add_parser("plan", help="replication plans kept by the console").add_subparsers(dest="pcmd",
+                                                                                            required=True)
+    sp = leaf(pp, "create", cmd_plan_create, [common], 2, "create a plan (no write on the clusters)")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--from", dest="source", required=True, help="source cluster name")
+    sp.add_argument("--to", dest="target", required=True, help="target cluster name")
+    sp.add_argument("--vm", action="append", metavar="NS/NAME", help="VM to protect (repeatable)")
+    sp.add_argument("--selector", metavar="KEY=VALUE", help="VM label selector, resolved at each protect")
+    sp.add_argument("--namespace", help="namespace of the selector")
+    sp.add_argument("--rpo", required=True, help="RPO objective (15m, 1h)")
+    for opt, what in (("--map-net", "network ns/name=ns/name"), ("--map-sc", "storage class"),
+                      ("--map-ns", "namespace"), ("--map-image", "image ns/name=ns/name"),
+                      ("--map-claim", "PVC ns/claim=name"), ("--target-name", "VM ns/name=name")):
+        sp.add_argument(opt, action="append", metavar="SRC=DST", help=f"{what} mapping (repeatable)")
+    sp.add_argument("--cloud-init", choices=rp.OPTION_CHOICES["cloud_init"])
+    sp.add_argument("--mac", choices=rp.OPTION_CHOICES["mac"])
+    sp.add_argument("--create-namespace", action="store_true")
+    sp.add_argument("--start", choices=rp.OPTION_CHOICES["start"], help="state of the VM after a failover")
+    sp.add_argument("--retain", type=int, help=f"backups kept ({rp.RETAIN_MIN} to {rp.RETAIN_MAX})")
+    sp.add_argument("--interval", help="backup interval (5m); derived from a measure otherwise")
+    sp.add_argument("--follow", choices=rp.OPTION_CHOICES["follow"], help="who follows the plan")
+    sp.add_argument("--skew-tolerance", help="accepted skew between disks at an unplanned failover (10s)")
+    sp.add_argument("--timeout", action="append", metavar="NAME=SECONDS", help="plan wait setting (repeatable)")
+
+    sp = leaf(pp, "list", cmd_plan_list, [common, role], 2, "all plans with their resources")
+    sp.add_argument("--host", help="plans where this cluster is source or target")
+    sp = leaf(pp, "show", cmd_plan_show, [common, role], 2, "one plan, its status and runs")
+    sp.add_argument("plan")
+    sp = leaf(pp, "delete", cmd_plan_delete, [common], 2, "delete a draft or unprotected plan")
+    sp.add_argument("plan")
+    sp = leaf(pp, "set", cmd_plan_set, [common], 2, "hot settings, read by the follower at its next round")
+    sp.add_argument("plan")
+    sp.add_argument("--rpo")
+    sp.add_argument("--paused", help="true or false")
+    sp.add_argument("--follow", choices=rp.OPTION_CHOICES["follow"])
+    sp.add_argument("--skew-tolerance")
+    sp.add_argument("--timeout", action="append", metavar="NAME=SECONDS",
+                    help="plan wait setting (repeatable); NAME= removes it")
+
+    sp = leaf(sub, "check", cmd_check, [common, clusters], 1, "full pre-check, nothing written")
+    sp.add_argument("plan")
+    sp.add_argument("--phase", choices=rp.PHASES, default="protect")
+    sp.add_argument("--force-unplanned", action="store_true")
+
+    mp = sub.add_parser("measure", help="measure the changes before protecting").add_subparsers(dest="mcmd",
+                                                                                               required=True)
+    sp = leaf(mp, "start", cmd_measure_start, [common, clusters], 2, "backup jobs on the source only")
+    sp.add_argument("plan")
+    sp.add_argument("--interval", help="measured interval (default 5m)")
+    sp = leaf(mp, "stop", cmd_measure_stop, [common, clusters], 2, "record the passes and remove the jobs")
+    sp.add_argument("plan")
+    sp = leaf(mp, "report", cmd_measure_report, [common], 2, "per candidate interval, from the database")
+    sp.add_argument("plan")
+    sp.add_argument("--margin", type=float, default=rp.DEFAULT_MARGIN)
+    sp = leaf(mp, "formula", cmd_measure_formula, [common], 2, "forecast from write counters, no cluster")
+    sp.add_argument("--size", required=True, help="disk size (2Gi)")
+    sp.add_argument("--writes", type=int, required=True, help="writes per interval")
+    sp.add_argument("--interval", required=True, help="interval (5m)")
+    sp.add_argument("--block", default="2Mi", help="backup block size (2Mi or 16Mi)")
+    sp.add_argument("--throughput", help="bytes per second to the target (72Mi)")
+    sp.add_argument("--write-size", type=int, default=4096, help="bytes per write")
+
+    sp = leaf(sub, "protect", cmd_protect, [common, clusters], 1, "protect the plan's VMs")
+    sp.add_argument("plan")
+    sp.add_argument("--dry-run", action="store_true", help="check and server dry-run, nothing written")
+    sp.add_argument("--interval", help="backup interval (required without a measure)")
+
+    sp = leaf(sub, "follow", cmd_follow, [common], 1, "the follower loop (resync after each backup, stats)")
+    g = sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--plan")
+    g.add_argument("--all", action="store_true")
+    sp.add_argument("--once", action="store_true", help="one round, then exit")
+    sp.add_argument("--take-over", action="store_true", help="take the plans' lease from another follower")
+    sp.add_argument("--console", action="store_true", help="console child: timestamped journal on stderr")
+
+    sp = leaf(sub, "status", cmd_status, [common], 1, "RPO held against the objective (exit 4 if exceeded)")
+    sp.add_argument("plan", nargs="?")
+    sp.add_argument("--host")
+
+    sp = leaf(sub, "resources", cmd_resources, [common, role], 1, "resources of a host, as source or target")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--side", choices=("source", "target", "any"), default="any")
+
+    sp = leaf(sub, "events", cmd_events, [common], 1, "the persistent journal, newest first")
+    g = sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("--resource", help="source VM uid")
+    g.add_argument("--plan")
+    g.add_argument("--host")
+    sp.add_argument("--limit", type=int, default=50)
+    sp.add_argument("--before", help="event id or ISO date of the last event of the previous page")
+
+    sp = leaf(sub, "failover", cmd_failover, [common, clusters], 1, "fail the plan's VMs over to the target")
+    sp.add_argument("plan")
+    sp.add_argument("--vm", action="append", metavar="NS/NAME", help="limit to these VMs (repeatable)")
+    sp.add_argument("--unplanned", action="store_true", help="the source is lost (needs --yes)")
+    sp.add_argument("--force-unplanned", action="store_true", help="unplanned although the source answers")
+    sp.add_argument("--accept-skew", action="store_true", help="accept a skew between disks above the tolerance")
+    sp.add_argument("--yes", action="store_true", help="confirm an unplanned failover")
+    sp.add_argument("--dry-run", action="store_true")
+
+    sp = leaf(sub, "resume", cmd_resume, [common, clusters], 1, "resume the interrupted command of a plan")
+    sp.add_argument("plan")
+    sp.add_argument("--yes", action="store_true")
+
+    sp = leaf(sub, "unprotect", cmd_unprotect, [common, clusters], 1, "stop protecting the plan")
+    sp.add_argument("plan")
+    sp.add_argument("--delete-backups", action="store_true", help="also delete the plan's backups (needs --yes)")
+    sp.add_argument("--yes", action="store_true")
+    return ap
+
+
+def _spec_arg(argv):
+    """Valeur de --spec (`--spec=F` ou `--spec F`), lue avant l'analyse : les
+    options obligatoires peuvent venir du fichier."""
+    for i, a in enumerate(argv):
+        if a.startswith("--spec="):
+            return a.split("=", 1)[1]
+        if a == "--spec" and i + 1 < len(argv):
+            return argv[i + 1]
+    return None
+
+
+def parse(argv):
+    ap = build_parser()
+    spec = _spec_arg(argv)
+    if spec:
+        # options du fichier juste après la sous-commande : celles de la
+        # ligne de commande, plus loin, l'emportent
+        n = 2 if argv and argv[0] in ("plan", "measure") else 1
+        argv = argv[:n] + _spec_tokens(spec) + argv[n:]
+    return ap.parse_args(argv)
+
+
+def configure(args):
+    if args.state_dir:
+        os.environ["HARVESTER_OPS_STATE_DIR"] = str(Path(args.state_dir).resolve())
+    _HIDDEN.clear()
+    _hide(args.db, os.environ.get("HARVESTER_OPS_REPLICATION_DB"), cluster_decl.state_dir(),
+          os.environ.get("HARVESTER_OPS_CONFIG", "/etc/harvester-ops/config.yaml"),
+          getattr(args, "spec", None) if args.spec != "-" else None)
+    home = os.path.expanduser("~")
+    if home and home != "/":
+        _hide(home)
+    _CANCEL["signal"] = None
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    want_json = "--json" in argv
+    try:
+        with scrubbed_journal():
+            args = parse(argv)
+            want_json = args.json
+            configure(args)
+            if args.fn is cmd_follow:
+                return args.fn(args)            # le suiveur a son propre arrêt (rend ses baux)
+            with cancel_on_signals():
+                try:
+                    return args.fn(args)
+                except rr.Cancelled as e:
+                    return fail_exit(want_json, "cancel", f"cancelled ({e})", "cancelled", EXIT_CANCELLED)
+    except UsageError as e:
+        return fail_exit(want_json, "validate", str(e), e.kind, EXIT_USAGE)
+    except Failure as e:
+        return fail_exit(want_json, "failed", str(e), e.kind, EXIT_FAIL)
+    except Exception as e:                      # noqa: BLE001 : ni trace ni chemin à l'appelant
+        return fail_exit(want_json, "internal", f"unexpected internal error ({type(e).__name__})", "failed",
+                         EXIT_FAIL)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
