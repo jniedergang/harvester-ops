@@ -701,8 +701,27 @@ def parse_domain_xml(text):
     nvram = None
     nv = os_el.find("nvram") if os_el is not None else None
     if nv is not None:
-        nvram = {"path": (nv.text or "").strip() or None, "format": nv.get("format"),
-                 "template": nv.get("template")}
+        # deux formes (formatdomain, « BIOS bootloader ») : chemin en texte, ou
+        # `<nvram type='file|block|network'><source file=|dev=|name=/></nvram>`
+        nv_src = nv.find("source")
+        nv_path = (nv.text or "").strip() or None
+        if nv_path is None and nv_src is not None:
+            nv_path = _first_attr(nv_src, ("file", "dev", "name"))
+        nvram = {"path": nv_path, "format": nv.get("format"), "template": nv.get("template"),
+                 "type": nv.get("type") or "file"}
+    tpm = None
+    tpm_el = devices.find("tpm")
+    if tpm_el is not None:
+        be = tpm_el.find("backend")
+        be_src = be.find("source") if be is not None else None
+        tpm = {"model": tpm_el.get("model"),
+               "backend": be.get("type") if be is not None else None,
+               "version": be.get("version") if be is not None else None,
+               "persistent_state": _yes(be.get("persistent_state")) if be is not None else False,
+               # source explicite de l'état (fichier ou répertoire choisi à la main)
+               "state_source": (_first_attr(be_src, ("path", "file", "dir"))
+                                if be_src is not None else None)}
+    genid = root.find("genid")
     return {"name": root.findtext("name"), "uuid": root.findtext("uuid"),
             "domain_type": root.get("type"), "id": _int(root.get("id")),
             "vcpus": _int(vcpu.text) if vcpu is not None else None,
@@ -713,7 +732,12 @@ def parse_domain_xml(text):
             "machine": os_type.get("machine") if os_type is not None else None,
             "arch": os_type.get("arch") if os_type is not None else None,
             "firmware": firmware, "disks": disks, "nics": nics, "graphics": graphics,
-            "nvram": nvram, "hostdevs": len(devices.findall("hostdev")),
+            "nvram": nvram,
+            # une carte `<interface type='hostdev'>` est aussi un périphérique de l'hôte
+            "hostdevs": len(devices.findall("hostdev")) + sum(
+                1 for n in devices.findall("interface") if n.get("type") == "hostdev"),
+            "tpm": tpm,
+            "genid": None if genid is None else ((genid.text or "").strip() or True),
             "seclabels_static": any(sl.get("type") == "static" for sl in root.findall("seclabel")),
             "sysinfo_uuid": any(e.get("name") == "uuid"
                                 for e in root.findall("sysinfo/system/entry"))}
@@ -836,7 +860,11 @@ def parse_vol_xml(text):
             "format": fmt.get("type") if fmt is not None else None,
             "capacity": _bytes(root.find("capacity")),
             "allocation": _bytes(root.find("allocation")),
-            "backing": (root.findtext("backingStore/path") or "").strip() or None}
+            "backing": (root.findtext("backingStore/path") or "").strip() or None,
+            # droits du fichier vus par libvirt (texte tel quel : mode octal, uid, gid)
+            "mode": (root.findtext("target/permissions/mode") or "").strip() or None,
+            "owner": (root.findtext("target/permissions/owner") or "").strip() or None,
+            "group": (root.findtext("target/permissions/group") or "").strip() or None}
 
 
 def parse_pool_xml(text):

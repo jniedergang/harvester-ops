@@ -10,6 +10,7 @@ Deux étages :
 """
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -18,6 +19,8 @@ import sys
 import tempfile
 import time
 import uuid as uuidlib
+import posixpath
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,11 +84,11 @@ def table(headers, rows):
                       *[line(r) for r in rows], ""])
 
 
-def dominfo(name, state, persistent=True, uid="u"):
+def dominfo(name, state, persistent=True, uid="u", managed_save=False):
     return (f"Id:             {'1' if state == 'running' else '-'}\nName:           {name}\n"
             f"UUID:           {uid}\nState:          {state}\n"
             f"Persistent:     {'yes' if persistent else 'no'}\nAutostart:      disable\n"
-            f"Managed save:   no\n")
+            f"Managed save:   {'yes' if managed_save else 'no'}\n")
 
 
 # --- libvirt simulé --------------------------------------------------------------
@@ -101,6 +104,11 @@ class Sim:
         self.domains = {}
         self.pools = {}
         self.files = {}          # chemin -> sortie json de qemu-img (liste) ; None = illisible
+        #                          (fichier non déclaré : image sans base)
+        self.inodes = {}         # chemin -> « dev:ino » imposé (liens) ; défaut : propre au chemin
+        self.missing = set()     # chemins absents pour stat -L
+        self.stat_fail = set()   # chemins dont stat -L échoue (droits)
+        self.fstypes = {}        # répertoire -> type de `stat -f -c %T`
         self.exists = set()      # chemins vus par `test -e`
         self.writable = set()    # répertoires où le compte SSH écrit
         self.statf = {}          # répertoire -> "bavail bsize"
@@ -111,6 +119,8 @@ class Sim:
         self.copy_polls = 2
         self.on_copy_poll = None
         self.copies = {}
+        self.commit_out = "linked\nsrc=1000:100:644\ndst=1000:100:644\n"
+        self.vol_perms = ("0644", "107", "107")
 
     # -- déclaration du monde
     def add_domain(self, name, xml, state="shut off", persistent=True, live=None, snaps=(),
@@ -197,11 +207,14 @@ class Sim:
                 return "rc=\npid=4242\nprogress=50.00/100%\nlast=\n"
             return f"rc={self.copy_rc}\npid=4242\nprogress=100.00/100%\nlast=boom: no space\n"
         if argv[:2] == ["sh", "-c"] and argv[2] == ko._COPY_COMMIT:
-            tmp, dest = argv[4:]
+            tmp, dest, src = argv[4:]
             if dest in self.exists:
-                raise kh.make_error(self.name, "ln: failed to create hard link: File exists", 1)
+                raise kh.make_error(self.name, "ln: failed to create hard link: File exists", 3)
             self.exists.add(dest)
             self.copies[tmp]["committed"] = dest
+            return self.commit_out
+        if argv[:2] == ["sh", "-c"] and argv[2] == ko._COPY_UNCOMMIT:
+            self.copies[argv[4]]["killed"] = True
             return ""
         if argv[:2] == ["sh", "-c"] and argv[2] == ko._COPY_KILL:
             self.copies[argv[4]]["killed"] = True
@@ -224,9 +237,23 @@ class Sim:
     def _shell(self, argv):
         if argv[:2] == ["qemu-img", "info"]:
             f = argv[-1]
-            if self.files.get(f) is None:
+            if f in self.missing:
+                return 1, f"qemu-img: Could not open '{f}': No such file or directory"
+            if f in self.files and self.files[f] is None:
                 return 1, f"qemu-img: Could not open '{f}': Permission denied"
-            return 0, json.dumps(self.files[f])
+            return 0, json.dumps(self.files.get(f) or [{"filename": f}])
+        if argv[:4] == ["stat", "-L", "-c", "%d:%i"]:
+            f = argv[-1]
+            if f in self.missing:
+                return 1, f"stat: cannot statx '{f}': No such file or directory"
+            if f in self.stat_fail:
+                return 1, f"stat: cannot statx '{f}': Permission denied"
+            return 0, self.inodes.get(f) or f"64769:{zlib.crc32(f.encode())}"
+        if argv[:4] == ["stat", "-f", "-c", "%T"]:
+            f = argv[-1]
+            if f in self.missing:
+                return 1, f"stat: cannot read file system information for '{f}': No such file"
+            return 0, self.fstypes.get(posixpath.dirname(f), "xfs") + "\n"
         if argv[:2] == ["test", "-e"]:
             return (0 if argv[2] in self.exists else 1), ""
         if argv[:3] == ["test", "!", "-e"]:
@@ -275,7 +302,8 @@ class Sim:
         if d is None:
             return self._nodom(o["domain"])
         uid = kh.parse_domain_xml(d["xml"])["uuid"]
-        return 0, dominfo(o["domain"], d["state"], d["persistent"], uid), ""
+        return 0, dominfo(o["domain"], d["state"], d["persistent"], uid,
+                          d.get("managed_save", False)), ""
 
     def v_domstate(self, o, p, data):
         d = self._dom(o["domain"])
@@ -296,12 +324,15 @@ class Sim:
         v = self.pools[o["pool"]]["vols"].get(o["vol"])
         if v is None:
             return 1, "", f"error: failed to get vol '{o['vol']}'\n"
+        mode, owner, group = self.vol_perms
         bs = (f"<backingStore><path>{v['backing']}</path><format type='qcow2'/></backingStore>"
               if v["backing"] else "")
         return 0, (f"<volume type='file'><name>{o['vol']}</name><key>{v['path']}</key>"
                    f"<capacity unit='bytes'>{v['cap']}</capacity>"
                    f"<allocation unit='bytes'>{v['alloc']}</allocation>"
-                   f"<target><path>{v['path']}</path><format type='{v['fmt']}'/></target>"
+                   f"<target><path>{v['path']}</path><format type='{v['fmt']}'/>"
+                   f"<permissions><mode>{mode}</mode><owner>{owner}</owner>"
+                   f"<group>{group}</group></permissions></target>"
                    f"{bs}</volume>"), ""
 
     def v_vol_path(self, o, p, data):
@@ -474,8 +505,16 @@ DISPLAY_CASES = [
      {"type": "vnc", "address": "::1", "port": 5900, "password": False}),
     ("host IP", dom("h", graphics=vnc("172.16.1.12", 5905)), True,
      {"type": "vnc", "address": "172.16.1.12", "port": 5905, "password": False}),
+    ("IP of another machine", dom("h", graphics=vnc("172.16.1.11", 5905)), True,
+     {"reason": "listen"}),
     ("network listen", dom("n", graphics=vnc("192.168.122.1", listen_type="network")), True,
      {"type": "vnc", "address": "192.168.122.1", "port": 5900, "password": False}),
+    ("network listen without address",
+     dom("n", graphics="<graphics type='vnc' port='5900' autoport='yes'>"
+                       "<listen type='network' network='default'/></graphics>"), True,
+     {"reason": "listen"}),
+    ("vnc then spice", dom("s", graphics=vnc("127.0.0.1", 5908) + SPICE), True,
+     {"type": "vnc", "address": "127.0.0.1", "port": 5908, "password": False}),
     ("no listen address", dom("e", graphics=vnc(None)), True,
      {"type": "vnc", "address": "127.0.0.1", "port": 5900, "password": False}),
     ("host name", dom("x", graphics=vnc("node2.home.lo")), True, {"reason": "listen"}),
@@ -495,9 +534,36 @@ DISPLAY_CASES = [
 
 @pytest.mark.parametrize("label,xml,live,expected", DISPLAY_CASES, ids=[c[0] for c in DISPLAY_CASES])
 def test_display_target(label, xml, live, expected):
-    assert ko.display_target(xml, live) == expected
+    addrs = HOST_ADDRS
+    assert ko.display_target(xml, live, host_addresses=addrs) == expected
     # même résultat sur le dict déjà lu
-    assert ko.display_target(kh.parse_domain_xml(xml), live) == expected
+    assert ko.display_target(kh.parse_domain_xml(xml), live, host_addresses=addrs) == expected
+
+
+IP_ADDR = """1: lo    inet 127.0.0.1/8 scope host lo\\       valid_lft forever preferred_lft forever
+1: lo    inet6 ::1/128 scope host noprefixroute \\       valid_lft forever preferred_lft forever
+2: br0    inet 172.16.1.12/16 brd 172.16.255.255 scope global br0\\       valid_lft forever
+2: br0    inet6 fe80::0a:0001/64 scope link proto kernel_ll \\       valid_lft forever
+5: virbr0    inet 192.168.122.1/24 brd 192.168.122.255 scope global virbr0\\       valid_lft
+"""
+HOST_ADDRS = ko.parse_ip_addr(IP_ADDR)
+
+
+def test_parse_ip_addr_and_host_addresses():
+    assert HOST_ADDRS == {"127.0.0.1", "::1", "172.16.1.12", "fe80::a:1", "192.168.122.1"}
+    sim = Sim()
+    sim.run = lambda argv, timeout=None: IP_ADDR if argv == [
+        "env", "LC_ALL=C", "ip", "-o", "addr", "show"] else None
+    assert ko.host_addresses(sim) == HOST_ADDRS
+
+
+@pytest.mark.parametrize("listen", ["172.16.1.12", "192.168.122.1"])
+def test_display_target_specific_ip_needs_host_addresses(listen):
+    # sans la liste des adresses de l'hôte, une IP précise n'est jamais crue
+    xml = dom("h", graphics=vnc(listen, 5905))
+    assert ko.display_target(xml, True) == {"reason": "listen"}
+    assert ko.display_target(xml, True, host_addresses={"10.0.0.1"}) == {"reason": "listen"}
+    assert ko.display_target(xml, True, host_addresses=HOST_ADDRS)["address"] == listen
 
 
 def test_vnc_password_reads_security_info_only():
@@ -670,8 +736,9 @@ def test_revert_snapshot_rereads_state(snap, start, end):
 
 def test_revert_needing_force_is_named_not_forced():
     sim = snap_sim()
-    sim.fail["snapshot-revert"] = (1, "error: revert requires force: target domain cpu "
-                                      "configuration mismatch; use --force\n")
+    # texte réel (VIR_ERR_SNAPSHOT_REVERT_RISKY, libvirt 12.7.0, qemu_snapshot.c)
+    sim.fail["snapshot-revert"] = (1, "error: revert requires force: snapshot 's1' lacks "
+                                      "domain 'kvmtest-1' rollback info\n")
     with pytest.raises(ko.OpError) as e:
         ko.revert_snapshot(sim, "kvmtest-1", "s1")
     assert e.value.kind == "needs-force" and "revert requires force" in e.value.message
@@ -751,7 +818,7 @@ def test_owned_disks_reasons_table():
         "vdb": (False, "shared with other"),
         "vdc": (False, f"backing file of {POOL}/mine.qcow2"),
         "vdd": (False, f"backing file of {OUT}/stopped-ov.qcow2"),
-        "vde": (False, "shared with runner"),
+        "vde": (False, f"backing file of {OUT}/top.qcow2"),
         "vdf": (False, "block device"),
         "vdg": (False, "network disk"),
         "sda": (False, "read-only or CD-ROM"),
@@ -779,7 +846,8 @@ def test_owned_disks_raw_neighbours_are_not_opened():
     sim.add_domain("target", dom("target", [disk("vda", f"{POOL}/lonely.qcow2")]))
     sim.add_domain("rawvm", dom("rawvm", [disk("vda", f"{OUT}/r.img", fmt="raw")]))
     assert owned_map(sim) == {"vda": (True, None)}
-    assert not [c for c in sim.calls if c[0] == "run"]
+    scripts = " ".join(c[1][2] for c in sim.calls if c[0] == "run")
+    assert "qemu-img" not in scripts and f"{OUT}/r.img" in scripts      # identité lue, rien d'autre
 
 
 def test_owned_disks_unreadable_domain_proves_nothing():
@@ -1456,3 +1524,524 @@ def test_real_copy_deadline(local):
                       time.monotonic() + 0.5, None, time.sleep, 0.1)
     assert err.value.kind == "timeout"
     assert ko._rollback(local.host(), created) == [] and leftovers_in(local.work) == []
+
+
+# --- après revue : preuve de propriété sur tout l'hôte (C1) -------------------------------------
+
+P2 = f"{IMG}/kvmtest2"
+LONELY = f"{POOL}/lonely.qcow2"
+
+
+def c1_sim():
+    sim = storage_sim()
+    sim.add_pool("kvmtest2", P2)
+    sim.add_domain("target", dom("target", [disk("vda", LONELY)]))
+    return sim
+
+
+def _c1_other_pool(sim):
+    # surcouche arrêtée dans un AUTRE pool, illisible par le compte SSH (root 0600) :
+    # seule la lecture des volumes de ce pool par libvirt la voit
+    sim.add_vol("kvmtest2", "ov.qcow2", backing=LONELY)
+    sim.files[f"{P2}/ov.qcow2"] = None
+    sim.add_domain("b", dom("b", [disk("vda", f"{P2}/ov.qcow2")]))
+
+
+def _c1_other_pool_volume_disk(sim):
+    sim.add_vol("kvmtest2", "ov.qcow2", backing=LONELY)
+    sim.add_domain("b", dom("b", [disk("vda", "kvmtest2/ov.qcow2", type="volume")]))
+
+
+def _c1_outside(sim):
+    sim.files[f"{OUT}/ov.qcow2"] = [{"filename": f"{OUT}/ov.qcow2"}, {"filename": LONELY}]
+    sim.add_domain("b", dom("b", [disk("vda", f"{OUT}/ov.qcow2")]))
+
+
+def _c1_free_volume(sim):
+    sim.add_vol("kvmtest2", "free.qcow2", backing=LONELY)        # attaché à aucun domaine
+
+
+def _c1_running_live_chain(sim):
+    sim.add_vol("kvmtest2", "run.qcow2")
+    sim.add_domain("b", dom("b", [disk("vda", f"{P2}/run.qcow2")]), state="running",
+                   live=dom("b", [disk("vda", f"{P2}/run.qcow2", chain=[LONELY])], live_id=7))
+
+
+def _c1_exit_from_pools(sim):
+    # volume libre -> fichier hors pool -> candidat : qemu-img lit la fin de la chaîne
+    sim.add_vol("kvmtest2", "x.qcow2", backing=f"{OUT}/mid.qcow2")
+    sim.files[f"{OUT}/mid.qcow2"] = [{"filename": f"{OUT}/mid.qcow2"}, {"filename": LONELY}]
+
+
+def _c1_running_next_definition(sim):
+    # domaine en marche dont la définition (prochain démarrage) cite une autre surcouche
+    sim.files[f"{OUT}/next.qcow2"] = [{"filename": f"{OUT}/next.qcow2"}, {"filename": LONELY}]
+    sim.add_domain("b", dom("b", [disk("vda", f"{OUT}/next.qcow2")]), state="running",
+                   live=dom("b", [disk("vda", f"{OUT}/now.qcow2")], live_id=8))
+
+
+C1_CASES = [
+    ("stopped overlay in another pool", _c1_other_pool, (False, f"backing file of {P2}/ov.qcow2")),
+    ("stopped overlay as a volume of another pool", _c1_other_pool_volume_disk,
+     (False, f"backing file of {P2}/ov.qcow2")),
+    ("stopped overlay outside any pool", _c1_outside, (False, f"backing file of {OUT}/ov.qcow2")),
+    ("free volume of another pool", _c1_free_volume, (False, f"backing file of {P2}/free.qcow2")),
+    ("running domain, live chain", _c1_running_live_chain,
+     (False, f"backing file of {P2}/run.qcow2")),
+    ("chain leaving the pools", _c1_exit_from_pools, (False, f"backing file of {P2}/x.qcow2")),
+    ("next definition of a running domain", _c1_running_next_definition,
+     (False, f"backing file of {OUT}/next.qcow2")),
+    ("nobody", lambda sim: None, (True, None)),
+]
+
+
+@pytest.mark.parametrize("label,setup,expected", C1_CASES, ids=[c[0] for c in C1_CASES])
+def test_ownership_proof_reads_every_chain_of_the_host(label, setup, expected):
+    sim = c1_sim()
+    setup(sim)
+    assert owned_map(sim)["vda"] == expected
+    # et la suppression garde le disque
+    res = ko.delete_vm(sim, "target", remove_storage=True)
+    assert [d["target"] for d in res["deleted"]] == (["vda"] if expected[0] else [])
+    assert (LONELY in sim.exists) is (not expected[0])
+
+
+def test_ownership_proof_batches_its_reads():
+    sim = c1_sim()
+    for setup in (_c1_other_pool, _c1_outside, _c1_free_volume, _c1_exit_from_pools):
+        setup(sim)
+    sim.add_domain("c", dom("c", [disk("vda", f"{OUT}/c1.qcow2"), disk("vdb", f"{OUT}/c2.qcow2")]))
+    sim.files[f"{OUT}/c1.qcow2"] = [{"filename": f"{OUT}/c1.qcow2"}, {"filename": "deep.qcow2"}]
+    sim.calls.clear()
+    ko.owned_disks(sim, "target")
+    runs = [c for c in sim.calls if c[0] == "run"]
+    # un lot qemu-img + stat + stat -f, puis un lot stat des maillons découverts
+    assert len(runs) == 2 and f"stat -L -c %d:%i -- {OUT}/deep.qcow2" in runs[1][1][2]
+    assert {c[0] for c in sim.calls} == {"batch", "run"}
+
+
+# --- stockage partagé entre hôtes (C2) --------------------------------------------------------
+
+@pytest.mark.parametrize("fstype,shared", [
+    ("nfs", True), ("nfs4", True), ("cifs", True), ("smb2", True), ("fuseblk", True),
+    ("fuse.sshfs", True), ("glusterfs", True), ("ceph", True), ("9p", True), ("v9fs", True),
+    ("virtiofs", True), ("gfs2", True), ("ocfs2", True),
+    ("xfs", False), ("ext2/ext3", False), ("btrfs", False), ("tmpfs", False),
+])
+def test_shared_filesystem_keeps_the_disk(fstype, shared):
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", f"{OUT}/own.qcow2"),
+                                            disk("vdb", LONELY)]))
+    sim.fstypes[OUT] = fstype
+    got = owned_map(sim)
+    assert got["vda"] == ((False, ko.REASON_SHARED_STORAGE) if shared else (True, None))
+    assert got["vdb"] == (True, None)
+
+
+@pytest.mark.parametrize("ptype,shared", [("netfs", True), ("gluster", True), ("rbd", True),
+                                          ("iscsi", True), ("dir", False), ("fs", False)])
+def test_shared_pool_keeps_the_volume(ptype, shared):
+    sim = storage_sim()
+    sim.add_pool("remote", "/mnt/remote", type=ptype)
+    sim.add_vol("remote", "r.qcow2")
+    sim.add_domain("target", dom("target", [disk("vda", "remote/r.qcow2", type="volume")]))
+    assert owned_map(sim)["vda"] == ((False, ko.REASON_SHARED_STORAGE) if shared else (True, None))
+
+
+def test_shared_storage_reads_are_batched_and_unreadable_fs_proves_nothing():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", f"{OUT}/a.qcow2"),
+                                            disk("vdb", f"{OUT}/b.qcow2")]))
+    real = sim._shell
+
+    def shell(argv):
+        if argv[:2] == ["stat", "-f"] and argv[-1].endswith("b.qcow2"):
+            return 1, "stat: cannot read file system information: Input/output error"
+        return real(argv)
+    sim._shell = shell
+    sim.calls.clear()
+    assert owned_map(sim) == {"vda": (True, None), "vdb": (False, ko.REASON_UNKNOWN)}
+    script = next(c[1][2] for c in sim.calls if c[0] == "run")
+    assert script.count("stat -f -c %T") == 2
+
+
+# --- identité des fichiers : périphérique et inode (I1) -----------------------------------------
+
+def test_symlink_to_the_disk_used_by_another_domain_is_shared():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", LONELY)]))
+    sim.add_domain("other", dom("other", [disk("vda", f"{OUT}/alias.qcow2")]))
+    sim.inodes[LONELY] = sim.inodes[f"{OUT}/alias.qcow2"] = "64769:4242"
+    assert owned_map(sim)["vda"] == (False, "shared with other")
+
+
+def test_symlink_in_a_backing_chain_is_seen():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", LONELY)]))
+    sim.files[f"{OUT}/ov.qcow2"] = [{"filename": f"{OUT}/ov.qcow2"},
+                                    {"filename": f"{OUT}/base-link.qcow2"}]
+    sim.add_domain("b", dom("b", [disk("vda", f"{OUT}/ov.qcow2")]))
+    sim.inodes[LONELY] = sim.inodes[f"{OUT}/base-link.qcow2"] = "64769:77"
+    assert owned_map(sim)["vda"] == (False, f"backing file of {OUT}/ov.qcow2")
+
+
+def test_identity_of_another_file_unreadable_or_missing():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", LONELY)]))
+    sim.add_domain("b", dom("b", [disk("vda", f"{OUT}/gone.qcow2")]))
+    sim.missing.add(f"{OUT}/gone.qcow2")
+    assert owned_map(sim)["vda"] == (True, None)         # absent : il ne cite rien
+    sim.add_domain("c", dom("c", [disk("vda", f"{OUT}/hidden.qcow2", fmt="raw")]))
+    sim.stat_fail.add(f"{OUT}/hidden.qcow2")
+    assert owned_map(sim)["vda"] == (False, ko.REASON_UNKNOWN)
+    assert ko.delete_plan(sim, "target", remove_storage=True)["unreadable"] == [
+        f"{OUT}/hidden.qcow2"]
+
+
+def test_missing_own_disk_is_kept_not_deleted():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", f"{OUT}/lost.qcow2")]))
+    sim.missing.add(f"{OUT}/lost.qcow2")
+    assert owned_map(sim)["vda"] == (False, ko.REASON_MISSING)
+
+
+# --- fichiers illisibles acceptés par l'opérateur (décision 46) ---------------------------------
+
+SECRET = f"{OUT}/secret.qcow2"
+
+
+def d46_sim():
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", LONELY), disk("vdb", f"{OUT}/own.qcow2")]))
+    sim.exists.add(f"{OUT}/own.qcow2")
+    sim.add_domain("stopped", dom("stopped", [disk("vda", SECRET)]))
+    sim.files[SECRET] = None
+    return sim
+
+
+def test_unreadable_files_are_listed_and_keep_everything_by_default():
+    sim = d46_sim()
+    plan = ko.delete_plan(sim, "target", remove_storage=True)
+    assert plan["unreadable"] == [SECRET] and plan["acknowledged_unreadable"] == []
+    assert plan["delete"] == [] and {d["reason"] for d in plan["keep"]} == {ko.REASON_UNKNOWN}
+    res = ko.delete_vm(sim, "target", remove_storage=True)
+    assert res["deleted"] == [] and LONELY in sim.exists and res["unreadable"] == [SECRET]
+
+
+def test_acknowledged_unreadable_files_let_the_proof_proceed():
+    sim = d46_sim()
+    plan = ko.delete_plan(sim, "target", remove_storage=True, acknowledged_unreadable=[SECRET])
+    assert [d["target"] for d in plan["delete"]] == ["vda", "vdb"]
+    assert plan["acknowledged_unreadable"] == [SECRET]
+    res = ko.delete_vm(sim, "target", remove_storage=True, acknowledged_unreadable=[SECRET])
+    assert sorted(d["target"] for d in res["deleted"]) == ["vda", "vdb"]
+    assert LONELY not in sim.exists
+
+
+@pytest.mark.parametrize("label,extra,ack", [
+    ("only one of two acknowledged", "second", [SECRET]),
+    ("libvirt read missing too", "domain", [SECRET]),
+    ("other path acknowledged", None, [f"{OUT}/elsewhere.qcow2"]),
+])
+def test_acknowledgement_is_not_a_blank_cheque(label, extra, ack):
+    sim = d46_sim()
+    if extra == "second":
+        sim.add_domain("s2", dom("s2", [disk("vda", f"{OUT}/secret2.qcow2")]))
+        sim.files[f"{OUT}/secret2.qcow2"] = None
+    elif extra == "domain":
+        sim.add_domain("weird", "<domain><name>weird</name><devices>")
+    plan = ko.delete_plan(sim, "target", remove_storage=True, acknowledged_unreadable=ack)
+    assert plan["delete"] == []
+
+
+def test_acknowledgement_does_not_hide_a_readable_chain():
+    sim = d46_sim()
+    _c1_outside(sim)
+    plan = ko.delete_plan(sim, "target", remove_storage=True, acknowledged_unreadable=[SECRET])
+    assert ("vda", f"backing file of {OUT}/ov.qcow2") in [(d["target"], d["reason"])
+                                                         for d in plan["keep"]]
+
+
+@pytest.mark.parametrize("ack", ["/a/b", ["relative/x"], [3], ["/a\nb"], {"/a": 1}])
+def test_acknowledged_unreadable_validated(ack):
+    with pytest.raises(ko.OpError) as e:
+        ko.delete_plan(d46_sim(), "target", remove_storage=True, acknowledged_unreadable=ack)
+    assert e.value.kind == "invalid"
+
+
+# --- nvram, identifiants, TPM dans le clone (I2, I7) --------------------------------------------
+
+def test_clone_xml_new_style_nvram_fixture():
+    src = fx("dumpxml-kvmtest-nvram-source.xml")
+    vm = kh.parse_domain_xml(src)
+    assert vm["nvram"]["type"] == "file" and vm["nvram"]["path"].endswith("_VARS.qcow2")
+    root = ET.fromstring(ko.clone_xml(src, "kvmtest-n2", {}))
+    nv = root.find("os/nvram")
+    assert nv.find("source") is None and not (nv.text or "").strip() and nv.get("type") is None
+    assert nv.get("template") == ET.fromstring(src).find("os/nvram").get("template")
+    assert kh.parse_domain_xml(ET.tostring(root, encoding="unicode"))["nvram"]["path"] is None
+    # identifiants du relevé réel retirés et dits
+    assert ko._clone_tree(src, "kvmtest-n2", {})[1] == [
+        "genid: a new one is generated by libvirt", "disk vda: serial removed",
+        "sysinfo system: serial removed"]
+
+
+@pytest.mark.parametrize("nv,text", [
+    ("<nvram type='block'><source dev='/dev/vg/nv'/></nvram>", "nvram) on a block source"),
+    ("<nvram type='network'><source protocol='iscsi' name='t/1'/></nvram>",
+     "nvram) on a network source"),
+])
+def test_clone_refuses_block_or_network_nvram(nv, text):
+    xml = dom("src", [disk("vda", f"{POOL}/mine.qcow2")]).replace(
+        "<os><type arch='x86_64'>hvm</type>", f"<os><type arch='x86_64'>hvm</type>{nv}")
+    with pytest.raises(ko.OpError) as e:
+        ko.clone_xml(xml, "n", {})
+    assert e.value.kind == "refused" and text in e.value.message
+    plan = ko.clone_plan(clone_sim(xml=xml), "src", "src-2")
+    assert any(text in r for r in plan["refusals"])
+
+
+IDENT = ("<genid>43dc0cf8-809b-4adb-9bea-a9abb5f3d90e</genid>"
+         "<sysinfo type='smbios'><system><entry name='serial'>S1</entry>"
+         "<entry name='uuid'>11111111-2222-3333-4444-555555555555</entry>"
+         "<entry name='product'>p</entry></system>"
+         "<baseBoard><entry name='serial'>B1</entry></baseBoard>"
+         "<chassis><entry name='serial'>C1</entry><entry name='asset'>a</entry></chassis>"
+         "</sysinfo>")
+
+
+def test_clone_xml_drops_and_reports_identifiers():
+    vda = disk("vda", f"{POOL}/mine.qcow2").replace(
+        "</disk>", "<serial>SN-1</serial><wwn>5000c50015ea71ac</wwn></disk>")
+    src = dom("src", [vda], extra=IDENT)
+    root, changes = ko._clone_tree(src, "n", {})
+    assert root.find("genid") is not None and not root.find("genid").text
+    assert root.find("devices/disk/serial") is None and root.find("devices/disk/wwn") is None
+    assert [(e.get("name"), e.text) for e in root.iter("entry")] == [
+        ("product", "p"), ("asset", "a")]
+    assert changes == ["genid: a new one is generated by libvirt", "disk vda: serial removed",
+                       "disk vda: wwn removed", "sysinfo system: serial removed",
+                       "sysinfo system: uuid removed", "sysinfo baseBoard: serial removed",
+                       "sysinfo chassis: serial removed"]
+    plan = ko.clone_plan(clone_sim(xml=src), "src", "src-2")
+    assert plan["refusals"] == [] and plan["regenerated"] == changes
+
+
+def test_clone_xml_empty_genid_is_not_reported():
+    root, changes = ko._clone_tree(dom("g", extra="<genid/>"), "n", {})
+    assert changes == [] and root.find("genid") is not None
+
+
+@pytest.mark.parametrize("tpm,refusal,lost", [
+    ("<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>", None, True),
+    ("<tpm model='tpm-crb'><backend type='emulator' version='2.0'>"
+     "<source type='dir' path='/srv/tpm/x'/></backend></tpm>", "explicit state location", None),
+    ("<tpm model='tpm-tis'><backend type='passthrough'><device path='/dev/tpm0'/></backend>"
+     "</tpm>", "TPM with a passthrough backend", None),
+    ("", None, False),
+])
+def test_clone_tpm(tpm, refusal, lost):
+    sim = clone_sim(xml=dom("src", [disk("vda", f"{POOL}/mine.qcow2")], extra_dev=tpm))
+    plan = ko.clone_plan(sim, "src", "src-2")
+    if refusal:
+        assert any(refusal in r for r in plan["refusals"])
+        with pytest.raises(ko.OpError):
+            ko.clone_xml(sim.domains["src"]["xml"], "n", {})
+    else:
+        assert plan["refusals"] == [] and plan["tpm_state_lost"] is lost
+        assert ko.clone_vm(sim, "src", "src-2")["tpm_state_lost"] is lost
+
+
+def test_clone_refuses_hostdev_network_card():
+    xml = dom("src", [disk("vda", f"{POOL}/mine.qcow2")],
+              extra_dev="<interface type='hostdev' managed='yes'><source>"
+                        "<address type='pci' domain='0' bus='3' slot='0' function='1'/>"
+                        "</source></interface>")
+    plan = ko.clone_plan(clone_sim(xml=xml), "src", "src-2")
+    assert any("hostdev" in r for r in plan["refusals"])
+
+
+# --- droits, destinations, course (I3, I5, I6) ---------------------------------------------------
+
+@pytest.mark.parametrize("perms,expected", [
+    ({"mode": "0644", "owner": "107", "group": "107"}, ("0644", "107", "107")),
+    ({"mode": "0600", "owner": None, "group": "36"}, ("0600", None, "36")),
+    (None, None),
+])
+def test_volume_xml_permissions(perms, expected):
+    root = ET.fromstring(ko.volume_xml("v.qcow2", 1 << 20, "qcow2", perms))
+    p = root.find("target/permissions")
+    if expected is None:
+        assert p is None
+    else:
+        assert (p.findtext("mode"), p.findtext("owner"), p.findtext("group")) == expected
+
+
+def test_volume_xml_refuses_odd_permissions():
+    with pytest.raises(ko.OpError):
+        ko.volume_xml("v", 1, "raw", {"mode": "0644</mode><x>"})
+
+
+def test_clone_vm_pool_copy_keeps_source_permissions():
+    sim = clone_sim()
+    sim.vol_perms = ("0640", "107", "36")
+    ko.clone_vm(sim, "src", "src-2")
+    create = next(c for c in sim.calls if c[0] == "input" and "vol-create-from" in c[1])
+    p = ET.fromstring(create[2]).find("target/permissions")
+    assert (p.findtext("mode"), p.findtext("owner"), p.findtext("group")) == ("0640", "107", "36")
+
+
+@pytest.mark.parametrize("out,warning", [
+    ("linked\nsrc=1000:100:644\ndst=1000:100:644\n", None),
+    ("linked\nsrc=107:107:600\ndst=1000:100:600\n", "belongs to 1000:100 (uid:gid), the source "
+                                                    "to 107:107: changing the owner needs root"),
+    ("linked\nsrc=1000:100:640\ndst=1000:100:644\n", "has mode 644, the source 640"),
+    ("linked\ntmpleft\nsrc=1000:100:644\ndst=1000:100:644\n", "could not be removed"),
+])
+def test_clone_vm_file_copy_reports_ownership(out, warning):
+    sim = clone_sim("file")
+    sim.commit_out = out
+    res = ko.clone_vm(sim, "src", "src-2", sleep=lambda s: None)
+    if warning is None:
+        assert res["warnings"] == []
+    else:
+        assert len(res["warnings"]) == 1 and warning in res["warnings"][0]
+
+
+def test_clone_plan_pool_destination_unregistered_file_refused():
+    sim = clone_sim()
+    sim.exists.add(f"{POOL}/src-2-vda.qcow2")            # fichier présent, pool pas rafraîchi
+    plan = ko.clone_plan(sim, "src", "src-2")
+    assert plan["refusals"] == [f"{POOL}/src-2-vda.qcow2 already exists"]
+
+
+def test_clone_vm_source_started_during_copy_is_discarded():
+    sim = clone_sim()
+    real = sim.v_vol_create_from
+
+    def started(o, p, data):
+        out = real(o, p, data)
+        sim.domains["src"]["state"] = "running"
+        return out
+    sim.v_vol_create_from = started
+    with pytest.raises(ko.OpError) as e:
+        ko.clone_vm(sim, "src", "src-2")
+    assert e.value.kind == "failed" and "src was started during the copy" in e.value.message
+    assert "src-2" not in sim.domains and not sim.virsh_calls("define")
+    assert "src-2-vda.qcow2" not in sim.pools["kvmtest"]["vols"]
+    assert e.value.data["leftovers"] == []
+
+
+def test_clone_vm_pool_copy_cancelled_names_the_volume_being_built():
+    sim = clone_sim()
+
+    def cancel(o, p, data):
+        raise Stop()
+    sim.v_vol_create_from = cancel
+    real = sim._answer
+
+    def answer(args, data=None):
+        if str(args[0]) == "vol-delete":
+            return 1, "", "error: Requested operation is not valid: volume 'src-2-vda.qcow2' " \
+                          "is still being allocated.\n"
+        return real(args, data)
+    sim._answer = answer
+    with pytest.raises(Stop) as e:
+        ko.clone_vm(sim, "src", "src-2")
+    (left,) = e.value.leftovers
+    assert left["volume"] == "src-2-vda.qcow2" and "building" not in left
+    assert "libvirtd may still be building volume kvmtest/src-2-vda.qcow2" in left["error"]
+
+
+def test_clone_vm_copy_that_never_starts_fails_fast():
+    sim = clone_sim("file")
+    real = sim.run
+
+    def run(argv, timeout=None):
+        if argv[:3] == ["sh", "-c", ko._COPY_POLL]:
+            sim.calls.append(("run", tuple(argv)))
+            return "rc=\npid=\nprogress=\nlast=\n"
+        return real(argv, timeout)
+    sim.run = run
+    with pytest.raises(ko.OpError) as e:
+        ko.clone_vm(sim, "src", "src-2", sleep=lambda s: None, poll=1.0)
+    assert e.value.kind == "failed" and "did not start on the host" in e.value.message
+    polls = [c for c in sim.calls if c[1][2:3] == (ko._COPY_POLL,)]
+    assert len(polls) == int(ko.COPY_START_GRACE) + 1
+
+
+# --- suppression : notes du plan ------------------------------------------------------------------
+
+@pytest.mark.parametrize("managed,tpm,state,notes", [
+    (False, "", None, []),
+    (True, "", None, ["the saved memory state (managed save) is discarded with the VM"]),
+    (False, "<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>", "removed",
+     ["the vTPM state is removed with the VM"]),
+    (False, "<tpm model='tpm-crb'><backend type='emulator' version='2.0' "
+            "persistent_state='yes'/></tpm>", "kept",
+     ["the vTPM state is kept by libvirt (persistent_state)"]),
+])
+def test_delete_plan_managed_save_and_tpm_notes(managed, tpm, state, notes):
+    sim = storage_sim()
+    sim.add_domain("v", dom("v", [disk("vda", LONELY)], extra_dev=tpm))
+    sim.domains["v"]["managed_save"] = managed
+    plan = ko.delete_plan(sim, "v", remove_storage=True)
+    assert (plan["managed_save_lost"], plan["tpm_state"], plan["notes"]) == (managed, state, notes)
+
+
+# --- scripts réels après revue : lien interrompu, PID vérifié, droits ---------------------------
+
+def test_real_copy_keeps_source_mode(local):
+    src = local.work / "src.qcow2"
+    src.write_text("disk-data")
+    src.chmod(0o640)
+    e = entry(local.work, src, "new-vda.qcow2")
+    created = []
+    warnings = ko._copy_file(local.host(), e, created, time.monotonic() + 30, None,
+                             time.sleep, 0.1)
+    assert warnings == [] and oct((local.work / "new-vda.qcow2").stat().st_mode & 0o777) == "0o640"
+    assert leftovers_in(local.work) == []
+
+
+@pytest.mark.parametrize("state", ["linked, temporary still there", "temporary gone"])
+def test_real_rollback_of_an_interrupted_link(local, state):
+    tmp = local.work / ".new.hops-abc.tmp"
+    dest = local.work / "new.qcow2"
+    tmp.write_text("copy")
+    (local.work / ".new.hops-abc.tmp.rc").write_text("0\n")
+    os.link(tmp, dest)                                   # le lien a eu lieu, puis l'annulation
+    if state == "temporary gone":
+        tmp.unlink()
+    left = ko._rollback(local.host(), [{"kind": "commit", "path": str(tmp),
+                                       "destination": str(dest)}])
+    assert leftovers_in(local.work) == []
+    if state == "temporary gone":
+        assert dest.exists() and len(left) == 1 and left[0]["path"] == str(dest)
+        assert "origin cannot be proven" in left[0]["error"]
+    else:
+        assert not dest.exists() and left == []
+
+
+def test_real_rollback_of_a_link_never_removes_someone_elses_file(local):
+    tmp = local.work / ".new.hops-abc.tmp"
+    dest = local.work / "new.qcow2"
+    tmp.write_text("copy")
+    (local.work / ".new.hops-abc.tmp.rc").write_text("0\n")
+    dest.write_text("someone else")                      # le lien n'a pas eu lieu
+    assert ko._rollback(local.host(), [{"kind": "commit", "path": str(tmp),
+                                       "destination": str(dest)}]) == []
+    assert dest.read_text() == "someone else" and leftovers_in(local.work) == []
+
+
+def test_real_kill_checks_the_pid_is_our_qemu_img(local):
+    tmp = local.work / ".new.hops-abc.tmp"
+    tmp.write_text("partial")
+    victim = subprocess.Popen(["sleep", "30"])          # PID étranger écrit dans le fichier
+    try:
+        (local.work / ".new.hops-abc.tmp.pid").write_text(f"{victim.pid}\n")
+        assert ko._rollback(local.host(), [{"kind": "tmp", "path": str(tmp)}]) == []
+        assert victim.poll() is None                     # toujours vivant
+        assert leftovers_in(local.work) == []
+    finally:
+        victim.kill()
+        victim.wait()

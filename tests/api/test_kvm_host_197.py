@@ -171,7 +171,8 @@ def test_parse_domain_xml_socket_spice_uefi_fixtures():
     uefi = kh.parse_domain_xml(fx("dumpxml-kvmtest-uefi.xml"))
     assert uefi["nvram"] == {"path": "/var/lib/libvirt/qemu/nvram/kvmtest-uefi_VARS.qcow2",
                              "format": "qcow2",
-                             "template": "/usr/share/qemu/ovmf-x86_64-4m-vars.qcow2"}
+                             "template": "/usr/share/qemu/ovmf-x86_64-4m-vars.qcow2",
+                             "type": "file"}
     assert uefi["graphics"][0]["listen"] == "0.0.0.0"
     # XML inactif : pas de chaîne de sauvegarde
     inactive = kh.parse_domain_xml(fx("dumpxml-kvmtest-uefi-inactive.xml"))
@@ -209,7 +210,7 @@ def test_parse_domain_xml_synthetic_fields():
     assert d["disks"][0]["backing"] == "/i/mid.qcow2"
     assert d["disks"][0]["backing_chain"] == ["/i/mid.qcow2", "/i/base.raw"]
     assert d["nvram"] == {"path": "/var/lib/libvirt/qemu/nvram/s_VARS.fd", "format": None,
-                          "template": None}
+                          "template": None, "type": "file"}
     assert (d["hostdevs"], d["seclabels_static"], d["sysinfo_uuid"]) == (2, True, True)
     assert [(g["type"], g["listen_type"], g["listen"]) for g in d["graphics"]] == [
         ("vnc", "none", None), ("spice", "network", "192.168.122.1")]
@@ -218,8 +219,66 @@ def test_parse_domain_xml_synthetic_fields():
 def test_parse_domain_xml_empty_nvram_element():
     d = kh.parse_domain_xml("<domain><name>e</name><os><type>hvm</type>"
                             "<nvram template='/t.fd'/></os></domain>")
-    assert d["nvram"] == {"path": None, "format": None, "template": "/t.fd"}
+    assert d["nvram"] == {"path": None, "format": None, "template": "/t.fd", "type": "file"}
     assert (d["hostdevs"], d["seclabels_static"], d["sysinfo_uuid"]) == (0, False, False)
+
+
+NVRAM_FORMS = [
+    ("text path", "<nvram format='qcow2'>/n/a_VARS.qcow2</nvram>",
+     {"path": "/n/a_VARS.qcow2", "format": "qcow2", "template": None, "type": "file"}),
+    ("new file form", "<nvram type='file' template='/t.qcow2' format='qcow2'>"
+                      "<source file='/n/b_VARS.qcow2'/></nvram>",
+     {"path": "/n/b_VARS.qcow2", "format": "qcow2", "template": "/t.qcow2", "type": "file"}),
+    ("block form", "<nvram type='block'><source dev='/dev/vg/nv'/></nvram>",
+     {"path": "/dev/vg/nv", "format": None, "template": None, "type": "block"}),
+    ("network form", "<nvram type='network'><source protocol='iscsi' name='t/1'/></nvram>",
+     {"path": "t/1", "format": None, "template": None, "type": "network"}),
+]
+
+
+@pytest.mark.parametrize("label,nv,expected", NVRAM_FORMS, ids=[n[0] for n in NVRAM_FORMS])
+def test_parse_domain_xml_nvram_forms(label, nv, expected):
+    d = kh.parse_domain_xml(f"<domain><name>n</name><os><type>hvm</type>{nv}</os></domain>")
+    assert d["nvram"] == expected
+
+
+TPM_FORMS = [
+    ("none", "", None),
+    ("emulator default", "<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>",
+     {"model": "tpm-crb", "backend": "emulator", "version": "2.0", "persistent_state": False,
+      "state_source": None}),
+    ("emulator persistent", "<tpm model='tpm-tis'><backend type='emulator' version='2.0' "
+                            "persistent_state='yes'/></tpm>",
+     {"model": "tpm-tis", "backend": "emulator", "version": "2.0", "persistent_state": True,
+      "state_source": None}),
+    ("emulator explicit dir", "<tpm model='tpm-crb'><backend type='emulator' version='2.0'>"
+                              "<source type='dir' path='/srv/tpm/x'/></backend></tpm>",
+     {"model": "tpm-crb", "backend": "emulator", "version": "2.0", "persistent_state": False,
+      "state_source": "/srv/tpm/x"}),
+    ("passthrough", "<tpm model='tpm-tis'><backend type='passthrough'>"
+                    "<device path='/dev/tpm0'/></backend></tpm>",
+     {"model": "tpm-tis", "backend": "passthrough", "version": None, "persistent_state": False,
+      "state_source": None}),
+]
+
+
+@pytest.mark.parametrize("label,tpm,expected", TPM_FORMS, ids=[t[0] for t in TPM_FORMS])
+def test_parse_domain_xml_tpm(label, tpm, expected):
+    d = kh.parse_domain_xml(f"<domain><name>t</name><devices>{tpm}</devices></domain>")
+    assert d["tpm"] == expected
+
+
+@pytest.mark.parametrize("xml,hostdevs,genid", [
+    ("<devices/>", 0, None),
+    ("<devices><interface type='hostdev'><source><address type='pci' bus='0x3'/></source>"
+     "</interface><interface type='network'><source network='d'/></interface></devices>", 1, None),
+    ("<genid/><devices><hostdev mode='subsystem' type='pci'/></devices>", 1, True),
+    ("<genid>43dc0cf8-809b-4adb-9bea-a9abb5f3d90e</genid><devices/>", 0,
+     "43dc0cf8-809b-4adb-9bea-a9abb5f3d90e"),
+])
+def test_parse_domain_xml_hostdev_cards_and_genid(xml, hostdevs, genid):
+    d = kh.parse_domain_xml(f"<domain><name>h</name>{xml}</domain>")
+    assert (d["hostdevs"], d["genid"]) == (hostdevs, genid)
 
 
 # --- instantanés, volumes, pools -------------------------------------------------
@@ -256,7 +315,8 @@ def test_parse_vol_xml_backing_fixture():
         "name": "kvmtest-1.qcow2", "key": "/var/lib/libvirt/images/kvmtest/kvmtest-1.qcow2",
         "path": "/var/lib/libvirt/images/kvmtest/kvmtest-1.qcow2", "format": "qcow2",
         "capacity": 67108864, "allocation": 3284992,
-        "backing": "/var/lib/libvirt/images/kvmtest/base.qcow2"}
+        "backing": "/var/lib/libvirt/images/kvmtest/base.qcow2",
+        "mode": "0644", "owner": "1000", "group": "100"}
 
 
 def test_parse_vol_xml_without_backing_and_units():
@@ -264,7 +324,8 @@ def test_parse_vol_xml_without_backing_and_units():
                          "<capacity unit='KiB'>2</capacity><allocation>10</allocation>"
                          "<target><path>/p/r.img</path></target></volume>")
     assert v == {"name": "r.img", "key": "/p/r.img", "path": "/p/r.img", "format": None,
-                 "capacity": 2048, "allocation": 10, "backing": None}
+                 "capacity": 2048, "allocation": 10, "backing": None,
+                 "mode": None, "owner": None, "group": None}
 
 
 def test_parse_pool_xml_fixture():
