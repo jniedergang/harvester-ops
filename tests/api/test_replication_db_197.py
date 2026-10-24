@@ -726,3 +726,18 @@ def test_backup_target_urls_are_stored_exactly(conn):
     url = "nfs://nas:/var/lib/backups/?backup=b-1&volume=v-1"
     db.upsert_volume(conn, PID, {"generation": 1, "vm_uid": "u1", "disk": "d1", "backup_volume_target": url})
     assert db.list_volumes(conn, PID)[0]["backup_volume_target"] == url
+
+
+
+@pytest.mark.parametrize("holder_host, alive, taken", [
+    ("here", False, True),      # processus disparu sur cet hôte : repris aussitôt
+    ("here", True, False),      # toujours là : on attend son bail
+    ("elsewhere", False, False),  # autre hôte : son PID ne veut rien dire ici
+])
+def test_take_lease_reclaims_the_lease_of_a_dead_process_on_this_host(conn, holder_host, alive, taken):
+    dead = db.owner_id("console", host=holder_host, pid=4242)
+    assert db.take_lease(conn, PID, dead, ttl=180, now=NOW, host="here") is True
+    me = db.owner_id("console", host="here", pid=5151)
+    got = db.take_lease(conn, PID, me, ttl=180, now=at(5), host="here", pid_alive=lambda pid: alive)
+    assert got is taken
+    assert db.get_lease(conn, PID)["owner"] == (me if taken else dead)

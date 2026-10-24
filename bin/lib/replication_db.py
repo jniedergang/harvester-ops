@@ -1123,16 +1123,22 @@ def _parse_owner(owner):
         return None, None
 
 
-def take_lease(conn, plan_id, owner, ttl, take_over=False, now=None):
+def take_lease(conn, plan_id, owner, ttl, take_over=False, now=None, pid_alive=None, host=None):
     """Prend (ou renouvelle) le bail d'un plan pour `ttl` secondes. Refusé
     (False) si un autre détenteur l'a renouvelé depuis moins de son `ttl`,
-    sauf `take_over`."""
+    sauf `take_over`, ou si ce détenteur était sur CET hôte et que son
+    processus n'existe plus : vu sur le banc, le suiveur relancé par la
+    console après un `kill -9` attendait les 180 s du bail de son
+    prédécesseur sans rien appliquer."""
     t = _now(now)
+    alive = pid_alive or _pid_alive
     with _tx(conn):
         r = conn.execute("SELECT * FROM leases WHERE plan_id = ?", (plan_id,)).fetchone()
         if r and r["owner"] != owner and not take_over:
             expires = rp._t(r["heartbeat"]) + timedelta(seconds=int(r["ttl_s"]))
-            if expires > rp._t(t):
+            h, pid = _parse_owner(r["owner"])
+            gone = h == (host or socket.gethostname()) and pid is not None and not alive(pid)
+            if expires > rp._t(t) and not gone:
                 return False
         conn.execute("INSERT INTO leases (plan_id, owner, heartbeat, ttl_s) VALUES (?, ?, ?, ?)"
                      " ON CONFLICT (plan_id) DO UPDATE SET owner = excluded.owner,"
