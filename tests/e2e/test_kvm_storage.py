@@ -11,6 +11,7 @@ créée depuis une image (premier disque prérempli), rôles, noms hostiles."""
 import json
 import re
 import sys
+import time
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -72,16 +73,29 @@ IMAGES = {"host": "node2", "image_pools": ["images"], "pools": ["images"], "miss
 
 FAKE_XHR = """
 window.__xhrs = [];
+window.__events = [];
 class FakeXHR {
   constructor() { this.upload = {}; this.headers = {}; this.aborted = false; window.__xhrs.push(this); }
   open(m, u) { this.method = m; this.url = u; }
   setRequestHeader(k, v) { this.headers[k] = v; }
   send(body) { this.size = body && body.size; this.name = body && body.name; }
-  abort() { this.aborted = true; if (this.onabort) this.onabort(); }
+  abort() { this.aborted = true; window.__events.push('abort'); if (this.onabort) this.onabort(); }
   _progress(loaded, total) { this.upload.onprogress({ lengthComputable: true, loaded, total }); }
+  _sent() { window.__events.push('last-byte'); if (this.upload.onload) this.upload.onload(); }
   _done(status, body) { this.status = status; this.responseText = JSON.stringify(body); this.onload(); }
 }
 window.XMLHttpRequest = FakeXHR;
+// serveur contrôlable : l'annulation par jeton est notée, et peut être
+// retenue (`__holdCancel`) jusqu'à `__releaseCancel()` pour jouer la course
+// avec le dernier octet
+const realFetch = window.fetch.bind(window);
+window.__holdCancel = false;
+window.fetch = (u, o) => {
+  if (!String(u).includes('/api/kvm/uploads/')) return realFetch(u, o);
+  window.__events.push('cancel:' + String(u));
+  if (!window.__holdCancel) return realFetch(u, o);
+  return new Promise((res) => { window.__releaseCancel = () => res(realFetch(u, o)); });
+};
 """
 
 
@@ -126,7 +140,7 @@ def install(page, state):
                 return ok(route, {"host": "node2", "pools": POOLS, "role": state["role"]})
             if path == "hosts/node2/images":
                 state.setdefault("image_gets", []).append(req.url)
-                return ok(route, dict(IMAGES, role=state["role"]))
+                return ok(route, dict(IMAGES, role=state["role"], unknown=state.get("images_unknown", [])))
             if path == "hosts/node2/links":
                 return ok(route, dict(LINKS, host="node2", role=state["role"]))
             if path == "hosts/node2/networks":
@@ -146,6 +160,8 @@ def install(page, state):
                                            "refusals": refusals, "unreadable": [UNREAD],
                                            "acknowledged_unreadable": [UNREAD] if UNREAD in acked else [], "digest": DIG}})
             mm = re.fullmatch(r"hosts/node2/pools/(.+)/delete-plan", path)
+            if mm:
+                state.setdefault("plan_times", []).append(time.monotonic())
             if mm and state.get("plan_busy"):
                 state["plan_busy"] -= 1
                 return ok(route, {"error": "node2: 2 disk surveys are already running on this host; try again in a few seconds",
@@ -165,6 +181,11 @@ def install(page, state):
                                   "plan": {"name": mm.group(1), "network": {"forward": "isolated", "bridge": "virbr9"},
                                            "refusals": ["used by web, db"], "digest": DIG}})
             return route.fallback()
+        mm = re.fullmatch(r"uploads/([0-9a-f]{32})/cancel", path)
+        if mm and m == "POST":
+            state.setdefault("upload_cancels", []).append(mm.group(1))
+            code, resp = state.get("upload_cancel", (202, {"phase": "receive", "cancel_requested": True}))
+            return ok(route, resp, code)
         body = json.loads(req.post_data or "{}")
         if not re.fullmatch(r"hosts/node2/(pools|networks|volumes|images|image-pools)(/.*)?", path):
             return route.fallback()
@@ -462,6 +483,8 @@ def test_upload_shows_receive_progress_and_cancel_keeps_nothing(ui):
     url = page.evaluate("window.__xhrs[0].url")
     q = parse_qs(urlsplit(url).query)
     assert urlsplit(url).path == "/api/kvm/hosts/node2/images/upload"
+    token = q.pop("token")[0]
+    assert re.fullmatch(r"[0-9a-f]{32}", token)
     assert q == {"pool": ["images"], "name": ["My-Image-1-.qcow2"], "sha256": ["b" * 64], "hosts": ["node9"],
                  "limit_mbps": ["200"]}
     assert page.evaluate("window.__xhrs[0].headers['Content-Type']") == "application/octet-stream"
@@ -470,7 +493,10 @@ def test_upload_shows_receive_progress_and_cancel_keeps_nothing(ui):
     expect(win.locator('[data-ks="first-line"]')).to_contain_text("Received by the console")
     expect(win.locator('[data-ks="cancel"]')).to_be_visible()
     win.locator('[data-ks="cancel"]').click()
-    assert page.evaluate("window.__xhrs[0].aborted") is True
+    page.wait_for_function("window.__xhrs[0].aborted")
+    # la console est prévenue par le jeton AVANT l'interruption de la requête
+    assert page.evaluate("window.__events") == [f"cancel:/api/kvm/uploads/{token}/cancel", "abort"]
+    assert state["upload_cancels"] == [token]
     expect(win.locator('[data-ks="msg"]')).to_contain_text("nothing was kept, nothing was sent")
     expect(win.locator('[data-ks="go"]')).to_be_enabled()
     expect(win.locator('[data-ks="cancel"]')).to_be_hidden()
@@ -490,11 +516,29 @@ def test_upload_then_send_progress_and_cancel_while_sending(ui):
     expect(win.locator('[data-ks="send-bar"]')).to_have_attribute("style", "width: 30%;")
     expect(win.locator('[data-ks="send-line"]')).to_contain_text("Upload")
     win.locator('[data-ks="cancel"]').click()
+    expect(win.locator('[data-ks="msg"]')).to_contain_text("waiting for the console")
+    token = parse_qs(urlsplit(page.evaluate("window.__xhrs[0].url")).query)["token"][0]
+    assert state["upload_cancels"] == [token] and not state.get("cancels")
+    assert page.evaluate("window.__xhrs[0].aborted") is False
+
+
+def test_cancel_while_sending_falls_back_to_the_action_when_the_token_is_gone(ui):
+    page, state, _ = ui
+    state["upload_cancel"] = (404, {"error": "no upload is receiving or sending with this token", "reason": "not-active"})
+    pane, block = open_images(page)
+    win, f = upload_window(page, block, "cirros-0.6.3.img")
+    f.locator('[data-ks="go"]').click()
+    state["streams"]["kvm000000779"] = sse_events([("progress", {"phase": "upload", "done": 30, "total": 100, "rate": 10,
+                                                                  "eta": 7, "elapsed": 3})])
+    page.evaluate("window.__xhrs[0]._sent()")
+    page.evaluate("window.__xhrs[0]._done(202, {action_id: 'kvm000000779'})")
+    expect(win.locator('[data-ks="send-bar"]')).to_have_attribute("style", "width: 30%;")
+    win.locator('[data-ks="cancel"]').click()
     for _ in range(50):
         if state.get("cancels"):
             break
         page.wait_for_timeout(100)
-    assert [(m, u.rsplit("/api/", 1)[1]) for m, u in state["cancels"]] == [("DELETE", "action/kvm000000777")]
+    assert [(m, u.rsplit("/api/", 1)[1]) for m, u in state["cancels"]] == [("DELETE", "action/kvm000000779")]
 
 
 def test_upload_success_names_the_hosts(ui):
@@ -671,3 +715,148 @@ def test_a_busy_host_preview_is_retried_by_itself(ui):
     expect(win.locator('[data-ks="plan"]')).to_contain_text("trying again by itself")
     expect(win.locator('[data-ks="free"]')).to_be_visible(timeout=10000)
     assert state["plan_busy"] == 0
+
+
+# --- revue de la tâche 6 : course après le dernier octet ----------------------------------------
+
+def _token(page):
+    return parse_qs(urlsplit(page.evaluate("window.__xhrs[0].url")).query)["token"][0]
+
+
+@pytest.mark.parametrize("end,expected,not_expected", [
+    # la console a vu l'annulation avant l'envoi : elle dit ce qu'elle a fait
+    ({"status": "cancelled", "error_summary": "cancelled before sending: nothing sent",
+      "result": {"output": {"ok": False, "kind": "cancelled"}}},
+     "Cancelled: cancelled before sending: nothing sent", "nothing was kept"),
+    # l'envoi a fini avant que l'annulation n'arrive : c'est fini, pas « annulé »
+    ({"status": "done", "result": {"output": {"ok": True, "pool": "images", "volume": "late.qcow2", "sha256": "e" * 64,
+                                               "hosts": [{"host": "node2", "ok": True}]}}},
+     "images/late.qcow2 is on node2", "Cancelled"),
+])
+def test_cancel_after_the_last_byte_shows_the_console_outcome(ui, end, expected, not_expected):
+    page, state, _ = ui
+    pane, block = open_images(page)
+    win, f = upload_window(page, block, "late.qcow2")
+    f.locator('[data-ks="go"]').click()
+    page.evaluate("window.__xhrs[0]._progress(1024, 1024)")
+    page.evaluate("window.__xhrs[0]._sent()")
+    win.locator('[data-ks="cancel"]').click()
+    msg = win.locator('[data-ks="msg"]')
+    expect(msg).to_contain_text("waiting for the console")
+    assert state["upload_cancels"] == [_token(page)]
+    # jamais d'interruption locale ni de « rien gardé » affirmé par la page
+    assert page.evaluate("window.__xhrs[0].aborted") is False
+    expect(msg).not_to_contain_text("nothing was kept")
+    state["streams"]["kvm000000780"] = sse_events([], end)
+    page.evaluate("window.__xhrs[0]._done(202, {action_id: 'kvm000000780'})")
+    expect(msg).to_contain_text(expected)
+    expect(msg).not_to_contain_text(not_expected)
+    assert not state.get("cancels")
+
+
+def test_cancel_after_the_last_byte_with_the_token_gone_cancels_the_action_after_the_202(ui):
+    page, state, _ = ui
+    state["upload_cancel"] = (404, {"error": "no upload is receiving or sending with this token", "reason": "not-active"})
+    pane, block = open_images(page)
+    win, f = upload_window(page, block, "late.qcow2")
+    f.locator('[data-ks="go"]').click()
+    page.evaluate("window.__xhrs[0]._sent()")
+    win.locator('[data-ks="cancel"]').click()
+    expect(win.locator('[data-ks="msg"]')).to_contain_text("waiting for the console")
+    assert not state.get("cancels")                            # pas encore d'identifiant
+    state["streams"]["kvm000000781"] = sse_events([("progress", {"phase": "upload", "done": 5, "total": 100})])
+    page.evaluate("window.__xhrs[0]._done(202, {action_id: 'kvm000000781'})")
+    for _ in range(50):
+        if state.get("cancels"):
+            break
+        page.wait_for_timeout(100)
+    assert [(m, u.rsplit("/api/", 1)[1]) for m, u in state["cancels"]] == [("DELETE", "action/kvm000000781")]
+    assert page.evaluate("window.__xhrs[0].aborted") is False
+
+
+def test_last_byte_leaving_while_the_cancel_is_in_flight_never_aborts(ui):
+    """Annulation cliquée pendant la réception ; le dernier octet part avant la
+    réponse de la console : la page n'interrompt plus rien et attend."""
+    page, state, _ = ui
+    pane, block = open_images(page)
+    win, f = upload_window(page, block, "race.qcow2")
+    f.locator('[data-ks="go"]').click()
+    page.evaluate("window.__xhrs[0]._progress(900, 1024)")
+    page.evaluate("window.__holdCancel = true")
+    win.locator('[data-ks="cancel"]').click()
+    page.wait_for_function("window.__events.some((e) => e.startsWith('cancel:'))")
+    page.evaluate("window.__xhrs[0]._sent()")
+    page.evaluate("window.__releaseCancel()")
+    msg = win.locator('[data-ks="msg"]')
+    expect(msg).to_contain_text("waiting for the console")
+    assert page.evaluate("window.__events")[-1] == "last-byte"
+    assert page.evaluate("window.__xhrs[0].aborted") is False
+    state["streams"]["kvm000000782"] = sse_events([], {"status": "cancelled", "error_summary": "cancelled before sending: nothing sent",
+                                                       "result": {"output": {"ok": False, "kind": "cancelled"}}})
+    page.evaluate("window.__xhrs[0]._done(202, {action_id: 'kvm000000782'})")
+    expect(msg).to_contain_text("Cancelled: cancelled before sending: nothing sent")
+
+
+def test_a_cancelled_receive_reported_by_the_console_is_shown(ui):
+    page, state, _ = ui
+    pane, block = open_images(page)
+    win, f = upload_window(page, block, "x.qcow2")
+    f.locator('[data-ks="go"]').click()
+    page.evaluate("window.__xhrs[0]._sent()")
+    win.locator('[data-ks="cancel"]').click()
+    expect(win.locator('[data-ks="msg"]')).to_contain_text("waiting for the console")
+    page.evaluate("window.__xhrs[0]._done(409, {error: 'cancelled', kind: 'cancelled', message: 'cancelled, nothing kept'})")
+    expect(win.locator('[data-ks="msg"]')).to_contain_text("nothing was kept, nothing was sent")
+    expect(win.locator('[data-ks="go"]')).to_be_enabled()
+
+
+# --- revue : nouvel essai d'un aperçu refusé (429) ----------------------------------------------
+
+def test_busy_retry_delay_doubles_with_jitter_and_a_cap(ui):
+    page, _, _ = ui
+    got = page.evaluate("""() => { const d = KVMStorage._internals.busyDelay;
+      return [d(0, () => 0), d(0, () => 1), d(1, () => 1), d(3, () => 0.5), d(10, () => 1), d(10, () => 0)]; }""")
+    assert got == [500, 1000, 2000, 6000, 20000, 10000]
+
+
+def test_a_new_preview_restarts_the_busy_retries(ui):
+    """Un aperçu relancé par l'opérateur (case changée) pendant une série de
+    refus repart du premier délai, pas du délai déjà doublé."""
+    page, state, _ = ui
+    page.evaluate("Math.random = () => 0.999999")
+    state["plan_busy"] = 3
+    state["pool_users"] = []
+    pane = open_tab(page, "kvmstorage")
+    pane.locator('tr[data-kvm-pool="off"] [data-kvm="pool-delete"]').click()
+    win = page.locator(".floating-panel", has=page.locator('.kvms-delete[data-ks-kind="pool"]'))
+    expect(win.locator('[data-ks="plan"]')).to_contain_text("trying again by itself")
+    for _ in range(60):                       # deux refus : le délai suivant serait 4 s
+        if len(state.get("plan_times", [])) >= 2:
+            break
+        page.wait_for_timeout(100)
+    assert len(state["plan_times"]) == 2
+    page.wait_for_timeout(300)
+    t_toggle = time.monotonic()
+    win.locator('[name="remove_dir"]').check()
+    expect(win.locator('[data-ks="free"]')).to_be_visible(timeout=10000)
+    # aperçu neuf (refusé une fois de plus) puis relance après ~1 s, jamais 4 s
+    assert state["plan_busy"] == 0
+    assert state["plan_times"][-1] - t_toggle < 2.5, state["plan_times"][-1] - t_toggle
+    assert len(state["plan_times"]) == 4
+
+
+# --- revue : « usage non prouvé », illisible (acceptable) ou relevé en échec --------------------
+
+@pytest.mark.parametrize("unknown,cls,tip", [
+    ([], "info", "you can acknowledge them one by one"),
+    (["domain web", "pool images"], "warn", "2 reads: timeout or I/O error"),
+])
+def test_unproven_tooltip_tells_acknowledgeable_from_failed(ui, unknown, cls, tip):
+    page, state, _ = ui
+    state["images_unknown"] = unknown
+    pane, block = open_images(page)
+    b = block.locator('tr[data-kvm-image="images/netinst.iso"] .badge', has_text="use not proven")
+    expect(b).to_have_class(re.compile(rf"\b{cls}\b"))
+    assert tip in b.get_attribute("data-tip")
+    if unknown:
+        assert "cannot be acknowledged" in b.get_attribute("data-tip")

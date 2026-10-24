@@ -704,6 +704,7 @@ ROLE_TABLE = [
     ("POST", "/api/kvm/vms/node2/web/hot/cloudinit", "operator"),
     ("POST", "/api/kvm/hosts/node2/images/upload", "operator"),
     ("POST", "/api/kvm/hosts/node2/images/fetch", "operator"),
+    ("POST", "/api/kvm/uploads/0123456789abcdef0123456789abcdef/cancel", "operator"),
     ("POST", "/api/kvm/hosts/node2/images/images/c.qcow2/verify", "operator"),
     ("DELETE", "/api/kvm/hosts/node2/images/images/c.qcow2", "admin"),
     ("POST", "/api/kvm/hosts/node2/volumes", "operator"),
@@ -788,6 +789,7 @@ MUTATIONS = [
     ('"/api/kvm/vms/<host>/<domain>/hot/<op>", methods=["POST"]', "20/minute"),
     ('"/api/kvm/hosts/<host>/images/upload", methods=["POST"]', "10/minute"),
     ('"/api/kvm/hosts/<host>/images/fetch", methods=["POST"]', "10/minute"),
+    ('"/api/kvm/uploads/<token>/cancel", methods=["POST"]', "30/minute"),
     ('"/api/kvm/hosts/<host>/images/<pool>/<volume>/verify", methods=["POST"]', "5/minute"),
     ('"/api/kvm/hosts/<host>/images/<pool>/<volume>", methods=["DELETE"]', "10/minute"),
     ('"/api/kvm/hosts/<host>/volumes", methods=["POST"]', "10/minute"),
@@ -999,11 +1001,14 @@ class _ShortStream:
 
 
 def test_upload_interrupted_body_keeps_nothing(client, upload):
+    # navigateur fermé (ou requête interrompue) : annulé, pas une erreur
     env_ = {"CONTENT_LENGTH": "1000", "wsgi.input": _ShortStream(b"x" * 400)}
     r = client.post("/api/kvm/hosts/node2/images/upload?pool=images&name=a.img",
                     environ_overrides=env_, content_type="application/octet-stream")
-    assert r.status_code == 400 and "stopped at 400 of 1000 bytes" in r.get_json()["error"]
-    assert only_run().status == "error" and staged(upload) == [] and _NoThread.started == []
+    assert r.status_code == 409 and r.get_json()["kind"] == "cancelled"
+    run = only_run()
+    assert run.status == "cancelled" and run.exit_code == 3
+    assert staged(upload) == [] and _NoThread.started == []
 
 
 def test_upload_cancelled_while_receiving(client, upload, monkeypatch):

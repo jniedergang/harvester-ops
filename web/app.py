@@ -158,8 +158,28 @@ if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import longhorn_room  # noqa: E402
 # garde anti-SSRF des téléchargements (1.99.0), dans bin/lib depuis la prochaine
-# version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même
-import url_fetch_guard as _ufg  # noqa: E402
+# version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même.
+# Chargée par son chemin (bin/lib), jamais par le chemin de recherche : une
+# copie égarée dans web/ (prioritaire, bin/lib est en fin de chemin) ne peut
+# pas la remplacer en silence. Enregistrée sous son nom : un `import
+# url_fetch_guard` ultérieur (CLI, tests) rend le même module.
+
+
+def _load_shared_module(name):
+    import importlib.util as _importlib_util
+    path = (BIN_DIR / "lib" / f"{name}.py").resolve()
+    mod = sys.modules.get(name)
+    if mod is not None and getattr(mod, "__file__", None) and \
+            Path(mod.__file__).resolve() == path:
+        return mod
+    spec = _importlib_util.spec_from_file_location(name, path)
+    mod = _importlib_util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ufg = _load_shared_module("url_fetch_guard")
 import bm_discover as _bmd  # noqa: E402
 import baremetal_disks as _bmdisks  # noqa: E402
 import cluster_decl as _cd  # noqa: E402
@@ -10307,6 +10327,10 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
         with contextlib.suppress(Exception):
             _ko.bump_generation(types.SimpleNamespace(state=state, name=host))
 
+    # vrai dès que la fermeture a oublié les vues : `after` ne refait pas le
+    # même travail (un relevé partagé de moins, une génération de moins)
+    refreshed = []
+
     def setup(run):
         # vues oubliées AVANT la fin de l'action : la page relit dès l'événement
         # `end` (vu en réel : un pool créé n'apparaissait qu'au relevé suivant)
@@ -10314,13 +10338,16 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
 
         def close_after_refresh():
             refresh_views()
+            refreshed.append(True)
             close()
         run.close = close_after_refresh
 
     def after():
         if cleanup:
             cleanup()
-        refresh_views()
+        # action qui n'a pas fermé (relais interrompu) : oublier quand même
+        if not refreshed:
+            refresh_views()
     run, err = _cli_action(cluster or f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
                            check_busy=False, capture=True, setup=setup)
     if err:
@@ -11333,6 +11360,14 @@ def api_action_cancel(run_id):
         return jsonify({"error": "forbidden", "role": current_role(), "required": need,
                         "hint": f"cancelling this action needs the '{need}' role, "
                                 f"like starting it"}), 403
+    _action_request_cancel(run)
+    return jsonify(run.to_dict())
+
+
+def _action_request_cancel(run):
+    """Demande l'arrêt d'une action (bouton du dock, ou annulation d'un
+    téléversement KVM par son jeton) : processus arrêté, ou `_cancel` posé
+    pour une action sans processus qui le consulte dans ses boucles."""
     if run.cancel_waits and run.status in ("starting", "running"):
         # v1.99.0 : l'action reste en cours (les gardes d'occupation la
         # voient encore) ; le relais range le statut que l'outil donne en
@@ -11344,7 +11379,7 @@ def api_action_cancel(run_id):
             run.proc.terminate()
             if run.kill_grace and not getattr(run, "_kill_watch", None):
                 run._kill_watch = _kill_after_grace(run)
-        return jsonify(run.to_dict())
+        return
     if run.proc and run.proc.poll() is None:
         run.proc.terminate()
         if run.kill_grace:
@@ -11358,7 +11393,6 @@ def api_action_cancel(run_id):
         # ses boucles, mais rien ne le posait : le bouton du dock ne faisait
         # rien. Elle s'arrête d'elle-même et nettoie ce qu'elle a commencé.
         run._cancel = True
-    return jsonify(run.to_dict())
 
 
 def _kill_after_grace(run, wait=None):
@@ -20521,6 +20555,15 @@ class _UploadCancelled(Exception):
     pass
 
 
+class _KvmUploadInterrupted(Exception):
+    """Corps de téléversement KVM coupé avant Content-Length (navigateur
+    fermé, requête interrompue) sans annulation demandée."""
+
+    def __init__(self, done, length):
+        super().__init__(f"the upload stopped at {done} of {length} bytes")
+        self.done, self.length = done, length
+
+
 class _BadArchive(ValueError):
     pass
 
@@ -23445,8 +23488,10 @@ def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hol
     results, failure, cancelled = [], None, False
     try:
         for h in hosts:
-            if run.status == "cancelled" or getattr(run, "_cancel", False):
+            if run.status == "cancelled" or _kvm_cancel_asked(run):
                 cancelled = True
+                if not results:
+                    _kvm_step(run, "send", "cancelled", "cancelled before sending: nothing sent")
                 break
             cmd = _kvm_base("image", "upload") + [
                 f"--host={h}", f"--pool={pool}", f"--name={name}", f"--file={path}",
@@ -23470,14 +23515,18 @@ def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hol
         Path(path).unlink(missing_ok=True)
         if hold is not None:
             hold.release()
+        _kvm_upload_forget(run)
         out = {"ok": failure is None and not cancelled, "pool": pool, "volume": name,
                "sha256": sha, "size": size, "hosts": results}
         if url:
             out["url"] = url
+        if cancelled:
+            out["kind"] = "cancelled"
         run.result = dict(run.result or {}, output=out)
         if cancelled:
             run.status, run.exit_code = "cancelled", 3
-            run.error_summary = (results[-1].get("error") if results else None) or \
+            run.error_summary = (results[-1].get("error") if results else
+                                 "cancelled before sending: nothing sent") or \
                 "cancelled: nothing more was sent"
         elif failure:
             run.status, run.exit_code = "error", 1
@@ -23505,6 +23554,30 @@ def _kvm_author(run):
     return None
 
 
+# Jeton de téléversement : tiré au hasard par la page et passé dans la requête,
+# il désigne l'action AVANT la réponse 202 (la page ne connaît pas encore son
+# identifiant pendant la réception). Valable tant que le téléversement reçoit
+# ou envoie ; oublié à la fin de l'action.
+_KVM_UPLOAD_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_KVM_UPLOAD_TOKENS = {}                 # jeton -> identifiant de l'action
+_KVM_UPLOAD_LOCK = threading.Lock()
+
+
+def _kvm_upload_forget(run):
+    tok = getattr(run, "upload_token", None)
+    if tok:
+        with _KVM_UPLOAD_LOCK:
+            if _KVM_UPLOAD_TOKENS.get(tok) == run.id:
+                del _KVM_UPLOAD_TOKENS[tok]
+
+
+def _kvm_cancel_asked(run):
+    """Annulation demandée (bouton du dock, jeton de téléversement) : une
+    action d'image attend la sortie de l'outil (`cancel_waits`), elle consulte
+    donc les deux marques."""
+    return bool(getattr(run, "_cancel", False) or getattr(run, "cancel_requested", False))
+
+
 def _kvm_image_run(host, label, hosts, pool, name, public):
     """Action suivie d'un envoi d'image, enregistrée sous le verrou des
     gestes : 409 si le même volume est déjà écrit ou supprimé sur l'un des
@@ -23520,6 +23593,9 @@ def _kvm_image_run(host, label, hosts, pool, name, public):
         run.author = current_user()
         run.required_role = required_role_for(request.path, request.method)
         run.cancel_summary = "cancelled"
+        # annuler attend la sortie de l'outil : l'action finit avec ce qu'il a
+        # défait (volume partiel supprimé), jamais avant
+        run.cancel_waits = True
         run.kvm_holds = tuple(holds)
         run.kvm_state = _state_dir()
         with ACTIONS_LOCK:
@@ -23533,6 +23609,7 @@ def _kvm_step(run, sid, status, msg=""):
 
 
 def _kvm_end(run, status, code, summary):
+    _kvm_upload_forget(run)
     run.status, run.exit_code, run.error_summary = status, code, summary
     run.ended_at = time.time()
     run.emit({"type": "status", "status": status, "exit_code": code, "ts": time.time()})
@@ -23570,6 +23647,9 @@ def api_kvm_image_upload(host):
         hosts, pool, name, sha, opts = _kvm_image_query(host, request.args)
     except _ko.OpError as e:
         return _kvm_err(e.message, 404 if e.kind == "notfound" else 400)
+    token = request.args.get("token") or None
+    if token is not None and not _KVM_UPLOAD_TOKEN_RE.match(token):
+        return _kvm_err("token: 32 lowercase hexadecimal characters")
     length = request.content_length
     if not length:
         return _kvm_err("Content-Length required", 411)
@@ -23588,13 +23668,30 @@ def api_kvm_image_upload(host):
     except _KvmNoSpace as e:
         return jsonify({"error": e.message, "reason": "no-space", "need": length,
                         "free": e.free, "reserved": e.reserved}), 507
+    if token is not None:
+        # jeton réservé avant l'action (deux téléversements ne le partagent jamais)
+        with _KVM_UPLOAD_LOCK:
+            taken = token in _KVM_UPLOAD_TOKENS
+            if not taken:
+                _KVM_UPLOAD_TOKENS[token] = None
+        if taken:
+            hold.release()
+            return _kvm_err("this upload token is already in use", 409)
     public = ["harvester-kvm", "image", "upload", f"--pool={pool}", f"--name={name}",
               f"--hosts={','.join(hosts)}"]
     run, err = _kvm_image_run(host, f"kvm:image-upload:{host}/{pool}/{name}", hosts, pool, name,
                               public)
     if err:
         hold.release()
+        if token is not None:
+            with _KVM_UPLOAD_LOCK:
+                _KVM_UPLOAD_TOKENS.pop(token, None)
         return err
+    run.upload_phase = "receive"
+    if token is not None:
+        with _KVM_UPLOAD_LOCK:
+            _KVM_UPLOAD_TOKENS[token] = run.id
+        run.upload_token = token
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     _kvm_step(run, "receive", "running", f"receiving {name} ({_vp.fmt_bytes(length)})")
@@ -23610,7 +23707,7 @@ def api_kvm_image_upload(host):
         h, done = hashlib.sha256(), 0
         with os.fdopen(fd, "wb") as f:
             while done < length:
-                if getattr(run, "_cancel", False):
+                if _kvm_cancel_asked(run):
                     raise _UploadCancelled()
                 try:
                     chunk = request.stream.read(min(KVM_UPLOAD_CHUNK, length - done))
@@ -23623,8 +23720,13 @@ def api_kvm_image_upload(host):
                 done += len(chunk)
                 hold.update(done)
                 prog.update(done)
+        # une annulation demandée (jeton, dock) prime : la page l'envoie
+        # AVANT d'interrompre la requête ; sinon, un corps coupé est une
+        # interruption du navigateur (onglet fermé, réseau), pas une erreur
+        if _kvm_cancel_asked(run):
+            raise _UploadCancelled()
         if done != length:
-            raise ValueError(f"the upload stopped at {done} of {length} bytes")
+            raise _KvmUploadInterrupted(done, length)
         got = h.hexdigest()
         _kvm_step(run, "receive", "done", f"{_vp.fmt_bytes(done)}, SHA-256 {got}")
         refusals = _kvm_check_received(path, sha, got)
@@ -23636,12 +23738,20 @@ def api_kvm_image_upload(host):
             _kvm_end(run, "error", 2, refusals[0][:300])
             return jsonify({"error": refusals[0], "refusals": refusals, "kind": "refused",
                             "action_id": run.id}), 422
-    except _UploadCancelled:
+    except (_UploadCancelled, _KvmUploadInterrupted) as e:
         Path(path).unlink(missing_ok=True)
         hold.release()
-        _kvm_step(run, "receive", "error", "cancelled, nothing kept")
-        _kvm_end(run, "cancelled", 3, "cancelled, nothing kept")
-        return jsonify({"error": "cancelled", "action_id": run.id}), 409
+        if isinstance(e, _KvmUploadInterrupted):
+            msg = "interrupted by the browser, nothing kept"
+            _kvm_step(run, "receive", "skipped", msg)
+            log.info("kvm upload %s interrupted at %d of %d bytes", run.id, e.done, e.length)
+        else:
+            msg = "cancelled, nothing kept"
+            _kvm_step(run, "receive", "cancelled", msg)
+        run.result = {"output": {"ok": False, "kind": "cancelled", "error": msg}}
+        _kvm_end(run, "cancelled", 3, msg)
+        return jsonify({"error": "cancelled", "kind": "cancelled", "message": msg,
+                        "action_id": run.id}), 409
     except _KvmNoSpace as e:                       # le disque s'est rempli pendant la réception
         Path(path).unlink(missing_ok=True)
         hold.release()
@@ -23656,10 +23766,39 @@ def api_kvm_image_upload(host):
         _kvm_end(run, "error", 1, msg)
         return jsonify({"error": msg, "action_id": run.id}), 400
 
+    run.upload_phase = "send"
+
     def work():
         _kvm_send_image(run, path, got, length, hosts, pool, name, opts, hold=hold)
     threading.Thread(target=work, daemon=True, name=f"kvm-upload-{run.id}").start()
     return _kvm_accepted(run, host=host, hosts=hosts, pool=pool, volume=name, sha256=got)
+
+
+@app.route("/api/kvm/uploads/<token>/cancel", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_kvm_upload_cancel(token):
+    """Annule un téléversement par le jeton que la page a passé dans sa
+    requête : pendant la réception (la page ne connaît pas encore l'action)
+    comme pendant l'envoi aux hôtes. Même personne que celle qui téléverse ;
+    valable tant que le téléversement reçoit ou envoie. L'action finit
+    `cancelled` avec ce qui a été défait, ou `done` si l'envoi a fini avant."""
+    if not _KVM_UPLOAD_TOKEN_RE.match(token):
+        return _kvm_err("token: 32 lowercase hexadecimal characters")
+    with _KVM_UPLOAD_LOCK:
+        rid = _KVM_UPLOAD_TOKENS.get(token)
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(rid) if rid else None
+    if run is None or run.status not in ("starting", "running"):
+        return jsonify({"error": "no upload is receiving or sending with this token",
+                        "reason": "not-active"}), 404
+    if (getattr(run, "author", None) or "") != (current_user() or ""):
+        return jsonify({"error": "this upload was started by someone else",
+                        "reason": "not-yours"}), 403
+    phase = getattr(run, "upload_phase", "receive")
+    _action_request_cancel(run)
+    return jsonify({"action_id": run.id, "phase": phase, "status": run.status,
+                    "cancel_requested": True}), 202
 
 
 @app.route("/api/kvm/hosts/<host>/images/fetch", methods=["POST"])
@@ -23719,11 +23858,11 @@ def api_kvm_image_fetch(host):
             prog["p"].update(done)
         try:
             path, size, got = _kvm_fetch_download(url, staging, allow, max_bytes, min_free,
-                                                  progress, lambda: getattr(run, "_cancel", False),
+                                                  progress, lambda: _kvm_cancel_asked(run),
                                                   hold=hold)
         except _UploadCancelled:
             hold.release()
-            _kvm_step(run, "download", "error", "cancelled: nothing was sent to the host")
+            _kvm_step(run, "download", "cancelled", "cancelled: nothing was sent to the host")
             return _kvm_end(run, "cancelled", 3, "cancelled: nothing was sent to the host")
         except _KvmFetchRefused as e:
             hold.release()

@@ -539,6 +539,7 @@ def test_run_stream_bytes_progress_and_fresh_connection(state, work):
                  progress=seen.append)
     assert out.read_bytes() == Path(src).read_bytes()
     assert seen[-1] == 9 << 20 and seen == sorted(seen)
+    assert seen[0] == 0                      # la mesure de débit part du début du flux
     argv = pop.argv[0]
     assert "ControlMaster=no" in argv and "ControlPath=none" in argv
     assert "ControlMaster=auto" not in argv and "LogLevel=ERROR" in argv
@@ -550,8 +551,36 @@ def test_run_stream_rate_limit(state, work):
     t0 = time.monotonic()
     h.run_stream(["sh", "-c", "cat > /dev/null"], src, size=2 << 20, limit_bps=1 << 20)
     elapsed = time.monotonic() - t0
-    # 2 Mio à 1 Mio/s : la dernière seconde part sans attente, d'où ~1 s au moins
-    assert 0.8 <= elapsed <= 2.4, elapsed
+    # 2 Mio à 1 Mio/s : seul le premier morceau part sans attendre
+    assert 1.8 <= elapsed <= 3.0, elapsed
+
+
+@pytest.mark.parametrize("size,delay", [(4 << 20, 1.5), (3 << 20, 1.0)])
+def test_run_stream_rate_limit_ignores_time_before_the_reader(state, work, size, delay):
+    """Le temps passé avant que ssh lise (échange de clés) n'est pas rendu
+    en rafale : une fois la lecture commencée, le débit reste plafonné
+    (crédit borné à STREAM_BURST_S). Mesuré depuis le début de la lecture :
+    depuis l'appel, l'ancien seau sans plafond tenait aussi la durée totale."""
+    src = raw_file(work / "src", size)
+    mark = work / "reader-start"
+    h = kh.VirshHost(DECL, state, popen=LocalPopen())
+    h.run_stream(["sh", "-c", f'sleep {delay}; date +%s.%N > "$1"; cat >/dev/null', "sh", str(mark)],
+                 src, size=size, limit_bps=1 << 20)
+    after_read = time.time() - float(mark.read_text())
+    # tout sauf le tuyau (64 Kio) et le crédit borné (0,25 s) part à 1 Mio/s
+    floor = (size - (64 << 10)) / (1 << 20) - kh.STREAM_BURST_S - 0.15
+    assert after_read >= floor, (after_read, floor)
+    if size == 4 << 20:
+        assert after_read >= 3.6, after_read
+
+
+def test_run_stream_rate_limit_tiny_rate_still_moves(state, work):
+    """Débit minuscule : le crédit couvre au moins un octet (jamais bloqué)."""
+    src = raw_file(work / "src", 6)
+    h = kh.VirshHost(DECL, state, popen=LocalPopen())
+    t0 = time.monotonic()
+    h.run_stream(["sh", "-c", "cat > /dev/null"], src, size=6, limit_bps=4)
+    assert 1.0 <= time.monotonic() - t0 <= 3.5
 
 
 def test_run_stream_remote_stops_reading_is_classified(state, work):

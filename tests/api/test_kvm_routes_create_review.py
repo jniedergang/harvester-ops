@@ -184,7 +184,26 @@ def test_release_gate_the_kvm_fetch_uses_the_shared_guard_only():
     assert "_kvm_load_fetch_guard" not in SRC
 
 
-def _package_gate(tmp_path, guard, fallback):
+def test_a_stray_web_copy_of_the_guard_never_shadows_bin_lib(tmp_path):
+    """Une copie de url_fetch_guard placée avant bin/lib dans le chemin de
+    recherche (web/ l'est toujours) n'est pas celle que charge la console."""
+    stray = tmp_path / "stray"
+    stray.mkdir()
+    (stray / "url_fetch_guard.py").write_text("STRAY = True\n")
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); sys.path.insert(0, sys.argv[2]); "
+            "import app; import url_fetch_guard as u; "
+            "print(app._ufg.__file__); print(u is app._ufg); print(hasattr(app._ufg, 'STRAY'))")
+    env = dict(os.environ, HARVESTER_OPS_CONFIG=str(tmp_path / "none.yaml"),
+               HARVESTER_OPS_BIN=str(ROOT / "bin"), HARVESTER_OPS_LOG_DIR=str(tmp_path))
+    r = subprocess.run([sys.executable, "-c", code, str(stray), str(ROOT / "web")],
+                       capture_output=True, text=True, env=env, timeout=120, cwd=str(tmp_path))
+    assert r.returncode == 0, r.stderr[-2000:]
+    path, same, is_stray = r.stdout.strip().splitlines()[-3:]
+    assert Path(path).resolve() == (ROOT / "bin" / "lib" / "url_fetch_guard.py").resolve()
+    assert same == "True" and is_stray == "False"
+
+
+def _package_gate(tmp_path, guard, fallback, stray=False):
     d = tmp_path / "pkg"
     (d / "web").mkdir(parents=True)
     (d / "bin" / "lib").mkdir(parents=True)
@@ -195,6 +214,8 @@ def _package_gate(tmp_path, guard, fallback):
                                                 else "# rien\n")
     if guard:
         (d / "bin" / "lib" / "url_fetch_guard.py").write_text("")
+    if stray:                                  # copie égarée à l'ancien emplacement
+        (d / "web" / "url_fetch_guard.py").write_text("")
     bindir = tmp_path / "bin"                  # ni podman ni docker : rien ne se construit
     bindir.mkdir(exist_ok=True)
     for tool in ("cat", "dirname", "grep"):
@@ -205,12 +226,13 @@ def _package_gate(tmp_path, guard, fallback):
                           env={"PATH": str(bindir)}, timeout=30)
 
 
-@pytest.mark.parametrize("guard,fallback,refused", [
-    (True, "app", True), (True, "cli", True), (True, None, False), (False, None, True)])
+@pytest.mark.parametrize("guard,fallback,stray,refused", [
+    (True, "app", False, True), (True, "cli", False, True), (True, None, False, False),
+    (False, None, False, True), (True, None, True, True)])
 def test_package_refuses_a_release_without_the_shared_guard_or_with_the_fallback(
-        tmp_path, guard, fallback, refused):
+        tmp_path, guard, fallback, stray, refused):
     # sans podman ni docker, le script s'arrête de toute façon plus loin : rien ne se construit
-    r = _package_gate(tmp_path, guard, fallback)
+    r = _package_gate(tmp_path, guard, fallback, stray)
     assert r.returncode == 1
     assert ("KVM fetch must use" in r.stderr) is refused, r.stderr
 

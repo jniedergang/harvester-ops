@@ -17,9 +17,11 @@ cd "$SCRIPT_DIR"
 # Garde de livraison (téléchargement d'images KVM) : la route KVM et la CLI
 # passent par la garde partagée anti-SSRF (bin/lib/url_fetch_guard.py, 1.99.0)
 # et par elle seule. Le repli d'avant la fusion (REPLI-AVANT-1.99) ne doit pas
-# revenir : refuser de construire s'il réapparaît.
-if grep -qs 'REPLI-AVANT-1.99' web/app.py bin/harvester-kvm.py || [[ ! -f bin/lib/url_fetch_guard.py ]]; then
-    printf ' ✗  %s\n' "the KVM fetch must use bin/lib/url_fetch_guard.py only (missing guard or REPLI-AVANT-1.99 fallback back in web/app.py or bin/harvester-kvm.py)" >&2
+# revenir, ni une copie de la garde dans web/ (l'ancien emplacement) : refuser
+# de construire si l'un ou l'autre réapparaît.
+if grep -qs 'REPLI-AVANT-1.99' web/app.py bin/harvester-kvm.py || [[ ! -f bin/lib/url_fetch_guard.py ]] \
+        || [[ -e web/url_fetch_guard.py ]]; then
+    printf ' ✗  %s\n' "the KVM fetch must use bin/lib/url_fetch_guard.py only (missing guard, stray web/url_fetch_guard.py copy, or REPLI-AVANT-1.99 fallback back in web/app.py or bin/harvester-kvm.py)" >&2
     exit 1
 fi
 

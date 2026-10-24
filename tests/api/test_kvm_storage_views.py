@@ -63,3 +63,29 @@ def test_an_image_send_forgets_the_views_before_it_ends(client, upload, order):
     first_close = order.index("close")
     assert order[:first_close] == ["invalidate", "bump"], order
     assert staged(upload) == []
+
+
+@pytest.mark.parametrize("closes,raises", [(True, False), (False, False), (False, True)])
+def test_views_are_forgotten_once_per_action(client, env, lib, monkeypatch, order, closes, raises):
+    """La fermeture oublie déjà les vues : `after` ne le refait pas. Un relais
+    qui n'a pas fermé (interrompu, exception) laisse `after` les oublier."""
+    def runner(run, cmd, capture=False):
+        run.status = "done"
+        if closes:
+            run.close()
+        if raises:
+            raise RuntimeError("relay stopped")
+    monkeypatch.setattr(wapp, "_vm_transfer_runner", runner)
+    kvm = []
+    monkeypatch.setattr(wapp.READ_SHARE, "invalidate",
+                        lambda scope=None, *a, **k: kvm.append(scope) if scope == wapp.KVM_SCOPE else None)
+    r = client.post("/api/kvm/hosts/node2/pools/images/start", json={})
+    assert r.status_code == 202, r.get_json()
+    del order[:], kvm[:]
+    t = _NoThread.started[-1]
+    if raises:
+        with pytest.raises(RuntimeError):
+            t.target()
+    else:
+        t.target()
+    assert kvm == [wapp.KVM_SCOPE] and order.count("bump") == 1, (kvm, order)

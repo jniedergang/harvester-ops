@@ -467,6 +467,16 @@ Réalisé (tâche 6), écarts et précisions :
 - Une image « base de N disques » ne compte que des disques : `unknown` (lecture manquée, `kvm_ops.UNKNOWN`) s'affiche « usage non prouvé ».
 - Vu en réel sur node2 et corrigé avec un test : la console oubliait ses lectures partagées APRÈS avoir fermé l'action, donc la page, qui relit à l'événement `end`, recevait l'ancienne réponse (image téléversée sans sa somme). Les actions KVM (`_kvm_action`, envoi d'image) oublient les vues et avancent la génération des relevés avant de se fermer.
 
+Revue de la tâche 6, corrections :
+
+- Annuler un téléversement pendant la réception. La page tire un jeton (32 caractères hexadécimaux) passé dans la requête ; `POST /api/kvm/uploads/<jeton>/cancel` (même personne, opérateur, 30/minute) désigne l'action avant même la réponse 202, valable tant que le téléversement reçoit ou envoie (404 ensuite). La page l'appelle puis interrompt la requête. Un corps coupé sans annulation demandée (onglet fermé, réseau) finit aussi `cancelled` (code 3), étape `receive` sautée « interrupted by the browser, nothing kept » ; une annulation demandée (jeton ou dock) donne l'étape `cancelled`, jamais `error`.
+- Course après le dernier octet. Dès `xhr.upload.onload`, la page n'interrompt plus rien et n'affirme plus « rien gardé » : elle annule par le jeton (ou, jeton refusé, supprime l'action dès la 202) et montre l'issue de la console (annulé, avec ce qui a été défait, ou fini). Les actions d'image attendent la sortie de l'outil (`cancel_waits`) : une annulation pendant l'envoi finit après la suppression du volume partiel. Annulée avant le premier hôte : étape `send` annulée, « cancelled before sending: nothing sent ».
+- Plafond de débit de la CLI (`kvm_host._feed`). Seau à jetons dont le crédit est borné à 0,25 s d'envoi, horloge lancée à la première écriture réussie : le temps passé avant que ssh lise (échange de clés) n'est plus rendu en rafale. Le flux annonce aussi 0 octet au départ, la mesure de débit part de là. Vu en réel sur node2 : 100 Mio à 40 Mbit/s, 5,0 Mo/s (4,77 Mio/s) entre deux relevés, 4,7 Mio/s affichés, 4,3 Mio/s de moyenne vidage de libvirt compris (avant : 7,2 Mio/s affichés pour 20 Mio, un premier relevé à débit absurde).
+- Aperçu de suppression refusé (429) : nouvel essai après une attente qui double (1 s à 20 s), tirée entre la moitié et la totalité ; un aperçu relancé par l'opérateur repart du premier délai.
+- « Usage non prouvé » : la bulle distingue les fichiers illisibles pour le compte SSH (acceptables un par un dans l'aperçu de suppression) d'un relevé en échec (`unknown` du catalogue : délai, E/S ; jamais acceptable, badge d'avertissement).
+- La garde anti-SSRF est chargée par son chemin (`bin/lib/url_fetch_guard.py`) : une copie dans `web/` ne la remplace jamais ; `package.sh` refuse de construire si `web/url_fetch_guard.py` réapparaît.
+- Une action KVM n'oublie ses vues qu'une fois (fermeture), `after` seulement si l'action ne s'est pas fermée.
+
 ## Tâche 7 : vérification réelle, documentation, version
 
 Banc (node2, 172.16.1.12, allumé par son iLO, éteint après ; **attendre que node2 soit libéré par le banc en cours**) :

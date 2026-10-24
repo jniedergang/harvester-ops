@@ -36,11 +36,18 @@ const KVMStorage = (() => {
   const VOLUME_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,250}$/;
   const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
   const SHA_RE = /^[0-9a-fA-F]{64}$/;
-  const STEP_BADGE = { done: 'ok', ok: 'ok', running: 'info', warn: 'warn', error: 'fail', failed: 'fail', skipped: 'dim' };
+  const STEP_BADGE = { done: 'ok', ok: 'ok', running: 'info', warn: 'warn', error: 'fail', failed: 'fail', skipped: 'dim', cancelled: 'dim' };
   const NET_MODES = ['nat', 'route', 'isolated', 'bridge'];
   // aperçu refusé parce que l'hôte relit déjà ses disques (429) : nouvel essai
-  const BUSY_RETRIES = 10;
-  const BUSY_RETRY_MS = 3000;
+  // après une attente qui double à chaque refus (plafonnée), tirée entre la
+  // moitié et la totalité (plusieurs fenêtres ne relancent pas ensemble)
+  const BUSY_RETRIES = 8;
+  const BUSY_RETRY_MS = 1000;
+  const BUSY_RETRY_MAX_MS = 20000;
+  const busyDelay = (n, rand = Math.random) => {
+    const cap = Math.min(BUSY_RETRY_MAX_MS, BUSY_RETRY_MS * (2 ** n));
+    return Math.round(cap / 2 + rand() * (cap / 2));
+  };
 
   const hostBase = (host) => `/api/kvm/hosts/${enc(host)}`;
   const badge = (cls, text, tip) =>
@@ -479,8 +486,11 @@ const KVMStorage = (() => {
       </div>`;
     }
 
-    async function preview() {
+    // `retry` : relance après un 429 ; tout autre aperçu (case acceptée,
+    // répertoire retiré) repart avec un compteur de refus à zéro
+    async function preview(retry = false) {
       const seq = ++st.seq;
+      if (!retry) st.retries = 0;
       st.loading = true;
       controls();
       const q = new URLSearchParams();
@@ -492,9 +502,10 @@ const KVMStorage = (() => {
       // relevés de l'hôte déjà en cours (429, vu en réel sur node2) : nouvel
       // essai tout seul, quelques fois, le message reste affiché
       if (d.status === 429 && st.retries < BUSY_RETRIES) {
+        const wait = busyDelay(st.retries);
         st.retries += 1;
         $('plan').innerHTML = `<p class="form-hint">${esc(tr('kvms.del.busyRetry', { msg: d.error }))}</p>`;
-        setTimeout(() => { if (root.isConnected && seq === st.seq) preview(); }, BUSY_RETRY_MS);
+        setTimeout(() => { if (root.isConnected && seq === st.seq) preview(true); }, wait);
         return;
       }
       st.retries = 0;
@@ -639,7 +650,11 @@ const KVMStorage = (() => {
       return okHtml(tr('kvms.up.done', { name: `${o.pool || '?'}/${o.volume || '?'}`, hosts: (hosts.length ? hosts : [host]).join(', ') }))
         + (o.sha256 ? `<p class="kvm-path">SHA-256 ${esc(o.sha256)}</p>` : '');
     }
-    if (run.status === 'cancelled') return errHtml(tr('kvms.up.cancelledSend'));
+    if (run.status === 'cancelled') {
+      // l'issue que dit la console (rien envoyé, volume partiel défait...)
+      const why = o.error || run.error_summary;
+      return errHtml(why ? tr('kvms.up.cancelledServer', { msg: why }) : tr('kvms.up.cancelledSend'));
+    }
     const per = (o.hosts || []).filter((h) => h && h.ok === false).map((h) => `${h.host}: ${h.error || '?'}`);
     return `${errHtml(failText(run, o))}${listHtml(o.refusals)}${listHtml(per)}`;
   }
@@ -653,6 +668,15 @@ const KVMStorage = (() => {
         say(errHtml(d.error || `HTTP ${r.status}`));
       }
     } catch (e) { say(errHtml(e.message)); }
+  }
+
+  /** Jeton tiré au hasard, passé dans la requête du téléversement : il
+   *  désigne l'action côté console avant même sa réponse 202. */
+  function uploadToken() {
+    const b = new Uint8Array(16);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(b);
+    else for (let i = 0; i < b.length; i += 1) b[i] = Math.floor(Math.random() * 256);
+    return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
   }
 
   // -- Téléverser une image -------------------------------------------------------------
@@ -676,22 +700,47 @@ const KVMStorage = (() => {
     const $ = (k) => root.querySelector(`[data-ks="${k}"]`);
     const say = (html) => { $('msg').innerHTML = html; };
     $('first-label').textContent = tr('kvms.up.phaseReceive');
-    const st = { xhr: null, action: null, phase: 'idle' };
+    // `lastByte` : tout le fichier a quitté le navigateur (xhr.upload.onload) ;
+    // dès lors la page n'affirme plus rien d'elle-même, elle attend l'issue
+    // de la console. `cancelAsked` : annulation demandée, jamais deux fois.
+    const st = { xhr: null, action: null, phase: 'idle', token: null, lastByte: false, cancelAsked: false, cancelMissed: false };
     let nameTouched = false;
     f.elements.name.addEventListener('input', () => { nameTouched = true; });
     f.elements.file.addEventListener('change', () => {
       const file = f.elements.file.files[0];
       if (file && !nameTouched) f.elements.name.value = suggestName(file.name);
     });
-    const idle = () => { $('go').disabled = false; $('cancel').hidden = true; st.xhr = null; };
+    const idle = () => { $('go').disabled = false; $('cancel').hidden = true; $('cancel').disabled = false; st.xhr = null; };
 
-    $('cancel').addEventListener('click', () => {
-      if (st.phase === 'receive' && st.xhr) {
-        st.cancelled = true;
-        st.xhr.abort();
-        return;
+    // annulation par le jeton : rend vrai si la console l'a prise en compte
+    async function cancelByToken() {
+      try {
+        const r = await fetch(`/api/kvm/uploads/${enc(st.token)}/cancel`, { method: 'POST' });
+        if (r.ok) return true;
+        const d = await r.json().catch(() => ({}));
+        // 404 : plus rien ne reçoit ni n'envoie (fini, ou pas encore commencé)
+        if (r.status !== 404) say(errHtml(d.error || `HTTP ${r.status}`));
+        return false;
+      } catch { return false; }
+    }
+
+    $('cancel').addEventListener('click', async () => {
+      if (st.cancelAsked || st.phase === 'idle' || st.phase === 'done') return;
+      st.cancelAsked = true;
+      $('cancel').disabled = true;
+      if (st.phase === 'receive' && !st.lastByte) {
+        // avant le dernier octet : la console est prévenue, puis la requête
+        // est interrompue (elle voit aussi la coupure, rien n'est gardé)
+        await cancelByToken();
+        if (st.xhr && !st.lastByte) { st.cancelled = true; st.xhr.abort(); return; }
+      } else if (st.phase === 'send') {
+        if (!(await cancelByToken()) && st.action && st.phase === 'send') await cancelAction(st, say);
+      } else if (!(await cancelByToken())) {
+        // dernier octet parti, réponse pas encore là : l'action sera annulée
+        // dès que la réponse 202 donnera son identifiant
+        st.cancelMissed = true;
       }
-      if (st.phase === 'send') cancelAction(st, say);
+      if (st.phase !== 'idle' && st.phase !== 'done') say(esc(tr('kvms.up.cancelWaiting')));
     });
 
     f.addEventListener('submit', (e) => {
@@ -701,7 +750,11 @@ const KVMStorage = (() => {
       const v = readSendFields(root, f);
       const bad = checkSendFields(v);
       if (bad) { say(errHtml(bad)); return; }
-      const q = new URLSearchParams({ pool: v.pool, name: v.name });
+      st.token = uploadToken();
+      st.lastByte = false;
+      st.cancelAsked = false;
+      st.cancelMissed = false;
+      const q = new URLSearchParams({ pool: v.pool, name: v.name, token: st.token });
       if (v.sha256) q.set('sha256', v.sha256);
       if (v.hosts.length) q.set('hosts', v.hosts.join(','));
       if (v.limit_mbps) q.set('limit_mbps', String(v.limit_mbps));
@@ -731,6 +784,8 @@ const KVMStorage = (() => {
         $('first-bar').style.width = `${XferProgress.pct(snap)}%`;
         $('first-line').textContent = XferProgress.text(snap);
       };
+      // tout est parti : la suite (annulation comprise) se lit côté console
+      xhr.upload.onload = () => { st.lastByte = true; };
       xhr.onabort = () => {
         idle();
         st.phase = 'idle';
@@ -743,17 +798,19 @@ const KVMStorage = (() => {
         st.xhr = null;
         if (xhr.status === 202 && d.action_id) {
           $('first-bar').style.width = '100%';
-          say(esc(tr('kvms.up.sending', { name: v.name })));
+          say(esc(st.cancelAsked ? tr('kvms.up.cancelWaiting') : tr('kvms.up.sending', { name: v.name })));
           followSend(st, $, d.action_id, host, (ok, run, o) => {
             idle();
             say(sendResultHtml(ok, run, o, host));
             if (ok) { $('send-bar').style.width = '100%'; refreshList(); }
           });
+          // annulation demandée sans que le jeton ait pu la porter : par l'action
+          if (st.cancelMissed) { st.cancelMissed = false; cancelAction(st, say); }
           return;
         }
         idle();
         st.phase = 'idle';
-        if (st.cancelled || xhr.status === 409 && d.error === 'cancelled') { say(errHtml(tr('kvms.up.cancelledReceive'))); return; }
+        if (st.cancelled || xhr.status === 409 && d.kind === 'cancelled') { say(errHtml(tr('kvms.up.cancelledReceive'))); return; }
         // 422 : somme fausse, qcow2 à image de base... refusé AVANT tout envoi
         say(`${errHtml(d.error || `HTTP ${xhr.status}`)}${(d.refusals || []).length > 1 ? listHtml(d.refusals) : ''}`);
       };
@@ -958,7 +1015,7 @@ const KVMStorage = (() => {
 
   return { openPoolCreate, openVolumeCreate, openVolumeResize, openDelete, openUpload, openFetch,
            openImagePools, openNetworkCreate, publicUrl, atLeast,
-           _internals: { suggestName, freeSubnet, dhcpRange, cidr, overlaps } };
+           _internals: { suggestName, freeSubnet, dhcpRange, cidr, overlaps, busyDelay, uploadToken } };
 })();
 
 if (typeof window !== 'undefined') window.KVMStorage = KVMStorage;

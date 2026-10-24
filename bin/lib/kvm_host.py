@@ -371,6 +371,10 @@ STREAM_KILL_GRACE = 2.0
 STREAM_FINISH_TIMEOUT = 600
 # une seconde entre deux appels de `progress`
 STREAM_PROGRESS_EVERY = 1.0
+# débit plafonné : crédit du seau à jetons borné à ce temps d'envoi. Le temps
+# passé avant que ssh lise (échange de clés) n'est jamais rendu en rafale :
+# vu en réel, 7,2 Mio/s mesurés pour 40 Mbit/s demandés.
+STREAM_BURST_S = 0.25
 
 
 class VirshHost:
@@ -562,7 +566,16 @@ class VirshHost:
         fd = proc.stdin.fileno()
         os.set_blocking(fd, False)
         sent, broken = 0, False
-        start = last = self.clock()
+        last = self.clock()
+        # seau à jetons : horloge lancée à la première écriture réussie,
+        # crédit plafonné à STREAM_BURST_S secondes d'envoi
+        burst = max(limit_bps * STREAM_BURST_S, 1) if limit_bps else 0
+        tokens, tick = 0.0, None
+        # zéro octet au départ du flux : la mesure de débit de l'appelant part
+        # d'ici, pas de son premier rappel (vu en réel : 2,8 Mo comptés sur un
+        # temps nul, un débit absurde affiché la première seconde)
+        if progress is not None:
+            progress(0)
 
         def cancelled():
             if cancel is not None and cancel():
@@ -577,14 +590,16 @@ class VirshHost:
             view = memoryview(block)
             while view and not broken:
                 cancelled()
-                if limit_bps:
-                    ahead = sent / limit_bps - (self.clock() - start)
-                    if ahead > 0:
-                        self.sleep(min(ahead, 0.2))
-                        continue
                 piece = view[:STREAM_PIECE]
                 if limit_bps:
                     piece = view[:max(1, min(len(piece), int(limit_bps / 5) or 1))]
+                    if tick is not None:
+                        now = self.clock()
+                        tokens = min(burst, tokens + (now - tick) * limit_bps)
+                        tick = now
+                        if tokens < len(piece):
+                            self.sleep(min((len(piece) - tokens) / limit_bps, 0.2))
+                            continue
                 _, ready, _ = select.select([], [fd], [], 0.5)
                 if not ready:
                     if proc.poll() is not None:
@@ -600,6 +615,11 @@ class VirshHost:
                 sent += n
                 view = view[n:]
                 now = self.clock()
+                if limit_bps:
+                    if tick is None:
+                        tick = now          # première écriture : l'horloge part
+                    else:
+                        tokens -= n
                 if progress is not None and now - last >= STREAM_PROGRESS_EVERY:
                     last = now
                     progress(sent)

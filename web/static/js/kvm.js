@@ -788,10 +788,18 @@ const KVM = (() => {
     return `${head}<table class="data-table kvm-images"><thead><tr><th>${esc(tr('kvms.img.name'))}</th><th>${esc(tr('kvm.col.pool'))}</th>
         <th>${esc(tr('kvms.img.format'))}</th><th>${esc(tr('kvms.img.size'))}</th><th>${esc(tr('kvms.img.users'))}</th>
         <th>${esc(tr('kvms.img.checksum'))}</th><th>${esc(tr('kvms.img.origin'))}</th><th>${esc(tr('kvms.col.actions'))}</th></tr></thead><tbody>
-      ${imgs.map((i) => imageRow(i, host)).join('')}</tbody></table>`;
+      ${imgs.map((i) => imageRow(i, host, det.unknown || [])).join('')}</tbody></table>`;
   }
 
-  function imageRow(i, host) {
+  /** `failed` : lectures manquées du relevé (`unknown` du catalogue : délai
+   *  dépassé, erreur d'E/S), jamais acceptables ; sans elles, « non prouvé »
+   *  vient de fichiers illisibles pour le compte SSH, acceptables un par un
+   *  dans l'aperçu de suppression. */
+  function unprovenTip(failed) {
+    return failed.length ? tr('kvms.img.unprovenFailTip', { n: failed.length }) : tr('kvms.img.unprovenTip');
+  }
+
+  function imageRow(i, host, failed = []) {
     const key = `${i.pool}/${i.volume}`;
     // `unknown` (kvm_ops.UNKNOWN) en fin de liste : une lecture a manqué, rien
     // n'est prouvé ; ce n'est pas un disque de plus
@@ -810,7 +818,7 @@ const KVM = (() => {
       <td>${esc(i.format || '?')} ${i.iso ? badge('info', 'ISO', tr('kvms.img.isoTip')) : ''}</td><td>${esc(bytes(i.capacity))}</td>
       <td>${backers ? badge('warn', tr('kvms.img.baseOf', { n: backers }), backList.join(', ')) : ''}
         ${users ? badge('dim', tr('kvms.img.usedBy', { n: users }), (i.used_by || []).join(', ')) : ''}
-        ${unproven ? badge('info', tr('kvms.img.unproven'), tr('kvms.img.unprovenTip')) : ''}${!backers && !users && !unproven ? dim('–') : ''}</td>
+        ${unproven ? badge(failed.length ? 'warn' : 'info', tr('kvms.img.unproven'), unprovenTip(failed)) : ''}${!backers && !users && !unproven ? dim('–') : ''}</td>
       <td>${sha}</td><td>${origin ? `<span class="kvm-path tip" data-tip="${esc(origin)}">${esc(origin.length > 48 ? `${origin.slice(0, 45)}…` : origin)}</span>` : dim('–')}</td>
       <td class="kvm-row-acts">${acts}</td></tr>`;
   }
