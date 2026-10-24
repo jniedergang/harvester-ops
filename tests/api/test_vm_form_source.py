@@ -25,7 +25,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 JS = ROOT / "web" / "static" / "js"
-NEW = ["vm-form.js", "cloudinit-form.js", "kvm-form.js"]
+NEW = ["vm-form.js", "cloudinit-form.js", "kvm-form.js", "kvm-storage.js"]
 SRC = {f: (JS / f).read_text() for f in NEW + ["kvm.js", "vm-create.js", "vm-edit.js"]}
 
 sys.path.insert(0, str(ROOT / "web"))
@@ -110,7 +110,7 @@ def test_no_server_value_is_interpolated_raw_into_html(name):
 
 # --- règle générale : TOUTE interpolation d'un gabarit HTML ---------------------------
 # Portée exacte : chaque ${...} d'un gabarit littéral qui contient « < » dans
-# vm-form.js, cloudinit-form.js, kvm-form.js et kvm.js. Elle est sûre si elle
+# vm-form.js, cloudinit-form.js, kvm-form.js, kvm-storage.js et kvm.js. Elle est sûre si elle
 # est : un littéral (chaîne, nombre) ; un appel unique d'un constructeur de
 # HTML qui échappe ses entrées (BUILDERS : esc, icon, tr dans un attribut de
 # classe...) ; une liste `.map(<constructeur>).join('')` ; un gabarit imbriqué
@@ -126,14 +126,17 @@ BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item
             "existingDisksHtml", "existingNicsHtml", "renderSection",
             "VMForm.shellHtml", "VMForm.appliedBadge", "VMForm.changesHtml", "VMForm.restartBanner",
             "VMForm.reviewHtml", "TFForm.render", "CloudInitForm.renderWizard",
-            "KVMForm.menuGroupHtml")
+            "KVMForm.menuGroupHtml", "errHtml", "okHtml", "listHtml", "progressHtml", "sendFieldsHtml",
+            "poolRow", "volRow", "imageRow", "netRow")
 HTML_VARS = {
     "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
     "cloudinit-form.js": set(),
+    "kvm-storage.js": {"cls", "unread"},
     "kvm-form.js": {"attrs", "cls", "control", "dis", "existing", "extra", "hot", "list", "media", "ro",
                     "tip", "whyHtml"},
-    "kvm.js": {"bad", "body", "byState", "cls", "declare", "filters", "flags", "g", "inner",
-               "labels", "op", "open", "partly", "remove", "state", "test", "value"},
+    "kvm.js": {"acts", "bad", "body", "byState", "cls", "data", "declare", "filters", "flags", "g", "head",
+               "head(h.name)", "inner", "labels", "links", "op", "open", "partly", "remove", "sha", "state",
+               "test", "value"},
 }
 _LIT = re.compile(r"""^('([^'\\]|\\.)*'|"([^"\\]|\\.)*"|\d+(\.\d+)?)$""")
 

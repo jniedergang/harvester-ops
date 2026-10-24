@@ -5529,3 +5529,16 @@ td.fk-reason { max-width: 260px; }
 .kvmf-edit-head { padding: 4px 6px 8px; }
 .vmf-applied { white-space: nowrap; }
 .kvmf [data-disk-capacity]:empty { display: none; }
+/* prochaine version KVM, tâche 6 : Images, Stockage et Réseaux (kvm.js, kvm-storage.js) */
+.kvm-subtabs { margin: 0; }
+.kvm-block-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.kvm-row-acts { white-space: nowrap; }
+.kvm-row-acts .btn-icon-action[disabled] { opacity: 0.4; cursor: not-allowed; }
+.kvm-img-notes { margin: 0 0 6px; }
+.kvm-links { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+.kvm-links h4 { margin: 6px 0 2px; font-size: 12.5px; }
+.kvms-hosts { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.kvms-hosts legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+.kvms-progress { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.kvms-progress[hidden] { display: none; }
+.kvms-phase-head { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }

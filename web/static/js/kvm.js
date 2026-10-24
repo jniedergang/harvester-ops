@@ -10,8 +10,15 @@
  *     menu des six gestes (grisés quand l'état ne s'y prête pas, la table des
  *     refus vient du serveur, celle du script), arrêt forcé confirmé dans la
  *     page, détail dépliable.
- *   - Stockage : pools de chaque hôte et leurs volumes.
- *   - Réseaux : réseaux libvirt de chaque hôte.
+ *   - Stockage : deux sous-onglets. « Pools et volumes » : pools de chaque
+ *     hôte (créer, démarrer, arrêter, rafraîchir, autostart, supprimer) et
+ *     leurs volumes (créer, redimensionner, supprimer). « Images » : le
+ *     catalogue de chaque hôte (téléverser, télécharger depuis une URL,
+ *     vérifier, créer une VM, supprimer, pools d'images).
+ *   - Réseaux : réseaux libvirt de chaque hôte (créer, démarrer, arrêter,
+ *     autostart, supprimer), ponts et cartes de l'hôte en lecture.
+ *   Les fenêtres de ces deux vues sont dans kvm-storage.js ; les gestes
+ *   simples (démarrer, arrêter...) sont suivis dans la ligne d'état de la vue.
  *
  * Toute écriture est une action suivie que le serveur lance par
  * bin/harvester-kvm.py ; on la suit par SSEReconnect (dock, Activity) et la
@@ -140,7 +147,8 @@ const KVM = (() => {
   function start(view, host) {
     stop();
     if (!host || !VIEWS.includes(view)) return Promise.resolve();
-    cur = { view, host, data: null, details: {}, prefs: { host: '', state: '', text: '', label: '', sort: 'name', dir: 1 },
+    cur = { view, host, data: null, details: {}, pools: {}, images: {}, links: {}, openLinks: new Set(),
+            prefs: { host: '', state: '', text: '', label: '', sort: 'name', dir: 1, sub: 'pools' },
             busy: 0, open: new Set() };
     shell();
     cur.timer = setInterval(() => {
@@ -163,7 +171,11 @@ const KVM = (() => {
           ${STATE_ORDER.map((s) => `<option value="${esc(s)}">${esc(stateLabel(s))}</option>`).join('')}</select>
         <input type="search" class="res-filter tip" data-kvm-filter="text" placeholder="${esc(tr('kvm.f.text'))}" data-tip="${esc(tr('kvm.f.textTip'))}">`
       : v === 'hosts' ? `<select class="tip" data-kvm-filter="label" data-tip="${esc(tr('kvm.f.labelTip'))}"><option value="">${esc(tr('kvm.f.allLabels'))}</option></select>`
-        : '';
+        // Stockage et Réseaux : un hôte ou tous ; Stockage : pools ou images
+        : `${v === 'storage' ? `<div class="sub-tabs sub-tabs-inline kvm-subtabs" role="tablist">
+            <button type="button" class="sub-tab tip active" role="tab" data-kvm="sub" data-sub="pools" data-tip="${esc(tr('kvms.subPoolsTip'))}">${icon('storage')} <span>${esc(tr('kvms.subPools'))}</span></button>
+            <button type="button" class="sub-tab tip" role="tab" data-kvm="sub" data-sub="images" data-tip="${esc(tr('kvms.subImagesTip'))}">${icon('disk')} <span>${esc(tr('kvms.subImages'))}</span></button></div>` : ''}
+          <select class="tip" data-kvm-filter="host" data-tip="${esc(tr('kvms.hostFilterTip'))}"><option value="">${esc(tr('kvm.f.allHosts'))}</option></select>`;
     const declare = v === 'hosts' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="declare" data-tip="${esc(tr('kvm.declareTip'))}">${icon('add')} ${esc(tr('kvm.declare'))}</button>`
       // prochaine version : créer une VM (kvm-form.js), hôte choisi dans la fenêtre
       : v === 'vms' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="create-vm" data-tip="${esc(tr('kvmf.createVmTip'))}">${icon('add')} ${esc(tr('kvmf.createVm'))}</button>` : '';
@@ -181,6 +193,8 @@ const KVM = (() => {
       el.addEventListener(el.tagName === 'INPUT' ? 'input' : 'change', () => {
         cur.prefs[el.dataset.kvmFilter] = el.value;
         render();
+        // Stockage et Réseaux : seul l'hôte choisi est lu, les autres le sont au retour à « tous »
+        if (el.dataset.kvmFilter === 'host' && (cur.view === 'storage' || cur.view === 'networks')) load();
       });
     });
   }
@@ -199,12 +213,39 @@ const KVM = (() => {
     c.data = d;
     if (perHostView) {
       render();
-      const names = (d.hosts || []).filter((h) => !h.error).map((h) => h.name);
+      const names = (d.hosts || []).filter((h) => !h.error && (!c.prefs.host || h.name === c.prefs.host)).map((h) => h.name);
+      if (c.view === 'storage' && c.prefs.sub === 'images') {
+        // catalogue : relevé gardé par hôte (jusqu'à ~20 s la première fois),
+        // chaque bloc s'affiche dès que son hôte a répondu
+        await Promise.all(names.map(async (n) => {
+          const [img, pools] = await Promise.all([getJson(`/api/kvm/hosts/${enc(n)}/images${q}`),
+                                                  getJson(`/api/kvm/hosts/${enc(n)}/pools`)]);
+          if (c !== cur) return;
+          c.images[n] = img;
+          c.pools[n] = pools;
+          render();
+        }));
+        return;
+      }
       const got = await Promise.all(names.map((n) => getJson(`/api/kvm/hosts/${enc(n)}${q}`)));
       if (c !== cur) return;
       names.forEach((n, i) => { c.details[n] = got[i]; });
+      if (c.view === 'storage') {
+        // type et cible de chaque pool (absents de l'inventaire) : lecture à
+        // part, une vue sans elle reste utilisable
+        const pools = await Promise.all(names.map((n) => getJson(`/api/kvm/hosts/${enc(n)}/pools`)));
+        if (c !== cur) return;
+        names.forEach((n, i) => { c.pools[n] = pools[i]; });
+      }
+      if (c.view === 'networks') await Promise.all([...c.openLinks].filter((n) => names.includes(n)).map((n) => loadLinks(n)));
     }
     render();
+  }
+
+  async function loadLinks(name) {
+    const c = cur;
+    const d = await getJson(`/api/kvm/hosts/${enc(name)}/links`);
+    if (c === cur) c.links[name] = d;
   }
 
   const role = () => (cur && cur.data && cur.data.role) || 'viewer';
@@ -232,8 +273,9 @@ const KVM = (() => {
     const warn = (d.warnings || []).map((w) => `<p class="res-error">${icon('warn')} ${esc(w)}</p>`).join('');
     if (cur.view === 'hosts') body.innerHTML = warn + hostsHtml(d);
     else if (cur.view === 'vms') body.innerHTML = warn + vmsHtml(d);
-    else if (cur.view === 'storage') body.innerHTML = warn + perHost(d, storageHtml);
-    else body.innerHTML = warn + perHost(d, networksHtml);
+    else if (cur.view === 'storage' && cur.prefs.sub === 'images') body.innerHTML = warn + perHost(d, imagesHtml, imagesHead, cur.images);
+    else if (cur.view === 'storage') body.innerHTML = warn + perHost(d, storageHtml, storageHead);
+    else body.innerHTML = warn + perHost(d, networksHtml, networksHead);
   }
 
   const emptyHosts = () => `<p class="form-hint kvm-empty">${esc(tr('kvm.noHosts'))}</p>`;
@@ -625,58 +667,320 @@ const KVM = (() => {
   }
 
   // -- Stockage et Réseaux : un bloc par hôte ------------------------------------
-  function perHost(d, fn) {
-    const hosts = d.hosts || [];
+  /** Un bloc par hôte (filtre « un hôte ou tous »). `fn(det, name)` rend le
+   *  contenu à partir de `src[nom]` (détail de l'hôte par défaut), `head(name)`
+   *  les boutons du bloc. */
+  function perHost(d, fn, head, src) {
+    const all = d.hosts || [];
+    const sel = cur.host.querySelector('[data-kvm-filter="host"]');
+    if (sel) {
+      const names = all.map((h) => h.name);
+      const want = [''].concat(names).join('|');
+      if ([...sel.options].map((o) => o.value).join('|') !== want) {
+        sel.innerHTML = `<option value="">${esc(tr('kvm.f.allHosts'))}</option>`
+          + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+      }
+      if (!names.includes(cur.prefs.host)) cur.prefs.host = '';
+      sel.value = cur.prefs.host;
+    }
+    const hosts = all.filter((h) => !cur.prefs.host || h.name === cur.prefs.host);
     cur.host.querySelector('.res-count').textContent = tr('kvm.hostCount', { n: hosts.length });
     if (!hosts.length) return emptyHosts();
+    const from = src || cur.details;
     return hosts.map((h) => {
       let inner;
+      const det = from[h.name];
       if (h.error) inner = `<p class="res-error">${esc(h.error.message)}</p>`;
-      else {
-        const det = cur.details[h.name];
-        if (!det) inner = `<p class="form-hint">${esc(tr('common.loading'))}</p>`;
-        else if (det.error) inner = `<p class="res-error">${esc(typeof det.error === 'string' ? det.error : det.error.message)}</p>`;
-        else inner = fn(det);
-      }
+      else if (!det) inner = `<p class="form-hint">${esc(tr(src ? 'kvms.surveying' : 'common.loading'))}</p>`;
+      else if (det.error) inner = `<p class="res-error">${esc(typeof det.error === 'string' ? det.error : det.error.message)}</p>`;
+      else inner = fn(det, h.name);
       return `<section class="kvm-host-block" data-kvm-block="${esc(h.name)}">
-          <h3>${icon('node')} ${esc(h.name)} ${h.error ? errorBadge(h.error) : (cur.details[h.name] && cur.details[h.name].error && typeof cur.details[h.name].error === 'object' ? errorBadge(cur.details[h.name].error) : '')}</h3>
+          <h3>${icon('node')} ${esc(h.name)} ${h.error ? errorBadge(h.error) : (det && det.error && typeof det.error === 'object' ? errorBadge(det.error) : '')}</h3>
+          ${!h.error && head ? `<div class="kvm-block-actions">${head(h.name)}</div>` : ''}
           ${inner}</section>`;
     }).join('');
   }
 
   const pct = (a, c) => (c ? `${Math.round((a / c) * 100)} %` : '–');
 
-  function storageHtml(det) {
+  /** Bouton d'action d'un bloc ou d'une ligne : grisé avec la raison
+   *  (rôle, état) ; `attrs` : {pool, vol, net, verb, enable} posés en data-. */
+  function act(kind, label, ic, tip, why, host, attrs = {}, cls = 'btn btn-sm btn-secondary') {
+    const data = Object.entries(attrs).map(([k, v]) => ` data-${k}="${esc(v)}"`).join('');
+    return `<button type="button" class="${cls} tip" data-kvm="${esc(kind)}" data-host="${esc(host)}"${data}${why ? ' disabled' : ''}
+      data-tip="${esc(why || tip)}" aria-label="${esc(label)}">${icon(ic)}${cls.includes('btn-icon-action') ? '' : ` ${esc(label)}`}</button>`;
+  }
+  const mini = (kind, label, ic, tip, why, host, attrs) => act(kind, label, ic, tip, why, host, attrs, 'btn-icon-action');
+  const needOp = () => (canOperate() ? '' : tr('kvm.operatorOnly'));
+  const needAdmin = () => (isAdmin() ? '' : tr('kvm.adminOnly'));
+
+  function poolInfo(host, name) {
+    const d = cur.pools[host];
+    return ((d && d.pools) || []).find((p) => p.name === name) || {};
+  }
+
+  function storageHead(host) {
+    return `${act('pool-create', tr('kvms.pool.create'), 'add', tr('kvms.pool.createTip'), needAdmin(), host)}
+      ${act('vol-create', tr('kvms.vol.create'), 'disk', tr('kvms.vol.createTip'), needOp(), host)}`;
+  }
+
+  function storageHtml(det, host) {
     const pools = det.pools || [];
     if (!pools.length) return `<p class="form-hint">${esc(tr('kvm.noPools'))}</p>`;
     return `<table class="data-table kvm-pools"><thead><tr><th>${esc(tr('kvm.col.pool'))}</th><th>${esc(tr('kvm.col.state'))}</th>
-        <th>${esc(tr('kvm.col.capacity'))}</th><th>${esc(tr('kvm.col.allocation'))}</th><th>${esc(tr('kvm.col.available'))}</th>
-        <th>${esc(tr('kvm.col.volumes'))}</th></tr></thead><tbody>
-      ${pools.map((p) => `<tr data-kvm-pool="${esc(p.name)}"><td><strong>${esc(p.name)}</strong>
-          ${p.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.poolAutostartTip')) : ''}</td>
-        <td>${badge(p.state === 'running' ? 'ok' : 'dim', p.state === 'running' ? tr('kvm.active') : tr('kvm.inactive'))}</td>
-        <td>${esc(bytes(p.capacity))}</td><td>${esc(bytes(p.allocation))} ${dim(pct(p.allocation, p.capacity))}</td><td>${esc(bytes(p.available))}</td>
-        <td>${(p.volumes || []).length ? `<details><summary class="tip" data-tip="${esc(tr('kvm.volumesTip'))}">${esc(tr('kvm.volCount', { n: p.volumes.length }))}</summary>
-          <table class="data-table kvm-vols"><thead><tr><th>${esc(tr('kvm.col.volume'))}</th><th>${esc(tr('kvm.col.type'))}</th>
-            <th>${esc(tr('kvm.col.capacity'))}</th><th>${esc(tr('kvm.col.allocation'))}</th></tr></thead><tbody>
-            ${p.volumes.map((x) => `<tr><td><span class="tip" data-tip="${esc(x.path || '')}">${esc(x.name)}</span></td><td>${esc(x.type || '')}</td>
-              <td>${esc(bytes(x.capacity))}</td><td>${esc(bytes(x.allocation))}</td></tr>`).join('')}</tbody></table></details>`
-    : dim(p.state === 'running' ? tr('kvm.volCount', { n: 0 }) : tr('kvm.poolInactive'))}</td></tr>`).join('')}
+        <th>${esc(tr('kvms.col.type'))}</th><th>${esc(tr('kvm.col.capacity'))}</th><th>${esc(tr('kvm.col.allocation'))}</th><th>${esc(tr('kvm.col.available'))}</th>
+        <th>${esc(tr('kvm.col.volumes'))}</th><th>${esc(tr('kvms.col.actions'))}</th></tr></thead><tbody>
+      ${pools.map((p) => poolRow(p, host)).join('')}
       </tbody></table>`;
   }
 
-  function networksHtml(det) {
+  function poolRow(p, host) {
+    const info = poolInfo(host, p.name);
+    const running = p.state === 'running';
+    const a = { pool: p.name };
+    const acts = [running
+      ? mini('pool-verb', tr('kvms.stop'), 'stop', tr('kvms.pool.stopTip'), needAdmin(), host, { ...a, verb: 'stop' })
+      : mini('pool-verb', tr('kvms.start'), 'play', tr('kvms.pool.startTip'), needAdmin(), host, { ...a, verb: 'start' }),
+    mini('pool-verb', tr('kvms.refresh'), 'refresh', tr('kvms.pool.refreshTip'), needOp() || (running ? '' : tr('kvms.pool.needRunning')), host, { ...a, verb: 'refresh' }),
+    mini('pool-verb', p.autostart ? tr('kvms.autostartOff') : tr('kvms.autostartOn'), 'power',
+      p.autostart ? tr('kvms.pool.autostartOffTip') : tr('kvms.pool.autostartOnTip'), needAdmin(), host, { ...a, verb: 'autostart', enable: p.autostart ? '0' : '1' }),
+    mini('pool-delete', tr('kvms.delete'), 'trash', tr('kvms.pool.deleteTip'), needAdmin(), host, a)].join('');
+    return `<tr data-kvm-pool="${esc(p.name)}"><td><strong class="${info.target_path ? 'tip' : ''}"${info.target_path ? ` data-tip="${esc(info.target_path)}"` : ''}>${esc(p.name)}</strong>
+          ${p.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.poolAutostartTip')) : ''}</td>
+        <td>${badge(running ? 'ok' : 'dim', running ? tr('kvm.active') : tr('kvm.inactive'))}</td>
+        <td>${info.type ? esc(info.type) : dim('–')}</td>
+        <td>${esc(bytes(p.capacity))}</td><td>${esc(bytes(p.allocation))} ${dim(pct(p.allocation, p.capacity))}</td><td>${esc(bytes(p.available))}</td>
+        <td>${(p.volumes || []).length ? `<details><summary class="tip" data-tip="${esc(tr('kvm.volumesTip'))}">${esc(tr('kvm.volCount', { n: p.volumes.length }))}</summary>
+          <table class="data-table kvm-vols"><thead><tr><th>${esc(tr('kvm.col.volume'))}</th><th>${esc(tr('kvm.col.type'))}</th>
+            <th>${esc(tr('kvm.col.capacity'))}</th><th>${esc(tr('kvm.col.allocation'))}</th><th>${esc(tr('kvms.col.actions'))}</th></tr></thead><tbody>
+            ${p.volumes.map((x) => volRow(x, p, host)).join('')}</tbody></table></details>`
+    : dim(running ? tr('kvm.volCount', { n: 0 }) : tr('kvm.poolInactive'))}</td>
+        <td class="kvm-row-acts">${acts}</td></tr>`;
+  }
+
+  function volRow(x, p, host) {
+    // le répertoire d'un pool imbriqué n'est pas un disque : aucune action
+    const acts = x.type === 'dir' ? dim(tr('kvms.vol.dir'))
+      : [mini('vol-resize', tr('kvms.resize.go'), 'edit', tr('kvms.vol.resizeTip'), needOp(), host, { pool: p.name, vol: x.name }),
+        mini('vol-delete', tr('kvms.delete'), 'trash', tr('kvms.vol.deleteTip'), needAdmin(), host, { pool: p.name, vol: x.name })].join('');
+    return `<tr data-kvm-vol="${esc(x.name)}"><td><span class="tip" data-tip="${esc(x.path || '')}">${esc(x.name)}</span></td><td>${esc(x.type || '')}</td>
+      <td>${esc(bytes(x.capacity))}</td><td>${esc(bytes(x.allocation))}</td><td class="kvm-row-acts">${acts}</td></tr>`;
+  }
+
+  // -- Images ---------------------------------------------------------------------------
+  function imagesHead(host) {
+    const det = cur.images[host];
+    const ready = det && !det.error ? '' : tr('kvms.img.waitSurvey');
+    return `${act('img-upload', tr('kvms.up.open'), 'upload', tr('kvms.up.openTip'), needOp() || ready, host)}
+      ${act('img-fetch', tr('kvms.dl.open'), 'download', tr('kvms.dl.openTip'), needOp() || ready, host)}
+      ${act('img-pools', tr('kvms.ip.open'), 'storage', tr('kvms.ip.openTip'), needAdmin() || ready, host)}`;
+  }
+
+  function imagesHtml(det, host) {
+    const imgs = det.images || [];
+    const notes = [];
+    if ((det.image_pools || []).length) notes.push(tr('kvms.img.fromPools', { pools: det.image_pools.join(', ') }));
+    else notes.push(tr('kvms.img.fromFree'));
+    if ((det.missing_pools || []).length) notes.push(tr('kvms.img.missing', { pools: det.missing_pools.join(', ') }));
+    if ((det.unknown || []).length) notes.push(tr('kvms.img.unknown', { n: det.unknown.length }));
+    const head = `<p class="form-hint kvm-img-notes">${esc(notes.join(' · '))}</p>`;
+    if (!imgs.length) return `${head}<p class="form-hint">${esc(tr('kvms.img.none'))}</p>`;
+    return `${head}<table class="data-table kvm-images"><thead><tr><th>${esc(tr('kvms.img.name'))}</th><th>${esc(tr('kvm.col.pool'))}</th>
+        <th>${esc(tr('kvms.img.format'))}</th><th>${esc(tr('kvms.img.size'))}</th><th>${esc(tr('kvms.img.users'))}</th>
+        <th>${esc(tr('kvms.img.checksum'))}</th><th>${esc(tr('kvms.img.origin'))}</th><th>${esc(tr('kvms.col.actions'))}</th></tr></thead><tbody>
+      ${imgs.map((i) => imageRow(i, host)).join('')}</tbody></table>`;
+  }
+
+  function imageRow(i, host) {
+    const key = `${i.pool}/${i.volume}`;
+    // `unknown` (kvm_ops.UNKNOWN) en fin de liste : une lecture a manqué, rien
+    // n'est prouvé ; ce n'est pas un disque de plus
+    const backList = (i.backing_users || []).filter((x) => x !== 'unknown');
+    const unproven = (i.backing_users || []).includes('unknown');
+    const backers = backList.length;
+    const users = (i.used_by || []).length;
+    const sha = i.sha256 ? `<code class="tip" data-tip="${esc(tr('kvms.img.shaTip', { sha: i.sha256, date: i.date || '?', author: i.author || '?' }))}">${esc(i.sha256.slice(0, 12))}…</code>`
+      : dim(tr('kvms.img.noSha'));
+    const origin = window.KVMStorage ? KVMStorage.publicUrl(i.url || '') : '';
+    const a = { pool: i.pool, vol: i.volume };
+    const acts = [mini('img-verify', tr('kvms.img.verify'), 'refresh', tr('kvms.img.verifyTip'), needOp(), host, a),
+      mini('img-create-vm', tr('kvms.img.createVm'), 'vm', tr('kvms.img.createVmTip'), needOp() || (window.KVMForm ? '' : tr('kvm.operatorOnly')), host, a),
+      mini('img-delete', tr('kvms.delete'), 'trash', backers ? tr('kvms.img.deleteBaseTip', { n: backers }) : tr('kvms.img.deleteTip'), needAdmin(), host, a)].join('');
+    return `<tr data-kvm-image="${esc(key)}"><td><span class="tip" data-tip="${esc(i.path || '')}">${esc(i.volume)}</span></td><td>${esc(i.pool)}</td>
+      <td>${esc(i.format || '?')} ${i.iso ? badge('info', 'ISO', tr('kvms.img.isoTip')) : ''}</td><td>${esc(bytes(i.capacity))}</td>
+      <td>${backers ? badge('warn', tr('kvms.img.baseOf', { n: backers }), backList.join(', ')) : ''}
+        ${users ? badge('dim', tr('kvms.img.usedBy', { n: users }), (i.used_by || []).join(', ')) : ''}
+        ${unproven ? badge('info', tr('kvms.img.unproven'), tr('kvms.img.unprovenTip')) : ''}${!backers && !users && !unproven ? dim('–') : ''}</td>
+      <td>${sha}</td><td>${origin ? `<span class="kvm-path tip" data-tip="${esc(origin)}">${esc(origin.length > 48 ? `${origin.slice(0, 45)}…` : origin)}</span>` : dim('–')}</td>
+      <td class="kvm-row-acts">${acts}</td></tr>`;
+  }
+
+  // -- Réseaux --------------------------------------------------------------------------
+  function networksHead(host) {
+    const open = cur.openLinks.has(host);
+    return `${act('net-create', tr('kvms.net.create'), 'add', tr('kvms.net.createTip'), needAdmin(), host)}
+      ${act('net-links', open ? tr('kvms.links.hide') : tr('kvms.links.show'), 'network', tr('kvms.links.tip'), '', host)}`;
+  }
+
+  function networksHtml(det, host) {
     const nets = det.networks || [];
-    if (!nets.length) return `<p class="form-hint">${esc(tr('kvm.noNetworks'))}</p>`;
+    const links = cur.openLinks.has(host) ? linksHtml(host) : '';
+    if (!nets.length) return `<p class="form-hint">${esc(tr('kvm.noNetworks'))}</p>${links}`;
     return `<table class="data-table kvm-nets"><thead><tr><th>${esc(tr('kvm.col.network'))}</th><th>${esc(tr('kvm.col.state'))}</th>
-        <th>${esc(tr('kvm.col.forward'))}</th><th>${esc(tr('kvm.col.bridge'))}</th><th>${esc(tr('kvm.col.ips'))}</th><th>${esc(tr('kvm.col.flags'))}</th></tr></thead><tbody>
-      ${nets.map((n) => `<tr data-kvm-net="${esc(n.name)}"><td><strong>${esc(n.name)}</strong></td>
+        <th>${esc(tr('kvm.col.forward'))}</th><th>${esc(tr('kvm.col.bridge'))}</th><th>${esc(tr('kvm.col.ips'))}</th><th>${esc(tr('kvm.col.flags'))}</th>
+        <th>${esc(tr('kvms.col.actions'))}</th></tr></thead><tbody>
+      ${nets.map((n) => netRow(n, host)).join('')}
+      </tbody></table>${links}`;
+  }
+
+  function netRow(n, host) {
+    const a = { net: n.name };
+    const acts = [n.active
+      ? mini('net-verb', tr('kvms.stop'), 'stop', tr('kvms.net.stopTip'), needAdmin(), host, { ...a, verb: 'stop' })
+      : mini('net-verb', tr('kvms.start'), 'play', tr('kvms.net.startTip'), needAdmin(), host, { ...a, verb: 'start' }),
+    mini('net-verb', n.autostart ? tr('kvms.autostartOff') : tr('kvms.autostartOn'), 'power',
+      n.autostart ? tr('kvms.net.autostartOffTip') : tr('kvms.net.autostartOnTip'), needAdmin() || (n.persistent === false ? tr('kvms.net.transient') : ''), host,
+      { ...a, verb: 'autostart', enable: n.autostart ? '0' : '1' }),
+    mini('net-delete', tr('kvms.delete'), 'trash', tr('kvms.net.deleteTip'), needAdmin(), host, a)].join('');
+    return `<tr data-kvm-net="${esc(n.name)}"><td><strong>${esc(n.name)}</strong></td>
         <td>${badge(n.active ? 'ok' : 'dim', n.active ? tr('kvm.active') : tr('kvm.inactive'))}</td>
         <td>${esc(n.forward || '–')}</td><td>${esc(n.bridge || '–')}</td>
         <td>${(n.ips || []).map((ip) => `${esc(ip.address || '')}${ip.prefix != null ? `/${esc(ip.prefix)}` : ''}${(ip.dhcp_ranges || []).length
     ? ` ${dim(tr('kvm.dhcp', { start: ip.dhcp_ranges[0].start, end: ip.dhcp_ranges[0].end }))}` : ''}`).join('<br>') || '–'}</td>
-        <td>${n.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.netAutostartTip')) : ''} ${n.persistent ? '' : badge('info', tr('kvm.transient'), tr('kvm.transientNetTip'))}</td></tr>`).join('')}
-      </tbody></table>`;
+        <td>${n.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.netAutostartTip')) : ''} ${n.persistent ? '' : badge('info', tr('kvm.transient'), tr('kvm.transientNetTip'))}</td>
+        <td class="kvm-row-acts">${acts}</td></tr>`;
+  }
+
+  /** Ponts et cartes physiques de l'hôte (lecture, `ip -j`). */
+  function linksHtml(host) {
+    const d = cur.links[host];
+    if (!d) return `<div class="kvm-links"><p class="form-hint">${esc(tr('common.loading'))}</p></div>`;
+    if (d.error) return `<div class="kvm-links"><p class="res-error">${esc(d.error)}</p></div>`;
+    return `<div class="kvm-links" data-kvm-links="${esc(host)}"><h4>${esc(tr('kvms.links.bridges'))}</h4>
+      ${(d.bridges || []).length ? `<ul class="kvm-op-list">${d.bridges.map((b) => `<li><strong>${esc(b.name)}</strong> ${dim(b.state || '?')}</li>`).join('')}</ul>` : dim(tr('kvms.links.none'))}
+      <h4>${esc(tr('kvms.links.cards'))}</h4>
+      ${(d.physical || []).length ? `<ul class="kvm-op-list">${d.physical.map((c) => `<li><strong>${esc(c.name)}</strong> ${dim(c.state || '?')} ${c.master ? dim(tr('kvms.links.inBridge', { bridge: c.master })) : ''}</li>`).join('')}</ul>` : dim(tr('kvms.links.none'))}
+      <h4>${esc(tr('kvms.links.networks'))}</h4>
+      ${(d.networks || []).length ? `<ul class="kvm-op-list">${d.networks.map((x) => `<li><code>${esc(x.network)}</code> ${dim(`${x.source || ''} ${x.dev || ''}`)}</li>`).join('')}</ul>` : dim(tr('kvms.links.none'))}</div>`;
+  }
+
+  // -- gestes simples sur un pool ou un réseau ---------------------------------------------
+  const VERB_LABEL = {
+    start: () => tr('kvms.start'), stop: () => tr('kvms.stop'), refresh: () => tr('kvms.refresh'),
+    autostart: () => tr('kvms.autostart'),
+  };
+
+  /** Arrêter un pool ou un réseau sert à toutes les VMs de l'hôte : confirmé
+   *  dans la page. Les autres gestes partent tout de suite. */
+  function askObject(kind, host, name, verb, enable) {
+    if (verb !== 'stop') { objectGesture(kind, host, name, verb, enable); return; }
+    const fb = cur.host.querySelector('[data-kvm="feedback"]');
+    cur.busy += 1;
+    cur.pendingObj = { kind, host, name, verb };
+    const text = kind === 'pool' ? tr('kvms.pool.stopConfirm', { name, host }) : tr('kvms.net.stopConfirm', { name, host });
+    fb.innerHTML = `<div class="bkg-confirm kvm-confirm" role="group" aria-label="${esc(text)}">
+        <span>${icon('warn')} ${esc(text)}</span>
+        <button type="button" class="btn btn-sm btn-danger tip" data-kvm="obj-yes" data-tip="${esc(tr('kvms.stopYesTip'))}">${icon('stop')} ${esc(tr('kvms.stop'))}</button>
+        <button type="button" class="btn btn-sm btn-secondary tip" data-kvm="confirm-no" data-tip="${esc(tr('kvm.confirmNoTip'))}">${esc(tr('kvm.confirmNo'))}</button></div>`;
+    fb.querySelector('[data-kvm="confirm-no"]').focus();
+  }
+
+  async function objectGesture(kind, host, name, verb, enable) {
+    const fb = cur.host.querySelector('[data-kvm="feedback"]');
+    const label = VERB_LABEL[verb] ? VERB_LABEL[verb]() : verb;
+    fb.textContent = tr('kvms.sending', { verb: label, name });
+    const c = cur;
+    c.busy += 1;
+    const url = `/api/kvm/hosts/${enc(host)}/${kind === 'pool' ? 'pools' : 'networks'}/${enc(name)}/${enc(verb)}`;
+    try {
+      const out = await send('POST', url, verb === 'autostart' ? { enable: !!enable } : {});
+      follow(out.action_id, (s) => { if (s.message && cur === c) fb.textContent = s.message; }, (ok, run) => {
+        c.busy = Math.max(0, c.busy - 1);
+        if (c !== cur) return;
+        const o = (run.result && run.result.output) || {};
+        if (ok) fb.innerHTML = `<span>${icon('ok')} ${esc(tr('kvms.verbDone', { verb: label, name }))}</span>`;
+        else {
+          fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(o.error || run.error_summary || '?')}</span>${
+            (o.refusals || []).length ? `<ul class="kvm-op-list">${o.refusals.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}`;
+        }
+        load(true);
+      });
+    } catch (e) {
+      c.busy = Math.max(0, c.busy - 1);
+      fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
+    }
+  }
+
+  async function verifyImage(host, pool, vol) {
+    const fb = cur.host.querySelector('[data-kvm="feedback"]');
+    fb.textContent = tr('kvms.img.verifying', { name: `${pool}/${vol}` });
+    const c = cur;
+    c.busy += 1;
+    try {
+      const out = await send('POST', `/api/kvm/hosts/${enc(host)}/images/${enc(pool)}/${enc(vol)}/verify`, {});
+      follow(out.action_id, (s) => { if (s.message && cur === c) fb.textContent = s.message; }, (ok, run) => {
+        c.busy = Math.max(0, c.busy - 1);
+        if (c !== cur) return;
+        const o = (run.result && run.result.output) || {};
+        let text;
+        if (!ok) text = o.error || run.error_summary || '?';
+        else if (o.skipped) text = tr('kvms.img.verifySkipped', { name: `${pool}/${vol}`, why: o.skipped });
+        else if (o.match === false) text = tr('kvms.img.verifyMismatch', { name: `${pool}/${vol}`, sha: o.sha256 || '?' });
+        else if (o.match === true) text = tr('kvms.img.verifyOk', { name: `${pool}/${vol}`, sha: o.sha256 || '?' });
+        else text = tr('kvms.img.verifyNoRef', { name: `${pool}/${vol}`, sha: o.sha256 || '?' });
+        const good = ok && o.match !== false;
+        fb.innerHTML = `<span class="${good ? '' : 'res-error'}">${icon(good ? 'ok' : 'fail')} ${esc(text)}</span>`;
+      });
+    } catch (e) {
+      c.busy = Math.max(0, c.busy - 1);
+      fb.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
+    }
+  }
+
+  /** Contexte des fenêtres d'envoi : hôtes joignables, pools actifs de
+   *  l'hôte, pools d'images déclarés. */
+  function sendContext(host) {
+    const pools = ((cur.pools[host] && cur.pools[host].pools) || []).filter((p) => p.state === 'running').map((p) => p.name);
+    const img = cur.images[host] || {};
+    return { hosts: ((cur.data && cur.data.hosts) || []).filter((h) => !h.error).map((h) => h.name),
+             pools: pools.length ? pools : (img.pools || []), imagePools: img.image_pools || [] };
+  }
+
+  function storageClick(b) {
+    const S = window.KVMStorage;
+    const act = b.dataset.kvm;
+    const host = b.dataset.host;
+    if (!S) return false;
+    const det = cur.details[host] || {};
+    const poolOf = (name) => (det.pools || []).find((p) => p.name === name);
+    const imageOf = () => ((cur.images[host] || {}).images || []).find((i) => i.pool === b.dataset.pool && i.volume === b.dataset.vol);
+    switch (act) {
+      case 'pool-create': S.openPoolCreate(host); return true;
+      case 'vol-create': S.openVolumeCreate(host, { pools: det.pools || [], pool: b.dataset.pool }); return true;
+      case 'pool-verb': askObject('pool', host, b.dataset.pool, b.dataset.verb, b.dataset.enable === '1'); return true;
+      case 'pool-delete': S.openDelete('pool', host, { name: b.dataset.pool }); return true;
+      case 'vol-resize': {
+        const v = ((poolOf(b.dataset.pool) || {}).volumes || []).find((x) => x.name === b.dataset.vol);
+        if (v) S.openVolumeResize(host, b.dataset.pool, v);
+        return true;
+      }
+      case 'vol-delete': S.openDelete('volume', host, { pool: b.dataset.pool, name: b.dataset.vol }); return true;
+      case 'img-upload': S.openUpload(host, sendContext(host)); return true;
+      case 'img-fetch': S.openFetch(host, sendContext(host)); return true;
+      case 'img-pools': S.openImagePools(host, { pools: ((cur.pools[host] || {}).pools || []).map((p) => p.name),
+                                                 current: (cur.images[host] || {}).image_pools || [] }); return true;
+      case 'img-verify': verifyImage(host, b.dataset.pool, b.dataset.vol); return true;
+      case 'img-create-vm': {
+        const i = imageOf();
+        if (i && window.KVMForm) KVMForm.openCreate(host, { image: { pool: i.pool, volume: i.volume, iso: !!i.iso, format: i.format, capacity: i.capacity } });
+        return true;
+      }
+      case 'img-delete': S.openDelete('image', host, { pool: b.dataset.pool, name: b.dataset.vol }); return true;
+      case 'net-create': S.openNetworkCreate(host); return true;
+      case 'net-verb': askObject('network', host, b.dataset.net, b.dataset.verb, b.dataset.enable === '1'); return true;
+      case 'net-delete': S.openDelete('network', host, { name: b.dataset.net }); return true;
+      default: return false;
+    }
   }
 
   // -- clics --------------------------------------------------------------------------
@@ -693,6 +997,28 @@ const KVM = (() => {
     if (!b || !cur || b.disabled) return;
     const act = b.dataset.kvm;
     if (act === 'refresh') { load(true); return; }
+    if (act === 'sub') {
+      cur.prefs.sub = b.dataset.sub === 'images' ? 'images' : 'pools';
+      cur.host.querySelectorAll('[data-kvm="sub"]').forEach((x) => x.classList.toggle('active', x.dataset.sub === cur.prefs.sub));
+      render();
+      load();
+      return;
+    }
+    if (act === 'net-links') {
+      const h = b.dataset.host;
+      if (cur.openLinks.has(h)) cur.openLinks.delete(h);
+      else { cur.openLinks.add(h); loadLinks(h).then(render); }
+      render();
+      return;
+    }
+    if (act === 'obj-yes') {
+      const o = cur.pendingObj;
+      cur.pendingObj = null;
+      cur.busy = Math.max(0, cur.busy - 1);
+      if (o) objectGesture(o.kind, o.host, o.name, o.verb);
+      return;
+    }
+    if (storageClick(b)) return;
     if (act === 'declare') { openDeclare(); return; }
     if (act === 'create-vm') { if (window.KVMForm) KVMForm.openCreate(b.dataset.host || ''); return; }
     if (act === 'test') { testHost(b.dataset.host); return; }
@@ -701,6 +1027,7 @@ const KVM = (() => {
     if (act === 'confirm-no') {
       cur.busy = Math.max(0, cur.busy - 1);
       cur.pending = null;
+      cur.pendingObj = null;
       const fb = cur.host.querySelector('[data-kvm="feedback"]');
       if (fb.contains(b)) fb.innerHTML = '';
       render();

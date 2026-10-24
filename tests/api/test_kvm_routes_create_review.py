@@ -539,10 +539,13 @@ def test_a_failed_fetch_never_logs_the_full_url(client, upload, monkeypatch, cap
     def boom(*a, **k):
         raise RuntimeError(f"failure for {url}")
     monkeypatch.setattr(wapp, "_kvm_fetch_download", boom)
+    # réservations laissées par un autre test du même processus (action jamais
+    # exécutée) : seules celles de ce test doivent être rendues
+    before = set(wapp._KVM_STAGING_HOLDS)
     assert fetch(client, url).status_code == 202
     with caplog.at_level(logging.DEBUG):
         _NoThread.started[-1].target()
     assert "SIGNED-SECRET" not in caplog.text and "http://127.0.0.1:9/img.qcow2" in caplog.text
     run = only_run()
     assert run.status == "error" and "SIGNED-SECRET" not in str(run.to_dict())
-    assert wapp._KVM_STAGING_HOLDS == set()
+    assert wapp._KVM_STAGING_HOLDS - before == set()

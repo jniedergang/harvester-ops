@@ -10296,9 +10296,7 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
     avancer de génération de relevés (aucun fichier survey-gen créé)."""
     state = _state_dir()
 
-    def after():
-        if cleanup:
-            cleanup()
+    def refresh_views():
         READ_SHARE.invalidate(KVM_SCOPE)
         if cluster is not None:
             return
@@ -10308,8 +10306,23 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
         # qu'un relevé de plus)
         with contextlib.suppress(Exception):
             _ko.bump_generation(types.SimpleNamespace(state=state, name=host))
+
+    def setup(run):
+        # vues oubliées AVANT la fin de l'action : la page relit dès l'événement
+        # `end` (vu en réel : un pool créé n'apparaissait qu'au relevé suivant)
+        close = run.close
+
+        def close_after_refresh():
+            refresh_views()
+            close()
+        run.close = close_after_refresh
+
+    def after():
+        if cleanup:
+            cleanup()
+        refresh_views()
     run, err = _cli_action(cluster or f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
-                           check_busy=False, capture=True)
+                           check_busy=False, capture=True, setup=setup)
     if err:
         if cleanup:
             cleanup()
@@ -23471,14 +23484,15 @@ def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hol
             run.error_summary = failure[:300]
         else:
             run.status, run.exit_code = "done", 0
-        run.ended_at = time.time()
-        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
-                  "ts": time.time()})
-        run.close()
+        # vues oubliées AVANT la fin : la page relit le catalogue dès `end`
         READ_SHARE.invalidate(KVM_SCOPE)
         for h in hosts:
             with contextlib.suppress(Exception):
                 _ko.bump_generation(types.SimpleNamespace(state=run.kvm_state, name=h))
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": run.exit_code,
+                  "ts": time.time()})
+        run.close()
 
 
 def _kvm_author(run):

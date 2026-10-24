@@ -1847,7 +1847,8 @@ const KVMForm = (() => {
     return all.length ? all : null;
   }
 
-  return { openCreate, openEdit, openHot, menuGroupHtml, fillMenuDevices, onMenuClick, hotWhy, restartFor,
+  // parseSize : partagé avec kvm-storage.js (volumes, redimensionnement)
+  return { openCreate, openEdit, openHot, menuGroupHtml, fillMenuDevices, onMenuClick, hotWhy, restartFor, parseSize,
            _internals: { parseSize, diskItem, nicItem, hotness, cardOf, nicCardOf, notePending,
                          agentDefault, bootCard, restartFor, poll: POLL } };
 })();

@@ -457,6 +457,16 @@ Fichiers : `web/static/js/kvm.js` (vues Stockage et Réseaux, aujourd'hui en lec
 
 Tests e2e : téléversement d'un petit fichier vers un faux hôte avec progression et annulation ; somme fausse refusée ; qcow2 à image de base refusé avant l'envoi ; pool refusé (chemin `/etc`) avec la raison ; suppression d'un pool utilisé grisée ; réseau qui chevauche le LAN refusé ; noms hostiles.
 
+Réalisé (tâche 6), écarts et précisions :
+
+- Stockage a deux sous-onglets (« Pools et volumes », « Images ») et un filtre « un hôte ou tous », comme Réseaux ; seul l'hôte choisi est lu. Les boutons d'un hôte sont dans son bloc ; ceux d'un pool, d'un volume, d'une image ou d'un réseau dans une colonne Actions, grisés avec la raison (rôle, pool arrêté, catalogue pas encore lu). Le type et la cible des pools viennent de `GET .../pools` (absents de l'inventaire), lecture à part : sans elle la vue reste utilisable.
+- Les fenêtres sont dans `kvm-storage.js` ; les gestes simples (démarrer, arrêter, rafraîchir, autostart, vérifier une image) se suivent dans la ligne d'état de la vue. Arrêter un pool ou un réseau se confirme dans la page (il sert à toutes les VMs de l'hôte) ; le refus du script (VM en marche) est montré avec ses raisons.
+- Créer un pool ou un réseau : essai à blanc du serveur d'abord, refus montrés avec leurs raisons, rien n'est lancé ; sinon l'action suivie. Le sous-réseau proposé est le premier 192.168.X.0/24 (X de 100 à 254) libre d'après `GET .../links` et les réseaux libvirt ; le serveur refait le contrôle.
+- Supprimer : une seule fenêtre pour volume, image, pool et réseau (aperçu neuf, raisons d'usage, fichiers illisibles à accepter un par un, empreinte renvoyée, nouvel aperçu si `plan-changed`) ; le nom est à saisir pour un pool et un réseau. Le répertoire d'un pool imbriqué (volume `dir`) n'a aucune action.
+- Téléverser : la réception par la console se suit par la progression du navigateur (`XMLHttpRequest`, débit et temps restant calculés dans la page), l'envoi par la progression de l'action ; annuler pendant la réception coupe la requête (la console ne garde rien), pendant l'envoi annule l'action. Phase `receive` ajoutée à `xfer-progress.js`.
+- Une image « base de N disques » ne compte que des disques : `unknown` (lecture manquée, `kvm_ops.UNKNOWN`) s'affiche « usage non prouvé ».
+- Vu en réel sur node2 et corrigé avec un test : la console oubliait ses lectures partagées APRÈS avoir fermé l'action, donc la page, qui relit à l'événement `end`, recevait l'ancienne réponse (image téléversée sans sa somme). Les actions KVM (`_kvm_action`, envoi d'image) oublient les vues et avancent la génération des relevés avant de se fermer.
+
 ## Tâche 7 : vérification réelle, documentation, version
 
 Banc (node2, 172.16.1.12, allumé par son iLO, éteint après ; **attendre que node2 soit libéré par le banc en cours**) :
