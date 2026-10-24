@@ -25029,8 +25029,10 @@ def api_replication_measure(plan_id):
 @requires_auth
 @_rate_limit("20/minute")
 def api_replication_protect(plan_id):
-    """Protège (ou reprend la protection) : `interval` facultatif,
-    `dry_run: true` pour le contrôle et l'essai à blanc du serveur."""
+    """Protège (ou reprend la protection) : `interval` et `retain`
+    facultatifs (v1.99.0 : `retain` sur un plan protégé met à jour sa tâche
+    récurrente), `dry_run: true` pour le contrôle et l'essai à blanc du
+    serveur."""
     err = _repl_unavailable()
     if err:
         return err
@@ -25043,6 +25045,11 @@ def api_replication_protect(plan_id):
     try:
         dry = _repl_flag(body, "dry_run")
         extra = [f"--interval={_repl_text(body['interval'], 'interval')}"] if body.get("interval") is not None else []
+        if body.get("retain") is not None:
+            r = body["retain"]
+            if isinstance(r, bool) or not isinstance(r, int) or not _rp.RETAIN_MIN <= r <= _rp.RETAIN_MAX:
+                raise ValueError(f"retain: an integer between {_rp.RETAIN_MIN} and {_rp.RETAIN_MAX}")
+            extra.append(f"--retain={r}")
     except ValueError as e:
         return _repl_err(str(e))
     kargs, err = _repl_kube_args(plan)
@@ -25242,7 +25249,10 @@ def api_replication_settings(plan_id):
         return err
     for key in ("interval", "retain"):
         if key in body:
-            return _repl_err(f"{key} cannot be changed here", 400, "not-settable")
+            # v1.99.0 (décision 56) : les deux vivent dans la tâche récurrente
+            # de la source, protect les change avec elle
+            return _repl_err(f"{key} cannot be changed here: protect the plan again with `{key}`",
+                             400, "not-settable")
     unknown = set(body) - set(_SETTINGS_KEYS)
     if unknown:
         return _repl_err(f"unknown field: {sorted(unknown)[0][:40]}")

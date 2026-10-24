@@ -308,6 +308,9 @@ CASES = [
      ["measure", "stop", PID], True, "harvlab"),
     ("protect", "POST", f"/api/replication/plans/{PID}/protect", {"interval": "5m", "dry_run": True},
      ["protect", PID, "--interval=5m", "--dry-run"], True, "harvlab"),
+    # v1.99.0, décision 56 : la rétention d'un plan protégé passe par protect
+    ("protect", "POST", f"/api/replication/plans/{PID}/protect", {"retain": 9},
+     ["protect", PID, "--retain=9"], True, "harvlab"),
     ("failover", "POST", f"/api/replication/plans/{PID}/failover",
      {"vms": ["default/rep-a"], "confirm": "web"}, ["failover", PID, "--vm=default/rep-a", "--yes"], True, "harvlab2"),
     ("failover", "POST", f"/api/replication/plans/{PID}/failover",
@@ -446,6 +449,14 @@ def test_refusals_answer_before_any_action(client, path, body, code):
 def test_settings_refusals(client, body, code):
     r = client.patch(f"/api/replication/plans/{PID}/settings", json=body)
     assert r.status_code == 400 and r.get_json().get("code") == code and not wapp.ACTIONS
+    if code == "not-settable":
+        assert "protect the plan again" in r.get_json()["error"]
+
+
+@pytest.mark.parametrize("retain", [0, 10_000, "9", True, 2.5])
+def test_protect_refuses_a_bad_retain_before_any_action(client, retain):
+    r = client.post(f"/api/replication/plans/{PID}/protect", json={"retain": retain})
+    assert r.status_code == 400 and "retain" in r.get_json()["error"] and not wapp.ACTIONS
 
 
 def test_a_cluster_this_session_cannot_see_is_refused_never_replaced(client, env):

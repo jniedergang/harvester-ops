@@ -342,6 +342,19 @@ def test_protect_result_schema_and_cluster_objects(tmp_path, capsys):
     assert rc == 0 and len(w.src.mutations()) + len(w.dst.mutations()) == n
 
 
+@pytest.mark.parametrize("value,rc_expected,kind,retain", [
+    ("9", 0, None, 9), ("2", 2, "bad-retain", 6), ("x", 2, "bad-retain", 6), ("-3", 2, "bad-retain", 6),
+])
+def test_protect_retain_on_a_protected_plan(tmp_path, capsys, value, rc_expected, kind, retain):
+    # v1.99.0, décision 56
+    w = protected(tmp_path, vms=("vm-a",))
+    rc, data, _ = run(capsys, w, "protect", "plan-a", f"--retain={value}")
+    assert rc == rc_expected and data["kind"] == kind, data
+    assert w.plan()["retain"] == retain
+    jobs = [j for j in w.src.list(rr.K_LH_JOB, rr.NS) if rp.LABEL_PLAN in (j["metadata"].get("labels") or {})]
+    assert [j["spec"]["retain"] for j in jobs] == [retain]
+
+
 def test_protect_refusal_codes_pass_through(tmp_path, capsys):
     w = draft_world(tmp_path, vms=("vm-a",), interval=None)
     rc, data, _ = run(capsys, w, "protect", "plan-a")
@@ -788,7 +801,8 @@ def test_confirmations_and_refused_options(tmp_path, capsys, argv, kind):
     if argv[-1] == "--interval=5m":
         assert "protect P --interval" in data["error"]
     if argv[-1] == "--retain=3":
-        assert "decision 56" in data["error"]
+        # v1.99.0, décision 56 : la rétention se change par protect
+        assert "protect P --retain" in data["error"]
 
 
 def test_failover_with_another_scope_than_the_open_run_points_to_resume(tmp_path, capsys):

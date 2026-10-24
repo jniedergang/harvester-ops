@@ -2327,6 +2327,50 @@ def test_protect_dry_run_of_a_protected_plan_passes(tmp_path):
         assert rows and all(d["ok"] and d.get("exists") for d in rows), what
 
 
+def _job_retains(w):
+    return sorted(j["spec"]["retain"] for j in w.src.list(rr.K_LH_JOB, rr.NS)
+                  if rp.LABEL_PLAN in (j["metadata"].get("labels") or {}))
+
+
+# v1.99.0, décision 56 : protect --retain met à jour la tâche d'un plan protégé
+@pytest.mark.parametrize("retain,exit_code,expected", [
+    (None, 0, 6), (6, 0, 6), (9, 0, 9), ("12", 0, 12),
+    (2, 2, 6), (51, 2, 6), ("x", 2, 6), (True, 2, 6), ("9 ", 0, 9),
+])
+def test_protect_retain_updates_the_job_of_a_protected_plan(tmp_path, retain, exit_code, expected):
+    w = protected(tmp_path)
+    assert w.plan()["retain"] == 6 and _job_retains(w) == [6, 6]
+    before = len(w.src.mutations()) + len(w.dst.mutations())
+    res = rr.protect(w.ctx(), retain=retain)
+    assert res["exit"] == exit_code, res
+    assert w.plan()["retain"] == expected and _job_retains(w) == [expected, expected]
+    assert w.plan()["state"] == "protected"
+    patches = [c for c in w.src.mutations() if c[0] == "patch" and c[1] == rr.K_LH_JOB]
+    assert len(patches) == (2 if expected != 6 else 0)
+    if exit_code == 2:
+        assert res["code"] == "bad-retain"
+        assert len(w.src.mutations()) + len(w.dst.mutations()) == before
+    retain_events = [e for e in events(w, operation="protect") if e["step"] == "retain"]
+    assert len(retain_events) == (1 if expected != 6 else 0)
+
+
+def test_protect_retain_cancelled_restores_the_job_and_the_plan_row(tmp_path):
+    w = protected(tmp_path)
+    interval = w.plan()["interval_s"]
+    seen = []
+
+    def hook(name):
+        seen.append(name)
+        if len(seen) == 2:
+            raise rr.Cancelled("signal 15")
+    w.src.hooks[("patch", rr.K_LH_JOB)] = hook
+    res = rr.protect(w.ctx(), retain=9, interval="10m")
+    assert res["exit"] == 3, res
+    w.src.hooks.clear()
+    assert _job_retains(w) == [6, 6]
+    assert (w.plan()["retain"], w.plan()["interval_s"]) == (6, interval) and interval != 600
+
+
 def test_protect_dry_run_refuses_a_job_of_someone_else(world):
     w = world
     job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])

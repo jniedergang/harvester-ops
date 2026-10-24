@@ -16,15 +16,14 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication plan delete P
   harvester-replication plan set P [--rpo D] [--paused true|false] [--follow M]
         [--skew-tolerance D] [--timeout NOM=S ...]   (NOM= retire la surcharge ;
-        --interval et --retain refusés : `protect --interval`, rétention fixée
-        à la création en attendant la décision 56)
+        --interval et --retain refusés : `protect --interval`, `protect --retain`)
   harvester-replication check P [--phase protect|failover|failover-unplanned] [--force-unplanned]
   harvester-replication measure start P [--interval 5m]
   harvester-replication measure stop P
   harvester-replication measure report P [--margin 0.2]
   harvester-replication measure formula --size 2Gi --writes N --interval 5m
         [--block 2Mi] [--throughput 72Mi] [--write-size 4096]
-  harvester-replication protect P [--dry-run] [--interval 5m]
+  harvester-replication protect P [--dry-run] [--interval 5m] [--retain N]
   harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console] [--log-file=PATH]
         [--timeout client=S]
   harvester-replication status [P] [--host H]
@@ -613,8 +612,8 @@ def cmd_plan_set(args):
         raise UsageError("the interval lives in the source backup jobs: change it with "
                          "`protect P --interval D` (plan set cannot)", "not-settable")
     if args.retain is not None:
-        raise UsageError("retain is fixed when the plan is created (changing it later is pending product "
-                         "decision 56)", "not-settable")
+        raise UsageError("retain lives in the source backup jobs: change it with "
+                         "`protect P --retain N` (plan set cannot)", "not-settable")
     conn = open_db(args)
     plan = find_plan(conn, args.plan)
     fields, options = {}, {}
@@ -771,7 +770,7 @@ def cmd_measure_formula(args):
 
 def cmd_protect(args):
     _conn, _plan, ctx = _plan_ctx(args)
-    return finish(args, rr.protect(ctx, interval=args.interval, dry_run=args.dry_run))
+    return finish(args, rr.protect(ctx, interval=args.interval, dry_run=args.dry_run, retain=args.retain))
 
 
 def _vm_refs(values):
@@ -1113,7 +1112,7 @@ def build_parser():
     sp.add_argument("--timeout", action="append", metavar="NAME=SECONDS",
                     help="plan wait setting (repeatable); NAME= removes it")
     sp.add_argument("--interval", help="refused: use `protect P --interval D`")
-    sp.add_argument("--retain", help="refused: fixed at creation (pending product decision 56)")
+    sp.add_argument("--retain", help="refused: use `protect P --retain N`")
 
     sp = leaf(sub, "check", cmd_check, [common, clusters], 1, "full pre-check, nothing written")
     sp.add_argument("plan")
@@ -1142,6 +1141,8 @@ def build_parser():
     sp.add_argument("plan")
     sp.add_argument("--dry-run", action="store_true", help="check and server dry-run, nothing written")
     sp.add_argument("--interval", help="backup interval (required without a measure)")
+    sp.add_argument("--retain", help=f"backups kept by the recurring job ({rp.RETAIN_MIN} to {rp.RETAIN_MAX}); "
+                    "on a protected plan, updates the job")
 
     sp = leaf(sub, "follow", cmd_follow, [common], 1, "the follower loop (resync after each backup, stats)")
     g = sp.add_mutually_exclusive_group(required=True)

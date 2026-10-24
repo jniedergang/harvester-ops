@@ -1714,16 +1714,36 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
     return out
 
 
-def protect(ctx, interval=None, dry_run=False):
+def _choose_retain(retain):
+    """`--retain` de protect (v1.99.0, décision 56) : None garde la valeur du
+    plan ; sinon un entier entre RETAIN_MIN et RETAIN_MAX."""
+    if retain in (None, ""):
+        return None
+    try:
+        n = int(retain)
+    except (TypeError, ValueError):
+        n = None
+    if isinstance(retain, bool) or n is None or str(n) != str(retain).strip() \
+            or not rp.RETAIN_MIN <= n <= rp.RETAIN_MAX:
+        raise Refused("bad-retain", f"retain: an integer between {rp.RETAIN_MIN} and {rp.RETAIN_MAX}")
+    return n
+
+
+def protect(ctx, interval=None, dry_run=False, retain=None):
     """(`draft`, `measuring`, `protecting`, `protected`, `error`) ->
     `protecting` -> `protected`. Rejouable : chaque sous-étape constate
     l'existant. Annulation : retour arrière de ce que cette exécution a
     créé. Échec : rien n'est défait (la relance reprend, une longue
-    restauration initiale n'est pas perdue), plan en `error`."""
+    restauration initiale n'est pas perdue), plan en `error`.
+    `retain` (v1.99.0, décision 56) : nombre de sauvegardes gardées par la
+    tâche récurrente ; sur un plan déjà protégé, la tâche existante est mise
+    à jour avec la ligne du plan (seul chemin pour changer la rétention)."""
     uids = []
+    prev = {}
     try:
         _precondition(ctx, "protect")
         before = _plan_guard(ctx.plan)
+        new_retain = _choose_retain(retain)
         src = collect_source(ctx)
         # une VM déjà basculée n'est plus protégée : ni tâche, ni étiquette sur
         # sa source arrêtée, ni volume de secours (son volume est activé)
@@ -1758,6 +1778,12 @@ def protect(ctx, interval=None, dry_run=False):
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "protect", e, uids)
     try:
+        prev = {"interval_s": ctx.plan.get("interval_s"), "retain": ctx.plan.get("retain")}
+        if new_retain is not None and new_retain != ctx.plan.get("retain"):
+            db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), retain=new_retain)
+            ctx.reload()
+            ctx.event("protect", "retain", code="retain", message=f"{new_retain} backups kept",
+                      facts={"retain": new_retain, "previous": prev["retain"]})
         if how == "plan" and not db.list_ticks(ctx.conn, ctx.plan_id, ctx.gen, table="measures"):
             ctx.event("protect", "interval", level="warn", code="interval-without-measure",
                       message=f"interval {chosen} s set without a measure")
@@ -1786,6 +1812,12 @@ def protect(ctx, interval=None, dry_run=False):
                        findings=findings)
     except Cancelled as e:
         left = _undo_created(ctx)
+        # la tâche reprise retrouve ses valeurs (`undo_specs`) : la ligne du
+        # plan aussi
+        back = {k: v for k, v in prev.items() if v is not None and ctx.reload().get(k) != v}
+        if back:
+            db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), **back)
+            ctx.reload()
         if ctx.undo_timed_out:
             _error(ctx, uids, f"protect cancelled: {e}")
             return _undo_timeout(ctx, "protect", f"protect cancelled ({e})", left)
