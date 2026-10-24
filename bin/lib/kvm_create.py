@@ -15,7 +15,15 @@ Retour arrière sur échec ou annulation, dans l'ordre inverse : arrêt si
 démarrée, `undefine --nvram` si définie (seulement si l'uuid est le nôtre),
 `vol-delete` des volumes créés par cette action (jamais d'un volume existant
 choisi comme source). Ce qui reste est nommé (`leftovers`).
+
+Un volume que libvirt refuse de créer parce qu'il existe déjà (créé ailleurs
+entre le plan et l'écriture) n'est jamais noté comme créé : le retour
+arrière ne le supprime pas. L'absence des volumes de chaque instance est
+aussi revérifiée juste avant de les créer (plusieurs instances : le plan a
+pu être fait des minutes plus tôt).
 """
+
+import threading
 
 import io
 import re
@@ -33,6 +41,9 @@ import kvm_storage as ks
 import kvm_xml as kx
 
 OpError = ko.OpError
+
+# relecture de `vol-info` pendant une copie complète (secondes)
+COPY_POLL = 2.0
 
 INSTANCES_MAX = 20
 _VNC_ALPHABET = string.ascii_letters + string.digits
@@ -299,28 +310,92 @@ def seed_iso(cloudinit, instance_id, hostname, vendor_data=None):
         raise OpError("invalid", f"cloud-init seed: {e}") from None
 
 
-def upload_bytes(host, pool, name, data, cancel=None):
+def _already(err):
+    """Vrai si libvirt refuse parce que le volume existe déjà."""
+    msg = (getattr(err, "message", "") or "").lower()
+    return "already" in msg or "exists" in msg
+
+
+def upload_bytes(host, pool, name, data, cancel=None, created=None):
     """Crée un volume raw et y téléverse `data` (ISO de seed) sur une
-    connexion propre. Le volume est à la charge de l'appelant en cas d'échec."""
-    host.virsh("vol-create-as", "--pool", pool, "--name", name, "--capacity", str(len(data)),
-               "--format", "raw")
+    connexion propre. Le volume est noté dans `created` (pour le retour
+    arrière de l'appelant) avant sa création, et retiré de la liste si
+    libvirt dit qu'il existait déjà : un volume d'un autre n'est jamais
+    supprimé."""
+    item = {"kind": "volume", "pool": pool, "volume": name}
+    if created is not None:
+        created.append(item)
+    try:
+        host.virsh("vol-create-as", "--pool", pool, "--name", name, "--capacity",
+                   str(len(data)), "--format", "raw")
+    except kh.KvmError as e:
+        if created is not None and _already(e):
+            created.remove(item)
+        raise
     host.run_stream(["env", "LC_ALL=C", "virsh", "-q", "-c",
                      host.decl.get("uri", "qemu:///system"), "vol-upload", "--pool", pool,
                      "--vol", name, "--file", "/dev/stdin"], io.BytesIO(data), size=len(data),
                     cancel=cancel)
 
 
-def _create_volume(host, v, created, cancel):
-    """Un volume du plan : vierge, lié ou copie complète (connexion propre)."""
+def _vol_allocation(host, pool, vol):
+    """Octets alloués d'un volume (`vol-info --bytes`), None si illisible."""
+    try:
+        info = kh._colon_fields(host.virsh("vol-info", "--bytes", "--pool", pool, "--vol", vol,
+                                           idempotent=True))
+        return int((info.get("Allocation") or "").split()[0])
+    except (kh.KvmError, ValueError, IndexError):
+        return None
+
+
+def _with_progress(host, work, pool, vol, report, poll=None):
+    """Lance `work()` (copie longue, connexion propre) dans un fil et relit
+    `vol-info` du volume de destination toutes les `poll` secondes sur la
+    connexion partagée ; `report(octets)` à chaque changement. L'exception
+    de `work` est relevée telle quelle."""
+    box = {}
+
+    def run():
+        try:
+            box["out"] = work()
+        except BaseException as e:      # noqa: BLE001 - relevée dans le fil appelant
+            box["exc"] = e
+    t = threading.Thread(target=run, daemon=True, name="kvm-copy")
+    t.start()
+    last = None
+    poll = COPY_POLL if poll is None else poll
+    while True:
+        t.join(poll)
+        if not t.is_alive():
+            break
+        alloc = _vol_allocation(host, pool, vol)
+        if alloc is not None and alloc != last:
+            last = alloc
+            report(alloc)
+    if "exc" in box:
+        raise box["exc"]
+    return box.get("out")
+
+
+def _create_volume(host, v, created, cancel, report=None, poll=None):
+    """Un volume du plan : vierge, lié ou copie complète (connexion propre,
+    octets copiés rendus par `report(octets)` d'après `vol-info`)."""
     if v["copy_from"]:
         src = v["copy_from"]
-        created.append({"kind": "volume", "pool": v["pool"], "volume": v["volume"],
-                        "building": True})
-        ks.virsh_input(host, ("vol-create-from", "--pool", v["pool"], "--file", "/dev/stdin",
-                              "--vol", src["volume"], "--inputpool", src["pool"]),
-                       ko.volume_xml(v["volume"], src["capacity"], v["format"]),
-                       timeout=3600, fresh=True)
-        created[-1].pop("building")
+        item = {"kind": "volume", "pool": v["pool"], "volume": v["volume"], "building": True}
+        created.append(item)
+        try:
+            _with_progress(host, lambda: ks.virsh_input(
+                host, ("vol-create-from", "--pool", v["pool"], "--file", "/dev/stdin",
+                       "--vol", src["volume"], "--inputpool", src["pool"]),
+                ko.volume_xml(v["volume"], src["capacity"], v["format"]),
+                timeout=3600, fresh=True), v["pool"], v["volume"], report or (lambda n: None),
+                poll)
+        except kh.KvmError as e:
+            if _already(e):
+                created.remove(item)         # pas le nôtre : jamais supprimé
+            raise
+        item.pop("building")
         if v["capacity"] > (src["capacity"] or 0):
             host.virsh("vol-resize", "--pool", v["pool"], "--vol", v["volume"], "--capacity",
                        str(v["capacity"]))
@@ -331,7 +406,7 @@ def _create_volume(host, v, created, cancel):
         try:
             host.virsh(*args)
         except kh.KvmError as e:
-            if "already" in e.message.lower() or "exists" in e.message.lower():
+            if _already(e):
                 created.pop()                # pas le nôtre : jamais supprimé
             raise
 
@@ -401,6 +476,13 @@ def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uui
     opts = plan["_options"]
     multi = len(plan["_instances"]) > 1
     done = []
+    with ko.writing(host):
+        return _create_instances(host, plan, opts, multi, done, step, check_cancel, cancel,
+                                 uuid_gen, password_gen, start)
+
+
+def _create_instances(host, plan, opts, multi, done, step, check_cancel, cancel, uuid_gen,
+                      password_gen, start):
     for inst in plan["_instances"]:
         s, name = inst["spec"], inst["name"]
         prefix = f"{name}:" if multi else ""
@@ -408,11 +490,21 @@ def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uui
         password = password_gen() if s["display"]["vnc"] and s["display"]["password"] else None
         try:
             check_cancel()
+            # revérifié juste avant d'écrire : une instance précédente a pu
+            # prendre des minutes, quelqu'un a pu créer un volume du même nom
+            existing = _existing_volumes(host, {p for p, _ in inst["to_create"]})
+            taken = [f"{p}/{v}" for p, v in inst["to_create"] if v in existing.get(p, ())]
+            if taken:
+                raise OpError("refused", f"volume(s) created meanwhile: {', '.join(taken)}",
+                              {"refusals": [f"a volume named {t} already exists" for t in taken]})
             for v in inst["volumes"]:
                 sid = f"{prefix}volume-{v['target']}"
                 step(sid, "running", f"{v['pool']}/{v['volume']}"
                      + (" (linked)" if v["backing"] else " (copy)" if v["copy_from"] else ""))
-                _create_volume(host, v, created, cancel)
+                total = (v["copy_from"] or {}).get("capacity")
+                _create_volume(host, v, created, cancel, report=lambda n, sid=sid, total=total: step(
+                    sid, "running", f"{n} bytes copied" + (f" (image: {total} bytes)"
+                                                           if total else "")))
                 step(sid, "done", f"{v['pool']}/{v['volume']}")
                 check_cancel()
             uid = str(uuid_gen())
@@ -421,8 +513,7 @@ def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uui
                 step(f"{prefix}seed", "running", f"{seed['pool']}/{seed['volume']}")
                 ci = s.get("cloudinit") or {}
                 data = seed_iso(ci, uid, ci.get("hostname") or guest_hostname(name))
-                created.append({"kind": "volume", "pool": seed["pool"], "volume": seed["volume"]})
-                upload_bytes(host, seed["pool"], seed["volume"], data, cancel)
+                upload_bytes(host, seed["pool"], seed["volume"], data, cancel, created=created)
                 step(f"{prefix}seed", "done", f"{len(data)} bytes, user-data "
                      f"{'present' if ci.get('user_data') else 'empty'}")
                 check_cancel()

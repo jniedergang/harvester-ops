@@ -1143,6 +1143,16 @@ def changes(view_before, spec_after):
                     have = {"pool": have.get("pool"), "volume": have.get("volume")} if have else None
                     if want != have:
                         out.append({"field": f"disks[{t}].source", "old": have, "new": want})
+                elif old[t]["device"] != "cdrom" and src.get("kind"):
+                    # source d'un disque : jamais modifiable, mais dite (refusée par
+                    # kvm_edit) au lieu d'être ignorée en silence
+                    have = old[t].get("source")
+                    same = src.get("kind") == "volume" and isinstance(have, dict) and (
+                        have.get("pool"), have.get("volume")) == (
+                        src.get("pool"), src.get("volume") or src.get("image"))
+                    if not same:
+                        out.append({"field": f"disks[{t}].source", "old": have,
+                                    "new": dict(src)})
             else:
                 out.append({"field": f"disks[{t or '+' + str(i + 1)}]", "old": None, "new": d})
         for t, d in old.items():

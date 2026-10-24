@@ -7,14 +7,24 @@ ne gère pas reste octet pour octet. Chaque changement a une règle fixe
 (un seul `define --validate` du XML inactif), ou refusé avec sa raison.
 
 Règles :
-- l'empreinte (`canonical_digest` du XML inactif) lue à l'ouverture de la
-  fenêtre est revérifiée : si le XML a changé, OpError `changed` ;
+- l'empreinte (`canonical_digest` du XML inactif ENTIER, pas seulement des
+  champs gérés) lue à l'ouverture de la fenêtre est revérifiée au plan
+  recalculé juste avant d'écrire : tout changement venu d'ailleurs depuis
+  l'ouverture, sur n'importe quel champ, donne OpError `changed`. Reste une
+  fenêtre entre ce contrôle et le `define` (les gestes à chaud passent
+  avant, jusqu'à 30 s pour un retrait de disque) : le `define` part du XML
+  relu à ce moment-là et n'y change que les champs modifiés, donc un
+  changement extérieur sur un AUTRE champ est gardé, mais un changement
+  extérieur sur le MÊME champ géré est écrasé par la valeur du formulaire ;
 - les écritures ne sont jamais rejouées ; après une coupure du transport
   pendant une écriture, le changement est dit `uncertain` et le reste n'est
   pas tenté ;
 - pas de transaction : une erreur au milieu laisse les changements déjà
   faits, nommés dans le résultat, jamais défaits automatiquement ;
-- un retrait de disque ne supprime jamais son volume.
+- un retrait de disque ne supprime jamais son volume ;
+- un volume créé pour un disque ajouté (à chaud ou au prochain démarrage)
+  est retiré si son attache ou le `define` échoue ; quand l'écriture est
+  incertaine (coupure du transport), il est gardé et nommé dans `leftovers`.
 """
 
 import copy
@@ -82,7 +92,8 @@ HOTNESS = (
     {"field": "disks[].shareable", "running": "next-boot", "command": "define"},
     {"field": "disks[].boot_order", "running": "next-boot", "command": "define"},
     {"field": "disks[].source", "running": "now", "command": "update-device --live --config",
-     "note": "CD-ROM media change or eject"},
+     "note": "CD-ROM media change or eject; the source of any other disk is not changeable "
+             "(refused: remove the disk and add another one)"},
     {"field": "disks[+]", "running": "now", "command": "attach-device --live --config",
      "note": "virtio, or scsi with a SCSI controller, and a free PCIe slot on q35; SATA and "
              "CD-ROM drives wait for the next start"},
@@ -210,6 +221,12 @@ def _classify(ch, ctx, spec_after, gesture):
         if ctx["snapshots"]:
             return "refused", "rename: libvirt refuses to rename a VM that has snapshots"
         return "config", None
+    if field.startswith("disks[") and field.endswith("].source"):
+        target = field[len("disks["):field.index("]")]
+        disk = next((d for d in ctx["view"].get("disks") or [] if d.get("target") == target), None)
+        if not disk or disk.get("device") != "cdrom":
+            return "refused", ("only the media of a CD-ROM drive can be changed: remove the disk "
+                               "and add another one")
     live = ctx["live"]
     if not live:
         return "config", None
@@ -433,8 +450,16 @@ def _new_disk(host, name, d, vm, ctx, created):
             fmt = "qcow2"
         if ks._volume(host, pool, vol) is not None:
             raise OpError("refused", f"a volume named {vol} already exists in {pool}")
-        created.append({"kind": "volume", "pool": pool, "volume": vol})
-        host.virsh(*args)
+        entry = {"kind": "volume", "pool": pool, "volume": vol}
+        created.append(entry)
+        try:
+            host.virsh(*args)
+        except kh.KvmError as e:
+            if kc._already(e):
+                created.remove(entry)        # créé par un autre entre-temps : jamais supprimé
+            elif _transport_lost(e):
+                entry["uncertain"] = True    # peut-être créé : gardé et nommé
+            raise
         item.update(pool=pool, volume=vol, format=fmt)
     elif kind in ("volume", "iso"):
         pool, volname = src.get("pool"), src.get("volume") or src.get("image")
@@ -447,6 +472,35 @@ def _new_disk(host, name, d, vm, ctx, created):
             else vol["format"]
         item.update(pool=pool, volume=volname, format=fmt)
     return item
+
+
+def _transport_lost(err):
+    """Coupure du transport pendant une écriture : son effet est inconnu."""
+    return isinstance(err, kh.KvmError) and err.rc == kh.SSH_RC and err.kind in (
+        "unreachable", "failed")
+
+
+def _drop_created(host, created, entries):
+    """Retire les volumes `entries` (créés par ce geste) ; rend les restes.
+    Un volume à la création incertaine n'est jamais supprimé : il est nommé."""
+    leftovers = []
+    for c in entries:
+        if c not in created:
+            continue
+        if c.get("uncertain"):
+            leftovers.append({"kind": "volume", "pool": c["pool"], "volume": c["volume"],
+                              "error": "created or not: the connection was lost; check and "
+                                       "remove it if unused"})
+            created.remove(c)
+            continue
+        try:
+            host.virsh("vol-delete", "--pool", c["pool"], "--vol", c["volume"])
+        except kh.KvmError as e:
+            if e.kind != "notfound":
+                leftovers.append({"kind": "volume", "pool": c["pool"], "volume": c["volume"],
+                                  "error": e.message})
+        created.remove(c)
+    return leftovers
 
 
 def _apply_now(host, name, ch, ctx, vm, created, sleep):
@@ -512,20 +566,21 @@ def _apply_now(host, name, ch, ctx, vm, created, sleep):
                 waited += DETACH_POLL
             ch["applied"] = "next-boot"
             return REASON_DETACH_PENDING
+        before = list(created)
         item = _new_disk(host, name, new, vm, ctx, created)
         ch["target"] = item["target"]
+        mine = [c for c in created if c not in before]
         try:
             ks.virsh_input(host, ("attach-device", "--domain", name, "--file", "/dev/stdin",
                                   *flags), kx.device_xml("disk", item))
-        except BaseException:
-            created_vol = [c for c in created if c.get("volume") == item.get("volume")]
-            for c in created_vol:
-                try:
-                    host.virsh("vol-delete", "--pool", c["pool"], "--vol", c["volume"])
-                    created.remove(c)
-                except kh.KvmError:
-                    pass
+        except BaseException as exc:
+            if _transport_lost(exc):
+                for c in mine:               # l'attache a pu réussir : le volume est gardé
+                    c["uncertain"] = True
+            ctx.setdefault("leftovers", []).extend(_drop_created(host, created, mine))
             raise
+        for c in mine:
+            created.remove(c)                # attaché : appartient à la VM
         return None
     if field.startswith("nics["):
         if new is None:
@@ -707,7 +762,10 @@ def _config_edits(host, name, vm, items, ctx, created, password_gen):
         sub = f.partition("].")[2]
         if f.startswith("disks["):
             if c["old"] is None and isinstance(c["new"], dict):
-                item = _new_disk(host, name, c["new"], vm, ctx, created)
+                # cibles prises relues sur le XML en cours (deux disques ajoutés
+                # dans la même modification n'ont pas la même cible)
+                item = _new_disk(host, name, c["new"], {"inactive": edit.xml(),
+                                                        "live": vm["live"]}, ctx, created)
                 c["target"] = edit.add_disk(item)
             elif c["new"] is None and not sub:
                 edit.remove_disk(ident)
@@ -754,6 +812,7 @@ def apply_edit(host, name, plan, progress=None, cancel=None, sleep=time.sleep,
             progress(sid, status, msg)
 
     created = []
+    ko.invalidate_survey(host)
     now = [c for c in changes if c["applied"] == "now" and ctx["live"]
            and c["field"] not in ("name", "cloudinit")]
     special = {"autostart", "name", "cloudinit"}
@@ -782,12 +841,24 @@ def apply_edit(host, name, plan, progress=None, cancel=None, sleep=time.sleep,
                                                                      if reason else ""))
         if config:
             step("define", "running", f"{len(config)} change(s)")
-            xml, secrets = _write(lambda: _config_edits(host, name, vm, config, ctx, created,
-                                                        password_gen), config[0])
-            if xml is not None:
-                _write(lambda: ks.virsh_input(host, ("define", "--validate", "/dev/stdin"), xml,
-                                              secrets=secrets), config[0])
-                defined = True
+            before = list(created)
+            in_define = False
+            try:
+                xml, secrets = _write(lambda: _config_edits(host, name, vm, config, ctx, created,
+                                                            password_gen), config[0])
+                if xml is not None:
+                    in_define = True
+                    _write(lambda: ks.virsh_input(host, ("define", "--validate", "/dev/stdin"),
+                                                  xml, secrets=secrets), config[0])
+                    defined = True
+            except BaseException as exc:
+                mine = [c for c in created if c not in before]
+                if in_define and _transport_lost(exc):
+                    for c in mine:           # le define a pu passer : volumes gardés
+                        c["uncertain"] = True
+                ctx.setdefault("leftovers", []).extend(_drop_created(host, created, mine))
+                raise
+            created[:] = before              # cités par la définition : appartiennent à la VM
             for c in config:
                 c["status"] = "done"
             step("define", "done", "configuration updated" if defined else "nothing to change")
@@ -812,12 +883,17 @@ def apply_edit(host, name, plan, progress=None, cancel=None, sleep=time.sleep,
                 if c["applied"] != "refused":
                     c["reason"] = REASON_NOT_DONE
         res = _result(changes)
+        leftovers = ctx.get("leftovers", []) + list(getattr(exc, "leftovers", None) or [])
         if isinstance(exc, OpError):
             exc.data["changes"] = res
+            exc.data["leftovers"] = leftovers
         exc.changes = res
+        exc.leftovers = leftovers
         raise
+    finally:
+        ko.invalidate_survey(host)
     return {"name": renames[0]["new"] if renames else name, "changes": _result(changes),
-            "defined": defined, "renamed": bool(renames)}
+            "defined": defined, "renamed": bool(renames), "leftovers": []}
 
 
 def _write(fn, change):
@@ -978,12 +1054,24 @@ def detach_nic(host, name, mac, progress=None, sleep=time.sleep):
 # --- cloud-init --------------------------------------------------------------------
 
 def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=None,
-                    uuid_gen=uuidlib.uuid4):
+                    uuid_gen=uuidlib.uuid4, acknowledged_unreadable=None):
     """Nouvelle ISO de seed téléversée sous un nom neuf (`<vm>-cidata-<n>.iso`),
-    média changé (à chaud si la VM tourne), `<hops:seed>` mis à jour,
-    ancien volume supprimé après le changement réussi s'il n'est cité par
-    aucun autre domaine. `rerun` : nouvel `instance-id` (cloud-init rejoue
-    ses modules de premier démarrage). Rend {seed, previous, removed}."""
+    média changé (à chaud si la VM tourne), `<hops:seed>` mis à jour par un
+    `define`. `rerun` : nouvel `instance-id` (cloud-init rejoue ses modules
+    de premier démarrage). Rend {seed, previous, removed, kept_reason,
+    next_boot, rerun, leftovers}.
+
+    Ancien seed : supprimé SEULEMENT après le `define` réussi, et seulement
+    si la preuve de la 1.98 le permet (relevé neuf, identité
+    périphérique:inode, chaînes, stockage partagé : delete_volume_plan) ;
+    sinon gardé, avec la raison dans `kept_reason`. `acknowledged_unreadable` :
+    comme pour la suppression d'un volume (décision 46).
+
+    Échec : avant le changement de média, le nouveau volume est retiré ;
+    après (`update-device` a pu basculer le lecteur sur lui, ou la coupure
+    du transport le laisse incertain), il est GARDÉ, car la VM le cite, et
+    nommé dans `exc.leftovers` ; l'ancien seed n'est alors jamais touché."""
+    ko.check_acknowledged(acknowledged_unreadable)
     vm = read_vm(host, name)
     if not vm["info"]["persistent"]:
         raise OpError("refused", REASON_TRANSIENT)
@@ -1006,47 +1094,68 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
     new_vol = f"{name}-cidata-{n}.iso"
     data = kc.seed_iso({"user_data": user_data, "network_data": network_data}, instance_id,
                        hostname or kc.guest_hostname(name))
-    created = [{"kind": "volume", "pool": pool, "volume": new_vol}]
-    try:
-        kc.upload_bytes(host, pool, new_vol, data)
-        flags = ["--live", "--config"] if live else ["--config"]
-        target = None
-        for d in view["disks"]:
-            src = d.get("source") or {}
-            if seed and src.get("pool") == seed["pool"] and src.get("volume") == seed["volume"]:
-                target = d["target"]
-        if target:
-            ks.virsh_input(host, ("update-device", "--domain", name, "--file", "/dev/stdin",
-                                  *flags),
-                           _media_xml(vm["live"] if live else vm["inactive"], target, pool,
-                                      new_vol))
-        xml = host.virsh("dumpxml", "--inactive", "--security-info", "--domain", name,
-                         idempotent=True)
-        edit = kx.Edit(xml)
-        if not target:
-            fam = view.get("machine_family")
-            bus = "ide" if fam == "pc" else "sata"
-            used = {d["target"] for d in view["disks"]}
-            target = edit.add_disk({"device": "cdrom", "bus": bus, "readonly": True,
-                                    "target": kx._free_target(kx._TARGET_PREFIX[bus], used),
-                                    "pool": pool, "volume": new_vol, "format": "raw"})
-        edit.set_seed(pool, new_vol)
-        ks.virsh_input(host, ("define", "--validate", "/dev/stdin"), edit.xml(),
-                       secrets=ko._passwords(xml))
-    except BaseException:
-        kc.rollback(host, created)
-        raise
-    removed = False
-    if seed:
-        doms = ks.read_domains(host)
-        others = [d for d in ks.volume_users(doms, seed["pool"], seed["volume"], None)
-                  if d != name]
-        if not others and not doms["unknown"]:
+    created = []
+    switched = False                    # le lecteur peut citer le nouveau volume
+    with ko.writing(host):
+        try:
+            kc.upload_bytes(host, pool, new_vol, data, created=created)
+            flags = ["--live", "--config"] if live else ["--config"]
+            target = None
+            for d in view["disks"]:
+                src = d.get("source") or {}
+                if seed and src.get("pool") == seed["pool"] and \
+                        src.get("volume") == seed["volume"]:
+                    target = d["target"]
+            if target:
+                try:
+                    ks.virsh_input(host, ("update-device", "--domain", name, "--file",
+                                          "/dev/stdin", *flags),
+                                   _media_xml(vm["live"] if live else vm["inactive"], target,
+                                              pool, new_vol))
+                except kh.KvmError as e:
+                    switched = _transport_lost(e)
+                    raise
+                switched = True
+            xml = host.virsh("dumpxml", "--inactive", "--security-info", "--domain", name,
+                             idempotent=True)
+            edit = kx.Edit(xml)
+            if not target:
+                fam = view.get("machine_family")
+                bus = "ide" if fam == "pc" else "sata"
+                used = {d["target"] for d in view["disks"]}
+                target = edit.add_disk({"device": "cdrom", "bus": bus, "readonly": True,
+                                        "target": kx._free_target(kx._TARGET_PREFIX[bus], used),
+                                        "pool": pool, "volume": new_vol, "format": "raw"})
+            edit.set_seed(pool, new_vol)
             try:
-                host.virsh("vol-delete", "--pool", seed["pool"], "--vol", seed["volume"])
-                removed = True
-            except kh.KvmError:
-                removed = False
+                ks.virsh_input(host, ("define", "--validate", "/dev/stdin"), edit.xml(),
+                               secrets=ko._passwords(xml))
+            except kh.KvmError as e:
+                switched = switched or _transport_lost(e)
+                raise
+        except BaseException as exc:
+            if switched:
+                leftovers = [{"kind": "volume", "pool": pool, "volume": new_vol,
+                              "error": "kept: the CD-ROM of the VM may already use it; the "
+                                       "previous seed was not removed"}]
+            else:
+                leftovers = kc.rollback(host, created)
+            exc.leftovers = leftovers
+            if isinstance(exc, OpError):
+                exc.data["leftovers"] = leftovers
+            raise
+        removed, kept_reason = False, None
+        if seed:
+            try:
+                plan = ks.delete_volume_plan(host, seed["pool"], seed["volume"],
+                                             acknowledged_unreadable)
+                if plan["refusals"]:
+                    kept_reason = "; ".join(plan["refusals"])
+                else:
+                    host.virsh("vol-delete", "--pool", seed["pool"], "--vol", seed["volume"])
+                    removed = True
+            except (kh.KvmError, OpError) as e:
+                kept_reason = e.message
     return {"seed": {"pool": pool, "volume": new_vol, "target": target},
-            "previous": seed, "removed": removed, "next_boot": True,
-            "rerun": bool(rerun)}
+            "previous": seed, "removed": removed, "kept_reason": kept_reason,
+            "next_boot": True, "rerun": bool(rerun), "leftovers": []}

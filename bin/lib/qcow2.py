@@ -43,6 +43,9 @@ REASON_ENCRYPTED = "encrypted image: the console cannot provide its key"
 REASON_CORRUPT = "the image is marked corrupt"
 REASON_UNKNOWN_FEATURES = "the image uses unknown incompatible features"
 REASON_VERSION = "unsupported qcow2 version"
+# taille virtuelle maximale acceptée par défaut (réglable par l'appelant) : un
+# en-tête qui annonce des pétaoctets remplirait le pool à la première écriture
+MAX_VIRTUAL_SIZE = 16 << 40
 
 # autres formats qui peuvent citer un fichier de l'hôte
 _OTHER_RISKY = ((b"QED\x00", "QED"), (b"KDMV", "VMDK"), (b"# Disk DescriptorFile", "VMDK"),
@@ -112,10 +115,12 @@ def _extensions(b, start, backing_off):
     return found
 
 
-def check_upload(first_bytes):
+def check_upload(first_bytes, max_virtual_size=MAX_VIRTUAL_SIZE):
     """Raisons de refuser l'envoi d'une image (liste vide = acceptable).
     Une image qui n'est pas un qcow2 (raw, ISO) n'est pas refusée, sauf les
-    formats qui peuvent eux aussi citer un fichier de l'hôte."""
+    formats qui peuvent eux aussi citer un fichier de l'hôte. Un qcow2 dont
+    la taille virtuelle dépasse `max_virtual_size` (None : pas de plafond)
+    est refusé."""
     b = bytes(first_bytes or b"")
     if b[:4] != MAGIC:
         for magic, name in _OTHER_RISKY:
@@ -137,4 +142,7 @@ def check_upload(first_bytes):
         reasons.append(REASON_CORRUPT)
     if h["unknown_features"]:
         reasons.append(REASON_UNKNOWN_FEATURES)
+    if max_virtual_size is not None and h["virtual_size"] > max_virtual_size:
+        reasons.append(f"the image announces a virtual size of {h['virtual_size']} bytes, above "
+                       f"the limit of {max_virtual_size} bytes")
     return reasons

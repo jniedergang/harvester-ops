@@ -181,6 +181,13 @@ class Sim2(W.Sim):
         v["cap"] = int(o["capacity"])
         return 0, "", ""
 
+    def v_vol_info(self, o, p, data):
+        v = self.pools[o["pool"]]["vols"].get(o["vol"])
+        if v is None:
+            return 1, "", f"error: failed to get vol '{o['vol']}'\n"
+        return 0, (f"Name:           {o['vol']}\nType:           file\n"
+                   f"Capacity:       {v['cap']} bytes\nAllocation:     {v['alloc']} bytes\n"), ""
+
     def v_pool_refresh(self, o, p, data):
         return 0, "", ""
 

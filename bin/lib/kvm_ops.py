@@ -26,10 +26,12 @@ import io
 import ipaddress
 import itertools
 import json
+import os
 import posixpath
 import re
 import secrets
 import shlex
+import threading
 import time
 import uuid as uuidlib
 import xml.etree.ElementTree as ET
@@ -795,6 +797,119 @@ class _Survey:
         return found
 
 
+# --- relevés gardés pour les vues ----------------------------------------------
+
+SURVEY_TTL = 20.0                # âge au-delà duquel un relevé est rafraîchi
+SURVEY_MAX_STALE = 120.0         # au-delà, la vue attend un relevé neuf
+
+
+def _spawn_thread(fn):
+    threading.Thread(target=fn, daemon=True, name="kvm-survey").start()
+
+
+class SurveyCache:
+    """Relevés (`_Survey`) gardés par hôte pour les VUES seulement (catalogue
+    d'images) : un relevé coûte ~30 s sur un hôte chargé (node2). Jamais
+    utilisé pour une décision d'écriture (suppression, redimensionnement) :
+    celles-ci refont toujours un relevé neuf.
+
+    Un relevé plus vieux que `ttl` est rendu tel quel pendant qu'un fil le
+    rafraîchit ; plus vieux que `max_stale`, ou absent, il est refait sur
+    place. Toute écriture de la console sur l'hôte appelle `invalidate` : le
+    relevé est oublié, et un rafraîchissement commencé avant l'écriture est
+    jeté (génération). La clé est l'hôte déclaré (nom, adresse, URI).
+
+    `enabled` None : actif sauf `HARVESTER_OPS_KVM_SURVEY_CACHE=0` (coupé
+    par les tests d'API, qui changent leur hôte simulé entre deux appels)."""
+
+    def __init__(self, ttl=SURVEY_TTL, max_stale=SURVEY_MAX_STALE, clock=time.monotonic,
+                 spawn=_spawn_thread, factory=None, enabled=None):
+        self.ttl, self.max_stale, self.clock, self.spawn = ttl, max_stale, clock, spawn
+        self.enabled = enabled
+        self.factory = factory or (lambda host: _Survey(host))
+        self._lock = threading.Lock()
+        self._entries = {}          # hôte -> (relevé, date)
+        self._gen = {}              # hôte -> génération (invalidations)
+        self._refreshing = set()
+
+    def _store(self, key, gen, survey, at):
+        with self._lock:
+            if self._gen.get(key, 0) == gen:
+                self._entries[key] = (survey, at)
+
+    def get(self, host):
+        """(relevé, âge en secondes) ; âge 0 pour un relevé fait sur place."""
+        enabled = self.enabled if self.enabled is not None else (
+            os.environ.get("HARVESTER_OPS_KVM_SURVEY_CACHE", "1") != "0")
+        if not enabled:
+            return self.factory(host), 0.0
+        key = _host_key(host)
+        now = self.clock()
+        with self._lock:
+            entry = self._entries.get(key)
+            gen = self._gen.get(key, 0)
+            age = now - entry[1] if entry else None
+            if entry and age < self.ttl:
+                return entry[0], age
+            background = bool(entry and age < self.max_stale)
+            if background and key in self._refreshing:
+                return entry[0], age
+            if background:
+                self._refreshing.add(key)
+        if background:
+            def refresh():
+                try:
+                    at = self.clock()
+                    self._store(key, gen, self.factory(host), at)
+                except Exception:               # noqa: BLE001 - la vue garde l'ancien
+                    pass
+                finally:
+                    with self._lock:
+                        self._refreshing.discard(key)
+            self.spawn(refresh)
+            return entry[0], age
+        at = self.clock()
+        survey = self.factory(host)
+        self._store(key, gen, survey, at)
+        return survey, 0.0
+
+    def invalidate(self, host):
+        key = _host_key(host)
+        with self._lock:
+            self._gen[key] = self._gen.get(key, 0) + 1
+            self._entries.pop(key, None)
+
+
+def _host_key(host):
+    decl = getattr(host, "decl", None) or {}
+    return (getattr(host, "name", None), decl.get("address"), decl.get("uri"))
+
+
+SURVEYS = SurveyCache()
+
+
+def invalidate_survey(host):
+    """À appeler après toute écriture de la console sur l'hôte."""
+    SURVEYS.invalidate(host)
+
+
+class writing:
+    """`with writing(host):` autour d'une écriture : relevé gardé oublié
+    avant (un rafraîchissement en cours est jeté) et après (un relevé fait
+    pendant l'écriture verrait un état intermédiaire)."""
+
+    def __init__(self, host):
+        self.host = host
+
+    def __enter__(self):
+        invalidate_survey(self.host)
+        return self
+
+    def __exit__(self, *exc):
+        invalidate_survey(self.host)
+        return False
+
+
 def _chain_paths(path, info):
     """Chemins des images de base d'après `qemu-img info --backing-chain
     --output=json` (le premier élément est le fichier lui-même) ; un chemin
@@ -1178,8 +1293,7 @@ def _clone_seed(host, plan, new_name, uid, created):
                                 "network_data": files.get("network-config")}, uid,
                                kvm_create.guest_hostname(new_name),
                                vendor_data=files.get("vendor-data"))
-    created.append({"kind": "volume", "pool": sp["pool"], "volume": sp["new_volume"]})
-    kvm_create.upload_bytes(host, sp["pool"], sp["new_volume"], data)
+    kvm_create.upload_bytes(host, sp["pool"], sp["new_volume"], data, created=created)
 
 
 def _set_clone_identity(xml_text, uid, seed_plan):
@@ -1497,6 +1611,13 @@ def _passwords(xml_text):
 
 def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
              poll=COPY_POLL):
+    """Voir _clone_vm (relevé gardé oublié autour des écritures)."""
+    with writing(host):
+        return _clone_vm(host, name, new_name, timeout, progress, sleep, poll)
+
+
+def _clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
+              poll=COPY_POLL):
     """Copie complète d'une VM arrêtée : plan recalculé, volumes copiés
     (`vol-create-from` dans un pool, chaîne aplatie, droits de la source ;
     `qemu-img convert` hors pool), état de la source relu juste avant de
@@ -1802,7 +1923,8 @@ def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unread
          + (f", {len(skipped)} no longer deleted since the preview" if skipped else ""))
     stage = {"undefine": False, "pending": [_delete_key(d) for d in plan["delete"]]}
     try:
-        return _delete_execute(host, name, plan, skipped, stage, step, timeout)
+        with writing(host):
+            return _delete_execute(host, name, plan, skipped, stage, step, timeout)
     except BaseException as exc:
         exc.delete_progress = {"undefine_started": stage["undefine"],
                                "pending": list(stage["pending"]) if stage["undefine"] else []}

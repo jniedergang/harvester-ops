@@ -245,19 +245,34 @@ def network_xml(spec):
 
 # --- gestes ----------------------------------------------------------------------
 
-def _users(domains, network, live_only=False):
-    """Domaines dont une carte `network` cite ce réseau."""
+# modes où le pont appartient au réseau libvirt (créé à son démarrage) ; en
+# mode `bridge`, le pont est celui de l'hôte et vit sans le réseau
+_OWNED_BRIDGE_MODES = ("nat", "route", "isolated", "open")
+
+
+def _users(domains, network, live_only=False, bridge=None):
+    """Domaines dont une carte cite ce réseau : `type='network'` sur son nom,
+    ou `type='bridge'` sur `bridge`, le pont créé par le réseau (une carte
+    branchée directement sur virbrN tombe aussi quand le réseau s'arrête)."""
     users = []
     for name, e in domains["domains"].items():
         if live_only and not e["active"]:
             continue
         vms = [e["live"]] if live_only else [e["inactive"], e["live"]]
         for vm in vms:
-            if any(n.get("type") == "network" and n.get("source") == network
+            if any((n.get("type") == "network" and n.get("source") == network)
+                   or (bridge and n.get("type") == "bridge" and n.get("source") == bridge)
                    for n in (vm or {}).get("nics") or []):
                 users.append(name)
                 break
     return sorted(users)
+
+
+def _own_bridge(net):
+    """Pont créé par le réseau (None en mode `bridge` : pont de l'hôte). Une
+    carte `type='direct'` (macvtap) vise une carte de l'hôte, jamais le
+    réseau : elle n'en dépend pas."""
+    return net.get("bridge") if net.get("forward") in _OWNED_BRIDGE_MODES else None
 
 
 def _net(host, name):
@@ -326,9 +341,9 @@ def autostart_network(host, name, enable=True):
 def stop_network(host, name):
     """`net-destroy` ; refus si une VM en marche y a une carte."""
     check_network_name(name)
-    _net(host, name)
+    net = _net(host, name)
     doms = ks.read_domains(host)
-    users = _users(doms, name, live_only=True)
+    users = _users(doms, name, live_only=True, bridge=_own_bridge(net))
     if users:
         raise OpError("refused", f"a running VM has a card on it ({', '.join(users)})",
                       {"refusals": [f"used by {u}" for u in users]})
@@ -344,7 +359,7 @@ def delete_network_plan(host, name):
     net = _net(host, name)
     doms = ks.read_domains(host)
     refusals = []
-    users = _users(doms, name)
+    users = _users(doms, name, bridge=_own_bridge(net))
     if users:
         refusals.append(f"used by {', '.join(users)}")
     if doms["unknown"]:

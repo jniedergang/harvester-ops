@@ -48,16 +48,24 @@ VOLUME_FORMATS = ("qcow2", "raw")
 # décision 67 : seuls ces types se créent depuis la console
 CREATABLE_POOL_TYPES = ("dir", "netfs")
 # cibles de pool interdites : égales, parentes ou enfants (sauf de « / »).
-# Un pool imbriqué dans le répertoire d'un autre pool `dir` est accepté : vu
-# sur node2 (7 pools sur 9 sous /var/lib/libvirt/images, lui-même un pool),
+# Un pool `dir` imbriqué dans le répertoire d'un autre pool `dir` est accepté :
+# vu sur node2 (7 pools sur 9 sous /var/lib/libvirt/images, lui-même un pool),
 # libvirt ne descend pas dans les sous-répertoires, un fichier n'appartient
-# donc qu'à un pool ; seul le même répertoire est refusé.
+# donc qu'à un pool ; le pool parent voit seulement le répertoire de l'enfant
+# comme un volume de format `dir`, que la console ne liste ni ne supprime.
+# Tout autre type (netfs, fs, logical...) qui contient la cible d'un pool ou
+# s'y trouve est refusé : un montage cacherait les fichiers de l'autre pool.
+# Les cibles se comparent par identité (`stat -L -c %d:%i`, liens suivis) en
+# plus du texte.
 FORBIDDEN_POOL_PATHS = ("/", "/boot", "/dev", "/etc", "/proc", "/run", "/sys", "/usr",
                         "/var/lib/libvirt/qemu", "/var/run")
 _HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
                           r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$")
 NOTES_DIR = "kvm-images"
 REASON_UNPROVEN = "could not prove that no VM uses it"
+REASON_DIRECTORY = "a directory, not a disk image"
+# plafond de taille virtuelle d'un qcow2 téléversé (réglable)
+MAX_VIRTUAL_SIZE = qcow2.MAX_VIRTUAL_SIZE
 # débit minimal supposé pour borner un contrôle d'empreinte sur l'hôte
 VERIFY_MIN_BPS = 50 << 20
 
@@ -313,20 +321,31 @@ def _is_iso_probe(text):
     return "".join(text.split()) == "CD001"
 
 
-def list_images(host, decl=None, notes=None):
+def list_images(host, decl=None, notes=None, fresh=False):
     """Catalogue d'images d'un hôte : volumes des pools d'images déclarés
     (`decl["image_pools"]`), sinon volumes libres (cités par aucun domaine)
     de tous les pools actifs. Rend {"images": [{pool, volume, path, format,
     iso, capacity, allocation, sha256, url, date, author, used_by,
-    backing_users}], "pools": [noms lus], "unknown": [lectures manquées]}."""
+    backing_users}], "pools": [noms lus], "unknown": [lectures manquées],
+    "survey_age_s"}.
+
+    Vue seulement : le relevé vient du cache par hôte (ko.SURVEYS, rafraîchi
+    en arrière-plan, oublié à chaque écriture de la console) sauf `fresh`.
+    Les répertoires (volumes de format `dir`, par exemple la cible d'un pool
+    imbriqué) ne sont jamais listés."""
     notes = notes or {}
     wanted = list((decl or {}).get("image_pools") or [])
-    survey = ko._Survey(host)
+    if fresh:
+        survey, age = ko._Survey(host), 0.0
+    else:
+        survey, age = ko.SURVEYS.get(host)
     users = survey.users()
     pools = [p for p in (wanted or sorted(survey.vols)) if p in survey.vols]
     images, probes = [], []
     for p in pools:
         for n, v in sorted(survey.vols[p].items()):
+            if v.get("format") == "dir":
+                continue
             ids = {f"{p}/{n}", ko._norm(v["path"]) if v.get("path") else None} - {None}
             used_by = sorted({u for i in ids for u in users.get(i, [])})
             if not wanted and used_by:
@@ -352,7 +371,7 @@ def list_images(host, decl=None, notes=None):
                 rc != 0 and item["volume"].lower().endswith(".iso"))
     missing = [p for p in wanted if p not in survey.vols]
     return {"images": images, "pools": pools, "missing_pools": missing,
-            "unknown": sorted(set(survey.unknown))}
+            "unknown": sorted(set(survey.unknown)), "survey_age_s": round(age, 1)}
 
 
 # --- contrôle d'empreinte sur l'hôte ----------------------------------------------
@@ -410,14 +429,16 @@ def local_format(first):
     return "raw"
 
 
-def check_image_file(path):
+def check_image_file(path, max_virtual_size=None):
     """Contrôles d'un fichier avant envoi : taille, en-tête qcow2
     (qcow2.check_upload : fichier de base, fichier de données externe,
-    chiffrement...). Rend {size, format, refusals}."""
+    chiffrement, taille virtuelle au-delà de `max_virtual_size`, par défaut
+    MAX_VIRTUAL_SIZE). Rend {size, format, refusals}."""
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         first = f.read(max(qcow2.HEADER_READ, 32774))
-    refusals = qcow2.check_upload(first) if size else ["the file is empty"]
+    limit = MAX_VIRTUAL_SIZE if max_virtual_size is None else max_virtual_size
+    refusals = qcow2.check_upload(first, limit) if size else ["the file is empty"]
     return {"size": size, "format": local_format(first), "refusals": refusals}
 
 
@@ -441,7 +462,7 @@ def _delete_partial(host, pool, name):
 
 def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=True,
                   progress=None, cancel=None, limit_bps=None, notes_state=None, author=None,
-                  url=None, step=None):
+                  url=None, step=None, max_virtual_size=None):
     """Téléverse un fichier local comme nouveau volume du pool : nom
     contrôlé, volume absent, pool actif avec la place, en-tête qcow2
     contrôlé, `vol-create-as --format raw`, `vol-upload --file /dev/stdin`
@@ -449,7 +470,8 @@ def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=Tru
     format relu (libvirt le sonde), empreinte recalculée sur l'hôte si
     `verify`, note écrite dans `notes_state`.
 
-    `progress(octets)` ; `cancel()` ; `limit_bps`. Sur échec ou annulation
+    `progress(octets)` ; `cancel()` ; `limit_bps` ; `max_virtual_size` :
+    plafond de taille virtuelle d'un qcow2 (MAX_VIRTUAL_SIZE par défaut). Sur échec ou annulation
     (kh.Cancelled), le volume partiel est supprimé ; ce qui n'a pas pu
     l'être est attaché à l'exception (`exc.leftovers`). `step(id, statut,
     message)` reçoit `check`, `upload`, `verify`."""
@@ -464,7 +486,7 @@ def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=Tru
             step(sid, status, msg)
 
     st("check", "running", f"{pool}/{name}")
-    info = check_image_file(path)
+    info = check_image_file(path, max_virtual_size)
     if info["refusals"]:
         raise OpError("refused", "; ".join(info["refusals"]), {"refusals": info["refusals"]})
     if fmt_hint and fmt_hint not in ("qcow2", "raw", "iso"):
@@ -484,6 +506,7 @@ def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=Tru
                       f"needed, {pst['available']} available")
     st("check", "done", f"{info['format']}, {info['size']} bytes")
     started = time.monotonic()
+    ko.invalidate_survey(host)
     host.virsh("vol-create-as", "--pool", pool, "--name", name, "--capacity",
                str(info["size"]), "--format", "raw")
     try:
@@ -522,6 +545,8 @@ def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=Tru
         if isinstance(exc, OpError):
             exc.data["leftovers"] = exc.leftovers
         raise
+    finally:
+        ko.invalidate_survey(host)
     if notes_state is not None:
         save_note(notes_state, host.name, pool, name, {
             "sha256": local_sha, "url": url, "author": author,
@@ -574,79 +599,187 @@ def create_volume(host, pool, name, capacity, fmt="qcow2", backing=None,
     if fmt == "raw" and pst.get("available") is not None and capacity > pst["available"]:
         raise OpError("refused", f"not enough space in pool {pool}: {capacity} bytes needed, "
                       f"{pst['available']} available")
-    host.virsh(*create_volume_argv(pool, name, capacity, fmt, backing, bfmt, prealloc_metadata))
+    with ko.writing(host):
+        host.virsh(*create_volume_argv(pool, name, capacity, fmt, backing, bfmt,
+                                       prealloc_metadata))
     return _volume(host, pool, name)
 
 
-def resize_volume(host, pool, name, capacity):
-    """Agrandit un volume (`vol-resize`) ; refus d'une réduction et d'un
+def _stat_more(survey, paths):
+    """Identité `stat -L` de chemins que le relevé n'a pas encore lus
+    (cibles des pools, volumes d'un pool) ; un échec laisse le chemin sans
+    identité (comparé par texte seulement)."""
+    more = sorted({ko._norm(p) for p in paths if ko._is_path(p)} - set(survey.inode)
+                  - survey.absent)
+    if not more:
+        return
+    res = ko._sh_batch(survey.host, [["stat", "-L", "-c", "%d:%i", "--", p] for p in more],
+                       timeout=survey.timeout, idempotent=True)
+    for p, (rc, text) in zip(more, res):
+        if rc == 0 and re.fullmatch(r"\d+:\d+", (text or "").strip()):
+            survey.inode[p] = text.strip()
+
+
+def _volume_survey(host, pool, name, timeout=None):
+    """(volume, relevé) pour une décision d'écriture sur un volume : volume
+    lu d'abord (son chemin), puis relevé NEUF de l'hôte avec ce chemin en
+    `extra` (identité périphérique:inode et système de fichiers lus), et
+    identité des cibles de tous les pools (répertoire d'un pool imbriqué)."""
+    v = _volume(host, pool, name)
+    if v is None:
+        pool_state(host, pool)                  # pool absent : notfound plus clair
+        raise OpError("notfound", f"{host.name}: volume {pool}/{name} not found")
+    path = v.get("path")
+    survey = ko._Survey(host, extra=[path] if ko._is_path(path) else [], timeout=timeout)
+    again = survey.vols.get(pool, {}).get(name)
+    if again is None:
+        if pool not in survey.vols:
+            raise OpError("notfound", f"{host.name}: pool {pool} not found or not active")
+        raise OpError("notfound", f"{host.name}: volume {pool}/{name} not found")
+    if ko._norm(again.get("path") or "") != ko._norm(path or ""):
+        raise OpError("plan-changed", f"{pool}/{name} changed while it was read: try again")
+    _stat_more(survey, [i.get("target_path") for i in survey.pools.values()])
+    return again, survey
+
+
+def _pool_target_of(survey, path):
+    """Nom du pool dont `path` est la cible (texte ou identité), ou None."""
+    keys = survey.keys([path])
+    for p, info in sorted(survey.pools.items()):
+        t = info.get("target_path")
+        if t and survey.keys([t]) & keys:
+            return p
+    return None
+
+
+def _volume_proof(survey, pool, name, v, ack, running_only=False):
+    """Preuve qu'aucun domaine ne se sert d'un volume, comme `_owned` de la
+    1.98 (kvm_ops) : `sharers` (domaines qui citent le volume, comparés par
+    texte ET par périphérique:inode, donc aussi sous un lien), `backers`
+    (chaînes de sauvegarde qui passent par lui), stockage partagé entre
+    hôtes (REASON_SHARED_STORAGE : un autre hôte peut s'en servir), système
+    de fichiers illisible, lecture manquée (seul un fichier illisible pour
+    refus de droits est acceptable, `ack`). `running_only` : seuls les
+    domaines en marche comptent parmi les `sharers` (redimensionnement).
+    Rend (refus, {"sharers", "backers"})."""
+    path = v.get("path")
+    refusals = []
+    if v.get("format") == "dir":
+        owner = _pool_target_of(survey, path) if path else None
+        refusals.append(f"the directory of pool {owner}" if owner else REASON_DIRECTORY)
+    ids = {f"{pool}/{name}"} | ({ko._norm(path)} if path else set())
+    keys = survey.keys(ids)
+    sharers = survey.sharers(keys)
+    if running_only:
+        sharers = [d for d in sharers if survey.domains.get(d, {}).get("active")]
+        if sharers:
+            refusals.append(f"used by a running VM ({', '.join(sharers)}): shut it down first")
+    elif sharers:
+        refusals.append(f"used by {', '.join(sharers)}")
+    backers = [b for b in survey.backers(keys) if b not in ids
+               and ko._norm(b) != ko._norm(path or "")]
+    if backers:
+        refusals.append(f"backing file of {backers[0]}")
+    if ko._shared_storage(survey, {"pool": pool, "path": path}):
+        refusals.append(f"{ko.REASON_SHARED_STORAGE} (shared storage: another host may use it)")
+    elif path and ko._norm(path) not in survey.absent and \
+            survey.fstype.get(ko._norm(path), "") is None:
+        refusals.append(f"{REASON_UNPROVEN} (file system of the volume unreadable)")
+    if survey.blocked(ack):
+        left = sorted(p for p in survey.unreadable if p not in ack)
+        refusals.append(REASON_UNPROVEN + (f" (files the SSH user cannot read: {', '.join(left)})"
+                                           if left else ""))
+    return refusals, {"sharers": sharers, "backers": backers}
+
+
+def resize_volume(host, pool, name, capacity, acknowledged_unreadable=None):
+    """Agrandit un volume (`vol-resize`) ; refus d'une réduction, d'un
     volume cité par un domaine en marche (décision 66 : redimensionner
-    seulement VM arrêtée)."""
+    seulement VM arrêtée), d'une image de base, d'un stockage partagé, et
+    quand rien n'est prouvé (même preuve que la suppression)."""
     check_pool_name(pool)
     ko.check_vm_name(name)
     _check_size(capacity, "capacity")
+    ack = ko.check_acknowledged(acknowledged_unreadable)
     v = _volume(host, pool, name)
     if v is None:
         raise OpError("notfound", f"{host.name}: volume {pool}/{name} not found")
     if capacity <= (v.get("capacity") or 0):
         raise OpError("refused", f"the new size must be larger than {v.get('capacity')} bytes "
                       "(shrinking is not offered)")
-    doms = read_domains(host)
-    running = [d for d in volume_users(doms, pool, name, v.get("path"))
-               if doms["domains"][d]["active"]]
-    if running:
-        raise OpError("refused", f"used by a running VM ({', '.join(running)}): shut it down "
-                      "first")
-    if doms["unknown"]:
-        raise OpError("refused", f"{REASON_UNPROVEN}: unreadable VM definition(s) "
-                      f"{', '.join(doms['unknown'])}")
-    host.virsh("vol-resize", "--pool", pool, "--vol", name, "--capacity", str(capacity))
+    v, survey = _volume_survey(host, pool, name)
+    refusals, _ = _volume_proof(survey, pool, name, v, ack, running_only=True)
+    if refusals:
+        raise OpError("refused", "; ".join(refusals), {"refusals": refusals,
+                                                       "unreadable": sorted(survey.unreadable)})
+    with ko.writing(host):
+        host.virsh("vol-resize", "--pool", pool, "--vol", name, "--capacity", str(capacity))
     return _volume(host, pool, name)
 
 
-def delete_volume_plan(host, pool, name, acknowledged_unreadable=None):
-    """Plan de suppression d'un volume : {pool, volume, path, refusals,
-    unreadable}. Refus : cité par un domaine, image de base d'un autre
-    volume ou d'un disque, lecture manquée (rien n'est alors prouvé).
-    `acknowledged_unreadable` : fichiers illisibles que l'exploitant accepte
-    de considérer comme ne citant pas ce volume (décision 46, comme la
-    suppression d'une VM)."""
+def volume_digest(plan):
+    """Empreinte d'un plan de suppression de volume : pool, nom, clé libvirt,
+    chemin et identité périphérique:inode. Un volume recréé sous le même nom
+    entre l'aperçu et l'exécution n'a plus la même empreinte."""
+    doc = json.dumps({k: plan.get(k) for k in ("pool", "volume", "key", "path", "identity")},
+                     sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(doc.encode()).hexdigest()
+
+
+def delete_volume_plan(host, pool, name, acknowledged_unreadable=None, survey_timeout=None):
+    """Plan de suppression d'un volume, relevé NEUF (jamais le cache des
+    vues) : {pool, volume, key, path, identity, refusals, unreadable,
+    acknowledged_unreadable, digest}. Refus (`_volume_proof`) : cité par un
+    domaine (texte ou identité), image de base d'un autre volume ou d'un
+    disque, stockage partagé, répertoire (cible d'un pool imbriqué), lecture
+    manquée. `acknowledged_unreadable` : fichiers illisibles que l'exploitant
+    accepte de considérer comme ne citant pas ce volume (décision 46, comme
+    la suppression d'une VM)."""
     check_pool_name(pool)
     ko.check_vm_name(name)
     ack = ko.check_acknowledged(acknowledged_unreadable)
-    survey = ko._Survey(host, extra=[])
-    v = survey.vols.get(pool, {}).get(name)
-    if v is None:
-        if pool not in survey.vols:
-            raise OpError("notfound", f"{host.name}: pool {pool} not found or not active")
-        raise OpError("notfound", f"{host.name}: volume {pool}/{name} not found")
-    refusals = []
-    users = survey.users()
-    ids = {f"{pool}/{name}"} | ({ko._norm(v["path"])} if v.get("path") else set())
-    cited = sorted({u for i in ids for u in users.get(i, [])})
-    if cited:
-        refusals.append(f"used by {', '.join(cited)}")
-    backers = [b for b in survey.backers(survey.keys(ids)) if b not in ids
-               and ko._norm(b) != ko._norm(v.get("path") or "")]
-    if backers:
-        refusals.append(f"backing file of {backers[0]}")
+    v, survey = _volume_survey(host, pool, name, timeout=survey_timeout)
+    refusals, _ = _volume_proof(survey, pool, name, v, ack)
+    path = v.get("path")
     unreadable = sorted(survey.unreadable)
-    if survey.blocked(ack):
-        left = [p for p in unreadable if p not in ack]
-        refusals.append(REASON_UNPROVEN + (f" (files the SSH user cannot read: {', '.join(left)})"
-                                           if left else ""))
-    return {"pool": pool, "volume": name, "path": v.get("path"), "refusals": refusals,
-            "unreadable": unreadable}
+    plan = {"pool": pool, "volume": name, "key": v.get("key"), "path": path,
+            "identity": survey.inode.get(ko._norm(path)) if path else None,
+            "refusals": refusals, "unreadable": unreadable,
+            "acknowledged_unreadable": sorted(ack & set(unreadable))}
+    plan["digest"] = volume_digest(plan)
+    return plan
 
 
-def delete_volume(host, pool, name, notes_state=None, acknowledged_unreadable=None):
-    """Supprime un volume après un plan recalculé ici (jamais l'aperçu)."""
-    plan = delete_volume_plan(host, pool, name, acknowledged_unreadable)
+def delete_volume(host, pool, name, notes_state=None, acknowledged_unreadable=None,
+                  expect_digest=None, progress=None, survey_timeout=None):
+    """Supprime un volume après un plan recalculé ici (jamais l'aperçu).
+    `expect_digest` : `digest` de l'aperçu montré ; s'il ne correspond plus
+    (volume recréé, déplacé), OpError `plan-changed` et rien n'est fait.
+    `progress(étape, statut, message)` reçoit `plan` et `delete` (action
+    suivie de la console)."""
+    ko.check_digest(expect_digest)
+
+    def step(sid, status, msg=""):
+        if progress:
+            progress(sid, status, msg)
+
+    step("plan", "running", f"{pool}/{name}")
+    plan = delete_volume_plan(host, pool, name, acknowledged_unreadable, survey_timeout)
     if plan["refusals"]:
-        raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"]})
-    host.virsh("vol-delete", "--pool", pool, "--vol", name)
+        step("plan", "failed", "; ".join(plan["refusals"]))
+        raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"],
+                                                                "plan": plan})
+    if expect_digest is not None and expect_digest != plan["digest"]:
+        msg = f"{pool}/{name} changed since the preview: nothing was done; preview again"
+        step("plan", "failed", msg)
+        raise OpError("plan-changed", msg, {"refusals": [], "plan": plan})
+    step("plan", "done", "nothing uses it")
+    step("delete", "running", f"{pool}/{name}")
+    with ko.writing(host):
+        host.virsh("vol-delete", "--pool", pool, "--vol", name)
     if notes_state is not None:
         save_note(notes_state, host.name, pool, name, None)
+    step("delete", "done", f"{pool}/{name}")
     return {**plan, "deleted": True}
 
 
@@ -664,9 +797,51 @@ def _norm_abs(path, what):
     return norm
 
 
-def check_pool_spec(spec, pools):
+def _ancestors(path):
+    """Le chemin puis chacun de ses parents jusqu'à « / »."""
+    out, p = [], posixpath.normpath(path)
+    while True:
+        out.append(p)
+        if p in ("/", "//", "."):
+            return out
+        p = posixpath.dirname(p)
+
+
+def path_ids(host, paths):
+    """{chemin: « périphérique:inode »} (`stat -L`, liens suivis) de chaque
+    chemin et de chacun de ses parents, en un appel ; un chemin absent ou
+    illisible n'a pas d'identité (comparé par texte seulement)."""
+    todo = sorted({a for p in paths if isinstance(p, str) and p.startswith("/")
+                   for a in _ancestors(p)})
+    if not todo:
+        return {}
+    res = ko._sh_batch(host, [["stat", "-L", "-c", "%d:%i", "--", p] for p in todo],
+                       idempotent=True)
+    return {p: text.strip() for p, (rc, text) in zip(todo, res)
+            if rc == 0 and re.fullmatch(r"\d+:\d+", (text or "").strip())}
+
+
+def path_relation(a, b, ids=None):
+    """Relation de deux répertoires : `same`, `inside` (a sous b), `contains`
+    (b sous a) ou None. Par texte, et par identité quand `ids` (path_ids) la
+    donne : un lien vers le répertoire d'un pool est le même répertoire."""
+    ids = ids or {}
+    a, b = posixpath.normpath(a), posixpath.normpath(b)
+    ia, ib = ids.get(a), ids.get(b)
+    if a == b or (ia and ia == ib):
+        return "same"
+    if _under(a, b) or (ib and ib in {ids.get(x) for x in _ancestors(a)[1:]}):
+        return "inside"
+    if _under(b, a) or (ia and ia in {ids.get(x) for x in _ancestors(b)[1:]}):
+        return "contains"
+    return None
+
+
+def check_pool_spec(spec, pools, ids=None):
     """Raisons de refus d'un pool à créer. `spec` : {name, type (dir|netfs),
-    path, source_host, source_dir, autostart} ; `pools` : list_pools()."""
+    path, source_host, source_dir, autostart} ; `pools` : list_pools() ;
+    `ids` : path_ids() de la cible, des cibles des pools et des répertoires
+    système (sans lui, comparaison par texte seulement)."""
     reasons = []
     if not isinstance(spec, dict):
         return ["the pool spec must be an object"]
@@ -683,22 +858,23 @@ def check_pool_spec(spec, pools):
         path = None
     if path:
         for bad in FORBIDDEN_POOL_PATHS:
-            if path == bad or (bad != "/" and _under(path, bad)) or (
-                    path != "/" and _under(bad, path)):
+            rel = path_relation(path, bad, ids)
+            if rel == "same" or (rel and bad != "/"):
                 reasons.append(f"the target path {path} is or contains a system directory "
                                f"({bad})")
                 break
         for p in pools:
             other = p.get("target_path")
+            rel = path_relation(path, other, ids) if other else None
             if p.get("name") == spec.get("name"):
                 reasons.append(f"a pool named {p['name']} already exists")
-            elif other and posixpath.normpath(other) == path:
+            elif rel == "same":
                 reasons.append(f"the target path is the directory of pool {p['name']}: a file "
                                "seen by two pools would break the ownership checks")
-            elif other and (_under(path, other) or _under(other, path)) and (
-                    p.get("type") not in ("dir", "fs", "netfs")):
-                reasons.append(f"the target path overlaps pool {p['name']} ({other}, "
-                               f"{p.get('type')})")
+            elif rel and not (spec.get("type") == "dir" and p.get("type") == "dir"):
+                where = "inside" if rel == "inside" else "around"
+                reasons.append(f"the target path is {where} pool {p['name']} ({other}, "
+                               f"{p.get('type')}): only two dir pools may be nested")
     if spec.get("type") == "netfs":
         h = spec.get("source_host")
         try:
@@ -715,13 +891,12 @@ def check_pool_spec(spec, pools):
     return reasons
 
 
-def nested_pools(spec, pools):
+def nested_pools(spec, pools, ids=None):
     """Pools `dir` dont la cible contient celle du nouveau pool ou y est
-    contenue (accepté, dit dans le plan)."""
+    contenue (accepté entre deux pools `dir`, dit dans le plan)."""
     path = posixpath.normpath(spec["path"])
     return sorted(p["name"] for p in pools if p.get("target_path")
-                  and posixpath.normpath(p["target_path"]) != path
-                  and (_under(path, p["target_path"]) or _under(p["target_path"], path)))
+                  and path_relation(path, p["target_path"], ids) in ("inside", "contains"))
 
 
 def pool_xml(spec):
@@ -752,13 +927,18 @@ def define_pool(host, spec, step=None, dry_run=False):
     st("plan", "running", str(spec.get("name") if isinstance(spec, dict) else "?"))
     pools = list_pools(host)
     reasons = check_pool_spec(spec, pools)
+    ids = {}
+    if not reasons:
+        ids = path_ids(host, [spec["path"], *FORBIDDEN_POOL_PATHS,
+                              *(p["target_path"] for p in pools if p.get("target_path"))])
+        reasons = check_pool_spec(spec, pools, ids)
     if reasons:
         st("plan", "failed", "; ".join(reasons))
         raise OpError("refused", "; ".join(reasons), {"refusals": reasons})
     path = _norm_abs(spec["path"], "path")
     existed = ko._sh_batch(host, [["test", "-e", path]], idempotent=True)[0][0] == 0
     xml = pool_xml(spec)
-    nested = nested_pools(spec, pools)
+    nested = nested_pools(spec, pools, ids)
     st("plan", "done", f"{spec['type']} pool at {path}"
        + (" (existing directory)" if existed else "")
        + (f" (nested with pool {', '.join(nested)})" if nested else ""))
@@ -767,6 +947,7 @@ def define_pool(host, spec, step=None, dry_run=False):
                 "nested_with": nested}
     name = spec["name"]
     done = []
+    ko.invalidate_survey(host)
     try:
         st("define", "running", name)
         virsh_input(host, ("pool-define", "--validate", "--file", "/dev/stdin"), xml)
@@ -794,26 +975,31 @@ def define_pool(host, spec, step=None, dry_run=False):
         if isinstance(exc, OpError):
             exc.data["leftovers"] = leftovers
         raise
+    finally:
+        ko.invalidate_survey(host)
     return {"name": name, "dry_run": False, "state": pool_state(host, name),
             "existing_directory": existed, "nested_with": nested}
 
 
 def start_pool(host, name):
     check_pool_name(name)
-    host.virsh("pool-start", "--pool", name)
+    with ko.writing(host):
+        host.virsh("pool-start", "--pool", name)
     return pool_state(host, name)
 
 
 def refresh_pool(host, name):
     check_pool_name(name)
-    host.virsh("pool-refresh", "--pool", name)
+    with ko.writing(host):
+        host.virsh("pool-refresh", "--pool", name)
     return pool_state(host, name)
 
 
 def autostart_pool(host, name, enable=True):
     check_pool_name(name)
     args = ["pool-autostart", "--pool", name] + ([] if enable else ["--disable"])
-    host.virsh(*args)
+    with ko.writing(host):
+        host.virsh(*args)
     return pool_state(host, name)
 
 
@@ -830,44 +1016,77 @@ def stop_pool(host, name):
     if doms["unknown"]:
         raise OpError("refused", f"{REASON_UNPROVEN}: unreadable VM definition(s) "
                       f"{', '.join(doms['unknown'])}")
-    host.virsh("pool-destroy", "--pool", name)
+    with ko.writing(host):
+        host.virsh("pool-destroy", "--pool", name)
     return pool_state(host, name)
 
 
-def delete_pool_plan(host, name, remove_dir=False, busy=()):
-    """Plan de suppression d'un pool : refus si une définition de domaine
-    (active ou inactive) cite un de ses volumes ou un chemin sous sa cible,
-    si une opération de la console y écrit (`busy` : libellés), ou si une
-    lecture a manqué. `remove_dir` : `pool-delete` seulement si le pool est
-    vide."""
+def delete_pool_plan(host, name, remove_dir=False, busy=(), acknowledged_unreadable=None,
+                     survey_timeout=None):
+    """Plan de suppression d'un pool, relevé neuf : refus si une définition
+    de domaine (active ou inactive) cite un de ses volumes ou un chemin sous
+    sa cible (texte, ou identité périphérique:inode : un lien compte), si la
+    chaîne de sauvegarde d'un domaine ou d'un volume d'un autre pool passe
+    par un fichier du pool, si une opération de la console y écrit (`busy` :
+    libellés), ou si une lecture a manqué (un fichier illisible pour refus de
+    droits peut être accepté, `acknowledged_unreadable`, décision 46).
+    `remove_dir` : `pool-delete` seulement si le pool est vide."""
     check_pool_name(name)
+    ack = ko.check_acknowledged(acknowledged_unreadable)
     st = pool_state(host, name)
-    doms = read_domains(host)
+    target = st.get("target_path")
+    survey = ko._Survey(host, extra=[target] if ko._is_path(target) else [],
+                        timeout=survey_timeout)
+    vols = survey.vols.get(name, {})
+    vol_paths = [v["path"] for v in vols.values() if ko._is_path(v.get("path"))]
+    _stat_more(survey, vol_paths)
+    pool_keys = survey.keys(vol_paths) | {("p", f"{name}/{n}") for n in vols}
+
+    def in_pool(p):
+        return bool(ko._is_path(p) and target and _under(ko._norm(p), target)) or bool(
+            survey.keys([p]) & pool_keys)
+
+    users, chains = set(), set()
+    for r in survey.refs:
+        inside = r["path"] and in_pool(r["path"])
+        if r["owner"] not in (None, ko._SELF):
+            if inside or any(i.startswith(f"{name}/") or in_pool(i) for i in r["ids"]):
+                users.add(r["owner"])
+                continue
+        elif inside:
+            continue                    # volume libre du pool lui-même : part avec lui
+        if any(in_pool(c) for c in r["chain"]):
+            chains.add(r["owner"] if r["owner"] not in (None, ko._SELF) else r["top"])
     refusals = []
-    users = pool_users(doms, name, st.get("target_path"))
     if users:
-        refusals.append(f"used by {', '.join(users)}")
-    if doms["unknown"]:
-        refusals.append(f"{REASON_UNPROVEN}: unreadable VM definition(s) "
-                        f"{', '.join(doms['unknown'])}")
+        refusals.append(f"used by {', '.join(sorted(users))}")
+    if chains:
+        refusals.append(f"a backing chain uses a file of the pool: {', '.join(sorted(chains))}")
+    if survey.blocked(ack):
+        left = sorted(p for p in survey.unreadable if p not in ack)
+        refusals.append(REASON_UNPROVEN + (f" (files the SSH user cannot read: {', '.join(left)})"
+                                           if left else
+                                           f": {', '.join(sorted(set(survey.unknown)))}"))
     if busy:
         refusals.append(f"an operation of the console writes to it: {', '.join(busy)}")
-    vols = None
+    names = None
     if remove_dir:
         if st["state"] == "running":
-            vols = sorted(pool_volumes(host, name))
-            if vols:
-                refusals.append(f"the pool still holds {len(vols)} volume(s): the directory is "
+            names = sorted(pool_volumes(host, name))
+            if names:
+                refusals.append(f"the pool still holds {len(names)} volume(s): the directory is "
                                 "only removed when empty")
         else:
             refusals.append("start the pool first so that the console can see it is empty")
         if st.get("type") not in ("dir", "netfs"):
             refusals.append("the console only removes the directory of dir and NFS pools")
-    return {"name": name, "state": st, "remove_dir": bool(remove_dir), "volumes": vols,
-            "refusals": refusals}
+    return {"name": name, "state": st, "remove_dir": bool(remove_dir), "volumes": names,
+            "refusals": refusals, "unreadable": sorted(survey.unreadable),
+            "acknowledged_unreadable": sorted(ack & survey.unreadable)}
 
 
-def delete_pool(host, name, remove_dir=False, busy=(), step=None):
+def delete_pool(host, name, remove_dir=False, busy=(), step=None, acknowledged_unreadable=None,
+                survey_timeout=None):
     """Supprime un pool après un plan recalculé : `pool-destroy` (s'il est
     actif), `pool-delete` si demandé et vide, `pool-undefine`. Jamais de
     suppression de volumes en masse."""
@@ -876,12 +1095,13 @@ def delete_pool(host, name, remove_dir=False, busy=(), step=None):
             step(sid, status, msg)
 
     stp("plan", "running", name)
-    plan = delete_pool_plan(host, name, remove_dir, busy)
+    plan = delete_pool_plan(host, name, remove_dir, busy, acknowledged_unreadable, survey_timeout)
     if plan["refusals"]:
         stp("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"]})
     stp("plan", "done", "nothing uses it")
     stp("delete", "running", name)
+    ko.invalidate_survey(host)
     if plan["state"]["state"] == "running":
         if not remove_dir:
             host.virsh("pool-destroy", "--pool", name)
@@ -891,5 +1111,6 @@ def delete_pool(host, name, remove_dir=False, busy=(), step=None):
             host.virsh("pool-delete", "--pool", name)
     if plan["state"].get("persistent", True):
         host.virsh("pool-undefine", "--pool", name)
+    ko.invalidate_survey(host)
     stp("delete", "done", name)
     return {"name": name, "deleted": True, "directory_removed": bool(remove_dir)}
