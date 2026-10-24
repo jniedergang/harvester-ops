@@ -416,7 +416,7 @@ def test_hostile_vm_names_stay_one_argument_and_out_of_the_label(client, env, vm
 def test_every_replication_label_is_built_from_checked_tokens():
     labels = re.findall(r'label = f"(replication:[^"]+)"', SRC) + re.findall(r'f"(replication:create:[^"]+)"', SRC)
     assert labels == ["replication:{plan['id']}:{op}", "replication:create:{plan['name']}"]
-    assert "plan, argv = _repl_create_request(body)" in SRC          # le nom passe par normalize_plan
+    assert "plan, argv, recovery = _repl_create_request(body)" in SRC          # le nom passe par normalize_plan
 
 
 @pytest.mark.parametrize("path,body,code", [
@@ -569,7 +569,7 @@ def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_l
     from limits import parse_many
     blocks = re.split(r"\n(?=@app\.route\()", SRC)
     routes = [b for b in blocks if b.startswith('@app.route("/api/replication/')]
-    assert len(routes) == 15
+    assert len(routes) == 17
     for b in routes:
         head = b.split("\ndef ", 1)[0]
         assert "@requires_auth" in head, head
@@ -578,7 +578,7 @@ def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_l
             assert parse_many(spec), head
         else:
             assert "@_rate_limit" not in head and "@shared_read(scope=REPLICATION_SCOPE)" in head \
-                or "/follower" in head
+                or "/follower" in head or "/candidates/" in head
 
 
 # --- relais : statut et résumé ----------------------------------------------------------
