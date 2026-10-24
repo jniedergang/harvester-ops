@@ -88,6 +88,8 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
+import baremetal_onboarding as _bmo
+import baremetal_onboarding_runtime as _bmor
 from flask import (
     Flask,
     Response,
@@ -5666,18 +5668,17 @@ def _bm_vm_apply(opts, run, step, deadline):
                      + (": " + last if last else ""))
 
 
-import baremetal_onboarding as _bmo
-import baremetal_onboarding_runtime as _bmor
-
-
 def _bm_onboarding_config(data, cfg):
+    """Configuration d'installation complétée par le profil de stockage
+    choisi ; inchangée sans profil. L'identité d'installation vient du plan
+    préparé côté serveur (_bmor.preflight), jamais du navigateur."""
     if not _bmo.selected(data):
         return cfg
     try:
         out = _bmo.augment(cfg, _bmo.selection(data, cfg))
         identity = data.get('_onboarding_plan', {}).get('install_id')
         if identity:
-            out['os'].setdefault('labels', {})['harvester-ops.io/install-id'] = identity
+            out['os'].setdefault('labels', {})[_bmo.INSTALL_ID_LABEL] = identity
         return out
     except _bmo.ProfileError as e:
         raise InstallConfigError(["onboarding"], "invalid onboarding profile", {"onboarding": str(e)}) from e
@@ -5763,7 +5764,7 @@ def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
         node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
-        if node and getattr(run, "_onboarding_enabled", False):
+        if node and getattr(run, "_onboarding_plan", None):
             node = _bmor.guard(sys.modules[__name__], kubeconfig, node, run)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
@@ -6279,8 +6280,9 @@ def _bm_reset(host, user, pwd, sys_path, reset_type):
 
 
 def _baremetal_install_runner(run, opts):
-    run._onboarding_enabled = bool(opts.get("_onboarding_plan"))
-    run._onboarding_install_id = opts.get("_onboarding_plan", {}).get("install_id")
+    # plan préparé par _bmor.preflight : seule source de l'identité
+    # d'installation pour la garde du nœud et les vérifications finales
+    run._onboarding_plan = opts.get("_onboarding_plan")
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
     tokens = []
@@ -6458,8 +6460,6 @@ def _baremetal_install_runner(run, opts):
            "--work-dir", str(_iso_work_dir())]
     try:
         network_args = _bm_boot_network_args(yaml.safe_load(cfg_yaml), opts.get("extra_args", ""))
-        if opts.get("_onboarding_plan"):
-            network_args += " " + " ".join(_bmo.definition(opts["onboarding"]["profile"])["bootstrap_args"])
     except BootNetworkError as e:
         return fail("remaster", f"invalid bootstrap network: {e.path}")
     cmd += ["--network-args", network_args]
@@ -7036,9 +7036,16 @@ def _bm_prepare_install(data, defer_join=False):
     data.pop("_onboarding_plan", None)
     if _bmo.selected(data):
         try:
-            data["_onboarding_plan"] = _bmor.preflight(sys.modules[__name__], data, _bm_render_checked(data))
+            data["_onboarding_plan"] = _bmor.preflight(sys.modules[__name__], data,
+                                                       _bm_render_checked(data))
+        except _bmo.ProfileError as e:
+            # messages fixes du module (rôles, noms Kubernetes) : ni chemin ni secret
+            return None, (jsonify({"error": "onboarding preflight failed: " + str(e),
+                                   "fields": ["onboarding"]}), 400)
         except (ValueError, OSError, subprocess.TimeoutExpired):
-            return None, (jsonify({"error": "onboarding preflight failed; check profile, new hostname, target network and current user permissions", "fields": ["onboarding"]}), 400)
+            return None, (jsonify({"error": "onboarding preflight failed; check profile, new "
+                                            "hostname, target network and current user permissions",
+                                   "fields": ["onboarding"]}), 400)
     try:
         _bm_artifact_base_urls(data, 8091)
     except ValueError:

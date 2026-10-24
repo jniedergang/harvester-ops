@@ -450,14 +450,14 @@ const BMC = (() => {
             </div>
           </fieldset>
           <div id="bm-raid-box">${raidHtml(node.storage)}</div>
-          <fieldset id="bm-onboarding">
+          <fieldset id="bm-onboarding" class="bm-onboarding" hidden>
             <legend>${esc(tr('bmc.onboard.title'))}</legend>
-            <label style="grid-column:1/-1"><input type="checkbox" name="onboard_enabled"> ${esc(tr('bmc.onboard.enable'))}</label>
+            <label style="grid-column:1/-1" ${tipAttr(tr('bmc.onboard.tip.enable'))}><input type="checkbox" name="onboard_enabled"> ${esc(tr('bmc.onboard.enable'))}</label>
             <p class="form-hint" style="grid-column:1/-1">${esc(tr('bmc.onboard.hint'))}</p>
             <div data-onboard-fields hidden style="grid-column:1/-1">
-              <label>${esc(tr('bmc.onboard.profile'))}<select name="onboard_profile"></select></label>
+              <label ${tipAttr(tr('bmc.onboard.tip.profile'))}>${esc(tr('bmc.onboard.profile'))}<select name="onboard_profile"></select></label>
               <p class="form-hint" data-onboard-description></p>
-              <label data-onboard-wwid hidden>${esc(tr('bmc.onboard.bootWwid'))}<input name="onboard_boot_wwid" autocomplete="off"></label>
+              <label data-onboard-wwid hidden ${tipAttr(tr('bmc.onboard.tip.bootWwid'))}>${esc(tr('bmc.onboard.bootWwid'))}<input name="onboard_boot_wwid" autocomplete="off"></label>
               <div data-onboard-ports></div>
               <p class="form-hint" data-onboard-message></p>
             </div>
@@ -515,20 +515,31 @@ const BMC = (() => {
       form.querySelector('[data-onboard-wwid]').hidden = !profile?.boot_disk_exclusion;
       field('onboard_boot_wwid').disabled = !profile?.boot_disk_exclusion;
       field('onboard_boot_wwid').required = !!profile?.boot_disk_exclusion;
-      form.querySelector('[data-onboard-ports]').innerHTML = Object.entries(profile?.ports || {}).map(([role, label]) => `
+      const macOptions = (node.nics || []).filter(n => n.mac)
+        .map(n => `<option value="${esc(n.mac)}">${esc(n.mac)}</option>`).join('');
+      const ports = Object.entries(profile?.ports || {});
+      form.querySelector('[data-onboard-ports]').innerHTML = ports.map(([role, label]) => `
         <div class="form-row"><strong>${esc(label)}</strong>
-          <label>${esc(tr('bmc.onboard.nic'))}<input name="onboard_${esc(role)}_name" required autocomplete="off"></label>
-          <label>MAC<select name="onboard_${esc(role)}_mac" required><option value=""></option>${(node.nics || []).filter(n => n.mac).map(n => `<option value="${esc(n.mac)}">${esc(n.mac)}</option>`).join('')}</select></label>
-          <label>IPv4/CIDR<input name="onboard_${esc(role)}_address" required autocomplete="off" placeholder="192.0.2.10/24"></label>
+          <label ${tipAttr(tr('bmc.onboard.tip.mac'))}>${esc(tr('bmc.onboard.mac'))}<select name="onboard_${esc(role)}_mac" required><option value=""></option>${macOptions}</select></label>
+          <label ${tipAttr(tr('bmc.onboard.tip.address'))}>${esc(tr('bmc.onboard.address'))}<input name="onboard_${esc(role)}_address" required autocomplete="off" placeholder="192.0.2.10/24"></label>
         </div>`).join('');
+    }
+    // Le mode est un champ caché, sans événement change : syncAll appelle
+    // cette fonction, comme pour .bm-vm-network. Elle ne touche pas aux
+    // champs saisis tant que le mode reste « join ».
+    function syncOnboardingMode() {
+      const join = field('mode').value === 'join';
+      form.querySelector('.bm-onboarding').hidden = !join;
+      onboardEnabled.disabled = !join;
+      if (!join && onboardEnabled.checked) { onboardEnabled.checked = false; syncOnboarding(); }
     }
     async function syncOnboarding() {
       const generation = ++onboardFetch;
-      const join = field('mode').value === 'join';
-      onboardEnabled.disabled = !join;
-      if (!join) onboardEnabled.checked = false;
       onboardFields.hidden = !onboardEnabled.checked;
-      onboardFields.querySelectorAll('input, select').forEach(input => { input.disabled = !onboardEnabled.checked; input.required = onboardEnabled.checked; });
+      onboardFields.querySelectorAll('input, select').forEach(input => {
+        input.disabled = !onboardEnabled.checked;
+        input.required = onboardEnabled.checked;
+      });
       if (!onboardEnabled.checked) return;
       try {
         if (!storageProfiles.length) {
@@ -537,17 +548,20 @@ const BMC = (() => {
           if (generation !== onboardFetch || !onboardEnabled.checked) return;
           if (!r.ok) throw new Error(tr('bmc.onboard.loadError'));
           storageProfiles = d.profiles || [];
-          field('onboard_profile').innerHTML = '<option value="">' + esc(tr('bmc.onboard.select')) + '</option>' + storageProfiles.map(p =>
-            `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+          field('onboard_profile').innerHTML = '<option value="">' + esc(tr('bmc.onboard.select')) + '</option>'
+            + storageProfiles.map(p => `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
         }
         renderStoragePorts();
         onboardMessage.textContent = tr('bmc.onboard.noIpGuess');
-      } catch (e) { if (generation === onboardFetch) { onboardMessage.textContent = tr('bmc.onboard.loadError'); field('onboard_profile').innerHTML = '<option value=""></option>'; } }
+      } catch (e) {
+        if (generation === onboardFetch) {
+          onboardMessage.textContent = tr('bmc.onboard.loadError');
+          field('onboard_profile').innerHTML = '<option value=""></option>';
+        }
+      }
     }
     onboardEnabled.addEventListener('change', syncOnboarding);
-    field('mode').addEventListener('change', syncOnboarding);
     field('onboard_profile').addEventListener('change', renderStoragePorts);
-    syncOnboarding();
 
     // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
     // identifiant ; le navigateur ne les voit jamais.
@@ -999,8 +1013,7 @@ const BMC = (() => {
         l.querySelector('input').required = stat;
       });
       const creating = field('mode').value !== 'join';
-      onboardEnabled.disabled = creating;
-      if (creating && onboardEnabled.checked) { onboardEnabled.checked = false; syncOnboarding(); }
+      syncOnboardingMode();
       form.querySelector('.bm-vm-network').hidden = creating;
       if (!creating && field('vm_enabled').checked) loadVmTemplates();
       panel.el.querySelectorAll('.bm-create').forEach(l => {
@@ -1036,7 +1049,8 @@ const BMC = (() => {
         const profile = storageProfile();
         const ports = {};
         for (const role of Object.keys(profile?.ports || {})) {
-          ports[role] = Object.fromEntries(['name', 'mac', 'address'].map(k => [k, field('onboard_' + role + '_' + k).value.trim()]));
+          ports[role] = Object.fromEntries(['mac', 'address']
+            .map(k => [k, field('onboard_' + role + '_' + k).value.trim()]));
         }
         body.onboarding = {profile: field('onboard_profile').value,
           boot_wwid: profile?.boot_disk_exclusion ? field('onboard_boot_wwid').value.trim() : '', ports};

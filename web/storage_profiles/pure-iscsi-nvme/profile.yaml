@@ -1,7 +1,7 @@
-label: Pure iSCSI and NVMe/TCP (example)
-description: Example host prerequisites for an existing Pure CSI deployment. Review
-  the packaged settings and CSI DaemonSet reference for your environment. No array
-  provisioning or CSI credentials are configured.
+label: Pure iSCSI and NVMe/TCP (unverified example)
+description: Unverified example of host prerequisites for an existing Pure CSI
+  deployment. Review every setting and the CSI DaemonSet reference for your
+  environment. No array provisioning or CSI credentials are configured.
 ports:
   iscsi1: iSCSI interface 1
   iscsi2: iSCSI interface 2
@@ -9,13 +9,24 @@ ports:
   nvme2: NVMe/TCP interface 2
 files:
 - 91-pure-storage-udev.yaml
-- 96-nvme-tcp.yaml
+- 92-pure-multipath-tuning.yaml
 - 99-iscsi-ifaces.yaml
-- 99-load-dm-multipath.yaml
-- portworx-multipathd.yaml
+# Harvester renders /etc/multipath.conf from this block through
+# os.external_storage_config and enables multipathd. The local boot disk WWID
+# entered in the form is added to blacklistWwids.
 boot_disk_exclusion: true
-bootstrap_args:
-- multipath=off
+multipath:
+  blacklist:
+  - vendor: HPE
+    product: LOGICAL VOLUME
+  - vendor: VMware
+    product: Virtual disk
+  blacklistExceptions:
+  - vendor: NVME
+    product: Everpure FlashArray
+  - vendor: PURE
+    product: FlashArray
+# Loaded by the installer at every boot (os.modules).
 modules:
 - dm_multipath
 - scsi_dh_alua

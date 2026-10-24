@@ -36,15 +36,21 @@ def test_storage_profiles_preview_launch_disable_and_vm_uplinks(context, flask_s
     page.mouse.move(1300, 450)
     form = page.locator('#bmc-discover-form');form.locator('[name="hosts"]').fill(host);form.locator('[name="password"]').fill('fixture-bmc-password');form.locator('button[type="submit"]').click()
     page.locator('.bmc-install').click();win = page.locator('#bm-install-form')
+    # création de cluster : la section est masquée, comme le réseau VM
+    expect(win.locator('#bm-onboarding')).to_be_hidden()
     expect(win.locator('[name="onboard_enabled"]')).not_to_be_checked()
     win.locator('[data-bm="file"]').set_input_files({'name': 'join.yaml', 'mimeType': 'text/yaml', 'buffer': b'install: {mode: join}'})
+    expect(win.locator('#bm-onboarding')).to_be_visible()
     expect(win.locator('[name="onboard_enabled"]')).to_be_enabled()
     win.locator('[name="onboard_enabled"]').check()
     expect(win.locator('[name="onboard_profile"] option')).to_have_count(3)
     win.locator('[name="onboard_profile"]').select_option('storage-network-only')
     expect(win.locator('[data-onboard-wwid]')).to_be_hidden()
+    # chaque contrôle porte sa bulle d'aide, et le nom Linux n'est plus demandé
+    for name in ('onboard_profile', 'onboard_storage1_mac', 'onboard_storage1_address'):
+        assert win.locator('label:has([name="%s"])' % name).get_attribute('data-tip')
+    assert win.locator('[name="onboard_storage1_name"]').count() == 0
     for i, role in enumerate(('storage1', 'storage2')):
-        win.locator('[name="onboard_%s_name"]' % role).fill('ens3f' + str(i + 6))
         win.locator('[name="onboard_%s_mac"]' % role).select_option(macs[i + 2])
         win.locator('[name="onboard_%s_address"]' % role).fill(('192.0.2.74/24', '198.51.100.74/24')[i])
     def preview():
@@ -54,11 +60,11 @@ def test_storage_profiles_preview_launch_disable_and_vm_uplinks(context, flask_s
     assert captured[-1]['onboarding']['profile'] == 'storage-network-only'
     assert captured[-1]['onboarding']['boot_wwid'] == ''
     assert len(captured[-1]['onboarding']['ports']) == 2
+    assert captured[-1]['onboarding']['ports']['storage1'] == {'mac': macs[2], 'address': '192.0.2.74/24'}
     win.locator('[name="onboard_profile"]').select_option('pure-iscsi-nvme')
     expect(win.locator('[data-onboard-wwid]')).to_be_visible()
     win.locator('[name="onboard_boot_wwid"]').fill('360000000000000000000000000000001')
     for i, role in enumerate(('iscsi1', 'iscsi2', 'nvme1', 'nvme2')):
-        win.locator('[name="onboard_%s_name"]' % role).fill(('ens3f6','ens3f7','enp55s1f0','enp55s1f1')[i])
         win.locator('[name="onboard_%s_mac"]' % role).select_option(macs[i + 2])
         win.locator('[name="onboard_%s_address"]' % role).fill(('192.0.2.74/24','198.51.100.74/24','198.18.6.74/24','198.18.10.74/24')[i])
     win.locator('[name="vm_enabled"]').check();expect(win.locator('[name="vm_template"] option')).to_have_count(2)

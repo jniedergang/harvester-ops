@@ -9,7 +9,7 @@ zéro-touch de Harvester, piloté de bout en bout par la console.
 
 Les [profils de stockage facultatifs](baremetal-storage-onboarding.md) préparent
 les interfaces dédiées et prérequis fournisseur pendant une jonction, puis laissent
-l’hôte non planifiable pour validation. Le profil réseau neutre et l’exemple Pure
+l’hôte non planifiable pour validation. Le profil réseau neutre et l’exemple Pure non vérifié
 n’installent pas de chart CSI et ne configurent pas les identifiants des baies.
 
 ---

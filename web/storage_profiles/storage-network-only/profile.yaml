@@ -7,7 +7,7 @@ ports:
   storage2: Storage interface 2
 files: []
 boot_disk_exclusion: false
-bootstrap_args: []
+multipath: null
 modules: []
 services: []
 iscsi_ifaces: {}
