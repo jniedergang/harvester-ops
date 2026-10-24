@@ -831,6 +831,13 @@ def _add_disk(vm):
     t["domain"]["devices"].setdefault("disks", []).append({"name": "data", "disk": {"bus": "virtio"}})
 
 
+def _domain(vm, **parts):
+    _bump(vm)
+    d = vm["spec"]["template"]["spec"]["domain"]
+    for k, v in parts.items():
+        d[k] = dict(d.get(k) or {}, **v)
+
+
 def _ci(vm, secret):
     _bump(vm)
     vm["spec"]["template"]["spec"]["volumes"].append(
@@ -857,6 +864,19 @@ def _ci(vm, secret):
     # disque agrandi (taille lue sur le PVC)
     (_bump, [dict(DISK_FACTS[0], size=2 * GiB)], True),
     (_bump, [dict(DISK_FACTS[0], storage_class="harv-rep1")], True),
+    # v1.99.0, décision 49 : processeur et mémoire sont une dérive
+    (lambda vm: _domain(vm, cpu={"cores": 4}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, cpu={"sockets": 2}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, cpu={"threads": 2}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, memory={"guest": "8Gi"}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, resources={"limits": {"memory": "8Gi"}}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, resources={"limits": {"cpu": "4"}}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, resources={"requests": {"memory": "6Gi"}}), DISK_FACTS, True),
+    (lambda vm: _domain(vm, resources={"requests": {"cpu": "500m"}}), DISK_FACTS, True),
+    # le reste de la spec n'est pas une dérive (le carnet le dit, `carnet-stale`)
+    (lambda vm: (_bump(vm), vm["spec"]["template"]["spec"].update(evictionStrategy="LiveMigrate")),
+     DISK_FACTS, False),
+    (lambda vm: _domain(vm, machine={"type": "q35"}), DISK_FACTS, False),
 ])
 def test_spec_drift_uses_a_digest_of_the_replication_relevant_spec(change, disks, drift):
     vm = vm_obj("rep-a", UID_A, [("disk-0", "c")])

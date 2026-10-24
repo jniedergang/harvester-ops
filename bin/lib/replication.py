@@ -717,12 +717,19 @@ def vm_spec_digest(vm, disks=None):
     volumes et leur source (PVC, cloud-init), disques (nom, bus), tailles et
     classes des disques (`disks` : [{"disk", "size", "storage_class"}], lus
     sur les PVC), réseaux, interfaces (nom, modèle, MAC, liaison),
-    `firmware.uuid`. Ignore `runStrategy`/`running`, annotations et
-    étiquettes : démarrer, arrêter ou classer la VM n'est pas une dérive.
+    `firmware.uuid`, et depuis la 1.99.0 (décision 49) le processeur
+    (`domain.cpu` : cores, sockets, threads, plus les vCPU demandés ou
+    limités) et la mémoire (`domain.memory.guest`, demandes et limites de
+    `domain.resources`) : un changement de taille de la VM avertit et
+    `protect` réécrit le carnet. Ignore `runStrategy`/`running`, annotations
+    et étiquettes : démarrer, arrêter ou classer la VM n'est pas une dérive.
     Rangée à la protection (`plan_resources.vm_spec_digest`), comparée par le
     suiveur (`health["vm_spec_digest"]`)."""
     tspec = vt._tspec(vm or {})
-    devices = ((tspec.get("domain") or {}).get("devices")) or {}
+    domain = tspec.get("domain") or {}
+    devices = domain.get("devices") or {}
+    cpu = domain.get("cpu") or {}
+    res = domain.get("resources") or {}
     parts = {
         "volumes": sorted(([v.get("name"), _volume_source(v)] for v in tspec.get("volumes") or []),
                           key=lambda x: str(x[0])),
@@ -738,6 +745,10 @@ def vm_spec_digest(vm, disks=None):
                               sorted(k for k in i if k not in ("name", "model", "macAddress", "bootOrder"))]
                              for i in devices.get("interfaces") or []),
         "firmware_uuid": firmware_uuid(vm or {}),
+        "cpu": [str(cpu.get(k) or "") for k in ("cores", "sockets", "threads")]
+        + [str((res.get(k) or {}).get("cpu") or "") for k in ("requests", "limits")],
+        "memory": [str((domain.get("memory") or {}).get("guest") or "")]
+        + [str((res.get(k) or {}).get("memory") or "") for k in ("requests", "limits")],
     }
     return _digest(json.dumps(parts, sort_keys=True, default=str))[:32]
 

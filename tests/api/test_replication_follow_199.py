@@ -11,6 +11,7 @@ Horloge factice partagée : les tours, les sommeils de la boucle et les délais
 sont exacts, sans attendre.
 """
 
+import copy
 import math
 import os
 import signal
@@ -638,6 +639,8 @@ def _vm_change(w, how):
         vm["metadata"].setdefault("annotations", {})["x"] = "y"
     elif how == "memory":
         vm["spec"]["template"]["spec"]["domain"]["memory"] = {"guest": "8Gi"}
+    elif how == "eviction":
+        vm["spec"]["template"]["spec"]["evictionStrategy"] = "LiveMigrate"
     elif how == "disk-added":
         vm["spec"]["template"]["spec"]["volumes"].append({"name": "d4", "persistentVolumeClaim":
                                                           {"claimName": "vm-b-d4"}})
@@ -651,8 +654,9 @@ def _vm_change(w, how):
 
 
 @pytest.mark.parametrize("how,drift", [
-    ("none", False), ("run-strategy", False), ("annotation", False), ("memory", False),
-    ("disk-added", True), ("size", True), ("network", True),
+    ("none", False), ("run-strategy", False), ("annotation", False), ("eviction", False),
+    # v1.99.0, décision 49 : la mémoire et le processeur sont une dérive
+    ("memory", True), ("disk-added", True), ("size", True), ("network", True),
 ])
 def test_spec_drift_by_digest(tmp_path, how, drift):
     w = protected(tmp_path)
@@ -1117,8 +1121,11 @@ def test_sigterm_kills_a_waiting_kubectl_call_and_releases_the_lease(tmp_path):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("how,stale,drift", [
-    ("none", False, False), ("memory", True, False), ("cpu", True, False), ("run-strategy", False, False),
-    ("disk-added", True, True),
+    ("none", False, False), ("run-strategy", False, False),
+    # v1.99.0, décision 49 : processeur et mémoire avertissent aussi par la dérive
+    ("memory", True, True), ("cpu", True, True), ("disk-added", True, True),
+    # le reste de ce que le carnet porte : carnet périmé seulement
+    ("eviction", True, False),
 ])
 def test_carnet_stale_is_reported_and_nothing_is_written(tmp_path, how, stale, drift):
     w = protected(tmp_path)
@@ -1138,6 +1145,31 @@ def test_carnet_stale_is_reported_and_nothing_is_written(tmp_path, how, stale, d
     assert len([c for c in w.dst.mutations() if c[1] == rr.K_SECRET]) == before
     if how in ("memory", "cpu"):
         assert "spec.template.spec.domain" in ev[0]["facts"]
+
+
+@pytest.mark.parametrize("change,path", [
+    ({"cpu": {"cores": 8}}, ("cpu", "cores")),
+    ({"memory": {"guest": "8Gi"}}, ("memory", "guest")),
+])
+def test_cpu_or_memory_change_is_drift_and_protect_rewrites_the_carnet(tmp_path, change, path):
+    # v1.99.0, décision 49 : l'état avertit, `protect` réécrit le carnet et
+    # range la nouvelle empreinte, la dérive disparaît
+    w = protected(tmp_path)
+    f = follower(w)
+    f.once()
+    vm = w.src.obj(rr.K_VM, "default", "vm-b")
+    vm["spec"]["template"]["spec"]["domain"].update(copy.deepcopy(change))
+    vm["metadata"]["generation"] += 1
+    run_until(w, f, w.clock.now() + 1300)
+    assert "plan-drift" in status(w)["vms"][0]["reasons"]
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0, res
+    secret = [s for s in w.dst.list(rr.K_SECRET, rp.CARNET_NAMESPACE)
+              if (s["metadata"].get("labels") or {}).get(rp.LABEL_VM) == VMS["vm-b"]["uid"]][0]
+    domain = rr.read_carnet(secret)["vm"]["spec"]["template"]["spec"]["domain"]
+    assert domain[path[0]][path[1]] == change[path[0]][path[1]]
+    run_until(w, f, w.clock.now() + 1300)
+    assert "plan-drift" not in status(w)["vms"][0]["reasons"]
 
 
 def test_stats_older_than_30_days_are_downsampled_hourly(tmp_path):
