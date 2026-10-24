@@ -1273,6 +1273,27 @@ def test_delete_vm_storage_only_owned_volumes(nvram, flag):
     assert "victim" not in sim.domains
 
 
+def test_delete_vm_reports_progress_and_plan_fields():
+    sim = delete_sim(nvram="qcow2", snaps=[("s1", "shutoff", None, "internal")])
+    seen = []
+    res = ko.delete_vm(sim, "victim", remove_storage=True,
+                       progress=lambda s, st, m="": seen.append((s, st)))
+    assert seen == [("plan", "running"), ("plan", "done"), ("undefine", "running"),
+                    ("undefine", "done"), ("storage", "running"), ("storage", "done"),
+                    ("verify", "done")]
+    assert res["remove_storage"] is True and res["internal_snapshots"] == 1
+    assert res["nvram"] and res["tpm_state"] is None and res["managed_save_lost"] is False
+    assert res["acknowledged_unreadable"] == []
+
+
+def test_delete_vm_refusal_reports_the_plan_step():
+    sim = delete_sim(state="running")
+    seen = []
+    with pytest.raises(ko.OpError):
+        ko.delete_vm(sim, "victim", progress=lambda s, st, m="": seen.append((s, st)))
+    assert seen == [("plan", "running"), ("plan", "failed")]
+
+
 def test_delete_vm_without_storage_keeps_every_disk():
     sim = delete_sim(snaps=[("s1", "shutoff", None, "internal")])
     plan = ko.delete_plan(sim, "victim", remove_storage=False)

@@ -1513,17 +1513,30 @@ def undefine_argv(name, plan):
     return args
 
 
-def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unreadable=None):
+def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unreadable=None,
+              progress=None):
     """Supprime une VM arrêtée et persistante : plan recalculé ici, puis
     `undefine` aussitôt (fenêtre minimale après le relevé). Les volumes
     possédés partent par `undefine --storage`, les fichiers possédés hors
     pool par `rm` après le `undefine` (si `test -f`). Rend {"name",
-    "undefined", "deleted", "kept", "leftovers", "unreadable", "notes"}."""
+    "undefined", "deleted", "kept", "leftovers", "unreadable", "notes",
+    "remove_storage", "internal_snapshots", "managed_save_lost", "nvram",
+    "tpm_state", "acknowledged_unreadable"} (les derniers repris du plan).
+    `progress(étape, statut, message)` reçoit `plan`, `undefine`, `storage`
+    (avec suppression des disques) et `verify`."""
+    def step(sid, status, msg=""):
+        if progress:
+            progress(sid, status, msg)
+
+    step("plan", "running", f"what {name} owns")
     plan = delete_plan(host, name, remove_storage, acknowledged_unreadable)
     if plan["refusals"]:
+        step("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"],
                                                                 "plan": plan})
+    step("plan", "done", f"{len(plan['delete'])} disk(s) to delete, {len(plan['keep'])} kept")
     error = None
+    step("undefine", "running", name)
     try:
         host.virsh(*undefine_argv(name, plan), timeout=timeout)
     except kh.KvmError as e:
@@ -1536,7 +1549,11 @@ def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unread
             raise
         gone = True
     if not gone:
+        step("undefine", "failed", (error.message if error else "still defined"))
         raise error or OpError("failed", f"{name} is still defined after undefine")
+    step("undefine", "done", f"{name} undefined")
+    if plan["delete"]:
+        step("storage", "running", f"{len(plan['delete'])} disk(s)")
     files = [d for d in plan["delete"] if not d.get("volume")]
     res = _sh_batch(host, [["sh", "-c", 'test -f "$1" && rm -f -- "$1"; [ ! -e "$1" ]', "sh",
                             d["path"]] for d in files]) if files else []
@@ -1556,5 +1573,14 @@ def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unread
         else:
             leftovers.append({**d, "error": (error.message if error else
                                              "the volume is still present")})
+    if plan["delete"]:
+        step("storage", "warn" if leftovers else "done",
+             f"{len(deleted)} deleted, {len(leftovers)} left in place")
+    step("verify", "done", f"{name} no longer exists")
     return {"name": name, "undefined": True, "deleted": deleted, "kept": plan["keep"],
-            "leftovers": leftovers, "unreadable": plan["unreadable"], "notes": plan["notes"]}
+            "leftovers": leftovers, "unreadable": plan["unreadable"], "notes": plan["notes"],
+            "remove_storage": plan["remove_storage"],
+            "internal_snapshots": plan["internal_snapshots"],
+            "managed_save_lost": plan["managed_save_lost"], "nvram": plan["nvram"],
+            "tpm_state": plan["tpm_state"],
+            "acknowledged_unreadable": plan["acknowledged_unreadable"]}

@@ -15,6 +15,13 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py vm list [--host N]
   harvester-kvm.py vm show --host N --name D
   harvester-kvm.py vm start|shutdown|reboot|destroy|suspend|resume --host N --name D [--timeout S]
+  harvester-kvm.py vm display --host N --name D
+  harvester-kvm.py vm delete --host N --name D [--remove-storage]
+        [--acknowledge-unreadable=PATH ...] [--dry-run] [--timeout S]
+  harvester-kvm.py snapshot list --host N --name D
+  harvester-kvm.py snapshot create --host N --name D --snapshot S [--description T] [--timeout S]
+  harvester-kvm.py snapshot revert|delete --host N --name D --snapshot S [--timeout S]
+  harvester-kvm.py clone --host N --name D --new-name C [--dry-run] [--timeout S]
 
 Options communes : --json (sortie JSON sur stdout), --state-dir (défaut
 HARVESTER_OPS_STATE_DIR). Progression sur stderr en
@@ -48,15 +55,27 @@ a redémarré. Un geste manifestement impossible dans l'état courant
 (reprendre une VM qui tourne) est refusé sans appeler libvirt ; pour le
 reste, libvirt décide.
 
+Instantanés, clonage et suppression (v1.97.0, bin/lib/kvm_ops.py) : chaque
+commande émet `plan`, puis ses étapes, relit l'état réel à la fin et rend
+ce qui a été fait (`deleted`, `kept` avec leur raison, `leftovers`). Une
+demande refusée par l'état de la VM (en marche, disque raw...) sort en 1,
+kind `refused`, avec la liste `refusals`. Deux opérations sur la même VM
+(clonage : la source et le nom du clone) ne tournent jamais en même temps :
+la seconde sort en 2, kind `busy`. `vm display` dit où joindre l'affichage
+VNC et la commande `ssh -L` à lancer soi-même ; le mot de passe VNC n'est
+jamais lu par ce script, seule sa présence est dite.
+
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
 ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
-commencé est défait, `host add` ne laisse ni déclaration ni clé).
+commencé est défait, `host add` ne laisse ni déclaration ni clé ; un clonage
+retire ce qu'il a créé et nomme ce qui reste).
 """
 
 import argparse
 import contextlib
 import errno
 import fcntl
+import hashlib
 import ipaddress
 import json
 import math
@@ -74,6 +93,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import cluster_decl  # noqa: E402
 import kvm_decl  # noqa: E402
 import kvm_host as kh  # noqa: E402
+import kvm_ops as ko  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 # code que la console lit comme « annulé » (même valeur que les autres outils)
@@ -136,6 +156,13 @@ ACTION_COMMANDS = {("resume", "pmsuspended"): "dompmwakeup"}
 
 # à l'échéance, le geste forcé à proposer (rien pour les autres)
 FORCED = {"shutdown": ["destroy"], "reboot": ["destroy", "start"]}
+
+# délais par défaut (s) des opérations de la 1.97.0
+SNAPSHOT_TIMEOUTS = {"create": 600, "revert": 300, "delete": 300}
+CLONE_TIMEOUT = 3600
+DELETE_TIMEOUT = 300
+# participe passé des messages d'annulation des instantanés
+SNAPSHOT_DONE = {"create": "taken", "revert": "reverted", "delete": "deleted"}
 
 
 class Cancelled(BaseException):
@@ -911,6 +938,426 @@ def gesture(args, action):
 
 
 # ---------------------------------------------------------------------------
+# v1.97.0 : affichage, instantanés, clonage, suppression (bin/lib/kvm_ops.py)
+# ---------------------------------------------------------------------------
+
+def checked(fn, *a):
+    """Contrôle d'entrée de kvm_ops ; un refus (OpError `invalid`) devient
+    une erreur d'usage (code 2), avant tout appel à l'hôte."""
+    try:
+        return fn(*a)
+    except ko.OpError as e:
+        raise UsageError(e.message) from None
+
+
+def positive_timeout(value, default):
+    timeout = default if value is None else value
+    if timeout <= 0:
+        raise UsageError("--timeout must be positive")
+    return timeout
+
+
+@contextlib.contextmanager
+def vm_lock(state, host, *names):
+    """Verrou d'une opération sur une VM (`<état>/kvm.d/locks/`), pris sans
+    attendre : un clonage et une suppression de la même VM ne se croisent
+    jamais. Le nom du fichier est un condensé du nom de la VM (un nom libvirt
+    peut contenir n'importe quoi)."""
+    d = kvm_decl.decl_dir(state) / "locks"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fds = []
+    try:
+        for name in sorted(set(names)):
+            digest = hashlib.sha256(name.encode()).hexdigest()[:16]
+            fd = os.open(d / f"{host}-{digest}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            fds.append(fd)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise UsageError(f"another operation on {name} is in progress on {host}: "
+                                 "try again later", kind="busy") from None
+        yield
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+class Progress:
+    """Rappel `progress` de kvm_ops vers STEP_EVENT ; garde la dernière
+    étape pour y dire l'échec si la bibliothèque ne l'a pas dit."""
+
+    def __init__(self, first="plan"):
+        self.sid, self.status = first, None
+
+    def __call__(self, sid, status, msg=""):
+        status = "error" if status == "failed" else status
+        self.sid, self.status = sid, status
+        step(sid, status, msg)
+
+    def fail(self, msg):
+        if self.status != "error":
+            step(self.sid, "error", msg)
+            self.status = "error"
+
+
+def describe_leftover(item):
+    """Ce qui reste d'un retour arrière, en une phrase."""
+    kind = item.get("kind")
+    if kind == "domain":
+        what = f"domain {item.get('name')}"
+    elif kind == "volume":
+        what = f"volume {item.get('pool')}/{item.get('volume')}"
+    else:
+        what = item.get("destination") or item.get("path") or "?"
+    return f"{what} ({item['error']})" if item.get("error") else what
+
+
+def op_failure(prog, e, data):
+    """OpError ou KvmError d'une opération -> Failure (code 1) dont l'objet
+    JSON garde ses champs (refus, restes)."""
+    msg = e.message
+    prog.fail(msg)
+    extra = dict(data)
+    if isinstance(e, ko.OpError):
+        if "refusals" in extra:
+            extra["refusals"] = list(e.data.get("refusals") or [])
+    if "leftovers" in extra:
+        extra["leftovers"] = list(getattr(e, "leftovers", None) or [])
+    return Failure(msg, kind=e.kind, data=extra)
+
+
+DISPLAY_REASONS = {
+    "notrunning": "the VM is not running: its display opens once it runs",
+    "spice": "this VM has only a SPICE display: not supported",
+    "socket": "the display listens on a UNIX socket owned by root and qemu: "
+              "the SSH user cannot reach it",
+    "nodisplay": "this VM has no graphical display",
+    "nolisten": "the display has no listener (listen type none)",
+    "listen": "the display listens on an address that is not one of the host's own: "
+              "not reachable through the host",
+}
+
+
+def tunnel_command(decl, address, port):
+    """Commande `ssh -L` à lancer soi-même (sans chemin de clé)."""
+    target = f"[{address}]" if ":" in address else address
+    return (f"ssh -N -L {port}:{target}:{port} -p {decl.get('port', kvm_decl.DEFAULT_PORT)} "
+            f"-l {decl['user']} {decl['address']}")
+
+
+def cmd_vm_display(args):
+    """Où joindre l'affichage VNC d'une VM. Le XML est lu avec
+    --security-info pour savoir SI un mot de passe existe ; sa valeur ne
+    quitte jamais l'analyseur (parse_domain_xml ne rend qu'un booléen)."""
+    host = load_host(state_of(args), args.host)
+    name = check_vm_name(args.name)
+    step("display", "running", f"reading the display of {name}")
+    try:
+        out = host.batch({"state": ("domstate", "--domain", name),
+                          "xml": ("dumpxml", "--security-info", "--domain", name)})
+        for key in ("state", "xml"):
+            if not out[key].ok:
+                raise out[key].error
+        state = _first_line(out["state"])
+        vm = kh.parse_domain_xml(str(out["xml"]))
+        live = state != "shut off"
+        target = ko.display_target(vm, live)
+        if target.get("reason") == "listen":
+            # IP précise : acceptée seulement si elle appartient à l'hôte
+            target = ko.display_target(vm, live, host_addresses=ko.host_addresses(host))
+    except kh.KvmError as e:
+        step("display", "error", e.message)
+        raise Failure(e.message, kind=e.kind) from None
+    except (ValueError, SyntaxError):          # XML illisible (jamais cité)
+        msg = f"{host.name}: unreadable definition for {name}"
+        step("display", "error", msg)
+        raise Failure(msg) from None
+    reason = target.get("reason")
+    result = {"ok": True, "host": host.name, "name": name, "state": state,
+              "available": reason is None, "type": target.get("type"),
+              "address": target.get("address"), "port": target.get("port"),
+              "password": bool(target.get("password")), "reason": reason,
+              "message": DISPLAY_REASONS.get(reason, ""), "tunnel": None}
+    if reason is None:
+        result["tunnel"] = tunnel_command(host.decl, target["address"], target["port"])
+        result["message"] = (f"VNC on {target['address']}:{target['port']} of the host"
+                             + (", protected by a password" if target["password"] else ""))
+        text = (f"{name} on {host.name}: {result['message']}\n"
+                f"open a tunnel with: {result['tunnel']}\n"
+                f"then point a VNC viewer at localhost:{target['port']}")
+    else:
+        text = f"{name} on {host.name}: no display to open ({reason}): {result['message']}"
+    step("display", "done" if reason is None else "warn", result["message"])
+    emit(args, result, text)
+    return EXIT_OK
+
+
+def _gib_text(kib):
+    return f"{kib / 1024 / 1024:.1f} GiB" if isinstance(kib, (int, float)) else "unknown size"
+
+
+def snapshot_rows(snaps):
+    head = ("NAME", "CREATED", "STATE", "LOCATION", "PARENT", "")
+    rows = [head] + [(s["name"], s.get("created") or "-", s.get("state") or "-",
+                      s.get("location") or "-", s.get("parent") or "-",
+                      "current" if s.get("current") else "") for s in snaps]
+    widths = [max(len(str(r[i])) for r in rows) for i in range(len(head))]
+    return ["  ".join(str(c).ljust(widths[i]) for i, c in enumerate(r)).rstrip() for r in rows]
+
+
+def cmd_snapshot_list(args):
+    host = load_host(state_of(args), args.host)
+    name = check_vm_name(args.name)
+    step("list", "running", f"reading the snapshots of {name}")
+    try:
+        listing = ko.list_snapshots(host, name)
+    except (ko.OpError, kh.KvmError) as e:
+        step("list", "error", e.message)
+        raise Failure(e.message, kind=e.kind) from None
+    step("list", "done", f"{len(listing['snapshots'])} snapshot(s)")
+    lines = [f"{name} on {host.name}: {listing['state']}"]
+    lines += snapshot_rows(listing["snapshots"]) if listing["snapshots"] else ["(no snapshot)"]
+    lines += [f"cannot take a snapshot: {r}" for r in listing["support"]]
+    emit(args, {"ok": True, "host": host.name, "name": name, **listing}, "\n".join(lines))
+    return EXIT_OK
+
+
+def _snapshot_target(args, new=False):
+    host = load_host(state_of(args), args.host)
+    name = check_vm_name(args.name)
+    snap = checked(ko.check_snapshot_name, args.snapshot, new)
+    return host, name, snap
+
+
+def _snapshot_plan(prog, host, name, what):
+    """Étape `plan` d'un geste d'instantané : la liste relue (la
+    bibliothèque la relit encore au moment d'agir)."""
+    prog("plan", "running", f"reading the snapshots of {name}")
+    listing = ko.list_snapshots(host, name)
+    prog("plan", "done", what(listing))
+    return listing
+
+
+def cmd_snapshot_create(args):
+    host, name, snap = _snapshot_target(args, new=True)
+    description = checked(ko._check_description, args.description)
+    timeout = positive_timeout(args.timeout, SNAPSHOT_TIMEOUTS["create"])
+    data = {"host": host.name, "name": name, "snapshot": snap, "refusals": []}
+    prog = Progress()
+
+    def what(listing):
+        if listing["state"] == "running":
+            return (f"{name} is running: the guest is paused while its memory "
+                    f"({_gib_text(listing['memory_kib'])}) is saved")
+        return f"{name} is {listing['state']}: the snapshot holds the disks"
+    with vm_lock(state_of(args), host.name, name):
+        try:
+            _snapshot_plan(prog, host, name, what)
+            prog("create", "running", f"snapshot {snap}")
+            t0 = CLOCK()
+            res = ko.create_snapshot(host, name, snap, description, timeout=timeout)
+            elapsed = CLOCK() - t0
+            prog("create", "done", f"snapshot {snap} taken in {elapsed:.1f}s"
+                 + (" (memory included)" if res["memory"] else ""))
+            prog("verify", "done", f"{len(res['snapshots'])} snapshot(s), current: "
+                 f"{res['current'] or 'none'}")
+        except (ko.OpError, kh.KvmError) as e:
+            raise op_failure(prog, e, data) from None
+    data.pop("refusals")
+    emit(args, {"ok": True, **data, "memory": res["memory"], "state": res["state"],
+                "current": res["current"], "snapshots": res["snapshots"],
+                "elapsed_s": round(elapsed, 1)},
+         f"{name}: snapshot {snap} taken" + (" with its memory" if res["memory"] else "")
+         + f" in {elapsed:.1f}s")
+    return EXIT_OK
+
+
+def cmd_snapshot_revert(args):
+    host, name, snap = _snapshot_target(args)
+    timeout = positive_timeout(args.timeout, SNAPSHOT_TIMEOUTS["revert"])
+    data = {"host": host.name, "name": name, "snapshot": snap, "refusals": []}
+    prog = Progress()
+
+    def what(listing):
+        s = next((x for x in listing["snapshots"] if x["name"] == snap), None)
+        if s is None:
+            return f"snapshot {snap} not listed"
+        return (f"back to {snap} (taken {s.get('state') or 'in an unknown state'}): the "
+                f"current state of {name} that was not saved is lost")
+    with vm_lock(state_of(args), host.name, name):
+        try:
+            _snapshot_plan(prog, host, name, what)
+            prog("revert", "running", f"snapshot {snap}")
+            t0 = CLOCK()
+            res = ko.revert_snapshot(host, name, snap, timeout=timeout)
+            elapsed = CLOCK() - t0
+            prog("revert", "done", f"reverted to {snap} in {elapsed:.1f}s")
+            prog("verify", "done", f"{name}: {res['state']}")
+        except (ko.OpError, kh.KvmError) as e:
+            raise op_failure(prog, e, data) from None
+    data.pop("refusals")
+    emit(args, {"ok": True, **data, "taken_state": res["taken_state"], "state": res["state"],
+                "elapsed_s": round(elapsed, 1)},
+         f"{name}: reverted to {snap}, now {res['state']}")
+    return EXIT_OK
+
+
+def cmd_snapshot_delete(args):
+    host, name, snap = _snapshot_target(args)
+    timeout = positive_timeout(args.timeout, SNAPSHOT_TIMEOUTS["delete"])
+    data = {"host": host.name, "name": name, "snapshot": snap, "refusals": []}
+    prog = Progress()
+
+    def what(listing):
+        children = [x["name"] for x in listing["snapshots"] if x.get("parent") == snap]
+        if children:
+            return (f"deleting {snap}: its children ({', '.join(children)}) are attached "
+                    "to its parent")
+        return f"deleting {snap}"
+    with vm_lock(state_of(args), host.name, name):
+        try:
+            _snapshot_plan(prog, host, name, what)
+            prog("delete", "running", f"snapshot {snap}")
+            res = ko.delete_snapshot(host, name, snap, timeout=timeout)
+            prog("delete", "done", f"snapshot {snap} deleted")
+            prog("verify", "done", f"{len(res['snapshots'])} snapshot(s), current: "
+                 f"{res['current'] or 'none'}")
+        except (ko.OpError, kh.KvmError) as e:
+            raise op_failure(prog, e, data) from None
+    data.pop("refusals")
+    emit(args, {"ok": True, **data, "current": res["current"], "snapshots": res["snapshots"]},
+         f"{name}: snapshot {snap} deleted")
+    return EXIT_OK
+
+
+def plan_text(title, refusals, lines):
+    out = [title] + [f"  {ln}" for ln in lines]
+    out += [f"  refused: {r}" for r in refusals]
+    return "\n".join(out)
+
+
+def cmd_clone(args):
+    host = load_host(state_of(args), args.host)
+    name = check_vm_name(args.name)
+    new = checked(ko.check_new_vm_name, args.new_name)
+    timeout = positive_timeout(args.timeout, CLONE_TIMEOUT)
+    data = {"host": host.name, "source": name, "new_name": new, "refusals": [],
+            "leftovers": []}
+    prog = Progress()
+    if args.dry_run:
+        prog("plan", "running", f"{name} -> {new} (dry run)")
+        try:
+            plan = ko.clone_plan(host, name, new)
+        except (ko.OpError, kh.KvmError) as e:
+            raise op_failure(prog, e, data) from None
+        prog("plan", "warn" if plan["refusals"] else "done",
+             "; ".join(plan["refusals"]) or f"{len(plan['disks'])} disk(s) to copy")
+        lines = [f"copy {d['target']}: {d['source']} -> {d['destination']} "
+                 f"({d['needed']} bytes)" for d in plan["disks"]]
+        lines += [f"shared {d['target']}: {d['source']} ({d['reason']})" for d in plan["shared"]]
+        emit(args, {"ok": True, "host": host.name, "source": name, "new_name": new,
+                    "dry_run": True, "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"clone {name} -> {new} on {host.name} (dry run)", plan["refusals"],
+                       lines))
+        return EXIT_OK
+    with vm_lock(state_of(args), host.name, name, new):
+        t0 = CLOCK()
+        try:
+            res = ko.clone_vm(host, name, new, timeout=timeout, progress=prog, sleep=SLEEP)
+        except (ko.OpError, kh.KvmError) as e:
+            failure = op_failure(prog, e, data)
+            rollback_step(e)
+            raise failure from None
+        except Exception as e:                 # noqa: BLE001 : restes dits, sans trace
+            msg = f"unexpected internal error ({type(e).__name__})"
+            prog.fail(msg)
+            rollback_step(e)
+            raise Failure(msg, data={**data, "leftovers": list(getattr(e, "leftovers", []))}) \
+                from None
+        elapsed = CLOCK() - t0
+    lines = [f"disk {d['target']}: {d['destination']}" for d in res["disks"]]
+    lines += [f"note: {w}" for w in res["warnings"]]
+    if res["uefi_entries_lost"]:
+        lines.append("note: new UEFI variables (boot entries are not copied)")
+    emit(args, {"ok": True, "host": host.name, "dry_run": False,
+                "elapsed_s": round(elapsed, 1), **res},
+         plan_text(f"{new}: copy of {name} on {host.name}, uuid {res['uuid']}, {res['state']}",
+                   [], lines))
+    return EXIT_OK
+
+
+def rollback_step(e):
+    """Dit le retour arrière d'un clonage (si quelque chose avait été créé)."""
+    left = getattr(e, "leftovers", None)
+    if left is None:
+        return
+    if left:
+        step("rollback", "warn", "not removed: " + ", ".join(describe_leftover(x) for x in left))
+    else:
+        step("rollback", "done", "everything created was removed")
+
+
+def cmd_vm_delete(args):
+    host = load_host(state_of(args), args.host)
+    name = check_vm_name(args.name)
+    ack = args.acknowledge_unreadable
+    if ack and not args.remove_storage:
+        raise UsageError("--acknowledge-unreadable only applies with --remove-storage")
+    checked(ko.check_acknowledged, ack)
+    timeout = positive_timeout(args.timeout, DELETE_TIMEOUT)
+    data = {"host": host.name, "name": name, "refusals": [], "leftovers": [],
+            "unreadable": []}
+    prog = Progress()
+
+    def disk_lines(d):
+        return (d.get("path") or d.get("source") or d.get("target") or "?")
+    if args.dry_run:
+        prog("plan", "running", f"what {name} owns (dry run)")
+        try:
+            plan = ko.delete_plan(host, name, args.remove_storage, ack)
+        except (ko.OpError, kh.KvmError) as e:
+            raise op_failure(prog, e, data) from None
+        prog("plan", "warn" if plan["refusals"] else "done",
+             "; ".join(plan["refusals"]) or f"{len(plan['delete'])} disk(s) to delete, "
+             f"{len(plan['keep'])} kept")
+        lines = [f"delete {d['target']}: {disk_lines(d)}" for d in plan["delete"]]
+        lines += [f"keep {d['target']}: {disk_lines(d)} ({d['reason']})" for d in plan["keep"]]
+        lines += unreadable_lines(plan["unreadable"], plan["acknowledged_unreadable"])
+        lines += [f"note: {n}" for n in plan["notes"]]
+        emit(args, {"ok": True, "host": host.name, "name": name, "dry_run": True,
+                    "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"delete {name} on {host.name} (dry run)", plan["refusals"], lines))
+        return EXIT_OK
+    with vm_lock(state_of(args), host.name, name):
+        try:
+            res = ko.delete_vm(host, name, args.remove_storage, timeout=timeout,
+                               acknowledged_unreadable=ack, progress=prog)
+        except (ko.OpError, kh.KvmError) as e:
+            if isinstance(e, ko.OpError):
+                data["unreadable"] = list((e.data.get("plan") or {}).get("unreadable") or [])
+            raise op_failure(prog, e, data) from None
+    lines = [f"deleted {d['target']}: {disk_lines(d)}" for d in res["deleted"]]
+    lines += [f"kept {d['target']}: {disk_lines(d)} ({d['reason']})" for d in res["kept"]]
+    lines += [f"left in place {d['target']}: {disk_lines(d)} ({d['error']})"
+              for d in res["leftovers"]]
+    lines += unreadable_lines(res["unreadable"], res["acknowledged_unreadable"])
+    lines += [f"note: {n}" for n in res["notes"]]
+    emit(args, {"ok": True, "host": host.name, "dry_run": False, **res},
+         plan_text(f"{name} deleted from {host.name}", [], lines))
+    return EXIT_OK
+
+
+def unreadable_lines(unreadable, acknowledged):
+    """Fichiers illisibles par le compte SSH qui ont empêché la preuve."""
+    left = [p for p in unreadable if p not in set(acknowledged)]
+    if not left:
+        return []
+    return [f"unreadable by the SSH user: {p}" for p in left] + [
+        "disks are kept while these files cannot be read; if you are sure none of them "
+        "uses a disk of this VM, add --acknowledge-unreadable=PATH for each"]
+
+
+# ---------------------------------------------------------------------------
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -922,14 +1369,21 @@ def main(argv=None):
             try:
                 return args.fn(args)
             except Cancelled as e:
+                # un clonage interrompu nomme ce que son retour arrière a laissé
+                data = ({"leftovers": list(e.leftovers)} if getattr(e, "leftovers", None)
+                        is not None else None)
                 return fail_exit(want_json, "cancelled", cancel_message(args, e), "cancelled",
-                                 EXIT_CANCELLED)
+                                 EXIT_CANCELLED, data)
     except (UsageError, kvm_decl.DeclError) as e:
         kind = getattr(e, "kind", "usage")
         return fail_exit(want_json, "validate", str(e), kind, EXIT_USAGE)
     except Failure as e:
         return fail_exit(want_json, None, e.message, e.kind, EXIT_FAIL, e.data)
     except kh.KvmError as e:
+        return fail_exit(want_json, "host", e.message, e.kind, EXIT_FAIL)
+    except ko.OpError as e:
+        if e.kind == "invalid":
+            return fail_exit(want_json, "validate", e.message, "usage", EXIT_USAGE)
         return fail_exit(want_json, "host", e.message, e.kind, EXIT_FAIL)
     except Exception as e:                     # noqa: BLE001 : ni trace ni chemin à l'appelant
         return fail_exit(want_json, "internal", f"unexpected internal error ({type(e).__name__})",
@@ -944,6 +1398,22 @@ def cancel_message(args, sig):
     if args.cmd == "vm" and args.vcmd in GESTURES:
         return (f"{args.vcmd} cancelled ({sig}): it may already have been requested; "
                 f"its result was not followed")
+    if getattr(args, "dry_run", False):
+        return f"cancelled ({sig})"            # un aperçu ne change rien
+    if args.cmd == "snapshot" and args.scmd in SNAPSHOT_DONE:
+        return (f"snapshot {args.scmd} cancelled ({sig}): it may already have been "
+                f"{SNAPSHOT_DONE[args.scmd]}: list the snapshots")
+    if args.cmd == "clone":
+        left = getattr(sig, "leftovers", None)
+        if left is None:
+            return f"clone cancelled ({sig}) before any copy: nothing created"
+        if not left:
+            return f"clone cancelled ({sig}): rolled back"
+        return (f"clone cancelled ({sig}): rollback incomplete, left on the host: "
+                + ", ".join(describe_leftover(x) for x in left))
+    if args.cmd == "vm" and args.vcmd == "delete":
+        return (f"vm delete cancelled ({sig}): it may already have been undefined: "
+                "check the VM list")
     return f"cancelled ({sig})"
 
 
@@ -1012,6 +1482,48 @@ def build_parser():
         sp.add_argument("--timeout", type=int,
                         help=f"seconds (default {DEFAULT_TIMEOUTS.get(action, DEFAULT_TIMEOUT)})")
         sp.set_defaults(fn=lambda a, _act=action: gesture(a, _act))
+    sp = vp.add_parser("display", parents=[common],
+                       help="where to reach the VNC display of a VM (never its password)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--name", required=True)
+    sp.set_defaults(fn=cmd_vm_display)
+    sp = vp.add_parser("delete", parents=[common], help="delete a shut off VM")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--remove-storage", action="store_true",
+                    help="also delete the disks this VM provably owns")
+    sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH",
+                    help="file the SSH user cannot read, accepted as using no disk of this VM "
+                         "(repeatable)")
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.add_argument("--timeout", type=int, help=f"seconds (default {DELETE_TIMEOUT})")
+    sp.set_defaults(fn=cmd_vm_delete)
+
+    np = sub.add_parser("snapshot", help="internal snapshots of a VM").add_subparsers(
+        dest="scmd", required=True)
+    sp = np.add_parser("list", parents=[common], help="snapshots of a VM")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--name", required=True)
+    sp.set_defaults(fn=cmd_snapshot_list)
+    for verb, fn in (("create", cmd_snapshot_create), ("revert", cmd_snapshot_revert),
+                     ("delete", cmd_snapshot_delete)):
+        sp = np.add_parser(verb, parents=[common], help=f"{verb} an internal snapshot")
+        sp.add_argument("--host", required=True)
+        sp.add_argument("--name", required=True)
+        sp.add_argument("--snapshot", required=True)
+        if verb == "create":
+            sp.add_argument("--description")
+        sp.add_argument("--timeout", type=int,
+                        help=f"seconds (default {SNAPSHOT_TIMEOUTS[verb]})")
+        sp.set_defaults(fn=fn)
+
+    sp = sub.add_parser("clone", parents=[common], help="full copy of a shut off VM")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--new-name", required=True)
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.add_argument("--timeout", type=int, help=f"seconds (default {CLONE_TIMEOUT})")
+    sp.set_defaults(fn=cmd_clone)
     return ap
 
 
