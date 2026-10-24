@@ -403,7 +403,7 @@ const KVM = (() => {
 
   function vmRow(v) {
     const k = vmKey(v);
-    const restart = window.KVMForm && KVMForm.restartFor(v.host, v.name);
+    const restart = window.KVMForm && KVMForm.restartFor(v);
     const flags = [v.persistent ? '' : badge('info', tr('kvm.transient'), tr('kvm.transientTip')),
       v.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.autostartTip')) : '',
       restart ? badge('warn', tr('vmf.restartNeeded'), tr('kvmf.restartListTip', { fields: restart.join(', ') })) : ''].join(' ');

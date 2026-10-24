@@ -10071,6 +10071,12 @@ def api_kvm_vms():
             continue
         hosts.append({"name": inv["name"], "state": "ok", "count": len(inv["vms"])})
         vms.extend(inv["vms"])
+    # « redémarrage nécessaire » : repères notés par la console (kvm_pending),
+    # valables tant que la VM tourne avec le même Id ; aucun dumpxml ici
+    try:
+        _kpend.annotate(_state_dir(), vms, [h["name"] for h in hosts if h["state"] == "ok"])
+    except OSError as e:
+        log.warning("KVM: restart markers not read: %s", e)
     vms.sort(key=lambda v: (v["name"], v["host"]))
     return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
                     "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
@@ -22138,6 +22144,7 @@ import kvm_caps as _kcaps  # noqa: E402
 import kvm_create as _kc  # noqa: E402
 import kvm_edit as _ke  # noqa: E402
 import kvm_net as _kn  # noqa: E402
+import kvm_pending as _kpend  # noqa: E402
 import kvm_storage as _ks  # noqa: E402
 import kvm_templates as _ktpl  # noqa: E402
 import kvm_xml as _kx  # noqa: E402
@@ -22430,6 +22437,11 @@ def api_kvm_vm_form(host, domain):
         form = _ke.vm_form(vh, domain)
     except (_ko.OpError, _kh.KvmError) as e:
         return _kvm_op_error(e, {"host": host, "name": domain})
+    # la fenêtre compare les deux XML : le repère de la liste suit
+    try:
+        _kpend.record(_state_dir(), host, domain, form.get("id"), form.get("pending"))
+    except OSError as e:
+        log.warning("KVM: restart marker of %s/%s not saved: %s", host, domain, e)
     return jsonify(dict(form, host=host, role=current_role()))
 
 
@@ -22791,6 +22803,15 @@ def _kvm_hot_args(op, body):
     rerun = body.get("rerun", False)
     if not isinstance(rerun, bool):
         raise _ko.OpError("invalid", "rerun must be true or false")
+    # `clear: true` : vider le user-data est voulu ; sans lui, un user-data
+    # vide qui remplacerait un seed non vide est refusé (kvm_edit)
+    clear = body.get("clear", False)
+    if not isinstance(clear, bool):
+        raise _ko.OpError("invalid", "clear must be true or false")
+    if clear:
+        if (ci.get("user_data") or "").strip():
+            raise _ko.OpError("invalid", "clear: send an empty user_data with it")
+        ci["clear"] = True
     ack = _kvm_ack_body(body)
     return (["--rerun"] if rerun else []) + [f"--acknowledge-unreadable={p}" for p in ack], ci, []
 
@@ -22802,7 +22823,7 @@ def api_kvm_vm_hot(host, domain, op):
     """Geste à chaud, noms de Harvester : cpumem {vcpus, memory_mib},
     add-volume {disk}, remove-volume {target}, insert-cdrom {target, pool,
     volume}, eject-image {target}, add-nic {nic}, remove-nic {mac},
-    cloudinit {user_data, network_data, hostname, rerun}. Le résultat dit
+    cloudinit {user_data, network_data, hostname, rerun, clear}. Le résultat dit
     pour chaque changement « now », « next-boot » ou « refused »."""
     if op not in KVM_HOT_OPS:
         return _kvm_err(f"unknown gesture (one of {', '.join(KVM_HOT_OPS)})", 404)

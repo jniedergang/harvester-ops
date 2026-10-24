@@ -32,6 +32,8 @@ const VMForm = (() => {
   /** Le corps de la fenêtre : en-tête (déjà rendu par l'adaptateur), barre
    *  d'onglets, zone des onglets, pied (boutons + résultat). Même balisage
    *  que la fenêtre de création Harvester depuis la 1.28.0. */
+  // bulle d'un onglet : texte, ou fonction relue à l'ouverture (langue courante)
+  const tipOf = (s) => (typeof s.tip === 'function' ? s.tip() : s.tip) || '';
   function shellHtml({ head = '', sections, actions = '', cls = '' }) {
     return `
       <div class="vm-create${cls ? ` ${esc(cls)}` : ''}">
@@ -40,7 +42,7 @@ const VMForm = (() => {
         <div class="vm-edit-layout vm-create-layout">
           <aside class="vm-edit-nav">
             ${sections.map(s => `
-              <button type="button" data-section="${esc(s.id)}"${s.tip ? ` class="tip" data-tip="${esc(s.tip)}"` : ''}>
+              <button type="button" data-section="${esc(s.id)}"${tipOf(s) ? ` class="tip" data-tip="${esc(tipOf(s))}"` : ''}>
                 <span class="ic">${icon(s.icon)}</span>
                 <span>${esc(s.label())}</span>
               </button>`).join('')}
@@ -117,8 +119,9 @@ const VMForm = (() => {
    *  dans `listEl`. Rend vrai s'il n'y a aucune erreur. */
   function showErrors(root, errors, listEl) {
     root.querySelectorAll('.vmf-err-count').forEach(e => e.remove());
-    root.querySelectorAll('.vmf-invalid').forEach(e => {
-      e.classList.remove('vmf-invalid');
+    root.querySelectorAll('.vmf-invalid').forEach(e => e.classList.remove('vmf-invalid'));
+    root.querySelectorAll('.vmf-invalid-ctl').forEach(e => {
+      e.classList.remove('vmf-invalid-ctl');
       e.removeAttribute('aria-invalid');
     });
     const by = {};
@@ -133,7 +136,12 @@ const VMForm = (() => {
     (errors || []).forEach(e => {
       if (!e.field) return;
       const el = root.querySelector(`[data-vmf-field="${CSS.escape(e.field)}"]`);
-      if (el) { el.classList.add('vmf-invalid'); el.setAttribute('aria-invalid', 'true'); }
+      if (!el) return;
+      el.classList.add('vmf-invalid');
+      // aria-invalid va sur le contrôle lui-même (le libellé qui l'entoure
+      // n'est pas lu comme un champ par les lecteurs d'écran)
+      const ctl = el.matches('input, select, textarea') ? el : el.querySelector('input, select, textarea');
+      if (ctl) { ctl.classList.add('vmf-invalid-ctl'); ctl.setAttribute('aria-invalid', 'true'); }
     });
     if (listEl) {
       listEl.innerHTML = (errors || []).length

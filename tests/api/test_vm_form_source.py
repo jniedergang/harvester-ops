@@ -108,6 +108,141 @@ def test_no_server_value_is_interpolated_raw_into_html(name):
     assert raw_data_in_html(SRC[name]) == []
 
 
+# --- règle générale : TOUTE interpolation d'un gabarit HTML ---------------------------
+# Portée exacte : chaque ${...} d'un gabarit littéral qui contient « < » dans
+# vm-form.js, cloudinit-form.js, kvm-form.js et kvm.js. Elle est sûre si elle
+# est : un littéral (chaîne, nombre) ; un appel unique d'un constructeur de
+# HTML qui échappe ses entrées (BUILDERS : esc, icon, tr dans un attribut de
+# classe...) ; une liste `.map(<constructeur>).join('')` ; un gabarit imbriqué
+# (analysé lui-même) ; un ternaire dont chaque branche est sûre. Le reste
+# doit figurer dans HTML_VARS (variable locale qui porte du HTML assemblé dans
+# la même fonction à partir de morceaux échappés, ou constante du code), avec
+# un contrôle que chaque entrée sert encore. Hors portée : les chaînes
+# assemblées par « + » hors gabarit et les .innerHTML affectés d'une variable
+# (couverts par la relecture et les e2e à noms hostiles).
+BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "hfield", "opt",
+            "fieldHtml", "appliedBadge", "unmanagedHtml", "headHtml", "actionsHtml", "field", "li",
+            "th", "checksHtml", "stateBadge", "errorBadge", "yes", "vmRow", "hostTile", "opItem",
+            "existingDisksHtml", "existingNicsHtml", "renderSection",
+            "VMForm.shellHtml", "VMForm.appliedBadge", "VMForm.changesHtml", "VMForm.restartBanner",
+            "VMForm.reviewHtml", "TFForm.render", "CloudInitForm.renderWizard",
+            "KVMForm.menuGroupHtml")
+HTML_VARS = {
+    "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
+    "cloudinit-form.js": set(),
+    "kvm-form.js": {"attrs", "cls", "control", "dis", "existing", "extra", "hot", "list", "media", "ro",
+                    "tip", "whyHtml"},
+    "kvm.js": {"bad", "body", "byState", "cls", "declare", "filters", "flags", "g", "inner",
+               "labels", "op", "open", "partly", "remove", "state", "test", "value"},
+}
+_LIT = re.compile(r"""^('([^'\\]|\\.)*'|"([^"\\]|\\.)*"|\d+(\.\d+)?)$""")
+
+
+def _top_split(e, sep):
+    """Index du premier `sep` hors parenthèses, crochets et chaînes, ou -1."""
+    depth, q, i = 0, None, 0
+    while i < len(e):
+        c = e[i]
+        if q:
+            if c == "\\":
+                i += 2
+                continue
+            if c == q:
+                q = None
+        elif c in "'\"`":
+            q = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c == sep:
+            return i
+        i += 1
+    return -1
+
+
+def _single_call(e, names):
+    for n in sorted(names, key=len, reverse=True):
+        if e.startswith(n + "(") and _top_split(e[len(n):], ",") != 0:
+            rest = e[len(n):]
+            depth, q, i = 0, None, 0
+            while i < len(rest):
+                c = rest[i]
+                if q:
+                    if c == "\\":
+                        i += 2
+                        continue
+                    if c == q:
+                        q = None
+                elif c in "'\"`":
+                    q = c
+                elif c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return i == len(rest) - 1
+                i += 1
+    return False
+
+
+def interpolation_is_safe(e):
+    e = " ".join(e.split())
+    while e.startswith("(") and _single_call("x" + e, {"x"}):
+        e = e[1:-1].strip()
+    if not e or _LIT.match(e) or "`" in e:
+        return bool(e)
+    q = _top_split(e, "?")
+    if q > 0:
+        rest = e[q + 1:]
+        c = _top_split(rest, ":")
+        return c > 0 and interpolation_is_safe(rest[:c]) and interpolation_is_safe(rest[c + 1:])
+    if _single_call(e, BUILDERS):
+        return True
+    m = re.match(r"^.+\.map\((.+)\)\.join\(''\)$", e)
+    if m:
+        fn = m.group(1).strip()
+        if fn in BUILDERS:
+            return True
+        m2 = re.match(r"^\(?\w+(, ?\w+)?\)? => (.+)$", fn)
+        return bool(m2) and interpolation_is_safe(m2.group(2))
+    return False
+
+
+def unsafe_interpolations(src):
+    return sorted({" ".join(e.split()) for e, text in template_interpolations(src)
+                   if "<" in text and not interpolation_is_safe(e)})
+
+
+@pytest.mark.parametrize("name", NEW + ["kvm.js"])
+def test_every_interpolation_in_html_is_escaped_or_known(name):
+    found = unsafe_interpolations(SRC[name])
+    assert set(found) - HTML_VARS[name] == set(), set(found) - HTML_VARS[name]
+    # une entrée qui ne sert plus est retirée (la liste ne grossit pas en silence)
+    assert HTML_VARS[name] - set(found) == set()
+
+
+@pytest.mark.parametrize("snippet,flagged", [
+    ("`<b>${v.name}</b>`", ["v.name"]),
+    ("`<b>${name}</b>`", ["name"]),
+    ("`<b>${x ? v.name : ''}</b>`", ["x ? v.name : ''"]),
+    ("`<b>${a + b}</b>`", ["a + b"]),
+    ("`<b>${list.join(', ')}</b>`", ["list.join(', ')"]),
+    ("`<b>${esc(a) + b}</b>`", ["esc(a) + b"]),
+    ("`<b>${rows.map((r) => r.name).join('')}</b>`", ["rows.map((r) => r.name).join('')"]),
+    ("`<b>${esc(v.name)}</b>`", []),
+    ("`<b>${x ? 'a' : 'b'}</b>`", []),
+    ("`<b>${icon('ok', 12)}</b>`", []),
+    ("`<b>${x ? f('a') : ''}</b>`", []),
+    ("`<b>${names.map(f).join('')}</b>`", []),
+    ("`<b>${rows.map((r) => vmRow(r)).join('')}</b>`", []),
+    ("`<b>${x ? `<i>${esc(y)}</i>` : ''}</b>`", []),
+    ("`kvm-${v.host}`", []),
+])
+def test_the_general_scanner_table(snippet, flagged):
+    assert unsafe_interpolations("const a = " + snippet + ";") == flagged
+
+
 def test_the_template_scanner_catches_an_unescaped_name():
     src = "const a = `<b>${esc(v.name)}</b>`; const id = `kvm-${v.host}`; const t = `<td>${d.target}</td>`;"
     assert raw_data_in_html(src) == ["d.target"]
@@ -131,7 +266,7 @@ def test_user_data_never_lands_in_an_attribute():
     for m in re.finditer(r'<textarea[^>]*data-ci="(userData|networkData)"[^>]*>', s):
         assert "value=" not in m.group(0)
     assert ".value = st.loadedCi.user_data" in s
-    assert "root.querySelector('[data-ci=\"userData\"]').value = d.user_data || ''" in s
+    assert "ud.value = st.loaded;" in s and "st.loaded = d.user_data || '';" in s
     # le mot de passe VNC est une case : jamais une valeur dans la page
     assert "'display.password': { s: 'firmware', type: 'check'" in s
 
@@ -166,30 +301,89 @@ def _node(files, script):
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOk ju@node1"
 
 
-@pytest.mark.parametrize("user_data,keys,agent,expect_in,skipped", [
-    ("", [KEY], False, ["#cloud-config", "ssh_authorized_keys:", f"'{KEY}'"], False),
-    ("#cloud-config\nhostname: a\n", [KEY], True, ["hostname: a", f"  - '{KEY}'", "packages:\n  - qemu-guest-agent",
-                                                    "'systemctl enable --now qemu-guest-agent'"], False),
-    ("#cloud-config\nssh_authorized_keys:\n  - ssh-rsa AAAA old\nusers: []\n", [KEY], False,
-     ["ssh_authorized_keys:\n  - ssh-rsa AAAA old\n  - 'ssh-ed25519", "users: []"], False),
-    ("#cloud-config\npackages:\n  - qemu-guest-agent\n", [], True, ["packages:\n  - qemu-guest-agent\n"], False),
-    ("#!/bin/sh\necho hi\n", [KEY], True, ["#!/bin/sh\necho hi\n"], True),
-    ("", [], False, [""], False),
-])
-def test_keys_and_agent_are_merged_into_a_cloud_config(user_data, keys, agent, expect_in, skipped):
+START = "systemctl enable --now qemu-guest-agent"
+KEY2 = "ssh-rsa AAAAB3NzaC1yc2E it's-me"
+QGA = "qemu-guest-agent"
+WF = "#cloud-config\nwrite_files:\n  - path: /etc/x.yaml\n    content: |\n      packages:\n        - nano\n      runcmd: [ls]\n"
+
+# (libellé, user-data, clés, agent, document attendu (dict) ou raison du refus, liste entre crochets modifiée)
+MERGE_CASES = [
+    ("empty", "", [KEY], False, {"ssh_authorized_keys": [KEY]}, False),
+    ("nothing to add", "", [], False, None, False),
+    ("hostname + agent", "#cloud-config\nhostname: a\n", [KEY], True,
+     {"hostname": "a", "ssh_authorized_keys": [KEY], "packages": [QGA], "runcmd": [START]}, False),
+    ("existing keys", "#cloud-config\nssh_authorized_keys:\n  - ssh-rsa AAAA old\nusers: []\n", [KEY], False,
+     {"ssh_authorized_keys": ["ssh-rsa AAAA old", KEY], "users": []}, False),
+    ("agent already there", "#cloud-config\npackages:\n  - qemu-guest-agent\n", [], True,
+     {"packages": [QGA], "runcmd": [START]}, False),
+    ("shell script", "#!/bin/sh\necho hi\n", [KEY], True, "not-cloud-config", False),
+    ("flow lists", "#cloud-config\npackages: [vim, curl]\nruncmd: [\"echo hi\"]\n", [KEY], True,
+     {"packages": ["vim", "curl", QGA], "runcmd": ["echo hi", START], "ssh_authorized_keys": [KEY]}, True),
+    ("empty flow list", "#cloud-config\npackages: []  # none\n", [], True,
+     {"packages": [QGA], "runcmd": [START]}, True),
+    ("zero indent", "#cloud-config\npackages:\n- vim\nruncmd:\n- echo hi\nhostname: z\n", [], True,
+     {"packages": ["vim", QGA], "runcmd": ["echo hi", START], "hostname": "z"}, False),
+    ("four spaces", "#cloud-config\npackages:\n    - vim\n", [], True, {"packages": ["vim", QGA], "runcmd": [START]}, False),
+    ("nested keys ignored", f"#cloud-config\nusers:\n  - name: a\n    ssh_authorized_keys:\n      - {KEY}\n", [KEY], False,
+     {"users": [{"name": "a", "ssh_authorized_keys": [KEY]}], "ssh_authorized_keys": [KEY]}, False),
+    ("write_files content", WF, [], True,
+     {"write_files": [{"path": "/etc/x.yaml", "content": "packages:\n  - nano\nruncmd: [ls]\n"}],
+      "packages": [QGA], "runcmd": [START]}, False),
+    ("comments", "#cloud-config\npackages: # list\n  # first\n  - vim\n# about runcmd\nruncmd:\n  - ls\n", [], True,
+     {"packages": ["vim", QGA], "runcmd": ["ls", START]}, False),
+    ("comment inside zero indent", "#cloud-config\npackages:\n- vim\n# c\n- curl\nruncmd: []\n", [], True,
+     {"packages": ["vim", "curl", QGA], "runcmd": [START]}, True),
+    ("crlf", "#cloud-config\r\npackages:\r\n- vim\r\n", [KEY2], True,
+     {"packages": ["vim", QGA], "runcmd": [START], "ssh_authorized_keys": [KEY2]}, False),
+    ("no final newline", "#cloud-config\nhostname: n", [KEY], False, {"hostname": "n", "ssh_authorized_keys": [KEY]}, False),
+    ("document start", "#cloud-config\n---\nhostname: d\n", [], True, {"hostname": "d", "packages": [QGA], "runcmd": [START]}, False),
+    ("quoted key", "#cloud-config\n\"packages\":\n  - vim\n", [], True, {"packages": ["vim", QGA], "runcmd": [START]}, False),
+    ("key present in flow", f"#cloud-config\nssh_authorized_keys: ['{KEY}']\n", [KEY], False, {"ssh_authorized_keys": [KEY]}, True),
+    ("agent started as a list", "#cloud-config\nruncmd:\n  - [systemctl, enable, --now, qemu-guest-agent]\n", [], True,
+     {"runcmd": [["systemctl", "enable", "--now", QGA]], "packages": [QGA]}, False),
+    ("multi-line flow", "#cloud-config\npackages: [vim,\n  curl]\n", [], True, "flow", False),
+    ("nested flow", "#cloud-config\npackages: [vim, [curl, 1]]\n", [], True, "flow", False),
+    ("flow pair", "#cloud-config\npackages: [a: b]\n", [], True, "flow", False),
+    ("scalar", "#cloud-config\npackages: vim\n", [], True, "not-list", False),
+    ("mapping", "#cloud-config\npackages:\n  vim: 1\n", [], True, "not-list", False),
+    ("anchor", "#cloud-config\nssh_authorized_keys: &k\n  - a\n", [KEY], False, "not-list", False),
+    ("duplicate key", "#cloud-config\npackages:\n  - a\npackages:\n  - b\n", [], True, "duplicate", False),
+    ("two documents", "#cloud-config\nhostname: a\n---\nhostname: b\n", [KEY], False, "documents", False),
+    ("document end", "#cloud-config\nhostname: a\n...\n", [KEY], False, "documents", False),
+]
+
+
+@pytest.mark.parametrize("label,user_data,keys,agent,expect,flow", MERGE_CASES, ids=[c[0] for c in MERGE_CASES])
+def test_keys_and_agent_are_merged_into_a_cloud_config(label, user_data, keys, agent, expect, flow):
+    """Chaque résultat est relu par un vrai analyseur YAML (PyYAML, outil de
+    test seulement) ; un refus rend le texte INCHANGÉ ; un ajout garde chaque
+    ligne d'origine, dans l'ordre (sauf la ligne entre crochets complétée)."""
+    import yaml
     out = _node(["cloudinit-form.js"], f"""
       const r = CloudInitForm.withKeysAndAgent({json.dumps(user_data)}, {json.dumps(keys)}, {json.dumps(agent)});
       console.log(JSON.stringify(r));""")
-    assert out["skipped"] is skipped
-    for piece in expect_in:
-        assert piece in out["text"], (piece, out["text"])
-    if not skipped and out["text"].strip():
-        import yaml
-        doc = yaml.safe_load(out["text"])
-        if keys:
-            assert KEY in doc["ssh_authorized_keys"]
-        if agent:
-            assert doc["packages"].count("qemu-guest-agent") == 1
+    if isinstance(expect, str):
+        assert out["skipped"] is True and out["reason"] == expect and out["text"] == user_data
+        return
+    assert out["skipped"] is False and out["reason"] is None
+    if expect is None:
+        assert out["text"] == user_data
+        return
+    text = out["text"]
+    assert text.startswith("#cloud-config")
+    assert yaml.safe_load(text) == expect
+    got = text.splitlines(keepends=True)
+    orig = (user_data or "#cloud-config\n").splitlines(keepends=True)
+    if not orig[-1].endswith("\n"):
+        orig[-1] += "\r\n" if "\r\n" in user_data else "\n"
+    it = iter(got)
+    missing = [l for l in orig if not any(g == l for g in it)]
+    if flow:
+        assert all("[" in l for l in missing), missing
+    else:
+        assert missing == [], missing
+    if "\r\n" in user_data:
+        assert re.search(r"(?<!\r)\n", text) is None
 
 
 def test_a_key_already_present_is_not_repeated():
@@ -292,3 +486,21 @@ def test_vm_list_serves_the_edit_operations_table():
     assert wapp.KVM_VM_EDIT_OPERATIONS["hot"]["states"][:3] == list(ke.LIVE_STATES)
     src = (ROOT / "web" / "app.py").read_text()
     assert '"edit_operations": KVM_VM_EDIT_OPERATIONS})' in src
+
+
+def test_harvester_tabs_carry_a_tooltip_in_the_shared_shell_and_the_edit_window():
+    out = _node(["cloudinit-form.js", "vm-edit.js", "vm-form.js"], TR + """
+      const html = VMForm.shellHtml({ sections: VMEdit.SECTIONS });
+      const tips = [...html.matchAll(/data-section="([a-z]+)" class="tip" data-tip="([^"]+)"/g)].map(m => [m[1], m[2]]);
+      console.log(JSON.stringify(tips));""")
+    assert [t[0] for t in out] == ["general", "compute", "firmware", "disks", "network", "cloudinit",
+                                   "placement", "lifecycle"]
+    assert all(len(t[1]) > 10 for t in out)        # texte de repli ; les 5 langues : test_i18n
+    for sid in [t[0] for t in out]:
+        assert f"tr('vm.edit.tip.{sid}'" in SRC["vm-edit.js"]
+    assert '<button data-section="${s.id}" class="tip" data-tip="${esc(s.tip())}">' in SRC["vm-edit.js"]
+
+
+def test_no_em_dash_or_unicode_arrow_in_the_new_form_files():
+    for name in NEW:
+        assert "\u2014" not in SRC[name] and "\u2192" not in SRC[name], name

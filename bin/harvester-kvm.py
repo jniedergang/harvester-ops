@@ -178,6 +178,7 @@ import kvm_edit as ke  # noqa: E402
 import kvm_host as kh  # noqa: E402
 import kvm_net as kn  # noqa: E402
 import kvm_ops as ko  # noqa: E402
+import kvm_pending  # noqa: E402
 import kvm_storage as ks  # noqa: E402
 import kvm_templates as ktpl  # noqa: E402
 import vm_transfer_progress as vtp  # noqa: E402
@@ -1839,18 +1840,25 @@ def leftover_lines(left):
     return [f"left on the host: {describe_leftover(x)}" for x in left or []]
 
 
-def after_edit(host, name):
+def after_edit(host, name, state=None):
     """Relecture après une modification : état, empreinte, changements en
-    attente (la fenêtre affiche « restart needed » d'après `pending`)."""
+    attente (la fenêtre affiche « restart needed » d'après `pending`).
+    `state` : le repère « redémarrage nécessaire » de la liste des VMs
+    (kvm_pending) est mis à jour."""
     try:
         form = ke.vm_form(host, name)
     except (ko.OpError, kh.KvmError) as e:
         step("verify", "warn", f"cannot read {name} back: {e.message}")
         return {"state": None, "config_digest": None, "pending": None}
+    if state is not None:
+        try:
+            kvm_pending.record(state, host.name, name, form.get("id"), form["pending"])
+        except OSError as e:                 # un repère manqué ne fait pas échouer l'action
+            step("verify", "warn", f"restart marker not saved: {e.strerror}")
     step("verify", "done", f"{form['state']}"
          + (f", restart needed for: {', '.join(form['pending'])}" if form["pending"] else ""))
     return {"state": form["state"], "config_digest": form["config_digest"],
-            "pending": form["pending"]}
+            "pending": form["pending"], "id": form.get("id")}
 
 
 # --- host caps -------------------------------------------------------------------
@@ -2034,7 +2042,7 @@ def cmd_vm_edit(args):
                              cancel=deadline_cancel(timeout), sleep=SLEEP)
         except LIB_ERRORS as e:
             raise edit_failure(prog, e, data) from None
-        after = after_edit(host, res.get("name") or name)
+        after = after_edit(host, res.get("name") or name, state)
     changes = res.get("changes") or []
     out = {"ok": True, "host": host.name, "dry_run": False, "name": res.get("name") or name,
            "previous_name": name, "changes": changes, "empty": not changes,
@@ -2077,7 +2085,7 @@ def hot_gesture(args, gesture, fn, pools=(), networks=()):
             raise edit_failure(prog, e, data) from None
         if prog.sid == "plan":
             prog("plan", "done", "nothing to change" if not res.get("changes") else gesture)
-        after = after_edit(host, name)
+        after = after_edit(host, name, state)
     out = {"ok": True, "host": host.name, "name": name, "gesture": gesture,
            "changes": res.get("changes") or [], "defined": bool(res.get("defined")),
            "leftovers": list(res.get("leftovers") or []), "after": after,
@@ -2151,12 +2159,14 @@ def cmd_vm_cloudinit(args):
     host = load_host_next(state, args.host)
     name = check_vm_name(args.name)
     ci = read_spec(args.spec_file, "cloud-init")
-    unknown = sorted(set(ci) - {"user_data", "network_data", "hostname"})
+    unknown = sorted(set(ci) - {"user_data", "network_data", "hostname", "clear"})
     if unknown:
         raise UsageError(f"cloud-init: unknown field(s) {', '.join(unknown)}")
     for k in ("user_data", "network_data", "hostname"):
         if ci.get(k) is not None and not isinstance(ci[k], str):
             raise UsageError(f"cloud-init: {k} must be a string")
+    if "clear" in ci and not isinstance(ci["clear"], bool):
+        raise UsageError("cloud-init: clear must be true or false")
     ack = args.acknowledge_unreadable
     checked(ko.check_acknowledged, ack)
     data = {"host": host.name, "name": name, "refusals": [], "leftovers": []}
@@ -2174,14 +2184,15 @@ def cmd_vm_cloudinit(args):
              + (" (cloud-init runs again at next boot)" if args.rerun else ""))
         res = lib_call(prog, data, lambda: ke.regenerate_seed(
             host, name, ci.get("user_data"), ci.get("network_data"), rerun=args.rerun,
-            hostname=ci.get("hostname"), acknowledged_unreadable=ack, before_write=hold))
+            hostname=ci.get("hostname"), acknowledged_unreadable=ack, before_write=hold,
+            clear=ci.get("clear") is True))
         prog("seed", "done", f"{res['seed']['pool']}/{res['seed']['volume']} on "
              f"{res['seed']['target']}, read by the guest at its next start")
         if res["previous"]:
             prog("cleanup", "done" if res["removed"] else "warn",
                  f"previous seed {res['previous']['pool']}/{res['previous']['volume']} "
                  + ("removed" if res["removed"] else f"kept: {res['kept_reason']}"))
-        after = after_edit(host, name)
+        after = after_edit(host, name, state)
     out = {"ok": True, "host": host.name, "name": name, **res, "after": after,
            "user_data": bool(ci.get("user_data")), "user_data_bytes": len(ci.get("user_data") or ""),
            "network_data": bool(ci.get("network_data"))}

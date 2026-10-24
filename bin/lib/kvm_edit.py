@@ -47,6 +47,8 @@ REASON_TRANSIENT = ("transient VM: its definition disappears at shutdown, so the
                     "to edit; make it persistent first")
 REASON_TRANSIENT_NEXT = "transient VM: nothing persists after shutdown"
 REASON_UNSUPPORTED = "not changeable by the console in this version"
+REASON_EMPTY_USER_DATA = ("an empty user-data would erase the current one: send clear to confirm "
+                          "that it must be emptied")
 REASON_NOT_DONE = "not attempted: an earlier change failed"
 REASON_UNCERTAIN = ("the connection was lost during the write: reload the VM to see whether "
                     "it was applied")
@@ -174,7 +176,8 @@ def vm_form(host, name):
             "pending": pending, "restart_required": bool(pending), "hotness": list(HOTNESS),
             "config_digest": kx.canonical_digest(vm["inactive"]),
             "state": vm["info"]["state"], "persistent": vm["info"]["persistent"],
-            "autostart": vm["info"].get("autostart"), "snapshots": len(vm["snapshots"])}
+            "autostart": vm["info"].get("autostart"), "snapshots": len(vm["snapshots"]),
+            "id": vm["info"].get("id")}
 
 
 # --- plan --------------------------------------------------------------------------
@@ -185,7 +188,7 @@ def _scrub(value):
     if isinstance(value, dict) and ("user_data" in value or "network_data" in value):
         return {k: (bool(v), len(v)) if isinstance(v, str) else v for k, v in value.items()
                 if k in ("user_data", "network_data")} | {
-            k: v for k, v in value.items() if k in ("rerun", "hostname")}
+            k: v for k, v in value.items() if k in ("rerun", "hostname", "clear")}
     return value
 
 
@@ -331,6 +334,10 @@ def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False,
         applied, reason = _classify(ch, ctx, spec, gesture)
         if applied == "config":
             applied = "now"
+        if ch["field"] == "cloudinit" and applied != "refused":
+            why = empty_user_data_refusal(host, view.get("seed"), ch["new"])
+            if why:
+                applied, reason = "refused", why
         ch["applied"], ch["reason"] = applied, reason
         if applied == "refused":
             refusals.append(f"{ch['field']}: {reason}")
@@ -870,7 +877,8 @@ def apply_edit(host, name, plan, progress=None, cancel=None, sleep=time.sleep,
             ci = c["new"] or {}
             _write(lambda ci=ci: regenerate_seed(host, name, ci.get("user_data"),
                                                  ci.get("network_data"), bool(ci.get("rerun")),
-                                                 hostname=ci.get("hostname")), c)
+                                                 hostname=ci.get("hostname"),
+                                                 clear=ci.get("clear") is True), c)
             c["status"] = "done"
         for c in renames:
             _write(lambda c=c: host.virsh("domrename", "--domain", name, "--new-name", c["new"]),
@@ -1053,12 +1061,26 @@ def detach_nic(host, name, mac, progress=None, sleep=time.sleep):
 
 # --- cloud-init --------------------------------------------------------------------
 
+def empty_user_data_refusal(host, seed, ci):
+    """Raison de refus si `ci` remplacerait un user-data non vide par un vide
+    sans `clear: true` (un champ resté vide par erreur effacerait le
+    cloud-init de la VM) ; None sinon. Le seed actuel n'est lu que dans ce
+    cas (user-data vide demandé, seed présent)."""
+    ci = ci if isinstance(ci, dict) else {}
+    if (ci.get("user_data") or "").strip() or ci.get("clear") is True or not seed:
+        return None
+    files = ko.read_seed(host, seed["pool"], seed["volume"])
+    return REASON_EMPTY_USER_DATA if (files.get("user-data") or b"").strip() else None
+
+
 def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=None,
-                    uuid_gen=uuidlib.uuid4, acknowledged_unreadable=None, before_write=None):
+                    uuid_gen=uuidlib.uuid4, acknowledged_unreadable=None, before_write=None,
+                    clear=False):
     """Nouvelle ISO de seed téléversée sous un nom neuf (`<vm>-cidata-<n>.iso`),
     média changé (à chaud si la VM tourne), `<hops:seed>` mis à jour par un
     `define`. `rerun` : nouvel `instance-id` (cloud-init rejoue ses modules
-    de premier démarrage). Rend {seed, previous, removed, kept_reason,
+    de premier démarrage). Un user-data vide qui remplacerait un user-data
+    non vide est refusé (OpError `refused`) sauf `clear=True`. Rend {seed, previous, removed, kept_reason,
     next_boot, rerun, leftovers}.
 
     Ancien seed : supprimé SEULEMENT après le `define` réussi, et seulement
@@ -1079,6 +1101,9 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
         raise OpError("refused", REASON_TRANSIENT)
     view = kx.managed_view(vm["inactive"])
     seed = view.get("seed")
+    why = empty_user_data_refusal(host, seed, {"user_data": user_data, "clear": bool(clear)})
+    if why:
+        raise OpError("refused", why)
     live = vm["info"]["state"] in LIVE_STATES
     instance_id = str(uuid_gen()) if rerun else (view.get("uuid") or str(uuid_gen()))
     if seed is None:

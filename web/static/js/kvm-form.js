@@ -49,9 +49,17 @@ const KVMForm = (() => {
   // réglages posés à la création seulement (refusés par la modification
   // dans cette version : « not changeable by the console in this version »)
   const CREATE_ONLY = ['memory.balloon', 'serial_console', 'watchdog', 'sysinfo_serial', 'cpu.hotplug'];
-  // pendants « redémarrage nécessaire » connus de cette page (la liste des
-  // VMs ne les sert pas encore) : "hôte/vm" -> [champs]
+  // « redémarrage nécessaire » appris par cette page (fenêtre, résultat d'un
+  // geste) avant que la liste ne le serve : "hôte/vm" -> {fields, id} ; l'Id
+  // libvirt change à chaque démarrage, un repère d'un autre Id est périmé
   const pendingRestart = new Map();
+  // relecture de l'état d'une fenêtre « Modifier » (réglable par les tests)
+  const POLL = { ms: 20000 };
+  function notePending(host, name, fields, id) {
+    const key = `${host}/${name}`;
+    if (fields && fields.length) pendingRestart.set(key, { fields: [...fields], id: id == null ? null : id });
+    else pendingRestart.delete(key);
+  }
 
   // -- requêtes ----------------------------------------------------------------------------
   async function getJson(url) {
@@ -454,6 +462,43 @@ const KVMForm = (() => {
     return { keys: picked.concat(pasted), bad: pasted.filter((k) => !CloudInitForm.SSH_KEY_RE.test(k)) };
   }
 
+  /** Pourquoi les clés SSH ou l'agent invité n'ont pas pu être ajoutés au
+   *  user-data (withKeysAndAgent n'a rien modifié) : un message par cause. */
+  function ciRefusals(merged, keys, agent) {
+    const key = merged.key || '';
+    if (merged.reason === 'not-cloud-config') {
+      const out = [];
+      if (agent) out.push(tr('kvmf.e.ciAgentShell'));
+      if (keys.length) out.push(tr('kvmf.e.ciKeysShell'));
+      return out;
+    }
+    const why = {
+      flow: () => tr('kvmf.e.ciFlow', { key }),
+      'not-list': () => tr('kvmf.e.ciNotList', { key }),
+      duplicate: () => tr('kvmf.e.ciDuplicate', { key }),
+      documents: () => tr('kvmf.e.ciDocuments'),
+    }[merged.reason];
+    return [why ? why() : tr('kvmf.e.ciDocuments')];
+  }
+
+  /** Disque de démarrage d'après les cartes : le plus petit ordre de
+   *  démarrage (> 0), sinon la première carte. */
+  function bootCard(cards) {
+    const ordered = (cards || []).map((c, i) => ({ c, i, o: Number(c.boot_order) || 0 }));
+    const withOrder = ordered.filter((x) => x.o > 0).sort((a, b) => a.o - b.o || a.i - b.i);
+    return (withOrder[0] || ordered[0] || {}).c || null;
+  }
+
+  /** L'agent invité coché par défaut ? Non pour un démarrage sur une ISO
+   *  (média d'installation : pas de cloud-init) ni pour un système Windows. */
+  function agentDefault(cards, os) {
+    const boot = bootCard(cards);
+    if (boot && boot.source === 'iso') return false;
+    return os !== 'windows';
+  }
+
+  const isCloudConfig = (text) => /^#cloud-config[ \t]*(\r?\n|$)/.test(String(text || ''));
+
   // -- sections ----------------------------------------------------------------------------
   const unmanagedFor = (id, list) => (list || []).filter((u) => {
     const s = String(u);
@@ -501,7 +546,7 @@ const KVMForm = (() => {
         <p class="form-hint">${esc(tr('kvmf.vncHint'))}</p>`;
     }
     if (id === 'disks') {
-      const existing = ctx.mode === 'edit' ? existingDisksHtml(ctx) : '';
+      const existing = ctx.mode === 'edit' ? `<div data-existing-wrap="disks">${existingDisksHtml(ctx)}</div>` : '';
       return `<h3>${esc(tr('kvmf.s.disks'))}</h3>
         ${existing}
         ${ctx.mode === 'edit' ? `<h4>${esc(tr('kvmf.addDisks'))}</h4>` : ''}
@@ -511,7 +556,7 @@ const KVMForm = (() => {
         ${unmanagedHtml(id, ctx)}`;
     }
     if (id === 'network') {
-      const existing = ctx.mode === 'edit' ? existingNicsHtml(ctx) : '';
+      const existing = ctx.mode === 'edit' ? `<div data-existing-wrap="nics">${existingNicsHtml(ctx)}</div>` : '';
       return `<h3>${esc(tr('kvmf.s.network'))}</h3>
         ${existing}
         ${ctx.mode === 'edit' ? `<h4>${esc(tr('kvmf.addNics'))}</h4>` : ''}
@@ -529,10 +574,13 @@ const KVMForm = (() => {
         </div>
         ${ctx.readOnly ? '' : CloudInitForm.renderWizard('', { schema: CloudInitForm.userSchema({ harvesterKey: false }), tips: true })}
         <div class="form-row"><label>${esc(tr('kvmf.f.userData'))}</label>
-          <textarea class="yaml-editor tall tip" data-ci="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}"${ro}></textarea></div>
+          <textarea class="yaml-editor tall tip" data-ci="userData" data-vmf-field="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}"${ro}></textarea>
+          ${ctx.mode === 'create' ? `<p class="form-hint res-warn" data-ci-agent-hint hidden>${icon('warn', 12)} ${esc(tr('kvmf.ciAgentHint'))}</p>` : ''}</div>
         <div class="form-row"><label>${esc(tr('kvmf.f.networkData'))}</label>
           <textarea class="yaml-editor tip" data-ci="networkData" spellcheck="false" data-tip="${esc(tr('kvmf.t.networkData'))}"${ro}></textarea></div>
-        ${ctx.mode === 'edit' ? `<label class="bk-check tip" data-tip="${esc(tr('kvmf.t.rerun'))}"><input type="checkbox" name="ci_rerun"${ro}> <span>${esc(tr('kvmf.f.rerun'))}</span> <span class="kvmf-hot" data-hot="cloudinit"></span></label>
+        ${ctx.mode === 'edit' ? `<div class="bk-form-actions"><button type="button" class="btn btn-sm btn-secondary tip" data-ci-clear data-tip="${esc(tr('kvmf.ciClearTip'))}"${ro}>${icon('trash')} ${esc(tr('kvmf.ciClear'))}</button>
+          <span class="form-hint" data-ci-cleared hidden>${esc(tr('kvmf.ciCleared'))}</span></div>
+          <label class="bk-check tip" data-tip="${esc(tr('kvmf.t.rerun'))}"><input type="checkbox" name="ci_rerun"${ro}> <span>${esc(tr('kvmf.f.rerun'))}</span> <span class="kvmf-hot" data-hot="cloudinit"></span></label>
           <p class="form-hint" data-ci-state></p>` : ''}
         <div class="kvmf-confirm" data-ci-confirm hidden></div>`;
     }
@@ -639,7 +687,7 @@ const KVMForm = (() => {
     if (ctx.mode === 'edit') {
       return `<div class="kvmf-edit-head">
           <span>${icon('vm')} <strong>${esc(ctx.domain)}</strong> <span class="res-dim">${esc(ctx.host)}</span> <span data-kvmf="state"></span></span>
-          <div data-kvmf="banner"></div></div>`;
+          <div data-kvmf="banner"></div><div data-kvmf="refreshed"></div></div>`;
     }
     return `<form class="capi-form vm-create-head kvmf-head" autocomplete="off" novalidate>
         <fieldset>
@@ -685,10 +733,15 @@ const KVMForm = (() => {
     const id = ctx.mode === 'edit' ? `kvm-edit-${ctx.host}-${enc(ctx.domain)}` : 'kvm-create';
     const title = ctx.mode === 'edit' ? tr('kvmf.editTitle', { name: ctx.domain, host: ctx.host }) : tr('kvmf.createTitle');
     const existing = document.getElementById(`fp-${id}`);
-    if (existing) return FloatingPanels.open({ id, icon: 'vm', title }).el;
+    if (existing) {
+      const el = FloatingPanels.open({ id, icon: 'vm', title }).el;
+      if (ctx.mode === 'create' && el.__kvmfRetarget) el.__kvmfRetarget({ host: ctx.host, image: ctx.image });
+      return el;
+    }
     const panel = FloatingPanels.open({
       id, icon: 'vm', title, width: 1040, height: 720,
       bodyHtml: `<div class="kvmf" data-kvmf-mode="${esc(ctx.mode)}">${VMForm.shellHtml({ head: headHtml(ctx), sections: sections(), actions: actionsHtml(ctx), cls: 'kvmf-shell' })}
+        <div class="kvmf-confirm" data-kvmf="retarget" hidden></div>
         <div class="kvmf-errors" data-kvmf="errors"></div>
         <ul class="kvm-steps" data-kvmf="steps"></ul></div>`,
     });
@@ -702,11 +755,16 @@ const KVMForm = (() => {
     const st = { ctx, form: null, base: null, keys: new Map(), busy: false, timer: null, loadedCi: null };
 
     // -- références de l'hôte ---------------------------------------------------------
+    /** Références de l'hôte. Un changement d'hôte pendant la lecture rend
+     *  la réponse périmée : elle est ignorée (jeton de requête), seule la
+     *  dernière demande remplit la fenêtre. */
     async function loadRefs(host) {
+      const token = (st.refToken = (st.refToken || 0) + 1);
       const [caps, pools, nets, links, images] = await Promise.all([
         getJson(`/api/kvm/hosts/${enc(host)}/caps`), getJson(`/api/kvm/hosts/${enc(host)}/pools`),
         getJson(`/api/kvm/hosts/${enc(host)}/networks`), getJson(`/api/kvm/hosts/${enc(host)}/links`),
         getJson(`/api/kvm/hosts/${enc(host)}/images`)]);
+      if (token !== st.refToken) { const e = new Error('stale'); e.stale = true; throw e; }
       if (caps.error) throw new Error(caps.error);
       ctx.caps = caps.options || {};
       ctx.role = caps.role || 'viewer';
@@ -720,6 +778,30 @@ const KVMForm = (() => {
     function setFamily(fam) {
       ctx.family = fam && (ctx.caps.by_machine || {})[fam] ? fam : (ctx.caps.default_machine || 'q35');
       ctx.opts = (ctx.caps.by_machine || {})[ctx.family] || {};
+    }
+
+    // -- agent invité (création) : coché par défaut sauf démarrage sur ISO ou
+    // Windows, tant que la personne n'a pas touché la case ----------------------------
+    function diskCards() {
+      const ed = root.querySelector('[data-editor="kvm-disks"] .tf-form');
+      try { return ed ? (TFForm.read(ed, diskSchema(ctx), { emitEmptyLists: true }).disk || []) : []; } catch { return []; }
+    }
+    function syncAgent(cards) {
+      const box = root.querySelector('.kvmf-head [name="head_agent"]');
+      if (!box) return;
+      if (!st.agentTouched) {
+        const os = (root.querySelector('[data-vmf-field="os"] [name="os"]') || {}).value;
+        box.checked = agentDefault(cards || diskCards(), os);
+      }
+      updateAgentHint();
+    }
+    /** Un user-data qui n'est pas un #cloud-config (script shell) passe tel
+     *  quel case décochée ; case cochée, la fenêtre dit pourquoi. */
+    function updateAgentHint() {
+      const hint = root.querySelector('[data-ci-agent-hint]');
+      const box = root.querySelector('.kvmf-head [name="head_agent"]');
+      const u = (root.querySelector('[data-ci="userData"]') || {}).value || '';
+      if (hint) hint.hidden = !(box && box.checked && u.trim() && !isCloudConfig(u));
     }
 
     // -- construction des onglets ------------------------------------------------------
@@ -745,9 +827,25 @@ const KVMForm = (() => {
           let cards = [];
           try { cards = TFForm.read(ed, schema, { emitEmptyLists: true }).disk || []; } catch { /* carte incomplète */ }
           renderCapacity(el.querySelector('[data-disk-capacity]'), ctx, cards);
+          if (ctx.mode === 'create') syncAgent(cards);
         });
       }
       if (sid === 'network') wireCards(el.querySelector('[data-editor="kvm-nics"] .tf-form'), nicSchema(ctx), 'nic');
+      if (sid === 'general' && ctx.mode === 'create') {
+        el.querySelector('[name="os"]')?.addEventListener('change', () => syncAgent());
+      }
+      if (sid === 'cloudinit' && ctx.mode === 'create') {
+        el.querySelector('[data-ci="userData"]').addEventListener('input', () => updateAgentHint());
+      }
+      if (sid === 'cloudinit' && ctx.mode === 'edit') {
+        // « Vider » : seul moyen d'envoyer un user-data vide à la place d'un
+        // user-data existant (le serveur exige clear)
+        const ud = el.querySelector('[data-ci="userData"]');
+        const mark = el.querySelector('[data-ci-cleared]');
+        st.ciCleared = false;
+        el.querySelector('[data-ci-clear]')?.addEventListener('click', () => { ud.value = ''; st.ciCleared = true; mark.hidden = false; });
+        ud.addEventListener('input', () => { if (ud.value.trim()) { st.ciCleared = false; mark.hidden = true; } });
+      }
       if (sid === 'cloudinit' && !ctx.readOnly) {
         CloudInitForm.wireWizard(el, '', {
           schema: CloudInitForm.userSchema({ harvesterKey: false }),
@@ -785,6 +883,15 @@ const KVMForm = (() => {
 
     function readSpecSafe() {
       try { return collect({ lenient: true }).spec; } catch { return null; }
+    }
+
+    /** Empreinte de la saisie (spec, cartes, cloud-init, clés collées) : une
+     *  fenêtre « touchée » demande avant d'être remplacée. */
+    function snapshot() {
+      const spec = readSpecSafe() || {};
+      const q = (sel) => (root.querySelector(sel) || {}).value || '';
+      return JSON.stringify([spec, spec._cards || null, q('[data-ci="userData"]'), q('[data-ci="networkData"]'),
+        q('.kvmf-head [name="ssh_extra"]'), q('.kvmf-head [name="name"]'), q('.kvmf-head [name="count"]')]);
     }
 
     /** Changement de type de machine : les choix (micrologiciel, bus, vidéo,
@@ -852,7 +959,7 @@ const KVMForm = (() => {
         const u = root.querySelector('[data-ci="userData"]').value;
         const n = root.querySelector('[data-ci="networkData"]').value;
         const merged = CloudInitForm.withKeysAndAgent(u, keys, agent);
-        if (merged.skipped && (keys.length || agent)) errors.push({ section: 'cloudinit', message: tr('kvmf.e.notCloudConfig') });
+        if (merged.skipped) ciRefusals(merged, keys, agent).forEach((m) => errors.push({ section: 'cloudinit', field: 'userData', message: m }));
         if (merged.text.trim() || n.trim()) {
           const seedPool = root.querySelector('[name="seed_pool"]').value
             || (disks.find((d) => d.source && d.source.pool) || { source: {} }).source.pool || null;
@@ -938,6 +1045,10 @@ const KVMForm = (() => {
       if (st.loadedCi && (u !== st.loadedCi.user_data || nd !== st.loadedCi.network_data || rerun || hn)) {
         spec.cloudinit = { user_data: u, network_data: nd || null, rerun };
         if (hn) spec.cloudinit.hostname = hn;
+        if (!u.trim() && st.loadedCi.user_data.trim()) {
+          if (st.ciCleared) { spec.cloudinit.user_data = ''; spec.cloudinit.clear = true; }
+          else errors.push({ section: 'cloudinit', field: 'userData', message: tr('kvmf.e.ciEmpty') });
+        }
       }
       const cpu = Object.assign({}, st.form.view.cpu, spec.cpu || {});
       const mem = Object.assign({}, st.form.view.memory, spec.memory || {});
@@ -983,7 +1094,7 @@ const KVMForm = (() => {
         box.innerHTML = VMForm.reviewHtml({ refusals: p.refusals || [], body: VMForm.changesHtml(p.changes || []) });
         return d;
       } catch (e) {
-        if (e.status === 409 && e.data && e.data.kind === 'changed') { showChanged(); box.innerHTML = ''; return null; }
+        if (e.status === 409 && e.data && e.data.kind === 'changed') { onChanged(); box.innerHTML = ''; return null; }
         box.innerHTML = `<p class="res-error">${icon('fail')} ${esc(e.message)}</p>`;
         return null;
       }
@@ -1057,6 +1168,7 @@ const KVMForm = (() => {
       writeControl(root.querySelector('[name="machine"]'), ctx.family);
       if (spec.cloudinit && spec.cloudinit.network_data) root.querySelector('[data-ci="networkData"]').value = spec.cloudinit.network_data;
       root.querySelector('[name="cpu.mode"]')?.dispatchEvent(new Event('change'));
+      syncAgent();
       form.show('general');
       say(`${esc(tr('kvmf.templateLoaded'))} <code>${esc(name)}</code>${(d.removed || []).length ? ` <span class="res-dim">${esc(tr('kvmf.templateRemoved', { list: d.removed.join(', ') }))}</span>` : ''}`);
     }
@@ -1079,22 +1191,114 @@ const KVMForm = (() => {
     }
 
     // -- modifier ---------------------------------------------------------------------
-    function showChanged() {
+    /** Valeur d'un champ telle que la fenêtre la lirait (readControl après
+     *  writeControl), pour comparer base, saisie et nouvelle vue. */
+    function norm(name, v) {
+      const t = FIELDS[name].type;
+      if (t === 'check') return !!v;
+      if (v == null || v === '') return null;
+      return t === 'int' ? Number(v) : String(v);
+    }
+    const srcOf = (f) => Object.assign({}, f.view, { autostart: !!f.autostart, name: f.name || ctx.domain });
+    function fieldsOf(f) {
+      const src = srcOf(f);
+      const out = {};
+      Object.keys(st.base.fields).forEach((name) => { out[name] = norm(name, getPath(src, name)); });
+      return out;
+    }
+    const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+    /** Saisie des tableaux de disques et de cartes existants (pour savoir
+     *  s'ils ont été touchés depuis l'ouverture). */
+    function tablesOf() {
+      const out = {};
+      ['disks', 'nics'].forEach((k) => {
+        out[k] = [...root.querySelectorAll(`[data-existing="${k}"] input, [data-existing="${k}"] select`)]
+          .map((el) => (el.type === 'checkbox' ? el.checked : el.value));
+      });
+      return out;
+    }
+    const ciOf = () => ({ u: root.querySelector('[data-ci="userData"]').value, n: root.querySelector('[data-ci="networkData"]').value });
+
+    /** Ce qui a changé ailleurs depuis la base de la fenêtre : {remote:
+     *  [champs], conflicts: [champs aussi modifiés ici]}. */
+    function remoteChanges(f) {
+      const base = st.base.fields;
+      const now = readFields(root);
+      const next = fieldsOf(f);
+      const remote = Object.keys(next).filter((k) => !same(next[k], base[k]));
+      const devs = [['disks', 'disks'], ['nics', 'nics']].filter(([k]) => !same((f.view || {})[k], (st.form.view || {})[k])).map(([k]) => k);
+      const tables = tablesOf();
+      const conflicts = remote.filter((k) => !same(now[k], base[k]))
+        .concat(devs.filter((k) => !same(tables[k], st.base.tables[k])));
+      return { remote: remote.concat(devs), conflicts, next };
+    }
+    const fieldLabel = (k) => (k === 'disks' ? tr('kvmf.s.disks') : k === 'nics' ? tr('kvmf.s.network')
+      : FIELDS[k] ? FIELDS[k].label() : k);
+
+    /** La VM a changé ailleurs : bandeau avec les champs touchés (ceux aussi
+     *  modifiés ici sont marqués) et « Relire ». L'empreinte n'est PAS
+     *  remplacée ici : seule la relecture l'accepte. */
+    function showChanged(f) {
       const ban = root.querySelector('[data-kvmf="banner"]');
-      ban.innerHTML = `<div class="bkg-confirm kvmf-changed" role="alert">${icon('warn')} <span>${esc(tr('kvmf.changed'))}</span>
-          <button type="button" class="btn btn-sm btn-primary tip" data-kvmf="reload-now" data-tip="${esc(tr('kvmf.reloadTip'))}">${icon('refresh')} ${esc(tr('kvmf.reload'))}</button></div>`;
+      ban.querySelector('.kvmf-changed')?.remove();
+      const rc = f && f.view ? remoteChanges(f) : { remote: [], conflicts: [] };
+      const list = rc.remote.map((k) => `<li data-remote-field="${esc(k)}"${rc.conflicts.includes(k) ? ' class="res-warn"' : ''}>${esc(fieldLabel(k))}${
+        rc.conflicts.includes(k) ? ` <span class="res-dim">(${esc(tr('kvmf.changedConflict'))})</span>` : ''}</li>`).join('');
+      ban.insertAdjacentHTML('beforeend', `<div class="bkg-confirm kvmf-changed" role="alert">${icon('warn')} <span>${esc(tr('kvmf.changed'))}</span>
+          ${list ? `<ul class="kvmf-remote">${list}</ul>` : ''}
+          <button type="button" class="btn btn-sm btn-primary tip" data-kvmf="reload-now" data-tip="${esc(tr('kvmf.reloadTip'))}">${icon('refresh')} ${esc(tr('kvmf.reload'))}</button></div>`);
       sayText(tr('kvmf.changed'), true);
     }
 
-    /** Relit la VM (empreinte, état, changements en attente) SANS toucher à
-     *  la saisie : la modification suivante part de la nouvelle empreinte. */
+    /** Refus 409 `changed` (aperçu ou enregistrement) : la nouvelle vue est
+     *  lue pour nommer les champs changés, sans être acceptée. */
+    async function onChanged() {
+      const d = await getJson(`/api/kvm/vms/${enc(ctx.host)}/${enc(ctx.domain)}/form`);
+      showChanged(d.error ? null : d);
+    }
+
+    /** Relecture à trois voies (base, saisie, nouvelle vue) : un champ non
+     *  touché prend la nouvelle valeur, un champ modifié ici garde la saisie ;
+     *  les tableaux de disques et de cartes sont refaits s'ils n'ont pas été
+     *  touchés ; le cloud-init est relu s'il n'a pas été modifié. La nouvelle
+     *  empreinte devient la base de la modification suivante. */
     async function reloadForm() {
       const d = await getJson(`/api/kvm/vms/${enc(ctx.host)}/${enc(ctx.domain)}/form`);
       if (d.error) { sayText(errText(d.error), true); return false; }
+      const rc = remoteChanges(d);
+      const now = readFields(root);
+      const tables = tablesOf();
+      const ci = ciOf();
+      const ciUntouched = !st.loadedCi || (ci.u === st.loadedCi.user_data && ci.n === st.loadedCi.network_data);
+      Object.keys(rc.next).forEach((name) => {
+        if (same(now[name], st.base.fields[name]) && !same(rc.next[name], st.base.fields[name])) {
+          const el = root.querySelector(`[data-vmf-field="${CSS.escape(name)}"] [name="${CSS.escape(name)}"]`);
+          if (el) writeControl(el, rc.next[name]);
+        }
+      });
+      const oldView = st.form.view;
       st.form = d;
       ctx.form = d;
+      st.base.fields = rc.next;
+      ['disks', 'nics'].forEach((k) => {
+        const wrap = root.querySelector(`[data-existing-wrap="${k}"]`);
+        if (wrap && !same((d.view || {})[k], (oldView || {})[k]) && same(tables[k], st.base.tables[k])) {
+          wrap.innerHTML = k === 'disks' ? existingDisksHtml(ctx) : existingNicsHtml(ctx);
+        }
+      });
+      st.base.tables = tablesOf();
+      root.querySelector('[name="cpu.mode"]')?.dispatchEvent(new Event('change'));
       updateEditState();
       root.querySelector('[data-kvmf="banner"] .kvmf-changed')?.remove();
+      if (ciUntouched) { st.loadedCi = null; loadCloudInit(); }
+      const kept = rc.conflicts.map(fieldLabel);
+      const refreshed = rc.remote.filter((k) => !rc.conflicts.includes(k)).map(fieldLabel);
+      const box = root.querySelector('[data-kvmf="refreshed"]');
+      if (box) {
+        box.innerHTML = rc.remote.length ? `<div class="vmf-restart kvmf-refreshed" role="status">${icon('refresh')} ${
+          esc(tr('kvmf.refreshedFields', { list: refreshed.join(', ') || '–' }))}${
+          kept.length ? ` <span class="res-warn">${esc(tr('kvmf.keptFields', { list: kept.join(', ') }))}</span>` : ''}</div>` : '';
+      }
       sayText(tr('kvmf.reloaded'));
       return true;
     }
@@ -1104,8 +1308,7 @@ const KVMForm = (() => {
       root.querySelector('[data-kvmf="state"]').innerHTML = `<span class="badge ${LIVE.includes(f.state) ? 'ok' : 'dim'}">${esc(window.KVM && KVM.stateLabel ? KVM.stateLabel(f.state) : f.state)}</span>`;
       const ban = root.querySelector('[data-kvmf="banner"]');
       const changed = ban.querySelector('.kvmf-changed');
-      const key = `${ctx.host}/${ctx.domain}`;
-      if ((f.pending || []).length) pendingRestart.set(key, f.pending); else pendingRestart.delete(key);
+      notePending(ctx.host, ctx.domain, f.pending, f.id);
       const restart = VMForm.restartBanner(f.pending || [], `<button type="button" class="btn btn-sm btn-secondary tip" data-kvmf="cycle" data-tip="${esc(tr('kvmf.cycleTip'))}">${icon('restart')} ${esc(tr('kvmf.cycle'))}</button>`);
       const ro = ctx.readOnly ? `<div class="vmf-readonly res-error" role="status">${icon('lock')} ${esc(ctx.readOnly)}</div>` : '';
       ban.innerHTML = ro + restart;
@@ -1130,10 +1333,7 @@ const KVMForm = (() => {
           const changes = o.changes || [];
           const restart = !!o.restart_required;
           const after = o.after || {};
-          if (after.pending) {
-            if (after.pending.length) pendingRestart.set(`${ctx.host}/${ctx.domain}`, after.pending);
-            else pendingRestart.delete(`${ctx.host}/${ctx.domain}`);
-          }
+          if (after.pending) notePending(ctx.host, ctx.domain, after.pending, after.id);
           if (ok) {
             say(`${esc(tr('kvmf.applied'))}${restart ? ` · ${esc(tr('vmf.restartNeeded'))}` : ''}`);
             const box = root.querySelector('[data-kvmf="review"]');
@@ -1144,7 +1344,7 @@ const KVMForm = (() => {
             reopen();
           } else {
             const kind = o.kind || '';
-            if (kind === 'changed') showChanged();
+            if (kind === 'changed') onChanged();
             else say(`${esc(o.error || run.error_summary || tr('kvmf.failed'))}`, true);
             const box = root.querySelector('[data-kvmf="review"]');
             if (box && changes.length) { box.innerHTML = VMForm.changesHtml(changes); showResult(); }
@@ -1153,7 +1353,7 @@ const KVMForm = (() => {
         });
       } catch (e) {
         st.busy = false;
-        if (e.status === 409 && e.data && e.data.kind === 'changed') { showChanged(); return; }
+        if (e.status === 409 && e.data && e.data.kind === 'changed') { onChanged(); return; }
         sayText(e.message, true);
       }
     }
@@ -1161,7 +1361,13 @@ const KVMForm = (() => {
     /** Après une modification réussie : relecture complète (nouvelle base). */
     async function reopen() {
       const d = await getJson(`/api/kvm/vms/${enc(ctx.host)}/${enc(ctx.domain)}/form`);
-      if (d.error) return;
+      if (d.error) {
+        // la base et l'empreinte restent celles d'avant : le dire, et
+        // proposer la relecture plutôt qu'un second envoi sur une base fausse
+        say(`${esc(tr('kvmf.reopenFailed', { error: errText(d.error) }))}`, true);
+        showChanged(null);
+        return;
+      }
       const review = root.querySelector('[data-kvmf="review"]').innerHTML;
       st.loadedCi = null;          // le seed a pu changer : relu
       st.form = d;
@@ -1211,7 +1417,8 @@ const KVMForm = (() => {
       fillFields(root, Object.assign({}, v, { autostart: !!st.form.autostart, name: st.form.name || ctx.domain }));
       root.querySelector('[name="cpu.mode"]')?.dispatchEvent(new Event('change'));
       if (ctx.readOnly) root.querySelectorAll('.vm-edit-content input, .vm-edit-content select, .vm-edit-content textarea').forEach((el) => { el.disabled = true; });
-      st.base = { fields: readFields(root) };
+      st.base = { fields: readFields(root), tables: tablesOf() };
+      root.querySelector('[data-kvmf="refreshed"]').innerHTML = '';
       updateEditState();
       if (st.loadedCi) {
         root.querySelector('[data-ci="userData"]').value = st.loadedCi.user_data;
@@ -1290,7 +1497,9 @@ const KVMForm = (() => {
               tablet: true, rng: true, serial_console: true, guest_agent: true, hotplug_slots: ctx.family === 'q35' ? 4 : 0,
               on_poweroff: 'destroy', on_reboot: 'restart', on_crash: 'destroy', watchdog: '' });
             root.querySelector('[name="cpu.mode"]')?.dispatchEvent(new Event('change'));
+            syncAgent();
             form.show('general');
+            st.pristine = snapshot();
             if ((ROLE_RANK[ctx.role] || 0) < ROLE_RANK.operator) {
               root.querySelector('[data-kvmf="create"]').disabled = true;
               root.querySelector('[data-kvmf="create"]').dataset.tip = tr('kvm.operatorOnly');
@@ -1302,9 +1511,27 @@ const KVMForm = (() => {
             if (sel.value === ctx.host) return;
             ctx.host = sel.value;
             root.querySelector('.vm-edit-content').innerHTML = `<p class="form-hint">${esc(tr('common.loading'))}</p>`;
-            try { await start(); } catch (e) { sayText(e.message, true); }
+            try { await start(); } catch (e) { if (!e.stale) sayText(e.message, true); }
           });
-          await start();
+          head.querySelector('[name="head_agent"]').addEventListener('change', () => { st.agentTouched = true; updateAgentHint(); });
+          // fenêtre déjà ouverte rouverte avec un autre hôte ou une image :
+          // appliqué tout de suite, ou après accord si une saisie serait perdue
+          root.__kvmfRetarget = async (next) => {
+            const host = next.host && hosts.includes(next.host) ? next.host : ctx.host;
+            const image = next.image || null;
+            if (host === ctx.host && !image) return;
+            if (st.pristine && snapshot() !== st.pristine) {
+              const ok = await confirmInPage(root.querySelector('[data-kvmf="retarget"]'), tr('kvmf.discardTyped', { host }));
+              if (!ok) return;
+            }
+            ctx.host = host;
+            ctx.image = image;
+            st.agentTouched = false;
+            sel.value = host;
+            root.querySelector('.vm-edit-content').innerHTML = `<p class="form-hint">${esc(tr('common.loading'))}</p>`;
+            try { await start(); } catch (e) { if (!e.stale) sayText(e.message, true); }
+          };
+          try { await start(); } catch (e) { if (!e.stale) throw e; }
         } else {
           const d = await getJson(`/api/kvm/vms/${enc(ctx.host)}/${enc(ctx.domain)}/form`);
           if (d.error) throw new Error(errText(d.error));
@@ -1325,11 +1552,14 @@ const KVMForm = (() => {
             if (document.hidden || st.busy) return;
             const f = await getJson(`/api/kvm/vms/${enc(ctx.host)}/${enc(ctx.domain)}/form`);
             if (f.error || !st.form) return;
-            // l'empreinte n'est JAMAIS remplacée en silence : seul « Relire » le fait
-            st.form = Object.assign({}, st.form, { state: f.state, pending: f.pending, snapshots: f.snapshots });
+            // l'empreinte n'est JAMAIS remplacée en silence : seul « Relire » le
+            // fait ; un changement fait ailleurs est annoncé tout de suite
+            const elsewhere = f.config_digest && f.config_digest !== st.form.config_digest;
+            st.form = Object.assign({}, st.form, { state: f.state, pending: f.pending, snapshots: f.snapshots, id: f.id });
             ctx.form = st.form;
             updateEditState();
-          }, 20000);
+            if (elsewhere && st.announced !== f.config_digest) { st.announced = f.config_digest; showChanged(f); }
+          }, POLL.ms);
         }
       } catch (e) {
         root.querySelector('.vm-edit-content').innerHTML = `<p class="res-error">${icon('fail')} ${esc(e.message)}</p>`;
@@ -1521,19 +1751,46 @@ const KVMForm = (() => {
         st.body = () => ({ mac: arg.mac });
       } else if (op === 'cloudinit') {
         hint(tr('kvmf.h.cloudinit'));
-        $('fields').innerHTML = `<div class="form-row"><label>${esc(tr('kvmf.f.userData'))}</label><textarea class="yaml-editor tall tip" data-ci="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}"></textarea></div>
+        // « Appliquer » reste grisé tant que le seed actuel n'est pas lu : un
+        // envoi sur une zone vide effacerait le cloud-init de la VM
+        const go = $('go');
+        go.disabled = true;
+        go.dataset.tip = tr('kvmf.ciLoading');
+        $('fields').innerHTML = `<div class="form-row"><label>${esc(tr('kvmf.f.userData'))}</label><textarea class="yaml-editor tall tip" data-ci="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}" disabled></textarea>
+          <button type="button" class="btn btn-sm btn-secondary tip" data-h="clear" data-tip="${esc(tr('kvmf.ciClearTip'))}" disabled>${icon('trash')} ${esc(tr('kvmf.ciClear'))}</button>
+          <span class="form-hint" data-h="cleared" hidden>${esc(tr('kvmf.ciCleared'))}</span></div>
           <div class="form-row"><label>${esc(tr('kvmf.f.networkData'))}</label><textarea class="yaml-editor tip" data-ci="networkData" spellcheck="false" data-tip="${esc(tr('kvmf.t.networkData'))}"></textarea></div>
           ${hfield('hostname', tr('kvmf.f.hostname'), '<input name="hostname" maxlength="63">', tr('kvmf.t.hostname'))}
           <label class="bk-check tip" data-tip="${esc(tr('kvmf.t.rerun'))}"><input type="checkbox" name="rerun"> <span>${esc(tr('kvmf.f.rerun'))}</span></label>`;
+        const ud = root.querySelector('[data-ci="userData"]');
         const d = await getJson(`/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/cloudinit`);
-        if (!d.error) {
-          root.querySelector('[data-ci="userData"]').value = d.user_data || '';
-          root.querySelector('[data-ci="networkData"]').value = d.network_data || '';
-        } else hint(errText(d.error));
+        if (d.error) {
+          // lecture impossible : rien ne part, l'erreur reste affichée
+          hint(errText(d.error));
+          $('msg').innerHTML = `<span class="res-error">${icon('fail')} ${esc(tr('kvmf.ciLoadFailed', { error: errText(d.error) }))}</span>`;
+          go.dataset.tip = tr('kvmf.ciLoadFailed', { error: errText(d.error) });
+          return;
+        }
+        st.loaded = d.user_data || '';
+        st.cleared = false;
+        ud.value = st.loaded;
+        root.querySelector('[data-ci="networkData"]').value = d.network_data || '';
+        ud.disabled = false;
+        go.disabled = false;
+        go.dataset.tip = tr('kvmf.hotGoTip');
+        const clear = $('clear');
+        clear.disabled = false;
+        clear.addEventListener('click', () => { ud.value = ''; st.cleared = true; $('cleared').hidden = false; });
+        ud.addEventListener('input', () => { if (ud.value.trim()) { st.cleared = false; $('cleared').hidden = true; } });
         st.body = () => {
-          const b = { user_data: root.querySelector('[data-ci="userData"]').value,
+          const b = { user_data: ud.value,
                       network_data: root.querySelector('[data-ci="networkData"]').value || undefined, rerun: formEl.rerun.checked };
           if (formEl.hostname.value.trim()) b.hostname = formEl.hostname.value.trim();
+          if (!b.user_data.trim()) {
+            // vide : seulement par « Vider » (le serveur le refuse aussi sans clear)
+            if (st.cleared) { b.user_data = ''; b.clear = true; }
+            else if (st.loaded.trim()) throw new Error(tr('kvmf.e.ciEmpty'));
+          }
           return b;
         };
       }
@@ -1560,9 +1817,8 @@ const KVMForm = (() => {
         }, (ok, run) => {
           go.disabled = false;
           const o = (run.result && run.result.output) || {};
-          const key = `${v.host}/${v.name}`;
           const pend = (o.after && o.after.pending) || [];
-          if (pend.length) pendingRestart.set(key, pend); else if (o.after) pendingRestart.delete(key);
+          if (o.after) notePending(v.host, v.name, pend, o.after.id);
           $('msg').innerHTML = ok ? `<span>${icon('ok')} ${esc(tr('kvmf.applied'))}</span>`
             : `<span class="res-error">${icon('fail')} ${esc(o.error || run.error_summary || tr('kvmf.failed'))}</span>`;
           $('result').innerHTML = VMForm.changesHtml(o.changes || []) + VMForm.restartBanner(o.restart_required ? pend : []);
@@ -1576,10 +1832,24 @@ const KVMForm = (() => {
     return root;
   }
 
-  const restartFor = (host, name) => pendingRestart.get(`${host}/${name}`) || null;
+  /** Champs en attente d'un redémarrage pour une ligne de la liste : ceux
+   *  servis par `/api/kvm/vms` (`v.pending`) et ceux appris par cette page.
+   *  Une VM vue arrêtée ou redémarrée (autre Id) perd le repère local. */
+  const RUNNING = LIVE.concat(['paused', 'in shutdown', 'pmsuspended']);
+  function restartFor(v) {
+    const key = `${v.host}/${v.name}`;
+    const local = pendingRestart.get(key);
+    if (local && (!RUNNING.includes(v.state) || (local.id != null && v.id != null && local.id !== v.id))) {
+      pendingRestart.delete(key);
+    }
+    const kept = pendingRestart.get(key);
+    const all = [...new Set([...(RUNNING.includes(v.state) ? (v.pending || []) : []), ...(kept ? kept.fields : [])])];
+    return all.length ? all : null;
+  }
 
   return { openCreate, openEdit, openHot, menuGroupHtml, fillMenuDevices, onMenuClick, hotWhy, restartFor,
-           _internals: { parseSize, diskItem, nicItem, hotness, cardOf, nicCardOf } };
+           _internals: { parseSize, diskItem, nicItem, hotness, cardOf, nicCardOf, notePending,
+                         agentDefault, bootCard, restartFor, poll: POLL } };
 })();
 
 if (typeof window !== 'undefined') window.KVMForm = KVMForm;

@@ -519,40 +519,162 @@ const CloudInitForm = (() => {
 
   /** Clés SSH et agent invité ajoutés à un user-data `#cloud-config`, comme
    *  le fait le serveur pour Harvester : `ssh_authorized_keys` complété (une
-   *  clé déjà là n'est pas répétée), `qemu-guest-agent` ajouté aux paquets et
-   *  démarré par `runcmd`. Un user-data qui n'est pas un `#cloud-config` (script
-   *  shell, MIME) est rendu tel quel : rien ne s'y insère sans le casser ; un
-   *  user-data vide devient un `#cloud-config`. Rend {text, skipped}. */
+   *  clé déjà dans la liste de premier niveau n'est pas répétée),
+   *  `qemu-guest-agent` ajouté aux paquets et démarré par `runcmd`.
+   *
+   *  Seules les clés de PREMIER niveau sont lues (colonne 0) : une clé
+   *  imbriquée (`users[].ssh_authorized_keys`) ou un texte de `write_files`
+   *  qui contient « packages: » ne comptent pas. Une liste existante reçoit
+   *  ses nouveaux éléments à SA propre indentation (y compris la liste à
+   *  indentation nulle, `packages:\n- vim`) ; une liste entre crochets sur
+   *  une ligne (`packages: [vim, curl]`) est complétée dans ses crochets si
+   *  ses éléments sont simples. Tout autre cas (crochets sur plusieurs
+   *  lignes, valeur qui n'est pas une liste, clé en double, plusieurs
+   *  documents YAML, user-data qui n'est pas un `#cloud-config`) est REFUSÉ :
+   *  le texte est rendu inchangé avec la raison. Les fins de ligne CRLF sont
+   *  gardées. Un user-data vide devient un `#cloud-config`.
+   *  Rend {text, skipped, reason, key} ; reason : 'not-cloud-config',
+   *  'flow', 'not-list', 'duplicate', 'documents'. */
   function withKeysAndAgent(userData, keys, agent) {
     const want = [...new Set((keys || []).map(k => String(k).trim()).filter(Boolean))];
-    let text = String(userData || '');
-    if (!want.length && !agent) return { text, skipped: false };
-    if (!text.trim()) text = '#cloud-config\n';
-    if (!/^#cloud-config[ \t]*(\r?\n|$)/.test(text)) return { text: String(userData || ''), skipped: true };
-    if (!text.endsWith('\n')) text += '\n';
-    const lines = text.split('\n');
-    const topIndex = (key) => lines.findIndex(l => new RegExp(`^${key}:\\s*$`).test(l));
-    const insertItems = (key, items) => {
-      if (!items.length) return;
-      const i = topIndex(key);
-      if (i < 0) {
-        if (lines[lines.length - 1] === '') lines.pop();
-        lines.push(`${key}:`, ...items.map(v => `  - ${v}`), '');
-        return;
-      }
-      let j = i + 1;
-      while (j < lines.length && /^(\s+|-)/.test(lines[j]) && lines[j].trim() !== '') j += 1;
-      lines.splice(j, 0, ...items.map(v => `  - ${v}`));
-    };
+    const original = String(userData || '');
+    if (!want.length && !agent) return { text: original, skipped: false, reason: null, key: null };
+    const refuse = (reason, key) => ({ text: original, skipped: true, reason, key: key || null });
+    const text = original.trim() ? original : '#cloud-config\n';
+    if (!/^#cloud-config[ \t]*(\r?\n|$)/.test(text)) return refuse('not-cloud-config');
+    // chaque ligne garde SA fin (LF ou CRLF) ; les lignes ajoutées prennent
+    // celle de la première ligne
+    const eol = /^[^\n]*\r\n/.test(text) ? '\r\n' : '\n';
+    const parts = text.split(/(\r?\n)/);
+    const lines = parts.filter((_, k) => k % 2 === 0);
+    const ends = parts.filter((_, k) => k % 2 === 1);
+    if (lines[lines.length - 1] === '') lines.pop();
+    while (ends.length < lines.length) ends.push(eol);
+
+    // clé de premier niveau : colonne 0, nom éventuellement entre guillemets
+    const TOP = /^(["']?)([A-Za-z_][\w.-]*)\1[ \t]*:(?=[ \t]|$)(.*)$/;
+    const isItem = (l, indent) => l.startsWith(indent + '-') && /^([ \t]|$)/.test(l.slice(indent.length + 1));
+    const isComment = (l) => /^[ \t]*#/.test(l);
     const quote = (v) => "'" + String(v).replace(/'/g, "''") + "'";
-    const present = new Set(lines.map(l => l.replace(/^\s*-\s*/, '').replace(/^'(.*)'$/, '$1').trim()));
-    insertItems('ssh_authorized_keys', want.filter(k => !present.has(k)).map(quote));
-    if (agent) {
-      if (!present.has('qemu-guest-agent')) insertItems('packages', ['qemu-guest-agent']);
-      const start = 'systemctl enable --now qemu-guest-agent';
-      if (!lines.some(l => l.includes(start))) insertItems('runcmd', [quote(start)]);
+    const unquote = (v) => {
+      const t = v.trim();
+      if (/^'.*'$/.test(t)) return t.slice(1, -1).replace(/''/g, "'");
+      if (/^".*"$/.test(t)) { try { return JSON.parse(t); } catch { return t.slice(1, -1); } }
+      return t.replace(/[ \t]+#.*$/, '');
+    };
+    // documents : un « --- » après du contenu, ou « ... », ouvrent un autre document
+    let content = false;
+    for (let i = 1; i < lines.length; i++) {
+      const l = lines[i];
+      if (/^\.\.\.([ \t]|$)/.test(l) || (/^---([ \t]|$)/.test(l) && content)) return refuse('documents');
+      if (/^---([ \t]|$)/.test(l)) continue;
+      if (l.trim() && !isComment(l)) {
+        if (!content && /^-([ \t]|$)/.test(l)) return refuse('not-list');     // racine en liste
+        content = true;
+      }
     }
-    return { text: lines.join('\n'), skipped: false };
+    const find = (key) => {
+      const at = [];
+      lines.forEach((l, i) => { const m = i > 0 && TOP.exec(l); if (m && m[2] === key) at.push(i); });
+      return at;
+    };
+    // éléments d'une liste entre crochets sur UNE ligne, ou null si elle
+    // n'est pas assez simple pour y ajouter sans risque
+    const FLOW_ITEM = /^[ \t]*('(?:[^']|'')*'|"(?:[^"\\]|\\.)*"|[^,\[\]{}#'"\s&*!|>%@`][^,\[\]{}#]*?)[ \t]*$/;
+    const flowItems = (inner) => {
+      if (!inner.trim()) return [];
+      const parts = [];
+      let cur = '', q = null;
+      for (let k = 0; k < inner.length; k++) {
+        const c = inner[k];
+        if (q) {
+          cur += c;
+          if (q === '"' && c === '\\') { cur += inner[++k] || ''; continue; }
+          if (c === q) {
+            if (q === "'" && inner[k + 1] === "'") { cur += inner[++k]; continue; }
+            q = null;
+          }
+        } else if (c === "'" || c === '"') { q = c; cur += c; }
+        else if (c === ',') { parts.push(cur); cur = ''; }
+        else cur += c;
+      }
+      if (q) return null;
+      parts.push(cur);
+      for (const p of parts) {
+        const m = FLOW_ITEM.exec(p);
+        if (!m) return null;
+        // un élément simple avec « : » serait une paire clé/valeur
+        if (!/^['"]/.test(m[1]) && /:([ \t]|$)/.test(m[1])) return null;
+      }
+      return parts.map(unquote);
+    };
+    // lecture d'une clé de premier niveau : {kind: 'absent'|'block'|'flow', ...}
+    const read = (key) => {
+      const at = find(key);
+      if (!at.length) return { kind: 'absent' };
+      if (at.length > 1) return { kind: 'refused', reason: 'duplicate' };
+      const i = at[0];
+      const m = TOP.exec(lines[i]);
+      const rest = m[3].replace(/^[ \t]+/, '');
+      if (!rest || rest.startsWith('#')) {
+        let end = i + 1;
+        while (end < lines.length && (!lines[end].trim() || /^[ \t#]/.test(lines[end]) || /^-([ \t]|$)/.test(lines[end]))) end += 1;
+        const body = [];
+        for (let j = i + 1; j < end; j++) if (lines[j].trim() && !isComment(lines[j])) body.push(j);
+        if (!body.length) return { kind: 'block', i, indent: '  ', at: i + 1, items: [] };
+        const first = /^([ \t]*)-([ \t]|$)/.exec(lines[body[0]]);
+        if (!first || first[1].includes('\t')) return { kind: 'refused', reason: 'not-list' };
+        const indent = first[1];
+        const items = body.filter(j => isItem(lines[j], indent)).map(j => lines[j].slice(indent.length + 1));
+        // une ligne de contenu moins indentée que les éléments n'appartient pas à la liste
+        if (body.some(j => !lines[j].startsWith(indent))) return { kind: 'refused', reason: 'not-list' };
+        return { kind: 'block', i, indent, at: body[body.length - 1] + 1, items: items.map(unquote), raw: items };
+      }
+      const f = /^\[(.*)\]([ \t]*(#.*)?)$/.exec(rest);
+      if (f) {
+        const items = flowItems(f[1]);
+        if (items === null) return { kind: 'refused', reason: 'flow' };
+        return { kind: 'flow', i, inner: f[1], tail: f[2], items, raw: items };
+      }
+      return { kind: 'refused', reason: rest.startsWith('[') ? 'flow' : 'not-list' };
+    };
+    const plan = [];
+    const need = (key, pick) => {
+      const r = read(key);
+      if (r.kind === 'refused') return r;
+      const add = pick(r);
+      if (add.length) plan.push({ key, add });
+      return null;
+    };
+    const steps = [
+      ['ssh_authorized_keys', (r) => want.filter(k => !(r.items || []).includes(k))],
+    ];
+    if (agent) {
+      steps.push(['packages', (r) => ((r.items || []).includes('qemu-guest-agent') ? [] : ['qemu-guest-agent'])]);
+      const start = 'systemctl enable --now qemu-guest-agent';
+      steps.push(['runcmd', (r) => ((r.raw || []).some(x => /systemctl\b.*\bqemu-guest-agent\b/.test(String(x))) ? [] : [start])]);
+    }
+    for (const [key, pick] of steps) {
+      const bad = need(key, pick);
+      if (bad) return refuse(bad.reason, key);
+    }
+    // écriture : une clé à la fois, relue après chaque insertion
+    for (const { key, add } of plan) {
+      const r = read(key);
+      const fresh = r.kind === 'absent' ? [`${key}:`, ...add.map(v => `  - ${quote(v)}`)]
+        : r.kind === 'block' ? add.map(v => `${r.indent}- ${quote(v)}`) : null;
+      if (fresh) {
+        const at = r.kind === 'absent' ? lines.length : r.at;
+        lines.splice(at, 0, ...fresh);
+        ends.splice(at, 0, ...fresh.map(() => eol));
+      }
+      if (!fresh) {
+        const head = lines[r.i].slice(0, lines[r.i].indexOf('[') + 1);
+        const inner = r.inner.replace(/[ \t]+$/, '');
+        lines[r.i] = `${head}${inner}${inner.trim() ? ', ' : ''}${add.map(quote).join(', ')}]${r.tail}`;
+      }
+    }
+    return { text: lines.map((l, k) => l + ends[k]).join(''), skipped: false, reason: null, key: null };
   }
 
   return { CI_USER_SCHEMA, CI_NET_SCHEMA, genUserData, genNetworkData, userSchema,

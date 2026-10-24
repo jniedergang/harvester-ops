@@ -27,15 +27,25 @@ const VMEdit = (() => {
     catch { return fb; }
   };
 
+  // `tip` : bulle du bouton d'onglet (coquille commune vm-form.js et
+  // fenêtre « Modifier »)
   const SECTIONS = [
-    { id: 'general',   label: () => tr('vm.edit.general', 'General'),      icon: 'general' },
-    { id: 'compute',   label: () => tr('vm.edit.compute', 'Compute'),      icon: 'compute' },
-    { id: 'firmware',  label: () => tr('vm.edit.firmware', 'Firmware'),    icon: 'firmware' },
-    { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: 'disk' },
-    { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: 'network' },
-    { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: 'cloud' },
-    { id: 'placement', label: () => tr('vm.edit.placement', 'Placement'),  icon: 'placement' },
-    { id: 'lifecycle', label: () => tr('vm.edit.lifecycle', 'Lifecycle'),  icon: 'lifecycle' },
+    { id: 'general',   label: () => tr('vm.edit.general', 'General'),      icon: 'general',
+      tip: () => tr('vm.edit.tip.general', 'Name, namespace, display name and description') },
+    { id: 'compute',   label: () => tr('vm.edit.compute', 'Compute'),      icon: 'compute',
+      tip: () => tr('vm.edit.tip.compute', 'CPU, memory and their limits') },
+    { id: 'firmware',  label: () => tr('vm.edit.firmware', 'Firmware'),    icon: 'firmware',
+      tip: () => tr('vm.edit.tip.firmware', 'Machine type, BIOS or UEFI, Secure Boot, TPM') },
+    { id: 'disks',     label: () => tr('vm.edit.disks', 'Disks'),          icon: 'disk',
+      tip: () => tr('vm.edit.tip.disks', 'Volumes, images, CD-ROMs and their boot order') },
+    { id: 'network',   label: () => tr('vm.edit.network', 'Network'),      icon: 'network',
+      tip: () => tr('vm.edit.tip.network', 'Network cards and the networks they join') },
+    { id: 'cloudinit', label: () => tr('vm.edit.cloudinit', 'Cloud-init'), icon: 'cloud',
+      tip: () => tr('vm.edit.tip.cloudinit', 'User-data and network-data read by the guest at boot') },
+    { id: 'placement', label: () => tr('vm.edit.placement', 'Placement'),  icon: 'placement',
+      tip: () => tr('vm.edit.tip.placement', 'Node selection, affinity rules and tolerations') },
+    { id: 'lifecycle', label: () => tr('vm.edit.lifecycle', 'Lifecycle'),  icon: 'lifecycle',
+      tip: () => tr('vm.edit.tip.lifecycle', 'Eviction strategy and shutdown grace period') },
   ];
 
   // Per-open refresh callbacks. v1.6.x stored this on the panel API object
@@ -666,7 +676,7 @@ const VMEdit = (() => {
       <div class="vm-edit-layout">
         <aside class="vm-edit-nav">
           ${SECTIONS.map(s => `
-            <button data-section="${s.id}">
+            <button data-section="${s.id}" class="tip" data-tip="${esc(s.tip())}">
               <span class="ic">${Icons.svg(s.icon, { size: 14 })}</span>
               <span>${esc(s.label())}</span>
             </button>`).join('')}

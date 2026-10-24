@@ -408,6 +408,48 @@ def test_regenerate_seed_rerun_changes_instance_id_and_keeps_a_shared_seed():
     assert ("update-device", "--domain", "ci1", "--file", "/dev/stdin", "--config") in s.writes
 
 
+@pytest.mark.parametrize("user_data,clear,refused", [
+    ("", False, True),          # champ resté vide : le cloud-init n'est pas effacé
+    (None, False, True),
+    ("  \n", False, True),
+    ("", True, False),          # vider est voulu : accepté
+    (UD + "# v2\n", False, False),
+])
+def test_an_empty_user_data_needs_clear_to_replace_a_non_empty_seed(user_data, clear, refused):
+    s = seeded_world()
+    if refused:
+        with pytest.raises(ko.OpError) as e:
+            ke.regenerate_seed(s, "ci1", user_data, None, clear=clear)
+        assert e.value.kind == "refused" and "clear" in e.value.message
+        assert s.writes == []                                   # rien d'écrit
+        return
+    res = ke.regenerate_seed(s, "ci1", user_data, None, clear=clear)
+    files = iso9660.read_iso(s.contents[("images", res["seed"]["volume"])])["files"]
+    assert files["user-data"].decode() == (user_data or "")
+
+
+def test_an_empty_seed_can_stay_empty_without_clear():
+    s = seeded_world()
+    first = ke.regenerate_seed(s, "ci1", "", None, clear=True)
+    s.writes.clear()
+    second = ke.regenerate_seed(s, "ci1", "", "version: 2\n")
+    assert second["seed"]["volume"] != first["seed"]["volume"]
+
+
+@pytest.mark.parametrize("ci,applied", [
+    ({"user_data": ""}, "refused"),
+    ({"user_data": "", "clear": True}, "next-boot"),
+    ({"user_data": UD + "# v3\n"}, "next-boot"),
+])
+def test_the_edit_plan_refuses_an_empty_user_data_without_clear(ci, applied):
+    s = seeded_world("running")
+    plan = ke.edit_plan(s, "ci1", {"cloudinit": ci}, options=OPTS)
+    ch = next(c for c in plan["changes"] if c["field"] == "cloudinit")
+    assert ch["applied"] == applied
+    assert bool(plan["refusals"]) is (applied == "refused")
+    assert "hostname: x" not in json.dumps(plan["changes"])     # jamais le texte du user-data
+
+
 def test_seed_is_owned_and_deleted_with_the_vm():
     s = seeded_world()
     disks = {d["target"]: d for d in ko.owned_disks(s, "ci1")}

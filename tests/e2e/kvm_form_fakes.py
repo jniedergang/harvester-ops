@@ -113,12 +113,18 @@ def install(page, state):
                 return ok(route, {"hosts": [{"name": "node2"}, {"name": "node9"}], "warnings": [],
                                   "role": state["role"], "gestures": GESTURES})
             if path == "vms":
-                return ok(route, {"vms": VMS, "role": state["role"], "gestures": GESTURES,
+                return ok(route, {"vms": state.get("vms", VMS), "role": state["role"], "gestures": GESTURES,
                                   "operations": OPERATIONS, "edit_operations": EDIT_OPS, "warnings": [],
                                   "hosts": [{"name": "node2", "state": "ok", "count": len(VMS)}]})
             mm = re.fullmatch(r"hosts/(node2|node9)/(caps|pools|networks|links|images)", path)
             if mm:
                 what = mm.group(2)
+                # réponse retenue (course entre deux hôtes) : rendue plus tard par le test
+                if state.get("hold") == path:
+                    state.setdefault("held", []).append((route, {"host": mm.group(1), "options": state["caps"], "role": state["role"]}))
+                    return None
+                if what == "pools" and mm.group(1) == "node9" and state.get("pools9"):
+                    return ok(route, {"pools": state["pools9"], "role": state["role"]})
                 if what == "caps":
                     return ok(route, {"host": mm.group(1), "options": state["caps"], "role": state["role"]})
                 if what == "pools":
@@ -142,9 +148,15 @@ def install(page, state):
             if mm:
                 if mm.group(2) == "form":
                     return ok(route, dict(state["form"], name=mm.group(1)))
-                return ok(route, {"host": "node2", "name": mm.group(1), "seed": {"pool": "images", "volume": "kvmtest-1-cidata.iso"},
-                                  "user_data": f"#cloud-config\nchpasswd:\n  list: |\n    root:{USER_SECRET}\n",
-                                  "network_data": None})
+                if state.get("ci_error"):
+                    return ok(route, {"error": state["ci_error"]}, 502)
+                body = {"host": "node2", "name": mm.group(1), "seed": {"pool": "images", "volume": "kvmtest-1-cidata.iso"},
+                        "user_data": f"#cloud-config\nchpasswd:\n  list: |\n    root:{USER_SECRET}\n",
+                        "network_data": None}
+                if state.get("hold") == path:
+                    state.setdefault("held", []).append((route, body))
+                    return None
+                return ok(route, body)
             mm = re.fullmatch(r"vms/node2/([^/]+)", path)
             if mm:
                 return ok(route, {"host": "node2", "name": mm.group(1), "state": "running",
@@ -229,3 +241,9 @@ def install(page, state):
     page.route(re.compile(r".*/api/stream/kvm\d+$"), lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body=state["streams"].get(q.url.rsplit("/", 1)[1], sse([]))))
     return state
+
+
+def release(state):
+    """Rend les réponses retenues (`state["hold"]`)."""
+    for route, body in state.pop("held", []):
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
