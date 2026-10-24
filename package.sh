@@ -14,12 +14,12 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Garde de livraison (téléchargement d'images KVM) : quand la garde partagée
-# anti-SSRF (web/url_fetch_guard.py, 1.99.0) existe, la route KVM doit passer
-# par elle seule ; le repli marqué REPLI-AVANT-1.99 dans web/app.py doit
-# alors avoir été supprimé. Refuser de construire sinon.
-if [[ -f web/url_fetch_guard.py ]] && grep -q 'REPLI-AVANT-1.99' web/app.py; then
-    printf ' ✗  %s\n' "web/url_fetch_guard.py exists but web/app.py still carries the KVM fetch fallback (REPLI-AVANT-1.99): delete the fallback before releasing" >&2
+# Garde de livraison (téléchargement d'images KVM) : la route KVM et la CLI
+# passent par la garde partagée anti-SSRF (bin/lib/url_fetch_guard.py, 1.99.0)
+# et par elle seule. Le repli d'avant la fusion (REPLI-AVANT-1.99) ne doit pas
+# revenir : refuser de construire s'il réapparaît.
+if grep -qs 'REPLI-AVANT-1.99' web/app.py bin/harvester-kvm.py || [[ ! -f bin/lib/url_fetch_guard.py ]]; then
+    printf ' ✗  %s\n' "the KVM fetch must use bin/lib/url_fetch_guard.py only (missing guard or REPLI-AVANT-1.99 fallback back in web/app.py or bin/harvester-kvm.py)" >&2
     exit 1
 fi
 
@@ -77,8 +77,11 @@ if [[ "$SKIP_IMAGE_BUILD" == "1" ]]; then
     warn "SKIP_IMAGE_BUILD=1 — skipping image build"
 else
     info "Building container image (FROM registry.suse.com/bci/python:3.11)..."
-    "$RUNTIME" build -t "harvester-ops:${VERSION}" -t "harvester-ops:latest" \
+    # v1.98.1 : --pull=always, never a stale cached base (1.98.0 was built on
+    # a six-week-old base that still trusted the compromised emSign CAs).
+    "$RUNTIME" build --pull=always -t "harvester-ops:${VERSION}" -t "harvester-ops:latest" \
         -f container/Containerfile .
+    ok "Base image: $("$RUNTIME" image inspect --format '{{.Digest}}' registry.suse.com/bci/python:3.11 2>/dev/null || echo '?')"
     ok "Image built: harvester-ops:${VERSION}"
 
     info "Saving OCI image to images/harvester-ops-ui.tar..."

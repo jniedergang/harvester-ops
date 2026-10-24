@@ -51,7 +51,6 @@ def no_dns(monkeypatch):
                                  "https://:s3cr3tpw@mirror.example/x.img",
                                  "https://@mirror.example/x.img"])
 def test_fetch_refuses_credentials_before_any_network_call(client, upload, monkeypatch, url):
-    monkeypatch.setattr(wapp, "_ufg", None)
     no_dns(monkeypatch)
     r = fetch(client, url)
     assert r.status_code == 400 and r.get_json()["reason"] == "credentials", r.get_json()
@@ -73,7 +72,6 @@ BROAD = {"iso_fetch": {"allow_private": ["0.0.0.0/0", "::/0"]}}
     ("http://255.255.255.255/x", "broadcast"),
 ])
 def test_always_refused_addresses_even_with_a_broad_allowlist(client, upload, monkeypatch, url, why):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: BROAD)
     r = fetch(client, url)
     assert r.status_code == 400 and r.get_json()["reason"] == "address", r.get_json()
@@ -83,14 +81,12 @@ def test_always_refused_addresses_even_with_a_broad_allowlist(client, upload, mo
 
 
 def test_the_allowlist_still_opens_loopback_and_private(client, upload, monkeypatch):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: BROAD)
     assert fetch(client, "http://127.0.0.1:9/x").status_code == 202
 
 
 def test_a_redirect_to_the_metadata_address_is_refused_with_a_broad_allowlist(client, upload, monkeypatch,
                                                                               http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: BROAD)
     monkeypatch.setattr(_Handler, "redirect", "http://169.254.169.254/latest/meta-data/")
     assert fetch(client, f"{http_server}/redir").status_code == 202
@@ -100,26 +96,34 @@ def test_a_redirect_to_the_metadata_address_is_refused_with_a_broad_allowlist(cl
     assert FakePopen.calls == [] and staged(upload) == []
 
 
-def test_a_redirect_from_https_to_http_is_refused_by_the_fallback(tmp_path, monkeypatch):
-    """Le repli passe par download_url du script : son gestionnaire de
-    redirections refuse le retour à http (ici joué par un ouvreur simulé qui
-    appelle le vrai gestionnaire)."""
-    import urllib.request
-    handler = wapp._kvm_cli._Redirects()
+def test_a_redirect_from_https_to_http_is_refused_by_the_shared_guard(tmp_path, monkeypatch):
+    """La route passe par la garde partagée : son suivi des redirections
+    refuse le retour à http (connexion simulée, résolution publique)."""
+    import functools
 
-    class Opener:
-        def open(self, req, timeout=None):
-            return handler.redirect_request(urllib.request.Request("https://mirror.example/x"),
-                                            None, 302, "Found", {}, "http://mirror.example/x")
-    real = wapp._kvm_cli.download_url
-    monkeypatch.setattr(wapp._kvm_cli, "download_url",
-                        lambda url, dest, progress=None, **k: real(url, dest, progress,
-                                                                   opener=Opener(), **k))
-    monkeypatch.setattr(wapp, "_ufg", None)
+    class Resp:
+        status = 302
+
+        def getheader(self, name, default=None):
+            return "http://mirror.example/x" if name == "Location" else default
+
+    class Conn:
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return Resp()
+
+        def close(self):
+            pass
+    resolver = lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))]   # noqa: E731
+    monkeypatch.setattr(wapp._ufg, "open_checked",
+                        functools.partial(wapp._ufg.open_checked, resolver=resolver,
+                                          connector=lambda *a: Conn()))
     with pytest.raises(wapp._KvmFetchRefused) as e:
         wapp._kvm_fetch_download("https://mirror.example/x", tmp_path, [], 1 << 20, 1,
                                  lambda d, t: None, lambda: False)
-    assert e.value.reason == "refused" and "https to http" in e.value.message
+    assert e.value.reason == "downgrade" and "https to http" in e.value.message
     assert list(tmp_path.iterdir()) == []
 
 
@@ -129,7 +133,6 @@ def test_a_redirect_from_https_to_http_is_refused_by_the_fallback(tmp_path, monk
     ("https://mirror.example/x", None, 202, None),
 ])
 def test_plain_http_needs_the_sha256(client, upload, monkeypatch, url, sha, code, reason):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp.socket, "getaddrinfo",
                         lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 80))])
     r = fetch(client, url, sha=sha)
@@ -168,33 +171,30 @@ def test_the_shared_guard_also_needs_the_sha256_for_plain_http(client, upload, m
 
 # --- garde de livraison : le repli disparaît avec la garde partagée ----------------------------
 
-def test_an_importable_shared_guard_makes_the_fallback_unreachable(monkeypatch):
-    fake = types.ModuleType("url_fetch_guard")
-    monkeypatch.setitem(sys.modules, "url_fetch_guard", fake)
-    assert wapp._kvm_load_fetch_guard() is fake
-    monkeypatch.setitem(sys.modules, "url_fetch_guard", None)        # import impossible
-    assert wapp._kvm_load_fetch_guard() is None
-
-
-def test_release_gate_no_fallback_once_the_shared_guard_exists():
-    """Échoue dès que web/url_fetch_guard.py (1.99.0) est là tant que la
-    route KVM garde son repli : à la fusion, supprimer les blocs
-    REPLI-AVANT-1.99. Avant la fusion, le repli est bien le seul chemin."""
-    if (ROOT / "web" / "url_fetch_guard.py").exists():
-        assert wapp._ufg is not None
-        assert "REPLI-AVANT-1.99" not in SRC, "delete the KVM fetch fallback (REPLI-AVANT-1.99)"
-    else:
-        assert wapp._ufg is None and SRC.count("REPLI-AVANT-1.99") >= 4
+def test_release_gate_the_kvm_fetch_uses_the_shared_guard_only():
+    """Fusion de la 1.99.0 : le repli REPLI-AVANT-1.99 a été supprimé ; la
+    route et la CLI passent par bin/lib/url_fetch_guard.py seul."""
+    import url_fetch_guard
+    assert wapp._ufg is url_fetch_guard and wapp._kvm_cli.ufg is url_fetch_guard
+    assert (ROOT / "bin" / "lib" / "url_fetch_guard.py").exists()
+    assert not (ROOT / "web" / "url_fetch_guard.py").exists()
+    cli_src = (ROOT / "bin" / "harvester-kvm.py").read_text()
+    for src in (SRC, cli_src):
+        assert "REPLI-AVANT-1.99" not in src
+    assert "_kvm_load_fetch_guard" not in SRC
 
 
 def _package_gate(tmp_path, guard, fallback):
     d = tmp_path / "pkg"
     (d / "web").mkdir(parents=True)
+    (d / "bin" / "lib").mkdir(parents=True)
     shutil.copy(ROOT / "package.sh", d / "package.sh")
     (d / "VERSION").write_text("0.0.0\n")
-    (d / "web" / "app.py").write_text("# REPLI-AVANT-1.99\n" if fallback else "# rien\n")
+    (d / "web" / "app.py").write_text("# REPLI-AVANT-1.99\n" if fallback == "app" else "# rien\n")
+    (d / "bin" / "harvester-kvm.py").write_text("# REPLI-AVANT-1.99\n" if fallback == "cli"
+                                                else "# rien\n")
     if guard:
-        (d / "web" / "url_fetch_guard.py").write_text("")
+        (d / "bin" / "lib" / "url_fetch_guard.py").write_text("")
     bindir = tmp_path / "bin"                  # ni podman ni docker : rien ne se construit
     bindir.mkdir(exist_ok=True)
     for tool in ("cat", "dirname", "grep"):
@@ -206,13 +206,13 @@ def _package_gate(tmp_path, guard, fallback):
 
 
 @pytest.mark.parametrize("guard,fallback,refused", [
-    (True, True, True), (True, False, False), (False, True, False), (False, False, False)])
-def test_package_refuses_a_release_with_the_fallback_and_the_shared_guard(tmp_path, guard, fallback,
-                                                                          refused):
+    (True, "app", True), (True, "cli", True), (True, None, False), (False, None, True)])
+def test_package_refuses_a_release_without_the_shared_guard_or_with_the_fallback(
+        tmp_path, guard, fallback, refused):
     # sans podman ni docker, le script s'arrête de toute façon plus loin : rien ne se construit
     r = _package_gate(tmp_path, guard, fallback)
     assert r.returncode == 1
-    assert ("KVM fetch fallback" in r.stderr) is refused, r.stderr
+    assert ("KVM fetch must use" in r.stderr) is refused, r.stderr
 
 
 # --- 2. place sur la console : réservations ---------------------------------------------------
@@ -307,7 +307,6 @@ def test_free_space_is_checked_again_while_receiving(client, upload, space, monk
 
 
 def test_a_running_upload_counts_against_a_download(client, upload, space, monkeypatch):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"min_free_bytes": 1000,
                                                                         "allow_private": ["127.0.0.0/8"]}})
     other = wapp._KvmStagingHold(wapp._kvm_cli.staging_dir(wapp._state_dir()), 1000)
@@ -320,7 +319,6 @@ def test_a_running_upload_counts_against_a_download(client, upload, space, monke
 
 
 def test_a_download_reserves_its_announced_size(client, upload, space, monkeypatch, http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     # le contrôle du script (marge de DOWNLOAD_MARGIN) passe, la réservation
     # (iso_fetch.min_free_bytes) refuse : un octet de trop
     margin = wapp._kvm_cli.DOWNLOAD_MARGIN
@@ -535,7 +533,6 @@ def test_a_corrupt_generation_restarts_above_every_cached_one(tmp_path, content)
 # --- 11. journal sans URL complète ----------------------------------------------------------
 
 def test_a_failed_fetch_never_logs_the_full_url(client, upload, monkeypatch, caplog):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.0/8"]}})
     url = "http://127.0.0.1:9/img.qcow2?X-Amz-Signature=SIGNED-SECRET"
 

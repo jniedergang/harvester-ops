@@ -12,6 +12,7 @@
   recopié depuis une erreur, politique d'adresses du téléchargement.
 """
 
+import os
 import json
 import shlex
 
@@ -596,7 +597,7 @@ def test_address_refusal_reasons_are_those_of_the_shared_guard(addr, allow, why)
                                  "https://@example.org/x.img"])
 def test_urls_with_credentials_are_refused_before_any_network_call(env, capsys, monkeypatch, url):
     env.use(t.world())
-    monkeypatch.setattr(cli.socket, "getaddrinfo", lambda *a, **k: pytest.fail("network call"))
+    monkeypatch.setattr(cli.ufg.socket, "getaddrinfo", lambda *a, **k: pytest.fail("network call"))
     assert "user name or password" in cli.check_url(url)
     res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
               f"--url={url}", "--sha256=" + "e" * 64)
@@ -620,17 +621,59 @@ def test_plain_http_needs_the_sha256(env, capsys):
     ("http://a.example/x", "http://b.example/y", False),
     ("https://a.example/x", "http://u:pw@b.example/y", True),
 ])
-def test_redirects_never_go_from_https_to_http(old, new, refused):
-    import urllib.request
-    h = cli._Redirects()
-    req = urllib.request.Request(old)
-    if refused:
-        with pytest.raises(cli.Failure) as e:
-            h.redirect_request(req, None, 302, "Found", {}, new)
-        assert e.value.kind == "refused" and "pw" not in e.value.message
-        assert "b.example" not in e.value.message
-    else:
-        assert h.redirect_request(req, None, 302, "Found", {}, new).full_url == new
+def test_redirects_never_go_from_https_to_http(tmp_path, old, new, refused):
+    """download_url passe par la garde partagée : son suivi des redirections
+    refuse le retour à http (connexions simulées, résolution publique)."""
+    import io
+
+    class Resp:
+        def __init__(self, status, location=None, body=b""):
+            self.status, self._loc, self._body = status, location, io.BytesIO(body)
+
+        def getheader(self, name, default=None):
+            return {"Location": self._loc, "Content-Length": str(len(self._body.getvalue()))
+                    }.get(name, default)
+
+        def read(self, n=-1):
+            return self._body.read(n)
+
+    class Conn:
+        def __init__(self, url):
+            self.url = url
+
+        def request(self, *a, **k):
+            pass
+
+        def getresponse(self):
+            return Resp(302, new) if self.url == "first" else Resp(200, body=b"ok")
+
+        def close(self):
+            pass
+    calls = []
+
+    def connector(scheme, host, ip, port, timeout):
+        calls.append(host)
+        return Conn("first" if len(calls) == 1 else "second")
+    resolver = lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 0))]   # noqa: E731
+    real = cli.ufg.open_checked
+    import functools
+    cli_open = functools.partial(real, resolver=resolver)
+    orig = cli.ufg.open_checked
+    cli.ufg.open_checked = cli_open
+    try:
+        if refused:
+            with pytest.raises(cli.Failure) as e:
+                cli.download_url(old, str(tmp_path), connector=connector)
+            assert e.value.kind == "refused" and "pw" not in e.value.message
+            assert "b.example" not in e.value.message
+            assert len(calls) == 1
+        else:
+            path, size, _sha = cli.download_url(old, str(tmp_path), connector=connector)
+            assert size == 2 and calls == ["a.example", "b.example"]
+            os.unlink(path)
+    finally:
+        cli.ufg.open_checked = orig
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_a_redirect_to_the_metadata_address_is_refused_even_with_a_broad_allowlist(env, capsys,

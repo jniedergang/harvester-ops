@@ -399,6 +399,12 @@ Après la revue de la tâche 4 :
 - Compteur de génération neuf ou abîmé : il repart d'une valeur prise sur l'horloge (ns), plus grande que toute génération gardée par un cache.
 - Un échec de téléchargement est journalisé avec l'URL montrable seulement (ni identifiants, ni jeton, ni texte de l'exception).
 
+Fusion de master (1.99.0), au début de la tâche 6 :
+
+- Le repli `REPLI-AVANT-1.99` est supprimé. La garde partagée est déplacée de `web/` vers `bin/lib/url_fetch_guard.py` (bibliothèque standard seulement) pour que la route KVM, `/api/iso/fetch` et la CLI `image download-url` passent par le même code ; la CLI a perdu ses copies (`address_refusal` délègue, son téléchargement passe par `open_checked`). La règle propre à KVM reste : une URL en http simple exige la SHA-256.
+- Le message d'une adresse toujours refusée (métadonnées, non spécifiée, multicast, diffusion) ne propose plus `iso_fetch.allow_private` : aucune liste ne l'ouvre.
+- `package.sh` refuse une version sans `bin/lib/url_fetch_guard.py` ou dont `web/app.py` ou `bin/harvester-kvm.py` porte à nouveau `REPLI-AVANT-1.99`.
+
 ## Tâche 5 : fenêtres de création et de modification, gestes à chaud
 
 Fichiers : nouveaux `web/static/js/vm-form.js`, `web/static/js/cloudinit-form.js`, `web/static/js/kvm-form.js` ; `web/static/js/vm-create.js`, `web/static/js/vm-edit.js` (déplacement du cloud-init, réexport), `web/static/js/kvm.js` (bouton « Créer une VM » de la vue des VMs et du bloc d'un hôte, entrées du menu), `web/static/js/kvm-vm.js` (gestes à chaud), `web/templates/index.html`, `web/static/js/i18n.js`, `web/static/css/style.css` ; tests `tests/e2e/test_kvm_create.py`, `tests/e2e/test_kvm_edit.py`, `tests/api/test_vm_form_source.py` (contrôles de source : `escapeHtml` à chaque interpolation, pas de `confirm(`, pas de `new EventSource(`).

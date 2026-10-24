@@ -146,7 +146,6 @@ import argparse
 import contextlib
 import errno
 import fcntl
-import functools
 import hashlib
 import http.client
 import ipaddress
@@ -156,7 +155,6 @@ import os
 import re
 import shutil
 import signal
-import socket
 import subprocess
 import sys
 import tempfile
@@ -181,6 +179,7 @@ import kvm_ops as ko  # noqa: E402
 import kvm_pending  # noqa: E402
 import kvm_storage as ks  # noqa: E402
 import kvm_templates as ktpl  # noqa: E402
+import url_fetch_guard as ufg  # noqa: E402
 import vm_transfer_progress as vtp  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
@@ -2321,48 +2320,23 @@ def parse_cidrs(items):
     return nets
 
 
-# Règles d'adresse du téléchargement : COPIE EXACTE de la garde partagée
-# 1.99.0 (web/url_fetch_guard.py, address_refusal, commit f7bb19c), plus la
-# diffusion générale (255.255.255.255) toujours refusée. Toujours refusées,
-# même couvertes par --allow-private / iso_fetch.allow_private : métadonnées
-# de cloud, non spécifiée (0.0.0.0, ::), multicast, diffusion. La liste
-# d'autorisation n'ouvre que le reste (bouclage, lien local hors métadonnées,
-# privées, CGNAT, réservées).
-METADATA_ADDRESSES = frozenset({
-    ipaddress.ip_address("169.254.169.254"),
-    ipaddress.ip_address("fd00:ec2::254"),
-})
-_CGNAT = ipaddress.ip_network("100.64.0.0/10")
-_BROADCAST = ipaddress.ip_address("255.255.255.255")
-ALWAYS_REFUSED = frozenset({"metadata", "unspecified", "multicast", "broadcast"})
+# Règles d'adresse et téléchargement : la garde partagée de la console
+# (bin/lib/url_fetch_guard.py, 1.99.0), la même que /api/iso/fetch et la route
+# KVM. Toujours refusées, même couvertes par --allow-private /
+# iso_fetch.allow_private : métadonnées de cloud, non spécifiée (0.0.0.0, ::),
+# multicast, diffusion (générale, et dirigée dans une plage autorisée). La
+# liste d'autorisation n'ouvre que le reste (bouclage, lien local hors
+# métadonnées, privées, CGNAT, réservées).
+ALWAYS_REFUSED = ufg.ALWAYS_REFUSED
+# raisons de la garde -> genre d'échec de la CLI
+_FETCH_KINDS = {"dns": "unreachable", "connect": "unreachable", "tls": "unreachable",
+                "http": "failed"}
 
 
 def address_refusal(addr, allow=()):
-    """None si l'adresse est joignable, sinon la raison du refus (mêmes
-    raisons que url_fetch_guard.address_refusal, plus `broadcast`)."""
-    ip = ipaddress.ip_address(str(addr).split("%", 1)[0])
-    # ::ffff:127.0.0.1 est 127.0.0.1
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if ip in METADATA_ADDRESSES:
-        return "metadata"
-    if ip.is_unspecified:
-        return "unspecified"
-    if ip.is_multicast:
-        return "multicast"
-    if ip == _BROADCAST:
-        return "broadcast"
-    if any(ip in net for net in allow if net.version == ip.version):
-        return None
-    if ip.is_loopback:
-        return "loopback"
-    if ip.is_link_local:
-        return "link-local"
-    if ip.is_private or (ip.version == 4 and ip in _CGNAT):
-        return "private"
-    if ip.is_reserved or not ip.is_global:
-        return "reserved"
-    return None
+    """None si l'adresse est joignable, sinon la raison du refus
+    (url_fetch_guard.address_refusal)."""
+    return ufg.address_refusal(str(addr).split("%", 1)[0], allow)
 
 
 def address_allowed(addr, allow=()):
@@ -2370,136 +2344,34 @@ def address_allowed(addr, allow=()):
     return address_refusal(addr, allow) is None
 
 
-def refusal_message(host, reasons, addrs):
-    """Message d'un refus d'adresse : la piste --allow-private n'est donnée
-    que si elle peut servir (jamais pour une adresse toujours refusée)."""
-    reasons = sorted(set(reasons))
-    msg = (f"{host} resolves to a {' and '.join(reasons)} address ({', '.join(addrs)}): "
-           "refused")
-    if set(reasons) & ALWAYS_REFUSED:
-        return msg + " (cloud metadata, unspecified, multicast and broadcast addresses are " \
-            "never reachable)"
-    return msg + "; if this server is intended, add --allow-private=CIDR"
+def _fetch_failure(e):
+    """FetchRefused de la garde -> Failure de la CLI ; la piste
+    iso_fetch.allow_private devient l'option de la CLI."""
+    msg = e.message.replace("unless allowed by iso_fetch.allow_private",
+                            "unless allowed by --allow-private=CIDR")
+    return Failure(msg, kind=_FETCH_KINDS.get(e.reason, "refused"))
 
 
-def _guarded_connection(base):
-    """Classe de connexion http.client qui résout le nom elle-même, refuse
-    toute adresse non autorisée AVANT de se connecter, puis se connecte à
-    l'adresse vérifiée (pas de seconde résolution : un changement de DNS
-    entre le contrôle et la connexion ne passe pas)."""
-    class Guarded(base):
-        def __init__(self, *a, allow=(), **kw):
-            super().__init__(*a, **kw)
-            self._allow = allow
-            self._create_connection = self._connect_checked
-
-        def _connect_checked(self, address, timeout=None, source_address=None, *a, **kw):
-            host, port = address
-            try:
-                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            except socket.gaierror as e:
-                raise OSError(f"cannot resolve {host} ({e.strerror})") from None
-            bad = {sa[0]: address_refusal(sa[0], self._allow) for *_, sa in infos}
-            bad = {a: why for a, why in bad.items() if why}
-            if bad:
-                raise Failure(refusal_message(host, bad.values(), sorted(bad)),
-                              kind="refused")
-            last = None
-            for family, socktype, proto, _canon, sa in infos:
-                sock = socket.socket(family, socktype, proto)
-                try:
-                    if timeout is not None and timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
-                        sock.settimeout(timeout)
-                    if source_address:
-                        sock.bind(source_address)
-                    sock.connect(sa)
-                    return sock
-                except OSError as e:
-                    last = e
-                    sock.close()
-            raise last or OSError(f"no address for {host}")
-    return Guarded
-
-
-_GuardedHTTP = _guarded_connection(http.client.HTTPConnection)
-_GuardedHTTPS = _guarded_connection(http.client.HTTPSConnection)
-
-
-class _GuardedHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, allow):
-        super().__init__()
-        self._allow = allow
-
-    def http_open(self, req):
-        return self.do_open(functools.partial(_GuardedHTTP, allow=self._allow), req)
-
-
-class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
-    def __init__(self, allow):
-        super().__init__()
-        self._allow = allow
-
-    def https_open(self, req):
-        return self.do_open(functools.partial(_GuardedHTTPS, allow=self._allow), req,
-                            context=self._context)
-
-
-class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Redirections bornées, vers http ou https seulement, port valide, sans
-    identifiants, jamais de https vers http (la vérification TLS serait
-    perdue, comme la garde 1.99.0) ; l'adresse de chaque étape est contrôlée
-    à sa connexion. Aucun message ne recopie l'URL."""
-    max_redirections = DOWNLOAD_MAX_REDIRECTS
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if check_url(newurl) is not None:
-            raise Failure("the download was redirected outside http/https or to an invalid "
-                          "URL: refused", kind="refused")
-        if urllib.parse.urlsplit(req.full_url).scheme == "https" and \
-                urllib.parse.urlsplit(newurl).scheme == "http":
-            raise Failure("redirect from https to http refused", kind="refused")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
-
-
-def download_opener(allow=()):
-    """Ouvreur urllib du téléchargement : sans mandataire d'environnement
-    (l'adresse contrôlée est celle du serveur joint), sans ftp ni file,
-    adresses contrôlées à chaque connexion, redirections bornées."""
-    opener = urllib.request.OpenerDirector()
-    for h in (urllib.request.ProxyHandler({}), urllib.request.UnknownHandler(),
-              urllib.request.HTTPDefaultErrorHandler(), _Redirects(),
-              urllib.request.HTTPErrorProcessor(), _GuardedHTTPHandler(allow),
-              _GuardedHTTPSHandler(allow)):
-        opener.add_handler(h)
-    return opener
-
-
-def download_url(url, dest, progress=None, opener=None, max_size=None, allow=()):
+def download_url(url, dest, progress=None, max_size=None, allow=(), connector=None):
     """Télécharge `url` (http/https) dans un fichier 0600 de `dest`, en flux,
-    SHA-256 calculé au passage. Adresses du serveur et de chaque redirection
-    contrôlées (address_allowed, `allow` : plages autorisées). Taille
-    plafonnée à `max_size` (annoncée et reçue) et contrôlée contre la place
-    libre (marge DOWNLOAD_MARGIN). Rend (chemin, taille, sha256). Le fichier
-    partiel est supprimé sur toute erreur ou annulation."""
+    SHA-256 calculé au passage, par la garde partagée (adresse du serveur et
+    de chaque redirection contrôlée, connexion à l'adresse vérifiée, pas de
+    retour de https à http, sans mandataire). Taille plafonnée à `max_size`
+    (annoncée et reçue) et contrôlée contre la place libre (marge
+    DOWNLOAD_MARGIN). Rend (chemin, taille, sha256). Le fichier partiel est
+    supprimé sur toute erreur ou annulation. `connector` : point d'injection
+    des tests (url_fetch_guard.open_checked)."""
     max_size = DOWNLOAD_MAX_SIZE if max_size is None else max_size
-    opener = opener or download_opener(allow)
+    kw = {"connector": connector} if connector else {}
     try:
-        resp = opener.open(urllib.request.Request(url, headers={"User-Agent": "harvester-ops"}),
-                           timeout=DOWNLOAD_TIMEOUT)
-    except (UsageError, Failure):
-        raise
-    except urllib.error.HTTPError as e:
-        if 300 <= e.code < 400:                # redirection hors http(s), ou trop nombreuses
-            raise Failure("the download was redirected outside http/https or too many times: "
-                          "refused", kind="refused") from None
-        raise Failure(f"download refused by the server (HTTP {e.code})", kind="failed") from None
-    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
-        reason = getattr(e, "reason", None) or type(e).__name__
-        raise Failure(f"download failed ({reason})", kind="unreachable") from None
+        resp, conn, _final = ufg.open_checked(url, allow, timeout=DOWNLOAD_TIMEOUT,
+                                              max_redirects=DOWNLOAD_MAX_REDIRECTS, **kw)
+    except ufg.FetchRefused as e:
+        raise _fetch_failure(e) from None
     fd, tmp = tempfile.mkstemp(dir=dest, prefix="dl-")
     try:
-        with resp, os.fdopen(fd, "wb") as f:
-            length = resp.headers.get("Content-Length")
+        with contextlib.closing(conn), os.fdopen(fd, "wb") as f:
+            length = resp.getheader("Content-Length")
             total = int(length) if length and length.isascii() and length.isdigit() else None
             if total is not None and total > max_size:
                 raise Failure(f"the file is larger than --max-size ({total} bytes announced, "
@@ -2514,7 +2386,11 @@ def download_url(url, dest, progress=None, opener=None, max_size=None, allow=())
                 progress(0, total)
             h, got = hashlib.sha256(), 0
             while True:
-                block = resp.read(DOWNLOAD_CHUNK)
+                try:
+                    block = resp.read(DOWNLOAD_CHUNK)
+                except (OSError, http.client.HTTPException) as e:
+                    raise Failure(f"download failed ({type(e).__name__})",
+                                  kind="unreachable") from None
                 if not block:
                     break
                 got += len(block)

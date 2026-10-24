@@ -76,6 +76,14 @@ ailleurs.
   qui dit ce qu'il coûte. Une archive se télécharge depuis la fenêtre qui
   l'a produite, et se dépose dans le magasin d'une autre console depuis le
   navigateur, vérifiée avant d'être gardée.
+- **Reprise après sinistre entre deux clusters** : les VMs sont répliquées
+  de façon asynchrone vers un second cluster Harvester par la cible de
+  sauvegarde qu'ils partagent, avec un objectif de RPO par plan. Une phase
+  de mesure recommande l'intervalle, un suiveur applique chaque sauvegarde
+  sur des volumes de secours et montre le RPO réellement tenu, et une
+  bascule planifiée (sans perte) ou non planifiée (source perdue, perte
+  dite par VM) remet les VMs en route sur l'autre site. Ligne de commande
+  et API de la console dans cette version.
 - **Migrations VMware par Forklift** : la console installe Forklift sur un
   cluster, construit l'image VDDK depuis l'archive de VMware et la pousse
   dans votre registre, raccorde les serveurs vCenter (en reprenant ceux

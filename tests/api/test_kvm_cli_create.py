@@ -809,7 +809,7 @@ def test_download_url_on_this_machine_then_upload(env, capsys, files_server):
 @pytest.mark.parametrize("path,sha,kind,msg", [
     ("/cirros.qcow2", "0" * 64, "refused", "does not match"),
     ("/missing.qcow2", "e" * 64, "failed", "HTTP 404"),
-    ("/redir", "e" * 64, "refused", "outside http/https"),
+    ("/redir", "e" * 64, "refused", "only http and https"),
 ])
 def test_download_url_refusals_send_nothing(env, capsys, files_server, path, sha, kind, msg):
     root, base = files_server

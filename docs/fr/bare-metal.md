@@ -59,6 +59,35 @@ Collez l'URL de l'éditeur, lancez le téléchargement, suivez le
 pourcentage dans le dock. Le magasin montre ce qui est sur le disque et
 combien de place il reste.
 
+Le téléchargement demande le rôle **admin**. La console vérifie l'URL
+avant de se connecter, puis à chaque redirection :
+
+- `http` et `https` seulement, 5 redirections au plus, pas de retour de
+  `https` vers `http` ; les certificats TLS sont toujours vérifiés ;
+- le nom est résolu une fois et la console se connecte à l'adresse
+  vérifiée : une réponse DNS ne peut pas basculer vers une adresse interne ;
+- les adresses de bouclage, de lien local, privées (RFC 1918, ULA, CGNAT),
+  multicast, de diffusion, non spécifiées et réservées sont refusées, de même que les
+  adresses de métadonnées de cloud (`169.254.169.254`, `fd00:ec2::254`) ;
+- le fichier ne peut pas dépasser 20 Gio, et le téléchargement s'arrête
+  quand le magasin descend sous 1 Gio d'espace libre.
+
+Un site isolé sert souvent ses ISO depuis un miroir interne. Autorisez
+son réseau dans `config.yaml` ; la console relit le réglage à chaque
+téléchargement, sans redémarrage :
+
+```yaml
+iso_fetch:
+  allow_private: ["10.20.0.0/16", "fd12:3456::/32"]   # miroirs internes
+  max_bytes: 21474836480        # plafond de taille, 20 Gio par défaut
+  min_free_bytes: 1073741824    # espace libre gardé dans le magasin, 1 Gio par défaut
+```
+
+Toutes les adresses vers lesquelles le nom du miroir résout doivent être
+autorisées, IPv4 comme IPv6. Les adresses de métadonnées, multicast et non
+spécifiées restent refusées même dans un réseau autorisé, de même que
+`255.255.255.255` et l'adresse de diffusion d'un réseau IPv4 autorisé.
+
 L'ISO n'est **volontairement pas** embarqué dans le tarball de release :
 le toolkit entier pèse 135 Mo, l'ISO à lui seul cinquante fois plus.
 

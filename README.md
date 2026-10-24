@@ -68,6 +68,13 @@ recorded, whether it was made from the console or somewhere else.
   throughput and time left, with a speed choice that says what it costs.
   An archive is downloaded from the window that made it, and added to
   another console's store from the browser, checked before it is kept.
+- **Disaster recovery between two clusters**: VMs are replicated
+  asynchronously to a second Harvester cluster through the backup target
+  both share, with an RPO objective per plan. A measurement phase
+  recommends the interval, a follower applies each backup on standby
+  volumes and shows the RPO really held, and a planned failover (no loss)
+  or an unplanned one (source lost, loss stated per VM) brings the VMs up
+  on the other site. Command line and console API in this release.
 - **VMware migrations with Forklift**: the console installs Forklift on a
   cluster, builds the VDDK image from VMware's archive and pushes it to
   your registry, connects vCenter servers (reusing those already declared

@@ -1,5 +1,8 @@
 # harvester-ops — container image
 # Base: SUSE Base Container Image — Python 3.11 on SLE Micro
+# package.sh builds with --pull=always: every release takes the current base
+# (security fixes such as ca-certificates-mozilla), its digest is recorded
+# in the CHANGELOG.
 FROM registry.suse.com/bci/python:3.11
 
 LABEL org.opencontainers.image.title="harvester-ops"
@@ -21,26 +24,38 @@ RUN zypper --non-interactive ref && \
         gzip \
         tar \
         xorriso \
+    && zypper --non-interactive update --no-recommends ca-certificates ca-certificates-mozilla \
     && zypper clean --all
 
-# kubectl — pinned, signed
-ARG KUBECTL_VERSION=v1.30.5
+# kubectl: pinned and verified against the checksum published on dl.k8s.io.
+# v1.98.1 : v1.30.5 (Go 1.22.6) -> v1.35.9 (Go 1.26.8), the newest patch of
+# the minor whose +/-1 skew covers Harvester 1.8 (Kubernetes 1.35) and 1.9
+# (Kubernetes 1.36). No kubectl release is built with a Go fixed for
+# CVE-2026-111943 yet (Go 1.26.10 / 1.27.3): kubectl reads the system trust
+# store, from which the compromised emSign roots are gone.
+ARG KUBECTL_VERSION=v1.35.9
+ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
 RUN curl -fsSL "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" \
         -o /usr/local/bin/kubectl && \
+    echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c - && \
     chmod +x /usr/local/bin/kubectl
 
-# yq (mikefarah)
+# yq (mikefarah): pinned and verified against the SHA-256 of the release
+# "checksums" file. yq makes no network connection (no TLS).
 ARG YQ_VERSION=v4.44.3
+ARG YQ_SHA256=a2c097180dd884a8d50c956ee16a9cec070f30a7947cf4ebf87d5f36213e9ed7
 RUN curl -fsSL "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_amd64" \
         -o /usr/local/bin/yq && \
+    echo "${YQ_SHA256}  /usr/local/bin/yq" | sha256sum -c - && \
     chmod +x /usr/local/bin/yq
 
 # v1.51.0 : OpenTofu (MPL-2.0), l'équivalent ouvert de Terraform, pour que
 # l'onglet Terraform marche dès l'installation. Épinglé et vérifié par la
 # somme publiée par OpenTofu. Un binaire `terraform` posé par l'exploitant
 # reste pris en priorité (HARVESTER_OPS_TF_BIN).
-ARG TOFU_VERSION=1.12.6
-ARG TOFU_SHA256=50a6106fa4de523d09c87af85f3db1dd47535fc005727fdca6852146476b88ec
+# v1.98.1 : 1.12.6 -> 1.12.9, built with Go 1.26.10 (fix for CVE-2026-111943).
+ARG TOFU_VERSION=1.12.9
+ARG TOFU_SHA256=3ef275a8ec6738741bb1d3ad0bbddd808ce4717b60a4fffdfac8e828e27ec554
 RUN curl -fsSL "https://github.com/opentofu/opentofu/releases/download/v${TOFU_VERSION}/tofu_${TOFU_VERSION}_linux_amd64.tar.gz" \
         -o /tmp/tofu.tar.gz && \
     echo "${TOFU_SHA256}  /tmp/tofu.tar.gz" | sha256sum -c - && \

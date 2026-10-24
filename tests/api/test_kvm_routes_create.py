@@ -1056,13 +1056,12 @@ SHA = "e" * 64
     ("http://[::]/x", "address"),
     ("http://224.0.0.1/x", "address"),
     ("http://255.255.255.255/x", "address"),
-    ("ftp://example.org/x", "bad-url"),
-    ("file:///etc/passwd", "bad-url"),
+    ("ftp://example.org/x", "scheme"),
+    ("file:///etc/passwd", "scheme"),
     ("http://example.org:99999/x", "bad-url"),
     ("", "bad-url"),
 ])
 def test_fetch_refuses_internal_addresses_before_anything(client, upload, monkeypatch, url, reason):
-    monkeypatch.setattr(wapp, "_ufg", None)
     r = client.post("/api/kvm/hosts/node2/images/fetch",
                     json={"url": url, "pool": "images", "name": "a.img", "sha256": SHA})
     assert r.status_code == 400 and r.get_json()["reason"] == reason, r.get_json()
@@ -1101,7 +1100,6 @@ def http_server():
 
 def test_fetch_from_an_allowed_internal_mirror_downloads_once_and_sends(client, env, upload, monkeypatch,
                                                                        http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.0/8"]}})
     sha = __import__("hashlib").sha256(_Handler.payload).hexdigest()
     url = f"{http_server}/img/cirros.img?token=SIGNED-SECRET"
@@ -1120,7 +1118,6 @@ def test_fetch_from_an_allowed_internal_mirror_downloads_once_and_sends(client, 
 
 
 def test_fetch_redirect_to_a_refused_address_sends_nothing(client, upload, monkeypatch, http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     # le serveur de départ est autorisé, la redirection vise une adresse privée non autorisée
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.1/32"]}})
     monkeypatch.setattr(_Handler, "redirect", "http://10.255.255.1/x")
@@ -1134,7 +1131,6 @@ def test_fetch_redirect_to_a_refused_address_sends_nothing(client, upload, monke
 
 
 def test_fetch_wrong_sha_sends_nothing(client, upload, monkeypatch, http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.0/8"]}})
     client.post("/api/kvm/hosts/node2/images/fetch",
                 json={"url": f"{http_server}/x", "pool": "images", "name": "c.img", "sha256": "0" * 64})
@@ -1143,7 +1139,6 @@ def test_fetch_wrong_sha_sends_nothing(client, upload, monkeypatch, http_server)
 
 
 def test_fetch_size_cap(client, upload, monkeypatch, http_server):
-    monkeypatch.setattr(wapp, "_ufg", None)
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.0/8"],
                                                                         "max_bytes": 1000}})
     client.post("/api/kvm/hosts/node2/images/fetch", json={"url": f"{http_server}/x", "pool": "images",
@@ -1193,7 +1188,6 @@ def test_downloads_ignore_environment_proxies(upload, monkeypatch, http_server, 
     fermé : le téléchargement passe quand même)."""
     for var in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"):
         monkeypatch.setenv(var, "http://127.0.0.1:9")
-    monkeypatch.setattr(wapp, "_ufg", None)
     import ipaddress
     path, size, _sha = wapp._kvm_fetch_download(f"{http_server}/x", tmp_path,
                                                 [ipaddress.ip_network("127.0.0.0/8")], 1 << 20, 1,

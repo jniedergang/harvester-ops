@@ -226,6 +226,9 @@ def cmd_profile(args):
     # le même répertoire d'état (il retombait dans /tmp)
     os.environ.setdefault("HARVESTER_OPS_WATCH", "0")
     os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
+    # v1.99.0 : jamais de suiveur de réplication depuis cette commande (la
+    # console ne le lance que de son point d'entrée ; seconde garde)
+    os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"
     os.environ.setdefault("HARVESTER_OPS_ACTIONS_DB", str(Path(state) / "actions.db"))
     os.environ.setdefault("HARVESTER_OPS_NOTES_DB", str(Path(state) / "notes.db"))
     app = _load_web_module("app")

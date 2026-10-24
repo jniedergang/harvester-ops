@@ -32,6 +32,21 @@ import app as wapp            # noqa: E402
 import bm_profiles as bmp     # noqa: E402
 import harvester_install_schema as his  # noqa: E402
 
+
+
+@pytest.fixture(autouse=True)
+def _actions_left_as_found():
+    """Les faux enfants (`Child`) posés dans ACTIONS n'ont ni `cluster` ni
+    `to_dict` : laissés là, ils faisaient échouer les tests suivants du même
+    processus (garde d'occupation, persistance de l'Activité)."""
+    with wapp.ACTIONS_LOCK:
+        before = dict(wapp.ACTIONS)
+    yield
+    with wapp.ACTIONS_LOCK:
+        wapp.ACTIONS.clear()
+        wapp.ACTIONS.update(before)
+
+
 TOKEN = "TOKSECRET-180a"
 OSPW = "OSPWSECRET-180b"
 BMCPW = "BMCSECRET-180c"

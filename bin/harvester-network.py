@@ -44,7 +44,11 @@ K_IP = "ips.kubeovn.io"
 K_NAD = "network-attachment-definitions.k8s.cni.cncf.io"
 
 
-class Cancelled(Exception):
+class Cancelled(BaseException):
+    # v1.99.0 : BaseException, comme le Cancelled de la réplication. Un
+    # signal levé dans une lecture gardée par `except Exception` (configuration,
+    # relance d'une API, nettoyage) y était avalé : l'outil continuait comme
+    # si de rien n'était, ou concluait à une erreur au lieu d'une annulation.
     pass
 
 
@@ -201,6 +205,8 @@ def cmd_apply(args):
 def _undo(kube, kind, spec, nad=None):
     """Une création interrompue ne laisse ni VPC, ni subnet, ni réseau à
     moitié faits."""
+    # v1.99.0 : un second signal pendant le retour arrière ne doit pas le couper
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
     todo = [(K_VPC if kind == "vpc" else K_SUBNET, None, spec["name"])]
     if nad:
         todo.append((K_NAD, *nad.partition("/")[::2]))
