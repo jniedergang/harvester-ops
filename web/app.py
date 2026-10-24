@@ -238,12 +238,12 @@ if _PROMETHEUS_AVAILABLE:
     metric_repl_rpo_held = Gauge(
         "harvester_ops_replication_rpo_held_seconds",
         "Worst RPO held over the VMs of a replication plan.",
-        labelnames=("plan", "name", "source", "target"),
+        labelnames=("plan", "source", "target"),
     )
     metric_repl_rpo_objective = Gauge(
         "harvester_ops_replication_rpo_objective_seconds",
         "RPO objective of a replication plan.",
-        labelnames=("plan", "name", "source", "target"),
+        labelnames=("plan", "source", "target"),
     )
 else:
     class _NoopMetric:
@@ -1166,8 +1166,10 @@ KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 
 
 # v1.97.0 : réplication. Bascule = admin (une activation est définitive) ;
-# le reste = opérateur. La suppression des sauvegardes à la déprotection,
-# qui dépend du corps de la demande, est contrôlée dans sa route.
+# le reste = opérateur. La suppression des sauvegardes à la déprotection
+# (demandée, ou héritée d'une déprotection interrompue) et la reprise d'une
+# bascule ou d'une telle déprotection, qui dépendent du corps de la demande
+# ou de l'état du plan, sont contrôlées dans leur route (admin).
 REPLICATION_ADMIN_SUFFIXES = ("/failover",)
 
 
@@ -1397,6 +1399,17 @@ def identity_env(login=None, cluster=None):
 # -----------------------------------------------------------------------------
 # Action registry (in-memory)
 # -----------------------------------------------------------------------------
+def _metric_action(action):
+    """Libellé d'action des métriques. v1.97.0 : `replication:<plan>:<op>`
+    (et `replication:create:<nom>`) devient `replication:<op>`, pour ne pas
+    ouvrir une série par plan ni exposer un nom de plan."""
+    action = str(action or "unknown")
+    if action.startswith("replication:"):
+        parts = action.split(":")
+        return "replication:" + (parts[1] if parts[1] == "create" else parts[-1])
+    return action
+
+
 class ActionRun:
     """Represents one running invocation of a bash script."""
 
@@ -1443,6 +1456,11 @@ class ActionRun:
         # v1.97.0 : délai laissé à l'outil annulé pour défaire ce qu'il a
         # posé avant un SIGKILL (None : jamais de SIGKILL, comme avant)
         self.kill_grace = None
+        # v1.97.0 : outil qui défait lui-même ce qu'il a posé (réplication) :
+        # une annulation est DEMANDÉE (`cancel_requested`), l'action reste
+        # « running » jusqu'à la sortie de l'outil, qui dit le statut final
+        self.cancel_waits = False
+        self.cancel_requested = False
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -1493,12 +1511,12 @@ class ActionRun:
         try:
             metric_actions_in_flight.dec()
             metric_actions_total.labels(
-                action=str(self.action or "unknown"),
+                action=_metric_action(self.action),
                 status=str(self.status or "unknown"),
             ).inc()
             if self.ended_at:
                 metric_action_duration.labels(
-                    action=str(self.action or "unknown"),
+                    action=_metric_action(self.action),
                 ).observe(self.ended_at - self.started_at)
         except Exception:
             pass
@@ -1521,6 +1539,7 @@ class ActionRun:
             "progress": dict(self.progress),
             "progress_current": self.progress_last,
             "result": dict(self.result),
+            "cancel_requested": self.cancel_requested,
         }
 
 
@@ -10953,6 +10972,18 @@ def api_action_cancel(run_id):
         return jsonify({"error": "forbidden", "role": current_role(), "required": need,
                         "hint": f"cancelling this action needs the '{need}' role, "
                                 f"like starting it"}), 403
+    if run.cancel_waits and run.status in ("starting", "running"):
+        # v1.97.0 : l'action reste en cours (les gardes d'occupation la
+        # voient encore) ; le relais range le statut que l'outil donne en
+        # sortant, et une commande déjà finie n'est jamais réécrite
+        if not run.cancel_requested:
+            run.cancel_requested = True
+            run.emit({"type": "status", "status": "cancel-requested", "ts": time.time()})
+        if run.proc and run.proc.poll() is None:
+            run.proc.terminate()
+            if run.kill_grace and not getattr(run, "_kill_watch", None):
+                run._kill_watch = _kill_after_grace(run)
+        return jsonify(run.to_dict())
     if run.proc and run.proc.poll() is None:
         run.proc.terminate()
         if run.kill_grace:
@@ -14921,7 +14952,8 @@ def api_capi_cluster_preview(cluster):
 
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
-                capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False):
+                capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
+                setup=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
@@ -14932,11 +14964,11 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     l'action, `(cluster,)` par défaut) et `busy_prefix` (une action en cours
     dont le libellé commence ainsi bloque aussi : un geste par plan de
     réplication) ; `summarize` passé au relais ; `id_arg` ajoute
-    `--id=<action>` pour que l'outil lie son journal à l'Activité."""
-    busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
-            if check_busy else None)
-    if busy:
-        return None, _busy_response(busy)
+    `--id=<action>` pour que l'outil lie son journal à l'Activité.
+    `setup(run)` règle l'action (rôle, délai avant SIGKILL...) AVANT qu'elle
+    soit visible et que son fil parte ; le contrôle d'occupation et l'ajout
+    à ACTIONS se font sous le même verrou (deux gestes simultanés sur le
+    même plan : un seul passe)."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -14954,8 +14986,20 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = (current_cluster_identity() or {}).get("user")
+    if setup is not None:
+        setup(run)
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
+                if check_busy else None)
+        if not busy:
+            ACTIONS[run_id] = run
+    if busy:
+        run.status = "cancelled"               # jamais lancée : rien à persister
+        run._closed = True
+        metric_actions_in_flight.dec()
+        if spec_file:
+            Path(spec_file).unlink(missing_ok=True)
+        return None, _busy_response(busy)
 
     def work():
         try:
@@ -19831,10 +19875,24 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
     out_file = tempfile.TemporaryFile() if capture else None
+    if run.cancel_requested:
+        # v1.97.0 : annulée avant le départ de la commande : rien n'est lancé
+        if out_file is not None:
+            out_file.close()
+        run.status, run.error_summary = "cancelled", "cancelled before the command started: nothing done"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": None, "ts": time.time()})
+        run.close()
+        return
     try:
         proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
+        if run.cancel_requested:
+            # v1.97.0 : annulation demandée avant que le processus existe
+            proc.terminate()
+            if run.kill_grace:
+                run._kill_watch = _kill_after_grace(run)
         for line in proc.stderr:
             line = line.strip()
             if line.startswith("STEP_EVENT|"):
@@ -23667,6 +23725,10 @@ REPLICATION_UID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 REPLICATION_SIDES = ("source", "target", "any")
 # marge ajoutée au retour arrière avant un SIGKILL : sortie JSON, baux rendus
 REPLICATION_GRACE_MARGIN = 15
+# budget d'arrêt de la console : l'unité arrête le conteneur par `podman
+# stop -t 600` ; tout retour arrière doit tenir dedans, avec une marge pour
+# ranger les résultats et sortir
+REPLICATION_STOP_BUDGET = 585
 REPLICATION_EVENTS_MAX = 500
 REPLICATION_STATS_MAX = 5000
 _OFF = ("0", "false", "no", "off")
@@ -23753,6 +23815,22 @@ def _repl_grace(plan):
     return int(t.get("undo_total") or 240) + int(t.get("client") or 30) + REPLICATION_GRACE_MARGIN
 
 
+def _repl_budget_error(plan):
+    """Réponse 400 si le retour arrière d'une commande lancée par la console
+    (`undo_total` + `client` + marge) ne tient pas dans le budget d'arrêt de
+    l'unité, pour un plan suivi par la console ; None sinon."""
+    if ((plan.get("options") or {}).get("follow") or _rp.DEFAULT_OPTIONS["follow"]) != "console":
+        return None
+    grace = _repl_grace(plan)
+    if grace <= REPLICATION_STOP_BUDGET:
+        return None
+    room = REPLICATION_STOP_BUDGET - REPLICATION_GRACE_MARGIN
+    return _repl_err(f"timeouts undo_total + client = {grace - REPLICATION_GRACE_MARGIN} s: a plan followed by "
+                     f"the console must keep them at {room} s or less, so that a rollback still fits in the "
+                     f"console's stop budget ({REPLICATION_STOP_BUDGET} s); lower them, or set follow to cli",
+                     400, "stop-budget")
+
+
 def _repl_summarize(run, rc, data, last_error):
     """Statut et résumé d'une commande de réplication, depuis sa sortie JSON :
     annulée et défaite, interrompue (rien n'est défait, reprendre), retour
@@ -23787,17 +23865,20 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
     (identifiant contrôlé, jamais de nom libre) ; un geste à la fois par plan,
     et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters."""
     label = f"replication:{plan['id']}:{op}"
-    run, err = _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
-                           after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=busy,
-                           capture=True,
-                           busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
-                           busy_prefix=f"replication:{plan['id']}:", summarize=_repl_summarize, id_arg=True)
-    if err:
-        return None, err
-    run.required_role = role
-    run.kill_grace = _repl_grace(plan)
-    run.result = dict(run.result or {}, plan=plan["id"])
-    return run, None
+
+    def setup(run):
+        # avant le départ du fil : une annulation immédiate voit déjà le rôle
+        # et le délai de retour arrière
+        run.required_role = role
+        run.kill_grace = _repl_grace(plan)
+        run.cancel_waits = True
+        run.result = dict(run.result or {}, plan=plan["id"])
+    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
+                       after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=busy,
+                       capture=True,
+                       busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
+                       busy_prefix=f"replication:{plan['id']}:", summarize=_repl_summarize, id_arg=True,
+                       setup=setup)
 
 
 def _repl_accepted(run, plan_id, **extra):
@@ -24089,16 +24170,21 @@ def api_replication_plan_create():
     for side in ("source_cluster", "target_cluster"):
         if plan[side] not in declared:
             return _repl_err(f"unknown cluster: {plan[side]}", 400, "unknown-cluster")
+    err = _repl_budget_error(plan)
+    if err:
+        return err
     _kargs, err = _repl_kube_args(plan)          # la personne doit voir les deux clusters
     if err:
         return err
+    def setup(run):
+        run.required_role = "operator"
+        run.cancel_waits = True
     run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
                            _repl_base("plan", "create") + argv, REPLICATION_TOOL,
                            after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=False,
-                           capture=True, summarize=_repl_summarize, id_arg=True)
+                           capture=True, summarize=_repl_summarize, id_arg=True, setup=setup)
     if err:
         return err
-    run.required_role = "operator"
     return jsonify({"action_id": run.id, "name": plan["name"]}), 202
 
 
@@ -24251,26 +24337,74 @@ def api_replication_failover(plan_id):
     return _repl_accepted(run, plan["id"], mode=mode, dry_run=dry)
 
 
+def _repl_open_run(plan, operation):
+    """La bascule ou la déprotection non terminée de la génération courante
+    (ligne `runs`), comme `replication_run._open_run` ; None sinon."""
+    conn = _replication_conn()
+    try:
+        runs = _rdb.list_runs(conn, plan["id"])
+    finally:
+        conn.close()
+    for r in reversed(runs):
+        if (r["operation"] == operation and not r["finished_at"]
+                and int(r["generation"]) == int(plan.get("generation") or 1)):
+            return r
+    return None
+
+
+def _repl_inherits_backup_deletion(plan):
+    """La déprotection interrompue de ce plan supprimait aussi les
+    sauvegardes (`points.delete_backups` de sa ligne `runs`)."""
+    r = _repl_open_run(plan, "unprotect")
+    return bool(((r or {}).get("points") or {}).get("delete_backups"))
+
+
+def _repl_resume_role(plan):
+    """(rôle, motif) d'une reprise : elle termine ce qui a été interrompu,
+    donc demande le rôle du geste d'origine. Une bascule (état
+    `failing_over`, ou `error` venu de là) = admin ; une déprotection qui
+    supprimait les sauvegardes = admin ; le reste = opérateur."""
+    state = plan.get("state")
+    eff = (plan.get("error_origin") or None) if state == "error" else state
+    if eff == "failing_over":
+        return "admin", "resuming a failover (an activation) needs the 'admin' role"
+    if eff == "unprotecting" and _repl_inherits_backup_deletion(plan):
+        return "admin", "resuming an unprotect that deletes the plan's backups needs the 'admin' role"
+    return "operator", None
+
+
+def _repl_forbidden(role, hint):
+    if ROLE_RANK.get(current_role(), 0) >= ROLE_RANK[role]:
+        return None
+    return jsonify({"error": "forbidden", "role": current_role(), "required": role, "hint": hint}), 403
+
+
 @app.route("/api/replication/plans/<plan_id>/resume", methods=["POST"])
 @requires_auth
 @_rate_limit("10/minute")
 def api_replication_resume(plan_id):
     """Termine une bascule ou une déprotection interrompue (avec la
-    confirmation donnée à son départ)."""
+    confirmation donnée à son départ). Le rôle est celui du geste repris :
+    administrateur pour une bascule ou une suppression des sauvegardes, et
+    autant pour annuler la reprise."""
     err = _repl_unavailable()
     if err:
         return err
     plan, err = _repl_plan(plan_id)
     if err:
         return err
+    role, hint = _repl_resume_role(plan)
+    err = _repl_forbidden(role, hint)
+    if err:
+        return err
     kargs, err = _repl_kube_args(plan)
     if err:
         return err
-    run, err = _repl_action(plan, "resume", _repl_base("resume", plan["id"]) + kargs, "operator",
+    run, err = _repl_action(plan, "resume", _repl_base("resume", plan["id"]) + kargs, role,
                             cluster=plan["target_cluster"])
     if err:
         return err
-    return _repl_accepted(run, plan["id"])
+    return _repl_accepted(run, plan["id"], role=role)
 
 
 @app.route("/api/replication/plans/<plan_id>/unprotect", methods=["POST"])
@@ -24294,10 +24428,18 @@ def api_replication_unprotect(plan_id):
         delete_backups = _repl_flag(body, "delete_backups")
     except ValueError as e:
         return _repl_err(str(e))
-    role = "admin" if delete_backups else "operator"
-    if ROLE_RANK.get(current_role(), 0) < ROLE_RANK[role]:
-        return jsonify({"error": "forbidden", "role": current_role(), "required": role,
-                        "hint": "deleting the plan's backups needs the 'admin' role"}), 403
+    inherited = _repl_inherits_backup_deletion(plan)
+    role = "admin" if delete_backups or inherited else "operator"
+    err = _repl_forbidden(role, "deleting the plan's backups needs the 'admin' role" if delete_backups else
+                          "the interrupted unprotect of this plan also deletes its backups: "
+                          "finishing it needs the 'admin' role")
+    if err:
+        return err
+    if inherited and not delete_backups:
+        # le moteur refuserait aussi (`needs-admin-resume`) : jamais élargi
+        # en silence, l'administrateur le demande explicitement
+        return _repl_err("the interrupted unprotect also deletes the plan's backups: send delete_backups: "
+                         "true, or resume the plan", 400, "needs-admin-resume")
     if body.get("confirm") != plan["name"]:
         return _repl_err("confirm must carry the plan name", 400, "confirmation-required")
     kargs, err = _repl_kube_args(plan)
@@ -24349,10 +24491,26 @@ def api_replication_settings(plan_id):
             if body["follow"] not in _rp.OPTION_CHOICES["follow"]:
                 raise ValueError("follow must be console, cli or off")
             argv.append(f"--follow={body['follow']}")
-        argv += [f"--timeout={k}={'' if v is None else v}"
-                 for k, v in _repl_timeouts(body, allow_null=True).items()]
+        changes = _repl_timeouts(body, allow_null=True)
+        argv += [f"--timeout={k}={'' if v is None else v}" for k, v in changes.items()]
+        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu ?
+        opts = dict(plan.get("options") or {})
+        merged = dict(opts.get("timeouts") or {})
+        for k, v in changes.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        opts["timeouts"] = _rp.normalize_timeouts(merged)
+        if body.get("follow") is not None:
+            opts["follow"] = body["follow"]
+    except _rp.PlanError as e:
+        return _repl_err(str(e), 400, e.code)
     except ValueError as e:
         return _repl_err(str(e))
+    err = _repl_budget_error(dict(plan, options=opts))
+    if err:
+        return err
     run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
                             busy_clusters=("",))
     if err:
@@ -24393,9 +24551,14 @@ def _replication_follow_enabled():
     return not (isinstance(cfg, dict) and cfg.get("follow") is False)
 
 
+def _replication_follow_log():
+    return LOG_DIR / "replication-follow.log"
+
+
 def _replication_follow_cmd():
     return [sys.executable, str(BIN_DIR / REPLICATION_SCRIPT), "follow", "--all", "--console", "--json",
-            f"--state-dir={_state_dir()}", f"--db={_replication_db_path()}"]
+            f"--state-dir={_state_dir()}", f"--db={_replication_db_path()}",
+            f"--log-file={_replication_follow_log()}"]
 
 
 def _replication_follow_grace():
@@ -24414,7 +24577,7 @@ def _replication_follow_grace():
                 conn.close()
     except Exception:                            # noqa: BLE001 : jamais bloquant à l'arrêt
         pass
-    return client + REPLICATION_GRACE_MARGIN
+    return min(client + REPLICATION_GRACE_MARGIN, REPLICATION_STOP_BUDGET)
 
 
 class ReplicationFollowerSupervisor:
@@ -24434,9 +24597,11 @@ class ReplicationFollowerSupervisor:
     LOG_MAX = 10 * 1024 * 1024
 
     def __init__(self, cmd, log_path, enabled, grace, popen=subprocess.Popen, clock=time.monotonic,
-                 wall=time.time, ready=None):
+                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1):
         self._cmd, self._log_path, self._enabled, self._grace = cmd, log_path, enabled, grace
         self._popen, self._clock, self._wall, self._ready = popen, clock, wall, ready
+        self._reopen_signal = reopen_signal
+        self.rotations = 0
         self.proc = None
         self.restarts = 0
         self.last_error = None
@@ -24461,7 +24626,7 @@ class ReplicationFollowerSupervisor:
         return {"enabled": self.state != "disabled", "state": self.state, "running": self.running(),
                 "pid": self.proc.pid if self.running() else None, "restarts": self.restarts,
                 "last_exit": self.last_exit, "last_error": self.last_error, "started_at": self.started_at,
-                "next_restart_in_s": nxt}
+                "next_restart_in_s": nxt, "log_rotations": self.rotations}
 
     def tick(self):
         """Un tour : interrupteur, (re)lancement, constat d'une sortie."""
@@ -24481,7 +24646,26 @@ class ReplicationFollowerSupervisor:
                 rc = self.proc.poll()
                 if rc is not None:
                     self._exited(rc)
+                else:
+                    self._rotate_if_needed()
             metric_repl_follower_up.set(1 if self.running() else 0)
+
+    def _rotate_if_needed(self):
+        """Journal trop gros pendant que l'enfant tourne : renommé en `.1`,
+        puis SIGUSR1 à l'enfant, qui rouvre son fichier (`--log-file`) sans
+        redémarrer."""
+        path = Path(self._log_path())
+        try:
+            if path.stat().st_size <= self.LOG_MAX:
+                return
+            path.replace(path.with_name(path.name + ".1"))
+        except OSError:
+            return
+        try:
+            self.proc.send_signal(self._reopen_signal)
+        except (OSError, ValueError):
+            pass
+        self.rotations += 1
 
     def _open_log(self):
         path = Path(self._log_path())
@@ -24535,8 +24719,9 @@ class ReplicationFollowerSupervisor:
         log_watch.warning("replication follower exited (%s), restart in %s s", rc,
                           round(self._next_start - self._clock()))
 
-    def _terminate(self):
-        proc, grace = self.proc, self._grace()
+    def _terminate(self, grace=None):
+        proc = self.proc
+        grace = self._grace() if grace is None else grace
         if proc.poll() is None:
             proc.terminate()
             try:
@@ -24548,13 +24733,13 @@ class ReplicationFollowerSupervisor:
         self.last_exit = proc.returncode
         self.proc = None
 
-    def stop(self):
-        """Arrêt demandé (console qui s'arrête) : SIGTERM, attente, jamais de
-        relance."""
+    def stop(self, grace=None):
+        """Arrêt demandé (console qui s'arrête) : SIGTERM, attente (`grace`,
+        bornée par l'appelant au budget d'arrêt), jamais de relance."""
         self._stop.set()
         with self._lock:
             if self.proc is not None:
-                self._terminate()
+                self._terminate(grace)
             self.state = "stopped"
             metric_repl_follower_up.set(0)
 
@@ -24575,37 +24760,74 @@ class ReplicationFollowerSupervisor:
 
 
 REPLICATION_FOLLOWER = None
+REPLICATION_FOLLOWER_ELSEWHERE = None       # pid de la console qui suit déjà ce répertoire d'état
 _replication_follower_lock = threading.Lock()
+_REPLICATION_FOLLOW_LOCK_FD = None
 
 
 def _replication_follower_health():
     sup = REPLICATION_FOLLOWER
     if sup is None:
-        return {"enabled": False, "state": "off", "running": False, "pid": None, "restarts": 0,
-                "last_exit": None, "last_error": None, "started_at": None, "next_restart_in_s": None}
+        out = {"enabled": False, "state": "off", "running": False, "pid": None, "restarts": 0,
+               "last_exit": None, "last_error": None, "started_at": None, "next_restart_in_s": None,
+               "log_rotations": 0}
+        if REPLICATION_FOLLOWER_ELSEWHERE is not None:
+            out.update(state="elsewhere", last_error="another console already follows this state directory "
+                                                     f"(pid {REPLICATION_FOLLOWER_ELSEWHERE or '?'})")
+        return out
     return sup.health()
 
 
+def _replication_follow_lock(path):
+    """Verrou exclusif (flock) du répertoire d'état, tenu toute la vie de la
+    console : (descripteur, None) s'il est pris, (None, pid du détenteur)
+    si une autre console le tient déjà. Libéré par le noyau à la sortie,
+    même brutale : jamais de fichier périmé qui bloquerait."""
+    import fcntl
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = int(os.pread(fd, 32, 0).decode().strip() or 0)
+        except (OSError, ValueError):
+            holder = 0
+        os.close(fd)
+        return None, holder
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+    return fd, None
+
+
 def _start_replication_follower():
-    """Démarre le fil de suivi, une seule fois par processus principal
-    (jamais dans un lecteur), sauf HARVESTER_OPS_REPLICATION_FOLLOW=0."""
-    global REPLICATION_FOLLOWER
+    """Démarre le fil de suivi : appelé par le point d'entrée du serveur
+    seulement (jamais à l'import : bin/harvester-baremetal.py charge ce
+    module), une seule fois par processus principal, jamais dans un
+    lecteur, sauf HARVESTER_OPS_REPLICATION_FOLLOW=0, et pas si une autre
+    console suit déjà le même répertoire d'état (verrou
+    `replication-follow.lock`)."""
+    global REPLICATION_FOLLOWER, REPLICATION_FOLLOWER_ELSEWHERE, _REPLICATION_FOLLOW_LOCK_FD
     if IS_READ_WORKER or not _replication_follow_env_on() or not (BIN_DIR / REPLICATION_SCRIPT).is_file():
         return None
     with _replication_follower_lock:
         if REPLICATION_FOLLOWER is not None:
             return REPLICATION_FOLLOWER
+        if _REPLICATION_FOLLOW_LOCK_FD is None:
+            fd, holder = _replication_follow_lock(_state_dir() / "replication-follow.lock")
+            if fd is None:
+                REPLICATION_FOLLOWER_ELSEWHERE = holder
+                log_watch.warning("replication follower not started: another console (pid %s) follows %s",
+                                  holder or "?", _state_dir())
+                return None
+            _REPLICATION_FOLLOW_LOCK_FD = fd
+        REPLICATION_FOLLOWER_ELSEWHERE = None
         REPLICATION_FOLLOWER = ReplicationFollowerSupervisor(
-            _replication_follow_cmd, lambda: LOG_DIR / "replication-follow.log",
+            _replication_follow_cmd, _replication_follow_log,
             _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY)
         REPLICATION_FOLLOWER.start()
         return REPLICATION_FOLLOWER
-
-
-try:
-    _start_replication_follower()
-except Exception as _e:
-    log_watch.error("replication follower startup failed: %s", _e)
 
 
 def _replication_metrics_refresh():
@@ -24628,29 +24850,37 @@ def _replication_metrics_refresh():
         1 for p in plans if (p.get("options") or {}).get("follow") == "console"
         and not (p.get("options") or {}).get("paused") and p.get("state") in _rf.FOLLOWED_STATES))
     for p, r in zip(plans, rows):
-        labels = {"plan": p["id"], "name": p["name"], "source": p["source_cluster"],
-                  "target": p["target_cluster"]}
+        # identifiant du plan, jamais son nom (texte libre, /metrics sans
+        # authentification) ; les clusters comme `kubectl_calls_total`
+        labels = {"plan": p["id"], "source": p["source_cluster"], "target": p["target_cluster"]}
         metric_repl_rpo_objective.labels(**labels).set(r["rpo_objective_s"] or 0)
         if r["rpo_held_s"] is not None:
             metric_repl_rpo_held.labels(**labels).set(r["rpo_held_s"])
 
 
-def _replication_shutdown(clock=time.monotonic, sleep=time.sleep):
+def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):
     """Arrêt de la console : SIGTERM aux commandes de réplication en cours et
     au suiveur, puis attente de chacune jusqu'à son délai de retour arrière
-    (`kill_grace`), SIGKILL au-delà. Rend {action: code de sortie}."""
+    (`kill_grace`), SIGKILL au-delà. Chaque délai est borné par le budget
+    d'arrêt de l'unité (REPLICATION_STOP_BUDGET, sous `podman stop -t
+    600`) : passé ce budget, podman tuerait tout sans prévenir. Rend
+    {action: code de sortie}."""
+    budget = REPLICATION_STOP_BUDGET if budget is None else budget
+    start = clock()
     sup = REPLICATION_FOLLOWER
     stopper = None
     if sup is not None:
-        stopper = threading.Thread(target=sup.stop, daemon=True)
+        stopper = threading.Thread(target=sup.stop, kwargs={"grace": min(_replication_follow_grace(), budget)},
+                                   daemon=True)
         stopper.start()
     now = clock()
     runs = [r for r in list(ACTIONS.values())
             if getattr(r, "kill_grace", None) and getattr(r, "proc", None) is not None and r.proc.poll() is None]
     deadlines = {}
     for r in runs:
+        r.cancel_requested = True
         r.proc.terminate()
-        deadlines[r.id] = now + r.kill_grace
+        deadlines[r.id] = now + min(r.kill_grace, budget)
     alive = list(runs)
     while alive:
         t = clock()
@@ -24668,7 +24898,7 @@ def _replication_shutdown(clock=time.monotonic, sleep=time.sleep):
     while any(r.status in ("starting", "running") for r in runs) and clock() < end:
         sleep(0.1)
     if stopper is not None:
-        stopper.join(timeout=_replication_follow_grace() + 5)
+        stopper.join(timeout=max(1.0, start + budget + 5 - clock()))
     return {r.id: r.proc.returncode for r in runs}
 
 
@@ -24700,5 +24930,10 @@ if __name__ == "__main__":
     # le temps de défaire ce qu'elles ont posé (puis SIGKILL), et arrêter le
     # fil de suivi proprement (il rend ses baux)
     signal.signal(signal.SIGTERM, _console_sigterm)
+    # v1.97.0 : le fil de suivi ne part que d'ici (jamais à l'import)
+    try:
+        _start_replication_follower()
+    except Exception as _e:                      # noqa: BLE001
+        log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)

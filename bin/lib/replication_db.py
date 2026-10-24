@@ -1040,8 +1040,18 @@ def _events(conn, where, args, limit, before):
     q = f"SELECT * FROM events WHERE {where}"
     if before is not None and before != "":
         kind, value = _before(before)
-        q += " AND id < ?" if kind == "id" else " AND ts < ?"
-        args = args + [value]
+        row = (conn.execute("SELECT ts FROM events WHERE id = ?", (value,)).fetchone()
+               if kind == "id" else None)
+        if row is not None:
+            # curseur composé (ts, id), dans l'ordre même de la page : un
+            # événement daté plus tôt mais rangé plus tard n'est ni sauté ni
+            # rendu deux fois
+            q += " AND (ts < ? OR (ts = ? AND id < ?))"
+            args = args + [row["ts"], row["ts"], value]
+        else:
+            # id disparu (purge) : le plus proche possible ; date : stricte
+            q += " AND id < ?" if kind == "id" else " AND ts < ?"
+            args = args + [value]
     q += " ORDER BY ts DESC, id DESC LIMIT ?"
     return [_row("events", r) for r in conn.execute(q, args + [limit])]
 

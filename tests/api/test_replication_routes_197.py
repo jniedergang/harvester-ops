@@ -708,6 +708,9 @@ class FakeProc:
         self.killed += 1
         self.rc = -9
 
+    def send_signal(self, sig):
+        self.signals = getattr(self, "signals", []) + [sig]
+
     def wait(self, timeout=None):
         self.waits.append(timeout)
         if self.rc is None:
@@ -852,8 +855,10 @@ def test_the_follower_thread_starts_once_and_never_in_a_reader(monkeypatch):
 def test_follower_command_follows_the_console_plans_with_the_console_state(monkeypatch, tmp_path):
     monkeypatch.setattr(wapp, "_state_dir", lambda: tmp_path)
     monkeypatch.delenv("HARVESTER_OPS_REPLICATION_DB", raising=False)
+    monkeypatch.setattr(wapp, "LOG_DIR", tmp_path / "logs")
     assert wapp._replication_follow_cmd() == [sys.executable, SCRIPT, "follow", "--all", "--console", "--json",
-                                              f"--state-dir={tmp_path}", f"--db={tmp_path / 'replication.db'}"]
+                                              f"--state-dir={tmp_path}", f"--db={tmp_path / 'replication.db'}",
+                                              f"--log-file={tmp_path / 'logs' / 'replication-follow.log'}"]
 
 
 def test_follower_grace_is_the_longest_client_timeout(env):
@@ -871,7 +876,8 @@ def test_metrics_expose_the_follower_and_the_rpo_per_plan(client, env, monkeypat
     monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", fake)
     text = client.get("/metrics").get_data(as_text=True)
     assert "harvester_ops_replication_follower_up 1.0" in text
-    labels = {"plan": PID, "name": "web", "source": "harvlab", "target": "harvlab2"}
+    labels = {"plan": PID, "source": "harvlab", "target": "harvlab2"}
+    assert 'name="web"' not in text and 'name="db"' not in text          # jamais un nom de plan
     assert REGISTRY.get_sample_value("harvester_ops_replication_rpo_objective_seconds", labels) == 900
     assert REGISTRY.get_sample_value("harvester_ops_replication_rpo_held_seconds", labels) > 900
     assert REGISTRY.get_sample_value("harvester_ops_replication_plans_followed") == 1    # web suivi, db brouillon
@@ -886,3 +892,452 @@ def test_follower_route_reports_off_without_a_supervisor(client, monkeypatch):
     monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
     d = client.get("/api/replication/follower").get_json()
     assert d["state"] == "off" and d["running"] is False and d["pid"] is None
+
+
+# --- corrections après relecture --------------------------------------------------------
+
+def _plan_state(env, state, origin="", run=None):
+    """Pose l'état du plan `web` et, au besoin, une ligne `runs` :
+    run = (opération, points, terminée, génération)."""
+    conn = db.connect(env["db"])
+    conn.execute("UPDATE plans SET state = ?, error_origin = ? WHERE id = ?", (state, origin, PID))
+    conn.commit()
+    if run:
+        op, points, finished, gen = run
+        db.record_run(conn, PID, op, now_utc(), max(gen, 1), finished_at=now_utc() if finished else None,
+                      points=points)
+        if gen == 0:                         # ligne d'une génération passée
+            conn.execute("UPDATE plans SET generation = 2 WHERE id = ?", (PID,))
+            conn.commit()
+    conn.close()
+
+
+UNPROTECT_DEL = ("unprotect", {"delete_backups": True, "held": {}}, False, 1)
+RESUME_ROLES = [
+    # état, origine de l'erreur, ligne `runs`, rôle exigé
+    ("protecting", "", None, "operator"),
+    ("error", "protecting", None, "operator"),
+    ("error", "measuring", None, "operator"),
+    ("failing_over", "", ("failover", {"mode": "planned"}, False, 1), "admin"),
+    ("error", "failing_over", ("failover", {"mode": "unplanned"}, False, 1), "admin"),
+    ("error", "failing_over", None, "admin"),                    # même sans ligne : c'est une bascule
+    ("unprotecting", "", UNPROTECT_DEL, "admin"),
+    ("error", "unprotecting", UNPROTECT_DEL, "admin"),
+    ("unprotecting", "", ("unprotect", {"delete_backups": False, "held": {}}, False, 1), "operator"),
+    ("unprotecting", "", ("unprotect", {"delete_backups": True}, True, 1), "operator"),       # terminée
+    ("unprotecting", "", ("unprotect", {"delete_backups": True}, False, 0), "operator"),      # autre génération
+]
+
+
+@pytest.mark.parametrize("state,origin,run,need", RESUME_ROLES)
+@pytest.mark.parametrize("user", ["alice", "patronne"])
+def test_resume_needs_the_role_of_the_gesture_it_finishes(as_user, env, user, state, origin, run, need):
+    _plan_state(env, state, origin, run)
+    r = as_user(user, "POST", f"/api/replication/plans/{PID}/resume", json={})
+    if wapp.ROLE_RANK[USERS[user]] < wapp.ROLE_RANK[need]:
+        assert r.status_code == 403 and r.get_json()["required"] == need and not wapp.ACTIONS
+        return
+    assert r.status_code == 202, r.get_json()
+    assert r.get_json()["role"] == need
+    run_ = only_run()
+    assert run_.required_role == need
+    # annuler la reprise demande le même rôle
+    c = as_user("alice", "DELETE", f"/api/action/{run_.id}")
+    assert c.status_code == (200 if need == "operator" else 403)
+
+
+@pytest.mark.parametrize("user,body,status,code,flag", [
+    ("alice", {"confirm": "web"}, 403, None, False),
+    ("alice", {"confirm": "web", "delete_backups": True}, 403, None, False),
+    ("patronne", {"confirm": "web"}, 400, "needs-admin-resume", False),
+    ("patronne", {"confirm": "web", "delete_backups": True}, 202, None, True),
+])
+def test_unprotect_inheriting_a_backup_deletion_needs_an_explicit_admin(as_user, env, user, body, status, code,
+                                                                         flag):
+    _plan_state(env, "unprotecting", "", UNPROTECT_DEL)
+    r = as_user(user, "POST", f"/api/replication/plans/{PID}/unprotect", json=body)
+    assert r.status_code == status, r.get_json()
+    if status == 403:
+        assert r.get_json()["required"] == "admin" and not wapp.ACTIONS
+    elif status == 400:
+        assert r.get_json()["code"] == code and not wapp.ACTIONS
+    else:
+        assert ("--delete-backups" in script_cmd()) is flag and only_run().required_role == "admin"
+
+
+def test_unprotect_without_an_open_deletion_stays_operator(as_user, env):
+    _plan_state(env, "unprotecting", "", ("unprotect", {"delete_backups": False}, False, 1))
+    r = as_user("alice", "POST", f"/api/replication/plans/{PID}/unprotect", json={"confirm": "web"})
+    assert r.status_code == 202 and "--delete-backups" not in script_cmd()
+    assert only_run().required_role == "operator"
+
+
+# --- fil de suivi : jamais à l'import, un seul par répertoire d'état -------------------
+
+IMPORT_PROBE = """
+import importlib.util, sys, threading
+spec = importlib.util.spec_from_file_location("bm", sys.argv[1])
+bm = importlib.util.module_from_spec(spec); spec.loader.exec_module(bm)
+app = bm._load_web_module("app")
+import time; time.sleep(0.3)
+names = [t.name for t in threading.enumerate()]
+print(app.REPLICATION_FOLLOWER is None, "replication-follower" in names)
+"""
+
+
+def test_importing_the_console_starts_no_follower(tmp_path):
+    """Comme bin/harvester-baremetal.py, qui charge web/app.py : même avec
+    l'interrupteur à 1, aucun fil ni processus de suivi."""
+    env = dict(os.environ, HARVESTER_OPS_REPLICATION_FOLLOW="1", HARVESTER_OPS_STATE_DIR=str(tmp_path),
+               HARVESTER_OPS_REPLICATION_DB=str(tmp_path / "replication.db"), HARVESTER_OPS_WATCH="0",
+               HARVESTER_OPS_READ_WORKERS="0", HARVESTER_OPS_WEB_DIR=str(ROOT / "web"))
+    p = subprocess.run([sys.executable, "-c", IMPORT_PROBE, str(ROOT / "bin" / "harvester-baremetal.py")],
+                       capture_output=True, text=True, timeout=120, env=env, cwd=str(tmp_path))
+    assert p.returncode == 0, p.stderr[-2000:]
+    assert p.stdout.split()[-2:] == ["True", "False"], p.stdout
+    assert not (tmp_path / "replication-follow.lock").exists()
+
+
+def test_the_follower_starts_only_from_the_server_entry_point():
+    main = SRC.split('if __name__ == "__main__":', 1)
+    assert "_start_replication_follower()" in main[1]
+    calls = [ln for ln in main[0].splitlines() if ln.strip() == "_start_replication_follower()"]
+    assert calls == []                                       # aucun appel au niveau du module
+    bm = (ROOT / "bin" / "harvester-baremetal.py").read_text()
+    assert bm.index('os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"') < bm.index('_load_web_module("app")\n')
+
+
+HOLD_LOCK = """
+import sys
+sys.path.insert(0, sys.argv[1])
+import os
+os.environ["HARVESTER_OPS_REPLICATION_FOLLOW"] = "0"
+import app
+fd, holder = app._replication_follow_lock(sys.argv[2])
+print("held" if fd is not None else "busy", flush=True)
+sys.stdin.read()
+"""
+
+
+@pytest.fixture
+def follower_globals(monkeypatch, tmp_path):
+    started = []
+    monkeypatch.setattr(wapp.ReplicationFollowerSupervisor, "start", lambda self: started.append(self))
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER_ELSEWHERE", None)
+    monkeypatch.setattr(wapp, "_REPLICATION_FOLLOW_LOCK_FD", None)
+    monkeypatch.setattr(wapp, "IS_READ_WORKER", False)
+    monkeypatch.setenv("HARVESTER_OPS_REPLICATION_FOLLOW", "1")
+    monkeypatch.setattr(wapp, "_state_dir", lambda: tmp_path)
+    yield started
+    if wapp._REPLICATION_FOLLOW_LOCK_FD is not None:
+        os.close(wapp._REPLICATION_FOLLOW_LOCK_FD)
+
+
+def test_a_second_console_on_the_same_state_dir_starts_no_follower(follower_globals, tmp_path):
+    holder = subprocess.Popen([sys.executable, "-c", HOLD_LOCK, str(ROOT / "web"),
+                               str(tmp_path / "replication-follow.lock")],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                              env=dict(os.environ, HARVESTER_OPS_WATCH="0", HARVESTER_OPS_READ_WORKERS="0"))
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        assert wapp._start_replication_follower() is None and follower_globals == []
+        h = wapp._replication_follower_health()
+        assert h["state"] == "elsewhere" and str(holder.pid) in h["last_error"]
+    finally:
+        holder.stdin.close()
+        holder.wait(30)
+    # l'autre console partie (même tuée), le verrou est libre
+    sup = wapp._start_replication_follower()
+    assert sup is not None and follower_globals == [sup]
+    assert (tmp_path / "replication-follow.lock").read_text().strip() == str(os.getpid())
+
+
+def test_the_same_console_keeps_its_own_lock(follower_globals):
+    a = wapp._start_replication_follower()
+    assert wapp._start_replication_follower() is a and follower_globals == [a]
+
+
+# --- rotation du journal du suiveur sans redémarrage -------------------------------------
+
+def test_follower_log_is_rotated_while_the_child_runs(sup):
+    s, procs, log = sup["s"], sup["procs"], sup["log"]
+    s.tick()
+    s.tick()
+    assert s.rotations == 0 and not getattr(procs[0], "signals", None)       # petit journal : rien
+    log.write_bytes(b"x" * (s.LOG_MAX + 1))
+    s.tick()
+    assert s.rotations == 1 and procs[0].signals == [wapp.signal.SIGUSR1]
+    assert log.with_name(log.name + ".1").stat().st_size == s.LOG_MAX + 1 and not log.exists()
+    assert len(procs) == 1 and s.restarts == 0 and procs[0].terms == 0      # aucun redémarrage
+    assert s.health()["log_rotations"] == 1
+
+
+ROTATING_CHILD = """
+import importlib.util, sys, time
+spec = importlib.util.spec_from_file_location("hr", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.install_log_reopen(sys.argv[2])
+for i in range(400):
+    sys.stderr.write(f"line {i:04d} " + "y" * 90 + "\\n"); sys.stderr.flush()
+    time.sleep(0.01)
+time.sleep(30)
+"""
+
+
+def test_follower_log_rotation_with_a_real_child(tmp_path):
+    """Superviseur réel, enfant réel qui rouvre son journal (le gestionnaire
+    même de la ligne de commande) : rotation, même pid, aucune ligne perdue."""
+    log = tmp_path / "logs" / "replication-follow.log"
+    cmd = [sys.executable, "-c", ROTATING_CHILD, str(ROOT / "bin" / "harvester-replication.py"), str(log)]
+    s = wapp.ReplicationFollowerSupervisor(lambda: cmd, lambda: log, lambda: True, lambda: 5)
+    s.LOG_MAX = 8000
+    s.tick()
+    pid = s.proc.pid
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            s.tick()
+            text = log.read_text() if log.exists() else ""
+            if "line 0399" in text:
+                break
+            time.sleep(0.05)
+        assert s.rotations >= 1 and s.proc.pid == pid and s.restarts == 0
+        old = log.with_name(log.name + ".1").read_text()
+        assert old and "line 0399" in log.read_text()
+        assert len(log.read_text()) <= s.LOG_MAX + 2000          # le fichier courant reste borné
+    finally:
+        s.stop()
+
+
+# --- budget d'arrêt -----------------------------------------------------------------------
+
+def test_console_shutdown_clamps_every_grace_to_the_stop_budget(monkeypatch):
+    seen = {}
+    fake = type("S", (), {"stop": lambda self, grace=None: seen.update(grace=grace)})()
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", fake)
+    monkeypatch.setattr(wapp, "_replication_follow_grace", lambda: 900)
+    saved = dict(wapp.ACTIONS)
+    wapp.ACTIONS.clear()
+    try:
+        run = wapp.ActionRun("b1", f"replication:{PID}:protect", "harvlab", ["x"])
+        run.proc, run.kill_grace, run.status = _child(STUBBORN), 900, "done"
+        wapp.ACTIONS["b1"] = run
+        t0 = time.monotonic()
+        codes = wapp._replication_shutdown(budget=1)
+        assert codes == {"b1": -9} and time.monotonic() - t0 < 10
+        assert seen["grace"] == 1
+    finally:
+        wapp.ACTIONS.clear()
+        wapp.ACTIONS.update(saved)
+
+
+def test_stop_budget_fits_the_unit_and_the_default_grace():
+    unit = (ROOT / "config" / "systemd" / "harvester-ops.service").read_text()
+    stop = int(re.search(r"podman stop -t (\d+)", unit).group(1))
+    assert wapp._repl_grace({"options": {}}) <= wapp.REPLICATION_STOP_BUDGET < stop - 10
+
+
+@pytest.mark.parametrize("timeouts,follow,status", [
+    ({"undo_total": "550", "client": "20"}, None, 202),          # 550 + 20 + 15 = 585 : tient
+    ({"undo_total": "551", "client": "20"}, None, 400),
+    ({"undo_total": "2h"}, "console", 400),
+    ({"undo_total": "2h"}, "cli", 202),                           # pas lancé par la console au suivi
+    ({"undo_total": "2h"}, "off", 202),
+])
+def test_create_refuses_a_rollback_beyond_the_stop_budget(client, timeouts, follow, status):
+    body = {"name": "w9", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/a"],
+            "timeouts": timeouts}
+    if follow:
+        body["follow"] = follow
+    r = client.post("/api/replication/plans", json=body)
+    assert r.status_code == status, r.get_json()
+    if status == 400:
+        assert r.get_json()["code"] == "stop-budget" and "585" in r.get_json()["error"] and not wapp.ACTIONS
+
+
+@pytest.mark.parametrize("body,status", [
+    ({"timeouts": {"undo_total": "550"}}, 202),                  # client 20 du plan : 585
+    ({"timeouts": {"undo_total": "560"}}, 400),
+    ({"timeouts": {"client": "200"}}, 202),                       # 100 + 200 + 15
+    ({"timeouts": {"client": "600"}}, 400),
+    ({"timeouts": {"undo_total": "1h"}, "follow": "cli"}, 202),
+    ({"timeouts": {"undo_total": None, "client": None}}, 202),    # retour aux défauts (285)
+    ({"timeouts": {"undo_total": "nope"}}, 400),
+])
+def test_settings_refuse_a_rollback_beyond_the_stop_budget(client, body, status):
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json=body)
+    assert r.status_code == status, r.get_json()
+    assert bool(wapp.ACTIONS) is (status == 202)
+
+
+def test_switching_a_large_plan_back_to_console_follow_is_refused(client, env):
+    conn = db.connect(env["db"])
+    db.update_plan(conn, PID, options={"follow": "cli", "timeouts": {"undo_total": 3600, "client": 20}})
+    conn.close()
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json={"follow": "console"})
+    assert r.status_code == 400 and r.get_json()["code"] == "stop-budget"
+    assert client.patch(f"/api/replication/plans/{PID}/settings", json={"rpo": "1h"}).status_code == 202
+
+
+# --- annulation : l'action reste en cours jusqu'à la sortie de l'outil --------------------
+
+FINISH_ON_TERM = ("import json,signal,sys,time\n"
+                  "def h(*a):\n    time.sleep(0.6); print(json.dumps(OUT)); sys.exit(RC)\n"
+                  "signal.signal(signal.SIGTERM, h)\nprint('ready', file=sys.stderr, flush=True)\n"
+                  "time.sleep(30)\n")
+
+
+@pytest.mark.parametrize("rc,out,status", [
+    (0, {"ok": True}, "done"),                                    # déjà finie : jamais réécrite
+    (3, {"ok": False, "kind": "cancelled", "left": []}, "cancelled"),
+    (3, {"ok": False, "kind": "interrupted", "resume_required": True}, "cancelled"),
+])
+def test_cancel_keeps_a_replication_action_running_until_the_tool_says(client, rc, out, status):
+    run = wapp.ActionRun("c1", f"replication:{PID}:protect", "harvlab", ["x"])
+    run.required_role, run.kill_grace, run.cancel_waits = "operator", 30, True
+    wapp.ACTIONS["c1"] = run
+    code = FINISH_ON_TERM.replace("OUT", repr(out)).replace("RC", str(rc))
+    t = _RealThread(target=wapp._vm_transfer_runner, args=(run, [sys.executable, "-c", code]),
+                    kwargs={"capture": True, "summarize": wapp._repl_summarize})
+    t.start()
+    deadline = time.monotonic() + 10
+    while run.proc is None and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.3)
+    r = client.delete("/api/action/c1")
+    d = r.get_json()
+    assert r.status_code == 200 and d["status"] == "running" and d["cancel_requested"] is True
+    # toujours vue comme occupée : pas de second geste sur le plan, pas de mise à jour
+    assert client.post(f"/api/replication/plans/{PID}/protect", json={}).status_code == 409
+    assert "c1" in {a["id"] for a in wapp._update_busy_actions()}
+    t.join(15)
+    assert run.status == status and run.cancel_requested is True
+    assert wapp._actions_db_get("c1")[0]["status"] == status          # Activité : le statut de l'outil
+
+
+def test_a_cancel_before_the_process_exists_never_starts_it(client):
+    run = wapp.ActionRun("c2", f"replication:{PID}:protect", "harvlab", ["x"])
+    run.required_role, run.kill_grace, run.cancel_waits = "operator", 30, True
+    wapp.ACTIONS["c2"] = run
+    assert client.delete("/api/action/c2").get_json()["cancel_requested"] is True
+    assert run.status == "starting"
+    marker = Path(os.environ.get("TMPDIR", "/tmp")) / f"never-started-{os.getpid()}"
+    wapp._vm_transfer_runner(run, [sys.executable, "-c", f"open({str(marker)!r}, 'w')"], capture=True,
+                             summarize=wapp._repl_summarize)
+    assert run.status == "cancelled" and run.proc is None and not marker.exists()
+    assert run.error_summary == "cancelled before the command started: nothing done"
+
+
+def test_other_actions_are_still_cancelled_at_once(client):
+    run = wapp.ActionRun("c3", "vm-transfer", "harvlab", ["x"])
+    run.proc, run.status = _child(POLITE), "running"
+    wapp.ACTIONS["c3"] = run
+    d = client.delete("/api/action/c3").get_json()
+    assert d["status"] == "cancelled" and d["cancel_requested"] is False
+    run.proc.wait(5)
+
+
+# --- pages du journal : curseur composé (ts, id) ------------------------------------------
+
+def test_event_pages_hold_when_ts_and_id_disagree_at_a_page_edge(client, env):
+    """Un événement rangé plus tard (id plus grand) mais daté plus tôt : la
+    page s'ordonne par (ts, id), le curseur aussi ; rien n'est sauté ni
+    rendu deux fois."""
+    conn = db.connect(env["db"])
+    t = now_utc() + timedelta(hours=1)
+    ids = {}
+    for name, dt in (("late", t), ("mid", t - timedelta(seconds=10)), ("old", t - timedelta(seconds=20))):
+        ids[name] = db.record_event(conn, "follow", step=name, resource_uid="u-z", now=dt)
+    # rangé en dernier, daté entre mid et old
+    ids["backdated"] = db.record_event(conn, "follow", step="backdated", resource_uid="u-z",
+                                       now=t - timedelta(seconds=15))
+    conn.close()
+    full = client.get("/api/replication/resources/u-z/events?limit=500").get_json()["events"]
+    assert [e["step"] for e in full] == ["late", "mid", "backdated", "old"]
+    pages, before = [], None
+    while True:
+        q = "/api/replication/resources/u-z/events?limit=2" + (f"&before={before}" if before else "")
+        d = client.get(q).get_json()
+        pages += d["events"]
+        before = d["next_before"]
+        if before is None:
+            break
+    assert [e["id"] for e in pages] == [e["id"] for e in full]
+    # la même chose au registre, page de 1
+    conn = db.connect(env["db"])
+    got, cur = [], None
+    for _ in range(6):
+        page = db.resource_events(conn, "u-z", limit=1, before=cur)
+        if not page:
+            break
+        got.append(page[0]["step"])
+        cur = page[0]["id"]
+    conn.close()
+    assert got == ["late", "mid", "backdated", "old"]
+
+
+# --- métriques : opération seulement, jamais un plan ---------------------------------------
+
+@pytest.mark.parametrize("action,label", [
+    (f"replication:{PID}:protect", "replication:protect"),
+    (f"replication:{PID2}:measure-start", "replication:measure-start"),
+    (f"replication:{PID}:unprotect-delete-backups", "replication:unprotect-delete-backups"),
+    ("replication:create:web", "replication:create"),
+    ("shutdown", "shutdown"),
+    (None, "unknown"),
+])
+def test_action_metric_label_keeps_only_the_operation(action, label):
+    assert wapp._metric_action(action) == label
+
+
+@pytest.mark.skipif(not wapp._PROMETHEUS_AVAILABLE, reason="prometheus_client absent")
+def test_closed_replication_actions_count_by_operation(client):
+    from prometheus_client import REGISTRY
+    key = {"action": "replication:settings", "status": "done"}
+    before = REGISTRY.get_sample_value("harvester_ops_actions_total", key) or 0
+    run = wapp.ActionRun("m1", f"replication:{PID}:settings", "harvlab", ["x"])
+    run.status, run.ended_at = "done", time.time()
+    run.close()
+    assert REGISTRY.get_sample_value("harvester_ops_actions_total", key) == before + 1
+    text = client.get("/metrics").get_data(as_text=True)
+    assert PID not in "\n".join(ln for ln in text.splitlines() if ln.startswith("harvester_ops_action"))
+
+
+# --- l'action est réglée avant son départ, le contrôle d'occupation est atomique ---------
+
+def test_role_and_grace_are_set_before_the_action_thread_starts(client, monkeypatch):
+    seen = []
+
+    class Probe(_NoThread):
+        def start(self):
+            [run] = wapp.ACTIONS.values()
+            seen.append((run.required_role, run.kill_grace, run.cancel_waits))
+            _NoThread.start(self)
+    monkeypatch.setattr(wapp.threading, "Thread", Probe)
+    assert client.post(f"/api/replication/plans/{PID}/failover",
+                       json={"vms": ["default/rep-a"], "confirm": "web"}).status_code == 202
+    assert seen == [("admin", 100 + 20 + 15, True)]
+
+
+def test_two_simultaneous_gestures_on_one_plan_let_only_one_through(client, monkeypatch):
+    real = wapp._transfer_busy
+
+    def slow(*a, **k):
+        r = real(*a, **k)
+        time.sleep(0.3)                    # élargit la fenêtre entre contrôle et ajout
+        return r
+    monkeypatch.setattr(wapp, "_transfer_busy", slow)
+    codes = []
+    barrier = threading.Barrier(2)
+
+    def hit():
+        with wapp.app.test_client() as c:
+            barrier.wait()
+            codes.append(c.post(f"/api/replication/plans/{PID}/protect", json={}).status_code)
+    ts = [_RealThread(target=hit) for _ in range(2)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join(20)
+    assert sorted(codes) == [202, 409] and len(wapp.ACTIONS) == 1

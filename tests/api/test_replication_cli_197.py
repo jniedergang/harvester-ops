@@ -299,7 +299,7 @@ def test_check_without_blocker_writes_nothing(tmp_path, capsys):
     events_before = len(db.plan_events(w.conn, PID, limit=500))
     rc, data, err = run(capsys, w, "check", "plan-a")
     assert rc == 0, data
-    assert set(data) == RESULT_KEYS | {"phase", "findings", "skipped"} and data["code"] == "ok"
+    assert set(data) == RESULT_KEYS | {"phase", "findings", "skipped", "advisories"} and data["code"] == "ok"
     assert {f["code"] for f in data["findings"]} >= {"backing-image-restore"}
     assert w.src.mutations(include_dry=True) == [] and w.dst.mutations(include_dry=True) == []
     assert len(db.plan_events(w.conn, PID, limit=500)) == events_before
@@ -1025,6 +1025,61 @@ def test_follow_loop_stops_on_sigterm_and_releases_its_lease(tmp_path):
     assert set(data) == FAILURE_KEYS | {"rounds", "stopped", "signal", "last"} and data["rounds"] >= 1
     assert PID in data["last"]["followed"]
     assert st["lease"] is None and st["plan_state"] == "protected"
+
+
+# ---------------------------------------------------------------------------
+# Corrections après relecture (tâche 6)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("world_kind,argv,rc_want", [
+    ("draft", ["check", "plan-a"], 0),
+    ("protected", ["check", "plan-a", "--phase=failover"], 0),
+    ("protected", ["check", "plan-a", "--phase=failover-unplanned"], 2),     # refusé : conseil quand même
+])
+def test_check_always_carries_the_console_placement_advisory(tmp_path, capsys, world_kind, argv, rc_want):
+    w = draft_world(tmp_path) if world_kind == "draft" else protected(tmp_path, vms=("vm-a",))
+    rc, data, _ = run(capsys, w, *argv)
+    assert rc == rc_want, data
+    [adv] = data["advisories"]
+    assert adv["code"] == "console-placement" and adv["level"] == "info"
+    assert adv["facts"]["target"] == "harvlab2" and "backup side" in adv["facts"]["advice"]
+    assert adv not in (data.get("findings") or [])                         # jamais un constat bloquant
+    assert "console-placement" not in {f["code"] for f in data.get("findings") or []}
+
+
+def test_check_text_output_shows_the_advisory(tmp_path, capsys):
+    rc, out, _ = run(capsys, draft_world(tmp_path), "check", "plan-a", as_json=False)
+    assert rc == 0 and "[info] console-placement: run the console" in out
+
+
+REOPEN_CHILD = """
+import importlib.util, os, signal, sys, time
+spec = importlib.util.spec_from_file_location("hr", sys.argv[1])
+m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+m.install_log_reopen(sys.argv[2])
+sys.stderr.write("before rotation\\n"); sys.stderr.flush()
+os.replace(sys.argv[2], sys.argv[2] + ".1")
+os.kill(os.getpid(), m.REOPEN_SIGNAL)
+time.sleep(0.2)
+sys.stderr.write("after rotation\\n"); sys.stderr.flush()
+print(os.getpid())
+"""
+
+
+def test_the_follower_reopens_its_log_on_sigusr1_without_restarting(tmp_path):
+    log = tmp_path / "replication-follow.log"
+    p = subprocess.run([sys.executable, "-c", REOPEN_CHILD, str(ROOT / "bin" / "harvester-replication.py"),
+                        str(log)], capture_output=True, text=True, timeout=30)
+    assert p.returncode == 0, p.stderr
+    assert (tmp_path / "replication-follow.log.1").read_text() == "before rotation\n"
+    assert log.read_text() == "after rotation\n"
+    assert oct(log.stat().st_mode & 0o777) == "0o600"
+    assert cli.REOPEN_SIGNAL not in cli.CANCEL_SIGNALS          # rouvrir n'arrête jamais le suiveur
+
+
+def test_follow_accepts_a_log_file(tmp_path):
+    args = cli.build_parser().parse_args(["follow", "--all", "--console", f"--log-file={tmp_path / 'f.log'}"])
+    assert args.log_file == str(tmp_path / "f.log")
 
 
 if __name__ == "__main__" and len(sys.argv) > 1 and sys.argv[1] == "harness":

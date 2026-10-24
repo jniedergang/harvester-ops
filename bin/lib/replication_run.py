@@ -2416,7 +2416,14 @@ def unprotect(ctx, delete_backups=False, yes=False):
         _precondition(ctx, "unprotect")
         before = _plan_guard(ctx.plan)
         prev = _open_run(ctx, "unprotect")
-        delete_backups = bool(delete_backups or ((prev or {}).get("points") or {}).get("delete_backups"))
+        if ((prev or {}).get("points") or {}).get("delete_backups") and not delete_backups:
+            # la déprotection interrompue supprimait aussi les sauvegardes :
+            # une relance sans --delete-backups ne l'élargit pas en silence
+            # (la console réserve ce geste à l'administrateur)
+            raise Refused("needs-admin-resume", "the interrupted unprotect also deletes the plan's backups: "
+                          "run unprotect again with --delete-backups --yes, or resume the plan",
+                          facts={"delete_backups": True})
+        delete_backups = bool(delete_backups)
         held = _held_vms(ctx, prev, probe(ctx, "dst") == "ok")
         if delete_backups and held:
             names = {r["resource_uid"]: f"{r['namespace']}/{r['name']}" for r in db.list_resources(ctx.conn, ctx.plan_id)}

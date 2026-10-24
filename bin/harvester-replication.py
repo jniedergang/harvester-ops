@@ -25,7 +25,7 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication measure formula --size 2Gi --writes N --interval 5m
         [--block 2Mi] [--throughput 72Mi] [--write-size 4096]
   harvester-replication protect P [--dry-run] [--interval 5m]
-  harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console]
+  harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console] [--log-file=PATH]
         [--timeout client=S]
   harvester-replication status [P] [--host H]
   harvester-replication resources --host H [--side source|target|any] [--role R]
@@ -423,6 +423,8 @@ def _text_result(res):
     for f in res.get("findings") or []:
         facts = ", ".join(f"{k}={v}" for k, v in (f.get("facts") or {}).items())
         lines.append(f"  [{f.get('level')}] {f.get('code')}" + (f": {facts}" if facts else ""))
+    for a in res.get("advisories") or []:
+        lines.append(f"  [{a.get('level')}] {a.get('code')}: {(a.get('facts') or {}).get('advice', '')}")
     for d in res.get("dry_run") or []:
         lines.append(f"  dry-run {d.get('object')} {d.get('name')}: {'ok' if d.get('ok') else d.get('message')}")
     for k in ("left", "pending"):
@@ -663,6 +665,17 @@ def _plan_ctx(args):
     return conn, plan, make_ctx(args, conn, plan)
 
 
+def console_placement(plan):
+    """Conseil (jamais bloquant) rendu par `check` : la console qui suit et
+    bascule doit tourner du côté du secours ou hors des deux sites. Sur le
+    site source, elle disparaît avec lui au moment où il faut basculer."""
+    return {"code": "console-placement", "level": "info",
+            "facts": {"source": plan["source_cluster"], "target": plan["target_cluster"],
+                      "advice": "run the console that follows and fails over this plan on the backup side "
+                                f"({plan['target_cluster']}) or outside both sites, never only on the source "
+                                "site: it would be lost with it"}}
+
+
 def cmd_check(args):
     if args.force_unplanned and args.phase != "failover-unplanned":
         raise UsageError("--force-unplanned goes with --phase failover-unplanned")
@@ -670,8 +683,9 @@ def cmd_check(args):
     if args.phase != "protect":
         # la bascule à blanc : contrôles, carnets et dry-run serveur, rien
         # d'écrit, ni sur les clusters ni au journal
-        return finish(args, rr.failover(ctx, planned=args.phase == "failover",
-                                        force_unplanned=args.force_unplanned, dry_run=True, record=False))
+        res = rr.failover(ctx, planned=args.phase == "failover", force_unplanned=args.force_unplanned,
+                          dry_run=True, record=False)
+        return finish(args, dict(res, advisories=[console_placement(plan)]))
     step("check", "running", "reading both clusters")
     try:
         src = rr.collect_source(ctx)
@@ -685,7 +699,8 @@ def cmd_check(args):
             raise
         step("check", "error", str(e)[:400])
         return finish(args, {"exit": EXIT_FAIL, "plan": plan["id"], "state": plan["state"],
-                             "code": rr.error_code(e), "message": f"pre-check failed: {e}"})
+                             "code": rr.error_code(e), "message": f"pre-check failed: {e}",
+                             "advisories": [console_placement(plan)]})
     _block_signals()                # lecture finie : plus d'annulation
     blocked = rp.blocking(findings)
     step("check", "error" if blocked else "done",
@@ -693,7 +708,8 @@ def cmd_check(args):
     return finish(args, {"exit": EXIT_USAGE if blocked else EXIT_OK, "plan": plan["id"], "state": plan["state"],
                          "code": "check" if blocked else "ok", "phase": "protect",
                          "message": "the pre-check refuses this protection" if blocked else "no blocker",
-                         "findings": findings, "skipped": sorted(skipped)})
+                         "findings": findings, "skipped": sorted(skipped),
+                         "advisories": [console_placement(plan)]})
 
 
 def cmd_measure_start(args):
@@ -822,7 +838,38 @@ def _round_line(report):
             f"events {report.get('events', 0)}, unreachable {', '.join(report.get('unreachable') or []) or 'none'}")
 
 
+REOPEN_SIGNAL = signal.SIGUSR1
+
+
+def redirect_stderr(path):
+    """Branche le descripteur 2 sur `path` (ajout, 0600 à la création) : le
+    journal du suiveur ET ce qui s'écrit hors journal (trace d'une erreur)."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        sys.stderr.flush()
+        os.dup2(fd, 2)
+    finally:
+        os.close(fd)
+
+
+def install_log_reopen(path):
+    """v1.97.0 : la console renomme le journal trop gros puis envoie
+    SIGUSR1 ; le suiveur rouvre le fichier sans redémarrer (SIGHUP reste un
+    signal d'arrêt). Rend l'ancien gestionnaire."""
+    redirect_stderr(path)
+
+    def reopen(_signum, _frame):
+        try:
+            redirect_stderr(path)
+        except OSError:
+            pass                                # garde l'ancien fichier plutôt que de tomber
+    return signal.signal(REOPEN_SIGNAL, reopen)
+
+
 def cmd_follow(args):
+    if args.log_file and threading.current_thread() is threading.main_thread():
+        # au plus tôt : un SIGUSR1 ne doit jamais trouver l'action par défaut
+        install_log_reopen(args.log_file)
     overrides, client_override = parse_timeouts(args.timeout)
     if overrides:
         raise UsageError("follow: only --timeout client=S (the plan wait settings are set with plan set)",
@@ -1103,6 +1150,8 @@ def build_parser():
     sp.add_argument("--once", action="store_true", help="one round, then exit")
     sp.add_argument("--take-over", action="store_true", help="take the plans' lease from another follower")
     sp.add_argument("--console", action="store_true", help="console child: timestamped journal on stderr")
+    sp.add_argument("--log-file", metavar="PATH",
+                    help="send stderr to this file, reopened on SIGUSR1 (the console rotates it)")
     sp.add_argument("--timeout", action="append", metavar="client=SECONDS",
                     help="kubectl call timeout (default: the largest plan `client` setting, else 30 s)")
 

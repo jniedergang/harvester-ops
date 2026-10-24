@@ -2160,3 +2160,42 @@ def test_unprotect_cancelled_is_interrupted_not_undone(tmp_path):
     assert res["exit"] == 3 and res["code"] == "interrupted" and w.plan()["state"] == "unprotecting", res
     w.dst.hooks.clear()
     assert rr.resume(w.ctx())["code"] == "unprotected"
+
+
+# ---------------------------------------------------------------------------
+# Corrections après relecture (tâche 6) : pas d'élargissement silencieux
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("call,exit_code,code", [
+    # relance sans --delete-backups : refusée avant toute écriture
+    (lambda c: rr.unprotect(c), 2, "needs-admin-resume"),
+    (lambda c: rr.unprotect(c, yes=True), 2, "needs-admin-resume"),
+    # demande explicite, ou reprise (qui relit la ligne `runs`) : terminée
+    (lambda c: rr.unprotect(c, delete_backups=True, yes=True), 0, None),
+    (lambda c: rr.resume(c), 0, None),
+])
+def test_an_interrupted_unprotect_with_backup_deletion_is_never_widened_silently(tmp_path, call, exit_code, code):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.src.down = True
+    assert rr.unprotect(w.ctx(), delete_backups=True, yes=True)["exit"] == 1     # source injoignable : à finir
+    w.src.down = False
+    n_src, n_dst = len(w.src.mutations()), len(w.dst.mutations())
+    res = call(w.ctx())
+    assert res["exit"] == exit_code, res
+    if code:
+        assert res["code"] == code and res["facts"] == {"delete_backups": True}
+        assert (len(w.src.mutations()), len(w.dst.mutations())) == (n_src, n_dst)
+        assert w.plan()["state"] == "unprotecting"
+    else:
+        assert w.plan()["state"] == "unprotected"
+        assert not [k for k in w.owned(w.src) if k[0] == rr.K_LH_BACKUP]
+
+
+def test_an_interrupted_plain_unprotect_still_finishes_without_the_flag(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.src.down = True
+    assert rr.unprotect(w.ctx())["exit"] == 1
+    w.src.down = False
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0 and w.plan()["state"] == "unprotected"
+    assert [k for k in w.owned(w.src) if k[0] == rr.K_LH_BACKUP]       # sauvegardes gardées
