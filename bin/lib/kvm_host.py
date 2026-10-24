@@ -20,6 +20,7 @@ Les erreurs sont des `KvmError` classées (`kind`) ; leur message nomme
 l'hôte, jamais un chemin de clé ni un secret.
 """
 
+import datetime
 import hashlib
 import ipaddress
 import os
@@ -224,6 +225,40 @@ def ssh_argv(decl, state, remote_argv):
     return [*_ssh_base(decl, state), "--", decl["address"], remote]
 
 
+VNC_PORT_MIN, VNC_PORT_MAX = 5900, 65535
+
+
+def _forward_target(address, port):
+    """`<adresse>:<port>` de `ssh -W`, contrôlé : IP littérale seulement
+    (IPv6 entre crochets), port entier 5900..65535. Aucun texte venu du XML
+    n'arrive tel quel dans la ligne de ssh."""
+    if isinstance(port, bool) or not isinstance(port, int) or not (
+            VNC_PORT_MIN <= port <= VNC_PORT_MAX):
+        raise KvmError("failed", f"failed: invalid display port {port!r}")
+    try:
+        ip = ipaddress.ip_address(str(address))
+    except ValueError:
+        raise KvmError("failed", "failed: the display address must be a literal IP") from None
+    if ip.version == 6:
+        return f"[{ip.compressed}]:{port}"
+    return f"{ip.compressed}:{port}"
+
+
+def stdio_forward_argv(decl, state, address, port):
+    """ssh qui relie son entrée et sa sortie standard à `<adresse>:<port>`
+    vu depuis l'hôte (`ssh -W`), pour la console VNC. `ControlMaster=no` : le
+    tunnel passe par la connexion maître si elle existe, sans jamais en
+    devenir une (un maître né d'un `-W` mourrait avec la console du
+    navigateur). Même ControlPath que les autres commandes. KvmError
+    (`failed`) pour une adresse ou un port refusé."""
+    target = _forward_target(address, port)
+    base = _ssh_base(decl, state)
+    i = base.index("ControlMaster=auto")
+    base[i] = "ControlMaster=no"
+    return [*base, "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3",
+            "-W", target, "--", decl["address"]]
+
+
 def close_master(decl, state, runner=subprocess.run, timeout=10):
     """Ferme la connexion ControlMaster d'une déclaration (`ssh -O exit`,
     mêmes options). À appeler avant un ajout, une modification ou un
@@ -268,15 +303,17 @@ class VirshHost:
     def _virsh_argv(self, args):
         return ["virsh", "-c", self.decl.get("uri", kvm_decl.DEFAULT_URI), *map(str, args)]
 
-    def _ssh(self, remote_argv, timeout):
+    def _ssh(self, remote_argv, timeout, data=None):
         argv = ssh_argv(self.decl, self.state, remote_argv)
         try:
             kvm_decl.ensure_ssh_dir(self.state)
         except OSError:
             pass                            # ssh dira lui-même ce qui manque
+        # stdin fermé : ssh ne lit jamais l'entrée de la console ; `data`
+        # (run_input) est la seule entrée jamais transmise
+        feed = {"stdin": subprocess.DEVNULL} if data is None else {"input": data}
         try:
-            # stdin fermé : ssh ne lit jamais l'entrée de la console
-            return self.runner(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            return self.runner(argv, **feed, capture_output=True, text=True,
                                timeout=timeout or self.timeout)
         except subprocess.TimeoutExpired as e:
             raise KvmError("timeout", f"{self.name}: timeout after {timeout or self.timeout}s",
@@ -288,6 +325,19 @@ class VirshHost:
     def run(self, remote_argv, timeout=None):
         """Lance une commande quelconque sur l'hôte ; rend sa sortie."""
         res = self._ssh(remote_argv, timeout)
+        if res.returncode != 0:
+            raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
+                             ssh_level=res.returncode == SSH_RC)
+        return res.stdout or ""
+
+    def run_input(self, remote_argv, data, timeout=None):
+        """Comme `run()`, mais `data` (texte) part sur l'entrée standard de la
+        commande distante. Sert à `virsh define /dev/stdin` : le XML, qui peut
+        porter le mot de passe VNC, ne passe ni par un fichier temporaire ni
+        par la ligne de commande. Le message d'erreur ne cite jamais `data`."""
+        if not isinstance(data, str):
+            raise TypeError("data must be a str")
+        res = self._ssh(remote_argv, timeout, data=data)
         if res.returncode != 0:
             raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
                              ssh_level=res.returncode == SSH_RC)
@@ -570,6 +620,22 @@ def _nic_source(iface):
     return _first_attr(src, ("network", "bridge", "dev", "path", "address"))
 
 
+def _backing_chain(disk):
+    """Chemins de la chaîne `<backingStore>` d'un disque (XML vivant : libvirt
+    la décrit niveau par niveau), du plus proche au plus lointain. Vide pour
+    un XML inactif ou un disque sans image de base."""
+    chain, cur = [], disk
+    for _ in range(64):                     # garde-fou contre une boucle
+        bs = cur.find("backingStore")
+        if bs is None or bs.find("source") is None:
+            break
+        src = _disk_source(bs)
+        if src:
+            chain.append(src)
+        cur = bs
+    return chain
+
+
 def parse_domain_xml(text):
     """XML de `virsh dumpxml` -> dict (nom, uuid, vCPU, mémoire en Kio,
     épinglage/ordonnanceur, machine, micrologiciel, disques, cartes,
@@ -596,11 +662,17 @@ def parse_domain_xml(text):
     disks = []
     for d in devices.findall("disk"):
         tgt, drv = d.find("target"), d.find("driver")
+        chain = _backing_chain(d)
         disks.append({"target": tgt.get("dev") if tgt is not None else None,
                       "device": d.get("device", "disk"), "type": d.get("type"),
                       "source": _disk_source(d),
                       "format": drv.get("type") if drv is not None else None,
-                      "bus": tgt.get("bus") if tgt is not None else None})
+                      "bus": tgt.get("bus") if tgt is not None else None,
+                      "readonly": d.find("readonly") is not None,
+                      "shareable": d.find("shareable") is not None,
+                      "transient": d.find("transient") is not None,
+                      "backing": chain[0] if chain else None,
+                      "backing_chain": chain})
     nics = []
     for n in devices.findall("interface"):
         mac, model = n.find("mac"), n.find("model")
@@ -609,13 +681,28 @@ def parse_domain_xml(text):
                      "model": model.get("type") if model is not None else None})
     graphics = []
     for g in devices.findall("graphics"):
+        sub = g.find("listen")
         listen = g.get("listen")
         if not listen:
-            sub = g.find("listen")
             listen = sub.get("address") if sub is not None else None
+        socket = g.get("socket") or (sub.get("socket") if sub is not None else None)
+        if sub is not None and sub.get("type"):
+            listen_type = sub.get("type")
+        elif socket:
+            listen_type = "socket"
+        else:
+            listen_type = "address"
         port = _int(g.get("port"))
+        # `password` : présence seulement (XML lu par --security-info), jamais la valeur
         graphics.append({"type": g.get("type"), "port": port if port and port > 0 else None,
-                         "listen": listen, "autoport": _yes(g.get("autoport"))})
+                         "listen": listen, "autoport": _yes(g.get("autoport")),
+                         "listen_type": listen_type, "socket": socket,
+                         "password": bool(g.get("passwd"))})
+    nvram = None
+    nv = os_el.find("nvram") if os_el is not None else None
+    if nv is not None:
+        nvram = {"path": (nv.text or "").strip() or None, "format": nv.get("format"),
+                 "template": nv.get("template")}
     return {"name": root.findtext("name"), "uuid": root.findtext("uuid"),
             "domain_type": root.get("type"), "id": _int(root.get("id")),
             "vcpus": _int(vcpu.text) if vcpu is not None else None,
@@ -625,7 +712,11 @@ def parse_domain_xml(text):
             "hugepages": root.find("memoryBacking/hugepages") is not None,
             "machine": os_type.get("machine") if os_type is not None else None,
             "arch": os_type.get("arch") if os_type is not None else None,
-            "firmware": firmware, "disks": disks, "nics": nics, "graphics": graphics}
+            "firmware": firmware, "disks": disks, "nics": nics, "graphics": graphics,
+            "nvram": nvram, "hostdevs": len(devices.findall("hostdev")),
+            "seclabels_static": any(sl.get("type") == "static" for sl in root.findall("seclabel")),
+            "sysinfo_uuid": any(e.get("name") == "uuid"
+                                for e in root.findall("sysinfo/system/entry"))}
 
 
 def parse_domstats_raw(text):
@@ -686,6 +777,75 @@ def parse_net_list(text):
     return [{"name": r.get("Name", ""), "state": r.get("State", ""),
              "active": r.get("State", "") == "active", "autostart": _yes(r.get("Autostart")),
              "persistent": _yes(r.get("Persistent"))} for r in _parse_table(text)]
+
+
+def _parse_wide_table(text):
+    """Tableau de virsh dont un titre contient une espace (« Creation Time ») :
+    virsh sépare les colonnes par au moins deux espaces, les titres sont donc
+    les suites de mots séparés par une seule."""
+    lines = (text or "").splitlines()
+    head = next((i for i, ln in enumerate(lines) if ln.strip()), None)
+    if head is None or head + 1 >= len(lines) or not set(lines[head + 1].strip()) <= {"-"}:
+        return []
+    cols = [(m.start(), m.group(0)) for m in re.finditer(r"\S+(?: \S+)*", lines[head])]
+    rows = []
+    for ln in lines[head + 2:]:
+        if not ln.strip():
+            continue
+        rows.append({title: ln[start:(cols[n + 1][0] if n + 1 < len(cols) else None)].strip()
+                     for n, (start, title) in enumerate(cols)})
+    return rows
+
+
+def _iso_time(text):
+    """« 2026-10-24 11:39:00 +0200 » -> « 2026-10-24T11:39:00+02:00 » ; le
+    texte tel quel s'il ne se lit pas."""
+    try:
+        return datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S %z").isoformat()
+    except (TypeError, ValueError):
+        return text or None
+
+
+def parse_snapshot_list(text):
+    """`virsh snapshot-list --parent` -> [{"name", "created", "state",
+    "parent"}] ; `state` = état du domaine à la prise (`running` : mémoire
+    comprise, `shutoff` : disques seuls), `parent` None pour une racine.
+    Un nom d'instantané qui contient deux espaces de suite se lirait mal :
+    `list_snapshots` le recoupe avec la liste `--name`."""
+    out = []
+    for r in _parse_wide_table(text):
+        out.append({"name": r.get("Name", ""), "created": _iso_time(r.get("Creation Time")),
+                    "state": r.get("State") or None, "parent": r.get("Parent") or None})
+    return out
+
+
+def _bytes(el):
+    if el is None or _int(el.text) is None:
+        return None
+    return _int(el.text) * _XML_UNITS.get((el.get("unit") or "bytes").lower(), 1)
+
+
+def parse_vol_xml(text):
+    """XML de `virsh vol-dumpxml` -> {"name", "key", "path", "format",
+    "capacity", "allocation", "backing"} (octets ; `backing` = chemin de
+    l'image de base, None sans)."""
+    root = _safe_xml(text)
+    fmt = root.find("target/format")
+    return {"name": root.findtext("name"), "key": root.findtext("key"),
+            "path": root.findtext("target/path"),
+            "format": fmt.get("type") if fmt is not None else None,
+            "capacity": _bytes(root.find("capacity")),
+            "allocation": _bytes(root.find("allocation")),
+            "backing": (root.findtext("backingStore/path") or "").strip() or None}
+
+
+def parse_pool_xml(text):
+    """XML de `virsh pool-dumpxml` -> {"name", "type", "target_path",
+    "available"} (octets)."""
+    root = _safe_xml(text)
+    return {"name": root.findtext("name"), "type": root.get("type"),
+            "target_path": (root.findtext("target/path") or "").strip() or None,
+            "available": _bytes(root.find("available"))}
 
 
 def parse_net_xml(text):
