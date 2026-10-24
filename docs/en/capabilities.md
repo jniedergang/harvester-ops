@@ -3007,7 +3007,8 @@ released.
 `harvester_ops_replication_plans_followed`, and per plan
 `harvester_ops_replication_rpo_held_seconds{plan,source,target}` and
 `harvester_ops_replication_rpo_objective_seconds{plan,source,target}`.
-Replication actions appear in `harvester_ops_actions_total` as
+The registry is read at most every 30 seconds, however often Prometheus
+scrapes. Replication actions appear in `harvester_ops_actions_total` as
 `replication:<op>`, without the plan id.
 
 **Where to run the console.** `check` adds a `console-placement` advice:

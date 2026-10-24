@@ -3295,9 +3295,10 @@ tour suivant une fois libéré.
 `harvester_ops_replication_follower_restarts_total`,
 `harvester_ops_replication_plans_followed`, et par plan
 `harvester_ops_replication_rpo_held_seconds{plan,source,target}` et
-`harvester_ops_replication_rpo_objective_seconds{plan,source,target}`. Les
-actions de réplication apparaissent dans `harvester_ops_actions_total` en
-`replication:<op>`, sans l'id du plan.
+`harvester_ops_replication_rpo_objective_seconds{plan,source,target}`. Le
+registre est relu au plus toutes les 30 secondes, quel que soit le nombre de
+relevés. Les actions de réplication apparaissent dans
+`harvester_ops_actions_total` en `replication:<op>`, sans l'id du plan.
 
 **Où faire tourner la console.** `check` ajoute un conseil
 `console-placement` : la console qui suit et bascule un plan va sur le

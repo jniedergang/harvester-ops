@@ -156,6 +156,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   than 30 days at each prune. Rows it has seen are now marked (`reduced`
   column, additive migration): a second prune reads nothing, and a late
   row joins its already reduced hour.
+- `/metrics` recomputed every plan's status, with an events query per
+  resource, at each scrape. The replication gauges now come from a reading
+  kept 30 seconds, and are updated and exposed under one lock, so a
+  concurrent scrape never sees half the series.
 
 ### Security
 - Each write route runs the command line with the person's own

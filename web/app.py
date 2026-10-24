@@ -277,11 +277,15 @@ def api_metrics():
     if not _PROMETHEUS_AVAILABLE:
         return Response("# prometheus_client not installed\n",
                          mimetype="text/plain")
-    try:
-        _replication_metrics_refresh()
-    except Exception as e:                       # noqa: BLE001 : une base illisible ne coupe pas /metrics
-        log.warning("replication metrics: %s", type(e).__name__)
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    # v1.99.0 : mise à jour des jauges et exposition sous le même verrou :
+    # un relevé concurrent ne voit jamais des séries à moitié reposées
+    with _REPL_METRICS_LOCK:
+        try:
+            _replication_metrics_refresh()
+        except Exception as e:                   # noqa: BLE001 : une base illisible ne coupe pas /metrics
+            log.warning("replication metrics: %s", type(e).__name__)
+        body = generate_latest()
+    return Response(body, mimetype=CONTENT_TYPE_LATEST)
 
 
 # Rate-limiting (v1.5.6) — defends mutative endpoints against accidental
@@ -25676,32 +25680,72 @@ def _start_replication_follower():
         return REPLICATION_FOLLOWER
 
 
-def _replication_metrics_refresh():
-    """Jauges de /metrics : suiveur en marche, plans suivis par la console,
-    RPO tenu et objectif de chaque plan (lus au registre à chaque relevé)."""
-    metric_repl_follower_up.set(1 if REPLICATION_FOLLOWER is not None and REPLICATION_FOLLOWER.running() else 0)
-    metric_repl_rpo_held.clear()
-    metric_repl_rpo_objective.clear()
-    path = _replication_db_path()
+# v1.99.0 : les jauges de réplication viennent d'un relevé gardé
+# REPLICATION_METRICS_TTL secondes. plan_rows lit les événements de chaque
+# ressource : le refaire à chaque relevé Prometheus (toutes les 15 s, par
+# plusieurs collecteurs parfois) coûtait autant que l'écran de suivi.
+REPLICATION_METRICS_TTL = 30.0
+_REPL_METRICS = {"at": None, "key": None, "snap": None, "applied": None}
+# un seul calcul à la fois, et jamais une exposition au milieu d'une mise à
+# jour des séries (effacer puis reposer) : le relevé suivant attend
+_REPL_METRICS_LOCK = threading.Lock()
+
+
+def _replication_metrics_snapshot(path):
+    """Relevé du registre : (plans suivis, ((labels, objectif, RPO tenu), ...)).
+    Rien n'est modifié ici : une base illisible lève avant toute jauge."""
     if not path.exists():
-        metric_repl_plans_followed.set(0)
-        return
+        return (0, ())
     conn = _rdb.connect(path)
     try:
         plans = _rdb.list_plans(conn)
         rows = _rdb.plan_rows(conn, plans, _repl_now())
     finally:
         conn.close()
-    metric_repl_plans_followed.set(sum(
+    followed = sum(
         1 for p in plans if (p.get("options") or {}).get("follow") == "console"
-        and not (p.get("options") or {}).get("paused") and p.get("state") in _rf.FOLLOWED_STATES))
+        and not (p.get("options") or {}).get("paused") and p.get("state") in _rf.FOLLOWED_STATES)
+    series = []
     for p, r in zip(plans, rows):
         # identifiant du plan, jamais son nom (texte libre, /metrics sans
         # authentification) ; les clusters comme `kubectl_calls_total`
-        labels = {"plan": p["id"], "source": p["source_cluster"], "target": p["target_cluster"]}
-        metric_repl_rpo_objective.labels(**labels).set(r["rpo_objective_s"] or 0)
-        if r["rpo_held_s"] is not None:
-            metric_repl_rpo_held.labels(**labels).set(r["rpo_held_s"])
+        labels = (("plan", p["id"]), ("source", p["source_cluster"]), ("target", p["target_cluster"]))
+        series.append((labels, r["rpo_objective_s"] or 0, r["rpo_held_s"]))
+    return (followed, tuple(series))
+
+
+def _replication_metrics_invalidate():
+    with _REPL_METRICS_LOCK:
+        _REPL_METRICS["at"] = None
+
+
+def _replication_metrics_refresh(clock=None):
+    """Jauges de /metrics : suiveur en marche, plans suivis par la console,
+    RPO tenu et objectif de chaque plan. Appelée SOUS _REPL_METRICS_LOCK.
+    Le relevé est refait au-delà de REPLICATION_METRICS_TTL ; les séries ne
+    sont reposées que si le relevé a changé."""
+    metric_repl_follower_up.set(1 if REPLICATION_FOLLOWER is not None and REPLICATION_FOLLOWER.running() else 0)
+    now = (clock or time.monotonic)()
+    path = _replication_db_path()
+    if _REPL_METRICS["at"] is None or _REPL_METRICS["key"] != str(path) \
+            or now - _REPL_METRICS["at"] >= REPLICATION_METRICS_TTL:
+        try:
+            _REPL_METRICS["snap"] = _replication_metrics_snapshot(path)
+        finally:
+            # en échec aussi : une base illisible n'est pas relue à chaque relevé
+            _REPL_METRICS["at"], _REPL_METRICS["key"] = now, str(path)
+    snap = _REPL_METRICS["snap"]
+    if snap is None or snap is _REPL_METRICS["applied"]:
+        return
+    followed, series = snap
+    metric_repl_plans_followed.set(followed)
+    metric_repl_rpo_held.clear()
+    metric_repl_rpo_objective.clear()
+    for labels, objective, held in series:
+        metric_repl_rpo_objective.labels(**dict(labels)).set(objective)
+        if held is not None:
+            metric_repl_rpo_held.labels(**dict(labels)).set(held)
+    _REPL_METRICS["applied"] = snap
 
 
 def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):

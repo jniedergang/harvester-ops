@@ -16,6 +16,7 @@ import base64
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -895,6 +896,10 @@ def test_metrics_expose_the_follower_and_the_rpo_per_plan(client, env, monkeypat
     conn = db.connect(env["db"])
     db.update_plan(conn, PID, options={"paused": True})
     conn.close()
+    # v1.99.0 : relevé gardé REPLICATION_METRICS_TTL secondes
+    client.get("/metrics")
+    assert REGISTRY.get_sample_value("harvester_ops_replication_plans_followed") == 1
+    wapp._replication_metrics_invalidate()
     client.get("/metrics")
     assert REGISTRY.get_sample_value("harvester_ops_replication_plans_followed") == 0
 
@@ -1352,3 +1357,94 @@ def test_two_simultaneous_gestures_on_one_plan_let_only_one_through(client, monk
     for t in ts:
         t.join(20)
     assert sorted(codes) == [202, 409] and len(wapp.ACTIONS) == 1
+
+
+# --- v1.99.0 : /metrics lit un relevé gardé, exposé sous verrou -------------------------
+
+from threading import Thread as _RealThread  # noqa: E402  (env remplace threading.Thread)
+
+
+@pytest.mark.skipif(not wapp._PROMETHEUS_AVAILABLE, reason="prometheus_client absent")
+def test_metrics_do_not_recompute_plan_rows_at_every_scrape(client, env, monkeypatch):
+    calls = []
+    real = wapp._rdb.plan_rows
+    monkeypatch.setattr(wapp._rdb, "plan_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+    clock = [1000.0]
+    monkeypatch.setattr(wapp.time, "monotonic", lambda: clock[0])
+    wapp._replication_metrics_invalidate()
+    for _ in range(5):
+        assert client.get("/metrics").status_code == 200
+    assert len(calls) == 1
+    clock[0] += wapp.REPLICATION_METRICS_TTL - 1
+    client.get("/metrics")
+    assert len(calls) == 1
+    clock[0] += 2
+    client.get("/metrics")
+    assert len(calls) == 2
+
+
+@pytest.mark.skipif(not wapp._PROMETHEUS_AVAILABLE, reason="prometheus_client absent")
+def test_an_unreadable_registry_is_not_reread_at_every_scrape(client, env, monkeypatch):
+    calls = []
+
+    def boom(path):
+        calls.append(1)
+        raise sqlite3.DatabaseError("file is not a database")
+    monkeypatch.setattr(wapp, "_replication_metrics_snapshot", boom)
+    wapp._replication_metrics_invalidate()
+    for _ in range(3):
+        assert client.get("/metrics").status_code == 200
+    assert len(calls) == 1
+
+
+@pytest.mark.skipif(not wapp._PROMETHEUS_AVAILABLE, reason="prometheus_client absent")
+def test_a_concurrent_scrape_never_sees_half_the_series(client, env, monkeypatch):
+    """Le relevé A repose 40 séries ; au milieu, un relevé B arrive. B
+    n'expose jamais pendant que A repose ses séries (il attend), et voit les
+    40 nouvelles."""
+    def snap(prefix):
+        return (0, tuple(((("plan", f"{prefix}-{i:02d}"), ("source", "s"), ("target", "t")), 60, 30)
+                         for i in range(40)))
+    current = {"snap": snap("a")}
+    monkeypatch.setattr(wapp, "_replication_metrics_snapshot", lambda path: current["snap"])
+    wapp._replication_metrics_invalidate()
+    client.get("/metrics")
+    current["snap"] = snap("b")
+    wapp._replication_metrics_invalidate()
+    middle, done, overlaps = threading.Event(), [], []
+    applying = {}                       # fil -> séries reposées depuis son clear()
+    real_gauge = wapp.metric_repl_rpo_objective
+    real_generate = wapp.generate_latest
+
+    class Slow:
+        def clear(self):
+            applying[threading.get_ident()] = 0
+            real_gauge.clear()
+
+        def labels(self, **kw):
+            me = threading.get_ident()
+            applying[me] += 1
+            if applying[me] == 10 and not middle.is_set():
+                middle.set()
+                time.sleep(0.3)            # B a le temps d'exposer s'il le peut
+            if applying[me] == 40:
+                del applying[me]
+            return real_gauge.labels(**kw)
+
+    def generate(*a, **k):
+        me = threading.get_ident()
+        overlaps.extend(t for t in applying if t != me)
+        return real_generate(*a, **k)
+    monkeypatch.setattr(wapp, "metric_repl_rpo_objective", Slow())
+    monkeypatch.setattr(wapp, "generate_latest", generate)
+
+    def scrape_b():
+        middle.wait(5)
+        done.append(wapp.app.test_client().get("/metrics").get_data(as_text=True))
+    t = _RealThread(target=scrape_b)
+    t.start()
+    client.get("/metrics")
+    t.join(10)
+    assert overlaps == []
+    plans = re.findall(r'harvester_ops_replication_rpo_objective_seconds\{plan="([ab])-', done[0])
+    assert len(plans) == 40 and set(plans) == {"b"}
