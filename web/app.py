@@ -1132,7 +1132,7 @@ KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 def _kvm_required_role(path, method):
     if path in KVM_ADMIN_PATHS or (method == "DELETE" and path.startswith("/api/kvm/hosts/")):
         return "admin"
-    # v1.97.0 : supprimer une VM (exactement /api/kvm/vms/<hôte>/<domaine>)
+    # v1.98.0 : supprimer une VM (exactement /api/kvm/vms/<hôte>/<domaine>)
     # = admin ; supprimer un instantané (.../snapshots/<nom>) reste opérateur
     if method == "DELETE" and path.startswith("/api/kvm/vms/") and \
             len(path[len("/api/kvm/vms/"):].split("/")) == 2:
@@ -21235,7 +21235,7 @@ log_vnc = logging.getLogger("harvester-ops.vnc")
 
 
 class _TicketRedactFilter(logging.Filter):
-    """v1.97.0 : le journal d'accès de werkzeug écrit la ligne de requête
+    """v1.98.0 : le journal d'accès de werkzeug écrit la ligne de requête
     entière, donc le ticket des websockets de console (`?ticket=...`, VNC
     KubeVirt et KVM, console série). La valeur est remplacée par `***`
     avant tout gestionnaire."""
@@ -21392,7 +21392,7 @@ def _vnc_consume_ticket(token, cluster, namespace, name):
 
 
 def _vnc_ticket_user_ok(entry):
-    """v1.97.0 : un ticket de console est un jeton au porteur, lié à une
+    """v1.98.0 : un ticket de console est un jeton au porteur, lié à une
     personne, à une VM (cluster ou hôte, domaine) et à un genre de console ;
     il ne vit que 30 s et ne sert qu'une fois. Le websocket qui le présente
     doit en plus venir de la MÊME personne (cookie de session, en-tête
@@ -21565,7 +21565,7 @@ def ws_vnc(ws, cluster, namespace, name):
 
 
 # =============================================================================
-# v1.97.0 : console VNC d'une VM KVM, par tunnel SSH (web/kvm_vnc.py)
+# v1.98.0 : console VNC d'une VM KVM, par tunnel SSH (web/kvm_vnc.py)
 #
 # Même modèle que la console KubeVirt : un ticket à usage unique délivré par
 # une route authentifiée (seul endroit d'où une erreur LISIBLE peut venir),
@@ -21728,7 +21728,7 @@ def ws_kvm_vnc(ws, host, domain):
 
 
 # =============================================================================
-# v1.97.0 : instantanés, clonage et suppression d'une VM KVM
+# v1.98.0 : instantanés, clonage et suppression d'une VM KVM
 #
 # Lectures (liste des instantanés, aperçus du clonage et de la suppression)
 # par la bibliothèque, comme le détail d'une VM ; chaque mutation lance

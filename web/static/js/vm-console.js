@@ -11,12 +11,12 @@
  * right after starting a VM and the firmware/GRUB output is caught as soon
  * as qemu exposes the display.
  *
- * v1.97.0 : la même fenêtre sert une VM KVM (`openKvm(host, domain)`). Tout
+ * v1.98.0 : la même fenêtre sert une VM KVM (`openKvm(host, domain)`). Tout
  * ce qui dépend de la plateforme passe par une CIBLE : `harvesterTarget`
  * (URLs /api/vm/..., boutons de marche par runStrategy, instantanés et
  * réglages) ou `kvmTarget` (URLs /api/kvm/..., `ws_path` lu dans la réponse
  * du ticket, gestes KVM suivis par VMActions.follow, arrêt forcé confirmé
- * dans la page, pas de réglages avant 1.98). Un 422 du ticket KVM (affichage
+ * dans la page, pas encore de réglages). Un 422 du ticket KVM (affichage
  * SPICE seul, socket, pas d'écoute...) est dit sans nouvel essai.
  */
 const VMConsole = (() => {

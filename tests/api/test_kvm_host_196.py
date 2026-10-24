@@ -499,7 +499,7 @@ GRAPHICS_KEYS_196 = ("type", "port", "listen", "autoport")
 
 
 def pick(items, keys):
-    """Champs de la 1.96.0 seulement (la 1.97.0 en ajoute, sans en renommer)."""
+    """Champs de la 1.96.0 seulement (la 1.98.0 en ajoute, sans en renommer)."""
     return [{k: it[k] for k in keys} for it in items]
 
 

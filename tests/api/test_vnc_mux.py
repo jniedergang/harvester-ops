@@ -446,7 +446,7 @@ def test_the_reason_is_known_before_browsers_are_told():
 
 
 # ---------------------------------------------------------------------------
-# v1.97.0 : authentification VNC (type 2) côté amont, pour un affichage
+# v1.98.0 : authentification VNC (type 2) côté amont, pour un affichage
 # libvirt protégé par `passwd`. Réponse de référence calculée une fois par
 # OpenSSL (`openssl enc -des-ecb -K <clé aux bits inversés> -nopad`, fournisseur
 # legacy) et figée ici : défi 00..0f, mot de passe "Fk7pw3Zq".
@@ -540,7 +540,7 @@ def test_close_where_closes_only_the_matching_hubs():
 
 
 def test_a_browser_gone_during_its_handshake_closes_an_unwatched_hub():
-    """v1.97.0 : sans navigateur rattaché, la connexion amont (un `ssh -W`
+    """v1.98.0 : sans navigateur rattaché, la connexion amont (un `ssh -W`
     côté KVM) ne reste pas ouverte pour personne."""
     up = fake_qemu()
     hub = vm.get_hub(("kvm:node2", "vm1"), lambda: up)

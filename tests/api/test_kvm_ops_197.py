@@ -1,4 +1,4 @@
-"""v1.97.0 : opérations composées (bin/lib/kvm_ops.py).
+"""v1.98.0 : opérations composées (bin/lib/kvm_ops.py).
 
 Deux étages :
 - `Sim`, un petit libvirt simulé au niveau de l'API de VirshHost (virsh,
@@ -2197,7 +2197,7 @@ def test_real_kill_checks_the_pid_is_our_qemu_img(local):
         victim.wait()
 
 
-# --- corrections de revue (1.97, tâche 2) -------------------------------------------------------
+# --- corrections de revue (1.98, tâche 2) -------------------------------------------------------
 
 def _keep_backing(sim):
     # b a pour base le disque vdc de victim : gardé, raison voulue

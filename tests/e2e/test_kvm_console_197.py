@@ -1,4 +1,4 @@
-"""v1.97.0 : la console VNC d'une VM KVM, dans un vrai navigateur, API simulée.
+"""v1.98.0 : la console VNC d'une VM KVM, dans un vrai navigateur, API simulée.
 
 Ouverte depuis le menu d'actions d'une VM KVM, elle demande un ticket à
 /api/kvm/..., ouvre le websocket indiqué par `ws_path` et parle RFB à une
@@ -147,7 +147,7 @@ def test_the_kvm_console_opens_from_the_actions_menu(ui):
     urls = page.evaluate("window.__wsUrls")
     assert len(urls) == 1 and re.search(r"/ws/kvm/vnc/node2/kvmtest-cirros\?ticket=t1$", urls[0]), urls
     assert state["tickets"] == ["kvmtest-cirros"]
-    # boutons de la cible KVM, chacun avec sa bulle ; pas de réglages avant 1.98
+    # boutons de la cible KVM, chacun avec sa bulle ; pas encore de réglages
     for cls in ("vm-console-kvm-start", "vm-console-kvm-shutdown", "vm-console-kvm-destroy",
                 "vm-console-kvm-snapshots"):
         assert panel.locator(f".{cls}").get_attribute("data-tip"), cls
@@ -171,7 +171,7 @@ def test_a_spice_only_display_is_said_without_retrying(ui):
     panel = open_console_from_menu(page, "spicey")
     status = panel.locator(".vm-console-status")
     expect(status).to_contain_text("only a SPICE display", timeout=5000)
-    expect(status).to_contain_text("1.98")
+    expect(status).to_contain_text("later version")
     page.wait_for_timeout(2500)
     assert state["tickets"] == ["spicey"], "the console retried a terminal refusal"
     assert page.evaluate("window.__wsUrls") == []
@@ -278,7 +278,7 @@ def test_the_reason_of_a_lost_console_is_said(ui, last_close, expected, retries)
 @pytest.mark.parametrize("module,visible", [(False, False), (True, True)])
 def test_the_snapshots_button_needs_the_kvm_snapshots_module(ui, context, module, visible):
     make_page, _ = ui
-    # kvm-vm.js (1.97.0) pose window.KVMSnapshots : la propriété est figée
+    # kvm-vm.js (1.98.0) pose window.KVMSnapshots : la propriété est figée
     # avant lui, absente (module manquant) ou remplacée par une sonde
     if module:
         context.add_init_script("Object.defineProperty(window, 'KVMSnapshots', {configurable: false,"

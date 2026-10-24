@@ -1,5 +1,5 @@
 /**
- * harvester-ops : instantanés, clonage et suppression d'une VM KVM (v1.97.0).
+ * harvester-ops : instantanés, clonage et suppression d'une VM KVM (v1.98.0).
  *
  * Trois fenêtres (FloatingPanels), ouvertes depuis le menu d'une VM KVM
  * (kvm.js) ou, pour les instantanés, depuis la console de la VM :

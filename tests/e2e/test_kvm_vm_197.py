@@ -1,4 +1,4 @@
-"""v1.97.0 : instantanés, clonage et suppression d'une VM KVM, API simulée.
+"""v1.98.0 : instantanés, clonage et suppression d'une VM KVM, API simulée.
 
 Menu d'une VM (second groupe grisé d'après la table servie par le serveur,
 avec la raison), fenêtre Instantanés (actuel, pause annoncée, raisons de

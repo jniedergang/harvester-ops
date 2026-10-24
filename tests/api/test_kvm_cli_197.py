@@ -1,4 +1,4 @@
-"""v1.97.0 : bin/harvester-kvm.py, affichage, instantanés, clonage, suppression.
+"""v1.98.0 : bin/harvester-kvm.py, affichage, instantanés, clonage, suppression.
 
 Le faux réseau remplace ssh au niveau de `subprocess.run` : il redécoupe la
 ligne distante avec shlex (comme le shell de l'hôte) et la rejoue contre le
@@ -827,7 +827,7 @@ def test_a_signal_during_the_copy_rolls_back_for_real(tmp_path, sig):
         shutil.rmtree(short, ignore_errors=True)
 
 
-# --- corrections de revue (1.97, tâche 2) -------------------------------------------------------
+# --- corrections de revue (1.98, tâche 2) -------------------------------------------------------
 
 class Prog(BaseException):
     """Annulation portant ce que la bibliothèque ou la CLI y attachent."""

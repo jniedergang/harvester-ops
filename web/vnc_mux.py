@@ -52,7 +52,7 @@ log = logging.getLogger("harvester-ops.vnc")
 
 VERSION = b"RFB 003.008\n"
 SEC_NONE = 1
-# v1.97.0 : authentification VNC (RFC 6143 section 7.2.2), côté amont
+# v1.98.0 : authentification VNC (RFC 6143 section 7.2.2), côté amont
 # seulement, pour un affichage libvirt protégé par `passwd`. Les navigateurs
 # restent en None : l'accès est gardé par la session et le rôle.
 SEC_VNC = 2
@@ -506,7 +506,7 @@ class VncHub:
             log.warning("console client handshake failed on %s: %s",
                         "/".join(self.key), e)
             client.kill()
-            # v1.97.0 : un navigateur parti pendant sa poignée de main ne doit
+            # v1.98.0 : un navigateur parti pendant sa poignée de main ne doit
             # pas laisser ouverte une connexion que personne ne regarde (un
             # `ssh -W` vivant pour rien, côté KVM)
             with self.lock:

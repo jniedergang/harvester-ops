@@ -1,4 +1,4 @@
-"""v1.97.0 : console VNC d'une VM KVM, par tunnel SSH.
+"""v1.98.0 : console VNC d'une VM KVM, par tunnel SSH.
 
 Trois étages :
 - `vnc_des` : DES d'un bloc en Python pur, sur des vecteurs publiés, et la
@@ -474,7 +474,7 @@ def test_ticket_refusals(client, env, state, xml, code, reason):
 
 def test_spice_message_announces_the_settings_of_1_98(client, env):
     env["sim"]["domains"]["web"] = ("running", SPICE)
-    assert "possible from the VM settings in 1.98" in ticket(client).get_json()["error"]
+    assert "possible from the VM settings in a later version" in ticket(client).get_json()["error"]
 
 
 def test_an_ip_of_the_host_itself_is_accepted_after_reading_its_addresses(client, env):

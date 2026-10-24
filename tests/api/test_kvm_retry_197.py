@@ -1,4 +1,4 @@
-"""v1.97.0 : reprise d'une LECTURE coupée au niveau du transport (kvm_host).
+"""v1.98.0 : reprise d'une LECTURE coupée au niveau du transport (kvm_host).
 
 Vu en réel sur node2 (OpenSSH 10.2p1) : deux lectures simultanées sur le
 même ControlMaster ont fait tomber le sshd de l'hôte (« mm_request_receive:

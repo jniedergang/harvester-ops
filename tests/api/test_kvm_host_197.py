@@ -1,4 +1,4 @@
-"""v1.97.0 : transport et analyseurs ajoutés à bin/lib/kvm_host.py.
+"""v1.98.0 : transport et analyseurs ajoutés à bin/lib/kvm_host.py.
 
 `run_input` (XML sur l'entrée standard), `stdio_forward_argv` (tunnel VNC par
 `ssh -W`), champs ajoutés à `parse_domain_xml`, et les analyseurs

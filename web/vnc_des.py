@@ -1,5 +1,5 @@
 """
-harvester-ops : chiffrement DES d'un bloc, pour l'authentification VNC (v1.97.0).
+harvester-ops : chiffrement DES d'un bloc, pour l'authentification VNC (v1.98.0).
 
 Un affichage libvirt protégé par `passwd` n'offre que l'authentification VNC
 (type de sécurité 2, RFC 6143 section 7.2.2) : le serveur envoie un défi de

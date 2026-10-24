@@ -1,4 +1,4 @@
-"""v1.97.0 : instantanés, clonage et suppression d'une VM KVM dans la console.
+"""v1.98.0 : instantanés, clonage et suppression d'une VM KVM dans la console.
 
 Lectures (liste des instantanés, aperçus) par la bibliothèque, sans action
 ni mutation ; chaque mutation lance bin/harvester-kvm.py en action suivie,

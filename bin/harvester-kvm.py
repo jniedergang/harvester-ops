@@ -56,7 +56,7 @@ a redémarré. Un geste manifestement impossible dans l'état courant
 (reprendre une VM qui tourne) est refusé sans appeler libvirt ; pour le
 reste, libvirt décide.
 
-Instantanés, clonage et suppression (v1.97.0, bin/lib/kvm_ops.py) : chaque
+Instantanés, clonage et suppression (v1.98.0, bin/lib/kvm_ops.py) : chaque
 commande émet `plan`, puis ses étapes, relit l'état réel à la fin et rend
 ce qui a été fait (`deleted`, `kept` avec leur raison, `leftovers`). Une
 demande refusée par l'état de la VM (en marche, disque raw...) sort en 1,
@@ -159,7 +159,7 @@ ACTION_COMMANDS = {("resume", "pmsuspended"): "dompmwakeup"}
 # à l'échéance, le geste forcé à proposer (rien pour les autres)
 FORCED = {"shutdown": ["destroy"], "reboot": ["destroy", "start"]}
 
-# délais par défaut (s) des opérations de la 1.97.0
+# délais par défaut (s) des opérations de la 1.98.0
 SNAPSHOT_TIMEOUTS = {"create": 600, "revert": 300, "delete": 300}
 CLONE_TIMEOUT = 3600
 DELETE_TIMEOUT = 300
@@ -888,7 +888,7 @@ def gesture(args, action):
     timeout = args.timeout if args.timeout is not None else DEFAULT_TIMEOUTS.get(action, DEFAULT_TIMEOUT)
     if timeout <= 0:
         raise UsageError("--timeout must be positive")
-    # même verrou par VM que les opérations de la 1.97 : un geste ne croise
+    # même verrou par VM que les opérations de la 1.98 : un geste ne croise
     # jamais un clonage, une suppression ou un instantané de la même VM
     with vm_lock(state_of(args), host.name, name):
         return _gesture_locked(args, action, host, name, timeout)
@@ -950,7 +950,7 @@ def _gesture_locked(args, action, host, name, timeout):
 
 
 # ---------------------------------------------------------------------------
-# v1.97.0 : affichage, instantanés, clonage, suppression (bin/lib/kvm_ops.py)
+# v1.98.0 : affichage, instantanés, clonage, suppression (bin/lib/kvm_ops.py)
 # ---------------------------------------------------------------------------
 
 def checked(fn, *a):

@@ -1,5 +1,5 @@
 """
-harvester-ops : console VNC d'une VM KVM, par tunnel SSH (v1.97.0).
+harvester-ops : console VNC d'une VM KVM, par tunnel SSH (v1.98.0).
 
 L'affichage d'une VM libvirt écoute sur l'hôte (en général 127.0.0.1:59xx).
 La console l'atteint par `ssh -W <adresse>:<port>` : ssh relie son entrée et
@@ -45,7 +45,7 @@ TERMINAL_REASONS = ("spice", "socket", "nodisplay", "nolisten", "listen")
 REASON_MESSAGES = {
     "notrunning": "the VM is not running: its display opens once it runs",
     "spice": "this VM has only a SPICE display: not supported; adding a VNC display will be "
-             "possible from the VM settings in 1.98",
+             "possible from the VM settings in a later version",
     "socket": "the display listens on a UNIX socket owned by root and qemu: the SSH user "
               "cannot reach it",
     "nodisplay": "this VM has no graphical display",

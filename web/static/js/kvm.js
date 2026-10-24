@@ -451,7 +451,7 @@ const KVM = (() => {
       </div>`;
   }
 
-  // v1.97.0 : second groupe du menu (instantanés, cloner, supprimer). La
+  // v1.98.0 : second groupe du menu (instantanés, cloner, supprimer). La
   // table des conditions (rôle, états, persistance) est servie par le
   // serveur (`operations`), comme celle des gestes.
   const OPERATIONS = ['snapshots', 'clone', 'delete'];
@@ -543,7 +543,7 @@ const KVM = (() => {
       if (c) {
         if (c.getAttribute('aria-disabled')) return;
         closeMenu();
-        // v1.97.0 : console VNC par la connexion SSH de l'hôte
+        // v1.98.0 : console VNC par la connexion SSH de l'hôte
         if (window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(v.host, v.name);
         return;
       }
@@ -551,7 +551,7 @@ const KVM = (() => {
       if (o) {
         if (o.getAttribute('aria-disabled')) return;
         closeMenu();
-        // v1.97.0 : instantanés, clonage, suppression (kvm-vm.js)
+        // v1.98.0 : instantanés, clonage, suppression (kvm-vm.js)
         const fn = window.KVMVm && OP_OPEN[o.dataset.kvmOp] && KVMVm[OP_OPEN[o.dataset.kvmOp]];
         if (fn) fn(v.host, v.name);
         return;

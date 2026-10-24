@@ -1,4 +1,4 @@
-"""Opérations composées sur les VMs d'un hôte KVM (v1.97.0).
+"""Opérations composées sur les VMs d'un hôte KVM (v1.98.0).
 
 `kvm_host` reste le transport (ssh, virsh, batch) et les analyseurs ; ici
 vivent les opérations qui enchaînent plusieurs lectures et écritures :

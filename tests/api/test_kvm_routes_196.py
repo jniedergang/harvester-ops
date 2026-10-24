@@ -453,7 +453,7 @@ def test_second_gesture_on_the_same_vm_waits(client):
                                    "kvm:vm-snapshot-revert:node2/web",
                                    "kvm:vm-clone:node2/web", "kvm:vm-delete:node2/web"])
 def test_every_kvm_vm_action_blocks_a_gesture_on_the_same_vm(client, label):
-    """Les opérations par VM de la 1.97 (libellés `kvm:vm-<verbe>:`) et les
+    """Les opérations par VM de la 1.98 (libellés `kvm:vm-<verbe>:`) et les
     gestes se bloquent mutuellement, comme le verrou par VM de la CLI."""
     run = wapp.ActionRun("kvmbusy0001", label, "kvm:node2", ["harvester-kvm"])
     run.status = "running"
