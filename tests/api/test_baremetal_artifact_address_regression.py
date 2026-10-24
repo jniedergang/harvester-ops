@@ -77,8 +77,9 @@ class AddressTests(unittest.TestCase):
              '_bm_artifact_base_urls':self.fn,'_iso_dir':FakePath,'_iso_work_dir':FakePath,
              '_bm_join_pubkey':lambda cluster:None,'_harvester_install_config':config,
              'InstallConfigError':type('FixtureError',(Exception,),{}),'scratch':[],
-             'creds':[],'tokens':[],'fail':lambda *args:('failed',args)}
-        start=APP.index('    port = pxe_server.start()',APP.index('def _baremetal_install_runner'))
+             'creds':[],'tokens':[],'fail':lambda *args:('failed',args),'port':8091,
+             '_bm_write_private':lambda path,text:None}
+        start=APP.index('    try:\n        media_base, installer_base',APP.index('def _baremetal_install_steps'))
         end=APP.index('    step("remaster", "running"',start)
         exec(compile('def capture():\n    opts = dict(initial_opts)\n'+APP[start:end]+'    return iso_url, install_iso_url, config_url\n','<actual-runner-url-stage>','exec'),env)
         media,iso,cfg=env['capture']()

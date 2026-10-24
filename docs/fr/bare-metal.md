@@ -7,6 +7,11 @@ ou clique dans l'installeur. La console pilote la machine par son BMC.
 Rien de magique ni de spécifique ici : c'est le mode d'installation
 zéro-touch de Harvester, piloté de bout en bout par la console.
 
+Les [profils de stockage facultatifs](baremetal-storage-onboarding.md) préparent
+les interfaces dédiées et prérequis fournisseur pendant une jonction, puis laissent
+l’hôte non planifiable pour validation. Le profil réseau neutre et l’exemple Pure non vérifié
+n’installent pas de chart CSI et ne configurent pas les identifiants des baies.
+
 ---
 
 ## Ce qu'il faut avant de commencer
@@ -486,6 +491,18 @@ images de plusieurs gigaoctets par morceaux.
 
 Ce port doit être joignable **depuis le réseau du BMC**. Sur un hôte avec
 pare-feu, pensez à l'ouvrir.
+
+La console prend le port dans `HARVESTER_OPS_PXE_PORT` (8091 par défaut).
+Elle n'en choisit jamais un autre d'elle-même : l'adresse donnée au BMC et
+à l'installeur doit être celle que vous avez ouverte. Si le port est pris,
+le déroulé échoue à son étape `serve` avec un message qui nomme le port,
+avant toute action sur l'alimentation. Le listener démarre avec la
+première installation ou découverte et s'arrête à la fin de la dernière.
+
+Tout échec d'un déroulé, prévu ou non, termine l'action en échec. La
+configuration servie (elle porte le jeton du cluster), l'ISO
+remasterisée et les jetons sont effacés ; le message de l'étape ne donne
+que le type de l'erreur, jamais un chemin ni un secret.
 
 ---
 

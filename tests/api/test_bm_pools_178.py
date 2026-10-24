@@ -389,7 +389,7 @@ def test_the_new_cluster_name_is_checked_before_the_action_run(client, runs, mon
 
 def test_runner_declares_then_runs_pools_under_one_budget():
     src = Path(wapp.__file__).read_text()
-    body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("def _baremetal_install_steps(", 1)[1].split("\ndef ", 1)[0]
     assert body.index('step("wait-api", "done"') < body.index('step("declare", "running"')
     assert body.index('step("cleanup", "done"') < body.index('step("declare", "running"')
     assert body.index("_bm_declare_cluster(") < body.index('step("pools", "running"')

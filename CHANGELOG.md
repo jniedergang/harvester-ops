@@ -4,6 +4,61 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.97.0] - 2026-10-24 - Storage profiles for bare-metal joins
+
+### Added
+- **Optional storage profiles for bare-metal joins** (contributed by Paul
+  Dresch, PR #7). In **Bare-metal > Install**, a join can prepare
+  dedicated storage NICs:
+  - each storage NIC is chosen by its MAC, with an explicit IPv4/CIDR
+    address. The NetworkManager connections are bound to the MAC, not to
+    a name;
+  - a preflight runs before the install: new hostname only, LinkMonitor
+    inventory (a storage MAC already seen on a registered host is
+    refused), and the profile's CSI DaemonSet when it declares one;
+  - after the join, the console checks the NICs, the node, the local
+    Longhorn disk and the CSI pod. The host is left cordoned after these
+    checks;
+  - two packaged profiles: "Storage network only", and an unverified
+    "Pure iSCSI and NVMe/TCP" example.
+- API: `GET /api/baremetal/onboarding/options` lists the profiles.
+- Tunables: `HARVESTER_OPS_ONBOARDING_TIMEOUT` (readiness checks, 1800 s
+  by default) and `HARVESTER_OPS_ONBOARDING_PATCH_ATTEMPTS` (refused
+  conditional cordons, 5 by default).
+- When the cluster and the ISO chosen for the install are both v1.9.0 or
+  later, the join uses Harvester's own install cordon
+  (`install.cordoned`). The console then writes nothing to the node.
+  Otherwise the console keeps its taint and conditional cordon, and
+  cordons the node again after a promotion lifts it.
+- The advanced YAML accepts `install.cordoned`.
+
+### Changed
+- The artifact server starts with the first install or discovery and
+  stops when the last one ends. Before, it stayed open for the console
+  lifetime.
+- A taken artifact port fails the run at its `serve` step, before any
+  power action. The message names the port. No other port is tried.
+- An unexpected error in a VM transfer now stops the child script, which
+  undoes the transfer. Before, the script kept running on its own.
+
+### Fixed
+- Install, discovery and series runs no longer stay "running" after an
+  unexpected error or a taken port. The served configuration (it holds
+  the cluster token), the remastered ISO and the cluster keys not yet
+  confirmed are removed, and the artifact tokens are revoked.
+- A VM transfer whose temporary file cannot be created no longer stays
+  "running".
+- Onboarding readiness no longer fails on a single failed read. A
+  timeout or an API blip on the node, the VlanConfig list or the CSI pods
+  is read again until the deadline.
+
+### Security
+- A crashed run shows only the error type. Never a path, a command line
+  or a token.
+- A preflight refusal gives a fixed reason, never a path.
+- A kubeconfig path sent by the client is dropped before an install is
+  prepared. The console computes it.
+
 ## [1.96.0] - 2026-10-23 - KVM hypervisors: hosts, inventory and lifecycle gestures
 
 ### Added

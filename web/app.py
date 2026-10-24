@@ -89,6 +89,8 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
+import baremetal_onboarding as _bmo
+import baremetal_onboarding_runtime as _bmor
 from flask import (
     Flask,
     Response,
@@ -5673,6 +5675,25 @@ def _bm_vm_apply(opts, run, step, deadline):
                      + (": " + last if last else ""))
 
 
+def _bm_onboarding_config(data, cfg):
+    """Configuration d'installation complétée par le profil de stockage
+    choisi ; inchangée sans profil. L'identité d'installation vient du plan
+    préparé côté serveur (_bmor.preflight), jamais du navigateur."""
+    if not _bmo.selected(data):
+        return cfg
+    try:
+        plan = data.get('_onboarding_plan') or {}
+        # cordon natif (install.cordoned) décidé par le préflight sur la
+        # version du cluster rejoint ; sans plan (aperçu), taint de la console
+        out = _bmo.augment(cfg, _bmo.selection(data, cfg), native=bool(plan.get('native_cordon')))
+        identity = plan.get('install_id')
+        if identity:
+            out['os'].setdefault('labels', {})[_bmo.INSTALL_ID_LABEL] = identity
+        return out
+    except _bmo.ProfileError as e:
+        raise InstallConfigError(["onboarding"], "invalid onboarding profile", {"onboarding": str(e)}) from e
+
+
 def _harvester_install_config(opts, boot_identity=False):
     """Rend la configuration d'installation Harvester (YAML).
 
@@ -5683,6 +5704,8 @@ def _harvester_install_config(opts, boot_identity=False):
     réservée à la console ou posée des deux côtés lève InstallConfigError
     avec son chemin."""
     cfg = _his.render_install_config(opts)
+    if opts.get("onboarding"):
+        cfg = _bm_onboarding_config(opts, cfg)
     # Les noms hvbootN ne valent qu'avec les ifname= que porte l'ISO
     # remasterisée : un appelant qui démarre l'installeur lui-même (banc
     # harvlab, PXE de l'exploitant) garde la configuration sans eux.
@@ -5751,6 +5774,8 @@ def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
         node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
+        if node and getattr(run, "_onboarding_plan", None):
+            node = _bmor.guard(sys.modules[__name__], kubeconfig, node, run)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
         if conds.get("Ready") == "True":
@@ -6264,22 +6289,115 @@ def _bm_reset(host, user, pwd, sys_path, reset_type):
     return ok, detail
 
 
+# Serveur d'artefacts partagé : une série lance jusqu'à 4 installations en
+# même temps, et une découverte peut tourner à côté. Chaque déroulé le
+# prend et le rend ; le dernier à le rendre l'arrête s'il ne sert plus rien
+# (ports libérés). Tenu sous verrou de start() à la fin du compte, pour qu'un
+# déroulé qui démarre ne voie jamais le serveur s'arrêter sous lui.
+_BM_PXE_USERS = [0]
+_BM_PXE_LOCK = threading.Lock()
+
+
+def _bm_pxe_acquire(state):
+    """Démarre (si besoin) le serveur d'artefacts et le compte pris par ce
+    déroulé. Lève pxe_server.PortUnavailable si le port est pris."""
+    with _BM_PXE_LOCK:
+        port = pxe_server.start()
+        _BM_PXE_USERS[0] += 1
+    state["pxe"] = True
+    return port
+
+
+def _bm_pxe_release(state):
+    if not state.pop("pxe", False):
+        return
+    with _BM_PXE_LOCK:
+        _BM_PXE_USERS[0] = max(0, _BM_PXE_USERS[0] - 1)
+        if _BM_PXE_USERS[0] == 0 and not pxe_server.has_live_tokens():
+            pxe_server.stop()
+
+
+def _bm_crash_detail(e):
+    """Texte sûr d'une exception imprévue : son type seul (le texte d'une
+    OSError porte un chemin, celui d'une CalledProcessError la ligne de
+    commande et ses jetons). Seul le refus de port, au message fixe, passe."""
+    if isinstance(e, pxe_server.PortUnavailable):
+        return str(e)[:300]
+    return f"internal error ({type(e).__name__})"
+
+
+def _run_crashed(run, sid, e):
+    """Termine en échec une action dont le déroulé a levé hors de ses propres
+    blocs try. Sans effet si l'action est déjà finie."""
+    if getattr(run, "status", None) not in ("starting", "running"):
+        return
+    msg = _bm_crash_detail(e)
+    try:
+        run.error_summary = msg
+        run.emit({"type": "step", "step_id": sid, "status": "error",
+                  "message": msg, "ts": time.time()})
+    finally:
+        run.exit_code = 1
+        run.status = "error"
+        run.ended_at = time.time()
+        try:
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+        finally:
+            run.close()
+
+
 def _baremetal_install_runner(run, opts):
+    """Enveloppe du déroulé : toute exception, même levée hors de ses blocs
+    try (vu en réel : port du serveur d'artefacts déjà pris), finit l'action
+    en échec, efface les fichiers à secrets, révoque les jetons et rend le
+    serveur d'artefacts. SystemExit/KeyboardInterrupt sont relancées après
+    le ménage."""
+    state = {"tokens": [], "scratch": [], "creds": [], "keep_creds": [False],
+             "step": "preflight"}
+    try:
+        _baremetal_install_steps(run, opts, state)
+    except BaseException as e:
+        try:
+            _bm_install_cleanup(state)
+        finally:
+            _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _bm_install_cleanup(state):
+    """Ménage idempotent d'une installation interrompue."""
+    if state["tokens"]:
+        pxe_server.revoke(*state["tokens"])
+    for p in state["scratch"] + ([] if state["keep_creds"][0] else state["creds"]):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _baremetal_install_steps(run, opts, state):
+    # plan préparé par _bmor.preflight : seule source de l'identité
+    # d'installation pour la garde du nœud et les vérifications finales
+    run._onboarding_plan = opts.get("_onboarding_plan")
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
-    tokens = []
+    tokens = state["tokens"]
     # Fichiers à effacer quoi qu'il arrive : la configuration porte le token
     # du cluster et le mot de passe OS, elle n'a rien à faire sur le disque
     # après un échec.
-    scratch = []
+    scratch = state["scratch"]
     # v1.78.0 : clés du nouveau cluster, effacées sur un échec tant que la
     # machine n'a pas redémarré sur l'installeur ; gardées ensuite (le nœud
     # porte la clé publique, et la déclaration s'en sert).
-    creds = []
-    keep_creds = [False]
+    creds = state["creds"]
+    keep_creds = state["keep_creds"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         # Persistance périodique : sans elle, un redémarrage de Flask
@@ -6379,7 +6497,10 @@ def _baremetal_install_runner(run, opts):
          f"{profile.get('model')} : {n_disks or '?'} disque(s) ({disk_src or 'non vus'}), média virtuel OK")
 
     # --- remasterisation ---
-    port = pxe_server.start()
+    try:
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        return fail("serve", str(e))
     try:
         media_base, installer_base = _bm_artifact_base_urls(opts, port)
     except ValueError:
@@ -6414,11 +6535,14 @@ def _baremetal_install_runner(run, opts):
         if join_pub:
             opts = _bm_with_ssh_key(opts, join_pub)
     else:
+        # inscrites AVANT la génération : un ssh-keygen interrompu laisserait
+        # sinon une clé privée orpheline
+        cf = _bm_cluster_files(opts["cluster_name"])
+        creds.extend([cf["key"], cf["pub"], cf["known_hosts"]])
         try:
             files = _bm_cluster_keypair(opts["cluster_name"])
         except (OSError, subprocess.SubprocessError) as e:
             return fail("remaster", f"no SSH key for the new cluster: {type(e).__name__}")
-        creds.extend([files["key"], files["pub"], files["known_hosts"]])
         opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
         cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True),
@@ -6426,9 +6550,10 @@ def _baremetal_install_runner(run, opts):
     except InstallConfigError as e:
         return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
-    cfg_path.write_text(cfg_yaml)
-    cfg_path.chmod(0o600)          # contient un token et un mot de passe
+    # inscrite avant l'écriture (une écriture interrompue reste à effacer) et
+    # créée en 0600 d'emblée : elle contient un token et un mot de passe
     scratch.append(cfg_path)
+    _bm_write_private(cfg_path, cfg_yaml)
     cfg_token = pxe_server.issue(cfg_path, "config")
     tokens.append(cfg_token)
     config_url = f"{installer_base}/pxe/config/{cfg_token}.yaml"
@@ -6545,8 +6670,14 @@ def _baremetal_install_runner(run, opts):
     if opts.get("mode") == "join":
         step("wait-node", "running",
              f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
-        if not _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
-                                   opts["hostname"], deadline, run, step):
+        try:
+            ready = _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
+                                        opts["hostname"], deadline, run, step)
+        except _bmo.ProfileError as e:
+            # garde du profil de stockage : le déroulé échoue, jamais un fil
+            # mort laissant l'action « running » et ses artefacts en place
+            return fail("wait-node", f"Harvester is installed; storage onboarding stopped: {e}")
+        if not ready:
             return fail("wait-node",
                         f"{opts['hostname']} not Ready in {opts['cluster']} after "
                         f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
@@ -6617,6 +6748,10 @@ def _baremetal_install_runner(run, opts):
             current[0] = "vm-network"
             step("vm-network", "running", "configuring this host's VM uplinks")
             _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
+        if opts.get("_onboarding_plan"):
+            current[0] = "onboarding"
+            step("onboarding", "running", "Checking storage profile readiness; host stays cordoned")
+            _bmor.finish(sys.modules[__name__], opts, run, step, post_deadline)
     except Exception as e:
         # une OSError porterait le chemin d'un fichier privé : son type seul
         detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
@@ -6776,12 +6911,26 @@ def _bm_with_installer_identity(cfg):
 
 def _bm_render_boot_checked(data):
     # Real launch/preview values only; profile-schema checks use placeholders.
-    cfg = _bm_with_installer_identity(_bm_render_checked(data))
+    cfg = _bm_render_checked(data)
+    if data.get("onboarding"):
+        cfg = _bm_onboarding_config(data, cfg)
+    cfg = _bm_with_installer_identity(cfg)
     try:
         _bm_boot_network_args(cfg, data.get("extra_args", ""))
     except BootNetworkError as e:
         raise InstallConfigError([e.path], "invalid bootstrap network", {e.path: e.reason}) from e
     return cfg
+
+
+@app.route("/api/baremetal/onboarding/options")
+@requires_auth
+@_rate_limit("30/minute")
+def api_baremetal_onboarding_options():
+    # Trusted, packaged profile metadata only; never return OEM commands or paths.
+    try:
+        return jsonify({"profiles": _bmo.options()})
+    except (ValueError, OSError):
+        return jsonify({"error": "storage profile catalog is unavailable"}), 400
 
 
 @app.route("/api/baremetal/config/parse", methods=["POST"])
@@ -6830,6 +6979,7 @@ def api_baremetal_config_preview():
     """YAML final tel que l'installeur le recevra, jeton et mot de passe
     masqués. Pas besoin des identifiants du BMC."""
     data = request.get_json(force=True, silent=True) or {}
+    data.pop("_onboarding_plan", None)
     # l'hôte ne sert qu'à lire l'inventaire de la machine (contrôles des
     # disques) ; les identifiants du BMC ne sont pas utilisés ici
     host = data.get("bmc_host")
@@ -6904,6 +7054,9 @@ def _bm_prepare_install(data, defer_join=False):
     complétées, None) ou (None, réponse d'erreur). `defer_join` : le
     cluster rejoint n'existe pas encore (série, avant que la première ligne
     l'ait créé) ; tout le reste est contrôlé."""
+    data.pop("_onboarding_plan", None)
+    # kubeconfig du cluster rejoint : calculé ici, jamais fourni par le client
+    data.pop("_cluster_kc", None)
     mode = data["mode"]
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
@@ -6995,6 +7148,19 @@ def _bm_prepare_install(data, defer_join=False):
         return None, _bm_config_refusal(e)
     except ValueError as e:
         return None, (jsonify({"error": str(e), "fields": ["vm_network"]}), 400)
+    data.pop("_onboarding_plan", None)
+    if _bmo.selected(data):
+        try:
+            data["_onboarding_plan"] = _bmor.preflight(sys.modules[__name__], data,
+                                                       _bm_render_checked(data))
+        except _bmo.ProfileError as e:
+            # messages fixes du module (rôles, noms Kubernetes) : ni chemin ni secret
+            return None, (jsonify({"error": "onboarding preflight failed: " + str(e),
+                                   "fields": ["onboarding"]}), 400)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return None, (jsonify({"error": "onboarding preflight failed; check profile, new "
+                                            "hostname, target network and current user permissions",
+                                   "fields": ["onboarding"]}), 400)
     try:
         _bm_artifact_base_urls(data, 8091)
     except ValueError:
@@ -7271,6 +7437,20 @@ def _bm_wait_action(action_id, parent, sleep=None):
 
 
 def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Enveloppe : la série ne reste jamais « running » sur une exception
+    levée hors de ses blocs try, et ses secrets sont effacés de la mémoire
+    du déroulé dans tous les cas."""
+    try:
+        _baremetal_batch_steps(run, plan, concurrency)
+    except BaseException as e:
+        _run_crashed(run, "batch", e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        plan.clear()
+
+
+def _baremetal_batch_steps(run, plan, concurrency):
     """Série d'installations : ligne 1 seule (création), puis les jonctions,
     `concurrency` à la fois, chacune une action suivie à part. Chaque nœud
     est une étape `node-<n>` de cette action, avec l'identifiant de son
@@ -7468,10 +7648,27 @@ class _BmDiscoverBmc:
 
 
 def _baremetal_discover_runner(run, opts):
+    """Enveloppe : une exception levée hors des blocs try du déroulé finit
+    l'action en échec au lieu de la laisser « running » ; le serveur
+    d'artefacts est toujours rendu (le déroulé efface lui-même son ISO et
+    révoque ses jetons, bm_discover.run)."""
+    state = {"step": "remaster"}
+    try:
+        _baremetal_discover_steps(run, opts, state)
+    except BaseException as e:
+        _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _baremetal_discover_steps(run, opts, state):
     host = opts["bmc_host"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         if time.time() - persisted[0] > 60:
@@ -7498,7 +7695,11 @@ def _baremetal_discover_runner(run, opts):
         step("remaster", "error", f"ISO not found: {opts['iso']}")
         return finish("error", 1, f"ISO not found: {opts['iso']}")
     try:
-        port = pxe_server.start()
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        step("serve", "error", str(e))
+        return finish("error", 1, str(e))
+    try:
         res = _bmd.run(
             # l'ISO de la découverte y est écrite puis effacée en fin de run ;
             # un run tué par un redémarrage est balayé au bout d'un jour
@@ -17643,6 +17844,16 @@ def _iso_release_info(path):
     return _ISO_RELEASE_CACHE[key]
 
 
+def _bm_iso_harvester_version(name):
+    """Version de Harvester d'un ISO du magasin (harvester-release.yaml), ou
+    None : nom refusé, fichier absent ou ISO illisible."""
+    safe = _safe_artifact_name(str(name or ""))
+    path = _iso_dir() / safe if safe else None
+    if not path or not path.is_file():
+        return None
+    return (_iso_release_info(path) or {}).get("harvester")
+
+
 def _iso_sha512(name):
     """Le SHA-512 publié d'un ISO du magasin, s'il est posé à côté (fichier
     .sha512 de la release, une ligne « <hash>  <nom> »)."""
@@ -19756,8 +19967,11 @@ def _vm_transfer_runner(run, cmd, capture=False):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
-    out_file = tempfile.TemporaryFile() if capture else None
+    out_file = None
     try:
+        # dans le try : une erreur ici (disque plein) laissait l'action
+        # « running » pour toujours
+        out_file = tempfile.TemporaryFile() if capture else None
         proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
@@ -19799,11 +20013,21 @@ def _vm_transfer_runner(run, cmd, capture=False):
         else:
             run.status = "error"
             run.error_summary = (last_error or f"exit {rc}")[:300]
-    except Exception as e:                     # noqa: BLE001
-        run.error_summary = str(e)[:300]
-        step("transfer", "error", str(e)[:300])
+    except BaseException as e:                 # noqa: BLE001
+        # le texte d'une OSError porte un chemin : son type seul
+        detail = type(e).__name__ if isinstance(e, OSError) else str(e)[:300]
+        run.error_summary = detail
+        step("transfer", "error", detail)
         run.exit_code = 1
         run.status = "error"
+        proc = getattr(run, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()            # même signal qu'un arrêt depuis le dock
+        if not isinstance(e, Exception):
+            run.ended_at = time.time()
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+            run.close()
+            raise
     finally:
         if out_file is not None:
             out_file.close()
