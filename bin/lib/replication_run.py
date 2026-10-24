@@ -1567,9 +1567,10 @@ def ensure_standby(ctx, works, latest, visible):
 
 def _dry_run_protect(ctx, works, src_facts, dst_facts):
     """Dry-run serveur de chaque objet cible (volumes de secours, backing
-    images, carnet) et de la tâche source. Une URL de sauvegarde manquante
-    (aucune sauvegarde encore) est remplacée par une valeur d'essai,
-    signalée (`placeholder_url`)."""
+    images, carnet) et de la tâche source. Une backing image sans sauvegarde
+    visible passe avec une URL d'essai (`placeholder_url`, acceptée par
+    Longhorn 1.12.1) ; un volume de secours sans sauvegarde, sans backing
+    image ou sans namespace des carnets ne peut pas l'être : `deferred`."""
     out = []
     tb = backups_by_volume(ctx.dst)
     labels = rp.plan_labels(ctx.plan_id, ctx.gen)
@@ -1625,11 +1626,17 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
                 out.append({"object": "standby-volume", "name": d["target_volume"], "ok": True,
                             "deferred": "backing-image", "placeholder_url": not url})
                 continue
+            if not url:
+                # Longhorn 1.12.1 cherche le `Backup` nommé dans `fromBackup`
+                # (« cannot get backup none ») : un volume de secours ne passe
+                # au dry-run qu'une fois la première sauvegarde faite
+                out.append({"object": "standby-volume", "name": d["target_volume"], "ok": True,
+                            "deferred": "first-backup", "placeholder_url": True})
+                continue
             attempt("dst", rp.standby_volume(
-                d["target_volume"], url or f"dry-run://?backup=none&volume={d['source_volume']}", d["size"],
-                d["access_mode"], d["migratable"], d["target_replicas"], d["backing_image"] or None,
-                d["class_params"], labels=dict(labels, **{rp.LABEL_VM: w["uid"]})),
-                "standby-volume", placeholder_url=not url)
+                d["target_volume"], url, d["size"], d["access_mode"], d["migratable"], d["target_replicas"],
+                d["backing_image"] or None, d["class_params"], labels=dict(labels, **{rp.LABEL_VM: w["uid"]})),
+                "standby-volume", placeholder_url=False)
         res = {"resource_uid": w["uid"], "namespace": w["namespace"], "name": w["name"],
                "firmware_uuid": w["firmware_uuid"]}
         try:

@@ -351,6 +351,9 @@ class FakeKube:
             # dry-run avec une URL d'essai : accepté (à confirmer sur le banc)
             if url not in self.store.bbis.values() and not (dry and str(url).startswith("dry-run://")):
                 raise RuntimeError("backing image backup not found")
+        if kind == rr.K_LH_VOLUME and str(spec.get("fromBackup", "")).startswith("dry-run://"):
+            # Longhorn 1.12.1 : « cannot get backup none » (vu sur le banc)
+            raise RuntimeError('cannot get backup none: backup.longhorn.io "none" not found')
         if kind == rr.K_SECRET and md.get("namespace") == rp.CARNET_NAMESPACE and \
                 (rr.K_NS, None, rp.CARNET_NAMESPACE) not in self.objs:
             raise RuntimeError(f'namespaces "{rp.CARNET_NAMESPACE}" not found')
@@ -845,8 +848,10 @@ def test_protect_dry_run_writes_nothing_and_defers_what_protect_creates_first(wo
     assert all(d["ok"] for d in res["dry_run"])
     sv = {d["name"]: d for d in res["dry_run"] if d["object"] == "standby-volume"}
     assert all(d.get("placeholder_url") for d in sv.values())
-    deferred = sorted(n for n, d in sv.items() if d.get("deferred") == "backing-image")
-    assert len(deferred) == 1 and all(c[3] not in deferred for c in w.dst.calls if c[1] == rr.K_LH_VOLUME)
+    # aucune sauvegarde encore : Longhorn refuse un `fromBackup` d'essai, rien n'est tenté
+    assert sorted(d["deferred"] for d in sv.values()).count("backing-image") == 1
+    assert {d["deferred"] for d in sv.values()} == {"backing-image", "first-backup"}
+    assert not [c for c in w.dst.calls if c[1] == rr.K_LH_VOLUME and c[0] == "create"]
     assert [d["deferred"] for d in res["dry_run"] if d["object"] == "carnet"] == ["namespace", "namespace"]
     assert ("create", rr.K_NS, None, rp.CARNET_NAMESPACE, "dry") in w.dst.calls
     assert not [c for c in w.dst.calls if c[1] == rr.K_SECRET and c[0] == "create"]
@@ -2250,3 +2255,18 @@ def test_protect_dry_run_tries_the_carnet_once_its_namespace_exists(world):
     assert carnets and all(d["ok"] and "deferred" not in d for d in carnets)
     assert not [d for d in res["dry_run"] if d["object"] == "namespace"]
     assert len([c for c in w.dst.calls if c[0] == "create" and c[1] == rr.K_SECRET and c[4] == "dry"]) == len(carnets)
+
+
+def test_protect_dry_run_tries_a_standby_once_a_backup_exists(world):
+    w = world
+    for n in ("vm-a", "vm-b"):
+        for d in VMS[n]["disks"]:
+            w.src.make_backup(f"pvc-{n}-{d}", f"backup-pre-{n}-{d}")
+    w.dst.sync_all()
+    res = rr.protect(w.ctx(), dry_run=True)
+    assert res["exit"] == 0
+    sv = [d for d in res["dry_run"] if d["object"] == "standby-volume"]
+    tried = [d for d in sv if "deferred" not in d]
+    assert tried and all(d["ok"] and d["placeholder_url"] is False for d in tried)
+    assert {d.get("deferred") for d in sv} == {None, "backing-image"}
+    assert len([c for c in w.dst.calls if c[0] == "create" and c[1] == rr.K_LH_VOLUME and c[4] == "dry"]) == len(tried)
