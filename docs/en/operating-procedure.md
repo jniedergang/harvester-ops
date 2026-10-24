@@ -201,9 +201,16 @@ disks are too far apart is refused unless `--accept-skew`. Read
 `lost_after` in the result: the writes after it are lost. When the source
 comes back, make sure its VMs stay stopped.
 
-**Interrupted.** A failover cut after the activation (exit 3 `interrupted`,
-or a console restart) is finished with `resume web`, with the target alone
-if needed. A protect cancelled before its end is undone; run it again.
+**Interrupted.** A failover cut after the activation (exit 3 `interrupted`)
+is finished with `resume web`, with the target alone if needed. A console
+restart, a host reboot or an update does not cancel anything: a protect
+(initial restore included), a measure or an unprotect in progress is left
+`interrupted` with the step it reached, and `resume web` continues it
+without copying again what was restored (Activity says "interrupted by the
+console shutdown"). A failover not yet activated is undone at that moment.
+Only a cancel by a person (dock cancel, Ctrl-C) undoes a protect; run it
+again afterwards. A command reported `not-started` never began: run it
+again.
 
 **Unprotect.** `unprotect web --yes`. VMs that were failed over keep
 everything on the target (listed in `left`). After a completed failover,

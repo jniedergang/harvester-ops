@@ -3175,8 +3175,27 @@ rattrapage.
 **Reprise.** Une bascule interrompue après l'activation (annulation, arrêt
 brutal, redémarrage de la console) reste en l'état : plan en `error`, rien
 n'est défait. `resume` la termine, avec la cible seule si la source a
-disparu. Il termine aussi une protection ou une déprotection interrompue.
-La confirmation donnée au départ d'une bascule vaut pour sa reprise.
+disparu. Il termine aussi une protection, une mesure ou une déprotection
+interrompue. La confirmation donnée au départ d'une bascule vaut pour sa
+reprise.
+
+**Un arrêt de la console n'est pas une annulation (décision 68).** Un
+redémarrage de la console, un redémarrage de l'hôte ou une mise à jour
+forcée arrête une protection en cours (restauration initiale comprise),
+une mesure ou une déprotection à son prochain point sûr, et ne défait
+rien. La commande reste `interrupted` : le plan garde son état
+(`protecting`, `measuring`, `unprotecting`), et l'étape atteinte figure
+dans le résultat (`step`), au journal et dans son exécution. `resume` la
+continue. Il ne recopie pas ce qui est déjà là : Longhorn continue de
+restaurer pendant que la console est arrêtée, et la protection reprise
+attend les mêmes volumes de secours (le bilan dit ce qui était déjà
+restauré). Seule l'annulation d'une personne (bouton du dock, SIGTERM ou
+Ctrl-C en ligne de commande) défait une protection. Une annulation de la
+protection reprise défait toute la protection, comme une annulation avant
+l'arrêt. Une bascule pas encore activée est défaite à l'arrêt de la
+console, comme pour une annulation : avant son activation elle est tout ou
+rien, et la VM source redémarre. Une commande arrêtée avant sa première
+écriture rend `not-started` : la relancer.
 
 **Déprotection, et décision 47.** `unprotect --yes` retire sur la cible les
 volumes de secours, carnets et backing images restaurées des VMs jamais
@@ -3253,7 +3272,9 @@ confirmation absente, état qui ne permet pas la commande, `state-changed`
 quand le plan a changé entre la lecture et le verrou, `open-run` quand une
 bascule est ouverte sur un autre périmètre) ; 3 annulé par un signal
 (`cancelled` : défait, ou `interrupted` : rien n'est défait, `resume`
-termine) ; 4 `status` avec un objectif dépassé (son JSON dit quand même
+termine), ou arrêté par l'arrêt de la console (SIGUSR2 : `interrupted`
+avec `step` et `resume_required`, ou `not-started` quand rien n'a été
+écrit) ; 4 `status` avec un objectif dépassé (son JSON dit quand même
 `ok: true`). Avec `--json`, exactement un objet part sur stdout ; les
 étapes partent sur stderr en `STEP_EVENT|<étape>|<statut>|<message>`. Aucun
 chemin de fichier n'apparaît jamais dans une sortie ni dans le journal.
@@ -3265,14 +3286,22 @@ chemin de fichier n'apparaît jamais dans une sortie ni dans le journal.
 par plan (`plan set --timeout NOM=S`, à chaud) et par commande (`--timeout
 NOM=S`). Tout retour arrière a une échéance unique, `undo_total` (240 s) :
 passée, plus rien n'est tenté et ce qui reste est listé. Arrêter ou
-redémarrer la console envoie SIGTERM à chaque commande de réplication en
-cours : une protection en cours, restauration initiale comprise, est
-annulée et défaite dans son échéance ; une bascule passé son activation, ou
-une déprotection commencée, reste `interrupted` et doit être reprise.
+redémarrer la console envoie SIGUSR2 à chaque commande de réplication en
+cours, qui veut dire « arrête au prochain point sûr et garde l'état ». Une
+protection, une mesure ou une déprotection s'arrête entre deux étapes ou au
+prochain relevé d'une attente, en au plus un appel kubectl (`client`, 30 s
+par défaut ; au-delà, la commande s'arrête là où elle est, toujours sans
+rien défaire). La console l'attend `client + 15` s, puis la tue. Une
+bascule pas encore activée est défaite dans son échéance `undo_total`, et
+une annulation déjà demandée par une personne garde son échéance de retour
+arrière : seules ces deux-là peuvent encore consommer le budget d'arrêt.
 L'unité systemd attend jusqu'à 600 s (`podman stop -t 600`,
 `TimeoutStopSec=630s`) ; la console sort tout de suite quand aucune
 commande de réplication ne tourne. Un plan suivi par la console ne peut pas
 avoir `undo_total + client` au-delà de 570 s (refusé avec `stop-budget`).
+Une console lancée hors du conteneur par sa propre unité systemd a besoin
+de `KillMode=mixed` : avec `control-group`, la valeur par défaut, systemd
+envoie aussi SIGTERM à chaque enfant, ce qui est une annulation.
 
 **Le processus de suivi.** La console lance un suiveur enfant,
 `harvester-replication follow --all --console`, pour les plans dont
@@ -3340,7 +3369,18 @@ restauration initiale égale à ce que Longhorn a restauré (4 Kio d'écart
 sur 348 Mio), le contrôle non planifié source perdue (points, écart,
 rattrapage en cours), `point_at` dans les deux modes et `lost_after` pour
 la non planifiée seulement, et `unprotect-delete-backups` refusé sur un
-plan dont une VM est activée. Faits Longhorn sur lesquels elle repose :
+plan dont une VM est activée. Le 24/10/2026 au soir, la décision 68 par
+une seconde console : un disque de données de 2 Gio (données
+incompressibles), une protection lancée depuis la console, la console
+arrêtée pendant la restauration initiale (sortie en 1 s au lieu d'un
+retour arrière) : plan toujours `protecting`, étape `initial-restore`
+rangée, volumes de secours et tâche gardés sur les deux clusters, Activité
+qui affiche « interrupted by the console shutdown » ; la reprise depuis la
+console redémarrée a atteint `protected` avec les mêmes volumes de secours
+(mêmes uid), la seconde fois avec 1,1 Gio sur 2,0 Gio déjà restaurés par
+Longhorn pendant l'arrêt, finie 11 s plus tard. Une annulation depuis le
+dock pendant la restauration initiale a toujours tout défait. Faits
+Longhorn sur lesquels elle repose :
 l'étiquette `backup-volume` d'un Backup est le nom du volume ; les
 étiquettes de la tâche récurrente sont dans `spec.labels` et
 `status.labels`, jamais dans `metadata.labels` ; un instantané ou une
@@ -3358,7 +3398,8 @@ sauvegarde en vol pendant le rattrapage d'une bascule non planifiée, un
 BackupVolume cible supprimé pendant un passage, SIGTERM pendant un kubectl
 lent, des nœuds suspendus pendant une bascule, un arrêt gracieux de la
 cible (harvlab2) pendant la protection, un arrêt de la console pendant une
-protection, un PVC en mode système de fichiers, et les refus du contrôle
+mesure ou une déprotection (couvert par les tests seulement), un PVC en
+mode système de fichiers, et les refus du contrôle
 pour la capacité, un nom de volume pris et une MAC prise. Le contrôle non
 planifié à blanc juge `caught-up` d'après les sauvegardes que la cible voit
 à cet instant, qui peuvent avoir 1 à 4 minutes de retard sur la source ; la

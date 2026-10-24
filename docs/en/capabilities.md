@@ -2891,8 +2891,24 @@ each VM would get, the skew, and the disks still catching up.
 **Resume.** A failover interrupted after the activation (cancel, crash,
 console restart) is left as it is: plan in `error`, nothing undone.
 `resume` finishes it, with the target alone if the source is gone. It
-also finishes an interrupted protect or unprotect. The confirmation given
-at the start of a failover holds for its resume.
+also finishes an interrupted protect, measure or unprotect. The
+confirmation given at the start of a failover holds for its resume.
+
+**A console shutdown is not a cancel (decision 68).** A console restart,
+a host reboot or a forced update stops a running protect (initial restore
+included), measure or unprotect at its next safe point, and undoes
+nothing. The command is left `interrupted`: the plan keeps its state
+(`protecting`, `measuring`, `unprotecting`), and the step it reached is in
+the result (`step`), in the journal and in its run. `resume` continues it.
+It does not copy again what is already there: Longhorn goes on restoring
+while the console is down, and the resumed protect waits for the same
+standby volumes (the summary says how much was already restored). Only a
+cancel by a person (dock cancel, SIGTERM or Ctrl-C at the shell) rolls a
+protect back. A cancel of a resumed protect undoes the whole protection,
+as a cancel before the shutdown would have. A failover not yet activated
+is undone at a console shutdown, as for a cancel: before its activation
+it is all or nothing, and the source VM starts again. A command stopped
+before its first write reports `not-started`: run it again.
 
 **Unprotect, and decision 47.** `unprotect --yes` removes on the target
 the standby volumes, carnets and restored backing images of VMs that were
@@ -2965,7 +2981,9 @@ missing confirmation, a state that does not allow the command,
 `state-changed` when the plan changed between the read and the lock,
 `open-run` when a failover is open on another scope); 3 cancelled by a
 signal (`cancelled`: undone, or `interrupted`: nothing undone, `resume`
-finishes); 4 `status` with an objective exceeded (its JSON still says
+finishes), or stopped by the console shutdown (SIGUSR2: `interrupted`
+with `step` and `resume_required`, or `not-started` when nothing was
+written); 4 `status` with an objective exceeded (its JSON still says
 `ok: true`). With `--json`, exactly one object goes to stdout; steps go to
 stderr as `STEP_EVENT|<step>|<status>|<message>`. No file path ever
 appears in an output or in the journal.
@@ -2977,14 +2995,21 @@ appears in an output or in the journal.
 per plan (`plan set --timeout NAME=S`, hot) and per command
 (`--timeout NAME=S`). Every rollback has one overall deadline,
 `undo_total` (240 s): past it nothing more is tried and what is left is
-listed. Stopping or restarting the console sends SIGTERM to every running
-replication command: a running `protect`, the initial restore included,
-is cancelled and rolled back within its deadline; a failover after its
-activation, or a started unprotect, is left `interrupted` and must be
-resumed. The systemd unit waits up to 600 s (`podman stop -t 600`,
-`TimeoutStopSec=630s`); the console exits at once when no replication
-command runs. A plan followed by the console cannot have `undo_total +
-client` above 570 s (refused with `stop-budget`).
+listed. Stopping or restarting the console sends SIGUSR2 to every running
+replication command, which means "stop at the next safe point and keep
+the state". A protect, a measure or an unprotect stops between two steps
+or at the next poll of a wait, within one kubectl call (`client`, 30 s by
+default; past it the command stops where it is, still without undoing
+anything). The console waits `client + 15` s for it, then kills it. A
+failover not yet activated is undone within its `undo_total` deadline,
+and a cancel already asked by a person keeps its rollback deadline: only
+these two can still use the stop budget. The systemd unit waits up to
+600 s (`podman stop -t 600`, `TimeoutStopSec=630s`); the console exits at
+once when no replication command runs. A plan followed by the console
+cannot have `undo_total + client` above 570 s (refused with
+`stop-budget`). A console started outside the container by its own
+systemd unit needs `KillMode=mixed`: with the default `control-group`,
+systemd also sends SIGTERM to every child, which is a cancel.
 
 **The follower process.** The console starts one follower child,
 `harvester-replication follow --all --console`, for the plans whose
@@ -3047,7 +3072,17 @@ that reused a 6-minute-old backup, the initial restore size equal to what
 Longhorn restored (4 KiB apart on 348 MiB), the unplanned check with the
 source lost (points, skew, catch-up pending), `point_at` in both modes and
 `lost_after` for the unplanned one only, and `unprotect-delete-backups`
-refused on a plan with an activated VM.
+refused on a plan with an activated VM. On 24/10/2026 at night, decision
+68 through a second console: a 2 GiB data disk (incompressible data), a
+protect started from the console, the console stopped during the initial
+restore (exit in 1 s instead of a rollback): plan still `protecting`, step
+`initial-restore` recorded, standby volumes and job kept on both
+clusters, Activity saying "interrupted by the console shutdown"; resume
+from the restarted console reached `protected` with the same standby
+volumes (same uids), the second time with 1.1 GiB of 2.0 GiB already
+restored by Longhorn while the console was down, finished 11 s later. A
+cancel from the dock during the initial restore still rolled everything
+back.
 Longhorn facts this relies on: a Backup's `backup-volume` label is the
 volume name; recurring job labels are in `spec.labels` and
 `status.labels`, never in `metadata.labels`; a snapshot or backup of a
@@ -3063,8 +3098,8 @@ in error, live migration during protection, a forced unplanned failover on
 a reachable source, a backup in flight during an unplanned catch-up, a
 target BackupVolume deleted during a pass, SIGTERM during a slow kubectl,
 nodes suspended during a failover, a graceful shutdown of the target
-(harvlab2) during protection, a console stop during a protect, a
-filesystem-mode PVC, and the check refusals for capacity, a taken volume
+(harvlab2) during protection, a console stop during a measure or an
+unprotect (covered by tests only), a filesystem-mode PVC, and the check refusals for capacity, a taken volume
 name and a taken MAC. The dry unplanned check judges `caught-up` against
 the backups the target sees at that moment, which may lag the source by 1
 to 4 minutes; the real failover resyncs first.

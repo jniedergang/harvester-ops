@@ -207,9 +207,15 @@ les disques sont trop écartés est refusée sauf avec `--accept-skew`. Lire
 Quand la source revient, s'assurer que ses VMs restent arrêtées.
 
 **Interruption.** Une bascule coupée après l'activation (sortie 3
-`interrupted`, ou redémarrage de la console) se termine avec `resume web`,
-avec la cible seule si besoin. Une protection annulée avant sa fin est
-défaite ; la relancer.
+`interrupted`) se termine avec `resume web`, avec la cible seule si besoin.
+Un redémarrage de la console, de l'hôte ou une mise à jour n'annule rien :
+une protection (restauration initiale comprise), une mesure ou une
+déprotection en cours reste `interrupted` avec l'étape atteinte, et
+`resume web` la continue sans recopier ce qui est restauré (l'Activité affiche
+« interrupted by the console shutdown »). Une bascule pas encore activée
+est défaite à ce moment-là. Seule l'annulation d'une personne (bouton du
+dock, Ctrl-C) défait une protection ; la relancer ensuite. Une commande
+rendue `not-started` n'a jamais commencé : la relancer.
 
 **Déprotection.** `unprotect web --yes`. Les VMs basculées gardent tout sur
 la cible (listé dans `left`). Après une bascule terminée, les sauvegardes
