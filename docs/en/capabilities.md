@@ -3107,12 +3107,116 @@ to 4 minutes; the real failover resyncs first.
 The operator procedure (first protection, failover, unprotect) is in
 [operating-procedure.md](operating-procedure.md#12-disaster-recovery-asynchronous-replication).
 
+### Follow-up data, alerts, notifications and link tests
+
+These are the reads and settings behind the replication screens. The
+console and the command line call the same functions, so they show the
+same objects.
+
+**Plan rows.** Each plan row (`GET /api/replication/plans`, the `row` of a
+plan, `plan list --json`, `plan show --json`) also carries `transfer` (the
+last pass of any VM: date, bytes sent, upload and apply throughput; bytes
+and passes over the last 24 hours), `pending_vms` (VMs of a selector plan
+that carry the label but are not protected yet, as `ns/name`), `alerts`
+(the number of active alerts of the plan) and `reach` (whether the
+follower last read the source and the target: `true`, `false`, or `null`
+when never read; the worst value over the plan's VMs, with the date of the
+latest reading).
+
+**Chart series.** `GET /api/replication/plans/<id>/series?range=1h|24h|7d|30d`
+(optional `resource=<uid>`) groups the per-pass statistics in buckets of
+60 s, 600 s, 3600 s and 21600 s: the worst RPO held and backlog, the mean
+throughputs (weighted by passes for hourly rows), the bytes sent and the
+number of passes. Empty buckets are left out.
+
+**Selector plans.** At each spec reading (every 10 minutes by default,
+`follow_spec`), the follower lists the source VMs of the selector
+namespace. A VM that carries the label and is not in the plan is written
+once to the journal (`selector-new-vm`, warning) and kept in the plan's
+`pending_vms` until it is protected or loses the label. A VM of the plan
+that lost the label is written once (`selector-vm-left`, information): it
+stays protected until unprotect. A follower restart writes neither again.
+The follower never protects anything.
+
+**Automatic protection.** With the plan option `auto_protect: true` (stored
+by the plan settings), a protected selector plan with pending VMs and no
+command running gets a `protect` started by the console itself: a tracked
+action `replication:<plan>:protect`, author `console`, run with the
+console's own kubeconfigs, at most once every 10 minutes per plan. Only
+the console that holds the follower lock does this. Kill switch, read
+again every minute: `replication: {auto_protect: false}` in `config.yaml`.
+
+**Active alerts.** `GET /api/replication/alerts?host=<cluster>` and
+`harvester-replication alerts [--host H] --json` compute the alerts from
+the present state, errors first: `rpo-exceeded`, `disk-never-backs-up`,
+`standby-degraded`, `plan-drift`, `selector-new-vm` (warnings),
+`source-unreachable`, `backup-error`, `plan-error` (plan in `error`) and
+`source-vm-running-after-failover` (errors). The last one comes from a
+follower health flag: after a failover, the follower watches the source VM
+and flags it as long as it runs again. `since` is the date of the latest
+journal event of that kind (or the date a pending VM was first seen).
+`host` keeps the plans where that cluster is source or target.
+
+**External notifications.** Matrix (client-server API, a room id and an
+access token), Slack (incoming webhook), a generic JSON webhook (plain
+headers and secret headers) and e-mail (SMTP, optional STARTTLS, optional
+login). The settings live in `replication.db`: `enabled`, `min_level`
+(`warn` or `error`), `codes` (`null` for every alert code above plus the
+failover results `failed-over` and `interrupted` and the return under the
+objective `rpo-recovered`), and the channels. `failed-over` and
+`rpo-recovered` are sent whatever `min_level`, when selected. The console
+follower sends them: at each round, the new journal events that pass the
+filter are grouped into one message per channel, sent from a background
+thread (10 s per call, 3 tries), so a slow mail server never delays the
+follower. The journal position moves on once a batch is done; a channel
+that failed three times is written to the journal (`notify-failed`). A
+batch in flight when the follower stops is sent again at its restart. The
+first round after an upgrade starts at the end of the journal (nothing old
+is sent). A shell follower sends only with `follow --all --notify`.
+Secrets (Matrix token, Slack URL, secret header values, mail password) are
+shown as `********` on every read (API, command line output, journal,
+Activity). Writing `********` back keeps the stored value, so a screen can
+send the settings it read. The settings reach the command line through a
+private file (`notify set --spec FILE`), never through its arguments.
+
+**Links between clusters.** `GET /api/replication/links` and `link list
+--json` give one entry per source and target pair that has a plan or a
+test: its plans, the passive figures from the plans' passes (last upload
+and apply throughput, medians and totals over 24 hours, an hourly series)
+and the last active test. The active test (`POST
+/api/replication/links/test`, `link test --from A --to B --size-mib N`,
+64 to 4096 MiB, 512 by default) measures what replication really uses: a
+temporary pod on the source writes N MiB of random data to the shared NFS
+backup target, then a pod on the target reads it back and deletes it. The
+durations come from the pods' logs. Both pods use the cluster's own
+longhorn-manager image (already on every node, nothing to pull, airgap
+safe) and run in `longhorn-system`. Pods and file are always removed, on
+error, on cancel and at a console shutdown; a file whose removal is not
+confirmed is removed by a cleanup pod, and the result says so if even
+that fails. The test is refused with `backup-target-differs` when the two
+clusters do not use the same backup target, and `not-supported` for a
+target other than NFS. It runs with the person's kubeconfigs for both
+clusters, as a tracked action, one at a time per pair, and its result is
+kept (table `link_tests`). Not verified on a real cluster yet: the tools
+the script expects in the longhorn-manager image (`sh`, `dd`, `date
++%s.%N`, `stat`) and the NFS mount from a pod; unit tests only.
+
+**Roles** for these routes: every read is viewer, except the notification
+settings (operator, even masked: they say where alerts go). Changing them
+and sending a test message need admin. A link test needs operator.
+
 API: reads `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, row, status, volumes, last runs,
 lock, lease), `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
 `GET /api/replication/hosts/<cluster>/resources?side=`,
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
-`GET /api/replication/follower`; writes (answer `202 {action_id}`)
+`GET /api/replication/follower`,
+`GET /api/replication/plans/<id>/series?range=&resource=`,
+`GET /api/replication/alerts?host=`, `GET /api/replication/links`,
+`GET /api/replication/notify` (operator, secrets masked); writes (answer
+`202 {action_id}`) `PUT /api/replication/notify` (admin),
+`POST /api/replication/notify/test` (`{channel}`, admin),
+`POST /api/replication/links/test` (`{from, to, size_mib}`),
 `POST /api/replication/plans`,
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
@@ -3136,7 +3240,9 @@ start|stop|report P`, `measure formula`, `protect P [--dry-run]
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/name ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
-`unprotect P --yes [--delete-backups]`. P is a plan id or name. Commands
+`unprotect P --yes [--delete-backups]`, `alerts [--host H]`, `notify
+show|set --spec FILE|test --channel ID`, `link list`, `link test --from A
+--to B [--size-mib N]`. P is a plan id or name. Commands
 that talk to clusters take `--from-kubeconfig`, `--to-kubeconfig` and
 `--timeout NAME=S`; every command takes `--json`.
 
