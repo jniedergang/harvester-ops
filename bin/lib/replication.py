@@ -100,9 +100,12 @@ TIMEOUTS = {"probe": 15, "stop": 600, "snapshot": 300, "final_backup": 6 * 3600,
             # plan : lecture rapide pendant un passage, santé, relecture de
             # la spec des VMs, délai laissé à la tâche pour démarrer ses
             # sauvegardes après l'échéance, fenêtre de lecture rapide (None :
-            # l'intervalle du plan)
+            # min(intervalle, barrier + resync_apply)). Deux compteurs, pas
+            # des secondes : intervalles sans sauvegarde avant qu'un disque
+            # soit dit « ne sauvegarde jamais », tours injoignables de suite
+            # avant que le cluster soit dit injoignable (hystérésis)
             "follow_poll": 3, "follow_health": 60, "follow_spec": 600, "follow_grace": 60,
-            "follow_window": None}
+            "follow_window": None, "follow_never_intervals": 2, "follow_down_rounds": 2}
 TIMEOUT_MAX = 7 * 86400
 
 OPTION_CHOICES = {"cloud_init": ("keep", "rerun"), "mac": ("keep", "new"),
@@ -1252,7 +1255,7 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
 # Raison -> état calculé, et priorité des états (le premier l'emporte)
 REASON_STATE = {"source-unreachable": "source-unreachable", "backup-error": "degraded",
                 "standby-degraded": "degraded", "rpo-drift": "drifting", "plan-drift": "drifting",
-                "rpo-exceeded": "lagging", "no-point": "lagging"}
+                "rpo-exceeded": "lagging", "no-point": "lagging", "disk-never-backs-up": "degraded"}
 COMPUTED_PRIORITY = ("source-unreachable", "degraded", "drifting", "lagging")
 
 
@@ -1270,6 +1273,9 @@ def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None)
             reasons.append("backup-error")
         if health.get("standby_degraded"):
             reasons.append("standby-degraded")
+        if health.get("never_backs_up"):
+            # disques sans sauvegarde depuis plusieurs intervalles (suiveur)
+            reasons.append("disk-never-backs-up")
         if ev["drift"]:
             reasons.append("rpo-drift")
         if spec_drifted(resource, health):

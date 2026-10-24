@@ -25,6 +25,12 @@ import cluster_decl
 import replication as rp
 
 RETENTION_DAYS = 400
+# Statistiques gardées passage par passage pendant 30 jours, puis réduites à
+# une ligne par heure (et par plan, génération, ressource) jusqu'à
+# RETENTION_DAYS. Volume : une ligne par VM et par passage, soit 480 par jour
+# à 3 min d'intervalle ; avec la réduction, environ 30 x 480 + 370 x 24 =
+# 23 280 lignes par VM au lieu de 192 000.
+STATS_FULL_DAYS = 30
 # Verrou d'une commande : le détenteur le renouvelle (`lock_heartbeat`) au
 # moins toutes les LOCK_TTL_S / 3 secondes ; sans quoi un autre hôte le
 # reprend passé ce délai.
@@ -171,6 +177,9 @@ TABLES = {
         ("upload_bps", "REAL"),
         ("apply_bps", "REAL"),
         ("state", "TEXT NOT NULL DEFAULT ''"),
+        # passages agrégés dans la ligne : 1, ou plus après la réduction à
+        # l'heure des statistiques de plus de STATS_FULL_DAYS jours
+        ("passes", "INTEGER NOT NULL DEFAULT 1"),
     ],
     "runs": [
         ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
@@ -1093,11 +1102,52 @@ def get_lock(conn, plan_id):
 # Rétention
 # ---------------------------------------------------------------------------
 
-def prune(conn, before):
+_STATS_MAX = ("disks", "backup_s", "apply_lag_s", "resync_to_apply_s", "skew_s", "rpo_held_s", "backlog")
+_STATS_MEAN = ("upload_bps", "apply_bps")
+
+
+def downsample_stats(conn, before):
+    """Statistiques d'avant `before` réduites à une ligne par heure (plan,
+    génération, ressource) : pires valeurs (durées, écart, RPO tenu,
+    arriéré, disques), somme des octets envoyés, moyenne des débits pondérée
+    par les passages, dernier état. Idempotent (une heure déjà réduite n'a
+    plus qu'une ligne). Rend le nombre de lignes retirées."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT rowid AS rid, * FROM stats WHERE pass_at < ? ORDER BY plan_id, generation, resource_uid, pass_at",
+        (_iso(before),))]
+    groups = {}
+    for r in rows:
+        groups.setdefault((r["plan_id"], r["generation"], r["resource_uid"], r["pass_at"][:13]), []).append(r)
+    removed = 0
+    with _tx(conn):
+        for items in groups.values():
+            if len(items) < 2:
+                continue
+            agg = {k: items[0][k] for k in ("plan_id", "generation", "resource_uid", "pass_at")}
+            agg["ts"] = max(r["ts"] for r in items)
+            agg["state"] = items[-1]["state"]
+            agg["passes"] = sum(int(r.get("passes") or 1) for r in items)
+            agg["newly_uploaded"] = sum(int(r["newly_uploaded"] or 0) for r in items)
+            for k in _STATS_MAX:
+                vals = [r[k] for r in items if r[k] is not None]
+                agg[k] = max(vals) if vals else None
+            for k in _STATS_MEAN:
+                vals = [(r[k], int(r.get("passes") or 1)) for r in items if r[k] is not None]
+                agg[k] = sum(v * w for v, w in vals) / sum(w for _v, w in vals) if vals else None
+            conn.execute(f"DELETE FROM stats WHERE rowid IN ({','.join('?' for _ in items)})",
+                         [r["rid"] for r in items])
+            _insert(conn, "stats", agg)
+            removed += len(items) - 1
+    return removed
+
+
+def prune(conn, before, now=None):
     """Efface passages, mesures et événements d'avant `before` (400 jours
-    en usage normal). Le dernier passage appliqué de chaque volume est
-    gardé : sans lui, le RPO d'un plan figé deviendrait inconnu. Rend
-    {"ticks", "measures", "events", "stats"} (lignes effacées)."""
+    en usage normal), et réduit à l'heure les statistiques de plus de
+    STATS_FULL_DAYS jours (`now` : maintenant par défaut). Le dernier
+    passage appliqué de chaque volume est gardé : sans lui, le RPO d'un plan
+    figé deviendrait inconnu. Rend {"ticks", "measures", "events", "stats",
+    "stats_downsampled"} (lignes effacées)."""
     t, te = _iso(before), _event_ts(before)
     with _tx(conn):
         n_ticks = conn.execute(
@@ -1110,7 +1160,31 @@ def prune(conn, before):
         n_meas = conn.execute("DELETE FROM measures WHERE snapshot_at < ?", (t,)).rowcount
         n_ev = conn.execute("DELETE FROM events WHERE ts < ?", (te,)).rowcount
         n_stats = conn.execute("DELETE FROM stats WHERE pass_at < ?", (t,)).rowcount
-    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev, "stats": n_stats}
+    n_down = downsample_stats(conn, _now(now) - timedelta(days=STATS_FULL_DAYS))
+    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev, "stats": n_stats, "stats_downsampled": n_down}
+
+
+# Constats du suiveur et leur fin (`replication_follow`) : relus au démarrage
+# pour ne pas réécrire un constat toujours en cours
+FOLLOW_PER_BACKUP = ("backup-error", "apply-late", "backup-volume-missing")
+
+
+def last_follow_events(conn, since_per_backup=None):
+    """Dernier événement du suiveur par (plan, ressource, code), plus tous
+    ceux des constats propres à une sauvegarde ou un volume
+    (FOLLOW_PER_BACKUP) depuis `since_per_backup`. Rend une liste de lignes
+    (faits décodés), plus anciennes d'abord."""
+    rows = conn.execute(
+        "SELECT e.* FROM events e JOIN (SELECT MAX(id) AS id FROM events WHERE operation = 'follow'"
+        " GROUP BY plan_id, resource_uid, code) m ON e.id = m.id ORDER BY e.id").fetchall()
+    out = [_row("events", r) for r in rows]
+    if since_per_backup is not None:
+        q = ("SELECT * FROM events WHERE operation = 'follow' AND ts >= ? AND code IN ("
+             + ",".join("?" for _ in FOLLOW_PER_BACKUP) + ") ORDER BY id")
+        seen = {r["id"] for r in out}
+        out += [_row("events", r) for r in conn.execute(q, [_event_ts(since_per_backup), *FOLLOW_PER_BACKUP])
+                if r["id"] not in seen]
+    return sorted(out, key=lambda r: r["id"])
 
 
 def retention_cutoff(now=None):

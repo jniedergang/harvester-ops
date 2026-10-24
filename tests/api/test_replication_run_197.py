@@ -182,6 +182,9 @@ class FakeKube:
         self.calls = []
         self.timers = []
         self.down = False
+        # cluster mort (et pas seulement coupé du client) : ses contrôleurs
+        # Longhorn s'arrêtent aussi, une sauvegarde en cours ne finit jamais
+        self.dead = False
         self.freeze = set()      # comportements suspendus (délais)
         self.hooks = {}          # (op, kind) -> fonction appelée avant l'appel
         self.last_natural = self.clock.now()
@@ -211,6 +214,8 @@ class FakeKube:
 
     # -- simulation ------------------------------------------------------------
     def tick(self):
+        if self.dead:
+            return
         now = self.clock.now()
         while True:
             due = [t for t in self.timers if t[0] <= now]
@@ -305,7 +310,12 @@ class FakeKube:
     # -- interface client ----------------------------------------------------------
     def _guard(self, op, kind, name, mutating, dry=False):
         self.tick()
-        if self.down:
+        # cluster coupé du client (`down`) : ses contrôleurs tournent
+        # toujours au rythme de l'horloge commune ; mort (`dead`) : plus rien
+        peer = self.world.dst if self is self.world.src else self.world.src
+        if peer.down and peer is not self:
+            peer.tick()
+        if self.down or self.dead:
             raise RuntimeError("Unable to connect to the server: dial tcp: i/o timeout")
         hook = self.hooks.get(("dry" if dry else op, kind))
         if hook:
@@ -418,9 +428,21 @@ class FakeKube:
             self.at(1, lambda: o["status"].update(readyToUse=True, creationTime=iso(self.clock.now())))
 
     def _on_Backup(self, o):
+        """Comme le mutateur de longhorn-manager (webhook/resources/backup/
+        mutator.go, v1.12.0) : étiquettes `backup-volume` (nom du VOLUME,
+        celui de l'instantané s'il manque) et `backup-target` posées à la
+        création. `status.volumeName` n'est rempli qu'à la fin
+        (backup_controller.go, synchronisation d'une sauvegarde terminée) :
+        une sauvegarde en cours ou en erreur n'a que ses étiquettes."""
         snap = self.objs[(rr.K_LH_SNAPSHOT, rr.NS, o["spec"]["snapshotName"])]
-        vol = snap["spec"]["volume"]
-        o["status"] = {"state": "InProgress", "volumeName": vol, "progress": 10}
+        labels = o["metadata"].setdefault("labels", {})
+        vol = labels.setdefault("backup-volume", snap["spec"]["volume"])
+        labels.setdefault("backup-target", "default")
+        o["status"] = {"state": "InProgress", "progress": 10}
+        if (rr.K_LH_VOLUME, rr.NS, vol) not in self.objs:
+            # le contrôleur cherche le moteur du volume nommé par l'étiquette
+            o["status"].update(state="Error", error=f"cannot find the engine of volume {vol}")
+            return
         if "backup" in self.freeze:
             return
         self.at(self.backup_s, lambda: self.complete_backup(o, vol, snap["status"].get("creationTime")))
@@ -428,7 +450,8 @@ class FakeKube:
     def complete_backup(self, o, vol, snap_at, newly=25_174_351):
         name = o["metadata"]["name"]
         url = f"{BT_URL}?backup={name}&volume={vol}"
-        o["status"].update(state="Completed", url=url, snapshotCreatedAt=snap_at or iso(self.clock.now()),
+        o["status"].update(state="Completed", url=url, volumeName=vol,
+                           snapshotCreatedAt=snap_at or iso(self.clock.now()),
                            backupCreatedAt=iso(self.clock.now()), newlyUploadDataSize=str(newly), size=str(newly))
         self.store.backups[name] = {"volume": vol, "url": url, "snapshot_at": o["status"]["snapshotCreatedAt"],
                                     "done_at": o["status"]["backupCreatedAt"], "newly": newly, "size": newly,
@@ -441,8 +464,9 @@ class FakeKube:
 
     def make_backup(self, vol, name, snap_at=None, newly=25_174_351, labels=None):
         """Sauvegarde déjà terminée (tâche récurrente, sauvegarde Harvester)."""
-        o = self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS, "labels": labels or {}},
-                                      "spec": {"snapshotName": name}, "status": {"volumeName": vol}})
+        labels = dict({"backup-volume": vol, "backup-target": "default"}, **(labels or {}))
+        o = self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS, "labels": labels},
+                                      "spec": {"snapshotName": name}, "status": {}})
         self.complete_backup(o, vol, snap_at or iso(self.clock.now()), newly)
         return o
 
@@ -1383,6 +1407,37 @@ def test_unplanned_failover_with_the_source_lost(tmp_path):
     assert db.list_runs(w.conn, w.pid)[-1]["points"]["mode"] == "unplanned"
     # rien n'a été écrit sur la source
     assert w.src.calls[n_src:] == []
+
+
+@pytest.mark.parametrize("mode", ["partition", "dead"])
+def test_unplanned_failover_with_backups_in_flight(tmp_path, mode):
+    """Sauvegardes en cours au moment de la panne. Coupure réseau
+    (`partition`) : Longhorn finit la sauvegarde sur la source, la cible la
+    voit à la relecture finale. Cluster mort (`dead`) : elle ne finit
+    jamais ; la bascule part du dernier point terminé et dit la perte."""
+    w = protected(tmp_path, vms=("vm-b",))
+    w.clock.sleep(30)
+    for d in VMS["vm-b"]["disks"]:
+        w.src.make_backup(f"pvc-vm-b-{d}", f"backup-done-vm-b-{d}")
+    w.clock.sleep(30)
+    for d in VMS["vm-b"]["disks"]:
+        v = f"pvc-vm-b-{d}"
+        o = w.src.put(rr.K_LH_BACKUP, {"metadata": {"name": f"backup-flight-{d}", "namespace": rr.NS,
+                                                    "labels": {"backup-volume": v, "backup-target": "default"}},
+                                       "spec": {"snapshotName": f"backup-flight-{d}"},
+                                       "status": {"state": "InProgress"}})
+        w.src.at(1, lambda o=o, v=v: w.src.complete_backup(o, v, iso(w.clock.now() - 1)))
+    setattr(w.src, "down" if mode == "partition" else "dead", True)
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 0, res
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    got = w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"]
+    if mode == "dead":
+        assert got == "backup-done-vm-b-d1"
+        assert not [n for n in w.store.backups if n.startswith("backup-flight")]
+    else:
+        assert got == "backup-flight-d1"
+    assert set(res["lost_after"]) == {"default/vm-b"}
 
 
 def test_unplanned_failover_skew_between_disks(tmp_path):

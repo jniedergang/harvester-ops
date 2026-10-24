@@ -70,23 +70,25 @@ def bv_name(k, volume):
     return rr.find_backup_volume(k, volume)["metadata"]["name"]
 
 
-def start_pass(w, vm, finish, newly=None, snap=None, errors=(), label="volume"):
+def start_pass(w, vm, finish, newly=None, snap=None, errors=(), target="default", skip=()):
     """Une échéance de la tâche récurrente : une sauvegarde par disque de la
     VM, en cours ; chacune finit `finish[disque]` secondes plus tard
-    (absente : jamais), en erreur pour les disques de `errors`. `label` :
-    valeur de l'étiquette `backup-volume` (nom du volume, ou du
-    BackupVolume)."""
+    (absente : jamais), en erreur pour les disques de `errors`. Comme
+    Longhorn : étiquettes `backup-volume` (nom du volume) et `backup-target`
+    dès la création, `status.volumeName` seulement une fois terminée (rien
+    pour une sauvegarde en cours ou en erreur)."""
     t0 = w.clock.now()
     names = {}
     for d in VMS[vm]["disks"]:
+        if d in skip:
+            continue                    # disque hors de la tâche : aucune sauvegarde
         v = vol(vm, d)
         name = f"rb-{vm}-{d}-{int(t0)}"
         at = iso(t0 + (snap or {}).get(d, 0))
-        lab = v if label == "volume" else bv_name(w.src, v)
         o = w.src.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS,
-                                                    "labels": {"backup-volume": lab}},
+                                                    "labels": {"backup-volume": v, "backup-target": target}},
                                        "spec": {"snapshotName": name},
-                                       "status": {"state": "InProgress", "volumeName": v, "snapshotCreatedAt": at}})
+                                       "status": {"state": "InProgress", "snapshotCreatedAt": at}})
         names[d] = name
         if d not in finish:
             continue
@@ -176,6 +178,13 @@ def test_rhythm_follows_the_plan_and_its_hot_settings():
     r = rf.rhythm({"interval_s": 300, "options": {"timeouts": {"follow_health": 30, "follow_window": 120,
                                                                "barrier": 20}}})
     assert (r["follow_health"], r["follow_window"], r["barrier"], r["lease_ttl"]) == (30, 120, 20, 90)
+    # fenêtre de lecture rapide : barrière + attente de l'application, au plus l'intervalle
+    r = rf.rhythm({"interval_s": 3600, "options": {}})
+    assert (r["barrier"], r["follow_window"], r["follow_never_intervals"], r["follow_down_rounds"]) == \
+        (1800, 2400, 2, 2)
+    r = rf.rhythm({"interval_s": 3600, "options": {"timeouts": {"barrier": 60, "resync_apply": 120,
+                                                                "follow_never_intervals": 4}}})
+    assert (r["follow_window"], r["follow_never_intervals"]) == (180, 4)
     assert rp.normalize_timeouts({"follow_poll": "5s"}) == {"follow_poll": 5}
 
 
@@ -342,7 +351,7 @@ def test_loop_timing_fast_during_a_pass_then_sleeps_until_the_next_tick(tmp_path
     assert during and all(g == pytest.approx(3) for g in during)
     after = [(at, nw) for at, nw in reports if at > applied_at + 60]
     assert after and all(nw - at <= 60 for at, nw in after)
-    assert any(nw == pytest.approx(t0 - 1 + INTERVAL) for at, nw in reports if at > applied_at)
+    assert any(nw == pytest.approx(t0 - 1 + INTERVAL, abs=0.01) for at, nw in reports if at > applied_at)
     # boucle terminée : bail rendu
     assert db.get_lease(w.conn, w.pid) is None
 
@@ -403,7 +412,7 @@ def test_kubectl_lists_per_round_do_not_grow_with_the_plans(tmp_path):
         f.close()
     assert counts["one"] == counts["two"]
     assert counts["two"][1] == (1, 1)                  # Backups de la source, moteurs de la cible
-    assert counts["two"][0] == (3, 2)                  # + VMs et PVC source, volumes de secours cible
+    assert counts["two"][0] == (3, 3)                  # + VMs et PVC source, volumes de secours et carnets cible
 
 
 # ---------------------------------------------------------------------------
@@ -507,7 +516,8 @@ def test_bad_data_in_one_plan_is_an_event_not_a_crash(tmp_path):
     f.once()
     align(w)
     o = w.src.put(rr.K_LH_BACKUP, {"metadata": {"name": "rb-bad", "namespace": rr.NS,
-                                                "labels": {"backup-volume": vol("vm-b", "d1")}},
+                                                "labels": {"backup-volume": vol("vm-b", "d1"),
+                                                           "backup-target": "default"}},
                                    "status": {"state": "Completed", "volumeName": vol("vm-b", "d1"),
                                               "snapshotCreatedAt": "not-a-date"}})
     assert o
@@ -611,7 +621,7 @@ def test_no_work_when_nothing_is_followed(tmp_path, state, mode, modes):
     f = follower(w, modes=modes)
     r = f.once()
     assert r["calls"] == 0 and w.src.calls == [] and w.dst.calls == []
-    assert r["next_wake"] == pytest.approx(w.clock.now() + 60)
+    assert r["next_wake"] == pytest.approx(w.clock.now() + 60, abs=0.01)
     assert db.get_lease(w.conn, w.pid) is None
 
 
@@ -732,14 +742,16 @@ def test_measuring_records_passes_and_never_reads_the_target(tmp_path):
     assert w.dst.calls == []
 
 
-def test_backups_labelled_with_the_backup_volume_name_are_found(tmp_path):
+def test_backups_of_another_backup_target_are_ignored(tmp_path):
     w = protected(tmp_path)
     f = follower(w)
+    w.src.calls.clear()
     f.once()
     align(w)
-    names = start_pass(w, "vm-b", {"d1": 5, "d2": 6, "d3": 7}, label="bv")
+    other = start_pass(w, "vm-b", {"d1": 5, "d2": 6, "d3": 7}, target="offsite")
     run_until(w, f, w.clock.now() + 60)
-    assert all(tick(w, n)["state"] == "applied" for n in names.values())
+    assert not [t for t in ticks(w) if t["backup"] in other.values()]
+    assert all("backup-target=default" in c[3] for c in lists(w.src) if c[1] == rr.K_LH_BACKUP)
 
 
 def test_sigterm_stops_the_loop_between_rounds_and_releases_the_lease(tmp_path):
@@ -783,3 +795,370 @@ def test_follow_once_is_a_single_round_without_memory(tmp_path):
     w = protected(tmp_path)
     r = rf.follow_once(w.conn, {"harvlab": w.src, "harvlab2": w.dst}, now=w.clock.now, owner=OWNER)
     assert w.pid in r["followed"] and db.get_lease(w.conn, w.pid) is None
+
+
+# ---------------------------------------------------------------------------
+# Revue : sauvegardes en cours et en erreur lues par leurs étiquettes
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", ["in_progress", "error"])
+def test_in_progress_and_error_backups_are_seen_by_their_label(tmp_path, case):
+    """Longhorn ne remplit `status.volumeName` qu'à la fin d'une sauvegarde
+    réussie : en cours ou en erreur, elle ne se reconnaît qu'à son étiquette
+    `backup-volume`. Un disque en erreur donne `backup-error` dès l'erreur
+    et ferme la barrière, sans attendre son expiration."""
+    w = protected(tmp_path)
+    w.dst.freeze.add("natural-sync")
+    f = follower(w)
+    f.once()
+    align(w)
+    t0 = w.clock.now()
+    seen = watch_patches(w)
+    names = start_pass(w, "vm-b", {"d1": 5, "d2": 6, "d3": 20}, errors=("d3",) if case == "error" else ())
+    o = w.src.obj(rr.K_LH_BACKUP, rr.NS, names["d3"])
+    assert "volumeName" not in o["status"]                      # le faux est fidèle à Longhorn
+    run_until(w, f, t0 + 4)
+    assert {tick(w, n)["state"] for n in names.values()} == {"in_progress"}
+    run_until(w, f, t0 + 150)
+    if case == "error":
+        assert "volumeName" not in o["status"]
+        assert tick(w, names["d3"])["state"] == "error"
+        ev = follow_events(w, "backup-error")
+        assert len(ev) == 1 and ev[0]["ts"] <= iso(t0 + 20 + 3)
+        assert min(t for t, _ in seen) <= t0 + 20 + 3          # barrière fermée par l'erreur
+        assert not follow_events(w, "barrier-timeout")
+    else:
+        assert all(tick(w, n)["state"] == "applied" for n in names.values())
+        assert t0 + 20 <= min(t for t, _ in seen) <= t0 + 23
+
+
+def test_disk_that_never_backs_up_is_one_condition(tmp_path):
+    """d3 hors de la tâche : après deux intervalles, un seul constat agrégé,
+    raison de santé ; d1 et d2 n'attendent plus la barrière à chaque passage
+    et aucun barrier-timeout n'est réécrit par passage. Son retour est écrit
+    une fois."""
+    w = protected(tmp_path)
+    w.dst.freeze.add("natural-sync")
+    f = follower(w)
+    f.once()
+    seen = watch_patches(w)
+    starts = []
+    for _ in range(5):
+        align(w)
+        starts.append(w.clock.now())
+        start_pass(w, "vm-b", {"d1": 5, "d2": 6}, skip=("d3",))
+        run_until(w, f, w.clock.now() + 170)
+    ev = follow_events(w, "disk-never-backs-up")
+    assert len(ev) == 1 and vol("vm-b", "d3") in ev[0]["facts"] and ev[0]["resource_uid"] == ""
+    assert len(follow_events(w, "barrier-timeout")) <= 1
+    barrier = rf.rhythm(w.plan())["barrier"]
+    last = [t for t, n in seen if t >= starts[-1]]
+    assert last and min(last) < starts[-1] + barrier            # plus d'attente de la barrière
+    uid = VMS["vm-b"]["uid"]
+    assert db.health_map(w.conn, w.pid)[uid]["never_backs_up"] == [vol("vm-b", "d3")]
+    st = status(w)["vms"][0]
+    assert "disk-never-backs-up" in st["reasons"] and st["state"] == "degraded"
+    # pas de lecture rapide pour lui : un intervalle sans passage, quelques tours seulement
+    align(w)
+    start_pass(w, "vm-b", {"d1": 5, "d2": 6}, skip=("d3",))
+    n0 = len(lists(w.src))
+    run_until(w, f, w.clock.now() + 170)
+    assert len(lists(w.src)) - n0 <= 15
+    # il sauvegarde de nouveau
+    align(w)
+    start_pass(w, "vm-b", {"d1": 5, "d2": 6, "d3": 7})
+    run_until(w, f, w.clock.now() + 170)
+    assert len(follow_events(w, "disk-backs-up")) == 1
+    assert db.health_map(w.conn, w.pid)[uid]["never_backs_up"] == []
+    assert len(follow_events(w, "disk-never-backs-up")) == 1
+
+
+def test_a_stopped_vm_is_never_flagged_as_never_backing_up(tmp_path):
+    w = protected(tmp_path, vms=("vm-c",))
+    set_running(w, "vm-c", False, since=iso(w.clock.now() - 7200))
+    f = follower(w)
+    run_until(w, f, w.clock.now() + 6 * INTERVAL)
+    assert not follow_events(w, "disk-never-backs-up")
+
+
+# ---------------------------------------------------------------------------
+# Revue : taille des sélecteurs
+# ---------------------------------------------------------------------------
+
+class Recorder:
+    """Client qui ne répond rien et garde chaque appel."""
+
+    def __init__(self):
+        self.calls = []
+
+    def list(self, kind, ns=None, selector=None):
+        self.calls.append((kind, selector))
+        return []
+
+    def get(self, kind, ns, name):
+        return None
+
+    def patch(self, kind, ns, name, patch, dry_run=False):
+        self.calls.append(("patch", name))
+
+
+@pytest.mark.parametrize("count,backup_requests,wide", [(3, 1, False), (150, 4, False), (300, 1, True)])
+def test_selectors_stay_bounded_with_many_volumes(tmp_path, count, backup_requests, wide):
+    import uuid
+    w = World(tmp_path, vms=("vm-b",))
+    db.set_state(w.conn, w.pid, "draft", "protecting")
+    db.set_state(w.conn, w.pid, "protecting", "protected")
+    db.upsert_resource(w.conn, w.pid, {"generation": 1, "resource_uid": "u-big", "source_host": "harvlab",
+                                       "target_host": "harvlab2", "namespace": "default", "name": "big",
+                                       "state": "protected"})
+    for i in range(count):
+        db.upsert_volume(w.conn, w.pid, {"generation": 1, "vm_uid": "u-big", "disk": f"d{i}",
+                                         "source_volume": f"pvc-{uuid.uuid4()}",
+                                         "target_volume": (f"hr-big-d{i}-" + uuid.uuid4().hex)[:40],
+                                         "state": "standby"})
+    src, dst = Recorder(), Recorder()
+    f = rf.Follower(w.conn, {"harvlab": src, "harvlab2": dst}, OWNER, now=w.clock.now)
+    f.once()
+    from urllib.parse import quote
+    for _kind, sel in src.calls + dst.calls:
+        assert sel is None or len(quote(sel)) <= rf.SELECTOR_MAX
+    sels = [sel for kind, sel in src.calls if kind == rr.K_LH_BACKUP]
+    assert len(sels) == backup_requests
+    assert all(sel.startswith("backup-target=default") for sel in sels)
+    assert (sels == ["backup-target=default"]) is wide
+    eng = [sel for kind, sel in dst.calls if kind == rr.K_LH_ENGINE]
+    assert (eng == [None]) is wide and len(eng) <= rf.SELECTOR_CHUNKS
+
+
+def test_selectors_helper():
+    assert rf._selectors("k", ["b", "a"], base="t=x") == ["t=x,k in (a,b)"]
+    assert rf._selectors("k", [], base="t=x") == []
+    many = [f"v{i:04d}" for i in range(2000)]
+    assert rf._selectors("k", many, base="t=x") == ["t=x"]
+    assert rf._selectors("k", many) == [None]
+    parts = rf._selectors("k", many[:400])
+    assert 1 < len(parts) <= rf.SELECTOR_CHUNKS
+    assert sorted(v for p in parts for v in p[len("k in ("):-1].split(",")) == many[:400]
+
+
+# ---------------------------------------------------------------------------
+# Revue : écriture refusée, NotFound, hystérésis de la joignabilité
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("case", ["notfound", "unreachable", "refused"])
+def test_resync_patch_errors_are_classified(tmp_path, case):
+    w = protected(tmp_path)
+    w.dst.freeze.add("natural-sync")
+    f = follower(w)
+    f.once()
+    uid = VMS["vm-b"]["uid"]
+    if case == "notfound":
+        # BackupVolume recréé sous un autre nom : le nom rangé par protect n'existe plus
+        old = bv_name(w.dst, vol("vm-b", "d1"))
+        o = w.dst.objs.pop((rr.K_LH_BV, rr.NS, old))
+        o["metadata"]["name"] = "bv-recreated"
+        w.dst.objs[(rr.K_LH_BV, rr.NS, "bv-recreated")] = o
+    else:
+        msg = {"unreachable": "Unable to connect to the server: dial tcp 10.0.0.1:6443: i/o timeout",
+               "refused": 'backupvolumes "x" is forbidden: User cannot patch resource'}[case]
+
+        def fail(_name):
+            raise RuntimeError(msg)
+        w.dst.hooks[("patch", rr.K_LH_BV)] = fail
+    align(w)
+    t0 = w.clock.now()
+    names = start_pass(w, "vm-b", {"d1": 5, "d2": 6, "d3": 7})
+    run_until(w, f, t0 + 120)
+    h = db.health_map(w.conn, w.pid)[uid]
+    if case == "notfound":
+        assert not follow_events(w, "target-unreachable") and h["target_reachable"] is True
+        assert all(tick(w, n)["state"] == "applied" for n in names.values())
+        assert tick(w, names["d1"])["resync_at"]
+        assert f.bv["harvlab2"][vol("vm-b", "d1")] == "bv-recreated"
+    elif case == "unreachable":
+        assert len(follow_events(w, "target-unreachable")) == 1 and h["target_reachable"] is False
+        assert not any(tick(w, n)["resync_at"] for n in names.values())
+    else:
+        assert not follow_events(w, "target-unreachable") and h["target_reachable"] is True
+        assert len(follow_events(w, "resync-failed")) == 3           # une fois par BackupVolume
+        assert not any(tick(w, n)["resync_at"] for n in names.values())
+
+
+@pytest.mark.parametrize("rounds,events", [(1, 0), (2, 1), (6, 1)])
+def test_unreachable_needs_consecutive_rounds(tmp_path, rounds, events):
+    w = protected(tmp_path)
+    f = follower(w)
+    f.once()
+    w.clock.sleep(3)
+    w.dst.down = True
+    reach = []
+    for _ in range(rounds):
+        f.once()
+        reach.append(db.health_map(w.conn, w.pid)[VMS["vm-b"]["uid"]]["target_reachable"])
+        w.clock.sleep(3)
+    assert len(follow_events(w, "target-unreachable")) == events
+    assert reach[0] is True and reach[-1] is (False if events else True)
+    w.dst.down = False
+    f.once()
+    assert len(follow_events(w, "target-reachable")) == events
+
+
+def test_health_of_a_cluster_never_read_is_unknown(tmp_path):
+    w = protected(tmp_path)
+    w.dst.down = True
+    f = follower(w)
+    f.once()
+    h = db.health_map(w.conn, w.pid)[VMS["vm-b"]["uid"]]
+    assert h["target_reachable"] is None and h["source_reachable"] is True
+    w.clock.sleep(3)
+    f.once()
+    assert db.health_map(w.conn, w.pid)[VMS["vm-b"]["uid"]]["target_reachable"] is False
+
+
+def test_source_down_mid_pass_gives_no_barrier_timeout_from_stale_reads(tmp_path):
+    w = protected(tmp_path)
+    w.dst.freeze.add("natural-sync")
+    f = follower(w)
+    f.once()
+    align(w)
+    t0 = w.clock.now()
+    names = start_pass(w, "vm-b", {"d1": 5, "d2": 6})          # d3 ne finit jamais
+    run_until(w, f, t0 + 10)
+    w.src.down = True
+    run_until(w, f, t0 + 150)
+    assert not follow_events(w, "barrier-timeout")
+    assert len(follow_events(w, "source-unreachable")) == 1
+    assert not any(tick(w, names[d])["resync_at"] for d in ("d1", "d2"))
+    w.src.down = False
+    run_until(w, f, w.clock.now() + 30)
+    assert len(follow_events(w, "barrier-timeout")) == 1
+    assert all(tick(w, names[d])["resync_at"] for d in ("d1", "d2"))
+
+
+def test_heartbeat_carries_the_write_time(tmp_path):
+    w = protected(tmp_path)
+    w.dst.freeze.add("natural-sync")
+    f = follower(w)
+    f.once()
+    align(w)
+    start_pass(w, "vm-b", {"d1": 1, "d2": 1, "d3": 1})
+    w.clock.sleep(5)
+    start = w.clock.now()
+    w.dst.hooks[("list", rr.K_LH_ENGINE)] = lambda _n: setattr(w.clock, "t", w.clock.t + 40)
+    seen = watch_patches(w)
+    f.once()
+    assert seen
+    assert rp._t(db.get_lease(w.conn, w.pid)["heartbeat"]).timestamp() - start == pytest.approx(40, abs=0.5)
+
+
+# ---------------------------------------------------------------------------
+# Revue : redémarrage du suiveur, arrêt pendant un appel
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("condition", ["target-unreachable", "plan-drift"])
+def test_restart_does_not_write_an_active_condition_again(tmp_path, condition):
+    w = protected(tmp_path)
+    f = follower(w)
+    f.once()
+    if condition == "target-unreachable":
+        w.dst.down = True
+    else:
+        _vm_change(w, "disk-added")
+    run_until(w, f, w.clock.now() + 700)
+    assert len(follow_events(w, condition)) == 1
+    f.close()
+    g = follower(w, owner="cli:testhost:901")                    # redémarrage
+    run_until(w, g, w.clock.now() + 700)
+    assert len(follow_events(w, condition)) == 1
+    if condition == "target-unreachable":
+        w.dst.down = False
+        g.once()
+        assert len(follow_events(w, "target-reachable")) == 1
+
+
+def test_sigterm_kills_a_waiting_kubectl_call_and_releases_the_lease(tmp_path):
+    import subprocess
+    import threading
+    import time as rtime
+    w = protected(tmp_path)
+
+    class Slow:
+        def __init__(self, k):
+            self.k = k
+
+        def __getattr__(self, name):
+            return getattr(self.k, name)
+
+        def list(self, kind, ns=None, selector=None):
+            if kind == rr.K_LH_BACKUP:
+                subprocess.run(["sleep", "30"], check=False)      # kubectl qui attend
+            return self.k.list(kind, ns, selector)
+
+    f = rf.Follower(w.conn, {"harvlab": Slow(w.src), "harvlab2": w.dst}, OWNER, now=w.clock.now)
+    stopper = rf.Stopper()
+    old = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+    timer = threading.Timer(0.3, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    try:
+        stopper.install()
+        t = rtime.monotonic()
+        timer.start()
+        out = rf.follow_loop(f, stopper, sleep=w.clock.sleep)
+        took = rtime.monotonic() - t
+    finally:
+        timer.cancel()
+        for s, h in old.items():
+            signal.signal(s, h)
+    assert took < 5 and out["stopped"] and out["signal"] == signal.SIGTERM
+    assert db.get_lease(w.conn, w.pid) is None
+
+
+# ---------------------------------------------------------------------------
+# Revue : carnet périmé, statistiques réduites
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("how,stale,drift", [
+    ("none", False, False), ("memory", True, False), ("cpu", True, False), ("run-strategy", False, False),
+    ("disk-added", True, True),
+])
+def test_carnet_stale_is_reported_and_nothing_is_written(tmp_path, how, stale, drift):
+    w = protected(tmp_path)
+    f = follower(w)
+    f.once()
+    if how == "cpu":
+        vm = w.src.obj(rr.K_VM, "default", "vm-b")
+        vm["spec"]["template"]["spec"]["domain"]["cpu"] = {"cores": 8}
+        vm["metadata"]["generation"] += 1
+    elif how != "none":
+        _vm_change(w, how)
+    before = len([c for c in w.dst.mutations() if c[1] == rr.K_SECRET])
+    run_until(w, f, w.clock.now() + 1300)
+    ev = follow_events(w, "carnet-stale")
+    assert len(ev) == (1 if stale else 0)
+    assert len(follow_events(w, "plan-drift")) == (1 if drift else 0)
+    assert len([c for c in w.dst.mutations() if c[1] == rr.K_SECRET]) == before
+    if how in ("memory", "cpu"):
+        assert "spec.template.spec.domain" in ev[0]["facts"]
+
+
+def test_stats_older_than_30_days_are_downsampled_hourly(tmp_path):
+    w = protected(tmp_path)
+    uid = VMS["vm-b"]["uid"]
+    now = rf._utc(w.clock.now())
+    old = w.clock.now() - 40 * 86400
+    hour = math.floor(old / 3600) * 3600
+    rows = [(hour + 60, 10, 1.0, 100.0, 5), (hour + 240, 30, 4.0, 300.0, 7), (hour + 420, 20, 2.0, None, 6),
+            (hour + 3700, 5, 1.0, 50.0, 3), (w.clock.now() - 600, 1, 1.0, 10.0, 1),
+            (w.clock.now() - 420, 2, 1.0, 10.0, 1)]
+    for at, newly, backup_s, bps, rpo in rows:
+        db.record_stats(w.conn, w.pid, {"generation": 1, "resource_uid": uid, "pass_at": iso(at), "ts": iso(at + 20),
+                                        "newly_uploaded": newly, "backup_s": backup_s, "upload_bps": bps,
+                                        "rpo_held_s": rpo, "disks": 3, "state": "protected"})
+    out = db.prune(w.conn, db.retention_cutoff(now), now=now)
+    assert out["stats_downsampled"] == 2
+    st = db.list_stats(w.conn, w.pid, uid)
+    assert len(st) == 4
+    agg = st[0]
+    assert agg["pass_at"] == iso(hour + 60) and agg["passes"] == 3 and agg["newly_uploaded"] == 60
+    assert agg["backup_s"] == 4.0 and agg["rpo_held_s"] == 7 and agg["upload_bps"] == pytest.approx(200.0)
+    assert [s["passes"] for s in st[1:]] == [1, 1, 1]
+    assert db.prune(w.conn, db.retention_cutoff(now), now=now)["stats_downsampled"] == 0

@@ -331,12 +331,22 @@ def _int(v):
         return 0
 
 
+def backup_volume_of(b):
+    """Volume d'une sauvegarde : étiquette `backup-volume` (nom du volume,
+    posée par le mutateur dès la création), sinon `status.volumeName`.
+    Ce dernier n'est rempli qu'une fois la sauvegarde terminée
+    (longhorn-manager v1.10.0 et v1.12.0, controller/backup_controller.go,
+    synchronisation d'une sauvegarde `Completed`) : une sauvegarde en cours
+    ou en erreur ne se reconnaît qu'à son étiquette."""
+    return _labels(b).get("backup-volume") or _status(b).get("volumeName") or ""
+
+
 def backups_by_volume(kube):
-    """`Backup` de longhorn-system groupés par volume (`status.volumeName`),
+    """`Backup` de longhorn-system groupés par volume (`backup_volume_of`),
     rangés par date d'instantané. Une seule liste par appel."""
     out = {}
     for b in kube.list(K_LH_BACKUP, NS):
-        vol = _status(b).get("volumeName") or _labels(b).get("backup-volume") or ""
+        vol = backup_volume_of(b)
         out.setdefault(vol, []).append(b)
     for v in out.values():
         v.sort(key=lambda b: (_status(b).get("snapshotCreatedAt") or "", _md(b).get("name")))
@@ -368,7 +378,7 @@ def find_backup_volume(kube, volume):
 
 def _tick_from_backup(b, vm_uid, generation, state=None):
     st = _status(b)
-    return {"generation": generation, "vm_uid": vm_uid, "source_volume": st.get("volumeName") or "",
+    return {"generation": generation, "vm_uid": vm_uid, "source_volume": backup_volume_of(b),
             "backup": _md(b).get("name"), "snapshot_at": st.get("snapshotCreatedAt") or "",
             "backup_started_at": _md(b).get("creationTimestamp") or "",
             "backup_done_at": st.get("backupCreatedAt") or st.get("lastSyncedAt") or "",
@@ -775,9 +785,13 @@ def take_backups(ctx, op, items, kind, token=""):
         return True
     wait_for(ctx, op, "snapshots ready", ready, ctx.timeouts["snapshot"], every=2)
     for uid, vol in items:
-        bv = find_backup_volume(ctx.src, vol)
-        _ensure(ctx, "src", rp.backup(vol, names[vol], backup_volume=_md(bv).get("name") or vol,
-                                      target=BACKUP_TARGET, labels=dict(labels, **{rp.LABEL_VM: uid})),
+        # étiquette `backup-volume` = nom du VOLUME, jamais celui du
+        # BackupVolume : le contrôleur des sauvegardes cherche le moteur du
+        # volume qu'elle nomme (longhorn-manager v1.12.0,
+        # controller/backup_controller.go getBackupVolumeName, et le
+        # mutateur webhook/resources/backup/mutator.go)
+        _ensure(ctx, "src", rp.backup(vol, names[vol], target=BACKUP_TARGET,
+                                      labels=dict(labels, **{rp.LABEL_VM: uid})),
                 "backup")
     return names
 
