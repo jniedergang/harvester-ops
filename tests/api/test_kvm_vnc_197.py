@@ -359,7 +359,7 @@ def env(monkeypatch, fake_rfb):
     sim = {"domains": {"web": ("running", UEFI)}, "batches": [], "runs": [], "popen": [],
            "procs": [], "mode": "none"}
 
-    def fake_batch(self, commands, timeout=None, cmd_timeout=None):
+    def fake_batch(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
         sim["batches"].append(dict(commands))
         out = {}
         for k, cmd in commands.items():
@@ -374,12 +374,12 @@ def env(monkeypatch, fake_rfb):
         return out
     monkeypatch.setattr(kh.VirshHost, "batch", fake_batch)
 
-    def fake_run(self, remote_argv, timeout=None):
+    def fake_run(self, remote_argv, timeout=None, idempotent=False):
         sim["runs"].append(list(remote_argv))
         return IP_ADDR
     monkeypatch.setattr(kh.VirshHost, "run", fake_run)
 
-    def fake_virsh(self, *args, timeout=None):
+    def fake_virsh(self, *args, timeout=None, idempotent=False):
         name = args[-1]
         if name not in sim["domains"]:
             raise kh.KvmError("notfound", "node2: notfound: no domain")
@@ -490,7 +490,7 @@ def test_ticket_unknown_or_invalid_domain(client, domain, code):
 
 
 def test_ticket_unreachable_host_is_502(client, monkeypatch):
-    def boom(self, commands, timeout=None, cmd_timeout=None):
+    def boom(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
         raise kh.KvmError("unreachable", "node2: unreachable: ssh: connect to host 172.16.1.12 port 22: No route")
     monkeypatch.setattr(kh.VirshHost, "batch", boom)
     r = ticket(client)

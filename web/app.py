@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import contextlib
 import time
 import uuid
 from collections import Counter as _TallyCounter, deque
@@ -9804,7 +9805,8 @@ def _kvm_network_details(vh, inv):
     if not nets:
         return
     try:
-        out = vh.batch({n["name"]: ("net-dumpxml", "--network", n["name"]) for n in nets})
+        out = vh.batch({n["name"]: ("net-dumpxml", "--network", n["name"]) for n in nets},
+                       idempotent=True)
     except _kh.KvmError as e:
         inv["errors"].append({"command": "net-dumpxml", "kind": e.kind, "message": e.message})
         return
@@ -10045,12 +10047,15 @@ def api_kvm_host_test(host):
 
 
 def _kvm_vm_busy(host, domain):
-    """Un geste encore en cours sur la même VM (double clic, deux personnes)."""
+    """Un geste encore en cours sur la même VM (double clic, deux personnes).
+    Un clonage tient aussi le nom de sa copie (`kvm_vms`) : tant qu'il tourne,
+    rien ne se lance sur la VM qu'il est en train de créer."""
     suffix = f":{host}/{domain}"
     with ACTIONS_LOCK:
         for r in ACTIONS.values():
             if (r.status in ("starting", "running") and r.action.startswith("kvm:vm-")
-                    and r.action.endswith(suffix) and r.cluster == f"kvm:{host}"):
+                    and r.cluster == f"kvm:{host}"
+                    and (r.action.endswith(suffix) or domain in getattr(r, "kvm_vms", ()))):
                 return r
     return None
 
@@ -21513,6 +21518,39 @@ def ws_kvm_vnc(ws, host, domain):
 KVM_SNAPSHOT_TIMEOUT_MAX = 3600
 KVM_DELETE_SURVEY_TIMEOUT = int(getattr(_kvm_cli, "DELETE_SURVEY_TIMEOUT", 120)) if _kvm_cli else 120
 KVM_ACK_MAX = 64                       # fichiers illisibles acceptés en une fois
+# Aperçus (clonage, suppression) : chacun relève tous les disques de l'hôte
+# (dumpxml de chaque domaine, volumes, stat, qemu-img). Limite par personne
+# et nombre de relevés simultanés par hôte ; au-delà, 429 sans rien lancer.
+KVM_PREVIEW_RATE = "20/minute"
+KVM_SURVEYS_PER_HOST = 2
+_KVM_SURVEYS = {}                      # hôte -> relevés en cours
+_KVM_SURVEYS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _kvm_survey_slot(host):
+    """Place pour un relevé de disques sur `host` : rend True (place prise,
+    rendue en sortie) ou False (déjà KVM_SURVEYS_PER_HOST en cours)."""
+    with _KVM_SURVEYS_LOCK:
+        if _KVM_SURVEYS.get(host, 0) >= KVM_SURVEYS_PER_HOST:
+            yield False
+            return
+        _KVM_SURVEYS[host] = _KVM_SURVEYS.get(host, 0) + 1
+    try:
+        yield True
+    finally:
+        with _KVM_SURVEYS_LOCK:
+            left = _KVM_SURVEYS.get(host, 1) - 1
+            if left > 0:
+                _KVM_SURVEYS[host] = left
+            else:
+                _KVM_SURVEYS.pop(host, None)
+
+
+def _kvm_survey_busy(host, domain):
+    return jsonify({"error": f"{host}: {KVM_SURVEYS_PER_HOST} disk surveys are already running "
+                             "on this host; try again in a few seconds",
+                    "kind": "busy", "host": host, "name": domain}), 429
 
 # Table des opérations du second groupe du menu d'une VM : rôle demandé,
 # états où l'opération est possible (None : tous), définition persistante
@@ -21565,7 +21603,11 @@ def _kvm_vm_op(host, domain, verb, cmd, names=()):
             busy = _kvm_vm_busy(host, n)
             if busy:
                 return None, _busy_response(busy)
-        return _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd)
+        run, err = _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd)
+        if run is not None:
+            # posé sous le verrou : un geste concurrent le voit déjà
+            run.kvm_vms = (domain, *names)
+        return run, err
 
 
 @app.route("/api/kvm/vms/<host>/<domain>/snapshots")
@@ -21603,7 +21645,12 @@ def api_kvm_snapshot_create(host, domain):
         return _kvm_err("a JSON object is expected")
     try:
         snap = _ko.check_snapshot_name(body.get("name"), new=True)
-        desc = _ko._check_description(body.get("description") or None)
+        desc = body.get("description")
+        # texte seulement : 0 ou false ne deviennent ni « pas de
+        # description » ni le texte « 0 » ; une chaîne vide = aucune
+        if desc is not None and not isinstance(desc, str):
+            raise _ko.OpError("invalid", "description must be text")
+        desc = _ko._check_description(desc or None)
     except _ko.OpError as e:
         return _kvm_err(e.message)
     cmd = _kvm_snapshot_cmd("create", host, domain, snap)
@@ -21649,6 +21696,7 @@ def api_kvm_snapshot_delete(host, domain, snapshot):
 
 
 @app.route("/api/kvm/vms/<host>/<domain>/clone-plan")
+@_rate_limit(KVM_PREVIEW_RATE)
 @requires_auth
 @shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_clone_plan(host, domain):
@@ -21661,7 +21709,10 @@ def api_kvm_clone_plan(host, domain):
     new = request.args.get("name", "")
     try:
         _ko.check_new_vm_name(new)
-        plan = _ko.clone_plan(vh, domain, new)
+        with _kvm_survey_slot(host) as slot:
+            if not slot:
+                return _kvm_survey_busy(host, domain)
+            plan = _ko.clone_plan(vh, domain, new)
     except (_ko.OpError, _kh.KvmError) as e:
         return _kvm_op_error(e, {"host": host, "name": domain})
     return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],
@@ -21711,6 +21762,7 @@ def _kvm_flag(value):
 
 
 @app.route("/api/kvm/vms/<host>/<domain>/delete-plan")
+@_rate_limit(KVM_PREVIEW_RATE)
 @requires_auth
 @shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
 def api_kvm_delete_plan(host, domain):
@@ -21727,8 +21779,11 @@ def api_kvm_delete_plan(host, domain):
         if ack and not remove:
             raise _ko.OpError("invalid", "acknowledging unreadable files only applies when "
                               "the disks are deleted too")
-        plan = _ko.delete_plan(vh, domain, remove, ack or None,
-                               survey_timeout=KVM_DELETE_SURVEY_TIMEOUT)
+        with _kvm_survey_slot(host) as slot:
+            if not slot:
+                return _kvm_survey_busy(host, domain)
+            plan = _ko.delete_plan(vh, domain, remove, ack or None,
+                                   survey_timeout=KVM_DELETE_SURVEY_TIMEOUT)
     except (_ko.OpError, _kh.KvmError) as e:
         return _kvm_op_error(e, {"host": host, "name": domain})
     return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],

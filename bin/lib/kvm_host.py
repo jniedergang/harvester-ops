@@ -29,6 +29,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -66,6 +67,34 @@ _LIBVIRT_DOWN = ("failed to connect socket", "failed to connect to the hyperviso
                  "no connection driver available", "end of file while reading data")
 # codes de sortie de `timeout` (coreutils) : délai atteint, puis SIGKILL
 _TIMEOUT_RCS = (124, 137)
+
+# Reprise d'une LECTURE coupée au niveau du transport (ssh rend 255 sans que
+# la commande ait abouti). Vu en réel le 24/10/2026 : deux lectures lancées
+# ensemble sur le même ControlMaster ont fait tomber sshd 10.2p1 de l'hôte
+# (désynchronisation du moniteur privsep, « mm_request_receive: read: bad
+# msg_len »), le maître est mort avec la session en vol. Une lecture se
+# rejoue sans risque ; une écriture jamais (on ne sait pas si elle a eu
+# lieu). La reprise part sur une connexion neuve, hors du maître (mort).
+READ_RETRIES = 1
+READ_RETRY_DELAY = 0.5
+MAX_READ_RETRIES = 3
+# échecs de ssh qui ne sont pas une coupure : les rejouer ne changerait rien
+# (empreinte, clé) ou ferait attendre un second ConnectTimeout (hôte absent)
+_NO_RETRY_SSH = (
+    *_SSH_MARKERS[0][1], *_SSH_MARKERS[1][1],
+    "connection timed out", "no route to host", "could not resolve hostname",
+    "network is unreachable", "operation timed out",
+)
+
+
+def transport_lost(rc, stderr):
+    """Vrai si ssh a rendu 255 pour une coupure de la connexion (session
+    fermée, maître disparu, connexion réinitialisée) et non pour une
+    empreinte, une clé ou un hôte injoignable."""
+    if rc != SSH_RC:
+        return False
+    low = (stderr or "").lower()
+    return not any(m in low for m in _NO_RETRY_SSH)
 
 # virDomainState -> libellé de `virsh domstate`
 DOMAIN_STATES = {0: "no state", 1: "running", 2: "idle", 3: "paused", 4: "in shutdown",
@@ -246,13 +275,20 @@ def _ssh_base(decl, state):
     ]
 
 
-def ssh_argv(decl, state, remote_argv):
+def ssh_argv(decl, state, remote_argv, fresh=False):
     """Ligne de commande ssh qui lance `remote_argv` sur l'hôte. Chaque
     élément distant est cité (shlex.quote) et le tout part en UN argument :
-    le shell distant le redécoupe exactement en `remote_argv`. KvmError
-    (`failed`) pour une déclaration ou un chemin rangé invalide."""
+    le shell distant le redécoupe exactement en `remote_argv`. `fresh` :
+    connexion directe, sans passer par le ControlMaster ni en créer un
+    (reprise d'une lecture après la mort du maître). KvmError (`failed`)
+    pour une déclaration ou un chemin rangé invalide."""
     remote = " ".join(shlex.quote(str(a)) for a in remote_argv)
-    return [*_ssh_base(decl, state), "--", decl["address"], remote]
+    base = _ssh_base(decl, state)
+    if fresh:
+        base[base.index("ControlMaster=auto")] = "ControlMaster=no"
+        i = next(i for i, a in enumerate(base) if a.startswith("ControlPath="))
+        base[i] = "ControlPath=none"
+    return [*base, "--", decl["address"], remote]
 
 
 VNC_PORT_MIN, VNC_PORT_MAX = 5900, 65535
@@ -311,7 +347,8 @@ def close_master(decl, state, runner=subprocess.run, timeout=10):
 class VirshHost:
     """Un hôte KVM déclaré, interrogé par `virsh` à travers SSH."""
 
-    def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20):
+    def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20,
+                 read_retries=READ_RETRIES, retry_delay=READ_RETRY_DELAY, sleep=time.sleep):
         self.decl = kvm_decl.normalize(decl)
         self.state = state
         self.runner = runner
@@ -319,6 +356,11 @@ class VirshHost:
         # délai de CHAQUE commande d'un batch, appliqué sur l'hôte par
         # `timeout` quand il y existe
         self.cmd_timeout = cmd_timeout
+        # reprises d'une lecture idempotente coupée (borné), attente
+        # croissante entre deux essais
+        self.read_retries = max(0, min(int(read_retries), MAX_READ_RETRIES))
+        self.retry_delay = max(0.0, float(retry_delay))
+        self.sleep = sleep
         self.name = self.decl.get("name")
 
     def _secret_paths(self):
@@ -333,8 +375,8 @@ class VirshHost:
     def _virsh_argv(self, args):
         return ["virsh", "-c", self.decl.get("uri", kvm_decl.DEFAULT_URI), *map(str, args)]
 
-    def _ssh(self, remote_argv, timeout, data=None):
-        argv = ssh_argv(self.decl, self.state, remote_argv)
+    def _ssh(self, remote_argv, timeout, data=None, fresh=False):
+        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=fresh)
         try:
             kvm_decl.ensure_ssh_dir(self.state)
         except OSError:
@@ -352,9 +394,22 @@ class VirshHost:
             raise KvmError("failed", f"{self.name}: failed: cannot run ssh ({e.strerror})",
                            host=self.name) from e
 
-    def run(self, remote_argv, timeout=None):
-        """Lance une commande quelconque sur l'hôte ; rend sa sortie."""
+    def _retry(self, attempt):
+        """Attend avant la reprise n° `attempt` (1, 2, ...)."""
+        self.sleep(self.retry_delay * attempt)
+
+    def run(self, remote_argv, timeout=None, idempotent=False):
+        """Lance une commande quelconque sur l'hôte ; rend sa sortie.
+        `idempotent=True` (lecture seulement) : une coupure du transport est
+        rejouée `read_retries` fois sur une connexion neuve. Une écriture
+        (défaut) n'est jamais rejouée : son issue est inconnue."""
         res = self._ssh(remote_argv, timeout)
+        attempt = 0
+        while (idempotent and res.returncode != 0 and attempt < self.read_retries
+               and transport_lost(res.returncode, res.stderr)):
+            attempt += 1
+            self._retry(attempt)
+            res = self._ssh(remote_argv, timeout, fresh=True)
         if res.returncode != 0:
             raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
                              ssh_level=res.returncode == SSH_RC)
@@ -376,9 +431,23 @@ class VirshHost:
                              secrets=input_secrets(data, secrets))
         return res.stdout or ""
 
-    def virsh(self, *args, timeout=None):
-        """Une commande virsh ; rend sa sortie, KvmError classée sinon."""
-        return self.run(["env", "LC_ALL=C", *self._virsh_argv(args)], timeout=timeout)
+    def virsh(self, *args, timeout=None, idempotent=False):
+        """Une commande virsh ; rend sa sortie, KvmError classée sinon.
+        `idempotent=True` pour une lecture (voir `run`)."""
+        return self.run(["env", "LC_ALL=C", *self._virsh_argv(args)], timeout=timeout,
+                        idempotent=idempotent)
+
+    @staticmethod
+    def _batch_lost(res, m_out, tok, count):
+        """Lot coupé par le transport : pas de repère de départ et ssh en
+        coupure, ou départ vu mais ssh en 255 avant la fin de la dernière
+        commande."""
+        if not m_out:
+            return transport_lost(res.returncode, res.stderr)
+        if res.returncode != SSH_RC:
+            return False
+        done = re.findall(rf"\n{tok} \d+ -?\d+\n", (res.stdout or "")[m_out.end():])
+        return len(done) < count
 
     def batch_script(self, items, token, cmd_timeout):
         """Script `sh` d'un batch : une ligne repère de départ (ce que le
@@ -403,7 +472,7 @@ class VirshHost:
                                                      for a in self._virsh_argv(args)))
         return "\n".join(lines)
 
-    def batch(self, commands, timeout=None, cmd_timeout=None):
+    def batch(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
         """Plusieurs commandes virsh en UN appel SSH. `commands` : un dict
         {clé: (arguments virsh)} ou une suite de tuples (clé = arguments
         joints par des espaces). Rend {clé: CmdOutput} ; une commande en échec
@@ -413,7 +482,12 @@ class VirshHost:
         Le jeton des repères est tiré au hasard à chaque appel : une sortie
         ne peut pas l'imiter. Délai de l'appel ssh entier : `timeout`, par
         défaut celui de l'hôte plus un délai de commande (une commande
-        bloquée ne fait pas perdre les autres)."""
+        bloquée ne fait pas perdre les autres).
+
+        `idempotent=True` (lot de lectures seulement) : un lot coupé au
+        niveau du transport (ssh en 255 sans repère de départ, ou avant la
+        dernière commande) est rejoué en entier, `read_retries` fois, sur une
+        connexion neuve. Un lot qui écrit (défaut) ne l'est jamais."""
         if isinstance(commands, dict):
             items = [(str(k), tuple(map(str, v))) for k, v in commands.items()]
         else:
@@ -423,11 +497,19 @@ class VirshHost:
         # `timeout 0` voudrait dire « sans délai » : au moins une seconde
         cmd_timeout = max(1, int(cmd_timeout or self.cmd_timeout))
         token = "@@kvm-" + secrets.token_hex(12)
-        res = self._ssh(["sh", "-c", self.batch_script(items, token, cmd_timeout)],
-                        timeout or (self.timeout + cmd_timeout))
+        script = self.batch_script(items, token, cmd_timeout)
         tok = re.escape(token)
         paths = self._secret_paths()
-        m_out = re.search(rf"(?:^|\n){tok} start (\d+)\n", res.stdout or "")
+        attempt = 0
+        while True:
+            res = self._ssh(["sh", "-c", script], timeout or (self.timeout + cmd_timeout),
+                            fresh=attempt > 0)
+            m_out = re.search(rf"(?:^|\n){tok} start (\d+)\n", res.stdout or "")
+            if not (idempotent and attempt < self.read_retries
+                    and self._batch_lost(res, m_out, tok, len(items))):
+                break
+            attempt += 1
+            self._retry(attempt)
         if not m_out:
             # pas de repère de départ : le script n'a pas tourné ; en 255,
             # c'est ssh (hôte, empreinte, clé) et stderr est le sien
@@ -964,7 +1046,7 @@ def host_inventory(host, details=False):
     cmds = dict(INVENTORY_COMMANDS)
     if details:
         cmds.update(DETAIL_COMMANDS)
-    out = host.batch(cmds)
+    out = host.batch(cmds, idempotent=True)
     errors = [{"command": k, "kind": v.error.kind, "message": v.error.message}
               for k, v in out.items() if not v.ok]
     if len(errors) == len(out):
@@ -1000,7 +1082,8 @@ def host_inventory(host, details=False):
     if details:
         pools = parse_pool_list_details(ok("pools"))
         active = [p["name"] for p in pools if p["state"] == "running"]
-        vols = host.batch({p: ("vol-list", "--pool", p, "--details") for p in active}) if active else {}
+        vols = (host.batch({p: ("vol-list", "--pool", p, "--details") for p in active},
+                           idempotent=True) if active else {})
         for p in pools:
             v = vols.get(p["name"])
             p["volumes"] = parse_vol_list_details(str(v)) if v is not None and v.ok else []
@@ -1019,7 +1102,7 @@ def vm_detail(host, name):
     out = host.batch({"xml": ("dumpxml", "--domain", name),
                       "info": ("dominfo", "--domain", name),
                       "stats": ("domstats", "--raw", "--nowait", *DOMSTATS_GROUPS,
-                                "--domain", name)})
+                                "--domain", name)}, idempotent=True)
     for key in ("xml", "info"):
         if not out[key].ok:
             raise out[key].error

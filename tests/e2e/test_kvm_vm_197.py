@@ -139,10 +139,11 @@ def ui(context, flask_server):
                     if state.get("fail_lists"):
                         state["fail_lists"] -= 1
                         return ok(route, {"error": "node2: failed: error: domain is busy", "kind": "failed"}, 502)
+                    vstate = state.get("vm_state", {}).get(name, v["state"])
                     return ok(route, {"host": "node2", "name": name, "role": state["role"],
                                       "snapshots": SNAPS.get(name, []), "current": None,
                                       "support": ["raw disk vda: internal snapshots need qcow2"] if name == "rawvm" else [],
-                                      "running": v["state"] == "running", "state": v["state"],
+                                      "running": vstate == "running", "state": vstate,
                                       "persistent": v["persistent"], "memory_kib": 262144})
                 if what == "clone-plan":
                     p = clone_plan(name, q.get("name", [""])[0])
@@ -508,8 +509,10 @@ def test_the_reload_after_an_action_tries_once_more(ui, failures, rows):
     page, state, _ = ui
     panel = open_op(page, "web", "snapshots", ".kvm-snapshots")
     expect(panel.locator("tr[data-ks-row]")).to_have_count(3)
-    state["fail_lists"] = failures
     panel.locator('tr[data-ks-row="s-run"] [data-ks-act="revert"]').click()
+    expect(panel.locator('[data-ks="confirm"]')).to_be_visible()
+    # après la relecture de la confirmation : seules les relectures d'après l'action échouent
+    state["fail_lists"] = failures
     panel.locator('[data-ks="confirm"] [data-ks="yes"]').click()
     expect(panel.locator('[data-ks="msg"]')).to_contain_text("web reverted to s-run")
     if rows:
@@ -517,3 +520,80 @@ def test_the_reload_after_an_action_tries_once_more(ui, failures, rows):
     else:
         expect(panel.locator('[data-ks="list"] .res-error')).to_contain_text("domain is busy", timeout=6000)
     assert state["fail_lists"] == 0
+
+
+@pytest.mark.parametrize("shown,now,fail,warned", [
+    # affichée arrêtée, démarrée depuis : la relecture fait prévenir
+    ("shut off", "running", False, True),
+    # affichée en marche, arrêtée depuis : plus rien à éteindre
+    ("running", "shut off", False, False),
+    ("running", "running", False, True),
+    # relecture en échec : état inconnu, on prévient quand même
+    ("shut off", "shut off", True, True),
+])
+def test_revert_confirmation_rereads_the_state(ui, shown, now, fail, warned):
+    """La mise hors tension n'est annoncée qu'après avoir relu l'état de la VM
+    (instantané pris arrêté)."""
+    page, state, _ = ui
+    state["vm_state"] = {"web": shown}
+    panel = open_op(page, "web", "snapshots", ".kvm-snapshots")
+    expect(panel.locator("tr[data-ks-row]")).to_have_count(3)
+    state["vm_state"] = {"web": now}
+    if fail:
+        state["fail_lists"] = 1
+    before = len([g for g in state["gets"] if g[0] == "vms/node2/web/snapshots"])
+    panel.locator('tr[data-ks-row="s-off"] [data-ks-act="revert"]').click()
+    conf = panel.locator('[data-ks="confirm"]')
+    expect(conf).to_contain_text("Revert web to s-off?")
+    assert len([g for g in state["gets"] if g[0] == "vms/node2/web/snapshots"]) == before + 1
+    power = "reverting powers it off"
+    if warned:
+        expect(conf).to_contain_text(power)
+    else:
+        expect(conf).not_to_contain_text(power)
+
+
+def test_reads_after_an_action_are_chained_not_concurrent(ui):
+    """Fin d'une action : la fenêtre relit ses instantanés, PUIS la liste des
+    VMs, jamais les deux en même temps (deux lectures simultanées sur la même
+    connexion SSH partagée ont fait tomber le sshd de node2)."""
+    page, state, _ = ui
+    panel = open_op(page, "web", "snapshots", ".kvm-snapshots")
+    expect(panel.locator("tr[data-ks-row]")).to_have_count(3)
+    # chaque lecture KVM est ralentie et suivie : nombre en vol, ordre
+    page.evaluate("""() => {
+      const real = window.fetch.bind(window);
+      window.__kvmReads = { inflight: 0, max: 0, log: [] };
+      window.fetch = async (url, opts) => {
+        const u = String(url);
+        const m = (opts && opts.method) || 'GET';
+        if (!u.includes('/api/kvm/') || m !== 'GET') return real(url, opts);
+        const r = window.__kvmReads;
+        r.inflight += 1; r.max = Math.max(r.max, r.inflight); r.log.push('start ' + u);
+        try {
+          await new Promise((ok) => setTimeout(ok, 300));
+          return await real(url, opts);
+        } finally { r.inflight -= 1; r.log.push('end ' + u); }
+      };
+    }""")
+    panel.locator('tr[data-ks-row="s-run"] [data-ks-act="delete"]').click()
+    expect(panel.locator('[data-ks="confirm"]')).to_be_visible()
+    panel.locator('[data-ks="confirm"] [data-ks="yes"]').click()
+    expect(panel.locator('[data-ks="msg"]')).to_contain_text("Snapshot s-run deleted")
+    # la liste des VMs relue (fin de la chaîne)
+    for _ in range(100):
+        reads = page.evaluate("() => window.__kvmReads")
+        if any(x.startswith("end ") and re.search(r"/api/kvm/vms(\?|$)", x) for x in reads["log"]):
+            break
+        page.wait_for_timeout(50)
+    reads = page.evaluate("window.__kvmReads")
+    assert reads["max"] == 1, reads["log"]
+    log = [x.split("/api/kvm/", 1)[0] + x.split("/api/kvm/", 1)[1].split("?")[0] for x in reads["log"]]
+    snap_end = log.index("end vms/node2/web/snapshots")
+    vms_start = log.index("start vms")
+    assert snap_end < vms_start, reads["log"]
+
+
+def test_the_windows_reuse_the_follow_of_kvm_js(ui):
+    page, _, _ = ui
+    assert page.evaluate("typeof window.KVM.follow") == "function"

@@ -73,7 +73,7 @@ def read_display(vh, domain, want_password=False):
     KvmError (transport, domaine absent) ou OpError (XML illisible)."""
     ko.check_vm_name(domain)
     out = vh.batch({"state": ("domstate", "--domain", domain),
-                    "xml": ("dumpxml", "--security-info", "--domain", domain)})
+                    "xml": ("dumpxml", "--security-info", "--domain", domain)}, idempotent=True)
     for k in ("state", "xml"):
         if not out[k].ok:
             raise out[k].error
@@ -99,7 +99,7 @@ def classify_loss(vh, domain):
     """La connexion partagée est tombée sans nous : VM arrêtée ou disparue
     (`vm-stopped`), sinon `lost`."""
     try:
-        state = (str(vh.virsh("domstate", "--domain", domain)).strip().splitlines() or [""])[0]
+        state = (str(vh.virsh("domstate", "--domain", domain, idempotent=True)).strip().splitlines() or [""])[0]
     except kh.KvmError as e:
         return "vm-stopped" if e.kind == "notfound" else "lost"
     return "vm-stopped" if state.strip() == "shut off" else "lost"

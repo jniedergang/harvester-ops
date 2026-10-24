@@ -2523,7 +2523,10 @@ reachable from the network without a password. A display that listens on
 `StrictHostKeyChecking=yes` and the pinned line only. A host whose key has
 changed is refused, never accepted in silence. One SSH connection per host
 is reused for a short while, so a read does not pay a handshake per
-command.
+command. A read cut by the connection itself (the shared connection
+closed, ssh status 255) is tried once more, half a second later, on a new
+connection. A write is never tried again: whether it happened is unknown,
+and the action says the connection was lost.
 
 **Lifecycle gestures.** The menu of a VM offers **Start**, **Shut down**,
 **Reboot**, **Force off**, **Suspend** and **Resume**. A gesture the state

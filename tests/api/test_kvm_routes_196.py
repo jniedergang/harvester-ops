@@ -101,7 +101,7 @@ def env(monkeypatch):
         return inventory(host, details)
     monkeypatch.setattr(kh, "host_inventory", fake_inventory)
 
-    def fake_batch(self, commands, timeout=None, cmd_timeout=None):
+    def fake_batch(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
         calls["batch"].append(dict(commands))
         return {k: kh.CmdOutput(NET_XML) for k in commands}
     monkeypatch.setattr(kh.VirshHost, "batch", fake_batch)

@@ -140,11 +140,12 @@ def _writable_disk(d):
     return d.get("device", "disk") == "disk" and not d.get("readonly") and not d.get("shareable")
 
 
-def _sh_batch(host, commands, timeout=None):
+def _sh_batch(host, commands, timeout=None, idempotent=False):
     """Plusieurs commandes shell (pas virsh) en UN appel ssh : chaque
     commande est une liste d'arguments, citée une à une ; rend [(rc,
     sortie)] (stderr mêlé à stdout). Le jeton des repères est tiré au hasard
-    à chaque appel."""
+    à chaque appel. `idempotent=True` seulement pour un lot de lectures
+    (rejoué après une coupure du transport, voir VirshHost.run)."""
     if not commands:
         return []
     token = "@@kvmops-" + secrets.token_hex(12)
@@ -153,7 +154,7 @@ def _sh_batch(host, commands, timeout=None):
              "printf '\\n%s %d %d\\n' \"$T\" \"$i\" \"$rc\"; }"]
     for i, argv in enumerate(commands):
         lines.append(f"_r {i} " + " ".join(shlex.quote(str(a)) for a in argv))
-    out = host.run(["sh", "-c", "\n".join(lines)], timeout=timeout)
+    out = host.run(["sh", "-c", "\n".join(lines)], timeout=timeout, idempotent=idempotent)
     parts = re.split(rf"\n{re.escape(token)} (\d+) (-?\d+)\n", out)
     res = {}
     for j in range(0, len(parts) - 2, 3):
@@ -183,7 +184,7 @@ def parse_ip_addr(text):
 def host_addresses(host):
     """Adresses propres de l'hôte (`ip -o addr show`, un appel ssh), pour
     `display_target(..., host_addresses=...)`."""
-    return parse_ip_addr(host.run(["env", "LC_ALL=C", "ip", "-o", "addr", "show"]))
+    return parse_ip_addr(host.run(["env", "LC_ALL=C", "ip", "-o", "addr", "show"], idempotent=True))
 
 
 def display_target(xml_vm, live, host_addresses=None):
@@ -243,7 +244,8 @@ def vnc_password(host, name):
     Une erreur ne cite jamais le XML."""
     check_vm_name(name)
     try:
-        return vnc_password_of(host.virsh("dumpxml", "--security-info", "--domain", name))
+        return vnc_password_of(host.virsh("dumpxml", "--security-info", "--domain", name,
+                                               idempotent=True))
     except OpError:
         raise OpError("failed", f"{host.name}: unreadable definition for this VM") from None
 
@@ -310,7 +312,7 @@ def list_snapshots(host, name):
     "running", "state", "persistent", "memory_kib"}. `state` d'un instantané
     = état du domaine à la prise (`running` : mémoire comprise)."""
     check_vm_name(name)
-    out = host.batch(_snapshot_commands(name))
+    out = host.batch(_snapshot_commands(name), idempotent=True)
     xml, info = _need(out, "xml"), kh.parse_dominfo(_need(out, "info"))
     tree = kh.parse_snapshot_list(_need(out, "tree"))
     internal = set(kh.parse_names(_need(out, "internal")))
@@ -395,7 +397,7 @@ def revert_snapshot(host, name, snapshot, timeout=300):
         if _NEEDS_FORCE_RE.search(e.message):
             raise OpError("needs-force", e.message) from None
         raise
-    state = host.virsh("domstate", "--domain", name).strip()
+    state = host.virsh("domstate", "--domain", name, idempotent=True).strip()
     return {"snapshot": snapshot, "taken_state": snap["state"], "state": state}
 
 
@@ -485,7 +487,7 @@ class _Survey:
         self.unreadable = set()         # fichiers d'autres domaines illisibles
         self.self_unreadable = set()    # fichiers du domaine visé dont la chaîne est illisible
         first = host.batch({"all": ("list", "--all", "--name"), "active": ("list", "--name"),
-                            "pools": ("pool-list", "--name")}, timeout=timeout)
+                            "pools": ("pool-list", "--name")}, timeout=timeout, idempotent=True)
         names = kh.parse_names(_need(first, "all"))
         active = set(kh.parse_names(_need(first, "active")))
         pools = kh.parse_names(_need(first, "pools"))
@@ -497,7 +499,7 @@ class _Survey:
         for p in pools:
             cmds[f"pool\0{p}"] = ("pool-dumpxml", "--pool", p)
             cmds[f"vols\0{p}"] = ("vol-list", "--pool", p, "--details")
-        out = host.batch(cmds, timeout=timeout) if cmds else {}
+        out = host.batch(cmds, timeout=timeout, idempotent=True) if cmds else {}
         self.pools, vol_names = {}, {}
         for p in pools:
             v, vl = out.get(f"pool\0{p}"), out.get(f"vols\0{p}")
@@ -511,7 +513,7 @@ class _Survey:
         # tous les volumes de tous les pools, en un lot
         vcmds = {f"{p}\0{n}": ("vol-dumpxml", "--pool", p, "--vol", n)
                  for p, ns in vol_names.items() for n in ns}
-        vout = host.batch(vcmds, timeout=timeout) if vcmds else {}
+        vout = host.batch(vcmds, timeout=timeout, idempotent=True) if vcmds else {}
         self.vols = {p: {} for p in vol_names}
         for key in vcmds:
             p, n = key.split("\0", 1)
@@ -664,7 +666,7 @@ class _Survey:
                 + [["qemu-img", "info", "--force-share", "--output=json", "--backing-chain",
                     "--", q] for q in pending]
                 + [["stat", "-f", "-c", "%T", "--", p] for p in fs_paths])
-        res = _sh_batch(self.host, cmds, timeout=self.timeout) if cmds else []
+        res = _sh_batch(self.host, cmds, timeout=self.timeout, idempotent=True) if cmds else []
         self.inode, self.absent, stat_failed = {}, set(), set()
         self._read_stats(stat_list, res[:len(stat_list)], stat_failed)
         base = len(stat_list)
@@ -693,7 +695,7 @@ class _Survey:
         more = sorted({c for ch in chains.values() for c in ch if _is_path(c)} - stat_paths)
         if more:
             res2 = _sh_batch(self.host, [["stat", "-L", "-c", "%d:%i", "--", p] for p in more],
-                             timeout=self.timeout)
+                             timeout=self.timeout, idempotent=True)
             self._read_stats(more, res2, stat_failed)
         for r in all_refs:
             q = r.pop("pending")
@@ -964,7 +966,7 @@ def clone_plan(host, name, new_name):
     check_new_vm_name(new_name)
     out = host.batch({"info": ("dominfo", "--domain", name),
                       "xml": ("dumpxml", "--inactive", "--domain", name),
-                      "new": ("dominfo", "--domain", new_name)})
+                      "new": ("dominfo", "--domain", new_name)}, idempotent=True)
     info = kh.parse_dominfo(_need(out, "info"))
     xml = _need(out, "xml")
     vm = kh.parse_domain_xml(xml)
@@ -1053,7 +1055,7 @@ def clone_plan(host, name, new_name):
     for dr in dirs:
         cmds.append(["test", "-w", dr])
         cmds.append(["stat", "-f", "-c", "%a %S", "--", dr])
-    res = _sh_batch(host, cmds) if cmds else []
+    res = _sh_batch(host, cmds, idempotent=True) if cmds else []
     space = {}
     for n, e in enumerate(files):
         rc, text = res[n]
@@ -1305,7 +1307,7 @@ def _copy_file(host, entry, created, deadline, progress, sleep, poll):
     sid = f"copy-{entry['target']}"
     waited = 0.0
     while True:
-        f = _poll_fields(host.run(["sh", "-c", _COPY_POLL, "sh", tmp]))
+        f = _poll_fields(host.run(["sh", "-c", _COPY_POLL, "sh", tmp], idempotent=True))
         rc = f.get("rc", "").strip()
         if rc:
             break
@@ -1359,7 +1361,7 @@ def _rollback(host, created):
         public = {k: v for k, v in item.items() if k not in ("sources", "building")}
         try:
             if item["kind"] == "domain":
-                xml = host.virsh("dumpxml", "--inactive", "--domain", item["name"])
+                xml = host.virsh("dumpxml", "--inactive", "--domain", item["name"], idempotent=True)
                 vm = kh.parse_domain_xml(xml)
                 mine = {d.get("source") for d in vm["disks"]} >= set(item["sources"])
                 if not mine:                # ce n'est pas notre clone : on n'y touche pas
@@ -1432,7 +1434,8 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"],
                                                                 "plan": plan})
     step("plan", "done", f"{len(plan['disks'])} disk(s) to copy")
-    xml = host.virsh("dumpxml", "--inactive", "--security-info", "--domain", name)
+    xml = host.virsh("dumpxml", "--inactive", "--security-info", "--domain", name,
+                     idempotent=True)
     created, disk_map, copies, sources, warnings = [], {}, [], [], []
     try:
         for e in plan["disks"]:
@@ -1453,7 +1456,8 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
                         created.pop()        # pas le nôtre : jamais supprimé
                     raise
                 item.pop("building")
-                path = host.virsh("vol-path", "--pool", e["pool"], "--vol", e["dest_name"]).strip()
+                path = host.virsh("vol-path", "--pool", e["pool"], "--vol", e["dest_name"],
+                                  idempotent=True).strip()
                 disk_map[e["target"]] = e["dest_name"] if e["type"] == "volume" else path
                 # source telle que parse_domain_xml la lira dans le clone
                 sources.append(f"{e['pool']}/{e['dest_name']}" if e["type"] == "volume" else path)
@@ -1467,7 +1471,7 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
             step(sid, "done", copies[-1]["destination"])
         step("define", "running", new_name)
         # la source a pu être démarrée pendant la copie : la copie serait incohérente
-        state = host.virsh("domstate", "--domain", name).strip()
+        state = host.virsh("domstate", "--domain", name, idempotent=True).strip()
         if state != "shut off":
             raise OpError("failed", f"{name} was started during the copy (state: {state}): "
                           "the copy is discarded")
@@ -1478,7 +1482,8 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
         step("define", "done", new_name)
         step("verify", "running", new_name)
         out = host.batch({"info": ("dominfo", "--domain", new_name),
-                          "xml": ("dumpxml", "--inactive", "--domain", new_name)})
+                          "xml": ("dumpxml", "--inactive", "--domain", new_name)},
+                         idempotent=True)
         info = kh.parse_dominfo(_need(out, "info"))
         clone = kh.parse_domain_xml(_need(out, "xml"))
         step("verify", "done", f"uuid {clone['uuid']}")
@@ -1572,7 +1577,8 @@ def delete_plan(host, name, remove_storage=False, acknowledged_unreadable=None,
     out = host.batch({"info": ("dominfo", "--domain", name),
                       "xml": ("dumpxml", "--inactive", "--domain", name),
                       "internal": ("snapshot-list", "--domain", name, "--internal", "--name"),
-                      "external": ("snapshot-list", "--domain", name, "--external", "--name")})
+                      "external": ("snapshot-list", "--domain", name, "--external", "--name")},
+                     idempotent=True)
     info = kh.parse_dominfo(_need(out, "info"))
     vm = kh.parse_domain_xml(_need(out, "xml"))
     internal = kh.parse_names(_need(out, "internal"))
@@ -1714,7 +1720,7 @@ def _delete_execute(host, name, plan, skipped, stage, step, timeout):
     step("undefine", "running", name)
     # état relu juste avant le undefine : une VM démarrée entre-temps (geste
     # d'une autre console, virsh à la main) deviendrait transitoire
-    state = host.virsh("domstate", "--domain", name).strip()
+    state = host.virsh("domstate", "--domain", name, idempotent=True).strip()
     if state != plan["state"]:
         msg = (f"{name} is now {state} (it was {plan['state']} when the plan was made): "
                "nothing was done")
@@ -1727,7 +1733,7 @@ def _delete_execute(host, name, plan, skipped, stage, step, timeout):
         error = e                         # le domaine peut être parti malgré tout
     gone = False
     try:
-        host.virsh("dominfo", "--domain", name)
+        host.virsh("dominfo", "--domain", name, idempotent=True)
     except kh.KvmError as e:
         if e.kind != "notfound":
             raise
@@ -1748,7 +1754,8 @@ def _delete_execute(host, name, plan, skipped, stage, step, timeout):
         else:
             leftovers.append({**d, "error": _last_line(text) or "could not remove the file"})
     vols = [d for d in plan["delete"] if d.get("volume")]
-    checks = _sh_batch(host, [["test", "!", "-e", d["path"]] for d in vols if d.get("path")])
+    checks = _sh_batch(host, [["test", "!", "-e", d["path"]] for d in vols if d.get("path")],
+                       idempotent=True)
     it = iter(checks)
     for d in vols:
         ok = next(it)[0] == 0 if d.get("path") else error is None

@@ -817,7 +817,8 @@ const KVM = (() => {
 
   // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
   // l'actualisation automatique), lu par les tests
-  return { start, stop, load, openDeclare, gestureWhy, operationWhy, stateLabel, busy: () => (cur ? cur.busy : null) };
+  // follow : partagé avec kvm-vm.js (fenêtres instantanés, clonage, suppression)
+  return { start, stop, load, follow, openDeclare, gestureWhy, operationWhy, stateLabel, busy: () => (cur ? cur.busy : null) };
 })();
 
 if (typeof window !== 'undefined') window.KVM = KVM;

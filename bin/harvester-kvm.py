@@ -552,13 +552,14 @@ def check_vnc(host):
     l'hôte (toute adresse autre que la boucle locale ou un socket unix) sans
     mot de passe est un avertissement de sécurité."""
     try:
-        names = kh.parse_names(host.virsh("list", "--name"))
+        names = kh.parse_names(host.virsh("list", "--name", idempotent=True))
     except kh.KvmError as e:
         return _check("vnc", "warn", f"cannot list the running domains: {e.message}", kind=e.kind)
     if not names:
         return _check("vnc", "ok", "no running domain", domains=[])
     try:
-        out = host.batch({n: ("dumpxml", "--security-info", "--domain", n) for n in names})
+        out = host.batch({n: ("dumpxml", "--security-info", "--domain", n) for n in names},
+                         idempotent=True)
     except kh.KvmError as e:
         return _check("vnc", "warn", f"cannot read the displays: {e.message}", kind=e.kind)
     domains, exposed, unread = [], [], []
@@ -808,7 +809,7 @@ def cmd_vm_show(args):
 
 def domstate(host, name, timeout=None):
     """État courant d'une VM (`virsh domstate`) ; KvmError sinon."""
-    return _first_line(host.virsh("domstate", "--domain", name, timeout=timeout))
+    return _first_line(host.virsh("domstate", "--domain", name, timeout=timeout, idempotent=True))
 
 
 class StateTimeout(Exception):
@@ -1066,7 +1067,8 @@ def cmd_vm_display(args):
     step("display", "running", f"reading the display of {name}")
     try:
         out = host.batch({"state": ("domstate", "--domain", name),
-                          "xml": ("dumpxml", "--security-info", "--domain", name)})
+                          "xml": ("dumpxml", "--security-info", "--domain", name)},
+                         idempotent=True)
         for key in ("state", "xml"):
             if not out[key].ok:
                 raise out[key].error

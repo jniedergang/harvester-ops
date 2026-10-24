@@ -93,6 +93,23 @@ def dominfo(name, state, persistent=True, uid="u", managed_save=False):
 
 # --- libvirt simulé --------------------------------------------------------------
 
+
+def _run_label(argv):
+    """Libellé d'un appel `run` pour `modes` : script connu, lot `_sh_batch`
+    (premiers mots de ses commandes) ou commande."""
+    names = {ko._COPY_START: "copy-start", ko._COPY_POLL: "copy-poll",
+             ko._COPY_COMMIT: "copy-commit", ko._COPY_UNCOMMIT: "copy-uncommit",
+             ko._COPY_KILL: "copy-kill"}
+    if argv[:2] == ["sh", "-c"] and argv[2] in names:
+        return names[argv[2]]
+    if argv[:2] == ["sh", "-c"] and "\n_r " in argv[2]:
+        words = set()
+        for chunk in re.split(r"\n_r (?=\d+ )", argv[2])[1:]:
+            w = shlex.split(chunk)[1:]
+            words.add("rm" if w[:2] == ["sh", "-c"] else w[0])
+        return "sh:" + " ".join(sorted(words))
+    return argv[0] if argv[0] != "env" else " ".join(argv[2:3] + argv[5:6])
+
 class Sim:
     """Hôte simulé : domaines, pools, volumes, fichiers. `calls` garde chaque
     appel (`virsh`, `batch`, `run`, `input`)."""
@@ -118,6 +135,7 @@ class Sim:
         self.statf = {}          # répertoire -> "bavail bsize"
         self.rm_fail = set()
         self.calls = []
+        self.modes = []          # (appel, libellé, idempotent) : lecture rejouable ou écriture
         self.fail = {}           # premier mot virsh -> (rc, stderr)
         self.copy_rc = "0"
         self.copy_polls = 2
@@ -170,14 +188,17 @@ class Sim:
                 i += 1
         return handler(opts, pos, data)
 
-    def virsh(self, *args, timeout=None):
+    def virsh(self, *args, timeout=None, idempotent=False):
+        self.modes.append(("virsh", str(args[0]), idempotent))
         self.calls.append(("virsh", tuple(map(str, args))))
         rc, out, err = self._answer(args)
         if rc:
             raise kh.make_error(self.name, err, rc)
         return out
 
-    def batch(self, commands, timeout=None, cmd_timeout=None):
+    def batch(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
+        self.modes.append(("batch", " ".join(sorted({str(a[0]) for a in commands.values()})),
+                           idempotent))
         res = {}
         for k, args in commands.items():
             self.calls.append(("batch", tuple(map(str, args))))
@@ -195,7 +216,8 @@ class Sim:
             raise kh.make_error(self.name, err, rc, secrets=kh.input_secrets(data, secrets))
         return out
 
-    def run(self, argv, timeout=None):
+    def run(self, argv, timeout=None, idempotent=False):
+        self.modes.append(("run", _run_label(argv), idempotent))
         self.calls.append(("run", tuple(argv)))
         if argv[:2] == ["sh", "-c"] and "\n_r " in argv[2]:
             return self._sh_batch(argv[2])
@@ -570,7 +592,7 @@ HOST_ADDRS = ko.parse_ip_addr(IP_ADDR)
 def test_parse_ip_addr_and_host_addresses():
     assert HOST_ADDRS == {"127.0.0.1", "::1", "172.16.1.12", "fe80::a:1", "192.168.122.1"}
     sim = Sim()
-    sim.run = lambda argv, timeout=None: IP_ADDR if argv == [
+    sim.run = lambda argv, timeout=None, idempotent=False: IP_ADDR if argv == [
         "env", "LC_ALL=C", "ip", "-o", "addr", "show"] else None
     assert ko.host_addresses(sim) == HOST_ADDRS
 
@@ -2085,11 +2107,11 @@ def test_clone_vm_copy_that_never_starts_fails_fast():
     sim = clone_sim("file")
     real = sim.run
 
-    def run(argv, timeout=None):
+    def run(argv, timeout=None, idempotent=False):
         if argv[:3] == ["sh", "-c", ko._COPY_POLL]:
             sim.calls.append(("run", tuple(argv)))
             return "rc=\npid=\nprogress=\nlast=\n"
-        return real(argv, timeout)
+        return real(argv, timeout, idempotent)
     sim.run = run
     with pytest.raises(ko.OpError) as e:
         ko.clone_vm(sim, "src", "src-2", sleep=lambda s: None, poll=1.0)
@@ -2383,13 +2405,13 @@ def test_survey_timeout_reaches_every_read_of_the_survey():
     seen = []
     real_batch, real_run = sim.batch, sim.run
 
-    def batch(commands, timeout=None, cmd_timeout=None):
+    def batch(commands, timeout=None, cmd_timeout=None, idempotent=False):
         seen.append(("batch", timeout))
-        return real_batch(commands, timeout, cmd_timeout)
+        return real_batch(commands, timeout, cmd_timeout, idempotent)
 
-    def run(argv, timeout=None):
+    def run(argv, timeout=None, idempotent=False):
         seen.append(("run", timeout))
-        return real_run(argv, timeout)
+        return real_run(argv, timeout, idempotent)
     sim.batch, sim.run = batch, run
     ko.delete_plan(sim, "victim", remove_storage=True, survey_timeout=77)
     # premier lot : dominfo/dumpxml du plan (délai de l'hôte), puis le relevé
@@ -2428,3 +2450,49 @@ def test_run_input_scrubs_the_password_from_errors(stderr, tmp_path):
         host.run_input(["virsh", "define", "/dev/stdin"], data, secrets=[FAKE_PASSWORD])
     assert FAKE_PASSWORD not in str(e.value) + repr(e.value) + e.value.message
     assert FAKE_PASSWORD[:4] + "'" not in e.value.message
+
+
+# --- lecture rejouable ou écriture : chaque appel le dit -------------------------
+# Une lecture coupée par le transport est rejouée sur une connexion neuve
+# (VirshHost) ; une écriture jamais. Toute commande qui modifie l'hôte doit
+# donc partir avec idempotent=False, toute lecture avec True.
+WRITES = {"snapshot-create-as", "snapshot-revert", "snapshot-delete", "undefine", "vol-delete",
+          "copy-start", "copy-commit", "copy-uncommit", "copy-kill", "rm", "sh:rm"}
+
+
+def _clone_define_fails():
+    sim = clone_sim()
+    sim.fail["define"] = (1, "error: XML error: boom\n")
+    return sim
+
+
+def _file_copy_fails():
+    sim = clone_sim("file")
+    sim.copy_rc = "1"
+    return sim
+
+
+@pytest.mark.parametrize("make,op", [
+    (snap_sim, lambda s: ko.list_snapshots(s, "kvmtest-1")),
+    (snap_sim, lambda s: ko.create_snapshot(s, "kvmtest-1", "new-1", description="d")),
+    (lambda: snap_sim(state="running"), lambda s: ko.revert_snapshot(s, "kvmtest-1", "s1")),
+    (snap_sim, lambda s: ko.delete_snapshot(s, "kvmtest-1", "s2")),
+    (clone_sim, lambda s: ko.clone_plan(s, "src", "src-2")),
+    (clone_sim, lambda s: ko.clone_vm(s, "src", "src-2")),
+    (lambda: clone_sim("file"), lambda s: ko.clone_vm(s, "src", "src-2", sleep=lambda x: None)),
+    (_clone_define_fails, lambda s: ko.clone_vm(s, "src", "src-2")),
+    (_file_copy_fails, lambda s: ko.clone_vm(s, "src", "src-2", sleep=lambda x: None)),
+    (delete_sim, lambda s: ko.delete_plan(s, "victim", remove_storage=True)),
+    (delete_sim, lambda s: ko.delete_vm(s, "victim", remove_storage=True)),
+    (delete_sim, lambda s: ko.delete_vm(s, "victim")),
+])
+def test_every_write_is_sent_as_non_idempotent_and_every_read_as_idempotent(make, op):
+    sim = make()
+    try:
+        op(sim)
+    except (ko.OpError, kh.KvmError):
+        pass                              # chemins d'échec voulus (retour arrière)
+    assert sim.modes
+    wrong = [(kind, label, idem) for kind, label, idem in sim.modes
+             if idem != (label not in WRITES)]
+    assert wrong == []

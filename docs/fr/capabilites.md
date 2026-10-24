@@ -2778,7 +2778,11 @@ rien derrière elle.
 `StrictHostKeyChecking=yes` et la seule ligne épinglée. Un hôte dont la clé
 a changé est refusé, jamais accepté en silence. Une connexion SSH par hôte
 est réutilisée un court moment, pour qu'une lecture ne paie pas une
-poignée de main par commande.
+poignée de main par commande. Une lecture coupée par la connexion elle-même
+(connexion partagée fermée, ssh en code 255) est retentée une fois, une
+demi-seconde plus tard, sur une connexion neuve. Une écriture n'est jamais
+retentée : on ne sait pas si elle a eu lieu, et l'action dit que la
+connexion a été perdue.
 
 **Gestes de cycle de vie.** Le menu d'une VM propose **Démarrer**,
 **Arrêter**, **Redémarrer**, **Arrêt forcé**, **Suspendre** et

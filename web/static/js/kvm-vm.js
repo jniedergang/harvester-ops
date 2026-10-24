@@ -71,23 +71,8 @@ const KVMVm = (() => {
     return d;
   }
 
-  /** Suit une action : `onStep(step)` à chaque étape, `onEnd(ok, run)` à la
-   *  fin, avec l'action entière (son `result.output` compris). */
-  function follow(actionId, onStep, onEnd) {
-    if (window.Dock && Dock.poll) Dock.poll();
-    if (!window.SSEReconnect) { onEnd(false, { error_summary: 'no SSE' }); return; }
-    const es = SSEReconnect.connect(`/api/stream/${enc(actionId)}`, {
-      on: {
-        step: (e) => { try { onStep(JSON.parse(e.data)); } catch { /* ligne illisible */ } },
-        end: (e) => {
-          let d = {};
-          try { d = JSON.parse(e.data); } catch { /* fin sans détail */ }
-          es.close();
-          onEnd(d.status === 'done', d);
-        },
-      },
-    });
-  }
+  /** Suit une action : celui de kvm.js (`KVM.follow`), chargé avant. */
+  const follow = (actionId, onStep, onEnd) => KVM.follow(actionId, onStep, onEnd);
 
   /** Une étape de l'action dans la liste de la fenêtre (une ligne par étape). */
   function stepLine(list, s) {
@@ -98,7 +83,9 @@ const KVMVm = (() => {
     li.innerHTML = `${badge(STEP_BADGE[st] || 'info', s.step_id || st)} ${esc(s.message || '')}`;
   }
 
-  const refreshList = () => { if (window.KVM && KVM.load) KVM.load(true); };
+  // rend la promesse de la relecture : les fenêtres l'enchaînent après leur
+  // propre lecture, jamais en même temps (voir `load` des instantanés)
+  const refreshList = () => (window.KVM && KVM.load ? KVM.load(true) : Promise.resolve());
   const listHtml = (items) => (items && items.length ? `<ul class="kvm-op-list">${items.map((x) => `<li>${esc(x)}</li>`).join('')}</ul>` : '');
   const failText = (run, o) => o.error || run.error_summary || run.status || '?';
 
@@ -201,9 +188,13 @@ const KVMVm = (() => {
       controls();
     }
 
-    // `retry` : relecture juste après une action ; libvirt peut encore finir
-    // le travail de l'instantané (vu sur node2 juste après un retour) : un
-    // second essai 2 s plus tard au lieu d'une fenêtre vide
+    // `retry` : relecture juste après une action, filet de dernier recours.
+    // Cause vue sur node2 (sshd 10.2p1) : deux lectures lancées ensemble sur
+    // la même connexion SSH partagée ont fait tomber le sshd de l'hôte
+    // (moniteur privsep désynchronisé) et la lecture en vol a rendu 502.
+    // Depuis, le serveur rejoue une lecture coupée sur une connexion neuve
+    // et la fenêtre enchaîne ses lectures ; ce second essai 2 s plus tard ne
+    // sert plus que si les deux essais du serveur échouent.
     async function load(fresh, retry) {
       let d = await getJson(`${base(host, domain)}/snapshots${fresh ? '?fresh=1' : ''}`);
       if (retry && d.error && d.status === 502 && root.isConnected) {
@@ -221,13 +212,22 @@ const KVMVm = (() => {
       c.hidden = true; c.innerHTML = ''; st.pending = null;
     }
 
-    function ask(act, snap) {
+    async function ask(act, snap) {
+      const before = ((st.data || {}).snapshots || []).find((x) => x.name === snap) || {};
+      // revenir à un instantané pris arrêté éteint une VM en marche : l'état
+      // affiché peut dater (VM démarrée depuis), on le relit avant de parler
+      if (act === 'revert') {
+        await load(true);
+        if (!root.isConnected) return;
+      }
       const d = st.data || {};
-      const s = (d.snapshots || []).find((x) => x.name === snap) || {};
+      const s = (d.snapshots || []).find((x) => x.name === snap) || before;
       let text;
       if (act === 'revert') {
         text = tr('kvm.snap.revertConfirm', { name: domain, snapshot: snap });
-        if (d.state && d.state !== 'shut off' && (s.state === 'shutoff' || s.state === 'shut off')) {
+        const takenOff = s.state === 'shutoff' || s.state === 'shut off';
+        // état illisible : on prévient quand même
+        if (takenOff && d.state !== 'shut off') {
           text += ` ${tr('kvm.snap.revertPowerOff', { name: domain })}`;
         }
       } else {
@@ -266,8 +266,8 @@ const KVMVm = (() => {
           if (ok) say(okHtml(doneText(act, snap, o)));
           else say(`${errHtml(failText(r, o))}${listHtml(o.refusals)}`);
           if (ok && act === 'create') form.elements.name.value = defaultSnapshotName(domain);
-          load(true, true);
-          refreshList();
+          // l'une après l'autre : pas de lectures simultanées de notre fait
+          load(true, true).then(refreshList, refreshList);
         });
       } catch (e) {
         st.busy = false;
@@ -585,7 +585,9 @@ const KVMVm = (() => {
           } else if (o.kind === 'plan-changed') {
             say(`${errHtml(tr('kvm.del.planChanged'))}`);
             form.elements.confirm.value = '';
-            preview(true);
+            // aperçu d'abord, liste ensuite (lectures enchaînées)
+            Promise.resolve(preview(true)).finally(() => { controls(); refreshList(); });
+            return;
           } else {
             const pending = (o.pending || []).length
               ? `<div class="kvm-op-warn">${icon('warn')} ${esc(tr('kvm.del.pending'))}${listHtml(o.pending)}</div>` : '';

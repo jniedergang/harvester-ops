@@ -164,6 +164,13 @@ def test_vm_list_serves_the_operations_table(client):
     ("ok.2", "multi\nline <b>", ["--description=multi\nline <b>"]),
     ("ok.3", "d" * 1001, None),
     ("ok.4", 5, None),
+    # valeurs « fausses » : texte seulement, jamais avalées en silence
+    ("ok.5", 0, None),
+    ("ok.6", False, None),
+    ("ok.7", [], None),
+    ("ok.8", {}, None),
+    ("ok.9", "0", ["--description=0"]),
+    ("ok.10", "false", ["--description=false"]),
 ])
 def test_snapshot_create_argv(client, env, snap, desc, extra):
     body = {"name": snap}
@@ -234,6 +241,33 @@ def test_clone_is_refused_while_its_new_name_is_busy(client):
     r = client.post("/api/kvm/vms/node2/db/clone", json={"name": "db-copy"})
     assert r.status_code == 409 and r.get_json()["running_action"] == "kvm:vm-start:node2/db-copy"
     assert _NoThread.started == []
+
+
+CLONE_TARGET_OPS = [
+    ("post", "/api/kvm/vms/node2/web2/start", {}),
+    ("post", "/api/kvm/vms/node2/web2/snapshots", {"name": "s9"}),
+    ("post", "/api/kvm/vms/node2/web2/snapshots/s1/revert", {}),
+    ("delete", "/api/kvm/vms/node2/web2/snapshots/s1", {}),
+    ("post", "/api/kvm/vms/node2/web2/clone", {"name": "web3"}),
+    ("delete", "/api/kvm/vms/node2/web2", delete_body("web2")),
+    # un second clonage vers le même nom
+    ("post", "/api/kvm/vms/node2/db/clone", {"name": "web2"}),
+]
+
+
+@pytest.mark.parametrize("m,url,body", CLONE_TARGET_OPS, ids=[o[1] for o in CLONE_TARGET_OPS])
+def test_a_running_clone_holds_the_name_of_its_copy(client, m, url, body):
+    """Symétrique du refus ci-dessus : pendant un clonage de web vers web2,
+    toute opération sur web2 est refusée (409), avec le libellé du clonage."""
+    assert client.post("/api/kvm/vms/node2/web/clone", json={"name": "web2"}).status_code == 202
+    run = only_run()
+    run.status = "running"
+    assert run.kvm_vms == ("web", "web2")
+    r = getattr(client, m)(url, json=body)
+    assert r.status_code == 409 and r.get_json()["running_action"] == "kvm:vm-clone:node2/web"
+    # le clonage fini, le nom est libre
+    run.status = "done"
+    assert getattr(client, m)(url, json=body).status_code == 202
 
 
 # --- suppression ---------------------------------------------------------------------------
@@ -309,9 +343,12 @@ def test_one_operation_at_a_time_per_vm(client, first, second):
     m2, url2, body2, _ = second
     r = getattr(client, m2)(url2, json=body2)
     assert r.status_code == 409 and r.get_json()["running_action"] == label
-    # une autre VM du même hôte passe
-    other = getattr(client, m2)(url2.replace("/web", "/db", 1),
-                                json=dict(body2, confirm="db") if "confirm" in body2 else body2)
+    # une autre VM du même hôte passe (un clonage vers un autre nom : web2
+    # est tenu par le clonage en cours, voir plus haut)
+    body_db = dict(body2, confirm="db") if "confirm" in body2 else body2
+    if url2.endswith("/clone"):
+        body_db = {"name": "db2"}
+    other = getattr(client, m2)(url2.replace("/web", "/db", 1), json=body_db)
     assert other.status_code == 202, other.get_json()
 
 
@@ -395,12 +432,89 @@ def test_every_mutation_is_authenticated_and_rate_limited(route, limit):
     wapp._validate_rate_spec(m.group(1))
 
 
-@pytest.mark.parametrize("route", ['"/api/kvm/vms/<host>/<domain>/snapshots"',
-                                   '"/api/kvm/vms/<host>/<domain>/clone-plan"',
-                                   '"/api/kvm/vms/<host>/<domain>/delete-plan"'])
-def test_every_read_is_authenticated_and_shared(route):
-    assert re.search(r'@app\.route\(' + re.escape(route) + r'\)\n@requires_auth\n'
-                     r'@shared_read\(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN\)', SRC), route
+@pytest.mark.parametrize("route,limit", [
+    ('"/api/kvm/vms/<host>/<domain>/snapshots"', None),
+    # les aperçus relèvent tous les disques de l'hôte : limités par personne
+    ('"/api/kvm/vms/<host>/<domain>/clone-plan"', "KVM_PREVIEW_RATE"),
+    ('"/api/kvm/vms/<host>/<domain>/delete-plan"', "KVM_PREVIEW_RATE"),
+])
+def test_every_read_is_authenticated_and_shared(route, limit):
+    # la limite au-dessus de @requires_auth : @shared_read reste juste dessous
+    rate = rf"@_rate_limit\({limit}\)\n" if limit else ""
+    assert re.search(r'@app\.route\(' + re.escape(route) + r'\)\n' + rate + r'@requires_auth\n'
+                     + r'@shared_read\(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN\)', SRC), route
+
+
+def test_the_preview_rate_is_a_valid_limit():
+    assert wapp.KVM_PREVIEW_RATE == "20/minute"
+    wapp._validate_rate_spec(wapp.KVM_PREVIEW_RATE)
+
+
+# --- relevés de disques simultanés par hôte ------------------------------------------------
+
+PREVIEWS = [("/api/kvm/vms/node2/{d}/clone-plan?name={d}-c", "clone-plan"),
+            ("/api/kvm/vms/node2/{d}/delete-plan?remove_storage=1", "delete-plan")]
+
+
+@pytest.fixture
+def surveys():
+    with wapp._KVM_SURVEYS_LOCK:
+        wapp._KVM_SURVEYS.clear()
+    yield wapp._KVM_SURVEYS
+    with wapp._KVM_SURVEYS_LOCK:
+        wapp._KVM_SURVEYS.clear()
+
+
+@pytest.mark.parametrize("url,kind", PREVIEWS, ids=[p[1] for p in PREVIEWS])
+@pytest.mark.parametrize("running,code", [(0, 200), (1, 200), (2, 429), (5, 429)])
+def test_previews_are_capped_per_host(client, lib, surveys, url, kind, running, code):
+    if running:
+        surveys["node2"] = running
+    surveys["other-host"] = 9                 # un autre hôte ne compte pas
+    dom = f"cap{running}{kind[0]}"
+    r = client.get(url.format(d=dom))
+    assert r.status_code == code, r.get_json()
+    if code == 429:
+        d = r.get_json()
+        assert d["kind"] == "busy" and "2 disk surveys are already running" in d["error"]
+        assert not [c for c in lib if c[0] == kind]
+    else:
+        assert [c[0] for c in lib] == [kind]
+    # la place prise est rendue, en succès comme en refus
+    assert surveys.get("node2", 0) == running
+
+
+def test_a_failed_survey_gives_its_slot_back(client, lib, surveys, monkeypatch):
+    def boom(*a, **k):
+        raise kh.KvmError("unreachable", "node2: unreachable: ssh: no route")
+    monkeypatch.setattr(ko, "clone_plan", boom)
+    assert client.get("/api/kvm/vms/node2/slotfail/clone-plan?name=c").status_code == 502
+    assert "node2" not in surveys
+
+
+def test_survey_slots_under_concurrency(surveys):
+    """Dix demandes en même temps sur un hôte : deux relevés, huit refus."""
+    import threading
+    gate, got, lock = threading.Event(), [], threading.Lock()
+
+    def one():
+        with wapp._kvm_survey_slot("node2") as slot:
+            with lock:
+                got.append(slot)
+            if slot:
+                gate.wait(5)
+    threads = [threading.Thread(target=one) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for _ in range(200):
+        with lock:
+            if len(got) == 10:
+                break
+        threading.Event().wait(0.01)
+    gate.set()
+    for t in threads:
+        t.join(5)
+    assert sorted(got) == [False] * 8 + [True] * 2 and "node2" not in surveys
 
 
 def test_cancel_of_a_vm_delete_needs_the_admin_role(as_user, env):
