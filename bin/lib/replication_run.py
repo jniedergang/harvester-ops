@@ -1585,10 +1585,24 @@ def ensure_standby(ctx, works, latest, visible):
                     "generation": ctx.gen, "vm_uid": w["uid"], "disk": d["disk"], "state": "restoring",
                     "backup_volume_source": _md(bv_src).get("name") or "",
                     "backup_volume_target": _md(bv_dst).get("name") or ""})
-    total = sum(int(d["size"]) for w in works for d in w["disks"])
+    # octets à restaurer : la taille des données de la sauvegarde
+    # (`Backup.status.size` de Longhorn, blocs de la sauvegarde entière), pas
+    # la taille nominale du disque (vu sur le banc, v1.99.0 : « 5.0 GiB en
+    # 14 s » pour environ 150 Mo restaurés). Longhorn ne publie pas d'octets
+    # restaurés : la progression vient du pourcentage des moteurs appliqué à
+    # cette taille. Sans taille de sauvegarde, la taille nominale est prise et
+    # le bilan le dit (« volume size »).
+    sizes, nominal = {}, False
+    for w in works:
+        for d in w["disks"]:
+            data = _int(_status(latest.get(d["source_volume"])).get("size"))
+            if data <= 0:
+                nominal = True
+            sizes[d["target_volume"]] = data if data > 0 else int(d["size"])
+    total = sum(sizes.values())
+    label = "initial-restore (volume size)" if nominal else "initial-restore (backup data)"
     prog = ctx.tracker("initial-restore", total)
     wanted = {d["target_volume"]: (d["source_volume"], names[d["source_volume"]]) for w in works for d in w["disks"]}
-    sizes = {d["target_volume"]: int(d["size"]) for w in works for d in w["disks"]}
 
     def progress_hook():
         done = 0
@@ -1602,7 +1616,7 @@ def ensure_standby(ctx, works, latest, visible):
         # la progression (octets restaurés des moteurs) est relevée à chaque tour
         applied = wait_applied(ctx, "initial-restore", wanted, "initial_restore", on_poll=progress_hook)
         prog.update(total)
-        ctx.emit("initial-restore", "running", vp.summary(prog.phase, prog.finish()))
+        ctx.emit("initial-restore", "running", vp.summary(label, prog.finish()))
     now = ctx.dt()
     for w in works:
         for d in w["disks"]:

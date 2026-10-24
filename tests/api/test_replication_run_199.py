@@ -41,6 +41,7 @@ sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import replication as rp  # noqa: E402
 import replication_db as db  # noqa: E402
 import replication_run as rr  # noqa: E402
+import vm_transfer_progress as vp  # noqa: E402
 
 GIB = 1024 ** 3
 BT_VALUE = json.dumps({"type": "nfs", "endpoint": "nfs://172.16.0.5:/volume1/BACKUP/harvester-lab"})
@@ -150,8 +151,9 @@ class World:
         self.owner_n += 1
         self.alive = {self.owner_n}
         kw.setdefault("timeouts", {})
+        kw.setdefault("progress", lambda *a, **k: None)
         return rr.Ctx(self.conn, self.pid, self.src, self.dst, emit=lambda *a: self.log.append(a),
-                      sleep=self.clock.sleep, now=self.clock.now, progress=lambda *a, **k: None,
+                      sleep=self.clock.sleep, now=self.clock.now,
                       owner=f"cli:testhost:{self.owner_n}", host="testhost",
                       pid_alive=lambda p: p in self.alive, **kw)
 
@@ -878,6 +880,35 @@ def test_image_disk_without_image_mapping_takes_the_mapped_base_class(tmp_path, 
     assert disks and {d["image_class"] for d in disks} == {expected_base}
     works = rr.build_works(ctx, src, dst)
     assert {d["target_class"] for wk in works for d in wk["disks"] if d["image"]} == {expected_class}
+
+
+@pytest.mark.parametrize("size,label", [
+    # taille des données de la sauvegarde (Longhorn `Backup.status.size`)
+    ("25174351", "initial-restore (backup data)"),
+    # sans taille publiée : taille nominale, dite comme telle
+    (None, "initial-restore (volume size)"),
+])
+def test_initial_restore_reports_backup_data_not_the_disk_size(tmp_path, size, label):
+    # vu sur le banc (v1.99.0) : « 5.0 GiB en 14 s » pour environ 150 Mo restaurés
+    w = World(tmp_path)
+    if size is None:
+        real = w.src.complete_backup
+
+        def no_size(o, vol, snap_at, newly=25_174_351):
+            real(o, vol, snap_at, newly)
+            o["status"].pop("size", None)
+        w.src.complete_backup = no_size
+    snaps = []
+    ctx = w.ctx(progress=lambda snap: snaps.append(snap))
+    assert rr.protect(ctx)["exit"] == 0
+    disks = db.list_volumes(w.conn, w.pid)
+    nominal = sum(VMS[n]["disks"][d][0] for n in VMS for d in VMS[n]["disks"]
+                  if VMS[n]["uid"] in {v["vm_uid"] for v in disks})
+    expected = len(disks) * 25_174_351 if size else nominal
+    lines = [a[2] for a in w.log if a[0] == "initial-restore" and a[1] == "running"]
+    assert lines and lines[-1].startswith(f"{label}: {vp.fmt_bytes(expected)} in ")
+    restore = [x for x in snaps if x.get("phase") == "initial-restore"]
+    assert restore and restore[-1]["total"] == expected
 
 
 def test_protect_dry_run_writes_nothing_and_defers_what_protect_creates_first(world):
