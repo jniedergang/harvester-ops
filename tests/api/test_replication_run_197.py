@@ -250,9 +250,12 @@ class FakeKube:
                 self.objs.pop(key)
         for name, b in self.store.backups.items():
             if b["volume"] == vol and (rr.K_LH_BACKUP, rr.NS, name) not in self.objs:
+                # comme Longhorn : la cible ne relit que les étiquettes de la
+                # sauvegarde (`spec.labels` de la source), en `status.labels`
                 self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS,
-                                                       "labels": dict(b["labels"])},
+                                                       "labels": {"backup-volume": vol, "backup-target": "default"}},
                                           "status": {"state": "Completed", "volumeName": vol, "url": b["url"],
+                                                     "labels": dict(b["labels"]),
                                                      "snapshotCreatedAt": b["snapshot_at"],
                                                      "backupCreatedAt": b["done_at"],
                                                      "newlyUploadDataSize": str(b["newly"]), "size": str(b["size"])}})
@@ -454,22 +457,28 @@ class FakeKube:
         name = o["metadata"]["name"]
         url = f"{BT_URL}?backup={name}&volume={vol}"
         o["status"].update(state="Completed", url=url, volumeName=vol,
+                           labels=dict((o.get("spec") or {}).get("labels") or {}),
                            snapshotCreatedAt=snap_at or iso(self.clock.now()),
                            backupCreatedAt=iso(self.clock.now()), newlyUploadDataSize=str(newly), size=str(newly))
         self.store.backups[name] = {"volume": vol, "url": url, "snapshot_at": o["status"]["snapshotCreatedAt"],
                                     "done_at": o["status"]["backupCreatedAt"], "newly": newly, "size": newly,
-                                    "labels": dict(o["metadata"].get("labels") or {})}
+                                    "labels": dict((o.get("spec") or {}).get("labels") or {})}
         self.ensure_bv(vol)
         lv = self.objs.get((rr.K_LH_VOLUME, rr.NS, vol))
         bi = (lv or {}).get("spec", {}).get("backingImage")
         if bi:
             self.store.bbis.setdefault(bi, f"{BT_URL}?backingImage={bi}")
 
-    def make_backup(self, vol, name, snap_at=None, newly=25_174_351, labels=None):
-        """Sauvegarde déjà terminée (tâche récurrente, sauvegarde Harvester)."""
+    def make_backup(self, vol, name, snap_at=None, newly=25_174_351, labels=None, job_labels=None):
+        """Sauvegarde déjà terminée (tâche récurrente, sauvegarde Harvester).
+        `job_labels` : étiquettes de la tâche, que Longhorn met dans
+        `spec.labels` et jamais dans `metadata.labels`."""
         labels = dict({"backup-volume": vol, "backup-target": "default"}, **(labels or {}))
+        spec = {"snapshotName": name}
+        if job_labels:
+            spec["labels"] = dict(job_labels)
         o = self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS, "labels": labels},
-                                      "spec": {"snapshotName": name}, "status": {}})
+                                      "spec": spec, "status": {}})
         self.complete_backup(o, vol, snap_at or iso(self.clock.now()), newly)
         return o
 
@@ -1671,6 +1680,26 @@ def test_abandoning_an_activated_failover_keeps_everything_on_the_target(tmp_pat
     assert "removed" not in {v["state"] for v in db.list_volumes(w.conn, w.pid)}
     # les sauvegardes du plan sont toujours là
     assert [k for k in w.owned(w.src) if k[0] == rr.K_LH_BACKUP]
+
+
+def test_unprotect_deletes_the_backups_of_its_recurring_jobs(tmp_path):
+    """Vu sur le banc : les sauvegardes d'une tâche récurrente n'ont les
+    étiquettes du plan que dans `spec.labels` (et `status.labels` une fois
+    relues par la cible) ; un sélecteur sur `metadata.labels` ne les trouvait
+    pas et `--delete-backups` les laissait toutes."""
+    w = protected(tmp_path, vms=("vm-a",))
+    uid = VMS["vm-a"]["uid"]
+    job = dict(rp.plan_labels(w.pid, 1, uid), RecurringJob=rp.recurring_job_name(w.pid, uid))
+    w.src.make_backup("pvc-vm-a-data", "backup-cron-1", job_labels=job)
+    w.src.make_backup("pvc-vm-a-data", "backup-client-1", job_labels={"RecurringJob": "daily"})
+    w.dst.sync_all()
+    synced = w.dst.obj(rr.K_LH_BACKUP, rr.NS, "backup-cron-1")
+    assert rp.LABEL_PLAN not in synced["metadata"]["labels"] and synced["status"]["labels"][rp.LABEL_PLAN] == w.pid
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert res["exit"] == 0, res
+    assert "backup-cron-1" not in w.store.backups and w.src.obj(rr.K_LH_BACKUP, rr.NS, "backup-cron-1") is None
+    assert "backup-client-1" in w.store.backups
+    assert not [b for b in w.store.backups.values() if b["labels"].get(rp.LABEL_PLAN) == w.pid]
 
 
 def test_unprotect_of_a_protected_plan_still_deletes_backups(tmp_path):

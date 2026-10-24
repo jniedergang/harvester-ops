@@ -2484,8 +2484,10 @@ def unprotect(ctx, delete_backups=False, yes=False):
                 if probe(ctx, side) != "ok":
                     continue
                 with stage(ctx, op, "delete-backups", name, uids):
-                    for b in ctx.kube(side).list(K_LH_BACKUP, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
-                        if _owned(ctx, b):
+                    # les étiquettes du plan ne sont pas dans `metadata.labels`
+                    # d'une sauvegarde de tâche récurrente : pas de sélecteur
+                    for b in ctx.kube(side).list(K_LH_BACKUP, NS, selector=f"backup-target={BACKUP_TARGET}"):
+                        if rp.backup_owned_by(b, ctx.plan_id):
                             if run.delete_quiet(ctx.kube(side), K_LH_BACKUP, NS, _md(b)["name"]):
                                 deleted += 1
         if pending:

@@ -1537,11 +1537,31 @@ def snapshot(volume, name, labels=None):
 
 
 def backup(volume, snapshot_name, backup_volume=None, target="default", name=None, labels=None):
-    """Sauvegarde d'un instantané (sauvegarde finale de la bascule)."""
+    """Sauvegarde d'un instantané (sauvegarde finale de la bascule). Nos
+    étiquettes vont aussi dans `spec.labels` : ce sont les seules que la
+    cible commune garde, et donc les seules que la cible relit (`Backup`
+    synchronisé : `status.labels`), comme pour les sauvegardes d'une tâche
+    récurrente (vu sur Longhorn 1.11.2 et 1.12.1)."""
     md_labels = {"backup-volume": backup_volume or volume, "backup-target": target}
     md_labels.update(labels or {})
+    spec = {"snapshotName": snapshot_name}
+    if labels:
+        spec["labels"] = dict(labels)
     return {"apiVersion": "longhorn.io/v1beta2", "kind": "Backup",
-            "metadata": _lh_meta(name or snapshot_name, md_labels), "spec": {"snapshotName": snapshot_name}}
+            "metadata": _lh_meta(name or snapshot_name, md_labels), "spec": spec}
+
+
+def backup_owned_by(backup, plan_id):
+    """Une sauvegarde est-elle du plan ? Celles d'une tâche récurrente ne
+    portent les étiquettes de la tâche (`RecurringJob.spec.labels`) que dans
+    `spec.labels` côté source et `status.labels` partout, jamais dans
+    `metadata.labels` (qui n'a que `backup-volume` et `backup-target`) : vu
+    sur Longhorn 1.11.2 (source) et 1.12.1 (cible synchronisée)."""
+    for labels in ((backup.get("metadata") or {}).get("labels"), (backup.get("spec") or {}).get("labels"),
+                   (backup.get("status") or {}).get("labels")):
+        if owned_by(labels, plan_id):
+            return True
+    return False
 
 
 def activation_patch():

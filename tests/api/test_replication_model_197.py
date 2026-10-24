@@ -1084,12 +1084,14 @@ LABELS = rp.plan_labels(PID, 1, UID_A)
 def strip_ours(obj):
     """L'objet sans nos étiquettes (le banc n'en posait pas)."""
     o = copy.deepcopy(obj)
-    md = o["metadata"]
-    labels = {k: v for k, v in (md.get("labels") or {}).items() if not k.startswith("harvester-ops.io/")}
-    if labels:
-        md["labels"] = labels
-    else:
-        md.pop("labels", None)
+    for md in (o["metadata"], o.get("spec") if o.get("kind") == "Backup" else None):
+        if md is None:
+            continue
+        labels = {k: v for k, v in (md.get("labels") or {}).items() if not k.startswith("harvester-ops.io/")}
+        if labels:
+            md["labels"] = labels
+        else:
+            md.pop("labels", None)
     return o
 
 
@@ -1147,6 +1149,8 @@ def test_snapshot_backup_and_activation_match_the_bench():
     same(strip_ours(rp.snapshot("dr2-fb-data-sb", "dr2-fb-final-data", labels=LABELS)), BENCH[4])
     bk = rp.backup("dr2-fb-data-sb", "dr2-fb-final-data", labels=LABELS)
     assert bk["metadata"]["labels"][rp.LABEL_PLAN] == PID
+    # la cible commune ne garde que `spec.labels` (relu par la cible en `status.labels`)
+    assert bk["spec"]["labels"] == LABELS
     same(strip_ours(bk), BENCH[5])
     assert rp.activation_patch() == {"spec": {"Standby": False, "frontend": "blockdev"}}
 
@@ -1196,3 +1200,20 @@ def test_target_vm_rerun_drops_the_firmware_uuid_new_mac_and_stopped():
 def test_target_vm_keep_without_firmware_uuid_refuses():
     with pytest.raises(ValueError, match="firmware uuid"):
         rp.target_vm(vm_obj("rep-a", UID_A, [], fw=None), res(UID_A, "rep-a"), {}, {"cloud_init": "keep"}, {}, PID, 1)
+
+
+@pytest.mark.parametrize("where, owned", [
+    ("metadata", True),     # sauvegarde créée par la console
+    ("spec", True),         # tâche récurrente, côté source
+    ("status", True),       # sauvegarde synchronisée par la cible
+    ("other-plan", False),
+    ("none", False),        # tâche d'un client sur le même volume
+])
+def test_backup_owned_by_reads_every_place_longhorn_keeps_labels(where, owned):
+    b = {"metadata": {"labels": {"backup-volume": "pvc-a", "backup-target": "default"}},
+         "spec": {"labels": {"RecurringJob": "daily"}}, "status": {"labels": {"RecurringJob": "daily"}}}
+    if where in ("metadata", "spec", "status"):
+        b[where]["labels"][rp.LABEL_PLAN] = PID
+    elif where == "other-plan":
+        b["status"]["labels"][rp.LABEL_PLAN] = "rp-other"
+    assert rp.backup_owned_by(b, PID) is owned
