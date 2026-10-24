@@ -31,6 +31,7 @@ pas un serveur de fichiers, c'est un guichet à deux tickets.
 Aucune dépendance nouvelle — `http.server` de la bibliothèque standard.
 """
 
+import errno
 import logging
 import os
 import re
@@ -54,6 +55,18 @@ INVENTORY_MAX = 1024 * 1024  # un inventaire réel pèse quelques dizaines de Ki
 
 class TokenInUse(Exception):
     """Le jeton demandé est déjà armé (une autre action l'utilise)."""
+
+
+class PortUnavailable(OSError):
+    """Le port du serveur d'artefacts est pris (ou interdit) sur cet hôte. Le message
+    nomme le port (rien de secret) ; aucun autre port n'est essayé : l'adresse
+    publiée aux BMC et à l'installeur doit rester celle qu'on a ouverte."""
+
+    def __init__(self, port, reason=""):
+        super().__init__(f"cannot listen on artifact server port {port} on this host "
+                         f"({reason or 'address already in use'}): free it or set "
+                         f"HARVESTER_OPS_PXE_PORT to a free port")
+        self.port = port
 
 
 def issue(path, kind, ttl=DEFAULT_TTL, token=None):
@@ -81,6 +94,13 @@ def revoke(*tokens):
     with _LOCK:
         for t in tokens:
             _TOKENS.pop(t, None)
+
+
+def has_live_tokens():
+    """Au moins un artefact encore servi (jeton non expiré)."""
+    now = time.time()
+    with _LOCK:
+        return any(e["expires"] >= now for e in _TOKENS.values())
 
 
 def stats(token):
@@ -301,7 +321,14 @@ def start(port=None, bind="0.0.0.0"):
     port = int(port)
     if _SERVER is not None:
         return _SERVER.server_address[1]
-    _SERVER = ThreadingHTTPServer((bind, port), _Handler)
+    try:
+        _SERVER = ThreadingHTTPServer((bind, port), _Handler)
+    except OSError as e:
+        # vu en réel : port déjà pris sur node1, le déroulé mourait sur une
+        # OSError sans dire lequel
+        if e.errno in (errno.EADDRINUSE, errno.EACCES):
+            raise PortUnavailable(port, os.strerror(e.errno).lower()) from None
+        raise
     _SERVER.daemon_threads = True
     _THREAD = threading.Thread(target=_SERVER.serve_forever, daemon=True,
                                name="pxe-artifacts")

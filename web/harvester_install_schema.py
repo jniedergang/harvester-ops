@@ -170,6 +170,8 @@ INSTALL = _struct(
     ("withNetImages", "bool"),
     ("wipeAllDisks", "bool"),
     ("wipeDisksList", "list[str]"),
+    # v1.9.0 (backport harvester/harvester#11301) ; ignorée par les installeurs v1.8
+    ("cordoned", "bool"),
     ("forceMbr", "bool"),
     ("dataDisk", "str"),
     ("webhooks", "list[object]", WEBHOOK),

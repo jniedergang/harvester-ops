@@ -1,0 +1,14 @@
+label: Storage network only
+description: Provider-neutral dedicated storage interfaces. No multipath, protocol
+  tuning, or CSI readiness claim. Use the existing VM-uplink controls separately if
+  needed.
+ports:
+  storage1: Storage interface 1
+  storage2: Storage interface 2
+files: []
+boot_disk_exclusion: false
+multipath: null
+modules: []
+services: []
+iscsi_ifaces: {}
+csi_node: null

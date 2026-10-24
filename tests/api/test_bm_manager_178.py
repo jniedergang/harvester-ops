@@ -218,7 +218,7 @@ def test_wait_power_off_stops_on_cancel(monkeypatch):
 
 def test_runner_boots_the_disk_after_the_installer_powers_off():
     src = (ROOT / "web" / "app.py").read_text()
-    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    runner = src.split("def _baremetal_install_steps", 1)[1].split("\ndef ", 1)[0]
     i_wait = runner.index("_bm_wait_power_off(")
     i_eject = runner.index("_bm_media_eject(", i_wait)
     i_hdd = runner.index('_bm_boot_once_target(host, kc_user, kc_pwd, sys_path, "Hdd")')
@@ -291,7 +291,7 @@ def test_an_inventory_of_another_machine_stops_the_install_before_power_on(monke
 
 def test_runner_does_not_power_on_when_the_media_stays_inserted():
     src = (ROOT / "web" / "app.py").read_text()
-    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    runner = src.split("def _baremetal_install_steps", 1)[1].split("\ndef ", 1)[0]
     i_ej = runner.index("ok_ej, detail_ej = _bm_media_eject(")
     i_fail = runner.index('return fail("boot-disk"', i_ej)
     i_on = runner.index('_bm_reset(host, kc_user, kc_pwd, sys_path, "On")', i_ej)
