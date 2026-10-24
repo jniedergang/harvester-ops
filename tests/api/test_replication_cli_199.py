@@ -175,7 +175,9 @@ def test_dash_values_are_kept(tmp_path, capsys):
 
 PLAN_ROW_KEYS = {"id", "name", "source_host", "target_host", "source_host_kind", "target_host_kind", "state",
                  "generation", "active_side", "rpo_objective_s", "rpo_held_s", "interval_s", "next_tick_at",
-                 "resources_by_state", "last_events", "actions", "resources"}
+                 "resources_by_state", "last_events", "actions", "resources",
+                 # écrans de suivi : transferts, VMs du sélecteur, alertes, joignabilité
+                 "transfer", "pending_vms", "alerts", "reach"}
 RESOURCE_ROW_KEYS = {"plan", "plan_name", "resource_kind", "resource_uid", "namespace", "name", "side",
                      "host_kind", "peer_host", "state", "reasons", "state_since", "rpo_held_s", "rpo_objective_s",
                      "last_applied_at", "last_events", "actions"}
