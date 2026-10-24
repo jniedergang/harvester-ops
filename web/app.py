@@ -24930,6 +24930,41 @@ def api_replication_resource_events(uid):
                     "next_before": evs[-1]["id"] if len(evs) >= limit else None})
 
 
+@app.route("/api/replication/plans/<plan_id>/events")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plan_events(plan_id):
+    """Journal d'un plan (ses événements propres et ceux de ses ressources),
+    du plus récent au plus ancien : l'onglet Journal de la vue d'un contrat.
+    Mêmes `?limit=` et `?before=` que le journal d'une ressource ; `?level=`
+    (warn : avertissements et erreurs) filtre côté serveur."""
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    try:
+        limit = int(request.args.get("limit", 100))
+        if not 1 <= limit <= REPLICATION_EVENTS_MAX:
+            raise ValueError
+    except ValueError:
+        return _repl_err(f"limit must be between 1 and {REPLICATION_EVENTS_MAX}")
+    level = request.args.get("level") or ""
+    if level not in ("", "warn"):
+        return _repl_err("level must be warn")
+    before = request.args.get("before") or None
+    conn = _replication_conn()
+    try:
+        if level == "warn":
+            evs = _rdb._events(conn, "plan_id = ? AND level IN ('warn', 'error')", [plan["id"]], limit, before)
+        else:
+            evs = _rdb.plan_events(conn, plan["id"], limit=limit, before=before)
+    except ValueError:
+        return _repl_err("before must be an event id or an ISO 8601 date")
+    finally:
+        conn.close()
+    return jsonify({"plan": plan["id"], "events": evs,
+                    "next_before": evs[-1]["id"] if len(evs) >= limit else None})
+
+
 @app.route("/api/replication/follower")
 @requires_auth
 def api_replication_follower():
