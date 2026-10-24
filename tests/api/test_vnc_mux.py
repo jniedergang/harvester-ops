@@ -443,3 +443,201 @@ def test_the_reason_is_known_before_browsers_are_told():
     up.close()
     assert wait_for(lambda: seen)
     assert seen[0] == [True, True], "les navigateurs étaient déjà fermés"
+
+
+# ---------------------------------------------------------------------------
+# v1.98.0 : authentification VNC (type 2) côté amont, pour un affichage
+# libvirt protégé par `passwd`. Réponse de référence calculée une fois par
+# OpenSSL (`openssl enc -des-ecb -K <clé aux bits inversés> -nopad`, fournisseur
+# legacy) et figée ici : défi 00..0f, mot de passe "Fk7pw3Zq".
+# ---------------------------------------------------------------------------
+
+CHALLENGE = bytes(range(16))
+PW = "Fk7pw3Zq"
+PW_RESPONSE = bytes.fromhex("605e8da8b5747d3fa22b1892e9ab713d")
+
+
+class PwQemu(FakeWs):
+    """Un QEMU qui n'offre que l'authentification VNC (ou les deux)."""
+
+    def __init__(self, types=(vm.SEC_VNC,), password=None, accept=True):
+        super().__init__()
+        self.vnc_password = password
+        self.accept = accept
+        self.feed(b"RFB 003.008\n")
+        self.feed(bytes([len(types), *types]))
+
+    def send(self, data):
+        super().send(data)
+        sent = bytes(self.sent)
+        # après la version (12) et le choix (1) : défi ; après la réponse (16) : résultat
+        if sent == vm.VERSION + bytes([vm.SEC_VNC]):
+            self.feed(CHALLENGE)
+        elif sent == vm.VERSION + bytes([vm.SEC_NONE]):
+            self.feed(b"\x00\x00\x00\x00" + server_init())
+        elif len(sent) == 12 + 1 + 16 and sent[12] == vm.SEC_VNC:
+            ok = self.accept and sent[13:] == PW_RESPONSE
+            self.feed(b"\x00\x00\x00\x00" + server_init() if ok
+                      else b"\x00\x00\x00\x01" + struct.pack(">I", 21) + b"Authentication failed")
+
+
+def test_a_password_display_is_opened_with_the_vnc_challenge():
+    up = PwQemu(password=PW)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    hub.start(timeout=2)
+    assert bytes(up.sent[12:13]) == bytes([vm.SEC_VNC])
+    assert bytes(up.sent[13:29]) == PW_RESPONSE
+    assert up.vnc_password is None, "le mot de passe survit à la poignée de main"
+    assert (hub.width, hub.height) == (800, 600)
+    hub.close("test")
+
+
+def test_a_wrong_password_is_refused_without_quoting_it():
+    up = PwQemu(password="nottheone")
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(vm.ProtocolError) as e:
+        hub.start(timeout=2)
+    # la raison écrite par QEMU complète le message (RFB 3.8)
+    assert str(e.value) == "the VM display refused the password: Authentication failed"
+    assert isinstance(e.value, vm.AuthFailed) and e.value.reason == "auth"
+    assert "nottheone" not in repr(e.value)
+    assert up.vnc_password is None
+
+
+def test_a_password_display_without_password_is_refused():
+    up = PwQemu(password=None)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(vm.ProtocolError, match="asks for a password"):
+        hub.start(timeout=2)
+    assert bytes(up.sent) == vm.VERSION, "un type de sécurité a été choisi sans mot de passe"
+
+
+def test_none_is_still_preferred_when_offered_even_with_a_password():
+    up = PwQemu(types=(vm.SEC_VNC, vm.SEC_NONE), password=PW)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    hub.start(timeout=2)
+    assert bytes(up.sent[12:13]) == bytes([vm.SEC_NONE])
+    assert up.vnc_password is None
+    hub.close("test")
+
+
+def test_the_kubevirt_path_keeps_its_message_without_any_type():
+    up = PwQemu(types=(16,), password=PW)
+    hub = vm.VncHub(("c", "ns", "vm1"), up)
+    with pytest.raises(vm.ProtocolError, match="no 'None' security type"):
+        hub.start(timeout=2)
+
+
+def test_close_where_closes_only_the_matching_hubs():
+    a, b = fake_qemu(), fake_qemu()
+    ha = vm.get_hub(("kvm:node2", "vm1"), lambda: a)
+    hb = vm.get_hub(("kvm:node2x", "vm1"), lambda: b)
+    keys = vm.close_where(lambda k: k[0] == "kvm:node2", "host removed")
+    assert keys == [("kvm:node2", "vm1")]
+    assert ha.closed and ha.close_reason == "host removed" and not a.connected
+    assert not hb.closed
+    hb.close("test")
+
+
+def test_a_browser_gone_during_its_handshake_closes_an_unwatched_hub():
+    """v1.98.0 : sans navigateur rattaché, la connexion amont (un `ssh -W`
+    côté KVM) ne reste pas ouverte pour personne."""
+    up = fake_qemu()
+    hub = vm.get_hub(("kvm:node2", "vm1"), lambda: up)
+    ws = FakeWs()
+    ws.close()                            # parti avant la poignée de main
+    assert hub.serve(ws, "a") is True
+    assert hub.closed and not up.connected
+
+
+def test_a_failed_handshake_keeps_a_hub_that_others_watch():
+    up = fake_qemu()
+    hub = vm.get_hub(("c", "ns", "vm1"), lambda: up)
+    ok, _t = run_browser(hub, "alice")
+    assert wait_for(lambda: len(hub.clients) == 1)
+    ws = FakeWs()
+    ws.close()
+    hub.serve(ws, "b")
+    assert not hub.closed
+    hub.close("test")
+
+
+# ---------------------------------------------------------------------------
+# Après revue : raisons explicites (types d'exception, pas de recherche de
+# mots dans le message), sécurité non gérée, mot de passe absent des piles.
+# ---------------------------------------------------------------------------
+
+class RawQemu(FakeWs):
+    """Un serveur dont on écrit chaque octet ; `after_choice` répond au
+    choix du type de sécurité (rien : il se tait)."""
+
+    def __init__(self, first, after_choice=b"", password=None):
+        super().__init__()
+        self.vnc_password = password
+        self.after_choice = after_choice
+        self.feed(b"RFB 003.008\n")
+        self.feed(first)
+
+    def send(self, data):
+        super().send(data)
+        if len(self.sent) == 13 and self.after_choice:
+            self.feed(self.after_choice)
+
+
+@pytest.mark.parametrize("first,after,password,exc,reason,message", [
+    # VeNCrypt, SASL, TLS seuls : refus définitif, types nommés
+    (b"\x01\x13", b"", "pw", vm.UnsupportedSecurity, "unsupported-security",
+     "server offers no 'None' security type nor VNC password authentication (offered: VeNCrypt (19))"),
+    (b"\x01\x14", b"", "pw", vm.UnsupportedSecurity, "unsupported-security",
+     "server offers no 'None' security type nor VNC password authentication (offered: SASL (20))"),
+    (b"\x02\x12\x13", b"", None, vm.UnsupportedSecurity, "unsupported-security",
+     "server offers no 'None' security type nor VNC password authentication "
+     "(offered: TLS (18), VeNCrypt (19))"),
+    (b"\x01\xfe", b"", None, vm.UnsupportedSecurity, "unsupported-security",
+     "server offers no 'None' security type nor VNC password authentication (offered: unknown (254))"),
+    # refus écrit par le serveur avant tout type : son texte, sans raison stable
+    (b"\x00" + struct.pack(">I", 26) + b"Too many security failures", b"", None,
+     vm.ProtocolError, None, "server refused: Too many security failures"),
+    # None offert, résultat en échec suivi d'une raison
+    (b"\x01\x01", b"\x00\x00\x00\x01" + struct.pack(">I", 6) + b"no way", None,
+     vm.ProtocolError, None, "security handshake failed: no way"),
+    # None offert, résultat en échec SANS raison (le serveur se tait)
+    (b"\x01\x01", b"\x00\x00\x00\x01", None,
+     vm.ProtocolError, None, "security handshake failed"),
+    # mot de passe demandé, aucun défini
+    (b"\x01\x02", b"", None, vm.AuthFailed, "auth",
+     "the VM display asks for a password and none is defined for it"),
+])
+def test_security_failures_carry_their_reason_and_message(first, after, password, exc, reason, message):
+    up = RawQemu(first, after, password)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(vm.ProtocolError) as e:
+        hub.start(timeout=0.5)
+    assert type(e.value) is exc
+    assert e.value.reason == reason
+    assert str(e.value) == message
+    assert up.vnc_password is None
+
+
+def _traceback_locals(exc):
+    tb = exc.__traceback__
+    while tb is not None:
+        yield tb.tb_frame.f_code.co_name, tb.tb_frame.f_locals
+        tb = tb.tb_next
+
+
+@pytest.mark.parametrize("after", [
+    b"",                              # le défi n'arrive jamais : délai dépassé
+    bytes(range(8)),                  # la moitié du défi, puis plus rien
+])
+def test_the_password_is_in_no_frame_of_a_failed_challenge(after):
+    up = RawQemu(b"\x01\x02", after, password=PW)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(TimeoutError) as e:
+        hub.start(timeout=0.3)
+    frames = list(_traceback_locals(e.value))
+    assert any(name == "_security" for name, _ in frames)
+    for name, local in frames:
+        for k, v in local.items():
+            assert PW not in repr(v), f"password in {name}.{k}"
+    assert up.vnc_password is None

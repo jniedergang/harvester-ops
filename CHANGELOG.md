@@ -4,6 +4,128 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.98.0] - 2026-10-24 - KVM: VNC console, snapshots, clone and delete
+
+### Added
+- **VNC console of a KVM VM.** **Console** in the menu of a KVM VM opens
+  the same noVNC window as for a Harvester VM. The display is reached
+  through the SSH connection of the host (`ssh -W` on the pinned host
+  key), so a display on `127.0.0.1` works and nothing is opened to the
+  network. Several viewers share one tunnel, which closes with the last
+  window. The address and port are read again at each connection.
+  - A VNC password is read from the definition and answered by the
+    console (VNC authentication). It never reaches an API answer, a log,
+    an action step or a browser; the ticket only says that one exists.
+  - A SPICE-only display, a UNIX socket, no display, a display without a
+    listener or on an address that is not the host's own, a refused
+    password and a display offering only VeNCrypt, SASL or TLS are said,
+    and the window does not retry them. A stopped VM keeps the window
+    waiting until it runs.
+  - The window has Start, Shut down, Force off (confirmed in the page)
+    and Snapshots.
+- **Snapshots window**: internal snapshots with the current one, date,
+  content (disks, or disks and memory), location and parent. Create (name
+  proposed, optional description, pause of a running guest announced with
+  its memory size), revert (confirmation that reads the state again and
+  says when the VM will be powered off), delete (child snapshots named).
+  Every writable disk and the UEFI variables must be qcow2: otherwise
+  Create is disabled with the reason. External snapshots are shown and
+  not managed. A revert that libvirt wants forced is said, never forced.
+- **Clone**: full copy of a shut off, persistent VM on the same host,
+  after a preview (disks, destination, size to copy, free space, shared
+  disks, what is regenerated). Each disk is copied next to its source (same
+  pool or same directory), flattened. New uuid, MAC addresses, UEFI
+  variables file and generation id; disk serials, WWN and SMBIOS serials
+  removed; a fixed display port becomes automatic. UEFI boot entries and
+  vTPM state are not copied, and the preview says so. Out-of-pool copies
+  show their progress; a cancel or a failure removes everything created
+  and names what could not be removed.
+- **Delete** a shut off, persistent VM (admin), after a preview and the
+  typed name. With **Also delete the disks this VM owns**, a disk goes
+  only when the console proves that no other VM uses it (every pool and
+  volume, every other definition and disk chain, files compared by device
+  and inode). Disks shared with another VM, backing files of another VM's
+  disk, read-only disks, block devices, disks on shared storage and
+  missing files are kept with their reason.
+  - A file of another VM that the SSH user cannot read (permission
+    denied) refuses the delete until it is ticked in the window. Failed
+    libvirt reads and I/O errors cannot be acknowledged.
+  - The delete carries a digest of the preview. A host that changed since
+    the preview stops it (`plan-changed`) and shows the new preview.
+- Command line: `vm display`, `snapshot list|create|revert|delete`,
+  `clone [--dry-run]` and `vm delete [--remove-storage]
+  [--acknowledge-unreadable=PATH] [--expect-delete=DIGEST] [--dry-run]
+  [--survey-timeout S]` in `bin/harvester-kvm.py`. New failure kinds
+  `busy` (exit 2) and `plan-changed` (exit 1).
+- API: `POST .../console-ticket`, `GET .../console-status`, websocket
+  `/ws/kvm/vnc/<host>/<domain>`, `GET|POST .../snapshots`,
+  `POST .../snapshots/<snapshot>/revert`, `DELETE .../snapshots/<snapshot>`,
+  `GET .../clone-plan`, `POST .../clone`, `GET .../delete-plan`,
+  `DELETE /api/kvm/vms/<host>/<domain>`, all under
+  `/api/kvm/vms/<host>/<domain>`. `/api/kvm/vms` gives each VM an
+  `operations` table that the menu reads.
+
+### Changed
+- A long volume copy during a clone runs on its own SSH connection, so a concurrent read cannot cut it.
+- A read failure counts as a permission refusal only from the error text, never from the file path.
+- Roles: a viewer reads snapshots and previews; an operator opens the
+  console, manages snapshots and clones; an admin deletes a VM, and only
+  an admin can cancel a delete.
+- One operation at a time per KVM VM: a gesture, snapshot, clone or
+  delete is refused while another one runs on the same VM (409 in the
+  console, `busy` in the script). The lock now also covers the 1.96
+  lifecycle gestures. A clone also holds the name of the copy.
+- A KVM read cut by the SSH transport (ssh status 255, shared connection
+  gone) is replayed once on a fresh connection. Writes are never
+  replayed. Clone and delete previews are limited to 20 per minute and
+  2 disk surveys at once per host.
+- Reopening a console that is already open, Harvester or KVM, brings its
+  window back instead of opening a second connection.
+- When the only browser of a shared console connection leaves during its
+  handshake, the connection to the VM is closed. Before, it stayed open
+  with no viewer (KubeVirt consoles included).
+
+### Security
+- A console ticket issued to a user is accepted only on a websocket of the
+  same signed-in user. This applies to the KubeVirt VNC and serial
+  consoles too, not only KVM.
+- The werkzeug access log writes `ticket=***` instead of the single-use
+  console ticket in websocket URLs.
+- A VNC password is scrubbed from libvirt error messages before they are
+  classified or shown.
+
+### Internal
+- `bin/lib/kvm_ops.py` (new): display target, snapshots, clone plan and
+  copy with rollback, delete plan with the disk survey and digest.
+  `web/kvm_vnc.py` (SSH stdio tunnel) and `web/vnc_des.py` (DES of the
+  VNC challenge, standard library only).
+- Known limit, seen on a lab host with OpenSSH 10.2p1: the SSH server can
+  abort under concurrent sessions over one shared connection
+  (`mm_request_receive: read: bad msg_len`). Reads survive it through the
+  retry; a write cut that way says "connection lost".
+- Not in this version: SPICE, external snapshots, linked clones, choosing
+  the clone destination, reverting with `--force`.
+
+### Tests
+- API: library on outputs captured from libvirt 12.7.0 and a simulated
+  host that runs the real shell scripts (hostile names, copy, cancel,
+  rollback, ownership proof table, digest, retries of reads only), the
+  command line (JSON schemas, exit codes, SIGTERM and SIGHUP during a
+  copy), DES on published vectors and RFB authentication against a fake
+  server, routes (roles, limits, busy matrix, routing, no password or
+  state path in any answer or log).
+- e2e (`tests/e2e/test_kvm_console_197.py`, `test_kvm_vm_197.py`):
+  console opened from the menu, shared view, refusals without retry,
+  snapshots, clone and delete windows, plan-changed, hostile names.
+  Key rules were mutated to see their tests fail.
+- Real, on a lab host (libvirt 12.7.0): console with and without a VNC
+  password through the UI, shared by two browsers on one tunnel;
+  snapshots shut off and running, revert both ways, delete of a parent;
+  clone in a pool and out of pool, started and opened in the console; a
+  cancelled 7.4 GiB copy left nothing; delete with the unreadable file
+  acknowledged, shared and backing disks kept, `plan-changed`. The
+  existing 15 domains, 9 pools and 3 networks were left untouched.
+
 ## [1.97.0] - 2026-10-24 - Storage profiles for bare-metal joins
 
 ### Added

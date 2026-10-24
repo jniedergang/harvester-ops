@@ -103,7 +103,10 @@ ailleurs.
   une empreinte de clé épinglée, leurs VMs, pools de stockage et réseaux
   dans une même vue, et les gestes de cycle de vie (démarrer, arrêter,
   redémarrer, arrêt forcé, suspendre, reprendre) suivis jusqu'à l'état
-  réel. Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
+  réel. La console VNC d'une VM passe par la connexion SSH de son hôte,
+  mot de passe compris ; instantanés internes, clones complets et
+  suppression avec la preuve qu'aucune autre VM n'utilise un disque.
+  Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
   commande.
 - **Scriptable** : le séquençage électrique s'exécute aussi en ligne de
   commande, pour les chaînes d'automatisation et les sites hors ligne, et
