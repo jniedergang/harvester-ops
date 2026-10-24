@@ -10074,7 +10074,8 @@ def api_kvm_vms():
     vms.sort(key=lambda v: (v["name"], v["host"]))
     return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
                     "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
-                    "operations": KVM_VM_OPERATIONS})
+                    "operations": KVM_VM_OPERATIONS,
+                    "edit_operations": KVM_VM_EDIT_OPERATIONS})
 
 
 @app.route("/api/kvm/vms/<host>/<domain>")
@@ -22148,6 +22149,18 @@ KVM_SPEC_MAX_BODY = 1 << 20            # corps d'une création ou d'une modifica
 KVM_SMALL_BODY = 64 * 1024             # corps des autres mutations
 KVM_HOT_OPS = ("cpumem", "add-volume", "remove-volume", "insert-cdrom", "eject-image",
                "add-nic", "remove-nic", "cloudinit")
+# Menu d'une VM KVM, groupe « Disques et réseau » (fenêtre Modifier et gestes
+# à chaud) : conditions servies par /api/kvm/vms comme celles de la 1.98.0.
+# États : ceux où kvm_edit écrit (en marche, ou arrêtée : configuration
+# seule) ; en pause ou en cours d'arrêt, la bibliothèque refuse. Une VM
+# transitoire ouvre la fenêtre en lecture seule avec la raison, et ses gestes
+# à chaud passent en `--live` seul.
+KVM_VM_EDIT_OPERATIONS = {
+    "edit": {"role": "operator", "states": list(_ke.LIVE_STATES) + ["shut off"],
+             "persistent": False},
+    "hot": {"role": "operator", "states": list(_ke.LIVE_STATES) + ["shut off"],
+            "persistent": False},
+}
 KVM_POOL_VERBS = ("start", "stop", "refresh", "autostart")
 KVM_NET_VERBS = ("start", "stop", "autostart")
 KVM_MAX_HOSTS = 16                     # hôtes d'un même envoi d'image

@@ -164,7 +164,9 @@ const KVM = (() => {
         <input type="search" class="res-filter tip" data-kvm-filter="text" placeholder="${esc(tr('kvm.f.text'))}" data-tip="${esc(tr('kvm.f.textTip'))}">`
       : v === 'hosts' ? `<select class="tip" data-kvm-filter="label" data-tip="${esc(tr('kvm.f.labelTip'))}"><option value="">${esc(tr('kvm.f.allLabels'))}</option></select>`
         : '';
-    const declare = v === 'hosts' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="declare" data-tip="${esc(tr('kvm.declareTip'))}">${icon('add')} ${esc(tr('kvm.declare'))}</button>` : '';
+    const declare = v === 'hosts' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="declare" data-tip="${esc(tr('kvm.declareTip'))}">${icon('add')} ${esc(tr('kvm.declare'))}</button>`
+      // prochaine version : créer une VM (kvm-form.js), hôte choisi dans la fenêtre
+      : v === 'vms' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="create-vm" data-tip="${esc(tr('kvmf.createVmTip'))}">${icon('add')} ${esc(tr('kvmf.createVm'))}</button>` : '';
     cur.host.innerHTML = `<div class="card na-card kvm-card" data-kvm-view="${esc(v)}">
         <div class="res-tools">${filters}
           <span class="res-count"></span>
@@ -217,6 +219,11 @@ const KVM = (() => {
     if (decl) {
       decl.disabled = !isAdmin();
       decl.dataset.tip = isAdmin() ? tr('kvm.declareTip') : tr('kvm.adminOnly');
+    }
+    const mk = cur.host.querySelector('.res-tools [data-kvm="create-vm"]');
+    if (mk) {
+      mk.disabled = !canOperate() || !window.KVMForm;
+      mk.dataset.tip = canOperate() ? tr('kvmf.createVmTip') : tr('kvm.operatorOnly');
     }
     if (!d || d.error) {
       body.innerHTML = `<p class="res-error">${icon('fail')} ${esc(d && d.error ? d.error : tr('fabric.unreachable'))}</p>`;
@@ -288,7 +295,8 @@ const KVM = (() => {
         <div class="res-dim">${esc(h.hostname && h.hostname !== h.name ? `${h.hostname} · ${where}` : where)}</div>
         ${body}
         ${labels ? `<div class="kvm-labels">${labels}</div>` : ''}
-        <div class="kvm-tile-actions">${test} ${remove}</div>
+        <div class="kvm-tile-actions">${test} ${h.error ? '' : `<button type="button" class="btn btn-sm btn-secondary tip" data-kvm="create-vm" data-host="${esc(h.name)}"
+          ${canOperate() ? '' : 'disabled'} data-tip="${esc(canOperate() ? tr('kvmf.createVmHostTip', { host: h.name }) : tr('kvm.operatorOnly'))}">${icon('add')} ${esc(tr('kvmf.createVm'))}</button>`} ${remove}</div>
         <div class="of-msg kvm-tile-msg" role="status"></div>
       </div>`;
   }
@@ -395,8 +403,10 @@ const KVM = (() => {
 
   function vmRow(v) {
     const k = vmKey(v);
+    const restart = window.KVMForm && KVMForm.restartFor(v.host, v.name);
     const flags = [v.persistent ? '' : badge('info', tr('kvm.transient'), tr('kvm.transientTip')),
-      v.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.autostartTip')) : ''].join(' ');
+      v.autostart ? badge('dim', tr('kvm.autostart'), tr('kvm.autostartTip')) : '',
+      restart ? badge('warn', tr('vmf.restartNeeded'), tr('kvmf.restartListTip', { fields: restart.join(', ') })) : ''].join(' ');
     const open = cur.open.has(k);
     return `<tr data-kvm-vm="${esc(k)}" data-state="${esc(v.state)}">
         <td class="check-col"><button type="button" class="btn-icon-action tip" data-kvm="detail" data-vm="${esc(k)}" aria-expanded="${open}"
@@ -511,7 +521,8 @@ const KVM = (() => {
       <div class="vma-group"><button type="button" class="vma-item tip" role="menuitem" data-kvm-console="1"
         data-tip="${esc(canOperate() ? tr('kvm.consoleTip') : tr('kvm.operatorOnly'))}"${canOperate() ? '' : ' aria-disabled="true"'}>
         <span class="vma-ic">${icon('console')}</span> ${esc(tr('kvm.console'))}</button>
-        ${OPERATIONS.map((op) => opItem(op, v)).join('')}</div>`;
+        ${OPERATIONS.map((op) => opItem(op, v)).join('')}</div>
+      ${window.KVMForm ? KVMForm.menuGroupHtml(v, cur.data.edit_operations, role()) : ''}`;
     document.body.appendChild(el);
     const r = anchor.getBoundingClientRect();
     const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
@@ -538,7 +549,11 @@ const KVM = (() => {
     document.addEventListener('pointerdown', menu.outside, true);
     document.addEventListener('keydown', menu.keys, true);
     el.querySelector('.vma-item:not([aria-disabled])')?.focus();
+    // prochaine version : disques et cartes de la VM lus à l'ouverture du menu
+    const hotGroup = el.querySelector('[data-kvm-hot-group]');
+    if (hotGroup) KVMForm.fillMenuDevices(hotGroup, v, cur.data.edit_operations, role());
     el.addEventListener('click', (e) => {
+      if (window.KVMForm && KVMForm.onMenuClick(e, v, closeMenu)) return;
       const c = e.target.closest('[data-kvm-console]');
       if (c) {
         if (c.getAttribute('aria-disabled')) return;
@@ -679,6 +694,7 @@ const KVM = (() => {
     const act = b.dataset.kvm;
     if (act === 'refresh') { load(true); return; }
     if (act === 'declare') { openDeclare(); return; }
+    if (act === 'create-vm') { if (window.KVMForm) KVMForm.openCreate(b.dataset.host || ''); return; }
     if (act === 'test') { testHost(b.dataset.host); return; }
     if (act === 'remove') { confirmRemove(b.dataset.host); return; }
     if (act === 'remove-yes') { doRemove(b.dataset.host); return; }
