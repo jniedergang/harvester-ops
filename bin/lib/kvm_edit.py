@@ -1054,7 +1054,7 @@ def detach_nic(host, name, mac, progress=None, sleep=time.sleep):
 # --- cloud-init --------------------------------------------------------------------
 
 def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=None,
-                    uuid_gen=uuidlib.uuid4, acknowledged_unreadable=None):
+                    uuid_gen=uuidlib.uuid4, acknowledged_unreadable=None, before_write=None):
     """Nouvelle ISO de seed téléversée sous un nom neuf (`<vm>-cidata-<n>.iso`),
     média changé (à chaud si la VM tourne), `<hops:seed>` mis à jour par un
     `define`. `rerun` : nouvel `instance-id` (cloud-init rejoue ses modules
@@ -1065,7 +1065,9 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
     si la preuve de la 1.98 le permet (relevé neuf, identité
     périphérique:inode, chaînes, stockage partagé : delete_volume_plan) ;
     sinon gardé, avec la raison dans `kept_reason`. `acknowledged_unreadable` :
-    comme pour la suppression d'un volume (décision 46).
+    comme pour la suppression d'un volume (décision 46). `before_write(pool,
+    volume)` : appelé avant toute écriture avec le pool et le nom du nouveau
+    seed (l'appelant y prend ses verrous ; une exception arrête tout).
 
     Échec : avant le changement de média, le nouveau volume est retiré ;
     après (`update-device` a pu basculer le lecteur sur lui, ou la coupure
@@ -1094,6 +1096,8 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
     new_vol = f"{name}-cidata-{n}.iso"
     data = kc.seed_iso({"user_data": user_data, "network_data": network_data}, instance_id,
                        hostname or kc.guest_hostname(name))
+    if before_write is not None:
+        before_write(pool, new_vol)
     created = []
     switched = False                    # le lecteur peut citer le nouveau volume
     with ko.writing(host):

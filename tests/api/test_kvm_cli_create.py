@@ -140,6 +140,8 @@ def env(monkeypatch):
 
 
 run = c197.run
+# empreinte valide quelconque : un refus d'usage ou un verrou occupé vient avant
+ANY_DIGEST = f"--expect-delete={c197.ANY_DIGEST}"
 
 
 def world(running=False, cidata=False):
@@ -262,10 +264,10 @@ def _argv_cases():
          [("vol-resize", "--pool", "images", "--vol", "free.qcow2", "--capacity",
            str(128 << 20))]),
         ("vol delete", world,
-         ["vol", "delete", "--host=lab", "--pool=images", "--name=free.qcow2"],
+         ["vol", "delete", "--host=lab", "--pool=images", "--name=free.qcow2", "PREVIEW"],
          [("vol-delete", "--pool", "images", "--vol", "free.qcow2")]),
         ("image delete", world,
-         ["image", "delete", "--host=lab", "--pool=images", "--volume=free.qcow2"],
+         ["image", "delete", "--host=lab", "--pool=images", "--volume=free.qcow2", "PREVIEW"],
          [("vol-delete", "--pool", "images", "--vol", "free.qcow2")]),
         ("pool define", world,
          ["pool", "define", "--host=lab", "--name=lab-pool", "--path=/srv/lab-pool",
@@ -293,13 +295,18 @@ def _argv_cases():
 ARGV_CASES = _argv_cases()
 
 
-def _argv(env, items):
+def _argv(env, items, capsys=None):
+    """argv d'un cas : dict = fichier de spec, DIGEST = empreinte de la VM,
+    PREVIEW = empreinte de l'aperçu des arguments qui précèdent (obligatoire
+    pour une suppression réelle)."""
     out = []
     for it in items:
         if isinstance(it, dict):
             out.append(env.spec(it))
         elif it == "DIGEST":
             out.append(f"--expect-config={digest_of(env)}")
+        elif it == "PREVIEW":
+            out = c197.previewed(capsys, *out)
         else:
             out.append(it)
     return out
@@ -308,7 +315,7 @@ def _argv(env, items):
 @pytest.mark.parametrize("label,make,argv,want", ARGV_CASES, ids=[c[0] for c in ARGV_CASES])
 def test_exact_argv_of_each_write(env, capsys, label, make, argv, want):
     env.use(make())
-    res = run(capsys, *_argv(env, argv))
+    res = run(capsys, *_argv(env, argv, capsys))
     assert res.rc == 0, res.err
     got = writes(env)
     # chaque écriture attendue, dans l'ordre, avec ses premiers arguments exacts
@@ -520,7 +527,7 @@ DRY = [
 @pytest.mark.parametrize("label,make,argv", DRY, ids=[d[0] for d in DRY])
 def test_dry_run_never_writes(env, capsys, label, make, argv):
     env.use(Refuser(make()))
-    res = run(capsys, *_argv(env, argv))
+    res = run(capsys, *_argv(env, argv, capsys))
     assert res.rc == 0, res.err
     assert res.data["dry_run"] is True and env.net.fresh == []
     assert UD_MARK not in res.out + res.err
@@ -600,7 +607,7 @@ def test_create_holds_every_instance_name(env, capsys):
 def test_pool_delete_waits_for_a_creation_writing_into_it(env, capsys):
     env.use(world())
     with cli.object_lock(env.state, "lab", "pool", "images", shared=True):
-        res = run(capsys, "pool", "delete", "--host=lab", "--pool=images")
+        res = run(capsys, "pool", "delete", "--host=lab", "--pool=images", ANY_DIGEST)
         assert res.rc == 2 and res.data["kind"] == "busy"
         # deux créations peuvent écrire dans le même pool
         with cli.object_lock(env.state, "lab", "pool", "images", shared=True):
@@ -613,7 +620,7 @@ def test_edit_and_gesture_share_the_vm_lock(env, capsys):
     with cli.vm_lock(env.state, "lab", "vm1"):
         res = run(capsys, "vm", "cpumem", "--host=lab", "--name=vm1", "--vcpus=2")
         assert res.rc == 2 and res.data["kind"] == "busy"
-        res = run(capsys, "vm", "delete", "--host=lab", "--name=vm1")
+        res = run(capsys, "vm", "delete", "--host=lab", "--name=vm1", ANY_DIGEST)
         assert res.rc == 2 and res.data["kind"] == "busy"
 
 
@@ -789,7 +796,7 @@ def test_download_url_on_this_machine_then_upload(env, capsys, files_server):
     sha = hashlib.sha256(data).hexdigest()
     res = run(capsys, "image", "download-url", "--host=lab", "--pool=images",
               "--name=cirros.qcow2", f"--url={base}/cirros.qcow2?token=SECRETTOKEN",
-              f"--sha256={sha}")
+              f"--sha256={sha}", "--allow-private=127.0.0.1/32")
     assert res.rc == 0, res.err
     assert env.net.sim.contents[("images", "cirros.qcow2")] == data
     assert res.data["url"] == f"{base}/cirros.qcow2"
@@ -809,7 +816,8 @@ def test_download_url_refusals_send_nothing(env, capsys, files_server, path, sha
     (root / "cirros.qcow2").write_bytes(qcow2_bytes())
     env.use(world())
     argv = ["image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
-            f"--url={base}{path}"] + ([f"--sha256={sha}"] if sha else [])
+            f"--url={base}{path}", "--allow-private=127.0.0.0/8"] + (
+                [f"--sha256={sha}"] if sha else [])
     res = run(capsys, *argv)
     assert res.rc in (1, 2) and res.data["kind"] == kind and msg in res.data["error"]
     assert writes(env) == [] and list((env.state / "kvm-images" / "staging").iterdir()) == []
@@ -921,20 +929,20 @@ SCHEMAS = [
                                "--name=free.qcow2", "--dry-run"], 0,
      {"ok", "host", "dry_run", "possible", "plan"}),
     ("vol delete", world, ["vol", "delete", "--host=lab", "--pool=images",
-                           "--name=free.qcow2"], 0,
+                           "--name=free.qcow2", "PREVIEW"], 0,
      {"ok", "host", "dry_run", "pool", "volume", "key", "path", "identity", "refusals",
       "unreadable", "acknowledged_unreadable", "digest", "deleted", "gone"}),
     ("pool define", world, ["pool", "define", "--host=lab", "--name=p3", "--path=/srv/p3"], 0,
      {"ok", "host", "name", "dry_run", "state", "existing_directory", "nested_with"}),
     ("pool stop", world, ["pool", "stop", "--host=lab", "--pool=images"], 0,
      {"ok", "host", "pool", "action", "state"}),
-    ("pool delete", world, ["pool", "delete", "--host=lab", "--pool=images"], 0,
+    ("pool delete", world, ["pool", "delete", "--host=lab", "--pool=images", "PREVIEW"], 0,
      {"ok", "host", "dry_run", "name", "deleted", "directory_removed", "gone"}),
     ("net define", world, ["net", "define", "--host=lab", "--name=n3", "--mode=isolated",
                            "--subnet=10.4.4.0/24"], 0,
      {"ok", "host", "name", "dry_run", "network"}),
     ("net delete refused", lambda: vm_world("running"),
-     ["net", "delete", "--host=lab", "--network=default"], 1, FAIL | {"host", "network",
+     ["net", "delete", "--host=lab", "--network=default", "PREVIEW"], 1, FAIL | {"host", "network",
                                                                      "refusals"}),
     ("net links", world, ["net", "links", "--host=lab"], 0,
      {"ok", "host", "bridges", "physical", "links", "networks"}),
@@ -944,7 +952,7 @@ SCHEMAS = [
 @pytest.mark.parametrize("label,make,argv,rc,keys", SCHEMAS, ids=[s[0] for s in SCHEMAS])
 def test_json_schema_is_stable(env, capsys, label, make, argv, rc, keys):
     env.use(make())
-    res = run(capsys, *_argv(env, argv))
+    res = run(capsys, *_argv(env, argv, capsys))
     assert res.rc == rc, res.err
     assert set(res.data) == keys
     assert "Traceback" not in res.err and str(env.state) not in res.out + res.err

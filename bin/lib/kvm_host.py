@@ -499,13 +499,16 @@ class VirshHost:
         src = open(source, "rb") if own else source
         out_f, err_f = tempfile.TemporaryFile(), tempfile.TemporaryFile()
         try:
+            proc = None
             try:
-                proc = self.popen(argv, stdin=subprocess.PIPE, stdout=out_f, stderr=err_f,
-                                  bufsize=0)
-            except OSError as e:
-                raise KvmError("failed", f"{self.name}: failed: cannot run ssh ({e.strerror})",
-                               host=self.name) from e
-            try:
+                # lancement DANS le bloc gardé : un signal reçu juste après
+                # popen() arrête quand même ssh
+                try:
+                    proc = self.popen(argv, stdin=subprocess.PIPE, stdout=out_f,
+                                      stderr=err_f, bufsize=0)
+                except OSError as e:
+                    raise KvmError("failed", f"{self.name}: failed: cannot run ssh "
+                                   f"({e.strerror})", host=self.name) from e
                 sent, broken = self._feed(proc, src, progress, cancel, limit_bps)
                 try:
                     rc = proc.wait(timeout=finish_timeout)
@@ -517,7 +520,8 @@ class VirshHost:
             except BaseException:
                 # signal de l'appelant (annulation par SIGTERM levée dans ce fil)
                 # ou erreur : ssh n'est jamais laissé en vie derrière nous
-                self._stop(proc)
+                if proc is not None:
+                    self._stop(proc)
                 raise
             out_f.seek(0)
             err_f.seek(0)

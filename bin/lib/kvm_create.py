@@ -443,10 +443,14 @@ def rollback(host, created):
 
 
 def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uuidlib.uuid4,
-              password_gen=vnc_password, start=None):
+              password_gen=vnc_password, start=None, before_write=None):
     """Crée les instances d'un spec : plan recalculé ici (jamais l'aperçu),
     puis pour chaque instance volumes, seed, define, autostart, start,
-    relecture. `progress(étape, statut, message)` reçoit `plan`,
+    relecture. `before_write(volumes, networks)` : appelé une fois le plan
+    accepté et avant toute écriture, avec les (pool, volume) que la création
+    va créer (disques et seed) et les réseaux cités ; l'appelant y prend ses
+    verrous, une exception l'arrête sans rien avoir créé.
+    `progress(étape, statut, message)` reçoit `plan`,
     `volume-<cible>`, `seed`, `define`, `start`, `verify` (préfixés du nom
     d'instance quand il y en a plusieurs). `cancel()` : consulté entre deux
     étapes et pendant les téléversements ; lève kh.Cancelled.
@@ -471,6 +475,10 @@ def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uui
         step("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]),
                       {"refusals": plan["refusals"], "plan": _public(plan)})
+    if before_write is not None:
+        before_write(sorted({pv for i in plan["_instances"] for pv in i["to_create"]}),
+                     sorted({n["source"] for i in plan["_instances"] for n in i["spec"]["nics"]
+                             if n.get("kind") == "network"}))
     step("plan", "done", f"{len(plan['instances'])} VM(s)"
          + (f"; {'; '.join(plan['warnings'])}" if plan["warnings"] else ""))
     opts = plan["_options"]

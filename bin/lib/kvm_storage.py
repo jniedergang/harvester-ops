@@ -450,14 +450,43 @@ def file_sha256(path):
     return h.hexdigest()
 
 
-def _delete_partial(host, pool, name):
-    """Supprime un volume partiel ; rend None ou un reste nommé."""
-    try:
-        host.virsh("vol-delete", "--pool", pool, "--vol", name)
-    except kh.KvmError as e:
-        if e.kind != "notfound":
-            return {"kind": "volume", "pool": pool, "volume": name, "error": e.message}
-    return None
+# volume partiel encore tenu par libvirt (flux `vol-upload` distant pas
+# encore refermé après l'arrêt de ssh) : vol-delete est réessayé avec un
+# recul croissant, PARTIAL_DELETE_RETRY secondes au plus, avant de nommer
+# le reste. Réglable (tests, hôte lent).
+PARTIAL_DELETE_RETRY = 30.0
+PARTIAL_DELETE_FIRST_WAIT = 0.5
+PARTIAL_DELETE_MAX_WAIT = 4.0
+_IN_USE = ("still in use", "in use", "being allocated")
+
+
+def _volume_busy(err):
+    """Refus de libvirt parce que le volume sert encore (flux en cours)."""
+    low = (err.message or "").lower()
+    return any(m in low for m in _IN_USE)
+
+
+def _delete_partial(host, pool, name, retry_for=None, sleep=None, clock=None):
+    """Supprime un volume partiel ; rend None ou un reste nommé. Tant que
+    libvirt le dit encore utilisé (« in use », « still in use »), réessaie
+    avec un recul borné (`retry_for` secondes, PARTIAL_DELETE_RETRY par
+    défaut) ; une autre erreur est dite tout de suite."""
+    retry_for = PARTIAL_DELETE_RETRY if retry_for is None else retry_for
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    end = clock() + retry_for
+    wait = PARTIAL_DELETE_FIRST_WAIT
+    while True:
+        try:
+            host.virsh("vol-delete", "--pool", pool, "--vol", name)
+            return None
+        except kh.KvmError as e:
+            if e.kind == "notfound":
+                return None
+            if not _volume_busy(e) or clock() + wait > end:
+                return {"kind": "volume", "pool": pool, "volume": name, "error": e.message}
+        sleep(wait)
+        wait = min(wait * 2, PARTIAL_DELETE_MAX_WAIT)
 
 
 def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=True,

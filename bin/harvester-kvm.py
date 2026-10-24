@@ -17,7 +17,7 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py vm start|shutdown|reboot|destroy|suspend|resume --host N --name D [--timeout S]
   harvester-kvm.py vm display --host N --name D
   harvester-kvm.py vm delete --host N --name D [--remove-storage]
-        [--acknowledge-unreadable=PATH ...] [--expect-delete=DIGEST] [--dry-run]
+        [--acknowledge-unreadable=PATH ...] (--dry-run | --expect-delete=DIGEST)
         [--timeout S] [--survey-timeout S]
   harvester-kvm.py snapshot list --host N --name D
   harvester-kvm.py snapshot create --host N --name D --snapshot S [--description T] [--timeout S]
@@ -41,20 +41,21 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py image verify --host N --pool=P --volume=V [--sha256=H]
   harvester-kvm.py image upload|vol upload --host N --pool=P --name=V --file=PATH
         [--sha256=H] [--format=F] [--no-verify] [--limit-mbps=M] [--author=A]
-  harvester-kvm.py image download-url --host N --pool=P --name=V --url=U [...]
-  harvester-kvm.py image delete --host N --pool=P --volume=V [--dry-run] [--expect-delete=D]
+  harvester-kvm.py image download-url --host N --pool=P --name=V --url=U
+        [--allow-private=CIDR ...] [--max-size=SIZE] [...]
+  harvester-kvm.py image delete --host N --pool=P --volume=V (--dry-run | --expect-delete=D)
   harvester-kvm.py vol create --host N --pool=P --name=V --capacity=SIZE [--format=F]
         [--backing=IMAGE]
   harvester-kvm.py vol resize --host N --pool=P --name=V --capacity=SIZE
-  harvester-kvm.py vol delete --host N --pool=P --name=V [--dry-run] [--expect-delete=D]
+  harvester-kvm.py vol delete --host N --pool=P --name=V (--dry-run | --expect-delete=D)
   harvester-kvm.py pool define --host N --spec-file=F|--name --path [--type] [--dry-run]
   harvester-kvm.py pool start|stop|refresh --host N --pool=P
   harvester-kvm.py pool autostart --host N --pool=P [--disable]
-  harvester-kvm.py pool delete --host N --pool=P [--remove-dir] [--dry-run] [--expect-delete=D]
+  harvester-kvm.py pool delete --host N --pool=P [--remove-dir] (--dry-run | --expect-delete=D)
   harvester-kvm.py net define --host N --spec-file=F|--name --mode [--subnet] [--dry-run]
   harvester-kvm.py net start|stop --host N --network=R
   harvester-kvm.py net autostart --host N --network=R [--disable]
-  harvester-kvm.py net delete --host N --network=R [--dry-run] [--expect-delete=D]
+  harvester-kvm.py net delete --host N --network=R (--dry-run | --expect-delete=D)
   harvester-kvm.py net links --host N
 
 Options communes : --json (sortie JSON sur stdout), --state-dir (défaut
@@ -105,15 +106,27 @@ par un fichier (`--spec-file=`, 0600 dans le répertoire de travail de la
 console), jamais par argv, et son contenu n'est jamais recopié dans une
 sortie (le JSON dit `user_data: true` et la taille). Le mot de passe VNC est
 tiré par la console et n'apparaît nulle part. Chaque commande relit l'état
-à la fin. Une création tient le verrou de chaque nom d'instance et tient en
-partage les pools où elle écrit ; arrêter ou supprimer un pool le prend en
-exclusif. Les suppressions acceptent `--expect-delete=<digest de l'aperçu>`
-(`plan-changed` si l'objet a changé), la modification exige
+à la fin. Une création tient le verrou de chaque nom d'instance, en
+exclusif chaque volume qu'elle va créer (disques, seed), en partage les
+pools où elle écrit et les réseaux qu'elle cite ; arrêter ou supprimer un
+pool ou un réseau le prend en exclusif, supprimer un volume ou une image
+prend le verrou du volume (kind `busy` si une création l'écrit). Toute
+suppression réelle (vm, vol, image, pool, net) exige
+`--expect-delete=<digest de l'aperçu>` montré par `--dry-run` (sans lui :
+erreur d'usage, code 2 ; `plan-changed` si l'objet a changé depuis
+l'aperçu), la modification exige
 `--expect-config=<config_digest lu à l'ouverture>` (`changed` sinon).
 Un téléversement envoie le fichier sur une connexion ssh propre, publie sa
 progression en PROGRESS_EVENT|upload|<json> (débit, temps restant), et un
-volume partiel est supprimé sur échec ou annulation. `image download-url`
-télécharge sur la machine de la console (jamais sur l'hôte), puis envoie.
+volume partiel est supprimé sur échec ou annulation (libvirt le dit « in
+use » tant que le flux distant n'est pas fermé : la suppression est
+réessayée jusqu'à 30 s, puis le reste est nommé). Un téléversement n'a pas
+de --timeout : il s'arrête par SIGTERM/SIGHUP (bouton « Annuler »).
+`image download-url` télécharge sur la machine de la console (jamais sur
+l'hôte), puis envoie ; seules les adresses publiques sont jointes, à chaque
+redirection (pas de boucle locale, de lien local, d'adresse privée ni de
+métadonnées), sauf les plages données par --allow-private=CIDR ; taille
+plafonnée par --max-size.
 
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
 ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
@@ -125,7 +138,9 @@ import argparse
 import contextlib
 import errno
 import fcntl
+import functools
 import hashlib
+import http.client
 import ipaddress
 import json
 import math
@@ -133,6 +148,7 @@ import os
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1402,9 +1418,9 @@ def cmd_vm_delete(args):
     if ack and not args.remove_storage:
         raise UsageError("--acknowledge-unreadable only applies with --remove-storage")
     checked(ko.check_acknowledged, ack)
-    expect = checked(ko.check_digest, args.expect_delete)
     timeout = positive_timeout(args.timeout, DELETE_TIMEOUT)
     survey_timeout = positive_timeout(args.survey_timeout, DELETE_SURVEY_TIMEOUT)
+    expect = required_digest(args, "a VM")
     data = {"host": host.name, "name": name, "refusals": [], "leftovers": [],
             "unreadable": []}
     prog = Progress()
@@ -1461,6 +1477,17 @@ def cmd_vm_delete(args):
     return EXIT_OK
 
 
+def required_digest(args, what):
+    """Empreinte d'aperçu (`--expect-delete`) : obligatoire pour toute
+    suppression réelle, l'aperçu (`--dry-run`) la montre. Refus d'usage
+    (code 2) avant tout appel à l'hôte."""
+    digest = checked(ko.check_digest, args.expect_delete)
+    if digest is None and not args.dry_run:
+        raise UsageError(f"--expect-delete is required to delete {what}: run the same "
+                         "command with --dry-run first, then pass the digest it shows")
+    return digest
+
+
 def unreadable_lines(unreadable, acknowledged):
     """Fichiers illisibles par le compte SSH qui ont empêché la preuve."""
     left = [p for p in unreadable if p not in set(acknowledged)]
@@ -1481,6 +1508,8 @@ CREATE_TIMEOUT = 3600
 EDIT_TIMEOUT = 600
 # taille maximale d'un fichier de spec (création, disque, carte, cloud-init)
 SPEC_MAX = 1 << 20
+# imbrication maximale d'un spec JSON (un VmSpec en compte moins de 6)
+SPEC_MAX_DEPTH = 32
 # taille maximale d'un user-data ou network-data donné par --user-data=
 CLOUDINIT_MAX = 1 << 20
 DOWNLOAD_TIMEOUT = 60
@@ -1488,6 +1517,8 @@ DOWNLOAD_MAX_REDIRECTS = 5
 DOWNLOAD_CHUNK = 1 << 20
 # marge laissée libre sur le disque de la console pendant un téléchargement
 DOWNLOAD_MARGIN = 256 << 20
+# taille maximale d'un téléchargement par défaut (--max-size)
+DOWNLOAD_MAX_SIZE = 64 << 30
 AUTHOR_MAX = 128
 SIZE_UNITS = {"": 1, "B": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
 # participe passé des gestes de pool et de réseau (annulation)
@@ -1511,6 +1542,46 @@ def deadline_cancel(timeout):
     return lambda: CLOCK() > end
 
 
+class _NotFinite(Exception):
+    """Nombre NaN ou infini dans un spec JSON."""
+
+
+def _no_constant(_name):
+    # NaN, Infinity, -Infinity : acceptés par json.loads, refusés ici
+    raise _NotFinite()
+
+
+def _finite_float(text):
+    value = float(text)
+    if not math.isfinite(value):               # 1e400 devient inf
+        raise _NotFinite()
+    return value
+
+
+def json_depth(text):
+    """Profondeur d'imbrication des objets et listes d'un texte JSON, comptée
+    AVANT l'analyse (json.loads irait jusqu'à RecursionError) ; les crochets
+    des chaînes ne comptent pas."""
+    depth = deepest = 0
+    in_str = esc = False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+        elif ch == '"':
+            in_str = True
+        elif ch in "[{":
+            depth += 1
+            deepest = max(deepest, depth)
+        elif ch in "]}":
+            depth -= 1
+    return deepest
+
+
 def read_spec(path, what="spec"):
     """Spec JSON lu depuis un fichier (ou `-` : entrée standard). Le contenu
     n'est jamais recopié dans une sortie (il peut porter un user-data), ni le
@@ -1529,8 +1600,17 @@ def read_spec(path, what="spec"):
     if len(raw) > SPEC_MAX:
         raise UsageError(f"the {what} file is larger than {SPEC_MAX} bytes")
     try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UsageError(f"the {what} file is not valid JSON") from None
+    if json_depth(text) > SPEC_MAX_DEPTH:
+        raise UsageError(f"the {what} file nests deeper than {SPEC_MAX_DEPTH} levels")
+    try:
+        data = json.loads(text, parse_constant=_no_constant, parse_float=_finite_float)
+    except _NotFinite:
+        raise UsageError(f"the {what} file holds a number that is not finite (NaN or "
+                         "infinity)") from None
+    except (ValueError, RecursionError):
         raise UsageError(f"the {what} file is not valid JSON") from None
     if not isinstance(data, dict):
         raise UsageError(f"the {what} must be a JSON object")
@@ -1559,7 +1639,7 @@ def parse_size(text, what="size"):
         if isinstance(text, str) else ""
     unit = t[-1:] if t[-1:] in SIZE_UNITS else ""
     digits = t[:-1] if unit else t
-    if not digits.isdigit() or int(digits) <= 0:
+    if not (digits.isascii() and digits.isdigit()) or int(digits) <= 0:
         raise UsageError(f"invalid {what}: a positive number of bytes, or with K, M, G, T")
     return int(digits) * SIZE_UNITS[unit]
 
@@ -1816,12 +1896,26 @@ def cmd_vm_create(args):
              plan_text(f"create {', '.join(names)} on {host.name} (dry run)", pub["refusals"],
                        lines))
         return EXIT_OK
-    with vm_lock(state, host.name, *names), \
-            object_lock(state, host.name, "pool", *spec_pools(spec), shared=True), \
-            noting_progress(prog):
+    with contextlib.ExitStack() as locks:
+        locks.enter_context(vm_lock(state, host.name, *names))
+        locks.enter_context(object_lock(state, host.name, "pool", *spec_pools(spec),
+                                        shared=True))
+        locks.enter_context(noting_progress(prog))
+
+        def hold(volumes, networks):
+            # plan accepté, rien d'écrit : chaque volume à créer (disques,
+            # seed) en exclusif, contre un retrait ou un envoi du même nom ;
+            # chaque réseau cité en partage, contre son arrêt ou son retrait
+            locks.enter_context(object_lock(state, host.name, "volume",
+                                            *[f"{p}/{v}" for p, v in volumes]))
+            locks.enter_context(object_lock(state, host.name, "network", *networks,
+                                            shared=True))
         t0 = CLOCK()
         try:
-            res = kc.create_vm(host, spec, progress=prog, cancel=deadline_cancel(timeout))
+            res = kc.create_vm(host, spec, progress=prog, cancel=deadline_cancel(timeout),
+                               before_write=hold)
+        except UsageError:
+            raise                              # verrou occupé : rien n'a été écrit
         except LIB_ERRORS as e:
             data.update(created=list(getattr(e, "created", None) or []),
                         failed=getattr(e, "failed", None))
@@ -1906,9 +2000,10 @@ def cmd_vm_edit(args):
     return EXIT_OK
 
 
-def hot_gesture(args, gesture, fn):
-    """Un geste à chaud : verrou de la VM, étapes, résultat par changement,
-    relecture (état, changements en attente)."""
+def hot_gesture(args, gesture, fn, pools=()):
+    """Un geste à chaud : verrou de la VM (et des `pools` en partage),
+    étapes, résultat par changement, relecture (état, changements en
+    attente)."""
     state = state_of(args)
     host = load_host_next(state, args.host)
     name = check_vm_name(args.name)
@@ -1920,7 +2015,9 @@ def hot_gesture(args, gesture, fn):
         if prog.sid == "plan" and prog.status == "running":
             prog("plan", "done", gesture)
         prog(sid, status, msg)
-    with vm_lock(state, host.name, name), noting_progress(prog):
+    with vm_lock(state, host.name, name), \
+            object_lock(state, host.name, "pool", *pools, shared=True), \
+            noting_progress(prog):
         prog("plan", "running", f"{gesture} on {name}")
         try:
             res = fn(host, name, chained)
@@ -1950,8 +2047,9 @@ def cmd_vm_cpumem(args):
 
 def cmd_vm_add_volume(args):
     disk = read_spec(args.spec_file, "disk")
+    # pools où le disque peut être créé (ou lu) : tenus en partage
     return hot_gesture(args, "add-volume", lambda h, n, p: ke.attach_disk(
-        h, n, disk, progress=p, sleep=SLEEP))
+        h, n, disk, progress=p, sleep=SLEEP), pools=spec_pools({"disks": [disk]}))
 
 
 def check_target(target):
@@ -2011,12 +2109,20 @@ def cmd_vm_cloudinit(args):
     checked(ko.check_acknowledged, ack)
     data = {"host": host.name, "name": name, "refusals": [], "leftovers": []}
     prog = Progress("seed")
-    with vm_lock(state, host.name, name), noting_progress(prog):
+    with contextlib.ExitStack() as locks:
+        locks.enter_context(vm_lock(state, host.name, name))
+        locks.enter_context(noting_progress(prog))
+
+        def hold(pool, volume):
+            # pool du seed en partage (un retrait ou un arrêt du pool attend),
+            # nouveau seed en exclusif
+            locks.enter_context(object_lock(state, host.name, "pool", pool, shared=True))
+            locks.enter_context(object_lock(state, host.name, "volume", f"{pool}/{volume}"))
         prog("seed", "running", f"new cloud-init seed for {name}"
              + (" (cloud-init runs again at next boot)" if args.rerun else ""))
         res = lib_call(prog, data, lambda: ke.regenerate_seed(
             host, name, ci.get("user_data"), ci.get("network_data"), rerun=args.rerun,
-            hostname=ci.get("hostname"), acknowledged_unreadable=ack))
+            hostname=ci.get("hostname"), acknowledged_unreadable=ack, before_write=hold))
         prog("seed", "done", f"{res['seed']['pool']}/{res['seed']['volume']} on "
              f"{res['seed']['target']}, read by the guest at its next start")
         if res["previous"]:
@@ -2105,7 +2211,8 @@ def staging_dir(state):
 
 def public_url(url):
     """URL sans identifiants, requête ni fragment (une URL signée porte son
-    jeton dans la requête) : c'est elle qui est notée et affichée."""
+    jeton dans la requête) : c'est elle qui est notée et affichée. L'URL a
+    été contrôlée par check_url (port valide)."""
     p = urllib.parse.urlsplit(url)
     host = p.hostname or ""
     if ":" in host:
@@ -2114,40 +2221,166 @@ def public_url(url):
     return urllib.parse.urlunsplit((p.scheme, netloc, p.path, "", ""))
 
 
+def check_url(url):
+    """URL http(s) avec un hôte et un port valide, sans caractère de
+    contrôle ni espace ; rend le message de refus, ou None."""
+    if not isinstance(url, str) or not url or any(ord(c) < 33 or ord(c) == 127 for c in url):
+        return "an http or https URL"
+    try:
+        p = urllib.parse.urlsplit(url)
+        port = p.port
+    except ValueError:
+        return "an http or https URL with a valid port (1 to 65535)"
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return "an http or https URL"
+    if port == 0:
+        return "an http or https URL with a valid port (1 to 65535)"
+    return None
+
+
+def parse_cidrs(items):
+    """--allow-private=CIDR (répétable) : plages privées autorisées."""
+    nets = []
+    for item in items or []:
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            raise UsageError(f"--allow-private: {item!r} is not an address range such as "
+                             "10.0.0.0/8") from None
+    return nets
+
+
+def address_allowed(addr, allow=()):
+    """Adresse joignable par un téléchargement : publique (globale, ni
+    multicast), ou dans une plage de --allow-private. Refusées par défaut :
+    boucle locale, lien local (169.254.169.254, adresse des métadonnées des
+    clouds, comprise), privées, partagées (100.64/10), réservées."""
+    ip = ipaddress.ip_address(str(addr).split("%", 1)[0])
+    if ip.version == 6 and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    if any(ip.version == n.version and ip in n for n in allow):
+        return True
+    return ip.is_global and not ip.is_multicast
+
+
+def _guarded_connection(base):
+    """Classe de connexion http.client qui résout le nom elle-même, refuse
+    toute adresse non autorisée AVANT de se connecter, puis se connecte à
+    l'adresse vérifiée (pas de seconde résolution : un changement de DNS
+    entre le contrôle et la connexion ne passe pas)."""
+    class Guarded(base):
+        def __init__(self, *a, allow=(), **kw):
+            super().__init__(*a, **kw)
+            self._allow = allow
+            self._create_connection = self._connect_checked
+
+        def _connect_checked(self, address, timeout=None, source_address=None, *a, **kw):
+            host, port = address
+            try:
+                infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+            except socket.gaierror as e:
+                raise OSError(f"cannot resolve {host} ({e.strerror})") from None
+            bad = sorted({sa[0] for *_, sa in infos
+                          if not address_allowed(sa[0], self._allow)})
+            if bad:
+                raise Failure(f"{host} resolves to a loopback, link-local, private or reserved "
+                              f"address ({', '.join(bad)}): refused; if this server is "
+                              "intended, add --allow-private=CIDR", kind="refused")
+            last = None
+            for family, socktype, proto, _canon, sa in infos:
+                sock = socket.socket(family, socktype, proto)
+                try:
+                    if timeout is not None and timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                        sock.settimeout(timeout)
+                    if source_address:
+                        sock.bind(source_address)
+                    sock.connect(sa)
+                    return sock
+                except OSError as e:
+                    last = e
+                    sock.close()
+            raise last or OSError(f"no address for {host}")
+    return Guarded
+
+
+_GuardedHTTP = _guarded_connection(http.client.HTTPConnection)
+_GuardedHTTPS = _guarded_connection(http.client.HTTPSConnection)
+
+
+class _GuardedHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, allow):
+        super().__init__()
+        self._allow = allow
+
+    def http_open(self, req):
+        return self.do_open(functools.partial(_GuardedHTTP, allow=self._allow), req)
+
+
+class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, allow):
+        super().__init__()
+        self._allow = allow
+
+    def https_open(self, req):
+        return self.do_open(functools.partial(_GuardedHTTPS, allow=self._allow), req,
+                            context=self._context)
+
+
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Redirections bornées, vers http ou https seulement."""
+    """Redirections bornées, vers http ou https seulement, port valide ;
+    l'adresse de chaque étape est contrôlée à sa connexion."""
     max_redirections = DOWNLOAD_MAX_REDIRECTS
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):
-            raise UsageError("the download was redirected outside http/https: refused")
+        if check_url(newurl) is not None:
+            raise Failure("the download was redirected outside http/https or to an invalid "
+                          "URL: refused", kind="refused")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def download_url(url, dest, progress=None, opener=None):
+def download_opener(allow=()):
+    """Ouvreur urllib du téléchargement : sans mandataire d'environnement
+    (l'adresse contrôlée est celle du serveur joint), sans ftp ni file,
+    adresses contrôlées à chaque connexion, redirections bornées."""
+    opener = urllib.request.OpenerDirector()
+    for h in (urllib.request.ProxyHandler({}), urllib.request.UnknownHandler(),
+              urllib.request.HTTPDefaultErrorHandler(), _Redirects(),
+              urllib.request.HTTPErrorProcessor(), _GuardedHTTPHandler(allow),
+              _GuardedHTTPSHandler(allow)):
+        opener.add_handler(h)
+    return opener
+
+
+def download_url(url, dest, progress=None, opener=None, max_size=None, allow=()):
     """Télécharge `url` (http/https) dans un fichier 0600 de `dest`, en flux,
-    SHA-256 calculé au passage. Taille annoncée contrôlée contre la place
+    SHA-256 calculé au passage. Adresses du serveur et de chaque redirection
+    contrôlées (address_allowed, `allow` : plages autorisées). Taille
+    plafonnée à `max_size` (annoncée et reçue) et contrôlée contre la place
     libre (marge DOWNLOAD_MARGIN). Rend (chemin, taille, sha256). Le fichier
     partiel est supprimé sur toute erreur ou annulation."""
-    opener = opener or urllib.request.build_opener(_Redirects)
+    max_size = DOWNLOAD_MAX_SIZE if max_size is None else max_size
+    opener = opener or download_opener(allow)
     try:
         resp = opener.open(urllib.request.Request(url, headers={"User-Agent": "harvester-ops"}),
                            timeout=DOWNLOAD_TIMEOUT)
-    except UsageError:
+    except (UsageError, Failure):
         raise
     except urllib.error.HTTPError as e:
         if 300 <= e.code < 400:                # redirection hors http(s), ou trop nombreuses
             raise Failure("the download was redirected outside http/https or too many times: "
                           "refused", kind="refused") from None
         raise Failure(f"download refused by the server (HTTP {e.code})", kind="failed") from None
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         reason = getattr(e, "reason", None) or type(e).__name__
         raise Failure(f"download failed ({reason})", kind="unreachable") from None
     fd, tmp = tempfile.mkstemp(dir=dest, prefix="dl-")
     try:
         with resp, os.fdopen(fd, "wb") as f:
             length = resp.headers.get("Content-Length")
-            total = int(length) if length and length.isdigit() else None
+            total = int(length) if length and length.isascii() and length.isdigit() else None
+            if total is not None and total > max_size:
+                raise Failure(f"the file is larger than --max-size ({total} bytes announced, "
+                              f"{max_size} allowed)", kind="refused")
             free = shutil.disk_usage(dest).free
             if total is not None and total + DOWNLOAD_MARGIN > free:
                 raise Failure(f"not enough space on the console for {total} bytes "
@@ -2161,6 +2394,9 @@ def download_url(url, dest, progress=None, opener=None):
                 if total is not None and got > total:
                     raise Failure("the server sent more than the size it announced",
                                   kind="failed")
+                if got > max_size:
+                    raise Failure(f"the file is larger than --max-size ({max_size} bytes)",
+                                  kind="refused")
                 if got % (64 * DOWNLOAD_CHUNK) < len(block) and \
                         shutil.disk_usage(dest).free < DOWNLOAD_MARGIN:
                     raise Failure("the console is running out of space", kind="refused")
@@ -2196,8 +2432,8 @@ def _upload_progress(phase):
 def _limit_bps(args):
     if args.limit_mbps is None:
         return None
-    if args.limit_mbps <= 0:
-        raise UsageError("--limit-mbps must be positive")
+    if not math.isfinite(args.limit_mbps) or args.limit_mbps <= 0:
+        raise UsageError("--limit-mbps must be a positive finite number")
     return args.limit_mbps * 1_000_000 / 8
 
 
@@ -2257,9 +2493,12 @@ def cmd_image_download(args):
     le fichier reçu est supprimé à la fin, réussite ou échec."""
     state, host, pool, name = check_upload_args(args)
     url = args.url
-    if not isinstance(url, str) or urllib.parse.urlsplit(url).scheme not in ("http", "https") \
-            or not urllib.parse.urlsplit(url).hostname or any(ord(c) < 33 for c in url):
-        raise UsageError("--url: an http or https URL")
+    bad = check_url(url)
+    if bad:
+        raise UsageError(f"--url: {bad}")
+    allow = parse_cidrs(args.allow_private)
+    max_size = DOWNLOAD_MAX_SIZE if args.max_size is None else parse_size(args.max_size,
+                                                                            "--max-size")
     shown = public_url(url)
     prog = Progress("download")
     prog("download", "running", shown)
@@ -2267,7 +2506,8 @@ def cmd_image_download(args):
     path = None
     try:
         try:
-            path, size, sha = download_url(url, staging_dir(state), progress)
+            path, size, sha = download_url(url, staging_dir(state), progress,
+                                           max_size=max_size, allow=allow)
         except Cancelled as c:
             c.stage = "download"
             raise
@@ -2341,7 +2581,7 @@ def cmd_vol_delete(args):
     name = checked(ko.check_vm_name, args.name)
     ack = args.acknowledge_unreadable
     checked(ko.check_acknowledged, ack)
-    expect = checked(ko.check_digest, args.expect_delete)
+    expect = required_digest(args, "an image" if args.cmd == "image" else "a volume")
     data = {"host": host.name, "pool": pool, "volume": name, "refusals": [], "unreadable": []}
     prog = Progress()
     if args.dry_run:
@@ -2450,7 +2690,7 @@ def cmd_pool_delete(args):
     pool = checked(ks.check_pool_name, args.pool)
     ack = args.acknowledge_unreadable
     checked(ko.check_acknowledged, ack)
-    expect = checked(ko.check_digest, args.expect_delete)
+    expect = required_digest(args, "a pool")
     data = {"host": host.name, "pool": pool, "refusals": [], "unreadable": []}
     prog = Progress()
     if args.dry_run:
@@ -2460,7 +2700,8 @@ def cmd_pool_delete(args):
         prog("plan", "warn" if plan["refusals"] else "done",
              "; ".join(plan["refusals"]) or "nothing uses it")
         lines = unreadable_lines(plan["unreadable"], plan["acknowledged_unreadable"])
-        lines.append("the directory and its files are removed" if args.remove_dir else
+        lines.append("the directory is removed only if it is empty: the deletion is refused "
+                     "while the pool holds volumes" if args.remove_dir else
                      "the directory and its files are kept")
         if not plan["refusals"]:
             lines.append(f"to delete exactly this, add --expect-delete={plan['digest']}")
@@ -2539,7 +2780,10 @@ def net_gesture(args, verb):
     fns = {"start": lambda: kn.start_network(host, net),
            "stop": lambda: kn.stop_network(host, net),
            "autostart": lambda: kn.autostart_network(host, net, not args.disable)}
-    with object_lock(state, host.name, "network", net), noting_progress(prog):
+    # démarrer n'ôte rien à une création qui cite le réseau (partage) ; arrêt
+    # et démarrage automatique en exclusif, comme pour les pools
+    with object_lock(state, host.name, "network", net, shared=verb == "start"), \
+            noting_progress(prog):
         what = (f"autostart {'off' if args.disable else 'on'}" if verb == "autostart"
                 else verb)
         prog(verb, "running", f"{what} network {net}")
@@ -2554,7 +2798,7 @@ def cmd_net_delete(args):
     state = state_of(args)
     host = load_host_next(state, args.host)
     net = checked(kn.check_network_name, args.network)
-    expect = checked(ko.check_digest, args.expect_delete)
+    expect = required_digest(args, "a network")
     data = {"host": host.name, "network": net, "refusals": []}
     prog = Progress()
     if args.dry_run:
@@ -2831,7 +3075,8 @@ def build_parser():
                     help="file the SSH user cannot read, accepted as using no disk of this VM "
                          "(repeatable)")
     sp.add_argument("--expect-delete", metavar="DIGEST",
-                    help="digest of the previewed plan: refused if more would be deleted")
+                    help="digest shown by --dry-run, required to delete: refused if more "
+                         "would be deleted")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
     sp.add_argument("--timeout", type=int, help=f"seconds (default {DELETE_TIMEOUT})")
     sp.add_argument("--survey-timeout", type=int,
@@ -2882,7 +3127,11 @@ def add_next_parsers(sub, vp, common):
     sp.add_argument("--host", required=True)
     sp.add_argument("--spec-file", help="JSON VmSpec (- for standard input)")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
-    sp.add_argument("--timeout", type=int, help=f"seconds (default {CREATE_TIMEOUT})")
+    sp.add_argument("--timeout", type=int,
+                    help=f"seconds (default {CREATE_TIMEOUT}); checked between steps (before "
+                         "each volume, the seed, define, start) and between blocks of an "
+                         "upload, never inside a running virsh command (a full copy keeps "
+                         "its own limit); past it, the creation is rolled back")
     sp.add_argument("--name")
     sp.add_argument("--instances", type=int)
     sp.add_argument("--vcpus", type=int)
@@ -2911,7 +3160,9 @@ def add_next_parsers(sub, vp, common):
     sp.add_argument("--expect-config", "--expect-digest", dest="expect_config",
                     metavar="DIGEST", help="config_digest read when the form was opened")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
-    sp.add_argument("--timeout", type=int, help=f"seconds (default {EDIT_TIMEOUT})")
+    sp.add_argument("--timeout", type=int,
+                    help=f"seconds (default {EDIT_TIMEOUT}); checked between the changes, "
+                         "never inside a running virsh command")
     sp.set_defaults(fn=cmd_vm_edit)
 
     sp = vp.add_parser("cpumem", parents=[common], help="vCPU and memory, live up to the maximums")
@@ -2973,7 +3224,8 @@ def add_next_parsers(sub, vp, common):
         sp.add_argument(volume_flag, dest="name", required=True)
         sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH")
         sp.add_argument("--expect-delete", metavar="DIGEST",
-                        help="digest of the previewed plan: refused if the volume changed")
+                        help="digest shown by --dry-run, required to delete: refused if the "
+                             "volume changed")
         sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
         sp.set_defaults(fn=cmd_vol_delete)
 
@@ -2997,6 +3249,12 @@ def add_next_parsers(sub, vp, common):
                        help="download an http(s) URL on this machine, then send it to the host")
     upload_opts(sp)
     sp.add_argument("--url", required=True)
+    sp.add_argument("--allow-private", action="append", metavar="CIDR",
+                    help="address range the server may be in although it is private, loopback "
+                         "or link-local (repeatable; default: public addresses only, checked "
+                         "at every redirect)")
+    sp.add_argument("--max-size", metavar="SIZE",
+                    help=f"largest file accepted (default {DOWNLOAD_MAX_SIZE >> 30}G)")
     sp.set_defaults(fn=cmd_image_download)
     sp = ip.add_parser("delete", parents=[common], help="delete an image (refused while used)")
     delete_opts(sp, "--volume")
@@ -3053,7 +3311,9 @@ def add_next_parsers(sub, vp, common):
     sp.add_argument("--remove-dir", action="store_true",
                     help="also remove the directory, only when the pool is empty")
     sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH")
-    sp.add_argument("--expect-delete", metavar="DIGEST")
+    sp.add_argument("--expect-delete", metavar="DIGEST",
+                    help="digest shown by --dry-run (same flags), required to delete: refused "
+                         "if the pool changed")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
     sp.set_defaults(fn=cmd_pool_delete)
 
@@ -3084,7 +3344,9 @@ def add_next_parsers(sub, vp, common):
     sp = xp.add_parser("delete", parents=[common], help="undefine a network (refused while cited)")
     sp.add_argument("--host", required=True)
     sp.add_argument("--network", required=True)
-    sp.add_argument("--expect-delete", metavar="DIGEST")
+    sp.add_argument("--expect-delete", metavar="DIGEST",
+                    help="digest shown by --dry-run, required to delete: refused if the "
+                         "network changed")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
     sp.set_defaults(fn=cmd_net_delete)
     sp = xp.add_parser("links", parents=[common], help="bridges and links of the host")
