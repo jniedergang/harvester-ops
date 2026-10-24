@@ -88,6 +88,6 @@ def test_no_nic_warning_at_10_gbit(monkeypatch):
 
 def test_runner_passes_the_stall_check():
     src = (ROOT / "web" / "app.py").read_text()
-    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    runner = src.split("def _baremetal_install_steps", 1)[1].split("\ndef ", 1)[0]
     assert "stalled=lambda: _bm_install_stalled(cfg_token, iso_token, host)" in runner
     assert 'return fail("wait-install", run._stall)' in runner

@@ -68,6 +68,13 @@ recorded, whether it was made from the console or somewhere else.
   throughput and time left, with a speed choice that says what it costs.
   An archive is downloaded from the window that made it, and added to
   another console's store from the browser, checked before it is kept.
+- **Disaster recovery between two clusters**: VMs are replicated
+  asynchronously to a second Harvester cluster through the backup target
+  both share, with an RPO objective per plan. A measurement phase
+  recommends the interval, a follower applies each backup on standby
+  volumes and shows the RPO really held, and a planned failover (no loss)
+  or an unplanned one (source lost, loss stated per VM) brings the VMs up
+  on the other site. Command line and console API in this release.
 - **VMware migrations with Forklift**: the console installs Forklift on a
   cluster, builds the VDDK image from VMware's archive and pushes it to
   your registry, connects vCenter servers (reusing those already declared
@@ -92,8 +99,11 @@ recorded, whether it was made from the console or somewhere else.
 - **KVM hosts next to the clusters**: libvirt hosts declared with a
   pinned host key, their VMs, storage pools and networks in one view, and
   the lifecycle gestures (start, shut down, reboot, force off, suspend,
-  resume) followed until the real state is reached. No agent on the
-  hosts: `virsh` over SSH, also from the command line.
+  resume) followed until the real state is reached. The VNC console of a
+  VM goes through the SSH connection of its host, password included;
+  internal snapshots, full clones and deletion with proof that no other
+  VM uses a disk. No agent on the hosts: `virsh` over SSH, also from the
+  command line.
 - **Scriptable**: the power sequencing also runs from the command line,
   for pipelines and airgapped sites, and every operation has a dry run.
 

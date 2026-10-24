@@ -494,13 +494,22 @@ def test_parse_dominfo_autostart_enabled_and_transient():
     assert got["persistent"] is False and got["autostart"] is True
 
 
+DISK_KEYS_196 = ("target", "device", "type", "bus", "format", "source")
+GRAPHICS_KEYS_196 = ("type", "port", "listen", "autoport")
+
+
+def pick(items, keys):
+    """Champs de la 1.96.0 seulement (la 1.98.0 en ajoute, sans en renommer)."""
+    return [{k: it[k] for k in keys} for it in items]
+
+
 def test_parse_domain_xml_harvlab_n1():
     d = kh.parse_domain_xml(fx("dumpxml-harvlab-n1.xml"))
     assert (d["name"], d["uuid"], d["id"], d["vcpus"], d["memory_kib"]) == (
         "harvlab-n1", "be02dfd3-538b-4ee2-80de-a0e7f0b12548", 1, 8, 16777216)
     assert (d["machine"], d["firmware"], d["cpu_pinned"], d["cpu_realtime"]) == (
         "pc-q35-10.2", "efi", False, False)
-    assert d["disks"] == [
+    assert pick(d["disks"], DISK_KEYS_196) == [
         {"target": "vda", "device": "disk", "type": "file", "bus": "virtio", "format": "qcow2",
          "source": "/var/lib/libvirt/images/harvlab/harvlab-n1.qcow2"},
         {"target": "sda", "device": "cdrom", "type": "file", "bus": "sata", "format": "raw",
@@ -508,7 +517,8 @@ def test_parse_domain_xml_harvlab_n1():
     assert d["nics"] == [
         {"type": "bridge", "source": "br0", "mac": "52:54:00:4c:ab:61", "model": "virtio"},
         {"type": "bridge", "source": "br0", "mac": "52:54:00:4c:ad:61", "model": "virtio"}]
-    assert d["graphics"] == [{"type": "vnc", "port": 5900, "listen": "127.0.0.1", "autoport": True}]
+    assert pick(d["graphics"], GRAPHICS_KEYS_196) == [
+        {"type": "vnc", "port": 5900, "listen": "127.0.0.1", "autoport": True}]
 
 
 def test_parse_domain_xml_netperf_pinned_realtime():
@@ -529,13 +539,14 @@ def test_parse_domain_xml_vmwlab_esx1():
         ("sda", "sata", "disk"), ("hda", "ide", "cdrom")]
     assert d["nics"] == [{"type": "bridge", "source": "br0", "mac": "52:54:00:4c:ae:80",
                           "model": "e1000e"}]
-    assert d["graphics"] == [{"type": "vnc", "port": None, "listen": "127.0.0.1", "autoport": True}]
+    assert pick(d["graphics"], GRAPHICS_KEYS_196) == [
+        {"type": "vnc", "port": None, "listen": "127.0.0.1", "autoport": True}]
 
 
 def test_parse_domain_xml_live_network_nvme_cdrom_no_graphics():
     d = kh.parse_domain_xml(fx("dumpxml-live-network-nvme.xml"))
     assert (d["name"], d["id"], d["graphics"]) == ("scratch", 7, [])
-    assert d["disks"] == [
+    assert pick(d["disks"], DISK_KEYS_196) == [
         {"target": "nvme0n1", "device": "disk", "type": "nvme", "bus": "nvme", "format": "raw",
          "source": "0000:01:00.0"},
         {"target": "sdb", "device": "cdrom", "type": "file", "bus": "sata", "format": "raw",

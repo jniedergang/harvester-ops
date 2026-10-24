@@ -155,3 +155,64 @@ To add a new cluster without editing `config.yaml` by hand:
 - **Idempotency**: re-running the script after a partial failure picks up where it left off (e.g. VMs already stopped → skip step 2's wait).
 - **No silent failure**: every step exits non-zero on error unless the operator explicitly chooses to skip.
 - **Auditable**: every command is logged with timestamp and exit code.
+
+## 12. Disaster recovery (asynchronous replication)
+
+What it does, the objects it creates and its limits: [capabilities.md,
+section 11](capabilities.md#11-disaster-recovery-asynchronous-vm-replication-cli--console-api).
+Every command below is `harvester-replication` (add `--json` for scripts).
+
+**Before anything.** Both clusters use the same backup target (Harvester
+setting `backup-target`), and it lives on neither site. Run the console
+that follows the plans on the backup site or outside both sites, never
+only on the source site: it would be lost with it.
+
+**First protection.**
+1. `plan create --name web --from harv1 --to harv2 --vm default/web-01
+   --rpo 15m --map-net default/prod=default/prod --map-sc
+   harvester-longhorn=harvester-longhorn`. Map every network and storage
+   class the VMs use. An image disk without `--map-image` takes the class
+   its image was built on, through `--map-sc`.
+2. `check web` until it shows no `block` finding.
+3. `measure start web --interval 5m`, wait three passes, `measure stop
+   web`, then `measure report web` for the recommended interval.
+4. `protect web --dry-run`, then `protect web` (it takes the measured
+   interval unless `--interval` is given; `--retain N` sets the number of
+   backups kept).
+5. `status web` (exit 4 means an objective is exceeded) and `events --plan
+   web`. In the console, the actions are in the dock and Activity.
+6. `check web --phase failover` runs the failover as a dry run, writing
+   nothing.
+
+**While protected.** The console follower applies each backup on the
+target. `plan set web --paused true` pauses it for the plan, `plan set web
+--rpo 30m` changes the objective (both hot). A CPU, memory, disk or network
+change of a protected VM shows as drift: run `protect web` again to
+rewrite its carnet. To change the retention: `protect web --retain 10`.
+
+**Planned failover** (both sites up, no loss): `failover web --vm
+default/web-01` (or `--all-vms --yes`). The source VM is stopped, its last
+writes are backed up and applied, then the VM starts on the target.
+
+**Unplanned failover** (source lost): first `check web --phase
+failover-unplanned` to see the points, the skew and the disks still
+catching up, then `failover web --all-vms --unplanned --yes`. A VM whose
+disks are too far apart is refused unless `--accept-skew`. Read
+`lost_after` in the result: the writes after it are lost. When the source
+comes back, make sure its VMs stay stopped.
+
+**Interrupted.** A failover cut after the activation (exit 3 `interrupted`)
+is finished with `resume web`, with the target alone if needed. A console
+restart, a host reboot or an update does not cancel anything: a protect
+(initial restore included), a measure or an unprotect in progress is left
+`interrupted` with the step it reached, and `resume web` continues it
+without copying again what was restored (Activity says "interrupted by the
+console shutdown"). A failover not yet activated is undone at that moment.
+Only a cancel by a person (dock cancel, Ctrl-C) undoes a protect; run it
+again afterwards. A command reported `not-started` never began: run it
+again.
+
+**Unprotect.** `unprotect web --yes`. VMs that were failed over keep
+everything on the target (listed in `left`). After a completed failover,
+backups are purged by hand: see "Purging the backups after a completed
+failover" in the capabilities page.

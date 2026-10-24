@@ -1,0 +1,38 @@
+stages:
+  network:
+    - name: "configure portworx iSCSI ifaces"
+      commands:
+        - |
+          /bin/bash -euxo pipefail -c '
+            LOG="/var/log/configure-iscsi-ifaces.log"
+            exec >> "$LOG" 2>&1
+            echo "==== $(date -Is) Configure iSCSI ifaces ===="
+            echo "Host: $(hostname)"
+            if ! command -v iscsiadm >/dev/null 2>&1; then
+              echo "ERROR: iscsiadm not found"
+              exit 1
+            fi
+            systemctl enable --now iscsid 2>/dev/null || true
+            systemctl restart iscsid 2>/dev/null || true
+            ip link show {{iscsi1}} >/dev/null 2>&1 || echo "WARNING: NIC {{iscsi1}} not found"
+            ip link show {{iscsi2}} >/dev/null 2>&1 || echo "WARNING: NIC {{iscsi2}} not found"
+            echo "Creating/updating iface eth-iscsi1 -> {{iscsi1}}"
+            if ! iscsiadm -m iface -I eth-iscsi1 >/dev/null 2>&1; then
+              iscsiadm -m iface -I eth-iscsi1 -o new
+            else
+              echo "iface eth-iscsi1 already exists"
+            fi
+            iscsiadm -m iface -I eth-iscsi1 -o update -n iface.net_ifacename -v {{iscsi1}}
+            echo "Creating/updating iface eth-iscsi2 -> {{iscsi2}}"
+            if ! iscsiadm -m iface -I eth-iscsi2 >/dev/null 2>&1; then
+              iscsiadm -m iface -I eth-iscsi2 -o new
+            else
+              echo "iface eth-iscsi2 already exists"
+            fi
+            iscsiadm -m iface -I eth-iscsi2 -o update -n iface.net_ifacename -v {{iscsi2}}
+            echo "Configured iSCSI ifaces:"
+            iscsiadm -m iface || true
+            iscsiadm -m iface -I eth-iscsi1 || true
+            iscsiadm -m iface -I eth-iscsi2 || true
+            echo "==== $(date -Is) Finished iSCSI iface configuration ===="
+          '

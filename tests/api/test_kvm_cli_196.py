@@ -384,7 +384,7 @@ class FlakyHost:
     def __init__(self, clock, script, timeout=30):
         self.clock, self.script, self.timeout, self.budgets = clock, list(script), timeout, []
 
-    def virsh(self, *args, timeout=None):
+    def virsh(self, *args, timeout=None, idempotent=False):
         assert args[0] == "domstate"
         self.budgets.append((timeout, self.clock()))
         item = self.script.pop(0) if len(self.script) > 1 else self.script[0]

@@ -1,0 +1,44 @@
+<!-- relevé sur node2 (libvirt 12.7.0) : volume de banc avec image de base -->
+<volume type='file'>
+  <name>kvmtest-1.qcow2</name>
+  <key>/var/lib/libvirt/images/kvmtest/kvmtest-1.qcow2</key>
+  <capacity unit='bytes'>67108864</capacity>
+  <allocation unit='bytes'>3284992</allocation>
+  <physical unit='bytes'>2490653</physical>
+  <target>
+    <path>/var/lib/libvirt/images/kvmtest/kvmtest-1.qcow2</path>
+    <format type='qcow2'/>
+    <permissions>
+      <mode>0644</mode>
+      <owner>1000</owner>
+      <group>100</group>
+      <label>unconfined_u:object_r:virt_image_t:s0</label>
+    </permissions>
+    <timestamps>
+      <atime>1792834700.435401257</atime>
+      <mtime>1792834741.637725555</mtime>
+      <ctime>1792834741.637725555</ctime>
+      <btime>0</btime>
+    </timestamps>
+    <compat>1.1</compat>
+    <clusterSize unit='B'>65536</clusterSize>
+    <features/>
+  </target>
+  <backingStore>
+    <path>/var/lib/libvirt/images/kvmtest/base.qcow2</path>
+    <format type='qcow2'/>
+    <permissions>
+      <mode>0644</mode>
+      <owner>107</owner>
+      <group>107</group>
+      <label>system_u:object_r:virt_content_t:s0</label>
+    </permissions>
+    <timestamps>
+      <atime>1792834700.365397524</atime>
+      <mtime>1792834700.391398911</mtime>
+      <ctime>1792834721.098317172</ctime>
+      <btime>0</btime>
+    </timestamps>
+  </backingStore>
+</volume>
+

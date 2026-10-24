@@ -46,10 +46,16 @@ import struct
 import threading
 import time
 
+import vnc_des
+
 log = logging.getLogger("harvester-ops.vnc")
 
 VERSION = b"RFB 003.008\n"
 SEC_NONE = 1
+# v1.98.0 : authentification VNC (RFC 6143 section 7.2.2), côté amont
+# seulement, pour un affichage libvirt protégé par `passwd`. Les navigateurs
+# restent en None : l'accès est gardé par la session et le rôle.
+SEC_VNC = 2
 
 # Le format que noVNC impose quel que soit le serveur (rfb.js, pixelFormat) :
 # 32 bpp, profondeur 24, petit-boutiste, vraies couleurs, rouge à 0.
@@ -80,7 +86,26 @@ class Incomplete(Exception):
 
 
 class ProtocolError(Exception):
-    pass
+    """Échange RFB impossible. `reason` est la raison stable montrée par la
+    console (None : erreur de protocole ordinaire, son message suffit)."""
+    reason = None
+
+
+class AuthFailed(ProtocolError):
+    """L'affichage refuse le mot de passe, ou en demande un sans qu'il y en
+    ait : un nouvel essai ne changera rien."""
+    reason = "auth"
+
+
+class UnsupportedSecurity(ProtocolError):
+    """L'affichage n'offre que des types de sécurité que la console ne gère
+    pas (VeNCrypt, SASL, TLS...) : un nouvel essai ne changera rien."""
+    reason = "unsupported-security"
+
+
+# Noms des types de sécurité RFB (registre IANA) cités dans les messages.
+SECURITY_NAMES = {2: "VNC", 5: "RA2", 6: "RA2ne", 16: "Tight", 17: "Ultra", 18: "TLS",
+                  19: "VeNCrypt", 20: "SASL", 21: "MD5", 22: "xvp"}
 
 
 def _need(buf, end):
@@ -348,11 +373,12 @@ class VncHub:
         if count == 0:
             length = struct.unpack(">I", s.read(4, timeout))[0]
             raise ProtocolError("server refused: " + s.read(length, timeout).decode(errors="replace"))
-        if SEC_NONE not in s.read(count, timeout):
-            raise ProtocolError("server offers no 'None' security type")
-        self.send_upstream(bytes([SEC_NONE]))
-        if struct.unpack(">I", s.read(4, timeout))[0] != 0:
-            raise ProtocolError("security handshake failed")
+        try:
+            self._security(s.read(count, timeout), timeout)
+        finally:
+            # le mot de passe ne survit pas à la poignée de main, réussie ou non
+            if hasattr(self.up, "vnc_password"):
+                self.up.vnc_password = None
         self.send_upstream(b"\x01")                 # ClientInit : partagé
         self.width, self.height = struct.unpack(">HH", s.read(4, timeout))
         s.read(16, timeout)                         # son format : remplacé
@@ -363,6 +389,50 @@ class VncHub:
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f"vnc-hub-{self.key[-1]}")
         self._reader.start()
+
+    def _security(self, types, timeout):
+        """Choix du type de sécurité amont. None (1) s'il est offert : chemin
+        KubeVirt inchangé. Sinon authentification VNC (2) si l'amont porte
+        un mot de passe : défi de 16 octets chiffré en DES. Les messages ne
+        citent jamais la valeur, et le mot de passe n'est lu qu'APRÈS le
+        défi : une attente du défi qui échoue ne laisse aucune trace de lui
+        dans la pile de l'exception."""
+        s = self.stream
+        if SEC_NONE in types:
+            self.send_upstream(bytes([SEC_NONE]))
+            if struct.unpack(">I", s.read(4, timeout))[0] != 0:
+                raise ProtocolError(self._failure_text("security handshake failed", timeout))
+            return
+        if SEC_VNC not in types:
+            offered = ", ".join(f"{SECURITY_NAMES.get(t, 'unknown')} ({t})" for t in types)
+            raise UnsupportedSecurity("server offers no 'None' security type nor VNC password "
+                                      f"authentication (offered: {offered})")
+        if not getattr(self.up, "vnc_password", None):
+            raise AuthFailed("the VM display asks for a password and none is defined for it")
+        self.send_upstream(bytes([SEC_VNC]))
+        challenge = s.read(16, timeout)
+        password = self.up.vnc_password
+        self.up.vnc_password = None
+        try:
+            response = vnc_des.vnc_response(password, challenge)
+        finally:
+            password = None
+        self.send_upstream(response)
+        if struct.unpack(">I", s.read(4, timeout))[0] != 0:
+            raise AuthFailed(self._failure_text("the VM display refused the password", timeout))
+
+    def _failure_text(self, base, timeout):
+        """RFB 3.8 : un SecurityResult en échec est suivi d'une raison écrite
+        par le serveur. Elle complète le message si elle arrive ; sinon le
+        message de base suffit."""
+        try:
+            length = struct.unpack(">I", self.stream.read(4, min(timeout, 2.0)))[0]
+            if not 0 < length <= 1024:
+                return base
+            text = self.stream.read(length, min(timeout, 2.0)).decode(errors="replace").strip()
+        except Exception:                            # noqa: BLE001 (raison facultative)
+            return base
+        return f"{base}: {text}" if text else base
 
     def send_upstream(self, data):
         with self.up_lock:
@@ -436,6 +506,13 @@ class VncHub:
             log.warning("console client handshake failed on %s: %s",
                         "/".join(self.key), e)
             client.kill()
+            # v1.98.0 : un navigateur parti pendant sa poignée de main ne doit
+            # pas laisser ouverte une connexion que personne ne regarde (un
+            # `ssh -W` vivant pour rien, côté KVM)
+            with self.lock:
+                empty = not self.clients
+            if empty and not self.closed:
+                self.close("no viewer left")
             return True
         try:
             # Une image complète pour l'arrivant ; les autres la reçoivent
@@ -573,6 +650,17 @@ def attach(key, dial, ws, user="", on_lost=None):
         if hub.serve(ws, user):
             return
     ws.close()
+
+
+def close_where(match, reason):
+    """Ferme toutes les connexions partagées dont la clé vérifie `match`
+    (le retrait d'un hôte KVM coupe chacune de ses consoles). Rend les clés
+    fermées."""
+    with _hubs_lock:
+        hubs = [h for h in _hubs.values() if not h.closed and match(h.key)]
+    for h in hubs:
+        h.close(reason)
+    return [h.key for h in hubs]
 
 
 def sessions():

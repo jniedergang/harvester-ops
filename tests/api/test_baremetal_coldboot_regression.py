@@ -58,7 +58,7 @@ def sequence(initial='Off', off_ok=True, mount_ok=True, boot_ok=True,
            'iso_url': 'http://fixture.invalid/fixture.iso',
            'profile': {'system_path': '/redfish/v1/Systems/1/'}, 'keep_creds': [False]}
     functions({'_bm_power_off'}, env)
-    start = SOURCE.index('    # --- média virtuel + amorce + allumage ---', SOURCE.index('def _baremetal_install_runner'))
+    start = SOURCE.index('    # --- média virtuel + amorce + allumage ---', SOURCE.index('def _baremetal_install_steps'))
     end = SOURCE.index("    # --- attente de l'installation ---", start)
     block = 'def sequence():\n' + SOURCE[start:end] + "    return 'booted'\n"
     exec(compile(block, '<actual-install-boot-sequence>', 'exec'), env)
@@ -131,7 +131,7 @@ class BootSequenceTests(unittest.TestCase):
         self.assertEqual(result[1], 'bmc-insert')
         self.assertFalse([e for e in events if e[0] in ('boot','reset')])
     def test_preflight_contains_no_power_commands(self):
-        start = SOURCE.index('    # --- preflight:', SOURCE.index('def _baremetal_install_runner'))
+        start = SOURCE.index('    # --- preflight:', SOURCE.index('def _baremetal_install_steps'))
         end = SOURCE.index('    # --- remasterisation ---', start)
         body = SOURCE[start:end]
         self.assertNotIn('_bm_reset(', body)

@@ -290,6 +290,7 @@ const FloatingPanels = (() => {
 
   const KIND_LABELS = {
     'vm-console':   () => tr('panel.kind.console',   'Console'),
+    'kvm-console':  () => tr('panel.kind.console',   'Console'),
     'vm-edit':      () => tr('panel.kind.edit',      'Settings'),
     'vm-snapshots': () => tr('panel.kind.snapshots', 'Snapshots'),
     'vm-migrate':   () => tr('panel.kind.migrate',   'Migrate'),

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import contextlib
 import time
 import uuid
 from collections import Counter as _TallyCounter, deque
@@ -88,6 +89,9 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
+import url_fetch_guard as _ufg
+import baremetal_onboarding as _bmo
+import baremetal_onboarding_runtime as _bmor
 from flask import (
     Flask,
     Response,
@@ -222,6 +226,29 @@ if _PROMETHEUS_AVAILABLE:
         "harvester_ops_vnc_sessions",
         "In-browser VNC console sessions currently relayed.",
     )
+    # v1.99.0 : réplication (fil de suivi de la console, RPO par plan)
+    metric_repl_follower_up = Gauge(
+        "harvester_ops_replication_follower_up",
+        "1 when the console's replication follower process is running.",
+    )
+    metric_repl_follower_restarts = Counter(
+        "harvester_ops_replication_follower_restarts_total",
+        "Replication follower restarts after an abnormal exit.",
+    )
+    metric_repl_plans_followed = Gauge(
+        "harvester_ops_replication_plans_followed",
+        "Replication plans the console follows (follow: console, not paused, measuring/protecting/protected).",
+    )
+    metric_repl_rpo_held = Gauge(
+        "harvester_ops_replication_rpo_held_seconds",
+        "Worst RPO held over the VMs of a replication plan.",
+        labelnames=("plan", "source", "target"),
+    )
+    metric_repl_rpo_objective = Gauge(
+        "harvester_ops_replication_rpo_objective_seconds",
+        "RPO objective of a replication plan.",
+        labelnames=("plan", "source", "target"),
+    )
 else:
     class _NoopMetric:
         def labels(self, **kw): return self
@@ -229,11 +256,17 @@ else:
         def dec(self, *a, **kw): pass
         def observe(self, *a, **kw): pass
         def set(self, *a, **kw): pass
+        def clear(self): pass
     metric_actions_total = _NoopMetric()
     metric_action_duration = _NoopMetric()
     metric_actions_in_flight = _NoopMetric()
     metric_kubectl_calls = _NoopMetric()
     metric_vnc_sessions = _NoopMetric()
+    metric_repl_follower_up = _NoopMetric()
+    metric_repl_follower_restarts = _NoopMetric()
+    metric_repl_plans_followed = _NoopMetric()
+    metric_repl_rpo_held = _NoopMetric()
+    metric_repl_rpo_objective = _NoopMetric()
 
 
 @app.route("/metrics")
@@ -244,7 +277,15 @@ def api_metrics():
     if not _PROMETHEUS_AVAILABLE:
         return Response("# prometheus_client not installed\n",
                          mimetype="text/plain")
-    return Response(generate_latest(), mimetype=CONTENT_TYPE_LATEST)
+    # v1.99.0 : mise à jour des jauges et exposition sous le même verrou :
+    # un relevé concurrent ne voit jamais des séries à moitié reposées
+    with _REPL_METRICS_LOCK:
+        try:
+            _replication_metrics_refresh()
+        except Exception as e:                   # noqa: BLE001 : une base illisible ne coupe pas /metrics
+            log.warning("replication metrics: %s", type(e).__name__)
+        body = generate_latest()
+    return Response(body, mimetype=CONTENT_TYPE_LATEST)
 
 
 # Rate-limiting (v1.5.6) — defends mutative endpoints against accidental
@@ -891,9 +932,15 @@ def _read_share_invalidate(response):
         if request.path.startswith("/api/kvm/"):
             # v1.96.0 : un hôte KVM n'est pas un cluster ; le relevé des
             # empreintes ne fait que lire
-            if request.path != "/api/kvm/hosts/scan":
+            # (le ticket de console ne fait que lire, lui aussi)
+            if request.path != "/api/kvm/hosts/scan" and not request.path.endswith("/console-ticket"):
                 READ_SHARE.invalidate(KVM_SCOPE)
                 READ_SHARE.invalidate("_activity")
+            return response
+        if request.path.startswith("/api/replication/"):
+            # v1.99.0 : le registre de la réplication n'est pas un cluster
+            READ_SHARE.invalidate(REPLICATION_SCOPE)
+            READ_SHARE.invalidate("_activity")
             return response
         READ_SHARE.invalidate((request.view_args or {}).get("cluster"))
         READ_SHARE.invalidate("_activity")
@@ -1108,6 +1155,8 @@ def required_role_for(path, method):
         return "viewer"
     if path.startswith("/api/kvm/"):
         return _kvm_required_role(path, method)
+    if path.startswith("/api/replication/"):
+        return _replication_required_role(path, method)
     # v1.96.0 : annuler une action demande le rôle qu'il a fallu pour la
     # lancer (contrôlé par api_action_cancel ; admin pour une action qui ne
     # le dit pas) : un opérateur annule son propre geste sur une VM KVM
@@ -1125,8 +1174,27 @@ def required_role_for(path, method):
 KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 
 
+# v1.99.0 : réplication. Bascule = admin (une activation est définitive) ;
+# le reste = opérateur. La suppression des sauvegardes à la déprotection
+# (demandée, ou héritée d'une déprotection interrompue) et la reprise d'une
+# bascule ou d'une telle déprotection, qui dépendent du corps de la demande
+# ou de l'état du plan, sont contrôlées dans leur route (admin).
+REPLICATION_ADMIN_SUFFIXES = ("/failover",)
+
+
+def _replication_required_role(path, method):
+    if path.endswith(REPLICATION_ADMIN_SUFFIXES):
+        return "admin"
+    return "operator"
+
+
 def _kvm_required_role(path, method):
     if path in KVM_ADMIN_PATHS or (method == "DELETE" and path.startswith("/api/kvm/hosts/")):
+        return "admin"
+    # v1.98.0 : supprimer une VM (exactement /api/kvm/vms/<hôte>/<domaine>)
+    # = admin ; supprimer un instantané (.../snapshots/<nom>) reste opérateur
+    if method == "DELETE" and path.startswith("/api/kvm/vms/") and \
+            len(path[len("/api/kvm/vms/"):].split("/")) == 2:
         return "admin"
     return "operator"
 
@@ -1345,6 +1413,17 @@ def identity_env(login=None, cluster=None):
 # -----------------------------------------------------------------------------
 # Action registry (in-memory)
 # -----------------------------------------------------------------------------
+def _metric_action(action):
+    """Libellé d'action des métriques. v1.99.0 : `replication:<plan>:<op>`
+    (et `replication:create:<nom>`) devient `replication:<op>`, pour ne pas
+    ouvrir une série par plan ni exposer un nom de plan."""
+    action = str(action or "unknown")
+    if action.startswith("replication:"):
+        parts = action.split(":")
+        return "replication:" + (parts[1] if parts[1] == "create" else parts[-1])
+    return action
+
+
 class ActionRun:
     """Represents one running invocation of a bash script."""
 
@@ -1388,6 +1467,18 @@ class ActionRun:
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
+        # v1.99.0 : délai laissé à l'outil annulé pour défaire ce qu'il a
+        # posé avant un SIGKILL (None : jamais de SIGKILL, comme avant)
+        self.kill_grace = None
+        # v1.99.0 : outil qui défait lui-même ce qu'il a posé (réplication) :
+        # une annulation est DEMANDÉE (`cancel_requested`), l'action reste
+        # « running » jusqu'à la sortie de l'outil, qui dit le statut final
+        self.cancel_waits = False
+        self.cancel_requested = False
+        # décision 68 : délai laissé à l'outil à l'arrêt de la console (point
+        # sûr, sans retour arrière) ; None = `kill_grace`
+        self.shutdown_grace = None
+        self.shutdown_requested = False
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -1438,12 +1529,12 @@ class ActionRun:
         try:
             metric_actions_in_flight.dec()
             metric_actions_total.labels(
-                action=str(self.action or "unknown"),
+                action=_metric_action(self.action),
                 status=str(self.status or "unknown"),
             ).inc()
             if self.ended_at:
                 metric_action_duration.labels(
-                    action=str(self.action or "unknown"),
+                    action=_metric_action(self.action),
                 ).observe(self.ended_at - self.started_at)
         except Exception:
             pass
@@ -1466,6 +1557,7 @@ class ActionRun:
             "progress": dict(self.progress),
             "progress_current": self.progress_last,
             "result": dict(self.result),
+            "cancel_requested": self.cancel_requested,
         }
 
 
@@ -5666,6 +5758,25 @@ def _bm_vm_apply(opts, run, step, deadline):
                      + (": " + last if last else ""))
 
 
+def _bm_onboarding_config(data, cfg):
+    """Configuration d'installation complétée par le profil de stockage
+    choisi ; inchangée sans profil. L'identité d'installation vient du plan
+    préparé côté serveur (_bmor.preflight), jamais du navigateur."""
+    if not _bmo.selected(data):
+        return cfg
+    try:
+        plan = data.get('_onboarding_plan') or {}
+        # cordon natif (install.cordoned) décidé par le préflight sur la
+        # version du cluster rejoint ; sans plan (aperçu), taint de la console
+        out = _bmo.augment(cfg, _bmo.selection(data, cfg), native=bool(plan.get('native_cordon')))
+        identity = plan.get('install_id')
+        if identity:
+            out['os'].setdefault('labels', {})[_bmo.INSTALL_ID_LABEL] = identity
+        return out
+    except _bmo.ProfileError as e:
+        raise InstallConfigError(["onboarding"], "invalid onboarding profile", {"onboarding": str(e)}) from e
+
+
 def _harvester_install_config(opts, boot_identity=False):
     """Rend la configuration d'installation Harvester (YAML).
 
@@ -5676,6 +5787,8 @@ def _harvester_install_config(opts, boot_identity=False):
     réservée à la console ou posée des deux côtés lève InstallConfigError
     avec son chemin."""
     cfg = _his.render_install_config(opts)
+    if opts.get("onboarding"):
+        cfg = _bm_onboarding_config(opts, cfg)
     # Les noms hvbootN ne valent qu'avec les ifname= que porte l'ISO
     # remasterisée : un appelant qui démarre l'installeur lui-même (banc
     # harvlab, PXE de l'exploitant) garde la configuration sans eux.
@@ -5744,6 +5857,8 @@ def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
         node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
+        if node and getattr(run, "_onboarding_plan", None):
+            node = _bmor.guard(sys.modules[__name__], kubeconfig, node, run)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
         if conds.get("Ready") == "True":
@@ -6257,22 +6372,115 @@ def _bm_reset(host, user, pwd, sys_path, reset_type):
     return ok, detail
 
 
+# Serveur d'artefacts partagé : une série lance jusqu'à 4 installations en
+# même temps, et une découverte peut tourner à côté. Chaque déroulé le
+# prend et le rend ; le dernier à le rendre l'arrête s'il ne sert plus rien
+# (ports libérés). Tenu sous verrou de start() à la fin du compte, pour qu'un
+# déroulé qui démarre ne voie jamais le serveur s'arrêter sous lui.
+_BM_PXE_USERS = [0]
+_BM_PXE_LOCK = threading.Lock()
+
+
+def _bm_pxe_acquire(state):
+    """Démarre (si besoin) le serveur d'artefacts et le compte pris par ce
+    déroulé. Lève pxe_server.PortUnavailable si le port est pris."""
+    with _BM_PXE_LOCK:
+        port = pxe_server.start()
+        _BM_PXE_USERS[0] += 1
+    state["pxe"] = True
+    return port
+
+
+def _bm_pxe_release(state):
+    if not state.pop("pxe", False):
+        return
+    with _BM_PXE_LOCK:
+        _BM_PXE_USERS[0] = max(0, _BM_PXE_USERS[0] - 1)
+        if _BM_PXE_USERS[0] == 0 and not pxe_server.has_live_tokens():
+            pxe_server.stop()
+
+
+def _bm_crash_detail(e):
+    """Texte sûr d'une exception imprévue : son type seul (le texte d'une
+    OSError porte un chemin, celui d'une CalledProcessError la ligne de
+    commande et ses jetons). Seul le refus de port, au message fixe, passe."""
+    if isinstance(e, pxe_server.PortUnavailable):
+        return str(e)[:300]
+    return f"internal error ({type(e).__name__})"
+
+
+def _run_crashed(run, sid, e):
+    """Termine en échec une action dont le déroulé a levé hors de ses propres
+    blocs try. Sans effet si l'action est déjà finie."""
+    if getattr(run, "status", None) not in ("starting", "running"):
+        return
+    msg = _bm_crash_detail(e)
+    try:
+        run.error_summary = msg
+        run.emit({"type": "step", "step_id": sid, "status": "error",
+                  "message": msg, "ts": time.time()})
+    finally:
+        run.exit_code = 1
+        run.status = "error"
+        run.ended_at = time.time()
+        try:
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+        finally:
+            run.close()
+
+
 def _baremetal_install_runner(run, opts):
+    """Enveloppe du déroulé : toute exception, même levée hors de ses blocs
+    try (vu en réel : port du serveur d'artefacts déjà pris), finit l'action
+    en échec, efface les fichiers à secrets, révoque les jetons et rend le
+    serveur d'artefacts. SystemExit/KeyboardInterrupt sont relancées après
+    le ménage."""
+    state = {"tokens": [], "scratch": [], "creds": [], "keep_creds": [False],
+             "step": "preflight"}
+    try:
+        _baremetal_install_steps(run, opts, state)
+    except BaseException as e:
+        try:
+            _bm_install_cleanup(state)
+        finally:
+            _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _bm_install_cleanup(state):
+    """Ménage idempotent d'une installation interrompue."""
+    if state["tokens"]:
+        pxe_server.revoke(*state["tokens"])
+    for p in state["scratch"] + ([] if state["keep_creds"][0] else state["creds"]):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _baremetal_install_steps(run, opts, state):
+    # plan préparé par _bmor.preflight : seule source de l'identité
+    # d'installation pour la garde du nœud et les vérifications finales
+    run._onboarding_plan = opts.get("_onboarding_plan")
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
-    tokens = []
+    tokens = state["tokens"]
     # Fichiers à effacer quoi qu'il arrive : la configuration porte le token
     # du cluster et le mot de passe OS, elle n'a rien à faire sur le disque
     # après un échec.
-    scratch = []
+    scratch = state["scratch"]
     # v1.78.0 : clés du nouveau cluster, effacées sur un échec tant que la
     # machine n'a pas redémarré sur l'installeur ; gardées ensuite (le nœud
     # porte la clé publique, et la déclaration s'en sert).
-    creds = []
-    keep_creds = [False]
+    creds = state["creds"]
+    keep_creds = state["keep_creds"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         # Persistance périodique : sans elle, un redémarrage de Flask
@@ -6372,7 +6580,10 @@ def _baremetal_install_runner(run, opts):
          f"{profile.get('model')} : {n_disks or '?'} disque(s) ({disk_src or 'non vus'}), média virtuel OK")
 
     # --- remasterisation ---
-    port = pxe_server.start()
+    try:
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        return fail("serve", str(e))
     try:
         media_base, installer_base = _bm_artifact_base_urls(opts, port)
     except ValueError:
@@ -6407,11 +6618,14 @@ def _baremetal_install_runner(run, opts):
         if join_pub:
             opts = _bm_with_ssh_key(opts, join_pub)
     else:
+        # inscrites AVANT la génération : un ssh-keygen interrompu laisserait
+        # sinon une clé privée orpheline
+        cf = _bm_cluster_files(opts["cluster_name"])
+        creds.extend([cf["key"], cf["pub"], cf["known_hosts"]])
         try:
             files = _bm_cluster_keypair(opts["cluster_name"])
         except (OSError, subprocess.SubprocessError) as e:
             return fail("remaster", f"no SSH key for the new cluster: {type(e).__name__}")
-        creds.extend([files["key"], files["pub"], files["known_hosts"]])
         opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
         cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True),
@@ -6419,9 +6633,10 @@ def _baremetal_install_runner(run, opts):
     except InstallConfigError as e:
         return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
-    cfg_path.write_text(cfg_yaml)
-    cfg_path.chmod(0o600)          # contient un token et un mot de passe
+    # inscrite avant l'écriture (une écriture interrompue reste à effacer) et
+    # créée en 0600 d'emblée : elle contient un token et un mot de passe
     scratch.append(cfg_path)
+    _bm_write_private(cfg_path, cfg_yaml)
     cfg_token = pxe_server.issue(cfg_path, "config")
     tokens.append(cfg_token)
     config_url = f"{installer_base}/pxe/config/{cfg_token}.yaml"
@@ -6538,8 +6753,14 @@ def _baremetal_install_runner(run, opts):
     if opts.get("mode") == "join":
         step("wait-node", "running",
              f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
-        if not _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
-                                   opts["hostname"], deadline, run, step):
+        try:
+            ready = _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
+                                        opts["hostname"], deadline, run, step)
+        except _bmo.ProfileError as e:
+            # garde du profil de stockage : le déroulé échoue, jamais un fil
+            # mort laissant l'action « running » et ses artefacts en place
+            return fail("wait-node", f"Harvester is installed; storage onboarding stopped: {e}")
+        if not ready:
             return fail("wait-node",
                         f"{opts['hostname']} not Ready in {opts['cluster']} after "
                         f"{HARVESTER_INSTALL_TIMEOUT // 60} min")
@@ -6610,6 +6831,10 @@ def _baremetal_install_runner(run, opts):
             current[0] = "vm-network"
             step("vm-network", "running", "configuring this host's VM uplinks")
             _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
+        if opts.get("_onboarding_plan"):
+            current[0] = "onboarding"
+            step("onboarding", "running", "Checking storage profile readiness; host stays cordoned")
+            _bmor.finish(sys.modules[__name__], opts, run, step, post_deadline)
     except Exception as e:
         # une OSError porterait le chemin d'un fichier privé : son type seul
         detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
@@ -6769,12 +6994,26 @@ def _bm_with_installer_identity(cfg):
 
 def _bm_render_boot_checked(data):
     # Real launch/preview values only; profile-schema checks use placeholders.
-    cfg = _bm_with_installer_identity(_bm_render_checked(data))
+    cfg = _bm_render_checked(data)
+    if data.get("onboarding"):
+        cfg = _bm_onboarding_config(data, cfg)
+    cfg = _bm_with_installer_identity(cfg)
     try:
         _bm_boot_network_args(cfg, data.get("extra_args", ""))
     except BootNetworkError as e:
         raise InstallConfigError([e.path], "invalid bootstrap network", {e.path: e.reason}) from e
     return cfg
+
+
+@app.route("/api/baremetal/onboarding/options")
+@requires_auth
+@_rate_limit("30/minute")
+def api_baremetal_onboarding_options():
+    # Trusted, packaged profile metadata only; never return OEM commands or paths.
+    try:
+        return jsonify({"profiles": _bmo.options()})
+    except (ValueError, OSError):
+        return jsonify({"error": "storage profile catalog is unavailable"}), 400
 
 
 @app.route("/api/baremetal/config/parse", methods=["POST"])
@@ -6823,6 +7062,7 @@ def api_baremetal_config_preview():
     """YAML final tel que l'installeur le recevra, jeton et mot de passe
     masqués. Pas besoin des identifiants du BMC."""
     data = request.get_json(force=True, silent=True) or {}
+    data.pop("_onboarding_plan", None)
     # l'hôte ne sert qu'à lire l'inventaire de la machine (contrôles des
     # disques) ; les identifiants du BMC ne sont pas utilisés ici
     host = data.get("bmc_host")
@@ -6897,6 +7137,9 @@ def _bm_prepare_install(data, defer_join=False):
     complétées, None) ou (None, réponse d'erreur). `defer_join` : le
     cluster rejoint n'existe pas encore (série, avant que la première ligne
     l'ait créé) ; tout le reste est contrôlé."""
+    data.pop("_onboarding_plan", None)
+    # kubeconfig du cluster rejoint : calculé ici, jamais fourni par le client
+    data.pop("_cluster_kc", None)
     mode = data["mode"]
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
@@ -6988,6 +7231,19 @@ def _bm_prepare_install(data, defer_join=False):
         return None, _bm_config_refusal(e)
     except ValueError as e:
         return None, (jsonify({"error": str(e), "fields": ["vm_network"]}), 400)
+    data.pop("_onboarding_plan", None)
+    if _bmo.selected(data):
+        try:
+            data["_onboarding_plan"] = _bmor.preflight(sys.modules[__name__], data,
+                                                       _bm_render_checked(data))
+        except _bmo.ProfileError as e:
+            # messages fixes du module (rôles, noms Kubernetes) : ni chemin ni secret
+            return None, (jsonify({"error": "onboarding preflight failed: " + str(e),
+                                   "fields": ["onboarding"]}), 400)
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return None, (jsonify({"error": "onboarding preflight failed; check profile, new "
+                                            "hostname, target network and current user permissions",
+                                   "fields": ["onboarding"]}), 400)
     try:
         _bm_artifact_base_urls(data, 8091)
     except ValueError:
@@ -7264,6 +7520,20 @@ def _bm_wait_action(action_id, parent, sleep=None):
 
 
 def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Enveloppe : la série ne reste jamais « running » sur une exception
+    levée hors de ses blocs try, et ses secrets sont effacés de la mémoire
+    du déroulé dans tous les cas."""
+    try:
+        _baremetal_batch_steps(run, plan, concurrency)
+    except BaseException as e:
+        _run_crashed(run, "batch", e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        plan.clear()
+
+
+def _baremetal_batch_steps(run, plan, concurrency):
     """Série d'installations : ligne 1 seule (création), puis les jonctions,
     `concurrency` à la fois, chacune une action suivie à part. Chaque nœud
     est une étape `node-<n>` de cette action, avec l'identifiant de son
@@ -7461,10 +7731,27 @@ class _BmDiscoverBmc:
 
 
 def _baremetal_discover_runner(run, opts):
+    """Enveloppe : une exception levée hors des blocs try du déroulé finit
+    l'action en échec au lieu de la laisser « running » ; le serveur
+    d'artefacts est toujours rendu (le déroulé efface lui-même son ISO et
+    révoque ses jetons, bm_discover.run)."""
+    state = {"step": "remaster"}
+    try:
+        _baremetal_discover_steps(run, opts, state)
+    except BaseException as e:
+        _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _baremetal_discover_steps(run, opts, state):
     host = opts["bmc_host"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         if time.time() - persisted[0] > 60:
@@ -7491,7 +7778,11 @@ def _baremetal_discover_runner(run, opts):
         step("remaster", "error", f"ISO not found: {opts['iso']}")
         return finish("error", 1, f"ISO not found: {opts['iso']}")
     try:
-        port = pxe_server.start()
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        step("serve", "error", str(e))
+        return finish("error", 1, str(e))
+    try:
         res = _bmd.run(
             # l'ISO de la découverte y est écrite puis effacée en fin de run ;
             # un run tué par un redémarrage est balayé au bout d'un jour
@@ -7685,42 +7976,81 @@ def api_isos_list():
                     "used": sum(e["size"] for e in items)})
 
 
-def _iso_fetch_runner(run, url, dest):
-    """Télécharge un ISO en flux, avec progression et sha256 calculé au vol."""
-    import urllib.request, hashlib
+def _iso_free_bytes(path):
+    """Espace libre du magasin d'ISO (point d'injection des tests)."""
+    return shutil.disk_usage(path).free
+
+
+def _iso_fetch_runner(run, url, dest, allow=(), max_bytes=None, min_free=None):
+    """Télécharge un ISO en flux, avec progression et sha256 calculé au vol.
+
+    v1.99.0 : garde anti-SSRF (url_fetch_guard : adresses internes refusées,
+    redirections revérifiées à chaque saut), plafond de taille et espace
+    libre contrôlé avant et pendant le téléchargement. Les messages montrés
+    ne portent ni chemin local ni détail interne."""
+    import hashlib
+    if max_bytes is None or min_free is None:
+        d_max, d_free = _ufg.limits({})
+        max_bytes = d_max if max_bytes is None else max_bytes
+        min_free = d_free if min_free is None else min_free
     tmp = dest.with_suffix(dest.suffix + ".downloading")
 
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
 
+    def refuse(reason, message):
+        raise _ufg.FetchRefused(reason, message)
+
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     step("fetch", "running", f"downloading {url}")
+    conn = None
     try:
         h = hashlib.sha256()
         done = 0
+        next_space_check = 0
         last_pct = -1
-        with urllib.request.urlopen(url, timeout=60) as r:
-            total = int(r.headers.get("Content-Length") or 0)
-            with open(tmp, "wb") as f:
-                while True:
-                    if getattr(run, "_cancel", False):
-                        raise RuntimeError("cancelled by operator")
-                    chunk = r.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
-                    done += len(chunk)
-                    if total:
-                        pct = int(done * 100 / total)
-                        # Agrégé : le buffer d'évènements d'une action est
-                        # borné, inutile de le remplir de bruit.
-                        if pct != last_pct and pct % 5 == 0:
-                            last_pct = pct
-                            step("fetch", "progress",
-                                 f"{pct}% ({done // (1024*1024)} MiB)")
+        r, conn, _final = _ufg.open_checked(url, allow, timeout=60)
+        try:
+            total = int(r.getheader("Content-Length") or 0)
+        except ValueError:
+            total = 0
+        if total > max_bytes:
+            refuse("too-large", f"the file is larger than the {max_bytes // 1024 ** 3} GiB "
+                                "limit (iso_fetch.max_bytes)")
+        if total and _iso_free_bytes(dest.parent) - total < min_free:
+            refuse("no-space", "not enough free space in the ISO store for this file")
+        with open(tmp, "wb") as f:
+            while True:
+                if getattr(run, "_cancel", False):
+                    refuse("cancelled", "cancelled by operator")
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                done += len(chunk)
+                # un serveur peut annoncer moins qu'il n'envoie
+                if done > max_bytes:
+                    refuse("too-large", f"the file is larger than the "
+                                        f"{max_bytes // 1024 ** 3} GiB limit (iso_fetch.max_bytes)")
+                # espace libre relu tous les 64 MiB
+                if done >= next_space_check:
+                    next_space_check = done + 64 * 1024 * 1024
+                    if _iso_free_bytes(dest.parent) - len(chunk) < min_free:
+                        refuse("no-space",
+                               "the ISO store ran out of free space during the download")
+                f.write(chunk)
+                h.update(chunk)
+                if total:
+                    pct = int(done * 100 / total)
+                    # Agrégé : le buffer d'évènements d'une action est
+                    # borné, inutile de le remplir de bruit.
+                    if pct != last_pct and pct % 5 == 0:
+                        last_pct = pct
+                        step("fetch", "progress",
+                             f"{pct}% ({done // (1024*1024)} MiB)")
+        if total and done != total:
+            refuse("short", "the download ended before the announced size")
         tmp.rename(dest)
         digest = h.hexdigest()
         dest.with_suffix(dest.suffix + ".sha256").write_text(
@@ -7733,10 +8063,19 @@ def _iso_fetch_runner(run, url, dest):
         tmp.unlink(missing_ok=True)
         # v1.47.0 : un arrêt demandé depuis le dock se lit « annulé »
         cancelled = getattr(run, "_cancel", False)
-        run.error_summary = str(e)[:300]
-        step("fetch", "error", str(e)[:300])
+        if isinstance(e, _ufg.FetchRefused):
+            msg = e.message
+        else:
+            # le texte d'une OSError porte des chemins : il reste au journal
+            log.warning("iso fetch %s failed: %r", dest.name, e)
+            msg = f"download failed ({type(e).__name__})"
+        run.error_summary = msg[:300]
+        step("fetch", "error", msg[:300])
         run.exit_code = 3 if cancelled else 1
         run.status = "cancelled" if cancelled else "error"
+    finally:
+        if conn is not None:
+            conn.close()
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
@@ -7747,20 +8086,39 @@ def _iso_fetch_runner(run, url, dest):
 @requires_auth
 @_rate_limit("6/minute")
 def api_iso_fetch():
-    """Télécharge un ISO côté serveur. Body: {url, name?}."""
+    """Télécharge un ISO côté serveur. Body: {url, name?}.
+
+    Rôle : /api/iso/ est réservé aux admins (ADMIN_ONLY_PREFIXES). v1.99.0 :
+    l'URL est vérifiée ici (forme, résolution, adresses internes refusées
+    sauf `iso_fetch.allow_private`, relu à chaque demande) puis à nouveau à
+    chaque saut par le téléchargement."""
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "http(s) URL required"}), 400
-    name = data.get("name") or url.rsplit("/", 1)[-1].split("?")[0]
+    cfg = load_config_ro()
+    allow = _ufg.parse_allowlist(cfg)
+    max_bytes, min_free = _ufg.limits(cfg)
+    try:
+        _scheme, host, port, path = _ufg.check_url(url)
+        _ufg.resolve_checked(host, port, allow)
+    except _ufg.FetchRefused as e:
+        return jsonify({"error": e.message, "reason": e.reason}), 400
+    name = data.get("name") or path.rsplit("/", 1)[-1].split("?")[0]
     name = _safe_artifact_name(name)
     if not name:
         return jsonify({"error": "the file name must be a plain *.iso"}), 400
     dest = _iso_dir() / name
     if dest.exists():
         return jsonify({"error": "already present", "name": name}), 409
+    try:
+        if _iso_free_bytes(dest.parent) < min_free:
+            return jsonify({"error": "not enough free space in the ISO store",
+                            "reason": "no-space"}), 507
+    except OSError:
+        pass
     action_id = track_action(f"iso-fetch:{name}", "(local)",
-                             _iso_fetch_runner, url, dest)
+                             _iso_fetch_runner, url, dest, allow, max_bytes, min_free)
     return jsonify({"action_id": action_id, "name": name}), 202
 
 
@@ -9798,7 +10156,8 @@ def _kvm_network_details(vh, inv):
     if not nets:
         return
     try:
-        out = vh.batch({n["name"]: ("net-dumpxml", "--network", n["name"]) for n in nets})
+        out = vh.batch({n["name"]: ("net-dumpxml", "--network", n["name"]) for n in nets},
+                       idempotent=True)
     except _kh.KvmError as e:
         inv["errors"].append({"command": "net-dumpxml", "kind": e.kind, "message": e.message})
         return
@@ -9836,7 +10195,8 @@ def api_kvm_vms():
         vms.extend(inv["vms"])
     vms.sort(key=lambda v: (v["name"], v["host"]))
     return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
-                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
+                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
+                    "operations": KVM_VM_OPERATIONS})
 
 
 @app.route("/api/kvm/vms/<host>/<domain>")
@@ -10004,7 +10364,15 @@ def api_kvm_host_remove(host):
         return _kvm_err("invalid host name")
     if not _kd.decl_path(_state_dir(), host).exists():
         return _kvm_err(f"host {host} is not declared", 404)
-    run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host])
+    # ses consoles tombent tout de suite, et encore à la fin du retrait (une
+    # console rouverte entre-temps) ; `ssh -O exit` du script coupe de toute
+    # façon les tunnels qui passent par la connexion maître
+    # (en tâche de fond : fermer un tunnel laisse 2 s à ssh pour finir, la
+    # requête n'a pas à les attendre)
+    threading.Thread(target=_kvm_vnc_cut_host, args=(host,), daemon=True,
+                     name=f"kvm-vnc-cut-{host}").start()
+    run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host],
+                           cleanup=lambda: _kvm_vnc_cut_host(host))
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host}), 202
@@ -10030,12 +10398,15 @@ def api_kvm_host_test(host):
 
 
 def _kvm_vm_busy(host, domain):
-    """Un geste encore en cours sur la même VM (double clic, deux personnes)."""
+    """Un geste encore en cours sur la même VM (double clic, deux personnes).
+    Un clonage tient aussi le nom de sa copie (`kvm_vms`) : tant qu'il tourne,
+    rien ne se lance sur la VM qu'il est en train de créer."""
     suffix = f":{host}/{domain}"
     with ACTIONS_LOCK:
         for r in ACTIONS.values():
             if (r.status in ("starting", "running") and r.action.startswith("kvm:vm-")
-                    and r.action.endswith(suffix) and r.cluster == f"kvm:{host}"):
+                    and r.cluster == f"kvm:{host}"
+                    and (r.action.endswith(suffix) or domain in getattr(r, "kvm_vms", ()))):
                 return r
     return None
 
@@ -10898,8 +11269,22 @@ def api_action_cancel(run_id):
         return jsonify({"error": "forbidden", "role": current_role(), "required": need,
                         "hint": f"cancelling this action needs the '{need}' role, "
                                 f"like starting it"}), 403
+    if run.cancel_waits and run.status in ("starting", "running"):
+        # v1.99.0 : l'action reste en cours (les gardes d'occupation la
+        # voient encore) ; le relais range le statut que l'outil donne en
+        # sortant, et une commande déjà finie n'est jamais réécrite
+        if not run.cancel_requested:
+            run.cancel_requested = True
+            run.emit({"type": "status", "status": "cancel-requested", "ts": time.time()})
+        if run.proc and run.proc.poll() is None:
+            run.proc.terminate()
+            if run.kill_grace and not getattr(run, "_kill_watch", None):
+                run._kill_watch = _kill_after_grace(run)
+        return jsonify(run.to_dict())
     if run.proc and run.proc.poll() is None:
         run.proc.terminate()
+        if run.kill_grace:
+            _kill_after_grace(run)
         run.status = "cancelled"
         run.emit({"type": "status", "status": "cancelled", "ts": time.time()})
         run.close()
@@ -10910,6 +11295,24 @@ def api_action_cancel(run_id):
         # rien. Elle s'arrête d'elle-même et nettoie ce qu'elle a commencé.
         run._cancel = True
     return jsonify(run.to_dict())
+
+
+def _kill_after_grace(run, wait=None):
+    """v1.99.0 : SIGKILL seulement si l'outil n'est pas sorti après son délai
+    de retour arrière (`run.kill_grace`) ; un fil par annulation."""
+    proc, grace = run.proc, run.kill_grace
+
+    def watch():
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            run.emit({"type": "log", "stream": "stderr", "ts": time.time(),
+                      "message": f"no exit {grace} s after the cancel request: process killed"})
+    t = threading.Thread(target=watch, daemon=True, name=f"kill-grace-{run.id}")
+    t.start()
+    return t
 
 
 @app.route("/api/stream/<run_id>")
@@ -14846,16 +15249,23 @@ def api_capi_cluster_preview(cluster):
 
 
 def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None, check_busy=True,
-                capture=False):
+                capture=False, busy_clusters=None, busy_prefix=None, summarize=None, id_arg=False,
+                setup=None):
     """Une action suivie (dock, Activité) qui lance un outil de `bin/`. La
     demande part par un fichier privé, effacé à la fin ; la ligne de commande
     montrée ne porte ni chemin ni kubeconfig. `check_busy=False` pour un outil
     qui n'écrit rien sur le cluster (réservations, v1.94.0) : l'arrêt d'un
     cluster en cours ne le bloque pas. `capture=True` (v1.96.0) garde l'objet
-    JSON que l'outil écrit sur stdout dans `run.result["output"]`."""
-    busy = _transfer_busy((cluster,), label) if check_busy else None
-    if busy:
-        return None, _busy_response(busy)
+    JSON que l'outil écrit sur stdout dans `run.result["output"]`.
+    v1.99.0 : `busy_clusters` (clusters dont l'arrêt en cours bloque
+    l'action, `(cluster,)` par défaut) et `busy_prefix` (une action en cours
+    dont le libellé commence ainsi bloque aussi : un geste par plan de
+    réplication) ; `summarize` passé au relais ; `id_arg` ajoute
+    `--id=<action>` pour que l'outil lie son journal à l'Activité.
+    `setup(run)` règle l'action (rôle, délai avant SIGKILL...) AVANT qu'elle
+    soit visible et que son fil parte ; le contrôle d'occupation et l'ajout
+    à ACTIONS se font sous le même verrou (deux gestes simultanés sur le
+    même plan : un seul passe)."""
     wd = _capi_work_dir()
     spec_file = None
     if spec is not None:
@@ -14865,18 +15275,35 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
             json.dump(spec, f)
         cmd = cmd + ["--spec", spec_file]
     run_id = uuid.uuid4().hex[:12]
+    if id_arg:
+        cmd = cmd + [f"--id={run_id}"]
     # v1.96.0 : un chemin passé en `--option=/chemin` est masqué lui aussi
     public = [tool] + [a for a in cmd[2:] if not a.startswith("/")
                        and not a.partition("=")[2].startswith("/")
                        and a not in ("--kubeconfig", "--db")]
     run = ActionRun(run_id, label, cluster, public, dry_run=dry_run)
     run.cluster_user = (current_cluster_identity() or {}).get("user")
+    if setup is not None:
+        setup(run)
     with ACTIONS_LOCK:
-        ACTIONS[run_id] = run
+        busy = (_transfer_busy(tuple(busy_clusters or (cluster,)), label, prefix=busy_prefix)
+                if check_busy else None)
+        if not busy:
+            ACTIONS[run_id] = run
+    if busy:
+        run.status = "cancelled"               # jamais lancée : rien à persister
+        run._closed = True
+        metric_actions_in_flight.dec()
+        if spec_file:
+            Path(spec_file).unlink(missing_ok=True)
+        return None, _busy_response(busy)
 
     def work():
         try:
-            _vm_transfer_runner(run, cmd, capture=capture)
+            if summarize is None:          # signature d'avant la 1.99.0 (outils et tests)
+                _vm_transfer_runner(run, cmd, capture=capture)
+            else:
+                _vm_transfer_runner(run, cmd, capture=capture, summarize=summarize)
         finally:
             if spec_file:
                 Path(spec_file).unlink(missing_ok=True)
@@ -17623,6 +18050,16 @@ def _iso_release_info(path):
     return _ISO_RELEASE_CACHE[key]
 
 
+def _bm_iso_harvester_version(name):
+    """Version de Harvester d'un ISO du magasin (harvester-release.yaml), ou
+    None : nom refusé, fichier absent ou ISO illisible."""
+    safe = _safe_artifact_name(str(name or ""))
+    path = _iso_dir() / safe if safe else None
+    if not path or not path.is_file():
+        return None
+    return (_iso_release_info(path) or {}).get("harvester")
+
+
 def _iso_sha512(name):
     """Le SHA-512 publié d'un ISO du magasin, s'il est posé à côté (fichier
     .sha512 de la release, une ligne « <hash>  <nom> »)."""
@@ -19708,14 +20145,18 @@ def _transfer_check(cmd):
     return jsonify(out)
 
 
-def _transfer_busy(clusters, label):
+def _transfer_busy(clusters, label, prefix=None):
     """Même VM déjà en transfert, ou arrêt/démarrage de l'un des clusters en
     cours : un transfert qui démarre sous un cluster qu'on éteint échoue au
-    milieu, et deux transferts de la même VM se marcheraient dessus."""
-    for r in ACTIONS.values():
+    milieu, et deux transferts de la même VM se marcheraient dessus.
+    `prefix` (v1.99.0) : toute action en cours dont le libellé commence
+    ainsi, quel que soit son cluster (un geste à la fois par plan)."""
+    for r in list(ACTIONS.values()):
         if r.status not in ("starting", "running") or r.dry_run:
             continue
         if r.action == label and r.cluster == clusters[0]:
+            return r
+        if prefix and str(r.action).startswith(prefix):
             return r
         if r.action in CLUSTER_SEQUENCES and r.cluster in clusters:
             return r
@@ -19725,10 +20166,14 @@ def _transfer_busy(clusters, label):
 CLI_OUTPUT_MAX = 1024 * 1024
 
 
-def _vm_transfer_runner(run, cmd, capture=False):
+def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     """Relaie les étapes du script, comme pour l'installateur du provider.
     `capture` : l'objet JSON de stdout va dans `run.result["output"]`
-    (fichier temporaire anonyme, pas de tube qui se remplirait)."""
+    (fichier temporaire anonyme, pas de tube qui se remplirait).
+    `summarize(run, rc, sortie, dernière erreur)` (v1.99.0) : rend (statut,
+    résumé) pour un outil qui dit lui-même ce que veut dire sa sortie (la
+    réplication distingue annulé et défait, interrompu à reprendre), ou None
+    pour les textes habituels."""
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
@@ -19736,11 +20181,26 @@ def _vm_transfer_runner(run, cmd, capture=False):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
-    out_file = tempfile.TemporaryFile() if capture else None
+    out_file = None
+    if run.cancel_requested:
+        # v1.99.0 : annulée avant le départ de la commande : rien n'est lancé
+        run.status, run.error_summary = "cancelled", "cancelled before the command started: nothing done"
+        run.ended_at = time.time()
+        run.emit({"type": "status", "status": run.status, "exit_code": None, "ts": time.time()})
+        run.close()
+        return
     try:
+        # dans le try : une erreur ici (disque plein) laissait l'action
+        # « running » pour toujours
+        out_file = tempfile.TemporaryFile() if capture else None
         proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
+        if run.cancel_requested:
+            # v1.99.0 : annulation demandée avant que le processus existe
+            proc.terminate()
+            if run.kill_grace:
+                run._kill_watch = _kill_after_grace(run)
         for line in proc.stderr:
             line = line.strip()
             if line.startswith("STEP_EVENT|"):
@@ -19768,7 +20228,10 @@ def _vm_transfer_runner(run, cmd, capture=False):
                 data = None
             if isinstance(data, dict):
                 run.result = dict(run.result or {}, output=data)
-        if rc == 0:
+        custom = summarize(run, rc, data if out_file is not None else None, last_error) if summarize else None
+        if custom is not None:
+            run.status, run.error_summary = custom[0], (custom[1][:300] if custom[1] else None)
+        elif rc == 0:
             run.status = "done"
         elif rc == 3 or run.status == "cancelled":
             run.status = "cancelled"
@@ -19779,11 +20242,21 @@ def _vm_transfer_runner(run, cmd, capture=False):
         else:
             run.status = "error"
             run.error_summary = (last_error or f"exit {rc}")[:300]
-    except Exception as e:                     # noqa: BLE001
-        run.error_summary = str(e)[:300]
-        step("transfer", "error", str(e)[:300])
+    except BaseException as e:                 # noqa: BLE001
+        # le texte d'une OSError porte un chemin : son type seul
+        detail = type(e).__name__ if isinstance(e, OSError) else str(e)[:300]
+        run.error_summary = detail
+        step("transfer", "error", detail)
         run.exit_code = 1
         run.status = "error"
+        proc = getattr(run, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()            # même signal qu'un arrêt depuis le dock
+        if not isinstance(e, Exception):
+            run.ended_at = time.time()
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+            run.close()
+            raise
     finally:
         if out_file is not None:
             out_file.close()
@@ -20989,6 +21462,28 @@ from simple_websocket import Client as _WsClient
 
 log_vnc = logging.getLogger("harvester-ops.vnc")
 
+
+class _TicketRedactFilter(logging.Filter):
+    """v1.98.0 : le journal d'accès de werkzeug écrit la ligne de requête
+    entière, donc le ticket des websockets de console (`?ticket=...`, VNC
+    KubeVirt et KVM, console série). La valeur est remplacée par `***`
+    avant tout gestionnaire."""
+
+    _RE = re.compile(r"(ticket=)[^&\s\"']+")
+
+    def filter(self, record):
+        try:
+            text = record.getMessage()
+        except Exception:                            # noqa: BLE001 (on laisse passer tel quel)
+            return True
+        if "ticket=" in text:
+            record.msg, record.args = self._RE.sub(r"\1***", text), ()
+        return True
+
+
+_TICKET_REDACT = _TicketRedactFilter()
+logging.getLogger("werkzeug").addFilter(_TICKET_REDACT)
+
 _VNC_TICKET_TTL = 30          # seconds; consumed once
 # Navigateurs rattachés, toutes VMs confondues. Chaque navigateur tient deux
 # fils (lecture, écriture) ; la connexion partagée d'une VM en tient un.
@@ -21125,6 +21620,18 @@ def _vnc_consume_ticket(token, cluster, namespace, name):
     return _vnc_take_ticket(token, cluster, namespace, name) is not None
 
 
+def _vnc_ticket_user_ok(entry):
+    """v1.98.0 : un ticket de console est un jeton au porteur, lié à une
+    personne, à une VM (cluster ou hôte, domaine) et à un genre de console ;
+    il ne vit que 30 s et ne sert qu'une fois. Le websocket qui le présente
+    doit en plus venir de la MÊME personne (cookie de session, en-tête
+    Basic) : un ticket lu ailleurs (journal, historique) ne sert à rien
+    sans la session. Un ticket délivré sans personne (console en mode
+    ouvert) ne compare rien."""
+    want = entry.get("user") or ""
+    return not want or current_user() == want
+
+
 def _vnc_classify_loss(cluster, namespace, name, uid):
     """KubeVirt a fermé la connexion partagée : la VM a-t-elle redémarré, ou
     un AUTRE client (la console d'Harvester, une autre instance du toolkit)
@@ -21240,6 +21747,9 @@ def ws_vnc(ws, cluster, namespace, name):
         log_vnc.warning("rejected /ws/vnc for %s/%s: bad or expired ticket",
                         namespace, name)
         ws.close(message="invalid or expired ticket"); return
+    if not _vnc_ticket_user_ok(entry):
+        log_vnc.warning("rejected /ws/vnc for %s/%s: ticket of another user", namespace, name)
+        ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
     kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
@@ -21284,6 +21794,495 @@ def ws_vnc(ws, cluster, namespace, name):
 
 
 # =============================================================================
+# v1.98.0 : console VNC d'une VM KVM, par tunnel SSH (web/kvm_vnc.py)
+#
+# Même modèle que la console KubeVirt : un ticket à usage unique délivré par
+# une route authentifiée (seul endroit d'où une erreur LISIBLE peut venir),
+# puis un websocket rattaché à la connexion partagée de la VM (vnc_mux). La
+# connexion amont est un `ssh -W` vers l'affichage, vu depuis l'hôte, à
+# travers la connexion maître : aucun écouteur local. Le ticket porte
+# `cluster="kvm:<hôte>"` et le genre `kvm-vnc`, la clé de partage est
+# `("kvm:<hôte>", domaine)` : un `:` est interdit dans un nom de cluster et
+# une clé KubeVirt a trois éléments, donc aucune collision possible. Le mot
+# de passe VNC éventuel ne quitte pas le processus : lu à l'ouverture,
+# présenté à QEMU, oublié (vnc_mux) ; les navigateurs restent en sécurité
+# None, l'accès est gardé par la session et le rôle (opérateur).
+# =============================================================================
+import kvm_ops as _ko  # noqa: E402
+import kvm_vnc  # noqa: E402
+
+KVM_VNC_KIND = "kvm-vnc"
+
+
+def _kvm_vnc_key(host, domain):
+    return (f"kvm:{host}", domain)
+
+
+def _kvm_vnc_remember(host, domain, reason, detail=None):
+    entry = {"reason": reason, "at": time.time()}
+    if detail:
+        entry["detail"] = detail
+    with _vnc_lock:
+        _vnc_last_close[_kvm_vnc_key(host, domain)] = entry
+
+
+def _kvm_vnc_cut_host(host, reason="host-removed"):
+    """Ferme chaque console ouverte sur un hôte (son retrait) : le dernier
+    navigateur n'a pas à partir pour que le tunnel tombe."""
+    keys = vnc_mux.close_where(lambda k: len(k) == 2 and k[0] == f"kvm:{host}",
+                               "host removed")
+    for k in keys:
+        _kvm_vnc_remember(host, k[1], reason)
+    if keys:
+        metric_vnc_sessions.set(_vnc_viewers())
+    return keys
+
+
+def _kvm_vnc_failure(e, up):
+    """(raison, détail) d'une ouverture de console qui échoue. Une erreur de
+    protocole RFB porte son propre message (refus du serveur, sécurité non
+    gérée, mot de passe refusé) et, pour les refus définitifs, sa raison ;
+    la dernière ligne d'erreur de ssh ne vaut que pour une panne du
+    transport."""
+    if isinstance(e, vnc_mux.ProtocolError):
+        return e.reason or "unreachable", str(e)
+    detail = (up.failure_reason() if up is not None
+              else getattr(e, "message", None) or type(e).__name__)
+    return "unreachable", detail
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/console-ticket", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_kvm_console_ticket(host, domain):
+    """Pré-contrôle et ticket du websocket de la console d'une VM KVM.
+    409 `notrunning` : la page réessaie ; 422 pour un affichage qu'aucun
+    nouvel essai ne rendra joignable (SPICE seul, socket, pas d'affichage,
+    pas d'écoute, adresse qui n'est pas celle de l'hôte)."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        return err
+    active = _vnc_viewers()
+    if active >= _VNC_MAX_SESSIONS:
+        return jsonify({"error": f"too many console sessions open ({active})",
+                        "hint": "close an existing console first"}), 429
+    try:
+        _state, target, _ = kvm_vnc.read_display(vh, domain)
+    except _kh.KvmError as e:
+        code = 404 if e.kind == "notfound" else 502
+        return jsonify({"error": e.message, "kind": e.kind}), code
+    except _ko.OpError as e:
+        return jsonify({"error": e.message, "kind": e.kind}), 502
+    reason = target.get("reason")
+    if reason:
+        code = 409 if reason == "notrunning" else 422
+        return jsonify({"error": kvm_vnc.REASON_MESSAGES.get(reason, reason), "reason": reason,
+                        "terminal": reason in kvm_vnc.TERMINAL_REASONS}), code
+    token = _vnc_issue_ticket(f"kvm:{host}", "", domain, user=current_user(), kind=KVM_VNC_KIND)
+    return jsonify({"ticket": token,
+                    "ws_path": f"/ws/kvm/vnc/{host}/{quote(domain, safe='')}",
+                    "expires_in": _VNC_TICKET_TTL,
+                    "password": bool(target.get("password"))})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/console-status")
+@requires_auth
+def api_kvm_console_status(host, domain):
+    """Qui regarde la console de cette VM KVM, et pourquoi elle s'est fermée
+    la dernière fois (comme api_vm_console_status)."""
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    key = _kvm_vnc_key(host, domain)
+    viewers = vnc_mux.sessions().get(key, [])
+    with _vnc_lock:
+        last = _vnc_last_close.get(key)
+    if last and time.time() - last["at"] > _VNC_CLOSE_MEMORY:
+        last = None
+    return jsonify({"viewers": viewers, "count": len(viewers), "last_close": last})
+
+
+@sock.route("/ws/kvm/vnc/<host>/<domain>")
+def ws_kvm_vnc(ws, host, domain):
+    """Rattache le navigateur à la console PARTAGÉE d'une VM KVM : une seule
+    connexion vers QEMU (un seul `ssh -W`) pour tous ses navigateurs ; le
+    dernier qui part la ferme, donc arrête ssh."""
+    if not _kvm_check_host(host) or not _kvm_check_domain(domain):
+        ws.close(message="invalid host or domain"); return
+    entry = _vnc_take_ticket(request.args.get("ticket"), f"kvm:{host}", "", domain,
+                             kind=KVM_VNC_KIND)
+    if not entry:
+        log_vnc.warning("rejected /ws/kvm/vnc on %s: bad or expired ticket", host)
+        ws.close(message="invalid or expired ticket"); return
+    if not _vnc_ticket_user_ok(entry):
+        log_vnc.warning("rejected /ws/kvm/vnc on %s: ticket of another user", host)
+        ws.close(message="invalid or expired ticket"); return
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        ws.close(message="host is not declared"); return
+    key = _kvm_vnc_key(host, domain)
+    box = {}
+
+    def dial():
+        box["up"] = up = kvm_vnc.dial(vh, domain)
+        return up
+
+    def lost(_hub):
+        reason = kvm_vnc.classify_loss(vh, domain)
+        _kvm_vnc_remember(host, domain, reason)
+        log_vnc.info("console kvm:%s lost: %s", host, reason)
+
+    with _vnc_lock:
+        _vnc_last_close.pop(key, None)
+    try:
+        vnc_mux.attach(key, dial, ws, user=entry.get("user") or "", on_lost=lost)
+    except kvm_vnc.DisplayUnavailable as e:
+        _kvm_vnc_remember(host, domain, e.reason, e.message)
+        try: ws.close(message=e.reason)
+        except Exception: pass
+    except Exception as e:              # noqa: BLE001
+        reason, detail = _kvm_vnc_failure(e, box.get("up"))
+        _kvm_vnc_remember(host, domain, reason, detail)
+        log_vnc.error("console kvm:%s: upstream unavailable: %s", host, detail)
+        try: ws.close(message="VM display unreachable")
+        except Exception: pass
+    finally:
+        metric_vnc_sessions.set(_vnc_viewers())
+
+
+# =============================================================================
+# v1.98.0 : instantanés, clonage et suppression d'une VM KVM
+#
+# Lectures (liste des instantanés, aperçus du clonage et de la suppression)
+# par la bibliothèque, comme le détail d'une VM ; chaque mutation lance
+# bin/harvester-kvm.py en action suivie, valeurs en `--option=valeur`, avec un
+# libellé `kvm:vm-<verbe>:<hôte>/<domaine>` : `_kvm_vm_busy` refuse alors
+# toute autre opération sur la même VM (le script tient en plus son verrou
+# par VM). La suppression d'une VM exige le nom saisi et l'empreinte de
+# l'aperçu montré (`--expect-delete`) : le script refuse (`plan-changed`) si
+# l'ensemble supprimé a grandi depuis.
+# =============================================================================
+KVM_SNAPSHOT_TIMEOUT_MAX = 3600
+KVM_DELETE_SURVEY_TIMEOUT = int(getattr(_kvm_cli, "DELETE_SURVEY_TIMEOUT", 120)) if _kvm_cli else 120
+KVM_ACK_MAX = 64                       # fichiers illisibles acceptés en une fois
+# Aperçus (clonage, suppression) : chacun relève tous les disques de l'hôte
+# (dumpxml de chaque domaine, volumes, stat, qemu-img). Limite par personne
+# et nombre de relevés simultanés par hôte ; au-delà, 429 sans rien lancer.
+KVM_PREVIEW_RATE = "20/minute"
+KVM_SURVEYS_PER_HOST = 2
+_KVM_SURVEYS = {}                      # hôte -> relevés en cours
+_KVM_SURVEYS_LOCK = threading.Lock()
+
+
+@contextlib.contextmanager
+def _kvm_survey_slot(host):
+    """Place pour un relevé de disques sur `host` : rend True (place prise,
+    rendue en sortie) ou False (déjà KVM_SURVEYS_PER_HOST en cours)."""
+    with _KVM_SURVEYS_LOCK:
+        if _KVM_SURVEYS.get(host, 0) >= KVM_SURVEYS_PER_HOST:
+            yield False
+            return
+        _KVM_SURVEYS[host] = _KVM_SURVEYS.get(host, 0) + 1
+    try:
+        yield True
+    finally:
+        with _KVM_SURVEYS_LOCK:
+            left = _KVM_SURVEYS.get(host, 1) - 1
+            if left > 0:
+                _KVM_SURVEYS[host] = left
+            else:
+                _KVM_SURVEYS.pop(host, None)
+
+
+def _kvm_survey_busy(host, domain):
+    return jsonify({"error": f"{host}: {KVM_SURVEYS_PER_HOST} disk surveys are already running "
+                             "on this host; try again in a few seconds",
+                    "kind": "busy", "host": host, "name": domain}), 429
+
+# Table des opérations du second groupe du menu d'une VM : rôle demandé,
+# états où l'opération est possible (None : tous), définition persistante
+# exigée. Servie avec la liste des VMs (`operations`) : l'interface grise les
+# entrées d'après elle, sans règle à elle. Les mêmes refus restent faits par
+# la bibliothèque au moment d'agir.
+KVM_VM_OPERATIONS = {
+    "snapshots": {"role": "operator", "states": None, "persistent": False},
+    "clone": {"role": "operator", "states": ["shut off"], "persistent": True},
+    "delete": {"role": "admin", "states": ["shut off"], "persistent": True},
+}
+
+
+def _kvm_op_error(e, extra=None):
+    """Réponse d'une lecture qui échoue : 400 pour un nom refusé, 404 pour
+    une VM inconnue, 502 sinon ; le message de la bibliothèque, jamais une
+    trace ni un chemin d'état."""
+    kind = getattr(e, "kind", "failed")
+    code = 400 if kind == "invalid" else 404 if kind == "notfound" else 502
+    if code == 502:
+        log.warning("KVM: %s failed: %s", request.path, getattr(e, "message", type(e).__name__))
+    return jsonify(dict(extra or {}, error=getattr(e, "message", str(e)), kind=kind)), code
+
+
+def _kvm_vm_target(host, domain):
+    """(VirshHost, None) après les contrôles communs d'une route de VM, ou
+    (None, réponse d'erreur)."""
+    err = _kvm_unavailable()
+    if err:
+        return None, err
+    if not _kvm_check_host(host):
+        return None, _kvm_err("invalid host name")
+    if not _kvm_check_domain(domain):
+        return None, _kvm_err("invalid domain name")
+    return _kvm_host(_state_dir(), host)
+
+
+def _kvm_json_body():
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    return body if isinstance(body, dict) else None
+
+
+def _kvm_vm_op(host, domain, verb, cmd, names=()):
+    """Lance une opération sur une VM : refus 409 si une autre opération tient
+    déjà la VM (ou l'un des `names`, le nom d'un clone), sinon l'action."""
+    with _KVM_GESTURE_LOCK:
+        for n in (domain, *names):
+            busy = _kvm_vm_busy(host, n)
+            if busy:
+                return None, _busy_response(busy)
+        run, err = _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd)
+        if run is not None:
+            # posé sous le verrou : un geste concurrent le voit déjà
+            run.kvm_vms = (domain, *names)
+        return run, err
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots")
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_snapshots(host, domain):
+    """Instantanés d'une VM (nom, date, état à la prise, emplacement, parent,
+    actuel) et raisons pour lesquelles on ne peut pas en prendre."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    try:
+        listing = _ko.list_snapshots(vh, domain)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify(dict(listing, host=host, name=domain, role=current_role()))
+
+
+def _kvm_snapshot_cmd(verb, host, domain, snapshot):
+    return _kvm_base("snapshot", verb) + [f"--host={host}", f"--name={domain}",
+                                          f"--snapshot={snapshot}"]
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_create(host, domain):
+    """Prend un instantané interne ; corps {name, description}. Une VM en
+    marche est mise en pause le temps d'enregistrer sa mémoire."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    try:
+        snap = _ko.check_snapshot_name(body.get("name"), new=True)
+        desc = body.get("description")
+        # texte seulement : 0 ou false ne deviennent ni « pas de
+        # description » ni le texte « 0 » ; une chaîne vide = aucune
+        if desc is not None and not isinstance(desc, str):
+            raise _ko.OpError("invalid", "description must be text")
+        desc = _ko._check_description(desc or None)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    cmd = _kvm_snapshot_cmd("create", host, domain, snap)
+    if desc:
+        cmd.append(f"--description={desc}")
+    run, err = _kvm_vm_op(host, domain, "snapshot-create", cmd)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "snapshot": snap}), 202
+
+
+def _kvm_snapshot_gesture(host, domain, snapshot, verb):
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    try:
+        snap = _ko.check_snapshot_name(snapshot)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    run, err = _kvm_vm_op(host, domain, f"snapshot-{verb}",
+                          _kvm_snapshot_cmd(verb, host, domain, snap))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "snapshot": snap}), 202
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots/<snapshot>/revert", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_revert(host, domain, snapshot):
+    """Revient à un instantané (jamais `--force`) : l'état actuel non
+    enregistré est perdu ; une VM en marche revenue à un instantané pris
+    arrêté s'éteint."""
+    return _kvm_snapshot_gesture(host, domain, snapshot, "revert")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots/<snapshot>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_delete(host, domain, snapshot):
+    """Supprime un instantané ; ses enfants sont rattachés à son parent."""
+    return _kvm_snapshot_gesture(host, domain, snapshot, "delete")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/clone-plan")
+@_rate_limit(KVM_PREVIEW_RATE)
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_clone_plan(host, domain):
+    """Aperçu d'un clonage `?name=C` : disques copiés et leur destination,
+    place, disques partagés gardés, ce qui est régénéré, refus. Ne modifie
+    rien."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    new = request.args.get("name", "")
+    try:
+        _ko.check_new_vm_name(new)
+        with _kvm_survey_slot(host) as slot:
+            if not slot:
+                return _kvm_survey_busy(host, domain)
+            plan = _ko.clone_plan(vh, domain, new)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],
+                    "plan": plan, "role": current_role()})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/clone", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_kvm_clone(host, domain):
+    """Copie complète d'une VM arrêtée sous un nouveau nom ; corps {name}.
+    Le script refait l'aperçu au moment d'agir et défait tout en cas
+    d'échec ou d'annulation."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    new = body.get("name")
+    try:
+        _ko.check_new_vm_name(new)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    if new == domain:
+        return _kvm_err("the copy needs another name")
+    cmd = _kvm_base("clone") + [f"--host={host}", f"--name={domain}", f"--new-name={new}"]
+    run, err = _kvm_vm_op(host, domain, "clone", cmd, names=(new,))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "new_name": new}), 202
+
+
+def _kvm_ack_list(values):
+    """Fichiers illisibles acceptés : liste de chemins absolus (contrôlée par
+    la bibliothèque), sans doublon, dans l'ordre reçu."""
+    if values is None:
+        return []
+    if not isinstance(values, list) or len(values) > KVM_ACK_MAX:
+        raise _ko.OpError("invalid", "acknowledge_unreadable: a list of absolute paths")
+    _ko.check_acknowledged(values)
+    return list(dict.fromkeys(values))
+
+
+def _kvm_flag(value):
+    return value is True or value in ("1", "true")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/delete-plan")
+@_rate_limit(KVM_PREVIEW_RATE)
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_delete_plan(host, domain):
+    """Aperçu d'une suppression : disques supprimés et gardés (avec leur
+    raison), fichiers illisibles, instantanés, mémoire enregistrée, vTPM,
+    nvram, refus, et l'empreinte à rendre à la suppression.
+    `?remove_storage=1`, `?acknowledge=<chemin>` (répété)."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    remove = _kvm_flag(request.args.get("remove_storage"))
+    try:
+        ack = _kvm_ack_list(request.args.getlist("acknowledge"))
+        if ack and not remove:
+            raise _ko.OpError("invalid", "acknowledging unreadable files only applies when "
+                              "the disks are deleted too")
+        with _kvm_survey_slot(host) as slot:
+            if not slot:
+                return _kvm_survey_busy(host, domain)
+            plan = _ko.delete_plan(vh, domain, remove, ack or None,
+                                   survey_timeout=KVM_DELETE_SURVEY_TIMEOUT)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],
+                    "plan": plan, "role": current_role()})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_vm_delete(host, domain):
+    """Supprime une VM arrêtée et persistante (administrateur). Corps :
+    {confirm: <nom de la VM>, expect_delete: <empreinte de l'aperçu>,
+    remove_storage, acknowledge_unreadable: [chemins cochés]}."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    if body.get("confirm") != domain:
+        return _kvm_err("type the name of the VM to confirm the deletion")
+    remove = body.get("remove_storage", False)
+    if not isinstance(remove, bool):
+        return _kvm_err("remove_storage must be true or false")
+    try:
+        digest = _ko.check_digest(body.get("expect_delete"))
+        if digest is None:
+            raise _ko.OpError("invalid", "expect_delete is required: preview the deletion first")
+        ack = _kvm_ack_list(body.get("acknowledge_unreadable"))
+        if ack and not remove:
+            raise _ko.OpError("invalid", "acknowledging unreadable files only applies when "
+                              "the disks are deleted too")
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    cmd = _kvm_base("vm", "delete") + [f"--host={host}", f"--name={domain}"]
+    if remove:
+        cmd.append("--remove-storage")
+    cmd += [f"--acknowledge-unreadable={p}" for p in ack]
+    cmd.append(f"--expect-delete={digest}")
+    run, err = _kvm_vm_op(host, domain, "delete", cmd)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain}), 202
+
+
+# =============================================================================
 # Console série (v1.61.0) : « Open in Serial Console » de Harvester.
 # Navigateur (xterm.js) <-ws-> console <-wss-> KubeVirt, sous-ressource
 # `console` de la VMI (binaire). Même modèle que la VNC : un ticket à usage
@@ -21322,7 +22321,7 @@ def ws_serial(ws, cluster, namespace, name):
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$", cluster):
         ws.close(message="invalid cluster"); return
     entry = _vnc_take_ticket(request.args.get("ticket"), cluster, namespace, name, kind="serial")
-    if not entry:
+    if not entry or not _vnc_ticket_user_ok(entry):
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
     kc = next((c["kubeconfig"] for c in cfg.get("clusters", []) if c["name"] == cluster), None)
@@ -23541,6 +24540,1318 @@ def api_notes_get(doc_id):
     return jsonify({"doc_id": doc_id, "content": text})
 
 
+# =============================================================================
+# Réplication asynchrone (v1.99.0), sans écran
+#
+# Seul chemin d'écriture : bin/harvester-replication.py, lancé en action
+# suivie (Activité, dock, annulable) avec les kubeconfigs de la personne pour
+# les deux clusters. Les lectures vont droit au registre (replication.db) par
+# `replication_db.plan_rows` / `host_rows`, les mêmes fonctions que la ligne
+# de commande : le menu racine « Disaster Recovery », le sous-menu d'un hôte
+# et `plan list --json` / `resources --json` rendent les mêmes lignes.
+#
+# Le fil de suivi garde UN processus `follow --all --console` en vie (plans
+# `follow: console`), le relance avec un délai croissant s'il tombe, l'arrête
+# proprement à l'arrêt de la console. Interrupteurs : HARVESTER_OPS_
+# REPLICATION_FOLLOW=0 au démarrage, `replication: {follow: false}` dans
+# config.yaml (à chaud), et l'option `follow` de chaque plan (à chaud).
+# Voir docs/design/2026-10-24-replication-v1-plan.md, tâche 6.
+# =============================================================================
+import replication as _rp  # noqa: E402
+import replication_db as _rdb  # noqa: E402
+import replication_follow as _rf  # noqa: E402
+import replication_run as _rr  # noqa: E402
+
+REPLICATION_SCRIPT = "harvester-replication.py"
+REPLICATION_TOOL = "harvester-replication"
+REPLICATION_SCOPE = "_replication"          # clé des lectures partagées
+REPLICATION_UID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+REPLICATION_SIDES = ("source", "target", "any")
+# marge ajoutée au retour arrière avant un SIGKILL : sortie JSON, baux rendus
+REPLICATION_GRACE_MARGIN = 15
+# budget d'arrêt de la console : l'unité arrête le conteneur par `podman
+# stop -t 600` ; toute attente de l'arrêt doit tenir dedans, avec une marge
+# pour ranger les résultats et sortir. Depuis la décision 68, une protection,
+# une mesure ou une déprotection n'est plus défaite à l'arrêt : elle s'arrête
+# au prochain point sûr (au plus un appel kubectl, `client`). Seuls une
+# bascule pas encore activée et un retour arrière déjà demandé par une
+# personne consomment encore leur délai de retour arrière dans ce budget.
+REPLICATION_STOP_BUDGET = 585
+# signal de l'arrêt de la console vers une commande de réplication : « arrête
+# au prochain point sûr, garde l'état » (SIGTERM reste l'annulation d'une
+# personne, avec retour arrière)
+REPLICATION_SUSPEND_SIGNAL = signal.SIGUSR2
+REPLICATION_EVENTS_MAX = 500
+REPLICATION_STATS_MAX = 5000
+_OFF = ("0", "false", "no", "off")
+
+
+def _replication_db_path():
+    env = os.environ.get("HARVESTER_OPS_REPLICATION_DB")
+    return Path(env) if env else _state_dir() / "replication.db"
+
+
+def _replication_conn():
+    return _rdb.connect(_replication_db_path())
+
+
+def _repl_now():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
+
+
+def _repl_err(message, status=400, code=None):
+    body = {"error": message}
+    if code:
+        body["code"] = code
+    return jsonify(body), status
+
+
+def _repl_unavailable():
+    if not (BIN_DIR / REPLICATION_SCRIPT).is_file():
+        return _repl_err(f"{REPLICATION_SCRIPT} not deployed", 503)
+    return None
+
+
+def _repl_plan(plan_id):
+    """(plan, None) ou (None, réponse 400/404). Identifiant `rp-<12 hex>`
+    seulement : un nom de plan ne passe pas par un chemin d'URL."""
+    if not _rp.PLAN_ID_RE.match(plan_id or ""):
+        return None, _repl_err("invalid plan id")
+    conn = _replication_conn()
+    try:
+        plan = _rdb.get_plan(conn, plan_id)
+    finally:
+        conn.close()
+    if plan is None:
+        return None, _repl_err(f"unknown plan: {plan_id}", 404, "unknown-plan")
+    return plan, None
+
+
+def _repl_base(*sub):
+    """Ligne de commande du script : sortie JSON, répertoire d'état et base de
+    la console (masqués dans la commande montrée), auteur du journal."""
+    cmd = [sys.executable, str(BIN_DIR / REPLICATION_SCRIPT), *sub, "--json",
+           f"--state-dir={_state_dir()}", f"--db={_replication_db_path()}"]
+    user = current_user()
+    if user:
+        cmd.append(f"--by={user}")
+    return cmd
+
+
+def _repl_kube_args(plan):
+    """`--from-kubeconfig` / `--to-kubeconfig` de la personne. Un cluster que
+    la console ne déclare plus ne reçoit rien : le script le traite comme
+    injoignable (bascule non planifiée, déprotection). Un cluster déclaré que
+    cette session ne voit pas (Rancher) est refusé, jamais remplacé par le
+    kubeconfig de la console."""
+    declared = {c.get("name") for c in load_config_ro().get("clusters", [])}
+    out = []
+    for side, opt in (("source_cluster", "--from-kubeconfig"), ("target_cluster", "--to-kubeconfig")):
+        name = plan.get(side)
+        if name not in declared:
+            continue
+        kc = _kubectl_for_cluster(name)
+        if not kc:
+            return None, _repl_err(f"this session has no access to cluster {name}", 403,
+                                   "target-denied" if side == "target_cluster" else "source-denied")
+        out.append(f"{opt}={kc}")
+    return out, None
+
+
+def _repl_grace(plan):
+    """Délai avant SIGKILL d'une commande annulée : l'échéance unique de son
+    retour arrière (`undo_total`) plus un appel kubectl (`client`), réglages
+    du plan compris, plus une marge."""
+    t = _rr.effective_timeouts(plan)
+    return int(t.get("undo_total") or 240) + int(t.get("client") or 30) + REPLICATION_GRACE_MARGIN
+
+
+def _repl_shutdown_grace(plan, op):
+    """Délai laissé à une commande à l'arrêt de la console (décision 68) :
+    une bascule (ou la reprise d'une bascule) est défaite si elle n'est pas
+    activée, d'où son délai de retour arrière (`_repl_grace`) ; toute autre
+    commande s'arrête au prochain point sûr, atteint en au plus un appel
+    kubectl (`client`, puis le filet de la ligne de commande), plus la
+    marge pour écrire son résultat."""
+    state = plan.get("state")
+    eff = (plan.get("error_origin") or None) if state == "error" else state
+    if op == "failover" or (op == "resume" and eff == "failing_over"):
+        return _repl_grace(plan)
+    t = _rr.effective_timeouts(plan)
+    return int(t.get("client") or 30) + REPLICATION_GRACE_MARGIN
+
+
+def _repl_budget_error(plan):
+    """Réponse 400 si le retour arrière d'une commande lancée par la console
+    (`undo_total` + `client` + marge) ne tient pas dans le budget d'arrêt de
+    l'unité, pour un plan suivi par la console ; None sinon. Depuis la
+    décision 68, ce retour arrière ne se joue plus à l'arrêt que pour une
+    bascule pas encore activée ou une annulation déjà demandée : la règle
+    reste, pour elles."""
+    if ((plan.get("options") or {}).get("follow") or _rp.DEFAULT_OPTIONS["follow"]) != "console":
+        return None
+    grace = _repl_grace(plan)
+    if grace <= REPLICATION_STOP_BUDGET:
+        return None
+    room = REPLICATION_STOP_BUDGET - REPLICATION_GRACE_MARGIN
+    return _repl_err(f"timeouts undo_total + client = {grace - REPLICATION_GRACE_MARGIN} s: a plan followed by "
+                     f"the console must keep them at {room} s or less, so that a rollback still fits in the "
+                     f"console's stop budget ({REPLICATION_STOP_BUDGET} s); lower them, or set follow to cli",
+                     400, "stop-budget")
+
+
+def _repl_summarize(run, rc, data, last_error):
+    """Statut et résumé d'une commande de réplication, depuis sa sortie JSON :
+    annulée et défaite, interrompue (rien n'est défait, reprendre), retour
+    arrière arrivé à échéance (reste à nettoyer), refus."""
+    data = data if isinstance(data, dict) else {}
+    left = [str(x) for x in data.get("left") or []]
+    tail = f"; left: {', '.join(left)}" if left else ""
+    kind, code = data.get("kind"), data.get("code")
+    if rc == 0:
+        return "done", None
+    if data.get("suspended") and code == "not-started":
+        return "interrupted", "stopped by the console shutdown before any change: run the command again"
+    if data.get("suspended") and (data.get("resume_required") or "interrupted" in (kind, code)):
+        # décision 68 : arrêt de la console, pas une annulation ; rien n'est défait
+        run.result = dict(run.result or {}, resume_required=True, step=data.get("step"))
+        return "interrupted", (f"interrupted by the console shutdown at step {data.get('step') or '?'}, "
+                               f"nothing undone: resume the plan to continue" + tail)
+    if data.get("resume_required") or "interrupted" in (kind, code):
+        run.result = dict(run.result or {}, resume_required=True)
+        if rc == 3:
+            return "cancelled", "interrupted, nothing undone: resume the plan to finish" + tail
+        return "error", (f"interrupted ({data.get('error') or last_error or 'error'}), "
+                         f"nothing undone: resume the plan to finish" + tail)
+    if rc == 3:
+        if not data:
+            return "cancelled", "cancelled, no result from the command: check the plan"
+        return "cancelled", "cancelled, changes of this run undone" + tail
+    if "undo-timeout" in (kind, code):
+        return "error", (f"undo deadline reached, clean up by hand what carries "
+                         f"{_rp.LABEL_PLAN}={data.get('plan') or '?'}" + tail)
+    if rc < 0:
+        return "error", (f"killed (signal {-rc}) before the end of the command: check the plan "
+                         f"({_rp.LABEL_PLAN})")
+    return "error", str(data.get("error") or data.get("message") or last_error or f"exit {rc}")
+
+
+def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=None, dry_run=False):
+    """Lance une commande en action suivie. Libellé `replication:<plan>:<op>`
+    (identifiant contrôlé, jamais de nom libre) ; un geste à la fois par plan,
+    et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters."""
+    label = f"replication:{plan['id']}:{op}"
+
+    def setup(run):
+        # avant le départ du fil : une annulation immédiate voit déjà le rôle
+        # et le délai de retour arrière
+        run.required_role = role
+        run.kill_grace = _repl_grace(plan)
+        run.shutdown_grace = _repl_shutdown_grace(plan, op)
+        run.cancel_waits = True
+        run.result = dict(run.result or {}, plan=plan["id"])
+    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
+                       after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=busy,
+                       capture=True,
+                       busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
+                       busy_prefix=f"replication:{plan['id']}:", summarize=_repl_summarize, id_arg=True,
+                       setup=setup)
+
+
+def _repl_accepted(run, plan_id, **extra):
+    return jsonify(dict({"action_id": run.id, "plan": plan_id}, **extra)), 202
+
+
+def _repl_body():
+    body = request.get_json(silent=True)
+    if body is None and not request.get_data():
+        return {}, None
+    if not isinstance(body, dict):
+        return None, _repl_err("a JSON object is expected")
+    return body, None
+
+
+def _repl_flag(body, key):
+    v = body.get(key, False)
+    if not isinstance(v, bool):
+        raise ValueError(f"{key} must be true or false")
+    return v
+
+
+def _repl_text(value, key, empty=False):
+    """Une valeur passée au script : chaîne sans caractère de contrôle (ou
+    nombre entier, rendu en texte)."""
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"{key} must be a string")
+    value = str(value)
+    if (not value and not empty) or len(value) > 512 or any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise ValueError(f"invalid {key}")
+    return value
+
+
+# --- lectures --------------------------------------------------------------------
+
+def _repl_side_arg():
+    side = request.args.get("side", "any")
+    if side not in REPLICATION_SIDES:
+        raise ValueError("side must be source, target or any")
+    return side
+
+
+@app.route("/api/replication/plans")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plans():
+    """Menu racine « Disaster Recovery » : chaque plan, son état et celui de
+    chaque ressource, RPO tenu face à l'objectif, actions permises au rôle de
+    la personne (avec leur raison), derniers événements. `?host=` : plans où
+    ce cluster est source ou cible ; `?side=` : côté des lignes (any)."""
+    try:
+        side = _repl_side_arg()
+    except ValueError as e:
+        return _repl_err(str(e))
+    host = request.args.get("host") or None
+    if host is not None and not _rp.CLUSTER_RE.match(host):
+        return _repl_err("invalid host")
+    conn = _replication_conn()
+    try:
+        rows = _rdb.plan_rows(conn, _rdb.list_plans(conn, host=host), _repl_now(), role=current_role(),
+                              side=side)
+    finally:
+        conn.close()
+    return jsonify({"plans": rows, "side": side, "role": current_role(),
+                    "follower": _replication_follower_health()})
+
+
+@app.route("/api/replication/plans/<plan_id>")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plan(plan_id):
+    """Un plan : sa ligne, son état calculé (`plan_status`), ses volumes, ses
+    dix dernières bascules ou déprotections, verrou et bail en cours."""
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    now = _repl_now()
+    conn = _replication_conn()
+    try:
+        v = _rdb.plan_view(conn, plan, now)
+        row = _rdb.plan_rows(conn, [plan], now, role=current_role())[0]
+        status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
+        out = {"plan": plan, "row": row, "status": status, "volumes": v["volumes"],
+               "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
+               "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role()}
+    finally:
+        conn.close()
+    return jsonify(out)
+
+
+@app.route("/api/replication/plans/<plan_id>/stats")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plan_stats(plan_id):
+    """Bilans des passages appliqués (`stats`), du plus ancien au plus récent.
+    `?resource=<uid>`, `?since=<date ISO>`, `?limit=` (1 à 5000)."""
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    uid = request.args.get("resource") or None
+    if uid is not None and not REPLICATION_UID_RE.match(uid):
+        return _repl_err("invalid resource")
+    try:
+        limit = int(request.args.get("limit", 1000))
+        if not 1 <= limit <= REPLICATION_STATS_MAX:
+            raise ValueError
+    except ValueError:
+        return _repl_err(f"limit must be between 1 and {REPLICATION_STATS_MAX}")
+    since = request.args.get("since") or None
+    if since is not None:
+        from datetime import datetime
+        try:
+            since = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            return _repl_err("since must be an ISO 8601 date")
+    conn = _replication_conn()
+    try:
+        rows = _rdb.list_stats(conn, plan["id"], resource_uid=uid, since=since, limit=limit)
+    finally:
+        conn.close()
+    return jsonify({"plan": plan["id"], "stats": rows})
+
+
+@app.route("/api/replication/hosts/<cluster>/resources")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_host_resources(cluster):
+    """Sous-menu « Disaster Recovery » d'un hôte : ses ressources incluses
+    dans un plan, vues comme source, cible ou les deux, mêmes lignes que le
+    menu racine pour le même côté."""
+    if not _rp.CLUSTER_RE.match(cluster or ""):
+        return _repl_err("invalid host")
+    try:
+        side = _repl_side_arg()
+    except ValueError as e:
+        return _repl_err(str(e))
+    conn = _replication_conn()
+    try:
+        rows = _rdb.host_rows(conn, cluster, side, _repl_now(), role=current_role())
+    finally:
+        conn.close()
+    return jsonify({"host": cluster, "host_kind": "harvester", "side": side, "resources": rows,
+                    "role": current_role()})
+
+
+@app.route("/api/replication/resources/<uid>/events")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_resource_events(uid):
+    """Journal persistant d'une ressource, du plus récent au plus ancien, avec
+    l'action d'Activité (`action_id`) quand il y en a une. `?limit=` (1 à 500)
+    et `?before=` (id du dernier événement rendu, ou date ISO) ;
+    `next_before` donne la page suivante."""
+    if not REPLICATION_UID_RE.match(uid or ""):
+        return _repl_err("invalid resource")
+    try:
+        limit = int(request.args.get("limit", 50))
+        if not 1 <= limit <= REPLICATION_EVENTS_MAX:
+            raise ValueError
+    except ValueError:
+        return _repl_err(f"limit must be between 1 and {REPLICATION_EVENTS_MAX}")
+    before = request.args.get("before") or None
+    conn = _replication_conn()
+    try:
+        evs = _rdb.resource_events(conn, uid, limit=limit, before=before)
+    except ValueError:
+        return _repl_err("before must be an event id or an ISO 8601 date")
+    finally:
+        conn.close()
+    return jsonify({"resource": uid, "events": evs,
+                    "next_before": evs[-1]["id"] if len(evs) >= limit else None})
+
+
+@app.route("/api/replication/follower")
+@requires_auth
+def api_replication_follower():
+    """État du fil de suivi de la console."""
+    return jsonify(_replication_follower_health())
+
+
+# --- écritures ------------------------------------------------------------------
+
+_CREATE_SCALARS = (("name", "--name"), ("from", "--from"), ("to", "--to"), ("selector", "--selector"),
+                   ("namespace", "--namespace"), ("rpo", "--rpo"), ("cloud_init", "--cloud-init"),
+                   ("mac", "--mac"), ("start", "--start"), ("retain", "--retain"), ("interval", "--interval"),
+                   ("follow", "--follow"), ("skew_tolerance", "--skew-tolerance"))
+_CREATE_MAPS = (("map_net", "--map-net", "networks"), ("map_sc", "--map-sc", "storage_classes"),
+                ("map_ns", "--map-ns", "namespaces"), ("map_image", "--map-image", "images"),
+                ("map_claim", "--map-claim", "claims"), ("target_name", "--target-name", "target_names"))
+_CREATE_KEYS = ({k for k, _ in _CREATE_SCALARS} | {k for k, _o, _m in _CREATE_MAPS}
+                | {"vms", "create_namespace", "timeouts"})
+
+
+def _repl_pairs(body, key):
+    raw = body.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{key} must be an object")
+    out = {}
+    for a, b in sorted(raw.items()):                # ordre stable de la commande montrée
+        a, b = _repl_text(a, key), _repl_text(b, key, empty=True)
+        if "=" in a:
+            raise ValueError(f"{key}: a source name cannot contain '='")
+        out[a] = b
+    return out
+
+
+def _repl_timeouts(body, key="timeouts", allow_null=False):
+    raw = body.get(key)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{key} must be an object")
+    out = {}
+    for name, val in sorted(raw.items()):
+        name = _repl_text(name, key)
+        if not re.match(r"^[a-z_]{1,40}$", name):
+            raise ValueError(f"{key}: invalid name")
+        out[name] = None if (val is None and allow_null) else _repl_text(val, key)
+    return out
+
+
+def _repl_create_request(body):
+    """(demande normalisée, options du script) d'un corps de création ;
+    ValueError ou PlanError sinon. La demande passe par
+    `replication.normalize_plan`, le contrôle même du script, pour répondre
+    400 tout de suite au lieu d'une action en échec."""
+    unknown = set(body) - _CREATE_KEYS
+    if unknown:
+        raise ValueError(f"unknown field: {sorted(unknown)[0][:40]}")
+    argv = []
+    vals = {}
+    for key, opt in _CREATE_SCALARS:
+        if body.get(key) is not None:
+            vals[key] = _repl_text(body[key], key)
+            argv.append(f"{opt}={vals[key]}")
+    vms = body.get("vms") or []
+    if not isinstance(vms, list):
+        raise ValueError("vms must be a list")
+    vms = [_repl_text(v, "vms") for v in vms]
+    argv += [f"--vm={v}" for v in vms]
+    maps = {}
+    for key, opt, kind in _CREATE_MAPS:
+        pairs = _repl_pairs(body, key)
+        if pairs:
+            maps[kind] = pairs
+        argv += [f"{opt}={a}={b}" for a, b in pairs.items()]
+    options = {k: vals[k] for k in ("cloud_init", "mac", "start", "follow") if k in vals}
+    if "skew_tolerance" in vals:
+        options["skew_tolerance_s"] = vals["skew_tolerance"]
+    if _repl_flag(body, "create_namespace"):
+        options["create_namespace"] = True
+        argv.append("--create-namespace")
+    timeouts = _repl_timeouts(body)
+    if timeouts:
+        options["timeouts"] = timeouts
+        argv += [f"--timeout={k}={v}" for k, v in timeouts.items()]
+    req = {"name": vals.get("name"), "source_cluster": vals.get("from"), "target_cluster": vals.get("to"),
+           "rpo_objective_s": vals.get("rpo"), "interval_s": vals.get("interval"), "vms": vms,
+           "selector": vals.get("selector", ""), "namespace": vals.get("namespace", ""),
+           "mappings": maps, "options": options}
+    if "retain" in vals:
+        try:
+            req["retain"] = int(vals["retain"])
+        except ValueError:
+            raise ValueError("retain must be an integer") from None
+    return _rp.normalize_plan(req), argv
+
+
+@app.route("/api/replication/plans", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_plan_create():
+    """Crée un plan (brouillon) : rien n'est écrit sur les clusters."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    try:
+        plan, argv = _repl_create_request(body)
+    except _rp.PlanError as e:
+        return _repl_err(str(e), 400, e.code)
+    except ValueError as e:
+        return _repl_err(str(e))
+    declared = {c.get("name") for c in load_config_ro().get("clusters", [])}
+    for side in ("source_cluster", "target_cluster"):
+        if plan[side] not in declared:
+            return _repl_err(f"unknown cluster: {plan[side]}", 400, "unknown-cluster")
+    err = _repl_budget_error(plan)
+    if err:
+        return err
+    _kargs, err = _repl_kube_args(plan)          # la personne doit voir les deux clusters
+    if err:
+        return err
+    def setup(run):
+        run.required_role = "operator"
+        run.cancel_waits = True
+    run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
+                           _repl_base("plan", "create") + argv, REPLICATION_TOOL,
+                           after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=False,
+                           capture=True, summarize=_repl_summarize, id_arg=True, setup=setup)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "name": plan["name"]}), 202
+
+
+@app.route("/api/replication/plans/<plan_id>/check", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_replication_check(plan_id):
+    """Contrôle complet (`phase` protect, failover ou failover-unplanned) ;
+    rien n'est écrit sur les clusters. Action suivie : le résultat (constats,
+    refus `target-denied`...) est dans la sortie de l'action."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    phase = body.get("phase", "protect")
+    if phase not in _rp.PHASES:
+        return _repl_err(f"phase must be one of {', '.join(_rp.PHASES)}")
+    try:
+        force = _repl_flag(body, "force_unplanned")
+    except ValueError as e:
+        return _repl_err(str(e))
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    cmd = _repl_base("check", plan["id"]) + [f"--phase={phase}"] + (["--force-unplanned"] if force else []) + kargs
+    run, err = _repl_action(plan, "check", cmd, "operator", busy=False, dry_run=True)
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], phase=phase)
+
+
+@app.route("/api/replication/plans/<plan_id>/measure", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_replication_measure(plan_id):
+    """Démarre (`op: start`, `interval` facultatif) ou arrête (`op: stop`) la
+    mesure des changements."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    op = body.get("op")
+    if op not in ("start", "stop"):
+        return _repl_err("op must be start or stop")
+    extra = []
+    if body.get("interval") is not None:
+        if op != "start":
+            return _repl_err("interval goes with op start")
+        try:
+            extra.append(f"--interval={_repl_text(body['interval'], 'interval')}")
+        except ValueError as e:
+            return _repl_err(str(e))
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    run, err = _repl_action(plan, f"measure-{op}", _repl_base("measure", op, plan["id"]) + extra + kargs,
+                            "operator")
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], op=op)
+
+
+@app.route("/api/replication/plans/<plan_id>/protect", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_replication_protect(plan_id):
+    """Protège (ou reprend la protection) : `interval` et `retain`
+    facultatifs (v1.99.0 : `retain` sur un plan protégé met à jour sa tâche
+    récurrente), `dry_run: true` pour le contrôle et l'essai à blanc du
+    serveur."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    try:
+        dry = _repl_flag(body, "dry_run")
+        extra = [f"--interval={_repl_text(body['interval'], 'interval')}"] if body.get("interval") is not None else []
+        if body.get("retain") is not None:
+            r = body["retain"]
+            if isinstance(r, bool) or not isinstance(r, int) or not _rp.RETAIN_MIN <= r <= _rp.RETAIN_MAX:
+                raise ValueError(f"retain: an integer between {_rp.RETAIN_MIN} and {_rp.RETAIN_MAX}")
+            extra.append(f"--retain={r}")
+    except ValueError as e:
+        return _repl_err(str(e))
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    cmd = _repl_base("protect", plan["id"]) + extra + (["--dry-run"] if dry else []) + kargs
+    run, err = _repl_action(plan, "protect", cmd, "operator", busy=not dry, dry_run=dry)
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], dry_run=dry)
+
+
+@app.route("/api/replication/plans/<plan_id>/failover", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_failover(plan_id):
+    """Bascule (administrateur) : `vms` (ns/nom) ou `all_vms: true`, `mode`
+    planned (défaut) ou unplanned, `force_unplanned` et `accept_skew` avec
+    unplanned, `dry_run`. Hors essai à blanc, `confirm` doit porter le nom
+    du plan : une activation est définitive."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    try:
+        all_vms, dry = _repl_flag(body, "all_vms"), _repl_flag(body, "dry_run")
+        force, skew = _repl_flag(body, "force_unplanned"), _repl_flag(body, "accept_skew")
+        vms = body.get("vms") or []
+        if not isinstance(vms, list):
+            raise ValueError("vms must be a list")
+        vms = [_repl_text(v, "vms") for v in vms]
+    except ValueError as e:
+        return _repl_err(str(e))
+    mode = body.get("mode", "planned")
+    if mode not in ("planned", "unplanned"):
+        return _repl_err("mode must be planned or unplanned")
+    if bool(vms) == all_vms:
+        return _repl_err("give either vms or all_vms: true", 400, "bad-selection")
+    if (force or skew) and mode != "unplanned":
+        return _repl_err("force_unplanned and accept_skew go with mode unplanned", 400, "bad-option")
+    if not dry and body.get("confirm") != plan["name"]:
+        return _repl_err("confirm must carry the plan name: the activation cannot be undone", 400,
+                         "confirmation-required")
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    cmd = (_repl_base("failover", plan["id"]) + [f"--vm={v}" for v in vms]
+           + (["--all-vms"] if all_vms else []) + (["--unplanned"] if mode == "unplanned" else [])
+           + (["--force-unplanned"] if force else []) + (["--accept-skew"] if skew else [])
+           + (["--dry-run"] if dry else ["--yes"]) + kargs)
+    run, err = _repl_action(plan, "failover", cmd, "admin", cluster=plan["target_cluster"],
+                            busy=not dry, dry_run=dry)
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], mode=mode, dry_run=dry)
+
+
+def _repl_open_run(plan, operation):
+    """La bascule ou la déprotection non terminée de la génération courante
+    (ligne `runs`), comme `replication_run._open_run` ; None sinon."""
+    conn = _replication_conn()
+    try:
+        runs = _rdb.list_runs(conn, plan["id"])
+    finally:
+        conn.close()
+    for r in reversed(runs):
+        if (r["operation"] == operation and not r["finished_at"]
+                and int(r["generation"]) == int(plan.get("generation") or 1)):
+            return r
+    return None
+
+
+def _repl_inherits_backup_deletion(plan):
+    """La déprotection interrompue de ce plan supprimait aussi les
+    sauvegardes (`points.delete_backups` de sa ligne `runs`)."""
+    r = _repl_open_run(plan, "unprotect")
+    return bool(((r or {}).get("points") or {}).get("delete_backups"))
+
+
+def _repl_resume_role(plan):
+    """(rôle, motif) d'une reprise : elle termine ce qui a été interrompu,
+    donc demande le rôle du geste d'origine. Une bascule (état
+    `failing_over`, ou `error` venu de là) = admin ; une déprotection qui
+    supprimait les sauvegardes = admin ; le reste = opérateur."""
+    state = plan.get("state")
+    eff = (plan.get("error_origin") or None) if state == "error" else state
+    if eff == "failing_over":
+        return "admin", "resuming a failover (an activation) needs the 'admin' role"
+    if eff == "unprotecting" and _repl_inherits_backup_deletion(plan):
+        return "admin", "resuming an unprotect that deletes the plan's backups needs the 'admin' role"
+    return "operator", None
+
+
+def _repl_forbidden(role, hint):
+    if ROLE_RANK.get(current_role(), 0) >= ROLE_RANK[role]:
+        return None
+    return jsonify({"error": "forbidden", "role": current_role(), "required": role, "hint": hint}), 403
+
+
+@app.route("/api/replication/plans/<plan_id>/resume", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_resume(plan_id):
+    """Termine une bascule ou une déprotection interrompue (avec la
+    confirmation donnée à son départ). Le rôle est celui du geste repris :
+    administrateur pour une bascule ou une suppression des sauvegardes, et
+    autant pour annuler la reprise."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    role, hint = _repl_resume_role(plan)
+    err = _repl_forbidden(role, hint)
+    if err:
+        return err
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    run, err = _repl_action(plan, "resume", _repl_base("resume", plan["id"]) + kargs, role,
+                            cluster=plan["target_cluster"])
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], role=role)
+
+
+@app.route("/api/replication/plans/<plan_id>/unprotect", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_unprotect(plan_id):
+    """Déprotège : `confirm` doit porter le nom du plan (les volumes de
+    secours de la cible sont supprimés ; une VM déjà basculée reste entière
+    sur la cible). `delete_backups: true` (administrateur) supprime aussi les
+    sauvegardes du plan."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    try:
+        delete_backups = _repl_flag(body, "delete_backups")
+    except ValueError as e:
+        return _repl_err(str(e))
+    inherited = _repl_inherits_backup_deletion(plan)
+    role = "admin" if delete_backups or inherited else "operator"
+    err = _repl_forbidden(role, "deleting the plan's backups needs the 'admin' role" if delete_backups else
+                          "the interrupted unprotect of this plan also deletes its backups: "
+                          "finishing it needs the 'admin' role")
+    if err:
+        return err
+    if inherited and not delete_backups:
+        # le moteur refuserait aussi (`needs-admin-resume`) : jamais élargi
+        # en silence, l'administrateur le demande explicitement
+        return _repl_err("the interrupted unprotect also deletes the plan's backups: send delete_backups: "
+                         "true, or resume the plan", 400, "needs-admin-resume")
+    if body.get("confirm") != plan["name"]:
+        return _repl_err("confirm must carry the plan name", 400, "confirmation-required")
+    kargs, err = _repl_kube_args(plan)
+    if err:
+        return err
+    cmd = _repl_base("unprotect", plan["id"]) + ["--yes"] + (["--delete-backups"] if delete_backups else []) + kargs
+    run, err = _repl_action(plan, "unprotect-delete-backups" if delete_backups else "unprotect", cmd, role)
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], delete_backups=delete_backups)
+
+
+_SETTINGS_KEYS = ("rpo", "paused", "follow", "skew_tolerance", "timeouts")
+
+
+@app.route("/api/replication/plans/<plan_id>/settings", methods=["PATCH"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_replication_settings(plan_id):
+    """Réglages à chaud, lus par le suiveur au tour suivant : `rpo`, `paused`,
+    `follow` (console, cli, off), `skew_tolerance`, `timeouts` ({nom:
+    secondes}, null retire la surcharge). L'intervalle (`protect
+    --interval`) et la rétention ne se changent pas ici."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    for key in ("interval", "retain"):
+        if key in body:
+            # v1.99.0 (décision 56) : les deux vivent dans la tâche récurrente
+            # de la source, protect les change avec elle
+            return _repl_err(f"{key} cannot be changed here: protect the plan again with `{key}`",
+                             400, "not-settable")
+    unknown = set(body) - set(_SETTINGS_KEYS)
+    if unknown:
+        return _repl_err(f"unknown field: {sorted(unknown)[0][:40]}")
+    if not body:
+        return _repl_err("nothing to change")
+    argv = []
+    try:
+        for key, opt in (("rpo", "--rpo"), ("skew_tolerance", "--skew-tolerance")):
+            if body.get(key) is not None:
+                argv.append(f"{opt}={_repl_text(body[key], key)}")
+        if "paused" in body:
+            argv.append(f"--paused={'true' if _repl_flag(body, 'paused') else 'false'}")
+        if body.get("follow") is not None:
+            if body["follow"] not in _rp.OPTION_CHOICES["follow"]:
+                raise ValueError("follow must be console, cli or off")
+            argv.append(f"--follow={body['follow']}")
+        changes = _repl_timeouts(body, allow_null=True)
+        argv += [f"--timeout={k}={'' if v is None else v}" for k, v in changes.items()]
+        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu ?
+        opts = dict(plan.get("options") or {})
+        merged = dict(opts.get("timeouts") or {})
+        for k, v in changes.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        opts["timeouts"] = _rp.normalize_timeouts(merged)
+        if body.get("follow") is not None:
+            opts["follow"] = body["follow"]
+    except _rp.PlanError as e:
+        return _repl_err(str(e), 400, e.code)
+    except ValueError as e:
+        return _repl_err(str(e))
+    err = _repl_budget_error(dict(plan, options=opts))
+    if err:
+        return err
+    run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
+                            busy_clusters=("",))
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"])
+
+
+@app.route("/api/replication/plans/<plan_id>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_plan_delete(plan_id):
+    """Supprime un plan brouillon ou déprotégé (son journal reste)."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    run, err = _repl_action(plan, "delete", _repl_base("plan", "delete", plan["id"]), "operator",
+                            busy_clusters=("",))
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"])
+
+
+# --- fil de suivi ------------------------------------------------------------------
+
+def _replication_follow_env_on():
+    return os.environ.get("HARVESTER_OPS_REPLICATION_FOLLOW", "1").strip().lower() not in _OFF
+
+
+def _replication_follow_enabled():
+    """Interrupteur à chaud : l'environnement (lu au démarrage par le service)
+    et `replication.follow` de config.yaml, relu à chaque tour."""
+    if not _replication_follow_env_on():
+        return False
+    cfg = load_config_ro().get("replication") or {}
+    return not (isinstance(cfg, dict) and cfg.get("follow") is False)
+
+
+def _replication_follow_log():
+    return LOG_DIR / "replication-follow.log"
+
+
+def _replication_follow_cmd():
+    return [sys.executable, str(BIN_DIR / REPLICATION_SCRIPT), "follow", "--all", "--console", "--json",
+            f"--state-dir={_state_dir()}", f"--db={_replication_db_path()}",
+            f"--log-file={_replication_follow_log()}"]
+
+
+def _replication_follow_grace():
+    """Délai d'arrêt du suiveur : il sort entre deux tours, ou coupe l'appel
+    kubectl en cours ; on lui laisse le plus long délai client des plans."""
+    client = int(_rp.TIMEOUTS["client"])
+    try:
+        path = _replication_db_path()
+        if path.exists():
+            conn = _rdb.connect(path)
+            try:
+                for p in _rdb.list_plans(conn):
+                    client = max(client, int(((p.get("options") or {}).get("timeouts") or {}).get("client")
+                                             or 0))
+            finally:
+                conn.close()
+    except Exception:                            # noqa: BLE001 : jamais bloquant à l'arrêt
+        pass
+    return min(client + REPLICATION_GRACE_MARGIN, REPLICATION_STOP_BUDGET)
+
+
+class ReplicationFollowerSupervisor:
+    """Garde un processus `follow --all --console` en vie.
+
+    Relancé avec un délai croissant (BACKOFF) après toute sortie qu'il n'a
+    pas demandée, y compris un 0 (un suiveur ne sort de lui-même qu'après un
+    signal reçu d'ailleurs : un `follow --take-over` à la main reprend les
+    baux de toute façon). Un enfant qui a tenu STABLE_S remet le délai à
+    zéro. Arrêté par SIGTERM (il rend ses baux et sort en 0), SIGKILL après
+    `grace()` secondes ; ni relance après un arrêt demandé (arrêt de la
+    console, interrupteur). Tout est injectable pour les tests."""
+
+    BACKOFF = (5, 15, 30, 60, 120, 300)
+    STABLE_S = 600
+    POLL_S = 2
+    LOG_MAX = 10 * 1024 * 1024
+
+    def __init__(self, cmd, log_path, enabled, grace, popen=subprocess.Popen, clock=time.monotonic,
+                 wall=time.time, ready=None, reopen_signal=signal.SIGUSR1):
+        self._cmd, self._log_path, self._enabled, self._grace = cmd, log_path, enabled, grace
+        self._popen, self._clock, self._wall, self._ready = popen, clock, wall, ready
+        self._reopen_signal = reopen_signal
+        self.rotations = 0
+        self.proc = None
+        self.restarts = 0
+        self.last_error = None
+        self.last_exit = None
+        self.started_at = None
+        self.state = "idle"             # idle, running, backoff, disabled, stopped
+        self._spawned = None
+        self._fails = 0
+        self._next_start = 0.0
+        self._stop = threading.Event()
+        self._lock = threading.Lock()
+        self._thread = None
+
+    def running(self):
+        p = self.proc
+        return p is not None and p.poll() is None
+
+    def health(self):
+        nxt = None
+        if self.state == "backoff":
+            nxt = max(0, round(self._next_start - self._clock()))
+        return {"enabled": self.state != "disabled", "state": self.state, "running": self.running(),
+                "pid": self.proc.pid if self.running() else None, "restarts": self.restarts,
+                "last_exit": self.last_exit, "last_error": self.last_error, "started_at": self.started_at,
+                "next_restart_in_s": nxt, "log_rotations": self.rotations}
+
+    def tick(self):
+        """Un tour : interrupteur, (re)lancement, constat d'une sortie."""
+        with self._lock:
+            if self._stop.is_set():
+                return
+            if not self._enabled():
+                if self.proc is not None:
+                    self._terminate()
+                self.state, self._fails, self._next_start = "disabled", 0, 0.0
+            elif self.proc is None:
+                if self._clock() < self._next_start:
+                    self.state = "backoff"
+                else:
+                    self._spawn()
+            else:
+                rc = self.proc.poll()
+                if rc is not None:
+                    self._exited(rc)
+                else:
+                    self._rotate_if_needed()
+            metric_repl_follower_up.set(1 if self.running() else 0)
+
+    def _rotate_if_needed(self):
+        """Journal trop gros pendant que l'enfant tourne : renommé en `.1`,
+        puis SIGUSR1 à l'enfant, qui rouvre son fichier (`--log-file`) sans
+        redémarrer."""
+        path = Path(self._log_path())
+        try:
+            if path.stat().st_size <= self.LOG_MAX:
+                return
+            path.replace(path.with_name(path.name + ".1"))
+        except OSError:
+            return
+        try:
+            self.proc.send_signal(self._reopen_signal)
+        except (OSError, ValueError):
+            pass
+        self.rotations += 1
+
+    def _open_log(self):
+        path = Path(self._log_path())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if path.stat().st_size > self.LOG_MAX:
+                path.replace(path.with_name(path.name + ".1"))
+        except OSError:
+            pass
+        return open(path, "a", buffering=1)
+
+    def _spawn(self):
+        try:
+            with self._open_log() as log_f:
+                self.proc = self._popen(self._cmd(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                        stderr=log_f, start_new_session=True)
+        except OSError as e:
+            self.proc = None
+            self._backoff(f"cannot start the follower: {type(e).__name__}")
+            return
+        self._spawned = self._clock()
+        self.started_at = self._wall()
+        self.state = "running"
+        log_watch.info("replication follower started (pid %s)", self.proc.pid)
+
+    def _last_log_line(self):
+        try:
+            with open(self._log_path(), "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 4096))
+                lines = [ln for ln in f.read().decode("utf-8", "replace").splitlines() if ln.strip()]
+        except OSError:
+            return None
+        return lines[-1][:300] if lines else None
+
+    def _backoff(self, error):
+        delay = self.BACKOFF[min(self._fails, len(self.BACKOFF) - 1)]
+        self._fails += 1
+        self._next_start = self._clock() + delay
+        self.last_error = error
+        self.state = "backoff"
+
+    def _exited(self, rc):
+        if self._spawned is not None and self._clock() - self._spawned >= self.STABLE_S:
+            self._fails = 0
+        self.proc, self.last_exit = None, rc
+        self.restarts += 1
+        metric_repl_follower_restarts.inc()
+        line = self._last_log_line()
+        self._backoff(f"exit {rc}" + (f": {line}" if line else ""))
+        log_watch.warning("replication follower exited (%s), restart in %s s", rc,
+                          round(self._next_start - self._clock()))
+
+    def _terminate(self, grace=None):
+        proc = self.proc
+        grace = self._grace() if grace is None else grace
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=grace)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                self.last_error = f"no exit {grace} s after SIGTERM: killed"
+        self.last_exit = proc.returncode
+        self.proc = None
+
+    def stop(self, grace=None):
+        """Arrêt demandé (console qui s'arrête) : SIGTERM, attente (`grace`,
+        bornée par l'appelant au budget d'arrêt), jamais de relance."""
+        self._stop.set()
+        with self._lock:
+            if self.proc is not None:
+                self._terminate(grace)
+            self.state = "stopped"
+            metric_repl_follower_up.set(0)
+
+    def _loop(self):
+        if self._ready is not None:
+            self._ready.wait(60)
+        while not self._stop.is_set():
+            try:
+                self.tick()
+            except Exception as e:               # noqa: BLE001 : le fil ne meurt pas
+                log_watch.warning("replication follower supervisor: %s", type(e).__name__)
+            self._stop.wait(self.POLL_S)
+
+    def start(self):
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="replication-follower")
+        self._thread.start()
+        return self._thread
+
+
+REPLICATION_FOLLOWER = None
+REPLICATION_FOLLOWER_ELSEWHERE = None       # pid de la console qui suit déjà ce répertoire d'état
+_replication_follower_lock = threading.Lock()
+_REPLICATION_FOLLOW_LOCK_FD = None
+
+
+def _replication_follower_health():
+    sup = REPLICATION_FOLLOWER
+    if sup is None:
+        out = {"enabled": False, "state": "off", "running": False, "pid": None, "restarts": 0,
+               "last_exit": None, "last_error": None, "started_at": None, "next_restart_in_s": None,
+               "log_rotations": 0}
+        if REPLICATION_FOLLOWER_ELSEWHERE is not None:
+            out.update(state="elsewhere", last_error="another console already follows this state directory "
+                                                     f"(pid {REPLICATION_FOLLOWER_ELSEWHERE or '?'})")
+        return out
+    return sup.health()
+
+
+def _replication_follow_lock(path):
+    """Verrou exclusif (flock) du répertoire d'état, tenu toute la vie de la
+    console : (descripteur, None) s'il est pris, (None, pid du détenteur)
+    si une autre console le tient déjà. Libéré par le noyau à la sortie,
+    même brutale : jamais de fichier périmé qui bloquerait."""
+    import fcntl
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            holder = int(os.pread(fd, 32, 0).decode().strip() or 0)
+        except (OSError, ValueError):
+            holder = 0
+        os.close(fd)
+        return None, holder
+    os.ftruncate(fd, 0)
+    os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+    return fd, None
+
+
+def _start_replication_follower():
+    """Démarre le fil de suivi : appelé par le point d'entrée du serveur
+    seulement (jamais à l'import : bin/harvester-baremetal.py charge ce
+    module), une seule fois par processus principal, jamais dans un
+    lecteur, sauf HARVESTER_OPS_REPLICATION_FOLLOW=0, et pas si une autre
+    console suit déjà le même répertoire d'état (verrou
+    `replication-follow.lock`)."""
+    global REPLICATION_FOLLOWER, REPLICATION_FOLLOWER_ELSEWHERE, _REPLICATION_FOLLOW_LOCK_FD
+    if IS_READ_WORKER or not _replication_follow_env_on() or not (BIN_DIR / REPLICATION_SCRIPT).is_file():
+        return None
+    with _replication_follower_lock:
+        if REPLICATION_FOLLOWER is not None:
+            return REPLICATION_FOLLOWER
+        if _REPLICATION_FOLLOW_LOCK_FD is None:
+            fd, holder = _replication_follow_lock(_state_dir() / "replication-follow.lock")
+            if fd is None:
+                REPLICATION_FOLLOWER_ELSEWHERE = holder
+                log_watch.warning("replication follower not started: another console (pid %s) follows %s",
+                                  holder or "?", _state_dir())
+                return None
+            _REPLICATION_FOLLOW_LOCK_FD = fd
+        REPLICATION_FOLLOWER_ELSEWHERE = None
+        REPLICATION_FOLLOWER = ReplicationFollowerSupervisor(
+            _replication_follow_cmd, _replication_follow_log,
+            _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY)
+        REPLICATION_FOLLOWER.start()
+        return REPLICATION_FOLLOWER
+
+
+# v1.99.0 : les jauges de réplication viennent d'un relevé gardé
+# REPLICATION_METRICS_TTL secondes. plan_rows lit les événements de chaque
+# ressource : le refaire à chaque relevé Prometheus (toutes les 15 s, par
+# plusieurs collecteurs parfois) coûtait autant que l'écran de suivi.
+REPLICATION_METRICS_TTL = 30.0
+_REPL_METRICS = {"at": None, "key": None, "snap": None, "applied": None}
+# un seul calcul à la fois, et jamais une exposition au milieu d'une mise à
+# jour des séries (effacer puis reposer) : le relevé suivant attend
+_REPL_METRICS_LOCK = threading.Lock()
+
+
+def _replication_metrics_snapshot(path):
+    """Relevé du registre : (plans suivis, ((labels, objectif, RPO tenu), ...)).
+    Rien n'est modifié ici : une base illisible lève avant toute jauge."""
+    if not path.exists():
+        return (0, ())
+    conn = _rdb.connect(path)
+    try:
+        plans = _rdb.list_plans(conn)
+        rows = _rdb.plan_rows(conn, plans, _repl_now())
+    finally:
+        conn.close()
+    followed = sum(
+        1 for p in plans if (p.get("options") or {}).get("follow") == "console"
+        and not (p.get("options") or {}).get("paused") and p.get("state") in _rf.FOLLOWED_STATES)
+    series = []
+    for p, r in zip(plans, rows):
+        # identifiant du plan, jamais son nom (texte libre, /metrics sans
+        # authentification) ; les clusters comme `kubectl_calls_total`
+        labels = (("plan", p["id"]), ("source", p["source_cluster"]), ("target", p["target_cluster"]))
+        series.append((labels, r["rpo_objective_s"] or 0, r["rpo_held_s"]))
+    return (followed, tuple(series))
+
+
+def _replication_metrics_invalidate():
+    with _REPL_METRICS_LOCK:
+        _REPL_METRICS["at"] = None
+
+
+def _replication_metrics_refresh(clock=None):
+    """Jauges de /metrics : suiveur en marche, plans suivis par la console,
+    RPO tenu et objectif de chaque plan. Appelée SOUS _REPL_METRICS_LOCK.
+    Le relevé est refait au-delà de REPLICATION_METRICS_TTL ; les séries ne
+    sont reposées que si le relevé a changé."""
+    metric_repl_follower_up.set(1 if REPLICATION_FOLLOWER is not None and REPLICATION_FOLLOWER.running() else 0)
+    now = (clock or time.monotonic)()
+    path = _replication_db_path()
+    if _REPL_METRICS["at"] is None or _REPL_METRICS["key"] != str(path) \
+            or now - _REPL_METRICS["at"] >= REPLICATION_METRICS_TTL:
+        try:
+            _REPL_METRICS["snap"] = _replication_metrics_snapshot(path)
+        finally:
+            # en échec aussi : une base illisible n'est pas relue à chaque relevé
+            _REPL_METRICS["at"], _REPL_METRICS["key"] = now, str(path)
+    snap = _REPL_METRICS["snap"]
+    if snap is None or snap is _REPL_METRICS["applied"]:
+        return
+    followed, series = snap
+    metric_repl_plans_followed.set(followed)
+    metric_repl_rpo_held.clear()
+    metric_repl_rpo_objective.clear()
+    for labels, objective, held in series:
+        metric_repl_rpo_objective.labels(**dict(labels)).set(objective)
+        if held is not None:
+            metric_repl_rpo_held.labels(**dict(labels)).set(held)
+    _REPL_METRICS["applied"] = snap
+
+
+def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):
+    """Arrêt de la console (redémarrage, mise à jour, arrêt de l'hôte) :
+    SIGUSR2 aux commandes de réplication en cours, SIGTERM au suiveur, puis
+    attente de chacune jusqu'à son délai, SIGKILL au-delà.
+
+    Décision 68 (v1.99.0) : un arrêt de la console n'est PAS une annulation.
+    SIGUSR2 dit « arrête au prochain point sûr et garde l'état » : une
+    protection (restauration initiale comprise), une mesure ou une
+    déprotection est laissée `interrupted`, et `resume` la continue. Son
+    délai est court (`shutdown_grace` : un appel kubectl plus une marge).
+    Une bascule pas encore activée est défaite (tout ou rien) : elle garde
+    son délai de retour arrière. Une annulation déjà demandée par une
+    personne (`cancel_requested`, SIGTERM déjà envoyé) n'est pas changée en
+    arrêt : son retour arrière va à son terme (`kill_grace`).
+
+    Chaque délai est borné par le budget d'arrêt de l'unité
+    (REPLICATION_STOP_BUDGET, sous `podman stop -t 600`) : passé ce budget,
+    podman tuerait tout sans prévenir. Rend {action: code de sortie}."""
+    budget = REPLICATION_STOP_BUDGET if budget is None else budget
+    start = clock()
+    sup = REPLICATION_FOLLOWER
+    stopper = None
+    if sup is not None:
+        stopper = threading.Thread(target=sup.stop, kwargs={"grace": min(_replication_follow_grace(), budget)},
+                                   daemon=True)
+        stopper.start()
+    now = clock()
+    runs = [r for r in list(ACTIONS.values())
+            if getattr(r, "kill_grace", None) and getattr(r, "proc", None) is not None and r.proc.poll() is None]
+    deadlines = {}
+    for r in runs:
+        if getattr(r, "cancel_requested", False):
+            grace = r.kill_grace
+        else:
+            r.shutdown_requested = True
+            r.proc.send_signal(REPLICATION_SUSPEND_SIGNAL)
+            grace = getattr(r, "shutdown_grace", None) or r.kill_grace
+        deadlines[r.id] = now + min(grace, budget)
+    alive = list(runs)
+    while alive:
+        t = clock()
+        for r in list(alive):
+            if r.proc.poll() is not None:
+                alive.remove(r)
+            elif t >= deadlines[r.id]:
+                r.proc.kill()
+                r.proc.wait()
+                alive.remove(r)
+        if alive:
+            sleep(0.2)
+    # le relais range le résultat (Activité) dès la sortie de l'outil
+    end = clock() + 5
+    while any(r.status in ("starting", "running") for r in runs) and clock() < end:
+        sleep(0.1)
+    if stopper is not None:
+        stopper.join(timeout=max(1.0, start + budget + 5 - clock()))
+    return {r.id: r.proc.returncode for r in runs}
+
+
+def _console_sigterm(signum, frame):
+    try:
+        _replication_shutdown()
+    finally:
+        sys.exit(0)
+
+
 # -----------------------------------------------------------------------------
 # Entry point
 # -----------------------------------------------------------------------------
@@ -23558,6 +25869,14 @@ if __name__ == "__main__":
     # applique pas l'action par défaut de SIGTERM, qui était donc ignoré, et
     # `podman stop` finissait par un SIGKILL au bout de 10 s. Sortir
     # proprement à la place.
-    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+    # v1.99.0 : avant de sortir, laisser aux commandes de réplication en cours
+    # le temps de défaire ce qu'elles ont posé (puis SIGKILL), et arrêter le
+    # fil de suivi proprement (il rend ses baux)
+    signal.signal(signal.SIGTERM, _console_sigterm)
+    # v1.99.0 : le fil de suivi ne part que d'ici (jamais à l'import)
+    try:
+        _start_replication_follower()
+    except Exception as _e:                      # noqa: BLE001
+        log_watch.error("replication follower startup failed: %s", _e)
     _announce_setup()
     app.run(host=host, port=port, ssl_context=ssl_ctx, threaded=True, debug=False)

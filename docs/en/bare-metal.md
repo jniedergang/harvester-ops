@@ -7,6 +7,11 @@ through the installer. The console drives the machine through its BMC.
 Nothing here is Harvester-specific magic: it is the vendor's own
 zero-touch installation, driven end to end by the console.
 
+Optional [storage profiles](baremetal-storage-onboarding.md) can prepare dedicated
+storage NICs and provider prerequisites during a join, then leave the host cordoned
+for acceptance checks. The provider-neutral network profile and the unverified Pure
+example do not install CSI charts or configure array credentials.
+
 ---
 
 ## What has to be true before you start
@@ -51,6 +56,35 @@ memory on the way in.
 
 Paste the vendor URL, press Download, and follow the percentage in the
 dock. The store shows what is on disk and how much room is left.
+
+Downloading needs the **admin** role. The console checks the URL before
+it connects, and again at every redirect:
+
+- only `http` and `https`, at most 5 redirects, and no redirect from
+  `https` back to `http`; TLS certificates are always verified;
+- the host name is resolved once and the console connects to the address
+  it checked, so a DNS answer cannot switch to an internal address;
+- loopback, link-local, private (RFC 1918, ULA, CGNAT), multicast,
+  broadcast, unspecified and reserved addresses are refused, and so are the cloud
+  metadata addresses (`169.254.169.254`, `fd00:ec2::254`);
+- the file may not exceed 20 GiB, and the download stops when the store
+  falls under 1 GiB of free space.
+
+An isolated site often serves its ISOs from an internal mirror. Allow
+its network in `config.yaml`; the console reads the setting at each
+download, no restart needed:
+
+```yaml
+iso_fetch:
+  allow_private: ["10.20.0.0/16", "fd12:3456::/32"]   # internal mirrors
+  max_bytes: 21474836480        # size cap, 20 GiB by default
+  min_free_bytes: 1073741824    # free space kept in the store, 1 GiB by default
+```
+
+Every address the mirror's name resolves to must be allowed, IPv4 and
+IPv6 alike. The metadata addresses, multicast and unspecified addresses
+stay refused even inside an allowed network, and so do `255.255.255.255`
+and the broadcast address of an allowed IPv4 network.
 
 The ISO is deliberately **not** part of the release tarball: the whole
 toolkit is 135 MB, the ISO alone is fifty times that.
@@ -464,6 +498,18 @@ images in chunks.
 
 The port has to be reachable **from the BMC network**. On a host with a
 firewall, open it there.
+
+The console sets the port with `HARVESTER_OPS_PXE_PORT` (default 8091).
+It never picks another port by itself: the address given to the BMC and
+the installer must be the one you opened. If the port is taken, the run
+fails at its `serve` step with a message naming the port, before any
+power action. The listener starts with the first installation or
+discovery and stops when the last one ends.
+
+Any failure of a run, expected or not, ends the action as failed. The
+served configuration (it holds the cluster token), the remastered ISO and
+the tokens are removed; the step message gives the error type only, never
+a path or a secret.
 
 ---
 

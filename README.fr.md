@@ -76,6 +76,14 @@ ailleurs.
   qui dit ce qu'il coûte. Une archive se télécharge depuis la fenêtre qui
   l'a produite, et se dépose dans le magasin d'une autre console depuis le
   navigateur, vérifiée avant d'être gardée.
+- **Reprise après sinistre entre deux clusters** : les VMs sont répliquées
+  de façon asynchrone vers un second cluster Harvester par la cible de
+  sauvegarde qu'ils partagent, avec un objectif de RPO par plan. Une phase
+  de mesure recommande l'intervalle, un suiveur applique chaque sauvegarde
+  sur des volumes de secours et montre le RPO réellement tenu, et une
+  bascule planifiée (sans perte) ou non planifiée (source perdue, perte
+  dite par VM) remet les VMs en route sur l'autre site. Ligne de commande
+  et API de la console dans cette version.
 - **Migrations VMware par Forklift** : la console installe Forklift sur un
   cluster, construit l'image VDDK depuis l'archive de VMware et la pousse
   dans votre registre, raccorde les serveurs vCenter (en reprenant ceux
@@ -103,7 +111,10 @@ ailleurs.
   une empreinte de clé épinglée, leurs VMs, pools de stockage et réseaux
   dans une même vue, et les gestes de cycle de vie (démarrer, arrêter,
   redémarrer, arrêt forcé, suspendre, reprendre) suivis jusqu'à l'état
-  réel. Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
+  réel. La console VNC d'une VM passe par la connexion SSH de son hôte,
+  mot de passe compris ; instantanés internes, clones complets et
+  suppression avec la preuve qu'aucune autre VM n'utilise un disque.
+  Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
   commande.
 - **Scriptable** : le séquençage électrique s'exécute aussi en ligne de
   commande, pour les chaînes d'automatisation et les sites hors ligne, et

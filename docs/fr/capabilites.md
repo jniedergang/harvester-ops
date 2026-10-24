@@ -2304,6 +2304,8 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
 - **Magasin d'images d'installation** — télécharger un ISO Harvester côté
   serveur, en flux, avec un pourcentage suivi. Les 7,6 Go de l'image ne
   passent jamais par le navigateur et ne sont pas livrés dans le tarball.
+  Rôle admin ; les adresses internes sont refusées à chaque redirection
+  sauf autorisation par `iso_fetch.allow_private` (voir le guide bare-metal).
 - **Installation sans opérateur** — choisir un ISO, renseigner le node
   (nom d'hôte, disque d'installation, NIC de management, adressage, VIP,
   DNS, NTP, token, mot de passe OS ; le gestionnaire de mots de passe du
@@ -2778,7 +2780,11 @@ rien derrière elle.
 `StrictHostKeyChecking=yes` et la seule ligne épinglée. Un hôte dont la clé
 a changé est refusé, jamais accepté en silence. Une connexion SSH par hôte
 est réutilisée un court moment, pour qu'une lecture ne paie pas une
-poignée de main par commande.
+poignée de main par commande. Une lecture coupée par la connexion elle-même
+(connexion partagée fermée, ssh en code 255) est retentée une fois, une
+demi-seconde plus tard, sur une connexion neuve. Une écriture n'est jamais
+retentée : on ne sait pas si elle a eu lieu, et l'action dit que la
+connexion a été perdue.
 
 **Gestes de cycle de vie.** Le menu d'une VM propose **Démarrer**,
 **Arrêter**, **Redémarrer**, **Arrêt forcé**, **Suspendre** et
@@ -2827,10 +2833,10 @@ et le relevé de la clé d'hôte en est une. Juste après un relevé, l'hôte
 peut couper les nouvelles connexions une quinzaine de secondes. La
 déclaration d'un hôte refait une fois son test SSH après 20 s.
 
-**Pas dans cette version** : console graphique (VNC), instantanés,
-clonage, création et modification de VMs, de pools, de volumes et de
-réseaux, migration à chaud entre hôtes, maintenance d'un hôte et
-supervision. Ils sont prévus de la 1.97.0 à la 1.99.0.
+**Pas dans la 1.96.0** : console graphique (VNC), instantanés et clonage,
+ajoutés en 1.98.0 (plus bas). Création et modification de VMs, de pools,
+de volumes et de réseaux, migration à chaud entre hôtes, maintenance d'un
+hôte et supervision restent à venir.
 
 API : `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, réseaux), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
@@ -2870,6 +2876,572 @@ après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
 console pendant son test de connexion, déjà enregistrée, a été défaite :
 aucun fichier de déclaration ni de clé n'est resté.
 
+### Console, instantanés, clonage et suppression d'une VM (1.98.0)
+
+Le menu d'une VM KVM gagne un second groupe : **Console**, **Instantanés**,
+**Cloner** et **Supprimer**. Chaque entrée est grisée, avec la raison,
+quand le rôle, l'état ou la définition de la VM ne le permet pas. Les
+raisons viennent du serveur, pas de la page.
+
+**Console graphique (VNC).** **Console** ouvre la même fenêtre que pour
+une VM Harvester, avec noVNC. La console n'ouvre pas l'affichage au
+réseau. Elle l'atteint par la connexion SSH de l'hôte (`ssh -W`, sur la
+clé d'hôte épinglée) : un affichage qui écoute sur `127.0.0.1` fonctionne.
+Plusieurs personnes qui regardent la même VM partagent une seule connexion
+à l'affichage ; la fenêtre dit qui regarde. Le tunnel se ferme avec la
+dernière fenêtre. L'adresse et le port sont relus à chaque connexion : une
+VM redémarrée sur un nouveau port est retrouvée. Une VM arrêtée laisse la
+fenêtre en attente jusqu'à son démarrage.
+- **Mot de passe.** Quand l'affichage a un mot de passe VNC, la console le
+  lit dans la définition et répond elle-même au défi. Le mot de passe ne
+  sort jamais de cette connexion : aucune réponse d'API, aucun journal,
+  aucune étape d'action ni aucun navigateur ne le reçoit. Le ticket dit
+  seulement qu'un mot de passe existe. Un mot de passe refusé est dit, et
+  la fenêtre cesse de réessayer.
+- **Refus dits, sans nouvel essai** : affichage SPICE seul (non pris en
+  charge dans cette version), affichage sur une socket UNIX (propriété de
+  root et de qemu, le compte SSH ne peut pas l'atteindre), aucun affichage,
+  affichage sans écoute, et affichage qui écoute sur une adresse qui n'est
+  pas l'une de celles de l'hôte. Un affichage qui ne propose que des types
+  de sécurité que la console ne parle pas (VeNCrypt, SASL, TLS) est nommé,
+  sans nouvel essai.
+- La fenêtre a **Démarrer**, **Arrêter**, **Arrêt forcé** (confirmé dans la
+  page) et **Instantanés**. Rouvrir une console déjà ouverte ramène sa
+  fenêtre au lieu d'ouvrir une seconde connexion. Cela vaut aussi pour les
+  consoles Harvester.
+- 8 spectateurs de console au plus en même temps dans toute la console,
+  consoles Harvester comprises (429 au-delà). Retirer un hôte ferme ses
+  consoles.
+
+**Instantanés.** La fenêtre **Instantanés** liste les instantanés internes
+de la VM : nom, instantané courant, date, contenu (disques seuls, ou
+disques et mémoire), emplacement et parent. **Créer** propose
+`<vm>-AAAAMMJJ-HHMM` et accepte une description facultative. Sur une VM
+en marche, l'instantané garde aussi la mémoire, et l'invité est mis en
+pause pendant l'enregistrement : la fenêtre le dit, avec la taille de la
+mémoire. **Revenir** demande une confirmation qui dit que l'état non
+enregistré est perdu. Revenir, sur une VM en marche, à un instantané pris
+VM arrêtée éteint la VM : la confirmation relit l'état et le dit.
+**Supprimer** nomme les instantanés enfants, rattachés au parent de
+l'instantané supprimé.
+- Instantanés internes seulement : chaque disque inscriptible doit être un
+  fichier ou un volume qcow2, et les variables UEFI (nvram) aussi. Un
+  disque raw, bloc ou réseau, un disque transitoire ou un périphérique PCI
+  ou USB attaché désactive **Créer** et dit quel disque. Une VM en pause ou
+  en cours d'arrêt, une VM transitoire et un nom déjà pris sont refusés.
+- Les instantanés externes sont affichés « non gérés par la console »,
+  sans bouton. La console ne revient jamais avec `--force` : quand libvirt
+  le demande, la console le dit et s'arrête.
+
+**Cloner.** Une copie complète d'une VM arrêtée et persistante, sur le
+même hôte. La fenêtre montre la copie avant toute création : chaque disque
+avec sa destination et la taille à copier, la place libre, les disques
+gardés partagés, et ce qui est régénéré. **Cloner** reste désactivé tant
+que l'aperçu ne correspond pas au nom saisi ou contient un refus.
+- Chaque disque est copié **à côté de sa source** : dans le même pool de
+  stockage, comme nouveau volume, ou dans le même répertoire. La
+  destination est `<nouveau nom>-<cible>` avec l'extension de la source.
+  Elle ne se choisit pas dans cette version. La copie est aplatie : elle ne
+  dépend pas de l'image de base de la source.
+- La copie reçoit un nouvel uuid, de nouvelles adresses MAC, un nouveau
+  fichier de variables UEFI (créé par libvirt au premier démarrage), un
+  nouvel identifiant de génération, et perd numéros de série de disque,
+  WWN et numéros de série SMBIOS. Un port VNC fixe devient automatique.
+  Les entrées de démarrage UEFI et l'état du vTPM ne sont pas copiés :
+  l'aperçu le signale.
+- Les disques en lecture seule et les CD-ROM restent partagés. Un disque
+  bloc ou réseau, un disque partageable, un disque utilisé par une autre
+  VM, un périphérique PCI ou USB, une étiquette de sécurité statique et un
+  vTPM à état externe sont refusés.
+- Une copie hors pool tourne en arrière-plan sur l'hôte et montre sa
+  progression. **Annuler** dans le dock arrête la copie et retire tout ce
+  qui a été créé. Une copie qui échoue est défaite de la même façon, et ce
+  qui n'a pas pu être retiré est nommé.
+
+**Supprimer.** **Supprimer** retire une VM arrêtée et persistante. Il
+faut le rôle administrateur. La fenêtre montre d'abord un aperçu, puis
+demande le nom exact de la VM.
+- Sans **Supprimer aussi les disques que possède cette VM**, seule la définition
+  part, avec les métadonnées de ses instantanés, son état sauvegardé et
+  son fichier de variables UEFI. Les disques restent.
+- Avec, un disque n'est supprimé que si la console prouve qu'aucune autre
+  VM ne s'en sert. Elle lit tous les pools et volumes de l'hôte, les
+  définitions et les chaînes de disques de toutes les autres VMs, et
+  compare les fichiers par périphérique et inode : un lien symbolique ne
+  cache pas un disque partagé. Un disque est gardé, avec sa raison, quand
+  il est partagé avec une autre VM, image de base du disque d'une autre VM,
+  en lecture seule, un périphérique bloc, sur un stockage partagé (NFS,
+  Ceph, Gluster et semblables : un autre hôte pourrait s'en servir), ou
+  absent.
+- **Fichiers illisibles.** Quand le compte SSH ne peut pas lire un fichier
+  d'une autre VM (permission refusée), la console ne peut pas prouver que
+  ce fichier ne dépend pas d'un disque de cette VM. La suppression est
+  refusée tant que vous n'avez pas coché chacun de ces fichiers dans la
+  fenêtre. Seul un refus de droits peut être reconnu ainsi : une lecture
+  libvirt en échec ou une erreur d'entrée-sortie refuse toujours.
+- **L'aperçu est ce qui est supprimé.** La fenêtre envoie une empreinte de
+  la suppression montrée. Si l'hôte a changé depuis (une autre VM utilise
+  maintenant un disque, la VM a été redéfinie), la suppression s'arrête
+  avec « l'hôte a changé depuis l'aperçu » et montre le nouvel aperçu. Un
+  disque devenu partagé entre-temps est gardé et signalé comme écarté.
+
+**Une opération à la fois par VM.** Un geste, un instantané, un clonage
+ou une suppression sur une VM est refusé tant qu'une autre opération y
+tourne (409 dans la console, sortie 2 `busy` du script). Ce verrou couvre
+désormais aussi les gestes de cycle de vie de la 1.96. Un clonage tient
+aussi le nom de la copie.
+
+**Les lectures coupées par la connexion sont refaites une fois.** Sur un
+hôte de banc en OpenSSH 10.2p1, le serveur SSH s'interrompt parfois quand
+plusieurs sessions tournent en même temps sur une connexion partagée (son
+journal dit `mm_request_receive: read: bad msg_len` et
+`rtype N != type 115`). La connexion partagée tombe, et chaque commande en
+cours finit avec le statut ssh 255. La console rejoue une lecture une fois
+sur une connexion neuve. Elle ne rejoue jamais une écriture : un
+instantané, un clonage ou une suppression coupé ainsi dit « connexion
+perdue », et vous vérifiez le résultat avant de recommencer. Les aperçus
+d'un clonage ou d'une suppression sont limités à 20 par minute et à 2 en
+même temps par hôte.
+
+**Droits.** Un lecteur lit les instantanés et les aperçus. Un opérateur
+ouvre la console, crée, restaure et supprime des instantanés, et clone.
+Un administrateur supprime une VM, et seul un administrateur peut annuler
+une suppression.
+
+API : `POST /api/kvm/vms/<host>/<domain>/console-ticket` (`{ticket,
+ws_path, expires_in, password}` ; 409 quand la VM ne tourne pas, 422 avec
+`reason` pour un affichage que la console ne peut pas ouvrir),
+`GET /api/kvm/vms/<host>/<domain>/console-status`, websocket
+`/ws/kvm/vnc/<host>/<domain>?ticket=...` ;
+`GET /api/kvm/vms/<host>/<domain>/snapshots`,
+`POST /api/kvm/vms/<host>/<domain>/snapshots` (`{name, description}`),
+`POST /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>/revert`,
+`DELETE /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>` ;
+`GET /api/kvm/vms/<host>/<domain>/clone-plan?name=C`,
+`POST /api/kvm/vms/<host>/<domain>/clone` (`{name}`) ;
+`GET /api/kvm/vms/<host>/<domain>/delete-plan?remove_storage=1&acknowledge=CHEMIN`,
+`DELETE /api/kvm/vms/<host>/<domain>` (`{confirm, expect_delete,
+remove_storage, acknowledge_unreadable}`, `expect_delete` est le `digest`
+de l'aperçu). Les écritures répondent `202 {action_id}`. `/api/kvm/vms`
+donne à chaque VM une table `operations` (rôle, états, persistance) pour
+le menu.
+
+Ligne de commande : `vm display --host N --name D` (adresse, port,
+présence d'un mot de passe, et la commande `ssh -L` pour un visualiseur
+local), `snapshot list|create|revert|delete --host N --name D
+[--snapshot=S] [--description=T] [--timeout S]`, `clone --host N --name D
+--new-name=C [--dry-run] [--timeout S]`, `vm delete --host N --name D
+[--remove-storage] [--acknowledge-unreadable=CHEMIN ...]
+[--expect-delete=EMPREINTE] [--dry-run] [--timeout S] [--survey-timeout S]`.
+Donner les valeurs en `--opt=valeur` quand elles peuvent commencer par un
+tiret. Codes de sortie comme plus haut, plus `busy` (sortie 2) quand une
+autre opération tient la VM et `plan-changed` (sortie 1) quand l'hôte ne
+correspond plus à l'aperçu.
+
+**Ce qui est vérifié.** Sur l'hôte de banc (libvirt 12.7.0, OpenSSH
+10.2p1), sur des domaines d'essai créés pour l'occasion (cirros,
+`qemu-img`), chaque étape contrôlée par `virsh` : console ouverte par le
+tunnel, partagée par deux navigateurs sur un seul tunnel, fermée avec la
+dernière fenêtre ; vrai mot de passe VNC de QEMU résolu par la console, le
+mot de passe absent de toute réponse d'API, du journal de la console et de
+l'Activité ; instantanés pris VM arrêtée et en marche, retours dans les
+deux sens (une VM en marche ramenée à un instantané pris arrêtée est
+éteinte), parent supprimé et enfant rattaché au grand-parent ; disque raw
+refusé avec sa raison ; instantané d'une VM UEFI ; clonage dans un pool et
+hors pool, avec nouvel uuid, sans chaîne de base, nouveaux fichier de
+variables UEFI et identifiant de génération, démarré et ouvert dans la
+console ; une copie de 7,4 Gio annulée n'a rien laissé ; suppression
+refusée à cause d'un fichier illisible d'une autre VM, puis faite après
+l'avoir reconnu ; un disque partagé par lien symbolique et l'image de base
+d'une autre VM gardés ; un hôte modifié refusé par `plan-changed`. Sous
+8 lecteurs en parallèle pendant 60 s, la chute du serveur SSH décrite plus
+haut est arrivée 2 à 4 fois par minute, sans aucune lecture en échec. Non
+vérifié : un hôte qui exige `--force` pour revenir à un instantané.
+
+---
+
+## 11. Reprise après sinistre : réplication asynchrone des VMs (CLI + API de la console)
+
+### Plans de réplication, protection, bascule (1.99.0)
+
+harvester-ops garde des copies de secours de VMs sur un second cluster
+Harvester et les y bascule quand le premier site s'arrête, volontairement
+ou non. Elle s'appuie sur ce que Harvester et Longhorn ont déjà : une cible
+de sauvegarde commune aux deux clusters, des sauvegardes récurrentes
+Longhorn sur la source, et des **volumes de secours** Longhorn (standby)
+sur la cible, qui appliquent chaque nouvelle sauvegarde dès qu'elle arrive.
+Rien n'est installé sur les clusters. Cette version livre le moteur, la
+ligne de commande `harvester-replication` et les routes de la console. Les
+fenêtres de la console (vue de suivi, fenêtre de création, exercices)
+viennent dans les versions suivantes : d'ici là, la console montre les
+actions de réplication dans le dock et dans l'Activité, et la ligne de
+commande fait le reste.
+
+**Le contrat, c'est le plan.** Un plan nomme un cluster source, un cluster
+cible, les VMs (une liste `ns/nom`, ou un sélecteur d'étiquettes dans un
+namespace), un **objectif de RPO** (l'âge maximal de la copie sur la
+cible), et les correspondances (réseaux, classes de stockage, namespaces,
+images, noms de PVC, noms des VMs cibles). Il porte aussi ses options :
+cloud-init `keep` (la VM cible garde le `firmware.uuid` de la source, donc
+cloud-init ne repasse pas) ou `rerun` ; MAC `keep` ou `new` ; la VM cible
+`started` ou `stopped` après une bascule ; qui suit le plan (`console`,
+`cli` ou `off`) ; la tolérance d'écart entre les disques d'une VM (10 s) ;
+et chaque attente, réglable par plan. Par défaut : cloud-init gardé, MAC
+gardée, VM démarrée après la bascule, suivie par la console. Le plan est
+gardé par la console dans `replication.db` (répertoire d'état). Le créer
+n'écrit rien sur aucun cluster.
+
+**RPO visé et RPO tenu.** Le RPO tenu par une VM est l'âge du plus ancien
+point appliqué sur la cible parmi ses disques. `status` montre les deux,
+par VM et par plan, et signale une VM en retard, en dérive (un passage qui
+dure plus d'un intervalle, ou une spec modifiée), dégradée (une sauvegarde
+en erreur, un volume de secours dégradé, un disque qui ne se sauvegarde
+jamais) ou dont la source ne répond pas. Une VM arrêtée dont le dernier
+point est postérieur à son arrêt est à jour (RPO 0).
+
+**D'abord mesurer.** `measure start` pose une tâche de sauvegarde sur la
+source seulement, à un intervalle d'essai, sans toucher à la cible. Après
+quelques passages, `measure stop` la retire et `measure report` donne, par
+intervalle candidat, les octets envoyés par passage, le débit et le RPO que
+chaque intervalle tiendrait, avec un intervalle recommandé. `measure
+formula` prévoit la même chose depuis des compteurs d'écriture, sans
+cluster. Les chiffres du banc : trois écritures de 8 Mio toutes les 3
+minutes sur un disque de 2 Gio envoient 25 Mo par passage, et la formule et
+la mesure s'accordent à 8,5 Ko près.
+
+**Protéger.** `protect` fait le pré-contrôle complet, puis pose sur la
+source une tâche récurrente Longhorn par VM (`concurrency` = ses disques)
+à l'intervalle choisi (donné, mesuré, ou celui du plan), une première
+sauvegarde de chaque volume qui n'en a aucune, et sur la cible un volume de
+secours par disque créé depuis la dernière sauvegarde, les backing images
+qui manquent à la cible (restaurées depuis la cible de sauvegarde), et un
+**carnet de reprise** par VM : un Secret qui porte la VM cible, ses secrets
+cloud-init et ses volumes. La restauration initiale est suivie avec sa
+progression (la taille des données de la sauvegarde, telle que Longhorn la
+publie). `protect` se relance : sur un plan protégé, il ajoute ce qui
+manque, réécrit un carnet dont le contenu a changé, et avec `--retain N`
+met à jour la rétention de la tâche récurrente (seul moyen de la changer ;
+`plan set --retain` refuse et renvoie ici). `--interval` change
+l'intervalle de la même façon. `protect --dry-run` contrôle et demande aux
+serveurs d'API un essai à blanc de chaque objet, sans rien écrire.
+
+**Le suiveur.** Après chaque passage de sauvegarde, le suiveur demande à la
+cible de relire la cible de sauvegarde pour ces volumes (il n'attend pas la
+relecture de Longhorn toutes les 5 minutes). Il attend que tous les disques
+d'une VM aient fini le même passage (la **barrière**, la moitié de
+l'intervalle au plus), pour que les disques d'une VM soient appliqués
+ensemble, puis vérifie que chaque volume de secours l'a appliqué. Il range
+chaque passage (octets envoyés, durée de sauvegarde, retard sur la cible,
+écart entre disques, RPO tenu), écrit un avertissement une fois quand une
+condition apparaît et une fois quand elle disparaît, et garde des
+statistiques par VM. Sur le banc, un passage était appliqué 13 à 46 s après
+la fin de sa sauvegarde (médiane 16 s), et le RPO tenu a été au plus de
+382 s pour un objectif de 600 s. La seule écriture du suiveur sur un
+cluster est la demande de relecture. Une modification de la spec d'une VM
+protégée (disques, tailles, classes, réseaux, MAC, firmware uuid, secret
+cloud-init, processeur et mémoire) est une **dérive** : `status` avertit,
+et `protect` réécrit le carnet. Toute autre différence entre la VM et son
+carnet est signalée `carnet-stale` (rien n'est écrit).
+
+**Bascule planifiée.** Les deux sites répondent. Pour chaque VM : le
+suiveur est mis en pause pour le plan, la VM source est arrêtée,
+l'étiquette de tâche est retirée et la tâche supprimée (la clôture), une
+sauvegarde finale de chaque disque est prise et appliquée sur la cible,
+puis les volumes de secours sont **activés**, les PV, PVC, secrets
+cloud-init et la VM sont créés sur la cible depuis le carnet, et la VM
+démarre. Rien n'est perdu : la cible porte l'état de la source à son arrêt.
+Jusqu'à l'activation, une erreur ou une annulation remet tout en place (VM
+source redémarrée, tâche et étiquettes rendues, plan `protected`).
+L'activation est le point de non-retour. Sur le banc, une bascule
+planifiée a pris 83 s (arrêt 16 s, sauvegarde finale 18 s, relecture
+finale 14 s, démarrage de la VM 18 s).
+
+**Bascule non planifiée.** La source ne répond pas (`--unplanned`,
+confirmation exigée). La cible relit la cible de sauvegarde une dernière
+fois (borné par `unplanned_sync`), chaque volume de secours doit avoir
+appliqué la dernière sauvegarde qu'il connaît (`catch-up`, borné par
+`unplanned_catchup`), puis les points sont lus par disque. Une VM dont les
+disques sont écartés de plus que la tolérance est refusée sauf avec
+`--accept-skew` ; un disque sans aucun point appliqué refuse la VM.
+Ensuite, activation et mise en route comme ci-dessus. Le résultat dit, par
+VM, à partir de quand les écritures sont perdues (`lost_after`, le plus
+ancien point de ses disques) et l'écart. Si la source répond de nouveau
+pendant la bascule, sa VM est arrêtée au mieux. Avec une source qui répond
+encore, `--force-unplanned` l'arrête d'abord (clôture), puis bascule de la
+même façon. `check --phase failover-unplanned` montre, sans écrire, les
+points que chaque VM recevrait, l'écart, et les disques encore en
+rattrapage.
+
+**Reprise.** Une bascule interrompue après l'activation (annulation, arrêt
+brutal, redémarrage de la console) reste en l'état : plan en `error`, rien
+n'est défait. `resume` la termine, avec la cible seule si la source a
+disparu. Il termine aussi une protection, une mesure ou une déprotection
+interrompue. La confirmation donnée au départ d'une bascule vaut pour sa
+reprise.
+
+**Un arrêt de la console n'est pas une annulation (décision 68).** Un
+redémarrage de la console, un redémarrage de l'hôte ou une mise à jour
+forcée arrête une protection en cours (restauration initiale comprise),
+une mesure ou une déprotection à son prochain point sûr, et ne défait
+rien. La commande reste `interrupted` : le plan garde son état
+(`protecting`, `measuring`, `unprotecting`), et l'étape atteinte figure
+dans le résultat (`step`), au journal et dans son exécution. `resume` la
+continue. Il ne recopie pas ce qui est déjà là : Longhorn continue de
+restaurer pendant que la console est arrêtée, et la protection reprise
+attend les mêmes volumes de secours (le bilan dit ce qui était déjà
+restauré). Seule l'annulation d'une personne (bouton du dock, SIGTERM ou
+Ctrl-C en ligne de commande) défait une protection. Une annulation de la
+protection reprise défait toute la protection, comme une annulation avant
+l'arrêt. Une bascule pas encore activée est défaite à l'arrêt de la
+console, comme pour une annulation : avant son activation elle est tout ou
+rien, et la VM source redémarre. Une commande arrêtée avant sa première
+écriture rend `not-started` : la relancer.
+
+**Déprotection, et décision 47.** `unprotect --yes` retire sur la cible les
+volumes de secours, carnets et backing images restaurées des VMs jamais
+activées, et sur la source les étiquettes de tâche, les tâches et les
+instantanés du plan. Une VM dont la bascule a activé un volume garde
+**tout** sur la cible (volumes activés, volumes de secours restants, PV,
+PVC, la VM, secrets cloud-init, backing images utilisées) : abandonner une
+bascule ne supprime rien qui porte des données. Ce qui est gardé est listé
+dans `left`, avec les sélecteurs d'étiquettes pour le retrouver
+(`left_selectors`). Son carnet est gardé tant que la VM cible n'existe pas
+(c'est la seule recette qui reste), et supprimé une fois la VM en route.
+Le plan reste listé `unprotected` avec son historique ; un plan brouillon
+ou déprotégé peut ensuite être supprimé (son journal est gardé).
+`unprotect --delete-backups --yes` (administrateur) supprime aussi les
+sauvegardes du plan sur les deux clusters, mais est refusé
+(`backups-in-use`) tant qu'une VM du plan est tenue par une bascule. Les
+actions listées par la console et la ligne de commande ne la disent
+permise que si la déprotection l'accepterait (sinon raison
+`backups-in-use`).
+
+**Purger les sauvegardes après une bascule terminée** reste manuel dans
+cette version. Longhorn range les étiquettes du plan des sauvegardes de la
+tâche récurrente dans `spec.labels` (source) et `status.labels` (cible),
+pas dans `metadata.labels` : un sélecteur d'étiquettes ne les trouve pas.
+Sur le cluster source, après avoir vérifié la liste :
+
+```
+kubectl -n longhorn-system get backups.longhorn.io -o json \
+  | jq -r --arg p rp-XXXXXXXXXXXX '.items[]
+      | select((.metadata.labels["harvester-ops.io/replication-plan"]
+                // .spec.labels["harvester-ops.io/replication-plan"]
+                // .status.labels["harvester-ops.io/replication-plan"]) == $p)
+      | .metadata.name'
+```
+
+puis supprimer ces noms avec `kubectl -n longhorn-system delete
+backups.longhorn.io <nom> ...`. Longhorn les retire de la cible de
+sauvegarde, et le cluster cible les abandonne à sa relecture suivante. Un
+CR Backup dont le BackupVolume a été supprimé peut rester en `Completed` :
+le supprimer à la main. Un volume activé par une bascule ne dépend plus
+d'aucune sauvegarde.
+
+**Ce qui est créé, et où.** Chaque objet porte
+`harvester-ops.io/replication-plan=<id du plan>`, plus
+`harvester-ops.io/replication-generation` et `harvester-ops.io/replication-vm`
+(uid de la VM source) quand il appartient à une VM.
+
+| Cluster | Objets |
+|---|---|
+| Source | RecurringJob `longhorn-system/hr-<plan>-<vm>` (`task: backup`) ; étiquettes `recurring-job.longhorn.io/<tâche>: enabled` sur chaque volume Longhorn de la VM (plus `recurring-job-group.longhorn.io/default: enabled` quand le volume n'était dans le groupe par défaut qu'implicitement, retirée par la déprotection) ; Snapshots et Backups `hr-<empreinte>-first` et `-final` ; à une bascule, les annotations `harvester-ops.io/replication-stopped` puis `harvester-ops.io/replication-failed-over-to` sur la VM, qui est arrêtée |
+| Cible | Volumes de secours `longhorn-system/hr-<vm>-<disque>-<empreinte>` (40 caractères au plus, la limite de Longhorn) ; BackingImages restaurées depuis la cible de sauvegarde quand elles manquent ; namespace `harvester-ops-replication` (jamais supprimé) avec un Secret carnet `hr-<plan>-<vm>` par VM ; à une bascule, un PV par disque (au nom du volume de secours, `Retain`, lié à son PVC par `claimRef`), les PVC, les secrets cloud-init, le namespace si `--create-namespace`, et la VM |
+
+Le carnet porte une copie des secrets cloud-init de la VM (souvent des mots
+de passe et des clés SSH). Garder `harvester-ops-replication` hors de tout
+projet Rancher, lisible par les administrateurs seulement.
+
+**Rôles.** Un lecteur lit les plans, les lignes, les statistiques et les
+événements. Un opérateur crée et supprime les plans, mesure, protège,
+change les réglages, reprend et déprotège. Une bascule, planifiée ou non,
+exige un administrateur, de même que `unprotect --delete-backups`. La
+reprise exige un administrateur quand la commande interrompue était une
+bascule ou une déprotection avec suppression des sauvegardes. Annuler une
+action exige le rôle qui l'a lancée.
+
+**Confirmations.** Une bascule sans `--vm` exige `--all-vms --yes` ; une
+bascule non planifiée exige `--yes` ; `--accept-skew` ne va qu'avec
+`--unplanned` ; `unprotect` exige `--yes`. Dans la console, une bascule hors
+essai à blanc et toute déprotection exigent `confirm` égal au nom du plan.
+
+**Codes de sortie** de `harvester-replication` : 0 fait ; 1 échec (dont
+`undo-timeout`, un retour arrière à court de temps, et `interrupted` après
+une erreur passé l'activation) ; 2 usage ou refus (blocage du pré-contrôle,
+confirmation absente, état qui ne permet pas la commande, `state-changed`
+quand le plan a changé entre la lecture et le verrou, `open-run` quand une
+bascule est ouverte sur un autre périmètre) ; 3 annulé par un signal
+(`cancelled` : défait, ou `interrupted` : rien n'est défait, `resume`
+termine), ou arrêté par l'arrêt de la console (SIGUSR2 : `interrupted`
+avec `step` et `resume_required`, ou `not-started` quand rien n'a été
+écrit) ; 4 `status` avec un objectif dépassé (son JSON dit quand même
+`ok: true`). Avec `--json`, exactement un objet part sur stdout ; les
+étapes partent sur stderr en `STEP_EVENT|<étape>|<statut>|<message>`. Aucun
+chemin de fichier n'apparaît jamais dans une sortie ni dans le journal.
+
+**Délais et arrêt de la console.** Chaque attente a une valeur par défaut
+(`probe` 15 s, `final_backup` 6 h, `initial_restore` 12 h, `resync_apply`
+600 s, `activate` 300 s, `vm_start` 900 s, `unplanned_sync` 120 s,
+`unplanned_catchup` 600 s, `client` 30 s par appel kubectl...), surchargée
+par plan (`plan set --timeout NOM=S`, à chaud) et par commande (`--timeout
+NOM=S`). Tout retour arrière a une échéance unique, `undo_total` (240 s) :
+passée, plus rien n'est tenté et ce qui reste est listé. Arrêter ou
+redémarrer la console envoie SIGUSR2 à chaque commande de réplication en
+cours, qui veut dire « arrête au prochain point sûr et garde l'état ». Une
+protection, une mesure ou une déprotection s'arrête entre deux étapes ou au
+prochain relevé d'une attente, en au plus un appel kubectl (`client`, 30 s
+par défaut ; au-delà, la commande s'arrête là où elle est, toujours sans
+rien défaire). La console l'attend `client + 15` s, puis la tue. Une
+bascule pas encore activée est défaite dans son échéance `undo_total`, et
+une annulation déjà demandée par une personne garde son échéance de retour
+arrière : seules ces deux-là peuvent encore consommer le budget d'arrêt.
+L'unité systemd attend jusqu'à 600 s (`podman stop -t 600`,
+`TimeoutStopSec=630s`) ; la console sort tout de suite quand aucune
+commande de réplication ne tourne. Un plan suivi par la console ne peut pas
+avoir `undo_total + client` au-delà de 570 s (refusé avec `stop-budget`).
+Une console lancée hors du conteneur par sa propre unité systemd a besoin
+de `KillMode=mixed` : avec `control-group`, la valeur par défaut, systemd
+envoie aussi SIGTERM à chaque enfant, ce qui est une annulation.
+
+**Le processus de suivi.** La console lance un suiveur enfant,
+`harvester-replication follow --all --console`, pour les plans dont
+l'option `follow` vaut `console`, jamais dans un processus lecteur. Elle le
+relance après 5, 15, 30, 60, 120 puis 300 s quand il s'arrête de lui-même
+(600 s de marche remettent l'attente à zéro). Son journal est
+`logs/replication-follow.log`, renommé en `.1` au-delà de 10 Mio pendant
+qu'il tourne (l'enfant rouvre son fichier sur SIGUSR1). Un seul suiveur par
+répertoire d'état : une seconde console sur le même état indique
+`elsewhere` avec le pid du détenteur (verrou `replication-follow.lock`).
+Interrupteurs : `HARVESTER_OPS_REPLICATION_FOLLOW=0` au démarrage (aucun
+suiveur), `replication: {follow: false}` dans `config.yaml` (relu toutes
+les 2 s : l'enfant est arrêté, et relancé quand l'interrupteur revient), et
+les options `follow` et `paused` de chaque plan. Chaque plan est tenu par
+un seul suiveur à la fois au moyen d'un bail : `follow --plan P
+--take-over` depuis un terminal le reprend, et la console le reprend à son
+tour suivant une fois libéré.
+
+**Métriques** (`/metrics`) : `harvester_ops_replication_follower_up`,
+`harvester_ops_replication_follower_restarts_total`,
+`harvester_ops_replication_plans_followed`, et par plan
+`harvester_ops_replication_rpo_held_seconds{plan,source,target}` et
+`harvester_ops_replication_rpo_objective_seconds{plan,source,target}`. Le
+registre est relu au plus toutes les 30 secondes, quel que soit le nombre de
+relevés. Les actions de réplication apparaissent dans
+`harvester_ops_actions_total` en `replication:<op>`, sans l'id du plan.
+
+**Où faire tourner la console.** `check` ajoute un conseil
+`console-placement` : la console qui suit et bascule un plan va sur le
+site de secours ou hors des deux sites, jamais seulement sur le site
+source.
+
+**Limites.** Volumes Longhorn v1 seulement : disques de VM (`rwx` +
+`migratable`) et `rwo` ; ni Longhorn v2, ni volumes chiffrés, ni volumes
+`rwx` non migrables (refusés par le contrôle). Les disques en mode bloc
+ont été vérifiés ; un PVC en mode système de fichiers n'est pas refusé mais
+n'a pas été vérifié. Les deux clusters doivent déjà utiliser la même cible
+de sauvegarde. Chaque disque est sauvegardé pour lui-même : il n'existe pas
+d'instantané atomique de plusieurs volumes, la barrière ne fait que réduire
+l'écart, et l'écart est montré et contrôlé à la bascule. Une VM avec un
+disque conteneur, hôte ou vide est répliquée sans ces disques (signalé). Le
+retour au premier site, les exercices, les vagues et le gel de l'invité ne
+sont pas dans cette version. Une sauvegarde Longhorn est cohérente comme
+après une coupure de courant (l'invité n'est pas gelé). Un volume de
+secours occupe sa place sur la cible dès la protection, pas seulement le
+jour de la bascule. Une activation est définitive : pour protéger de
+nouveau, le volume de secours est recréé et tout est recopié.
+
+**Ce qui a été vérifié pour de vrai** (harvlab, Harvester 1.8.2 / Longhorn
+1.11.2, vers harvlab2, Harvester 1.9.0 / Longhorn 1.12.1, 24/10/2026) :
+mesure, protection (43 s pour deux VMs), suiveur pendant 35 minutes,
+bascule planifiée à l'octet près, bascule non planifiée source injoignable
+avec écart refusé puis accepté, protection annulée sans reste, bascule
+interrompue après l'activation puis reprise, déprotection avec la décision
+47, suppression des sauvegardes, supervision du suiveur (reprise du bail,
+kill -9, arrêt de la console). Rejoué sur les mêmes bancs le soir même :
+un disque d'image sans correspondance d'image placé par la correspondance
+des classes, `protect --retain` sur un plan protégé et son annulation
+(huit signaux à des étapes différentes, tâche et ligne du plan remises à
+chaque fois), un changement de processeur et de mémoire qui lève
+`plan-drift` et `carnet-stale` puis protect qui réécrit le carnet (la VM
+basculée a démarré à la nouvelle taille), aucun `rpo-drift` après une
+protection qui a repris une sauvegarde de 6 minutes, la taille de la
+restauration initiale égale à ce que Longhorn a restauré (4 Kio d'écart
+sur 348 Mio), le contrôle non planifié source perdue (points, écart,
+rattrapage en cours), `point_at` dans les deux modes et `lost_after` pour
+la non planifiée seulement, et `unprotect-delete-backups` refusé sur un
+plan dont une VM est activée. Le 24/10/2026 au soir, la décision 68 par
+une seconde console : un disque de données de 2 Gio (données
+incompressibles), une protection lancée depuis la console, la console
+arrêtée pendant la restauration initiale (sortie en 1 s au lieu d'un
+retour arrière) : plan toujours `protecting`, étape `initial-restore`
+rangée, volumes de secours et tâche gardés sur les deux clusters, Activité
+qui affiche « interrupted by the console shutdown » ; la reprise depuis la
+console redémarrée a atteint `protected` avec les mêmes volumes de secours
+(mêmes uid), la seconde fois avec 1,1 Gio sur 2,0 Gio déjà restaurés par
+Longhorn pendant l'arrêt, finie 11 s plus tard. Une annulation depuis le
+dock pendant la restauration initiale a toujours tout défait. Faits
+Longhorn sur lesquels elle repose :
+l'étiquette `backup-volume` d'un Backup est le nom du volume ; les
+étiquettes de la tâche récurrente sont dans `spec.labels` et
+`status.labels`, jamais dans `metadata.labels` ; un instantané ou une
+sauvegarde d'un volume détaché dit d'abord « waiting for the volume to be
+attached », puis se prend ; après l'activation, Longhorn 1.12.1 ne publie
+plus la sauvegarde appliquée, donc les points lus juste avant l'activation
+font foi (si Longhorn finit une restauration pendant l'activation, le point
+réel est plus récent que celui annoncé : `lost_after` se trompe trop tôt,
+jamais trop tard). **Non vérifié** : la taille des requêtes à travers
+Rancher pour de grands plans (Rancher était injoignable), le sens Longhorn
+1.12 vers 1.11 par le produit (vérifié à la main sur le banc de conception
+seulement), les sauvegardes en erreur, la migration à chaud pendant la
+protection, une bascule non planifiée forcée sur une source joignable, une
+sauvegarde en vol pendant le rattrapage d'une bascule non planifiée, un
+BackupVolume cible supprimé pendant un passage, SIGTERM pendant un kubectl
+lent, des nœuds suspendus pendant une bascule, un arrêt gracieux de la
+cible (harvlab2) pendant la protection, un arrêt de la console pendant une
+mesure ou une déprotection (couvert par les tests seulement), un PVC en
+mode système de fichiers, et les refus du contrôle
+pour la capacité, un nom de volume pris et une MAC prise. Le contrôle non
+planifié à blanc juge `caught-up` d'après les sauvegardes que la cible voit
+à cet instant, qui peuvent avoir 1 à 4 minutes de retard sur la source ; la
+vraie bascule resynchronise d'abord.
+
+La procédure d'exploitation (première protection, bascule, déprotection)
+est dans [procedure-operationnelle.md](procedure-operationnelle.md#12-reprise-après-sinistre-réplication-asynchrone).
+
+API : lectures `GET /api/replication/plans?side=any|source|target&host=`,
+`GET /api/replication/plans/<id>` (plan, ligne, état, volumes, dernières
+exécutions, verrou, bail),
+`GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
+`GET /api/replication/hosts/<cluster>/resources?side=`,
+`GET /api/replication/resources/<uid>/events?limit=&before=`,
+`GET /api/replication/follower` ; écritures (réponse `202 {action_id}`)
+`POST /api/replication/plans`,
+`POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
+`POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
+`POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
+`POST /api/replication/plans/<id>/failover` (`{vms | all_vms, mode,
+force_unplanned, accept_skew, dry_run, confirm}`, administrateur),
+`POST /api/replication/plans/<id>/resume`,
+`POST /api/replication/plans/<id>/unprotect` (`{confirm, delete_backups}`),
+`PATCH /api/replication/plans/<id>/settings` (`{rpo, paused, follow,
+skew_tolerance, timeouts}` ; `interval` et `retain` répondent
+`not-settable`), `DELETE /api/replication/plans/<id>`. Chaque écriture
+lance la ligne de commande avec les kubeconfigs de la personne (403
+`target-denied` ou `source-denied` quand la session ne voit pas un
+cluster, jamais celui de la console).
+
+Ligne de commande : `harvester-replication plan create|list|show|set|delete`,
+`check P [--phase protect|failover|failover-unplanned]`, `measure
+start|stop|report P`, `measure formula`, `protect P [--dry-run]
+[--interval D] [--retain N]`, `follow (--plan P | --all) [--once]
+[--take-over]`, `status [P] [--host H]`, `resources --host H [--side S]`,
+`events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
+`failover P (--vm ns/nom ... | --all-vms) [--unplanned]
+[--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
+`unprotect P --yes [--delete-backups]`. P est un id ou un nom de plan. Les
+commandes qui parlent aux clusters prennent `--from-kubeconfig`,
+`--to-kubeconfig` et `--timeout NOM=S` ; toutes prennent `--json`.
+
 ---
 
 ## Ce qui nécessite quoi
@@ -2882,6 +3454,7 @@ aucun fichier de déclaration ni de clé n'est resté.
 | Des VMs gérées par Terraform | Console web + le binaire du provider Terraform |
 | Un fonctionnement 100 % hors-ligne | Le tarball : wheels bundlés + image OCI |
 | Des hôtes KVM et leurs VMs | La console web ou `bin/harvester-kvm.py`, et un accès SSH par clé à un compte du groupe `libvirt` de chaque hôte |
+| Des copies de secours de VMs sur un second cluster | `bin/harvester-replication.py` (ou les routes de la console), deux clusters Harvester qui partagent une cible de sauvegarde |
 
 Voir [architecture.md](architecture.md) pour la façon dont les surfaces se
 posent sur le moteur partagé, et [installation.md](installation.md) pour

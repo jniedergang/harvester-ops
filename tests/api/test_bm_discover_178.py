@@ -731,7 +731,7 @@ def test_the_command_line_shares_the_console_code_path():
     src = (BIN / "harvester-baremetal.py").read_text()
     assert "bm_discover.run(" in src and "harvester-iso-remaster.sh" in src
     app_src = (WEB / "app.py").read_text()
-    runner = app_src.split("def _baremetal_discover_runner(", 1)[1].split("\ndef ", 1)[0]
+    runner = app_src.split("def _baremetal_discover_steps(", 1)[1].split("\ndef ", 1)[0]
     assert "_bmd.run(" in runner and '"harvester-iso-remaster.sh"' in runner
 
 

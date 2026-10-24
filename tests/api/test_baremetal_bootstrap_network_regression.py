@@ -125,7 +125,7 @@ class BootstrapTests(unittest.TestCase):
         self.assertIn('_bm_render_boot_checked',ast.dump(prepare))
     def test_runner_and_preview_are_wired(self):
         tree=ast.parse(APP)
-        runner=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_baremetal_install_runner')
+        runner=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_baremetal_install_steps')
         preview=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='api_baremetal_config_preview')
         self.assertIn('--network-args',ast.dump(runner))
         self.assertIn('boot_network_args',ast.dump(preview))

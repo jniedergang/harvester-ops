@@ -7,6 +7,11 @@ ou clique dans l'installeur. La console pilote la machine par son BMC.
 Rien de magique ni de spécifique ici : c'est le mode d'installation
 zéro-touch de Harvester, piloté de bout en bout par la console.
 
+Les [profils de stockage facultatifs](baremetal-storage-onboarding.md) préparent
+les interfaces dédiées et prérequis fournisseur pendant une jonction, puis laissent
+l’hôte non planifiable pour validation. Le profil réseau neutre et l’exemple Pure non vérifié
+n’installent pas de chart CSI et ne configurent pas les identifiants des baies.
+
 ---
 
 ## Ce qu'il faut avant de commencer
@@ -53,6 +58,35 @@ serait tamponné en mémoire à l'arrivée.
 Collez l'URL de l'éditeur, lancez le téléchargement, suivez le
 pourcentage dans le dock. Le magasin montre ce qui est sur le disque et
 combien de place il reste.
+
+Le téléchargement demande le rôle **admin**. La console vérifie l'URL
+avant de se connecter, puis à chaque redirection :
+
+- `http` et `https` seulement, 5 redirections au plus, pas de retour de
+  `https` vers `http` ; les certificats TLS sont toujours vérifiés ;
+- le nom est résolu une fois et la console se connecte à l'adresse
+  vérifiée : une réponse DNS ne peut pas basculer vers une adresse interne ;
+- les adresses de bouclage, de lien local, privées (RFC 1918, ULA, CGNAT),
+  multicast, de diffusion, non spécifiées et réservées sont refusées, de même que les
+  adresses de métadonnées de cloud (`169.254.169.254`, `fd00:ec2::254`) ;
+- le fichier ne peut pas dépasser 20 Gio, et le téléchargement s'arrête
+  quand le magasin descend sous 1 Gio d'espace libre.
+
+Un site isolé sert souvent ses ISO depuis un miroir interne. Autorisez
+son réseau dans `config.yaml` ; la console relit le réglage à chaque
+téléchargement, sans redémarrage :
+
+```yaml
+iso_fetch:
+  allow_private: ["10.20.0.0/16", "fd12:3456::/32"]   # miroirs internes
+  max_bytes: 21474836480        # plafond de taille, 20 Gio par défaut
+  min_free_bytes: 1073741824    # espace libre gardé dans le magasin, 1 Gio par défaut
+```
+
+Toutes les adresses vers lesquelles le nom du miroir résout doivent être
+autorisées, IPv4 comme IPv6. Les adresses de métadonnées, multicast et non
+spécifiées restent refusées même dans un réseau autorisé, de même que
+`255.255.255.255` et l'adresse de diffusion d'un réseau IPv4 autorisé.
 
 L'ISO n'est **volontairement pas** embarqué dans le tarball de release :
 le toolkit entier pèse 135 Mo, l'ISO à lui seul cinquante fois plus.
@@ -486,6 +520,18 @@ images de plusieurs gigaoctets par morceaux.
 
 Ce port doit être joignable **depuis le réseau du BMC**. Sur un hôte avec
 pare-feu, pensez à l'ouvrir.
+
+La console prend le port dans `HARVESTER_OPS_PXE_PORT` (8091 par défaut).
+Elle n'en choisit jamais un autre d'elle-même : l'adresse donnée au BMC et
+à l'installeur doit être celle que vous avez ouverte. Si le port est pris,
+le déroulé échoue à son étape `serve` avec un message qui nomme le port,
+avant toute action sur l'alimentation. Le listener démarre avec la
+première installation ou découverte et s'arrête à la fin de la dernière.
+
+Tout échec d'un déroulé, prévu ou non, termine l'action en échec. La
+configuration servie (elle porte le jeton du cluster), l'ISO
+remasterisée et les jetons sont effacés ; le message de l'étape ne donne
+que le type de l'erreur, jamais un chemin ni un secret.
 
 ---
 

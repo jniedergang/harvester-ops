@@ -53,7 +53,11 @@ SPEEDS = ("eco", "normal", "max")
 EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
 
 
-class Cancelled(Exception):
+class Cancelled(BaseException):
+    # v1.99.0 : BaseException, comme le Cancelled de la réplication. Un
+    # signal levé dans une lecture gardée par `except Exception` (configuration,
+    # relance d'une API, nettoyage) y était avalé : l'outil continuait comme
+    # si de rien n'était, ou concluait à une erreur au lieu d'une annulation.
     pass
 
 
