@@ -95,7 +95,7 @@ VERIFIED_LONGHORN_PAIRS = {((1, 11, 2), (1, 12, 1)), ((1, 12, 1), (1, 11, 2))}
 TIMEOUTS = {"probe": 15, "stop": 600, "snapshot": 300, "final_backup": 6 * 3600,
             "resync_apply": 600, "initial_restore": 12 * 3600, "backing_image": 2 * 3600,
             "activate": 300, "bind": 120, "vm_start": 900, "unplanned_sync": 120,
-            "barrier": None}
+            "unplanned_catchup": 600, "barrier": None}
 TIMEOUT_MAX = 7 * 86400
 
 OPTION_CHOICES = {"cloud_init": ("keep", "rerun"), "mac": ("keep", "new"),
@@ -129,14 +129,14 @@ PLAN_TRANSITIONS = {
 # Sorties de `error` en plus de celles de l'état d'origine.
 # Bascule en échec (origine `failing_over`) : sans cela, la seule issue serait
 # de relancer la bascule. On permet `unprotect`, au sens « abandonner la
-# bascule » : la déprotection retire ce que la bascule a posé sur la cible
-# (VM, PVC, PV, volumes de secours) et la tâche de la source ; la VM source,
-# arrêtée par une bascule planifiée, se redémarre à la main. Plutôt qu'une
-# transition `abort_failover` dédiée : la déprotection sait déjà tout retirer
-# objet par objet, de façon idempotente, et une seconde commande qui fait la
-# même chose finirait par diverger. Pas de `failing_over -> unprotecting`
-# direct : une bascule en cours tient le verrou, on n'abandonne qu'une bascule
-# arrêtée en erreur.
+# bascule » (décision 47) : une VM dont un volume a déjà été activé garde
+# TOUT sur la cible (volumes, secours restants compris, PV, PVC, VM, secrets,
+# carnet, backing images), listé dans `left` ; la suppression est un geste
+# séparé et explicite. La déprotection retire la tâche de la source et ce
+# qui, sur la cible, appartient aux VMs jamais activées. La VM source, arrêtée
+# par la bascule, se redémarre à la main. Pas de `failing_over ->
+# unprotecting` direct : une bascule en cours tient le verrou, on n'abandonne
+# qu'une bascule arrêtée en erreur.
 ERROR_EXTRA_EXITS = {"failing_over": ("unprotecting",)}
 # Origine inconnue (ligne d'avant la colonne `error_origin`) : seule la
 # déprotection, qui sait partir de n'importe quel état, est sûre.
@@ -328,9 +328,11 @@ def _mapping(kind, raw):
         raise PlanError("bad-mapping", f"{kind}: a mapping is expected")
     out = {}
     for s, d in raw.items():
-        if kind in ("networks", "images", "target_names"):
+        if kind in ("networks", "images", "target_names", "claims"):
             _ref(s, kind)
-            if kind == "target_names":
+            if kind in ("target_names", "claims"):
+                # clé `namespace/nom` (lue ainsi par `target_ref` et
+                # `target_claim`), valeur : un nom seul, dans le namespace cible
                 if not isinstance(d, str) or not NAME_RE.match(d):
                     raise PlanError("bad-mapping", f"{kind}: invalid target name for {s}")
             else:
@@ -1531,15 +1533,20 @@ def activation_patch():
     return {"spec": {"Standby": False, "frontend": "blockdev"}}
 
 
-def static_pv(volume, size, mode, access_modes, storage_class, labels=None):
+def static_pv(volume, size, mode, access_modes, storage_class, labels=None, claim_ref=None):
+    """PV statique d'un volume activé. `claim_ref` (namespace, nom) le
+    réserve d'avance au PVC voulu : aucun autre PVC en attente de la même
+    classe ne peut le prendre (pré-liaison documentée de Kubernetes)."""
     md = {"name": volume}
     if labels:
         md["labels"] = dict(labels)
-    return {"apiVersion": "v1", "kind": "PersistentVolume", "metadata": md,
-            "spec": {"capacity": {"storage": quantity(size)}, "volumeMode": mode,
-                     "accessModes": list(access_modes), "persistentVolumeReclaimPolicy": "Retain",
-                     "storageClassName": storage_class,
-                     "csi": {"driver": LONGHORN_DRIVER, "volumeHandle": volume}}}
+    spec = {"capacity": {"storage": quantity(size)}, "volumeMode": mode,
+            "accessModes": list(access_modes), "persistentVolumeReclaimPolicy": "Retain",
+            "storageClassName": storage_class,
+            "csi": {"driver": LONGHORN_DRIVER, "volumeHandle": volume}}
+    if claim_ref:
+        spec["claimRef"] = {"namespace": claim_ref[0], "name": claim_ref[1]}
+    return {"apiVersion": "v1", "kind": "PersistentVolume", "metadata": md, "spec": spec}
 
 
 def static_pvc(name, namespace, volume, size, mode, access_modes, storage_class, image_id=None, labels=None):

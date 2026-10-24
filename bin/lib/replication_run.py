@@ -170,6 +170,8 @@ class Ctx:
         self.timeouts = effective_timeouts(self.plan, self.overrides)
         self.created = []           # (côté, kind, ns, nom) créés par cette commande
         self.undo_labels = []       # (côté, kind, ns, nom, {clé: None}) posées par elle
+        self.undo_specs = []        # (côté, kind, ns, nom, patch inverse) : champs modifiés par elle
+        self.undo_default = []      # (vm_uid, disque) : étiquette `default` notée posée par elle
         self.steps = []             # [{"step", "seconds"}] pour `runs`
         self.locked = False
         self._beat = now()
@@ -213,8 +215,11 @@ class Ctx:
         return self.plan["source_cluster"] if side == "source" else self.plan["target_cluster"]
 
     def event(self, operation, step, uid="", side="", level="info", code="", message="", facts=None):
+        # un événement du plan entier (sans côté) est rangé sous la cible :
+        # c'est d'elle que la réplication se regarde (vue par hôte)
         return db.record_event(self.conn, operation, step=step, plan_id=self.plan_id, resource_uid=uid,
-                               host=self.cluster(side) if side else "", side=side, level=level, code=code,
+                               host=self.cluster(side) if side else self.plan["target_cluster"], side=side,
+                               level=level, code=code,
                                message=str(message)[:500], facts=facts, by=self.by,
                                action_id=self.action_id, now=self.dt())
 
@@ -661,6 +666,19 @@ def _undo_created(ctx):
         except Exception:                       # noqa: BLE001
             left.append(f"labels of {kind} {name}")
     ctx.undo_labels.clear()
+    for uid, disk in ctx.undo_default:
+        db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": ctx.gen, "vm_uid": uid, "disk": disk,
+                                                 "default_label_added": 0})
+    ctx.undo_default.clear()
+    for side, kind, ns, name, patch in reversed(ctx.undo_specs):
+        # objet créé par cette commande : il sera supprimé juste après
+        if (side, kind, ns, name) in ctx.created:
+            continue
+        try:
+            ctx.kube(side).patch(kind, ns, name, patch)
+        except Exception:                       # noqa: BLE001
+            left.append(f"spec of {kind} {name}")
+    ctx.undo_specs.clear()
     for side, kind, ns, name in reversed(list(ctx.created)):
         if not run._undo_delete(ctx, ctx.kube(side), kind, ns, name):
             left.append(f"{kind} {ns + '/' if ns else ''}{name}")
@@ -672,27 +690,38 @@ def _undo_created(ctx):
 # Briques Longhorn
 # ---------------------------------------------------------------------------
 
-def _label_volume(ctx, volume, job, keep_default):
+DEFAULT_GROUP_LABEL = rp.JOB_GROUP_LABEL_PREFIX + rp.DEFAULT_GROUP
+
+
+def _label_volume(ctx, volume, job, keep_default, row=None):
     """Étiquette de notre tâche (et du groupe `default` quand le volume y
-    était implicitement, voir `replication.backup_membership`)."""
+    était implicitement, voir `replication.backup_membership`). `row`
+    (vm_uid, disque) : la ligne du volume où noter que l'étiquette `default`
+    vient de nous (notée AVANT la pose : un arrêt brutal entre les deux ne
+    fait pas oublier qu'on l'a posée), pour que la déprotection ne retire
+    que celle-là."""
     lv = ctx.src.get(K_LH_VOLUME, NS, volume)
     if lv is None:
         raise RunError("source-volume-missing", f"Longhorn volume {volume} not found on the source")
     labels = _labels(lv)
     want = dict([rp.job_label(job)])
     if keep_default:
-        want[rp.JOB_GROUP_LABEL_PREFIX + rp.DEFAULT_GROUP] = "enabled"
+        want[DEFAULT_GROUP_LABEL] = "enabled"
     add = {k: v for k, v in want.items() if labels.get(k) != v}
     if not add:
         return False
+    if DEFAULT_GROUP_LABEL in add and row:
+        db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": ctx.gen, "vm_uid": row[0], "disk": row[1],
+                                                 "default_label_added": 1})
+        ctx.undo_default.append(row)
     ctx.src.patch(K_LH_VOLUME, NS, volume, {"metadata": {"labels": add}})
     ctx.undo_labels.append(("src", K_LH_VOLUME, NS, volume, {k: None for k in add}))
     return True
 
 
 def _unlabel_volume(ctx, volume, job):
-    """Retire notre étiquette de tâche (l'étiquette du groupe `default`
-    reste : c'est l'appartenance implicite d'avant, rendue explicite)."""
+    """Retire notre étiquette de tâche (l'étiquette du groupe `default`, si
+    elle vient de nous, ne part qu'à la déprotection : `_remove_jobs`)."""
     lv = ctx.src.get(K_LH_VOLUME, NS, volume)
     key = rp.job_label(job)[0]
     if lv is None or key not in _labels(lv):
@@ -938,9 +967,15 @@ def write_carnets(ctx, works):
     """Un carnet par VM, réécrit seulement si son empreinte a changé."""
     dst = ctx.dst
     if dst.get(K_NS, None, rp.CARNET_NAMESPACE) is None:
-        # namespace commun à tous les plans : jamais supprimé
-        dst.create({"apiVersion": "v1", "kind": "Namespace",
-                    "metadata": {"name": rp.CARNET_NAMESPACE, "labels": dict(MANAGED_BY)}})
+        # namespace commun à tous les plans : jamais supprimé ; un autre plan
+        # peut le créer au même instant
+        try:
+            dst.create({"apiVersion": "v1", "kind": "Namespace",
+                        "metadata": {"name": rp.CARNET_NAMESPACE, "labels": dict(MANAGED_BY)}})
+        except Exception as e:                  # noqa: BLE001
+            if "alreadyexists" not in str(e).lower().replace(" ", "") \
+                    and dst.get(K_NS, None, rp.CARNET_NAMESPACE) is None:
+                raise
     for w in works:
         with stage(ctx, "protect", "carnet", "target", [w["uid"]]):
             secrets = []
@@ -1004,6 +1039,8 @@ def measure_start(ctx, interval=300):
         return _refusal(ctx, "measure", e)
     except Cancelled as e:
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
+    except Exception as e:                      # noqa: BLE001
+        return _preflight_failed(ctx, "measure", e)
     uids = [w["uid"] for w in works]
     try:
         _set_state(ctx, "measuring")
@@ -1049,6 +1086,8 @@ def measure_stop(ctx):
         _lock(ctx, "measure-stop")
     except Refused as e:
         return _refusal(ctx, "measure", e)
+    except Exception as e:                      # noqa: BLE001
+        return _preflight_failed(ctx, "measure", e)
     res = db.list_resources(ctx.conn, ctx.plan_id, ctx.gen)
     uids = [r["resource_uid"] for r in res]
     try:
@@ -1177,9 +1216,20 @@ def _ensure_jobs(ctx, op, works, cron, retain, jobs):
                         if sp.get(k) != want["spec"][k]}
                 if diff:
                     ctx.src.patch(K_LH_JOB, NS, w["job"], {"spec": diff})
+                    # annulation : la tâche reprise (mesure, relance) retrouve ses valeurs
+                    ctx.undo_specs.append(("src", K_LH_JOB, NS, w["job"],
+                                           {"spec": {k: _inverse(sp.get(k), v) for k, v in diff.items()}}))
             for d in w["disks"]:
                 keep = rp.backup_membership(d["lh_volume"], jobs, w["job"])["keep_default_label"]
-                _label_volume(ctx, d["source_volume"], w["job"], keep)
+                _label_volume(ctx, d["source_volume"], w["job"], keep, row=(w["uid"], d["disk"]))
+
+
+def _inverse(old, new):
+    """Patch de fusion qui rend `old` à un champ passé à `new` (clés
+    ajoutées d'un dictionnaire remises à null)."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        return {k: old.get(k) for k in set(old) | set(new)}
+    return old
 
 
 def _remove_jobs(ctx, op, resources):
@@ -1192,6 +1242,16 @@ def _remove_jobs(ctx, op, resources):
             cur = ctx.src.get(K_LH_JOB, NS, job)
             if cur is not None and _owned(ctx, cur):
                 ctx.src.delete(K_LH_JOB, NS, job)
+            # l'étiquette du groupe `default`, seulement là où la réplication l'a posée
+            for v in db.list_volumes(ctx.conn, ctx.plan_id, vm_uid=r["resource_uid"]):
+                if not v.get("default_label_added"):
+                    continue
+                lv = ctx.src.get(K_LH_VOLUME, NS, v["source_volume"]) if v["source_volume"] else None
+                if lv is not None and DEFAULT_GROUP_LABEL in _labels(lv):
+                    ctx.src.patch(K_LH_VOLUME, NS, v["source_volume"],
+                                  {"metadata": {"labels": {DEFAULT_GROUP_LABEL: None}}})
+                db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": int(v["generation"]), "vm_uid": v["vm_uid"],
+                                                         "disk": v["disk"], "default_label_added": 0})
     _remove_snapshots(ctx, op, [r["resource_uid"] for r in resources])
 
 
@@ -1333,6 +1393,8 @@ def ensure_standby(ctx, works, latest, visible):
                 if cur is not None:
                     if not _owned(ctx, cur):
                         raise RunError("target-volume-taken", f"volume {sb} exists without our labels")
+                    if _is_activated(cur):
+                        raise RunError("standby-activated", f"volume {sb} was activated: not a standby any more")
                     if url_volume(_spec(cur).get("fromBackup")) != vol:
                         raise RunError("standby-mismatch", f"standby volume {sb} restores another volume")
                 else:
@@ -1392,6 +1454,22 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
         except Exception as e:                  # noqa: BLE001
             out.append({"object": what, "name": obj["metadata"]["name"], "ok": False,
                         "message": str(e)[:300], **facts})
+    # backing images absentes de la cible (étape 1 de la spec : tout objet
+    # que la protection posera passe au dry-run serveur)
+    bbis = {}
+    for b in ctx.dst.list(K_LH_BBI, NS):
+        for key in (_spec(b).get("backingImage"), _status(b).get("backingImage"), _md(b).get("name")):
+            if key and _status(b).get("url"):
+                bbis.setdefault(key, _status(b)["url"])
+    for bi in sorted({d["backing_image"] for w in works for d in w["disks"] if d["backing_image"]}):
+        if bi in (dst_facts.get("backing_images") or {}):
+            out.append({"object": "backing-image", "name": bi, "ok": True, "exists": True})
+            continue
+        checksum = ((src_facts.get("backing_images") or {}).get(bi) or {}).get("checksum") or ""
+        url = bbis.get(bi) or ""
+        attempt("dst", rp.backing_image_restore(bi, checksum, url or f"dry-run://?backingImage={bi}",
+                                                BACKUP_TARGET, labels=labels),
+                "backing-image", placeholder_url=not url)
     for w in works:
         attempt("src", rp.recurring_job(w["job"], rp.cron_for(ctx.plan.get("interval_s") or 300), ctx.plan["retain"],
                                         max(1, len(w["disks"])), ctx.plan_id, w["uid"], ctx.gen),
@@ -1426,16 +1504,29 @@ def protect(ctx, interval=None, dry_run=False):
     l'existant. Annulation : retour arrière de ce que cette exécution a
     créé. Échec : rien n'est défait (la relance reprend, une longue
     restauration initiale n'est pas perdue), plan en `error`."""
+    uids = []
     try:
         _precondition(ctx, "protect")
         src = collect_source(ctx)
+        # une VM déjà basculée n'est plus protégée : ni tâche, ni étiquette sur
+        # sa source arrêtée, ni volume de secours (son volume est activé)
+        skipped = _failed_over(ctx, src)
+        src["vms"] = [v for v in src.get("vms") or [] if v["uid"] not in skipped]
+        uids = [v["uid"] for v in src.get("vms") or []]
         dst = collect_target(ctx, [rp.target_ref(ctx.plan, {"namespace": v["namespace"], "name": v["name"]})[0]
                                    for v in src.get("vms") or []])
         findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase="protect"))
-        uids = [v["uid"] for v in src.get("vms") or []]
         if rp.blocking(findings):
             raise Refused("check", "the pre-check refuses this protection", findings=findings)
         works = build_works(ctx, src, dst)
+        activated = sorted(d["target_volume"] for w in works for d in w["disks"]
+                           if _is_activated(ctx.dst.get(K_LH_VOLUME, NS, d["target_volume"])))
+        if activated:
+            raise Refused("standby-activated", "a target volume was activated by a failover: it cannot be "
+                          "a standby again", facts={"volumes": activated})
+        for uid, why in sorted(skipped.items()):
+            ctx.event("protect", "skip", uid, "source", code="failed-over",
+                      message=f"failed over ({why}): not protected again")
         if dry_run:
             dry = _dry_run_protect(ctx, works, src, dst)
             ok = all(x["ok"] for x in dry)
@@ -1443,10 +1534,12 @@ def protect(ctx, interval=None, dry_run=False):
         chosen, how = _choose_interval(ctx, interval)
         _lock(ctx, "protect")
     except Refused as e:
-        return _refusal(ctx, "protect", e, [v["uid"] for v in (locals().get("src") or {}).get("vms") or []])
+        return _refusal(ctx, "protect", e, uids)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
+    except Exception as e:                      # noqa: BLE001
+        return _preflight_failed(ctx, "protect", e, uids)
     try:
         if how == "plan" and not db.list_ticks(ctx.conn, ctx.plan_id, ctx.gen, table="measures"):
             ctx.event("protect", "interval", level="warn", code="interval-without-measure",
@@ -1481,6 +1574,29 @@ def protect(ctx, interval=None, dry_run=False):
     except Exception as e:                      # noqa: BLE001
         _error(ctx, uids, f"protect failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
+
+
+def _failed_over(ctx, src_facts):
+    """VMs déjà basculées : ressource `failed_over` en base, ou VM source
+    annotée par une bascule. Rend {uid: raison}."""
+    out = {r["resource_uid"]: "state" for r in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen)
+           if r["state"] == "failed_over"}
+    for v in src_facts.get("vms") or []:
+        if FAILED_OVER_TO in (_md(v.get("vm")).get("annotations") or {}):
+            out.setdefault(v["uid"], "annotation")
+    return out
+
+
+def _preflight_failed(ctx, op, e, uids=()):
+    """Échec d'une lecture ou d'un dry-run avant toute écriture : même
+    contrat que les autres sorties (`exit` 1, `code`), jamais d'exception
+    brute vers l'appelant."""
+    code = error_code(e)
+    for u in list(uids) or [""]:
+        ctx.event(op, "check", u, level="error", code=code, message=f"pre-check failed: {e}")
+    ctx.emit("check", "error", str(e)[:400])
+    _unlock(ctx)
+    return _result(ctx, code, EXIT_FAIL, f"pre-check failed: {e}")
 
 
 def _error(ctx, uids, message, left=None):
@@ -1563,7 +1679,7 @@ def _preflight_targets(ctx, carnets, dst_facts):
                 findings.append({"code": "target-pv-taken", "level": "block", "facts": {"name": v["target_volume"]}})
             elif pv is None:
                 try:
-                    ctx.dst.create(_pv(ctx, uid, v), dry_run=True)
+                    ctx.dst.create(_pv(ctx, uid, tns, v), dry_run=True)
                     dry.append({"object": "pv", "name": v["target_volume"], "ok": True})
                 except Exception as e:          # noqa: BLE001
                     dry.append({"object": "pv", "name": v["target_volume"], "ok": False, "message": str(e)[:300]})
@@ -1593,9 +1709,10 @@ def _preflight_targets(ctx, carnets, dst_facts):
     return findings, dry
 
 
-def _pv(ctx, uid, v):
+def _pv(ctx, uid, tns, v):
+    # pré-lié à SON PVC (claimRef) : aucun autre PVC en attente ne le prend
     return rp.static_pv(v["target_volume"], v["size"], v["volume_mode"], v["access_modes"], v["storage_class"],
-                        labels=rp.plan_labels(ctx.plan_id, ctx.gen, uid))
+                        labels=rp.plan_labels(ctx.plan_id, ctx.gen, uid), claim_ref=(tns, v["target_claim"]))
 
 
 def _pvc(ctx, uid, tns, v):
@@ -1630,16 +1747,27 @@ def _restart_source(ctx, ns, name):
     return True
 
 
+def _restore_job(ctx, uid, disks):
+    """Retour arrière de la clôture : la tâche de la VM revient (cron et
+    rétention du plan)."""
+    job = rp.recurring_job_name(ctx.plan_id, uid)
+    if ctx.src.get(K_LH_JOB, NS, job) is None:
+        ctx.src.create(rp.recurring_job(job, ctx.plan["cron"], ctx.plan["retain"], max(1, disks), ctx.plan_id,
+                                        uid, ctx.gen))
+
+
 def _rollback_failover(ctx, sel, carnets):
-    """Avant l'activation, tout est réversible : la VM source repart comme
-    elle tournait, l'étiquette de tâche revient, les instantanés finaux de
-    cette exécution disparaissent (les sauvegardes finales restent : le
-    volume de secours a pu les appliquer)."""
+    """Avant l'activation, tout est réversible : la tâche et son étiquette
+    reviennent, la VM source repart comme elle tournait, les instantanés
+    finaux de cette exécution disparaissent (les sauvegardes finales
+    restent : le volume de secours a pu les appliquer)."""
     left = []
     for r in sel:
         uid, ns, name = r["resource_uid"], r["namespace"], r["name"]
+        vols = (carnets.get(uid) or {}).get("volumes") or []
         try:
-            for v in (carnets.get(uid) or {}).get("volumes") or []:
+            _restore_job(ctx, uid, len(vols))
+            for v in vols:
                 _label_volume(ctx, v["source_volume"], rp.recurring_job_name(ctx.plan_id, uid), False)
             _restart_source(ctx, ns, name)
         except Exception as e:                  # noqa: BLE001
@@ -1661,18 +1789,100 @@ def _activated_volumes(ctx, carnet):
     return out
 
 
+def _fence_source(ctx, op, r, carnet):
+    """Clôture de la source avant de figer les points : VM arrêtée (runStrategy
+    d'origine noté), étiquette de tâche retirée, tâche de la VM supprimée.
+    Plus aucune sauvegarde ne part après."""
+    uid = r["resource_uid"]
+    with stage(ctx, op, "stop-source", "source", [uid], f"stopping {r['namespace']}/{r['name']}"):
+        _stop_source(ctx, uid, r["namespace"], r["name"])
+    with stage(ctx, op, "remove-job-label", "source", [uid]):
+        job = rp.recurring_job_name(ctx.plan_id, uid)
+        for v in carnet["volumes"]:
+            _unlabel_volume(ctx, v["source_volume"], job)
+        cur = ctx.src.get(K_LH_JOB, NS, job)
+        if cur is not None and _owned(ctx, cur):
+            ctx.src.delete(K_LH_JOB, NS, job)
+
+
+def _late_fence(ctx, op, r, carnet):
+    """Source revenue pendant une bascule non planifiée : clôture tentée au
+    mieux, sans attendre (runStrategy, étiquette, tâche)."""
+    job = rp.recurring_job_name(ctx.plan_id, r["resource_uid"])
+    try:
+        ctx.src.patch(K_VM, r["namespace"], r["name"], {"spec": {"runStrategy": "Halted"}})
+    except Exception:                           # noqa: BLE001
+        return "source-not-fenced"
+    for v in carnet["volumes"]:
+        with contextlib.suppress(Exception):
+            _unlabel_volume(ctx, v["source_volume"], job)
+    with contextlib.suppress(Exception):
+        cur = ctx.src.get(K_LH_JOB, NS, job)
+        if cur is not None and _owned(ctx, cur):
+            ctx.src.delete(K_LH_JOB, NS, job)
+    return "source-fenced"
+
+
+def _applied_points(ctx, carnet, tb):
+    """Point appliqué par disque (moteur du volume de secours), écart entre
+    disques et instant à partir duquel les écritures sont perdues."""
+    pts = {}
+    for v in carnet["volumes"]:
+        last = _status(engine_of(ctx.dst, v["target_volume"])).get("lastRestoredBackup") or ""
+        b = next((x for x in tb.get(v["source_volume"], []) if _md(x).get("name") == last), None)
+        pts[v["source_volume"]] = {"backup": last, "snapshot_at": _snap_time(b)}
+    times = [rp._t(p["snapshot_at"]) for p in pts.values() if p["snapshot_at"]]
+    skew = int((max(times) - min(times)).total_seconds()) if len(times) > 1 else 0
+    return pts, skew, (rp.iso(min(times)) if times else None)
+
+
+def wait_caught_up(ctx, op, volumes, timeout_key):
+    """Bascule non planifiée : avant l'activation, chaque moteur doit avoir
+    appliqué la dernière sauvegarde connue de son volume
+    (`engine.status.lastRestoredBackup == volume.status.lastBackup`, la
+    condition de Longhorn pour activer un volume de secours)."""
+    def caught_up():
+        late = []
+        for sb in volumes:
+            lv = ctx.dst.get(K_LH_VOLUME, NS, sb)
+            eng = engine_of(ctx.dst, sb)
+            for st in (_status(eng).get("restoreStatus") or {}).values():
+                if (st or {}).get("error"):
+                    return Fail(f"restore of {sb}: {st['error']}")
+            last = _status(lv).get("lastBackup") or ""
+            if not last or _status(eng).get("lastRestoredBackup") != last:
+                late.append(sb)
+        return True if not late else f"{len(late)} volume(s) still restoring their last backup"
+    wait_for(ctx, op, "last backups restored", caught_up, ctx.timeouts[timeout_key], every=2)
+
+
+def _final_applied(ctx, carnet, finals):
+    """Relance d'une bascule planifiée : la sauvegarde finale de chaque
+    disque (nom rangé dans `runs.points.final`) est-elle déjà appliquée ?
+    Alors la source n'est plus nécessaire pour cette VM."""
+    for v in carnet["volumes"]:
+        name = finals.get(v["source_volume"])
+        if not name or _status(engine_of(ctx.dst, v["target_volume"])).get("lastRestoredBackup") != name:
+            return False
+    return True
+
+
 def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=False, yes=False, dry_run=False):
     """(`protected`, `failing_over`, `error`) -> `failing_over` ->
     `failed_over` (ou `protected` si une partie seulement du plan bascule).
 
     Planifiée : la source répond ; VM arrêtée, sauvegarde finale de chaque
     disque appliquée avant l'activation (zéro perte). Non planifiée
-    (`planned=False`, exige `yes`) : relecture finale bornée, activation de
-    ce qui est appliqué, écart entre disques contrôlé (`accept_skew`).
+    (`planned=False`, exige `yes`) : relecture finale bornée, chaque moteur
+    à jour de la dernière sauvegarde connue, activation de ce qui est
+    appliqué, écart entre disques contrôlé (`accept_skew`). Avec
+    `force_unplanned` et une source vivante, la source est clôturée d'abord.
     Avant l'activation, une erreur ou une annulation remet tout en place ;
-    après, rien n'est défait et la relance reprend à l'étape suivante."""
+    après, rien n'est défait et la relance reprend à l'étape suivante, avec
+    la cible seule."""
     opts = ctx.plan.get("options") or {}
     tolerance = int(opts.get("skew_tolerance_s", rp.SKEW_TOLERANCE_S))
+    uids = []
     try:
         if not planned and not yes and not dry_run:
             raise Refused("confirmation-required", "an unplanned failover needs --yes")
@@ -1683,19 +1893,23 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         if d_state != "ok":
             raise Refused("target-denied" if d_state == "denied" else "target-unreachable",
                           f"the target cluster is {'refusing this reader' if d_state == 'denied' else 'unreachable'}")
-        if planned and s_state != "ok":
-            raise Refused("source-unreachable", "the source does not answer: use --unplanned",
-                          facts={"hint": "--unplanned"})
-        if not planned and s_state == "ok" and not force_unplanned:
-            raise Refused("source-reachable", "the source answers: use a planned failover, or --force-unplanned")
         carnets = _carnets(ctx, set(uids))
         missing = [r for r in sel if r["resource_uid"] not in carnets]
         if missing:
             raise Refused("carnet-missing", "no recovery carnet for " +
                           ", ".join(f"{r['namespace']}/{r['name']}" for r in missing))
+        # une VM déjà activée : la bascule ne peut que se terminer, avec la
+        # cible seule (l'état de la source ne bloque plus rien)
+        resuming = any(any(_activated_volumes(ctx, carnets[u]).values()) for u in uids)
+        if not resuming:
+            if planned and s_state != "ok":
+                raise Refused("source-unreachable", "the source does not answer: use --unplanned",
+                              facts={"hint": "--unplanned"})
+            if not planned and s_state == "ok" and not force_unplanned:
+                raise Refused("source-reachable", "the source answers: use a planned failover, or --force-unplanned")
         tns_list = [_md(c["vm"])["namespace"] for c in carnets.values()]
         dst = collect_target(ctx, tns_list)
-        if planned:
+        if planned and s_state == "ok":
             src = collect_source(ctx)
             src["vms"] = [v for v in src.get("vms") or [] if v["uid"] in carnets]
             phase = "failover"
@@ -1711,24 +1925,30 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry)
         _lock(ctx, "failover")
     except Refused as e:
-        return _refusal(ctx, "failover", e, [r["resource_uid"] for r in locals().get("sel") or []])
+        return _refusal(ctx, "failover", e, uids)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
+    except Exception as e:                      # noqa: BLE001
+        return _preflight_failed(ctx, "failover", e, uids)
 
     op = "failover"
     mode = "planned" if planned else "unplanned"
+    # --force-unplanned avec une source vivante : clôture d'abord
+    fence_live = not planned and s_state == "ok"
     started = ctx.dt()
+    refs = [f"{r['namespace']}/{r['name']}" for r in sel]
     prev = _open_run(ctx, "failover")
-    run_id = prev["id"] if prev else db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen,
-                                                    vms=[f"{r['namespace']}/{r['name']}" for r in sel],
-                                                    points={"mode": mode}, by=ctx.by, action_id=ctx.action_id)
-    points = dict((prev or {}).get("points") or {}, mode=mode)
+    run_id = prev["id"] if prev else db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, vms=refs,
+                                                    points={"mode": mode, "force_unplanned": bool(force_unplanned)},
+                                                    by=ctx.by, action_id=ctx.action_id)
+    points = dict((prev or {}).get("points") or {}, mode=mode, force_unplanned=bool(force_unplanned))
     paused_before = bool(opts.get("paused"))
     if prev and "paused_before" in points:
         paused_before = points["paused_before"]
     points["paused_before"] = paused_before
     activated_any = False
+    source_touched = False
     result = {"fenced": {}, "skew_s": {}, "refused_skew": [], "lost_after": {}}
     try:
         _set_state(ctx, "failing_over")
@@ -1743,72 +1963,75 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         pre = [r for r in sel if r["resource_uid"] not in done_vms]
         wanted = {}                              # volume de secours -> (volume source, sauvegarde)
         if planned:
-            for r in pre:
-                uid = r["resource_uid"]
-                with stage(ctx, op, "stop-source", "source", [uid], f"stopping {r['namespace']}/{r['name']}"):
-                    _stop_source(ctx, uid, r["namespace"], r["name"])
-                with stage(ctx, op, "remove-job-label", "source", [uid]):
-                    for v in carnets[uid]["volumes"]:
-                        _unlabel_volume(ctx, v["source_volume"], rp.recurring_job_name(ctx.plan_id, uid))
-            items = [(r["resource_uid"], v["source_volume"]) for r in pre for v in carnets[r["resource_uid"]]["volumes"]]
+            finals = points.get("final") or {}
+            ready = [r for r in pre if _final_applied(ctx, carnets[r["resource_uid"]], finals)]
+            todo = [r for r in pre if r not in ready]
+            for r in todo:
+                source_touched = True
+                _fence_source(ctx, op, r, carnets[r["resource_uid"]])
+            items = [(r["resource_uid"], v["source_volume"]) for r in todo
+                     for v in carnets[r["resource_uid"]]["volumes"]]
+            names = {}
             if items:
-                with stage(ctx, op, "final-backup", "source", [r["resource_uid"] for r in pre]):
+                with stage(ctx, op, "final-backup", "source", [r["resource_uid"] for r in todo]):
                     names = take_backups(ctx, "final-backup", items, "final", token=str(run_id))
-                    finals = wait_backups(ctx, "final-backup", names, "final_backup")
+                    backups = wait_backups(ctx, "final-backup", names, "final_backup")
                 for uid, vol in items:
-                    db.record_tick(ctx.conn, ctx.plan_id, _tick_from_backup(finals[vol], uid, ctx.gen))
-                for r in pre:
-                    for v in carnets[r["resource_uid"]]["volumes"]:
-                        wanted[v["target_volume"]] = (v["source_volume"], names[v["source_volume"]])
-                points["final"] = {vol: names[vol] for _u, vol in items}
-                db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points,
-                              vms=[f"{r['namespace']}/{r['name']}" for r in sel], run_id=run_id,
-                              by=ctx.by, action_id=ctx.action_id)
+                    db.record_tick(ctx.conn, ctx.plan_id, _tick_from_backup(backups[vol], uid, ctx.gen))
+                points["final"] = dict(finals, **names)
+                db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs,
+                              run_id=run_id, by=ctx.by, action_id=ctx.action_id)
+            for r in pre:
+                for v in carnets[r["resource_uid"]]["volumes"]:
+                    wanted[v["target_volume"]] = (v["source_volume"], points["final"][v["source_volume"]])
+            if wanted:
                 with stage(ctx, op, "final-resync", "target", [r["resource_uid"] for r in pre]):
                     wait_applied(ctx, "final-resync", wanted, "resync_apply")
-                for uid, vol in items:
-                    db.mark_applied(ctx.conn, ctx.plan_id, vol, names[vol], ctx.dt(), ctx.gen)
+                for sb, (vol, name) in wanted.items():
+                    db.mark_applied(ctx.conn, ctx.plan_id, vol, name, ctx.dt(), ctx.gen)
         else:
+            if fence_live:
+                for r in pre:
+                    source_touched = True
+                    _fence_source(ctx, op, r, carnets[r["resource_uid"]])
+                    result["fenced"][f"{r['namespace']}/{r['name']}"] = "source-fenced"
+                    ctx.event(op, "fence", r["resource_uid"], "source", code="source-fenced")
             vols = {v["target_volume"]: v["source_volume"] for r in pre for v in carnets[r["resource_uid"]]["volumes"]}
-            with stage(ctx, op, "final-resync", "target", [r["resource_uid"] for r in pre]):
-                deadline = ctx.now() + ctx.timeouts["unplanned_sync"]
-                wait_synced(ctx, "final-resync", list(vols.values()), deadline)
-                tb = backups_by_volume(ctx.dst)
-                for sb, vol in vols.items():
-                    c = _completed(tb.get(vol))
-                    if c:
-                        wanted[sb] = (vol, _md(c[-1])["name"])
-                saved = ctx.timeouts["unplanned_sync"]
-                ctx.timeouts["unplanned_sync"] = max(1, deadline - ctx.now())
-                try:
-                    wait_applied(ctx, "final-resync", wanted, "unplanned_sync", fail_on_timeout=False)
-                finally:
-                    ctx.timeouts["unplanned_sync"] = saved
-        # points réellement appliqués et écart entre disques, par VM
+            if vols:
+                with stage(ctx, op, "final-resync", "target", [r["resource_uid"] for r in pre]):
+                    deadline = ctx.now() + ctx.timeouts["unplanned_sync"]
+                    wait_synced(ctx, "final-resync", list(vols.values()), deadline)
+                    tb = backups_by_volume(ctx.dst)
+                    for sb, vol in vols.items():
+                        c = _completed(tb.get(vol))
+                        if c:
+                            wanted[sb] = (vol, _md(c[-1])["name"])
+                    saved = ctx.timeouts["unplanned_sync"]
+                    ctx.timeouts["unplanned_sync"] = max(1, deadline - ctx.now())
+                    try:
+                        wait_applied(ctx, "final-resync", wanted, "unplanned_sync", fail_on_timeout=False)
+                    finally:
+                        ctx.timeouts["unplanned_sync"] = saved
+                with stage(ctx, op, "catch-up", "target", [r["resource_uid"] for r in pre]):
+                    wait_caught_up(ctx, "catch-up", sorted(vols), "unplanned_catchup")
+        # points appliqués et écart entre disques, par VM (décision de basculer)
         tb = backups_by_volume(ctx.dst)
         go = []
         for r in sel:
-            uid = r["resource_uid"]
-            pts = {}
-            for v in carnets[uid]["volumes"]:
-                eng = engine_of(ctx.dst, v["target_volume"])
-                last = _status(eng).get("lastRestoredBackup") or ""
-                b = next((x for x in tb.get(v["source_volume"], []) if _md(x).get("name") == last), None)
-                pts[v["source_volume"]] = {"backup": last, "snapshot_at": _snap_time(b)}
-            times = [rp._t(p["snapshot_at"]) for p in pts.values() if p["snapshot_at"]]
-            skew = int((max(times) - min(times)).total_seconds()) if len(times) > 1 else 0
-            result["skew_s"][f"{r['namespace']}/{r['name']}"] = skew
-            if times:
-                result["lost_after"][f"{r['namespace']}/{r['name']}"] = rp.iso(min(times))
+            uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
+            pts, skew, lost = _applied_points(ctx, carnets[uid], tb)
+            result["skew_s"][key] = skew
+            if lost:
+                result["lost_after"][key] = lost
             points.setdefault("applied", {})[uid] = pts
             if not planned and uid not in done_vms:
                 if not all(p["backup"] for p in pts.values()):
-                    result["refused_skew"].append(f"{r['namespace']}/{r['name']}")
+                    result["refused_skew"].append(key)
                     ctx.event(op, "points", uid, "target", level="error", code="no-point",
                               message="a disk has no applied point", facts=pts)
                     continue
                 if skew > tolerance and not accept_skew:
-                    result["refused_skew"].append(f"{r['namespace']}/{r['name']}")
+                    result["refused_skew"].append(key)
                     ctx.event(op, "points", uid, "target", level="warn", code="skew-exceeded",
                               message=f"disks {skew} s apart (tolerance {tolerance} s): --accept-skew",
                               facts={"skew_s": skew, "points": pts})
@@ -1818,19 +2041,17 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         if not go:
             raise Refused("skew-exceeded", "no VM can fail over without --accept-skew", facts=result)
         if not planned:
-            # source revenue pendant la bascule : arrêt tenté au mieux
-            if probe(ctx, "src") == "ok":
-                for r in go:
-                    key = f"{r['namespace']}/{r['name']}"
-                    try:
-                        ctx.src.patch(K_VM, r["namespace"], r["name"], {"spec": {"runStrategy": "Halted"}})
-                        result["fenced"][key] = "source-fenced"
-                    except Exception:           # noqa: BLE001
-                        result["fenced"][key] = "source-not-fenced"
+            # source revenue pendant la bascule (ou à sa reprise) : clôture
+            # tentée au mieux des VMs pas encore clôturées
+            came_back = probe(ctx, "src") == "ok"
+            for r in go:
+                key = f"{r['namespace']}/{r['name']}"
+                if key in result["fenced"]:
+                    continue
+                result["fenced"][key] = _late_fence(ctx, op, r, carnets[r["resource_uid"]]) if came_back \
+                    else "source-not-fenced"
+                if came_back:
                     ctx.event(op, "fence", r["resource_uid"], "source", code=result["fenced"][key])
-            else:
-                for r in go:
-                    result["fenced"][f"{r['namespace']}/{r['name']}"] = "source-not-fenced"
         # --- point de non-retour : l'activation est définitive ---
         for r in go:
             uid = r["resource_uid"]
@@ -1841,14 +2062,40 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             for v in carnets[uid]["volumes"]:
                 db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": ctx.gen, "vm_uid": uid, "disk": v["disk"],
                                                          "state": "activated"})
+        # points réellement activés : relus APRÈS l'activation (Longhorn a pu
+        # finir une restauration en cours entre la lecture et l'activation)
+        tb = backups_by_volume(ctx.dst)
         for r in go:
-            _bring_up(ctx, op, r, carnets[r["resource_uid"]], opts)
-            if planned:
-                ctx.src.patch(K_VM, r["namespace"], r["name"], {"metadata": {"annotations": {
-                    FAILED_OVER_TO: f"{ctx.plan['target_cluster']}/{_md(carnets[r['resource_uid']]['vm'])['namespace']}/"
-                                    f"{_md(carnets[r['resource_uid']]['vm'])['name']}",
-                    STOPPED_ANNOTATION: None}}})
-            _set_resources(ctx, [r["resource_uid"]], "failed_over")
+            uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
+            before = points["applied"].get(uid) or {}
+            pts, _skew, _lost = _applied_points(ctx, carnets[uid], tb)
+            for vol, p in pts.items():
+                if not p["backup"] and (before.get(vol) or {}).get("backup"):
+                    pts[vol] = before[vol]           # moteur illisible : on garde la lecture d'avant
+            times = [rp._t(p["snapshot_at"]) for p in pts.values() if p["snapshot_at"]]
+            result["skew_s"][key] = int((max(times) - min(times)).total_seconds()) if len(times) > 1 else 0
+            if times:
+                result["lost_after"][key] = rp.iso(min(times))
+            points["applied"][uid] = pts
+        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
+                      by=ctx.by, action_id=ctx.action_id)
+        src_back = probe(ctx, "src") == "ok"
+        for r in go:
+            uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
+            _bring_up(ctx, op, r, carnets[uid], opts)
+            if src_back:
+                tvm = _md(carnets[uid]["vm"])
+                try:
+                    ctx.src.patch(K_VM, r["namespace"], r["name"], {"metadata": {"annotations": {
+                        FAILED_OVER_TO: f"{ctx.plan['target_cluster']}/{tvm['namespace']}/{tvm['name']}",
+                        STOPPED_ANNOTATION: None}}})
+                except Exception as e:          # noqa: BLE001
+                    ctx.event(op, "annotate-source", uid, "source", level="warn", code="annotation-failed",
+                              message=str(e)[:300])
+            _set_resources(ctx, [uid], "failed_over")
+            ctx.event(op, "done", uid, "target", code="failed-over", message=f"{key} failed over ({mode})",
+                      facts={"lost_after": result["lost_after"].get(key), "skew_s": result["skew_s"].get(key),
+                             "points": points["applied"].get(uid), "mode": mode})
         back = [r["resource_uid"] for r in sel if r not in go]
         _set_resources(ctx, back, "protected", "not failed over")
         rest = [x for x in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen) if x["state"] != "failed_over"]
@@ -1864,12 +2111,13 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         cancelled = isinstance(e, Cancelled)
         refused = isinstance(e, Refused)
         if not activated_any:
-            left = _rollback_failover(ctx, sel, carnets) if planned else []
+            # planifiée : la source a pu être arrêtée par une exécution précédente
+            left = _rollback_failover(ctx, sel, carnets) if planned or source_touched else []
             _set_resources(ctx, uids, "protected", "failover undone")
             _set_state(ctx, "protected", f"failover undone: {e}"[:500])
             db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), options={"paused": paused_before})
             db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, finished_at=ctx.dt(),
-                          result="rolled-back", points=points, steps=ctx.steps, by=ctx.by,
+                          result="rolled-back", vms=refs, points=points, steps=ctx.steps, by=ctx.by,
                           action_id=ctx.action_id, run_id=run_id)
             _unlock(ctx)
             if left:
@@ -1880,8 +2128,8 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                            EXIT_CANCELLED if cancelled else EXIT_FAIL, f"{e} (failover undone)", left=left, **result)
         # après l'activation : pas de retour arrière, reprise par relance
         msg = f"failover stopped after activation ({e}): run failover again to finish"
-        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, result="interrupted", points=points,
-                      steps=ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=run_id)
+        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, result="interrupted", vms=refs,
+                      points=points, steps=ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=run_id)
         _error(ctx, uids, msg)
         return _result(ctx, "interrupted", EXIT_CANCELLED if cancelled else EXIT_FAIL, msg, run_id=run_id, **result)
 
@@ -1906,7 +2154,7 @@ def _bring_up(ctx, op, r, carnet, opts):
                                  "metadata": {"name": s["name"], "namespace": tns, "labels": dict(labels)},
                                  "data": dict(s.get("data") or {})}, "target-secret")
         for v in carnet["volumes"]:
-            _ensure(ctx, "dst", _pv(ctx, uid, v), "target-pv")
+            _ensure(ctx, "dst", _pv(ctx, uid, tns, v), "target-pv")
             _ensure(ctx, "dst", _pvc(ctx, uid, tns, v), "target-pvc")
 
         def bound():
@@ -1927,7 +2175,8 @@ def _bring_up(ctx, op, r, carnet, opts):
                     clash = sorted(mine & vt.vm_macs(other))
                     if key != f"{tns}/{tname}" and clash:
                         raise RunError("mac-in-use", f"MAC {', '.join(clash)} used by {key}")
-            ctx.dst.create(vm, dry_run=True)
+            # pas de dry-run ici : la création passe par les mêmes contrôles
+            # d'admission ; celui du préalable a lieu avant toute écriture
             created = ctx.dst.create(vm) or {}
             ctx.record("dst", K_VM, tns, tname)
             vuid = _md(created).get("uid") or _md(ctx.dst.get(K_VM, tns, tname)).get("uid")
@@ -1949,39 +2198,73 @@ def _bring_up(ctx, op, r, carnet, opts):
 # Déprotection
 # ---------------------------------------------------------------------------
 
+def _held_vms(ctx, prev, dst_ok):
+    """VMs dont la bascule a déjà touché la cible (décision 47) : un volume
+    activé (cible relue, ou ligne `activated`), ou une ressource en bascule,
+    basculée, ou en erreur pendant une bascule. Leur contenu cible est gardé
+    en entier. Rangé dans la ligne `runs` de la déprotection : une relance
+    retrouve la liste même après le passage des ressources à
+    `unprotecting`. Rend {uid: raison}."""
+    held = dict(((prev or {}).get("points") or {}).get("held") or {})
+    for r in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen):
+        st = r["state"]
+        if st in ("failing_over", "failed_over") or (st == "error" and r.get("error_origin") == "failing_over"):
+            held.setdefault(r["resource_uid"], st)
+    for v in db.list_volumes(ctx.conn, ctx.plan_id, ctx.gen):
+        if v["state"] == "activated":
+            held.setdefault(v["vm_uid"], "activated")
+    if dst_ok:
+        for lv in ctx.dst.list(K_LH_VOLUME, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
+            uid = _labels(lv).get(rp.LABEL_VM)
+            if uid and _owned(ctx, lv) and _is_activated(lv):
+                held.setdefault(uid, "activated")
+    return held
+
+
 def unprotect(ctx, delete_backups=False, yes=False):
     """Tout état sauf `draft`, `failing_over`, `unprotected` ->
-    `unprotecting` -> `unprotected`. Cible : volumes de secours non activés,
-    carnets, backing images restaurées par le plan et inutilisées. Source :
+    `unprotecting` -> `unprotected`. Cible : volumes de secours, carnets et
+    backing images restaurées par le plan, des VMs jamais activées. Une VM
+    dont la bascule a déjà activé un volume garde TOUT sur la cible
+    (décision 47 : abandonner la bascule ne supprime rien), listé dans
+    `left` ; tant qu'il en reste une, `delete_backups` est refusé. Source :
     étiquettes de tâche, tâches. `delete_backups` (exige `yes`) : les
-    `Backup` portant les étiquettes du plan, jamais un `BackupVolume`.
-    Côté injoignable : noté « à faire », terminé à la relance. Les volumes
-    activés, PV, PVC et VM cibles ne sont jamais supprimés (rendus dans
-    `left`)."""
+    `Backup` portant les étiquettes du plan, jamais un `BackupVolume`. Côté
+    injoignable : noté « à faire », terminé à la relance. PV, PVC et VM
+    cibles ne sont jamais supprimés."""
     try:
         if delete_backups and not yes:
             raise Refused("confirmation-required", "deleting backups needs --yes")
         _precondition(ctx, "unprotect")
+        prev = _open_run(ctx, "unprotect")
+        delete_backups = bool(delete_backups or ((prev or {}).get("points") or {}).get("delete_backups"))
+        held = _held_vms(ctx, prev, probe(ctx, "dst") == "ok")
+        if delete_backups and held:
+            names = {r["resource_uid"]: f"{r['namespace']}/{r['name']}" for r in db.list_resources(ctx.conn, ctx.plan_id)}
+            vms = sorted(names.get(u, u) for u in held)
+            raise Refused("backups-in-use", "a failover already activated volumes of " + ", ".join(vms) +
+                          ": the backups are kept; unprotect without --delete-backups",
+                          facts={"vms": vms})
         _lock(ctx, "unprotect")
     except Refused as e:
         return _refusal(ctx, "unprotect", e)
+    except Exception as e:                      # noqa: BLE001
+        return _preflight_failed(ctx, "unprotect", e)
     op = "unprotect"
     started = ctx.dt()
-    prev = _open_run(ctx, "unprotect")
     resources = db.list_resources(ctx.conn, ctx.plan_id)
     uids = sorted({r["resource_uid"] for r in resources if int(r["generation"]) == ctx.gen})
-    delete_backups = bool(delete_backups or ((prev or {}).get("points") or {}).get("delete_backups"))
+    base = {"delete_backups": delete_backups, "held": held}
     run_id = prev["id"] if prev else db.record_run(ctx.conn, ctx.plan_id, "unprotect", started, ctx.gen,
-                                                    points={"delete_backups": delete_backups}, by=ctx.by,
-                                                    action_id=ctx.action_id)
-    pending, left = [], []
+                                                    points=base, by=ctx.by, action_id=ctx.action_id)
+    pending, left, selectors = [], [], {}
     try:
         _set_state(ctx, "unprotecting")
         _set_resources(ctx, uids, "unprotecting")
         if not _touched_target(ctx):
             pass
         elif probe(ctx, "dst") == "ok":
-            left += _unprotect_target(ctx, op, uids)
+            left, selectors = _unprotect_target(ctx, op, uids, held)
         else:
             pending.append("target")
         if probe(ctx, "src") == "ok":
@@ -1990,10 +2273,10 @@ def unprotect(ctx, delete_backups=False, yes=False):
             pending.append("source")
         deleted = 0
         if delete_backups:
-            with stage(ctx, op, "delete-backups", "", uids):
-                for side in ("src", "dst"):
-                    if probe(ctx, side) != "ok":
-                        continue
+            for side, name in (("src", "source"), ("dst", "target")):
+                if probe(ctx, side) != "ok":
+                    continue
+                with stage(ctx, op, "delete-backups", name, uids):
                     for b in ctx.kube(side).list(K_LH_BACKUP, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
                         if _owned(ctx, b):
                             if run.delete_quiet(ctx.kube(side), K_LH_BACKUP, NS, _md(b)["name"]):
@@ -2003,17 +2286,19 @@ def unprotect(ctx, delete_backups=False, yes=False):
                 ctx.event(op, "pending", u, level="warn", code="pending",
                           message="unreachable: " + ", ".join(pending) + "; run unprotect again")
             db.record_run(ctx.conn, ctx.plan_id, "unprotect", started, ctx.gen, result="pending",
-                          points={"delete_backups": delete_backups, "pending": pending}, steps=ctx.steps,
+                          points=dict(base, pending=pending), steps=ctx.steps,
                           by=ctx.by, action_id=ctx.action_id, run_id=run_id)
             _unlock(ctx)
-            return _result(ctx, "pending", EXIT_FAIL, "to finish: " + ", ".join(pending), pending=pending, left=left)
+            return _result(ctx, "pending", EXIT_FAIL, "to finish: " + ", ".join(pending), pending=pending, left=left,
+                           left_selectors=selectors)
         _set_resources(ctx, uids, "unprotected")
         _set_state(ctx, "unprotected")
         db.record_run(ctx.conn, ctx.plan_id, "unprotect", started, ctx.gen, finished_at=ctx.dt(), result="ok",
-                      points={"delete_backups": delete_backups, "backups_deleted": deleted}, steps=ctx.steps,
+                      points=dict(base, backups_deleted=deleted, left=left), steps=ctx.steps,
                       by=ctx.by, action_id=ctx.action_id, run_id=run_id)
         _unlock(ctx)
-        return _result(ctx, "unprotected", EXIT_OK, "plan unprotected", left=left, backups_deleted=deleted)
+        return _result(ctx, "unprotected", EXIT_OK, "plan unprotected", left=left, left_selectors=selectors,
+                       backups_deleted=deleted)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, f"{e}: run unprotect again to finish")
@@ -2030,45 +2315,76 @@ def _touched_target(ctx):
     return row is not None
 
 
-def _unprotect_target(ctx, op, uids):
-    left = []
+def _unprotect_target(ctx, op, uids, held):
+    """Rend (left, sélecteurs) : ce qui reste sur la cible, une ligne par
+    objet, et pour chaque genre le sélecteur d'étiquette qui le retrouve."""
+    left, kinds = [], set()
     dst = ctx.dst
+    sel = f"{rp.LABEL_PLAN}={ctx.plan_id}"
+
+    def keep(kind, label, o):
+        ns = _md(o).get("namespace")
+        left.append(f"{label} {ns + '/' if ns else ''}{_md(o)['name']}")
+        kinds.add(kind)
     with stage(ctx, op, "remove-target", "target", uids):
-        for s in dst.list(K_SECRET, rp.CARNET_NAMESPACE, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
-            if _owned(ctx, s):
-                dst.delete(K_SECRET, rp.CARNET_NAMESPACE, _md(s)["name"])
+        vms = {(_md(o).get("namespace"), _md(o)["name"]) for o in dst.list(K_VM, None, selector=sel) if _owned(ctx, o)}
+        for s in dst.list(K_SECRET, rp.CARNET_NAMESPACE, selector=sel):
+            if not _owned(ctx, s):
+                continue
+            meta = read_carnet(s).get("meta") or {}
+            if _labels(s).get(rp.LABEL_VM) in held and \
+                    (meta.get("target_namespace"), meta.get("target_name")) not in vms:
+                # bascule abandonnée avant la VM : le carnet est la seule recette pour la finir
+                keep(K_SECRET, "carnet", s)
+                continue
+            dst.delete(K_SECRET, rp.CARNET_NAMESPACE, _md(s)["name"])
         gone = []
-        for lv in dst.list(K_LH_VOLUME, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
+        for lv in dst.list(K_LH_VOLUME, NS, selector=sel):
             if not _owned(ctx, lv):
                 continue
             name = _md(lv)["name"]
             if _is_activated(lv):
-                left.append(f"volume {name} (activated)")
+                keep(K_LH_VOLUME, "volume", lv)
+                left[-1] += " (activated)"
+                continue
+            if _labels(lv).get(rp.LABEL_VM) in held:
+                keep(K_LH_VOLUME, "volume", lv)
+                left[-1] += " (standby of a failed-over VM)"
                 continue
             dst.delete(K_LH_VOLUME, NS, name)
             gone.append(name)
-        for kind, label in ((K_PV, "pv"), (K_PVC, "pvc"), (K_VM, "vm")):
-            for o in dst.list(kind, None, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
+        for kind, label in ((K_PV, "pv"), (K_PVC, "pvc"), (K_VM, "vm"), (K_NS, "namespace")):
+            for o in dst.list(kind, None, selector=sel):
                 if _owned(ctx, o):
-                    left.append(f"{label} {(_md(o).get('namespace') + '/') if _md(o).get('namespace') else ''}"
-                                f"{_md(o)['name']}")
+                    keep(kind, label, o)
+        # secrets cloud-init recopiés par la bascule (le carnet est à part)
+        for o in dst.list(K_SECRET, None, selector=sel):
+            if _md(o).get("namespace") != rp.CARNET_NAMESPACE and _owned(ctx, o):
+                keep(K_SECRET, "secret", o)
         if gone:
             wait_for(ctx, op, "standby volumes deleted",
                      lambda: True if not any(dst.get(K_LH_VOLUME, NS, n) for n in gone) else "deleting",
                      ctx.timeouts["delete"], every=2)
         used = {_spec(v).get("backingImage") for v in dst.list(K_LH_VOLUME, NS)}
-        for bi in dst.list(K_LH_BI, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
-            if _owned(ctx, bi) and _md(bi)["name"] not in used:
-                dst.delete(K_LH_BI, NS, _md(bi)["name"])
+        for bi in dst.list(K_LH_BI, NS, selector=sel):
+            if not _owned(ctx, bi):
+                continue
+            if _md(bi)["name"] in used:
+                keep(K_LH_BI, "backingimage", bi)
+                left[-1] += " (in use)"
+                continue
+            dst.delete(K_LH_BI, NS, _md(bi)["name"])
         for v in db.list_volumes(ctx.conn, ctx.plan_id):
             if v["target_volume"] in gone or (v["state"] in ("pending", "restoring", "standby")
+                                              and v["vm_uid"] not in held
                                               and dst.get(K_LH_VOLUME, NS, v["target_volume"]) is None):
                 db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": int(v["generation"]), "vm_uid": v["vm_uid"],
                                                          "disk": v["disk"], "state": "removed"})
+    selectors = {k: sel for k in sorted(kinds)}
     if left:
-        ctx.event(op, "left", level="warn", code="left",
-                  message=f"kept on the target (label {rp.LABEL_PLAN}={ctx.plan_id}): " + "; ".join(left))
-    return left
+        ctx.event(op, "left", side="target", level="warn", code="left",
+                  message="kept on the target: " + "; ".join(left)[:400], facts={"left": left, "selectors": selectors})
+    return left, selectors
 
 
 # ---------------------------------------------------------------------------
@@ -2077,7 +2393,9 @@ def _unprotect_target(ctx, op, uids):
 
 def resume(ctx, yes=False):
     """Reprend la commande interrompue d'après l'état rangé (après un arrêt
-    brutal, le verrou abandonné est repris par `acquire_lock`)."""
+    brutal, le verrou abandonné est repris par `acquire_lock`). Une bascule
+    reprend avec son mode, ses VMs et `force_unplanned` rangés dans sa ligne
+    `runs` : la confirmation donnée au départ vaut pour sa reprise."""
     plan = ctx.reload()
     state = plan["state"]
     origin = db.error_origin(ctx.conn, ctx.plan_id) if state == "error" else None
@@ -2088,7 +2406,8 @@ def resume(ctx, yes=False):
         r = _open_run(ctx, "failover") or {}
         pts = r.get("points") or {}
         planned = pts.get("mode", "planned") == "planned"
-        return failover(ctx, vms=None, planned=planned, yes=yes or planned)
+        return failover(ctx, vms=list(r.get("vms") or []) or None, planned=planned,
+                        force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r))
     if eff == "unprotecting":
         r = _open_run(ctx, "unprotect") or {}
         return unprotect(ctx, delete_backups=bool((r.get("points") or {}).get("delete_backups")), yes=True)

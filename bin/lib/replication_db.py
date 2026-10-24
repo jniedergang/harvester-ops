@@ -96,6 +96,10 @@ TABLES = {
         ("backup_volume_source", "TEXT NOT NULL DEFAULT ''"),
         ("backup_volume_target", "TEXT NOT NULL DEFAULT ''"),
         ("state", "TEXT NOT NULL DEFAULT 'pending'"),
+        # 1 : l'étiquette `recurring-job-group.longhorn.io/default` a été posée
+        # par la réplication (appartenance implicite rendue explicite) ; la
+        # déprotection ne retire que celle-là
+        ("default_label_added", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "ticks": [
         ("plan_id", "TEXT NOT NULL"),

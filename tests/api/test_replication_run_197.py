@@ -11,9 +11,14 @@ de vrai (relevé sur le banc harvlab -> harvlab2, docs/design/
   `BackupVolume.spec.syncRequestedAt` (2 s), ou naturelle (150 s) ;
 * le moteur d'un volume de secours (trouvé par `longhornvolume`) applique
   la dernière sauvegarde visible de son volume (`lastRestoredBackup`) ;
+* un volume de secours suit la dernière sauvegarde visible de son volume
+  (`status.lastBackup`, comme le contrôleur de volumes de Longhorn) ;
 * l'activation (`Standby: false`, `frontend: blockdev`) rend le volume
   `detached` non `Standby`, et note ce que le moteur avait appliqué à cet
-  instant (`activatedFrom`, pour le test « zéro perte ») ;
+  instant (`activatedFrom`, pour le test « zéro perte ») ; avec
+  `finish_on_activate`, Longhorn finit d'abord la restauration en cours ;
+* un PV statique sans `claimRef` peut être pris par n'importe quel PVC en
+  attente de la même classe ;
 * le webhook de Longhorn refuse un volume dont la backing image manque ;
 * un PVC lié à un PV statique passe `Bound`, une VM démarre ou s'arrête.
 
@@ -169,6 +174,7 @@ class FakeKube:
         self.backup_s = 5
         self.apply_s = 3
         self.restore_s = 10
+        self.finish_on_activate = False
 
     # -- outils de test --------------------------------------------------------
     def put(self, kind, obj):
@@ -257,6 +263,7 @@ class FakeKube:
             if not done:
                 continue
             latest = done[-1]["metadata"]["name"]
+            v.setdefault("status", {})["lastBackup"] = latest
             st = eng["status"]
             if st.get("lastRestoredBackup") == latest:
                 st.pop("_at", None)
@@ -297,7 +304,7 @@ class FakeKube:
                 if k == kind and (ns is None or n == ns)
                 and _match((o.get("metadata") or {}).get("labels") or {}, selector)]
 
-    def _validate(self, kind, obj):
+    def _validate(self, kind, obj, dry=False):
         md, spec = obj["metadata"], obj.get("spec") or {}
         if kind == rr.K_LH_VOLUME and spec.get("backingImage") and \
                 (rr.K_LH_BI, rr.NS, spec["backingImage"]) not in self.objs:
@@ -305,7 +312,8 @@ class FakeKube:
                                f'failed to get backing image {spec["backingImage"]}')
         if kind == rr.K_LH_BI:
             url = (spec.get("sourceParameters") or {}).get("backup-url")
-            if url not in self.store.bbis.values():
+            # dry-run avec une URL d'essai : accepté (à confirmer sur le banc)
+            if url not in self.store.bbis.values() and not (dry and str(url).startswith("dry-run://")):
                 raise RuntimeError("backing image backup not found")
         if kind == rr.K_LH_BACKUP and (rr.K_LH_SNAPSHOT, rr.NS, spec.get("snapshotName")) not in self.objs:
             raise RuntimeError("snapshot not found")
@@ -320,7 +328,7 @@ class FakeKube:
         md = obj["metadata"]
         self._guard("create", kind, md["name"], not dry_run, dry=dry_run)
         self.tick()
-        self._validate(kind, obj)
+        self._validate(kind, obj, dry_run)
         self.calls.append(("create", kind, md.get("namespace"), md["name"], "dry" if dry_run else ""))
         if dry_run:
             return copy.deepcopy(obj)
@@ -357,6 +365,9 @@ class FakeKube:
             self.at(2, self.sync_all)
         if kind == rr.K_LH_VOLUME and (patch.get("spec") or {}).get("Standby") is False:
             eng = self.objs.get((rr.K_LH_ENGINE, rr.NS, f"{name}-e-0")) or {"status": {}}
+            if self.finish_on_activate and eng["status"].get("_target"):
+                # Longhorn termine la restauration en cours avant d'activer
+                eng["status"]["lastRestoredBackup"] = eng["status"]["_target"]
             o["status"]["activatedFrom"] = eng["status"].get("lastRestoredBackup")
             if "activate" not in self.freeze:
                 self.at(1, lambda: o["status"].update(isStandby=False, state="detached"))
@@ -423,9 +434,26 @@ class FakeKube:
         if "backing-image" not in self.freeze:
             self.at(5, lambda: o["status"].update(diskFileStatusMap={"d1": {"state": "ready"}}))
 
+    def _on_PersistentVolume(self, o):
+        """Contrôleur de liaison : un PV sans `claimRef` est pris par un PVC
+        en attente (sans `volumeName`) de la même classe."""
+        if (o.get("spec") or {}).get("claimRef"):
+            return
+        for (k, ns, n), p in self.objs.items():
+            if k == rr.K_PVC and not p["spec"].get("volumeName") and \
+                    p["spec"].get("storageClassName") == o["spec"].get("storageClassName"):
+                o["spec"]["claimRef"] = {"namespace": ns, "name": n}
+                p["spec"]["volumeName"] = o["metadata"]["name"]
+                p.setdefault("status", {})["phase"] = "Bound"
+                return
+
     def _on_PersistentVolumeClaim(self, o):
         o["status"] = {"phase": "Pending"}
-        if "bind" not in self.freeze and (rr.K_PV, None, o["spec"].get("volumeName")) in self.objs:
+        pv = self.objs.get((rr.K_PV, None, o["spec"].get("volumeName")))
+        ref = ((pv or {}).get("spec") or {}).get("claimRef")
+        mine = ref is None or (ref.get("namespace"), ref.get("name")) == (o["metadata"]["namespace"],
+                                                                         o["metadata"]["name"])
+        if "bind" not in self.freeze and pv is not None and mine:
             self.at(1, lambda: o["status"].update(phase="Bound"))
 
     def _on_VirtualMachine(self, o):
@@ -755,6 +783,10 @@ def test_protect_dry_run_writes_nothing_and_reports_the_missing_backing_image(wo
     assert res["exit"] == 2 and [d["object"] for d in bad] == ["standby-volume"]
     assert "failed to get backing image" in bad[0]["message"]
     assert all(d.get("placeholder_url") for d in res["dry_run"] if d["object"] == "standby-volume")
+    # la backing image absente de la cible passe aussi au dry-run serveur
+    bi = [d for d in res["dry_run"] if d["object"] == "backing-image"]
+    assert [(d["name"], d["ok"], d["placeholder_url"]) for d in bi] == [("vmi-img1", True, True)]
+    assert ("create", rr.K_LH_BI, rr.NS, "vmi-img1", "dry") in w.dst.calls
     assert w.plan()["state"] == "draft"
 
 
@@ -1479,3 +1511,428 @@ def test_commands_refused_from_a_draft_plan(world, command):
 def test_resume_with_nothing_to_resume(tmp_path):
     w = protected(tmp_path)
     assert rr.resume(w.ctx())["code"] == "nothing-to-resume"
+
+
+# ---------------------------------------------------------------------------
+# Corrections après relecture
+# ---------------------------------------------------------------------------
+
+def _interrupt_activation_after(w, n):
+    """Annulation au (n+1)-ième patch d'activation sur la cible : n volumes
+    activés, les suivants restent en attente."""
+    seen = [0]
+
+    def hook(name):
+        seen[0] += 1
+        if seen[0] > n:
+            raise rr.Cancelled("signal 15")
+    w.dst.hooks[("patch", rr.K_LH_VOLUME)] = hook
+
+
+def _abandon_scenario(tmp_path, scenario):
+    w = protected(tmp_path, vms=("vm-a",))
+    if scenario == "half-activated":
+        _interrupt_activation_after(w, 1)
+        assert rr.failover(w.ctx())["exit"] == 3
+    elif scenario == "activated-before-bring-up":
+        w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+        assert rr.failover(w.ctx())["exit"] == 3
+    elif scenario == "failed-over":
+        assert rr.failover(w.ctx())["exit"] == 0
+    w.dst.hooks.clear()
+    return w
+
+
+@pytest.mark.parametrize("scenario,activated,carnet_kept,kept_kinds", [
+    # disque 1 activé, disque 2 encore en attente : rien ne part de la cible
+    ("half-activated", 1, True, {rr.K_LH_VOLUME, rr.K_LH_BI, rr.K_SECRET}),
+    ("activated-before-bring-up", 2, True, {rr.K_LH_VOLUME, rr.K_LH_BI, rr.K_SECRET}),
+    # bascule finie : la VM et ses secrets sont sur la cible, le carnet (copie) part
+    ("failed-over", 2, False, {rr.K_LH_VOLUME, rr.K_LH_BI, rr.K_SECRET, rr.K_PV, rr.K_PVC, rr.K_VM}),
+])
+def test_abandoning_an_activated_failover_keeps_everything_on_the_target(tmp_path, scenario, activated,
+                                                                         carnet_kept, kept_kinds):
+    w = _abandon_scenario(tmp_path, scenario)
+    vols = [v["target_volume"] for v in db.list_volumes(w.conn, w.pid)]
+    assert sum(w.dst.obj(rr.K_LH_VOLUME, rr.NS, v)["spec"]["Standby"] is False for v in vols) == activated
+    before = {k: copy.deepcopy(o) for k, o in w.dst.objs.items() if k in w.owned(w.dst)}
+    n_src, n_dst = len(w.src.mutations()), len(w.dst.mutations())
+    # --delete-backups refusé tant qu'une VM est (à moitié) activée, avant toute écriture
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert res["exit"] == 2 and res["code"] == "backups-in-use", res
+    assert res["facts"]["vms"] == ["default/vm-a"]
+    assert (len(w.src.mutations()), len(w.dst.mutations())) == (n_src, n_dst)
+    # abandon sans suppression des sauvegardes : rien ne part de la cible, sauf le carnet d'une VM montée
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0, res
+    carnet = (rr.K_SECRET, rp.CARNET_NAMESPACE, rp.carnet_name(w.pid, VMS["vm-a"]["uid"]))
+    for k, o in before.items():
+        if k == carnet and not carnet_kept:
+            continue
+        assert w.dst.objs.get(k) == o, k
+    assert (carnet in w.dst.objs) == carnet_kept
+    deletes = [c for c in mut_keys(w.dst, "delete")]
+    assert deletes == ([] if carnet_kept else [("delete", rr.K_SECRET, rp.CARNET_NAMESPACE, carnet[2], "")])
+    for v in vols:
+        assert any(x.startswith(f"volume {rr.NS}/{v}") for x in res["left"]), (v, res["left"])
+    assert set(res["left_selectors"]) == kept_kinds
+    assert set(res["left_selectors"].values()) == {f"{rp.LABEL_PLAN}={w.pid}"}
+    assert w.plan()["state"] == "unprotected"
+    # aucune ligne de volume n'est passée à `removed`
+    assert "removed" not in {v["state"] for v in db.list_volumes(w.conn, w.pid)}
+    # les sauvegardes du plan sont toujours là
+    assert [k for k in w.owned(w.src) if k[0] == rr.K_LH_BACKUP]
+
+
+def test_unprotect_of_a_protected_plan_still_deletes_backups(tmp_path):
+    """Témoin du tableau précédent : sans activation, tout part."""
+    w = protected(tmp_path, vms=("vm-a",))
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert res["exit"] == 0 and res["left"] == [] and res["backups_deleted"] >= 2
+    assert w.owned(w.dst) == [] and w.owned(w.src) == []
+
+
+def test_unprotect_rerun_remembers_the_held_vms(tmp_path):
+    """Les ressources passent à `unprotecting` : la relance retrouve les VMs
+    gardées dans la ligne `runs`, même si la base ne dit plus rien."""
+    w = _abandon_scenario(tmp_path, "half-activated")
+    w.src.down = True
+    assert rr.unprotect(w.ctx())["exit"] == 1
+    # la base a oublié l'état de bascule ; la cible aussi ne peut plus le dire
+    w.conn.execute("UPDATE plan_volumes SET state = 'standby'")
+    w.conn.commit()
+    for v in db.list_volumes(w.conn, w.pid):
+        w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["spec"]["Standby"] = True
+    w.src.down = False
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0 and len([x for x in res["left"] if x.startswith("volume ")]) == 2
+
+
+def test_failover_pv_is_prebound_to_its_claim(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    # un PVC étranger en attente, même classe que le disque de données
+    w.dst.put(rr.K_PVC, {"metadata": {"name": "squatter", "namespace": "default"},
+                         "spec": {"storageClassName": "harvester-longhorn"}, "status": {"phase": "Pending"}})
+    res = rr.failover(w.ctx(timeouts={"bind": 30}))
+    assert res["exit"] == 0, res
+    for d in VMS["vm-a"]["disks"]:
+        sb = rp.target_volume_name(w.pid, VMS["vm-a"]["uid"], d, 1, "vm-a")
+        assert w.dst.obj(rr.K_PV, None, sb)["spec"]["claimRef"] == {"namespace": "default", "name": f"vm-a-{d}"}
+    assert not w.dst.obj(rr.K_PVC, "default", "squatter")["spec"].get("volumeName")
+
+
+def test_static_pv_claim_ref():
+    pv = rp.static_pv("v", 1, "Block", ["ReadWriteMany"], "c", claim_ref=("ns", "pvc"))
+    assert pv["spec"]["claimRef"] == {"namespace": "ns", "name": "pvc"}
+    assert "claimRef" not in rp.static_pv("v", 1, "Block", ["ReadWriteMany"], "c")["spec"]
+
+
+def _late_backups(w, vms, prefix, at=None):
+    for n in vms:
+        for d in VMS[n]["disks"]:
+            w.src.make_backup(f"pvc-{n}-{d}", f"{prefix}-{n}-{d}", snap_at=at)
+
+
+def test_unplanned_failover_records_the_points_actually_activated(tmp_path):
+    """Longhorn finit une restauration en cours au moment de l'activation :
+    les points rendus sont relus après elle, pas ceux lus avant."""
+    w = protected(tmp_path, vms=("vm-b",))
+    w.src.down = True
+    w.dst.finish_on_activate = True
+    race_at = w.clock.now() + 500
+    fired = [False]
+
+    def race(_name):
+        # entre la lecture des points et l'activation, une sauvegarde plus récente arrive
+        if not fired[0]:
+            fired[0] = True
+            w.clock.t = race_at
+            w.src.down = False                # les outils du faux lisent la source
+            _late_backups(w, ("vm-b",), "backup-race", at=iso(race_at))
+            w.src.down = True
+            for d in VMS["vm-b"]["disks"]:
+                w.dst.sync_volume(f"pvc-vm-b-{d}")
+    w.dst.hooks[("patch", rr.K_LH_VOLUME)] = race
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 0, res
+    for d in VMS["vm-b"]["disks"]:
+        sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], d, 1, "vm-b")
+        assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"] == f"backup-race-vm-b-{d}"
+    assert res["lost_after"]["default/vm-b"] == iso(race_at)
+    applied = db.list_runs(w.conn, w.pid)[-1]["points"]["applied"][VMS["vm-b"]["uid"]]
+    assert {p["backup"] for p in applied.values()} == {f"backup-race-vm-b-{d}" for d in VMS["vm-b"]["disks"]}
+    done = events(w, step="done", code="failed-over", resource_uid=VMS["vm-b"]["uid"])
+    assert len(done) == 1 and json.loads(done[0]["facts"])["lost_after"] == iso(race_at)
+
+
+def test_unplanned_failover_waits_for_the_last_backup_before_activation(tmp_path):
+    w = protected(tmp_path, vms=("vm-b",))
+    _late_backups(w, ("vm-b",), "backup-late")
+    w.src.down = True
+    w.dst.apply_s = 400                       # le moteur met longtemps à appliquer la dernière
+    res = rr.failover(w.ctx(timeouts={"unplanned_catchup": 60}), planned=False, yes=True)
+    assert res["exit"] == 1 and res["code"] == "timeout" and "undone" in res["message"]
+    assert events(w, step="catch-up", code="timeout")
+    assert all(w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["spec"]["Standby"]
+               for v in db.list_volumes(w.conn, w.pid))
+    assert w.plan()["state"] == "protected"
+    # avec le temps qu'il faut, la bascule active la dernière sauvegarde
+    res = rr.failover(w.ctx(timeouts={"unplanned_catchup": 900}), planned=False, yes=True)
+    assert res["exit"] == 0, res
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"] == "backup-late-vm-b-d1"
+
+
+def test_forced_unplanned_failover_fences_the_live_source_first(tmp_path):
+    w = protected(tmp_path, vms=("vm-b",))
+    n_src, n_dst = len(w.src.calls), len(w.dst.calls)
+    res = rr.failover(w.ctx(), planned=False, yes=True, force_unplanned=True)
+    assert res["exit"] == 0, res
+    assert len(w.dst.calls) > n_dst
+    # ordre des étapes, lu dans le journal (une ligne par début d'étape)
+    seq = []
+    for e in events(w):
+        if e["operation"] != "failover" or e["code"] != "start":
+            continue
+        if e["step"] not in seq:
+            seq.append(e["step"])
+    assert seq[:5] == ["stop-source", "remove-job-label", "final-resync", "catch-up", "activate"], seq
+    job = rp.recurring_job_name(w.pid, VMS["vm-b"]["uid"])
+    assert w.src.obj(rr.K_LH_JOB, rr.NS, job) is None
+    for d in VMS["vm-b"]["disks"]:
+        assert rp.job_label(job)[0] not in w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-vm-b-{d}")["metadata"]["labels"]
+    vm = w.src.obj(rr.K_VM, "default", "vm-b")
+    assert vm["spec"]["runStrategy"] == "Halted" and w.src.obj(rr.K_VMI, "default", "vm-b") is None
+    assert vm["metadata"]["annotations"][rr.FAILED_OVER_TO] == "harvlab2/default/vm-b"
+    assert rr.STOPPED_ANNOTATION not in vm["metadata"]["annotations"]
+    assert res["fenced"] == {"default/vm-b": "source-fenced"}
+    assert db.list_runs(w.conn, w.pid)[-1]["points"]["force_unplanned"] is True
+    # la source a été clôturée avant que la cible ne relise quoi que ce soit
+    src_fence = [i for i, c in enumerate(w.src.calls[n_src:]) if c[0] == "delete" and c[1] == rr.K_LH_JOB]
+    assert src_fence and not [c for c in w.src.calls[n_src:][src_fence[0]:]
+                              if c[0] in ("create", "patch") and c[1] in (rr.K_LH_SNAPSHOT, rr.K_LH_BACKUP)]
+
+
+def test_forced_unplanned_failover_undone_before_activation_restores_the_source(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("patch", rr.K_LH_BV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    res = rr.failover(w.ctx(), planned=False, yes=True, force_unplanned=True)
+    assert res["exit"] == 3 and "undone" in res["message"]
+    w.clock.sleep(10)
+    job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])
+    assert w.src.obj(rr.K_LH_JOB, rr.NS, job) is not None
+    for d in VMS["vm-a"]["disks"]:
+        assert w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-vm-a-{d}")["metadata"]["labels"][rp.job_label(job)[0]] == "enabled"
+    assert w.src.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+    assert w.plan()["state"] == "protected"
+
+
+@pytest.mark.parametrize("mode,source_after", [
+    ("planned", "gone"), ("planned", "back"),
+    ("unplanned", "gone"), ("unplanned", "back"),
+    ("forced", "gone"), ("forced", "back"),
+])
+def test_resume_after_activation_needs_only_the_target(tmp_path, mode, source_after):
+    w = protected(tmp_path, vms=("vm-a",))
+    if mode == "unplanned":
+        w.src.down = True
+    w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    res = rr.failover(w.ctx(), planned=mode == "planned", yes=True, force_unplanned=mode == "forced")
+    assert res["exit"] == 3 and "run failover again" in res["message"], res
+    w.dst.hooks.clear()
+    w.src.down = source_after == "gone"
+    res = rr.resume(w.ctx())
+    assert res["exit"] == 0, res
+    assert res["mode"] == ("planned" if mode == "planned" else "unplanned")
+    assert w.dst.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+    assert w.plan()["state"] == "failed_over"
+    run = db.list_runs(w.conn, w.pid)[-1]
+    assert run["result"] == "ok" and run["points"]["force_unplanned"] is (mode == "forced")
+    if source_after == "back":
+        vm = w.src.obj(rr.K_VM, "default", "vm-a")
+        assert vm["metadata"]["annotations"][rr.FAILED_OVER_TO] == "harvlab2/default/vm-a"
+        assert vm["spec"]["runStrategy"] == "Halted"
+
+
+def test_resume_of_a_partial_failover_keeps_its_vms(tmp_path):
+    w = protected(tmp_path)
+    w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    assert rr.failover(w.ctx(), vms=["default/vm-b"])["exit"] == 3
+    w.dst.hooks.clear()
+    assert rr.resume(w.ctx())["exit"] == 0
+    states = {r["name"]: r["state"] for r in db.list_resources(w.conn, w.pid)}
+    assert states == {"vm-a": "protected", "vm-b": "failed_over"}
+    assert w.src.obj(rr.K_VMI, "default", "vm-a") is not None
+
+
+def test_protect_rerun_after_a_partial_failover_leaves_the_failed_over_vm_alone(tmp_path):
+    w = protected(tmp_path)
+    assert rr.failover(w.ctx(), vms=["default/vm-b"])["exit"] == 0
+    n_src, n_dst = len(w.src.mutations()), len(w.dst.mutations())
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0, res
+    job_b = rp.recurring_job_name(w.pid, VMS["vm-b"]["uid"])
+    assert w.src.obj(rr.K_LH_JOB, rr.NS, job_b) is None
+    for d in VMS["vm-b"]["disks"]:
+        labels = w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-vm-b-{d}")["metadata"]["labels"]
+        assert rp.job_label(job_b)[0] not in labels
+    touched = {c[3] for c in w.src.mutations()[n_src:] + w.dst.mutations()[n_dst:]}
+    assert not [n for n in touched if "vm-b" in n or job_b in n], touched
+    states = {r["name"]: r["state"] for r in db.list_resources(w.conn, w.pid)}
+    assert states == {"vm-a": "protected", "vm-b": "failed_over"} and w.plan()["state"] == "protected"
+    assert events(w, step="skip", code="failed-over", resource_uid=VMS["vm-b"]["uid"])
+
+
+def test_protect_never_reuses_an_activated_volume_as_a_standby(world):
+    w = world
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d2", 1, "vm-b")
+    w.dst.put(rr.K_LH_VOLUME, {"metadata": {"name": sb, "namespace": rr.NS,
+                                            "labels": rp.plan_labels(w.pid, 1, VMS["vm-b"]["uid"])},
+                               "spec": {"Standby": False, "fromBackup": f"{BT_URL}?backup=b&volume=pvc-vm-b-d2"},
+                               "status": {"isStandby": False}})
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 2 and res["code"] == "standby-activated" and res["facts"]["volumes"] == [sb]
+    assert mut_keys(w.src) == [] and mut_keys(w.dst) == []
+
+
+@pytest.mark.parametrize("mapping,code", [
+    ({"default/vm-a-data": "vm-a-data-dr"}, None),
+    ({"vm-a-data": "vm-a-data-dr"}, "bad-reference"),
+    ({"default/vm-a-data": "dr/vm-a-data"}, "bad-mapping"),
+    ({"default/vm-a-data": "Bad"}, "bad-mapping"),
+])
+def test_claims_mapping_is_keyed_by_namespace_and_claim(mapping, code):
+    req = {"name": "p", "source_cluster": "a", "target_cluster": "b", "rpo_objective_s": "15m",
+           "vms": ["default/vm-a"], "mappings": {"claims": mapping}}
+    if code is None:
+        assert rp.normalize_plan(req)["mappings"]["claims"] == mapping
+    else:
+        with pytest.raises(rp.PlanError) as e:
+            rp.normalize_plan(req)
+        assert e.value.code == code
+
+
+CLAIMS = {"networks": {"default/prod": "default/lab-net"}, "claims": {"default/vm-a-data": "vm-a-data-dr"}}
+
+
+@pytest.mark.parametrize("taken,warned", [("vm-a-data-dr", True), ("vm-a-data", False)])
+def test_claims_mapping_reaches_the_pvc_check(tmp_path, taken, warned):
+    w = World(tmp_path, vms=("vm-a",), mappings=CLAIMS)
+    w.dst.put(rr.K_PVC, {"metadata": {"name": taken, "namespace": "default"}, "spec": {}})
+    res = rr.protect(w.ctx(), dry_run=True)
+    hits = [f for f in res["findings"] if f["code"] == "target-pvc-taken"]
+    assert bool(hits) == warned and (not hits or hits[0]["facts"]["name"] == f"default/{taken}")
+
+
+def test_claims_mapping_through_works_carnet_and_failover(tmp_path):
+    w = World(tmp_path, vms=("vm-a",), mappings=CLAIMS)
+    c = w.ctx()
+    src = rr.collect_source(c)
+    works = rr.build_works(c, src, rr.collect_target(c, ["default"]))
+    assert {d["claim"]: d["target_claim"] for d in works[0]["disks"]} == \
+        {"vm-a-root": "vm-a-root", "vm-a-data": "vm-a-data-dr"}
+    assert rr.protect(w.ctx())["exit"] == 0
+    carnet = rr.read_carnet(w.dst.obj(rr.K_SECRET, rp.CARNET_NAMESPACE, rp.carnet_name(w.pid, VMS["vm-a"]["uid"])))
+    assert {v["claim"]: v["target_claim"] for v in carnet["volumes"]}["vm-a-data"] == "vm-a-data-dr"
+    claims = {v["name"]: v["persistentVolumeClaim"]["claimName"]
+              for v in carnet["vm"]["spec"]["template"]["spec"]["volumes"] if "persistentVolumeClaim" in v}
+    assert claims == {"root": "vm-a-root", "data": "vm-a-data-dr"}
+    assert rr.failover(w.ctx())["exit"] == 0
+    assert w.dst.obj(rr.K_PVC, "default", "vm-a-data-dr")["status"]["phase"] == "Bound"
+    assert w.dst.obj(rr.K_PVC, "default", "vm-a-data") is None
+
+
+def test_left_lists_secrets_namespace_and_backing_images(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",), options={"create_namespace": True},
+                  mappings={"networks": {"default/prod": "default/lab-net"}, "namespaces": {"default": "dr"}})
+    assert rr.failover(w.ctx())["exit"] == 0
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0, res
+    for item in ("secret dr/vm-a-cloudinit", "namespace dr", f"backingimage {rr.NS}/vmi-img1 (in use)", "vm dr/vm-a"):
+        assert item in res["left"], (item, res["left"])
+    assert {rr.K_SECRET, rr.K_NS, rr.K_LH_BI}.issubset(res["left_selectors"])
+    left = events(w, step="left", code="left")
+    assert left and left[-1]["host"] == "harvlab2"
+
+
+def test_unprotect_removes_only_the_default_group_label_it_added(tmp_path):
+    w = World(tmp_path, vms=("vm-b",))
+    w.src.obj(rr.K_LH_VOLUME, rr.NS, "pvc-vm-b-d3")["metadata"]["labels"] = {rr.DEFAULT_GROUP_LABEL: "enabled"}
+    assert rr.protect(w.ctx())["exit"] == 0
+    flags = {v["disk"]: v["default_label_added"] for v in db.list_volumes(w.conn, w.pid)}
+    assert flags == {"d1": 1, "d2": 1, "d3": 0}
+    assert rr.unprotect(w.ctx())["exit"] == 0
+    for d, kept in (("d1", False), ("d2", False), ("d3", True)):
+        labels = w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-vm-b-{d}")["metadata"]["labels"]
+        assert (rr.DEFAULT_GROUP_LABEL in labels) == kept, d
+
+
+@pytest.mark.parametrize("command,prep", [
+    ("protect", None), ("failover", "protect"), ("measure_start", None), ("unprotect", "protect"),
+])
+def test_preflight_read_failures_return_the_result_contract(tmp_path, command, prep):
+    w = protected(tmp_path, vms=("vm-a",)) if prep else World(tmp_path, vms=("vm-a",))
+    kube = w.src if command == "measure_start" else w.dst
+
+    def boom(_name):
+        raise RuntimeError("etcdserver: leader changed")
+    kube.hooks[("list", rr.K_SC if command != "unprotect" else rr.K_LH_VOLUME)] = boom
+    if command == "failover":
+        w.dst.hooks[("list", rr.K_SC)] = boom
+    n = len(w.src.mutations()), len(w.dst.mutations())
+    res = getattr(rr, command)(w.ctx())
+    assert isinstance(res, dict) and res["exit"] == 1 and res["code"] == "failed", res
+    assert db.get_lock(w.conn, w.pid) is None
+    assert (len(w.src.mutations()), len(w.dst.mutations())) == n
+    assert events(w, step="check", code="failed")
+
+
+def test_protect_cancel_restores_the_reused_measure_job(world):
+    w = world
+    assert rr.measure_start(w.ctx(), "1m")["exit"] == 0
+    job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])
+    before = copy.deepcopy(w.src.obj(rr.K_LH_JOB, rr.NS, job)["spec"])
+    w.src.hooks[("create", rr.K_LH_SNAPSHOT)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    res = rr.protect(w.ctx(), interval="5m")
+    assert res["exit"] == 3
+    after = w.src.obj(rr.K_LH_JOB, rr.NS, job)["spec"]
+    assert after == before and after["cron"] == "*/1 * * * *"
+
+
+def test_carnet_namespace_created_by_someone_else_at_the_same_time(world):
+    w = world
+
+    def race(_name):
+        w.dst.put(rr.K_NS, {"metadata": {"name": rp.CARNET_NAMESPACE}})
+    w.dst.hooks[("create", rr.K_NS)] = race
+    assert rr.protect(w.ctx())["exit"] == 0
+
+
+def test_plan_events_and_delete_backups_have_a_host(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    assert rr.unprotect(w.ctx(), delete_backups=True, yes=True)["exit"] == 0
+    # les passages d'état sont écrits par le registre (replication_db), hors du déroulé
+    rows = [e for e in events(w) if e["step"] != "state"]
+    assert all(e["host"] for e in rows), [e for e in rows if not e["host"]][:3]
+    assert {(e["side"], e["host"]) for e in events(w, step="delete-backups")} == \
+        {("source", "harvlab"), ("target", "harvlab2")}
+
+
+def test_failover_dry_runs_the_vm_once(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    assert rr.failover(w.ctx())["exit"] == 0
+    assert len([c for c in w.dst.calls if c[0] == "create" and c[1] == rr.K_VM and c[4] == "dry"]) == 1
+
+
+def test_unprotect_reads_the_target_when_the_database_forgot_the_failover(tmp_path):
+    """Base restaurée d'avant la bascule : la cible dit seule qu'un volume
+    est activé, et cela suffit à tout garder."""
+    w = _abandon_scenario(tmp_path, "half-activated")
+    w.conn.execute("UPDATE plan_resources SET state = 'protected', error_origin = ''")
+    w.conn.execute("UPDATE plan_volumes SET state = 'standby'")
+    w.conn.execute("UPDATE plans SET state = 'protected', error_origin = ''")
+    w.conn.commit()
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert res["exit"] == 2 and res["code"] == "backups-in-use"
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0 and mut_keys(w.dst, "delete") == []
