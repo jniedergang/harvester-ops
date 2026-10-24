@@ -31,12 +31,13 @@ import re
 import secrets
 import shlex
 import time
+import uuid as uuidlib
 import xml.etree.ElementTree as ET
 
 import kvm_host as kh
 
 OP_KINDS = ("invalid", "refused", "notfound", "needs-force", "timeout", "failed",
-            "plan-changed")
+            "plan-changed", "changed")
 
 # nom d'un instantané créé par la console (un instantané existant, créé
 # ailleurs, est désigné par tout nom accepté par check_vm_name)
@@ -58,6 +59,8 @@ REASON_UNKNOWN = "could not prove that no other VM uses it"
 REASON_NOT_REQUESTED = "storage removal not requested"
 REASON_SHARED_STORAGE = "shared-storage: cannot prove"
 REASON_MISSING = "file not found"
+REASON_SEED = "cloud-init seed of this VM"
+REASON_SEED_CLONE = "cloud-init seed: a new one is written for the copy"
 
 # pools dont les volumes peuvent servir à plusieurs hôtes
 _SHARED_POOL_TYPES = ("netfs", "gluster", "rbd", "iscsi", "iscsi-direct", "sheepdog",
@@ -837,8 +840,13 @@ def _shared_storage(survey, entry):
 def _owned(survey, vm, acknowledged=frozenset()):
     """Disques d'une VM avec ce qu'on peut en faire (voir owned_disks)."""
     disks, candidates = [], []
+    seed = vm.get("seed")
     for d in vm.get("disks") or []:
         loc = survey.locate(d)
+        # volume cloud-init écrit par la console pour cette VM (`<hops:seed>`) :
+        # un CD-ROM, mais possédé ; supprimable si personne d'autre ne le cite
+        is_seed = bool(seed and d.get("type") == "volume" and d.get("source")
+                       == f"{seed['pool']}/{seed['volume']}")
         entry = {"target": d.get("target"), "source": d.get("source"), "pool": loc["pool"],
                  "volume": loc["volume"], "path": loc["path"], "format": d.get("format"),
                  "kind": None, "deletable": False, "reason": None}
@@ -847,7 +855,9 @@ def _owned(survey, vm, acknowledged=frozenset()):
             if loc["volume"] not in survey.pool_volumes(loc["pool"]):
                 entry.update(pool=None, volume=None)
         entry["kind"] = "volume" if entry["volume"] else d.get("type")
-        if d.get("device", "disk") != "disk" or d.get("readonly"):
+        if is_seed:
+            entry["seed"] = True
+        if (d.get("device", "disk") != "disk" or d.get("readonly")) and not is_seed:
             entry["reason"] = REASON_RO
         elif not d.get("source"):
             entry["reason"] = "empty drive"
@@ -884,6 +894,8 @@ def _owned(survey, vm, acknowledged=frozenset()):
             e["reason"] = REASON_UNKNOWN
         else:
             e["deletable"] = True
+            if e.get("seed"):
+                e["reason"] = REASON_SEED
     # un disque gardé du domaine visé qui a pour base un disque supprimable
     # garde aussi celui-ci (sa propre surcouche, supprimée avec lui, ne compte pas)
     changed = True
@@ -904,6 +916,8 @@ def _owned(survey, vm, acknowledged=frozenset()):
                 changed = True
     for e in candidates:
         e.pop("_keys", None)
+    for e in disks:
+        e.pop("seed", None)
     return disks
 
 
@@ -988,8 +1002,21 @@ def clone_plan(host, name, new_name):
     regenerated = [] if own_refusals else _clone_tree(xml, new_name, {})[1]
     survey = _Survey(host, exclude=name)
     disks, shared = [], []
+    seed_plan = None
+    vseed = vm.get("seed")
     for d in vm.get("disks") or []:
         t = d.get("target") or "?"
+        if vseed and d.get("type") == "volume" and d.get("source") == \
+                f"{vseed['pool']}/{vseed['volume']}":
+            # le seed n'est jamais partagé avec la copie : il est réécrit avec
+            # le nouveau nom d'hôte et l'uuid de la copie
+            new_vol = seed_volume_name(new_name)
+            seed_plan = {"target": t, "pool": vseed["pool"], "volume": vseed["volume"],
+                         "new_volume": new_vol}
+            if new_vol in survey.pool_volumes(vseed["pool"]):
+                refusals.append(f"a volume named {new_vol} already exists in {vseed['pool']}")
+            shared.append({"target": t, "source": d.get("source"), "reason": REASON_SEED_CLONE})
+            continue
         if d.get("device", "disk") != "disk" or d.get("readonly"):
             shared.append({"target": t, "source": d.get("source"), "reason": REASON_RO})
             continue
@@ -1113,7 +1140,62 @@ def clone_plan(host, name, new_name):
             "shared": shared, "space": list(space.values()), "nics": len(vm.get("nics") or []),
             "nvram": bool(nv), "uefi_entries_lost": bool(nv),
             "tpm_state_lost": bool(tpm and tpm.get("backend") == "emulator"),
-            "regenerated": regenerated}
+            "regenerated": regenerated, "seed": seed_plan}
+
+
+def seed_volume_name(vm):
+    """Nom du volume cloud-init d'une VM (même règle que kvm_xml)."""
+    return f"{vm}-cidata.iso"
+
+
+# lecture d'une ISO de seed (petite) par libvirt, en base64 sur la sortie ;
+# `virsh -q` : sans lui, un saut de ligne final s'ajoute aux octets
+_SEED_READ = ('virsh -q -c "$1" vol-download --pool "$2" --vol "$3" --file /dev/stdout '
+              '| base64 -w0')
+
+
+def read_seed(host, pool, volume):
+    """Fichiers d'un seed NoCloud lu sur l'hôte : {nom Joliet: octets}."""
+    import base64
+    import iso9660
+    uri = host.decl.get("uri", "qemu:///system")
+    out = host.run(["sh", "-c", _SEED_READ, "sh", uri, pool, volume], idempotent=True)
+    try:
+        return iso9660.read_iso(base64.b64decode(out.strip(), validate=True))["files"]
+    except (ValueError, iso9660.IsoError, KeyError) as exc:
+        raise OpError("failed", f"the cloud-init seed {pool}/{volume} could not be read "
+                      f"({exc.__class__.__name__})") from None
+
+
+def _clone_seed(host, plan, new_name, uid, created):
+    """Réécrit le seed d'une copie : user-data, network-config et
+    vendor-data repris, `instance-id` = uuid de la copie, nom d'hôte tiré du
+    nouveau nom ; téléversé sous `<copie>-cidata.iso`."""
+    import kvm_create
+    sp = plan["seed"]
+    files = read_seed(host, sp["pool"], sp["volume"])
+    data = kvm_create.seed_iso({"user_data": files.get("user-data"),
+                                "network_data": files.get("network-config")}, uid,
+                               kvm_create.guest_hostname(new_name),
+                               vendor_data=files.get("vendor-data"))
+    created.append({"kind": "volume", "pool": sp["pool"], "volume": sp["new_volume"]})
+    kvm_create.upload_bytes(host, sp["pool"], sp["new_volume"], data)
+
+
+def _set_clone_identity(xml_text, uid, seed_plan):
+    """uuid tiré par la console et `<hops:seed>` de la copie."""
+    _register_namespaces(xml_text)
+    root = ET.fromstring(xml_text)
+    el = root.find("uuid")
+    if el is None:
+        el = ET.Element("uuid")
+        root.insert(list(root).index(root.find("name")) + 1, el)
+    el.text = uid
+    ns = kh.HOPS_NS
+    s_el = root.find(f"metadata/{{{ns}}}vm/{{{ns}}}seed")
+    if s_el is not None and seed_plan:
+        s_el.set("volume", seed_plan["new_volume"])
+    return ET.tostring(root, encoding="unicode")
 
 
 def volume_xml(name, capacity, fmt, permissions=None):
@@ -1473,6 +1555,13 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
                 copies.append({"target": e["target"], "destination": e["destination"],
                                "pool": None})
             step(sid, "done", copies[-1]["destination"])
+        uid = None
+        if plan.get("seed"):
+            step("seed", "running", f"{plan['seed']['pool']}/{plan['seed']['new_volume']}")
+            uid = str(uuidlib.uuid4())
+            _clone_seed(host, plan, new_name, uid, created)
+            disk_map[plan["seed"]["target"]] = plan["seed"]["new_volume"]
+            step("seed", "done", plan["seed"]["new_volume"])
         step("define", "running", new_name)
         # la source a pu être démarrée pendant la copie : la copie serait incohérente
         state = host.virsh("domstate", "--domain", name, idempotent=True).strip()
@@ -1480,6 +1569,8 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
             raise OpError("failed", f"{name} was started during the copy (state: {state}): "
                           "the copy is discarded")
         new_xml = clone_xml(xml, new_name, disk_map)
+        if uid:
+            new_xml = _set_clone_identity(new_xml, uid, plan["seed"])
         created.append({"kind": "domain", "name": new_name, "sources": sources})
         host.run_input(["env", "LC_ALL=C", *host._virsh_argv(("define", "/dev/stdin"))], new_xml,
                        secrets=_passwords(xml))

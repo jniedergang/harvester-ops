@@ -27,8 +27,10 @@ import ipaddress
 import os
 import re
 import secrets
+import select
 import shlex
 import subprocess
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -118,6 +120,17 @@ class KvmError(Exception):
         self.message = message
         self.host = host
         self.rc = rc
+
+
+class Cancelled(Exception):
+    """Opération arrêtée par l'annulation (`cancel()` vrai) : pour un envoi
+    en flux, ssh a été arrêté et `sent` octets étaient partis. Ce n'est pas
+    une KvmError : rien n'a échoué côté hôte, l'appelant défait ce qu'il
+    avait commencé."""
+
+    def __init__(self, sent=0, message=None):
+        super().__init__(message or f"cancelled after {sent} bytes sent")
+        self.sent = sent
 
 
 class CmdOutput(str):
@@ -261,6 +274,10 @@ def _ssh_base(decl, state):
         "ssh",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=10",
+        # rien que les erreurs sur stderr : la bannière de connexion d'un
+        # sshd durci (`Banner /etc/issue.net`, vue sur node2) ne doit jamais
+        # entrer dans un message d'erreur lu sur la sortie d'erreur
+        "-o", "LogLevel=ERROR",
         "-o", "StrictHostKeyChecking=yes",
         "-o", f"UserKnownHostsFile={_ssh_opt_path(known)}",
         # seule l'empreinte épinglée compte, pas celles du système
@@ -344,11 +361,27 @@ def close_master(decl, state, runner=subprocess.run, timeout=10):
     return getattr(res, "returncode", 1) == 0
 
 
+# envoi en flux (run_stream) : taille d'un bloc lu dans la source, morceau
+# écrit dans le tuyau entre deux contrôles de l'annulation, délai laissé à
+# ssh pour s'arrêter avant SIGKILL, attente de la fin de la commande
+# distante une fois tout envoyé (libvirt vide ses tampons)
+STREAM_CHUNK = 4 << 20
+STREAM_PIECE = 64 << 10
+STREAM_KILL_GRACE = 2.0
+STREAM_FINISH_TIMEOUT = 600
+# une seconde entre deux appels de `progress`
+STREAM_PROGRESS_EVERY = 1.0
+
+
 class VirshHost:
     """Un hôte KVM déclaré, interrogé par `virsh` à travers SSH."""
 
     def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20,
-                 read_retries=READ_RETRIES, retry_delay=READ_RETRY_DELAY, sleep=time.sleep):
+                 read_retries=READ_RETRIES, retry_delay=READ_RETRY_DELAY, sleep=time.sleep,
+                 popen=subprocess.Popen, clock=time.monotonic):
+        # `popen` et `clock` : remplaçables par les tests de run_stream
+        self.popen = popen
+        self.clock = clock
         self.decl = kvm_decl.normalize(decl)
         self.state = state
         self.runner = runner
@@ -398,12 +431,13 @@ class VirshHost:
         """Attend avant la reprise n° `attempt` (1, 2, ...)."""
         self.sleep(self.retry_delay * attempt)
 
-    def run(self, remote_argv, timeout=None, idempotent=False):
+    def run(self, remote_argv, timeout=None, idempotent=False, fresh=False):
         """Lance une commande quelconque sur l'hôte ; rend sa sortie.
         `idempotent=True` (lecture seulement) : une coupure du transport est
         rejouée `read_retries` fois sur une connexion neuve. Une écriture
-        (défaut) n'est jamais rejouée : son issue est inconnue."""
-        res = self._ssh(remote_argv, timeout)
+        (défaut) n'est jamais rejouée : son issue est inconnue. `fresh` :
+        connexion propre dès le premier essai (commande longue)."""
+        res = self._ssh(remote_argv, timeout, fresh=fresh)
         attempt = 0
         while (idempotent and res.returncode != 0 and attempt < self.read_retries
                and transport_lost(res.returncode, res.stderr)):
@@ -433,6 +467,140 @@ class VirshHost:
                              ssh_level=res.returncode == SSH_RC,
                              secrets=input_secrets(data, secrets))
         return res.stdout or ""
+
+    def run_stream(self, remote_argv, source, size=None, progress=None, cancel=None,
+                   limit_bps=None, finish_timeout=STREAM_FINISH_TIMEOUT):
+        """Envoie `source` (chemin ou fichier binaire ouvert) sur l'entrée
+        standard de `remote_argv`, lancé sur une connexion PROPRE
+        (`ControlMaster=no`, `ControlPath=none`) : une écriture longue ne
+        passe jamais par la connexion partagée, qu'un plantage de sshd sous
+        sessions multiplexées couperait, et elle ne bloque pas les lectures.
+
+        Écrit par morceaux dans le tuyau de ssh (non bloquant) : `cancel()`
+        est consulté entre deux morceaux et pendant une attente, une entrée
+        bouchée ne fige donc jamais l'annulation. `progress(octets)` au plus
+        une fois par seconde, et une dernière fois à la fin. `limit_bps` :
+        débit plafonné (seau à jetons). `size` : octets attendus ; une source
+        plus courte est une erreur (le volume serait incomplet).
+
+        Annulation : entrée fermée, SIGTERM, `STREAM_KILL_GRACE` secondes,
+        SIGKILL ; lève Cancelled. Échec de la commande ou de ssh :
+        KvmError classée comme run(), chemins de l'état masqués. Jamais
+        rejoué (écriture). Rend la sortie standard de la commande."""
+        if limit_bps is not None and (isinstance(limit_bps, bool) or not isinstance(
+                limit_bps, (int, float)) or limit_bps <= 0):
+            raise ValueError("limit_bps must be a positive number")
+        argv = ssh_argv(self.decl, self.state, remote_argv, fresh=True)
+        try:
+            kvm_decl.ensure_ssh_dir(self.state)
+        except OSError:
+            pass
+        own = not hasattr(source, "read")
+        src = open(source, "rb") if own else source
+        out_f, err_f = tempfile.TemporaryFile(), tempfile.TemporaryFile()
+        try:
+            try:
+                proc = self.popen(argv, stdin=subprocess.PIPE, stdout=out_f, stderr=err_f,
+                                  bufsize=0)
+            except OSError as e:
+                raise KvmError("failed", f"{self.name}: failed: cannot run ssh ({e.strerror})",
+                               host=self.name) from e
+            sent, broken = self._feed(proc, src, progress, cancel, limit_bps)
+            try:
+                rc = proc.wait(timeout=finish_timeout)
+            except subprocess.TimeoutExpired:
+                self._stop(proc)
+                raise KvmError("timeout", f"{self.name}: timeout: the host did not finish "
+                               f"within {finish_timeout}s after the last byte",
+                               host=self.name) from None
+            out_f.seek(0)
+            err_f.seek(0)
+            stdout = out_f.read().decode("utf-8", "replace")
+            stderr = err_f.read().decode("utf-8", "replace")
+            if rc != 0:
+                raise make_error(self.name, stderr, rc, self._secret_paths(),
+                                 ssh_level=rc == SSH_RC)
+            if broken or (size is not None and sent != size):
+                what = (f"the host stopped reading after {sent} bytes" if broken else
+                        f"{sent} bytes sent, {size} expected: the source changed")
+                raise KvmError("failed", f"{self.name}: failed: {what}", host=self.name)
+            return stdout
+        finally:
+            out_f.close()
+            err_f.close()
+            if own:
+                src.close()
+
+    def _stop(self, proc):
+        """Arrête ssh : SIGTERM, attente courte, SIGKILL."""
+        try:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=STREAM_KILL_GRACE)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+
+    def _feed(self, proc, src, progress, cancel, limit_bps):
+        """Boucle d'écriture de run_stream ; rend (octets envoyés, tuyau
+        rompu). Lève Cancelled après avoir arrêté ssh."""
+        fd = proc.stdin.fileno()
+        os.set_blocking(fd, False)
+        sent, broken = 0, False
+        start = last = self.clock()
+
+        def cancelled():
+            if cancel is not None and cancel():
+                self._stop(proc)
+                raise Cancelled(sent)
+
+        while not broken:
+            cancelled()
+            block = src.read(STREAM_CHUNK)
+            if not block:
+                break
+            view = memoryview(block)
+            while view and not broken:
+                cancelled()
+                if limit_bps:
+                    ahead = sent / limit_bps - (self.clock() - start)
+                    if ahead > 0:
+                        self.sleep(min(ahead, 0.2))
+                        continue
+                piece = view[:STREAM_PIECE]
+                if limit_bps:
+                    piece = view[:max(1, min(len(piece), int(limit_bps / 5) or 1))]
+                _, ready, _ = select.select([], [fd], [], 0.5)
+                if not ready:
+                    if proc.poll() is not None:
+                        broken = True       # ssh parti sans tout lire
+                    continue
+                try:
+                    n = os.write(fd, piece)
+                except BlockingIOError:
+                    continue
+                except (BrokenPipeError, OSError):
+                    broken = True
+                    break
+                sent += n
+                view = view[n:]
+                now = self.clock()
+                if progress is not None and now - last >= STREAM_PROGRESS_EVERY:
+                    last = now
+                    progress(sent)
+        cancelled()
+        try:
+            proc.stdin.close()
+        except OSError:
+            broken = True
+        if progress is not None:
+            progress(sent)
+        return sent, broken
 
     def virsh(self, *args, timeout=None, idempotent=False):
         """Une commande virsh ; rend sa sortie, KvmError classée sinon.
@@ -858,7 +1026,21 @@ def parse_domain_xml(text):
             "genid": None if genid is None else ((genid.text or "").strip() or True),
             "seclabels_static": any(sl.get("type") == "static" for sl in root.findall("seclabel")),
             "sysinfo_uuid": any(e.get("name") == "uuid"
-                                for e in root.findall("sysinfo/system/entry"))}
+                                for e in root.findall("sysinfo/system/entry")),
+            "seed": _hops_seed(root)}
+
+
+# espace de noms des métadonnées de la console (kvm_xml.HOPS_NS)
+HOPS_NS = "https://harvester-ops.io/xmlns/vm/1"
+
+
+def _hops_seed(root):
+    """Volume cloud-init possédé par la VM (`<hops:seed pool volume>`), ou
+    None : écrit par la console à la création, reconnu à la suppression."""
+    el = root.find(f"metadata/{{{HOPS_NS}}}vm/{{{HOPS_NS}}}seed")
+    if el is None or not el.get("pool") or not el.get("volume"):
+        return None
+    return {"pool": el.get("pool"), "volume": el.get("volume")}
 
 
 def parse_domstats_raw(text):

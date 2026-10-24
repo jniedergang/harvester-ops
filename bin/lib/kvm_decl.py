@@ -43,6 +43,9 @@ FINGERPRINT_RE = re.compile(r"\bSHA256:[A-Za-z0-9+/=]+")
 # noms pris par une route fixe de la console (/api/kvm/hosts/scan) : un
 # hôte de ce nom serait inatteignable par ses propres routes
 RESERVED_NAMES = frozenset({"scan"})
+# pools d'images déclarés pour un hôte (facultatif) : le catalogue d'images
+# ne montre que leurs volumes
+IMAGE_POOLS_MAX = 32
 
 
 class DeclError(ValueError):
@@ -126,6 +129,15 @@ def check_decl(decl):
             not isinstance(k, str) or not LABEL_KEY_RE.match(k) or not isinstance(v, str)
             for k, v in labels.items()):
         return "labels must map names to strings"
+    pools = decl.get("image_pools")
+    if pools is not None:
+        if not isinstance(pools, list) or len(pools) > IMAGE_POOLS_MAX or any(
+                not isinstance(p, str) or not p or len(p) > 255
+                or any(ord(c) < 32 or ord(c) == 127 for c in p) for p in pools):
+            return (f"image_pools must be a list of at most {IMAGE_POOLS_MAX} pool names "
+                    "without control characters")
+        if len(set(pools)) != len(pools):
+            return "image_pools lists a pool twice"
     return None
 
 

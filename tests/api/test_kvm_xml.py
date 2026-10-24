@@ -471,6 +471,20 @@ def test_diff_pending():
     assert kx.diff(inactive, live) == ["cpu.max_vcpus", "disks[vda].cache"]
 
 
+def test_diff_ignores_host_model_expanded_by_libvirt():
+    """Vu sur node2 : le XML vivant d'une VM host-model porte `mode='custom'`
+    et un modèle nommé ; ce n'est pas un changement en attente."""
+    inactive = kx.managed_view(fx("dumpxml-netperf.xml"))
+    inactive["cpu"].update(mode="host-model", model=None)
+    live = copy.deepcopy(inactive)
+    live["cpu"].update(mode="custom", model="Broadwell-IBRS")
+    assert kx.diff(inactive, live) == []
+    live["cpu"]["max_vcpus"] = 9
+    assert kx.diff(inactive, live) == ["cpu.max_vcpus"]
+    inactive["cpu"].update(mode="host-passthrough")
+    assert "cpu.mode" in kx.diff(inactive, live)
+
+
 def test_changes():
     view = kx.managed_view(fx("dumpxml-netperf.xml"))
     ch = kx.changes(view, {"cpu": {"vcpus": 2, "max_vcpus": 4}, "title": "T",

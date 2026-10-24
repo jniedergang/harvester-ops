@@ -653,7 +653,7 @@ SCHEMAS = [
 ]
 PLAN_KEYS = {
     "clone": {"source", "new_name", "refusals", "disks", "shared", "space", "nics", "nvram",
-              "uefi_entries_lost", "tpm_state_lost", "regenerated"},
+              "uefi_entries_lost", "tpm_state_lost", "regenerated", "seed"},
     "vm": {"name", "state", "persistent", "refusals", "internal_snapshots",
            "external_snapshots", "managed_save", "managed_save_lost", "nvram", "tpm_state",
            "remove_storage", "delete", "keep", "unreadable", "acknowledged_unreadable",

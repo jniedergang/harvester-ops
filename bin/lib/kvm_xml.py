@@ -1099,6 +1099,12 @@ def diff(view_inactive, view_live):
     """Champs gérés dont la définition persistante diffère de la VM en
     marche : changements qui attendent le prochain démarrage (`pending`)."""
     a, b = _flatten(view_inactive), _flatten(view_live)
+    if a.get("cpu.mode") == "host-model" and b.get("cpu.mode") == "custom":
+        # libvirt développe host-model en modèle nommé dans le XML vivant (vu sur
+        # node2 : `mode='custom'` + Broadwell-IBRS) : ce n'est pas un changement
+        for k in ("cpu.mode", "cpu.model"):
+            a.pop(k, None)
+            b.pop(k, None)
     keys = sorted(set(a) | set(b))
     return [k for k in keys if k not in _LIVE_ONLY and a.get(k) != b.get(k)]
 
