@@ -928,6 +928,35 @@ def plan_view(conn, plan, now):
             "events": events, "health": health, "vm_running": vm_running}
 
 
+def plan_rows(conn, plans, now, role=None, side="any"):
+    """Lignes de plans (`replication.plan_row`) lues par `plan_view` : la
+    ligne de commande (`plan list`) et la console (menu racine) passent par
+    ici, et rendent donc les mêmes objets."""
+    rows = []
+    for p in plans:
+        v = plan_view(conn, p, now)
+        rows.append(rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                                role=role, health=v["health"], side=side))
+    return rows
+
+
+def host_rows(conn, host, side, now, role=None):
+    """Lignes de ressource d'un hôte, vu comme source, cible ou les deux
+    (`resources --host`, sous-menu d'un hôte) : même `resource_row` et même
+    `plan_view` que `plan_rows`, une lecture par plan."""
+    rows, views, plans = [], {}, {}
+    for r in list_resources_by_host(conn, host, side):
+        pid = r["plan_id"]
+        if pid not in plans:
+            plans[pid] = get_plan(conn, pid)
+            views[pid] = plan_view(conn, plans[pid], now)
+        p, v = plans[pid], views[pid]
+        res = next((x for x in v["resources"] if x["resource_uid"] == r["resource_uid"]), r)
+        rows.append(rp.resource_row(p, res, r["side"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                                    role=role, health=v["health"].get(r["resource_uid"])))
+    return rows
+
+
 def record_stats(conn, plan_id, row):
     """Range (idempotent) le bilan d'un passage appliqué d'une VM ; clé
     (plan, génération, ressource, `pass_at`)."""
@@ -998,7 +1027,9 @@ def _before(before):
         if b.isdigit():
             return "id", int(b)
         try:
-            return "ts", _event_ts(rp._t(b))
+            # à la microseconde : la date du dernier rendu ne saute pas les
+            # événements de la même seconde (`rp._t` tronque à la seconde)
+            return "ts", _event_ts(b)
         except ValueError:
             raise ValueError("before: an event id or an ISO date") from None
     raise ValueError("before: an event id or an ISO date")

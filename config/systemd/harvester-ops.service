@@ -10,6 +10,11 @@ Type=simple
 Restart=on-failure
 RestartSec=10s
 TimeoutStartSec=60s
+# A replication command cancelled at shutdown gets its rollback deadline
+# (undo_total, 240 s by default, plus one kubectl call) before a SIGKILL:
+# podman stop and systemd must wait at least that long. The console exits
+# at once when no such command is running.
+TimeoutStopSec=630s
 
 # Reads ports/paths from /etc/harvester-ops/config.yaml
 # Performance settings (docs/en/sizing.md) go in /etc/harvester-ops/env, as
@@ -56,9 +61,10 @@ ExecStart=/bin/sh -c 'u=$$(id -u harvester-ops); g=$$(id -g harvester-ops); \
     -e HARVESTER_OPS_WATCH_INTERVAL=$${HARVESTER_OPS_WATCH_INTERVAL:-15} \
     -e HARVESTER_OPS_WATCH_IDLE_AFTER=$${HARVESTER_OPS_WATCH_IDLE_AFTER:-300} \
     -e HARVESTER_OPS_WATCH_IDLE_INTERVAL=$${HARVESTER_OPS_WATCH_IDLE_INTERVAL:-120} \
+    -e HARVESTER_OPS_REPLICATION_FOLLOW=$${HARVESTER_OPS_REPLICATION_FOLLOW:-1} \
     localhost/harvester-ops:latest serve'
 
-ExecStop=/usr/bin/podman stop -t 10 harvester-ops
+ExecStop=/usr/bin/podman stop -t 600 harvester-ops
 
 [Install]
 WantedBy=multi-user.target

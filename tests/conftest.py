@@ -29,6 +29,8 @@ os.environ.setdefault("HARVESTER_OPS_KUBE_REST", "0")
 os.environ.setdefault("HARVESTER_OPS_READ_WORKERS", "0")
 # v1.95.0 : ni échantillonneur des GPU (fil de fond), testé à part
 os.environ.setdefault("HARVESTER_OPS_USAGE", "0")
+# v1.97.0 : ni fil de suivi de la réplication (processus enfant), testé à part
+os.environ.setdefault("HARVESTER_OPS_REPLICATION_FOLLOW", "0")
 # v1.54.0 : les tests qui importent `app` dans le processus ne doivent pas
 # écrire dans les espaces Terraform ni les déclarations réels (audit D17).
 import tempfile as _tempfile  # noqa: E402

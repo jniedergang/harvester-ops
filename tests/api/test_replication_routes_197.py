@@ -1,0 +1,888 @@
+"""v1.97.0 : la réplication dans la console, sans écran.
+
+Lectures droit au registre par les fonctions mêmes de la ligne de commande
+(`replication_db.plan_rows` / `host_rows`) : le menu racine et le sous-menu
+d'un hôte rendent les mêmes lignes pour le même côté. Toute écriture lance
+bin/harvester-replication.py en action suivie, valeurs en `--option=valeur`,
+kubeconfigs de la personne pour les deux clusters, commande montrée sans
+chemin. Rôles : lecture viewer, bascule et suppression des sauvegardes
+admin, le reste operator. Relais : annulée et défaite, interrompue à
+reprendre, retour arrière arrivé à échéance. Délai de retour arrière avant
+SIGKILL (annulation, arrêt de la console). Fil de suivi : démarrage unique,
+relance avec délai croissant, aucune relance après un arrêt demandé, arrêt
+gracieux, interrupteurs."""
+
+import base64
+import json
+import os
+import re
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "web"))
+os.environ.setdefault("HARVESTER_OPS_DISABLE_RATELIMIT", "1")
+import app as wapp  # noqa: E402
+
+SRC = (ROOT / "web" / "app.py").read_text()
+rp, db = wapp._rp, wapp._rdb
+PID, PID2 = "rp-0123456789ab", "rp-ba9876543210"
+SCRIPT = str(wapp.BIN_DIR / wapp.REPLICATION_SCRIPT)
+KC = {"harvlab": "/srv/kc/harvlab.yaml", "harvlab2": "/srv/kc/harvlab2.yaml", "harvlab3": "/srv/kc/harvlab3.yaml"}
+HOSTILE = ["a;rm -rf ~", "$(id)", "-x", "<img src=x onerror=alert(1)>", "--json", "q'uote\"d"]
+
+_RealThread = threading.Thread
+
+
+class _NoThread:
+    """Retient le fil de travail d'une action (`work`) sans le lancer."""
+    started = []
+
+    def __new__(cls, target=None, args=(), **k):
+        if getattr(target, "__name__", "") != "work":
+            return _RealThread(target=target, args=args, **k)
+        return super().__new__(cls)
+
+    def __init__(self, target=None, args=(), **k):
+        self.target, self.args = target, args
+
+    def start(self):
+        _NoThread.started.append(self)
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def iso(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def seed(conn):
+    """Plan `web` harvlab -> harvlab2 protégé (rep-a deux disques, rep-b un),
+    plan `db` harvlab2 -> harvlab3 en brouillon (rep-c) : harvlab2 est cible
+    de l'un et source de l'autre."""
+    n = now_utc()
+    req = rp.normalize_plan({"name": "web", "source_cluster": "harvlab", "target_cluster": "harvlab2",
+                             "rpo_objective_s": "15m", "interval_s": "3m",
+                             "vms": ["default/rep-a", "default/rep-b"],
+                             "options": {"timeouts": {"undo_total": 100, "client": 20}}})
+    db.insert_plan(conn, req, created_by="alice", plan_id=PID)
+    for uid, name in (("u-a", "rep-a"), ("u-b", "rep-b")):
+        db.upsert_resource(conn, PID, {"resource_uid": uid, "source_host": "harvlab", "target_host": "harvlab2",
+                                       "namespace": "default", "name": name, "generation": 1})
+    for uid, disk, vol in (("u-a", "disk-0", "pvc-a0"), ("u-a", "disk-1", "pvc-a1"), ("u-b", "disk-0", "pvc-b0")):
+        db.upsert_volume(conn, PID, {"generation": 1, "vm_uid": uid, "disk": disk, "source_volume": vol,
+                                     "state": "standby"})
+    db.set_state(conn, PID, "draft", "protecting")
+    db.set_state(conn, PID, "protecting", "protected")
+    for uid in ("u-a", "u-b"):
+        db.set_resource_state(conn, PID, uid, "protecting")
+        db.set_resource_state(conn, PID, uid, "protected")
+    for vol, uid, age in (("pvc-a0", "u-a", 200), ("pvc-a1", "u-a", 230), ("pvc-b0", "u-b", 3000)):
+        snap = n - timedelta(seconds=age)
+        db.record_tick(conn, PID, {"source_volume": vol, "vm_uid": uid, "generation": 1, "backup": f"b-{vol}",
+                                   "snapshot_at": iso(snap), "backup_done_at": iso(snap + timedelta(seconds=5)),
+                                   "state": "completed"})
+        db.mark_applied(conn, PID, vol, f"b-{vol}", snap + timedelta(seconds=15), 1)
+    for i in range(4):
+        db.record_event(conn, "follow", step=f"s{i}", plan_id=PID, resource_uid="u-a", host="harvlab2",
+                        code="rpo-recovered", message=f"event {i}", action_id="abc123abc123")
+    req2 = rp.normalize_plan({"name": "db", "source_cluster": "harvlab2", "target_cluster": "harvlab3",
+                              "rpo_objective_s": "1h", "vms": ["default/rep-c"]})
+    db.insert_plan(conn, req2, created_by="alice", plan_id=PID2)
+    db.upsert_resource(conn, PID2, {"resource_uid": "u-c", "source_host": "harvlab2", "target_host": "harvlab3",
+                                    "namespace": "default", "name": "rep-c", "generation": 1})
+
+
+@pytest.fixture
+def env(monkeypatch, tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    dbp = state / "replication.db"
+    monkeypatch.setenv("HARVESTER_OPS_REPLICATION_DB", str(dbp))
+    monkeypatch.setattr(wapp, "_state_dir", lambda: state)
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: {"clusters": [
+        {"name": n, "kubeconfig": p} for n, p in KC.items()]})
+    access = dict(KC)
+    monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: access.get(c))
+    monkeypatch.setattr(wapp, "current_cluster_identity", lambda: None)
+    monkeypatch.setattr(wapp.threading, "Thread", _NoThread)
+    conn = db.connect(dbp)
+    seed(conn)
+    conn.close()
+    _NoThread.started = []
+    saved = dict(wapp.ACTIONS)
+    wapp.ACTIONS.clear()
+    yield {"state": state, "db": dbp, "access": access}
+    wapp.ACTIONS.clear()
+    wapp.ACTIONS.update(saved)
+
+
+@pytest.fixture
+def client(env, monkeypatch, tmp_path):
+    monkeypatch.setattr(wapp, "HTPASSWD_PATH", tmp_path / "htpasswd")        # mode ouvert : admin
+    return wapp.app.test_client()
+
+
+@pytest.fixture
+def as_user(env, monkeypatch, tmp_path):
+    (tmp_path / "htpasswd").write_text("")
+    roles = tmp_path / "roles.yaml"
+    roles.write_text("default_role: viewer\nusers:\n  patronne: admin\n  alice: operator\n  curieux: viewer\n")
+    monkeypatch.setattr(wapp, "HTPASSWD_PATH", tmp_path / "htpasswd")
+    monkeypatch.setattr(wapp, "ROLES_PATH", roles)
+    monkeypatch.setattr(wapp, "_roles_cache", {"mtime": None, "data": None})
+    monkeypatch.setattr(wapp, "check_auth", lambda u, p: True)
+
+    def call(user, method, path, **kw):
+        token = base64.b64encode(f"{user}:x".encode()).decode()
+        with wapp.app.test_client() as c:
+            return c.open(path, method=method, headers={"Authorization": f"Basic {token}"}, **kw)
+    return call
+
+
+def script_cmd():
+    t = _NoThread.started[-1]
+    cell = dict(zip(t.target.__code__.co_freevars, t.target.__closure__ or ()))
+    return cell["cmd"].cell_contents
+
+
+def only_run():
+    [run] = wapp.ACTIONS.values()
+    return run
+
+
+def base(env, *sub, user=None):
+    out = [sys.executable, SCRIPT, *sub, "--json", f"--state-dir={env['state']}", f"--db={env['db']}"]
+    return out + ([f"--by={user}"] if user else [])
+
+
+KUBE = [f"--from-kubeconfig={KC['harvlab']}", f"--to-kubeconfig={KC['harvlab2']}"]
+
+
+# --- lignes : menu racine et sous-menu d'un hôte ------------------------------------
+
+def test_root_view_lists_every_plan_with_its_resources_rpo_actions_and_events(client):
+    r = client.get("/api/replication/plans")
+    assert r.status_code == 200
+    d = r.get_json()
+    by = {p["id"]: p for p in d["plans"]}
+    assert set(by) == {PID, PID2} and d["side"] == "any" and d["role"] == "admin"
+    web = by[PID]
+    assert web["state"] == "protected" and web["rpo_objective_s"] == 900
+    assert web["rpo_held_s"] is not None and web["rpo_held_s"] > 900           # rep-b en retard
+    assert web["resources_by_state"] == {"protected": 1, "lagging": 1}
+    rows = {x["name"]: x for x in web["resources"]}
+    assert rows["rep-b"]["state"] == "lagging" and rows["rep-a"]["state"] == "protected"
+    assert [e["step"] for e in rows["rep-a"]["last_events"]] == ["s3", "s2", "s1"]
+    acts = {a["name"]: a for a in web["actions"]}
+    assert acts["failover"]["allowed"] is True and acts["failover"]["role"] == "admin"
+    assert d["follower"]["running"] is False
+
+
+def test_root_rows_equal_the_cli_rows(client, env):
+    conn = db.connect(env["db"])
+    try:
+        cli = db.plan_rows(conn, db.list_plans(conn), now_utc(), role="admin")
+    finally:
+        conn.close()
+    got = client.get("/api/replication/plans").get_json()["plans"]
+    strip = lambda rows: [{k: v for k, v in p.items() if k not in ("rpo_held_s", "resources", "next_tick_at")}
+                          for p in rows]
+    assert strip(got) == strip(cli)                # même fonction, à l'horloge près
+
+
+@pytest.mark.parametrize("host,side", [("harvlab2", "target"), ("harvlab", "source"), ("harvlab2", "source")])
+def test_host_view_rows_are_the_root_rows_for_the_same_side(client, host, side):
+    root = client.get(f"/api/replication/plans?side={side}&host={host}").get_json()["plans"]
+    want = [r for p in root for r in p["resources"]
+            if (p["target_host"] if side == "target" else p["source_host"]) == host]
+    got = client.get(f"/api/replication/hosts/{host}/resources?side={side}").get_json()
+    assert got["host"] == host and got["side"] == side and got["host_kind"] == "harvester"
+    assert want and [_nocl(x) for x in got["resources"]] == [_nocl(x) for x in want]
+
+
+def _nocl(row):
+    # `rpo_held_s` suit l'horloge entre deux lectures
+    return {k: v for k, v in row.items() if k != "rpo_held_s"}
+
+
+def test_host_view_any_differs_from_the_root_only_by_side_peer_and_actions(client):
+    root = {r["resource_uid"]: r for p in client.get("/api/replication/plans").get_json()["plans"]
+            for r in p["resources"]}
+    got = client.get("/api/replication/hosts/harvlab2/resources?side=any").get_json()["resources"]
+    assert sorted((x["resource_uid"], x["side"]) for x in got) == [("u-a", "target"), ("u-b", "target"),
+                                                                   ("u-c", "source")]
+    for x in got:
+        same = {k for k in x if k not in ("side", "peer_host", "actions", "rpo_held_s")}
+        assert {k: x[k] for k in same} == {k: root[x["resource_uid"]][k] for k in same}
+
+
+@pytest.mark.parametrize("user,allowed", [("curieux", False), ("alice", False), ("patronne", True)])
+def test_failover_is_offered_on_the_target_side_with_the_role_of_the_person(as_user, user, allowed):
+    tgt = as_user(user, "GET", "/api/replication/hosts/harvlab2/resources?side=target").get_json()["resources"]
+    src = as_user(user, "GET", "/api/replication/hosts/harvlab/resources?side=source").get_json()["resources"]
+    a = {x["name"]: {y["name"]: y for y in x["actions"]} for x in tgt}["rep-a"]
+    assert a["failover"]["allowed"] is allowed and (allowed or a["failover"]["reason"] == "role")
+    assert a["unprotect"]["allowed"] is (user != "curieux")
+    assert all("failover" not in {y["name"] for y in x["actions"]} for x in src)
+
+
+@pytest.mark.parametrize("path", ["/api/replication/plans?side=both", "/api/replication/hosts/harvlab/resources?side=x",
+                                  "/api/replication/hosts/bad%20host/resources", "/api/replication/plans?host=a%20b",
+                                  "/api/replication/plans/web", "/api/replication/plans/rp-0123456789ab/stats?limit=0",
+                                  "/api/replication/plans/rp-0123456789ab/stats?since=yesterday",
+                                  "/api/replication/plans/rp-0123456789ab/stats?resource=a%20b",
+                                  "/api/replication/resources/u-a/events?limit=501",
+                                  "/api/replication/resources/u-a/events?limit=x",
+                                  "/api/replication/resources/u-a/events?before=not-a-date",
+                                  "/api/replication/resources/%20x/events"])
+def test_reads_refuse_bad_parameters(client, path):
+    assert client.get(path).status_code == 400
+
+
+def test_plan_detail_unknown_is_404(client):
+    r = client.get("/api/replication/plans/rp-ffffffffffff")
+    assert r.status_code == 404 and r.get_json()["code"] == "unknown-plan"
+
+
+def test_plan_detail_carries_status_volumes_runs_lock_and_lease(client):
+    d = client.get(f"/api/replication/plans/{PID}").get_json()
+    assert set(d) == {"plan", "row", "status", "volumes", "runs", "lock", "lease", "role"}
+    assert d["plan"]["id"] == PID and d["row"]["id"] == PID and len(d["volumes"]) == 3
+    assert d["status"]["exceeded"] is True and d["lock"] is None and d["lease"] is None
+    assert {v["name"]: v["state"] for v in d["status"]["vms"]} == {"rep-a": "protected", "rep-b": "lagging"}
+
+
+def test_events_are_paged_by_id_and_by_date(client, env):
+    conn = db.connect(env["db"])
+    for i in range(4, 7):
+        db.record_event(conn, "failover", step=f"s{i}", plan_id=PID, resource_uid="u-a", level="warn")
+    conn.close()
+    full = client.get("/api/replication/resources/u-a/events?limit=500").get_json()
+    assert full["next_before"] is None and len(full["events"]) == 9      # 7 du suiveur + 2 changements d'état
+    p1 = client.get("/api/replication/resources/u-a/events?limit=3").get_json()
+    assert [e["step"] for e in p1["events"]] == ["s6", "s5", "s4"] and p1["next_before"] == p1["events"][-1]["id"]
+    p2 = client.get(f"/api/replication/resources/u-a/events?limit=3&before={p1['next_before']}").get_json()
+    assert [e["step"] for e in p2["events"]] == ["s3", "s2", "s1"]
+    p3 = client.get(f"/api/replication/resources/u-a/events?limit=3&before={p2['next_before']}").get_json()
+    p4 = client.get(f"/api/replication/resources/u-a/events?limit=3&before={p3['next_before']}").get_json()
+    assert p1["events"] + p2["events"] + p3["events"] + p4["events"] == full["events"] and p4["next_before"] is None
+    by_date = client.get(f"/api/replication/resources/u-a/events?limit=2&before={p1['events'][-1]['ts']}").get_json()
+    assert [e["step"] for e in by_date["events"]] == ["s3", "s2"]
+    e = p2["events"][0]
+    assert e["action_id"] == "abc123abc123" and e["operation"] == "follow" and isinstance(e["facts"], dict)
+    late = client.get("/api/replication/resources/u-a/events?before=2000-01-01T00:00:00Z").get_json()
+    assert late["events"] == [] and late["next_before"] is None
+
+
+def test_stats_are_read_oldest_first_and_filtered(client, env):
+    conn = db.connect(env["db"])
+    n = now_utc()
+    for uid in ("u-a", "u-b"):
+        for i in range(3):
+            db.record_stats(conn, PID, {"resource_uid": uid, "generation": 1,
+                                        "pass_at": iso(n - timedelta(minutes=10 - i)), "disks": 1})
+    conn.close()
+    d = client.get(f"/api/replication/plans/{PID}/stats?resource=u-a").get_json()
+    assert [s["resource_uid"] for s in d["stats"]] == ["u-a"] * 3
+    assert [s["pass_at"] for s in d["stats"]] == sorted(s["pass_at"] for s in d["stats"])
+    assert len(client.get(f"/api/replication/plans/{PID}/stats?limit=2").get_json()["stats"]) == 2
+
+
+# --- écritures : ligne de commande exacte --------------------------------------------
+
+CASES = [
+    ("check", "POST", f"/api/replication/plans/{PID}/check", {"phase": "failover", "force_unplanned": True},
+     ["check", PID, "--phase=failover", "--force-unplanned"] , True, "harvlab"),
+    ("measure-start", "POST", f"/api/replication/plans/{PID}/measure", {"op": "start", "interval": "-5m"},
+     ["measure", "start", PID, "--interval=-5m"], True, "harvlab"),
+    ("measure-stop", "POST", f"/api/replication/plans/{PID}/measure", {"op": "stop"},
+     ["measure", "stop", PID], True, "harvlab"),
+    ("protect", "POST", f"/api/replication/plans/{PID}/protect", {"interval": "5m", "dry_run": True},
+     ["protect", PID, "--interval=5m", "--dry-run"], True, "harvlab"),
+    ("failover", "POST", f"/api/replication/plans/{PID}/failover",
+     {"vms": ["default/rep-a"], "confirm": "web"}, ["failover", PID, "--vm=default/rep-a", "--yes"], True, "harvlab2"),
+    ("failover", "POST", f"/api/replication/plans/{PID}/failover",
+     {"all_vms": True, "mode": "unplanned", "force_unplanned": True, "accept_skew": True, "confirm": "web"},
+     ["failover", PID, "--all-vms", "--unplanned", "--force-unplanned", "--accept-skew", "--yes"], True, "harvlab2"),
+    ("failover", "POST", f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-b"], "dry_run": True},
+     ["failover", PID, "--vm=default/rep-b", "--dry-run"], True, "harvlab2"),
+    ("resume", "POST", f"/api/replication/plans/{PID}/resume", None, ["resume", PID], True, "harvlab2"),
+    ("unprotect", "POST", f"/api/replication/plans/{PID}/unprotect", {"confirm": "web"},
+     ["unprotect", PID, "--yes"], True, "harvlab"),
+    ("unprotect-delete-backups", "POST", f"/api/replication/plans/{PID}/unprotect",
+     {"confirm": "web", "delete_backups": True}, ["unprotect", PID, "--yes", "--delete-backups"], True, "harvlab"),
+    ("settings", "PATCH", f"/api/replication/plans/{PID}/settings",
+     {"rpo": "30m", "paused": True, "follow": "cli", "skew_tolerance": "20s",
+      "timeouts": {"undo_total": 300, "client": None}},
+     ["plan", "set", PID, "--rpo=30m", "--skew-tolerance=20s", "--paused=true", "--follow=cli",
+      "--timeout=client=", "--timeout=undo_total=300"], False, "harvlab"),
+    ("delete", "DELETE", f"/api/replication/plans/{PID2}", None, ["plan", "delete", PID2], False, "harvlab2"),
+]
+
+
+@pytest.mark.parametrize("op,method,path,body,argv,kube,cluster", CASES)
+def test_each_mutation_spawns_the_exact_command_as_a_tracked_action(client, env, op, method, path, body, argv,
+                                                                    kube, cluster):
+    r = client.open(path, method=method, json=body) if body is not None else client.open(path, method=method)
+    assert r.status_code == 202, r.get_json()
+    run = only_run()
+    plan_id = argv[argv.index("delete") + 1] if op == "delete" else PID
+    assert r.get_json()["action_id"] == run.id and r.get_json()["plan"] == plan_id
+    sub = [a for a in argv if not a.startswith("--")]
+    opts = [a for a in argv if a.startswith("--")]
+    kube_args = []
+    if kube:
+        kube_args = KUBE
+    want = base(env, *sub) + opts + kube_args + [f"--id={run.id}"]
+    assert script_cmd() == want
+    assert run.action == f"replication:{plan_id}:{op}" and run.cluster == cluster
+    assert run.kill_grace == (100 + 20 + 15 if plan_id == PID else 240 + 30 + 15)
+    assert run.required_role == ("admin" if op in ("failover", "unprotect-delete-backups") else "operator")
+    # commande montrée : ni kubeconfig, ni base, ni répertoire d'état
+    shown = " ".join(run.cmd)
+    assert run.cmd[0] == "harvester-replication" and "/srv" not in shown and str(env["state"]) not in shown
+    assert run.dry_run is (op == "check" or "--dry-run" in argv)
+
+
+def test_create_validates_like_the_script_and_spawns_plan_create(client, env):
+    body = {"name": "web2", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/rep-a", "ns2/x"],
+            "map_net": {"default/lab-net": "default/lab-net2"}, "map_sc": {"fast": "slow"},
+            "target_name": {"default/rep-a": "rep-a-dr"}, "cloud_init": "rerun", "mac": "new",
+            "create_namespace": True, "start": "stopped", "retain": 4, "interval": "5m", "follow": "console",
+            "skew_tolerance": "15s", "timeouts": {"client": 45}}
+    r = client.post("/api/replication/plans", json=body)
+    assert r.status_code == 202, r.get_json()
+    run = only_run()
+    assert script_cmd() == base(env, "plan", "create") + [
+        "--name=web2", "--from=harvlab", "--to=harvlab2", "--rpo=15m", "--cloud-init=rerun", "--mac=new",
+        "--start=stopped", "--retain=4", "--interval=5m", "--follow=console", "--skew-tolerance=15s",
+        "--vm=default/rep-a", "--vm=ns2/x", "--map-net=default/lab-net=default/lab-net2", "--map-sc=fast=slow",
+        "--target-name=default/rep-a=rep-a-dr", "--create-namespace", "--timeout=client=45", f"--id={run.id}"]
+    assert run.action == "replication:create:web2" and run.required_role == "operator"
+    assert r.get_json()["name"] == "web2"
+
+
+@pytest.mark.parametrize("body,code", [
+    ({"name": "Bad Name", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/a"]}, "bad-name"),
+    ({"name": "x", "from": "harvlab", "to": "harvlab", "rpo": "15m", "vms": ["default/a"]}, "same-cluster"),
+    ({"name": "x", "from": "harvlab", "to": "nowhere", "rpo": "15m", "vms": ["default/a"]}, "unknown-cluster"),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "soon", "vms": ["default/a"]}, "bad-rpo"),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "15m"}, "bad-selection"),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": "default/a"}, None),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/a"], "map_net": {"a=b": "c"}},
+     None),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/a"], "extra": 1}, None),
+    ({"name": "x", "from": "harvlab", "to": "harvlab2", "rpo": "15m", "vms": ["default/a"],
+      "create_namespace": "yes"}, None),
+])
+def test_create_refusals_answer_400_without_an_action(client, body, code):
+    r = client.post("/api/replication/plans", json=body)
+    assert r.status_code == 400 and r.get_json().get("code") == code
+    assert not wapp.ACTIONS
+
+
+@pytest.mark.parametrize("name", HOSTILE)
+def test_hostile_plan_names_never_reach_a_label(client, name):
+    r = client.post("/api/replication/plans", json={"name": name, "from": "harvlab", "to": "harvlab2",
+                                                    "rpo": "15m", "vms": ["default/a"]})
+    assert r.status_code == 400 and not wapp.ACTIONS
+
+
+@pytest.mark.parametrize("vm", HOSTILE)
+def test_hostile_vm_names_stay_one_argument_and_out_of_the_label(client, env, vm):
+    r = client.post(f"/api/replication/plans/{PID}/failover", json={"vms": [vm], "dry_run": True})
+    assert r.status_code == 202
+    cmd = script_cmd()
+    assert cmd.count(f"--vm={vm}") == 1 and cmd.count(vm) == (1 if vm == "--json" else 0)
+    assert only_run().action == f"replication:{PID}:failover"
+
+
+def test_every_replication_label_is_built_from_checked_tokens():
+    labels = re.findall(r'label = f"(replication:[^"]+)"', SRC) + re.findall(r'f"(replication:create:[^"]+)"', SRC)
+    assert labels == ["replication:{plan['id']}:{op}", "replication:create:{plan['name']}"]
+    assert "plan, argv = _repl_create_request(body)" in SRC          # le nom passe par normalize_plan
+
+
+@pytest.mark.parametrize("path,body,code", [
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"]}, "confirmation-required"),
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "confirm": "WEB"}, "confirmation-required"),
+    (f"/api/replication/plans/{PID}/failover", {"all_vms": True, "mode": "unplanned"}, "confirmation-required"),
+    (f"/api/replication/plans/{PID}/failover", {"confirm": "web"}, "bad-selection"),
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "all_vms": True, "confirm": "web"},
+     "bad-selection"),
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "accept_skew": True, "confirm": "web"},
+     "bad-option"),
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "force_unplanned": True,
+                                                "confirm": "web"}, "bad-option"),
+    (f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "mode": "now", "confirm": "web"}, None),
+    (f"/api/replication/plans/{PID}/unprotect", {}, "confirmation-required"),
+    (f"/api/replication/plans/{PID}/unprotect", {"delete_backups": True, "confirm": "nope"}, "confirmation-required"),
+    (f"/api/replication/plans/{PID}/unprotect", {"delete_backups": "yes", "confirm": "web"}, None),
+    (f"/api/replication/plans/{PID}/measure", {"op": "go"}, None),
+    (f"/api/replication/plans/{PID}/measure", {"op": "stop", "interval": "5m"}, None),
+    (f"/api/replication/plans/{PID}/check", {"phase": "drill"}, None),
+    (f"/api/replication/plans/{PID}/protect", {"dry_run": 1}, None),
+    (f"/api/replication/plans/{PID}/protect", {"interval": "5m\n--json"}, None),
+    ("/api/replication/plans/rp-ffffffffffff/protect", {}, "unknown-plan"),
+])
+def test_refusals_answer_before_any_action(client, path, body, code):
+    r = client.post(path, json=body)
+    assert r.status_code in (400, 404) and r.get_json().get("code") == code
+    assert not wapp.ACTIONS
+
+
+@pytest.mark.parametrize("body,code", [({"interval": "5m"}, "not-settable"), ({"retain": 3}, "not-settable"),
+                                       ({}, None), ({"follow": "always"}, None), ({"paused": "true"}, None),
+                                       ({"colour": "red"}, None), ({"timeouts": {"Bad-Name": 3}}, None)])
+def test_settings_refusals(client, body, code):
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json=body)
+    assert r.status_code == 400 and r.get_json().get("code") == code and not wapp.ACTIONS
+
+
+def test_a_cluster_this_session_cannot_see_is_refused_never_replaced(client, env):
+    env["access"].pop("harvlab2")
+    r = client.post(f"/api/replication/plans/{PID}/protect", json={})
+    assert r.status_code == 403 and r.get_json()["code"] == "target-denied" and not wapp.ACTIONS
+    env["access"]["harvlab2"] = KC["harvlab2"]
+    env["access"].pop("harvlab")
+    r = client.post(f"/api/replication/plans/{PID}/protect", json={})
+    assert r.status_code == 403 and r.get_json()["code"] == "source-denied"
+
+
+def test_a_source_no_longer_declared_gets_no_kubeconfig(client, env, monkeypatch):
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: {"clusters": [{"name": "harvlab2", "kubeconfig": "x"}]})
+    r = client.post(f"/api/replication/plans/{PID}/failover",
+                    json={"all_vms": True, "mode": "unplanned", "confirm": "web"})
+    assert r.status_code == 202
+    cmd = script_cmd()
+    assert f"--to-kubeconfig={KC['harvlab2']}" in cmd and not any(a.startswith("--from-kubeconfig") for a in cmd)
+
+
+def _running(action, cluster, dry_run=False):
+    run = wapp.ActionRun(f"r{len(wapp.ACTIONS)}", action, cluster, ["x"], dry_run=dry_run)
+    run.status = "running"
+    wapp.ACTIONS[run.id] = run
+    return run
+
+
+@pytest.mark.parametrize("busy,blocked", [
+    (("shutdown", "harvlab"), True), (("startup", "harvlab2"), True), (("shutdown", "harvlab3"), False),
+    ((f"replication:{PID}:failover", "harvlab2"), True), ((f"replication:{PID2}:protect", "harvlab2"), False),
+    ((f"replication:{PID}:check", "harvlab"), False),                  # contrôle : essai, ne bloque rien
+])
+def test_busy_on_either_cluster_or_on_the_plan(client, busy, blocked):
+    _running(*busy, dry_run=busy[0].endswith(":check"))
+    r = client.post(f"/api/replication/plans/{PID}/protect", json={})
+    assert r.status_code == (409 if blocked else 202)
+
+
+def test_a_check_and_a_dry_run_are_not_blocked_by_a_running_failover(client):
+    _running(f"replication:{PID}:failover", "harvlab2")
+    assert client.post(f"/api/replication/plans/{PID}/check", json={}).status_code == 202
+    assert client.post(f"/api/replication/plans/{PID}/protect", json={"dry_run": True}).status_code == 202
+    assert client.patch(f"/api/replication/plans/{PID}/settings", json={"rpo": "1h"}).status_code == 409
+
+
+def test_by_carries_the_person(as_user, env):
+    r = as_user("alice", "POST", f"/api/replication/plans/{PID}/protect", json={})
+    assert r.status_code == 202
+    assert script_cmd() == base(env, "protect", PID, user="alice") + KUBE + [f"--id={only_run().id}"]
+
+
+# --- rôles ----------------------------------------------------------------------------
+
+ROLE_ROUTES = [
+    ("GET", "/api/replication/plans", None, "viewer"),
+    ("GET", f"/api/replication/plans/{PID}", None, "viewer"),
+    ("GET", f"/api/replication/plans/{PID}/stats", None, "viewer"),
+    ("GET", "/api/replication/hosts/harvlab/resources", None, "viewer"),
+    ("GET", "/api/replication/resources/u-a/events", None, "viewer"),
+    ("GET", "/api/replication/follower", None, "viewer"),
+    ("POST", "/api/replication/plans", {"name": "w3", "from": "harvlab", "to": "harvlab2", "rpo": "15m",
+                                        "vms": ["default/a"]}, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/check", {}, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/measure", {"op": "start"}, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/protect", {}, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/resume", {}, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/unprotect", {"confirm": "web"}, "operator"),
+    ("PATCH", f"/api/replication/plans/{PID}/settings", {"rpo": "1h"}, "operator"),
+    ("DELETE", f"/api/replication/plans/{PID2}", None, "operator"),
+    ("POST", f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "confirm": "web"}, "admin"),
+    ("POST", f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "dry_run": True}, "admin"),
+    ("POST", f"/api/replication/plans/{PID}/unprotect", {"confirm": "web", "delete_backups": True}, "admin"),
+]
+USERS = {"curieux": "viewer", "alice": "operator", "patronne": "admin"}
+
+
+@pytest.mark.parametrize("method,path,body,need", ROLE_ROUTES)
+@pytest.mark.parametrize("user", list(USERS))
+def test_roles_per_route(as_user, user, method, path, body, need):
+    wapp.ACTIONS.clear()
+    r = as_user(user, method, path, json=body) if body is not None else as_user(user, method, path)
+    ok = wapp.ROLE_RANK[USERS[user]] >= wapp.ROLE_RANK[need]
+    if ok:
+        assert r.status_code in (200, 202), (user, path, r.get_json())
+    else:
+        d = r.get_json()
+        assert r.status_code == 403 and not wapp.ACTIONS
+        # la suppression des sauvegardes se contrôle dans la route : un lecteur
+        # bute d'abord sur le garde central (operator)
+        assert d["required"] == ("operator" if USERS[user] == "viewer" and "/unprotect" in path else need)
+
+
+@pytest.mark.parametrize("op,body,need", [
+    ("protect", {}, "operator"), ("failover", {"vms": ["default/rep-a"], "confirm": "web"}, "admin"),
+    ("unprotect", {"confirm": "web", "delete_backups": True}, "admin"), ("unprotect", {"confirm": "web"}, "operator")])
+def test_cancelling_needs_the_role_that_started_it(as_user, op, body, need):
+    as_user("patronne", "POST", f"/api/replication/plans/{PID}/{op}", json=body)
+    run = only_run()
+    assert run.required_role == need
+    r = as_user("alice", "DELETE", f"/api/action/{run.id}")
+    assert r.status_code == (200 if need == "operator" else 403)
+
+
+def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_limit():
+    from limits import parse_many
+    blocks = re.split(r"\n(?=@app\.route\()", SRC)
+    routes = [b for b in blocks if b.startswith('@app.route("/api/replication/')]
+    assert len(routes) == 15
+    for b in routes:
+        head = b.split("\ndef ", 1)[0]
+        assert "@requires_auth" in head, head
+        if "methods=" in head:
+            [spec] = re.findall(r'@_rate_limit\("([^"]+)"\)', head)
+            assert parse_many(spec), head
+        else:
+            assert "@_rate_limit" not in head and "@shared_read(scope=REPLICATION_SCOPE)" in head \
+                or "/follower" in head
+
+
+# --- relais : statut et résumé ----------------------------------------------------------
+
+def _run_tool(rc, data, summarize=wapp._repl_summarize, stderr=""):
+    code = (f"import json,sys; sys.stderr.write({stderr!r}); "
+            f"print(json.dumps({json.dumps(data)!r} and json.loads({json.dumps(data)!r}))); sys.exit({rc})")
+    run = wapp.ActionRun("t1", f"replication:{PID}:failover", "harvlab2", ["harvester-replication"])
+    wapp._vm_transfer_runner(run, [sys.executable, "-c", code], capture=True, summarize=summarize)
+    return run
+
+
+@pytest.mark.parametrize("rc,data,status,summary", [
+    (0, {"ok": True}, "done", None),
+    (3, {"ok": False, "kind": "cancelled", "code": "cancelled", "resume_required": False, "left": []},
+     "cancelled", "cancelled, changes of this run undone"),
+    (3, {"ok": False, "kind": "cancelled", "resume_required": False, "left": ["vm default/rep-a (not restarted)"]},
+     "cancelled", "cancelled, changes of this run undone; left: vm default/rep-a (not restarted)"),
+    (3, {"ok": False, "kind": "interrupted", "code": "interrupted", "resume_required": True},
+     "cancelled", "interrupted, nothing undone: resume the plan to finish"),
+    (1, {"ok": False, "kind": "interrupted", "code": "interrupted", "resume_required": True, "error": "vm refused"},
+     "error", "interrupted (vm refused), nothing undone: resume the plan to finish"),
+    (1, {"ok": False, "kind": "undo-timeout", "code": "undo-timeout", "plan": PID, "left": ["volume x"]},
+     "error", f"undo deadline reached, clean up by hand what carries harvester-ops.io/replication-plan={PID}; "
+              "left: volume x"),
+    (2, {"ok": False, "kind": "state-changed", "error": "the plan changed while waiting for its lock"},
+     "error", "the plan changed while waiting for its lock"),
+    (3, {}, "cancelled", "cancelled, no result from the command: check the plan"),
+])
+def test_runner_wording_follows_the_kind(rc, data, status, summary):
+    run = _run_tool(rc, data)
+    assert (run.status, run.error_summary, run.exit_code) == (status, summary, rc)
+    assert run.result.get("resume_required", False) is bool(data.get("resume_required"))
+
+
+def test_other_tools_keep_their_texts():
+    run = _run_tool(3, {"ok": False}, summarize=None)
+    assert (run.status, run.error_summary) == ("cancelled", "cancelled, transfer undone")
+    run = _run_tool(1, {}, summarize=None, stderr="STEP_EVENT|x|error|boom\n")
+    assert (run.status, run.error_summary) == ("error", "boom")
+
+
+# --- délai de retour arrière avant SIGKILL ------------------------------------------------
+
+STUBBORN = ("import signal,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "print('ready', flush=True)\ntime.sleep(30)\n")
+POLITE = ("import signal,sys,time\ndef h(*a):\n    time.sleep(0.5); sys.exit(3)\n"
+          "signal.signal(signal.SIGTERM, h)\nprint('ready', flush=True)\ntime.sleep(30)\n")
+
+
+def _child(code):
+    p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, text=True)
+    assert p.stdout.readline().strip() == "ready"
+    return p
+
+
+def test_grace_is_undo_total_plus_client_plus_margin():
+    assert wapp._repl_grace({"options": {}}) == 240 + 30 + 15
+    assert wapp._repl_grace({"options": {"timeouts": {"undo_total": 600, "client": 60}}}) == 675
+
+
+@pytest.mark.parametrize("code,grace,want_rc", [(STUBBORN, 1, -9), (POLITE, 5, 3)])
+def test_cancel_kills_only_after_the_grace(code, grace, want_rc):
+    run = wapp.ActionRun("g1", f"replication:{PID}:protect", "harvlab", ["x"])
+    run.proc, run.kill_grace = _child(code), grace
+    t0 = time.monotonic()
+    run.proc.terminate()
+    wapp._kill_after_grace(run).join(10)
+    took = time.monotonic() - t0
+    assert run.proc.returncode == want_rc
+    assert (took >= grace) if want_rc == -9 else (took < grace)
+
+
+def test_cancel_route_escalates_only_for_actions_with_a_grace(client, monkeypatch):
+    seen = []
+    monkeypatch.setattr(wapp, "_kill_after_grace", lambda run: seen.append(run.id))
+    for rid, grace in (("a1", 30), ("a2", None)):
+        run = wapp.ActionRun(rid, "x", "harvlab", ["x"])
+        run.proc, run.kill_grace, run.status = _child(POLITE), grace, "running"
+        wapp.ACTIONS[rid] = run
+        assert client.delete(f"/api/action/{rid}").status_code == 200
+        run.proc.wait(5)
+    assert seen == ["a1"]
+
+
+def test_console_shutdown_waits_each_grace_then_kills(monkeypatch):
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
+    saved = dict(wapp.ACTIONS)
+    wapp.ACTIONS.clear()
+    try:
+        runs = {}
+        for rid, code, grace in (("s1", STUBBORN, 1), ("s2", POLITE, 20), ("s3", POLITE, None)):
+            run = wapp.ActionRun(rid, "x", "harvlab", ["x"])
+            run.proc, run.kill_grace, run.status = _child(code), grace, "done"
+            wapp.ACTIONS[rid] = runs[rid] = run
+        t0 = time.monotonic()
+        codes = wapp._replication_shutdown()
+        assert codes == {"s1": -9, "s2": 3} and 1 <= time.monotonic() - t0 < 10
+        assert runs["s3"].proc.poll() is None          # pas une commande de réplication : intacte
+        runs["s3"].proc.kill()
+        runs["s3"].proc.wait()
+    finally:
+        wapp.ACTIONS.clear()
+        wapp.ACTIONS.update(saved)
+
+
+def test_sigterm_handler_goes_through_the_replication_shutdown():
+    assert "signal.signal(signal.SIGTERM, _console_sigterm)" in SRC
+    assert "def _console_sigterm(signum, frame):\n    try:\n        _replication_shutdown()" in SRC
+
+
+def test_service_unit_waits_long_enough_at_stop():
+    unit = (ROOT / "config" / "systemd" / "harvester-ops.service").read_text()
+    stop = int(re.search(r"podman stop -t (\d+)", unit).group(1))
+    timeout = int(re.search(r"TimeoutStopSec=(\d+)s", unit).group(1))
+    assert stop >= wapp._repl_grace({"options": {}}) and timeout > stop
+    assert "HARVESTER_OPS_REPLICATION_FOLLOW=$${HARVESTER_OPS_REPLICATION_FOLLOW:-1}" in unit
+
+
+# --- fil de suivi -------------------------------------------------------------------------
+
+class FakeProc:
+    n = 0
+
+    def __init__(self, obey=True):
+        FakeProc.n += 1
+        self.pid, self.obey, self.rc, self.terms, self.killed, self.waits = 1000 + FakeProc.n, obey, None, 0, 0, []
+
+    def poll(self):
+        return self.rc
+
+    @property
+    def returncode(self):
+        return self.rc
+
+    def terminate(self):
+        self.terms += 1
+        if self.obey:
+            self.rc = 0
+
+    def kill(self):
+        self.killed += 1
+        self.rc = -9
+
+    def wait(self, timeout=None):
+        self.waits.append(timeout)
+        if self.rc is None:
+            raise subprocess.TimeoutExpired("follow", timeout)
+        return self.rc
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1000.0
+
+    def __call__(self):
+        return self.t
+
+
+@pytest.fixture
+def sup(tmp_path):
+    clock, procs, flags = Clock(), [], {"on": True, "obey": True, "fail": False}
+    log = tmp_path / "logs" / "replication-follow.log"
+
+    def popen(cmd, **kw):
+        if flags["fail"]:
+            raise OSError("no python")
+        kw["stderr"].write("2026-10-24T10:00:00Z info round: 0 plan(s)\n")
+        p = FakeProc(flags["obey"])
+        p.cmd, p.kw = cmd, kw
+        procs.append(p)
+        return p
+    s = wapp.ReplicationFollowerSupervisor(lambda: ["follow", "--all", "--console"], lambda: log,
+                                           lambda: flags["on"], lambda: 42, popen=popen, clock=clock,
+                                           wall=lambda: 5.0)
+    return {"s": s, "clock": clock, "procs": procs, "flags": flags, "log": log}
+
+
+def test_follower_starts_once_and_writes_its_journal_to_the_log(sup):
+    s, procs = sup["s"], sup["procs"]
+    s.tick()
+    s.tick()
+    assert len(procs) == 1 and procs[0].cmd == ["follow", "--all", "--console"]
+    assert procs[0].kw["start_new_session"] is True and procs[0].kw["stdout"] is subprocess.DEVNULL
+    h = s.health()
+    assert h["running"] and h["pid"] == procs[0].pid and h["state"] == "running" and h["restarts"] == 0
+    assert "round: 0 plan(s)" in sup["log"].read_text()
+
+
+def test_follower_restarts_with_a_growing_backoff_then_resets_after_a_stable_run(sup):
+    s, procs, clock = sup["s"], sup["procs"], sup["clock"]
+    s.tick()
+    delays = []
+    for _ in range(4):
+        procs[-1].rc = 1
+        s.tick()
+        start = clock.t
+        assert s.health()["state"] == "backoff" and s.health()["last_exit"] == 1
+        n = len(procs)
+        while len(procs) == n:
+            clock.t += 1
+            s.tick()
+        delays.append(clock.t - start)
+    assert delays == [5, 15, 30, 60] and s.restarts == 4
+    assert s.last_error.startswith("exit 1: ") and "round: 0 plan(s)" in s.last_error
+    clock.t += s.STABLE_S
+    procs[-1].rc = -9
+    s.tick()
+    assert s.health()["next_restart_in_s"] == 5
+
+
+def test_an_unrequested_clean_exit_is_restarted_but_a_requested_stop_is_not(sup):
+    s, procs, clock = sup["s"], sup["procs"], sup["clock"]
+    s.tick()
+    procs[-1].rc = 0                 # SIGTERM venu d'ailleurs : le suiveur sort en 0
+    s.tick()
+    clock.t += 5
+    s.tick()
+    assert len(procs) == 2
+    s.stop()
+    assert procs[-1].terms == 1 and procs[-1].waits == [42] and procs[-1].killed == 0
+    for _ in range(5):
+        clock.t += 400
+        s.tick()
+    assert len(procs) == 2 and s.health()["state"] == "stopped" and s.restarts == 1
+
+
+def test_follower_stop_kills_after_the_grace_when_it_does_not_exit(sup):
+    s, procs = sup["s"], sup["procs"]
+    sup["flags"]["obey"] = False
+    s.tick()
+    s.stop()
+    assert procs[0].waits[0] == 42 and procs[0].killed == 1 and "killed" in s.last_error
+
+
+def test_kill_switch_stops_gracefully_and_restarts_at_once_when_back(sup):
+    s, procs, flags = sup["s"], sup["procs"], sup["flags"]
+    s.tick()
+    flags["on"] = False
+    s.tick()
+    assert procs[0].terms == 1 and procs[0].waits == [42] and s.health()["state"] == "disabled"
+    s.tick()
+    assert len(procs) == 1 and not s.health()["enabled"]
+    flags["on"] = True
+    s.tick()
+    assert len(procs) == 2 and s.restarts == 0
+
+
+def test_a_spawn_failure_is_retried_with_backoff(sup):
+    s, procs, clock, flags = sup["s"], sup["procs"], sup["clock"], sup["flags"]
+    flags["fail"] = True
+    s.tick()
+    assert s.health()["state"] == "backoff" and "OSError" in s.last_error
+    flags["fail"] = False
+    clock.t += 4
+    s.tick()
+    assert not procs
+    clock.t += 1
+    s.tick()
+    assert len(procs) == 1
+
+
+@pytest.mark.parametrize("env_value,config,on", [
+    ("1", {}, True), ("0", {}, False), ("false", {}, False), ("1", {"replication": {"follow": False}}, False),
+    ("1", {"replication": {"follow": True}}, True), ("1", {"replication": "junk"}, True)])
+def test_follow_switches(monkeypatch, env_value, config, on):
+    monkeypatch.setenv("HARVESTER_OPS_REPLICATION_FOLLOW", env_value)
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: config)
+    assert wapp._replication_follow_enabled() is on
+
+
+def test_the_follower_thread_starts_once_and_never_in_a_reader(monkeypatch):
+    started = []
+    monkeypatch.setattr(wapp.ReplicationFollowerSupervisor, "start", lambda self: started.append(self))
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
+    monkeypatch.setenv("HARVESTER_OPS_REPLICATION_FOLLOW", "0")
+    assert wapp._start_replication_follower() is None
+    monkeypatch.setenv("HARVESTER_OPS_REPLICATION_FOLLOW", "1")
+    monkeypatch.setattr(wapp, "IS_READ_WORKER", True)
+    assert wapp._start_replication_follower() is None
+    monkeypatch.setattr(wapp, "IS_READ_WORKER", False)
+    a = wapp._start_replication_follower()
+    assert wapp._start_replication_follower() is a and started == [a]
+
+
+def test_follower_command_follows_the_console_plans_with_the_console_state(monkeypatch, tmp_path):
+    monkeypatch.setattr(wapp, "_state_dir", lambda: tmp_path)
+    monkeypatch.delenv("HARVESTER_OPS_REPLICATION_DB", raising=False)
+    assert wapp._replication_follow_cmd() == [sys.executable, SCRIPT, "follow", "--all", "--console", "--json",
+                                              f"--state-dir={tmp_path}", f"--db={tmp_path / 'replication.db'}"]
+
+
+def test_follower_grace_is_the_longest_client_timeout(env):
+    assert wapp._replication_follow_grace() == 30 + 15
+    conn = db.connect(env["db"])
+    db.update_plan(conn, PID2, options={"timeouts": {"client": 90}})
+    conn.close()
+    assert wapp._replication_follow_grace() == 90 + 15
+
+
+@pytest.mark.skipif(not wapp._PROMETHEUS_AVAILABLE, reason="prometheus_client absent")
+def test_metrics_expose_the_follower_and_the_rpo_per_plan(client, env, monkeypatch):
+    from prometheus_client import REGISTRY
+    fake = type("S", (), {"running": lambda self: True})()
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", fake)
+    text = client.get("/metrics").get_data(as_text=True)
+    assert "harvester_ops_replication_follower_up 1.0" in text
+    labels = {"plan": PID, "name": "web", "source": "harvlab", "target": "harvlab2"}
+    assert REGISTRY.get_sample_value("harvester_ops_replication_rpo_objective_seconds", labels) == 900
+    assert REGISTRY.get_sample_value("harvester_ops_replication_rpo_held_seconds", labels) > 900
+    assert REGISTRY.get_sample_value("harvester_ops_replication_plans_followed") == 1    # web suivi, db brouillon
+    conn = db.connect(env["db"])
+    db.update_plan(conn, PID, options={"paused": True})
+    conn.close()
+    client.get("/metrics")
+    assert REGISTRY.get_sample_value("harvester_ops_replication_plans_followed") == 0
+
+
+def test_follower_route_reports_off_without_a_supervisor(client, monkeypatch):
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
+    d = client.get("/api/replication/follower").get_json()
+    assert d["state"] == "off" and d["running"] is False and d["pid"] is None

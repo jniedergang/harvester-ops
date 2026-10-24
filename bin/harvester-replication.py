@@ -531,13 +531,7 @@ def _role(args):
 
 
 def plan_rows(conn, plans, role=None, side="any"):
-    now = utcnow()
-    rows = []
-    for p in plans:
-        v = db.plan_view(conn, p, now)
-        rows.append(rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
-                                role=role, health=v["health"], side=side))
-    return rows
+    return db.plan_rows(conn, plans, utcnow(), role=role, side=side)
 
 
 def cmd_plan_list(args):
@@ -936,16 +930,7 @@ def cmd_status(args):
 def cmd_resources(args):
     conn = open_db(args)
     now = utcnow()
-    rows, views, plans = [], {}, {}
-    for r in db.list_resources_by_host(conn, args.host, args.side):
-        pid = r["plan_id"]
-        if pid not in plans:
-            plans[pid] = db.get_plan(conn, pid)
-            views[pid] = db.plan_view(conn, plans[pid], now)
-        p, v = plans[pid], views[pid]
-        res = next((x for x in v["resources"] if x["resource_uid"] == r["resource_uid"]), r)
-        rows.append(rp.resource_row(p, res, r["side"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
-                                    role=_role(args), health=v["health"].get(r["resource_uid"])))
+    rows = db.host_rows(conn, args.host, args.side, now, role=_role(args))
     emit(args, {"ok": True, "error": None, "kind": None, "host": args.host, "side": args.side, "resources": rows},
          [f"{x['plan_name']:20} {x['side']:6} {x['namespace']}/{x['name']}: {x['state']}, peer "
           f"{x['peer_host']}, actions {', '.join(a['name'] for a in x['actions']) or '-'}" for x in rows]
