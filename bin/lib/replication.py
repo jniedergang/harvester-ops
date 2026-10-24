@@ -191,6 +191,8 @@ RESOURCE_STATES = ("draft", "measuring", "protecting", "protected", "lagging", "
 # rangés en base ; les quatre autres sont calculés à la lecture
 STORED_RESOURCE_STATES = PLAN_STATES
 _FOLLOWED = ("protected", "lagging", "drifting", "degraded", "source-unreachable")
+# ressources dont rien n'est plus répliqué : ni RPO, ni dépassement, ni dérive
+NOT_REPLICATING = ("failed_over", "unprotecting", "unprotected")
 
 VOLUME_STATES = ("pending", "restoring", "standby", "activated", "removed")
 TICK_STATES = ("in_progress", "completed", "error", "applied", "skipped")
@@ -1268,6 +1270,11 @@ def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None)
     ev = _vm_eval(plan, resource["resource_uid"], volumes, ticks, now, vm_running)
     stored = resource.get("state") or plan.get("state") or "draft"
     health = health or {}
+    if stored in NOT_REPLICATING:
+        # plus rien n'est répliqué : l'âge du dernier point ne mesure plus un
+        # RPO (vu sur le banc : une VM basculée faisait dépasser l'objectif du
+        # plan entier, `status` sortait en 4)
+        ev.update(rpo_held_s=None, exceeded=False, drift=[], backlog=0)
     reasons = []
     state = stored
     if stored == "protected":

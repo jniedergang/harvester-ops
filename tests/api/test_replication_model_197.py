@@ -739,6 +739,17 @@ def test_plan_status_oldest_applied_point_and_stats():
     assert s["resources_by_state"] == {"protected": 2}
 
 
+@pytest.mark.parametrize("state", ["failed_over", "unprotecting", "unprotected"])
+def test_plan_status_ignores_the_rpo_of_a_resource_no_longer_replicated(state):
+    # vu sur le banc : rep-a basculée, son dernier point vieillit et le plan
+    # entier passait « objectif dépassé »
+    ticks = [tick("pvc-a0", -4000), tick("pvc-a1", -4000), tick("pvc-b0", -60)]
+    s = rp.plan_status(pplan(), [res(UID_A, "rep-a", state), res(UID_B, "rep-b")], SVOLS, ticks, NOW, {})
+    a, b = s["vms"]
+    assert (a["rpo_held_s"], a["exceeded"], a["drift"], a["state"]) == (None, False, False, state)
+    assert (s["rpo_held_s"], s["exceeded"]) == (60, False) and b["rpo_held_s"] == 60
+
+
 def test_plan_status_without_any_tick():
     s = rp.plan_status(pplan(state="protecting"), [res(UID_A, "rep-a", "protecting")], SVOLS, [], NOW, {})
     assert s["rpo_held_s"] is None and s["vms"][0]["last_applied_at"] is None and s["vms"][0]["state"] == "protecting"
