@@ -278,8 +278,14 @@ def test_the_reason_of_a_lost_console_is_said(ui, last_close, expected, retries)
 @pytest.mark.parametrize("module,visible", [(False, False), (True, True)])
 def test_the_snapshots_button_needs_the_kvm_snapshots_module(ui, context, module, visible):
     make_page, _ = ui
+    # kvm-vm.js (1.97.0) pose window.KVMSnapshots : la propriété est figée
+    # avant lui, absente (module manquant) ou remplacée par une sonde
     if module:
-        context.add_init_script("window.KVMSnapshots = { open(h, d) { window.__snap = [h, d]; } };")
+        context.add_init_script("Object.defineProperty(window, 'KVMSnapshots', {configurable: false,"
+                                " get() { return { open(h, d) { window.__snap = [h, d]; } }; }, set() {}});")
+    else:
+        context.add_init_script("Object.defineProperty(window, 'KVMSnapshots', {configurable: false,"
+                                " get() { return undefined; }, set() {}});")
     page, _ = make_page()
     panel = open_console_from_menu(page, "kvmtest-cirros")
     expect(panel.locator(".vm-console-status")).to_have_text("Connected", timeout=5000)

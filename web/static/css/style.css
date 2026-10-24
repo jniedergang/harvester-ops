@@ -5482,3 +5482,14 @@ td.fk-reason { max-width: 260px; }
 .kvm-fps legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
 .kvm-fp { display: flex; align-items: center; gap: 6px; font-size: 12.5px; overflow-wrap: anywhere; }
 .kvm-pools details table { margin-top: 6px; }
+/* v1.97.0 : fenêtres Instantanés, Cloner et Supprimer d'une VM KVM */
+.kvm-vmw { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; font-size: 13px; }
+.kvm-vmw h4 { margin: 8px 0 4px; font-size: 13px; }
+.kvm-op-list { margin: 4px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.kvm-op-refusals, .kvm-op-warn { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
+.kvm-op-refusals { border-color: var(--error); }
+.kvm-op-warn { border-color: var(--warn); }
+.kvm-path { font-family: var(--font-mono, monospace); font-size: 12px; overflow-wrap: anywhere; }
+.kvm-check { display: flex; align-items: flex-start; gap: 6px; }
+.kvm-snap-acts { white-space: nowrap; }
+.kvm-snap-table td, .kvm-clone-disks td { vertical-align: top; }

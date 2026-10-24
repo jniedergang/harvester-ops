@@ -1129,6 +1129,11 @@ KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 def _kvm_required_role(path, method):
     if path in KVM_ADMIN_PATHS or (method == "DELETE" and path.startswith("/api/kvm/hosts/")):
         return "admin"
+    # v1.97.0 : supprimer une VM (exactement /api/kvm/vms/<hôte>/<domaine>)
+    # = admin ; supprimer un instantané (.../snapshots/<nom>) reste opérateur
+    if method == "DELETE" and path.startswith("/api/kvm/vms/") and \
+            len(path[len("/api/kvm/vms/"):].split("/")) == 2:
+        return "admin"
     return "operator"
 
 
@@ -9837,7 +9842,8 @@ def api_kvm_vms():
         vms.extend(inv["vms"])
     vms.sort(key=lambda v: (v["name"], v["host"]))
     return jsonify({"vms": vms, "hosts": hosts, "warnings": warnings, "role": current_role(),
-                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
+                    "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()},
+                    "operations": KVM_VM_OPERATIONS})
 
 
 @app.route("/api/kvm/vms/<host>/<domain>")
@@ -21490,6 +21496,280 @@ def ws_kvm_vnc(ws, host, domain):
         except Exception: pass
     finally:
         metric_vnc_sessions.set(_vnc_viewers())
+
+
+# =============================================================================
+# v1.97.0 : instantanés, clonage et suppression d'une VM KVM
+#
+# Lectures (liste des instantanés, aperçus du clonage et de la suppression)
+# par la bibliothèque, comme le détail d'une VM ; chaque mutation lance
+# bin/harvester-kvm.py en action suivie, valeurs en `--option=valeur`, avec un
+# libellé `kvm:vm-<verbe>:<hôte>/<domaine>` : `_kvm_vm_busy` refuse alors
+# toute autre opération sur la même VM (le script tient en plus son verrou
+# par VM). La suppression d'une VM exige le nom saisi et l'empreinte de
+# l'aperçu montré (`--expect-delete`) : le script refuse (`plan-changed`) si
+# l'ensemble supprimé a grandi depuis.
+# =============================================================================
+KVM_SNAPSHOT_TIMEOUT_MAX = 3600
+KVM_DELETE_SURVEY_TIMEOUT = int(getattr(_kvm_cli, "DELETE_SURVEY_TIMEOUT", 120)) if _kvm_cli else 120
+KVM_ACK_MAX = 64                       # fichiers illisibles acceptés en une fois
+
+# Table des opérations du second groupe du menu d'une VM : rôle demandé,
+# états où l'opération est possible (None : tous), définition persistante
+# exigée. Servie avec la liste des VMs (`operations`) : l'interface grise les
+# entrées d'après elle, sans règle à elle. Les mêmes refus restent faits par
+# la bibliothèque au moment d'agir.
+KVM_VM_OPERATIONS = {
+    "snapshots": {"role": "operator", "states": None, "persistent": False},
+    "clone": {"role": "operator", "states": ["shut off"], "persistent": True},
+    "delete": {"role": "admin", "states": ["shut off"], "persistent": True},
+}
+
+
+def _kvm_op_error(e, extra=None):
+    """Réponse d'une lecture qui échoue : 400 pour un nom refusé, 404 pour
+    une VM inconnue, 502 sinon ; le message de la bibliothèque, jamais une
+    trace ni un chemin d'état."""
+    kind = getattr(e, "kind", "failed")
+    code = 400 if kind == "invalid" else 404 if kind == "notfound" else 502
+    return jsonify(dict(extra or {}, error=getattr(e, "message", str(e)), kind=kind)), code
+
+
+def _kvm_vm_target(host, domain):
+    """(VirshHost, None) après les contrôles communs d'une route de VM, ou
+    (None, réponse d'erreur)."""
+    err = _kvm_unavailable()
+    if err:
+        return None, err
+    if not _kvm_check_host(host):
+        return None, _kvm_err("invalid host name")
+    if not _kvm_check_domain(domain):
+        return None, _kvm_err("invalid domain name")
+    return _kvm_host(_state_dir(), host)
+
+
+def _kvm_json_body():
+    body = request.get_json(silent=True)
+    if body is None:
+        body = {}
+    return body if isinstance(body, dict) else None
+
+
+def _kvm_vm_op(host, domain, verb, cmd, names=()):
+    """Lance une opération sur une VM : refus 409 si une autre opération tient
+    déjà la VM (ou l'un des `names`, le nom d'un clone), sinon l'action."""
+    with _KVM_GESTURE_LOCK:
+        for n in (domain, *names):
+            busy = _kvm_vm_busy(host, n)
+            if busy:
+                return None, _busy_response(busy)
+        return _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd)
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots")
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_snapshots(host, domain):
+    """Instantanés d'une VM (nom, date, état à la prise, emplacement, parent,
+    actuel) et raisons pour lesquelles on ne peut pas en prendre."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    try:
+        listing = _ko.list_snapshots(vh, domain)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify(dict(listing, host=host, name=domain, role=current_role()))
+
+
+def _kvm_snapshot_cmd(verb, host, domain, snapshot):
+    return _kvm_base("snapshot", verb) + [f"--host={host}", f"--name={domain}",
+                                          f"--snapshot={snapshot}"]
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_create(host, domain):
+    """Prend un instantané interne ; corps {name, description}. Une VM en
+    marche est mise en pause le temps d'enregistrer sa mémoire."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    try:
+        snap = _ko.check_snapshot_name(body.get("name"), new=True)
+        desc = _ko._check_description(body.get("description") or None)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    cmd = _kvm_snapshot_cmd("create", host, domain, snap)
+    if desc:
+        cmd.append(f"--description={desc}")
+    run, err = _kvm_vm_op(host, domain, "snapshot-create", cmd)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "snapshot": snap}), 202
+
+
+def _kvm_snapshot_gesture(host, domain, snapshot, verb):
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    try:
+        snap = _ko.check_snapshot_name(snapshot)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    run, err = _kvm_vm_op(host, domain, f"snapshot-{verb}",
+                          _kvm_snapshot_cmd(verb, host, domain, snap))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "snapshot": snap}), 202
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots/<snapshot>/revert", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_revert(host, domain, snapshot):
+    """Revient à un instantané (jamais `--force`) : l'état actuel non
+    enregistré est perdu ; une VM en marche revenue à un instantané pris
+    arrêté s'éteint."""
+    return _kvm_snapshot_gesture(host, domain, snapshot, "revert")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/snapshots/<snapshot>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_snapshot_delete(host, domain, snapshot):
+    """Supprime un instantané ; ses enfants sont rattachés à son parent."""
+    return _kvm_snapshot_gesture(host, domain, snapshot, "delete")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/clone-plan")
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_clone_plan(host, domain):
+    """Aperçu d'un clonage `?name=C` : disques copiés et leur destination,
+    place, disques partagés gardés, ce qui est régénéré, refus. Ne modifie
+    rien."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    new = request.args.get("name", "")
+    try:
+        _ko.check_new_vm_name(new)
+        plan = _ko.clone_plan(vh, domain, new)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],
+                    "plan": plan, "role": current_role()})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/clone", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_kvm_clone(host, domain):
+    """Copie complète d'une VM arrêtée sous un nouveau nom ; corps {name}.
+    Le script refait l'aperçu au moment d'agir et défait tout en cas
+    d'échec ou d'annulation."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    new = body.get("name")
+    try:
+        _ko.check_new_vm_name(new)
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    if new == domain:
+        return _kvm_err("the copy needs another name")
+    cmd = _kvm_base("clone") + [f"--host={host}", f"--name={domain}", f"--new-name={new}"]
+    run, err = _kvm_vm_op(host, domain, "clone", cmd, names=(new,))
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain, "new_name": new}), 202
+
+
+def _kvm_ack_list(values):
+    """Fichiers illisibles acceptés : liste de chemins absolus (contrôlée par
+    la bibliothèque), sans doublon, dans l'ordre reçu."""
+    if values is None:
+        return []
+    if not isinstance(values, list) or len(values) > KVM_ACK_MAX:
+        raise _ko.OpError("invalid", "acknowledge_unreadable: a list of absolute paths")
+    _ko.check_acknowledged(values)
+    return list(dict.fromkeys(values))
+
+
+def _kvm_flag(value):
+    return value is True or value in ("1", "true")
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/delete-plan")
+@requires_auth
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+def api_kvm_delete_plan(host, domain):
+    """Aperçu d'une suppression : disques supprimés et gardés (avec leur
+    raison), fichiers illisibles, instantanés, mémoire enregistrée, vTPM,
+    nvram, refus, et l'empreinte à rendre à la suppression.
+    `?remove_storage=1`, `?acknowledge=<chemin>` (répété)."""
+    vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    remove = _kvm_flag(request.args.get("remove_storage"))
+    try:
+        ack = _kvm_ack_list(request.args.getlist("acknowledge"))
+        if ack and not remove:
+            raise _ko.OpError("invalid", "acknowledging unreadable files only applies when "
+                              "the disks are deleted too")
+        plan = _ko.delete_plan(vh, domain, remove, ack or None,
+                               survey_timeout=KVM_DELETE_SURVEY_TIMEOUT)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host, "name": domain})
+    return jsonify({"host": host, "name": domain, "possible": not plan["refusals"],
+                    "plan": plan, "role": current_role()})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>", methods=["DELETE"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_vm_delete(host, domain):
+    """Supprime une VM arrêtée et persistante (administrateur). Corps :
+    {confirm: <nom de la VM>, expect_delete: <empreinte de l'aperçu>,
+    remove_storage, acknowledge_unreadable: [chemins cochés]}."""
+    _vh, err = _kvm_vm_target(host, domain)
+    if err:
+        return err
+    body = _kvm_json_body()
+    if body is None:
+        return _kvm_err("a JSON object is expected")
+    if body.get("confirm") != domain:
+        return _kvm_err("type the name of the VM to confirm the deletion")
+    remove = body.get("remove_storage", False)
+    if not isinstance(remove, bool):
+        return _kvm_err("remove_storage must be true or false")
+    try:
+        digest = _ko.check_digest(body.get("expect_delete"))
+        if digest is None:
+            raise _ko.OpError("invalid", "expect_delete is required: preview the deletion first")
+        ack = _kvm_ack_list(body.get("acknowledge_unreadable"))
+        if ack and not remove:
+            raise _ko.OpError("invalid", "acknowledging unreadable files only applies when "
+                              "the disks are deleted too")
+    except _ko.OpError as e:
+        return _kvm_err(e.message)
+    cmd = _kvm_base("vm", "delete") + [f"--host={host}", f"--name={domain}"]
+    if remove:
+        cmd.append("--remove-storage")
+    cmd += [f"--acknowledge-unreadable={p}" for p in ack]
+    cmd.append(f"--expect-delete={digest}")
+    run, err = _kvm_vm_op(host, domain, "delete", cmd)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "host": host, "name": domain}), 202
 
 
 # =============================================================================

@@ -451,6 +451,36 @@ const KVM = (() => {
       </div>`;
   }
 
+  // v1.97.0 : second groupe du menu (instantanés, cloner, supprimer). La
+  // table des conditions (rôle, états, persistance) est servie par le
+  // serveur (`operations`), comme celle des gestes.
+  const OPERATIONS = ['snapshots', 'clone', 'delete'];
+  const OP_OPEN = { snapshots: 'openSnapshots', clone: 'openClone', delete: 'openDelete' };
+  const OP_LABEL = { snapshots: () => tr('kvm.op.snapshots'), clone: () => tr('kvm.op.clone'), delete: () => tr('kvm.op.delete') };
+  const OP_TIP = { snapshots: () => tr('kvm.op.snapshotsTip'), clone: () => tr('kvm.op.cloneTip'), delete: () => tr('kvm.op.deleteTip') };
+  const OP_ICON = { snapshots: 'snapshot', clone: 'clone', delete: 'trash' };
+  const ROLE_RANK = { viewer: 1, operator: 2, admin: 3 };
+
+  /** Pourquoi une opération est grisée ('' : possible), d'après la table
+   *  servie par le serveur. */
+  function operationWhy(operations, op, v, have) {
+    const t = operations && operations[op];
+    if (!t) return tr('kvm.op.unavailable');
+    if ((ROLE_RANK[have] || 0) < (ROLE_RANK[t.role] || 3)) return t.role === 'admin' ? tr('kvm.adminOnly') : tr('kvm.operatorOnly');
+    if (t.persistent && !v.persistent) return tr('kvm.why.transient');
+    if (t.states && !t.states.includes(v.state)) {
+      return tr('kvm.why.needsState', { state: stateLabel(v.state), need: t.states.map(stateLabel).join(', ') });
+    }
+    return '';
+  }
+
+  function opItem(op, v) {
+    const why = !window.KVMVm ? tr('kvm.op.unavailable') : operationWhy(cur.data.operations, op, v, role());
+    return `<button type="button" class="vma-item tip${op === 'delete' ? ' danger' : ''}" role="menuitem" data-kvm-op="${op}"
+        data-tip="${esc(why || OP_TIP[op]())}"${why ? ' aria-disabled="true"' : ''}>
+        <span class="vma-ic">${icon(OP_ICON[op])}</span> ${esc(OP_LABEL[op]())}</button>`;
+  }
+
   // le menu d'une VM (même allure que celui des VMs Harvester)
   let menu = null;
   function closeMenu() {
@@ -480,7 +510,8 @@ const KVM = (() => {
       <div class="vma-group">${GESTURES.map(item).join('')}</div>
       <div class="vma-group"><button type="button" class="vma-item tip" role="menuitem" data-kvm-console="1"
         data-tip="${esc(canOperate() ? tr('kvm.consoleTip') : tr('kvm.operatorOnly'))}"${canOperate() ? '' : ' aria-disabled="true"'}>
-        <span class="vma-ic">${icon('console')}</span> ${esc(tr('kvm.console'))}</button></div>`;
+        <span class="vma-ic">${icon('console')}</span> ${esc(tr('kvm.console'))}</button>
+        ${OPERATIONS.map((op) => opItem(op, v)).join('')}</div>`;
     document.body.appendChild(el);
     const r = anchor.getBoundingClientRect();
     const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
@@ -514,6 +545,15 @@ const KVM = (() => {
         closeMenu();
         // v1.97.0 : console VNC par la connexion SSH de l'hôte
         if (window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(v.host, v.name);
+        return;
+      }
+      const o = e.target.closest('[data-kvm-op]');
+      if (o) {
+        if (o.getAttribute('aria-disabled')) return;
+        closeMenu();
+        // v1.97.0 : instantanés, clonage, suppression (kvm-vm.js)
+        const fn = window.KVMVm && OP_OPEN[o.dataset.kvmOp] && KVMVm[OP_OPEN[o.dataset.kvmOp]];
+        if (fn) fn(v.host, v.name);
         return;
       }
       const b = e.target.closest('[data-kvm-gesture]');
@@ -777,7 +817,7 @@ const KVM = (() => {
 
   // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
   // l'actualisation automatique), lu par les tests
-  return { start, stop, load, openDeclare, gestureWhy, busy: () => (cur ? cur.busy : null) };
+  return { start, stop, load, openDeclare, gestureWhy, operationWhy, stateLabel, busy: () => (cur ? cur.busy : null) };
 })();
 
 if (typeof window !== 'undefined') window.KVM = KVM;
