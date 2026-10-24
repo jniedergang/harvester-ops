@@ -120,7 +120,7 @@ const ReplicationPlan = (() => {
     const pending = row.pending_vms || [];
     const vms = s.vms || [];
     return `<div class="kpi rp-kpi">
-        <div class="rp-kpi-wide"><small>${esc(tr('rp.kpi.rpo'))}</small>${U.gauge(s.rpo_held_s, s.rpo_objective_s, { wide: true })}</div>
+        <div class="rp-kpi-wide"><small>${esc(tr('rp.kpi.rpo'))}</small>${U.gauge(s.rpo_held_s, s.rpo_objective_s)}</div>
         <div><small>${esc(tr('rp.kpi.interval'))}</small><b>${esc(s.interval_s ? U.dur(s.interval_s) : '-')}</b></div>
         <div><small>${esc(tr('rp.kpi.next'))}</small><b>${esc(next == null ? '-' : U.dur(next))}</b></div>
         <div><small>${esc(tr('rp.kpi.backlog'))}</small><b class="tip" data-tip="${esc(tr('rp.kpi.backlogTip'))}">${esc(s.backlog ?? 0)}</b></div>
@@ -187,7 +187,7 @@ const ReplicationPlan = (() => {
     const long = end - start > 2 * 86400000;
     const fx = (ms) => new Date(ms).toLocaleString(undefined, long ? { month: 'short', day: 'numeric' } : { hour: '2-digit', minute: '2-digit' });
     return `${ys.map((y) => { const py = PT + (H - PT - PB) * (1 - y / max); return `<line class="grid" x1="${PL}" x2="${W - PR}" y1="${py}" y2="${py}"/><text x="${PL - 6}" y="${py + 4}" text-anchor="end">${esc(fmt(y))}</text>`; }).join('')}
-      ${xt.map((x) => `<text x="${PL + (W - PL - PR) * ((x - start) / (end - start))}" y="${H - 6}" text-anchor="middle">${esc(fx(x))}</text>`).join('')}`;
+      ${xt.map((x, i) => `<text x="${PL + (W - PL - PR) * ((x - start) / (end - start))}" y="${H - 6}" text-anchor="${i === 0 ? 'start' : (i === xt.length - 1 ? 'end' : 'middle')}">${esc(fx(x))}</text>`).join('')}`;
   }
   const px = (t, start, end) => PL + (W - PL - PR) * Math.min(1, Math.max(0, (Date.parse(t) - start) / (end - start)));
   function lineChart(pts, series, o) {
@@ -207,7 +207,7 @@ const ReplicationPlan = (() => {
     const ref = o.ref ? `<line class="ref" x1="${PL}" x2="${W - PR}" y1="${py(o.ref)}" y2="${py(o.ref)}"/>` : '';
     const data = pts.map((p) => ({ x: px(p.t, o.start, o.end), t: p.t, v: series.map((s) => [s.label, p[s.key] == null ? '-' : o.fmt(p[s.key])]) }));
     return `<div class="rp-chart-wrap"><svg class="rp-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(series.map((s) => s.label).join(', '))}"
-      data-points="${esc(JSON.stringify(data))}">${axes(o.start, o.end, max, o.fmt)}${ref}${paths}<line class="cross" x1="0" x2="0" y1="${PT}" y2="${H - PB}" hidden/></svg>
+      data-points="${esc(JSON.stringify(data))}">${axes(o.start, o.end, max, o.fmt)}${ref}${paths}<line class="cross" x1="0" x2="0" y1="${PT}" y2="${H - PB}" style="display:none"/></svg>
       <div class="rp-tip" hidden></div></div>`;
   }
   function barChart(pts, key, o) {
@@ -219,7 +219,7 @@ const ReplicationPlan = (() => {
     }).join('');
     const data = pts.map((p) => ({ x: px(p.t, o.start, o.end) + bw / 2, t: p.t, v: [[tr('rp.charts.sent'), o.fmt(p[key] || 0)], [tr('rp.charts.passes'), String(p.passes || 0)]] }));
     return `<div class="rp-chart-wrap"><svg class="rp-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(tr('rp.charts.sent'))}"
-      data-points="${esc(JSON.stringify(data))}">${axes(o.start, o.end, max, o.fmt)}${bars}<line class="cross" x1="0" x2="0" y1="${PT}" y2="${H - PB}" hidden/></svg>
+      data-points="${esc(JSON.stringify(data))}">${axes(o.start, o.end, max, o.fmt)}${bars}<line class="cross" x1="0" x2="0" y1="${PT}" y2="${H - PB}" style="display:none"/></svg>
       <div class="rp-tip" hidden></div></div>`;
   }
   /** Infobulle au survol : le point le plus proche, trait vertical. */
@@ -233,12 +233,12 @@ const ReplicationPlan = (() => {
       let best = null;
       data.forEach((p) => { if (!best || Math.abs(p.x - x) < Math.abs(best.x - x)) best = p; });
       if (!best) return;
-      cross.setAttribute('x1', best.x); cross.setAttribute('x2', best.x); cross.hidden = false;
+      cross.setAttribute('x1', best.x); cross.setAttribute('x2', best.x); cross.style.display = '';
       tip.hidden = false;
-      tip.innerHTML = `<b>${esc(U.when(best.t))}</b>${best.v.map(([k, val]) => `<div>${esc(k)} : ${esc(val)}</div>`).join('')}`;
+      tip.innerHTML = `<b>${esc(U.when(best.t))}</b>${best.v.map(([k, val]) => `<div>${esc(k)}: ${esc(val)}</div>`).join('')}`;
       tip.style.left = `${Math.min(r.width - 160, Math.max(0, (best.x / W) * r.width + 10))}px`;
     });
-    svg.addEventListener('mouseleave', () => { tip.hidden = true; cross.hidden = true; });
+    svg.addEventListener('mouseleave', () => { tip.hidden = true; cross.style.display = 'none'; });
   }
 
   // -- journal -------------------------------------------------------------------------------
@@ -579,7 +579,7 @@ const ReplicationPlan = (() => {
       const m = mode();
       const a = m === 'planned' ? planned : unplanned;
       const reach = row.reach || {};
-      const modeText = m === 'planned' ? tr('rp.fo.planned') : tr('rp.fo.unplanned');
+      const modeText = m === 'planned' ? tr('rp.act.failover') : tr('rp.act.failoverUnplanned');
       const out = [li(isAdmin, isAdmin ? tr('rp.chk.admin') : tr('rp.chk.adminNo', { role: d.role })),
         li(!!a, a ? tr('rp.chk.allowed', { mode: modeText }) : tr('rp.chk.notAllowed', { mode: modeText })),
         reachLi(reach.source, p.source_cluster), reachLi(reach.target, p.target_cluster)];

@@ -133,6 +133,10 @@ const ReplUtil = (() => {
 
   /** Jauge RPO tenu / objectif : barre jusqu'à 1,5 fois l'objectif, repère à l'objectif. */
   function gauge(held, objective, opts = {}) {
+    // plus rien n'est répliqué (basculé, déprotégé) : pas de RPO à montrer
+    if (opts.state && ['failed_over', 'unprotecting', 'unprotected'].includes(opts.state)) {
+      return `<span class="rp-gauge-wrap"><span class="res-dim tip" data-rp-gauge="off" data-tip="${esc(tr('rp.gauge.offTip'))}">${esc(tr('rp.gauge.off'))}</span></span>`;
+    }
     const max = Math.max(1, (objective || 1) * 1.5);
     const pct = held == null ? 0 : Math.min(100, (held / max) * 100);
     const mark = Math.min(100, ((objective || 0) / max) * 100);
@@ -165,6 +169,11 @@ const ReplUtil = (() => {
   }
   function transferText(t) {
     if (!t || !t.last_at) return `<span class="res-dim">${esc(tr('rp.transfer.none'))}</span>`;
+    // dernier passage sans aucun bloc changé : un débit de 0 ne dirait rien
+    if (!t.last_bytes) {
+      return `<span class="tip" data-tip="${esc(tr('rp.transfer.tip', { at: when(t.last_at) }))}">${esc(tr('rp.transfer.idle'))}</span>
+        <span class="res-dim">· ${esc(tr('rp.transfer.day', { bytes: bytes(t.bytes_24h), n: t.passes_24h || 0 }))}</span>`;
+    }
     return `<span class="tip" data-tip="${esc(tr('rp.transfer.tip', { at: when(t.last_at) }))}">${esc(tr('rp.transfer.last', {
       bytes: bytes(t.last_bytes), up: rate(t.upload_bps), apply: rate(t.apply_bps) }))}</span>
       <span class="res-dim">· ${esc(tr('rp.transfer.day', { bytes: bytes(t.bytes_24h), n: t.passes_24h || 0 }))}</span>`;
@@ -421,7 +430,7 @@ const Replication = (() => {
       <header><h3><a href="#" data-rp-open="${esc(r.id)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.name)}</a></h3>
         <span class="rp-badges">${roleBadge(r)} ${U.stateBadge(st)}${r.alerts ? ` <span class="badge fail tip" data-tip="${esc(tr('rp.alertsCountTip'))}">${icon('warn', 11)} ${r.alerts}</span>` : ''}</span></header>
       <div class="rp-card-flow">${U.flow(r)}</div>
-      <div class="rp-card-gauge"><small>${esc(tr('rp.col.rpo'))}</small>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { wide: true })}</div>
+      <div class="rp-card-gauge"><small>${esc(tr('rp.col.rpo'))}</small>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { wide: true, state: st })}</div>
       <dl class="rp-meta">
         <div><dt>${esc(tr('rp.col.vms'))}</dt><dd>${vmCount(r)} ${U.vmStates(r.resources_by_state)}</dd></div>
         <div><dt>${esc(tr('rp.col.transfer'))}</dt><dd>${U.transferText(r.transfer)}</dd></div>
@@ -443,7 +452,7 @@ const Replication = (() => {
         ${roleCol ? `<td>${roleBadge(r)}</td>` : ''}
         <td>${U.stateBadge(U.planState(r))}</td><td>${U.flow(r)}</td>
         <td>${vmCount(r)}<div class="rp-chips">${U.vmStates(r.resources_by_state)}</div></td>
-        <td>${U.gauge(r.rpo_held_s, r.rpo_objective_s)}</td><td class="rp-xfer">${U.transferText(r.transfer)}</td>
+        <td>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { state: U.planState(r) })}</td><td class="rp-xfer">${U.transferText(r.transfer)}</td>
         <td class="rp-ev">${U.lastEvent(r.last_events)}</td>
         <td class="btn-row rp-row-act"><button type="button" class="btn btn-sm btn-secondary tip" data-rp-open="${esc(r.id)}" data-tip="${esc(tr('rp.openTip'))}">${esc(tr('rp.open'))}</button>${failoverButton(r)}</td>
       </tr>`).join('')}</tbody></table></div>`;
@@ -466,7 +475,7 @@ const Replication = (() => {
         <td>${esc(r.peer_host || '')}</td>
         <td><a href="#" data-rp-open="${esc(r.plan)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.plan_name)}</a></td>
         <td>${U.stateBadge(r.state, (r.reasons || []).map(U.reasonText).join(', '))}</td>
-        <td>${U.gauge(r.rpo_held_s, r.rpo_objective_s)}</td><td>${U.lastEvent(r.last_events)}</td></tr>`).join('')}</tbody></table></div>`
+        <td>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { state: r.state })}</td><td>${U.lastEvent(r.last_events)}</td></tr>`).join('')}</tbody></table></div>`
       : `<p class="hint">${esc(tr('rp.hostVmsNone'))}</p>`}`;
   }
 

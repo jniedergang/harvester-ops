@@ -3700,14 +3700,14 @@ resserrent la liste. Les alertes actives sont en tête. Le bouton
 Matrix, webhook entrant Slack, courriel par SMTP ou webhook JSON générique ;
 un administrateur les modifie, les secrets ne sont plus jamais montrés, une
 valeur masquée laissée telle quelle garde le secret rangé ; chaque canal a
-un bouton **Envoyer un essai**).
+un bouton **Envoyer un test**).
 
 **Fenêtre Nouveau contrat.** Cinq blocs sur une page, chacun dit s'il est
 prêt, et rien n'est écrit avant **Créer** :
 1. *Quoi et vers où* : nom, clusters source et de secours, VMs choisies
    dans une liste (celles qui ne se répliquent pas sont grisées avec la
    raison) ou par une règle d'étiquette `clé=valeur` dans un namespace.
-   Avec une règle, **Protéger d'office les nouvelles VMs étiquetées**
+   Avec une règle, **Protéger automatiquement les nouvelles VMs qui reçoivent l'étiquette**
    laisse la console protéger une VM qui reçoit l'étiquette plus tard
    (sinon une alerte vous attend).
 2. *Objectif* : objectif de RPO (5, 15, 60 minutes ou toute valeur), points
@@ -3733,7 +3733,7 @@ prêt, et rien n'est écrit avant **Créer** :
    annexes HTTP (moment, méthode, URL, en-têtes, un en-tête secret masqué
    une fois gardé, corps, délai). Une action annexe s'essaie une fois le
    contrat créé.
-5. *Récapitulatif et contrôles* : votre rôle, les clusters source et de
+5. *Résumé et vérifications préalables* : votre rôle, les clusters source et de
    secours lisibles avec vos droits, chaque correspondance présente, le
    débit mesuré du lien ; la place libre et la cible de sauvegarde sont
    contrôlées par le contrôle préalable de la protection. Puis ce qui
@@ -3742,9 +3742,9 @@ prêt, et rien n'est écrit avant **Créer** :
 
 **Fenêtre d'un contrat.** Ouverte depuis une carte ou une ligne, avec les
 gestes que le contrat permet (un bouton grisé dit pourquoi : rôle, ou
-sauvegardes tenues) : Contrôler, Mesurer, Arrêter la mesure, Protéger,
+sauvegardes tenues) : Vérifier, Mesurer, Arrêter la mesure, Protéger,
 Pause, Reprendre le suivi, Reprendre la commande (après une interruption)
-et Basculer. Quatre onglets :
+et « Bascule... ». Quatre onglets :
 - *Vue d'ensemble* : RPO tenu, intervalle, prochain passage, passages en
   attente, écart, débits d'envoi et d'application, données envoyées en 24
   heures, une ligne par VM avec ses raisons, et les dernières bascules et
@@ -3778,7 +3778,7 @@ bouton se déverrouille une fois le nom du contrat tapé.
 **Liens.** Un bloc par paire de clusters ayant un contrat ou un essai : les
 deux trajets source -> cible de sauvegarde -> secours avec le débit médian
 des vraies sauvegardes sur 24 heures (le trajet le plus lent est marqué),
-le dernier passage, une courbe de 24 heures par trajet, et l'**essai
+le dernier passage, une courbe de 24 heures par trajet, et le **test
 actif** : un pod temporaire écrit des données aléatoires (256 Mio à 2 Gio)
 vers la cible de sauvegarde NFS depuis la source et un pod les relit depuis
 le secours, tous deux supprimés ensuite (opérateur). Une paire sans contrat

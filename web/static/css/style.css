@@ -5655,3 +5655,4 @@ body.sidebar-collapsed .rp-menu-badge { position: absolute; margin: 0; right: 4p
 :is(.rp-create, .rp-view, .rp-failover, .rp-notify, .rp-confirm, .rp-card, .rp-links-card) :is(button, input, select) { font-family: inherit; }
 .rp-presets .bk-field { width: 170px; }
 .rp-presets .bk-field input { width: 100%; }
+.rp-plan-card h3 { text-transform: none; letter-spacing: 0; }

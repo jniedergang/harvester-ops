@@ -286,6 +286,9 @@ const App = (() => {
     if (active === 'bookings' && window.Bookings) jobs.push(Bookings.load());
     if (active === 'usage' && window.Usage) jobs.push(Usage.load());
     if (active === 'clusterdr' && window.Replication) jobs.push(Replication.start($('#rp-cluster-host'), 'cluster', currentCluster));
+    // les contrats et les liens ne dépendent pas du cluster choisi ; relus comme Activity
+    if (active === 'drplans' && window.Replication) jobs.push(Replication.load());
+    if (active === 'drlinks' && window.Replication) jobs.push(Replication.loadLinks());
     if (window.Replication) Replication.paintBadges();
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());

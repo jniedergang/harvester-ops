@@ -172,8 +172,8 @@ lui.
 
 **Depuis la console.** Les mêmes étapes existent dans Disaster Recovery >
 Contrats : **Nouveau contrat** (blocs 1 à 5, mesurer d'abord ou protéger
-directement), puis la fenêtre du contrat (Contrôler, Mesurer, Protéger, les
-onglets Graphiques et Journal) et **Basculer...** (administrateur, nom du
+directement), puis la fenêtre du contrat (Vérifier, Mesurer, Protéger, les
+onglets Graphiques et Journal) et **Bascule...** (administrateur, nom du
 contrat tapé). Voir [capabilites.md, Écrans Disaster Recovery](capabilites.md#écrans-disaster-recovery).
 
 **Première protection.**
