@@ -1134,7 +1134,17 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
                 switched = switched or _transport_lost(e)
                 raise
         except BaseException as exc:
-            if switched:
+            if switched and _reconcile_seed(host, name, pool, new_vol):
+                # le lecteur cite le nouveau volume et <hops:seed> aussi : la
+                # suppression de la VM le reconnaît comme possédé, une
+                # régénération suivante le remplace (pas de second lecteur)
+                leftovers = []
+                if seed and (seed["pool"], seed["volume"]) != (pool, new_vol):
+                    leftovers.append({"kind": "volume", "pool": seed["pool"],
+                                      "volume": seed["volume"],
+                                      "error": "previous seed, no longer used by the VM: it "
+                                               "was not removed"})
+            elif switched:
                 leftovers = [{"kind": "volume", "pool": pool, "volume": new_vol,
                               "error": "kept: the CD-ROM of the VM may already use it; the "
                                        "previous seed was not removed"}]
@@ -1159,3 +1169,28 @@ def regenerate_seed(host, name, user_data, network_data, rerun=False, hostname=N
     return {"seed": {"pool": pool, "volume": new_vol, "target": target},
             "previous": seed, "removed": removed, "kept_reason": kept_reason,
             "next_boot": True, "rerun": bool(rerun), "leftovers": []}
+
+
+def _reconcile_seed(host, name, pool, volume):
+    """Après un échec qui suit le changement de média : si la définition
+    persistante cite déjà le nouveau volume sur un CD-ROM, `<hops:seed>` est
+    remis d'accord avec ce lecteur (un `define` qui ne change que lui).
+    Rend True si la définition est cohérente à la sortie ; jamais d'erreur
+    (au mieux : le reste est dit par l'appelant)."""
+    try:
+        xml = host.virsh("dumpxml", "--inactive", "--security-info", "--domain", name,
+                         idempotent=True)
+        vm = kh.parse_domain_xml(xml)
+        cites = any(d.get("device") == "cdrom" and d.get("type") == "volume"
+                    and d.get("source") == f"{pool}/{volume}" for d in vm.get("disks") or [])
+        if not cites:
+            return False
+        if vm.get("seed") == {"pool": pool, "volume": volume}:
+            return True
+        edit = kx.Edit(xml)
+        edit.set_seed(pool, volume)
+        ks.virsh_input(host, ("define", "--validate", "/dev/stdin"), edit.xml(),
+                       secrets=ko._passwords(xml))
+        return True
+    except (kh.KvmError, OpError, ValueError, SyntaxError):
+        return False

@@ -369,14 +369,20 @@ def test_with_progress_reraises_the_copy_error():
 
 # --- I3 : seed régénéré, échec après le changement de média ------------------------------
 
-@pytest.mark.parametrize("label,verb,fail,kept", [
-    ("upload fails", "vol-upload", BOOM, False),
-    ("update-device refused", "update-device", BOOM, False),
-    ("update-device transport loss", "update-device", LOST, True),
-    ("define fails after update-device", "define", BOOM, True),
-    ("define transport loss", "define", LOST, True),
+# `left` : volume nommé dans les restes ; `meta` : volume cité par <hops:seed> à la fin
+@pytest.mark.parametrize("label,verb,fail,kept,left,meta", [
+    ("upload fails", "vol-upload", BOOM, False, None, "ci1-cidata.iso"),
+    ("update-device refused", "update-device", BOOM, False, None, "ci1-cidata.iso"),
+    ("update-device transport loss", "update-device", LOST, True, "ci1-cidata-1.iso",
+     "ci1-cidata.iso"),
+    # le lecteur cite déjà le nouveau volume : <hops:seed> remis d'accord,
+    # l'ancien seed (plus cité) est nommé dans les restes
+    ("define fails after update-device", "define", BOOM, True, "ci1-cidata.iso",
+     "ci1-cidata-1.iso"),
+    ("define transport loss", "define", LOST, True, "ci1-cidata.iso", "ci1-cidata-1.iso"),
 ])
-def test_i3_regenerate_seed_failure_keeps_what_the_vm_may_use(label, verb, fail, kept):
+def test_i3_regenerate_seed_failure_keeps_what_the_vm_may_use(label, verb, fail, kept, left,
+                                                              meta):
     s = seeded_world("running")
     s.fail_next[verb] = fail
     with pytest.raises(kh.KvmError) as e:
@@ -385,10 +391,33 @@ def test_i3_regenerate_seed_failure_keeps_what_the_vm_may_use(label, verb, fail,
     assert (new in s.pools["images"]["vols"]) is kept
     assert "ci1-cidata.iso" in s.pools["images"]["vols"]     # ancien seed jamais touché
     assert ("vol-delete", "--pool", "images", "--vol", "ci1-cidata.iso") not in s.writes
-    if kept:
-        assert [(x["pool"], x["volume"]) for x in e.value.leftovers] == [("images", new)]
-    else:
-        assert e.value.leftovers == []
+    assert [(x["pool"], x["volume"]) for x in e.value.leftovers] == (
+        [("images", left)] if left else [])
+    assert kh.parse_domain_xml(s.domains["ci1"]["xml"])["seed"] == {"pool": "images",
+                                                                   "volume": meta}
+
+
+def test_i3_reconciled_seed_is_owned_and_replaced_later():
+    """Après un define en échec derrière le changement de média : la VM cite
+    le nouveau seed sur son lecteur ET dans <hops:seed>. La suppression le
+    reconnaît comme possédé, une nouvelle régénération le remplace sur le
+    même lecteur (pas de second CD-ROM)."""
+    s = seeded_world("shut off")
+    s.fail_next["define"] = BOOM
+    with pytest.raises(kh.KvmError):
+        ke.regenerate_seed(s, "ci1", UD + "# v2\n", None)
+    cdroms = [d for d in kh.parse_domain_xml(s.domains["ci1"]["xml"])["disks"]
+              if d["device"] == "cdrom"]
+    assert [d["source"] for d in cdroms] == ["images/ci1-cidata-1.iso"]
+    plan = ko.delete_plan(s, "ci1", True)
+    owned = {d["volume"]: d["reason"] for d in plan["delete"]}
+    assert owned.get("ci1-cidata-1.iso") == "cloud-init seed of this VM"
+    res = ke.regenerate_seed(s, "ci1", UD + "# v3\n", None)
+    assert res["previous"] == {"pool": "images", "volume": "ci1-cidata-1.iso"}
+    assert res["removed"] is True and res["seed"]["volume"] == "ci1-cidata-2.iso"
+    cdroms = [d for d in kh.parse_domain_xml(s.domains["ci1"]["xml"])["disks"]
+              if d["device"] == "cdrom"]
+    assert [d["source"] for d in cdroms] == ["images/ci1-cidata-2.iso"]
 
 
 # --- I4 : réseau cité par son pont ---------------------------------------------------------
