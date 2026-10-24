@@ -668,6 +668,8 @@ def test_spec_drift_by_digest(tmp_path, how, drift):
     run_until(w, f, w.clock.now() + 1300)                   # deux relectures de spec
     ev = follow_events(w, "plan-drift")
     assert len(ev) == (1 if drift else 0)
+    # le message nomme ce qui compte dans l'empreinte, mémoire comprise (banc)
+    assert all("CPU, memory" in e["message"] for e in ev)
     st = status(w)["vms"][0]
     assert ("plan-drift" in st["reasons"]) is drift
     h = db.health_map(w.conn, w.pid)[VMS["vm-b"]["uid"]]

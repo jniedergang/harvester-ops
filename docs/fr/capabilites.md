@@ -3325,7 +3325,19 @@ bascule planifiée à l'octet près, bascule non planifiée source injoignable
 avec écart refusé puis accepté, protection annulée sans reste, bascule
 interrompue après l'activation puis reprise, déprotection avec la décision
 47, suppression des sauvegardes, supervision du suiveur (reprise du bail,
-kill -9, arrêt de la console). Faits Longhorn sur lesquels elle repose :
+kill -9, arrêt de la console). Rejoué sur les mêmes bancs le soir même :
+un disque d'image sans correspondance d'image placé par la correspondance
+des classes, `protect --retain` sur un plan protégé et son annulation
+(huit signaux à des étapes différentes, tâche et ligne du plan remises à
+chaque fois), un changement de processeur et de mémoire qui lève
+`plan-drift` et `carnet-stale` puis protect qui réécrit le carnet (la VM
+basculée a démarré à la nouvelle taille), aucun `rpo-drift` après une
+protection qui a repris une sauvegarde de 6 minutes, la taille de la
+restauration initiale égale à ce que Longhorn a restauré (4 Kio d'écart
+sur 348 Mio), le contrôle non planifié source perdue (points, écart,
+rattrapage en cours), `point_at` dans les deux modes et `lost_after` pour
+la non planifiée seulement, et `unprotect-delete-backups` refusé sur un
+plan dont une VM est activée. Faits Longhorn sur lesquels elle repose :
 l'étiquette `backup-volume` d'un Backup est le nom du volume ; les
 étiquettes de la tâche récurrente sont dans `spec.labels` et
 `status.labels`, jamais dans `metadata.labels` ; un instantané ou une

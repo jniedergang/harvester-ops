@@ -1254,7 +1254,7 @@ class Follower:
         if rp.spec_drifted({"vm_spec_digest": r.get("vm_spec_digest")}, seen):
             if self.once_on(("plan-drift", p["id"], uid), seen["vm_spec_digest"]):
                 self.event(p, "spec", "plan-drift", uid, "source", "warn",
-                           "the VM spec changed since protect (disks, sizes, networks): run protect again",
+                           "the VM spec changed since protect (disks, sizes, networks, CPU, memory): run protect again",
                            facts={"known_digest": r.get("vm_spec_digest"), "seen_digest": seen["vm_spec_digest"],
                                   "known_generation": r.get("vm_generation"),
                                   "seen_generation": h["vm_generation_seen"]})

@@ -3034,6 +3034,17 @@ failover byte for byte, unplanned failover with the source unreachable and
 skew refused then accepted, cancelled protect leaving nothing, failover
 interrupted after activation then resumed, unprotect with decision 47,
 backup deletion, follower supervision (takeover, kill -9, console stop).
+Replayed on the same benches the same evening: an image disk without an
+image mapping placed through the class mapping, `protect --retain` on a
+protected plan and its cancel (eight signals at different steps, job and
+plan row restored each time), a CPU and memory change raising
+`plan-drift` and `carnet-stale` then protect rewriting the carnet (the
+failed-over VM came up with the new size), no `rpo-drift` after a protect
+that reused a 6-minute-old backup, the initial restore size equal to what
+Longhorn restored (4 KiB apart on 348 MiB), the unplanned check with the
+source lost (points, skew, catch-up pending), `point_at` in both modes and
+`lost_after` for the unplanned one only, and `unprotect-delete-backups`
+refused on a plan with an activated VM.
 Longhorn facts this relies on: a Backup's `backup-volume` label is the
 volume name; recurring job labels are in `spec.labels` and
 `status.labels`, never in `metadata.labels`; a snapshot or backup of a

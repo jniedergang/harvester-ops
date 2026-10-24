@@ -978,13 +978,21 @@ def cmd_status(args):
     return EXIT_RPO if exceeded else EXIT_OK
 
 
+def _action_text(a):
+    """Une action d'une ressource ; refusée, avec sa raison (v1.99.0 : le
+    texte proposait `unprotect-delete-backups` que la déprotection refuse)."""
+    if a.get("allowed", True):
+        return a["name"]
+    return f"{a['name']} (not allowed: {a.get('reason') or 'role'})"
+
+
 def cmd_resources(args):
     conn = open_db(args)
     now = utcnow()
     rows = db.host_rows(conn, args.host, args.side, now, role=_role(args))
     emit(args, {"ok": True, "error": None, "kind": None, "host": args.host, "side": args.side, "resources": rows},
          [f"{x['plan_name']:20} {x['side']:6} {x['namespace']}/{x['name']}: {x['state']}, peer "
-          f"{x['peer_host']}, actions {', '.join(a['name'] for a in x['actions']) or '-'}" for x in rows]
+          f"{x['peer_host']}, actions {', '.join(_action_text(a) for a in x['actions']) or '-'}" for x in rows]
          or [f"no resource of {args.host} in a plan"])
     return EXIT_OK
 

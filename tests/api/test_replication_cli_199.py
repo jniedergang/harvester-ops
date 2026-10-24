@@ -534,6 +534,25 @@ def test_resources_by_host_match_the_plan_rows(tmp_path, capsys):
     assert data["resources"] == []
 
 
+# v1.99.0 (banc) : le texte proposait `unprotect-delete-backups` sur une VM
+# basculée, alors que la déprotection le refuse (backups-in-use)
+@pytest.mark.parametrize("failed_over,expected", [
+    (False, "unprotect-delete-backups"),
+    (True, "unprotect-delete-backups (not allowed: backups-in-use)"),
+])
+def test_resources_text_says_why_an_action_is_not_allowed(tmp_path, capsys, failed_over, expected):
+    w = protected(tmp_path, vms=("vm-a",))
+    if failed_over:
+        assert rr.failover(w.ctx())["exit"] == 0
+    rc, data, _ = run(capsys, w, "resources", "--host=harvlab")
+    acts = {a["name"]: a for a in data["resources"][0]["actions"]}
+    assert acts["unprotect-delete-backups"]["allowed"] is (not failed_over)
+    rc, out, _ = run(capsys, w, "resources", "--host=harvlab", as_json=False)
+    assert rc == 0
+    names = out.split(", actions ", 1)[1].strip().split(", ")
+    assert expected in names, out
+
+
 def test_events_paging_by_id_and_date(tmp_path, capsys):
     w = protected(tmp_path, vms=("vm-a",))
     uid = VMS["vm-a"]["uid"]

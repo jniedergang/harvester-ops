@@ -133,6 +133,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - After the activation, Longhorn 1.12.1 no longer publishes the applied
   backup: the points read before the activation are now recorded before
   it and kept on resume (the dead post-activation reread is gone).
+- A SIGTERM during a command was sometimes swallowed by a guarded read
+  (probe, image class, path scrubbing), so a cancelled `protect --retain`
+  finished with exit 0 and the new value. The cancellation is no longer an
+  `Exception`; measure stop and unprotect release their lock on it.
+- A signal right after `BEGIN IMMEDIATE` left the transaction open, and the
+  rollback of a cancelled protect then failed with an internal error
+  (`OperationalError`) before restoring the plan row. A transaction left
+  open by a signal is now rolled back.
+- `resources` text marks the actions that are not allowed, with their
+  reason (`unprotect-delete-backups (not allowed: backups-in-use)`), and
+  the `plan-drift` message names CPU and memory.
 
 ### Security
 - Each write route runs the command line with the person's own
