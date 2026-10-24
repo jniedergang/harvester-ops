@@ -2584,3 +2584,30 @@ def test_cancel_in_the_precheck_releases_the_lock(tmp_path, command, side):
     getattr(w, side).hooks.clear()
     assert fired and res["exit"] == 3 and res["code"] == "cancelled", res
     assert run()["exit"] == 0
+
+
+def test_protect_rerun_on_a_protected_plan_says_nothing_was_restored(tmp_path):
+    # vu au rejeu (v1.99.0) : une relance affichait « initial-restore (backup
+    # data): 348.0 MiB in 2 s » alors que les volumes de secours étaient déjà
+    # à jour
+    w = protected(tmp_path)
+    first = [a[2] for a in w.log if a[0] == "initial-restore" and a[1] == "running"]
+    assert first and first[-1].startswith("initial-restore (backup data): ")
+    n = len(w.log)
+    snaps = []
+    assert rr.protect(w.ctx(progress=lambda snap: snaps.append(snap)))["exit"] == 0
+    again = [a[2] for a in w.log[n:] if a[0] == "initial-restore" and a[1] == "running"]
+    assert again[-1] == "standby volumes already hold the latest backups: nothing restored"
+    assert not any("backup data" in x or "volume size" in x for x in again), again
+    assert all(x["total"] == 0 for x in snaps if x.get("phase") == "initial-restore")
+
+
+def test_unplanned_check_says_what_caught_up_is_measured_against(tmp_path):
+    # vu au rejeu : « caught-up » d'après les sauvegardes que la cible connaît,
+    # alors qu'une sauvegarde plus récente de la source pouvait exister
+    w = protected(tmp_path, vms=("vm-b",))
+    w.src.down = True
+    res = rr.failover(w.ctx(), planned=False, dry_run=True, record=False)
+    got = {f["code"]: f for f in res["findings"]}
+    assert got["caught-up"]["facts"]["note"] == (
+        "against the backups the target sees now (may lag 1-4 min; the real failover resyncs first)")

@@ -1611,24 +1611,42 @@ def ensure_standby(ctx, works, latest, visible):
             if data <= 0:
                 nominal = True
             sizes[d["target_volume"]] = data if data > 0 else int(d["size"])
-    total = sum(sizes.values())
+    wanted = {d["target_volume"]: (d["source_volume"], names[d["source_volume"]]) for w in works for d in w["disks"]}
+    # v1.99.0 : une relance sur un plan protégé trouve ses volumes de secours
+    # déjà à jour ; ils ne comptent pas dans le bilan (vu au rejeu : « 348 MiB
+    # en 2 s » sans rien restaurer)
+    def up_to_date(sb, name):
+        try:
+            return (_status(engine_of(ctx.dst, sb)).get("lastRestoredBackup") or "") == name
+        except Exception as e:                  # noqa: BLE001
+            # API momentanément injoignable : compté comme à restaurer,
+            # l'attente qui suit réessaie
+            if not run.transient(e):
+                raise
+            return False
+    todo = {sb: sizes[sb] for sb, (_vol, name) in wanted.items() if not up_to_date(sb, name)}
+    total = sum(todo.values())
     label = "initial-restore (volume size)" if nominal else "initial-restore (backup data)"
     prog = ctx.tracker("initial-restore", total)
-    wanted = {d["target_volume"]: (d["source_volume"], names[d["source_volume"]]) for w in works for d in w["disks"]}
 
     def progress_hook():
         done = 0
-        for sb in wanted:
+        for sb in todo:
             st = (_status(engine_of(ctx.dst, sb)).get("restoreStatus") or {}).values()
             pct = [float((s or {}).get("progress") or 0) for s in st]
-            done += sizes[sb] * (sum(pct) / len(pct) / 100.0 if pct else 0)
+            done += todo[sb] * (sum(pct) / len(pct) / 100.0 if pct else 0)
         prog.update(int(done))
 
     with stage(ctx, "protect", "initial-restore", "target", [w["uid"] for w in works]):
         # la progression (octets restaurés des moteurs) est relevée à chaque tour
         applied = wait_applied(ctx, "initial-restore", wanted, "initial_restore", on_poll=progress_hook)
         prog.update(total)
-        ctx.emit("initial-restore", "running", vp.summary(label, prog.finish()))
+        if todo:
+            ctx.emit("initial-restore", "running", vp.summary(label, prog.finish()))
+        else:
+            prog.finish()
+            ctx.emit("initial-restore", "running",
+                     "standby volumes already hold the latest backups: nothing restored")
     now = ctx.dt()
     for w in works:
         for d in w["disks"]:
@@ -2119,6 +2137,13 @@ def _applied_points(ctx, carnet, tb):
     return pts, skew, (rp.iso(min(times)) if times else None)
 
 
+# v1.99.0 : le contrôle à blanc juge le rattrapage d'après les sauvegardes
+# que la cible connaît déjà (relue par Longhorn toutes les quelques minutes) ;
+# vu au rejeu : « caught-up » alors qu'une sauvegarde plus récente existait
+CATCH_UP_NOTE = ("against the backups the target sees now (may lag 1-4 min; "
+                 "the real failover resyncs first)")
+
+
 def _unplanned_dry_findings(ctx, sel, carnets):
     """Ce qu'une bascule non planifiée ferait, lu sur la cible seule, sans
     rien écrire (v1.99.0 : le contrôle à blanc ne disait rien). Par VM :
@@ -2150,8 +2175,8 @@ def _unplanned_dry_findings(ctx, sel, carnets):
             applied = _status(engine_of(ctx.dst, v["target_volume"])).get("lastRestoredBackup") or ""
             if not last or applied != last:
                 late.append({"volume": v["source_volume"], "applied": applied, "last_backup": last})
-        out.append(rp._finding("catch-up-pending", "warn", vm=key, volumes=late) if late
-                   else rp._finding("caught-up", "ok", vm=key))
+        out.append(rp._finding("catch-up-pending", "warn", vm=key, volumes=late, note=CATCH_UP_NOTE) if late
+                   else rp._finding("caught-up", "ok", vm=key, note=CATCH_UP_NOTE))
     return out
 
 

@@ -160,6 +160,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   resource, at each scrape. The replication gauges now come from a reading
   kept 30 seconds, and are updated and exposed under one lock, so a
   concurrent scrape never sees half the series.
+- Rerunning protect on a protected plan no longer reports an initial
+  restore of the full backup size when the standby volumes were already up
+  to date ("nothing restored"). The dry unplanned check says that
+  `caught-up` is judged against the backups the target sees now (they may
+  lag 1 to 4 minutes; the real failover resyncs first).
 
 ### Security
 - Each write route runs the command line with the person's own
