@@ -17822,6 +17822,16 @@ def _iso_release_info(path):
     return _ISO_RELEASE_CACHE[key]
 
 
+def _bm_iso_harvester_version(name):
+    """Version de Harvester d'un ISO du magasin (harvester-release.yaml), ou
+    None : nom refusé, fichier absent ou ISO illisible."""
+    safe = _safe_artifact_name(str(name or ""))
+    path = _iso_dir() / safe if safe else None
+    if not path or not path.is_file():
+        return None
+    return (_iso_release_info(path) or {}).get("harvester")
+
+
 def _iso_sha512(name):
     """Le SHA-512 publié d'un ISO du magasin, s'il est posé à côté (fichier
     .sha512 de la release, une ligne « <hash>  <nom> »)."""

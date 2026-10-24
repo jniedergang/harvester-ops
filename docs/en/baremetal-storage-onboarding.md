@@ -75,15 +75,22 @@ boot WWID when required, and verify addresses, protocol bindings, modules and
 services before advertising a profile-completion label. No debug shell is
 persisted. The default partition layout is unchanged.
 
-The joining node stays cordoned. How it gets there depends on the version of
-the joined cluster. The console reads the `server-version` setting with the
-person's frozen kubeconfig before installation.
+The joining node stays cordoned. How it gets there depends on two versions,
+both read before installation:
 
-### Harvester v1.9.0 and later: native install cordon
+- the joined cluster, from its `server-version` setting, read with the
+  person's frozen kubeconfig;
+- the ISO selected for the install, from its `harvester-release.yaml`.
+
+The native path below is used only when **both** are v1.9.0 or later. In every
+other case (older cluster, older ISO, pre-release of v1.9.0, unreadable
+version) the console uses its own taint and cordon.
+
+### Harvester v1.9.0 and later (cluster and ISO): native install cordon
 
 The console sets the installer option `install.cordoned: true` (added by
-harvester/harvester#11301, present in the v1.9.0 tag). Harvester then does the
-work:
+harvester/harvester#11301, present in the v1.9.0 tag). No onboarding taint is
+written. Harvester cordons the node itself, after it registers:
 
 - the installer adds the label `harvesterhci.io/install-cordoned=true` to the
   RKE2 configuration. Kubelet registers the node without it. RKE2 applies it
@@ -97,15 +104,29 @@ work:
   cordoned node for promotion.
 
 The console writes nothing to the node. It waits for the processed annotation,
-then checks that the node is still unschedulable. No onboarding taint is
-written and no node patch permission is required. The job stops if the node is
-schedulable: Harvester leaves it schedulable when no other node is available.
-An installer older than the cluster ignores the option: the label never comes,
-and the wait ends with the readiness timeout and that reason.
+then checks that the node is still unschedulable. No node patch permission is
+required.
 
-Pre-releases of v1.9.0 and unreadable versions use the console mechanism below.
+- Harvester leaves the node schedulable when no other node is available (all
+  others cordoned or in maintenance). The job then stops, and the node stays
+  schedulable: check it before running workloads.
+- An installer older than v1.9.0 ignores the option. The console does not pick
+  this path with such an ISO. If the label still never comes, the wait ends
+  with the readiness timeout and that reason.
+- A node that stays cordoned is never promoted. When the 3rd node joins a
+  cluster with two management nodes, its promotion waits until the operator
+  uncordons it.
+- Harvester cordons the node when it sees the label. In rare cases the
+  promote controller could start a promotion before that. This is an upstream
+  race, and the console does not close it. The job waits while the promotion
+  runs. At the end the controller lifts the cordon, so the job stops and the
+  node is left schedulable.
 
-### Harvester v1.8: console taint and cordon
+`install.cordoned` is also accepted in the advanced YAML. On this path it must
+be `true`. With the console path below it must be absent or `false`. Installers
+older than v1.9.0 ignore it.
+
+### Older cluster or ISO (v1.8): console taint and cordon
 
 An initial `harvester-ops.io/onboarding=pending:NoSchedule` taint protects the
 joining node. It is written to `/etc/rancher/rke2/config.yaml.d/` by the
@@ -155,7 +176,9 @@ The final stage verifies physical storage NIC ownership, Node Ready, no resource
 pressure, the local Longhorn disk, the boot-completion label and, if declared,
 the exact CSI DaemonSet pod on this node (read with a server-side field selector,
 pods being deleted are ignored). New controllers with null or incomplete status
-stay pending. The checks give up after `HARVESTER_OPS_ONBOARDING_TIMEOUT` seconds
+stay pending. A read that fails (timeout, API unavailable) is also pending: the
+console reads again at the next poll. The node, the VlanConfig list and the CSI
+pod list are all read this way. Only explicit refusals stop the job. The checks give up after `HARVESTER_OPS_ONBOARDING_TIMEOUT` seconds
 (1800 by default), within the post-installation budget. Failure or cancellation
 leaves the node cordoned, or initially tainted if protection could not be
 confirmed. There is no automatic production release, VM migration,

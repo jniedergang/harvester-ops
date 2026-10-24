@@ -56,7 +56,12 @@ def preflight(api, data, cfg):
     profile.require('NotFound' in (found.stderr or ''), 'cannot read the target cluster nodes')
     # Version lue par le kubeconfig figé de la requête : v1.9.0 et plus
     # cordonnent le nœud eux-mêmes (install.cordoned), la console n'y écrit rien.
-    native = profile.native_cordon(api._hup.parse_version(api._harvester_server_version(kc)))
+    # L'installeur doit l'être aussi : un ISO plus ancien ignore l'option en
+    # silence. Version de l'ISO lue dans son harvester-release.yaml ;
+    # illisible = mécanisme de la console.
+    native = (profile.native_cordon(api._hup.parse_version(api._harvester_server_version(kc)))
+              and profile.native_cordon(api._hup.parse_version(
+                  api._bm_iso_harvester_version(data.get('iso')))))
     if not native:
         # Do not discover insufficient write access after installing a host.
         allowed = api._kubectl_run(['kubectl', '--kubeconfig', kc, 'auth', 'can-i', 'patch',

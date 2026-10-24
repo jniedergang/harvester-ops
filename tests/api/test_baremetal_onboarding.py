@@ -728,10 +728,14 @@ class Preflight:
     _hup = hv_upgrade
 
     def __init__(self, node_rc=1, node_err='Error from server (NotFound): nodes "worker.example" not found',
-                 can_i='yes', lm=None, ds=True, version='v1.8.2'):
+                 can_i='yes', lm=None, ds=True, version='v1.8.2', iso_version='v1.9.0'):
         self.node_rc, self.node_err, self.can_i, self.lm, self.ds = node_rc, node_err, can_i, lm, ds
-        self.version = version
+        self.version, self.iso_version = version, iso_version
         self.calls = []
+
+    def _bm_iso_harvester_version(self, name):
+        self.calls.append(('iso-version', name))
+        return self.iso_version
 
     def _harvester_server_version(self, kc):
         assert kc == '/operator'
@@ -757,7 +761,7 @@ class Preflight:
 
 
 def data_for(choice):
-    return {'mode': 'join', 'onboarding': choice, '_cluster_kc': '/operator'}
+    return {'mode': 'join', 'onboarding': choice, '_cluster_kc': '/operator', 'iso': 'harvester.iso'}
 
 
 def test_preflight_uses_current_user_and_does_not_write(choice, cfg):
@@ -927,6 +931,43 @@ def test_preflight_chooses_the_cordon_by_cluster_version(choice, cfg, version, n
     assert ('server-version',) in api.calls
     # le cordon natif n'a besoin d'aucun droit d'écriture sur les nœuds
     assert (('auth', 'can-i', 'patch', 'nodes') in api.calls) is not native
+
+
+# (cluster, ISO choisi pour l'installation, cordon natif)
+CORDON_BY_CLUSTER_AND_ISO = [
+    ('v1.9.0', 'v1.9.0', True),
+    ('v1.10.0', 'v1.9.1', True),
+    ('v1.9.0', 'v1.8.2', False),
+    ('v1.8.2', 'v1.9.0', False),
+    ('v1.10.0', 'v1.9.0-rc4', False),
+    ('v1.9.0', None, False),
+]
+
+
+@pytest.mark.parametrize('version,iso_version,native', CORDON_BY_CLUSTER_AND_ISO,
+                         ids=['%s cluster, %s ISO' % (c, i or 'unreadable') for c, i, _ in CORDON_BY_CLUSTER_AND_ISO])
+def test_native_cordon_needs_both_cluster_and_iso_at_v1_9(choice, cfg, version, iso_version, native):
+    api = Preflight(version=version, iso_version=iso_version)
+    out = rt.preflight(api, data_for(choice), cfg)
+    assert out['native_cordon'] is native
+    assert (('auth', 'can-i', 'patch', 'nodes') in api.calls) is not native
+    if version.startswith('v1.9') or version.startswith('v1.10'):
+        assert ('iso-version', 'harvester.iso') in api.calls
+
+
+@pytest.mark.parametrize('label,name,release,expected', [
+    ('release read', 'h.iso', {'harvester': 'v1.9.0'}, 'v1.9.0'),
+    ('not a Harvester ISO', 'h.iso', None, None),
+    ('missing file', 'absent.iso', {'harvester': 'v1.9.0'}, None),
+    ('path in the name', '../h.iso', {'harvester': 'v1.9.0'}, None),
+    ('no name', None, {'harvester': 'v1.9.0'}, None),
+], ids=lambda v: v if isinstance(v, str) else '')
+def test_iso_harvester_version_from_the_store(monkeypatch, tmp_path, label, name, release, expected):
+    import app
+    (tmp_path / 'h.iso').write_bytes(b'iso')
+    monkeypatch.setattr(app, '_iso_dir', lambda: tmp_path)
+    monkeypatch.setattr(app, '_iso_release_info', lambda path: release)
+    assert app._bm_iso_harvester_version(name) == expected
 
 
 @pytest.mark.parametrize('version,native', CORDON_BY_VERSION[:3], ids=[v for v, _ in CORDON_BY_VERSION[:3]])

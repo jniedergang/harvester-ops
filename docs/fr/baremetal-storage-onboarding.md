@@ -71,15 +71,23 @@ Le disque local Longhorn doit devenir Ready. Le partitionnement reste inchangé.
 
 ## Protection et vérifications
 
-Le nœud qui rejoint reste cordonné. La façon d'y arriver dépend de la version
-du cluster rejoint. La console lit le réglage `server-version` avec le
-kubeconfig de la personne, figé lors de la requête, avant l'installation.
+Le nœud qui rejoint reste cordonné. La façon d'y arriver dépend de deux
+versions, lues avant l'installation :
 
-### Harvester v1.9.0 et plus : cordon natif de l'installeur
+- celle du cluster rejoint, dans son réglage `server-version`, lu avec le
+  kubeconfig de la personne, figé lors de la requête ;
+- celle de l'ISO choisi pour l'installation, dans son `harvester-release.yaml`.
+
+Le chemin natif ci-dessous n'est pris que si **les deux** sont en v1.9.0 ou
+plus. Dans tous les autres cas (cluster plus ancien, ISO plus ancien, préversion
+de v1.9.0, version illisible), la console pose sa propre taint et son cordon.
+
+### Harvester v1.9.0 et plus (cluster et ISO) : cordon natif de l'installeur
 
 La console pose l'option d'installation `install.cordoned: true` (ajoutée par
-harvester/harvester#11301, présente dans le tag v1.9.0). Harvester fait le
-reste :
+harvester/harvester#11301, présente dans le tag v1.9.0). Aucune taint
+d'onboarding n'est écrite. Harvester cordonne lui-même le nœud, après son
+enregistrement :
 
 - l'installeur ajoute le label `harvesterhci.io/install-cordoned=true` à la
   configuration de RKE2. Kubelet enregistre le nœud sans lui. RKE2 l'applique
@@ -93,17 +101,29 @@ reste :
   nœud cordonné pour une promotion.
 
 La console n'écrit rien sur le nœud. Elle attend l'annotation, puis vérifie que
-le nœud est toujours non planifiable. Aucune taint d'onboarding n'est écrite et
-aucun droit de patch sur les nœuds n'est demandé. La tâche s'arrête si le nœud
-est planifiable : Harvester le laisse ainsi quand aucun autre nœud n'est
-disponible. Un installeur plus ancien que le cluster ignore l'option : le label
-n'arrive jamais, et l'attente se termine au délai des vérifications, avec
-cette raison.
+le nœud est toujours non planifiable. Aucun droit de patch sur les nœuds n'est
+demandé.
 
-Les préversions de v1.9.0 et une version illisible suivent le mécanisme de la
-console ci-dessous.
+- Harvester laisse le nœud planifiable quand aucun autre nœud n'est disponible
+  (tous les autres cordonnés ou en maintenance). La tâche s'arrête alors et le
+  nœud reste planifiable : le vérifier avant d'y lancer des charges.
+- Un installeur plus ancien que v1.9.0 ignore l'option. La console ne prend pas
+  ce chemin avec un tel ISO. Si le label n'arrive quand même jamais, l'attente
+  se termine au délai des vérifications, avec cette raison.
+- Un nœud qui reste cordonné n'est jamais promu. Quand le 3e nœud rejoint un
+  cluster qui compte deux nœuds de gestion, sa promotion attend que
+  l'opérateur lève son cordon.
+- Harvester cordonne le nœud quand il voit le label. Dans de rares cas, le
+  contrôleur de promotion pourrait lancer une promotion avant. C'est une course
+  propre à Harvester, que la console ne ferme pas. La tâche attend pendant la
+  promotion. À la fin, le contrôleur lève le cordon : la tâche s'arrête et le
+  nœud reste planifiable.
 
-### Harvester v1.8 : taint et cordon de la console
+`install.cordoned` est aussi accepté dans le YAML avancé. Sur ce chemin, il doit
+valoir `true`. Avec le chemin de la console ci-dessous, il doit être absent ou
+valoir `false`. Les installeurs antérieurs à v1.9.0 l'ignorent.
+
+### Cluster ou ISO plus ancien (v1.8) : taint et cordon de la console
 
 Une taint initiale `harvester-ops.io/onboarding=pending:NoSchedule` protège le
 nouveau nœud. Elle est écrite dans `/etc/rancher/rke2/config.yaml.d/` par
@@ -154,7 +174,10 @@ avant d'annoncer la configuration terminée. Les contrôles finaux exigent Node
 Ready, absence de pression, disque local Longhorn prêt et, si déclaré par le
 profil, pod du DaemonSet CSI exact prêt sur ce nœud (lu avec un sélecteur de
 champ côté serveur, un pod en cours de suppression est ignoré). Un statut
-initial nul reste en attente. Les contrôles abandonnent après
+initial nul reste en attente. Une lecture qui échoue (délai dépassé, API
+indisponible) reste aussi en attente : la console relit au tour suivant. C'est
+le cas du nœud, de la liste des VlanConfig et de celle des pods CSI. Seuls les
+refus explicites arrêtent la tâche. Les contrôles abandonnent après
 `HARVESTER_OPS_ONBOARDING_TIMEOUT` secondes (1800 par défaut), dans le budget
 d'après installation. Le nœud reste non planifiable après succès ou échec ;
 aucune remise en production, migration de VM ou suppression de nœud n'est
