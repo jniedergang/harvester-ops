@@ -26,6 +26,10 @@ def _install_id(run):
     return (getattr(run, '_onboarding_plan', None) or {}).get('install_id')
 
 
+def _native(run):
+    return bool((getattr(run, '_onboarding_plan', None) or {}).get('native_cordon'))
+
+
 def preflight(api, data, cfg):
     choice = profile.selection(data, cfg)
     spec = profile.definition(choice['profile'])
@@ -42,11 +46,15 @@ def preflight(api, data, cfg):
     profile.require(found.returncode != 0,
                     'onboarding is only for a new node, not a reinstall of a registered host')
     profile.require('NotFound' in (found.stderr or ''), 'cannot read the target cluster nodes')
-    # Do not discover insufficient write access after installing a host.
-    allowed = api._kubectl_run(['kubectl', '--kubeconfig', kc, 'auth', 'can-i', 'patch', 'nodes'],
-                               capture_output=True, text=True, timeout=20)
-    profile.require(allowed.returncode == 0 and allowed.stdout.strip() == 'yes',
-                    'node patch permission is required to keep the host cordoned')
+    # Version lue par le kubeconfig figé de la requête : v1.9.0 et plus
+    # cordonnent le nœud eux-mêmes (install.cordoned), la console n'y écrit rien.
+    native = profile.native_cordon(api._hup.parse_version(api._harvester_server_version(kc)))
+    if not native:
+        # Do not discover insufficient write access after installing a host.
+        allowed = api._kubectl_run(['kubectl', '--kubeconfig', kc, 'auth', 'can-i', 'patch',
+                                    'nodes'], capture_output=True, text=True, timeout=20)
+        profile.require(allowed.returncode == 0 and allowed.stdout.strip() == 'yes',
+                        'node patch permission is required to keep the host cordoned')
     items(api, kc, 'nodes.longhorn.io', '-n', 'longhorn-system')
     items(api, kc, profile.VC)
     lm = api._kubectl_json(kc, 'get', profile.LM, 'nic', timeout=20)
@@ -64,7 +72,7 @@ def preflight(api, data, cfg):
         profile.require(bool(ds) and not ds['metadata'].get('deletionTimestamp'),
                         'profile CSI DaemonSet must already be installed')
         _node_pods(api, kc, csi, hostname)
-    return {'choice': choice, 'install_id': uuid.uuid4().hex}
+    return {'choice': choice, 'install_id': uuid.uuid4().hex, 'native_cordon': native}
 
 
 def _node_pods(api, kc, csi, host):
@@ -101,6 +109,10 @@ def _check_identity(node, run):
     labels = node['metadata'].get('labels', {})
     profile.require(labels.get(profile.INSTALL_ID_LABEL) == _install_id(run),
                     'registered node does not carry this installation identity; no node was patched')
+    # Un installeur plus ancien que le cluster ignore install.cordoned en silence.
+    profile.require(not _native(run) or labels.get(profile.NATIVE_CORDON_LABEL) == 'true',
+                    'registered node lacks the install-cordoned label: the installer ignored '
+                    'install.cordoned; cordon the host by hand')
 
 
 def cordon(api, kc, node, run):
@@ -122,15 +134,17 @@ def cordon(api, kc, node, run):
 def guard(api, kc, node, run):
     """Protège le nœud dès qu'il apparaît. Rend le nœud (patché ou non)."""
     _check_identity(node, run)
-    if getattr(run, '_onboarding_guarded', False):
+    # Cordon natif : Harvester le pose, la console ne fait que le constater (finish).
+    if _native(run) or getattr(run, '_onboarding_guarded', False):
         return node
     status = profile.promote_status(node)
-    # Le contrôleur de promotion de Harvester (pkg/controller/master/node/
-    # promote_controller.go, v1.8.2 et v1.9.0) pose Unschedulable=true au
-    # début (setPromoteStart) et le lève à la fin (setPromoteResult, statut
-    # « complete »). En v1.9.0, selectPromoteNode écarte un nœud cordonné ;
-    # en v1.8.2 non : une promotion peut donc commencer avant comme après
-    # notre cordon (voir finish). Pendant qu'elle tourne avant notre cordon,
+    # Mécanisme de la console, pour les clusters antérieurs à v1.9.0. Le
+    # contrôleur de promotion de Harvester (pkg/controller/master/node/
+    # promote_controller.go, v1.8.2) pose Unschedulable=true au début
+    # (setPromoteStart) et le lève à la fin (setPromoteResult, statut
+    # « complete »). En v1.8.2, selectPromoteNode n'écarte pas un nœud
+    # cordonné : une promotion peut commencer avant comme après notre cordon
+    # (voir finish). Pendant qu'elle tourne avant notre cordon,
     # la taint d'onboarding reste en place : elle couvre la levée du cordon
     # en fin de promotion jusqu'à notre patch.
     if status == profile.PROMOTE_RUNNING:
@@ -189,11 +203,22 @@ def finish(api, opts, run, step, deadline):
                         'onboarding cancelled; host remains cordoned')
         node = api._kubectl_json(kc, 'get', 'node', host, timeout=20)
         node = guard(api, kc, node, run)
-        if not getattr(run, '_onboarding_guarded', False):
+        if _native(run):
+            annotations = node['metadata'].get('annotations') or {}
+            if annotations.get(profile.NATIVE_CORDON_DONE) != 'true':
+                report('Waiting for Harvester to apply the install cordon')
+                time.sleep(POLL_SECONDS)
+                continue
+            # reconcileInstallCordonedNode laisse planifiable le dernier nœud
+            # disponible ; tout autre retrait du cordon vient d'ailleurs.
+            profile.require(node['spec'].get('unschedulable'),
+                            'host is schedulable after the install cordon: no other node was '
+                            'available, or it was uncordoned outside this job; onboarding stopped')
+        elif not getattr(run, '_onboarding_guarded', False):
             report('Waiting for the Harvester promotion of this host; it stays tainted')
             time.sleep(POLL_SECONDS)
             continue
-        if not node['spec'].get('unschedulable'):
+        elif not node['spec'].get('unschedulable'):
             status = profile.promote_status(node)
             # Promotion achevée après notre cordon : le contrôleur l'a levé
             # (setPromoteResult). On le repose, sous les mêmes conditions.

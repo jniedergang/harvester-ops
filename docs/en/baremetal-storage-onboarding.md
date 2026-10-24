@@ -75,6 +75,34 @@ boot WWID when required, and verify addresses, protocol bindings, modules and
 services before advertising a profile-completion label. No debug shell is
 persisted. The default partition layout is unchanged.
 
+The joining node stays cordoned. How it gets there depends on the version of
+the joined cluster. The console reads the `server-version` setting with the
+person's frozen kubeconfig before installation.
+
+### Harvester v1.9.0 and later: native install cordon
+
+The console sets the installer option `install.cordoned: true` (added by
+harvester/harvester#11301, present in the v1.9.0 tag). Harvester then does the
+work:
+
+- the installer adds the label `harvesterhci.io/install-cordoned=true` to the
+  RKE2 configuration, so the node carries it from registration;
+- the promote controller cordons the node once and records it with the
+  annotation `harvesterhci.io/install-cordoned-processed=true`;
+- nothing in Harvester lifts that cordon, and the controller never selects a
+  cordoned node for promotion.
+
+The console writes nothing to the node. It waits for the processed annotation,
+then checks that the node is still unschedulable. No onboarding taint is
+written and no node patch permission is required. The job stops if the node
+lacks the label (an installer older than the cluster ignores the option) or if
+it is schedulable. Harvester leaves the node schedulable when no other node is
+available.
+
+Pre-releases of v1.9.0 and unreadable versions use the console mechanism below.
+
+### Harvester v1.8: console taint and cordon
+
 An initial `harvester-ops.io/onboarding=pending:NoSchedule` taint protects the
 joining node. It is written to `/etc/rancher/rke2/config.yaml.d/` by the
 installed system's initramfs stage, before RKE2 first starts. That stage
@@ -93,29 +121,29 @@ outcome is unknown (timeout) is never retried. Other labels and taints are
 preserved. Reads and writes use the person's frozen kubeconfig from the join
 request, never a fallback administrative identity.
 
-### Promotion to a management node
-
 Harvester promotes a joining node to the control plane while the cluster has
 fewer than three management nodes, unless the node has the `worker` role. Its
 promote controller sets the node unschedulable when promotion starts and makes
-it schedulable again when promotion completes (`promote_controller.go`, in
-Harvester v1.8 and v1.9). The status is the node annotation
-`harvesterhci.io/promote-status` (`running`, `complete`, `failed`, `unknown`).
+it schedulable again when promotion completes (`promote_controller.go`). The
+status is the node annotation `harvesterhci.io/promote-status` (`running`,
+`complete`, `failed`, `unknown`). On v1.8 the controller can promote a node
+that the console has already cordoned.
 
-- On v1.9, the controller never selects a cordoned node. On v1.8 it can promote
-  a node that the console has already cordoned.
 - While the status is `running`, nothing is reported ready and the job waits.
   If promotion started before the console cordoned the node, the onboarding
   taint stays in place until then. When the status becomes `complete`, the
   console cordons the node and removes the taint.
 - If the controller lifts the cordon when promotion completes, the console
   cordons the node again. Any other uncordon stops the job.
-  Between the two, the node can be schedulable for up to one polling interval
-  (5 seconds).
-- On v1.8, a promotion that starts after the job has ended would also lift the
-  cordon. Check the node before releasing it.
 - A `failed` or `unknown` promotion stops the job; the node stays tainted or
   cordoned.
+
+Two gaps remain on v1.8:
+
+- between the controller's uncordon and the console's new cordon, the node can
+  be schedulable for up to one polling interval (5 seconds);
+- a promotion that starts after the job has ended lifts the cordon. Check the
+  node before releasing it.
 
 ### Final checks
 
@@ -132,15 +160,6 @@ configuration rollback, or deletion of a registered node.
 A successful preparation is not an application or storage-path acceptance test.
 Validate array registration, path health and failover, VM migration and guest I/O
 before deliberately releasing the node.
-
-### Planned replacement: Harvester's native install cordon
-
-Harvester adds an installer option `install.cordoned`. The installer labels the
-node `harvesterhci.io/install-cordoned=true` and the promote controller cordons
-it once, before any promotion can select it (commit deb81e910 on master,
-backported as harvester/harvester#11301 and present in the v1.9.0 tag). It does
-not exist on Harvester v1.8. Once every supported cluster version has it, it is
-the planned replacement for the console's own taint and cordon.
 
 ## Adding a provider
 

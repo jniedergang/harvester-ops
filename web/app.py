@@ -5675,8 +5675,11 @@ def _bm_onboarding_config(data, cfg):
     if not _bmo.selected(data):
         return cfg
     try:
-        out = _bmo.augment(cfg, _bmo.selection(data, cfg))
-        identity = data.get('_onboarding_plan', {}).get('install_id')
+        plan = data.get('_onboarding_plan') or {}
+        # cordon natif (install.cordoned) décidé par le préflight sur la
+        # version du cluster rejoint ; sans plan (aperçu), taint de la console
+        out = _bmo.augment(cfg, _bmo.selection(data, cfg), native=bool(plan.get('native_cordon')))
+        identity = plan.get('install_id')
         if identity:
             out['os'].setdefault('labels', {})[_bmo.INSTALL_ID_LABEL] = identity
         return out

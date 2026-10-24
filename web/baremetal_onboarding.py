@@ -19,6 +19,21 @@ INSTALL_ID_LABEL = 'harvester-ops.io/install-id'
 # (HarvesterPromoteStatusAnnotationKey) et pkg/util/node.go (PromoteStatus*).
 PROMOTE_STATUS = 'harvesterhci.io/promote-status'
 PROMOTE_RUNNING, PROMOTE_COMPLETE = 'running', 'complete'
+# Cordon natif de l'installeur (harvester/harvester v1.9.0, backport #11301,
+# 85064f4fee) : `install.cordoned: true` (pkg/installer/config/config.go,
+# Install.Cordoned) fait poser ce label par rancherd à chaque démarrage de
+# rke2 (templates/rancherd-config.yaml) ; le contrôleur de promotion
+# (pkg/controller/master/node/promote_controller.go, OnNodeChanged et
+# reconcileInstallCordonedNode) cordonne alors le nœud une seule fois, sauf
+# s'il est le dernier disponible, et pose l'annotation de traitement.
+# Personne ne lève ce cordon ; selectPromoteNode écarte un nœud cordonné.
+# Clés : pkg/util/constants.go (HarvesterInstallCordonedLabel,
+# HarvesterInstallCordonedProcessedAnnotation).
+NATIVE_CORDON_LABEL = 'harvesterhci.io/install-cordoned'
+NATIVE_CORDON_DONE = 'harvesterhci.io/install-cordoned-processed'
+# Première version publiée qui le porte (absent de v1.8.2 et de la branche
+# v1.8 ; les préversions de v1.9.0 gardent le mécanisme de la console).
+NATIVE_CORDON_SINCE = (1, 9, 0)
 # Répertoire volatile (tmpfs) où le script de démarrage range le nom noyau
 # résolu de chaque carte de stockage, à partir de sa MAC.
 NIC_DIR = '/run/harvester-ops/storage-nics'
@@ -129,6 +144,16 @@ def options():
         keys = ('label', 'description', 'ports', 'boot_disk_exclusion')
         out.append({'id': path.parent.name, **{k: spec[k] for k in keys}})
     return out
+
+
+def native_cordon(version):
+    """`version` : résultat de hv_upgrade.parse_version (tuple, « dev » ou
+    None). Vrai seulement pour une version publiée >= v1.9.0 ou une
+    préversion d'une version ultérieure ; illisible ou dev : non."""
+    if not isinstance(version, tuple):
+        return False
+    return version[:3] > NATIVE_CORDON_SINCE or (version[:3] == NATIVE_CORDON_SINCE
+                                                  and not version[3])
 
 
 def selected(data):
@@ -288,10 +313,16 @@ def oem(choice, spec=None):
                           sort_keys=False)
 
 
-def augment(cfg, choice, spec=None):
+def augment(cfg, choice, spec=None, native=False):
+    """`native` : le cluster rejoint applique `install.cordoned` (v1.9.0 et
+    plus) ; sinon la console pose une taint d'enregistrement et cordonne le
+    nœud elle-même."""
     spec = spec or definition(choice['profile'])
     cfg = copy.deepcopy(cfg)
     os_cfg = cfg.setdefault('os', {})
+    install = cfg.setdefault('install', {})
+    require(install.get('cordoned') in (None, native),
+            'advanced YAML sets install.cordoned; the storage profile owns it')
     require(INSTALL_ID_LABEL not in os_cfg.get('labels', {}), 'install identity label is reserved')
     require(LABEL not in os_cfg.get('labels', {}), 'storage completion label is reserved')
     files = os_cfg.setdefault('write_files', [])
@@ -307,6 +338,12 @@ def augment(cfg, choice, spec=None):
          'content': 'node-taint+:\n  - ' + TAINT['key'] + '=' + TAINT['value'] + ':'
                     + TAINT['effect'] + '\n'},
     ]
+    if native:
+        # Le cordon natif suffit : kubelet enregistre le nœud avec la taint
+        # node.kubernetes.io/not-ready, et le contrôleur le cordonne dès
+        # l'apparition du label, bien avant qu'il soit prêt.
+        install['cordoned'] = True
+        generated.pop()
     require(not any(f.get('path') in {g['path'] for g in generated} for f in files),
             'advanced YAML conflicts with onboarding files')
     files.extend(generated)

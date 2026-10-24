@@ -14,6 +14,8 @@ sys.path.insert(0, str(ROOT / 'web'))
 import baremetal_onboarding as p
 import baremetal_onboarding_runtime as rt
 import harvester_install_schema as his
+sys.path.insert(0, str(ROOT / 'bin' / 'lib'))
+import hv_upgrade
 
 HOST = 'worker.example'
 DISK = {'disk': {'diskPath': '/var/lib/harvester/defaultdisk',
@@ -653,10 +655,18 @@ def test_partial_controller_status_stays_pending(node, choice):
 # --- contrôles avant installation -------------------------------------------
 
 class Preflight:
+    _hup = hv_upgrade
+
     def __init__(self, node_rc=1, node_err='Error from server (NotFound): nodes "worker.example" not found',
-                 can_i='yes', lm=None, ds=True):
+                 can_i='yes', lm=None, ds=True, version='v1.8.2'):
         self.node_rc, self.node_err, self.can_i, self.lm, self.ds = node_rc, node_err, can_i, lm, ds
+        self.version = version
         self.calls = []
+
+    def _harvester_server_version(self, kc):
+        assert kc == '/operator'
+        self.calls.append(('server-version',))
+        return self.version
 
     def _kubectl_json(self, kc, verb, kind, *args, **kw):
         assert kc == '/operator' and verb == 'get'
@@ -822,3 +832,132 @@ def test_ui_is_opt_in_hidden_in_create_mode_and_explained():
     assert 'onboard_${esc(role)}_name' not in source
     for key in ('enable', 'profile', 'bootWwid', 'mac', 'address'):
         assert "tipAttr(tr('bmc.onboard.tip.%s'))" % key in source
+
+
+# --- cordon natif de l'installeur (v1.9.0 et plus) ---------------------------
+
+CORDON_BY_VERSION = [
+    ('v1.8.2', False),
+    ('v1.9.0', True),
+    ('v1.9.1-rc1', True),
+    ('v1.10.0', True),
+    # préversion de v1.9.0 : la console garde son propre mécanisme
+    ('v1.9.0-rc4', False),
+    # version illisible ou de développement : idem
+    ('', False),
+    ('dev', False),
+]
+
+
+@pytest.mark.parametrize('version,native', CORDON_BY_VERSION, ids=[v or 'unreadable' for v, _ in CORDON_BY_VERSION])
+def test_preflight_chooses_the_cordon_by_cluster_version(choice, cfg, version, native):
+    api = Preflight(version=version)
+    out = rt.preflight(api, data_for(choice), cfg)
+    assert out['native_cordon'] is native
+    assert ('server-version',) in api.calls
+    # le cordon natif n'a besoin d'aucun droit d'écriture sur les nœuds
+    assert (('auth', 'can-i', 'patch', 'nodes') in api.calls) is not native
+
+
+@pytest.mark.parametrize('version,native', CORDON_BY_VERSION[:3], ids=[v for v, _ in CORDON_BY_VERSION[:3]])
+def test_patch_permission_is_only_required_without_native_cordon(choice, cfg, version, native):
+    api = Preflight(version=version, can_i='no')
+    if native:
+        assert rt.preflight(api, data_for(choice), cfg)['native_cordon']
+    else:
+        with pytest.raises(p.ProfileError, match='node patch permission'):
+            rt.preflight(api, data_for(choice), cfg)
+
+
+TAINT_FILE = '/etc/rancher/rke2/config.yaml.d/99-harvester-ops-onboarding.yaml'
+
+
+@pytest.mark.parametrize('native', [False, True], ids=['v1.8 console taint', 'v1.9 install.cordoned'])
+def test_install_config_uses_native_cordon_or_console_taint(choice, cfg, native):
+    out = p.augment(cfg, choice, native=native)
+    paths = [f['path'] for f in out['os']['write_files']]
+    assert '/oem/90-harvester-ops-storage.yaml' in paths
+    assert (TAINT_FILE in paths) is not native
+    assert out['install'].get('cordoned') is (True if native else None)
+    assert his.validate_install_config(his.canonicalize(out)) == []
+
+
+@pytest.mark.parametrize('native,value', [(True, False), (False, True)], ids=['v1.9 false', 'v1.8 true'])
+def test_advanced_install_cordoned_conflicts_with_the_profile(choice, cfg, native, value):
+    cfg['install']['cordoned'] = value
+    with pytest.raises(p.ProfileError, match='install.cordoned'):
+        p.augment(cfg, choice, native=native)
+
+
+def test_advanced_install_cordoned_true_is_kept_on_native_path(choice, cfg):
+    cfg['install']['cordoned'] = True
+    assert p.augment(cfg, choice, native=True)['install']['cordoned'] is True
+
+
+def native_run(**extra):
+    return run_for(_onboarding_plan={'install_id': 'this-run', 'native_cordon': True}, **extra)
+
+
+@pytest.fixture
+def natively_cordoned(node):
+    node['metadata']['labels'][p.NATIVE_CORDON_LABEL] = 'true'
+    node['metadata']['annotations'] = {p.NATIVE_CORDON_DONE: 'true'}
+    node['spec']['taints'] = [{'key': 'other', 'effect': 'NoSchedule'}]
+    return node
+
+
+def test_native_guard_never_patches(natively_cordoned):
+    natively_cordoned['spec']['unschedulable'] = False
+    api = Cluster(natively_cordoned)
+    assert rt.guard(api, '/operator', natively_cordoned, native_run()) == natively_cordoned
+    assert api.patch_ops() == []
+
+
+def test_native_finish_waits_for_the_cordon_then_checks_without_writing(choice, natively_cordoned, clock):
+    pending = copy.deepcopy(natively_cordoned)
+    pending['metadata']['annotations'] = {}
+    pending['spec']['unschedulable'] = False
+    seen = []
+
+    class Later(Cluster):
+        def _kubectl_json(self, kc, verb, kind, *args, **kw):
+            if kind == 'node':
+                seen.append(1)
+                self.node = pending if len(seen) == 1 else natively_cordoned
+            return super()._kubectl_json(kc, verb, kind, *args, **kw)
+    api = Later(pending, **reads_for(choice))
+    events = []
+    out = rt.finish(api, opts_for(choice) | {'_onboarding_plan': {'choice': choice, 'install_id': 'this-run',
+                                                                  'native_cordon': True}},
+                    native_run(), lambda *a: events.append(a[2]), 100)
+    assert all(out.values()) and api.patch_ops() == []
+    assert events[0] == 'Waiting for Harvester to apply the install cordon'
+
+
+@pytest.mark.parametrize('label,change,message', [
+    ('last available node left schedulable', lambda n: n['spec'].update(unschedulable=False), 'host is schedulable'),
+    ('installer ignored install.cordoned', lambda n: n['metadata']['labels'].pop(p.NATIVE_CORDON_LABEL),
+     'lacks the install-cordoned label'),
+    ('foreign node', lambda n: n['metadata']['labels'].update({p.INSTALL_ID_LABEL: 'other'}), 'installation identity'),
+], ids=lambda v: v if isinstance(v, str) else '')
+def test_native_finish_stops_without_writing(choice, natively_cordoned, clock, label, change, message):
+    change(natively_cordoned)
+    api = Cluster(natively_cordoned, **reads_for(choice))
+    with pytest.raises(p.ProfileError, match=message):
+        rt.finish(api, opts_for(choice), native_run(), lambda *a: None, 100)
+    assert api.patch_ops() == []
+
+
+def test_final_install_config_carries_native_cordon_from_the_plan(choice):
+    import app
+    body = {'mode': 'join', 'server_url': 'https://cluster.example', 'hostname': HOST,
+            'device': '/dev/sdb', 'mgmt_interfaces': ['02:00:00:00:00:01'], 'method': 'dhcp',
+            'token': 'x', 'password': 'y', 'onboarding': choice,
+            '_onboarding_plan': {'install_id': 'server-generated', 'native_cordon': True}}
+    rendered = yaml.safe_load(app._harvester_install_config(body, boot_identity=True))
+    assert rendered['install']['cordoned'] is True
+    assert TAINT_FILE not in [f['path'] for f in rendered['os']['write_files']]
+    body['_onboarding_plan']['native_cordon'] = False
+    rendered = yaml.safe_load(app._harvester_install_config(body, boot_identity=True))
+    assert 'cordoned' not in rendered['install']
+    assert TAINT_FILE in [f['path'] for f in rendered['os']['write_files']]

@@ -71,6 +71,35 @@ Le disque local Longhorn doit devenir Ready. Le partitionnement reste inchangé.
 
 ## Protection et vérifications
 
+Le nœud qui rejoint reste cordonné. La façon d'y arriver dépend de la version
+du cluster rejoint. La console lit le réglage `server-version` avec le
+kubeconfig de la personne, figé lors de la requête, avant l'installation.
+
+### Harvester v1.9.0 et plus : cordon natif de l'installeur
+
+La console pose l'option d'installation `install.cordoned: true` (ajoutée par
+harvester/harvester#11301, présente dans le tag v1.9.0). Harvester fait le
+reste :
+
+- l'installeur ajoute le label `harvesterhci.io/install-cordoned=true` à la
+  configuration de RKE2 : le nœud le porte dès son enregistrement ;
+- le contrôleur de promotion cordonne le nœud une seule fois et le note par
+  l'annotation `harvesterhci.io/install-cordoned-processed=true` ;
+- rien dans Harvester ne lève ce cordon, et le contrôleur ne choisit jamais un
+  nœud cordonné pour une promotion.
+
+La console n'écrit rien sur le nœud. Elle attend l'annotation, puis vérifie que
+le nœud est toujours non planifiable. Aucune taint d'onboarding n'est écrite et
+aucun droit de patch sur les nœuds n'est demandé. La tâche s'arrête si le nœud
+n'a pas le label (un installeur plus ancien que le cluster ignore l'option) ou
+s'il est planifiable. Harvester laisse le nœud planifiable quand aucun autre
+nœud n'est disponible.
+
+Les préversions de v1.9.0 et une version illisible suivent le mécanisme de la
+console ci-dessous.
+
+### Harvester v1.8 : taint et cordon de la console
+
 Une taint initiale `harvester-ops.io/onboarding=pending:NoSchedule` protège le
 nouveau nœud. Elle est écrite dans `/etc/rancher/rke2/config.yaml.d/` par
 l'étape initramfs du système installé, avant le premier démarrage de RKE2. Cette
@@ -89,29 +118,29 @@ l'issue est inconnue (délai dépassé) n'est jamais renvoyée. Les autres
 labels/taints sont préservés. Les opérations utilisent le kubeconfig de la
 personne, figé lors de la requête de jonction.
 
-### Promotion en nœud de gestion
-
 Harvester promeut un nœud qui rejoint le cluster tant que celui-ci compte moins
 de trois nœuds de gestion, sauf s'il a le rôle `worker`. Son contrôleur de
 promotion rend le nœud non planifiable au début et planifiable à la fin
-(`promote_controller.go`, Harvester v1.8 et v1.9). L'état se lit dans
-l'annotation `harvesterhci.io/promote-status` (`running`, `complete`, `failed`,
-`unknown`).
+(`promote_controller.go`). L'état se lit dans l'annotation
+`harvesterhci.io/promote-status` (`running`, `complete`, `failed`, `unknown`).
+En v1.8, le contrôleur peut promouvoir un nœud déjà cordonné par la console.
 
-- En v1.9, le contrôleur ne choisit jamais un nœud non planifiable. En v1.8, il
-  peut promouvoir un nœud déjà cordonné par la console.
 - Tant que l'état vaut `running`, rien n'est déclaré prêt et la tâche attend.
   Si la promotion a commencé avant le cordon de la console, la taint
   d'onboarding reste en place jusque-là. À l'état `complete`, la console
   cordonne le nœud et retire la taint.
 - Si le contrôleur lève le cordon en fin de promotion, la console le repose.
   Toute autre levée arrête la tâche.
-  Entre les deux, le nœud peut rester planifiable le temps d'un intervalle de
-  lecture (5 secondes).
-- En v1.8, une promotion qui commence après la fin de la tâche lèverait aussi
-  le cordon. Vérifier le nœud avant de le remettre en service.
 - Une promotion `failed` ou `unknown` arrête la tâche ; le nœud garde sa taint
   ou son cordon.
+
+Deux trous restent en v1.8 :
+
+- entre la levée du cordon par le contrôleur et le nouveau cordon de la
+  console, le nœud peut rester planifiable le temps d'un intervalle de lecture
+  (5 secondes) ;
+- une promotion qui commence après la fin de la tâche lève le cordon. Vérifier
+  le nœud avant de le remettre en service.
 
 ### Vérifications finales
 
@@ -125,15 +154,6 @@ initial nul reste en attente. Les contrôles abandonnent après
 d'après installation. Le nœud reste non planifiable après succès ou échec ;
 aucune remise en production, migration de VM ou suppression de nœud n'est
 automatique.
-
-### Remplacement prévu : le cordon natif de Harvester
-
-Harvester ajoute l'option d'installation `install.cordoned`. L'installeur pose
-le label `harvesterhci.io/install-cordoned=true` et le contrôleur de promotion
-cordonne le nœud une fois, avant toute promotion (commit deb81e910 sur master,
-rétroporté par harvester/harvester#11301 et présent dans le tag v1.9.0). Elle
-n'existe pas en v1.8. Quand toutes les versions prises en charge l'auront, elle
-remplacera la taint et le cordon propres à la console.
 
 ## Ajouter un fournisseur
 
