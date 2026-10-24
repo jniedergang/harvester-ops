@@ -1,6 +1,8 @@
 """Téléchargement côté serveur d'une URL choisie par l'opérateur, sans SSRF.
 
-Utilisé par /api/iso/fetch (ISO bare-metal) et prévu pour les images KVM.
+Utilisé par /api/iso/fetch (ISO bare-metal), la route de téléchargement
+d'images KVM et la CLI `harvester-kvm.py image download-url` (bibliothèque
+standard seulement : partagé entre web/ et bin/).
 La console tourne à côté de services internes (Vault sur 127.0.0.1:8200,
 métadonnées de cloud, API de clusters) : une URL arbitraire ne doit pas
 pouvoir les atteindre, ni directement, ni par une redirection, ni par un
@@ -42,6 +44,18 @@ _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 _LIMITED_BROADCAST = ipaddress.ip_address("255.255.255.255")
 
 REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# raisons qu'aucune liste d'autorisation n'ouvre : le message ne propose
+# alors pas `iso_fetch.allow_private`
+ALWAYS_REFUSED = frozenset({"metadata", "unspecified", "multicast", "broadcast"})
+
+
+def _address_message(subject, why):
+    if why in ALWAYS_REFUSED:
+        return (f"{subject} {why} address: refused (cloud metadata, unspecified, multicast "
+                "and broadcast addresses are never reachable)")
+    return (f"{subject} {why} address; internal addresses are refused unless allowed by "
+            "iso_fetch.allow_private")
 
 
 class FetchRefused(Exception):
@@ -148,10 +162,7 @@ def resolve_checked(host, port, allow=(), resolver=None):
     if literal is not None:
         why = address_refusal(literal, allow)
         if why:
-            raise FetchRefused(
-                "address",
-                f"{host} is a {why} address; internal addresses are refused "
-                "unless allowed by iso_fetch.allow_private")
+            raise FetchRefused("address", _address_message(f"{host} is a", why))
         return str(literal)
     resolver = resolver or socket.getaddrinfo
     try:
@@ -168,10 +179,7 @@ def resolve_checked(host, port, allow=(), resolver=None):
     for a in addrs:
         why = address_refusal(a, allow)
         if why:
-            raise FetchRefused(
-                "address",
-                f"{host} resolves to a {why} address; internal addresses are "
-                "refused unless allowed by iso_fetch.allow_private")
+            raise FetchRefused("address", _address_message(f"{host} resolves to a", why))
     return addrs[0]
 
 

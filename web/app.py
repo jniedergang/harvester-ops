@@ -89,7 +89,6 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
-import url_fetch_guard as _ufg
 import baremetal_onboarding as _bmo
 import baremetal_onboarding_runtime as _bmor
 from flask import (
@@ -156,6 +155,29 @@ BIN_DIR = _resolve_bin_dir()
 if str(BIN_DIR / "lib") not in sys.path:
     sys.path.append(str(BIN_DIR / "lib"))
 import longhorn_room  # noqa: E402
+# garde anti-SSRF des téléchargements (1.99.0), dans bin/lib depuis la prochaine
+# version KVM : la console (ISO, images KVM) et la CLI KVM partagent la même.
+# Chargée par son chemin (bin/lib), jamais par le chemin de recherche : une
+# copie égarée dans web/ (prioritaire, bin/lib est en fin de chemin) ne peut
+# pas la remplacer en silence. Enregistrée sous son nom : un `import
+# url_fetch_guard` ultérieur (CLI, tests) rend le même module.
+
+
+def _load_shared_module(name):
+    import importlib.util as _importlib_util
+    path = (BIN_DIR / "lib" / f"{name}.py").resolve()
+    mod = sys.modules.get(name)
+    if mod is not None and getattr(mod, "__file__", None) and \
+            Path(mod.__file__).resolve() == path:
+        return mod
+    spec = _importlib_util.spec_from_file_location(name, path)
+    mod = _importlib_util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_ufg = _load_shared_module("url_fetch_guard")
 import bm_discover as _bmd  # noqa: E402
 import baremetal_disks as _bmdisks  # noqa: E402
 import cluster_decl as _cd  # noqa: E402
