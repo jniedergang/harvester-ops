@@ -155,6 +155,54 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   with a deliberate mutation for each fix.
 - Real: harvlab to harvlab2 on 24/10/2026 (see the capabilities page for
   what was and was not verified).
+## [1.98.1] - 2026-10-24 - Security: rebuilt image without the compromised emSign CAs
+
+### Security
+- **Compromised eMudhra CAs no longer trusted.** The image is rebuilt on
+  `registry.suse.com/bci/python:3.11@sha256:22e26dad93ee34638a1cd84159f34c793f237aee6318de878d619d69e2f577b0`
+  (`3.11.15-85.71`, 23/10/2026), with `ca-certificates-mozilla` 2.92
+  instead of 2.84. Its trust store no longer holds emSign ECC Root CA - G3,
+  emSign ECC Root CA - C3 and emSign Root CA - C1 (revoked after the
+  compromise of eight emSign intermediate keys, 18/10/2026). emSign Root
+  CA - G1 stays, as in Mozilla's store. Python verifies TLS against this
+  system store (no private certifi bundle; pip's vendored certifi is
+  patched by SUSE to read the same file).
+- **OpenTofu 1.12.6 -> 1.12.9**, built with Go 1.26.10, which carries the
+  Go fix for CVE-2026-111943 (crypto/x509 refuses chains through the
+  compromised intermediates; Go 1.26.10 and 1.27.3, 19/10/2026).
+- **Residual risks** (no upstream release built with a fixed Go yet; each
+  reads the image's system trust store, from which the roots are gone):
+  - kubectl v1.35.9 is built with Go 1.26.8;
+  - yq v4.44.3 is built with Go 1.22.5 (no newer yq is built with a fixed
+    Go either); yq makes no network connection;
+  - the embedded terraform-provider-harvester 1.9.0 is built with Go
+    1.26.0 (the 1.9.1 release candidates too; no release candidate is
+    shipped);
+  - the embedded Cluster API bundle (unchanged,
+    `capi-bundle-20260926-002651-caaph`) carries controller images built
+    before the fix (Cluster API, CAPHV, RKE2 providers, cert-manager
+    v1.16.2). They run on the target clusters, not in the console. A
+    bundle rebuilt on fixed upstream releases needs a new end-to-end
+    cluster creation check and is left to a later release.
+
+### Changed
+- **kubectl v1.30.5 -> v1.35.9**, the newest patch of the minor whose
+  +/-1 version skew covers Harvester 1.8 (Kubernetes 1.35) and 1.9
+  (Kubernetes 1.36); v1.30 was outside the skew of both.
+- kubectl and yq downloads are now verified against their published
+  SHA-256, like OpenTofu (the comment said "signed", nothing was checked).
+- `package.sh` builds with `--pull=always` and prints the base digest: a
+  release is never built on a stale cached base again (1.98.0 was built on
+  a six-week-old one). The Containerfile also updates the CA packages.
+
+### Tests
+- `tests/api/test_release_trust_198_1.py`: pinned versions and checksums,
+  every download verified, fresh base, Go fix threshold, trust store
+  subjects, residual risks pinned to the accepted Go version.
+- `tools/release/check_image_trust.py <image> [--bundles <dir>]`: release
+  check of a built image (distrusted CAs absent, Go version of every Go
+  binary fixed or declared residual, Python on the system store). It fails
+  on the 1.98.0 image and passes on 1.98.1.
 
 ## [1.98.0] - 2026-10-24 - KVM: VNC console, snapshots, clone and delete
 

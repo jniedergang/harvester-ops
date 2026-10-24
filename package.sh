@@ -67,8 +67,11 @@ if [[ "$SKIP_IMAGE_BUILD" == "1" ]]; then
     warn "SKIP_IMAGE_BUILD=1 — skipping image build"
 else
     info "Building container image (FROM registry.suse.com/bci/python:3.11)..."
-    "$RUNTIME" build -t "harvester-ops:${VERSION}" -t "harvester-ops:latest" \
+    # v1.98.1 : --pull=always, never a stale cached base (1.98.0 was built on
+    # a six-week-old base that still trusted the compromised emSign CAs).
+    "$RUNTIME" build --pull=always -t "harvester-ops:${VERSION}" -t "harvester-ops:latest" \
         -f container/Containerfile .
+    ok "Base image: $("$RUNTIME" image inspect --format '{{.Digest}}' registry.suse.com/bci/python:3.11 2>/dev/null || echo '?')"
     ok "Image built: harvester-ops:${VERSION}"
 
     info "Saving OCI image to images/harvester-ops-ui.tar..."
