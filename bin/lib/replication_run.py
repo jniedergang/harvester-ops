@@ -1608,7 +1608,8 @@ def ensure_standby(ctx, works, latest, visible):
         for d in w["disks"]:
             b = latest[d["source_volume"]]
             db.record_tick(ctx.conn, ctx.plan_id, _tick_from_backup(b, w["uid"], ctx.gen))
-            db.mark_applied(ctx.conn, ctx.plan_id, d["source_volume"], _md(b)["name"], now, ctx.gen)
+            db.mark_applied(ctx.conn, ctx.plan_id, d["source_volume"], _md(b)["name"], now, ctx.gen,
+                            applied_by="protect")
             db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": ctx.gen, "vm_uid": w["uid"], "disk": d["disk"],
                                                      "state": "standby"})
     return applied
@@ -2253,7 +2254,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                 with stage(ctx, op, "final-resync", "target", [r["resource_uid"] for r in pre]):
                     wait_applied(ctx, "final-resync", wanted, "resync_apply")
                 for sb, (vol, name) in wanted.items():
-                    db.mark_applied(ctx.conn, ctx.plan_id, vol, name, ctx.dt(), ctx.gen)
+                    db.mark_applied(ctx.conn, ctx.plan_id, vol, name, ctx.dt(), ctx.gen, applied_by="failover")
         else:
             if fence_live:
                 for r in pre:

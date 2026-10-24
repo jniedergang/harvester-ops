@@ -811,6 +811,11 @@ def test_stopped_vm_since_before_its_point_is_up_to_date():
     ([tick("pvc-a0", -300, apply=200), tick("pvc-a1", -100)], True),               # appliqué trop tard
     ([tick("pvc-a0", -100), tick("pvc-a1", -100), tick("pvc-a1", -250, state="completed", backup="late")], True),
     ([tick("pvc-a0", -100), tick("pvc-a1", -100), tick("pvc-a1", -20, state="in_progress")], False),
+    # v1.99.0 : sauvegarde ancienne reprise et appliquée par protect, pas un passage
+    ([dict(tick("pvc-a0", -3000, apply=2900), applied_by="protect"),
+      dict(tick("pvc-a1", -3000, apply=2900), applied_by="protect")], False),
+    # même âge appliqué par le suiveur : dérive
+    ([tick("pvc-a0", -3000, apply=2900), dict(tick("pvc-a1", -3000, apply=2900), applied_by="protect")], True),
 ])
 def test_drift_when_a_pass_takes_more_than_one_step(ticks, drift):
     v = rp.plan_status(pplan(rpo_objective_s=3600), RES2[:1], SVOLS, ticks, NOW, {})["vms"][0]

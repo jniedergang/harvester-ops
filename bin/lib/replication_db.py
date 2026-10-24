@@ -137,6 +137,11 @@ TABLES = {
         ("state", "TEXT NOT NULL DEFAULT 'completed'"),
         ("skew_s", "REAL"),
         ("vm_uid", "TEXT NOT NULL DEFAULT ''"),
+        # v1.99.0 : qui l'a appliqué hors du suiveur (`protect` pour la
+        # restauration initiale, `failover` pour le dernier point) ; vide pour
+        # un passage du suiveur. Un point repris par protect n'est pas un
+        # passage : son âge ne dit rien d'une dérive du RPO
+        ("applied_by", "TEXT NOT NULL DEFAULT ''"),
     ],
     "measures": [
         ("plan_id", "TEXT NOT NULL"),
@@ -844,15 +849,19 @@ def record_measure(conn, plan_id, measure):
     _record_pass(conn, "measures", plan_id, measure)
 
 
-def mark_applied(conn, plan_id, source_volume, backup, applied_at, generation, resync_at=None):
+def mark_applied(conn, plan_id, source_volume, backup, applied_at, generation, resync_at=None, applied_by=""):
     """Note qu'une sauvegarde est appliquée sur le volume de secours. Rend
     False si le passage est inconnu ; ValueError s'il est en erreur (une
-    sauvegarde en échec ne s'applique pas)."""
+    sauvegarde en échec ne s'applique pas). `applied_by` : `protect` ou
+    `failover` quand ce n'est pas le suiveur (colonne `applied_by`)."""
     generation = _generation(generation)
     sets, args = ["state = 'applied'", "applied_at = ?"], [_iso(applied_at)]
     if resync_at:
         sets.append("resync_at = ?")
         args.append(_iso(resync_at))
+    if applied_by:
+        sets.append("applied_by = ?")
+        args.append(str(applied_by))
     with _tx(conn):
         old = conn.execute("SELECT state FROM ticks WHERE plan_id = ? AND generation = ? AND source_volume = ?"
                            " AND backup = ?", (plan_id, generation, source_volume, backup)).fetchone()

@@ -1172,6 +1172,23 @@ def test_cpu_or_memory_change_is_drift_and_protect_rewrites_the_carnet(tmp_path,
     assert "plan-drift" not in status(w)["vms"][0]["reasons"]
 
 
+def test_no_rpo_drift_at_the_first_round_after_protect_reused_an_old_backup(tmp_path):
+    # vu sur le banc (v1.99.0) : protect reprend une sauvegarde plus vieille
+    # que l'intervalle ; le premier tour du suiveur y voyait un passage trop
+    # long et écrivait `rpo-drift`
+    w = protected(tmp_path)
+    ticks = db.list_ticks(w.conn, w.pid)
+    assert ticks and {t["applied_by"] for t in ticks} == {"protect"}
+    interval = w.plan()["interval_s"]
+    old = rf._utc(w.clock.now() - 3 * interval)
+    w.conn.execute("UPDATE ticks SET snapshot_at = ? WHERE plan_id = ?", (rp.iso(old), w.pid))
+    w.conn.commit()
+    f = follower(w)
+    f.once()
+    assert follow_events(w, "rpo-drift") == []
+    assert "rpo-drift" not in status(w)["vms"][0]["reasons"]
+
+
 def test_stats_older_than_30_days_are_downsampled_hourly(tmp_path):
     w = protected(tmp_path)
     uid = VMS["vm-b"]["uid"]

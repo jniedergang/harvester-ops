@@ -1241,7 +1241,10 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
         if _in_error(ts):
             errors.append(v["source_volume"])
         if interval:
-            if last_applied and last_applied.get("applied_at") and \
+            # un point appliqué par protect (sauvegarde reprise, parfois
+            # ancienne) n'est pas un passage : pas de dérive sur son âge (vu
+            # sur le banc, v1.99.0 : un `rpo-drift` au premier tour du suiveur)
+            if last_applied and last_applied.get("applied_at") and not last_applied.get("applied_by") and \
                     _secs(_t(last_applied["snapshot_at"]), _t(last_applied["applied_at"])) > interval:
                 drift.append(v["source_volume"])
             elif any(_secs(_t(t["snapshot_at"]), now) > interval for t in pending if t.get("snapshot_at")):
