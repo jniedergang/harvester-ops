@@ -360,17 +360,39 @@ def connect(path=None):
 
 
 class _tx:
-    """BEGIN IMMEDIATE ... COMMIT, ROLLBACK sur toute exception."""
+    """BEGIN IMMEDIATE ... COMMIT, ROLLBACK sur toute exception.
+
+    Une annulation (signal) peut être levée juste après le BEGIN, avant que
+    le `with` ne prenne la main (BEGIN IMMEDIATE attend le verrou jusqu'à
+    10 s), ou à l'entrée de `__exit__` : la transaction restait ouverte et
+    tout BEGIN suivant échouait (`OperationalError`), retour arrière de
+    l'annulation compris (vu sur le banc, v1.99.0 : `protect --retain`
+    annulé, ligne du plan jamais remise). Ce module n'imbrique jamais de
+    transactions : une transaction ouverte à l'entrée est un tel reste, et
+    elle est annulée."""
 
     def __init__(self, conn):
         self.conn = conn
 
+    def _rollback_left(self):
+        if self.conn.in_transaction:
+            self.conn.execute("ROLLBACK")
+
     def __enter__(self):
-        self.conn.execute("BEGIN IMMEDIATE")
+        self._rollback_left()
+        try:
+            self.conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            self._rollback_left()
+            raise
         return self.conn
 
     def __exit__(self, exc_type, exc, tb):
-        self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        try:
+            self.conn.execute("ROLLBACK" if exc_type else "COMMIT")
+        except BaseException:
+            self._rollback_left()
+            raise
         return False
 
 

@@ -2537,3 +2537,50 @@ def test_planned_failover_waits_through_the_attach_error_of_a_stopped_vm(tmp_pat
     else:
         assert res["exit"] == 1 and "no space left" in res["message"], res
         assert w.plan()["state"] == "protected"
+
+
+# v1.99.0 (banc) : une annulation levée pendant une petite lecture à
+# `except Exception` (sonde, classe de l'image) était retenue et protect allait
+# au bout avec la nouvelle rétention. `Cancelled` n'est plus une `Exception`.
+@pytest.mark.parametrize("side,op,kind", [
+    ("src", "get", rr.K_SETTING),       # probe() : la sonde rendait « unreachable »
+    ("src", "get", rr.K_IMAGE),         # _image_class() : la lecture rendait None
+    ("dst", "get", rr.K_SETTING),
+])
+def test_protect_cancel_inside_a_guarded_read_is_not_swallowed(tmp_path, side, op, kind):
+    w = protected(tmp_path)
+    fired = []
+
+    def hook(name):
+        if not fired:
+            fired.append(name)
+            raise rr.Cancelled("signal 15")
+    getattr(w, side).hooks[(op, kind)] = hook
+    res = rr.protect(w.ctx(), retain=9)
+    getattr(w, side).hooks.clear()
+    assert fired, "the hook never ran: the case tests nothing"
+    assert res["exit"] == 3 and res["code"] == "cancelled", res
+    assert w.plan()["retain"] == 6 and _job_retains(w) == [6, 6]
+    assert rr.protect(w.ctx(), retain=9)["exit"] == 0       # rien de verrouillé
+
+
+@pytest.mark.parametrize("command,side", [("unprotect", "dst"), ("measure_stop", "src")])
+def test_cancel_in_the_precheck_releases_the_lock(tmp_path, command, side):
+    if command == "unprotect":
+        w = protected(tmp_path)
+        run = lambda: rr.unprotect(w.ctx(), yes=True)      # noqa: E731
+    else:
+        w = World(tmp_path)
+        assert rr.measure_start(w.ctx(), interval="5m")["exit"] == 0
+        run = lambda: rr.measure_stop(w.ctx())             # noqa: E731
+    fired = []
+
+    def hook(name):
+        if not fired:
+            fired.append(name)
+            raise rr.Cancelled("signal 15")
+    getattr(w, side).hooks[("get", rr.K_SETTING)] = hook
+    res = run()
+    getattr(w, side).hooks.clear()
+    assert fired and res["exit"] == 3 and res["code"] == "cancelled", res
+    assert run()["exit"] == 0

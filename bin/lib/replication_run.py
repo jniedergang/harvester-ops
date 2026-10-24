@@ -107,8 +107,13 @@ _DENIED = ("forbidden", "unauthorized", "provide credentials")
 _PVC_MISSING = ("persistentvolumeclaim", "not found")
 
 
-class Cancelled(Exception):
-    """Annulation demandée (SIGTERM/SIGINT), levée dans le déroulé."""
+class Cancelled(BaseException):
+    """Annulation demandée (SIGTERM/SIGINT), levée dans le déroulé. Pas une
+    `Exception` (comme `replication_follow.Interrupted`) : levée par le
+    gestionnaire de signal n'importe où, elle était retenue par les
+    `except Exception` des petites lectures (sonde, classe d'une image,
+    masquage des chemins) et la commande allait au bout (vu sur le banc,
+    v1.99.0 : `protect --retain` annulé sorti en 0 avec la nouvelle valeur)."""
 
 
 class Refused(Exception):
@@ -1262,6 +1267,9 @@ def measure_stop(ctx):
         _lock_checked(ctx, "measure-stop", before)
     except Refused as e:
         return _refusal(ctx, "measure", e)
+    except Cancelled as e:
+        _unlock(ctx)
+        return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "measure", e)
     res = db.list_resources(ctx.conn, ctx.plan_id, ctx.gen)
@@ -1273,6 +1281,10 @@ def measure_stop(ctx):
         _set_state(ctx, "draft")
         _unlock(ctx)
         return _result(ctx, "draft", EXIT_OK, "measure stopped", passes=n)
+    except Cancelled as e:
+        # rien n'est défait : la relance termine l'arrêt de la mesure
+        _error(ctx, uids, f"measure stop cancelled: {e}")
+        return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         _error(ctx, uids, f"measure stop failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
@@ -2614,6 +2626,9 @@ def unprotect(ctx, delete_backups=False, yes=False):
         _lock_checked(ctx, "unprotect", before)
     except Refused as e:
         return _refusal(ctx, "unprotect", e)
+    except Cancelled as e:
+        _unlock(ctx)
+        return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "unprotect", e)
     op = "unprotect"

@@ -805,3 +805,63 @@ def test_take_lease_reclaims_the_lease_of_a_dead_process_on_this_host(conn, hold
     got = db.take_lease(conn, PID, me, ttl=180, now=at(5), host="here", pid_alive=lambda pid: alive)
     assert got is taken
     assert db.get_lease(conn, PID)["owner"] == (me if taken else dead)
+
+
+class _Interrupt(BaseException):
+    """Annulation levée par un gestionnaire de signal (BaseException)."""
+
+
+class _ConnAfterBegin:
+    """Connexion dont l'appel qui suit le BEGIN est interrompu, comme un
+    signal traité au retour de BEGIN IMMEDIATE (attente du verrou)."""
+
+    def __init__(self, real, sql, before=False):
+        self.real, self.sql, self.armed, self.before = real, sql, True, before
+
+    @property
+    def in_transaction(self):
+        return self.real.in_transaction
+
+    def execute(self, sql, *a):
+        if self.before and self.armed and sql == self.sql:
+            # l'appel lui-même échoue (verrou, disque) : rien n'est exécuté
+            self.armed = False
+            raise sqlite3.OperationalError("database is locked")
+        out = self.real.execute(sql, *a)
+        if self.armed and sql == self.sql:
+            self.armed = False
+            raise _Interrupt()
+        return out
+
+
+# v1.99.0 (banc) : `protect --retain` annulé, puis OperationalError (« cannot
+# start a transaction within a transaction ») au retour arrière : la ligne du
+# plan n'était jamais remise
+@pytest.mark.parametrize("left_by", ["enter", "outside"])
+def test_tx_after_an_interrupted_begin_still_writes(conn, left_by):
+    pid = new_plan(conn)["id"]
+    if left_by == "enter":
+        with pytest.raises(_Interrupt):
+            with db._tx(_ConnAfterBegin(conn, "BEGIN IMMEDIATE")):
+                pass
+        assert not conn.in_transaction
+    else:
+        # reste d'une transaction ouverte (signal à l'entrée de __exit__)
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("UPDATE plans SET retain = 40 WHERE id = ?", (pid,))
+    db.update_plan(conn, pid, retain=9)
+    assert not conn.in_transaction
+    assert db.get_plan(conn, pid)["retain"] == 9
+
+
+@pytest.mark.parametrize("before,exc,retain", [
+    (False, _Interrupt, 11),                    # COMMIT fait, signal à son retour
+    (True, sqlite3.OperationalError, 6),        # COMMIT refusé : annulé, rien d'ouvert
+])
+def test_tx_commit_interrupted_leaves_no_open_transaction(conn, before, exc, retain):
+    pid = new_plan(conn)["id"]
+    db.update_plan(conn, pid, retain=6)
+    with pytest.raises(exc):
+        with db._tx(_ConnAfterBegin(conn, "COMMIT", before=before)) as c:
+            c.execute("UPDATE plans SET retain = 11 WHERE id = ?", (pid,))
+    assert not conn.in_transaction and db.get_plan(conn, pid)["retain"] == retain
