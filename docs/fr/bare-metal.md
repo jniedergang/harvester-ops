@@ -492,6 +492,18 @@ images de plusieurs gigaoctets par morceaux.
 Ce port doit être joignable **depuis le réseau du BMC**. Sur un hôte avec
 pare-feu, pensez à l'ouvrir.
 
+La console prend le port dans `HARVESTER_OPS_PXE_PORT` (8091 par défaut).
+Elle n'en choisit jamais un autre d'elle-même : l'adresse donnée au BMC et
+à l'installeur doit être celle que vous avez ouverte. Si le port est pris,
+le déroulé échoue à son étape `serve` avec un message qui nomme le port,
+avant toute action sur l'alimentation. Le listener démarre avec la
+première installation ou découverte et s'arrête à la fin de la dernière.
+
+Tout échec d'un déroulé, prévu ou non, termine l'action en échec. La
+configuration servie (elle porte le jeton du cluster), l'ISO
+remasterisée et les jetons sont effacés ; le message de l'étape ne donne
+que le type de l'erreur, jamais un chemin ni un secret.
+
 ---
 
 ## Dépannage

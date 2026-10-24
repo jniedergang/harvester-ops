@@ -6282,25 +6282,115 @@ def _bm_reset(host, user, pwd, sys_path, reset_type):
     return ok, detail
 
 
+# Serveur d'artefacts partagé : une série lance jusqu'à 4 installations en
+# même temps, et une découverte peut tourner à côté. Chaque déroulé le
+# prend et le rend ; le dernier à le rendre l'arrête s'il ne sert plus rien
+# (ports libérés). Tenu sous verrou de start() à la fin du compte, pour qu'un
+# déroulé qui démarre ne voie jamais le serveur s'arrêter sous lui.
+_BM_PXE_USERS = [0]
+_BM_PXE_LOCK = threading.Lock()
+
+
+def _bm_pxe_acquire(state):
+    """Démarre (si besoin) le serveur d'artefacts et le compte pris par ce
+    déroulé. Lève pxe_server.PortUnavailable si le port est pris."""
+    with _BM_PXE_LOCK:
+        port = pxe_server.start()
+        _BM_PXE_USERS[0] += 1
+    state["pxe"] = True
+    return port
+
+
+def _bm_pxe_release(state):
+    if not state.pop("pxe", False):
+        return
+    with _BM_PXE_LOCK:
+        _BM_PXE_USERS[0] = max(0, _BM_PXE_USERS[0] - 1)
+        if _BM_PXE_USERS[0] == 0 and not pxe_server.has_live_tokens():
+            pxe_server.stop()
+
+
+def _bm_crash_detail(e):
+    """Texte sûr d'une exception imprévue : son type seul (le texte d'une
+    OSError porte un chemin, celui d'une CalledProcessError la ligne de
+    commande et ses jetons). Seul le refus de port, au message fixe, passe."""
+    if isinstance(e, pxe_server.PortUnavailable):
+        return str(e)[:300]
+    return f"internal error ({type(e).__name__})"
+
+
+def _run_crashed(run, sid, e):
+    """Termine en échec une action dont le déroulé a levé hors de ses propres
+    blocs try. Sans effet si l'action est déjà finie."""
+    if getattr(run, "status", None) not in ("starting", "running"):
+        return
+    msg = _bm_crash_detail(e)
+    try:
+        run.error_summary = msg
+        run.emit({"type": "step", "step_id": sid, "status": "error",
+                  "message": msg, "ts": time.time()})
+    finally:
+        run.exit_code = 1
+        run.status = "error"
+        run.ended_at = time.time()
+        try:
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+        finally:
+            run.close()
+
+
 def _baremetal_install_runner(run, opts):
+    """Enveloppe du déroulé : toute exception, même levée hors de ses blocs
+    try (vu en réel : port du serveur d'artefacts déjà pris), finit l'action
+    en échec, efface les fichiers à secrets, révoque les jetons et rend le
+    serveur d'artefacts. SystemExit/KeyboardInterrupt sont relancées après
+    le ménage."""
+    state = {"tokens": [], "scratch": [], "creds": [], "keep_creds": [False],
+             "step": "preflight"}
+    try:
+        _baremetal_install_steps(run, opts, state)
+    except BaseException as e:
+        try:
+            _bm_install_cleanup(state)
+        finally:
+            _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _bm_install_cleanup(state):
+    """Ménage idempotent d'une installation interrompue."""
+    if state["tokens"]:
+        pxe_server.revoke(*state["tokens"])
+    for p in state["scratch"] + ([] if state["keep_creds"][0] else state["creds"]):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _baremetal_install_steps(run, opts, state):
     # plan préparé par _bmor.preflight : seule source de l'identité
     # d'installation pour la garde du nœud et les vérifications finales
     run._onboarding_plan = opts.get("_onboarding_plan")
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
-    tokens = []
+    tokens = state["tokens"]
     # Fichiers à effacer quoi qu'il arrive : la configuration porte le token
     # du cluster et le mot de passe OS, elle n'a rien à faire sur le disque
     # après un échec.
-    scratch = []
+    scratch = state["scratch"]
     # v1.78.0 : clés du nouveau cluster, effacées sur un échec tant que la
     # machine n'a pas redémarré sur l'installeur ; gardées ensuite (le nœud
     # porte la clé publique, et la déclaration s'en sert).
-    creds = []
-    keep_creds = [False]
+    creds = state["creds"]
+    keep_creds = state["keep_creds"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         # Persistance périodique : sans elle, un redémarrage de Flask
@@ -6400,7 +6490,10 @@ def _baremetal_install_runner(run, opts):
          f"{profile.get('model')} : {n_disks or '?'} disque(s) ({disk_src or 'non vus'}), média virtuel OK")
 
     # --- remasterisation ---
-    port = pxe_server.start()
+    try:
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        return fail("serve", str(e))
     try:
         media_base, installer_base = _bm_artifact_base_urls(opts, port)
     except ValueError:
@@ -6435,11 +6528,14 @@ def _baremetal_install_runner(run, opts):
         if join_pub:
             opts = _bm_with_ssh_key(opts, join_pub)
     else:
+        # inscrites AVANT la génération : un ssh-keygen interrompu laisserait
+        # sinon une clé privée orpheline
+        cf = _bm_cluster_files(opts["cluster_name"])
+        creds.extend([cf["key"], cf["pub"], cf["known_hosts"]])
         try:
             files = _bm_cluster_keypair(opts["cluster_name"])
         except (OSError, subprocess.SubprocessError) as e:
             return fail("remaster", f"no SSH key for the new cluster: {type(e).__name__}")
-        creds.extend([files["key"], files["pub"], files["known_hosts"]])
         opts = _bm_with_ssh_key(opts, files["pub"].read_text().strip())
     try:
         cfg_yaml = _harvester_install_config(dict(opts, iso_url=install_iso_url, power_off=True),
@@ -6447,9 +6543,10 @@ def _baremetal_install_runner(run, opts):
     except InstallConfigError as e:
         return fail("remaster", f"invalid configuration: {', '.join(e.paths)}")
     cfg_path = _iso_work_dir() / f"config-{run.id}.yaml"
-    cfg_path.write_text(cfg_yaml)
-    cfg_path.chmod(0o600)          # contient un token et un mot de passe
+    # inscrite avant l'écriture (une écriture interrompue reste à effacer) et
+    # créée en 0600 d'emblée : elle contient un token et un mot de passe
     scratch.append(cfg_path)
+    _bm_write_private(cfg_path, cfg_yaml)
     cfg_token = pxe_server.issue(cfg_path, "config")
     tokens.append(cfg_token)
     config_url = f"{installer_base}/pxe/config/{cfg_token}.yaml"
@@ -7331,6 +7428,20 @@ def _bm_wait_action(action_id, parent, sleep=None):
 
 
 def _baremetal_batch_runner(run, plan, concurrency=_bmp.DEFAULT_CONCURRENCY):
+    """Enveloppe : la série ne reste jamais « running » sur une exception
+    levée hors de ses blocs try, et ses secrets sont effacés de la mémoire
+    du déroulé dans tous les cas."""
+    try:
+        _baremetal_batch_steps(run, plan, concurrency)
+    except BaseException as e:
+        _run_crashed(run, "batch", e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        plan.clear()
+
+
+def _baremetal_batch_steps(run, plan, concurrency):
     """Série d'installations : ligne 1 seule (création), puis les jonctions,
     `concurrency` à la fois, chacune une action suivie à part. Chaque nœud
     est une étape `node-<n>` de cette action, avec l'identifiant de son
@@ -7528,10 +7639,27 @@ class _BmDiscoverBmc:
 
 
 def _baremetal_discover_runner(run, opts):
+    """Enveloppe : une exception levée hors des blocs try du déroulé finit
+    l'action en échec au lieu de la laisser « running » ; le serveur
+    d'artefacts est toujours rendu (le déroulé efface lui-même son ISO et
+    révoque ses jetons, bm_discover.run)."""
+    state = {"step": "remaster"}
+    try:
+        _baremetal_discover_steps(run, opts, state)
+    except BaseException as e:
+        _run_crashed(run, state["step"], e)
+        if not isinstance(e, Exception):
+            raise
+    finally:
+        _bm_pxe_release(state)
+
+
+def _baremetal_discover_steps(run, opts, state):
     host = opts["bmc_host"]
     persisted = [time.time()]
 
     def step(sid, status, msg=""):
+        state["step"] = sid
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
         if time.time() - persisted[0] > 60:
@@ -7558,7 +7686,11 @@ def _baremetal_discover_runner(run, opts):
         step("remaster", "error", f"ISO not found: {opts['iso']}")
         return finish("error", 1, f"ISO not found: {opts['iso']}")
     try:
-        port = pxe_server.start()
+        port = _bm_pxe_acquire(state)
+    except pxe_server.PortUnavailable as e:
+        step("serve", "error", str(e))
+        return finish("error", 1, str(e))
+    try:
         res = _bmd.run(
             # l'ISO de la découverte y est écrite puis effacée en fin de run ;
             # un run tué par un redémarrage est balayé au bout d'un jour
@@ -19803,8 +19935,11 @@ def _vm_transfer_runner(run, cmd, capture=False):
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     last_error = None
-    out_file = tempfile.TemporaryFile() if capture else None
+    out_file = None
     try:
+        # dans le try : une erreur ici (disque plein) laissait l'action
+        # « running » pour toujours
+        out_file = tempfile.TemporaryFile() if capture else None
         proc = subprocess.Popen(cmd, stdout=out_file or subprocess.DEVNULL,
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
@@ -19846,11 +19981,21 @@ def _vm_transfer_runner(run, cmd, capture=False):
         else:
             run.status = "error"
             run.error_summary = (last_error or f"exit {rc}")[:300]
-    except Exception as e:                     # noqa: BLE001
-        run.error_summary = str(e)[:300]
-        step("transfer", "error", str(e)[:300])
+    except BaseException as e:                 # noqa: BLE001
+        # le texte d'une OSError porte un chemin : son type seul
+        detail = type(e).__name__ if isinstance(e, OSError) else str(e)[:300]
+        run.error_summary = detail
+        step("transfer", "error", detail)
         run.exit_code = 1
         run.status = "error"
+        proc = getattr(run, "proc", None)
+        if proc is not None and proc.poll() is None:
+            proc.terminate()            # même signal qu'un arrêt depuis le dock
+        if not isinstance(e, Exception):
+            run.ended_at = time.time()
+            run.emit({"type": "status", "status": "error", "exit_code": 1, "ts": time.time()})
+            run.close()
+            raise
     finally:
         if out_file is not None:
             out_file.close()

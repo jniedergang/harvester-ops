@@ -470,6 +470,18 @@ images in chunks.
 The port has to be reachable **from the BMC network**. On a host with a
 firewall, open it there.
 
+The console sets the port with `HARVESTER_OPS_PXE_PORT` (default 8091).
+It never picks another port by itself: the address given to the BMC and
+the installer must be the one you opened. If the port is taken, the run
+fails at its `serve` step with a message naming the port, before any
+power action. The listener starts with the first installation or
+discovery and stops when the last one ends.
+
+Any failure of a run, expected or not, ends the action as failed. The
+served configuration (it holds the cluster token), the remastered ISO and
+the tokens are removed; the step message gives the error type only, never
+a path or a secret.
+
 ---
 
 ## Troubleshooting

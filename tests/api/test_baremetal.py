@@ -377,7 +377,7 @@ def test_a_join_that_never_comes_times_out(monkeypatch):
 
 def test_the_runner_follows_a_join_on_the_node_not_the_vip():
     src = (Path(wapp.__file__)).read_text()
-    body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("def _baremetal_install_steps(", 1)[1].split("\ndef ", 1)[0]
     assert 'if opts.get("mode") == "join":' in body
     assert "_bm_wait_node_ready(opts[\"cluster\"], _bm_cluster_kubeconfig(opts)" in body
 
@@ -425,7 +425,7 @@ def test_a_join_carries_the_person_s_kubeconfig_to_the_worker(
 
 def test_the_runner_never_resolves_the_cluster_kubeconfig_itself():
     src = (Path(wapp.__file__)).read_text()
-    body = src.split("def _baremetal_install_runner(", 1)[1].split("\ndef ", 1)[0]
+    body = src.split("def _baremetal_install_steps(", 1)[1].split("\ndef ", 1)[0]
     assert "_kubectl_for_cluster(" not in body, "le fil n'a pas l'identité de la personne"
 
 
@@ -714,8 +714,8 @@ def test_failed_install_leaves_no_secret_on_disk():
     OS. Le premier essai réel a échoué à la remasterisation en la laissant
     derrière lui : tout chemin d'échec doit maintenant l'effacer."""
     src = (WEB / "app.py").read_text()
-    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
-    assert "scratch = []" in runner
+    runner = src.split("def _baremetal_install_steps", 1)[1].split("\ndef ", 1)[0]
+    assert 'scratch = state["scratch"]' in runner
     assert "scratch.append(cfg_path)" in runner
     fail = runner.split("def fail(", 1)[1].split("run.close()", 1)[0]
     assert "for p in scratch:" in fail, "fail() doit effacer les artefacts"
@@ -829,7 +829,7 @@ def test_iso_token_is_issued_before_the_config_is_written():
     avant l'écriture, alors que le fichier n'existe pas encore (il sera là
     bien avant la première requête du BMC)."""
     src = (WEB / "app.py").read_text()
-    runner = src.split("def _baremetal_install_runner", 1)[1].split("\ndef ", 1)[0]
+    runner = src.split("def _baremetal_install_steps", 1)[1].split("\ndef ", 1)[0]
     assert runner.index('iso_token = pxe_server.issue(out_iso') < \
         runner.index("cfg_yaml = _harvester_install_config"), (
             "l'URL de l'ISO doit exister avant que la configuration soit rendue")
