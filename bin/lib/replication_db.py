@@ -1137,12 +1137,18 @@ def host_events(conn, host, limit=50, before=None):
 # Bascules et déprotections
 # ---------------------------------------------------------------------------
 
+RUN_OPERATIONS = ("failover", "unprotect", "protect", "measure-start", "measure-stop")
+
+
 def record_run(conn, plan_id, operation, started_at, generation, finished_at=None, result="",
                vms=(), points=None, steps=(), by="", action_id="", run_id=None):
     """Range (ou complète, avec `run_id`) une bascule ou une déprotection :
-    points de reprise par volume, durée de chaque étape. Rend l'id."""
-    if operation not in ("failover", "unprotect"):
-        raise ValueError("operation: failover or unprotect")
+    points de reprise par volume, durée de chaque étape. Rend l'id. Depuis
+    la décision 68 (v1.99.0), aussi une protection ou une mesure
+    interrompue par l'arrêt de la console : étape atteinte et ce qu'une
+    annulation aurait à défaire, pour `resume`."""
+    if operation not in RUN_OPERATIONS:
+        raise ValueError("operation: " + ", ".join(RUN_OPERATIONS))
     vals = {"plan_id": plan_id, "generation": _generation(generation), "operation": operation,
             "started_at": _iso(started_at), "finished_at": _iso(finished_at) if finished_at else "",
             "result": result or "", "vms": list(vms), "points": points or {}, "steps": list(steps),

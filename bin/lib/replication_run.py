@@ -30,7 +30,11 @@ Règles tenues partout (docs/design/2026-10-24-replication-v1-plan.md) :
   et les `BackupVolume` (relecture demandée par `syncRequestedAt`) ;
 * annulation (`Cancelled`, levée par le gestionnaire de SIGTERM/SIGINT de
   la ligne de commande) : retour arrière de ce que la commande a créé, sauf
-  après une activation, qui est définitive.
+  après une activation, qui est définitive ;
+* arrêt de la console (`Suspended`, décision 68, v1.99.0) : la commande
+  s'arrête au prochain point sûr SANS retour arrière, son exécution est
+  rangée `interrupted` avec l'étape atteinte, et `resume` la continue (une
+  restauration initiale commencée n'est pas refaite).
 
 Les clusters ne sont vus qu'au travers d'un client à l'interface de
 `kube.Kube` (`get`, `list`, `create(obj, dry_run)`, `replace`,
@@ -116,6 +120,19 @@ class Cancelled(BaseException):
     v1.99.0 : `protect --retain` annulé sorti en 0 avec la nouvelle valeur)."""
 
 
+class Suspended(BaseException):
+    """Arrêt demandé par l'arrêt de la console (décision 68, v1.99.0), pas
+    par une personne : la commande s'arrête au prochain point sûr
+    (`Ctx.safe_point`), sans retour arrière, et reste à reprendre.
+
+    Pas une sous-classe de `Cancelled` : chaque `except Cancelled` du
+    déroulé lance un retour arrière, qu'un arrêt de la console ne doit
+    justement pas déclencher (une restauration initiale de plusieurs heures
+    serait perdue à chaque redémarrage ou mise à jour). Une `BaseException`,
+    pour la même raison que `Cancelled` : jamais retenue par un `except
+    Exception` de petite lecture."""
+
+
 class Refused(Exception):
     """Refus avant toute écriture : sortie 2."""
 
@@ -183,6 +200,13 @@ class Ctx:
         self.quiet = False          # rien au journal (contrôle à blanc de `check`)
         self.undo_until = None      # échéance du retour arrière (`begin_undo`)
         self.undo_timed_out = False
+        # arrêt de la console (décision 68) : fonction posée par la ligne de
+        # commande, qui rend la raison de l'arrêt demandé (ou None). Lue aux
+        # points sûrs seulement (`safe_point`) : jamais au milieu d'une suite
+        # d'écritures, ni pendant un retour arrière
+        self.suspend_requested = None
+        self.suspended = False
+        self.step = ""              # dernière étape commencée (rangée à l'arrêt)
         # appelé quand le résultat est construit (la ligne de commande y masque
         # ses signaux : une commande terminée n'est plus dite annulée)
         self.on_finish = None
@@ -202,8 +226,25 @@ class Ctx:
         except ValueError:
             pass
 
+    def safe_point(self):
+        """Point sûr : rien n'est à moitié écrit. Lève `Suspended` si l'arrêt
+        de la console est demandé. Placé entre deux étapes (`stage`) et à
+        chaque attente (`sleep`, où passent toutes les attentes bornées) :
+        c'est là que la commande passe presque tout son temps (restauration
+        initiale, sauvegardes), donc l'arrêt y est vu en un tour d'attente.
+        Jamais pendant un retour arrière (une annulation déjà commencée va
+        à son terme) ni deux fois."""
+        if self.suspended or self.undo_until is not None or self.suspend_requested is None:
+            return
+        reason = self.suspend_requested()
+        if reason:
+            self.suspended = True
+            raise Suspended(reason)
+
     def sleep(self, s):
+        self.safe_point()
         self._sleep(s)
+        self.safe_point()
         if self.locked and self.now() - self._beat >= db.LOCK_TTL_S / 3:
             db.lock_heartbeat(self.conn, self.plan_id, self.owner, now=self.dt())
             self._beat = self.now()
@@ -290,12 +331,21 @@ def stage(ctx, op, step, side, uids, message=""):
     """Une étape d'une opération : début, fin (durée) ou échec, écrits au
     journal pour chaque ressource touchée, et sur la sortie STEP_EVENT."""
     uids = [u for u in uids if u] or [""]
+    # point sûr avant l'étape : l'étape rangée à l'arrêt est celle qui allait
+    # commencer (rien n'en est encore écrit)
+    ctx.step = step
+    ctx.safe_point()
     t0 = ctx.now()
     ctx.emit(step, "running", message or step)
     for u in uids:
         ctx.event(op, step, u, side, code="start", message=message or step)
     try:
         yield
+    except Suspended as e:
+        for u in uids:
+            ctx.event(op, step, u, side, level="warn", code="interrupted", message=f"{step}: stopped ({e})")
+        ctx.emit(step, "error", "stopped by the console shutdown")
+        raise
     except Cancelled as e:
         for u in uids:
             ctx.event(op, step, u, side, level="warn", code="cancelled", message=f"{step}: cancelled ({e})")
@@ -1212,29 +1262,40 @@ def measure_start(ctx, interval=300):
                   for f in rp.volume_findings(d["lh_volume"], d["pvc"], d["sc"]) if f["level"] == "block"]
         if blocks:
             raise Refused("check", "a disk cannot be replicated", findings=blocks)
+        ctx.safe_point()
         _lock_checked(ctx, "measure-start", before)
     except Refused as e:
         return _refusal(ctx, "measure", e)
+    except Suspended as e:
+        return _not_started(ctx, "measure", e)
     except Cancelled as e:
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "measure", e)
     uids = [w["uid"] for w in works]
+    run_prev, started, steps_before = None, ctx.dt(), []
     try:
+        run_prev, started, steps_before = _begin_run(ctx, "measure-start")
         _set_state(ctx, "measuring")
         ctx.event("measure", "start", code="measuring", facts={"interval_s": interval})
         _record_works(ctx, works, "measuring")
         _ensure_jobs(ctx, "measure", works, rp.cron_for(interval), ctx.plan["retain"], src.get("jobs") or {})
+        _end_run(ctx, "measure-start", run_prev, started, steps_before, "ok")
         _unlock(ctx)
         return _result(ctx, "measuring", EXIT_OK, f"measuring every {interval} s", interval_s=interval,
                        vms=len(uids))
+    except Suspended as e:
+        return _suspended(ctx, "measure", e, uids, run_op="measure-start", prev=run_prev, started=started,
+                          steps_before=steps_before, points={"interval_s": interval})
     except Cancelled as e:
         left = _undo_created(ctx)
+        _end_run(ctx, "measure-start", run_prev, started, steps_before, "cancelled")
         _error(ctx, uids, f"measure start cancelled: {e}")
         if ctx.undo_timed_out:
             return _undo_timeout(ctx, "measure", f"measure start cancelled ({e})", left)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
+        _keep_run_open(ctx, "measure-start", run_prev, started, steps_before)
         _error(ctx, uids, f"measure start failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
 
@@ -1264,9 +1325,12 @@ def measure_stop(ctx):
         before = _plan_guard(ctx.plan)
         if probe(ctx, "src") != "ok":
             raise Refused("source-unreachable", "the source cluster does not answer")
+        ctx.safe_point()
         _lock_checked(ctx, "measure-stop", before)
     except Refused as e:
         return _refusal(ctx, "measure", e)
+    except Suspended as e:
+        return _not_started(ctx, "measure", e)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
@@ -1274,18 +1338,29 @@ def measure_stop(ctx):
         return _preflight_failed(ctx, "measure", e)
     res = db.list_resources(ctx.conn, ctx.plan_id, ctx.gen)
     uids = [r["resource_uid"] for r in res]
+    run_prev, started, steps_before = None, ctx.dt(), []
     try:
+        run_prev, started, steps_before = _begin_run(ctx, "measure-stop")
         n = collect_measures(ctx)
         _remove_jobs(ctx, "measure", res)
         _set_resources(ctx, uids, "draft")
         _set_state(ctx, "draft")
+        _end_run(ctx, "measure-stop", run_prev, started, steps_before, "ok")
         _unlock(ctx)
         return _result(ctx, "draft", EXIT_OK, "measure stopped", passes=n)
+    except Suspended as e:
+        # le plan reste `measuring` : `resume` termine l'arrêt de la mesure
+        return _suspended(ctx, "measure", e, uids, run_op="measure-stop", prev=run_prev, started=started,
+                          steps_before=steps_before)
     except Cancelled as e:
         # rien n'est défait : la relance termine l'arrêt de la mesure
+        _end_run(ctx, "measure-stop", run_prev, started, steps_before, "cancelled")
         _error(ctx, uids, f"measure stop cancelled: {e}")
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
+        # le plan passe en `error` : l'arrêt de la mesure ne part pas de là,
+        # l'exécution reprise est close
+        _end_run(ctx, "measure-stop", run_prev, started, steps_before, "failed")
         _error(ctx, uids, f"measure stop failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
 
@@ -1629,12 +1704,19 @@ def ensure_standby(ctx, works, latest, visible):
     label = "initial-restore (volume size)" if nominal else "initial-restore (backup data)"
     prog = ctx.tracker("initial-restore", total)
 
+    # décision 68 : une reprise après un arrêt de la console trouve une
+    # restauration déjà avancée (Longhorn a continué sans la console) ; ce
+    # qui était fait au premier relevé est dit à part, rien n'est recopié
+    already = [None]
+
     def progress_hook():
         done = 0
         for sb in todo:
             st = (_status(engine_of(ctx.dst, sb)).get("restoreStatus") or {}).values()
             pct = [float((s or {}).get("progress") or 0) for s in st]
             done += todo[sb] * (sum(pct) / len(pct) / 100.0 if pct else 0)
+        if already[0] is None:
+            already[0] = int(done)
         prog.update(int(done))
 
     with stage(ctx, "protect", "initial-restore", "target", [w["uid"] for w in works]):
@@ -1642,7 +1724,13 @@ def ensure_standby(ctx, works, latest, visible):
         applied = wait_applied(ctx, "initial-restore", wanted, "initial_restore", on_poll=progress_hook)
         prog.update(total)
         if todo:
-            ctx.emit("initial-restore", "running", vp.summary(label, prog.finish()))
+            text = vp.summary(label, prog.finish())
+            if already[0]:
+                text += f" ({vp.fmt_bytes(already[0])} already restored before the interruption)"
+                ctx.event("protect", "initial-restore", side="target", code="continued",
+                          message="initial restore continued, not restarted",
+                          facts={"already_restored_bytes": already[0], "total_bytes": total})
+            ctx.emit("initial-restore", "running", text)
         else:
             prog.finish()
             ctx.emit("initial-restore", "running",
@@ -1814,16 +1902,28 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
             ok = all(x["ok"] for x in dry)
             return _result(ctx, "dry-run", EXIT_OK if ok else EXIT_BLOCKED, "dry run", findings=findings, dry_run=dry)
         chosen, how = _choose_interval(ctx, interval)
+        # arrêt de la console demandé pendant les lectures : la commande ne
+        # commence pas (rien n'est écrit, rien à reprendre)
+        ctx.safe_point()
         _lock_checked(ctx, "protect", before)
     except Refused as e:
         return _refusal(ctx, "protect", e, uids)
+    except Suspended as e:
+        return _not_started(ctx, "protect", e)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "protect", e, uids)
+    run_prev, started, steps_before = None, ctx.dt(), []
     try:
         prev = {"interval_s": ctx.plan.get("interval_s"), "retain": ctx.plan.get("retain")}
+        # reprise après un arrêt de la console (décision 68) : l'exécution
+        # interrompue rend ses listes de retour arrière et les valeurs du plan
+        # d'avant elle, pour qu'une annulation de la reprise défasse tout
+        run_prev, started, steps_before = _begin_run(ctx, "protect")
+        if run_prev is not None:
+            prev = dict((run_prev.get("points") or {}).get("plan_prev") or prev)
         if new_retain is not None and new_retain != ctx.plan.get("retain"):
             db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), retain=new_retain)
             ctx.reload()
@@ -1852,11 +1952,17 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         _set_resources(ctx, uids, "protected")
         _set_state(ctx, "protected")
         ctx.event("protect", "done", code="protected", facts={"interval_s": chosen, "how": how, "vms": len(uids)})
+        _end_run(ctx, "protect", run_prev, started, steps_before, "ok")
         _unlock(ctx)
         return _result(ctx, "protected", EXIT_OK, f"{len(uids)} VM(s) protected", interval_s=chosen,
                        findings=findings)
+    except Suspended as e:
+        # arrêt de la console : rien n'est défait, le plan reste `protecting`
+        return _suspended(ctx, "protect", e, uids, run_op="protect", prev=run_prev, started=started,
+                          steps_before=steps_before, points={"plan_prev": prev})
     except Cancelled as e:
         left = _undo_created(ctx)
+        _end_run(ctx, "protect", run_prev, started, steps_before, "cancelled")
         # la tâche reprise retrouve ses valeurs (`undo_specs`) : la ligne du
         # plan aussi
         back = {k: v for k, v in prev.items() if v is not None and ctx.reload().get(k) != v}
@@ -1869,6 +1975,7 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         _error(ctx, uids, f"protect cancelled: {e}", left)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e), left=left)
     except Exception as e:                      # noqa: BLE001
+        _keep_run_open(ctx, "protect", run_prev, started, steps_before)
         _error(ctx, uids, f"protect failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
 
@@ -1909,6 +2016,126 @@ def _error(ctx, uids, message, left=None):
             ctx.event("plan", "rollback", level="error", code="left", message="could not undo: " + "; ".join(left))
     finally:
         _unlock(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Arrêt de la console : exécution interrompue, reprise (décision 68)
+# ---------------------------------------------------------------------------
+
+# commandes qui s'arrêtent sans retour arrière à l'arrêt de la console ; leur
+# exécution interrompue est rangée dans `runs` (result `interrupted`, sans
+# `finished_at`) avec l'étape atteinte et de quoi défaire plus tard
+SUSPENDABLE_RUNS = ("protect", "measure-start", "measure-stop")
+
+
+def _undo_state(ctx):
+    """Ce qu'une annulation devrait défaire, rangé avec l'exécution
+    interrompue : une annulation de la REPRISE défait alors toute la
+    commande, comme l'aurait fait une annulation avant l'arrêt."""
+    return {"created": [list(x) for x in ctx.created],
+            "labels": [list(x) for x in ctx.undo_labels],
+            "specs": [list(x) for x in ctx.undo_specs],
+            "default": [list(x) for x in ctx.undo_default]}
+
+
+def _load_undo(ctx, saved):
+    """Reprend les listes de retour arrière d'une exécution interrompue
+    (sans doublon : la reprise ne recrée pas ce qui existe, elle ne le note
+    donc pas une seconde fois)."""
+    saved = saved or {}
+    for key, attr in (("created", "created"), ("labels", "undo_labels"), ("specs", "undo_specs"),
+                      ("default", "undo_default")):
+        cur = getattr(ctx, attr)
+        for x in saved.get(key) or []:
+            t = tuple(x)
+            if t not in cur:
+                cur.append(t)
+
+
+def _open_interrupted(ctx, operation):
+    """Exécution interrompue par un arrêt de la console, encore ouverte."""
+    r = _open_run(ctx, operation)
+    return r if r and r.get("result") == "interrupted" else None
+
+
+def _close_superseded(ctx, operations, keep=None):
+    """Une autre commande prend la main sur le plan : les exécutions
+    interrompues qu'elle remplace sont closes (`superseded`), `resume` ne
+    les relancera plus."""
+    for r in db.list_runs(ctx.conn, ctx.plan_id):
+        if r["operation"] in operations and not r["finished_at"] and r["id"] != keep \
+                and r.get("result") == "interrupted":
+            db.record_run(ctx.conn, ctx.plan_id, r["operation"], r["started_at"], int(r["generation"]),
+                          finished_at=ctx.dt(), result="superseded", vms=r.get("vms") or [],
+                          points=r.get("points") or {}, steps=r.get("steps") or [], by=r.get("by") or "",
+                          action_id=r.get("action_id") or "", run_id=r["id"])
+
+
+def _begin_run(ctx, operation):
+    """(exécution interrompue reprise ou None, début, étapes déjà faites) :
+    la reprise retrouve son début, ses étapes et ses listes de retour
+    arrière ; les autres exécutions interrompues sont closes."""
+    prev = _open_interrupted(ctx, operation)
+    _close_superseded(ctx, [o for o in SUSPENDABLE_RUNS], keep=prev["id"] if prev else None)
+    if prev is None:
+        return None, ctx.dt(), []
+    pts = prev.get("points") or {}
+    _load_undo(ctx, pts.get("undo"))
+    ctx.event(operation.split("-")[0], "resume", code="resumed",
+              message=f"resumed after the console shutdown, from step {pts.get('step') or 'start'}",
+              facts={"from_step": pts.get("step") or "", "steps_done": pts.get("steps_done") or []})
+    return prev, prev["started_at"], list(prev.get("steps") or [])
+
+
+def _end_run(ctx, operation, prev, started, steps_before, result, points=None):
+    """Clôt l'exécution reprise (réussite, annulation) ; rien sans reprise."""
+    if prev is None:
+        return
+    db.record_run(ctx.conn, ctx.plan_id, operation, started, ctx.gen, finished_at=ctx.dt(), result=result,
+                  points=dict(prev.get("points") or {}, **(points or {}), undo={}), steps=steps_before + ctx.steps,
+                  by=ctx.by, action_id=ctx.action_id, run_id=prev["id"])
+
+
+def _keep_run_open(ctx, operation, prev, started, steps_before):
+    """Échec d'une reprise : l'exécution reste ouverte (`interrupted`), avec
+    ce que cette reprise a ajouté à défaire."""
+    if prev is None:
+        return
+    db.record_run(ctx.conn, ctx.plan_id, operation, started, ctx.gen, result="interrupted",
+                  points=dict(prev.get("points") or {}, undo=_undo_state(ctx)), steps=steps_before + ctx.steps,
+                  by=ctx.by, action_id=ctx.action_id, run_id=prev["id"])
+
+
+def _suspended(ctx, op, e, uids, run_op=None, prev=None, started=None, steps_before=(), points=None,
+               run_id=None):
+    """Arrêt de la console pendant une commande : rien n'est défait, l'état
+    du plan reste celui de la commande en cours (`protecting`,
+    `measuring`, `unprotecting`), l'étape atteinte est rangée (journal et
+    `runs`), le verrou est rendu. Sortie 3, code `interrupted` : `resume`
+    continue la commande là où elle en était."""
+    step = ctx.step or "start"
+    done = [x["step"] for x in list(steps_before) + ctx.steps]
+    facts = {"step": step, "steps_done": done, "reason": str(e)}
+    msg = f"interrupted by the console shutdown at step {step}: nothing undone, resume the plan to continue"
+    for u in list(uids) or [""]:
+        ctx.event(op, "interrupted", u, level="warn", code="interrupted", message=msg, facts=facts)
+    if run_op:
+        rid = prev["id"] if prev else run_id
+        db.record_run(ctx.conn, ctx.plan_id, run_op, started or ctx.dt(), ctx.gen, result="interrupted",
+                      points=dict((prev or {}).get("points") or {}, **(points or {}), step=step, steps_done=done,
+                                  reason=str(e), undo=_undo_state(ctx)),
+                      steps=list(steps_before) + ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=rid)
+    _unlock(ctx)
+    return _result(ctx, "interrupted", EXIT_CANCELLED, msg, step=step, steps_done=done, suspended=True)
+
+
+def _not_started(ctx, op, e):
+    """Arrêt de la console avant la moindre écriture : la commande n'a pas
+    commencé, il n'y a rien à reprendre (la relancer après le redémarrage)."""
+    _unlock(ctx)
+    ctx.emit("check", "error", f"not started: {e}")
+    return _result(ctx, "not-started", EXIT_CANCELLED,
+                   f"the console stopped ({e}) before this command changed anything: run it again", suspended=True)
 
 
 # ---------------------------------------------------------------------------
@@ -2276,9 +2503,12 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                 findings = sorted(findings + _unplanned_dry_findings(ctx, sel, carnets),
                                   key=lambda f: rp._ORDER[f["level"]])
             return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry)
+        ctx.safe_point()
         _lock_checked(ctx, "failover", before, lambda: _sel_key(_select(ctx, vms)), _sel_key(sel))
     except Refused as e:
         return _refusal(ctx, "failover", e, uids)
+    except Suspended as e:
+        return _not_started(ctx, "failover", e)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
@@ -2471,8 +2701,16 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         _unlock(ctx)
         return _result(ctx, "failed-over", EXIT_OK, f"{len(go)} VM(s) failed over", run_id=run_id, mode=mode,
                        **result)
-    except (Cancelled, Exception) as e:          # noqa: BLE001
-        cancelled = isinstance(e, Cancelled)
+    except (Cancelled, Suspended, Exception) as e:          # noqa: BLE001
+        # Arrêt de la console (décision 68) pendant une bascule : traité comme
+        # une annulation. Avant l'activation, une bascule est tout ou rien par
+        # conception (même un échec remet tout en place) : la laisser à moitié
+        # faite pendant que la console est arrêtée garderait la VM source
+        # arrêtée, sans VM cible, et ferait d'une bascule planifiée une panne.
+        # Après l'activation, rien n'est défait (déjà le cas) : `resume` la
+        # termine. La console attend donc le retour arrière d'une bascule
+        # (`kill_grace`), et seulement d'elle.
+        cancelled = isinstance(e, (Cancelled, Suspended))
         refused = isinstance(e, Refused)
         if not activated_any:
             # planifiée : la source a pu être arrêtée par une exécution précédente
@@ -2648,9 +2886,12 @@ def unprotect(ctx, delete_backups=False, yes=False):
             raise Refused("backups-in-use", "a failover already activated volumes of " + ", ".join(vms) +
                           ": the backups are kept; unprotect without --delete-backups",
                           facts={"vms": vms})
+        ctx.safe_point()
         _lock_checked(ctx, "unprotect", before)
     except Refused as e:
         return _refusal(ctx, "unprotect", e)
+    except Suspended as e:
+        return _not_started(ctx, "unprotect", e)
     except Cancelled as e:
         _unlock(ctx)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
@@ -2665,6 +2906,8 @@ def unprotect(ctx, delete_backups=False, yes=False):
                                                     points=base, by=ctx.by, action_id=ctx.action_id)
     pending, left, selectors = [], [], {}
     try:
+        # une protection ou une mesure interrompue n'est plus à reprendre
+        _close_superseded(ctx, SUSPENDABLE_RUNS)
         _set_state(ctx, "unprotecting")
         _set_resources(ctx, uids, "unprotecting")
         if not _touched_target(ctx):
@@ -2707,6 +2950,11 @@ def unprotect(ctx, delete_backups=False, yes=False):
         _unlock(ctx)
         return _result(ctx, "unprotected", EXIT_OK, "plan unprotected", left=left, left_selectors=selectors,
                        backups_deleted=deleted)
+    except Suspended as e:
+        # arrêt de la console : comme une annulation, rien n'est défait ; la
+        # ligne `runs` (déjà ouverte) garde l'étape atteinte
+        return _suspended(ctx, op, e, uids, run_op="unprotect", started=started, run_id=run_id,
+                          points=dict(base, pending=pending))
     except Cancelled as e:
         # rien n'est défait : la relance (ou `resume`) termine la déprotection
         _unlock(ctx)
@@ -2809,7 +3057,19 @@ def resume(ctx, yes=False):
     state = plan["state"]
     origin = db.error_origin(ctx.conn, ctx.plan_id) if state == "error" else None
     eff = origin or state
-    if eff == "protecting":
+    # une commande arrêtée par l'arrêt de la console (décision 68) : sa ligne
+    # `runs` ouverte dit laquelle, quel que soit l'état où elle a laissé le
+    # plan (un arrêt avant son premier changement d'état le laisse en
+    # `draft`) ; la plus récente l'emporte
+    opened = [r for r in db.list_runs(ctx.conn, ctx.plan_id)
+              if r["operation"] in SUSPENDABLE_RUNS and not r["finished_at"] and r.get("result") == "interrupted"
+              and int(r["generation"]) == ctx.gen]
+    last = opened[-1] if opened else None
+    if last is not None and last["operation"] == "measure-stop" and state == "measuring":
+        return measure_stop(ctx)
+    if last is not None and last["operation"] == "measure-start":
+        return measure_start(ctx, (last.get("points") or {}).get("interval_s") or _measure_interval(ctx.conn, plan))
+    if eff == "protecting" or (last is not None and last["operation"] == "protect"):
         return protect(ctx)
     if eff == "failing_over":
         r = _open_run(ctx, "failover") or {}

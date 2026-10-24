@@ -73,6 +73,16 @@ termine ; 4 objectif de RPO dépassé (`status` seulement, pour une sonde, avec
 l'échéance du retour arrière, puis reprennent leur effet. `follow` arrêté
 par un signal sort en 0 après avoir rendu ses baux : c'est sa fin normale.
 
+SIGUSR2 (décision 68, v1.99.0) est le signal de l'ARRÊT DE LA CONSOLE, pas
+d'une personne : `protect` (restauration initiale comprise), la mesure et
+la déprotection s'arrêtent au prochain point sûr sans rien défaire, sortie
+3, kind `interrupted`, `resume_required: true`, l'étape atteinte dans
+`step` ; `resume` continue sans refaire ce qui est fait. Une commande
+arrêtée avant toute écriture rend kind `not-started` (la relancer). Une
+bascule pas encore activée est défaite comme pour une annulation (elle est
+tout ou rien). Sans point sûr dans le délai d'un appel kubectl (`client`),
+l'arrêt est levé là où en est la commande, toujours sans retour arrière.
+
 La ligne de commande agit avec les droits du kubeconfig qu'elle reçoit ; les
 rôles de la console (lecture, opérateur, administrateur) sont appliqués par
 la console avant de la lancer. `--role` sur les lectures ne fait que remplir
@@ -105,6 +115,15 @@ from kube import Kube, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_CANCELLED, EXIT_RPO = 0, 1, 2, 3, 4
 CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+# Arrêt de la console (décision 68) : un signal à part, que seule la console
+# envoie, et jamais une personne. SIGHUP était déjà une annulation (terminal
+# fermé) ; SIGUSR1 rouvre le journal du suiveur. Un marqueur de fichier lu par
+# la commande aurait demandé une scrutation, et ne réveille pas une attente.
+SUSPEND_SIGNAL = signal.SIGUSR2
+# Filet du point sûr : si aucun n'est atteint dans ce délai (un appel kubectl
+# pendu), l'arrêt est levé là où en est la commande, par SIGALRM
+SUSPEND_ALARM = signal.SIGALRM
+_HANDLED = CANCEL_SIGNALS + (SUSPEND_SIGNAL, SUSPEND_ALARM)
 # délai d'un appel kubectl : un cluster pendu coûte au plus 30 s par appel
 # (et par tour au suiveur, qui ne relit pas un cluster tombé dans le tour) ;
 # réglable par plan (`--timeout client=S` de plan create/set) et par commande
@@ -119,7 +138,10 @@ SLEEP = time.sleep
 # ce qu'une sortie ne doit jamais montrer (chemins), rempli au démarrage
 _HIDDEN = []
 # signal reçu, échéance du retour arrière, contexte de la commande en cours
-_CANCEL = {"signal": None, "deadline": None, "ctx": None, "finished": False}
+# `suspend` : raison de l'arrêt de la console demandé (SIGUSR2), lue par le
+# déroulé à ses points sûrs ; `client` : délai d'un appel kubectl de la commande
+_CANCEL = {"signal": None, "deadline": None, "ctx": None, "finished": False, "suspend": None,
+           "client": CLIENT_TIMEOUT}
 
 
 class Cancelled(rr.Cancelled):
@@ -247,6 +269,11 @@ def _on_cancel_signal(signum, _frame):
     passée l'échéance, un signal reprend son effet par défaut."""
     if _CANCEL.get("finished"):
         return                      # résultat construit : la commande n'est plus annulable
+    if _CANCEL.get("suspend"):
+        # l'arrêt de la console est déjà en route : la commande s'arrête sans
+        # rien défaire, un signal de plus ne la change pas en retour arrière
+        # (systemd, en fin d'arrêt, signale tout le groupe de processus)
+        return
     name = signal.Signals(signum).name
     ctx = _CANCEL.get("ctx")
     undoing = ctx is not None and ctx.undo_until is not None
@@ -261,6 +288,38 @@ def _on_cancel_signal(signum, _frame):
     os.kill(os.getpid(), signum)
 
 
+def _suspend_reason():
+    return _CANCEL.get("suspend")
+
+
+def _on_suspend_signal(signum, _frame):
+    """SIGUSR2 : arrêt de la console. Rien n'est levé ici : le déroulé lit la
+    demande à son prochain point sûr (`Ctx.safe_point`) et s'arrête sans
+    retour arrière. Ignoré une fois le résultat construit, pendant une
+    annulation (qui va à son terme) et s'il est déjà demandé. Arme le filet
+    (SIGALRM après un délai d'appel kubectl)."""
+    if _CANCEL.get("finished") or _CANCEL.get("signal") or _CANCEL.get("suspend"):
+        return
+    ctx = _CANCEL.get("ctx")
+    if ctx is not None and ctx.undo_until is not None:
+        return
+    _CANCEL["suspend"] = f"console shutdown ({signal.Signals(signum).name})"
+    signal.setitimer(signal.ITIMER_REAL, float(max(1, int(_CANCEL.get("client") or CLIENT_TIMEOUT))))
+
+
+def _on_suspend_alarm(_signum, _frame):
+    """Filet : aucun point sûr dans le délai d'un appel kubectl. L'arrêt est
+    levé là où en est la commande, toujours sans retour arrière (protect,
+    mesure et déprotection reprennent depuis n'importe quel point : chaque
+    étape constate l'existant). Rien sans commande du déroulé en cours."""
+    ctx = _CANCEL.get("ctx")
+    if _CANCEL.get("finished") or not _CANCEL.get("suspend") or ctx is None or ctx.suspended \
+            or ctx.undo_until is not None:
+        return
+    ctx.suspended = True
+    raise rr.Suspended(_CANCEL["suspend"] + ", no safe point in time")
+
+
 def _block_signals():
     """Le résultat de la commande est construit : un signal qui arrive
     maintenant reste en attente, puis est jeté (`cancel_on_signals`). Une
@@ -268,7 +327,8 @@ def _block_signals():
     processus à plusieurs fils, où le signal peut arriver par un autre fil."""
     _CANCEL["finished"] = True
     if threading.current_thread() is threading.main_thread():
-        signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.pthread_sigmask(signal.SIG_BLOCK, _HANDLED)
 
 
 @contextlib.contextmanager
@@ -279,17 +339,20 @@ def cancel_on_signals():
         yield
         return
     saved = {sig: signal.signal(sig, _on_cancel_signal) for sig in CANCEL_SIGNALS}
+    saved[SUSPEND_SIGNAL] = signal.signal(SUSPEND_SIGNAL, _on_suspend_signal)
+    saved[SUSPEND_ALARM] = signal.signal(SUSPEND_ALARM, _on_suspend_alarm)
     try:
         yield
     finally:
         # un signal resté en attente après la fin est jeté (SIG_IGN avant le
         # déblocage), puis les gestionnaires d'avant reviennent
-        for sig in CANCEL_SIGNALS:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        for sig in _HANDLED:
             signal.signal(sig, signal.SIG_IGN)
-        signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, _HANDLED)
         for sig, h in saved.items():
             signal.signal(sig, h)
-        _CANCEL.update(ctx=None, finished=False)
+        _CANCEL.update(ctx=None, finished=False, suspend=None)
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +472,10 @@ def make_ctx(args, conn, plan):
                  by=args.by or system_user(), action_id=args.id or "",
                  through_rancher=through_rancher(tk, dst))
     ctx.on_finish = _block_signals
+    # arrêt de la console : le déroulé lit la demande à ses points sûrs
+    ctx.suspend_requested = _suspend_reason
     _CANCEL["ctx"] = ctx
+    _CANCEL["client"] = client_timeout or CLIENT_TIMEOUT
     return ctx
 
 
@@ -445,6 +511,8 @@ def _kind(code, res):
     déprotection commencée : rien n'est défait, `resume` termine)."""
     if res.get("code") == "interrupted":
         return "interrupted"
+    if res.get("code") == "not-started":
+        return "not-started"
     if code == EXIT_CANCELLED:
         return "cancelled"
     return res.get("code") or "failed"
@@ -1052,7 +1120,10 @@ EPILOG = """exit codes:
      locked, open-run)
   3  cancelled by SIGTERM, SIGHUP or SIGINT: kind cancelled (what the command
      had set is undone) or kind interrupted (after an activation, or during
-     unprotect: nothing undone, resume_required true, run resume)
+     unprotect: nothing undone, resume_required true, run resume);
+     stopped by SIGUSR2 (console shutdown): kind interrupted, nothing undone,
+     `step` reached, resume_required true (a failover not yet activated is
+     undone, as for a cancel); kind not-started when nothing was written
   4  status only: an RPO objective is exceeded (the JSON still has ok: true)
 
 After the first signal, further signals are ignored until the rollback
@@ -1240,7 +1311,7 @@ def configure(args):
     home = os.path.expanduser("~")
     if home and home != "/":
         _hide(home)
-    _CANCEL.update(signal=None, deadline=None, ctx=None, finished=False)
+    _CANCEL.update(signal=None, deadline=None, ctx=None, finished=False, suspend=None, client=CLIENT_TIMEOUT)
 
 
 def main(argv=None):
@@ -1258,6 +1329,10 @@ def main(argv=None):
                     return args.fn(args)
                 except rr.Cancelled as e:
                     return fail_exit(want_json, "cancel", f"cancelled ({e})", "cancelled", EXIT_CANCELLED)
+                except rr.Suspended as e:
+                    # arrêt de la console hors du déroulé (lectures d'avant) :
+                    # rien n'a commencé
+                    return fail_exit(want_json, "cancel", f"not started: {e}", "not-started", EXIT_CANCELLED)
     except UsageError as e:
         return fail_exit(want_json, "validate", str(e), e.kind, EXIT_USAGE)
     except Failure as e:

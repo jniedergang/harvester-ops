@@ -350,6 +350,9 @@ def test_each_mutation_spawns_the_exact_command_as_a_tracked_action(client, env,
     assert script_cmd() == want
     assert run.action == f"replication:{plan_id}:{op}" and run.cluster == cluster
     assert run.kill_grace == (100 + 20 + 15 if plan_id == PID else 240 + 30 + 15)
+    # décision 68 : à l'arrêt de la console, seule une bascule attend son
+    # retour arrière ; le reste s'arrête au point sûr (un appel kubectl + marge)
+    assert run.shutdown_grace == (run.kill_grace if op == "failover" else (20 if plan_id == PID else 30) + 15)
     assert run.required_role == ("admin" if op in ("failover", "unprotect-delete-backups") else "operator")
     # commande montrée : ni kubeconfig, ni base, ni répertoire d'état
     shown = " ".join(run.cmd)
@@ -604,6 +607,13 @@ def _run_tool(rc, data, summarize=wapp._repl_summarize, stderr=""):
     (2, {"ok": False, "kind": "state-changed", "error": "the plan changed while waiting for its lock"},
      "error", "the plan changed while waiting for its lock"),
     (3, {}, "cancelled", "cancelled, no result from the command: check the plan"),
+    # décision 68 : arrêt de la console, pas une annulation
+    (3, {"ok": False, "kind": "interrupted", "code": "interrupted", "resume_required": True, "suspended": True,
+         "step": "initial-restore"},
+     "interrupted", "interrupted by the console shutdown at step initial-restore, nothing undone: "
+                    "resume the plan to continue"),
+    (3, {"ok": False, "kind": "not-started", "code": "not-started", "resume_required": False, "suspended": True},
+     "interrupted", "stopped by the console shutdown before any change: run the command again"),
 ])
 def test_runner_wording_follows_the_kind(rc, data, status, summary):
     run = _run_tool(rc, data)
@@ -620,10 +630,15 @@ def test_other_tools_keep_their_texts():
 
 # --- délai de retour arrière avant SIGKILL ------------------------------------------------
 
+# enfants de test : SIGTERM (annulation) et SIGUSR2 (arrêt de la console,
+# décision 68) ignorés, ou suivis d'une sortie 3 ; le signal reçu est écrit
 STUBBORN = ("import signal,sys,time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "signal.signal(signal.SIGUSR2, signal.SIG_IGN)\n"
             "print('ready', flush=True)\ntime.sleep(30)\n")
-POLITE = ("import signal,sys,time\ndef h(*a):\n    time.sleep(0.5); sys.exit(3)\n"
-          "signal.signal(signal.SIGTERM, h)\nprint('ready', flush=True)\ntime.sleep(30)\n")
+POLITE = ("import signal,sys,time\ndef h(n, f):\n    print(signal.Signals(n).name, flush=True); "
+          "time.sleep(0.5); sys.exit(3)\n"
+          "signal.signal(signal.SIGTERM, h)\nsignal.signal(signal.SIGUSR2, h)\n"
+          "print('ready', flush=True)\ntime.sleep(30)\n")
 
 
 def _child(code):
@@ -677,6 +692,70 @@ def test_console_shutdown_waits_each_grace_then_kills(monkeypatch):
         assert runs["s3"].proc.poll() is None          # pas une commande de réplication : intacte
         runs["s3"].proc.kill()
         runs["s3"].proc.wait()
+    finally:
+        wapp.ACTIONS.clear()
+        wapp.ACTIONS.update(saved)
+
+
+@pytest.mark.parametrize("plan,op,want", [
+    ({"state": "protecting", "options": {}}, "protect", 30 + 15),
+    ({"state": "measuring", "options": {"timeouts": {"client": 60}}}, "measure-stop", 60 + 15),
+    ({"state": "draft", "options": {}}, "measure-start", 30 + 15),
+    ({"state": "unprotecting", "options": {}}, "unprotect", 30 + 15),
+    ({"state": "protecting", "options": {}}, "resume", 30 + 15),
+    ({"state": "error", "error_origin": "protecting", "options": {}}, "resume", 30 + 15),
+    ({"state": "protected", "options": {}}, "failover", 240 + 30 + 15),
+    ({"state": "failing_over", "options": {}}, "resume", 240 + 30 + 15),
+    ({"state": "error", "error_origin": "failing_over", "options": {"timeouts": {"undo_total": 100}}}, "resume",
+     100 + 30 + 15),
+])
+def test_shutdown_grace_is_a_safe_point_except_for_a_failover(plan, op, want):
+    """Décision 68 : une protection, une mesure, une déprotection (et leur
+    reprise) ne sont plus défaites à l'arrêt de la console ; seule une
+    bascule pas encore activée garde son délai de retour arrière."""
+    assert wapp._repl_shutdown_grace(plan, op) == want
+
+
+def _readlines_until(proc, n=1, timeout=5):
+    out, end = [], time.monotonic() + timeout
+    while len(out) < n and time.monotonic() < end:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        out.append(line.strip())
+    return out
+
+
+def test_console_shutdown_suspends_running_commands_and_lets_a_cancel_finish(monkeypatch):
+    """L'arrêt de la console envoie SIGUSR2 (« arrête au point sûr, garde
+    l'état ») à une commande en cours, jamais SIGTERM, et ne la marque pas
+    annulée ; une annulation déjà demandée par une personne (SIGTERM déjà
+    reçu, retour arrière en cours) ne reçoit rien de plus et garde son délai
+    de retour arrière. Le délai d'arrêt (`shutdown_grace`) remplace le délai
+    de retour arrière pour les autres : un enfant qui ne s'arrête pas est
+    tué après lui, pas après `kill_grace`."""
+    monkeypatch.setattr(wapp, "REPLICATION_FOLLOWER", None)
+    saved = dict(wapp.ACTIONS)
+    wapp.ACTIONS.clear()
+    try:
+        runs = {}
+        for rid, code, cancelled, grace, kill in (("p1", POLITE, False, 5, 300), ("p2", POLITE, True, None, 20),
+                                                 ("p3", STUBBORN, False, 1, 300)):
+            run = wapp.ActionRun(rid, f"replication:{PID}:protect", "harvlab", ["x"])
+            run.proc, run.kill_grace, run.shutdown_grace, run.status = _child(code), kill, grace, "done"
+            if cancelled:
+                run.cancel_requested = True
+                run.proc.terminate()                      # l'annulation du dock, avant l'arrêt
+            wapp.ACTIONS[rid] = runs[rid] = run
+        t0 = time.monotonic()
+        codes = wapp._replication_shutdown()
+        took = time.monotonic() - t0
+        assert codes == {"p1": 3, "p2": 3, "p3": -9}
+        assert 1 <= took < 10                             # p3 tué après son délai d'arrêt (1 s), pas 300 s
+        assert _readlines_until(runs["p1"].proc) == ["SIGUSR2"]
+        assert _readlines_until(runs["p2"].proc) == ["SIGTERM"]       # rien de plus
+        assert runs["p1"].cancel_requested is False and runs["p1"].shutdown_requested is True
+        assert runs["p2"].shutdown_requested is False
     finally:
         wapp.ACTIONS.clear()
         wapp.ACTIONS.update(saved)

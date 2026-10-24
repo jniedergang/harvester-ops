@@ -90,14 +90,28 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   documented (decision 48).
 
 ### Changed
-- systemd unit: `podman stop -t 600` (was 10) and `TimeoutStopSec=630s`,
-  so that a replication command cancelled at shutdown can roll back. The
-  console still exits at once when no replication command runs. A plan
-  followed by the console cannot set `undo_total + client` above 570 s
-  (`stop-budget`).
-- Console shutdown (SIGTERM) now cancels running replication commands and
-  stops the follower, waiting for each one's grace before SIGKILL; other
-  actions are untouched.
+- A console shutdown (restart, host reboot, forced update) no longer
+  cancels a running replication command (decision 68). The console sends
+  SIGUSR2, which means "stop at the next safe point and keep the state": a
+  protect (initial restore included), a measure or an unprotect stops
+  between two steps or at the next poll of a wait, undoes nothing, and is
+  left `interrupted` (exit 3, `resume_required`, the `step` reached, kept
+  in the journal and in its run). `resume` continues it without copying
+  again what was restored, and a cancel of the resumed protect still
+  undoes the whole protection. The console waits one kubectl call plus
+  15 s for it (a fallback stops the command where it is after one
+  `client` timeout, still without rollback), so the stop budget is no
+  longer spent on rollbacks. A failover not yet activated is still undone
+  (all or nothing before activation). Only a cancel by a person (dock
+  cancel, SIGTERM, Ctrl-C) rolls a protect back. Activity shows
+  "interrupted by the console shutdown"; a command stopped before its
+  first write reports `not-started`. The follower is stopped as before;
+  other actions are untouched.
+- systemd unit: `podman stop -t 600` (was 10) and `TimeoutStopSec=630s`.
+  That budget is now used only by a failover not yet activated or a cancel
+  already under way at shutdown; the console still exits at once when no
+  replication command runs. A plan followed by the console cannot set
+  `undo_total + client` above 570 s (`stop-budget`).
 - The busy check of `_cli_action` and the insertion of the new action
   happen under one lock for every tool: two simultaneous gestures on the
   same target can no longer both start.
@@ -198,8 +212,18 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   controllers, crash and cancel at every mutating call), follower, command
   line (real SIGTERM harness) and routes, about 1 080 tests, table-driven
   with a deliberate mutation for each fix.
+- Console shutdown during a replication command (decision 68): a table
+  per protect step (jobs created, first backup in progress, standby
+  created, initial restore in progress) where the shutdown leaves the plan
+  `interrupted` with its objects and resume reaches the same end state with
+  no object created twice, the same steps with an operator cancel rolling
+  back, real subprocesses receiving SIGUSR2 and SIGTERM, the fallback
+  without a safe point, and deliberate mutations (shutdown handled as a
+  cancel, no safe point, resume forgetting what to undo, console sending
+  SIGTERM or waiting the rollback grace) all caught.
 - Real: harvlab to harvlab2 on 24/10/2026 (see the capabilities page for
-  what was and was not verified).
+  what was and was not verified), and decision 68 the same night through a
+  second console (shutdown during a 2 GiB initial restore, then resume).
 
 ## [1.98.1] - 2026-10-24 - Security: rebuilt image without the compromised emSign CAs
 

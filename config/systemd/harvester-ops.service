@@ -10,10 +10,12 @@ Type=simple
 Restart=on-failure
 RestartSec=10s
 TimeoutStartSec=60s
-# A replication command cancelled at shutdown gets its rollback deadline
-# (undo_total, 240 s by default, plus one kubectl call) before a SIGKILL:
-# podman stop and systemd must wait at least that long. The console exits
-# at once when no such command is running.
+# At shutdown the console asks each running replication command to stop at
+# its next safe point and keep its state (SIGUSR2, decision 68): that takes
+# one kubectl call. Only a failover not yet activated, or a cancel already
+# under way, still gets its rollback deadline (undo_total, 240 s by default,
+# plus one kubectl call) before a SIGKILL: podman stop and systemd must wait
+# at least that long. The console exits at once when no such command runs.
 TimeoutStopSec=630s
 
 # Reads ports/paths from /etc/harvester-ops/config.yaml

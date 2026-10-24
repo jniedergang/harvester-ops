@@ -967,6 +967,12 @@ TRIGGERS = {
     "failover-before": ("final-backup", "running"),
     "failover-after": ("activate", "done"),
     "follow": ("follow", "done"),
+    # décision 68 : arrêt de la console (SIGUSR2) ou annulation (SIGTERM)
+    "protect-restore": ("initial-restore", "running"),
+    "protect-backup": ("first-backup", "running"),
+    "protect-standby": ("standby-volume", "done"),
+    # aucun point sûr pendant la pause : le filet (SIGALRM, `client` = 1 s) arrête
+    "protect-stuck": ("initial-restore", "running"),
 }
 
 
@@ -974,7 +980,7 @@ def harness(case, workdir, outfile, resume):
     """Processus fils : banc simulé, commande lancée par `main`, et à l'étape
     choisie une pause réelle pendant laquelle le parent envoie SIGTERM."""
     w = World(Path(workdir), vms=("vm-a",))
-    if case != "protect":
+    if not case.startswith("protect"):
         assert rr.protect(w.ctx())["exit"] == 0
     wire(w)
     trigger = TRIGGERS[case]
@@ -989,11 +995,21 @@ def harness(case, workdir, outfile, resume):
             deadline = time.monotonic() + (1 if case == "follow" else 20)
             while time.monotonic() < deadline:
                 time.sleep(0.05)               # le signal arrive ici, en pleine étape
+                if cli._CANCEL.get("suspend") and case != "protect-stuck":
+                    # arrêt demandé : la pause finit peu après (un second
+                    # signal peut encore arriver), le point sûr suivant arrête
+                    deadline = min(deadline, time.monotonic() + 1)
     cli.step = step
-    argv = {"protect": ["protect", "plan-a", "--interval=3m"],
-            "follow": ["follow", "--plan=plan-a"]}.get(case, ["failover", "plan-a", "--all-vms", "--yes"])
+    argv = ["protect", "plan-a", "--interval=3m"] if case.startswith("protect") else \
+        {"follow": ["follow", "--plan=plan-a"]}.get(case, ["failover", "plan-a", "--all-vms", "--yes"])
+    if case == "protect-stuck":
+        argv.append("--timeout=client=1")
+    t0 = time.monotonic()
     rc = cli.main(argv + ["--json", f"--db={db_path(w)}"])
+    took = time.monotonic() - t0
     cli.step = orig
+    first_creates = [list(c[1:4]) for c in w.src.mutations() + w.dst.mutations() if c[0] == "create"]
+    deletes = [list(c[1:4]) for c in w.src.mutations() + w.dst.mutations() if c[0] == "delete"]
     w.clock.sleep(200)                         # les sauvegardes défaites quittent la cible à sa relecture
     w.dst.list(rr.K_LH_BACKUP)
     state = {"rc": rc, "plan_state": w.plan()["state"], "origin": db.error_origin(w.conn, w.pid),
@@ -1007,7 +1023,10 @@ def harness(case, workdir, outfile, resume):
                          .get("spec", {}).get("Standby") for v in db.list_volumes(w.conn, w.pid)},
              "lease": db.get_lease(w.conn, w.pid),
              "dst_vm": bool(w.dst.obj(rr.K_VM, "default", "vm-a")), "runs": [r["result"] for r in
-                                                                          db.list_runs(w.conn, w.pid)]}
+                                                                          db.list_runs(w.conn, w.pid)],
+             "run_rows": [[r["operation"], r["result"], (r["points"] or {}).get("step")]
+                          for r in db.list_runs(w.conn, w.pid)],
+             "creates": first_creates, "deletes": deletes, "took": took}
     if resume:
         with open(os.devnull, "w") as null:
             saved, sys.stdout = sys.stdout, null
@@ -1017,10 +1036,13 @@ def harness(case, workdir, outfile, resume):
                 sys.stdout = saved
         state["resume_state"] = w.plan()["state"]
         state["resume_dst_vm"] = bool(w.dst.obj(rr.K_VM, "default", "vm-a"))
+        state["resume_creates"] = [list(c[1:4]) for c in w.src.mutations() + w.dst.mutations()
+                                   if c[0] == "create"][len(first_creates):]
+        state["resume_runs"] = [r["result"] for r in db.list_runs(w.conn, w.pid)]
     Path(outfile).write_text(json.dumps(state, default=str))
 
 
-def run_cancel(tmp_path, case, resume=False, sig=signal.SIGTERM):
+def run_cancel(tmp_path, case, resume=False, sig=signal.SIGTERM, then=None):
     out = tmp_path / "state.json"
     work = tmp_path / "work"
     work.mkdir()
@@ -1035,6 +1057,9 @@ def run_cancel(tmp_path, case, resume=False, sig=signal.SIGTERM):
             lines.append(line)
             if line.strip() == "HARNESS_READY":
                 proc.send_signal(sig)
+                if then is not None:
+                    time.sleep(0.2)
+                    proc.send_signal(then)
                 break
         stdout, rest = proc.communicate(timeout=60)
     finally:
@@ -1075,6 +1100,105 @@ def test_cancel_failover_after_activation_keeps_everything_and_resumes(tmp_path)
     assert st["standby"] and all(v is False for v in st["standby"].values())      # activés, gardés
     assert st["src_vm"] == "Halted" and st["runs"][-1] == "interrupted"
     assert st["resume_rc"] == 0 and st["resume_state"] == "failed_over" and st["resume_dst_vm"] is True
+
+
+# --- décision 68 : SIGUSR2 = arrêt de la console, rien n'est défait -----------------------
+
+@pytest.mark.parametrize("case,step", [
+    ("protect-backup", "first-backup"),
+    ("protect-standby", "initial-restore"),
+    ("protect-restore", "initial-restore"),
+])
+def test_console_shutdown_signal_interrupts_protect_and_resume_finishes(tmp_path, case, step):
+    """Un vrai SIGUSR2 pendant protect : sortie 3, kind `interrupted`,
+    `resume_required`, l'étape atteinte ; rien supprimé, plan toujours en
+    protection, verrou rendu, exécution rangée ouverte. La reprise finit
+    sans recréer ce qui existait."""
+    data, st, err = run_cancel(tmp_path, case, resume=True, sig=signal.SIGUSR2)
+    assert st["rc"] == 3 and data["kind"] == "interrupted" and data["code"] == "interrupted", (data, err)
+    assert data["resume_required"] is True and data["step"] == step and data["suspended"] is True
+    assert st["plan_state"] == "protecting" and st["lock"] is None
+    assert st["deletes"] == [] and st["owned_src"]
+    assert st["run_rows"][-1] == ["protect", "interrupted", step]
+    assert "Traceback" not in err
+    assert st["resume_rc"] == 0 and st["resume_state"] == "protected"
+    assert not [c for c in st["resume_creates"] if c in st["creates"]]          # rien en double
+    if step == "initial-restore":
+        assert not [c for c in st["resume_creates"] if c[0] == rr.K_LH_VOLUME]  # secours non recréé
+    assert st["resume_runs"][-1] == "ok"
+
+
+def test_operator_sigterm_during_the_initial_restore_still_rolls_back(tmp_path):
+    data, st, err = run_cancel(tmp_path, "protect-restore", sig=signal.SIGTERM)
+    assert st["rc"] == 3 and data["kind"] == "cancelled" and data["resume_required"] is False, (data, err)
+    assert st["plan_state"] == "error" and st["origin"] == "protecting" and st["lock"] is None
+    assert st["owned_src"] == [] and st["owned_dst"] == []
+    assert all(labels == {} for labels in st["src_labels"].values())
+
+
+def test_a_sigterm_after_the_shutdown_signal_does_not_turn_it_into_a_rollback(tmp_path):
+    """systemd, en fin d'arrêt, signale tout le groupe : un SIGTERM qui suit
+    SIGUSR2 ne change pas l'arrêt en retour arrière."""
+    data, st, err = run_cancel(tmp_path, "protect-restore", sig=signal.SIGUSR2, then=signal.SIGTERM)
+    assert st["rc"] == 3 and data["kind"] == "interrupted", (data, err)
+    assert st["deletes"] == [] and st["plan_state"] == "protecting"
+
+
+def test_the_shutdown_signal_undoes_a_failover_not_yet_activated(tmp_path):
+    data, st, err = run_cancel(tmp_path, "failover-before", sig=signal.SIGUSR2)
+    assert st["rc"] == 3 and data["kind"] == "cancelled" and "undone" in data["error"], (data, err)
+    assert st["plan_state"] == "protected" and st["src_vm"] == "Always" and st["runs"][-1] == "rolled-back"
+
+
+def test_without_a_safe_point_the_fallback_stops_after_one_client_timeout(tmp_path):
+    """Aucun point sûr (pause sans attente) : SIGALRM après `client` (1 s)
+    arrête la commande là où elle est, toujours sans retour arrière."""
+    data, st, err = run_cancel(tmp_path, "protect-stuck", resume=True, sig=signal.SIGUSR2)
+    assert st["rc"] == 3 and data["kind"] == "interrupted", (data, err)
+    assert st["took"] < 15 and st["deletes"] == [] and st["plan_state"] == "protecting"
+    assert st["resume_rc"] == 0 and st["resume_state"] == "protected"
+
+
+def test_suspend_handler_only_asks_and_the_alarm_raises_only_with_a_command(monkeypatch):
+    saved = dict(cli._CANCEL)
+    timers = []
+    monkeypatch.setattr(cli.signal, "setitimer", lambda which, t: timers.append(t))
+    try:
+        ctx = type("C", (), {"undo_until": None, "suspended": False})()
+        cli._CANCEL.update(signal=None, ctx=ctx, finished=False, suspend=None, client=7)
+        assert cli._on_suspend_signal(signal.SIGUSR2, None) is None            # rien levé
+        assert cli._CANCEL["suspend"] == "console shutdown (SIGUSR2)" and timers == [7.0]
+        assert cli._on_cancel_signal(signal.SIGTERM, None) is None             # ignoré : arrêt en route
+        with pytest.raises(rr.Suspended):
+            cli._on_suspend_alarm(signal.SIGALRM, None)
+        assert ctx.suspended is True
+        assert cli._on_suspend_alarm(signal.SIGALRM, None) is None             # une seule fois
+        # pendant une annulation (retour arrière), l'arrêt n'est pas demandé
+        ctx2 = type("C", (), {"undo_until": 123.0, "suspended": False})()
+        cli._CANCEL.update(signal="SIGTERM", ctx=ctx2, suspend=None)
+        cli._on_suspend_signal(signal.SIGUSR2, None)
+        assert cli._CANCEL["suspend"] is None
+        # sans commande du déroulé (plan create...), le filet ne lève rien
+        cli._CANCEL.update(signal=None, ctx=None, suspend="console shutdown (SIGUSR2)")
+        assert cli._on_suspend_alarm(signal.SIGALRM, None) is None
+    finally:
+        cli._CANCEL.clear()
+        cli._CANCEL.update(saved)
+
+
+def test_a_shutdown_outside_the_engine_is_not_started_never_cancelled(tmp_path, capsys, monkeypatch):
+    """Un arrêt levé avant le déroulé (filet pendant les lectures) : rien n'a
+    commencé, kind `not-started`. `Suspended` n'est jamais une annulation :
+    aucun `except Cancelled` (qui lance un retour arrière) ne le retient."""
+    assert not issubclass(rr.Suspended, rr.Cancelled) and not issubclass(rr.Suspended, Exception)
+    w = draft_world(tmp_path)
+
+    def boom(*a, **k):
+        raise rr.Suspended("console shutdown (SIGUSR2), no safe point in time")
+    monkeypatch.setattr(cli.rr, "protect", boom)
+    rc, data, err = run(capsys, w, "protect", "plan-a", "--interval=3m")
+    assert rc == 3 and data["kind"] == "not-started" and set(data) == FAILURE_KEYS, data
+    assert w.src.mutations() == [] and w.dst.mutations() == []
 
 
 def test_follow_loop_stops_on_sigterm_and_releases_its_lease(tmp_path):

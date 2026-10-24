@@ -1475,6 +1475,10 @@ class ActionRun:
         # « running » jusqu'à la sortie de l'outil, qui dit le statut final
         self.cancel_waits = False
         self.cancel_requested = False
+        # décision 68 : délai laissé à l'outil à l'arrêt de la console (point
+        # sûr, sans retour arrière) ; None = `kill_grace`
+        self.shutdown_grace = None
+        self.shutdown_requested = False
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -24566,9 +24570,17 @@ REPLICATION_SIDES = ("source", "target", "any")
 # marge ajoutée au retour arrière avant un SIGKILL : sortie JSON, baux rendus
 REPLICATION_GRACE_MARGIN = 15
 # budget d'arrêt de la console : l'unité arrête le conteneur par `podman
-# stop -t 600` ; tout retour arrière doit tenir dedans, avec une marge pour
-# ranger les résultats et sortir
+# stop -t 600` ; toute attente de l'arrêt doit tenir dedans, avec une marge
+# pour ranger les résultats et sortir. Depuis la décision 68, une protection,
+# une mesure ou une déprotection n'est plus défaite à l'arrêt : elle s'arrête
+# au prochain point sûr (au plus un appel kubectl, `client`). Seuls une
+# bascule pas encore activée et un retour arrière déjà demandé par une
+# personne consomment encore leur délai de retour arrière dans ce budget.
 REPLICATION_STOP_BUDGET = 585
+# signal de l'arrêt de la console vers une commande de réplication : « arrête
+# au prochain point sûr, garde l'état » (SIGTERM reste l'annulation d'une
+# personne, avec retour arrière)
+REPLICATION_SUSPEND_SIGNAL = signal.SIGUSR2
 REPLICATION_EVENTS_MAX = 500
 REPLICATION_STATS_MAX = 5000
 _OFF = ("0", "false", "no", "off")
@@ -24655,10 +24667,28 @@ def _repl_grace(plan):
     return int(t.get("undo_total") or 240) + int(t.get("client") or 30) + REPLICATION_GRACE_MARGIN
 
 
+def _repl_shutdown_grace(plan, op):
+    """Délai laissé à une commande à l'arrêt de la console (décision 68) :
+    une bascule (ou la reprise d'une bascule) est défaite si elle n'est pas
+    activée, d'où son délai de retour arrière (`_repl_grace`) ; toute autre
+    commande s'arrête au prochain point sûr, atteint en au plus un appel
+    kubectl (`client`, puis le filet de la ligne de commande), plus la
+    marge pour écrire son résultat."""
+    state = plan.get("state")
+    eff = (plan.get("error_origin") or None) if state == "error" else state
+    if op == "failover" or (op == "resume" and eff == "failing_over"):
+        return _repl_grace(plan)
+    t = _rr.effective_timeouts(plan)
+    return int(t.get("client") or 30) + REPLICATION_GRACE_MARGIN
+
+
 def _repl_budget_error(plan):
     """Réponse 400 si le retour arrière d'une commande lancée par la console
     (`undo_total` + `client` + marge) ne tient pas dans le budget d'arrêt de
-    l'unité, pour un plan suivi par la console ; None sinon."""
+    l'unité, pour un plan suivi par la console ; None sinon. Depuis la
+    décision 68, ce retour arrière ne se joue plus à l'arrêt que pour une
+    bascule pas encore activée ou une annulation déjà demandée : la règle
+    reste, pour elles."""
     if ((plan.get("options") or {}).get("follow") or _rp.DEFAULT_OPTIONS["follow"]) != "console":
         return None
     grace = _repl_grace(plan)
@@ -24681,6 +24711,13 @@ def _repl_summarize(run, rc, data, last_error):
     kind, code = data.get("kind"), data.get("code")
     if rc == 0:
         return "done", None
+    if data.get("suspended") and code == "not-started":
+        return "interrupted", "stopped by the console shutdown before any change: run the command again"
+    if data.get("suspended") and (data.get("resume_required") or "interrupted" in (kind, code)):
+        # décision 68 : arrêt de la console, pas une annulation ; rien n'est défait
+        run.result = dict(run.result or {}, resume_required=True, step=data.get("step"))
+        return "interrupted", (f"interrupted by the console shutdown at step {data.get('step') or '?'}, "
+                               f"nothing undone: resume the plan to continue" + tail)
     if data.get("resume_required") or "interrupted" in (kind, code):
         run.result = dict(run.result or {}, resume_required=True)
         if rc == 3:
@@ -24711,6 +24748,7 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
         # et le délai de retour arrière
         run.required_role = role
         run.kill_grace = _repl_grace(plan)
+        run.shutdown_grace = _repl_shutdown_grace(plan, op)
         run.cancel_waits = True
         run.result = dict(run.result or {}, plan=plan["id"])
     return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
@@ -25749,12 +25787,23 @@ def _replication_metrics_refresh(clock=None):
 
 
 def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):
-    """Arrêt de la console : SIGTERM aux commandes de réplication en cours et
-    au suiveur, puis attente de chacune jusqu'à son délai de retour arrière
-    (`kill_grace`), SIGKILL au-delà. Chaque délai est borné par le budget
-    d'arrêt de l'unité (REPLICATION_STOP_BUDGET, sous `podman stop -t
-    600`) : passé ce budget, podman tuerait tout sans prévenir. Rend
-    {action: code de sortie}."""
+    """Arrêt de la console (redémarrage, mise à jour, arrêt de l'hôte) :
+    SIGUSR2 aux commandes de réplication en cours, SIGTERM au suiveur, puis
+    attente de chacune jusqu'à son délai, SIGKILL au-delà.
+
+    Décision 68 (v1.99.0) : un arrêt de la console n'est PAS une annulation.
+    SIGUSR2 dit « arrête au prochain point sûr et garde l'état » : une
+    protection (restauration initiale comprise), une mesure ou une
+    déprotection est laissée `interrupted`, et `resume` la continue. Son
+    délai est court (`shutdown_grace` : un appel kubectl plus une marge).
+    Une bascule pas encore activée est défaite (tout ou rien) : elle garde
+    son délai de retour arrière. Une annulation déjà demandée par une
+    personne (`cancel_requested`, SIGTERM déjà envoyé) n'est pas changée en
+    arrêt : son retour arrière va à son terme (`kill_grace`).
+
+    Chaque délai est borné par le budget d'arrêt de l'unité
+    (REPLICATION_STOP_BUDGET, sous `podman stop -t 600`) : passé ce budget,
+    podman tuerait tout sans prévenir. Rend {action: code de sortie}."""
     budget = REPLICATION_STOP_BUDGET if budget is None else budget
     start = clock()
     sup = REPLICATION_FOLLOWER
@@ -25768,9 +25817,13 @@ def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):
             if getattr(r, "kill_grace", None) and getattr(r, "proc", None) is not None and r.proc.poll() is None]
     deadlines = {}
     for r in runs:
-        r.cancel_requested = True
-        r.proc.terminate()
-        deadlines[r.id] = now + min(r.kill_grace, budget)
+        if getattr(r, "cancel_requested", False):
+            grace = r.kill_grace
+        else:
+            r.shutdown_requested = True
+            r.proc.send_signal(REPLICATION_SUSPEND_SIGNAL)
+            grace = getattr(r, "shutdown_grace", None) or r.kill_grace
+        deadlines[r.id] = now + min(grace, budget)
     alive = list(runs)
     while alive:
         t = clock()
