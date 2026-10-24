@@ -42,6 +42,12 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
         [--force-unplanned] [--accept-skew] [--dry-run]   (les deux dernières avec --unplanned)
   harvester-replication resume P
   harvester-replication unprotect P --yes [--delete-backups]
+  harvester-replication alerts [--host H]
+  harvester-replication notify show
+  harvester-replication notify set --spec FICHIER   (le réglage entier, secrets compris : jamais en argument)
+  harvester-replication notify test --channel ID
+  harvester-replication link list
+  harvester-replication link test --from A --to B [--size-mib 512]
 
 P : l'identifiant (`rp-<12 hex>`) ou le nom du plan.
 
@@ -122,6 +128,8 @@ import cluster_decl  # noqa: E402
 import replication as rp  # noqa: E402
 import replication_db as db  # noqa: E402
 import replication_follow as rf  # noqa: E402
+import replication_link as rl  # noqa: E402
+import replication_notify as rn  # noqa: E402
 import replication_run as rr  # noqa: E402
 import vm_transfer as vt  # noqa: E402
 from kube import Kube, cluster_config  # noqa: E402
@@ -655,8 +663,7 @@ def cmd_plan_show(args):
     plan = find_plan(conn, args.plan)
     now = utcnow()
     v = db.plan_view(conn, plan, now)
-    row = rp.plan_row(plan, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
-                      role=_role(args), health=v["health"])
+    row = db.plan_rows(conn, [plan], now, role=_role(args))[0]
     status = rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
     runs = db.list_runs(conn, plan["id"])[-10:]
     data = {"ok": True, "error": None, "kind": None, "plan": rp.mask_plan(plan), "row": row, "status": status,
@@ -1094,6 +1101,17 @@ def cmd_follow(args):
 
     follower = rf.Follower(conn, client, owner, now=NOW, modes=modes, plan_ids=plan_ids,
                            take_over=args.take_over, emit=log)
+    # notifications externes : le suiveur de la console (ou `--notify`), un
+    # seul expéditeur par base (curseur commun)
+    notifier = rn.Notifier(by=owner) if (args.console or args.notify) and not args.once else None
+
+    def notify_round():
+        if notifier is None:
+            return
+        try:
+            notifier.round(conn, db)
+        except Exception as e:                  # noqa: BLE001 - jamais au prix du suivi
+            log("notify-error", "warn", f"notifications skipped this round ({type(e).__name__})")
     stopper = rf.Stopper()
     saved = {s: signal.getsignal(s) for s in CANCEL_SIGNALS}
     if threading.current_thread() is threading.main_thread():
@@ -1116,13 +1134,18 @@ def cmd_follow(args):
 
         def on_round(report):
             refresh_timeouts()
+            notify_round()
             if args.console:
                 log("round", "error" if report.get("error") else "info", _round_line(report))
             else:
                 step("follow", "error" if report.get("error") else "done", _round_line(report))
             on_round.last = report
         on_round.last = None
-        res = rf.follow_loop(follower, stopper, sleep=SLEEP, on_round=on_round)
+        try:
+            res = rf.follow_loop(follower, stopper, sleep=SLEEP, on_round=on_round)
+        finally:
+            if notifier is not None:
+                notifier.close(conn, db)
         sig = signal.Signals(res["signal"]).name if res.get("signal") else None
         step("follow", "done", f"stopped after {res['rounds']} round(s)" + (f" ({sig})" if sig else ""))
         emit(args, {"ok": True, "error": None, "kind": None, "rounds": res["rounds"], "stopped": res["stopped"],
@@ -1197,6 +1220,156 @@ def cmd_events(args):
     emit(args, {"ok": True, "error": None, "kind": None, "events": evs, "next_before": nxt},
          [f"{e['ts']} {e['level']:5} {e['operation']}/{e['step']} {e['code']}: {e['message']}" for e in evs]
          or ["no event"])
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# Écrans de suivi : alertes, notifications, liens
+# ---------------------------------------------------------------------------
+
+def cmd_alerts(args):
+    if args.host and not rp.CLUSTER_RE.match(args.host):
+        raise UsageError("--host: a cluster name is expected")
+    conn = open_db(args)
+    res = db.alerts(conn, utcnow(), host=args.host or None)
+    emit(args, {"ok": True, "error": None, "kind": None, **res},
+         [f"[{a['level']}] {a['code']} {a['plan_name']} {a['namespace']}/{a['name']}: {a['message']}".replace(" /:", ":")
+          for a in res["alerts"]] or ["no alert"])
+    return EXIT_OK
+
+
+def _notify_lines(cfg):
+    lines = [f"notifications {'on' if cfg['enabled'] else 'off'}, level {cfg['min_level']}+, codes "
+             f"{', '.join(cfg['codes']) if cfg['codes'] else 'all'}"]
+    for c in cfg["channels"]:
+        lines.append(f"  {c['id']} ({c['kind']}) {c.get('name') or ''}".rstrip())
+    return lines
+
+
+def cmd_notify_show(args):
+    conn = open_db(args)
+    cfg = rn.mask(db.get_setting(conn, "notify"))
+    emit(args, {"ok": True, "error": None, "kind": None, "notify": cfg}, _notify_lines(cfg))
+    return EXIT_OK
+
+
+def _read_spec_json(path):
+    if not path:
+        raise UsageError("notify set: --spec FILE is required (the settings carry secrets: never in arguments)")
+    try:
+        text = sys.stdin.read() if path == "-" else Path(path).read_text()
+        return json.loads(text)
+    except (OSError, ValueError):
+        raise UsageError("--spec: unreadable JSON request") from None
+
+
+def cmd_notify_set(args):
+    raw = _read_spec_json(args.spec)
+    conn = open_db(args)
+    stored = db.get_setting(conn, "notify")
+    try:
+        cfg = rn.normalize(raw, stored)
+    except rn.NotifyError as e:
+        raise UsageError(str(e), e.code) from None
+    db.set_setting(conn, "notify", cfg, by=args.by or system_user(), now=utcnow())
+    shown = rn.mask(cfg)
+    db.record_event(conn, "plan", step="notify", code="notify-set",
+                    message=f"notification settings changed ({len(cfg['channels'])} channel(s), "
+                            f"{'on' if cfg['enabled'] else 'off'})",
+                    facts={"enabled": cfg["enabled"], "min_level": cfg["min_level"], "codes": cfg["codes"],
+                           "channels": [{"id": c["id"], "kind": c["kind"]} for c in cfg["channels"]]},
+                    by=args.by or system_user(), action_id=args.id or "")
+    step("notify", "done", "notification settings saved")
+    emit(args, {"ok": True, "error": None, "kind": None, "notify": shown}, _notify_lines(shown))
+    return EXIT_OK
+
+
+def cmd_notify_test(args):
+    conn = open_db(args)
+    cfg = db.get_setting(conn, "notify") or {}
+    ch = next((c for c in cfg.get("channels") or [] if c.get("id") == args.channel), None)
+    if ch is None:
+        raise UsageError(f"unknown channel: {str(args.channel)[:40]}", "unknown-channel")
+    step("notify", "running", f"sending a test message to {ch['id']} ({ch['kind']})")
+    res = rn.deliver(ch, rn.sample_text(), sleep=SLEEP)
+    db.record_event(conn, "plan", step="notify", level="info" if res["ok"] else "warn",
+                    code="notify-test" if res["ok"] else "notify-failed",
+                    message=f"test message to {ch['id']}: " + ("sent" if res["ok"] else res["error"]),
+                    facts={"channel": ch["id"], "tries": res["tries"]}, by=args.by or system_user(),
+                    action_id=args.id or "")
+    if not res["ok"]:
+        return fail_exit(args.json, "notify", f"test message to {ch['id']} failed: {res['error']}", "notify-failed",
+                         EXIT_FAIL, {"result": res})
+    step("notify", "done", f"test message sent to {ch['id']}")
+    emit(args, {"ok": True, "error": None, "kind": None, "result": res}, [f"test message sent to {ch['id']}"])
+    return EXIT_OK
+
+
+def cmd_link_list(args):
+    conn = open_db(args)
+    res = db.links(conn, utcnow())
+    lines = []
+    for x in res["links"]:
+        a = x["active"] or {}
+        p = x["passive"]
+        lines.append(f"{x['source']} to {x['target']}: {len(x['plans'])} plan(s), upload "
+                     f"{p['upload_bps'] if p['upload_bps'] is not None else '-'} B/s, last test "
+                     f"{a.get('at') or '-'}" + (f" ({a['error']})" if a.get("error") else ""))
+    emit(args, {"ok": True, "error": None, "kind": None, **res}, lines or ["no link"])
+    return EXIT_OK
+
+
+def cmd_link_test(args):
+    for name in (args.source, args.target):
+        if not rp.CLUSTER_RE.match(name or ""):
+            raise UsageError("--from / --to: cluster names are expected")
+    if args.source == args.target:
+        raise UsageError("--from and --to must be two different clusters", "same-cluster")
+    if not rl.SIZE_MIN_MIB <= args.size_mib <= rl.SIZE_MAX_MIB:
+        raise UsageError(f"--size-mib: {rl.SIZE_MIN_MIB} to {rl.SIZE_MAX_MIB}", "bad-size")
+    _overrides, client = parse_timeouts(args.timeout)
+    _hide(args.from_kubeconfig, args.to_kubeconfig)
+    src = cluster_client(args.source, args.from_kubeconfig, client or CLIENT_TIMEOUT)
+    dst = cluster_client(args.target, args.to_kubeconfig, client or CLIENT_TIMEOUT)
+    for name, c in ((args.source, src), (args.target, dst)):
+        if c is None:
+            raise UsageError(f"unknown cluster: {name}", "unknown-cluster")
+    conn = open_db(args)
+    test_id = os.urandom(6).hex()
+    by = args.by or system_user()
+    row = {"source": args.source, "target": args.target, "by": by, "action_id": args.id or "",
+           "size_bytes": args.size_mib * rl.MIB}
+    err, code = None, None
+    try:
+        res = rl.run(src, dst, args.size_mib, test_id, sleep=SLEEP, now=NOW, stop=_suspend_reason, emit=step)
+    except rl.LinkError as e:
+        res, err, code = dict(getattr(e, "facts", None) or {}), str(e), e.code
+    except rr.Cancelled:
+        # pods et fichier déjà retirés par le `finally` de l'essai
+        db.record_link_test(conn, dict(row, error="cancelled"), now=utcnow())
+        raise
+    except Exception as e:                      # noqa: BLE001 - lecture refusée, cluster muet
+        res, err, code = {}, scrub(str(e))[:300], "failed"
+    row.update({k: res.get(k) for k in ("size_bytes", "write_bps", "read_bps", "write_s", "read_s",
+                                        "backup_target") if res.get(k) is not None})
+    row["error"] = f"{code}: {err}" if err else ""
+    db.record_link_test(conn, row, now=utcnow())
+    db.record_event(conn, "plan", step="link-test", host=args.source, level="warn" if err else "info",
+                    code=code or "link-tested",
+                    message=(f"link test {args.source} to {args.target}: "
+                             + (err if err else f"write {res.get('write_s')} s, read {res.get('read_s')} s")),
+                    facts={k: row.get(k) for k in ("target", "size_bytes", "write_bps", "read_bps")},
+                    by=by, action_id=args.id or "")
+    data = {"source": args.source, "target": args.target, **{k: res.get(k) for k in (
+        "size_bytes", "write_s", "read_s", "write_bps", "read_bps", "backup_target", "cleanup")}}
+    if err:
+        if code == "stopped":
+            return fail_exit(args.json, "link", err, "cancelled", EXIT_CANCELLED, data)
+        return fail_exit(args.json, "link", err, code, EXIT_USAGE if code in rl.REFUSALS else EXIT_FAIL, data)
+    step("link", "done", f"write {res['write_s']} s, read {res['read_s']} s")
+    emit(args, {"ok": True, "error": None, "kind": None, **data},
+         [f"{args.source} to {args.target}: {data['size_bytes']} bytes, write {data['write_s']} s, "
+          f"read {data['read_s']} s, cleanup {data['cleanup']}"])
     return EXIT_OK
 
 
@@ -1379,6 +1552,8 @@ def build_parser():
     g.add_argument("--all", action="store_true")
     sp.add_argument("--once", action="store_true", help="one round, then exit")
     sp.add_argument("--take-over", action="store_true", help="take the plans' lease from another follower")
+    sp.add_argument("--notify", action="store_true",
+                    help="send the external notifications (the console follower always does)")
     sp.add_argument("--console", action="store_true", help="console child: timestamped journal on stderr")
     sp.add_argument("--log-file", metavar="PATH",
                     help="send stderr to this file, reopened on SIGUSR1 (the console rotates it)")
@@ -1400,6 +1575,26 @@ def build_parser():
     g.add_argument("--host")
     sp.add_argument("--limit", type=int, default=50)
     sp.add_argument("--before", help="event id or ISO date of the last event of the previous page")
+
+    sp = leaf(sub, "alerts", cmd_alerts, [common], 1, "active alerts of every plan, errors first")
+    sp.add_argument("--host", help="plans where this cluster is source or target")
+
+    np_ = sub.add_parser("notify", help="external notifications (Matrix, Slack, e-mail, webhook)") \
+        .add_subparsers(dest="ncmd", required=True)
+    leaf(np_, "show", cmd_notify_show, [common], 2, "the notification settings, secrets masked")
+    leaf(np_, "set", cmd_notify_set, [common], 2, "replace the settings from --spec FILE (JSON, secrets kept "
+         "when given as ********)")
+    sp = leaf(np_, "test", cmd_notify_test, [common], 2, "send a test message to one channel")
+    sp.add_argument("--channel", required=True)
+
+    lp = sub.add_parser("link", help="links between clusters: passive throughput and active test") \
+        .add_subparsers(dest="lcmd", required=True)
+    leaf(lp, "list", cmd_link_list, [common], 2, "one entry per source and target pair")
+    sp = leaf(lp, "test", cmd_link_test, [common, clusters], 2,
+              "write then read N MiB through the shared NFS backup target (temporary pods, always removed)")
+    sp.add_argument("--from", dest="source", required=True, help="source cluster name")
+    sp.add_argument("--to", dest="target", required=True, help="target cluster name")
+    sp.add_argument("--size-mib", type=int, default=512, help=f"{rl.SIZE_MIN_MIB} to {rl.SIZE_MAX_MIB} MiB")
 
     sp = leaf(sub, "failover", cmd_failover, [common, clusters], 1, "fail the plan's VMs over to the target")
     sp.add_argument("plan")
@@ -1439,10 +1634,11 @@ def parse(argv):
     ap = build_parser()
     spec = _spec_arg(argv)
     objects = {}
-    if spec:
+    # `notify set` lit son fichier entier (objets imbriqués, secrets)
+    if spec and argv[:2] != ["notify", "set"]:
         # options du fichier juste après la sous-commande : celles de la
         # ligne de commande, plus loin, l'emportent
-        n = 2 if argv and argv[0] in ("plan", "measure", "hook") else 1
+        n = 2 if argv and argv[0] in ("plan", "measure", "hook", "notify", "link") else 1
         argv = argv[:n] + _spec_tokens(spec, objects) + argv[n:]
     args = ap.parse_args(argv)
     args.spec_objects = objects

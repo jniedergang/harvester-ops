@@ -3512,6 +3512,113 @@ rendre la VM inéligible. `plans` liste les plans qui tiennent déjà la VM
 La procédure d'exploitation (première protection, bascule, déprotection)
 est dans [procedure-operationnelle.md](procedure-operationnelle.md#12-reprise-après-sinistre-réplication-asynchrone).
 
+### Données de suivi, alertes, notifications et essais de lien
+
+Ce sont les lectures et les réglages derrière les écrans de la
+réplication. La console et la ligne de commande appellent les mêmes
+fonctions, et montrent donc les mêmes objets.
+
+**Lignes de plan.** Chaque ligne de plan (`GET /api/replication/plans`, la
+`row` d'un plan, `plan list --json`, `plan show --json`) porte aussi
+`transfer` (le dernier passage de n'importe quelle VM : date, octets
+envoyés, débits d'envoi et d'application ; octets et passages des
+dernières 24 heures), `pending_vms` (les VMs d'un plan à sélecteur qui
+portent l'étiquette sans être encore protégées, en `ns/nom`), `alerts` (le
+nombre d'alertes en cours du plan) et `reach` (si le suiveur a lu la source
+et la cible à son dernier relevé : `true`, `false`, ou `null` jamais lu ;
+la pire valeur des VMs du plan, avec la date du relevé le plus récent).
+
+**Séries des graphiques.**
+`GET /api/replication/plans/<id>/series?range=1h|24h|7d|30d` (`resource=<uid>`
+facultatif) regroupe les statistiques par passage en tranches de 60 s,
+600 s, 3600 s et 21600 s : pire RPO tenu et pire arriéré, débits moyens
+(pondérés par les passages pour les lignes réduites à l'heure), octets
+envoyés et nombre de passages. Les tranches vides sont omises.
+
+**Plans à sélecteur.** À chaque relecture des specs (toutes les 10 minutes
+par défaut, `follow_spec`), le suiveur liste les VMs source du namespace du
+sélecteur. Une VM qui porte l'étiquette sans être dans le plan est écrite
+une fois au journal (`selector-new-vm`, avertissement) et gardée dans les
+`pending_vms` du plan jusqu'à sa protection ou la perte de l'étiquette.
+Une VM du plan qui a perdu l'étiquette est écrite une fois
+(`selector-vm-left`, information) : elle reste protégée jusqu'à la
+déprotection. Un redémarrage du suiveur ne réécrit ni l'un ni l'autre. Le
+suiveur ne protège jamais rien.
+
+**Protection automatique.** Avec l'option de plan `auto_protect: true`
+(rangée par les réglages du plan), un plan à sélecteur protégé qui a des
+VMs en attente et aucune commande en cours reçoit un `protect` lancé par
+la console elle-même : action suivie `replication:<plan>:protect`, auteur
+`console`, avec les kubeconfigs de la console, au plus une fois toutes les
+10 minutes par plan. Seule la console qui tient le verrou du suivi le
+fait. Interrupteur, relu chaque minute : `replication: {auto_protect:
+false}` dans `config.yaml`.
+
+**Alertes en cours.** `GET /api/replication/alerts?host=<cluster>` et
+`harvester-replication alerts [--host H] --json` calculent les alertes sur
+l'état présent, erreurs d'abord : `rpo-exceeded`, `disk-never-backs-up`,
+`standby-degraded`, `plan-drift`, `selector-new-vm` (avertissements),
+`source-unreachable`, `backup-error`, `plan-error` (plan en `error`) et
+`source-vm-running-after-failover` (erreurs). Cette dernière vient d'un
+drapeau de santé du suiveur : après une bascule, il surveille la VM source
+et la signale tant qu'elle tourne à nouveau. `since` est la date du
+dernier événement de ce genre au journal (ou la date où une VM en attente
+a été vue la première fois). `host` garde les plans où ce cluster est
+source ou cible.
+
+**Notifications externes.** Matrix (API client-serveur, un id de salon et
+un jeton d'accès), Slack (webhook entrant), un webhook JSON générique
+(en-têtes en clair et en-têtes secrets) et le courriel (SMTP, STARTTLS et
+identification facultatifs). Le réglage vit dans `replication.db` :
+`enabled`, `min_level` (`warn` ou `error`), `codes` (`null` pour tous les
+codes d'alerte ci-dessus, plus les résultats de bascule `failed-over` et
+`interrupted` et le retour sous l'objectif `rpo-recovered`), et les canaux.
+`failed-over` et `rpo-recovered` partent quel que soit `min_level`, quand
+ils sont choisis. Le suiveur de la console les envoie : à chaque tour, les
+nouveaux événements du journal qui passent le filtre sont groupés en un
+message par canal, envoyé depuis un fil à part (10 s par appel, 3 essais) :
+un serveur de courriel lent ne retarde jamais le suiveur. La position dans
+le journal avance une fois le lot traité ; un canal en échec après trois
+essais est écrit au journal (`notify-failed`). Un lot encore en vol à
+l'arrêt du suiveur est renvoyé à son redémarrage. Le premier tour après une
+mise à jour part de la fin du journal (rien d'ancien n'est envoyé). Un
+suiveur lancé à la main n'envoie qu'avec `follow --all --notify`. Les
+secrets (jeton Matrix, URL Slack, valeurs des en-têtes secrets, mot de
+passe du courriel) s'affichent `********` à chaque lecture (API, sortie de
+la ligne de commande, journal, Activité). Renvoyer `********` garde la
+valeur rangée : un écran peut renvoyer le réglage qu'il a lu. Le réglage
+arrive à la ligne de commande par un fichier privé (`notify set --spec
+FICHIER`), jamais par ses arguments.
+
+**Liens entre clusters.** `GET /api/replication/links` et `link list
+--json` rendent une entrée par couple source et cible qui porte un plan ou
+un essai : ses plans, les chiffres passifs tirés des passages de ses plans
+(derniers débits d'envoi et d'application, médianes et totaux sur 24 heures,
+une série par heure) et le dernier essai actif. L'essai actif (`POST
+/api/replication/links/test`, `link test --from A --to B --size-mib N`,
+64 à 4096 Mio, 512 par défaut) mesure ce que la réplication emprunte
+vraiment : une pod temporaire sur la source écrit N Mio de données
+aléatoires dans la cible de sauvegarde NFS commune, puis une pod sur la
+cible les relit et les efface. Les durées sont lues dans le journal des
+pods. Les deux pods prennent l'image longhorn-manager du cluster même
+(déjà sur chaque nœud, rien à tirer, compatible airgap) et tournent dans
+`longhorn-system`. Pods et fichier sont toujours retirés, en échec, en
+annulation et à l'arrêt de la console ; un fichier dont l'effacement n'est
+pas confirmé est retiré par une pod de nettoyage, et le résultat le dit si
+même cela échoue. L'essai est refusé avec `backup-target-differs` quand les
+deux clusters n'utilisent pas la même cible de sauvegarde, et
+`not-supported` pour une cible autre que NFS. Il tourne avec les
+kubeconfigs de la personne pour les deux clusters, en action suivie, un à
+la fois par couple, et son résultat est gardé (table `link_tests`). Pas
+encore vérifié sur un cluster réel : les outils que le script attend dans
+l'image longhorn-manager (`sh`, `dd`, `date +%s.%N`, `stat`) et le montage
+NFS depuis une pod ; essais unitaires seulement.
+
+**Rôles** de ces routes : toute lecture est en lecteur, sauf le réglage des
+notifications (opérateur, même masqué : il dit où partent les alertes). Le
+changer et envoyer un message d'essai demandent administrateur. Un essai de
+lien demande opérateur.
+
 API : lectures `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, ligne, état, volumes, dernières
 exécutions, verrou, bail),
@@ -3520,10 +3627,17 @@ exécutions, verrou, bail),
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
 `GET /api/replication/follower`,
 `GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
-`source-denied`, 404 `unknown-cluster`) ; écritures (réponse `202
-{action_id}`) `POST /api/replication/plans` (aussi `map_disk_class`,
-`map_drill_net` et `recovery {waves, hooks, network_data, resize,
-auto_protect}`),
+`source-denied`, 404 `unknown-cluster`),
+`GET /api/replication/plans/<id>/events?limit=&before=&level=warn` (le
+journal du plan et de ses VMs),
+`GET /api/replication/plans/<id>/series?range=&resource=`,
+`GET /api/replication/alerts?host=`, `GET /api/replication/links`,
+`GET /api/replication/notify` (opérateur, secrets masqués) ; écritures
+(réponse `202 {action_id}`) `PUT /api/replication/notify` (administrateur),
+`POST /api/replication/notify/test` (`{channel}`, administrateur),
+`POST /api/replication/links/test` (`{from, to, size_mib}`),
+`POST /api/replication/plans` (aussi `map_disk_class`, `map_drill_net` et
+`recovery {waves, hooks, network_data, resize, auto_protect}`),
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
 `POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
@@ -3551,11 +3665,13 @@ start|stop|report P`, `measure formula`, `protect P [--dry-run]
 `failover P (--vm ns/nom ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
 `unprotect P --yes [--delete-backups]`, `hook test P --name N`,
-`candidates --cluster C [--namespace NS [--selector k=v]]`. `plan create`
-prend aussi `--map-disk-class ns/vm/disque=classe` et `--map-drill-net
-S=D` ; `plan set` prend `--cloud-init`, `--mac` et `--start` ; les objets
-`recovery` et `mappings` ne passent que par `--spec FICHIER`. P est un id
-ou un nom de plan. Les
+`candidates --cluster C [--namespace NS [--selector k=v]]`, `alerts [--host
+H]`, `notify show|set --spec FICHIER|test --channel ID`, `link list`, `link
+test --from A --to B [--size-mib N]`. `plan create` prend aussi
+`--map-disk-class ns/vm/disque=classe` et `--map-drill-net S=D` ; `plan
+set` prend `--cloud-init`, `--mac` et `--start` ; les objets `recovery` et
+`mappings` ne passent que par `--spec FICHIER`. P est un id ou un nom de
+plan. Les
 commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 `--to-kubeconfig` et `--timeout NOM=S` ; toutes prennent `--json`.
 

@@ -100,6 +100,10 @@ def seed(conn):
     db.insert_plan(conn, req2, created_by="alice", plan_id=PID2)
     db.upsert_resource(conn, PID2, {"resource_uid": "u-c", "source_host": "harvlab2", "target_host": "harvlab3",
                                     "namespace": "default", "name": "rep-c", "generation": 1})
+    # écrans de suivi : un canal de notification rangé (essai d'envoi)
+    db.set_setting(conn, "notify", {"enabled": True, "min_level": "warn", "codes": None, "channels": [
+        {"id": "c1", "name": "ops", "kind": "matrix", "homeserver": "https://matrix.example", "room": "!a:example",
+         "token": "stored-matrix-token"}]})
 
 
 @pytest.fixture
@@ -534,6 +538,14 @@ ROLE_ROUTES = [
     ("POST", f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "confirm": "web"}, "admin"),
     ("POST", f"/api/replication/plans/{PID}/failover", {"vms": ["default/rep-a"], "dry_run": True}, "admin"),
     ("POST", f"/api/replication/plans/{PID}/unprotect", {"confirm": "web", "delete_backups": True}, "admin"),
+    # écrans de suivi
+    ("GET", f"/api/replication/plans/{PID}/series", None, "viewer"),
+    ("GET", "/api/replication/alerts", None, "viewer"),
+    ("GET", "/api/replication/links", None, "viewer"),
+    ("GET", "/api/replication/notify", None, "operator"),
+    ("PUT", "/api/replication/notify", {"enabled": True, "channels": []}, "admin"),
+    ("POST", "/api/replication/notify/test", {"channel": "c1"}, "admin"),
+    ("POST", "/api/replication/links/test", {"from": "harvlab", "to": "harvlab2", "size_mib": 64}, "operator"),
 ]
 USERS = {"curieux": "viewer", "alice": "operator", "patronne": "admin"}
 
@@ -569,7 +581,7 @@ def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_l
     from limits import parse_many
     blocks = re.split(r"\n(?=@app\.route\()", SRC)
     routes = [b for b in blocks if b.startswith('@app.route("/api/replication/')]
-    assert len(routes) == 17
+    assert len(routes) == 25
     for b in routes:
         head = b.split("\ndef ", 1)[0]
         assert "@requires_auth" in head, head
@@ -577,8 +589,9 @@ def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_l
             [spec] = re.findall(r'@_rate_limit\("([^"]+)"\)', head)
             assert parse_many(spec), head
         else:
+            # suiveur et réglage des notifications : jamais en lecture partagée
             assert "@_rate_limit" not in head and "@shared_read(scope=REPLICATION_SCOPE)" in head \
-                or "/follower" in head or "/candidates/" in head
+                or "/follower" in head or "/candidates/" in head or '"/api/replication/notify"' in head
 
 
 # --- relais : statut et résumé ----------------------------------------------------------

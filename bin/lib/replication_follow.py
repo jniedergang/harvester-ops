@@ -616,6 +616,17 @@ class Follower:
             got = self._list_by_plan(c, rr.K_SECRET, rp.CARNET_NAMESPACE, pids)
             if got[1] is None:
                 carnets[c] = {_md(o).get("name"): o for o in got[0]}
+        # VMs du sélecteur (specs, 10 min) : nouvelles et sorties, relevées seulement
+        for v in views:
+            if v["plan"]["id"] in due_spec and v["plan"].get("selector"):
+                try:
+                    self._selector_watch(v)
+                except _Lost:
+                    pass
+                except Exception as e:          # noqa: BLE001 - jamais au prix du suivi
+                    if self.once_on(("follow-error", v["plan"]["id"], _short(e))):
+                        self.event(v["plan"], "selector", "follow-error", level="error",
+                                   message=f"selector check failed: {e}")
         wakes = []
         for v in views:
             p = v["plan"]
@@ -1294,6 +1305,48 @@ class Follower:
                        "the recovery carnet no longer matches the source VM: run protect again to refresh it",
                        facts={"fields": _diff_paths(carnet["vm"], want), "seen_digest": digest})
 
+    def _selector_watch(self, v):
+        """Plan à sélecteur : les VMs du namespace qui portent l'étiquette sans
+        être dans le plan (`selector-new-vm`, une fois par VM, gardées en base
+        pour `pending_vms`) et les VMs du plan qui l'ont perdue
+        (`selector-vm-left`, une fois). Rien n'est protégé ici : le suiveur
+        n'écrit que des relectures ; la protection automatique est un geste
+        de la console (option `auto_protect`)."""
+        p = v["plan"]
+        cluster = p["source_cluster"]
+        if cluster in self._down_now or self.vms_at.get(cluster) != self.t:
+            return                              # VMs pas relues à ce tour : rien de neuf
+        key, _, value = (p.get("selector") or "").partition("=")
+        ns = p.get("selector_namespace") or ""
+        vms = self.vms.get(cluster) or {}
+        known = {r["resource_uid"]: r for r in v["resources"]}
+        matching = {uid: vm for uid, vm in vms.items() if uid and _md(vm).get("namespace") == ns
+                    and (_md(vm).get("labels") or {}).get(key) == value}
+        prev = db.get_selector_watch(self.conn, p["id"])
+        was = {x.get("uid"): x for x in prev["pending"]}
+        now_iso = rp.iso(_utc(self.t))
+        pending = []
+        for uid in sorted(set(matching) - set(known)):
+            md = _md(matching[uid])
+            item = {"uid": uid, "namespace": md.get("namespace"), "name": md.get("name"),
+                    "since": (was.get(uid) or {}).get("since") or now_iso}
+            pending.append(item)
+            if uid not in was:
+                self.event(p, "selector", "selector-new-vm", uid, "source", "warn",
+                           f"VM {item['namespace']}/{item['name']} matches the selector {p['selector']} but is"
+                           f" not protected: run protect", facts={"vm": f"{item['namespace']}/{item['name']}"})
+        left = sorted(uid for uid, r in known.items() if uid in vms and uid not in matching
+                      and r["state"] in rp.STORED_RESOURCE_STATES and r["state"] not in rp.NOT_REPLICATING)
+        for uid in left:
+            if uid not in prev["left_uids"]:
+                r = known[uid]
+                self.event(p, "selector", "selector-vm-left", uid, "source", "info",
+                           f"VM {r['namespace']}/{r['name']} no longer matches the selector {p['selector']}:"
+                           f" it stays protected until unprotect", facts={"vm": f"{r['namespace']}/{r['name']}"})
+        if [x["uid"] for x in pending] != [x.get("uid") for x in prev["pending"]] or left != prev["left_uids"] \
+                or not prev.get("checked_at"):
+            db.set_selector_watch(self.conn, p["id"], pending, left, now=_utc(self.t))
+
     def _after_failover(self, v):
         """Plan basculé (ou ressource basculée d'un plan encore protégé) : la
         VM source revenue en marche est signalée ; l'arrêter reste un geste
@@ -1310,7 +1363,8 @@ class Follower:
                 continue
             vm = vms.get(r["resource_uid"])
             key = ("source-vm-running-after-failover", p["id"], r["resource_uid"])
-            if vm is not None and vm_is_running(vm):
+            running = vm is not None and vm_is_running(vm)
+            if running:
                 if self.once_on(key):
                     self.event(p, "health", "source-vm-running-after-failover", r["resource_uid"], "source",
                                "warn", f"source VM {r['namespace']}/{r['name']} runs again after the failover:"
@@ -1318,6 +1372,13 @@ class Follower:
                                                                              f"{r.get('target_name')}"})
             else:
                 self.clear(key)
+            # drapeau de santé lu par les alertes (`source-vm-running-after-failover`)
+            hkey = (p["id"], r["resource_uid"])
+            prev = self.written_health.get(hkey) or (r.get("health") or {})
+            if bool(prev.get("source_running_after_failover")) != running:
+                h = dict(prev, source_running_after_failover=running)
+                db.set_health(self.conn, p["id"], r["resource_uid"], v["gen"], h, now=_utc(self.t))
+                self.written_health[hkey] = h
 
     # -- état, statistiques, rythme -------------------------------------------------------------------------
     def _status(self, v, health):
