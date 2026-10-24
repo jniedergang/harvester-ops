@@ -155,6 +155,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   with a deliberate mutation for each fix.
 - Real: harvlab to harvlab2 on 24/10/2026 (see the capabilities page for
   what was and was not verified).
+
 ## [1.98.1] - 2026-10-24 - Security: rebuilt image without the compromised emSign CAs
 
 ### Security
