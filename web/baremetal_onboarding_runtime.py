@@ -204,9 +204,9 @@ def finish(api, opts, run, step, deadline):
             if annotations.get(profile.NATIVE_CORDON_DONE) != 'true':
                 # Le label n'est pas là à l'enregistrement : kubelet crée le
                 # nœud avec ses seuls --node-labels, rke2 applique ensuite ses
-                # node-label (vu sur le banc : 17 s plus tard, nœud encore
-                # NotReady). Un installeur plus ancien que le cluster ignore
-                # install.cordoned en silence : l'attente est bornée.
+                # node-label (vu sur le banc : 17 à 18 s plus tard, parfois
+                # après Ready). Un installeur plus ancien que le cluster
+                # ignore install.cordoned en silence : l'attente est bornée.
                 labels = node['metadata'].get('labels') or {}
                 report('Waiting for Harvester to apply the install cordon'
                        if labels.get(profile.NATIVE_CORDON_LABEL) == 'true' else

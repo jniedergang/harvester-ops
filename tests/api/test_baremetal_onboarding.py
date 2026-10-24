@@ -963,7 +963,7 @@ def test_final_install_config_carries_native_cordon_from_the_plan(choice):
 
 def test_native_guard_accepts_a_node_registered_before_the_rke2_labels(natively_cordoned):
     # vu sur le banc : kubelet crée le nœud avec ses seuls --node-labels ;
-    # le label install-cordoned arrive 17 s plus tard, avec ceux de rke2
+    # le label install-cordoned arrive 17 à 18 s plus tard, avec ceux de rke2
     natively_cordoned['metadata']['labels'].pop(p.NATIVE_CORDON_LABEL)
     natively_cordoned['metadata']['annotations'] = {}
     natively_cordoned['spec']['unschedulable'] = False

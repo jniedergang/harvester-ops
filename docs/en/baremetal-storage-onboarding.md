@@ -86,10 +86,11 @@ harvester/harvester#11301, present in the v1.9.0 tag). Harvester then does the
 work:
 
 - the installer adds the label `harvesterhci.io/install-cordoned=true` to the
-  RKE2 configuration. RKE2 applies it once its agent is up, shortly after
-  kubelet registered the node (17 seconds on the test bench). Until the node is
-  Ready it keeps the Kubernetes `node.kubernetes.io/not-ready:NoSchedule`
-  taint;
+  RKE2 configuration. Kubelet registers the node without it. RKE2 applies it
+  when it initializes the node, 17 to 18 seconds later on the test bench. Until
+  then the node keeps the `node.cloudprovider.kubernetes.io/uninitialized:NoSchedule`
+  taint. On the bench, the cordon appeared within the same second as that
+  taint was removed;
 - the promote controller cordons the node once and records it with the
   annotation `harvesterhci.io/install-cordoned-processed=true`;
 - nothing in Harvester lifts that cordon, and the controller never selects a

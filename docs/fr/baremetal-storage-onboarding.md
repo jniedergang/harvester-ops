@@ -82,10 +82,11 @@ harvester/harvester#11301, présente dans le tag v1.9.0). Harvester fait le
 reste :
 
 - l'installeur ajoute le label `harvesterhci.io/install-cordoned=true` à la
-  configuration de RKE2. RKE2 l'applique une fois son agent démarré, peu après
-  l'enregistrement du nœud par kubelet (17 secondes sur le banc d'essai).
-  Jusqu'à ce qu'il soit prêt, le nœud garde la taint Kubernetes
-  `node.kubernetes.io/not-ready:NoSchedule` ;
+  configuration de RKE2. Kubelet enregistre le nœud sans lui. RKE2 l'applique
+  quand il initialise le nœud, 17 à 18 secondes plus tard sur le banc d'essai.
+  Jusque-là, le nœud garde la taint
+  `node.cloudprovider.kubernetes.io/uninitialized:NoSchedule`. Sur le banc, le
+  cordon est apparu dans la même seconde que le retrait de cette taint ;
 - le contrôleur de promotion cordonne le nœud une seule fois et le note par
   l'annotation `harvesterhci.io/install-cordoned-processed=true` ;
 - rien dans Harvester ne lève ce cordon, et le contrôleur ne choisit jamais un

@@ -339,10 +339,11 @@ def augment(cfg, choice, spec=None, native=False):
                     + TAINT['effect'] + '\n'},
     ]
     if native:
-        # Le cordon natif suffit : le nœud garde la taint
-        # node.kubernetes.io/not-ready jusqu'à être prêt, et le contrôleur le
-        # cordonne dès que rke2 pose le label (vu sur le banc : 17 s après
-        # l'enregistrement, 11 s avant Ready).
+        # Le cordon natif suffit : kubelet enregistre le nœud sans le label,
+        # rke2 le pose en initialisant le nœud, qui garde jusque-là la taint
+        # node.cloudprovider.kubernetes.io/uninitialized ; vu sur le banc
+        # (deux jonctions), le cordon arrive dans la même seconde que le
+        # retrait de cette taint, 17 à 18 s après l'enregistrement.
         install['cordoned'] = True
         generated.pop()
     require(not any(f.get('path') in {g['path'] for g in generated} for f in files),
