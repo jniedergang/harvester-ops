@@ -10,6 +10,14 @@
  * (2 s, up to ~90 s) re-requests a ticket on every attempt: open the console
  * right after starting a VM and the firmware/GRUB output is caught as soon
  * as qemu exposes the display.
+ *
+ * v1.98.0 : la même fenêtre sert une VM KVM (`openKvm(host, domain)`). Tout
+ * ce qui dépend de la plateforme passe par une CIBLE : `harvesterTarget`
+ * (URLs /api/vm/..., boutons de marche par runStrategy, instantanés et
+ * réglages) ou `kvmTarget` (URLs /api/kvm/..., `ws_path` lu dans la réponse
+ * du ticket, gestes KVM suivis par VMActions.follow, arrêt forcé confirmé
+ * dans la page, pas encore de réglages). Un 422 du ticket KVM (affichage
+ * SPICE seul, socket, pas d'écoute...) est dit sans nouvel essai.
  */
 const VMConsole = (() => {
   // Two-phase retry: a fast phase right after a disconnect (a KubeVirt
@@ -33,8 +41,175 @@ const VMConsole = (() => {
     return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key, vars) : fallback;
   }
 
+  // --- cibles ---------------------------------------------------------------
+  // Ce qui change d'une plateforme à l'autre ; le reste de la fenêtre (boucle
+  // de connexion, partage, échelle) est commun.
+  function harvesterTarget(cluster, namespace, name) {
+    const base = `/api/vm/${cluster}/${namespace}/${name}`;
+    return {
+      panelId: `vm-console-${cluster}-${namespace}-${name}`,
+      title: `Console — ${namespace}/${name}`,
+      restoreSpec: { type: 'vm-console', args: { cluster, namespace, name } },
+      entity: null,
+      ticketUrl: `${base}/console-ticket`,
+      statusUrl: `${base}/console-status`,
+      wsPath: () => `/ws/vnc/${cluster}/${namespace}/${name}`,
+      kind: 'harvester',
+      wire(wrap, ctx) {
+        wrap.querySelector('.vm-console-power-start')
+            .addEventListener('click', () => powerAction('start'));
+        wrap.querySelector('.vm-console-power-stop')
+            .addEventListener('click', () => powerAction('stop'));
+        wrap.querySelector('.vm-console-power-reset')
+            .addEventListener('click', () => powerAction('reset'));
+        wrap.querySelector('.vm-console-snapshots').addEventListener('click', () => {
+          if (window.VMSnapshots) VMSnapshots.open(cluster, namespace, name);
+        });
+        wrap.querySelector('.vm-console-settings').addEventListener('click', () => {
+          if (window.VMEdit) VMEdit.open(cluster, namespace, name);
+        });
+
+        async function powerAction(kind) {
+          try {
+            if (kind === 'start') {
+              await fetch(`${base}/runStrategy`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runStrategy: 'Always' }),
+              });
+              ctx.kickRetry();
+            } else if (kind === 'stop') {
+              if (!confirm(tr('console.confirmStop', 'Stop VM {name}?', { name }))) return;
+              await fetch(`${base}/runStrategy`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runStrategy: 'Halted' }),
+              });
+            } else if (kind === 'reset') {
+              if (!confirm(tr('console.confirmReset',
+                'Hard reset VM {name}? Unsaved guest state is lost.', { name }))) return;
+              await fetch(`${base}/restart`, { method: 'POST' });
+              ctx.kickRetry();      // reattach fast enough to catch the firmware
+            }
+          } catch (e) { /* the dock tracks the action and carries the error */ }
+        }
+      },
+      // 409 : la VM ne tourne pas (encore) ; tout autre refus est final
+      refusal: () => null,
+      lostReason: () => null,
+    };
+  }
+
+  function kvmTarget(host, domain) {
+    const enc = encodeURIComponent;
+    const base = `/api/kvm/vms/${enc(host)}/${enc(domain)}`;
+    let wsPath = null;
+    const reasonText = (reason, fallback, detail) => ({
+      notrunning: tr('console.vmNotRunning', fallback),
+      spice: tr('console.kvm.spice', fallback),
+      socket: tr('console.kvm.socket', fallback),
+      nodisplay: tr('console.kvm.nodisplay', fallback),
+      nolisten: tr('console.kvm.nolisten', fallback),
+      listen: tr('console.kvm.listen', fallback),
+      auth: tr('console.kvm.auth', fallback),
+      'unsupported-security': tr('console.kvm.unsupportedSecurity', fallback, { detail: detail || '' }),
+      'host-removed': tr('console.kvm.hostRemoved', fallback),
+      unreachable: tr('console.kvm.unreachable', fallback, { detail: detail || '' }),
+    }[reason] || fallback);
+    return {
+      panelId: `kvm-console-${host}-${enc(domain)}`,
+      title: tr('console.kvm.title', `Console: ${domain} on ${host}`, { name: domain, host }),
+      restoreSpec: { type: 'kvm-console', args: { host, domain } },
+      entity: { key: `kvm:${host}|${domain}`, label: `${host}/${domain}` },
+      ticketUrl: `${base}/console-ticket`,
+      statusUrl: `${base}/console-status`,
+      takeTicket(body) { wsPath = body.ws_path; },
+      wsPath: () => wsPath,
+      kind: 'kvm',
+      wire(wrap, ctx) {
+        const confirmBox = wrap.querySelector('.vm-console-confirm');
+        async function gesture(g) {
+          try {
+            const r = await fetch(`${base}/${g}`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+            });
+            const out = await r.json().catch(() => ({}));
+            if (!r.ok) { ctx.say('failed', out.hint || out.error || `HTTP ${r.status}`); return; }
+            if (window.VMActions && VMActions.follow) {
+              VMActions.follow(out.action_id, null,
+                tr('console.kvm.gestureDone', `${g}: done`, { name: domain }),
+                () => { if (g === 'start') ctx.kickRetry(); });
+            }
+            if (g === 'start') ctx.kickRetry();
+          } catch (e) { ctx.say('failed', e.message); }
+        }
+        function askDestroy() {
+          const q = tr('kvm.destroyConfirm', `Force off ${domain} on ${host}?`, { name: domain, host });
+          confirmBox.innerHTML = `<div class="bkg-confirm" role="group" aria-label="${escapeHtml(q)}">
+            <span>${escapeHtml(q)}</span>
+            <button type="button" class="btn btn-sm btn-danger tip vm-console-destroy-yes"
+                    data-tip="${escapeHtml(tr('kvm.destroyYesTip', 'Cut the power of this VM now'))}"
+                    >${Icons.svg('stop')} ${escapeHtml(tr('kvm.destroyYes', 'Force off'))}</button>
+            <button type="button" class="btn btn-sm btn-secondary tip vm-console-destroy-no"
+                    data-tip="${escapeHtml(tr('kvm.confirmNoTip', 'Keep the VM as it is'))}"
+                    >${escapeHtml(tr('kvm.confirmNo', 'Cancel'))}</button></div>`;
+          confirmBox.hidden = false;
+          confirmBox.querySelector('.vm-console-destroy-no').focus();
+        }
+        confirmBox.addEventListener('click', (e) => {
+          if (e.target.closest('.vm-console-destroy-yes')) {
+            confirmBox.hidden = true; confirmBox.innerHTML = ''; gesture('destroy');
+          } else if (e.target.closest('.vm-console-destroy-no')) {
+            confirmBox.hidden = true; confirmBox.innerHTML = '';
+          }
+        });
+        wrap.querySelector('.vm-console-kvm-start').addEventListener('click', () => gesture('start'));
+        wrap.querySelector('.vm-console-kvm-shutdown').addEventListener('click', () => gesture('shutdown'));
+        wrap.querySelector('.vm-console-kvm-destroy').addEventListener('click', askDestroy);
+        // Les instantanés KVM arrivent avec leur propre module : tant qu'il
+        // n'est pas chargé, le bouton n'apparaît pas (il ne ferait rien).
+        const snapBtn = wrap.querySelector('.vm-console-kvm-snapshots');
+        if (!window.KVMSnapshots) {
+          snapBtn.hidden = true;
+          const sep = snapBtn.previousElementSibling;
+          if (sep && sep.classList.contains('vm-console-sep')) sep.hidden = true;
+        }
+        snapBtn.addEventListener('click', () => {
+          if (window.KVMSnapshots) KVMSnapshots.open(host, domain);
+        });
+      },
+      // Refus d'un ticket : texte à afficher et nouvel essai ou non. Le 422
+      // est un affichage qu'aucun essai ne rendra joignable.
+      refusal(status, body) {
+        if (status === 409) return { retry: true, text: reasonText('notrunning', body.error) };
+        if (status === 422) return { retry: false, text: reasonText(body.reason, body.error || '?') };
+        return null;
+      },
+      // Pourquoi la dernière connexion est tombée : les raisons finales
+      // arrêtent la boucle (mot de passe refusé, hôte retiré, affichage
+      // devenu injoignable par nature).
+      lostReason(last) {
+        if (!last) return null;
+        const final = ['auth', 'unsupported-security', 'host-removed', 'spice', 'socket', 'nodisplay', 'nolisten', 'listen'];
+        if (final.includes(last.reason)) return { retry: false, text: reasonText(last.reason, last.detail || last.reason, last.detail) };
+        if (last.reason === 'unreachable') return { retry: true, text: reasonText('unreachable', last.detail || '', last.detail) };
+        return null;
+      },
+    };
+  }
+
   function open(cluster, namespace, name) {
-    const panelId = `vm-console-${cluster}-${namespace}-${name}`;
+    return openWith(harvesterTarget(cluster, namespace, name));
+  }
+
+  function openKvm(host, domain) {
+    return openWith(kvmTarget(host, domain));
+  }
+
+  function openWith(t) {
+    const panelId = t.panelId;
+    // Déjà ouverte : la ramener, sans ouvrir une seconde connexion cachée.
+    if (document.getElementById('fp-' + panelId)) return FloatingPanels.open({ id: panelId });
     const state = {
       rfb: null, closed: false, retries: 0, retryTimer: null, scaled: true,
       statusTimer: null,
@@ -51,22 +226,36 @@ const VMConsole = (() => {
         <button class="btn-mini vm-console-reconnect tip" hidden
                 data-tip="${escapeHtml(tr('console.reconnectTip', 'Retry the console connection'))}"
                 >${escapeHtml(tr('console.reconnect', 'Reconnect'))}</button>
-        <button class="btn-mini vm-console-power-start tip"
-                data-tip="${escapeHtml(tr('console.startTip', 'Start the VM'))}"
-                ><span class="icon-green">${Icons.svg('play')}</span></button>
-        <button class="btn-mini vm-console-power-stop tip"
-                data-tip="${escapeHtml(tr('console.stopTip', 'Stop the VM (graceful)'))}"
-                ><span class="icon-red">${Icons.svg('stop')}</span></button>
-        <button class="btn-mini vm-console-power-reset tip"
-                data-tip="${escapeHtml(tr('console.resetTip', 'Hard reset: destroy and respawn the VM instance'))}"
-                >${Icons.svg('restart')}</button>
-        <span class="vm-console-sep"></span>
-        <button class="btn-mini vm-console-snapshots tip"
-                data-tip="${escapeHtml(tr('console.snapshotsTip', 'Open VM snapshots'))}"
-                >${Icons.svg('snapshot')}</button>
-        <button class="btn-mini vm-console-settings tip"
-                data-tip="${escapeHtml(tr('console.settingsTip', 'Open VM settings (CPU, memory, disks, cloud-init)'))}"
-                >${Icons.svg('settings')}</button>
+        ${t.kind === 'kvm' ? `
+            <button class="btn-mini vm-console-kvm-start tip"
+                    data-tip="${escapeHtml(tr('kvm.g.startTip', 'Start the VM'))}"
+                    ><span class="icon-green">${Icons.svg('play')}</span></button>
+            <button class="btn-mini vm-console-kvm-shutdown tip"
+                    data-tip="${escapeHtml(tr('kvm.g.shutdownTip', 'Shut the VM down'))}"
+                    >${Icons.svg('power')}</button>
+            <button class="btn-mini vm-console-kvm-destroy tip"
+                    data-tip="${escapeHtml(tr('kvm.g.destroyTip', 'Force off'))}"
+                    ><span class="icon-red">${Icons.svg('stop')}</span></button>
+            <span class="vm-console-sep"></span>
+            <button class="btn-mini vm-console-kvm-snapshots tip"
+                    data-tip="${escapeHtml(tr('console.kvm.snapshotsTip', 'Open the snapshots of this VM'))}"
+                    >${Icons.svg('snapshot')}</button>` : `
+            <button class="btn-mini vm-console-power-start tip"
+                    data-tip="${escapeHtml(tr('console.startTip', 'Start the VM'))}"
+                    ><span class="icon-green">${Icons.svg('play')}</span></button>
+            <button class="btn-mini vm-console-power-stop tip"
+                    data-tip="${escapeHtml(tr('console.stopTip', 'Stop the VM (graceful)'))}"
+                    ><span class="icon-red">${Icons.svg('stop')}</span></button>
+            <button class="btn-mini vm-console-power-reset tip"
+                    data-tip="${escapeHtml(tr('console.resetTip', 'Hard reset: destroy and respawn the VM instance'))}"
+                    >${Icons.svg('restart')}</button>
+            <span class="vm-console-sep"></span>
+            <button class="btn-mini vm-console-snapshots tip"
+                    data-tip="${escapeHtml(tr('console.snapshotsTip', 'Open VM snapshots'))}"
+                    >${Icons.svg('snapshot')}</button>
+            <button class="btn-mini vm-console-settings tip"
+                    data-tip="${escapeHtml(tr('console.settingsTip', 'Open VM settings (CPU, memory, disks, cloud-init)'))}"
+                    >${Icons.svg('settings')}</button>`}
         <span class="vm-console-sep"></span>
         <button class="btn-mini vm-console-cad tip"
                 data-tip="${escapeHtml(tr('console.ctrlAltDelTip', 'Send Ctrl-Alt-Del to the VM'))}"
@@ -75,6 +264,7 @@ const VMConsole = (() => {
                 data-tip="${escapeHtml(tr('console.scaleTip', 'Toggle fit-to-window / 1:1 pixel size'))}"
                 >1:1</button>
       </div>
+      <div class="vm-console-confirm" hidden></div>
       <div class="vm-console-screen" tabindex="0"></div>`;
     const screen = wrap.querySelector('.vm-console-screen');
     const statusEl = wrap.querySelector('.vm-console-status');
@@ -100,7 +290,7 @@ const VMConsole = (() => {
     // avec qui, pour qu'on sache qu'un autre peut taper en même temps.
     async function fetchStatus() {
       try {
-        const r = await fetch(`/api/vm/${cluster}/${namespace}/${name}/console-status`);
+        const r = await fetch(t.statusUrl);
         return r.ok ? await r.json() : null;
       } catch { return null; }
     }
@@ -140,15 +330,17 @@ const VMConsole = (() => {
       if (state.closed) return;
       let ticket;
       try {
-        const r = await fetch(
-          `/api/vm/${cluster}/${namespace}/${name}/console-ticket`,
-          { method: 'POST' });
+        const r = await fetch(t.ticketUrl, { method: 'POST' });
         const body = await r.json().catch(() => ({}));
         if (!r.ok) {
           // 409 = VM not running (yet): keep retrying so a freshly started
           // VM gets its boot captured. 429 = session cap, usually transient
           // reconnect churn: retry too. Other errors are terminal.
-          if (r.status === 409) {
+          const refused = t.refusal(r.status, body);
+          if (refused) {
+            setStatus(refused.retry ? 'retrying' : 'failed', refused.text);
+            if (refused.retry) scheduleRetry();
+          } else if (r.status === 409) {
             setStatus('retrying', tr('console.vmNotRunning',
               'The VM is not running — start it to catch the boot.'));
             scheduleRetry();
@@ -161,6 +353,7 @@ const VMConsole = (() => {
           return;
         }
         ticket = body.ticket;
+        if (t.takeTicket) t.takeTicket(body);
       } catch (e) {
         setStatus('retrying', tr('console.connecting', 'Connecting…'));
         scheduleRetry();
@@ -170,7 +363,7 @@ const VMConsole = (() => {
       const RFB = await loadRFB();
       if (state.closed) return;
       const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      const url = `${proto}${location.host}/ws/vnc/${cluster}/${namespace}/${name}`
+      const url = `${proto}${location.host}${t.wsPath()}`
                 + `?ticket=${encodeURIComponent(ticket)}`;
       setStatus('connecting', tr('console.connecting', 'Connecting…'));
       const rfb = new RFB(screen, url, { wsProtocols: [] });
@@ -199,6 +392,12 @@ const VMConsole = (() => {
         // laisse l'exploitant choisir.
         const st = await fetchStatus();
         if (state.closed) return;
+        const lost = t.lostReason(st && st.last_close);
+        if (lost) {
+          setStatus(lost.retry ? 'retrying' : 'failed', lost.text);
+          if (lost.retry) scheduleRetry();
+          return;
+        }
         if (st && st.last_close && st.last_close.reason === 'taken') {
           setStatus('taken', tr('console.taken',
             'Another console took this display (for example the Harvester UI): KubeVirt allows only one.'));
@@ -231,49 +430,12 @@ const VMConsole = (() => {
       if (!state.rfb) state.retryTimer = setTimeout(connectOnce, RETRY_FAST_MS);
     }
 
-    async function powerAction(kind) {
-      const base = `/api/vm/${cluster}/${namespace}/${name}`;
-      try {
-        if (kind === 'start') {
-          await fetch(`${base}/runStrategy`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runStrategy: 'Always' }),
-          });
-          kickRetry();
-        } else if (kind === 'stop') {
-          if (!confirm(tr('console.confirmStop', 'Stop VM {name}?', { name }))) return;
-          await fetch(`${base}/runStrategy`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ runStrategy: 'Halted' }),
-          });
-        } else if (kind === 'reset') {
-          if (!confirm(tr('console.confirmReset',
-            'Hard reset VM {name}? Unsaved guest state is lost.', { name }))) return;
-          await fetch(`${base}/restart`, { method: 'POST' });
-          kickRetry();      // reattach fast enough to catch the firmware
-        }
-      } catch (e) { /* the dock tracks the action and carries the error */ }
-    }
-
     reconnectBtn.addEventListener('click', () => {
       clearInterval(state.statusTimer);
       state.retries = 0;
       connectOnce();
     });
-    wrap.querySelector('.vm-console-power-start')
-        .addEventListener('click', () => powerAction('start'));
-    wrap.querySelector('.vm-console-power-stop')
-        .addEventListener('click', () => powerAction('stop'));
-    wrap.querySelector('.vm-console-power-reset')
-        .addEventListener('click', () => powerAction('reset'));
-    wrap.querySelector('.vm-console-snapshots').addEventListener('click', () => {
-      if (window.VMSnapshots) VMSnapshots.open(cluster, namespace, name);
-    });
-    wrap.querySelector('.vm-console-settings').addEventListener('click', () => {
-      if (window.VMEdit) VMEdit.open(cluster, namespace, name);
-    });
+    t.wire(wrap, { kickRetry, say: (st, text) => setStatus(st, text) });
     wrap.querySelector('.vm-console-cad').addEventListener('click', () => {
       if (state.rfb) state.rfb.sendCtrlAltDel();
     });
@@ -291,11 +453,12 @@ const VMConsole = (() => {
 
     const panel = FloatingPanels.open({
       id: panelId,
-      title: `Console — ${namespace}/${name}`,
+      title: t.title,
       icon: 'console',
       bodyNode: wrap,
       width: 900, height: 620,
-      restoreSpec: { type: 'vm-console', args: { cluster, namespace, name } },
+      restoreSpec: t.restoreSpec,
+      ...(t.entity ? { entity: t.entity } : {}),
       onClose: () => {
         state.closed = true;
         clearTimeout(state.retryTimer);
@@ -314,9 +477,11 @@ const VMConsole = (() => {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
-  return { open };
+  return { open, openKvm };
 })();
 
 window.VMConsole = VMConsole;
 FloatingPanels.registerType('vm-console', (args) =>
   VMConsole.open(args.cluster, args.namespace, args.name));
+FloatingPanels.registerType('kvm-console', (args) =>
+  VMConsole.openKvm(args.host, args.domain));

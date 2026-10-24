@@ -78,7 +78,7 @@ def test_helper_loaded_before_consumers_in_template():
 # No raw EventSource left outside the helper
 # ---------------------------------------------------------------------------
 
-CONSUMERS = ["app.js", "dock.js", "support.js", "terraform.js", "capi.js", "kvm.js"]
+CONSUMERS = ["app.js", "dock.js", "support.js", "terraform.js", "capi.js", "kvm.js", "kvm-vm.js"]
 
 
 def test_no_raw_eventsource_in_migrated_consumers():
@@ -98,10 +98,27 @@ def test_no_raw_eventsource_in_migrated_consumers():
         )
 
 
+# consommateurs qui passent par le suivi d'un autre fichier (un seul suivi
+# d'action par famille de fenêtres) : fichier -> (appel attendu, fichier hôte)
+DELEGATED = {"kvm-vm.js": ("KVM.follow(", "kvm.js")}
+
+
+def test_delegated_consumers_reuse_the_shared_follow():
+    """kvm-vm.js n'a plus sa propre copie de `follow()` : il appelle celui de
+    kvm.js, exporté (`KVM.follow`)."""
+    for name, (call, owner) in DELEGATED.items():
+        src = (JS_DIR / name).read_text()
+        assert call in src and "function follow(" not in src, name
+        host = (JS_DIR / owner).read_text()
+        assert "function follow(" in host and re.search(r"return \{[^}]*\bfollow\b", host), owner
+
+
 def test_consumers_call_sse_reconnect():
     """Conversely, every consumer should actually USE the helper. If a
     file lost its SSE entry-point during refactor, this catches it."""
     for name in CONSUMERS:
+        if name in DELEGATED:
+            continue
         src = (JS_DIR / name).read_text()
         assert "SSEReconnect.connect(" in src, (
             f"{name} no longer calls SSEReconnect.connect() — did the "

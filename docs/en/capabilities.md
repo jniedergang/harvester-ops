@@ -2523,7 +2523,10 @@ reachable from the network without a password. A display that listens on
 `StrictHostKeyChecking=yes` and the pinned line only. A host whose key has
 changed is refused, never accepted in silence. One SSH connection per host
 is reused for a short while, so a read does not pay a handshake per
-command.
+command. A read cut by the connection itself (the shared connection
+closed, ssh status 255) is tried once more, half a second later, on a new
+connection. A write is never tried again: whether it happened is unknown,
+and the action says the connection was lost.
 
 **Lifecycle gestures.** The menu of a VM offers **Start**, **Shut down**,
 **Reboot**, **Force off**, **Suspend** and **Resume**. A gesture the state
@@ -2569,10 +2572,10 @@ reading the host key is one. Right after a read, the host may drop new
 connections for about 15 s. Declaring a host retries its SSH check once
 after 20 s.
 
-**Not in this version**: graphical console (VNC), snapshots, cloning,
-creating and editing VMs, pools, volumes and networks, live migration
-between hosts, host maintenance and monitoring. They are planned for
-1.97.0 to 1.99.0.
+**Not in 1.96.0**: graphical console (VNC), snapshots and cloning, added
+in 1.98.0 (below). Creating and editing VMs, pools, volumes and networks,
+live migration between hosts, host maintenance and monitoring are still to
+come.
 
 API: `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, networks), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
@@ -2610,6 +2613,173 @@ tested and removed, with its files deleted. A SLES 16 guest that honours
 ACPI reached `shut off` 2.4 s after the request (action done in 3.5 s). A
 declaration cancelled from the console during its connection test, after
 it was saved, was undone: no declaration or key file was left.
+
+### Console, snapshots, cloning and deleting a VM (1.98.0)
+
+The menu of a KVM VM gains a second group: **Console**, **Snapshots**,
+**Clone** and **Delete**. Each entry is greyed out with the reason when
+the role, the state or the definition of the VM does not allow it. The
+reasons come from the server, not from the page.
+
+**Graphical console (VNC).** **Console** opens the same window as for a
+Harvester VM, with noVNC. The console does not open the display to the
+network. It reaches the display through the SSH connection of the host
+(`ssh -W`, on the pinned host key), so a display that listens on
+`127.0.0.1` works. Several people watching the same VM share one
+connection to the display; the window says who is watching. The tunnel
+closes when the last window closes. The address and port are read again
+at each connection, so a VM restarted with a new port is found again. A
+stopped VM keeps the window waiting until it runs.
+- **Password.** When the display has a VNC password, the console reads it
+  from the definition and answers the challenge itself. The password never
+  leaves that connection: no API answer, log, action step or browser
+  receives it. The ticket only says that a password exists. A refused
+  password is said and the window stops retrying.
+- **Refusals, said and not retried**: a SPICE-only display (not supported
+  in this version), a display on a UNIX socket (owned by root and qemu,
+  the SSH user cannot reach it), no display, a display with no listener,
+  and a display that listens on an address that is not one of the host's
+  own. A display that offers only security types the console does not
+  speak (VeNCrypt, SASL, TLS) is named and not retried.
+- The window has **Start**, **Shut down**, **Force off** (confirmed in the
+  page) and **Snapshots**. Reopening a console that is already open brings
+  its window back instead of opening a second connection. This applies to
+  Harvester consoles too.
+- At most 8 console viewers at once in the whole console, Harvester
+  consoles included (429 beyond). Removing a host closes its consoles.
+
+**Snapshots.** The **Snapshots** window lists the internal snapshots of
+the VM: name, current one, date, content (disks only, or disks and
+memory), location and parent. **Create** proposes `<vm>-YYYYMMDD-HHMM`
+and takes an optional description. On a running VM the snapshot holds the
+memory too, and the guest is paused while it is saved: the window says
+so, with the memory size. **Revert** asks for a confirmation that says
+the unsaved state is lost. Reverting a running VM to a snapshot taken
+shut off powers the VM off: the confirmation reads the state again and
+says so. **Delete** names the child snapshots, which are attached to the
+parent of the deleted one.
+- Only internal snapshots, so every writable disk must be a qcow2 file or
+  volume, and UEFI variables (nvram) must be qcow2 too. A raw, block or
+  network disk, a transient disk or an attached PCI or USB device disables
+  **Create** and says which disk. A paused or shutting down VM, a
+  transient VM and an existing name are refused.
+- External snapshots are shown as "not managed by the console", without a
+  button. The console never reverts with `--force`: when libvirt asks for
+  it, the console says so and stops.
+
+**Clone.** A full copy of a shut off, persistent VM, on the same host.
+The window previews the copy before anything is created: each disk with
+its destination and the size to copy, the free space, the disks kept
+shared, and what is regenerated. **Clone** stays disabled until the
+preview matches the typed name and has no refusal.
+- Each disk is copied **next to its source**: in the same storage pool,
+  as a new volume, or in the same directory. The destination is
+  `<new name>-<target>` with the extension of the source. It cannot be
+  chosen in this version. The copy is flattened: it does not depend on
+  the backing image of the source.
+- The copy gets a new uuid, new MAC addresses, a new UEFI variables file
+  (made by libvirt at the first start), a new VM generation id, and no
+  disk serial, WWN or SMBIOS serial. A fixed VNC port becomes automatic.
+  The UEFI boot entries and the vTPM state are not copied: the preview
+  warns about them.
+- Read-only disks and CD-ROMs are kept shared. A block or network disk, a
+  shareable disk, a disk used by another VM, a PCI or USB device, a
+  static security label and a vTPM with an external state are refused.
+- An out-of-pool copy runs in the background on the host and shows its
+  progress. **Cancel** in the dock stops the copy and removes everything
+  created. A copy that fails is rolled back the same way, and anything
+  that could not be removed is named.
+
+**Delete.** **Delete** removes a shut off, persistent VM. It needs the
+admin role. The window shows a preview first, then asks for the exact
+name of the VM.
+- Without **Also delete the disks this VM owns**, only the definition is
+  removed, with its snapshot metadata, managed save and UEFI variables
+  file. Disks stay.
+- With it, a disk is deleted only when the console proves that no other
+  VM uses it. The console reads every pool and volume of the host, the
+  definitions and disk chains of every other VM, and compares files by
+  device and inode, so a symbolic link does not hide a shared disk. A disk
+  is kept, with its reason, when it is shared with another VM, the backing
+  file of another VM's disk, read-only, a block device, on shared storage
+  (NFS, Ceph, Gluster and similar: another host could use it), or
+  missing.
+- **Unreadable files.** When the SSH user cannot read a file of another
+  VM (permission denied), the console cannot prove that the file does not
+  depend on a disk of this VM. The delete is refused until you tick each
+  such file in the window. Only a permission refusal can be acknowledged
+  this way: a failed libvirt read or an I/O error still refuses.
+- **The preview is what gets deleted.** The window sends a digest of the
+  previewed deletion. If the host changed since (another VM now uses a
+  disk, the VM was redefined), the delete stops with "the host changed
+  since the preview" and shows the new preview. A disk that became shared
+  meanwhile is kept and reported as skipped.
+
+**One operation at a time per VM.** A gesture, a snapshot, a clone or a
+delete on a VM is refused while another one runs on it (409 in the
+console, exit 2 `busy` in the script). This lock now covers the 1.96
+lifecycle gestures too. A clone also holds the name of the copy.
+
+**Reads cut by the connection are retried once.** On a lab host with
+OpenSSH 10.2p1, the SSH server sometimes aborts when several sessions
+run at the same time over one shared connection (its log says
+`mm_request_receive: read: bad msg_len` and `rtype N != type 115`). The
+shared connection drops, and every command in flight ends with ssh status
+255. The console replays a read once on a fresh connection. It never
+replays a write: a snapshot, clone or delete cut that way says "connection
+lost", and you check the result before trying again. The previews of a
+clone or a delete are limited to 20 per minute and 2 at once per host.
+
+**Rights.** A viewer reads the snapshots and the previews. An operator
+opens the console, creates, reverts and deletes snapshots, and clones. An
+admin deletes a VM, and only an admin can cancel a delete.
+
+API: `POST /api/kvm/vms/<host>/<domain>/console-ticket` (`{ticket,
+ws_path, expires_in, password}`; 409 when the VM is not running, 422 with
+`reason` for a display the console cannot open),
+`GET /api/kvm/vms/<host>/<domain>/console-status`, websocket
+`/ws/kvm/vnc/<host>/<domain>?ticket=...`;
+`GET /api/kvm/vms/<host>/<domain>/snapshots`,
+`POST /api/kvm/vms/<host>/<domain>/snapshots` (`{name, description}`),
+`POST /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>/revert`,
+`DELETE /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>`;
+`GET /api/kvm/vms/<host>/<domain>/clone-plan?name=C`,
+`POST /api/kvm/vms/<host>/<domain>/clone` (`{name}`);
+`GET /api/kvm/vms/<host>/<domain>/delete-plan?remove_storage=1&acknowledge=PATH`,
+`DELETE /api/kvm/vms/<host>/<domain>` (`{confirm, expect_delete,
+remove_storage, acknowledge_unreadable}`, `expect_delete` is the
+`digest` of the preview). Writes answer `202 {action_id}`. `/api/kvm/vms`
+gives each VM an `operations` table (role, states, persistence) for the
+menu.
+
+Command line: `vm display --host N --name D` (address, port, whether a
+password exists, and the `ssh -L` command for a local viewer),
+`snapshot list|create|revert|delete --host N --name D [--snapshot=S]
+[--description=T] [--timeout S]`, `clone --host N --name D --new-name=C
+[--dry-run] [--timeout S]`, `vm delete --host N --name D
+[--remove-storage] [--acknowledge-unreadable=PATH ...]
+[--expect-delete=DIGEST] [--dry-run] [--timeout S] [--survey-timeout S]`.
+Give values as `--opt=value` when they may start with a dash. Exit codes
+as above, plus `busy` (exit 2) when another operation holds the VM and
+`plan-changed` (exit 1) when the host no longer matches the preview.
+
+**What is verified.** On the lab host (libvirt 12.7.0, OpenSSH 10.2p1),
+on test domains made for the purpose (cirros, `qemu-img`), each step
+checked with `virsh`: console opened through the tunnel, shared by two
+browsers with one tunnel, closed with the last window; real QEMU VNC
+password answered by the console, the password found in no API answer,
+console log or Activity; snapshots taken shut off and running, reverted
+both ways (a running VM reverted to a shut off snapshot is shut off),
+parent deleted with its child attached to the grandparent; raw disk
+refused with its reason; UEFI VM snapshot; clone in a pool and out of
+pool, with a new uuid, no backing chain, a new UEFI variables file and
+generation id, started and opened in the console; a cancelled 7.4 GiB
+copy left nothing; delete refused with an unreadable file of another VM,
+then done after acknowledging it; a disk shared through a symbolic link
+and a backing file of another VM kept; a changed host refused with
+`plan-changed`. Under 8 parallel readers for 60 s, the SSH server crash
+above happened 2 to 4 times a minute, and no read failed. Not verified:
+a host that demands `--force` to revert.
 
 ---
 
