@@ -477,7 +477,10 @@ const KVM = (() => {
         <span class="vma-ic">${icon(GESTURE_ICON[g])}</span> ${esc(GESTURE_LABEL[g]())}</button>`;
     };
     el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(v.name)}</strong> <span class="res-dim">${esc(v.host)} · ${esc(stateLabel(v.state))}</span></div>
-      <div class="vma-group">${GESTURES.map(item).join('')}</div>`;
+      <div class="vma-group">${GESTURES.map(item).join('')}</div>
+      <div class="vma-group"><button type="button" class="vma-item tip" role="menuitem" data-kvm-console="1"
+        data-tip="${esc(canOperate() ? tr('kvm.consoleTip') : tr('kvm.operatorOnly'))}"${canOperate() ? '' : ' aria-disabled="true"'}>
+        <span class="vma-ic">${icon('console')}</span> ${esc(tr('kvm.console'))}</button></div>`;
     document.body.appendChild(el);
     const r = anchor.getBoundingClientRect();
     const wd = el.offsetWidth || 260, h = el.offsetHeight || 200;
@@ -505,6 +508,14 @@ const KVM = (() => {
     document.addEventListener('keydown', menu.keys, true);
     el.querySelector('.vma-item:not([aria-disabled])')?.focus();
     el.addEventListener('click', (e) => {
+      const c = e.target.closest('[data-kvm-console]');
+      if (c) {
+        if (c.getAttribute('aria-disabled')) return;
+        closeMenu();
+        // v1.97.0 : console VNC par la connexion SSH de l'hôte
+        if (window.VMConsole && VMConsole.openKvm) VMConsole.openKvm(v.host, v.name);
+        return;
+      }
       const b = e.target.closest('[data-kvm-gesture]');
       if (!b || b.getAttribute('aria-disabled')) return;
       closeMenu();
