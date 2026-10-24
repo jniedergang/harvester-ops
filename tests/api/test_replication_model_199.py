@@ -1321,3 +1321,11 @@ def test_backup_owned_by_reads_every_place_longhorn_keeps_labels(where, owned):
     elif where == "other-plan":
         b["status"]["labels"][rp.LABEL_PLAN] = "rp-other"
     assert rp.backup_owned_by(b, PID) is owned
+
+
+def test_default_options_are_the_product_decisions_42_to_45():
+    # décisions 42 à 45 (ju, 24/10/2026) : cloud-init gardé, MAC gardée, VM
+    # démarrée après la bascule, suivie par la console
+    p = rp.normalize_plan(dict(BASE, vms=["default/rep-a"]))
+    o = p["options"]
+    assert (o["cloud_init"], o["mac"], o["start"], o["follow"]) == ("keep", "keep", "started", "console")

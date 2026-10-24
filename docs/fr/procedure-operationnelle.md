@@ -156,3 +156,62 @@ Pour ajouter un cluster sans éditer `config.yaml` à la main :
 - **Idempotence** : ré-exécuter le script après un échec partiel reprend là où il en était (ex. VMs déjà arrêtées → on saute l'attente de l'étape 2).
 - **Pas d'échec silencieux** : chaque étape sort en non-zéro sur erreur, sauf si l'opérateur choisit explicitement de l'ignorer.
 - **Auditable** : chaque commande est tracée avec timestamp et code de retour.
+
+## 12. Reprise après sinistre (réplication asynchrone)
+
+Ce qu'elle fait, les objets qu'elle crée et ses limites :
+[capabilites.md, section 11](capabilites.md#11-reprise-après-sinistre--réplication-asynchrone-des-vms-cli--api-de-la-console).
+Chaque commande ci-dessous est `harvester-replication` (ajouter `--json`
+pour les scripts).
+
+**Avant tout.** Les deux clusters utilisent la même cible de sauvegarde
+(réglage Harvester `backup-target`), placée sur aucun des deux sites. Faire
+tourner la console qui suit les plans sur le site de secours ou hors des
+deux sites, jamais seulement sur le site source : elle serait perdue avec
+lui.
+
+**Première protection.**
+1. `plan create --name web --from harv1 --to harv2 --vm default/web-01
+   --rpo 15m --map-net default/prod=default/prod --map-sc
+   harvester-longhorn=harvester-longhorn`. Mettre en correspondance chaque
+   réseau et chaque classe de stockage des VMs. Un disque d'image sans
+   `--map-image` prend la classe sur laquelle son image a été bâtie, à
+   travers `--map-sc`.
+2. `check web` jusqu'à ce qu'il ne montre aucun constat `block`.
+3. `measure start web --interval 5m`, attendre trois passages, `measure
+   stop web`, puis `measure report web` pour l'intervalle recommandé.
+4. `protect web --dry-run`, puis `protect web` (il prend l'intervalle
+   mesuré, sauf `--interval` ; `--retain N` fixe le nombre de sauvegardes
+   gardées).
+5. `status web` (sortie 4 : un objectif est dépassé) et `events --plan
+   web`. Dans la console, les actions sont dans le dock et l'Activité.
+6. `check web --phase failover` joue la bascule à blanc, sans rien écrire.
+
+**Pendant la protection.** Le suiveur de la console applique chaque
+sauvegarde sur la cible. `plan set web --paused true` le met en pause pour
+le plan, `plan set web --rpo 30m` change l'objectif (les deux à chaud). Un
+changement de processeur, de mémoire, de disque ou de réseau d'une VM
+protégée apparaît comme une dérive : relancer `protect web` pour réécrire
+son carnet. Pour changer la rétention : `protect web --retain 10`.
+
+**Bascule planifiée** (les deux sites répondent, sans perte) : `failover
+web --vm default/web-01` (ou `--all-vms --yes`). La VM source est arrêtée,
+ses dernières écritures sont sauvegardées et appliquées, puis la VM
+démarre sur la cible.
+
+**Bascule non planifiée** (source perdue) : d'abord `check web --phase
+failover-unplanned` pour voir les points, l'écart et les disques encore en
+rattrapage, puis `failover web --all-vms --unplanned --yes`. Une VM dont
+les disques sont trop écartés est refusée sauf avec `--accept-skew`. Lire
+`lost_after` dans le résultat : les écritures qui suivent sont perdues.
+Quand la source revient, s'assurer que ses VMs restent arrêtées.
+
+**Interruption.** Une bascule coupée après l'activation (sortie 3
+`interrupted`, ou redémarrage de la console) se termine avec `resume web`,
+avec la cible seule si besoin. Une protection annulée avant sa fin est
+défaite ; la relancer.
+
+**Déprotection.** `unprotect web --yes`. Les VMs basculées gardent tout sur
+la cible (listé dans `left`). Après une bascule terminée, les sauvegardes
+se purgent à la main : voir « Purger les sauvegardes après une bascule
+terminée » dans la page des capacités.
