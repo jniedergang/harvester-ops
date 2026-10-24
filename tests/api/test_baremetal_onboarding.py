@@ -616,6 +616,76 @@ def test_readiness_timeout_is_tunable(choice, node, clock, monkeypatch):
     assert clock[0] == 15
 
 
+class FlakyCluster(Cluster):
+    """Lectures qui échouent (None, comme _kubectl_json sur délai ou coupure
+    d'API) selon le rang de l'appel par type d'objet."""
+
+    def __init__(self, node, fails, patches=(), **reads):
+        super().__init__(node, patches, **reads)
+        self.fails = fails
+        self.seen = {}
+
+    def _kubectl_json(self, kc, verb, kind, *args, **kw):
+        rank = self.seen[kind] = self.seen.get(kind, -1) + 1
+        if kind in self.fails and self.fails[kind](rank):
+            self.calls.append((kind,) + args)
+            return None
+        return super()._kubectl_json(kc, verb, kind, *args, **kw)
+
+
+# (cas, lectures en échec, patchs scriptés, nœud déjà gardé, message attendu)
+FAILED_READS = [
+    ('joined node', {'node': lambda i: i == 0}, [], True, 'Cannot read the joined node; retrying'),
+    ('node read again after a refused cordon', {'node': lambda i: i == 1}, [CONFLICT, 'ok'], False,
+     'Cannot read the joined node again before the cordon'),
+    ('VlanConfig list', {p.VC: lambda i: i == 0}, [], True, 'Cannot read the network configurations'),
+    ('CSI pod list', {'pods': lambda i: i == 0}, [], True, 'Cannot read the CSI pods'),
+]
+
+
+@pytest.mark.parametrize('label,fails,patches,guarded,message', FAILED_READS,
+                         ids=[f[0] for f in FAILED_READS])
+def test_one_failed_read_is_pending_not_fatal(choice, fresh, clock, label, fails, patches, guarded, message):
+    fresh['spec']['unschedulable'] = guarded
+    fresh['metadata']['labels'][p.LABEL] = choice['profile']
+    api = FlakyCluster(fresh, fails, patches, **reads_for(choice))
+    events = []
+    run = run_for(_onboarding_guarded=guarded)
+    out = rt.finish(api, opts_for(choice), run, lambda *a: events.append(a[2]), 100)
+    assert all(out.values())
+    assert any(message in e for e in events)
+    assert len(api.patch_ops()) == len(patches)
+
+
+# Lecture en échec à chaque tour : délai dépassé, avec la raison.
+ALWAYS_FAILING = [
+    ('joined node', {'node': lambda i: True}, [], True, 'Cannot read the joined node; retrying'),
+    ('node read again after a refused cordon', {'node': lambda i: i % 2 == 1}, [CONFLICT] * 100, False,
+     'Cannot read the joined node again before the cordon'),
+    ('VlanConfig list', {p.VC: lambda i: True}, [], True, 'Cannot read the network configurations'),
+    ('CSI pod list', {'pods': lambda i: True}, [], True, 'Cannot read the CSI pods'),
+]
+
+
+@pytest.mark.parametrize('label,fails,patches,guarded,message', ALWAYS_FAILING,
+                         ids=[f[0] for f in ALWAYS_FAILING])
+def test_repeated_failed_reads_end_with_a_clear_timeout(choice, fresh, clock, label, fails, patches,
+                                                        guarded, message):
+    fresh['spec']['unschedulable'] = guarded
+    api = FlakyCluster(fresh, fails, patches, **reads_for(choice))
+    with pytest.raises(p.ProfileError, match='readiness checks timed out; host remains cordoned. '
+                                             + message):
+        rt.finish(api, opts_for(choice), run_for(_onboarding_guarded=guarded), lambda *a: None, 100)
+    assert clock[0] >= 100
+    assert all(ops[-1]['path'] == '/spec/taints' for ops in api.patch_ops())
+
+
+def test_strict_reads_still_refuse_in_preflight():
+    api = FlakyCluster({}, {p.VC: lambda i: True})
+    with pytest.raises(p.ProfileError, match='cannot read'):
+        rt.items(api, '/operator', p.VC)
+
+
 def test_readiness_requires_exact_host_and_real_csi_readiness(node, choice):
     lh = {'status': {'diskStatus': DISK}}
     csi = p.definition('pure-iscsi-nvme')['csi_node']

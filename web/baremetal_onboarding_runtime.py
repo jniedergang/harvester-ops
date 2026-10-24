@@ -15,11 +15,19 @@ PATCH_ATTEMPTS = int(os.environ.get('HARVESTER_OPS_ONBOARDING_PATCH_ATTEMPTS', 5
 POLL_SECONDS = 5
 
 
-def items(api, kc, kind, *args):
+def read_items(api, kc, kind, *args):
+    """La liste, ou None quand la lecture a échoué (délai, coupure d'API)."""
     doc = api._kubectl_json(kc, 'get', kind, *args, timeout=20)
-    profile.require(isinstance(doc, dict) and isinstance(doc.get('items'), list),
-                    'cannot read ' + kind)
-    return doc['items']
+    if isinstance(doc, dict) and isinstance(doc.get('items'), list):
+        return doc['items']
+    return None
+
+
+def items(api, kc, kind, *args):
+    """Lecture stricte, pour le préflight : un échec refuse le lancement."""
+    found = read_items(api, kc, kind, *args)
+    profile.require(found is not None, 'cannot read ' + kind)
+    return found
 
 
 def _install_id(run):
@@ -75,9 +83,10 @@ def preflight(api, data, cfg):
     return {'choice': choice, 'install_id': uuid.uuid4().hex, 'native_cordon': native}
 
 
-def _node_pods(api, kc, csi, host):
+def _node_pods(api, kc, csi, host, strict=True):
     # filtrés côté serveur : seuls les pods du nœud rejoint
-    return items(api, kc, 'pods', '-n', csi['namespace'], '--field-selector', 'spec.nodeName=' + host)
+    read = items if strict else read_items
+    return read(api, kc, 'pods', '-n', csi['namespace'], '--field-selector', 'spec.nodeName=' + host)
 
 
 UNCERTAIN = 'node patch result uncertain; inspect the joined host, no write was retried'
@@ -114,7 +123,9 @@ def _check_identity(node, run):
 def cordon(api, kc, node, run):
     """Cordon conditionnel (UID + resourceVersion) qui retire la seule taint
     d'onboarding. Relit le nœud et recommence après un refus, au plus
-    PATCH_ATTEMPTS fois."""
+    PATCH_ATTEMPTS fois. Rend None quand cette relecture échoue (délai,
+    coupure d'API) : rien n'a été écrit, l'appelant réessaie au tour suivant
+    de son attente, bornée par son échéance."""
     name = node['metadata']['name']
     for _ in range(max(1, PATCH_ATTEMPTS)):
         _check_identity(node, run)
@@ -123,6 +134,8 @@ def cordon(api, kc, node, run):
             profile.require(out.get('spec', {}).get('unschedulable'), 'cordon was not confirmed')
             return out
         node = api._kubectl_json(kc, 'get', 'node', name, timeout=20)
+        if node is None:
+            return None
     raise profile.ProfileError('the node kept changing during %d cordon attempts; '
                                'host remains tainted' % max(1, PATCH_ATTEMPTS))
 
@@ -148,6 +161,9 @@ def guard(api, kc, node, run):
     profile.require(status in (None, profile.PROMOTE_COMPLETE),
                     'Harvester promotion of this host ended as "%s"; host remains tainted' % status)
     out = cordon(api, kc, node, run)
+    if out is None:
+        # relecture échouée : nœud toujours marqué, nouvel essai au tour suivant
+        return node
     run._onboarding_guarded = True
     run._onboarding_promote_seen = profile.promote_status(out)
     return out
@@ -157,7 +173,8 @@ def _verify_nics(api, kc, node, links, choice):
     """Chaque MAC de stockage : une seule carte physique hors bond dans
     l'inventaire LinkMonitor de l'hôte. Les noms ne sont connus qu'ici : une
     configuration réseau automatique qui viserait l'hôte ne doit pas prendre
-    une carte de stockage."""
+    une carte de stockage. Rend False quand la liste des VlanConfig n'a pas
+    pu être lue : vérification à refaire au tour suivant."""
     names = {}
     for role, port in choice['ports'].items():
         matches = [link for link in links if str(link.get('mac', '')).lower() == port['mac']
@@ -166,7 +183,10 @@ def _verify_nics(api, kc, node, links, choice):
                         'storage NIC identity or ownership changed: ' + role)
         names[matches[0].get('name')] = role
     labels = node['metadata'].get('labels') or {}
-    for config in items(api, kc, profile.VC):
+    configs = read_items(api, kc, profile.VC)
+    if configs is None:
+        return False
+    for config in configs:
         spec = config.get('spec') or {}
         selector = spec.get('nodeSelector') or {}
         if config['metadata'].get('deletionTimestamp') or any(
@@ -176,6 +196,7 @@ def _verify_nics(api, kc, node, links, choice):
         profile.require(not claimed, 'network configuration ' + config['metadata']['name']
                         + ' would use storage NIC ' + ', '.join(sorted(names[n] for n in claimed))
                         + '; scope its selector, host remains cordoned')
+    return True
 
 
 def finish(api, opts, run, step, deadline):
@@ -197,7 +218,13 @@ def finish(api, opts, run, step, deadline):
     while time.time() < deadline:
         profile.require(not getattr(run, '_cancel', False),
                         'onboarding cancelled; host remains cordoned')
+        # Une lecture échouée (délai, coupure d'API) n'est pas un refus :
+        # on relit jusqu'à l'échéance. Seuls les refus explicites arrêtent.
         node = api._kubectl_json(kc, 'get', 'node', host, timeout=20)
+        if node is None:
+            report('Cannot read the joined node; retrying')
+            time.sleep(POLL_SECONDS)
+            continue
         node = guard(api, kc, node, run)
         if _native(run):
             annotations = node['metadata'].get('annotations') or {}
@@ -220,7 +247,9 @@ def finish(api, opts, run, step, deadline):
                             'host is schedulable after the install cordon: no other node was '
                             'available, or it was uncordoned outside this job; onboarding stopped')
         elif not getattr(run, '_onboarding_guarded', False):
-            report('Waiting for the Harvester promotion of this host; it stays tainted')
+            report('Waiting for the Harvester promotion of this host; it stays tainted'
+                   if profile.promote_status(node) == profile.PROMOTE_RUNNING else
+                   'Cannot read the joined node again before the cordon; it stays tainted')
             time.sleep(POLL_SECONDS)
             continue
         elif not node['spec'].get('unschedulable'):
@@ -230,7 +259,12 @@ def finish(api, opts, run, step, deadline):
             seen = getattr(run, '_onboarding_promote_seen', None)
             profile.require(status == profile.PROMOTE_COMPLETE and seen != profile.PROMOTE_COMPLETE,
                             'host was uncordoned outside this job; onboarding stopped')
-            node = cordon(api, kc, node, run)
+            out = cordon(api, kc, node, run)
+            if out is None:
+                report('Cannot read the joined node again before the cordon; retrying')
+                time.sleep(POLL_SECONDS)
+                continue
+            node = out
             run._onboarding_promote_seen = profile.PROMOTE_COMPLETE
             step('onboarding', 'progress',
                  'Harvester promotion completed and lifted the cordon; host cordoned again')
@@ -252,11 +286,18 @@ def finish(api, opts, run, step, deadline):
                 report('Waiting for joined host NIC inventory; host remains cordoned')
                 time.sleep(POLL_SECONDS)
                 continue
-            _verify_nics(api, kc, node, links, choice)
+            if not _verify_nics(api, kc, node, links, choice):
+                report('Cannot read the network configurations; retrying, host remains cordoned')
+                time.sleep(POLL_SECONDS)
+                continue
             verified = True
         lh = api._kubectl_json(kc, 'get', 'nodes.longhorn.io', host, '-n', 'longhorn-system',
                                timeout=20)
-        pods = _node_pods(api, kc, csi, host) if csi else []
+        pods = _node_pods(api, kc, csi, host, strict=False) if csi else []
+        if pods is None:
+            report('Cannot read the CSI pods of the joined host; retrying, host remains cordoned')
+            time.sleep(POLL_SECONDS)
+            continue
         latest = profile.readiness(node, lh, pods, choice, csi)
         report('; '.join(k + ': ' + ('Ready' if v else 'pending') for k, v in latest.items()))
         if all(latest.values()):
