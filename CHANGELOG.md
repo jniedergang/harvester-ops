@@ -144,6 +144,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - `resources` text marks the actions that are not allowed, with their
   reason (`unprotect-delete-backups (not allowed: backups-in-use)`), and
   the `plan-drift` message names CPU and memory.
+- The same swallowed-cancel weakness existed in `harvester-network`,
+  `harvester-vm-transfer` (and its library), `harvester-resources` and
+  `harvester-capi`: their cancellation is now a `BaseException`, so a
+  guarded read (configuration, API retry, cleanup) can no longer eat a
+  stop request. The network rollback ignores a second signal, and a
+  cancelled image, upgrade-log or kubeconfig download in
+  `harvester-resources` leaves no partial file.
 
 ### Security
 - Each write route runs the command line with the person's own

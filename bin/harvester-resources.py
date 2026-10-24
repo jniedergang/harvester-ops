@@ -157,7 +157,11 @@ EXIT_OK, EXIT_FAIL, EXIT_BLOCKED, EXIT_CANCELLED = 0, 1, 2, 3
 K_ADDON = "addons.harvesterhci.io"
 
 
-class Cancelled(Exception):
+class Cancelled(BaseException):
+    # v1.99.0 : BaseException, comme le Cancelled de la réplication. Un
+    # signal levé dans une lecture gardée par `except Exception` (configuration,
+    # relance d'une API, nettoyage) y était avalé : l'outil continuait comme
+    # si de rien n'était, ou concluait à une erreur au lieu d'une annulation.
     pass
 
 
@@ -169,6 +173,27 @@ def step(sid, status, msg=""):
 
 def _on_signal(signum, frame):
     raise Cancelled(f"signal {signum}")
+
+
+def _write_stream(out, chunks, mode=0o600):
+    """Écrit un flux dans `out` par un fichier voisin renommé à la fin.
+    v1.99.0 : une annulation (signal) ou une erreur en cours de route ne
+    laisse ni fichier partiel sous le nom attendu, ni fichier temporaire.
+    Rend le nombre d'octets écrits."""
+    out = Path(out)
+    tmp = out.with_name(f".{out.name}.part")
+    n = 0
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "wb") as f:
+            for chunk in chunks:
+                f.write(chunk)
+                n += len(chunk)
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    return n
 
 
 def refusal(msg):
@@ -2086,21 +2111,13 @@ def img_download(kube, args):
             return EXIT_FAIL
         path = hs.cdi_download_path(args.namespace, args.name)
         step("download", "running", f"image {args.name} to {out.name} (qcow2; Harvester removes the downloader after)")
-        n = 0
-        with open(out, "wb") as f:
-            for chunk in kube.raw_stream(path):
-                f.write(chunk)
-                n += len(chunk)
+        n = _write_stream(out, kube.raw_stream(path))
         step("download", "done", f"{n} bytes written")
         return EXIT_OK
     sc = _sc(kube, ((img.get("status") or {}).get("storageClassName")))
     path = hs.download_path(hs.backing_image_of(img, sc))
     step("download", "running", f"image {args.name} to {out.name} (gzip)")
-    n = 0
-    with open(out, "wb") as f:
-        for chunk in kube.raw_stream(path):
-            f.write(chunk)
-            n += len(chunk)
+    n = _write_stream(out, kube.raw_stream(path))
     step("download", "done", f"{n} bytes written")
     return EXIT_OK
 
@@ -2672,8 +2689,7 @@ def cmd_kubeconfig(args):
     text = hset.kubeconfig_yaml(args.cluster_name or args.cluster or "harvester", f"https://{vip}:6443", ca, token,
                                 sa["metadata"]["name"])
     out = Path(args.out)
-    out.touch(mode=0o600)
-    out.write_text(text)
+    _write_stream(out, [text.encode()])
     step("kubeconfig", "done", f"kubeconfig {args.name} written, expires {sa['metadata']['annotations'][hset.KC_EXPIRES]}")
     return EXIT_OK
 
@@ -2962,11 +2978,8 @@ def cmd_upgrade(args):
         if _wait(kube, hup.K_UPGRADELOG, hup.NS, log, ready, 900, label="upgrade") != EXIT_OK:
             return EXIT_FAIL
         out = Path(args.out)
-        out.touch(mode=0o600)
-        with open(out, "wb") as fh:
-            for chunk in kube.raw_stream(f"{base}/download?archiveName={archive}"):
-                fh.write(chunk)
-        step("upgrade", "done", f"logs saved ({out.stat().st_size} bytes)")
+        n = _write_stream(out, kube.raw_stream(f"{base}/download?archiveName={archive}"))
+        step("upgrade", "done", f"logs saved ({n} bytes)")
         return EXIT_OK
 
     # start
