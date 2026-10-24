@@ -1756,7 +1756,8 @@ def spec_pools(spec):
     """Pools où une création écrit (disques, images, seed) : ils sont tenus
     en partage pendant la création, un retrait de pool attend."""
     pools = set()
-    for d in spec.get("disks") or []:
+    disks = spec.get("disks")
+    for d in disks if isinstance(disks, list) else []:
         src = (d or {}).get("source") if isinstance(d, dict) else None
         if isinstance(src, dict):
             for k in ("pool", "image_pool"):
@@ -1766,6 +1767,15 @@ def spec_pools(spec):
     if isinstance(ci, dict) and isinstance(ci.get("seed_pool"), str):
         pools.add(ci["seed_pool"])
     return sorted(pools)
+
+
+def spec_networks(spec):
+    """Réseaux libvirt cités par les cartes d'un spec : tenus en partage
+    (création, modification, ajout de carte), un arrêt ou un retrait attend."""
+    nics = spec.get("nics")
+    return sorted({n["source"] for n in (nics if isinstance(nics, list) else [])
+                   if isinstance(n, dict) and n.get("kind") == "network"
+                   and isinstance(n.get("source"), str)})
 
 
 @contextlib.contextmanager
@@ -2014,7 +2024,11 @@ def cmd_vm_edit(args):
                        plan["refusals"], change_lines(plan["changes"])))
         return EXIT_OK
     new_name = spec.get("name") if isinstance(spec.get("name"), str) else name
-    with vm_lock(state, host.name, name, new_name), noting_progress(prog):
+    # disques et cartes ajoutés : leurs pools et réseaux en partage
+    with vm_lock(state, host.name, name, new_name), \
+            object_lock(state, host.name, "pool", *spec_pools(spec), shared=True), \
+            object_lock(state, host.name, "network", *spec_networks(spec), shared=True), \
+            noting_progress(prog):
         try:
             res = ke.edit_vm(host, name, spec, expect, progress=prog,
                              cancel=deadline_cancel(timeout), sleep=SLEEP)
@@ -2037,8 +2051,8 @@ def cmd_vm_edit(args):
     return EXIT_OK
 
 
-def hot_gesture(args, gesture, fn, pools=()):
-    """Un geste à chaud : verrou de la VM (et des `pools` en partage),
+def hot_gesture(args, gesture, fn, pools=(), networks=()):
+    """Un geste à chaud : verrou de la VM (et des `pools` et `networks` en partage),
     étapes, résultat par changement, relecture (état, changements en
     attente)."""
     state = state_of(args)
@@ -2054,6 +2068,7 @@ def hot_gesture(args, gesture, fn, pools=()):
         prog(sid, status, msg)
     with vm_lock(state, host.name, name), \
             object_lock(state, host.name, "pool", *pools, shared=True), \
+            object_lock(state, host.name, "network", *networks, shared=True), \
             noting_progress(prog):
         prog("plan", "running", f"{gesture} on {name}")
         try:
@@ -2118,7 +2133,7 @@ def cmd_vm_eject_image(args):
 def cmd_vm_add_nic(args):
     nic = read_spec(args.spec_file, "network card")
     return hot_gesture(args, "add-nic", lambda h, n, p: ke.attach_nic(
-        h, n, nic, progress=p, sleep=SLEEP))
+        h, n, nic, progress=p, sleep=SLEEP), networks=spec_networks({"nics": [nic]}))
 
 
 MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
@@ -2222,7 +2237,10 @@ def cmd_image_verify(args):
         raise UsageError("--sha256: 64 hexadecimal characters")
     prog = Progress("verify")
     prog("verify", "running", f"SHA-256 of {pool}/{volume} on the host")
-    res = lib_call(prog, {}, lambda: ks.verify_image(host, pool, volume, expected))
+    # lecture : pool et volume en partage (un retrait ou un envoi attend)
+    with object_lock(state, host.name, "pool", pool, shared=True), \
+            object_lock(state, host.name, "volume", f"{pool}/{volume}", shared=True):
+        res = lib_call(prog, {}, lambda: ks.verify_image(host, pool, volume, expected))
     out = {"host": host.name, "pool": pool, "volume": volume, **res}
     if res["match"] is False:
         msg = f"{pool}/{volume} does not match the expected SHA-256"
@@ -2260,7 +2278,9 @@ def public_url(url):
 
 def check_url(url):
     """URL http(s) avec un hôte et un port valide, sans caractère de
-    contrôle ni espace ; rend le message de refus, ou None."""
+    contrôle ni espace, sans identifiants (refusés comme par la garde
+    1.99.0, avant tout appel réseau) ; rend le message de refus, ou None.
+    Le message ne recopie jamais l'URL."""
     if not isinstance(url, str) or not url or any(ord(c) < 33 or ord(c) == 127 for c in url):
         return "an http or https URL"
     try:
@@ -2270,6 +2290,9 @@ def check_url(url):
         return "an http or https URL with a valid port (1 to 65535)"
     if p.scheme not in ("http", "https") or not p.hostname:
         return "an http or https URL"
+    if p.username is not None or p.password is not None:
+        return "an http or https URL without user name or password (credentials in the " \
+            "URL are not supported)"
     if port == 0:
         return "an http or https URL with a valid port (1 to 65535)"
     return None
@@ -2287,17 +2310,65 @@ def parse_cidrs(items):
     return nets
 
 
-def address_allowed(addr, allow=()):
-    """Adresse joignable par un téléchargement : publique (globale, ni
-    multicast), ou dans une plage de --allow-private. Refusées par défaut :
-    boucle locale, lien local (169.254.169.254, adresse des métadonnées des
-    clouds, comprise), privées, partagées (100.64/10), réservées."""
+# Règles d'adresse du téléchargement : COPIE EXACTE de la garde partagée
+# 1.99.0 (web/url_fetch_guard.py, address_refusal, commit f7bb19c), plus la
+# diffusion générale (255.255.255.255) toujours refusée. Toujours refusées,
+# même couvertes par --allow-private / iso_fetch.allow_private : métadonnées
+# de cloud, non spécifiée (0.0.0.0, ::), multicast, diffusion. La liste
+# d'autorisation n'ouvre que le reste (bouclage, lien local hors métadonnées,
+# privées, CGNAT, réservées).
+METADATA_ADDRESSES = frozenset({
+    ipaddress.ip_address("169.254.169.254"),
+    ipaddress.ip_address("fd00:ec2::254"),
+})
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+_BROADCAST = ipaddress.ip_address("255.255.255.255")
+ALWAYS_REFUSED = frozenset({"metadata", "unspecified", "multicast", "broadcast"})
+
+
+def address_refusal(addr, allow=()):
+    """None si l'adresse est joignable, sinon la raison du refus (mêmes
+    raisons que url_fetch_guard.address_refusal, plus `broadcast`)."""
     ip = ipaddress.ip_address(str(addr).split("%", 1)[0])
-    if ip.version == 6 and ip.ipv4_mapped:
+    # ::ffff:127.0.0.1 est 127.0.0.1
+    if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
-    if any(ip.version == n.version and ip in n for n in allow):
-        return True
-    return ip.is_global and not ip.is_multicast
+    if ip in METADATA_ADDRESSES:
+        return "metadata"
+    if ip.is_unspecified:
+        return "unspecified"
+    if ip.is_multicast:
+        return "multicast"
+    if ip == _BROADCAST:
+        return "broadcast"
+    if any(ip in net for net in allow if net.version == ip.version):
+        return None
+    if ip.is_loopback:
+        return "loopback"
+    if ip.is_link_local:
+        return "link-local"
+    if ip.is_private or (ip.version == 4 and ip in _CGNAT):
+        return "private"
+    if ip.is_reserved or not ip.is_global:
+        return "reserved"
+    return None
+
+
+def address_allowed(addr, allow=()):
+    """Adresse joignable par un téléchargement (address_refusal sans raison)."""
+    return address_refusal(addr, allow) is None
+
+
+def refusal_message(host, reasons, addrs):
+    """Message d'un refus d'adresse : la piste --allow-private n'est donnée
+    que si elle peut servir (jamais pour une adresse toujours refusée)."""
+    reasons = sorted(set(reasons))
+    msg = (f"{host} resolves to a {' and '.join(reasons)} address ({', '.join(addrs)}): "
+           "refused")
+    if set(reasons) & ALWAYS_REFUSED:
+        return msg + " (cloud metadata, unspecified, multicast and broadcast addresses are " \
+            "never reachable)"
+    return msg + "; if this server is intended, add --allow-private=CIDR"
 
 
 def _guarded_connection(base):
@@ -2317,12 +2388,11 @@ def _guarded_connection(base):
                 infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
             except socket.gaierror as e:
                 raise OSError(f"cannot resolve {host} ({e.strerror})") from None
-            bad = sorted({sa[0] for *_, sa in infos
-                          if not address_allowed(sa[0], self._allow)})
+            bad = {sa[0]: address_refusal(sa[0], self._allow) for *_, sa in infos}
+            bad = {a: why for a, why in bad.items() if why}
             if bad:
-                raise Failure(f"{host} resolves to a loopback, link-local, private or reserved "
-                              f"address ({', '.join(bad)}): refused; if this server is "
-                              "intended, add --allow-private=CIDR", kind="refused")
+                raise Failure(refusal_message(host, bad.values(), sorted(bad)),
+                              kind="refused")
             last = None
             for family, socktype, proto, _canon, sa in infos:
                 sock = socket.socket(family, socktype, proto)
@@ -2364,14 +2434,19 @@ class _GuardedHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Redirections bornées, vers http ou https seulement, port valide ;
-    l'adresse de chaque étape est contrôlée à sa connexion."""
+    """Redirections bornées, vers http ou https seulement, port valide, sans
+    identifiants, jamais de https vers http (la vérification TLS serait
+    perdue, comme la garde 1.99.0) ; l'adresse de chaque étape est contrôlée
+    à sa connexion. Aucun message ne recopie l'URL."""
     max_redirections = DOWNLOAD_MAX_REDIRECTS
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if check_url(newurl) is not None:
             raise Failure("the download was redirected outside http/https or to an invalid "
                           "URL: refused", kind="refused")
+        if urllib.parse.urlsplit(req.full_url).scheme == "https" and \
+                urllib.parse.urlsplit(newurl).scheme == "http":
+            raise Failure("redirect from https to http refused", kind="refused")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -2422,6 +2497,10 @@ def download_url(url, dest, progress=None, opener=None, max_size=None, allow=())
             if total is not None and total + DOWNLOAD_MARGIN > free:
                 raise Failure(f"not enough space on the console for {total} bytes "
                               f"({free} free)", kind="refused")
+            if progress:
+                # taille annoncée connue avant le premier octet : l'appelant
+                # peut réserver sa place (console : réceptions concurrentes)
+                progress(0, total)
             h, got = hashlib.sha256(), 0
             while True:
                 block = resp.read(DOWNLOAD_CHUNK)
@@ -2545,6 +2624,9 @@ def cmd_image_download(args):
     allow = parse_cidrs(args.allow_private)
     max_size = DOWNLOAD_MAX_SIZE if args.max_size is None else parse_size(args.max_size,
                                                                             "--max-size")
+    if urllib.parse.urlsplit(url).scheme == "http" and not args.sha256:
+        # en http, rien ne prouve que le fichier n'a pas été remplacé en route
+        raise UsageError("--sha256 is required for a plain http URL (or use https)")
     shown = public_url(url)
     prog = Progress("download")
     prog("download", "running", shown)
@@ -2643,7 +2725,8 @@ def cmd_vol_delete(args):
              plan_text(f"delete {pool}/{name} on {host.name} (dry run)", plan["refusals"],
                        lines))
         return EXIT_OK
-    with object_lock(state, host.name, "volume", f"{pool}/{name}"), noting_progress(prog):
+    with object_lock(state, host.name, "pool", pool, shared=True), \
+            object_lock(state, host.name, "volume", f"{pool}/{name}"), noting_progress(prog):
         try:
             res = ks.delete_volume(host, pool, name, notes_state=state,
                                    acknowledged_unreadable=ack, expect_digest=expect,
@@ -2901,7 +2984,11 @@ def cmd_template_save(args):
     spec = read_spec(args.spec_file, "template spec")
     step("save", "running", f"template {name}")
     try:
-        removed = ktpl.save(state, name, spec)
+        removed = ktpl.save(state, name, spec, owner=args.owner,
+                            replace_other=args.replace_other)
+    except ktpl.TemplateOwnerError as e:
+        step("save", "error", str(e))
+        raise Failure(str(e), kind="refused") from None
     except ktpl.TemplateError as e:
         raise UsageError(str(e)) from None
     step("save", "warn" if removed else "done",
@@ -2916,7 +3003,12 @@ def cmd_template_delete(args):
     name = checked_template(args.name)
     step("delete", "running", f"template {name}")
     try:
-        ktpl.delete(state, name)
+        ktpl.delete(state, name, owner=args.owner, replace_other=args.replace_other)
+    except ktpl.TemplateOwnerError as e:
+        step("delete", "error", str(e))
+        raise Failure(str(e), kind="refused") from None
+    except ktpl.TemplateError as e:
+        raise UsageError(str(e)) from None
     except FileNotFoundError:
         raise UsageError(f"template {name} does not exist", kind="notfound") from None
     step("delete", "done", f"template {name} deleted")
@@ -3461,9 +3553,15 @@ def add_next_parsers(sub, vp, common):
                        help="save a creation spec as a template (secrets removed)")
     sp.add_argument("--name", required=True)
     sp.add_argument("--spec-file", required=True, help="JSON VmSpec (- for standard input)")
+    sp.add_argument("--owner", help="who saves it (kept with the template)")
+    sp.add_argument("--replace-other", action="store_true",
+                    help="replace a template that belongs to another person (administrator)")
     sp.set_defaults(fn=cmd_template_save)
     sp = tp.add_parser("delete", parents=[common], help="delete a template")
     sp.add_argument("--name", required=True)
+    sp.add_argument("--owner", help="who deletes it")
+    sp.add_argument("--replace-other", action="store_true",
+                    help="delete a template that belongs to another person (administrator)")
     sp.set_defaults(fn=cmd_template_delete)
 
     xp = sub.add_parser("net", help="libvirt networks").add_subparsers(dest="ocmd", required=True)

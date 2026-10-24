@@ -192,7 +192,8 @@ def test_cloudinit_is_read_for_an_operator_only(as_user, lib):
 
 
 def test_cloudinit_route_is_not_a_shared_read():
-    assert re.search(r'@app\.route\("/api/kvm/vms/<host>/<domain>/cloudinit"\)\n@requires_auth\n'
+    assert re.search(r'@app\.route\("/api/kvm/vms/<host>/<domain>/cloudinit"\)\n'
+                     r'@_rate_limit\(KVM_READ_RATE\)\n@requires_auth\n'
                      r'def api_kvm_vm_cloudinit', SRC)
 
 
@@ -490,11 +491,11 @@ def test_a_finished_action_holds_nothing(client, lib):
 
 
 def test_object_labels(client, lib):
-    client.post("/api/kvm/hosts/node2/pools/images/stop", json={})
+    client.post("/api/kvm/hosts/node2/pools/iso/stop", json={})
     client.delete("/api/kvm/hosts/node2/volumes/images/d.qcow2", json={"expect_delete": DIGEST})
     client.post("/api/kvm/vms/node2/web/hot/cpumem", json={"vcpus": 2})
     assert sorted(r.action for r in wapp.ACTIONS.values()) == [
-        "kvm:pool-stop:node2/images", "kvm:vm-cpumem:node2/web", "kvm:vol-delete:node2/images/d.qcow2"]
+        "kvm:pool-stop:node2/iso", "kvm:vm-cpumem:node2/web", "kvm:vol-delete:node2/images/d.qcow2"]
 
 
 # --- empreintes obligatoires ---------------------------------------------------------------
@@ -807,23 +808,26 @@ def test_every_mutation_is_authenticated_and_rate_limited(route, limit):
     wapp._validate_rate_spec(m.group(1))
 
 
-@pytest.mark.parametrize("route,limit", [
-    ('"/api/kvm/hosts/<host>/caps"', None),
-    ('"/api/kvm/hosts/<host>/images"', "KVM_PREVIEW_RATE"),
-    ('"/api/kvm/hosts/<host>/links"', None),
-    ('"/api/kvm/hosts/<host>/pools"', None),
-    ('"/api/kvm/hosts/<host>/networks"', None),
-    ('"/api/kvm/vms/<host>/<domain>/form"', None),
-    ('"/api/kvm/hosts/<host>/volumes/<pool>/<volume>/delete-plan"', "KVM_PREVIEW_RATE"),
-    ('"/api/kvm/hosts/<host>/pools/<pool>/delete-plan"', "KVM_PREVIEW_RATE"),
-    ('"/api/kvm/hosts/<host>/networks/<net>/delete-plan"', "KVM_PREVIEW_RATE"),
-    ('"/api/kvm/templates"', None),
-    ('"/api/kvm/templates/<template>"', None),
+@pytest.mark.parametrize("route,limit,keys", [
+    ('"/api/kvm/hosts/<host>/caps"', "KVM_READ_RATE", '("machine",)'),
+    ('"/api/kvm/hosts/<host>/images"', "KVM_PREVIEW_RATE", "()"),
+    ('"/api/kvm/hosts/<host>/links"', "KVM_READ_RATE", "()"),
+    ('"/api/kvm/hosts/<host>/pools"', "KVM_READ_RATE", "()"),
+    ('"/api/kvm/hosts/<host>/networks"', "KVM_READ_RATE", "()"),
+    ('"/api/kvm/vms/<host>/<domain>/form"', "KVM_READ_RATE", "()"),
+    ('"/api/kvm/hosts/<host>/volumes/<pool>/<volume>/delete-plan"', "KVM_PREVIEW_RATE", None),
+    ('"/api/kvm/hosts/<host>/pools/<pool>/delete-plan"', "KVM_PREVIEW_RATE", None),
+    ('"/api/kvm/hosts/<host>/networks/<net>/delete-plan"', "KVM_PREVIEW_RATE", None),
+    ('"/api/kvm/templates"', None, None),
+    ('"/api/kvm/templates/<template>"', None, None),
 ])
-def test_every_read_is_authenticated_and_shared(route, limit):
+def test_every_read_is_authenticated_and_shared(route, limit, keys):
     rate = rf"@_rate_limit\({limit}\)\n" if limit else ""
+    qk = f", query_keys={re.escape(keys)}" if keys is not None else ""
     assert re.search(r'@app\.route\(' + re.escape(route) + r'\)\n' + rate + r'@requires_auth\n'
-                     + r'@shared_read\(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN\)', SRC), route
+                     + r'@shared_read\(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN' + qk + r'\)\n', SRC), route
+    if limit:
+        wapp._validate_rate_spec(getattr(wapp, limit))
 
 
 @pytest.mark.parametrize("route", ['"/api/kvm/hosts/<host>/vm-plan", methods=["POST"]',
@@ -967,13 +971,14 @@ def test_upload_size_limits(client, upload, monkeypatch):
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"max_bytes": 100}})
     r = client.post("/api/kvm/hosts/node2/images/upload?pool=images&name=a.img", data=b"x" * 101)
     assert r.status_code == 413 and "iso_fetch.max_bytes" in r.get_json()["error"]
-    monkeypatch.setattr(wapp, "load_config_ro", lambda: {})
-    # place insuffisante sur la console : 507
+    # place insuffisante sur la console (iso_fetch.min_free_bytes gardé libre) : 507
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"min_free_bytes": 1000}})
     real = wapp.shutil.disk_usage
     monkeypatch.setattr(wapp.shutil, "disk_usage",
-                        lambda p: types.SimpleNamespace(total=1, used=0, free=wapp.KVM_UPLOAD_SPARE))
+                        lambda p: types.SimpleNamespace(total=1, used=0, free=1009))
     r = client.post("/api/kvm/hosts/node2/images/upload?pool=images&name=a.img", data=b"x" * 10)
-    assert r.status_code == 507 and r.get_json()["need"] == 10
+    assert r.status_code == 507 and r.get_json()["need"] == 10 and r.get_json()["reason"] == "no-space"
+    assert "iso_fetch.min_free_bytes" in r.get_json()["error"]
     monkeypatch.setattr(wapp.shutil, "disk_usage", real)
     assert wapp.ACTIONS == {} and staged(upload) == []
 
@@ -1034,12 +1039,19 @@ def test_upload_route_reads_the_raw_body_not_multipart():
 
 # --- téléchargement d'une URL (adaptateur 1.99.0) ------------------------------------------
 
+SHA = "e" * 64
+
+
 @pytest.mark.parametrize("url,reason", [
     ("http://127.0.0.1:8200/v1/secret", "address"),
     ("http://10.0.0.1/x.img", "address"),
     ("http://169.254.169.254/latest/meta-data", "address"),
     ("http://[::1]/x", "address"),
     ("http://localhost/x", "address"),
+    ("http://0.0.0.0/x", "address"),
+    ("http://[::]/x", "address"),
+    ("http://224.0.0.1/x", "address"),
+    ("http://255.255.255.255/x", "address"),
     ("ftp://example.org/x", "bad-url"),
     ("file:///etc/passwd", "bad-url"),
     ("http://example.org:99999/x", "bad-url"),
@@ -1047,7 +1059,8 @@ def test_upload_route_reads_the_raw_body_not_multipart():
 ])
 def test_fetch_refuses_internal_addresses_before_anything(client, upload, monkeypatch, url, reason):
     monkeypatch.setattr(wapp, "_ufg", None)
-    r = client.post("/api/kvm/hosts/node2/images/fetch", json={"url": url, "pool": "images", "name": "a.img"})
+    r = client.post("/api/kvm/hosts/node2/images/fetch",
+                    json={"url": url, "pool": "images", "name": "a.img", "sha256": SHA})
     assert r.status_code == 400 and r.get_json()["reason"] == reason, r.get_json()
     assert wapp.ACTIONS == {} and _NoThread.started == []
 
@@ -1108,7 +1121,7 @@ def test_fetch_redirect_to_a_refused_address_sends_nothing(client, upload, monke
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.1/32"]}})
     monkeypatch.setattr(_Handler, "redirect", "http://10.255.255.1/x")
     r = client.post("/api/kvm/hosts/node2/images/fetch",
-                    json={"url": f"{http_server}/redir", "pool": "images", "name": "c.img"})
+                    json={"url": f"{http_server}/redir", "pool": "images", "name": "c.img", "sha256": SHA})
     assert r.status_code == 202
     _NoThread.started[-1].target()
     run = only_run()
@@ -1130,7 +1143,7 @@ def test_fetch_size_cap(client, upload, monkeypatch, http_server):
     monkeypatch.setattr(wapp, "load_config_ro", lambda: {"iso_fetch": {"allow_private": ["127.0.0.0/8"],
                                                                         "max_bytes": 1000}})
     client.post("/api/kvm/hosts/node2/images/fetch", json={"url": f"{http_server}/x", "pool": "images",
-                                                           "name": "c.img"})
+                                                           "name": "c.img", "sha256": SHA})
     _NoThread.started[-1].target()
     run = only_run()
     assert run.status == "error" and "iso_fetch.max_bytes" in run.error_summary
@@ -1153,8 +1166,9 @@ def test_fetch_uses_the_shared_guard_once_merged(client, upload, monkeypatch):
         check_url=lambda url: (seen.append(("check", url)) or ("https", "mirror.example", 443, "/x")),
         resolve_checked=lambda host, port, allow: seen.append(("resolve", host, port, allow)) or "1.2.3.4")
     monkeypatch.setattr(wapp, "_ufg", fake)
-    monkeypatch.setattr(wapp._kvm_cli, "address_allowed",
-                        lambda *a: pytest.fail("the fallback must not be used"))
+    for fallback in ("address_allowed", "address_refusal", "check_url", "download_url"):
+        monkeypatch.setattr(wapp._kvm_cli, fallback,
+                            lambda *a, **k: pytest.fail("the fallback must not be used"))
     r = client.post("/api/kvm/hosts/node2/images/fetch",
                     json={"url": "https://mirror.example/x", "pool": "images", "name": "c.img"})
     assert r.status_code == 202
@@ -1167,11 +1181,6 @@ def test_fetch_uses_the_shared_guard_once_merged(client, upload, monkeypatch):
     r = client.post("/api/kvm/hosts/node2/images/fetch",
                     json={"url": "https://mirror.example/x", "pool": "images", "name": "c.img"})
     assert r.status_code == 400 and r.get_json()["reason"] == "address"
-
-
-def test_the_adapter_is_marked_for_removal_after_the_merge():
-    assert "import url_fetch_guard as _ufg" in SRC
-    assert SRC.count("REPLI-AVANT-1.99") >= 4
 
 
 def test_downloads_ignore_environment_proxies(upload, monkeypatch, http_server, tmp_path):
@@ -1210,6 +1219,10 @@ def _shared_cache(spawned=None):
     return c, made
 
 
+def _gen(state):
+    return int((Path(state) / "kvm.d" / "survey-gen" / "node2").read_text())
+
+
 def _host(state):
     return types.SimpleNamespace(state=state, name="node2",
                                  decl={"address": "172.16.1.12", "uri": "qemu:///system"})
@@ -1223,7 +1236,7 @@ def test_a_write_in_another_process_invalidates_the_cached_survey(tmp_path):
     _other_process_writes(tmp_path)                              # écriture par la CLI
     assert c.get(h) == ("survey-2", 0.0)                         # oublié
     assert c.get(h)[0] == "survey-2" and len(made) == 2
-    assert (tmp_path / "kvm.d" / "survey-gen" / "node2").read_text() == "1"
+    assert _gen(tmp_path) > 10 ** 18                             # départ pris sur l'horloge
 
 
 def test_two_processes_share_one_state_dir_both_ways(tmp_path):
@@ -1279,16 +1292,17 @@ def test_the_cli_bumps_the_generation_after_a_write_only(tmp_path):
     cli("pool", "delete", "--host=node2", "--pool=p", "--dry-run")
     assert not gen.exists()
     r = cli("pool", "start", "--host=node2", "--pool=p")         # écriture (refusée : hôte inconnu)
-    assert r.returncode == 2 and gen.read_text() == "1"
+    first = _gen(tmp_path)
+    assert r.returncode == 2 and first > 10 ** 18
     cli("vol", "delete", "--host=node2", "--pool=p", "--name=v", f"--expect-delete={DIGEST}")
-    assert gen.read_text() == "2"
+    assert _gen(tmp_path) == first + 1
 
 
 def test_every_console_action_bumps_the_generation(client, env, lib, monkeypatch):
     monkeypatch.setattr(wapp, "_vm_transfer_runner", lambda run, cmd, capture=False: None)
     client.post("/api/kvm/hosts/node2/pools/images/start", json={})
     _NoThread.started[-1].target()
-    assert (env["state"] / "kvm.d" / "survey-gen" / "node2").read_text() == "1"
+    assert _gen(env["state"]) > 10 ** 18
 
 
 def test_cli_template_commands(tmp_path):

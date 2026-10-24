@@ -473,6 +473,20 @@ ADDRESSES = [
     ("172.16.3.6", ("172.16.0.0/16",), True),
     ("::ffff:172.16.3.6", ("172.16.0.0/16",), True),
     ("10.1.2.3", ("172.16.0.0/16",), False),
+    # toujours refusées, même couvertes par la liste d'autorisation (1.99.0, f7bb19c)
+    ("169.254.169.254", ("0.0.0.0/0",), False),
+    ("169.254.169.254", ("169.254.0.0/16",), False),
+    ("::ffff:169.254.169.254", ("0.0.0.0/0",), False),
+    ("fd00:ec2::254", ("::/0",), False),
+    ("0.0.0.0", ("0.0.0.0/0",), False),
+    ("::", ("::/0",), False),
+    ("224.0.0.1", ("224.0.0.0/4",), False),
+    ("ff02::1", ("::/0",), False),
+    ("255.255.255.255", ("0.0.0.0/0",), False),
+    # la liste n'ouvre que bouclage, lien local hors métadonnées, privées
+    ("127.0.0.1", ("127.0.0.0/8",), True),
+    ("169.254.1.1", ("169.254.0.0/16",), True),
+    ("fe80::1", ("fe80::/10",), True),
 ]
 
 
@@ -487,7 +501,7 @@ def test_download_from_a_loopback_server_is_refused_without_allow_private(env, c
     (root / "c.qcow2").write_bytes(t.qcow2_bytes())
     env.use(t.world())
     res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
-              f"--url={base}/c.qcow2")
+              f"--url={base}/c.qcow2", "--sha256=" + "e" * 64)
     assert res.rc == 1 and res.data["kind"] == "refused", res.data
     assert "127.0.0.1" in res.data["error"] and "--allow-private=CIDR" in res.data["error"]
     assert t.writes(env) == [] and no_remote(env)
@@ -504,9 +518,12 @@ def test_every_redirect_hop_is_checked(env, capsys, files_server, target):
     files_server_redirect[0] = target
     env.use(t.world())
     res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
-              f"--url={base}/hop", "--allow-private=127.0.0.1/32")
+              f"--url={base}/hop", "--allow-private=127.0.0.1/32", "--sha256=" + "e" * 64)
     assert res.rc == 1 and res.data["kind"] == "refused", res.data
-    assert "--allow-private=CIDR" in res.data["error"]
+    if "169.254.169.254" in target:                # métadonnées : jamais, pas de piste
+        assert "never reachable" in res.data["error"]
+    else:
+        assert "--allow-private=CIDR" in res.data["error"]
     assert t.writes(env) == [] and no_remote(env)
 
 
@@ -515,7 +532,8 @@ def test_download_size_cap(env, capsys, files_server):
     (root / "c.qcow2").write_bytes(t.qcow2_bytes())
     env.use(t.world())
     res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
-              f"--url={base}/c.qcow2", "--allow-private=127.0.0.1/32", "--max-size=1K")
+              f"--url={base}/c.qcow2", "--allow-private=127.0.0.1/32", "--max-size=1K",
+              "--sha256=" + "e" * 64)
     assert res.rc == 1 and res.data["kind"] == "refused" and "--max-size" in res.data["error"]
     assert t.writes(env) == []
     assert list((env.state / "kvm-images" / "staging").iterdir()) == []
@@ -548,3 +566,128 @@ def files_server(tmp_path):
     th.start()
     yield root, f"http://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
+
+
+# --- après la revue de la tâche 4 : règles du téléchargement alignées sur 1.99.0 ----------------
+
+REASONS = [
+    ("169.254.169.254", ("0.0.0.0/0",), "metadata"),
+    ("0.0.0.0", ("0.0.0.0/0",), "unspecified"),
+    ("::", ("::/0",), "unspecified"),
+    ("239.1.2.3", ("0.0.0.0/0",), "multicast"),
+    ("255.255.255.255", ("0.0.0.0/0",), "broadcast"),
+    ("127.0.0.1", (), "loopback"),
+    ("169.254.1.1", (), "link-local"),
+    ("10.1.2.3", (), "private"),
+    ("100.64.0.1", (), "private"),
+    ("240.0.0.1", (), "private"),               # 240/4 est « privée » pour ipaddress
+    ("8.8.8.8", (), None),
+]
+
+
+@pytest.mark.parametrize("addr,allow,why", REASONS, ids=[r[0] for r in REASONS])
+def test_address_refusal_reasons_are_those_of_the_shared_guard(addr, allow, why):
+    assert cli.address_refusal(addr, cli.parse_cidrs(allow)) == why
+
+
+@pytest.mark.parametrize("url", ["http://user:s3cr3tpw@example.org/x.img",
+                                 "https://s3cr3tpw@example.org/x.img",
+                                 "https://:s3cr3tpw@example.org/x.img",
+                                 "https://@example.org/x.img"])
+def test_urls_with_credentials_are_refused_before_any_network_call(env, capsys, monkeypatch, url):
+    env.use(t.world())
+    monkeypatch.setattr(cli.socket, "getaddrinfo", lambda *a, **k: pytest.fail("network call"))
+    assert "user name or password" in cli.check_url(url)
+    res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
+              f"--url={url}", "--sha256=" + "e" * 64)
+    assert res.rc == 2 and res.data["kind"] == "usage", res.data
+    assert "s3cr3tpw" not in res.out + res.err and "user:" not in res.out + res.err
+    assert no_remote(env)
+
+
+def test_plain_http_needs_the_sha256(env, capsys):
+    env.use(t.world())
+    res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
+              "--url=http://example.org/x.img")
+    assert res.rc == 2 and "--sha256 is required" in res.data["error"]
+    assert no_remote(env)
+
+
+@pytest.mark.parametrize("old,new,refused", [
+    ("https://a.example/x", "http://b.example/y", True),
+    ("https://a.example/x", "https://b.example/y", False),
+    ("http://a.example/x", "https://b.example/y", False),
+    ("http://a.example/x", "http://b.example/y", False),
+    ("https://a.example/x", "http://u:pw@b.example/y", True),
+])
+def test_redirects_never_go_from_https_to_http(old, new, refused):
+    import urllib.request
+    h = cli._Redirects()
+    req = urllib.request.Request(old)
+    if refused:
+        with pytest.raises(cli.Failure) as e:
+            h.redirect_request(req, None, 302, "Found", {}, new)
+        assert e.value.kind == "refused" and "pw" not in e.value.message
+        assert "b.example" not in e.value.message
+    else:
+        assert h.redirect_request(req, None, 302, "Found", {}, new).full_url == new
+
+
+def test_a_redirect_to_the_metadata_address_is_refused_even_with_a_broad_allowlist(env, capsys,
+                                                                                 files_server):
+    files_server_redirect[0] = "http://169.254.169.254/latest/meta-data/"
+    root, base = files_server
+    env.use(t.world())
+    res = run(capsys, "image", "download-url", "--host=lab", "--pool=images", "--name=c.qcow2",
+              f"--url={base}/hop", "--allow-private=0.0.0.0/0", "--sha256=" + "e" * 64)
+    assert res.rc == 1 and res.data["kind"] == "refused", res.data
+    assert "metadata" in res.data["error"] and "never reachable" in res.data["error"]
+    assert "--allow-private" not in res.data["error"]
+    assert t.writes(env) == [] and list((env.state / "kvm-images" / "staging").iterdir()) == []
+
+
+# --- après la revue de la tâche 4 : verrous des objets cités --------------------------------
+
+DIGEST64 = "b" * 64
+
+
+@pytest.mark.parametrize("held,argv,what", [
+    (("pool", "images"), ["vol", "delete", "--host=lab", "--pool=images", "--name=free.qcow2",
+                          f"--expect-delete={DIGEST64}"], "pool images"),
+    (("pool", "images"), ["image", "delete", "--host=lab", "--pool=images", "--volume=free.qcow2",
+                          f"--expect-delete={DIGEST64}"], "pool images"),
+    (("pool", "images"), ["image", "verify", "--host=lab", "--pool=images", "--volume=free.qcow2"],
+     "pool images"),
+    (("volume", "images/free.qcow2"), ["image", "verify", "--host=lab", "--pool=images",
+                                       "--volume=free.qcow2"], "volume images/free.qcow2"),
+    (("pool", "images"), ["vm", "edit", "--host=lab", "--name=vm1", "DISKEDIT",
+                          f"--expect-config={DIGEST64}"], "pool images"),
+    (("network", "default"), ["vm", "edit", "--host=lab", "--name=vm1", "NICEDIT",
+                              f"--expect-config={DIGEST64}"], "network default"),
+    (("network", "default"), ["vm", "add-nic", "--host=lab", "--name=vm1", "NIC"], "network default"),
+])
+def test_commands_hold_the_pool_or_network_they_use(env, capsys, held, argv, what):
+    env.use(t.vm_world())
+    sub = {"DISKEDIT": env.spec({"disks": BLANK}, "e1.json"),
+           "NICEDIT": env.spec({"nics": [{"kind": "network", "source": "default"}]}, "e2.json"),
+           "NIC": env.spec({"kind": "network", "source": "default"}, "n.json")}
+    with cli.object_lock(env.state, "lab", *held):          # arrêt ou retrait en cours
+        res = run(capsys, *[sub.get(a, a) for a in argv])
+    assert res.rc == 2 and res.data["kind"] == "busy", res.data
+    assert f"another operation on {what} is in progress" in res.data["error"]
+    assert t.writes(env) == []
+
+
+# --- après la revue de la tâche 4 : modèles et propriétaire ----------------------------------
+
+def test_template_of_another_person_is_kept_unless_replace_other(env, capsys):
+    spec = env.spec({"vcpus": 1})
+    assert run(capsys, "template", "save", "--name=t1", spec, "--owner=alice").rc == 0
+    res = run(capsys, "template", "save", "--name=t1", spec, "--owner=bob")
+    assert res.rc == 1 and res.data["kind"] == "refused" and "belongs to alice" in res.data["error"]
+    res = run(capsys, "template", "delete", "--name=t1", "--owner=bob")
+    assert res.rc == 1 and res.data["kind"] == "refused"
+    assert run(capsys, "template", "save", "--name=t1", spec, "--owner=alice").rc == 0
+    assert run(capsys, "template", "save", "--name=t1", spec, "--owner=bob",
+               "--replace-other").rc == 0
+    assert run(capsys, "template", "delete", "--name=t1", "--owner=bob").rc == 0

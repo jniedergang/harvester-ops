@@ -14,6 +14,16 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Garde de livraison (téléchargement d'images KVM) : quand la garde partagée
+# anti-SSRF (web/url_fetch_guard.py, 1.99.0) existe, la route KVM doit passer
+# par elle seule ; le repli marqué REPLI-AVANT-1.99 dans web/app.py doit
+# alors avoir été supprimé. Refuser de construire sinon.
+if [[ -f web/url_fetch_guard.py ]] && grep -q 'REPLI-AVANT-1.99' web/app.py; then
+    printf ' ✗  %s\n' "web/url_fetch_guard.py exists but web/app.py still carries the KVM fetch fallback (REPLI-AVANT-1.99): delete the fallback before releasing" >&2
+    exit 1
+fi
+
+
 VERSION="$(cat VERSION)"
 NAME="harvester-ops-${VERSION}"
 DIST_DIR="${SCRIPT_DIR}/dist"

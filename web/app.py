@@ -25,6 +25,7 @@ import logging
 import os
 import platform
 import shutil
+import stat as _stat
 import types
 import re
 import shlex
@@ -828,12 +829,15 @@ def _fresh_allowed(key, min_interval):
         return True
 
 
-def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None):
+def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys=None):
     """Décorateur d'une vue GET qui ne fait que lire. `?fresh=1` passe outre.
     `scope` remplace le cluster en tête de clé pour une vue qui n'en a pas
     (on l'invalide alors par ce nom). `fresh_min` (v1.96.0) : `?fresh=1`
     relit au plus une fois par `fresh_min` s pour une même clé ; entre-temps
-    la lecture partagée de moins de `fresh_min` s sert."""
+    la lecture partagée de moins de `fresh_min` s sert. `query_keys` : seuls
+    ces paramètres de requête (et `fresh`) entrent dans la clé ; un paramètre
+    inconnu (`?x=hasard`) ne peut alors pas forcer une nouvelle lecture
+    coûteuse en contournant le résultat partagé."""
     def deco(f):
         @wraps(f)
         def wrapped(*args, **kwargs):
@@ -843,6 +847,8 @@ def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None):
                 return f(*args, **kwargs)
             cluster = kwargs.get("cluster")
             qargs = request.args.items(multi=True)
+            if query_keys is not None:
+                qargs = [(k, v) for k, v in qargs if k in query_keys or k == "fresh"]
             if fresh_min:                      # lecture forcée ou non : même clé
                 qargs = [(k, v) for k, v in qargs if k != "fresh"]
             key = (scope or cluster, request.endpoint,
@@ -10125,20 +10131,25 @@ def _kvm_base(*sub):
             f"--state-dir={_state_dir()}"]
 
 
-def _kvm_action(host, label, cmd, cleanup=None):
+def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
+    """Action suivie du script KVM. `cluster` : étiquette d'une action qui ne
+    vise aucun hôte (modèles : KVM_TEMPLATES_TAG) ; elle ne fait alors pas
+    avancer de génération de relevés (aucun fichier survey-gen créé)."""
     state = _state_dir()
 
     def after():
         if cleanup:
             cleanup()
         READ_SHARE.invalidate(KVM_SCOPE)
+        if cluster is not None:
+            return
         # relevés gardés (catalogue d'images) de la console ET de ses
         # processus lecteurs : la génération partagée avance (le script
         # l'a déjà fait s'il a écrit ; une action refusée tôt ne coûte
         # qu'un relevé de plus)
         with contextlib.suppress(Exception):
             _ko.bump_generation(types.SimpleNamespace(state=state, name=host))
-    run, err = _cli_action(f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
+    run, err = _cli_action(cluster or f"kvm:{host}", label, cmd, "harvester-kvm", after=after,
                            check_busy=False, capture=True)
     if err:
         if cleanup:
@@ -21777,6 +21788,9 @@ KVM_ACK_MAX = 64                       # fichiers illisibles acceptés en une fo
 # (dumpxml de chaque domaine, volumes, stat, qemu-img). Limite par personne
 # et nombre de relevés simultanés par hôte ; au-delà, 429 sans rien lancer.
 KVM_PREVIEW_RATE = "20/minute"
+# lectures coûteuses (plusieurs virsh/ssh) : caps, links, pools, networks,
+# form, cloudinit ; validée par _rate_limit comme toute limite
+KVM_READ_RATE = "60/minute"
 KVM_SURVEYS_PER_HOST = 2
 _KVM_SURVEYS = {}                      # hôte -> relevés en cours
 _KVM_SURVEYS_LOCK = threading.Lock()
@@ -22138,7 +22152,6 @@ KVM_POOL_VERBS = ("start", "stop", "refresh", "autostart")
 KVM_NET_VERBS = ("start", "stop", "autostart")
 KVM_MAX_HOSTS = 16                     # hôtes d'un même envoi d'image
 KVM_CAPS_TTL = 3600.0                  # s ; clé : hôte + version de libvirt/QEMU
-KVM_UPLOAD_SPARE = 256 * 1024 * 1024   # laissé libre sur la console après réception
 KVM_UPLOAD_CHUNK = 1024 * 1024
 _KVM_TARGET_RE = re.compile(r"^[a-z]{2,3}[a-z0-9]{1,4}$")
 _KVM_MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
@@ -22199,7 +22212,7 @@ def _kvm_holds_busy(holds):
     return None
 
 
-def _kvm_object_op(host, label, cmd, holds, cleanup=None):
+def _kvm_object_op(host, label, cmd, holds, cleanup=None, cluster=None):
     """Lance une opération sur un objet de l'hôte (pool, volume, réseau,
     image) : 409 si un objet de `holds` est tenu en conflit, sinon l'action."""
     with _KVM_GESTURE_LOCK:
@@ -22208,7 +22221,7 @@ def _kvm_object_op(host, label, cmd, holds, cleanup=None):
             if cleanup:
                 cleanup()
             return None, _busy_response(busy)
-        run, err = _kvm_action(host, label, cmd, cleanup=cleanup)
+        run, err = _kvm_action(host, label, cmd, cleanup=cleanup, cluster=cluster)
         if run is not None:
             run.kvm_holds = tuple(holds)
         return run, err
@@ -22277,8 +22290,9 @@ def _kvm_host_key(vh):
 
 
 @app.route("/api/kvm/hosts/<host>/caps")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=("machine",))
 def api_kvm_host_caps(host):
     """Ce que le formulaire de création propose sur cet hôte (types de
     machine, micrologiciel, modes CPU, bus, vidéo, TPM) et la raison de chaque
@@ -22317,7 +22331,7 @@ def api_kvm_host_caps(host):
 @app.route("/api/kvm/hosts/<host>/images")
 @_rate_limit(KVM_PREVIEW_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=())
 def api_kvm_images(host):
     """Catalogue d'images d'un hôte : volumes des pools d'images (ou libres
     de tous les pools), format, taille, ISO, somme notée, base de quels
@@ -22340,8 +22354,9 @@ def api_kvm_images(host):
 
 
 @app.route("/api/kvm/hosts/<host>/links")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=())
 def api_kvm_links(host):
     """Ponts et cartes physiques de l'hôte (`ip -j`), et ses réseaux libvirt."""
     vh, err = _kvm_host_target(host)
@@ -22355,8 +22370,9 @@ def api_kvm_links(host):
 
 
 @app.route("/api/kvm/hosts/<host>/pools")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=())
 def api_kvm_pools(host):
     """Pools de stockage de l'hôte (état, type, cible, autostart, place)."""
     vh, err = _kvm_host_target(host)
@@ -22370,8 +22386,9 @@ def api_kvm_pools(host):
 
 
 @app.route("/api/kvm/hosts/<host>/networks")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=())
 def api_kvm_networks(host):
     """Réseaux libvirt de l'hôte (mode, pont, adresses, DHCP, autostart)."""
     vh, err = _kvm_host_target(host)
@@ -22385,8 +22402,9 @@ def api_kvm_networks(host):
 
 
 @app.route("/api/kvm/vms/<host>/<domain>/form")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
-@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN)
+@shared_read(scope=KVM_SCOPE, fresh_min=KVM_FRESH_MIN, query_keys=())
 def api_kvm_vm_form(host, domain):
     """La fenêtre « Modifier » : vue gérée, réglages non gérés, changements
     en attente, règles « maintenant / au prochain démarrage » (HOTNESS) et
@@ -22403,6 +22421,7 @@ def api_kvm_vm_form(host, domain):
 
 
 @app.route("/api/kvm/vms/<host>/<domain>/cloudinit")
+@_rate_limit(KVM_READ_RATE)
 @requires_auth
 def api_kvm_vm_cloudinit(host, domain):
     """Le cloud-init d'une VM (user-data, network-config du seed), pour un
@@ -22533,6 +22552,11 @@ def _kvm_create_preview(vh, host, spec):
 
 
 def _kvm_instance_names(spec):
+    # nom absent ou vide : refusé ici (400), avant de fabriquer les noms
+    # d'instances (« -01 », « None-01 »...)
+    name = spec.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise _ko.OpError("invalid", "name: the name of the new VM is required")
     names = [s.get("name") for s in _kc.instance_specs(spec)]
     for n in names:
         _ko.check_new_vm_name(n)
@@ -22686,8 +22710,12 @@ def api_kvm_vm_edit(host, domain):
         return err
     cmd = _kvm_base("vm", "edit") + [f"--host={host}", f"--name={domain}",
                                      f"--spec-file={path}", f"--expect-config={expect}"]
+    # disques et cartes du spec : leurs pools et réseaux en partage (mêmes
+    # verrous que le script) ; un arrêt ou un retrait en cours donne 409 ici
+    holds = [(host, "pool", p, "s") for p in _kvm_spec_pools(spec)] + \
+            [(host, "network", n, "s") for n in _kvm_spec_networks(spec)]
     run, err = _kvm_vm_op(host, domain, "edit", cmd,
-                          names=(new,) if new != domain else (), cleanup=cleanup)
+                          names=(new,) if new != domain else (), holds=holds, cleanup=cleanup)
     if err:
         return err
     return _kvm_accepted(run, host=host, name=domain)
@@ -22710,8 +22738,9 @@ def _kvm_target(body):
 
 
 def _kvm_hot_args(op, body):
-    """(arguments en --opt=valeur, spec à passer par fichier ou None,
-    pools tenus en partage) d'un geste à chaud ; OpError `invalid` sinon."""
+    """(arguments en --opt=valeur, spec à passer par fichier ou None, objets
+    tenus en partage [(genre, nom)] : pools d'un disque ajouté, réseau d'une
+    carte ajoutée) d'un geste à chaud ; OpError `invalid` sinon."""
     if op == "cpumem":
         vcpus, mem = _kvm_int(body, "vcpus", 1, 4096), _kvm_int(body, "memory_mib", 1, 1 << 30)
         if vcpus is None and mem is None:
@@ -22723,8 +22752,11 @@ def _kvm_hot_args(op, body):
         item = body.get(key)
         if not isinstance(item, dict):
             raise _ko.OpError("invalid", f"{key}: a JSON object is expected")
-        pools = _kvm_spec_pools({"disks": [item]}) if op == "add-volume" else []
-        return [], item, pools
+        if op == "add-volume":
+            held = [("pool", p) for p in _kvm_spec_pools({"disks": [item]})]
+        else:
+            held = [("network", n) for n in _kvm_spec_networks({"nics": [item]})]
+        return [], item, held
     if op in ("remove-volume", "eject-image"):
         return [f"--target={_kvm_target(body)}"], None, []
     if op == "insert-cdrom":
@@ -22768,7 +22800,7 @@ def api_kvm_vm_hot(host, domain, op):
     if err:
         return err
     try:
-        args, item, pools = _kvm_hot_args(op, body)
+        args, item, held = _kvm_hot_args(op, body)
     except _ko.OpError as e:
         return _kvm_err(e.message)
     cmd = _kvm_base("vm", op) + [f"--host={host}", f"--name={domain}"] + args
@@ -22778,7 +22810,7 @@ def api_kvm_vm_hot(host, domain, op):
         if err:
             return err
         cmd.append(f"--spec-file={path}")
-    run, err = _kvm_vm_op(host, domain, op, cmd, holds=[(host, "pool", p, "s") for p in pools],
+    run, err = _kvm_vm_op(host, domain, op, cmd, holds=[(host, k, n, "s") for k, n in held],
                           cleanup=cleanup)
     if err:
         return err
@@ -22788,26 +22820,43 @@ def api_kvm_vm_hot(host, domain, op):
 # --- téléchargement d'une URL : ADAPTATEUR vers la garde partagée (1.99.0) -------------
 #
 # La garde anti-SSRF de /api/iso/fetch (web/url_fetch_guard.py) arrive avec la
-# 1.99.0 sur une autre branche. ICI on ne la recopie pas : la route KVM appelle
-# `_kvm_fetch_check` et `_kvm_fetch_download`, au contrat de cette garde
-# (http/https seulement, adresse vérifiée à CHAQUE saut, connexion à l'adresse
-# vérifiée, plafond de taille, place libre contrôlée avant et pendant,
-# `iso_fetch.allow_private` relu à chaque demande, messages sans chemin).
+# 1.99.0 sur une autre branche (commit f7bb19c). ICI on ne la recopie pas : la
+# route KVM appelle `_kvm_fetch_check` et `_kvm_fetch_download`, au contrat de
+# cette garde (http/https seulement, pas d'identifiants dans l'URL, adresse
+# vérifiée à CHAQUE saut, pas de retour de https à http, connexion à
+# l'adresse vérifiée, plafond de taille, place libre contrôlée avant et
+# pendant, `iso_fetch.allow_private` relu à chaque demande, messages sans
+# chemin ni URL).
 # - Après la fusion de master (qui contiendra la 1.99.0), `url_fetch_guard`
-#   s'importe : ces deux fonctions passent par lui, et la branche de repli
-#   ci-dessous (marquée REPLI-AVANT-1.99) est à supprimer.
-# - D'ici là, repli sur les règles du script (harvester-kvm.py :
-#   check_url, address_allowed, download_url), les mêmes que
-#   `image download-url` : adresses publiques seulement sauf les plages de
-#   `iso_fetch.allow_private`, contrôle à chaque redirection.
+#   s'importe : ces deux fonctions passent par lui SEUL (le repli devient
+#   inatteignable), et la branche de repli (marquée REPLI-AVANT-1.99) est à
+#   supprimer. GARDE DE LIVRAISON : tests/api (test du repli) et package.sh
+#   refusent une version où le module partagé existe et le repli est encore
+#   là.
+# - D'ici là, repli sur les règles du script (harvester-kvm.py : check_url,
+#   address_refusal, download_url), ALIGNÉES sur la garde 1.99.0 : URL avec
+#   identifiants refusée avant tout appel réseau, retour de https à http
+#   refusé, métadonnées / non spécifiée / multicast / diffusion toujours
+#   refusées même couvertes par `iso_fetch.allow_private` (copie exacte de
+#   url_fetch_guard.address_refusal, f7bb19c, plus la diffusion).
+# Pour toutes les deux : une URL en http simple exige la SHA-256 attendue
+# (rien d'autre ne prouve que le fichier n'a pas été remplacé en route).
 # Mandataire : aucun, comme le script et la garde 1.99.0 (les variables
 # d'environnement http_proxy/https_proxy sont ignorées : l'adresse vérifiée
 # doit être celle du serveur joint). Un site qui ne sort que par un
 # mandataire passe par un miroir interne autorisé par iso_fetch.allow_private.
-try:
-    import url_fetch_guard as _ufg  # noqa: E402  (1.99.0, master)
-except ImportError:                   # REPLI-AVANT-1.99
-    _ufg = None
+
+def _kvm_load_fetch_guard():
+    """Le module partagé s'il est importable : alors le repli ne peut PAS
+    être choisi (aucun réglage ne le rouvre)."""
+    try:
+        import url_fetch_guard  # noqa: E402  (1.99.0, master)
+    except ImportError:               # REPLI-AVANT-1.99
+        return None
+    return url_fetch_guard
+
+
+_ufg = _kvm_load_fetch_guard()
 
 KVM_FETCH_MAX_DEFAULT = 20 * 1024 ** 3   # mêmes défauts que url_fetch_guard.limits
 KVM_FETCH_MIN_FREE_DEFAULT = 1024 ** 3
@@ -22846,107 +22895,270 @@ def _kvm_fetch_policy():
                                                               KVM_FETCH_MIN_FREE_DEFAULT)
 
 
-def _kvm_fetch_check(url, allow):
+def _kvm_fetch_check(url, allow, sha=None):
     """Forme de l'URL et adresses de son hôte, avant de lancer quoi que ce
     soit ; rend l'URL montrable (sans identifiants, requête ni fragment).
-    _KvmFetchRefused sinon."""
+    _KvmFetchRefused sinon ; aucun message ne recopie l'URL."""
     if not isinstance(url, str) or not url:
         raise _KvmFetchRefused("bad-url", "an http or https URL is required")
     if _ufg is not None:
         try:
-            _scheme, host, port, _path = _ufg.check_url(url)
+            scheme, host, port, _path = _ufg.check_url(url)
+            if scheme == "http" and not sha:
+                raise _KvmFetchRefused("sha256-required", KVM_HTTP_NEEDS_SHA)
             _ufg.resolve_checked(host, port, allow)
         except _ufg.FetchRefused as e:
             raise _KvmFetchRefused(e.reason, e.message) from None
         return _kvm_cli.public_url(url)
-    # REPLI-AVANT-1.99 : règles du script
+    # REPLI-AVANT-1.99 : règles du script, alignées sur la garde 1.99.0
+    try:
+        p = urllib.parse.urlsplit(url)
+        has_credentials = p.username is not None or p.password is not None
+    except ValueError:
+        has_credentials = False
+    if has_credentials:                # avant tout appel réseau, comme la garde
+        raise _KvmFetchRefused("credentials", "credentials in the URL are not supported")
     bad = _kvm_cli.check_url(url)
     if bad:
         raise _KvmFetchRefused("bad-url", f"url: {bad}")
-    p = urllib.parse.urlsplit(url)
+    if p.scheme == "http" and not sha:
+        raise _KvmFetchRefused("sha256-required", KVM_HTTP_NEEDS_SHA)
     port = p.port or (443 if p.scheme == "https" else 80)
     try:
         infos = socket.getaddrinfo(p.hostname, port, type=socket.SOCK_STREAM)
     except (socket.gaierror, UnicodeError, OSError):
         raise _KvmFetchRefused("dns", f"cannot resolve {p.hostname}") from None
-    bad = sorted({i[4][0] for i in infos if not _kvm_cli.address_allowed(i[4][0], allow)})
-    if bad:
-        raise _KvmFetchRefused("address", f"{p.hostname} resolves to a loopback, link-local, "
-                               "private or reserved address: refused unless allowed by "
-                               "iso_fetch.allow_private")
+    reasons = sorted({why for why in (_kvm_cli.address_refusal(i[4][0], allow) for i in infos)
+                      if why})
+    if reasons:
+        msg = f"{p.hostname} resolves to a {' and '.join(reasons)} address: refused"
+        if set(reasons) & _kvm_cli.ALWAYS_REFUSED:
+            msg += (" (cloud metadata, unspecified, multicast and broadcast addresses are "
+                    "never reachable)")
+        else:
+            msg += " unless allowed by iso_fetch.allow_private"
+        raise _KvmFetchRefused("address", msg)
     return _kvm_cli.public_url(url)
 
 
-def _kvm_fetch_download(url, dest, allow, max_bytes, min_free, progress, cancelled):
+KVM_HTTP_NEEDS_SHA = ("sha256 is required for a plain http URL (nothing else proves the file "
+                      "was not replaced on the way); or use https")
+
+
+def _kvm_fetch_download(url, dest, allow, max_bytes, min_free, progress, cancelled, hold=None):
     """Télécharge dans un fichier 0600 de `dest` ; rend (chemin, taille,
     sha256). Le fichier partiel est supprimé sur toute erreur ou annulation.
-    _KvmFetchRefused pour un refus ou un échec à montrer tel quel."""
-    if _ufg is not None:
-        fd, tmp = tempfile.mkstemp(dir=str(dest), prefix="dl-")
-        conn = None
-        try:
-            r, conn, _final = _ufg.open_checked(url, allow, timeout=60)
-            try:
-                total = int(r.getheader("Content-Length") or 0)
-            except ValueError:
-                total = 0
-            if total > max_bytes:
-                raise _KvmFetchRefused("too-large", f"the file is larger than the "
-                                       f"{max_bytes} bytes limit (iso_fetch.max_bytes)")
-            if total and shutil.disk_usage(dest).free - total < min_free:
-                raise _KvmFetchRefused("no-space", "not enough free space on the console "
-                                       "for this file")
-            h, done, next_check = hashlib.sha256(), 0, 0
-            with os.fdopen(fd, "wb") as f:
-                fd = None
-                while True:
-                    if cancelled():
-                        raise _UploadCancelled()
-                    chunk = r.read(KVM_UPLOAD_CHUNK)
-                    if not chunk:
-                        break
-                    done += len(chunk)
-                    if done > max_bytes:
-                        raise _KvmFetchRefused("too-large", f"the file is larger than the "
-                                               f"{max_bytes} bytes limit (iso_fetch.max_bytes)")
-                    if done >= next_check:
-                        next_check = done + 64 * KVM_UPLOAD_CHUNK
-                        if shutil.disk_usage(dest).free - len(chunk) < min_free:
-                            raise _KvmFetchRefused("no-space", "the console ran out of free "
-                                                   "space during the download")
-                    f.write(chunk)
-                    h.update(chunk)
-                    progress(done, total or None)
-            if total and done != total:
-                raise _KvmFetchRefused("short", "the download ended before the announced size")
-            return tmp, done, h.hexdigest()
-        except _ufg.FetchRefused as e:
-            Path(tmp).unlink(missing_ok=True)
-            raise _KvmFetchRefused(e.reason, e.message) from None
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
-        finally:
-            if fd is not None:
-                os.close(fd)
-            if conn is not None:
-                conn.close()
-    # REPLI-AVANT-1.99 : le téléchargement gardé du script (adresse contrôlée à
-    # chaque connexion, redirections bornées et revérifiées, sans mandataire)
-
-    def tick(done, total):
-        if cancelled():
-            raise _UploadCancelled()
-        progress(done, total)
-    if shutil.disk_usage(dest).free < min_free:
-        raise _KvmFetchRefused("no-space", "not enough free space on the console")
+    `hold` (_KvmStagingHold) : place réservée sur la console, mise à jour à
+    chaque bloc et revérifiée régulièrement (avec les autres réceptions en
+    cours sur le même système de fichiers). _KvmFetchRefused pour un refus ou
+    un échec à montrer tel quel."""
+    own_hold = hold is None
+    if own_hold:
+        hold = _KvmStagingHold(dest, min_free, "download")
     try:
-        return _kvm_cli.download_url(url, str(dest), tick, max_size=max_bytes, allow=allow)
-    except (_kvm_cli.Failure, _kvm_cli.UsageError) as e:
-        msg = getattr(e, "message", None) or str(e)
-        msg = msg.replace("add --allow-private=CIDR", "allow it with iso_fetch.allow_private") \
-            .replace("--max-size", "iso_fetch.max_bytes")
-        raise _KvmFetchRefused(getattr(e, "kind", "failed"), msg) from None
+        hold.reserve(0)
+        if _ufg is not None:
+            return _kvm_fetch_download_guard(url, dest, allow, max_bytes, progress, cancelled,
+                                             hold)
+        # REPLI-AVANT-1.99 : le téléchargement gardé du script (adresse contrôlée à
+        # chaque connexion, redirections bornées et revérifiées, pas de https vers
+        # http, sans mandataire)
+
+        def tick(done, total):
+            if cancelled():
+                raise _UploadCancelled()
+            hold.update(done, total)
+            progress(done, total)
+        try:
+            return _kvm_cli.download_url(url, str(dest), tick, max_size=max_bytes, allow=allow)
+        except (_kvm_cli.Failure, _kvm_cli.UsageError) as e:
+            msg = getattr(e, "message", None) or str(e)
+            msg = msg.replace("add --allow-private=CIDR", "allow it with iso_fetch.allow_private") \
+                .replace("--max-size", "iso_fetch.max_bytes")
+            raise _KvmFetchRefused(getattr(e, "kind", "failed"), msg) from None
+    except _KvmNoSpace as e:
+        raise _KvmFetchRefused("no-space", e.message) from None
+    finally:
+        if own_hold:
+            hold.release()
+
+
+def _kvm_fetch_download_guard(url, dest, allow, max_bytes, progress, cancelled, hold):
+    fd, tmp = tempfile.mkstemp(dir=str(dest), prefix="dl-")
+    hold.attach(tmp)
+    conn = None
+    try:
+        r, conn, _final = _ufg.open_checked(url, allow, timeout=60)
+        try:
+            total = int(r.getheader("Content-Length") or 0)
+        except ValueError:
+            total = 0
+        if total > max_bytes:
+            raise _KvmFetchRefused("too-large", f"the file is larger than the "
+                                   f"{max_bytes} bytes limit (iso_fetch.max_bytes)")
+        hold.update(0, total or None)
+        h, done = hashlib.sha256(), 0
+        with os.fdopen(fd, "wb") as f:
+            fd = None
+            while True:
+                if cancelled():
+                    raise _UploadCancelled()
+                chunk = r.read(KVM_UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                done += len(chunk)
+                if done > max_bytes:
+                    raise _KvmFetchRefused("too-large", f"the file is larger than the "
+                                           f"{max_bytes} bytes limit (iso_fetch.max_bytes)")
+                f.write(chunk)
+                h.update(chunk)
+                hold.update(done, total or None)
+                progress(done, total or None)
+        if total and done != total:
+            raise _KvmFetchRefused("short", "the download ended before the announced size")
+        return tmp, done, h.hexdigest()
+    except _ufg.FetchRefused as e:
+        Path(tmp).unlink(missing_ok=True)
+        raise _KvmFetchRefused(e.reason, e.message) from None
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+    finally:
+        if fd is not None:
+            os.close(fd)
+        if conn is not None:
+            conn.close()
+
+
+# --- place sur la console : réservations des réceptions en cours ---------------------------
+#
+# Un téléversement et un téléchargement écrivent dans le répertoire de
+# réception (`<état>/kvm-images/staging/`). Contrôler la place libre au
+# départ ne suffit pas : deux envois de 15 Gio lancés ensemble sur 20 Gio
+# libres passent chacun le contrôle, puis remplissent le disque de la console
+# (et son état, sa base d'actions). Chaque réception RÉSERVE donc sa taille
+# annoncée, sous un verrou : la place libre moins ce que les autres
+# réceptions du même système de fichiers doivent encore écrire doit garder
+# `iso_fetch.min_free_bytes`. Revérifié tous les KVM_SPACE_CHECK_EVERY octets
+# pendant l'écriture (le disque peut se remplir par ailleurs) ; arrêt propre
+# avec un message clair. Réservations propres à ce processus (une seule
+# console écrit dans un répertoire d'état).
+
+KVM_SPACE_CHECK_EVERY = 64 * KVM_UPLOAD_CHUNK
+_KVM_STAGING_LOCK = threading.Lock()
+_KVM_STAGING_HOLDS = set()
+
+
+class _KvmNoSpace(Exception):
+    def __init__(self, message, free=0, reserved=0):
+        super().__init__(message)
+        self.message, self.free, self.reserved = message, free, reserved
+
+
+class _KvmStagingHold:
+    """Une réception en cours : taille réservée (`need`), octets déjà écrits
+    (déjà comptés par le système de fichiers), chemin du fichier (pour le
+    nettoyage au démarrage, qui ne touche jamais un fichier suivi)."""
+
+    def __init__(self, staging, min_free, what="upload"):
+        self.dir = str(staging)
+        self.dev = os.stat(self.dir).st_dev
+        self.min_free, self.what = min_free, what
+        self.need = self.written = 0
+        self.path = None
+        self.next_check = KVM_SPACE_CHECK_EVERY
+
+    def remaining(self):
+        return max(0, self.need - self.written)
+
+    def _check(self, need):
+        """Sous _KVM_STAGING_LOCK : _KvmNoSpace si `need` octets de plus à
+        écrire ne laissent pas `min_free` une fois comptées les autres."""
+        others = sum(h.remaining() for h in _KVM_STAGING_HOLDS
+                     if h is not self and h.dev == self.dev)
+        free = shutil.disk_usage(self.dir).free
+        if free - others - need < self.min_free:
+            return free, others
+        return None
+
+    def reserve(self, need):
+        """Réserve `need` octets (annoncés) ; _KvmNoSpace si la place manque."""
+        with _KVM_STAGING_LOCK:
+            short = self._check(max(0, need - self.written))
+            if short:
+                free, others = short
+                raise _KvmNoSpace(
+                    f"not enough free space on the console for this file ({need} bytes "
+                    f"needed, {free} free, {others} reserved by other uploads or downloads, "
+                    f"{self.min_free} kept free by iso_fetch.min_free_bytes)", free, others)
+            self.need = max(need, self.written)
+            _KVM_STAGING_HOLDS.add(self)
+
+    def attach(self, path):
+        self.path = str(path)
+
+    def update(self, written, total=None):
+        """Octets écrits ; une taille annoncée plus grande que la réservation
+        est réservée ; place revérifiée tous les KVM_SPACE_CHECK_EVERY octets."""
+        self.written = written
+        if total and total > self.need:
+            self.reserve(total)
+        if written < self.next_check:
+            return
+        self.next_check = written + KVM_SPACE_CHECK_EVERY
+        with _KVM_STAGING_LOCK:
+            short = self._check(self.remaining())
+        if short:
+            raise _KvmNoSpace(f"the console ran out of free space during the {self.what} "
+                              f"(less than {self.min_free} bytes would stay free, "
+                              "iso_fetch.min_free_bytes): stopped, nothing kept", *short)
+
+    def release(self):
+        with _KVM_STAGING_LOCK:
+            _KVM_STAGING_HOLDS.discard(self)
+
+
+def _kvm_staging_active():
+    with _KVM_STAGING_LOCK:
+        return {h.path for h in _KVM_STAGING_HOLDS if h.path}
+
+
+KVM_STAGING_TTL = 24 * 3600            # au-delà, un reste sans action suivie est retiré
+
+
+def _kvm_staging_sweep(state=None, ttl=KVM_STAGING_TTL, now=None):
+    """Retire du répertoire de réception les restes `up-*` et `dl-*` (console
+    arrêtée en pleine réception ou pendant l'envoi aux hôtes) plus vieux que
+    `ttl` et qu'aucune réception en cours ne suit. Lancé au démarrage de la
+    console (pas des processus lecteurs). Rend les noms retirés."""
+    d = Path(state or _state_dir()) / _ks.NOTES_DIR / "staging"
+    now = time.time() if now is None else now
+    active = _kvm_staging_active()
+    removed = []
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return removed
+    for p in entries:
+        if not p.name.startswith(("up-", "dl-")) or str(p) in active:
+            continue
+        try:
+            st = p.lstat()
+            if not _stat.S_ISREG(st.st_mode) or now - st.st_mtime < ttl:
+                continue
+            p.unlink()
+            removed.append(p.name)
+        except OSError:
+            continue
+    if removed:
+        log.info("kvm staging: %d leftover file(s) removed", len(removed))
+    return removed
+
+
+# au démarrage de la console (un processus lecteur n'écrit rien)
+if not IS_READ_WORKER:
+    with contextlib.suppress(Exception):
+        _kvm_staging_sweep()
 
 
 # --- envoi d'images (téléversement, téléchargement), plusieurs hôtes ----------------------
@@ -23043,7 +23255,7 @@ def _kvm_run_cli(run, cmd, prefix=""):
         out.close()
 
 
-def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None):
+def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None, hold=None):
     """Envoie le fichier reçu à chaque hôte, l'un après l'autre (`image
     upload`), puis le supprime de la console, réussite ou échec. L'action
     finit `done` si tous les hôtes l'ont, `error` sinon, `cancelled` si
@@ -23075,6 +23287,8 @@ def _kvm_send_image(run, path, sha, size, hosts, pool, name, opts, url=None):
         failure = failure or type(e).__name__
     finally:
         Path(path).unlink(missing_ok=True)
+        if hold is not None:
+            hold.release()
         out = {"ok": failure is None and not cancelled, "pool": pool, "volume": name,
                "sha256": sha, "size": size, "hosts": results}
         if url:
@@ -23177,28 +23391,38 @@ def api_kvm_image_upload(host):
     length = request.content_length
     if not length:
         return _kvm_err("Content-Length required", 411)
-    limit = _kvm_upload_max()
+    _allow, limit, min_free = _kvm_fetch_policy()
     if length > limit:
         return _kvm_err(f"the file is larger than the {limit} bytes limit "
                         "(iso_fetch.max_bytes)", 413)
     try:
         staging = _kvm_cli.staging_dir(_state_dir())
-        free = shutil.disk_usage(staging).free
+        hold = _KvmStagingHold(staging, min_free, "upload")
     except OSError:
         return _kvm_err("no private staging directory: check the console state", 503)
-    if free < length + KVM_UPLOAD_SPARE:
-        return jsonify({"error": "not enough room on the console for this file",
-                        "need": length, "free": free}), 507
+    # place réservée sous verrou, avec les autres réceptions en cours
+    try:
+        hold.reserve(length)
+    except _KvmNoSpace as e:
+        return jsonify({"error": e.message, "reason": "no-space", "need": length,
+                        "free": e.free, "reserved": e.reserved}), 507
     public = ["harvester-kvm", "image", "upload", f"--pool={pool}", f"--name={name}",
               f"--hosts={','.join(hosts)}"]
     run, err = _kvm_image_run(host, f"kvm:image-upload:{host}/{pool}/{name}", hosts, pool, name,
                               public)
     if err:
+        hold.release()
         return err
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     _kvm_step(run, "receive", "running", f"receiving {name} ({_vp.fmt_bytes(length)})")
-    fd, path = tempfile.mkstemp(prefix="up-", dir=str(staging))        # 0600
+    try:
+        fd, path = tempfile.mkstemp(prefix="up-", dir=str(staging))        # 0600
+    except OSError:
+        hold.release()
+        _kvm_end(run, "error", 1, "no private staging directory")
+        return _kvm_err("no private staging directory: check the console state", 503)
+    hold.attach(path)
     try:
         prog = _vp.Progress(run.emit_progress, "receive", length)
         h, done = hashlib.sha256(), 0
@@ -23215,6 +23439,7 @@ def api_kvm_image_upload(host):
                 f.write(chunk)
                 h.update(chunk)
                 done += len(chunk)
+                hold.update(done)
                 prog.update(done)
         if done != length:
             raise ValueError(f"the upload stopped at {done} of {length} bytes")
@@ -23224,24 +23449,33 @@ def api_kvm_image_upload(host):
         if refusals:
             _kvm_step(run, "check", "error", "; ".join(refusals))
             Path(path).unlink(missing_ok=True)
+            hold.release()
             run.result = {"output": {"ok": False, "refusals": refusals, "sha256": got}}
             _kvm_end(run, "error", 2, refusals[0][:300])
             return jsonify({"error": refusals[0], "refusals": refusals, "kind": "refused",
                             "action_id": run.id}), 422
     except _UploadCancelled:
         Path(path).unlink(missing_ok=True)
+        hold.release()
         _kvm_step(run, "receive", "error", "cancelled, nothing kept")
         _kvm_end(run, "cancelled", 3, "cancelled, nothing kept")
         return jsonify({"error": "cancelled", "action_id": run.id}), 409
+    except _KvmNoSpace as e:                       # le disque s'est rempli pendant la réception
+        Path(path).unlink(missing_ok=True)
+        hold.release()
+        _kvm_step(run, "receive", "error", e.message)
+        _kvm_end(run, "error", 1, e.message[:300])
+        return jsonify({"error": e.message, "reason": "no-space", "action_id": run.id}), 507
     except Exception as e:                         # noqa: BLE001 : navigateur fermé, réseau
         Path(path).unlink(missing_ok=True)
+        hold.release()
         msg = _error_text(e)
         _kvm_step(run, "receive", "error", msg)
         _kvm_end(run, "error", 1, msg)
         return jsonify({"error": msg, "action_id": run.id}), 400
 
     def work():
-        _kvm_send_image(run, path, got, length, hosts, pool, name, opts)
+        _kvm_send_image(run, path, got, length, hosts, pool, name, opts, hold=hold)
     threading.Thread(target=work, daemon=True, name=f"kvm-upload-{run.id}").start()
     return _kvm_accepted(run, host=host, hosts=hosts, pool=pool, volume=name, sha256=got)
 
@@ -23270,21 +23504,25 @@ def api_kvm_image_fetch(host):
     allow, max_bytes, min_free = _kvm_fetch_policy()
     url = body.get("url")
     try:
-        shown = _kvm_fetch_check(url, allow)
+        shown = _kvm_fetch_check(url, allow, sha)
     except _KvmFetchRefused as e:
         return jsonify({"error": e.message, "reason": e.reason, "kind": "refused"}), 400
     try:
         staging = _kvm_cli.staging_dir(_state_dir())
-        if shutil.disk_usage(staging).free < min_free:
-            return jsonify({"error": "not enough free space on the console",
-                            "reason": "no-space"}), 507
+        hold = _KvmStagingHold(staging, min_free, "download")
     except OSError:
         return _kvm_err("no private staging directory: check the console state", 503)
+    try:
+        hold.reserve(0)                # au moins min_free, réceptions en cours comptées
+    except _KvmNoSpace as e:
+        return jsonify({"error": e.message, "reason": "no-space", "free": e.free,
+                        "reserved": e.reserved}), 507
     public = ["harvester-kvm", "image", "fetch", f"--url={shown}", f"--pool={pool}",
               f"--name={name}", f"--hosts={','.join(hosts)}"]
     run, err = _kvm_image_run(host, f"kvm:image-fetch:{host}/{pool}/{name}", hosts, pool, name,
                               public)
     if err:
+        hold.release()
         return err
 
     def work():
@@ -23299,29 +23537,37 @@ def api_kvm_image_fetch(host):
             prog["p"].update(done)
         try:
             path, size, got = _kvm_fetch_download(url, staging, allow, max_bytes, min_free,
-                                                  progress, lambda: getattr(run, "_cancel", False))
+                                                  progress, lambda: getattr(run, "_cancel", False),
+                                                  hold=hold)
         except _UploadCancelled:
+            hold.release()
             _kvm_step(run, "download", "error", "cancelled: nothing was sent to the host")
             return _kvm_end(run, "cancelled", 3, "cancelled: nothing was sent to the host")
         except _KvmFetchRefused as e:
+            hold.release()
             _kvm_step(run, "download", "error", e.message[:300])
             run.result = {"output": {"ok": False, "error": e.message, "reason": e.reason}}
             return _kvm_end(run, "error", 1, e.message[:300])
         except Exception as e:                     # noqa: BLE001 : jamais un chemin
-            log.warning("kvm image fetch failed: %r", e)
+            hold.release()
+            # jamais l'URL reçue (identifiants, jeton signé) ni le texte de
+            # l'exception (il peut la recopier) : l'URL montrable seulement
+            log.warning("kvm image fetch from %s failed: %s", shown, type(e).__name__)
             msg = f"download failed ({type(e).__name__})"
             _kvm_step(run, "download", "error", msg)
             return _kvm_end(run, "error", 1, msg)
+        hold.attach(path)
         if "p" in prog:
             prog["p"].finish()
         _kvm_step(run, "download", "done", f"{_vp.fmt_bytes(size)}, SHA-256 {got}")
         refusals = _kvm_check_received(path, sha, got)
         if refusals:
             Path(path).unlink(missing_ok=True)
+            hold.release()
             _kvm_step(run, "check", "error", "; ".join(refusals))
             run.result = {"output": {"ok": False, "refusals": refusals, "sha256": got}}
             return _kvm_end(run, "error", 2, refusals[0][:300])
-        _kvm_send_image(run, path, got, size, hosts, pool, name, opts, url=shown)
+        _kvm_send_image(run, path, got, size, hosts, pool, name, opts, url=shown, hold=hold)
     threading.Thread(target=work, daemon=True, name=f"kvm-fetch-{run.id}").start()
     return _kvm_accepted(run, host=host, hosts=hosts, pool=pool, volume=name, url=shown)
 
@@ -23348,7 +23594,8 @@ def api_kvm_image_verify(host, pool, volume):
     if sha:
         cmd.append(f"--sha256={sha}")
     run, err = _kvm_object_op(host, f"kvm:image-verify:{host}/{pool}/{volume}", cmd,
-                              [(host, "volume", f"{pool}/{volume}", "s")])
+                              [(host, "volume", f"{pool}/{volume}", "s"),
+                               (host, "pool", pool, "s")])
     if err:
         return err
     return _kvm_accepted(run, host=host, pool=pool, volume=volume)
@@ -23378,7 +23625,8 @@ def _kvm_delete_volume(host, pool, volume, image):
     cmd.append(f"--expect-delete={digest}")
     verb = "image-delete" if image else "vol-delete"
     run, err = _kvm_object_op(host, f"kvm:{verb}:{host}/{pool}/{volume}", cmd,
-                              [(host, "volume", f"{pool}/{volume}", "x")])
+                              [(host, "volume", f"{pool}/{volume}", "x"),
+                               (host, "pool", pool, "s")])
     if err:
         return err
     return _kvm_accepted(run, host=host, pool=pool, volume=volume)
@@ -23725,6 +23973,40 @@ def api_kvm_image_pools(host):
 
 
 # --- modèles ---------------------------------------------------------------------------
+#
+# Étiquette propre aux actions sur les modèles : elles ne visent aucun hôte.
+# `kvm-templates` n'a pas la forme `kvm:<hôte>` des actions d'hôte (un hôte
+# nommé `local` ou `kvm-templates` ne s'y mélange pas) et la clé des objets
+# tenus commence par `@`, impossible dans un nom d'hôte.
+# Propriétaire (décision : pas d'espace par personne, un seul espace de noms
+# partagé) : le modèle note qui l'a enregistré ; une autre personne ne peut ni
+# le remplacer ni le supprimer, sauf un administrateur.
+KVM_TEMPLATES_TAG = "kvm-templates"
+KVM_TEMPLATES_HOLD = "@templates"
+
+
+def _kvm_template_owner(name):
+    """(arguments --owner/--replace-other du script, None) ou (None, 403)
+    quand le modèle existant appartient à une autre personne et que la
+    personne n'est pas administrateur. Le script refait le contrôle."""
+    user = current_user()
+    args = []
+    if isinstance(user, str) and user and len(user) <= _ktpl.OWNER_MAX and not any(
+            ord(c) < 32 or ord(c) == 127 for c in user):
+        args.append(f"--owner={user}")
+    admin = ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["admin"]
+    try:
+        owner = _ktpl.load(_state_dir(), name).get("owner")
+    except (OSError, ValueError):
+        owner = None
+    if owner and owner != user:
+        if not admin:
+            return None, (jsonify({"error": f"template {name} belongs to {owner}: only they "
+                                            "or an administrator can replace or delete it",
+                                   "kind": "refused", "owner": owner}), 403)
+        args.append("--replace-other")
+    return args, None
+
 
 @app.route("/api/kvm/templates", methods=["POST"])
 @requires_auth
@@ -23745,12 +24027,16 @@ def api_kvm_template_save():
         return _kvm_err(str(e))
     if not isinstance(spec, dict):
         return _kvm_err("spec: a JSON object is expected")
+    owner_args, err = _kvm_template_owner(name)
+    if err:
+        return err
     path, cleanup, err = _kvm_spec_file(spec)
     if err:
         return err
-    cmd = _kvm_base("template", "save") + [f"--name={name}", f"--spec-file={path}"]
-    run, err = _kvm_object_op("local", f"kvm:template-save:{name}", cmd,
-                              [("local", "template", name, "x")], cleanup=cleanup)
+    cmd = _kvm_base("template", "save") + [f"--name={name}", f"--spec-file={path}"] + owner_args
+    run, err = _kvm_object_op(KVM_TEMPLATES_HOLD, f"kvm:template-save:{name}", cmd,
+                              [(KVM_TEMPLATES_HOLD, "template", name, "x")], cleanup=cleanup,
+                              cluster=KVM_TEMPLATES_TAG)
     if err:
         return err
     return _kvm_accepted(run, name=name)
@@ -23770,9 +24056,13 @@ def api_kvm_template_delete(template):
         return _kvm_err(str(e))
     if not _ktpl.path_of(_state_dir(), template).exists():
         return _kvm_err(f"template {template} does not exist", 404)
-    cmd = _kvm_base("template", "delete") + [f"--name={template}"]
-    run, err = _kvm_object_op("local", f"kvm:template-delete:{template}", cmd,
-                              [("local", "template", template, "x")])
+    owner_args, err = _kvm_template_owner(template)
+    if err:
+        return err
+    cmd = _kvm_base("template", "delete") + [f"--name={template}"] + owner_args
+    run, err = _kvm_object_op(KVM_TEMPLATES_HOLD, f"kvm:template-delete:{template}", cmd,
+                              [(KVM_TEMPLATES_HOLD, "template", template, "x")],
+                              cluster=KVM_TEMPLATES_TAG)
     if err:
         return err
     return _kvm_accepted(run, name=template)

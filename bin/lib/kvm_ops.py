@@ -960,9 +960,13 @@ def bump_generation(host):
         fcntl.flock(fd, fcntl.LOCK_EX)
         raw = os.read(fd, 32)
         try:
-            value = int(raw.strip() or b"0") + 1
+            value = int(raw.strip()) + 1
         except ValueError:
-            value = 1
+            # fichier neuf, vide ou abîmé : repartir d'une valeur prise sur
+            # l'horloge (en nanosecondes), plus grande que toute génération
+            # comptée jusqu'ici et gardée par un cache ; repartir de 1 ferait
+            # retomber sur une génération déjà vue et servir un relevé périmé
+            value = time.time_ns()
         os.lseek(fd, 0, os.SEEK_SET)
         os.ftruncate(fd, 0)
         os.write(fd, str(value).encode())
