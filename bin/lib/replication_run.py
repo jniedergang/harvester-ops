@@ -874,11 +874,27 @@ def _kind_of(obj):
     return _KINDS[obj["kind"]]
 
 
+def _snapshot_name(ctx, vol, kind, token, tries=8):
+    """Nom déterministe de l'instantané, sauf s'il est tenu par le reste d'une
+    exécution annulée : Longhorn recrée le `Snapshot` d'un instantané effacé
+    (`status.markRemoved`, sans étiquettes, `createSnapshot: false`) tant que
+    le moteur ne l'a pas purgé (vu sur Longhorn 1.11.2 après un `protect`
+    annulé : la relance refusait `snapshot-taken`). Le nom suivant de la
+    suite est alors pris ; une relance retrouve le sien de la même façon."""
+    name = op_name(ctx.plan_id, vol, ctx.gen, kind, token)
+    for i in range(1, tries):
+        cur = ctx.src.get(K_LH_SNAPSHOT, NS, name)
+        if cur is None or _owned(ctx, cur) or not _status(cur).get("markRemoved"):
+            return name
+        name = op_name(ctx.plan_id, vol, ctx.gen, kind, f"{token}#{i}")
+    return name
+
+
 def take_backups(ctx, op, items, kind, token=""):
     """Instantané puis sauvegarde de chaque volume (`items` : [(uid,
     volume)]), noms déterministes ; rend {volume: nom de la sauvegarde}."""
     labels = rp.plan_labels(ctx.plan_id, ctx.gen)
-    names = {vol: op_name(ctx.plan_id, vol, ctx.gen, kind, token) for _u, vol in items}
+    names = {vol: _snapshot_name(ctx, vol, kind, token) for _u, vol in items}
     for uid, vol in items:
         _ensure(ctx, "src", rp.snapshot(vol, names[vol], labels=dict(labels, **{rp.LABEL_VM: uid})), "snapshot")
 

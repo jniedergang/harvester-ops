@@ -2292,3 +2292,31 @@ def test_protect_dry_run_refuses_a_job_of_someone_else(world):
     assert res["exit"] == 2, res
     # le pré-contrôle le refuse déjà ; le dry-run ne l'aurait pas laissé passer
     assert res["code"] == "check" and "recurring-job-taken" in [f["code"] for f in res["findings"]], res
+
+
+@pytest.mark.parametrize("leftover, ok", [
+    ({"markRemoved": True}, True),      # reste d'un protect annulé, recréé par Longhorn
+    ({}, False),                        # instantané de quelqu'un d'autre : refusé
+])
+def test_protect_after_a_cancel_skips_the_removed_snapshot_longhorn_relists(world, leftover, ok):
+    w = world
+    uid = VMS["vm-a"]["uid"]
+    vol = "pvc-vm-a-data"
+    name = rr.op_name(w.pid, vol, 1, "first")
+    w.src.put(rr.K_LH_SNAPSHOT, {"metadata": {"name": name, "namespace": rr.NS,
+                                              "labels": {"longhornvolume": vol}},
+                                 "spec": {"volume": vol, "createSnapshot": False, "labels": None},
+                                 "status": dict({"readyToUse": False, "labels": {}}, **leftover)})
+    res = rr.protect(w.ctx(), interval=300)
+    if not ok:
+        assert res["exit"] == 1 and res["code"] == "snapshot-taken", res
+        return
+    assert res["exit"] == 0, res
+    first = [c[3] for c in mut_keys(w.src, "create") if c[1] == rr.K_LH_SNAPSHOT and vol in str(
+        w.src.obj(rr.K_LH_SNAPSHOT, rr.NS, c[3]) or {})]
+    assert first and name not in first
+    assert w.src.obj(rr.K_LH_SNAPSHOT, rr.NS, first[0])["metadata"]["labels"][rp.LABEL_VM] == uid
+    # une relance retrouve le même nom de remplacement : rien de nouveau
+    before = len(mut_keys(w.src, "create"))
+    assert rr.protect(w.ctx())["exit"] == 0
+    assert len(mut_keys(w.src, "create")) == before
