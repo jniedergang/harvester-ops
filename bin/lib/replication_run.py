@@ -175,6 +175,14 @@ class Ctx:
         self.steps = []             # [{"step", "seconds"}] pour `runs`
         self.locked = False
         self._beat = now()
+        self.quiet = False          # rien au journal (contrôle à blanc de `check`)
+        self.undo_until = None      # échéance du retour arrière (`begin_undo`)
+        self.undo_timed_out = False
+        # appelé quand le résultat est construit (la ligne de commande y masque
+        # ses signaux : une commande terminée n'est plus dite annulée)
+        self.on_finish = None
+        # un kubeconfig cité par une erreur de kubectl n'entre jamais au journal
+        db.hide_paths(getattr(src, "kubeconfig", None), getattr(dst, "kubeconfig", None))
 
     # -- compatibilité vm_transfer_run ---------------------------------------
     def kube(self, side):
@@ -214,7 +222,24 @@ class Ctx:
     def cluster(self, side):
         return self.plan["source_cluster"] if side == "source" else self.plan["target_cluster"]
 
+    # -- retour arrière borné ------------------------------------------------------
+    def begin_undo(self):
+        """Ouvre l'échéance UNIQUE du retour arrière (`undo_total`, 240 s par
+        défaut) : chaque attente est ensuite bornée par le temps qui reste,
+        et une fois l'échéance passée plus rien n'est tenté."""
+        if self.undo_until is None:
+            self.undo_until = self.now() + int(self.timeouts.get("undo_total") or rp.TIMEOUTS["undo_total"])
+            self.timeouts = _UndoTimeouts(self.timeouts, self)
+        return self.undo_until
+
+    def undo_expired(self):
+        if self.undo_until is not None and self.now() >= self.undo_until:
+            self.undo_timed_out = True
+        return self.undo_timed_out
+
     def event(self, operation, step, uid="", side="", level="info", code="", message="", facts=None):
+        if self.quiet:
+            return None
         # un événement du plan entier (sans côté) est rangé sous la cible :
         # c'est d'elle que la réplication se regarde (vue par hôte)
         return db.record_event(self.conn, operation, step=step, plan_id=self.plan_id, resource_uid=uid,
@@ -225,6 +250,25 @@ class Ctx:
 
     def tracker(self, phase, total):
         return vp.Progress(self.progress, phase, total, now=self.now)
+
+
+class _UndoTimeouts(dict):
+    """Délais pendant un retour arrière : jamais au-delà de son échéance."""
+
+    def __init__(self, base, ctx):
+        super().__init__(base)
+        self._ctx = ctx
+
+    def _cap(self, v):
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and self._ctx.undo_until is not None:
+            return min(v, max(1, int(self._ctx.undo_until - self._ctx.now())))
+        return v
+
+    def __getitem__(self, k):
+        return self._cap(super().__getitem__(k))
+
+    def get(self, k, default=None):
+        return self._cap(super().get(k, default))
 
 
 def error_code(e):
@@ -605,6 +649,8 @@ def _record_works(ctx, works, state):
 # ---------------------------------------------------------------------------
 
 def _result(ctx, code, exit_code, message="", **extra):
+    if ctx.on_finish is not None:
+        ctx.on_finish()
     out = {"exit": exit_code, "plan": ctx.plan_id, "state": (ctx.reload() or {}).get("state"),
            "code": code, "message": message}
     out.update(extra)
@@ -644,6 +690,38 @@ def _lock(ctx, command):
     ctx._beat = ctx.now()
 
 
+_GUARD_FIELDS = ("state", "error_origin", "generation", "vms", "selector", "selector_namespace", "mappings")
+
+
+def _plan_guard(plan):
+    """Ce qui, lu avant le verrou, ne doit pas avoir changé une fois le
+    verrou pris : état (et origine), génération, sélection des VMs."""
+    return json.dumps({k: (plan or {}).get(k) for k in _GUARD_FIELDS}, sort_keys=True, default=str)
+
+
+def _sel_key(sel):
+    return sorted((r["resource_uid"], r["state"]) for r in sel)
+
+
+def _lock_checked(ctx, command, before, select=None, sel_before=None):
+    """Le verrou, puis la précondition et la sélection refaites SOUS le
+    verrou : une autre commande a pu changer le plan entre la lecture et la
+    prise. Changé : verrou rendu, refus `state-changed` (rien n'est écrit)."""
+    _lock(ctx, command)
+    try:
+        _precondition(ctx, command)
+        changed = _plan_guard(ctx.plan) != before
+        if not changed and select is not None:
+            changed = select() != sel_before
+    except Refused:
+        changed = True
+    if changed:
+        _unlock(ctx)
+        raise Refused("state-changed", f"the plan changed while {command} was starting (now "
+                      f"{ctx.plan['state']}): read it again before running {command}",
+                      facts={"state": ctx.plan["state"]})
+
+
 def _unlock(ctx):
     if ctx.locked:
         db.release_lock(ctx.conn, ctx.plan_id, ctx.owner)
@@ -666,11 +744,28 @@ def _set_resources(ctx, uids, state, message=""):
                               by=ctx.by, action_id=ctx.action_id, message=message)
 
 
+_LATE = " (undo deadline reached)"
+
+
+def _undo_delete(ctx, kube, kind, ns, name):
+    """Suppression d'un retour arrière, dans son échéance : rien n'est
+    tenté une fois l'échéance passée (False)."""
+    if ctx.undo_expired():
+        return False
+    return run._undo_delete(ctx, kube, kind, ns, name)
+
+
 def _undo_created(ctx):
     """Retour arrière de ce que la commande a posé : étiquettes retirées,
-    objets créés supprimés, dans l'ordre inverse. Rend ce qui reste."""
+    objets créés supprimés, dans l'ordre inverse. Rend ce qui reste. Tout
+    tient dans l'échéance de `ctx.begin_undo()` : passée, chaque objet pas
+    encore défait est listé sans être tenté (`ctx.undo_timed_out`)."""
+    ctx.begin_undo()
     left = []
     for side, kind, ns, name, patch in reversed(ctx.undo_labels):
+        if ctx.undo_expired():
+            left.append(f"labels of {kind} {name}" + _LATE)
+            continue
         try:
             ctx.kube(side).patch(kind, ns, name, {"metadata": {"labels": patch}})
         except Exception:                       # noqa: BLE001
@@ -684,16 +779,30 @@ def _undo_created(ctx):
         # objet créé par cette commande : il sera supprimé juste après
         if (side, kind, ns, name) in ctx.created:
             continue
+        if ctx.undo_expired():
+            left.append(f"spec of {kind} {name}" + _LATE)
+            continue
         try:
             ctx.kube(side).patch(kind, ns, name, patch)
         except Exception:                       # noqa: BLE001
             left.append(f"spec of {kind} {name}")
     ctx.undo_specs.clear()
     for side, kind, ns, name in reversed(list(ctx.created)):
-        if not run._undo_delete(ctx, ctx.kube(side), kind, ns, name):
-            left.append(f"{kind} {ns + '/' if ns else ''}{name}")
+        if not _undo_delete(ctx, ctx.kube(side), kind, ns, name):
+            left.append(f"{kind} {ns + '/' if ns else ''}{name}" + (_LATE if ctx.undo_timed_out else ""))
     ctx.created.clear()
     return left
+
+
+def _undo_timeout(ctx, op, message, left):
+    """Le retour arrière a dépassé son échéance : ce qui reste est écrit au
+    journal, une ligne par objet (`plan/rollback`, code `undo-timeout`)."""
+    total = int(dict.get(ctx.timeouts, "undo_total") or rp.TIMEOUTS["undo_total"])
+    ctx.event(op, "rollback", level="error", code="undo-timeout",
+              message="undo stopped at its deadline, left: " + "; ".join(left)[:400],
+              facts={"left": left, "undo_total_s": total})
+    ctx.emit("rollback", "error", "undo deadline reached: " + "; ".join(left)[:300])
+    return _result(ctx, "undo-timeout", EXIT_FAIL, f"{message}; undo stopped at its deadline", left=left)
 
 
 # ---------------------------------------------------------------------------
@@ -1035,6 +1144,7 @@ def measure_start(ctx, interval=300):
     l'incrémental."""
     try:
         _precondition(ctx, "measure-start")
+        before = _plan_guard(ctx.plan)
         interval = rp.parse_duration(interval)
         if interval not in rp.CRON_STEPS or interval > 3600:
             raise Refused("bad-interval", "measure interval: a divisor of the hour, from 1 min")
@@ -1048,7 +1158,7 @@ def measure_start(ctx, interval=300):
                   for f in rp.volume_findings(d["lh_volume"], d["pvc"], d["sc"]) if f["level"] == "block"]
         if blocks:
             raise Refused("check", "a disk cannot be replicated", findings=blocks)
-        _lock(ctx, "measure-start")
+        _lock_checked(ctx, "measure-start", before)
     except Refused as e:
         return _refusal(ctx, "measure", e)
     except Cancelled as e:
@@ -1065,8 +1175,10 @@ def measure_start(ctx, interval=300):
         return _result(ctx, "measuring", EXIT_OK, f"measuring every {interval} s", interval_s=interval,
                        vms=len(uids))
     except Cancelled as e:
-        _undo_created(ctx)
+        left = _undo_created(ctx)
         _error(ctx, uids, f"measure start cancelled: {e}")
+        if ctx.undo_timed_out:
+            return _undo_timeout(ctx, "measure", f"measure start cancelled ({e})", left)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e))
     except Exception as e:                      # noqa: BLE001
         _error(ctx, uids, f"measure start failed: {e}")
@@ -1095,9 +1207,10 @@ def measure_stop(ctx):
     tâches supprimées (seulement celles du plan)."""
     try:
         _precondition(ctx, "measure-stop")
+        before = _plan_guard(ctx.plan)
         if probe(ctx, "src") != "ok":
             raise Refused("source-unreachable", "the source cluster does not answer")
-        _lock(ctx, "measure-stop")
+        _lock_checked(ctx, "measure-stop", before)
     except Refused as e:
         return _refusal(ctx, "measure", e)
     except Exception as e:                      # noqa: BLE001
@@ -1521,6 +1634,7 @@ def protect(ctx, interval=None, dry_run=False):
     uids = []
     try:
         _precondition(ctx, "protect")
+        before = _plan_guard(ctx.plan)
         src = collect_source(ctx)
         # une VM déjà basculée n'est plus protégée : ni tâche, ni étiquette sur
         # sa source arrêtée, ni volume de secours (son volume est activé)
@@ -1546,7 +1660,7 @@ def protect(ctx, interval=None, dry_run=False):
             ok = all(x["ok"] for x in dry)
             return _result(ctx, "dry-run", EXIT_OK if ok else EXIT_BLOCKED, "dry run", findings=findings, dry_run=dry)
         chosen, how = _choose_interval(ctx, interval)
-        _lock(ctx, "protect")
+        _lock_checked(ctx, "protect", before)
     except Refused as e:
         return _refusal(ctx, "protect", e, uids)
     except Cancelled as e:
@@ -1583,6 +1697,9 @@ def protect(ctx, interval=None, dry_run=False):
                        findings=findings)
     except Cancelled as e:
         left = _undo_created(ctx)
+        if ctx.undo_timed_out:
+            _error(ctx, uids, f"protect cancelled: {e}")
+            return _undo_timeout(ctx, "protect", f"protect cancelled ({e})", left)
         _error(ctx, uids, f"protect cancelled: {e}", left)
         return _result(ctx, "cancelled", EXIT_CANCELLED, str(e), left=left)
     except Exception as e:                      # noqa: BLE001
@@ -1775,10 +1892,14 @@ def _rollback_failover(ctx, sel, carnets):
     reviennent, la VM source repart comme elle tournait, les instantanés
     finaux de cette exécution disparaissent (les sauvegardes finales
     restent : le volume de secours a pu les appliquer)."""
+    ctx.begin_undo()
     left = []
     for r in sel:
         uid, ns, name = r["resource_uid"], r["namespace"], r["name"]
         vols = (carnets.get(uid) or {}).get("volumes") or []
+        if ctx.undo_expired():
+            left.append(f"{ns}/{name}: backup job, volume labels and source VM start not restored" + _LATE)
+            continue
         try:
             _restore_job(ctx, uid, len(vols))
             for v in vols:
@@ -1789,8 +1910,8 @@ def _rollback_failover(ctx, sel, carnets):
         ctx.event("failover", "rollback", uid, "source", level="warn" if not left else "error",
                   code="rolled-back", message="failover undone before activation")
     for side, kind, ns, name in reversed(list(ctx.created)):
-        if kind == K_LH_SNAPSHOT:
-            run._undo_delete(ctx, ctx.kube(side), kind, ns, name)
+        if kind == K_LH_SNAPSHOT and not _undo_delete(ctx, ctx.kube(side), kind, ns, name) and ctx.undo_timed_out:
+            left.append(f"{kind} {ns}/{name}" + _LATE)
     ctx.created.clear()
     ctx.undo_labels.clear()
     return left
@@ -1881,7 +2002,8 @@ def _final_applied(ctx, carnet, finals):
     return True
 
 
-def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=False, yes=False, dry_run=False):
+def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=False, yes=False, dry_run=False,
+             record=True):
     """(`protected`, `failing_over`, `error`) -> `failing_over` ->
     `failed_over` (ou `protected` si une partie seulement du plan bascule).
 
@@ -1893,16 +2015,21 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
     `force_unplanned` et une source vivante, la source est clôturée d'abord.
     Avant l'activation, une erreur ou une annulation remet tout en place ;
     après, rien n'est défait et la relance reprend à l'étape suivante, avec
-    la cible seule."""
-    opts = ctx.plan.get("options") or {}
-    tolerance = int(opts.get("skew_tolerance_s", rp.SKEW_TOLERANCE_S))
+    la cible seule. Une bascule restée ouverte (`runs`) ne se relance que
+    sur le même périmètre et le même mode (`open-run` sinon : `resume`).
+    `record=False` (à blanc seulement) : rien au journal."""
     uids = []
+    if dry_run and not record:
+        ctx.quiet = True
     try:
         if not planned and not yes and not dry_run:
             raise Refused("confirmation-required", "an unplanned failover needs --yes")
         _precondition(ctx, "failover")
+        before = _plan_guard(ctx.plan)
         sel = _select(ctx, vms)
         uids = [r["resource_uid"] for r in sel]
+        if not dry_run:
+            _check_open_run(ctx, sel, planned)
         s_state, d_state = probe(ctx, "src"), probe(ctx, "dst")
         if d_state != "ok":
             raise Refused("target-denied" if d_state == "denied" else "target-unreachable",
@@ -1937,7 +2064,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             raise Refused("check", "the pre-check refuses this failover", findings=findings)
         if dry_run:
             return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry)
-        _lock(ctx, "failover")
+        _lock_checked(ctx, "failover", before, lambda: _sel_key(_select(ctx, vms)), _sel_key(sel))
     except Refused as e:
         return _refusal(ctx, "failover", e, uids)
     except Cancelled as e:
@@ -1946,6 +2073,9 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
     except Exception as e:                      # noqa: BLE001
         return _preflight_failed(ctx, "failover", e, uids)
 
+    # réglages relus sous le verrou
+    opts = ctx.plan.get("options") or {}
+    tolerance = int(opts.get("skew_tolerance_s", rp.SKEW_TOLERANCE_S))
     op = "failover"
     mode = "planned" if planned else "unplanned"
     # --force-unplanned avec une source vivante : clôture d'abord
@@ -2114,7 +2244,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         _set_resources(ctx, back, "protected", "not failed over")
         rest = [x for x in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen) if x["state"] != "failed_over"]
         _set_state(ctx, "protected" if rest else "failed_over")
-        db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), options={"paused": paused_before})
+        _restore_paused(ctx, op, paused_before)
         db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, finished_at=ctx.dt(), result="ok",
                       vms=[f"{r['namespace']}/{r['name']}" for r in go], points=points, steps=ctx.steps,
                       by=ctx.by, action_id=ctx.action_id, run_id=run_id)
@@ -2129,11 +2259,13 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             left = _rollback_failover(ctx, sel, carnets) if planned or source_touched else []
             _set_resources(ctx, uids, "protected", "failover undone")
             _set_state(ctx, "protected", f"failover undone: {e}"[:500])
-            db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), options={"paused": paused_before})
+            _restore_paused(ctx, op, paused_before)
             db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, finished_at=ctx.dt(),
-                          result="rolled-back", vms=refs, points=points, steps=ctx.steps, by=ctx.by,
-                          action_id=ctx.action_id, run_id=run_id)
+                          result="undo-timeout" if ctx.undo_timed_out else "rolled-back", vms=refs,
+                          points=points, steps=ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=run_id)
             _unlock(ctx)
+            if ctx.undo_timed_out:
+                return _undo_timeout(ctx, op, f"{e} (failover undone in part)", left)
             if left:
                 ctx.event(op, "rollback", level="error", code="left", message="; ".join(left))
             if refused:
@@ -2146,6 +2278,38 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                       points=points, steps=ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=run_id)
         _error(ctx, uids, msg)
         return _result(ctx, "interrupted", EXIT_CANCELLED if cancelled else EXIT_FAIL, msg, run_id=run_id, **result)
+
+
+def _restore_paused(ctx, op, paused_before):
+    """Rend au suiveur l'état d'avant la bascule, seulement si personne n'a
+    changé `paused` depuis que la bascule l'a posé (à True) : un changement
+    venu d'ailleurs pendant la bascule est gardé."""
+    cur = (ctx.reload().get("options") or {}).get("paused")
+    if cur is True:
+        db.update_plan(ctx.conn, ctx.plan_id, now=ctx.dt(), options={"paused": paused_before})
+        ctx.reload()
+    elif cur != paused_before:
+        ctx.event(op, "pause-follower", level="warn", code="paused-kept",
+                  message=f"paused was changed to {cur} during the failover: kept", facts={"paused": cur})
+
+
+def _open_scope(ctx, run_):
+    """VMs d'une bascule ouverte qui restent à basculer."""
+    done = {f"{r['namespace']}/{r['name']}" for r in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen)
+            if r["state"] == "failed_over"}
+    return sorted(v for v in run_.get("vms") or [] if v not in done)
+
+
+def _check_open_run(ctx, sel, planned):
+    prev = _open_run(ctx, "failover")
+    have = _open_scope(ctx, prev) if prev else []
+    if not have:
+        return
+    want = sorted(f"{r['namespace']}/{r['name']}" for r in sel)
+    pmode = (prev.get("points") or {}).get("mode", "planned")
+    if want != have or pmode != ("planned" if planned else "unplanned"):
+        raise Refused("open-run", f"a {pmode} failover of {', '.join(have)} is not finished: "
+                      "run resume to finish it", facts={"vms": have, "mode": pmode, "hint": "resume"})
 
 
 def _bring_up(ctx, op, r, carnet, opts):
@@ -2250,6 +2414,7 @@ def unprotect(ctx, delete_backups=False, yes=False):
         if delete_backups and not yes:
             raise Refused("confirmation-required", "deleting backups needs --yes")
         _precondition(ctx, "unprotect")
+        before = _plan_guard(ctx.plan)
         prev = _open_run(ctx, "unprotect")
         delete_backups = bool(delete_backups or ((prev or {}).get("points") or {}).get("delete_backups"))
         held = _held_vms(ctx, prev, probe(ctx, "dst") == "ok")
@@ -2259,7 +2424,7 @@ def unprotect(ctx, delete_backups=False, yes=False):
             raise Refused("backups-in-use", "a failover already activated volumes of " + ", ".join(vms) +
                           ": the backups are kept; unprotect without --delete-backups",
                           facts={"vms": vms})
-        _lock(ctx, "unprotect")
+        _lock_checked(ctx, "unprotect", before)
     except Refused as e:
         return _refusal(ctx, "unprotect", e)
     except Exception as e:                      # noqa: BLE001
@@ -2314,8 +2479,9 @@ def unprotect(ctx, delete_backups=False, yes=False):
         return _result(ctx, "unprotected", EXIT_OK, "plan unprotected", left=left, left_selectors=selectors,
                        backups_deleted=deleted)
     except Cancelled as e:
+        # rien n'est défait : la relance (ou `resume`) termine la déprotection
         _unlock(ctx)
-        return _result(ctx, "cancelled", EXIT_CANCELLED, f"{e}: run unprotect again to finish")
+        return _result(ctx, "interrupted", EXIT_CANCELLED, f"{e}: run unprotect again to finish")
     except Exception as e:                      # noqa: BLE001
         _error(ctx, uids, f"unprotect failed: {e}")
         return _result(ctx, error_code(e), EXIT_FAIL, str(e))
@@ -2420,7 +2586,7 @@ def resume(ctx, yes=False):
         r = _open_run(ctx, "failover") or {}
         pts = r.get("points") or {}
         planned = pts.get("mode", "planned") == "planned"
-        return failover(ctx, vms=list(r.get("vms") or []) or None, planned=planned,
+        return failover(ctx, vms=(_open_scope(ctx, r) if r else None) or None, planned=planned,
                         force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r))
     if eff == "unprotecting":
         r = _open_run(ctx, "unprotect") or {}

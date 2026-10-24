@@ -2014,3 +2014,149 @@ def test_unprotect_reads_the_target_when_the_database_forgot_the_failover(tmp_pa
     assert res["exit"] == 2 and res["code"] == "backups-in-use"
     res = rr.unprotect(w.ctx())
     assert res["exit"] == 0 and mut_keys(w.dst, "delete") == []
+
+
+# ---------------------------------------------------------------------------
+# Revue de la tâche 5 : retour arrière borné, état relu sous le verrou,
+# `paused` gardé, bascule ouverte, contrôle à blanc muet
+# ---------------------------------------------------------------------------
+
+LATE = "(undo deadline reached)"
+
+
+@pytest.mark.parametrize("command,side,key,undo_total", [
+    ("protect", "dst", ("create", rr.K_SECRET), None),
+    ("protect", "dst", ("create", rr.K_SECRET), 60),
+    ("failover", "src", ("create", rr.K_LH_SNAPSHOT), None),
+    ("failover", "src", ("create", rr.K_LH_SNAPSHOT), 60),
+])
+def test_rollback_stops_at_one_overall_deadline(tmp_path, command, side, key, undo_total):
+    """API morte pendant l'annulation : chaque suppression réessaierait
+    jusqu'à 300 s ; une seule échéance (240 s par défaut, réglable) borne
+    tout le retour arrière, et ce qui reste est listé."""
+    w = World(tmp_path) if command == "protect" else protected(tmp_path)
+    at = {"n": 0}
+
+    def dead_then_cancel(name):
+        # bascule : au dernier des 5 instantanés finaux (4 sont à défaire)
+        at["n"] += 1
+        if command == "failover" and at["n"] < 5:
+            return
+        at["t"] = w.clock.now()
+        w.src.down = w.dst.down = True
+        raise rr.Cancelled("signal 15")
+    getattr(w, side).hooks[key] = dead_then_cancel
+    ctx = w.ctx(timeouts={"undo_total": undo_total} if undo_total else {})
+    res = rr.protect(ctx) if command == "protect" else rr.failover(ctx)
+    total = undo_total or rp.TIMEOUTS["undo_total"]
+    assert res["exit"] == 1 and res["code"] == "undo-timeout", res
+    assert [x for x in res["left"] if x.endswith(LATE)], res["left"]
+    assert w.clock.now() - at["t"] <= total + 10                 # une attente de 10 s au plus après l'échéance
+    ev = events(w, code="undo-timeout")
+    assert len(ev) == 1 and json.loads(ev[0]["facts"]) == {"left": res["left"], "undo_total_s": total}
+    assert db.get_lock(w.conn, w.pid) is None
+    if command == "failover":
+        assert db.list_runs(w.conn, w.pid)[-1]["result"] == "undo-timeout"
+
+
+def test_rollback_within_its_deadline_is_a_plain_cancel(tmp_path):
+    w = World(tmp_path)
+    w.dst.hooks[("create", rr.K_SECRET)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    ctx = w.ctx()
+    res = rr.protect(ctx)
+    assert res["exit"] == 3 and res["code"] == "cancelled" and not ctx.undo_timed_out
+    assert not [x for x in res.get("left") or [] if x.endswith(LATE)]
+
+
+def _move_state(w, state):
+    w.conn.execute("UPDATE plans SET state = ? WHERE id = ?", (state, w.pid))
+
+
+@pytest.mark.parametrize("command,side,key,change", [
+    # une autre commande a déplacé le plan entre la lecture et le verrou
+    ("protect", "dst", ("list", rr.K_SC), lambda w: _move_state(w, "measuring")),
+    # les VMs du plan ont changé
+    ("protect", "dst", ("list", rr.K_SC), lambda w: db.update_plan(w.conn, w.pid, vms=["default/vm-a"])),
+    # une génération nouvelle
+    ("protect", "dst", ("list", rr.K_SC),
+     lambda w: w.conn.execute("UPDATE plans SET generation = generation + 1 WHERE id = ?", (w.pid,))),
+    ("measure-start", "src", ("get", rr.K_VM), lambda w: db.update_plan(w.conn, w.pid, vms=["default/vm-a"])),
+    # la sélection de la bascule a changé (état d'une VM)
+    ("failover", "dst", ("list", rr.K_SC),
+     lambda w: db.set_resource_state(w.conn, w.pid, VMS["vm-b"]["uid"], "error", generation=1)),
+    ("failover", "dst", ("list", rr.K_SC), lambda w: _move_state(w, "error")),
+    ("unprotect", "dst", ("list", rr.K_LH_VOLUME), lambda w: _move_state(w, "error")),
+])
+def test_state_and_selection_are_checked_again_under_the_lock(tmp_path, command, side, key, change):
+    w = World(tmp_path) if command in ("protect", "measure-start") else protected(tmp_path)
+    kube = getattr(w, side)
+
+    def once(name):
+        kube.hooks.pop(key)
+        change(w)
+    kube.hooks[key] = once
+    before = len(w.src.mutations()) + len(w.dst.mutations())
+    ctx = w.ctx()
+    res = {"protect": lambda: rr.protect(ctx), "measure-start": lambda: rr.measure_start(ctx, "1m"),
+           "failover": lambda: rr.failover(ctx), "unprotect": lambda: rr.unprotect(ctx)}[command]()
+    assert res["exit"] == 2 and res["code"] == "state-changed", res
+    assert key not in kube.hooks                                  # le changement a bien eu lieu
+    assert len(w.src.mutations()) + len(w.dst.mutations()) == before
+    assert db.get_lock(w.conn, w.pid) is None
+
+
+@pytest.mark.parametrize("paused_before,meanwhile,fail,expected,kept_event", [
+    (False, None, False, False, False),
+    (True, None, False, True, False),
+    (True, False, False, False, True),            # changé pendant la bascule : gardé
+    (True, False, True, False, True),             # idem quand la bascule est défaite
+])
+def test_failover_keeps_a_paused_change_made_meanwhile(tmp_path, paused_before, meanwhile, fail, expected,
+                                                       kept_event):
+    w = protected(tmp_path, vms=("vm-a",))
+    db.update_plan(w.conn, w.pid, options={"paused": paused_before})
+    key = ("create", rr.K_LH_SNAPSHOT)
+
+    def hook(name):
+        w.src.hooks.pop(key)
+        if meanwhile is not None:
+            db.update_plan(w.conn, w.pid, options={"paused": meanwhile})
+        if fail:
+            raise RuntimeError("injected failure")
+    w.src.hooks[key] = hook
+    res = rr.failover(w.ctx())
+    assert res["exit"] == (1 if fail else 0), res
+    assert w.plan()["options"]["paused"] is expected
+    assert bool(events(w, code="paused-kept")) is kept_event
+
+
+def test_an_open_failover_is_only_run_again_on_its_scope(tmp_path):
+    w = protected(tmp_path, vms=("vm-a", "vm-b"))
+    w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(RuntimeError("apiserver gone"))
+    assert rr.failover(w.ctx())["code"] == "interrupted"
+    w.dst.hooks.clear()
+    for kw in ({"vms": ["default/vm-a"]}, {"planned": False, "yes": True}):
+        res = rr.failover(w.ctx(), **kw)
+        assert res["exit"] == 2 and res["code"] == "open-run" and "resume" in res["message"], (kw, res)
+        assert res["facts"] == {"vms": ["default/vm-a", "default/vm-b"], "mode": "planned", "hint": "resume"}
+    res = rr.resume(w.ctx())
+    assert res["exit"] == 0 and w.plan()["state"] == "failed_over", res
+
+
+def test_failover_dry_run_without_record_writes_no_event(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    n = len(events(w))
+    assert rr.failover(w.ctx(), dry_run=True, record=False)["code"] == "dry-run"
+    assert rr.failover(w.ctx(), planned=False, dry_run=True, record=False)["code"] == "source-reachable"
+    assert len(events(w)) == n
+    assert rr.failover(w.ctx(), planned=False, dry_run=True)["code"] == "source-reachable"
+    assert len(events(w)) > n                                    # la commande, elle, garde sa trace
+
+
+def test_unprotect_cancelled_is_interrupted_not_undone(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("delete", rr.K_LH_VOLUME)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 3 and res["code"] == "interrupted" and w.plan()["state"] == "unprotecting", res
+    w.dst.hooks.clear()
+    assert rr.resume(w.ctx())["code"] == "unprotected"

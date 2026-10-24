@@ -15,7 +15,9 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication plan show P [--role R]
   harvester-replication plan delete P
   harvester-replication plan set P [--rpo D] [--paused true|false] [--follow M]
-        [--skew-tolerance D] [--timeout NOM=S ...]   (NOM= retire la surcharge)
+        [--skew-tolerance D] [--timeout NOM=S ...]   (NOM= retire la surcharge ;
+        --interval et --retain refusés : `protect --interval`, rétention fixée
+        à la création en attendant la décision 56)
   harvester-replication check P [--phase protect|failover|failover-unplanned] [--force-unplanned]
   harvester-replication measure start P [--interval 5m]
   harvester-replication measure stop P
@@ -24,13 +26,14 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
         [--block 2Mi] [--throughput 72Mi] [--write-size 4096]
   harvester-replication protect P [--dry-run] [--interval 5m]
   harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console]
+        [--timeout client=S]
   harvester-replication status [P] [--host H]
   harvester-replication resources --host H [--side source|target|any] [--role R]
   harvester-replication events (--resource UID | --plan P | --host H) [--limit N] [--before ID|DATE]
-  harvester-replication failover P [--vm ns/nom ...] [--unplanned --yes]
-        [--force-unplanned] [--accept-skew] [--dry-run]
-  harvester-replication resume P [--yes]
-  harvester-replication unprotect P [--delete-backups --yes]
+  harvester-replication failover P (--vm ns/nom ... | --all-vms --yes) [--unplanned --yes]
+        [--force-unplanned] [--accept-skew] [--dry-run]   (les deux dernières avec --unplanned)
+  harvester-replication resume P
+  harvester-replication unprotect P --yes [--delete-backups]
 
 P : l'identifiant (`rp-<12 hex>`) ou le nom du plan.
 
@@ -59,12 +62,17 @@ d'état) ni secret n'apparaît dans une sortie ou au journal.
 Les valeurs se passent sous la forme `--option=valeur` (ce que construit la
 console) : une valeur qui commence par un tiret reste une valeur.
 
-Codes de sortie : 0 réussite, 1 échec, 2 refus du contrôle préalable ou
-erreur d'usage, 3 annulation (SIGTERM, SIGHUP ou SIGINT : `protect` et une
-bascule pas encore activée défont ce qu'elles ont posé ; après une
-activation rien n'est défait, la relance termine), 4 objectif de RPO dépassé
-(`status` seulement, pour une sonde). `follow` arrêté par un signal sort en 0
-après avoir rendu ses baux : c'est sa fin normale.
+Codes de sortie : 0 réussite, 1 échec (dont `undo-timeout` : un retour
+arrière a atteint son échéance unique `undo_total`, 240 s par défaut, ce qui
+reste est listé dans `left`), 2 refus du contrôle préalable ou erreur
+d'usage, 3 annulation (SIGTERM, SIGHUP ou SIGINT) : kind `cancelled` quand
+`protect`, la mesure ou une bascule pas encore activée ont défait ce qu'elles
+avaient posé, kind `interrupted` (`resume_required: true`) après une
+activation ou pendant une déprotection, où rien n'est défait et `resume`
+termine ; 4 objectif de RPO dépassé (`status` seulement, pour une sonde, avec
+`ok: true`). Après le premier signal, les suivants sont ignorés jusqu'à
+l'échéance du retour arrière, puis reprennent leur effet. `follow` arrêté
+par un signal sort en 0 après avoir rendu ses baux : c'est sa fin normale.
 
 La ligne de commande agit avec les droits du kubeconfig qu'elle reçoit ; les
 rôles de la console (lecture, opérateur, administrateur) sont appliqués par
@@ -99,8 +107,9 @@ from kube import Kube, cluster_config  # noqa: E402
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_CANCELLED, EXIT_RPO = 0, 1, 2, 3, 4
 CANCEL_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
 # délai d'un appel kubectl : un cluster pendu coûte au plus 30 s par appel
-# (et par tour au suiveur, qui ne relit pas un cluster tombé dans le tour)
-CLIENT_TIMEOUT = 30
+# (et par tour au suiveur, qui ne relit pas un cluster tombé dans le tour) ;
+# réglable par plan (`--timeout client=S` de plan create/set) et par commande
+CLIENT_TIMEOUT = rp.TIMEOUTS["client"]
 ROLES = rp.ROLES
 
 # points d'injection des tests : clients des clusters, horloge, attente
@@ -110,7 +119,8 @@ SLEEP = time.sleep
 
 # ce qu'une sortie ne doit jamais montrer (chemins), rempli au démarrage
 _HIDDEN = []
-_CANCEL = {"signal": None}
+# signal reçu, échéance du retour arrière, contexte de la commande en cours
+_CANCEL = {"signal": None, "deadline": None, "ctx": None, "finished": False}
 
 
 class Cancelled(rr.Cancelled):
@@ -148,23 +158,16 @@ class Parser(argparse.ArgumentParser):
 # ---------------------------------------------------------------------------
 
 def scrub(text):
-    """Retire les chemins connus (kubeconfigs, base, répertoire d'état,
-    configuration, répertoire personnel) d'un texte sorti."""
-    s = str(text)
-    for h in sorted(set(_HIDDEN), key=len, reverse=True):
-        if h and len(h) > 1:
-            s = s.replace(h, "<hidden>")
-    return s
+    """Retire d'un texte sorti les chemins connus (kubeconfigs, base,
+    répertoire d'état, configuration, répertoire personnel, temporaires),
+    seulement là où ils apparaissent comme chemins, et tout chemin absolu
+    sous /home, /root, /var/lib, /tmp (`replication_db.scrub_text`, la même
+    fonction que le registre)."""
+    return db.scrub_text(text, _HIDDEN)
 
 
 def _scrub_obj(obj):
-    if isinstance(obj, str):
-        return scrub(obj)
-    if isinstance(obj, dict):
-        return {k: _scrub_obj(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_scrub_obj(v) for v in obj]
-    return obj
+    return db.scrub_value(obj, _HIDDEN)
 
 
 def _hide(*paths):
@@ -175,6 +178,8 @@ def _hide(*paths):
                 _HIDDEN.append(os.path.abspath(str(p)))
             except (TypeError, ValueError):
                 pass
+    # le registre les connaît aussi : rien ne passe par une écriture directe
+    db.hide_paths(*[p for p in paths if p])
 
 
 def step(sid, status, msg=""):
@@ -185,7 +190,10 @@ def step(sid, status, msg=""):
 
 
 def print_json(obj):
-    print(scrub(json.dumps(obj, indent=1, default=str)))
+    # masqué AVANT la sérialisation : un chemin non ASCII serait échappé
+    # (\uXXXX) dans le texte JSON et échapperait au masquage
+    plain = json.loads(json.dumps(obj, default=str))
+    print(json.dumps(_scrub_obj(plain), indent=1))
 
 
 def fail_exit(want_json, sid, message, kind, code, data=None):
@@ -227,12 +235,41 @@ def scrubbed_journal():
         db.record_event = orig
 
 
+def _undo_total():
+    ctx = _CANCEL.get("ctx")
+    t = dict.get(ctx.timeouts, "undo_total") if ctx is not None else None
+    return int(t or rp.TIMEOUTS["undo_total"])
+
+
 def _on_cancel_signal(signum, _frame):
-    # un seul coup : un second signal n'interrompt pas le retour arrière
-    for sig in CANCEL_SIGNALS:
-        signal.signal(sig, signal.SIG_IGN)
-    _CANCEL["signal"] = signal.Signals(signum).name
-    raise Cancelled(signal.Signals(signum).name)
+    """Premier signal : `Cancelled` dans le fil principal (le déroulé défait
+    ce qu'il a posé). Les suivants, et tout signal pendant un retour arrière,
+    sont ignorés jusqu'à l'échéance de ce retour arrière (`undo_total`) ;
+    passée l'échéance, un signal reprend son effet par défaut."""
+    if _CANCEL.get("finished"):
+        return                      # résultat construit : la commande n'est plus annulable
+    name = signal.Signals(signum).name
+    ctx = _CANCEL.get("ctx")
+    undoing = ctx is not None and ctx.undo_until is not None
+    if _CANCEL["signal"] is None and not undoing:
+        _CANCEL["signal"] = name
+        _CANCEL["deadline"] = NOW() + _undo_total()
+        raise Cancelled(name)
+    deadline = ctx.undo_until if undoing else _CANCEL["deadline"]
+    if deadline is not None and NOW() < deadline:
+        return
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def _block_signals():
+    """Le résultat de la commande est construit : un signal qui arrive
+    maintenant reste en attente, puis est jeté (`cancel_on_signals`). Une
+    commande terminée n'est jamais dite annulée. Le drapeau couvre un
+    processus à plusieurs fils, où le signal peut arriver par un autre fil."""
+    _CANCEL["finished"] = True
+    if threading.current_thread() is threading.main_thread():
+        signal.pthread_sigmask(signal.SIG_BLOCK, CANCEL_SIGNALS)
 
 
 @contextlib.contextmanager
@@ -246,8 +283,14 @@ def cancel_on_signals():
     try:
         yield
     finally:
+        # un signal resté en attente après la fin est jeté (SIG_IGN avant le
+        # déblocage), puis les gestionnaires d'avant reviennent
+        for sig in CANCEL_SIGNALS:
+            signal.signal(sig, signal.SIG_IGN)
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, CANCEL_SIGNALS)
         for sig, h in saved.items():
             signal.signal(sig, h)
+        _CANCEL.update(ctx=None, finished=False)
 
 
 # ---------------------------------------------------------------------------
@@ -327,9 +370,10 @@ def _pairs(values, kind, what):
 
 
 def parse_timeouts(values):
-    """`--timeout NOM=S` d'une commande : (surcharges, délai client)."""
+    """`--timeout NOM=S` d'une commande : (surcharges, délai client ou None
+    s'il n'est pas donné)."""
     raw = _pairs(values, "bad-timeout", "--timeout")
-    client = CLIENT_TIMEOUT
+    client = None
     if "client" in raw:
         try:
             client = rp.parse_duration(raw.pop("client"))
@@ -350,15 +394,24 @@ def system_user():
         return ""
 
 
+def plan_client_timeout(plan):
+    """Délai d'un appel kubectl réglé sur le plan (`timeouts.client`)."""
+    return int(((plan.get("options") or {}).get("timeouts") or {}).get("client") or CLIENT_TIMEOUT)
+
+
 def make_ctx(args, conn, plan):
     overrides, client_timeout = parse_timeouts(getattr(args, "timeout", None))
+    client_timeout = client_timeout or plan_client_timeout(plan)
     fk, tk = getattr(args, "from_kubeconfig", None), getattr(args, "to_kubeconfig", None)
     _hide(fk, tk)
     src = cluster_client(plan["source_cluster"], fk, client_timeout) or Unreachable(plan["source_cluster"])
     dst = cluster_client(plan["target_cluster"], tk, client_timeout) or Unreachable(plan["target_cluster"])
-    return rr.Ctx(conn, plan["id"], src, dst, emit=step, sleep=SLEEP, now=NOW, timeouts=overrides,
-                  by=args.by or system_user(), action_id=args.id or "",
-                  through_rancher=through_rancher(tk, dst))
+    ctx = rr.Ctx(conn, plan["id"], src, dst, emit=step, sleep=SLEEP, now=NOW, timeouts=overrides,
+                 by=args.by or system_user(), action_id=args.id or "",
+                 through_rancher=through_rancher(tk, dst))
+    ctx.on_finish = _block_signals
+    _CANCEL["ctx"] = ctx
+    return ctx
 
 
 def utcnow():
@@ -380,15 +433,27 @@ def _text_result(res):
     return lines
 
 
+def _kind(code, res):
+    """`kind` d'un résultat en échec. En sortie 3 : `cancelled` (ce qui
+    avait été posé est défait) ou `interrupted` (après une activation, ou une
+    déprotection commencée : rien n'est défait, `resume` termine)."""
+    if res.get("code") == "interrupted":
+        return "interrupted"
+    if code == EXIT_CANCELLED:
+        return "cancelled"
+    return res.get("code") or "failed"
+
+
 def finish(args, res):
     """Le résultat d'une commande du déroulé : code de sortie et objet."""
+    _block_signals()                # la commande est finie : plus d'annulation
     code = int(res.get("exit", EXIT_FAIL))
-    if _CANCEL["signal"] and code == EXIT_FAIL:
+    if _CANCEL["signal"] and code == EXIT_FAIL and res.get("code") != "undo-timeout":
         # annulation reçue pendant une étape qui ne la distingue pas d'un échec
         code = EXIT_CANCELLED
     ok = code == EXIT_OK
     out = {"ok": ok, "error": None if ok else (res.get("message") or res.get("code") or "failed"),
-           "kind": None if ok else ("cancelled" if code == EXIT_CANCELLED else res.get("code") or "failed")}
+           "kind": None if ok else _kind(code, res), "resume_required": res.get("code") == "interrupted"}
     out.update({k: v for k, v in res.items() if k != "exit"})
     if not ok:
         print(f"error: {scrub(out['error'])}", file=sys.stderr)
@@ -507,11 +572,27 @@ def cmd_plan_show(args):
     return EXIT_OK
 
 
+@contextlib.contextmanager
+def plan_lock(conn, plan, command):
+    """Le verrou des commandes du plan, le temps d'une écriture du registre :
+    refus `locked` (code 2) tant qu'une autre commande le tient."""
+    owner = db.owner_id("cli")
+    try:
+        db.acquire_lock(conn, plan["id"], command, owner, now=utcnow())
+    except db.Locked as e:
+        raise UsageError(f"plan {plan['name']} is busy: {e.holder.get('command')} is running", "locked") from None
+    try:
+        yield
+    finally:
+        db.release_lock(conn, plan["id"], owner)
+
+
 def cmd_plan_delete(args):
     conn = open_db(args)
     plan = find_plan(conn, args.plan)
     try:
-        db.delete_plan(conn, plan["id"])
+        with plan_lock(conn, plan, "plan-delete"):
+            db.delete_plan(conn, plan["id"])
     except db.StateConflict as e:
         raise UsageError(f"plan {plan['name']} is {e.current}: only a draft or unprotected plan can be deleted",
                          "state") from None
@@ -532,6 +613,12 @@ def _bool(value, what):
 
 
 def cmd_plan_set(args):
+    if args.interval is not None:
+        raise UsageError("the interval lives in the source backup jobs: change it with "
+                         "`protect P --interval D` (plan set cannot)", "not-settable")
+    if args.retain is not None:
+        raise UsageError("retain is fixed when the plan is created (changing it later is pending product "
+                         "decision 56)", "not-settable")
     conn = open_db(args)
     plan = find_plan(conn, args.plan)
     fields, options = {}, {}
@@ -543,22 +630,26 @@ def cmd_plan_set(args):
         options["follow"] = args.follow
     if args.skew_tolerance is not None:
         options["skew_tolerance_s"] = args.skew_tolerance
-    if args.timeout:
-        cur = dict((plan.get("options") or {}).get("timeouts") or {})
-        for k, v in _pairs(args.timeout, "bad-timeout", "--timeout").items():
-            if v == "":
-                cur.pop(k, None)               # NOM= : retour à la valeur par défaut
-            else:
-                cur[k] = v
-        options["timeouts"] = cur
-    if options:
-        fields["options"] = options
-    if not fields:
+    timeouts = _pairs(args.timeout, "bad-timeout", "--timeout") if args.timeout else None
+    if not fields and not options and timeouts is None:
         raise UsageError("nothing to set: give --rpo, --paused, --follow, --skew-tolerance or --timeout")
-    try:
-        new = db.update_plan(conn, plan["id"], now=utcnow(), **fields)
-    except rp.PlanError as e:
-        raise UsageError(str(e), e.code) from None
+    with plan_lock(conn, plan, "plan-set"):
+        if timeouts is not None:
+            # relu sous le verrou : `NOM=` retire une surcharge du plan tel qu'il est
+            plan = db.get_plan(conn, plan["id"]) or plan
+            cur = dict((plan.get("options") or {}).get("timeouts") or {})
+            for k, v in timeouts.items():
+                if v == "":
+                    cur.pop(k, None)           # NOM= : retour à la valeur par défaut
+                else:
+                    cur[k] = v
+            options["timeouts"] = cur
+        if options:
+            fields["options"] = options
+        try:
+            new = db.update_plan(conn, plan["id"], now=utcnow(), **fields)
+        except rp.PlanError as e:
+            raise UsageError(str(e), e.code) from None
     changed = {k: new[k] for k in ("rpo_objective_s",) if "rpo_objective_s" in fields}
     changed.update({k: (new.get("options") or {}).get(k) for k in options})
     _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(sorted(changed)), changed, args)
@@ -583,9 +674,10 @@ def cmd_check(args):
         raise UsageError("--force-unplanned goes with --phase failover-unplanned")
     _conn, plan, ctx = _plan_ctx(args)
     if args.phase != "protect":
-        # la bascule à blanc : contrôles, carnets et dry-run serveur, rien d'écrit
+        # la bascule à blanc : contrôles, carnets et dry-run serveur, rien
+        # d'écrit, ni sur les clusters ni au journal
         return finish(args, rr.failover(ctx, planned=args.phase == "failover",
-                                        force_unplanned=args.force_unplanned, dry_run=True))
+                                        force_unplanned=args.force_unplanned, dry_run=True, record=False))
     step("check", "running", "reading both clusters")
     try:
         src = rr.collect_source(ctx)
@@ -600,6 +692,7 @@ def cmd_check(args):
         step("check", "error", str(e)[:400])
         return finish(args, {"exit": EXIT_FAIL, "plan": plan["id"], "state": plan["state"],
                              "code": rr.error_code(e), "message": f"pre-check failed: {e}"})
+    _block_signals()                # lecture finie : plus d'annulation
     blocked = rp.blocking(findings)
     step("check", "error" if blocked else "done",
          "the pre-check refuses this protection" if blocked else "no blocker")
@@ -682,17 +775,33 @@ def cmd_failover(args):
     vms = _vm_refs(args.vm)
     if args.force_unplanned and not args.unplanned:
         raise UsageError("--force-unplanned goes with --unplanned")
+    if args.accept_skew and not args.unplanned:
+        raise UsageError("--accept-skew goes with --unplanned")
+    if vms and args.all_vms:
+        raise UsageError("--vm and --all-vms: choose one")
+    if not args.dry_run:
+        if not vms and not args.all_vms:
+            raise UsageError("failing every VM of the plan over needs --all-vms and --yes (or name them with --vm)",
+                             "confirmation-required")
+        if args.all_vms and not args.yes:
+            raise UsageError("--all-vms needs --yes", "confirmation-required")
     _conn, _plan, ctx = _plan_ctx(args)
     return finish(args, rr.failover(ctx, vms=vms, planned=not args.unplanned, accept_skew=args.accept_skew,
                                     force_unplanned=args.force_unplanned, yes=args.yes, dry_run=args.dry_run))
 
 
 def cmd_resume(args):
+    # pas de --yes : la reprise refait la commande rangée avec la confirmation
+    # donnée à son départ (mode, VMs, --force-unplanned de sa ligne `runs`)
     _conn, _plan, ctx = _plan_ctx(args)
-    return finish(args, rr.resume(ctx, yes=args.yes))
+    return finish(args, rr.resume(ctx))
 
 
 def cmd_unprotect(args):
+    if not args.yes:
+        # les volumes de secours de la cible sont supprimés
+        raise UsageError("unprotect deletes the standby volumes on the target: it needs --yes",
+                         "confirmation-required")
     _conn, _plan, ctx = _plan_ctx(args)
     return finish(args, rr.unprotect(ctx, delete_backups=args.delete_backups, yes=args.yes))
 
@@ -701,11 +810,14 @@ def cmd_unprotect(args):
 # Suiveur
 # ---------------------------------------------------------------------------
 
-def _follow_client(name):
-    c = cluster_client(name)
-    if c is None:
-        raise LookupError(f"unknown cluster {name}")
-    return c
+def follow_client_timeout(conn, name, override=None):
+    """Délai d'un appel kubectl du suiveur vers un cluster : `follow
+    --timeout client=S`, sinon le plus grand `timeouts.client` des plans où
+    ce cluster est source ou cible, sinon 30 s."""
+    if override:
+        return override
+    vals = [plan_client_timeout(p) for p in db.list_plans(conn, host=name)]
+    return max(vals) if vals else CLIENT_TIMEOUT
 
 
 def _round_line(report):
@@ -717,6 +829,10 @@ def _round_line(report):
 
 
 def cmd_follow(args):
+    overrides, client_override = parse_timeouts(args.timeout)
+    if overrides:
+        raise UsageError("follow: only --timeout client=S (the plan wait settings are set with plan set)",
+                         "bad-timeout")
     conn = open_db(args)
     plan_ids = None
     if args.plan:
@@ -734,7 +850,19 @@ def cmd_follow(args):
                              f"{' '.join(scrub(message).split())}\n")
             sys.stderr.flush()
 
-    follower = rf.Follower(conn, _follow_client, owner, now=NOW, modes=modes, plan_ids=plan_ids,
+    def client(name):
+        c = cluster_client(name, timeout=follow_client_timeout(conn, name, client_override))
+        if c is None:
+            raise LookupError(f"unknown cluster {name}")
+        return c
+
+    def refresh_timeouts():
+        # réglage du plan changé à chaud : pris au tour suivant
+        for name, c in follower.clients.items():
+            if hasattr(c, "timeout"):
+                c.timeout = follow_client_timeout(conn, name, client_override)
+
+    follower = rf.Follower(conn, client, owner, now=NOW, modes=modes, plan_ids=plan_ids,
                            take_over=args.take_over, emit=log)
     stopper = rf.Stopper()
     saved = {s: signal.getsignal(s) for s in CANCEL_SIGNALS}
@@ -757,6 +885,7 @@ def cmd_follow(args):
             return EXIT_FAIL if report.get("error") else EXIT_OK
 
         def on_round(report):
+            refresh_timeouts()
             if args.console:
                 log("round", "error" if report.get("error") else "info", _round_line(report))
             else:
@@ -871,6 +1000,21 @@ def _spec_tokens(path):
     return out
 
 
+EPILOG = """exit codes:
+  0  ok
+  1  failure; also kind undo-timeout: a rollback reached its deadline (timeout
+     undo_total, 240 s by default), what is left is listed in `left`
+  2  usage error or refusal (pre-check, confirmation, state, state-changed,
+     locked, open-run)
+  3  cancelled by SIGTERM, SIGHUP or SIGINT: kind cancelled (what the command
+     had set is undone) or kind interrupted (after an activation, or during
+     unprotect: nothing undone, resume_required true, run resume)
+  4  status only: an RPO objective is exceeded (the JSON still has ok: true)
+
+After the first signal, further signals are ignored until the rollback
+deadline (undo_total); after it, a signal ends the process."""
+
+
 def build_parser():
     common = Parser(add_help=False)
     common.add_argument("--json", action="store_true", help="JSON output on stdout")
@@ -889,7 +1033,8 @@ def build_parser():
     role = Parser(add_help=False)
     role.add_argument("--role", choices=ROLES, help="fill `allowed` of the actions for this console role")
 
-    ap = Parser(prog="harvester-replication", description="Asynchronous VM replication between Harvester clusters.")
+    ap = Parser(prog="harvester-replication", description="Asynchronous VM replication between Harvester clusters.",
+                epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def leaf(subs, name, fn, parents, words, help_):
@@ -935,6 +1080,8 @@ def build_parser():
     sp.add_argument("--skew-tolerance")
     sp.add_argument("--timeout", action="append", metavar="NAME=SECONDS",
                     help="plan wait setting (repeatable); NAME= removes it")
+    sp.add_argument("--interval", help="refused: use `protect P --interval D`")
+    sp.add_argument("--retain", help="refused: fixed at creation (pending product decision 56)")
 
     sp = leaf(sub, "check", cmd_check, [common, clusters], 1, "full pre-check, nothing written")
     sp.add_argument("plan")
@@ -971,6 +1118,8 @@ def build_parser():
     sp.add_argument("--once", action="store_true", help="one round, then exit")
     sp.add_argument("--take-over", action="store_true", help="take the plans' lease from another follower")
     sp.add_argument("--console", action="store_true", help="console child: timestamped journal on stderr")
+    sp.add_argument("--timeout", action="append", metavar="client=SECONDS",
+                    help="kubectl call timeout (default: the largest plan `client` setting, else 30 s)")
 
     sp = leaf(sub, "status", cmd_status, [common], 1, "RPO held against the objective (exit 4 if exceeded)")
     sp.add_argument("plan", nargs="?")
@@ -990,21 +1139,24 @@ def build_parser():
 
     sp = leaf(sub, "failover", cmd_failover, [common, clusters], 1, "fail the plan's VMs over to the target")
     sp.add_argument("plan")
-    sp.add_argument("--vm", action="append", metavar="NS/NAME", help="limit to these VMs (repeatable)")
+    sp.add_argument("--vm", action="append", metavar="NS/NAME", help="fail these VMs over (repeatable)")
+    sp.add_argument("--all-vms", action="store_true", help="fail every VM of the plan over (needs --yes)")
     sp.add_argument("--unplanned", action="store_true", help="the source is lost (needs --yes)")
-    sp.add_argument("--force-unplanned", action="store_true", help="unplanned although the source answers")
-    sp.add_argument("--accept-skew", action="store_true", help="accept a skew between disks above the tolerance")
-    sp.add_argument("--yes", action="store_true", help="confirm an unplanned failover")
+    sp.add_argument("--force-unplanned", action="store_true",
+                    help="unplanned although the source answers (with --unplanned)")
+    sp.add_argument("--accept-skew", action="store_true",
+                    help="accept a skew between disks above the tolerance (with --unplanned)")
+    sp.add_argument("--yes", action="store_true", help="confirm --all-vms or an unplanned failover")
     sp.add_argument("--dry-run", action="store_true")
 
-    sp = leaf(sub, "resume", cmd_resume, [common, clusters], 1, "resume the interrupted command of a plan")
+    sp = leaf(sub, "resume", cmd_resume, [common, clusters], 1,
+              "finish the interrupted command of a plan, with the confirmation given at its start")
     sp.add_argument("plan")
-    sp.add_argument("--yes", action="store_true")
 
     sp = leaf(sub, "unprotect", cmd_unprotect, [common, clusters], 1, "stop protecting the plan")
     sp.add_argument("plan")
-    sp.add_argument("--delete-backups", action="store_true", help="also delete the plan's backups (needs --yes)")
-    sp.add_argument("--yes", action="store_true")
+    sp.add_argument("--delete-backups", action="store_true", help="also delete the plan's backups")
+    sp.add_argument("--yes", action="store_true", help="confirm (the target standby volumes are deleted)")
     return ap
 
 
@@ -1040,7 +1192,7 @@ def configure(args):
     home = os.path.expanduser("~")
     if home and home != "/":
         _hide(home)
-    _CANCEL["signal"] = None
+    _CANCEL.update(signal=None, deadline=None, ctx=None, finished=False)
 
 
 def main(argv=None):

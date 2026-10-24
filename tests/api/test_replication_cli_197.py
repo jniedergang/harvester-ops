@@ -32,7 +32,7 @@ from test_replication_run_197 import GIB, VMS, World, protected  # noqa: E402
 
 PID = "rp-0123456789ab"
 FAILURE_KEYS = {"ok", "error", "kind"}
-RESULT_KEYS = {"ok", "error", "kind", "plan", "state", "code", "message"}
+RESULT_KEYS = {"ok", "error", "kind", "resume_required", "plan", "state", "code", "message"}
 
 
 def db_path(w):
@@ -397,8 +397,8 @@ def test_planned_failover(tmp_path, capsys):
 
 
 @pytest.mark.parametrize("argv,rc,kind", [
-    (["--unplanned"], 2, "confirmation-required"),
-    (["--unplanned", "--yes"], 2, "source-reachable"),
+    (["--unplanned", "--vm=default/vm-a"], 2, "confirmation-required"),
+    (["--unplanned", "--yes", "--all-vms"], 2, "source-reachable"),
     (["--vm=default/vm-z"], 2, "unknown-vm"),
 ])
 def test_failover_refusals(tmp_path, capsys, argv, rc, kind):
@@ -411,9 +411,9 @@ def test_failover_refusals(tmp_path, capsys, argv, rc, kind):
 def test_unplanned_failover_with_the_source_lost(tmp_path, capsys):
     w = protected(tmp_path, vms=("vm-a",))
     w.src.down = True
-    rc, data, _ = run(capsys, w, "failover", "plan-a")
+    rc, data, _ = run(capsys, w, "failover", "plan-a", "--all-vms", "--yes")
     assert rc == 2 and data["kind"] == "source-unreachable" and "--unplanned" in data["message"]
-    rc, data, _ = run(capsys, w, "failover", "plan-a", "--unplanned", "--yes")
+    rc, data, _ = run(capsys, w, "failover", "plan-a", "--unplanned", "--yes", "--all-vms")
     assert rc == 0 and data["mode"] == "unplanned" and data["lost_after"], data
 
 
@@ -421,7 +421,7 @@ def test_failover_of_an_undeclared_source_goes_on_with_the_target(tmp_path, caps
     w = protected(tmp_path, vms=("vm-a",))
     rc, data, _ = run(capsys, w, "status")       # banc branché
     cli.KUBE_FACTORY = lambda name, kc: {"harvlab2": w.dst}.get(name)
-    rc = cli.main(["failover", "plan-a", "--unplanned", "--yes", "--json", f"--db={db_path(w)}"])
+    rc = cli.main(["failover", "plan-a", "--unplanned", "--yes", "--all-vms", "--json", f"--db={db_path(w)}"])
     data = json.loads(capsys.readouterr()[0])
     assert rc == 0 and data["state"] == "failed_over", data
 
@@ -430,10 +430,10 @@ def test_unprotect_refusals_and_left(tmp_path, capsys):
     w = protected(tmp_path, vms=("vm-a",))
     rc, data, _ = run(capsys, w, "unprotect", "plan-a", "--delete-backups")
     assert rc == 2 and data["kind"] == "confirmation-required"
-    assert run(capsys, w, "failover", "plan-a")[0] == 0
+    assert run(capsys, w, "failover", "plan-a", "--all-vms", "--yes")[0] == 0
     rc, data, _ = run(capsys, w, "unprotect", "plan-a", "--delete-backups", "--yes")
     assert rc == 2 and data["kind"] == "backups-in-use" and data["facts"]["vms"] == ["default/vm-a"]
-    rc, data, _ = run(capsys, w, "unprotect", "plan-a")
+    rc, data, _ = run(capsys, w, "unprotect", "plan-a", "--yes")
     assert rc == 0, data
     assert set(data) == RESULT_KEYS | {"left", "left_selectors", "backups_deleted"}
     assert data["state"] == "unprotected" and any(x.startswith("vm default/vm-a") for x in data["left"])
@@ -449,8 +449,9 @@ def test_unprotect_with_delete_backups(tmp_path, capsys):
 def test_resume_after_an_interrupted_failover(tmp_path, capsys):
     w = protected(tmp_path, vms=("vm-a",))
     w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(RuntimeError("apiserver gone"))
-    rc, data, _ = run(capsys, w, "failover", "plan-a")
+    rc, data, _ = run(capsys, w, "failover", "plan-a", "--all-vms", "--yes")
     assert rc == 1 and data["kind"] == "interrupted" and "run failover again" in data["error"]
+    assert data["resume_required"] is True
     w.dst.hooks.clear()
     rc, data, _ = run(capsys, w, "resume", "plan-a")
     assert rc == 0 and data["state"] == "failed_over", data
@@ -636,6 +637,270 @@ def test_install_links_the_replication_tool_like_the_others():
 
 
 # ---------------------------------------------------------------------------
+# Revue de la tâche 5
+# ---------------------------------------------------------------------------
+
+class HalfLeaky(LeakyKube):
+    """Lit et modifie, mais ses créations échouent en citant le kubeconfig :
+    l'échec arrive APRÈS le verrou, et passe par les écritures directes du
+    registre (passages d'état), hors du journal de la ligne de commande."""
+
+    def list(self, *a, **k):
+        return self.inner.list(*a, **k)
+
+    def patch(self, *a, **k):
+        return self.inner.patch(*a, **k)
+
+    create = LeakyKube._fail
+
+
+@pytest.mark.parametrize("kc_dir", ["secret-place", "sécret-place"])
+def test_no_path_in_any_row_nor_in_the_views_after_a_failure_past_the_lock(tmp_path, capsys, kc_dir):
+    w = draft_world(tmp_path, vms=("vm-a",))
+    kc = tmp_path / kc_dir / "person.kubeconfig"
+    wire(w)
+    cli.KUBE_FACTORY = lambda name, k: HalfLeaky(w.dst, k) if k else {"harvlab": w.src}.get(name)
+    rc = cli.main(["protect", "plan-a", "--interval=3m", f"--to-kubeconfig={kc}", "--json", f"--db={db_path(w)}"])
+    out, err = capsys.readouterr()
+    assert rc == 1 and json.loads(out)["state"] == "error", out
+    rows = {t: json.dumps([dict(r) for r in w.conn.execute(f'SELECT * FROM "{t}"')])
+            for t in ("events", "runs", "plans", "plan_resources")}
+    assert any("<hidden>" in v for v in rows.values())
+    texts = [out, err, *rows.values()]
+    for argv, as_json in ((["status", "plan-a"], True), (["plan", "show", "plan-a"], True),
+                          (["events", "--plan=plan-a", "--limit=500"], True), (["status", "plan-a"], False),
+                          (["plan", "show", "plan-a"], False), (["events", "--plan=plan-a"], False)):
+        _rc, got, e = run(capsys, w, *argv, as_json=as_json)
+        texts += [json.dumps(got, ensure_ascii=False) if as_json else got, e]
+    for text in texts:
+        assert kc_dir not in text and kc_dir.encode("unicode_escape").decode() not in text, text[:300]
+
+
+@pytest.mark.parametrize("res,signal_seen,code,kind,resume", [
+    ({"exit": 3, "code": "cancelled"}, "SIGTERM", 3, "cancelled", False),
+    ({"exit": 3, "code": "interrupted"}, "SIGTERM", 3, "interrupted", True),
+    ({"exit": 1, "code": "interrupted"}, None, 1, "interrupted", True),
+    ({"exit": 1, "code": "failed"}, "SIGTERM", 3, "cancelled", False),      # étape qui ne distingue pas
+    ({"exit": 1, "code": "undo-timeout"}, "SIGTERM", 1, "undo-timeout", False),
+    ({"exit": 0, "code": "protected"}, "SIGTERM", 0, None, False),         # terminée : jamais annulée
+    ({"exit": 2, "code": "state-changed"}, None, 2, "state-changed", False),
+])
+def test_exit_3_tells_cancelled_from_interrupted(capsys, res, signal_seen, code, kind, resume):
+    import argparse
+    cli._CANCEL.update(signal=signal_seen, deadline=None, ctx=None, finished=False)
+    saved = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+    try:
+        got = cli.finish(argparse.Namespace(json=True), dict(res, plan=PID, state="x", message="m"))
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, saved)
+        cli._CANCEL.update(signal=None, finished=False)
+    data = json.loads(capsys.readouterr()[0])
+    assert got == code and data["kind"] == kind and data["resume_required"] is resume, data
+
+
+def test_unprotect_cancelled_is_interrupted_and_resumes(tmp_path, capsys):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("delete", rr.K_LH_VOLUME)] = lambda name: os.kill(os.getpid(), signal.SIGTERM)
+    rc, data, _ = run(capsys, w, "unprotect", "plan-a", "--yes")
+    assert rc == 3 and data["kind"] == "interrupted" and data["resume_required"] is True, data
+    w.dst.hooks.clear()
+    rc, data, _ = run(capsys, w, "resume", "plan-a")
+    assert rc == 0 and data["state"] == "unprotected", data
+
+
+def test_undo_deadline_through_the_cli(tmp_path, capsys):
+    """SIGTERM, puis une API morte : le retour arrière s'arrête à l'échéance
+    (`--timeout undo_total=60`), un second signal pendant le retour arrière
+    est ignoré, la sortie est 1 / `undo-timeout` avec ce qui reste."""
+    w = draft_world(tmp_path)
+    seen = {"undo_signal": False}
+
+    def dead_then_signal(name):
+        w.src.down = w.dst.down = True
+        os.kill(os.getpid(), signal.SIGTERM)
+    w.dst.hooks[("create", rr.K_SECRET)] = dead_then_signal
+    wire(w)
+    start = {}
+
+    def sleep(s):
+        ctx = cli._CANCEL.get("ctx")
+        if ctx is not None and ctx.undo_until is not None and not seen["undo_signal"]:
+            seen["undo_signal"] = True
+            start["t"] = w.clock.now()
+            os.kill(os.getpid(), signal.SIGTERM)           # ignoré : échéance pas atteinte
+        w.clock.sleep(s)
+    cli.SLEEP = sleep
+    rc = cli.main(["protect", "plan-a", "--timeout=undo_total=60", "--json", f"--db={db_path(w)}"])
+    data = json.loads(capsys.readouterr()[0])
+    assert rc == 1 and data["kind"] == "undo-timeout" and data["resume_required"] is False, data
+    assert seen["undo_signal"] and w.clock.now() - start["t"] <= 70
+    assert any(x.endswith("(undo deadline reached)") for x in data["left"])
+    ev = [e for e in db.plan_events(w.conn, PID, limit=500) if e["code"] == "undo-timeout"]
+    assert ev and ev[0]["facts"]["left"] == data["left"]
+
+
+def test_a_signal_after_the_deadline_takes_its_default_effect(monkeypatch):
+    killed = []
+    monkeypatch.setattr(cli.os, "kill", lambda pid, sig: killed.append(sig))
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(cli, "NOW", lambda: clock["t"])
+    saved = signal.getsignal(signal.SIGTERM)
+    cli._CANCEL.update(signal=None, deadline=None, ctx=None, finished=False)
+    try:
+        with pytest.raises(cli.Cancelled):
+            cli._on_cancel_signal(signal.SIGTERM, None)
+        assert cli._CANCEL["deadline"] == 1000.0 + rp.TIMEOUTS["undo_total"]
+        clock["t"] += rp.TIMEOUTS["undo_total"] - 1
+        assert cli._on_cancel_signal(signal.SIGTERM, None) is None and killed == []    # ignoré
+        clock["t"] += 1
+        cli._on_cancel_signal(signal.SIGTERM, None)
+        assert killed == [signal.SIGTERM] and signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGTERM, saved)
+        cli._CANCEL.update(signal=None, deadline=None, ctx=None, finished=False)
+
+
+@pytest.mark.parametrize("argv,kind", [
+    (["failover", "plan-a"], "confirmation-required"),
+    (["failover", "plan-a", "--all-vms"], "confirmation-required"),
+    (["failover", "plan-a", "--yes"], "confirmation-required"),
+    (["failover", "plan-a", "--unplanned", "--yes"], "confirmation-required"),
+    (["failover", "plan-a", "--vm=default/vm-a", "--all-vms", "--yes"], "usage"),
+    (["failover", "plan-a", "--vm=default/vm-a", "--accept-skew"], "usage"),
+    (["failover", "plan-a", "--vm=default/vm-a", "--force-unplanned"], "usage"),
+    (["unprotect", "plan-a"], "confirmation-required"),
+    (["unprotect", "plan-a", "--delete-backups"], "confirmation-required"),
+    (["resume", "plan-a", "--yes"], "usage"),
+    (["plan", "set", "plan-a", "--interval=5m"], "not-settable"),
+    (["plan", "set", "plan-a", "--retain=3"], "not-settable"),
+    (["follow", "--plan=plan-a", "--once", "--timeout=probe=5"], "bad-timeout"),
+    (["plan", "create", "--name=plan-c", "--from=harvlab", "--to=harvlab2", "--vm=default/vm-a", "--rpo=15m",
+      "--timeout=client=2h"], "bad-timeout"),
+])
+def test_confirmations_and_refused_options(tmp_path, capsys, argv, kind):
+    w = protected(tmp_path, vms=("vm-a",))
+    n = len(w.src.mutations()) + len(w.dst.mutations())
+    events_before = len(db.plan_events(w.conn, PID, limit=500))
+    rc, data, _ = run(capsys, w, *argv)
+    assert rc == 2 and set(data) == FAILURE_KEYS and data["kind"] == kind, data
+    assert len(w.src.mutations()) + len(w.dst.mutations()) == n and w.plan()["state"] == "protected"
+    assert len(db.plan_events(w.conn, PID, limit=500)) == events_before
+    if argv[-1] == "--interval=5m":
+        assert "protect P --interval" in data["error"]
+    if argv[-1] == "--retain=3":
+        assert "decision 56" in data["error"]
+
+
+def test_failover_with_another_scope_than_the_open_run_points_to_resume(tmp_path, capsys):
+    w = protected(tmp_path, vms=("vm-a", "vm-b"))
+    w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(RuntimeError("apiserver gone"))
+    assert run(capsys, w, "failover", "plan-a", "--all-vms", "--yes")[1]["kind"] == "interrupted"
+    w.dst.hooks.clear()
+    rc, data, _ = run(capsys, w, "failover", "plan-a", "--vm=default/vm-a")
+    assert rc == 2 and data["kind"] == "open-run" and "resume" in data["error"], data
+    rc, data, _ = run(capsys, w, "resume", "plan-a")
+    assert rc == 0 and data["state"] == "failed_over", data
+
+
+def test_check_failover_phase_writes_nothing_in_the_journal(tmp_path, capsys):
+    w = protected(tmp_path, vms=("vm-a",))
+    n = len(db.plan_events(w.conn, PID, limit=500))
+    for phase, kind in (("failover", None), ("failover-unplanned", "source-reachable")):
+        rc, data, _ = run(capsys, w, "check", "plan-a", f"--phase={phase}")
+        assert data["kind"] == kind, data
+    assert len(db.plan_events(w.conn, PID, limit=500)) == n
+
+
+def test_print_json_hides_non_ascii_paths_and_only_paths(capsys, monkeypatch):
+    monkeypatch.setenv("HOME", "/srv/ju")
+    monkeypatch.setattr(cli, "_HIDDEN", [])
+    cli._hide("/srv/sécret/kc.yaml")
+    cli.print_json({"error": 'config "/srv/sécret/kc.yaml" refused', "user": "/srv/julia", "who": "ju",
+                    "p": Path("/srv/ju/.kube/config")})
+    out = capsys.readouterr()[0]
+    data = json.loads(out)
+    assert "sécret" not in out and "s\\u00e9cret" not in out
+    assert data == {"error": 'config "<hidden>" refused', "user": "/srv/julia", "who": "ju", "p": "<hidden>"}
+
+
+def test_help_documents_every_exit_code():
+    text = cli.build_parser().format_help()
+    for needle in ("exit codes:", "0  ok", "undo-timeout", "undo_total", "2  usage", "kind interrupted",
+                   "resume_required", "4  status only", "ok: true"):
+        assert needle in text, needle
+
+
+@pytest.mark.parametrize("override,plans,want", [
+    (7, {}, 7),
+    (None, {"rp-000000000001": 90, "rp-000000000002": 45}, 90),
+    (None, {"rp-000000000001": None}, 30),
+    (None, {}, 30),
+])
+def test_follow_client_timeout(tmp_path, override, plans, want):
+    conn = db.connect(tmp_path / "r.db")
+    for i, (pid, t) in enumerate(plans.items()):
+        req = {"name": f"p{i}", "source_cluster": "harvlab", "target_cluster": "harvlab2", "rpo_objective_s": "15m",
+               "vms": ["default/vm-a"], "options": {"timeouts": {"client": t}} if t else {}}
+        db.insert_plan(conn, rp.normalize_plan(req), plan_id=pid)
+    assert cli.follow_client_timeout(conn, "harvlab", override) == want
+
+
+@pytest.mark.parametrize("argv,plan_client,want", [
+    (["follow", "--plan=plan-a", "--once", "--timeout=client=12"], None, 12),
+    (["follow", "--plan=plan-a", "--once"], 50, 50),
+    (["protect", "plan-a"], 50, 50),
+    (["protect", "plan-a", "--timeout=client=9"], 50, 9),
+])
+def test_client_timeout_reaches_the_cluster_clients(tmp_path, capsys, monkeypatch, argv, plan_client, want):
+    w = protected(tmp_path, vms=("vm-a",))
+    if plan_client:
+        db.update_plan(w.conn, PID, options={"timeouts": {"client": plan_client}})
+    wire(w)
+    seen = []
+
+    def client(name, kubeconfig=None, timeout=cli.CLIENT_TIMEOUT):
+        seen.append(timeout)
+        return {"harvlab": w.src, "harvlab2": w.dst}.get(name)
+    monkeypatch.setattr(cli, "cluster_client", client)
+    rc = cli.main(argv + ["--json", f"--db={db_path(w)}"])
+    capsys.readouterr()
+    assert rc == 0 and seen and set(seen) == {want}, seen
+
+
+@pytest.mark.parametrize("command", [["plan", "delete", "plan-a"], ["plan", "set", "plan-a", "--rpo=30m"]])
+def test_plan_delete_and_set_take_the_plan_lock(tmp_path, capsys, command):
+    from datetime import datetime, timezone
+    w = draft_world(tmp_path, vms=("vm-a",))
+    wire(w)
+    now = datetime.fromtimestamp(w.clock.now(), timezone.utc)
+    db.acquire_lock(w.conn, PID, "protect", "cli:otherhost:1", now=now)
+    rc, data, _ = run(capsys, w, *command)
+    assert rc == 2 and data["kind"] == "locked" and "protect" in data["error"], data
+    assert db.get_plan(w.conn, PID)["rpo_objective_s"] == 900
+    db.release_lock(w.conn, PID, "cli:otherhost:1")
+    rc, data, _ = run(capsys, w, *command)
+    assert rc == 0, data
+    assert db.get_lock(w.conn, PID) is None
+
+
+def test_a_signal_after_the_engine_returned_does_not_relabel_the_result(tmp_path, capsys, monkeypatch):
+    """Le résultat est construit, puis un SIGTERM arrive avant l'affichage :
+    la commande a réussi, elle sort en 0 avec son résultat, une seule fois."""
+    w = draft_world(tmp_path, vms=("vm-a",))
+    orig = rr.protect
+
+    def protect_then_signal(ctx, **kw):
+        res = orig(ctx, **kw)
+        os.kill(os.getpid(), signal.SIGTERM)
+        return res
+    monkeypatch.setattr(rr, "protect", protect_then_signal)
+    rc, data, _ = run(capsys, w, "protect", "plan-a")
+    assert rc == 0 and data["ok"] is True and data["state"] == "protected", data
+    assert signal.getsignal(signal.SIGTERM) is not cli._on_cancel_signal
+    assert signal.SIGTERM not in signal.pthread_sigmask(signal.SIG_BLOCK, [])     # rien de bloqué ensuite
+
+
+# ---------------------------------------------------------------------------
 # Annulation : un vrai processus, un vrai SIGTERM
 # ---------------------------------------------------------------------------
 
@@ -668,7 +933,7 @@ def harness(case, workdir, outfile, resume):
                 time.sleep(0.05)               # le signal arrive ici, en pleine étape
     cli.step = step
     argv = {"protect": ["protect", "plan-a", "--interval=3m"],
-            "follow": ["follow", "--plan=plan-a"]}.get(case, ["failover", "plan-a"])
+            "follow": ["follow", "--plan=plan-a"]}.get(case, ["failover", "plan-a", "--all-vms", "--yes"])
     rc = cli.main(argv + ["--json", f"--db={db_path(w)}"])
     cli.step = orig
     w.clock.sleep(200)                         # les sauvegardes défaites quittent la cible à sa relecture
@@ -736,6 +1001,7 @@ def test_cancel_protect_rolls_back_what_it_created(tmp_path):
 def test_cancel_failover_before_activation_is_undone(tmp_path, sig):
     data, st, err = run_cancel(tmp_path, "failover-before", sig=sig)
     assert st["rc"] == 3 and data["kind"] == "cancelled" and "undone" in data["error"], (data, err)
+    assert data["resume_required"] is False
     assert st["plan_state"] == "protected" and st["lock"] is None
     assert st["src_vm"] == "Always" and st["src_vmi"] is True
     assert st["standby"] and all(v is True for v in st["standby"].values())
@@ -744,7 +1010,8 @@ def test_cancel_failover_before_activation_is_undone(tmp_path, sig):
 
 def test_cancel_failover_after_activation_keeps_everything_and_resumes(tmp_path):
     data, st, err = run_cancel(tmp_path, "failover-after", resume=True)
-    assert st["rc"] == 3 and data["kind"] == "cancelled" and data["code"] == "interrupted", (data, err)
+    assert st["rc"] == 3 and data["kind"] == "interrupted" and data["code"] == "interrupted", (data, err)
+    assert data["resume_required"] is True
     assert "run failover again" in data["error"]
     assert st["plan_state"] == "error" and st["origin"] == "failing_over" and st["lock"] is None
     assert st["standby"] and all(v is False for v in st["standby"].values())      # activés, gardés

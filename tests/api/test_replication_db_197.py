@@ -659,3 +659,70 @@ def test_plan_view_reads_recent_ticks_the_last_point_and_three_events_each(conn)
     assert [r["resource_uid"] for r in v["resources"]] == ["u1", "u2"]
     assert v["vm_running"] == {"u1": {"running": False, "stopped_at": "2026-10-24T09:00:00Z"}}
     assert set(v["health"]) == {"u1", "u2"}
+
+
+# -- aucun chemin au registre (revue de la tâche 5) ------------------------------
+
+SECRET = "/srv/sécret/person.kubeconfig"
+
+
+@pytest.mark.parametrize("text,want", [
+    (f'error loading config file "{SECRET}": permission denied',
+     'error loading config file "<hidden>": permission denied'),
+    ("open /var/lib/harvester-ops/replication.db failed", "open <hidden> failed"),
+    ("read /root/.kube/config", "read <hidden>"),
+    ("in /tmp/kc-123 and /home/bob/x.yaml", "in <hidden> and <hidden>"),
+    ("bare /tmp", "bare <hidden>"),
+    # rien d'autre n'est touché
+    ("https://rancher.example/tmp/k8s/clusters/c-1", "https://rancher.example/tmp/k8s/clusters/c-1"),
+    ("default/tmp-vm and ns/home", "default/tmp-vm and ns/home"),
+    ("/var/library and /tmpfs", "/var/library and /tmpfs"),
+    ("/srv/julia is another user, /srv/ju/.kube/config is home", "/srv/julia is another user, <hidden> is home"),
+    ("ju owns it", "ju owns it"),
+    ("nfs://nas:/var/lib/backups?x=1", "nfs://nas:/var/lib/backups?x=1"),        # URL de cible de sauvegarde
+])
+def test_scrub_text_hides_paths_only_where_they_are_paths(monkeypatch, text, want):
+    monkeypatch.setattr(db, "_HIDDEN_PATHS", set())
+    monkeypatch.setenv("HOME", "/srv/ju")
+    db.hide_paths(SECRET)
+    assert db.scrub_text(text) == want
+
+
+def _lock_reclaim(conn, msg):
+    # détenteur d'un autre hôte, silencieux depuis plus que son ttl : la
+    # reprise écrit `plan/lock-reclaimed`, qui cite l'ancien détenteur
+    db.acquire_lock(conn, PID, "protect", f"cli:{msg}:1", now=NOW, host="here")
+    db.acquire_lock(conn, PID, "protect", "cli:here:2", now=at(db.LOCK_TTL_S + 60), host="here",
+                    pid_alive=lambda p: True)
+
+
+@pytest.mark.parametrize("write", [
+    lambda c, m: db.record_event(c, "protect", plan_id=PID, message=m, facts={"error": m, m: 1}),
+    lambda c, m: db.set_state(c, PID, "draft", "protecting", now=NOW, message=m),
+    lambda c, m: (db.upsert_resource(c, PID, resource("u1"), now=NOW),
+                  db.set_resource_state(c, PID, "u1", "protecting", generation=1, now=NOW, message=m)),
+    lambda c, m: db.record_run(c, PID, "failover", NOW, 1, steps=[{"step": "x", "message": m}]),
+    lambda c, m: db.record_run(c, PID, "failover", NOW, 1, run_id=db.record_run(c, PID, "failover", NOW, 1),
+                               points={"error": m}),
+    lambda c, m: (db.upsert_resource(c, PID, resource("u1"), now=NOW),
+                  db.set_health(c, PID, "u1", 1, {"error": m}, now=NOW)),
+    lambda c, m: _lock_reclaim(c, m),
+], ids=["record_event", "set_state", "set_resource_state", "record_run", "record_run-update", "set_health",
+        "lock-reclaimed"])
+def test_every_write_path_of_the_registry_hides_paths(conn, monkeypatch, write):
+    """Une écriture directe du registre (passage d'état, reprise de verrou)
+    ne passe pas par la ligne de commande : le registre masque lui-même."""
+    monkeypatch.setattr(db, "_HIDDEN_PATHS", set())
+    db.hide_paths(SECRET)
+    new_plan(conn)
+    write(conn, f'error loading config file "{SECRET}": permission denied')
+    dump = repr([dict(r) for t in ("events", "runs", "plans", "plan_resources", "locks")
+                 for r in conn.execute(f'SELECT * FROM "{t}"')])
+    assert "sécret" not in dump and "s\\u00e9cret" not in dump and "<hidden>" in dump
+
+
+def test_backup_target_urls_are_stored_exactly(conn):
+    new_plan(conn)
+    url = "nfs://nas:/var/lib/backups/?backup=b-1&volume=v-1"
+    db.upsert_volume(conn, PID, {"generation": 1, "vm_uid": "u1", "disk": "d1", "backup_volume_target": url})
+    assert db.list_volumes(conn, PID)[0]["backup_volume_target"] == url

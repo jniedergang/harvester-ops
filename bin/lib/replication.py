@@ -105,8 +105,13 @@ TIMEOUTS = {"probe": 15, "stop": 600, "snapshot": 300, "final_backup": 6 * 3600,
             # soit dit « ne sauvegarde jamais », tours injoignables de suite
             # avant que le cluster soit dit injoignable (hystérésis)
             "follow_poll": 3, "follow_health": 60, "follow_spec": 600, "follow_grace": 60,
-            "follow_window": None, "follow_never_intervals": 2, "follow_down_rounds": 2}
+            "follow_window": None, "follow_never_intervals": 2, "follow_down_rounds": 2,
+            # échéance UNIQUE de tout retour arrière (protect, bascule avant
+            # activation, mesure) : passée, plus rien n'est défait, le reste
+            # est listé (`undo-timeout`) ; délai d'un appel kubectl (1 s à 1 h)
+            "undo_total": 240, "client": 30}
 TIMEOUT_MAX = 7 * 86400
+CLIENT_TIMEOUT_MAX = 3600
 
 OPTION_CHOICES = {"cloud_init": ("keep", "rerun"), "mac": ("keep", "new"),
                   "start": ("started", "stopped"), "follow": ("console", "cli", "off")}
@@ -362,7 +367,7 @@ def normalize_timeouts(raw):
         if k not in TIMEOUTS:
             raise PlanError("bad-timeout", f"unknown timeout: {str(k)[:30]}")
         s = parse_duration(v)
-        if not 1 <= s <= TIMEOUT_MAX:
+        if not 1 <= s <= (CLIENT_TIMEOUT_MAX if k == "client" else TIMEOUT_MAX):
             raise PlanError("bad-timeout", f"timeout {k} out of range")
         out[k] = s
     return out

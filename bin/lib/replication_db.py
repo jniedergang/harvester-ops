@@ -15,8 +15,10 @@ cible). Rien n'est jamais écrit sur un cluster.
 
 import json
 import os
+import re
 import socket
 import sqlite3
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -385,7 +387,81 @@ def _generation(value):
     return value
 
 
+# ---------------------------------------------------------------------------
+# Aucun chemin au registre
+# ---------------------------------------------------------------------------
+
+HIDDEN = "<hidden>"
+# chemins connus du processus (kubeconfigs, base, fichiers temporaires...),
+# ajoutés par `hide_paths` ; s'y ajoutent à chaque masquage le répertoire
+# personnel, le répertoire temporaire, le répertoire d'état et la configuration
+_HIDDEN_PATHS = set()
+_PATH_TAIL = r"[^\s\"'<>|,;:()\[\]{}]*"
+# tout chemin absolu sous /home, /root, /var/lib ou /tmp, même inconnu
+_GENERIC_PATH_RE = re.compile(r"(?<![\w.~/:@-])/(?:home|root|var/lib|tmp)(?![\w.-])" + _PATH_TAIL)
+
+
+_SCRUBBED_TABLES = ("events", "runs")
+
+
+def hide_paths(*paths):
+    """Chemins à ne jamais écrire au registre ni montrer (forme donnée,
+    absolue et résolue)."""
+    for p in paths:
+        if not p or not isinstance(p, (str, os.PathLike)):
+            continue
+        s = os.fspath(p)
+        for v in (s, os.path.abspath(s), os.path.realpath(s)):
+            if len(v) > 1 and v != "/":
+                _HIDDEN_PATHS.add(v)
+
+
+def _process_paths():
+    out = set(_HIDDEN_PATHS)
+    home = os.path.expanduser("~")
+    for p in (home if home not in ("", "/") else None, tempfile.gettempdir(),
+              os.environ.get("HARVESTER_OPS_CONFIG"), os.environ.get("HARVESTER_OPS_REPLICATION_DB")):
+        if p and len(p) > 1:
+            out.add(p)
+    try:
+        out.add(str(cluster_decl.state_dir()))
+    except Exception:                           # noqa: BLE001
+        pass
+    return out
+
+
+def scrub_text(text, extra=()):
+    """Le texte sans aucun chemin : chaque chemin connu (seulement là où il
+    apparaît comme chemin, jamais au milieu d'un mot ou d'un autre chemin),
+    puis tout chemin absolu sous /home, /root, /var/lib et /tmp, devient
+    `<hidden>`."""
+    s = str(text)
+    if "/" not in s and not extra:
+        return s
+    for h in sorted(_process_paths() | {str(x) for x in extra if x and len(str(x)) > 1}, key=len, reverse=True):
+        if h in s:
+            # le chemin et ce qui le prolonge (`<rép>/fichier`), jamais `<rép>x`
+            s = re.sub(r"(?<![\w.~-])" + re.escape(h) + r"(?:/" + _PATH_TAIL + r")?(?![\w.-])", HIDDEN, s)
+    return _GENERIC_PATH_RE.sub(HIDDEN, s)
+
+
+def scrub_value(v, extra=()):
+    """`scrub_text` sur chaque chaîne (clés comprises) d'une valeur JSON."""
+    if isinstance(v, str):
+        return scrub_text(v, extra)
+    if isinstance(v, dict):
+        return {scrub_value(k, extra) if isinstance(k, str) else k: scrub_value(x, extra) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [scrub_value(x, extra) for x in v]
+    return v
+
+
 def _insert(conn, table, values, upsert=False):
+    # messages et détails (journal, bascules) : masquage des chemins ; les
+    # autres tables ne rangent que des noms, des états et des URL de cible
+    # de sauvegarde, qui doivent rester exactes
+    if table in _SCRUBBED_TABLES:
+        values = {k: scrub_value(v) for k, v in values.items()}
     cols = list(values)
     sql = (f'INSERT INTO "{table}" (' + ", ".join(f'"{c}"' for c in cols) + ") VALUES ("
            + ", ".join("?" for _ in cols) + ")")
@@ -809,7 +885,7 @@ def set_health(conn, plan_id, resource_uid, generation, health, now=None):
             cur = json.loads(r["health"] or "{}") or {}
         except ValueError:
             cur = {}
-        cur.update(health or {})
+        cur.update(scrub_value(health or {}))
         conn.execute("UPDATE plan_resources SET health = ?, health_at = ? WHERE plan_id = ? AND generation = ?"
                      " AND resource_uid = ?", (json.dumps(cur, sort_keys=True), _iso(_now(now)), plan_id,
                                                generation, resource_uid))
@@ -902,8 +978,8 @@ def record_event(conn, operation, step="", plan_id="", resource_uid="", host="",
             'INSERT INTO events (ts, plan_id, resource_uid, host, side, operation, step, level, code, message,'
             ' facts, "by", action_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             (_event_ts(_now(now)), plan_id or "", resource_uid or "", host or "", side or "", operation,
-             step or "", level, code or "", (message or "")[:500], json.dumps(facts or {}, sort_keys=True),
-             by or "", action_id or ""))
+             step or "", level, code or "", scrub_text(message or "")[:500],
+             json.dumps(scrub_value(facts or {}), sort_keys=True), by or "", action_id or ""))
     return cur.lastrowid
 
 
@@ -974,7 +1050,7 @@ def record_run(conn, plan_id, operation, started_at, generation, finished_at=Non
             sets = ", ".join(f'"{k}" = ?' for k in vals)
             conn.execute(f"UPDATE runs SET {sets} WHERE id = ?",
                          [json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v
-                          for v in vals.values()] + [run_id])
+                          for v in scrub_value(vals).values()] + [run_id])
             return run_id
         _insert(conn, "runs", vals)
         return conn.execute("SELECT last_insert_rowid()").fetchone()[0]
