@@ -81,8 +81,9 @@ iso_fetch:
   min_free_bytes: 1073741824    # free space kept in the store, 1 GiB by default
 ```
 
-The metadata addresses, multicast and unspecified addresses stay refused
-even inside an allowed network.
+Every address the mirror's name resolves to must be allowed, IPv4 and
+IPv6 alike. The metadata addresses, multicast and unspecified addresses
+stay refused even inside an allowed network.
 
 The ISO is deliberately **not** part of the release tarball: the whole
 toolkit is 135 MB, the ISO alone is fifty times that.

@@ -83,8 +83,9 @@ iso_fetch:
   min_free_bytes: 1073741824    # espace libre gardé dans le magasin, 1 Gio par défaut
 ```
 
-Les adresses de métadonnées, multicast et non spécifiées restent refusées
-même dans un réseau autorisé.
+Toutes les adresses vers lesquelles le nom du miroir résout doivent être
+autorisées, IPv4 comme IPv6. Les adresses de métadonnées, multicast et non
+spécifiées restent refusées même dans un réseau autorisé.
 
 L'ISO n'est **volontairement pas** embarqué dans le tarball de release :
 le toolkit entier pèse 135 Mo, l'ISO à lui seul cinquante fois plus.
