@@ -1601,17 +1601,29 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
     # le namespace des carnets et les backing images à restaurer n'existent
     # qu'une fois la protection lancée : le dry-run d'un objet qui en dépend
     # échouerait toujours avant la première protection. Le namespace passe
-    # lui-même au dry-run ; l'objet dépendant est essayé sans la dépendance
-    # (volume) ou reporté (carnet), signalé par `deferred`.
+    # lui-même au dry-run ; l'objet dépendant est reporté, signalé par
+    # `deferred`.
     carnet_ns_missing = ctx.dst.get(K_NS, None, rp.CARNET_NAMESPACE) is None
     if carnet_ns_missing:
         attempt("dst", {"apiVersion": "v1", "kind": "Namespace",
                         "metadata": {"name": rp.CARNET_NAMESPACE, "labels": dict(MANAGED_BY)}}, "namespace")
     present_bis = set(dst_facts.get("backing_images") or {})
+
+    def present(side, kind, ns, name, what):
+        """Objet déjà posé par une protection précédente (relance après un
+        `plan-drift`) : la création serait refusée (AlreadyExists), la
+        protection le met à jour."""
+        o = ctx.kube(side).get(kind, ns, name)
+        if o is None:
+            return False
+        out.append({"object": what, "name": name, "ok": _owned(ctx, o), "exists": True,
+                    **({} if _owned(ctx, o) else {"message": "exists and is not owned by this plan"})})
+        return True
     for w in works:
-        attempt("src", rp.recurring_job(w["job"], rp.cron_for(ctx.plan.get("interval_s") or 300), ctx.plan["retain"],
-                                        max(1, len(w["disks"])), ctx.plan_id, w["uid"], ctx.gen),
-                "recurring-job")
+        if not present("src", K_LH_JOB, NS, w["job"], "recurring-job"):
+            attempt("src", rp.recurring_job(w["job"], rp.cron_for(ctx.plan.get("interval_s") or 300), ctx.plan["retain"],
+                                            max(1, len(w["disks"])), ctx.plan_id, w["uid"], ctx.gen),
+                    "recurring-job")
         for d in w["disks"]:
             done = _completed(tb.get(d["source_volume"]))
             url = _status(done[-1]).get("url") if done else ""
@@ -1645,7 +1657,7 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
             m = carnet_manifest(ctx.plan_id, ctx.gen, w, vm, [], carnet_volumes(w), ctx.plan["source_cluster"])
             if carnet_ns_missing:
                 out.append({"object": "carnet", "name": m["metadata"]["name"], "ok": True, "deferred": "namespace"})
-            else:
+            elif not present("dst", K_SECRET, rp.CARNET_NAMESPACE, m["metadata"]["name"], "carnet"):
                 attempt("dst", m, "carnet")
         except ValueError as e:
             out.append({"object": "carnet", "name": rp.carnet_name(ctx.plan_id, w["uid"]), "ok": False,

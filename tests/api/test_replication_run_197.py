@@ -2270,3 +2270,25 @@ def test_protect_dry_run_tries_a_standby_once_a_backup_exists(world):
     assert tried and all(d["ok"] and d["placeholder_url"] is False for d in tried)
     assert {d.get("deferred") for d in sv} == {None, "backing-image"}
     assert len([c for c in w.dst.calls if c[0] == "create" and c[1] == rr.K_LH_VOLUME and c[4] == "dry"]) == len(tried)
+
+
+def test_protect_dry_run_of_a_protected_plan_passes(tmp_path):
+    """Relance d'une protection (après un `plan-drift`) : la tâche et le
+    carnet existent déjà, leur création au dry-run était refusée
+    (AlreadyExists, vu sur le banc)."""
+    w = protected(tmp_path)
+    res = rr.protect(w.ctx(), dry_run=True)
+    assert res["exit"] == 0, [d for d in res["dry_run"] if not d["ok"]]
+    for what in ("recurring-job", "carnet", "standby-volume"):
+        rows = [d for d in res["dry_run"] if d["object"] == what]
+        assert rows and all(d["ok"] and d.get("exists") for d in rows), what
+
+
+def test_protect_dry_run_refuses_a_job_of_someone_else(world):
+    w = world
+    job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])
+    w.src.put(rr.K_LH_JOB, {"metadata": {"name": job, "namespace": rr.NS}, "spec": {}})
+    res = rr.protect(w.ctx(), dry_run=True)
+    assert res["exit"] == 2, res
+    # le pré-contrôle le refuse déjà ; le dry-run ne l'aurait pas laissé passer
+    assert res["code"] == "check" and "recurring-job-taken" in [f["code"] for f in res["findings"]], res
