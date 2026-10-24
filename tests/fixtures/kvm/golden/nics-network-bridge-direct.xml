@@ -1,0 +1,81 @@
+<domain type="kvm">
+  <name>kvmtest-1</name>
+  <metadata>
+    <hops:vm xmlns:hops="https://harvester-ops.io/xmlns/vm/1">
+      <hops:os>linux</hops:os>
+    </hops:vm>
+  </metadata>
+  <memory unit="KiB">2097152</memory>
+  <currentMemory unit="KiB">2097152</currentMemory>
+  <vcpu placement="static">2</vcpu>
+  <os>
+    <type arch="x86_64" machine="q35">hvm</type>
+  </os>
+  <features>
+    <acpi />
+    <apic />
+  </features>
+  <cpu mode="host-model" check="partial">
+    <topology sockets="2" dies="1" clusters="1" cores="1" threads="1" />
+  </cpu>
+  <clock offset="utc" />
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type="volume" device="disk">
+      <driver name="qemu" type="qcow2" discard="unmap" />
+      <source pool="images" volume="kvmtest-1-vda.qcow2" />
+      <target dev="vda" bus="virtio" />
+      <boot order="1" />
+    </disk>
+    <controller type="usb" model="qemu-xhci" />
+    <controller type="pci" index="0" model="pcie-root" />
+    <controller type="pci" index="1" model="pcie-root-port" />
+    <controller type="pci" index="2" model="pcie-root-port" />
+    <controller type="pci" index="3" model="pcie-root-port" />
+    <controller type="pci" index="4" model="pcie-root-port" />
+    <controller type="pci" index="5" model="pcie-root-port" />
+    <controller type="pci" index="6" model="pcie-root-port" />
+    <controller type="pci" index="7" model="pcie-root-port" />
+    <controller type="pci" index="8" model="pcie-root-port" />
+    <controller type="pci" index="9" model="pcie-root-port" />
+    <controller type="pci" index="10" model="pcie-root-port" />
+    <controller type="pci" index="11" model="pcie-root-port" />
+    <controller type="pci" index="12" model="pcie-root-port" />
+    <interface type="network">
+      <source network="default" />
+      <model type="virtio" />
+      <boot order="2" />
+    </interface>
+    <interface type="bridge">
+      <mac address="52:54:00:12:34:56" />
+      <source bridge="br0" />
+      <model type="e1000e" />
+    </interface>
+    <interface type="direct">
+      <source dev="eno1" mode="vepa" />
+      <model type="rtl8139" />
+    </interface>
+    <serial type="pty">
+      <target port="0" />
+    </serial>
+    <console type="pty">
+      <target type="serial" port="0" />
+    </console>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0" />
+    </channel>
+    <input type="tablet" bus="usb" />
+    <graphics type="vnc" port="-1" autoport="yes">
+      <listen type="address" address="127.0.0.1" />
+    </graphics>
+    <video>
+      <model type="virtio" />
+    </video>
+    <memballoon model="virtio" />
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>

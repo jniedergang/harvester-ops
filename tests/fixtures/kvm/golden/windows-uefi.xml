@@ -1,0 +1,88 @@
+<domain type="kvm">
+  <name>kvmtest-win</name>
+  <metadata>
+    <hops:vm xmlns:hops="https://harvester-ops.io/xmlns/vm/1">
+      <hops:os>windows</hops:os>
+    </hops:vm>
+  </metadata>
+  <memory unit="KiB">4194304</memory>
+  <currentMemory unit="KiB">4194304</currentMemory>
+  <vcpu placement="static">4</vcpu>
+  <os firmware="efi">
+    <type arch="x86_64" machine="q35">hvm</type>
+    <firmware>
+      <feature enabled="no" name="secure-boot" />
+    </firmware>
+  </os>
+  <features>
+    <acpi />
+    <apic />
+    <hyperv mode="custom">
+      <relaxed state="on" />
+      <vapic state="on" />
+      <spinlocks state="on" retries="8191" />
+    </hyperv>
+  </features>
+  <cpu mode="host-model" check="partial">
+    <topology sockets="1" dies="1" clusters="1" cores="2" threads="2" />
+  </cpu>
+  <clock offset="localtime">
+    <timer name="rtc" tickpolicy="catchup" />
+    <timer name="pit" tickpolicy="delay" />
+    <timer name="hpet" present="no" />
+    <timer name="hypervclock" present="yes" />
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <devices>
+    <disk type="volume" device="disk">
+      <driver name="qemu" type="qcow2" discard="unmap" />
+      <source pool="images" volume="kvmtest-win-sda.qcow2" />
+      <target dev="sda" bus="sata" />
+      <boot order="2" />
+    </disk>
+    <disk type="volume" device="cdrom">
+      <driver name="qemu" type="raw" />
+      <source pool="images" volume="win2025.iso" />
+      <target dev="sdb" bus="sata" />
+      <boot order="1" />
+      <readonly />
+    </disk>
+    <controller type="usb" model="qemu-xhci" />
+    <controller type="pci" index="0" model="pcie-root" />
+    <controller type="pci" index="1" model="pcie-root-port" />
+    <controller type="pci" index="2" model="pcie-root-port" />
+    <controller type="pci" index="3" model="pcie-root-port" />
+    <controller type="pci" index="4" model="pcie-root-port" />
+    <controller type="pci" index="5" model="pcie-root-port" />
+    <controller type="pci" index="6" model="pcie-root-port" />
+    <controller type="pci" index="7" model="pcie-root-port" />
+    <controller type="pci" index="8" model="pcie-root-port" />
+    <controller type="pci" index="9" model="pcie-root-port" />
+    <interface type="bridge">
+      <source bridge="br0" />
+      <model type="e1000e" />
+    </interface>
+    <serial type="pty">
+      <target port="0" />
+    </serial>
+    <console type="pty">
+      <target type="serial" port="0" />
+    </console>
+    <channel type="unix">
+      <target type="virtio" name="org.qemu.guest_agent.0" />
+    </channel>
+    <input type="tablet" bus="usb" />
+    <graphics type="vnc" port="-1" autoport="yes">
+      <listen type="address" address="127.0.0.1" />
+    </graphics>
+    <video>
+      <model type="vga" />
+    </video>
+    <memballoon model="virtio" />
+    <rng model="virtio">
+      <backend model="random">/dev/urandom</backend>
+    </rng>
+  </devices>
+</domain>
