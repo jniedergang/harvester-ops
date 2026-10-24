@@ -65,7 +65,7 @@ it connects, and again at every redirect:
 - the host name is resolved once and the console connects to the address
   it checked, so a DNS answer cannot switch to an internal address;
 - loopback, link-local, private (RFC 1918, ULA, CGNAT), multicast,
-  unspecified and reserved addresses are refused, and so are the cloud
+  broadcast, unspecified and reserved addresses are refused, and so are the cloud
   metadata addresses (`169.254.169.254`, `fd00:ec2::254`);
 - the file may not exceed 20 GiB, and the download stops when the store
   falls under 1 GiB of free space.
@@ -83,7 +83,8 @@ iso_fetch:
 
 Every address the mirror's name resolves to must be allowed, IPv4 and
 IPv6 alike. The metadata addresses, multicast and unspecified addresses
-stay refused even inside an allowed network.
+stay refused even inside an allowed network, and so do `255.255.255.255`
+and the broadcast address of an allowed IPv4 network.
 
 The ISO is deliberately **not** part of the release tarball: the whole
 toolkit is 135 MB, the ISO alone is fifty times that.

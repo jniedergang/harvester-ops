@@ -184,7 +184,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   included, directly, through a redirect or through a name resolving to
   an internal address. The console now resolves the name once and
   connects to the checked address, refuses loopback, link-local, private,
-  multicast, unspecified, reserved and cloud metadata addresses, follows
+  multicast, unspecified, reserved and cloud metadata addresses, and
+  broadcast (255.255.255.255 always, and the broadcast address of an
+  allowed IPv4 network, even when `iso_fetch.allow_private` covers it), follows
   at most 5 redirects by hand (http and https only, no https to http) and
   checks every hop again. TLS stays verified. Size cap (20 GiB) and free
   space (1 GiB kept) are checked before and during the download. Internal

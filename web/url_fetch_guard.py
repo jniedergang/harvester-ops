@@ -37,6 +37,10 @@ METADATA_ADDRESSES = frozenset({
 # Plage partagée des opérateurs (CGNAT), absente de is_private
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
+# Diffusion limitée : jamais une source de fichier, même dans une plage
+# autorisée (comme métadonnées, non spécifiée, multidiffusion)
+_LIMITED_BROADCAST = ipaddress.ip_address("255.255.255.255")
+
 REDIRECT_CODES = (301, 302, 303, 307, 308)
 
 
@@ -91,8 +95,15 @@ def address_refusal(ip, allow=()):
         return "unspecified"
     if ip.is_multicast:
         return "multicast"
-    if any(ip in net for net in allow if net.version == ip.version):
-        return None
+    if ip == _LIMITED_BROADCAST:
+        return "broadcast"
+    for net in allow:
+        if net.version == ip.version and ip in net:
+            # diffusion dirigée : décelable seulement dans un réseau autorisé,
+            # dont on connaît le masque (pas pour /31 ni /32, sans diffusion)
+            if ip.version == 4 and net.prefixlen < 31 and ip == net.broadcast_address:
+                return "broadcast"
+            return None
     if ip.is_loopback:
         return "loopback"
     if ip.is_link_local:

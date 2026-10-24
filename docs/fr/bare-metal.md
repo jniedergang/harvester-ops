@@ -67,7 +67,7 @@ avant de se connecter, puis à chaque redirection :
 - le nom est résolu une fois et la console se connecte à l'adresse
   vérifiée : une réponse DNS ne peut pas basculer vers une adresse interne ;
 - les adresses de bouclage, de lien local, privées (RFC 1918, ULA, CGNAT),
-  multicast, non spécifiées et réservées sont refusées, de même que les
+  multicast, de diffusion, non spécifiées et réservées sont refusées, de même que les
   adresses de métadonnées de cloud (`169.254.169.254`, `fd00:ec2::254`) ;
 - le fichier ne peut pas dépasser 20 Gio, et le téléchargement s'arrête
   quand le magasin descend sous 1 Gio d'espace libre.
@@ -85,7 +85,8 @@ iso_fetch:
 
 Toutes les adresses vers lesquelles le nom du miroir résout doivent être
 autorisées, IPv4 comme IPv6. Les adresses de métadonnées, multicast et non
-spécifiées restent refusées même dans un réseau autorisé.
+spécifiées restent refusées même dans un réseau autorisé, de même que
+`255.255.255.255` et l'adresse de diffusion d'un réseau IPv4 autorisé.
 
 L'ISO n'est **volontairement pas** embarqué dans le tarball de release :
 le toolkit entier pèse 135 Mo, l'ISO à lui seul cinquante fois plus.

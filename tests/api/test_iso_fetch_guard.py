@@ -58,6 +58,12 @@ PUBLIC = "93.184.216.34"
     ("169.254.169.254", ["169.254.0.0/16"], "metadata"),
     ("fd00:ec2::254", ["fd00::/8"], "metadata"),
     ("224.0.0.1", ["224.0.0.0/4"], "multicast"),
+    # diffusion : limitée toujours refusée, dirigée refusée dans le réseau autorisé
+    ("255.255.255.255", [], "broadcast"),
+    ("255.255.255.255", ["0.0.0.0/0"], "broadcast"),
+    ("172.16.255.255", ["172.16.0.0/16"], "broadcast"),
+    ("172.16.255.254", ["172.16.0.0/16"], None),
+    ("172.16.1.11", ["172.16.1.11/32"], None),
 ])
 def test_address_refusal(ip, allow, expected):
     nets = [ipaddress.ip_network(n) for n in allow]
