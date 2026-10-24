@@ -152,6 +152,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   stop request. The network rollback ignores a second signal, and a
   cancelled image, upgrade-log or kubeconfig download in
   `harvester-resources` leaves no partial file.
+- The hourly reduction of replication statistics reread every row older
+  than 30 days at each prune. Rows it has seen are now marked (`reduced`
+  column, additive migration): a second prune reads nothing, and a late
+  row joins its already reduced hour.
 
 ### Security
 - Each write route runs the command line with the person's own

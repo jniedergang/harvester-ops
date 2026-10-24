@@ -865,3 +865,83 @@ def test_tx_commit_interrupted_leaves_no_open_transaction(conn, before, exc, ret
         with db._tx(_ConnAfterBegin(conn, "COMMIT", before=before)) as c:
             c.execute("UPDATE plans SET retain = 11 WHERE id = ?", (pid,))
     assert not conn.in_transaction and db.get_plan(conn, pid)["retain"] == retain
+
+
+# -- v1.99.0 : réduction des statistiques par filigrane ----------------------
+
+def _stat(conn, uid, when, **kw):
+    row = {"generation": 1, "resource_uid": uid, "pass_at": db._iso(when), "ts": db._iso(when),
+           "newly_uploaded": 1, "backup_s": 1.0, "upload_bps": 10.0, "rpo_held_s": 5, "state": "protected"}
+    row.update(kw)
+    db.record_stats(conn, PID, row)
+
+
+def _writes(conn):
+    """Instructions qui lisent ou écrivent `stats` par groupe : une seconde
+    réduction ne doit en lancer aucune."""
+    seen = []
+    conn.set_trace_callback(seen.append)
+    return seen
+
+
+def test_a_second_stats_downsample_touches_nothing(conn):
+    new_plan(conn)
+    base = NOW - timedelta(days=40)
+    uids = [f"uid-{i}" for i in range(5)]
+    # 5 VM x 48 heures x 20 passages, plus une heure à une seule ligne
+    for uid in uids:
+        for h in range(48):
+            for k in range(20):
+                _stat(conn, uid, base + timedelta(hours=h, minutes=3 * k))
+    _stat(conn, "uid-lone", base)
+    before = NOW - timedelta(days=30)
+    first = db.downsample_stats(conn, before)
+    assert first == 5 * 48 * 19
+    assert conn.execute("SELECT COUNT(*) FROM stats WHERE reduced = 0").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM stats").fetchone()[0] == 5 * 48 + 1
+    seen = _writes(conn)
+    assert db.downsample_stats(conn, before) == 0
+    conn.set_trace_callback(None)
+    touching = [s for s in seen if "stats" in s and not s.startswith("SELECT rowid AS rid, * FROM stats WHERE reduced = 0")]
+    assert touching == []
+
+
+def test_a_late_row_joins_its_already_reduced_hour(conn):
+    new_plan(conn)
+    hour = (NOW - timedelta(days=40)).replace(minute=0, second=0, microsecond=0)
+    for m, newly, rpo in ((5, 10, 5), (20, 30, 7)):
+        _stat(conn, "u", hour + timedelta(minutes=m), newly_uploaded=newly, rpo_held_s=rpo)
+    before = NOW - timedelta(days=30)
+    assert db.downsample_stats(conn, before) == 1
+    # passage rangé en retard dans la même heure, et plus tôt que l'agrégat
+    _stat(conn, "u", hour + timedelta(minutes=1), newly_uploaded=5, rpo_held_s=9)
+    assert db.downsample_stats(conn, before) == 1
+    st = db.list_stats(conn, PID, "u")
+    assert len(st) == 1
+    agg = st[0]
+    assert agg["passes"] == 3 and agg["newly_uploaded"] == 45 and agg["rpo_held_s"] == 9
+    assert agg["pass_at"] == db._iso(hour + timedelta(minutes=1)) and agg["reduced"] == 1
+    assert db.downsample_stats(conn, before) == 0
+
+
+def test_recent_stats_are_left_unreduced(conn):
+    new_plan(conn)
+    for m in (0, 3, 6):
+        _stat(conn, "u", NOW - timedelta(days=2, minutes=m))
+    assert db.downsample_stats(conn, NOW - timedelta(days=30)) == 0
+    assert conn.execute("SELECT COUNT(*) FROM stats WHERE reduced = 0").fetchone()[0] == 3
+
+
+def test_an_old_database_gains_the_reduced_column(tmp_path):
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    cols = [(n, d) for n, d in db.TABLES["stats"] if n != "reduced"]
+    c.execute(db._create_sql("stats", cols))
+    c.execute("INSERT INTO stats (plan_id, resource_uid, pass_at, ts) VALUES ('p', 'u', '2026-01-01T00:00:00Z', 'x')")
+    c.commit()
+    c.close()
+    conn = db.connect(path)
+    try:
+        assert conn.execute("SELECT reduced FROM stats").fetchone()[0] == 0
+    finally:
+        conn.close()

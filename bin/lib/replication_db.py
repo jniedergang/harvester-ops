@@ -195,6 +195,9 @@ TABLES = {
         # passages agrégés dans la ligne : 1, ou plus après la réduction à
         # l'heure des statistiques de plus de STATS_FULL_DAYS jours
         ("passes", "INTEGER NOT NULL DEFAULT 1"),
+        # 1 = ligne déjà passée par downsample_stats (réduite, ou seule de son
+        # heure) : la réduction suivante ne relit que les lignes à 0
+        ("reduced", "INTEGER NOT NULL DEFAULT 0"),
     ],
     # v1.99.0 : passages de plus de TICKS_FULL_DAYS jours, réduits à l'heure
     "tick_hours": [
@@ -262,6 +265,8 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS measures_plan ON measures (plan_id, generation, snapshot_at)",
     "CREATE INDEX IF NOT EXISTS stats_plan ON stats (plan_id, ts)",
     "CREATE INDEX IF NOT EXISTS stats_resource ON stats (resource_uid, ts)",
+    # lignes que la réduction à l'heure n'a pas encore vues
+    "CREATE INDEX IF NOT EXISTS stats_unreduced ON stats (pass_at) WHERE reduced = 0",
 )
 _JSON = {"plans": ("mappings", "options", "vms"), "events": ("facts",), "plan_resources": ("health",),
          "runs": ("vms", "points", "steps")}
@@ -1318,18 +1323,31 @@ def downsample_stats(conn, before):
     """Statistiques d'avant `before` réduites à une ligne par heure (plan,
     génération, ressource) : pires valeurs (durées, écart, RPO tenu,
     arriéré, disques), somme des octets envoyés, moyenne des débits pondérée
-    par les passages, dernier état. Idempotent (une heure déjà réduite n'a
-    plus qu'une ligne). Rend le nombre de lignes retirées."""
+    par les passages, dernier état. Rend le nombre de lignes retirées.
+
+    Seules les lignes pas encore vues (`reduced = 0`) sont lues : une ligne
+    réduite, ou seule de son heure, est marquée et n'est plus relue ; une
+    seconde réduction ne touche donc rien (idempotent, coût borné par les
+    nouvelles lignes et non par l'historique). Une ligne arrivée en retard
+    dans une heure déjà réduite y est fusionnée."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT rowid AS rid, * FROM stats WHERE pass_at < ? ORDER BY plan_id, generation, resource_uid, pass_at",
+        "SELECT rowid AS rid, * FROM stats WHERE reduced = 0 AND pass_at < ?"
+        " ORDER BY plan_id, generation, resource_uid, pass_at",
         (_iso(before),))]
     groups = {}
     for r in rows:
         groups.setdefault((r["plan_id"], r["generation"], r["resource_uid"], r["pass_at"][:13]), []).append(r)
     removed = 0
     with _tx(conn):
-        for items in groups.values():
+        for (plan_id, gen, uid, hour), fresh in groups.items():
+            # ligne déjà réduite de la même heure : elle entre dans l'agrégat
+            old = [dict(r) for r in conn.execute(
+                "SELECT rowid AS rid, * FROM stats WHERE reduced = 1 AND plan_id = ? AND generation = ?"
+                " AND resource_uid = ? AND pass_at >= ? AND pass_at < ?",
+                (plan_id, gen, uid, hour, hour + "\uffff"))]
+            items = sorted(old + fresh, key=lambda r: r["pass_at"])
             if len(items) < 2:
+                conn.execute("UPDATE stats SET reduced = 1 WHERE rowid = ?", (items[0]["rid"],))
                 continue
             agg = {k: items[0][k] for k in ("plan_id", "generation", "resource_uid", "pass_at")}
             agg["ts"] = max(r["ts"] for r in items)
@@ -1342,6 +1360,7 @@ def downsample_stats(conn, before):
             for k in _STATS_MEAN:
                 vals = [(r[k], int(r.get("passes") or 1)) for r in items if r[k] is not None]
                 agg[k] = sum(v * w for v, w in vals) / sum(w for _v, w in vals) if vals else None
+            agg["reduced"] = 1
             conn.execute(f"DELETE FROM stats WHERE rowid IN ({','.join('?' for _ in items)})",
                          [r["rid"] for r in items])
             _insert(conn, "stats", agg)
