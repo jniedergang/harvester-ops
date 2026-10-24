@@ -1,4 +1,4 @@
-"""v1.97.0 : déroulé de la réplication (`replication_run`), sans cluster.
+"""v1.99.0 : déroulé de la réplication (`replication_run`), sans cluster.
 
 Deux clusters simulés en mémoire (`FakeKube`) qui partagent une cible de
 sauvegarde (`Store`), avec ce que Longhorn, Harvester et KubeVirt font pour

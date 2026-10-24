@@ -225,7 +225,7 @@ if _PROMETHEUS_AVAILABLE:
         "harvester_ops_vnc_sessions",
         "In-browser VNC console sessions currently relayed.",
     )
-    # v1.97.0 : réplication (fil de suivi de la console, RPO par plan)
+    # v1.99.0 : réplication (fil de suivi de la console, RPO par plan)
     metric_repl_follower_up = Gauge(
         "harvester_ops_replication_follower_up",
         "1 when the console's replication follower process is running.",
@@ -933,7 +933,7 @@ def _read_share_invalidate(response):
                 READ_SHARE.invalidate("_activity")
             return response
         if request.path.startswith("/api/replication/"):
-            # v1.97.0 : le registre de la réplication n'est pas un cluster
+            # v1.99.0 : le registre de la réplication n'est pas un cluster
             READ_SHARE.invalidate(REPLICATION_SCOPE)
             READ_SHARE.invalidate("_activity")
             return response
@@ -1169,7 +1169,7 @@ def required_role_for(path, method):
 KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 
 
-# v1.97.0 : réplication. Bascule = admin (une activation est définitive) ;
+# v1.99.0 : réplication. Bascule = admin (une activation est définitive) ;
 # le reste = opérateur. La suppression des sauvegardes à la déprotection
 # (demandée, ou héritée d'une déprotection interrompue) et la reprise d'une
 # bascule ou d'une telle déprotection, qui dépendent du corps de la demande
@@ -1409,7 +1409,7 @@ def identity_env(login=None, cluster=None):
 # Action registry (in-memory)
 # -----------------------------------------------------------------------------
 def _metric_action(action):
-    """Libellé d'action des métriques. v1.97.0 : `replication:<plan>:<op>`
+    """Libellé d'action des métriques. v1.99.0 : `replication:<plan>:<op>`
     (et `replication:create:<nom>`) devient `replication:<op>`, pour ne pas
     ouvrir une série par plan ni exposer un nom de plan."""
     action = str(action or "unknown")
@@ -1462,10 +1462,10 @@ class ActionRun:
         # v1.96.0 : message d'une annulation pour un outil qui ne défait pas
         # tout (None : celui des transferts, « transfer undone »)
         self.cancel_summary = None
-        # v1.97.0 : délai laissé à l'outil annulé pour défaire ce qu'il a
+        # v1.99.0 : délai laissé à l'outil annulé pour défaire ce qu'il a
         # posé avant un SIGKILL (None : jamais de SIGKILL, comme avant)
         self.kill_grace = None
-        # v1.97.0 : outil qui défait lui-même ce qu'il a posé (réplication) :
+        # v1.99.0 : outil qui défait lui-même ce qu'il a posé (réplication) :
         # une annulation est DEMANDÉE (`cancel_requested`), l'action reste
         # « running » jusqu'à la sortie de l'outil, qui dit le statut final
         self.cancel_waits = False
@@ -11194,7 +11194,7 @@ def api_action_cancel(run_id):
                         "hint": f"cancelling this action needs the '{need}' role, "
                                 f"like starting it"}), 403
     if run.cancel_waits and run.status in ("starting", "running"):
-        # v1.97.0 : l'action reste en cours (les gardes d'occupation la
+        # v1.99.0 : l'action reste en cours (les gardes d'occupation la
         # voient encore) ; le relais range le statut que l'outil donne en
         # sortant, et une commande déjà finie n'est jamais réécrite
         if not run.cancel_requested:
@@ -11222,7 +11222,7 @@ def api_action_cancel(run_id):
 
 
 def _kill_after_grace(run, wait=None):
-    """v1.97.0 : SIGKILL seulement si l'outil n'est pas sorti après son délai
+    """v1.99.0 : SIGKILL seulement si l'outil n'est pas sorti après son délai
     de retour arrière (`run.kill_grace`) ; un fil par annulation."""
     proc, grace = run.proc, run.kill_grace
 
@@ -15181,7 +15181,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
     qui n'écrit rien sur le cluster (réservations, v1.94.0) : l'arrêt d'un
     cluster en cours ne le bloque pas. `capture=True` (v1.96.0) garde l'objet
     JSON que l'outil écrit sur stdout dans `run.result["output"]`.
-    v1.97.0 : `busy_clusters` (clusters dont l'arrêt en cours bloque
+    v1.99.0 : `busy_clusters` (clusters dont l'arrêt en cours bloque
     l'action, `(cluster,)` par défaut) et `busy_prefix` (une action en cours
     dont le libellé commence ainsi bloque aussi : un geste par plan de
     réplication) ; `summarize` passé au relais ; `id_arg` ajoute
@@ -15224,7 +15224,7 @@ def _cli_action(cluster, label, cmd, tool, spec=None, dry_run=False, after=None,
 
     def work():
         try:
-            if summarize is None:          # signature d'avant la 1.97.0 (outils et tests)
+            if summarize is None:          # signature d'avant la 1.99.0 (outils et tests)
                 _vm_transfer_runner(run, cmd, capture=capture)
             else:
                 _vm_transfer_runner(run, cmd, capture=capture, summarize=summarize)
@@ -20073,7 +20073,7 @@ def _transfer_busy(clusters, label, prefix=None):
     """Même VM déjà en transfert, ou arrêt/démarrage de l'un des clusters en
     cours : un transfert qui démarre sous un cluster qu'on éteint échoue au
     milieu, et deux transferts de la même VM se marcheraient dessus.
-    `prefix` (v1.97.0) : toute action en cours dont le libellé commence
+    `prefix` (v1.99.0) : toute action en cours dont le libellé commence
     ainsi, quel que soit son cluster (un geste à la fois par plan)."""
     for r in list(ACTIONS.values()):
         if r.status not in ("starting", "running") or r.dry_run:
@@ -20094,7 +20094,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     """Relaie les étapes du script, comme pour l'installateur du provider.
     `capture` : l'objet JSON de stdout va dans `run.result["output"]`
     (fichier temporaire anonyme, pas de tube qui se remplirait).
-    `summarize(run, rc, sortie, dernière erreur)` (v1.97.0) : rend (statut,
+    `summarize(run, rc, sortie, dernière erreur)` (v1.99.0) : rend (statut,
     résumé) pour un outil qui dit lui-même ce que veut dire sa sortie (la
     réplication distingue annulé et défait, interrompu à reprendre), ou None
     pour les textes habituels."""
@@ -20107,7 +20107,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
     last_error = None
     out_file = None
     if run.cancel_requested:
-        # v1.97.0 : annulée avant le départ de la commande : rien n'est lancé
+        # v1.99.0 : annulée avant le départ de la commande : rien n'est lancé
         run.status, run.error_summary = "cancelled", "cancelled before the command started: nothing done"
         run.ended_at = time.time()
         run.emit({"type": "status", "status": run.status, "exit_code": None, "ts": time.time()})
@@ -20121,7 +20121,7 @@ def _vm_transfer_runner(run, cmd, capture=False, summarize=None):
                                 stderr=subprocess.PIPE, text=True)
         run.proc = proc          # annulable depuis le dock : le script défait tout
         if run.cancel_requested:
-            # v1.97.0 : annulation demandée avant que le processus existe
+            # v1.99.0 : annulation demandée avant que le processus existe
             proc.terminate()
             if run.kill_grace:
                 run._kill_watch = _kill_after_grace(run)
@@ -24465,7 +24465,7 @@ def api_notes_get(doc_id):
 
 
 # =============================================================================
-# Réplication asynchrone (v1.97.0), sans écran
+# Réplication asynchrone (v1.99.0), sans écran
 #
 # Seul chemin d'écriture : bin/harvester-replication.py, lancé en action
 # suivie (Activité, dock, annulable) avec les kubeconfigs de la personne pour
@@ -25694,11 +25694,11 @@ if __name__ == "__main__":
     # applique pas l'action par défaut de SIGTERM, qui était donc ignoré, et
     # `podman stop` finissait par un SIGKILL au bout de 10 s. Sortir
     # proprement à la place.
-    # v1.97.0 : avant de sortir, laisser aux commandes de réplication en cours
+    # v1.99.0 : avant de sortir, laisser aux commandes de réplication en cours
     # le temps de défaire ce qu'elles ont posé (puis SIGKILL), et arrêter le
     # fil de suivi proprement (il rend ses baux)
     signal.signal(signal.SIGTERM, _console_sigterm)
-    # v1.97.0 : le fil de suivi ne part que d'ici (jamais à l'import)
+    # v1.99.0 : le fil de suivi ne part que d'ici (jamais à l'import)
     try:
         _start_replication_follower()
     except Exception as _e:                      # noqa: BLE001

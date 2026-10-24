@@ -1,4 +1,4 @@
-"""v1.97.0 : le registre de la réplication (bin/lib/replication_db.py).
+"""v1.99.0 : le registre de la réplication (bin/lib/replication_db.py).
 
 Transitions d'un plan valides et refusées (et depuis `error`, celles de
 l'état d'origine seulement), unicité du nom, liste par hôte des deux côtés,

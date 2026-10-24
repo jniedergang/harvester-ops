@@ -1,4 +1,4 @@
-"""v1.97.0 : la logique pure de la réplication (bin/lib/replication.py).
+"""v1.99.0 : la logique pure de la réplication (bin/lib/replication.py).
 
 Noms (déterministes, bornés, collision d'empreinte rattrapée), validation
 d'un plan, constats d'éligibilité et de contrôle (un cas par code, plan à deux

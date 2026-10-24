@@ -1,10 +1,10 @@
-"""v1.97.0 : bin/harvester-replication.py, la ligne de commande de la réplication.
+"""v1.99.0 : bin/harvester-replication.py, la ligne de commande de la réplication.
 
-Les deux clusters simulés du déroulé (`test_replication_run_197.World`) sont
+Les deux clusters simulés du déroulé (`test_replication_run_199.World`) sont
 branchés par le point d'injection `KUBE_FACTORY` ; l'horloge et l'attente
 sont celles du faux (des heures durent une fraction de seconde). Les
 annulations passent par un vrai processus qui reçoit un vrai SIGTERM : ce
-fichier sert aussi de harnais (`python3 test_replication_cli_197.py harness
+fichier sert aussi de harnais (`python3 test_replication_cli_199.py harness
 ...`), qui monte le banc simulé, lance la commande, et range l'état final.
 """
 
@@ -28,7 +28,7 @@ _spec.loader.exec_module(cli)
 import replication as rp  # noqa: E402
 import replication_db as db  # noqa: E402
 import replication_run as rr  # noqa: E402
-from test_replication_run_197 import GIB, VMS, World, protected  # noqa: E402
+from test_replication_run_199 import GIB, VMS, World, protected  # noqa: E402
 
 PID = "rp-0123456789ab"
 FAILURE_KEYS = {"ok", "error", "kind"}

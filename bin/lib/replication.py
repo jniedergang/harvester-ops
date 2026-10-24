@@ -1,4 +1,4 @@
-"""harvester-ops : décisions de la réplication asynchrone de VMs (v1.97.0).
+"""harvester-ops : décisions de la réplication asynchrone de VMs (v1.99.0).
 
 Ce module ne parle à aucun cluster. Il reçoit des objets déjà lus (plan,
 ressources, volumes, passages relevés, faits des deux clusters) et décide :

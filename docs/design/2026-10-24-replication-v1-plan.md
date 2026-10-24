@@ -1,4 +1,4 @@
-# Réplication asynchrone 1.97.0 : moteur et ligne de commande (plan de réalisation)
+# Réplication asynchrone 1.99.0 : moteur et ligne de commande (plan de réalisation)
 
 Conception et résultats des bancs : `2026-10-22-replication-asynchrone.md`. Maquette (versions suivantes) : `2026-10-22-replication-maquette.html`.
 
@@ -6,7 +6,7 @@ Cette version livre le moteur de réplication et sa ligne de commande `bin/harve
 
 ## Périmètre retenu, et pourquoi
 
-| Dans la 1.97.0 | Hors 1.97.0 | Raison |
+| Dans la 1.99.0 | Hors 1.99.0 | Raison |
 |---|---|---|
 | Plan gardé par la console, mesure, protection, suiveur, état, bascule planifiée et non planifiée, déprotection | Exercices, retour au site principal (reprotection), vagues, appels HTTP annexes, cohérence par gel de l'invité | Le moteur doit d'abord tenir son RPO en continu et basculer sans perte sur le banc. Les exercices et le retour réutilisent les mêmes briques (volume de secours, activation, PV/PVC, carnet de reprise) et s'ajoutent sans changer le modèle |
 | Routes de la console, sans écran | Vue de suivi, fenêtre de création | Les routes donnent dès maintenant l'audit dans Activité et les rôles ; la vue se branche dessus ensuite |
@@ -30,7 +30,7 @@ Cette version livre le moteur de réplication et sa ligne de commande `bin/harve
 
 ## Tâche 1 : registre `replication_db`
 
-Fichiers : `bin/lib/replication_db.py`, `tests/api/test_replication_db_197.py`.
+Fichiers : `bin/lib/replication_db.py`, `tests/api/test_replication_db_199.py`.
 
 Calqué sur `bin/lib/bookings_db.py` : SQLite en WAL, `replication.db` dans le répertoire d'état (ou `HARVESTER_OPS_REPLICATION_DB`), fichier 0600, `busy_timeout`, schéma en `CREATE TABLE IF NOT EXISTS` (migrations additives seulement). Seule la ligne de commande y écrit ; la console la lit (et son fil de suivi lance la ligne de commande).
 
@@ -53,7 +53,7 @@ Tests : transitions valides et refusées en tableau, unicité du nom, liste par 
 
 ## Tâche 2 : logique pure `replication`
 
-Fichiers : `bin/lib/replication.py`, `tests/api/test_replication_model_197.py`.
+Fichiers : `bin/lib/replication.py`, `tests/api/test_replication_model_199.py`.
 
 **Noms.**
 - `target_volume_name(plan_id, vm_uid, disk, generation, vm_name)` : `hr-<vm tronqué>-<disque tronqué>-<6 hex>` (empreinte de `plan_id|vm_uid|disk|generation`), minuscules, RFC 1123, déterministe (une relance retrouve le même nom). Longueur bornée à 40 pour laisser la place aux noms dérivés de Longhorn (moteur, répliques) ; la limite exacte est lue dans la validation du nom de volume de longhorn-manager 1.11 et 1.12, ligne citée en commentaire.
@@ -116,7 +116,7 @@ Tests (en tableau) : noms (déterministes, longueurs limites, caractères interd
 
 ## Tâche 3 : déroulé `replication_run`
 
-Fichiers : `bin/lib/replication_run.py`, `tests/api/test_replication_run_197.py`.
+Fichiers : `bin/lib/replication_run.py`, `tests/api/test_replication_run_199.py`.
 
 `Ctx` compatible avec `vm_transfer_run.wait_for` (`emit`, `sleep`, `now`, `timeouts`, `created`, `record`, `forget`), plus `db` et `plan`. Faux cluster : celui de `tests/api/test_vm_transfer_run.py` (`Clock`, `Store`, `FakeCluster`), étendu d'un **Longhorn simulé** : une `Backup` passe `Completed` quand l'horloge avance, une relecture (`syncRequestedAt`) fait apparaître la sauvegarde côté secours, le moteur du volume de secours avance son `lastRestoredBackup`, l'activation passe le volume `detached` non `Standby`. Le faux sait aussi échouer à une étape choisie (erreur, délai, coupure transitoire).
 
@@ -167,7 +167,7 @@ Tests : protection complète sur un plan à deux VMs (une à trois disques, une 
 
 ## Tâche 4 : suiveur `replication_follow`
 
-Fichiers : `bin/lib/replication_follow.py`, `tests/api/test_replication_follow_197.py`.
+Fichiers : `bin/lib/replication_follow.py`, `tests/api/test_replication_follow_199.py`.
 
 Le suiveur raccourcit le RPO (relecture forcée à la fin de chaque sauvegarde : 9 à 10 s au lieu de 1 à 3 min) et tient les statistiques. Il ne fait qu'une écriture sur les clusters : le `syncRequestedAt` des `BackupVolume`. S'il s'arrête, la réplication continue au rythme de la relecture naturelle de Longhorn : le RPO s'allonge de 1 à 3 min, rien ne casse.
 
@@ -188,7 +188,7 @@ Tests : barrière (trois disques, le troisième en retard, puis en erreur) ; rel
 
 ## Tâche 5 : ligne de commande `bin/harvester-replication.py`
 
-Fichiers : `bin/harvester-replication.py`, `tests/api/test_replication_cli_197.py`.
+Fichiers : `bin/harvester-replication.py`, `tests/api/test_replication_cli_199.py`.
 
 Sous-commandes (argparse, `--json`, `--db`, `--spec`, `--timeout NOM=S`) :
 - `plan create --name N --from A --to B (--vm ns/nom ... | --selector k=v --namespace ns) --rpo 15m [--map-net S=D] [--map-sc S=D] [--map-ns S=D] [--target-name ns/vm=nom] [--cloud-init rerun|keep] [--mac keep|new] [--create-namespace] [--start started|stopped] [--retain N] [--interval 5m]` : contrôle des noms et de la forme, aucune écriture sur les clusters ; le sélecteur est résolu à `protect` (et à chaque relance de `protect`).
@@ -206,7 +206,7 @@ Chaque commande mutative écrit ses événements par ressource (`by` = utilisate
 
 ## Tâche 6 : console (fil de suivi, routes, rôles), sans écran
 
-Fichiers : `web/app.py`, `tests/api/test_replication_routes_197.py`.
+Fichiers : `web/app.py`, `tests/api/test_replication_routes_199.py`.
 
 - **Fil de suivi** calqué sur l'échantillonneur d'usage (`_start_usage_sampler`) : un fil unique par processus principal (pas dans les lecteurs, `IS_READ_WORKER`) qui lance et surveille `harvester-replication.py follow --all --console` avec le kubeconfig de la console, le relance avec un délai croissant s'il s'arrête, et écrit son journal sous `logs/replication-follow.log`. Interrupteur à chaud : `HARVESTER_OPS_REPLICATION_FOLLOW=0` au démarrage, et l'option `follow` de chaque plan en base. La console doit tourner du côté du secours ou à l'extérieur des deux sites : écrit dans la doc et dans le résultat de `check` quand on peut le savoir.
 - Routes : `GET /api/replication/plans`, `GET /api/replication/plans/<id>` (état calculé par `plan_status`, lecture de la base seulement, `@shared_read`), `POST /api/replication/plans` (création), `POST .../check`, `POST .../measure` (`start|stop`), `POST .../protect`, `POST .../failover`, `POST .../unprotect`, `PATCH .../settings`, `DELETE /api/replication/plans/<id>`, et les lectures par hôte de la section « Interface future », livrées dès cette version : `GET /api/replication/hosts/<host>/resources` et `GET /api/replication/resources/<uid>/events`. Toute mutation passe par `_cli_action` (action suivie, Activité, dock, annulable), avec les kubeconfigs de la personne pour les deux clusters et un contrôle d'occupation qui couvre **les deux clusters** et le plan (`_cli_action` reçoit un paramètre `busy_clusters` ; libellé `replication:<id>`), pour qu'une bascule ne parte pas sous un arrêt de cluster en cours.
@@ -242,13 +242,13 @@ Après les essais : `harvlab.sh tidy`, arrêt des deux bancs, extinction de node
 
 ## Tâche 8 : documentation, version
 
-- `VERSION` 1.97.0, entrée en tête du `CHANGELOG.md` (Added, Changed, Tests).
+- `VERSION` 1.99.0, entrée en tête du `CHANGELOG.md` (Added, Changed, Tests).
 - Doc EN et FR : `docs/en/capabilities.md`, `docs/fr/capabilites.md` (réplication en ligne de commande, limites : v1 seulement, cohérence comme après une coupure de courant, place occupée sur la cible dès la protection, activation définitive) ; `docs/en/operating-procedure.md` et `docs/fr/procedure-operationnelle.md` (mesurer, protéger, suivre, basculer, déprotéger, où placer la console).
-- Conception : section « Ce que la 1.97.0 a appris » avec les réponses de la tâche 7 ; tableau de parité inchangé (fonction sans équivalent dans Harvester).
+- Conception : section « Ce que la 1.99.0 a appris » avec les réponses de la tâche 7 ; tableau de parité inchangé (fonction sans équivalent dans Harvester).
 
 ## Cohérence entre disques d'une VM : la limite, dite telle quelle
 
-Une tâche récurrente Longhorn traite chaque volume pour lui-même : il n'existe pas d'instantané atomique de plusieurs volumes. La 1.97.0 réduit l'écart sans le supprimer :
+Une tâche récurrente Longhorn traite chaque volume pour lui-même : il n'existe pas d'instantané atomique de plusieurs volumes. La 1.99.0 réduit l'écart sans le supprimer :
 - une tâche par VM, avec autant de volumes en parallèle que de disques : les instantanés d'une VM partent dans la même seconde ou presque ;
 - la barrière du suiveur n'applique côté secours un passage que lorsque tous les disques de la VM l'ont terminé ;
 - l'écart est mesuré à chaque passage (`skew_s`), montré par `status`, et contrôlé à la bascule non planifiée (`--accept-skew` au-delà de la tolérance) ;
@@ -262,7 +262,7 @@ Un seul modèle, deux vues :
 - un menu racine **« Disaster Recovery »** (la section « Protection » de la maquette) présente tous les plans, avec l'état et les actions de chaque plan et de chacune de ses ressources ;
 - chaque hôte (un cluster Harvester aujourd'hui, un hyperviseur KVM plus tard) a un sous-menu « Disaster Recovery » : les mêmes données, filtrées sur cet hôte, comme source ou comme cible.
 
-La 1.97.0 livre ce que ces deux vues liront :
+La 1.99.0 livre ce que ces deux vues liront :
 
 - `GET /api/replication/plans` : `[{id, name, source_host, target_host, state, rpo_objective_s, rpo_held_s (pire ressource), interval_s, next_tick_at, resources_by_state: {...}, last_events: [...3], actions: [{name, role, allowed}], resources: [<ligne de ressource ci-dessous>]}]`, et `GET /api/replication/plans/<id>` pour un plan avec ses statistiques détaillées ; les actions d'un plan (`plan_actions(plan, side)`, à côté de `allowed_actions`) agissent sur toutes ses ressources ;
 - `GET /api/replication/hosts/<host>/resources?side=source|target|any` : les lignes de ressource, produites par la **même fonction** que la liste des plans, filtrées par hôte : `[{plan, plan_name, resource_kind, resource_uid, namespace, name, side, peer_host, state, state_since, rpo_held_s, rpo_objective_s, last_applied_at, last_events: [...3], actions: [{name, role, allowed}]}]` ; `allowed` tient compte du rôle de la personne, l'action reste listée (bouton grisé avec sa raison) ;

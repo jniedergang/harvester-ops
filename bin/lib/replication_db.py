@@ -1,4 +1,4 @@
-"""harvester-ops : le registre de la réplication asynchrone (v1.97.0).
+"""harvester-ops : le registre de la réplication asynchrone (v1.99.0).
 
 Une base SQLite de la console, `replication.db`, dans le répertoire d'état
 (ou HARVESTER_OPS_REPLICATION_DB), en mode WAL, fichier 0600. Seule la ligne

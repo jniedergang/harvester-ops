@@ -1,4 +1,4 @@
-"""v1.97.0 : la réplication dans la console, sans écran.
+"""v1.99.0 : la réplication dans la console, sans écran.
 
 Lectures droit au registre par les fonctions mêmes de la ligne de commande
 (`replication_db.plan_rows` / `host_rows`) : le menu racine et le sous-menu

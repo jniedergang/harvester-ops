@@ -1,4 +1,4 @@
-"""harvester-ops : déroulé de la réplication asynchrone de VMs (v1.97.0).
+"""harvester-ops : déroulé de la réplication asynchrone de VMs (v1.99.0).
 
 Les opérations qui parlent aux clusters, au-dessus des décisions pures de
 `replication` et du registre `replication_db` :

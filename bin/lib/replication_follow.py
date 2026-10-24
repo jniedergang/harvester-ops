@@ -1,4 +1,4 @@
-"""harvester-ops : le suiveur de la réplication asynchrone (v1.97.0).
+"""harvester-ops : le suiveur de la réplication asynchrone (v1.99.0).
 
 Il raccourcit le RPO et tient les statistiques. Sans lui, un volume de
 secours n'applique une nouvelle sauvegarde qu'à la relecture naturelle de

@@ -1,6 +1,6 @@
-"""v1.97.0 : le suiveur de la réplication (`replication_follow`), sans cluster.
+"""v1.99.0 : le suiveur de la réplication (`replication_follow`), sans cluster.
 
-Les deux clusters simulés du déroulé (`test_replication_run_197.World`),
+Les deux clusters simulés du déroulé (`test_replication_run_199.World`),
 protégés pour de vrai par `replication_run.protect`, puis une tâche
 récurrente simulée : chaque disque d'une VM part à la même échéance du cron
 et finit sa sauvegarde à son heure (`start_pass`). La cible n'applique une
@@ -26,7 +26,7 @@ import replication as rp  # noqa: E402
 import replication_db as db  # noqa: E402
 import replication_follow as rf  # noqa: E402
 import replication_run as rr  # noqa: E402
-from test_replication_run_197 import VMS, World, iso  # noqa: E402
+from test_replication_run_199 import VMS, World, iso  # noqa: E402
 
 INTERVAL = 180
 OWNER = "cli:testhost:900"

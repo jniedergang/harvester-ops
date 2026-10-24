@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""harvester-replication : réplication asynchrone de VMs entre clusters (v1.97.0).
+"""harvester-replication : réplication asynchrone de VMs entre clusters (v1.99.0).
 
 Seul chemin d'écriture de la réplication : la console lance ces commandes en
 actions suivies, et son fil de suivi lance `follow --all --console`.
@@ -853,7 +853,7 @@ def redirect_stderr(path):
 
 
 def install_log_reopen(path):
-    """v1.97.0 : la console renomme le journal trop gros puis envoie
+    """v1.99.0 : la console renomme le journal trop gros puis envoie
     SIGUSR1 ; le suiveur rouvre le fichier sans redémarrer (SIGHUP reste un
     signal d'arrêt). Rend l'ancien gestionnaire."""
     redirect_stderr(path)
