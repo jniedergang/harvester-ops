@@ -326,6 +326,17 @@ d'agent ; l'onglet le dit.
 la même installation sans l'interface ; `sudo harvester-ops-update.py
 --status` montre la dernière issue de l'agent.
 
+**Mises à jour de sécurité (1.98.1).** Chaque image est construite sur la
+base SUSE BCI Python du moment (tirée à neuf à la construction) et son magasin
+de certificats. La 1.98.1 est une version de sécurité : elle retire les
+autorités eMudhra compromises en octobre 2026 (emSign ECC Root CA - G3, emSign
+ECC Root CA - C3, emSign Root CA - C1) et met à jour OpenTofu et kubectl. Elle
+s'installe comme toute autre version. Le CHANGELOG donne, pour chaque version
+de sécurité, l'empreinte de l'image de base et les composants qui attendent
+encore un correctif amont. Pour vérifier soi-même une image construite :
+`python3 tools/release/check_image_trust.py localhost/harvester-ops:<version>`
+(depuis les sources).
+
 ## Déplacer harvops vers un autre hôte
 
 La console sépare deux répertoires, et les copier tous les deux suffit à

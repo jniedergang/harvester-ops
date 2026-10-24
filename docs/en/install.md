@@ -315,6 +315,16 @@ interface. A console run from the sources has no agent; the tab says so.
 same install without the interface; `sudo harvester-ops-update.py --status`
 shows the agent's last outcome.
 
+**Security updates (1.98.1).** Each release image is built on the current
+SUSE BCI Python base (pulled fresh at build time) and its trust store. 1.98.1
+is a security release: it removes the eMudhra CAs compromised in October 2026
+(emSign ECC Root CA - G3, emSign ECC Root CA - C3, emSign Root CA - C1) and
+updates OpenTofu and kubectl. Install it like any other release. The
+CHANGELOG lists, for each security release, the base image digest and the
+components still waiting for an upstream fix. To check a built image yourself:
+`python3 tools/release/check_image_trust.py localhost/harvester-ops:<version>`
+(from the sources).
+
 ## Moving harvops to another host
 
 The console keeps two directories apart, and copying both is all a move
