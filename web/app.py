@@ -24737,10 +24737,12 @@ def _repl_summarize(run, rc, data, last_error):
     return "error", str(data.get("error") or data.get("message") or last_error or f"exit {rc}")
 
 
-def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=None, dry_run=False):
+def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=None, dry_run=False, spec=None):
     """Lance une commande en action suivie. Libellé `replication:<plan>:<op>`
     (identifiant contrôlé, jamais de nom libre) ; un geste à la fois par plan,
-    et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters."""
+    et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters.
+    `spec` : objet passé par le fichier privé `--spec` (secrets jamais dans
+    la ligne de commande)."""
     label = f"replication:{plan['id']}:{op}"
 
     def setup(run):
@@ -24751,7 +24753,7 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
         run.shutdown_grace = _repl_shutdown_grace(plan, op)
         run.cancel_waits = True
         run.result = dict(run.result or {}, plan=plan["id"])
-    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
+    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run, spec=spec,
                        after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=busy,
                        capture=True,
                        busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
@@ -24839,7 +24841,7 @@ def api_replication_plan(plan_id):
         v = _rdb.plan_view(conn, plan, now)
         row = _rdb.plan_rows(conn, [plan], now, role=current_role())[0]
         status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
-        out = {"plan": plan, "row": row, "status": status, "volumes": v["volumes"],
+        out = {"plan": _rp.mask_plan(plan), "row": row, "status": status, "volumes": v["volumes"],
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
                "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role()}
     finally:
@@ -24980,9 +24982,11 @@ _CREATE_SCALARS = (("name", "--name"), ("from", "--from"), ("to", "--to"), ("sel
                    ("follow", "--follow"), ("skew_tolerance", "--skew-tolerance"))
 _CREATE_MAPS = (("map_net", "--map-net", "networks"), ("map_sc", "--map-sc", "storage_classes"),
                 ("map_ns", "--map-ns", "namespaces"), ("map_image", "--map-image", "images"),
-                ("map_claim", "--map-claim", "claims"), ("target_name", "--target-name", "target_names"))
+                ("map_claim", "--map-claim", "claims"), ("target_name", "--target-name", "target_names"),
+                ("map_disk_class", "--map-disk-class", "disk_classes"),
+                ("map_drill_net", "--map-drill-net", "drill_networks"))
 _CREATE_KEYS = ({k for k, _ in _CREATE_SCALARS} | {k for k, _o, _m in _CREATE_MAPS}
-                | {"vms", "create_namespace", "timeouts"})
+                | {"vms", "create_namespace", "timeouts", "recovery"})
 
 
 def _repl_pairs(body, key):
@@ -25015,9 +25019,24 @@ def _repl_timeouts(body, key="timeouts", allow_null=False):
     return out
 
 
+def _repl_recovery(body):
+    """Le bloc `recovery` d'un corps (création, réglages) : un objet aux clés
+    de `replication.RECOVERY_KEYS`, passé au script par le fichier privé
+    `--spec` (jamais dans la ligne de commande : en-têtes secrets)."""
+    rec = body.get("recovery")
+    if rec is None:
+        return None
+    if not isinstance(rec, dict):
+        raise ValueError("recovery must be an object")
+    unknown = set(rec) - set(_rp.RECOVERY_KEYS)
+    if unknown:
+        raise ValueError(f"recovery: unknown key {sorted(unknown)[0][:40]}")
+    return rec
+
+
 def _repl_create_request(body):
-    """(demande normalisée, options du script) d'un corps de création ;
-    ValueError ou PlanError sinon. La demande passe par
+    """(demande normalisée, options du script, bloc `recovery`) d'un corps
+    de création ; ValueError ou PlanError sinon. La demande passe par
     `replication.normalize_plan`, le contrôle même du script, pour répondre
     400 tout de suite au lieu d'une action en échec."""
     unknown = set(body) - _CREATE_KEYS
@@ -25050,6 +25069,9 @@ def _repl_create_request(body):
     if timeouts:
         options["timeouts"] = timeouts
         argv += [f"--timeout={k}={v}" for k, v in timeouts.items()]
+    recovery = _repl_recovery(body)
+    if recovery:
+        options.update(recovery)
     req = {"name": vals.get("name"), "source_cluster": vals.get("from"), "target_cluster": vals.get("to"),
            "rpo_objective_s": vals.get("rpo"), "interval_s": vals.get("interval"), "vms": vms,
            "selector": vals.get("selector", ""), "namespace": vals.get("namespace", ""),
@@ -25059,7 +25081,7 @@ def _repl_create_request(body):
             req["retain"] = int(vals["retain"])
         except ValueError:
             raise ValueError("retain must be an integer") from None
-    return _rp.normalize_plan(req), argv
+    return _rp.normalize_plan(req), argv, recovery
 
 
 @app.route("/api/replication/plans", methods=["POST"])
@@ -25074,7 +25096,7 @@ def api_replication_plan_create():
     if err:
         return err
     try:
-        plan, argv = _repl_create_request(body)
+        plan, argv, recovery = _repl_create_request(body)
     except _rp.PlanError as e:
         return _repl_err(str(e), 400, e.code)
     except ValueError as e:
@@ -25094,6 +25116,7 @@ def api_replication_plan_create():
         run.cancel_waits = True
     run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
                            _repl_base("plan", "create") + argv, REPLICATION_TOOL,
+                           spec={"recovery": recovery} if recovery else None,
                            after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=False,
                            capture=True, summarize=_repl_summarize, id_arg=True, setup=setup)
     if err:
@@ -25372,7 +25395,20 @@ def api_replication_unprotect(plan_id):
     return _repl_accepted(run, plan["id"], delete_backups=delete_backups)
 
 
-_SETTINGS_KEYS = ("rpo", "paused", "follow", "skew_tolerance", "timeouts")
+_SETTINGS_KEYS = ("rpo", "paused", "follow", "skew_tolerance", "timeouts", "recovery", "mappings",
+                  "cloud_init", "mac", "start")
+
+
+def _repl_settings_mappings(body):
+    maps = body.get("mappings")
+    if maps is None:
+        return {}
+    if not isinstance(maps, dict) or not maps:
+        raise ValueError("mappings must be a non-empty object")
+    unknown = set(maps) - set(_rp.MAPPING_KINDS)
+    if unknown:
+        raise ValueError(f"mappings: unknown kind {sorted(unknown)[0][:40]}")
+    return maps
 
 
 @app.route("/api/replication/plans/<plan_id>/settings", methods=["PATCH"])
@@ -25382,7 +25418,17 @@ def api_replication_settings(plan_id):
     """Réglages à chaud, lus par le suiveur au tour suivant : `rpo`, `paused`,
     `follow` (console, cli, off), `skew_tolerance`, `timeouts` ({nom:
     secondes}, null retire la surcharge). L'intervalle (`protect
-    --interval`) et la rétention ne se changent pas ici."""
+    --interval`) et la rétention ne se changent pas ici.
+
+    Reprise (écrans de réplication) : `recovery` (`waves`, `hooks`,
+    `network_data`, `resize`, `auto_protect`, chaque clé donnée remplace la
+    valeur rangée ; un en-tête secret `********` garde la sienne),
+    `cloud_init`, `mac`, `start`, permis dans tout état sauf pendant une
+    bascule ; `mappings` ({genre: {...}}, chaque genre donné remplace le
+    sien) : `networks` et `drill_networks` dans tout état sauf pendant une
+    bascule, les autres en brouillon seulement (400 `state-forbids`). Les
+    objets passent par le fichier privé `--spec`. Sur un plan protégé dont
+    le carnet de reprise change, la réponse porte `protect_needed: true`."""
     err = _repl_unavailable()
     if err:
         return err
@@ -25404,6 +25450,8 @@ def api_replication_settings(plan_id):
     if not body:
         return _repl_err("nothing to change")
     argv = []
+    spec = {}
+    carnet = {}
     try:
         for key, opt in (("rpo", "--rpo"), ("skew_tolerance", "--skew-tolerance")):
             if body.get(key) is not None:
@@ -25414,9 +25462,21 @@ def api_replication_settings(plan_id):
             if body["follow"] not in _rp.OPTION_CHOICES["follow"]:
                 raise ValueError("follow must be console, cli or off")
             argv.append(f"--follow={body['follow']}")
+        for key in ("cloud_init", "mac", "start"):
+            if body.get(key) is not None:
+                if body[key] not in _rp.OPTION_CHOICES[key]:
+                    raise ValueError(f"{key} must be one of {', '.join(_rp.OPTION_CHOICES[key])}")
+                carnet[key] = body[key]
+                argv.append(f"--{key.replace('_', '-')}={body[key]}")
+        recovery = _repl_recovery(body)
+        maps = _repl_settings_mappings(body)
+        why = _rp.settings_refusal(plan["state"], bool(recovery), carnet, maps)
+        if why:
+            return _repl_err(why, 400, "state-forbids")
         changes = _repl_timeouts(body, allow_null=True)
         argv += [f"--timeout={k}={'' if v is None else v}" for k, v in changes.items()]
-        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu ?
+        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu, et
+        # même contrôle que le script (`normalize_plan`), pour un 400 tout de suite
         opts = dict(plan.get("options") or {})
         merged = dict(opts.get("timeouts") or {})
         for k, v in changes.items():
@@ -25427,6 +25487,24 @@ def api_replication_settings(plan_id):
         opts["timeouts"] = _rp.normalize_timeouts(merged)
         if body.get("follow") is not None:
             opts["follow"] = body["follow"]
+        opts.update(carnet)
+        if recovery:
+            rec = dict(recovery)
+            if "hooks" in rec:
+                rec["hooks"] = _rp.keep_hook_secrets(rec["hooks"], (plan.get("options") or {}).get("hooks"))
+            opts.update(rec)
+            spec["recovery"] = recovery
+        if maps:
+            spec["mappings"] = maps
+        if recovery or maps or carnet:
+            _rp.normalize_plan({"name": plan["name"], "source_cluster": plan["source_cluster"],
+                                "target_cluster": plan["target_cluster"],
+                                "rpo_objective_s": plan["rpo_objective_s"], "interval_s": plan.get("interval_s"),
+                                "retain": plan["retain"], "vms": plan.get("vms") or [],
+                                "selector": plan.get("selector") or "",
+                                "namespace": plan.get("selector_namespace") or "",
+                                "mappings": dict(plan.get("mappings") or {}, **maps),
+                                "options": {k: v for k, v in opts.items() if k != "timeouts"}})
     except _rp.PlanError as e:
         return _repl_err(str(e), 400, e.code)
     except ValueError as e:
@@ -25435,10 +25513,80 @@ def api_replication_settings(plan_id):
     if err:
         return err
     run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
-                            busy_clusters=("",))
+                            busy_clusters=("",), spec=spec or None)
     if err:
         return err
-    return _repl_accepted(run, plan["id"])
+    extra = {"protect_needed": True} if _rp.protect_needed(plan["state"], recovery, carnet, maps) else {}
+    return _repl_accepted(run, plan["id"], **extra)
+
+
+@app.route("/api/replication/plans/<plan_id>/hooks/test", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_replication_hook_test(plan_id):
+    """Appelle tout de suite une action annexe HTTP du plan (`name`), en
+    action suivie (opérateur) : statut et durée dans la sortie et au
+    journal, jamais un en-tête secret."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    name = body.get("name")
+    if not isinstance(name, str) or not _rp.NAME_RE.match(name):
+        return _repl_err("name must be a hook name", 400, "bad-option")
+    if not any(h.get("name") == name for h in (plan.get("options") or {}).get("hooks") or []):
+        return _repl_err(f"plan {plan['name']} has no hook {name}", 404, "unknown-hook")
+    run, err = _repl_action(plan, "hook-test", _repl_base("hook", "test", plan["id"]) + [f"--name={name}"],
+                            "operator", busy=False, busy_clusters=("",))
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], name=name)
+
+
+@app.route("/api/replication/candidates/<cluster>")
+@requires_auth
+def api_replication_candidates(cluster):
+    """VMs d'un cluster source qu'un plan peut protéger (fenêtre de
+    création) : disques, éligibilité et raisons, plans qui les tiennent déjà.
+    Lu avec le kubeconfig de la personne (403 `source-denied` si cette
+    session ne voit pas le cluster) ; `namespace`, `selector` (`clé=valeur`,
+    avec `namespace`). Même fonction que `candidates --json`."""
+    if not _rp.CLUSTER_RE.match(cluster or ""):
+        return _repl_err("invalid cluster")
+    if cluster not in {c.get("name") for c in load_config_ro().get("clusters", [])}:
+        return _repl_err(f"unknown cluster: {cluster}", 404, "unknown-cluster")
+    ns = request.args.get("namespace") or None
+    sel = request.args.get("selector") or None
+    if ns is not None and not _rp.NAME_RE.match(ns):
+        return _repl_err("invalid namespace")
+    if sel is not None:
+        try:
+            _rp._selector(sel)
+        except _rp.PlanError as e:
+            return _repl_err(str(e), 400, e.code)
+        if ns is None:
+            return _repl_err("selector needs namespace", 400, "bad-selection")
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return _repl_err(f"this session has no access to cluster {cluster}", 403, "source-denied")
+    from kube import Kube as _Kube
+    conn = _replication_conn()
+    try:
+        held = _rr.plans_holding(conn, cluster)
+    finally:
+        conn.close()
+    try:
+        data = _rr.candidates(_Kube(kc, timeout=30), cluster, ns, sel, held=held)
+    except Exception as e:                      # noqa: BLE001 : jamais de chemin ni de trace
+        if any(m in str(e).lower() for m in ("forbidden", "unauthorized", "provide credentials")):
+            return _repl_err(f"this session cannot read cluster {cluster}", 403, "source-denied")
+        return _repl_err(f"cluster {cluster} cannot be read", 502, "source-unreachable")
+    return jsonify(data)
 
 
 @app.route("/api/replication/plans/<plan_id>", methods=["DELETE"])

@@ -3343,8 +3343,9 @@ de sauvegarde. Chaque disque est sauvegardé pour lui-même : il n'existe pas
 d'instantané atomique de plusieurs volumes, la barrière ne fait que réduire
 l'écart, et l'écart est montré et contrôlé à la bascule. Une VM avec un
 disque conteneur, hôte ou vide est répliquée sans ces disques (signalé). Le
-retour au premier site, les exercices, les vagues et le gel de l'invité ne
-sont pas dans cette version. Une sauvegarde Longhorn est cohérente comme
+retour au premier site, les exercices et le gel de l'invité ne sont pas
+dans cette version (les réseaux d'exercice se déclarent déjà, voir
+plus bas). Une sauvegarde Longhorn est cohérente comme
 après une coupure de courant (l'invité n'est pas gelé). Un volume de
 secours occupe sa place sur la cible dès la protection, pas seulement le
 jour de la bascule. Une activation est définitive : pour protéger de
@@ -3405,6 +3406,109 @@ planifié à blanc juge `caught-up` d'après les sauvegardes que la cible voit
 à cet instant, qui peuvent avoir 1 à 4 minutes de retard sur la source ; la
 vraie bascule resynchronise d'abord.
 
+### Options de reprise : vagues, actions annexes, taille, réseau, classe par disque
+
+Un plan porte aussi un bloc **reprise** (`recovery`), posé à la création ou
+changé ensuite (`recovery` dans la console, `--spec FICHIER` en ligne de
+commande), et deux genres de correspondances de plus. Rien de tout cela
+n'est encore vérifié sur un cluster : tests unitaires seulement.
+
+**Classe de stockage par disque** (`disk_classes`, `{"ns/vm/disque":
+"classe"}`, disque = le nom du disque KubeVirt). Elle l'emporte sur les
+correspondances d'images et de classes pour ce disque. Une classe absente
+de la cible bloque le contrôle (`storage-class-unmapped`, avec le fait
+`disk`). Un disque qui a sa classe ne reçoit pas l'annotation d'image de la
+cible (l'image désignerait une autre classe). Elle change ce que pose
+protect : elle ne se change que sur un plan brouillon.
+
+**Réseaux d'exercice** (`drill_networks`, `{"ns/réseau": "ns/réseau"}`) :
+rangés et contrôlés comme les correspondances de réseaux. Les exercices
+viendront dans une version suivante.
+
+**Vagues** (10 au plus) : `{"name", "vms": ["ns/nom", ...], "gate":
+{"kind", "seconds"}}`. Après l'activation, la bascule démarre les VMs vague
+par vague. Une VM listée dans aucune vague part dans une dernière vague,
+implicite. Chaque vague passe une condition avant la suivante : `running`
+(par défaut, les VMs tournent), `agent` (l'agent invité répond, condition
+`AgentConnected` de la VMI, pendant au plus `seconds`, 300 par défaut, de
+10 à 3600) ou `delay` (`seconds` après le démarrage des VMs, de 1 à
+3600). Une condition `agent` non remplie à temps avertit
+(`wave-gate-timeout`) et la bascule continue. Une VM laissée arrêtée
+(`start: stopped`) n'attend aucune condition. Une VM listée deux fois est
+refusée. Un plan par sélecteur peut nommer des VMs qui n'existent pas
+encore. Quand une partie seulement d'un plan bascule, une vague sans
+aucune de ses VMs est sautée, avec ses actions. Le journal reçoit
+`wave-start`, `wave-passed` ou `wave-gate-timeout` (étape `wave`) pour
+chaque vague.
+
+**Actions annexes HTTP** (20 au plus) : `{"name", "at", "method", "url",
+"headers", "secret_headers", "body", "timeout_s"}`. `at` vaut `start`
+(après l'activation, avant la première vague), `wave:<n>` (après le
+passage de la vague n ; n peut être la dernière vague, implicite) ou
+`end`. La méthode est GET, POST (par défaut), PUT, PATCH ou DELETE ; le
+corps fait au plus 16 Kio ; le délai va de 1 à 120 s (15 par défaut).
+L'adresse commence par `http://` ou `https://`, sans identifiants : ils
+vont dans `secret_headers`. Une action en échec (refus, délai dépassé,
+statut 400 ou plus) avertit (`hook-failed`) et la bascule continue :
+l'activation est définitive. Chaque appel écrit son statut et sa durée au
+journal (étape `hook`, `hook-ok` ou `hook-failed`), jamais la valeur d'un
+en-tête ni le corps de la réponse. Une bascule reprise après une
+interruption ne rappelle pas une action déjà appelée. `hook test` appelle
+une action tout de suite.
+
+**En-têtes secrets** : rangés dans `replication.db`, montrés `********`
+partout ailleurs : plan lu par la console, `plan show --json`, sorties de
+`plan create` et `plan set`, journal et Activité. Renvoyer `********` à
+une modification garde la valeur rangée de cet en-tête ; un `********`
+sans valeur rangée est refusé. Ils ne passent jamais par une ligne de
+commande : la console les donne au script dans son fichier privé.
+
+**Taille au secours** (`resize`, `{"ns/vm": {"cpu": 1..256, "memory":
+"<n>Mi|<n>Gi"}}`). La VM cible est écrite comme Harvester l'écrit : vCPU
+dans `domain.cpu.cores` et `resources.limits.cpu`, mémoire dans
+`resources.limits.memory`, `requests` de la source retirées (le mutateur
+de VM de la cible les calcule depuis son réglage de surallocation) et
+`domain.memory.guest` qui garde l'écart limite - invité de la source (ou
+l'annotation `harvesterhci.io/reservedMemory`). Une VM à branchement à
+chaud du processeur et de la mémoire compte ses vCPU en `sockets` et garde
+la mémoire en `memory.guest` (cas non joué sur un cluster).
+
+**Configuration réseau** (`network_data`, `{"ns/vm": "<network-config
+cloud-init, 16 Kio au plus>"}`) : demande `cloud_init: rerun`. Le volume
+cloud-init de la VM cible (NoCloud ou ConfigDrive) la porte en ligne
+(`networkData`) et perd sa référence au secret des données réseau ; une VM
+sans volume cloud-init en reçoit un (NoCloud).
+
+**Protection d'office** (`auto_protect`, vrai ou faux) : rangée pour les
+plans par sélecteur ; son côté console est décrit avec le suiveur.
+
+**Les changer.** `PATCH .../settings` et `plan set` changent `recovery`
+(chaque clé donnée remplace la valeur rangée), `cloud_init`, `mac` et
+`start` dans tout état sauf `failing_over`, les correspondances
+`networks` et `drill_networks` dans les mêmes états, et les autres
+correspondances sur un plan brouillon seulement (sinon `state-forbids`).
+Taille, configuration réseau, cloud-init, MAC, démarrage et
+correspondance de réseaux changent le carnet de reprise : sur un plan
+protégé la réponse porte `protect_needed: true`, et le protect suivant
+réécrit le carnet (le suiveur signale `carnet-stale` d'ici là).
+
+**À blanc.** `failover --dry-run` (et `check --phase failover`) liste les
+vagues (`index`, `name`, `vms`, `gate`, `implicit` pour la dernière) et
+les actions (`name`, `at`, `method`, `url`), sans rien appeler. Une vraie
+bascule rend les appels dans `hook_results`.
+
+**Candidates.** `candidates --cluster C [--namespace NS [--selector
+k=v]] --json`, et `GET /api/replication/candidates/<cluster>` dans la
+console (lecteur, kubeconfig de la personne), listent les VMs d'un cluster
+source qu'un plan peut protéger : vCPU, mémoire, réseaux, genre de
+cloud-init, étiquettes, en marche ou non, et par disque le PVC, la taille,
+la place occupée, la classe, l'image et l'éligibilité. Raisons :
+`not-longhorn`, `longhorn-v2`, `encrypted`, `rwx-not-migratable`,
+`containerDisk`, `hostDisk`, `emptyDisk`, `no-disk`. Un disque que la
+réplication ne recopie pas (disque conteneur) est montré inéligible sans
+rendre la VM inéligible. `plans` liste les plans qui tiennent déjà la VM
+(tout état sauf `unprotected`).
+
 La procédure d'exploitation (première protection, bascule, déprotection)
 est dans [procedure-operationnelle.md](procedure-operationnelle.md#12-reprise-après-sinistre-réplication-asynchrone).
 
@@ -3414,8 +3518,12 @@ exécutions, verrou, bail),
 `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
 `GET /api/replication/hosts/<cluster>/resources?side=`,
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
-`GET /api/replication/follower` ; écritures (réponse `202 {action_id}`)
-`POST /api/replication/plans`,
+`GET /api/replication/follower`,
+`GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
+`source-denied`, 404 `unknown-cluster`) ; écritures (réponse `202
+{action_id}`) `POST /api/replication/plans` (aussi `map_disk_class`,
+`map_drill_net` et `recovery {waves, hooks, network_data, resize,
+auto_protect}`),
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
 `POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
@@ -3424,8 +3532,12 @@ force_unplanned, accept_skew, dry_run, confirm}`, administrateur),
 `POST /api/replication/plans/<id>/resume`,
 `POST /api/replication/plans/<id>/unprotect` (`{confirm, delete_backups}`),
 `PATCH /api/replication/plans/<id>/settings` (`{rpo, paused, follow,
-skew_tolerance, timeouts}` ; `interval` et `retain` répondent
-`not-settable`), `DELETE /api/replication/plans/<id>`. Chaque écriture
+skew_tolerance, timeouts, recovery, mappings, cloud_init, mac, start}` ;
+`interval` et `retain` répondent `not-settable`, un changement que l'état
+interdit répond `state-forbids`, la réponse ajoute `protect_needed: true`
+quand le carnet d'un plan protégé change),
+`POST /api/replication/plans/<id>/hooks/test` (`{name}`, opérateur),
+`DELETE /api/replication/plans/<id>`. Chaque écriture
 lance la ligne de commande avec les kubeconfigs de la personne (403
 `target-denied` ou `source-denied` quand la session ne voit pas un
 cluster, jamais celui de la console).
@@ -3438,7 +3550,12 @@ start|stop|report P`, `measure formula`, `protect P [--dry-run]
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/nom ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
-`unprotect P --yes [--delete-backups]`. P est un id ou un nom de plan. Les
+`unprotect P --yes [--delete-backups]`, `hook test P --name N`,
+`candidates --cluster C [--namespace NS [--selector k=v]]`. `plan create`
+prend aussi `--map-disk-class ns/vm/disque=classe` et `--map-drill-net
+S=D` ; `plan set` prend `--cloud-init`, `--mac` et `--start` ; les objets
+`recovery` et `mappings` ne passent que par `--spec FICHIER`. P est un id
+ou un nom de plan. Les
 commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 `--to-kubeconfig` et `--timeout NOM=S` ; toutes prennent `--json`.
 

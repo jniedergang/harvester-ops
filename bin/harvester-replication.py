@@ -11,12 +11,21 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
         [--mac keep|new] [--create-namespace] [--start started|stopped]
         [--retain N] [--interval 5m] [--follow console|cli|off]
         [--skew-tolerance 10s] [--timeout NOM=S ...]
+        [--map-disk-class ns/vm/disque=classe] [--map-drill-net S=D]
+        [--spec FICHIER : {"recovery": {"waves", "hooks", "network_data",
+        "resize", "auto_protect"}}]
   harvester-replication plan list [--host H] [--role R]
   harvester-replication plan show P [--role R]
   harvester-replication plan delete P
   harvester-replication plan set P [--rpo D] [--paused true|false] [--follow M]
         [--skew-tolerance D] [--timeout NOM=S ...]   (NOM= retire la surcharge ;
         --interval et --retain refusés : `protect --interval`, `protect --retain`)
+        [--cloud-init rerun|keep] [--mac keep|new] [--start started|stopped]
+        [--spec FICHIER : {"recovery": {...}, "mappings": {genre: {...}}}]
+        (rien pendant une bascule ; correspondances autres que networks et
+        drill_networks : brouillon seulement)
+  harvester-replication hook test P --name N
+  harvester-replication candidates --cluster C [--namespace NS [--selector k=v]] [--kubeconfig F]
   harvester-replication check P [--phase protect|failover|failover-unplanned] [--force-unplanned]
   harvester-replication measure start P [--interval 5m]
   harvester-replication measure stop P
@@ -41,6 +50,10 @@ HARVESTER_OPS_REPLICATION_DB, sinon `replication.db` du répertoire d'état),
 --state-dir (défaut HARVESTER_OPS_STATE_DIR), --spec FICHIER (JSON, `-`
 pour l'entrée standard : chaque clé est le nom long d'une option, la valeur
 celle qu'elle prendrait ; les options de la ligne de commande l'emportent).
+Les valeurs composées (`recovery`, `mappings`) ne passent QUE par --spec :
+les en-têtes secrets des actions annexes n'apparaissent jamais dans la
+ligne de commande. Toute sortie et le journal les montrent masqués
+(`********`) ; renvoyer `********` à `plan set` garde la valeur rangée.
 Commandes qui parlent aux clusters : --from-kubeconfig / --to-kubeconfig
 (kubeconfig de la personne, passé par la console ; sinon celui du cluster
 nommé dans la configuration ou les déclarations de la console), --timeout
@@ -559,8 +572,10 @@ def plan_request(args):
                 "namespaces": _pairs(args.map_ns, "bad-mapping", "--map-ns"),
                 "images": _pairs(args.map_image, "bad-mapping", "--map-image"),
                 "claims": _pairs(args.map_claim, "bad-mapping", "--map-claim"),
-                "target_names": _pairs(args.target_name, "bad-mapping", "--target-name")}
-    options = {}
+                "target_names": _pairs(args.target_name, "bad-mapping", "--target-name"),
+                "disk_classes": _pairs(args.map_disk_class, "bad-mapping", "--map-disk-class"),
+                "drill_networks": _pairs(args.map_drill_net, "bad-mapping", "--map-drill-net")}
+    options = dict(_recovery(args))
     for key, val in (("cloud_init", args.cloud_init), ("mac", args.mac), ("start", args.start),
                      ("follow", args.follow), ("skew_tolerance_s", args.skew_tolerance)):
         if val is not None:
@@ -576,6 +591,23 @@ def plan_request(args):
     if args.retain is not None:
         req["retain"] = args.retain
     return req
+
+
+def _recovery(args):
+    """Le bloc `recovery` de --spec (objet), clés contrôlées."""
+    rec = (getattr(args, "spec_objects", None) or {}).get("recovery") or {}
+    unknown = sorted(set(rec) - set(rp.RECOVERY_KEYS))
+    if unknown:
+        raise UsageError(f"recovery: unknown key {unknown[0][:40]}", "bad-option")
+    return rec
+
+
+def _spec_mappings(args):
+    maps = (getattr(args, "spec_objects", None) or {}).get("mappings") or {}
+    unknown = sorted(set(maps) - set(rp.MAPPING_KINDS))
+    if unknown:
+        raise UsageError(f"mappings: unknown kind {unknown[0][:40]}", "bad-mapping")
+    return maps
 
 
 def cmd_plan_create(args):
@@ -594,7 +626,7 @@ def cmd_plan_create(args):
         raise UsageError(str(e), "name-taken") from None
     _plan_event(conn, stored, "create", "draft", f"plan {stored['name']} created", {"name": stored["name"]}, args)
     step("plan", "done", f"plan {stored['name']} created ({stored['id']})")
-    emit(args, {"ok": True, "error": None, "kind": None, "plan": stored},
+    emit(args, {"ok": True, "error": None, "kind": None, "plan": rp.mask_plan(stored)},
          [f"plan {stored['name']} created: {stored['id']} ({stored['source_cluster']} to "
           f"{stored['target_cluster']}, RPO objective {stored['rpo_objective_s']} s)"])
     return EXIT_OK
@@ -627,7 +659,7 @@ def cmd_plan_show(args):
                       role=_role(args), health=v["health"])
     status = rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
     runs = db.list_runs(conn, plan["id"])[-10:]
-    data = {"ok": True, "error": None, "kind": None, "plan": plan, "row": row, "status": status,
+    data = {"ok": True, "error": None, "kind": None, "plan": rp.mask_plan(plan), "row": row, "status": status,
             "volumes": v["volumes"], "runs": runs, "lock": db.get_lock(conn, plan["id"]),
             "lease": db.get_lease(conn, plan["id"])}
     lines = [f"{plan['name']} ({plan['id']}): {plan['state']}, {plan['source_cluster']} to {plan['target_cluster']}",
@@ -687,6 +719,7 @@ def cmd_plan_set(args):
     if args.retain is not None:
         raise UsageError("retain lives in the source backup jobs: change it with "
                          "`protect P --retain N` (plan set cannot)", "not-settable")
+    recovery, maps = _recovery(args), _spec_mappings(args)
     conn = open_db(args)
     plan = find_plan(conn, args.plan)
     fields, options = {}, {}
@@ -698,32 +731,116 @@ def cmd_plan_set(args):
         options["follow"] = args.follow
     if args.skew_tolerance is not None:
         options["skew_tolerance_s"] = args.skew_tolerance
+    carnet = {}
+    for key, val in (("cloud_init", args.cloud_init), ("mac", args.mac), ("start", args.start)):
+        if val is not None:
+            carnet[key] = val
     timeouts = _pairs(args.timeout, "bad-timeout", "--timeout") if args.timeout else None
-    if not fields and not options and timeouts is None:
-        raise UsageError("nothing to set: give --rpo, --paused, --follow, --skew-tolerance or --timeout")
+    if not fields and not options and timeouts is None and not carnet and not recovery and not maps:
+        raise UsageError("nothing to set: give --rpo, --paused, --follow, --skew-tolerance, --timeout, "
+                         "--cloud-init, --mac, --start, or recovery / mappings through --spec")
     with plan_lock(conn, plan, "plan-set"):
+        # relu sous le verrou : état, surcharges et secrets du plan tel qu'il est
+        plan = db.get_plan(conn, plan["id"]) or plan
+        why = rp.settings_refusal(plan["state"], bool(recovery), carnet, maps)
+        if why:
+            raise UsageError(why, "state-forbids")
+        stored = plan.get("options") or {}
         if timeouts is not None:
-            # relu sous le verrou : `NOM=` retire une surcharge du plan tel qu'il est
-            plan = db.get_plan(conn, plan["id"]) or plan
-            cur = dict((plan.get("options") or {}).get("timeouts") or {})
+            cur = dict(stored.get("timeouts") or {})
             for k, v in timeouts.items():
                 if v == "":
                     cur.pop(k, None)           # NOM= : retour à la valeur par défaut
                 else:
                     cur[k] = v
             options["timeouts"] = cur
+        options.update(carnet)
+        if recovery:
+            rec = dict(recovery)
+            if "hooks" in rec:
+                # `********` garde la valeur rangée de l'en-tête secret
+                rec["hooks"] = rp.keep_hook_secrets(rec["hooks"], stored.get("hooks"))
+            options.update(rec)
         if options:
             fields["options"] = options
+        if maps:
+            fields["mappings"] = dict(plan.get("mappings") or {}, **maps)
         try:
             new = db.update_plan(conn, plan["id"], now=utcnow(), **fields)
         except rp.PlanError as e:
             raise UsageError(str(e), e.code) from None
     changed = {k: new[k] for k in ("rpo_objective_s",) if "rpo_objective_s" in fields}
     changed.update({k: (new.get("options") or {}).get(k) for k in options})
-    _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(sorted(changed)), changed, args)
-    step("plan", "done", "settings changed: " + ", ".join(sorted(changed)))
-    emit(args, {"ok": True, "error": None, "kind": None, "plan": new, "changed": changed},
-         [f"{plan['name']}: " + ", ".join(f"{k}={v}" for k, v in sorted(changed.items()))])
+    changed = rp.mask_options(changed)
+    if maps:
+        changed["mappings"] = {k: (new.get("mappings") or {}).get(k) for k in maps}
+    need = rp.protect_needed(plan["state"], recovery, carnet, maps)
+    names = sorted(changed)
+    _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(names), changed, args)
+    step("plan", "done", "settings changed: " + ", ".join(names))
+    lines = [f"{plan['name']}: " + ", ".join(f"{k}={v}" for k, v in sorted(changed.items()))]
+    if need:
+        lines.append("  the recovery carnet changes: run protect again to rewrite it")
+    out = {"ok": True, "error": None, "kind": None, "plan": rp.mask_plan(new), "changed": changed}
+    if need:
+        out["protect_needed"] = True
+    emit(args, out, lines)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# hook test, candidates
+# ---------------------------------------------------------------------------
+
+def cmd_hook_test(args):
+    conn = open_db(args)
+    plan = find_plan(conn, args.plan)
+    if not rp.NAME_RE.match(args.name or ""):
+        raise UsageError("--name: a hook name is expected", "bad-option")
+    try:
+        res, hook = rr.hook_test(conn, plan, args.name, by=args.by or system_user(), action_id=args.id or "",
+                                 now=utcnow())
+    except KeyError:
+        raise UsageError(f"plan {plan['name']} has no hook {args.name}", "unknown-hook") from None
+    summary = {"name": hook["name"], "at": hook["at"], "method": hook["method"], "url": hook["url"]}
+    text = f"HTTP {res['status']}" if res["ok"] else (res["error"] or f"HTTP {res['status']}")
+    step("hook", "done" if res["ok"] else "error", f"hook {hook['name']}: {text}")
+    out = {"ok": res["ok"], "error": None if res["ok"] else text, "kind": None if res["ok"] else "hook-failed",
+           "plan": plan["id"], "hook": summary, "status": res["status"], "seconds": res["seconds"]}
+    if not res["ok"]:
+        print(f"error: {scrub(text)}", file=sys.stderr)
+    emit(args, out, [f"hook {hook['name']} ({hook['method']} {hook['url']}): {text} in {res['seconds']} s"])
+    return EXIT_OK if res["ok"] else EXIT_FAIL
+
+
+def cmd_candidates(args):
+    if not rp.CLUSTER_RE.match(args.cluster or ""):
+        raise UsageError("--cluster: a cluster name is expected", "bad-cluster")
+    if args.selector:
+        try:
+            rp._selector(args.selector)
+        except rp.PlanError as e:
+            raise UsageError(str(e), e.code) from None
+        if not args.namespace:
+            raise UsageError("--selector needs --namespace", "bad-selection")
+    if args.namespace and not rp.NAME_RE.match(args.namespace):
+        raise UsageError("--namespace: a namespace name is expected", "bad-selection")
+    _hide(args.kubeconfig)
+    kube = cluster_client(args.cluster, args.kubeconfig)
+    if kube is None:
+        raise UsageError(f"unknown cluster: {args.cluster}", "unknown-cluster")
+    conn = open_db(args)
+    try:
+        data = rr.candidates(kube, args.cluster, args.namespace, args.selector,
+                             held=rr.plans_holding(conn, args.cluster))
+    except Exception as e:                      # noqa: BLE001
+        if any(m in str(e).lower() for m in ("forbidden", "unauthorized", "provide credentials")):
+            raise UsageError(f"cluster {args.cluster} refuses this reader", "source-denied") from None
+        raise Failure(f"cluster {args.cluster} cannot be read: {scrub(str(e))[:200]}", "source-unreachable") \
+            from None
+    emit(args, dict({"ok": True, "error": None, "kind": None}, **data),
+         [f"{v['namespace']}/{v['name']}: {'eligible' if v['eligible'] else 'not eligible ' + ','.join(v['reasons'])}"
+          + (f" (plans {', '.join(v['plans'])})" if v["plans"] else "") for v in data["vms"]] or ["no VM"])
     return EXIT_OK
 
 
@@ -1087,8 +1204,14 @@ def cmd_events(args):
 # Ligne de commande
 # ---------------------------------------------------------------------------
 
-def _spec_tokens(path):
-    """Les options d'un fichier --spec, en `--option=valeur`."""
+# clés de --spec dont la valeur est un objet JSON (jamais une option de la
+# ligne de commande : des secrets peuvent s'y trouver)
+SPEC_OBJECT_KEYS = ("recovery", "mappings")
+
+
+def _spec_tokens(path, objects=None):
+    """Les options d'un fichier --spec, en `--option=valeur`. Les objets
+    (SPEC_OBJECT_KEYS) vont dans `objects`."""
     try:
         text = sys.stdin.read() if path == "-" else Path(path).read_text()
         data = json.loads(text)
@@ -1100,6 +1223,12 @@ def _spec_tokens(path):
     for key, val in data.items():
         if not isinstance(key, str) or not re.match(r"^[a-z][a-z0-9_-]*$", key) or key in ("spec", "json"):
             raise UsageError(f"--spec: invalid key {str(key)[:40]!r}")
+        if key in SPEC_OBJECT_KEYS:
+            if not isinstance(val, dict):
+                raise UsageError(f"--spec: {key}: an object is expected")
+            if objects is not None:
+                objects[key] = val
+            continue
         opt = "--" + key.replace("_", "-")
         for v in (val if isinstance(val, list) else [val]):
             if isinstance(v, bool):
@@ -1169,7 +1298,9 @@ def build_parser():
     sp.add_argument("--rpo", required=True, help="RPO objective (15m, 1h)")
     for opt, what in (("--map-net", "network ns/name=ns/name"), ("--map-sc", "storage class"),
                       ("--map-ns", "namespace"), ("--map-image", "image ns/name=ns/name"),
-                      ("--map-claim", "PVC ns/claim=name"), ("--target-name", "VM ns/name=name")):
+                      ("--map-claim", "PVC ns/claim=name"), ("--target-name", "VM ns/name=name"),
+                      ("--map-disk-class", "per-disk storage class ns/vm/disk=class"),
+                      ("--map-drill-net", "drill network ns/name=ns/name")):
         sp.add_argument(opt, action="append", metavar="SRC=DST", help=f"{what} mapping (repeatable)")
     sp.add_argument("--cloud-init", choices=rp.OPTION_CHOICES["cloud_init"])
     sp.add_argument("--mac", choices=rp.OPTION_CHOICES["mac"])
@@ -1197,6 +1328,20 @@ def build_parser():
                     help="plan wait setting (repeatable); NAME= removes it")
     sp.add_argument("--interval", help="refused: use `protect P --interval D`")
     sp.add_argument("--retain", help="refused: use `protect P --retain N`")
+    sp.add_argument("--cloud-init", choices=rp.OPTION_CHOICES["cloud_init"])
+    sp.add_argument("--mac", choices=rp.OPTION_CHOICES["mac"])
+    sp.add_argument("--start", choices=rp.OPTION_CHOICES["start"], help="state of the VM after a failover")
+
+    hp = sub.add_parser("hook", help="HTTP hooks called by a failover").add_subparsers(dest="hcmd", required=True)
+    sp = leaf(hp, "test", cmd_hook_test, [common], 2, "call one hook of a plan now")
+    sp.add_argument("plan")
+    sp.add_argument("--name", required=True, help="hook name")
+
+    sp = leaf(sub, "candidates", cmd_candidates, [common], 1, "VMs of a source cluster a plan can protect")
+    sp.add_argument("--cluster", required=True)
+    sp.add_argument("--namespace")
+    sp.add_argument("--selector", metavar="KEY=VALUE", help="label selector (needs --namespace)")
+    sp.add_argument("--kubeconfig", help="kubeconfig of the person (default: the cluster's)")
 
     sp = leaf(sub, "check", cmd_check, [common, clusters], 1, "full pre-check, nothing written")
     sp.add_argument("plan")
@@ -1293,12 +1438,15 @@ def _spec_arg(argv):
 def parse(argv):
     ap = build_parser()
     spec = _spec_arg(argv)
+    objects = {}
     if spec:
         # options du fichier juste après la sous-commande : celles de la
         # ligne de commande, plus loin, l'emportent
-        n = 2 if argv and argv[0] in ("plan", "measure") else 1
-        argv = argv[:n] + _spec_tokens(spec) + argv[n:]
-    return ap.parse_args(argv)
+        n = 2 if argv and argv[0] in ("plan", "measure", "hook") else 1
+        argv = argv[:n] + _spec_tokens(spec, objects) + argv[n:]
+    args = ap.parse_args(argv)
+    args.spec_objects = objects
+    return args
 
 
 def configure(args):
