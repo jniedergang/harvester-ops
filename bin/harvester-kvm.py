@@ -1093,7 +1093,11 @@ def cmd_vm_display(args):
 
 
 def _gib_text(kib):
-    return f"{kib / 1024 / 1024:.1f} GiB" if isinstance(kib, (int, float)) else "unknown size"
+    if not isinstance(kib, (int, float)):
+        return "unknown size"
+    if kib < 1024 * 1024:
+        return f"{kib / 1024:.0f} MiB"
+    return f"{kib / 1024 / 1024:.1f} GiB"
 
 
 def snapshot_rows(snaps):

@@ -241,7 +241,7 @@ def test_snapshot_list(env, capsys):
 
 @pytest.mark.parametrize("state,description,memory,announce", [
     ("shut off", None, False, "the snapshot holds the disks"),
-    ("running", "-dash; $(id)", True, "the guest is paused while its memory (0.2 GiB) is saved"),
+    ("running", "-dash; $(id)", True, "the guest is paused while its memory (256 MiB) is saved"),
 ])
 def test_snapshot_create(env, capsys, state, description, memory, announce):
     net = env.use(snap_world(state=state))
@@ -688,6 +688,12 @@ class Sig(BaseException):
     def __init__(self, name, leftovers):
         super().__init__(name)
         self.leftovers = leftovers
+
+
+@pytest.mark.parametrize("kib,text", [(262144, "256 MiB"), (1048576, "1.0 GiB"),
+                                      (4194304 + 524288, "4.5 GiB"), (None, "unknown size")])
+def test_memory_size_in_the_pause_announcement(kib, text):
+    assert cli._gib_text(kib) == text
 
 
 def test_cancel_message_of_a_clone_names_what_remains():
