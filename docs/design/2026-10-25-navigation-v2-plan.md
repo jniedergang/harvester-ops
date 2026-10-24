@@ -412,6 +412,29 @@ Bilan : tableau règle par règle (règles du dépôt et règles TERRAHARV) -> c
 | Routeur, liens directs, anciens jetons | 1, 3, 10 |
 | Dossiers partagés (VMs, conteneurs, hôtes), annuler | 12, 13, 14, 15 |
 
+## Décisions du propriétaire du produit sur les points à trancher (25/10/2026)
+
+Elles s'appliquent aux tâches ci-dessous et l'emportent sur leur texte en cas d'écart.
+
+| Point | Décision |
+|---|---|
+| 1 | Schéma de ligne commun livré dans la 2.0.0 (tâche 11). |
+| 2 | L'adresse vide ouvre `#vms` ; le dernier écran est rouvert une seule fois, à la première ouverture de la 2.0.0. |
+| 3 | `#containers` = racine de flotte. |
+| 4 | Profondeur 8, chemin 253 caractères, nom 1 à 63 caractères ; réalignement du cache pendant une lecture sans `ActionRun`, exception documentée. |
+| 5 | Favoris = préférence personnelle sous `/api/me/`, sans `ActionRun` ni CLI. |
+| 6 | **Pas de plafond** d'hôtes par famille : tous les hôtes sont listés, familles repliables, recherche. Retirer de la tâche concernée le réglage `host_family_cap`, le lien « Voir les N » et les tests de plafond ; garder les tests « alertes visibles » et un test de rendu à 100 hôtes. |
+| 7 | Réglages > Comptes du cluster déplacé en Paramètres > Sécurité de chaque hôte Harvester. |
+| 8 | Étiquettes d'un hôte KVM modifiables : admin, action suivie, `harvester-kvm.py host label`. |
+| 9 | Route DR corrigée dès la 2.0.0 : `/api/replication/hosts/<kind>/<nom>/resources`, l'ancienne forme reste comprise pour `harvester`. |
+| 10 | Mesurer sur node2 avant de figer ; par défaut, dossiers lus dans le XML du domaine en un appel par hôte, plus le cache. |
+| 11 | Charges rangeables : Deployment, StatefulSet, DaemonSet, CronJob. |
+| 12 | Cluster de `config.yaml` rangé dans la base de la console seulement (`source=console`), avec la pastille. |
+| 13 | Ranger un hôte : rôle operator, seul le champ `folder` est écrit. |
+| 14 | Adresses ajoutées acceptées. |
+| 15 | **Tout en 2.0.0** : le routeur ne sort pas seul. Une seule branche, `VERSION` à 2.0.0 dès le premier commit visible, une entrée de CHANGELOG complétée au fil des commits. |
+| 16 | Info-bulle de l'interrupteur retirée. |
+
 ## Points à trancher
 
 1. **Schéma de ligne commun « prévu en 1.97.0 » absent.** La conception le cite comme existant ; `master` n'a ni `common_row`, ni `memory_bytes`, ni `uuid` KVM (inventaire en `list --all`). Le plan le livre en tâche 11, avant les dossiers. À confirmer : livré dans 2.0.0 (recommandé) ou en 1.x séparé avant.

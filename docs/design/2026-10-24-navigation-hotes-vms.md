@@ -177,7 +177,6 @@ Point de passage unique : `setCluster(name)` devient une fonction interne du rou
 Le menu ne doit jamais montrer 100 lignes d'un coup. Règles :
 - **Recherche** en tête du menu, raccourci `/`. Elle filtre les hôtes par nom, étiquette et famille, et propose les VMs qui correspondent (« Aller à la VM »). Entrée ouvre le premier résultat.
 - **Favoris** : une étoile sur chaque hôte. Les favoris restent en tête de leur famille. Ils sont rangés par personne, dans la base de la console (comme les préférences de compte), pas dans le navigateur : on les retrouve sur un autre poste.
-- **Plafond par famille** : au-delà de 8 hôtes, une famille montre ses favoris, l'hôte ouvert, les hôtes en alerte, puis « Voir les 60 hôtes Harvester », qui ouvre l'index filtré (`#hosts/harvester`).
 - **Hôtes en alerte toujours visibles** : un hôte injoignable ou en erreur n'est jamais caché par le plafond. La tête de famille résume l'état (`58 ok, 2 en alerte`).
 - **Familles repliables**, état gardé dans `localStorage`.
 - **Index des hôtes** (`#hosts`) : un tableau de tous les hôtes, triable et filtrable (famille, état, étiquette, version), avec les mêmes gestes que le menu.
@@ -264,7 +263,7 @@ La nouvelle navigation arrive d'un bloc en **2.0.0** (décision du 25/10/2026). 
 
 | Étape | Contenu | Publication |
 |---|---|---|
-| 1 | Routeur par ancre et liens directs dans l'interface actuelle. Anciens jetons compris. Un F5 et un lien rendent l'écran exact. | Peut sortir seule en 1.x (rien de visible ne change) |
+| 1 | Routeur par ancre et liens directs dans l'interface actuelle. Anciens jetons compris. Un F5 et un lien rendent l'écran exact. | 2.0.0 (décision du 25/10/2026 : rien ne sort seul) |
 | 2 | Nouveau menu : liste des hôtes, recherche, favoris, sous-menu d'hôte qui monte les sections existantes en onglets, index des hôtes. KVM entre dans la liste. | 2.0.0 |
 | 3 | Vue unique des VMs (Harvester et KVM), panneau Hôtes, dossiers partagés (VMs, conteneurs, hôtes) : lecture, écriture, annuler. | 2.0.0 |
 | 4 | Disaster Recovery racine et par hôte, en reprenant les écrans de réplication. | 2.0.0 |
@@ -289,5 +288,5 @@ Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte in
 2. Favoris **par personne**, dans la base de la console.
 3. « Contrat » dans l'interface, `plan` dans l'API.
 4. Regroupement par site ou étiquette dans le menu : **plus tard** ; l'index des hôtes filtre déjà par étiquette.
-5. Plafond de **8** hôtes par famille avant « Voir tous », réglable.
+5. **Pas de plafond** d'hôtes par famille dans le menu (décision du 25/10/2026) : tous les hôtes sont listés, familles repliables, recherche et favoris.
 6. Conteneurs : **entrée racine**, et onglet Conteneurs dans le sous-menu d'un hôte Harvester.
