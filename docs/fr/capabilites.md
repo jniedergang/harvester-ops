@@ -2831,10 +2831,10 @@ et le relevé de la clé d'hôte en est une. Juste après un relevé, l'hôte
 peut couper les nouvelles connexions une quinzaine de secondes. La
 déclaration d'un hôte refait une fois son test SSH après 20 s.
 
-**Pas dans cette version** : console graphique (VNC), instantanés,
-clonage, création et modification de VMs, de pools, de volumes et de
-réseaux, migration à chaud entre hôtes, maintenance d'un hôte et
-supervision. Ils sont prévus de la 1.97.0 à la 1.99.0.
+**Pas dans la 1.96.0** : console graphique (VNC), instantanés et clonage,
+ajoutés en 1.98.0 (plus bas). Création et modification de VMs, de pools,
+de volumes et de réseaux, migration à chaud entre hôtes, maintenance d'un
+hôte et supervision restent à venir.
 
 API : `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, réseaux), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
@@ -2873,6 +2873,188 @@ supprimés. Un invité SLES 16 qui suit l'ACPI est arrivé à `shut off` 2,4 s
 après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
 console pendant son test de connexion, déjà enregistrée, a été défaite :
 aucun fichier de déclaration ni de clé n'est resté.
+
+### Console, instantanés, clonage et suppression d'une VM (1.98.0)
+
+Le menu d'une VM KVM gagne un second groupe : **Console**, **Instantanés**,
+**Cloner** et **Supprimer**. Chaque entrée est grisée, avec la raison,
+quand le rôle, l'état ou la définition de la VM ne le permet pas. Les
+raisons viennent du serveur, pas de la page.
+
+**Console graphique (VNC).** **Console** ouvre la même fenêtre que pour
+une VM Harvester, avec noVNC. La console n'ouvre pas l'affichage au
+réseau. Elle l'atteint par la connexion SSH de l'hôte (`ssh -W`, sur la
+clé d'hôte épinglée) : un affichage qui écoute sur `127.0.0.1` fonctionne.
+Plusieurs personnes qui regardent la même VM partagent une seule connexion
+à l'affichage ; la fenêtre dit qui regarde. Le tunnel se ferme avec la
+dernière fenêtre. L'adresse et le port sont relus à chaque connexion : une
+VM redémarrée sur un nouveau port est retrouvée. Une VM arrêtée laisse la
+fenêtre en attente jusqu'à son démarrage.
+- **Mot de passe.** Quand l'affichage a un mot de passe VNC, la console le
+  lit dans la définition et répond elle-même au défi. Le mot de passe ne
+  sort jamais de cette connexion : aucune réponse d'API, aucun journal,
+  aucune étape d'action ni aucun navigateur ne le reçoit. Le ticket dit
+  seulement qu'un mot de passe existe. Un mot de passe refusé est dit, et
+  la fenêtre cesse de réessayer.
+- **Refus dits, sans nouvel essai** : affichage SPICE seul (non pris en
+  charge dans cette version), affichage sur une socket UNIX (propriété de
+  root et de qemu, le compte SSH ne peut pas l'atteindre), aucun affichage,
+  affichage sans écoute, et affichage qui écoute sur une adresse qui n'est
+  pas l'une de celles de l'hôte. Un affichage qui ne propose que des types
+  de sécurité que la console ne parle pas (VeNCrypt, SASL, TLS) est nommé,
+  sans nouvel essai.
+- La fenêtre a **Démarrer**, **Arrêter**, **Arrêt forcé** (confirmé dans la
+  page) et **Instantanés**. Rouvrir une console déjà ouverte ramène sa
+  fenêtre au lieu d'ouvrir une seconde connexion. Cela vaut aussi pour les
+  consoles Harvester.
+- 8 spectateurs de console au plus en même temps dans toute la console,
+  consoles Harvester comprises (429 au-delà). Retirer un hôte ferme ses
+  consoles.
+
+**Instantanés.** La fenêtre **Instantanés** liste les instantanés internes
+de la VM : nom, instantané courant, date, contenu (disques seuls, ou
+disques et mémoire), emplacement et parent. **Créer** propose
+`<vm>-AAAAMMJJ-HHMM` et accepte une description facultative. Sur une VM
+en marche, l'instantané garde aussi la mémoire, et l'invité est mis en
+pause pendant l'enregistrement : la fenêtre le dit, avec la taille de la
+mémoire. **Revenir** demande une confirmation qui dit que l'état non
+enregistré est perdu. Revenir, sur une VM en marche, à un instantané pris
+VM arrêtée éteint la VM : la confirmation relit l'état et le dit.
+**Supprimer** nomme les instantanés enfants, rattachés au parent de
+l'instantané supprimé.
+- Instantanés internes seulement : chaque disque inscriptible doit être un
+  fichier ou un volume qcow2, et les variables UEFI (nvram) aussi. Un
+  disque raw, bloc ou réseau, un disque transitoire ou un périphérique PCI
+  ou USB attaché désactive **Créer** et dit quel disque. Une VM en pause ou
+  en cours d'arrêt, une VM transitoire et un nom déjà pris sont refusés.
+- Les instantanés externes sont affichés « non gérés par la console »,
+  sans bouton. La console ne revient jamais avec `--force` : quand libvirt
+  le demande, la console le dit et s'arrête.
+
+**Cloner.** Une copie complète d'une VM arrêtée et persistante, sur le
+même hôte. La fenêtre montre la copie avant toute création : chaque disque
+avec sa destination et la taille à copier, la place libre, les disques
+gardés partagés, et ce qui est régénéré. **Cloner** reste désactivé tant
+que l'aperçu ne correspond pas au nom saisi ou contient un refus.
+- Chaque disque est copié **à côté de sa source** : dans le même pool de
+  stockage, comme nouveau volume, ou dans le même répertoire. La
+  destination est `<nouveau nom>-<cible>` avec l'extension de la source.
+  Elle ne se choisit pas dans cette version. La copie est aplatie : elle ne
+  dépend pas de l'image de base de la source.
+- La copie reçoit un nouvel uuid, de nouvelles adresses MAC, un nouveau
+  fichier de variables UEFI (créé par libvirt au premier démarrage), un
+  nouvel identifiant de génération, et perd numéros de série de disque,
+  WWN et numéros de série SMBIOS. Un port VNC fixe devient automatique.
+  Les entrées de démarrage UEFI et l'état du vTPM ne sont pas copiés :
+  l'aperçu le signale.
+- Les disques en lecture seule et les CD-ROM restent partagés. Un disque
+  bloc ou réseau, un disque partageable, un disque utilisé par une autre
+  VM, un périphérique PCI ou USB, une étiquette de sécurité statique et un
+  vTPM à état externe sont refusés.
+- Une copie hors pool tourne en arrière-plan sur l'hôte et montre sa
+  progression. **Annuler** dans le dock arrête la copie et retire tout ce
+  qui a été créé. Une copie qui échoue est défaite de la même façon, et ce
+  qui n'a pas pu être retiré est nommé.
+
+**Supprimer.** **Supprimer** retire une VM arrêtée et persistante. Il
+faut le rôle administrateur. La fenêtre montre d'abord un aperçu, puis
+demande le nom exact de la VM.
+- Sans **Supprimer aussi les disques que possède cette VM**, seule la définition
+  part, avec les métadonnées de ses instantanés, son état sauvegardé et
+  son fichier de variables UEFI. Les disques restent.
+- Avec, un disque n'est supprimé que si la console prouve qu'aucune autre
+  VM ne s'en sert. Elle lit tous les pools et volumes de l'hôte, les
+  définitions et les chaînes de disques de toutes les autres VMs, et
+  compare les fichiers par périphérique et inode : un lien symbolique ne
+  cache pas un disque partagé. Un disque est gardé, avec sa raison, quand
+  il est partagé avec une autre VM, image de base du disque d'une autre VM,
+  en lecture seule, un périphérique bloc, sur un stockage partagé (NFS,
+  Ceph, Gluster et semblables : un autre hôte pourrait s'en servir), ou
+  absent.
+- **Fichiers illisibles.** Quand le compte SSH ne peut pas lire un fichier
+  d'une autre VM (permission refusée), la console ne peut pas prouver que
+  ce fichier ne dépend pas d'un disque de cette VM. La suppression est
+  refusée tant que vous n'avez pas coché chacun de ces fichiers dans la
+  fenêtre. Seul un refus de droits peut être reconnu ainsi : une lecture
+  libvirt en échec ou une erreur d'entrée-sortie refuse toujours.
+- **L'aperçu est ce qui est supprimé.** La fenêtre envoie une empreinte de
+  la suppression montrée. Si l'hôte a changé depuis (une autre VM utilise
+  maintenant un disque, la VM a été redéfinie), la suppression s'arrête
+  avec « l'hôte a changé depuis l'aperçu » et montre le nouvel aperçu. Un
+  disque devenu partagé entre-temps est gardé et signalé comme écarté.
+
+**Une opération à la fois par VM.** Un geste, un instantané, un clonage
+ou une suppression sur une VM est refusé tant qu'une autre opération y
+tourne (409 dans la console, sortie 2 `busy` du script). Ce verrou couvre
+désormais aussi les gestes de cycle de vie de la 1.96. Un clonage tient
+aussi le nom de la copie.
+
+**Les lectures coupées par la connexion sont refaites une fois.** Sur un
+hôte de banc en OpenSSH 10.2p1, le serveur SSH s'interrompt parfois quand
+plusieurs sessions tournent en même temps sur une connexion partagée (son
+journal dit `mm_request_receive: read: bad msg_len` et
+`rtype N != type 115`). La connexion partagée tombe, et chaque commande en
+cours finit avec le statut ssh 255. La console rejoue une lecture une fois
+sur une connexion neuve. Elle ne rejoue jamais une écriture : un
+instantané, un clonage ou une suppression coupé ainsi dit « connexion
+perdue », et vous vérifiez le résultat avant de recommencer. Les aperçus
+d'un clonage ou d'une suppression sont limités à 20 par minute et à 2 en
+même temps par hôte.
+
+**Droits.** Un lecteur lit les instantanés et les aperçus. Un opérateur
+ouvre la console, crée, restaure et supprime des instantanés, et clone.
+Un administrateur supprime une VM, et seul un administrateur peut annuler
+une suppression.
+
+API : `POST /api/kvm/vms/<host>/<domain>/console-ticket` (`{ticket,
+ws_path, expires_in, password}` ; 409 quand la VM ne tourne pas, 422 avec
+`reason` pour un affichage que la console ne peut pas ouvrir),
+`GET /api/kvm/vms/<host>/<domain>/console-status`, websocket
+`/ws/kvm/vnc/<host>/<domain>?ticket=...` ;
+`GET /api/kvm/vms/<host>/<domain>/snapshots`,
+`POST /api/kvm/vms/<host>/<domain>/snapshots` (`{name, description}`),
+`POST /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>/revert`,
+`DELETE /api/kvm/vms/<host>/<domain>/snapshots/<snapshot>` ;
+`GET /api/kvm/vms/<host>/<domain>/clone-plan?name=C`,
+`POST /api/kvm/vms/<host>/<domain>/clone` (`{name}`) ;
+`GET /api/kvm/vms/<host>/<domain>/delete-plan?remove_storage=1&acknowledge=CHEMIN`,
+`DELETE /api/kvm/vms/<host>/<domain>` (`{confirm, expect_delete,
+remove_storage, acknowledge_unreadable}`, `expect_delete` est le `digest`
+de l'aperçu). Les écritures répondent `202 {action_id}`. `/api/kvm/vms`
+donne à chaque VM une table `operations` (rôle, états, persistance) pour
+le menu.
+
+Ligne de commande : `vm display --host N --name D` (adresse, port,
+présence d'un mot de passe, et la commande `ssh -L` pour un visualiseur
+local), `snapshot list|create|revert|delete --host N --name D
+[--snapshot=S] [--description=T] [--timeout S]`, `clone --host N --name D
+--new-name=C [--dry-run] [--timeout S]`, `vm delete --host N --name D
+[--remove-storage] [--acknowledge-unreadable=CHEMIN ...]
+[--expect-delete=EMPREINTE] [--dry-run] [--timeout S] [--survey-timeout S]`.
+Donner les valeurs en `--opt=valeur` quand elles peuvent commencer par un
+tiret. Codes de sortie comme plus haut, plus `busy` (sortie 2) quand une
+autre opération tient la VM et `plan-changed` (sortie 1) quand l'hôte ne
+correspond plus à l'aperçu.
+
+**Ce qui est vérifié.** Sur l'hôte de banc (libvirt 12.7.0, OpenSSH
+10.2p1), sur des domaines d'essai créés pour l'occasion (cirros,
+`qemu-img`), chaque étape contrôlée par `virsh` : console ouverte par le
+tunnel, partagée par deux navigateurs sur un seul tunnel, fermée avec la
+dernière fenêtre ; vrai mot de passe VNC de QEMU résolu par la console, le
+mot de passe absent de toute réponse d'API, du journal de la console et de
+l'Activité ; instantanés pris VM arrêtée et en marche, retours dans les
+deux sens (une VM en marche ramenée à un instantané pris arrêtée est
+éteinte), parent supprimé et enfant rattaché au grand-parent ; disque raw
+refusé avec sa raison ; instantané d'une VM UEFI ; clonage dans un pool et
+hors pool, avec nouvel uuid, sans chaîne de base, nouveaux fichier de
+variables UEFI et identifiant de génération, démarré et ouvert dans la
+console ; une copie de 7,4 Gio annulée n'a rien laissé ; suppression
+refusée à cause d'un fichier illisible d'une autre VM, puis faite après
+l'avoir reconnu ; un disque partagé par lien symbolique et l'image de base
+d'une autre VM gardés ; un hôte modifié refusé par `plan-changed`. Sous
+8 lecteurs en parallèle pendant 60 s, la chute du serveur SSH décrite plus
+haut est arrivée 2 à 4 fois par minute, sans aucune lecture en échec. Non
+vérifié : un hôte qui exige `--force` pour revenir à un instantané.
 
 ---
 

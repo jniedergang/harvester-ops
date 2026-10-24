@@ -92,8 +92,11 @@ recorded, whether it was made from the console or somewhere else.
 - **KVM hosts next to the clusters**: libvirt hosts declared with a
   pinned host key, their VMs, storage pools and networks in one view, and
   the lifecycle gestures (start, shut down, reboot, force off, suspend,
-  resume) followed until the real state is reached. No agent on the
-  hosts: `virsh` over SSH, also from the command line.
+  resume) followed until the real state is reached. The VNC console of a
+  VM goes through the SSH connection of its host, password included;
+  internal snapshots, full clones and deletion with proof that no other
+  VM uses a disk. No agent on the hosts: `virsh` over SSH, also from the
+  command line.
 - **Scriptable**: the power sequencing also runs from the command line,
   for pipelines and airgapped sites, and every operation has a dry run.
 
