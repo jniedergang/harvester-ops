@@ -146,8 +146,8 @@ const CloudInitForm = (() => {
             description: { en: 'The account to create', fr: 'Le compte à créer' } },
           { name: 'password', type: 'text',
             label: { en: 'Password', fr: 'Mot de passe' },
-            description: { en: 'Stored as plain text in the cloud-init Secret — prefer SSH keys',
-                           fr: 'Stocké en clair dans le Secret cloud-init — préférez les clés SSH' } },
+            description: { en: 'Stored as plain text in the cloud-init Secret, prefer SSH keys',
+                           fr: 'Stocké en clair dans le Secret cloud-init, préférez les clés SSH' } },
           { name: 'sudo', type: 'bool', default: true,
             label: { en: 'Passwordless sudo', fr: 'sudo sans mot de passe' },
             description: { en: 'ALL=(ALL) NOPASSWD:ALL', fr: 'ALL=(ALL) NOPASSWD:ALL' } },
@@ -226,7 +226,7 @@ const CloudInitForm = (() => {
         min: 0, max: 4,
         label: { en: 'Interfaces', fr: 'Interfaces' },
         itemTitle: (v) => ({ icon: 'plug', text:
-          `${v.iface || 'eth0'} — ${v.mode || 'dhcp'}${v.address ? ' · ' + v.address : ''}` }),
+          `${v.iface || 'eth0'} (${v.mode || 'dhcp'})${v.address ? ' · ' + v.address : ''}` }),
         newItem: (items) => ({ iface: nextFree('eth', 0, items.map(i => i.iface)) }),
         args: [
           { name: 'iface', type: 'text', required: true, default: 'eth0',
@@ -430,7 +430,7 @@ const CloudInitForm = (() => {
     const tip = (k, fb) => (opts.tips ? ` tip" data-tip="${esc(tr(k, fb))}` : '');
     return `
       <details class="vm-edit-adv vm-edit-ci-wizard">
-        <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant — generate the YAML below'))}</summary>
+        <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant, generate the YAML below'))}</summary>
         <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
           'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
         <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
@@ -505,7 +505,7 @@ const CloudInitForm = (() => {
         const yaml = isUser ? genUserData(spec) : genNetworkData(spec);
         if (target.value.trim() && !(await confirmReplace(result))) return;
         target.value = yaml;
-        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated — review below, then Save'))}</span>`;
+        result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated, review below, then Save'))}</span>`;
       } catch (e) {
         result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`;
       }
