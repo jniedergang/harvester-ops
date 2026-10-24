@@ -108,6 +108,10 @@ class Sim:
         self.inodes = {}         # chemin -> « dev:ino » imposé (liens) ; défaut : propre au chemin
         self.missing = set()     # chemins absents pour stat -L
         self.stat_fail = set()   # chemins dont stat -L échoue (droits)
+        self.stat_errors = {}    # chemin -> texte d'erreur stat -L (toute autre cause, rc=1)
+        self.qemu_errors = {}    # chemin -> texte d'erreur qemu-img info (toute autre cause, rc=1)
+        self.qemu_garbage = {}   # chemin -> sortie non-JSON de qemu-img info (rc=0)
+        self.no_output = set()   # chemin -> ni stat -L ni qemu-img info ne répond (délai dépassé)
         self.fstypes = {}        # répertoire -> type de `stat -f -c %T`
         self.exists = set()      # chemins vus par `test -e`
         self.writable = set()    # répertoires où le compte SSH écrit
@@ -231,21 +235,34 @@ class Sim:
             words = shlex.split(chunk)
             i, argv = int(words[0]), words[1:]
             rc, text = self._shell(argv)
+            if rc is None:
+                continue              # délai dépassé : jamais de ligne de repère (`_sh_batch` réel
+                                       # rend alors (-1, "no output") pour cet indice)
             out += f"{text}\n{token} {i} {rc}\n"
         return out
 
     def _shell(self, argv):
         if argv[:2] == ["qemu-img", "info"]:
             f = argv[-1]
+            if f in self.no_output:
+                return None, None
             if f in self.missing:
                 return 1, f"qemu-img: Could not open '{f}': No such file or directory"
+            if f in self.qemu_errors:
+                return 1, self.qemu_errors[f]
+            if f in self.qemu_garbage:
+                return 0, self.qemu_garbage[f]
             if f in self.files and self.files[f] is None:
                 return 1, f"qemu-img: Could not open '{f}': Permission denied"
             return 0, json.dumps(self.files.get(f) or [{"filename": f}])
         if argv[:4] == ["stat", "-L", "-c", "%d:%i"]:
             f = argv[-1]
+            if f in self.no_output:
+                return None, None
             if f in self.missing:
                 return 1, f"stat: cannot statx '{f}': No such file or directory"
+            if f in self.stat_errors:
+                return 1, self.stat_errors[f]
             if f in self.stat_fail:
                 return 1, f"stat: cannot statx '{f}': Permission denied"
             return 0, self.inodes.get(f) or f"64769:{zlib.crc32(f.encode())}"
@@ -1788,6 +1805,92 @@ def test_acknowledged_unreadable_validated(ack):
     with pytest.raises(ko.OpError) as e:
         ko.delete_plan(d46_sim(), "target", remove_storage=True, acknowledged_unreadable=ack)
     assert e.value.kind == "invalid"
+
+
+# --- classification des échecs de lecture : seul un refus de droits est acceptable --------------
+#
+# `stat -L` et `qemu-img info --backing-chain` échouent pour bien d'autres raisons qu'un refus
+# de droits (E/S, descripteur NFS périmé, sortie illisible, délai dépassé). Seul le refus de
+# droits (`Permission denied`) prouve que le fichier existe mais reste hors de portée : lui seul
+# peut devenir acceptable (décision 46). Tout le reste ne prouve rien du tout sur ce que le
+# fichier cite et doit bloquer la suppression même si l'opérateur le nomme explicitement.
+
+def _fault_sim(path, fmt):
+    """`stopped` cite `path` ; `target` a deux disques propres dont la suppression ne dépend
+    que de la preuve faite sur `path`. `fmt="raw"` ne passe jamais par `qemu-img` (isole
+    `_read_stats`) ; `fmt="qcow2"` fait lire la chaîne de sauvegarde par `qemu-img`."""
+    sim = storage_sim()
+    sim.add_domain("target", dom("target", [disk("vda", LONELY), disk("vdb", f"{OUT}/own.qcow2")]))
+    sim.exists.add(f"{OUT}/own.qcow2")
+    sim.add_domain("stopped", dom("stopped", [disk("vda", path, fmt=fmt)]))
+    return sim
+
+
+def _assert_classification(sim, path, acknowledgeable):
+    """Sans acquittement, le chemin bloque toujours la suppression des disques propres de
+    `target`. Avec `acknowledged_unreadable=[path]` : débloqué seulement pour un refus de
+    droits ; pour toute autre cause, toujours bloqué (jamais acceptable)."""
+    plan = ko.delete_plan(sim, "target", remove_storage=True)
+    assert plan["delete"] == [] and {d["reason"] for d in plan["keep"]} == {ko.REASON_UNKNOWN}
+    assert plan["unreadable"] == ([path] if acknowledgeable else [])
+    ack_plan = ko.delete_plan(sim, "target", remove_storage=True, acknowledged_unreadable=[path])
+    if acknowledgeable:
+        assert sorted(d["target"] for d in ack_plan["delete"]) == ["vda", "vdb"]
+    else:
+        assert ack_plan["delete"] == []
+        assert {d["reason"] for d in ack_plan["keep"]} == {ko.REASON_UNKNOWN}
+
+
+IDENTITY_FAULTS = [
+    ("permission denied", "Permission denied", True),
+    ("input/output error", "Input/output error", False),
+    ("stale file handle", "Stale file handle", False),
+]
+
+
+@pytest.mark.parametrize("label,text,acknowledgeable", IDENTITY_FAULTS,
+                         ids=[c[0] for c in IDENTITY_FAULTS])
+def test_identity_read_failure_classification(label, text, acknowledgeable):
+    # fmt="raw" : seule l'identité (`stat -L`) est en cause, jamais `qemu-img`
+    path = f"{OUT}/identity-fault.qcow2"
+    sim = _fault_sim(path, fmt="raw")
+    sim.stat_errors[path] = f"stat: cannot statx '{path}': {text}"
+    _assert_classification(sim, path, acknowledgeable)
+
+
+def test_identity_read_timeout_is_never_acknowledgeable():
+    path = f"{OUT}/identity-timeout.qcow2"
+    sim = _fault_sim(path, fmt="raw")
+    sim.no_output.add(path)
+    _assert_classification(sim, path, False)
+
+
+CHAIN_FAULTS = [
+    ("permission denied", "qemu_errors",
+     "qemu-img: Could not open '{p}': Permission denied", True),
+    ("input/output error", "qemu_errors",
+     "qemu-img: Could not open '{p}': Input/output error", False),
+    ("stale file handle", "qemu_errors",
+     "qemu-img: Could not open '{p}': Stale file handle", False),
+    ("garbage output", "qemu_garbage", "not json at all", False),
+]
+
+
+@pytest.mark.parametrize("label,attr,text,acknowledgeable", CHAIN_FAULTS,
+                         ids=[c[0] for c in CHAIN_FAULTS])
+def test_backing_chain_read_failure_classification(label, attr, text, acknowledgeable):
+    # fmt="qcow2" (par défaut) : la chaîne de sauvegarde est lue par `qemu-img info`
+    path = f"{OUT}/chain-fault.qcow2"
+    sim = _fault_sim(path, fmt="qcow2")
+    getattr(sim, attr)[path] = text.format(p=path)
+    _assert_classification(sim, path, acknowledgeable)
+
+
+def test_backing_chain_timeout_is_never_acknowledgeable():
+    path = f"{OUT}/chain-timeout.qcow2"
+    sim = _fault_sim(path, fmt="qcow2")
+    sim.no_output.add(path)
+    _assert_classification(sim, path, False)
 
 
 # --- nvram, identifiants, TPM dans le clone (I2, I7) --------------------------------------------

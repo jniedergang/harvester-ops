@@ -414,6 +414,25 @@ def _missing(text):
     return "No such file or directory" in (text or "")
 
 
+def _failure_class(text):
+    """Classe un échec de lecture (`stat -L` ou `qemu-img info`) : `permission`
+    est le seul refus qu'un opérateur peut accepter (décision 46, fichier
+    illisible mais présent). Tout le reste (E/S, descripteur NFS périmé,
+    sortie illisible, délai dépassé) ne prouve rien sur ce que cite le
+    fichier : la classe rendue sert seulement à nommer la cause dans
+    `unknown`, jamais à rendre l'échec acceptable."""
+    t = (text or "").strip()
+    if "Permission denied" in t or "EACCES" in t:
+        return "permission"
+    if not t or t == "no output":
+        return "timeout"
+    if "Stale file handle" in t or "ESTALE" in t:
+        return "stale file handle"
+    if "Input/output error" in t or "EIO" in t:
+        return "I/O error"
+    return "read error"
+
+
 def check_acknowledged(paths):
     """Liste des fichiers illisibles acceptés par l'opérateur (décision 46) :
     None ou liste de chemins absolus ; rend un ensemble normalisé."""
@@ -440,12 +459,14 @@ class _Survey:
     Une chaîne est une `référence` : {"owner": domaine, None (volume attaché à
     aucun domaine) ou _SELF, "top": chemin ou identifiant, "ids": identités
     texte, "chain": maillons}. Ce qui n'a pas pu être lu va dans `unknown`
-    (domaine, pool, volume) ou `unreadable` (fichier) : rien n'est alors prouvé
-    (sauf fichiers illisibles acceptés, décision 46)."""
+    (domaine, pool, volume, ou fichier dont la lecture a échoué pour une
+    autre raison qu'un refus de droits) ou `unreadable` (fichier dont `stat`
+    ou `qemu-img` répond « Permission denied ») : rien n'est alors prouvé,
+    et seul `unreadable` peut être accepté par l'opérateur (décision 46)."""
 
     def __init__(self, host, exclude=None, extra=()):
         self.host, self.exclude = host, exclude
-        self.unknown = []               # lectures libvirt manquées (jamais acceptables)
+        self.unknown = []               # lectures manquées, jamais acceptables (libvirt ou E/S)
         self.unreadable = set()         # fichiers d'autres domaines illisibles
         self.self_unreadable = set()    # fichiers du domaine visé dont la chaîne est illisible
         first = host.batch({"all": ("list", "--all", "--name"), "active": ("list", "--name"),
@@ -632,14 +653,23 @@ class _Survey:
         self.inode, self.absent, stat_failed = {}, set(), set()
         self._read_stats(stat_list, res[:len(stat_list)], stat_failed)
         base = len(stat_list)
-        chains, chain_failed = {}, set()
+        chains, pending_denied = {}, set()
         for q, (rc, text) in zip(pending, res[base:base + len(pending)]):
             try:
                 if rc != 0:
                     raise ValueError(text)
                 chains[q] = _chain_paths(q, json.loads(text))
             except ValueError:
-                chain_failed.add(q)
+                if q in self.absent:
+                    continue             # déjà su absent par `stat -L` : il ne cite rien
+                kind = _failure_class(text)
+                if kind == "permission":
+                    pending_denied.add(q)
+                else:
+                    # pas un refus de droits : rien n'est prouvé, et ce n'est
+                    # jamais acceptable (décision 46 ne couvre que `Permission
+                    # denied`) -> bloque comme une lecture libvirt manquée
+                    self.unknown.append(f"backing chain: {kind}")
         base += len(pending)
         self.fstype = {}
         for p, (rc, text) in zip(fs_paths, res[base:]):
@@ -657,10 +687,12 @@ class _Survey:
                 r["chain"] += [c for c in chains[q] if c not in r["chain"]]
             elif q in self.absent:
                 continue                # fichier absent : il ne cite rien
-            elif r["owner"] == _SELF:
-                self.self_unreadable.add(r["path"])
-            else:
-                self.unreadable.add(q)
+            elif q in pending_denied:
+                if r["owner"] == _SELF:
+                    self.self_unreadable.add(r["path"])
+                else:
+                    self.unreadable.add(q)
+            # sinon : déjà compté dans `unknown` ci-dessus, jamais acceptable
         # identité illisible : un autre domaine peut citer le même fichier sous
         # un autre nom (lien) ; un disque du domaine visé n'est plus comparable
         self.unreadable |= stat_failed
@@ -672,7 +704,14 @@ class _Survey:
             elif _missing(text):
                 self.absent.add(p)
             else:
-                failed.add(p)
+                kind = _failure_class(text)
+                if kind == "permission":
+                    failed.add(p)
+                else:
+                    # ni droits ni absence : rien n'est prouvé sur ce fichier,
+                    # et ce n'est jamais acceptable (décision 46 ne couvre que
+                    # `Permission denied`)
+                    self.unknown.append(f"disk identity: {kind}")
 
     # --- comparaisons par identité
     def keys(self, paths):
