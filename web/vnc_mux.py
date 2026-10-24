@@ -46,10 +46,16 @@ import struct
 import threading
 import time
 
+import vnc_des
+
 log = logging.getLogger("harvester-ops.vnc")
 
 VERSION = b"RFB 003.008\n"
 SEC_NONE = 1
+# v1.97.0 : authentification VNC (RFC 6143 section 7.2.2), côté amont
+# seulement, pour un affichage libvirt protégé par `passwd`. Les navigateurs
+# restent en None : l'accès est gardé par la session et le rôle.
+SEC_VNC = 2
 
 # Le format que noVNC impose quel que soit le serveur (rfb.js, pixelFormat) :
 # 32 bpp, profondeur 24, petit-boutiste, vraies couleurs, rouge à 0.
@@ -348,11 +354,12 @@ class VncHub:
         if count == 0:
             length = struct.unpack(">I", s.read(4, timeout))[0]
             raise ProtocolError("server refused: " + s.read(length, timeout).decode(errors="replace"))
-        if SEC_NONE not in s.read(count, timeout):
-            raise ProtocolError("server offers no 'None' security type")
-        self.send_upstream(bytes([SEC_NONE]))
-        if struct.unpack(">I", s.read(4, timeout))[0] != 0:
-            raise ProtocolError("security handshake failed")
+        try:
+            self._security(s.read(count, timeout), timeout)
+        finally:
+            # le mot de passe ne survit pas à la poignée de main, réussie ou non
+            if hasattr(self.up, "vnc_password"):
+                self.up.vnc_password = None
         self.send_upstream(b"\x01")                 # ClientInit : partagé
         self.width, self.height = struct.unpack(">HH", s.read(4, timeout))
         s.read(16, timeout)                         # son format : remplacé
@@ -363,6 +370,31 @@ class VncHub:
         self._reader = threading.Thread(target=self._read_loop, daemon=True,
                                         name=f"vnc-hub-{self.key[-1]}")
         self._reader.start()
+
+    def _security(self, types, timeout):
+        """Choix du type de sécurité amont. None (1) s'il est offert : chemin
+        KubeVirt inchangé. Sinon authentification VNC (2) si l'amont porte
+        un mot de passe : défi de 16 octets chiffré en DES. Les messages ne
+        citent jamais la valeur."""
+        s = self.stream
+        if SEC_NONE in types:
+            self.send_upstream(bytes([SEC_NONE]))
+            if struct.unpack(">I", s.read(4, timeout))[0] != 0:
+                raise ProtocolError("security handshake failed")
+            return
+        if SEC_VNC not in types:
+            raise ProtocolError("server offers no 'None' security type")
+        password = getattr(self.up, "vnc_password", None)
+        if not password:
+            raise ProtocolError("the VM display asks for a password and none is defined for it")
+        self.up.vnc_password = None
+        self.send_upstream(bytes([SEC_VNC]))
+        challenge = s.read(16, timeout)
+        response = vnc_des.vnc_response(password, challenge)
+        password = None
+        self.send_upstream(response)
+        if struct.unpack(">I", s.read(4, timeout))[0] != 0:
+            raise ProtocolError("the VM display refused the password")
 
     def send_upstream(self, data):
         with self.up_lock:
@@ -436,6 +468,13 @@ class VncHub:
             log.warning("console client handshake failed on %s: %s",
                         "/".join(self.key), e)
             client.kill()
+            # v1.97.0 : un navigateur parti pendant sa poignée de main ne doit
+            # pas laisser ouverte une connexion que personne ne regarde (un
+            # `ssh -W` vivant pour rien, côté KVM)
+            with self.lock:
+                empty = not self.clients
+            if empty and not self.closed:
+                self.close("no viewer left")
             return True
         try:
             # Une image complète pour l'arrivant ; les autres la reçoivent
@@ -573,6 +612,17 @@ def attach(key, dial, ws, user="", on_lost=None):
         if hub.serve(ws, user):
             return
     ws.close()
+
+
+def close_where(match, reason):
+    """Ferme toutes les connexions partagées dont la clé vérifie `match`
+    (le retrait d'un hôte KVM coupe chacune de ses consoles). Rend les clés
+    fermées."""
+    with _hubs_lock:
+        hubs = [h for h in _hubs.values() if not h.closed and match(h.key)]
+    for h in hubs:
+        h.close(reason)
+    return [h.key for h in hubs]
 
 
 def sessions():

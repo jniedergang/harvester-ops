@@ -443,3 +443,118 @@ def test_the_reason_is_known_before_browsers_are_told():
     up.close()
     assert wait_for(lambda: seen)
     assert seen[0] == [True, True], "les navigateurs étaient déjà fermés"
+
+
+# ---------------------------------------------------------------------------
+# v1.97.0 : authentification VNC (type 2) côté amont, pour un affichage
+# libvirt protégé par `passwd`. Réponse de référence calculée une fois par
+# OpenSSL (`openssl enc -des-ecb -K <clé aux bits inversés> -nopad`, fournisseur
+# legacy) et figée ici : défi 00..0f, mot de passe "Fk7pw3Zq".
+# ---------------------------------------------------------------------------
+
+CHALLENGE = bytes(range(16))
+PW = "Fk7pw3Zq"
+PW_RESPONSE = bytes.fromhex("605e8da8b5747d3fa22b1892e9ab713d")
+
+
+class PwQemu(FakeWs):
+    """Un QEMU qui n'offre que l'authentification VNC (ou les deux)."""
+
+    def __init__(self, types=(vm.SEC_VNC,), password=None, accept=True):
+        super().__init__()
+        self.vnc_password = password
+        self.accept = accept
+        self.feed(b"RFB 003.008\n")
+        self.feed(bytes([len(types), *types]))
+
+    def send(self, data):
+        super().send(data)
+        sent = bytes(self.sent)
+        # après la version (12) et le choix (1) : défi ; après la réponse (16) : résultat
+        if sent == vm.VERSION + bytes([vm.SEC_VNC]):
+            self.feed(CHALLENGE)
+        elif sent == vm.VERSION + bytes([vm.SEC_NONE]):
+            self.feed(b"\x00\x00\x00\x00" + server_init())
+        elif len(sent) == 12 + 1 + 16 and sent[12] == vm.SEC_VNC:
+            ok = self.accept and sent[13:] == PW_RESPONSE
+            self.feed(b"\x00\x00\x00\x00" + server_init() if ok
+                      else b"\x00\x00\x00\x01" + struct.pack(">I", 21) + b"Authentication failed")
+
+
+def test_a_password_display_is_opened_with_the_vnc_challenge():
+    up = PwQemu(password=PW)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    hub.start(timeout=2)
+    assert bytes(up.sent[12:13]) == bytes([vm.SEC_VNC])
+    assert bytes(up.sent[13:29]) == PW_RESPONSE
+    assert up.vnc_password is None, "le mot de passe survit à la poignée de main"
+    assert (hub.width, hub.height) == (800, 600)
+    hub.close("test")
+
+
+def test_a_wrong_password_is_refused_without_quoting_it():
+    up = PwQemu(password="nottheone")
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(vm.ProtocolError) as e:
+        hub.start(timeout=2)
+    assert str(e.value) == "the VM display refused the password"
+    assert "nottheone" not in repr(e.value)
+    assert up.vnc_password is None
+
+
+def test_a_password_display_without_password_is_refused():
+    up = PwQemu(password=None)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    with pytest.raises(vm.ProtocolError, match="asks for a password"):
+        hub.start(timeout=2)
+    assert bytes(up.sent) == vm.VERSION, "un type de sécurité a été choisi sans mot de passe"
+
+
+def test_none_is_still_preferred_when_offered_even_with_a_password():
+    up = PwQemu(types=(vm.SEC_VNC, vm.SEC_NONE), password=PW)
+    hub = vm.VncHub(("kvm:node2", "vm1"), up)
+    hub.start(timeout=2)
+    assert bytes(up.sent[12:13]) == bytes([vm.SEC_NONE])
+    assert up.vnc_password is None
+    hub.close("test")
+
+
+def test_the_kubevirt_path_keeps_its_message_without_any_type():
+    up = PwQemu(types=(16,), password=PW)
+    hub = vm.VncHub(("c", "ns", "vm1"), up)
+    with pytest.raises(vm.ProtocolError, match="no 'None' security type"):
+        hub.start(timeout=2)
+
+
+def test_close_where_closes_only_the_matching_hubs():
+    a, b = fake_qemu(), fake_qemu()
+    ha = vm.get_hub(("kvm:node2", "vm1"), lambda: a)
+    hb = vm.get_hub(("kvm:node2x", "vm1"), lambda: b)
+    keys = vm.close_where(lambda k: k[0] == "kvm:node2", "host removed")
+    assert keys == [("kvm:node2", "vm1")]
+    assert ha.closed and ha.close_reason == "host removed" and not a.connected
+    assert not hb.closed
+    hb.close("test")
+
+
+def test_a_browser_gone_during_its_handshake_closes_an_unwatched_hub():
+    """v1.97.0 : sans navigateur rattaché, la connexion amont (un `ssh -W`
+    côté KVM) ne reste pas ouverte pour personne."""
+    up = fake_qemu()
+    hub = vm.get_hub(("kvm:node2", "vm1"), lambda: up)
+    ws = FakeWs()
+    ws.close()                            # parti avant la poignée de main
+    assert hub.serve(ws, "a") is True
+    assert hub.closed and not up.connected
+
+
+def test_a_failed_handshake_keeps_a_hub_that_others_watch():
+    up = fake_qemu()
+    hub = vm.get_hub(("c", "ns", "vm1"), lambda: up)
+    ok, _t = run_browser(hub, "alice")
+    assert wait_for(lambda: len(hub.clients) == 1)
+    ws = FakeWs()
+    ws.close()
+    hub.serve(ws, "b")
+    assert not hub.closed
+    hub.close("test")

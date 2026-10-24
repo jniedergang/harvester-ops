@@ -891,7 +891,8 @@ def _read_share_invalidate(response):
         if request.path.startswith("/api/kvm/"):
             # v1.96.0 : un hôte KVM n'est pas un cluster ; le relevé des
             # empreintes ne fait que lire
-            if request.path != "/api/kvm/hosts/scan":
+            # (le ticket de console ne fait que lire, lui aussi)
+            if request.path != "/api/kvm/hosts/scan" and not request.path.endswith("/console-ticket"):
                 READ_SHARE.invalidate(KVM_SCOPE)
                 READ_SHARE.invalidate("_activity")
             return response
@@ -10004,7 +10005,12 @@ def api_kvm_host_remove(host):
         return _kvm_err("invalid host name")
     if not _kd.decl_path(_state_dir(), host).exists():
         return _kvm_err(f"host {host} is not declared", 404)
-    run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host])
+    # ses consoles tombent tout de suite, et encore à la fin du retrait (une
+    # console rouverte entre-temps) ; `ssh -O exit` du script coupe de toute
+    # façon les tunnels qui passent par la connexion maître
+    _kvm_vnc_cut_host(host)
+    run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host],
+                           cleanup=lambda: _kvm_vnc_cut_host(host))
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host}), 202
@@ -21278,6 +21284,159 @@ def ws_vnc(ws, cluster, namespace, name):
     except Exception as e:              # noqa: BLE001
         log_vnc.error("console %s/%s: upstream unavailable: %s", namespace, name, e)
         try: ws.close(message="cluster VNC endpoint unreachable")
+        except Exception: pass
+    finally:
+        metric_vnc_sessions.set(_vnc_viewers())
+
+
+# =============================================================================
+# v1.97.0 : console VNC d'une VM KVM, par tunnel SSH (web/kvm_vnc.py)
+#
+# Même modèle que la console KubeVirt : un ticket à usage unique délivré par
+# une route authentifiée (seul endroit d'où une erreur LISIBLE peut venir),
+# puis un websocket rattaché à la connexion partagée de la VM (vnc_mux). La
+# connexion amont est un `ssh -W` vers l'affichage, vu depuis l'hôte, à
+# travers la connexion maître : aucun écouteur local. Le ticket porte
+# `cluster="kvm:<hôte>"` et le genre `kvm-vnc`, la clé de partage est
+# `("kvm:<hôte>", domaine)` : un `:` est interdit dans un nom de cluster et
+# une clé KubeVirt a trois éléments, donc aucune collision possible. Le mot
+# de passe VNC éventuel ne quitte pas le processus : lu à l'ouverture,
+# présenté à QEMU, oublié (vnc_mux) ; les navigateurs restent en sécurité
+# None, l'accès est gardé par la session et le rôle (opérateur).
+# =============================================================================
+import kvm_ops as _ko  # noqa: E402
+import kvm_vnc  # noqa: E402
+
+KVM_VNC_KIND = "kvm-vnc"
+
+
+def _kvm_vnc_key(host, domain):
+    return (f"kvm:{host}", domain)
+
+
+def _kvm_vnc_remember(host, domain, reason, detail=None):
+    entry = {"reason": reason, "at": time.time()}
+    if detail:
+        entry["detail"] = detail
+    with _vnc_lock:
+        _vnc_last_close[_kvm_vnc_key(host, domain)] = entry
+
+
+def _kvm_vnc_cut_host(host, reason="host-removed"):
+    """Ferme chaque console ouverte sur un hôte (son retrait) : le dernier
+    navigateur n'a pas à partir pour que le tunnel tombe."""
+    keys = vnc_mux.close_where(lambda k: len(k) == 2 and k[0] == f"kvm:{host}",
+                               "host removed")
+    for k in keys:
+        _kvm_vnc_remember(host, k[1], reason)
+    if keys:
+        metric_vnc_sessions.set(_vnc_viewers())
+    return keys
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/console-ticket", methods=["POST"])
+@requires_auth
+@_rate_limit("30/minute")
+def api_kvm_console_ticket(host, domain):
+    """Pré-contrôle et ticket du websocket de la console d'une VM KVM.
+    409 `notrunning` : la page réessaie ; 422 pour un affichage qu'aucun
+    nouvel essai ne rendra joignable (SPICE seul, socket, pas d'affichage,
+    pas d'écoute, adresse qui n'est pas celle de l'hôte)."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        return err
+    active = _vnc_viewers()
+    if active >= _VNC_MAX_SESSIONS:
+        return jsonify({"error": f"too many console sessions open ({active})",
+                        "hint": "close an existing console first"}), 429
+    try:
+        _state, target, _ = kvm_vnc.read_display(vh, domain)
+    except _kh.KvmError as e:
+        code = 404 if e.kind == "notfound" else 502
+        return jsonify({"error": e.message, "kind": e.kind}), code
+    except _ko.OpError as e:
+        return jsonify({"error": e.message, "kind": e.kind}), 502
+    reason = target.get("reason")
+    if reason:
+        code = 409 if reason == "notrunning" else 422
+        return jsonify({"error": kvm_vnc.REASON_MESSAGES.get(reason, reason), "reason": reason,
+                        "terminal": reason in kvm_vnc.TERMINAL_REASONS}), code
+    token = _vnc_issue_ticket(f"kvm:{host}", "", domain, user=current_user(), kind=KVM_VNC_KIND)
+    return jsonify({"ticket": token,
+                    "ws_path": f"/ws/kvm/vnc/{host}/{quote(domain, safe='')}",
+                    "expires_in": _VNC_TICKET_TTL,
+                    "password": bool(target.get("password"))})
+
+
+@app.route("/api/kvm/vms/<host>/<domain>/console-status")
+@requires_auth
+def api_kvm_console_status(host, domain):
+    """Qui regarde la console de cette VM KVM, et pourquoi elle s'est fermée
+    la dernière fois (comme api_vm_console_status)."""
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kvm_check_domain(domain):
+        return _kvm_err("invalid domain name")
+    key = _kvm_vnc_key(host, domain)
+    viewers = vnc_mux.sessions().get(key, [])
+    with _vnc_lock:
+        last = _vnc_last_close.get(key)
+    if last and time.time() - last["at"] > _VNC_CLOSE_MEMORY:
+        last = None
+    return jsonify({"viewers": viewers, "count": len(viewers), "last_close": last})
+
+
+@sock.route("/ws/kvm/vnc/<host>/<domain>")
+def ws_kvm_vnc(ws, host, domain):
+    """Rattache le navigateur à la console PARTAGÉE d'une VM KVM : une seule
+    connexion vers QEMU (un seul `ssh -W`) pour tous ses navigateurs ; le
+    dernier qui part la ferme, donc arrête ssh."""
+    if not _kvm_check_host(host) or not _kvm_check_domain(domain):
+        ws.close(message="invalid host or domain"); return
+    entry = _vnc_take_ticket(request.args.get("ticket"), f"kvm:{host}", "", domain,
+                             kind=KVM_VNC_KIND)
+    if not entry:
+        log_vnc.warning("rejected /ws/kvm/vnc on %s: bad or expired ticket", host)
+        ws.close(message="invalid or expired ticket"); return
+    vh, err = _kvm_host(_state_dir(), host)
+    if err:
+        ws.close(message="host is not declared"); return
+    key = _kvm_vnc_key(host, domain)
+    box = {}
+
+    def dial():
+        box["up"] = up = kvm_vnc.dial(vh, domain)
+        return up
+
+    def lost(_hub):
+        reason = kvm_vnc.classify_loss(vh, domain)
+        _kvm_vnc_remember(host, domain, reason)
+        log_vnc.info("console kvm:%s lost: %s", host, reason)
+
+    with _vnc_lock:
+        _vnc_last_close.pop(key, None)
+    try:
+        vnc_mux.attach(key, dial, ws, user=entry.get("user") or "", on_lost=lost)
+    except kvm_vnc.DisplayUnavailable as e:
+        _kvm_vnc_remember(host, domain, e.reason, e.message)
+        try: ws.close(message=e.reason)
+        except Exception: pass
+    except Exception as e:              # noqa: BLE001
+        up = box.get("up")
+        if isinstance(e, vnc_mux.ProtocolError) and "password" in str(e):
+            reason, detail = "auth", str(e)
+        else:
+            reason = "unreachable"
+            detail = (up.failure_reason() if up is not None
+                      else getattr(e, "message", None) or type(e).__name__)
+        _kvm_vnc_remember(host, domain, reason, detail)
+        log_vnc.error("console kvm:%s: upstream unavailable: %s", host, detail)
+        try: ws.close(message="VM display unreachable")
         except Exception: pass
     finally:
         metric_vnc_sessions.set(_vnc_viewers())

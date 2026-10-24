@@ -242,11 +242,21 @@ def vnc_password(host, name):
     appelant, en mémoire ; None sans mot de passe. Jamais appelée par la CLI.
     Une erreur ne cite jamais le XML."""
     check_vm_name(name)
-    xml = host.virsh("dumpxml", "--security-info", "--domain", name)
+    try:
+        return vnc_password_of(host.virsh("dumpxml", "--security-info", "--domain", name))
+    except OpError:
+        raise OpError("failed", f"{host.name}: unreadable definition for this VM") from None
+
+
+def vnc_password_of(xml):
+    """Mot de passe du premier affichage VNC d'un XML déjà lu avec
+    `--security-info` (None sans mot de passe). Sert à la console, qui lit
+    le port et le mot de passe dans la même définition. Une erreur ne cite
+    jamais le XML."""
     try:
         root = kh._safe_xml(xml)
     except (ET.ParseError, ValueError):
-        raise OpError("failed", f"{host.name}: unreadable definition for this VM") from None
+        raise OpError("failed", "unreadable definition for this VM") from None
     for g in root.findall("devices/graphics"):
         if g.get("type") == "vnc":
             return g.get("passwd") or None
