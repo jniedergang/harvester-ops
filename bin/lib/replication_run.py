@@ -2229,7 +2229,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
     points["paused_before"] = paused_before
     activated_any = False
     source_touched = False
-    result = {"fenced": {}, "skew_s": {}, "refused_skew": [], "lost_after": {}}
+    result = {"fenced": {}, "skew_s": {}, "refused_skew": [], "lost_after": {}, "point_at": {}}
     try:
         _set_state(ctx, "failing_over")
         _set_resources(ctx, uids, "failing_over")
@@ -2299,10 +2299,24 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         go = []
         for r in sel:
             uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
-            pts, skew, lost = _applied_points(ctx, carnets[uid], tb)
+            stored = (points.get("applied") or {}).get(uid)
+            if uid in done_vms and stored:
+                # reprise après l'activation : le moteur n'a plus de point
+                # (voir plus bas), la lecture rangée avant l'activation fait foi
+                pts = stored
+                times = [rp._t(p["snapshot_at"]) for p in pts.values() if p.get("snapshot_at")]
+                skew = int((max(times) - min(times)).total_seconds()) if len(times) > 1 else 0
+                lost = rp.iso(min(times)) if times else None
+            else:
+                pts, skew, lost = _applied_points(ctx, carnets[uid], tb)
             result["skew_s"][key] = skew
             if lost:
-                result["lost_after"][key] = lost
+                result["point_at"][key] = lost
+                # planifiée : la source était arrêtée et son dernier point
+                # appliqué, rien n'est perdu ; seule la non planifiée perd ce
+                # qui suit le plus vieux point de ses disques
+                if not planned:
+                    result["lost_after"][key] = lost
             points.setdefault("applied", {})[uid] = pts
             if not planned and uid not in done_vms:
                 if not all(p["backup"] for p in pts.values()):
@@ -2332,6 +2346,10 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                     else "source-not-fenced"
                 if came_back:
                     ctx.event(op, "fence", r["resource_uid"], "source", code=result["fenced"][key])
+        # points lus avant l'activation, rangés avant elle : un arrêt brutal
+        # pendant l'activation ne les perd pas (le moteur activé n'en a plus)
+        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
+                      by=ctx.by, action_id=ctx.action_id)
         # --- point de non-retour : l'activation est définitive ---
         for r in go:
             uid = r["resource_uid"]
@@ -2342,23 +2360,12 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             for v in carnets[uid]["volumes"]:
                 db.upsert_volume(ctx.conn, ctx.plan_id, {"generation": ctx.gen, "vm_uid": uid, "disk": v["disk"],
                                                          "state": "activated"})
-        # points réellement activés : relus APRÈS l'activation (Longhorn a pu
-        # finir une restauration en cours entre la lecture et l'activation)
-        tb = backups_by_volume(ctx.dst)
-        for r in go:
-            uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
-            before = points["applied"].get(uid) or {}
-            pts, _skew, _lost = _applied_points(ctx, carnets[uid], tb)
-            for vol, p in pts.items():
-                if not p["backup"] and (before.get(vol) or {}).get("backup"):
-                    pts[vol] = before[vol]           # moteur illisible : on garde la lecture d'avant
-            times = [rp._t(p["snapshot_at"]) for p in pts.values() if p["snapshot_at"]]
-            result["skew_s"][key] = int((max(times) - min(times)).total_seconds()) if len(times) > 1 else 0
-            if times:
-                result["lost_after"][key] = rp.iso(min(times))
-            points["applied"][uid] = pts
-        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
-                      by=ctx.by, action_id=ctx.action_id)
+        # points rangés : ceux lus AVANT l'activation. Après elle, Longhorn
+        # 1.12.1 vide `lastRestoredBackup` du moteur et `status.lastBackup` du
+        # volume (vu sur le banc, v1.99.0) : une relecture ne rend rien. Si
+        # Longhorn finit une restauration en cours pendant l'activation, le
+        # point réel est plus récent que celui rangé : `lost_after` reste
+        # prudent (plus tôt que la réalité), jamais optimiste.
         src_back = probe(ctx, "src") == "ok"
         for r in go:
             uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
@@ -2374,7 +2381,8 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
                               message=str(e)[:300])
             _set_resources(ctx, [uid], "failed_over")
             ctx.event(op, "done", uid, "target", code="failed-over", message=f"{key} failed over ({mode})",
-                      facts={"lost_after": result["lost_after"].get(key), "skew_s": result["skew_s"].get(key),
+                      facts={"lost_after": result["lost_after"].get(key), "point_at": result["point_at"].get(key),
+                             "skew_s": result["skew_s"].get(key),
                              "points": points["applied"].get(uid), "mode": mode})
         back = [r["resource_uid"] for r in sel if r not in go]
         _set_resources(ctx, back, "protected", "not failed over")

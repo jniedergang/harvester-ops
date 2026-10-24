@@ -195,6 +195,9 @@ class FakeKube:
         self.apply_s = 3
         self.restore_s = 10
         self.finish_on_activate = False
+        # Longhorn 1.12.1 (banc, v1.99.0) : après l'activation, le moteur n'a
+        # plus de `lastRestoredBackup` ni le volume de `status.lastBackup`
+        self.clear_on_activate = False
 
     # -- outils de test --------------------------------------------------------
     def put(self, kind, obj):
@@ -414,6 +417,9 @@ class FakeKube:
                 # Longhorn termine la restauration en cours avant d'activer
                 eng["status"]["lastRestoredBackup"] = eng["status"]["_target"]
             o["status"]["activatedFrom"] = eng["status"].get("lastRestoredBackup")
+            if self.clear_on_activate:
+                eng["status"]["lastRestoredBackup"] = ""
+                o["status"]["lastBackup"] = ""
             if "activate" not in self.freeze:
                 self.at(1, lambda: o["status"].update(isStandby=False, state="detached"))
         if kind == rr.K_VM and "runStrategy" in (patch.get("spec") or {}):
@@ -1830,9 +1836,11 @@ def _late_backups(w, vms, prefix, at=None):
             w.src.make_backup(f"pvc-{n}-{d}", f"{prefix}-{n}-{d}", snap_at=at)
 
 
-def test_unplanned_failover_records_the_points_actually_activated(tmp_path):
-    """Longhorn finit une restauration en cours au moment de l'activation :
-    les points rendus sont relus après elle, pas ceux lus avant."""
+def test_unplanned_failover_records_the_points_read_before_activation(tmp_path):
+    """Longhorn finit une restauration en cours au moment de l'activation.
+    Après elle, Longhorn 1.12.1 ne publie plus de point (vu sur le banc,
+    v1.99.0) : la lecture d'avant l'activation fait foi, `lost_after` est
+    prudent (plus tôt que le point réellement activé), jamais optimiste."""
     w = protected(tmp_path, vms=("vm-b",))
     w.src.down = True
     w.dst.finish_on_activate = True
@@ -1850,16 +1858,23 @@ def test_unplanned_failover_records_the_points_actually_activated(tmp_path):
             for d in VMS["vm-b"]["disks"]:
                 w.dst.sync_volume(f"pvc-vm-b-{d}")
     w.dst.hooks[("patch", rr.K_LH_VOLUME)] = race
+    uid = VMS["vm-b"]["uid"]
+    before = {p["backup"] for p in rr._applied_points(
+        w.ctx(), {"volumes": [{"source_volume": f"pvc-vm-b-{d}",
+                               "target_volume": rp.target_volume_name(w.pid, uid, d, 1, "vm-b")}
+                              for d in VMS["vm-b"]["disks"]]}, rr.backups_by_volume(w.dst))[0].values()}
     res = rr.failover(w.ctx(), planned=False, yes=True)
     assert res["exit"] == 0, res
     for d in VMS["vm-b"]["disks"]:
-        sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], d, 1, "vm-b")
+        sb = rp.target_volume_name(w.pid, uid, d, 1, "vm-b")
         assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"] == f"backup-race-vm-b-{d}"
-    assert res["lost_after"]["default/vm-b"] == iso(race_at)
-    applied = db.list_runs(w.conn, w.pid)[-1]["points"]["applied"][VMS["vm-b"]["uid"]]
-    assert {p["backup"] for p in applied.values()} == {f"backup-race-vm-b-{d}" for d in VMS["vm-b"]["disks"]}
-    done = events(w, step="done", code="failed-over", resource_uid=VMS["vm-b"]["uid"])
-    assert len(done) == 1 and json.loads(done[0]["facts"])["lost_after"] == iso(race_at)
+    applied = db.list_runs(w.conn, w.pid)[-1]["points"]["applied"][uid]
+    assert {p["backup"] for p in applied.values()} == before
+    assert not before & {f"backup-race-vm-b-{d}" for d in VMS["vm-b"]["disks"]}
+    # prudent : la perte annoncée commence avant le point réellement activé
+    assert rp._t(res["lost_after"]["default/vm-b"]) < rp._t(iso(race_at))
+    done = events(w, step="done", code="failed-over", resource_uid=uid)
+    assert len(done) == 1 and json.loads(done[0]["facts"])["lost_after"] == res["lost_after"]["default/vm-b"]
 
 
 def test_unplanned_failover_waits_for_the_last_backup_before_activation(tmp_path):
@@ -1931,16 +1946,24 @@ def test_forced_unplanned_failover_undone_before_activation_restores_the_source(
 ])
 def test_resume_after_activation_needs_only_the_target(tmp_path, mode, source_after):
     w = protected(tmp_path, vms=("vm-a",))
+    w.dst.clear_on_activate = True
     if mode == "unplanned":
         w.src.down = True
     w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
     res = rr.failover(w.ctx(), planned=mode == "planned", yes=True, force_unplanned=mode == "forced")
     assert res["exit"] == 3 and "run failover again" in res["message"], res
+    recorded = db.list_runs(w.conn, w.pid)[-1]["points"]["applied"][VMS["vm-a"]["uid"]]
+    assert recorded and all(p["backup"] for p in recorded.values())
     w.dst.hooks.clear()
     w.src.down = source_after == "gone"
     res = rr.resume(w.ctx())
     assert res["exit"] == 0, res
     assert res["mode"] == ("planned" if mode == "planned" else "unplanned")
+    # v1.99.0 : le moteur activé n'a plus de point, la lecture d'avant
+    # l'activation reste celle du rapport et de l'exécution
+    assert db.list_runs(w.conn, w.pid)[-1]["points"]["applied"][VMS["vm-a"]["uid"]] == recorded
+    assert set(res["point_at"]) == {"default/vm-a"}
+    assert bool(res["lost_after"]) is (mode != "planned")
     assert w.dst.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
     assert w.plan()["state"] == "failed_over"
     run = db.list_runs(w.conn, w.pid)[-1]

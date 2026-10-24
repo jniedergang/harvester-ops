@@ -429,8 +429,13 @@ def _text_result(res):
     for k in ("left", "pending"):
         for x in res.get(k) or []:
             lines.append(f"  {k}: {x}")
-    for vm, at in (res.get("lost_after") or {}).items():
+    lost = res.get("lost_after") or {}
+    for vm, at in lost.items():
         lines.append(f"  {vm}: writes after {at} are lost (skew {(res.get('skew_s') or {}).get(vm, 0)} s)")
+    for vm, at in (res.get("point_at") or {}).items():
+        if vm not in lost:
+            # bascule planifiée : la cible porte l'état de la source à son arrêt
+            lines.append(f"  {vm}: target holds the source state at its stop (last point {at})")
     return lines
 
 

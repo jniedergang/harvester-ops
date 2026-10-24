@@ -398,7 +398,7 @@ def test_measure_formula_bench_numbers(capsys):
 # bascule, reprise, déprotection
 # ---------------------------------------------------------------------------
 
-FAILOVER_KEYS = RESULT_KEYS | {"run_id", "mode", "fenced", "skew_s", "refused_skew", "lost_after"}
+FAILOVER_KEYS = RESULT_KEYS | {"run_id", "mode", "fenced", "skew_s", "refused_skew", "lost_after", "point_at"}
 
 
 def test_planned_failover(tmp_path, capsys):
@@ -407,6 +407,21 @@ def test_planned_failover(tmp_path, capsys):
     assert rc == 0, data
     assert set(data) == FAILOVER_KEYS and data["state"] == "failed_over" and data["mode"] == "planned"
     assert w.dst.obj(rr.K_VM, "default", "vm-a") is not None
+    # v1.99.0 : une bascule planifiée ne perd rien, elle ne le dit donc pas
+    assert data["lost_after"] == {} and set(data["point_at"]) == {"default/vm-a"}
+
+
+@pytest.mark.parametrize("mode,lost", [("planned", False), ("unplanned", True)])
+def test_failover_text_says_lost_writes_only_when_unplanned(tmp_path, capsys, mode, lost):
+    w = protected(tmp_path, vms=("vm-a",))
+    argv = ["failover", "plan-a", "--vm=default/vm-a"]
+    if mode == "unplanned":
+        w.src.down = True
+        argv += ["--unplanned", "--yes"]
+    rc, out, _ = run(capsys, w, *argv, as_json=False)
+    assert rc == 0, out
+    assert ("are lost" in out) is lost
+    assert ("target holds the source state at its stop" in out) is not lost
 
 
 @pytest.mark.parametrize("argv,rc,kind", [
