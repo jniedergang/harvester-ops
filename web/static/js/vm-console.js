@@ -112,6 +112,7 @@ const VMConsole = (() => {
       nolisten: tr('console.kvm.nolisten', fallback),
       listen: tr('console.kvm.listen', fallback),
       auth: tr('console.kvm.auth', fallback),
+      'unsupported-security': tr('console.kvm.unsupportedSecurity', fallback, { detail: detail || '' }),
       'host-removed': tr('console.kvm.hostRemoved', fallback),
       unreachable: tr('console.kvm.unreachable', fallback, { detail: detail || '' }),
     }[reason] || fallback);
@@ -165,7 +166,15 @@ const VMConsole = (() => {
         wrap.querySelector('.vm-console-kvm-start').addEventListener('click', () => gesture('start'));
         wrap.querySelector('.vm-console-kvm-shutdown').addEventListener('click', () => gesture('shutdown'));
         wrap.querySelector('.vm-console-kvm-destroy').addEventListener('click', askDestroy);
-        wrap.querySelector('.vm-console-kvm-snapshots').addEventListener('click', () => {
+        // Les instantanés KVM arrivent avec leur propre module : tant qu'il
+        // n'est pas chargé, le bouton n'apparaît pas (il ne ferait rien).
+        const snapBtn = wrap.querySelector('.vm-console-kvm-snapshots');
+        if (!window.KVMSnapshots) {
+          snapBtn.hidden = true;
+          const sep = snapBtn.previousElementSibling;
+          if (sep && sep.classList.contains('vm-console-sep')) sep.hidden = true;
+        }
+        snapBtn.addEventListener('click', () => {
           if (window.KVMSnapshots) KVMSnapshots.open(host, domain);
         });
       },
@@ -181,7 +190,7 @@ const VMConsole = (() => {
       // devenu injoignable par nature).
       lostReason(last) {
         if (!last) return null;
-        const final = ['auth', 'host-removed', 'spice', 'socket', 'nodisplay', 'nolisten', 'listen'];
+        const final = ['auth', 'unsupported-security', 'host-removed', 'spice', 'socket', 'nodisplay', 'nolisten', 'listen'];
         if (final.includes(last.reason)) return { retry: false, text: reasonText(last.reason, last.detail || last.reason, last.detail) };
         if (last.reason === 'unreachable') return { retry: true, text: reasonText('unreachable', last.detail || '', last.detail) };
         return null;

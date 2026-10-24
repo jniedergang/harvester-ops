@@ -86,7 +86,26 @@ class Incomplete(Exception):
 
 
 class ProtocolError(Exception):
-    pass
+    """Échange RFB impossible. `reason` est la raison stable montrée par la
+    console (None : erreur de protocole ordinaire, son message suffit)."""
+    reason = None
+
+
+class AuthFailed(ProtocolError):
+    """L'affichage refuse le mot de passe, ou en demande un sans qu'il y en
+    ait : un nouvel essai ne changera rien."""
+    reason = "auth"
+
+
+class UnsupportedSecurity(ProtocolError):
+    """L'affichage n'offre que des types de sécurité que la console ne gère
+    pas (VeNCrypt, SASL, TLS...) : un nouvel essai ne changera rien."""
+    reason = "unsupported-security"
+
+
+# Noms des types de sécurité RFB (registre IANA) cités dans les messages.
+SECURITY_NAMES = {2: "VNC", 5: "RA2", 6: "RA2ne", 16: "Tight", 17: "Ultra", 18: "TLS",
+                  19: "VeNCrypt", 20: "SASL", 21: "MD5", 22: "xvp"}
 
 
 def _need(buf, end):
@@ -375,26 +394,45 @@ class VncHub:
         """Choix du type de sécurité amont. None (1) s'il est offert : chemin
         KubeVirt inchangé. Sinon authentification VNC (2) si l'amont porte
         un mot de passe : défi de 16 octets chiffré en DES. Les messages ne
-        citent jamais la valeur."""
+        citent jamais la valeur, et le mot de passe n'est lu qu'APRÈS le
+        défi : une attente du défi qui échoue ne laisse aucune trace de lui
+        dans la pile de l'exception."""
         s = self.stream
         if SEC_NONE in types:
             self.send_upstream(bytes([SEC_NONE]))
             if struct.unpack(">I", s.read(4, timeout))[0] != 0:
-                raise ProtocolError("security handshake failed")
+                raise ProtocolError(self._failure_text("security handshake failed", timeout))
             return
         if SEC_VNC not in types:
-            raise ProtocolError("server offers no 'None' security type")
-        password = getattr(self.up, "vnc_password", None)
-        if not password:
-            raise ProtocolError("the VM display asks for a password and none is defined for it")
-        self.up.vnc_password = None
+            offered = ", ".join(f"{SECURITY_NAMES.get(t, 'unknown')} ({t})" for t in types)
+            raise UnsupportedSecurity("server offers no 'None' security type nor VNC password "
+                                      f"authentication (offered: {offered})")
+        if not getattr(self.up, "vnc_password", None):
+            raise AuthFailed("the VM display asks for a password and none is defined for it")
         self.send_upstream(bytes([SEC_VNC]))
         challenge = s.read(16, timeout)
-        response = vnc_des.vnc_response(password, challenge)
-        password = None
+        password = self.up.vnc_password
+        self.up.vnc_password = None
+        try:
+            response = vnc_des.vnc_response(password, challenge)
+        finally:
+            password = None
         self.send_upstream(response)
         if struct.unpack(">I", s.read(4, timeout))[0] != 0:
-            raise ProtocolError("the VM display refused the password")
+            raise AuthFailed(self._failure_text("the VM display refused the password", timeout))
+
+    def _failure_text(self, base, timeout):
+        """RFB 3.8 : un SecurityResult en échec est suivi d'une raison écrite
+        par le serveur. Elle complète le message si elle arrive ; sinon le
+        message de base suffit."""
+        try:
+            length = struct.unpack(">I", self.stream.read(4, min(timeout, 2.0)))[0]
+            if not 0 < length <= 1024:
+                return base
+            text = self.stream.read(length, min(timeout, 2.0)).decode(errors="replace").strip()
+        except Exception:                            # noqa: BLE001 (raison facultative)
+            return base
+        return f"{base}: {text}" if text else base
 
     def send_upstream(self, data):
         with self.up_lock:

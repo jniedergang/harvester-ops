@@ -240,3 +240,55 @@ def test_a_viewer_sees_the_console_item_disabled(ui):
     item.click(force=True)
     page.wait_for_timeout(300)
     assert state["tickets"] == []
+
+
+# --- après revue : raisons dites telles quelles, bouton des instantanés ------
+
+@pytest.mark.parametrize("last_close,expected,retries", [
+    # sécurité non gérée : dite, avec le message du serveur, sans nouvel essai
+    ({"reason": "unsupported-security", "at": 1,
+      "detail": "server offers no 'None' security type nor VNC password authentication "
+                "(offered: VeNCrypt (19))"},
+     ["security type the console does not handle", "VeNCrypt (19)"], False),
+    # raison écrite par le serveur : elle arrive littéralement (texte, pas HTML)
+    ({"reason": "unreachable", "at": 1, "detail": f"server refused: {EVIL}"},
+     ["could not be reached through the host", f"server refused: {EVIL}"], True),
+])
+def test_the_reason_of_a_lost_console_is_said(ui, last_close, expected, retries):
+    make_page, state = ui
+    page, dialogs = make_page()
+    panel = open_console_from_menu(page, "kvmtest-cirros")
+    expect(panel.locator(".vm-console-status")).to_have_text("Connected", timeout=5000)
+    state["last_close"] = last_close
+    page.evaluate("window.__ws.close()")
+    status = panel.locator(".vm-console-status")
+    for text in expected:
+        expect(status).to_contain_text(text, timeout=5000)
+    page.wait_for_timeout(1500)
+    if retries:
+        assert len(state["tickets"]) > 1, "a transport failure must retry"
+    else:
+        assert state["tickets"] == ["kvmtest-cirros"], "the console retried a terminal reason"
+        expect(panel.locator(".vm-console-reconnect")).to_be_visible()
+    assert page.locator(".floating-panel img").count() == 0
+    assert page.evaluate("window.__xss") is None
+    assert dialogs == []
+
+
+@pytest.mark.parametrize("module,visible", [(False, False), (True, True)])
+def test_the_snapshots_button_needs_the_kvm_snapshots_module(ui, context, module, visible):
+    make_page, _ = ui
+    if module:
+        context.add_init_script("window.KVMSnapshots = { open(h, d) { window.__snap = [h, d]; } };")
+    page, _ = make_page()
+    panel = open_console_from_menu(page, "kvmtest-cirros")
+    expect(panel.locator(".vm-console-status")).to_have_text("Connected", timeout=5000)
+    btn = panel.locator(".vm-console-kvm-snapshots")
+    sep = btn.locator("xpath=preceding-sibling::*[1]")
+    if visible:
+        expect(btn).to_be_visible()
+        btn.click()
+        assert page.evaluate("window.__snap") == ["node2", "kvmtest-cirros"]
+    else:
+        expect(btn).to_be_hidden()
+        expect(sep).to_be_hidden()

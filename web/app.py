@@ -10008,7 +10008,10 @@ def api_kvm_host_remove(host):
     # ses consoles tombent tout de suite, et encore à la fin du retrait (une
     # console rouverte entre-temps) ; `ssh -O exit` du script coupe de toute
     # façon les tunnels qui passent par la connexion maître
-    _kvm_vnc_cut_host(host)
+    # (en tâche de fond : fermer un tunnel laisse 2 s à ssh pour finir, la
+    # requête n'a pas à les attendre)
+    threading.Thread(target=_kvm_vnc_cut_host, args=(host,), daemon=True,
+                     name=f"kvm-vnc-cut-{host}").start()
     run, err = _kvm_action(host, f"kvm:host-remove:{host}", _kvm_base("host", "remove") + [host],
                            cleanup=lambda: _kvm_vnc_cut_host(host))
     if err:
@@ -20995,6 +20998,28 @@ from simple_websocket import Client as _WsClient
 
 log_vnc = logging.getLogger("harvester-ops.vnc")
 
+
+class _TicketRedactFilter(logging.Filter):
+    """v1.97.0 : le journal d'accès de werkzeug écrit la ligne de requête
+    entière, donc le ticket des websockets de console (`?ticket=...`, VNC
+    KubeVirt et KVM, console série). La valeur est remplacée par `***`
+    avant tout gestionnaire."""
+
+    _RE = re.compile(r"(ticket=)[^&\s\"']+")
+
+    def filter(self, record):
+        try:
+            text = record.getMessage()
+        except Exception:                            # noqa: BLE001 (on laisse passer tel quel)
+            return True
+        if "ticket=" in text:
+            record.msg, record.args = self._RE.sub(r"\1***", text), ()
+        return True
+
+
+_TICKET_REDACT = _TicketRedactFilter()
+logging.getLogger("werkzeug").addFilter(_TICKET_REDACT)
+
 _VNC_TICKET_TTL = 30          # seconds; consumed once
 # Navigateurs rattachés, toutes VMs confondues. Chaque navigateur tient deux
 # fils (lecture, écriture) ; la connexion partagée d'une VM en tient un.
@@ -21131,6 +21156,18 @@ def _vnc_consume_ticket(token, cluster, namespace, name):
     return _vnc_take_ticket(token, cluster, namespace, name) is not None
 
 
+def _vnc_ticket_user_ok(entry):
+    """v1.97.0 : un ticket de console est un jeton au porteur, lié à une
+    personne, à une VM (cluster ou hôte, domaine) et à un genre de console ;
+    il ne vit que 30 s et ne sert qu'une fois. Le websocket qui le présente
+    doit en plus venir de la MÊME personne (cookie de session, en-tête
+    Basic) : un ticket lu ailleurs (journal, historique) ne sert à rien
+    sans la session. Un ticket délivré sans personne (console en mode
+    ouvert) ne compare rien."""
+    want = entry.get("user") or ""
+    return not want or current_user() == want
+
+
 def _vnc_classify_loss(cluster, namespace, name, uid):
     """KubeVirt a fermé la connexion partagée : la VM a-t-elle redémarré, ou
     un AUTRE client (la console d'Harvester, une autre instance du toolkit)
@@ -21246,6 +21283,9 @@ def ws_vnc(ws, cluster, namespace, name):
         log_vnc.warning("rejected /ws/vnc for %s/%s: bad or expired ticket",
                         namespace, name)
         ws.close(message="invalid or expired ticket"); return
+    if not _vnc_ticket_user_ok(entry):
+        log_vnc.warning("rejected /ws/vnc for %s/%s: ticket of another user", namespace, name)
+        ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
     kc = next((c["kubeconfig"] for c in cfg.get("clusters", [])
                if c["name"] == cluster), None)
@@ -21334,6 +21374,19 @@ def _kvm_vnc_cut_host(host, reason="host-removed"):
     return keys
 
 
+def _kvm_vnc_failure(e, up):
+    """(raison, détail) d'une ouverture de console qui échoue. Une erreur de
+    protocole RFB porte son propre message (refus du serveur, sécurité non
+    gérée, mot de passe refusé) et, pour les refus définitifs, sa raison ;
+    la dernière ligne d'erreur de ssh ne vaut que pour une panne du
+    transport."""
+    if isinstance(e, vnc_mux.ProtocolError):
+        return e.reason or "unreachable", str(e)
+    detail = (up.failure_reason() if up is not None
+              else getattr(e, "message", None) or type(e).__name__)
+    return "unreachable", detail
+
+
 @app.route("/api/kvm/vms/<host>/<domain>/console-ticket", methods=["POST"])
 @requires_auth
 @_rate_limit("30/minute")
@@ -21403,6 +21456,9 @@ def ws_kvm_vnc(ws, host, domain):
     if not entry:
         log_vnc.warning("rejected /ws/kvm/vnc on %s: bad or expired ticket", host)
         ws.close(message="invalid or expired ticket"); return
+    if not _vnc_ticket_user_ok(entry):
+        log_vnc.warning("rejected /ws/kvm/vnc on %s: ticket of another user", host)
+        ws.close(message="invalid or expired ticket"); return
     vh, err = _kvm_host(_state_dir(), host)
     if err:
         ws.close(message="host is not declared"); return
@@ -21427,13 +21483,7 @@ def ws_kvm_vnc(ws, host, domain):
         try: ws.close(message=e.reason)
         except Exception: pass
     except Exception as e:              # noqa: BLE001
-        up = box.get("up")
-        if isinstance(e, vnc_mux.ProtocolError) and "password" in str(e):
-            reason, detail = "auth", str(e)
-        else:
-            reason = "unreachable"
-            detail = (up.failure_reason() if up is not None
-                      else getattr(e, "message", None) or type(e).__name__)
+        reason, detail = _kvm_vnc_failure(e, box.get("up"))
         _kvm_vnc_remember(host, domain, reason, detail)
         log_vnc.error("console kvm:%s: upstream unavailable: %s", host, detail)
         try: ws.close(message="VM display unreachable")
@@ -21481,7 +21531,7 @@ def ws_serial(ws, cluster, namespace, name):
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$", cluster):
         ws.close(message="invalid cluster"); return
     entry = _vnc_take_ticket(request.args.get("ticket"), cluster, namespace, name, kind="serial")
-    if not entry:
+    if not entry or not _vnc_ticket_user_ok(entry):
         ws.close(message="invalid or expired ticket"); return
     cfg = load_config()
     kc = next((c["kubeconfig"] for c in cfg.get("clusters", []) if c["name"] == cluster), None)

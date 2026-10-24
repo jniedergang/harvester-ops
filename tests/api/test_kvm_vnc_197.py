@@ -236,7 +236,12 @@ def note(**k):
         f.write(json.dumps(k) + "\n")
 out.write(b"RFB 003.008\n"); out.flush()
 rd(12)
-types = {"vnc": [2], "both": [2, 1], "none": [1]}[mode]
+if mode == "refuse":
+    why = b"<b>Too many</b> & failures"
+    out.write(b"\x00" + struct.pack(">I", len(why)) + why); out.flush()
+    sys.exit(0)
+types = {"vnc": [2], "both": [2, 1], "none": [1], "vencrypt": [19], "sasl": [20],
+         "tls": [18]}[mode]
 out.write(bytes([len(types)] + types)); out.flush()
 choice = rd(1)[0]
 note(choice=choice)
@@ -349,6 +354,8 @@ def env(monkeypatch, fake_rfb):
     kd.write(state, decl("node2", "172.16.1.12"))
     monkeypatch.setattr(wapp, "_state_dir", lambda: state)
     monkeypatch.setattr(wapp, "current_cluster_identity", lambda: None)
+    # les websockets des tests s'authentifient en Basic avec « pw »
+    monkeypatch.setattr(wapp, "check_auth", lambda u, p: p == "pw")
     sim = {"domains": {"web": ("running", UEFI)}, "batches": [], "runs": [], "popen": [],
            "procs": [], "mode": "none"}
 
@@ -595,12 +602,19 @@ class BrowserWs:
         self.inbox.put(None)
 
 
-def attach_browser(tok, domain="web", host="node2"):
+def basic(user):
+    return {"Authorization": "Basic " + base64.b64encode(f"{user}:pw".encode()).decode()}
+
+
+def attach_browser(tok, domain="web", host="node2", user="alice"):
+    """Le websocket vient de la session de `user` (en-tête Basic ; None :
+    aucune session)."""
     ws = BrowserWs()
     view = wapp.app.view_functions["ws_kvm_vnc"].__wrapped__
+    headers = basic(user) if user else {}
 
     def run():
-        with wapp.app.test_request_context(f"/ws/kvm/vnc/{host}/x?ticket={tok}"):
+        with wapp.app.test_request_context(f"/ws/kvm/vnc/{host}/x?ticket={tok}", headers=headers):
             view(ws, host, domain)
     t = threading.Thread(target=run, daemon=True)
     t.start()
@@ -759,3 +773,146 @@ def test_the_password_never_leaves_the_process(env, client, caplog):
     outputs += [rec.getMessage() for rec in caplog.records]
     for text in outputs:
         assert FAKE_PASSWORD not in text and "Zz9other" not in text
+
+
+# --- après revue ---------------------------------------------------------------
+
+class _Up:
+    def __init__(self, reason):
+        self._reason = reason
+
+    def failure_reason(self):
+        return self._reason
+
+
+@pytest.mark.parametrize("exc,up,reason,detail", [
+    # une erreur RFB dit son propre message, jamais la dernière ligne de ssh
+    (vnc_mux.ProtocolError("server refused: busy"), _Up("ssh: last line"), "unreachable",
+     "server refused: busy"),
+    (vnc_mux.AuthFailed("the VM display refused the password"), _Up("ssh: x"), "auth",
+     "the VM display refused the password"),
+    (vnc_mux.UnsupportedSecurity("offered: VeNCrypt (19)"), _Up("ssh: x"), "unsupported-security",
+     "offered: VeNCrypt (19)"),
+    # un message qui contient « password » ne suffit plus à faire un refus
+    (vnc_mux.ProtocolError("password field garbled"), None, "unreachable", "password field garbled"),
+    # panne du transport : la raison que ssh a donnée
+    (EOFError("connection closed"), _Up("ssh: connect to host node2 port 22: refused"), "unreachable",
+     "ssh: connect to host node2 port 22: refused"),
+    (OSError("spawn failed"), None, "unreachable", "OSError"),
+    (kvm_vnc.DisplayUnavailable("socket"), None, "unreachable", kvm_vnc.REASON_MESSAGES["socket"]),
+])
+def test_failure_classification_uses_exception_types(exc, up, reason, detail):
+    assert wapp._kvm_vnc_failure(exc, up) == (reason, detail)
+
+
+@pytest.mark.parametrize("mode,reason,detail", [
+    ("vencrypt", "unsupported-security", "server offers no 'None' security type nor VNC password "
+                                         "authentication (offered: VeNCrypt (19))"),
+    ("sasl", "unsupported-security", "server offers no 'None' security type nor VNC password "
+                                     "authentication (offered: SASL (20))"),
+    ("tls", "unsupported-security", "server offers no 'None' security type nor VNC password "
+                                    "authentication (offered: TLS (18))"),
+    # la raison écrite par le serveur arrive telle quelle (la page l'échappe)
+    ("refuse", "unreachable", "server refused: <b>Too many</b> & failures"),
+])
+def test_a_refusing_display_is_remembered_with_its_own_message(env, client, mode, reason, detail):
+    env["sim"]["mode"] = mode
+    ws, t = attach_browser(new_ticket())
+    t.join(timeout=5)
+    assert not t.is_alive()
+    last = client.get("/api/kvm/vms/node2/web/console-status").get_json()["last_close"]
+    assert (last["reason"], last["detail"]) == (reason, detail)
+    assert ws.close_message == "VM display unreachable"
+    # une seule ouverture : pas de nouvel essai côté serveur
+    assert len(env["sim"]["popen"]) == 1
+    assert KEY not in vnc_mux.sessions()
+
+
+@pytest.mark.parametrize("ticket_user,ws_user,opens", [
+    ("alice", "alice", True),
+    ("alice", "bob", False),           # ticket d'une autre personne
+    ("alice", None, False),            # aucune session
+    ("", None, True),                  # console en mode ouvert : personne à comparer
+])
+def test_the_kvm_websocket_wants_the_user_of_the_ticket(env, ticket_user, ws_user, opens):
+    tok = wapp._vnc_issue_ticket("kvm:node2", "", "web", user=ticket_user, kind="kvm-vnc")
+    ws, t = attach_browser(tok, user=ws_user)
+    if opens:
+        assert wait_for(lambda: vnc_mux.sessions().get(KEY))
+        ws.close(); t.join(timeout=5)
+    else:
+        t.join(timeout=5)
+        assert ws.close_message == "invalid or expired ticket" and env["sim"]["popen"] == []
+        # consommé quand même : il ne resservira pas
+        assert wapp._vnc_take_ticket(tok, "kvm:node2", "", "web", kind="kvm-vnc") is None
+
+
+@pytest.mark.parametrize("ticket_user,ws_user,refused", [
+    ("alice", "bob", True), ("alice", None, True), ("alice", "alice", False), ("", None, False),
+])
+def test_the_kubevirt_websockets_want_the_user_of_the_ticket(env, monkeypatch, ticket_user, ws_user,
+                                                             refused):
+    monkeypatch.setattr(wapp, "load_config", lambda: {"clusters": []})
+    headers = basic(ws_user) if ws_user else {}
+    for kind, view in (("vnc", "ws_vnc"), ("serial", "ws_serial")):
+        tok = wapp._vnc_issue_ticket("harv1", "default", "web", user=ticket_user, kind=kind)
+        ws = BrowserWs()
+        with wapp.app.test_request_context(f"/ws/{kind}/harv1/default/web?ticket={tok}", headers=headers):
+            wapp.app.view_functions[view].__wrapped__(ws, "harv1", "default", "web")
+        # refusé : ticket ; admis : il va jusqu'au cluster (inconnu ici)
+        assert ws.close_message == ("invalid or expired ticket" if refused else "unknown cluster"), kind
+
+
+def test_the_access_log_hides_console_tickets(caplog):
+    from werkzeug.serving import WSGIRequestHandler
+    caplog.set_level(logging.INFO, logger="werkzeug")
+    for path in ("/ws/kvm/vnc/node2/web?ticket=SeCrEt-Tk_1", "/ws/vnc/harv1/default/web?ticket=SeCrEt-Tk_2&x=1"):
+        h = WSGIRequestHandler.__new__(WSGIRequestHandler)
+        h.path, h.command, h.request_version = path, "GET", "HTTP/1.1"
+        h.client_address, h.requestline = ("127.0.0.1", 4242), f"GET {path} HTTP/1.1"
+        h.log_request(101)
+    text = "\n".join(r.getMessage() for r in caplog.records if r.name == "werkzeug")
+    assert "SeCrEt" not in text and caplog.text.count("ticket=***") == 2
+    assert "/ws/kvm/vnc/node2/web?ticket=***" in text and "ticket=***&x=1" in text
+
+
+def test_host_removal_does_not_wait_for_its_tunnels(env, client):
+    """Fermer un tunnel laisse 2 s à ssh ; la requête de retrait n'attend pas."""
+    closing = threading.Event()
+
+    class SlowUp:
+        connected = True
+
+        def __init__(self):
+            import queue
+            self.inbox = queue.Queue()
+            pf = struct.pack(">BBBBHHHBBB3x", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
+            for d in (b"RFB 003.008\n", b"\x01\x01", b"\x00\x00\x00\x00",
+                      struct.pack(">HH", 8, 8) + pf + struct.pack(">I", 1) + b"v"):
+                self.inbox.put(d)
+
+        def receive(self, timeout=None):
+            import queue
+            try:
+                return self.inbox.get(timeout=min(timeout or 0.05, 0.05))
+            except queue.Empty:
+                return None
+
+        def send(self, data):
+            pass
+
+        def close(self):
+            closing.set()
+            time.sleep(1.5)                # la grâce laissée à ssh
+            self.connected = False
+    hubs = [vnc_mux.get_hub(("kvm:node2", d), SlowUp) for d in ("a", "b")]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(wapp, "_kvm_action", lambda host, label, cmd, cleanup=None:
+                   (type("R", (), {"id": "x"})(), None))
+        t0 = time.monotonic()
+        r = client.delete("/api/kvm/hosts/node2")
+        elapsed = time.monotonic() - t0
+    assert r.status_code == 202
+    assert elapsed < 1.0, f"the removal waited {elapsed:.1f}s for its tunnels"
+    assert closing.wait(5)
+    assert wait_for(lambda: all(h.closed for h in hubs) and all(not h.up.connected for h in hubs))
