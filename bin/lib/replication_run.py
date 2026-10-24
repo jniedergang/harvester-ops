@@ -2107,6 +2107,42 @@ def _applied_points(ctx, carnet, tb):
     return pts, skew, (rp.iso(min(times)) if times else None)
 
 
+def _unplanned_dry_findings(ctx, sel, carnets):
+    """Ce qu'une bascule non planifiée ferait, lu sur la cible seule, sans
+    rien écrire (v1.99.0 : le contrôle à blanc ne disait rien). Par VM :
+    points appliqués et écart entre disques (`applied-points`), refus
+    attendu sans `--accept-skew` (`skew-exceeded`) ou faute de point
+    (`no-point`), moteurs encore en retard sur la dernière sauvegarde connue
+    (`catch-up-pending`, sinon `caught-up`). Rien n'est demandé à Longhorn :
+    une relecture de la cible n'est faite que par la vraie bascule."""
+    tolerance = int((ctx.plan.get("options") or {}).get("skew_tolerance_s", rp.SKEW_TOLERANCE_S))
+    tb = backups_by_volume(ctx.dst)
+    out = []
+    for r in sel:
+        uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
+        carnet = carnets.get(uid)
+        if not carnet or any(_activated_volumes(ctx, carnet).values()):
+            continue
+        pts, skew, lost = _applied_points(ctx, carnet, tb)
+        out.append(rp._finding("applied-points", "ok", vm=key, points=pts, skew_s=skew, lost_after=lost,
+                               tolerance_s=tolerance))
+        if not all(p["backup"] for p in pts.values()):
+            out.append(rp._finding("no-point", "warn", vm=key,
+                                   volumes=sorted(v for v, p in pts.items() if not p["backup"])))
+        elif skew > tolerance:
+            out.append(rp._finding("skew-exceeded", "warn", vm=key, skew_s=skew, tolerance_s=tolerance,
+                                   hint="--accept-skew"))
+        late = []
+        for v in carnet["volumes"]:
+            last = _status(ctx.dst.get(K_LH_VOLUME, NS, v["target_volume"])).get("lastBackup") or ""
+            applied = _status(engine_of(ctx.dst, v["target_volume"])).get("lastRestoredBackup") or ""
+            if not last or applied != last:
+                late.append({"volume": v["source_volume"], "applied": applied, "last_backup": last})
+        out.append(rp._finding("catch-up-pending", "warn", vm=key, volumes=late) if late
+                   else rp._finding("caught-up", "ok", vm=key))
+    return out
+
+
 def wait_caught_up(ctx, op, volumes, timeout_key):
     """Bascule non planifiée : avant l'activation, chaque moteur doit avoir
     appliqué la dernière sauvegarde connue de son volume
@@ -2199,6 +2235,9 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         if rp.blocking(findings):
             raise Refused("check", "the pre-check refuses this failover", findings=findings)
         if dry_run:
+            if phase == "failover-unplanned":
+                findings = sorted(findings + _unplanned_dry_findings(ctx, sel, carnets),
+                                  key=lambda f: rp._ORDER[f["level"]])
             return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry)
         _lock_checked(ctx, "failover", before, lambda: _sel_key(_select(ctx, vms)), _sel_key(sel))
     except Refused as e:

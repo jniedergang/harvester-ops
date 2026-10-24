@@ -445,6 +445,16 @@ def test_unplanned_failover_with_the_source_lost(tmp_path, capsys):
     assert rc == 0 and data["mode"] == "unplanned" and data["lost_after"], data
 
 
+def test_unplanned_check_with_the_source_lost_prints_its_findings(tmp_path, capsys):
+    # v1.99.0 : le contrôle à blanc d'une bascule non planifiée dit les points
+    w = protected(tmp_path, vms=("vm-a",))
+    w.src.down = True
+    rc, out, _ = run(capsys, w, "check", "plan-a", "--phase=failover-unplanned", as_json=False)
+    assert rc == 0, out
+    assert "[ok] applied-points: vm=default/vm-a" in out and "lost_after=" in out and "skew_s=" in out
+    assert "caught-up" in out or "catch-up-pending" in out
+
+
 def test_failover_of_an_undeclared_source_goes_on_with_the_target(tmp_path, capsys):
     w = protected(tmp_path, vms=("vm-a",))
     rc, data, _ = run(capsys, w, "status")       # banc branché

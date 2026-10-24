@@ -1561,6 +1561,42 @@ def test_unplanned_failover_skew_between_disks(tmp_path):
     assert res["exit"] == 0 and w.plan()["state"] == "failed_over"
 
 
+@pytest.mark.parametrize("case,warns", [
+    ("caught", []),
+    ("skew", ["skew-exceeded"]),
+    ("late", ["catch-up-pending"]),
+])
+def test_unplanned_check_with_the_source_lost_says_what_it_found(tmp_path, case, warns):
+    # vu sur le banc (v1.99.0) : `check --phase failover-unplanned`, source
+    # injoignable, sortait 0 sans aucun constat
+    w = protected(tmp_path, vms=("vm-b",))
+    t = w.clock.now()
+    if case in ("skew", "late"):
+        if case == "late":
+            w.dst.apply_s = 400
+        for i, d in enumerate(VMS["vm-b"]["disks"]):
+            w.src.make_backup(f"pvc-vm-b-{d}", f"backup-{case}-{d}", snap_at=iso(t + 30 * i))
+            w.dst.sync_volume(f"pvc-vm-b-{d}")
+        w.dst.list(rr.K_LH_ENGINE, rr.NS)          # le contrôleur voit les sauvegardes
+        w.clock.sleep(60 if case == "late" else 600)
+        w.dst.list(rr.K_LH_ENGINE, rr.NS)
+    w.src.down = True
+    n = len(w.src.mutations()) + len(w.dst.mutations())
+    res = rr.failover(w.ctx(), planned=False, dry_run=True, record=False)
+    assert res["exit"] == 0 and res["code"] == "dry-run", res
+    assert len(w.src.mutations()) + len(w.dst.mutations()) == n
+    got = {f["code"]: f for f in res["findings"]}
+    pts = got["applied-points"]["facts"]
+    assert pts["vm"] == "default/vm-b" and set(pts["points"]) == {f"pvc-vm-b-{d}" for d in VMS["vm-b"]["disks"]}
+    assert pts["lost_after"] and pts["tolerance_s"] == rp.SKEW_TOLERANCE_S
+    assert [f["code"] for f in res["findings"] if f["level"] == "warn"] == warns
+    assert ("caught-up" in got) is (case != "late")
+    if case == "skew":
+        assert got["skew-exceeded"]["facts"]["skew_s"] == 60 == pts["skew_s"]
+    if case == "late":
+        assert {v["volume"] for v in got["catch-up-pending"]["facts"]["volumes"]} == set(pts["points"])
+
+
 def test_unplanned_failover_refused_when_the_source_answers(tmp_path):
     w = protected(tmp_path, vms=("vm-a",))
     res = rr.failover(w.ctx(), planned=False, yes=True)
