@@ -26,6 +26,7 @@ seul chemin d'écriture : la console le lance en action suivie.
 
   Prochaine version KVM (créer, modifier, images, volumes, pools, réseaux) :
   harvester-kvm.py host caps --host N [--machine=q35|pc]
+  harvester-kvm.py host image-pools --host N [--pool=P ...]   (sans --pool : tous les pools)
   harvester-kvm.py vm create --host N --spec-file=F|- [--dry-run] [--timeout S]
         (ou, à la main : --name --disk=KIND:... --nic=KIND:... --vcpus --memory-mib
         --user-data=FILE --start ...)
@@ -41,6 +42,7 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py image verify --host N --pool=P --volume=V [--sha256=H]
   harvester-kvm.py image upload|vol upload --host N --pool=P --name=V --file=PATH
         [--sha256=H] [--format=F] [--no-verify] [--limit-mbps=M] [--author=A]
+        [--origin-url=U]   (image upload : URL d'origine notée, sans jeton)
   harvester-kvm.py image download-url --host N --pool=P --name=V --url=U
         [--allow-private=CIDR ...] [--max-size=SIZE] [...]
   harvester-kvm.py image delete --host N --pool=P --volume=V (--dry-run | --expect-delete=D)
@@ -57,6 +59,7 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py net autostart --host N --network=R [--disable]
   harvester-kvm.py net delete --host N --network=R (--dry-run | --expect-delete=D)
   harvester-kvm.py net links --host N
+  harvester-kvm.py template list | save --name=T --spec-file=F | delete --name=T
 
 Options communes : --json (sortie JSON sur stdout), --state-dir (défaut
 HARVESTER_OPS_STATE_DIR). Progression sur stderr en
@@ -128,6 +131,11 @@ redirection (pas de boucle locale, de lien local, d'adresse privée ni de
 métadonnées), sauf les plages données par --allow-private=CIDR ; taille
 plafonnée par --max-size.
 
+Toute commande qui écrit (pas ses --dry-run) fait avancer, à sa fin, la
+génération partagée des relevés de l'hôte (`<état>/kvm.d/survey-gen/<hôte>`,
+voir kvm_ops.SurveyCache) : la console et ses processus lecteurs oublient
+alors le relevé qu'ils gardaient pour le catalogue d'images.
+
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
 ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
 commencé est défait, `host add` ne laisse ni déclaration ni clé ; un clonage
@@ -154,6 +162,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -170,6 +179,7 @@ import kvm_host as kh  # noqa: E402
 import kvm_net as kn  # noqa: E402
 import kvm_ops as ko  # noqa: E402
 import kvm_storage as ks  # noqa: E402
+import kvm_templates as ktpl  # noqa: E402
 import vm_transfer_progress as vtp  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
@@ -1835,6 +1845,33 @@ def after_edit(host, name):
 
 # --- host caps -------------------------------------------------------------------
 
+def cmd_host_image_pools(args):
+    """Pools d'images d'un hôte (`image_pools` de sa déclaration) : sans
+    --pool, le champ est retiré et le catalogue reprend les volumes libres
+    de tous les pools."""
+    state = state_of(args)
+    if not isinstance(args.host, str) or not kvm_decl.NAME_RE.match(args.host):
+        raise UsageError("invalid host name")
+    pools = list(args.pool or [])
+    with host_lock(state):
+        try:
+            decl = kvm_decl.load(state, args.host)
+        except FileNotFoundError:
+            raise UsageError(f"host {args.host} is not declared") from None
+        new = {k: v for k, v in decl.items() if k != "image_pools"}
+        if pools:
+            new["image_pools"] = pools
+        problem = kvm_decl.check_decl(new)
+        if problem:
+            raise UsageError(problem)
+        step("image-pools", "running", f"image pools of {args.host}")
+        kvm_decl.write(state, new)
+        step("image-pools", "done", ", ".join(pools) if pools else "every pool")
+    emit(args, {"ok": True, "host": args.host, "image_pools": pools},
+         f"{args.host}: image pools " + (", ".join(pools) if pools else "not set (every pool)"))
+    return EXIT_OK
+
+
 def cmd_host_caps(args):
     host = load_host_next(state_of(args), args.host)
     if args.machine is not None and args.machine not in kvm_caps.MACHINE_FAMILIES:
@@ -2482,8 +2519,17 @@ def cmd_vol_upload(args):
         raise UsageError("--file: a readable local file")
     if not os.access(args.file, os.R_OK):
         raise UsageError("--file: the file cannot be read")
-    res = do_upload(args, state, host, pool, name, args.file, args.sha256)
-    emit(args, {"ok": True, "host": host.name, **res}, upload_text(res))
+    origin = getattr(args, "origin_url", None)
+    if origin is not None:
+        bad = check_url(origin)
+        if bad:
+            raise UsageError(f"--origin-url: {bad}")
+        origin = public_url(origin)
+    res = do_upload(args, state, host, pool, name, args.file, args.sha256, url=origin)
+    out = {"ok": True, "host": host.name, **res}
+    if origin is not None:
+        out["url"] = origin
+    emit(args, out, upload_text(res))
     return EXIT_OK
 
 
@@ -2840,6 +2886,84 @@ def cmd_net_links(args):
 
 # ---------------------------------------------------------------------------
 
+# --- modèles ---------------------------------------------------------------------------
+
+def cmd_template_list(args):
+    items = ktpl.list_all(state_of(args))
+    emit(args, {"ok": True, "templates": items},
+         "\n".join(i["name"] for i in items) or "no template")
+    return EXIT_OK
+
+
+def cmd_template_save(args):
+    state = state_of(args)
+    name = checked_template(args.name)
+    spec = read_spec(args.spec_file, "template spec")
+    step("save", "running", f"template {name}")
+    try:
+        removed = ktpl.save(state, name, spec)
+    except ktpl.TemplateError as e:
+        raise UsageError(str(e)) from None
+    step("save", "warn" if removed else "done",
+         f"template {name} saved" + (f"; not kept (secrets): {', '.join(removed)}"
+                                     if removed else ""))
+    emit(args, {"ok": True, "name": name, "removed": removed}, f"template {name} saved")
+    return EXIT_OK
+
+
+def cmd_template_delete(args):
+    state = state_of(args)
+    name = checked_template(args.name)
+    step("delete", "running", f"template {name}")
+    try:
+        ktpl.delete(state, name)
+    except FileNotFoundError:
+        raise UsageError(f"template {name} does not exist", kind="notfound") from None
+    step("delete", "done", f"template {name} deleted")
+    emit(args, {"ok": True, "name": name, "deleted": True}, f"template {name} deleted")
+    return EXIT_OK
+
+
+def checked_template(name):
+    try:
+        return ktpl.check_name(name)
+    except ktpl.TemplateError as e:
+        raise UsageError(str(e)) from None
+
+
+# Commandes qui ne font que lire : toutes les autres (et pas leur --dry-run)
+# font avancer la génération partagée des relevés de l'hôte.
+READ_ONLY_COMMANDS = frozenset({
+    ("host", "scan"), ("host", "list"), ("host", "caps"), ("host", "test"), ("inventory", None),
+    ("vm", "list"), ("vm", "show"), ("vm", "display"), ("snapshot", "list"),
+    ("image", "list"), ("image", "verify"), ("net", "links"), ("template", "list"),
+    ("template", "save"), ("template", "delete")})
+
+
+def command_key(args):
+    sub = None
+    for attr in ("hcmd", "vcmd", "scmd", "ocmd"):
+        sub = sub or getattr(args, attr, None)
+    return (args.cmd, sub)
+
+
+def bump_after_write(args):
+    """Fin d'une commande qui a pu écrire (réussie, refusée, annulée) : la
+    génération partagée des relevés de l'hôte avance (kvm_ops.SurveyCache),
+    pour que la console et ses processus lecteurs oublient leur relevé gardé
+    même quand l'écriture n'est pas passée par `ko.writing` (gestes,
+    instantanés). Jamais d'erreur : c'est une vue."""
+    # `host ...` ne touche ni volume ni domaine (déclaration, empreinte)
+    if (args.cmd == "host" or getattr(args, "dry_run", False)
+            or command_key(args) in READ_ONLY_COMMANDS):
+        return
+    name = getattr(args, "host", None)
+    if not isinstance(name, str) or not kvm_decl.NAME_RE.match(name):
+        return
+    with contextlib.suppress(Exception):
+        ko.bump_generation(types.SimpleNamespace(state=state_of(args), name=name))
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     want_json = "--json" in argv
@@ -2852,6 +2976,8 @@ def main(argv=None):
             except Cancelled as e:
                 return fail_exit(want_json, "cancelled", cancel_message(args, e), "cancelled",
                                  EXIT_CANCELLED, cancel_data(args, e))
+            finally:
+                bump_after_write(args)
     except (UsageError, kvm_decl.DeclError) as e:
         kind = getattr(e, "kind", "usage")
         return fail_exit(want_json, "validate", str(e), kind, EXIT_USAGE)
@@ -3034,6 +3160,13 @@ def build_parser():
     sp = hp.add_parser("remove", parents=[common], help="remove a host, its key and fingerprint")
     sp.add_argument("name")
     sp.set_defaults(fn=cmd_host_remove)
+    sp = hp.add_parser("image-pools", parents=[common],
+                       help="set the image pools of a host (no --pool: every pool)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--pool", action="append", metavar="POOL",
+                    help="pool whose volumes form the image catalogue (repeatable)")
+    sp.set_defaults(fn=cmd_host_image_pools)
+
     sp = hp.add_parser("caps", parents=[common],
                        help="what the VM form can offer on a host, with the reason of each "
                             "option that is not available")
@@ -3244,6 +3377,9 @@ def add_next_parsers(sub, vp, common):
     sp = ip.add_parser("upload", parents=[common], help="send a local file as a new image")
     upload_opts(sp)
     sp.add_argument("--file", required=True)
+    sp.add_argument("--origin-url", metavar="URL",
+                    help="where the file was downloaded from (kept in the console notes, "
+                         "without credentials, query or fragment)")
     sp.set_defaults(fn=cmd_vol_upload)
     sp = ip.add_parser("download-url", parents=[common],
                        help="download an http(s) URL on this machine, then send it to the host")
@@ -3316,6 +3452,19 @@ def add_next_parsers(sub, vp, common):
                          "if the pool changed")
     sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
     sp.set_defaults(fn=cmd_pool_delete)
+
+    tp = sub.add_parser("template", help="VM creation templates kept by the console") \
+        .add_subparsers(dest="ocmd", required=True)
+    sp = tp.add_parser("list", parents=[common], help="templates")
+    sp.set_defaults(fn=cmd_template_list)
+    sp = tp.add_parser("save", parents=[common],
+                       help="save a creation spec as a template (secrets removed)")
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--spec-file", required=True, help="JSON VmSpec (- for standard input)")
+    sp.set_defaults(fn=cmd_template_save)
+    sp = tp.add_parser("delete", parents=[common], help="delete a template")
+    sp.add_argument("--name", required=True)
+    sp.set_defaults(fn=cmd_template_delete)
 
     xp = sub.add_parser("net", help="libvirt networks").add_subparsers(dest="ocmd", required=True)
     sp = xp.add_parser("define", parents=[common], help="create a NAT, routed, isolated or "

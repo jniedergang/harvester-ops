@@ -21,6 +21,7 @@ Les refus et échecs propres à ces opérations sont des `OpError` (genre dans
 OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 """
 
+import fcntl
 import hashlib
 import io
 import ipaddress
@@ -36,6 +37,7 @@ import time
 import uuid as uuidlib
 import xml.etree.ElementTree as ET
 
+import kvm_decl
 import kvm_host as kh
 
 OP_KINDS = ("invalid", "refused", "notfound", "needs-force", "timeout", "failed",
@@ -820,22 +822,44 @@ class SurveyCache:
     jeté (génération). La clé est l'hôte déclaré (nom, adresse, URI).
 
     `enabled` None : actif sauf `HARVESTER_OPS_KVM_SURVEY_CACHE=0` (coupé
-    par les tests d'API, qui changent leur hôte simulé entre deux appels)."""
+    par les tests d'API, qui changent leur hôte simulé entre deux appels).
+
+    Invalidation ENTRE PROCESSUS. Les écritures sont faites par
+    bin/harvester-kvm.py (un processus par action) et les vues sont servies
+    par la console et ses processus lecteurs : chacun a son cache. Un compteur
+    de génération par hôte vit donc dans le répertoire d'état
+    (`<état>/kvm.d/survey-gen/<hôte>`, un entier, écrit sous `flock`) :
+    - `invalidate` (appelé par `writing` / `invalidate_survey` autour de
+      chaque écriture de la bibliothèque, par la CLI à la fin de toute
+      commande qui écrit, et par la console à la fin de chaque action KVM)
+      incrémente ce compteur, en plus d'oublier l'entrée locale ;
+    - `get` relit le compteur (un `read` d'une dizaine d'octets) et ne sert
+      une entrée que si elle a été relevée sous la MÊME génération : une
+      écriture faite par un autre processus, même pendant un
+      rafraîchissement, rend l'entrée périmée ;
+    - compteur illisible (droits, disque) : pas de cache pour cet appel, le
+      relevé est refait (une vue un peu plus lente, jamais fausse) ; échec
+      d'écriture du compteur : ignoré (rien d'autre à faire), les autres
+      processus gardent au pire leur entrée jusqu'à `ttl`.
+    Un hôte sans répertoire d'état (objets des tests) a la génération 0."""
 
     def __init__(self, ttl=SURVEY_TTL, max_stale=SURVEY_MAX_STALE, clock=time.monotonic,
-                 spawn=_spawn_thread, factory=None, enabled=None):
+                 spawn=_spawn_thread, factory=None, enabled=None, generation=None, bump=None):
         self.ttl, self.max_stale, self.clock, self.spawn = ttl, max_stale, clock, spawn
         self.enabled = enabled
+        # compteur partagé entre processus (remplaçables par les tests)
+        self.generation = generation or read_generation
+        self.bump = bump or bump_generation
         self.factory = factory or (lambda host: _Survey(host))
         self._lock = threading.Lock()
         self._entries = {}          # hôte -> (relevé, date)
         self._gen = {}              # hôte -> génération (invalidations)
         self._refreshing = set()
 
-    def _store(self, key, gen, survey, at):
+    def _store(self, key, gen, survey, at, shared):
         with self._lock:
             if self._gen.get(key, 0) == gen:
-                self._entries[key] = (survey, at)
+                self._entries[key] = (survey, at, shared)
 
     def get(self, host):
         """(relevé, âge en secondes) ; âge 0 pour un relevé fait sur place."""
@@ -844,9 +868,15 @@ class SurveyCache:
         if not enabled:
             return self.factory(host), 0.0
         key = _host_key(host)
+        shared = self.generation(host)
+        if shared is None:                      # compteur illisible : pas de cache
+            return self.factory(host), 0.0
         now = self.clock()
         with self._lock:
             entry = self._entries.get(key)
+            if entry and entry[2] != shared:    # écrit par un autre processus depuis
+                self._entries.pop(key, None)
+                entry = None
             gen = self._gen.get(key, 0)
             age = now - entry[1] if entry else None
             if entry and age < self.ttl:
@@ -860,7 +890,7 @@ class SurveyCache:
             def refresh():
                 try:
                     at = self.clock()
-                    self._store(key, gen, self.factory(host), at)
+                    self._store(key, gen, self.factory(host), at, shared)
                 except Exception:               # noqa: BLE001 - la vue garde l'ancien
                     pass
                 finally:
@@ -870,7 +900,7 @@ class SurveyCache:
             return entry[0], age
         at = self.clock()
         survey = self.factory(host)
-        self._store(key, gen, survey, at)
+        self._store(key, gen, survey, at, shared)
         return survey, 0.0
 
     def invalidate(self, host):
@@ -878,6 +908,69 @@ class SurveyCache:
         with self._lock:
             self._gen[key] = self._gen.get(key, 0) + 1
             self._entries.pop(key, None)
+        self.bump(host)
+
+
+SURVEY_GEN_DIR = "survey-gen"
+
+
+def _generation_path(host):
+    """`<état>/kvm.d/survey-gen/<hôte>`, ou None pour un hôte sans état (le
+    nom d'un hôte déclaré suit NAME_RE : un nom de fichier sûr)."""
+    state = getattr(host, "state", None)
+    name = getattr(host, "name", None)
+    if not state or not isinstance(name, str) or not name or "/" in name or name.startswith("."):
+        return None
+    return kvm_decl.decl_dir(state) / SURVEY_GEN_DIR / name
+
+
+def read_generation(host):
+    """Génération partagée des relevés de `host` : 0 sans fichier (ou sans
+    état), None si le fichier existe mais ne se lit pas."""
+    path = _generation_path(host)
+    if path is None:
+        return 0
+    try:
+        with open(path, "rb") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)     # jamais entre troncature et écriture
+            raw = f.read(32)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    try:
+        return int(raw.strip() or b"0")
+    except ValueError:
+        return None
+
+
+def bump_generation(host):
+    """Incrémente la génération partagée de `host` (sous `flock` : deux
+    processus qui écrivent en même temps comptent deux). Rend la nouvelle
+    valeur, ou None (pas d'état, ou échec : rien d'autre à faire)."""
+    path = _generation_path(host)
+    if path is None:
+        return None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        raw = os.read(fd, 32)
+        try:
+            value = int(raw.strip() or b"0") + 1
+        except ValueError:
+            value = 1
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, str(value).encode())
+        return value
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
 
 
 def _host_key(host):
