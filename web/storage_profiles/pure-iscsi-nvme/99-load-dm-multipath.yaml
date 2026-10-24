@@ -1,0 +1,8 @@
+stages:
+  boot:
+  - name: "load dm_multipath kernel module"
+    commands:
+    - mkdir -p /etc/modules-load.d
+    - echo dm_multipath > /etc/modules-load.d/dm_multipath.conf
+    - modprobe dm_multipath || true
+    - systemctl restart multipathd || true

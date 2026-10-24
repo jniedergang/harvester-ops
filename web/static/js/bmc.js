@@ -450,6 +450,18 @@ const BMC = (() => {
             </div>
           </fieldset>
           <div id="bm-raid-box">${raidHtml(node.storage)}</div>
+          <fieldset id="bm-onboarding">
+            <legend>${esc(tr('bmc.onboard.title'))}</legend>
+            <label style="grid-column:1/-1"><input type="checkbox" name="onboard_enabled"> ${esc(tr('bmc.onboard.enable'))}</label>
+            <p class="form-hint" style="grid-column:1/-1">${esc(tr('bmc.onboard.hint'))}</p>
+            <div data-onboard-fields hidden style="grid-column:1/-1">
+              <label>${esc(tr('bmc.onboard.profile'))}<select name="onboard_profile"></select></label>
+              <p class="form-hint" data-onboard-description></p>
+              <label data-onboard-wwid hidden>${esc(tr('bmc.onboard.bootWwid'))}<input name="onboard_boot_wwid" autocomplete="off"></label>
+              <div data-onboard-ports></div>
+              <p class="form-hint" data-onboard-message></p>
+            </div>
+          </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.system'))}</legend>
             <label>${esc(tr('bmc.f.dns'))}<input name="dns" autocomplete="off" placeholder="9.9.9.9, 1.1.1.1"></label>
@@ -491,6 +503,52 @@ const BMC = (() => {
     const form = panel.el.querySelector('#bm-install-form');
     const field = (name) => form.querySelector(`[name="${name}"]`);
     const msg = panel.el.querySelector('#bm-config-msg');
+    const onboardEnabled = field('onboard_enabled');
+    const onboardFields = form.querySelector('[data-onboard-fields]');
+    const onboardMessage = form.querySelector('[data-onboard-message]');
+    let onboardFetch = 0;
+    let storageProfiles = [];
+    function storageProfile() { return storageProfiles.find(p => p.id === field('onboard_profile').value); }
+    function renderStoragePorts() {
+      const profile = storageProfile();
+      form.querySelector('[data-onboard-description]').textContent = profile?.description || '';
+      form.querySelector('[data-onboard-wwid]').hidden = !profile?.boot_disk_exclusion;
+      field('onboard_boot_wwid').disabled = !profile?.boot_disk_exclusion;
+      field('onboard_boot_wwid').required = !!profile?.boot_disk_exclusion;
+      form.querySelector('[data-onboard-ports]').innerHTML = Object.entries(profile?.ports || {}).map(([role, label]) => `
+        <div class="form-row"><strong>${esc(label)}</strong>
+          <label>${esc(tr('bmc.onboard.nic'))}<input name="onboard_${esc(role)}_name" required autocomplete="off"></label>
+          <label>MAC<select name="onboard_${esc(role)}_mac" required><option value=""></option>${(node.nics || []).filter(n => n.mac).map(n => `<option value="${esc(n.mac)}">${esc(n.mac)}</option>`).join('')}</select></label>
+          <label>IPv4/CIDR<input name="onboard_${esc(role)}_address" required autocomplete="off" placeholder="192.0.2.10/24"></label>
+        </div>`).join('');
+    }
+    async function syncOnboarding() {
+      const generation = ++onboardFetch;
+      const join = field('mode').value === 'join';
+      onboardEnabled.disabled = !join;
+      if (!join) onboardEnabled.checked = false;
+      onboardFields.hidden = !onboardEnabled.checked;
+      onboardFields.querySelectorAll('input, select').forEach(input => { input.disabled = !onboardEnabled.checked; input.required = onboardEnabled.checked; });
+      if (!onboardEnabled.checked) return;
+      try {
+        if (!storageProfiles.length) {
+          const r = await fetch('/api/baremetal/onboarding/options');
+          const d = await r.json();
+          if (generation !== onboardFetch || !onboardEnabled.checked) return;
+          if (!r.ok) throw new Error(tr('bmc.onboard.loadError'));
+          storageProfiles = d.profiles || [];
+          field('onboard_profile').innerHTML = '<option value="">' + esc(tr('bmc.onboard.select')) + '</option>' + storageProfiles.map(p =>
+            `<option value="${esc(p.id)}">${esc(p.label)}</option>`).join('');
+        }
+        renderStoragePorts();
+        onboardMessage.textContent = tr('bmc.onboard.noIpGuess');
+      } catch (e) { if (generation === onboardFetch) { onboardMessage.textContent = tr('bmc.onboard.loadError'); field('onboard_profile').innerHTML = '<option value=""></option>'; } }
+    }
+    onboardEnabled.addEventListener('change', syncOnboarding);
+    field('mode').addEventListener('change', syncOnboarding);
+    field('onboard_profile').addEventListener('change', renderStoragePorts);
+    syncOnboarding();
+
     // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
     // identifiant ; le navigateur ne les voit jamais.
     let importId = null;
@@ -941,6 +999,8 @@ const BMC = (() => {
         l.querySelector('input').required = stat;
       });
       const creating = field('mode').value !== 'join';
+      onboardEnabled.disabled = creating;
+      if (creating && onboardEnabled.checked) { onboardEnabled.checked = false; syncOnboarding(); }
       form.querySelector('.bm-vm-network').hidden = creating;
       if (!creating && field('vm_enabled').checked) loadVmTemplates();
       panel.el.querySelectorAll('.bm-create').forEach(l => {
@@ -971,6 +1031,17 @@ const BMC = (() => {
       fd.delete('mgmt_nic');
       for (const name of ['vm_nic', 'vm_enabled', 'vm_template']) fd.delete(name);
       const body = Object.fromEntries(fd.entries());
+      Object.keys(body).filter(k => k.startsWith('onboard_')).forEach(k => delete body[k]);
+      if (onboardEnabled.checked) {
+        const profile = storageProfile();
+        const ports = {};
+        for (const role of Object.keys(profile?.ports || {})) {
+          ports[role] = Object.fromEntries(['name', 'mac', 'address'].map(k => [k, field('onboard_' + role + '_' + k).value.trim()]));
+        }
+        body.onboarding = {profile: field('onboard_profile').value,
+          boot_wwid: profile?.boot_disk_exclusion ? field('onboard_boot_wwid').value.trim() : '', ports};
+      }
+
       body.mgmt_interfaces = [...form.querySelectorAll('[name="mgmt_nic"]:checked')].map(c => c.value);
       if (body.mode === 'join' && field('vm_enabled').checked) {
         body.vm_network = {template: field('vm_template').value,

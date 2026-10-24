@@ -7,6 +7,11 @@ ou clique dans l'installeur. La console pilote la machine par son BMC.
 Rien de magique ni de spécifique ici : c'est le mode d'installation
 zéro-touch de Harvester, piloté de bout en bout par la console.
 
+Les [profils de stockage facultatifs](baremetal-storage-onboarding.md) préparent
+les interfaces dédiées et prérequis fournisseur pendant une jonction, puis laissent
+l’hôte non planifiable pour validation. Le profil réseau neutre et l’exemple Pure
+n’installent pas de chart CSI et ne configurent pas les identifiants des baies.
+
 ---
 
 ## Ce qu'il faut avant de commencer

@@ -1,0 +1,31 @@
+label: Pure iSCSI and NVMe/TCP (example)
+description: Example host prerequisites for an existing Pure CSI deployment. Review
+  the packaged settings and CSI DaemonSet reference for your environment. No array
+  provisioning or CSI credentials are configured.
+ports:
+  iscsi1: iSCSI interface 1
+  iscsi2: iSCSI interface 2
+  nvme1: NVMe/TCP interface 1
+  nvme2: NVMe/TCP interface 2
+files:
+- 91-pure-storage-udev.yaml
+- 96-nvme-tcp.yaml
+- 99-iscsi-ifaces.yaml
+- 99-load-dm-multipath.yaml
+- portworx-multipathd.yaml
+boot_disk_exclusion: true
+bootstrap_args:
+- multipath=off
+modules:
+- dm_multipath
+- scsi_dh_alua
+- nvme_tcp
+services:
+- multipathd
+- iscsid
+iscsi_ifaces:
+  iscsi1: eth-iscsi1
+  iscsi2: eth-iscsi2
+csi_node:
+  namespace: portworx
+  daemonset: px-pure-csi-node

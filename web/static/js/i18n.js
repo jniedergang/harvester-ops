@@ -17,6 +17,15 @@ const I18N_STORAGE_KEY = 'harvester_ops_language';
 
 const translations = {
   en: {
+    "bmc.onboard.title": "Optional storage onboarding",
+    "bmc.onboard.enable": "Configure a storage profile and keep the joined host cordoned",
+    "bmc.onboard.hint": "For a new worker joining a declared cluster. Select a reviewed profile for your provider. Configure VM uplinks separately above.",
+    "bmc.onboard.profile": "Storage profile",
+    "bmc.onboard.bootWwid": "Local boot disk SCSI WWID",
+    "bmc.onboard.nic": "Linux NIC name",
+    "bmc.onboard.loadError": "Cannot load the storage profile catalog.",
+    "bmc.onboard.select": "Select a storage profile",
+    "bmc.onboard.noIpGuess": "Enter explicitly assigned host storage addresses. No storage gateway or DNS is configured.",
     "bmc.vm.title": "VM/customer network (optional)",
     "bmc.vm.enable": "Configure VM uplinks after joining",
     "bmc.vm.hint": "Choose separate NICs by MAC. The selected template supplies the cluster network, bond mode and MTU. Overlapping configurations must first be scoped to their existing hosts in Networks.",
@@ -5528,6 +5537,15 @@ const translations = {
   },
 
   fr: {
+    "bmc.onboard.title": "Configuration de stockage facultative",
+    "bmc.onboard.enable": "Configurer un profil de stockage et garder le nouvel hôte non planifiable",
+    "bmc.onboard.hint": "Pour un nouveau nœud worker rejoignant un cluster déclaré. Choisissez un profil validé pour votre fournisseur. Configurez les interfaces VM séparément ci-dessus.",
+    "bmc.onboard.profile": "Profil de stockage",
+    "bmc.onboard.bootWwid": "WWID SCSI du disque de démarrage local",
+    "bmc.onboard.nic": "Nom de l’interface Linux",
+    "bmc.onboard.loadError": "Impossible de charger les profils de stockage.",
+    "bmc.onboard.select": "Choisir un profil de stockage",
+    "bmc.onboard.noIpGuess": "Saisissez les adresses de stockage attribuées à cet hôte. Aucun routage par défaut ni DNS de stockage ne sera configuré.",
     "bmc.vm.title": "Réseau VM/client (facultatif)",
     "bmc.vm.enable": "Configurer les cartes VM après la jonction",
     "bmc.vm.hint": "Choisir des cartes distinctes par MAC. Le modèle fournit le réseau de cluster, le mode du bond et le MTU. Limiter auparavant les configurations en conflit à leurs hôtes existants dans Réseaux.",
@@ -11040,12 +11058,22 @@ const translations = {
   },
 
   it: {
+    "bmc.onboard.title": "Optional storage onboarding",
+    "bmc.onboard.enable": "Configure a storage profile and keep the joined host cordoned",
+    "bmc.onboard.hint": "For a new worker joining a declared cluster. Select a reviewed profile for your provider. Configure VM uplinks separately above.",
+    "bmc.onboard.profile": "Storage profile",
+    "bmc.onboard.bootWwid": "Local boot disk SCSI WWID",
+    "bmc.onboard.nic": "Linux NIC name",
+    "bmc.onboard.loadError": "Cannot load the storage profile catalog.",
+    "bmc.onboard.select": "Select a storage profile",
+    "bmc.onboard.noIpGuess": "Enter explicitly assigned host storage addresses. No storage gateway or DNS is configured.",
     "bmc.vm.title": "Rete VM/cliente (facoltativa)",
     "bmc.vm.enable": "Configurare le NIC VM dopo l’aggiunta al cluster",
     "bmc.vm.hint": "Scegliere NIC separate tramite MAC. Il modello fornisce rete del cluster, modalità del bond e MTU. Limitare prima le configurazioni sovrapposte ai rispettivi host in Reti.",
     "bmc.vm.template": "Configurazione di rete esistente da copiare",
     "bmc.vm.reload": "Ricaricare le configurazioni",
     "bmc.vm.afterJoin": "Piano dopo l’aggiunta al cluster (i MAC vengono risolti nei nomi delle NIC Linux sul nuovo host)",
+
     'bmc.confirmInstall': 'Installare Harvester su {host}? Tutto il contenuto di {device} sarà cancellato.',
     'bmc.confirmPower': 'Inviare «{action}» a {host}?',
     'bmc.credsHint': 'Compatibile con iLO 4/5, iDRAC 9 e qualsiasi BMC con Redfish standard. Le credenziali non vengono mai memorizzate sul server; restano in questa pagina per la sessione.',
@@ -16550,12 +16578,22 @@ const translations = {
   },
 
   es: {
+    "bmc.onboard.title": "Optional storage onboarding",
+    "bmc.onboard.enable": "Configure a storage profile and keep the joined host cordoned",
+    "bmc.onboard.hint": "For a new worker joining a declared cluster. Select a reviewed profile for your provider. Configure VM uplinks separately above.",
+    "bmc.onboard.profile": "Storage profile",
+    "bmc.onboard.bootWwid": "Local boot disk SCSI WWID",
+    "bmc.onboard.nic": "Linux NIC name",
+    "bmc.onboard.loadError": "Cannot load the storage profile catalog.",
+    "bmc.onboard.select": "Select a storage profile",
+    "bmc.onboard.noIpGuess": "Enter explicitly assigned host storage addresses. No storage gateway or DNS is configured.",
     "bmc.vm.title": "Red de VM/cliente (opcional)",
     "bmc.vm.enable": "Configurar las NIC de VM después de unirse al clúster",
     "bmc.vm.hint": "Seleccione NIC separadas por MAC. La plantilla proporciona la red del clúster, el modo del bond y la MTU. Limite primero las configuraciones superpuestas a sus hosts existentes en Redes.",
     "bmc.vm.template": "Configuración de red existente para copiar",
     "bmc.vm.reload": "Recargar configuraciones",
     "bmc.vm.afterJoin": "Plan posterior a la unión (las MAC se resuelven en nombres de NIC Linux en el nuevo host)",
+
     'bmc.confirmInstall': '¿Instalar Harvester en {host}? Se borrará todo el contenido de {device}.',
     'bmc.confirmPower': '¿Enviar «{action}» a {host}?',
     'bmc.credsHint': 'Compatible con iLO 4/5, iDRAC 9 y cualquier BMC con Redfish estándar. Las credenciales nunca se almacenan en el servidor; permanecen en esta página durante la sesión.',
@@ -22060,6 +22098,15 @@ const translations = {
   },
 
   de: {
+    "bmc.onboard.title": "Optionale Storage-Konfiguration",
+    "bmc.onboard.enable": "Storage-Profil konfigurieren und den neuen Host gesperrt lassen",
+    "bmc.onboard.hint": "Für einen neuen Worker in einem registrierten Cluster. Ein geprüftes Profil für den Storage-Anbieter auswählen. VM-Uplinks separat oben konfigurieren.",
+    "bmc.onboard.profile": "Storage-Profil",
+    "bmc.onboard.bootWwid": "SCSI-WWID der lokalen Boot-Disk",
+    "bmc.onboard.nic": "Linux-Interfacename",
+    "bmc.onboard.loadError": "Storage-Profile konnten nicht geladen werden.",
+    "bmc.onboard.select": "Storage-Profil auswählen",
+    "bmc.onboard.noIpGuess": "Die dem Host zugewiesenen Storage-Adressen eingeben. Es werden weder Storage-Gateway noch DNS konfiguriert.",
     "bmc.vm.title": "VM-/Kundennetzwerk (optional)",
     "bmc.vm.enable": "VM-Uplinks nach dem Clusterbeitritt konfigurieren",
     "bmc.vm.hint": "Separate NICs anhand ihrer MAC wählen. Die Vorlage liefert Cluster-Netzwerk, Bond-Modus und MTU. Überlappende Konfigurationen zuvor unter Netzwerke auf ihre bisherigen Hosts begrenzen.",

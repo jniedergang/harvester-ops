@@ -7,6 +7,11 @@ through the installer. The console drives the machine through its BMC.
 Nothing here is Harvester-specific magic: it is the vendor's own
 zero-touch installation, driven end to end by the console.
 
+Optional [storage profiles](baremetal-storage-onboarding.md) can prepare dedicated
+storage NICs and provider prerequisites during a join, then leave the host cordoned
+for acceptance checks. The provider-neutral network profile and optional Pure
+example do not install CSI charts or configure array credentials.
+
 ---
 
 ## What has to be true before you start

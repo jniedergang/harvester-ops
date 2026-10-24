@@ -5666,6 +5666,23 @@ def _bm_vm_apply(opts, run, step, deadline):
                      + (": " + last if last else ""))
 
 
+import baremetal_onboarding as _bmo
+import baremetal_onboarding_runtime as _bmor
+
+
+def _bm_onboarding_config(data, cfg):
+    if not _bmo.selected(data):
+        return cfg
+    try:
+        out = _bmo.augment(cfg, _bmo.selection(data, cfg))
+        identity = data.get('_onboarding_plan', {}).get('install_id')
+        if identity:
+            out['os'].setdefault('labels', {})['harvester-ops.io/install-id'] = identity
+        return out
+    except _bmo.ProfileError as e:
+        raise InstallConfigError(["onboarding"], "invalid onboarding profile", {"onboarding": str(e)}) from e
+
+
 def _harvester_install_config(opts, boot_identity=False):
     """Rend la configuration d'installation Harvester (YAML).
 
@@ -5676,6 +5693,8 @@ def _harvester_install_config(opts, boot_identity=False):
     réservée à la console ou posée des deux côtés lève InstallConfigError
     avec son chemin."""
     cfg = _his.render_install_config(opts)
+    if opts.get("onboarding"):
+        cfg = _bm_onboarding_config(opts, cfg)
     # Les noms hvbootN ne valent qu'avec les ifname= que porte l'ISO
     # remasterisée : un appelant qui démarre l'installeur lui-même (banc
     # harvlab, PXE de l'exploitant) garde la configuration sans eux.
@@ -5744,6 +5763,8 @@ def _bm_wait_node_ready(cluster, kubeconfig, hostname, deadline, run, step):
         if getattr(run, "_cancel", False):
             raise RuntimeError("cancelled by operator")
         node = _kubectl_json(kubeconfig, "get", "node", hostname, cluster=cluster)
+        if node and getattr(run, "_onboarding_enabled", False):
+            node = _bmor.guard(sys.modules[__name__], kubeconfig, node, run)
         conds = {c.get("type"): c.get("status")
                  for c in ((node or {}).get("status") or {}).get("conditions") or []}
         if conds.get("Ready") == "True":
@@ -6258,6 +6279,8 @@ def _bm_reset(host, user, pwd, sys_path, reset_type):
 
 
 def _baremetal_install_runner(run, opts):
+    run._onboarding_enabled = bool(opts.get("_onboarding_plan"))
+    run._onboarding_install_id = opts.get("_onboarding_plan", {}).get("install_id")
     kc_user, kc_pwd = opts["bmc_user"], opts["bmc_password"]
     host = opts["bmc_host"]
     tokens = []
@@ -6435,6 +6458,8 @@ def _baremetal_install_runner(run, opts):
            "--work-dir", str(_iso_work_dir())]
     try:
         network_args = _bm_boot_network_args(yaml.safe_load(cfg_yaml), opts.get("extra_args", ""))
+        if opts.get("_onboarding_plan"):
+            network_args += " " + " ".join(_bmo.definition(opts["onboarding"]["profile"])["bootstrap_args"])
     except BootNetworkError as e:
         return fail("remaster", f"invalid bootstrap network: {e.path}")
     cmd += ["--network-args", network_args]
@@ -6610,6 +6635,10 @@ def _baremetal_install_runner(run, opts):
             current[0] = "vm-network"
             step("vm-network", "running", "configuring this host's VM uplinks")
             _bm_vm_apply(opts, run, step, min(post_deadline, time.time() + 180))
+        if opts.get("_onboarding_plan"):
+            current[0] = "onboarding"
+            step("onboarding", "running", "Checking storage profile readiness; host stays cordoned")
+            _bmor.finish(sys.modules[__name__], opts, run, step, post_deadline)
     except Exception as e:
         # une OSError porterait le chemin d'un fichier privé : son type seul
         detail = type(e).__name__ if isinstance(e, OSError) else f"{type(e).__name__}: {str(e)[:200]}"
@@ -6769,12 +6798,26 @@ def _bm_with_installer_identity(cfg):
 
 def _bm_render_boot_checked(data):
     # Real launch/preview values only; profile-schema checks use placeholders.
-    cfg = _bm_with_installer_identity(_bm_render_checked(data))
+    cfg = _bm_render_checked(data)
+    if data.get("onboarding"):
+        cfg = _bm_onboarding_config(data, cfg)
+    cfg = _bm_with_installer_identity(cfg)
     try:
         _bm_boot_network_args(cfg, data.get("extra_args", ""))
     except BootNetworkError as e:
         raise InstallConfigError([e.path], "invalid bootstrap network", {e.path: e.reason}) from e
     return cfg
+
+
+@app.route("/api/baremetal/onboarding/options")
+@requires_auth
+@_rate_limit("30/minute")
+def api_baremetal_onboarding_options():
+    # Trusted, packaged profile metadata only; never return OEM commands or paths.
+    try:
+        return jsonify({"profiles": _bmo.options()})
+    except (ValueError, OSError):
+        return jsonify({"error": "storage profile catalog is unavailable"}), 400
 
 
 @app.route("/api/baremetal/config/parse", methods=["POST"])
@@ -6823,6 +6866,7 @@ def api_baremetal_config_preview():
     """YAML final tel que l'installeur le recevra, jeton et mot de passe
     masqués. Pas besoin des identifiants du BMC."""
     data = request.get_json(force=True, silent=True) or {}
+    data.pop("_onboarding_plan", None)
     # l'hôte ne sert qu'à lire l'inventaire de la machine (contrôles des
     # disques) ; les identifiants du BMC ne sont pas utilisés ici
     host = data.get("bmc_host")
@@ -6897,6 +6941,7 @@ def _bm_prepare_install(data, defer_join=False):
     complétées, None) ou (None, réponse d'erreur). `defer_join` : le
     cluster rejoint n'existe pas encore (série, avant que la première ligne
     l'ait créé) ; tout le reste est contrôlé."""
+    data.pop("_onboarding_plan", None)
     mode = data["mode"]
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
@@ -6988,6 +7033,12 @@ def _bm_prepare_install(data, defer_join=False):
         return None, _bm_config_refusal(e)
     except ValueError as e:
         return None, (jsonify({"error": str(e), "fields": ["vm_network"]}), 400)
+    data.pop("_onboarding_plan", None)
+    if _bmo.selected(data):
+        try:
+            data["_onboarding_plan"] = _bmor.preflight(sys.modules[__name__], data, _bm_render_checked(data))
+        except (ValueError, OSError, subprocess.TimeoutExpired):
+            return None, (jsonify({"error": "onboarding preflight failed; check profile, new hostname, target network and current user permissions", "fields": ["onboarding"]}), 400)
     try:
         _bm_artifact_base_urls(data, 8091)
     except ValueError:
