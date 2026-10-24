@@ -505,14 +505,20 @@ class VirshHost:
             except OSError as e:
                 raise KvmError("failed", f"{self.name}: failed: cannot run ssh ({e.strerror})",
                                host=self.name) from e
-            sent, broken = self._feed(proc, src, progress, cancel, limit_bps)
             try:
-                rc = proc.wait(timeout=finish_timeout)
-            except subprocess.TimeoutExpired:
+                sent, broken = self._feed(proc, src, progress, cancel, limit_bps)
+                try:
+                    rc = proc.wait(timeout=finish_timeout)
+                except subprocess.TimeoutExpired:
+                    self._stop(proc)
+                    raise KvmError("timeout", f"{self.name}: timeout: the host did not finish "
+                                   f"within {finish_timeout}s after the last byte",
+                                   host=self.name) from None
+            except BaseException:
+                # signal de l'appelant (annulation par SIGTERM levée dans ce fil)
+                # ou erreur : ssh n'est jamais laissé en vie derrière nous
                 self._stop(proc)
-                raise KvmError("timeout", f"{self.name}: timeout: the host did not finish "
-                               f"within {finish_timeout}s after the last byte",
-                               host=self.name) from None
+                raise
             out_f.seek(0)
             err_f.seek(0)
             stdout = out_f.read().decode("utf-8", "replace")

@@ -24,6 +24,39 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py snapshot revert|delete --host N --name D --snapshot S [--timeout S]
   harvester-kvm.py clone --host N --name D --new-name C [--dry-run] [--timeout S]
 
+  Prochaine version KVM (créer, modifier, images, volumes, pools, réseaux) :
+  harvester-kvm.py host caps --host N [--machine=q35|pc]
+  harvester-kvm.py vm create --host N --spec-file=F|- [--dry-run] [--timeout S]
+        (ou, à la main : --name --disk=KIND:... --nic=KIND:... --vcpus --memory-mib
+        --user-data=FILE --start ...)
+  harvester-kvm.py vm edit --host N --name D --spec-file=F --expect-config=DIGEST
+        [--dry-run] [--timeout S]
+  harvester-kvm.py vm cpumem --host N --name D [--vcpus=N] [--memory-mib=M]
+  harvester-kvm.py vm add-volume|add-nic --host N --name D --spec-file=F
+  harvester-kvm.py vm remove-volume|eject-image --host N --name D --target=T
+  harvester-kvm.py vm insert-cdrom --host N --name D --target=T --pool=P --volume=V
+  harvester-kvm.py vm remove-nic --host N --name D --mac=M
+  harvester-kvm.py vm cloudinit --host N --name D --spec-file=F [--rerun]
+  harvester-kvm.py image list --host N [--fresh]
+  harvester-kvm.py image verify --host N --pool=P --volume=V [--sha256=H]
+  harvester-kvm.py image upload|vol upload --host N --pool=P --name=V --file=PATH
+        [--sha256=H] [--format=F] [--no-verify] [--limit-mbps=M] [--author=A]
+  harvester-kvm.py image download-url --host N --pool=P --name=V --url=U [...]
+  harvester-kvm.py image delete --host N --pool=P --volume=V [--dry-run] [--expect-delete=D]
+  harvester-kvm.py vol create --host N --pool=P --name=V --capacity=SIZE [--format=F]
+        [--backing=IMAGE]
+  harvester-kvm.py vol resize --host N --pool=P --name=V --capacity=SIZE
+  harvester-kvm.py vol delete --host N --pool=P --name=V [--dry-run] [--expect-delete=D]
+  harvester-kvm.py pool define --host N --spec-file=F|--name --path [--type] [--dry-run]
+  harvester-kvm.py pool start|stop|refresh --host N --pool=P
+  harvester-kvm.py pool autostart --host N --pool=P [--disable]
+  harvester-kvm.py pool delete --host N --pool=P [--remove-dir] [--dry-run] [--expect-delete=D]
+  harvester-kvm.py net define --host N --spec-file=F|--name --mode [--subnet] [--dry-run]
+  harvester-kvm.py net start|stop --host N --network=R
+  harvester-kvm.py net autostart --host N --network=R [--disable]
+  harvester-kvm.py net delete --host N --network=R [--dry-run] [--expect-delete=D]
+  harvester-kvm.py net links --host N
+
 Options communes : --json (sortie JSON sur stdout), --state-dir (défaut
 HARVESTER_OPS_STATE_DIR). Progression sur stderr en
 STEP_EVENT|étape|statut|message : le message peut contenir `|`, le
@@ -67,6 +100,21 @@ verrou. `vm display` dit où joindre l'affichage VNC et la commande `ssh -L`
 à lancer soi-même ; le XML est lu avec --security-info, en mémoire, pour
 savoir SI un mot de passe VNC existe : sa valeur n'est jamais écrite.
 
+Création, modification, images, volumes, pools et réseaux : le spec arrive
+par un fichier (`--spec-file=`, 0600 dans le répertoire de travail de la
+console), jamais par argv, et son contenu n'est jamais recopié dans une
+sortie (le JSON dit `user_data: true` et la taille). Le mot de passe VNC est
+tiré par la console et n'apparaît nulle part. Chaque commande relit l'état
+à la fin. Une création tient le verrou de chaque nom d'instance et tient en
+partage les pools où elle écrit ; arrêter ou supprimer un pool le prend en
+exclusif. Les suppressions acceptent `--expect-delete=<digest de l'aperçu>`
+(`plan-changed` si l'objet a changé), la modification exige
+`--expect-config=<config_digest lu à l'ouverture>` (`changed` sinon).
+Un téléversement envoie le fichier sur une connexion ssh propre, publie sa
+progression en PROGRESS_EVENT|upload|<json> (débit, temps restant), et un
+volume partiel est supprimé sur échec ou annulation. `image download-url`
+télécharge sur la machine de la console (jamais sur l'hôte), puis envoie.
+
 Codes de sortie : 0 fait, 1 échec (hôte, libvirt, délai), 2 erreur d'usage
 ou demande refusée avant l'hôte, 3 annulé (SIGTERM ou SIGHUP : ce qui était
 commencé est défait, `host add` ne laisse ni déclaration ni clé ; un clonage
@@ -82,20 +130,31 @@ import ipaddress
 import json
 import math
 import os
+import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import cluster_decl  # noqa: E402
 import kvm_decl  # noqa: E402
+import kvm_caps  # noqa: E402
+import kvm_create as kc  # noqa: E402
+import kvm_edit as ke  # noqa: E402
 import kvm_host as kh  # noqa: E402
+import kvm_net as kn  # noqa: E402
 import kvm_ops as ko  # noqa: E402
+import kvm_storage as ks  # noqa: E402
+import vm_transfer_progress as vtp  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 # code que la console lit comme « annulé » (même valeur que les autres outils)
@@ -1413,6 +1472,1129 @@ def unreadable_lines(unreadable, acknowledged):
 
 
 # ---------------------------------------------------------------------------
+# Prochaine version KVM : créer, modifier, gestes à chaud, images, volumes,
+# pools, réseaux (bin/lib/kvm_create.py, kvm_edit.py, kvm_storage.py,
+# kvm_net.py)
+# ---------------------------------------------------------------------------
+
+CREATE_TIMEOUT = 3600
+EDIT_TIMEOUT = 600
+# taille maximale d'un fichier de spec (création, disque, carte, cloud-init)
+SPEC_MAX = 1 << 20
+# taille maximale d'un user-data ou network-data donné par --user-data=
+CLOUDINIT_MAX = 1 << 20
+DOWNLOAD_TIMEOUT = 60
+DOWNLOAD_MAX_REDIRECTS = 5
+DOWNLOAD_CHUNK = 1 << 20
+# marge laissée libre sur le disque de la console pendant un téléchargement
+DOWNLOAD_MARGIN = 256 << 20
+AUTHOR_MAX = 128
+SIZE_UNITS = {"": 1, "B": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+# participe passé des gestes de pool et de réseau (annulation)
+OBJECT_VERBS = {"define": "defined", "start": "started", "stop": "stopped",
+                "refresh": "refreshed", "autostart": "changed", "delete": "deleted"}
+
+POPEN = subprocess.Popen
+
+
+def load_host_next(state, name):
+    """VirshHost d'un hôte déclaré, avec le lanceur de flux injectable (tests)."""
+    host = load_host(state, name)
+    host.popen = POPEN
+    return host
+
+
+def deadline_cancel(timeout):
+    """Rappel `cancel()` des bibliothèques : vrai une fois l'échéance passée
+    (consulté entre deux étapes et pendant un téléversement)."""
+    end = CLOCK() + timeout
+    return lambda: CLOCK() > end
+
+
+def read_spec(path, what="spec"):
+    """Spec JSON lu depuis un fichier (ou `-` : entrée standard). Le contenu
+    n'est jamais recopié dans une sortie (il peut porter un user-data), ni le
+    chemin du fichier."""
+    if not isinstance(path, str) or not path:
+        raise UsageError(f"--spec-file: give the {what} file")
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read(SPEC_MAX + 1)
+        else:
+            with open(path, "rb") as f:
+                raw = f.read(SPEC_MAX + 1)
+    except OSError as e:
+        raise UsageError(f"cannot read the {what} file ({errno.errorcode.get(e.errno, 'error')})") \
+            from None
+    if len(raw) > SPEC_MAX:
+        raise UsageError(f"the {what} file is larger than {SPEC_MAX} bytes")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise UsageError(f"the {what} file is not valid JSON") from None
+    if not isinstance(data, dict):
+        raise UsageError(f"the {what} must be a JSON object")
+    return data
+
+
+def read_text_file(path, what):
+    """user-data ou network-data donné par chemin (usage manuel)."""
+    try:
+        with open(path, "rb") as f:
+            raw = f.read(CLOUDINIT_MAX + 1)
+    except OSError as e:
+        raise UsageError(f"cannot read the {what} file ({errno.errorcode.get(e.errno, 'error')})") \
+            from None
+    if len(raw) > CLOUDINIT_MAX:
+        raise UsageError(f"the {what} file is larger than {CLOUDINIT_MAX} bytes")
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise UsageError(f"the {what} file is not UTF-8 text") from None
+
+
+def parse_size(text, what="size"):
+    """Octets : entier, ou suffixe binaire K, M, G, T (`20G`)."""
+    t = (text or "").strip().upper().removesuffix("IB").removesuffix("B") \
+        if isinstance(text, str) else ""
+    unit = t[-1:] if t[-1:] in SIZE_UNITS else ""
+    digits = t[:-1] if unit else t
+    if not digits.isdigit() or int(digits) <= 0:
+        raise UsageError(f"invalid {what}: a positive number of bytes, or with K, M, G, T")
+    return int(digits) * SIZE_UNITS[unit]
+
+
+def _pool_vol(text, what):
+    pool, sep, vol = (text or "").partition("/")
+    if not sep or not pool or not vol:
+        raise UsageError(f"--disk={what}: POOL/VOLUME expected")
+    return pool, vol
+
+
+def disk_from_flag(text):
+    """`--disk=` : blank:POOL:SIZE, image:POOL/IMAGE[:SIZE][:copy],
+    volume:POOL/VOLUME, iso:POOL/VOLUME. Un nom de pool ne contient ni `:`
+    ni `/` (POOL_NAME_RE), la découpe est donc sans ambiguïté."""
+    kind, _, rest = (text or "").partition(":")
+    if kind == "blank":
+        pool, sep, size = rest.partition(":")
+        if not sep:
+            raise UsageError("--disk=blank:POOL:SIZE expected")
+        return {"source": {"kind": "blank", "pool": pool, "size_bytes": parse_size(size)}}
+    if kind == "image":
+        parts = rest.split(":")
+        pool, vol = _pool_vol(parts[0], "image")
+        src = {"kind": "image", "pool": pool, "image": vol}
+        for extra in parts[1:]:
+            if extra == "copy":
+                src["linked"] = False
+            else:
+                src["size_bytes"] = parse_size(extra)
+        return {"source": src}
+    if kind in ("volume", "iso"):
+        pool, vol = _pool_vol(rest, kind)
+        return {"source": {"kind": kind, "pool": pool, "volume": vol}}
+    raise UsageError("--disk: blank:POOL:SIZE, image:POOL/IMAGE[:SIZE][:copy], "
+                     "volume:POOL/VOLUME or iso:POOL/VOLUME")
+
+
+def nic_from_flag(text):
+    """`--nic=` : network:NAME, bridge:NAME, direct:IFACE[:MODE]."""
+    kind, _, rest = (text or "").partition(":")
+    if kind not in ("network", "bridge", "direct") or not rest:
+        raise UsageError("--nic: network:NAME, bridge:NAME or direct:IFACE[:MODE]")
+    nic = {"kind": kind, "source": rest}
+    if kind == "direct" and ":" in rest:
+        nic["source"], nic["mode"] = rest.split(":", 1)
+    return nic
+
+
+CREATE_FLAGS = ("name", "instances", "vcpus", "memory_mib", "os", "machine", "firmware",
+                "title", "description", "disk", "nic", "user_data", "network_data",
+                "hostname", "seed_pool")
+CREATE_SWITCHES = ("start", "autostart", "secure_boot", "tpm", "vnc_password")
+
+
+def spec_from_flags(args):
+    """Spec de création construit depuis les options (usage manuel ; la
+    console passe toujours --spec-file)."""
+    if not args.name:
+        raise UsageError("give --spec-file, or at least --name with the options of the VM")
+    spec = {"name": args.name}
+    if args.instances is not None:
+        spec["instances"] = args.instances
+    for flag in ("os", "machine", "firmware", "title", "description"):
+        if getattr(args, flag) is not None:
+            spec[flag] = getattr(args, flag)
+    if args.vcpus is not None:
+        spec["cpu"] = {"vcpus": args.vcpus}
+    if args.memory_mib is not None:
+        spec["memory"] = {"current_mib": args.memory_mib}
+    spec["disks"] = [disk_from_flag(d) for d in args.disk or []]
+    spec["nics"] = [nic_from_flag(n) for n in args.nic or []]
+    for flag in ("start", "autostart", "secure_boot", "tpm"):
+        if getattr(args, flag):
+            spec[flag] = True
+    if args.vnc_password:
+        spec["display"] = {"vnc": True, "password": True}
+    ci = {}
+    if args.user_data:
+        ci["user_data"] = read_text_file(args.user_data, "user-data")
+    if args.network_data:
+        ci["network_data"] = read_text_file(args.network_data, "network-data")
+    if args.hostname:
+        ci["hostname"] = args.hostname
+    if args.seed_pool:
+        ci["seed_pool"] = args.seed_pool
+    if ci:
+        spec["cloudinit"] = ci
+    return spec
+
+
+def create_spec(args):
+    flags = [f for f in CREATE_FLAGS if getattr(args, f, None) not in (None, [])]
+    flags += [f for f in CREATE_SWITCHES if getattr(args, f, False)]
+    if args.spec_file is not None:
+        if flags:
+            raise UsageError("give either --spec-file or the options of the VM, not both "
+                             f"(--{flags[0].replace('_', '-')})")
+        return read_spec(args.spec_file)
+    return spec_from_flags(args)
+
+
+def spec_pools(spec):
+    """Pools où une création écrit (disques, images, seed) : ils sont tenus
+    en partage pendant la création, un retrait de pool attend."""
+    pools = set()
+    for d in spec.get("disks") or []:
+        src = (d or {}).get("source") if isinstance(d, dict) else None
+        if isinstance(src, dict):
+            for k in ("pool", "image_pool"):
+                if isinstance(src.get(k), str):
+                    pools.add(src[k])
+    ci = spec.get("cloudinit")
+    if isinstance(ci, dict) and isinstance(ci.get("seed_pool"), str):
+        pools.add(ci["seed_pool"])
+    return sorted(pools)
+
+
+@contextlib.contextmanager
+def object_lock(state, host, kind, *names, shared=False):
+    """Verrou d'un objet de l'hôte (pool, volume, réseau), pris sans
+    attendre. `shared` : plusieurs créations peuvent écrire dans le même
+    pool, mais un retrait ou un arrêt du pool (exclusif) n'y entre pas."""
+    d = kvm_decl.decl_dir(state) / "locks"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fds = []
+    try:
+        for name in sorted(set(names)):
+            digest = hashlib.sha256(name.encode()).hexdigest()[:16]
+            fd = os.open(d / f"{host}-{kind}-{digest}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            fds.append(fd)
+            try:
+                fcntl.flock(fd, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX) | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise UsageError(f"another operation on {kind} {name} is in progress on "
+                                 f"{host}: try again later", kind="busy") from None
+        yield
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def lib_error(prog, e, data):
+    """Exception à lever pour une erreur de bibliothèque : refus d'entrée
+    (OpError `invalid`) en erreur d'usage (code 2), autres erreurs en
+    Failure (code 1) qui garde `refusals` et `leftovers`, échéance
+    (kh.Cancelled levée par le rappel `cancel`) en kind `timeout`."""
+    if isinstance(e, ko.OpError) and e.kind == "invalid":
+        prog.fail(e.message)
+        return UsageError(e.message)
+    if isinstance(e, (ko.OpError, kh.KvmError)):
+        return op_failure(prog, e, data)
+    msg = "the operation did not finish within --timeout"
+    prog.fail(msg)
+    extra = dict(data)
+    if "leftovers" in extra:
+        extra["leftovers"] = list(getattr(e, "leftovers", None) or [])
+    return Failure(msg, kind="timeout", data=extra)
+
+
+LIB_ERRORS = (ko.OpError, kh.KvmError, kh.Cancelled)
+
+
+def lib_call(prog, data, fn):
+    try:
+        return fn()
+    except LIB_ERRORS as e:
+        raise lib_error(prog, e, data) from None
+
+
+def change_lines(changes):
+    return [f"{c['field']}{' ' + c['target'] if c.get('target') else ''}: {c['applied']}"
+            + (f" ({c['reason']})" if c.get("reason") else "") for c in changes]
+
+
+def leftover_lines(left):
+    return [f"left on the host: {describe_leftover(x)}" for x in left or []]
+
+
+def after_edit(host, name):
+    """Relecture après une modification : état, empreinte, changements en
+    attente (la fenêtre affiche « restart needed » d'après `pending`)."""
+    try:
+        form = ke.vm_form(host, name)
+    except (ko.OpError, kh.KvmError) as e:
+        step("verify", "warn", f"cannot read {name} back: {e.message}")
+        return {"state": None, "config_digest": None, "pending": None}
+    step("verify", "done", f"{form['state']}"
+         + (f", restart needed for: {', '.join(form['pending'])}" if form["pending"] else ""))
+    return {"state": form["state"], "config_digest": form["config_digest"],
+            "pending": form["pending"]}
+
+
+# --- host caps -------------------------------------------------------------------
+
+def cmd_host_caps(args):
+    host = load_host_next(state_of(args), args.host)
+    if args.machine is not None and args.machine not in kvm_caps.MACHINE_FAMILIES:
+        raise UsageError(f"--machine: one of {', '.join(kvm_caps.MACHINE_FAMILIES)}")
+    prog = Progress("caps")
+    prog("caps", "running", f"capabilities of {host.name}")
+    options = lib_call(prog, {}, lambda: kc.host_options(host))
+    if args.machine:
+        options = {**options,
+                   "by_machine": {k: v for k, v in options["by_machine"].items()
+                                  if k == args.machine},
+                   "disabled": {k: v for k, v in options["disabled"].items()
+                                if k == args.machine}}
+    fams = sorted(options["by_machine"])
+    prog("caps", "done", f"machine types: {', '.join(fams) or 'none'}")
+    lines = [f"{host.name}: {options.get('arch')}, default machine {options.get('default_machine')}"]
+    for fam in fams:
+        o = options["by_machine"][fam]
+        lines.append(f"  {fam}: firmware {', '.join(o.get('firmware') or [])}; disk buses "
+                     f"{', '.join(o.get('disk_buses') or [])}; video "
+                     f"{', '.join(o.get('video_models') or [])}")
+        for opt, reason in sorted((options["disabled"].get(fam) or {}).items()):
+            lines.append(f"    {opt}: {reason}")
+    emit(args, {"ok": True, "host": host.name, "machine": args.machine, "options": options},
+         "\n".join(lines))
+    return EXIT_OK
+
+
+# --- vm create -------------------------------------------------------------------
+
+def cmd_vm_create(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    spec = create_spec(args)
+    timeout = positive_timeout(args.timeout, CREATE_TIMEOUT)
+    names = [s.get("name") for s in checked(kc.instance_specs, spec)]
+    if not all(isinstance(n, str) and n for n in names):
+        raise UsageError("the spec needs a name")
+    for n in names:
+        checked(ko.check_new_vm_name, n)
+    data = {"host": host.name, "refusals": [], "created": [], "failed": None, "leftovers": []}
+    prog = Progress()
+    if args.dry_run:
+        prog("plan", "running", f"{names[0]} (dry run)")
+        plan = lib_call(prog, data, lambda: kc.create_plan(host, spec))
+        pub = kc.public_plan(plan)
+        prog("plan", "warn" if pub["refusals"] else "done",
+             "; ".join(pub["refusals"]) or f"{len(pub['instances'])} VM(s)")
+        lines = []
+        for i in pub["instances"]:
+            lines.append(f"{i['name']}:")
+            lines += [f"  volume {v['target']}: {v['pool']}/{v['volume']} ({v['kind']}, "
+                      f"{v['capacity']} bytes)" for v in i["volumes"]]
+            if i["seed"]:
+                lines.append(f"  cloud-init seed: {i['seed']['pool']}/{i['seed']['volume']}")
+        lines += [f"warning: {w}" for w in pub["warnings"]]
+        emit(args, {"ok": True, "host": host.name, "dry_run": True,
+                    "possible": not pub["refusals"], "plan": pub},
+             plan_text(f"create {', '.join(names)} on {host.name} (dry run)", pub["refusals"],
+                       lines))
+        return EXIT_OK
+    with vm_lock(state, host.name, *names), \
+            object_lock(state, host.name, "pool", *spec_pools(spec), shared=True), \
+            noting_progress(prog):
+        t0 = CLOCK()
+        try:
+            res = kc.create_vm(host, spec, progress=prog, cancel=deadline_cancel(timeout))
+        except LIB_ERRORS as e:
+            data.update(created=list(getattr(e, "created", None) or []),
+                        failed=getattr(e, "failed", None))
+            err = lib_error(prog, e, data)
+            if isinstance(err, Failure):
+                err.data["leftovers"] = list(getattr(e, "leftovers", None) or [])
+            rollback_step(e)
+            raise err from None
+        except Exception as e:                 # noqa: BLE001 : restes dits, sans trace
+            msg = f"unexpected internal error ({type(e).__name__})"
+            prog.fail(msg)
+            rollback_step(e)
+            raise Failure(msg, data={**data, "created": list(getattr(e, "created", None) or []),
+                                     "failed": getattr(e, "failed", None),
+                                     "leftovers": list(getattr(e, "leftovers", None) or [])}) \
+                from None
+        elapsed = CLOCK() - t0
+    lines = [f"{c['name']}: {c['state']}, uuid {c['uuid']}"
+             + (f", volumes {', '.join(c['volumes'])}" if c["volumes"] else "")
+             + (f", cloud-init seed {c['seed']}" if c["seed"] else "") for c in res["created"]]
+    lines += [f"warning: {w}" for w in res["warnings"]]
+    emit(args, {"ok": True, "host": host.name, "dry_run": False, "elapsed_s": round(elapsed, 1),
+                **res}, plan_text(f"created on {host.name}", [], lines))
+    return EXIT_OK
+
+
+# --- vm edit et gestes à chaud ------------------------------------------------------
+
+def edit_failure(prog, e, data):
+    """Échec d'une modification : ce qui a été fait, échoué, pas tenté."""
+    err = lib_error(prog, e, data)
+    if isinstance(err, Failure):
+        err.data["changes"] = list(getattr(e, "changes", None) or (
+            e.data.get("changes") if isinstance(e, ko.OpError) else None) or [])
+        err.data["leftovers"] = list(getattr(e, "leftovers", None) or [])
+    return err
+
+
+def cmd_vm_edit(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    name = check_vm_name(args.name)
+    spec = read_spec(args.spec_file)
+    expect = checked(ko.check_digest, args.expect_config)
+    if expect is None and not args.dry_run:
+        raise UsageError("--expect-config: give the config_digest read when the form was opened "
+                         "(a dry run shows it)")
+    timeout = positive_timeout(args.timeout, EDIT_TIMEOUT)
+    data = {"host": host.name, "name": name, "refusals": [], "changes": [], "leftovers": []}
+    prog = Progress()
+    if args.dry_run:
+        res = lib_call(prog, data, lambda: ke.edit_vm(host, name, spec, expect, progress=prog,
+                                                      dry_run=True))
+        plan = {k: res.get(k) for k in ("name", "state", "persistent", "config_digest",
+                                         "changes", "refusals", "empty")}
+        emit(args, {"ok": True, "host": host.name, "name": name, "dry_run": True,
+                    "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"edit {name} on {host.name} (dry run), config {plan['config_digest']}",
+                       plan["refusals"], change_lines(plan["changes"])))
+        return EXIT_OK
+    new_name = spec.get("name") if isinstance(spec.get("name"), str) else name
+    with vm_lock(state, host.name, name, new_name), noting_progress(prog):
+        try:
+            res = ke.edit_vm(host, name, spec, expect, progress=prog,
+                             cancel=deadline_cancel(timeout), sleep=SLEEP)
+        except LIB_ERRORS as e:
+            raise edit_failure(prog, e, data) from None
+        after = after_edit(host, res.get("name") or name)
+    changes = res.get("changes") or []
+    out = {"ok": True, "host": host.name, "dry_run": False, "name": res.get("name") or name,
+           "previous_name": name, "changes": changes, "empty": not changes,
+           "defined": bool(res.get("defined")), "renamed": bool(res.get("renamed")),
+           "leftovers": list(res.get("leftovers") or []),
+           "config_digest_before": res.get("config_digest"), "after": after,
+           "restart_required": bool(after.get("pending"))}
+    lines = change_lines(changes) or ["nothing to change"]
+    lines += leftover_lines(out["leftovers"])
+    if out["restart_required"]:
+        lines.append("restart needed (shut down, then start: a reboot inside the guest is not "
+                     "enough) for: " + ", ".join(after["pending"]))
+    emit(args, out, plan_text(f"{out['name']} on {host.name}", [], lines))
+    return EXIT_OK
+
+
+def hot_gesture(args, gesture, fn):
+    """Un geste à chaud : verrou de la VM, étapes, résultat par changement,
+    relecture (état, changements en attente)."""
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    name = check_vm_name(args.name)
+    data = {"host": host.name, "name": name, "gesture": gesture, "refusals": [],
+            "changes": [], "leftovers": []}
+    prog = Progress()
+    def chained(sid, status, msg=""):
+        # la première étape de la bibliothèque clôt l'étape `plan`
+        if prog.sid == "plan" and prog.status == "running":
+            prog("plan", "done", gesture)
+        prog(sid, status, msg)
+    with vm_lock(state, host.name, name), noting_progress(prog):
+        prog("plan", "running", f"{gesture} on {name}")
+        try:
+            res = fn(host, name, chained)
+        except LIB_ERRORS as e:
+            raise edit_failure(prog, e, data) from None
+        if prog.sid == "plan":
+            prog("plan", "done", "nothing to change" if not res.get("changes") else gesture)
+        after = after_edit(host, name)
+    out = {"ok": True, "host": host.name, "name": name, "gesture": gesture,
+           "changes": res.get("changes") or [], "defined": bool(res.get("defined")),
+           "leftovers": list(res.get("leftovers") or []), "after": after,
+           "restart_required": bool(after.get("pending"))}
+    lines = change_lines(out["changes"]) or ["nothing to change"]
+    emit(args, out, plan_text(f"{gesture} on {name} ({host.name})", [], lines))
+    return EXIT_OK
+
+
+def cmd_vm_cpumem(args):
+    if args.vcpus is None and args.memory_mib is None:
+        raise UsageError("give --vcpus and/or --memory-mib")
+    for v, flag in ((args.vcpus, "--vcpus"), (args.memory_mib, "--memory-mib")):
+        if v is not None and v < 1:
+            raise UsageError(f"{flag} must be positive")
+    return hot_gesture(args, "cpumem", lambda h, n, p: ke.set_cpu_memory(
+        h, n, vcpus=args.vcpus, memory_mib=args.memory_mib, progress=p, sleep=SLEEP))
+
+
+def cmd_vm_add_volume(args):
+    disk = read_spec(args.spec_file, "disk")
+    return hot_gesture(args, "add-volume", lambda h, n, p: ke.attach_disk(
+        h, n, disk, progress=p, sleep=SLEEP))
+
+
+def check_target(target):
+    if not isinstance(target, str) or not re.fullmatch(r"[a-z]{2,3}[a-z0-9]{1,4}", target):
+        raise UsageError("--target: a disk target such as vdb or sda")
+    return target
+
+
+def cmd_vm_remove_volume(args):
+    target = check_target(args.target)
+    return hot_gesture(args, "remove-volume", lambda h, n, p: ke.detach_disk(
+        h, n, target, progress=p, sleep=SLEEP))
+
+
+def cmd_vm_insert_cdrom(args):
+    target = check_target(args.target)
+    pool = checked(ks.check_pool_name, args.pool)
+    volume = checked(ko.check_vm_name, args.volume)
+    return hot_gesture(args, "insert-cdrom", lambda h, n, p: ke.insert_media(
+        h, n, target, pool, volume, progress=p, sleep=SLEEP))
+
+
+def cmd_vm_eject_image(args):
+    target = check_target(args.target)
+    return hot_gesture(args, "eject-image", lambda h, n, p: ke.eject_media(
+        h, n, target, progress=p, sleep=SLEEP))
+
+
+def cmd_vm_add_nic(args):
+    nic = read_spec(args.spec_file, "network card")
+    return hot_gesture(args, "add-nic", lambda h, n, p: ke.attach_nic(
+        h, n, nic, progress=p, sleep=SLEEP))
+
+
+MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$")
+
+
+def cmd_vm_remove_nic(args):
+    if not isinstance(args.mac, str) or not MAC_RE.match(args.mac):
+        raise UsageError("--mac: a MAC address such as 52:54:00:12:34:56")
+    return hot_gesture(args, "remove-nic", lambda h, n, p: ke.detach_nic(
+        h, n, args.mac, progress=p, sleep=SLEEP))
+
+
+def cmd_vm_cloudinit(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    name = check_vm_name(args.name)
+    ci = read_spec(args.spec_file, "cloud-init")
+    unknown = sorted(set(ci) - {"user_data", "network_data", "hostname"})
+    if unknown:
+        raise UsageError(f"cloud-init: unknown field(s) {', '.join(unknown)}")
+    for k in ("user_data", "network_data", "hostname"):
+        if ci.get(k) is not None and not isinstance(ci[k], str):
+            raise UsageError(f"cloud-init: {k} must be a string")
+    ack = args.acknowledge_unreadable
+    checked(ko.check_acknowledged, ack)
+    data = {"host": host.name, "name": name, "refusals": [], "leftovers": []}
+    prog = Progress("seed")
+    with vm_lock(state, host.name, name), noting_progress(prog):
+        prog("seed", "running", f"new cloud-init seed for {name}"
+             + (" (cloud-init runs again at next boot)" if args.rerun else ""))
+        res = lib_call(prog, data, lambda: ke.regenerate_seed(
+            host, name, ci.get("user_data"), ci.get("network_data"), rerun=args.rerun,
+            hostname=ci.get("hostname"), acknowledged_unreadable=ack))
+        prog("seed", "done", f"{res['seed']['pool']}/{res['seed']['volume']} on "
+             f"{res['seed']['target']}, read by the guest at its next start")
+        if res["previous"]:
+            prog("cleanup", "done" if res["removed"] else "warn",
+                 f"previous seed {res['previous']['pool']}/{res['previous']['volume']} "
+                 + ("removed" if res["removed"] else f"kept: {res['kept_reason']}"))
+        after = after_edit(host, name)
+    out = {"ok": True, "host": host.name, "name": name, **res, "after": after,
+           "user_data": bool(ci.get("user_data")), "user_data_bytes": len(ci.get("user_data") or ""),
+           "network_data": bool(ci.get("network_data"))}
+    lines = [f"seed {res['seed']['pool']}/{res['seed']['volume']} on {res['seed']['target']}"]
+    if res["previous"] and not res["removed"]:
+        lines.append(f"previous seed kept: {res['kept_reason']}")
+    emit(args, out, plan_text(f"cloud-init of {name} on {host.name}", [], lines))
+    return EXIT_OK
+
+
+# --- images et volumes -----------------------------------------------------------------
+
+def check_author(author):
+    if author is None:
+        return None
+    if not isinstance(author, str) or not author or len(author) > AUTHOR_MAX or any(
+            ord(c) < 32 or ord(c) == 127 for c in author):
+        raise UsageError("--author: a name without control characters, "
+                         f"{AUTHOR_MAX} characters at most")
+    return author
+
+
+def cmd_image_list(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    prog = Progress("list")
+    prog("list", "running", f"images of {host.name}")
+    res = lib_call(prog, {}, lambda: ks.list_images(host, host.decl,
+                                                    ks.load_notes(state, host.name),
+                                                    fresh=args.fresh))
+    prog("list", "done", f"{len(res['images'])} image(s)")
+    head = ("POOL", "VOLUME", "FORMAT", "SIZE", "ISO", "BASE OF", "SHA-256")
+    rows = [head] + [(i["pool"], i["volume"], i["format"] or "-", str(i["capacity"] or "-"),
+                      "yes" if i["iso"] else "", str(len(i["backing_users"])),
+                      (i["sha256"] or "")[:12]) for i in res["images"]]
+    widths = [max(len(r[c]) for r in rows) for c in range(len(head))]
+    text = "\n".join("  ".join(v.ljust(widths[c]) for c, v in enumerate(r)).rstrip()
+                     for r in rows)
+    if res["missing_pools"]:
+        text += "\nimage pools not found: " + ", ".join(res["missing_pools"])
+    emit(args, {"ok": True, "host": host.name, **res}, text)
+    return EXIT_OK
+
+
+def cmd_image_verify(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    volume = checked(ko.check_vm_name, args.volume)
+    expected = args.sha256 or (ks.load_notes(state, host.name).get(f"{pool}/{volume}")
+                               or {}).get("sha256")
+    if expected is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
+        raise UsageError("--sha256: 64 hexadecimal characters")
+    prog = Progress("verify")
+    prog("verify", "running", f"SHA-256 of {pool}/{volume} on the host")
+    res = lib_call(prog, {}, lambda: ks.verify_image(host, pool, volume, expected))
+    out = {"host": host.name, "pool": pool, "volume": volume, **res}
+    if res["match"] is False:
+        msg = f"{pool}/{volume} does not match the expected SHA-256"
+        prog("verify", "error", msg)
+        raise Failure(msg, kind="mismatch", data=out)
+    if res["skipped"]:
+        prog("verify", "warn", res["skipped"])
+    else:
+        prog("verify", "done", res["sha256"] + (" (matches)" if res["match"] else ""))
+    emit(args, {"ok": True, **out},
+         f"{pool}/{volume}: " + (res["skipped"] or res["sha256"]
+                                 + (" matches" if res["match"] else "")))
+    return EXIT_OK
+
+
+def staging_dir(state):
+    """Répertoire des fichiers téléchargés avant leur envoi (0700)."""
+    d = Path(state) / ks.NOTES_DIR / "staging"
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(d, 0o700)
+    return d
+
+
+def public_url(url):
+    """URL sans identifiants, requête ni fragment (une URL signée porte son
+    jeton dans la requête) : c'est elle qui est notée et affichée."""
+    p = urllib.parse.urlsplit(url)
+    host = p.hostname or ""
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host + (f":{p.port}" if p.port else "")
+    return urllib.parse.urlunsplit((p.scheme, netloc, p.path, "", ""))
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Redirections bornées, vers http ou https seulement."""
+    max_redirections = DOWNLOAD_MAX_REDIRECTS
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme not in ("http", "https"):
+            raise UsageError("the download was redirected outside http/https: refused")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def download_url(url, dest, progress=None, opener=None):
+    """Télécharge `url` (http/https) dans un fichier 0600 de `dest`, en flux,
+    SHA-256 calculé au passage. Taille annoncée contrôlée contre la place
+    libre (marge DOWNLOAD_MARGIN). Rend (chemin, taille, sha256). Le fichier
+    partiel est supprimé sur toute erreur ou annulation."""
+    opener = opener or urllib.request.build_opener(_Redirects)
+    try:
+        resp = opener.open(urllib.request.Request(url, headers={"User-Agent": "harvester-ops"}),
+                           timeout=DOWNLOAD_TIMEOUT)
+    except UsageError:
+        raise
+    except urllib.error.HTTPError as e:
+        if 300 <= e.code < 400:                # redirection hors http(s), ou trop nombreuses
+            raise Failure("the download was redirected outside http/https or too many times: "
+                          "refused", kind="refused") from None
+        raise Failure(f"download refused by the server (HTTP {e.code})", kind="failed") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", None) or type(e).__name__
+        raise Failure(f"download failed ({reason})", kind="unreachable") from None
+    fd, tmp = tempfile.mkstemp(dir=dest, prefix="dl-")
+    try:
+        with resp, os.fdopen(fd, "wb") as f:
+            length = resp.headers.get("Content-Length")
+            total = int(length) if length and length.isdigit() else None
+            free = shutil.disk_usage(dest).free
+            if total is not None and total + DOWNLOAD_MARGIN > free:
+                raise Failure(f"not enough space on the console for {total} bytes "
+                              f"({free} free)", kind="refused")
+            h, got = hashlib.sha256(), 0
+            while True:
+                block = resp.read(DOWNLOAD_CHUNK)
+                if not block:
+                    break
+                got += len(block)
+                if total is not None and got > total:
+                    raise Failure("the server sent more than the size it announced",
+                                  kind="failed")
+                if got % (64 * DOWNLOAD_CHUNK) < len(block) and \
+                        shutil.disk_usage(dest).free < DOWNLOAD_MARGIN:
+                    raise Failure("the console is running out of space", kind="refused")
+                h.update(block)
+                f.write(block)
+                if progress:
+                    progress(got, total)
+            if total is not None and got != total:
+                raise Failure(f"the download stopped after {got} of {total} bytes",
+                              kind="failed")
+        return tmp, got, h.hexdigest()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _upload_progress(phase):
+    """Rappel de progression d'un envoi : débit et temps restant
+    (PROGRESS_EVENT, comme les transferts de VM)."""
+    box = {}
+
+    def cb(done, total=None):
+        if "p" not in box:
+            box["p"] = vtp.Progress(vtp.emit_line, phase, total or 0, every=1.0)
+        if total and not box["p"].total:
+            box["p"].total = total
+        box["p"].update(done)
+    cb.box = box
+    return cb
+
+
+def _limit_bps(args):
+    if args.limit_mbps is None:
+        return None
+    if args.limit_mbps <= 0:
+        raise UsageError("--limit-mbps must be positive")
+    return args.limit_mbps * 1_000_000 / 8
+
+
+def do_upload(args, state, host, pool, name, path, sha, url=None):
+    """Envoi d'un fichier local comme volume (kvm_storage.upload_volume),
+    avec progression, plafond de débit, contrôle sur l'hôte."""
+    data = {"host": host.name, "pool": pool, "volume": name, "refusals": [], "leftovers": []}
+    prog = Progress("check")
+    size = os.path.getsize(path)
+    progress = _upload_progress("upload")
+    with object_lock(state, host.name, "pool", pool, shared=True), \
+            object_lock(state, host.name, "volume", f"{pool}/{name}"):
+        res = lib_call(prog, data, lambda: ks.upload_volume(
+            host, pool, name, path, fmt_hint=args.format, sha256=sha, verify=not args.no_verify,
+            progress=lambda n: progress(n, size), limit_bps=_limit_bps(args),
+            notes_state=state, author=check_author(args.author), url=url, step=prog))
+    if "p" in progress.box:
+        progress.box["p"].finish()
+    return res
+
+
+def check_upload_args(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    name = checked(ks.check_volume_name, args.name)
+    if args.sha256 is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", args.sha256):
+        raise UsageError("--sha256: 64 hexadecimal characters")
+    if args.format is not None and args.format not in ("qcow2", "raw", "iso"):
+        raise UsageError("--format: qcow2, raw or iso")
+    check_author(args.author)
+    _limit_bps(args)
+    return state, host, pool, name
+
+
+def upload_text(res):
+    verified = {True: "verified on the host", "skipped": "not verified (no sha256sum on the "
+                "host)", None: "not verified"}[res["verified"]]
+    return (f"{res['pool']}/{res['volume']}: {res['format']}, {res['capacity']} bytes, "
+            f"{verified}, {res['elapsed_s']}s")
+
+
+def cmd_vol_upload(args):
+    state, host, pool, name = check_upload_args(args)
+    if not args.file or not os.path.isfile(args.file):
+        raise UsageError("--file: a readable local file")
+    if not os.access(args.file, os.R_OK):
+        raise UsageError("--file: the file cannot be read")
+    res = do_upload(args, state, host, pool, name, args.file, args.sha256)
+    emit(args, {"ok": True, "host": host.name, **res}, upload_text(res))
+    return EXIT_OK
+
+
+def cmd_image_download(args):
+    """Téléchargement par la machine de la console (jamais par l'hôte : il n'a
+    souvent pas d'accès sortant), puis le même envoi qu'un téléversement ;
+    le fichier reçu est supprimé à la fin, réussite ou échec."""
+    state, host, pool, name = check_upload_args(args)
+    url = args.url
+    if not isinstance(url, str) or urllib.parse.urlsplit(url).scheme not in ("http", "https") \
+            or not urllib.parse.urlsplit(url).hostname or any(ord(c) < 33 for c in url):
+        raise UsageError("--url: an http or https URL")
+    shown = public_url(url)
+    prog = Progress("download")
+    prog("download", "running", shown)
+    progress = _upload_progress("download")
+    path = None
+    try:
+        try:
+            path, size, sha = download_url(url, staging_dir(state), progress)
+        except Cancelled as c:
+            c.stage = "download"
+            raise
+        except Failure as f:
+            prog.fail(f.message)
+            raise
+        if "p" in progress.box:
+            progress.box["p"].finish()
+        if args.sha256 and sha != args.sha256.lower():
+            msg = "the downloaded file does not match the expected SHA-256: nothing was sent"
+            prog.fail(msg)
+            raise Failure(msg, kind="refused", data={"host": host.name, "refusals": [msg]})
+        prog("download", "done", f"{size} bytes, SHA-256 {sha}")
+        res = do_upload(args, state, host, pool, name, path, sha, url=shown)
+    finally:
+        if path:
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+    emit(args, {"ok": True, "host": host.name, "url": shown, **res}, upload_text(res))
+    return EXIT_OK
+
+
+def cmd_vol_create(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    name = checked(ks.check_volume_name, args.name)
+    capacity = parse_size(args.capacity, "--capacity")
+    if args.format not in ks.VOLUME_FORMATS:
+        raise UsageError("--format: qcow2 or raw")
+    if args.backing is not None:
+        checked(ko.check_vm_name, args.backing)
+    prog = Progress("create")
+    data = {"host": host.name, "pool": pool, "volume": name, "refusals": []}
+    with object_lock(state, host.name, "pool", pool, shared=True), \
+            object_lock(state, host.name, "volume", f"{pool}/{name}"):
+        prog("create", "running", f"{pool}/{name}"
+             + (f" on image {args.backing}" if args.backing else ""))
+        vol = lib_call(prog, data, lambda: ks.create_volume(
+            host, pool, name, capacity, args.format, args.backing, args.prealloc_metadata))
+        prog("verify", "done", f"{pool}/{name}: {(vol or {}).get('format')}, "
+             f"{(vol or {}).get('capacity')} bytes")
+    emit(args, {"ok": True, "host": host.name, "pool": pool, "name": name, "volume": vol},
+         f"{pool}/{name}: {(vol or {}).get('format')}, {(vol or {}).get('capacity')} bytes")
+    return EXIT_OK
+
+
+def cmd_vol_resize(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    name = checked(ko.check_vm_name, args.name)
+    capacity = parse_size(args.capacity, "--capacity")
+    ack = args.acknowledge_unreadable
+    checked(ko.check_acknowledged, ack)
+    prog = Progress("resize")
+    data = {"host": host.name, "pool": pool, "volume": name, "refusals": []}
+    with object_lock(state, host.name, "volume", f"{pool}/{name}"):
+        prog("resize", "running", f"{pool}/{name} to {capacity} bytes")
+        vol = lib_call(prog, data, lambda: ks.resize_volume(host, pool, name, capacity, ack))
+        prog("resize", "done", f"{(vol or {}).get('capacity')} bytes")
+    emit(args, {"ok": True, "host": host.name, "pool": pool, "name": name, "volume": vol},
+         f"{pool}/{name}: {(vol or {}).get('capacity')} bytes")
+    return EXIT_OK
+
+
+def cmd_vol_delete(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    name = checked(ko.check_vm_name, args.name)
+    ack = args.acknowledge_unreadable
+    checked(ko.check_acknowledged, ack)
+    expect = checked(ko.check_digest, args.expect_delete)
+    data = {"host": host.name, "pool": pool, "volume": name, "refusals": [], "unreadable": []}
+    prog = Progress()
+    if args.dry_run:
+        prog("plan", "running", f"{pool}/{name} (dry run)")
+        plan = lib_call(prog, data, lambda: ks.delete_volume_plan(host, pool, name, ack))
+        prog("plan", "warn" if plan["refusals"] else "done",
+             "; ".join(plan["refusals"]) or "nothing uses it")
+        lines = unreadable_lines(plan["unreadable"], plan["acknowledged_unreadable"])
+        if not plan["refusals"]:
+            lines.append(f"to delete exactly this, add --expect-delete={plan['digest']}")
+        emit(args, {"ok": True, "host": host.name, "dry_run": True,
+                    "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"delete {pool}/{name} on {host.name} (dry run)", plan["refusals"],
+                       lines))
+        return EXIT_OK
+    with object_lock(state, host.name, "volume", f"{pool}/{name}"), noting_progress(prog):
+        try:
+            res = ks.delete_volume(host, pool, name, notes_state=state,
+                                   acknowledged_unreadable=ack, expect_digest=expect,
+                                   progress=prog)
+        except LIB_ERRORS as e:
+            err = lib_error(prog, e, data)
+            if isinstance(err, Failure) and isinstance(e, ko.OpError):
+                err.data["unreadable"] = list((e.data.get("plan") or {}).get("unreadable")
+                                              or [])
+            raise err from None
+        gone = lib_call(prog, data, lambda: ks._volume(host, pool, name)) is None
+        prog("verify", "done" if gone else "warn",
+             f"{pool}/{name} " + ("deleted" if gone else "still listed by libvirt"))
+    emit(args, {"ok": True, "host": host.name, "dry_run": False, **res, "gone": gone},
+         f"{pool}/{name} deleted from {host.name}")
+    return EXIT_OK
+
+
+# --- pools ---------------------------------------------------------------------------
+
+def pool_spec(args):
+    flags = {"name": args.name, "type": args.type, "path": args.path,
+             "source_host": args.source_host, "source_dir": args.source_dir}
+    given = [k for k, v in flags.items() if v is not None] + (["autostart"] if args.autostart
+                                                               else [])
+    if args.spec_file is not None:
+        if given:
+            raise UsageError("give either --spec-file or the options of the pool, not both")
+        return read_spec(args.spec_file, "pool spec")
+    if not args.name or not args.path:
+        raise UsageError("give --spec-file, or --name and --path (and --type)")
+    spec = {k: v for k, v in flags.items() if v is not None}
+    spec.setdefault("type", "dir")
+    spec["autostart"] = bool(args.autostart)
+    return spec
+
+
+def pool_line(st):
+    return (f"pool {st.get('name')}: {st.get('state') or 'unknown'}, {st.get('type')}, "
+            f"{st.get('target_path') or '-'}, autostart {'yes' if st.get('autostart') else 'no'}")
+
+
+def cmd_pool_define(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    spec = pool_spec(args)
+    name = spec.get("name") if isinstance(spec.get("name"), str) else ""
+    checked(ks.check_pool_name, name, True)
+    prog = Progress()
+    data = {"host": host.name, "pool": name, "refusals": [], "leftovers": []}
+    with object_lock(state, host.name, "pool", name), noting_progress(prog):
+        res = lib_call(prog, data, lambda: ks.define_pool(host, spec, step=prog,
+                                                          dry_run=args.dry_run))
+        if not args.dry_run:
+            prog("verify", "done", pool_line(res["state"]))
+    lines = [f"nested with pool {', '.join(res['nested_with'])}"] if res["nested_with"] else []
+    if res.get("existing_directory"):
+        lines.append("the target directory already existed")
+    title = (f"pool {name} on {host.name} (dry run)" if args.dry_run
+             else pool_line(res["state"]))
+    emit(args, {"ok": True, "host": host.name, **res}, plan_text(title, [], lines))
+    return EXIT_OK
+
+
+def pool_gesture(args, verb):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    prog = Progress(verb)
+    data = {"host": host.name, "pool": pool, "refusals": []}
+    fns = {"start": lambda: ks.start_pool(host, pool),
+           "stop": lambda: ks.stop_pool(host, pool),
+           "refresh": lambda: ks.refresh_pool(host, pool),
+           "autostart": lambda: ks.autostart_pool(host, pool, not args.disable)}
+    shared = verb in ("refresh", "start")
+    with object_lock(state, host.name, "pool", pool, shared=shared), noting_progress(prog):
+        what = (f"autostart {'off' if args.disable else 'on'}" if verb == "autostart"
+                else verb)
+        prog(verb, "running", f"{what} pool {pool}")
+        st = lib_call(prog, data, fns[verb])
+        prog(verb, "done", pool_line(st))
+    emit(args, {"ok": True, "host": host.name, "pool": pool, "action": verb, "state": st},
+         pool_line(st))
+    return EXIT_OK
+
+
+def cmd_pool_delete(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    pool = checked(ks.check_pool_name, args.pool)
+    ack = args.acknowledge_unreadable
+    checked(ko.check_acknowledged, ack)
+    expect = checked(ko.check_digest, args.expect_delete)
+    data = {"host": host.name, "pool": pool, "refusals": [], "unreadable": []}
+    prog = Progress()
+    if args.dry_run:
+        prog("plan", "running", f"pool {pool} (dry run)")
+        plan = lib_call(prog, data, lambda: ks.delete_pool_plan(
+            host, pool, args.remove_dir, acknowledged_unreadable=ack))
+        prog("plan", "warn" if plan["refusals"] else "done",
+             "; ".join(plan["refusals"]) or "nothing uses it")
+        lines = unreadable_lines(plan["unreadable"], plan["acknowledged_unreadable"])
+        lines.append("the directory and its files are removed" if args.remove_dir else
+                     "the directory and its files are kept")
+        if not plan["refusals"]:
+            lines.append(f"to delete exactly this, add --expect-delete={plan['digest']}")
+        emit(args, {"ok": True, "host": host.name, "dry_run": True,
+                    "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"delete pool {pool} on {host.name} (dry run)", plan["refusals"], lines))
+        return EXIT_OK
+    with object_lock(state, host.name, "pool", pool), noting_progress(prog):
+        res = lib_call(prog, data, lambda: ks.delete_pool(
+            host, pool, args.remove_dir, step=prog, acknowledged_unreadable=ack,
+            expect_digest=expect))
+        names = lib_call(prog, data, lambda: kh.parse_names(
+            host.virsh("pool-list", "--all", "--name", idempotent=True)))
+        gone = pool not in names
+        prog("verify", "done" if gone else "warn",
+             f"pool {pool} " + ("removed" if gone else "still listed by libvirt"))
+    emit(args, {"ok": True, "host": host.name, "dry_run": False, **res, "gone": gone},
+         f"pool {pool} deleted from {host.name}"
+         + (" with its directory" if res["directory_removed"] else ", files kept"))
+    return EXIT_OK
+
+
+# --- réseaux --------------------------------------------------------------------------
+
+def net_spec(args):
+    flags = {"name": args.name, "mode": args.mode, "subnet": args.subnet,
+             "bridge": args.bridge, "dhcp_start": args.dhcp_start, "dhcp_end": args.dhcp_end,
+             "domain": args.domain}
+    given = [k for k, v in flags.items() if v is not None] + (
+        ["autostart"] if args.autostart else []) + (["no_dhcp"] if args.no_dhcp else [])
+    if args.spec_file is not None:
+        if given:
+            raise UsageError("give either --spec-file or the options of the network, not both")
+        return read_spec(args.spec_file, "network spec")
+    if not args.name or not args.mode:
+        raise UsageError("give --spec-file, or --name and --mode (and --subnet or --bridge)")
+    spec = {k: v for k, v in flags.items() if v is not None}
+    spec["dhcp"] = not args.no_dhcp
+    spec["autostart"] = bool(args.autostart)
+    return spec
+
+
+def net_line(n):
+    ips = ", ".join(f"{i['address']}/{i['prefix']}" for i in n.get("ips") or [])
+    return (f"network {n.get('name')}: {'active' if n.get('active') else 'inactive'}, "
+            f"{n.get('forward')}, bridge {n.get('bridge') or '-'}"
+            + (f", {ips}" if ips else "")
+            + f", autostart {'yes' if n.get('autostart') else 'no'}")
+
+
+def cmd_net_define(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    spec = net_spec(args)
+    name = spec.get("name") if isinstance(spec.get("name"), str) else ""
+    checked(kn.check_network_name, name, True)
+    prog = Progress()
+    data = {"host": host.name, "network": name, "refusals": [], "leftovers": []}
+    with object_lock(state, host.name, "network", name), noting_progress(prog):
+        res = lib_call(prog, data, lambda: kn.define_network(host, spec, step=prog,
+                                                             dry_run=args.dry_run))
+        if not args.dry_run:
+            prog("verify", "done", net_line(res["network"]))
+    title = (f"network {name} on {host.name} (dry run)" if args.dry_run
+             else net_line(res["network"]))
+    emit(args, {"ok": True, "host": host.name, **res}, title)
+    return EXIT_OK
+
+
+def net_gesture(args, verb):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    net = checked(kn.check_network_name, args.network)
+    prog = Progress(verb)
+    data = {"host": host.name, "network": net, "refusals": []}
+    fns = {"start": lambda: kn.start_network(host, net),
+           "stop": lambda: kn.stop_network(host, net),
+           "autostart": lambda: kn.autostart_network(host, net, not args.disable)}
+    with object_lock(state, host.name, "network", net), noting_progress(prog):
+        what = (f"autostart {'off' if args.disable else 'on'}" if verb == "autostart"
+                else verb)
+        prog(verb, "running", f"{what} network {net}")
+        n = lib_call(prog, data, fns[verb])
+        prog(verb, "done", net_line(n))
+    emit(args, {"ok": True, "host": host.name, "network": net, "action": verb, "state": n},
+         net_line(n))
+    return EXIT_OK
+
+
+def cmd_net_delete(args):
+    state = state_of(args)
+    host = load_host_next(state, args.host)
+    net = checked(kn.check_network_name, args.network)
+    expect = checked(ko.check_digest, args.expect_delete)
+    data = {"host": host.name, "network": net, "refusals": []}
+    prog = Progress()
+    if args.dry_run:
+        prog("plan", "running", f"network {net} (dry run)")
+        plan = lib_call(prog, data, lambda: kn.delete_network_plan(host, net))
+        prog("plan", "warn" if plan["refusals"] else "done",
+             "; ".join(plan["refusals"]) or "nothing uses it")
+        lines = [] if plan["refusals"] else [
+            f"to delete exactly this, add --expect-delete={plan['digest']}"]
+        emit(args, {"ok": True, "host": host.name, "dry_run": True,
+                    "possible": not plan["refusals"], "plan": plan},
+             plan_text(f"delete network {net} on {host.name} (dry run)", plan["refusals"],
+                       lines))
+        return EXIT_OK
+    with object_lock(state, host.name, "network", net), noting_progress(prog):
+        res = lib_call(prog, data, lambda: kn.delete_network(host, net, step=prog,
+                                                             expect_digest=expect))
+        names = [n["name"] for n in lib_call(prog, data, lambda: kn.list_networks(host))]
+        gone = net not in names
+        prog("verify", "done" if gone else "warn",
+             f"network {net} " + ("removed" if gone else "still listed by libvirt"))
+    emit(args, {"ok": True, "host": host.name, "dry_run": False, **res, "gone": gone},
+         f"network {net} deleted from {host.name}")
+    return EXIT_OK
+
+
+def cmd_net_links(args):
+    host = load_host_next(state_of(args), args.host)
+    prog = Progress("links")
+    prog("links", "running", f"bridges and links of {host.name}")
+    res = lib_call(prog, {}, lambda: kn.host_links(host))
+    prog("links", "done", f"{len(res['bridges'])} bridge(s), {len(res['physical'])} physical "
+         "link(s)")
+    lines = [f"bridge {b['name']}" for b in res["bridges"]]
+    lines += [f"physical {p['name'] if isinstance(p, dict) else p}" for p in res["physical"]]
+    emit(args, {"ok": True, "host": host.name, **res}, "\n".join(lines))
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
@@ -1452,6 +2634,17 @@ def cancel_message(args, sig):
                 f"its result was not followed")
     if getattr(args, "dry_run", False):
         return f"cancelled ({sig})"            # un aperçu ne change rien
+    if args.cmd == "vm" and args.vcmd == "create":
+        return create_cancel_message(sig)
+    if args.cmd == "vm" and args.vcmd in EDIT_COMMANDS:
+        return (f"{EDIT_COMMANDS[args.vcmd]} cancelled ({sig}): some changes may already be "
+                "applied: reload the VM")
+    if args.cmd in ("vol", "image") and getattr(args, "ocmd", None) in UPLOADS:
+        return upload_cancel_message(args, sig)
+    if args.cmd in ("vol", "image", "pool", "net"):
+        what = {"vol": "volume", "image": "image", "pool": "pool", "net": "network"}[args.cmd]
+        return (f"{what} {args.ocmd} cancelled ({sig}): it may already have been "
+                f"{OBJECT_VERBS.get(args.ocmd, 'done')}: check the list")
     if args.cmd == "snapshot" and args.scmd in SNAPSHOT_DONE:
         return (f"snapshot {args.scmd} cancelled ({sig}): it may already have been "
                 f"{SNAPSHOT_DONE[args.scmd]}: list the snapshots")
@@ -1481,9 +2674,65 @@ def cancel_message(args, sig):
     return f"cancelled ({sig})"
 
 
+# sous-commandes `vm` de modification -> nom dit dans le message d'annulation
+EDIT_COMMANDS = {"edit": "edit", "cpumem": "cpumem", "add-volume": "add-volume",
+                 "remove-volume": "remove-volume", "insert-cdrom": "insert-cdrom",
+                 "eject-image": "eject-image", "add-nic": "add-nic",
+                 "remove-nic": "remove-nic", "cloudinit": "cloud-init"}
+UPLOADS = ("upload", "download-url")
+
+
+def _last_done(sig):
+    """La dernière étape dite est une relecture réussie : l'opération était
+    complète quand l'annulation est arrivée."""
+    last = getattr(sig, "last_step", None) or (None, None)
+    return str(last[0]).endswith("verify") and last[1] == "done"
+
+
+def create_cancel_message(sig):
+    left = getattr(sig, "leftovers", None)
+    created = [c.get("name") for c in getattr(sig, "created", None) or []]
+    kept = f"; already created and kept: {', '.join(created)}" if created else ""
+    if left is None and _last_done(sig):
+        return f"creation cancelled ({sig}) after it completed: the VM(s) were created"
+    if left is None:
+        return f"creation cancelled ({sig}) before anything was created"
+    if not left:
+        return f"creation cancelled ({sig}): rolled back{kept}"
+    return (f"creation cancelled ({sig}): rollback incomplete, left on the host: "
+            + ", ".join(describe_leftover(x) for x in left) + kept)
+
+
+def upload_cancel_message(args, sig):
+    if getattr(sig, "stage", None) == "download":
+        return f"download cancelled ({sig}): nothing was sent to the host"
+    left = getattr(sig, "leftovers", None)
+    if left is None and _last_done(sig):
+        return f"upload cancelled ({sig}) after it completed: {args.pool}/{args.name} is kept"
+    if left is None:
+        return f"upload cancelled ({sig}) before any volume was created"
+    if not left:
+        return f"upload cancelled ({sig}): the partial volume was deleted"
+    return (f"upload cancelled ({sig}): the partial volume could not be deleted: "
+            + ", ".join(describe_leftover(x) for x in left))
+
+
 def cancel_data(args, sig):
     """Champs du JSON d'annulation : `leftovers` (et `created`) d'un clonage
-    commencé, `pending` d'une suppression dont le undefine était parti."""
+    commencé, `pending` d'une suppression dont le undefine était parti ;
+    `created`, `failed`, `leftovers` d'une création ; `changes` et
+    `leftovers` d'une modification ; `leftovers` d'un téléversement."""
+    if getattr(args, "dry_run", False):
+        return None
+    if args.cmd == "vm" and args.vcmd == "create" and hasattr(sig, "leftovers"):
+        return {"created": list(getattr(sig, "created", None) or []),
+                "failed": getattr(sig, "failed", None), "leftovers": list(sig.leftovers)}
+    if args.cmd == "vm" and args.vcmd in EDIT_COMMANDS and hasattr(sig, "changes"):
+        return {"changes": list(sig.changes), "leftovers": list(getattr(sig, "leftovers", [])
+                                                                or [])}
+    if args.cmd in ("vol", "image") and getattr(args, "ocmd", None) in UPLOADS and \
+            hasattr(sig, "leftovers"):
+        return {"leftovers": list(sig.leftovers)}
     if args.cmd == "clone" and not getattr(args, "dry_run", False):
         left = getattr(sig, "leftovers", None)
         if left is not None:
@@ -1541,6 +2790,12 @@ def build_parser():
     sp = hp.add_parser("remove", parents=[common], help="remove a host, its key and fingerprint")
     sp.add_argument("name")
     sp.set_defaults(fn=cmd_host_remove)
+    sp = hp.add_parser("caps", parents=[common],
+                       help="what the VM form can offer on a host, with the reason of each "
+                            "option that is not available")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--machine", help="q35 or pc (default: both)")
+    sp.set_defaults(fn=cmd_host_caps)
 
     sp = sub.add_parser("inventory", parents=[common], help="host summary and VMs (all hosts in parallel)")
     sp.add_argument("--host")
@@ -1584,6 +2839,8 @@ def build_parser():
                          f"(default {DELETE_SURVEY_TIMEOUT})")
     sp.set_defaults(fn=cmd_vm_delete)
 
+    add_next_parsers(sub, vp, common)
+
     np = sub.add_parser("snapshot", help="internal snapshots of a VM").add_subparsers(
         dest="scmd", required=True)
     sp = np.add_parser("list", parents=[common], help="snapshots of a VM")
@@ -1610,6 +2867,229 @@ def build_parser():
     sp.add_argument("--timeout", type=int, help=f"seconds (default {CLONE_TIMEOUT})")
     sp.set_defaults(fn=cmd_clone)
     return ap
+
+
+def _vm_target(sp):
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--name", required=True)
+
+
+def add_next_parsers(sub, vp, common):
+    """Sous-commandes de création, modification, images, volumes, pools et
+    réseaux (prochaine version KVM)."""
+    sp = vp.add_parser("create", parents=[common],
+                       help="create one or several VMs from a JSON spec (or options)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--spec-file", help="JSON VmSpec (- for standard input)")
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.add_argument("--timeout", type=int, help=f"seconds (default {CREATE_TIMEOUT})")
+    sp.add_argument("--name")
+    sp.add_argument("--instances", type=int)
+    sp.add_argument("--vcpus", type=int)
+    sp.add_argument("--memory-mib", type=int)
+    for flag in ("os", "machine", "firmware", "title", "description", "hostname",
+                 "seed-pool"):
+        sp.add_argument(f"--{flag}")
+    sp.add_argument("--disk", action="append", metavar="KIND:...",
+                    help="blank:POOL:SIZE, image:POOL/IMAGE[:SIZE][:copy], volume:POOL/VOLUME, "
+                         "iso:POOL/VOLUME (repeatable)")
+    sp.add_argument("--nic", action="append", metavar="KIND:SOURCE",
+                    help="network:NAME, bridge:NAME, direct:IFACE[:MODE] (repeatable)")
+    sp.add_argument("--user-data", metavar="FILE")
+    sp.add_argument("--network-data", metavar="FILE")
+    for flag in ("start", "autostart", "secure-boot", "tpm"):
+        sp.add_argument(f"--{flag}", action="store_true")
+    sp.add_argument("--vnc-password", action="store_true",
+                    help="protect the display with a password generated by the console "
+                         "(never shown)")
+    sp.set_defaults(fn=cmd_vm_create)
+
+    sp = vp.add_parser("edit", parents=[common],
+                       help="change a VM: applied now when libvirt allows it, else at next start")
+    _vm_target(sp)
+    sp.add_argument("--spec-file", required=True, help="JSON spec of the fields to change")
+    sp.add_argument("--expect-config", "--expect-digest", dest="expect_config",
+                    metavar="DIGEST", help="config_digest read when the form was opened")
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.add_argument("--timeout", type=int, help=f"seconds (default {EDIT_TIMEOUT})")
+    sp.set_defaults(fn=cmd_vm_edit)
+
+    sp = vp.add_parser("cpumem", parents=[common], help="vCPU and memory, live up to the maximums")
+    _vm_target(sp)
+    sp.add_argument("--vcpus", type=int)
+    sp.add_argument("--memory-mib", type=int)
+    sp.set_defaults(fn=cmd_vm_cpumem)
+    sp = vp.add_parser("add-volume", parents=[common], help="add a disk (JSON disk spec)")
+    _vm_target(sp)
+    sp.add_argument("--spec-file", required=True)
+    sp.set_defaults(fn=cmd_vm_add_volume)
+    sp = vp.add_parser("remove-volume", parents=[common],
+                       help="remove a disk (its volume is kept)")
+    _vm_target(sp)
+    sp.add_argument("--target", required=True)
+    sp.set_defaults(fn=cmd_vm_remove_volume)
+    sp = vp.add_parser("insert-cdrom", parents=[common], help="put a volume in a CD-ROM drive")
+    _vm_target(sp)
+    sp.add_argument("--target", required=True)
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--volume", required=True)
+    sp.set_defaults(fn=cmd_vm_insert_cdrom)
+    sp = vp.add_parser("eject-image", parents=[common], help="empty a CD-ROM drive")
+    _vm_target(sp)
+    sp.add_argument("--target", required=True)
+    sp.set_defaults(fn=cmd_vm_eject_image)
+    sp = vp.add_parser("add-nic", parents=[common], help="add a network card (JSON card spec)")
+    _vm_target(sp)
+    sp.add_argument("--spec-file", required=True)
+    sp.set_defaults(fn=cmd_vm_add_nic)
+    sp = vp.add_parser("remove-nic", parents=[common], help="remove the network card with this MAC")
+    _vm_target(sp)
+    sp.add_argument("--mac", required=True)
+    sp.set_defaults(fn=cmd_vm_remove_nic)
+    sp = vp.add_parser("cloudinit", parents=[common],
+                       help="new cloud-init seed (JSON: user_data, network_data, hostname)")
+    _vm_target(sp)
+    sp.add_argument("--spec-file", required=True)
+    sp.add_argument("--rerun", action="store_true",
+                    help="new instance-id: cloud-init runs its first-boot modules again")
+    sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH",
+                    help="file the SSH user cannot read, accepted when removing the old seed")
+    sp.set_defaults(fn=cmd_vm_cloudinit)
+
+    def upload_opts(sp):
+        sp.add_argument("--host", required=True)
+        sp.add_argument("--pool", required=True)
+        sp.add_argument("--name", required=True, help="name of the new volume")
+        sp.add_argument("--sha256", help="expected SHA-256 of the file")
+        sp.add_argument("--format", help="qcow2, raw or iso (checked against the file)")
+        sp.add_argument("--no-verify", action="store_true",
+                        help="do not recompute the SHA-256 on the host after the upload")
+        sp.add_argument("--limit-mbps", type=float, help="bandwidth cap in megabits per second")
+        sp.add_argument("--author", help="who uploads (kept in the console notes)")
+
+    def delete_opts(sp, volume_flag="--name"):
+        sp.add_argument("--host", required=True)
+        sp.add_argument("--pool", required=True)
+        sp.add_argument(volume_flag, dest="name", required=True)
+        sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH")
+        sp.add_argument("--expect-delete", metavar="DIGEST",
+                        help="digest of the previewed plan: refused if the volume changed")
+        sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+        sp.set_defaults(fn=cmd_vol_delete)
+
+    ip = sub.add_parser("image", help="image catalogue of a host").add_subparsers(
+        dest="ocmd", required=True)
+    sp = ip.add_parser("list", parents=[common], help="images of a host")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--fresh", action="store_true", help="read the host now (no cached survey)")
+    sp.set_defaults(fn=cmd_image_list)
+    sp = ip.add_parser("verify", parents=[common], help="recompute the SHA-256 on the host")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--volume", required=True)
+    sp.add_argument("--sha256", help="expected value (default: the one noted at upload)")
+    sp.set_defaults(fn=cmd_image_verify)
+    sp = ip.add_parser("upload", parents=[common], help="send a local file as a new image")
+    upload_opts(sp)
+    sp.add_argument("--file", required=True)
+    sp.set_defaults(fn=cmd_vol_upload)
+    sp = ip.add_parser("download-url", parents=[common],
+                       help="download an http(s) URL on this machine, then send it to the host")
+    upload_opts(sp)
+    sp.add_argument("--url", required=True)
+    sp.set_defaults(fn=cmd_image_download)
+    sp = ip.add_parser("delete", parents=[common], help="delete an image (refused while used)")
+    delete_opts(sp, "--volume")
+
+    op = sub.add_parser("vol", help="storage volumes").add_subparsers(dest="ocmd", required=True)
+    sp = op.add_parser("create", parents=[common], help="blank volume, or linked to an image")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--capacity", required=True, help="bytes, or with K, M, G, T")
+    sp.add_argument("--format", default="qcow2")
+    sp.add_argument("--backing", metavar="IMAGE", help="image of the same pool (linked volume)")
+    sp.add_argument("--prealloc-metadata", action="store_true")
+    sp.set_defaults(fn=cmd_vol_create)
+    sp = op.add_parser("upload", parents=[common], help="send a local file as a new volume")
+    upload_opts(sp)
+    sp.add_argument("--file", required=True)
+    sp.set_defaults(fn=cmd_vol_upload)
+    sp = op.add_parser("resize", parents=[common], help="grow a volume of a shut off VM")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--name", required=True)
+    sp.add_argument("--capacity", required=True, help="bytes, or with K, M, G, T")
+    sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH")
+    sp.set_defaults(fn=cmd_vol_resize)
+    sp = op.add_parser("delete", parents=[common], help="delete a volume (refused while used)")
+    delete_opts(sp)
+
+    pp = sub.add_parser("pool", help="storage pools").add_subparsers(dest="ocmd", required=True)
+    sp = pp.add_parser("define", parents=[common], help="create a dir or NFS pool")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--spec-file")
+    sp.add_argument("--name")
+    sp.add_argument("--type", help="dir (default) or netfs")
+    sp.add_argument("--path")
+    sp.add_argument("--source-host")
+    sp.add_argument("--source-dir")
+    sp.add_argument("--autostart", action="store_true")
+    sp.add_argument("--dry-run", action="store_true", help="checks and XML only")
+    sp.set_defaults(fn=cmd_pool_define)
+    for verb, text in (("start", "start a pool"),
+                       ("stop", "stop a pool (pool-destroy: no data is destroyed)"),
+                       ("refresh", "rescan the volumes of a pool"),
+                       ("autostart", "start the pool with the host (--disable: no)")):
+        sp = pp.add_parser(verb, parents=[common], help=text)
+        sp.add_argument("--host", required=True)
+        sp.add_argument("--pool", required=True)
+        if verb == "autostart":
+            sp.add_argument("--disable", action="store_true")
+        sp.set_defaults(fn=lambda a, _v=verb: pool_gesture(a, _v))
+    sp = pp.add_parser("delete", parents=[common], help="undefine a pool (files kept by default)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--pool", required=True)
+    sp.add_argument("--remove-dir", action="store_true",
+                    help="also remove the directory, only when the pool is empty")
+    sp.add_argument("--acknowledge-unreadable", action="append", metavar="PATH")
+    sp.add_argument("--expect-delete", metavar="DIGEST")
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.set_defaults(fn=cmd_pool_delete)
+
+    xp = sub.add_parser("net", help="libvirt networks").add_subparsers(dest="ocmd", required=True)
+    sp = xp.add_parser("define", parents=[common], help="create a NAT, routed, isolated or "
+                                                        "bridge network")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--spec-file")
+    sp.add_argument("--name")
+    sp.add_argument("--mode", help="nat, route, isolated or bridge")
+    sp.add_argument("--subnet")
+    sp.add_argument("--bridge")
+    sp.add_argument("--dhcp-start")
+    sp.add_argument("--dhcp-end")
+    sp.add_argument("--domain")
+    sp.add_argument("--no-dhcp", action="store_true")
+    sp.add_argument("--autostart", action="store_true")
+    sp.add_argument("--dry-run", action="store_true", help="checks and XML only")
+    sp.set_defaults(fn=cmd_net_define)
+    for verb, text in (("start", "start a network"), ("stop", "stop a network"),
+                       ("autostart", "start the network with the host (--disable: no)")):
+        sp = xp.add_parser(verb, parents=[common], help=text)
+        sp.add_argument("--host", required=True)
+        sp.add_argument("--network", required=True)
+        if verb == "autostart":
+            sp.add_argument("--disable", action="store_true")
+        sp.set_defaults(fn=lambda a, _v=verb: net_gesture(a, _v))
+    sp = xp.add_parser("delete", parents=[common], help="undefine a network (refused while cited)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--network", required=True)
+    sp.add_argument("--expect-delete", metavar="DIGEST")
+    sp.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
+    sp.set_defaults(fn=cmd_net_delete)
+    sp = xp.add_parser("links", parents=[common], help="bridges and links of the host")
+    sp.add_argument("--host", required=True)
+    sp.set_defaults(fn=cmd_net_links)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ de la maison) ; arrêter un réseau qu'une VM en marche utilise, ou supprimer
 un réseau qu'une définition cite, est refusé.
 """
 
+import hashlib
 import ipaddress
 import json
 import re
@@ -365,12 +366,28 @@ def delete_network_plan(host, name):
     if doms["unknown"]:
         refusals.append(f"{ks.REASON_UNPROVEN}: unreadable VM definition(s) "
                         f"{', '.join(doms['unknown'])}")
-    return {"name": name, "network": net, "refusals": refusals}
+    plan = {"name": name, "network": net, "refusals": refusals}
+    plan["digest"] = network_digest(plan)
+    return plan
 
 
-def delete_network(host, name, step=None):
+def network_digest(plan):
+    """Empreinte d'un plan de suppression de réseau : nom, uuid, mode, pont
+    et adresses. Un réseau recréé ou changé entre l'aperçu et l'exécution
+    n'a plus la même."""
+    net = plan.get("network") or {}
+    doc = json.dumps({"name": plan.get("name"), "uuid": net.get("uuid"),
+                      "forward": net.get("forward"), "bridge": net.get("bridge"),
+                      "ips": net.get("ips")}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(doc.encode()).hexdigest()
+
+
+def delete_network(host, name, step=None, expect_digest=None):
     """`net-destroy` (s'il est actif) puis `net-undefine`, après un plan
-    recalculé ; refus si une définition de domaine le cite."""
+    recalculé ; refus si une définition de domaine le cite. `expect_digest` :
+    `digest` de l'aperçu montré, sinon OpError `plan-changed`."""
+    ko.check_digest(expect_digest)
+
     def st(sid, status, msg=""):
         if step:
             step(sid, status, msg)
@@ -380,6 +397,10 @@ def delete_network(host, name, step=None):
     if plan["refusals"]:
         st("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"]})
+    if expect_digest is not None and expect_digest != plan["digest"]:
+        msg = f"network {name} changed since the preview: nothing was done; preview again"
+        st("plan", "failed", msg)
+        raise OpError("plan-changed", msg, {"refusals": []})
     st("plan", "done", "nothing uses it")
     st("delete", "running", name)
     if plan["network"]["active"]:

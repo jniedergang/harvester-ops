@@ -203,7 +203,7 @@ def pool_state(host, pool):
     root = kh._safe_xml(xml)
     h = root.find("source/host")
     st.update(state=info.get("State", ""), autostart=info.get("Autostart") == "yes",
-              persistent=info.get("Persistent") == "yes",
+              persistent=info.get("Persistent") == "yes", uuid=root.findtext("uuid"),
               source_host=h.get("name") if h is not None else None,
               source_dir=(root.find("source/dir").get("path")
                           if root.find("source/dir") is not None else None))
@@ -507,8 +507,17 @@ def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=Tru
     st("check", "done", f"{info['format']}, {info['size']} bytes")
     started = time.monotonic()
     ko.invalidate_survey(host)
-    host.virsh("vol-create-as", "--pool", pool, "--name", name, "--capacity",
-               str(info["size"]), "--format", "raw")
+    try:
+        host.virsh("vol-create-as", "--pool", pool, "--name", name, "--capacity",
+                   str(info["size"]), "--format", "raw")
+    except kh.KvmError:
+        raise                           # refusé (ou existait déjà) : rien de nôtre
+    except BaseException as exc:
+        # interrompu pendant la création (annulation) : le nom était libre
+        # juste avant, le volume éventuellement créé est donc le nôtre
+        left = _delete_partial(host, pool, name)
+        exc.leftovers = [left] if left else []
+        raise
     try:
         st("upload", "running", f"{info['size']} bytes")
         host.run_stream(["env", "LC_ALL=C", "virsh", "-q", "-c",
@@ -1080,16 +1089,32 @@ def delete_pool_plan(host, name, remove_dir=False, busy=(), acknowledged_unreada
             refusals.append("start the pool first so that the console can see it is empty")
         if st.get("type") not in ("dir", "netfs"):
             refusals.append("the console only removes the directory of dir and NFS pools")
-    return {"name": name, "state": st, "remove_dir": bool(remove_dir), "volumes": names,
+    plan = {"name": name, "state": st, "remove_dir": bool(remove_dir), "volumes": names,
             "refusals": refusals, "unreadable": sorted(survey.unreadable),
             "acknowledged_unreadable": sorted(ack & survey.unreadable)}
+    plan["digest"] = pool_digest(plan)
+    return plan
+
+
+def pool_digest(plan):
+    """Empreinte d'un plan de suppression de pool : nom, uuid, type, cible,
+    retrait du répertoire et volumes vus. Un pool recréé sous le même nom,
+    déplacé ou rempli entre l'aperçu et l'exécution n'a plus la même."""
+    st = plan.get("state") or {}
+    doc = json.dumps({"name": plan.get("name"), "uuid": st.get("uuid"), "type": st.get("type"),
+                      "target": st.get("target_path"), "remove_dir": plan.get("remove_dir"),
+                      "volumes": plan.get("volumes")}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(doc.encode()).hexdigest()
 
 
 def delete_pool(host, name, remove_dir=False, busy=(), step=None, acknowledged_unreadable=None,
-                survey_timeout=None):
+                survey_timeout=None, expect_digest=None):
     """Supprime un pool après un plan recalculé : `pool-destroy` (s'il est
     actif), `pool-delete` si demandé et vide, `pool-undefine`. Jamais de
-    suppression de volumes en masse."""
+    suppression de volumes en masse. `expect_digest` : `digest` de l'aperçu
+    montré ; s'il ne correspond plus, OpError `plan-changed`, rien n'est fait."""
+    ko.check_digest(expect_digest)
+
     def stp(sid, status, msg=""):
         if step:
             step(sid, status, msg)
@@ -1099,6 +1124,10 @@ def delete_pool(host, name, remove_dir=False, busy=(), step=None, acknowledged_u
     if plan["refusals"]:
         stp("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]), {"refusals": plan["refusals"]})
+    if expect_digest is not None and expect_digest != plan["digest"]:
+        msg = f"pool {name} changed since the preview: nothing was done; preview again"
+        stp("plan", "failed", msg)
+        raise OpError("plan-changed", msg, {"refusals": []})
     stp("plan", "done", "nothing uses it")
     stp("delete", "running", name)
     ko.invalidate_survey(host)
