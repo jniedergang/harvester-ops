@@ -409,3 +409,11 @@ def test_cancel_of_a_vm_delete_needs_the_admin_role(as_user, env):
     assert wapp.ACTIONS[aid].required_role == "admin"
     r2 = as_user("alice", "DELETE", f"/api/action/{aid}")
     assert r2.status_code == 403
+
+
+def test_a_failed_read_is_logged_with_the_library_message(client, lib, caplog):
+    import logging
+    with caplog.at_level(logging.WARNING):
+        r = client.get("/api/kvm/vms/node2/gone/snapshots")
+    assert r.status_code == 502
+    assert any("snapshots failed" in m and "no route" in m for m in caplog.messages)

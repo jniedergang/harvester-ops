@@ -201,8 +201,15 @@ const KVMVm = (() => {
       controls();
     }
 
-    async function load(fresh) {
-      const d = await getJson(`${base(host, domain)}/snapshots${fresh ? '?fresh=1' : ''}`);
+    // `retry` : relecture juste après une action ; libvirt peut encore finir
+    // le travail de l'instantané (vu sur node2 juste après un retour) : un
+    // second essai 2 s plus tard au lieu d'une fenêtre vide
+    async function load(fresh, retry) {
+      let d = await getJson(`${base(host, domain)}/snapshots${fresh ? '?fresh=1' : ''}`);
+      if (retry && d.error && d.status === 502 && root.isConnected) {
+        await new Promise((r) => setTimeout(r, 2000));
+        d = await getJson(`${base(host, domain)}/snapshots?fresh=1`);
+      }
       if (!root.isConnected) return;
       st.data = d;
       render();
@@ -259,7 +266,7 @@ const KVMVm = (() => {
           if (ok) say(okHtml(doneText(act, snap, o)));
           else say(`${errHtml(failText(r, o))}${listHtml(o.refusals)}`);
           if (ok && act === 'create') form.elements.name.value = defaultSnapshotName(domain);
-          load(true);
+          load(true, true);
           refreshList();
         });
       } catch (e) {

@@ -21532,6 +21532,8 @@ def _kvm_op_error(e, extra=None):
     trace ni un chemin d'état."""
     kind = getattr(e, "kind", "failed")
     code = 400 if kind == "invalid" else 404 if kind == "notfound" else 502
+    if code == 502:
+        log.warning("KVM: %s failed: %s", request.path, getattr(e, "message", type(e).__name__))
     return jsonify(dict(extra or {}, error=getattr(e, "message", str(e)), kind=kind)), code
 
 

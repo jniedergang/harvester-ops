@@ -136,6 +136,9 @@ def ui(context, flask_server):
                 name, what = mm.groups()
                 v = next(x for x in VMS if x["name"] == name)
                 if what == "snapshots":
+                    if state.get("fail_lists"):
+                        state["fail_lists"] -= 1
+                        return ok(route, {"error": "node2: failed: error: domain is busy", "kind": "failed"}, 502)
                     return ok(route, {"host": "node2", "name": name, "role": state["role"],
                                       "snapshots": SNAPS.get(name, []), "current": None,
                                       "support": ["raw disk vda: internal snapshots need qcow2"] if name == "rawvm" else [],
@@ -495,3 +498,22 @@ def test_the_dock_shows_the_new_labels_as_text(context, flask_server, verb):
     expect(card.locator(".name")).to_contain_text(EVIL)
     expect(card.locator(".step-msg")).to_contain_text(f"snapshot {EVIL_SNAP} of {EVIL}", timeout=10000)
     assert page.locator("img[src='x']").count() == 0 and page.evaluate("window.__xss") is None
+
+
+@pytest.mark.parametrize("failures,rows", [(1, 3), (2, 0)])
+def test_the_reload_after_an_action_tries_once_more(ui, failures, rows):
+    """Relecture juste après une action : un échec passager (vu sur node2
+    juste après un retour) est relu une fois, 2 s plus tard ; un second
+    échec est dit tel quel."""
+    page, state, _ = ui
+    panel = open_op(page, "web", "snapshots", ".kvm-snapshots")
+    expect(panel.locator("tr[data-ks-row]")).to_have_count(3)
+    state["fail_lists"] = failures
+    panel.locator('tr[data-ks-row="s-run"] [data-ks-act="revert"]').click()
+    panel.locator('[data-ks="confirm"] [data-ks="yes"]').click()
+    expect(panel.locator('[data-ks="msg"]')).to_contain_text("web reverted to s-run")
+    if rows:
+        expect(panel.locator("tr[data-ks-row]")).to_have_count(rows, timeout=6000)
+    else:
+        expect(panel.locator('[data-ks="list"] .res-error')).to_contain_text("domain is busy", timeout=6000)
+    assert state["fail_lists"] == 0
