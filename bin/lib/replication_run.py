@@ -456,8 +456,32 @@ def _resolve_vms(ctx, kube):
     return kube.list(K_VM, plan["selector_namespace"], selector=plan["selector"])
 
 
-def _vm_disks(kube, vm, classes):
+IMAGE_CLASS_ANNOTATION = "harvesterhci.io/storageClassName"
+
+
+def _image_class(kube, image_id, cache):
+    """Classe sur laquelle une image Harvester a été bâtie :
+    `spec.targetStorageClassName`, sinon l'annotation
+    `harvesterhci.io/storageClassName` (le mutateur de Harvester pose les deux,
+    pkg/image/common/mutator.go `EnsureTargetSC`). None si l'image est
+    illisible ou absente."""
+    if image_id in cache:
+        return cache[image_id]
+    ns, _, name = (image_id or "").partition("/")
+    img = None
+    if ns and name:
+        try:
+            img = kube.get(K_IMAGE, ns, name)
+        except Exception:                       # noqa: BLE001
+            img = None
+    cache[image_id] = (_spec(img).get("targetStorageClassName")
+                       or (_md(img).get("annotations") or {}).get(IMAGE_CLASS_ANNOTATION)) if img else None
+    return cache[image_id]
+
+
+def _vm_disks(kube, vm, classes, images=None):
     ns = _md(vm).get("namespace")
+    images = {} if images is None else images
     out = []
     for vol in vt._tspec(vm).get("volumes") or []:
         claim = (vol.get("persistentVolumeClaim") or {}).get("claimName")
@@ -472,8 +496,9 @@ def _vm_disks(kube, vm, classes):
         sc_name = ps.get("storageClassName")
         size = vt.parse_quantity(((ps.get("resources") or {}).get("requests") or {}).get("storage")) \
             or _int(_spec(lh).get("size"))
+        image = (_md(pvc).get("annotations") or {}).get(rp.IMAGE_ID_ANNOTATION) or None
         out.append({"disk": vol.get("name"), "claim": claim, "size": size, "storage_class": sc_name,
-                    "image": (_md(pvc).get("annotations") or {}).get(rp.IMAGE_ID_ANNOTATION) or None,
+                    "image": image, "image_class": _image_class(kube, image, images) if image else None,
                     "lh_volume": lh, "pvc": pvc, "sc": classes.get(sc_name), "source_volume": lh_name,
                     "access_modes": list(ps.get("accessModes") or ["ReadWriteMany"]),
                     "volume_mode": ps.get("volumeMode") or "Block"})
@@ -496,10 +521,10 @@ def collect_source(ctx):
         jobs={_md(j)["name"]: {"task": _spec(j).get("task"), "groups": list(_spec(j).get("groups") or [])}
               for j in jobs},
         recurring_jobs={_md(j)["name"]: _labels(j) for j in jobs})
-    vms, bis = [], {}
+    vms, bis, images = [], {}, {}
     for vm in _resolve_vms(ctx, src):
         md = _md(vm)
-        disks = _vm_disks(src, vm, classes)
+        disks = _vm_disks(src, vm, classes, images)
         vms.append({"uid": md.get("uid"), "namespace": md.get("namespace"), "name": md.get("name"), "vm": vm,
                     "firmware_uuid": rp.firmware_uuid(vm), "disks": disks})
         for d in disks:

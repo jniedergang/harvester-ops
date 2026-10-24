@@ -848,6 +848,38 @@ def test_protect_two_classes_on_the_same_disks_do_not_warn_a_shared_pool(tmp_pat
     assert "capacity-shared-pool" not in codes, codes
 
 
+@pytest.mark.parametrize("image,expected_class,expected_base", [
+    # classe de base dans la spec de l'image (mutateur de Harvester)
+    ({"spec": {"targetStorageClassName": "harvester-longhorn"}}, "fast", "harvester-longhorn"),
+    # classe de base dans l'annotation seule
+    ({"metadata": {"annotations": {"harvesterhci.io/storageClassName": "harvester-longhorn"}}},
+     "fast", "harvester-longhorn"),
+    # image absente : classe par défaut de la cible, comme avant
+    (None, "harvester-longhorn", None),
+])
+def test_image_disk_without_image_mapping_takes_the_mapped_base_class(tmp_path, image, expected_class,
+                                                                       expected_base):
+    # vu sur le banc (v1.99.0) : un disque d'image sans correspondance d'image
+    # tombait sur la classe par défaut de la cible sans passer par la
+    # correspondance des classes du plan
+    w = World(tmp_path, mappings={"networks": {"default/prod": "default/lab-net"},
+                                  "storage_classes": {"harvester-longhorn": "fast"}})
+    w.dst.put(rr.K_SC, {"metadata": {"name": "fast"}, "provisioner": rp.LONGHORN_DRIVER,
+                        "parameters": {"numberOfReplicas": "1"}})
+    if image is not None:
+        obj = {"metadata": {"name": "img1", "namespace": "default"}, "spec": {}}
+        obj["metadata"].update(image.get("metadata") or {})
+        obj["spec"].update(image.get("spec") or {})
+        w.src.put(rr.K_IMAGE, obj)
+    ctx = w.ctx()
+    src = rr.collect_source(ctx)
+    dst = rr.collect_target(ctx, ["default"])
+    disks = [d for vm in src["vms"] for d in vm["disks"] if d["image"]]
+    assert disks and {d["image_class"] for d in disks} == {expected_base}
+    works = rr.build_works(ctx, src, dst)
+    assert {d["target_class"] for wk in works for d in wk["disks"] if d["image"]} == {expected_class}
+
+
 def test_protect_dry_run_writes_nothing_and_defers_what_protect_creates_first(world):
     # vu sur le banc (harvlab -> harvlab2) : avant la première protection, le
     # namespace des carnets et la backing image à restaurer n'existent pas ;

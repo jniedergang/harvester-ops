@@ -354,6 +354,38 @@ def test_check_clean_plan_two_vms_three_disks():
     assert order == sorted(order)
 
 
+# v1.99.0 : un disque d'image sans correspondance d'image passe par la
+# correspondance des classes du plan, depuis la classe de base de l'image
+@pytest.mark.parametrize("disk_kw,maps,images,expected", [
+    # classe de base de l'image, correspondance du plan : harv-rep1
+    (dict(image_class="harvester-longhorn"), {"harvester-longhorn": "harv-rep1"}, {},
+     ("harv-rep1", "warn", "harvester-longhorn")),
+    # classe de base présente sous le même nom sur la cible
+    (dict(image_class="harv-rep1"), {}, {}, ("harv-rep1", "warn", "harv-rep1")),
+    # classe de base qui mène à une classe absente : classe par défaut de la cible
+    (dict(image_class="gold"), {"gold": "platinum"}, {}, ("harvester-longhorn", "warn", None)),
+    # classe de base inconnue (image illisible) : classe par défaut de la cible
+    (dict(image_class=None), {"harvester-longhorn": "harv-rep1"}, {}, ("harvester-longhorn", "warn", None)),
+    # la classe propre du disque est dans la correspondance : elle gagne, sans constat
+    (dict(image_class="harvester-longhorn"), {"lh-cirros": "harv-rep1", "harvester-longhorn": "x"}, {},
+     ("harv-rep1", None, None)),
+    # image mise en correspondance : la classe de l'image cible
+    (dict(image_class="harvester-longhorn"), {"harvester-longhorn": "harvester-longhorn"},
+     {"default/cirros2": {"storage_class": "harv-rep1"}}, ("harv-rep1", None, None)),
+])
+def test_image_disk_without_image_mapping_follows_the_class_mapping(disk_kw, maps, images, expected):
+    d = dict(disk("disk-0", "rep-a-root", GiB, "pvc-a0", sc="lh-cirros", image="default/cirros",
+                  backing="vmi-cirros"), **disk_kw)
+    p = plan_obj()
+    p["mappings"] = dict(p["mappings"], storage_classes=maps,
+                         images={"default/cirros": "default/cirros2"} if images else {})
+    _src, dst = facts(dst__images=images)
+    sc, f = rp._target_class(d, p, dst)
+    assert (sc, f and f["level"], f and f["facts"].get("image_class")) == expected
+    if f:
+        assert f["code"] == "image-unmapped" and f["facts"]["storage_class"] == sc
+
+
 def mutate_vm(src, i, **kw):
     src["vms"][i]["vm"] = vm_obj(src["vms"][i]["name"], src["vms"][i]["uid"],
                                  [(d["disk"], d["claim"]) for d in src["vms"][i]["disks"]], **kw)

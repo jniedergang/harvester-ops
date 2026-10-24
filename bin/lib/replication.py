@@ -772,7 +772,18 @@ def _target_class(disk, plan, dst):
         return m, None
     if image:
         # disque d'image sans image correspondante : la backing image suit le
-        # volume, le PVC prend la classe par défaut de la cible
+        # volume. Sa classe propre (`lh-<uid>`, liée à l'image source) n'existe
+        # pas sur la cible : le PVC prend la classe sur laquelle l'image a été
+        # bâtie (`image_class`, annotation `harvesterhci.io/storageClassName`
+        # de l'image, posée par le mutateur de Harvester), passée par la
+        # correspondance des classes du plan ; à défaut, la classe par défaut
+        # de la cible (v1.99.0)
+        base = disk.get("image_class")
+        if base:
+            mb = (maps.get("storage_classes") or {}).get(base, base)
+            if mb in classes:
+                return mb, _finding("image-unmapped", "warn", image=image, storage_class=mb,
+                                    image_class=base)
         d = dst.get("default_storage_class")
         if d in classes:
             return d, _finding("image-unmapped", "warn", image=image, storage_class=d)
@@ -846,8 +857,9 @@ def check(src, dst, plan):
     {"checksum", "size"}}, "jobs": {nom: {"task", "groups"}} (tâches
     récurrentes, voir `backup_membership`), "recurring_jobs": {nom:
     étiquettes}, "vms": [{"uid", "namespace", "name", "vm", "disks":
-    [{"disk", "claim", "size", "storage_class", "image", "lh_volume", "pvc",
-    "sc"}]}]}.
+    [{"disk", "claim", "size", "storage_class", "image", "image_class",
+    "lh_volume", "pvc", "sc"}]}]}. `image_class` : classe sur laquelle l'image
+    d'un disque d'image a été bâtie (voir `_target_class`).
     `dst` : {"cluster", "reachable", "denied", "backup_target",
     "backup_target_available", "longhorn_version", "networks": [...],
     "namespaces": [...], "storage_classes": {nom: {"replicas", "allocatable",
