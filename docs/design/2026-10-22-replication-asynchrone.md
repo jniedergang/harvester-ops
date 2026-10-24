@@ -113,6 +113,32 @@ La taille d'un instantané sous-estime l'envoi d'un facteur pouvant aller jusqu'
 - Tout ce qui touche le cluster de secours est validé par un dry-run serveur.
 - Vue du plan : âge du dernier point appliqué comparé à l'objectif, débit, prochaine synchro, arriéré ; boutons Exercice, Basculer, Retour.
 
+## Ce que la 1.99.0 a appris (banc du 24/10/2026)
+
+- **Étiquettes des sauvegardes.** Les étiquettes d'une tâche récurrente (donc celles du plan) ne sont jamais dans `metadata.labels` d'un `Backup` : elles sont dans `spec.labels` et `status.labels` sur la source, dans `status.labels` sur la cible. `metadata.labels` ne porte que `backup-target` et `backup-volume` (le nom du volume, pas celui du BackupVolume), dès la création. Nos propres sauvegardes portent désormais le plan aux trois endroits, et la suppression des sauvegardes les cherche aux trois.
+- **Volume détaché.** Un instantané ou une sauvegarde d'un volume détaché dit d'abord « waiting for the volume to be attached » pendant 1 à 3 s, puis Longhorn l'attache et le prend. La bascule planifiée prenait ce message pour un échec et défaisait tout.
+- **Après l'activation**, Longhorn 1.12.1 vide `lastRestoredBackup` du moteur et `status.lastBackup` du volume : les points lus juste avant l'activation font foi, rangés avant elle.
+- **Instantané supprimé.** Longhorn relit un instantané supprimé comme un CR sans étiquettes (`markRemoved`) jusqu'à la purge du moteur : une relance prend le nom suivant d'une suite déterministe.
+- **Placeholder de dry-run.** Longhorn 1.12.1 refuse un volume de secours dont `fromBackup` est un placeholder (« cannot get backup none ») et accepte une BackingImage dont `backup-url` en est un.
+- **Groupe par défaut.** Sur Longhorn 1.11.2, chaque volume porte déjà `recurring-job-group.longhorn.io/default: enabled` explicitement : le cas implicite ne s'est pas présenté.
+- **Durées.** Protection de deux VMs en 43 s, bascule planifiée en 83 s (67 s à la main le 23/10), non planifiée en 33 s ; passage appliqué 13 à 46 s après la fin de la sauvegarde ; RPO tenu au plus 382 s pour un objectif de 600 s à un intervalle de 360 s.
+
 ## Étapes suivantes
 
-1. Découper la réalisation : moteur CLI (`bin/harvester-replication.py`), puis vue de suivi, puis fenêtre de création, puis exercices et bascule.
+La réalisation a été découpée ainsi : moteur et ligne de commande, puis vue de suivi, puis fenêtre de création, puis exercices et retour au site principal. Plan de réalisation de la première étape : `2026-10-24-replication-v1-plan.md`.
+
+### Livré en 1.99.0
+
+- Moteur et ligne de commande `bin/harvester-replication.py` : plan gardé par la console (`replication.db`), mesure (tâche sur la source seule, rapport par intervalle candidat, formule), pré-contrôle complet, protection (tâche récurrente, premières sauvegardes, volumes de secours, backing images, carnet de reprise), suiveur (relecture déclenchée après chaque passage, barrière par VM, RPO tenu, statistiques), état, bascule planifiée et non planifiée (forcée sur une source vivante), reprise, déprotection (décision 47), suppression des sauvegardes.
+- Routes de la console, sans écran : chaque geste est une action suivie (dock, Activité), rôles (bascule et suppression des sauvegardes réservées à l'administrateur), kubeconfigs de la personne, suiveur lancé et surveillé par la console avec interrupteurs, métriques Prometheus.
+- Décisions de ju du 24/10/2026 : cloud-init et MAC gardés, VM démarrée après la bascule, suivi par la console par défaut (42 à 45) ; décision 47 (abandonner une bascule ne supprime rien sur la cible) ; processeur et mémoire comptés dans la dérive (49) ; passages de plus de 30 jours réduits à l'heure par volume (55) ; rétention changée par `protect --retain` (56) ; purge des sauvegardes après une bascule terminée laissée manuelle, commande documentée (48).
+- Vérifié sur harvlab (1.8.2 / Longhorn 1.11.2) vers harvlab2 (1.9.0 / Longhorn 1.12.1) le 24/10/2026, huit défauts trouvés et corrigés ; ce qui reste non vérifié est listé dans `docs/fr/capabilites.md`, section 11.
+
+### Reste à faire
+
+1. Vue de suivi de la maquette (`2026-10-22-replication-maquette.html`) : section Protection, liste des plans avec RPO tenu contre l'objectif, sous-menu de chaque hôte, journal par ressource. Les routes de lecture existent déjà et rendent les mêmes lignes que la ligne de commande.
+2. Fenêtre de création à six blocs, avec la commande équivalente.
+3. Exercices : courant (copie séparée restaurée sur un réseau isolé) et complet (activation puis réarmement).
+4. Retour au site principal (reprotection en sens inverse, nouvelle génération du plan).
+5. Source VMware (réplication depuis vCenter vers Harvester), à concevoir avec les migrations Forklift.
+6. Points ouverts du banc : taille des requêtes à travers Rancher pour de grands plans, sens Longhorn 1.12 vers 1.11 par le produit, sauvegardes en erreur, migration à chaud pendant la protection, purge des sauvegardes depuis la console.

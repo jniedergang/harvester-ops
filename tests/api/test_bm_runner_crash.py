@@ -30,7 +30,9 @@ SECRET = "SECRET-FIXTURE-TOKEN"
 
 
 def fake_run():
+    # cancel_requested / kill_grace : champs de tout ActionRun depuis la 1.99.0
     return SimpleNamespace(id="crash0000001", status="starting", _cancel=False,
+                           cancel_requested=False, kill_grace=None,
                            error_summary=None, emit=Mock(), close=Mock())
 
 

@@ -72,14 +72,18 @@ class Kube:
                 return []
             raise
 
-    def create(self, obj):
-        return json.loads(self.run("create", "-f", "-", "-o", "json", input=json.dumps(obj)))
+    def create(self, obj, dry_run=False):
+        """`dry_run` : validation par le serveur (webhooks compris), rien
+        n'est écrit (`--dry-run=server`)."""
+        extra = ["--dry-run=server"] if dry_run else []
+        return json.loads(self.run("create", "-f", "-", "-o", "json", *extra, input=json.dumps(obj)))
 
     def replace(self, obj):
         return json.loads(self.run("replace", "-f", "-", "-o", "json", input=json.dumps(obj)))
 
-    def patch(self, kind, ns, name, patch):
-        self.run("patch", kind, name, *self._ns(ns), "--type", "merge", "-p", json.dumps(patch))
+    def patch(self, kind, ns, name, patch, dry_run=False):
+        extra = ["--dry-run=server"] if dry_run else []
+        self.run("patch", kind, name, *self._ns(ns), "--type", "merge", "-p", json.dumps(patch), *extra)
 
     def apply(self, docs, field_manager="harvester-ops", timeout=None):
         """Application côté serveur d'une liste d'objets (JSON). Rend la

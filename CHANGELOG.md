@@ -4,6 +4,227 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.99.0] - 2026-10-24 - Asynchronous VM replication between Harvester clusters (engine, CLI, console API)
+
+### Added
+- **Replication plans.** A plan names a source and a target Harvester
+  cluster, the VMs (`ns/name` list or a label selector), an RPO objective,
+  the mappings (networks, storage classes, namespaces, images, PVC and VM
+  names) and its options. Defaults: cloud-init kept (same
+  `firmware.uuid`), MAC kept, target VM started after a failover, plan
+  followed by the console. Plans live in `replication.db` in the state
+  directory (mode 0600, additive schema migration). Creating a plan writes
+  nothing on a cluster.
+- **Measurement phase**: `measure start|stop|report` puts a backup job on
+  the source only and recommends an interval from the bytes really sent;
+  `measure formula` forecasts the same from write counters.
+- **Protect**: full pre-check (backup target shared and available,
+  Longhorn pair, networks, classes, images, capacity, MAC, names taken,
+  disks that cannot be replicated), then a Longhorn recurring job per VM,
+  first backups, standby volumes on the target, backing images restored
+  when missing, and a recovery carnet per VM (Secret in
+  `harvester-ops-replication`). `--dry-run` asks the API servers for a dry
+  run of every object. Rerunnable: it adds what is missing and rewrites a
+  changed carnet. `protect --retain N` updates the retention of the
+  recurring job of a protected plan.
+- **Follower**: requests the target resync after each backup pass, waits
+  for every disk of a VM (barrier), checks each standby applied it, and
+  records passes, statistics, RPO held and warnings (backup error, barrier
+  timeout, late apply, RPO exceeded or drifting, degraded standby, spec
+  drift, stale carnet, disk that never backs up, unreachable cluster,
+  source VM running after a failover). Bounded selectors, a constant
+  number of lists per cluster and per round whatever the number of plans,
+  one lease per plan.
+- **Failover**: planned (source stopped and fenced, final backup applied,
+  no loss) and unplanned (`--unplanned --yes`: final target sync, catch-up,
+  points read per disk, skew refused unless `--accept-skew`, loss stated
+  per VM as `lost_after`); `--force-unplanned` fences a source that still
+  answers. Rollback of everything before the activation; after it, the
+  failover is left `interrupted` and `resume` finishes it, with the target
+  alone if needed. Planned results carry `point_at` per VM.
+- **Unprotect** (decision 47): removes what the plan created, except that
+  a VM whose failover activated a volume keeps everything on the target,
+  listed in `left` with `left_selectors`. `--delete-backups` (admin) also
+  deletes the plan's backups, refused with `backups-in-use` while a VM is
+  held by a failover.
+- `bin/harvester-replication.py` (alias `harvester-replication`): `plan
+  create|list|show|set|delete`, `check`, `measure`, `protect`, `follow`,
+  `status` (exit 4 when an objective is exceeded), `resources`, `events`,
+  `failover`, `resume`, `unprotect`. Exit codes 0, 1, 2, 3 (`cancelled` or
+  `interrupted`), 4; one JSON object with `--json`; signals cancel with a
+  bounded rollback (`undo_total`, 240 s).
+- **Console routes** (no screen yet): `GET /api/replication/plans`,
+  `/plans/<id>`, `/plans/<id>/stats`, `/hosts/<cluster>/resources`,
+  `/resources/<uid>/events`, `/follower`; `POST /api/replication/plans`,
+  `/plans/<id>/check`, `/measure`, `/protect`, `/failover`, `/resume`,
+  `/unprotect`; `PATCH /plans/<id>/settings`; `DELETE /plans/<id>`. Each
+  write is a tracked action that runs the command line, labelled
+  `replication:create:<name>` for a creation and `replication:<plan>:<op>`
+  for the other writes (metrics normalise both to `replication:<op>`). Roles: viewer reads, operator writes, admin for a
+  failover, for backup deletion and for resuming either.
+- **Supervised follower**: the console starts one `follow --all --console`
+  child, restarted with backoff (5 s to 300 s), logging to
+  `logs/replication-follow.log` (rotated at 10 MiB through SIGUSR1), one
+  per state directory (`replication-follow.lock`). Kill switches:
+  `HARVESTER_OPS_REPLICATION_FOLLOW=0`, `replication: {follow: false}` in
+  `config.yaml` (hot), and each plan's `follow` and `paused` options.
+- Metrics: `harvester_ops_replication_follower_up`,
+  `harvester_ops_replication_follower_restarts_total`,
+  `harvester_ops_replication_plans_followed`,
+  `harvester_ops_replication_rpo_held_seconds{plan,source,target}` and
+  `harvester_ops_replication_rpo_objective_seconds{plan,source,target}`.
+- Docs: "Disaster recovery" in the capabilities page and its procedure in
+  the operating procedure (EN, FR), README feature line.
+
+- Product decisions of 24/10/2026: CPU and memory changes of a protected
+  VM (cores, sockets, threads, memory guest, requests and limits) count as
+  drift, so `status` warns and `protect` rewrites the carnet; other
+  differences between a VM and its carnet are reported `carnet-stale`
+  (decision 49). Passes and statistics older than 30 days are reduced to
+  one row per hour (passes per volume in `tick_hours`: count, applied,
+  skipped, errors, bytes, worst apply lag; the last applied pass of each
+  volume is kept), and everything goes after 400 days (decision 55). The
+  retention changes only through `protect --retain`: `plan set --retain`
+  and the settings route refuse it and point there (decision 56). Purging
+  the backups after a completed failover stays manual, with the command
+  documented (decision 48).
+
+### Changed
+- A console shutdown (restart, host reboot, forced update) no longer
+  cancels a running replication command (decision 68). The console sends
+  SIGUSR2, which means "stop at the next safe point and keep the state": a
+  protect (initial restore included), a measure or an unprotect stops
+  between two steps or at the next poll of a wait, undoes nothing, and is
+  left `interrupted` (exit 3, `resume_required`, the `step` reached, kept
+  in the journal and in its run). `resume` continues it without copying
+  again what was restored, and a cancel of the resumed protect still
+  undoes the whole protection. The console waits one kubectl call plus
+  15 s for it (a fallback stops the command where it is after one
+  `client` timeout, still without rollback), so the stop budget is no
+  longer spent on rollbacks. A failover not yet activated is still undone
+  (all or nothing before activation). Only a cancel by a person (dock
+  cancel, SIGTERM, Ctrl-C) rolls a protect back. Activity shows
+  "interrupted by the console shutdown"; a command stopped before its
+  first write reports `not-started`. The follower is stopped as before;
+  other actions are untouched.
+- systemd unit: `podman stop -t 600` (was 10) and `TimeoutStopSec=630s`.
+  That budget is now used only by a failover not yet activated or a cancel
+  already under way at shutdown; the console still exits at once when no
+  replication command runs. A plan followed by the console cannot set
+  `undo_total + client` above 570 s (`stop-budget`).
+- The busy check of `_cli_action` and the insertion of the new action
+  happen under one lock for every tool: two simultaneous gestures on the
+  same target can no longer both start.
+- Every action carries `cancel_requested` (false for tools other than
+  replication, whose cancel waits for the command's own result).
+- The `actions_total` and `action_duration_seconds` metrics label
+  replication actions `replication:<op>`, without the plan id or name.
+
+### Fixed
+- Found on the bench (harvlab 1.8.2 to harvlab2 1.9.0): protect dry-run
+  refused what the first protect creates, a standby without any backup,
+  and an already protected plan; a planned failover of a running VM rolled
+  back on Longhorn's transient "waiting for the volume to be attached";
+  a protect rerun after a cancel tripped on the removed first snapshot; a
+  restarted follower waited the lease of its dead predecessor; a
+  failed-over VM kept counting in the plan RPO; `unprotect
+  --delete-backups` never found the recurring job backups (labels in
+  `spec.labels`/`status.labels` only).
+- No `rpo-drift` warning on the first follower round when protect reused
+  a backup older than the interval (points applied by protect or by a
+  failover are marked `applied_by`).
+- The initial restore progress counts the data size of the backup
+  (Longhorn `Backup.status.size`), not the nominal disk size; without it,
+  the summary says "volume size".
+- A planned failover no longer says "writes after X are lost".
+- `check --phase failover-unplanned` with the source lost reports, per VM,
+  the applied points, the skew (and the refusal it would cause) and the
+  disks still catching up.
+- `unprotect-delete-backups` is listed as allowed only when unprotect
+  would accept it (one rule, `held_vms`, for the actions and the engine).
+- An image disk without an image mapping takes the class its image was
+  built on (`harvesterhci.io/storageClassName`), through the plan's class
+  mapping, before falling back to the target default class.
+- After the activation, Longhorn 1.12.1 no longer publishes the applied
+  backup: the points read before the activation are now recorded before
+  it and kept on resume (the dead post-activation reread is gone).
+- A SIGTERM during a command was sometimes swallowed by a guarded read
+  (probe, image class, path scrubbing), so a cancelled `protect --retain`
+  finished with exit 0 and the new value. The cancellation is no longer an
+  `Exception`; measure stop and unprotect release their lock on it.
+- A signal right after `BEGIN IMMEDIATE` left the transaction open, and the
+  rollback of a cancelled protect then failed with an internal error
+  (`OperationalError`) before restoring the plan row. A transaction left
+  open by a signal is now rolled back.
+- `resources` text marks the actions that are not allowed, with their
+  reason (`unprotect-delete-backups (not allowed: backups-in-use)`), and
+  the `plan-drift` message names CPU and memory.
+- The same swallowed-cancel weakness existed in `harvester-network`,
+  `harvester-vm-transfer` (and its library), `harvester-resources` and
+  `harvester-capi`: their cancellation is now a `BaseException`, so a
+  guarded read (configuration, API retry, cleanup) can no longer eat a
+  stop request. The network rollback ignores a second signal, and a
+  cancelled image, upgrade-log or kubeconfig download in
+  `harvester-resources` leaves no partial file.
+- The hourly reduction of replication statistics reread every row older
+  than 30 days at each prune. Rows it has seen are now marked (`reduced`
+  column, additive migration): a second prune reads nothing, and a late
+  row joins its already reduced hour.
+- `/metrics` recomputed every plan's status, with an events query per
+  resource, at each scrape. The replication gauges now come from a reading
+  kept 30 seconds, and are updated and exposed under one lock, so a
+  concurrent scrape never sees half the series.
+- Rerunning protect on a protected plan no longer reports an initial
+  restore of the full backup size when the standby volumes were already up
+  to date ("nothing restored"). The dry unplanned check says that
+  `caught-up` is judged against the backups the target sees now (they may
+  lag 1 to 4 minutes; the real failover resyncs first).
+
+### Security
+- Each write route runs the command line with the person's own
+  kubeconfigs; a cluster the session cannot see is refused (403
+  `target-denied` or `source-denied`), never replaced by the console's
+  kubeconfig. A failover outside a dry run and every unprotect need the
+  plan name as confirmation.
+- Paths (kubeconfigs, state directory, database, home) are scrubbed from
+  every output, the journal and the run records.
+- Plan and VM names are validated before they reach an action label or a
+  command line; values are passed as `--opt=value`.
+- The recovery carnet holds a copy of the VM's cloud-init secrets: keep
+  `harvester-ops-replication` out of every Rancher project, readable by
+  admins only (documented).
+- Bare-metal ISO download (`/api/iso/fetch`, admin role): the URL could
+  reach any address of the console host, Vault on `127.0.0.1:8200`
+  included, directly, through a redirect or through a name resolving to
+  an internal address. The console now resolves the name once and
+  connects to the checked address, refuses loopback, link-local, private,
+  multicast, unspecified, reserved and cloud metadata addresses, and
+  broadcast (255.255.255.255 always, and the broadcast address of an
+  allowed IPv4 network, even when `iso_fetch.allow_private` covers it), follows
+  at most 5 redirects by hand (http and https only, no https to http) and
+  checks every hop again. TLS stays verified. Size cap (20 GiB) and free
+  space (1 GiB kept) are checked before and during the download. Internal
+  mirrors are allowed with `iso_fetch.allow_private` (CIDR list, read at
+  each download). Errors no longer show local paths.
+
+### Tests
+- API: model, store, engine (two simulated clusters with Longhorn
+  controllers, crash and cancel at every mutating call), follower, command
+  line (real SIGTERM harness) and routes, about 1 080 tests, table-driven
+  with a deliberate mutation for each fix.
+- Console shutdown during a replication command (decision 68): a table
+  per protect step (jobs created, first backup in progress, standby
+  created, initial restore in progress) where the shutdown leaves the plan
+  `interrupted` with its objects and resume reaches the same end state with
+  no object created twice, the same steps with an operator cancel rolling
+  back, real subprocesses receiving SIGUSR2 and SIGTERM, the fallback
+  without a safe point, and deliberate mutations (shutdown handled as a
+  cancel, no safe point, resume forgetting what to undo, console sending
+  SIGTERM or waiting the rollback grace) all caught.
+- Real: harvlab to harvlab2 on 24/10/2026 (see the capabilities page for
+  what was and was not verified), and decision 68 the same night through a
+  second console (shutdown during a 2 GiB initial restore, then resume).
+
 ## [1.98.1] - 2026-10-24 - Security: rebuilt image without the compromised emSign CAs
 
 ### Security
