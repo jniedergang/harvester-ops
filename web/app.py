@@ -6566,8 +6566,14 @@ def _baremetal_install_runner(run, opts):
     if opts.get("mode") == "join":
         step("wait-node", "running",
              f"installation en cours, attente de {opts['hostname']} dans {opts['cluster']}")
-        if not _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
-                                   opts["hostname"], deadline, run, step):
+        try:
+            ready = _bm_wait_node_ready(opts["cluster"], _bm_cluster_kubeconfig(opts),
+                                        opts["hostname"], deadline, run, step)
+        except _bmo.ProfileError as e:
+            # garde du profil de stockage : le déroulé échoue, jamais un fil
+            # mort laissant l'action « running » et ses artefacts en place
+            return fail("wait-node", f"Harvester is installed; storage onboarding stopped: {e}")
+        if not ready:
             return fail("wait-node",
                         f"{opts['hostname']} not Ready in {opts['cluster']} after "
                         f"{HARVESTER_INSTALL_TIMEOUT // 60} min")

@@ -109,10 +109,6 @@ def _check_identity(node, run):
     labels = node['metadata'].get('labels', {})
     profile.require(labels.get(profile.INSTALL_ID_LABEL) == _install_id(run),
                     'registered node does not carry this installation identity; no node was patched')
-    # Un installeur plus ancien que le cluster ignore install.cordoned en silence.
-    profile.require(not _native(run) or labels.get(profile.NATIVE_CORDON_LABEL) == 'true',
-                    'registered node lacks the install-cordoned label: the installer ignored '
-                    'install.cordoned; cordon the host by hand')
 
 
 def cordon(api, kc, node, run):
@@ -206,7 +202,16 @@ def finish(api, opts, run, step, deadline):
         if _native(run):
             annotations = node['metadata'].get('annotations') or {}
             if annotations.get(profile.NATIVE_CORDON_DONE) != 'true':
-                report('Waiting for Harvester to apply the install cordon')
+                # Le label n'est pas là à l'enregistrement : kubelet crée le
+                # nœud avec ses seuls --node-labels, rke2 applique ensuite ses
+                # node-label (vu sur le banc : 17 s plus tard, nœud encore
+                # NotReady). Un installeur plus ancien que le cluster ignore
+                # install.cordoned en silence : l'attente est bornée.
+                labels = node['metadata'].get('labels') or {}
+                report('Waiting for Harvester to apply the install cordon'
+                       if labels.get(profile.NATIVE_CORDON_LABEL) == 'true' else
+                       'Waiting for the install-cordoned label; an installer older than the '
+                       'cluster ignores install.cordoned')
                 time.sleep(POLL_SECONDS)
                 continue
             # reconcileInstallCordonedNode laisse planifiable le dernier nœud

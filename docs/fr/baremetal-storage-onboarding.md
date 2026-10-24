@@ -82,7 +82,10 @@ harvester/harvester#11301, présente dans le tag v1.9.0). Harvester fait le
 reste :
 
 - l'installeur ajoute le label `harvesterhci.io/install-cordoned=true` à la
-  configuration de RKE2 : le nœud le porte dès son enregistrement ;
+  configuration de RKE2. RKE2 l'applique une fois son agent démarré, peu après
+  l'enregistrement du nœud par kubelet (17 secondes sur le banc d'essai).
+  Jusqu'à ce qu'il soit prêt, le nœud garde la taint Kubernetes
+  `node.kubernetes.io/not-ready:NoSchedule` ;
 - le contrôleur de promotion cordonne le nœud une seule fois et le note par
   l'annotation `harvesterhci.io/install-cordoned-processed=true` ;
 - rien dans Harvester ne lève ce cordon, et le contrôleur ne choisit jamais un
@@ -91,9 +94,10 @@ reste :
 La console n'écrit rien sur le nœud. Elle attend l'annotation, puis vérifie que
 le nœud est toujours non planifiable. Aucune taint d'onboarding n'est écrite et
 aucun droit de patch sur les nœuds n'est demandé. La tâche s'arrête si le nœud
-n'a pas le label (un installeur plus ancien que le cluster ignore l'option) ou
-s'il est planifiable. Harvester laisse le nœud planifiable quand aucun autre
-nœud n'est disponible.
+est planifiable : Harvester le laisse ainsi quand aucun autre nœud n'est
+disponible. Un installeur plus ancien que le cluster ignore l'option : le label
+n'arrive jamais, et l'attente se termine au délai des vérifications, avec
+cette raison.
 
 Les préversions de v1.9.0 et une version illisible suivent le mécanisme de la
 console ci-dessous.

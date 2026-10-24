@@ -86,7 +86,10 @@ harvester/harvester#11301, present in the v1.9.0 tag). Harvester then does the
 work:
 
 - the installer adds the label `harvesterhci.io/install-cordoned=true` to the
-  RKE2 configuration, so the node carries it from registration;
+  RKE2 configuration. RKE2 applies it once its agent is up, shortly after
+  kubelet registered the node (17 seconds on the test bench). Until the node is
+  Ready it keeps the Kubernetes `node.kubernetes.io/not-ready:NoSchedule`
+  taint;
 - the promote controller cordons the node once and records it with the
   annotation `harvesterhci.io/install-cordoned-processed=true`;
 - nothing in Harvester lifts that cordon, and the controller never selects a
@@ -94,10 +97,10 @@ work:
 
 The console writes nothing to the node. It waits for the processed annotation,
 then checks that the node is still unschedulable. No onboarding taint is
-written and no node patch permission is required. The job stops if the node
-lacks the label (an installer older than the cluster ignores the option) or if
-it is schedulable. Harvester leaves the node schedulable when no other node is
-available.
+written and no node patch permission is required. The job stops if the node is
+schedulable: Harvester leaves it schedulable when no other node is available.
+An installer older than the cluster ignores the option: the label never comes,
+and the wait ends with the readiness timeout and that reason.
 
 Pre-releases of v1.9.0 and unreadable versions use the console mechanism below.
 

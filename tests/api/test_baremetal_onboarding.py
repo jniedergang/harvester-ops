@@ -936,8 +936,6 @@ def test_native_finish_waits_for_the_cordon_then_checks_without_writing(choice, 
 
 @pytest.mark.parametrize('label,change,message', [
     ('last available node left schedulable', lambda n: n['spec'].update(unschedulable=False), 'host is schedulable'),
-    ('installer ignored install.cordoned', lambda n: n['metadata']['labels'].pop(p.NATIVE_CORDON_LABEL),
-     'lacks the install-cordoned label'),
     ('foreign node', lambda n: n['metadata']['labels'].update({p.INSTALL_ID_LABEL: 'other'}), 'installation identity'),
 ], ids=lambda v: v if isinstance(v, str) else '')
 def test_native_finish_stops_without_writing(choice, natively_cordoned, clock, label, change, message):
@@ -961,3 +959,69 @@ def test_final_install_config_carries_native_cordon_from_the_plan(choice):
     rendered = yaml.safe_load(app._harvester_install_config(body, boot_identity=True))
     assert 'cordoned' not in rendered['install']
     assert TAINT_FILE in [f['path'] for f in rendered['os']['write_files']]
+
+
+def test_native_guard_accepts_a_node_registered_before_the_rke2_labels(natively_cordoned):
+    # vu sur le banc : kubelet crée le nœud avec ses seuls --node-labels ;
+    # le label install-cordoned arrive 17 s plus tard, avec ceux de rke2
+    natively_cordoned['metadata']['labels'].pop(p.NATIVE_CORDON_LABEL)
+    natively_cordoned['metadata']['annotations'] = {}
+    natively_cordoned['spec']['unschedulable'] = False
+    api = Cluster(natively_cordoned)
+    assert rt.guard(api, '/operator', natively_cordoned, native_run()) == natively_cordoned
+    assert api.patch_ops() == []
+
+
+def test_native_finish_times_out_when_the_installer_ignored_the_option(choice, natively_cordoned, clock):
+    natively_cordoned['metadata']['labels'].pop(p.NATIVE_CORDON_LABEL)
+    natively_cordoned['metadata']['annotations'] = {}
+    natively_cordoned['spec']['unschedulable'] = False
+    api = Cluster(natively_cordoned, **reads_for(choice))
+    with pytest.raises(p.ProfileError, match='timed out.*installer older than the cluster'):
+        rt.finish(api, opts_for(choice), native_run(), lambda *a: None, 30)
+    assert api.patch_ops() == []
+    assert ('nodes.longhorn.io', HOST, '-n', 'longhorn-system') not in api.calls
+
+
+def test_onboarding_guard_refusal_while_waiting_for_the_node_fails_the_run(monkeypatch, tmp_path, choice):
+    """Vu en réel : une ProfileError de la garde dans wait-node tuait le fil
+    du déroulé, l'action restait « running » et ses artefacts en place."""
+    import app
+    from unittest.mock import Mock
+    import test_baremetal_vm_network as vmt
+    (tmp_path / 'harvester.iso').write_bytes(b'fixture')
+    opts = dict(vmt.install_data(), cluster='test-cluster', _cluster_kc='/delegated/kubeconfig',
+                onboarding=choice, _onboarding_plan={'choice': choice, 'install_id': 'this-run'})
+    opts.pop('vm_network', None)
+    run = SimpleNamespace(id='fixture', _cancel=False, emit=Mock(), close=Mock())
+    profile = {'ok': True, 'power_state': 'Off', 'virtualmedia_path': '/media',
+               'boot_targets': ['Cd'], 'uefi_targets': ['HD.fixture'], 'system_path': '/system'}
+
+    def refuse(*a):
+        raise p.ProfileError('registered node does not carry this installation identity; no node was patched')
+    for name, replacement in {
+        '_bmc_discover_one': lambda *a: profile, '_bm_nic_warning': lambda *a: None,
+        '_iso_dir': lambda: tmp_path, '_iso_work_dir': lambda: tmp_path,
+        '_bm_artifact_base_urls': lambda *a: ('http://fixture', 'http://fixture'),
+        '_bm_join_pubkey': lambda *a: None, '_harvester_install_config': lambda *a, **kw: '{}',
+        '_bm_boot_network_args': lambda *a: '', '_bm_remaster_stream': lambda *a: 0,
+        '_bm_power_off': lambda *a: (True, ''), '_bm_media_insert': lambda *a: (True, '', {}),
+        '_bm_boot_once_cd': lambda *a: (True, ''),
+        '_redfish_get': lambda *a, **kw: {'PowerState': 'Off', 'Boot': {
+            'BootSourceOverrideTarget': 'Cd', 'BootSourceOverrideEnabled': 'Once'}},
+        '_bm_reset': lambda *a: (True, ''), '_bm_wait_power_off': lambda *a, **kw: True,
+        '_bm_media_eject': lambda *a: (True, ''), '_bm_boot_once_target': lambda *a: (True, ''),
+        '_bm_wait_node_ready': refuse,
+    }.items():
+        monkeypatch.setattr(app, name, replacement)
+    monkeypatch.setattr(app._bmd, 'load_inventory', lambda *a: None)
+    monkeypatch.setattr(app.pxe_server, 'start', lambda: 8091)
+    monkeypatch.setattr(app.pxe_server, 'issue', lambda *a: 'fixture')
+    revoke = Mock()
+    monkeypatch.setattr(app.pxe_server, 'revoke', revoke)
+    app._baremetal_install_runner(run, opts)
+    assert run.status == 'error'
+    assert 'storage onboarding stopped: registered node does not carry' in run.error_summary
+    revoke.assert_called()
+    assert not list(tmp_path.glob('config-*'))
+    run.close.assert_called_once()
