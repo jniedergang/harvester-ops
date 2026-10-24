@@ -25,6 +25,10 @@ import cluster_decl
 import replication as rp
 
 RETENTION_DAYS = 400
+# Verrou d'une commande : le détenteur le renouvelle (`lock_heartbeat`) au
+# moins toutes les LOCK_TTL_S / 3 secondes ; sans quoi un autre hôte le
+# reprend passé ce délai.
+LOCK_TTL_S = 600
 
 # (nom, déclaration). Une colonne ajoutée plus tard va EN FIN de liste, avec
 # une valeur par défaut : c'est ce que la migration sait poser.
@@ -52,6 +56,9 @@ TABLES = {
         # VMs nommées à la création (`--vm ns/nom`), et namespace du sélecteur
         ("vms", "TEXT NOT NULL DEFAULT '[]'"),
         ("selector_namespace", "TEXT NOT NULL DEFAULT ''"),
+        # état d'où le plan est entré en `error` (vide hors `error`) : rangé
+        # ici, le journal étant effacé après 400 jours
+        ("error_origin", "TEXT NOT NULL DEFAULT ''"),
     ],
     "plan_resources": [
         ("plan_id", "TEXT NOT NULL"),
@@ -68,6 +75,9 @@ TABLES = {
         ("firmware_uuid", "TEXT NOT NULL DEFAULT ''"),
         ("state", "TEXT NOT NULL DEFAULT 'draft'"),
         ("state_since", "TEXT NOT NULL DEFAULT ''"),
+        # empreinte de la spec vue à la protection (`replication.vm_spec_digest`)
+        ("vm_spec_digest", "TEXT NOT NULL DEFAULT ''"),
+        ("error_origin", "TEXT NOT NULL DEFAULT ''"),
     ],
     "plan_volumes": [
         ("plan_id", "TEXT NOT NULL"),
@@ -158,6 +168,12 @@ TABLES = {
         ("command", "TEXT NOT NULL"),
         ("owner", "TEXT NOT NULL"),
         ("started_at", "TEXT NOT NULL"),
+        # date de démarrage du processus détenteur (/proc/<pid>/stat) : un PID
+        # réutilisé par un autre processus ne garde pas le verrou
+        ("pid_start", "TEXT NOT NULL DEFAULT ''"),
+        # détenteur sur un autre hôte : repris quand heartbeat + ttl_s est passé
+        ("heartbeat", "TEXT NOT NULL DEFAULT ''"),
+        ("ttl_s", "INTEGER NOT NULL DEFAULT 0"),
     ],
 }
 KEYS = {
@@ -240,9 +256,22 @@ def migrate(conn):
     return added
 
 
+def _private(path):
+    """0600 sur la base et ses fichiers -wal et -shm (SQLite les crée avec
+    les droits de la base, on le vérifie quand même)."""
+    for p in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            os.chmod(p, 0o600)
+        except OSError:
+            pass
+
+
 def connect(path=None):
     path = Path(path or default_path())
     path.parent.mkdir(parents=True, exist_ok=True)
+    # créée 0600 avant la première ouverture : jamais lisible par d'autres,
+    # même un instant
+    os.close(os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600))
     conn = sqlite3.connect(str(path), timeout=10, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
@@ -254,10 +283,7 @@ def connect(path=None):
     except BaseException:
         conn.execute("ROLLBACK")
         raise
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    _private(path)
     return conn
 
 
@@ -308,6 +334,14 @@ def _row(table, r):
     if table == "plan_volumes" and "migratable" in d:
         d["migratable"] = bool(d["migratable"])
     return d
+
+
+def _generation(value):
+    """Génération exigée là où elle fait partie de la clé : jamais de 1 par
+    défaut, qui rangerait en silence une ligne dans la mauvaise génération."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError("generation is required (a positive integer)")
+    return value
 
 
 def _insert(conn, table, values, upsert=False):
@@ -375,85 +409,118 @@ def list_plans(conn, host=None):
     return [_row("plans", r) for r in conn.execute(q + " ORDER BY name", args)]
 
 
-_SETTABLE = ("rpo_objective_s", "interval_s", "cron", "retain", "mappings", "options",
+_SETTABLE = ("rpo_objective_s", "interval_s", "retain", "mappings", "options",
              "selector", "selector_namespace", "vms", "generation", "active_side")
 
 
 def update_plan(conn, plan_id, now=None, **fields):
     """Réglages modifiables (lus à chaud par le suiveur). L'état ne passe
-    jamais par ici (voir `set_state`)."""
+    jamais par ici (voir `set_state`).
+
+    Le plan modifié repasse par `replication.normalize_plan` (PlanError au
+    premier défaut) : `cron` suit `interval_s`, les options gardent leurs
+    valeurs par défaut. `options` se fusionne aux options rangées (mettre
+    `paused` ne touche pas au reste) ; `mappings` remplace. Donner `vms`
+    retire le sélecteur, et inversement."""
     bad = [k for k in fields if k not in _SETTABLE]
     if bad:
         raise ValueError(f"not settable: {', '.join(bad)}")
-    if not fields:
-        return get_plan(conn, plan_id)
-    sets = ", ".join(f'"{k}" = ?' for k in fields)
-    vals = [json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v for v in fields.values()]
     with _tx(conn):
-        cur = conn.execute(f"UPDATE plans SET {sets}, updated_at = ? WHERE id = ?",
-                           vals + [_iso(_now(now)), plan_id])
-        if not cur.rowcount:
+        p = _row("plans", conn.execute("SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone())
+        if not p:
             raise KeyError(plan_id)
+        if not fields:
+            return p
+        req = {k: p[k] for k in ("name", "source_cluster", "target_cluster", "source_host_kind",
+                                 "target_host_kind", "rpo_objective_s", "interval_s", "retain", "vms",
+                                 "selector", "mappings")}
+        req["namespace"] = p["selector_namespace"]
+        req["options"] = dict(p["options"] or {})
+        for k, v in fields.items():
+            if k == "options":
+                req["options"].update(v or {})
+            elif k == "selector_namespace":
+                req["namespace"] = v
+            elif k not in ("generation", "active_side"):
+                req[k] = v
+        if fields.get("vms"):
+            req["selector"], req["namespace"] = "", ""
+        elif fields.get("selector"):
+            req["vms"] = []
+        n = rp.normalize_plan(req)
+        vals = {k: n[k] for k in ("rpo_objective_s", "interval_s", "cron", "retain", "mappings", "options",
+                                  "selector", "selector_namespace", "vms")}
+        if "generation" in fields:
+            vals["generation"] = _generation(fields["generation"])
+        if "active_side" in fields:
+            if fields["active_side"] not in rp.SIDES:
+                raise ValueError("active_side: source or target")
+            vals["active_side"] = fields["active_side"]
+        sets = ", ".join(f'"{k}" = ?' for k in vals)
+        args = [json.dumps(v, sort_keys=True) if isinstance(v, (dict, list)) else v for v in vals.values()]
+        conn.execute(f"UPDATE plans SET {sets}, updated_at = ? WHERE id = ?", args + [_iso(_now(now)), plan_id])
     return get_plan(conn, plan_id)
 
 
 def delete_plan(conn, plan_id):
-    """Efface un plan `draft` ou `unprotected` et ses lignes (le journal
-    reste, il est effacé par `prune` après 400 jours)."""
+    """Efface un plan `draft` ou `unprotected` et ses lignes de travail
+    (ressources, volumes, passages, mesures, bail, verrou). Les bascules et
+    déprotections (`runs`) et le journal (`events`) restent, pour l'audit :
+    ils disent ce qui a été fait, par qui, même plan effacé. Les deux sont
+    gardés ensemble, jamais l'un sans l'autre ; le journal part avec `prune`
+    (400 jours)."""
     with _tx(conn):
         p = conn.execute("SELECT state FROM plans WHERE id = ?", (plan_id,)).fetchone()
         if not p:
             return False
         if p["state"] not in ("draft", "unprotected"):
             raise StateConflict(plan_id, p["state"], "deleted", "only a draft or unprotected plan can be deleted")
-        for t in ("plan_resources", "plan_volumes", "ticks", "measures", "runs", "leases", "locks"):
+        for t in ("plan_resources", "plan_volumes", "ticks", "measures", "leases", "locks"):
             conn.execute(f'DELETE FROM "{t}" WHERE plan_id = ?', (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
     return True
 
 
 def error_origin(conn, plan_id):
-    """L'état d'avant le dernier passage en `error` (journal du plan)."""
-    r = conn.execute("SELECT facts FROM events WHERE plan_id = ? AND operation = 'plan' AND step = 'state'"
-                     " AND code = 'error' ORDER BY ts DESC, id DESC LIMIT 1", (plan_id,)).fetchone()
-    if not r:
+    """L'état d'où le plan est entré en `error` (colonne `error_origin`) ;
+    None hors `error` ou si inconnue."""
+    r = conn.execute("SELECT state, error_origin FROM plans WHERE id = ?", (plan_id,)).fetchone()
+    if not r or r["state"] != "error":
         return None
-    try:
-        return json.loads(r["facts"] or "{}").get("from")
-    except ValueError:
-        return None
+    return r["error_origin"] or None
+
+
+def _state_event(conn, t, plan_id, resource_uid, cur, new, by, action_id, message):
+    _insert(conn, "events", {"ts": _event_ts(t), "plan_id": plan_id, "resource_uid": resource_uid or "",
+                             "host": "", "side": "", "operation": "plan", "step": "state",
+                             "level": "error" if new == "error" else "info", "code": new,
+                             "message": (message or f"{cur} to {new}")[:500],
+                             "facts": {"from": cur, "to": new}, "by": by or "", "action_id": action_id or ""})
 
 
 def set_state(conn, plan_id, expected, new, now=None, by="", action_id="", message=""):
     """Passe le plan de `expected` (un état ou une liste) à `new`, dans une
     seule transaction. StateConflict si l'état réel n'est pas attendu ou si
-    la transition n'existe pas ; depuis `error`, seules les transitions de
-    l'état d'origine (ou son retour) sont permises. Chaque passage écrit un
-    événement `plan/state` (code = nouvel état, facts {from, to})."""
+    la transition n'existe pas (`replication.transition_allowed` : depuis
+    `error`, `error_exits(error_origin)`). Entrer en `error` range l'état
+    d'origine dans `error_origin`, en sortir l'efface. Chaque passage écrit
+    un événement `plan/state` (code = nouvel état, facts {from, to})."""
     if new not in rp.PLAN_STATES:
         raise ValueError(f"unknown state {new}")
     exp = (expected,) if isinstance(expected, str) else tuple(expected)
     with _tx(conn):
-        r = conn.execute("SELECT state, source_cluster FROM plans WHERE id = ?", (plan_id,)).fetchone()
+        r = conn.execute("SELECT state, error_origin FROM plans WHERE id = ?", (plan_id,)).fetchone()
         if not r:
             raise KeyError(plan_id)
         cur = r["state"]
         if cur not in exp:
             raise StateConflict(plan_id, cur, new, f"state is {cur}, expected {'|'.join(exp)}")
-        allowed = rp.PLAN_TRANSITIONS.get(cur, ())
-        if cur == "error":
-            origin = error_origin(conn, plan_id)
-            if origin in rp.PLAN_TRANSITIONS:
-                allowed = tuple(s for s in allowed if s == origin or s in rp.PLAN_TRANSITIONS[origin])
-        if new not in allowed:
+        if not rp.transition_allowed(cur, new, r["error_origin"] or None):
             raise StateConflict(plan_id, cur, new, "transition not allowed")
         t = _now(now)
-        conn.execute("UPDATE plans SET state = ?, updated_at = ? WHERE id = ?", (new, _iso(t), plan_id))
-        _insert(conn, "events", {"ts": _event_ts(t), "plan_id": plan_id, "resource_uid": "",
-                                 "host": "", "side": "", "operation": "plan", "step": "state",
-                                 "level": "error" if new == "error" else "info", "code": new,
-                                 "message": (message or f"{cur} to {new}")[:500],
-                                 "facts": {"from": cur, "to": new}, "by": by or "", "action_id": action_id or ""})
+        conn.execute("UPDATE plans SET state = ?, error_origin = ?, updated_at = ? WHERE id = ?",
+                     (new, cur if new == "error" else "", _iso(t), plan_id))
+        _state_event(conn, t, plan_id, "", cur, new, by, action_id, message)
     return get_plan(conn, plan_id)
 
 
@@ -464,8 +531,8 @@ def set_state(conn, plan_id, expected, new, now=None, by="", action_id="", messa
 def upsert_resource(conn, plan_id, resource, now=None):
     """Range (ou met à jour) une ressource protégée ; clé (plan, génération,
     uid). L'état n'est changé que par `set_resource_state`, sauf à la
-    création (`draft` par défaut)."""
-    gen = int(resource.get("generation") or 1)
+    création (`draft` par défaut). `generation` est exigée (celle du plan)."""
+    gen = _generation(resource.get("generation"))
     uid = resource["resource_uid"]
     vals = {"plan_id": plan_id, "generation": gen, "resource_kind": resource.get("resource_kind") or "vm",
             "resource_uid": uid, "source_host": resource["source_host"], "target_host": resource["target_host"],
@@ -473,6 +540,8 @@ def upsert_resource(conn, plan_id, resource, now=None):
             "target_namespace": resource.get("target_namespace") or "",
             "target_name": resource.get("target_name") or "", "vm_generation": resource.get("vm_generation"),
             "firmware_uuid": resource.get("firmware_uuid") or ""}
+    if "vm_spec_digest" in resource:
+        vals["vm_spec_digest"] = resource.get("vm_spec_digest") or ""
     if vals["resource_kind"] not in rp.RESOURCE_KINDS:
         raise ValueError(f"unknown resource kind {vals['resource_kind']}")
     with _tx(conn):
@@ -504,20 +573,36 @@ def list_resources(conn, plan_id, generation=None):
     return [_row("plan_resources", r) for r in conn.execute(q + " ORDER BY namespace, name", args)]
 
 
-def set_resource_state(conn, plan_id, resource_uid, state, generation=None, now=None):
+def set_resource_state(conn, plan_id, resource_uid, state, generation=None, now=None, by="", action_id="",
+                       message="", expected=None):
     """Change l'état rangé d'une ressource (états du cycle de vie seulement :
     `lagging`, `drifting`, `degraded` et `source-unreachable` se calculent).
-    `state_since` ne bouge que si l'état change. Rend la ressource."""
+    Même état : rien ne change (ni `state_since`, ni journal). Sinon la
+    transition est contrôlée comme celle du plan (`transition_allowed`,
+    `error_origin` de la ressource), `expected` (un état ou une liste)
+    éventuel est vérifié, `error_origin` est rangé à l'entrée en `error` et
+    effacé à la sortie, et un événement `plan/state` est écrit pour la
+    ressource. Rend la ressource."""
     if state not in rp.STORED_RESOURCE_STATES:
         raise ValueError(f"not a stored resource state: {state}")
     with _tx(conn):
         r = get_resource(conn, plan_id, resource_uid, generation)
         if not r:
             raise KeyError(resource_uid)
-        if r["state"] != state:
-            conn.execute("UPDATE plan_resources SET state = ?, state_since = ? WHERE plan_id = ? AND"
-                         " generation = ? AND resource_uid = ?",
-                         (state, _iso(_now(now)), plan_id, r["generation"], resource_uid))
+        cur = r["state"]
+        if expected is not None:
+            exp = (expected,) if isinstance(expected, str) else tuple(expected)
+            if cur not in exp:
+                raise StateConflict(plan_id, cur, state, f"resource state is {cur}, expected {'|'.join(exp)}")
+        if cur != state:
+            if not rp.transition_allowed(cur, state, r.get("error_origin") or None):
+                raise StateConflict(plan_id, cur, state, "resource transition not allowed")
+            t = _now(now)
+            conn.execute("UPDATE plan_resources SET state = ?, state_since = ?, error_origin = ? WHERE plan_id = ?"
+                         " AND generation = ? AND resource_uid = ?",
+                         (state, _iso(t), cur if state == "error" else "", plan_id, r["generation"],
+                          resource_uid))
+            _state_event(conn, t, plan_id, resource_uid, cur, state, by, action_id, message)
     return get_resource(conn, plan_id, resource_uid, generation)
 
 
@@ -544,21 +629,26 @@ def list_resources_by_host(conn, host, side="any"):
 
 def upsert_volume(conn, plan_id, volume):
     """Range (ou met à jour) un disque protégé ; clé (plan, génération, VM,
-    disque)."""
-    state = volume.get("state") or "pending"
-    if state not in rp.VOLUME_STATES:
+    disque). Sans `state`, l'état rangé est gardé (`pending` à la création),
+    comme `upsert_resource`. `generation` est exigée."""
+    state = volume.get("state")
+    if state is not None and state not in rp.VOLUME_STATES:
         raise ValueError(f"unknown volume state {state}")
-    vals = {"plan_id": plan_id, "generation": int(volume.get("generation") or 1)}
+    vals = {"plan_id": plan_id, "generation": _generation(volume.get("generation"))}
     for col, _decl in TABLES["plan_volumes"]:
         if col in ("plan_id", "generation"):
             continue
         if col in volume:
             vals[col] = int(bool(volume[col])) if col == "migratable" else volume[col]
-    vals["state"] = state
+    vals.pop("state", None)
     for k in ("vm_uid", "disk"):
         if not vals.get(k):
             raise ValueError(f"volume: {k} is required")
     with _tx(conn):
+        exists = conn.execute("SELECT 1 FROM plan_volumes WHERE plan_id = ? AND generation = ? AND vm_uid = ?"
+                              " AND disk = ?", (plan_id, vals["generation"], vals["vm_uid"], vals["disk"])).fetchone()
+        if state is not None or not exists:
+            vals["state"] = state or "pending"
         _insert(conn, "plan_volumes", vals, upsert=True)
     return list_volumes(conn, plan_id, vals["generation"], vm_uid=vals["vm_uid"], disk=vals["disk"])[0]
 
@@ -580,7 +670,7 @@ def _record_pass(conn, table, plan_id, tick):
     state = tick.get("state") or "completed"
     if state not in rp.TICK_STATES:
         raise ValueError(f"unknown tick state {state}")
-    vals = {"plan_id": plan_id, "generation": int(tick.get("generation") or 1)}
+    vals = {"plan_id": plan_id, "generation": _generation(tick.get("generation"))}
     for col, _decl in TABLES[table]:
         if col in ("plan_id", "generation", "state"):
             continue
@@ -613,17 +703,23 @@ def record_measure(conn, plan_id, measure):
     _record_pass(conn, "measures", plan_id, measure)
 
 
-def mark_applied(conn, plan_id, source_volume, backup, applied_at, generation=1, resync_at=None):
+def mark_applied(conn, plan_id, source_volume, backup, applied_at, generation, resync_at=None):
     """Note qu'une sauvegarde est appliquée sur le volume de secours. Rend
-    False si le passage est inconnu."""
+    False si le passage est inconnu ; ValueError s'il est en erreur (une
+    sauvegarde en échec ne s'applique pas)."""
+    generation = _generation(generation)
     sets, args = ["state = 'applied'", "applied_at = ?"], [_iso(applied_at)]
     if resync_at:
         sets.append("resync_at = ?")
         args.append(_iso(resync_at))
     with _tx(conn):
+        old = conn.execute("SELECT state FROM ticks WHERE plan_id = ? AND generation = ? AND source_volume = ?"
+                           " AND backup = ?", (plan_id, generation, source_volume, backup)).fetchone()
+        if old and old["state"] == "error":
+            raise ValueError(f"tick {backup} is in error and cannot be applied")
         cur = conn.execute(f"UPDATE ticks SET {', '.join(sets)} WHERE plan_id = ? AND generation = ? AND"
                            " source_volume = ? AND backup = ?",
-                           args + [plan_id, int(generation), source_volume, backup])
+                           args + [plan_id, generation, source_volume, backup])
     return cur.rowcount > 0
 
 
@@ -668,23 +764,43 @@ def record_event(conn, operation, step="", plan_id="", resource_uid="", host="",
     return cur.lastrowid
 
 
+def _before(before):
+    """Curseur de page : ("id", n) ou ("ts", date). Un entier, ou une chaîne
+    de chiffres, est un id d'événement ; une chaîne ISO 8601 ou un datetime,
+    une date. ValueError sinon (jamais de devinette)."""
+    if isinstance(before, bool):
+        raise ValueError("before: an event id or an ISO date")
+    if isinstance(before, int):
+        return "id", before
+    if isinstance(before, datetime):
+        return "ts", _event_ts(before)
+    if isinstance(before, str):
+        b = before.strip()
+        if b.isdigit():
+            return "id", int(b)
+        try:
+            return "ts", _event_ts(rp._t(b))
+        except ValueError:
+            raise ValueError("before: an event id or an ISO date") from None
+    raise ValueError("before: an event id or an ISO date")
+
+
 def _events(conn, where, args, limit, before):
     limit = max(1, min(int(limit or 50), 500))
     q = f"SELECT * FROM events WHERE {where}"
-    if isinstance(before, int) and not isinstance(before, bool):
-        q += " AND id < ?"
-        args = args + [before]
-    elif before:
-        q += " AND ts < ?"
-        args = args + [_event_ts(before)]
+    if before is not None and before != "":
+        kind, value = _before(before)
+        q += " AND id < ?" if kind == "id" else " AND ts < ?"
+        args = args + [value]
     q += " ORDER BY ts DESC, id DESC LIMIT ?"
     return [_row("events", r) for r in conn.execute(q, args + [limit])]
 
 
 def resource_events(conn, resource_uid, limit=50, before=None):
     """Le journal d'une ressource, du plus récent au plus ancien. `before` :
-    une date (page suivante : la date du dernier rendu) ou l'id du dernier
-    événement rendu (curseur exact quand plusieurs partagent la même date)."""
+    l'id du dernier événement rendu (entier ou chaîne de chiffres : curseur
+    exact quand plusieurs partagent la même date), ou une date ISO 8601 /
+    datetime (page suivante : la date du dernier rendu)."""
     return _events(conn, "resource_uid = ?", [resource_uid], limit, before)
 
 
@@ -700,13 +816,13 @@ def host_events(conn, host, limit=50, before=None):
 # Bascules et déprotections
 # ---------------------------------------------------------------------------
 
-def record_run(conn, plan_id, operation, started_at, generation=1, finished_at=None, result="",
+def record_run(conn, plan_id, operation, started_at, generation, finished_at=None, result="",
                vms=(), points=None, steps=(), by="", action_id="", run_id=None):
     """Range (ou complète, avec `run_id`) une bascule ou une déprotection :
     points de reprise par volume, durée de chaque étape. Rend l'id."""
     if operation not in ("failover", "unprotect"):
         raise ValueError("operation: failover or unprotect")
-    vals = {"plan_id": plan_id, "generation": int(generation), "operation": operation,
+    vals = {"plan_id": plan_id, "generation": _generation(generation), "operation": operation,
             "started_at": _iso(started_at), "finished_at": _iso(finished_at) if finished_at else "",
             "result": result or "", "vms": list(vms), "points": points or {}, "steps": list(steps),
             "by": by or "", "action_id": action_id or ""}
@@ -794,23 +910,67 @@ def _pid_alive(pid):
     return True
 
 
-def acquire_lock(conn, plan_id, command, owner, now=None, pid_alive=_pid_alive, host=None):
-    """Une seule commande mutative à la fois par plan. Repris si le
-    détenteur tournait sur CET hôte et que son processus n'existe plus ;
-    Locked sinon. Le même détenteur peut le reprendre (relance dans le même
-    processus)."""
+def _proc_start(pid):
+    """Date de démarrage d'un processus (champ 22 de /proc/<pid>/stat, en
+    tops d'horloge depuis le démarrage) ; "" si illisible."""
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text()
+        return raw[raw.rindex(")") + 2:].split()[19]
+    except (OSError, ValueError, IndexError):
+        return ""
+
+
+def acquire_lock(conn, plan_id, command, owner, now=None, pid_alive=_pid_alive, host=None,
+                 proc_start=_proc_start, ttl=LOCK_TTL_S):
+    """Une seule commande mutative à la fois par plan. Locked sinon.
+
+    Le même détenteur le reprend (relance dans le même processus). Un
+    verrou abandonné est repris :
+    * détenteur sur CET hôte : son processus n'existe plus, ou son PID a été
+      réutilisé (date de démarrage différente de celle rangée) ;
+    * détenteur sur un autre hôte (son PID ne veut rien dire ici) : son
+      dernier renouvellement (`lock_heartbeat`, sinon la prise) date de plus
+      de son `ttl_s`.
+    Chaque reprise est écrite au journal (`plan/lock-reclaimed`)."""
     here = host or socket.gethostname()
+    t = _now(now)
+    my_host, my_pid = _parse_owner(owner)
+    my_start = proc_start(my_pid) if my_host == here and my_pid is not None else ""
     with _tx(conn):
         r = conn.execute("SELECT * FROM locks WHERE plan_id = ?", (plan_id,)).fetchone()
         if r and r["owner"] != owner:
             h, pid = _parse_owner(r["owner"])
-            if not (h == here and pid is not None and not pid_alive(pid)):
+            reason = None
+            if h == here and pid is not None:
+                if not pid_alive(pid):
+                    reason = "process-gone"
+                elif r["pid_start"] and proc_start(pid) not in ("", r["pid_start"]):
+                    reason = "pid-reused"
+            else:
+                beat = r["heartbeat"] or r["started_at"]
+                if int(r["ttl_s"] or 0) > 0 and rp._t(beat) + timedelta(seconds=int(r["ttl_s"])) < rp._t(t):
+                    reason = "ttl-expired"
+            if not reason:
                 raise Locked(plan_id, dict(r))
-        conn.execute("INSERT INTO locks (plan_id, command, owner, started_at) VALUES (?, ?, ?, ?)"
-                     " ON CONFLICT (plan_id) DO UPDATE SET command = excluded.command,"
-                     " owner = excluded.owner, started_at = excluded.started_at",
-                     (plan_id, command, owner, _iso(_now(now))))
+            _insert(conn, "events", {"ts": _event_ts(t), "plan_id": plan_id, "operation": "plan",
+                                     "step": "lock-reclaimed", "level": "warn", "code": reason,
+                                     "message": f"lock of {r['command']} taken back from {r['owner']}"[:500],
+                                     "facts": {"previous_owner": r["owner"], "command": r["command"],
+                                               "reason": reason}, "by": owner})
+        conn.execute("INSERT INTO locks (plan_id, command, owner, started_at, pid_start, heartbeat, ttl_s)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (plan_id) DO UPDATE SET"
+                     " command = excluded.command, owner = excluded.owner, started_at = excluded.started_at,"
+                     " pid_start = excluded.pid_start, heartbeat = excluded.heartbeat, ttl_s = excluded.ttl_s",
+                     (plan_id, command, owner, _iso(t), my_start, _iso(t), int(ttl)))
     return True
+
+
+def lock_heartbeat(conn, plan_id, owner, now=None):
+    """Renouvelle un verrou tenu ; False s'il a été repris."""
+    with _tx(conn):
+        cur = conn.execute("UPDATE locks SET heartbeat = ? WHERE plan_id = ? AND owner = ?",
+                           (_iso(_now(now)), plan_id, owner))
+    return cur.rowcount > 0
 
 
 def release_lock(conn, plan_id, owner):

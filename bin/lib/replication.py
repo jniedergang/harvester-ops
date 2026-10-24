@@ -24,9 +24,10 @@ qui tourne aussi sur un hôte airgap sans la console. `now` est toujours passé.
 """
 
 import hashlib
+import json
 import math
 import re
-from datetime import timedelta
+from datetime import timedelta, timezone
 
 import hv_bookings as hb
 import vm_transfer as vt
@@ -83,7 +84,6 @@ CRON_STEPS = (60, 120, 180, 240, 300, 360, 600, 720, 900, 1200, 1800,
 RPO_MIN, RPO_MAX = 60, 7 * 86400
 DEFAULT_RETAIN, RETAIN_MIN, RETAIN_MAX = 6, 3, 50
 DEFAULT_MARGIN = 0.2
-DEFAULT_RESYNC_S = 10                    # relecture déclenchée : 9 à 10 s sur le banc
 SKEW_TOLERANCE_S = 10
 
 # Paires Longhorn vérifiées de bout en bout sur le banc (22-23/10/2026)
@@ -111,7 +111,9 @@ PLAN_STATES = ("draft", "measuring", "protecting", "protected", "failing_over",
 # Une transition vers soi-même n'est permise que pour un état intermédiaire :
 # c'est la reprise d'une commande interrompue.
 PLAN_TRANSITIONS = {
-    "draft": ("measuring", "protecting", "unprotecting", "error"),
+    # un brouillon n'a rien posé sur un cluster : il se supprime (`delete`),
+    # il ne se déprotège pas
+    "draft": ("measuring", "protecting", "error"),
     "measuring": ("measuring", "draft", "protecting", "unprotecting", "error"),
     "protecting": ("protecting", "protected", "unprotecting", "error"),
     # protect relancé après un `plan-drift` (disque ajouté, taille changée)
@@ -121,16 +123,51 @@ PLAN_TRANSITIONS = {
     "failed_over": ("unprotecting", "error"),
     "unprotecting": ("unprotecting", "unprotected", "error"),
     "unprotected": (),
-    # depuis `error`, le registre restreint aux transitions de l'état d'origine
+    # depuis `error`, seules les sorties de `error_exits(origine)`
     "error": ("measuring", "protecting", "failing_over", "unprotecting"),
 }
+# Sorties de `error` en plus de celles de l'état d'origine.
+# Bascule en échec (origine `failing_over`) : sans cela, la seule issue serait
+# de relancer la bascule. On permet `unprotect`, au sens « abandonner la
+# bascule » : la déprotection retire ce que la bascule a posé sur la cible
+# (VM, PVC, PV, volumes de secours) et la tâche de la source ; la VM source,
+# arrêtée par une bascule planifiée, se redémarre à la main. Plutôt qu'une
+# transition `abort_failover` dédiée : la déprotection sait déjà tout retirer
+# objet par objet, de façon idempotente, et une seconde commande qui fait la
+# même chose finirait par diverger. Pas de `failing_over -> unprotecting`
+# direct : une bascule en cours tient le verrou, on n'abandonne qu'une bascule
+# arrêtée en erreur.
+ERROR_EXTRA_EXITS = {"failing_over": ("unprotecting",)}
+# Origine inconnue (ligne d'avant la colonne `error_origin`) : seule la
+# déprotection, qui sait partir de n'importe quel état, est sûre.
+ERROR_UNKNOWN_EXITS = ("unprotecting",)
+
+
+def error_exits(origin):
+    """États permis en sortie de `error`, selon l'état d'où l'on y est entré :
+    l'origine elle-même (reprise de la commande) et ses propres transitions,
+    restreintes à celles de `error`, plus ERROR_EXTRA_EXITS. Source unique du
+    registre (`set_state`, `set_resource_state`) et des actions proposées."""
+    if origin not in PLAN_TRANSITIONS or origin == "error":
+        return ERROR_UNKNOWN_EXITS
+    own = set(PLAN_TRANSITIONS[origin]) | {origin} | set(ERROR_EXTRA_EXITS.get(origin, ()))
+    return tuple(s for s in PLAN_TRANSITIONS["error"] if s in own)
+
+
+def transition_allowed(current, new, origin=None):
+    """`current -> new` permis ? Depuis `error`, selon `error_exits(origin)`."""
+    if current == "error":
+        return new in error_exits(origin)
+    return new in PLAN_TRANSITIONS.get(current, ())
+
+
 # États d'où part chaque commande (elle reprend depuis son état intermédiaire)
 COMMAND_FROM = {
     "measure-start": ("draft", "measuring", "error"),
     "measure-stop": ("measuring",),
     "protect": ("draft", "measuring", "protecting", "protected", "error"),
     "failover": ("protected", "failing_over", "error"),
-    "unprotect": tuple(s for s in PLAN_STATES if s not in ("failing_over", "unprotected")),
+    "unprotect": tuple(s for s in PLAN_STATES if s not in ("draft", "failing_over", "unprotected")),
 }
 
 RESOURCE_STATES = ("draft", "measuring", "protecting", "protected", "lagging", "drifting",
@@ -154,6 +191,13 @@ ACTION_ROLES = {
 }
 ACTION_ORDER = ("measure-start", "measure-stop", "protect", "failover", "failover-unplanned",
                 "pause", "resume", "unprotect", "unprotect-delete-backups", "delete")
+# État du plan où mène chaque action (celles qui en changent) : c'est par lui
+# que les actions proposées depuis `error` sont dérivées des transitions.
+ACTION_STATE = {
+    "measure-start": "measuring", "measure-stop": "draft", "protect": "protecting",
+    "failover": "failing_over", "failover-unplanned": "failing_over",
+    "unprotect": "unprotecting", "unprotect-delete-backups": "unprotecting",
+}
 _PAUSE = "pause|resume"
 _PROTECTED_ACTIONS = ("failover", "failover-unplanned", _PAUSE, "unprotect", "unprotect-delete-backups")
 # Une action pas encore livrée (`drill`, `failback`) s'ajoutera ici seulement.
@@ -166,11 +210,13 @@ STATE_ACTIONS = {
     "drifting": ("protect",) + _PROTECTED_ACTIONS,
     "degraded": _PROTECTED_ACTIONS,
     "source-unreachable": ("failover-unplanned", _PAUSE, "unprotect"),
-    "failing_over": ("failover",),
+    # bascule interrompue : la reprendre, ou la finir en imprévue si la
+    # source a disparu entre-temps
+    "failing_over": ("failover", "failover-unplanned"),
     "failed_over": ("unprotect", "unprotect-delete-backups"),
     "unprotecting": ("unprotect", "unprotect-delete-backups"),
     "unprotected": (),
-    "error": ("protect", "unprotect", "unprotect-delete-backups"),
+    # `error` : dérivé de l'origine (`error_actions`), jamais d'une liste fixe
 }
 # Bascule : regardée depuis la cible (ou la vue de tous les plans) ; depuis la
 # source seulement quand la source est injoignable.
@@ -433,8 +479,13 @@ def _hex8(value):
 
 
 def recurring_job_name(plan_id, vm_uid):
-    """Une tâche par VM : `hr-<8 hex du plan>-<8 hex de la VM>`."""
-    return f"hr-{_hex8(plan_id[3:] if str(plan_id).startswith('rp-') else plan_id)}-{_hex8(vm_uid)}"
+    """Une tâche par VM : `hr-<8 hex du plan>-<8 hex d'empreinte de la VM>`.
+
+    La partie VM est une empreinte de l'uid, pas son début : deux uids qui
+    partagent leurs 8 premiers caractères donnent deux noms. Une collision
+    d'empreinte reste possible ; les étiquettes du plan la détectent
+    (`collisions`, `recurring-job-taken`)."""
+    return f"hr-{_hex8(plan_id[3:] if str(plan_id).startswith('rp-') else plan_id)}-{_digest(str(vm_uid))[:8]}"
 
 
 def carnet_name(plan_id, vm_uid):
@@ -472,7 +523,7 @@ def planned_objects(plan, resources, volumes):
             if v.get("vm_uid") != uid or v.get("state") == "removed":
                 continue
             out["volumes"].append(v.get("target_volume") or target_volume_name(
-                pid, uid, v["disk"], plan.get("generation", 1), r["name"]))
+                pid, uid, v["disk"], plan["generation"], r["name"]))
             out["pvcs"].append(f"{tns}/{target_claim(plan, r['namespace'], v['claim'])}")
     return out
 
@@ -530,20 +581,53 @@ def volume_block_size(lh_volume):
     return v if v in BLOCK_SIZES else BLOCK_SIZE
 
 
-def _in_default_group(lh_volume):
-    """Longhorn range dans le groupe `default` un volume sans aucune
-    étiquette de tâche ni de groupe, ou qui porte celle du groupe."""
+# longhorn-manager types/types.go : tâches qui produisent un `Backup`
+# (`RecurringJobTypeBackup`, `RecurringJobTypeBackupForceCreate`)
+BACKUP_TASKS = ("backup", "backup-force-create")
+DEFAULT_GROUP = "default"
+
+
+def backup_membership(lh_volume, jobs, own_job=None):
+    """Ce que la pose de notre étiquette de tâche change aux tâches récurrentes
+    existantes de la source.
+
+    `jobs` : {nom: {"task", "groups": [...]}} (RecurringJob de la source).
+    Longhorn range dans le groupe `default` un volume qui ne porte AUCUNE
+    étiquette de tâche ni de groupe (appartenance implicite) ; son mutateur
+    pose aussi souvent l'étiquette explicite
+    `recurring-job-group.longhorn.io/default: enabled`.
+
+    * implicite : notre étiquette sortirait le volume du groupe, ses tâches
+      (`lost_jobs`) cesseraient de le couvrir sans bruit. On recommande de
+      poser l'étiquette du groupe explicitement (`keep_default_label`) dès
+      que le groupe a une tâche : la protection existante de l'exploitant
+      (souvent une rétention plus longue) ne disparaît pas en silence.
+    * explicite (étiquette du groupe, autres groupes, tâches nommées) : rien
+      n'est retiré, mais les autres tâches de sauvegarde continuent
+      d'écrire dans le même BackupVolume (`double_backup_jobs`).
+
+    Rend {"implicit", "keep_default_label", "lost_jobs",
+    "double_backup_jobs"} ; la tâche 3 applique `keep_default_label`."""
     labels = ((lh_volume or {}).get("metadata") or {}).get("labels") or {}
-    if labels.get(JOB_GROUP_LABEL_PREFIX + "default") == "enabled":
-        return True, False
-    if not any(k.startswith((JOB_LABEL_PREFIX, JOB_GROUP_LABEL_PREFIX)) for k in labels):
-        return True, True
-    return False, False
+    jobs = {n: j for n, j in (jobs or {}).items() if n != own_job}
+    enabled = {k for k, v in labels.items() if v == "enabled"}
+    named = {k[len(JOB_LABEL_PREFIX):] for k in enabled if k.startswith(JOB_LABEL_PREFIX)}
+    groups = {k[len(JOB_GROUP_LABEL_PREFIX):] for k in enabled if k.startswith(JOB_GROUP_LABEL_PREFIX)}
+    named.discard(own_job)
+    implicit = not any(k.startswith((JOB_LABEL_PREFIX, JOB_GROUP_LABEL_PREFIX)) for k in labels)
+    default_jobs = sorted(n for n, j in jobs.items() if DEFAULT_GROUP in (j.get("groups") or []))
+    lost = default_jobs if implicit else []
+    keep = bool(lost) or DEFAULT_GROUP in groups
+    covering_groups = groups | ({DEFAULT_GROUP} if keep else set())
+    double = sorted(n for n, j in jobs.items() if j.get("task") in BACKUP_TASKS
+                    and (n in named or covering_groups & set(j.get("groups") or [])))
+    return {"implicit": implicit, "keep_default_label": keep, "lost_jobs": lost,
+            "double_backup_jobs": double}
 
 
-def volume_findings(lh_volume, pvc, sc, default_backup_jobs=()):
-    """Constats d'éligibilité d'un disque. `default_backup_jobs` : noms des
-    tâches de sauvegarde du groupe `default` sur la source."""
+def volume_findings(lh_volume, pvc, sc, jobs=None, own_job=None):
+    """Constats d'éligibilité d'un disque. `jobs` : tâches récurrentes de la
+    source (voir `backup_membership`) ; `own_job` : la nôtre, ignorée."""
     claim = ((pvc or {}).get("metadata") or {}).get("name")
     if (sc or {}).get("provisioner") != LONGHORN_DRIVER or not lh_volume:
         return [_finding("not-longhorn", "block", claim=claim,
@@ -557,12 +641,10 @@ def volume_findings(lh_volume, pvc, sc, default_backup_jobs=()):
         out.append(_finding("encrypted-volume", "block", volume=vol, claim=claim, verified=False))
     if spec.get("accessMode") == "rwx" and not spec.get("migratable"):
         out.append(_finding("rwx-share-manager", "block", volume=vol, claim=claim, verified=False))
-    if default_backup_jobs:
-        member, implicit = _in_default_group(lh_volume)
-        if member:
-            # implicite : la pose de notre étiquette sort le volume du groupe
-            out.append(_finding("default-backup-job", "warn", volume=vol, claim=claim,
-                                jobs=sorted(default_backup_jobs), implicit=implicit))
+    if jobs:
+        m = backup_membership(lh_volume, jobs, own_job)
+        if m["lost_jobs"] or m["double_backup_jobs"]:
+            out.append(_finding("backup-job-membership", "warn", volume=vol, claim=claim, **m))
     return out
 
 
@@ -577,10 +659,11 @@ def vm_disk_findings(vm):
 
 
 def vm_spec_generation(vm):
-    """Version de la spec d'une VM, pour la dérive : `metadata.generation`,
-    qui ne bouge qu'à un changement de spec. Jamais `resourceVersion`, qui
-    change à chaque annotation (dossier de la console) ou mise à jour d'état
-    et ferait passer la VM pour modifiée."""
+    """`metadata.generation` de la VM : simple préfiltre de la dérive (même
+    valeur = spec inchangée, rien à recalculer). Elle bouge aussi au
+    démarrage et à l'arrêt (`runStrategy` est dans la spec) : la dérive se
+    décide sur `vm_spec_digest`. Jamais `resourceVersion`, qui change à
+    chaque annotation ou mise à jour d'état."""
     g = ((vm or {}).get("metadata") or {}).get("generation")
     try:
         return int(g) if g is not None else None
@@ -590,6 +673,66 @@ def vm_spec_generation(vm):
 
 def firmware_uuid(vm):
     return (((vt._tspec(vm).get("domain") or {}).get("firmware")) or {}).get("uuid") or ""
+
+
+_CLOUD_INIT_KINDS = ("cloudInitNoCloud", "cloudInitConfigDrive")
+
+
+def _volume_source(vol):
+    """Source d'un volume de VM, réduite à ce qui touche la réplication."""
+    for kind in ("persistentVolumeClaim", "dataVolume"):
+        if kind in vol:
+            return {kind: (vol[kind] or {}).get("claimName") or (vol[kind] or {}).get("name")}
+    for kind in _CLOUD_INIT_KINDS:
+        if kind in vol:
+            # la source de cloud-init : secret référencé, ou empreinte du
+            # contenu en ligne (jamais le contenu lui-même)
+            ci = vol[kind] or {}
+            return {kind: {k: (v.get("name") if isinstance(v, dict) else _digest(str(v))[:16])
+                           for k, v in sorted(ci.items())}}
+    return {"other": sorted(vol)}
+
+
+def vm_spec_digest(vm, disks=None):
+    """Empreinte des parties de la spec qui comptent pour la réplication :
+    volumes et leur source (PVC, cloud-init), disques (nom, bus), tailles et
+    classes des disques (`disks` : [{"disk", "size", "storage_class"}], lus
+    sur les PVC), réseaux, interfaces (nom, modèle, MAC, liaison),
+    `firmware.uuid`. Ignore `runStrategy`/`running`, annotations et
+    étiquettes : démarrer, arrêter ou classer la VM n'est pas une dérive.
+    Rangée à la protection (`plan_resources.vm_spec_digest`), comparée par le
+    suiveur (`health["vm_spec_digest"]`)."""
+    tspec = vt._tspec(vm or {})
+    devices = ((tspec.get("domain") or {}).get("devices")) or {}
+    parts = {
+        "volumes": sorted(([v.get("name"), _volume_source(v)] for v in tspec.get("volumes") or []),
+                          key=lambda x: str(x[0])),
+        "disks": sorted([d.get("name"), sorted((k, (v or {}).get("bus") if isinstance(v, dict) else v)
+                                               for k, v in d.items() if k not in ("name", "bootOrder"))]
+                        for d in devices.get("disks") or []),
+        "sizes": sorted([str(d.get("disk")), int(d.get("size") or 0), d.get("storage_class") or ""]
+                        for d in disks or []),
+        "networks": sorted([n.get("name"), sorted((k, (v or {}).get("networkName") if isinstance(v, dict) else v)
+                                                  for k, v in n.items() if k != "name")]
+                           for n in tspec.get("networks") or []),
+        "interfaces": sorted([i.get("name"), i.get("model") or "", (i.get("macAddress") or "").lower(),
+                              sorted(k for k in i if k not in ("name", "model", "macAddress", "bootOrder"))]
+                             for i in devices.get("interfaces") or []),
+        "firmware_uuid": firmware_uuid(vm or {}),
+    }
+    return _digest(json.dumps(parts, sort_keys=True, default=str))[:32]
+
+
+def spec_drifted(known, seen):
+    """La spec a-t-elle changé depuis la protection ? `known` (rangé) et
+    `seen` (relu) : {"vm_generation", "vm_spec_digest"}. La génération sert
+    de préfiltre (égale : rien n'a changé) ; sinon l'empreinte décide. Sans
+    empreinte des deux côtés, pas de dérive affirmée."""
+    kg, sg = known.get("vm_generation"), seen.get("vm_generation")
+    if kg is not None and sg is not None and int(kg) == int(sg):
+        return False
+    kd, sd = known.get("vm_spec_digest"), seen.get("vm_spec_digest")
+    return bool(kd and sd and kd != sd)
 
 
 def _target_class(disk, plan, dst):
@@ -617,32 +760,98 @@ def _target_class(disk, plan, dst):
     return None, _finding("storage-class-unmapped", "block", storage_class=sc, mapped=m)
 
 
+PHASES = ("protect", "failover", "failover-unplanned")
+
+
+def _version(v):
+    """`v1.12.1` -> (1, 12, 1) ; None si illisible ou absente (version
+    inconnue : jamais comparée)."""
+    m = re.match(r"^v?(\d+)\.(\d+)\.(\d+)", str(v or ""))
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _capacity(needed, classes):
+    """Place sur la cible. `needed` : {classe: octets}. L'allouable de
+    storage_room est la place du n-ième meilleur nœud (n = répliques) :
+    chaque réplique y tient, la somme des tailles se compare donc à lui.
+
+    Plusieurs classes puisent dans les mêmes disques : chacune ne dispose pas
+    de tout l'allouable. Quand les faits donnent le groupe de disques d'une
+    classe (`pool`, par exemple ses sélecteurs de disques et de nœuds), les
+    classes d'un même groupe sont comptées ensemble contre le plus petit de
+    leurs allouables (celui de la classe aux répliques les plus nombreuses :
+    prudent). Sans ce renseignement pour toutes les classes en jeu, chaque
+    classe est comptée seule et `capacity-shared-pool` avertit que la place
+    peut manquer quand même."""
+    out = []
+    eff = {}
+    for sc in sorted(needed):
+        info = classes.get(sc) or {}
+        alloc = int(info.get("allocatable") or 0)
+        if not alloc and info.get("degraded_allocatable"):
+            out.append(_finding("replicas-degraded", "warn", storage_class=sc,
+                                replicas=info.get("replicas"), nodes=info.get("nodes")))
+            alloc = int(info["degraded_allocatable"])
+        eff[sc] = alloc
+    used = sorted(sc for sc in needed if needed[sc])
+    pools = {sc: (classes.get(sc) or {}).get("pool") for sc in used}
+    if len(used) > 1 and all(pools.values()):
+        groups = {}
+        for sc in used:
+            groups.setdefault(pools[sc], []).append(sc)
+    else:
+        groups = {sc: [sc] for sc in used}
+        if len(used) > 1:
+            out.append(_finding("capacity-shared-pool", "warn", storage_classes=used))
+    for pool, members in sorted(groups.items()):
+        n = sum(needed[sc] for sc in members)
+        alloc = min(eff[sc] for sc in members)
+        if n > alloc:
+            facts = {"needed": n, "allocatable": alloc,
+                     "needed_total": sum(needed[sc] * int((classes.get(sc) or {}).get("replicas") or 1)
+                                         for sc in members)}
+            if len(members) == 1:
+                facts["storage_class"] = members[0]
+            else:
+                facts.update(storage_classes=members, pool=pool)
+            out.append(_finding("capacity-short", "block", **facts))
+    return out
+
+
 def check(src, dst, plan):
     """Contrôle d'un plan : liste de constats {code, level, facts}, blocages
     d'abord.
 
     `src` : {"cluster", "reachable", "backup_target" (réglage brut),
     "backup_target_available", "longhorn_version", "backing_images": {nom:
-    {"checksum", "size"}}, "default_backup_jobs": [...], "recurring_jobs":
-    {nom: étiquettes}, "vms": [{"uid", "namespace", "name", "vm", "disks":
+    {"checksum", "size"}}, "jobs": {nom: {"task", "groups"}} (tâches
+    récurrentes, voir `backup_membership`), "recurring_jobs": {nom:
+    étiquettes}, "vms": [{"uid", "namespace", "name", "vm", "disks":
     [{"disk", "claim", "size", "storage_class", "image", "lh_volume", "pvc",
     "sc"}]}]}.
     `dst` : {"cluster", "reachable", "denied", "backup_target",
     "backup_target_available", "longhorn_version", "networks": [...],
     "namespaces": [...], "storage_classes": {nom: {"replicas", "allocatable",
-    "degraded_allocatable", "nodes"}}, "default_storage_class", "images":
-    {"ns/nom": {"storage_class"}}, "backing_images": {nom: {"checksum"}},
-    "macs": {mac: "ns/vm"}, "volumes"|"carnets"|"pvcs"|"vms": {nom:
-    étiquettes}, "through_rancher"}.
-    `plan` : plan normalisé avec `id`, `generation`, et `phase`
-    (`protect` ou `failover`)."""
+    "degraded_allocatable", "nodes", "pool"}}, "default_storage_class",
+    "images": {"ns/nom": {"storage_class"}}, "backing_images": {nom:
+    {"checksum"}}, "macs": {mac: "ns/vm"}, "volumes"|"carnets"|"pvcs"|"vms":
+    {nom: étiquettes}, "through_rancher"}.
+    `plan` : plan normalisé avec `id`, `generation`, et `phase` :
+    `protect`, `failover` (les deux sites vivants) ou `failover-unplanned`
+    (source perdue : ses faits manquent, les VMs viennent du carnet ; ni la
+    source injoignable, ni ce qui se lit sur elle ne bloque, et l'éligibilité
+    des volumes, contrôlée à la protection, n'est pas refaite)."""
     phase = plan.get("phase", "protect")
+    if phase not in PHASES:
+        raise ValueError(f"unknown phase {phase}")
+    unplanned = phase == "failover-unplanned"
     if dst.get("denied"):
         return [_finding("target-denied", "block", cluster=dst.get("cluster"))]
     if not dst.get("reachable"):
         return [_finding("target-unreachable", "block", cluster=dst.get("cluster"))]
-    if not src.get("reachable"):
+    if not unplanned and not src.get("reachable"):
         return [_finding("source-unreachable", "block", cluster=src.get("cluster"))]
+    pid, gen = plan["id"], plan["generation"]
     out = []
     vms = src.get("vms") or []
     if not vms:
@@ -650,29 +859,34 @@ def check(src, dst, plan):
 
     s_bt, d_bt = vt.normalize_backup_target(src.get("backup_target")), \
         vt.normalize_backup_target(dst.get("backup_target"))
-    if not s_bt or not d_bt or tuple(s_bt) != tuple(d_bt):
+    if unplanned:
+        if not d_bt:
+            out.append(_finding("backup-target-differs", "block"))
+    elif not s_bt or not d_bt or tuple(s_bt) != tuple(d_bt):
         out.append(_finding("backup-target-differs", "block"))
     for side, facts in (("source", src), ("target", dst)):
+        if side == "source" and unplanned:
+            continue
         if not facts.get("backup_target_available"):
             out.append(_finding("backup-target-unavailable", "block", side=side,
                                 cluster=facts.get("cluster")))
 
-    sv, dv = vt.version_tuple(src.get("longhorn_version")), vt.version_tuple(dst.get("longhorn_version"))
-    if (sv, dv) in VERIFIED_LONGHORN_PAIRS:
-        out.append(_finding("longhorn-pair-verified", "ok", source=src.get("longhorn_version"),
-                            target=dst.get("longhorn_version")))
-    else:
-        out.append(_finding("longhorn-pair-unverified", "warn", source=src.get("longhorn_version"),
-                            target=dst.get("longhorn_version")))
-        if dv < sv:
-            out.append(_finding("longhorn-target-older", "warn", source=src.get("longhorn_version"),
-                                target=dst.get("longhorn_version")))
+    if not unplanned:
+        sv, dv = _version(src.get("longhorn_version")), _version(dst.get("longhorn_version"))
+        versions = {"source": src.get("longhorn_version"), "target": dst.get("longhorn_version")}
+        if sv and dv and (sv, dv) in VERIFIED_LONGHORN_PAIRS:
+            out.append(_finding("longhorn-pair-verified", "ok", **versions))
+        else:
+            out.append(_finding("longhorn-pair-unverified", "warn", unknown=not (sv and dv), **versions))
+            if sv and dv and dv < sv:
+                out.append(_finding("longhorn-target-older", "warn", **versions))
 
     maps = plan.get("mappings") or {}
     opts = plan.get("options") or {}
     nets = maps.get("networks") or {}
     needed, images_seen = {}, set()
     src_bi, dst_bi = src.get("backing_images") or {}, dst.get("backing_images") or {}
+    dst_volumes = dst.get("volumes") or {}
     namespaces_seen = set()
     resources, volumes = [], []
     for vm in vms:
@@ -692,24 +906,31 @@ def check(src, dst, plan):
                 out.append(_finding("network-unmapped", "block", vm=f"{vm['namespace']}/{vm['name']}",
                                     network=n, mapped=m))
         out += vm_disk_findings(obj)
+        own_job = recurring_job_name(pid, uid)
         for d in vm.get("disks") or []:
-            out += volume_findings(d.get("lh_volume"), d.get("pvc"), d.get("sc"),
-                                   src.get("default_backup_jobs") or ())
+            if not unplanned:
+                out += volume_findings(d.get("lh_volume"), d.get("pvc"), d.get("sc"),
+                                       src.get("jobs") or {}, own_job)
             volumes.append({"vm_uid": uid, "disk": d["disk"], "claim": d["claim"]})
             sc, f = _target_class(d, plan, dst)
             if f:
                 out.append(f)
             if not sc:
                 continue
-            needed[sc] = needed.get(sc, 0) + int(d.get("size") or 0)
+            # un volume de secours déjà à nous (relance après l'ajout d'un
+            # disque) occupe déjà sa place : il n'en demande pas davantage
+            standby = target_volume_name(pid, uid, d["disk"], gen, vm["name"])
+            if not unplanned and not owned_by(dst_volumes.get(standby), pid):
+                needed[sc] = needed.get(sc, 0) + int(d.get("size") or 0)
             bi = ((d.get("lh_volume") or {}).get("spec") or {}).get("backingImage")
             if bi and bi not in images_seen:
                 images_seen.add(bi)
                 there, mine = dst_bi.get(bi), src_bi.get(bi) or {}
                 if there is None:
                     out.append(_finding("backing-image-restore", "ok", backing_image=bi))
-                    needed[sc] += int(mine.get("size") or 0)
-                elif there.get("checksum") != mine.get("checksum"):
+                    if not unplanned:
+                        needed[sc] = needed.get(sc, 0) + int(mine.get("size") or 0)
+                elif (mine or not unplanned) and there.get("checksum") != mine.get("checksum"):
                     out.append(_finding("backing-image-conflict", "block", backing_image=bi))
                 else:
                     out.append(_finding("backing-image-reuse", "ok", backing_image=bi))
@@ -717,7 +938,7 @@ def check(src, dst, plan):
             taken = dst.get("macs") or {}
             clash = sorted(m for m in inv.get("macs") or [] if m in taken and taken[m] != f"{tns}/{tname}")
             if clash:
-                out.append(_finding("mac-in-use", "block" if phase == "failover" else "warn",
+                out.append(_finding("mac-in-use", "warn" if phase == "protect" else "block",
                                     vm=f"{vm['namespace']}/{vm['name']}", macs=", ".join(clash),
                                     vms=", ".join(sorted({taken[m] for m in clash}))))
         if opts.get("cloud_init", "keep") == "keep" and not (vm.get("firmware_uuid") or firmware_uuid(obj)):
@@ -728,28 +949,15 @@ def check(src, dst, plan):
         if inv.get("node_affinity"):
             out.append(_finding("node-affinity-removed", "warn", vm=f"{vm['namespace']}/{vm['name']}"))
 
-    # Place : un volume de secours occupe sa taille dès sa création. L'allouable
-    # de storage_room est la place du n-ième meilleur nœud (n = répliques) :
-    # chaque réplique y tient, la somme des tailles se compare donc à lui.
-    classes = dst.get("storage_classes") or {}
-    for sc, n in sorted(needed.items()):
-        info = classes.get(sc) or {}
-        alloc = int(info.get("allocatable") or 0)
-        if not alloc and info.get("degraded_allocatable"):
-            out.append(_finding("replicas-degraded", "warn", storage_class=sc,
-                                replicas=info.get("replicas"), nodes=info.get("nodes")))
-            alloc = int(info["degraded_allocatable"])
-        if n > alloc:
-            out.append(_finding("capacity-short", "block", storage_class=sc, needed=n,
-                                needed_total=n * int(info.get("replicas") or 1), allocatable=alloc))
+    out += _capacity(needed, dst.get("storage_classes") or {})
 
     if opts.get("cloud_init") == "rerun":
         out.append(_finding("cloud-init-rerun", "warn"))
     if dst.get("through_rancher"):
         out.append(_finding("target-through-rancher", "warn", cluster=dst.get("cluster")))
     facts = dict(dst)
-    facts["recurring_jobs"] = src.get("recurring_jobs") or {}
-    out += collisions(facts, plan, resources, volumes, phase)
+    facts["recurring_jobs"] = {} if unplanned else (src.get("recurring_jobs") or {})
+    out += collisions(facts, plan, resources, volumes, "protect" if phase == "protect" else "failover")
     return sorted(out, key=lambda f: _ORDER[f["level"]])
 
 
@@ -768,23 +976,25 @@ def cron_for(interval_s):
 
 
 def next_tick_at(interval_s, now):
-    """Prochaine échéance du cron, strictement après `now` (UTC, l'heure du
-    gestionnaire Longhorn). Les pas divisent le jour : l'échéance est un
-    multiple du pas compté depuis minuit."""
+    """Prochaine échéance du cron, strictement après `now`, en UTC (l'heure
+    du gestionnaire Longhorn) ; rendue sans microsecondes (`...:SSZ`). Les
+    pas divisent le jour : l'échéance est un multiple du pas compté depuis
+    minuit UTC."""
     if not interval_s:
         return None
-    now = _t(now)
-    midnight = now.replace(hour=0, minute=0, second=0)
+    now = _t(now).astimezone(timezone.utc)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     k = math.floor(_secs(midnight, now) / interval_s) + 1
     return iso(midnight + timedelta(seconds=k * interval_s))
 
 
 class IntervalChoice(tuple):
-    """(pas, rpo_atteignable, tenable), avec `.reason` quand intenable."""
+    """(pas, rpo_atteignable, tenable), avec `.reason` quand intenable, et
+    `.send_s` / `.apply_s` estimés pour ce pas."""
 
-    def __new__(cls, step, rpo, tenable, reason=None):
+    def __new__(cls, step, rpo, tenable, reason=None, send_s=None, apply_s=None):
         self = super().__new__(cls, (step, rpo, tenable))
-        self.reason = reason
+        self.reason, self.send_s, self.apply_s = reason, send_s, apply_s
         return self
 
     step = property(lambda self: self[0])
@@ -792,44 +1002,79 @@ class IntervalChoice(tuple):
     tenable = property(lambda self: self[2])
 
 
-def derive_interval(objective_s, send_p95_s, apply_p95_s, resync_s=DEFAULT_RESYNC_S, margin=DEFAULT_MARGIN):
-    """Le plus grand pas tel que `pas + envoi + application + relecture <=
-    objectif` et `envoi + application <= pas x (1 - marge)` (sinon le RPO
-    dérive).
+def _per_step(f):
+    if callable(f):
+        return f
+    value = float(f or 0)
+    return lambda step: value
+
+
+def derive_interval(objective_s, send_for_step, apply_for_step, margin=DEFAULT_MARGIN):
+    """Le plus grand pas tel que `pas + envoi(pas) + application(pas) <=
+    objectif` et `envoi(pas) + application(pas) <= pas x (1 - marge)` (sinon
+    le RPO dérive).
+
+    `send_for_step` et `apply_for_step` : fonctions pas -> secondes (voir
+    `StepEstimator`), car les blocs salis, donc les durées, croissent avec
+    le pas. Un nombre vaut pour tous les pas (borne fixe).
+
+    L'application mesurée va de la fin de la sauvegarde à l'application sur
+    le volume de secours : elle comprend déjà la relecture que la console
+    déclenche (9 à 10 s sur le banc, relecture comprise). Aucune relecture
+    n'est donc ajoutée en plus.
 
     Intenable : le plus petit pas qui ne dérive pas, avec son RPO
     (`objective-too-short`) ; si tous dérivent, le plus grand pas
     (`drift-at-every-step`)."""
-    transfer = float(send_p95_s or 0) + float(apply_p95_s or 0)
+    send, apply_ = _per_step(send_for_step), _per_step(apply_for_step)
+
+    def costs(step):
+        s, a = float(send(step)), float(apply_(step))
+        return s, a, step + s + a, s + a <= step * (1 - margin)
+
     for step in reversed(CRON_STEPS):
-        rpo = step + transfer + resync_s
-        if rpo <= objective_s and transfer <= step * (1 - margin):
-            return IntervalChoice(step, rpo, True)
+        s, a, rpo, steady = costs(step)
+        if rpo <= objective_s and steady:
+            return IntervalChoice(step, rpo, True, None, s, a)
     for step in CRON_STEPS:
-        if transfer <= step * (1 - margin):
-            return IntervalChoice(step, step + transfer + resync_s, False, "objective-too-short")
+        s, a, rpo, steady = costs(step)
+        if steady:
+            return IntervalChoice(step, rpo, False, "objective-too-short", s, a)
     step = CRON_STEPS[-1]
-    return IntervalChoice(step, step + transfer + resync_s, False, "drift-at-every-step")
+    s, a, rpo, _ = costs(step)
+    return IntervalChoice(step, rpo, False, "drift-at-every-step", s, a)
 
 
 def blocks_forecast(size, writes, block=BLOCK_SIZE, write_size=4096):
     """Blocs (et octets) qu'une sauvegarde enverra après `writes` écritures de
-    `write_size` octets sur un volume de `size` octets.
+    `write_size` octets sur un volume de `size` octets. N = taille / bloc.
 
-    Borne haute (écritures dispersées) : N x (1 - (1 - k/N)^écritures), N =
-    taille / bloc, k = blocs touchés par une écriture (1 pour 4 Kio). Borne
-    basse (écritures séquentielles) : octets écrits / bloc, arrondi au-dessus.
-    Les deux plafonnées à N ; la haute jamais sous la basse. Écritures
-    supposées alignées sur le bloc."""
+    * `scattered_estimate` : écritures dispersées au hasard, alignées sur
+      leur taille (une écriture de 4 Kio ne chevauche jamais deux blocs de 2
+      Mio) : N x (1 - (1 - k/N)^écritures), k = ceil(taille écrite / bloc).
+      C'est la prévision vérifiée sur le banc (454 blocs pour 452 relevés).
+    * `sequential` : écritures contiguës sans recouvrement : octets écrits /
+      bloc, arrondi au-dessus. Des écritures qui se recouvrent peuvent
+      envoyer moins : ce n'est pas un minimum absolu.
+    * `worst_case` : chaque écriture non alignée touche au plus
+      ceil((taille - 1) / bloc) + 1 blocs, aucune ne partage un bloc :
+      min(N, écritures x ce nombre).
+
+    Tous plafonnés à N ; l'estimation dispersée est gardée entre la valeur
+    séquentielle et le pire cas."""
     n = max(1, int(size) // int(block))
     writes = max(0, int(writes))
-    k = min(n, max(1, math.ceil(int(write_size) / int(block))))
-    lower = min(n, math.ceil(writes * int(write_size) / int(block)))
-    upper = n * (1 - (1 - k / n) ** writes) if writes else 0.0
-    upper = min(float(n), max(upper, float(lower)))
-    return {"blocks": n, "block": int(block), "bytes_written": writes * int(write_size),
-            "upper_blocks": upper, "upper_bytes": upper * block,
-            "lower_blocks": lower, "lower_bytes": lower * block}
+    w, b = max(1, int(write_size)), int(block)
+    k = min(n, math.ceil(w / b))
+    k_unaligned = math.ceil((w - 1) / b) + 1
+    sequential = min(n, math.ceil(writes * w / b))
+    worst = min(n, writes * k_unaligned)
+    scattered = n * (1 - (1 - k / n) ** writes) if writes else 0.0
+    scattered = min(float(worst), max(scattered, float(sequential)))
+    return {"blocks": n, "block": b, "bytes_written": writes * w,
+            "scattered_estimate": scattered, "scattered_estimate_bytes": scattered * b,
+            "sequential": sequential, "sequential_bytes": sequential * b,
+            "worst_case": worst, "worst_case_bytes": worst * b}
 
 
 def aggregate_upper(measures, factor, cap=None):
@@ -848,6 +1093,49 @@ def aggregate_upper(measures, factor, cap=None):
     if not sums:
         return {"samples": [], "mean": None, "p95": None, "max": None}
     return {"samples": sums, "mean": sum(sums) / len(sums), "p95": percentile(sums, 95), "max": max(sums)}
+
+
+class StepEstimator:
+    """Durée d'un trajet (envoi ou application) pour un pas donné, tirée des
+    passages mesurés : `est(pas) -> secondes`, `est.bytes(pas) -> octets`.
+
+    Choix : on ne prolonge pas la formule des blocs (elle suppose des
+    écritures dispersées au hasard, ce que la mesure ne dit pas), on part des
+    octets réellement envoyés par passage (`newlyUploadDataSize`) :
+
+    * pas plus petit que le pas mesuré : la valeur mesurée (p95). Les blocs
+      salis ne font que croître avec le temps, elle majore donc le petit pas ;
+    * pas plus grand : facteur f = ceil(pas / pas mesuré), p95 des sommes de
+      f passages consécutifs (`aggregate_upper`) ; l'union des blocs salis est
+      au plus la somme, c'est un majorant ;
+    * moins de f passages mesurés : p95 d'un passage x f (même majorant,
+      extrapolé) ;
+    * jamais plus que `cap` (taille du volume).
+
+    secondes = `fixed_s` + octets / `bps`. Pour l'application, `fixed_s`
+    porte la part fixe mesurée (relecture déclenchée comprise)."""
+
+    def __init__(self, measured_step, samples, bps, fixed_s=0.0, cap=None):
+        self.measured_step = int(measured_step)
+        self.samples = [int(x or 0) for x in samples or []]
+        if self.measured_step <= 0:
+            raise ValueError("measured step must be positive")
+        if not self.samples:
+            raise ValueError("at least one measured pass is needed")
+        if not bps or bps <= 0:
+            raise ValueError("throughput must be positive")
+        self.bps, self.fixed_s, self.cap = float(bps), float(fixed_s), cap
+
+    def bytes(self, step):
+        factor = max(1, math.ceil(int(step) / self.measured_step))
+        agg = aggregate_upper(self.samples, factor, self.cap)
+        if agg["p95"] is not None:
+            return agg["p95"]
+        total = percentile(self.samples, 95) * factor
+        return min(total, int(self.cap)) if self.cap else total
+
+    def __call__(self, step):
+        return self.fixed_s + self.bytes(step) / self.bps
 
 
 def first_copy_eta(used_bytes, throughput):
@@ -872,8 +1160,26 @@ def _running_info(vm_running, uid):
     return bool(v), None
 
 
+def _tick_time(t):
+    return t.get("snapshot_at") or t.get("backup_started_at") or t.get("backup_done_at") or ""
+
+
+def _in_error(ticks):
+    """Un volume est en erreur si un passage en erreur n'est suivi d'aucun
+    passage réussi. Un passage en erreur sans aucune date (instantané
+    refusé) compte comme le plus récent : il le reste jusqu'à la rétention."""
+    ok = [_tick_time(t) for t in ticks if t.get("state") in ("completed", "applied")]
+    for e in ticks:
+        if e.get("state") != "error":
+            continue
+        te = _tick_time(e)
+        if not te or not any(o > te for o in ok):
+            return True
+    return False
+
+
 def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
-    gen = int(plan.get("generation") or 1)
+    gen = int(plan["generation"])
     interval = plan.get("interval_s") or 0
     now = _t(now)
     vols = [v for v in volumes if v.get("vm_uid") == uid and int(v.get("generation") or gen) == gen
@@ -890,7 +1196,7 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
         last_applied = applied[-1] if applied else None
         pending = [t for t in ts if t.get("state") in ("completed", "in_progress")]
         backlog += len(pending)
-        if ts and ts[-1].get("state") == "error":
+        if _in_error(ts):
             errors.append(v["source_volume"])
         if interval:
             if last_applied and last_applied.get("applied_at") and \
@@ -927,11 +1233,18 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
     if complete:
         rpo = 0 if up_to_date else int(_secs(oldest, now))
     objective = plan.get("rpo_objective_s") or 0
-    return {"disks": disks, "backlog": backlog, "drift": drift, "errors": errors,
+    return {"disks": disks, "backlog": backlog, "drift": drift, "errors": errors, "complete": complete,
             "last_applied_at": iso(oldest) if oldest else None, "rpo_held_s": rpo,
             "up_to_date": up_to_date, "exceeded": bool(rpo is not None and objective and rpo > objective),
             "skew_s": int(_secs(min(last_points), max(last_points))) if len(last_points) > 1 else 0,
             "throughput": {"upload": upload, "apply": apply_}}
+
+
+# Raison -> état calculé, et priorité des états (le premier l'emporte)
+REASON_STATE = {"source-unreachable": "source-unreachable", "backup-error": "degraded",
+                "standby-degraded": "degraded", "rpo-drift": "drifting", "plan-drift": "drifting",
+                "rpo-exceeded": "lagging", "no-point": "lagging"}
+COMPUTED_PRIORITY = ("source-unreachable", "degraded", "drifting", "lagging")
 
 
 def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None):
@@ -940,20 +1253,25 @@ def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None)
     health = health or {}
     reasons = []
     state = stored
-    seen, known = health.get("vm_generation"), resource.get("vm_generation")
-    spec_changed = seen is not None and known is not None and int(seen) != int(known)
     if stored == "protected":
+        # toutes les raisons sont relevées, l'état suit la plus grave
         if health.get("source_reachable") is False:
-            state, reasons = "source-unreachable", ["source-unreachable"]
-        elif ev["errors"] or health.get("standby_degraded"):
-            state = "degraded"
-            reasons = (["backup-error"] if ev["errors"] else []) + \
-                      (["standby-degraded"] if health.get("standby_degraded") else [])
-        elif ev["drift"] or spec_changed:
-            state = "drifting"
-            reasons = (["rpo-drift"] if ev["drift"] else []) + (["plan-drift"] if spec_changed else [])
-        elif ev["exceeded"]:
-            state, reasons = "lagging", ["rpo-exceeded"]
+            reasons.append("source-unreachable")
+        if ev["errors"]:
+            reasons.append("backup-error")
+        if health.get("standby_degraded"):
+            reasons.append("standby-degraded")
+        if ev["drift"]:
+            reasons.append("rpo-drift")
+        if spec_drifted(resource, health):
+            reasons.append("plan-drift")
+        if ev["exceeded"]:
+            reasons.append("rpo-exceeded")
+        if not ev["complete"]:
+            # un disque sans point appliqué : jamais « protégé » tout court
+            reasons.append("no-point")
+        found = {REASON_STATE[r] for r in reasons}
+        state = next((s for s in COMPUTED_PRIORITY if s in found), stored)
     ev["state"], ev["reasons"] = state, reasons
     return ev
 
@@ -962,10 +1280,12 @@ def resource_state(plan, resource, volumes, ticks, now, vm_running, health=None)
     """État d'une ressource (RESOURCE_STATES). L'état rangé dit où en est
     le cycle de vie ; pour une ressource protégée, la lecture des passages
     affine en `lagging` (RPO tenu au-delà de l'objectif), `drifting` (un
-    passage plus long qu'un pas, ou spec changée : `health["vm_generation"]`
-    différent de celui vu à la protection), `degraded` (sauvegarde en
-    erreur, ou `health["standby_degraded"]`), `source-unreachable`
-    (`health["source_reachable"] is False`)."""
+    passage plus long qu'un pas, ou spec changée : `spec_drifted(resource,
+    health)` sur `vm_generation` et `vm_spec_digest`), `degraded`
+    (sauvegarde en erreur, ou `health["standby_degraded"]`),
+    `source-unreachable` (`health["source_reachable"] is False`). Un disque
+    sans point appliqué donne `lagging` (raison `no-point`). Toutes les
+    raisons sont rendues par `plan_status` ; l'état suit COMPUTED_PRIORITY."""
     return _resource_eval(plan, resource, volumes, ticks, now, vm_running, health)["state"]
 
 
@@ -981,15 +1301,27 @@ def _action(name, role):
     return {"name": name, "role": need, "allowed": ok, "reason": "" if ok else "role"}
 
 
+def error_actions(origin):
+    """Actions proposées en `error` : celles dont l'état d'arrivée
+    (ACTION_STATE) est une sortie permise par `error_exits(origin)`. Le
+    registre et l'interface lisent la même règle : aucune action proposée
+    n'est refusée, aucune sortie permise n'est cachée."""
+    exits = error_exits(origin)
+    return [a for a in ACTION_ORDER if ACTION_STATE.get(a) in exits]
+
+
 def allowed_actions(plan, resource, side, role=None):
-    """Actions d'une ressource selon son état (`resource["state"]`, calculé)
-    et le côté d'où l'on regarde (`source`, `target`, ou `any` pour la vue de
+    """Actions d'une ressource selon son état (`resource["state"]`, calculé ;
+    en `error`, selon `resource["error_origin"]`, rangé) et le côté d'où l'on regarde (`source`, `target`, ou `any` pour la vue de
     tous les plans), chacune avec le rôle requis. Avec `role`, `allowed` dit
     si la personne peut la lancer (l'action reste listée)."""
     state = resource.get("state") or "draft"
-    names = list(STATE_ACTIONS.get(state, ()))
-    if state == "error" and resource.get("error_origin") == "failing_over":
-        names.insert(1, "failover")
+    if state == "error":
+        origin = resource.get("error_origin") or (plan.get("error_origin") if plan.get("state") == "error"
+                                                  else None)
+        names = error_actions(origin)
+    else:
+        names = list(STATE_ACTIONS.get(state, ()))
     paused = bool((plan.get("options") or {}).get("paused"))
     out = []
     for n in names:
@@ -1123,7 +1455,7 @@ def job_label(job_name):
     return JOB_LABEL_PREFIX + job_name, "enabled"
 
 
-def recurring_job(name, cron, retain, concurrency, plan_id, vm_uid, generation=1):
+def recurring_job(name, cron, retain, concurrency, plan_id, vm_uid, generation):
     """Tâche de sauvegarde d'une VM. `groups: []` : jamais appliquée par
     groupe ; `labels` recopiées par Longhorn sur chaque `Backup` (pour
     retrouver nos sauvegardes)."""
@@ -1223,7 +1555,7 @@ def static_pvc(name, namespace, volume, size, mode, access_modes, storage_class,
                      "volumeName": volume, "resources": {"requests": {"storage": quantity(size)}}}}
 
 
-def target_vm(source_vm, resource, mappings, options, claims, plan_id, generation=1):
+def target_vm(source_vm, resource, mappings, options, claims, plan_id, generation):
     """La VM cible : `sanitize_vm` puis `retarget_vm` (réseaux, PVC, MAC selon
     `mac`), `firmware.uuid` recopié (`keep`) ou retiré (`rerun` : KubeVirt
     prend alors un nouvel `instance-id`, `cloudInitUUIDFromVMI`, et cloud-init

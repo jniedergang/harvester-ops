@@ -121,10 +121,26 @@ def test_target_volume_name_limits_and_charset(vm, disk):
 
 
 def test_recurring_job_and_carnet_names():
-    assert rp.recurring_job_name(PID, UID_A) == "hr-01234567-fc8b3a33"
+    assert rp.recurring_job_name(PID, UID_A) == "hr-01234567-bb400680"
     assert rp.carnet_name(PID, UID_A) == rp.recurring_job_name(PID, UID_A)
     odd = rp.recurring_job_name(PID, "not-a-uuid")
     assert len(odd) == 20 and rp.NAME_RE.match(odd)
+
+
+def test_recurring_job_name_digests_the_vm_uid_instead_of_its_prefix():
+    # deux uids aux 8 premiers caractères identiques : deux tâches distinctes
+    twin = UID_A[:8] + "-0000-4000-8000-000000000000"
+    assert rp.recurring_job_name(PID, twin) != rp.recurring_job_name(PID, UID_A)
+    assert rp.recurring_job_name(PID, UID_A) == rp.recurring_job_name(PID, UID_A)
+
+
+def test_a_simulated_recurring_job_name_collision_is_caught_by_the_labels(monkeypatch):
+    monkeypatch.setattr(rp, "_digest", lambda text: "deadbeef" * 8)
+    name = rp.recurring_job_name(PID, UID_B)
+    assert name == rp.recurring_job_name(PID, UID_A)
+    res = [{"resource_uid": UID_B, "namespace": "default", "name": "rep-b"}]
+    facts = {"recurring_jobs": {name: rp.plan_labels("rp-00000000000a", 1, UID_A)}}
+    assert [f["code"] for f in rp.collisions(facts, plan_obj(), res, [])] == ["recurring-job-taken"]
 
 
 def plan_obj(**kw):
@@ -148,8 +164,8 @@ def test_planned_objects_follow_the_mappings():
     o = rp.planned_objects(p, RESOURCES, VOLUMES)
     assert o["vms"] == ["dr/rep-a", "dr/rep-b-dr"]
     assert o["pvcs"] == ["dr/rep-a-root", "dr/rep-a-data-dr", "dr/rep-b-root"]
-    assert len(set(o["volumes"])) == 3 and o["recurring_jobs"][0] == "hr-01234567-fc8b3a33"
-    assert o["carnets"][0] == "harvester-ops-replication/hr-01234567-fc8b3a33"
+    assert len(set(o["volumes"])) == 3 and o["recurring_jobs"][0] == "hr-01234567-bb400680"
+    assert o["carnets"][0] == "harvester-ops-replication/hr-01234567-bb400680"
 
 
 def test_collisions_by_label_and_by_phase():
@@ -198,6 +214,7 @@ def lhv(name="pvc-1", labels=None, **spec):
 
 
 PVC = {"metadata": {"name": "rep-a-data"}}
+DAILY = {"daily": {"task": "backup", "groups": ["default"]}}
 
 
 @pytest.mark.parametrize("vol,sc,jobs,expected", [
@@ -208,10 +225,10 @@ PVC = {"metadata": {"name": "rep-a-data"}}
     (None, SC_LH, (), [("not-longhorn", "block")]),
     (lhv(encrypted=True), SC_LH, (), [("encrypted-volume", "block")]),
     (lhv(migratable=False), SC_LH, (), [("rwx-share-manager", "block")]),
-    (lhv(), SC_LH, ("daily",), [("default-backup-job", "warn")]),                 # implicite : sans étiquette
-    (lhv(labels={rp.JOB_GROUP_LABEL_PREFIX + "default": "enabled"}), SC_LH, ("daily",),
-     [("default-backup-job", "warn")]),
-    (lhv(labels={rp.JOB_LABEL_PREFIX + "mine": "enabled"}), SC_LH, ("daily",), []),
+    (lhv(), SC_LH, DAILY, [("backup-job-membership", "warn")]),                  # implicite : sans étiquette
+    (lhv(labels={rp.JOB_GROUP_LABEL_PREFIX + "default": "enabled"}), SC_LH, DAILY,
+     [("backup-job-membership", "warn")]),
+    (lhv(labels={rp.JOB_LABEL_PREFIX + "mine": "enabled"}), SC_LH, DAILY, []),
     (lhv(dataEngine="v2", encrypted=True, migratable=False), SC_LH, (),
      [("data-engine-v2", "block"), ("encrypted-volume", "block"), ("rwx-share-manager", "block")]),
 ])
@@ -220,9 +237,42 @@ def test_volume_findings(vol, sc, jobs, expected):
     assert [(f["code"], f["level"]) for f in got] == expected
 
 
-def test_default_backup_job_says_when_membership_is_implicit():
-    f = rp.volume_findings(lhv(), PVC, SC_LH, ("daily",))[0]
-    assert f["facts"]["implicit"] is True and f["facts"]["jobs"] == ["daily"]
+JOBS = {"daily": {"task": "backup", "groups": ["default"]},
+        "trim": {"task": "filesystem-trim", "groups": ["default"]},
+        "weekly": {"task": "backup-force-create", "groups": ["gold"]},
+        "snap": {"task": "snapshot", "groups": ["gold"]},
+        "named": {"task": "backup", "groups": []},
+        "hr-01234567-bb400680": {"task": "backup", "groups": []}}
+G, J = rp.JOB_GROUP_LABEL_PREFIX, rp.JOB_LABEL_PREFIX
+
+
+@pytest.mark.parametrize("labels,jobs,expected", [
+    # implicite : notre étiquette sortirait le volume du groupe default ; on
+    # garde l'étiquette du groupe, ses tâches de sauvegarde sauvegardent aussi
+    ({}, JOBS, (True, True, ["daily", "trim"], ["daily"])),
+    # groupe default sans tâche : rien à garder
+    ({}, {"weekly": JOBS["weekly"]}, (True, False, [], [])),
+    # explicite (mutateur de Longhorn) : rien n'est perdu, double sauvegarde
+    ({G + "default": "enabled"}, JOBS, (False, True, [], ["daily"])),
+    # autre groupe : ses tâches de sauvegarde, pas ses instantanés
+    ({G + "gold": "enabled"}, JOBS, (False, False, [], ["weekly"])),
+    ({G + "gold": "enabled", G + "default": "enabled"}, JOBS, (False, True, [], ["daily", "weekly"])),
+    # tâche nommée sur le volume
+    ({J + "named": "enabled"}, JOBS, (False, False, [], ["named"])),
+    # notre propre tâche ne compte jamais
+    ({J + "hr-01234567-bb400680": "enabled"}, JOBS, (False, False, [], [])),
+    # étiquette désactivée : le volume n'est plus implicite, rien ne le couvre
+    ({G + "gold": "disabled"}, JOBS, (False, False, [], [])),
+])
+def test_backup_membership_implicit_and_explicit(labels, jobs, expected):
+    m = rp.backup_membership(lhv(labels=labels), jobs, own_job="hr-01234567-bb400680")
+    assert (m["implicit"], m["keep_default_label"], m["lost_jobs"], m["double_backup_jobs"]) == expected
+
+
+def test_backup_job_membership_finding_carries_the_recommendation():
+    f = rp.volume_findings(lhv(), PVC, SC_LH, JOBS, own_job="hr-01234567-bb400680")[0]
+    assert f["code"] == "backup-job-membership" and f["facts"]["keep_default_label"] is True
+    assert f["facts"]["lost_jobs"] == ["daily", "trim"] and f["facts"]["double_backup_jobs"] == ["daily"]
 
 
 def test_disks_not_replicated_and_block_size():
@@ -321,6 +371,7 @@ def mutate_vm(src, i, **kw):
     (lambda s, d: s.update(backup_target_available=False), {}, "backup-target-unavailable", "block"),
     (lambda s, d: d.update(longhorn_version="v1.12.0"), {}, "longhorn-pair-unverified", "warn"),
     (lambda s, d: d.update(longhorn_version="v1.10.3"), {}, "longhorn-target-older", "warn"),
+    (lambda s, d: d.update(longhorn_version=None), {}, "longhorn-pair-unverified", "warn"),
     (lambda s, d: d.update(networks=["default/other"]), {}, "network-unmapped", "block"),
     (lambda s, d: d.update(storage_classes={"harv-rep1": {"replicas": 1, "allocatable": 100 * GiB}},
                            default_storage_class=None), {}, "storage-class-unmapped", "block"),
@@ -359,6 +410,48 @@ def test_check_one_case_per_code(setup, plan_kw, code, level):
     assert (code, level) in [(f["code"], f["level"]) for f in got], got
 
 
+def test_check_capacity_skips_standby_volumes_we_already_own():
+    # relance de protect après l'ajout d'un disque : les volumes de secours
+    # déjà posés ne redemandent pas leur place
+    owned = {rp.target_volume_name(PID, UID_B, "disk-0", 1, "rep-b"): rp.plan_labels(PID, 1, UID_B)}
+    room = {"harvester-longhorn": {"replicas": 1, "allocatable": GiB + 2 * GiB + 21_700_000}}
+    src, dst = facts(dst__storage_classes=room)
+    assert "capacity-short" in codes(rp.check(src, dst, plan_obj()))
+    src, dst = facts(dst__storage_classes=room, dst__volumes=owned)
+    assert "capacity-short" not in codes(rp.check(src, dst, plan_obj()))
+    # un volume du même nom à un autre plan compte (et bloque par ailleurs)
+    src, dst = facts(dst__storage_classes=room,
+                     dst__volumes={k: rp.plan_labels("rp-ffffffffffff", 1) for k in owned})
+    assert "capacity-short" in codes(rp.check(src, dst, plan_obj()))
+
+
+def two_classes(**room):
+    src, dst = facts(dst__storage_classes=room)
+    src["vms"][1]["disks"][0]["storage_class"] = "harv-rep1"            # rep-b : 10 Gio dans harv-rep1
+    return src, dst
+
+
+@pytest.mark.parametrize("room,expected", [
+    # même groupe de disques : 3 Gio + 10 Gio contre 12 Gio, trop court
+    # (chaque classe seule tiendrait)
+    ({"harvester-longhorn": {"replicas": 1, "allocatable": 12 * GiB, "pool": "all"},
+      "harv-rep1": {"replicas": 1, "allocatable": 12 * GiB, "pool": "all"}},
+     [("capacity-short", "block", ("harvester-longhorn", "harv-rep1"))]),
+    # deux groupes distincts : chacun tient
+    ({"harvester-longhorn": {"replicas": 1, "allocatable": 12 * GiB, "pool": "ssd"},
+      "harv-rep1": {"replicas": 1, "allocatable": 12 * GiB, "pool": "hdd"}}, []),
+    # groupe inconnu : chaque classe seule, et l'avertissement
+    ({"harvester-longhorn": {"replicas": 1, "allocatable": 12 * GiB},
+      "harv-rep1": {"replicas": 1, "allocatable": 12 * GiB}},
+     [("capacity-shared-pool", "warn", ("harv-rep1", "harvester-longhorn"))]),
+])
+def test_check_capacity_of_classes_sharing_one_pool(room, expected):
+    src, dst = two_classes(**room)
+    got = [(f["code"], f["level"], tuple(sorted(f["facts"].get("storage_classes") or ())))
+           for f in rp.check(src, dst, plan_obj()) if f["code"].startswith("capacity")]
+    assert got == [(c, lv, tuple(sorted(x))) for c, lv, x in expected]
+
+
 def test_check_capacity_counts_each_target_class_and_the_backing_image():
     # 1 Gio (image) + 2 Gio + 10 Gio dans harvester-longhorn, plus 21,7 Mo de
     # backing image à restaurer
@@ -369,6 +462,54 @@ def test_check_capacity_counts_each_target_class_and_the_backing_image():
     f = [x for x in rp.check(src, dst, plan_obj()) if x["code"] == "capacity-short"][0]
     assert f["facts"] == {"storage_class": "harvester-longhorn", "needed": need, "needed_total": 3 * need,
                           "allocatable": need - 1}
+
+
+@pytest.mark.parametrize("version", [None, "", "unknown", "main-head"])
+def test_unknown_longhorn_version_is_never_called_older(version):
+    src, dst = facts(dst__longhorn_version=version)
+    got = rp.check(src, dst, plan_obj())
+    f = [x for x in got if x["code"] == "longhorn-pair-unverified"][0]
+    assert f["facts"]["unknown"] is True and "longhorn-target-older" not in codes(got)
+
+
+def lost_source():
+    src, dst = facts()
+    src.update(reachable=False, backup_target=None, backup_target_available=False, longhorn_version=None,
+               backing_images={}, recurring_jobs={})
+    for vm in src["vms"]:                                     # VMs du carnet : pas de faits Longhorn
+        for d in vm["disks"]:
+            d.update(lh_volume=None, sc=None)
+    return src, dst
+
+
+def test_check_unplanned_failover_needs_no_source_facts():
+    src, dst = lost_source()
+    got = rp.check(src, dst, plan_obj(phase="failover-unplanned"))
+    assert codes(got, "block") == [], got
+    assert "source-unreachable" not in codes(got) and "not-longhorn" not in codes(got)
+    assert "longhorn-pair-unverified" not in codes(got)
+    # les mêmes faits bloquent une bascule planifiée
+    assert codes(rp.check(src, dst, plan_obj(phase="failover")), "block") == ["source-unreachable"]
+
+
+@pytest.mark.parametrize("setup,code", [
+    (lambda d: d.update(backup_target_available=False), "backup-target-unavailable"),
+    (lambda d: d.update(backup_target=None), "backup-target-differs"),
+    (lambda d: d.update(networks=[]), "network-unmapped"),
+    (lambda d: d.update(macs={"52:54:00:aa:00:01": "default/other"}), "mac-in-use"),
+    (lambda d: d.update(vms={"default/rep-a": {}}), "target-vm-taken"),
+    (lambda d: d.update(reachable=False), "target-unreachable"),
+])
+def test_check_unplanned_failover_still_blocks_on_the_target(setup, code):
+    src, dst = lost_source()
+    setup(dst)
+    assert code in codes(rp.check(src, dst, plan_obj(phase="failover-unplanned")), "block")
+
+
+def test_check_refuses_an_unknown_phase():
+    src, dst = facts()
+    with pytest.raises(ValueError, match="phase"):
+        rp.check(src, dst, plan_obj(phase="drill"))
 
 
 def test_check_mapped_image_uses_the_image_class_and_mac_of_our_own_target_vm_is_fine():
@@ -404,24 +545,27 @@ def test_cron_steps_and_expressions():
     ("2026-10-24T10:01:30Z", 180, "2026-10-24T10:03:00Z"),
     ("2026-10-24T10:59:59Z", 720, "2026-10-24T11:00:00Z"),
     ("2026-10-24T23:30:00Z", 21600, "2026-10-25T00:00:00Z"),
+    ("2026-10-24T10:01:30.987654Z", 180, "2026-10-24T10:03:00Z"),  # microsecondes effacées
+    ("2026-10-24T12:01:30+02:00", 180, "2026-10-24T10:03:00Z"),    # rendu en UTC
 ])
 def test_next_tick_at(now, interval, expected):
     assert rp.next_tick_at(interval, now) == expected
 
 
 @pytest.mark.parametrize("objective,send,apply,step,rpo,tenable,reason", [
-    # sauvegarde de 25 Mo en 5 s, application 10 s (banc du 22/10)
-    (300, 5, 10, 240, 265, True, None),
-    (900, 5, 10, 720, 745, True, None),
-    (3600, 5, 10, 1800, 1825, True, None),
-    # écritures dispersées : 952 Mo envoyés en 14 s, appliqués en 14 s
-    (300, 14, 14, 240, 278, True, None),
-    (60, 5, 10, 60, 85, False, "objective-too-short"),
+    # durées fixes (mêmes à tous les pas). Banc du 22/10 : sauvegarde de 25
+    # Mo en 5 s, application en 9 à 10 s relecture déclenchée COMPRISE : le
+    # RPO est pas + envoi + application, sans relecture ajoutée
+    (300, 5, 10, 240, 255, True, None),
+    (900, 5, 10, 720, 735, True, None),
+    (3600, 5, 10, 1800, 1815, True, None),
+    (300, 14, 14, 240, 268, True, None),
+    (60, 5, 10, 60, 75, False, "objective-too-short"),
     # 240 s de transfert : 240 s dériverait (240 > 0,8 x 240), 300 s non (marge
-    # pile) mais donne 550 s, au-delà de l'objectif
-    (500, 120, 120, 300, 550, False, "objective-too-short"),
-    (600, 120, 120, 300, 550, True, None),
-    (3600, 50000, 50000, 86400, 186410, False, "drift-at-every-step"),
+    # pile) mais donne 540 s, au-delà de l'objectif
+    (500, 120, 120, 300, 540, False, "objective-too-short"),
+    (600, 120, 120, 360, 600, True, None),
+    (3600, 50000, 50000, 86400, 186400, False, "drift-at-every-step"),
 ])
 def test_derive_interval_grid(objective, send, apply, step, rpo, tenable, reason):
     got = rp.derive_interval(objective, send, apply)
@@ -429,40 +573,107 @@ def test_derive_interval_grid(objective, send, apply, step, rpo, tenable, reason
     assert (s, r, ok, got.reason) == (step, rpo, tenable, reason)
 
 
+def test_derive_interval_never_adds_a_separate_resync():
+    with pytest.raises(TypeError):
+        rp.derive_interval(300, 5, 10, resync_s=10)
+    got = rp.derive_interval(300, 5, 10)
+    assert got.rpo == got.step + got.send_s + got.apply_s
+
+
 def test_derive_interval_margin_decides():
     # 50 s de transfert pour un pas de 60 s : dérive avec 20 % de marge
     assert rp.derive_interval(3600, 25, 25, margin=0.2).step == 1800
-    assert rp.derive_interval(130, 25, 25, margin=0.2).tenable is False
-    assert rp.derive_interval(130, 25, 25, margin=0.1) == (60, 120, True)
+    assert rp.derive_interval(130, 25, 25, margin=0.2) == (120, 170, False)
+    assert rp.derive_interval(130, 25, 25, margin=0.1) == (60, 110, True)
+
+
+# Banc du 22/10 : 3 x 8 Mio par passage de 3 min, 25 174 351 octets envoyés en
+# 5 s ; application 9 à 10 s, dont 9 s fixes (relecture déclenchée).
+SEQ = [25_174_351] * 10
+
+
+def bench_estimators(samples=SEQ, cap=None):
+    send = rp.StepEstimator(180, samples, bps=25_174_351 / 5, cap=cap)
+    apply_ = rp.StepEstimator(180, samples, bps=25_174_351 / 1, fixed_s=9, cap=cap)
+    return send, apply_
+
+
+@pytest.mark.parametrize("step,send_s,apply_s", [
+    (60, 5, 10),           # pas plus court que la mesure : la mesure le majore
+    (180, 5, 10),          # le pas mesuré
+    (240, 10, 11),         # 2 passages
+    (720, 20, 13),         # 4 passages
+    (900, 25, 14),         # 5 passages
+])
+def test_step_estimator_grows_with_the_step(step, send_s, apply_s):
+    send, apply_ = bench_estimators()
+    assert (send(step), apply_(step)) == (pytest.approx(send_s), pytest.approx(apply_s))
+
+
+def test_derive_interval_with_the_send_time_of_each_step():
+    # La mesure à 3 min seule promettrait 900 s (900 + 5 + 10 = 915 <= 920) ;
+    # à 900 s il y a cinq fois plus de blocs : 900 + 25 + 14 = 939. Le bon pas
+    # est 720 s (720 + 20 + 13 = 753).
+    assert rp.derive_interval(920, 5, 10).step == 900
+    got = rp.derive_interval(920, *bench_estimators())
+    assert (got.step, got.rpo, got.tenable, got.send_s, got.apply_s) == (720, 753, True, 20, 13)
+
+
+def test_step_estimator_scattered_writes_capped_at_the_volume():
+    # écritures dispersées du 23/10 : 952,6 Mo par passage de 3 min en 14 s,
+    # appliqués en 14 s ; au-delà de 2 passages, le volume entier (2 Gio)
+    scattered = [952_600_000] * 5
+    send = rp.StepEstimator(180, scattered, bps=952_600_000 / 14, cap=2 * GiB)
+    apply_ = rp.StepEstimator(180, scattered, bps=952_600_000 / 14, cap=2 * GiB)
+    assert send.bytes(360) == 1_905_200_000 and send.bytes(900) == 2 * GiB
+    got = rp.derive_interval(900, send, apply_)
+    full = 2 * GiB / (952_600_000 / 14)
+    assert got.step == 720 and got.rpo == pytest.approx(720 + 2 * full) and got.tenable
+
+
+def test_step_estimator_extrapolates_from_few_passes_and_refuses_nothing_measured():
+    send = rp.StepEstimator(180, [10, 30], bps=1)
+    assert send.bytes(180) == 30 and send.bytes(360) == 40 and send.bytes(720) == 30 * 4
+    for bad in (dict(measured_step=0, samples=[1], bps=1), dict(measured_step=180, samples=[], bps=1),
+                dict(measured_step=180, samples=[1], bps=0)):
+        with pytest.raises(ValueError):
+            rp.StepEstimator(**bad)
 
 
 def test_blocks_forecast_scattered_writes_on_the_bench():
     # 600 écritures de 4 Kio dispersées sur 2 Gio : relevé 450 à 458 blocs,
     # 944 à 960 Mo envoyés ; prévision 454 blocs, 952,6 Mo
     f = rp.blocks_forecast(2 * GiB, 600)
-    assert f["blocks"] == 1024 and round(f["upper_blocks"]) == 454
-    assert round(f["upper_bytes"] / 1e6, 1) == 952.6
-    assert 944e6 <= f["upper_bytes"] <= 960e6
-    assert f["lower_blocks"] == 2 and f["bytes_written"] == 2_457_600
+    assert f["blocks"] == 1024 and round(f["scattered_estimate"]) == 454
+    assert round(f["scattered_estimate_bytes"] / 1e6, 1) == 952.6
+    assert 944e6 <= f["scattered_estimate_bytes"] <= 960e6
+    assert f["sequential"] == 2 and f["bytes_written"] == 2_457_600
+    # non alignées, chaque écriture de 4 Kio toucherait 2 blocs : 1200, plafonné
+    assert f["worst_case"] == 1024
 
 
 def test_blocks_forecast_sequential_writes_on_the_bench():
     # 3 x 8 Mio par passage : 12 blocs ; 25 174 351 octets envoyés (lz4 sur
     # des données aléatoires, à 0,04 % près)
     f = rp.blocks_forecast(2 * GiB, 3, write_size=8 * MiB)
-    assert f["lower_blocks"] == 12 and f["lower_bytes"] == 25_165_824
-    assert f["upper_blocks"] >= f["lower_blocks"]
-    assert abs(25_174_351 - f["lower_bytes"]) / f["lower_bytes"] < 0.001
+    assert f["sequential"] == 12 and f["sequential_bytes"] == 25_165_824
+    assert f["scattered_estimate"] == 12 and f["worst_case"] == 15     # 5 blocs par écriture non alignée
+    assert abs(25_174_351 - f["sequential_bytes"]) / f["sequential_bytes"] < 0.001
 
 
-@pytest.mark.parametrize("size,writes,ws,block,lo,hi", [
-    (2 * GiB, 0, 4096, 2 * MiB, 0, 0),
-    (2 * GiB, 10 ** 6, 4096, 2 * MiB, 1024, 1024),               # plafonné au volume
-    (2 * GiB, 600, 4096, 16 * MiB, 1, 127),                      # bloc de 16 Mio : 127 blocs sur 128
+@pytest.mark.parametrize("size,writes,ws,block,seq,scat,worst", [
+    (2 * GiB, 0, 4096, 2 * MiB, 0, 0, 0),
+    (2 * GiB, 10 ** 6, 4096, 2 * MiB, 1024, 1024, 1024),          # plafonné au volume
+    (2 * GiB, 600, 4096, 16 * MiB, 1, 127, 128),                  # bloc de 16 Mio : 127 blocs sur 128
+    (2 * GiB, 10, 3 * MiB, 2 * MiB, 15, 20, 30),                  # 3 Mio : 2 blocs alignés, 3 sinon
+    (2 * GiB, 10, 2 * MiB + 1, 2 * MiB, 11, 20, 20),              # à peine plus d'un bloc
+    (4 * MiB, 3, 4096, 2 * MiB, 1, 2, 2),                         # recouvrements : 2 blocs au plus
+    (2 * GiB, 5, 1, 2 * MiB, 1, 5, 5),                            # écriture d'un octet : un bloc
 ])
-def test_blocks_forecast_bounds(size, writes, ws, block, lo, hi):
+def test_blocks_forecast_bounds(size, writes, ws, block, seq, scat, worst):
     f = rp.blocks_forecast(size, writes, block=block, write_size=ws)
-    assert f["lower_blocks"] == lo and round(f["upper_blocks"]) == hi
+    assert (f["sequential"], round(f["scattered_estimate"]), f["worst_case"]) == (seq, scat, worst)
+    assert f["sequential"] <= f["scattered_estimate"] <= f["worst_case"] <= f["blocks"]
 
 
 def test_aggregate_upper_sums_consecutive_passes():
@@ -563,20 +774,63 @@ def test_drift_when_a_pass_takes_more_than_one_step(ticks, drift):
     assert v["drift"] is drift and (v["state"] == "drifting") is drift
 
 
-def test_spec_drift_uses_metadata_generation_not_resource_version():
+DISK_FACTS = [{"disk": "disk-0", "size": GiB, "storage_class": "harvester-longhorn"}]
+
+
+def _bump(vm):
+    vm["metadata"]["generation"] += 1
+
+
+def _add_disk(vm):
+    _bump(vm)
+    t = vm["spec"]["template"]["spec"]
+    t["volumes"].append({"name": "data", "persistentVolumeClaim": {"claimName": "rep-a-data"}})
+    t["domain"]["devices"].setdefault("disks", []).append({"name": "data", "disk": {"bus": "virtio"}})
+
+
+def _ci(vm, secret):
+    _bump(vm)
+    vm["spec"]["template"]["spec"]["volumes"].append(
+        {"name": "ci", "cloudInitNoCloud": {"secretRef": {"name": secret}}})
+
+
+@pytest.mark.parametrize("change,disks,drift", [
+    # dossier de la console : annotation, resourceVersion ; la generation ne bouge pas
+    (lambda vm: (vm["metadata"].update(resourceVersion="2000"),
+                 vm["metadata"].setdefault("annotations", {}).update({"harvester-ops.io/folder": "prod"})),
+     DISK_FACTS, False),
+    (lambda vm: (_bump(vm), vm["metadata"].setdefault("labels", {}).update(tier="gold")), DISK_FACTS, False),
+    # démarrage, arrêt : runStrategy est dans la spec, la generation bouge
+    (lambda vm: (_bump(vm), vm["spec"].update(runStrategy="Halted")), DISK_FACTS, False),
+    (lambda vm: (_bump(vm), vm["spec"].pop("runStrategy"), vm["spec"].update(running=False)), DISK_FACTS, False),
+    (_add_disk, DISK_FACTS, True),
+    (lambda vm: (_bump(vm), vm["spec"]["template"]["spec"]["networks"][0]["multus"].update(
+        networkName="default/other")), DISK_FACTS, True),
+    (lambda vm: (_bump(vm), vm["spec"]["template"]["spec"]["domain"]["devices"]["interfaces"][0].update(
+        macAddress="52:54:00:aa:00:99")), DISK_FACTS, True),
+    (lambda vm: (_bump(vm), vm["spec"]["template"]["spec"]["domain"]["firmware"].update(uuid="other")),
+     DISK_FACTS, True),
+    (lambda vm: _ci(vm, "ci-v2"), DISK_FACTS, True),
+    # disque agrandi (taille lue sur le PVC)
+    (_bump, [dict(DISK_FACTS[0], size=2 * GiB)], True),
+    (_bump, [dict(DISK_FACTS[0], storage_class="harv-rep1")], True),
+])
+def test_spec_drift_uses_a_digest_of_the_replication_relevant_spec(change, disks, drift):
     vm = vm_obj("rep-a", UID_A, [("disk-0", "c")])
-    r = res(UID_A, "rep-a", vm_generation=rp.vm_spec_generation(vm))
+    r = res(UID_A, "rep-a", vm_generation=rp.vm_spec_generation(vm), vm_spec_digest=rp.vm_spec_digest(vm, DISK_FACTS))
     ticks = [tick("pvc-a0", -10), tick("pvc-a1", -10)]
-    # dossier de la console posé en annotation : resourceVersion bouge, pas la generation
-    moved = copy.deepcopy(vm)
-    moved["metadata"]["resourceVersion"] = "2000"
-    moved["metadata"].setdefault("annotations", {})["harvester-ops.io/folder"] = "prod"
-    st = rp.resource_state(pplan(), r, SVOLS, ticks, NOW, {}, {"vm_generation": rp.vm_spec_generation(moved)})
-    assert st == "protected"
-    changed = copy.deepcopy(vm)
-    changed["metadata"]["generation"] = 5
-    assert rp.resource_state(pplan(), r, SVOLS, ticks, NOW, {},
-                             {"vm_generation": rp.vm_spec_generation(changed)}) == "drifting"
+    seen = copy.deepcopy(vm)
+    change(seen)
+    health = {"vm_generation": rp.vm_spec_generation(seen), "vm_spec_digest": rp.vm_spec_digest(seen, disks)}
+    v = rp.plan_status(pplan(), [r], SVOLS, ticks, NOW, {}, {UID_A: health})["vms"][0]
+    assert (v["state"] == "drifting", "plan-drift" in v["reasons"]) == (drift, drift)
+
+
+def test_spec_drift_without_a_known_digest_is_never_asserted():
+    assert rp.spec_drifted({"vm_generation": 4}, {"vm_generation": 5}) is False
+    assert rp.spec_drifted({"vm_generation": 4, "vm_spec_digest": "a"}, {"vm_generation": 4,
+                                                                         "vm_spec_digest": "b"}) is False
+    assert rp.spec_drifted({"vm_spec_digest": "a"}, {"vm_spec_digest": "b"}) is True
 
 
 @pytest.mark.parametrize("health,ticks,state", [
@@ -584,9 +838,32 @@ def test_spec_drift_uses_metadata_generation_not_resource_version():
     ({"standby_degraded": True}, [tick("pvc-a0", -10), tick("pvc-a1", -10)], "degraded"),
     ({}, [tick("pvc-a0", -10), tick("pvc-a1", -10), tick("pvc-a1", -5, state="error", backup="e")], "degraded"),
     ({}, [tick("pvc-a0", -10), tick("pvc-a1", -10)], "protected"),
+    # passage en erreur sans date (instantané refusé) : le plus récent
+    ({}, [tick("pvc-a0", -10), tick("pvc-a1", -10), {"source_volume": "pvc-a1", "backup": "e", "generation": 1,
+                                                       "state": "error"}], "degraded"),
+    # erreur suivie d'un passage réussi : rétabli
+    ({}, [tick("pvc-a0", -10), tick("pvc-a1", -100, state="error", backup="e"), tick("pvc-a1", -10)], "protected"),
 ])
 def test_resource_state_from_health(health, ticks, state):
     assert rp.resource_state(pplan(), res(UID_A, "rep-a"), SVOLS, ticks, NOW, {}, health) == state
+
+
+@pytest.mark.parametrize("ticks,health,reasons,state", [
+    # toutes les raisons relevées, l'état suit la plus grave
+    ([tick("pvc-a0", -10), tick("pvc-a1", -400), tick("pvc-a1", -5, state="error", backup="e")],
+     {"source_reachable": False, "standby_degraded": True},
+     ["source-unreachable", "backup-error", "standby-degraded", "rpo-exceeded"], "source-unreachable"),
+    ([tick("pvc-a0", -10), tick("pvc-a1", -400), tick("pvc-a1", -5, state="error", backup="e")], {},
+     ["backup-error", "rpo-exceeded"], "degraded"),
+    ([tick("pvc-a0", -400, apply=200), tick("pvc-a1", -400)], {}, ["rpo-drift", "rpo-exceeded"], "drifting"),
+    # un disque sans point appliqué : jamais « protégé » tout court
+    ([tick("pvc-a0", -10)], {}, ["no-point"], "lagging"),
+    ([], {}, ["no-point"], "lagging"),
+    ([tick("pvc-a0", -10), tick("pvc-a1", 0, state="completed")], {}, ["no-point"], "lagging"),
+])
+def test_all_reasons_are_collected_and_the_state_follows_priority(ticks, health, reasons, state):
+    v = rp.plan_status(pplan(), RES2[:1], SVOLS, ticks, NOW, {}, {UID_A: health})["vms"][0]
+    assert (v["reasons"], v["state"]) == (reasons, state)
 
 
 @pytest.mark.parametrize("stored", ["draft", "measuring", "protecting", "failing_over", "failed_over",
@@ -613,11 +890,12 @@ SRC_FULL = ("pause", "unprotect", "unprotect-delete-backups")
     ("drifting", ("protect",) + FULL, ("protect",) + SRC_FULL),
     ("degraded", FULL, SRC_FULL),
     ("source-unreachable", ("failover-unplanned", "pause", "unprotect"), ("failover-unplanned", "pause", "unprotect")),
-    ("failing_over", ("failover",), ()),
+    ("failing_over", ("failover", "failover-unplanned"), ()),
     ("failed_over", ("unprotect", "unprotect-delete-backups"), ("unprotect", "unprotect-delete-backups")),
     ("unprotecting", ("unprotect", "unprotect-delete-backups"), ("unprotect", "unprotect-delete-backups")),
     ("unprotected", (), ()),
-    ("error", ("protect", "unprotect", "unprotect-delete-backups"), ("protect", "unprotect", "unprotect-delete-backups")),
+    # origine inconnue : seule la déprotection
+    ("error", ("unprotect", "unprotect-delete-backups"), ("unprotect", "unprotect-delete-backups")),
 ])
 def test_actions_per_state_and_side(state, target, source):
     plan = pplan()
@@ -644,7 +922,46 @@ def test_paused_plan_offers_resume_and_error_after_failover_offers_failover():
     names = [a["name"] for a in rp.allowed_actions(paused, res(UID_A, "rep-a"), "target")]
     assert "resume" in names and "pause" not in names
     err = res(UID_A, "rep-a", "error", error_origin="failing_over")
-    assert [a["name"] for a in rp.allowed_actions(pplan(), err, "target")][:2] == ["protect", "failover"]
+    assert [a["name"] for a in rp.allowed_actions(pplan(), err, "target")] == \
+        ["failover", "failover-unplanned", "unprotect", "unprotect-delete-backups"]
+    assert [a["name"] for a in rp.allowed_actions(pplan(), err, "source")] == ["unprotect", "unprotect-delete-backups"]
+    # origine lue sur le plan quand la ligne de la ressource ne la porte pas
+    plan_err = pplan(state="error", error_origin="protecting")
+    assert [a["name"] for a in rp.allowed_actions(plan_err, res(UID_A, "rep-a", "error"), "target")] == \
+        ["protect", "unprotect", "unprotect-delete-backups"]
+
+
+# Action -> commande de la ligne de commande (COMMAND_FROM)
+COMMAND = {"measure-start": "measure-start", "measure-stop": "measure-stop", "protect": "protect",
+           "failover": "failover", "failover-unplanned": "failover", "unprotect": "unprotect",
+           "unprotect-delete-backups": "unprotect"}
+# Acceptées par le registre mais volontairement non proposées, avec la raison
+NOT_OFFERED = {
+    # protect relancé seulement quand la spec a dérivé (rien à faire sinon)
+    ("protected", "protect"), ("lagging", "protect"), ("degraded", "protect"), ("source-unreachable", "protect"),
+    # source perdue : la bascule planifiée exige la source, seule l'imprévue
+    ("source-unreachable", "failover"), ("source-unreachable", "unprotect-delete-backups"),
+    # la mesure n'a posé que ses propres sauvegardes, toujours retirées
+    ("measuring", "unprotect-delete-backups"),
+    # une mesure en cours se reprend d'elle-même (suiveur), pas de bouton
+    ("measuring", "measure-start"),
+}
+STORED_OF = {"lagging": "protected", "drifting": "protected", "degraded": "protected",
+             "source-unreachable": "protected"}
+
+
+@pytest.mark.parametrize("state", [s for s in rp.RESOURCE_STATES if s != "error"])
+@pytest.mark.parametrize("side", ["target", "source", "any"])
+def test_offered_actions_are_exactly_those_the_store_accepts(state, side):
+    stored = STORED_OF.get(state, state)
+    offered = {a["name"] for a in rp.allowed_actions(pplan(), res(UID_A, "rep-a", state), side, role="admin")}
+    accepted = {a for a, cmd in COMMAND.items()
+                if stored in rp.COMMAND_FROM[cmd] and rp.transition_allowed(stored, rp.ACTION_STATE[a])}
+    if side == "source" and state != "source-unreachable":
+        accepted -= set(rp._TARGET_ONLY)
+    stateful = {a for a in offered if a in rp.ACTION_STATE}
+    assert stateful <= accepted, stateful - accepted
+    assert accepted - stateful == {a for s, a in NOT_OFFERED if s == state} & accepted
 
 
 def test_plan_actions_from_mixed_resource_states():
@@ -782,17 +1099,19 @@ def same(ours, bench):
 
 
 def test_recurring_job_matches_the_bench():
-    rj = rp.recurring_job("dr2-fb-bak", "*/3 * * * *", 3, 2, PID, UID_A)
+    rj = rp.recurring_job("dr2-fb-bak", "*/3 * * * *", 3, 2, PID, UID_A, 1)
     assert rj["metadata"]["labels"] == LABELS and rj["spec"]["labels"] == LABELS
     bare = strip_ours(rj)
     bare["spec"]["labels"] = {}
     same(bare, BENCH[0])
     with pytest.raises(ValueError):
-        rp.recurring_job("x", "*/3 * * * *", 2, 1, PID, UID_A)
+        rp.recurring_job("x", "*/3 * * * *", 2, 1, PID, UID_A, 1)
     with pytest.raises(ValueError):
-        rp.recurring_job("x", "*/3 * * * *", 51, 1, PID, UID_A)
+        rp.recurring_job("x", "*/3 * * * *", 51, 1, PID, UID_A, 1)
     with pytest.raises(ValueError):
-        rp.recurring_job("x", "*/3 * * * *", 6, 0, PID, UID_A)
+        rp.recurring_job("x", "*/3 * * * *", 6, 0, PID, UID_A, 1)
+    with pytest.raises(TypeError):                                # génération exigée
+        rp.recurring_job("x", "*/3 * * * *", 6, 1, PID, UID_A)
     assert rp.job_label("dr2-fb-bak") == ("recurring-job.longhorn.io/dr2-fb-bak", "enabled")
 
 
@@ -850,7 +1169,7 @@ def test_target_vm_keep_copies_the_firmware_uuid_and_the_mac():
     resource = res(UID_A, "rep-a", firmware_uuid="fw-11111111")
     maps = {"networks": {"default/prod": "default/lab-net"}, "namespaces": {"default": "dr"}}
     vm, removed = rp.target_vm(src, resource, maps, {"cloud_init": "keep", "mac": "keep", "start": "started"},
-                               {"rep-a-root": "rep-a-root-dr"}, PID)
+                               {"rep-a-root": "rep-a-root-dr"}, PID, 1)
     tspec = vm["spec"]["template"]["spec"]
     assert (vm["metadata"]["namespace"], vm["metadata"]["name"]) == ("dr", "rep-a")
     assert vm["metadata"]["labels"] == rp.plan_labels(PID, 1, UID_A)
@@ -876,4 +1195,4 @@ def test_target_vm_rerun_drops_the_firmware_uuid_new_mac_and_stopped():
 
 def test_target_vm_keep_without_firmware_uuid_refuses():
     with pytest.raises(ValueError, match="firmware uuid"):
-        rp.target_vm(vm_obj("rep-a", UID_A, [], fw=None), res(UID_A, "rep-a"), {}, {"cloud_init": "keep"}, {}, PID)
+        rp.target_vm(vm_obj("rep-a", UID_A, [], fw=None), res(UID_A, "rep-a"), {}, {"cloud_init": "keep"}, {}, PID, 1)

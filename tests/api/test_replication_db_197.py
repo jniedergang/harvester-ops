@@ -46,7 +46,7 @@ def new_plan(conn, name="web", src="harvlab", dst="harvlab2", pid=PID):
 
 def resource(uid, src="harvlab", dst="harvlab2", ns="default", name=None, **kw):
     return dict({"resource_uid": uid, "source_host": src, "target_host": dst, "namespace": ns,
-                 "name": name or uid}, **kw)
+                 "name": name or uid, "generation": 1}, **kw)
 
 
 # -- connexion, plan -------------------------------------------------------------
@@ -57,7 +57,8 @@ def test_connect_creates_a_private_wal_database(tmp_path, monkeypatch):
     assert db.default_path() == path
     c = db.connect()
     assert c.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    for p in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        assert p.exists() and stat.S_IMODE(p.stat().st_mode) == 0o600, p
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert set(db.TABLES) <= tables
 
@@ -85,12 +86,47 @@ def test_plan_name_is_unique(conn):
 
 def test_update_plan_settings_and_refuses_the_state(conn):
     new_plan(conn)
+    db.update_plan(conn, PID, options={"mac": "new"})
     p = db.update_plan(conn, PID, now=at(60), rpo_objective_s=300, options={"paused": True})
-    assert p["rpo_objective_s"] == 300 and p["options"] == {"paused": True} and p["updated_at"] == "2026-10-24T10:01:00Z"
+    # options fusionnées et normalisées : `mac` gardé, défauts présents
+    assert p["rpo_objective_s"] == 300 and p["updated_at"] == "2026-10-24T10:01:00Z"
+    assert p["options"] == dict(rp.DEFAULT_OPTIONS, paused=True, mac="new", timeouts={})
     with pytest.raises(ValueError, match="not settable: state"):
         db.update_plan(conn, PID, state="protected")
+    with pytest.raises(ValueError, match="not settable: cron"):
+        db.update_plan(conn, PID, cron="*/7 * * * *")
     with pytest.raises(KeyError):
         db.update_plan(conn, "rp-ffffffffffff", retain=4)
+
+
+@pytest.mark.parametrize("fields,check", [
+    ({"interval_s": "15m"}, lambda p: (p["interval_s"], p["cron"]) == (900, "*/15 * * * *")),
+    ({"interval_s": None}, lambda p: (p["interval_s"], p["cron"]) == (None, "")),
+    ({"selector": "app=web", "selector_namespace": "prod"},
+     lambda p: (p["vms"], p["selector"], p["selector_namespace"]) == ([], "app=web", "prod")),
+    ({"generation": 2, "active_side": "target"}, lambda p: (p["generation"], p["active_side"]) == (2, "target")),
+])
+def test_update_plan_goes_through_normalize_plan(conn, fields, check):
+    new_plan(conn)
+    assert check(db.update_plan(conn, PID, **fields))
+
+
+@pytest.mark.parametrize("fields,err", [
+    ({"interval_s": 420}, rp.PlanError),                  # pas qui ne divise pas l'heure
+    ({"rpo_objective_s": 10}, rp.PlanError),
+    ({"retain": 1}, rp.PlanError),
+    ({"options": {"mac": "random"}}, rp.PlanError),
+    ({"mappings": {"bogus": {}}}, rp.PlanError),
+    ({"vms": [], "selector": ""}, rp.PlanError),          # plus aucune sélection
+    ({"generation": 0}, ValueError),
+    ({"active_side": "both"}, ValueError),
+])
+def test_update_plan_refuses_what_normalize_plan_refuses(conn, fields, err):
+    new_plan(conn)
+    before = db.get_plan(conn, PID)
+    with pytest.raises(err):
+        db.update_plan(conn, PID, **fields)
+    assert db.get_plan(conn, PID) == before
 
 
 # -- transitions ----------------------------------------------------------------
@@ -102,9 +138,10 @@ def test_update_plan_settings_and_refuses_the_state(conn):
     ["protecting", "protected", "protecting", "protected"],          # protect relancé après une dérive
     ["protecting", "protected", "failing_over", "protected"],        # bascule annulée avant activation
     ["protecting", "protected", "failing_over", "failing_over", "failed_over", "unprotecting", "unprotected"],
-    ["unprotecting", "unprotected"],
+    ["measuring", "unprotecting", "unprotected"],
     ["protecting", "error", "protecting", "protected"],              # reprise depuis error
     ["protecting", "protected", "failing_over", "error", "failing_over", "failed_over"],
+    ["protecting", "protected", "failing_over", "error", "unprotecting", "unprotected"],   # bascule abandonnée
 ])
 def test_valid_transitions(conn, path):
     new_plan(conn)
@@ -123,15 +160,19 @@ def test_valid_transitions(conn, path):
     ([], "draft", "protected", "transition not allowed"),             # pas de protection sans copie
     ([], "draft", "failing_over", "transition not allowed"),
     ([], "draft", "draft", "transition not allowed"),                  # draft n'est pas intermédiaire
+    ([], "draft", "unprotecting", "transition not allowed"),           # un brouillon se supprime
     ([], "protected", "failing_over", "state is draft"),               # état réel inattendu
     (["protecting", "protected"], "protected", "failed_over", "transition not allowed"),
     (["protecting", "protected"], "protected", "measuring", "transition not allowed"),
     (["protecting", "protected", "failing_over", "failed_over"], "failed_over", "protected", "transition not allowed"),
-    (["unprotecting", "unprotected"], "unprotected", "protecting", "transition not allowed"),
-    (["unprotecting", "unprotected"], "unprotected", "unprotecting", "transition not allowed"),
+    (["protecting", "unprotecting", "unprotected"], "unprotected", "protecting", "transition not allowed"),
+    (["protecting", "unprotecting", "unprotected"], "unprotected", "unprotecting", "transition not allowed"),
     # depuis error : seules les transitions de l'état d'origine
     (["protecting", "error"], "error", "failing_over", "transition not allowed"),
     (["protecting", "error"], "error", "measuring", "transition not allowed"),
+    (["protecting", "protected", "failing_over", "failed_over", "error"], "error", "failing_over",
+     "transition not allowed"),
+    (["protecting", "protected", "failing_over", "error"], "error", "protecting", "transition not allowed"),
 ])
 def test_refused_transitions(conn, path, expected, new, reason):
     new_plan(conn)
@@ -155,16 +196,50 @@ def test_set_state_accepts_several_expected_states_and_rejects_unknown(conn):
     assert db.error_origin(conn, PID) == "protecting"
 
 
-def test_delete_plan_only_from_draft_or_unprotected(conn):
+def test_error_origin_lives_in_the_plan_row_not_in_the_journal(conn):
+    new_plan(conn)
+    db.set_state(conn, PID, "draft", "protecting", now=at(0))
+    db.set_state(conn, PID, "protecting", "protected", now=at(1))
+    db.set_state(conn, PID, "protected", "failing_over", now=at(2))
+    p = db.set_state(conn, PID, "failing_over", "error", now=at(3))
+    assert p["error_origin"] == "failing_over"
+    # journal effacé (rétention) : l'origine reste, la sortie reste restreinte
+    assert db.prune(conn, at(3600))["events"] == 4
+    assert db.error_origin(conn, PID) == "failing_over"
+    with pytest.raises(db.StateConflict):
+        db.set_state(conn, PID, "error", "protecting")
+    p = db.set_state(conn, PID, "error", "failing_over", now=at(5))
+    assert (p["state"], p["error_origin"], db.error_origin(conn, PID)) == ("failing_over", "", None)
+
+
+def test_error_with_an_unknown_origin_only_unprotects(conn):
+    # ligne d'avant la colonne : origine vide, seule la déprotection sort
+    new_plan(conn)
+    db.set_state(conn, PID, "draft", "protecting")
+    db.set_state(conn, PID, "protecting", "error")
+    conn.execute("UPDATE plans SET error_origin = '' WHERE id = ?", (PID,))
+    with pytest.raises(db.StateConflict):
+        db.set_state(conn, PID, "error", "protecting")
+    assert db.set_state(conn, PID, "error", "unprotecting")["state"] == "unprotecting"
+
+
+def test_delete_plan_only_from_draft_or_unprotected_and_keeps_the_audit(conn):
     new_plan(conn)
     db.set_state(conn, PID, "draft", "protecting")
     with pytest.raises(db.StateConflict):
         db.delete_plan(conn, PID)
+    db.upsert_resource(conn, PID, resource("u1"), now=NOW)
+    db.upsert_volume(conn, PID, {"vm_uid": "u1", "disk": "d", "generation": 1})
+    db.record_tick(conn, PID, {"source_volume": "pvc-1", "backup": "b1", "generation": 1})
+    db.record_run(conn, PID, "unprotect", NOW, 1, finished_at=at(5), result="ok")
     db.set_state(conn, PID, "protecting", "unprotecting")
     db.set_state(conn, PID, "unprotecting", "unprotected")
-    db.upsert_resource(conn, PID, resource("u1"), now=NOW)
     assert db.delete_plan(conn, PID) is True and db.get_plan(conn, PID) is None
-    assert db.list_resources(conn, PID) == [] and db.delete_plan(conn, PID) is False
+    assert db.list_resources(conn, PID) == [] and db.list_volumes(conn, PID) == [] and db.list_ticks(conn, PID) == []
+    # bascules/déprotections et journal gardés ensemble, pour l'audit
+    assert [r["operation"] for r in db.list_runs(conn, PID)] == ["unprotect"]
+    assert [e["code"] for e in db.plan_events(conn, PID)][:1] == ["unprotected"]
+    assert db.delete_plan(conn, PID) is False
 
 
 # -- ressources, volumes, liste par hôte ------------------------------------------
@@ -174,10 +249,46 @@ def test_resource_upsert_keeps_its_state_and_state_since(conn):
     r = db.upsert_resource(conn, PID, resource("u1", name="rep-a", vm_generation=3), now=NOW)
     assert (r["state"], r["state_since"], r["vm_generation"]) == ("draft", "2026-10-24T10:00:00Z", 3)
     db.set_resource_state(conn, PID, "u1", "protecting", now=at(10))
-    r = db.upsert_resource(conn, PID, resource("u1", name="rep-a", vm_generation=4), now=at(20))
-    assert (r["state"], r["state_since"], r["vm_generation"]) == ("protecting", "2026-10-24T10:00:10Z", 4)
-    # même état : state_since ne bouge pas
+    r = db.upsert_resource(conn, PID, resource("u1", name="rep-a", vm_generation=4, vm_spec_digest="d1"), now=at(20))
+    assert (r["state"], r["state_since"], r["vm_generation"], r["vm_spec_digest"]) == \
+        ("protecting", "2026-10-24T10:00:10Z", 4, "d1")
+    # même état : state_since ne bouge pas, rien au journal
+    n = len(db.resource_events(conn, "u1"))
     assert db.set_resource_state(conn, PID, "u1", "protecting", now=at(30))["state_since"] == "2026-10-24T10:00:10Z"
+    assert len(db.resource_events(conn, "u1")) == n
+
+
+@pytest.mark.parametrize("path,refused", [
+    (["protecting", "protected", "failing_over", "failed_over"], "protected"),
+    (["protecting", "error"], "failing_over"),
+    ([], "protected"),
+    (["protecting", "protected", "failing_over", "error"], "protecting"),
+])
+def test_resource_transitions_are_checked_and_journaled(conn, path, refused):
+    new_plan(conn)
+    db.upsert_resource(conn, PID, resource("u1"), now=NOW)
+    cur = "draft"
+    for i, nxt in enumerate(path):
+        r = db.set_resource_state(conn, PID, "u1", nxt, now=at(i), by="alice", action_id="a1")
+        assert r["error_origin"] == (cur if nxt == "error" else "")
+        cur = nxt
+    evs = db.resource_events(conn, "u1", limit=50)
+    assert [e["code"] for e in reversed(evs)] == path
+    assert all(e["operation"] == "plan" and e["step"] == "state" and e["by"] == "alice" for e in evs)
+    with pytest.raises(db.StateConflict, match="resource transition not allowed"):
+        db.set_resource_state(conn, PID, "u1", refused)
+    assert db.get_resource(conn, PID, "u1")["state"] == cur
+
+
+def test_resource_state_expected_and_error_exit(conn):
+    new_plan(conn)
+    db.upsert_resource(conn, PID, resource("u1"), now=NOW)
+    with pytest.raises(db.StateConflict, match="expected protecting"):
+        db.set_resource_state(conn, PID, "u1", "protected", expected="protecting")
+    for s in ("protecting", "protected", "failing_over", "error"):
+        db.set_resource_state(conn, PID, "u1", s)
+    r = db.set_resource_state(conn, PID, "u1", "unprotecting", expected=("error",))
+    assert (r["state"], r["error_origin"]) == ("unprotecting", "")
 
 
 @pytest.mark.parametrize("state", ["lagging", "drifting", "degraded", "source-unreachable", "bogus"])
@@ -232,7 +343,7 @@ def test_list_by_host_reads_only_the_current_generation(conn):
 def test_volume_upsert_and_list(conn):
     new_plan(conn)
     v = {"vm_uid": "u1", "disk": "data", "claim": "rep-a-data", "source_volume": "pvc-1", "size": 2 * 1024 ** 3,
-         "access_mode": "rwx", "migratable": True, "target_volume": "hr-rep-a-data-abcdef"}
+         "access_mode": "rwx", "migratable": True, "target_volume": "hr-rep-a-data-abcdef", "generation": 1}
     assert db.upsert_volume(conn, PID, v)["state"] == "pending"
     got = db.upsert_volume(conn, PID, dict(v, state="standby", backup_volume_target="bv-1"))
     assert (got["state"], got["migratable"], got["backup_volume_target"]) == ("standby", True, "bv-1")
@@ -240,35 +351,67 @@ def test_volume_upsert_and_list(conn):
     with pytest.raises(ValueError, match="volume state"):
         db.upsert_volume(conn, PID, dict(v, state="gone"))
     with pytest.raises(ValueError, match="disk is required"):
-        db.upsert_volume(conn, PID, {"vm_uid": "u1"})
+        db.upsert_volume(conn, PID, {"vm_uid": "u1", "generation": 1})
+
+
+def test_volume_upsert_without_state_keeps_the_stored_state(conn):
+    new_plan(conn)
+    v = {"vm_uid": "u1", "disk": "data", "source_volume": "pvc-1", "generation": 1}
+    db.upsert_volume(conn, PID, dict(v, state="standby"))
+    got = db.upsert_volume(conn, PID, dict(v, backup_volume_target="bv-1"))      # pas de `state`
+    assert (got["state"], got["backup_volume_target"]) == ("standby", "bv-1")
+    assert db.upsert_volume(conn, PID, dict(v, disk="new"))["state"] == "pending"
+
+
+@pytest.mark.parametrize("call", [
+    lambda c: db.upsert_resource(c, PID, dict(resource("u1"), generation=None)),
+    lambda c: db.upsert_volume(c, PID, {"vm_uid": "u1", "disk": "d"}),
+    lambda c: db.record_tick(c, PID, {"source_volume": "pvc-1", "backup": "b1"}),
+    lambda c: db.record_measure(c, PID, {"source_volume": "pvc-1", "backup": "b1", "generation": True}),
+    lambda c: db.mark_applied(c, PID, "pvc-1", "b1", NOW, None),
+    lambda c: db.record_run(c, PID, "failover", NOW, 0),
+])
+def test_generation_is_required_where_it_is_part_of_the_key(conn, call):
+    new_plan(conn)
+    with pytest.raises(ValueError, match="generation is required"):
+        call(conn)
 
 
 # -- passages ---------------------------------------------------------------------
 
 def test_record_tick_is_idempotent_and_never_unapplies(conn):
     new_plan(conn)
-    tick = {"source_volume": "pvc-1", "backup": "backup-1", "vm_uid": "u1", "snapshot_at": "2026-10-24T10:00:00Z",
+    tick = {"source_volume": "pvc-1", "backup": "backup-1", "vm_uid": "u1", "generation": 1,
+            "snapshot_at": "2026-10-24T10:00:00Z",
             "backup_started_at": "2026-10-24T10:00:01Z", "backup_done_at": "2026-10-24T10:00:06Z",
             "newly_uploaded": 25174351, "size": 2 * 1024 ** 3}
     db.record_tick(conn, PID, tick)
     db.record_tick(conn, PID, tick)
     assert len(db.list_ticks(conn, PID)) == 1
-    assert db.mark_applied(conn, PID, "pvc-1", "backup-1", at(15), resync_at=at(6)) is True
+    assert db.mark_applied(conn, PID, "pvc-1", "backup-1", at(15), 1, resync_at=at(6)) is True
     db.record_tick(conn, PID, dict(tick, state="completed"))         # relu par un tour suivant
     t = db.list_ticks(conn, PID)[0]
     assert (t["state"], t["applied_at"], t["resync_at"], t["newly_uploaded"]) == \
         ("applied", "2026-10-24T10:00:15Z", "2026-10-24T10:00:06Z", 25174351)
-    assert db.mark_applied(conn, PID, "pvc-1", "backup-404", at(15)) is False
+    assert db.mark_applied(conn, PID, "pvc-1", "backup-404", at(15), 1) is False
     with pytest.raises(ValueError, match="tick state"):
         db.record_tick(conn, PID, dict(tick, state="done"))
     with pytest.raises(ValueError, match="backup is required"):
-        db.record_tick(conn, PID, {"source_volume": "pvc-1"})
+        db.record_tick(conn, PID, {"source_volume": "pvc-1", "generation": 1})
+
+
+def test_mark_applied_refuses_a_tick_in_error(conn):
+    new_plan(conn)
+    db.record_tick(conn, PID, {"source_volume": "pvc-1", "backup": "b1", "generation": 1, "state": "error"})
+    with pytest.raises(ValueError, match="in error"):
+        db.mark_applied(conn, PID, "pvc-1", "b1", at(15), 1)
+    assert db.list_ticks(conn, PID)[0]["state"] == "error"
 
 
 def test_measures_live_in_their_own_table(conn):
     new_plan(conn)
     db.record_measure(conn, PID, {"source_volume": "pvc-1", "backup": "b1", "snapshot_at": "2026-10-24T10:00:00Z",
-                                  "newly_uploaded": 952_000_000})
+                                  "newly_uploaded": 952_000_000, "generation": 1})
     assert db.list_ticks(conn, PID) == []
     assert [m["newly_uploaded"] for m in db.list_ticks(conn, PID, table="measures")] == [952_000_000]
 
@@ -287,6 +430,9 @@ def test_resource_events_are_paginated_by_date_and_by_id(conn):
     assert [e["step"] for e in page2] == ["s3", "s2", "s1"]
     page3 = db.resource_events(conn, "u1", limit=3, before=page2[-1]["id"])
     assert [e["step"] for e in page3] == ["s0"]
+    # une chaîne de chiffres est un id, jamais une date
+    assert db.resource_events(conn, "u1", limit=3, before=str(page2[-1]["id"])) == page3
+    assert [e["step"] for e in db.resource_events(conn, "u1", limit=2, before=at(2))] == ["s1", "s0"]
     assert [e["resource_uid"] for e in db.host_events(conn, "harvlab2")] == ["u2"]
 
 
@@ -297,6 +443,12 @@ def test_events_sharing_a_timestamp_are_paged_exactly_by_id(conn):
     p1 = db.resource_events(conn, "u1", limit=2)
     p2 = db.resource_events(conn, "u1", limit=2, before=p1[-1]["id"])
     assert [e["step"] for e in p1 + p2] == ["s3", "s2", "s1", "s0"]
+
+
+@pytest.mark.parametrize("before", ["yesterday", True, 1.5, "12a"])
+def test_event_paging_refuses_an_unreadable_cursor(conn, before):
+    with pytest.raises(ValueError, match="event id or an ISO date"):
+        db.resource_events(conn, "u1", before=before)
 
 
 @pytest.mark.parametrize("kw,msg", [
@@ -311,13 +463,13 @@ def test_event_refusals(conn, kw, msg):
 
 def test_runs_record_points_and_step_durations(conn):
     new_plan(conn)
-    rid = db.record_run(conn, PID, "failover", NOW, vms=["u1"])
-    db.record_run(conn, PID, "failover", NOW, finished_at=at(67), result="ok", vms=["u1"],
+    rid = db.record_run(conn, PID, "failover", NOW, 1, vms=["u1"])
+    db.record_run(conn, PID, "failover", NOW, 1, finished_at=at(67), result="ok", vms=["u1"],
                   points={"pvc-1": "backup-9"}, steps=[{"step": "activate", "seconds": 13}], run_id=rid)
     r = db.list_runs(conn, PID)
     assert len(r) == 1 and r[0]["points"] == {"pvc-1": "backup-9"} and r[0]["steps"][0]["seconds"] == 13
     with pytest.raises(ValueError):
-        db.record_run(conn, PID, "drill", NOW)
+        db.record_run(conn, PID, "drill", NOW, 1)
 
 
 # -- bail et verrou ---------------------------------------------------------------
@@ -339,30 +491,56 @@ def test_lease_taken_refused_expired_and_taken_over(conn):
         db.owner_id("daemon")
 
 
+def no_start(pid):
+    return ""
+
+
 def test_lock_one_command_at_a_time_and_taken_back_from_a_dead_process(conn):
     alive = {111: True, 222: False}
     holder = db.owner_id("cli", "node1", 111)
     assert db.acquire_lock(conn, PID, "protect", holder, now=NOW, host="node1",
-                           pid_alive=lambda p: alive.get(p, False))
+                           pid_alive=lambda p: alive.get(p, False), proc_start=no_start)
     with pytest.raises(db.Locked) as e:
         db.acquire_lock(conn, PID, "failover", db.owner_id("cli", "node1", 333), host="node1",
-                        pid_alive=lambda p: alive.get(p, False))
+                        pid_alive=lambda p: alive.get(p, False), proc_start=no_start)
     assert e.value.holder["command"] == "protect"
     # le même détenteur relance
-    assert db.acquire_lock(conn, PID, "protect", holder, host="node1", pid_alive=lambda p: True)
+    assert db.acquire_lock(conn, PID, "protect", holder, host="node1", pid_alive=lambda p: True, proc_start=no_start)
     # détenteur mort sur cet hôte : repris
     alive[111] = False
     assert db.acquire_lock(conn, PID, "failover", db.owner_id("cli", "node1", 333), now=at(5), host="node1",
-                           pid_alive=lambda p: alive.get(p, False))
+                           pid_alive=lambda p: alive.get(p, False), proc_start=no_start)
     assert db.get_lock(conn, PID)["command"] == "failover"
-    # détenteur sur un autre hôte : jamais repris (son PID ne veut rien dire ici)
-    db.release_lock(conn, PID, db.owner_id("cli", "node1", 333))
-    db.acquire_lock(conn, PID, "protect", db.owner_id("console", "node9", 222), host="node9")
-    with pytest.raises(db.Locked):
-        db.acquire_lock(conn, PID, "failover", db.owner_id("cli", "node1", 333), host="node1",
-                        pid_alive=lambda p: False)
-    assert db.release_lock(conn, PID, "cli:node1:333") is False
-    assert db.release_lock(conn, PID, "console:node9:222") is True and db.get_lock(conn, PID) is None
+    ev = db.plan_events(conn, PID)[0]
+    assert (ev["step"], ev["code"], ev["facts"]["previous_owner"]) == ("lock-reclaimed", "process-gone", holder)
+    assert db.release_lock(conn, PID, "cli:node1:111") is False
+    assert db.release_lock(conn, PID, "cli:node1:333") is True and db.get_lock(conn, PID) is None
+
+
+def test_lock_held_by_a_reused_pid_is_taken_back(conn):
+    starts = {111: "5000"}
+    db.acquire_lock(conn, PID, "protect", "cli:node1:111", now=NOW, host="node1",
+                    proc_start=lambda p: starts.get(p, ""))
+    assert db.get_lock(conn, PID)["pid_start"] == "5000"
+    take = dict(now=at(5), host="node1", pid_alive=lambda p: True, proc_start=lambda p: starts.get(p, ""))
+    with pytest.raises(db.Locked):                                  # même processus, toujours vivant
+        db.acquire_lock(conn, PID, "failover", "cli:node1:333", **take)
+    starts[111] = "9999"                                            # PID 111 repris par un autre processus
+    assert db.acquire_lock(conn, PID, "failover", "cli:node1:333", **take)
+    assert db.plan_events(conn, PID)[0]["code"] == "pid-reused"
+
+
+def test_lock_from_another_host_is_taken_back_after_its_ttl(conn):
+    db.acquire_lock(conn, PID, "protect", "console:node9:222", now=NOW, host="node9", ttl=600, proc_start=no_start)
+    other = dict(host="node1", pid_alive=lambda p: False, proc_start=no_start)
+    with pytest.raises(db.Locked):                                  # son PID ne veut rien dire ici
+        db.acquire_lock(conn, PID, "failover", "cli:node1:333", now=at(500), **other)
+    assert db.lock_heartbeat(conn, PID, "console:node9:222", now=at(550)) is True
+    with pytest.raises(db.Locked):                                  # renouvelé à +550
+        db.acquire_lock(conn, PID, "failover", "cli:node1:333", now=at(1100), **other)
+    assert db.acquire_lock(conn, PID, "failover", "cli:node1:333", now=at(1151), **other)
+    assert db.plan_events(conn, PID)[0]["code"] == "ttl-expired"
+    assert db.lock_heartbeat(conn, PID, "console:node9:222", now=at(1152)) is False
 
 
 # -- migration et rétention ----------------------------------------------------
@@ -391,13 +569,66 @@ def test_prune_keeps_the_last_applied_point_of_each_volume(conn):
     new_plan(conn)
     old = NOW - timedelta(days=500)
     for i, state in enumerate(["applied", "applied", "completed"]):
-        db.record_tick(conn, PID, {"source_volume": "pvc-1", "backup": f"b{i}", "state": state,
+        db.record_tick(conn, PID, {"source_volume": "pvc-1", "backup": f"b{i}", "state": state, "generation": 1,
                                    "snapshot_at": db._iso(old + timedelta(minutes=3 * i))})
     db.record_tick(conn, PID, {"source_volume": "pvc-1", "backup": "recent", "state": "completed",
-                               "snapshot_at": db._iso(NOW)})
-    db.record_measure(conn, PID, {"source_volume": "pvc-1", "backup": "m", "snapshot_at": db._iso(old)})
+                               "snapshot_at": db._iso(NOW), "generation": 1})
+    db.record_measure(conn, PID, {"source_volume": "pvc-1", "backup": "m", "snapshot_at": db._iso(old),
+                                  "generation": 1})
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=old)
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=NOW)
     assert db.prune(conn, db.retention_cutoff(NOW)) == {"ticks": 2, "measures": 1, "events": 1}
     assert [t["backup"] for t in db.list_ticks(conn, PID)] == ["b1", "recent"]
     assert len(db.resource_events(conn, "u1")) == 1
+
+
+# -- actions proposées en `error` = sorties acceptées par le registre ----------
+
+PATH_TO = {"draft": [], "measuring": ["measuring"], "protecting": ["protecting"],
+           "protected": ["protecting", "protected"],
+           "failing_over": ["protecting", "protected", "failing_over"],
+           "failed_over": ["protecting", "protected", "failing_over", "failed_over"],
+           "unprotecting": ["protecting", "unprotecting"], None: ["protecting"]}
+
+
+def plan_in_error(conn, origin, pid):
+    db.insert_plan(conn, plan_req(name="p" + pid[-6:]), now=NOW, plan_id=pid)
+    cur = "draft"
+    for nxt in PATH_TO[origin]:
+        db.set_state(conn, pid, cur, nxt)
+        cur = nxt
+    db.set_state(conn, pid, cur, "error")
+    if origin is None:                                     # ligne d'avant la colonne
+        conn.execute("UPDATE plans SET error_origin = '' WHERE id = ?", (pid,))
+    return db.get_plan(conn, pid)
+
+
+@pytest.mark.parametrize("origin", list(PATH_TO))
+@pytest.mark.parametrize("side", ["target", "source", "any"])
+def test_error_actions_offered_are_exactly_the_exits_the_store_accepts(conn, origin, side):
+    seq = iter(range(10 ** 6))
+
+    def fresh():
+        return plan_in_error(conn, origin, f"rp-{next(seq):012x}")
+
+    plan = fresh()
+    offered = [a["name"] for a in rp.allowed_actions(plan, {"state": "error", "error_origin": plan["error_origin"]},
+                                                     side, role="admin")]
+    # chaque action proposée passe le registre
+    for a in offered:
+        p = fresh()
+        assert db.set_state(conn, p["id"], "error", rp.ACTION_STATE[a])["state"] == rp.ACTION_STATE[a]
+    # chaque sortie acceptée par le registre est proposée (sauf la bascule vue
+    # de la source, réservée à la cible)
+    accepted = set()
+    for new in rp.PLAN_STATES:
+        p = fresh()
+        try:
+            db.set_state(conn, p["id"], "error", new)
+            accepted.add(new)
+        except db.StateConflict:
+            pass
+    reached = {rp.ACTION_STATE[a] for a in offered}
+    hidden = {"failing_over"} if side == "source" else set()
+    assert reached == accepted - hidden
+    assert accepted                                         # jamais d'impasse : une sortie au moins
