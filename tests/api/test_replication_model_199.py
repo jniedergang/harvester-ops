@@ -758,6 +758,42 @@ def res(uid, name, state="protected", **kw):
 RES2 = [res(UID_A, "rep-a"), res(UID_B, "rep-b")]
 
 
+def _delete_backups(actions):
+    return next((a for a in actions if a["name"] == "unprotect-delete-backups"), None)
+
+
+# v1.99.0 : la suppression des sauvegardes n'est proposée que si le déroulé
+# l'accepte (une seule règle, `held_vms`)
+@pytest.mark.parametrize("states,activated,allowed", [
+    (("protected", "protected"), False, True),
+    (("failed_over", "protected"), False, False),
+    (("failed_over", "failed_over"), False, False),
+    (("failing_over", "protected"), False, False),
+    ((("error", "failing_over"), "protected"), False, False),
+    ((("error", "protecting"), "protected"), False, True),
+    # volume activé d'une VM restée `protected` (bascule partielle relue)
+    (("protected", "protected"), True, False),
+])
+def test_delete_backups_offered_only_when_unprotect_would_accept_it(states, activated, allowed):
+    rs = []
+    for (uid, name), st in zip(((UID_A, "rep-a"), (UID_B, "rep-b")), states):
+        if isinstance(st, tuple):
+            rs.append(res(uid, name, st[0], error_origin=st[1]))
+        else:
+            rs.append(res(uid, name, st))
+    vols = [dict(v, state="activated" if activated and v["vm_uid"] == UID_A else "standby") for v in SVOLS]
+    ticks = [tick("pvc-a0", -100), tick("pvc-a1", -100), tick("pvc-b0", -100)]
+    plan = pplan(state="protected")
+    assert bool(rp.held_vms(rs, vols)) is not allowed
+    row = rp.plan_row(plan, rs, vols, ticks, [], NOW, {}, role="admin", side="target")
+    a = _delete_backups(row["actions"])
+    assert a and a["allowed"] is allowed and a["reason"] == ("" if allowed else "backups-in-use")
+    for r in row["resources"]:
+        a = _delete_backups(r["actions"])
+        if a:
+            assert a["allowed"] is allowed and a["reason"] == ("" if allowed else "backups-in-use")
+
+
 def test_plan_status_oldest_applied_point_and_stats():
     ticks = [tick("pvc-a0", -360), tick("pvc-a0", -180), tick("pvc-a1", -181), tick("pvc-b0", -180),
              tick("pvc-a1", 0, state="in_progress")]

@@ -2567,13 +2567,10 @@ def _held_vms(ctx, prev, dst_ok):
     retrouve la liste même après le passage des ressources à
     `unprotecting`. Rend {uid: raison}."""
     held = dict(((prev or {}).get("points") or {}).get("held") or {})
-    for r in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen):
-        st = r["state"]
-        if st in ("failing_over", "failed_over") or (st == "error" and r.get("error_origin") == "failing_over"):
-            held.setdefault(r["resource_uid"], st)
-    for v in db.list_volumes(ctx.conn, ctx.plan_id, ctx.gen):
-        if v["state"] == "activated":
-            held.setdefault(v["vm_uid"], "activated")
+    # même règle que les actions proposées (`replication.held_vms`)
+    for uid, why in rp.held_vms(db.list_resources(ctx.conn, ctx.plan_id, ctx.gen),
+                                db.list_volumes(ctx.conn, ctx.plan_id, ctx.gen)).items():
+        held.setdefault(uid, why)
     if dst_ok:
         for lv in ctx.dst.list(K_LH_VOLUME, NS, selector=f"{rp.LABEL_PLAN}={ctx.plan_id}"):
             uid = _labels(lv).get(rp.LABEL_VM)

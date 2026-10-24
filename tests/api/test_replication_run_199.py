@@ -1823,6 +1823,27 @@ def test_unprotect_deletes_the_backups_of_its_recurring_jobs(tmp_path):
     assert not [b for b in w.store.backups.values() if b["labels"].get(rp.LABEL_PLAN) == w.pid]
 
 
+@pytest.mark.parametrize("failover_first", [False, True])
+def test_delete_backups_offered_exactly_when_unprotect_accepts_it(tmp_path, failover_first):
+    # v1.99.0 : une seule règle (`replication.held_vms`) pour la liste des
+    # actions et pour le déroulé ; vu sur le banc : proposée sur une VM
+    # basculée, refusée ensuite (`backups-in-use`)
+    w = protected(tmp_path, vms=("vm-a", "vm-b"))
+    if failover_first:
+        assert rr.failover(w.ctx(), vms=["default/vm-a"])["exit"] == 0
+    row = db.plan_rows(w.conn, [w.plan()], rp._t(iso(w.clock.now())), role="admin", side="target")[0]
+    offered = next(a for a in row["actions"] if a["name"] == "unprotect-delete-backups")
+    host = db.host_rows(w.conn, "harvlab2", "target", rp._t(iso(w.clock.now())), role="admin")
+    assert host
+    for r in host:
+        a = next((x for x in r["actions"] if x["name"] == "unprotect-delete-backups"), None)
+        assert a is None or a["allowed"] is offered["allowed"]
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert offered["allowed"] is (res["exit"] == 0), (offered, res)
+    if not offered["allowed"]:
+        assert res["code"] == "backups-in-use" and offered["reason"] == "backups-in-use"
+
+
 def test_unprotect_of_a_protected_plan_still_deletes_backups(tmp_path):
     """Témoin du tableau précédent : sans activation, tout part."""
     w = protected(tmp_path, vms=("vm-a",))

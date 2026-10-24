@@ -986,7 +986,8 @@ def host_rows(conn, host, side, now, role=None):
         p, v = plans[pid], views[pid]
         res = next((x for x in v["resources"] if x["resource_uid"] == r["resource_uid"]), r)
         rows.append(rp.resource_row(p, res, r["side"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
-                                    role=role, health=v["health"].get(r["resource_uid"])))
+                                    role=role, health=v["health"].get(r["resource_uid"]),
+                                    backups_held=bool(rp.held_vms(v["resources"], v["volumes"]))))
     return rows
 
 

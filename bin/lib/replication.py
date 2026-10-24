@@ -1363,11 +1363,33 @@ def error_actions(origin):
     return [a for a in ACTION_ORDER if ACTION_STATE.get(a) in exits]
 
 
-def allowed_actions(plan, resource, side, role=None):
+def held_vms(resources, volumes=()):
+    """VMs dont une bascule a déjà touché la cible (décision 47) : ressource
+    en bascule, basculée, ou en erreur pendant une bascule, ou volume rangé
+    `activated`. Rend {uid: raison}. Seule règle de la suppression des
+    sauvegardes (v1.99.0) : le déroulé (`replication_run._held_vms`, qui y
+    ajoute ce qu'il relit sur la cible) refuse `unprotect --delete-backups`
+    tant qu'il en reste une, et les actions proposées le disent
+    (`backups-in-use`)."""
+    held = {}
+    for r in resources or ():
+        st = r.get("state")
+        if st in ("failing_over", "failed_over") or (st == "error" and r.get("error_origin") == "failing_over"):
+            held.setdefault(r["resource_uid"], st)
+    for v in volumes or ():
+        if v.get("state") == "activated" and v.get("vm_uid"):
+            held.setdefault(v["vm_uid"], "activated")
+    return held
+
+
+def allowed_actions(plan, resource, side, role=None, backups_held=False):
     """Actions d'une ressource selon son état (`resource["state"]`, calculé ;
     en `error`, selon `resource["error_origin"]`, rangé) et le côté d'où l'on regarde (`source`, `target`, ou `any` pour la vue de
     tous les plans), chacune avec le rôle requis. Avec `role`, `allowed` dit
-    si la personne peut la lancer (l'action reste listée)."""
+    si la personne peut la lancer (l'action reste listée). `backups_held` :
+    une VM du plan est tenue par une bascule (`held_vms`) ; la suppression
+    des sauvegardes reste listée, refusée (`backups-in-use`), comme le
+    déroulé la refuse."""
     state = resource.get("state") or "draft"
     if state == "error":
         origin = resource.get("error_origin") or (plan.get("error_origin") if plan.get("state") == "error"
@@ -1384,14 +1406,23 @@ def allowed_actions(plan, resource, side, role=None):
             continue
         out.append(n)
     out.sort(key=ACTION_ORDER.index)
-    return [_action(n, role) for n in out]
+    actions = [_action(n, role) for n in out]
+    if backups_held:
+        for a in actions:
+            if a["name"] == "unprotect-delete-backups":
+                a.update(allowed=False, reason="backups-in-use")
+    return actions
 
 
-def plan_actions(plan, side, resources=(), role=None):
+def plan_actions(plan, side, resources=(), role=None, volumes=()):
     """Actions du plan entier, dérivées des états de ses ressources : une
     action est rendue si elle vaut pour au moins une ressource (`count`).
-    `delete` s'ajoute pour un plan `draft` ou `unprotected`."""
+    `delete` s'ajoute pour un plan `draft` ou `unprotected`. La suppression
+    des sauvegardes vaut pour le plan entier : refusée si une VM est tenue
+    par une bascule (`held_vms`, avec les `volumes` du plan)."""
     counts = {}
+    resources = list(resources)
+    held = bool(held_vms(resources, volumes))
     for r in resources:
         for a in allowed_actions(plan, r, side):
             counts[a["name"]] = counts.get(a["name"], 0) + 1
@@ -1402,6 +1433,8 @@ def plan_actions(plan, side, resources=(), role=None):
     out = []
     for n in sorted(counts, key=ACTION_ORDER.index):
         a = _action(n, role)
+        if n == "unprotect-delete-backups" and held:
+            a.update(allowed=False, reason="backups-in-use")
         a["count"] = counts[n]
         out.append(a)
     return out
@@ -1442,10 +1475,15 @@ def _last_events(events, n=3):
     return evs[:n]
 
 
-def resource_row(plan, resource, side, volumes, ticks, events, now, vm_running, role=None, health=None):
+def resource_row(plan, resource, side, volumes, ticks, events, now, vm_running, role=None, health=None,
+                 backups_held=None):
     """La ligne d'une ressource, forme unique de la liste des plans, de la
     liste par hôte et de la ligne de commande. `side` : côté de l'hôte qui
-    regarde (`source`, `target`) ou `any` (vue de tous les plans)."""
+    regarde (`source`, `target`) ou `any` (vue de tous les plans).
+    `backups_held` : une VM du plan est tenue par une bascule (`held_vms`
+    sur tout le plan) ; None : lu sur cette ressource et les volumes."""
+    if backups_held is None:
+        backups_held = bool(held_vms([resource], volumes))
     ev = _resource_eval(plan, resource, volumes, ticks, now, vm_running, health)
     r = dict(resource, state=ev["state"])
     if side == "target":
@@ -1463,15 +1501,16 @@ def resource_row(plan, resource, side, volumes, ticks, events, now, vm_running, 
             "last_applied_at": ev["last_applied_at"],
             "last_events": _last_events([e for e in events or []
                                          if e.get("resource_uid") == resource["resource_uid"]]),
-            "actions": allowed_actions(plan, r, side, role)}
+            "actions": allowed_actions(plan, r, side, role, backups_held)}
 
 
 def plan_row(plan, resources, volumes, ticks, events, now, vm_running, role=None, health=None, side="any"):
     """La ligne d'un plan (liste des plans, `plan list --json`), avec les
     lignes de ses ressources produites par `resource_row`."""
     health = health or {}
+    backups_held = bool(held_vms(resources, volumes))
     rows = [resource_row(plan, r, side, volumes, ticks, events, now, vm_running, role,
-                         health.get(r["resource_uid"])) for r in resources]
+                         health.get(r["resource_uid"]), backups_held) for r in resources]
     held = [r["rpo_held_s"] for r in rows if r["rpo_held_s"] is not None]
     by_state = {}
     for r in rows:
@@ -1489,7 +1528,7 @@ def plan_row(plan, resources, volumes, ticks, events, now, vm_running, role=None
             if plan.get("state") in ("measuring", "protecting", "protected") else None,
             "resources_by_state": by_state,
             "last_events": _last_events([e for e in events or [] if e.get("plan_id") in (None, plan.get("id"))]),
-            "actions": plan_actions(plan, side, computed, role), "resources": rows}
+            "actions": plan_actions(plan, side, computed, role, volumes), "resources": rows}
 
 
 # ---------------------------------------------------------------------------
