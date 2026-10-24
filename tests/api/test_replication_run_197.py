@@ -79,14 +79,28 @@ def iso(t):
 KIND_OF = dict(rr._KINDS, VirtualMachineInstance=rr.K_VMI)
 
 
+def _terms(selector):
+    """Termes d'un sélecteur, sans couper l'ensemble d'un `clé in (a,b)`."""
+    out, cur, depth = [], "", 0
+    for ch in selector:
+        depth += ch == "("
+        depth -= ch == ")"
+        if ch == "," and depth == 0:
+            out.append(cur)
+            cur = ""
+        else:
+            cur += ch
+    return out + [cur]
+
+
 def _match(labels, selector):
     if not selector:
         return True
-    for term in selector.split(","):
+    for term in _terms(selector):
         term = term.strip()
         if " in (" in term:
             k, _, vals = term.partition(" in (")
-            if labels.get(k.strip()) not in [v.strip() for v in vals.rstrip(")").split("|" if "|" in vals else ",")]:
+            if labels.get(k.strip()) not in [v.strip() for v in vals.rstrip(")").split(",")]:
                 return False
         elif "=" in term:
             k, v = term.split("=", 1)
@@ -211,8 +225,17 @@ class FakeKube:
                 self.sync_all()
             self.apply_standby(now)
 
+    def _bv(self, vol):
+        """BackupVolume d'un volume, lu sans passer par l'API du faux : les
+        contrôleurs de Longhorn tournent même quand le client ne joint plus
+        le cluster (`down`)."""
+        for (k, _n, _m), o in self.objs.items():
+            if k == rr.K_LH_BV and (o.get("spec") or {}).get("volumeName") == vol:
+                return o
+        return None
+
     def sync_volume(self, vol):
-        bv = rr.find_backup_volume(self, vol)
+        bv = self._bv(vol)
         if bv is not None:
             self.objs[(rr.K_LH_BV, rr.NS, bv["metadata"]["name"])].setdefault("status", {})["lastSyncedAt"] = \
                 iso(self.clock.now())
@@ -230,7 +253,7 @@ class FakeKube:
                                                      "newlyUploadDataSize": str(b["newly"]), "size": str(b["size"])}})
 
     def ensure_bv(self, vol):
-        if rr.find_backup_volume(self, vol) is None:
+        if self._bv(vol) is None:
             # nom différent du volume, comme Longhorn depuis 1.8
             self.put(rr.K_LH_BV, {"metadata": {"name": f"bv-{abs(hash(vol)) % 10 ** 8:08d}", "namespace": rr.NS},
                                   "spec": {"volumeName": vol, "backupTargetName": "default"}})

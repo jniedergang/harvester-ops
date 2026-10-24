@@ -577,7 +577,7 @@ def test_prune_keeps_the_last_applied_point_of_each_volume(conn):
                                   "generation": 1})
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=old)
     db.record_event(conn, "follow", plan_id=PID, resource_uid="u1", now=NOW)
-    assert db.prune(conn, db.retention_cutoff(NOW)) == {"ticks": 2, "measures": 1, "events": 1}
+    assert db.prune(conn, db.retention_cutoff(NOW)) == {"ticks": 2, "measures": 1, "events": 1, "stats": 0}
     assert [t["backup"] for t in db.list_ticks(conn, PID)] == ["b1", "recent"]
     assert len(db.resource_events(conn, "u1")) == 1
 

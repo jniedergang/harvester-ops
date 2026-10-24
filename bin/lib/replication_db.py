@@ -78,6 +78,11 @@ TABLES = {
         # empreinte de la spec vue à la protection (`replication.vm_spec_digest`)
         ("vm_spec_digest", "TEXT NOT NULL DEFAULT ''"),
         ("error_origin", "TEXT NOT NULL DEFAULT ''"),
+        # santé relevée par le suiveur (`replication_follow`) : source et
+        # cible joignables, volume de secours dégradé, spec relue, VM en
+        # marche ; lue par `status` et la console (`health_map`)
+        ("health", "TEXT NOT NULL DEFAULT '{}'"),
+        ("health_at", "TEXT NOT NULL DEFAULT ''"),
     ],
     "plan_volumes": [
         ("plan_id", "TEXT NOT NULL"),
@@ -147,6 +152,26 @@ TABLES = {
         ("by", "TEXT NOT NULL DEFAULT ''"),
         ("action_id", "TEXT NOT NULL DEFAULT ''"),
     ],
+    # une ligne par VM et par passage appliqué, écrite par le suiveur : la
+    # série que lira la vue de suivi (RPO tenu, arriéré, débits)
+    "stats": [
+        ("plan_id", "TEXT NOT NULL"),
+        ("generation", "INTEGER NOT NULL DEFAULT 1"),
+        ("resource_uid", "TEXT NOT NULL"),
+        ("pass_at", "TEXT NOT NULL"),
+        ("ts", "TEXT NOT NULL"),
+        ("disks", "INTEGER NOT NULL DEFAULT 0"),
+        ("newly_uploaded", "INTEGER NOT NULL DEFAULT 0"),
+        ("backup_s", "REAL"),
+        ("apply_lag_s", "REAL"),
+        ("resync_to_apply_s", "REAL"),
+        ("skew_s", "REAL"),
+        ("rpo_held_s", "INTEGER"),
+        ("backlog", "INTEGER NOT NULL DEFAULT 0"),
+        ("upload_bps", "REAL"),
+        ("apply_bps", "REAL"),
+        ("state", "TEXT NOT NULL DEFAULT ''"),
+    ],
     "runs": [
         ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
         ("plan_id", "TEXT NOT NULL"),
@@ -185,6 +210,7 @@ KEYS = {
     "plan_volumes": ("plan_id", "generation", "vm_uid", "disk"),
     "ticks": ("plan_id", "generation", "source_volume", "backup"),
     "measures": ("plan_id", "generation", "source_volume", "backup"),
+    "stats": ("plan_id", "generation", "resource_uid", "pass_at"),
 }
 INDEXES = (
     "CREATE INDEX IF NOT EXISTS resources_source ON plan_resources (source_host)",
@@ -194,8 +220,10 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS events_plan ON events (plan_id, ts)",
     "CREATE INDEX IF NOT EXISTS ticks_plan ON ticks (plan_id, generation, snapshot_at)",
     "CREATE INDEX IF NOT EXISTS measures_plan ON measures (plan_id, generation, snapshot_at)",
+    "CREATE INDEX IF NOT EXISTS stats_plan ON stats (plan_id, ts)",
+    "CREATE INDEX IF NOT EXISTS stats_resource ON stats (resource_uid, ts)",
 )
-_JSON = {"plans": ("mappings", "options", "vms"), "events": ("facts",),
+_JSON = {"plans": ("mappings", "options", "vms"), "events": ("facts",), "plan_resources": ("health",),
          "runs": ("vms", "points", "steps")}
 
 
@@ -740,6 +768,79 @@ def list_ticks(conn, plan_id, generation=None, since=None, table="ticks"):
     return [dict(r) for r in conn.execute(q + " ORDER BY snapshot_at, source_volume", args)]
 
 
+def last_applied_ticks(conn, plan_id, generation):
+    """Le dernier passage appliqué de chaque volume (une requête) : avec les
+    passages récents, de quoi calculer le RPO tenu sans relire tout
+    l'historique, même quand l'application est arrêtée depuis longtemps."""
+    generation = _generation(generation)
+    rows = conn.execute(
+        "SELECT t.* FROM ticks t JOIN (SELECT source_volume, MAX(snapshot_at) AS m FROM ticks"
+        " WHERE plan_id = ? AND generation = ? AND state = 'applied' GROUP BY source_volume) k"
+        " ON t.source_volume = k.source_volume AND t.snapshot_at = k.m"
+        " WHERE t.plan_id = ? AND t.generation = ? AND t.state = 'applied'",
+        (plan_id, generation, plan_id, generation)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Santé et statistiques du suiveur
+# ---------------------------------------------------------------------------
+
+def set_health(conn, plan_id, resource_uid, generation, health, now=None):
+    """Range la santé d'une ressource relevée par le suiveur (fusionnée avec
+    la précédente : une clé absente garde sa valeur). Rend False si la
+    ressource est inconnue."""
+    generation = _generation(generation)
+    with _tx(conn):
+        r = conn.execute("SELECT health FROM plan_resources WHERE plan_id = ? AND generation = ? AND"
+                         " resource_uid = ?", (plan_id, generation, resource_uid)).fetchone()
+        if r is None:
+            return False
+        try:
+            cur = json.loads(r["health"] or "{}") or {}
+        except ValueError:
+            cur = {}
+        cur.update(health or {})
+        conn.execute("UPDATE plan_resources SET health = ?, health_at = ? WHERE plan_id = ? AND generation = ?"
+                     " AND resource_uid = ?", (json.dumps(cur, sort_keys=True), _iso(_now(now)), plan_id,
+                                               generation, resource_uid))
+    return True
+
+
+def health_map(conn, plan_id, generation=None):
+    """{uid: santé} des ressources d'un plan (forme de `health` attendue par
+    `replication.plan_status`)."""
+    return {r["resource_uid"]: dict(r.get("health") or {}, checked_at=r.get("health_at") or None)
+            for r in list_resources(conn, plan_id, generation)}
+
+
+def record_stats(conn, plan_id, row):
+    """Range (idempotent) le bilan d'un passage appliqué d'une VM ; clé
+    (plan, génération, ressource, `pass_at`)."""
+    vals = {"plan_id": plan_id, "generation": _generation(row.get("generation"))}
+    for col, _decl in TABLES["stats"]:
+        if col not in ("plan_id", "generation") and col in row:
+            vals[col] = row[col]
+    for k in ("resource_uid", "pass_at"):
+        if not vals.get(k):
+            raise ValueError(f"stats: {k} is required")
+    vals.setdefault("ts", _iso(_now(None)))
+    with _tx(conn):
+        _insert(conn, "stats", vals, upsert=True)
+
+
+def list_stats(conn, plan_id, resource_uid=None, since=None, limit=1000):
+    q, args = "SELECT * FROM stats WHERE plan_id = ?", [plan_id]
+    if resource_uid:
+        q += " AND resource_uid = ?"
+        args.append(resource_uid)
+    if since:
+        q += " AND pass_at >= ?"
+        args.append(_iso(since))
+    q += " ORDER BY pass_at DESC, resource_uid LIMIT ?"
+    return [dict(r) for r in conn.execute(q, args + [max(1, min(int(limit or 1000), 100000))])][::-1]
+
+
 # ---------------------------------------------------------------------------
 # Journal persistant par ressource
 # ---------------------------------------------------------------------------
@@ -996,7 +1097,7 @@ def prune(conn, before):
     """Efface passages, mesures et événements d'avant `before` (400 jours
     en usage normal). Le dernier passage appliqué de chaque volume est
     gardé : sans lui, le RPO d'un plan figé deviendrait inconnu. Rend
-    {"ticks", "measures", "events"} (lignes effacées)."""
+    {"ticks", "measures", "events", "stats"} (lignes effacées)."""
     t, te = _iso(before), _event_ts(before)
     with _tx(conn):
         n_ticks = conn.execute(
@@ -1008,7 +1109,8 @@ def prune(conn, before):
             " AND t.snapshot_at = k.m AND t.state = 'applied')", (t,)).rowcount
         n_meas = conn.execute("DELETE FROM measures WHERE snapshot_at < ?", (t,)).rowcount
         n_ev = conn.execute("DELETE FROM events WHERE ts < ?", (te,)).rowcount
-    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev}
+        n_stats = conn.execute("DELETE FROM stats WHERE pass_at < ?", (t,)).rowcount
+    return {"ticks": n_ticks, "measures": n_meas, "events": n_ev, "stats": n_stats}
 
 
 def retention_cutoff(now=None):

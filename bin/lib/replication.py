@@ -95,7 +95,14 @@ VERIFIED_LONGHORN_PAIRS = {((1, 11, 2), (1, 12, 1)), ((1, 12, 1), (1, 11, 2))}
 TIMEOUTS = {"probe": 15, "stop": 600, "snapshot": 300, "final_backup": 6 * 3600,
             "resync_apply": 600, "initial_restore": 12 * 3600, "backing_image": 2 * 3600,
             "activate": 300, "bind": 120, "vm_start": 900, "unplanned_sync": 120,
-            "unplanned_catchup": 600, "barrier": None}
+            "unplanned_catchup": 600, "barrier": None,
+            # rythme du suiveur (`replication_follow`), réglable à chaud par
+            # plan : lecture rapide pendant un passage, santé, relecture de
+            # la spec des VMs, délai laissé à la tâche pour démarrer ses
+            # sauvegardes après l'échéance, fenêtre de lecture rapide (None :
+            # l'intervalle du plan)
+            "follow_poll": 3, "follow_health": 60, "follow_spec": 600, "follow_grace": 60,
+            "follow_window": None}
 TIMEOUT_MAX = 7 * 86400
 
 OPTION_CHOICES = {"cloud_init": ("keep", "rerun"), "mac": ("keep", "new"),
