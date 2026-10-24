@@ -817,6 +817,26 @@ def test_preflight_reason_reaches_the_client(monkeypatch, choice):
     assert '/test/kubeconfig' not in json.dumps(body)
 
 
+@pytest.mark.parametrize('label,defer_join', [('join prepared later in a series', True),
+                                               ('create', False)])
+def test_client_supplied_cluster_kubeconfig_is_dropped(monkeypatch, label, defer_join):
+    import app
+    import test_baremetal_vm_network as vmt
+    vmt.route_helpers(monkeypatch)
+    data = vmt.install_data()
+    data.pop('vm_network')
+    data['_cluster_kc'] = '/client/chosen/kubeconfig'
+    data['_onboarding_plan'] = {'install_id': 'client-value'}
+    if label == 'create':
+        data.update(mode='create', vip='192.0.2.10', cluster_name='new-cluster')
+        data.pop('server_url')
+        monkeypatch.setattr(app, 'load_config', lambda: {'clusters': []})
+    with app.app.test_request_context():
+        result, error = app._bm_prepare_install(data, defer_join=defer_join)
+    assert error is None, error and error[0].get_json()
+    assert '_cluster_kc' not in result and '_onboarding_plan' not in result
+
+
 # --- intégration à l'application -------------------------------------------
 
 def test_profile_preview_hides_credentials_and_keeps_identity_after_render(choice, monkeypatch):

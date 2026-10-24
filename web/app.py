@@ -7048,6 +7048,8 @@ def _bm_prepare_install(data, defer_join=False):
     cluster rejoint n'existe pas encore (série, avant que la première ligne
     l'ait créé) ; tout le reste est contrôlé."""
     data.pop("_onboarding_plan", None)
+    # kubeconfig du cluster rejoint : calculé ici, jamais fourni par le client
+    data.pop("_cluster_kc", None)
     mode = data["mode"]
     # Créer un cluster demande sa VIP ; en rejoindre un, son adresse.
     required = ("bmc_host", "bmc_user", "bmc_password", "iso", "hostname",
