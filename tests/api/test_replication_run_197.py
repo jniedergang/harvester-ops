@@ -1,0 +1,1481 @@
+"""v1.97.0 : déroulé de la réplication (`replication_run`), sans cluster.
+
+Deux clusters simulés en mémoire (`FakeKube`) qui partagent une cible de
+sauvegarde (`Store`), avec ce que Longhorn, Harvester et KubeVirt font pour
+de vrai (relevé sur le banc harvlab -> harvlab2, docs/design/
+2026-10-22-replication-asynchrone.md) :
+
+* un instantané devient prêt, une sauvegarde passe `Completed` et dépose sa
+  donnée dans la cible commune (avec la backing image du volume) ;
+* la cible ne voit une sauvegarde qu'après une relecture : demandée par
+  `BackupVolume.spec.syncRequestedAt` (2 s), ou naturelle (150 s) ;
+* le moteur d'un volume de secours (trouvé par `longhornvolume`) applique
+  la dernière sauvegarde visible de son volume (`lastRestoredBackup`) ;
+* l'activation (`Standby: false`, `frontend: blockdev`) rend le volume
+  `detached` non `Standby`, et note ce que le moteur avait appliqué à cet
+  instant (`activatedFrom`, pour le test « zéro perte ») ;
+* le webhook de Longhorn refuse un volume dont la backing image manque ;
+* un PVC lié à un PV statique passe `Bound`, une VM démarre ou s'arrête.
+
+Horloge factice : des heures d'attente durent une fraction de seconde, les
+délais sont vérifiés pour de bon. Le faux sait échouer à un appel choisi :
+erreur, annulation (`Cancelled`), arrêt brutal (`Crash`, comme un kill -9 :
+ni retour arrière ni verrou libéré), API momentanément injoignable.
+"""
+
+import base64
+import copy
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(ROOT / "bin" / "lib"))
+import replication as rp  # noqa: E402
+import replication_db as db  # noqa: E402
+import replication_run as rr  # noqa: E402
+
+GIB = 1024 ** 3
+BT_VALUE = json.dumps({"type": "nfs", "endpoint": "nfs://172.16.0.5:/volume1/BACKUP/harvester-lab"})
+BT_URL = "nfs://172.16.0.5:/volume1/BACKUP/harvester-lab/"
+
+
+class Crash(BaseException):
+    """kill -9 : rien ne s'exécute après (pas de retour arrière)."""
+
+
+class Clock:
+    def __init__(self):
+        self.t = 1_792_000_000.0
+
+    def now(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += s
+
+
+def merge(dst, patch):
+    for k, v in patch.items():
+        if v is None:
+            dst.pop(k, None)
+        elif isinstance(v, dict) and isinstance(dst.get(k), dict):
+            merge(dst[k], v)
+        else:
+            dst[k] = copy.deepcopy(v)
+
+
+def iso(t):
+    return rp.iso(__import__("datetime").datetime.fromtimestamp(t, __import__("datetime").timezone.utc))
+
+
+KIND_OF = dict(rr._KINDS, VirtualMachineInstance=rr.K_VMI)
+
+
+def _match(labels, selector):
+    if not selector:
+        return True
+    for term in selector.split(","):
+        term = term.strip()
+        if " in (" in term:
+            k, _, vals = term.partition(" in (")
+            if labels.get(k.strip()) not in [v.strip() for v in vals.rstrip(")").split("|" if "|" in vals else ",")]:
+                return False
+        elif "=" in term:
+            k, v = term.split("=", 1)
+            if labels.get(k) != v:
+                return False
+        elif term not in labels:
+            return False
+    return True
+
+
+class Store:
+    """La cible de sauvegarde commune."""
+
+    def __init__(self):
+        self.backups = {}       # nom -> {volume, url, snapshot_at, done_at, newly, size, labels}
+        self.bbis = {}          # backing image -> url
+
+
+class World:
+    """Les deux clusters, le registre et le plan d'essai."""
+
+    count = 0
+
+    def __init__(self, tmp_path, vms=("vm-a", "vm-b"), options=None, mappings=None, interval="3m"):
+        self.clock = Clock()
+        self.store = Store()
+        self.mutations = 0
+        self.crash_at = None
+        self.cancel_at = None
+        self.fail_at = None
+        self.src = FakeKube(self, "harvlab", "source")
+        self.dst = FakeKube(self, "harvlab2", "target")
+        self.log = []
+        World.count += 1
+        self.conn = db.connect(str(tmp_path / f"r-{World.count}.db"))
+        seed_source(self.src, vms)
+        seed_target(self.dst)
+        req = {"name": "plan-a", "source_cluster": "harvlab", "target_cluster": "harvlab2", "rpo_objective_s": "15m",
+               "interval_s": interval, "vms": [f"default/{v}" for v in vms],
+               "mappings": mappings if mappings is not None else {"networks": {"default/prod": "default/lab-net"}},
+               "options": dict({"cloud_init": "keep", "mac": "keep"}, **(options or {}))}
+        self.pid = db.insert_plan(self.conn, rp.normalize_plan(req), plan_id="rp-0123456789ab")["id"]
+        self.owner_n = 0
+        self.alive = set()
+
+    def ctx(self, **kw):
+        self.owner_n += 1
+        self.alive = {self.owner_n}
+        kw.setdefault("timeouts", {})
+        return rr.Ctx(self.conn, self.pid, self.src, self.dst, emit=lambda *a: self.log.append(a),
+                      sleep=self.clock.sleep, now=self.clock.now, progress=lambda *a, **k: None,
+                      owner=f"cli:testhost:{self.owner_n}", host="testhost",
+                      pid_alive=lambda p: p in self.alive, **kw)
+
+    def mutating(self, cluster, op, kind, name):
+        self.mutations += 1
+        n = self.mutations
+        if self.crash_at == n:
+            raise Crash(f"crash at {op} {kind} {name}")
+        if self.cancel_at == n:
+            raise rr.Cancelled("signal 15")
+        if self.fail_at == n:
+            raise RuntimeError(f"injected failure at {op} {kind} {name}")
+
+    def plan(self):
+        return db.get_plan(self.conn, self.pid)
+
+    def owned(self, cluster):
+        return sorted(k for k, o in cluster.objs.items()
+                      if (o.get("metadata", {}).get("labels") or {}).get(rp.LABEL_PLAN) == self.pid)
+
+
+class FakeKube:
+    def __init__(self, world, name, role):
+        self.world, self.name, self.role = world, name, role
+        self.clock = world.clock
+        self.store = world.store
+        self.objs = {}
+        self.calls = []
+        self.timers = []
+        self.down = False
+        self.freeze = set()      # comportements suspendus (délais)
+        self.hooks = {}          # (op, kind) -> fonction appelée avant l'appel
+        self.last_natural = self.clock.now()
+        self.backup_s = 5
+        self.apply_s = 3
+        self.restore_s = 10
+
+    # -- outils de test --------------------------------------------------------
+    def put(self, kind, obj):
+        obj = copy.deepcopy(obj)
+        md = obj["metadata"]
+        md.setdefault("uid", f"uid-{md['name']}")
+        md.setdefault("creationTimestamp", iso(self.clock.now()))
+        self.objs[(kind, md.get("namespace"), md["name"])] = obj
+        return obj
+
+    def obj(self, kind, ns, name):
+        return self.objs.get((kind, ns, name))
+
+    def at(self, delay, fn):
+        self.timers.append((self.clock.now() + delay, fn))
+
+    def mutations(self, include_dry=False):
+        return [c for c in self.calls if c[0] in ("create", "patch", "delete", "replace")
+                and (include_dry or not c[-1] == "dry")]
+
+    # -- simulation ------------------------------------------------------------
+    def tick(self):
+        now = self.clock.now()
+        while True:
+            due = [t for t in self.timers if t[0] <= now]
+            if not due:
+                break
+            self.timers = [t for t in self.timers if t[0] > now]
+            for _, fn in sorted(due, key=lambda t: t[0]):
+                fn()
+        if self.role == "target":
+            if "natural-sync" not in self.freeze and now - self.last_natural >= 150:
+                self.last_natural = now
+                self.sync_all()
+            self.apply_standby(now)
+
+    def sync_volume(self, vol):
+        bv = rr.find_backup_volume(self, vol)
+        if bv is not None:
+            self.objs[(rr.K_LH_BV, rr.NS, bv["metadata"]["name"])].setdefault("status", {})["lastSyncedAt"] = \
+                iso(self.clock.now())
+        # une sauvegarde effacée de la cible commune disparaît à la relecture
+        for key, o in list(self.objs.items()):
+            if key[0] == rr.K_LH_BACKUP and o["status"].get("volumeName") == vol and key[2] not in self.store.backups:
+                self.objs.pop(key)
+        for name, b in self.store.backups.items():
+            if b["volume"] == vol and (rr.K_LH_BACKUP, rr.NS, name) not in self.objs:
+                self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS,
+                                                       "labels": dict(b["labels"])},
+                                          "status": {"state": "Completed", "volumeName": vol, "url": b["url"],
+                                                     "snapshotCreatedAt": b["snapshot_at"],
+                                                     "backupCreatedAt": b["done_at"],
+                                                     "newlyUploadDataSize": str(b["newly"]), "size": str(b["size"])}})
+
+    def ensure_bv(self, vol):
+        if rr.find_backup_volume(self, vol) is None:
+            # nom différent du volume, comme Longhorn depuis 1.8
+            self.put(rr.K_LH_BV, {"metadata": {"name": f"bv-{abs(hash(vol)) % 10 ** 8:08d}", "namespace": rr.NS},
+                                  "spec": {"volumeName": vol, "backupTargetName": "default"}})
+
+    def sync_all(self):
+        vols = {b["volume"] for b in self.store.backups.values()}
+        vols |= {o["status"].get("volumeName") for k, o in self.objs.items() if k[0] == rr.K_LH_BACKUP}
+        for vol in sorted(v for v in vols if v):
+            self.ensure_bv(vol)
+            self.sync_volume(vol)
+        for bi, url in self.store.bbis.items():
+            key = (rr.K_LH_BBI, rr.NS, f"bbi-{bi}")
+            if key not in self.objs:
+                self.put(rr.K_LH_BBI, {"metadata": {"name": f"bbi-{bi}", "namespace": rr.NS},
+                                       "spec": {"backingImage": bi}, "status": {"url": url}})
+
+    def apply_standby(self, now):
+        if "apply" in self.freeze:
+            return
+        for (kind, ns, name), v in list(self.objs.items()):
+            if kind != rr.K_LH_VOLUME or not v["spec"].get("Standby"):
+                continue
+            src_vol = rr.url_volume(v["spec"].get("fromBackup"))
+            eng = self.objs.get((rr.K_LH_ENGINE, rr.NS, f"{name}-e-0"))
+            if eng is None:
+                continue
+            done = sorted((o for (k, _n, _m), o in self.objs.items() if k == rr.K_LH_BACKUP
+                           and o["status"].get("volumeName") == src_vol and o["status"].get("state") == "Completed"),
+                          key=lambda o: o["status"]["snapshotCreatedAt"])
+            if not done:
+                continue
+            latest = done[-1]["metadata"]["name"]
+            st = eng["status"]
+            if st.get("lastRestoredBackup") == latest:
+                st.pop("_at", None)
+                continue
+            if st.get("_target") != latest:
+                st["_target"] = latest
+                st["_at"] = now + (self.apply_s if st.get("lastRestoredBackup") else self.restore_s)
+                st["_from"] = now
+            if now >= st["_at"]:
+                st["lastRestoredBackup"] = latest
+                st["restoreStatus"] = {"r1": {"progress": 100}}
+            else:
+                span = max(1, st["_at"] - st["_from"])
+                st["restoreStatus"] = {"r1": {"progress": int(100 * (now - st["_from"]) / span)}}
+
+    # -- interface client ----------------------------------------------------------
+    def _guard(self, op, kind, name, mutating, dry=False):
+        self.tick()
+        if self.down:
+            raise RuntimeError("Unable to connect to the server: dial tcp: i/o timeout")
+        hook = self.hooks.get(("dry" if dry else op, kind))
+        if hook:
+            hook(name)
+        if mutating:
+            self.world.mutating(self, op, kind, name)
+
+    def get(self, kind, ns, name):
+        self._guard("get", kind, name, False)
+        self.tick()
+        o = self.objs.get((kind, ns, name))
+        return copy.deepcopy(o) if o is not None else None
+
+    def list(self, kind, ns=None, selector=None):
+        self._guard("list", kind, None, False)
+        self.tick()
+        self.calls.append(("list", kind, ns, selector, ""))
+        return [copy.deepcopy(o) for (k, n, _), o in self.objs.items()
+                if k == kind and (ns is None or n == ns)
+                and _match((o.get("metadata") or {}).get("labels") or {}, selector)]
+
+    def _validate(self, kind, obj):
+        md, spec = obj["metadata"], obj.get("spec") or {}
+        if kind == rr.K_LH_VOLUME and spec.get("backingImage") and \
+                (rr.K_LH_BI, rr.NS, spec["backingImage"]) not in self.objs:
+            raise RuntimeError(f'admission webhook "validator.longhorn.io" denied the request: '
+                               f'failed to get backing image {spec["backingImage"]}')
+        if kind == rr.K_LH_BI:
+            url = (spec.get("sourceParameters") or {}).get("backup-url")
+            if url not in self.store.bbis.values():
+                raise RuntimeError("backing image backup not found")
+        if kind == rr.K_LH_BACKUP and (rr.K_LH_SNAPSHOT, rr.NS, spec.get("snapshotName")) not in self.objs:
+            raise RuntimeError("snapshot not found")
+        hook = self.hooks.get(("validate", kind))
+        if hook:
+            hook(obj)
+        if (kind, md.get("namespace"), md["name"]) in self.objs:
+            raise RuntimeError(f"AlreadyExists {kind} {md['name']}")
+
+    def create(self, obj, dry_run=False):
+        kind = KIND_OF[obj["kind"]]
+        md = obj["metadata"]
+        self._guard("create", kind, md["name"], not dry_run, dry=dry_run)
+        self.tick()
+        self._validate(kind, obj)
+        self.calls.append(("create", kind, md.get("namespace"), md["name"], "dry" if dry_run else ""))
+        if dry_run:
+            return copy.deepcopy(obj)
+        o = self.put(kind, obj)
+        getattr(self, "_on_" + obj["kind"], lambda o: None)(o)
+        return copy.deepcopy(o)
+
+    def replace(self, obj):
+        kind = KIND_OF[obj["kind"]]
+        md = obj["metadata"]
+        self._guard("replace", kind, md["name"], True)
+        self.calls.append(("replace", kind, md.get("namespace"), md["name"], ""))
+        key = (kind, md.get("namespace"), md["name"])
+        if key not in self.objs:
+            raise RuntimeError(f"NotFound {key}")
+        self.objs[key] = copy.deepcopy(obj)
+        return obj
+
+    def patch(self, kind, ns, name, patch, dry_run=False):
+        self._guard("patch", kind, name, not dry_run)
+        self.tick()
+        self.calls.append(("patch", kind, ns, name, json.dumps(patch, sort_keys=True)))
+        key = (kind, ns, name)
+        if key not in self.objs:
+            raise RuntimeError(f"NotFound {key}")
+        if dry_run:
+            return
+        merge(self.objs[key], patch)
+        o = self.objs[key]
+        if kind == rr.K_LH_BV and "syncRequestedAt" in (patch.get("spec") or {}) and "resync" not in self.freeze:
+            vol = o["spec"]["volumeName"]
+            self.at(2, lambda: self.sync_volume(vol))
+        if kind == rr.K_LH_TARGET and "syncRequestedAt" in (patch.get("spec") or {}) and "resync" not in self.freeze:
+            self.at(2, self.sync_all)
+        if kind == rr.K_LH_VOLUME and (patch.get("spec") or {}).get("Standby") is False:
+            eng = self.objs.get((rr.K_LH_ENGINE, rr.NS, f"{name}-e-0")) or {"status": {}}
+            o["status"]["activatedFrom"] = eng["status"].get("lastRestoredBackup")
+            if "activate" not in self.freeze:
+                self.at(1, lambda: o["status"].update(isStandby=False, state="detached"))
+        if kind == rr.K_VM and "runStrategy" in (patch.get("spec") or {}):
+            self._run(ns, name, patch["spec"]["runStrategy"])
+
+    def delete(self, kind, ns, name, cascade=None):
+        self._guard("delete", kind, name, True)
+        self.calls.append(("delete", kind, ns, name, ""))
+        key = (kind, ns, name)
+        if key not in self.objs:
+            raise RuntimeError(f"NotFound {key}")
+        self.objs.pop(key)
+        if kind == rr.K_LH_VOLUME:
+            self.objs.pop((rr.K_LH_ENGINE, rr.NS, f"{name}-e-0"), None)
+        if kind == rr.K_LH_BACKUP:
+            self.store.backups.pop(name, None)
+        if kind == rr.K_VM:
+            self.objs.pop((rr.K_VMI, ns, name), None)
+
+    # -- contrôleurs ------------------------------------------------------------------
+    def _on_Snapshot(self, o):
+        o["status"] = {"readyToUse": False}
+        if "snapshot" not in self.freeze:
+            self.at(1, lambda: o["status"].update(readyToUse=True, creationTime=iso(self.clock.now())))
+
+    def _on_Backup(self, o):
+        snap = self.objs[(rr.K_LH_SNAPSHOT, rr.NS, o["spec"]["snapshotName"])]
+        vol = snap["spec"]["volume"]
+        o["status"] = {"state": "InProgress", "volumeName": vol, "progress": 10}
+        if "backup" in self.freeze:
+            return
+        self.at(self.backup_s, lambda: self.complete_backup(o, vol, snap["status"].get("creationTime")))
+
+    def complete_backup(self, o, vol, snap_at, newly=25_174_351):
+        name = o["metadata"]["name"]
+        url = f"{BT_URL}?backup={name}&volume={vol}"
+        o["status"].update(state="Completed", url=url, snapshotCreatedAt=snap_at or iso(self.clock.now()),
+                           backupCreatedAt=iso(self.clock.now()), newlyUploadDataSize=str(newly), size=str(newly))
+        self.store.backups[name] = {"volume": vol, "url": url, "snapshot_at": o["status"]["snapshotCreatedAt"],
+                                    "done_at": o["status"]["backupCreatedAt"], "newly": newly, "size": newly,
+                                    "labels": dict(o["metadata"].get("labels") or {})}
+        self.ensure_bv(vol)
+        lv = self.objs.get((rr.K_LH_VOLUME, rr.NS, vol))
+        bi = (lv or {}).get("spec", {}).get("backingImage")
+        if bi:
+            self.store.bbis.setdefault(bi, f"{BT_URL}?backingImage={bi}")
+
+    def make_backup(self, vol, name, snap_at=None, newly=25_174_351, labels=None):
+        """Sauvegarde déjà terminée (tâche récurrente, sauvegarde Harvester)."""
+        o = self.put(rr.K_LH_BACKUP, {"metadata": {"name": name, "namespace": rr.NS, "labels": labels or {}},
+                                      "spec": {"snapshotName": name}, "status": {"volumeName": vol}})
+        self.complete_backup(o, vol, snap_at or iso(self.clock.now()), newly)
+        return o
+
+    def _on_Volume(self, o):
+        o["status"] = {"isStandby": bool(o["spec"].get("Standby")), "state": "detached", "robustness": "healthy"}
+        self.put(rr.K_LH_ENGINE, {"metadata": {"name": f"{o['metadata']['name']}-e-0", "namespace": rr.NS,
+                                               "labels": {"longhornvolume": o["metadata"]["name"]}},
+                                  "status": {}})
+
+    def _on_BackingImage(self, o):
+        o["status"] = {"diskFileStatusMap": {"d1": {"state": "in-progress"}}}
+        if "backing-image" not in self.freeze:
+            self.at(5, lambda: o["status"].update(diskFileStatusMap={"d1": {"state": "ready"}}))
+
+    def _on_PersistentVolumeClaim(self, o):
+        o["status"] = {"phase": "Pending"}
+        if "bind" not in self.freeze and (rr.K_PV, None, o["spec"].get("volumeName")) in self.objs:
+            self.at(1, lambda: o["status"].update(phase="Bound"))
+
+    def _on_VirtualMachine(self, o):
+        self._run(o["metadata"]["namespace"], o["metadata"]["name"], o["spec"].get("runStrategy"))
+
+    def _run(self, ns, name, strategy):
+        if strategy == "Halted":
+            if "stop" not in self.freeze:
+                self.at(2, lambda: self.objs.pop((rr.K_VMI, ns, name), None))
+        elif strategy in ("Always", "RerunOnFailure") and "start" not in self.freeze:
+            self.at(3, lambda: self.put(rr.K_VMI, {"metadata": {"name": name, "namespace": ns},
+                                                   "status": {"phase": "Running"}}))
+
+
+# ---------------------------------------------------------------------------
+# Les deux sites du banc
+# ---------------------------------------------------------------------------
+
+def _vm(name, uid, disks, running=True, secret=None, mac="52:54:00:00:00:01"):
+    volumes = [{"name": d, "persistentVolumeClaim": {"claimName": f"{name}-{d}"}} for d in disks]
+    if secret:
+        volumes.append({"name": "cloudinit", "cloudInitNoCloud": {"secretRef": {"name": secret}}})
+    return {"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
+            "metadata": {"name": name, "namespace": "default", "uid": uid, "generation": 2},
+            "spec": {"runStrategy": "Always" if running else "Halted", "template": {
+                "metadata": {"labels": {"harvesterhci.io/vmName": name}},
+                "spec": {"domain": {"firmware": {"uuid": f"fw-{uid}"},
+                                    "devices": {"disks": [{"name": d, "disk": {"bus": "virtio"}} for d in disks],
+                                                "interfaces": [{"name": "nic-1", "bridge": {}, "model": "virtio",
+                                                                "macAddress": mac}]}},
+                         "networks": [{"name": "nic-1", "multus": {"networkName": "default/prod"}}],
+                         "volumes": volumes}}}}
+
+
+VMS = {
+    # une VM à disque d'image (backing image absente de la cible) et disque de données
+    "vm-a": {"uid": "a1b2c3d4-0000-0000-0000-00000000000a", "disks": {"root": (1 * GIB, "vmi-img1"),
+                                                                      "data": (2 * GIB, None)},
+             "secret": "vm-a-cloudinit", "mac": "52:54:00:00:00:0a"},
+    # une VM à trois disques
+    "vm-b": {"uid": "b1b2c3d4-0000-0000-0000-00000000000b", "disks": {"d1": (2 * GIB, None), "d2": (2 * GIB, None),
+                                                                      "d3": (2 * GIB, None)},
+             "secret": None, "mac": "52:54:00:00:00:0b"},
+    # une VM arrêtée
+    "vm-c": {"uid": "c1b2c3d4-0000-0000-0000-00000000000c", "disks": {"data": (1 * GIB, None)},
+             "secret": None, "mac": "52:54:00:00:00:0c", "stopped": True},
+}
+
+
+def _common(k, version):
+    k.put(rr.K_SETTING, {"metadata": {"name": "backup-target"}, "value": BT_VALUE})
+    k.put(rr.K_LH_TARGET, {"metadata": {"name": "default", "namespace": rr.NS}, "status": {"available": True}})
+    k.put(rr.K_LH_SETTING, {"metadata": {"name": "current-longhorn-version", "namespace": rr.NS}, "value": version})
+    k.put(rr.K_NS, {"metadata": {"name": "default"}})
+    k.put(rr.K_SC, {"metadata": {"name": "harvester-longhorn",
+                                 "annotations": {"storageclass.kubernetes.io/is-default-class": "true"}},
+                    "provisioner": rp.LONGHORN_DRIVER,
+                    "parameters": {"numberOfReplicas": "1", "staleReplicaTimeout": "30"}})
+    k.put(rr.K_LH_NODE, {"metadata": {"name": "n1", "namespace": rr.NS},
+                         "spec": {"disks": {"d": {"allowScheduling": True, "storageReserved": 0}}},
+                         "status": {"diskStatus": {"d": {"conditions": [{"type": "Schedulable", "status": "True"},
+                                                                         {"type": "Ready", "status": "True"}],
+                                                         "storageMaximum": 1000 * GIB, "storageScheduled": 0,
+                                                         "storageAvailable": 1000 * GIB}}}})
+
+
+def seed_source(k, names):
+    _common(k, "v1.11.2")
+    k.put(rr.K_SC, {"metadata": {"name": "lh-img1"}, "provisioner": rp.LONGHORN_DRIVER,
+                    "parameters": {"numberOfReplicas": "1", "backingImage": "vmi-img1"}})
+    k.put(rr.K_LH_BI, {"metadata": {"name": "vmi-img1", "namespace": rr.NS},
+                       "spec": {"checksum": "abc123"}, "status": {"size": 21_700_000}})
+    # une tâche de l'exploitant dans le groupe `default` (appartenance implicite des volumes)
+    k.put(rr.K_LH_JOB, {"metadata": {"name": "daily", "namespace": rr.NS},
+                        "spec": {"task": "backup", "groups": ["default"], "cron": "0 3 * * *", "retain": 7}})
+    for name in names:
+        v = VMS[name]
+        k.put(rr.K_VM, _vm(name, v["uid"], list(v["disks"]), not v.get("stopped"), v["secret"], v["mac"]))
+        if not v.get("stopped"):
+            k.put(rr.K_VMI, {"metadata": {"name": name, "namespace": "default"}, "status": {"phase": "Running"}})
+        if v["secret"]:
+            k.put(rr.K_SECRET, {"metadata": {"name": v["secret"], "namespace": "default"}, "type": "Opaque",
+                                "data": {"userdata": base64.b64encode(b"#cloud-config\n").decode()}})
+        for d, (size, bi) in v["disks"].items():
+            pv = f"pvc-{name}-{d}"
+            k.put(rr.K_PVC, {"metadata": {"name": f"{name}-{d}", "namespace": "default",
+                                          "annotations": {"harvesterhci.io/imageId": "default/img1"} if bi else {}},
+                             "spec": {"volumeName": pv, "storageClassName": "lh-img1" if bi else "harvester-longhorn",
+                                      "accessModes": ["ReadWriteMany"], "volumeMode": "Block",
+                                      "resources": {"requests": {"storage": rp.quantity(size)}}},
+                             "status": {"phase": "Bound"}})
+            k.put(rr.K_PV, {"metadata": {"name": pv}, "spec": {"csi": {"driver": rp.LONGHORN_DRIVER,
+                                                                        "volumeHandle": pv}}})
+            spec = {"size": str(size), "accessMode": "rwx", "migratable": True, "dataEngine": "v1",
+                    "numberOfReplicas": 3}
+            if bi:
+                spec["backingImage"] = bi
+            k.put(rr.K_LH_VOLUME, {"metadata": {"name": pv, "namespace": rr.NS, "labels": {}}, "spec": spec,
+                                   "status": {"state": "attached"}})
+
+
+def seed_target(k):
+    _common(k, "v1.12.1")
+    k.put(rr.K_NAD, {"metadata": {"name": "lab-net", "namespace": "default"}})
+    k.put(rr.K_NAD, {"metadata": {"name": "prod", "namespace": "default"}})
+
+
+@pytest.fixture
+def world(tmp_path):
+    return World(tmp_path)
+
+
+def protected(tmp_path, **kw):
+    w = World(tmp_path, **kw)
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0, res
+    return w
+
+
+def events(w, **filt):
+    rows = w.conn.execute("SELECT * FROM events WHERE plan_id = ? ORDER BY id", (w.pid,)).fetchall()
+    out = [dict(r) for r in rows]
+    for k, v in filt.items():
+        out = [e for e in out if e[k] == v]
+    return out
+
+
+def mut_keys(cluster, op=None, kind=None):
+    return [c for c in cluster.mutations() if (op is None or c[0] == op) and (kind is None or c[1] == kind)]
+
+
+def snapshot_state(w):
+    """Ce qui compte de l'état final, pour comparer deux déroulés."""
+    def objs(k):
+        out = {}
+        for key, o in k.objs.items():
+            if key[0] in (rr.K_LH_ENGINE, rr.K_LH_BV, rr.K_LH_BBI, rr.K_VMI):
+                continue
+            labels = (o.get("metadata") or {}).get("labels") or {}
+            if labels.get(rp.LABEL_PLAN) or key[0] in (rr.K_LH_VOLUME, rr.K_LH_JOB, rr.K_VM):
+                out[key] = (json.dumps(labels, sort_keys=True), json.dumps(o.get("spec"), sort_keys=True,
+                                                                           default=str)[:400])
+        return out
+    vols = sorted((v["vm_uid"], v["disk"], v["state"], v["target_volume"]) for v in db.list_volumes(w.conn, w.pid))
+    res = sorted((r["resource_uid"], r["state"]) for r in db.list_resources(w.conn, w.pid))
+    return {"src": objs(w.src), "dst": objs(w.dst), "vols": vols, "res": res, "state": w.plan()["state"]}
+
+
+# ---------------------------------------------------------------------------
+# Petites briques
+# ---------------------------------------------------------------------------
+
+def test_kube_create_and_patch_take_a_server_dry_run(monkeypatch):
+    import kube
+    seen = []
+    monkeypatch.setattr(kube.Kube, "run", lambda self, *a, **k: seen.append(a) or "{}")
+    k = kube.Kube("/nowhere")
+    k.create({"kind": "X"})
+    k.create({"kind": "X"}, dry_run=True)
+    k.patch("vm", "ns", "n", {"a": 1})
+    k.patch("vm", "ns", "n", {"a": 1}, dry_run=True)
+    assert ["--dry-run=server" in a for a in seen] == [False, True, False, True]
+
+
+@pytest.mark.parametrize("plan_opts,overrides,expect", [
+    ({}, {}, {"probe": 15, "activate": 300, "barrier": 90, "start": 900, "undo": 300}),
+    ({"timeouts": {"activate": 60}}, {}, {"activate": 60}),
+    ({"timeouts": {"activate": 60}}, {"activate": 30}, {"activate": 30}),
+    ({"timeouts": {"vm_start": 120}}, {}, {"start": 120, "vm_start": 120}),
+    ({"timeouts": {"barrier": 40}}, {}, {"barrier": 40}),
+])
+def test_effective_timeouts(plan_opts, overrides, expect):
+    t = rr.effective_timeouts({"interval_s": 180, "options": plan_opts}, overrides)
+    for k, v in expect.items():
+        assert t[k] == v
+
+
+@pytest.mark.parametrize("url,vol", [
+    (f"{BT_URL}?backup=backup-1&volume=pvc-x", "pvc-x"),
+    ("nfs://h:/p/?volume=pvc-y&backup=b", "pvc-y"),
+    ("", ""), ("nfs://h:/p/", ""),
+])
+def test_url_volume(url, vol):
+    assert rr.url_volume(url) == vol
+
+
+def test_op_name_is_deterministic_and_run_scoped():
+    a = rr.op_name("rp-0123456789ab", "pvc-1", 1, "final", "7")
+    assert a == rr.op_name("rp-0123456789ab", "pvc-1", 1, "final", "7")
+    assert a != rr.op_name("rp-0123456789ab", "pvc-1", 1, "final", "8")
+    assert a != rr.op_name("rp-0123456789ab", "pvc-1", 2, "final", "7")
+    assert rp.NAME_RE.match(a) and len(a) <= rp.VOLUME_NAME_MAX
+
+
+@pytest.mark.parametrize("params,same", [
+    ({"diskSelector": "ssd,fast", "nodeSelector": ""}, {"diskSelector": "fast, ssd"}),
+    ({}, {"numberOfReplicas": "3"}),
+])
+def test_class_pool_groups_classes_by_selectors(params, same):
+    assert rr.class_pool({"parameters": params}) == rr.class_pool({"parameters": same})
+    assert rr.class_pool({"parameters": {"diskSelector": "hdd"}}) != rr.class_pool({"parameters": params})
+
+
+def test_carnet_round_trip_and_digest():
+    w = {"uid": "u1", "namespace": "default", "name": "vm", "tns": "dr", "tname": "vm2"}
+    m = rr.carnet_manifest("rp-0123456789ab", 1, w, {"kind": "VirtualMachine"}, [{"name": "s"}],
+                           [{"target_volume": "hr-x"}], "harvlab")
+    assert m["metadata"]["namespace"] == rp.CARNET_NAMESPACE
+    assert m["metadata"]["labels"] == rp.plan_labels("rp-0123456789ab", 1, "u1")
+    c = rr.read_carnet(m)
+    assert c["meta"]["target_namespace"] == "dr" and c["volumes"] == [{"target_volume": "hr-x"}]
+    m2 = rr.carnet_manifest("rp-0123456789ab", 1, w, {"kind": "VirtualMachine", "x": 1}, [{"name": "s"}],
+                            [{"target_volume": "hr-x"}], "harvlab")
+    assert m2["metadata"]["annotations"] != m["metadata"]["annotations"]
+
+
+# ---------------------------------------------------------------------------
+# Protection
+# ---------------------------------------------------------------------------
+
+def test_protect_two_vms_creates_everything_with_our_labels(world):
+    w = world
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0, res
+    assert w.plan()["state"] == "protected" and w.plan()["interval_s"] == 180
+    pid = w.pid
+    # source : une tâche par VM, concurrence = disques, étiquettes du plan
+    for name, n in (("vm-a", 2), ("vm-b", 3)):
+        uid = VMS[name]["uid"]
+        job = w.src.obj(rr.K_LH_JOB, rr.NS, rp.recurring_job_name(pid, uid))
+        assert job["spec"]["concurrency"] == n and job["spec"]["cron"] == "*/3 * * * *"
+        assert job["metadata"]["labels"] == rp.plan_labels(pid, 1, uid)
+        for d in VMS[name]["disks"]:
+            labels = w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-{name}-{d}")["metadata"]["labels"]
+            assert labels[rp.job_label(job["metadata"]["name"])[0]] == "enabled"
+            # appartenance implicite au groupe `default` rendue explicite (tâche `daily`)
+            assert labels["recurring-job-group.longhorn.io/default"] == "enabled"
+    # cible : volumes de secours, backing image restaurée, carnets
+    for name in ("vm-a", "vm-b"):
+        uid = VMS[name]["uid"]
+        for d, (size, bi) in VMS[name]["disks"].items():
+            sb = rp.target_volume_name(pid, uid, d, 1, name)
+            v = w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)
+            assert v["spec"]["Standby"] is True and v["spec"]["frontend"] == ""
+            assert rr.url_volume(v["spec"]["fromBackup"]) == f"pvc-{name}-{d}"
+            assert v["metadata"]["labels"] == rp.plan_labels(pid, 1, uid)
+            assert v["spec"].get("backingImage") == bi and v["spec"]["size"] == str(size)
+    bi = w.dst.obj(rr.K_LH_BI, rr.NS, "vmi-img1")
+    assert bi["spec"]["sourceType"] == "restore" and bi["spec"]["checksum"] == "abc123"
+    assert bi["metadata"]["labels"] == rp.plan_labels(pid, 1)
+    carnet = w.dst.obj(rr.K_SECRET, rp.CARNET_NAMESPACE, rp.carnet_name(pid, VMS["vm-a"]["uid"]))
+    c = rr.read_carnet(carnet)
+    assert c["vm"]["spec"]["template"]["spec"]["networks"][0]["multus"]["networkName"] == "default/lab-net"
+    assert c["vm"]["spec"]["template"]["spec"]["domain"]["firmware"]["uuid"] == f"fw-{VMS['vm-a']['uid']}"
+    assert [s["name"] for s in c["secrets"]] == ["vm-a-cloudinit"]
+    assert {v["disk"] for v in c["volumes"]} == {"root", "data"}
+    # registre : points appliqués, volumes en attente, ressources protégées
+    ticks = db.list_ticks(w.conn, pid)
+    assert len(ticks) == 5 and all(t["state"] == "applied" for t in ticks)
+    assert {v["state"] for v in db.list_volumes(w.conn, pid)} == {"standby"}
+    assert all(v["backup_volume_target"] for v in db.list_volumes(w.conn, pid))
+    assert {r["state"] for r in db.list_resources(w.conn, pid)} == {"protected"}
+    r = db.get_resource(w.conn, pid, VMS["vm-a"]["uid"])
+    assert r["vm_generation"] == 2 and r["vm_spec_digest"]
+    # rien sur la cible sans nos étiquettes, sauf le namespace commun et les relectures
+    for c in mut_keys(w.dst):
+        assert c[1] in (rr.K_LH_VOLUME, rr.K_LH_BI, rr.K_SECRET, rr.K_NS, rr.K_LH_BV, rr.K_LH_TARGET)
+
+
+def test_protect_journal_has_start_and_done_for_each_resource(world):
+    w = world
+    rr.protect(w.ctx())
+    for uid in (VMS["vm-a"]["uid"], VMS["vm-b"]["uid"]):
+        for step in ("recurring-job", "first-backup", "resync", "standby-volume", "initial-restore", "carnet"):
+            codes = [e["code"] for e in events(w, resource_uid=uid, step=step)]
+            assert codes == ["start", "done"], (uid, step, codes)
+    bi = events(w, step="backing-image")
+    assert {e["resource_uid"] for e in bi} == {VMS["vm-a"]["uid"]}
+    assert all(e["host"] == "harvlab2" for e in events(w, step="standby-volume"))
+    assert all(e["host"] == "harvlab" for e in events(w, step="recurring-job"))
+
+
+def test_protect_twice_creates_nothing_new(tmp_path):
+    w = protected(tmp_path)
+    before = (len(mut_keys(w.src, "create")), len(mut_keys(w.dst, "create")))
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0
+    assert (len(mut_keys(w.src, "create")), len(mut_keys(w.dst, "create"))) == before
+
+
+def test_protect_refused_before_any_write_when_a_target_volume_is_taken(world):
+    w = world
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d2", 1, "vm-b")
+    w.dst.put(rr.K_LH_VOLUME, {"metadata": {"name": sb, "namespace": rr.NS, "labels": {"owner": "someone"}},
+                               "spec": {}, "status": {}})
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 2 and "target-volume-taken" in [f["code"] for f in res["findings"]]
+    assert mut_keys(w.src) == [] and mut_keys(w.dst) == []
+    assert w.plan()["state"] == "draft"
+    assert events(w, step="check", resource_uid=VMS["vm-b"]["uid"])[0]["level"] == "warn"
+
+
+def test_protect_pvc_present_warns_only(world):
+    w = world
+    w.dst.put(rr.K_PVC, {"metadata": {"name": "vm-a-data", "namespace": "default"}, "spec": {}})
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 0
+    assert "target-pvc-taken" in [f["code"] for f in res["findings"] if f["level"] == "warn"]
+
+
+def test_protect_two_classes_on_the_same_disks_do_not_warn_a_shared_pool(tmp_path):
+    w = World(tmp_path, mappings={"networks": {"default/prod": "default/lab-net"},
+                                  "storage_classes": {"harvester-longhorn": "fast"}})
+    w.dst.put(rr.K_SC, {"metadata": {"name": "fast"}, "provisioner": rp.LONGHORN_DRIVER,
+                        "parameters": {"numberOfReplicas": "1"}})
+    res = rr.protect(w.ctx(), dry_run=True)
+    codes = [f["code"] for f in res["findings"]]
+    # vm-a : disque d'image vers la classe par défaut, disque de données vers `fast`
+    assert "capacity-shared-pool" not in codes, codes
+
+
+def test_protect_dry_run_writes_nothing_and_reports_the_missing_backing_image(world):
+    w = world
+    res = rr.protect(w.ctx(), dry_run=True)
+    assert mut_keys(w.src) == [] and mut_keys(w.dst) == []
+    bad = [d for d in res["dry_run"] if not d["ok"]]
+    assert res["exit"] == 2 and [d["object"] for d in bad] == ["standby-volume"]
+    assert "failed to get backing image" in bad[0]["message"]
+    assert all(d.get("placeholder_url") for d in res["dry_run"] if d["object"] == "standby-volume")
+    assert w.plan()["state"] == "draft"
+
+
+def test_protect_without_interval_nor_measure_is_refused(tmp_path):
+    w = World(tmp_path, interval=None)
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 2 and res["code"] == "interval-required"
+    assert mut_keys(w.src) == []
+
+
+def test_protect_given_interval_wins_and_is_stored(world):
+    res = rr.protect(world.ctx(), interval="5m")
+    assert res["exit"] == 0 and world.plan()["interval_s"] == 300 and world.plan()["cron"] == "*/5 * * * *"
+
+
+def test_protect_locked_by_a_live_command(world):
+    w = world
+    db.acquire_lock(w.conn, w.pid, "failover", "cli:otherhost:4242", ttl=600)
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 2 and res["code"] == "locked"
+    assert mut_keys(w.src) == []
+
+
+def test_long_waits_renew_the_lock(world):
+    w = world
+    w.dst.restore_s = 900                     # restauration initiale de 15 min
+    c = w.ctx()
+    beats = []
+    orig = db.lock_heartbeat
+    db.lock_heartbeat = lambda *a, **k: beats.append(1) or orig(*a, **k)
+    try:
+        assert rr.protect(c)["exit"] == 0
+    finally:
+        db.lock_heartbeat = orig
+    assert len(beats) >= 4
+
+
+def _clean_mutation_count(tmp_path, fn):
+    w = protected(tmp_path) if fn != "protect" else World(tmp_path)
+    w.mutations = 0
+    _run(w, fn)
+    return w.mutations
+
+
+def _run(w, fn, **kw):
+    if fn == "protect":
+        return rr.protect(w.ctx(), **kw)
+    if fn == "failover":
+        return rr.failover(w.ctx(), **kw)
+    if fn == "unprotect":
+        return rr.unprotect(w.ctx(), **kw)
+    raise AssertionError(fn)
+
+
+def test_protect_resumes_after_a_crash_at_every_step(tmp_path):
+    """Arrêt brutal à chaque écriture possible, puis relance : même état
+    final qu'un déroulé sans incident, et aucun doublon (le faux refuse une
+    création en double)."""
+    ref = World(tmp_path)
+    assert rr.protect(ref.ctx())["exit"] == 0
+    expected = snapshot_state(ref)
+    n = ref.mutations
+    assert n > 20
+    for k in range(1, n + 1):
+        w = World(tmp_path)
+        w.crash_at = k
+        with pytest.raises(Crash):
+            rr.protect(w.ctx())
+        w.crash_at = None
+        assert db.get_lock(w.conn, w.pid) is not None          # kill -9 : verrou resté
+        res = rr.resume(w.ctx())                                 # autre PID : verrou repris
+        assert res["exit"] == 0, (k, res)
+        got = snapshot_state(w)
+        assert got == expected, k
+        dup = [c for c in w.src.mutations() + w.dst.mutations() if c[0] == "create"]
+        assert len(dup) == len({(c[1], c[2], c[3]) for c in dup}), k
+
+
+def test_protect_cancel_undoes_only_what_this_run_created(world):
+    w = world
+    foreign = {"metadata": {"name": "keep-me", "namespace": rr.NS, "labels": {}}, "spec": {"x": 1}}
+    w.dst.put(rr.K_LH_VOLUME, foreign)
+    first_standby = [None]
+
+    def hook(name):
+        if first_standby[0] is None and name.startswith("hr-"):
+            first_standby[0] = name
+            raise rr.Cancelled("signal 15")
+    w.dst.hooks[("create", rr.K_LH_VOLUME)] = hook
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 3 and w.plan()["state"] == "error"
+    assert db.error_origin(w.conn, w.pid) == "protecting"
+    # les sauvegardes défaites disparaissent de la cible à sa relecture suivante
+    w.clock.sleep(200)
+    w.dst.list(rr.K_LH_BACKUP)
+    assert w.owned(w.src) == [] and w.owned(w.dst) == []
+    for name in ("vm-a", "vm-b"):
+        for d in VMS[name]["disks"]:
+            assert w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-{name}-{d}")["metadata"]["labels"] == {}
+    assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, "keep-me")["spec"] == {"x": 1}
+    assert db.get_lock(w.conn, w.pid) is None
+    # et la relance part de l'erreur
+    w.dst.hooks.clear()
+    assert rr.protect(w.ctx())["exit"] == 0 and w.plan()["state"] == "protected"
+
+
+def test_protect_failure_keeps_objects_for_the_rerun(world):
+    w = world
+    w.dst.freeze.add("apply")                 # le moteur n'applique rien
+    res = rr.protect(w.ctx(timeouts={"initial_restore": 120}))
+    assert res["exit"] == 1 and res["code"] == "timeout"
+    assert w.plan()["state"] == "error"
+    assert len([k for k in w.owned(w.dst) if k[0] == rr.K_LH_VOLUME]) == 5
+    errs = events(w, step="initial-restore", code="timeout")
+    assert {e["resource_uid"] for e in errs} == {VMS["vm-a"]["uid"], VMS["vm-b"]["uid"]}
+    w.dst.freeze.clear()
+    creates = len(mut_keys(w.dst, "create"))
+    assert rr.protect(w.ctx())["exit"] == 0
+    # seuls les carnets (et leur namespace) restaient à créer
+    assert sorted(c[1] for c in mut_keys(w.dst, "create")[creates:]) == [rr.K_NS, rr.K_SECRET, rr.K_SECRET]
+
+
+@pytest.mark.parametrize("cluster,freeze,timeout,step", [
+    ("src", "snapshot", "snapshot", "first-backup"),
+    ("src", "backup", "final_backup", "first-backup"),
+    ("dst", "backing-image", "backing_image", "backing-image"),
+    ("dst", "resync", "resync_apply", "resync"),
+    ("dst", "apply", "initial_restore", "initial-restore"),
+])
+def test_protect_every_wait_is_bounded(tmp_path, cluster, freeze, timeout, step):
+    w = World(tmp_path)
+    getattr(w, cluster).freeze.update({freeze, "natural-sync"})
+    t0 = w.clock.now()
+    res = rr.protect(w.ctx(timeouts={timeout: 100}))
+    assert res["exit"] == 1 and res["code"] == "timeout", res
+    assert w.clock.now() - t0 < 100 + 60
+    assert events(w, step=step, code="timeout")
+
+
+def test_api_blip_during_a_wait_does_not_fail(world):
+    w = world
+    w.dst.restore_s = 60
+    w.clock_t0 = w.clock.now()
+
+    def down_then_up(_name):
+        if not getattr(w, "_blipped", False):
+            w._blipped = True
+            w.dst.down = True
+            w.dst.at(20, lambda: setattr(w.dst, "down", False))
+    w.dst.hooks[("list", rr.K_LH_ENGINE)] = down_then_up
+    assert rr.protect(w.ctx())["exit"] == 0
+    assert w._blipped
+
+
+def test_an_owned_standby_volume_restoring_another_volume_is_refused(world):
+    w = world
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    w.dst.put(rr.K_LH_VOLUME, {"metadata": {"name": sb, "namespace": rr.NS,
+                                            "labels": rp.plan_labels(w.pid, 1, VMS["vm-b"]["uid"])},
+                               "spec": {"Standby": True, "fromBackup": f"{BT_URL}?backup=b&volume=pvc-other"},
+                               "status": {}})
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 1 and res["code"] == "standby-mismatch"
+    assert events(w, step="standby-volume", code="standby-mismatch")
+
+
+def test_default_group_label_only_where_membership_was_implicit(tmp_path):
+    w = World(tmp_path, vms=("vm-b",))
+    lv = w.src.obj(rr.K_LH_VOLUME, rr.NS, "pvc-vm-b-d2")
+    lv["metadata"]["labels"] = {"recurring-job-group.longhorn.io/gold": "enabled"}
+    assert rr.protect(w.ctx())["exit"] == 0
+    l1 = w.src.obj(rr.K_LH_VOLUME, rr.NS, "pvc-vm-b-d1")["metadata"]["labels"]
+    l2 = w.src.obj(rr.K_LH_VOLUME, rr.NS, "pvc-vm-b-d2")["metadata"]["labels"]
+    assert l1.get("recurring-job-group.longhorn.io/default") == "enabled"
+    assert "recurring-job-group.longhorn.io/default" not in l2
+
+
+def test_an_object_without_our_labels_is_never_touched(world):
+    """Course : un volume au nom du volume de secours apparaît entre le
+    contrôle et la création. La protection s'arrête sans le modifier ni le
+    supprimer."""
+    w = world
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    intruder = {"metadata": {"name": sb, "namespace": rr.NS, "labels": {"app": "other"}},
+                "spec": {"fromBackup": "x"}, "status": {}}
+
+    def race(name):
+        if name == sb and w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb) is None:
+            w.dst.put(rr.K_LH_VOLUME, intruder)
+    w.dst.hooks[("get", rr.K_LH_VOLUME)] = race
+    res = rr.protect(w.ctx())
+    assert res["exit"] == 1 and res["code"] == "target-volume-taken"
+    o = w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)
+    assert o["metadata"]["labels"] == {"app": "other"} and o["spec"] == {"fromBackup": "x"}
+    assert not [c for c in w.dst.calls if c[3] == sb and c[0] in ("patch", "delete", "replace")]
+    # la déprotection ne le touche pas davantage
+    rr.unprotect(w.ctx())
+    assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["spec"] == {"fromBackup": "x"}
+
+
+# ---------------------------------------------------------------------------
+# Mesure
+# ---------------------------------------------------------------------------
+
+def test_measure_writes_nothing_on_the_target_and_hands_its_job_to_protect(world):
+    w = world
+    res = rr.measure_start(w.ctx(), "1m")
+    assert res["exit"] == 0 and w.plan()["state"] == "measuring"
+    assert mut_keys(w.dst) == []
+    job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])
+    assert w.src.obj(rr.K_LH_JOB, rr.NS, job)["spec"]["cron"] == "*/1 * * * *"
+    # deux passages de la tâche (le premier complet), puis la protection
+    for i, vol in enumerate(f"pvc-{n}-{d}" for n in ("vm-a", "vm-b") for d in VMS[n]["disks"]):
+        w.src.make_backup(vol, f"backup-m0-{i}", newly=2 * GIB)
+    w.clock.sleep(60)
+    for i, vol in enumerate(f"pvc-{n}-{d}" for n in ("vm-a", "vm-b") for d in VMS[n]["disks"]):
+        w.src.make_backup(vol, f"backup-m1-{i}", newly=25_174_351)
+    creates = len(mut_keys(w.src, "create"))
+    assert rr.protect(w.ctx())["exit"] == 0
+    assert w.src.obj(rr.K_LH_JOB, rr.NS, job)["spec"]["cron"] == w.plan()["cron"]
+    # même tâche (patch du cron), et aucune première sauvegarde : le BackupVolume sert déjà
+    new = mut_keys(w.src, "create")[creates:]
+    assert [c for c in new if c[1] in (rr.K_LH_JOB, rr.K_LH_SNAPSHOT, rr.K_LH_BACKUP)] == []
+    assert ("patch", rr.K_LH_JOB, rr.NS, job) in [c[:4] for c in mut_keys(w.src, "patch")]
+
+
+def test_measure_stop_records_passes_and_removes_jobs(world):
+    w = world
+    rr.measure_start(w.ctx(), "3m")
+    w.src.make_backup("pvc-vm-a-data", "backup-x1", newly=2 * GIB)
+    res = rr.measure_stop(w.ctx())
+    assert res["exit"] == 0 and res["passes"] == 1 and w.plan()["state"] == "draft"
+    assert w.owned(w.src) == []
+    key = rp.job_label(rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"]))[0]
+    assert key not in w.src.obj(rr.K_LH_VOLUME, rr.NS, "pvc-vm-a-data")["metadata"]["labels"]
+    assert {r["state"] for r in db.list_resources(w.conn, w.pid)} == {"draft"}
+
+
+def _measures(w, step, per_pass, passes, first=2 * GIB, secs=5):
+    vols = db.list_volumes(w.conn, w.pid)
+    t = 1_792_000_000
+    for v in vols:
+        for i in range(passes + 1):
+            at = t + i * step
+            db.record_measure(w.conn, w.pid, {
+                "generation": 1, "vm_uid": v["vm_uid"], "source_volume": v["source_volume"], "backup": f"b{i}",
+                "snapshot_at": iso(at), "backup_started_at": iso(at + 1),
+                "backup_done_at": iso(at + 1 + (30 if i == 0 else secs)),
+                "newly_uploaded": first if i == 0 else per_pass, "state": "completed"})
+
+
+def test_measure_report_with_the_bench_numbers(world):
+    w = world
+    rr.measure_start(w.ctx(), "3m")
+    _measures(w, 180, 25_174_351, 6)
+    rep = rr.measure_report(w.conn, w.pid)
+    assert rep["measured_step_s"] == 180 and rep["assumption"] == "apply-equals-send"
+    vm = next(v for v in rep["vms"] if v["vm_uid"] == VMS["vm-a"]["uid"])
+    assert vm["passes"] == 6 and vm["throughput_bps"] > 0 and vm["first_copy_eta_s"] > 0
+    steps = {s["step_s"]: s for s in vm["steps"]}
+    assert set(steps) == {s for s in rp.CRON_STEPS if s % 180 == 0}
+    assert steps[180]["p95_bytes"] == 2 * 25_174_351              # deux disques par passage
+    assert steps[360]["upper_bytes"] == 4 * 25_174_351
+    assert rep["recommended_interval_s"] in rp.CRON_STEPS and rep["tenable"] is True
+    assert rep["rpo_s"] <= w.plan()["rpo_objective_s"]
+
+
+def test_measure_report_without_passes_is_insufficient(world):
+    rr.measure_start(world.ctx(), "3m")
+    rep = rr.measure_report(world.conn, world.pid)
+    assert rep["recommended_interval_s"] is None and all(v.get("insufficient") for v in rep["vms"])
+
+
+def test_measure_formula_bench_numbers():
+    f = rr.measure_formula(2 * GIB, 600, 180, throughput=72_000_000)
+    assert round(f["forecast"]["scattered_estimate"]) == 454
+    assert f["scattered_estimate"]["send_s"] == pytest.approx(454.06 * 2 * 1024 ** 2 / 72e6, rel=1e-3)
+    seq = rr.measure_formula(2 * GIB, 3, 60, write_size=8 * 1024 ** 2)
+    assert seq["forecast"]["sequential"] == 12 and "sequential" not in seq
+
+
+def test_protect_uses_the_measured_interval(world):
+    w = world
+    rr.measure_start(w.ctx(), "3m")
+    _measures(w, 180, 25_174_351, 6)
+    rr.measure_stop(w.ctx())
+    rep = rr.measure_report(w.conn, w.pid)
+    assert rr.protect(w.ctx())["exit"] == 0
+    assert w.plan()["interval_s"] == rep["recommended_interval_s"]
+    assert not events(w, code="interval-without-measure")
+
+
+# ---------------------------------------------------------------------------
+# Bascule planifiée
+# ---------------------------------------------------------------------------
+
+def _final_names(w, run_id):
+    return {f"pvc-{n}-{d}": rr.op_name(w.pid, f"pvc-{n}-{d}", 1, "final", str(run_id))
+            for n in ("vm-a", "vm-b") for d in VMS[n]["disks"]}
+
+
+def test_planned_failover_applies_the_final_backup_before_activation(tmp_path):
+    w = protected(tmp_path)
+    w.clock.sleep(400)                        # la tâche a tourné, la VM a écrit
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 0, res
+    finals = _final_names(w, res["run_id"])
+    for n in ("vm-a", "vm-b"):
+        for d in VMS[n]["disks"]:
+            sb = rp.target_volume_name(w.pid, VMS[n]["uid"], d, 1, n)
+            v = w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)
+            # zéro perte : le moteur avait appliqué LA sauvegarde finale à l'activation
+            assert v["status"]["activatedFrom"] == finals[f"pvc-{n}-{d}"]
+            assert v["spec"]["Standby"] is False and v["spec"]["frontend"] == "blockdev"
+    assert w.plan()["state"] == "failed_over" and w.plan()["options"]["paused"] is False
+    assert {r["state"] for r in db.list_resources(w.conn, w.pid)} == {"failed_over"}
+    assert {v["state"] for v in db.list_volumes(w.conn, w.pid)} == {"activated"}
+    vm = w.dst.obj(rr.K_VM, "default", "vm-a")
+    assert vm["metadata"]["labels"][rp.LABEL_PLAN] == w.pid
+    assert vm["spec"]["template"]["spec"]["domain"]["firmware"]["uuid"] == f"fw-{VMS['vm-a']['uid']}"
+    assert w.dst.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+    sec = w.dst.obj(rr.K_SECRET, "default", "vm-a-cloudinit")
+    assert sec["metadata"]["ownerReferences"][0]["name"] == "vm-a"
+    pvc = w.dst.obj(rr.K_PVC, "default", "vm-a-root")
+    assert pvc["spec"]["volumeName"] == rp.target_volume_name(w.pid, VMS["vm-a"]["uid"], "root", 1, "vm-a")
+    assert w.dst.obj(rr.K_PV, None, pvc["spec"]["volumeName"])["spec"]["csi"]["driver"] == "driver.longhorn.io"
+    src_vm = w.src.obj(rr.K_VM, "default", "vm-a")
+    assert src_vm["spec"]["runStrategy"] == "Halted"
+    assert src_vm["metadata"]["annotations"][rr.FAILED_OVER_TO] == "harvlab2/default/vm-a"
+    assert rr.STOPPED_ANNOTATION not in src_vm["metadata"]["annotations"]
+    run = db.list_runs(w.conn, w.pid)[-1]
+    assert run["result"] == "ok" and run["points"]["mode"] == "planned"
+    assert {s["step"] for s in run["steps"]} >= {"stop-source", "final-backup", "final-resync", "activate", "vm"}
+
+
+def test_planned_failover_call_order(tmp_path):
+    w = protected(tmp_path, vms=("vm-b",))
+    n_src, n_dst = len(w.src.calls), len(w.dst.calls)
+    assert rr.failover(w.ctx())["exit"] == 0
+    seq = []
+    for c in w.src.calls[n_src:]:
+        if c[0] == "patch" and c[1] == rr.K_VM and "Halted" in c[4]:
+            seq.append("stop")
+        elif c[0] == "patch" and c[1] == rr.K_LH_VOLUME:
+            seq.append("unlabel")
+        elif c[0] == "create" and c[1] == rr.K_LH_SNAPSHOT:
+            seq.append("snapshot")
+        elif c[0] == "create" and c[1] == rr.K_LH_BACKUP:
+            seq.append("backup")
+    for c in w.dst.calls[n_dst:]:
+        if c[0] == "patch" and c[1] == rr.K_LH_BV:
+            seq.append("resync")
+        elif c[0] == "patch" and c[1] == rr.K_LH_VOLUME:
+            seq.append("activate")
+        elif c[0] == "create" and not c[4] and c[1] in (rr.K_PV, rr.K_PVC, rr.K_VM):
+            seq.append(c[1])
+    dedup = [x for i, x in enumerate(seq) if i == 0 or seq[i - 1] != x]
+    assert dedup == ["stop", "unlabel", "snapshot", "backup", "resync", "activate",
+                     rr.K_PV, rr.K_PVC, rr.K_PV, rr.K_PVC, rr.K_PV, rr.K_PVC, rr.K_VM]
+
+
+def test_zero_loss_check_detects_an_activation_without_final_resync(tmp_path, monkeypatch):
+    """Garde du test précédent : sans attendre l'application de la
+    sauvegarde finale, le moteur a encore l'ancien point à l'activation."""
+    w = protected(tmp_path, vms=("vm-b",))
+    w.clock.sleep(400)
+    monkeypatch.setattr(rr, "wait_applied", lambda *a, **k: {})
+    res = rr.failover(w.ctx())
+    finals = _final_names(w, res["run_id"]) if "run_id" in res else {}
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"] != finals.get("pvc-vm-b-d1")
+
+
+@pytest.mark.parametrize("how,exit_code", [("cancel", 3), ("error", 1)])
+def test_failover_interrupted_before_activation_is_undone(tmp_path, how, exit_code):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.freeze.add("natural-sync")
+
+    def interrupt(name):
+        if how == "cancel":
+            raise rr.Cancelled("signal 15")
+        raise RuntimeError("the server rejected the request")
+    w.dst.hooks[("patch", rr.K_LH_BV)] = interrupt
+    res = rr.failover(w.ctx())
+    assert res["exit"] == exit_code and "undone" in res["message"]
+    w.clock.sleep(10)
+    assert w.src.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+    vm = w.src.obj(rr.K_VM, "default", "vm-a")
+    assert vm["spec"]["runStrategy"] == "Always" and rr.STOPPED_ANNOTATION not in vm["metadata"].get("annotations", {})
+    job = rp.recurring_job_name(w.pid, VMS["vm-a"]["uid"])
+    for d in VMS["vm-a"]["disks"]:
+        assert w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-vm-a-{d}")["metadata"]["labels"][rp.job_label(job)[0]] == "enabled"
+    assert not [k for k in w.src.objs if k[0] == rr.K_LH_SNAPSHOT and k[2].endswith("-final")]
+    assert w.plan()["state"] == "protected" and w.plan()["options"]["paused"] is False
+    assert {r["state"] for r in db.list_resources(w.conn, w.pid)} == {"protected"}
+    assert all(w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["spec"]["Standby"]
+               for v in db.list_volumes(w.conn, w.pid))
+    assert db.list_runs(w.conn, w.pid)[-1]["result"] == "rolled-back"
+    assert events(w, step="rollback", resource_uid=VMS["vm-a"]["uid"])
+    # une nouvelle bascule reprend proprement, avec une nouvelle sauvegarde finale
+    w.dst.hooks.clear()
+    assert rr.failover(w.ctx())["exit"] == 0
+
+
+def test_failover_cancelled_after_activation_is_not_undone_and_resumes(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("create", rr.K_PV)] = lambda name: (_ for _ in ()).throw(rr.Cancelled("signal 15"))
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 3 and "run failover again" in res["message"]
+    assert w.plan()["state"] == "error" and db.error_origin(w.conn, w.pid) == "failing_over"
+    assert all(w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["spec"]["Standby"] is False
+               for v in db.list_volumes(w.conn, w.pid))
+    assert w.src.obj(rr.K_VM, "default", "vm-a")["spec"]["runStrategy"] == "Halted"
+    assert w.src.obj(rr.K_VMI, "default", "vm-a") is None
+    assert w.plan()["options"]["paused"] is True
+    w.dst.hooks.clear()
+    snaps = len(mut_keys(w.src, "create", rr.K_LH_SNAPSHOT))
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 0, res
+    assert len(mut_keys(w.src, "create", rr.K_LH_SNAPSHOT)) == snaps          # pas de seconde sauvegarde finale
+    assert w.dst.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+    assert w.plan()["state"] == "failed_over"
+
+
+def test_failover_resumes_after_a_crash_at_every_step(tmp_path):
+    ref = protected(tmp_path, vms=("vm-a",))
+    ref.mutations = 0
+    assert rr.failover(ref.ctx())["exit"] == 0
+    n = ref.mutations
+    expected = snapshot_state(ref)
+    for k in range(1, n + 1):
+        w = protected(tmp_path, vms=("vm-a",))
+        w.mutations = 0
+        w.crash_at = k
+        with pytest.raises(Crash):
+            rr.failover(w.ctx())
+        w.crash_at = None
+        res = rr.resume(w.ctx())
+        assert res["exit"] == 0, (k, res)
+        got = snapshot_state(w)
+        # les noms des sauvegardes finales dépendent du numéro d'exécution : mêmes ici
+        assert got == expected, k
+        dup = [c for c in w.src.mutations() + w.dst.mutations() if c[0] == "create"]
+        assert len(dup) == len({(c[1], c[2], c[3]) for c in dup}), k
+
+
+@pytest.mark.parametrize("freeze,timeout,step", [
+    ("stop", "stop", "stop-source"),
+    ("backup", "final_backup", "final-backup"),
+    ("apply", "resync_apply", "final-resync"),
+])
+def test_failover_waits_before_activation_are_bounded_and_undone(tmp_path, freeze, timeout, step):
+    w = protected(tmp_path, vms=("vm-a",))
+    (w.dst if freeze == "apply" else w.src).freeze.add(freeze)
+    res = rr.failover(w.ctx(timeouts={timeout: 50}))
+    assert res["exit"] == 1 and "undone" in res["message"]
+    assert events(w, step=step, code="timeout")
+    assert w.plan()["state"] == "protected"
+
+
+@pytest.mark.parametrize("freeze,timeout,step", [
+    ("activate", "activate", "activate"),
+    ("bind", "bind", "claims"),
+    ("start", "vm_start", "vm-start"),
+])
+def test_failover_waits_after_activation_are_bounded_and_kept(tmp_path, freeze, timeout, step):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.freeze.add(freeze)
+    res = rr.failover(w.ctx(timeouts={timeout: 50}))
+    assert res["exit"] == 1 and "run failover again" in res["message"]
+    assert events(w, step=step, code="timeout")
+    assert w.plan()["state"] == "error"
+    w.dst.freeze.clear()
+    if freeze == "activate":
+        for v in db.list_volumes(w.conn, w.pid):
+            w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["status"].update(isStandby=False, state="detached")
+    if freeze == "bind":
+        for o in w.dst.objs.values():
+            if o.get("kind") == "PersistentVolumeClaim":
+                o["status"]["phase"] = "Bound"
+    if freeze == "start":
+        w.dst.put(rr.K_VMI, {"metadata": {"name": "vm-a", "namespace": "default"}, "status": {"phase": "Running"}})
+    assert rr.failover(w.ctx())["exit"] == 0
+
+
+def test_failover_refused_when_a_mac_is_taken(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.put(rr.K_VM, _vm("squatter", "uid-sq", [], mac=VMS["vm-a"]["mac"]))
+    n = len(w.src.mutations()), len(w.dst.mutations())
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 2 and "mac-in-use" in [f["code"] for f in res["findings"]]
+    assert (len(w.src.mutations()), len(w.dst.mutations())) == n
+    assert w.plan()["state"] == "protected"
+
+
+def test_failover_refused_when_a_pvc_is_already_there(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.put(rr.K_PVC, {"metadata": {"name": "vm-a-data", "namespace": "default"}, "spec": {}})
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 2 and "target-pvc-taken" in [f["code"] for f in res["findings"] if f["level"] == "block"]
+    assert w.src.obj(rr.K_VMI, "default", "vm-a") is not None
+
+
+def test_failover_of_part_of_the_plan_keeps_it_protected(tmp_path):
+    w = protected(tmp_path)
+    res = rr.failover(w.ctx(), vms=["default/vm-b"])
+    assert res["exit"] == 0 and w.plan()["state"] == "protected"
+    states = {r["name"]: r["state"] for r in db.list_resources(w.conn, w.pid)}
+    assert states == {"vm-a": "protected", "vm-b": "failed_over"}
+    assert w.src.obj(rr.K_VMI, "default", "vm-a") is not None
+    assert w.plan()["options"]["paused"] is False
+    assert rr.failover(w.ctx(), vms=["default/vm-zz"])["code"] == "unknown-vm"
+
+
+def test_planned_failover_of_a_stopped_vm(tmp_path):
+    w = protected(tmp_path, vms=("vm-c",), options={"start": "stopped"})
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 0, res
+    assert w.src.obj(rr.K_VM, "default", "vm-c")["spec"]["runStrategy"] == "Halted"
+    assert w.dst.obj(rr.K_VM, "default", "vm-c")["spec"]["runStrategy"] == "Halted"
+    assert w.dst.obj(rr.K_VMI, "default", "vm-c") is None
+
+
+def test_failover_dry_run_writes_nothing(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("validate", rr.K_VM)] = lambda obj: (_ for _ in ()).throw(
+        RuntimeError('admission webhook denied: persistentvolumeclaim "vm-a-root" not found'))
+    n = len(w.src.mutations()), len(w.dst.mutations())
+    res = rr.failover(w.ctx(), dry_run=True)
+    assert res["exit"] == 0 and (len(w.src.mutations()), len(w.dst.mutations())) == n
+    assert "vm-dry-run-pvc-missing" in [f["code"] for f in res["findings"] if f["level"] == "warn"]
+    assert {d["object"] for d in res["dry_run"]} == {"pv", "pvc", "vm"}
+
+
+def test_failover_refused_by_a_vm_webhook_before_activation(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.hooks[("validate", rr.K_VM)] = lambda obj: (_ for _ in ()).throw(RuntimeError("cpu quota exceeded"))
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 2 and "dry-run-refused" in [f["code"] for f in res["findings"]]
+    assert w.src.obj(rr.K_VMI, "default", "vm-a") is not None
+
+
+# ---------------------------------------------------------------------------
+# Bascule non planifiée
+# ---------------------------------------------------------------------------
+
+def test_planned_failover_refused_when_the_source_is_lost(tmp_path):
+    w = protected(tmp_path)
+    w.src.down = True
+    res = rr.failover(w.ctx())
+    assert res["exit"] == 2 and res["code"] == "source-unreachable" and res["facts"]["hint"] == "--unplanned"
+    assert rr.failover(w.ctx(), planned=False)["code"] == "confirmation-required"
+
+
+def test_unplanned_failover_with_the_source_lost(tmp_path):
+    w = protected(tmp_path)
+    w.clock.sleep(30)
+    for n in ("vm-a", "vm-b"):
+        for d in VMS[n]["disks"]:
+            w.src.make_backup(f"pvc-{n}-{d}", f"backup-late-{n}-{d}")
+    w.src.down = True
+    n_src = len(w.src.calls)
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 0, res
+    assert res["fenced"] == {"default/vm-a": "source-not-fenced", "default/vm-b": "source-not-fenced"}
+    assert set(res["lost_after"]) == {"default/vm-a", "default/vm-b"}
+    sb = rp.target_volume_name(w.pid, VMS["vm-b"]["uid"], "d1", 1, "vm-b")
+    # la relecture finale a ramené la dernière sauvegarde avant l'activation
+    assert w.dst.obj(rr.K_LH_VOLUME, rr.NS, sb)["status"]["activatedFrom"] == "backup-late-vm-b-d1"
+    assert w.plan()["state"] == "failed_over"
+    assert db.list_runs(w.conn, w.pid)[-1]["points"]["mode"] == "unplanned"
+    # rien n'a été écrit sur la source
+    assert w.src.calls[n_src:] == []
+
+
+def test_unplanned_failover_skew_between_disks(tmp_path):
+    w = protected(tmp_path, vms=("vm-b",))
+    t = w.clock.now()
+    for i, d in enumerate(VMS["vm-b"]["disks"]):
+        w.src.make_backup(f"pvc-vm-b-{d}", f"backup-skew-{d}", snap_at=iso(t + 30 * i))
+    w.src.down = True
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 2 and res["code"] == "skew-exceeded" and res["skew_s"]["default/vm-b"] == 60
+    assert w.plan()["state"] == "protected"
+    assert all(w.dst.obj(rr.K_LH_VOLUME, rr.NS, v["target_volume"])["spec"]["Standby"]
+               for v in db.list_volumes(w.conn, w.pid))
+    assert events(w, code="skew-exceeded")
+    res = rr.failover(w.ctx(), planned=False, yes=True, accept_skew=True)
+    assert res["exit"] == 0 and w.plan()["state"] == "failed_over"
+
+
+def test_unplanned_failover_refused_when_the_source_answers(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 2 and res["code"] == "source-reachable"
+    res = rr.failover(w.ctx(), planned=False, yes=True, force_unplanned=True)
+    assert res["exit"] == 0 and res["fenced"] == {"default/vm-a": "source-fenced"}
+    assert w.src.obj(rr.K_VM, "default", "vm-a")["spec"]["runStrategy"] == "Halted"
+
+
+def test_unplanned_failover_source_comes_back_during_the_failover(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.src.down = True
+    w.dst.at(1, lambda: setattr(w.src, "down", False))
+    res = rr.failover(w.ctx(), planned=False, yes=True)
+    assert res["exit"] == 0 and res["fenced"] == {"default/vm-a": "source-fenced"}
+
+
+def test_unplanned_failover_works_without_the_database_volumes(tmp_path):
+    """La bascule ne lit que la cible et le carnet."""
+    w = protected(tmp_path, vms=("vm-a",))
+    w.conn.execute("DELETE FROM plan_volumes")
+    w.conn.commit()
+    w.src.down = True
+    assert rr.failover(w.ctx(), planned=False, yes=True)["exit"] == 0
+    assert w.dst.obj(rr.K_VMI, "default", "vm-a")["status"]["phase"] == "Running"
+
+
+# ---------------------------------------------------------------------------
+# Déprotection
+# ---------------------------------------------------------------------------
+
+def test_unprotect_removes_our_objects_and_keeps_harvester_backups(tmp_path):
+    w = protected(tmp_path)
+    w.src.make_backup("pvc-vm-a-data", "backup-harvester-1", labels={"backup-volume": "pvc-vm-a-data"})
+    bvs = sorted(k for k in w.src.objs if k[0] == rr.K_LH_BV)
+    assert rr.unprotect(w.ctx(), delete_backups=True)["code"] == "confirmation-required"
+    res = rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+    assert res["exit"] == 0, res
+    assert res["backups_deleted"] >= 5
+    assert w.owned(w.src) == [] and w.owned(w.dst) == []
+    assert w.src.obj(rr.K_LH_BACKUP, rr.NS, "backup-harvester-1") is not None
+    assert "backup-harvester-1" in w.store.backups
+    assert sorted(k for k in w.src.objs if k[0] == rr.K_LH_BV) == bvs
+    for n in ("vm-a", "vm-b"):
+        for d in VMS[n]["disks"]:
+            labels = w.src.obj(rr.K_LH_VOLUME, rr.NS, f"pvc-{n}-{d}")["metadata"]["labels"]
+            assert not [k for k in labels if k.startswith(rp.JOB_LABEL_PREFIX)]
+    assert w.dst.obj(rr.K_LH_BI, rr.NS, "vmi-img1") is None
+    assert w.plan()["state"] == "unprotected"
+    assert {v["state"] for v in db.list_volumes(w.conn, w.pid)} == {"removed"}
+    assert {r["state"] for r in db.list_resources(w.conn, w.pid)} == {"unprotected"}
+    for uid in (VMS["vm-a"]["uid"], VMS["vm-b"]["uid"]):
+        assert [e["code"] for e in events(w, resource_uid=uid, step="remove-target")] == ["start", "done"]
+        assert [e["code"] for e in events(w, resource_uid=uid, step="remove-job")] == ["start", "done"]
+
+
+def test_unprotect_keeps_a_backing_image_still_in_use(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.dst.put(rr.K_LH_VOLUME, {"metadata": {"name": "other", "namespace": rr.NS},
+                               "spec": {"backingImage": "vmi-img1"}, "status": {}})
+    assert rr.unprotect(w.ctx())["exit"] == 0
+    assert w.dst.obj(rr.K_LH_BI, rr.NS, "vmi-img1") is not None
+
+
+def test_unprotect_with_the_source_lost_then_rerun(tmp_path):
+    w = protected(tmp_path)
+    w.src.down = True
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 1 and res["pending"] == ["source"]
+    assert w.plan()["state"] == "unprotecting"
+    assert [k for k in w.owned(w.dst) if k[0] != rr.K_LH_BACKUP] == []
+    assert w.owned(w.src)                               # tâches encore là
+    assert events(w, code="pending")
+    w.src.down = False
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0 and w.plan()["state"] == "unprotected"
+    assert [k for k in w.owned(w.src) if k[0] != rr.K_LH_BACKUP] == []
+
+
+def test_unprotect_after_failover_never_touches_the_failed_over_vm(tmp_path):
+    w = protected(tmp_path, vms=("vm-a",))
+    assert rr.failover(w.ctx())["exit"] == 0
+    keep = {k: copy.deepcopy(o) for k, o in w.dst.objs.items()
+            if k[0] in (rr.K_VM, rr.K_PVC, rr.K_PV, rr.K_LH_VOLUME)}
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0
+    for k, o in keep.items():
+        assert w.dst.objs.get(k) == o, k
+    assert any(x.startswith("vm default/vm-a") for x in res["left"])
+    assert w.dst.obj(rr.K_SECRET, rp.CARNET_NAMESPACE, rp.carnet_name(w.pid, VMS["vm-a"]["uid"])) is None
+
+
+def test_unprotect_of_a_measuring_plan_does_not_need_the_target(world):
+    w = world
+    rr.measure_start(w.ctx(), "3m")
+    w.dst.down = True
+    res = rr.unprotect(w.ctx())
+    assert res["exit"] == 0 and w.plan()["state"] == "unprotected" and w.owned(w.src) == []
+
+
+def test_unprotect_resumes_after_a_crash_at_every_step(tmp_path):
+    ref = protected(tmp_path)
+    ref.mutations = 0
+    assert rr.unprotect(ref.ctx(), delete_backups=True, yes=True)["exit"] == 0
+    n = ref.mutations
+    expected = snapshot_state(ref)
+    for k in range(1, n + 1):
+        w = protected(tmp_path)
+        w.mutations = 0
+        w.crash_at = k
+        with pytest.raises(Crash):
+            rr.unprotect(w.ctx(), delete_backups=True, yes=True)
+        w.crash_at = None
+        res = rr.resume(w.ctx())
+        assert res["exit"] == 0, (k, res)
+        assert snapshot_state(w) == expected, k
+
+
+# ---------------------------------------------------------------------------
+# Reprise et états
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("command", ["failover", "unprotect", "measure_stop"])
+def test_commands_refused_from_a_draft_plan(world, command):
+    fn = getattr(rr, command)
+    res = fn(world.ctx())
+    assert res["exit"] == 2 and res["code"] == "state"
+    assert mut_keys(world.src) == []
+
+
+def test_resume_with_nothing_to_resume(tmp_path):
+    w = protected(tmp_path)
+    assert rr.resume(w.ctx())["code"] == "nothing-to-resume"
