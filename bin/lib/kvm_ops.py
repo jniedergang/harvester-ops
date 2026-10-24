@@ -437,7 +437,11 @@ def _failure_class(text):
     fichier : la classe rendue sert seulement à nommer la cause dans
     `unknown`, jamais à rendre l'échec acceptable."""
     t = (text or "").strip()
-    if "Permission denied" in t or "EACCES" in t:
+    # Le refus de permission se lit dans le message d'erreur en fin de ligne,
+    # jamais dans le chemin cité : un fichier nommé « Permission denied »
+    # ne doit pas rendre acceptable une erreur d'E/S.
+    last = t.splitlines()[-1].strip() if t else ""
+    if re.search(r"(Permission denied|EACCES)\)?$", last):
         return "permission"
     if not t or t == "no output":
         return "timeout"
@@ -1450,7 +1454,7 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
                     host.run_input(["env", "LC_ALL=C", *host._virsh_argv(vol_create_args(e))],
                                    volume_xml(e["dest_name"], e["capacity"], e["format"],
                                               e.get("permissions")),
-                                   timeout=left)
+                                   timeout=left, fresh=True)   # copie longue : hors connexion partagée
                 except kh.KvmError as err:
                     if "already" in err.message.lower() or "exists" in err.message.lower():
                         created.pop()        # pas le nôtre : jamais supprimé

@@ -66,6 +66,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `operations` table that the menu reads.
 
 ### Changed
+- A long volume copy during a clone runs on its own SSH connection, so a concurrent read cannot cut it.
+- A read failure counts as a permission refusal only from the error text, never from the file path.
 - Roles: a viewer reads snapshots and previews; an operator opens the
   console, manages snapshots and clones; an admin deletes a VM, and only
   an admin can cancel a delete.

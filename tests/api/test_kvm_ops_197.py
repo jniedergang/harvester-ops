@@ -207,8 +207,9 @@ class Sim:
                 err, rc=rc, error=kh.make_error(self.name, err, rc))
         return res
 
-    def run_input(self, argv, data, timeout=None, secrets=()):
+    def run_input(self, argv, data, timeout=None, secrets=(), fresh=False):
         self.calls.append(("input", tuple(argv), data))
+        self.fresh_inputs = getattr(self, "fresh_inputs", []) + [(argv[5] if len(argv) > 5 else "", fresh)]
         assert argv[:5] == ["env", "LC_ALL=C", "virsh", "-c", "qemu:///system"]
         rc, out, err = self._answer(argv[5:], data)
         if rc:

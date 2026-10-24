@@ -415,16 +415,19 @@ class VirshHost:
                              ssh_level=res.returncode == SSH_RC)
         return res.stdout or ""
 
-    def run_input(self, remote_argv, data, timeout=None, secrets=()):
+    def run_input(self, remote_argv, data, timeout=None, secrets=(), fresh=False):
         """Comme `run()`, mais `data` (texte) part sur l'entrée standard de la
         commande distante. Sert à `virsh define /dev/stdin` : le XML, qui peut
         porter le mot de passe VNC, ne passe ni par un fichier temporaire ni
         par la ligne de commande. Une erreur qui recopierait l'entrée est
         expurgée : chaque `passwd` lu dans `data`, chaque valeur de `secrets`
-        et tout attribut `passwd=` sont masqués avant de bâtir le message."""
+        et tout attribut `passwd=` sont masqués avant de bâtir le message.
+        `fresh=True` : connexion propre, hors de la connexion partagée, pour
+        une écriture longue qu'un plantage de sshd sous sessions multiplexées
+        simultanées (OpenSSH 10.2p1) ne doit pas couper."""
         if not isinstance(data, str):
             raise TypeError("data must be a str")
-        res = self._ssh(remote_argv, timeout, data=data)
+        res = self._ssh(remote_argv, timeout, data=data, fresh=fresh)
         if res.returncode != 0:
             raise make_error(self.name, res.stderr, res.returncode, self._secret_paths(),
                              ssh_level=res.returncode == SSH_RC,
