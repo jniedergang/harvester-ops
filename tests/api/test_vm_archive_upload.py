@@ -309,19 +309,17 @@ def test_a_cancelled_iso_download_reads_cancelled(tmp_path, monkeypatch):
     run = _run()
 
     class Resp:
-        headers = {"Content-Length": "100"}
+        def getheader(self, name, default=None):
+            return "100" if name == "Content-Length" else default
 
         def read(self, n):
             run._cancel = True
             return b"i" * 10
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Resp())
+    class Conn:
+        def close(self):
+            pass
+    monkeypatch.setattr(wapp._ufg, "open_checked", lambda *a, **k: (Resp(), Conn(), a[0]))
     dest = tmp_path / "x.iso"
     wapp._iso_fetch_runner(run, "http://example.invalid/x.iso", dest)
     assert run.status == "cancelled" and run.exit_code == 3
@@ -330,11 +328,9 @@ def test_a_cancelled_iso_download_reads_cancelled(tmp_path, monkeypatch):
 
 def test_a_failed_iso_download_still_reads_error(tmp_path, monkeypatch):
     run = _run()
-    import urllib.request
-
     def boom(*a, **k):
         raise OSError("unreachable")
-    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    monkeypatch.setattr(wapp._ufg, "open_checked", boom)
     wapp._iso_fetch_runner(run, "http://example.invalid/x.iso", tmp_path / "x.iso")
     assert run.status == "error" and run.exit_code == 1
 

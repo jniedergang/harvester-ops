@@ -25,6 +25,13 @@ web:
 # transfer:
 #   serve_address: 10.0.0.5:8094
 
+# Server-side ISO download (bare-metal): internal addresses are refused.
+# Allow the networks of internal mirrors here (read at each download).
+# iso_fetch:
+#   allow_private: ["10.20.0.0/16"]
+#   max_bytes: 21474836480       # 20 GiB by default
+#   min_free_bytes: 1073741824   # 1 GiB kept free by default
+
 # Cluster declarations
 clusters:
 

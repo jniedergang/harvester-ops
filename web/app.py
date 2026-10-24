@@ -89,6 +89,7 @@ import rancher_servers as _srv
 import rancher_admin as _radm
 import tf_store as _tfs
 import tf_state as _tfst
+import url_fetch_guard as _ufg
 import baremetal_onboarding as _bmo
 import baremetal_onboarding_runtime as _bmor
 from flask import (
@@ -7967,42 +7968,81 @@ def api_isos_list():
                     "used": sum(e["size"] for e in items)})
 
 
-def _iso_fetch_runner(run, url, dest):
-    """Télécharge un ISO en flux, avec progression et sha256 calculé au vol."""
-    import urllib.request, hashlib
+def _iso_free_bytes(path):
+    """Espace libre du magasin d'ISO (point d'injection des tests)."""
+    return shutil.disk_usage(path).free
+
+
+def _iso_fetch_runner(run, url, dest, allow=(), max_bytes=None, min_free=None):
+    """Télécharge un ISO en flux, avec progression et sha256 calculé au vol.
+
+    v1.99.0 : garde anti-SSRF (url_fetch_guard : adresses internes refusées,
+    redirections revérifiées à chaque saut), plafond de taille et espace
+    libre contrôlé avant et pendant le téléchargement. Les messages montrés
+    ne portent ni chemin local ni détail interne."""
+    import hashlib
+    if max_bytes is None or min_free is None:
+        d_max, d_free = _ufg.limits({})
+        max_bytes = d_max if max_bytes is None else max_bytes
+        min_free = d_free if min_free is None else min_free
     tmp = dest.with_suffix(dest.suffix + ".downloading")
 
     def step(sid, status, msg=""):
         run.emit({"type": "step", "step_id": sid, "status": status,
                   "message": msg, "ts": time.time()})
 
+    def refuse(reason, message):
+        raise _ufg.FetchRefused(reason, message)
+
     run.status = "running"
     run.emit({"type": "status", "status": "running", "ts": time.time()})
     step("fetch", "running", f"downloading {url}")
+    conn = None
     try:
         h = hashlib.sha256()
         done = 0
+        next_space_check = 0
         last_pct = -1
-        with urllib.request.urlopen(url, timeout=60) as r:
-            total = int(r.headers.get("Content-Length") or 0)
-            with open(tmp, "wb") as f:
-                while True:
-                    if getattr(run, "_cancel", False):
-                        raise RuntimeError("cancelled by operator")
-                    chunk = r.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    h.update(chunk)
-                    done += len(chunk)
-                    if total:
-                        pct = int(done * 100 / total)
-                        # Agrégé : le buffer d'évènements d'une action est
-                        # borné, inutile de le remplir de bruit.
-                        if pct != last_pct and pct % 5 == 0:
-                            last_pct = pct
-                            step("fetch", "progress",
-                                 f"{pct}% ({done // (1024*1024)} MiB)")
+        r, conn, _final = _ufg.open_checked(url, allow, timeout=60)
+        try:
+            total = int(r.getheader("Content-Length") or 0)
+        except ValueError:
+            total = 0
+        if total > max_bytes:
+            refuse("too-large", f"the file is larger than the {max_bytes // 1024 ** 3} GiB "
+                                "limit (iso_fetch.max_bytes)")
+        if total and _iso_free_bytes(dest.parent) - total < min_free:
+            refuse("no-space", "not enough free space in the ISO store for this file")
+        with open(tmp, "wb") as f:
+            while True:
+                if getattr(run, "_cancel", False):
+                    refuse("cancelled", "cancelled by operator")
+                chunk = r.read(1024 * 1024)
+                if not chunk:
+                    break
+                done += len(chunk)
+                # un serveur peut annoncer moins qu'il n'envoie
+                if done > max_bytes:
+                    refuse("too-large", f"the file is larger than the "
+                                        f"{max_bytes // 1024 ** 3} GiB limit (iso_fetch.max_bytes)")
+                # espace libre relu tous les 64 MiB
+                if done >= next_space_check:
+                    next_space_check = done + 64 * 1024 * 1024
+                    if _iso_free_bytes(dest.parent) - len(chunk) < min_free:
+                        refuse("no-space",
+                               "the ISO store ran out of free space during the download")
+                f.write(chunk)
+                h.update(chunk)
+                if total:
+                    pct = int(done * 100 / total)
+                    # Agrégé : le buffer d'évènements d'une action est
+                    # borné, inutile de le remplir de bruit.
+                    if pct != last_pct and pct % 5 == 0:
+                        last_pct = pct
+                        step("fetch", "progress",
+                             f"{pct}% ({done // (1024*1024)} MiB)")
+        if total and done != total:
+            refuse("short", "the download ended before the announced size")
         tmp.rename(dest)
         digest = h.hexdigest()
         dest.with_suffix(dest.suffix + ".sha256").write_text(
@@ -8015,10 +8055,19 @@ def _iso_fetch_runner(run, url, dest):
         tmp.unlink(missing_ok=True)
         # v1.47.0 : un arrêt demandé depuis le dock se lit « annulé »
         cancelled = getattr(run, "_cancel", False)
-        run.error_summary = str(e)[:300]
-        step("fetch", "error", str(e)[:300])
+        if isinstance(e, _ufg.FetchRefused):
+            msg = e.message
+        else:
+            # le texte d'une OSError porte des chemins : il reste au journal
+            log.warning("iso fetch %s failed: %r", dest.name, e)
+            msg = f"download failed ({type(e).__name__})"
+        run.error_summary = msg[:300]
+        step("fetch", "error", msg[:300])
         run.exit_code = 3 if cancelled else 1
         run.status = "cancelled" if cancelled else "error"
+    finally:
+        if conn is not None:
+            conn.close()
     run.ended_at = time.time()
     run.emit({"type": "status", "status": run.status,
               "exit_code": run.exit_code, "ts": time.time()})
@@ -8029,20 +8078,39 @@ def _iso_fetch_runner(run, url, dest):
 @requires_auth
 @_rate_limit("6/minute")
 def api_iso_fetch():
-    """Télécharge un ISO côté serveur. Body: {url, name?}."""
+    """Télécharge un ISO côté serveur. Body: {url, name?}.
+
+    Rôle : /api/iso/ est réservé aux admins (ADMIN_ONLY_PREFIXES). v1.99.0 :
+    l'URL est vérifiée ici (forme, résolution, adresses internes refusées
+    sauf `iso_fetch.allow_private`, relu à chaque demande) puis à nouveau à
+    chaque saut par le téléchargement."""
     data = request.get_json(force=True, silent=True) or {}
     url = (data.get("url") or "").strip()
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "http(s) URL required"}), 400
-    name = data.get("name") or url.rsplit("/", 1)[-1].split("?")[0]
+    cfg = load_config_ro()
+    allow = _ufg.parse_allowlist(cfg)
+    max_bytes, min_free = _ufg.limits(cfg)
+    try:
+        _scheme, host, port, path = _ufg.check_url(url)
+        _ufg.resolve_checked(host, port, allow)
+    except _ufg.FetchRefused as e:
+        return jsonify({"error": e.message, "reason": e.reason}), 400
+    name = data.get("name") or path.rsplit("/", 1)[-1].split("?")[0]
     name = _safe_artifact_name(name)
     if not name:
         return jsonify({"error": "the file name must be a plain *.iso"}), 400
     dest = _iso_dir() / name
     if dest.exists():
         return jsonify({"error": "already present", "name": name}), 409
+    try:
+        if _iso_free_bytes(dest.parent) < min_free:
+            return jsonify({"error": "not enough free space in the ISO store",
+                            "reason": "no-space"}), 507
+    except OSError:
+        pass
     action_id = track_action(f"iso-fetch:{name}", "(local)",
-                             _iso_fetch_runner, url, dest)
+                             _iso_fetch_runner, url, dest, allow, max_bytes, min_free)
     return jsonify({"action_id": action_id, "name": name}), 202
 
 

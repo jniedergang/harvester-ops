@@ -2088,7 +2088,9 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
 - **Power actions** over Redfish, with the same dynamic path resolution.
 - **Installation image store** — download a Harvester ISO server-side, as
   a stream, tracked with a percentage. The 7.6 GB image never passes
-  through the browser and is not shipped in the tarball.
+  through the browser and is not shipped in the tarball. Admin role;
+  internal addresses are refused at every redirect unless allowed by
+  `iso_fetch.allow_private` (see the bare-metal guide).
 - **Unattended installation** — pick an ISO, fill in the node (hostname,
   install disk, management NIC, addressing, VIP, DNS, NTP, token, OS
   password; the browser's password manager never fills these fields), and the console remasters the ISO for zero-touch install,

@@ -158,6 +158,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - The recovery carnet holds a copy of the VM's cloud-init secrets: keep
   `harvester-ops-replication` out of every Rancher project, readable by
   admins only (documented).
+- Bare-metal ISO download (`/api/iso/fetch`, admin role): the URL could
+  reach any address of the console host, Vault on `127.0.0.1:8200`
+  included, directly, through a redirect or through a name resolving to
+  an internal address. The console now resolves the name once and
+  connects to the checked address, refuses loopback, link-local, private,
+  multicast, unspecified, reserved and cloud metadata addresses, follows
+  at most 5 redirects by hand (http and https only, no https to http) and
+  checks every hop again. TLS stays verified. Size cap (20 GiB) and free
+  space (1 GiB kept) are checked before and during the download. Internal
+  mirrors are allowed with `iso_fetch.allow_private` (CIDR list, read at
+  each download). Errors no longer show local paths.
 
 ### Tests
 - API: model, store, engine (two simulated clusters with Longhorn

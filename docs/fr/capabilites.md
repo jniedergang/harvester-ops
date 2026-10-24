@@ -2304,6 +2304,8 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
 - **Magasin d'images d'installation** — télécharger un ISO Harvester côté
   serveur, en flux, avec un pourcentage suivi. Les 7,6 Go de l'image ne
   passent jamais par le navigateur et ne sont pas livrés dans le tarball.
+  Rôle admin ; les adresses internes sont refusées à chaque redirection
+  sauf autorisation par `iso_fetch.allow_private` (voir le guide bare-metal).
 - **Installation sans opérateur** — choisir un ISO, renseigner le node
   (nom d'hôte, disque d'installation, NIC de management, adressage, VIP,
   DNS, NTP, token, mot de passe OS ; le gestionnaire de mots de passe du

@@ -57,6 +57,33 @@ memory on the way in.
 Paste the vendor URL, press Download, and follow the percentage in the
 dock. The store shows what is on disk and how much room is left.
 
+Downloading needs the **admin** role. The console checks the URL before
+it connects, and again at every redirect:
+
+- only `http` and `https`, at most 5 redirects, and no redirect from
+  `https` back to `http`; TLS certificates are always verified;
+- the host name is resolved once and the console connects to the address
+  it checked, so a DNS answer cannot switch to an internal address;
+- loopback, link-local, private (RFC 1918, ULA, CGNAT), multicast,
+  unspecified and reserved addresses are refused, and so are the cloud
+  metadata addresses (`169.254.169.254`, `fd00:ec2::254`);
+- the file may not exceed 20 GiB, and the download stops when the store
+  falls under 1 GiB of free space.
+
+An isolated site often serves its ISOs from an internal mirror. Allow
+its network in `config.yaml`; the console reads the setting at each
+download, no restart needed:
+
+```yaml
+iso_fetch:
+  allow_private: ["10.20.0.0/16", "fd12:3456::/32"]   # internal mirrors
+  max_bytes: 21474836480        # size cap, 20 GiB by default
+  min_free_bytes: 1073741824    # free space kept in the store, 1 GiB by default
+```
+
+The metadata addresses, multicast and unspecified addresses stay refused
+even inside an allowed network.
+
 The ISO is deliberately **not** part of the release tarball: the whole
 toolkit is 135 MB, the ISO alone is fifty times that.
 
