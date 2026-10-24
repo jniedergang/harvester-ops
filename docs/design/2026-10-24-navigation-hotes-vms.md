@@ -177,7 +177,7 @@ Point de passage unique : `setCluster(name)` devient une fonction interne du rou
 Le menu ne doit jamais montrer 100 lignes d'un coup. Règles :
 - **Recherche** en tête du menu, raccourci `/`. Elle filtre les hôtes par nom, étiquette et famille, et propose les VMs qui correspondent (« Aller à la VM »). Entrée ouvre le premier résultat.
 - **Favoris** : une étoile sur chaque hôte. Les favoris restent en tête de leur famille. Ils sont rangés par personne, dans la base de la console (comme les préférences de compte), pas dans le navigateur : on les retrouve sur un autre poste.
-- **Hôtes en alerte toujours visibles** : un hôte injoignable ou en erreur n'est jamais caché par le plafond. La tête de famille résume l'état (`58 ok, 2 en alerte`).
+- **Hôtes en alerte toujours visibles** : un hôte injoignable ou en erreur est mis en avant (pastille, tête de famille). La tête de famille résume l'état (`58 ok, 2 en alerte`).
 - **Familles repliables**, état gardé dans `localStorage`.
 - **Index des hôtes** (`#hosts`) : un tableau de tous les hôtes, triable et filtrable (famille, état, étiquette, version), avec les mêmes gestes que le menu.
 - **Coût** : l'état des hôtes vient des lectures partagées existantes (`@shared_read`, 1.81.0) ; le menu ne lance aucune lecture par hôte. Le compte de VMs vient de la même lecture que la vue Machines virtuelles.
@@ -270,7 +270,7 @@ La nouvelle navigation arrive d'un bloc en **2.0.0** (décision du 25/10/2026). 
 
 Pas d'interrupteur ancienne/nouvelle navigation : l'ancien menu disparaît en 2.0.0. Ce qui protège les habitudes : les anciennes adresses (`#storage`, `#kvm-hosts`...) restent comprises pour toujours, la doc EN et FR et le CHANGELOG décrivent la correspondance (tableau ci-dessus), et la mise à jour reste réversible par le retour arrière de l'agent de mise à jour (1.82.0).
 
-Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte inconnu, hôte hors des droits) ; menu avec 100 hôtes (plafond, alertes jamais cachées, recherche) ; dossiers (objet qui fait foi, repli console, renommage repris après un arrêt, transfert entre clusters, clone KVM, rôle par geste, suppression refusée, annuler) ; parité des cinq langues ; listes d'onglets des tests e2e mises à jour. Vérification réelle : annotation posée et relue sur harv1, métadonnées libvirt sur un hôte KVM de banc, transfert harvlab vers harvlab2 avec dossier conservé.
+Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte inconnu, hôte hors des droits) ; menu avec 100 hôtes (rendu, alertes visibles, recherche) ; dossiers (objet qui fait foi, repli console, renommage repris après un arrêt, transfert entre clusters, clone KVM, rôle par geste, suppression refusée, annuler) ; parité des cinq langues ; listes d'onglets des tests e2e mises à jour. Vérification réelle : annotation posée et relue sur harv1, métadonnées libvirt sur un hôte KVM de banc, transfert harvlab vers harvlab2 avec dossier conservé.
 
 ## Risques
 
