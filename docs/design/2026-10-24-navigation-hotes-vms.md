@@ -1,6 +1,6 @@
 # Navigation par hôtes et par VMs (conception)
 
-Date : 24/10/2026. Base : 1.96.0 (hyperviseurs KVM). Maquette : `2026-10-24-navigation-maquette.html`.
+Date : 24/10/2026, relue avec le propriétaire du produit le 25/10/2026. Base : 1.99.0. Maquette : `2026-10-24-navigation-maquette.html`.
 
 Décisions du propriétaire du produit du 24/10/2026, reprises telles quelles :
 - un **hôte** est un cluster Harvester entier ou un hyperviseur KVM, jamais un nœud Harvester ;
@@ -11,6 +11,15 @@ Décisions du propriétaire du produit du 24/10/2026, reprises telles quelles :
 - l'appartenance à un dossier est écrite **sur la VM**, qui fait foi ; la base de la console sert de cache et de repli ;
 - la liste des hôtes **remplace** le sélecteur de cluster en haut du menu, avec une recherche rapide.
 
+Décisions de la relecture du 25/10/2026 :
+- l'ordre du menu de la maquette est gardé, et **toutes** les vues de configuration déjà construites (nœuds, stockage, réseau, add-ons, sécurité, monitoring, avancé, mise à jour, alimentation, bare-metal) retrouvent une place, sans perte de fonction ;
+- les paramètres d'un hôte sont des **onglets** dans la page ;
+- les dossiers rangent les **VMs, les conteneurs et les hôtes**, dans **une seule arborescence partagée**, ouverte par une entrée « Dossiers » en haut du menu ;
+- un objet est dans **un seul** dossier, sans héritage : ranger un hôte ne range pas ses VMs (un bouton propose de les ranger aussi) ;
+- supprimer un dossier non vide est **refusé**, la fenêtre propose « déplacer le contenu vers... » ;
+- créer, renommer, ranger : rôle opérateur ;
+- la nouvelle navigation arrive en **bascule directe**, dans une version majeure **2.0.0**, sans interrupteur ancienne/nouvelle.
+
 ## Objectifs
 
 1. Une console multi-hôtes, pas une console « un cluster à la fois ». On ne choisit plus un cluster avant de travailler : on va à un hôte, ou à une VM.
@@ -18,7 +27,16 @@ Décisions du propriétaire du produit du 24/10/2026, reprises telles quelles :
 3. Rien ne se perd. Chaque onglet d'aujourd'hui a une place, écrite dans le tableau plus bas.
 4. Des liens directs partout. Chaque écran a une adresse `#...` que l'on peut copier, recharger, envoyer.
 5. Tenir à 60 clusters et 40 hôtes KVM sans menu de trois écrans de haut.
-6. Livrer par étapes, derrière un interrupteur, sans casser les habitudes.
+6. Livrer en une bascule annoncée (2.0.0), sans perdre un écran ni un lien : les anciens jetons d'adresse restent compris.
+7. Vérifier avant d'agir, isoler, revenir en arrière (principes ci-dessous).
+
+## Principes d'expérience (propriétaire du produit, 25/10/2026)
+
+Ils valent pour chaque écran de la nouvelle navigation, et pour ceux qu'elle accueille (réplication, KVM) :
+- **Vérifier avant d'agir.** Chaque geste montre dans sa fenêtre les contrôles qui le concernent, avant le bouton : droits de la personne (revue d'accès du serveur, `SelfSubjectAccessReview`, ou dry-run du webhook), capacité technique (place allouable, version, fonction présente), réseau (joignabilité, débit mesuré quand il compte). Un contrôle échoué dit pourquoi et ce qu'il faut faire.
+- **Une interface légère.** Le menu reste court, la page montre l'essentiel ; le détail va dans des onglets et des fenêtres en overlay (`.modal-overlay`), qui isolent un geste ou une vue.
+- **Des info-bulles claires** sur chaque contrôle, en une phrase, dans les cinq langues.
+- **Traçabilité et retour arrière.** Chaque geste mutatif est une action suivie (dock, Activité). Quand le geste est réversible, l'action garde l'état d'avant et propose « Annuler » : un déplacement de dossier, un renommage, un rangement en lot.
 
 ## Ce qui existe aujourd'hui (1.96.0)
 
@@ -201,14 +219,22 @@ Pourquoi un chemin et pas un identifiant sur la VM : un chemin se relit sans la 
 - KVM : clé `kvm/<uuid>`. Le dossier suit le domaine à travers un renommage et une migration d'un hôte à l'autre (les métadonnées font partie du XML). Un clone garde ses métadonnées : il naît dans le dossier de sa source, ce qui est le comportement attendu.
 - Une VM supprimée disparaît de la vue. Son entrée de cache est purgée après 30 jours sans être vue, pour qu'un hôte injoignable un moment ne vide pas ses dossiers.
 
+### Conteneurs et hôtes dans les dossiers
+
+L'arborescence est la même pour les trois sortes d'objets. Un dossier peut mêler VMs, conteneurs et hôtes ; la vue « Dossiers » les montre en trois groupes, les vues Machines virtuelles, Conteneurs et Hôtes filtrent par dossier.
+- Conteneur : la charge (Deployment, StatefulSet, DaemonSet) porte l'annotation `harvester-ops.io/folder`, comme une VM Harvester. Clé `container/<cluster>/<espace de noms>/<sorte>/<nom>`.
+- Hôte : un hôte est déjà un objet de la console (`clusters.d/`, `kvm.d/`). Son dossier est écrit dans sa déclaration, qui fait foi ; rien n'est écrit sur le cluster ou l'hyperviseur. Clé `host/harvester/<nom>` ou `host/kvm/<nom>`.
+
 ### Rôles
 
 | Geste | viewer | operator | admin |
 |---|---|---|---|
-| Voir les dossiers et les VMs | oui | oui | oui |
+| Voir les dossiers et leur contenu | oui | oui | oui |
 | Créer, renommer, ranger un dossier | non | oui | oui |
-| Déplacer des VMs | non | oui | oui |
-| Supprimer un dossier (ses VMs remontent au parent) | non | oui | oui |
+| Déplacer des objets | non | oui | oui |
+| Supprimer un dossier vide | non | oui | oui |
+
+Supprimer un dossier non vide est refusé ; la fenêtre propose de déplacer d'abord son contenu vers un autre dossier, en une action, puis de supprimer.
 
 Les VMs visibles restent celles que l'identité de la personne voit sur chaque cluster (Rancher ou kubeconfig délégué). Un dossier peut donc sembler vide pour une personne et plein pour une autre. La vue ne compte pas les VMs cachées : elle ne révèle rien de ce que la personne ne voit pas.
 
@@ -217,11 +243,12 @@ Les VMs visibles restent celles que l'identité de la personne voit sur chaque c
 - Glisser une ou plusieurs lignes sur un dossier du panneau.
 - Menu « Déplacer vers un dossier » sur une ligne et sur la sélection (cases à cocher), avec recherche de dossier.
 - Créer, renommer, supprimer un dossier : dans le panneau, en saisie sur place, sans fenêtre du navigateur.
-- Chaque déplacement est une action suivie (dock, Activité), une ligne par VM touchée, avec le résultat de chaque écriture.
+- Avant d'appliquer, la fenêtre de déplacement dit, objet par objet, si la personne peut écrire l'objet (revue d'accès) ou si seul le rangement de la console changera.
+- Chaque déplacement est une action suivie (dock, Activité), une ligne par objet touché, avec le résultat de chaque écriture. L'action garde les dossiers d'origine et propose « Annuler ».
 
 ## Disaster Recovery : menu racine et sous-menu d'hôte
 
-Un seul modèle, deux vues, comme le prévoit le plan de réplication 1.97.0 :
+Un seul modèle, deux vues, sur le moteur de réplication de la 1.99.0 :
 - **Racine** (`#dr`) : tous les contrats. Par contrat : nom, source, cible, état, RPO tenu (pire ressource) contre l'objectif, nombre de ressources par état, trois derniers événements, actions. Un contrat se déplie sur ses ressources.
 - **Hôte** (`#harvester/<cluster>/dr`) : les lignes de ressource de cet hôte, comme source ou comme cible, avec une colonne « côté » et l'hôte d'en face.
 - Les deux vues lisent les mêmes fonctions (`plan_row()`, `resource_row()`) par `GET /api/replication/plans` et `GET /api/replication/hosts/<hôte>/resources`. Ce que montre un hôte est exactement ce que montre la racine pour ses ressources.
@@ -229,21 +256,22 @@ Un seul modèle, deux vues, comme le prévoit le plan de réplication 1.97.0 :
 - Les actions sont rendues par le serveur avec leur rôle requis et leur droit (`allowed`). Une action non permise reste visible, grisée, avec sa raison. Aucune règle d'état n'est recopiée dans le navigateur.
 - Hôte KVM : le sous-menu existe dès la première version, avec un état vide qui le dit (« la réplication des domaines KVM n'est pas encore disponible »). Il se remplira quand `resource_kind = kvm-domain` sera livré, sans changer la forme.
 
-Vocabulaire : l'interface dit « contrat », le code et l'API disent `plan`. À confirmer (questions ouvertes).
+Vocabulaire : l'interface dit « contrat », le code et l'API disent `plan` (décision 3).
 
 ## Étapes de livraison
 
-| Étape | Contenu | Risque pour les habitudes |
+La nouvelle navigation arrive d'un bloc en **2.0.0** (décision du 25/10/2026). Le travail reste découpé, sur une branche, en étapes qui ont chacune leurs tests :
+
+| Étape | Contenu | Publication |
 |---|---|---|
-| 1 | Routeur par ancre et liens directs dans l'interface actuelle. Anciens jetons compris. Aucun changement visible, sauf qu'un F5 et un lien rendent l'écran exact. | Nul |
-| 2 | Nouveau menu derrière l'interrupteur `navigation_v2` : liste des hôtes, recherche, favoris, sous-menu d'hôte qui monte les sections existantes, index des hôtes. KVM entre dans la liste. | Nul tant que l'interrupteur est éteint |
-| 3 | Vue unique des VMs (Harvester et KVM, schéma commun 1.97.0), panneau Hôtes, puis dossiers : lecture d'abord, écriture ensuite. | Faible |
-| 4 | Disaster Recovery racine et par hôte, une fois les routes de réplication 1.97.0 livrées. | Nul (nouveau) |
-| 5 | `navigation_v2` par défaut. L'ancien menu reste disponible une version, puis disparaît. | Moyen, annoncé dans le CHANGELOG |
+| 1 | Routeur par ancre et liens directs dans l'interface actuelle. Anciens jetons compris. Un F5 et un lien rendent l'écran exact. | Peut sortir seule en 1.x (rien de visible ne change) |
+| 2 | Nouveau menu : liste des hôtes, recherche, favoris, sous-menu d'hôte qui monte les sections existantes en onglets, index des hôtes. KVM entre dans la liste. | 2.0.0 |
+| 3 | Vue unique des VMs (Harvester et KVM), panneau Hôtes, dossiers partagés (VMs, conteneurs, hôtes) : lecture, écriture, annuler. | 2.0.0 |
+| 4 | Disaster Recovery racine et par hôte, en reprenant les écrans de réplication. | 2.0.0 |
 
-L'interrupteur : un réglage serveur (`ui.navigation_v2: off | opt_in | on`), modifiable à chaud dans Réglages et dans le fichier de configuration, sans redémarrage. En `opt_in`, chaque personne choisit dans Réglages > Apparence. En `off`, personne ne voit le nouveau menu : c'est le coupe-circuit.
+Pas d'interrupteur ancienne/nouvelle navigation : l'ancien menu disparaît en 2.0.0. Ce qui protège les habitudes : les anciennes adresses (`#storage`, `#kvm-hosts`...) restent comprises pour toujours, la doc EN et FR et le CHANGELOG décrivent la correspondance (tableau ci-dessus), et la mise à jour reste réversible par le retour arrière de l'agent de mise à jour (1.82.0).
 
-Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte inconnu, hôte hors des droits) ; menu avec 100 hôtes (plafond, alertes jamais cachées, recherche) ; dossiers (VM qui fait foi, repli console, renommage repris après un arrêt, transfert entre clusters, clone KVM, rôle par geste) ; parité des cinq langues ; listes d'onglets des tests e2e mises à jour. Vérification réelle : annotation posée et relue sur harv1, métadonnées libvirt sur un hôte KVM de banc, transfert harvlab vers harvlab2 avec dossier conservé.
+Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte inconnu, hôte hors des droits) ; menu avec 100 hôtes (plafond, alertes jamais cachées, recherche) ; dossiers (objet qui fait foi, repli console, renommage repris après un arrêt, transfert entre clusters, clone KVM, rôle par geste, suppression refusée, annuler) ; parité des cinq langues ; listes d'onglets des tests e2e mises à jour. Vérification réelle : annotation posée et relue sur harv1, métadonnées libvirt sur un hôte KVM de banc, transfert harvlab vers harvlab2 avec dossier conservé.
 
 ## Risques
 
@@ -252,14 +280,14 @@ Tests à prévoir : routeur (chaque adresse du tableau, anciens jetons, hôte in
 - **Droits d'écriture absents.** Avec Rancher, beaucoup de personnes lisent sans écrire. Le repli console devient alors la règle, pas l'exception. Il doit rester lisible (pastille, action « écrire sur les VMs »).
 - **Renommer un gros dossier** réécrit des centaines de VMs. Action suivie, reprise, débit borné.
 - **KVM transitoire** : un domaine non persistant perd ses métadonnées à l'arrêt. Le cache console garde le rangement, marqué comme tel.
-- **Habitudes** : des personnes connaissent le menu actuel par cœur. Parade : l'ancien menu une version de plus, les anciens jetons compris pour toujours, une note dans le CHANGELOG et la doc EN et FR.
+- **Habitudes** : des personnes connaissent le menu actuel par cœur, et la bascule est directe. Parade : anciens jetons compris pour toujours, correspondance dans le CHANGELOG et la doc EN et FR, retour à la version précédente possible par l'agent de mise à jour.
 - **Tests e2e** : les listes d'onglets figées dans les tests changent. Voulu : un onglet non placé doit faire échouer.
 
-## Questions ouvertes pour le propriétaire du produit
+## Décisions du propriétaire du produit (24 et 25/10/2026)
 
-1. Chemin du dossier sur la VM (lisible, reconstructible, renommage coûteux) ou identifiant (renommage gratuit, illisible sans la console) ? Recommandation : chemin.
-2. Favoris par personne (base de la console) ou communs à toute l'équipe ? Recommandation : par personne.
-3. « Contrat » dans l'interface et `plan` dans l'API : garder les deux mots, ou un seul ?
-4. Regrouper les hôtes par site ou par étiquette dans le menu (au-delà des deux familles) : maintenant, ou après la première version ? Recommandation : après, l'index des hôtes filtre déjà par étiquette.
-5. Plafond de 8 hôtes par famille avant « Voir tous » : la bonne valeur ?
-6. Conteneurs : rester une entrée racine, ou entrer dans la vue des VMs sous forme d'un second onglet ?
+1. Dossier écrit sur l'objet sous forme de **chemin** (lisible, reconstructible ; renommer réécrit les objets, en action suivie).
+2. Favoris **par personne**, dans la base de la console.
+3. « Contrat » dans l'interface, `plan` dans l'API.
+4. Regroupement par site ou étiquette dans le menu : **plus tard** ; l'index des hôtes filtre déjà par étiquette.
+5. Plafond de **8** hôtes par famille avant « Voir tous », réglable.
+6. Conteneurs : **entrée racine**, et onglet Conteneurs dans le sous-menu d'un hôte Harvester.
