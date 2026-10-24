@@ -186,6 +186,7 @@ class FakeKube:
         # Longhorn s'arrêtent aussi, une sauvegarde en cours ne finit jamais
         self.dead = False
         self.freeze = set()      # comportements suspendus (délais)
+        self.snapshot_error = ""  # erreur posée sur chaque nouvel instantané
         self.hooks = {}          # (op, kind) -> fonction appelée avant l'appel
         self.last_natural = self.clock.now()
         self.backup_s = 5
@@ -433,6 +434,16 @@ class FakeKube:
     # -- contrôleurs ------------------------------------------------------------------
     def _on_Snapshot(self, o):
         o["status"] = {"readyToUse": False}
+        if self.snapshot_error:
+            # Longhorn 1.11.2, volume détaché (VM arrêtée) : erreur écrite le
+            # temps d'attacher le volume, puis instantané pris (vu sur le banc)
+            # ; une erreur définitive reste
+            o["status"]["error"] = self.snapshot_error
+            if "attached" not in self.snapshot_error:
+                return
+            self.at(2, lambda: o["status"].pop("error", None))
+            self.at(3, lambda: o["status"].update(readyToUse=True, creationTime=iso(self.clock.now())))
+            return
         if "snapshot" not in self.freeze:
             self.at(1, lambda: o["status"].update(readyToUse=True, creationTime=iso(self.clock.now())))
 
@@ -2320,3 +2331,22 @@ def test_protect_after_a_cancel_skips_the_removed_snapshot_longhorn_relists(worl
     before = len(mut_keys(w.src, "create"))
     assert rr.protect(w.ctx())["exit"] == 0
     assert len(mut_keys(w.src, "create")) == before
+
+
+@pytest.mark.parametrize("error, ok", [
+    # vu sur le banc : la VM arrêtée, Longhorn attache le volume lui-même
+    ("failed to take snapshot because the volume engine pvc-x-e-0 is not running. "
+     "Waiting for the volume to be attached", True),
+    ("snapshot failed: no space left on device", False),
+])
+def test_planned_failover_waits_through_the_attach_error_of_a_stopped_vm(tmp_path, error, ok):
+    w = protected(tmp_path, vms=("vm-a",))
+    w.clock.sleep(400)
+    w.src.snapshot_error = error
+    res = rr.failover(w.ctx())
+    if ok:
+        assert res["exit"] == 0, res
+        assert w.plan()["state"] == "failed_over"
+    else:
+        assert res["exit"] == 1 and "no space left" in res["message"], res
+        assert w.plan()["state"] == "protected"

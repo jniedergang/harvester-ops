@@ -874,6 +874,13 @@ def _kind_of(obj):
     return _KINDS[obj["kind"]]
 
 
+# Erreur passagère d'un instantané d'un volume détaché (VM arrêtée par la
+# bascule) : Longhorn 1.11.2 l'écrit dans `status.error` le temps d'attacher
+# le volume lui-même, puis prend l'instantané (vu sur le banc ; la bascule
+# planifiée abandonnait là et défaisait tout).
+SNAPSHOT_WAITING = ("waiting for the volume to be attached", "engine is not running")
+
+
 def _snapshot_name(ctx, vol, kind, token, tries=8):
     """Nom déterministe de l'instantané, sauf s'il est tenu par le reste d'une
     exécution annulée : Longhorn recrée le `Snapshot` d'un instantané effacé
@@ -903,8 +910,9 @@ def take_backups(ctx, op, items, kind, token=""):
             s = ctx.src.get(K_LH_SNAPSHOT, NS, names[vol])
             if s is None:
                 return Fail(f"snapshot {names[vol]} disappeared")
-            if _status(s).get("error"):
-                return Fail(f"snapshot {names[vol]}: {_status(s)['error']}")
+            err = _status(s).get("error") or ""
+            if err and not any(m in err.lower() for m in SNAPSHOT_WAITING):
+                return Fail(f"snapshot {names[vol]}: {err}")
             if not _status(s).get("readyToUse"):
                 return "snapshots being taken"
         return True
