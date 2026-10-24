@@ -1597,6 +1597,16 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
         attempt("dst", rp.backing_image_restore(bi, checksum, url or f"dry-run://?backingImage={bi}",
                                                 BACKUP_TARGET, labels=labels),
                 "backing-image", placeholder_url=not url)
+    # le namespace des carnets et les backing images à restaurer n'existent
+    # qu'une fois la protection lancée : le dry-run d'un objet qui en dépend
+    # échouerait toujours avant la première protection. Le namespace passe
+    # lui-même au dry-run ; l'objet dépendant est essayé sans la dépendance
+    # (volume) ou reporté (carnet), signalé par `deferred`.
+    carnet_ns_missing = ctx.dst.get(K_NS, None, rp.CARNET_NAMESPACE) is None
+    if carnet_ns_missing:
+        attempt("dst", {"apiVersion": "v1", "kind": "Namespace",
+                        "metadata": {"name": rp.CARNET_NAMESPACE, "labels": dict(MANAGED_BY)}}, "namespace")
+    present_bis = set(dst_facts.get("backing_images") or {})
     for w in works:
         attempt("src", rp.recurring_job(w["job"], rp.cron_for(ctx.plan.get("interval_s") or 300), ctx.plan["retain"],
                                         max(1, len(w["disks"])), ctx.plan_id, w["uid"], ctx.gen),
@@ -1606,6 +1616,14 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
             url = _status(done[-1]).get("url") if done else ""
             if (dst_facts.get("volumes") or {}).get(d["target_volume"]) is not None:
                 out.append({"object": "standby-volume", "name": d["target_volume"], "ok": True, "exists": True})
+                continue
+            if d["backing_image"] and d["backing_image"] not in present_bis:
+                # Longhorn lit la backing image de la sauvegarde même sans
+                # `backingImage` dans le volume (vu sur 1.12.1) : rien à
+                # essayer avant sa restauration, que la ligne au-dessus a
+                # passée au dry-run
+                out.append({"object": "standby-volume", "name": d["target_volume"], "ok": True,
+                            "deferred": "backing-image", "placeholder_url": not url})
                 continue
             attempt("dst", rp.standby_volume(
                 d["target_volume"], url or f"dry-run://?backup=none&volume={d['source_volume']}", d["size"],
@@ -1617,8 +1635,11 @@ def _dry_run_protect(ctx, works, src_facts, dst_facts):
         try:
             vm, _r = rp.target_vm(w["vm"], res, ctx.plan.get("mappings") or {}, ctx.plan.get("options") or {},
                                   {d["claim"]: d["target_claim"] for d in w["disks"]}, ctx.plan_id, ctx.gen)
-            attempt("dst", carnet_manifest(ctx.plan_id, ctx.gen, w, vm, [], carnet_volumes(w),
-                                           ctx.plan["source_cluster"]), "carnet")
+            m = carnet_manifest(ctx.plan_id, ctx.gen, w, vm, [], carnet_volumes(w), ctx.plan["source_cluster"])
+            if carnet_ns_missing:
+                out.append({"object": "carnet", "name": m["metadata"]["name"], "ok": True, "deferred": "namespace"})
+            else:
+                attempt("dst", m, "carnet")
         except ValueError as e:
             out.append({"object": "carnet", "name": rp.carnet_name(ctx.plan_id, w["uid"]), "ok": False,
                         "message": str(e)})

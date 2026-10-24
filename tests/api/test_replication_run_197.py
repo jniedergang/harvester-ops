@@ -348,6 +348,9 @@ class FakeKube:
             # dry-run avec une URL d'essai : accepté (à confirmer sur le banc)
             if url not in self.store.bbis.values() and not (dry and str(url).startswith("dry-run://")):
                 raise RuntimeError("backing image backup not found")
+        if kind == rr.K_SECRET and md.get("namespace") == rp.CARNET_NAMESPACE and \
+                (rr.K_NS, None, rp.CARNET_NAMESPACE) not in self.objs:
+            raise RuntimeError(f'namespaces "{rp.CARNET_NAMESPACE}" not found')
         if kind == rr.K_LH_BACKUP and (rr.K_LH_SNAPSHOT, rr.NS, spec.get("snapshotName")) not in self.objs:
             raise RuntimeError("snapshot not found")
         hook = self.hooks.get(("validate", kind))
@@ -822,14 +825,22 @@ def test_protect_two_classes_on_the_same_disks_do_not_warn_a_shared_pool(tmp_pat
     assert "capacity-shared-pool" not in codes, codes
 
 
-def test_protect_dry_run_writes_nothing_and_reports_the_missing_backing_image(world):
+def test_protect_dry_run_writes_nothing_and_defers_what_protect_creates_first(world):
+    # vu sur le banc (harvlab -> harvlab2) : avant la première protection, le
+    # namespace des carnets et la backing image à restaurer n'existent pas ;
+    # le dry-run des objets qui en dépendent échouait toujours (exit 2)
     w = world
     res = rr.protect(w.ctx(), dry_run=True)
     assert mut_keys(w.src) == [] and mut_keys(w.dst) == []
-    bad = [d for d in res["dry_run"] if not d["ok"]]
-    assert res["exit"] == 2 and [d["object"] for d in bad] == ["standby-volume"]
-    assert "failed to get backing image" in bad[0]["message"]
-    assert all(d.get("placeholder_url") for d in res["dry_run"] if d["object"] == "standby-volume")
+    assert res["exit"] == 0, [d for d in res["dry_run"] if not d["ok"]]
+    assert all(d["ok"] for d in res["dry_run"])
+    sv = {d["name"]: d for d in res["dry_run"] if d["object"] == "standby-volume"}
+    assert all(d.get("placeholder_url") for d in sv.values())
+    deferred = sorted(n for n, d in sv.items() if d.get("deferred") == "backing-image")
+    assert len(deferred) == 1 and all(c[3] not in deferred for c in w.dst.calls if c[1] == rr.K_LH_VOLUME)
+    assert [d["deferred"] for d in res["dry_run"] if d["object"] == "carnet"] == ["namespace", "namespace"]
+    assert ("create", rr.K_NS, None, rp.CARNET_NAMESPACE, "dry") in w.dst.calls
+    assert not [c for c in w.dst.calls if c[1] == rr.K_SECRET and c[0] == "create"]
     # la backing image absente de la cible passe aussi au dry-run serveur
     bi = [d for d in res["dry_run"] if d["object"] == "backing-image"]
     assert [(d["name"], d["ok"], d["placeholder_url"]) for d in bi] == [("vmi-img1", True, True)]
@@ -2199,3 +2210,14 @@ def test_an_interrupted_plain_unprotect_still_finishes_without_the_flag(tmp_path
     res = rr.unprotect(w.ctx())
     assert res["exit"] == 0 and w.plan()["state"] == "unprotected"
     assert [k for k in w.owned(w.src) if k[0] == rr.K_LH_BACKUP]       # sauvegardes gardées
+
+
+def test_protect_dry_run_tries_the_carnet_once_its_namespace_exists(world):
+    w = world
+    w.dst.put(rr.K_NS, {"metadata": {"name": rp.CARNET_NAMESPACE}})
+    res = rr.protect(w.ctx(), dry_run=True)
+    assert res["exit"] == 0
+    carnets = [d for d in res["dry_run"] if d["object"] == "carnet"]
+    assert carnets and all(d["ok"] and "deferred" not in d for d in carnets)
+    assert not [d for d in res["dry_run"] if d["object"] == "namespace"]
+    assert len([c for c in w.dst.calls if c[0] == "create" and c[1] == rr.K_SECRET and c[4] == "dry"]) == len(carnets)
