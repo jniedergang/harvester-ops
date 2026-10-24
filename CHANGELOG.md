@@ -58,8 +58,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `/resources/<uid>/events`, `/follower`; `POST /api/replication/plans`,
   `/plans/<id>/check`, `/measure`, `/protect`, `/failover`, `/resume`,
   `/unprotect`; `PATCH /plans/<id>/settings`; `DELETE /plans/<id>`. Each
-  write is a tracked action labelled `replication:<plan>:<op>` that runs
-  the command line. Roles: viewer reads, operator writes, admin for a
+  write is a tracked action that runs the command line, labelled
+  `replication:create:<name>` for a creation and `replication:<plan>:<op>`
+  for the other writes (metrics normalise both to `replication:<op>`). Roles: viewer reads, operator writes, admin for a
   failover, for backup deletion and for resuming either.
 - **Supervised follower**: the console starts one `follow --all --console`
   child, restarted with backoff (5 s to 300 s), logging to
@@ -103,7 +104,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - Every action carries `cancel_requested` (false for tools other than
   replication, whose cancel waits for the command's own result).
 - The `actions_total` and `action_duration_seconds` metrics label
-  replication actions `replication:<op>`, without the plan id.
+  replication actions `replication:<op>`, without the plan id or name.
 
 ### Fixed
 - Found on the bench (harvlab 1.8.2 to harvlab2 1.9.0): protect dry-run

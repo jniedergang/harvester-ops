@@ -3356,8 +3356,12 @@ protection, une bascule non planifiée forcée sur une source joignable, une
 sauvegarde en vol pendant le rattrapage d'une bascule non planifiée, un
 BackupVolume cible supprimé pendant un passage, SIGTERM pendant un kubectl
 lent, des nœuds suspendus pendant une bascule, un arrêt gracieux de la
-cible pendant la protection, et les refus du contrôle pour la capacité, un
-nom de volume pris et une MAC prise.
+cible (harvlab2) pendant la protection, un arrêt de la console pendant une
+protection, un PVC en mode système de fichiers, et les refus du contrôle
+pour la capacité, un nom de volume pris et une MAC prise. Le contrôle non
+planifié à blanc juge `caught-up` d'après les sauvegardes que la cible voit
+à cet instant, qui peuvent avoir 1 à 4 minutes de retard sur la source ; la
+vraie bascule resynchronise d'abord.
 
 La procédure d'exploitation (première protection, bascule, déprotection)
 est dans [procedure-operationnelle.md](procedure-operationnelle.md#12-reprise-après-sinistre-réplication-asynchrone).

@@ -3062,8 +3062,11 @@ in error, live migration during protection, a forced unplanned failover on
 a reachable source, a backup in flight during an unplanned catch-up, a
 target BackupVolume deleted during a pass, SIGTERM during a slow kubectl,
 nodes suspended during a failover, a graceful shutdown of the target
-during protection, and the check refusals for capacity, a taken volume
-name and a taken MAC.
+(harvlab2) during protection, a console stop during a protect, a
+filesystem-mode PVC, and the check refusals for capacity, a taken volume
+name and a taken MAC. The dry unplanned check judges `caught-up` against
+the backups the target sees at that moment, which may lag the source by 1
+to 4 minutes; the real failover resyncs first.
 
 The operator procedure (first protection, failover, unprotect) is in
 [operating-procedure.md](operating-procedure.md#12-disaster-recovery-asynchronous-replication).
