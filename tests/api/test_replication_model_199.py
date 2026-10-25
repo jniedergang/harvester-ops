@@ -933,6 +933,76 @@ def test_spec_drift_uses_a_digest_of_the_replication_relevant_spec(change, disks
     assert (v["state"] == "drifting", "plan-drift" in v["reasons"]) == (drift, drift)
 
 
+# 2.0.0 (tâche 17) : ranger une VM protégée dans un dossier écrit
+# l'annotation `harvester-ops.io/folder` (valeur = chemin du dossier) ; ce
+# n'est jamais une dérive, que la generation bouge ou non. Une vraie
+# modification de la spec en est une.
+FOLDER = "harvester-ops.io/folder"
+
+
+def _folder(value):
+    def change(vm):
+        ann = vm["metadata"].setdefault("annotations", {})
+        if value is None:
+            ann.pop(FOLDER, None)
+        else:
+            ann[FOLDER] = value
+        vm["metadata"]["resourceVersion"] = "9000"
+    return change
+
+
+def _filed(vm):
+    vm["metadata"].setdefault("annotations", {})[FOLDER] = "/Production/ERP"
+
+
+FOLDER_CASES = [
+    # (cas, VM au moment de la protection, changement vu par le suiveur, generation bougée, dérive)
+    ("folder-added", None, _folder("/Production/ERP"), False, False),
+    ("folder-changed", _filed, _folder("/Production/CRM"), False, False),
+    ("folder-removed", _filed, _folder(None), False, False),
+    ("folder-added-generation-moved", None, _folder("/Production/ERP"), True, False),
+    ("folder-changed-generation-moved", _filed, _folder("/Lab"), True, False),
+    ("folder-removed-generation-moved", _filed, _folder(None), True, False),
+    ("folder-and-label", None, lambda vm: (_folder("/P")(vm), vm["metadata"].setdefault("labels", {})
+                                           .update({"dr": "gold"})), True, False),
+    ("real-spec-change", _filed, lambda vm: vm["spec"]["template"]["spec"]["domain"]["firmware"].update(uuid="x"),
+     True, True),
+    ("real-spec-change-and-folder", None, lambda vm: (_folder("/P")(vm), vm["spec"]["template"]["spec"]["networks"][0]
+                                                      ["multus"].update(networkName="default/other")), True, True),
+]
+
+
+def _drift_case(before, change, moved, digest):
+    vm = vm_obj("rep-a", UID_A, [("disk-0", "c")])
+    if before:
+        before(vm)
+    known = {"vm_generation": rp.vm_spec_generation(vm), "vm_spec_digest": digest(vm, DISK_FACTS)}
+    seen = copy.deepcopy(vm)
+    change(seen)
+    if moved:
+        _bump(seen)
+    return rp.spec_drifted(known, {"vm_generation": rp.vm_spec_generation(seen),
+                                   "vm_spec_digest": digest(seen, DISK_FACTS)})
+
+
+@pytest.mark.parametrize("case,before,change,moved,drift", FOLDER_CASES, ids=[c[0] for c in FOLDER_CASES])
+def test_folder_annotation_is_never_a_drift(case, before, change, moved, drift):
+    assert _drift_case(before, change, moved, rp.vm_spec_digest) is drift, case
+
+
+def test_drift_mutation_annotations_in_digest():
+    """Une empreinte qui compterait les annotations ferait de chaque
+    rangement une dérive : les cas « dossier » à generation bougée échouent."""
+    def leaky(vm, disks=None):
+        return rp._digest(json.dumps([rp.vm_spec_digest(vm, disks), (vm.get("metadata") or {}).get("annotations")],
+                                     sort_keys=True))
+    caught = [c[0] for c in FOLDER_CASES if not c[4] and _drift_case(c[1], c[2], c[3], leaky)]
+    assert caught == ["folder-added-generation-moved", "folder-changed-generation-moved",
+                      "folder-removed-generation-moved", "folder-and-label"]
+    # la generation seule ne suffit pas non plus : elle préfiltre, l'empreinte décide
+    assert all(_drift_case(c[1], c[2], c[3], rp.vm_spec_digest) is c[4] for c in FOLDER_CASES)
+
+
 def test_spec_drift_without_a_known_digest_is_never_asserted():
     assert rp.spec_drifted({"vm_generation": 4}, {"vm_generation": 5}) is False
     assert rp.spec_drifted({"vm_generation": 4, "vm_spec_digest": "a"}, {"vm_generation": 4,
