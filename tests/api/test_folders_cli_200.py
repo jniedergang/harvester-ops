@@ -448,7 +448,10 @@ def test_rbac_denial_keeps_the_filing_in_the_console(env, capsys):
     assert members(env) == {"harvester/harv1/nav/a": ("/Lab", "console"),
                             "harvester/harv1/nav/b": ("/Lab", "console")}
     assert [c[2] for c in env["kube"].calls] == ["a"]           # `write: false` : rien envoyé
-    assert capsys.readouterr().err.count("kept in the console only") == 2
+    err = capsys.readouterr().err
+    assert err.count("kept in the console only") == 2
+    # le refus réel garde sa fin (le namespace), vu en réel tronqué à 200
+    assert 'in the namespace "nav-folders-test"' in err
 
 
 def test_a_console_filing_never_overrides_a_folder_carried_by_the_object(env, capsys):

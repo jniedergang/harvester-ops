@@ -313,6 +313,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   starts, comes back `interrupted` after a restart, and offers **Resume**
   and **Undo**. **Resume** is offered only while lines remain to finish,
   and sits next to Undo in the dock card instead of stretching across it.
+- **The RBAC refusal said on a console-only filing is complete**: it was
+  cut at 200 characters and lost the namespace; the first line of the
+  refusal is kept, up to 400 characters.
 - **The `/` shortcut no longer moves the focus behind an open window**: the
   host search kept taking the key while a modal was open.
 - **`folders.db` journal files are private**: the `-wal` and `-shm` files

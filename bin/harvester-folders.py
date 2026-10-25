@@ -180,7 +180,10 @@ def write_kube(obj, path, spec, kubes):
         kube.patch(resource, obj["namespace"], obj["name"], patch)
     except KubeError as e:
         if _denied(e):
-            raise ConsoleOnly(f"no write permission on the object: {str(e)[:200]}") from None
+            # première ligne entière (jusqu'à 400 caractères) : à 200, le
+            # refus réel de kubectl perdait le namespace (vu en réel)
+            first = (str(e).strip().splitlines() or [""])[0]
+            raise ConsoleOnly(f"no write permission on the object: {first[:400]}") from None
         raise
 
 
