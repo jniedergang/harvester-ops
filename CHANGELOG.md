@@ -4,6 +4,51 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.101.2] - 2026-10-25 - Faster KVM windows
+
+### Fixed
+- **KVM Edit and Create windows stayed on "Loading" for a long time.** They
+  waited for the image catalogue, which needs a survey of the host storage.
+  On node2 (15 VMs, 10 pools, 63 volumes) that survey took 24.9 s cold,
+  because each of its ~115 `virsh` reads paid its own libvirt connection,
+  one after the other.
+
+### Changed
+- **Read batches run in parallel on the host.** A batch of reads now runs
+  8 `virsh` commands at a time (`BATCH_PARALLEL` in `bin/lib/kvm_host.py`).
+  Each command keeps its own output, error, status, time limit and
+  markers; outputs come back in order. Each command writes to its own
+  files in a `mktemp -d` directory removed on exit. Without `mktemp`, the
+  batch runs in series as before. Write batches stay strictly sequential.
+  Measured on node2: survey 24.9 s -> 5.2 s, fresh image catalogue
+  26.8 s -> 6.7 s, pools list 5.2 s -> 1.5 s, Edit form 1.1 s -> 0.5 s.
+- **The windows no longer wait for the image catalogue.** They open as soon
+  as the form, the host choices, pools and networks arrive. The Disks tab
+  shows "Loading the host's images..." until the catalogue arrives, or the
+  reason it could not be read. Image choices already shown are filled in
+  place, with the current choice kept. In the Create window, an untouched
+  first disk becomes the first image of the catalogue when it arrives.
+- **The storage survey is prepared in the background.** Reading the KVM
+  hosts, the KVM VMs or one host starts a survey for each host that
+  answered, if none is fresh or running. A catalogue asked during that
+  survey waits for it instead of starting another one. No timer: nothing
+  runs when nobody looks. Before, the background refresh only renewed a
+  survey already in the cache.
+
+### Tests
+- API: the real batch script played by a local `sh` with a fake `virsh`:
+  commands really run at the same time and never more than the limit,
+  markers come back in order (a mutation that reverses the emission is
+  caught), status and error per command, a hung command times out alone,
+  random token that output cannot forge, series without `mktemp`, writes
+  in series, replay after a transport cut. Survey warm-up: starts only
+  when useful, a read waits for it, busy slot, write during the warm-up,
+  failure; routes warm only the hosts that answered.
+- e2e: the Edit window shows its form while the catalogue is held, then
+  fills the image choices; an unreadable catalogue is said in the Disks
+  tab; the Create window opens first then proposes an image, and keeps a
+  disk touched before the catalogue arrived.
+
 ## [1.101.1] - 2026-10-25 - State filter of the contracts list
 
 ### Fixed

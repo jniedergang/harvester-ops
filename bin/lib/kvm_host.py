@@ -80,6 +80,11 @@ _TIMEOUT_RCS = (124, 137)
 READ_RETRIES = 1
 READ_RETRY_DELAY = 0.5
 MAX_READ_RETRIES = 3
+# commandes d'un lot de LECTURE lancées en même temps sur l'hôte : chaque
+# processus virsh paie ~0,2 s de connexion à libvirt, 115 lectures en série
+# prenaient 24 s sur node2 ; 8 reste loin des 20 fils de travail par défaut
+# de libvirtd (max_workers). Les lots qui écrivent restent en série.
+BATCH_PARALLEL = 8
 # échecs de ssh qui ne sont pas une coupure : les rejouer ne changerait rien
 # (empreinte, clé) ou ferait attendre un second ConnectTimeout (hôte absent)
 _NO_RETRY_SSH = (
@@ -382,7 +387,7 @@ class VirshHost:
 
     def __init__(self, decl, state, runner=subprocess.run, timeout=30, cmd_timeout=20,
                  read_retries=READ_RETRIES, retry_delay=READ_RETRY_DELAY, sleep=time.sleep,
-                 popen=subprocess.Popen, clock=time.monotonic):
+                 popen=subprocess.Popen, clock=time.monotonic, batch_parallel=None):
         # `popen` et `clock` : remplaçables par les tests de run_stream
         self.popen = popen
         self.clock = clock
@@ -398,6 +403,8 @@ class VirshHost:
         self.read_retries = max(0, min(int(read_retries), MAX_READ_RETRIES))
         self.retry_delay = max(0.0, float(retry_delay))
         self.sleep = sleep
+        self.batch_parallel = max(1, int(BATCH_PARALLEL if batch_parallel is None
+                                         else batch_parallel))
         self.name = self.decl.get("name")
 
     def _secret_paths(self):
@@ -650,13 +657,20 @@ class VirshHost:
         done = re.findall(rf"\n{tok} \d+ -?\d+\n", (res.stdout or "")[m_out.end():])
         return len(done) < count
 
-    def batch_script(self, items, token, cmd_timeout):
+    def batch_script(self, items, token, cmd_timeout, parallel=1):
         """Script `sh` d'un batch : une ligne repère de départ (ce que le
         shell distant affiche avant, un `echo` de .bashrc par exemple, est
         jeté), puis chaque commande suivie de `<jeton> <i> <rc>` sur stdout
         et `<jeton> <i>` sur stderr. Chaque commande passe par
         `timeout -k 5 <N>` si l'hôte l'a (et comprend `-k`) : une commande
-        bloquée rend son propre échec au lieu d'emporter tout le lot."""
+        bloquée rend son propre échec au lieu d'emporter tout le lot.
+
+        `parallel` > 1 (lots de LECTURE seulement) : les commandes tournent
+        par vagues de `parallel` processus simultanés, chacune avec ses
+        fichiers stdout/stderr/rc dans un répertoire `mktemp -d` supprimé par
+        un `trap` ; à la fin de chaque vague, les sorties sont émises DANS
+        L'ORDRE avec les mêmes repères qu'en série : le contrat par commande
+        est inchangé. Sans `mktemp` utilisable, le lot passe en série."""
         lines = [
             "export LC_ALL=C",
             f"T={token}",
@@ -666,11 +680,33 @@ class VirshHost:
             '_kvm_run() { i=$1; shift; $W "$@" </dev/null; rc=$?; '
             "printf '\\n%s %d %d\\n' \"$T\" \"$i\" \"$rc\"; "
             "printf '\\n%s %d\\n' \"$T\" \"$i\" >&2; }",
-            "printf '%s start %d\\n' \"$T\" \"$S\"; printf '%s start\\n' \"$T\" >&2",
         ]
-        for i, (_, args) in enumerate(items):
-            lines.append(f"_kvm_run {i} " + " ".join(shlex.quote(a)
-                                                     for a in self._virsh_argv(args)))
+        parallel = max(1, int(parallel))
+        if parallel > 1:
+            lines += [
+                # D vide (mktemp absent ou en échec) : _kvm_bg exécute en série
+                "D=$(mktemp -d 2>/dev/null) || D=",
+                "if [ -n \"$D\" ]; then trap 'rm -rf \"$D\"' EXIT; "
+                "trap 'exit 129' HUP INT TERM; fi",
+                '_kvm_job() { i=$1; shift; $W "$@" </dev/null >"$D/$i.o" 2>"$D/$i.e"; '
+                'echo $? >"$D/$i.r"; }',
+                '_kvm_bg() { if [ -n "$D" ]; then _kvm_job "$@" & else _kvm_run "$@"; fi; }',
+                '_kvm_emit() { [ -n "$D" ] || return 0; i=$1; rc=-1; '
+                'read rc 2>/dev/null <"$D/$i.r"; cat "$D/$i.o" 2>/dev/null; '
+                "printf '\\n%s %d %d\\n' \"$T\" \"$i\" \"$rc\"; "
+                'cat "$D/$i.e" >&2; '
+                "printf '\\n%s %d\\n' \"$T\" \"$i\" >&2; }",
+                # fin d'une vague : attendre ses processus, émettre dans l'ordre
+                '_kvm_wave() { wait; for j in "$@"; do _kvm_emit "$j"; done; }',
+            ]
+        lines.append("printf '%s start %d\\n' \"$T\" \"$S\"; printf '%s start\\n' \"$T\" >&2")
+        for w in range(0, len(items), parallel):
+            wave = list(enumerate(items))[w:w + parallel]
+            for i, (_, args) in wave:
+                argv = " ".join(shlex.quote(a) for a in self._virsh_argv(args))
+                lines.append(f"_kvm_{'bg' if parallel > 1 else 'run'} {i} {argv}")
+            if parallel > 1:
+                lines.append("_kvm_wave " + " ".join(str(i) for i, _ in wave))
         return "\n".join(lines)
 
     def batch(self, commands, timeout=None, cmd_timeout=None, idempotent=False):
@@ -698,7 +734,10 @@ class VirshHost:
         # `timeout 0` voudrait dire « sans délai » : au moins une seconde
         cmd_timeout = max(1, int(cmd_timeout or self.cmd_timeout))
         token = "@@kvm-" + secrets.token_hex(12)
-        script = self.batch_script(items, token, cmd_timeout)
+        # lectures : processus virsh simultanés (chacun paie ~0,2 s de
+        # connexion à libvirt) ; une écriture reste strictement en série
+        script = self.batch_script(items, token, cmd_timeout,
+                                   parallel=self.batch_parallel if idempotent else 1)
         tok = re.escape(token)
         paths = self._secret_paths()
         attempt = 0

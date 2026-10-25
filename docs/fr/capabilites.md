@@ -2786,6 +2786,18 @@ demi-seconde plus tard, sur une connexion neuve. Une écriture n'est jamais
 retentée : on ne sait pas si elle a eu lieu, et l'action dit que la
 connexion a été perdue.
 
+**Lectures en parallèle (1.101.2).** Une lecture de nombreux objets (la
+définition de chaque VM, chaque volume de chaque pool) lance 8 commandes
+`virsh` à la fois sur l'hôte, chacune avec sa sortie, son code et son délai.
+Les écritures restent l'une après l'autre, dans l'ordre. Sur un hôte de
+15 VMs et 63 volumes, le relevé du stockage est passé de 24,9 s à 5 s
+environ. Le catalogue d'images ne retient plus les fenêtres Créer et
+Modifier : la fenêtre s'ouvre tout de suite, et l'onglet Disques affiche
+« Chargement des images de l'hôte... » jusqu'à son arrivée, ou dit pourquoi
+il n'a pas pu être lu. Regarder la section KVM ou un hôte prépare le relevé
+en arrière-plan : le catalogue est en général prêt à l'ouverture d'une
+fenêtre. Rien ne part quand personne ne regarde.
+
 **Gestes de cycle de vie.** Le menu d'une VM propose **Démarrer**,
 **Arrêter**, **Redémarrer**, **Arrêt forcé**, **Suspendre** et
 **Reprendre**. Un geste que l'état n'autorise pas est grisé et dit

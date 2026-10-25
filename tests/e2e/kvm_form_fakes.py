@@ -119,21 +119,24 @@ def install(page, state):
             mm = re.fullmatch(r"hosts/(node2|node9)/(caps|pools|networks|links|images)", path)
             if mm:
                 what = mm.group(2)
-                # réponse retenue (course entre deux hôtes) : rendue plus tard par le test
-                if state.get("hold") == path:
-                    state.setdefault("held", []).append((route, {"host": mm.group(1), "options": state["caps"], "role": state["role"]}))
-                    return None
                 if what == "pools" and mm.group(1) == "node9" and state.get("pools9"):
-                    return ok(route, {"pools": state["pools9"], "role": state["role"]})
-                if what == "caps":
-                    return ok(route, {"host": mm.group(1), "options": state["caps"], "role": state["role"]})
-                if what == "pools":
-                    return ok(route, {"pools": POOLS, "role": state["role"]})
-                if what == "networks":
-                    return ok(route, {"networks": NETWORKS, "role": state["role"]})
-                if what == "links":
-                    return ok(route, dict(LINKS, role=state["role"]))
-                return ok(route, {"images": IMAGES, "pools": ["images"], "role": state["role"]})
+                    body = {"pools": state["pools9"], "role": state["role"]}
+                elif what == "caps":
+                    body = {"host": mm.group(1), "options": state["caps"], "role": state["role"]}
+                elif what == "pools":
+                    body = {"pools": POOLS, "role": state["role"]}
+                elif what == "networks":
+                    body = {"networks": NETWORKS, "role": state["role"]}
+                elif what == "links":
+                    body = dict(LINKS, role=state["role"])
+                else:
+                    body = state.get("images_body") or {"images": IMAGES, "pools": ["images"], "role": state["role"]}
+                # réponse retenue (course entre deux hôtes, catalogue lent) :
+                # rendue plus tard par le test (release)
+                if state.get("hold") == path:
+                    state.setdefault("held", []).append((route, body))
+                    return None
+                return ok(route, body)
             mm = re.fullmatch(r"hosts/(node2|node9)/macs", path)
             if mm:
                 n = int(parse_qs(parts.query).get("count", ["1"])[0])

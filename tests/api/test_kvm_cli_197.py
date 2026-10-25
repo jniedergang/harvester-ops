@@ -35,6 +35,10 @@ _ops_spec.loader.exec_module(W)
 import kvm_decl  # noqa: E402
 import kvm_host as kh  # noqa: E402
 
+# fins de vague d'un lot de lectures en parallèle (_kvm_wave <i...>), retirées
+# avant de découper les commandes
+WAVE_RE = re.compile(r"\n_kvm_wave[ 0-9]*(?=\n|$)")
+
 URI = "qemu:///system"
 ADDR = "10.0.0.5"
 PRIVATE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAfake\n-----END OPENSSH PRIVATE KEY-----\n"
@@ -94,7 +98,7 @@ class SimNet:
     def batch(self, script):
         token = re.search(r"^T=(@@kvm-[0-9a-f]+)$", script, re.M).group(1)
         stdout, stderr = f"{token} start 1\n", f"{token} start\n"
-        for chunk in re.split(r"\n_kvm_run (?=\d+ )", script)[1:]:
+        for chunk in re.split(r"\n_kvm_(?:run|bg) (?=\d+ )", WAVE_RE.sub("", script))[1:]:
             words = shlex.split(chunk)
             i, words = int(words[0]), words[1:]
             assert words[:3] == ["virsh", "-c", URI]

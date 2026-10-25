@@ -321,3 +321,42 @@ def test_cloudinit_assistant_names_the_existing_cards_by_mac(ui):
     assert "nic2:" in nd.input_value() and "10.213.77.20/24" in nd.input_value()
     assert not [g for g in state["gets"] if g.endswith("/macs")]
     assert dialogs == []
+
+
+# --- 1.101.2 : le catalogue d'images ne bloque plus la fenêtre -------------------------
+
+def test_the_window_opens_while_the_image_catalogue_is_still_loading(ui):
+    page, state, dialogs = ui
+    state["hold"] = "hosts/node2/images"            # catalogue lent (relevé à froid)
+    panel = open_edit(page)                         # le formulaire est là
+    assert len(state.get("held", [])) == 1          # alors que le catalogue attend
+    comp = tab(panel, "compute")
+    assert comp.locator('[name="cpu.vcpus"]').input_value() == "2"
+    disks = tab(panel, "disks")
+    status = disks.locator('[data-kvmf="images-state"]')
+    expect(status).to_be_visible()
+    expect(status).to_have_text("Loading the host's images...")
+    disks.locator('.tf-block-add[data-block="disk"]').click()
+    sel = disks.locator('[data-editor="kvm-disks"] [name$=".image"]').last
+    assert sel.locator("option").evaluate_all("els => els.map(e => e.value)") == [""]
+    F.release(state)
+    expect(status).to_be_hidden()
+    expect(sel.locator('option[value="images/cirros-0.6.3.qcow2"]')).to_have_count(1)
+    # une carte ajoutée après l'arrivée voit aussi le catalogue
+    disks.locator('.tf-block-add[data-block="disk"]').click()
+    later = disks.locator('[data-editor="kvm-disks"] [name$=".image"]').last
+    expect(later.locator('option[value="images/cirros-0.6.3.qcow2"]')).to_have_count(1)
+    assert dialogs == []
+
+
+def test_an_unreadable_catalogue_is_said_in_the_disks_tab(ui):
+    page, state, dialogs = ui
+    state["images_body"] = {"error": "node2: timeout: no answer within 60s", "kind": "timeout"}
+    panel = open_edit(page)
+    disks = tab(panel, "disks")
+    status = disks.locator('[data-kvmf="images-state"]')
+    expect(status).to_be_visible()
+    expect(status).to_contain_text("Images could not be read")
+    expect(status).to_contain_text("no answer within 60s")
+    # le reste de la fenêtre reste utilisable
+    expect(tab(panel, "compute").locator('[name="cpu.vcpus"]')).to_have_value("2")
