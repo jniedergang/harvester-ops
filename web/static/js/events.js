@@ -16,12 +16,14 @@
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const icon = (n, size = 14) => (window.Icons ? Icons.svg(n, { size }) : '');
-  const GROUPS = ['all', 'hosts', 'vms', 'volumes', 'images'];
+  const GROUPS = ['all', 'hosts', 'vms', 'volumes', 'images', 'dr'];
   const GROUP_LABEL = {
     all: () => tr('ev.all'), hosts: () => tr('ev.hosts'), vms: () => tr('ev.vms'),
     volumes: () => tr('ev.volumes'), images: () => tr('ev.images'),
+    // alertes de réplication de ce cluster (Disaster Recovery)
+    dr: () => tr('tab.dr'),
   };
-  const GROUP_ICON = { all: 'activity', hosts: 'node', vms: 'vm', volumes: 'volume', images: 'cdrom' };
+  const GROUP_ICON = { all: 'activity', hosts: 'node', vms: 'vm', volumes: 'volume', images: 'cdrom', dr: 'shield' };
 
   function ago(iso) {
     const t = Date.parse(iso || '');
@@ -96,9 +98,25 @@
   async function load() {
     const cluster = board.cluster;
     try {
+      const drp = window.Replication ? Replication.eventRows(cluster).catch(() => []) : Promise.resolve([]);
       const r = await fetch(`/api/events/${enc(cluster)}`);
       const d = await r.json();
+      const dr = await drp;
       if (cluster !== board.cluster) return;
+      if (r.ok && !d.unreachable && dr.length) {
+        // les alertes de réplication rejoignent la liste, groupe « dr »
+        d.items = dr.concat(d.items || []);
+        d.counts = Object.assign({}, d.counts, { dr: dr.length });
+        d.warnings = Object.assign({}, d.warnings, { dr: dr.length });
+      }
+      if ((!r.ok || d.unreachable) && dr.length) {
+        // cluster injoignable : ses alertes de réplication comptent d'autant plus
+        board.data = { items: dr, counts: { dr: dr.length }, warnings: { dr: dr.length } };
+        render();
+        const l = host() && host().querySelector('[data-ev="list"]');
+        if (l) l.insertAdjacentHTML('afterbegin', `<p class="hint warn">${esc(d.unreachable ? tr('fabric.unreachable') : (d.error || `HTTP ${r.status}`))}</p>`);
+        return;
+      }
       if (!r.ok || d.unreachable) {
         const l = host() && host().querySelector('[data-ev="list"]');
         if (l) l.innerHTML = `<p class="hint warn">${esc(d.unreachable ? tr('fabric.unreachable') : (d.error || `HTTP ${r.status}`))}</p>`;

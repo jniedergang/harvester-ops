@@ -4,6 +4,416 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
+
+### Added
+- **Disaster Recovery screens.** A root menu group **Disaster Recovery**
+  (Contracts, Links) and a **Disaster Recovery** entry in each Harvester
+  cluster's group, both with an alert badge. Every gesture runs
+  `harvester-replication` as a tracked action (dock and Activity); the
+  screens never write by another path. Tooltips on every control, in the
+  five languages.
+  - **Contracts**: cards or table (toggle kept per browser), search and
+    state filter. Each contract shows its state, a gauge of the RPO held
+    against the objective, the direction source -> recovery site with a
+    reachability dot per cluster, its VMs and their states, the labelled
+    VMs not protected yet, the last event and the last transfer (data sent,
+    upload and apply throughput, data sent in 24 hours). Active alerts are
+    listed on top.
+  - **New contract window**, five blocks, nothing written before Create:
+    VMs by list or by label rule (non replicable VMs greyed with the
+    reason); RPO objective, points kept, **Measure first** or **Protect
+    directly** (warning with the estimated interval and the first full
+    copy duration); network mappings, a missing network blocking until it
+    is mapped or created on the target (**Create on the target**, VLAN
+    editable); storage class **disk by disk**; drill network column
+    (stored for the drills to come); recovery options; a summary with
+    pre-checks (role, both clusters readable with your rights, mappings,
+    measured link throughput) and the equivalent command line without
+    secrets.
+  - **Contract window**: Check, Measure, Protect, Pause, Unpause, Resume
+    command and Failover, each greyed button saying why. Tabs Overview,
+    Charts (RPO, throughputs, data sent; 24 hours by default, 1 hour, 7 or
+    30 days), Journal (warnings filter, linked to Activity) and Settings
+    (hot settings, interval and retention applied by protecting again,
+    recovery block, danger zone with the contract name typed). A saved
+    change offers **Undo**, which sends the exact previous values as a new
+    tracked action.
+  - **Failover window** (admin; read only for other roles, with the
+    reason): the steps of the planned or unplanned mode, what may be lost,
+    pre-checks (role, plan state, reachability of both clusters) and a dry
+    run started on opening; VMs can be restricted; the button unlocks once
+    the contract name is typed.
+  - **Links**: per cluster pair, the two legs source -> backup target ->
+    recovery site with the median throughput of the real backups over 24
+    hours, a curve per leg, and an **active test** (temporary pods on the
+    longhorn-manager image write then read 64 to 4096 MiB of random data on
+    the shared NFS backup target; the screen offers 256 MiB to 2 GiB; pods,
+    file and test directory removed). Refused with `backup-target-differs`
+    or `not-supported` (target other than NFS).
+  - **Disaster Recovery of a cluster**: the contracts where it is source or
+    recovery site, with a role badge and a filter, and its VMs held by a
+    contract. Alerts also show in the cluster's **Events** tab (group
+    Disaster Recovery).
+- **Recovery options** (`recovery` in the console, `--spec FILE` on the
+  command line): start **waves** (at most 10) with a gate each (`running`,
+  `agent` = guest agent connected within a delay, `delay`), **HTTP hooks**
+  (at most 20; at `start`, `wave:<n>` or `end`; any method, headers, secret
+  headers, body up to 16 KiB), **size at the backup site** (`resize`, CPU
+  and memory written the way Harvester writes them), **network data**
+  (cloud-init network-config applied with `cloud_init: rerun`), **per-disk
+  storage class** (`disk_classes`, `--map-disk-class ns/vm/disk=class`),
+  **drill networks** (`drill_networks`, `--map-drill-net`, stored and
+  checked). A hook that fails warns (`hook-failed`) and the failover goes
+  on; a resumed failover does not call a hook again. `hook test P --name N`
+  and `POST /api/replication/plans/<id>/hooks/test` call one hook at once
+  (operator). The dry run lists the waves and hooks without calling them.
+- **Settings of a plan**: `PATCH .../settings` and `plan set` also change
+  `recovery`, `cloud_init`, `mac`, `start` and the mappings, within what
+  the plan state allows (`state-forbids`), and answer `protect_needed:
+  true` when a carnet value of a protected plan really changed.
+- **Stale recovery settings** (`carnet-stale`): when a carnet value changed
+  since the last protect (judged on values: saving the same values, hooks,
+  waves, or going back to the protected values marks nothing), the plan and
+  the follower flag it, it shows as an alert and a banner with **Protect
+  again**, and a failover refuses to start unless told to use the previous
+  settings (`accept_stale_carnet`, `--accept-stale-carnet`, also on
+  `resume` of an interrupted failover). A successful protect clears it.
+- **Candidates**: `candidates --cluster C [--namespace NS [--selector k=v]]`
+  and `GET /api/replication/candidates/<cluster>` list the VMs a plan can
+  protect, with per-disk eligibility and its reasons.
+- **Follow-up data**: plan rows carry `transfer`, `pending_vms`, `alerts`
+  and `reach`; `GET /api/replication/plans/<id>/series` (1h, 24h, 7d, 30d
+  buckets); `GET /api/replication/plans/<id>/events` (journal of the plan
+  and its VMs, `level=warn`).
+- **Alerts**: `GET /api/replication/alerts` and `alerts [--host H]`:
+  `rpo-exceeded`, `disk-never-backs-up`, `standby-degraded`, `plan-drift`,
+  `selector-new-vm`, `carnet-stale`, `auto-protect-failed`,
+  `source-unreachable`, `backup-error`, `plan-error`,
+  `source-vm-running-after-failover`.
+- **External notifications**: Matrix, Slack incoming webhook, generic JSON
+  webhook and e-mail (SMTP with STARTTLS or implicit TLS on port 465),
+  filtered by level and codes, grouped per round and sent by the console
+  follower from a background thread (3 tries; `notify-failed` in the
+  journal). `GET /api/replication/notify` (operator, secrets masked), `PUT`
+  and `notify/test` (admin); `notify show|set --spec FILE|test`.
+- **Selector plans**: a labelled VM not in the plan is journaled once
+  (`selector-new-vm`) and listed as pending. With `auto_protect: true` the
+  console starts the protect itself (action author `console`, at most once
+  every 10 minutes per plan); after a failure the wait doubles from 10
+  minutes up to 6 hours, with one `auto-protect-failed` event per series,
+  kept across a console restart. Kill switch `replication: {auto_protect:
+  false}` in `config.yaml`, read again every minute. Refused on a plan that
+  lists its VMs.
+- **Link list and test**: `GET /api/replication/links`, `POST
+  /api/replication/links/test` (operator), `link list`, `link test --from A
+  --to B [--size-mib N]`, results kept.
+
+### Changed
+- **Standby replicas beyond the target nodes block protect.** A target
+  class that asks for more replicas than the target has schedulable
+  Longhorn nodes now blocks the check (`standby-replicas-exceed-nodes`,
+  with the classes that fit in `suggest`); in 1.99.0 it was a warning
+  (`replicas-degraded`). A protect again on such a plan stays blocked until
+  it is acknowledged: the recovery key `accept_degraded_standby: true`
+  (Settings checkbox, for every later protect) or `protect P
+  --accept-degraded-standby` / `resume P --accept-degraded-standby` (that
+  run only). A protect interrupted under 1.99.0 on such a class is refused
+  on resume until one of them is given. The new contract window offers
+  **Use <class>** for a class that fits.
+- **Hook timeout capped at 60 s** (1 to 60, 15 by default), and it bounds
+  the whole call, not each read, so a console stop reaches its next safe
+  point within its stop budget.
+- **URLs masked by path, for every role.** Hook and webhook URLs show their
+  scheme, host, port and first path segment only; the rest of the path is
+  `/********`, the query `?********`, credentials and fragment are dropped.
+  This holds in reads, command line outputs, the journal, Activity and
+  action labels. Sending the masked URL back keeps the stored one; editing
+  it means typing the full URL again. A token carried in the URL path
+  (Slack-style incoming webhook) is therefore never shown.
+- **A masked secret is kept only for the same request.** A hook's secret
+  headers are kept on `********` only when the name, method and exact URL
+  are unchanged; a Matrix token only for the same homeserver origin;
+  webhook secret headers only for the same URL; a mail password only for
+  the same SMTP host and port. Otherwise `secret-missing`.
+- **Hooks and notifications never follow redirects**: a 3xx fails with the
+  reason and the masked target.
+- **SMTP with a password requires TLS** (STARTTLS or implicit TLS);
+  refused at save, and at send for a channel stored otherwise.
+
+### Fixed
+Found during the real checks of this release, before it shipped:
+- **Protect directly** from the creation window failed with "no measure:
+  give --interval"; the window now sends the estimated interval.
+- Contracts and links lists now reload when the current cluster changes;
+  no RPO gauge is shown once a plan has failed over.
+- The link test removes its `harvester-ops-linktest/` directory from the
+  backup share.
+- A failed automatic protection names the blocking findings.
+
+### Security
+- **Outbound calls of hooks and notifications are guarded.** They go
+  through the same address guard as the ISO download (`url_fetch_guard`,
+  moved to `bin/lib/` so the replication command line uses it): the name is
+  resolved once and the connection goes to the checked address; loopback,
+  link-local, private, CGNAT, multicast and reserved addresses are refused
+  unless allowed by `replication.hooks.allow_private` or
+  `replication.notifications.allow_private` (CIDR lists in
+  `config.yaml`); cloud metadata addresses stay refused even when allowed.
+  The SMTP server is checked and pinned the same way. Addresses are also
+  checked at save (`hook-address`, `notify-address`, 400), and a guard
+  refusal is not retried.
+- Secrets (secret header values, Matrix token, Slack URL, mail password)
+  are stored in `replication.db`, masked on every read, and reach the
+  command line only through a private spec file, never its arguments.
+
+### Tests
+- 13 new API test files (replication model, routes, CLI, follower
+  selector, insight, links, notifications, outbound guard with refusal,
+  redirect and SMTP TLS tables, review fixes); 2 new end-to-end files (25
+  tests on simulated APIs: menu and badges, cards and table, creation with
+  blocking network, per-disk class, waves by drag and drop, failover,
+  roles, links, notifications, replica acknowledgement, stale settings).
+- Deliberate mutations, each caught by its test: redirect refusal removed,
+  guard allowing all, origin check dropped, plaintext SMTP allowed, path
+  kept unmasked, auto-protect without wait, stale mark by key presence,
+  failover button enabled without the typed name, among others.
+- Full suites on the merged branch: API 8443 passed, 1 skipped; end to end
+  738 passed.
+- **Verified for real** on 24-25/10/2026, harvlab (Harvester 1.8.2) to harvlab2 (1.9.0, one
+  node), through a console of this branch:
+  - create from the window (missing network created on the target with its
+    VLAN, per-disk class, wave gate), protect, live RPO and throughput,
+    planned failover (89 s), unprotect and delete;
+  - hooks at `start`, after wave 1 and at `end` of a real failover;
+    redirecting hook refused, redirect target reached by nothing; loopback,
+    metadata and private addresses refused at save; masked secret with
+    another host refused;
+  - webhook notification channel (test message and follower messages);
+    redirecting channel failed once; loopback SMTP and password without TLS
+    refused;
+  - automatic protection of a newly labelled VM, and its back off after a
+    failure (10 then 20 minutes, one event);
+  - recovery: agent gate (22 s), 2 vCPU / 2 GiB at the recovery site,
+    network data applied by the rerun cloud-init;
+  - standby replicas: `harvester-longhorn` marked on the one-node target,
+    **Use harv-rep1** fixed it;
+  - stale settings: failover dry run blocked, accepted as a warning, cleared
+    by protect;
+  - link test: 256 MiB at 99 / 103 MiB/s, then 64 MiB at 97 / 103 MiB/s with
+    no directory left.
+
+  Not verified on a cluster: notifications to a real Matrix room, Slack or a
+  real mail server (unit-tested against local servers), CPU and memory
+  hotplug at recovery, the resume of a failover with the stale settings
+  acknowledgement, drag and drop with a real mouse. The second review fixes
+  (stale mark judged on values, path masking, secret kept only for the same
+  request, `--accept-degraded-standby` and the resume flags) are covered by
+  unit and end-to-end tests, not run on a cluster. Drills are not in this
+  release (the drill network column is only stored).
+
+## [1.100.0] - 2026-10-25 - KVM: create and edit VMs, images, pools and networks
+
+### Added
+- **Create a KVM VM** from the KVM VMs toolbar, a host card or an image of
+  the catalogue, in the window of the Harvester VMs: same tabs (General,
+  Compute, Firmware, Disks, Network, Cloud-init, Review), same icons, same
+  cloud-init assistant.
+  - Choices read from the host (`capabilities`, `domcapabilities` per
+    machine family): q35 or pc, BIOS or UEFI, Secure Boot, TPM through
+    `swtpm`, CPU mode and models, disk buses, video. An option the host
+    cannot give is greyed out with its reason.
+  - 1 to 20 instances (`<name>-01`...), start after creation, vCPU and
+    memory below their maximum for hot changes, hot-plug PCIe slots on q35
+    (4 by default, 0 to 16).
+  - Disks: blank, from an image (linked qcow2 overlay by default, or full
+    copy resized to the asked size), existing volume, ISO, empty CD-ROM.
+    Cards: libvirt network, host bridge or macvtap. The console draws the
+    MAC of each card left empty (`52:54:00:...`, checked against every
+    card of the host) and writes it in the definition, also for a card
+    added later.
+  - VNC with a password drawn by the console (8 characters), never shown.
+  - Cloud-init: NoCloud seed ISO (label `cidata`, Joliet) built by the
+    console, instance id = VM uuid, user-data, network-config, guest host
+    name, seed pool. The guest agent and SSH keys (KeyPairs of the readable
+    clusters, pasted keys) are merged into a `#cloud-config`; a document
+    the console cannot merge safely is refused with its reason, unchanged.
+  - The assistant's network-config is a version 2 document that finds each
+    card by its MAC (`match: macaddress`), renaming it only when a name is
+    given: the name an image gives the card (`eth0`, `enp1s0`) no longer
+    matters. Generating it draws the MAC of the cards that have none. It
+    is refused for several instances, which cannot share a MAC.
+  - Review is the server plan (refusals, warnings, volumes, seed, XML with
+    `passwd='***'`). Create recomputes it, then runs volumes, seed,
+    `define --validate`, autostart, start, check. A failure removes what
+    was created for the failing instance and names the rest.
+  - Templates: form specs kept by the console (`kvm-templates/`, 0600),
+    shared by all hosts, with an owner; secrets and user-data removed when
+    saved, and said.
+- **Edit a KVM VM**: the same window filled from the inactive definition,
+  a forecast per field (now, next boot, refused) and the server's exact
+  classification in Review. Only changed fields are sent, with the digest
+  of the definition read at opening (409 `changed`, then Reload keeps what
+  was typed). Changes that wait for the next start show a "restart
+  needed" banner, with Shut down and start, and a badge in the VM list
+  (`pending` in `/api/kvm/vms`). Settings the form does not manage
+  (pinning, `<cputune>`, `<numatune>`, `<hostdev>`, `<qemu:commandline>`,
+  foreign metadata, `<seclabel>`...) are kept byte for byte and listed
+  read-only. Rename of a shut off VM without snapshots.
+- **Hot gestures** in the KVM VM menu, as for Harvester VMs: CPU and
+  memory, add a disk, add a card, remove a disk or a card, insert or eject
+  a CD-ROM media, cloud-init (new seed, run again at next boot, clear
+  user-data on purpose). Each result says now, next boot or refused with
+  the reason (no free PCIe slot, SATA, guest that does not release a disk
+  within 30 s). Removing a disk or card that waits for the next boot only
+  edits the definition.
+- **Image catalogue** per host (Storage > Images): format, ISO badge,
+  virtual size, use (base of N disks, used by N), SHA-256, origin URL
+  without credentials or query. Upload from the browser (received once,
+  checked, sent to one or several hosts on a fresh SSH connection,
+  optional Mbit/s limit, SHA-256 recomputed on each host, cancel in both
+  phases), download from a URL by the console, verify, delete with proof,
+  create a VM from an image, image pools of a host (admin). Uploads and
+  downloads are capped by `iso_fetch.max_bytes` (20 GiB by default).
+- **Volumes**: create (blank or linked to an image of the same pool),
+  resize up (VM shut off), delete with the 1.98 ownership proof and the
+  digest of the preview. Volumes of an NFS (`netfs`) pool, images uploaded
+  there included, cannot be deleted or resized by the console (shared
+  storage: the proof cannot be made).
+- **Pools**: create `dir` or NFS (admin), start, stop, refresh, autostart,
+  delete with or without the empty directory. Guards: system directories,
+  the directory of another pool (path and device:inode), nesting of other
+  types, a running VM on stop, any definition citing a volume on delete.
+- **Networks**: create NAT, routed, isolated (free `192.168.X.0/24`
+  proposed) or on a host bridge; start, stop, autostart, delete. A subnet
+  overlapping a host address or route or another network is refused; stop
+  is refused while a running VM has a card on it, delete while a
+  definition cites it. Bridges and cards view of the host.
+- Command line `bin/harvester-kvm.py`: `host caps`, `host image-pools`,
+  `vm create|edit|cpumem|add-volume|remove-volume|insert-cdrom|eject-image|add-nic|remove-nic|cloudinit`,
+  `image list|verify|upload|download-url|delete`,
+  `vol create|upload|resize|delete`,
+  `pool define|start|stop|refresh|autostart|delete`,
+  `net define|start|stop|autostart|delete|links`,
+  `template list|save|delete`. Specs by `--spec-file=` (0600) or stdin;
+  deletes need `--expect-delete=` from their `--dry-run`; edit needs
+  `--expect-config=`.
+- API under `/api/kvm`: `hosts/<host>/caps|images|links|pools|networks|macs`,
+  `vms/<host>/<domain>/form`, `.../cloudinit` (operator),
+  `hosts/<host>/vm-plan`, `POST vms/<host>`, `vms/<host>/<domain>/edit-plan`,
+  `PATCH vms/<host>/<domain>`, `vms/<host>/<domain>/hot/<op>`,
+  `hosts/<host>/images/upload|fetch`, `uploads/<token>/cancel`,
+  `.../images/<pool>/<volume>/verify`, image, volume, pool and network
+  create, gesture, delete-plan and delete routes, `PUT .../image-pools`,
+  `/api/kvm/templates`. `/api/kvm/vms` also gives `edit_operations`.
+- Docs: section 10 of the capabilities page (EN, FR) and the README KVM
+  line.
+
+### Changed
+- The Harvester VM creation window runs on a shell shared with the KVM
+  window (`vm-form.js`); the cloud-init assistant moved to
+  `cloudinit-form.js`. The Harvester behaviour is unchanged (every
+  existing end-to-end test passes as is).
+- ssh to KVM hosts runs with `LogLevel=ERROR`: a login banner no longer
+  reaches error messages.
+- The KVM disk survey kept for views is shared between the console and
+  its reader processes through a per-host generation, moved by every
+  write of the console or the command line.
+- A KVM action forgets the shared views before it ends, so the page that
+  reloads on the end event sees the change.
+- Cancelling an image upload or download, a VM creation or a clone waits
+  for the tool: the action stays running, names and pools stay held, until
+  the rollback is done. A full copy that libvirt is still building after a
+  cancel is waited for (up to 15 min) and deleted.
+- The URL guard of `/api/iso/fetch` moved to `bin/lib/url_fetch_guard.py`
+  and is shared with the KVM image download (console and command line).
+  A plain `http` image URL needs a SHA-256.
+- Without declared image pools, a base image stays in the catalogue while
+  linked disks use it (only direct use hides a volume).
+- The read retry after a transport cut (1.98.0) is kept as a safety net:
+  no `sshd-session` crash under multiplexed sessions has been observed
+  since OpenSSH 10.6p1 on the lab host (1303 concurrent multiplexed reads,
+  0 failures).
+
+### Fixed
+- Clone (1.98.0) cancelled during an in-pool copy: libvirt keeps building
+  the copy and refuses to delete it, so the action closed at once and left
+  the copy behind. The rollback now waits for the copy (same bounded wait
+  as a creation, up to 15 min) and deletes it; both names stay held.
+- The clone definition goes through `define --validate` like every other
+  definition.
+- The current memory of a running VM is never shown as waiting for the
+  next start: QEMU starts at the maximum and a guest without a balloon
+  driver stays there, so the "restart needed" badge was permanent.
+
+### Security
+- The VNC password and the user-data never reach an API answer (the
+  cloud-init read of an operator excepted), a log, an action step, a
+  command line or Activity; specs reach the tool by a 0600 file of the
+  action's working directory, removed at the end.
+- An uploaded or downloaded qcow2 that names a backing file or an external
+  data file, or announces more than 16 TiB, is refused before anything is
+  written on a host. The SHA-256 is compared before the first byte is
+  sent.
+- Uploads are staged in a 0700 directory (files 0600), with space reserved
+  per reception and checked while writing; stale staging files are swept
+  at startup.
+- The upload cancel token works only for the user who started the upload,
+  with the operator role.
+- Spec files left in the working directory by a console killed during a
+  KVM action (they may carry user-data) are removed at startup.
+- Roles: deleting a volume or an image, every pool and network gesture and
+  the image pools need the admin role; create, edit, hot gestures,
+  uploads, verify, resize, pool refresh and the cloud-init read need the
+  operator role.
+
+### Internal
+- Not in this version: Windows answer file, making a transient VM
+  persistent, live resize of a used volume (`blockresize`), download of
+  an image by the host itself, a key store of the console, LVM and iSCSI
+  pools, fixed DHCP leases, saving an existing VM as a template, changing
+  the balloon, serial console, watchdog, firmware serial or disk I/O
+  threads after creation.
+- After a nested `dir` pool is deleted with its directory, libvirt keeps
+  listing that directory in the parent pool until the parent is
+  refreshed; the console does not refresh pools it was not asked to touch.
+- New stdlib modules in `bin/lib`: `kvm_caps`, `kvm_xml`, `iso9660`,
+  `qcow2`, `kvm_storage`, `kvm_net`, `kvm_create`, `kvm_edit`,
+  `kvm_templates`, `kvm_pending`.
+
+### Tests
+- New API tests: `test_kvm_caps`, `test_kvm_xml` (golden files checked
+  by `virt-xml-validate` when present), `test_iso9660`, `test_qcow2`,
+  `test_kvm_storage`, `test_kvm_net`, `test_kvm_create`, `test_kvm_edit`,
+  `test_kvm_ssh_banner`, `test_kvm_next_review`, `test_kvm_cli_create`,
+  `test_kvm_cli_create_review`, `test_kvm_routes_create`,
+  `test_kvm_routes_create_review`, `test_kvm_pending`,
+  `test_kvm_storage_views`, `test_kvm_upload_cancel`,
+  `test_vm_form_source`, `test_cloudinit_net_by_mac` (generator played
+  by node, with mutations), on a simulated host (`kvm_next_sim.py`) and
+  fixtures read on the lab host. New end-to-end tests: `test_kvm_create`,
+  `test_kvm_edit`, `test_kvm_form_review`, `test_kvm_storage`.
+- Real check on the lab host (libvirt 12.8.0, QEMU 11.1.2, OpenSSH
+  10.6p1), test objects only, identical inventory before and after (apart
+  from libvirt's cached listing of the parent pool of a deleted nested
+  pool):
+  upload from a pipe, cirros 0.6.2, openSUSE Tumbleweed and Alpine with
+  their published checksums, BIOS VM linked to cirros with a VNC password
+  created in the window, UEFI Secure Boot TPM VM from a full copy reached
+  by SSH (`cloud-init status` done), a Tumbleweed VM created in the window
+  whose static address comes from the assistant's network-config, unedited
+  (card `enp1s0` found by the MAC the console drew, reached at that
+  address, no DHCP lease), three instances, cancel during a full copy with
+  nothing left, a clone cancelled during an in-pool copy with nothing
+  left, a card added with a MAC drawn by the console, hot vCPU,
+  memory, disks, card and media seen in the guest, PCIe slots exhausted,
+  next-boot machine type and memory maximum, unmanaged settings identical
+  in C14N, delete with storage, guards, cleanup by the console, secrets in
+  no answer, log or action record. Three defects found there are fixed
+  with tests: removing a disk added for the next boot failed, a cancel
+  during a full copy left the copy behind, a base image vanished from the
+  catalogue after its first linked VM.
+
 ## [1.99.0] - 2026-10-24 - Asynchronous VM replication between Harvester clusters (engine, CLI, console API)
 
 ### Added

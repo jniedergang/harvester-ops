@@ -117,7 +117,31 @@ OPTION_CHOICES = {"cloud_init": ("keep", "rerun"), "mac": ("keep", "new"),
                   "start": ("started", "stopped"), "follow": ("console", "cli", "off")}
 DEFAULT_OPTIONS = {"cloud_init": "keep", "mac": "keep", "create_namespace": False,
                    "start": "started", "follow": "console", "paused": False, "timeouts": {}}
-MAPPING_KINDS = ("networks", "storage_classes", "namespaces", "images", "claims", "target_names")
+MAPPING_KINDS = ("networks", "storage_classes", "namespaces", "images", "claims", "target_names",
+                 "disk_classes", "drill_networks")
+
+# -- reprise (« recovery ») : vagues, actions annexes HTTP, données réseau,
+# taille au secours, protection d'office des nouvelles VMs d'un sélecteur ----
+RECOVERY_KEYS = ("waves", "hooks", "network_data", "resize", "auto_protect", "accept_degraded_standby")
+# changent la VM cible, donc le carnet (protect le réécrit)
+CARNET_KEYS = ("cloud_init", "mac", "start", "network_data", "resize")
+WAVES_MAX, HOOKS_MAX = 10, 20
+WAVE_NAME_MAX, HOOK_NAME_MAX = 40, 40
+GATE_KINDS = ("running", "agent", "delay")
+AGENT_GATE_DEFAULT, AGENT_GATE_RANGE, DELAY_GATE_RANGE = 300, (10, 3600), (1, 3600)
+HOOK_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+# 60 s au plus : une bascule arrêtée par la console atteint son prochain point
+# sûr (entre deux actions) bien avant le budget d'arrêt de l'unité (600 s)
+HOOK_TIMEOUT_DEFAULT, HOOK_TIMEOUT_RANGE = 15, (1, 60)
+TEXT_MAX = 16 * 1024                     # corps d'une action, données réseau
+URL_MAX, HEADER_VALUE_MAX, HEADERS_MAX = 2048, 1024, 32
+RESIZE_CPU_RANGE = (1, 256)
+# valeur montrée à la place d'un secret ; renvoyée telle quelle à la mise à
+# jour, elle garde la valeur rangée
+MASK = "********"
+_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$")
+_MEMORY_RE = re.compile(r"^([1-9][0-9]{0,6})(Mi|Gi)$")
+_HOOK_AT_RE = re.compile(r"^(start|end|wave:([1-9][0-9]?))$")
 
 # -- états ------------------------------------------------------------------
 
@@ -345,7 +369,15 @@ def _mapping(kind, raw):
         raise PlanError("bad-mapping", f"{kind}: a mapping is expected")
     out = {}
     for s, d in raw.items():
-        if kind in ("networks", "images", "target_names", "claims"):
+        if kind == "disk_classes":
+            # clé `namespace/vm/disque` (nom du disque KubeVirt), valeur : une
+            # classe de stockage de la cible
+            parts = s.split("/") if isinstance(s, str) else []
+            if len(parts) != 3 or not all(NAME_RE.match(x) for x in parts):
+                raise PlanError("bad-mapping", f"{kind}: namespace/vm/disk expected, got {str(s)[:80]}")
+            if not isinstance(d, str) or not NAME_RE.match(d):
+                raise PlanError("bad-mapping", f"{kind}: invalid storage class for {s}")
+        elif kind in ("networks", "drill_networks", "images", "target_names", "claims"):
             _ref(s, kind)
             if kind in ("target_names", "claims"):
                 # clé `namespace/nom` (lue ainsi par `target_ref` et
@@ -455,14 +487,407 @@ def normalize_plan(req):
             if not 0 <= s <= 3600:
                 raise PlanError("bad-option", "skew_tolerance_s: 0 to 3600")
             opts[k] = s
+        elif k in RECOVERY_KEYS:
+            continue                    # contrôlées ensemble, plus bas
         else:
             raise PlanError("bad-option", f"unknown option: {str(k)[:30]}")
+    opts.update(normalize_recovery(raw_opts, vms if vms else None, opts["cloud_init"]))
 
     return {"name": name, "source_cluster": src, "target_cluster": dst, **kinds,
             "rpo_objective_s": rpo, "interval_s": interval,
             "cron": cron_for(interval) if interval else "", "retain": retain,
             "vms": vms, "selector": selector, "selector_namespace": sel_ns if selector else "",
             "mappings": mappings, "options": opts}
+
+
+# ---------------------------------------------------------------------------
+# Reprise : vagues, actions annexes, données réseau, taille au secours
+# ---------------------------------------------------------------------------
+
+def _int_in(v, lo, hi, what):
+    if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
+        raise PlanError("bad-option", f"{what}: an integer from {lo} to {hi}")
+    return v
+
+
+def _text(v, what, limit, empty=True):
+    if not isinstance(v, str) or len(v.encode()) > limit or (not v and not empty):
+        raise PlanError("bad-option", f"{what}: a text of at most {limit} bytes")
+    return v
+
+
+def _known_vm(ref, what, plan_vms):
+    """`namespace/nom` d'une VM ; dans la liste du plan quand il en a une
+    (un plan par sélecteur peut nommer une VM qui n'existe pas encore)."""
+    try:
+        _ref(ref, what)
+    except PlanError as e:
+        raise PlanError("bad-option", str(e)) from None
+    if plan_vms is not None and ref not in plan_vms:
+        raise PlanError("bad-option", f"{what}: {ref} is not a VM of this plan")
+    return ref
+
+
+def _gate(raw, what):
+    raw = {"kind": "running"} if raw in (None, "") else raw
+    if not isinstance(raw, dict) or set(raw) - {"kind", "seconds"}:
+        raise PlanError("bad-option", f"{what}: gate {{kind, seconds}} expected")
+    kind = raw.get("kind") or "running"
+    if kind not in GATE_KINDS:
+        raise PlanError("bad-option", f"{what}: gate kind one of {', '.join(GATE_KINDS)}")
+    secs = raw.get("seconds")
+    if kind == "running":
+        return {"kind": "running", "seconds": 0}
+    if kind == "agent":
+        secs = AGENT_GATE_DEFAULT if secs in (None, 0) else secs
+        return {"kind": "agent", "seconds": _int_in(secs, *AGENT_GATE_RANGE, f"{what}: agent gate seconds")}
+    return {"kind": "delay", "seconds": _int_in(secs, *DELAY_GATE_RANGE, f"{what}: delay gate seconds")}
+
+
+def _waves(raw, plan_vms):
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list) or len(raw) > WAVES_MAX:
+        raise PlanError("bad-option", f"waves: a list of at most {WAVES_MAX} waves")
+    out, seen = [], set()
+    for i, w in enumerate(raw, 1):
+        what = f"wave {i}"
+        if not isinstance(w, dict) or set(w) - {"name", "vms", "gate"}:
+            raise PlanError("bad-option", f"{what}: {{name, vms, gate}} expected")
+        name = _text(w.get("name") or "", f"{what}: name", WAVE_NAME_MAX)
+        if any(ord(c) < 32 or ord(c) == 127 for c in name):
+            raise PlanError("bad-option", f"{what}: name has a control character")
+        vms = w.get("vms")
+        if not isinstance(vms, list) or not vms:
+            raise PlanError("bad-option", f"{what}: vms, a non-empty list of namespace/name")
+        for ref in vms:
+            _known_vm(ref, what, plan_vms)
+            if ref in seen:
+                raise PlanError("bad-option", f"{what}: {ref} is listed twice")
+            seen.add(ref)
+        out.append({"name": name, "vms": list(vms), "gate": _gate(w.get("gate"), what)})
+    return out
+
+
+def _headers(raw, what):
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict) or len(raw) > HEADERS_MAX:
+        raise PlanError("bad-option", f"{what}: an object of at most {HEADERS_MAX} headers")
+    out = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not _HEADER_NAME_RE.match(k):
+            raise PlanError("bad-option", f"{what}: invalid header name {str(k)[:40]}")
+        if not isinstance(v, str) or len(v) > HEADER_VALUE_MAX or any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise PlanError("bad-option", f"{what}: invalid value for header {k}")
+        out[k] = v
+    return out
+
+
+def _hook_url(v, what):
+    from urllib.parse import urlsplit
+    if not isinstance(v, str) or len(v) > URL_MAX or any(ord(c) <= 32 or ord(c) == 127 for c in v):
+        raise PlanError("bad-option", f"{what}: url, an http(s) address without spaces")
+    try:
+        u = urlsplit(v)
+        u.port                          # port illisible : ValueError
+    except ValueError:
+        raise PlanError("bad-option", f"{what}: unreadable url") from None
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise PlanError("bad-option", f"{what}: url must start with http:// or https:// and name a host")
+    if u.username is not None or u.password is not None:
+        # un identifiant va dans `secret_headers`, masqués
+        raise PlanError("bad-option", f"{what}: no credentials in the url, use secret_headers")
+    if MASK in v:
+        # adresse montrée masquée (`mask_url`) et renvoyée modifiée : le
+        # chemin et la requête rangés sont cachés, ils ne se recollent pas
+        raise PlanError("bad-option", f"{what}: the stored url is partly hidden, type the full url again")
+    return v
+
+
+def _hooks(raw, n_waves):
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list) or len(raw) > HOOKS_MAX:
+        raise PlanError("bad-option", f"hooks: a list of at most {HOOKS_MAX} hooks")
+    keys = {"name", "at", "method", "url", "headers", "secret_headers", "body", "timeout_s"}
+    out, names = [], set()
+    for i, h in enumerate(raw, 1):
+        what = f"hook {i}"
+        if not isinstance(h, dict) or set(h) - keys:
+            raise PlanError("bad-option", f"{what}: unknown field")
+        name = h.get("name")
+        if not isinstance(name, str) or not NAME_RE.match(name) or len(name) > HOOK_NAME_MAX:
+            raise PlanError("bad-option", f"{what}: name, a lowercase RFC 1123 name of at most {HOOK_NAME_MAX}")
+        if name in names:
+            raise PlanError("bad-option", f"hooks: {name} is used twice")
+        names.add(name)
+        what = f"hook {name}"
+        at = h.get("at")
+        m = _HOOK_AT_RE.match(at) if isinstance(at, str) else None
+        # `wave:<n>` : une vague déclarée, ou la dernière, implicite, des VMs
+        # qui ne sont dans aucune
+        if not m or (m.group(2) and int(m.group(2)) > n_waves + 1):
+            raise PlanError("bad-option", f"{what}: at, one of start, end, wave:1 to wave:{n_waves + 1}")
+        method = h.get("method") or "POST"
+        if method not in HOOK_METHODS:
+            raise PlanError("bad-option", f"{what}: method one of {', '.join(HOOK_METHODS)}")
+        headers = _headers(h.get("headers"), f"{what}: headers")
+        secrets = _headers(h.get("secret_headers"), f"{what}: secret_headers")
+        both = sorted({k.lower() for k in headers} & {k.lower() for k in secrets})
+        if both:
+            raise PlanError("bad-option", f"{what}: header {both[0]} is both plain and secret")
+        if any(v == MASK for v in secrets.values()):
+            # le masque n'est accepté qu'en mise à jour, où il garde la valeur
+            # rangée (`keep_hook_secrets`) ; ici il n'y en a pas
+            raise PlanError("bad-option", f"{what}: a masked secret header has no stored value")
+        timeout = h.get("timeout_s")
+        timeout = HOOK_TIMEOUT_DEFAULT if timeout is None else _int_in(timeout, *HOOK_TIMEOUT_RANGE,
+                                                                       f"{what}: timeout_s")
+        out.append({"name": name, "at": at, "method": method, "url": _hook_url(h.get("url"), what),
+                    "headers": headers, "secret_headers": secrets,
+                    "body": _text(h.get("body") or "", f"{what}: body", TEXT_MAX), "timeout_s": timeout})
+    return out
+
+
+def _resize(raw, plan_vms):
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict):
+        raise PlanError("bad-option", "resize: an object {namespace/name: {cpu, memory}} is expected")
+    out = {}
+    for ref, r in raw.items():
+        _known_vm(ref, "resize", plan_vms)
+        if not isinstance(r, dict) or not r or set(r) - {"cpu", "memory"}:
+            raise PlanError("bad-option", f"resize {ref}: cpu and/or memory expected")
+        one = {}
+        if r.get("cpu") is not None:
+            one["cpu"] = _int_in(r["cpu"], *RESIZE_CPU_RANGE, f"resize {ref}: cpu")
+        if r.get("memory") is not None:
+            if not isinstance(r["memory"], str) or not _MEMORY_RE.match(r["memory"]):
+                raise PlanError("bad-option", f"resize {ref}: memory, a size in Mi or Gi (2Gi, 512Mi)")
+            one["memory"] = r["memory"]
+        if not one:
+            raise PlanError("bad-option", f"resize {ref}: cpu and/or memory expected")
+        out[ref] = one
+    return out
+
+
+def _network_data(raw, plan_vms, cloud_init):
+    if raw in (None, ""):
+        return {}
+    if not isinstance(raw, dict):
+        raise PlanError("bad-option", "network_data: an object {namespace/name: network-config} is expected")
+    out = {}
+    for ref, text in raw.items():
+        _known_vm(ref, "network_data", plan_vms)
+        out[ref] = _text(text, f"network_data {ref}", TEXT_MAX, empty=False)
+    if out and cloud_init != "rerun":
+        raise PlanError("bad-option", "network_data needs cloud_init rerun")
+    return out
+
+
+def normalize_recovery(raw_opts, plan_vms, cloud_init):
+    """Le bloc « reprise » des options d'un plan, contrôlé et complété :
+    `waves`, `hooks`, `network_data`, `resize`, `auto_protect`. `plan_vms` :
+    les VMs du plan (liste), None pour un plan par sélecteur. Rend les
+    seules clés posées (non vides)."""
+    raw_opts = raw_opts or {}
+    waves = _waves(raw_opts.get("waves"), plan_vms)
+    auto = raw_opts.get("auto_protect", False)
+    if not isinstance(auto, bool):
+        raise PlanError("bad-option", "auto_protect: true or false")
+    if auto and plan_vms is not None:
+        # sans effet hors sélecteur : refusé plutôt qu'ignoré en silence
+        raise PlanError("bad-option", "auto_protect needs a plan by label selector (a VM list has no new VMs)")
+    degraded = raw_opts.get("accept_degraded_standby", False)
+    if not isinstance(degraded, bool):
+        raise PlanError("bad-option", "accept_degraded_standby: true or false")
+    out = {"waves": waves, "hooks": _hooks(raw_opts.get("hooks"), len(waves)),
+           "network_data": _network_data(raw_opts.get("network_data"), plan_vms, cloud_init),
+           "resize": _resize(raw_opts.get("resize"), plan_vms), "auto_protect": auto,
+           "accept_degraded_standby": degraded}
+    # seules les valeurs posées sont rangées : un plan sans reprise garde la
+    # forme d'avant (lue partout par `.get`)
+    return {k: v for k, v in out.items() if v}
+
+
+def keep_hook_secrets(new_hooks, stored_hooks):
+    """Les actions annexes d'une mise à jour, où `MASK` garde une valeur
+    rangée de la même action (même nom) :
+    - une adresse égale à l'adresse rangée masquée (`mask_url`) reprend
+      l'adresse rangée (requête comprise) ;
+    - un en-tête secret `MASK` reprend la valeur rangée, SEULEMENT si
+      l'adresse (schéma, hôte, port, chemin, requête) et la méthode restent
+      les mêmes : sinon un opérateur enverrait le secret ailleurs, ou
+      ferait un autre appel avec les droits d'un autre (PlanError
+      `secret-missing`).
+    Sans valeur rangée (action nouvelle ou renommée), PlanError aussi."""
+    import replication_http as rh
+    if not isinstance(new_hooks, list):
+        return new_hooks
+    stored = {h.get("name"): h for h in stored_hooks or [] if isinstance(h, dict)}
+    out = []
+    for h in new_hooks:
+        if not isinstance(h, dict):
+            out.append(h)
+            continue
+        old = stored.get(h.get("name")) or {}
+        url = h.get("url")
+        if old.get("url") and isinstance(url, str) and url == rh.mask_url(old["url"]):
+            h = dict(h, url=old["url"])
+        sec = h.get("secret_headers")
+        if isinstance(sec, dict) and any(v == MASK for v in sec.values()):
+            name = h.get("name")
+            if not old:
+                raise PlanError("secret-missing", f"hook {name}: no stored secret under this name (new or renamed "
+                                                  "hook): type the secret header values again")
+            if not rh.same_target(h.get("url"), old.get("url")):
+                raise PlanError("secret-missing", f"hook {name}: the address changed, type the secret header "
+                                                  "values again")
+            if (h.get("method") or "POST") != (old.get("method") or "POST"):
+                raise PlanError("secret-missing", f"hook {name}: the method changed, type the secret header "
+                                                  "values again")
+            kept = {}
+            for k, v in sec.items():
+                if v == MASK and k not in (old.get("secret_headers") or {}):
+                    raise PlanError("secret-missing", f"hook {name}: secret header {k} has no stored value, "
+                                                      "type it again")
+                kept[k] = old["secret_headers"][k] if v == MASK else v
+            h = dict(h, secret_headers=kept)
+        out.append(h)
+    return out
+
+
+def mask_options(options):
+    """Les options sans secret : chaque valeur d'un en-tête secret devient
+    `MASK`, l'adresse ne garde que son hôte et le premier segment de son
+    chemin (`mask_url` : un jeton y est souvent porté). Lectures, sorties,
+    journal."""
+    import replication_http as rh
+    if not isinstance(options, dict) or not options.get("hooks"):
+        return options
+    out = dict(options)
+    out["hooks"] = [dict(h, url=rh.mask_url(h.get("url")),
+                         secret_headers={k: MASK for k in (h.get("secret_headers") or {})})
+                    if isinstance(h, dict) else h for h in options["hooks"]]
+    return out
+
+
+def mask_plan(plan):
+    """Le plan tel qu'il se montre : options masquées (`mask_options`)."""
+    if not isinstance(plan, dict) or not isinstance(plan.get("options"), dict):
+        return plan
+    return dict(plan, options=mask_options(plan["options"]))
+
+
+def hook_secret_values(hooks):
+    """Les valeurs secrètes des actions (à retirer de tout texte sorti)."""
+    return sorted({v for h in hooks or [] for v in (h.get("secret_headers") or {}).values() if v and v != MASK},
+                  key=len, reverse=True)
+
+
+# Réglages : ce qui se change dans quel état (PATCH settings, `plan set`)
+SETTINGS_MAPPINGS_ANY_STATE = ("networks", "drill_networks")
+
+
+def settings_refusal(state, recovery=False, options=(), mappings=()):
+    """Motif du refus (`state-forbids`) d'un changement de réglages dans
+    l'état `state`, ou None. Rien pendant une bascule ; les correspondances
+    autres que réseaux et réseaux d'exercice, seulement en brouillon (elles
+    décident de ce que protect pose)."""
+    if state == "failing_over" and (recovery or options or mappings):
+        return "the plan is failing over: settings cannot change now"
+    late = sorted(k for k in mappings or () if k not in SETTINGS_MAPPINGS_ANY_STATE)
+    if late and state != "draft":
+        return f"mappings {', '.join(late)} can change only on a draft plan (state {state})"
+    return None
+
+
+# valeur d'un réglage du carnet quand il n'est pas donné
+CARNET_DEFAULTS = {"cloud_init": "keep", "mac": "keep", "start": "started", "network_data": {}, "resize": {},
+                   "networks": {}}
+
+
+def carnet_values(options=None, mappings=None):
+    """Les valeurs des réglages qui réécrivent le carnet de reprise (options
+    normalisées du plan et correspondance des réseaux), défauts compris."""
+    o = options or {}
+    vals = {k: (o.get(k) or d) for k, d in CARNET_DEFAULTS.items() if k != "networks"}
+    vals["networks"] = (mappings or {}).get("networks") or {}
+    return vals
+
+
+def carnet_changes(before, after):
+    """Les réglages du carnet dont la VALEUR diffère entre `before` et
+    `after` (`carnet_values`) : renvoyer la même valeur ne compte pas."""
+    return sorted(k for k, d in CARNET_DEFAULTS.items() if (before or {}).get(k, d) != (after or {}).get(k, d))
+
+
+def stale_carnet_keys(flag, before, after):
+    """Les réglages du carnet en retard après un changement de `before` vers
+    `after`. La marque `carnet-stale` garde les valeurs du dernier protect
+    (`baseline`) : on compare à elles, donc revenir aux valeurs protégées
+    (Annuler) ne laisse rien en retard. Une marque sans `baseline` garde
+    ses clés."""
+    flag = flag or {}
+    if isinstance(flag.get("baseline"), dict):
+        return carnet_changes(flag["baseline"], after)
+    return sorted(set(flag.get("keys") or ()) | set(carnet_changes(before, after)))
+
+
+def protect_needed(state, stale_keys=()):
+    """Un plan protégé dont le carnet de reprise est en retard sur ses
+    réglages (`stale_carnet_keys`) : protect doit le réécrire."""
+    return state == "protected" and bool(stale_keys)
+
+
+def failover_waves(options, refs):
+    """Ordre de démarrage d'une bascule : les vagues du plan réduites aux VMs
+    `refs` (`namespace/nom`) de cette bascule, numérotées comme dans le plan
+    (les actions `wave:<n>` s'y rapportent), puis la dernière, implicite
+    (`implicit: true`, condition `running`), des VMs listées nulle part.
+    Une vague sans VM dans cette bascule est rendue vide (sautée)."""
+    refs = list(refs)
+    waves = (options or {}).get("waves") or []
+    listed = set()
+    out = []
+    for i, w in enumerate(waves, 1):
+        vms = [r for r in w.get("vms") or [] if r in refs]
+        listed.update(w.get("vms") or [])
+        out.append({"index": i, "name": w.get("name") or "", "vms": vms,
+                    "gate": dict(w.get("gate") or {"kind": "running", "seconds": 0})})
+    rest = [r for r in refs if r not in listed]
+    if rest:
+        out.append({"index": len(waves) + 1, "name": "", "vms": rest, "gate": {"kind": "running", "seconds": 0},
+                    "implicit": True})
+    return out
+
+
+def hooks_at(options, point):
+    """Actions annexes d'un point (`start`, `wave:<n>`, `end`), dans l'ordre
+    du plan."""
+    return [h for h in (options or {}).get("hooks") or [] if h.get("at") == point]
+
+
+def hooks_summary(options):
+    import replication_http as rh
+    return [{"name": h["name"], "at": h["at"], "method": h["method"], "url": rh.mask_url(h["url"])}
+            for h in (options or {}).get("hooks") or []]
+
+
+def hook_address_refusal(hooks, allow, resolver=None):
+    """Contrôle à l'enregistrement des adresses des actions annexes, par la
+    garde anti-SSRF (`replication_http`) : PlanError `hook-address` pour une
+    adresse interne non autorisée (`replication.hooks.allow_private`). Un
+    nom qui ne se résout pas encore passe (revérifié à l'appel)."""
+    import replication_http as rh
+    import url_fetch_guard as ufg
+    for h in hooks or []:
+        try:
+            rh.check_address(h.get("url"), allow, resolver=resolver, strict_dns=False)
+        except ufg.FetchRefused as e:
+            raise PlanError("hook-address", f"hook {h.get('name')}: {rh.refusal_text(e, 'hooks')}") from None
 
 
 # ---------------------------------------------------------------------------
@@ -765,10 +1190,27 @@ def spec_drifted(known, seen):
     return bool(kd and sd and kd != sd)
 
 
-def _target_class(disk, plan, dst):
-    """Classe cible d'un disque et constat éventuel."""
+def disk_class_override(plan, vm_ref, disk):
+    """Classe cible choisie pour CE disque (`disk_classes`, clé
+    `namespace/vm/disque`), ou None."""
+    if not vm_ref:
+        return None
+    return ((plan.get("mappings") or {}).get("disk_classes") or {}).get(f"{vm_ref}/{disk}")
+
+
+def _target_class(disk, plan, dst, vm_ref=None):
+    """Classe cible d'un disque et constat éventuel. `vm_ref` : la VM du
+    disque (`namespace/nom`, source) ; une classe choisie pour ce disque
+    (`disk_classes`) l'emporte sur les correspondances d'images et de
+    classes."""
     maps = plan.get("mappings") or {}
     classes = dst.get("storage_classes") or {}
+    chosen = disk_class_override(plan, vm_ref, disk.get("disk"))
+    if chosen:
+        if chosen in classes:
+            return chosen, None
+        return None, _finding("storage-class-unmapped", "block", storage_class=disk.get("storage_class"),
+                              mapped=chosen, disk=f"{vm_ref}/{disk.get('disk')}")
     image = disk.get("image")
     if image:
         mapped = (maps.get("images") or {}).get(image)
@@ -830,8 +1272,7 @@ def _capacity(needed, classes):
         info = classes.get(sc) or {}
         alloc = int(info.get("allocatable") or 0)
         if not alloc and info.get("degraded_allocatable"):
-            out.append(_finding("replicas-degraded", "warn", storage_class=sc,
-                                replicas=info.get("replicas"), nodes=info.get("nodes")))
+            # répliques au-delà des nœuds : dit par `replica_findings`
             alloc = int(info["degraded_allocatable"])
         eff[sc] = alloc
     used = sorted(sc for sc in needed if needed[sc])
@@ -857,6 +1298,61 @@ def _capacity(needed, classes):
                 facts.update(storage_classes=members, pool=pool)
             out.append(_finding("capacity-short", "block", **facts))
     return out
+
+
+def _empty_wave_hooks(plan, opts):
+    """Actions annexes de la dernière vague, implicite, alors que chaque VM
+    d'un plan par liste est dans une vague déclarée : cette vague est vide,
+    l'action ne serait jamais appelée (`hook-wave-empty`). Un plan par
+    sélecteur peut y recevoir une VM étiquetée plus tard : rien à dire."""
+    waves = opts.get("waves") or []
+    vms = plan.get("vms") or []
+    if not waves or not vms or plan.get("selector"):
+        return []
+    listed = {r for w in waves for r in w.get("vms") or []}
+    if not set(vms) <= listed:
+        return []
+    at = f"wave:{len(waves) + 1}"
+    names = sorted(h["name"] for h in opts.get("hooks") or [] if h.get("at") == at)
+    return [_finding("hook-wave-empty", "warn", at=at, hooks=names)] if names else []
+
+
+def replica_findings(used, classes, accepted):
+    """Classes des volumes de secours qui demandent plus de répliques
+    (`numberOfReplicas` de la StorageClass, 3 par défaut comme Longhorn) que
+    la cible n'a de nœuds Longhorn planifiables : chaque volume de secours y
+    resterait dégradé, et l'alerte `standby-degraded` ne s'éteindrait
+    jamais. Bloquant, sauf accord explicite du plan
+    (`accept_degraded_standby` : un secours dégradé peut être un choix, par
+    exemple une cible d'un seul nœud) ; `suggest` : les classes de la cible
+    qui tiennent."""
+    out = []
+    for sc in sorted(used):
+        info = classes.get(sc) or {}
+        replicas, nodes = int(info.get("replicas") or 0), int(info.get("nodes") or 0)
+        if nodes and replicas > nodes:
+            suggest = sorted(c for c, i in classes.items() if 0 < int((i or {}).get("replicas") or 0) <= nodes)
+            out.append(_finding("standby-replicas-exceed-nodes", "warn" if accepted else "block",
+                                storage_class=sc, replicas=replicas, nodes=nodes, suggest=suggest,
+                                accepted=bool(accepted)))
+    return out
+
+
+def refusal_hint(findings):
+    """Les refus connus dits en clair pour la ligne de commande et le
+    journal (quoi, pourquoi, comment l'accepter) ; '' sinon. La console dit
+    les mêmes en cinq langues."""
+    out = []
+    for f in findings or []:
+        x = f.get("facts") or {}
+        if f.get("level") == "block" and f.get("code") == "standby-replicas-exceed-nodes":
+            fits = ", ".join(x.get("suggest") or []) or "none"
+            out.append(f"the recovery class {x.get('storage_class')} asks for {x.get('replicas')} replicas but the "
+                       f"recovery cluster has {x.get('nodes')} node(s), so every standby volume would stay "
+                       f"degraded: choose a class that fits ({fits}), or, if a degraded standby is deliberate, "
+                       "tick \"Accept degraded standby volumes\" in the plan's Settings tab or add "
+                       "--accept-degraded-standby to protect or resume")
+    return "; ".join(out)
 
 
 def check(src, dst, plan):
@@ -926,7 +1422,7 @@ def check(src, dst, plan):
     maps = plan.get("mappings") or {}
     opts = plan.get("options") or {}
     nets = maps.get("networks") or {}
-    needed, images_seen = {}, set()
+    needed, images_seen, used_classes = {}, set(), set()
     src_bi, dst_bi = src.get("backing_images") or {}, dst.get("backing_images") or {}
     dst_volumes = dst.get("volumes") or {}
     namespaces_seen = set()
@@ -954,11 +1450,12 @@ def check(src, dst, plan):
                 out += volume_findings(d.get("lh_volume"), d.get("pvc"), d.get("sc"),
                                        src.get("jobs") or {}, own_job)
             volumes.append({"vm_uid": uid, "disk": d["disk"], "claim": d["claim"]})
-            sc, f = _target_class(d, plan, dst)
+            sc, f = _target_class(d, plan, dst, f"{vm['namespace']}/{vm['name']}")
             if f:
                 out.append(f)
             if not sc:
                 continue
+            used_classes.add(sc)
             # un volume de secours déjà à nous (relance après l'ajout d'un
             # disque) occupe déjà sa place : il n'en demande pas davantage
             standby = target_volume_name(pid, uid, d["disk"], gen, vm["name"])
@@ -992,6 +1489,10 @@ def check(src, dst, plan):
             out.append(_finding("node-affinity-removed", "warn", vm=f"{vm['namespace']}/{vm['name']}"))
 
     out += _capacity(needed, dst.get("storage_classes") or {})
+    if phase == "protect":
+        out += replica_findings(used_classes, dst.get("storage_classes") or {},
+                                bool(opts.get("accept_degraded_standby")))
+        out += _empty_wave_hooks(plan, opts)
 
     if opts.get("cloud_init") == "rerun":
         out.append(_finding("cloud-init-rerun", "warn"))
@@ -1288,7 +1789,10 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
 # Raison -> état calculé, et priorité des états (le premier l'emporte)
 REASON_STATE = {"source-unreachable": "source-unreachable", "backup-error": "degraded",
                 "standby-degraded": "degraded", "rpo-drift": "drifting", "plan-drift": "drifting",
-                "rpo-exceeded": "lagging", "no-point": "lagging", "disk-never-backs-up": "degraded"}
+                "rpo-exceeded": "lagging", "no-point": "lagging", "disk-never-backs-up": "degraded",
+                # alerte sans changer l'état : la réplication continue, seul le
+                # carnet de reprise est d'avant (protect le réécrit)
+                "carnet-stale": None}
 COMPUTED_PRIORITY = ("source-unreachable", "degraded", "drifting", "lagging")
 
 
@@ -1323,7 +1827,11 @@ def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None)
         if not ev["complete"]:
             # un disque sans point appliqué : jamais « protégé » tout court
             reasons.append("no-point")
-        found = {REASON_STATE[r] for r in reasons}
+        if health.get("carnet_stale"):
+            # carnet de reprise relu par le suiveur, différent de ce que protect
+            # écrirait aujourd'hui (réglages ou VM source changés)
+            reasons.append("carnet-stale")
+        found = {REASON_STATE[r] for r in reasons} - {None}
         state = next((s for s in COMPUTED_PRIORITY if s in found), stored)
     ev["state"], ev["reasons"] = state, reasons
     return ev
@@ -1705,4 +2213,107 @@ def target_vm(source_vm, resource, mappings, options, claims, plan_id, generatio
         vm["spec"]["runStrategy"] = rs if rs in ("Always", "RerunOnFailure") else "Always"
     else:
         vm["spec"]["runStrategy"] = "Halted"
+    ref = f"{resource['namespace']}/{resource['name']}"
+    size = ((options or {}).get("resize") or {}).get(ref)
+    if size:
+        apply_resize(vm, size.get("cpu"), size.get("memory"))
+    text = ((options or {}).get("network_data") or {}).get(ref)
+    if text:
+        apply_network_data(vm, text)
     return vm, removed
+
+
+# harvester pkg/util/constants.go (v1.9.0) : `AnnotationReservedMemory`,
+# mémoire ôtée de la limite pour donner `domain.memory.guest`
+RESERVED_MEMORY_ANNOTATION = "harvesterhci.io/reservedMemory"
+HOTPLUG_ANNOTATION = "harvesterhci.io/enableCPUAndMemoryHotplug"
+
+
+def _bytes(q):
+    return vt.parse_quantity(q) if q else 0
+
+
+def apply_resize(vm, cpu=None, memory=None):
+    """Taille de la VM au secours, posée comme Harvester la pose.
+
+    Le formulaire d'une VM de Harvester écrit les vCPU dans `domain.cpu.cores`
+    (`sockets` et `threads` à 1) et dans `resources.limits.cpu`, la mémoire
+    dans `resources.limits.memory`. À la création, le mutateur de VM de
+    Harvester (pkg/webhook/resources/virtualmachine/mutator.go,
+    `patchResourceOvercommit` et `generateMemoryPatch`, lus dans la v1.9.0)
+    recalcule les `requests` depuis les limites et `overcommit-config`, et
+    fixe `memory.guest` à la limite moins la mémoire réservée : l'annotation
+    `harvesterhci.io/reservedMemory`, sinon 100 Mio, sinon rien quand le
+    réglage `additional-guest-memory-overhead-ratio` est posé (cas de harv1 :
+    `memory.guest` égal à la limite, voir `_vm_memory` de la console). Les
+    `requests` de la source sont donc retirées (le mutateur de la cible les
+    pose), et `memory.guest` garde l'écart limite - invité de la source (ou
+    l'annotation) : le carnet montre ce que la cible posera. Une VM à
+    branchement à chaud (annotation `enableCPUAndMemoryHotplug`, voir
+    `hv_vm.cpumem_patch`) compte ses vCPU en `sockets` (plafond
+    `maxSockets`) et garde la mémoire demandée en `memory.guest` (plafond
+    `maxGuest`), que le mutateur ne réécrit pas ; ce cas n'a pas été joué
+    sur un cluster."""
+    tspec = vm.setdefault("spec", {}).setdefault("template", {}).setdefault("spec", {})
+    domain = tspec.setdefault("domain", {})
+    res = domain.setdefault("resources", {})
+    limits = res.setdefault("limits", {})
+    requests = dict(res.get("requests") or {})
+    ann = (vm.get("metadata") or {}).get("annotations") or {}
+    hotplug = ann.get(HOTPLUG_ANNOTATION) == "true"
+    if cpu:
+        c = domain.setdefault("cpu", {})
+        if hotplug:
+            c["sockets"] = int(cpu)
+            c["cores"], c["threads"] = 1, 1
+            if c.get("maxSockets") and int(c["maxSockets"]) < int(cpu):
+                c["maxSockets"] = int(cpu)
+        else:
+            c["cores"], c["sockets"], c["threads"] = int(cpu), 1, 1
+            if c.get("maxSockets"):
+                c["maxSockets"] = 1          # comme le mutateur : maxSockets = sockets
+        limits["cpu"] = str(int(cpu))
+        requests.pop("cpu", None)
+    if memory:
+        mem = domain.setdefault("memory", {})
+        new = _bytes(memory)
+        if hotplug:
+            mem["guest"] = memory
+            if mem.get("maxGuest") and _bytes(mem["maxGuest"]) < new:
+                mem["maxGuest"] = memory
+        else:
+            old_limit, old_guest = _bytes(limits.get("memory")), _bytes(mem.get("guest"))
+            reserved = _bytes(ann.get(RESERVED_MEMORY_ANNOTATION))
+            if not reserved and old_limit and old_guest and old_limit >= old_guest:
+                reserved = old_limit - old_guest
+            mem["guest"] = quantity(new - reserved) if 0 < reserved < new else memory
+        limits["memory"] = memory
+        requests.pop("memory", None)
+    if requests:
+        res["requests"] = requests
+    else:
+        res.pop("requests", None)
+    return vm
+
+
+def apply_network_data(vm, text):
+    """Configuration réseau du secours (cloud-init `network-config`) : le
+    volume cloud-init de la VM (NoCloud ou ConfigDrive) la porte en ligne
+    (`networkData`) et perd sa référence à un secret de données réseau
+    (`networkDataSecretRef`, `networkDataBase64`). Sans volume cloud-init,
+    un volume NoCloud est ajouté, avec son disque."""
+    tspec = vm.setdefault("spec", {}).setdefault("template", {}).setdefault("spec", {})
+    volumes = tspec.setdefault("volumes", [])
+    for vol in volumes:
+        for kind in _CLOUD_INIT_KINDS:
+            if kind in vol:
+                ci = dict(vol[kind] or {})
+                for k in ("networkDataSecretRef", "networkDataBase64"):
+                    ci.pop(k, None)
+                ci["networkData"] = text
+                vol[kind] = ci
+                return vm
+    volumes.append({"name": "cloudinitdisk", "cloudInitNoCloud": {"networkData": text}})
+    devices = tspec.setdefault("domain", {}).setdefault("devices", {})
+    devices.setdefault("disks", []).append({"name": "cloudinitdisk", "disk": {"bus": "virtio"}})
+    return vm

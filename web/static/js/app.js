@@ -62,6 +62,12 @@ const App = (() => {
     // v1.95.0 : Shared resources > Usage
     if (name === 'usage') { if (window.Usage) Usage.start($('#usage-host')); }
     else if (window.Usage) Usage.stop();
+    // Disaster Recovery : contrats (tous les clusters) et sous-onglet d'un cluster
+    if (name === 'drplans') { if (window.Replication) Replication.start($('#rp-plans-host'), 'all'); }
+    else if (name === 'clusterdr') { if (window.Replication) Replication.start($('#rp-cluster-host'), 'cluster', currentCluster); }
+    else if (window.Replication) Replication.stop();
+    if (name === 'drlinks') { if (window.Replication) Replication.startLinks($('#rp-links-host')); }
+    else if (window.Replication) Replication.stopLinks();
     // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
     if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`)); }
     else if (window.KVM) KVM.stop();
@@ -279,6 +285,11 @@ const App = (() => {
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
     if (active === 'bookings' && window.Bookings) jobs.push(Bookings.load());
     if (active === 'usage' && window.Usage) jobs.push(Usage.load());
+    if (active === 'clusterdr' && window.Replication) jobs.push(Replication.start($('#rp-cluster-host'), 'cluster', currentCluster));
+    // les contrats et les liens ne dépendent pas du cluster choisi ; relus comme Activity
+    if (active === 'drplans' && window.Replication) jobs.push(Replication.load());
+    if (active === 'drlinks' && window.Replication) jobs.push(Replication.loadLinks());
+    if (window.Replication) Replication.paintBadges();
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
     if (active === 'overview') {
@@ -1784,6 +1795,8 @@ const App = (() => {
     });
 
     loadRole();
+    // Disaster Recovery : pastilles d'alerte du menu, relues toutes les minutes
+    if (window.Replication) Replication.startBadges();
 
     $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
 

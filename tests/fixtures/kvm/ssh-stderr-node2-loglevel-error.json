@@ -1,0 +1,36 @@
+{
+ "_comment": "stderr de ssh (OpenSSH 10.6p1 vers node2, sshd durci avec Banner) relevé le 24/10/2026 avec -o LogLevel=ERROR ; {state} remplace le répertoire d'état ; 'banner_without_loglevel_bytes' : taille de stderr du même appel sans LogLevel=ERROR",
+ "samples": {
+  "success": {
+   "rc": 0,
+   "stderr": "",
+   "kind": null,
+   "banner_without_loglevel_bytes": 1305
+  },
+  "hostkey": {
+   "rc": 255,
+   "stderr": "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n@    WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!     @\n@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\nIT IS POSSIBLE THAT SOMEONE IS DOING SOMETHING NASTY!\nSomeone could be eavesdropping on you right now (man-in-the-middle attack)!\nIt is also possible that a host key has just been changed.\nThe fingerprint for the ED25519 key sent by the remote host is\nSHA256:81Nop5uq4NBaqU/hzSyopOIxSoyytc6DgyLZd5/xXJY.\nPlease contact your system administrator.\nAdd correct host key in {state}/ssh/node2_known to get rid of this message.\nOffending ED25519 key in {state}/ssh/node2_known:1\nYou can use following command to remove the offending key:\nssh-keygen -R 172.16.1.12 -f {state}/ssh/node2_known\nHost key for 172.16.1.12 has changed and you have requested strict checking.\nHost key verification failed.\n",
+   "kind": "hostkey",
+   "banner_without_loglevel_bytes": 875
+  },
+  "auth-key": {
+   "rc": 255,
+   "stderr": "ju@172.16.1.12: Permission denied (publickey,password,keyboard-interactive).\n",
+   "kind": "auth",
+   "banner_without_loglevel_bytes": 1382
+  },
+  "auth-user": {
+   "rc": 255,
+   "stderr": "nosuchuser@172.16.1.12: Permission denied (publickey,password,keyboard-interactive).\n",
+   "kind": "auth",
+   "banner_without_loglevel_bytes": 1390
+  },
+  "unreachable-port": {
+   "rc": 255,
+   "stderr": "ssh: connect to host 172.16.1.12 port 2: No route to host\n",
+   "kind": "unreachable",
+   "banner_without_loglevel_bytes": 58
+  }
+ },
+ "banner": "You are accessing a U.S. Government (USG) Information System (IS) that is\nprovided for USG-authorized use only.\n\nBy using this IS (which includes any device attached to this IS), you consent\nto the following conditions:\n\n-The USG routinely intercepts and monitors communications on this IS for\npurposes including, but not limited to, penetration testing, COMSEC monitoring,\nnetwork operations and defense, personnel misconduct (PM), law enforcement\n(LE), and counterintelligence (CI) investigations.\n\n-At any time, the USG may inspect and seize data stored on this IS.\n\n-Communications using, or data stored on, this IS are not private, are subject\nto routine monitoring, interception, and search, and may be disclosed or used\nfor any USG-authorized purpose.\n\n-This IS includes security measures (e.g., authentication and access controls)\nto protect USG interests--not for your personal benefit or privacy.\n\n-Notwithstanding the above, using this IS does not constitute consent to PM, LE\nor CI investigative searching or monitoring of the content of privileged\ncommunications, or work product, related to personal representation or services\nby attorneys, psychotherapists, or clergy, and their assistants. Such\ncommunications and work product are private and confidential. See User\nAgreement for details.\n"
+}

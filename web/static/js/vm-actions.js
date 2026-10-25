@@ -716,6 +716,6 @@ const VMActions = (() => {
     deleteDialog({ cluster, ns, name, st, onDone });
   }
 
-  return { open, close, bulk, remove, follow, _build: build };
+  return { open, close, bulk, remove, follow, toast, _build: build };
 })();
 window.VMActions = VMActions;
