@@ -1540,3 +1540,73 @@ def test_a_concurrent_scrape_never_sees_half_the_series(client, env, monkeypatch
     assert overlaps == []
     plans = re.findall(r'harvester_ops_replication_rpo_objective_seconds\{plan="([ab])-', done[0])
     assert len(plans) == 40 and set(plans) == {"b"}
+
+
+# --- 2.0.0 : « Reprendre la commande » décidé par le serveur -----------------------------
+
+def _resume_action(as_user, user):
+    d = as_user(user, "GET", f"/api/replication/plans/{PID}").get_json()
+    found = [a for a in d["row"]["actions"] if a["name"] == "resume-command"]
+    assert len(found) <= 1
+    return found[0] if found else None
+
+
+@pytest.mark.parametrize("state,origin,run,need", RESUME_ROLES)
+@pytest.mark.parametrize("user", ["alice", "patronne"])
+def test_plan_row_offers_resume_with_the_role_the_route_requires(as_user, env, user, state, origin, run, need):
+    """La ligne du contrat porte l'action de reprise avec le rôle que la
+    route POST .../resume exigera : un opérateur ne voit plus un bouton
+    actif que le serveur refuse."""
+    _plan_state(env, state, origin, run)
+    a = _resume_action(as_user, user)
+    assert a is not None and a["role"] == need
+    ok = wapp.ROLE_RANK[USERS[user]] >= wapp.ROLE_RANK[need]
+    assert a["allowed"] is ok and a["reason"] == ("" if ok else "role")
+    assert bool(a["hint"]) is (not ok)
+
+
+@pytest.mark.parametrize("state,origin,run", [
+    ("protected", "", None),
+    ("draft", "", None),
+    ("measuring", "", None),                     # mesure en cours, rien d'interrompu
+    ("unprotected", "", None),
+    ("error", "", None),                         # erreur sans origine connue
+    ("draft", "", ("measure-start", {}, True, 1)),   # terminée
+])
+def test_plan_row_has_no_resume_when_nothing_is_interrupted(as_user, env, state, origin, run):
+    _plan_state(env, state, origin, run)
+    assert _resume_action(as_user, "alice") is None
+    assert _resume_action(as_user, "patronne") is None
+
+
+def test_plan_row_offers_resume_for_a_command_stopped_by_the_console(as_user, env):
+    """Décision 68 : une mesure arrêtée par l'arrêt de la console avant son
+    premier changement d'état laisse le plan en `draft` ; la reprise reste
+    proposée (à l'opérateur)."""
+    _plan_state(env, "draft")
+    conn = db.connect(env["db"])
+    db.record_run(conn, PID, "measure-start", now_utc(), 1, result="interrupted", points={"interval_s": 60})
+    conn.close()
+    a = _resume_action(as_user, "alice")
+    assert a == {"name": "resume-command", "role": "operator", "allowed": True, "reason": "", "hint": ""}
+
+
+@pytest.mark.parametrize("state,origin,interrupted,expect", [
+    ("protecting", None, (), True), ("failing_over", None, (), True), ("unprotecting", None, (), True),
+    ("error", "measuring", (), True), ("measuring", None, (), False), ("error", None, (), False),
+    ("protected", None, (), False), ("draft", None, ("measure-start",), True),
+    ("draft", None, ("measure-stop",), False), ("measuring", None, ("measure-stop",), True),
+])
+def test_resumable_reads_like_resume(state, origin, interrupted, expect):
+    runs = [{"operation": op, "finished_at": None, "result": "interrupted", "generation": 1} for op in interrupted]
+    assert wapp._rr.resumable(state, origin, runs, 1) is expect
+    # une ligne d'une autre génération ne compte pas
+    other = [dict(r, generation=2) for r in runs]
+    if interrupted and state == "draft":
+        assert wapp._rr.resumable(state, origin, other, 1) is False
+
+
+def test_plan_view_has_no_resumable_state_list_in_the_browser():
+    js = (ROOT / "web" / "static" / "js" / "replication-plan.js").read_text()
+    assert "'failing_over'].includes" not in js and "resumable" not in js
+    assert "U.action(row, 'resume-command')" in js and "resumeCmd.allowed" in js

@@ -285,6 +285,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   to another network of the recovery site (`retarget_vm`, check
   `network-unmapped`).
 
+- **Resume command of a contract follows the server**: the contract window
+  kept its own list of resumable states and offered **Resume command** to an
+  operator for a failover the server only lets an admin finish (refused with
+  403). The contract row now carries a `resume-command` action with its
+  role, `allowed` and reason, decided by `replication_run.resumable` (the
+  same reading as `resume`) and `_repl_resume_role`; the button is greyed
+  with the role it needs, and no longer appears when nothing is
+  interrupted (a measure still running).
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships

@@ -72,7 +72,8 @@ const ReplicationPlan = (() => {
     const row = d.row;
     const p = d.plan;
     const st = U.planState(row);
-    const resumable = ['error', 'protecting', 'measuring', 'unprotecting', 'failing_over'].includes(p.state);
+    // reprise d'une commande interrompue : le serveur dit si elle existe et qui peut la lancer
+    const resumeCmd = U.action(row, 'resume-command');
     const canOp = U.roleRank(d.role) >= 2;
     return `<div class="rp-view-head">
       <div class="rp-view-title"><h2>${esc(p.name)}</h2> ${U.stateBadge(st)} ${U.flow(row)}</div>
@@ -83,7 +84,8 @@ const ReplicationPlan = (() => {
         <button type="button" class="btn btn-sm btn-secondary tip" data-rpv="check" data-tip="${esc(canOp ? tr('rp.act.checkTip') : tr('rp.viewerTip'))}"${canOp ? '' : ' disabled'}>${icon('test')} ${esc(tr('rp.act.check'))}</button>
         ${U.actionButton(row, 'measure-start')}${U.actionButton(row, 'measure-stop')}${U.actionButton(row, 'protect', 'btn-primary')}
         ${U.actionButton(row, 'pause')}${U.actionButton(row, 'resume')}
-        ${resumable ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpv="resume-cmd" data-tip="${esc(tr('rp.act.resumeCmdTip'))}"${canOp ? '' : ' disabled'}>${icon('play')} ${esc(tr('rp.act.resumeCmd'))}</button>` : ''}
+        ${resumeCmd ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpv="resume-cmd"
+          data-tip="${esc(resumeCmd.allowed ? tr('rp.act.resumeCmdTip') : `${tr('rp.act.resumeCmdTip')} ${tr('rp.act.needsRole', { role: resumeCmd.role })}`)}"${resumeCmd.allowed ? '' : ' disabled aria-disabled="true"'}>${icon('play')} ${esc(tr('rp.act.resumeCmd'))}</button>` : ''}
         ${(U.action(row, 'failover') || U.action(row, 'failover-unplanned')) ? `<button type="button" class="btn btn-sm btn-danger tip" data-rpv="failover"
           data-tip="${esc(tr('rp.act.failoverDialogTip'))}">${icon('migrate')} ${esc(tr('rp.act.failoverDots'))}</button>` : ''}
       </div>

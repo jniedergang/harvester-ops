@@ -28462,6 +28462,11 @@ def api_replication_plan(plan_id):
     try:
         v = _rdb.plan_view(conn, plan, now)
         row = _rdb.plan_rows(conn, [plan], now, role=current_role())[0]
+        # reprise d'une commande interrompue : décidée ici (rôle du geste
+        # repris), jamais par une liste d'états dans le navigateur
+        resume_action = _repl_resume_action(conn, plan)
+        if resume_action:
+            row["actions"] = list(row.get("actions") or []) + [resume_action]
         status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
         out = {"plan": _rp.mask_plan(plan), "row": row, "status": status, "volumes": v["volumes"],
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
@@ -28972,6 +28977,19 @@ def _repl_resume_role(plan):
     if eff == "unprotecting" and _repl_inherits_backup_deletion(plan):
         return "admin", "resuming an unprotect that deletes the plan's backups needs the 'admin' role"
     return "operator", None
+
+
+def _repl_resume_action(conn, plan):
+    """L'action « reprendre la commande » d'un plan, de la même forme que
+    les autres (`name`, `role`, `allowed`, `reason`, plus `hint`), ou None
+    quand `resume` n'aurait rien à finir (`replication_run.resumable`)."""
+    origin = _rdb.error_origin(conn, plan["id"]) if plan.get("state") == "error" else None
+    if not _rr.resumable(plan.get("state"), origin, _rdb.list_runs(conn, plan["id"]), plan.get("generation")):
+        return None
+    role, hint = _repl_resume_role(plan)
+    ok = ROLE_RANK.get(current_role(), 0) >= ROLE_RANK[role]
+    return {"name": "resume-command", "role": role, "allowed": ok, "reason": "" if ok else "role",
+            "hint": "" if ok else (hint or "")}
 
 
 def _repl_forbidden(role, hint):
