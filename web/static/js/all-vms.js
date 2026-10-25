@@ -400,7 +400,10 @@ const AllVMs = (() => {
     timer = null;
   }
 
-  return { start, stop, load, _visible: visible };
+  /** Dernière lecture de /api/vms-all (ou null) : la recherche du menu des
+   *  hôtes y trouve les VMs sans relancer de lecture. */
+  const cached = () => data;
+  return { start, stop, load, cached, _visible: visible };
 })();
 
 window.AllVMs = AllVMs;

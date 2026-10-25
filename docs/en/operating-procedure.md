@@ -222,3 +222,39 @@ again.
 everything on the target (listed in `left`). After a completed failover,
 backups are purged by hand: see "Purging the backups after a completed
 failover" in the capabilities page.
+
+## 13. Navigation by hosts (2.0)
+
+A **host** is a whole Harvester cluster or a KVM hypervisor, never a
+Harvester node. The side menu lists every host the person can see, in two
+families, Harvester and KVM, under **Hosts**. There is no cap: a fleet of 60
+clusters and 40 KVM hosts is listed in full, in a part of the menu that
+scrolls on its own.
+
+- **Family head.** Each family can be folded (the choice is kept by the
+  browser) and says its state in one line, for example `58 ok, 2 in alert`.
+  The hosts not read yet are counted in its tooltip.
+- **Host row.** A dot gives the state (green reachable, red unreachable or
+  in error, orange access refused, grey not read yet), then the name and the
+  number of VMs when a screen has already read them. A host in alert stays
+  visible even in a folded family. The list never reads a host itself.
+- **Favourites.** The star on a host keeps it at the top of its family. Stars
+  are kept per person by the console, so they follow you to another
+  computer. Any role can star a host.
+- **Open host.** The host on screen unfolds under its name (one at a time):
+  Overview, Virtual machines, Containers, Imports and migrations, Parameters,
+  Disaster Recovery for a Harvester cluster; Overview, Virtual machines,
+  Parameters, Disaster Recovery for a KVM host.
+- **Search** (shortcut `/`). It filters the hosts by name, label (`key`,
+  `value` or `key=value`) and family, and offers the VMs the screens have
+  already read ("Go to the VM" opens the VMs of its host, filtered on it).
+  Enter opens the first result, Escape clears the search.
+- **Add a host** (administrator) opens a window with two choices: a Harvester
+  cluster (the same form as Settings > Clusters) or a KVM hypervisor (the
+  declaration window of the KVM screens).
+- Above the hosts: **Folders**, **Virtual machines** and **Containers** of the
+  whole fleet; below: **Disaster Recovery** and **Migrations**.
+
+Every entry is a real link: middle click opens it in a new tab, and the
+address can be copied. A link opened before signing in is opened again once
+signed in.

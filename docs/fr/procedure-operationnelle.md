@@ -227,3 +227,42 @@ rendue `not-started` n'a jamais commencé : la relancer.
 la cible (listé dans `left`). Après une bascule terminée, les sauvegardes
 se purgent à la main : voir « Purger les sauvegardes après une bascule
 terminée » dans la page des capacités.
+
+## 13. Navigation par hôtes (2.0)
+
+Un **hôte** est un cluster Harvester entier ou un hyperviseur KVM, jamais un
+nœud Harvester. Le menu latéral liste tous les hôtes que la personne voit, en
+deux familles, Harvester et KVM, sous **Hôtes**. Pas de plafond : une flotte
+de 60 clusters et 40 hôtes KVM est listée en entier, dans une partie du menu
+qui défile seule.
+
+- **Tête de famille.** Chaque famille se replie (le choix est gardé par le
+  navigateur) et dit son état en une ligne, par exemple `58 ok, 2 en alerte`.
+  Les hôtes pas encore lus sont comptés dans son info-bulle.
+- **Ligne d'un hôte.** Une pastille donne l'état (verte joignable, rouge
+  injoignable ou en erreur, orange accès refusé, grise pas encore lu), puis
+  le nom et le nombre de VMs quand un écran les a déjà lues. Un hôte en alerte
+  reste visible même dans une famille repliée. La liste ne lit jamais un hôte
+  elle-même.
+- **Favoris.** L'étoile d'un hôte le garde en tête de sa famille. Les étoiles
+  sont gardées par la console, par personne : on les retrouve sur un autre
+  poste. Tout rôle peut poser une étoile.
+- **Hôte ouvert.** L'hôte à l'écran se déplie sous son nom (un seul à la
+  fois) : Vue d'ensemble, Machines virtuelles, Conteneurs, Imports et
+  migrations, Paramètres, Disaster Recovery pour un cluster Harvester ; Vue
+  d'ensemble, Machines virtuelles, Paramètres, Disaster Recovery pour un hôte
+  KVM.
+- **Recherche** (raccourci `/`). Elle filtre les hôtes par nom, étiquette
+  (`clé`, `valeur` ou `clé=valeur`) et famille, et propose les VMs que les
+  écrans ont déjà lues (« Aller à la VM » ouvre les VMs de son hôte, filtrées
+  sur elle). Entrée ouvre le premier résultat, Échap vide la recherche.
+- **Ajouter un hôte** (administrateur) ouvre une fenêtre à deux choix : un
+  cluster Harvester (le formulaire de Réglages > Clusters) ou un hyperviseur
+  KVM (la fenêtre de déclaration des écrans KVM).
+- Au-dessus des hôtes : **Dossiers**, **Machines virtuelles** et
+  **Conteneurs** de toute la flotte ; en dessous : **Disaster Recovery** et
+  **Migrations**.
+
+Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
+onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert
+une fois connecté.

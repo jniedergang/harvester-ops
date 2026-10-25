@@ -15,12 +15,35 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   /api/me/favorites/<kind>/<host>` star a host for the person (any role),
   stored in the console database `folders.db`; not a tracked action, nothing
   written on a cluster.
+- **Side menu of hosts.** Under **Hosts**, every Harvester cluster and KVM
+  host in two foldable families, each with a one-line state (`58 ok, 2 in
+  alert`), a state dot and the VM count per host, a star to keep a host at
+  the top (kept per person by the console), and the open host unfolded with
+  its sub-menu (Overview, Virtual machines, Containers, Imports and
+  migrations, Parameters, Disaster Recovery). No cap: every host is listed,
+  in a part of the menu that scrolls on its own, and a host in alert stays
+  visible in a folded family. A search (shortcut `/`) filters the hosts by
+  name, label and family and offers the VMs already read; Enter opens the
+  first result. **Add a host** opens a window with two choices, Harvester or
+  KVM. Folders, Virtual machines, Containers, Disaster Recovery and
+  Migrations of the whole fleet sit around it. Every entry is a real link.
+  The previous menu stays below until it is removed.
+- **An address opened before signing in is opened again after.** The login
+  page keeps it for the tab only when the address grammar understands it,
+  and never writes it in the page.
 
 ### Tests
 - `tests/api/test_hosts_routes_200.py`, `tests/api/test_favorites_200.py`:
   states, Rancher-hidden cluster, counts filled from the screens' reads,
   refusals (400, 404), stars kept per person, and traps that fail the test
   if the list reads a cluster or a KVM host.
+- `tests/api/test_host_nav_model_200.py` (ordering, folding, search, no cap,
+  a deliberate mutation that hides alerts), `tests/e2e/test_host_nav_200.py`
+  (100 hosts, translated family heads, search, `/`, Enter, stars kept after a
+  reload, keyboard, tooltips, Add a host, Go to the VM),
+  `tests/api/test_login_address_200.py` and
+  `tests/e2e/test_login_address_200.py` (address kept through the login,
+  crafted address forgotten).
 
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 

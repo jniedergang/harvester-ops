@@ -206,6 +206,8 @@
       try { route = await apply(hash); } finally { applying -= 1; }
       if (!route) { const h = screenNow(); route = h ? R().parse(h) : null; }
       current = route;
+      // étape 2 : le menu des hôtes suit l'écran (hôte ouvert, entrée active)
+      if (root.HostNav && HostNav.sync) HostNav.sync(current);
     };
     // une navigation qui lève est journalisée : la promesse rendue par go()
     // ne rejette jamais (aucun appelant n'a de gestionnaire) et la file continue
@@ -251,12 +253,27 @@
     if (!h || h === location.hash) return;
     history.replaceState(history.state, '', h);
     current = R().parse(h);
+    if (root.HostNav && HostNav.sync) HostNav.sync(current);
+  }
+
+  // Étape 2 : adresse ouverte avant la connexion, gardée par la page de
+  // connexion (login.html) le temps de se connecter
+  const AFTER_LOGIN = 'harvester_ops_after_login';
+
+  /** Remet dans la barre d'adresse l'écran demandé avant la connexion, s'il
+   *  est encore valable et que rien d'autre n'est demandé. */
+  function restoreAfterLogin() {
+    let h = null;
+    try { h = sessionStorage.getItem(AFTER_LOGIN); sessionStorage.removeItem(AFTER_LOGIN); } catch (e) { return; }
+    if (!h || location.hash || !R().acceptable(h)) return;
+    history.replaceState(history.state, '', bareUrl() + h);
   }
 
   /** Appelé par App.init APRÈS bind() : applique l'adresse du chargement. */
   function start() {
     if (started) return queue;
     started = true;
+    restoreAfterLogin();
     root.addEventListener('hashchange', () => { enqueue(location.hash); });
     return enqueue(location.hash);
   }

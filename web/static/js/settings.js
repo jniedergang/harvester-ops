@@ -236,6 +236,7 @@ const Settings = (() => {
       btn.innerHTML = `<span class="lang-flag">${code.toUpperCase()}</span><span>${label}</span>`;
       btn.addEventListener('click', () => {
         i18n.setLang(code);
+        if (window.HostNav) HostNav.render();     // menu des hôtes, dessiné par le script
         renderLanguageGrid();
         if (window.App && window.App.refreshStatus)  window.App.refreshStatus();
         if (window.App && window.App.loadVMOrder)    window.App.loadVMOrder();

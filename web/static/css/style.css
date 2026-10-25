@@ -5705,3 +5705,65 @@ body.sidebar-collapsed .rp-menu-badge { position: absolute; margin: 0; right: 4p
 .kvms-progress { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
 .kvms-progress[hidden] { display: none; }
 .kvms-phase-head { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }
+
+/* ============================================================================
+   Navigation 2.0 : menu des hôtes (host-nav.js)
+   Mêmes rangées que .tab ; rien ne revient à la ligne (règle de #sidebar).
+   ============================================================================ */
+.host-nav { display: flex; flex-direction: column; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--border); }
+/* Mêmes rangées que les entrées de l'ancien menu (display block) : une rangée
+   flex changeait de hauteur d'un pixel quand le libellé disparaît dans le rail,
+   et toute la navigation bougeait au dépliage (test_the_menu_rows_never_move). */
+button.tab.hnav-entry { background: none; border: 0; border-left: 3px solid transparent; width: 100%; text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
+body.sidebar-collapsed button.tab.hnav-entry { text-align: center; border-left: 0; }
+.hnav-search { position: relative; padding: 6px 12px 6px 12px; }
+.hnav-search input { width: 100%; padding: 5px 26px 5px 26px; font-size: 12px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; box-sizing: border-box; }
+.hnav-search-icon { position: absolute; left: 20px; top: 12px; color: var(--text-dim); display: inline-flex; pointer-events: none; }
+.hnav-kbd { position: absolute; right: 18px; top: 10px; font-size: 10px; border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 4px; color: var(--text-dim); background: var(--bg); font-family: var(--font-mono); }
+.hnav-sec { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; padding: 6px 18px 2px; }
+.hnav-results { padding-bottom: 4px; }
+.hnav-dim { color: var(--text-dim); font-size: 11px; }
+/* La liste des hôtes a sa propre hauteur : cent hôtes ne repoussent pas le reste du menu */
+.hnav-families { max-height: 52vh; overflow-y: auto; overflow-x: hidden; }
+.hnav-fam-head { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; cursor: pointer;
+  height: 28px; box-sizing: border-box; padding: 0 12px 0 18px; color: var(--text); font: inherit; font-size: 12.5px; font-weight: 600; text-align: left; }
+.hnav-fam-head:hover { background: var(--bg-elev); }
+.hnav-chev { display: inline-flex; transition: transform .15s ease; color: var(--text-dim); }
+.hnav-fam.collapsed .hnav-chev { transform: rotate(-90deg); }
+.hnav-fam-total { color: var(--text-dim); font-weight: 400; }
+.hnav-fam-sum { margin-left: auto; font-weight: 400; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.hnav-fam-sum.has-alert { color: var(--warn); }
+.hnav-host { display: flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px 0 26px; border-left: 3px solid transparent; font-size: 12.5px; }
+.hnav-host:hover { background: var(--bg-elev); }
+.hnav-host.open { background: var(--bg-elev); border-left-color: var(--accent); }
+.hnav-host.alert .hnav-host-name { color: var(--warn); }
+.hnav-host-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); text-decoration: none; padding: 2px 0; }
+.hnav-host-name:hover, .hnav-host.open .hnav-host-name { color: var(--text); }
+.hnav-host.open .hnav-host-name { color: var(--accent); font-weight: 600; }
+.hnav-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); opacity: .6; }
+.hnav-dot.st-ok { background: var(--done); opacity: 1; }
+.hnav-dot.st-unreachable, .hnav-dot.st-error { background: var(--error); opacity: 1; }
+.hnav-dot.st-denied { background: var(--warn); opacity: 1; }
+.hnav-count { font-size: 11px; color: var(--text-dim); min-width: 1.5em; text-align: right; }
+.hnav-star { background: none; border: 0; padding: 0 2px; cursor: pointer; color: var(--text-dim); opacity: .35; display: inline-flex; }
+.hnav-host:hover .hnav-star, .hnav-star:focus-visible { opacity: 1; }
+.hnav-star.on { color: #d39b00; opacity: 1; }
+.hnav-star.on svg { fill: currentColor; }
+.hnav-sub { margin: 0 0 4px 30px; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+.hnav-empty { height: 24px; line-height: 24px; padding: 0 18px 0 30px; font-size: 12px; color: var(--text-dim); overflow: hidden; }
+body.sidebar-collapsed .hnav-empty { visibility: hidden; }
+body.sidebar-collapsed .hnav-search input { padding-left: 4px; padding-right: 4px; }
+body.sidebar-collapsed .hnav-search-icon, body.sidebar-collapsed .hnav-chev { visibility: hidden; }
+body.sidebar-collapsed .hnav-host { padding-left: 10px; }
+body.sidebar-collapsed .hnav-sub { margin-left: 0; border-left: 0; }
+/* « + Ajouter un hôte » : deux choix */
+.host-add-modal { max-width: 560px; }
+.host-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 18px 24px 24px; }
+.host-add-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; cursor: pointer;
+  text-align: left; font: inherit; color: var(--text); white-space: normal; }
+.host-add-choice:hover, .host-add-choice:focus-visible { border-color: var(--accent); }
+.host-add-choice .hint { margin: 0; font-size: 12px; }
+.host-add-icon { color: var(--accent); display: inline-flex; }
+@media (max-width: 560px) { .host-add-choices { grid-template-columns: 1fr; } }

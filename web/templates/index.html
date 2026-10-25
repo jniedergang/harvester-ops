@@ -42,7 +42,60 @@
               title="What each version brought">v{{ version }}</button>
     </header>
 
-    <div class="cluster-selector">
+    <nav>
+      <!-- Navigation 2.0 : le menu des hôtes (host-nav.js). L'ancien menu
+           (sélecteur de cluster et groupes par cluster, plus bas) reste en
+           place jusqu'à son retrait, puis disparaît. -->
+      <div id="host-nav" class="host-nav">
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="folders" href="#folders"
+           data-i18n-title="hnav.foldersTip" title="Your folders: VMs, containers and hosts in one shared tree">
+          <span class="tab-icon" data-icon="bundle"></span>
+          <span class="sidebar-label" data-i18n="hnav.folders">Folders</span>
+        </a>
+        <div class="hnav-search">
+          <span class="hnav-search-icon" data-icon="search" data-icon-size="14" aria-hidden="true"></span>
+          <input type="search" id="hnav-q" autocomplete="off" class="tip"
+                 data-i18n-placeholder="hnav.search" placeholder="Search a host or a VM"
+                 data-i18n-title="hnav.searchTip" data-tip-i18n="hnav.searchTip"
+                 title="Filters the hosts by name, label or family and offers the matching VMs. Shortcut: /. Enter opens the first result."
+                 aria-label="Search a host or a VM">
+          <kbd class="hnav-kbd sidebar-label" data-i18n-title="hnav.searchKeyTip" title="Press / to go to the search">/</kbd>
+        </div>
+        <div id="hnav-results" class="hnav-results" hidden></div>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="vms" href="#vms"
+           data-i18n-title="hnav.vmsTip" title="Every VM, Harvester and KVM, in your folders">
+          <span class="tab-icon" data-icon="vm"></span>
+          <span class="sidebar-label" data-i18n="hnav.vms">Virtual machines</span>
+        </a>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="containers" href="#containers"
+           data-i18n-title="hnav.containersTip" title="The container workloads of every cluster">
+          <span class="tab-icon" data-icon="containers"></span>
+          <span class="sidebar-label" data-i18n="hnav.containers">Containers</span>
+        </a>
+        <a class="tab hnav-entry hnav-hosts-head" data-hnav="root" data-hnav-root="hosts" href="#hosts"
+           data-i18n-title="hnav.hostsTip" title="Index of every host: a table to sort and filter">
+          <span class="tab-icon" data-icon="node"></span>
+          <span class="sidebar-label" data-i18n="hnav.hosts">Hosts</span>
+        </a>
+        <div id="hnav-families" class="hnav-families"></div>
+        <button type="button" class="tab hnav-entry hnav-add needs-admin" id="hnav-add" data-hnav="add"
+                data-i18n-title="hnav.addTip" title="Add a host: a Harvester cluster or a KVM hypervisor">
+          <span class="tab-icon" data-icon="add"></span>
+          <span class="sidebar-label" data-i18n="hnav.add">Add a host</span>
+        </button>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="dr" href="#dr"
+           data-i18n-title="hnav.drTip" title="Every replication contract: state, RPO held, actions">
+          <span class="tab-icon" data-icon="shield"></span>
+          <span class="sidebar-label" data-i18n="hnav.dr">Disaster Recovery</span>
+          <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
+        </a>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="migrations" href="#migrations"
+           data-i18n-title="hnav.migrationsTip" title="Every VMware migration wave and transfer between hosts">
+          <span class="tab-icon" data-icon="migrate"></span>
+          <span class="sidebar-label" data-i18n="hnav.migrations">Migrations</span>
+        </a>
+      </div>
+      <div class="cluster-selector">
       <label class="sidebar-label" data-i18n="header.cluster">Cluster</label>
       <div class="cluster-row">
         <select id="cluster-select">
@@ -54,7 +107,6 @@
       </div>
     </div>
 
-    <nav>
       <div class="tab-group expanded" id="tab-group-cluster">
         <a class="tab tab-group-head" data-group="cluster" href="#cluster" data-i18n-title="tab.cluster" title="Cluster">
           <span class="tab-icon" data-icon="node"></span>
@@ -1205,6 +1257,35 @@
   </div>
 </div>
 
+<!-- Navigation 2.0 : « + Ajouter un hôte », un cluster Harvester ou un hyperviseur KVM -->
+<div class="modal-overlay" id="host-add-modal" role="dialog" aria-modal="true" aria-labelledby="host-add-title" aria-hidden="true">
+  <div class="modal host-add-modal">
+    <div class="modal-header">
+      <div>
+        <h3 id="host-add-title" data-i18n="hnav.addTitle">Add a host</h3>
+        <div class="modal-subtitle" data-i18n="hnav.addSubtitle">Choose the family of the new host</div>
+      </div>
+      <button class="btn-close" data-add-close data-i18n-title="common.close" title="Close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body host-add-choices">
+      <button type="button" class="card host-add-choice tip" data-add-kind="harvester"
+              data-tip-i18n="hnav.addHarvesterTip" data-i18n-title="hnav.addHarvesterTip"
+              title="Declare a Harvester cluster: kubeconfig, nodes and their SSH key">
+        <span class="host-add-icon" data-icon="node" data-icon-size="22"></span>
+        <strong data-i18n="hnav.addHarvester">Harvester cluster</strong>
+        <span class="hint" data-i18n="hnav.addHarvesterHint">A whole cluster: its kubeconfig, its nodes and their SSH key.</span>
+      </button>
+      <button type="button" class="card host-add-choice tip" data-add-kind="kvm"
+              data-tip-i18n="hnav.addKvmTip" data-i18n-title="hnav.addKvmTip"
+              title="Declare a KVM host: address, SSH user and key, host key fingerprint">
+        <span class="host-add-icon" data-icon="compute" data-icon-size="22"></span>
+        <strong data-i18n="hnav.addKvm">KVM hypervisor</strong>
+        <span class="hint" data-i18n="hnav.addKvmHint">A libvirt host reached over SSH, without agent.</span>
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- v1.56.0 : historique des versions, lu dans CHANGELOG.md -->
 <div class="modal-overlay" id="versions-modal" role="dialog" aria-modal="true" aria-labelledby="versions-modal-title" aria-hidden="true">
   <div class="modal modal-large versions-modal">
@@ -1395,6 +1476,7 @@
 <script type="module" src="/static/js/notes.js"></script>
 <script src="/static/js/routes.js"></script>
 <script src="/static/js/router.js"></script>
+<script src="/static/js/host-nav.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>

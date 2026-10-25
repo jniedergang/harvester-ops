@@ -143,6 +143,12 @@ const KVM = (() => {
 
   // -- cycle de vie (appelé par App.setTab) -------------------------------------
   let cur = null;   // { view, host, timer, data, details, prefs, busy }
+  // Navigation 2.0 : VMs de la dernière lecture (recherche du menu des
+  // hôtes) et filtre à poser au prochain affichage (« Aller à la VM »)
+  let lastVms = [];
+  let nextPrefs = null;
+  const cachedVms = () => lastVms.slice();
+  function preset(p) { nextPrefs = Object.assign({}, p || {}); }
 
   function start(view, host) {
     stop();
@@ -150,7 +156,10 @@ const KVM = (() => {
     cur = { view, host, data: null, details: {}, pools: {}, images: {}, links: {}, openLinks: new Set(),
             prefs: { host: '', state: '', text: '', label: '', sort: 'name', dir: 1, sub: 'pools' },
             busy: 0, open: new Set() };
+    if (nextPrefs) { Object.assign(cur.prefs, nextPrefs); nextPrefs = null; }
     shell();
+    const text = cur.host.querySelector('[data-kvm-filter="text"]');
+    if (text && cur.prefs.text) text.value = cur.prefs.text;
     cur.timer = setInterval(() => {
       if (cur && cur.host.isConnected && !document.hidden && !cur.busy && !menu) load();
     }, REFRESH_MS);
@@ -211,6 +220,10 @@ const KVM = (() => {
     const d = await getJson(url);
     if (c !== cur) return;
     c.data = d;
+    if (Array.isArray(d.vms)) lastVms = d.vms.map((v) => ({ host: v.host, name: v.name }));
+    else if (Array.isArray(d.hosts) && !perHostView) {
+      lastVms = [].concat(...d.hosts.map((h) => (h.vms || []).map((v) => ({ host: h.name, name: v.name }))));
+    }
     if (perHostView) {
       render();
       const names = (d.hosts || []).filter((h) => !h.error && (!c.prefs.host || h.name === c.prefs.host)).map((h) => h.name);
@@ -1169,7 +1182,8 @@ const KVM = (() => {
   // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
   // l'actualisation automatique), lu par les tests
   // follow : partagé avec kvm-vm.js (fenêtres instantanés, clonage, suppression)
-  return { start, stop, load, follow, openDeclare, gestureWhy, operationWhy, stateLabel, busy: () => (cur ? cur.busy : null) };
+  return { start, stop, load, follow, openDeclare, gestureWhy, operationWhy, stateLabel, cachedVms, preset,
+           busy: () => (cur ? cur.busy : null) };
 })();
 
 if (typeof window !== 'undefined') window.KVM = KVM;

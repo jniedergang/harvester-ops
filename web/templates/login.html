@@ -153,6 +153,21 @@
     </div>
   </main>
 <script src="/static/js/i18n.js"></script>
+<script src="/static/js/routes.js"></script>
+<script>
+  // Navigation 2.0 : une adresse ouverte avant la connexion (/login#...) est
+  // gardée pour l'onglet, puis rouverte après la connexion (router.js). Seule
+  // une adresse que la grammaire comprend est gardée ; elle n'est jamais
+  // écrite dans la page.
+  (function () {
+    try {
+      var KEY = 'harvester_ops_after_login';
+      var h = location.hash;
+      if (h && window.Routes && Routes.acceptable(h)) sessionStorage.setItem(KEY, h);
+      else if (!h && location.pathname === '/login') sessionStorage.removeItem(KEY);
+    } catch (e) { /* sans stockage : écran par défaut après connexion */ }
+  })();
+</script>
 <script>
   (function () {
     try {

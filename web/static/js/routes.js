@@ -268,8 +268,20 @@
     return r.name === 'unknown' ? null : r;
   }
 
+  /**
+   * Adresse gardée le temps d'une connexion (page de connexion, puis
+   * router.js) : forme courte et sûre, et comprise par la grammaire ou
+   * ancien jeton connu. Jamais une adresse arbitraire.
+   */
+  function acceptable(hash) {
+    const h = String(hash || '');
+    if (!/^#[A-Za-z0-9._~%/-]{1,512}$/.test(h)) return false;
+    const raw = h.slice(1);
+    return parse(h).name !== 'unknown' || Object.prototype.hasOwnProperty.call(LEGACY, raw);
+  }
+
   const api = {
-    parse, format, fromLegacy, validHost,
+    parse, format, fromLegacy, validHost, acceptable,
     LEGACY, HARVESTER_PARAMS, KVM_PARAMS, HARVESTER_PANES, IMPORT_PANES, AUTOMATION,
   };
   root.Routes = api;

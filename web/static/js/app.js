@@ -30,7 +30,9 @@ const App = (() => {
     // highlights exactly one of them at a time. (Don't filter out
     // .tab-child here or Cluster's Démarrage/Arrêt children stop
     // lighting up when selected.)
-    $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
+    // Navigation 2.0 : les entrées du menu des hôtes (data-hnav) sont
+    // peintes par HostNav d'après la route, pas par l'onglet affiché.
+    $$('.tab:not([data-hnav])').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     // v1.77.0 : l'entrée active reste visible, même dans un groupe replié
     // (VM Import / Export s'ouvre replié, et un F5 ou un lien direct sur
     // l'une de ses entrées la cachait sinon).
@@ -522,6 +524,13 @@ const App = (() => {
       (data.vms || []).forEach(vm => {
         (groups[vm.namespace] = groups[vm.namespace] || []).push(vm);
       });
+      // Navigation 2.0 : « Aller à la VM » de la recherche du menu
+      if (pendingVm && pendingVm.cluster === asked) {
+        if (groups[pendingVm.ns]) currentNamespace = pendingVm.ns;
+        const f = $('#ns-vm-filter');
+        if (f) f.value = pendingVm.name;
+        pendingVm = null;
+      }
 
       // Populate the namespace dropdown
       const sortedNs = Object.keys(groups).sort();
@@ -1759,7 +1768,9 @@ const App = (() => {
   // Event bindings
   // -------------------------------------------------------------------------
   function bind() {
-    $$('.tab').forEach(t => t.addEventListener('click', (e) => {
+    // Les entrées du menu des hôtes sont de vrais liens appliqués par le
+    // routeur (host-nav.js) : pas de bascule d'onglet ici.
+    $$('.tab:not([data-hnav])').forEach(t => t.addEventListener('click', (e) => {
       e.preventDefault();
       // Group heads without a data-tab (e.g. "cluster", "automation" —
       // purely a container) only toggle expansion. The first child of the
@@ -2341,6 +2352,15 @@ const App = (() => {
     if ($('#tab-automation')?.classList.contains('active') && window.CAPI && CAPI.reactivate) CAPI.reactivate();
   }
 
+  // Navigation 2.0 : la recherche du menu ouvre les VMs d'un cluster sur une VM
+  let pendingVm = null;
+  /** Ouvre les VMs du cluster, espace de noms de la VM choisi et liste
+   *  filtrée sur son nom (la navigation elle-même suit le lien cliqué). */
+  function focusVm(cluster, ns, name) {
+    pendingVm = { cluster, ns, name };
+    if ($('#tab-namespaces')?.classList.contains('active') && currentCluster === cluster) refreshNamespaces(false);
+  }
+
   /** Ouvre un écran d'un hôte (remplace « valeur du sélecteur + change »). */
   function openHost(kind, name, sub, tab, pane) {
     const route = { name: 'host', kind, host: name, sub: sub || null, tab: tab || null, pane: pane || null, id: null };
@@ -2355,7 +2375,7 @@ const App = (() => {
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
            mountTopology, stopBoards, setTab,
-           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost,
+           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm,
            // réservé au routeur (router.js)
            _nav: { showRoute, restoreFromStorage, screen, setCluster } };
 })();
