@@ -591,9 +591,6 @@ const KVM = (() => {
     document.addEventListener('pointerdown', menu.outside, true);
     document.addEventListener('keydown', menu.keys, true);
     el.querySelector('.vma-item:not([aria-disabled])')?.focus();
-    // prochaine version : disques et cartes de la VM lus à l'ouverture du menu
-    const hotGroup = el.querySelector('[data-kvm-hot-group]');
-    if (hotGroup) KVMForm.fillMenuDevices(hotGroup, v, cur.data.edit_operations, role());
     el.addEventListener('click', (e) => {
       if (window.KVMForm && KVMForm.onMenuClick(e, v, closeMenu)) return;
       const c = e.target.closest('[data-kvm-console]');

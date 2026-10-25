@@ -2906,9 +2906,14 @@ classification. Only the changed fields are sent.
   added by hand. The window lists them read-only ("kept as is").
 - Balloon on or off, serial console, watchdog, firmware serial and disk
   I/O threads are set at creation only. A transient VM opens read-only.
-- **Hot gestures** in the VM menu, as in Harvester: CPU and memory, Add a
-  disk, Add a card, Cloud-init, and per device Remove, Insert an image,
-  Eject. Each result says now, next boot or refused, with the reason.
+- **One editing entry in the menu (1.101.3).** Below the power, console,
+  snapshot, clone and delete entries, the menu of a KVM VM has a single
+  editing entry, **Edit**. Hot changes are made in this window: CPU and
+  memory, add or remove a disk, insert or eject the media of a CD-ROM,
+  add or remove a card, cloud-init (with a new run). Each field says
+  now, next boot or refused before you send, and the result says it per
+  change. The `/hot/<op>` routes and `harvester-kvm vm <gesture>` stay
+  for scripts.
 - **Cloud-init** of an existing VM: the seed is read back (operator role),
   regenerated as a new volume and swapped in; **Run cloud-init again at next boot**
   gives it a new instance id. An empty user-data that would erase the

@@ -120,7 +120,7 @@ def test_no_server_value_is_interpolated_raw_into_html(name):
 # un contrôle que chaque entrée sert encore. Hors portée : les chaînes
 # assemblées par « + » hors gabarit et les .innerHTML affectés d'une variable
 # (couverts par la relecture et les e2e à noms hostiles).
-BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "hfield", "opt",
+BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "opt",
             "fieldHtml", "appliedBadge", "unmanagedHtml", "headHtml", "actionsHtml", "field", "li",
             "th", "checksHtml", "stateBadge", "errorBadge", "yes", "vmRow", "hostTile", "opItem",
             "existingDisksHtml", "existingNicsHtml", "renderSection", "imagesStateHtml",
@@ -132,7 +132,7 @@ HTML_VARS = {
     "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
     "cloudinit-form.js": set(),
     "kvm-storage.js": {"cls", "unread"},
-    "kvm-form.js": {"attrs", "cls", "control", "dis", "existing", "extra", "hot", "list", "media", "ro",
+    "kvm-form.js": {"cls", "control", "dis", "existing", "hot", "list", "media", "ro",
                     "tip", "whyHtml"},
     "kvm.js": {"acts", "bad", "body", "byState", "cls", "data", "declare", "filters", "flags", "g", "head",
                "head(h.name)", "inner", "labels", "links", "op", "open", "partly", "remove", "sha", "state",
@@ -264,12 +264,24 @@ def test_kvm_actions_are_followed_through_kvm_follow():
     assert s.count("follow(out.action_id") >= 4
 
 
+def test_kvm_menu_editing_group_is_edit_only():
+    """1.101.3 : le groupe d'édition du menu d'une VM KVM n'a qu'une entrée,
+    « Modifier » ; les gestes à chaud passent par la fenêtre Modifier (routes
+    /hot/ gardées pour la CLI et l'API) et le menu ne lit plus la VM."""
+    s = SRC["kvm-form.js"]
+    body = s[s.index("function menuGroupHtml("):s.index("function onMenuClick(")]
+    assert re.findall(r'data-kvm-hot="([^"$]+)"', body) == ["edit"]
+    assert body.count("<button") == 1 and "data-kvm-hot=\"${" not in body
+    for gone in ("fillMenuDevices", "openHot", "/hot/", "data-kvm-hot-devices"):
+        assert gone not in s, gone
+    assert "fillMenuDevices" not in SRC["kvm.js"]
+
+
 def test_user_data_never_lands_in_an_attribute():
     s = SRC["kvm-form.js"]
     for m in re.finditer(r'<textarea[^>]*data-ci="(userData|networkData)"[^>]*>', s):
         assert "value=" not in m.group(0)
     assert ".value = st.loadedCi.user_data" in s
-    assert "ud.value = st.loaded;" in s and "st.loaded = d.user_data || '';" in s
     # le mot de passe VNC est une case : jamais une valeur dans la page
     assert "'display.password': { s: 'firmware', type: 'check'" in s
 

@@ -3190,10 +3190,15 @@ classification exacte du serveur. Seuls les champs changés partent.
 - Ballon actif ou non, console série, chien de garde, numéro de série du
   micrologiciel et fils d'E/S des disques se règlent à la création
   seulement. Une VM transitoire s'ouvre en lecture seule.
-- **Gestes à chaud** dans le menu de la VM, comme dans Harvester : CPU et
-  mémoire, Ajouter un disque, Ajouter une carte, Cloud-init, et par
-  appareil Retirer, Insérer une image, Éjecter. Chaque résultat dit
-  maintenant, prochain démarrage ou refusé, avec la raison.
+- **Une seule entrée d'édition dans le menu (1.101.3).** Sous les entrées
+  d'alimentation, de console, d'instantanés, de clonage et de suppression,
+  le menu d'une VM KVM n'a plus qu'une entrée d'édition, **Modifier**. Les
+  changements à chaud se font dans cette fenêtre : CPU et mémoire, ajouter
+  ou retirer un disque, insérer ou éjecter le média d'un CD-ROM, ajouter ou
+  retirer une carte, cloud-init (avec une nouvelle exécution). Chaque champ
+  dit maintenant, prochain démarrage ou refusé avant l'envoi, et le
+  résultat le dit par changement. Les routes `/hot/<op>` et
+  `harvester-kvm vm <geste>` restent pour les scripts.
 - **Cloud-init** d'une VM existante : le seed est relu (rôle opérateur),
   régénéré dans un nouveau volume et mis à la place ;
   **Rejouer cloud-init au prochain démarrage** lui donne un nouvel identifiant
