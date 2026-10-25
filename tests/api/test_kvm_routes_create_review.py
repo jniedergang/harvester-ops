@@ -384,6 +384,37 @@ def test_the_sweep_runs_at_startup_outside_read_workers():
         in SRC[i:i + 3000]
 
 
+SPEC_SWEEP_CASES = [
+    # (nom, âge en secondes, fichier ordinaire, retiré)
+    ("kvm-spec-old.json", wapp.KVM_SPEC_TTL + 60, True, True),
+    ("kvm-spec-fresh.json", 30, True, False),
+    ("kvm-spec-dir.json", wapp.KVM_SPEC_TTL + 60, False, False),
+    ("other-old.json", wapp.KVM_SPEC_TTL + 60, True, False),
+    ("kvm-spec-old.txt", wapp.KVM_SPEC_TTL + 60, True, False),
+]
+
+
+def test_startup_sweep_removes_leftover_spec_files(tmp_path):
+    """Revue finale m2 : un spec laissé par une console tuée pendant une
+    action (user-data, mots de passe cloud-init) ne reste pas sur le disque."""
+    now = time.time()
+    for name, age, regular, _ in SPEC_SWEEP_CASES:
+        p = tmp_path / name
+        p.write_text("{}") if regular else p.mkdir()
+        os.utime(p, (now - age, now - age))
+    assert wapp._kvm_spec_sweep(tmp_path, now=now) == ["kvm-spec-old.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == sorted(
+        c[0] for c in SPEC_SWEEP_CASES if not c[3])
+    assert wapp._kvm_spec_sweep(tmp_path / "absent", now=now) == []
+    assert not (tmp_path / "absent").exists()
+
+
+def test_the_spec_sweep_runs_at_startup_outside_read_workers():
+    i = SRC.index("# au démarrage de la console (un processus lecteur n'écrit rien)")
+    block = SRC[i:i + 400]
+    assert block.index("if not IS_READ_WORKER:") < block.index("_kvm_spec_sweep()")
+
+
 # --- 6. lectures coûteuses : clé partagée sans paramètre inconnu --------------------------------
 
 @pytest.mark.parametrize("path,call", [

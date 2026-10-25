@@ -23389,10 +23389,43 @@ def _kvm_staging_sweep(state=None, ttl=KVM_STAGING_TTL, now=None):
     return removed
 
 
+KVM_SPEC_TTL = 600                     # le script lit son spec dès son lancement
+
+
+def _kvm_spec_sweep(work_dir=None, ttl=KVM_SPEC_TTL, now=None):
+    """Retire les fichiers `kvm-spec-*.json` (spec d'une action KVM, qui peut
+    porter un user-data et des mots de passe cloud-init) laissés dans le
+    répertoire de travail par une console tuée pendant l'action : le
+    `cleanup` de l'action n'a pas tourné. Lancé au démarrage, quand aucune
+    action de cette console ne court ; `ttl` couvre un script encore en
+    train de lire le sien. Ne crée pas le répertoire. Rend les noms retirés."""
+    d = Path(work_dir or os.environ.get("HARVESTER_OPS_WORK_DIR") or (CAPI_BUNDLE_DIR / ".work"))
+    now = time.time() if now is None else now
+    removed = []
+    try:
+        entries = list(d.glob("kvm-spec-*.json"))
+    except OSError:
+        return removed
+    for p in entries:
+        try:
+            st = p.lstat()
+            if not _stat.S_ISREG(st.st_mode) or now - st.st_mtime < ttl:
+                continue
+            p.unlink()
+            removed.append(p.name)
+        except OSError:
+            continue
+    if removed:
+        log.info("kvm: %d leftover spec file(s) removed", len(removed))
+    return removed
+
+
 # au démarrage de la console (un processus lecteur n'écrit rien)
 if not IS_READ_WORKER:
     with contextlib.suppress(Exception):
         _kvm_staging_sweep()
+    with contextlib.suppress(Exception):
+        _kvm_spec_sweep()
 
 
 # --- envoi d'images (téléversement, téléchargement), plusieurs hôtes ----------------------
