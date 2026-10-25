@@ -406,7 +406,9 @@ const ReplicationPlan = (() => {
       const out = await U.api(method, url, body);
       U.follow(out.action_id, msg, doneText, (ok) => {
         if (btn) btn.disabled = false;
-        load(v); reloadLists();
+        const loaded = load(v); reloadLists();
+        // après le nouveau rendu de la vue, qui recopie le message
+        if (!ok) Promise.resolve(loaded).then(() => explainRefusal(out.action_id, v.root.querySelector('[data-rpv="msg"]') || msg));
         if (ok && prev) offerUndo(msg, method, url, prev, () => load(v));
         if (ok && noUndo) msg.insertAdjacentHTML('beforeend', ` <span class="res-dim" data-rp-noundo="1">${esc(noUndo)}</span>`);
       });
@@ -459,7 +461,25 @@ const ReplicationPlan = (() => {
   function findingsHtml(list) {
     if (!list.length) return '';
     return `<ul class="rp-findings">${list.map((f) => `<li class="${f.level === 'block' ? 'fail' : (f.level === 'warn' ? 'warn' : 'ok')}"><code>${esc(f.code)}</code>
-      ${esc(Object.entries(f).filter(([k]) => !['code', 'level'].includes(k)).map(([k, x]) => `${k}=${typeof x === 'object' ? JSON.stringify(x) : x}`).join(' '))}</li>`).join('')}</ul>`;
+      ${f.level === 'block' && findingSentence(f) ? `<span data-rp-hint="${esc(f.code)}">${esc(findingSentence(f))}</span>`
+    : esc(Object.entries(f).filter(([k]) => !['code', 'level'].includes(k)).map(([k, x]) => `${k}=${typeof x === 'object' ? JSON.stringify(x) : x}`).join(' '))}</li>`).join('')}</ul>`;
+  }
+  /** Un refus connu dit en clair (quoi, pourquoi, comment l'accepter) ; '' pour les autres. */
+  function findingSentence(f) {
+    const x = f.facts || {};
+    if (f.code === 'standby-replicas-exceed-nodes') {
+      return tr('rp.hint.replicas', { sc: x.storage_class, replicas: x.replicas, nodes: x.nodes,
+        suggest: (x.suggest || []).join(', ') || '-', box: tr('rp.c.ackDegraded') });
+    }
+    return '';
+  }
+  /** Après un échec : les refus connus de la sortie de l'outil, en clair. */
+  async function explainRefusal(actionId, msg) {
+    const o = await U.actionOutput(actionId);
+    const lines = ((o && o.findings) || []).filter((f) => f.level === 'block').map(findingSentence).filter(Boolean);
+    if (!lines.length) return;
+    if (msg) msg.insertAdjacentHTML('beforeend', lines.map((t) => `<p class="form-hint res-error" data-rp-hint="1">${esc(t)}</p>`).join(''));
+    else if (window.VMActions && VMActions.toast) VMActions.toast(lines.join(' '), true);
   }
 
   // ===========================================================================
@@ -478,7 +498,9 @@ const ReplicationPlan = (() => {
       try {
         const out = await U.api(method, url(path), body);
         U.follow(out.action_id, msg, done, (ok) => {
-          if (onDone) onDone(); reloadLists();
+          const loaded = onDone ? onDone() : null; reloadLists();
+          // message remplacé par un nouveau rendu : la phrase part en notification
+          if (!ok) Promise.resolve(loaded).then(() => explainRefusal(out.action_id, msg && msg.isConnected ? msg : null));
           if (ok && prev) offerUndo(msg, method, url(path), prev, onDone);
         });
       } catch (e) { if (msg) msg.innerHTML = err(e); else if (window.VMActions && VMActions.toast) VMActions.toast(e.message, true); }

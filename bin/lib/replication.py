@@ -1338,6 +1338,23 @@ def replica_findings(used, classes, accepted):
     return out
 
 
+def refusal_hint(findings):
+    """Les refus connus dits en clair pour la ligne de commande et le
+    journal (quoi, pourquoi, comment l'accepter) ; '' sinon. La console dit
+    les mêmes en cinq langues."""
+    out = []
+    for f in findings or []:
+        x = f.get("facts") or {}
+        if f.get("level") == "block" and f.get("code") == "standby-replicas-exceed-nodes":
+            fits = ", ".join(x.get("suggest") or []) or "none"
+            out.append(f"the recovery class {x.get('storage_class')} asks for {x.get('replicas')} replicas but the "
+                       f"recovery cluster has {x.get('nodes')} node(s), so every standby volume would stay "
+                       f"degraded: choose a class that fits ({fits}), or, if a degraded standby is deliberate, "
+                       "tick \"Accept degraded standby volumes\" in the plan's Settings tab or add "
+                       "--accept-degraded-standby to protect or resume")
+    return "; ".join(out)
+
+
 def check(src, dst, plan):
     """Contrôle d'un plan : liste de constats {code, level, facts}, blocages
     d'abord.

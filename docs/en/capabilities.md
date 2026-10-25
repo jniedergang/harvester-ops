@@ -3221,7 +3221,13 @@ carnet differs from what protect would write today, and both show as the
 finding, blocking, naming the changed keys and the VMs) unless it is told
 to use the previous settings: `accept_stale_carnet: true` in the console,
 `--accept-stale-carnet` on the command line (the finding becomes a
-warning). A successful protect clears the mark.
+warning). A successful protect clears the mark. A failover interrupted
+before any volume was activated checks again when it is finished: if the
+settings went stale meanwhile (seen by the follower, or a failover started
+under 1.99), `resume P --accept-stale-carnet` finishes it with the previous
+settings, and so does `failover P --accept-stale-carnet` with the same VMs
+(it takes over the open run). Neither flag is accepted for another
+interrupted command (`bad-option`).
 
 **Standby replicas.** At protect, a target class that asks for more
 replicas (`numberOfReplicas` of the StorageClass, 3 when absent, as
@@ -3230,7 +3236,14 @@ Longhorn) than the target has schedulable Longhorn nodes blocks the check
 every standby volume would stay degraded and the `standby-degraded` alert
 would never clear. A degraded standby can be a deliberate choice (a
 single-node backup site): the recovery key `accept_degraded_standby: true`
-turns the finding into a warning.
+(the "Accept degraded standby volumes" checkbox of the Settings tab) turns
+the finding into a warning, for every later protect. On the command line,
+`protect P --accept-degraded-standby` and `resume P
+--accept-degraded-standby` accept it for that run only. The refusal says
+this in a sentence (console in five languages, command line and journal in
+English). Behaviour change from 1.99.0, where it was a warning: a protect
+interrupted under 1.99 on such a class is refused on resume until one of
+these is given.
 
 **Dry run.** `failover --dry-run` (and `check --phase failover`) lists the
 waves (`index`, `name`, `vms`, `gate`, `implicit` for the last one) and the
@@ -3415,12 +3428,12 @@ console's).
 Command line: `harvester-replication plan create|list|show|set|delete`,
 `check P [--phase protect|failover|failover-unplanned]`, `measure
 start|stop|report P`, `measure formula`, `protect P [--dry-run]
-[--interval D] [--retain N]`, `follow (--plan P | --all) [--once]
+[--interval D] [--retain N] [--accept-degraded-standby]`, `follow (--plan P | --all) [--once]
 [--take-over]`, `status [P] [--host H]`, `resources --host H [--side S]`,
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/name ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--accept-stale-carnet] [--yes]
-[--dry-run]`, `resume P`,
+[--dry-run]`, `resume P [--accept-degraded-standby | --accept-stale-carnet]`,
 `unprotect P --yes [--delete-backups]`, `hook test P --name N`,
 `candidates --cluster C [--namespace NS [--selector k=v]]`, `alerts [--host
 H]`, `notify show|set --spec FILE|test --channel ID`, `link list`, `link test
@@ -3597,7 +3610,10 @@ Not verified on a cluster: notifications to a real Matrix room, Slack or a
 mail server (unit-tested against local servers), CPU and memory hotplug at
 recovery, the resume of a failover interrupted with the stale settings
 acknowledgement, and drag and drop with a real mouse (end-to-end tests
-only).
+only). The second review fixes (stale mark judged on values, URL path
+masking, stored secret kept only for the same request, `--accept-degraded-standby`
+and the resume flags) are covered by unit and end-to-end tests, not run on a
+cluster.
 
 ## What needs what
 

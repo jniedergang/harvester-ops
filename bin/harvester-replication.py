@@ -32,7 +32,7 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication measure report P [--margin 0.2]
   harvester-replication measure formula --size 2Gi --writes N --interval 5m
         [--block 2Mi] [--throughput 72Mi] [--write-size 4096]
-  harvester-replication protect P [--dry-run] [--interval 5m] [--retain N]
+  harvester-replication protect P [--dry-run] [--interval 5m] [--retain N] [--accept-degraded-standby]
   harvester-replication follow (--plan P | --all) [--once] [--take-over] [--console] [--log-file=PATH]
         [--timeout client=S]
   harvester-replication status [P] [--host H]
@@ -41,7 +41,8 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication failover P (--vm ns/nom ... | --all-vms --yes) [--unplanned --yes]
         [--force-unplanned] [--accept-skew] [--dry-run]   (les deux dernières avec --unplanned)
         [--accept-stale-carnet]   (réglages de reprise changés depuis le dernier protect)
-  harvester-replication resume P
+  harvester-replication resume P [--accept-degraded-standby | --accept-stale-carnet]
+        (le premier pour un protect repris, le second pour une bascule reprise)
   harvester-replication unprotect P --yes [--delete-backups]
   harvester-replication alerts [--host H]
   harvester-replication notify show
@@ -988,7 +989,8 @@ def cmd_measure_formula(args):
 
 def cmd_protect(args):
     _conn, _plan, ctx = _plan_ctx(args)
-    return finish(args, rr.protect(ctx, interval=args.interval, dry_run=args.dry_run, retain=args.retain))
+    return finish(args, rr.protect(ctx, interval=args.interval, dry_run=args.dry_run, retain=args.retain,
+                                   accept_degraded_standby=args.accept_degraded_standby))
 
 
 def _vm_refs(values):
@@ -1022,7 +1024,8 @@ def cmd_resume(args):
     # pas de --yes : la reprise refait la commande rangée avec la confirmation
     # donnée à son départ (mode, VMs, --force-unplanned de sa ligne `runs`)
     _conn, _plan, ctx = _plan_ctx(args)
-    return finish(args, rr.resume(ctx))
+    return finish(args, rr.resume(ctx, accept_degraded_standby=args.accept_degraded_standby,
+                                  accept_stale_carnet=args.accept_stale_carnet))
 
 
 def cmd_unprotect(args):
@@ -1568,6 +1571,10 @@ def build_parser():
     sp.add_argument("--interval", help="backup interval (required without a measure)")
     sp.add_argument("--retain", help=f"backups kept by the recurring job ({rp.RETAIN_MIN} to {rp.RETAIN_MAX}); "
                     "on a protected plan, updates the job")
+    sp.add_argument("--accept-degraded-standby", action="store_true",
+                    help="protect although the recovery class asks for more replicas than the recovery cluster "
+                         "has nodes (standby volumes stay degraded); for this run, like the recovery key "
+                         "accept_degraded_standby")
 
     sp = leaf(sub, "follow", cmd_follow, [common], 1, "the follower loop (resync after each backup, stats)")
     g = sp.add_mutually_exclusive_group(required=True)
@@ -1637,6 +1644,10 @@ def build_parser():
     sp = leaf(sub, "resume", cmd_resume, [common, clusters], 1,
               "finish the interrupted command of a plan, with the confirmation given at its start")
     sp.add_argument("plan")
+    sp.add_argument("--accept-degraded-standby", action="store_true",
+                    help="when resuming a protect: accept standby volumes that stay degraded (as on protect)")
+    sp.add_argument("--accept-stale-carnet", action="store_true",
+                    help="when resuming a failover: fail over with the previous recovery settings (as on failover)")
 
     sp = leaf(sub, "unprotect", cmd_unprotect, [common, clusters], 1, "stop protecting the plan")
     sp.add_argument("plan")

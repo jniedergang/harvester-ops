@@ -3530,7 +3530,14 @@ bascule refuse alors de partir (constat `carnet-stale`, bloquant, qui
 nomme les clés changées et les VMs), sauf si on lui dit de prendre les
 réglages précédents : `accept_stale_carnet: true` dans la console,
 `--accept-stale-carnet` en ligne de commande (le constat devient un
-avertissement). Un protect réussi efface la marque.
+avertissement). Un protect réussi efface la marque. Une bascule
+interrompue avant toute activation de volume refait le contrôle quand on
+la termine : si les réglages sont passés en retard entre-temps (vu par le
+suiveur, ou bascule partie sous 1.99), `resume P --accept-stale-carnet` la
+termine avec les réglages précédents, de même que `failover P
+--accept-stale-carnet` avec les mêmes VMs (elle reprend l'exécution
+ouverte). Aucun des deux drapeaux n'est accepté pour une autre commande
+interrompue (`bad-option`).
 
 **Répliques du secours.** Au protect, une classe cible qui demande plus de
 répliques (`numberOfReplicas` de la StorageClass, 3 en son absence, comme
@@ -3539,7 +3546,15 @@ contrôle (`standby-replicas-exceed-nodes`, avec les classes qui tiennent
 dans `suggest`) : chaque volume de secours resterait dégradé et l'alerte
 `standby-degraded` ne s'éteindrait jamais. Un secours dégradé peut être un
 choix (site de secours d'un seul nœud) : la clé de reprise
-`accept_degraded_standby: true` change le constat en avertissement.
+`accept_degraded_standby: true` (la case « Accepter des volumes de secours
+dégradés » de l'onglet Réglages) change le constat en avertissement, pour
+tous les protect suivants. En ligne de commande, `protect P
+--accept-degraded-standby` et `resume P --accept-degraded-standby`
+l'acceptent pour cette exécution seulement. Le refus le dit en une phrase
+(console en cinq langues, ligne de commande et journal en anglais).
+Changement de comportement depuis 1.99.0, où c'était un avertissement : un
+protect interrompu sous 1.99 sur une telle classe est refusé à la reprise
+tant que l'un des deux n'est pas donné.
 
 **À blanc.** `failover --dry-run` (et `check --phase failover`) liste les
 vagues (`index`, `name`, `vms`, `gate`, `implicit` pour la dernière) et
@@ -3737,12 +3752,12 @@ cluster, jamais celui de la console).
 Ligne de commande : `harvester-replication plan create|list|show|set|delete`,
 `check P [--phase protect|failover|failover-unplanned]`, `measure
 start|stop|report P`, `measure formula`, `protect P [--dry-run]
-[--interval D] [--retain N]`, `follow (--plan P | --all) [--once]
+[--interval D] [--retain N] [--accept-degraded-standby]`, `follow (--plan P | --all) [--once]
 [--take-over]`, `status [P] [--host H]`, `resources --host H [--side S]`,
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/nom ... | --all-vms) [--unplanned]
 [--force-unplanned] [--accept-skew] [--accept-stale-carnet] [--yes]
-[--dry-run]`, `resume P`,
+[--dry-run]`, `resume P [--accept-degraded-standby | --accept-stale-carnet]`,
 `unprotect P --yes [--delete-backups]`, `hook test P --name N`,
 `candidates --cluster C [--namespace NS [--selector k=v]]`, `alerts [--host
 H]`, `notify show|set --spec FICHIER|test --channel ID`, `link list`, `link
@@ -3937,7 +3952,12 @@ Non vérifié sur un cluster : les notifications vers un vrai salon Matrix,
 Slack ou un serveur de courriel (testées sur des serveurs locaux), l'ajout
 à chaud de CPU et de mémoire à la reprise, la reprise d'une bascule
 interrompue après l'accord sur des réglages en retard, et le
-glisser-déposer à la vraie souris (tests de bout en bout seulement).
+glisser-déposer à la vraie souris (tests de bout en bout seulement). Les
+corrections de la seconde revue (marque de retard jugée sur les valeurs,
+masquage du chemin des adresses, secret rangé gardé pour la même requête
+seulement, `--accept-degraded-standby` et les drapeaux de `resume`) sont
+couvertes par des tests unitaires et de bout en bout, pas jouées sur un
+cluster.
 
 ## Ce qui nécessite quoi
 

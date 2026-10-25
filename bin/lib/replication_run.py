@@ -1966,7 +1966,7 @@ def _choose_retain(retain):
     return n
 
 
-def protect(ctx, interval=None, dry_run=False, retain=None):
+def protect(ctx, interval=None, dry_run=False, retain=None, accept_degraded_standby=False):
     """(`draft`, `measuring`, `protecting`, `protected`, `error`) ->
     `protecting` -> `protected`. Rejouable : chaque sous-étape constate
     l'existant. Annulation : retour arrière de ce que cette exécution a
@@ -1974,7 +1974,10 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
     restauration initiale n'est pas perdue), plan en `error`.
     `retain` (v1.99.0, décision 56) : nombre de sauvegardes gardées par la
     tâche récurrente ; sur un plan déjà protégé, la tâche existante est mise
-    à jour avec la ligne du plan (seul chemin pour changer la rétention)."""
+    à jour avec la ligne du plan (seul chemin pour changer la rétention).
+    `accept_degraded_standby` : pour cette exécution, comme la clé de reprise
+    du même nom (des répliques au-delà des nœuds de la cible avertissent au
+    lieu de bloquer)."""
     uids = []
     prev = {}
     try:
@@ -1989,9 +1992,14 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         uids = [v["uid"] for v in src.get("vms") or []]
         dst = collect_target(ctx, [rp.target_ref(ctx.plan, {"namespace": v["namespace"], "name": v["name"]})[0]
                                    for v in src.get("vms") or []])
-        findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase="protect"))
+        checked = dict(ctx.plan, id=ctx.plan_id, phase="protect")
+        if accept_degraded_standby:
+            checked["options"] = dict(checked.get("options") or {}, accept_degraded_standby=True)
+        findings = rp.check(src, dst, checked)
         if rp.blocking(findings):
-            raise Refused("check", "the pre-check refuses this protection", findings=findings)
+            hint = rp.refusal_hint(findings)
+            raise Refused("check", "the pre-check refuses this protection" + (f": {hint}" if hint else ""),
+                          findings=findings)
         works = build_works(ctx, src, dst)
         activated = sorted(d["target_volume"] for w in works for d in w["disks"]
                            if _is_activated(ctx.dst.get(K_LH_VOLUME, NS, d["target_volume"])))
@@ -3356,11 +3364,14 @@ def _unprotect_target(ctx, op, uids, held):
 # Reprise
 # ---------------------------------------------------------------------------
 
-def resume(ctx, yes=False):
+def resume(ctx, yes=False, accept_degraded_standby=False, accept_stale_carnet=False):
     """Reprend la commande interrompue d'après l'état rangé (après un arrêt
     brutal, le verrou abandonné est repris par `acquire_lock`). Une bascule
     reprend avec son mode, ses VMs et `force_unplanned` rangés dans sa ligne
-    `runs` : la confirmation donnée au départ vaut pour sa reprise."""
+    `runs` : la confirmation donnée au départ vaut pour sa reprise.
+    `accept_degraded_standby` ne vaut que pour un protect repris,
+    `accept_stale_carnet` que pour une bascule reprise (refus `bad-option`
+    sinon : un accord ne se donne pas pour une autre commande)."""
     plan = ctx.reload()
     state = plan["state"]
     origin = db.error_origin(ctx.conn, ctx.plan_id) if state == "error" else None
@@ -3377,15 +3388,21 @@ def resume(ctx, yes=False):
         return measure_stop(ctx)
     if last is not None and last["operation"] == "measure-start":
         return measure_start(ctx, (last.get("points") or {}).get("interval_s") or _measure_interval(ctx.conn, plan))
-    if eff == "protecting" or (last is not None and last["operation"] == "protect"):
-        return protect(ctx)
+    is_protect = eff == "protecting" or (last is not None and last["operation"] == "protect")
+    wrong = ([] if is_protect or not accept_degraded_standby else ["--accept-degraded-standby (a protect)"]) + \
+        ([] if eff == "failing_over" or not accept_stale_carnet else ["--accept-stale-carnet (a failover)"])
+    if wrong:
+        return _result(ctx, "bad-option", EXIT_BLOCKED, f"{' and '.join(wrong)}: not what resume finishes "
+                                                        f"from {state}")
+    if is_protect:
+        return protect(ctx, accept_degraded_standby=accept_degraded_standby)
     if eff == "failing_over":
         r = _open_run(ctx, "failover") or {}
         pts = r.get("points") or {}
         planned = pts.get("mode", "planned") == "planned"
         return failover(ctx, vms=(_open_scope(ctx, r) if r else None) or None, planned=planned,
                         force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r),
-                        accept_stale_carnet=bool(pts.get("accept_stale_carnet")))
+                        accept_stale_carnet=bool(accept_stale_carnet) or bool(pts.get("accept_stale_carnet")))
     if eff == "unprotecting":
         r = _open_run(ctx, "unprotect") or {}
         return unprotect(ctx, delete_backups=bool((r.get("points") or {}).get("delete_backups")), yes=True)

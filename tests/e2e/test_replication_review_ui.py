@@ -199,3 +199,25 @@ def test_mail_channel_implicit_tls_replaces_starttls(ui):
     [put] = wait_sent(page, sent, lambda s: s[0] == "PUT")
     c = put[2]["channels"][1]
     assert c["implicit_tls"] is True and c["starttls"] is False and c["smtp_port"] == 465
+
+
+def test_a_protect_refused_for_replicas_says_how_to_accept_it(ui):
+    page, sent, _ = ui
+    out = {"id": ACTION, "status": "error", "result": {"output": {"ok": False, "code": "check",
+           "message": "the pre-check refuses this protection",
+           "findings": [{"code": "standby-replicas-exceed-nodes", "level": "block",
+                         "facts": {"storage_class": "harvester-longhorn", "replicas": 3, "nodes": 1,
+                                   "suggest": ["harv-rep1"], "accepted": False}}]}}}
+    page.route(re.compile(r".*/api/action/rpact.*"), lambda r, q: r.fulfill(**ok(out)))
+    page.route(re.compile(r".*/api/stream/.*"), lambda r, q: r.fulfill(
+        status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "error"}\n\n'))
+    d = plan_detail("admin")
+    d["carnet_stale"] = {"keys": ["resize"], "since": "2030-01-01T00:00:00Z"}
+    page.route(re.compile(rf".*/api/replication/plans/{PID}$"), lambda r, q: r.fulfill(**ok(d)))
+    view = open_view(page)
+    view.locator('[data-rpv="protect-again"]').click()
+    hint = view.locator('[data-rp-hint="1"]')
+    expect(hint).to_contain_text("harvester-longhorn asks for 3 replicas")
+    expect(hint).to_contain_text("harv-rep1")
+    expect(hint).to_contain_text('"Accept degraded standby volumes"')
+    expect(hint).to_contain_text("--accept-degraded-standby")

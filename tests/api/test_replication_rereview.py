@@ -154,3 +154,76 @@ def test_settings_route_refuses_a_masked_secret_for_another_request(client, env,
     got[0][field] = value
     r = client.patch(f"/api/replication/plans/{PID}/settings", json={"recovery": {"hooks": got}})
     assert r.status_code == 400 and r.get_json()["code"] == "secret-missing", r.get_json()
+
+
+# ---------------------------------------------------------------------------
+# m3 : répliques au-delà des nœuds, refus dit en clair et drapeau
+# ---------------------------------------------------------------------------
+
+def _three_replicas(w):
+    sc = w.dst.obj(rr.K_SC, None, "harvester-longhorn")
+    sc["parameters"]["numberOfReplicas"] = "3"
+    w.dst.put(rr.K_SC, sc)
+
+
+def test_resume_of_a_protect_interrupted_under_199_is_refused_then_accepted(tmp_path, capsys):
+    from test_replication_suspend_199 import at_step
+    w = World(tmp_path, vms=("vm-a",))
+    ctx, _ = at_step(w, ("initial-restore", "running"))
+    assert rr.protect(ctx)["code"] == "interrupted"
+    _three_replicas(w)                   # la règle de 1.100 s'applique à la reprise
+    rc, data, err = cli_run(capsys, w, "resume", "plan-a")
+    assert rc == rr.EXIT_BLOCKED and data["kind"] == "check", data
+    assert "standby-replicas-exceed-nodes" in [f["code"] for f in data["findings"]]
+    assert "--accept-degraded-standby" in data["error"] and "Settings tab" in data["error"]
+    assert w.plan()["state"] == "protecting"
+    assert [r["result"] for r in db.list_runs(w.conn, w.pid) if r["operation"] == "protect"][-1] == "interrupted"
+    rc, data, err = cli_run(capsys, w, "resume", "plan-a", "--accept-degraded-standby")
+    assert rc == 0, data
+    assert w.plan()["state"] == "protected"
+    assert not w.plan()["options"].get("accept_degraded_standby")      # pour cette exécution seulement
+
+
+def test_protect_flag_accepts_degraded_standby_for_this_run(tmp_path, capsys):
+    w = World(tmp_path, vms=("vm-a",))
+    _three_replicas(w)
+    rc, data, _ = cli_run(capsys, w, "protect", "plan-a", "--interval=5m")
+    assert rc == rr.EXIT_BLOCKED and "--accept-degraded-standby" in data["error"], data
+    rc, data, _ = cli_run(capsys, w, "protect", "plan-a", "--interval=5m", "--accept-degraded-standby")
+    assert rc == 0, data
+
+
+@pytest.mark.parametrize("flag", ["--accept-degraded-standby", "--accept-stale-carnet"])
+def test_resume_refuses_an_acknowledgement_for_another_command(tmp_path, capsys, flag):
+    w = World(tmp_path, vms=("vm-a",))
+    rc, data, _ = cli_run(capsys, w, "resume", "plan-a", flag)
+    assert rc == rr.EXIT_BLOCKED and data["kind"] == "bad-option", data
+
+
+def test_refusal_hint_names_the_way_out():
+    f = rp.replica_findings({"harvester-longhorn"}, {"harvester-longhorn": {"replicas": 3, "nodes": 1},
+                                                     "harv-rep1": {"replicas": 1, "nodes": 1}}, False)
+    hint = rp.refusal_hint(f)
+    assert "harvester-longhorn" in hint and "harv-rep1" in hint and "--accept-degraded-standby" in hint
+    assert rp.refusal_hint(rp.replica_findings({"harvester-longhorn"}, {"harvester-longhorn": {
+        "replicas": 3, "nodes": 1}}, True)) == ""
+
+
+# ---------------------------------------------------------------------------
+# m4 : reprise d'une bascule avec l'accord sur des réglages en retard
+# ---------------------------------------------------------------------------
+
+def test_resume_of_a_failover_carries_the_stale_settings_acknowledgement(tmp_path):
+    from test_replication_run_199 import Crash, protected
+    w = protected(tmp_path, vms=("vm-a",))
+    w.mutations, w.crash_at = 0, 1                 # arrêt brutal avant toute activation
+    with pytest.raises(Crash):
+        rr.failover(w.ctx())
+    w.crash_at = None
+    assert w.plan()["state"] == "failing_over"
+    db.mark_carnet_stale(w.conn, w.pid, ["resize"])   # vu après le départ (suiveur, ou départ sous 1.99)
+    res = rr.resume(w.ctx())
+    assert res["exit"] == rr.EXIT_BLOCKED and "carnet-stale" in [f["code"] for f in res["findings"]], res
+    assert w.plan()["state"] == "failing_over"
+    res = rr.resume(w.ctx(), accept_stale_carnet=True)
+    assert res["exit"] == 0 and w.plan()["state"] == "failed_over", res
