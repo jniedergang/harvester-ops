@@ -301,11 +301,22 @@ def test_deleting_a_plan_removes_its_flags(tmp_path):
 # M1 : le test de lien ne laisse pas son répertoire sur le partage
 # ---------------------------------------------------------------------------
 
-def test_link_test_read_pod_removes_its_directory():
-    script = rl.read_script("x" * 8, 16) if rl.read_script.__code__.co_argcount >= 2 else rl.read_script("x" * 8)
-    rm_file = script.index("rm -f")
-    rmdir = script.index("rmdir")
-    assert rmdir > rm_file and "|| true" in script[rmdir:]
+@pytest.mark.parametrize("other_file", [False, True])
+def test_link_test_read_pod_removes_its_directory(tmp_path, other_file):
+    """Le script de la pod de lecture, joué pour de vrai dans un répertoire
+    local à la place du montage NFS : fichier et répertoire retirés, sauf si
+    un autre essai y a encore son fichier."""
+    import subprocess
+    d = tmp_path / rl.DIR
+    d.mkdir()
+    (d / "t1.bin").write_bytes(b"x" * 4096)
+    if other_file:
+        (d / "t2.bin").write_bytes(b"y")
+    script = rl.read_script("t1").replace(rl.MOUNT, str(tmp_path))
+    out = subprocess.run(["sh", "-c", script], capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    assert "HOPS_LINK removed=1" in out.stdout and not (d / "t1.bin").exists()
+    assert d.exists() is other_file
 
 
 # ---------------------------------------------------------------------------

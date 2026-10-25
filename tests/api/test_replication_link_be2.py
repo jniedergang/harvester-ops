@@ -192,7 +192,8 @@ def test_scripts_time_only_the_transfer_and_remove_the_file():
     assert "count=128" in w and w.index("s=$(date") > w.index("/dev/urandom") and "conv=fsync" in w
     assert "rm -f /mnt/bt/harvester-ops-linktest/t1.bin" in w
     r = rl.read_script("t1")
-    assert "trap 'rm -f /mnt/bt/harvester-ops-linktest/t1.bin' EXIT" in r and "removed=1" in r
+    assert "trap 'rm -f /mnt/bt/harvester-ops-linktest/t1.bin; rmdir /mnt/bt/harvester-ops-linktest" in r
+    assert "removed=1" in r
 
 
 # ---------------------------------------------------------------------------
