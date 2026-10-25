@@ -77,8 +77,9 @@ HOST_ROWS = [
     (f"#harvester/{B}/params/power", "startup", None, B),
     (f"#harvester/{B}/params/power/startup", "startup", None, B),
     (f"#harvester/{B}/params/power/shutdown", "shutdown", None, B),
-    (f"#harvester/{B}/params/upgrade", "overview", None, B),
-    (f"#harvester/{B}/params/conn", "overview", None, B),
+    # 2.0.0 : Mise à jour et Connexion ont leur écran dans la page d'hôte
+    (f"#harvester/{B}/params/upgrade", "hupgrade", None, B),
+    (f"#harvester/{B}/params/conn", "hconn", None, B),
     (f"#vms/host/harvester/{B}", "namespaces", None, B),
     (f"#activity/host/harvester/{B}", "activity", None, A),
 ]
@@ -145,7 +146,15 @@ def check_detail(page, tab, detail):
         return
     kind, value = detail
     if kind == "overview":
-        expect(page.locator(f'[data-overview-tab="{value}"]')).to_have_class(re.compile(r"\bactive\b"))
+        # 2.0.0 : plus de sous-onglets d'aperçu ; le mode est porté par l'App
+        # (métriques et événements, ou vue en blocs des nœuds)
+        assert page.evaluate("App._nav.screen().overview") == value
+        board = page.locator('#tab-overview .overview-subtab[data-subtab="cluster"]')
+        if value == "cluster":
+            expect(board).to_be_visible()
+        else:
+            expect(board).to_be_hidden()
+            expect(page.locator('#tab-overview .overview-subtab[data-subtab="events"]')).to_be_visible()
     elif kind == "pane":
         expect(page.locator(f'#tab-{tab} [data-section-tab="{value}"]')).to_have_class(re.compile(r"\bactive\b"))
         expect(page.locator(f'#tab-{tab} .section-pane[data-pane="{value}"]')).to_be_visible()

@@ -99,7 +99,8 @@ def open_cluster(page, base_url, data=TOPO, lang="en", calls=None, checks=None,
         "localStorage.setItem('harvester_ops_current_tab','overview');")
     page.goto(base_url, wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click('[data-overview-tab="cluster"]')
+    # 2.0.0 : la vue en blocs des nœuds est Paramètres > Nœuds de l'hôte
+    page.evaluate("Router.go('#harvester/harv-fake/params/nodes')")
     page.wait_for_selector('.overview-subtab[data-subtab="cluster"] .cm-host', timeout=10000)
     page.wait_for_timeout(500)
     return page.locator('.overview-subtab[data-subtab="cluster"]')

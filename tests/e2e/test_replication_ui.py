@@ -357,8 +357,8 @@ def test_cluster_subview_shows_both_roles_and_filters(ui):
 
 def test_events_tab_lists_replication_alerts(ui):
     page, _, _ = ui
-    page.evaluate("App.setTab('overview')")
-    page.locator('[data-overview-tab="events"]').click()
+    # 2.0.0 : les événements sont un bloc sous les métriques de l'aperçu
+    page.evaluate("Router.go('#harvester/' + App.getCurrentCluster() + '/overview/events')")
     board = page.locator('[data-board="events"]')
     btn = board.locator('[data-ev-group="dr"]')
     expect(btn).to_be_visible()

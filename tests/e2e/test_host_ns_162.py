@@ -231,8 +231,8 @@ def test_the_events_board_and_the_usage_gauges(ui):
     page.route("**/api/events/harv-fake", lambda r, q: fulfill(r, EVENTS))
     page.route("**/api/usage/harv-fake", lambda r, q: fulfill(r, USAGE))
     page.route("**/api/status/harv-fake", lambda r, q: fulfill(r, {"summary": {"nodes_total": 1, "nodes_ready": 1}, "nodes": []}))
-    page.evaluate("App.setTab('overview')")
-    page.locator('[data-overview-tab="events"]').click()
+    # 2.0.0 : les événements sont un bloc sous les métriques de l'aperçu
+    page.evaluate("Router.go('#harvester/harv-fake/overview/events')")
     rows = page.locator(".ev-table tbody tr")
     expect(rows).to_have_count(2, timeout=8000)
     expect(page.locator('[data-ev-count="hosts"] .ev-warn')).to_contain_text("1")
@@ -245,9 +245,8 @@ def test_the_events_board_and_the_usage_gauges(ui):
     expect(rows.first).to_contain_text("web")
     page.locator('[data-ev="q"]').fill("nothing-matches")
     expect(page.locator(".ev-list .hint")).to_be_visible()
-    page.locator('[data-overview-tab="metrics"]').click()
-    expect(page.locator('[data-overview-tab="metrics"]')).to_have_class(re.compile(r"\bactive\b"))
-    expect(page.locator('[data-overview-tab="events"]')).not_to_have_class(re.compile(r"\bactive\b"))
+    # les jauges sont sur la même page, au-dessus des événements
+    expect(page.locator('#tab-overview .overview-subtab[data-subtab="metrics"]')).to_be_visible()
     expect(page.locator("#overview-usage .usage-gauge")).to_have_count(3, timeout=8000)
     expect(page.locator("#overview-usage")).to_contain_text("25 %")               # 2 cœurs sur 8
     expect(page.locator("#overview-usage")).to_contain_text("200 %")             # sur-provisionnement

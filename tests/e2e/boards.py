@@ -13,8 +13,11 @@ def goto_board(page, board):
     """Montre la vue `board` comme le ferait un clic de l'exploitant."""
     page.wait_for_function("window.App && window.Sections")
     if board in ("metrics", "cluster"):
-        page.evaluate("App.setTab('overview')")
-        page.click(f'[data-overview-tab="{board}"]')
+        # 2.0.0 : plus de sous-onglets d'aperçu : l'aperçu (métriques et
+        # événements) ou Paramètres > Nœuds, par l'adresse de l'hôte
+        sub = "/params/nodes" if board == "cluster" else ""
+        page.evaluate(f"Router.go('#harvester/' + encodeURIComponent(App.getCurrentCluster()) + '{sub}')")
+        page.evaluate("Router.idle()")
         return
     sec, pane = WHERE[board]
     # comme un lien d'une vue à l'autre : la section s'ouvre directement sur

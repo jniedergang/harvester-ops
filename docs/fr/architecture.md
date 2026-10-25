@@ -154,6 +154,12 @@ Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :
 | `#dr`, `#dr/<contrat>`, `#dr/links` | contrats de réplication, liens |
 | `#migrations`, `#gpus`, `#bookings`, `#usage`, `#automation/<capi, terraform ou pxe>`, `#activity[/host/<famille>/<nom>]` | écrans de flotte |
 
+Deux autres modules portent le menu de la 2.0 : `web/static/js/host-nav.js`
+(le menu latéral des hôtes, alimenté par `GET /api/hosts`, ordre et recherche
+purs testés dans node) et `web/static/js/host-page.js` (le bandeau de la page
+d'un hôte Harvester, posé sur la section que l'adresse désigne). Le routeur
+appelle `HostNav.sync(route)` et `HostPage.show(route)` après chaque écran.
+
 Les modules ne lisent jamais le sélecteur de cluster : ils passent par
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
 (cluster d'où Cluster API et Terraform gèrent, le dernier cluster visité

@@ -143,7 +143,7 @@ Pour restaurer les noms d'origine dans un fichier log qui t'a été retourné pa
 
 Pour ajouter un cluster sans éditer `config.yaml` à la main :
 
-- Paramètres → onglet **Clusters** → *Add cluster*, OU bouton **+** à côté du sélecteur de cluster dans la sidebar.
+- Réglages > onglet **Clusters** > *Add cluster*, OU **Ajouter un hôte** sous Hôtes dans le menu latéral, puis **Cluster Harvester**.
 - Renseigner : un nom unique, une description, l'utilisateur SSH (défaut `rancher`), la liste des nœuds (hostname + IP + role : `control-plane` ou `worker`), upload kubeconfig + clé SSH privée.
 - Le cluster est persisté dans le répertoire d'état de la console (`/var/lib/harvester-ops`, `HARVESTER_OPS_STATE_DIR`), jamais dans `config.yaml` : `clusters.d/<nom>.yaml` (mode 0600, écriture atomique), avec des chemins relatifs à ce répertoire pour que sa copie déplace la console (voir « Déplacer harvops vers un autre hôte » dans le guide d'installation).
 - Le kubeconfig est stocké dans `<état>/kubeconfigs/<nom>.yaml` (mode 0600) ; la clé SSH dans `<état>/ssh/<nom>_id` (mode 0600).
@@ -266,3 +266,41 @@ qui défile seule.
 Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
 onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert
 une fois connecté.
+
+### Page d'un hôte (Harvester)
+
+Un hôte Harvester s'ouvre sur une page avec un bandeau en tête : la famille,
+le nom, l'état, la version et le nombre de VMs, le sous-menu de l'hôte (Vue
+d'ensemble, Machines virtuelles, Conteneurs, Imports et migrations,
+Paramètres, Disaster Recovery) et **Activité de cet hôte**. Chaque vue déjà
+construite garde sa place ; le bandeau ne fait que l'encadrer.
+
+- **Vue d'ensemble** (`#harvester/<c>`) : métriques, jauges d'usage, tableau
+  des nœuds, et le bloc **Événements** en dessous (les sous-onglets Cluster
+  et Événements sont partis). `#harvester/<c>/overview/events` fait défiler
+  jusqu'aux événements. Le bouton **Upgrade** ouvre Paramètres > Mise à jour.
+- **Paramètres** (`#harvester/<c>/params/<onglet>`), en onglets :
+  - **Nœuds** : la vue en blocs des nœuds, avec la maintenance et les
+    réglages d'hôte, et **Joindre un nœud** (administrateur), qui ouvre
+    Automatisation > Bare-metal avec ce cluster déjà choisi : la fenêtre
+    d'installation s'ouvre en mode jonction vers `https://<hôte du serveur
+    d'API>:443`, lu dans le kubeconfig du cluster.
+  - **Stockage**, **Réseau**, **Add-ons**, **Monitoring et journaux**,
+    **Avancé** : les mêmes sections et sous-onglets qu'avant.
+  - **Sécurité** : Secrets, Clés SSH, et **Comptes du cluster** (venus des
+    Réglages).
+  - **Mise à jour** : le contenu de la fenêtre Upgrade, dans la page.
+  - **Alimentation** : Démarrage et Arrêt (avec l'ordre des VMs).
+  - **Connexion** : qui a déclaré le cluster (`config.yaml` ou la console),
+    ses nœuds déclarés, **Tester le kubeconfig** et **Tester SSH**
+    (administrateur), et un raccourci vers Réglages > Clusters.
+- **Machines virtuelles** (`#harvester/<c>/vms`) : la vue par espace de noms
+  et ses boutons (Backups, Modèles, Configurations cloud, Namespaces,
+  Exports, Créer).
+- **Imports et migrations** (`#harvester/<c>/imports/vmimport`,
+  `.../imports/forklift`) : Import de VM et migrations VMware.
+
+Un clic sur un autre hôte Harvester du menu garde l'écran : depuis
+Paramètres > Stockage > Images d'un cluster, on arrive sur le même onglet de
+l'autre (avec le voile de bascule). Un lecteur voit les mêmes pages, sans les
+boutons d'écriture.

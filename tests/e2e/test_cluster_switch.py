@@ -150,7 +150,9 @@ def test_coming_back_to_the_overview_shows_the_current_cluster(
     page.select_option('#cluster-select', two_clusters)
     page.wait_for_selector('.veil-fullscreen', state='hidden', timeout=30000)
     calls.clear()
-    page.click('.tab[data-tab="overview"]')
+    # 2.0.0 : la vue en blocs est Paramètres > Nœuds, ouverte depuis l'hôte du menu
+    page.click(f'#hnav-families .hnav-host-name:text-is("{two_clusters}")')
+    page.click('#host-page-head .hp-sub-link[data-hp-sub="params"]')
     page.wait_for_timeout(2000)
 
     topo = [c for c in calls if "/api/topology/" in c]
@@ -199,7 +201,8 @@ def test_a_slow_view_veils_only_its_own_zone(context, flask_server):
         "  : _f(...a);")
     page.goto(flask_server["base_url"], wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    page.click('[data-overview-tab="cluster"]')
+    # 2.0.0 : la vue en blocs des nœuds est Paramètres > Nœuds de l'hôte
+    page.click('#host-page-head .hp-sub-link[data-hp-sub="params"]')
     page.wait_for_timeout(900)          # au-delà du seuil anti-clignotement
 
     veil = page.locator('.veil-scoped')
@@ -232,7 +235,8 @@ def test_a_fast_view_shows_no_veil_at_all(context, flask_server):
       const orig = window.Veil.show;
       window.Veil.show = (t, o) => { window._veilSeen(); return orig(t, o); };
     }""")
-    page.click('[data-overview-tab="cluster"]')
+    # 2.0.0 : la vue en blocs des nœuds est Paramètres > Nœuds de l'hôte
+    page.click('#host-page-head .hp-sub-link[data-hp-sub="params"]')
     page.wait_for_timeout(2000)
     assert not seen, "un voile est apparu alors que la vue a chargé vite"
 

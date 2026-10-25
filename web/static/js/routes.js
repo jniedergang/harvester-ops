@@ -31,7 +31,7 @@
     storage: ['volumes', 'images', 'classes'],
     network: ['vmnets', 'clusternets', 'lbs', 'pools', 'hostnets', 'overlay', 'underlay'],
     addons: ['list'],
-    security: ['secrets', 'sshkeys'],
+    security: ['secrets', 'sshkeys', 'accounts'],
     monlog: ['metrics', 'alerts', 'flows', 'outputs'],
     advanced: ['settings', 'pci', 'usb', 'sriov', 'support'],
     upgrade: [],

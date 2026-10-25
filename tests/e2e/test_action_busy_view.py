@@ -29,6 +29,9 @@ def test_a_refused_shutdown_is_written_in_the_log(context, flask_server, lang, n
     page.route("**/api/action", _refuse)
     page.on("dialog", lambda d: d.accept())
     page.locator('.tab[data-tab="shutdown"]').first.click()
+    # 2.0.0 : le bandeau de l'hôte décale la page ; le menu ouvert en calque
+    # au survol couvrirait le bouton : écarter la souris, comme un exploitant
+    page.mouse.move(1100, 300)
     page.locator("#btn-shutdown").click()
     log = page.locator("#shutdown-log")
     expect(log).to_contain_text(needle, timeout=5000)

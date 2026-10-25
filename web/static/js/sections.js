@@ -22,7 +22,9 @@ const Sections = (() => {
                                          underlay: { board: 'fabric' } } },
     addons: { first: 'list', panes: { list: { list: 'addons' } } },
     security: { first: 'secrets', panes: { secrets: { list: 'secrets' },
-                                           sshkeys: { list: 'sshkeys' } } },
+                                           sshkeys: { list: 'sshkeys' },
+                                           // 2.0.0 : comptes du cluster, venus de Réglages (décision 7)
+                                           accounts: { mod: 'HUsers' } } },
     // v1.70.0 : le menu Monitoring & Logging de Harvester
     monlog: { first: 'metrics', panes: { metrics: { mod: 'MonLog' }, alerts: { mod: 'MonLog' },
                                          flows: { mod: 'MonLog' }, outputs: { mod: 'MonLog' } } },
@@ -43,7 +45,7 @@ const Sections = (() => {
                                             support: { mod: 'Advanced' } } },
   };
   // les modules qui tiennent leur onglet eux-mêmes : un seul vit à la fois
-  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'MonLog', 'VMImport', 'Forklift'];
+  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'MonLog', 'VMImport', 'Forklift', 'HUsers'];
   const KEY = (sec) => `harvester_ops_section_${sec}`;
 
   function isSection(name) { return Object.prototype.hasOwnProperty.call(DEF, name); }

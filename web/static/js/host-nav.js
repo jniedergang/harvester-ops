@@ -140,6 +140,17 @@
     return R().format(r);
   }
 
+  /** Lien d'un hôte : le même écran que celui affiché quand on est déjà sur
+   *  un hôte de la même famille (Paramètres > Stockage de A mène à
+   *  Paramètres > Stockage de B, comme l'ancien sélecteur de cluster) ;
+   *  sinon sa vue d'ensemble. */
+  function hostHref(h) {
+    if (route && route.name === 'host' && route.kind === h.kind && route.host && route.host !== h.name) {
+      return R().format(Object.assign({}, route, { host: h.name }));
+    }
+    return subHref(h.kind, h.name, 'overview');
+  }
+
   function openKey() {
     return route && route.name === 'host' && route.host ? `${route.kind}/${route.host}` : null;
   }
@@ -169,7 +180,7 @@
     const starTip = h.favorite ? tr('hnav.star.remove') : tr('hnav.star.add');
     return `<div class="hnav-host${open ? ' open' : ''}${isAlert(h) ? ' alert' : ''}" data-key="${esc(keyOf(h))}">
         <span class="hnav-dot st-${esc(st)}" title="${esc(STATE()[st] || st)}" aria-hidden="true"></span>
-        <a class="hnav-host-name" data-hnav="host" href="${esc(subHref(h.kind, h.name, 'overview'))}"
+        <a class="hnav-host-name" data-hnav="host" href="${esc(hostHref(h))}"
            title="${esc(hostTip(h))}"${open ? ' aria-current="true"' : ''}>${esc(h.name)}</a>
         <span class="hnav-count sidebar-label" title="${esc(countTip)}">${esc(count)}</span>
         <button type="button" class="hnav-star sidebar-label${h.favorite ? ' on' : ''}" data-star="${esc(keyOf(h))}"
@@ -257,7 +268,11 @@
 
   /** data = réponse de /api/hosts. */
   function render(d) {
-    if (d) { data = d; lastError = ''; }
+    if (d) {
+      data = d; lastError = '';
+      // le bandeau de la page d'hôte reprend l'état lu ici
+      if (root.HostPage && HostPage.render) HostPage.render();
+    }
     const q = $('#hnav-q');
     if (q) q.setAttribute('aria-label', tr('hnav.search'));
     renderFamilies();

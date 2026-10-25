@@ -3948,11 +3948,27 @@ def api_clusters():
             "description": c.get("description", ""),
             "node_count": len(c.get("nodes", [])),
             "origin": "config" if c["name"] in config_names else "console",
+            # 2.0.0 : Paramètres > Connexion d'un hôte (nœuds déclarés) et
+            # « Joindre un nœud » (adresse de jonction, https://VIP:443)
+            "nodes": [{"hostname": str(n.get("hostname", "")), "ip": str(n.get("ip", "")),
+                       "role": str(n.get("role", ""))} for n in c.get("nodes", []) if isinstance(n, dict)],
+            "join_url": _cluster_join_url(c),
         })
     out = {"clusters": clusters, "config_writable": _config_writable()}
     if sso:
         out["hidden"] = hidden
     return jsonify(out)
+
+
+def _cluster_join_url(entry):
+    """Adresse qu'un nœud vise pour rejoindre ce cluster (https://VIP:443),
+    tirée de l'hôte du serveur d'API de son kubeconfig, la règle même de
+    _cluster_for_server ; None si le kubeconfig ne se lit pas."""
+    endpoint = _cluster_api_endpoint(entry.get("kubeconfig") or "")
+    if not endpoint:
+        return None
+    host = endpoint[0]
+    return f"https://[{host}]:443" if ":" in host else f"https://{host}:443"
 
 
 @app.route("/api/status/<cluster>")

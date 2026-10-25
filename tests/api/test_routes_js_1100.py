@@ -47,7 +47,7 @@ def run_node(cases=(), legacy=(), routes=(), mutate=None):
 HARVESTER_PANES = {
     "nodes": [], "storage": ["volumes", "images", "classes"],
     "network": ["vmnets", "clusternets", "lbs", "pools", "hostnets", "overlay", "underlay"],
-    "addons": ["list"], "security": ["secrets", "sshkeys"],
+    "addons": ["list"], "security": ["secrets", "sshkeys", "accounts"],
     "monlog": ["metrics", "alerts", "flows", "outputs"],
     "advanced": ["settings", "pci", "usb", "sriov", "support"],
     "upgrade": [], "power": ["startup", "shutdown"], "conn": [],

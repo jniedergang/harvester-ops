@@ -39,7 +39,19 @@ const App = (() => {
     $$('.tab-child.active').forEach(t => t.closest('.tab-group')?.classList.add('expanded'));
     $$('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
     try { localStorage.setItem(TAB_STORAGE, name); } catch {}
-    if (name === 'overview')   { refreshStatus({ veil: true }); mountTopology(overviewMode()); }
+    if (name === 'overview')   {
+      refreshStatus({ veil: true });
+      // 2.0.0 : les événements sont un bloc sous les métriques ; la vue en
+      // blocs des nœuds est Paramètres > Nœuds (mode « cluster »)
+      const mode = overviewMode();
+      mountTopology(overviewBoard(mode));
+      if (mode === 'events') document.querySelector('.overview-subtab[data-subtab="events"]')?.scrollIntoView({ block: 'start' });
+    }
+    // 2.0.0 : Paramètres > Mise à jour, le contenu de la fenêtre Upgrade dans la page
+    if (name === 'hupgrade') { if (window.Upgrade && Upgrade.mount) Upgrade.mount(currentCluster, $('#hupgrade-host')); }
+    else if (window.Upgrade && Upgrade.unmount) Upgrade.unmount();
+    // 2.0.0 : Paramètres > Connexion
+    if (name === 'hconn' && window.HostPage) HostPage.renderConn(currentCluster);
     if (name === 'namespaces') { refreshNamespaces(true); }
     if (name === 'activity')   refreshActivity();
     if (name === 'shutdown')   loadVMOrder();
@@ -88,12 +100,12 @@ const App = (() => {
     if (window.Router) Router.syncFromScreen();
   }
 
-  /** Sous-onglet d'aperçu actif (metrics | cluster). */
-  function overviewMode() {
-    const btn = document.querySelector('[data-overview-tab].active');
-    if (btn) return btn.dataset.overviewTab;
-    return savedOverviewMode();
-  }
+  /** Mode de l'aperçu : metrics (métriques + bloc Événements), events (le
+   *  même, défilé sur les événements) ou cluster (Paramètres > Nœuds). */
+  let ovMode = null;
+  function overviewMode() { return ovMode || savedOverviewMode(); }
+  /** Vue de blocs montée pour un mode de l'aperçu. */
+  const overviewBoard = (mode) => (mode === 'cluster' ? 'cluster' : 'events');
 
   // v1.57.0 : un navigateur peut encore garder « storage », « network »,
   // « fabric » ou « vpc », partis dans leurs sections : on revient aux
@@ -307,11 +319,11 @@ const App = (() => {
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
     if (active === 'overview') {
-      const mode = savedOverviewMode();
-      if (mode !== 'metrics') {
-        mountTopology(mode);             // coupe aussi les vues de l'ancien
-      }
+      // coupe aussi les vues de l'ancien cluster (bloc Événements compris)
+      mountTopology(overviewBoard(overviewMode()));
     }
+    if (active === 'hupgrade' && window.Upgrade && Upgrade.mount) Upgrade.mount(currentCluster, $('#hupgrade-host'));
+    if (active === 'hconn' && window.HostPage) jobs.push(HostPage.renderConn(currentCluster));
     if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
       jobs.push(window.CAPI.reactivate());
     }
@@ -529,6 +541,7 @@ const App = (() => {
         if (groups[pendingVm.ns]) currentNamespace = pendingVm.ns;
         const f = $('#ns-vm-filter');
         if (f) f.value = pendingVm.name;
+        nsVmFilter = pendingVm.name;        // le filtre de la liste, comme une saisie
         pendingVm = null;
       }
 
@@ -1804,6 +1817,7 @@ const App = (() => {
         if (inherited) setTab(inherited);
         return;
       }
+      if (t.dataset.tab === 'overview') paintOverviewMode('metrics');
       setTab(t.dataset.tab);
     }));
 
@@ -2017,20 +2031,8 @@ const App = (() => {
       });
     });
 
-    // Overview sub-tabs (Metrics / Cluster / Network / Fabric / Storage).
-    $$('[data-overview-tab]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const target = btn.dataset.overviewTab;
-        $$('[data-overview-tab]').forEach(b => b.classList.toggle('active', b === btn));
-        $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== target));
-        try { localStorage.setItem('harvester_ops_overview_subtab', target); } catch {}
-        // Un seul chemin de montage : mountTopology gère lui-même le cas
-        // « Métriques » (pas de vue de blocs, mais il faut couper le polling).
-        mountTopology(target);
-        if (target === 'metrics') refreshStatus({ veil: true });
-        if (window.Router) Router.syncFromScreen();
-      });
-    });
+    // 2.0.0 : plus de sous-onglets d'aperçu ; le mode vient de l'adresse
+    // (#harvester/<c>, .../overview/events, .../params/nodes).
 
     // Namespace bulk toolbar
     if ($('#ns-vms-check-all')) {
@@ -2092,7 +2094,7 @@ const App = (() => {
         if (btn) btn.click();
       } catch {}
     };
-    restore('harvester_ops_overview_subtab', 'data-overview-tab');
+    paintOverviewMode(savedOverviewMode());
     restore('harvester_ops_shutdown_subtab', 'data-shutdown-tab');
   }
 
@@ -2126,11 +2128,17 @@ const App = (() => {
     } catch {}
   }
 
-  /** Peint le sous-onglet d'aperçu sans monter sa vue (setTab s'en charge). */
+  /** Peint le mode de l'aperçu sans monter sa vue (setTab s'en charge). */
   function paintOverviewMode(mode) {
-    $$('[data-overview-tab]').forEach(b => b.classList.toggle('active', b.dataset.overviewTab === mode));
-    $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== mode));
-    try { localStorage.setItem('harvester_ops_overview_subtab', mode); } catch {}
+    const m = ['metrics', 'cluster', 'events'].includes(mode) ? mode : 'metrics';
+    ovMode = m;
+    $$('.overview-subtab').forEach(p => {
+      p.hidden = m === 'cluster' ? p.dataset.subtab !== 'cluster' : p.dataset.subtab === 'cluster';
+    });
+    // Paramètres > Nœuds : le bandeau de l'hôte suffit, pas de titre d'aperçu
+    const head = $('#tab-overview > .shutdown-header');
+    if (head) head.style.display = m === 'cluster' ? 'none' : '';     // .shutdown-header l'emporte sur [hidden]
+    try { localStorage.setItem('harvester_ops_overview_subtab', m); } catch {}
   }
 
   const activeTab = () => document.querySelector('.tab-content.active')?.id?.replace(/^tab-/, '') || null;
@@ -2167,12 +2175,9 @@ const App = (() => {
     const work = async () => {
       if (t.tabFirst) { await refreshStatus({ veil: true }); return; }
       if (activeTab() === t.tab) {
-        if (t.overview) {
-          paintOverviewMode(t.overview);
-          // reloadForCluster ne remonte pas la vue en mode Métriques : sans
-          // cet appel, la vue en blocs de l'ancien cluster continuerait.
-          if (t.overview === 'metrics') mountTopology('metrics');
-        }
+        // reloadForCluster remonte la vue du mode (bloc Événements ou vue en
+        // blocs des nœuds) pour le nouveau cluster, et coupe celle de l'ancien
+        if (t.overview) paintOverviewMode(t.overview);
         await reloadForCluster();
       } else {
         show();

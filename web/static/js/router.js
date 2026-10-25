@@ -46,8 +46,10 @@
             if (route.tab === 'nodes') return t('overview', Object.assign(c, { overview: 'cluster' }));
             if (route.tab === 'power') return t(route.pane === 'shutdown' ? 'shutdown' : 'startup', c);
             if (SECTION_TABS.includes(route.tab)) return t(route.tab, Object.assign(c, { pane: route.pane || null }));
-            // upgrade, conn : pas d'écran à eux avant l'étape 2, l'aperçu
-            return t('overview', Object.assign(c, { overview: 'metrics' }));
+            // étape 2 : Mise à jour (contenu de la fenêtre Upgrade) et Connexion
+            if (route.tab === 'upgrade') return t('hupgrade', c);
+            if (route.tab === 'conn') return t('hconn', c);
+            return null;
           default: return null;
         }
       }
@@ -88,6 +90,8 @@
       case 'vmimport': case 'forklift': return H({ sub: 'imports', tab: s.tab, pane: s.pane || null });
       case 'clusterdr': return H({ sub: 'dr' });
       case 'startup': case 'shutdown': return H({ sub: 'params', tab: 'power', pane: s.tab });
+      case 'hupgrade': return H({ sub: 'params', tab: 'upgrade' });
+      case 'hconn': return H({ sub: 'params', tab: 'conn' });
       case 'namespaces': return H({ sub: 'vms' });
       case 'containers': return H({ sub: 'containers' });
       case 'allvms': return '#vms';
@@ -208,6 +212,7 @@
       current = route;
       // étape 2 : le menu des hôtes suit l'écran (hôte ouvert, entrée active)
       if (root.HostNav && HostNav.sync) HostNav.sync(current);
+      if (root.HostPage && HostPage.show) HostPage.show(current);
     };
     // une navigation qui lève est journalisée : la promesse rendue par go()
     // ne rejette jamais (aucun appelant n'a de gestionnaire) et la file continue
@@ -254,6 +259,7 @@
     history.replaceState(history.state, '', h);
     current = R().parse(h);
     if (root.HostNav && HostNav.sync) HostNav.sync(current);
+    if (root.HostPage && HostPage.show) HostPage.show(current);
   }
 
   // Étape 2 : adresse ouverte avant la connexion, gardée par la page de

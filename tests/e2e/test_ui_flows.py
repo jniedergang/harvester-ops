@@ -324,27 +324,21 @@ def test_overview_subtab_persists_across_reload(page):
     AFTER setCluster(), guaranteeing mountTopology has a cluster to
     work with. Since v1.43.0 the Cluster view is a board, not a canvas:
     its shell (`.fabric-body`) is what proves it was mounted."""
-    # Navigate to Overview > Cluster sub-tab and wait for the board
-    # to be mounted by mountTopology().
+    # 2.0.0 : la vue en blocs des nœuds est Paramètres > Nœuds de l'hôte ;
+    # F5 garde l'adresse, et la vue est remontée pour le bon cluster.
     page.click('.tab[data-tab="overview"]')
-    page.click('[data-overview-tab="cluster"]')
+    page.click('#host-page-head .hp-sub-link[data-hp-sub="params"]')
     page.wait_for_selector(
         '.overview-subtab[data-subtab="cluster"] .fabric-body',
         timeout=5000,
     )
+    assert page.evaluate("location.hash").endswith("/params/nodes")
 
     page.reload()
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(400)
 
-    # After reload the Cluster sub-tab must still be active AND the
-    # board must be present (the view was actually mounted).
-    cls = page.locator('[data-overview-tab="cluster"]').get_attribute("class") or ""
-    assert "active" in cls.split(), (
-        f"Overview Cluster sub-tab did not stay active after reload "
-        f"(class={cls!r}). restoreSubTabsFromStorage() is not running "
-        f"after setCluster() in init()."
-    )
+    assert page.evaluate("location.hash").endswith("/params/nodes")
     page.wait_for_selector(
         '.overview-subtab[data-subtab="cluster"] .fabric-body',
         timeout=5000,

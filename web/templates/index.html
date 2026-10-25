@@ -363,17 +363,19 @@
     <!-- v1.56.0 : ce que le cluster (ou Rancher) a refusé de montrer -->
     <div class="access-notice" id="access-notice" role="status" hidden></div>
 
+    <!-- Navigation 2.0 : bandeau de la page d'un hôte (host-page.js), posé
+         au-dessus de la section que l'adresse désigne -->
+    <div id="host-page-head" class="host-page-head" hidden></div>
+
     <!-- OVERVIEW -->
     <section id="tab-overview" class="tab-content active">
       <div class="shutdown-header">
         <div class="automation-header-text">
           <h1><span data-i18n="overview.title">Overview</span> — <span class="cluster-name"></span></h1>
         </div>
-        <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Overview sub-tabs">
-          <button type="button" class="sub-tab active" data-overview-tab="metrics"><span class="tab-icon" data-icon="metrics"></span> <span data-i18n="overview.tabMetrics">Metrics</span></button>
-          <button type="button" class="sub-tab" data-overview-tab="cluster"><span class="tab-icon" data-icon="node"></span> <span data-i18n="overview.tabCluster">Cluster</span></button>
-          <button type="button" class="sub-tab tip" data-overview-tab="events" data-tip-i18n="ev.tip.tab" data-i18n-title="ev.tip.tab" title="The cluster events, by hosts, VMs, volumes and images, as on Harvester's dashboard"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="ev.tab">Events</span></button>
-        </div>
+        <!-- 2.0.0 : les sous-onglets Cluster et Événements sont partis : les
+             événements sont un bloc sous les métriques, la vue en blocs des
+             nœuds est Paramètres > Nœuds -->
         <!-- v1.69.0 : le bouton Upgrade du tableau de bord de Harvester -->
         <div class="section-actions">
           <button type="button" id="btn-upgrade" class="btn btn-sm btn-secondary tip"
@@ -410,13 +412,21 @@
         </div>
       </div>
 
-      <!-- Vue de blocs du cluster (v1.43.0). Depuis la v1.57.0, Réseau,
-           Fabrique, Stockage et VPC vivent dans leurs sections. -->
+      <!-- Vue de blocs du cluster (v1.43.0) : Paramètres > Nœuds depuis la
+           2.0.0, avec « Joindre un nœud » (Bare-metal, cluster déjà choisi) -->
       <div class="overview-subtab" data-subtab="cluster" data-board="cluster" hidden>
+        <div class="section-actions hp-nodes-actions">
+          <button type="button" id="btn-join-node" class="btn btn-sm btn-secondary tip needs-admin"
+                  data-tip-i18n="hp.joinTip" data-i18n-title="hp.joinTip"
+                  title="Add a machine to this cluster from its BMC: Automation, Bare-metal, with this cluster already chosen">
+            <span data-icon="add"></span> <span data-i18n="hp.join">Join a node</span></button>
+        </div>
         <div class="topology-host" data-topology-mode="cluster"></div>
       </div>
-      <!-- v1.62.0 : les événements du tableau de bord de Harvester -->
+      <!-- v1.62.0 : les événements du tableau de bord de Harvester, en bloc
+           sous les métriques depuis la 2.0.0 -->
       <div class="overview-subtab" data-subtab="events" data-board="events" hidden>
+        <h2 class="hp-block-title" data-i18n="ev.tab">Events</h2>
         <div class="topology-host"></div>
       </div>
     </section>
@@ -495,10 +505,21 @@
         <div class="sub-tabs sub-tabs-inline" role="tablist">
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="secrets" data-i18n-title="section.secretsTip" title="Secrets of the cluster: type, key names and the VMs using them. Values are never shown."><span class="tab-icon" data-icon="lock"></span> <span data-i18n="section.secrets">Secrets</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="sshkeys" data-i18n-title="section.sshkeysTip" title="SSH public keys declared on the cluster and the VMs that received them"><span class="tab-icon" data-icon="key"></span> <span data-i18n="section.sshkeys">SSH Keys</span></button>
+          <!-- 2.0.0 : les comptes du cluster, venus de Réglages (décision 7) -->
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="accounts" data-i18n-title="section.accountsTip" title="Accounts declared on this cluster, who holds its administration, and its members in Rancher"><span class="tab-icon" data-icon="user"></span> <span data-i18n="husers.title">Cluster accounts</span></button>
         </div>
       </div>
       <div class="section-pane" data-pane="secrets" hidden><div class="resource-host" data-resource="secrets"></div></div>
       <div class="section-pane" data-pane="sshkeys" hidden><div class="resource-host" data-resource="sshkeys"></div></div>
+      <div class="section-pane" data-pane="accounts" hidden><div class="na-host husers-pane">
+        <p class="form-hint" data-i18n="husers.intro">Accounts declared on the
+          selected Harvester cluster, and who holds cluster administration.</p>
+        <div id="husers-body"><p class="form-hint">…</p></div>
+        <!-- v1.73.0 : les membres du cluster dans Rancher, avec leurs rôles -->
+        <h4 data-i18n="rm.clusterTitle">Members in Rancher</h4>
+        <p class="form-hint" data-i18n="rm.clusterIntro">Who Rancher gives rights on this cluster, and with which role.</p>
+        <div id="rmembers-body"></div>
+      </div></div>
     </section>
 
     <!-- v1.71.0 : VM IMPORT (vm-import-controller) -->
@@ -578,6 +599,27 @@
       <div class="section-pane" data-pane="usb" hidden><div class="na-host" data-adv="usb"></div></div>
       <div class="section-pane" data-pane="sriov" hidden><div class="na-host" data-adv="sriov"></div></div>
       <div class="section-pane" data-pane="support" hidden><div class="na-host" data-adv="support"></div></div>
+    </section>
+
+    <!-- 2.0.0 : Paramètres > Mise à jour (contenu de la fenêtre Upgrade) -->
+    <section id="tab-hupgrade" class="tab-content">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="upg.title">Upgrade Harvester</span> · <span class="cluster-name"></span></h1>
+        </div>
+      </div>
+      <div id="hupgrade-host"></div>
+    </section>
+
+    <!-- 2.0.0 : Paramètres > Connexion (origine, nœuds déclarés, tests) -->
+    <section id="tab-hconn" class="tab-content">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="hp.tab.conn">Connection</span> · <span class="cluster-name"></span></h1>
+          <p class="hint" data-i18n="hp.conn.hint">How the console reaches this cluster: who declared it, its nodes, and a test of its kubeconfig and of SSH.</p>
+        </div>
+      </div>
+      <div id="hconn-host"></div>
     </section>
 
     <!-- SHUTDOWN -->
@@ -1060,7 +1102,6 @@
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
       <button class="settings-tab needs-admin" data-stab="rancher" data-i18n="settings.tab.rancher">Rancher sign-in</button>
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
-      <button class="settings-tab"        data-stab="husers"     data-i18n="settings.tab.husers">Cluster accounts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -1082,17 +1123,6 @@
         <p class="form-hint" data-i18n="accounts.intro">Who can sign in to this console, and with which role. Accounts from the installer (htpasswd) are managed on the server.</p>
         <div id="accounts-feedback" class="res-feedback"></div>
         <div id="accounts-body"><p class="form-hint">…</p></div>
-      </div>
-
-      <div class="settings-tab-content" id="stab-husers">
-        <h4 data-i18n="husers.title">Cluster accounts</h4>
-        <p class="form-hint" data-i18n="husers.intro">Accounts declared on the
-          selected Harvester cluster, and who holds cluster administration.</p>
-        <div id="husers-body"><p class="form-hint">…</p></div>
-        <!-- v1.73.0 : les membres du cluster dans Rancher, avec leurs rôles -->
-        <h4 data-i18n="rm.clusterTitle">Members in Rancher</h4>
-        <p class="form-hint" data-i18n="rm.clusterIntro">Who Rancher gives rights on this cluster, and with which role.</p>
-        <div id="rmembers-body"></div>
       </div>
 
       <div class="settings-tab-content" id="stab-appearance">
@@ -1477,6 +1507,7 @@
 <script src="/static/js/routes.js"></script>
 <script src="/static/js/router.js"></script>
 <script src="/static/js/host-nav.js"></script>
+<script src="/static/js/host-page.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>

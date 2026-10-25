@@ -70,8 +70,11 @@ def win(page):
 
 def test_the_upgrade_button_opens_the_form_with_its_rules(ui):
     page, sent, _ = ui
+    # 2.0.0 : le bouton de l'aperçu mène à Paramètres > Mise à jour de l'hôte,
+    # le même contenu dans la page
     page.locator("#btn-upgrade").click()
-    w = win(page)
+    page.wait_for_function("() => location.hash === '#harvester/harv-fake/params/upgrade'")
+    w = page.locator("#tab-hupgrade .upg-win")
     f = w.locator('[data-upg="form"]')
     expect(f).to_be_visible(timeout=8000)
     expect(w.locator('[data-upg="head"]')).to_contain_text("v1.8.2")

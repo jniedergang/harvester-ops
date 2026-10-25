@@ -138,13 +138,13 @@ const HUsers = (() => {
     refresh();
   }
 
-  function init() {
-    document.addEventListener('click', (e) => {
-      if (e.target.closest('.settings-tab[data-stab="husers"]')) setTimeout(refresh, 60);
-    });
-  }
+  // 2.0.0 : un onglet de Paramètres > Sécurité d'un hôte (Sections.DEF),
+  // monté par Sections.activate comme les autres modules de section
+  function start() { return refresh(); }
+  function stop() { /* aucune minuterie */ }
+  function init() { /* plus d'onglet dans les réglages (décision 7) */ }
 
-  return { init, refresh };
+  return { init, refresh, start, stop };
 })();
 
 if (typeof window !== 'undefined') window.HUsers = HUsers;

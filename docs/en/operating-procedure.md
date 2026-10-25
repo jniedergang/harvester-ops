@@ -142,7 +142,7 @@ To restore original names in a log file that was returned to you by a third part
 
 To add a new cluster without editing `config.yaml` by hand:
 
-- Settings → **Clusters** tab → *Add cluster*, OR the **+** button next to the cluster selector in the sidebar.
+- Settings > **Clusters** tab > *Add cluster*, OR **Add a host** under Hosts in the side menu, then **Harvester cluster**.
 - Provide: a unique name, a description, the SSH user (defaults to `rancher`), the list of nodes (hostname + IP + role: `control-plane` or `worker`), and upload the kubeconfig + the SSH private key as files.
 - The new cluster is persisted in the console's state directory (`/var/lib/harvester-ops`, `HARVESTER_OPS_STATE_DIR`), never in `config.yaml`: `clusters.d/<name>.yaml` (mode 0600, atomic write), with paths relative to that directory so that copying it moves the console (see "Moving harvops to another host" in the install guide).
 - The kubeconfig is stored at `<state>/kubeconfigs/<name>.yaml` (mode 0600); the SSH key at `<state>/ssh/<name>_id` (mode 0600).
@@ -258,3 +258,40 @@ scrolls on its own.
 Every entry is a real link: middle click opens it in a new tab, and the
 address can be copied. A link opened before signing in is opened again once
 signed in.
+
+### Host page (Harvester)
+
+A Harvester host opens on a page with a band on top: the family, the name,
+the state, the version and the VM count, the host's sub-menu (Overview,
+Virtual machines, Containers, Imports and migrations, Parameters, Disaster
+Recovery) and **Activity of this host**. Every view already built keeps its
+place; the band only frames it.
+
+- **Overview** (`#harvester/<c>`): metrics, usage gauges, the nodes table,
+  and the **Events** block below them (the Cluster and Events sub-tabs are
+  gone). `#harvester/<c>/overview/events` scrolls to the events. The
+  **Upgrade** button opens Parameters > Upgrade.
+- **Parameters** (`#harvester/<c>/params/<tab>`), in tabs:
+  - **Nodes**: the block view of the nodes, with maintenance and host
+    settings, and **Join a node** (administrator), which opens Automation >
+    Bare-metal with this cluster already chosen: the install window opens in
+    join mode towards `https://<API server host>:443`, read from the
+    cluster's kubeconfig.
+  - **Storage**, **Network**, **Add-ons**, **Monitoring & Logging**,
+    **Advanced**: the same sections and sub-tabs as before.
+  - **Security**: Secrets, SSH Keys, and **Cluster accounts** (moved here
+    from Settings).
+  - **Upgrade**: the content of the Upgrade window, in the page.
+  - **Power**: Startup and Shutdown (with the VM order).
+  - **Connection**: who declared the cluster (`config.yaml` or the console),
+    its declared nodes, **Test kubeconfig** and **Test SSH** (administrator),
+    and a shortcut to Settings > Clusters.
+- **Virtual machines** (`#harvester/<c>/vms`): the namespace view and its
+  buttons (Backups, Templates, Cloud configs, Namespaces, Exports, Create).
+- **Imports and migrations** (`#harvester/<c>/imports/vmimport`,
+  `.../imports/forklift`): VM Import and VMware migrations.
+
+Clicking another Harvester host in the menu keeps the screen: from
+Parameters > Storage > Images of one cluster you land on the same tab of the
+other (with the switching veil). A viewer sees the same pages without the
+write buttons.

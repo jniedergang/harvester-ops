@@ -85,6 +85,7 @@ const BMC = (() => {
     if (!force && out.querySelector('#bmc-discover-form')) {
       renderIsoStore();
       if (window.BMProfiles) BMProfiles.render();
+      paintJoin();
       return;
     }
     out.innerHTML = `
@@ -116,6 +117,7 @@ const BMC = (() => {
     renderIsoStore();
     // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
     if (window.BMProfiles) BMProfiles.render();
+    paintJoin();
   }
 
   async function discover(ev) {
@@ -1034,6 +1036,11 @@ const BMC = (() => {
     };
     method.addEventListener('change', syncAll);
     bondMode.addEventListener('change', syncAll);
+    // 2.0.0 : « Joindre un nœud » d'un hôte : mode jonction vers ce cluster
+    if (joinTarget && joinTarget.server_url) {
+      field('mode').value = 'join';
+      field('server_url').value = joinTarget.server_url;
+    }
     syncAll();
     renderDisks();
     loadInventory();
@@ -1355,8 +1362,53 @@ const BMC = (() => {
     } catch (e) { alert(e.message); }
   }
 
+  // -------------------------------------------------------------------------
+  // 2.0.0 : « Joindre un nœud » depuis Paramètres > Nœuds d'un hôte. Ouvre
+  // Bare-metal avec ce cluster déjà choisi : la fenêtre d'installation part
+  // en mode jonction vers son adresse (https://VIP:443, tirée de son
+  // kubeconfig par le serveur, /api/clusters `join_url`).
+  // -------------------------------------------------------------------------
+  let joinTarget = null;        // { cluster, server_url }
+
+  function paintJoin() {
+    const out = $('#bmc-body');
+    if (!out) return;
+    let el = out.querySelector('#bm-join-target');
+    if (!joinTarget) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'bm-join-target';
+      el.className = 'summary-bar info bm-join-target';
+      el.setAttribute('role', 'status');
+      out.prepend(el);
+    }
+    el.innerHTML = joinTarget.server_url
+      ? `${Icons.svg('info', { size: 14 })} <span>${esc(tr('bmc.join.banner', { cluster: joinTarget.cluster, url: joinTarget.server_url }))}</span>
+         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
+                 data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`
+      : `${Icons.svg('warn', { size: 14 })} <span>${esc(tr('bmc.join.noUrl', { cluster: joinTarget.cluster }))}</span>
+         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
+                 data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`;
+  }
+
+  /** Ouvre Automatisation > Bare-metal pour joindre une machine à `cluster`. */
+  async function openJoin(cluster) {
+    if (!cluster) return;
+    let url = null;
+    try {
+      const d = await fetch('/api/clusters').then((r) => r.json());
+      url = ((d.clusters || []).find((c) => c.name === cluster) || {}).join_url || null;
+    } catch (e) { /* dit dans le bandeau */ }
+    joinTarget = { cluster, server_url: url };
+    try { localStorage.setItem('harvester_ops_automation_subtab', 'pxe'); } catch (e) { /* sans stockage */ }
+    if (window.Router) await Router.go('#automation/pxe');
+    render();
+    paintJoin();
+  }
+
   function init() {
     document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-bm="join-cancel"]')) { joinTarget = null; paintJoin(); return; }
       if (e.target.closest('#btn-bmc-refresh')) render(true);
       const p = e.target.closest('.bmc-power');
       if (p) { e.preventDefault(); power(p.dataset.host, p.dataset.action); }
@@ -1379,7 +1431,7 @@ const BMC = (() => {
     });
   }
 
-  return { init, render };
+  return { init, render, openJoin };
 })();
 
 document.addEventListener('DOMContentLoaded', BMC.init);

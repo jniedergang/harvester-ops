@@ -262,6 +262,7 @@ def test_search_offers_a_vm_already_read_and_goes_to_it(menu):
     expect(page.locator("#tab-namespaces")).to_have_class(re.compile("active"))
     page.wait_for_function("() => document.querySelector('#ns-vm-filter').value === 'erp-db-01'", timeout=10000)
     expect(page.locator("#ns-dropdown")).to_have_value("prod")
+    expect(page.locator("#ns-vms-table tbody tr")).to_have_count(1)        # la liste est filtrée sur elle
 
 
 def flask_server_url(page):

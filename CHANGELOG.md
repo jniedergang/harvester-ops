@@ -28,6 +28,25 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   KVM. Folders, Virtual machines, Containers, Disaster Recovery and
   Migrations of the whole fleet sit around it. Every entry is a real link.
   The previous menu stays below until it is removed.
+- **Harvester host page.** A band on top of the existing sections: family,
+  name, state, version, VM count, the host's sub-menu and **Activity of this
+  host**. **Parameters** become tabs: Nodes (block view, maintenance, host
+  settings, **Join a node**, which opens Bare-metal with the cluster chosen
+  and the install window in join mode), Storage, Network, Add-ons, Security,
+  Monitoring & Logging, Advanced, Upgrade (the Upgrade window's content in
+  the page), Power (Startup, Shutdown) and Connection (origin, declared
+  nodes, Test kubeconfig, Test SSH, shortcut to Settings > Clusters).
+  **Imports and migrations** become two tabs (VM Import, VMware
+  migrations). Clicking another Harvester host keeps the screen.
+- `/api/clusters` gives each cluster's declared nodes and its join address
+  (`join_url`, `https://<API server host>:443`).
+
+### Changed
+- **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
+  below the metrics; the block view of the nodes is Parameters > Nodes. The
+  **Upgrade** button opens Parameters > Upgrade.
+- **Cluster accounts** moved from Settings to Parameters > Security of each
+  Harvester host.
 - **An address opened before signing in is opened again after.** The login
   page keeps it for the tab only when the address grammar understands it,
   and never writes it in the page.
@@ -44,6 +63,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `tests/api/test_login_address_200.py` and
   `tests/e2e/test_login_address_200.py` (address kept through the login,
   crafted address forgotten).
+- `tests/e2e/test_host_page_200.py`: every host screen loaded cold (active
+  tab, visible section, only the address's cluster called), switching host
+  keeps the tab with the veil, Upgrade button, Join a node with the cluster
+  prefilled, Connection tests, Cluster accounts in Security, viewer without
+  write buttons, and a deliberate mutation that drops a Parameters tab.
+  `tests/api/test_clusters_join_url_200.py`: join address and declared nodes.
+  Tests that clicked the overview sub-tabs or Settings > Cluster accounts
+  now open the host addresses.
 
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 
