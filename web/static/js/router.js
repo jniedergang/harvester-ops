@@ -143,7 +143,8 @@
   }
 
   // Jeton d'avant sans hôte visible : l'onglet d'avant, tel quel (rien ne
-  // change à l'étape 1 pour une console sans cluster ou sans hôte KVM).
+  // change à l'étape 1 pour une console sans cluster ou sans hôte KVM), et le
+  // bandeau dit pourquoi. En 2.0.0 : #hosts avec ce message.
   const LEGACY_TAB = { cluster: 'overview', vmio: 'vmimport' };
 
   /** Adresse illisible, hôte inconnu ou hors des droits : l'écran par
@@ -171,6 +172,7 @@
       const t = Rt.fromLegacy(raw, ctx);
       if (t && t.notice === 'no-host') {
         await App._nav.showRoute({ tab: LEGACY_TAB[raw] || raw });
+        if (root.AccessNotice && AccessNotice.route) AccessNotice.route({ address: '#' + raw, reason: 'no-host' });
         return null;
       }
       if (!t) { await fallback(raw, null, 'unknown'); return null; }
@@ -205,7 +207,9 @@
       if (!route) { const h = screenNow(); route = h ? R().parse(h) : null; }
       current = route;
     };
-    queue = queue.then(run, run);
+    // une navigation qui lève est journalisée : la promesse rendue par go()
+    // ne rejette jamais (aucun appelant n'a de gestionnaire) et la file continue
+    queue = queue.then(run, run).catch((e) => { console.error('[router]', e); });
     return queue;
   }
 
@@ -234,7 +238,8 @@
     const s = App._nav.screen();
     const h = screenHash(Object.assign({}, s, { cluster: name }));
     const r = h ? R().parse(h) : null;
-    if (r && r.name === 'host' && r.kind === 'harvester') return go(r);
+    // un geste comme un clic : pas d'entrée d'historique (comme avant)
+    if (r && r.name === 'host' && r.kind === 'harvester') return go(r, { replace: true });
     return App._nav.setCluster(name);
   }
 

@@ -73,7 +73,9 @@ const AccessNotice = (() => {
         <ul class="an-list">${shownHidden.map(h => `<li>${escapeHtml((REASON[h.reason] || REASON['not-found'])(h.name))}</li>`).join('')}</ul>`);
     }
     routeMiss.filter(m => !REASON[m.reason]).forEach(m => {
-      parts.push(`<p class="an-intro an-route">${escapeHtml(tr('access.route.unknown', { address: m.address }))}</p>`);
+      const text = m.reason === 'no-host' ? tr('access.route.noHost', { address: m.address })
+        : tr('access.route.unknown', { address: m.address });
+      parts.push(`<p class="an-intro an-route">${escapeHtml(text)}</p>`);
     });
     el.innerHTML = `
       <span class="an-icon" aria-hidden="true">${window.Icons ? Icons.svg('lock', { size: 16 }) : ''}</span>
@@ -114,8 +116,8 @@ const AccessNotice = (() => {
 
   /** Adresse qui n'a pas pu s'ouvrir (hôte inconnu, caché par Rancher,
    *  adresse illisible) : le routeur a ouvert l'écran par défaut.
-   *  m = { address, name, reason } ; reason 'no-access' / 'not-found' (Rancher)
-   *  ou 'unknown'. */
+   *  m = { address, name, reason } ; reason 'no-access' / 'not-found' (Rancher),
+   *  'no-host' (ancien jeton alors qu'aucun hôte n'est visible) ou 'unknown'. */
   function route(m) {
     if (!m || !m.address) return;
     routeMiss = routeMiss.filter(x => x.address !== m.address).concat([{

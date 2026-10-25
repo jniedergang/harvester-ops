@@ -254,6 +254,71 @@ def test_an_address_that_cannot_open_says_so(context, flask_server, hash, name, 
     assert cluster_shown(page) == A
 
 
+XSS_ADDRESS = "#harvester/<img src=x onerror=window.__xss=1>"
+
+
+@pytest.mark.parametrize("how", ["cold", "go"])
+def test_a_crafted_address_is_shown_escaped(context, flask_server, how):
+    """Une adresse forgée n'atteint le bandeau qu'échappée : texte visible,
+    aucun élément créé, aucun script exécuté (à froid, et par Router.go qui
+    passe la chaîne brute, sans l'encodage de l'URL)."""
+    if how == "cold":
+        page, _ = open_cold(context, flask_server, XSS_ADDRESS)
+    else:
+        page, _ = open_cold(context, flask_server, "")
+        page.evaluate(f"Router.go({json.dumps(XSS_ADDRESS)})")
+        settle(page)
+    notice = page.locator("#access-notice")
+    expect(notice).to_be_visible()
+    if how == "go":
+        expect(notice).to_contain_text("<img src=x onerror=window.__xss=1>")
+    assert notice.locator("img").count() == 0
+    page.wait_for_timeout(300)
+    assert page.evaluate("window.__xss") is None
+
+
+def test_a_legacy_token_without_any_host_says_so(context, flask_server):
+    """Ancien jeton KVM alors qu'aucun hôte KVM n'est visible : l'onglet
+    d'avant s'ouvre (étape 1) et le bandeau dit pourquoi."""
+    empty = {"hosts": [], "warnings": [], "role": "admin", "gestures": {}}
+    page, _ = open_cold(context, flask_server, "#kvmstorage", routes={
+        "**/api/kvm/hosts?declared=1": lambda r, q: r.fulfill(
+            status=200, content_type="application/json", body=json.dumps(empty))})
+    assert active_tab(page) == "tab-kvmstorage"
+    notice = page.locator("#access-notice")
+    expect(notice).to_be_visible()
+    expect(notice).to_contain_text("#kvmstorage")
+    expect(notice).to_contain_text("none is visible")
+
+
+def test_the_cluster_selector_adds_no_history_entry(context, flask_server, two_clusters):
+    """Le sélecteur est un geste comme un clic : l'adresse suit sans entrée
+    d'historique (comme avant le routeur)."""
+    page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/storage")
+    before = page.evaluate("history.length")
+    page.select_option("#cluster-select", B)
+    page.wait_for_function(f"() => App.getCurrentCluster() === '{B}'")
+    settle(page)
+    assert page.evaluate("location.hash") == f"#harvester/{B}/params/storage/volumes"
+    assert page.evaluate("history.length") == before
+
+
+def test_a_failing_navigation_is_logged_and_the_next_one_still_runs(context, flask_server):
+    """Une navigation qui lève ne laisse pas de promesse rejetée sans
+    gestionnaire, et la file continue."""
+    page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/storage")
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.evaluate("""() => { const orig = App._nav.showRoute; window.__origShow = orig;
+      App._nav.showRoute = () => { App._nav.showRoute = orig; throw new Error('boom'); }; }""")
+    page.evaluate("() => { Router.go('#gpus'); }")   # promesse non attendue, comme un appelant
+    page.wait_for_timeout(300)
+    page.evaluate("Router.go('#bookings')")
+    settle(page)
+    assert active_tab(page) == "tab-bookings"
+    assert errors == [], errors
+
+
 def test_a_cluster_hidden_by_rancher_is_explained(context, flask_server):
     def clusters(route, req):
         route.fulfill(status=200, content_type="application/json", body=json.dumps({

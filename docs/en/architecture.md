@@ -127,12 +127,14 @@ exact screen and a reload (F5) gives it back. Two browser modules carry it:
   Host names are checked with the server's declaration rule (letters,
   digits, `.`, `_`, `-`), the same for a Harvester cluster and a KVM host.
 - `web/static/js/router.js` applies an address: it sets the cluster first,
-  then the tab, then the pane. A click on a menu entry, a section tab or an
-  overview tab rewrites the address without adding a history entry; a link
+  then the tab, then the pane. A click on a menu entry, a section tab, an
+  overview tab or the cluster selector rewrites the address without adding
+  a history entry; a link
   from one view to another (`App.openHost`) adds one, so Back returns to the
   previous screen. An unknown host, a host hidden by Rancher, or an address
   that matches no screen opens the default screen with a notice, never an
-  empty page. An empty address restores the last screen.
+  empty page. An old token that needs a host while none is visible opens
+  its old page with a notice. An empty address restores the last screen.
 
 Address grammar (`<c>` = Harvester cluster, `<h>` = KVM host):
 

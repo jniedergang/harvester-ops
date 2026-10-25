@@ -190,6 +190,8 @@
   /** route -> `#...`, chaque segment passé par encodeURIComponent. */
   function format(r) {
     if (!r || !r.name) return '#';
+    // adresse brute, NON validée : à afficher (échappée), jamais à écrire
+    // dans l'historique (pushState) ni à interpoler dans du HTML
     if (r.name === 'unknown') return '#' + (r.raw || '');
     const e = encodeURIComponent;
     const parts = [];

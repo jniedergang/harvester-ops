@@ -131,11 +131,14 @@ exact et un rechargement (F5) le rend. Deux modules du navigateur la portent :
   un hôte KVM.
 - `web/static/js/router.js` applique une adresse : le cluster d'abord, puis
   l'onglet, puis le pane. Un clic sur une entrée du menu, un onglet de
-  section ou d'aperçu réécrit l'adresse sans ajouter d'entrée d'historique ;
+  section ou d'aperçu, ou le sélecteur de cluster réécrit l'adresse sans
+  ajouter d'entrée d'historique ;
   un lien d'une vue vers une autre (`App.openHost`) en ajoute une, et
   Précédent revient à l'écran d'avant. Un hôte inconnu, caché par Rancher,
   ou une adresse qui ne mène à aucun écran ouvre l'écran par défaut avec un
-  message, jamais une page vide. Une adresse vide rend le dernier écran.
+  message, jamais une page vide. Un ancien jeton qui demande un hôte alors
+  qu'aucun n'est visible ouvre son ancienne page avec un message. Une
+  adresse vide rend le dernier écran.
 
 Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :
 
