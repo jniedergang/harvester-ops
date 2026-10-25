@@ -590,7 +590,8 @@ for whichever cluster is selected:
   Load Balancers, IP Pools and Host Networks (1.65.0, see below), Overlay
   Networks (the kube-ovn VPCs and subnets, with their forms) and Underlay
   Networks (the fabric: physical cards, virtual switches, LLDP). These views left the
-  Overview, which keeps Metrics and the Cluster board.
+  Overview. Since 2.0.0 they sit in the host's Parameters tabs, and the
+  Cluster board is Parameters > Nodes.
 - **Add-ons**: every Harvester add-on, its chart and version, its state, and
   Enable / Disable for administrators, followed in the dock
   (`harvester-resources addon` on the command line). A refusal of Harvester
@@ -924,7 +925,8 @@ On the command line, with the kubeconfig of a Rancher session:
 
 ### Rancher members of the cluster and its projects (1.73.0)
 
-Under the cluster accounts (Settings, **Cluster accounts**), **Members in
+Under the cluster accounts (the host's Parameters > Security > **Cluster
+accounts** since 2.0.0, before that in Settings), **Members in
 Rancher** lists who Rancher gives rights on the cluster, with the role and
 the provider (local, Keycloak...); in the Namespaces window, **Members** on a
 project does the same for the project. A member is added by searching the
@@ -940,10 +942,11 @@ On the command line, with the kubeconfig of a Rancher session:
 
 ### Dashboard events and usage (1.62.0)
 
-The Overview has an **Events** tab: the cluster events, grouped as on
-Harvester's dashboard (hosts, VMs, volumes, images), with counts, warnings
-marked, a "warnings only" filter and a search; refreshed every 20 seconds.
-The Metrics tab shows **usage** gauges: CPU and memory measured now
+The host's Overview shows an **Events** block under the metrics (a tab
+before 2.0.0; `#harvester/<c>/overview/events` scrolls to it): the cluster
+events, grouped as on Harvester's dashboard (hosts, VMs, volumes, images),
+with counts, warnings marked, a "warnings only" filter and a search;
+refreshed every 20 seconds. The metrics show **usage** gauges: CPU and memory measured now
 (metrics.k8s.io) against the hosts' capacity, with what the pods and VMs
 reserved; the Longhorn storage written, and what is promised to volumes
 against what may be promised (over-provisioning included).
@@ -1460,7 +1463,9 @@ its reason. Not checked against real GPU hardware.
 ### Upgrading Harvester (1.69.0)
 
 **Upgrade**, in the Overview header (and on the `server-version` setting, as
-in Harvester), opens a window per cluster.
+in Harvester), opens a window per cluster. Since 2.0.0 the same content is
+also the host's Parameters > **Upgrade** tab, and the Overview button leads
+there.
 
 - **Before**: the current version, and two ways to go:
   - **a version**: a Harvester `Version` object. The list says which ones
@@ -2194,7 +2199,8 @@ Terraform workspace.
   nothing is restricted and the console says so rather than quietly putting
   everyone, including the operator, in read-only.
 
-- **The cluster's own accounts** (Settings > Cluster accounts): the accounts
+- **The cluster's own accounts** (the host's Parameters > Security >
+  Cluster accounts, also reached from the account menu): the accounts
   declared on the selected Harvester cluster, whether each is enabled, and
   who holds cluster administration, in one view. Administration can be
   granted or revoked, and accounts enabled or disabled. Orphaned
@@ -2230,7 +2236,8 @@ users:
 ```
 
 - `cluster_user` is the **id** of the `users.management.cattle.io` object
-  (`user-2fhwx`), not the login. Settings > Cluster accounts lists them.
+  (`user-2fhwx`), not the login. Parameters > Security > Cluster accounts
+  of the host lists them.
 - **Unmapped accounts are refused** while delegation is on, rather than
   falling back to the shared administrator kubeconfig, which is what
   delegation exists to remove. Set `deny_unmapped: false` to allow it.
@@ -3822,8 +3829,8 @@ running again after a failover, a backup in error, a degraded standby
 volume, an unreachable source, a VM spec changed, a contract in error, a
 new VM matching a rule, recovery settings newer than the last protect, an
 automatic protection that failed. They show as a badge on the Disaster Recovery menu
-entries (root and current cluster), in the **Events** tab of the cluster
-overview (group Disaster Recovery, also when the cluster does not answer),
+entries (root and current cluster), in the **Events** block of the host's
+Overview (group Disaster Recovery, also when the cluster does not answer),
 and are sent to the configured notifications.
 
 Not in this release: drills (the drill network column is only stored).

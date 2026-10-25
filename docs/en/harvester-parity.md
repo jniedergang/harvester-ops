@@ -14,7 +14,7 @@ Harvester menu: *Dashboard*
 |---|---|---|---|
 | Host, VM and volume counts | Done | 1.2 | Overview tiles |
 | CPU, memory and storage capacity | Done | 1.62 | live usage (metrics.k8s.io), reserved, storage written and promised |
-| Cluster events (hosts, VMs, volumes, images) | Done | 1.62 | Overview Events tab, warnings filter |
+| Cluster events (hosts, VMs, volumes, images) | Done | 1.62 | Events block of the host Overview, warnings filter |
 | Cluster and VM metrics (rancher-monitoring) | Done | 1.70 | Metrics tab: Prometheus when rancher-monitoring is on, metrics-server otherwise; correct VM CPU (Harvester divides it by 1000) |
 | Upgrade Harvester button | Done | 1.69 | in the Overview header and on server-version |
 

@@ -675,7 +675,8 @@ connaissent de Harvester, pour le cluster choisi :
   plus bas), Réseaux overlay (les VPC et subnets kube-ovn, avec leurs
   formulaires) et Réseaux underlay (la fabrique : cartes physiques, switchs
   virtuels, LLDP). Ces vues ont quitté
-  l'Aperçu, qui garde Métriques et la vue Cluster.
+  l'Aperçu. Depuis la 2.0.0 elles sont dans les onglets Paramètres de
+  l'hôte, et la vue Cluster est Paramètres > Nœuds.
 - **Add-ons** : chaque add-on de Harvester, son chart et sa version, son
   état, et Activer / Désactiver pour les administrateurs, suivi dans le dock
   (`harvester-resources addon` en ligne de commande). Un refus de Harvester
@@ -1039,7 +1040,8 @@ En ligne de commande, avec le kubeconfig d'une session Rancher :
 
 ### Membres Rancher du cluster et de ses projets (1.73.0)
 
-Sous les comptes du cluster (Réglages, **Comptes du cluster**), **Membres
+Sous les comptes du cluster (Paramètres > Sécurité > **Comptes du cluster**
+de l'hôte depuis la 2.0.0, avant dans les Réglages), **Membres
 dans Rancher** liste à qui Rancher donne des droits sur le cluster, avec le
 rôle et le fournisseur (local, Keycloak...) ; dans la fenêtre Namespaces,
 **Membres** sur un projet fait de même pour le projet. Un membre s'ajoute en
@@ -1056,10 +1058,12 @@ En ligne de commande, avec le kubeconfig d'une session Rancher :
 
 ### Événements et utilisation du tableau de bord (1.62.0)
 
-L'aperçu a un onglet **Événements** : les événements du cluster, rangés comme
+La Vue d'ensemble de l'hôte montre un bloc **Événements** sous les métriques
+(un onglet avant la 2.0.0 ; `#harvester/<c>/overview/events` y fait
+défiler) : les événements du cluster, rangés comme
 sur le tableau de bord de Harvester (hôtes, VMs, volumes, images), avec leurs
 nombres, les avertissements marqués, un filtre « avertissements seulement »
-et une recherche ; relus toutes les 20 secondes. L'onglet Métriques montre
+et une recherche ; relus toutes les 20 secondes. Les métriques montrent
 des jauges d'**utilisation** : CPU et mémoire mesurés maintenant
 (metrics.k8s.io) face à la capacité des hôtes, avec ce que pods et VMs ont
 réservé ; le stockage Longhorn écrit, et ce qui est promis aux volumes face à
@@ -1623,6 +1627,8 @@ refusée avec sa raison. Non vérifié sur du vrai matériel GPU.
 
 **Mettre à jour**, dans l'en-tête de l'Aperçu (et sur le réglage
 `server-version`, comme dans Harvester), ouvre une fenêtre par cluster.
+Depuis la 2.0.0 le même contenu est aussi l'onglet Paramètres > **Mise à
+jour** de l'hôte, où mène le bouton de la Vue d'ensemble.
 
 - **Avant** : la version actuelle, et deux chemins :
   - **une version** : un objet `Version` de Harvester. La liste dit celles
@@ -2419,7 +2425,8 @@ un workspace Terraform.
   distinguable : rien n'est bridé, et la console le dit plutôt que de mettre
   discrètement tout le monde, exploitant compris, en lecture seule.
 
-- **Les comptes du cluster** (Réglages > Comptes du cluster) : les comptes
+- **Les comptes du cluster** (Paramètres > Sécurité > Comptes du cluster de
+  l'hôte, aussi depuis le menu du compte) : les comptes
   déclarés sur le cluster Harvester sélectionné, leur activation et qui
   détient l'administration, d'un seul regard. L'administration s'accorde et
   se retire, les comptes s'activent et se désactivent. Les délégations
@@ -2457,8 +2464,8 @@ users:
 ```
 
 - `cluster_user` est l'**identifiant** de l'objet
-  `users.management.cattle.io` (`user-2fhwx`), pas le login. Réglages >
-  Comptes du cluster les liste.
+  `users.management.cattle.io` (`user-2fhwx`), pas le login. Paramètres >
+  Sécurité > Comptes du cluster de l'hôte les liste.
 - **Un compte sans correspondance est refusé** tant que la délégation est
   active, plutôt que de retomber sur le kubeconfig administrateur partagé,
   qui est précisément ce que la délégation supprime. `deny_unmapped: false`
@@ -4183,7 +4190,7 @@ dégradé, source injoignable, spec d'une VM changée, contrat en erreur,
 nouvelle VM qui répond à une règle, réglages de reprise plus récents que la
 dernière protection, protection automatique en échec. Elles s'affichent en pastille sur les
 entrées Disaster Recovery du menu (racine et cluster courant), dans
-l'onglet **Événements** de l'aperçu du cluster (groupe Disaster Recovery,
+le bloc **Événements** de la Vue d'ensemble de l'hôte (groupe Disaster Recovery,
 même quand le cluster ne répond pas), et partent vers les notifications
 réglées.
 

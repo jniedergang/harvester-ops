@@ -14,7 +14,7 @@ Menu Harvester : *Dashboard*
 |---|---|---|---|
 | Compteurs nœuds, VMs, volumes | Fait | 1.2 | Vue d'ensemble |
 | Capacité CPU, mémoire, stockage | Fait | 1.62 | usage réel (metrics.k8s.io), réservé, stockage écrit et promis |
-| Événements du cluster (hôtes, VMs, volumes, images) | Fait | 1.62 | onglet Événements de l'aperçu, filtre avertissements |
+| Événements du cluster (hôtes, VMs, volumes, images) | Fait | 1.62 | bloc Événements de la Vue d'ensemble de l'hôte, filtre avertissements |
 | Métriques du cluster et des VMs (rancher-monitoring) | Fait | 1.70 | onglet Métriques : Prometheus quand rancher-monitoring est actif, metrics-server sinon ; CPU de VM juste (Harvester le divise par 1000) |
 | Bouton Mettre à jour Harvester | Fait | 1.69 | dans l'en-tête de l'aperçu et sur server-version |
 
