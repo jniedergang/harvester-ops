@@ -80,6 +80,7 @@ class Run:
         self.id = f"act{Run.n:09d}"
         self.status = "running"
         self.error_summary = ""
+        self.result = {}
 
 
 class Wall:
@@ -100,8 +101,10 @@ def _auto(env, runs):
     return wapp.ReplicationAutoProtect(enabled=lambda: True, clock=clock, wall=wall, launch=launch), wall, clock
 
 
-def _fail(run, why="the pre-check refuses this protect (disk-not-replicated)"):
+def _fail(run, why="the pre-check refuses this protection"):
     run.status, run.error_summary = "error", why
+    run.result = {"output": {"findings": [{"code": "disk-not-replicated", "level": "block"},
+                                          {"code": "cloud-init-rerun", "level": "warn"}]}}
 
 
 def _events(env, code):
@@ -135,7 +138,8 @@ def test_a_failed_auto_protect_waits_longer_each_time_and_alerts_once(env):
     _fail(runs[0])
     assert ap.tick() == []                                  # échec relevé, attente posée
     f = _flag(env)
-    assert f["failures"] == 1 and f["next_at"] == wall.t + every and "disk-not-replicated" in f["error"]
+    assert f["failures"] == 1 and f["next_at"] == wall.t + every
+    assert f["error"] == "the pre-check refuses this protection (disk-not-replicated)"
     _advance(wall, clock, every - 1)
     assert ap.tick() == []
     _advance(wall, clock, 1)

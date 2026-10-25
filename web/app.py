@@ -25916,6 +25916,11 @@ class ReplicationAutoProtect:
         failures = int((flag or {}).get("failures") or 0) + 1
         delay = min(REPLICATION_AUTO_PROTECT_EVERY_S * 2 ** (failures - 1), REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S)
         error = str(getattr(run, "error_summary", "") or run.status)[:200]
+        # les constats bloquants du contrôle disent quoi corriger (classe absente, volume chiffré...)
+        found = (((getattr(run, "result", None) or {}).get("output") or {}).get("findings")) or []
+        codes = sorted({f.get("code") for f in found if isinstance(f, dict) and f.get("level") == "block"} - {None})
+        if codes:
+            error = f"{error} ({', '.join(codes)})"
         now_iso = _rp.iso(_repl_now())
         _rdb.set_plan_flag(conn, "auto-protect", pid, {
             "key": self._key(conn, p), "failures": failures, "since": (flag or {}).get("since") or now_iso,
