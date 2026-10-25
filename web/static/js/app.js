@@ -24,6 +24,7 @@ const App = (() => {
   // Paramètres ; null sur les écrans de flotte. Posés par showRoute.
   let navKvm = null;
   let navKvmTab = null;
+  let navHostsKind = null;
   const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
@@ -92,6 +93,9 @@ const App = (() => {
     if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`), { host: navKvm }); }
     else if (window.KVM) KVM.stop();
     if (name === 'kvmparams' && window.HostPage) HostPage.renderKvmParams(navKvm, navKvmTab || 'system');
+    // 2.0.0 : index des hôtes (#hosts, #hosts/<famille>)
+    if (name === 'hosts') { if (window.HostsIndex) HostsIndex.start($('#hosts-index-host'), { kind: navHostsKind }); }
+    else if (window.HostsIndex) HostsIndex.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -182,6 +186,7 @@ const App = (() => {
   // de ne pas proposer ce qui sera refusé, et de le DIRE.
   // -------------------------------------------------------------------------
   let sessionRole = 'admin';
+  let roleKnown = false;
 
   // v1.50.0 : une session Rancher expirée ne doit pas laisser l'écran
   // tourner sur des 401 : on retourne à la page de connexion.
@@ -208,6 +213,9 @@ const App = (() => {
     try {
       const d = await fetch('/api/whoami').then(r => r.json());
       sessionRole = d.role || 'admin';
+      roleKnown = true;
+      // 2.0.0 : les vues qui grisent leurs boutons d'après le rôle le suivent
+      document.dispatchEvent(new CustomEvent('hops:role', { detail: { role: sessionRole } }));
       document.body.classList.toggle('auth-rancher', d.auth === 'rancher');
       // v1.56.0 : le compte et la déconnexion vivent dans le menu du compte
       // (en haut à droite), pour tous les modes de connexion
@@ -325,6 +333,7 @@ const App = (() => {
     if (window.Replication) Replication.paintBadges();
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
+    if (active === 'hosts' && window.HostsIndex) jobs.push(HostsIndex.reload());
     // 2.0.0 : Paramètres d'un hôte KVM relus de même ; kvmdr est un état vide fixe
     if (active === 'kvmparams' && window.HostPage) jobs.push(HostPage.renderKvmParams(navKvm, navKvmTab || 'system'));
     if (active === 'overview') {
@@ -2163,6 +2172,7 @@ const App = (() => {
   async function showRoute(t) {
     navKvm = t.kvm || null;
     navKvmTab = t.kvmTab || null;
+    navHostsKind = t.hostsKind || null;
     const show = () => {
       if (t.overview) paintOverviewMode(t.overview);
       setTab(t.tab);
@@ -2214,6 +2224,7 @@ const App = (() => {
       tab, cluster: currentCluster, overview: overviewMode(), automation,
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
       kvm, kvmTab: kvm ? navKvmTab : null,
+      hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,
     };
   }
 
@@ -2315,6 +2326,8 @@ const App = (() => {
 
   // Expose getCurrentCluster for the other modules
   function getCurrentCluster() { return currentCluster; }
+  /** Rôle de la session (whoami), null tant qu'il n'est pas lu. */
+  function role() { return roleKnown ? sessionRole : null; }
 
   // -------------------------------------------------------------------------
   // Navigation 2.0, étape 1 : source unique des clusters. Les modules ne
@@ -2393,7 +2406,7 @@ const App = (() => {
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
            mountTopology, stopBoards, setTab,
-           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm,
+           role, listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm,
            // réservé au routeur (router.js)
            _nav: { showRoute, restoreFromStorage, screen, setCluster } };
 })();

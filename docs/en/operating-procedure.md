@@ -299,3 +299,25 @@ Clicking another Harvester host in the menu keeps the screen: from
 Parameters > Storage > Images of one cluster you land on the same tab of the
 other (with the switching veil). A viewer sees the same pages without the
 write buttons.
+
+### Host page (KVM)
+
+A KVM host opens on the same kind of page (`#kvm/<host>`): Overview (the
+host block), Virtual machines (this host only), Parameters (System, Pools,
+Networks, Labels, Connection) and Disaster Recovery (not available yet for
+KVM domains). Connection holds **Test** (operator) and **Remove** (admin,
+confirmed in the page). Labels can be edited by an admin, after the checks
+the window shows. See Capabilities, section 10.
+
+### Hosts index
+
+**Hosts** in the side menu (`#hosts`) opens a table of every host of both
+families: family, name, state, version, labels, VMs, folder and favourite.
+Click a column title to sort (again to reverse); filter by family, state (or
+every host in alert), label, version or folder. `#hosts/harvester` and
+`#hosts/kvm` open with the family filter set, and changing that filter
+rewrites the address. A row opens its host page; its star works as in the
+menu. On `#hosts/kvm`, **Declare a host** and, per KVM row, **Test** and
+**Remove** (confirmed in the row) give back what KVM > Hosts offered. A link
+to a host you cannot see (removed, or outside your rights) opens this index
+with a notice. The index only reads the host list, never a host.

@@ -25,7 +25,7 @@
   function resolve(route) {
     if (!route || !route.name) return null;
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
-                                              kvm: null, kvmTab: null }, extra || {});
+                                              kvm: null, kvmTab: null, hostsKind: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -65,7 +65,9 @@
         return t('allvms');                  // racine, dossier, famille Harvester
       case 'folders': return t('allvms');
       case 'containers': return t('allcontainers');
-      case 'hosts': return route.kind === 'harvester' ? t('overview') : t('kvmhosts');
+      // 2.0.0 (tâche 8) : l'index des hôtes, une famille en option ; les
+      // dossiers d'hôtes arrivent à l'étape 3 (index entier en attendant)
+      case 'hosts': return t('hosts', { hostsKind: route.kind || null });
       case 'dr': return t(route.tab === 'links' ? 'drlinks' : 'drplans');
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
@@ -106,6 +108,7 @@
       case 'allcontainers': return '#containers';
       case 'gpus': case 'bookings': case 'usage': case 'activity': return '#' + s.tab;
       case 'forkliftglobal': return '#migrations';
+      case 'hosts': return '#hosts' + (s.hostsKind === 'harvester' || s.hostsKind === 'kvm' ? '/' + s.hostsKind : '');
       case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm';
       case 'kvmvms': return s.kvm ? K({ sub: 'vms' }) : '#vms/host/kvm';
       case 'kvmstorage': return s.kvm ? K({ sub: 'params', tab: 'pools' }) : '#' + s.tab;
@@ -157,10 +160,17 @@
     return { visible: false, reason: h ? h.reason : 'unknown' };
   }
 
-  // Jeton d'avant sans hôte visible : l'onglet d'avant, tel quel (rien ne
-  // change à l'étape 1 pour une console sans cluster ou sans hôte KVM), et le
-  // bandeau dit pourquoi. En 2.0.0 : #hosts avec ce message.
-  const LEGACY_TAB = { cluster: 'overview', vmio: 'vmimport' };
+  /** 2.0.0 : un hôte que la personne ne voit pas (retiré, hors de ses
+   *  droits) ou un ancien jeton qui demande un hôte alors qu'aucun n'est
+   *  visible : l'index des hôtes, et le bandeau dit pourquoi (jamais une
+   *  page vide). Rend la route de l'index. */
+  async function toHosts(raw, name, reason) {
+    const r = R().parse('#hosts');
+    history.replaceState(history.state, '', '#hosts');
+    await App._nav.showRoute(Object.assign({}, resolve(r), { tabFirst: false }));
+    if (root.AccessNotice && AccessNotice.route) AccessNotice.route({ address: '#' + raw, name, reason });
+    return r;
+  }
 
   /** Adresse illisible, hôte inconnu ou hors des droits : l'écran par
    *  défaut, et le bandeau d'AccessNotice le dit (jamais une page vide). */
@@ -185,18 +195,14 @@
         kvm: template.includes('{LK}') ? await kvmHosts() : [],
       };
       const t = Rt.fromLegacy(raw, ctx);
-      if (t && t.notice === 'no-host') {
-        await App._nav.showRoute({ tab: LEGACY_TAB[raw] || raw });
-        if (root.AccessNotice && AccessNotice.route) AccessNotice.route({ address: '#' + raw, reason: 'no-host' });
-        return null;
-      }
+      if (t && t.notice === 'no-host') return toHosts(raw, null, 'no-host');
       if (!t) { await fallback(raw, null, 'unknown'); return null; }
       route = t;
       rewrite = true;
     }
     if (route.host) {
       const v = await hostVisible(route.kind, route.host);
-      if (!v.visible) { await fallback(raw, route.host, v.reason); return null; }
+      if (!v.visible) return toHosts(raw, route.host, v.reason);
     }
     const target = resolve(route);
     if (!target) { await fallback(raw, null, 'unknown'); return null; }

@@ -131,10 +131,10 @@ exact screen and a reload (F5) gives it back. Two browser modules carry it:
   overview tab or the cluster selector rewrites the address without adding
   a history entry; a link
   from one view to another (`App.openHost`) adds one, so Back returns to the
-  previous screen. An unknown host, a host hidden by Rancher, or an address
-  that matches no screen opens the default screen with a notice, never an
-  empty page. An old token that needs a host while none is visible opens
-  its old page with a notice. An empty address restores the last screen.
+  previous screen. An unknown host or a host hidden by Rancher opens the
+  hosts index (`#hosts`) with a notice, and so does an old token that needs
+  a host while none is visible; an address that matches no screen opens the
+  default screen with a notice. Never an empty page. An empty address restores the last screen.
 
 Address grammar (`<c>` = Harvester cluster, `<h>` = KVM host):
 

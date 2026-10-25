@@ -70,7 +70,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   family is in the route; the former form still answers for a Harvester
   cluster, a KVM host answers an empty list with `available: false`.
 
+- **Hosts index** (`#hosts`, **Hosts** in the side menu): a table of every
+  Harvester cluster and KVM host with family, name, state, version, labels,
+  VMs, folder and favourite. Sort by any column, filter by family, state
+  (or in alert), label, version and folder. `#hosts/harvester` and
+  `#hosts/kvm` open pre-filtered; on `#hosts/kvm`, Declare a host, Test and
+  Remove per row give back KVM > Hosts. It reads `/api/hosts` only.
 ### Changed
+- **A link to a host you cannot see** (removed, or hidden by Rancher), and
+  an old token that needs a host while none is visible, open the hosts
+  index with a notice instead of the default screen.
 - **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
   below the metrics; the block view of the nodes is Parameters > Nodes. The
   **Upgrade** button opens Parameters > Upgrade.
@@ -83,6 +92,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Tests
+- `tests/api/test_hosts_index_model_200.py` (filters and sorts in a table,
+  same name in both families, facets, 100 hosts, a deliberate mutation of
+  the state order) and `tests/e2e/test_hosts_index_200.py` (columns,
+  pre-filtered addresses, filters, sort by state, 100 hosts, star, KVM row
+  gestures and their roles, a vanished host landing here with the notice).
 - `tests/api/test_kvm_host_page_200.py` (declaration without SSH and its
   fingerprints, refusals, role in the host read, labels route argv and
   refusals by role, `host label` command, DR route by family) and

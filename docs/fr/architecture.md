@@ -134,10 +134,11 @@ exact et un rechargement (F5) le rend. Deux modules du navigateur la portent :
   section ou d'aperçu, ou le sélecteur de cluster réécrit l'adresse sans
   ajouter d'entrée d'historique ;
   un lien d'une vue vers une autre (`App.openHost`) en ajoute une, et
-  Précédent revient à l'écran d'avant. Un hôte inconnu, caché par Rancher,
-  ou une adresse qui ne mène à aucun écran ouvre l'écran par défaut avec un
-  message, jamais une page vide. Un ancien jeton qui demande un hôte alors
-  qu'aucun n'est visible ouvre son ancienne page avec un message. Une
+  Précédent revient à l'écran d'avant. Un hôte inconnu ou caché par
+  Rancher ouvre l'index des hôtes (`#hosts`) avec un message, comme un
+  ancien jeton qui demande un hôte alors qu'aucun n'est visible ; une
+  adresse qui ne mène à aucun écran ouvre l'écran par défaut avec un
+  message. Jamais une page vide. Une
   adresse vide rend le dernier écran.
 
 Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :

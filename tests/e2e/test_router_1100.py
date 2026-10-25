@@ -90,8 +90,9 @@ FLEET_ROWS = [
     (f"#vms/host/kvm/{KVM}", "kvmvms", None),
     ("#folders", "allvms", None), ("#folders/12", "allvms", None),
     ("#containers", "allcontainers", None), ("#containers/folder/12", "allcontainers", None),
-    ("#hosts", "kvmhosts", None), ("#hosts/kvm", "kvmhosts", None), ("#hosts/folder/12", "kvmhosts", None),
-    ("#hosts/harvester", "overview", None),
+    # 2.0.0 (tâche 8) : l'index des hôtes
+    ("#hosts", "hosts", None), ("#hosts/kvm", "hosts", None), ("#hosts/folder/12", "hosts", None),
+    ("#hosts/harvester", "hosts", None),
     ("#dr", "drplans", None), ("#dr/links", "drlinks", None), ("#dr/rp-0123456789ab", "drplans", None),
     ("#migrations", "forkliftglobal", None), ("#gpus", "gpus", None), ("#bookings", "bookings", None),
     ("#usage", "usage", None), ("#activity", "activity", None),
@@ -122,8 +123,8 @@ LEGACY_ROWS = [
     ("#allvms", "allvms", "#vms"),
     ("#containers", "allcontainers", "#containers"),   # décision 3 : racine de flotte
     ("#allcontainers", "allcontainers", "#containers"),
-    ("#kvmhosts", "kvmhosts", "#hosts/kvm"),
-    ("#kvm-hosts", "kvmhosts", "#hosts/kvm"),
+    ("#kvmhosts", "hosts", "#hosts"),
+    ("#kvm-hosts", "hosts", "#hosts"),
     ("#kvmvms", "kvmvms", "#vms/host/kvm"),
     ("#kvmstorage", "kvmstorage", f"#kvm/{KVM}/params/pools"),
     ("#kvmnetworks", "kvmnetworks", f"#kvm/{KVM}/params/networks"),
@@ -243,24 +244,27 @@ def test_back_returns_to_the_previous_screen(context, flask_server, two_clusters
     check_detail(page, "storage", ("pane", "images"))
 
 
+# (adresse, nom, texte, onglet attendu, adresse finale) : un hôte inconnu
+# mène à l'index des hôtes (2.0.0, tâche 8) ; une adresse illisible à
+# l'écran par défaut
 NOT_OPENED = [
-    ("#harvester/nope/params/storage", "nope", "opens no screen"),
-    (f"#kvm/zzz/params/pools", "zzz", "opens no screen"),
-    ("#harvester/-a", "-a", "opens no screen"),
-    ("#xen/a", "#xen/a", "opens no screen"),
-    ("#harvester/a/params/storage/zzz", "zzz", "opens no screen"),
+    ("#harvester/nope/params/storage", "nope", "opens no screen", "tab-hosts", "#hosts"),
+    (f"#kvm/zzz/params/pools", "zzz", "opens no screen", "tab-hosts", "#hosts"),
+    ("#harvester/-a", "-a", "opens no screen", "tab-activity", ""),
+    ("#xen/a", "#xen/a", "opens no screen", "tab-activity", ""),
+    ("#harvester/a/params/storage/zzz", "zzz", "opens no screen", "tab-activity", ""),
 ]
 
 
-@pytest.mark.parametrize("hash,name,text", NOT_OPENED, ids=[h for h, _, _ in NOT_OPENED])
-def test_an_address_that_cannot_open_says_so(context, flask_server, hash, name, text):
+@pytest.mark.parametrize("hash,name,text,tab,final", NOT_OPENED, ids=[h[0] for h in NOT_OPENED])
+def test_an_address_that_cannot_open_says_so(context, flask_server, hash, name, text, tab, final):
     page, calls = open_cold(context, flask_server, hash, tab="activity")
-    assert active_tab(page) == "tab-activity"                 # écran par défaut (étape 1)
+    assert active_tab(page) == tab
     notice = page.locator("#access-notice")
     expect(notice).to_be_visible()
     expect(notice).to_contain_text(text)
     expect(notice).to_contain_text(hash)
-    assert page.evaluate("location.hash") == ""
+    assert page.evaluate("location.hash") == final
     assert cluster_shown(page) == A
 
 
@@ -288,13 +292,13 @@ def test_a_crafted_address_is_shown_escaped(context, flask_server, how):
 
 
 def test_a_legacy_token_without_any_host_says_so(context, flask_server):
-    """Ancien jeton KVM alors qu'aucun hôte KVM n'est visible : l'onglet
-    d'avant s'ouvre (étape 1) et le bandeau dit pourquoi."""
+    """Ancien jeton KVM alors qu'aucun hôte KVM n'est visible : l'index des
+    hôtes s'ouvre (2.0.0) et le bandeau dit pourquoi."""
     empty = {"hosts": [], "warnings": [], "role": "admin", "gestures": {}}
     page, _ = open_cold(context, flask_server, "#kvmstorage", routes={
         "**/api/kvm/hosts?declared=1": lambda r, q: r.fulfill(
             status=200, content_type="application/json", body=json.dumps(empty))})
-    assert active_tab(page) == "tab-kvmstorage"
+    assert active_tab(page) == "tab-hosts" and page.evaluate("location.hash") == "#hosts"
     notice = page.locator("#access-notice")
     expect(notice).to_be_visible()
     expect(notice).to_contain_text("#kvmstorage")
@@ -336,7 +340,7 @@ def test_a_cluster_hidden_by_rancher_is_explained(context, flask_server):
             "config_writable": True, "hidden": [{"name": "secret", "reason": "no-access"}]}))
     page, calls = open_cold(context, flask_server, "#harvester/secret/vms", tab="activity",
                             routes={"**/api/clusters": clusters})
-    assert active_tab(page) == "tab-activity"
+    assert active_tab(page) == "tab-hosts"                      # 2.0.0 : l'index des hôtes
     notice = page.locator("#access-notice")
     expect(notice).to_be_visible()
     expect(notice).to_contain_text("secret: Rancher manages it but gives your account no access to it.")

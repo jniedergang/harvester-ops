@@ -309,3 +309,28 @@ Un clic sur un autre hôte Harvester du menu garde l'écran : depuis
 Paramètres > Stockage > Images d'un cluster, on arrive sur le même onglet de
 l'autre (avec le voile de bascule). Un lecteur voit les mêmes pages, sans les
 boutons d'écriture.
+
+### Page d'un hôte (KVM)
+
+Un hôte KVM s'ouvre sur le même genre de page (`#kvm/<hôte>`) : Vue
+d'ensemble (le bloc de l'hôte), Machines virtuelles (cet hôte seulement),
+Paramètres (Système, Pools, Réseaux, Étiquettes, Connexion) et Disaster
+Recovery (pas encore disponible pour les domaines KVM). Connexion porte
+**Tester** (opérateur) et **Retirer** (administrateur, confirmé dans la
+page). Un administrateur peut modifier les étiquettes, après les contrôles
+que montre la fenêtre. Voir Capacités, section 10.
+
+### Index des hôtes
+
+**Hôtes** dans le menu latéral (`#hosts`) ouvre un tableau de tous les hôtes
+des deux familles : famille, nom, état, version, étiquettes, VMs, dossier et
+favori. Un clic sur le titre d'une colonne trie (un second inverse) ; les
+filtres portent sur la famille, l'état (ou tous les hôtes en alerte),
+l'étiquette, la version ou le dossier. `#hosts/harvester` et `#hosts/kvm`
+s'ouvrent avec le filtre de famille posé, et changer ce filtre réécrit
+l'adresse. Une ligne ouvre la page de son hôte ; son étoile fonctionne comme
+dans le menu. Sur `#hosts/kvm`, **Déclarer un hôte** et, par ligne KVM,
+**Tester** et **Retirer** (confirmé dans la ligne) reprennent ce qu'offrait
+KVM > Hôtes. Un lien vers un hôte que vous ne voyez pas (retiré, ou hors de
+vos droits) ouvre cet index avec un message. L'index ne lit que la liste
+des hôtes, jamais un hôte.
