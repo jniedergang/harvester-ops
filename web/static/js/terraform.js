@@ -722,12 +722,8 @@ const TF = (() => {
       const tab = e.target.closest('#tf-status-body .sub-tab[data-tf-tab]');
       if (tab) { activateSubtab(tab.dataset.tfTab); return; }
     });
-    // Refresh when the Terraform sub-tab becomes active
-    document.addEventListener('click', (e) => {
-      if (e.target.closest('#tab-automation .sub-tab[data-subtab="terraform"]')) {
-        setTimeout(refresh, 50);
-      }
-    });
+    // 2.0.0 : l'onglet Terraform est rafraîchi par le routeur
+    // (CAPI.selectAutomationSubtab), plus par un clic de l'ancien menu
     document.addEventListener('submit', (e) => {
       if (e.target?.id === 'tf-prov-form') installProvider(e);
       if (e.target?.id === 'tf-prov-file-form') uploadProvider(e);

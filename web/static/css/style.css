@@ -467,28 +467,7 @@ body.sidebar-collapsed #sidebar .brand .title {
    le clic atterrissait sur la ligne voisine. `visibility` masque sans
    libérer la place, donc la géométrie verticale est rigoureusement la
    même dans les deux états. */
-body.sidebar-collapsed #sidebar .version,
-body.sidebar-collapsed .cluster-selector label {
-  visibility: hidden;
-}
-/* Le sélecteur de cluster, LUI, reste utilisable dans le rail. Le masquer
-   obligeait à ouvrir le menu pour lire ou changer de cluster, sur une
-   console dont c'est le contrôle le plus utilisé, et le rendait carrément
-   inatteignable au clavier comme au script. Il occupe la largeur du rail,
-   le nom est tronqué mais lisible, et le bouton « + » (ajouter un cluster,
-   geste rare) attend le dépliage. La hauteur de la rangée ne change pas. */
-body.sidebar-collapsed .cluster-row #cluster-select {
-  width: 100%;
-  min-width: 0;
-  padding-left: 4px;
-  padding-right: 4px;
-}
-body.sidebar-collapsed .cluster-row .btn-icon-sm { display: none; }
-/* Exception au `display:none !important` ci-dessus : ce libellé porte la
-   classe `sidebar-label` mais occupe une LIGNE dans l'en-tête. Le retirer
-   du flux remontait toute la navigation de 19 px. */
-body.sidebar-collapsed .cluster-selector > label.sidebar-label {
-  display: block !important;
+body.sidebar-collapsed #sidebar .version {
   visibility: hidden;
 }
 /* Seul l'espacement HORIZONTAL change : toucher au vertical recréerait le
@@ -498,13 +477,6 @@ body.sidebar-collapsed #sidebar header {
   text-align: center;
 }
 body.sidebar-collapsed #sidebar .brand { justify-content: center; }
-body.sidebar-collapsed .cluster-selector {
-  padding: 14px 8px;
-  border-bottom: 1px solid var(--border);
-}
-body.sidebar-collapsed .cluster-row {
-  justify-content: center;
-}
 body.sidebar-collapsed .tab {
   padding: 10px 0;
   text-align: center;
@@ -581,47 +553,6 @@ body.sidebar-collapsed .sidebar-collapse-btn {
 }
 .version { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
 
-.cluster-selector {
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
-}
-.cluster-selector label {
-  display: block;
-  text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 1px;
-  color: var(--text-dim);
-  margin-bottom: 6px;
-}
-.cluster-selector select {
-  flex: 1;
-  background: var(--bg-elev);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 6px 8px;
-  border-radius: 4px;
-  font-size: 13px;
-}
-.cluster-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.cluster-row .btn-icon-sm {
-  background: var(--bg-elev);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  width: 26px; height: 26px;
-  border-radius: 4px;
-  font-size: 16px;
-  font-weight: 500;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.cluster-row .btn-icon-sm:hover {
-  background: var(--accent);
-  color: var(--btn-primary-text);
-}
 
 #sidebar nav {
   flex: 1;

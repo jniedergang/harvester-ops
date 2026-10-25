@@ -143,6 +143,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   page keeps it for the tab only when the address grammar understands it,
   and never writes it in the page.
 
+### Internal
+- Dead code of the 1.x menu removed: the Bare-metal and Terraform click
+  listeners on automation menu tabs that no longer exist (the router
+  refreshes these tabs) and the cluster selector styles.
+
 ### Tests
 - `tests/nav_inventory.py` (one table of every screen: old place, address,
   section, selector, old tokens), `tests/api/test_nav_inventory_200.py`

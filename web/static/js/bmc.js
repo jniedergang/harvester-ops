@@ -1450,13 +1450,9 @@ const BMC = (() => {
       if (i) { e.preventDefault(); openInstall(i.dataset.host); }
       const del = e.target.closest('.bmc-iso-del');
       if (del) { e.preventDefault(); deleteIso(del.dataset.name); }
-      // Viser le LIEN de navigation, pas n'importe quel `data-subtab="pxe"` :
-      // le panneau de contenu porte le même attribut, si bien qu'un simple
-      // clic sur un bouton de l'onglet reconstruisait tout 50 ms plus tard
-      // et effaçait le résultat de la découverte qui venait de s'afficher.
-      if (e.target.closest('#tab-automation .sub-tab[data-subtab="pxe"]')) {
-        setTimeout(render, 50);
-      }
+      // 2.0.0 : l'onglet Bare-metal est rendu par le routeur
+      // (CAPI.selectAutomationSubtab) ; aucun clic dans le panneau ne le
+      // reconstruit (il effaçait le résultat d'une découverte).
     });
     document.addEventListener('submit', (e) => {
       if (e.target?.id === 'bmc-discover-form') discover(e);

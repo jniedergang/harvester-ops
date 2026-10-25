@@ -109,3 +109,15 @@ def test_nav_inventory_mutation_orphan():
     assert orphans(copy) == ["zzz"]
     with pytest.raises(AssertionError):
         assert orphans(copy) == []
+
+
+def test_no_code_listens_to_a_removed_menu_element():
+    """Mineur 4 : un écouteur ou une règle de style visant un élément de
+    l'ancien menu (onglet de sous-section d'Automatisation, sélecteur de
+    cluster) ne se déclenche plus jamais ; il trompe le lecteur."""
+    js = {p.name: p.read_text(encoding="utf-8") for p in (ROOT / "web/static/js").glob("*.js")}
+    dead = [n for n, src in js.items() if "#tab-automation .sub-tab[data-subtab=" in src]
+    assert dead == []
+    css = (ROOT / "web/static/css/style.css").read_text(encoding="utf-8")
+    assert ".cluster-selector" not in css
+    assert not any("cluster-selector" in src for src in js.values())
