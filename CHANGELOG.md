@@ -157,6 +157,24 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
 
+- **Disaster Recovery in the new navigation.** The replication screens of
+  1.101.0 keep every behaviour (cards or table, filters, the creation and
+  failover windows, notifications) and get their addresses: `#dr`,
+  `#dr/links`, and `#dr/<id>` for one contract (the contracts with the
+  contract window on top; a click writes it, closing gives back `#dr`, F5
+  reopens it). A host's **Disaster Recovery** (`#harvester/<c>/dr`) shows
+  the contracts where it is the source or the recovery site, with the role
+  filter; `#kvm/<h>/dr` says that KVM replication is not available yet.
+  Every Harvester host line of the side menu carries a badge of its DR
+  alerts (as source or recovery site), which leads to its Disaster
+  Recovery. The **DR** badge of a VM in Virtual machines is read again when
+  the view opens and every minute, so a new or removed contract shows
+  without reloading the page.
+- **`#activity/action/<id>`**: Activity filtered on one action, its detail
+  open. The Activity icon of an event in a contract's journal leads there
+  (it opened Activity unfiltered); changing a filter gives back
+  `#activity`.
+
 ### Changed
 - **The 1.x menu is removed**: no more cluster selector, `+` button or
   per-cluster groups (Cluster, Virtual machines, Containers, Shared
@@ -259,6 +277,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   of "you can write this object".
 - **Resume an interrupted folder action from the console**:
   `POST /api/folders/actions/<id>/resume`, like `resume` on the command line.
+
+- **Creation of a contract, recovery site without a VM network**: the
+  network list said only "choose a network". It now says **No VM network on
+  <cluster>** and the line points to **Create on the target**. The
+  management (pod) network is not offered: the engine maps a VM network only
+  to another network of the recovery site (`retarget_vm`, check
+  `network-unmapped`).
 
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
@@ -424,6 +449,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   age of a reused count, stale denied state against the probe.
   Tests that clicked the overview sub-tabs or Settings > Cluster accounts
   now open the host addresses.
+
+- `tests/e2e/test_dr_200.py`: `#dr`, `#dr/<id>` cold, F5 and closed,
+  click without history, `#dr/links`, a host's DR as source and as recovery
+  site (roles swapped, side filter, the window keeps the host address), KVM
+  empty state without replication reads, badges on the root, the open host
+  entry and every host line (worst level, link), journal link to the
+  action in Activity, the VM DR badge read again, the creation window with
+  and without target networks. `tests/api/test_dr_ui_200.py`: action
+  buttons follow `actions[].allowed` only, no state table in the browser,
+  with the mutation `test_dr_mutation_role_copy`; address links, host
+  badges, management network never offered. `tests/api/test_replication_model_199.py`:
+  the folder annotation added, changed or removed is never a drift, with or
+  without a generation change, a real spec change is, and the mutation
+  `test_drift_mutation_annotations_in_digest`. Routes and router tables:
+  `#activity/action/<id>` and `#dr/<id>` round trips and error paths.
 
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 

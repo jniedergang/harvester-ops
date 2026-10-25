@@ -152,7 +152,7 @@ Address grammar (`<c>` = Harvester cluster, `<h>` = KVM host):
 | `#harvester/<c>/params/<tab>[/<pane>]` | settings: `nodes`, `storage`, `network`, `addons`, `security`, `monlog`, `advanced`, `upgrade`, `power`, `conn` |
 | `#kvm/<h>`, `#kvm/<h>/vms`, `#kvm/<h>/dr`, `#kvm/<h>/params/<system, pools, networks, labels or conn>` | KVM host |
 | `#dr`, `#dr/<plan>`, `#dr/links` | replication contracts, links |
-| `#migrations`, `#gpus`, `#bookings`, `#usage`, `#automation/<capi, terraform or pxe>`, `#activity[/host/<kind>/<name>]` | fleet screens |
+| `#migrations`, `#gpus`, `#bookings`, `#usage`, `#automation/<capi, terraform or pxe>`, `#activity[/host/<kind>/<name>]`, `#activity/action/<id>` | fleet screens (an action: Activity filtered on it, its detail open) |
 
 Two more modules carry the 2.0 menu: `web/static/js/host-nav.js` (the side
 menu of hosts, fed by `GET /api/hosts`, pure ordering and search tested in

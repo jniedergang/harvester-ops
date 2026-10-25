@@ -29,6 +29,11 @@ const App = (() => {
   // dossier de la route (#folders/<id>, #containers/folder/<id>, #hosts/folder/<id>)
   let navVms = null;
   let navFolder = null;
+  // 2.0.0 (tâche 16) : contrat DR ouvert par l'adresse (#dr/<id>) et action
+  // d'Activité demandée par l'adresse (#activity/action/<id>, lien du journal)
+  let navDrPlan = null;
+  let navActivityAction = null;
+  let pendingActionOpen = null;
   const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
@@ -76,7 +81,10 @@ const App = (() => {
     if (name === 'usage') { if (window.Usage) Usage.start($('#usage-host')); }
     else if (window.Usage) Usage.stop();
     // Disaster Recovery : contrats (tous les clusters) et sous-onglet d'un cluster
-    if (name === 'drplans') { if (window.Replication) Replication.start($('#rp-plans-host'), 'all'); }
+    if (name === 'drplans') {
+      if (window.Replication) Replication.start($('#rp-plans-host'), 'all');
+      if (navDrPlan && window.ReplicationPlan) ReplicationPlan.open(navDrPlan);
+    }
     else if (name === 'clusterdr') { if (window.Replication) Replication.start($('#rp-cluster-host'), 'cluster', currentCluster); }
     else if (window.Replication) Replication.stop();
     if (name === 'drlinks') { if (window.Replication) Replication.startLinks($('#rp-links-host')); }
@@ -1534,6 +1542,12 @@ const App = (() => {
           histBody.appendChild(tr);
         });
       }
+      // #activity/action/<id> : le détail de l'action s'ouvre une fois
+      if (pendingActionOpen) {
+        const idx = activityActionList.findIndex(a => a.id === pendingActionOpen);
+        pendingActionOpen = null;
+        if (idx >= 0) showActionDetails(idx);
+      }
     } catch (e) { console.warn('activity refresh failed', e); }
   }
 
@@ -1620,8 +1634,9 @@ const App = (() => {
       activityFilters[key] = e.target.value;
       saveActivityFilters();
       refreshActivity();
-      // 2.0.0 : le filtre d'hôte est dans l'adresse (#activity/host/...)
-      if (key === 'cluster' && window.Router) Router.syncFromScreen();
+      // 2.0.0 : le filtre d'hôte est dans l'adresse (#activity/host/...) ;
+      // tout autre filtre fait quitter l'adresse d'une action (#activity/action/<id>)
+      if (window.Router) Router.syncFromScreen();
     };
     $('#act-f-cluster')?.addEventListener('change', onChange('cluster'));
     $('#act-f-status')?.addEventListener('change', onChange('status'));
@@ -1635,6 +1650,7 @@ const App = (() => {
         activityFilters.q = v;
         saveActivityFilters();
         refreshActivity();
+        if (window.Router) Router.syncFromScreen();
       }, 250);
     });
     $('#btn-act-filter-reset')?.addEventListener('click', () => {
@@ -2084,6 +2100,15 @@ const App = (() => {
     navHostsKind = t.hostsKind || null;
     navVms = t.vms || null;
     navFolder = t.folderId || null;
+    navDrPlan = t.drPlan || null;
+    navActivityAction = t.activityAction || null;
+    // #activity/action/<id> : l'Activité filtrée sur cette action, son détail ouvert
+    if (t.tab === 'activity' && t.activityAction) {
+      Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
+      activityFilters.q = t.activityAction;
+      saveActivityFilters();
+      pendingActionOpen = t.activityAction;
+    }
     // 2.0.0 : #activity/host/<famille>/<nom> pose le filtre « cluster » de l'Activité
     if (t.tab === 'activity' && t.activityHost) {
       activityFilters.cluster = t.activityHost;
@@ -2146,6 +2171,11 @@ const App = (() => {
       folderId: tab === 'hosts' && window.HostsIndex && HostsIndex.folder ? (HostsIndex.folder() || null)
         : (['folders', 'allcontainers'].includes(tab) ? navFolder : null),
       activityHost: tab === 'activity' ? (activityFilters.cluster || null) : null,
+      // l'adresse garde l'action tant que le filtre est le sien, seul
+      activityAction: tab === 'activity' && navActivityAction && activityFilters.q === navActivityAction
+        && !activityFilters.cluster && !activityFilters.status && !activityFilters.action ? navActivityAction : null,
+      // et le contrat tant que sa fenêtre est ouverte
+      drPlan: tab === 'drplans' && navDrPlan && window.ReplicationPlan && ReplicationPlan.isOpen(navDrPlan) ? navDrPlan : null,
       activityIsCluster: tab === 'activity' && listClusters().includes(activityFilters.cluster),
     };
   }
@@ -2306,6 +2336,16 @@ const App = (() => {
     if ($('#tab-automation')?.classList.contains('active') && window.CAPI && CAPI.reactivate) CAPI.reactivate();
   }
 
+  /** 2.0.0 (tâche 16) : ouvre la fenêtre d'un contrat DR. Sur la liste des
+   *  contrats, l'adresse devient #dr/<id> (F5 la rouvre) ; ailleurs (DR
+   *  d'un hôte) la fenêtre flotte sur l'écran, adresse inchangée. */
+  function openDrPlan(id) {
+    if (!window.ReplicationPlan) return;
+    if (activeTab() === 'drplans') navDrPlan = id;
+    ReplicationPlan.open(id);
+    if (window.Router) Router.syncFromScreen();
+  }
+
   // Navigation 2.0 : la recherche du menu ouvre les VMs d'un cluster sur une VM
   let pendingVm = null;
   /** Ouvre les VMs du cluster, espace de noms de la VM choisi et liste
@@ -2327,7 +2367,7 @@ const App = (() => {
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
            mountTopology, stopBoards, setTab,
-           role, listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm,
+           role, listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm, openDrPlan,
            // réservé au routeur (router.js)
            _nav: { showRoute, screen, setCluster } };
 })();

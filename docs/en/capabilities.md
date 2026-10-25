@@ -3998,7 +3998,19 @@ that talk to clusters take `--from-kubeconfig`, `--to-kubeconfig` and
 
 The console has a root menu group **Disaster Recovery** with two entries,
 **Contracts** and **Links**, and a **Disaster Recovery** entry inside each
-Harvester cluster's menu group. Every gesture runs the command line
+Harvester cluster's menu group. Since 2.0.0 they are entries of the side
+menu, each with its address: **Disaster Recovery** (`#dr`) and **Links**
+(`#dr/links`) at the root, and **Disaster Recovery** in the sub-menu of
+every host (`#harvester/<c>/dr`; `#kvm/<h>/dr` says that replication of
+KVM domains is not available yet). A contract has its own address,
+`#dr/<id>`: it opens the contracts with the contract window on top, a
+click on a contract writes it, closing the window gives back `#dr`, and F5
+reopens it. From a host's Disaster Recovery the window opens over the host
+page, which keeps its address. In the journal of a contract, the Activity
+icon of an event leads to `#activity/action/<id>`: Activity filtered on
+that action, its detail open. In **Virtual machines**, a VM held by a
+contract carries a **DR** badge that leads to the contract; it is read
+again each time the view opens and every minute. Every gesture runs the command line
 `harvester-replication` as a tracked action (dock and Activity); the
 screens never write by another path.
 
@@ -4036,7 +4048,12 @@ is ready, and nothing is written before **Create**:
    missing on the recovery site blocks the creation until it is mapped to
    an existing network or created there with **Create on the target**
    (name, VLAN and cluster network editable; it runs the usual network
-   creation, admin). The **Drill network** column is stored for the drills
+   creation, admin). When the recovery site has no VM network at all, the
+   list says **No VM network on <cluster>** and the line points to
+   **Create on the target**. The management (pod) network is not offered:
+   the engine maps a VM network only to another VM network of the recovery
+   site (a NetworkAttachmentDefinition), and `check` refuses anything else.
+   The **Drill network** column is stored for the drills
    to come. Storage is chosen **disk by disk**; the same class name is
    proposed when it exists on the recovery site. A class that asks for more
    replicas than the recovery site has schedulable nodes is marked
@@ -4117,7 +4134,9 @@ running again after a failover, a backup in error, a degraded standby
 volume, an unreachable source, a VM spec changed, a contract in error, a
 new VM matching a rule, recovery settings newer than the last protect, an
 automatic protection that failed. They show as a badge on the Disaster Recovery menu
-entries (root and current cluster), in the **Events** block of the host's
+entries (root and current cluster) and, since 2.0.0, on the line of every
+Harvester host of the side menu (an alert counts for its source and for
+its recovery site; the badge leads to that host's Disaster Recovery), in the **Events** block of the host's
 Overview (group Disaster Recovery, also when the cluster does not answer),
 and are sent to the configured notifications.
 

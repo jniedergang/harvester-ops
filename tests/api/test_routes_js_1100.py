@@ -82,6 +82,8 @@ def address_table():
         "#harvester/Lab_1/params/nodes", "#harvester/Lab_1/params/addons/list",
         "#harvester/Lab_1/imports/forklift/waves", "#harvester/HARV1/vms",
         "#activity/host/harvester/Lab_1", "#vms/host/harvester/Lab_1",
+        # 2.0.0 (tâche 16) : une action d'Activité (lien du journal d'un contrat DR)
+        "#activity/action/a1b2c3d4e5f6",
     ]
     for tab, panes in IMPORT_PANES.items():
         rows.append(f"#harvester/{c}/imports/{tab}")
@@ -137,6 +139,9 @@ EXPECTED = [
     ("#activity/host/kvm/kvm-paris.01",
      {"name": "activity", "kind": "kvm", "host": "kvm-paris.01", "sub": None, "tab": None,
       "pane": None, "id": None}),
+    ("#activity/action/a1b2c3d4e5f6",
+     {"name": "activity", "kind": None, "host": None, "sub": None, "tab": None, "pane": None,
+      "id": "a1b2c3d4e5f6"}),
     # segment encodé sans caractère interdit : décodé puis accepté
     ("#kvm/kvm%2Dparis",
      {"name": "host", "kind": "kvm", "host": "kvm-paris", "sub": None, "tab": None,
@@ -184,6 +189,10 @@ ERRORS = [
     ("#automation/xen", "sous-onglet inconnu"),
     ("#gpus/x", "racine avec segment"),
     ("#activity/host/harvester/-a", "activité, nom invalide"),
+    ("#activity/action", "action sans identifiant"),
+    ("#activity/action/-x", "identifiant d'action invalide"),
+    ("#activity/action/a/b", "segment en trop sous une action"),
+    ("#activity/run/a1b2", "sous-adresse d'activité inconnue"),
     ("#storage", "ancien jeton, pas une adresse"),
     ("", "adresse vide"),
     ("#", "dièse seul"),

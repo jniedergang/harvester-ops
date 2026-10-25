@@ -28,7 +28,7 @@
     if (!route || !route.name) return null;
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
                                               kvm: null, kvmTab: null, hostsKind: null, activityHost: null,
-                                              vms: null, folderId: null }, extra || {});
+                                              vms: null, folderId: null, drPlan: null, activityAction: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -80,13 +80,15 @@
         const fleet = route.kind === 'kvm' && KVM_FLEET[route.tab];
         return fleet ? t(fleet) : t('hosts', { hostsKind: route.kind || null, folderId: route.id || null });
       }
-      case 'dr': return t(route.tab === 'links' ? 'drlinks' : 'drplans');
+      // 2.0.0 (tâche 16) : #dr/<id> = la liste des contrats, la fenêtre du contrat ouverte dessus
+      case 'dr': return route.tab === 'links' ? t('drlinks') : t('drplans', { drPlan: route.id || null });
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
       case 'automation': return t('automation', { automation: route.tab || 'capi' });
       // 2.0.0 (tâche 9) : Activité filtrée sur un hôte (filtre `cluster`
       // existant ; les actions d'un hôte KVM portent l'étiquette kvm:<hôte>)
       case 'activity':
+        if (route.id) return t('activity', { activityAction: route.id });
         return t('activity', { activityHost: route.host ? (route.kind === 'kvm' ? `kvm:${route.host}` : route.host) : null });
       default: return null;
     }
@@ -126,6 +128,7 @@
       case 'allcontainers': return Rt.format({ name: 'containers', id: s.folderId || null });
       case 'gpus': case 'bookings': case 'usage': return '#' + s.tab;
       case 'activity':
+        if (s.activityAction) return Rt.format({ name: 'activity', id: s.activityAction });
         if (s.activityHost && /^kvm:/.test(s.activityHost) && Rt.validHost('kvm', s.activityHost.slice(4))) {
           return Rt.format({ name: 'activity', kind: 'kvm', host: s.activityHost.slice(4) });
         }
@@ -141,7 +144,7 @@
       case 'kvmnetworks': return s.kvm ? K({ sub: 'params', tab: 'networks' }) : '#hosts/kvm/networks';
       case 'kvmparams': return s.kvm ? K({ sub: 'params', tab: Rt.KVM_PARAMS.includes(s.kvmTab) ? s.kvmTab : 'system' }) : null;
       case 'kvmdr': return s.kvm ? K({ sub: 'dr' }) : null;
-      case 'drplans': return '#dr';
+      case 'drplans': return s.drPlan ? Rt.format({ name: 'dr', id: s.drPlan }) : '#dr';
       case 'drlinks': return '#dr/links';
       case 'automation': return '#automation/' + (Rt.AUTOMATION.includes(s.automation) ? s.automation : 'capi');
       default: return null;

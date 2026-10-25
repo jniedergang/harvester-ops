@@ -401,7 +401,7 @@ const Replication = (() => {
     el.innerHTML = `<details class="rp-alert-box" open><summary class="tip" data-tip="${esc(tr('rp.alerts.tip'))}">${icon('warn')}
         ${esc(tr('rp.alerts.title', { n: list.length }))}</summary>
       <ul class="rp-alert-list">${list.slice(0, 50).map((x) => `<li class="${x.level === 'error' ? 'fail' : 'warn'}" data-rp-alert="${esc(x.code)}">
-        <b>${esc(alertText(x))}</b> · <a href="#" data-rp-open="${esc(x.plan)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(x.plan_name)}</a>
+        <b>${esc(alertText(x))}</b> · <a href="#dr/${enc(x.plan)}" data-rp-open="${esc(x.plan)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(x.plan_name)}</a>
         ${x.name ? ` · ${esc(`${x.namespace}/${x.name}`)}` : ''}
         <span class="res-dim">${x.since ? ` · ${esc(U.ago(x.since))}` : ''}${x.message ? ` · ${esc(x.message)}` : ''}</span></li>`).join('')}</ul></details>`;
   }
@@ -427,7 +427,7 @@ const Replication = (() => {
   function cardHtml(r, role) {
     const st = U.planState(r);
     return `<article class="rp-plan-card" data-rp-plan="${esc(r.id)}" data-state="${esc(st)}">
-      <header><h3><a href="#" data-rp-open="${esc(r.id)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.name)}</a></h3>
+      <header><h3><a href="#dr/${enc(r.id)}" data-rp-open="${esc(r.id)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.name)}</a></h3>
         <span class="rp-badges">${roleBadge(r)} ${U.stateBadge(st)}${r.alerts ? ` <span class="badge fail tip" data-tip="${esc(tr('rp.alertsCountTip'))}">${icon('warn', 11)} ${r.alerts}</span>` : ''}</span></header>
       <div class="rp-card-flow">${U.flow(r)}</div>
       <div class="rp-card-gauge"><small>${esc(tr('rp.col.rpo'))}</small>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { wide: true, state: st })}</div>
@@ -448,7 +448,7 @@ const Replication = (() => {
         <th>${esc(tr('rp.col.direction'))}</th><th>${esc(tr('rp.col.vms'))}</th><th>${esc(tr('rp.col.rpo'))}</th>
         <th>${esc(tr('rp.col.transfer'))}</th><th>${esc(tr('rp.col.lastEvent'))}</th><th></th></tr></thead>
       <tbody>${rows.map((r) => `<tr data-rp-plan="${esc(r.id)}">
-        <td><a href="#" data-rp-open="${esc(r.id)}" class="tip" data-tip="${esc(tr('rp.openTip'))}"><b>${esc(r.name)}</b></a></td>
+        <td><a href="#dr/${enc(r.id)}" data-rp-open="${esc(r.id)}" class="tip" data-tip="${esc(tr('rp.openTip'))}"><b>${esc(r.name)}</b></a></td>
         ${roleCol ? `<td>${roleBadge(r)}</td>` : ''}
         <td>${U.stateBadge(U.planState(r))}</td><td>${U.flow(r)}</td>
         <td>${vmCount(r)}<div class="rp-chips">${U.vmStates(r.resources_by_state)}</div></td>
@@ -473,7 +473,7 @@ const Replication = (() => {
         <td><b>${esc(`${r.namespace}/${r.name}`)}</b></td>
         <td><span class="badge ${r.side === 'source' ? 'info' : 'ok'}">${esc(r.side === 'source' ? tr('rp.role.source') : tr('rp.role.target'))}</span></td>
         <td>${esc(r.peer_host || '')}</td>
-        <td><a href="#" data-rp-open="${esc(r.plan)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.plan_name)}</a></td>
+        <td><a href="#dr/${enc(r.plan)}" data-rp-open="${esc(r.plan)}" class="tip" data-tip="${esc(tr('rp.openTip'))}">${esc(r.plan_name)}</a></td>
         <td>${U.stateBadge(r.state, (r.reasons || []).map(U.reasonText).join(', '))}</td>
         <td>${U.gauge(r.rpo_held_s, r.rpo_objective_s, { state: r.state })}</td><td>${U.lastEvent(r.last_events)}</td></tr>`).join('')}</tbody></table></div>`
       : `<p class="hint">${esc(tr('rp.hostVmsNone'))}</p>`}`;
@@ -481,7 +481,14 @@ const Replication = (() => {
 
   function onClick(e) {
     const open = e.target.closest('[data-rp-open]');
-    if (open) { e.preventDefault(); if (window.ReplicationPlan) ReplicationPlan.open(open.dataset.rpOpen); return; }
+    if (open) {
+      // une vraie adresse (#dr/<id>, nouvel onglet possible) ; le clic ouvre la
+      // fenêtre sur place, et sur la liste des contrats l'adresse la suit
+      e.preventDefault();
+      if (cur.mode === 'all' && window.App && App.openDrPlan) App.openDrPlan(open.dataset.rpOpen);
+      else if (window.ReplicationPlan) ReplicationPlan.open(open.dataset.rpOpen);
+      return;
+    }
     const v = e.target.closest('[data-rp-view]');
     if (v) { cur.prefs.view = v.dataset.rpView; savePrefs(cur.prefs); render(); return; }
     const s = e.target.closest('[data-rp-side]');
@@ -522,18 +529,22 @@ const Replication = (() => {
     if (!d) return;
     const list = d.alerts || [];
     const cluster = window.App && App.getCurrentCluster ? App.getCurrentCluster() : null;
-    const mine = list.filter((a) => a.source_host === cluster || a.target_host === cluster);
-    const paint = (el, items) => {
+    // 2.0.0 : une alerte compte pour l'hôte source ET pour l'hôte de secours
+    const of = (h) => list.filter((a) => a.source_host === h || a.target_host === h);
+    const paint = (el, items, host) => {
       if (!el) return;
       const n = items.length;
       el.hidden = !n;
       el.textContent = n > 99 ? '99+' : String(n);
       el.classList.toggle('fail', items.some((a) => a.level === 'error'));
-      el.dataset.tip = tr('rp.badgeTip', { n });
-      el.setAttribute('aria-label', tr('rp.badgeTip', { n }));
+      const tip = host ? tr('rp.hostBadgeTip', { n, host }) : tr('rp.badgeTip', { n });
+      el.dataset.tip = tip;
+      el.setAttribute('aria-label', tip);
     };
     document.querySelectorAll('[data-rp-badge="all"]').forEach((el) => paint(el, list));
-    document.querySelectorAll('[data-rp-badge="cluster"]').forEach((el) => paint(el, mine));
+    // entrée DR du sous-menu d'un hôte et ligne de chaque hôte Harvester du menu
+    document.querySelectorAll('[data-rp-badge="cluster"], [data-rp-badge="host"]')
+      .forEach((el) => paint(el, of(el.dataset.rpHost || cluster), el.dataset.rpHost || null));
   }
   function startBadges() {
     if (badgeTimer) return;

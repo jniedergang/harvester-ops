@@ -5669,6 +5669,10 @@ body.sidebar-collapsed button.tab.hnav-entry { text-align: center; border-left: 
 .hnav-host { display: flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px 0 26px; border-left: 3px solid transparent; font-size: 12.5px; }
 .hnav-host:hover { background: var(--bg-elev); }
 .hnav-host.open { background: var(--bg-elev); border-left-color: var(--accent); }
+.hnav-host { position: relative; }
+/* 2.0.0 : pastille des alertes DR d'un hôte (source ou secours), lien vers son DR */
+.hnav-dr-badge { margin-left: 0; text-decoration: none; flex: none; }
+.hnav-dr-badge:hover { filter: brightness(1.1); }
 .hnav-host.alert .hnav-host-name { color: var(--warn); }
 .hnav-host-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); text-decoration: none; padding: 2px 0; }
 .hnav-host-name:hover, .hnav-host.open .hnav-host-name { color: var(--text); }

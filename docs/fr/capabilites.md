@@ -4365,7 +4365,20 @@ commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 
 La console a un groupe de menu racine **Disaster Recovery** avec deux
 entrées, **Contrats** et **Liens**, et une entrée **Disaster Recovery** dans
-le groupe de menu de chaque cluster Harvester. Chaque geste lance la ligne
+le groupe de menu de chaque cluster Harvester. Depuis la 2.0.0 ce sont des
+entrées du menu latéral, chacune avec son adresse : **Disaster Recovery**
+(`#dr`) et **Liens** (`#dr/links`) à la racine, et **Disaster Recovery**
+dans le sous-menu de chaque hôte (`#harvester/<c>/dr` ; `#kvm/<h>/dr` dit
+que la réplication des domaines KVM n'existe pas encore). Un contrat a sa
+propre adresse, `#dr/<id>` : elle ouvre les contrats avec la fenêtre du
+contrat dessus, un clic sur un contrat l'écrit, fermer la fenêtre rend
+`#dr`, et F5 la rouvre. Depuis le Disaster Recovery d'un hôte, la fenêtre
+s'ouvre sur la page de l'hôte, qui garde son adresse. Dans le journal d'un
+contrat, l'icône Activité d'un événement mène à `#activity/action/<id>` :
+l'Activité filtrée sur cette action, son détail ouvert. Dans **Machines
+virtuelles**, une VM tenue par un contrat porte une pastille **DR** qui
+mène au contrat ; elle est relue à chaque ouverture de la vue et chaque
+minute. Chaque geste lance la ligne
 de commande `harvester-replication` en action suivie (dock et Activité) ;
 les écrans n'écrivent jamais par un autre chemin.
 
@@ -4405,7 +4418,12 @@ prêt, et rien n'est écrit avant **Créer** :
    absent du secours bloque la création tant qu'il n'est pas associé à un
    réseau existant ou créé là-bas par **Créer sur la cible** (nom, VLAN et
    réseau de cluster modifiables ; c'est la création de réseau habituelle,
-   administrateur). La colonne **Réseau d'exercice** est gardée pour les
+   administrateur). Quand le secours n'a aucun réseau de VM, la liste dit
+   **Aucun réseau de VM sur <cluster>** et la ligne mène à **Créer sur la
+   cible**. Le réseau de gestion (pod) n'est pas proposé : le moteur
+   n'associe un réseau de VM qu'à un autre réseau de VM du secours (une
+   NetworkAttachmentDefinition), et `check` refuse tout le reste. La
+   colonne **Réseau d'exercice** est gardée pour les
    exercices à venir. Le stockage se choisit **disque par disque** ; la
    classe de même nom est proposée quand elle existe sur le secours. Une
    classe qui demande plus de répliques que le secours n'a de nœuds
@@ -4494,7 +4512,10 @@ source rallumée après une bascule, sauvegarde en erreur, volume de secours
 dégradé, source injoignable, spec d'une VM changée, contrat en erreur,
 nouvelle VM qui répond à une règle, réglages de reprise plus récents que la
 dernière protection, protection automatique en échec. Elles s'affichent en pastille sur les
-entrées Disaster Recovery du menu (racine et cluster courant), dans
+entrées Disaster Recovery du menu (racine et cluster courant) et, depuis
+la 2.0.0, sur la ligne de chaque hôte Harvester du menu latéral (une alerte
+compte pour sa source et pour son secours ; la pastille mène au Disaster
+Recovery de cet hôte), dans
 le bloc **Événements** de la Vue d'ensemble de l'hôte (groupe Disaster Recovery,
 même quand le cluster ne répond pas), et partent vers les notifications
 réglées.

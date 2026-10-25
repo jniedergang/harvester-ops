@@ -170,7 +170,7 @@
       // Disaster Recovery d'un cluster : la pastille d'alertes de l'ancienne
       // entrée Cluster > Disaster Recovery (peinte par Replication.paintBadges)
       const badge = sub === 'dr' && h.kind === 'harvester'
-        ? ' <span class="rp-menu-badge tip" data-rp-badge="cluster" hidden></span>' : '';
+        ? ` <span class="rp-menu-badge tip" data-rp-badge="cluster" data-rp-host="${esc(h.name)}" hidden></span>` : '';
       return `<a class="tab tab-child hnav-entry${on ? ' active' : ''}" data-hnav="sub" data-sub="${esc(sub)}"
         href="${esc(subHref(h.kind, h.name, sub))}" title="${esc(tip())}"${on ? ' aria-current="page"' : ''}>
         <span class="tab-icon">${icon(ic, 16)}</span> <span class="sidebar-label">${esc(label())}</span>${badge}</a>`;
@@ -186,6 +186,8 @@
         <span class="hnav-dot st-${esc(st)}" title="${esc(STATE()[st] || st)}" aria-hidden="true"></span>
         <a class="hnav-host-name" data-hnav="host" href="${esc(hostHref(h))}"
            title="${esc(hostTip(h))}"${open ? ' aria-current="true"' : ''}>${esc(h.name)}</a>
+        ${h.kind === 'harvester' ? `<a class="rp-menu-badge hnav-dr-badge tip" data-rp-badge="host" data-rp-host="${esc(h.name)}"
+           href="${esc(subHref(h.kind, h.name, 'dr'))}" hidden></a>` : ''}
         <span class="hnav-count sidebar-label" title="${esc(countTip)}">${esc(count)}</span>
         <button type="button" class="hnav-star sidebar-label${h.favorite ? ' on' : ''}" data-star="${esc(keyOf(h))}"
                 aria-pressed="${h.favorite ? 'true' : 'false'}" title="${esc(starTip)}" aria-label="${esc(starTip)}">${icon('star', 13)}</button>

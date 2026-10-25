@@ -43,7 +43,9 @@ const AllVMs = (() => {
   let loading = false;
   let builtLang = '';                   // langue du squelette (il porte des libellés)
   let scope = { id: null, kind: null, host: null };
-  let dr = null;                        // { uid -> id du contrat }, lu une fois
+  let dr = null;                        // { uid -> id du contrat }, relu à l'ouverture puis chaque minute
+  let drAt = 0;
+  const DR_MS = 60000;
   let limit = PAGE;                     // lignes dessinées
   let listKey = '';                     // filtres + tri + périmètre du dernier rendu
   let lastRaw = null;                   // corps de la dernière lecture (relecture identique : rien)
@@ -655,14 +657,22 @@ const AllVMs = (() => {
   }
 
   // -- cycle ----------------------------------------------------------------------
-  async function loadDr() {
-    if (dr) return;
-    dr = {};
+  /** Pastille DR des VMs d'un contrat : relue à l'ouverture de la vue et
+   *  chaque minute (2.0.0 : un contrat créé ou retiré se voit sans recharger
+   *  la page). Une lecture refusée garde les pastilles d'avant. */
+  async function loadDr(force) {
+    if (!force && dr && Date.now() - drAt < DR_MS) return;
+    drAt = Date.now();
     try {
       const r = await fetch('/api/replication/plans');
-      const d = r.ok ? await r.json() : {};
-      (d.plans || []).forEach((p) => (p.resources || []).forEach((res) => { if (res.resource_uid) dr[res.resource_uid] = p.id; }));
-    } catch { /* sans réplication : aucune pastille */ }
+      if (!r.ok) { if (!dr) dr = {}; return; }
+      const d = await r.json();
+      const next = {};
+      (d.plans || []).forEach((p) => (p.resources || []).forEach((res) => { if (res.resource_uid) next[res.resource_uid] = p.id; }));
+      const same = dr && JSON.stringify(next) === JSON.stringify(dr);
+      dr = next;
+      if (same) return;
+    } catch { if (!dr) dr = {}; return; /* sans réplication : aucune pastille */ }
     renderSoon();
   }
 
@@ -699,9 +709,9 @@ const AllVMs = (() => {
     render();
     if (window.Folders) Folders.load();
     load();
-    loadDr();
+    loadDr(true);
     clearInterval(timer);
-    timer = setInterval(() => { if (!document.hidden) load(); }, REFRESH_MS);
+    timer = setInterval(() => { if (!document.hidden) { load(); loadDr(); } }, REFRESH_MS);
   }
 
   function stop() {

@@ -133,3 +133,23 @@ def test_kvm_family_index_stays_the_hosts_table():
                   "hostsKind": "kvm"}])
     assert got["h"] == "#hosts/kvm"
     assert got["back"]["tab"] == "hosts" and got["back"]["hostsKind"] == "kvm"
+
+
+# 2.0.0 (tâche 16) : le contrat ouvert (#dr/<id>) et l'action d'Activité
+# (#activity/action/<id>) sont dans l'adresse ; sans eux, l'adresse de l'écran.
+DR_ACTIVITY = [
+    ({"tab": "drplans", "drPlan": "rp-0123456789ab"}, "#dr/rp-0123456789ab", "drPlan", "rp-0123456789ab"),
+    ({"tab": "drplans", "drPlan": None}, "#dr", "drPlan", None),
+    ({"tab": "drlinks", "drPlan": "rp-0123456789ab"}, "#dr/links", "drPlan", None),
+    ({"tab": "activity", "activityAction": "a1b2c3d4e5f6"}, "#activity/action/a1b2c3d4e5f6", "activityAction",
+     "a1b2c3d4e5f6"),
+    ({"tab": "activity", "activityAction": None}, "#activity", "activityAction", None),
+]
+
+
+@pytest.mark.parametrize("screen,address,key,value", DR_ACTIVITY, ids=[a for _, a, _, _ in DR_ACTIVITY])
+def test_contract_and_action_addresses_round_trip(screen, address, key, value):
+    s = dict({"cluster": "c1", "pane": None, "overview": "metrics", "automation": "capi"}, **screen)
+    [got] = run([s])
+    assert got["h"] == address
+    assert got["back"]["tab"] == screen["tab"] and got["back"][key] == value, got

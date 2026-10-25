@@ -174,6 +174,8 @@
         if (n === 3 && rest[0] === 'host' && validHost(rest[1], rest[2])) {
           return route('activity', { kind: rest[1], host: rest[2] });
         }
+        // 2.0.0 : une action précise (lien du journal d'un contrat DR)
+        if (n === 2 && rest[0] === 'action' && validId(rest[1])) return route('activity', { id: rest[1] });
         return null;
       default:
         if (ROOTS.includes(head) && !n) return route(head);
@@ -235,6 +237,7 @@
       case 'activity':
         parts.push('activity');
         if (r.kind && r.host) parts.push('host', r.kind, e(r.host));
+        else if (r.id) parts.push('action', e(r.id));
         break;
       default:
         parts.push(r.name);
