@@ -851,9 +851,11 @@ def parse_uuid_names(text):
     par domaine, ligne vide finale ignorée)."""
     out = {}
     for ln in (text or "").splitlines():
-        parts = ln.strip().split(None, 1)
-        if len(parts) == 2 and UUID_RE.match(parts[0]):
-            out[parts[1]] = parts[0].lower()
+        # virsh écrit « uuid nom » avec UNE espace : le nom est gardé tel quel,
+        # espaces de tête ou de fin comprises
+        uid, sep, name = ln.lstrip().partition(" ")
+        if sep and name and UUID_RE.match(uid):
+            out[name] = uid.lower()
     return out
 
 

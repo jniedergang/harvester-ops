@@ -232,7 +232,9 @@ def set_folder(host, name, path, live=None):
     check_vm_name(name)
     info = kh.parse_dominfo(_need(host.batch({"info": ("dominfo", "--domain", name)},
                                              idempotent=True), "info"))
-    active = (info["state"] or "").lower() not in ("shut off", "") if live is None else bool(live)
+    # actif = un Id numérique (« - » sinon) : un domaine planté est arrêté,
+    # sauf on_crash=preserve qui le garde actif
+    active = info["id"] is not None if live is None else bool(live)
     persistent = info["persistent"]
     if not persistent and not active:
         raise OpError("refused", f"{name} is neither persistent nor running")

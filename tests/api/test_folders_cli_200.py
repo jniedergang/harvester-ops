@@ -86,8 +86,9 @@ class FakeVirsh:
             if name in self.down:
                 raise kh.KvmError("unreachable", "node2: unreachable: connection refused", host="node2")
             if args[0] == "dominfo":
-                state, persistent = self.domains[name]
-                out[key] = kh.CmdOutput(DOMINFO.format(id="-" if state == "shut off" else 3, name=name,
+                state, persistent, *dom_id = self.domains[name]
+                dom_id = dom_id[0] if dom_id else ("-" if state == "shut off" else 3)
+                out[key] = kh.CmdOutput(DOMINFO.format(id=dom_id, name=name,
                                                        state=state, persistent="yes" if persistent else "no"))
             else:
                 self.sets.append(tuple(args))
@@ -110,7 +111,8 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(cfg))
     kube = FakeKube()
     virsh = FakeVirsh({"vm-a": ("running", True), "vm-b": ("shut off", True), "vm-t": ("running", False),
-                       "it's mine": ("shut off", True)})
+                       "it's mine": ("shut off", True), "vm-c": ("crashed", True, "-"),
+                       "vm-p": ("crashed", True, "7")})
     monkeypatch.setattr(cli, "make_kube", lambda cluster, spec: kube)
     monkeypatch.setattr(cli, "make_host", lambda name: virsh)
     monkeypatch.setattr(cli, "SLEEP", lambda s: None)
@@ -353,6 +355,16 @@ def test_a_path_with_an_apostrophe_and_a_space_is_quoted_for_the_shell(env):
     line = [ln for ln in script.splitlines() if ln.startswith("_kvm_run 0 ")][0]
     assert shlex.quote("it's mine") in line and shlex.quote(args[args.index("--set") + 1]) in line
     assert shlex.split(line)[2:] == ["virsh", "-c", "qemu:///system", *args]
+
+
+@pytest.mark.parametrize("domain,flags", [
+    ("vm-c", ("--config",)),                       # arrêté après un plantage : pas de --live
+    ("vm-p", ("--config", "--live")),              # on_crash=preserve : encore actif
+])
+def test_a_crashed_domain_is_written_live_only_while_still_active(env, domain, flags):
+    assert run(env, "assign", "--to", "/Lab", spec={"objects": [kvm(domain, UUID1)]}) == 0
+    args = env["virsh"].sets[0]
+    assert args[args.index("--set") + 2:] == flags
 
 
 def test_a_transient_domain_is_written_live_and_kept_in_the_console(env, capsys):
@@ -605,6 +617,46 @@ def test_undo_with_a_conflict_leaves_the_moved_object(env, capsys):
     assert members(env) == {"harvester/harv1/nav/a": ("/Old", "vm")}       # b revenue « non rangée »
 
 
+def test_undo_of_a_move_whose_former_parent_is_gone_is_a_conflict(env, capsys):
+    conn = fdb.connect(env["db"])
+    fid = fdb.ensure_path(conn, "/Lab/Tmp/Box", "console")
+    conn.close()
+    assert run(env, "--id=mv", "move-folder", "--id", str(fid), "--parent", "/", spec={"objects": []}) == 0
+    assert run(env, "delete", "--id", str(fdb.id_of(fdb.connect(env["db"]), "/Lab/Tmp"))) == 0
+    capsys.readouterr()
+    assert run(env, "--id=um", "undo", "--action", "mv", spec={"objects": []}) == 1
+    assert "/Box" in tree_paths(env) and "/Lab/Box" not in tree_paths(env)
+    assert "/Lab/Tmp is gone" in capsys.readouterr().err
+
+
+def test_undo_goes_on_when_a_folder_cannot_take_its_name_back(env, capsys):
+    objs = [vm("a")]
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs}) == 0
+    assert run(env, "--id=rr", "rename", "--id", "2", "--name", "Finance", spec={"objects": objs}) == 0
+    conn = fdb.connect(env["db"])
+    fdb.ensure_path(conn, "/Prod/ERP", "console")         # quelqu'un a repris le nom depuis
+    conn.close()
+    capsys.readouterr()
+    assert run(env, "--id=ur", "undo", "--action", "rr", spec={"objects": objs}) == 1
+    cap = capsys.readouterr()
+    assert json.loads(cap.out)["undone"] == "rr" and "cannot go back to /Prod/ERP" in cap.err
+    assert members(env)["harvester/harv1/nav/a"] == ("/Prod/ERP", "vm")     # les objets sont remis
+
+
+def test_resume_never_overwrites_a_filing_made_since(env, capsys):
+    env["virsh"].down = {"vm-b"}
+    objs = [kvm("vm-a", UUID1), kvm("vm-b", UUID2)]
+    assert run(env, "--id=f1", "assign", "--to", "/Lab", spec={"objects": objs}) == 1
+    env["virsh"].down = set()
+    assert run(env, "assign", "--to", "/Old", spec={"objects": objs[1:]}) == 0   # rangée ailleurs depuis
+    env["virsh"].sets.clear()
+    capsys.readouterr()
+    assert run(env, "--id=f2", "resume", "--action", "f1", spec={"objects": objs}) == 1
+    assert env["virsh"].sets == []
+    assert members(env)[f"kvm/{UUID2}"] == ("/Old", "vm")
+    assert "now in /Old" in capsys.readouterr().err
+
+
 def test_two_simultaneous_assigns_last_write_wins_with_a_coherent_journal(env):
     barrier = threading.Barrier(2)
     real = cli.write_object
@@ -644,6 +696,13 @@ def test_action_id_from_the_console_at_the_end_of_the_line(env):
     `rename`, `--id 1` (forme avec espace) reste le dossier."""
     args = cli.parse_args(["--db", "x", "rename", "--id", "1", "--name", "N", "--id=abc123"])
     assert (args.id, args.folder_id) == ("abc123", "1")
+
+
+def test_only_trailing_action_ids_are_taken_from_the_line(env):
+    """Seuls les `--id=` de FIN de ligne (ajoutés par la console) sont
+    l'action ; ailleurs, `--id=1` reste le dossier de la sous-commande."""
+    args = cli.parse_args(["--db", "x", "rename", "--id=1", "--name", "N", "--id=abc123"])
+    assert (args.id, args.folder_id, args.name) == ("abc123", "1", "N")
 
 
 def test_a_transferred_vm_keeps_its_folder_annotation():

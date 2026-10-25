@@ -521,7 +521,17 @@ def cmd_resume(args, conn):
     # lignes pas encore faites : `pending` (action interrompue) et `failed`
     # (hôte injoignable, refus) ; une ligne `done` n'est jamais réécrite
     pending = [m for m in moves if m["status"] in ("pending", "failed")]
-    failed = run_lines(conn, args, args.action, pending, objects_of(spec), spec)
+    # règle d'Annuler : un objet rangé ailleurs depuis n'est pas réécrit
+    current = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
+    failed = 0
+    for m in [m for m in pending if not m["object_key"].startswith("folder/")]:
+        now = current.get(m["object_key"])
+        if now not in (m["from_path"], m["to_path"]):
+            failed += 1
+            pending.remove(m)
+            step(f"obj-{m['seq']}", "error", f"{m['object_key']} is now in {now or 'unfiled'}, "
+                                            f"not {m['from_path'] or 'unfiled'}: left as is")
+    failed += run_lines(conn, args, args.action, pending, objects_of(spec), spec)
     return finish(args, {"action": args.action, "resumed": len(pending)}, failed,
                   f"{len(pending) - failed}/{len(pending)} pending line(s) done")
 
@@ -586,10 +596,19 @@ def cmd_undo(args, conn):
             continue
         before_parent = fm.parent_path(m["from_path"])
         parent_id = fdb.id_of(conn, before_parent) if before_parent else None
-        if fm.parent_path(cur) != before_parent:
-            fdb.move_folder(conn, fid, parent_id)
-        if fm.split(cur)[-1] != fm.split(m["from_path"])[-1]:
-            fdb.rename(conn, fid, fm.split(m["from_path"])[-1])
+        if before_parent and parent_id is None:
+            failed += 1
+            step(f"folder-{fid}", "error", f"its former parent {before_parent} is gone: folder {cur} left as is")
+            continue
+        try:
+            if fm.parent_path(cur) != before_parent:
+                fdb.move_folder(conn, fid, parent_id)
+            if fm.split(cur)[-1] != fm.split(m["from_path"])[-1]:
+                fdb.rename(conn, fid, fm.split(m["from_path"])[-1])
+        except fdb.FolderError as e:               # nom repris depuis : les autres continuent
+            failed += 1
+            step(f"folder-{fid}", "error", f"folder {fid} cannot go back to {m['from_path']}: {e.message}")
+            continue
         fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
                         m["to_path"], m["from_path"], "done")
         step(f"folder-{fid}", "done", f"folder {m['to_path']} -> {m['from_path']}")
@@ -624,8 +643,9 @@ def parse_args(argv=None):
     sous-commande ; dans une sous-commande, `--id <n>` (forme avec espace) ou
     `--folder <n>` désigne le DOSSIER."""
     argv = list(sys.argv[1:] if argv is None else argv)
-    action_ids = [a.split("=", 1)[1] for a in argv if a.startswith("--id=")]
-    argv = [a for a in argv if not a.startswith("--id=")]
+    action_ids = []
+    while argv and argv[-1].startswith("--id="):          # seulement en fin de ligne
+        action_ids.insert(0, argv.pop().split("=", 1)[1])
     p = Parser(prog="harvester-folders.py", description=__doc__.split("\n")[0])
     p.add_argument("--db", help="folders.db (HARVESTER_OPS_FOLDERS_DB by default)")
     p.add_argument("--json", action="store_true")

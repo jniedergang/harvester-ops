@@ -384,3 +384,12 @@ def test_an_object_that_lost_its_folder_drops_the_cached_vm_membership(world):
     row = next(r for r in d["vms"] if r["key"] == "harvester/harv1/default/db")
     assert (row["folder"], row["folder_source"]) == (None, None)
     assert all(s["kind"] == "harvester" for s in d["sources"])
+
+
+def test_uuid_list_keeps_spaces_around_a_domain_name():
+    text = (f"{'49960a5e-a239-42da-95f6-f55383ea5c62'}  lead\n"
+            f"{'6b128cd4-f440-482d-8e90-1eb32a2c2094'} trail \n"
+            f"{'d516b457-b2a1-440a-8df3-0657d2523ba7'} two  words\n\n")
+    assert kh.parse_uuid_names(text) == {" lead": "49960a5e-a239-42da-95f6-f55383ea5c62",
+                                         "trail ": "6b128cd4-f440-482d-8e90-1eb32a2c2094",
+                                         "two  words": "d516b457-b2a1-440a-8df3-0657d2523ba7"}
