@@ -10,10 +10,13 @@ créée si elle manque, et complétée des colonnes qui manquent à une base cr�
 par une version précédente (ALTER TABLE ADD COLUMN, valeur par défaut).
 
 Les secrets des VMs ne sont jamais rangés ici (le carnet de reprise vit
-sur la cible). Seuls ceux des notifications externes (jetons, mots de
-passe, URL secrètes, réglage `notify` de la table `settings`) le sont, la
-base étant privée (0600) ; ils ne sortent jamais d'une lecture
-(`replication_notify.mask`). Rien n'est jamais écrit sur un cluster.
+sur la cible). Deux sortes de secrets le sont, la base étant privée (0600,
+posé avant la première ouverture, voir `connect`) : ceux des notifications
+externes (jetons, mots de passe, URL secrètes, réglage `notify` de la table
+`settings`) et les en-têtes secrets des actions annexes (`secret_headers`
+dans `plans.options`), avec leurs adresses complètes. Ils ne sortent jamais
+d'une lecture (`replication_notify.mask`, `replication.mask_plan`). Rien
+n'est jamais écrit sur un cluster.
 """
 
 import json

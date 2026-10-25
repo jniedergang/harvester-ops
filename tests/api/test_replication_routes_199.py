@@ -260,7 +260,7 @@ def test_plan_detail_unknown_is_404(client):
 
 def test_plan_detail_carries_status_volumes_runs_lock_and_lease(client):
     d = client.get(f"/api/replication/plans/{PID}").get_json()
-    assert set(d) == {"plan", "row", "status", "volumes", "runs", "lock", "lease", "role"}
+    assert set(d) == {"plan", "row", "status", "volumes", "runs", "lock", "lease", "role", "carnet_stale"}
     assert d["plan"]["id"] == PID and d["row"]["id"] == PID and len(d["volumes"]) == 3
     assert d["status"]["exceeded"] is True and d["lock"] is None and d["lease"] is None
     assert {v["name"]: v["state"] for v in d["status"]["vms"]} == {"rep-a": "protected", "rep-b": "lagging"}

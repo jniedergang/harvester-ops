@@ -334,3 +334,22 @@ def test_run_hooks_keeps_the_steps_of_the_run(tmp_path, monkeypatch):
     rr.run_hooks(ctx, "failover", "end", {}, rid, rp._t("2030-01-01T00:00:00Z"), ["default/vm-a"], [])
     run = next(r for r in db.list_runs(w.conn, w.pid) if r["id"] == rid)
     assert run["steps"] == [{"step": "activate", "seconds": 3}]
+
+
+# ---------------------------------------------------------------------------
+# M12 : action annexe d'une dernière vague vide
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("vms,waves,selector,at,want", [
+    (["default/a", "default/b"], [["default/a"], ["default/b"]], "", "wave:3", ["h"]),
+    (["default/a", "default/b"], [["default/a"]], "", "wave:2", []),             # b dans la vague implicite
+    (["default/a"], [["default/a"]], "", "end", []),
+    ([], [["default/a"]], "dr=gold", "wave:2", []),                               # sélecteur : peut se remplir
+    (["default/a"], [], "", "wave:1", []),
+])
+def test_hook_on_an_empty_implicit_wave_warns(vms, waves, selector, at, want):
+    plan = {"vms": vms, "selector": selector}
+    opts = {"waves": [{"vms": w} for w in waves], "hooks": [{"name": "h", "at": at}]}
+    got = rp._empty_wave_hooks(plan, opts)
+    assert [f["facts"]["hooks"] for f in got] == ([want] if want else [])
+    assert all(f["code"] == "hook-wave-empty" and f["level"] == "warn" for f in got)

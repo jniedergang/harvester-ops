@@ -1269,6 +1269,23 @@ def _capacity(needed, classes):
     return out
 
 
+def _empty_wave_hooks(plan, opts):
+    """Actions annexes de la dernière vague, implicite, alors que chaque VM
+    d'un plan par liste est dans une vague déclarée : cette vague est vide,
+    l'action ne serait jamais appelée (`hook-wave-empty`). Un plan par
+    sélecteur peut y recevoir une VM étiquetée plus tard : rien à dire."""
+    waves = opts.get("waves") or []
+    vms = plan.get("vms") or []
+    if not waves or not vms or plan.get("selector"):
+        return []
+    listed = {r for w in waves for r in w.get("vms") or []}
+    if not set(vms) <= listed:
+        return []
+    at = f"wave:{len(waves) + 1}"
+    names = sorted(h["name"] for h in opts.get("hooks") or [] if h.get("at") == at)
+    return [_finding("hook-wave-empty", "warn", at=at, hooks=names)] if names else []
+
+
 def replica_findings(used, classes, accepted):
     """Classes des volumes de secours qui demandent plus de répliques
     (`numberOfReplicas` de la StorageClass, 3 par défaut comme Longhorn) que
@@ -1427,6 +1444,7 @@ def check(src, dst, plan):
     if phase == "protect":
         out += replica_findings(used_classes, dst.get("storage_classes") or {},
                                 bool(opts.get("accept_degraded_standby")))
+        out += _empty_wave_hooks(plan, opts)
 
     if opts.get("cloud_init") == "rerun":
         out.append(_finding("cloud-init-rerun", "warn"))
