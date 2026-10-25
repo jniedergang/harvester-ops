@@ -125,7 +125,13 @@ person when the route names a cluster, and since 2.0.0 the identity the
 person presents to the clusters (Rancher session, or delegated user and
 groups, `_read_share_identity`) when it does not. Local accounts without
 identity delegation all use the console's kubeconfig and still share one
-read per role.
+read per role. KVM reads are the exception: the console reaches every KVM
+host with its own SSH key, so the answer does not depend on who reads. The
+KVM routes (`/api/kvm/...`) carry no identity in their key, and the KVM
+part of `/api/vms-all` is read once for everybody and kept 10 seconds
+(`HARVESTER_OPS_KVM_VMS_SHARE_TTL`); only its Harvester part is read per
+identity. Thirty people on Virtual machines make at most one SSH survey per
+KVM host every 10 seconds.
 
 ## Navigation and addresses
 

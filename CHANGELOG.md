@@ -340,6 +340,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   landing in another folder of the same name. They now stay with their
   folder and are counted as conflicts (`skipped` in the journal).
 
+- **KVM hosts are surveyed once for everybody**: since fleet reads carry
+  the person's identity, the KVM part of Virtual machines (the landing
+  screen) opened one SSH survey of every KVM host per person signed in
+  through Rancher or under delegation, although the console reads KVM hosts
+  with its own key. The KVM routes no longer carry the identity in their
+  key, and the KVM part of `/api/vms-all` is read once for everybody, kept
+  10 seconds (`HARVESTER_OPS_KVM_VMS_SHARE_TTL`); the Harvester part stays
+  per identity.
+
 ### Security
 - **Fleet reads are no longer shared across identities** (present since
   1.85.0): a shared read that names no cluster (`/api/vms-all`,
@@ -348,7 +357,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   session, or delegated user and groups). Before, two people of the same
   role signed in through Rancher, or under identity delegation, could be
   served each other's fleet, VMs of clusters hidden from them included.
-  Local accounts without delegation still share one read. **Fixed in
+  Local accounts without delegation still share one read; KVM reads, made
+  with the console's own SSH key, are shared by everybody. **Fixed in
   2.0.0 only, not backported**: versions 1.85.0 to 1.101.3 keep the leak
   when Rancher sign-in or identity delegation is on; upgrade to 2.0.0.
 - **Folder actions never name an object the person cannot see**: a rename,
@@ -563,6 +573,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   conflict said); Undo of a folder that cannot take its name back keeps its
   objects. Mutations: folder lines marked done without replay, strict rule
   off.
+- `tests/api/test_read_share_identity_200.py`: two Rancher identities make
+  one SSH survey per KVM host and still get their own Harvester part, a KVM
+  write drops the shared part, KVM keys equal across identities; mutation:
+  the identity put back in the KVM key gives one survey per person.
 
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 

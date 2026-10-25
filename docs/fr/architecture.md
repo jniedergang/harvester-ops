@@ -129,7 +129,13 @@ route nomme un cluster et, depuis la 2.0.0, l'identité que la personne
 présente aux clusters (session Rancher, ou utilisateur et groupes délégués,
 `_read_share_identity`) quand elle n'en nomme pas. Les comptes locaux sans
 délégation d'identité emploient tous le kubeconfig de la console et
-partagent encore une lecture par rôle.
+partagent encore une lecture par rôle. Les lectures KVM font exception : la
+console joint chaque hôte KVM avec sa propre clé SSH, la réponse ne dépend
+donc pas de qui lit. Les routes KVM (`/api/kvm/...`) ne portent pas
+d'identité dans leur clé, et la part KVM de `/api/vms-all` est lue une fois
+pour tous et gardée 10 secondes (`HARVESTER_OPS_KVM_VMS_SHARE_TTL`) ; seule
+sa part Harvester est lue par identité. Trente personnes sur Machines
+virtuelles font au plus une tournée SSH par hôte KVM toutes les 10 secondes.
 
 ## Navigation et adresses
 

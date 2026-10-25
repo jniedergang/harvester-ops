@@ -92,9 +92,16 @@ def test_fleet_key_carries_the_rancher_identity(sso, a, b, same):
     assert (key_for(a) == key_for(b)) is same
 
 
-@pytest.mark.parametrize("scope", [None, "_hosts", "_kvm", "_replication"])
+@pytest.mark.parametrize("scope", [None, "_hosts", "_replication"])
 def test_every_fleet_key_without_a_cluster_carries_the_identity(sso, scope):
     assert key_for("ann", scope=scope) != key_for("bob", scope=scope)
+
+
+def test_kvm_keys_are_shared_across_identities(sso):
+    """Revue finale I-3 : un hôte KVM est un objet de la console, lu avec la
+    clé SSH de la console quelle que soit la personne ; ses lectures sont
+    partagées entre identités (le rôle reste dans la clé)."""
+    assert key_for("ann", scope="_kvm") == key_for("bob", scope="_kvm") == key_for("ann2", scope="_kvm")
 
 
 def test_cluster_keys_keep_the_kubeconfig_only(sso):
@@ -168,3 +175,51 @@ def test_the_identity_part_is_frozen_in_the_single_key_builder():
     body = src.split("def _read_share_key(", 1)[1].split("\ndef ", 1)[0]
     assert "_read_share_identity()" in body
     assert src.count("_read_share_key(") >= 4
+
+
+# ---------------------------------------------------------------------------
+# Revue finale I-3 : la part KVM de /api/vms-all est lue une fois pour tous
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def kvm_survey(sso, monkeypatch, tmp_path):
+    monkeypatch.setenv("HARVESTER_OPS_FOLDERS_DB", str(tmp_path / "folders.db"))
+    decls = [{"name": "node2"}, {"name": "kvm2"}]
+    monkeypatch.setattr(wapp._kd, "load_all", lambda d: decls)
+    monkeypatch.setattr(wapp._kh, "VirshHost", lambda d, state, timeout=None: d["name"])
+    surveys = []
+
+    def read_all(hosts, deadline=None, folders=False):
+        surveys.extend(hosts)
+        return [{"name": h, "vms": [{"name": f"dom-{h}", "uuid": f"0000000{i}-0000-0000-0000-000000000000",
+                                     "state": "running", "host": h}], "errors": []}
+                for i, h in enumerate(hosts)]
+    monkeypatch.setattr(wapp._kvm_cli, "read_all", read_all)
+    return surveys
+
+
+def test_two_identities_cause_one_ssh_survey_per_host(kvm_survey):
+    a = get("ann", "/api/vms-all?kinds=harvester,kvm").get_json()
+    b = get("bob", "/api/vms-all?kinds=harvester,kvm").get_json()
+    assert sorted(kvm_survey) == ["kvm2", "node2"]          # une seule tournée SSH
+    for body in (a, b):
+        assert {v["source"] for v in body["vms"] if v["kind"] == "kvm"} == {"node2", "kvm2"}
+    # la part Harvester reste propre à chacun
+    assert {v["cluster"] for v in a["vms"] if v["kind"] == "harvester"} == {"harv1"}
+    assert {v["cluster"] for v in b["vms"] if v["kind"] == "harvester"} == {"harv1", "secret"}
+
+
+def test_i3_mutation_identity_in_the_kvm_key(kvm_survey, monkeypatch):
+    """Mutation volontaire : l'identité remise dans la clé KVM = une tournée
+    SSH par personne."""
+    real = wapp._kvm_part_key
+    monkeypatch.setattr(wapp, "_kvm_part_key", lambda: real() + (wapp._read_share_identity(),))
+    get("ann", "/api/vms-all?kinds=harvester,kvm")
+    get("bob", "/api/vms-all?kinds=harvester,kvm")
+    assert len(kvm_survey) == 4
+
+
+def test_a_kvm_write_drops_the_shared_kvm_part(kvm_survey):
+    get("ann", "/api/vms-all?kinds=harvester,kvm")
+    wapp.READ_SHARE.invalidate(wapp.KVM_SCOPE)
+    get("bob", "/api/vms-all?kinds=harvester,kvm")
+    assert len(kvm_survey) == 4

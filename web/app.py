@@ -910,14 +910,19 @@ def _read_share_key(endpoint, kwargs, qargs=(), scope=None, per_user=False):
     hôtes (navigation 2.0) relit le cache avec les mêmes clés que les écrans.
     Une route qui nomme un cluster porte le kubeconfig rendu pour la personne ;
     une vue de flotte (sans cluster) porte son identité (2.0.0, revue I-2 :
-    sinon deux personnes du même rôle partageaient la flotte de l'autre)."""
+    sinon deux personnes du même rôle partageaient la flotte de l'autre).
+    Les lectures KVM (`scope=KVM_SCOPE`) ne portent pas l'identité : la
+    console lit les hôtes avec sa propre clé, la réponse est la même pour
+    tous ; N personnes ne lancent pas N tournées SSH (revue finale I-3)."""
     cluster = kwargs.get("cluster")
     return (scope or cluster, endpoint,
             tuple(sorted(qargs)),
             tuple(sorted((k, str(v)) for k, v in kwargs.items())),
             _kubectl_for_cluster(cluster) if cluster else None,
             current_role(), current_user() if per_user else None,
-            None if cluster else _read_share_identity())
+            # un hôte KVM est un objet de la console, lu avec SA clé SSH quelle
+            # que soit la personne (revue finale I-3) : pas d'identité
+            None if cluster or scope == KVM_SCOPE else _read_share_identity())
 
 
 def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys=None):
@@ -9481,6 +9486,28 @@ def _vms_all_kvm():
     return sources, rows
 
 
+# 2.0.0 (revue finale I-3) : la part KVM de /api/vms-all est lue pour tous,
+# sans identité ni rôle (clé SSH de la console, même réponse pour chacun) ;
+# la part Harvester reste lue avec l'identité de chacun. Durée de partage
+# plus longue que celle de la vue : l'écran des VMs relit toutes les 15 s,
+# N personnes font au plus une tournée SSH par hôte et par période.
+KVM_VMS_SHARE_TTL = float(os.environ.get("HARVESTER_OPS_KVM_VMS_SHARE_TTL", "10"))
+
+
+def _kvm_part_key():
+    return (KVM_SCOPE, "_vms_all_kvm")
+
+
+def _vms_all_kvm_shared():
+    """_vms_all_kvm() par la lecture partagée de la console ; chaque requête
+    reçoit sa copie des lignes (elles sont modifiées ensuite)."""
+    if READ_SHARE_ENABLED:
+        sources, rows = READ_SHARE.get(_kvm_part_key(), KVM_VMS_SHARE_TTL, _vms_all_kvm)
+    else:
+        sources, rows = _vms_all_kvm()
+    return [dict(x) for x in sources], [dict(r) for r in rows]
+
+
 @app.route("/api/vms-all")
 @requires_auth
 @shared_read(query_keys=("kinds",))
@@ -9552,7 +9579,7 @@ def api_vms_all():
                 warnings.append({"key": row["key"], "reason": why})
             rows.append(row)
     if "kvm" in kinds:
-        ksources, krows = _vms_all_kvm()
+        ksources, krows = _vms_all_kvm_shared()
         sources += ksources
         rows += krows
     # une VM dont le dossier n'a pas pu être lu ne réaligne rien : son cache
@@ -9560,7 +9587,8 @@ def api_vms_all():
     unread = [r for r in rows if r.pop("_unread", False)]
     for r in unread:
         r.pop("_scope", None)
-    _folders_apply([r for r in rows if r not in unread],
+    unread_ids = {id(r) for r in unread}       # pas de comparaison de dicts (revue P-4)
+    _folders_apply([r for r in rows if id(r) not in unread_ids],
                    [f"{s['kind']}/{s['source']}" for s in sources if s["state"] == "ok" and not s.get("error")])
     if unread:
         cache = {}

@@ -50,6 +50,7 @@ as `VAR=value` lines in `/etc/harvester-ops/env`, then
 |---|---|---|
 | `HARVESTER_OPS_READ_SHARE` | `1` | `0` turns shared reads off |
 | `HARVESTER_OPS_READ_SHARE_TTL` | `3` | seconds a shared read serves |
+| `HARVESTER_OPS_KVM_VMS_SHARE_TTL` | `10` | seconds the KVM part of Virtual machines (`/api/vms-all`) serves everybody before the KVM hosts are surveyed again |
 | `HARVESTER_OPS_KUBE_REST` | `1` | `0` sends every read back through kubectl |
 | `HARVESTER_OPS_READ_WORKERS` | 4 (fewer below 5 cores, 0 below 3) | read worker processes; `0` builds every screen in the main process |
 | `HARVESTER_OPS_READ_WORKER_TASKS` | `200` | screens a worker builds before it restarts |

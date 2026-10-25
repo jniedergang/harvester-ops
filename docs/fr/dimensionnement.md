@@ -52,6 +52,7 @@ lignes `VAR=valeur` dans `/etc/harvester-ops/env`, puis
 |---|---|---|
 | `HARVESTER_OPS_READ_SHARE` | `1` | `0` coupe les lectures partagées |
 | `HARVESTER_OPS_READ_SHARE_TTL` | `3` | secondes pendant lesquelles une lecture sert |
+| `HARVESTER_OPS_KVM_VMS_SHARE_TTL` | `10` | secondes pendant lesquelles la part KVM de Machines virtuelles (`/api/vms-all`) sert tout le monde avant une nouvelle tournée des hôtes KVM |
 | `HARVESTER_OPS_KUBE_REST` | `1` | `0` renvoie toutes les lectures à kubectl |
 | `HARVESTER_OPS_READ_WORKERS` | 4 (moins sous 5 cœurs, 0 sous 3) | processus lecteurs ; `0` construit tous les écrans dans le processus principal |
 | `HARVESTER_OPS_READ_WORKER_TASKS` | `200` | écrans construits par un lecteur avant qu'il reparte à neuf |
