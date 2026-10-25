@@ -269,6 +269,29 @@ def test_the_kvm_screen_read_is_found_through_the_real_route(world, monkeypatch)
     assert d[("kvm", "kvm-paris.01")]["state"] == "unreachable"
 
 
+@pytest.mark.parametrize("fleet,single,want", [
+    (None, {"name": "node2", "vms": [{"name": "a"}], "libvirt_version": "12.8.0"}, ("ok", 1, "12.8.0")),
+    ({"name": "node2", "vms": [{"name": "a"}, {"name": "b"}], "libvirt_version": "12.7.0"},
+     {"name": "node2", "vms": [{"name": "a"}], "libvirt_version": "12.8.0"}, ("ok", 2, "12.7.0")),
+    (None, None, ("unknown", None, None)),
+])
+def test_kvm_state_from_the_host_page_read_when_no_fleet_read(world, fleet, single, want):
+    """2.0.0 : la page d'un hôte KVM lit l'hôte seul ; le menu reprend cette
+    lecture quand la lecture de flotte manque (celle-ci l'emporte)."""
+    with wapp.app.test_request_context("/api/kvm/hosts"):
+        kf = wapp._read_share_key("api_kvm_hosts", {}, scope=wapp.KVM_SCOPE)
+        ks = wapp._read_share_key("api_kvm_host", {"host": "node2"}, scope=wapp.KVM_SCOPE)
+    if fleet:
+        body = json.dumps({"hosts": [fleet]}).encode()
+        wapp.READ_SHARE.get(kf, 3, lambda: (200, body, "application/json", [], None, []))
+    if single:
+        b2 = json.dumps(single).encode()
+        wapp.READ_SHARE.get(ks, 3, lambda: (200, b2, "application/json", [], None, []))
+    with wapp.app.test_client() as c:
+        h = by_key(hosts(c))[("kvm", "node2")]
+    assert (h["state"], h["vm_count"], h["version"]) == want
+
+
 def test_a_hosts_list_never_reads_a_host_even_after_screens(world, monkeypatch):
     _fleet(monkeypatch)
     with wapp.app.test_client() as c:

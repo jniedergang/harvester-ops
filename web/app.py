@@ -9449,7 +9449,8 @@ def _harvester_hosts():
 
 def _kvm_hosts_menu():
     """Hôtes KVM déclarés ; état et nombre de VMs de la dernière lecture de
-    /api/kvm/hosts, sinon « unknown » (aucun SSH lancé ici)."""
+    /api/kvm/hosts, sinon de celle de l'hôte seul (/api/kvm/hosts/<h>, page
+    de l'hôte), sinon « unknown » (aucun SSH lancé ici)."""
     decls = _kd.load_all(_state_dir())
     seen = {}
     inv, inv_age = _peek_read("api_kvm_hosts", scope=KVM_SCOPE, with_age=True)
@@ -9459,6 +9460,12 @@ def _kvm_hosts_menu():
     out = []
     for d in decls:
         e = seen.get(d["name"])
+        age = inv_age
+        if e is None:
+            # 2.0.0 : la page d'un hôte KVM lit cet hôte seul ; sa lecture
+            # partagée vaut aussi pour le menu (le bandeau ne dit plus « pas
+            # encore lu » d'un hôte qu'il vient de montrer)
+            e, age = _peek_read("api_kvm_host", {"host": d["name"]}, scope=KVM_SCOPE, with_age=True)
         state, error, vm_count, version = "unknown", None, None, None
         if e is not None:
             if e.get("error"):
@@ -9471,7 +9478,7 @@ def _kvm_hosts_menu():
                 version = e.get("libvirt_version") or None
         out.append({"kind": "kvm", "name": d["name"], "state": state, "error": error,
                     "vm_count": vm_count,
-                    "vm_count_age": int(inv_age) if vm_count is not None else None,
+                    "vm_count_age": int(age) if vm_count is not None and age is not None else None,
                     "labels": dict(d.get("labels") or {}),
                     "version": version, "favorite": False, "folder": None, "origin": "console"})
     return out
