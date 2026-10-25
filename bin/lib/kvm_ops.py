@@ -1666,11 +1666,23 @@ def _copy_file(host, entry, created, deadline, progress, sleep, poll):
     return warnings
 
 
-def _rollback(host, created):
-    """Défait ce qui a été créé, dans l'ordre inverse ; rend ce qui reste."""
+def _rollback(host, created, sleep=None, clock=None):
+    """Défait ce qui a été créé, dans l'ordre inverse ; rend ce qui reste.
+
+    Un volume que `vol-create-from` construisait encore (`building`, clonage
+    annulé pendant la copie) : libvirtd poursuit la copie et refuse la
+    suppression jusqu'à sa fin ; même attente bornée que le retour arrière
+    d'une création (kvm_storage.delete_building)."""
+    import kvm_storage as ks         # kvm_storage importe ce module : import tardif
     leftovers = []
     for item in reversed(created):
         public = {k: v for k, v in item.items() if k not in ("sources", "building")}
+        if item["kind"] == "volume" and item.get("building"):
+            left = ks.delete_building(host, item["pool"], item["volume"], sleep=sleep,
+                                      clock=clock)
+            if left:
+                leftovers.append({**public, "error": left["error"]})
+            continue
         try:
             if item["kind"] == "domain":
                 xml = host.virsh("dumpxml", "--inactive", "--domain", item["name"], idempotent=True)
@@ -1700,12 +1712,7 @@ def _rollback(host, created):
         except kh.KvmError as e:
             if e.kind == "notfound" and item["kind"] in ("domain", "volume"):
                 continue                     # déjà absent
-            msg = e.message
-            if item.get("building"):
-                msg += (f"; libvirtd may still be building volume {item['pool']}/"
-                        f"{item['volume']}: remove it once the copy ends (virsh vol-delete "
-                        f"--pool {item['pool']} --vol {item['volume']})")
-            leftovers.append({**public, "error": msg})
+            leftovers.append({**public, "error": e.message})
         except (OpError, ET.ParseError, ValueError) as e:
             leftovers.append({**public, "error": str(e)})
     return leftovers
@@ -1722,14 +1729,14 @@ def _passwords(xml_text):
 
 
 def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
-             poll=COPY_POLL):
+             poll=COPY_POLL, clock=None):
     """Voir _clone_vm (relevé gardé oublié autour des écritures)."""
     with writing(host):
-        return _clone_vm(host, name, new_name, timeout, progress, sleep, poll)
+        return _clone_vm(host, name, new_name, timeout, progress, sleep, poll, clock)
 
 
 def _clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
-              poll=COPY_POLL):
+              poll=COPY_POLL, clock=None):
     """Copie complète d'une VM arrêtée : plan recalculé, volumes copiés
     (`vol-create-from` dans un pool, chaîne aplatie, droits de la source ;
     `qemu-img convert` hors pool), état de la source relu juste avant de
@@ -1816,7 +1823,7 @@ def _clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.slee
         clone = kh.parse_domain_xml(_need(out, "xml"))
         step("verify", "done", f"uuid {clone['uuid']}")
     except BaseException as exc:
-        leftovers = _rollback(host, created)
+        leftovers = _rollback(host, created, sleep=sleep, clock=clock)
         exc.leftovers = leftovers
         if isinstance(exc, OpError):
             exc.data["leftovers"] = leftovers

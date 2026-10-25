@@ -493,6 +493,25 @@ def _delete_partial(host, pool, name, retry_for=None, sleep=None, clock=None):
         wait = min(wait * 2, PARTIAL_DELETE_MAX_WAIT)
 
 
+# attente de la fin d'une copie complète annulée avant d'en supprimer le volume
+# (libvirtd la poursuit après l'annulation de `vol-create-from` et refuse la
+# suppression, « still being allocated », tant qu'elle dure ; vu sur node2)
+BUILDING_DELETE_RETRY = 900.0
+
+
+def delete_building(host, pool, name, sleep=None, clock=None):
+    """Supprime un volume que `vol-create-from` construisait quand l'opération
+    a été annulée (retour arrière d'une création ou d'un clonage) : réessaie
+    jusqu'à BUILDING_DELETE_RETRY secondes, puis rend un reste nommé qui dit
+    que la copie peut encore tourner. Rend None quand le volume n'est plus là."""
+    left = _delete_partial(host, pool, name, retry_for=BUILDING_DELETE_RETRY,
+                           sleep=sleep, clock=clock)
+    if left:
+        left["error"] += (f"; libvirtd may still be building volume {pool}/{name}: remove it "
+                          f"once the copy ends (virsh vol-delete --pool {pool} --vol {name})")
+    return left
+
+
 def upload_volume(host, pool, name, path, fmt_hint=None, sha256=None, verify=True,
                   progress=None, cancel=None, limit_bps=None, notes_state=None, author=None,
                   url=None, step=None, max_virtual_size=None):

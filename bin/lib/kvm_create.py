@@ -44,9 +44,6 @@ OpError = ko.OpError
 
 # relecture de `vol-info` pendant une copie complète (secondes)
 COPY_POLL = 2.0
-# attente de la fin d'une copie complète annulée avant d'en supprimer le volume
-# (libvirtd la poursuit et refuse la suppression tant qu'elle dure)
-BUILDING_DELETE_RETRY = 900.0
 
 INSTANCES_MAX = 20
 _VNC_ALPHABET = string.ascii_letters + string.digits
@@ -421,18 +418,16 @@ def rollback(host, created, sleep=None, clock=None):
     Un volume en cours de copie complète (`building`, création annulée
     pendant `vol-create-from`) : libvirtd poursuit la copie et refuse la
     suppression (« still being allocated ») jusqu'à sa fin ; le retour
-    arrière réessaie avec un recul borné (BUILDING_DELETE_RETRY secondes)
+    arrière réessaie avec un recul borné (ks.BUILDING_DELETE_RETRY secondes)
     puis le nomme en reste s'il est toujours en copie."""
     leftovers = []
     for item in reversed(created):
         public = {k: v for k, v in item.items() if k not in ("uuid", "building")}
         if item["kind"] == "volume" and item.get("building"):
-            left = ks._delete_partial(host, item["pool"], item["volume"],
-                                      retry_for=BUILDING_DELETE_RETRY, sleep=sleep, clock=clock)
+            left = ks.delete_building(host, item["pool"], item["volume"], sleep=sleep,
+                                      clock=clock)
             if left:
-                leftovers.append({**public, "error": left["error"] + (
-                    f"; libvirtd may still be building volume {item['pool']}/"
-                    f"{item['volume']}: remove it once the copy ends")})
+                leftovers.append({**public, "error": left["error"]})
             continue
         try:
             if item["kind"] == "started":

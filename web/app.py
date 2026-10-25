@@ -22313,7 +22313,10 @@ def api_kvm_clone(host, domain):
     if new == domain:
         return _kvm_err("the copy needs another name")
     cmd = _kvm_base("clone") + [f"--host={host}", f"--name={domain}", f"--new-name={new}"]
-    run, err = _kvm_vm_op(host, domain, "clone", cmd, names=(new,))
+    # annuler attend la sortie du script, comme une création : une copie dans
+    # un pool que libvirtd construit encore est attendue puis supprimée par le
+    # retour arrière, les deux noms restent tenus jusque-là
+    run, err = _kvm_vm_op(host, domain, "clone", cmd, names=(new,), waits=True)
     if err:
         return err
     return jsonify({"action_id": run.id, "host": host, "name": domain, "new_name": new}), 202

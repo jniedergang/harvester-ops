@@ -10,6 +10,7 @@ import iso9660
 import kvm_create as kc
 import kvm_host as kh
 import kvm_ops as ko
+import kvm_storage as ks
 
 IMG = "/var/lib/libvirt/images"
 SECRET = "Ud7SeCrEt99"          # valeur factice du user-data : ne doit sortir nulle part
@@ -352,7 +353,7 @@ ROLLBACK_CASES = [
 @pytest.mark.parametrize("label,refusals,left,calls", ROLLBACK_CASES, ids=[c[0] for c in ROLLBACK_CASES])
 def test_rollback_waits_for_a_volume_libvirt_is_still_copying(label, refusals, left, calls, monkeypatch):
     clock = {"t": 0.0}
-    monkeypatch.setattr(kc, "BUILDING_DELETE_RETRY", 60.0)
+    monkeypatch.setattr(ks, "BUILDING_DELETE_RETRY", 60.0)
     host = _BuildingHost(refusals)
     created = [{"kind": "volume", "pool": "p", "volume": "x", "building": True}]
     out = kc.rollback(host, created, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
