@@ -443,7 +443,7 @@ const HostPage = (() => {
     el.innerHTML = `<div class="modal">
         <div class="modal-header"><div><h3 id="hp-labels-title">${esc(tr('hp.kvm.labels.title', { name: host }))}</h3>
           <div class="modal-subtitle">${esc(tr('hp.kvm.labels.subtitle'))}</div></div>
-          <button type="button" class="btn-close tip" data-lbl="close" title="${esc(tr('common.close'))}" aria-label="${esc(tr('common.close'))}">×</button></div>
+          <button type="button" class="btn-close tip" data-lbl="close" title="${esc(tr('common.close'))}" data-tip="${esc(tr('common.close'))}" aria-label="${esc(tr('common.close'))}">×</button></div>
         <div class="modal-body">
           <table class="data-table hp-labels-edit"><thead><tr><th>${esc(tr('hp.kvm.labels.key'))}</th><th>${esc(tr('hp.kvm.labels.value'))}</th><th></th></tr></thead><tbody></tbody></table>
           <button type="button" class="btn btn-sm btn-secondary tip" data-lbl="add" title="${esc(tr('hp.kvm.labels.addTip'))}" data-tip="${esc(tr('hp.kvm.labels.addTip'))}">${icon('add')} ${esc(tr('hp.kvm.labels.add'))}</button>
@@ -453,11 +453,13 @@ const HostPage = (() => {
           <div class="of-msg hp-labels-msg" role="status" aria-live="polite"></div>
         </div>
         <div class="modal-footer">
-          <button type="button" class="btn btn-sm btn-secondary tip" data-lbl="close" title="${esc(tr('hp.kvm.labels.cancelTip'))}">${esc(tr('common.cancel'))}</button>
+          <button type="button" class="btn btn-sm btn-secondary tip" data-lbl="close" title="${esc(tr('hp.kvm.labels.cancelTip'))}" data-tip="${esc(tr('hp.kvm.labels.cancelTip'))}">${esc(tr('common.cancel'))}</button>
           <button type="button" class="btn btn-sm btn-primary tip" data-lbl="apply" title="${esc(tr('hp.kvm.labels.applyTip'))}" data-tip="${esc(tr('hp.kvm.labels.applyTip'))}">${icon('ok')} ${esc(tr('common.apply'))}</button>
         </div></div>`;
     document.body.appendChild(el);
     labelsModal = { el, prev: document.activeElement };
+    // même piège à focus que la fenêtre des réglages : Tab reste dedans
+    if (typeof Settings !== 'undefined' && Settings.trapFocus) Settings.trapFocus(el);
     const body = el.querySelector('tbody');
     const addRow = (k, v) => {
       const tr0 = document.createElement('tr');

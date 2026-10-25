@@ -312,3 +312,29 @@ def test_every_control_of_the_kvm_page_has_a_tooltip(kvm_page):
         go(hash)
         for el in page.locator("#host-page-head a, #kvmparams-host button").all():
             assert el.get_attribute("title") or el.get_attribute("data-tip"), el.evaluate("e => e.outerHTML")
+
+
+def test_labels_window_keeps_the_focus_inside_and_every_button_has_a_tip(kvm_page):
+    """Mineur 5 : Tab et Maj+Tab tournent dans la fenêtre (même piège à
+    focus que la fenêtre des réglages, Settings.trapFocus), jamais vers la
+    page dessous ; chaque bouton a son info-bulle (data-tip)."""
+    go, page, _ = kvm_page
+    go("#kvm/node2/params/labels")
+    page.locator('#kvmparams-host [data-hp-kvm="edit-labels"]').click()
+    modal = page.locator(".hp-labels-modal")
+    expect(modal).to_be_visible()
+    inside = "() => !!document.activeElement.closest('.hp-labels-modal')"
+    assert page.evaluate(inside)
+    for _ in range(12):
+        page.keyboard.press("Tab")
+        assert page.evaluate(inside), page.evaluate("document.activeElement.outerHTML")
+    for _ in range(12):
+        page.keyboard.press("Shift+Tab")
+        assert page.evaluate(inside), page.evaluate("document.activeElement.outerHTML")
+    for b in modal.locator("button").all():
+        assert b.get_attribute("data-tip") or b.get_attribute("aria-label"), b.evaluate("e => e.outerHTML")
+    assert modal.locator('.modal-footer [data-lbl="close"]').get_attribute("data-tip")
+    page.keyboard.press("Escape")
+    expect(modal).to_have_count(0)
+    # le focus revient au bouton qui a ouvert la fenêtre
+    assert page.evaluate("document.activeElement.dataset.hpKvm") == "edit-labels"

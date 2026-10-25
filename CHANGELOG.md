@@ -58,7 +58,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Disaster Recovery (replication of KVM domains is not available yet). An
   unreachable host keeps a block in error with the classified reason, and
   Labels and Connection stay readable from the declaration.
-- **KVM host labels can be edited** (admin): a window with checks before
+- **KVM host labels can be edited** (admin): a window (keyboard focus kept
+  inside, as in the settings window) with checks before
   Apply (valid names, no name twice, value length, 32 at most, what is
   added, changed and removed), then a tracked action that keeps the
   previous labels. Command line: `harvester-kvm.py host label --host <h>
@@ -182,7 +183,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `tests/e2e/test_kvm_host_page_200.py` (every KVM host address cold, a
   KVM host and a cluster of the same name, buttons greyed by role with the
   reason, Test and Remove from Connection, unreachable host, labels edited
-  after checks).
+  after checks, focus kept inside the labels window).
 - `tests/api/test_hosts_routes_200.py`, `tests/api/test_favorites_200.py`:
   states, Rancher-hidden cluster, counts filled from the screens' reads,
   refusals (400, 404), stars kept per person, and traps that fail the test
