@@ -28,7 +28,7 @@ de la RBAC à l'écriture), le rangement est gardé dans la console seulement
   ... assign --to <chemin|unfiled> --spec F [--rate N]
   ... apply-rename --id I --spec F [--rate N]
   ... resume --action A --spec F [--rate N]
-  ... undo --action A --spec F [--rate N]
+  ... undo --action A [--of USER] --spec F [--rate N]
   ... write-back --folder I --spec F [--rate N]
   ... empty-into --folder I --to <id|unfiled> --spec F [--rate N]
 
@@ -718,6 +718,10 @@ def cmd_undo(args, conn):
     spec = read_spec(args.spec)
     objects = objects_of(spec)
     failed = 0
+    # qui annule le geste de qui (revue M-4) : un opérateur peut annuler
+    # celui d'un autre, le journal le dit
+    whose = f" launched by {args.of}" if args.of and args.of != args.as_user else ""
+    step("undo", "done", f"undo of {args.action}{whose}, by {args.as_user}")
     # les objets portent encore le chemin écrit par l'action : ils y sont
     # repris pour revenir à celui d'avant (conflit s'ils ont bougé depuis).
     # Leurs lignes sont posées avant de toucher à l'arborescence, pour
@@ -904,6 +908,7 @@ def parse_args(argv=None):
     sp.add_argument("--action", required=True)
     sp = with_spec(sub.add_parser("undo"))
     sp.add_argument("--action", required=True)
+    sp.add_argument("--of", default=None, help="person who launched the action undone (for the journal)")
     with_folder(with_spec(sub.add_parser("write-back")))
     sp = with_folder(with_spec(sub.add_parser("empty-into")))
     sp.add_argument("--to", required=True, help="target folder id, or unfiled")

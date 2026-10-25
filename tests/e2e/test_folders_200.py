@@ -176,10 +176,11 @@ def world(context, flask_server):
     page.on("pageerror", lambda e: errors.append(str(e)))
     state["errors"] = errors
 
-    def go(hash, lang="en"):
+    def go(hash, lang="en", tree=True):
         page.add_init_script(f"localStorage.setItem('harvester_ops_language', '{lang}');")
         goto(page, flask_server["base_url"], hash)
-        page.wait_for_function("() => !!(window.Folders && Folders.get() && Folders.get().length > 0)")
+        if tree:
+            page.wait_for_function("() => !!(window.Folders && Folders.get() && Folders.get().length > 0)")
         return page
     return go, page, state
 
@@ -421,3 +422,41 @@ def test_panel_with_2000_folders_recreated_from_objects_stays_fast(world):
     expect(page.locator('#all-vms-host [data-fld-id="100"] .fld-count')).to_have_text("50")
     print(f"panel 2000 folders + 2000 VMs: one render {ms:.0f} ms, page ready in {load:.1f}s")
     assert ms < 1500
+
+
+def _old_action(aid, label, undo=True):
+    # finie il y a une heure : le dock ne la montre plus, l'Activité si
+    return {"id": aid, "action": f"folders:{label}", "cluster": "folders", "status": "done", "exit_code": 0,
+            "started_at": time.time() - 3600, "ended_at": time.time() - 3590, "dry_run": False,
+            "error_summary": None, **({"undo": {"path": f"/api/folders/actions/{aid}/undo"}} if undo else {})}
+
+
+def test_undo_from_activity_after_the_dock_card_is_gone(world):
+    """Revue I-4 : Annuler depuis l'onglet Activité, bien après la carte du dock."""
+    go, page, state = world
+    state["actions"] += [_old_action("fa0000000050", "rename:/Prod"), _old_action("fa0000000051", "create:/X", False)]
+    go("#activity", tree=False)
+    row = page.locator("#activity-history tbody tr", has_text="folders:rename:/Prod")
+    btn = row.locator("[data-act-undo]")
+    expect(btn).to_be_enabled(timeout=8000)
+    expect(btn).to_have_attribute("title", re.compile("folders from before"))
+    expect(page.locator("#activity-history tbody tr", has_text="folders:create:/X").locator("[data-act-undo]")).to_have_count(0)
+    assert page.locator("#dock-card-fa0000000050").count() == 0
+    btn.click()
+    expect(page.locator(".dock-action-card", has_text="folders:undo:fa0000000050")).to_be_visible(timeout=8000)
+    assert ("POST", "/api/folders/actions/fa0000000050/undo", None) in state["sent"]
+    # le clic n'ouvre pas le détail de la ligne
+    expect(page.locator("#fp-activity-detail")).to_have_count(0)
+    assert state["errors"] == []
+
+
+def test_undo_in_activity_is_greyed_for_a_viewer(world):
+    go, page, state = world
+    state["role"] = "viewer"
+    state["actions"].append(_old_action("fa0000000060", "assign:/Prod"))
+    go("#activity", tree=False)
+    page.wait_for_function("() => App.role && App.role() === 'viewer'")
+    btn = page.locator("#activity-history tbody tr", has_text="folders:assign:/Prod").locator("[data-act-undo]")
+    expect(btn).to_be_disabled(timeout=8000)
+    expect(btn).to_have_attribute("title", re.compile("operator role"))
+    assert [s for s in state["sent"] if s[0] != "GET"] == []

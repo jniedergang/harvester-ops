@@ -1733,6 +1733,13 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN result TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.0.0 (revue I-4) : la route d'annulation d'un geste réversible
+    # (dossiers), gardée pour que l'Activité propose Annuler après un
+    # redémarrage ; même migration additive, à chaud
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN undo TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -1754,22 +1761,25 @@ def _actions_persist(run):
         result_json = json.dumps(getattr(run, "result", None) or {})
     except (TypeError, ValueError):
         result_json = "{}"
+    undo = getattr(run, "undo", None)
+    undo_json = json.dumps(undo) if isinstance(undo, dict) and undo else None
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
             ended_at=excluded.ended_at,
             events=excluded.events,
             error_summary=excluded.error_summary,
-            result=excluded.result
+            result=excluded.result,
+            undo=excluded.undo
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json, run.error_summary, result_json))
+          cmd_str, events_json, run.error_summary, result_json, undo_json))
     conn.commit()
     # Cap history at 500 rows (drop oldest done/error)
     conn.execute("""
@@ -1795,6 +1805,15 @@ def _row_result(raw):
     except (TypeError, ValueError):
         return {}
     return v if isinstance(v, dict) else {}
+
+
+def _row_undo(raw):
+    """La colonne `undo` relue : {"path": ...} ou None (pas de bouton)."""
+    try:
+        v = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return v if isinstance(v, dict) and isinstance(v.get("path"), str) else None
 
 
 def _actions_load_history():
@@ -1840,6 +1859,8 @@ def _actions_load_history():
                 pass
             if "result" in row.keys():
                 run.result = _row_result(row["result"])
+            if "undo" in row.keys():
+                run.undo = _row_undo(row["undo"])
             run._closed = True
             ACTIONS[row["id"]] = run
             restored += 1
@@ -1858,7 +1879,18 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result")
+                         "result", "undo")
+
+
+def _row_finish(d):
+    """Champs relus d'une ligne : booléen, résultat, et `undo` seulement s'il
+    est posé (comme ActionRun.to_dict)."""
+    d["dry_run"] = bool(d.get("dry_run"))
+    d["result"] = _row_result(d.get("result"))
+    undo = _row_undo(d.pop("undo", None))
+    if undo:
+        d["undo"] = undo
+    return d
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
@@ -1896,13 +1928,7 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
         conn.close()
     except sqlite3.Error:
         return []
-    out = []
-    for r in rows:
-        d = {k: r[k] for k in _ACTIONS_LIST_COLUMNS}
-        d["dry_run"] = bool(d["dry_run"])
-        d["result"] = _row_result(d.get("result"))
-        out.append(d)
-    return out
+    return [_row_finish({k: r[k] for k in _ACTIONS_LIST_COLUMNS}) for r in rows]
 
 
 def _actions_db_count():
@@ -1931,8 +1957,7 @@ def _actions_db_get(run_id):
         return None, []
     d = {k: row[k] for k in _ACTIONS_LIST_COLUMNS if k in row.keys()}
     d.setdefault("error_summary", None)
-    d["dry_run"] = bool(d.get("dry_run"))
-    d["result"] = _row_result(d.get("result"))
+    _row_finish(d)
     try:
         events = json.loads(row["events"] or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -10028,7 +10053,7 @@ def _folders_after():
     READ_SHARE.invalidate(None)
 
 
-def _folder_action(label, sub, objects=None, undoable=False, chosen=False):
+def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None):
     """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur."""
     script = BIN_DIR / FOLDERS_SCRIPT
     if not script.is_file():
@@ -10038,6 +10063,8 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False):
         run.required_role = "operator"
         if undoable:
             run.undo = {"path": f"/api/folders/actions/{run.id}/undo"}
+        if result:
+            run.result = dict(result)
     spec = _folder_spec(objects, chosen) if objects is not None else None
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
                            spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
@@ -10205,6 +10232,26 @@ def api_folders_assign():
     return _folder_action(f"assign:{dest}", ["assign", "--to", dest], objects, undoable=True, chosen=True)
 
 
+def _action_launcher(action_id):
+    """Qui a lancé cette action (`--as` de sa ligne), en mémoire ou dans
+    l'historique ; None si on ne le sait pas."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    cmd = run.cmd if run is not None else None
+    if cmd is None:
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB))
+            row = conn.execute("SELECT cmd FROM actions WHERE id = ?", (action_id,)).fetchone()
+            conn.close()
+            cmd = json.loads(row[0]) if row and row[0] and row[0].startswith("[") else None
+        except (sqlite3.Error, ValueError):
+            cmd = None
+    if isinstance(cmd, list) and "--as" in cmd[:-1]:
+        who = cmd[cmd.index("--as") + 1]
+        return who if isinstance(who, str) and who else None
+    return None
+
+
 @app.route("/api/folders/actions/<action_id>/undo", methods=["POST"])
 @requires_auth
 @_rate_limit(FOLDERS_RATE)
@@ -10231,7 +10278,12 @@ def api_folders_undo(action_id):
                 objects.append(obj)
     finally:
         conn.close()
-    return _folder_action(f"undo:{action_id}", ["undo", "--action", action_id], objects, undoable=True)
+    # revue M-4 : tout opérateur peut annuler (règle gardée) ; le journal dit
+    # de qui était le geste et qui l'annule
+    owner = _action_launcher(action_id)
+    sub = ["undo", "--action", action_id] + (["--of", owner] if owner else [])
+    return _folder_action(f"undo:{action_id}", sub, objects, undoable=True,
+                          result={"undoes": action_id, "of": owner, "by": current_user() or "anonymous"})
 
 
 @app.route("/api/folders/<int:folder_id>/write-back", methods=["POST"])

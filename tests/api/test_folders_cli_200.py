@@ -878,3 +878,17 @@ def test_empty_into_never_counts_objects_outside_the_request(env, capsys):
                str(folder_id(env, "/Lab")), spec={"objects": [vm("a")]}) == 1
     err = capsys.readouterr().err
     assert "not visible to you" in err and "/Prod" in tree_paths(env)
+
+
+@pytest.mark.parametrize("of,expected", [
+    ("alice", "undo of a1 launched by alice, by bob"),
+    ("bob", "undo of a1, by bob"),
+    (None, "undo of a1, by bob"),
+])
+def test_undo_says_whose_action_it_undoes(env, capsys, of, expected):
+    """Revue M-4 : le journal de l'annulation dit de qui était le geste."""
+    assert run(env, "--id=a1", "assign", "--to", "/Prod", spec={"objects": [vm("a")]}) == 0
+    capsys.readouterr()
+    argv = ["--as", "bob", "--id=u9", "undo", "--action", "a1"] + (["--of", of] if of else [])
+    assert run(env, *argv, spec={"objects": [vm("a")]}) == 0
+    assert f"STEP_EVENT|undo|done|{expected}" in capsys.readouterr().err

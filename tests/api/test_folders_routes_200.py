@@ -349,6 +349,69 @@ def test_assign_counts_the_chosen_objects_as_visible(world, call, monkeypatch):
     assert "harvester/harv1/nav/b" in script_spec()["visible"]
 
 
+def test_undo_survives_a_console_restart(world, monkeypatch, tmp_path):
+    """Revue I-4 : `run.undo` est gardé dans actions.db (colonne additive) ;
+    après un redémarrage, l'Activité propose toujours Annuler."""
+    db = tmp_path / "actions.db"
+    monkeypatch.setattr(wapp, "ACTIONS_DB", db)
+    wapp._actions_init_db()
+    run = wapp.ActionRun("fa0000000001", "folders:rename:/Prod", "folders", ["x"])
+    run.undo = {"path": "/api/folders/actions/fa0000000001/undo"}
+    run.status, run.ended_at = "done", run.started_at + 1
+    plain = wapp.ActionRun("fa0000000002", "folders:create:/X", "folders", ["x"])
+    plain.status, plain.ended_at = "done", plain.started_at + 1
+    wapp._actions_persist(run)
+    wapp._actions_persist(plain)
+    rows = {r["id"]: r for r in wapp._actions_db_recent(10)}
+    assert rows["fa0000000001"]["undo"] == run.undo
+    assert "undo" not in rows["fa0000000002"]
+    assert wapp._actions_db_get("fa0000000001")[0]["undo"] == run.undo
+    wapp.ACTIONS.clear()
+    wapp._actions_load_history()
+    assert wapp.ACTIONS["fa0000000001"].to_dict()["undo"] == run.undo
+    assert "undo" not in wapp.ACTIONS["fa0000000002"].to_dict()
+
+
+def test_actions_db_undo_column_is_additive(monkeypatch, tmp_path):
+    """Une base d'avant la colonne `undo` est migrée à chaud, sans réécriture."""
+    import sqlite3
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE actions (id TEXT PRIMARY KEY, action TEXT NOT NULL, cluster TEXT, "
+                 "status TEXT NOT NULL, exit_code INTEGER, started_at REAL NOT NULL, ended_at REAL, "
+                 "dry_run INTEGER DEFAULT 0, cmd TEXT, events TEXT, error_summary TEXT, result TEXT)")
+    conn.execute("INSERT INTO actions(id, action, status, started_at) VALUES ('old1', 'x', 'done', 1)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(wapp, "ACTIONS_DB", db)
+    wapp._actions_init_db()
+    assert [r["id"] for r in wapp._actions_db_recent(5)] == ["old1"]
+
+
+@pytest.mark.parametrize("source", ["memory", "history"])
+def test_undo_of_another_persons_action_says_whose_and_by_whom(world, call, monkeypatch, tmp_path, source):
+    """Revue M-4 : un opérateur peut annuler le geste d'un autre (règle
+    gardée) ; l'action d'annulation dit de qui était le geste et qui l'annule."""
+    conn = fdb.connect(world["db"])
+    fdb.record_move(conn, "act7", 0, "harvester/harv1/nav/a", "/Lab", "/Prod/ERP", "done")
+    conn.close()
+    first = wapp.ActionRun("act7", "folders:assign:/Prod/ERP", "folders",
+                           ["harvester-folders", "--as", "alice", "--role", "operator", "assign"])
+    first.status = "done"
+    if source == "memory":
+        wapp.ACTIONS["act7"] = first
+    else:
+        monkeypatch.setattr(wapp, "ACTIONS_DB", tmp_path / "a.db")
+        wapp._actions_init_db()
+        wapp._actions_persist(first)
+    r = call("patronne", "POST", "/api/folders/actions/act7/undo")
+    assert r.status_code == 202
+    cmd = script_cmd()
+    assert cmd[cmd.index("undo"):cmd.index("undo") + 5] == ["undo", "--action", "act7", "--of", "alice"]
+    run = wapp.ACTIONS[r.get_json()["action_id"]]
+    assert run.result == {"undoes": "act7", "of": "alice", "by": "patronne"}
+
+
 def test_write_back_sends_only_console_filings(world, call):
     r = call("alice", "POST", f"/api/folders/{fid(world, '/Prod')}/write-back")
     assert r.status_code == 202

@@ -359,7 +359,7 @@ console seulement, ou échouera (raison dite) ; les objets qui échoueraient
 sont laissés de côté. Ranger un hôte (depuis l'index des hôtes) propose
 **Ranger aussi ses N VMs**, décoché : un hôte ne range jamais ses VMs de
 lui-même. Chaque geste est une action suivie ; le dock propose **Annuler**
-à sa fin. Un lecteur voit les dossiers et leur contenu, chaque contrôle de
+à sa fin, et l'onglet Activité ensuite (grisé avec la raison pour un lecteur). Un lecteur voit les dossiers et leur contenu, chaque contrôle de
 rangement est grisé avec la raison, et les lignes ne se glissent pas.
 
 **Dossiers** (`#folders`, `#folders/<id>`, première entrée du menu latéral)
@@ -408,7 +408,11 @@ opérateur, la lecture est ouverte à tous.
 
 Chaque changement répond tout de suite `202 {"action_id"}` ; le dock montre
 l'action, et un rangement, un renommage, un déplacement, un vidage ou une
-annulation terminés proposent **Annuler** (`undo.path` dans l'action). Un
+annulation terminés proposent **Annuler** (`undo.path` dans l'action), dans
+le dock puis dans l'onglet Activité, aussi après un redémarrage de la console
+(`undo` gardé dans actions.db). Tout opérateur peut annuler le geste d'un
+autre ; l'annulation dit de qui était le geste et qui l'annule (première
+étape, et `result` `{"undoes", "of", "by"}`). Un
 domaine KVM est désigné par son UUID, que virsh accepte : un domaine renommé
 est retrouvé.
 

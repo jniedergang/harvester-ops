@@ -340,11 +340,7 @@ const Dock = (() => {
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
-          ${!isRunning && a.undo && a.undo.path
-            ? (canUndo()
-              ? `<button class="btn-mini dock-undo" data-undo="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`
-              : `<button class="btn-mini dock-undo" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`)
-            : ''}
+          ${!isRunning ? undoButton(a, 'data-undo') : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
@@ -365,20 +361,9 @@ const Dock = (() => {
       // 2.0.0 : une action réversible (dossiers) propose « Annuler » une fois
       // finie ; l'annulation est elle-même une action suivie
       const undoBtn = card.querySelector('[data-undo]');
-      if (undoBtn) undoBtn.addEventListener('click', async (e) => {
+      if (undoBtn) undoBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        undoBtn.disabled = true;
-        try {
-          const r = await fetch(a.undo.path, { method: 'POST' });
-          const d = await r.json().catch(() => ({}));
-          if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
-          document.dispatchEvent(new CustomEvent('hops:undo', { detail: { action: a.id, undo: d.action_id } }));
-          poll();
-        } catch (err) {
-          undoBtn.disabled = false;
-          undoBtn.title = tr('dock.undoFailed', `Undo failed: ${err.message}`, { error: err.message });
-          undoBtn.classList.add('dock-undo-failed');
-        }
+        undo(a, undoBtn);
       });
       card.querySelector('.toggle-details').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -438,6 +423,38 @@ const Dock = (() => {
   function canUndo() {
     const r = window.App && App.role ? App.role() : null;
     return r === 'operator' || r === 'admin' || r == null;
+  }
+
+  // Bouton « Annuler » d'une action finie qui porte `undo` (dock et onglet
+  // Activité, revue I-4) : grisé avec la raison pour un lecteur. `attr` :
+  // attribut qui le désigne dans la vue qui l'affiche.
+  function undoButton(a, attr) {
+    if (!a || !a.undo || !a.undo.path) return '';
+    const label = escapeHtml(tr('dock.undo', 'Undo'));
+    return canUndo()
+      ? `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${label}</button>`
+      : `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${label}</button>`;
+  }
+
+  // L'annulation est elle-même une action suivie : elle part de la route
+  // existante, apparaît au dock, et publie `hops:undo`.
+  async function undo(a, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(a.undo.path, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
+      document.dispatchEvent(new CustomEvent('hops:undo', { detail: { action: a.id, undo: d.action_id } }));
+      poll();
+      return d.action_id;
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.title = tr('dock.undoFailed', `Undo failed: ${err.message}`, { error: err.message });
+        btn.classList.add('dock-undo-failed');
+      }
+      return null;
+    }
   }
 
   function tr(key, fallback, vars) {
@@ -537,7 +554,7 @@ const Dock = (() => {
     });
   }
 
-  return { init, poll, isVisible, setVisible };
+  return { init, poll, isVisible, setVisible, undoButton, undo };
 })();
 
 document.addEventListener('DOMContentLoaded', Dock.init);

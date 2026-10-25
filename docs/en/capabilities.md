@@ -332,7 +332,8 @@ button: written on the object, kept by the console only, or will fail (the
 reason is said); objects that would fail are left out. Filing a host (from
 the hosts index) offers **Also file its N VMs**, unchecked: a host never
 files its VMs by itself. Each gesture is a tracked action; the dock offers
-**Undo** once it ends. A viewer sees the folders and their content, every
+**Undo** once it ends, and the Activity tab afterwards (greyed with the
+reason for a viewer). A viewer sees the folders and their content, every
 filing control is greyed with the reason, and rows are not draggable.
 
 **Folders** (`#folders`, `#folders/<id>`, first entry of the side menu)
@@ -380,7 +381,10 @@ role, reading is for everyone.
 
 Every change answers `202 {"action_id"}` at once; the dock shows the action,
 and a finished assign, rename, move, empty-into or undo offers **Undo**
-(`undo.path` in the action). A KVM domain is designated by its UUID, which
+(`undo.path` in the action), in the dock then in the Activity tab, also
+after a console restart (`undo` kept in actions.db). Any operator may undo
+another person's action; the undo says whose action it was and who undoes
+it (first step, and `result` `{"undoes", "of", "by"}`). A KVM domain is designated by its UUID, which
 virsh accepts, so a renamed domain is still found.
 
 `POST /api/folders/check` answers `{"objects": [{"key", "write", "outcome",

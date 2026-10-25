@@ -229,6 +229,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   read. Those objects are counted in one step ("2 other objects not shown
   to you"); the console sends only the person's own keys as `visible`.
 
+- **Undo from the Activity tab**: a finished folder action (assign, rename,
+  move, empty-into, undo) keeps its **Undo** button in Activity once the
+  dock card is gone, greyed with the reason for a viewer. What Undo needs is
+  kept in `actions.db` (additive `undo` column, applied at start without
+  rewriting rows), so it survives a console restart.
+- **Who undoes whose folder action is said**: any operator may still undo
+  another person's folder action; the undo action's first step and its
+  `result` (`undoes`, `of`, `by`) name the person who launched the original
+  and the one who undoes it.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
@@ -244,6 +254,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- Undo: kept through a console restart (`actions.db` column, migration of
+  an older base), Undo from Activity after the dock card is gone and greyed
+  for a viewer (e2e, with a deliberate mutation that offers it to a viewer),
+  the undo of another person's action naming both people, from memory and
+  from the history.
 - `tests/api/test_folders_masking_200.py`: rename, move, empty-into and
   undo of a folder holding a visible object, one in an unreadable namespace
   and one in a hidden cluster, table driven: no hidden key in the steps,

@@ -1452,6 +1452,7 @@ const App = (() => {
           duration: (a.ended_at && a.started_at) ? (a.ended_at - a.started_at) : null,
           dry_run: a.dry_run,
           error_summary: a.error_summary || null,
+          undo: a.undo || null,
         });
       });
       (data.log_files || []).forEach(f => {
@@ -1510,11 +1511,18 @@ const App = (() => {
             <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
             <td>${typeBadge}</td>
             <td>${escapeHtml(it.cluster)}</td>
-            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
+            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${
+              it.kind === 'action' && typeof Dock !== 'undefined' && Dock.undoButton ? ' ' + Dock.undoButton(it, 'data-act-undo') : ''}</td>
             <td>${statusBadge}</td>
             <td>${tsStr}</td>
             <td>${dur}</td>`;
           if (it.error_summary) tr.title = it.error_summary;
+          // revue I-4 : Annuler un geste de dossiers fini, bien après le dock
+          const undoBtn = tr.querySelector('[data-act-undo]');
+          if (undoBtn) undoBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (await Dock.undo(it, undoBtn)) refreshActivity();
+          });
           if (it.kind === 'log') {
             tr.addEventListener('click', () => showLogFile(it.filename));
           } else {
