@@ -52,6 +52,7 @@ def _setup(monkeypatch, kc, reads):
         return reads
     monkeypatch.setattr(wapp, "_kubectl_json", fake_json)
     monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: kc if c == "harv1" else None)
+    monkeypatch.setattr(wapp, "_cluster_reachable", lambda kc_, **k: True)
     return calls
 
 
@@ -80,6 +81,13 @@ def test_join_url_is_read_from_the_cluster(tmp_path, monkeypatch, case, server, 
     else:
         # la ConfigMap même de Harvester, rien d'autre
         assert calls == [("get", "configmap", "vip", "-n", "harvester-system")]
+
+
+def test_join_url_of_a_powered_off_cluster_says_so_without_kubectl(tmp_path, monkeypatch):
+    calls = _setup(monkeypatch, _kc(tmp_path, "https://172.16.3.11:6443"), VIP_CM)
+    monkeypatch.setattr(wapp, "_cluster_reachable", lambda kc_, **k: False)
+    assert wapp._cluster_join_url("harv1") == (None, "unreachable")
+    assert calls == []
 
 
 @pytest.mark.parametrize("kc", [None, "/nonexistent/kc.yaml"])

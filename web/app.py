@@ -4011,7 +4011,8 @@ def _cluster_join_url(cluster):
 
     Elle prépare une installation qui efface des disques : jamais devinée.
     Raison quand l'adresse manque : `unavailable` (pas de kubeconfig),
-    `proxied` (kubeconfig derrière un mandataire, Rancher), `vip-unreadable`."""
+    `proxied` (kubeconfig derrière un mandataire, Rancher), `unreachable`,
+    `vip-unreadable`."""
     kc = _kubectl_for_cluster(cluster)
     server = _kubeconfig_server(kc) if kc else None
     if not server:
@@ -4019,6 +4020,9 @@ def _cluster_join_url(cluster):
     from urllib.parse import urlparse
     if urlparse(server).path not in _DIRECT_SERVER_PATHS:
         return None, "proxied"
+    # cluster éteint : dit en deux secondes, sans attendre le délai de kubectl
+    if _cluster_reachable(kc) is False:
+        return None, "unreachable"
     vip = _cluster_vip(kc)
     if not vip:
         return None, "vip-unreadable"

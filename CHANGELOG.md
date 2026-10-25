@@ -42,8 +42,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Join a node never guesses the address.** `GET
   /api/clusters/<c>/join-url` reads the VIP from the cluster itself
   (Harvester's `harvester-system/vip` ConfigMap) when the join starts. It
-  answers null, with the reason, for a kubeconfig that goes through Rancher
-  or when the VIP cannot be read; the banner then asks for the address. The
+  answers null, with the reason, for a kubeconfig that goes through Rancher,
+  a cluster that does not answer (in two seconds) or a VIP that cannot be
+  read; the banner then asks for the address. The
   install window shows the address in an editable field and asks to confirm
   it before Install. The chosen cluster follows the install, so a cluster
   whose kubeconfig targets one node is still recognised by its VIP.
