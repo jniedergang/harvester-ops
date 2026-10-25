@@ -720,6 +720,7 @@ const Replication = (() => {
       f = nfield(tr('rp.notify.f.smtpHost'), `<input name="smtp_host" value="${v('smtp_host')}">`, tr('rp.notify.t.smtpHost'))
         + nfield(tr('rp.notify.f.smtpPort'), `<input name="smtp_port" type="number" min="1" max="65535" value="${v('smtp_port') || 587}">`, tr('rp.notify.t.smtpPort'))
         + `<label class="bk-check tip" data-tip="${esc(tr('rp.notify.t.starttls'))}"><input type="checkbox" name="starttls"${c.starttls !== false ? ' checked' : ''}> <span>STARTTLS</span></label>`
+        + `<label class="bk-check tip" data-tip="${esc(tr('rp.notify.t.implicitTls'))}"><input type="checkbox" name="implicit_tls"${c.implicit_tls ? ' checked' : ''}> <span>${esc(tr('rp.notify.f.implicitTls'))}</span></label>`
         + nfield(tr('rp.notify.f.username'), `<input name="username" value="${v('username')}" autocomplete="off">`, tr('rp.notify.t.username'))
         + secret('password', tr('rp.notify.f.password'), tr('rp.notify.t.password'))
         + nfield(tr('rp.notify.f.from'), `<input name="from" value="${v('from')}">`, tr('rp.notify.t.from'))
@@ -743,7 +744,9 @@ const Replication = (() => {
     if (c.kind === 'matrix') Object.assign(c, { homeserver: val('homeserver'), room: val('room'), token: val('token') });
     else if (c.kind === 'slack') c.url = val('url');
     else if (c.kind === 'email') {
-      Object.assign(c, { smtp_host: val('smtp_host'), smtp_port: Number(val('smtp_port') || 587), starttls: fs.querySelector('[name="starttls"]').checked,
+      Object.assign(c, { smtp_host: val('smtp_host'), smtp_port: Number(val('smtp_port') || 587), // TLS implicite l'emporte : les deux ensemble sont refusés par le serveur
+        starttls: fs.querySelector('[name="starttls"]').checked && !fs.querySelector('[name="implicit_tls"]').checked,
+        implicit_tls: fs.querySelector('[name="implicit_tls"]').checked,
         username: val('username'), password: val('password'), from: val('from'), to: val('to').split(',').map((x) => x.trim()).filter(Boolean) });
     } else {
       c.url = val('url');
