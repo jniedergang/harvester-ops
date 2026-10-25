@@ -145,11 +145,28 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Internal
+- **Folder registry and rules** (`bin/lib/folders.py`, pure, and
+  `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
+  and the journal of folder actions in `folders.db` (additive tables next to
+  the favourites). Names of 1 to 63 characters, 8 levels, 253 characters per
+  path, siblings with distinct names (also when two people create the same
+  folder at once), the object wins over the cache, no inheritance, plans for
+  rename, move and undo, delete refused while anything is filed inside
+  (objects the person cannot see are said, never counted), entries purged
+  after 30 days only once their cluster or host was read again.
 - Dead code of the 1.x menu removed: the Bare-metal and Terraform click
   listeners on automation menu tabs that no longer exist (the router
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/api/test_folders_model_200.py` (names and paths, one case per
+  rule, object keys, rebuild from the objects alone, object against cache,
+  three-level rename plan, move into its own subtree, undo with a conflict,
+  delete check that hides what others filed, and a deliberate mutation that
+  inherits the host folder) and `tests/api/test_folders_db_200.py` (additive
+  schema keeping the favourites, every refusal, two connections creating the
+  same sibling, realignment that writes only changes, purge at 29 and 31
+  days, an unreachable host keeping its entries, journal).
 - `tests/nav_inventory.py` (one table of every screen: old place, address,
   section, selector, old tokens), `tests/api/test_nav_inventory_200.py`
   (every section of the template reached, every address resolving to its

@@ -201,6 +201,51 @@ de `notes.db`, ou `HARVESTER_OPS_FOLDERS_DB`), retrouvés depuis un autre poste.
 Ce ne sont pas des actions suivies et il n'y a pas de ligne de commande : rien
 n'est écrit sur un cluster ou un hyperviseur.
 
+## Dossiers (2.0.0)
+
+Un dossier range des VMs (Harvester et KVM), des charges de conteneurs
+(Deployment, StatefulSet, DaemonSet, CronJob) et des hôtes. Un objet est dans
+un seul dossier, sans héritage : ranger un hôte ne range pas ses VMs.
+
+Le dossier d'un objet est écrit **sur l'objet**, qui fait foi :
+
+| Objet | Où | Clé dans le cache |
+|---|---|---|
+| VM Harvester, charge de conteneurs | annotation `harvester-ops.io/folder` (merge patch, `null` pour retirer) | `harvester/<cluster>/<ns>/<nom>`, `container/<cluster>/<ns>/<sorte>/<nom>` |
+| Domaine KVM | métadonnées libvirt `<hops:folder xmlns:hops="https://harvester-ops.io/xmlns/folder/1" path="..."/>` (`--config`, et `--live` s'il tourne) | `kvm/<uuid>` (un domaine renommé la garde) |
+| Hôte | champ `folder` de `clusters.d/<nom>.yaml` ou `kvm.d/<nom>.yaml` | `host/harvester/<nom>`, `host/kvm/<nom>` |
+
+La base de la console `folders.db` garde l'arborescence (`folders` :
+identifiant, parent, nom, position, auteur, `origin` = `console`, ou
+`objects` pour un dossier recréé depuis les objets qui le nomment), un cache
+des rangements (`memberships` : clé, chemin, `source` = `vm` lu sur l'objet
+ou `console` quand la personne n'a pas le droit d'écrire l'objet, `seen_at`,
+`scope` = la lecture qui l'a vu) et le journal de chaque action sur les
+dossiers (`moves`, une ligne par objet : reprise d'une action interrompue,
+Annuler). Un chemin est absolu, de 8 niveaux et 253 caractères au plus ; un
+nom a de 1 à 63 caractères, sans `/` ni caractère de contrôle, et n'est ni
+`.` ni `..`. Deux frères ne portent jamais le même nom.
+
+Chaque lecture de flotte réaligne le cache : une valeur sur l'objet
+l'emporte et crée les dossiers qu'elle nomme ; un objet sans valeur garde un
+rangement `console` et perd un rangement `vm` (quelqu'un l'a retiré sur
+l'objet). Cette écriture se fait pendant une lecture, sans action suivie :
+c'est l'exception documentée, puisqu'elle ne fait que recopier ce que disent
+les objets. Une entrée non vue depuis 30 jours est retirée, mais seulement
+après une lecture réussie de son cluster ou de son hôte : un hôte injoignable
+garde ses entrées.
+
+Les dossiers KVM sont lus par une seule invocation de `virsh` par hôte, qui
+enchaîne les lectures `metadata` de tous les domaines, dans un second appel
+SSH sur la même connexion. Mesuré sur un hôte de 15 domaines (libvirt
+12.8.0) : l'inventaire seul prend 1,7 s, 0,3 s de plus avec cette lecture,
+contre 2,7 s de plus pour une commande `virsh metadata` par domaine et 2,9 s
+de plus pour un `dumpxml` par domaine. Une erreur de virsh autre que « pas de
+métadonnées » fait relire l'hôte domaine par domaine : un échec n'est jamais
+pris pour « pas de dossier ».
+
+Toute modification passe par `bin/harvester-folders.py` (voir Capacités).
+
 ## Flux d'événements SSE
 
 Quand la console déclenche une action (un shutdown ici) :

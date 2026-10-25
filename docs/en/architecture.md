@@ -194,6 +194,49 @@ password), stored per person in the console database `folders.db` (next to
 computer. They are not tracked actions and have no command line: nothing is
 written on a cluster or a hypervisor.
 
+## Folders (2.0.0)
+
+A folder files VMs (Harvester and KVM), container workloads (Deployment,
+StatefulSet, DaemonSet, CronJob) and hosts. An object is in one folder only,
+and nothing is inherited: filing a host does not file its VMs.
+
+The folder of an object is written **on the object**, which is the source
+of truth:
+
+| Object | Where | Key in the cache |
+|---|---|---|
+| Harvester VM, container workload | annotation `harvester-ops.io/folder` (merge patch, `null` to remove) | `harvester/<cluster>/<ns>/<name>`, `container/<cluster>/<ns>/<kind>/<name>` |
+| KVM domain | libvirt metadata `<hops:folder xmlns:hops="https://harvester-ops.io/xmlns/folder/1" path="..."/>` (`--config`, and `--live` when it runs) | `kvm/<uuid>` (a renamed domain keeps it) |
+| Host | `folder` field of `clusters.d/<name>.yaml` or `kvm.d/<name>.yaml` | `host/harvester/<name>`, `host/kvm/<name>` |
+
+The console database `folders.db` keeps the tree (`folders`: id, parent,
+name, position, creator, `origin` = `console` or `objects` when a folder was
+rebuilt from the objects that name it), a cache of the memberships
+(`memberships`: key, path, `source` = `vm` read on the object or `console`
+when the person may not write the object, `seen_at`, `scope` = the read that
+saw it) and the journal of each folder action (`moves`, one line per object:
+resume of an interrupted action, Undo). A path is absolute, 8 levels and 253
+characters at most; a name has 1 to 63 characters, no `/`, no control
+character, and is neither `.` nor `..`. Two siblings never share a name.
+
+Every fleet read realigns the cache: a value on the object wins and creates
+the folders it names; an object without a value keeps a `console` filing and
+loses a `vm` one (someone removed it on the object). This write happens
+during a read, without a tracked action: it is the documented exception, as
+it only mirrors what the objects say. An entry not seen for 30 days is
+removed, but only after a successful read of its cluster or host: an
+unreachable host keeps its entries.
+
+KVM folders are read with one `virsh` invocation per host that chains the
+`metadata` reads of every domain, in a second SSH call over the same
+connection. Measured on a host with 15 domains (libvirt 12.8.0): the
+inventory alone takes 1.7 s, plus 0.3 s with this read, against plus 2.7 s
+for one `virsh metadata` command per domain and plus 2.9 s for one
+`dumpxml` per domain. A virsh error other than "no metadata" makes the host
+read again domain by domain, so a failure is never taken for "no folder".
+
+Every change goes through `bin/harvester-folders.py` (see Capabilities).
+
 ## SSE event stream
 
 When the console triggers any action (a shutdown here):
