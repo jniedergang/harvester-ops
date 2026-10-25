@@ -388,6 +388,33 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   read. Those objects are counted in one step ("2 other objects not shown
   to you"); the console sends only the person's own keys as `visible`.
 
+### Rolling back to 1.101.x
+- **How**: stage the signed 1.101.x archive and call `POST /api/update/apply`
+  with `"allow_older": true` (the update window does not offer an older
+  release). The host agent checks the signature, keeps the files and image
+  of 2.0.0 and installs 1.101.x like an update. Checked on a packaged
+  install: 2.0.0 to 1.101.3, then back to 2.0.0.
+- **Kept, and found again when you update to 2.0.0**: folders, favourites
+  and the folder journal (`folders.db`, which 1.101.x ignores); the folder
+  written on the objects (annotation `harvester-ops.io/folder` on VMs and
+  workloads, libvirt metadata on KVM domains), which 1.101.x neither reads
+  nor removes; the `folder` field of KVM host declarations (`kvm.d`), since
+  1.101.x cannot edit them; the history in `actions.db`, read and written
+  normally by 1.101.x with its added `undo` column. Undo of a folder action
+  comes back with 2.0.0.
+- **Lost**: editing a cluster in Settings under 1.101.x rewrites its
+  declaration in `clusters.d` without the `folder` field, so that host is
+  unfiled back on 2.0.0 (file it again). Removing and declaring a host
+  again, or recreating a VM, under 1.101.x also loses its folder.
+- **Not available under 1.101.x**: the hosts menu, host pages, folders,
+  the Virtual machines view with folders and the Disaster Recovery
+  placement. 1.101.x has no addresses: a 2.0.0 link or bookmark opens its
+  default screen. The `harvester-folders` command stays installed on the
+  host. The fix of fleet reads shared across identities (see Security) is
+  not in 1.101.x.
+- A browser that already opened 2.0.0 does not reopen the last 1.x screen
+  again after a new update; an empty address opens `#vms`.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
