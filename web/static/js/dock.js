@@ -340,7 +340,7 @@ const Dock = (() => {
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
-          ${!isRunning ? undoButton(a, 'data-undo') : ''}
+          ${!isRunning ? undoButton(a, 'data-undo') + resumeButton(a, 'data-resume') : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
@@ -360,6 +360,8 @@ const Dock = (() => {
       });
       // 2.0.0 : une action réversible (dossiers) propose « Annuler » une fois
       // finie ; l'annulation est elle-même une action suivie
+      const resumeBtn = card.querySelector('[data-resume]');
+      if (resumeBtn) resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); resume(a, resumeBtn); });
       const undoBtn = card.querySelector('[data-undo]');
       if (undoBtn) undoBtn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -434,6 +436,30 @@ const Dock = (() => {
     return canUndo()
       ? `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${label}</button>`
       : `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${label}</button>`;
+  }
+
+  // 2.0.0 : une action de dossiers arrêtée (erreur, arrêt de la console)
+  // propose « Reprendre » ; le serveur décide (champ `resume`), la reprise
+  // est une action suivie qui ne réécrit jamais une ligne faite
+  function resumeButton(a, attr) {
+    if (!a || !a.resume || !a.resume.path) return '';
+    const label = escapeHtml(tr('dock.resume', 'Resume'));
+    return canUndo()
+      ? ` <button class="btn-mini dock-resume" ${attr}="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.resumeTip', 'Finish the objects this action did not reach'))}">${label}</button>`
+      : ` <button class="btn-mini dock-resume" ${attr}="${escapeHtml(a.id)}" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${label}</button>`;
+  }
+  async function resume(a, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(a.resume.path, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
+      poll();
+      return d.action_id;
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.title = tr('dock.resumeFailed', `Resume failed: ${err.message}`, { error: err.message }); }
+      return null;
+    }
   }
 
   // L'annulation est elle-même une action suivie : elle part de la route
@@ -554,7 +580,7 @@ const Dock = (() => {
     });
   }
 
-  return { init, poll, isVisible, setVisible, undoButton, undo };
+  return { init, poll, isVisible, setVisible, undoButton, undo, resumeButton, resume };
 })();
 
 document.addEventListener('DOMContentLoaded', Dock.init);

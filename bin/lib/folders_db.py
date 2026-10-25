@@ -107,10 +107,13 @@ def connect(path=None):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.executescript(SCHEMA)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    # le journal WAL et sa mémoire partagée suivent le umask : mêmes droits
+    # que la base (ils portent les mêmes lignes)
+    for f in (path, Path(f"{path}-wal"), Path(f"{path}-shm")):
+        try:
+            os.chmod(f, 0o600)
+        except OSError:
+            pass
     return conn
 
 

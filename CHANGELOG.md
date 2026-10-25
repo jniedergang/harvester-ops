@@ -175,6 +175,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (it opened Activity unfiltered); changing a filter gives back
   `#activity`.
 
+- **Resume a stopped folder action from the dock or Activity.** A folder
+  action that ended in error or was stopped by the console shutdown carries
+  a `resume` path decided by the server (`_folder_resume`); **Resume**
+  finishes only the objects it did not reach (`POST
+  /api/folders/actions/<id>/resume`, a tracked action, operator role,
+  greyed for a viewer). The resume of a resume targets the original action.
+
 ### Changed
 - **The 1.x menu is removed**: no more cluster selector, `+` button or
   per-cluster groups (Cluster, Virtual machines, Containers, Shared
@@ -293,6 +300,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   same reading as `resume`) and `_repl_resume_role`; the button is greyed
   with the role it needs, and no longer appears when nothing is
   interrupted (a measure still running).
+
+- **The `/` shortcut no longer moves the focus behind an open window**: the
+  host search kept taking the key while a modal was open.
+- **`folders.db` journal files are private**: the `-wal` and `-shm` files
+  followed the umask; they now get 0600 like the database.
 
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and

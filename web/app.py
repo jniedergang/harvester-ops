@@ -1656,6 +1656,7 @@ class ActionRun:
             "cancel_requested": self.cancel_requested,
             # 2.0.0 : seulement pour une action qui sait s'annuler (dossiers)
             **({"undo": dict(self.undo)} if self.undo else {}),
+            **_folder_resume(self.action, self.status, self.id),
         }
 
 
@@ -1882,6 +1883,20 @@ _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "result", "undo")
 
 
+_FOLDER_RESUMABLE = ("error", "interrupted")
+
+
+def _folder_resume(action, status, action_id):
+    """2.0.0 : {"resume": {"path": ...}} pour une action de dossiers arrêtée
+    (erreur ou arrêt de la console), {} sinon. La reprise d'une reprise vise
+    l'action d'origine (`folders:resume:<id>`) : ses lignes sont les seules
+    rangées. La route dit 404 quand il ne reste rien à reprendre."""
+    if status not in _FOLDER_RESUMABLE or not str(action or "").startswith("folders:"):
+        return {}
+    target = action.split(":", 2)[2] if action.startswith("folders:resume:") else action_id
+    return {"resume": {"path": f"/api/folders/actions/{target}/resume"}}
+
+
 def _row_finish(d):
     """Champs relus d'une ligne : booléen, résultat, et `undo` seulement s'il
     est posé (comme ActionRun.to_dict)."""
@@ -1890,6 +1905,7 @@ def _row_finish(d):
     undo = _row_undo(d.pop("undo", None))
     if undo:
         d["undo"] = undo
+    d.update(_folder_resume(d.get("action"), d.get("status"), d.get("id")))
     return d
 
 

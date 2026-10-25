@@ -481,6 +481,27 @@ def test_undo_in_activity_is_greyed_for_a_viewer(world):
     assert [s for s in state["sent"] if s[0] != "GET"] == []
 
 
+def test_resume_an_interrupted_folder_action_from_activity(world):
+    """2.0.0 : une action de dossiers arrêtée porte `resume` (décidé par le
+    serveur) ; « Reprendre » part de la route de reprise, un lecteur le voit
+    grisé, une action finie n'en a pas."""
+    go, page, state = world
+    stopped = dict(_old_action("fa0000000070", "move:/Prod", False), status="interrupted",
+                   resume={"path": "/api/folders/actions/fa0000000070/resume"})
+    state["actions"] += [stopped, _old_action("fa0000000071", "rename:/X")]
+    go("#activity", tree=False)
+    btn = page.locator("#activity-history tbody tr", has_text="folders:move:/Prod").locator("[data-act-resume]")
+    expect(btn).to_be_enabled(timeout=8000)
+    expect(btn).to_have_attribute("title", re.compile("did not reach"))
+    expect(page.locator("#activity-history tbody tr", has_text="folders:rename:/X")
+           .locator("[data-act-resume]")).to_have_count(0)
+    btn.click()
+    page.wait_for_timeout(500)
+    assert ("POST", "/api/folders/actions/fa0000000070/resume", None) in [s[:3] for s in state["sent"]]
+    expect(page.locator("#fp-activity-detail")).to_have_count(0)
+    assert state["errors"] == []
+
+
 RENDER_MS = """() => new Promise((res) => { const t = performance.now();
   document.dispatchEvent(new CustomEvent('hops:folders'));
   requestAnimationFrame(() => requestAnimationFrame(() => res(performance.now() - t))); })"""

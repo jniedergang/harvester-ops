@@ -750,3 +750,25 @@ def test_tree_of_2000_folders_with_2000_objects_reads_fast(world, call, monkeypa
     assert len(tree) >= 2041 and tree["/Big"]["counts"]["vms"] == 2000 and tree["/Big/G0"]["counts"]["vms"] == 50
     print(f"GET /api/folders, {len(tree)} folders, 2000 objects: {took:.3f}s")
     assert took < 5
+
+
+@pytest.mark.parametrize("action,status,expect", [
+    ("folders:move:/Prod", "interrupted", "/api/folders/actions/AID/resume"),
+    ("folders:assign:/Prod", "error", "/api/folders/actions/AID/resume"),
+    ("folders:rename:/X", "done", None),
+    ("folders:rename:/X", "running", None),
+    ("folders:resume:fa0000000001", "error", "/api/folders/actions/fa0000000001/resume"),   # vise l'origine
+    ("vm-start", "error", None),
+    (None, "error", None),
+])
+def test_stopped_folder_actions_carry_their_resume_path(action, status, expect):
+    """2.0.0 : le serveur dit qu'une action de dossiers se reprend (dock et
+    Activité n'ont aucune règle d'état), en mémoire comme relue de la base."""
+    got = wapp._folder_resume(action, status, "AID")
+    assert got == ({"resume": {"path": expect}} if expect else {})
+    row = wapp._row_finish({"id": "AID", "action": action, "status": status, "dry_run": 0, "result": None,
+                            "undo": None})
+    assert row.get("resume") == got.get("resume")
+    run = wapp.ActionRun("AID", action or "", "folders", ["x"])
+    run.status = status
+    assert run.to_dict().get("resume") == got.get("resume")

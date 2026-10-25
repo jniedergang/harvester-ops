@@ -170,6 +170,15 @@ def test_coming_back_to_the_overview_shows_the_current_cluster(
     assert all(two_clusters in c for c in topo), (
         f"topologie demandée pour le mauvais cluster : {topo}")
 
+    # 2.0.0 : le bloc Événements de la Vue d'ensemble se remonte pour le
+    # nouvel hôte (il remplace l'ancien onglet Événements)
+    calls.clear()
+    page.evaluate(f"location.hash = '#harvester/{two_clusters}'")
+    page.wait_for_timeout(2000)
+    evs = [c for c in calls if "/api/events/" in c]
+    assert evs, "le bloc Événements n'est pas rechargé sur la Vue d'ensemble"
+    assert all(f"/api/events/{two_clusters}" in c for c in evs), f"événements du mauvais cluster : {evs}"
+
 
 def test_leaving_the_overview_stops_polling_the_cluster(
         context, flask_server):

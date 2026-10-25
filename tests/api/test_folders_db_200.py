@@ -222,3 +222,21 @@ def test_realign_of_2000_folders_stays_fast(conn):
     assert len(fdb.list_tree(conn)) == 2001
     print(f"realign 2000 folders: first {first:.3f}s, unchanged {again:.3f}s")
     assert first < 10 and again < 5
+
+
+def test_database_and_its_wal_files_are_private(tmp_path):
+    """La base, son journal WAL et sa mémoire partagée : 0600 quel que soit
+    le umask (ils portent les mêmes lignes)."""
+    import os
+    old = os.umask(0o022)
+    try:
+        c = fdb.connect(tmp_path / "f.db")
+        c.execute("INSERT INTO favorites VALUES ('u', 'harvester/a', 'now')")
+        c2 = fdb.connect(tmp_path / "f.db")        # second ouvreur : les fichiers WAL existent
+        for name in ("f.db", "f.db-wal", "f.db-shm"):
+            assert (tmp_path / name).exists(), name
+            assert (tmp_path / name).stat().st_mode & 0o777 == 0o600, name
+        c.close()
+        c2.close()
+    finally:
+        os.umask(old)

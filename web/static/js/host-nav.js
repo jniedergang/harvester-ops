@@ -406,6 +406,8 @@
       if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey) return;
       const t = e.target;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
+      // une fenêtre ouverte garde le clavier : pas de focus derrière son calque
+      if (document.querySelector('.modal-overlay.active')) return;
       e.preventDefault();
       focusSearch();
     });

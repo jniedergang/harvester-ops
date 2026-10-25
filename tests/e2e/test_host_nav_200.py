@@ -151,6 +151,20 @@ def test_slash_focuses_the_search_and_enter_opens_the_first_host(menu):
     assert page.input_value("#hnav-q") == "/"
 
 
+def test_slash_does_nothing_while_a_window_is_open(menu):
+    """Une fenêtre ouverte garde le clavier : « / » ne déplace pas le focus
+    derrière son calque (mutation : retirer la garde dans host-nav.js)."""
+    page, _, _ = menu
+    page.evaluate("""() => { const m = document.querySelector('.modal-overlay');
+        m.classList.add('active'); m.setAttribute('tabindex', '-1'); m.focus(); }""")
+    page.keyboard.press("/")
+    expect(page.locator("#hnav-q")).not_to_be_focused()
+    page.evaluate("document.querySelector('.modal-overlay.active').classList.remove('active')")
+    page.locator("#tab-overview h1").click()
+    page.keyboard.press("/")
+    expect(page.locator("#hnav-q")).to_be_focused()
+
+
 def test_star_is_saved_by_the_console_and_found_again(menu):
     page, state, _ = menu
     star = page.locator('[data-star="harvester/harv-site-05"]')

@@ -121,3 +121,39 @@ def test_no_code_listens_to_a_removed_menu_element():
     css = (ROOT / "web/static/css/style.css").read_text(encoding="utf-8")
     assert ".cluster-selector" not in css
     assert not any("cluster-selector" in src for src in js.values())
+
+
+PANES_RUNNER = r"""
+global.window = global;
+global.document = { addEventListener() {} };
+require('./web/static/js/sections.js');
+const Routes = require('./web/static/js/routes.js');
+const Router = require('./web/static/js/router.js');
+const IMPORTS = ['vmimport', 'forklift'];
+const out = [];
+for (const [sec, spec] of Object.entries(window.Sections.DEF)) {
+  for (const pane of Object.keys(spec.panes)) {
+    const h = IMPORTS.includes(sec) ? `#harvester/c1/imports/${sec}/${pane}` : `#harvester/c1/params/${sec}/${pane}`;
+    const t = Router.resolve(Routes.parse(h));
+    const back = t ? Routes.format(Routes.parse(h)) : null;
+    out.push([sec, pane, h, t ? t.tab : null, t ? t.pane : null, back]);
+  }
+}
+console.log(JSON.stringify(out));
+"""
+
+
+def test_every_pane_of_every_section_has_its_own_address():
+    """L'inventaire nomme un pane par section ; ici chaque pane de
+    `Sections.DEF` a son adresse, qui se résout vers sa section ET ce pane,
+    et s'écrit à l'identique (perdre l'adresse d'un seul pane, `network/lbs`
+    par exemple, est vu)."""
+    try:
+        r = subprocess.run(["node", "-e", PANES_RUNNER], capture_output=True, text=True, cwd=str(ROOT), timeout=30)
+    except FileNotFoundError:
+        pytest.skip("node absent")
+    assert r.returncode == 0, r.stderr
+    rows = json.loads(r.stdout)
+    assert len(rows) >= 30
+    bad = [row for row in rows if row[3] != row[0] or row[4] != row[1] or row[5] != row[2]]
+    assert bad == [], bad
