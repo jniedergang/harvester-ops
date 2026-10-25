@@ -307,7 +307,15 @@ namespace, state, CPU, memory, IP, node and folder, with a **console**
 badge when only the console knows the filing (the person may not write the
 object) and a **DR** badge linking to the replication contract that holds
 the VM. Source chips, state, namespace and text filters and the column sort
-are kept from 1.85. The row menu follows the family: the Harvester VM menu,
+are kept from 1.85. The table draws the first 300 rows of the filtered and
+sorted list; **Show 300 more** adds the next ones. The selection, **Select
+all** and dragging act on the whole filtered list, not only on the rows
+drawn. The text filter applies 150 ms after the last key, and a refresh that
+brings the same list redraws nothing (only the rows that changed are
+redrawn otherwise). Measured in headless Chromium: with 2,000 VMs a render
+without change takes about 0.1 s and a full redraw (new sort) about 0.6 s;
+with 10,000 VMs about 0.15 s and 0.9 s (before, 3.6 s for every refresh
+and every key at 2,000). The row menu follows the family: the Harvester VM menu,
 or for a KVM VM the console, snapshots, clone, delete and **Open on its
 host** (start and stop are on the host page). Start, stop, restart, force
 stop and migrate of a selection apply to its Harvester VMs.

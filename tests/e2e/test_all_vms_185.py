@@ -119,6 +119,7 @@ def test_filters_by_cluster_state_namespace_and_text_and_remembers_them(view):
     assert names(rows) == ["db"]
     page.select_option('[data-avm="ns"]', "")
     page.fill('[data-avm="text"]', "10.0.0.11")
+    expect(rows).to_have_count(1)            # 2.0.0 : la recherche attend 150 ms
     assert names(rows) == ["web-1"]
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("window.AllVMs")

@@ -239,6 +239,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `result` (`undoes`, `of`, `by`) name the person who launched the original
   and the one who undoes it.
 
+- **The Virtual machines view holds large fleets**: it draws the first 300
+  rows with **Show 300 more**, applies the text filter 150 ms after typing,
+  redraws nothing on a refresh that brings the same list and only the rows
+  that changed otherwise. Selection, Select all and dragging still act on
+  the whole filtered list. At 2,000 VMs a full redraw went from 3.6 s on
+  every refresh and every key to about 0.6 s (0.1 s without change); 10,000
+  VMs measured at about 0.9 s.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
@@ -254,6 +262,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/e2e/test_folders_200.py`: 5,000 simulated VMs (300 rows drawn, Show
+  300 more appends, Select all selects the filtered 5,000, one update after
+  typing, an unchanged refresh redraws nothing, a changed one does) with
+  deliberate mutations (no debounce, no page); render and refresh times
+  measured at 2,000 and 10,000 VMs.
 - Undo: kept through a console restart (`actions.db` column, migration of
   an older base), Undo from Activity after the dock card is gone and greyed
   for a viewer (e2e, with a deliberate mutation that offers it to a viewer),

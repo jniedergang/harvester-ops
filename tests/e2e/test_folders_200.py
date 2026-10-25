@@ -401,7 +401,7 @@ def test_panel_with_2000_folders_recreated_from_objects_stays_fast(world):
     state["vms"] = [hvm(f"vm{i}", folder=f"/G{i % 40}/F{i % 1960}") for i in range(2000)]
     t0 = time.time()
     go("#vms")
-    expect(page.locator("#all-vms-host tbody tr[data-avm-row]")).to_have_count(2000, timeout=30000)
+    expect(page.locator("#all-vms-host tbody tr[data-avm-row]")).to_have_count(300, timeout=30000)   # revue I-3
     expect(page.locator("#all-vms-host .fld-node[data-fld-id]")).to_have_count(2000)
     load = time.time() - t0
     ms = page.evaluate("""() => {
@@ -460,3 +460,82 @@ def test_undo_in_activity_is_greyed_for_a_viewer(world):
     expect(btn).to_be_disabled(timeout=8000)
     expect(btn).to_have_attribute("title", re.compile("operator role"))
     assert [s for s in state["sent"] if s[0] != "GET"] == []
+
+
+RENDER_MS = """() => new Promise((res) => { const t = performance.now();
+  document.dispatchEvent(new CustomEvent('hops:folders'));
+  requestAnimationFrame(() => requestAnimationFrame(() => res(performance.now() - t))); })"""
+FULL_MS = """(col) => new Promise((res) => { const t = performance.now();
+  document.querySelector(`#all-vms-host [data-avm-sort="${col}"]`).click();
+  requestAnimationFrame(() => requestAnimationFrame(() => res(performance.now() - t))); })"""
+REFRESH_MS = """async () => { const t = performance.now(); await AllVMs.load();
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  return performance.now() - t; }"""
+
+
+def test_5000_vms_show_the_first_300_then_more_and_act_on_the_filtered_set(world):
+    """Revue I-3 : la vue d'accueil ne dessine que 300 lignes, « Show 300
+    more » en ajoute, la sélection et « tout cocher » portent sur l'ensemble
+    filtré (des clés, pas des lignes du DOM), la recherche attend 150 ms et
+    une relecture sans changement ne redessine rien."""
+    go, page, state = world
+    state["vms"] = [hvm(f"vm{i:05d}", ns=f"ns{i % 7}") for i in range(5000)]
+    go("#vms")
+    expect(rows(page)).to_have_count(300, timeout=30000)
+    ms = page.evaluate(RENDER_MS)
+    full = page.evaluate(FULL_MS, "namespace")
+    print(f"5000 VMs: render without change {ms:.0f} ms, full redraw (new sort) {full:.0f} ms")
+    # bornes larges (suite en parallèle) : la garde est le nombre de lignes
+    # dessinées ; les temps mesurés seul sont au rapport de la revue
+    assert ms < 800 and full < 1500
+    page.locator('#all-vms-host [data-avm-sort="name"]').click()
+    more = page.locator('#all-vms-host [data-avm="more"]')
+    expect(more).to_be_visible()
+    expect(more).to_contain_text("300 more")
+    expect(more).to_have_attribute("title", re.compile("."))
+    first = rows(page).first.get_attribute("data-avm-row")
+    more.click()
+    expect(rows(page)).to_have_count(600)
+    assert rows(page).first.get_attribute("data-avm-row") == first
+    # « tout cocher » coche l'ensemble filtré, pas les 600 lignes dessinées
+    page.locator('#all-vms-host [data-avm="all"]').check()
+    expect(page.locator('#all-vms-host [data-avm="selcount"]')).to_contain_text("5000")
+    page.locator('#all-vms-host [data-avm-bulk="clear"]').click()
+    # recherche : une seule mise à jour après la frappe
+    page.evaluate("""() => { window.__mut = 0; new MutationObserver(() => { window.__mut += 1; })
+      .observe(document.querySelector('#all-vms-host tbody'), { childList: true }); }""")
+    page.locator('#all-vms-host [data-avm="text"]').press_sequentially("vm0001", delay=20)
+    expect(rows(page)).to_have_count(10)
+    page.wait_for_timeout(300)
+    assert page.evaluate("window.__mut") == 1
+    expect(more).to_be_hidden()
+    page.locator('#all-vms-host [data-avm="text"]').fill("")
+    expect(rows(page)).to_have_count(300)
+    # relecture identique : rien n'est redessiné ; une VM changée : redessin
+    page.evaluate("document.querySelector('#all-vms-host tbody tr').dataset.mark = '1'")
+    page.evaluate(REFRESH_MS)
+    assert page.evaluate("!!document.querySelector('#all-vms-host tbody tr[data-mark]')")
+    state["vms"][0]["phase"] = "Stopped"
+    page.evaluate(REFRESH_MS)
+    assert not page.evaluate("!!document.querySelector('#all-vms-host tbody tr[data-mark]')")
+    assert state["errors"] == []
+
+
+@pytest.mark.parametrize("n", [2000, 10000])
+def test_vms_view_scale_measured(world, n):
+    """Mesures du rapport (revue I-3) : rendu, relecture identique, relecture
+    changée, à 2 000 et 10 000 VMs."""
+    go, page, state = world
+    state["vms"] = [hvm(f"vm{i:05d}", ns=f"ns{i % 7}", folder="/Prod" if i % 3 else None) for i in range(n)]
+    t0 = time.time()
+    go("#vms")
+    expect(rows(page)).to_have_count(300, timeout=60000)
+    ready = time.time() - t0
+    render = page.evaluate(RENDER_MS)
+    full = page.evaluate(FULL_MS, "namespace")
+    same = page.evaluate(REFRESH_MS)
+    state["vms"][0]["phase"] = "Stopped"
+    changed = page.evaluate(REFRESH_MS)
+    print(f"{n} VMs: page ready {ready:.1f}s, render without change {render:.0f} ms, full redraw {full:.0f} ms, "
+          f"unchanged refresh {same:.0f} ms, changed refresh {changed:.0f} ms")
+    assert render < 800 and full < 1500 and changed < 2500

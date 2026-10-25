@@ -5813,3 +5813,8 @@ body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibi
 .fld-win { padding: 10px 14px; }
 .vmf-main .avm-table { min-width: 100%; }
 .vmf-main { overflow-x: auto; }
+
+/* 2.0.0 (revue I-3) : avec les bulles en calque (tooltips.js, body.js-tips),
+   les porteurs de bulle du tableau des VMs n'ont pas besoin d'être des
+   blocs positionnés ; mesuré à 300 lignes, le rendu y gagne ~150 ms. */
+body.js-tips .avm-table tbody .tip { position: static; }

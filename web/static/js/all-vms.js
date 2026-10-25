@@ -28,6 +28,11 @@ const AllVMs = (() => {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const icon = (n, size = 14) => (window.Icons ? Icons.svg(n, { size }) : '');
   const REFRESH_MS = 15000;
+  // revue I-3 : la vue d'accueil ne dessine que les PAGE premières lignes de
+  // la liste filtrée et triée (« Show 300 more » en ajoute) ; la sélection,
+  // « tout cocher » et le glisser portent sur des clés, pas sur le DOM
+  const PAGE = 300;
+  const SEARCH_MS = 150;
   const STORE = 'harvester_ops_allvms';
   const PANEL_STORE = 'harvester_ops_vms_panel';
   const KINDS = ['harvester', 'kvm'];
@@ -39,6 +44,11 @@ const AllVMs = (() => {
   let builtLang = '';                   // langue du squelette (il porte des libellés)
   let scope = { id: null, kind: null, host: null };
   let dr = null;                        // { uid -> id du contrat }, lu une fois
+  let limit = PAGE;                     // lignes dessinées
+  let listKey = '';                     // filtres + tri + périmètre du dernier rendu
+  let lastRaw = null;                   // corps de la dernière lecture (relecture identique : rien)
+  let searchTimer = null;
+  let drawn = { keys: [], html: [] };   // lignes dessinées (clé, HTML) : seules celles qui changent sont refaites
   const selection = new Set();          // clés des lignes (`key`)
   const prefs = { clusters: [], phase: '', ns: '', text: '', sort: 'name', dir: 'asc' };
 
@@ -206,6 +216,7 @@ const AllVMs = (() => {
         </tr></thead>
         <tbody></tbody>
       </table>
+      <p class="avm-more"><button type="button" class="btn btn-sm btn-secondary tip" data-avm="more" hidden></button></p>
       <p class="hint avm-empty" data-avm="empty" hidden></p>
       <p class="hint vmf-viewer" data-avm="viewer" hidden></p>
       <pre class="live-log avm-log" data-avm="log" hidden></pre>
@@ -215,7 +226,14 @@ const AllVMs = (() => {
     q('[data-avm="text"]').value = prefs.text;
     q('[data-avm="phase"]').addEventListener('change', (e) => { prefs.phase = e.target.value; savePrefs(); render(); });
     q('[data-avm="ns"]').addEventListener('change', (e) => { prefs.ns = e.target.value; savePrefs(); render(); });
-    q('[data-avm="text"]').addEventListener('input', (e) => { prefs.text = e.target.value; savePrefs(); render(); });
+    // la recherche attend la fin de la frappe : un rendu par lettre figeait la vue
+    q('[data-avm="text"]').addEventListener('input', (e) => {
+      prefs.text = e.target.value;
+      savePrefs();
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(render, SEARCH_MS);
+    });
+    q('[data-avm="more"]').addEventListener('click', showMore);
     q('[data-avm="refresh"]').addEventListener('click', () => load({ fresh: true }));
     q('[data-avm="all"]').addEventListener('change', (e) => {
       for (const v of visible()) { if (e.target.checked) selection.add(keyOf(v)); else selection.delete(keyOf(v)); }
@@ -378,7 +396,7 @@ const AllVMs = (() => {
       </td></tr>`;
   }
 
-  function renderBulk() {
+  function renderBulk(vis = visible()) {
     const bar = host.querySelector('[data-avm="bulk"]');
     // une VM sortie de la liste (supprimée, source éteinte) quitte la sélection
     const known = new Set((data ? data.vms : []).map(keyOf));
@@ -390,7 +408,6 @@ const AllVMs = (() => {
       tr('avm.selected', { n: selection.size, c: sources.size });
     const fb = host.querySelector('[data-avm="bulkfolder"]');
     if (window.Folders) fb.innerHTML = Folders.moveButton('data-avm-move="1"', tr('fld.move'));
-    const vis = visible();
     const all = host.querySelector('[data-avm="all"]');
     all.checked = vis.length > 0 && vis.every((v) => selection.has(keyOf(v)));
   }
@@ -403,10 +420,10 @@ const AllVMs = (() => {
     renderNamespaces();
     const rows = visible();
     const tbody = host.querySelector('tbody');
-    // glisser une ligne (ou la sélection qui la contient) sur un dossier :
-    // les lignes portent draggable, un seul écouteur sur le tableau
-    const drag = window.Folders && Folders.canOperate();
-    tbody.innerHTML = rows.map((v) => (drag ? row(v).replace('<tr ', '<tr draggable="true" ') : row(v))).join('');
+    // une autre liste (filtre, tri, périmètre) repart des PAGE premières lignes
+    const key = JSON.stringify([prefs.clusters, prefs.phase, prefs.ns, prefs.text, prefs.sort, prefs.dir, scope]);
+    if (key !== listKey) { listKey = key; limit = PAGE; }
+    draw(tbody, rows.slice(0, limit));
     if (window.Folders) {
       Folders.draggableRows(tbody, 'tr[data-avm-row]', (tr_) => {
         const k = tr_.dataset.avmRow;
@@ -419,6 +436,7 @@ const AllVMs = (() => {
       h.querySelector('.sort-arrow').innerHTML = on ? icon(prefs.dir === 'asc' ? 'arrowUp' : 'arrowDown', 12) : '';
       h.setAttribute('aria-sort', on ? (prefs.dir === 'asc' ? 'ascending' : 'descending') : 'none');
     });
+    renderMore(rows.length);
     const total = data ? inScope(data.vms).length : 0;
     host.querySelector('[data-avm="count"]').textContent = data ? tr('avm.count', { n: rows.length, total }) : tr('common.loading');
     const empty = host.querySelector('[data-avm="empty"]');
@@ -427,7 +445,54 @@ const AllVMs = (() => {
     const viewer = host.querySelector('[data-avm="viewer"]');
     viewer.hidden = !window.Folders || Folders.canOperate();
     viewer.textContent = tr('vmf.viewerNote');
-    renderBulk();
+    renderBulk(rows);
+  }
+
+  // glisser une ligne (ou la sélection qui la contient) sur un dossier :
+  // les lignes portent draggable, un seul écouteur sur le tableau
+  function rowsHtml(list) {
+    const drag = window.Folders && Folders.canOperate();
+    return list.map((v) => (drag ? row(v).replace('<tr ', '<tr draggable="true" ') : row(v)));
+  }
+
+  /** Dessine `list` : mêmes lignes dans le même ordre, seules celles dont le
+   *  HTML a changé sont remplacées (une relecture où une VM change d'état ne
+   *  refait pas les 300 lignes) ; sinon le corps entier. */
+  function draw(tbody, list) {
+    const keys = list.map(keyOf);
+    const html = rowsHtml(list);
+    const same = keys.length === drawn.keys.length && tbody.rows.length === keys.length
+      && keys.every((k, i) => k === drawn.keys[i]);
+    if (same) {
+      for (let i = 0; i < html.length; i += 1) if (html[i] !== drawn.html[i]) tbody.rows[i].outerHTML = html[i];
+    } else {
+      tbody.innerHTML = html.join('');
+    }
+    drawn = { keys, html };
+  }
+
+  function renderMore(n) {
+    const b = host.querySelector('[data-avm="more"]');
+    const next = Math.min(PAGE, n - limit);
+    b.hidden = next <= 0;
+    if (next <= 0) return;
+    b.textContent = tr('avm.more', { n: next });
+    const tip = tr('avm.moreTip', { shown: limit, total: n });
+    b.title = tip;
+    b.dataset.tip = tip;
+  }
+
+  /** Ajoute les PAGE lignes suivantes sans redessiner les précédentes. */
+  function showMore() {
+    const rows = visible();
+    const from = limit;
+    limit += PAGE;
+    const more = rows.slice(from, limit);
+    const html = rowsHtml(more);
+    host.querySelector('tbody').insertAdjacentHTML('beforeend', html.join(''));
+    drawn = { keys: drawn.keys.concat(more.map(keyOf)), html: drawn.html.concat(html) };
+    renderMore(rows.length);
+    renderBulk(rows);
   }
 
   // -- ranger -------------------------------------------------------------------
@@ -606,7 +671,13 @@ const AllVMs = (() => {
     loading = true;
     try {
       const r = await fetch(`/api/vms-all?kinds=harvester,kvm${opts.fresh ? '&fresh=1' : ''}`);
-      if (r.ok) data = normalize(await r.json());
+      if (r.ok) {
+        const raw = await r.text();
+        // relecture identique (signature = le corps) : rien ne se redessine
+        if (raw === lastRaw && data) { loading = false; return; }
+        data = normalize(JSON.parse(raw));
+        lastRaw = raw;
+      }
     } catch { /* console injoignable : on garde la dernière liste */ }
     loading = false;
     render();

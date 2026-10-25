@@ -330,7 +330,16 @@ dossier, avec une pastille **console** quand seule la console connaît le
 rangement (la personne ne peut pas écrire l'objet) et une pastille **DR**
 vers le contrat de réplication qui protège la VM. Puces de sources, filtres
 d'état, d'espace de noms et de texte et tri par colonne sont repris de la
-1.85. Le menu d'une ligne suit sa famille : celui des VMs Harvester, ou pour
+1.85. Le tableau dessine les 300 premières lignes de la liste filtrée et
+triée ; **Afficher 300 de plus** ajoute les suivantes. La sélection, **Tout
+cocher** et le glisser portent sur toute la liste filtrée, pas seulement sur
+les lignes dessinées. Le filtre de texte s'applique 150 ms après la dernière
+touche, et une relecture qui rapporte la même liste ne redessine rien
+(sinon, seules les lignes qui ont changé sont refaites). Mesuré dans
+Chromium sans affichage : à 2 000 VMs, un rendu sans changement prend
+environ 0,1 s et un rendu complet (nouveau tri) environ 0,6 s ; à 10 000 VMs
+environ 0,15 s et 0,9 s (avant : 3,6 s à chaque relecture et à chaque
+touche, à 2 000). Le menu d'une ligne suit sa famille : celui des VMs Harvester, ou pour
 une VM KVM la console, les instantanés, le clonage, la suppression et
 **Ouvrir sur son hôte** (démarrer et arrêter sont sur la page de l'hôte).
 Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
