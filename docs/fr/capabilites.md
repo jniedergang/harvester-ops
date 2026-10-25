@@ -4297,7 +4297,9 @@ drapeau de santé du suiveur : après une bascule, il surveille la VM source
 et la signale tant qu'elle tourne à nouveau. `since` est la date du
 dernier événement de ce genre au journal (ou la date où une VM en attente
 a été vue la première fois). `host` garde les plans où ce cluster est
-source ou cible.
+source ou cible. Ranger une VM protégée dans un dossier, la déplacer vers
+un autre dossier ou renommer son dossier ne lève ni `plan-drift` ni
+`carnet-stale` : l'annotation de dossier n'est pas un réglage de reprise.
 
 **Notifications externes.** Matrix (API client-serveur, un id de salon et
 un jeton d'accès), Slack (webhook entrant), un webhook JSON générique

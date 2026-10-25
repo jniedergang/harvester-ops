@@ -340,6 +340,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   landing in another folder of the same name. They now stay with their
   folder and are counted as conflicts (`skipped` in the journal).
 
+- **Filing a protected VM no longer marks its recovery carnet stale**
+  (seen in a real test, harvlab to harvlab2): renaming the folder of a VM
+  held by a contract raised `carnet-stale` ("run protect again"), which
+  also made the failover ask for `--accept-stale-carnet`. The follower now
+  compares the carnet without the folder annotation, as the drift digest
+  already did.
 - **Opening an action's address keeps your Activity filters**:
   `#activity/action/<id>` cleared every Activity filter and saved that, so
   the person's saved filters were lost for good. The action filter is now
@@ -594,6 +600,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   through Rancher or with a refusal keeps an old console-only filing, a
   complete read purges it (mutations: purge always allowed, identity
   ignored).
+- `tests/api/test_replication_follow_199.py`: a protected VM filed, moved to
+  another folder or removed from its folder raises neither `carnet-stale`
+  nor `plan-drift` (fails when the folder annotation is compared).
 - `tests/api/test_clusters_join_url_200.py`: the join address of a cluster
   Rancher hides answers like an undeclared cluster.
 - `tests/e2e/test_dr_200.py`: `#activity/action/<id>` leaves the saved

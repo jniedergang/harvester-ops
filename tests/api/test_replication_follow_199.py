@@ -1149,6 +1149,38 @@ def test_carnet_stale_is_reported_and_nothing_is_written(tmp_path, how, stale, d
         assert "spec.template.spec.domain" in ev[0]["facts"]
 
 
+def _file(w, path):
+    md = w.src.obj(rr.K_VM, "default", "vm-b")["metadata"]
+    ann = md.setdefault("annotations", {})
+    if path is None:
+        ann.pop("harvester-ops.io/folder", None)
+    else:
+        ann["harvester-ops.io/folder"] = path
+
+
+@pytest.mark.parametrize("before,after", [
+    (None, "/Prod/ERP"),        # rangée après la protection
+    ("/Prod", "/Prod/ERP"),     # déplacée (ou dossier renommé) après la protection
+    ("/Prod", None),            # retirée de son dossier
+])
+def test_filing_a_protected_vm_is_neither_drift_nor_a_stale_carnet(tmp_path, before, after):
+    """2.0.0, vu en réel sur harvlab -> harvlab2 : renommer le dossier d'une
+    VM protégée levait `carnet-stale` (« relancer protect », et la bascule
+    exigeait --accept-stale-carnet). L'annotation de dossier n'est ni une
+    dérive ni un réglage de reprise."""
+    w = protected(tmp_path)
+    if before:
+        _file(w, before)
+        assert rr.protect(w.ctx())["exit"] == 0
+    f = follower(w)
+    f.once()
+    _file(w, after)                             # une écriture de métadonnées : génération inchangée
+    run_until(w, f, w.clock.now() + 1300)
+    assert follow_events(w, "carnet-stale") == []
+    assert follow_events(w, "plan-drift") == []
+    assert not {"carnet-stale", "plan-drift"} & set(status(w)["vms"][0]["reasons"])
+
+
 @pytest.mark.parametrize("change,path", [
     ({"cpu": {"cores": 8}}, ("cpu", "cores")),
     ({"memory": {"guest": "8Gi"}}, ("memory", "guest")),

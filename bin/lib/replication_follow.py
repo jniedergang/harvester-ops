@@ -63,6 +63,7 @@ import time
 from datetime import datetime, timezone
 from urllib.parse import quote
 
+import folders as fm
 import replication as rp
 import replication_db as db
 import replication_run as rr
@@ -180,6 +181,21 @@ def _short(e):
 
 def _canon(o):
     return json.dumps(o, sort_keys=True, separators=(",", ":"))
+
+
+def _carnet_view(vm):
+    """La VM telle que le carnet la compare : sans l'annotation de dossier de
+    la console (2.0.0, vu en réel : ranger une VM protégée ou renommer son
+    dossier levait `carnet-stale` et bloquait la bascule). Ranger n'est pas
+    un réglage de reprise, comme `vm_spec_digest` qui ignore les annotations."""
+    ann = ((vm or {}).get("metadata") or {}).get("annotations")
+    if not isinstance(ann, dict):
+        return vm
+    rest = {k: v for k, v in ann.items() if k != fm.ANNOTATION}
+    md = {k: v for k, v in vm["metadata"].items() if k != "annotations"}
+    if rest:
+        md["annotations"] = rest
+    return dict(vm, metadata=md)
 
 
 def _diff_paths(a, b, prefix="", out=None, limit=10):
@@ -1297,7 +1313,7 @@ class Follower:
             return
         key = ("carnet-stale", p["id"], uid)
         h = h if h is not None else {}
-        if _canon(want) == _canon(carnet["vm"]):
+        if _canon(_carnet_view(want)) == _canon(_carnet_view(carnet["vm"])):
             h["carnet_stale"] = False
             self.clear(key)
             return

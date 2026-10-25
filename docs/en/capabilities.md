@@ -3936,7 +3936,10 @@ the present state, errors first: `rpo-exceeded`, `disk-never-backs-up`,
 follower health flag: after a failover, the follower watches the source VM
 and flags it as long as it runs again. `since` is the date of the latest
 journal event of that kind (or the date a pending VM was first seen).
-`host` keeps the plans where that cluster is source or target.
+`host` keeps the plans where that cluster is source or target. Filing a
+protected VM in a folder, moving it to another folder or renaming its
+folder raises neither `plan-drift` nor `carnet-stale`: the folder
+annotation is not a recovery setting.
 
 **External notifications.** Matrix (client-server API, a room id and an
 access token), Slack (incoming webhook), a generic JSON webhook (plain
