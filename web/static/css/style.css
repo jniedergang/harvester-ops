@@ -5748,7 +5748,40 @@ body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > 
 /* 2.0.0 : les titres de groupe du menu des hôtes (Ressources partagées,
    Automatisation) gardent leur hauteur dans le rail : sans quoi les lignes
    dessous bougeaient à l'ouverture du menu (clic sur la ligne voisine). */
-body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibility: hidden; }
+body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; color: transparent; }
+
+/* 2.0.1 : sections lisibles (« gras + trait », choix du responsable
+   produit). Le titre de section (Ressources partagées, Automatisation,
+   VMs trouvées) est en gras, couleur d'accent du thème, en capitales
+   espacées, sous un trait fin. Les entrées qui pendent d'une autre (les
+   familles sous Hôtes, Liens sous Disaster Recovery) sont en retrait avec
+   un trait vertical, le motif de `.tab-group-children` et `.hnav-sub`. */
+#host-nav .hnav-sec { font-weight: 700; color: var(--accent); letter-spacing: .09em; font-size: 10.5px;
+  border-top: 1px solid var(--border); margin-top: 8px; padding: 10px 18px 4px; white-space: nowrap; overflow: hidden; }
+#host-nav .hnav-results .hnav-sec { margin-top: 2px; }
+.hnav-children { margin: 0 0 2px 28px; border-left: 1px solid var(--border); }
+.hnav-children > .tab { padding-left: 8px; }
+.hnav-children .hnav-fam-head { padding-left: 6px; }
+.hnav-children .hnav-host { padding-left: 22px; }
+.hnav-children .hnav-sub { margin-left: 24px; }
+.hnav-children .hnav-empty { padding-left: 22px; }
+/* Le résumé passe sous le nom de la famille : « 4 ok, 2 en alerte,
+   1 sans état » n'a jamais tenu à droite du nom une fois en retrait (coupé
+   en « 1 u... »). La tête a une hauteur fixe et le résumé est posé en
+   absolu : sa géométrie ne dépend pas de la largeur, donc rien ne bouge
+   pendant l'ouverture du rail (un retour à la ligne flex faisait sauter
+   les rangées de 8 puis 24 px). */
+.hnav-children .hnav-fam-head { position: relative; height: 42px; align-items: flex-start; padding-top: 6px; }
+.hnav-children .hnav-fam-sum { position: absolute; left: 40px; right: 8px; top: 23px; margin: 0; line-height: 15px;
+  white-space: nowrap; }
+/* Dans le rail, le retrait et le trait vertical disparaissent (colonne
+   d'icônes régulière, comme `.hnav-sub`) ; le trait des sections reste et
+   leur titre devient transparent, sans libérer sa hauteur (règle plus
+   haut). */
+body.sidebar-collapsed .hnav-children { margin-left: 0; border-left: 0; }
+body.sidebar-collapsed .hnav-children > .tab { padding-left: 0; }
+body.sidebar-collapsed .hnav-children .hnav-fam-head { padding-left: 2px; padding-right: 0; }
+body.sidebar-collapsed .hnav-children .hnav-host { padding-left: 10px; }
 
 /* -------------------------------------------------------------------------
    2.0.0 (tâche 15) : vue des VMs avec le panneau Dossiers / Hôtes, vue

@@ -4,6 +4,44 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.1] - 2026-10-25 - Readable side menu
+
+### Changed
+- **Readable sections.** The section titles of the side menu (Shared
+  resources, Automation, and the VM results of the search) are bold, in the
+  accent colour of the theme, in spaced capitals, under a thin rule. Entries
+  that hang from another sit indented with a vertical guide line: the
+  Harvester and KVM families and Add a host under Hosts, Links under
+  Disaster Recovery (it looked like a top-level entry). In the collapsed
+  rail the indent goes (straight column of icons), the rules stay and the
+  titles keep their height, so nothing moves when the menu opens.
+- **A folded family shows no host line at all.** Not even a host in alert,
+  nor the open host: the family head and its summary, in the alert colour
+  when a host is in alert, are enough. This reverses the 2.0.0 rule that
+  kept alerting hosts visible. Unfolded, every host is listed as before. A
+  search still shows what it finds in a folded family.
+- **The family summary sits under the family name**, so it is never cut.
+
+### Fixed
+- **The family summary counts every host.** `KVM (1)` said `0 ok, 0 in
+  alert` with node2 listed with a grey dot. A host not read yet is now
+  counted in the summary (`0 ok, 0 in alert, 1 unknown`), so the numbers
+  always add up to the family count, for Harvester and KVM alike. A tooltip
+  on the summary explains the three states with the colours of the dots.
+
+### Tests
+- e2e: a folded family shows no host line, alerting and grey hosts
+  included, and keeps its summary in the alert colour; the summary adds up
+  to the family count with unreachable, refused, failed and not yet read
+  hosts, and is not cut; section titles are bold, accent coloured, uppercase
+  and ruled in the light and dark SUSE themes; Links hangs indented under
+  Disaster Recovery and the families under Hosts, and the rail keeps a
+  straight column with unchanged title heights. The 2.0.0 test that kept
+  alerts in a folded family now asserts the reversed rule.
+- Pure model (node): a folded family returns no row; the summary buckets
+  add up for every state. Mutations: the 2.0.0 folding rule and a summary
+  that drops the unknown hosts are both caught.
+
 ## [2.0.0] - 2026-10-25 - Host-centred navigation, unified VMs with folders, Disaster Recovery screens
 
 ### Added

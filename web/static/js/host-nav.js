@@ -10,8 +10,10 @@
  * nom, étiquette et famille, et propose les VMs déjà lues par les écrans.
  *
  * Pas de plafond (décision 6 du 25/10/2026) : tous les hôtes sont listés.
- * Un hôte en alerte reste visible même dans une famille repliée, comme
- * l'hôte ouvert.
+ * 2.0.1 (choix du responsable produit) : une famille repliée ne montre
+ * AUCUNE ligne d'hôte, ni en alerte ni ouvert ; sa tête et son résumé
+ * (« 4 ok, 2 en alerte, 1 inconnu », en couleur d'alerte) suffisent. Le
+ * résumé compte chaque hôte : ok + en alerte + inconnus = total.
  *
  * Les entrées sont de vrais liens `<a href="#...">` : le routeur les
  * applique (clic milieu et copie de lien compris). Le menu ne lance aucune
@@ -48,22 +50,20 @@
 
   /**
    * Hôtes d'une famille à montrer, dans l'ordre : [{ key, reason }].
-   * reason : 'favorite' | 'open' | 'alert' | 'rest'. Famille repliée : seuls
-   * l'hôte ouvert et les hôtes en alerte restent (une alerte n'est jamais
-   * cachée par un repli). Aucun plafond.
+   * reason : 'favorite' | 'open' | 'alert' | 'rest'. Famille repliée :
+   * aucune ligne (2.0.1, le résumé de la tête dit les alertes). Aucun plafond.
    */
   function visible(hosts, openKey, collapsed) {
-    const out = [];
-    order(hosts).forEach((h) => {
+    if (collapsed) return [];
+    return order(hosts).map((h) => {
       const key = keyOf(h);
-      const reason = h.favorite ? 'favorite' : key === openKey ? 'open' : isAlert(h) ? 'alert' : 'rest';
-      if (collapsed && key !== openKey && !isAlert(h)) return;
-      out.push({ key, reason });
+      return { key, reason: h.favorite ? 'favorite' : key === openKey ? 'open' : isAlert(h) ? 'alert' : 'rest' };
     });
-    return out;
   }
 
-  /** Compteurs de la tête de famille à partir des hôtes eux-mêmes. */
+  /** Compteurs de la tête de famille à partir des hôtes eux-mêmes : chaque
+   *  hôte tombe dans un seul compteur (ok, alert, unknown = pastille grise),
+   *  leur somme fait toujours total. */
   function summaryParts(hosts) {
     const s = { total: 0, ok: 0, alert: 0, unknown: 0 };
     (hosts || []).forEach((h) => {
@@ -202,16 +202,19 @@
     const okey = openKey();
     const shown = visible(list, okey, collapsed);
     const byKey = new Map(list.map((h) => [keyOf(h), h]));
-    // la tête dit « 58 ok, 2 en alerte » ; les hôtes pas encore lus sont dans l'info-bulle
-    const summary = tr('hnav.summary', { ok: s.ok, alert: s.alert });
-    const summaryFull = s.unknown
-      ? tr('hnav.summaryUnknown', { ok: s.ok, alert: s.alert, unknown: s.unknown }) : summary;
+    // la tête dit « 58 ok, 2 en alerte », et « 1 inconnu » dès qu'un hôte
+    // n'est pas encore lu (pastille grise) : les nombres font le total
+    // (2.0.1, « 0 ok, 0 en alerte » pour un hôte KVM listé)
+    const summary = s.unknown
+      ? tr('hnav.summaryUnknown', { ok: s.ok, alert: s.alert, unknown: s.unknown })
+      : tr('hnav.summary', { ok: s.ok, alert: s.alert });
     const head = `<button type="button" class="hnav-fam-head" data-fam="${esc(kind)}" aria-expanded="${collapsed ? 'false' : 'true'}"
-        title="${esc(tr('hnav.famTip', { family: fam, summary: summaryFull }))}">
+        title="${esc(tr('hnav.famTip', { family: fam, summary }))}">
         <span class="hnav-chev" aria-hidden="true">${icon('chevronDown', 12)}</span>
         <span class="tab-icon">${icon(kind === 'kvm' ? 'compute' : 'node')}</span>
         <span class="sidebar-label hnav-fam-name">${esc(fam)} <span class="hnav-fam-total">(${s.total})</span></span>
-        <span class="sidebar-label hnav-fam-sum${s.alert ? ' has-alert' : ''}">${esc(summary)}</span></button>`;
+        <span class="sidebar-label hnav-fam-sum${s.alert ? ' has-alert' : ''}" data-ok="${s.ok}" data-alert="${s.alert}"
+          data-unknown="${s.unknown}" title="${esc(tr('hnav.sumTip', { total: s.total }))}">${esc(summary)}</span></button>`;
     let body = shown.map((x) => hostRow(byKey.get(x.key), x.key === okey)).join('');
     if (query && !list.length) body = `<div class="hnav-empty">${esc(tr('hnav.noMatch'))}</div>`;
     else if (!all.length) body = `<div class="hnav-empty">${esc(tr('hnav.noHost'))}</div>`;

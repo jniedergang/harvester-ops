@@ -232,12 +232,16 @@ clusters and 40 KVM hosts is listed in full, in a part of the menu that
 scrolls on its own.
 
 - **Family head.** Each family can be folded (the choice is kept by the
-  browser) and says its state in one line, for example `58 ok, 2 in alert`.
-  The hosts not read yet are counted in its tooltip.
+  browser) and says its state, for example `58 ok, 2 in alert`. A host not
+  read yet is counted too (`0 ok, 0 in alert, 1 unknown`): the numbers
+  always add up to the family count. The tooltip of the summary explains the
+  three states with the colours of the dots. A folded family shows no host
+  line at all, not even a host in alert or the open host: the summary, in
+  the alert colour, is enough.
 - **Host row.** A dot gives the state (green reachable, red unreachable or
   in error, orange access refused, grey not read yet), then the name and the
-  number of VMs when a screen has already read them. A host in alert stays
-  visible even in a folded family. The list never reads a host itself.
+  number of VMs when a screen has already read them. The list never reads a
+  host itself.
 - **Favourites.** The star on a host keeps it at the top of its family. Stars
   are kept per person by the console, so they follow you to another
   computer. Any role can star a host.

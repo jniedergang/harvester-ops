@@ -821,14 +821,19 @@ CHANGELOG (2.0.0) and in the operating procedure.
   ok, 2 in alert`). Each host has a state dot, its VM count, a star
   (favourites are kept per person by the console, found again from another
   computer) and, for a Harvester host, a badge of its Disaster Recovery
-  alerts. There is no cap: every host is listed, and a host in alert stays
-  visible in a folded family. The open host unfolds its sub-menu (Overview,
+  alerts. There is no cap: every host is listed. A folded family shows no
+  host line at all, not even a host in alert: its summary says the alerts,
+  in the alert colour, and counts every host (`0 ok, 0 in alert, 1 unknown`
+  when a host is not read yet), so the numbers always add up to the family
+  count. The open host unfolds its sub-menu (Overview,
   Virtual machines, Containers, Imports and migrations, Parameters,
   Disaster Recovery). The search (`/`) filters hosts by name, label and
   family and offers the VMs already read. **Add a host** offers Harvester
   or KVM. Above and below: Folders, Virtual machines, Containers, Disaster
   Recovery, Migrations, Shared resources, Automation and Activity, all real
-  links.
+  links. Section titles (Shared resources, Automation) are bold, in the
+  accent colour of the theme, under a thin rule; the families sit indented
+  under Hosts and Links under Disaster Recovery, with a vertical guide line.
 - **Hosts index** (`#hosts`, `#hosts/harvester`, `#hosts/kvm`,
   `#hosts/folder/<id>`): one table of every host with family, state,
   version, labels, VMs, folder and favourite; sort and filter on each
