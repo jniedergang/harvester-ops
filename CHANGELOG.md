@@ -4,7 +4,7 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
-## [2.0.0] - 2026-10-25 - Navigation by hosts, VMs and folders
+## [2.0.0] - 2026-10-25 - Host-centred navigation, unified VMs with folders, Disaster Recovery screens
 
 ### Added
 - **Hosts list and favourites (API).** `GET /api/hosts` lists every
@@ -156,7 +156,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
-
 - **Disaster Recovery in the new navigation.** The replication screens of
   1.101.0 keep every behaviour (cards or table, filters, the creation and
   failover windows, notifications) and get their addresses: `#dr`,
@@ -174,7 +173,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   open. The Activity icon of an event in a contract's journal leads there
   (it opened Activity unfiltered); changing a filter gives back
   `#activity`.
-
 - **Resume a stopped folder action from the dock or Activity.** A folder
   action that ended in error or was stopped by the console shutdown carries
   a `resume` path decided by the server (`_folder_resume`); **Resume**
@@ -188,28 +186,56 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   resources, KVM, Disaster Recovery, VM Import / Export, Automation,
   Activity). Every screen keeps an address and an entry of the new menu;
   the old tokens (`#storage`, `#allvms`, `#kvmhosts`, `#forkliftglobal`...)
-  still open their screen. Correspondence:
+  still open their screen. Complete correspondence (`<c>` a Harvester
+  host, `<h>` a KVM host; an old token that needs a host opens the last
+  Harvester or KVM host visited, else the first visible one, else the hosts
+  index with a notice; `[a|b]` = optional tab):
 
-  | 1.x | 2.0.0 |
-  |---|---|
-  | Cluster selector, `+` | Hosts in the side menu, Add a host |
-  | Cluster > Overview (Metrics, Cluster, Events), Upgrade button | `#harvester/<c>`, `.../params/nodes`, `.../overview/events`, `.../params/upgrade` |
-  | Cluster > Storage, Network, Add-ons, Security, Monitoring & Logging, Advanced | `#harvester/<c>/params/<storage, network, addons, security, monlog, advanced>` |
-  | Cluster > Startup, Shutdown | `#harvester/<c>/params/power/<startup, shutdown>` |
-  | Cluster > Disaster Recovery | `#harvester/<c>/dr` |
-  | Settings > Cluster accounts | `#harvester/<c>/params/security/accounts` |
-  | Current cluster's VMs, containers | `#harvester/<c>/vms`, `#harvester/<c>/containers` |
-  | All clusters VMs, containers | `#vms`, `#containers` |
-  | Shared resources > GPU, Bookings, Usage | `#gpus`, `#bookings`, `#usage` |
-  | KVM > Hosts | `#hosts/kvm`, `#hosts/kvm/capacity`, `#kvm/<h>`, `#kvm/<h>/params/conn` |
-  | KVM > Virtual machines | `#vms/host/kvm`, `#kvm/<h>/vms` |
-  | KVM > Storage, Networks (all hosts) | `#hosts/kvm/pools`, `#hosts/kvm/networks` |
-  | KVM > Storage, Networks (one host) | `#kvm/<h>/params/pools`, `#kvm/<h>/params/networks` |
-  | VM Import, VMware migrations | `#harvester/<c>/imports/vmimport`, `.../imports/forklift` |
-  | Migrations (all clusters) | `#migrations` |
-  | Disaster Recovery > Contracts, Links | `#dr`, `#dr/links` |
-  | Automation > Cluster API, Terraform, Bare-metal | `#automation/<capi, terraform, pxe>` |
-  | Activity | `#activity`, `#activity/host/<kind>/<name>` |
+  | 1.x place | Old token | 2.0.0 address |
+  |---|---|---|
+  | Cluster selector (`#cluster-select`) | | **Hosts** in the side menu, `#hosts` |
+  | `+` button next to the selector | | **Add a host** in the side menu |
+  | Cluster > Overview > Metrics | `#overview`, `#cluster` | `#harvester/<c>` |
+  | Cluster > Overview > Cluster (node blocks) | | `#harvester/<c>/params/nodes` |
+  | Cluster > Overview > Events | | `#harvester/<c>/overview/events` (block below the metrics) |
+  | Cluster > Overview, Upgrade button | | `#harvester/<c>/params/upgrade` |
+  | Cluster > Storage | `#storage` | `#harvester/<c>/params/storage[/volumes\|images\|classes]` |
+  | Cluster > Network (7 tabs) | `#network` | `#harvester/<c>/params/network[/vmnets\|clusternets\|lbs\|pools\|hostnets\|overlay\|underlay]` |
+  | Cluster > Add-ons | `#addons` | `#harvester/<c>/params/addons` |
+  | Cluster > Security | `#security` | `#harvester/<c>/params/security[/secrets\|sshkeys]` |
+  | Settings > Cluster accounts | | `#harvester/<c>/params/security/accounts` |
+  | Cluster > Monitoring & Logging | `#monlog` | `#harvester/<c>/params/monlog[/metrics\|alerts\|flows\|outputs]` |
+  | Cluster > Advanced | `#advanced` | `#harvester/<c>/params/advanced[/settings\|pci\|usb\|sriov\|support]` |
+  | Cluster > Startup | `#startup` | `#harvester/<c>/params/power/startup` |
+  | Cluster > Shutdown | `#shutdown` | `#harvester/<c>/params/power/shutdown` |
+  | Settings > Clusters, for one cluster | | `#harvester/<c>/params/conn` (Settings > Clusters stays) |
+  | Cluster > Disaster Recovery | `#clusterdr` | `#harvester/<c>/dr` |
+  | Virtual machines > Current cluster's VMs | `#namespaces` | `#harvester/<c>/vms` |
+  | Virtual machines > All clusters VMs | `#allvms` | `#vms` (also `#vms/folder/<id>`, `#vms/folder/unfiled`, `#vms/host/harvester/<c>`) |
+  | Containers > Current cluster's containers | | `#harvester/<c>/containers` |
+  | Containers > All clusters containers | `#allcontainers`, `#containers` | `#containers` (also `#containers/folder/<id>`) |
+  | Shared resources > GPU, Bookings, Usage | `#gpus`, `#bookings`, `#usage` | unchanged |
+  | KVM > Hosts | `#kvmhosts`, `#kvm-hosts` | `#hosts/kvm` (table), `#kvm/<h>` (one host) |
+  | KVM > Hosts, Test and Remove | | `#kvm/<h>/params/conn`, and each row of `#hosts/kvm` |
+  | KVM > Hosts, CPU and memory tiles | | `#hosts/kvm/capacity` (all hosts), `#kvm/<h>/params/system` (one host) |
+  | KVM host labels (1.96 declaration) | | `#kvm/<h>/params/labels` |
+  | KVM > Virtual machines | `#kvmvms` | `#vms/host/kvm` (all hosts), `#kvm/<h>/vms`, `#vms/host/kvm/<h>` |
+  | KVM > Storage | `#kvmstorage` | `#hosts/kvm/pools` (all hosts), `#kvm/<h>/params/pools` |
+  | KVM > Networks | `#kvmnetworks` | `#hosts/kvm/networks` (all hosts), `#kvm/<h>/params/networks` |
+  | VM Import / Export > VM Import | `#vmimport`, `#vmio` | `#harvester/<c>/imports/vmimport[/imports\|vmware\|openstack\|ova]` |
+  | VM Import / Export > VMware migrations | `#forklift` | `#harvester/<c>/imports/forklift[/prep\|sources\|inventory\|waves]` |
+  | VM Import / Export > Migrations (all clusters) | `#forkliftglobal` | `#migrations` |
+  | Disaster Recovery > Contracts | `#drplans` | `#dr`, `#dr/<id>` (one contract) |
+  | Disaster Recovery > Links | `#drlinks` | `#dr/links` |
+  | Automation > Cluster API, Terraform, Bare-metal | `#automation`, `#automation/capi`, `#automation/terraform`, `#automation/pxe` | `#automation/capi`, `#automation/terraform`, `#automation/pxe` |
+  | Activity | `#activity` | `#activity`, `#activity/host/harvester/<c>`, `#activity/host/kvm/<h>`, `#activity/action/<id>` |
+  | (new) Folders | | `#folders`, `#folders/<id>` |
+  | (new) Hosts index | | `#hosts`, `#hosts/harvester`, `#hosts/kvm`, `#hosts/folder/<id>` |
+  | (new) Disaster Recovery of a KVM host | | `#kvm/<h>/dr` |
+
+  `#containers` named the current cluster's containers in 1.x; it now opens
+  the containers of the whole fleet (the current cluster's list is
+  `#harvester/<c>/containers`).
 - **An empty address opens `#vms`**, the Virtual machines view. The first
   time 2.0.0 opens in a browser, the last screen
   of the 1.x menu is reopened once instead, then forgotten. An address that
@@ -238,22 +264,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Fixed
-- **Fleet reads are no longer shared across identities** (security, present
-  since 1.85): a shared read that names no cluster (`/api/vms-all`,
-  `/api/containers-all`, `/api/gpus-all`, the hosts menu, the folder counts)
-  now carries the identity the person presents to the clusters (Rancher
-  session, or delegated user and groups). Before, two people of the same
-  role signed in through Rancher, or under identity delegation, could be
-  served each other's fleet, VMs of clusters hidden from them included.
-  Local accounts without delegation still share one read.
-
-- **Folder actions never name an object the person cannot see**: a rename,
-  move, emptying, undo or resume no longer writes in the dock, Activity or
-  the command's output the key of an object filed in the folder that sits
-  in a cluster Rancher hides from the person or in a namespace they cannot
-  read. Those objects are counted in one step ("2 other objects not shown
-  to you"); the console sends only the person's own keys as `visible`.
-
 - **Undo from the Activity tab**: a finished folder action (assign, rename,
   move, empty-into, undo) keeps its **Undo** button in Activity once the
   dock card is gone, greyed with the reason for a viewer. What Undo needs is
@@ -263,7 +273,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   another person's folder action; the undo action's first step and its
   `result` (`undoes`, `of`, `by`) name the person who launched the original
   and the one who undoes it.
-
 - **The Virtual machines view holds large fleets**: it draws the first 300
   rows with **Show 300 more**, applies the text filter 150 ms after typing,
   redraws nothing on a refresh that brings the same list and only the rows
@@ -271,7 +280,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   the whole filtered list. At 2,000 VMs a full redraw went from 3.6 s on
   every refresh and every key to about 0.6 s (0.1 s without change); 10,000
   VMs measured at about 0.9 s.
-
 - **A folder name clash is refused before anything starts**: creating,
   renaming or moving a folder where a sibling already has that name answers
   409 `{conflicts}` instead of starting an action that fails.
@@ -282,16 +290,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **A local account without identity delegation is told the truth**: the
   check says the console writes the object with its own identity instead
   of "you can write this object".
-- **Resume an interrupted folder action from the console**:
-  `POST /api/folders/actions/<id>/resume`, like `resume` on the command line.
-
 - **Creation of a contract, recovery site without a VM network**: the
   network list said only "choose a network". It now says **No VM network on
   <cluster>** and the line points to **Create on the target**. The
   management (pod) network is not offered: the engine maps a VM network only
   to another network of the recovery site (`retarget_vm`, check
   `network-unmapped`).
-
 - **Resume command of a contract follows the server**: the contract window
   kept its own list of resumable states and offered **Resume command** to an
   operator for a failover the server only lets an admin finish (refused with
@@ -300,11 +304,28 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   same reading as `resume`) and `_repl_resume_role`; the button is greyed
   with the role it needs, and no longer appears when nothing is
   interrupted (a measure still running).
-
 - **The `/` shortcut no longer moves the focus behind an open window**: the
   host search kept taking the key while a modal was open.
 - **`folders.db` journal files are private**: the `-wal` and `-shm` files
   followed the umask; they now get 0600 like the database.
+
+### Security
+- **Fleet reads are no longer shared across identities** (present since
+  1.85.0): a shared read that names no cluster (`/api/vms-all`,
+  `/api/containers-all`, `/api/gpus-all`, the hosts menu, the folder counts)
+  now carries the identity the person presents to the clusters (Rancher
+  session, or delegated user and groups). Before, two people of the same
+  role signed in through Rancher, or under identity delegation, could be
+  served each other's fleet, VMs of clusters hidden from them included.
+  Local accounts without delegation still share one read. **Fixed in
+  2.0.0 only, not backported**: versions 1.85.0 to 1.101.3 keep the leak
+  when Rancher sign-in or identity delegation is on; upgrade to 2.0.0.
+- **Folder actions never name an object the person cannot see**: a rename,
+  move, emptying, undo or resume no longer writes in the dock, Activity or
+  the command's output the key of an object filed in the folder that sits
+  in a cluster Rancher hides from the person or in a namespace they cannot
+  read. Those objects are counted in one step ("2 other objects not shown
+  to you"); the console sends only the person's own keys as `visible`.
 
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
@@ -470,7 +491,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   age of a reused count, stale denied state against the probe.
   Tests that clicked the overview sub-tabs or Settings > Cluster accounts
   now open the host addresses.
-
 - `tests/e2e/test_dr_200.py`: `#dr`, `#dr/<id>` cold, F5 and closed,
   click without history, `#dr/links`, a host's DR as source and as recovery
   site (roles swapped, side filter, the window keeps the host address), KVM
@@ -485,6 +505,22 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   without a generation change, a real spec change is, and the mutation
   `test_drift_mutation_annotations_in_digest`. Routes and router tables:
   `#activity/action/<id>` and `#dr/<id>` round trips and error paths.
+- After the merge of 1.101.3 and the final review:
+  `tests/api/test_replication_routes_199.py` (the contract row carries
+  `resume-command` with the role the resume route requires, for every
+  interrupted state and both roles, none when nothing is interrupted, a
+  measure stopped by the console in `draft`, `resumable` read like `resume`,
+  no state list left in the contract window; mutations of the role check and
+  of `resumable` fail them), `tests/api/test_folders_routes_200.py` and
+  `tests/e2e/test_folders_200.py` (resume path of a stopped folder action
+  from memory and from the history, Resume from Activity, none on a finished
+  action), `tests/api/test_nav_inventory_200.py` (every pane of every
+  section has its own address, and the correspondence table above is
+  complete: every old token, every address resolved and written back, with
+  mutations), `tests/e2e/test_host_nav_200.py` (`/` held by an open window),
+  `tests/api/test_folders_db_200.py` (database and WAL files 0600),
+  `tests/e2e/test_cluster_switch.py` (the Events block reloads for the new
+  host).
 
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 

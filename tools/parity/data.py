@@ -3,8 +3,8 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "1.80.0"
-DATE = "2026-09-30"
+AS_OF = "2.0.0"
+DATE = "2026-10-25"
 
 S = []  # sections
 
@@ -24,7 +24,7 @@ r("ok", "1.62", "Événements du cluster (hôtes, VMs, volumes, images)", "Clust
 r("ok", "1.70", "Métriques du cluster et des VMs (rancher-monitoring)", "Cluster and VM metrics (rancher-monitoring)",
   "onglet Métriques : Prometheus quand rancher-monitoring est actif, metrics-server sinon ; CPU de VM juste (Harvester le divise par 1000)",
   "Metrics tab: Prometheus when rancher-monitoring is on, metrics-server otherwise; correct VM CPU (Harvester divides it by 1000)")
-r("ok", "1.69", "Bouton Mettre à jour Harvester", "Upgrade Harvester button", "dans l'en-tête de l'aperçu et sur server-version", "in the Overview header and on server-version")
+r("ok", "1.69", "Bouton Mettre à jour Harvester", "Upgrade Harvester button", "dans la Vue d'ensemble de l'hôte, ouvre Paramètres > Mise à jour (2.0) ; aussi sur server-version", "on the host Overview, opens Parameters > Upgrade (2.0); also on server-version")
 
 sec("hosts", "Hôtes", "Hosts", "Hosts", "Hosts")
 r("ok", "1.0", "Liste des hôtes, état, rôles", "Host list, state, roles")
@@ -243,6 +243,20 @@ r("plus", "1.1", "Plusieurs clusters dans une seule interface, sans Rancher",
   "Several clusters in one interface, without Rancher",
   "Rancher (Virtualization Management) réunit aussi plusieurs clusters Harvester ; la console le fait seule, et ajoute les gestes d'un cluster à l'autre",
   "Rancher (Virtualization Management) also gathers several Harvester clusters; the console does it on its own and adds actions between clusters")
+r("plus", "2.0", "Navigation par hôtes : clusters Harvester et hyperviseurs KVM dans un seul menu, une adresse par écran",
+  "Host-centred navigation: Harvester clusters and KVM hypervisors in one menu, one address per screen",
+  "favoris par personne, index des hôtes, anciennes adresses 1.x toujours comprises",
+  "favourites per person, hosts index, 1.x addresses still understood")
+r("plus", "2.0", "Dossiers partagés pour les VMs, les conteneurs et les hôtes, écrits sur les objets",
+  "Shared folders for VMs, containers and hosts, written on the objects",
+  "contrôles avant le geste, annulation et reprise ; Harvester n'a pas de dossiers",
+  "checks before the gesture, undo and resume; Harvester has no folders")
+r("plus", "1.99", "Réplication asynchrone entre clusters Harvester (contrats, RPO, bascule)",
+  "Asynchronous replication between Harvester clusters (contracts, RPO, failover)",
+  "volumes de secours Longhorn ; écrans Disaster Recovery depuis la 1.101, placés dans la navigation 2.0",
+  "Longhorn standby volumes; Disaster Recovery screens since 1.101, placed in the 2.0 navigation")
+r("plus", "1.96", "Hyperviseurs KVM (libvirt) gérés à côté des clusters", "KVM hypervisors (libvirt) managed next to the clusters",
+  "virsh par SSH, sans agent ; page d'hôte en 2.0", "virsh over SSH, no agent; host page in 2.0")
 r("plus", "1.0", "Arrêt et démarrage gracieux d'un cluster entier", "Graceful shutdown and startup of a whole cluster",
   "Harvester le décrit comme une procédure manuelle", "Harvester documents it as a manual procedure")
 r("plus", "1.45", "Transfert de VM entre clusters, export / import", "VM transfer between clusters, export / import")

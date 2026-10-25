@@ -422,9 +422,12 @@ annulation terminés proposent **Annuler** (`undo.path` dans l'action), dans
 le dock puis dans l'onglet Activité, aussi après un redémarrage de la console
 (`undo` gardé dans actions.db). Tout opérateur peut annuler le geste d'un
 autre ; l'annulation dit de qui était le geste et qui l'annule (première
-étape, et `result` `{"undoes", "of", "by"}`). Un
-domaine KVM est désigné par son UUID, que virsh accepte : un domaine renommé
-est retrouvé.
+étape, et `result` `{"undoes", "of", "by"}`). Une action finie en erreur ou
+arrêtée par l'arrêt de la console propose **Reprendre** dans le dock et
+dans l'Activité (`resume.path` dans l'action, posé par le serveur) : elle
+finit seulement les objets que l'action n'a pas atteints, et la reprise
+d'une reprise vise l'action d'origine. Un domaine KVM est désigné par son
+UUID, que virsh accepte : un domaine renommé est retrouvé.
 
 `POST /api/folders/check` répond `{"objects": [{"key", "write", "outcome",
 "reason", "check"}]}`. `outcome` dit ce que fera le déplacement : `object`
@@ -889,10 +892,52 @@ bit à bit après une copie, un export et un import entre versions.
 
 ## 3. Observabilité cluster (console)
 
+### Hôtes : menu latéral, index et pages d'hôte (2.0.0)
+
+Un hôte est un cluster Harvester entier ou un hyperviseur KVM. Depuis la
+2.0.0, la console s'organise autour des hôtes au lieu d'un cluster choisi ;
+la correspondance de chaque écran 1.x avec sa nouvelle adresse est dans le
+CHANGELOG (2.0.0) et dans la procédure opérationnelle.
+
+- **Menu latéral.** Sous **Hôtes**, chaque cluster Harvester et chaque
+  hôte KVM en deux familles repliables, chacune avec un résumé d'une ligne
+  (`58 ok, 2 en alerte`). Chaque hôte a une pastille d'état, son nombre de
+  VMs, une étoile (favoris gardés par personne par la console, retrouvés
+  depuis un autre poste) et, pour un hôte Harvester, une pastille de ses
+  alertes de Disaster Recovery. Pas de plafond : tous les hôtes sont
+  listés, et un hôte en alerte reste visible dans une famille repliée.
+  L'hôte ouvert déplie son sous-menu (Vue d'ensemble, Machines virtuelles,
+  Conteneurs, Imports et migrations, Paramètres, Disaster Recovery). La
+  recherche (`/`) filtre les hôtes par nom, étiquette et famille et propose
+  les VMs déjà lues. **Ajouter un hôte** propose Harvester ou KVM. Autour :
+  Dossiers, Machines virtuelles, Conteneurs, Disaster Recovery,
+  Migrations, Ressources partagées, Automatisation et Activité, tous de
+  vrais liens.
+- **Index des hôtes** (`#hosts`, `#hosts/harvester`, `#hosts/kvm`,
+  `#hosts/folder/<id>`) : un tableau de tous les hôtes avec famille, état,
+  version, étiquettes, VMs, dossier et favori ; tri et filtre sur chaque
+  colonne, **Déplacer vers un dossier** sur une sélection. La famille KVM
+  ajoute Déclarer un hôte, Tester et Retirer par ligne, et trois onglets
+  sur tous les hôtes KVM : Capacité, Pools et Réseaux.
+- **Page d'un hôte Harvester** (`#harvester/<c>`) : un bandeau (famille,
+  nom, état, version, nombre de VMs, sous-menu, Activité de cet hôte)
+  au-dessus des sections existantes. Vue d'ensemble = métriques avec le
+  bloc Événements dessous ; Paramètres = Nœuds, Stockage, Réseau, Modules,
+  Sécurité (avec les Comptes du cluster), Monitoring et journaux, Avancé,
+  Mise à jour, Alimentation (Démarrage, Arrêt) et Connexion ; Imports et
+  migrations = Import de VM et Migrations VMware. Cliquer un autre hôte
+  Harvester garde l'écran.
+- **Page d'un hôte KVM** (`#kvm/<h>`) : voir la section 10.
+
+Chaque écran a une adresse après `#` : un lien ouvre l'écran exact et F5 le
+rend. Les jetons 1.x (`#storage`, `#allvms`, `#kvmhosts`...) ouvrent encore
+leur écran.
+
 ### Les sections de Harvester, un cluster à la fois (1.57.0)
 
 Le menu latéral regroupe, sous Cluster, les menus que les opérateurs
-connaissent de Harvester, pour le cluster choisi :
+connaissent de Harvester, pour le cluster choisi (depuis la 2.0.0 : les
+Paramètres de chaque hôte Harvester, voir plus haut) :
 
 - **Stockage** : Volumes (la vue du stockage : répliques, santé,
   corrections), Images (source, taille, état, classe de stockage, VMs qui
@@ -4395,8 +4440,11 @@ contrat, l'icône Activité d'un événement mène à `#activity/action/<id>` :
 l'Activité filtrée sur cette action, son détail ouvert. Dans **Machines
 virtuelles**, une VM tenue par un contrat porte une pastille **DR** qui
 mène au contrat ; elle est relue à chaque ouverture de la vue et chaque
-minute. Chaque geste lance la ligne
-de commande `harvester-replication` en action suivie (dock et Activité) ;
+minute. Les boutons suivent les actions que le serveur rend avec chaque
+ligne de contrat (rôle, permis, raison) : **Reprendre la commande**
+n'apparaît que lorsque la commande `resume` a quelque chose à finir, grisé
+avec le rôle qu'il faut (admin pour finir une bascule). Chaque geste lance
+la ligne de commande `harvester-replication` en action suivie (dock et Activité) ;
 les écrans n'écrivent jamais par un autre chemin.
 
 **Contrats.** Tous les contrats, en cartes ou en tableau (la bascule est

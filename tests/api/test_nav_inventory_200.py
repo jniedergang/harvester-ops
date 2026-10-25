@@ -157,3 +157,52 @@ def test_every_pane_of_every_section_has_its_own_address():
     assert len(rows) >= 30
     bad = [row for row in rows if row[3] != row[0] or row[4] != row[1] or row[5] != row[2]]
     assert bad == [], bad
+
+
+TABLE_RUNNER = r"""
+global.window = global; global.document = { addEventListener() {} };
+const Routes = require('./web/static/js/routes.js'); const Router = require('./web/static/js/router.js');
+const inp = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+console.log(JSON.stringify({
+  legacy: Object.keys(Routes.LEGACY),
+  news: inp.map((h) => { const r = Routes.parse(h); const t = r.name === 'unknown' ? null : Router.resolve(r);
+                         return [h, t ? t.tab : null, t ? Routes.format(r) : null]; }),
+}));
+"""
+
+
+def _changelog_table():
+    import re
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    block = text[text.index("## [2.0.0]"):text.index("## [1.101.3]")]
+    rows = [ln for ln in block.splitlines() if ln.startswith("  | ") and "---" not in ln and "Old token" not in ln]
+    olds, news = set(), []
+    for ln in rows:
+        place, old, new = [c.strip() for c in re.split(r"(?<!\\)\|", ln.strip())[1:-1]]
+        olds |= {t[1:] for t in re.findall(r"`(#[^`]+)`", old)}
+        for tok in re.findall(r"`(#[^`]+)`", new):
+            tok = tok.replace("\\|", "|")
+            m = re.search(r"\[/([^\]]+)\]$", tok)
+            base = re.sub(r"\[/[^\]]+\]$", "", tok)
+            for v in [base] + ([f"{base}/{x}" for x in m.group(1).split("|")] if m else []):
+                ident = "rp-0123456789ab" if v.startswith("#dr") else ("fa0000000001" if "action" in v else "3")
+                news.append(v.replace("<c>", C).replace("<h>", H).replace("<id>", ident))
+    return olds, news
+
+
+def test_the_changelog_correspondence_table_is_complete_and_true():
+    """CHANGELOG 2.0.0 : chaque ancien jeton de `Routes.LEGACY` a sa ligne,
+    chaque adresse nouvelle (onglets optionnels compris) se résout vers un
+    écran et s'écrit à l'identique."""
+    olds, news = _changelog_table()
+    assert len(news) >= 80
+    try:
+        r = subprocess.run(["node", "-e", TABLE_RUNNER], input=json.dumps(news), capture_output=True, text=True,
+                           cwd=str(ROOT), timeout=30)
+    except FileNotFoundError:
+        pytest.skip("node absent")
+    assert r.returncode == 0, r.stderr
+    d = json.loads(r.stdout)
+    assert set(d["legacy"]) - olds == set(), "ancien jeton absent du tableau du CHANGELOG"
+    assert olds - set(d["legacy"]) == set(), "jeton du tableau inconnu de Routes.LEGACY"
+    assert [n for n in d["news"] if n[1] is None or n[2] != n[0]] == []

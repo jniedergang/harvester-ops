@@ -96,7 +96,7 @@ L'UI web re-streame les mêmes événements via Server-Sent Events (SSE) pour un
 ## 6. Multi-cluster
 
 Le fichier de config `/etc/harvester-ops/config.yaml` déclare tous les clusters connus.
-Chaque commande exige `--cluster <nom>`. L'UI web permet de basculer entre clusters via la sidebar gauche.
+Chaque commande exige `--cluster <nom>`. Depuis la 2.0.0, l'UI web liste tous les hôtes (clusters Harvester et hyperviseurs KVM) dans son menu latéral ; voir la section 13.
 
 Pour lister les clusters configurés :
 
@@ -113,7 +113,7 @@ harvester-status   --cluster prod --namespace tenant-a
 # (pas d'extinction par namespace en v1.0 — utiliser l'onglet Namespace de l'UI web)
 ```
 
-Dans l'UI web, l'onglet **Namespaces** liste chaque namespace avec ses VMs et permet de les démarrer/arrêter en groupe.
+Dans l'UI web, **Machines virtuelles** d'un hôte Harvester (`#harvester/<c>/vms`, l'ancien onglet Namespaces) liste chaque namespace avec ses VMs et permet de les démarrer/arrêter en groupe.
 
 ## 8. Suivi temps réel (dock Activity)
 
@@ -285,7 +285,7 @@ une fois connecté.
 Le menu de la 1.x (sélecteur de cluster, groupes par cluster) est retiré.
 Les anciens liens ouvrent toujours leur écran : `#storage` ouvre Paramètres
 > Stockage du dernier hôte Harvester visité, `#allvms` ouvre `#vms`,
-`#kvmhosts` l'index des hôtes, `#forkliftglobal` les Migrations ; le
+`#kvmhosts` l'index des hôtes KVM, `#forkliftglobal` les Migrations ; le
 CHANGELOG de la 2.0.0 donne chaque ancien emplacement et sa nouvelle
 adresse. Ouvrir la console sans adresse montre `#vms` ; la première fois
 après la mise à jour, c'est le dernier écran ouvert qui s'affiche.
@@ -360,3 +360,88 @@ ceux de tous les hôtes KVM sur un écran (`#hosts/kvm/capacity`, `/pools`,
 que vous ne voyez pas (retiré, ou hors de
 vos droits) ouvre cet index avec un message. L'index ne lit que la liste
 des hôtes, jamais un hôte.
+
+### Retrouver un écran de la 1.x
+
+Les anciens liens et favoris du navigateur marchent toujours : la console
+traduit le jeton 1.x vers sa nouvelle adresse et réécrit la barre
+d'adresse. Un jeton propre à un cluster ouvre cet écran sur le dernier hôte
+Harvester visité (sinon le premier visible) ; un jeton KVM ouvre la famille
+KVM. Les plus courants :
+
+| Vous cherchiez | Désormais |
+|---|---|
+| Le sélecteur de cluster | **Hôtes** dans le menu latéral, ou l'index des hôtes `#hosts` |
+| Cluster > Vue d'ensemble, Événements | la **Vue d'ensemble** de l'hôte (Événements sous les métriques) |
+| Cluster > Stockage, Réseau, Modules, Sécurité, Monitoring et journaux, Avancé | les **Paramètres** de l'hôte, mêmes noms d'onglets |
+| Cluster > Démarrage, Arrêt | **Paramètres > Alimentation** |
+| Réglages > Comptes du cluster | **Paramètres > Sécurité > Comptes du cluster** |
+| VMs du cluster courant | les **Machines virtuelles** de l'hôte |
+| VMs de tous les clusters, KVM > Machines virtuelles | **Machines virtuelles** (`#vms`), panneau Hôtes pour un hôte ou une famille |
+| `#containers` | les conteneurs de toute la flotte ; ceux d'un cluster : **Conteneurs** de l'hôte |
+| KVM > Hôtes, Stockage, Réseaux | la famille KVM (`#hosts/kvm`) et ses onglets Capacité, Pools, Réseaux, ou les **Paramètres** de l'hôte |
+| Import / export de VM | **Imports et migrations** de l'hôte ; tous les clusters : **Migrations** |
+
+Le CHANGELOG de la 2.0.0 donne le tableau complet, chaque ancien jeton
+compris.
+
+### Ranger des VMs, des conteneurs et des hôtes dans des dossiers
+
+Un dossier est partagé par tous ceux qui utilisent la console. Un objet
+(VM, charge de conteneurs, hôte) est dans un seul dossier, sans héritage :
+ranger un hôte ne range pas ses VMs (la fenêtre propose **Ranger aussi ses
+N VMs**, décoché).
+
+1. Ouvrir **Machines virtuelles** (`#vms`), **Conteneurs** ou l'index des
+   hôtes. Le panneau Dossiers, à gauche, montre l'arborescence, **Toutes les VMs**
+   et **Non rangées**, avec les compteurs de ce que vous voyez.
+2. Sélectionner des lignes et les glisser sur un dossier, ou **Déplacer
+   vers un dossier** sur une ligne ou une sélection, puis choisir le
+   dossier (recherche par nom).
+3. Lire les contrôles que la fenêtre montre, objet par objet, avant son
+   bouton : **écrit sur l'objet** (annotation d'une VM ou d'une charge
+   Harvester, métadonnées libvirt d'un domaine KVM, champ `folder` d'une
+   déclaration d'hôte), **console seulement** (vous ne pouvez pas écrire
+   l'objet, ou le cluster est déclaré dans `config.yaml` : le rangement est
+   gardé par la console, avec une pastille), ou **refusé** avec la raison et
+   quoi faire.
+4. Confirmer. L'action apparaît au dock, une ligne par objet, et reste dans
+   l'Activité.
+
+Créer, renommer et supprimer des dossiers depuis le panneau. Un dossier non
+vide ne se supprime pas : la fenêtre propose **Déplacer le contenu de...**
+vers un autre dossier, puis le supprime, en une action. Un nom déjà pris
+par un frère est refusé avant que rien ne parte.
+
+### Annuler et reprendre un geste sur les dossiers
+
+- **Annuler** : un rangement, renommage, déplacement, vidage ou une
+  annulation terminés proposent **Annuler** sur leur carte du dock, puis
+  dans l'Activité (aussi après un redémarrage de la console). L'annulation
+  remet exactement le dossier que chaque objet avait juste avant l'action.
+  Tout opérateur peut annuler le geste d'un autre ; l'annulation nomme les
+  deux personnes.
+- **Reprendre** : une action finie en erreur (un hôte injoignable en
+  chemin, un refus de webhook) ou arrêtée par l'arrêt de la console propose
+  **Reprendre**. Elle n'écrit que les objets que l'action n'a pas atteints ;
+  un objet fait n'est jamais réécrit, et un objet rangé ailleurs depuis est
+  laissé. En ligne de commande : `harvester-folders.py resume --action <id>`
+  et `undo --action <id>`.
+- Les objets que vous ne voyez pas (un cluster que Rancher vous masque, un
+  namespace que vous ne pouvez pas lire) ne sont jamais nommés dans les
+  étapes : ils sont comptés.
+
+### Rôles (2.0.0)
+
+| Geste | lecteur | opérateur | admin |
+|---|---|---|---|
+| Lire chaque écran, étoiler un hôte | oui | oui | oui |
+| Créer, renommer, supprimer un dossier vide, vider un dossier, ranger et déplacer des objets | non (grisé, avec la raison) | oui | oui |
+| Annuler ou reprendre un geste sur les dossiers, de n'importe qui | non | oui | oui |
+| Tester un hôte KVM | non | oui | oui |
+| Disaster Recovery : mesurer, protéger, suspendre, reprendre, déprotéger | non | oui | oui |
+| Disaster Recovery : bascule, déprotection qui supprime les sauvegardes, reprise de l'une ou l'autre | non | non | oui |
+| Ajouter un hôte, retirer un hôte KVM, modifier ses étiquettes, Joindre un nœud, Tester kubeconfig et SSH | non | non | oui |
+
+Un bouton que vous ne pouvez pas utiliser reste visible, grisé, avec le
+rôle qu'il faut dans son info-bulle ; le serveur applique la même règle.

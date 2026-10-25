@@ -95,7 +95,7 @@ The web UI re-streams the same events via Server-Sent Events (SSE) for real-time
 ## 6. Multi-cluster
 
 The configuration file `/etc/harvester-ops/config.yaml` declares all known clusters.
-Every command requires `--cluster <name>`. The web UI lets you switch clusters from a left-hand sidebar.
+Every command requires `--cluster <name>`. Since 2.0.0 the web UI lists every host (Harvester clusters and KVM hypervisors) in its side menu; see section 13.
 
 To list configured clusters:
 
@@ -112,7 +112,7 @@ harvester-status   --cluster prod --namespace tenant-a
 # (no per-namespace shutdown in v1.0 — use the web UI's namespace tab)
 ```
 
-In the web UI, the **Namespaces** tab lists each namespace with its VMs and lets you stop/start them as a group.
+In the web UI, **Virtual machines** of a Harvester host (`#harvester/<c>/vms`, the former Namespaces tab) lists each namespace with its VMs and lets you stop/start them as a group.
 
 ## 8. Real-time monitoring (Activity dock)
 
@@ -274,7 +274,7 @@ signed in.
 
 The menu of 1.x (cluster selector, per-cluster groups) is gone. Old links
 still open their screen: `#storage` opens Parameters > Storage of the last
-Harvester host visited, `#allvms` opens `#vms`, `#kvmhosts` the hosts index,
+Harvester host visited, `#allvms` opens `#vms`, `#kvmhosts` the KVM hosts index,
 `#forkliftglobal` Migrations; the CHANGELOG of 2.0.0 lists every old place
 and its new address. Opening the console without an address shows
 `#vms`; the first time after the upgrade, it shows the last screen you had
@@ -345,3 +345,83 @@ host on one screen (`#hosts/kvm/capacity`, `/pools`, `/networks`), each
 host name leading to its page. A link
 to a host you cannot see (removed, or outside your rights) opens this index
 with a notice. The index only reads the host list, never a host.
+
+### Find a 1.x screen
+
+Old links and bookmarks keep working: the console translates the 1.x token
+to its new address and rewrites the address bar. A token that belonged to
+one cluster opens that screen on the last Harvester host you visited (the
+first visible one otherwise); a KVM token opens the KVM family. The most
+used ones:
+
+| You looked for | Now |
+|---|---|
+| Cluster selector | **Hosts** in the side menu, or the hosts index `#hosts` |
+| Cluster > Overview, Events | the host's **Overview** (Events below the metrics) |
+| Cluster > Storage, Network, Add-ons, Security, Monitoring & Logging, Advanced | the host's **Parameters**, same tab names |
+| Cluster > Startup, Shutdown | **Parameters > Power** |
+| Settings > Cluster accounts | **Parameters > Security > Cluster accounts** |
+| Current cluster's VMs | the host's **Virtual machines** |
+| All clusters VMs, KVM > Virtual machines | **Virtual machines** (`#vms`), Hosts panel for one host or family |
+| `#containers` | the containers of the whole fleet; one cluster's: the host's **Containers** |
+| KVM > Hosts, Storage, Networks | the KVM family (`#hosts/kvm`) and its Capacity, Pools, Networks tabs, or the host's **Parameters** |
+| VM Import / Export | the host's **Imports and migrations**; all clusters: **Migrations** |
+
+The CHANGELOG of 2.0.0 has the complete table, every old token included.
+
+### File VMs, containers and hosts in folders
+
+A folder is shared by everyone who uses the console. An object (VM,
+container workload, host) is in one folder only, and nothing is inherited:
+filing a host does not file its VMs (the window offers **Also file its N
+VMs**, unchecked).
+
+1. Open **Virtual machines** (`#vms`), **Containers** or the hosts index.
+   The Folders panel on the left lists the tree, **All VMs** and **Unfiled**,
+   with the counts of what you can see.
+2. Select rows and drag them onto a folder, or use **Move to folder** on a
+   row or a selection, then pick the folder (search by name).
+3. Read the checks the window shows, object by object, before its button:
+   **written on the object** (annotation on a Harvester VM or workload,
+   libvirt metadata on a KVM domain, `folder` field of a host declaration),
+   **console only** (you may not write the object, or the cluster is
+   declared in `config.yaml`: the filing is kept by the console, with a
+   badge), or **refused** with the reason and what to do.
+4. Confirm. The action appears in the dock, one line per object, and stays
+   in Activity.
+
+Create, rename and delete folders from the panel. A folder that is not
+empty cannot be deleted: the window offers **Move the content of...** to
+another folder, then deletes it, in one action. A name already taken by a
+sibling is refused before anything starts.
+
+### Undo and resume a folder action
+
+- **Undo**: a finished assign, rename, move, empty-into or undo offers
+  **Undo** in its dock card, then in Activity (also after a console
+  restart). Undo puts back the exact folder each object had just before the
+  action. Any operator can undo another person's action; the undo names
+  both people.
+- **Resume**: an action that ended in error (a host unreachable in the
+  middle, a webhook refusal) or was stopped by the console shutdown offers
+  **Resume**. It writes only the objects the action did not reach; an
+  object done is never written again, and one filed elsewhere since is
+  left alone. On the command line: `harvester-folders.py resume --action
+  <id>` and `undo --action <id>`.
+- The objects you cannot see (a cluster Rancher hides from you, a namespace
+  you cannot read) are never named in the steps: they are counted.
+
+### Roles (2.0.0)
+
+| Gesture | viewer | operator | admin |
+|---|---|---|---|
+| Read every screen, star a host | yes | yes | yes |
+| Create, rename, delete an empty folder, empty a folder, file and move objects | no (greyed, with the reason) | yes | yes |
+| Undo or resume a folder action, anyone's | no | yes | yes |
+| Test a KVM host | no | yes | yes |
+| Disaster Recovery: measure, protect, pause, resume, unprotect | no | yes | yes |
+| Disaster Recovery: failover, unprotect deleting the backups, resuming either | no | no | yes |
+| Add a host, remove a KVM host, edit KVM labels, Join a node, Test kubeconfig and SSH | no | no | yes |
+
+A button you may not use stays visible, greyed, with the role it needs in
+its tooltip; the server applies the same rule.

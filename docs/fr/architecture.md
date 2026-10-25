@@ -4,7 +4,7 @@
 Poste d'exploitation
 └─ Conteneur harvester-ops  (registry.suse.com/bci/python:3.11)
    │
-   └─ Console Flask  (onglets sidebar · dock d'actions · flux SSE · multi-cluster)
+   └─ Console Flask  (menu des hôtes · dock d'actions · flux SSE · multi-hôtes)
         │
         ├──▶ bin/harvester-{shutdown,startup,status}.sh  — moteur de séquençage (SSE)
         ├──▶ kubectl  — cycle VM, topologie, status
@@ -110,12 +110,26 @@ d'API classiques.
   démarrage ; un paquet ou un provider choisi ensuite par l'exploitant n'est
   jamais écrasé par une nouvelle installation.
 
-## Modèle multi-cluster
+## Modèle multi-hôtes
 
-Un seul `config.yaml` déclare N clusters. Chaque commande CLI
-(`--cluster <nom>`) charge exactement le contexte d'un cluster. La sidebar
-de la console liste tous les clusters ; basculer ne fait que changer le
-contexte actif — pas d'opération cross-cluster en fan-out.
+Un hôte est un cluster Harvester entier ou un hyperviseur KVM, jamais un
+nœud Harvester. Les clusters sont déclarés dans `config.yaml` et dans
+`clusters.d/` (déclarations de la console), les hôtes KVM dans `kvm.d/`.
+Chaque commande CLI (`--cluster <nom>`, `--host <nom>`) charge exactement le
+contexte d'un hôte, et toute mutation agit sur des objets nommés d'hôtes
+nommés.
+
+La console lit la flotte d'un coup là où un écran en a besoin : le menu
+latéral (`GET /api/hosts`), Machines virtuelles
+(`/api/vms-all?kinds=harvester,kvm`), Conteneurs (`/api/containers-all`),
+GPU (`/api/gpus-all`) et les compteurs des dossiers. Ces lectures sont
+partagées entre les personnes qui obtiendraient la même réponse
+(`shared_read`) : la clé porte le kubeconfig rendu pour la personne quand la
+route nomme un cluster et, depuis la 2.0.0, l'identité que la personne
+présente aux clusters (session Rancher, ou utilisateur et groupes délégués,
+`_read_share_identity`) quand elle n'en nomme pas. Les comptes locaux sans
+délégation d'identité emploient tous le kubeconfig de la console et
+partagent encore une lecture par rôle.
 
 ## Navigation et adresses
 
@@ -175,6 +189,17 @@ Les modules ne lisent jamais un sélecteur de cluster (il n'y en a plus depuis l
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
 (cluster d'où Cluster API et Terraform gèrent, le dernier cluster visité
 sauf choix contraire) et `App.openHost(famille, nom, sub, onglet, pane)`.
+
+### Pages d'un hôte
+
+Une page d'hôte est un bandeau (famille, nom, état, version, nombre de VMs,
+sous-menu, Activité de cet hôte) posé au-dessus de la section existante que
+l'adresse désigne ; les sections elles-mêmes ne sont pas réécrites. Sur un
+hôte Harvester, les Paramètres sont des onglets sur les anciennes sections
+Cluster (`Sections.DEF` donne leurs panneaux) ; la Vue d'ensemble montre les
+métriques et, dessous, le bloc Événements, qui relit `/api/events/<c>`
+toutes les 20 s tant que la page est visible (un lecteur périodique de plus
+par personne qu'en 1.x, où Événements était un onglet).
 
 ### Liste des hôtes et favoris
 
@@ -259,6 +284,66 @@ de la vue Machines virtuelles et de la vue Dossiers, et les fenêtres
 vue Machines virtuelles (`#vms`, `#vms/folder/<id>`, `#vms/folder/unfiled`,
 `#vms/host/<famille>/<hôte>`) ; `FoldersView` (dans `folders.js`) est
 `#folders`.
+
+### Gestes sur les dossiers : contrôles, journal, annulation, reprise
+
+Avant un geste, `POST /api/folders/check` dit objet par objet ce qui va se
+passer : écrit sur l'objet (`kubectl auth can-i` avec l'identité de la
+personne, une revue par cluster, namespace et ressource ; hôte KVM joint et
+domaine persistant ; déclaration d'hôte modifiable), rangé dans la console
+seulement, ou refusé et pourquoi. La fenêtre montre ces lignes avant son
+bouton.
+
+Chaque geste est un `ActionRun` (dock, Activité) qui lance
+`harvester-folders.py` avec le rôle et le kubeconfig de la personne. L'outil
+écrit une ligne `moves` par objet (`pending`, puis `done`, `failed` ou
+`skipped`) avec la valeur lue sur l'objet juste avant de l'écrire, d'où :
+
+- **Annuler** (`POST /api/folders/actions/<id>/undo`) remet exactement
+  cette valeur ; ce dont le bouton a besoin est gardé dans la colonne
+  additive `undo` d'`actions.db`, donc après un redémarrage de la console,
+  et l'Activité le propose une fois la carte du dock partie.
+- **Reprendre** (`POST /api/folders/actions/<id>/resume`) finit seulement
+  les lignes `pending` et `failed` d'une action finie en erreur ou arrêtée
+  par l'arrêt de la console ; une ligne `done` n'est jamais réécrite, et un
+  objet rangé ailleurs depuis est laissé. Le serveur ajoute un chemin
+  `resume` à une telle action (`_folder_resume`), dont le dock et l'Activité
+  font un bouton.
+- Un objet que la personne ne voit pas (cluster masqué, namespace illisible)
+  n'est jamais nommé dans les étapes, la sortie ou `--json` : il est compté
+  (« 2 other objects not shown to you »), et sa vraie clé reste
+  dans le journal seulement.
+
+## Écrans de Disaster Recovery (2.0.0)
+
+Les écrans de réplication de la 1.101.0 (`web/static/js/replication.js`,
+`replication-plan.js`, `replication-create.js`...) sont placés dans la
+navigation, pas reconstruits : `#dr` liste les contrats, `#dr/<id>` ouvre la
+fenêtre d'un contrat au-dessus de la liste (la fermer rend `#dr`), et
+`#dr/links` liste les liens entre sites. Le Disaster Recovery d'un hôte
+Harvester (`#harvester/<c>/dr`) lit `GET
+/api/replication/hosts/harvester/<c>/resources` et montre les contrats où
+l'hôte est la source ou le site de secours ; `#kvm/<h>/dr` dit que la
+réplication KVM n'est pas encore disponible et ne lit rien. La pastille DR
+de la ligne d'un hôte dans le menu latéral compte ses alertes comme source
+et comme site de secours.
+
+Le navigateur ne porte aucune règle d'état : chaque bouton suit les
+`actions` de la ligne du contrat (`plan_row()` et `resource_row()` dans
+`bin/lib/replication.py`), chacune avec son `role`, `allowed` et `reason`.
+**Reprendre la commande**, dans la fenêtre d'un contrat, suit une action
+`resume-command` que la console ajoute à la ligne quand
+`replication_run.resumable` dit que la commande `resume` a quelque chose à
+finir, avec le rôle du geste qu'elle finit (admin pour une bascule).
+
+## Données de la console
+
+| Stockage | Contenu | Écrit par |
+|---|---|---|
+| `actions.db` (SQLite WAL) | chaque `ActionRun`, ses événements et son résultat, `undo` (2.0.0, colonne additive) | la console |
+| `folders.db` (SQLite WAL, 0600 avec ses `-wal` et `-shm`) | `favorites`, `folders`, `memberships` (cache), `moves` (journal) | la console (favoris, réalignement du cache pendant une lecture), `harvester-folders.py` (tout le reste) |
+| `replication.db` (SQLite WAL) | contrats, leurs VMs et volumes, passes, mesures, exécutions, événements | `harvester-replication.py`, son suiveur |
+| objets | annotation `harvester-ops.io/folder`, métadonnées libvirt, champ `folder` d'une déclaration d'hôte | `harvester-folders.py` |
 
 ## Flux d'événements SSE
 

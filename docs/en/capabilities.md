@@ -393,8 +393,12 @@ and a finished assign, rename, move, empty-into or undo offers **Undo**
 (`undo.path` in the action), in the dock then in the Activity tab, also
 after a console restart (`undo` kept in actions.db). Any operator may undo
 another person's action; the undo says whose action it was and who undoes
-it (first step, and `result` `{"undoes", "of", "by"}`). A KVM domain is designated by its UUID, which
-virsh accepts, so a renamed domain is still found.
+it (first step, and `result` `{"undoes", "of", "by"}`). An action that
+ended in error or was stopped by the console shutdown offers **Resume** in
+the dock and in Activity (`resume.path` in the action, set by the server):
+it finishes only the objects the action did not reach, and the resume of a
+resume targets the original action. A KVM domain is designated by its UUID,
+which virsh accepts, so a renamed domain is still found.
 
 `POST /api/folders/check` answers `{"objects": [{"key", "write", "outcome",
 "reason", "check"}]}`. `outcome` says what the move will do: `object` (the
@@ -795,10 +799,50 @@ versions.
 
 ## 3. Cluster observability (console)
 
+### Hosts: side menu, index and host pages (2.0.0)
+
+A host is a whole Harvester cluster or a KVM hypervisor. Since 2.0.0 the
+console is organised around hosts instead of one selected cluster; the
+correspondence of every 1.x screen with its new address is in the
+CHANGELOG (2.0.0) and in the operating procedure.
+
+- **Side menu.** Under **Hosts**, every Harvester cluster and every KVM
+  host in two foldable families, each family with a one-line summary (`58
+  ok, 2 in alert`). Each host has a state dot, its VM count, a star
+  (favourites are kept per person by the console, found again from another
+  computer) and, for a Harvester host, a badge of its Disaster Recovery
+  alerts. There is no cap: every host is listed, and a host in alert stays
+  visible in a folded family. The open host unfolds its sub-menu (Overview,
+  Virtual machines, Containers, Imports and migrations, Parameters,
+  Disaster Recovery). The search (`/`) filters hosts by name, label and
+  family and offers the VMs already read. **Add a host** offers Harvester
+  or KVM. Above and below: Folders, Virtual machines, Containers, Disaster
+  Recovery, Migrations, Shared resources, Automation and Activity, all real
+  links.
+- **Hosts index** (`#hosts`, `#hosts/harvester`, `#hosts/kvm`,
+  `#hosts/folder/<id>`): one table of every host with family, state,
+  version, labels, VMs, folder and favourite; sort and filter on each
+  column, **Move to folder** on a selection. The KVM family adds Declare a
+  host, Test and Remove per row, and three tabs over all KVM hosts:
+  Capacity, Pools and Networks.
+- **Harvester host page** (`#harvester/<c>`): a band (family, name, state,
+  version, VM count, sub-menu, Activity of this host) over the existing
+  sections. Overview = metrics with the Events block below; Parameters =
+  Nodes, Storage, Network, Add-ons, Security (with Cluster accounts),
+  Monitoring & Logging, Advanced, Upgrade, Power (Startup, Shutdown) and
+  Connection; Imports and migrations = VM Import and VMware migrations.
+  Clicking another Harvester host keeps the screen.
+- **KVM host page** (`#kvm/<h>`): see section 10.
+
+Every screen has an address after `#`: a link opens the exact screen and F5
+gives it back. The 1.x tokens (`#storage`, `#allvms`, `#kvmhosts`...) still
+open their screen.
+
 ### The Harvester sections, one cluster at a time (1.57.0)
 
 The sidebar groups, under Cluster, the menus operators know from Harvester,
-for whichever cluster is selected:
+for whichever cluster is selected (since 2.0.0: Parameters of each
+Harvester host, see above):
 
 - **Storage**: Volumes (the storage board: replicas, health, fixes),
   Images (source, size, state, storage class, the VMs using them) and
@@ -4026,7 +4070,11 @@ page, which keeps its address. In the journal of a contract, the Activity
 icon of an event leads to `#activity/action/<id>`: Activity filtered on
 that action, its detail open. In **Virtual machines**, a VM held by a
 contract carries a **DR** badge that leads to the contract; it is read
-again each time the view opens and every minute. Every gesture runs the command line
+again each time the view opens and every minute. The buttons follow the
+actions the server gives with each contract row (role, allowed, reason):
+**Resume command** appears only when the `resume` command has something to
+finish, greyed with the role it needs (admin to finish a failover).
+Every gesture runs the command line
 `harvester-replication` as a tracked action (dock and Activity); the
 screens never write by another path.
 

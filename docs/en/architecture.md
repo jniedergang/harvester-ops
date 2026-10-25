@@ -4,7 +4,7 @@
 Operator workstation
 └─ harvester-ops container  (registry.suse.com/bci/python:3.11)
    │
-   └─ Flask console  (sidebar tabs · action dock · SSE live feed · multi-cluster)
+   └─ Flask console  (host menu · action dock · SSE live feed · multi-host)
         │
         ├──▶ bin/harvester-{shutdown,startup,status}.sh  — power-sequencing engine (SSE)
         ├──▶ kubectl  — VM lifecycle, topology, status
@@ -108,12 +108,24 @@ lose data. The higher-level surfaces are conventional API clients.
   start; a bundle or provider the operator chooses later is never
   overwritten by a new installation.
 
-## Multi-cluster model
+## Multi-host model
 
-A single `config.yaml` declares N clusters. Each CLI command
-(`--cluster <name>`) loads exactly one cluster's context. The console
-sidebar lists every cluster; switching only changes the active context —
-there is no cross-cluster fan-out operation.
+A host is a whole Harvester cluster or a KVM hypervisor, never a Harvester
+node. Clusters are declared in `config.yaml` and in `clusters.d/` (console
+declarations), KVM hosts in `kvm.d/`. Each CLI command (`--cluster <name>`,
+`--host <name>`) loads exactly one host's context, and every mutation acts
+on named objects of named hosts.
+
+The console reads the fleet at once where a screen needs it: the side menu
+(`GET /api/hosts`), Virtual machines (`/api/vms-all?kinds=harvester,kvm`),
+Containers (`/api/containers-all`), GPU (`/api/gpus-all`) and the folder
+counts. These reads are shared between people who would get the same
+answer (`shared_read`): the key carries the kubeconfig rendered for the
+person when the route names a cluster, and since 2.0.0 the identity the
+person presents to the clusters (Rancher session, or delegated user and
+groups, `_read_share_identity`) when it does not. Local accounts without
+identity delegation all use the console's kubeconfig and still share one
+read per role.
 
 ## Navigation and addresses
 
@@ -170,6 +182,16 @@ Modules never read a cluster selector (there is none since 2.0.0): they use
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
 (cluster that Cluster API and Terraform manage from, the last cluster
 visited unless chosen) and `App.openHost(kind, name, sub, tab, pane)`.
+
+### Pages of a host
+
+A host page is a band (family, name, state, version, VM count, sub-menu,
+Activity of this host) on top of the existing section that the address
+selects; the sections themselves are not rewritten. On a Harvester host,
+Parameters are tabs over the former Cluster sections (`Sections.DEF` gives
+their panes); the Overview shows the metrics and, below, the Events block,
+which polls `/api/events/<c>` every 20 s while the page is visible (one more
+poller per viewer than in 1.x, where Events was a tab).
 
 ### Hosts list and favourites
 
@@ -247,6 +269,64 @@ Virtual machines view and of the Folders view, and the Move to folder and
 Move the content windows; `all-vms.js` is the Virtual machines view
 (`#vms`, `#vms/folder/<id>`, `#vms/folder/unfiled`,
 `#vms/host/<family>/<host>`); `FoldersView` (in `folders.js`) is `#folders`.
+
+### Folder actions: checks, journal, undo, resume
+
+Before a gesture, `POST /api/folders/check` tells object by object what will
+happen: written on the object (`kubectl auth can-i` with the person's
+identity, one review per cluster, namespace and resource; KVM host reached
+and domain persistent; host declaration writable), filed in the console
+only, or refused and why. The window shows these lines before its button.
+
+Each folder action is an `ActionRun` (dock, Activity) that runs
+`harvester-folders.py` with the person's role and kubeconfig. The tool
+writes one `moves` line per object (`pending`, then `done`, `failed` or
+`skipped`) with the value read on the object just before writing it, so:
+
+- **Undo** (`POST /api/folders/actions/<id>/undo`) puts back that exact
+  value; what the button needs is stored in the additive `undo` column of
+  `actions.db`, so it survives a console restart, and Activity offers it
+  after the dock card is gone.
+- **Resume** (`POST /api/folders/actions/<id>/resume`) finishes only the
+  `pending` and `failed` lines of an action that ended in error or was
+  stopped by the console shutdown; a `done` line is never rewritten, and an
+  object filed elsewhere since is left alone. The server adds a `resume`
+  path to such an action (`_folder_resume`), which the dock and Activity
+  turn into a button.
+- An object the person cannot see (hidden cluster, unreadable namespace) is
+  never named in the steps, the output or `--json`: it is counted ("2 other
+  objects not shown to you"), and its real key stays in the journal only.
+
+## Disaster Recovery screens (2.0.0)
+
+The replication screens of 1.101.0 (`web/static/js/replication.js`,
+`replication-plan.js`, `replication-create.js`...) are placed in the
+navigation, not rebuilt: `#dr` lists the contracts, `#dr/<id>` opens one
+contract's window on top of the list (closing it gives back `#dr`), and
+`#dr/links` lists the links between sites. A Harvester host's Disaster
+Recovery (`#harvester/<c>/dr`) reads `GET
+/api/replication/hosts/harvester/<c>/resources` and shows the contracts
+where the host is the source or the recovery site; `#kvm/<h>/dr` says that
+KVM replication is not available yet and reads nothing. The DR badge of a
+host line in the side menu counts its alerts as source and as recovery
+site.
+
+The browser holds no state rule: every button follows the `actions` of the
+contract row (`plan_row()` and `resource_row()` in
+`bin/lib/replication.py`), each with its `role`, `allowed` and `reason`.
+The contract window's **Resume command** follows a `resume-command` action
+that the console adds to the row when `replication_run.resumable` says the
+`resume` command has something to finish, with the role of the gesture it
+finishes (admin for a failover).
+
+## Console data stores
+
+| Store | Content | Written by |
+|---|---|---|
+| `actions.db` (SQLite WAL) | every `ActionRun`, its events and result, `undo` (2.0.0, additive column) | the console |
+| `folders.db` (SQLite WAL, 0600 with its `-wal` and `-shm`) | `favorites`, `folders`, `memberships` (cache), `moves` (journal) | the console (favourites, cache realignment during a read), `harvester-folders.py` (everything else) |
+| `replication.db` (SQLite WAL) | contracts, their VMs and volumes, passes, measures, runs, events | `harvester-replication.py`, its follower |
+| objects | annotation `harvester-ops.io/folder`, libvirt metadata, `folder` field of a host declaration | `harvester-folders.py` |
 
 ## SSE event stream
 
