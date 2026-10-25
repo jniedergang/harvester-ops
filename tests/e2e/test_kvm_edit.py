@@ -6,7 +6,8 @@ HOTNESS servie et l'état de la VM, réglages non gérés en lecture seule,
 modification mixte (spec partiel, empreinte rendue), revue classée par le
 serveur, résultat par changement, bandeau et badge « redémarrage nécessaire »,
 409 `changed` sans perte de saisie puis relecture de l'empreinte, VM
-transitoire en lecture seule, gestes du menu, noms hostiles, aucun secret dans
+transitoire en lecture seule, gestes de l'ancien menu passés par la fenêtre
+(1.101.3 : le menu ne garde que « Modifier »), noms hostiles, aucun secret dans
 un attribut du DOM."""
 
 import re
@@ -201,76 +202,114 @@ def test_cloud_init_secret_stays_in_the_textarea_value_only(ui):
     assert spec == {"cloudinit": {"user_data": "#cloud-config\nhostname: x\n", "network_data": None, "rerun": True}}
 
 
-def test_menu_offers_the_hot_gestures_per_disk_and_card(ui):
+# --- 1.101.3 : le groupe d'édition du menu ne garde que « Modifier » ; chaque geste
+# de l'ancien menu (CPU et mémoire, disques, médias, cartes, cloud-init) passe par la
+# fenêtre Modifier, envoyé en un PATCH partiel ---------------------------------------
+
+def last_patch_spec(state):
+    return [s for s in state["sent"] if s[0] == "PATCH"][-1][2]["spec"]
+
+
+def test_menu_editing_group_holds_edit_only_and_reads_nothing(ui):
     page, state, dialogs = ui
+    n = len(state["gets"])
     menu = open_menu(page, "kvmtest-1")
     grp = menu.locator("[data-kvm-hot-group]")
-    expect(grp.locator('[data-kvm-hot="remove-volume"][data-target="vda"]')).to_be_visible()
-    expect(grp.locator('[data-kvm-hot="insert-cdrom"][data-target="sdb"]')).to_be_visible()
-    expect(grp.locator('[data-kvm-hot="eject-image"][data-target="sdc"]')).to_be_visible()
-    assert grp.locator('[data-kvm-hot="eject-image"][data-target="sdb"]').count() == 0      # vide
-    expect(grp.locator('[data-kvm-hot="remove-nic"][data-mac="52:54:00:81:e2:fb"]')).to_be_visible()
-    for b in grp.locator("button").all():
-        assert b.get_attribute("data-tip"), b.inner_html()
-    # CPU et mémoire : la fenêtre du geste, le résultat par changement
-    grp.locator('[data-kvm-hot="cpumem"]').click()
-    dlg = page.locator('.floating-panel form[data-kvm-hot-op="cpumem"]')
-    expect(dlg).to_be_visible()
-    expect(dlg.locator('[data-h="hint"]')).to_contain_text("4 vCPUs and 4096 MiB")
-    dlg.locator('[name="vcpus"]').fill("3")
-    dlg.locator('[name="memory_mib"]').fill("5000")
-    dlg.locator('[data-h="go"]').click()
-    expect(dlg.locator('[data-h="result"] li[data-field="cpu.vcpus"] .vmf-applied')).to_have_text("applied now")
-    expect(dlg.locator('[data-h="result"] li[data-field="memory.current_mib"]')).to_contain_text("above the current maximum")
-    expect(dlg.locator(".vmf-restart")).to_contain_text("memory.max_mib")
-    sent = [s for s in state["sent"] if "/hot/" in s[1]][-1]
-    assert sent[1] == "vms/node2/kvmtest-1/hot/cpumem" and sent[2] == {"vcpus": 3, "memory_mib": 5000}
+    items = grp.locator("button")
+    expect(items).to_have_count(1)
+    assert items.first.get_attribute("data-kvm-hot") == "edit"
+    assert items.first.get_attribute("data-tip")
+    expect(items.first).to_contain_text("Edit")
+    # plus de lecture des disques et cartes à l'ouverture du menu
+    page.wait_for_timeout(300)
+    assert not [g for g in state["gets"][n:] if re.fullmatch(r"vms/node2/[^/]+", g)]
+    assert menu.locator('[data-kvm-hot]:not([data-kvm-hot="edit"])').count() == 0
     assert dialogs == []
 
 
-@pytest.mark.parametrize("op,attr,value,body", [
-    ("remove-volume", "data-target", "vda", {"target": "vda"}),
-    ("eject-image", "data-target", "sdc", {"target": "sdc"}),
-    ("remove-nic", "data-mac", "52:54:00:81:e2:fb", {"mac": "52:54:00:81:e2:fb"}),
-    ("insert-cdrom", "data-target", "sdb", {"target": "sdb", "pool": "images", "volume": "netinst.iso"}),
-])
-def test_device_gestures_send_their_target(ui, op, attr, value, body):
+def test_hot_cpu_and_memory_go_through_the_edit_window(ui):
     page, state, dialogs = ui
-    menu = open_menu(page, "kvmtest-1")
-    menu.locator(f'[data-kvm-hot="{op}"][{attr}="{value}"]').click()
-    dlg = page.locator(f'.floating-panel form[data-kvm-hot-op="{op}"]')
-    expect(dlg).to_be_visible()
-    if op == "insert-cdrom":
-        expect(dlg.locator('[name="iso"] option')).to_have_count(1)
-    else:
-        expect(dlg.locator('[data-h="hint"]')).to_contain_text(value)
-    dlg.locator('[data-h="go"]').click()
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text("Changes applied")
-    sent = [s for s in state["sent"] if "/hot/" in s[1]][-1]
-    assert sent[1] == f"vms/node2/kvmtest-1/hot/{op}" and sent[2] == body
+    panel = open_edit(page)
+    comp = tab(panel, "compute")
+    expect(badge(comp, "cpu.vcpus")).to_have_attribute("data-applied", "now")
+    expect(badge(comp, "memory.current_mib")).to_have_attribute("data-applied", "now")
+    comp.locator('[name="cpu.vcpus"]').fill("3")
+    comp.locator('[name="memory.current_mib"]').fill("3072")
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Changes applied")
+    assert last_patch_spec(state) == {"cpu": {"vcpus": 3}, "memory": {"current_mib": 3072}}
+    res = panel.locator('[data-kvmf="review"]')
+    expect(res.locator('li[data-field="cpu.vcpus"] .vmf-applied')).to_have_text("applied now")
     assert dialogs == []
 
 
-def test_add_disk_and_card_gestures_build_spec_items(ui):
+KEPT = [{"target": "vda"}, {"target": "sda"}, {"target": "sdb"}, {"target": "sdc"}]
+
+
+def keep(*changed):
+    """Les disques existants du spec : cible seule, sauf ceux changés."""
+    by = {c["target"]: c for c in changed}
+    return [by.get(d["target"], d) for d in KEPT if by.get(d["target"], d) is not None]
+
+
+@pytest.mark.parametrize("label,form_view,act,spec", [
+    ("remove disk", None,
+     lambda d: d.locator('tr[data-disk="vda"] [data-disk-remove]').check(),
+     {"disks": [{"target": "sda"}, {"target": "sdb"}, {"target": "sdc"}]}),
+    ("insert CD-ROM", None,
+     lambda d: d.locator('tr[data-disk="sdb"] [data-disk-field="source"]').select_option("images/netinst.iso"),
+     {"disks": keep({"target": "sdb", "source": {"kind": "iso", "pool": "images", "volume": "netinst.iso"}})}),
+    ("eject CD-ROM", {"pool": "images", "volume": "netinst.iso"},
+     lambda d: d.locator('tr[data-disk="sdb"] [data-disk-field="source"]').select_option(""),
+     {"disks": keep({"target": "sdb", "source": {"kind": "empty"}})}),
+])
+def test_disk_and_media_gestures_go_through_the_edit_window(ui, label, form_view, act, spec):
+    page, state, dialogs = ui
+    if form_view:
+        form = F.vm_form()
+        form["view"]["disks"][2] = dict(form["view"]["disks"][2], source=form_view, type="volume")
+        state["form"] = form
+    panel = open_edit(page)
+    disks = tab(panel, "disks")
+    act(disks)
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Changes applied")
+    assert last_patch_spec(state) == spec, label
+    assert not [s for s in state["sent"] if "/hot/" in s[1]]
+    assert dialogs == []
+
+
+def test_remove_card_goes_through_the_edit_window(ui):
     page, state, _ = ui
-    menu = open_menu(page, "kvmtest-1")
-    menu.locator('[data-kvm-hot="add-volume"]').click()
-    dlg = page.locator('.floating-panel form[data-kvm-hot-op="add-volume"]')
-    expect(dlg.locator('[name="pool"] option').first).to_be_attached()
-    dlg.locator('[name="size"]').fill("512M")
-    dlg.locator('[data-h="go"]').click()
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text("Changes applied")
-    assert [s for s in state["sent"] if "/hot/" in s[1]][-1][2] == {"disk": {
-        "device": "disk", "bus": "virtio", "source": {"kind": "blank", "pool": "images", "size_bytes": 512 * 2 ** 20, "format": "qcow2"}}}
-    menu = open_menu(page, "kvmtest-1")
-    menu.locator('[data-kvm-hot="add-nic"]').click()
-    dlg = page.locator('.floating-panel form[data-kvm-hot-op="add-nic"]')
-    expect(dlg.locator('[name="network"] option').first).to_be_attached()
-    dlg.locator('[name="mac"]').fill("52:54:00:AA:BB:01")
-    dlg.locator('[data-h="go"]').click()
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text("Changes applied")
-    assert [s for s in state["sent"] if "/hot/" in s[1]][-1][2] == {"nic": {
-        "kind": "network", "source": "default", "model": "virtio", "mac": "52:54:00:aa:bb:01"}}
+    panel = open_edit(page)
+    net = tab(panel, "network")
+    expect(net.locator('tr[data-nic="52:54:00:81:e2:fb"] [data-hot="nics[-]"] .vmf-applied')).to_have_attribute("data-applied", "now")
+    net.locator('tr[data-nic="52:54:00:81:e2:fb"] [data-nic-remove]').check()
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Changes applied")
+    assert last_patch_spec(state) == {"nics": [{"mac": "52:54:00:aa:bb:cc"}, {"mac": "52:54:00:2d:38:32"}]}
+
+
+def test_add_disk_and_card_go_through_the_edit_window(ui):
+    page, state, _ = ui
+    panel = open_edit(page)
+    disks = tab(panel, "disks")
+    ed = disks.locator('[data-editor="kvm-disks"]')
+    ed.locator('.tf-block-add[data-block="disk"]').click()
+    item = ed.locator(".tf-block-item").first
+    item.locator('[name$=".source"]').select_option("blank")
+    item.locator('[name$=".size"]').fill("512M")
+    net = tab(panel, "network")
+    ned = net.locator('[data-editor="kvm-nics"]')
+    ned.locator('.tf-block-add[data-block="nic"]').click()
+    ned.locator(".tf-block-item").first.locator('[name$=".mac"]').fill("52:54:00:AA:BB:01")
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Changes applied")
+    spec = last_patch_spec(state)
+    assert spec["disks"][:4] == KEPT
+    assert spec["disks"][4]["source"] == {"kind": "blank", "pool": "images", "size_bytes": 512 * 2 ** 20, "format": "qcow2"}
+    assert spec["nics"][:3] == [{"mac": "52:54:00:81:e2:fb"}, {"mac": "52:54:00:aa:bb:cc"}, {"mac": "52:54:00:2d:38:32"}]
+    assert spec["nics"][3]["mac"] == "52:54:00:aa:bb:01" and spec["nics"][3]["source"] == "default"
 
 
 def test_hostile_vm_name_stays_text_in_the_menu_window_and_dock(ui):
@@ -290,15 +329,15 @@ def test_hostile_vm_name_stays_text_in_the_menu_window_and_dock(ui):
     assert dialogs == []
 
 
-def test_viewer_sees_the_gestures_greyed_with_the_reason(ui):
+def test_viewer_sees_edit_greyed_with_the_reason(ui):
     page, state, _ = ui
     state["role"] = "viewer"
     menu = open_menu(page, "kvmtest-1")
-    item = menu.locator('[data-kvm-hot="cpumem"]')
+    item = menu.locator('[data-kvm-hot="edit"]')
     expect(item).to_have_attribute("aria-disabled", "true")
     assert item.get_attribute("data-tip") == "Needs the operator role"
     item.click(force=True)
-    assert page.locator('.floating-panel form[data-kvm-hot-op="cpumem"]').count() == 0
+    assert page.locator('.floating-panel .kvmf[data-kvmf-mode="edit"]').count() == 0
 
 
 def test_cloudinit_assistant_names_the_existing_cards_by_mac(ui):

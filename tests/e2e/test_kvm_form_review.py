@@ -9,8 +9,8 @@
 - fenêtre de création déjà ouverte : nouvel hôte et image appliqués, après
   accord si une saisie serait perdue ; réponse d'un hôte abandonné ignorée ;
 - aria-invalid sur le contrôle ;
-- cloud-init à chaud : « Appliquer » grisé tant que le seed n'est pas lu,
-  erreur de lecture gardée, vide seulement par « Vider » (clear) ;
+- cloud-init dans la fenêtre Modifier : rien n'est envoyé tant que le seed
+  n'est pas lu, erreur de lecture dite, vide seulement par « Vider » (clear) ;
 - relecture à trois voies après un 409 et annonce précoce par la relecture
   périodique ;
 - badge « redémarrage nécessaire » servi par la liste, repère local effacé
@@ -226,44 +226,39 @@ def test_a_late_answer_for_an_abandoned_host_is_ignored(ui):
     assert sel.input_value() == "node2"
 
 
-# --- cloud-init à chaud ------------------------------------------------------------------
+# --- cloud-init dans la fenêtre Modifier (1.101.3 : seul chemin depuis le menu) ----------
 
-def test_hot_cloud_init_apply_waits_for_the_current_seed(ui):
+def test_edit_window_sends_no_cloud_init_before_the_current_seed_is_read(ui):
     page, state, _ = ui
     state["hold"] = "vms/node2/kvmtest-1/cloudinit"
-    open_menu(page, "kvmtest-1").locator('[data-kvm-hot="cloudinit"]').click()
-    dlg = page.locator('.floating-panel form[data-kvm-hot-op="cloudinit"]')
-    go = dlg.locator('[data-h="go"]')
-    expect(go).to_be_disabled()
-    expect(dlg.locator('[data-ci="userData"]')).to_be_disabled()
-    page.wait_for_timeout(200)
+    panel = open_edit(page)
+    ci = tab(panel, "cloudinit")
+    ci.locator('[name="ci_rerun"]').check()
+    panel.locator('[data-kvmf="apply"]').click()
+    # seed pas encore lu : rien ne part (une zone vide effacerait le cloud-init)
+    expect(panel.locator("[data-result]")).to_contain_text("Nothing to change.")
+    assert not [s for s in state["sent"] if s[0] == "PATCH"]
     F.release(state)
-    expect(go).to_be_enabled()
-    expect(dlg.locator('[data-ci="userData"]')).to_have_value(re.compile(F.USER_SECRET))
-    # vidé à la main : refusé dans la fenêtre, rien n'est envoyé
-    dlg.locator('[data-ci="userData"]').fill("")
-    go.click()
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text('use "Clear user-data"')
-    assert not [s for s in state["sent"] if "/hot/" in s[1]]
-    # « Vider » : part avec clear
-    dlg.locator('[data-h="clear"]').click()
-    expect(dlg.locator('[data-h="cleared"]')).to_be_visible()
-    go.click()
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text("Changes applied")
-    sent = [s for s in state["sent"] if "/hot/" in s[1]][-1]
-    assert sent[1] == "vms/node2/kvmtest-1/hot/cloudinit"
-    assert sent[2] == {"user_data": "", "clear": True, "rerun": False}
+    ta = ci.locator('[data-ci="userData"]')
+    expect(ta).to_have_value(re.compile(F.USER_SECRET))
+    # seed lu : la relance part avec le user-data actuel
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Changes applied")
+    spec = [s for s in state["sent"] if s[0] == "PATCH"][-1][2]["spec"]
+    assert spec == {"cloudinit": {"user_data": f"#cloud-config\nchpasswd:\n  list: |\n    root:{F.USER_SECRET}\n",
+                                  "network_data": None, "rerun": True}}
 
 
-def test_hot_cloud_init_read_failure_keeps_apply_disabled(ui):
+def test_edit_window_cloud_init_read_failure_is_said_and_nothing_is_sent(ui):
     page, state, _ = ui
     state["ci_error"] = "node2: failed: the cloud-init seed images/x.iso could not be read"
-    open_menu(page, "kvmtest-1").locator('[data-kvm-hot="cloudinit"]').click()
-    dlg = page.locator('.floating-panel form[data-kvm-hot-op="cloudinit"]')
-    expect(dlg.locator('[data-h="msg"]')).to_contain_text("could not be read")
-    expect(dlg.locator('[data-h="go"]')).to_be_disabled()
-    expect(dlg.locator('[data-h="clear"]')).to_be_disabled()
-    assert not [s for s in state["sent"] if "/hot/" in s[1]]
+    panel = open_edit(page)
+    ci = tab(panel, "cloudinit")
+    expect(ci.locator("[data-ci-state]")).to_contain_text("could not be read")
+    ci.locator('[name="ci_rerun"]').check()
+    panel.locator('[data-kvmf="apply"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Nothing to change.")
+    assert not [s for s in state["sent"] if s[0] == "PATCH"]
 
 
 def test_edit_window_needs_clear_to_send_an_empty_user_data(ui):

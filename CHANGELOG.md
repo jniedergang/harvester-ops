@@ -4,6 +4,37 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
+
+### Changed
+- **The editing group of a KVM VM menu holds only Edit.** CPU and memory,
+  Add a disk, Add a card, Cloud-init, and the Remove, Insert and Eject
+  entries per disk, CD-ROM drive and card are gone from the menu. The Edit
+  window already does each of them, with the now / next boot mark of each
+  field: hot vCPU and memory, add a disk (blank, image, ISO, volume),
+  remove a disk (hot unplug where QEMU allows it), insert or eject the
+  media of a CD-ROM, add or remove a card, cloud-init with a new run.
+  The power, console, snapshot, clone and delete entries are unchanged.
+- **Opening the menu reads nothing.** The menu no longer fetches the disks
+  and cards of the VM each time it opens.
+- The `/hot/<op>` routes and `harvester-kvm vm <gesture>` stay for scripts.
+
+### Internal
+- Removed the hot gesture dialogs of the menu (`openHot`,
+  `fillMenuDevices`), their 32 strings in the five languages and their
+  styles.
+
+### Tests
+- e2e: the menu editing group holds exactly one entry, Edit, and opening
+  it reads nothing; a viewer sees Edit greyed with the reason.
+- e2e: each gesture of the old menu goes through the Edit window as a
+  partial PATCH: hot vCPU and memory, remove a disk, insert and eject a
+  CD-ROM media, remove a card, add a disk and a card, cloud-init run again
+  only once the current seed is read, nothing sent when the seed cannot be
+  read.
+- Source test: the menu group has a single button and no hot dialog code
+  is left.
+
 ## [1.101.2] - 2026-10-25 - Faster KVM windows
 
 ### Fixed
