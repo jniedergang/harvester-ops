@@ -226,6 +226,52 @@ knew. A folder annotation that is not a valid path is ignored and listed in
 Harvester and 16 KVM VMs, the UUIDs equal to `virsh list --all --uuid
 --name`.
 
+### Folders on the command line (2.0.0)
+
+`bin/harvester-folders.py` creates, renames, moves and deletes folders and
+files objects in them (VMs, container workloads, hosts). The windows of the
+console (to come) launch it as a tracked action; it also runs alone, on an
+air-gapped host, with the standard library only.
+
+```
+harvester-folders.py [--db F] [--json] [--as USER] [--role viewer|operator|admin] [--id=ACTION] COMMAND
+  tree
+  create --parent <id or /> --name N
+  rename --id I --name N [--spec F]          renames, then rewrites every object inside
+  move-folder --id I --parent <id or /> [--spec F]
+  delete --id I [--spec F]                   refused while anything is filed inside
+  assign --to <path or unfiled> --spec F     one journal line per object
+  resume --action A --spec F                 lines not done yet (interrupted, host down)
+  undo --action A --spec F                   back to the state before; conflicts said
+  apply-rename --id I --spec F               objects left under the former path
+  write-back --folder I --spec F             console-only filings the person may now write
+```
+
+The request (`--spec`) lists the objects, each with `kind` (`harvester`,
+`container`, `kvm`, `host`) and its fields (`cluster`, `namespace`, `name`,
+`workload_kind`, `host`, `domain`, `uuid`, `family`), `write` (false when
+the person may not write the object) and, from the console, the kubeconfig
+prepared for the person per cluster. The write on the object: an annotation
+patch checked first by the server in dry-run (a webhook refusal fails that
+line and the others go on), `virsh metadata` with `--config` and `--live`
+when the domain runs (a transient domain is written live and also kept by
+the console), the `folder` field of the host declaration. When the person
+may not write the object, or the cluster refuses the patch, the filing is
+kept by the console only; an object that carries a folder the person cannot
+change keeps it. A viewer reads the tree and changes nothing. Exit codes: 0
+done, 1 refused or an object failed, 2 invalid request (name, path, depth,
+length, unknown object).
+
+Checked for real: on harv1, a stopped then running VM and a Deployment
+filed, moved, undone and unfiled (annotation read back by `kubectl`, VM
+generation and VMI unchanged, no restart condition; a Deployment's
+generation goes up by one on any annotation change, as Kubernetes does,
+without a new ReplicaSet), a service account with the view role kept to
+the console, then written back with an operator kubeconfig; on node2, a
+diskless test domain filed while shut off and while running, the folder
+kept through a restart and by a clone, then removed; the 15 other domains
+byte for byte unchanged.
+
 ### Container workloads (1.91.0)
 
 Harvester 1.9.1 makes bare-metal container workloads generally available:

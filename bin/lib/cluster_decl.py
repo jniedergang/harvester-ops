@@ -90,6 +90,12 @@ def check_decl(doc, path):
         return f"name '{name}' does not match the file name"
     if not isinstance(doc.get("nodes", []), list):
         return "nodes must be a list"
+    # 2.0.0 : dossier de l'hôte (facultatif), écrit par harvester-folders.py
+    if doc.get("folder") is not None:
+        import folders
+        why = folders.check_path(doc["folder"])
+        if why:
+            return f"folder: {why}"
     return None
 
 

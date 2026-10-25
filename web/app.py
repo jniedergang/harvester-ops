@@ -11355,6 +11355,10 @@ def api_clusters_update(name):
             cluster["ssh"]["key"] == (original.get("ssh") or {}).get("key", "")
         if generated:
             cluster["ssh"]["generated"] = True
+        # 2.0.0 : le dossier de l'hôte n'est écrit que par harvester-folders.py
+        # (rôle operator) ; la fenêtre d'édition le garde tel quel
+        if original.get("folder") is not None:
+            cluster["folder"] = original["folder"]
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
         if cluster["name"] != name:
             if any(c.get("name") == cluster["name"] for c in load_config().get("clusters", [])):

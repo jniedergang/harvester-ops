@@ -246,6 +246,53 @@ qui n'est pas un chemin valide est ignorée et listée dans `folder_warnings`.
 Vérifié en réel sur harv1, gpudemo et node2 : 21 VMs Harvester et 16 VMs KVM,
 UUID identiques à `virsh list --all --uuid --name`.
 
+### Les dossiers en ligne de commande (2.0.0)
+
+`bin/harvester-folders.py` crée, renomme, déplace et supprime les dossiers,
+et y range des objets (VMs, charges de conteneurs, hôtes). Les fenêtres de
+la console (à venir) le lancent en action suivie ; il tourne aussi seul, sur
+un hôte airgap, avec la seule bibliothèque standard.
+
+```
+harvester-folders.py [--db F] [--json] [--as PERSONNE] [--role viewer|operator|admin] [--id=ACTION] COMMANDE
+  tree
+  create --parent <id ou /> --name N
+  rename --id I --name N [--spec F]          renomme, puis réécrit chaque objet rangé dedans
+  move-folder --id I --parent <id ou /> [--spec F]
+  delete --id I [--spec F]                   refusé tant que quelque chose y est rangé
+  assign --to <chemin ou unfiled> --spec F   une ligne de journal par objet
+  resume --action A --spec F                 lignes pas encore faites (interruption, hôte éteint)
+  undo --action A --spec F                   retour à l'état d'avant ; conflits dits
+  apply-rename --id I --spec F               objets restés sous l'ancien chemin
+  write-back --folder I --spec F             rangements de la console que la personne peut désormais écrire
+```
+
+La demande (`--spec`) liste les objets, chacun avec `kind` (`harvester`,
+`container`, `kvm`, `host`) et ses champs (`cluster`, `namespace`, `name`,
+`workload_kind`, `host`, `domain`, `uuid`, `family`), `write` (faux quand la
+personne n'a pas le droit d'écrire l'objet) et, depuis la console, le
+kubeconfig préparé pour la personne par cluster. L'écriture sur l'objet : un
+patch d'annotation contrôlé d'abord à blanc par le serveur (un refus du
+webhook fait échouer cette ligne, les autres continuent), `virsh metadata`
+avec `--config` et `--live` si le domaine tourne (un domaine transitoire est
+écrit à chaud et gardé aussi par la console), le champ `folder` de la
+déclaration de l'hôte. Quand la personne n'a pas le droit d'écrire l'objet,
+ou que le cluster refuse le patch, le rangement est gardé par la console
+seule ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
+Un lecteur lit l'arborescence et ne change rien. Codes de sortie : 0 fait,
+1 refus ou un objet en échec, 2 demande invalide (nom, chemin, profondeur,
+longueur, objet inconnu).
+
+Vérifié en réel : sur harv1, une VM arrêtée puis en marche et un Deployment
+rangés, déplacés, remis par Annuler puis sortis du dossier (annotation relue
+par `kubectl`, génération de la VM et VMI inchangées, aucune condition de
+redémarrage ; la génération d'un Deployment monte de un à tout changement
+d'annotation, comme le fait Kubernetes, sans nouveau ReplicaSet), un compte
+de service au rôle view gardé dans la console, puis écrit sur les objets
+avec un kubeconfig d'opérateur ; sur node2, un domaine de test sans disque
+rangé arrêté puis en marche, le dossier gardé après un redémarrage et par un
+clone, puis retiré ; les 15 autres domaines identiques à l'octet près.
+
 ### Charges de conteneurs (1.91.0)
 
 Harvester 1.9.1 passe en GA les conteneurs bare-metal : des charges

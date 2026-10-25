@@ -138,6 +138,12 @@ def check_decl(decl):
                     "without control characters")
         if len(set(pools)) != len(pools):
             return "image_pools lists a pool twice"
+    # 2.0.0 : dossier de l'hôte (facultatif), écrit par harvester-folders.py
+    if decl.get("folder") is not None:
+        import folders
+        why = folders.check_path(decl["folder"])
+        if why:
+            return f"folder: {why}"
     return None
 
 

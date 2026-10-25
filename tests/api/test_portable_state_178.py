@@ -345,3 +345,16 @@ def test_the_support_bundle_carries_the_console_declarations(env, monkeypatch, t
         assert "lab1" not in text and "192.0.2.50" not in text and "lab1" not in decls[0]
     else:
         assert decls[0] == "clusters.d/lab1.yaml" and "name: lab1" in text
+
+
+def test_editing_a_console_cluster_keeps_its_folder(env):
+    """2.0.0 : le champ `folder` (écrit par harvester-folders.py) survit à
+    une modification depuis Settings > Clusters, renommage compris."""
+    _put_decl(env["state"], _decl("lab1", folder="/Production/ERP"))
+    c = env["client"]
+    r = c.put("/api/clusters/lab1", json={"name": "lab1", "description": "edited", "nodes": [NODE]})
+    assert r.status_code == 200, r.get_json()
+    doc = yaml.safe_load((env["state"] / "clusters.d" / "lab1.yaml").read_text())
+    assert (doc["folder"], doc["description"]) == ("/Production/ERP", "edited")
+    r = c.put("/api/clusters/lab1", json={"name": "lab3", "description": "edited", "nodes": [NODE]})
+    assert yaml.safe_load((env["state"] / "clusters.d" / "lab3.yaml").read_text())["folder"] == "/Production/ERP"

@@ -202,6 +202,44 @@ def common_row(vm):
             "folder": folder, "folder_source": "vm" if folder else None}
 
 
+def folder_element(path):
+    """Élément XML posé par `virsh metadata --set` (libvirt y met l'espace de
+    noms et le préfixe donnés par --uri et --key)."""
+    return f'<folder path="{html.escape(path, quote=True)}"/>'
+
+
+def folder_commands(name, path, persistent, active):
+    """Arguments virsh qui posent (`path`) ou retirent (None) le dossier :
+    `--config` pour un domaine persistant, `--live` s'il tourne ; un domaine
+    transitoire n'a que `--live` (le dossier se perd à son arrêt)."""
+    base = ["metadata", "--domain", name, "--uri", kh.FOLDER_NS]
+    if path is None:
+        base.append("--remove")
+    else:
+        base += ["--key", kh.FOLDER_PREFIX, "--set", folder_element(path)]
+    if persistent:
+        base.append("--config")
+    if active:
+        base.append("--live")
+    return tuple(base)
+
+
+def set_folder(host, name, path, live=None):
+    """Pose ou retire le dossier d'un domaine. L'état est relu juste avant
+    (dominfo) : persistance et marche décident de `--config` / `--live`.
+    `live` force la marche (True/False) sans la relire. Rend
+    {"persistent", "live"} ; KvmError ou OpError en cas d'échec."""
+    check_vm_name(name)
+    info = kh.parse_dominfo(_need(host.batch({"info": ("dominfo", "--domain", name)},
+                                             idempotent=True), "info"))
+    active = (info["state"] or "").lower() not in ("shut off", "") if live is None else bool(live)
+    persistent = info["persistent"]
+    if not persistent and not active:
+        raise OpError("refused", f"{name} is neither persistent nor running")
+    _need(host.batch({"set": folder_commands(name, path, persistent, active)}), "set")
+    return {"persistent": persistent, "live": active}
+
+
 # --- petites aides ---------------------------------------------------------
 
 def _need(out, key):

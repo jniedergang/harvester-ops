@@ -98,6 +98,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   libvirt states map to the Harvester phases, and the folder comes from the
   object (annotation, libvirt metadata read in one virsh call per host),
   else from the console cache.
+- **Folders on the command line.** `bin/harvester-folders.py tree, create,
+  rename, move-folder, delete, assign, resume, undo, apply-rename,
+  write-back`: the folder is written on each object (annotation
+  `harvester-ops.io/folder` on VMs and Deployments, StatefulSets, DaemonSets,
+  CronJobs; libvirt metadata on KVM domains; `folder` field of the host
+  declaration), with one journal line per object for resume and undo. An
+  object the person may not write, or a cluster declared in config.yaml, is
+  filed in the console only. The operator role is needed to change
+  anything. Host declarations accept the optional `folder` field, and
+  editing a cluster in Settings keeps it.
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
@@ -175,6 +185,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   again domain by domain), the chained virsh call as one argument, an
   invalid annotation ignored and listed, the console fallback and a dropped
   `vm` filing in `/api/vms-all`.
+- `tests/api/test_folders_cli_200.py`: every command, the exact patch
+  (key, value, `null`) and virsh command (a path with an apostrophe and a
+  space quoted for the shell), a transient domain, a webhook refusal that
+  lets the other lines go on, an RBAC refusal kept in the console, an
+  unreachable host then resume, an interrupted rename resumed without
+  rewriting done lines, undo with a conflict, two simultaneous assigns, the
+  role, forged objects, exit codes, the YAML field edit, and a deliberate
+  mutation of the annotation key.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
   rule, object keys, rebuild from the objects alone, object against cache,
   three-level rename plan, move into its own subtree, undo with a conflict,
