@@ -158,7 +158,9 @@ def test_no_undo_when_a_hook_secret_changes_and_the_reason_is_said(ui):
 
 @pytest.mark.parametrize("change,message", [
     ("name", "renamed hook has no stored secret"),
-    ("url", "another host"),
+    ("url", "address or the method changed"),
+    ("path", "address or the method changed"),
+    ("method", "address or the method changed"),
 ])
 def test_hook_form_refuses_a_masked_secret_on_rename_or_new_host(ui, change, message):
     page, sent, _ = ui
@@ -167,8 +169,13 @@ def test_hook_form_refuses_a_masked_secret_on_rename_or_new_host(ui, change, mes
     view.locator('[data-rph-edit="0"]').click()
     if change == "name":
         view.locator('[name="h_name"]').fill("dns-2")
-    else:
+    elif change == "url":
         view.locator('[name="h_url"]').fill("https://other.example/erp")
+    elif change == "path":
+        url = view.locator('[name="h_url"]')
+        url.fill(url.input_value().split("/********")[0].rstrip("/") + "/other")
+    else:
+        view.locator('[name="h_method"]').select_option("DELETE")
     view.locator('[data-rph="keep"]').click()
     expect(view.locator('[data-rph="formmsg"]')).to_contain_text(message)
 

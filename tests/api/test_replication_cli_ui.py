@@ -99,16 +99,16 @@ def test_plan_set_recovery_keeps_masked_secrets_and_replaces_given_keys(tmp_path
     w = draft_world(tmp_path, vms=("vm-a", "vm-b"))
     _create_with_hooks(tmp_path, capsys, w)
     shown = run(capsys, w, "plan", "show", "plan-b")[1]["plan"]["options"]
-    # la personne renvoie ce qu'elle a lu (masqué), change une URL et ajoute un en-tête
+    # la personne renvoie ce qu'elle a lu (masqué), adresse comprise, et ajoute un en-tête
     hooks = shown["hooks"]
-    hooks[0]["url"] = "https://hooks.example/v2"
+    assert hooks[0]["url"] == "https://hooks.example/********"
     hooks[0]["secret_headers"]["X-Key"] = "k-new"
     rc, data, err = run(capsys, w, "plan", "set", "plan-b",
                         spec_file(tmp_path, {"recovery": {"hooks": hooks, "accept_degraded_standby": True}}))
     assert rc == 0, data
     stored = db.get_plan_by_name(w.conn, "plan-b")["options"]
     assert stored["hooks"][0]["secret_headers"] == {"Authorization": SECRET, "X-Key": "k-new"}
-    assert stored["hooks"][0]["url"] == "https://hooks.example/v2"
+    assert stored["hooks"][0]["url"] == "https://hooks.example/ok"       # adresse rangée reprise
     assert stored["waves"] and stored["resize"] and stored["accept_degraded_standby"] is True    # clés non données gardées
     assert data["changed"]["hooks"][0]["secret_headers"] == {"Authorization": rp.MASK, "X-Key": rp.MASK}
     assert "protect_needed" not in data
@@ -159,7 +159,7 @@ def test_hook_test_command(tmp_path, capsys, server):
     assert rc == 0, data
     assert set(data) == FAILURE_KEYS | {"plan", "hook", "status", "seconds"}
     assert data["status"] == 204 and data["hook"] == {"name": "ok", "at": "end", "method": "POST",
-                                                      "url": f"{server.url}/ok?********"}
+                                                      "url": f"{server.url}/********?********"}
     assert server.seen[-1]["headers"]["authorization"] == SECRET
     rc, data, err = run(capsys, w, "hook", "test", "plan-a", "--name=ko")
     assert rc == 1 and data["kind"] == "hook-failed" and data["status"] == 500

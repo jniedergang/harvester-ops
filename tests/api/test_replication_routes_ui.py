@@ -160,7 +160,7 @@ def test_settings_keep_a_masked_secret_and_never_show_it(client, env):
     _store_hooks(env, [HOOK])
     got = client.get(f"/api/replication/plans/{PID}").get_json()["plan"]["options"]["hooks"]
     assert got[0]["secret_headers"] == {"Authorization": "********"}
-    got[0]["url"] = "https://hooks.example/v2"
+    got[0]["timeout_s"] = 30
     r = client.patch(f"/api/replication/plans/{PID}/settings", json={"recovery": {"hooks": got}})
     assert r.status_code == 202, r.get_json()
     cmd = script_cmd()

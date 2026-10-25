@@ -31,7 +31,6 @@ const ReplicationCreate = (() => {
   const okBadge = (state, text) => `<span class="badge ${state === 'ok' ? 'ok' : (state === 'warn' ? 'warn' : 'fail')}" data-rpc-ready="${state}">${esc(text)}</span>`;
   const vmKey = (v) => `${v.namespace}/${v.name}`;
   /** Schéma, hôte et port d'une adresse (« » si illisible). */
-  const originOf = (u) => { try { const x = new URL(u); return `${x.protocol}//${x.host}`; } catch (e) { return ''; } };
 
   // ===========================================================================
   // Éditeur de reprise (bloc 4), partagé avec les réglages d'un contrat
@@ -201,9 +200,10 @@ const ReplicationCreate = (() => {
       Object.entries(prevSec).forEach(([k, x]) => { if (k !== first) h.secret_headers[k] = x; });
       if (v('h_sname').trim()) h.secret_headers[v('h_sname').trim()] = v('h_svalue');
       const masked = Object.values(h.secret_headers).includes(MASK);
-      // même règle que le serveur : un secret masqué ne suit ni un renommage ni un autre hôte
+      // même règle que le serveur : un secret masqué ne suit ni un renommage,
+      // ni une autre adresse (chemin compris), ni une autre méthode
       if (masked && prev && prev.name !== h.name) errs.push(tr('rp.hook.errRenameSecret'));
-      else if (masked && prev && originOf(prev.url) !== originOf(h.url)) errs.push(tr('rp.hook.errUrlSecret'));
+      else if (masked && prev && (prev.url !== h.url || (prev.method || 'POST') !== h.method)) errs.push(tr('rp.hook.errUrlSecret'));
       if (errs.length) { m.innerHTML = `<span class="res-error">${esc(errs.join(' · '))}</span>`; return; }
       if (st.editing === -1) st.hooks.push(h); else st.hooks[st.editing] = h;
       st.editing = null;

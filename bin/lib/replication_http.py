@@ -88,9 +88,36 @@ def same_origin(a, b):
     return oa is not None and oa == origin(b)
 
 
+def same_target(a, b):
+    """Même destination exacte : schéma, hôte, port effectif, chemin et
+    requête. Un secret rangé ne suit qu'une adresse inchangée (un autre
+    chemin du même hôte peut être une autre API, ou un autre locataire)."""
+    if not same_origin(a, b):
+        return False
+    try:
+        ua, ub = urlsplit(a), urlsplit(b)
+    except ValueError:
+        return False
+    return (ua.path or "/", ua.query) == (ub.path or "/", ub.query)
+
+
+def mask_path(path):
+    """Le chemin tel qu'il se montre : le premier segment, le reste
+    remplacé par `/********` (un jeton y est souvent porté : Slack, Discord,
+    Teams) ; un seul segment devient `/********` ; vide ou `/` restent."""
+    if not path or path == "/":
+        return path or ""
+    parts = path[1:].split("/") if path.startswith("/") else path.split("/")
+    if len(parts) == 1:
+        return "/" + MASK
+    return f"/{parts[0]}/{MASK}"
+
+
 def mask_url(url):
-    """L'adresse telle qu'elle se montre : schéma, hôte, port et chemin ;
-    requête remplacée par `********`, identifiants et fragment retirés."""
+    """L'adresse telle qu'elle se montre, la même pour tous les rôles (les
+    sorties et le journal sont partagés) : schéma, hôte, port, premier
+    segment du chemin (`mask_path`) ; requête remplacée par `********`,
+    identifiants et fragment retirés."""
     if not isinstance(url, str) or not url:
         return url
     try:
@@ -101,7 +128,7 @@ def mask_url(url):
     if not u.hostname:
         return MASK
     host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
-    out = f"{u.scheme}://{host}" + (f":{port}" if port else "") + (u.path or "")
+    out = f"{u.scheme}://{host}" + (f":{port}" if port else "") + mask_path(u.path)
     if u.query:
         out += "?" + MASK
     return out

@@ -167,28 +167,34 @@ def test_hook_addresses_are_checked_when_saved(url, allow, resolver, code):
 
 
 # ---------------------------------------------------------------------------
-# I1 : secret masqué gardé seulement vers la même adresse
+# I1 / m1 : secret masqué gardé seulement pour la même requête (adresse
+# exacte et méthode)
 # ---------------------------------------------------------------------------
 
 STORED = _hook("https://dns.example:8443/api/switch?key=" + QTOKEN)
 
 
-@pytest.mark.parametrize("url,ok", [
-    ("https://dns.example:8443/api/v2", True),                     # autre chemin, même origine
-    ("https://DNS.example:8443/other", True),                      # casse de l'hôte
-    ("https://attacker.example:8443/api/switch", False),           # autre hôte
-    ("https://dns.example:9443/api/switch", False),                # autre port
-    ("http://dns.example:8443/api/switch", False),                 # autre schéma
-    ("https://dns.example/api/switch", False),                     # port par défaut 443 != 8443
+@pytest.mark.parametrize("url,method,ok", [
+    (STORED["url"], "POST", True),                                         # inchangée
+    ("https://DNS.example:8443/api/switch?key=" + QTOKEN, "POST", True),   # casse de l'hôte
+    ("https://dns.example:443/api/switch?key=" + QTOKEN, "POST", False),   # port explicite différent
+    ("https://dns.example:8443/api/v2?key=" + QTOKEN, "POST", False),      # autre chemin, même hôte
+    ("https://dns.example:8443/api/switch/?key=" + QTOKEN, "POST", False),  # barre finale
+    ("https://dns.example:8443/api/switch", "POST", False),                # requête retirée
+    ("https://dns.example:8443/api/switch?key=other", "POST", False),      # autre requête
+    (STORED["url"], "DELETE", False),                                      # autre méthode
+    ("https://attacker.example:8443/api/switch?key=" + QTOKEN, "POST", False),  # autre hôte
+    ("https://dns.example:9443/api/switch?key=" + QTOKEN, "POST", False),       # autre port
+    ("http://dns.example:8443/api/switch?key=" + QTOKEN, "POST", False),        # autre schéma
 ])
-def test_a_masked_secret_follows_the_hook_only_to_the_same_origin(url, ok):
-    new = [dict(STORED, url=url, secret_headers={"Authorization": rp.MASK})]
+def test_a_masked_secret_follows_the_hook_only_to_the_same_request(url, method, ok):
+    new = [dict(STORED, url=url, method=method, secret_headers={"Authorization": rp.MASK})]
     if ok:
         assert rp.keep_hook_secrets(new, [STORED])[0]["secret_headers"] == {"Authorization": SECRET}
     else:
         with pytest.raises(rp.PlanError) as e:
             rp.keep_hook_secrets(new, [STORED])
-        assert e.value.code == "secret-missing" and "address changed" in str(e.value)
+        assert e.value.code == "secret-missing" and "changed" in str(e.value)
 
 
 def test_a_new_secret_value_may_go_with_a_new_address():
@@ -198,10 +204,10 @@ def test_a_new_secret_value_may_go_with_a_new_address():
 
 def test_the_masked_url_sent_back_keeps_the_stored_url_and_an_edited_one_is_refused():
     shown = rp.mask_options({"hooks": [STORED]})["hooks"][0]
-    assert QTOKEN not in json.dumps(shown) and shown["url"] == "https://dns.example:8443/api/switch?********"
+    assert QTOKEN not in json.dumps(shown) and shown["url"] == "https://dns.example:8443/api/********?********"
     kept = rp.keep_hook_secrets([shown], [STORED])[0]
     assert kept["url"] == STORED["url"] and kept["secret_headers"] == {"Authorization": SECRET}
-    edited = dict(shown, url="https://dns.example:8443/api/other?********")
+    edited = dict(shown, url="https://dns.example:8443/api/v2/********?********")
     got = rp.keep_hook_secrets([dict(edited, secret_headers={})], [STORED])
     with pytest.raises(rp.PlanError) as e:
         rp._hooks(got, 0)
@@ -227,9 +233,11 @@ def _mail(**kw):
     (_matrix(), _matrix(token=rn.MASK), None),
     (_matrix(), _matrix(homeserver="https://attacker.example", token=rn.MASK), "secret-missing"),
     (_matrix(), _matrix(homeserver="https://attacker.example", token="new-token"), None),
-    (_webhook(), _webhook(url="https://hook.example/in?********", secret_headers={"Authorization": rn.MASK}),
+    (_webhook(), _webhook(url="https://hook.example/********?********", secret_headers={"Authorization": rn.MASK}),
      None),
-    (_webhook(), _webhook(url="https://hook.example/other", secret_headers={"Authorization": rn.MASK}), None),
+    (_webhook(), _webhook(url="https://hook.example/other", secret_headers={"Authorization": rn.MASK}),
+     "secret-missing"),
+    (_webhook(), _webhook(url="https://hook.example/other", secret_headers={"Authorization": "fresh"}), None),
     (_webhook(), _webhook(url="https://evil.example/in", secret_headers={"Authorization": rn.MASK}),
      "secret-missing"),
     (_webhook(), _webhook(url="https://hook.example/x?********"), "bad-notify"),
@@ -245,8 +253,9 @@ def test_notification_secrets_are_kept_only_for_the_same_server(stored, sent, co
             if f in stored and sent.get(f) == rn.MASK:
                 assert got[f] == stored[f]
         if stored["kind"] == "webhook":
-            assert got["secret_headers"] == {"Authorization": SECRET}
-            assert got["url"] == (stored["url"] if "?" in sent["url"] else sent["url"])
+            masked = rn.MASK in sent["url"]
+            assert got["secret_headers"] == {"Authorization": SECRET if masked else "fresh"}
+            assert got["url"] == (stored["url"] if masked else sent["url"])
         return
     with pytest.raises(rn.NotifyError) as e:
         rn.normalize({"channels": [sent]}, old)
@@ -326,15 +335,25 @@ def test_notification_addresses_are_checked_when_saved(chan, allow, code):
 
 
 # ---------------------------------------------------------------------------
-# I3 : adresses montrées sans requête
+# I3 / m6 : adresses montrées sans requête ni jeton de chemin
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("url,shown", [
-    ("https://h.example/a/b?token=x&y=2", "https://h.example/a/b?********"),
-    ("https://h.example:8443/a", "https://h.example:8443/a"),
+    ("https://h.example/a/b?token=x&y=2", "https://h.example/a/********?********"),
+    ("https://h.example:8443/a", "https://h.example:8443/********"),
     ("http://h.example", "http://h.example"),
-    ("https://user:pw@h.example/a?x=1#frag", "https://h.example/a?********"),
-    ("http://[2001:db8::1]:8080/p?q=1", "http://[2001:db8::1]:8080/p?********"),
+    ("http://h.example/", "http://h.example/"),
+    ("https://h.example/hooks/", "https://h.example/hooks/********"),
+    ("https://h.example/a%2Fb/c%20d", "https://h.example/a%2Fb/********"),
+    ("https://user:pw@h.example/a?x=1#frag", "https://h.example/********?********"),
+    ("http://[2001:db8::1]:8080/p?q=1", "http://[2001:db8::1]:8080/********?********"),
+    # forme Slack, Discord, Mattermost, Teams : le jeton ne se montre jamais
+    ("https://hooks.slack.com/services/T0/B0/XXX", "https://hooks.slack.com/services/********"),
+    ("https://discord.com/api/webhooks/1/tok", "https://discord.com/api/********"),
+    ("https://mm.corp/hooks/abc", "https://mm.corp/hooks/********"),
+    ("https://x.webhook.office.com/webhookb2/g-u-i-d/IncomingWebhook/a/b",
+     "https://x.webhook.office.com/webhookb2/********"),
+    ("https://h/notify", "https://h/********"),
     ("not a url", rh.MASK),
     ("", ""),
 ])
@@ -342,11 +361,23 @@ def test_mask_url(url, shown):
     assert rh.mask_url(url) == shown
 
 
+def test_a_masked_path_round_trips_and_an_edited_one_is_refused():
+    stored = dict(STORED, url="https://hooks.slack.com/services/T0/B0/XXX")
+    shown = rp.mask_options({"hooks": [stored]})["hooks"][0]
+    assert "T0" not in json.dumps(shown) and "XXX" not in json.dumps(shown)
+    kept = rp.keep_hook_secrets([shown], [stored])[0]
+    assert kept["url"] == stored["url"] and kept["secret_headers"] == {"Authorization": SECRET}
+    edited = dict(shown, url="https://hooks.slack.com/services/T1/********", secret_headers={})
+    with pytest.raises(rp.PlanError) as e:
+        rp._hooks(rp.keep_hook_secrets([edited], [stored]), 0)
+    assert "type the full url again" in str(e.value)
+
+
 def test_hooks_summary_and_notify_mask_hide_the_query():
     opts = {"hooks": [STORED]}
     assert QTOKEN not in json.dumps(rp.hooks_summary(opts)) and QTOKEN not in json.dumps(rp.mask_options(opts))
     shown = rn.mask(rn.normalize({"channels": [_webhook()]}))
-    assert QTOKEN not in json.dumps(shown) and shown["channels"][0]["url"] == "https://hook.example/in?********"
+    assert QTOKEN not in json.dumps(shown) and shown["channels"][0]["url"] == "https://hook.example/********?********"
 
 
 # ---------------------------------------------------------------------------

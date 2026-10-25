@@ -408,5 +408,6 @@ def test_hooks_at_and_summary():
     opts = {"hooks": hooks}
     assert [h["name"] for h in rp.hooks_at(opts, "start")] == ["a", "c"]
     assert rp.hooks_at(opts, "end") == []
-    assert rp.hooks_summary(opts)[1] == {"name": "b", "at": "wave:1", "method": "POST", "url": HOOK["url"]}
+    assert rp.hooks_summary(opts)[1] == {"name": "b", "at": "wave:1", "method": "POST",
+                                        "url": "https://hooks.example/********"}
     assert "secret_headers" not in rp.hooks_summary(opts)[0]

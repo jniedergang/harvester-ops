@@ -599,9 +599,9 @@ def _hook_url(v, what):
         # un identifiant va dans `secret_headers`, masqués
         raise PlanError("bad-option", f"{what}: no credentials in the url, use secret_headers")
     if MASK in v:
-        # adresse montrée masquée (`mask_url`) et renvoyée modifiée : la
-        # requête rangée est cachée, elle ne se recolle pas
-        raise PlanError("bad-option", f"{what}: the stored query of the url is hidden, type the full url again")
+        # adresse montrée masquée (`mask_url`) et renvoyée modifiée : le
+        # chemin et la requête rangés sont cachés, ils ne se recollent pas
+        raise PlanError("bad-option", f"{what}: the stored url is partly hidden, type the full url again")
     return v
 
 
@@ -718,8 +718,10 @@ def keep_hook_secrets(new_hooks, stored_hooks):
     - une adresse égale à l'adresse rangée masquée (`mask_url`) reprend
       l'adresse rangée (requête comprise) ;
     - un en-tête secret `MASK` reprend la valeur rangée, SEULEMENT si
-      l'adresse garde le schéma, l'hôte et le port rangés : sinon un
-      opérateur enverrait le secret ailleurs (PlanError `secret-missing`).
+      l'adresse (schéma, hôte, port, chemin, requête) et la méthode restent
+      les mêmes : sinon un opérateur enverrait le secret ailleurs, ou
+      ferait un autre appel avec les droits d'un autre (PlanError
+      `secret-missing`).
     Sans valeur rangée (action nouvelle ou renommée), PlanError aussi."""
     import replication_http as rh
     if not isinstance(new_hooks, list):
@@ -740,8 +742,11 @@ def keep_hook_secrets(new_hooks, stored_hooks):
             if not old:
                 raise PlanError("secret-missing", f"hook {name}: no stored secret under this name (new or renamed "
                                                   "hook): type the secret header values again")
-            if not rh.same_origin(h.get("url"), old.get("url")):
+            if not rh.same_target(h.get("url"), old.get("url")):
                 raise PlanError("secret-missing", f"hook {name}: the address changed, type the secret header "
+                                                  "values again")
+            if (h.get("method") or "POST") != (old.get("method") or "POST"):
+                raise PlanError("secret-missing", f"hook {name}: the method changed, type the secret header "
                                                   "values again")
             kept = {}
             for k, v in sec.items():
@@ -756,8 +761,9 @@ def keep_hook_secrets(new_hooks, stored_hooks):
 
 def mask_options(options):
     """Les options sans secret : chaque valeur d'un en-tête secret devient
-    `MASK`, l'adresse perd sa requête (`mask_url` : un jeton y est souvent
-    porté). Lectures, sorties, journal."""
+    `MASK`, l'adresse ne garde que son hôte et le premier segment de son
+    chemin (`mask_url` : un jeton y est souvent porté). Lectures, sorties,
+    journal."""
     import replication_http as rh
     if not isinstance(options, dict) or not options.get("hooks"):
         return options

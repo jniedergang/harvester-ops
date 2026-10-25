@@ -136,8 +136,9 @@ def _channel(raw, stored):
     if not isinstance(cid, str) or not _ID_RE.match(cid):
         raise NotifyError("bad-notify", "channel id: lowercase letters, digits and dashes (40 at most)")
     # secrets gardés seulement d'un canal de même id ET de même nature, et
-    # pour un jeton ou des en-têtes, vers la même adresse (schéma, hôte,
-    # port) : sinon le secret partirait ailleurs
+    # pour un jeton, vers le même serveur Matrix (schéma, hôte, port), pour
+    # des en-têtes, vers la même adresse exacte (chemin et requête compris) :
+    # sinon le secret partirait ailleurs
     old = stored if stored and stored.get("kind") == kind else {}
     out = {"id": cid, "name": _text(raw.get("name") or "", "name", 80, empty=True), "kind": kind}
     if kind == "matrix":
@@ -157,12 +158,12 @@ def _channel(raw, stored):
             url = old["url"]                    # adresse renvoyée masquée : celle rangée
         out["url"] = _url(url, "url")
         if MASK in out["url"]:
-            raise NotifyError("bad-notify", "url: the stored query is hidden, type the full url again")
+            raise NotifyError("bad-notify", "url: the stored url is partly hidden, type the full url again")
         out["headers"] = _headers(raw.get("headers"), "headers")
         sh = raw.get("secret_headers") or {}
         if not isinstance(sh, dict):
             raise NotifyError("bad-notify", "secret_headers: an object is expected")
-        same = rh.same_origin(out["url"], old.get("url"))
+        same = rh.same_target(out["url"], old.get("url"))
         if not same and MASK in sh.values() and old.get("secret_headers"):
             raise NotifyError("secret-missing", "secret_headers: the url changed, type the values again")
         old_sh = (old.get("secret_headers") or {}) if same else {}

@@ -139,3 +139,18 @@ def test_plan_view_never_shows_the_baseline(client, env):
         conn.close()
     got = client.get(f"/api/replication/plans/{PID}").get_json()["carnet_stale"]
     assert got["keys"] == ["mac"] and "baseline" not in got
+
+
+# ---------------------------------------------------------------------------
+# m1 : la route refuse un secret masqué pour un autre chemin
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("field,value", [("url", "https://hooks.example/other"), ("method", "DELETE")])
+def test_settings_route_refuses_a_masked_secret_for_another_request(client, env, field, value):
+    from test_replication_routes_ui import HOOK, _store_hooks
+    _store_hooks(env, [HOOK])
+    got = client.get(f"/api/replication/plans/{PID}").get_json()["plan"]["options"]["hooks"]
+    assert got[0]["url"] == "https://hooks.example/********"
+    got[0][field] = value
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json={"recovery": {"hooks": got}})
+    assert r.status_code == 400 and r.get_json()["code"] == "secret-missing", r.get_json()

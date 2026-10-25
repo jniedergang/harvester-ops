@@ -221,9 +221,9 @@ def test_dry_run_lists_waves_and_hooks_without_calling_them(tmp_path, server):
         {"index": 1, "name": "db", "vms": ["default/vm-b"], "gate": {"kind": "delay", "seconds": 10}},
         {"index": 2, "name": "", "vms": ["default/vm-a"], "gate": {"kind": "running", "seconds": 0},
          "implicit": True}]
-    # adresse montrée sans sa requête (un jeton y est souvent porté)
+    # adresse montrée sans sa requête ni la fin de son chemin (un jeton y est souvent porté)
     assert res["hooks"] == [{"name": "announce", "at": "start", "method": "POST",
-                             "url": f"{server.url}/ok?********"}]
+                             "url": f"{server.url}/********?********"}]
     assert "h=announce" not in json.dumps(res)
     assert server.seen == [] and "t0p" not in json.dumps(res)
     assert w.plan()["state"] == "protected"

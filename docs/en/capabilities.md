@@ -3167,16 +3167,21 @@ again a hook it already called. `hook test` calls one hook at once.
 everywhere else: the plan read by the console, `plan show --json`, `plan
 create` and `plan set` outputs, the journal and Activity. Sending
 `********` back on a change keeps the stored value of that header, only
-when the hook keeps its name and the scheme, host and port of its stored
-URL. Otherwise the change is refused with `secret-missing` ("the address
-changed, type the secret header values again"), so an operator cannot send
-a stored secret elsewhere. A `********` without a stored value (new or
-renamed hook) is refused the same way. The URL is shown without its query
-(`https://host/path?********`), which often carries a token, in every read,
-output, journal entry and Activity line: sending that masked URL back
-keeps the stored one; editing it means typing the full URL again. A token
-in the path (some incoming webhooks) is still shown: put it in a secret
-header when the service allows it. They never travel on a
+when the hook keeps its name, its method and its exact stored URL (scheme,
+host, port, path and query). Otherwise the change is refused with
+`secret-missing` ("the address changed" or "the method changed, type the
+secret header values again"), so an operator can neither send a stored
+secret elsewhere nor make another call with someone else's credential. A
+`********` without a stored value (new or renamed hook) is refused the same
+way. The URL is shown with its scheme, host, port and the first segment of
+its path only, the same for every role: the rest of the path becomes
+`/********` (a single segment becomes `/********`) and the query
+`?********`, because incoming webhooks carry their token there
+(`https://hooks.slack.com/services/T0/B0/XXX` is shown
+`https://hooks.slack.com/services/********`). This holds in every read,
+output, journal entry, Activity line and action label: sending that masked
+URL back keeps the stored one; editing it means typing the full URL
+again. They never travel on a
 command line: the console passes them to the script in its private spec
 file.
 
@@ -3327,11 +3332,12 @@ first round after an upgrade starts at the end of the journal (nothing old
 is sent). A shell follower sends only with `follow --all --notify`.
 Secrets (Matrix token, Slack URL, secret header values, mail password) are
 shown as `********` on every read (API, command line output, journal,
-Activity), and a webhook URL without its query. Writing `********` back
+Activity), and a webhook URL masked as for hooks (first path segment
+only, `?********` for the query). Writing `********` back
 keeps the stored value, so a screen can send the settings it read, but only
 towards the same server: a Matrix token is kept only when the homeserver
 keeps its scheme, host and port, webhook secret headers only for the same
-URL origin, a mail password only for the same SMTP host and port
+exact URL (path and query included), a mail password only for the same SMTP host and port
 (`secret-missing` otherwise). Every call goes through the SSRF guard
 (internal addresses refused unless allowed by
 `replication.notifications.allow_private`, redirects never followed, the
@@ -3485,7 +3491,7 @@ is ready, and nothing is written before **Create**:
    stopped after the failover, and annex HTTP actions (when, method, URL,
    headers, one secret header whose value is masked once kept, body,
    timeout). An annex action can be tried once the contract exists. A
-   renamed action, or one whose URL names another host, asks for its secret
+   renamed action, or one whose URL or method changed, asks for its secret
    again; other secret headers set from the command line are kept.
 5. *Summary and pre-checks*: your role, the source and recovery clusters
    readable with your rights, every mapping present, the measured

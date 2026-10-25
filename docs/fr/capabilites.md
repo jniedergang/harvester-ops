@@ -3475,17 +3475,21 @@ une action tout de suite.
 partout ailleurs : plan lu par la console, `plan show --json`, sorties de
 `plan create` et `plan set`, journal et Activité. Renvoyer `********` à
 une modification garde la valeur rangée de cet en-tête, seulement si
-l'action garde son nom et le schéma, l'hôte et le port de son adresse
-rangée. Sinon le changement est refusé avec `secret-missing` (« l'adresse a
-changé, saisissez de nouveau les valeurs des en-têtes secrets ») : un
-opérateur ne peut pas envoyer ailleurs un secret rangé. Un `********` sans
-valeur rangée (action nouvelle ou renommée) est refusé de même. L'adresse
-se montre sans sa requête (`https://hôte/chemin?********`), qui porte
-souvent un jeton, dans toute lecture, sortie, ligne du journal et
-d'Activité : renvoyer cette adresse masquée garde celle rangée ; la
-modifier demande de la retaper en entier. Un jeton placé dans le chemin
-(certains webhooks entrants) reste visible : mettez-le dans un en-tête
-secret quand le service le permet. Ils ne passent jamais par une ligne de
+l'action garde son nom, sa méthode et son adresse rangée exacte (schéma,
+hôte, port, chemin et requête). Sinon le changement est refusé avec
+`secret-missing` (« l'adresse a changé » ou « la méthode a changé,
+saisissez de nouveau les valeurs des en-têtes secrets ») : un opérateur ne
+peut ni envoyer ailleurs un secret rangé, ni faire un autre appel avec le
+droit d'un autre. Un `********` sans valeur rangée (action nouvelle ou
+renommée) est refusé de même. L'adresse se montre avec son schéma, son
+hôte, son port et le premier segment de son chemin seulement, la même pour
+tous les rôles : le reste du chemin devient `/********` (un seul segment
+devient `/********`) et la requête `?********`, car les webhooks entrants
+y portent leur jeton (`https://hooks.slack.com/services/T0/B0/XXX` se
+montre `https://hooks.slack.com/services/********`). C'est vrai dans toute
+lecture, sortie, ligne du journal et d'Activité, et dans le libellé des
+actions : renvoyer cette adresse masquée garde celle rangée ; la modifier
+demande de la retaper en entier. Ils ne passent jamais par une ligne de
 commande : la console les donne au script dans son fichier privé.
 
 **Taille au secours** (`resize`, `{"ns/vm": {"cpu": 1..256, "memory":
@@ -3643,11 +3647,13 @@ mise à jour part de la fin du journal (rien d'ancien n'est envoyé). Un
 suiveur lancé à la main n'envoie qu'avec `follow --all --notify`. Les
 secrets (jeton Matrix, URL Slack, valeurs des en-têtes secrets, mot de
 passe du courriel) s'affichent `********` à chaque lecture (API, sortie de
-la ligne de commande, journal, Activité), et l'adresse d'un webhook sans sa
-requête. Renvoyer `********` garde la valeur rangée : un écran peut
+la ligne de commande, journal, Activité), et l'adresse d'un webhook
+masquée comme celle d'une action annexe (premier segment du chemin
+seulement, `?********` pour la requête). Renvoyer `********` garde la valeur rangée : un écran peut
 renvoyer le réglage qu'il a lu, mais seulement vers le même serveur : un
 jeton Matrix n'est gardé que si le serveur garde son schéma, son hôte et
-son port, les en-têtes secrets d'un webhook que pour la même origine, un
+son port, les en-têtes secrets d'un webhook que pour la même adresse exacte (chemin
+et requête compris), un
 mot de passe de courriel que pour le même serveur SMTP et le même port
 (`secret-missing` sinon). Chaque appel passe par la garde anti-SSRF
 (adresses internes refusées sauf autorisation par
@@ -3811,8 +3817,8 @@ prêt, et rien n'est écrit avant **Créer** :
    sur le secours, VMs démarrées ou arrêtées après la bascule, et actions
    annexes HTTP (moment, méthode, URL, en-têtes, un en-tête secret masqué
    une fois gardé, corps, délai). Une action annexe s'essaie une fois le
-   contrat créé. Une action renommée, ou dont l'adresse désigne un autre
-   hôte, redemande son secret ; les autres en-têtes secrets posés en ligne
+   contrat créé. Une action renommée, ou dont l'adresse ou la méthode a
+   changé, redemande son secret ; les autres en-têtes secrets posés en ligne
    de commande sont gardés.
 5. *Résumé et vérifications préalables* : votre rôle, les clusters source et de
    secours lisibles avec vos droits, chaque correspondance présente, le
