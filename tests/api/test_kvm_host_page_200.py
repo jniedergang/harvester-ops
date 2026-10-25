@@ -232,6 +232,10 @@ def repl(monkeypatch, tmp_path):
     ("/api/replication/hosts/harvlab2/resources?side=target", 200, "harvester", 1, True),   # forme d'avant
     ("/api/replication/hosts/kvm/node2/resources", 200, "kvm", 0, False),
     ("/api/replication/hosts/kvm/kvm-paris.01/resources?side=any", 200, "kvm", 0, False),
+    # règle de déclaration (kvm_decl.NAME_RE, cluster_decl.NAME_RE), pas RFC 1123
+    ("/api/replication/hosts/kvm/Node_2/resources", 200, "kvm", 0, False),
+    ("/api/replication/hosts/kvm/LAB/resources", 200, "kvm", 0, False),
+    ("/api/replication/hosts/harvester/Lab_1/resources", 200, "harvester", 1, True),
 ])
 def test_host_dr_route_by_family(repl, path, status, kind, rows, available):
     r = wapp.app.test_client().get(path)
@@ -246,6 +250,8 @@ def test_host_dr_route_by_family(repl, path, status, kind, rows, available):
     "/api/replication/hosts/kvm/-x/resources",
     "/api/replication/hosts/kvm/node2/resources?side=both",
     "/api/replication/hosts/harvester/bad%20host/resources",
+    "/api/replication/hosts/kvm/_x/resources",
+    "/api/replication/hosts/kvm/" + "a" * 62 + "/resources",
 ])
 def test_host_dr_route_refusals(repl, path):
     assert wapp.app.test_client().get(path).status_code == 400

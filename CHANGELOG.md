@@ -67,7 +67,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   without asking the host, with its pinned fingerprints (never a key path).
 - `GET /api/replication/hosts/<harvester|kvm>/<host>/resources`: the host
   family is in the route; the former form still answers for a Harvester
-  cluster, a KVM host answers an empty list with `available: false`.
+  cluster, a KVM host answers an empty list with `available: false`. The
+  host name follows the declaration rule of its family (`Node_2` is
+  accepted), not RFC 1123.
 - **Hosts index** (`#hosts`, **Hosts** in the side menu): a table of every
   Harvester cluster and KVM host with family, name, state, version, labels,
   VMs, folder and favourite. Sort by any column, filter by family, state

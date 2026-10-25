@@ -27467,15 +27467,19 @@ def api_replication_plan_stats(plan_id):
     return jsonify({"plan": plan["id"], "stats": rows})
 
 
-@app.route("/api/replication/hosts/<kind>/<name>/resources")
+@app.route("/api/replication/hosts/<kind>/<host>/resources")
 @requires_auth
 @shared_read(scope=REPLICATION_SCOPE)
-def api_replication_host_resources_kind(kind, name):
+def api_replication_host_resources_kind(kind, host):
     """Sous-menu « Disaster Recovery » d'un hôte (2.0.0, famille dans
     l'adresse) : ses ressources incluses dans un plan, vues comme source,
     cible ou les deux, mêmes lignes que le menu racine pour le même côté.
     KVM : la réplication des domaines n'existe pas encore, la liste est vide
-    et `available` le dit (aucune base lue)."""
+    et `available` le dit (aucune base lue). L'argument s'appelle `host`, pas
+    `name` : `name` passe par la règle RFC 1123 du before_request, qui
+    refusait un nom de déclaration valide (`Node_2`) ; chaque famille
+    valide ici avec sa propre règle de déclaration."""
+    name = host
     if kind == "kvm":
         if not _kvm_check_host(name):
             return _repl_err("invalid host")
