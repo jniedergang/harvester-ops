@@ -39,10 +39,25 @@ WEBHOOK_403 = ('Error from server (Forbidden): admission webhook "validator.harv
 
 
 class FakeKube:
-    """Enregistre chaque patch ; `fail` {nom: "webhook" | "forbidden" | "down"}."""
+    """Enregistre chaque patch ; `fail` {nom: "webhook" | "forbidden" | "down" |
+    "hidden" (lecture refusée) | "gone" (objet absent)}. `annotations`
+    {nom: valeur portée} suit les écritures : la valeur d'avant est relue."""
 
     def __init__(self, fail=None):
-        self.calls, self.fail = [], fail or {}
+        self.calls, self.fail, self.annotations, self.gets = [], fail or {}, {}, []
+
+    def get(self, kind, ns, name):
+        self.gets.append((kind, ns, name))
+        why = self.fail.get(name)
+        if why == "hidden":
+            raise KubeError(f'Error from server (Forbidden): {kind} "{name}" is forbidden: User "u" '
+                            f'cannot get resource "{kind}" in the namespace "{ns}"')
+        if why == "gone":
+            return None
+        if why == "down":
+            raise KubeError("Unable to connect to the server: dial tcp: i/o timeout")
+        val = self.annotations.get(name)
+        return {"metadata": {"name": name, "annotations": {cli.fm.ANNOTATION: val} if val else {}}}
 
     def patch(self, kind, ns, name, patch, dry_run=False):
         self.calls.append((kind, ns, name, json.loads(json.dumps(patch)), dry_run))
@@ -55,6 +70,8 @@ class FakeKube:
             raise KubeError(WEBHOOK_403)
         if why == "down":
             raise KubeError("Unable to connect to the server: dial tcp: i/o timeout")
+        if not dry_run:
+            self.annotations[name] = patch["metadata"]["annotations"][cli.fm.ANNOTATION]
 
 
 DOMINFO = """Id:             {id}
@@ -78,6 +95,7 @@ class FakeVirsh:
     def __init__(self, domains, down=()):
         self.domains, self.down, self.sets = domains, set(down), []
         self.name = "node2"
+        self.folders, self.reads = {}, []          # dossier porté par domaine, relu avant d'écrire
 
     def batch(self, commands, idempotent=False, **kw):
         out = {}
@@ -90,8 +108,17 @@ class FakeVirsh:
                 dom_id = dom_id[0] if dom_id else ("-" if state == "shut off" else 3)
                 out[key] = kh.CmdOutput(DOMINFO.format(id=dom_id, name=name,
                                                        state=state, persistent="yes" if persistent else "no"))
+            elif args[0] == "metadata" and "--set" not in args and "--remove" not in args:
+                self.reads.append(name)
+                val = self.folders.get(name)
+                out[key] = kh.CmdOutput(f'<folder path="{val}"/>' if val else "")
             else:
                 self.sets.append(tuple(args))
+                if "--set" in args:
+                    xml = args[args.index("--set") + 1]
+                    self.folders[name] = xml.split('path="', 1)[1].rsplit('"', 1)[0]
+                else:
+                    self.folders.pop(name, None)
                 out[key] = kh.CmdOutput("Metadata modified\n")
         return out
 
@@ -260,13 +287,16 @@ def test_without_a_role_nothing_is_written(env, capsys):
 
 
 def test_the_console_always_passes_the_role():
-    """Chaque appel de harvester-folders.py par la console porte `--role`."""
+    """Chaque appel de harvester-folders.py par la console porte `--role` : la
+    ligne de commande n'est construite qu'à un endroit (_folders_cmd), qui
+    passe le rôle de la personne."""
     src = (ROOT / "web" / "app.py").read_text()
-    lines = src.splitlines()
-    for i, ln in enumerate(lines):
-        if '"harvester-folders.py"' in ln:
-            call = "\n".join(lines[i:i + 4])
-            assert '"--role"' in call, f"web/app.py:{i + 1} calls harvester-folders.py without --role"
+    assert src.count('"harvester-folders.py"') == 1
+    assert src.count("BIN_DIR / FOLDERS_SCRIPT") == 2       # la commande, et le contrôle de présence
+    body = src.split("def _folders_cmd(", 1)[1].split("\ndef ", 1)[0]
+    assert "BIN_DIR / FOLDERS_SCRIPT" in body and '"--role", current_role()' in body
+    calls = [ln for ln in src.splitlines() if "_cli_action(" in ln and "harvester-folders" in ln]
+    assert calls and all("_folders_cmd(" in ln for ln in calls)
 
 
 @pytest.mark.parametrize("obj,message", [
@@ -715,3 +745,129 @@ def test_a_transferred_vm_keeps_its_folder_annotation():
               "spec": {"template": {"spec": {"domain": {"devices": {}}}}}}
     out = vm_transfer.sanitize_vm(vm_obj)
     assert out["metadata"]["annotations"] == {"harvester-ops.io/folder": "/Prod"}
+
+
+# ---------------------------------------------------------------------------
+# Étape 3b (relecture M-3) : la valeur d'avant est relue sur l'objet
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("family,setup,expected", [
+    # VM Harvester rangée hors de la console depuis la dernière lecture
+    ("harvester", lambda env: env["kube"].annotations.update(a="/Lab"), "/Lab"),
+    # domaine KVM rangé par un autre outil (virsh metadata)
+    ("kvm", lambda env: env["virsh"].folders.update({"vm-b": "/Old"}), "/Old"),
+    # hôte dont la déclaration porte déjà un dossier
+    ("host", lambda env: kd.write(env["state"], dict(kd.load(env["state"], "kvm2"), folder="/Lab")), "/Lab"),
+])
+def test_undo_restores_the_exact_value_read_on_the_object(env, capsys, family, setup, expected):
+    obj = {"harvester": vm("a"), "kvm": kvm("vm-b", UUID2),
+           "host": {"kind": "host", "family": "kvm", "name": "kvm2"}}[family]
+    setup(env)                                  # le cache ne sait rien de cette valeur
+    assert run(env, "--id=m3", "assign", "--to", "/Prod", spec={"objects": [obj]}) == 0
+    assert journal(env, "m3")[0][1] == expected
+    assert run(env, "--id=m3u", "undo", "--action", "m3", spec={"objects": [obj]}) == 0
+    now = {"harvester": lambda: env["kube"].annotations.get("a"),
+           "kvm": lambda: env["virsh"].folders.get("vm-b"),
+           "host": lambda: kd.load(env["state"], "kvm2").get("folder")}[family]()
+    assert now == expected
+
+
+@pytest.mark.parametrize("why,message", [
+    ("hidden", "you cannot read this object"),
+    ("gone", "does not exist"),
+])
+def test_an_object_the_person_cannot_read_is_never_filed(env, capsys, why, message):
+    env["kube"].fail = {"a": why}
+    assert run(env, "--id=nv", "assign", "--to", "/Prod", spec={"objects": [vm("a"), vm("b")]}) == 1
+    assert message in capsys.readouterr().err
+    assert [c for c in env["kube"].calls if c[2] == "a"] == []        # jamais de patch
+    assert ("harvester/harv1/nav/a" in members(env)) is False         # ni rangement console
+    assert members(env)["harvester/harv1/nav/b"] == ("/Prod", "vm")   # l'autre continue
+
+
+def test_m3_mutation_cache_value_instead_of_object(env, capsys, monkeypatch):
+    """Mutation volontaire : sans relecture, Annuler remet la valeur du cache
+    (ici rien) au lieu de celle que l'objet portait."""
+    monkeypatch.setattr(cli, "read_current", lambda obj, spec, ctx: None)
+    env["kube"].annotations["a"] = "/Lab"
+    run(env, "--id=mm", "assign", "--to", "/Prod", spec={"objects": [vm("a")]})
+    run(env, "--id=mmu", "undo", "--action", "mm", spec={"objects": [vm("a")]})
+    assert env["kube"].annotations.get("a") != "/Lab"
+
+
+# ---------------------------------------------------------------------------
+# empty-into : vider un dossier puis le supprimer, en une action
+# ---------------------------------------------------------------------------
+def folder_id(env, path):
+    conn = fdb.connect(env["db"])
+    try:
+        return fdb.id_of(conn, path)
+    finally:
+        conn.close()
+
+
+def test_empty_into_moves_objects_and_subfolders_then_deletes_and_undo_restores(env, capsys):
+    objs = [vm("a"), vm("b"), kvm("vm-b", UUID2)]
+    assert run(env, "--id=f1", "assign", "--to", "/Prod", spec={"objects": [vm("a")]}) == 0
+    assert run(env, "--id=f2", "assign", "--to", "/Prod/ERP", spec={"objects": [vm("b"), kvm("vm-b", UUID2)]}) == 0
+    prod, lab = folder_id(env, "/Prod"), folder_id(env, "/Lab")
+    assert run(env, "--id=e1", "empty-into", "--folder", str(prod), "--to", str(lab), spec={"objects": objs}) == 0
+    assert "/Prod" not in tree_paths(env) and "/Lab/ERP" in tree_paths(env)
+    m = members(env)
+    assert m["harvester/harv1/nav/a"] == ("/Lab", "vm")
+    assert m["harvester/harv1/nav/b"] == ("/Lab/ERP", "vm") and m[f"kvm/{UUID2}"] == ("/Lab/ERP", "vm")
+    assert env["virsh"].folders["vm-b"] == "/Lab/ERP"
+    assert journal(env, "e1")[-1] == (f"folder/{prod}", "/Prod", None, "done")
+    capsys.readouterr()
+    assert run(env, "--id=e1u", "undo", "--action", "e1", spec={"objects": objs}) == 0
+    assert {"/Prod", "/Prod/ERP"} <= set(tree_paths(env)) and "/Lab/ERP" not in tree_paths(env)
+    m = members(env)
+    assert m["harvester/harv1/nav/a"] == ("/Prod", "vm") and m["harvester/harv1/nav/b"] == ("/Prod/ERP", "vm")
+    assert env["kube"].annotations["a"] == "/Prod" and env["virsh"].folders["vm-b"] == "/Prod/ERP"
+
+
+@pytest.mark.parametrize("prep,target,code,message", [
+    # un sous-dossier du même nom existe déjà dans la cible
+    (lambda env: run(env, "create", "--parent", str(folder_id(env, "/Lab")), "--name", "ERP"),
+     "/Lab", 1, "already exists"),
+    # cible dans le dossier vidé lui-même
+    (lambda env: None, "/Prod/ERP", 2, "into the folder itself"),
+    (lambda env: None, "/Prod", 2, "into the folder itself"),
+])
+def test_empty_into_refusals_change_nothing(env, capsys, prep, target, code, message):
+    prep(env)
+    capsys.readouterr()
+    before = tree_paths(env)
+    assert run(env, "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to",
+               str(folder_id(env, target)), spec={"objects": []}) == code
+    assert message in capsys.readouterr().err
+    assert tree_paths(env) == before and env["kube"].calls == []
+
+
+def test_empty_into_unfiled_moves_subfolders_to_the_root(env, capsys):
+    assert run(env, "--id=u1", "assign", "--to", "/Prod", spec={"objects": [vm("a")]}) == 0
+    assert run(env, "--id=u2", "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to", "unfiled",
+               spec={"objects": [vm("a")]}) == 0
+    assert "/ERP" in tree_paths(env) and "/Prod" not in tree_paths(env)
+    assert "harvester/harv1/nav/a" not in members(env)
+    assert env["kube"].annotations["a"] is None
+
+
+def test_empty_into_keeps_the_folder_when_an_object_fails(env, capsys):
+    assert run(env, "--id=k1", "assign", "--to", "/Prod", spec={"objects": [vm("a"), vm("b")]}) == 0
+    env["kube"].fail = {"b": "down"}
+    assert run(env, "--id=k2", "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to",
+               str(folder_id(env, "/Lab")), spec={"objects": [vm("a"), vm("b")]}) == 1
+    assert "/Prod" in tree_paths(env)
+    assert journal(env, "k2")[-1][3] == "failed"
+    assert members(env)["harvester/harv1/nav/b"] == ("/Prod", "vm")
+
+
+def test_empty_into_never_counts_objects_outside_the_request(env, capsys):
+    """Un objet rangé que la personne ne voit pas (absent de sa demande) : sa
+    ligne échoue, le dossier reste, et le message ne dit pas son nombre."""
+    assert run(env, "--id=h1", "assign", "--to", "/Prod", spec={"objects": [vm("a"), vm("hidden")]}) == 0
+    capsys.readouterr()
+    assert run(env, "--id=h2", "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to",
+               str(folder_id(env, "/Lab")), spec={"objects": [vm("a")]}) == 1
+    err = capsys.readouterr().err
+    assert "not visible to you" in err and "/Prod" in tree_paths(env)

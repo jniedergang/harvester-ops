@@ -30,6 +30,7 @@ de la RBAC à l'écriture), le rangement est gardé dans la console seulement
   ... resume --action A --spec F [--rate N]
   ... undo --action A --spec F [--rate N]
   ... write-back --folder I --spec F [--rate N]
+  ... empty-into --folder I --to <id|unfiled> --spec F [--rate N]
 
 La demande (`--spec`, fichier privé écrit par la console) :
   {"objects": [{"key", "kind", "cluster", "namespace", "name", "workload_kind", "uuid",
@@ -37,6 +38,14 @@ La demande (`--spec`, fichier privé écrit par la console) :
    "visible": [clés que la personne voit],
    "kubeconfigs": {"<cluster>": "<kubeconfig préparé pour la personne>"}}
 Sans `kubeconfigs`, le kubeconfig du cluster déclaré est lu.
+
+Avant d'écrire, la valeur portée par l'objet est relue (kubectl get, virsh
+metadata, déclaration) : le journal garde la valeur exacte d'avant, que
+« Annuler » remet ; un objet que la personne ne peut pas lire n'est pas rangé.
+
+`empty-into` vide un dossier puis le supprime, en une action : ses objets
+vont dans la cible, ses sous-dossiers passent sous elle (sous la racine pour
+`unfiled`) ; « Annuler » recrée le dossier et remet tout.
 
 Chaque objet touché a sa ligne dans le journal `moves` de l'action (`--id`,
 lié à l'Activité) : `resume` reprend les lignes `pending` (action
@@ -271,6 +280,78 @@ def write_object(obj, path, spec, ctx):
     raise UsageError(f"unknown object kind: {kind}")
 
 
+# --- valeur portée par l'objet (relue avant d'écrire) -------------------------------
+
+class NotVisible(Exception):
+    """L'objet n'existe pas ou la personne ne peut pas le lire : pas de rangement."""
+
+
+RBAC_GET_DENIAL_RE = re.compile(r"\bcannot get resource\b")
+
+
+def read_kube(obj, spec, kubes):
+    resource = ("virtualmachines.kubevirt.io" if obj["kind"] == "harvester"
+                else fm.WORKLOAD_RESOURCES.get(obj.get("workload_kind")))
+    cluster = obj["cluster"]
+    if cluster not in kubes:
+        kubes[cluster] = make_kube(cluster, spec)
+    try:
+        got = kubes[cluster].get(resource, obj["namespace"], obj["name"])
+    except KubeError as e:
+        if RBAC_GET_DENIAL_RE.search(str(e).lower()):
+            raise NotVisible("you cannot read this object") from None
+        raise
+    if got is None:
+        raise NotVisible("the object does not exist (any more)")
+    val = ((got.get("metadata") or {}).get("annotations") or {}).get(fm.ANNOTATION)
+    return val if val and fm.check_path(val) is None else None
+
+
+def read_kvm(obj, hosts):
+    host = obj["host"]
+    if host not in hosts:
+        hosts[host] = make_host(host)
+    res = hosts[host].batch({"meta": ("metadata", "--domain", obj["domain"], "--uri", kh.FOLDER_NS)},
+                            idempotent=True)["meta"]
+    if not res.ok:
+        # libvirt < 12 : « metadata not found » quand le domaine n'en porte pas
+        if kh._absent_only(str(res)):
+            return None
+        raise res.error or RuntimeError(str(res)[:200])
+    try:
+        return kh.parse_folder_metadata(str(res))
+    except ValueError:
+        return None
+
+
+def read_host(obj):
+    family, name = obj["family"], obj["name"]
+    state = cluster_decl.state_dir()
+    if family == "kvm":
+        try:
+            return kvm_decl.load(state, name).get("folder")
+        except FileNotFoundError:
+            raise NotVisible(f"KVM host {name} is not declared") from None
+    p = cluster_decl.decl_path(state, name)
+    if p is None or not p.is_file():
+        return None                               # config.yaml : rangé dans la console
+    from kube import _read_yaml
+    val = (_read_yaml(str(p)) or {}).get("folder")
+    return val if isinstance(val, str) and fm.check_path(val) is None else None
+
+
+def read_current(obj, spec, ctx):
+    """Dossier porté par l'objet en ce moment (None : aucun). NotVisible si
+    l'objet n'existe pas ou n'est pas lisible ; autre exception : la ligne
+    échoue avec sa raison (hôte injoignable...)."""
+    kind = obj["kind"]
+    if kind in ("harvester", "container"):
+        return read_kube(obj, spec, ctx.setdefault("kubes", {}))
+    if kind == "kvm":
+        return read_kvm(obj, ctx.setdefault("hosts", {}))
+    return read_host(obj)
+
+
 # --- demande --------------------------------------------------------------------
 
 def read_spec(path):
@@ -370,6 +451,13 @@ def run_lines(conn, args, action, lines, objects, spec):
         try:
             if not obj["write"]:
                 raise ConsoleOnly("no write permission on the object")
+            # la valeur exacte d'avant, lue sur l'objet : « Annuler » la remet
+            # même si l'objet a été rangé hors de la console depuis la lecture
+            before = read_current(obj, spec, ctx)
+            if before != m["from_path"]:
+                fdb.set_move_from(conn, action, m["seq"], before)
+                m = dict(m, from_path=before)
+                what = f"{key}: {before or 'unfiled'} -> {to or 'unfiled'}"
             source = write_object(obj, to, spec, ctx)
             message = "" if source == "vm" else "transient domain: " + CONSOLE_ONLY
         except ConsoleOnly as e:
@@ -385,6 +473,11 @@ def run_lines(conn, args, action, lines, objects, spec):
             message = f"{e}: {CONSOLE_ONLY}" if to is not None else f"{e}: removed from the console only"
         except UsageError:
             raise
+        except NotVisible as e:
+            failed += 1
+            fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", str(e))
+            step(sid, "error", f"{what}: {e}")
+            continue
         except Exception as e:                     # noqa: BLE001 : un objet n'arrête pas le lot
             failed += 1
             msg = str(getattr(e, "message", e))[:300]
@@ -589,6 +682,18 @@ def cmd_undo(args, conn):
     # d'avant existent quand les objets y reviennent
     for m in reversed([m for m in moves if m["object_key"].startswith("folder/") and m["status"] == "done"]):
         fid = int(m["object_key"].split("/", 1)[1])
+        if m["to_path"] is None:
+            # dossier supprimé par l'action (empty-into) : recréé à son chemin
+            try:
+                fdb.ensure_path(conn, m["from_path"], origin="console", by=args.as_user)
+            except fdb.FolderError as e:
+                failed += 1
+                step(f"folder-{fid}", "error", f"folder {m['from_path']} cannot be created again: {e.message}")
+                continue
+            fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
+                            None, m["from_path"], "done")
+            step(f"folder-{fid}", "done", f"folder {m['from_path']} created again")
+            continue
         cur = fdb.path_of(conn, fid)
         if cur != m["to_path"]:
             failed += 1
@@ -637,6 +742,73 @@ def cmd_write_back(args, conn):
                   f"{len(plan) - failed}/{len(plan)} object(s) now carry their folder")
 
 
+def cmd_empty_into(args, conn):
+    """Vide un dossier puis le supprime, en une action : ses objets vont
+    dans la cible (`unfiled` : non rangés), ses sous-dossiers passent sous
+    elle (sous la racine pour `unfiled`). Rien n'est touché si un
+    sous-dossier ne peut pas y aller (nom déjà pris, bornes) ; le dossier
+    n'est supprimé que si tout son contenu est parti."""
+    need_operator(args)
+    fid = folder_ref(conn, args.folder_id)
+    if fid is None:
+        raise UsageError("the root cannot be emptied")
+    target = None if args.to == fm.UNFILED else folder_ref(conn, args.to)
+    tree = fdb.list_tree(conn)
+    if target is not None and target in fm.subtree_ids(tree, fid):
+        raise UsageError("the content cannot go into the folder itself or one of its subfolders")
+    spec = read_spec(args.spec)
+    objects = objects_of(spec)
+    paths = fm.paths(tree)
+    path = paths[fid]
+    to_path = paths[target] if target is not None else None
+    members = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
+    children = [f for f in tree if f["parent_id"] == fid]
+    taken = {f["name"] for f in tree if f["parent_id"] == target and f["id"] != fid}
+    if target == next((f["parent_id"] for f in tree if f["id"] == fid), None):
+        taken.add(fm.split(path)[-1])             # le dossier vidé existe encore
+    plan_folders, plan_objects = [], []
+    for c in children:
+        if c["name"] in taken:
+            raise Refused(f"a folder named {c['name']!r} already exists in {to_path or 'the root'}")
+        try:
+            rewrite = fm.move_plan(tree, members, c["id"], target)
+        except ValueError as e:
+            raise UsageError(str(e)) from None
+        new = (to_path or "") + "/" + c["name"]
+        plan_folders.append((c["id"], paths[c["id"]], new))
+        plan_objects += rewrite
+    plan_objects += [(k, v, to_path) for k, v in sorted(members.items()) if v == path]
+    # lignes d'objets posées avant les dossiers (une lecture de flotte voit
+    # le déplacement en cours), la suppression en dernier
+    lines = start_lines(conn, args.id, [(f"folder/{cid}", old, new) for cid, old, new in plan_folders]
+                        + plan_objects + [(f"folder/{fid}", path, None)])
+    folder_lines = lines[:len(plan_folders)]
+    object_lines = lines[len(plan_folders):-1]
+    delete_line = lines[-1]
+    for (cid, old, new), ln in zip(plan_folders, folder_lines):
+        fdb.move_folder(conn, cid, target)
+        fdb.record_move(conn, args.id, ln["seq"], ln["object_key"], old, new, "done")
+        step(f"folder-{cid}", "done", f"folder {old} -> {new}")
+    failed = run_lines(conn, args, args.id, object_lines, objects, spec)
+    # un objet resté (échec, ou hors de la demande) garde le dossier non vide :
+    # delete_empty le refuse, et dit ce que la personne voit
+    visible = set(spec["visible"]) if isinstance(spec.get("visible"), list) else set(objects)
+    try:
+        fdb.delete_empty(conn, fid, visible)
+    except fdb.FolderError as e:
+        failed += 1
+        fdb.record_move(conn, args.id, delete_line["seq"], delete_line["object_key"], path, None,
+                        "failed", e.message)
+        step("delete", "error", e.message)
+    else:
+        fdb.record_move(conn, args.id, delete_line["seq"], delete_line["object_key"], path, None, "done")
+        step("delete", "done", f"folder {path} deleted")
+    return finish(args, {"action": args.id, "from": path, "to": to_path, "objects": len(plan_objects),
+                         "folders": len(plan_folders)}, failed,
+                  f"{path} emptied into {to_path or 'unfiled'}: {len(plan_objects) - failed}/{len(plan_objects)} "
+                  f"object(s) moved" + ("" if failed else ", folder deleted"))
+
+
 def parse_args(argv=None):
     """L'identifiant d'ACTION s'écrit `--id=<action>` (forme avec `=`, celle
     qu'ajoute la console en fin de ligne) ou `--id <action>` avant la
@@ -681,6 +853,8 @@ def parse_args(argv=None):
     sp = with_spec(sub.add_parser("undo"))
     sp.add_argument("--action", required=True)
     with_folder(with_spec(sub.add_parser("write-back")))
+    sp = with_folder(with_spec(sub.add_parser("empty-into")))
+    sp.add_argument("--to", required=True, help="target folder id, or unfiled")
     args = p.parse_args(argv)
     if action_ids:
         args.id = action_ids[-1]
@@ -690,7 +864,7 @@ def parse_args(argv=None):
 COMMANDS = {"tree": cmd_tree, "create": cmd_create, "rename": cmd_rename,
             "move-folder": cmd_move_folder, "delete": cmd_delete, "assign": cmd_assign,
             "apply-rename": cmd_apply_rename, "resume": cmd_resume, "undo": cmd_undo,
-            "write-back": cmd_write_back}
+            "write-back": cmd_write_back, "empty-into": cmd_empty_into}
 
 
 def fail_exit(want_json, sid, message, kind, code):

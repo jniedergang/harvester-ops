@@ -265,7 +265,20 @@ harvester-folders.py [--db F] [--json] [--as PERSONNE] [--role viewer|operator|a
   undo --action A --spec F                   retour à l'état d'avant ; conflits dits
   apply-rename --id I --spec F               objets restés sous l'ancien chemin
   write-back --folder I --spec F             rangements de la console que la personne peut désormais écrire
+  empty-into --folder I --to <id ou unfiled> --spec F
+                                             déplace le contenu (objets, sous-dossiers), puis supprime
 ```
+
+Avant d'écrire, la commande relit le dossier que l'objet porte en ce moment
+(`kubectl get`, `virsh metadata`, la déclaration) : le journal garde cette
+valeur exacte, qu'Annuler remet même si l'objet a été rangé hors de la
+console depuis la dernière lecture. Un objet que la personne ne peut pas
+lire, ou qui n'existe plus, n'est jamais rangé (sa ligne échoue).
+`empty-into` déplace les objets d'un dossier vers la cible, ses sous-dossiers
+sous elle (sous la racine pour `unfiled`), puis supprime le dossier dans la
+même action ; rien ne bouge si un sous-dossier ne peut pas y aller (nom pris,
+bornes), et le dossier reste tant que quelque chose y est rangé. Annuler
+recrée le dossier et remet tout.
 
 La demande (`--spec`) liste les objets, chacun avec `kind` (`harvester`,
 `container`, `kvm`, `host`) et ses champs (`cluster`, `namespace`, `name`,
@@ -299,6 +312,54 @@ de service au rôle view gardé dans la console, puis écrit sur les objets
 avec un kubeconfig d'opérateur ; sur node2, un domaine de test sans disque
 rangé arrêté puis en marche, le dossier gardé après un redémarrage et par un
 clone, puis retiré ; les 15 autres domaines identiques à l'octet près.
+
+### Routes des dossiers et contrôles avant geste (2.0.0)
+
+La console lance `harvester-folders.py` en action suivie, avec le rôle de
+la personne (`--role`, jamais le défaut) et le kubeconfig préparé pour elle
+par cluster (usurpation et Rancher compris ; jamais dans une réponse ni dans
+la ligne de commande montrée). Les routes sont sous `/api/folders`, pas sous
+`/api/clusters` (réservé aux admins) : tout changement demande le rôle
+opérateur, la lecture est ouverte à tous.
+
+| Route | Rôle |
+|---|---|
+| `GET /api/folders` | l'arborescence, chaque dossier avec son `origin` (`console`, ou `objects` quand une lecture de flotte l'a créé depuis les objets qui le nomment) et ses `counts` `{vms, containers, hosts}`, sous-dossiers compris, limités à ce que la personne a vu dans ses propres lectures de flotte (`null` : pas encore lu) |
+| `POST /api/folders` | créer (`parent_id`, `name`) |
+| `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé |
+| `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre) |
+| `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action |
+| `POST /api/folders/assign` | `objects` (clés ; une VM KVM donne aussi son `host`) et `to` (identifiant de dossier ou `unfiled`) |
+| `POST /api/folders/check` | les contrôles montrés avant un déplacement, objet par objet, rien n'est écrit |
+| `POST /api/folders/actions/<id>/undo` | annuler une action de dossiers terminée |
+| `POST /api/folders/<id>/write-back` | écrire sur les objets les rangements du dossier gardés par la console seule |
+
+Chaque changement répond tout de suite `202 {"action_id"}` ; le dock montre
+l'action, et un rangement, un renommage, un déplacement, un vidage ou une
+annulation terminés proposent **Annuler** (`undo.path` dans l'action). Un
+domaine KVM est désigné par son UUID, que virsh accepte : un domaine renommé
+est retrouvé.
+
+`POST /api/folders/check` répond `{"objects": [{"key", "write", "outcome",
+"reason", "check"}]}`. `outcome` dit ce que fera le déplacement : `object`
+(le dossier est écrit sur l'objet), `console` (seul le rangement de la
+console change) ou `fail` (le geste échouera pour cet objet, raison dite).
+VMs et charges Harvester : `kubectl auth can-i patch` avec le kubeconfig de
+la personne (une SelfSubjectAccessReview, `check: ssar`) ; un cluster qui ne
+répond pas est dit sans l'interroger. KVM : hôte joint et domaine persistant
+(un `dominfo` par domaine dans un seul appel SSH par hôte, `check: virsh`) ;
+un domaine transitoire est gardé par la console. Hôte : sa déclaration
+(`check: decl`) ; un cluster de `config.yaml` est rangé dans la console
+seulement.
+
+Les lectures de flotte donnent aussi le dossier des charges de conteneurs
+(`key`, `folder`, `folder_source` sur `/api/containers/<cluster>` et
+`/api/containers-all` pour les Deployments, StatefulSets, DaemonSets et
+CronJobs) et des hôtes (`/api/hosts` : le champ `folder` de la déclaration,
+sinon le rangement de la console). Une lecture de flotte crée au plus 200
+dossiers nommés par des objets : qui peut annoter des objets ne remplit pas
+l'arborescence partagée en une lecture ; les autres attendent les lectures
+suivantes, et le débordement est journalisé une fois.
 
 ### Charges de conteneurs (1.91.0)
 

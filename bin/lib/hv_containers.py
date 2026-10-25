@@ -48,6 +48,9 @@ WORKLOAD_RESOURCES = (
 )
 KINDS = tuple(k for _, k in WORKLOAD_RESOURCES)
 
+# 2.0.0 : annotation de dossier (bin/lib/folders.py, ANNOTATION)
+FOLDER_ANNOTATION = "harvester-ops.io/folder"
+
 STATES = ("Running", "Progressing", "Degraded", "Failed", "Completed", "Suspended")
 
 # Ressources étendues comptées comme GPU (plugins de périphériques NVIDIA et AMD).
@@ -333,6 +336,8 @@ def build(lists):
             "gpus": gpu_count(tmpl),
             "created": meta.get("creationTimestamp"),
             "labels": meta.get("labels") or {},
+            # 2.0.0 : valeur brute de l'annotation de dossier (contrôlée par la console)
+            "folder_annotation": (meta.get("annotations") or {}).get(FOLDER_ANNOTATION),
             "pods": sorted((pod_row(p) for p in pods), key=lambda r: r["name"]),
         })
     out.sort(key=lambda w: (w["namespace"], w["name"], KINDS.index(w["kind"])))

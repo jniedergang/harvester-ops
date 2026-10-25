@@ -113,6 +113,24 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   path and recreates no former folder. Host declarations accept the
   optional `folder` field, and editing a cluster in Settings keeps it: the
   console and the command line share one lock on `clusters.d`.
+- **Folder routes and checks before a gesture.** `GET /api/folders` gives
+  the tree with, per folder, its origin and the VMs, containers and hosts
+  filed inside that the person saw (never what they cannot see). Create,
+  rename, move, delete an empty folder, empty a folder into another then
+  delete it, file objects, undo, and write console-only filings on the
+  objects: each is a tracked action that runs `harvester-folders.py` with
+  the person's role and kubeconfig, under `/api/folders` (operator role).
+  Deleting a non-empty folder answers 409 with what the person sees.
+  `POST /api/folders/check` says, object by object and before any write,
+  whether the folder will be written on the object (`kubectl auth can-i`
+  with the person's identity, KVM host reached and domain persistent, host
+  declaration), whether only the console's filing changes, or why the
+  gesture will fail. A finished folder action shows **Undo** in the dock.
+  Fleet reads give the folder of container workloads and hosts. The command
+  line reads the value an object carries just before writing it, so Undo
+  puts back that exact value, never files an object the person cannot read,
+  and gains `empty-into`. A fleet read creates at most 200 folders named by
+  objects (logged once when more wait).
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
@@ -205,6 +223,22 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   that leaves an object filed since, crashed domains, names with spaces;
   `tests/api/test_portable_state_178.py` adds a folder write during a
   console edit and the cross-process declaration lock.
+- `tests/api/test_folders_routes_200.py`: every route in success and in
+  error (body that is not an object, invalid name, unknown folder, invalid
+  or forged key, too many objects), viewer 403, operator and admin 202 with
+  their role on the command line, the operator rule frozen for every
+  gesture and a deliberate mutation declaring assign for viewers, checks
+  with permission, without (`can-i` no), on an unreachable cluster and KVM
+  host, transient and vanished domains, config.yaml clusters, no kubeconfig
+  path in any response or shown command, valid rate limits, `undo` in
+  `to_dict()` only for folder actions, counts limited to what the person
+  read, container and host folders in fleet reads, and the 200-folder cap
+  logged once. `test_folders_cli_200.py` adds the exact previous value put
+  back by Undo for the three families (and a deliberate mutation reading
+  the cache instead), unreadable or vanished objects never filed, and
+  `empty-into` with its refusals, its undo, a failed object keeping the
+  folder and objects outside the request; `test_folders_db_200.py` adds a
+  table of the per-read cap.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
   rule, object keys, rebuild from the objects alone, object against cache,
   three-level rename plan, move into its own subtree, undo with a conflict,

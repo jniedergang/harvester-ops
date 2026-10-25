@@ -343,10 +343,19 @@ def _age_s(older, newer):
         return float("inf")
 
 
-def realign(conn, rows, now=None):
+# Dossiers créés au plus par une lecture de flotte à partir des valeurs
+# portées par les objets : quiconque peut annoter des objets ne remplit pas
+# l'arborescence partagée de la console (au-delà, ces objets attendent).
+MAX_CREATED_PER_READ = 200
+
+
+def realign(conn, rows, now=None, max_create=MAX_CREATED_PER_READ, stats=None):
     """Réaligne le cache sur une lecture d'objets (folders.reconcile) et
     crée les dossiers nommés par les objets. Rend {clé: (dossier, source)}.
-    Écrit seulement ce qui a changé, ou un `seen_at` de plus d'une heure."""
+    Écrit seulement ce qui a changé, ou un `seen_at` de plus d'une heure.
+    Au plus `max_create` dossiers créés par appel : un objet dont le dossier
+    n'a pas été créé garde son cache tel quel, et `stats` (dict) reçoit
+    `created` et `overflow` (dossiers non créés)."""
     now = _iso(now) if now else _now()
     with _write(conn):
         tree = list_tree(conn)
@@ -360,6 +369,17 @@ def realign(conn, rows, now=None):
         cache = memberships(conn, [r["key"] for r in rows if r.get("key")])
         upd, created = fm.reconcile(tree, rows, cache, now)
         idx = fm.index(tree)
+        dropped = set(created[max_create:]) if max_create is not None else set()
+        created = [c for c in created if c not in dropped]
+        if dropped:
+            # objets dont un ancêtre n'est pas créé : rien de changé pour eux
+            for r in rows:
+                if r.get("key") in upd and r.get("folder") and \
+                        any(a in dropped for a in fm.ancestors(r["folder"])):
+                    del upd[r["key"]]
+        if stats is not None:
+            stats["created"] = len(created)
+            stats["overflow"] = len(dropped)
         for path in created:
             parent = idx.get(fm.parent_path(path)) if fm.parent_path(path) else None
             try:
@@ -424,6 +444,13 @@ def record_move(conn, action_id, seq, key, from_path, to_path, status="pending",
                  "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(action_id, seq) DO UPDATE SET "
                  "status = excluded.status, message = excluded.message, at = excluded.at",
                  (action_id, seq, key, from_path, to_path, status, str(message)[:500], _now()))
+
+
+def set_move_from(conn, action_id, seq, from_path):
+    """Valeur d'avant d'une ligne, relue sur l'objet juste avant de l'écrire
+    (« Annuler » remet la valeur exacte, pas celle du cache)."""
+    conn.execute("UPDATE moves SET from_path = ? WHERE action_id = ? AND seq = ?",
+                 (from_path, action_id, seq))
 
 
 def set_move_status(conn, action_id, seq, status, message=""):

@@ -340,6 +340,9 @@ const Dock = (() => {
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
+          ${!isRunning && a.undo && a.undo.path
+            ? `<button class="btn-mini dock-undo" data-undo="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`
+            : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
@@ -356,6 +359,24 @@ const Dock = (() => {
           }
           poll();
         } catch (err) { alert(err.message); }
+      });
+      // 2.0.0 : une action réversible (dossiers) propose « Annuler » une fois
+      // finie ; l'annulation est elle-même une action suivie
+      const undoBtn = card.querySelector('[data-undo]');
+      if (undoBtn) undoBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        undoBtn.disabled = true;
+        try {
+          const r = await fetch(a.undo.path, { method: 'POST' });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
+          document.dispatchEvent(new CustomEvent('hops:undo', { detail: { action: a.id, undo: d.action_id } }));
+          poll();
+        } catch (err) {
+          undoBtn.disabled = false;
+          undoBtn.title = tr('dock.undoFailed', `Undo failed: ${err.message}`, { error: err.message });
+          undoBtn.classList.add('dock-undo-failed');
+        }
       });
       card.querySelector('.toggle-details').addEventListener('click', (e) => {
         e.stopPropagation();

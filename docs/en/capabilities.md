@@ -245,7 +245,20 @@ harvester-folders.py [--db F] [--json] [--as USER] [--role viewer|operator|admin
   undo --action A --spec F                   back to the state before; conflicts said
   apply-rename --id I --spec F               objects left under the former path
   write-back --folder I --spec F             console-only filings the person may now write
+  empty-into --folder I --to <id or unfiled> --spec F
+                                             moves the content (objects, subfolders), then deletes
 ```
+
+Before writing, the command reads the folder the object carries now
+(`kubectl get`, `virsh metadata`, the declaration): the journal keeps that
+exact value, which Undo puts back even when the object was filed outside the
+console since the last read. An object the person cannot read, or that no
+longer exists, is never filed (its line fails). `empty-into` moves the
+objects of a folder to the target, its subfolders under it (under the root
+for `unfiled`), then deletes the folder in the same action; nothing moves
+when a subfolder cannot go there (name taken, limits), and the folder stays
+while anything is left inside. Undo creates the folder again and puts
+everything back.
 
 The request (`--spec`) lists the objects, each with `kind` (`harvester`,
 `container`, `kvm`, `host`) and its fields (`cluster`, `namespace`, `name`,
@@ -278,6 +291,52 @@ the console, then written back with an operator kubeconfig; on node2, a
 diskless test domain filed while shut off and while running, the folder
 kept through a restart and by a clone, then removed; the 15 other domains
 byte for byte unchanged.
+
+### Folder routes and checks before a gesture (2.0.0)
+
+The console launches `harvester-folders.py` as a tracked action, with the
+person's role (`--role`, never the default) and the kubeconfig prepared for
+the person per cluster (impersonation and Rancher included; never in a
+response nor in the command line shown). Routes are under `/api/folders`,
+not under `/api/clusters` (admin only): every change needs the operator
+role, reading is for everyone.
+
+| Route | What it does |
+|---|---|
+| `GET /api/folders` | the tree, each folder with its `origin` (`console`, or `objects` when a fleet read created it from the objects naming it) and `counts` `{vms, containers, hosts}`, subfolders included, limited to what the person saw in their own latest fleet reads (`null`: not read yet) |
+| `POST /api/folders` | create (`parent_id`, `name`) |
+| `PATCH /api/folders/<id>` | rename (`name`) or move (`parent_id`, `null` for the root), one change at a time; its objects are rewritten in the same action. Folders are sorted by name: `position` is refused |
+| `DELETE /api/folders/<id>` | delete an empty folder; a non-empty one answers 409 with what the person sees (`count_visible`, `subfolders`, and `hidden` without a number) |
+| `POST /api/folders/<id>/empty-into` | `target_id` (a folder or `unfiled`): move the content, then delete, in one action |
+| `POST /api/folders/assign` | `objects` (keys; a KVM VM also gives its `host`) and `to` (a folder id or `unfiled`) |
+| `POST /api/folders/check` | the checks shown before a move, object by object, nothing written |
+| `POST /api/folders/actions/<id>/undo` | undo a finished folder action |
+| `POST /api/folders/<id>/write-back` | write on the objects the console-only filings of the folder |
+
+Every change answers `202 {"action_id"}` at once; the dock shows the action,
+and a finished assign, rename, move, empty-into or undo offers **Undo**
+(`undo.path` in the action). A KVM domain is designated by its UUID, which
+virsh accepts, so a renamed domain is still found.
+
+`POST /api/folders/check` answers `{"objects": [{"key", "write", "outcome",
+"reason", "check"}]}`. `outcome` says what the move will do: `object` (the
+folder is written on the object), `console` (only the console's filing
+changes) or `fail` (the gesture will fail for this object, with the reason).
+Harvester VMs and workloads: `kubectl auth can-i patch` with the person's
+kubeconfig (a SelfSubjectAccessReview, `check: ssar`), a cluster that does
+not answer is said without asking it. KVM: the host is reached and the
+domain is persistent (one `dominfo` per domain in one SSH call per host,
+`check: virsh`); a transient domain is kept by the console. Host: its
+declaration (`check: decl`); a cluster of `config.yaml` is filed in the
+console only.
+
+Fleet reads also give the folder of container workloads (`key`, `folder`,
+`folder_source` on `/api/containers/<cluster>` and `/api/containers-all`
+for Deployments, StatefulSets, DaemonSets and CronJobs) and of hosts
+(`/api/hosts`: the `folder` field of the declaration, else the console's
+filing). A fleet read creates at most 200 folders named by objects: anyone
+who may annotate objects cannot flood the shared tree in one read; the
+others wait for the next reads, and the overflow is logged once.
 
 ### Container workloads (1.91.0)
 

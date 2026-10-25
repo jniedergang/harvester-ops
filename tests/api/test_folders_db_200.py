@@ -185,3 +185,48 @@ def test_journal_of_an_action(conn):
     assert (m[0]["status"], m[0]["object_key"], m[0]["to_path"]) == ("done", "kvm/u1", "/A")
     with pytest.raises(ValueError):
         fdb.record_move(conn, "a1", 2, "k", None, "/A", status="weird")
+
+
+# ---------------------------------------------------------------------------
+# Étape 3b (relecture M-8) : une lecture ne remplit pas l'arborescence partagée
+# ---------------------------------------------------------------------------
+def _rows(n, depth=1, prefix="/Flood"):
+    return [{"key": f"harvester/c/ns/vm{i}", "folder": prefix + "".join(f"/L{i}-{d}" for d in range(depth)),
+             "scope": "harvester/c"} for i in range(n)]
+
+
+@pytest.mark.parametrize("rows,cap,created,overflow,cached", [
+    # sous le plafond : tout est créé
+    (_rows(3), 200, 4, 0, 3),
+    # plafond atteint pile : /Flood + 199 dossiers
+    (_rows(199), 200, 200, 0, 199),
+    # au-delà : 200 créés, le reste attend ; les objets concernés gardent leur cache
+    (_rows(250), 200, 200, 51, 199),
+    # chemins profonds : un ancêtre non créé retient tout son sous-arbre
+    (_rows(2, depth=3), 3, 3, 4, 0),
+    # plafond 0 : rien n'est créé, rien n'est rangé
+    (_rows(2), 0, 0, 3, 0),
+])
+def test_realign_caps_the_folders_created_by_one_read(conn, rows, cap, created, overflow, cached):
+    stats = {}
+    fdb.realign(conn, rows, max_create=cap, stats=stats)
+    assert stats == {"created": created, "overflow": overflow}
+    assert len(fdb.list_tree(conn)) == created
+    assert all(f["origin"] == "objects" for f in fdb.list_tree(conn))
+    assert len(fdb.memberships(conn)) == cached
+
+
+def test_realign_cap_keeps_the_cache_of_an_object_left_waiting(conn):
+    fdb.ensure_path(conn, "/Prod", "console")
+    fdb.upsert_membership(conn, "harvester/c/ns/vm0", "/Prod", "console")
+    fdb.realign(conn, _rows(1), max_create=0)
+    assert fdb.memberships(conn)["harvester/c/ns/vm0"]["folder_path"] == "/Prod"     # rien de changé
+    fdb.realign(conn, _rows(1))                                                       # plafond normal
+    assert fdb.memberships(conn)["harvester/c/ns/vm0"]["folder_path"] == "/Flood/L0-0"
+
+
+def test_realign_cap_default_is_200(conn):
+    assert fdb.MAX_CREATED_PER_READ == 200
+    stats = {}
+    fdb.realign(conn, _rows(300), stats=stats)
+    assert stats["created"] == 200
