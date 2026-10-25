@@ -255,6 +255,21 @@ def test_list_images_declared_pools_show_used_volumes_too():
     assert used["used_by"] == ["vm1"]
 
 
+# Vu en réel (tâche 7) : sans pools d'images déclarés, une image servant de
+# base à un disque lié disparaissait du catalogue dès la première VM créée à
+# partir d'elle (la chaîne de sauvegarde comptait comme un usage direct), et
+# la fenêtre de création ne la proposait plus. Seul l'usage direct l'écarte.
+def test_list_images_keeps_a_base_image_used_only_through_a_backing_chain():
+    s = catalog_sim()
+    s.add_vol("images", "child.qcow2", fmt="qcow2", backing=f"{IMG}/images/base.qcow2")
+    s.add_domain("vm2", W.dom("vm2", [W.disk("vda", "images/child.qcow2", type="volume")]))
+    res = ks.list_images(s, {})
+    names = {(i["pool"], i["volume"]): i for i in res["images"]}
+    base = names[("images", "base.qcow2")]
+    assert base["used_by"] == [] and base["backing_users"] == [f"{IMG}/images/child.qcow2"]
+    assert ("images", "child.qcow2") not in names and ("images", "used.qcow2") not in names
+
+
 # --- volumes ----------------------------------------------------------------------------
 
 def test_create_volume_blank_and_linked_argv():

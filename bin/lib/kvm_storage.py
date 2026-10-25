@@ -323,8 +323,9 @@ def _is_iso_probe(text):
 
 def list_images(host, decl=None, notes=None, fresh=False):
     """Catalogue d'images d'un hôte : volumes des pools d'images déclarés
-    (`decl["image_pools"]`), sinon volumes libres (cités par aucun domaine)
-    de tous les pools actifs. Rend {"images": [{pool, volume, path, format,
+    (`decl["image_pools"]`), sinon volumes libres (cités directement par
+    aucun domaine : une image de base de disques liés en fait partie) de
+    tous les pools actifs. Rend {"images": [{pool, volume, path, format,
     iso, capacity, allocation, sha256, url, date, author, used_by,
     backing_users}], "pools": [noms lus], "unknown": [lectures manquées],
     "survey_age_s"}.
@@ -339,7 +340,10 @@ def list_images(host, decl=None, notes=None, fresh=False):
         survey, age = ko._Survey(host), 0.0
     else:
         survey, age = ko.SURVEYS.get(host)
-    users = survey.users()
+    # usage direct seulement : une image de base reste au catalogue tant
+    # qu'aucun domaine ne la cite comme disque (ses disques liés sont dans
+    # `backing_users`), sinon elle disparaissait dès la première VM liée
+    users = survey.direct_users()
     pools = [p for p in (wanted or sorted(survey.vols)) if p in survey.vols]
     images, probes = [], []
     for p in pools:

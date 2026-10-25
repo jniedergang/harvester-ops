@@ -790,6 +790,21 @@ class _Survey:
                     lst.append(r["owner"])
         return users
 
+    def direct_users(self):
+        """{identité texte de disque: [domaines]} des AUTRES domaines qui citent
+        ce disque comme source (définition et XML vivant), sans leurs chaînes :
+        une image de base n'est pas « utilisée » par les disques liés à elle
+        (voir backing_users)."""
+        users = {}
+        for r in self.refs:
+            if r["owner"] in (None, _SELF):
+                continue
+            for i in r["ids"]:
+                lst = users.setdefault(i, [])
+                if r["owner"] not in lst:
+                    lst.append(r["owner"])
+        return users
+
     def backing_users(self, path, acknowledged=frozenset()):
         """Sommets des chaînes (d'autres domaines ou de volumes libres) qui
         passent par `path` ; UNKNOWN en fin de liste si rien n'est prouvé."""
