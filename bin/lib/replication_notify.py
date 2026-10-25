@@ -465,6 +465,10 @@ def deliver(channel, text, items=(), tries=TRIES, timeout=TIMEOUT_S, sleep=time.
             return {"channel": channel.get("id"), "ok": True, "status": status, "tries": n, "error": ""}
         except Exception as e:                  # noqa: BLE001 - le canal suivant passe quand même
             last = scrub_secrets(_reason(e), secrets_of({"channels": [channel]}))[:300]
+            if isinstance(e, SendRefused):
+                # refus de la garde (adresse, redirection, TLS exigé) : un autre
+                # essai donnerait le même refus
+                return {"channel": channel.get("id"), "ok": False, "status": None, "tries": n, "error": last}
         if n < tries:
             sleep(float(n))
     return {"channel": channel.get("id"), "ok": False, "status": None, "tries": tries, "error": last}

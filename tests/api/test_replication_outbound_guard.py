@@ -272,6 +272,8 @@ def test_a_notification_redirect_never_carries_the_matrix_token(servers):
                      rn.send(c, t, i, timeout, allow=LOOP))
     assert res["ok"] is False and "redirect" in res["error"] and b.seen == []
     assert all(s["headers"].get("authorization") == f"Bearer {TOKEN}" for s in a.seen)
+    # refus de la garde : pas d'autre essai (il donnerait le même refus)
+    assert res["tries"] == 1 and len(a.seen) == 1
 
 
 @pytest.mark.parametrize("chan,code", [

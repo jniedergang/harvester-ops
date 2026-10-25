@@ -482,6 +482,10 @@ def test_cli_notify_set_refusals(tmp_path, capsys, spec, kind):
 
 
 def test_cli_notify_test_failure_exits_1_without_secret(tmp_path, capsys, monkeypatch):
+    # 127.0.0.1 autorisé : c'est l'échec de connexion (repris 3 fois) qui est essayé ici
+    cfg = tmp_path / "allow-config.yaml"
+    cfg.write_text("replication:\n  notifications:\n    allow_private: [127.0.0.0/8]\n")
+    monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(cfg))
     dbp = tmp_path / "c.db"
     c = db.connect(str(dbp))
     db.set_setting(c, "notify", rn.normalize({"channels": [matrix(homeserver="http://127.0.0.1:9")]}))
