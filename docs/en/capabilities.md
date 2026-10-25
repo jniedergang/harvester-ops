@@ -2691,6 +2691,11 @@ preview matches the typed name and has no refusal.
   progress. **Cancel** in the dock stops the copy and removes everything
   created. A copy that fails is rolled back the same way, and anything
   that could not be removed is named.
+- An in-pool copy (`vol-create-from`) goes on inside libvirt after a
+  cancel, and libvirt refuses to delete it until it ends. Since 1.100.0
+  the action stays running, with both names held, until the copy ends
+  (up to 15 min); the copy is then deleted. Before, the action closed at
+  once and the copy stayed.
 
 **Delete.** **Delete** removes a shut off, persistent VM. It needs the
 admin role. The window shows a preview first, then asks for the exact
@@ -2814,7 +2819,10 @@ Review), the same icons and the same cloud-init assistant.
   image of the same pool; or a full copy, resized to the asked size), an
   existing volume, an ISO, or an empty CD-ROM drive. The free space of the
   pool is shown under the cards. Cards: libvirt network, host bridge, or
-  macvtap on a host card with its mode.
+  macvtap on a host card with its mode. The console draws the MAC of each
+  card left empty (`52:54:00:...`, checked against every card of the
+  host) and writes it in the definition. A card added later gets one the
+  same way.
 - VNC display, with a password drawn by the console (8 characters, the
   VNC limit). The password is never shown.
 - Cloud-init: user-data and network-config written by hand or by the
@@ -2824,6 +2832,15 @@ Review), the same icons and the same cloud-init assistant.
   (flow lists over several lines, anchors, several documents) is refused
   with its reason and left untouched. The seed is a NoCloud ISO (label
   `cidata`, Joliet) made by the console, its instance id is the VM uuid.
+- The assistant writes a network-config version 2 that finds each card by
+  its MAC (`match: macaddress`). Each entry names a card of the Network
+  tab (1 = the first). The card is renamed in the guest (`set-name`) only
+  if you give a name. So the name the image gives the card (`eth0`,
+  `enp1s0`) does not matter. **Generate network-data** draws the MAC of
+  the cards that have none and writes it in their card. It is refused
+  for several instances, which cannot share a MAC: create them on DHCP,
+  then set each VM with Cloud-init. In the Edit window the entries name
+  the existing cards.
 - **Review** asks the server for the plan: refusals, warnings, volumes to
   create, seed, and the XML with `passwd='***'`. **Create** then runs the
   steps: volumes, seed, `define --validate`, autostart, start, check.
@@ -2831,8 +2848,9 @@ Review), the same icons and the same cloud-init assistant.
   trusted), and the pools are read again before each instance. A failure
   removes what the console created for that instance and names what could
   not be removed; instances already created stay and are listed.
-- Cancelling a creation waits for the tool: a full copy that libvirt is
-  still building is waited for (up to 15 min) and then deleted.
+- Cancelling a creation or a clone waits for the tool: a full copy that
+  libvirt is still building is waited for (up to 15 min) and then
+  deleted.
 - Templates keep the form (not the XML) in the console, shared by all
   hosts, with an owner. Passwords, keys and user-data are removed when a
   template is saved, and the window says so.
@@ -2860,6 +2878,9 @@ classification. Only the changed fields are sent.
 | Rename | shut off VM without snapshots only | `domrename` |
 
 - On a shut off VM everything goes through one targeted `define`.
+- The current memory never shows as waiting for the next start. QEMU
+  starts at the maximum, and a guest without a balloon driver stays
+  there, so the live value can differ from the definition for good.
 - "Next boot" means a shutdown then a start: a reboot inside the guest
   does not recreate the QEMU process. The window and the VM list show
   **restart needed** with the waiting fields, and **Shut down and start**
@@ -2898,6 +2919,8 @@ fragment).
   ISO store (every redirect checked again, internal addresses refused
   unless `iso_fetch.allow_private` allows them, cloud metadata addresses
   always refused). A plain `http` URL needs a SHA-256.
+- Uploads and downloads are capped by `iso_fetch.max_bytes` (20 GiB by
+  default), checked on the announced size and on the bytes received.
 - Refused before anything is written: a qcow2 that names a backing file
   or an external data file, or that announces more than 16 TiB.
 - **Verify** recomputes the SHA-256 on the host. **Create a VM from this
@@ -2908,7 +2931,10 @@ fragment).
 **Volumes.** Create (blank or linked to an image of the same pool),
 resize up (refused while a running VM uses the volume), delete (admin).
 Delete and resize use the 1.98 proof that no other VM uses the volume,
-and the delete carries the digest of its preview.
+and the delete carries the digest of its preview. Volumes of an NFS
+(`netfs`) pool, images uploaded there included, cannot be deleted or
+resized by the console: the storage is shared, so that proof cannot be
+made.
 
 **Pools** (admin, except refresh). Create a `dir` or NFS pool. Refused: a
 system directory (`/etc`, `/usr`...), the directory of another pool
@@ -2938,7 +2964,8 @@ step, a command line or Activity. Specs reach the tool through a 0600 file
 of the action's working directory, removed at the end.
 
 API: `GET /api/kvm/hosts/<host>/caps?machine=q35|pc`, `.../images`,
-`.../links`, `.../pools`, `.../networks`;
+`.../links`, `.../pools`, `.../networks`, `.../macs?count=N` (1 to 16
+free MACs drawn for the cards of a VM to create, never cached);
 `GET /api/kvm/vms/<host>/<domain>/form` (view, unmanaged settings,
 pending fields, digest), `GET .../cloudinit` (operator);
 `POST /api/kvm/hosts/<host>/vm-plan` (`{spec}`),
@@ -2972,23 +2999,31 @@ create|upload|resize|delete`, `pool define|start|stop|refresh|autostart|delete`,
 `net define|start|stop|autostart|delete|links`, `template list|save|delete`.
 Deletes take `--expect-delete=` from their `--dry-run`.
 
-**OpenSSH and the read retry.** The `sshd-session` crash under several
-multiplexed sessions (1.98.0) is fixed in OpenSSH 10.6p1: on the lab host,
-none since its update, over thousands of sessions during the check below.
-The single replay of a read cut by the transport stays as a safety net.
+**OpenSSH and the read retry.** No `sshd-session` crash under several
+multiplexed sessions (1.98.0) has been observed since OpenSSH 10.6p1 on
+the lab host (1303 concurrent multiplexed reads, 0 failures). The single
+replay of a read cut by the transport is kept as a safety net.
 
 **What is verified.** On the lab host (libvirt 12.8.0, QEMU 11.1.2,
 OpenSSH 10.6p1), test objects only, each step checked with `virsh` and in
-the guest: `vol-upload` from a pipe (byte-identical, format probed as
+the guest, the host inventory identical before and after (apart from
+libvirt's cached listing of the parent pool of a deleted nested pool):
+`vol-upload` from a pipe (byte-identical, format probed as
 qcow2); pool and NAT network created by the console, a network on the
 LAN subnet refused; cirros 0.6.2, openSUSE Tumbleweed and an Alpine ISO
 uploaded with their published checksums checked on the host; a BIOS q35
 VM with a disk linked to cirros and a VNC password created in the window,
 its console opened; a UEFI Secure Boot VM with a TPM from a full copy of
-Tumbleweed, with a cloud-init user, SSH key and static network-config:
-SSH into the guest with the injected key, `cloud-init status` done, host
-name, static address, Secure Boot on, `/dev/tpm0`; three instances; a
-cancel during a full copy that left nothing; vCPU 1 to 2 and memory 1 to
+Tumbleweed, with a cloud-init user and SSH key: SSH into the guest with
+the injected key, `cloud-init status` done, host name, Secure Boot on,
+`/dev/tpm0`; a Tumbleweed VM created in the window whose static address
+comes from the assistant's network-config, seed never edited by hand:
+the card, named `enp1s0` by the image, found by the MAC the console drew,
+the guest reached at that address with no DHCP lease; three instances; a
+cancel during a full copy that left nothing; a clone cancelled during an
+in-pool copy, the action kept running until libvirt ended the copy, then
+nothing left; a card added to a shut off VM with a MAC drawn by the
+console; vCPU 1 to 2 and memory 1 to
 2 GiB seen in the guest; four virtio disks hot-added, the fifth and sixth
 waiting for a free PCIe slot with the reason, all removed; a card added
 and removed; machine type and memory maximum changed at the next boot,

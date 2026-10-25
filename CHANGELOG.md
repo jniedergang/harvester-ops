@@ -20,13 +20,21 @@ This file summarises each minor release; per-patch detail lives in `git log`.
     (4 by default, 0 to 16).
   - Disks: blank, from an image (linked qcow2 overlay by default, or full
     copy resized to the asked size), existing volume, ISO, empty CD-ROM.
-    Cards: libvirt network, host bridge or macvtap.
+    Cards: libvirt network, host bridge or macvtap. The console draws the
+    MAC of each card left empty (`52:54:00:...`, checked against every
+    card of the host) and writes it in the definition, also for a card
+    added later.
   - VNC with a password drawn by the console (8 characters), never shown.
   - Cloud-init: NoCloud seed ISO (label `cidata`, Joliet) built by the
     console, instance id = VM uuid, user-data, network-config, guest host
     name, seed pool. The guest agent and SSH keys (KeyPairs of the readable
     clusters, pasted keys) are merged into a `#cloud-config`; a document
     the console cannot merge safely is refused with its reason, unchanged.
+  - The assistant's network-config is a version 2 document that finds each
+    card by its MAC (`match: macaddress`), renaming it only when a name is
+    given: the name an image gives the card (`eth0`, `enp1s0`) no longer
+    matters. Generating it draws the MAC of the cards that have none. It
+    is refused for several instances, which cannot share a MAC.
   - Review is the server plan (refusals, warnings, volumes, seed, XML with
     `passwd='***'`). Create recomputes it, then runs volumes, seed,
     `define --validate`, autostart, start, check. A failure removes what
@@ -57,10 +65,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   checked, sent to one or several hosts on a fresh SSH connection,
   optional Mbit/s limit, SHA-256 recomputed on each host, cancel in both
   phases), download from a URL by the console, verify, delete with proof,
-  create a VM from an image, image pools of a host (admin).
+  create a VM from an image, image pools of a host (admin). Uploads and
+  downloads are capped by `iso_fetch.max_bytes` (20 GiB by default).
 - **Volumes**: create (blank or linked to an image of the same pool),
   resize up (VM shut off), delete with the 1.98 ownership proof and the
-  digest of the preview.
+  digest of the preview. Volumes of an NFS (`netfs`) pool, images uploaded
+  there included, cannot be deleted or resized by the console (shared
+  storage: the proof cannot be made).
 - **Pools**: create `dir` or NFS (admin), start, stop, refresh, autostart,
   delete with or without the empty directory. Guards: system directories,
   the directory of another pool (path and device:inode), nesting of other
@@ -79,7 +90,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `template list|save|delete`. Specs by `--spec-file=` (0600) or stdin;
   deletes need `--expect-delete=` from their `--dry-run`; edit needs
   `--expect-config=`.
-- API under `/api/kvm`: `hosts/<host>/caps|images|links|pools|networks`,
+- API under `/api/kvm`: `hosts/<host>/caps|images|links|pools|networks|macs`,
   `vms/<host>/<domain>/form`, `.../cloudinit` (operator),
   `hosts/<host>/vm-plan`, `POST vms/<host>`, `vms/<host>/<domain>/edit-plan`,
   `PATCH vms/<host>/<domain>`, `vms/<host>/<domain>/hot/<op>`,
@@ -102,18 +113,30 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   write of the console or the command line.
 - A KVM action forgets the shared views before it ends, so the page that
   reloads on the end event sees the change.
-- Cancelling an image upload or download, or a VM creation, waits for the
-  tool: the action stays running, names and pools stay held, until the
-  rollback is done. A full copy that libvirt is still building after a
+- Cancelling an image upload or download, a VM creation or a clone waits
+  for the tool: the action stays running, names and pools stay held, until
+  the rollback is done. A full copy that libvirt is still building after a
   cancel is waited for (up to 15 min) and deleted.
 - The URL guard of `/api/iso/fetch` moved to `bin/lib/url_fetch_guard.py`
   and is shared with the KVM image download (console and command line).
   A plain `http` image URL needs a SHA-256.
 - Without declared image pools, a base image stays in the catalogue while
   linked disks use it (only direct use hides a volume).
-- The read retry after a transport cut (1.98.0) stays as a safety net: the
-  `sshd-session` crash under multiplexed sessions is fixed in OpenSSH
-  10.6p1 (none seen on the lab host since its update).
+- The read retry after a transport cut (1.98.0) is kept as a safety net:
+  no `sshd-session` crash under multiplexed sessions has been observed
+  since OpenSSH 10.6p1 on the lab host (1303 concurrent multiplexed reads,
+  0 failures).
+
+### Fixed
+- Clone (1.98.0) cancelled during an in-pool copy: libvirt keeps building
+  the copy and refuses to delete it, so the action closed at once and left
+  the copy behind. The rollback now waits for the copy (same bounded wait
+  as a creation, up to 15 min) and deletes it; both names stay held.
+- The clone definition goes through `define --validate` like every other
+  definition.
+- The current memory of a running VM is never shown as waiting for the
+  next start: QEMU starts at the maximum and a guest without a balloon
+  driver stays there, so the "restart needed" badge was permanent.
 
 ### Security
 - The VNC password and the user-data never reach an API answer (the
@@ -129,6 +152,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   at startup.
 - The upload cancel token works only for the user who started the upload,
   with the operator role.
+- Spec files left in the working directory by a console killed during a
+  KVM action (they may carry user-data) are removed at startup.
 - Roles: deleting a volume or an image, every pool and network gesture and
   the image pools need the admin role; create, edit, hot gestures,
   uploads, verify, resize, pool refresh and the cloud-init read need the
@@ -156,16 +181,23 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `test_kvm_cli_create_review`, `test_kvm_routes_create`,
   `test_kvm_routes_create_review`, `test_kvm_pending`,
   `test_kvm_storage_views`, `test_kvm_upload_cancel`,
-  `test_vm_form_source`, on a simulated host (`kvm_next_sim.py`) and
+  `test_vm_form_source`, `test_cloudinit_net_by_mac` (generator played
+  by node, with mutations), on a simulated host (`kvm_next_sim.py`) and
   fixtures read on the lab host. New end-to-end tests: `test_kvm_create`,
   `test_kvm_edit`, `test_kvm_form_review`, `test_kvm_storage`.
 - Real check on the lab host (libvirt 12.8.0, QEMU 11.1.2, OpenSSH
-  10.6p1), test objects only, identical inventory before and after:
+  10.6p1), test objects only, identical inventory before and after (apart
+  from libvirt's cached listing of the parent pool of a deleted nested
+  pool):
   upload from a pipe, cirros 0.6.2, openSUSE Tumbleweed and Alpine with
   their published checksums, BIOS VM linked to cirros with a VNC password
-  created in the window, UEFI Secure Boot TPM VM from a full copy with a
-  static network-config reached by SSH (`cloud-init status` done), three
-  instances, cancel during a full copy with nothing left, hot vCPU,
+  created in the window, UEFI Secure Boot TPM VM from a full copy reached
+  by SSH (`cloud-init status` done), a Tumbleweed VM created in the window
+  whose static address comes from the assistant's network-config, unedited
+  (card `enp1s0` found by the MAC the console drew, reached at that
+  address, no DHCP lease), three instances, cancel during a full copy with
+  nothing left, a clone cancelled during an in-pool copy with nothing
+  left, a card added with a MAC drawn by the console, hot vCPU,
   memory, disks, card and media seen in the guest, PCIe slots exhausted,
   next-boot machine type and memory maximum, unmanaged settings identical
   in C14N, delete with storage, guards, cleanup by the console, secrets in

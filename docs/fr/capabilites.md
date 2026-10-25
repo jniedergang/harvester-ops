@@ -2958,6 +2958,11 @@ que l'aperçu ne correspond pas au nom saisi ou contient un refus.
   progression. **Annuler** dans le dock arrête la copie et retire tout ce
   qui a été créé. Une copie qui échoue est défaite de la même façon, et ce
   qui n'a pas pu être retiré est nommé.
+- Une copie dans un pool (`vol-create-from`) continue dans libvirt après
+  une annulation, et libvirt refuse de la supprimer tant qu'elle dure.
+  Depuis la 1.100.0, l'action reste en cours, les deux noms tenus, jusqu'à
+  la fin de la copie (jusqu'à 15 min) ; la copie est alors supprimée.
+  Avant, l'action se fermait aussitôt et la copie restait.
 
 **Supprimer.** **Supprimer** retire une VM arrêtée et persistante. Il
 faut le rôle administrateur. La fenêtre montre d'abord un aperçu, puis
@@ -3092,7 +3097,10 @@ Réseau, Cloud-init, Revue), mêmes icônes, même assistant cloud-init.
   l'image du même pool ; ou copie complète, agrandie à la taille
   demandée), volume existant, ISO, ou lecteur de CD-ROM vide. La place
   libre du pool s'affiche sous les cartes. Cartes : réseau libvirt, pont
-  de l'hôte, ou macvtap sur une carte de l'hôte avec son mode.
+  de l'hôte, ou macvtap sur une carte de l'hôte avec son mode. La console
+  tire la MAC de chaque carte laissée vide (`52:54:00:...`, contrôlée
+  contre toutes les cartes de l'hôte) et l'écrit dans la définition. Une
+  carte ajoutée plus tard reçoit la sienne de la même façon.
 - Affichage VNC, avec un mot de passe tiré par la console (8 caractères,
   la limite de VNC). Le mot de passe n'est jamais affiché.
 - Cloud-init : user-data et network-config écrits à la main ou par
@@ -3104,6 +3112,16 @@ Réseau, Cloud-init, Revue), mêmes icônes, même assistant cloud-init.
   tel quel. Le seed est une ISO NoCloud (étiquette `cidata`, Joliet)
   fabriquée par la console ; son identifiant d'instance est l'uuid de la
   VM.
+- L'assistant écrit un network-config version 2 qui retrouve chaque carte
+  par sa MAC (`match: macaddress`). Chaque entrée désigne une carte de
+  l'onglet Réseau (1 = la première). La carte n'est renommée dans
+  l'invité (`set-name`) que si vous donnez un nom. Le nom que l'image
+  donne à la carte (`eth0`, `enp1s0`) ne compte donc plus. **Générer le
+  network-data** tire la MAC des cartes qui n'en ont pas et l'écrit dans
+  leur carte. C'est refusé pour plusieurs instances, qui ne peuvent pas
+  partager une MAC : créez-les en DHCP, puis réglez chaque VM par
+  Cloud-init. Dans la fenêtre Modifier, les entrées désignent les cartes
+  existantes.
 - **Revue** demande le plan au serveur : refus, avertissements, volumes à
   créer, seed, et le XML avec `passwd='***'`. **Créer** lance ensuite les
   étapes : volumes, seed, `define --validate`, autostart, démarrage,
@@ -3111,8 +3129,9 @@ Réseau, Cloud-init, Revue), mêmes icônes, même assistant cloud-init.
   cru), et les pools sont relus avant chaque instance. Un échec retire ce
   que la console a créé pour cette instance et nomme ce qui n'a pas pu
   l'être ; les instances déjà créées restent et sont listées.
-- Annuler une création attend l'outil : une copie complète que libvirt
-  construit encore est attendue (jusqu'à 15 min), puis supprimée.
+- Annuler une création ou un clonage attend l'outil : une copie complète
+  que libvirt construit encore est attendue (jusqu'à 15 min), puis
+  supprimée.
 - Les modèles gardent le formulaire (pas le XML) dans la console, communs
   à tous les hôtes, avec un propriétaire. Mots de passe, clés et user-data
   sont retirés à l'enregistrement, et la fenêtre le dit.
@@ -3140,6 +3159,9 @@ classification exacte du serveur. Seuls les champs changés partent.
 | Renommer | VM arrêtée et sans instantané seulement | `domrename` |
 
 - Sur une VM arrêtée, tout passe par un seul `define` ciblé.
+- La mémoire courante n'apparaît jamais en attente du prochain démarrage.
+  QEMU démarre au maximum, et un invité sans pilote de ballon y reste :
+  la valeur vive peut donc différer de la définition pour toujours.
 - « Prochain démarrage » veut dire un arrêt puis un démarrage : un
   redémarrage dans l'invité ne recrée pas le processus QEMU. La fenêtre
   et la liste des VMs affichent **restart needed** avec les champs en
@@ -3184,6 +3206,9 @@ Colonnes : nom, pool, format et badge ISO, taille virtuelle, usage
   internes refusées sauf si `iso_fetch.allow_private` les autorise,
   adresses de métadonnées cloud toujours refusées). Une URL `http` simple
   exige un SHA-256.
+- Les envois et les téléchargements sont plafonnés par
+  `iso_fetch.max_bytes` (20 Gio par défaut), contrôlé sur la taille
+  annoncée et sur les octets reçus.
 - Refusé avant toute écriture : un qcow2 qui nomme un fichier de base ou
   un fichier de données externe, ou qui annonce plus de 16 Tio.
 - **Vérifier** recalcule le SHA-256 sur l'hôte. **Créer une VM depuis
@@ -3196,7 +3221,9 @@ Colonnes : nom, pool, format et badge ISO, taille virtuelle, usage
 (refusé tant qu'une VM en marche utilise le volume), supprimer
 (administrateur). Suppression et agrandissement reprennent la preuve de la
 1.98 qu'aucune autre VM n'utilise le volume, et la suppression porte
-l'empreinte de son aperçu.
+l'empreinte de son aperçu. Les volumes d'un pool NFS (`netfs`), images
+téléversées là comprises, ne peuvent être ni supprimés ni agrandis par la
+console : le stockage est partagé, cette preuve ne peut pas être faite.
 
 **Pools** (administrateur, sauf rafraîchir). Créer un pool `dir` ou NFS.
 Refusés : un répertoire système (`/etc`, `/usr`...), le répertoire d'un
@@ -3229,7 +3256,8 @@ l'Activité. Les specs parviennent à l'outil par un fichier 0600 du
 répertoire de travail de l'action, supprimé à la fin.
 
 API : `GET /api/kvm/hosts/<hôte>/caps?machine=q35|pc`, `.../images`,
-`.../links`, `.../pools`, `.../networks` ;
+`.../links`, `.../pools`, `.../networks`, `.../macs?count=N` (1 à 16 MAC
+libres tirées pour les cartes d'une VM à créer, jamais gardées en cache) ;
 `GET /api/kvm/vms/<hôte>/<domaine>/form` (vue, réglages non gérés, champs
 en attente, empreinte), `GET .../cloudinit` (opérateur) ;
 `POST /api/kvm/hosts/<hôte>/vm-plan` (`{spec}`),
@@ -3267,25 +3295,33 @@ les options courtes `--name --vcpus --memory-mib --disk= --nic= ...`),
 `template list|save|delete`. Les suppressions prennent `--expect-delete=`
 de leur `--dry-run`.
 
-**OpenSSH et la reprise des lectures.** Le plantage de `sshd-session` sous
-plusieurs sessions multiplexées (1.98.0) est corrigé dans OpenSSH 10.6p1 :
-sur l'hôte du banc, aucun depuis sa mise à jour, sur des milliers de
-sessions pendant la vérification ci-dessous. La reprise unique d'une
-lecture coupée par le transport reste comme filet de sécurité.
+**OpenSSH et la reprise des lectures.** Aucun plantage de `sshd-session`
+sous plusieurs sessions multiplexées (1.98.0) n'a été observé depuis
+OpenSSH 10.6p1 sur l'hôte du banc (1303 lectures multiplexées
+simultanées, 0 échec). La reprise unique d'une lecture coupée par le
+transport est gardée comme filet de sécurité.
 
 **Ce qui est vérifié.** Sur l'hôte du banc (libvirt 12.8.0, QEMU 11.1.2,
 OpenSSH 10.6p1), objets de test seulement, chaque étape contrôlée par
-`virsh` et dans l'invité : `vol-upload` depuis un tuyau (octets
+`virsh` et dans l'invité, l'inventaire de l'hôte identique avant et après
+(hormis la liste gardée par libvirt du pool parent d'un pool imbriqué
+supprimé) : `vol-upload` depuis un tuyau (octets
 identiques, format sondé qcow2) ; pool et réseau NAT créés par la console,
 un réseau sur le sous-réseau du LAN refusé ; cirros 0.6.2, openSUSE
 Tumbleweed et une ISO Alpine téléversées avec leurs sommes publiées
 contrôlées sur l'hôte ; une VM BIOS q35 avec un disque lié à cirros et un
 mot de passe VNC créée dans la fenêtre, sa console ouverte ; une VM UEFI
 Secure Boot avec TPM depuis une copie complète de Tumbleweed, avec un
-utilisateur, une clé SSH et un network-config statique : SSH dans
-l'invité avec la clé injectée, `cloud-init status` done, nom d'hôte,
-adresse statique, Secure Boot actif, `/dev/tpm0` ; trois instances ; une
-annulation pendant une copie complète qui n'a rien laissé ; vCPU de 1 à 2
+utilisateur et une clé SSH : SSH dans l'invité avec la clé injectée,
+`cloud-init status` done, nom d'hôte, Secure Boot actif, `/dev/tpm0` ;
+une VM Tumbleweed créée dans la fenêtre dont l'adresse statique vient du
+network-config de l'assistant, seed jamais retouché à la main : la carte,
+nommée `enp1s0` par l'image, retrouvée par la MAC tirée par la console,
+l'invité joint à cette adresse sans bail DHCP ; trois instances ; une
+annulation pendant une copie complète qui n'a rien laissé ; un clonage
+annulé pendant une copie dans un pool, l'action restée en cours jusqu'à
+la fin de la copie par libvirt, puis rien de laissé ; une carte ajoutée
+à une VM arrêtée avec une MAC tirée par la console ; vCPU de 1 à 2
 et mémoire de 1 à 2 Gio vus dans l'invité ; quatre disques virtio ajoutés
 à chaud, le cinquième et le sixième en attente d'un emplacement PCIe avec
 la raison, tous retirés ; une carte ajoutée puis retirée ; type de

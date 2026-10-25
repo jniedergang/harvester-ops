@@ -61,7 +61,7 @@ Choix concrets du XML produit (`kvm_xml.build_domain`) :
 | Métadonnées | `<metadata><hops:vm xmlns:hops="https://harvester-ops.io/xmlns/vm/1"><hops:os>linux</hops:os><hops:seed pool=... volume=.../></hops:vm></metadata>` | type d'OS relu par la modification ; volume cloud-init reconnu comme possédé par la VM. Espace de noms distinct de celui réservé aux dossiers (`.../xmlns/folder/1`) |
 | Démarrage automatique | `virsh autostart` après le `define` si coché | réglage de l'hôte, hors XML |
 
-L'uuid du domaine est tiré par la console (`uuid4`) et posé dans le XML (écart assumé à la tâche 2, voir « Création ») : le seed porte ainsi dès sa fabrication l'`instance-id` = uuid du domaine, sans `define` préalable avec un lecteur vide ; libvirt refuse un uuid déjà pris et le retour arrière ne retire qu'un domaine qui porte cet uuid. Pas de `<mac>` quand l'exploitant n'en donne pas (libvirt génère `52:54:00:...`). Les MAC fournies sont contrôlées contre les domaines de l'hôte (relevé de la 1.98.0) : un doublon sur le même hôte est refusé ; entre hôtes, rien n'est contrôlé et c'est dit dans la bulle.
+L'uuid du domaine est tiré par la console (`uuid4`) et posé dans le XML (écart assumé à la tâche 2, voir « Création ») : le seed porte ainsi dès sa fabrication l'`instance-id` = uuid du domaine, sans `define` préalable avec un lecteur vide ; libvirt refuse un uuid déjà pris et le retour arrière ne retire qu'un domaine qui porte cet uuid. Une carte sans MAC reçoit une MAC tirée par la console (`52:54:00:...`, contrôlée contre toutes les cartes de l'hôte) et écrite dans le XML, à la création comme pour une carte ajoutée ensuite (revue finale, I2 : avant, libvirt la tirait et le network-config ne pouvait pas désigner la carte). Les MAC fournies sont contrôlées contre les domaines de l'hôte (relevé de la 1.98.0) : un doublon sur le même hôte est refusé ; entre hôtes, rien n'est contrôlé et c'est dit dans la bulle.
 
 ### Disques d'une nouvelle VM
 
@@ -515,6 +515,13 @@ Réalisé (tâche 7, 25/10/2026), ce que le réel a appris (node2 : libvirt 12.8
 - **OpenSSH 10.6p1** (installé sur node2 le 24/10 à 16:53) : aucun `bad msg_len` depuis, pour des milliers de sessions pendant la vérification ; la reprise unique des lectures reste en filet.
 - **Secrets** : mots de passe VNC (relus sur l'hôte, jamais affichés) et mot de passe cloud-init factice absents des réponses, de `dev-server.log`, d'`actions.db` et des journaux d'actions.
 - Non vérifié en réel : cartes macvtap, pools NFS, disques SCSI, baisse de vCPU refusée par QEMU, invité sans pilote de ballon ; vCPU limité à 1 vers 2 (règle du banc : 2 vCPU au plus par VM) au lieu de 2 vers 4.
+
+Revue finale (25/10/2026), corrections vérifiées en réel sur node2 (journal et relevés dans `/tmp/kvmnext/real8/`, relevé de référence identique avant et après) :
+
+- **Mémoire courante** jamais « en attente du prochain démarrage » (`memory.current_mib` dans `_LIVE_ONLY`) : QEMU démarre au plafond et un invité sans pilote de ballon y reste, le badge était permanent.
+- **Network-config par MAC** : la console tire la MAC de chaque carte qu'elle définit (création, carte ajoutée, geste « ajouter une carte ») et l'assistant écrit un network-config v2 qui désigne la carte par `match: macaddress` (`set-name` seulement si un nom est demandé ; route par défaut en `0.0.0.0/0`, `default` étant refusé par cloud-init 25.1). Réel : `kvmtest-net-c` créée dans la fenêtre depuis Tumbleweed, network-config généré par l'assistant sans retouche, invité en `enp1s0` à `10.213.77.30/24` (route `proto static`, aucun bail DHCP), joint en SSH puis supprimé par la console. La fenêtre de création refuse ce network-config pour plusieurs instances (une MAC ne se partage pas).
+- **Clonage annulé pendant une copie dans un pool** (1.98) : même attente bornée que la création (`kvm_storage.delete_building`, commune aux deux retours arrière), action en attente de l'outil. Réel : annulation à 350 Mo copiés (source liée à Tumbleweed, chaîne aplatie), action restée en cours 6 s puis « cancelled », un second clonage vers le même nom refusé en 409 pendant ce temps, rien laissé.
+- Aussi : `define --validate` pour le clonage, specs laissés par une console tuée balayés au démarrage, `delete_pool` sous `ko.writing`.
 
 ## Ordre et dépendances
 
