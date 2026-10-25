@@ -243,6 +243,24 @@ def test_clone_is_refused_while_its_new_name_is_busy(client):
     assert _NoThread.started == []
 
 
+def test_cancelling_a_clone_waits_for_the_tool_rollback(client):
+    """Revue finale I3 : annuler un clonage pendant une copie dans un pool
+    fermait l'action tout de suite et relâchait les deux noms pendant que
+    libvirtd construisait encore la copie. L'action attend la sortie de l'outil."""
+    import types
+    assert client.post("/api/kvm/vms/node2/web/clone", json={"name": "web2"}).status_code == 202
+    run = only_run()
+    assert run.cancel_waits is True
+    proc = types.SimpleNamespace(terminated=0, poll=lambda: None)
+    proc.terminate = lambda: setattr(proc, "terminated", proc.terminated + 1)
+    run.proc, run.status = proc, "running"
+    assert client.delete(f"/api/action/{run.id}").status_code == 200
+    assert proc.terminated == 1 and run.cancel_requested is True
+    assert run.status == "running"            # web et web2 encore tenus pendant le retour arrière
+    r = client.post("/api/kvm/vms/node2/db/clone", json={"name": "web2"})
+    assert r.status_code == 409
+
+
 CLONE_TARGET_OPS = [
     ("post", "/api/kvm/vms/node2/web2/start", {}),
     ("post", "/api/kvm/vms/node2/web2/snapshots", {"name": "s9"}),

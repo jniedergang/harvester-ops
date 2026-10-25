@@ -21,22 +21,27 @@ Les refus et échecs propres à ces opérations sont des `OpError` (genre dans
 OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 """
 
+import fcntl
 import hashlib
 import io
 import ipaddress
 import itertools
 import json
+import os
 import posixpath
 import re
 import secrets
 import shlex
+import threading
 import time
+import uuid as uuidlib
 import xml.etree.ElementTree as ET
 
+import kvm_decl
 import kvm_host as kh
 
 OP_KINDS = ("invalid", "refused", "notfound", "needs-force", "timeout", "failed",
-            "plan-changed")
+            "plan-changed", "changed")
 
 # nom d'un instantané créé par la console (un instantané existant, créé
 # ailleurs, est désigné par tout nom accepté par check_vm_name)
@@ -58,6 +63,8 @@ REASON_UNKNOWN = "could not prove that no other VM uses it"
 REASON_NOT_REQUESTED = "storage removal not requested"
 REASON_SHARED_STORAGE = "shared-storage: cannot prove"
 REASON_MISSING = "file not found"
+REASON_SEED = "cloud-init seed of this VM"
+REASON_SEED_CLONE = "cloud-init seed: a new one is written for the copy"
 
 # pools dont les volumes peuvent servir à plusieurs hôtes
 _SHARED_POOL_TYPES = ("netfs", "gluster", "rbd", "iscsi", "iscsi-direct", "sheepdog",
@@ -98,6 +105,35 @@ def check_new_vm_name(name):
     if "/" in name or name.startswith("."):
         raise OpError("invalid", "invalid name for the copy: no '/' and no leading '.'")
     return name
+
+
+# préfixe des MAC tirées par la console : celui de QEMU/KVM, que libvirt
+# utilise aussi quand il tire lui-même (adresse unicast, administrée localement)
+MAC_PREFIX = "52:54:00"
+MAC_DRAW_TRIES = 1000
+
+
+def macs_in_use(domains):
+    """MAC de toutes les cartes de l'hôte, définitions inactives et vives,
+    d'après un résultat de kvm_storage.read_domains ; ensemble en minuscules."""
+    return {(n.get("mac") or "").lower() for e in (domains.get("domains") or {}).values()
+            for vm in (e.get("inactive"), e.get("live")) if vm for n in vm.get("nics") or []
+            if n.get("mac")}
+
+
+def draw_mac(in_use, rand=None):
+    """Tire une MAC `52:54:00:xx:xx:xx` absente de `in_use` (ensemble en
+    minuscules, complété par l'appelant à chaque tirage). La console écrit
+    la MAC de chaque carte qu'elle définit, pour que le network-config de
+    cloud-init puisse désigner la carte par son adresse. `rand()` rend 24
+    bits (secrets.randbits par défaut, injectable pour les tests)."""
+    rand = rand or (lambda: secrets.randbits(24))
+    for _ in range(MAC_DRAW_TRIES):
+        n = rand() & 0xFFFFFF
+        mac = f"{MAC_PREFIX}:{n >> 16:02x}:{(n >> 8) & 0xFF:02x}:{n & 0xFF:02x}"
+        if n and mac not in in_use:
+            return mac
+    raise OpError("failed", "no free MAC address could be drawn")
 
 
 def check_snapshot_name(name, new=False):
@@ -783,6 +819,21 @@ class _Survey:
                     lst.append(r["owner"])
         return users
 
+    def direct_users(self):
+        """{identité texte de disque: [domaines]} des AUTRES domaines qui citent
+        ce disque comme source (définition et XML vivant), sans leurs chaînes :
+        une image de base n'est pas « utilisée » par les disques liés à elle
+        (voir backing_users)."""
+        users = {}
+        for r in self.refs:
+            if r["owner"] in (None, _SELF):
+                continue
+            for i in r["ids"]:
+                lst = users.setdefault(i, [])
+                if r["owner"] not in lst:
+                    lst.append(r["owner"])
+        return users
+
     def backing_users(self, path, acknowledged=frozenset()):
         """Sommets des chaînes (d'autres domaines ou de volumes libres) qui
         passent par `path` ; UNKNOWN en fin de liste si rien n'est prouvé."""
@@ -790,6 +841,214 @@ class _Survey:
         if self.blocked(acknowledged):
             found.append(UNKNOWN)
         return found
+
+
+# --- relevés gardés pour les vues ----------------------------------------------
+
+SURVEY_TTL = 20.0                # âge au-delà duquel un relevé est rafraîchi
+SURVEY_MAX_STALE = 120.0         # au-delà, la vue attend un relevé neuf
+
+
+def _spawn_thread(fn):
+    threading.Thread(target=fn, daemon=True, name="kvm-survey").start()
+
+
+class SurveyCache:
+    """Relevés (`_Survey`) gardés par hôte pour les VUES seulement (catalogue
+    d'images) : un relevé coûte ~30 s sur un hôte chargé (node2). Jamais
+    utilisé pour une décision d'écriture (suppression, redimensionnement) :
+    celles-ci refont toujours un relevé neuf.
+
+    Un relevé plus vieux que `ttl` est rendu tel quel pendant qu'un fil le
+    rafraîchit ; plus vieux que `max_stale`, ou absent, il est refait sur
+    place. Toute écriture de la console sur l'hôte appelle `invalidate` : le
+    relevé est oublié, et un rafraîchissement commencé avant l'écriture est
+    jeté (génération). La clé est l'hôte déclaré (nom, adresse, URI).
+
+    `enabled` None : actif sauf `HARVESTER_OPS_KVM_SURVEY_CACHE=0` (coupé
+    par les tests d'API, qui changent leur hôte simulé entre deux appels).
+
+    Invalidation ENTRE PROCESSUS. Les écritures sont faites par
+    bin/harvester-kvm.py (un processus par action) et les vues sont servies
+    par la console et ses processus lecteurs : chacun a son cache. Un compteur
+    de génération par hôte vit donc dans le répertoire d'état
+    (`<état>/kvm.d/survey-gen/<hôte>`, un entier, écrit sous `flock`) :
+    - `invalidate` (appelé par `writing` / `invalidate_survey` autour de
+      chaque écriture de la bibliothèque, par la CLI à la fin de toute
+      commande qui écrit, et par la console à la fin de chaque action KVM)
+      incrémente ce compteur, en plus d'oublier l'entrée locale ;
+    - `get` relit le compteur (un `read` d'une dizaine d'octets) et ne sert
+      une entrée que si elle a été relevée sous la MÊME génération : une
+      écriture faite par un autre processus, même pendant un
+      rafraîchissement, rend l'entrée périmée ;
+    - compteur illisible (droits, disque) : pas de cache pour cet appel, le
+      relevé est refait (une vue un peu plus lente, jamais fausse) ; échec
+      d'écriture du compteur : ignoré (rien d'autre à faire), les autres
+      processus gardent au pire leur entrée jusqu'à `ttl`.
+    Un hôte sans répertoire d'état (objets des tests) a la génération 0."""
+
+    def __init__(self, ttl=SURVEY_TTL, max_stale=SURVEY_MAX_STALE, clock=time.monotonic,
+                 spawn=_spawn_thread, factory=None, enabled=None, generation=None, bump=None):
+        self.ttl, self.max_stale, self.clock, self.spawn = ttl, max_stale, clock, spawn
+        self.enabled = enabled
+        # compteur partagé entre processus (remplaçables par les tests)
+        self.generation = generation or read_generation
+        self.bump = bump or bump_generation
+        self.factory = factory or (lambda host: _Survey(host))
+        self._lock = threading.Lock()
+        self._entries = {}          # hôte -> (relevé, date)
+        self._gen = {}              # hôte -> génération (invalidations)
+        self._refreshing = set()
+
+    def _store(self, key, gen, survey, at, shared):
+        with self._lock:
+            if self._gen.get(key, 0) == gen:
+                self._entries[key] = (survey, at, shared)
+
+    def get(self, host):
+        """(relevé, âge en secondes) ; âge 0 pour un relevé fait sur place."""
+        enabled = self.enabled if self.enabled is not None else (
+            os.environ.get("HARVESTER_OPS_KVM_SURVEY_CACHE", "1") != "0")
+        if not enabled:
+            return self.factory(host), 0.0
+        key = _host_key(host)
+        shared = self.generation(host)
+        if shared is None:                      # compteur illisible : pas de cache
+            return self.factory(host), 0.0
+        now = self.clock()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry and entry[2] != shared:    # écrit par un autre processus depuis
+                self._entries.pop(key, None)
+                entry = None
+            gen = self._gen.get(key, 0)
+            age = now - entry[1] if entry else None
+            if entry and age < self.ttl:
+                return entry[0], age
+            background = bool(entry and age < self.max_stale)
+            if background and key in self._refreshing:
+                return entry[0], age
+            if background:
+                self._refreshing.add(key)
+        if background:
+            def refresh():
+                try:
+                    at = self.clock()
+                    self._store(key, gen, self.factory(host), at, shared)
+                except Exception:               # noqa: BLE001 - la vue garde l'ancien
+                    pass
+                finally:
+                    with self._lock:
+                        self._refreshing.discard(key)
+            self.spawn(refresh)
+            return entry[0], age
+        at = self.clock()
+        survey = self.factory(host)
+        self._store(key, gen, survey, at, shared)
+        return survey, 0.0
+
+    def invalidate(self, host):
+        key = _host_key(host)
+        with self._lock:
+            self._gen[key] = self._gen.get(key, 0) + 1
+            self._entries.pop(key, None)
+        self.bump(host)
+
+
+SURVEY_GEN_DIR = "survey-gen"
+
+
+def _generation_path(host):
+    """`<état>/kvm.d/survey-gen/<hôte>`, ou None pour un hôte sans état (le
+    nom d'un hôte déclaré suit NAME_RE : un nom de fichier sûr)."""
+    state = getattr(host, "state", None)
+    name = getattr(host, "name", None)
+    if not state or not isinstance(name, str) or not name or "/" in name or name.startswith("."):
+        return None
+    return kvm_decl.decl_dir(state) / SURVEY_GEN_DIR / name
+
+
+def read_generation(host):
+    """Génération partagée des relevés de `host` : 0 sans fichier (ou sans
+    état), None si le fichier existe mais ne se lit pas."""
+    path = _generation_path(host)
+    if path is None:
+        return 0
+    try:
+        with open(path, "rb") as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_SH)     # jamais entre troncature et écriture
+            raw = f.read(32)
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    try:
+        return int(raw.strip() or b"0")
+    except ValueError:
+        return None
+
+
+def bump_generation(host):
+    """Incrémente la génération partagée de `host` (sous `flock` : deux
+    processus qui écrivent en même temps comptent deux). Rend la nouvelle
+    valeur, ou None (pas d'état, ou échec : rien d'autre à faire)."""
+    path = _generation_path(host)
+    if path is None:
+        return None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        raw = os.read(fd, 32)
+        try:
+            value = int(raw.strip()) + 1
+        except ValueError:
+            # fichier neuf, vide ou abîmé : repartir d'une valeur prise sur
+            # l'horloge (en nanosecondes), plus grande que toute génération
+            # comptée jusqu'ici et gardée par un cache ; repartir de 1 ferait
+            # retomber sur une génération déjà vue et servir un relevé périmé
+            value = time.time_ns()
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, str(value).encode())
+        return value
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def _host_key(host):
+    decl = getattr(host, "decl", None) or {}
+    return (getattr(host, "name", None), decl.get("address"), decl.get("uri"))
+
+
+SURVEYS = SurveyCache()
+
+
+def invalidate_survey(host):
+    """À appeler après toute écriture de la console sur l'hôte."""
+    SURVEYS.invalidate(host)
+
+
+class writing:
+    """`with writing(host):` autour d'une écriture : relevé gardé oublié
+    avant (un rafraîchissement en cours est jeté) et après (un relevé fait
+    pendant l'écriture verrait un état intermédiaire)."""
+
+    def __init__(self, host):
+        self.host = host
+
+    def __enter__(self):
+        invalidate_survey(self.host)
+        return self
+
+    def __exit__(self, *exc):
+        invalidate_survey(self.host)
+        return False
 
 
 def _chain_paths(path, info):
@@ -837,8 +1096,13 @@ def _shared_storage(survey, entry):
 def _owned(survey, vm, acknowledged=frozenset()):
     """Disques d'une VM avec ce qu'on peut en faire (voir owned_disks)."""
     disks, candidates = [], []
+    seed = vm.get("seed")
     for d in vm.get("disks") or []:
         loc = survey.locate(d)
+        # volume cloud-init écrit par la console pour cette VM (`<hops:seed>`) :
+        # un CD-ROM, mais possédé ; supprimable si personne d'autre ne le cite
+        is_seed = bool(seed and d.get("type") == "volume" and d.get("source")
+                       == f"{seed['pool']}/{seed['volume']}")
         entry = {"target": d.get("target"), "source": d.get("source"), "pool": loc["pool"],
                  "volume": loc["volume"], "path": loc["path"], "format": d.get("format"),
                  "kind": None, "deletable": False, "reason": None}
@@ -847,7 +1111,9 @@ def _owned(survey, vm, acknowledged=frozenset()):
             if loc["volume"] not in survey.pool_volumes(loc["pool"]):
                 entry.update(pool=None, volume=None)
         entry["kind"] = "volume" if entry["volume"] else d.get("type")
-        if d.get("device", "disk") != "disk" or d.get("readonly"):
+        if is_seed:
+            entry["seed"] = True
+        if (d.get("device", "disk") != "disk" or d.get("readonly")) and not is_seed:
             entry["reason"] = REASON_RO
         elif not d.get("source"):
             entry["reason"] = "empty drive"
@@ -884,6 +1150,8 @@ def _owned(survey, vm, acknowledged=frozenset()):
             e["reason"] = REASON_UNKNOWN
         else:
             e["deletable"] = True
+            if e.get("seed"):
+                e["reason"] = REASON_SEED
     # un disque gardé du domaine visé qui a pour base un disque supprimable
     # garde aussi celui-ci (sa propre surcouche, supprimée avec lui, ne compte pas)
     changed = True
@@ -904,6 +1172,8 @@ def _owned(survey, vm, acknowledged=frozenset()):
                 changed = True
     for e in candidates:
         e.pop("_keys", None)
+    for e in disks:
+        e.pop("seed", None)
     return disks
 
 
@@ -988,8 +1258,21 @@ def clone_plan(host, name, new_name):
     regenerated = [] if own_refusals else _clone_tree(xml, new_name, {})[1]
     survey = _Survey(host, exclude=name)
     disks, shared = [], []
+    seed_plan = None
+    vseed = vm.get("seed")
     for d in vm.get("disks") or []:
         t = d.get("target") or "?"
+        if vseed and d.get("type") == "volume" and d.get("source") == \
+                f"{vseed['pool']}/{vseed['volume']}":
+            # le seed n'est jamais partagé avec la copie : il est réécrit avec
+            # le nouveau nom d'hôte et l'uuid de la copie
+            new_vol = seed_volume_name(new_name)
+            seed_plan = {"target": t, "pool": vseed["pool"], "volume": vseed["volume"],
+                         "new_volume": new_vol}
+            if new_vol in survey.pool_volumes(vseed["pool"]):
+                refusals.append(f"a volume named {new_vol} already exists in {vseed['pool']}")
+            shared.append({"target": t, "source": d.get("source"), "reason": REASON_SEED_CLONE})
+            continue
         if d.get("device", "disk") != "disk" or d.get("readonly"):
             shared.append({"target": t, "source": d.get("source"), "reason": REASON_RO})
             continue
@@ -1113,7 +1396,61 @@ def clone_plan(host, name, new_name):
             "shared": shared, "space": list(space.values()), "nics": len(vm.get("nics") or []),
             "nvram": bool(nv), "uefi_entries_lost": bool(nv),
             "tpm_state_lost": bool(tpm and tpm.get("backend") == "emulator"),
-            "regenerated": regenerated}
+            "regenerated": regenerated, "seed": seed_plan}
+
+
+def seed_volume_name(vm):
+    """Nom du volume cloud-init d'une VM (même règle que kvm_xml)."""
+    return f"{vm}-cidata.iso"
+
+
+# lecture d'une ISO de seed (petite) par libvirt, en base64 sur la sortie ;
+# `virsh -q` : sans lui, un saut de ligne final s'ajoute aux octets
+_SEED_READ = ('virsh -q -c "$1" vol-download --pool "$2" --vol "$3" --file /dev/stdout '
+              '| base64 -w0')
+
+
+def read_seed(host, pool, volume):
+    """Fichiers d'un seed NoCloud lu sur l'hôte : {nom Joliet: octets}."""
+    import base64
+    import iso9660
+    uri = host.decl.get("uri", "qemu:///system")
+    out = host.run(["sh", "-c", _SEED_READ, "sh", uri, pool, volume], idempotent=True)
+    try:
+        return iso9660.read_iso(base64.b64decode(out.strip(), validate=True))["files"]
+    except (ValueError, iso9660.IsoError, KeyError) as exc:
+        raise OpError("failed", f"the cloud-init seed {pool}/{volume} could not be read "
+                      f"({exc.__class__.__name__})") from None
+
+
+def _clone_seed(host, plan, new_name, uid, created):
+    """Réécrit le seed d'une copie : user-data, network-config et
+    vendor-data repris, `instance-id` = uuid de la copie, nom d'hôte tiré du
+    nouveau nom ; téléversé sous `<copie>-cidata.iso`."""
+    import kvm_create
+    sp = plan["seed"]
+    files = read_seed(host, sp["pool"], sp["volume"])
+    data = kvm_create.seed_iso({"user_data": files.get("user-data"),
+                                "network_data": files.get("network-config")}, uid,
+                               kvm_create.guest_hostname(new_name),
+                               vendor_data=files.get("vendor-data"))
+    kvm_create.upload_bytes(host, sp["pool"], sp["new_volume"], data, created=created)
+
+
+def _set_clone_identity(xml_text, uid, seed_plan):
+    """uuid tiré par la console et `<hops:seed>` de la copie."""
+    _register_namespaces(xml_text)
+    root = ET.fromstring(xml_text)
+    el = root.find("uuid")
+    if el is None:
+        el = ET.Element("uuid")
+        root.insert(list(root).index(root.find("name")) + 1, el)
+    el.text = uid
+    ns = kh.HOPS_NS
+    s_el = root.find(f"metadata/{{{ns}}}vm/{{{ns}}}seed")
+    if s_el is not None and seed_plan:
+        s_el.set("volume", seed_plan["new_volume"])
+    return ET.tostring(root, encoding="unicode")
 
 
 def volume_xml(name, capacity, fmt, permissions=None):
@@ -1358,11 +1695,23 @@ def _copy_file(host, entry, created, deadline, progress, sleep, poll):
     return warnings
 
 
-def _rollback(host, created):
-    """Défait ce qui a été créé, dans l'ordre inverse ; rend ce qui reste."""
+def _rollback(host, created, sleep=None, clock=None):
+    """Défait ce qui a été créé, dans l'ordre inverse ; rend ce qui reste.
+
+    Un volume que `vol-create-from` construisait encore (`building`, clonage
+    annulé pendant la copie) : libvirtd poursuit la copie et refuse la
+    suppression jusqu'à sa fin ; même attente bornée que le retour arrière
+    d'une création (kvm_storage.delete_building)."""
+    import kvm_storage as ks         # kvm_storage importe ce module : import tardif
     leftovers = []
     for item in reversed(created):
         public = {k: v for k, v in item.items() if k not in ("sources", "building")}
+        if item["kind"] == "volume" and item.get("building"):
+            left = ks.delete_building(host, item["pool"], item["volume"], sleep=sleep,
+                                      clock=clock)
+            if left:
+                leftovers.append({**public, "error": left["error"]})
+            continue
         try:
             if item["kind"] == "domain":
                 xml = host.virsh("dumpxml", "--inactive", "--domain", item["name"], idempotent=True)
@@ -1392,12 +1741,7 @@ def _rollback(host, created):
         except kh.KvmError as e:
             if e.kind == "notfound" and item["kind"] in ("domain", "volume"):
                 continue                     # déjà absent
-            msg = e.message
-            if item.get("building"):
-                msg += (f"; libvirtd may still be building volume {item['pool']}/"
-                        f"{item['volume']}: remove it once the copy ends (virsh vol-delete "
-                        f"--pool {item['pool']} --vol {item['volume']})")
-            leftovers.append({**public, "error": msg})
+            leftovers.append({**public, "error": e.message})
         except (OpError, ET.ParseError, ValueError) as e:
             leftovers.append({**public, "error": str(e)})
     return leftovers
@@ -1414,7 +1758,14 @@ def _passwords(xml_text):
 
 
 def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
-             poll=COPY_POLL):
+             poll=COPY_POLL, clock=None):
+    """Voir _clone_vm (relevé gardé oublié autour des écritures)."""
+    with writing(host):
+        return _clone_vm(host, name, new_name, timeout, progress, sleep, poll, clock)
+
+
+def _clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep,
+              poll=COPY_POLL, clock=None):
     """Copie complète d'une VM arrêtée : plan recalculé, volumes copiés
     (`vol-create-from` dans un pool, chaîne aplatie, droits de la source ;
     `qemu-img convert` hors pool), état de la source relu juste avant de
@@ -1473,6 +1824,13 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
                 copies.append({"target": e["target"], "destination": e["destination"],
                                "pool": None})
             step(sid, "done", copies[-1]["destination"])
+        uid = None
+        if plan.get("seed"):
+            step("seed", "running", f"{plan['seed']['pool']}/{plan['seed']['new_volume']}")
+            uid = str(uuidlib.uuid4())
+            _clone_seed(host, plan, new_name, uid, created)
+            disk_map[plan["seed"]["target"]] = plan["seed"]["new_volume"]
+            step("seed", "done", plan["seed"]["new_volume"])
         step("define", "running", new_name)
         # la source a pu être démarrée pendant la copie : la copie serait incohérente
         state = host.virsh("domstate", "--domain", name, idempotent=True).strip()
@@ -1480,9 +1838,13 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
             raise OpError("failed", f"{name} was started during the copy (state: {state}): "
                           "the copy is discarded")
         new_xml = clone_xml(xml, new_name, disk_map)
+        if uid:
+            new_xml = _set_clone_identity(new_xml, uid, plan["seed"])
         created.append({"kind": "domain", "name": new_name, "sources": sources})
-        host.run_input(["env", "LC_ALL=C", *host._virsh_argv(("define", "/dev/stdin"))], new_xml,
-                       secrets=_passwords(xml))
+        # --validate : libvirt contrôle le XML contre son schéma avant de l'accepter
+        host.run_input(["env", "LC_ALL=C",
+                        *host._virsh_argv(("define", "--validate", "/dev/stdin"))],
+                       new_xml, secrets=_passwords(xml))
         step("define", "done", new_name)
         step("verify", "running", new_name)
         out = host.batch({"info": ("dominfo", "--domain", new_name),
@@ -1492,7 +1854,7 @@ def clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.sleep
         clone = kh.parse_domain_xml(_need(out, "xml"))
         step("verify", "done", f"uuid {clone['uuid']}")
     except BaseException as exc:
-        leftovers = _rollback(host, created)
+        leftovers = _rollback(host, created, sleep=sleep, clock=clock)
         exc.leftovers = leftovers
         if isinstance(exc, OpError):
             exc.data["leftovers"] = leftovers
@@ -1711,7 +2073,8 @@ def delete_vm(host, name, remove_storage=False, timeout=300, acknowledged_unread
          + (f", {len(skipped)} no longer deleted since the preview" if skipped else ""))
     stage = {"undefine": False, "pending": [_delete_key(d) for d in plan["delete"]]}
     try:
-        return _delete_execute(host, name, plan, skipped, stage, step, timeout)
+        with writing(host):
+            return _delete_execute(host, name, plan, skipped, stage, step, timeout)
     except BaseException as exc:
         exc.delete_progress = {"undefine_started": stage["undefine"],
                                "pending": list(stage["pending"]) if stage["undefine"] else []}

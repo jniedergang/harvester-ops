@@ -1,0 +1,186 @@
+[
+    {
+        "ifindex": 1,
+        "ifname": "lo",
+        "flags": [
+            "LOOPBACK",
+            "UP",
+            "LOWER_UP"
+        ],
+        "mtu": 65536,
+        "qdisc": "noqueue",
+        "operstate": "UNKNOWN",
+        "group": "default",
+        "txqlen": 1000,
+        "link_type": "loopback",
+        "address": "00:00:00:00:00:00",
+        "broadcast": "00:00:00:00:00:00",
+        "addr_info": [
+            {
+                "family": "inet",
+                "local": "127.0.0.1",
+                "prefixlen": 8,
+                "scope": "host",
+                "label": "lo",
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            },
+            {
+                "family": "inet6",
+                "local": "::1",
+                "prefixlen": 128,
+                "scope": "host",
+                "noprefixroute": true,
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            }
+        ]
+    },
+    {
+        "ifindex": 2,
+        "ifname": "eno1",
+        "flags": [
+            "BROADCAST",
+            "MULTICAST",
+            "UP",
+            "LOWER_UP"
+        ],
+        "mtu": 1500,
+        "qdisc": "mq",
+        "master": "br0",
+        "operstate": "UP",
+        "group": "default",
+        "txqlen": 1000,
+        "link_type": "ether",
+        "address": "70:10:6f:b6:e6:3a",
+        "broadcast": "ff:ff:ff:ff:ff:ff",
+        "altnames": [
+            "enp2s0f0",
+            "enx70106fb6e63a"
+        ],
+        "addr_info": []
+    },
+    {
+        "ifindex": 3,
+        "ifname": "eno2",
+        "flags": [
+            "NO-CARRIER",
+            "BROADCAST",
+            "MULTICAST",
+            "UP"
+        ],
+        "mtu": 1500,
+        "qdisc": "mq",
+        "operstate": "DOWN",
+        "group": "default",
+        "txqlen": 1000,
+        "link_type": "ether",
+        "address": "70:10:6f:b6:e6:3b",
+        "broadcast": "ff:ff:ff:ff:ff:ff",
+        "altnames": [
+            "enp2s0f1",
+            "enx70106fb6e63b"
+        ],
+        "addr_info": []
+    },
+    {
+        "ifindex": 4,
+        "ifname": "br0",
+        "flags": [
+            "BROADCAST",
+            "MULTICAST",
+            "UP",
+            "LOWER_UP"
+        ],
+        "mtu": 1500,
+        "qdisc": "noqueue",
+        "operstate": "UP",
+        "group": "default",
+        "txqlen": 1000,
+        "link_type": "ether",
+        "address": "c6:34:cd:cd:4f:1a",
+        "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {
+                "family": "inet",
+                "local": "172.16.1.12",
+                "prefixlen": 16,
+                "broadcast": "172.16.255.255",
+                "scope": "global",
+                "noprefixroute": true,
+                "label": "br0",
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            },
+            {
+                "family": "inet6",
+                "local": "fe80::c434:cdff:fecd:4f1a",
+                "prefixlen": 64,
+                "scope": "link",
+                "noprefixroute": true,
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            }
+        ]
+    },
+    {
+        "ifindex": 5,
+        "ifname": "virbr1",
+        "flags": [
+            "NO-CARRIER",
+            "BROADCAST",
+            "MULTICAST",
+            "UP"
+        ],
+        "mtu": 1500,
+        "qdisc": "htb",
+        "operstate": "DOWN",
+        "group": "default",
+        "txqlen": 1000,
+        "link_type": "ether",
+        "address": "52:54:00:95:46:10",
+        "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {
+                "family": "inet",
+                "local": "192.168.77.1",
+                "prefixlen": 24,
+                "broadcast": "192.168.77.255",
+                "scope": "global",
+                "label": "virbr1",
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            }
+        ]
+    },
+    {
+        "ifindex": 6,
+        "ifname": "docker0",
+        "flags": [
+            "NO-CARRIER",
+            "BROADCAST",
+            "MULTICAST",
+            "UP"
+        ],
+        "mtu": 1500,
+        "qdisc": "noqueue",
+        "operstate": "DOWN",
+        "group": "default",
+        "txqlen": 0,
+        "link_type": "ether",
+        "address": "ce:90:01:b5:a9:87",
+        "broadcast": "ff:ff:ff:ff:ff:ff",
+        "addr_info": [
+            {
+                "family": "inet",
+                "local": "172.17.0.1",
+                "prefixlen": 16,
+                "broadcast": "172.17.255.255",
+                "scope": "global",
+                "label": "docker0",
+                "valid_life_time": 4294967295,
+                "preferred_life_time": 4294967295
+            }
+        ]
+    }
+]

@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import kvm_host as kh  # noqa: E402
 import kvm_ops as ko  # noqa: E402
+import kvm_storage as ks  # noqa: E402
 
 FIX = ROOT / "tests" / "fixtures" / "kvm"
 FAKE_PASSWORD = "Fk7pw3Zq"
@@ -1146,7 +1147,7 @@ def test_clone_vm_pool_mode_flattens_and_defines_by_stdin():
     vol = ET.fromstring(create[2])
     assert (vol.findtext("name"), vol.findtext("capacity"), vol.find("target/format").get("type"),
             vol.find("backingStore")) == ("src-2-vda.qcow2", str(64 << 20), "qcow2", None)
-    assert define[1][5:] == ("define", "/dev/stdin")
+    assert define[1][5:] == ("define", "--validate", "/dev/stdin")
     # le XML (et son mot de passe) part sur l'entrée standard, jamais en argument
     assert FAKE_PASSWORD in define[2]
     assert all(FAKE_PASSWORD not in a for c in sim.calls for a in c[1])
@@ -2083,25 +2084,50 @@ def test_clone_vm_source_started_during_copy_is_discarded():
     assert e.value.data["leftovers"] == []
 
 
-def test_clone_vm_pool_copy_cancelled_names_the_volume_being_built():
+CLONE_BUILDING_CASES = [
+    # (libellé, refus « still being allocated » avant la fin de la copie, reste attendu)
+    ("copy ends while the rollback waits", 3, False),
+    ("still copying at the deadline", 10_000, True),
+]
+
+
+@pytest.mark.parametrize("label,refusals,left", CLONE_BUILDING_CASES,
+                         ids=[c[0] for c in CLONE_BUILDING_CASES])
+def test_clone_vm_pool_copy_cancelled_waits_for_the_volume_being_built(label, refusals, left,
+                                                                        monkeypatch):
+    """Revue finale I3 : clonage annulé pendant `vol-create-from` ; libvirtd
+    poursuit la copie et refuse la suppression, le retour arrière attend
+    (borné) au lieu de laisser la copie derrière lui."""
+    monkeypatch.setattr(ks, "BUILDING_DELETE_RETRY", 60.0)
     sim = clone_sim()
+    clock = {"t": 0.0}
+    state = {"refusals": refusals}
 
     def cancel(o, p, data):
+        sim.pools["kvmtest"]["vols"]["src-2-vda.qcow2"] = dict(sim.pools["kvmtest"]["vols"]["mine.qcow2"])
         raise Stop()
     sim.v_vol_create_from = cancel
     real = sim._answer
 
     def answer(args, data=None):
-        if str(args[0]) == "vol-delete":
+        if str(args[0]) == "vol-delete" and state["refusals"]:
+            state["refusals"] -= 1
             return 1, "", "error: Requested operation is not valid: volume 'src-2-vda.qcow2' " \
                           "is still being allocated.\n"
         return real(args, data)
     sim._answer = answer
     with pytest.raises(Stop) as e:
-        ko.clone_vm(sim, "src", "src-2")
-    (left,) = e.value.leftovers
-    assert left["volume"] == "src-2-vda.qcow2" and "building" not in left
-    assert "libvirtd may still be building volume kvmtest/src-2-vda.qcow2" in left["error"]
+        ko.clone_vm(sim, "src", "src-2", sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+                    clock=lambda: clock["t"])
+    if left:
+        (rest,) = e.value.leftovers
+        assert rest["volume"] == "src-2-vda.qcow2" and "building" not in rest
+        assert "libvirtd may still be building volume kvmtest/src-2-vda.qcow2" in rest["error"]
+        assert clock["t"] <= 60.0
+    else:
+        assert e.value.leftovers == []
+        assert "src-2-vda.qcow2" not in sim.pools["kvmtest"]["vols"]
+        assert len(sim.virsh_calls("vol-delete")) == refusals + 1
 
 
 def test_clone_vm_copy_that_never_starts_fails_fast():

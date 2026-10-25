@@ -145,6 +145,19 @@ def run(capsys, *argv, as_json=True):
     return SimpleNamespace(rc=rc, data=data, steps=steps, out=out, err=err)
 
 
+def previewed(capsys, *argv):
+    """argv d'une suppression réelle complété de l'empreinte de son aperçu
+    (`--dry-run`, mêmes options), comme le fait la console : l'empreinte est
+    obligatoire. Sans empreinte lisible (aperçu en échec), une empreinte
+    valide quelconque : le refus attendu vient avant sa comparaison."""
+    prev = run(capsys, *argv, "--dry-run")
+    plan = prev.data.get("plan") if isinstance(prev.data, dict) else None
+    return list(argv) + [f"--expect-delete={(plan or {}).get('digest') or ANY_DIGEST}"]
+
+
+ANY_DIGEST = "0" * 64
+
+
 def step_ids(res):
     return [(s[0], s[1]) for s in res.steps]
 
@@ -405,7 +418,7 @@ def test_clone_pool_mode_argv_and_stdin(env, capsys):
                       "--vol", "mine.qcow2", "--inputpool", "kvmtest")
     assert net.virsh_commands("vol-clone") == []
     # define : XML sur l'entrée standard, jamais en argument
-    assert net.virsh_commands("define") == [("define", "/dev/stdin")]
+    assert net.virsh_commands("define") == [("define", "--validate", "/dev/stdin")]
     (define_input,) = [d for r, d in net.inputs if "define" in r]
     assert "<domain" in define_input and PASSWORD in define_input   # la copie garde l'accès
     assert all("<domain" not in a for rem in net.remotes for a in rem)
@@ -508,7 +521,8 @@ def test_operations_on_the_same_vm_never_overlap(env, capsys):
     with cli.vm_lock(env.state, "lab", "src"):
         res = run(capsys, "clone", "--host=lab", "--name=src", "--new-name=src-2")
         assert res.rc == 2 and res.data["kind"] == "busy"
-        res = run(capsys, "vm", "delete", "--host=lab", "--name=src")
+        res = run(capsys, "vm", "delete", "--host=lab", "--name=src",
+                  f"--expect-delete={ANY_DIGEST}")
         assert res.rc == 2 and res.data["kind"] == "busy"
     with cli.vm_lock(env.state, "lab", "src-2"):           # le nom du clone aussi
         res = run(capsys, "clone", "--host=lab", "--name=src", "--new-name=src-2")
@@ -524,7 +538,8 @@ def test_operations_on_the_same_vm_never_overlap(env, capsys):
 @pytest.mark.parametrize("nvram,flag", [(None, False), ("qcow2", True)])
 def test_vm_delete_storage_only_owned_volumes(env, capsys, nvram, flag):
     net = env.use(W.delete_sim(nvram=nvram))
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=victim",
+                                 "--remove-storage"))
     assert res.rc == 0, res.data
     (undef,) = net.virsh_commands("undefine")
     assert undef == tuple(["undefine", "--domain", "victim", "--managed-save",
@@ -544,7 +559,7 @@ def test_vm_delete_storage_only_owned_volumes(env, capsys, nvram, flag):
 
 def test_vm_delete_without_storage_keeps_disks(env, capsys):
     net = env.use(W.delete_sim(snaps=[("s1", "shutoff", None, "internal")]))
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=victim"))
     assert res.rc == 0
     (undef,) = net.virsh_commands("undefine")
     assert "--storage" not in undef and res.data["deleted"] == []
@@ -555,7 +570,8 @@ def test_vm_delete_without_storage_keeps_disks(env, capsys):
 
 def test_vm_delete_refused_when_running(env, capsys):
     net = env.use(W.delete_sim(state="running"))
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=victim",
+                                 "--remove-storage"))
     assert res.rc == 1 and res.data["kind"] == "refused"
     assert res.data["refusals"] == ["the VM is running: shut it down or force it off first"]
     assert net.virsh_commands("undefine") == []
@@ -574,18 +590,19 @@ def test_vm_delete_unreadable_neighbour_keeps_disks_unless_acknowledged(env, cap
     assert "--acknowledge-unreadable=PATH" in text
     assert net.virsh_commands("undefine") == []
     # sans acquittement : refus, la VM reste, le fichier illisible et l'indice sont dits
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=target",
+                                 "--remove-storage"))
     assert res.rc == 1 and res.data["kind"] == "refused"
     assert res.data["unreadable"] == [W.SECRET] and res.data["leftovers"] == []
     assert f"--acknowledge-unreadable=PATH for each of: {W.SECRET}" in res.data["error"]
     assert "could not be proven unused" in res.data["refusals"][0]
     assert step_ids(res) == [("plan", "running"), ("plan", "error")]
-    text = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage",
-               as_json=False)
+    text = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=target",
+                                  "--remove-storage"), as_json=False)
     assert text.rc == 1 and "--acknowledge-unreadable=PATH" in text.err and W.SECRET in text.err
     assert net.virsh_commands("undefine") == [] and "target" in net.sim.domains
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=target", "--remove-storage",
-              f"--acknowledge-unreadable={W.SECRET}")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=target",
+                                 "--remove-storage", f"--acknowledge-unreadable={W.SECRET}"))
     assert res.rc == 0, res.data
     assert sorted(x["target"] for x in res.data["deleted"]) == ["vda", "vdb"]
     assert res.data["acknowledged_unreadable"] == [W.SECRET]
@@ -653,7 +670,7 @@ SCHEMAS = [
 ]
 PLAN_KEYS = {
     "clone": {"source", "new_name", "refusals", "disks", "shared", "space", "nics", "nvram",
-              "uefi_entries_lost", "tpm_state_lost", "regenerated"},
+              "uefi_entries_lost", "tpm_state_lost", "regenerated", "seed"},
     "vm": {"name", "state", "persistent", "refusals", "internal_snapshots",
            "external_snapshots", "managed_save", "managed_save_lost", "nvram", "tpm_state",
            "remove_storage", "delete", "keep", "unreadable", "acknowledged_unreadable",
@@ -667,6 +684,9 @@ def test_json_schema_is_stable(env, capsys, label, world, argv, rc, keys):
     for d in sim.domains.values():
         d["live"] = d["live"] or d["xml"]
     env.use(sim)
+    if argv[:2] == ["vm", "delete"] and not any(a.startswith(("--dry-run", "--expect-delete"))
+                                                for a in argv):
+        argv = previewed(capsys, *argv, "--host=lab")      # --host répété : sans effet
     res = run(capsys, *argv, "--host=lab")
     assert res.rc == rc, res.data
     assert set(res.data) == keys
@@ -892,9 +912,10 @@ def test_clone_cancelled_after_it_returned_says_the_clone_exists(env, capsys, mo
 def test_delete_cancelled_after_it_returned_says_it_is_done(env, capsys, monkeypatch):
     sim = W.delete_sim()
     env.use(sim)
+    argv = previewed(capsys, "vm", "delete", "--host=lab", "--name=victim")
     monkeypatch.setattr(cli, "emit", lambda *a, **k: (_ for _ in ()).throw(
         cli.Cancelled("SIGTERM")))
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim")
+    res = run(capsys, *argv)
     assert res.rc == 3 and "victim" not in sim.domains
     assert res.data["error"] == "vm delete cancelled (SIGTERM) after it completed: victim " \
                                 "was deleted"
@@ -907,7 +928,8 @@ def test_delete_cancelled_during_undefine_lists_the_owned_disks(env, capsys):
         raise cli.Cancelled("SIGTERM")
     sim.v_undefine = cancel
     env.use(sim)
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    res = run(capsys, *previewed(capsys, "vm", "delete", "--host=lab", "--name=victim",
+                                 "--remove-storage"))
     assert res.rc == 3
     assert res.data["pending"] == [f"{W.POOL}/lonely.qcow2", f"{OUT}/own.qcow2"]
     assert res.data["error"].endswith(
@@ -1020,13 +1042,14 @@ def test_a_delete_cannot_start_while_a_gesture_runs(env, capsys):
 def test_delete_refuses_a_vm_started_after_its_plan(env, capsys):
     sim = W.delete_sim()
     real = sim.v_vol_dumpxml
+    net = env.use(sim)
+    argv = previewed(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
 
     def started(o, p, data):
         sim.domains["victim"]["state"] = "running"     # un geste d'une autre console
         return real(o, p, data)
     sim.v_vol_dumpxml = started
-    net = env.use(sim)
-    res = run(capsys, "vm", "delete", "--host=lab", "--name=victim", "--remove-storage")
+    res = run(capsys, *argv)
     assert res.rc == 1 and res.data["kind"] == "plan-changed"
     assert net.virsh_commands("undefine") == [] and "victim" in sim.domains
     assert step_ids(res)[-1] == ("undefine", "error")

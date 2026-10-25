@@ -135,8 +135,8 @@ const VMCreate = (() => {
     }
 
     const sections = VMEdit.SECTIONS;
-    const html = `
-      <div class="vm-create">
+    // prochaine version : coquille commune (vm-form.js), adaptateur Harvester mince plus bas
+    const html = VMForm.shellHtml({ sections, head: `
         <form class="capi-form vm-create-head">
           <fieldset>
             <legend>${esc(tr('vm.create.identity', 'Identity'))}</legend>
@@ -170,19 +170,7 @@ const VMCreate = (() => {
                 'Loads the template settings as a starting point. Everything stays editable.'))}</span></label>
           </fieldset>
         </form>
-
-        <div class="vm-edit-layout vm-create-layout">
-          <aside class="vm-edit-nav">
-            ${sections.map(s => `
-              <button type="button" data-section="${s.id}">
-                <span class="ic">${Icons.svg(s.icon, { size: 14 })}</span>
-                <span>${esc(s.label())}</span>
-              </button>`).join('')}
-          </aside>
-          <main class="vm-edit-content"></main>
-        </div>
-
-        <div class="apply-bar vm-create-actions">
+`, actions: `
           <button type="button" class="btn btn-primary btn-sm btn-ico tip"
                   data-action="create" data-tip="${esc(tr('vm.create.tip.create',
                   'Create the virtual machine(s) on the selected cluster'))}">
@@ -198,9 +186,7 @@ const VMCreate = (() => {
                   'Save this configuration as a reusable Harvester template'))}">
             ${Icons.svg('bundle')} ${esc(tr('vm.create.saveTemplate', 'Save as template'))}
           </button>
-          <span class="apply-result" data-result></span>
-        </div>
-      </div>`;
+` });
 
     const panel = FloatingPanels.open({
       id: PANEL_ID,
@@ -214,15 +200,12 @@ const VMCreate = (() => {
 
     const root = panel.el;
     const head = root.querySelector('.vm-create-head');
-    const content = root.querySelector('.vm-edit-content');
-    const navBtns = root.querySelectorAll('.vm-edit-nav button');
     const result = root.querySelector('[data-result]');
 
     // Une seule instance de squelette pour toute la vie du panneau : les
     // sections déjà visitées y ont écrit, on ne doit pas la recréer.
     let vm = withImageDisk(skeleton('vm-01', namespace), opts.image);
     let templateCloudInit = null;       // v1.64.0 : cloud-init d'une version de modèle
-    const rendered = new Map();          // id -> élément de section
 
     head.querySelector('[name="namespace"]').addEventListener('change', (e) => {
       vm.metadata.namespace = e.target.value;
@@ -325,26 +308,18 @@ const VMCreate = (() => {
 
     /** Le squelette a changé sous les sections : elles doivent être
      *  reconstruites, sinon on éditerait encore l'ancienne VM. */
-    function resetSections() {
-      rendered.forEach(el => el.remove());
-      rendered.clear();
-      const active = root.querySelector('.vm-edit-nav button.active');
-      showSection(active ? active.dataset.section : 'general');
-    }
+    function resetSections() { form.reset(); }
 
-    function showSection(id) {
-      navBtns.forEach(b => b.classList.toggle('active', b.dataset.section === id));
-      rendered.forEach((el, key) => { el.hidden = key !== id; });
-      if (rendered.has(id)) return;
-      const wrap = document.createElement('div');
-      wrap.className = 'vm-create-section';
+    // L'adaptateur Harvester : il rejoue les sections de l'éditeur
+    // (VMEdit.renderSectionHtml / wireSection) sur le squelette.
+    const adapter = {
+      id: 'harvester',
+      sections,
       // Rien n'existe encore : les PVC déclarés par un template sont des
       // recettes, pas des volumes à sélectionner.
-      wrap.innerHTML = VMEdit.renderSectionHtml(id, vm, cluster,
-                                                { claimsAreToCreate: true });
-      content.appendChild(wrap);
-      rendered.set(id, wrap);
-      try {
+      renderSection: (id) => VMEdit.renderSectionHtml(id, vm, cluster,
+                                                      { claimsAreToCreate: true }),
+      wireSection: (id, wrap) => {
         VMEdit.wireSection(wrap, id, cluster, namespace, vm.metadata.name,
                            () => vm, { createMode: true });
         // v1.64.0 : le cloud-init de la version de modèle, modifiable avant création
@@ -354,15 +329,11 @@ const VMCreate = (() => {
           if (u) u.value = templateCloudInit.user_data || '';
           if (n) n.value = templateCloudInit.network_data || '';
         }
-      } catch (e) {
-        console.warn('wireSection', id, e);
-      }
-      rendered.forEach((el, key) => { el.hidden = key !== id; });
-    }
-
-    navBtns.forEach(b =>
-      b.addEventListener('click', () => showSection(b.dataset.section)));
-    showSection('general');
+      },
+    };
+    const form = VMForm.mount(root, adapter);
+    const rendered = form.rendered;      // id -> élément de section
+    form.show('general');
 
     /** Assemble le manifeste à partir des sections VISITÉES. Une section
      *  jamais ouverte garde les valeurs du squelette, ce qui est le
@@ -382,10 +353,7 @@ const VMCreate = (() => {
       return stripNulls(out);
     }
 
-    function say(html, bad) {
-      result.innerHTML = `<span style="color:var(--${bad ? 'danger' : 'accent'})">${
-        Icons.svg(bad ? 'fail' : 'ok', { size: 14 })} ${html}</span>`;
-    }
+    function say(html, bad) { VMForm.say(result, html, bad); }
 
     async function submit(dryRun) {
       const name = nameInput.value.trim();

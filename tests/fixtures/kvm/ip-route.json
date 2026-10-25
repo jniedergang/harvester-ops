@@ -1,0 +1,39 @@
+[
+    {
+        "dst": "default",
+        "gateway": "172.16.0.1",
+        "dev": "br0",
+        "protocol": "static",
+        "metric": 425,
+        "flags": []
+    },
+    {
+        "dst": "172.16.0.0/16",
+        "dev": "br0",
+        "protocol": "kernel",
+        "scope": "link",
+        "prefsrc": "172.16.1.12",
+        "metric": 425,
+        "flags": []
+    },
+    {
+        "dst": "172.17.0.0/16",
+        "dev": "docker0",
+        "protocol": "kernel",
+        "scope": "link",
+        "prefsrc": "172.17.0.1",
+        "flags": [
+            "linkdown"
+        ]
+    },
+    {
+        "dst": "192.168.77.0/24",
+        "dev": "virbr1",
+        "protocol": "kernel",
+        "scope": "link",
+        "prefsrc": "192.168.77.1",
+        "flags": [
+            "linkdown"
+        ]
+    }
+]

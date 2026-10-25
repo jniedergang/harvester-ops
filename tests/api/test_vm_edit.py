@@ -23,7 +23,10 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 WEB = ROOT / "web"
 VM_EDIT_JS = WEB / "static" / "js" / "vm-edit.js"
-JS = VM_EDIT_JS.read_text()
+# l'assistant cloud-init vit dans cloudinit-form.js (commun Harvester/KVM),
+# chargé avant vm-edit.js qui le réexporte
+CI_FORM_JS = WEB / "static" / "js" / "cloudinit-form.js"
+JS = CI_FORM_JS.read_text() + VM_EDIT_JS.read_text()
 
 sys.path.insert(0, str(WEB))
 import app as wapp  # noqa: E402
@@ -73,7 +76,7 @@ def _run_node(script):
     """Evaluate vm-edit.js in node (window shim) and run `script`."""
     prelude = (
         "globalThis.window = globalThis;\n"
-        + VM_EDIT_JS.read_text()
+        + CI_FORM_JS.read_text() + VM_EDIT_JS.read_text()
         + f"\nconst VM = {json.dumps(VM_FIXTURE)};\n"
         + "const M = window.VMEdit._mappers;\n"
         + "const sortByName = a => [...a].sort((x, y) => x.name.localeCompare(y.name));\n"
