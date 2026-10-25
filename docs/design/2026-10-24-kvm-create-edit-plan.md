@@ -1,6 +1,6 @@
 # KVM, prochaine version : créer et modifier des VMs, images, pools et réseaux (plan de réalisation)
 
-Statut : plan, 24/10/2026. Numéro de version posé à la livraison (« prochaine version KVM » dans ce document).
+Statut : réalisé, publié en 1.100.0 (25/10/2026). Plan du 24/10/2026 ; « prochaine version KVM » dans ce document = 1.100.0.
 
 Conception : `2026-10-23-hyperviseurs-kvm.md` (ligne « Création et modification de VMs (CPU, mémoire, disques, cartes, à chaud quand libvirt le permet), pools et volumes, réseaux »). Plans précédents : `2026-10-23-kvm-196-plan.md`, `2026-10-24-kvm-197-plan.md` (publié en 1.98.0).
 
@@ -497,6 +497,24 @@ Vérifications (chacune par la console de dev, puis côté hôte par `virsh` et 
 - Fin : tous les `kvmtest-*` (VMs, volumes, pool, réseau) supprimés par la console, relevé comparé à la référence (diff vide), mot de passe VNC et mot de passe cloud-init factice absents des réponses, de `dev-server.log`, de `actions.db` et de son WAL.
 
 Documentation et version : `VERSION`, entrée en tête du `CHANGELOG.md` (Added, Changed, Security, Internal avec ce qui n'est pas dans cette version, Tests), `docs/en/capabilities.md` et `docs/fr/capabilites.md` (section 10 : création, modification avec la table à chaud, images, pools, réseaux, API, ligne de commande, ce qui a été vérifié en réel et ce qui ne l'a pas été), `README.md` et `README.fr.md` (puce KVM), ce plan mis à jour avec ce que le réel a appris. Suites : fichiers ciblés pendant le travail, puis `pytest tests/api/ -q -n 12` et `pytest tests/e2e/ -q -n 8` avant la livraison.
+
+Réalisé (tâche 7, 25/10/2026), ce que le réel a appris (node2 : libvirt 12.8.0, QEMU 11.1.2, OpenSSH 10.6p1 ; console de vérification lancée depuis le worktree sur un autre port, état à part ; journal et relevés dans `/tmp/kvmnext/real7/`) :
+
+- **Relevé de référence identique avant et après** (15 domaines, 9 pools, 3 réseaux), à une ligne près : `vol-list images` montre encore le répertoire `kvmtest-pool` du pool imbriqué supprimé, que libvirt garde en mémoire jusqu'au prochain rafraîchissement du pool parent (le répertoire n'existe plus). La console ne rafraîchit pas un pool qu'on ne lui a pas demandé de toucher : question pour ju (rafraîchir les pools parents après la suppression d'un pool imbriqué avec son répertoire).
+- **Sous-réseau du banc** `10.213.77.0/24` enregistré dans NetBox (préfixe réservé, `infra-dotfiles/netbox/seed.py`) avant usage ; `kvmtest-net` est cette fois un NAT (les tâches précédentes l'avaient fait isolé).
+- **Jeux d'essai** : `domcapabilities` q35 et pc identiques à ceux de la tâche 1 ; `ip -j -d link` de même forme (interfaces `tun` des VMs en plus).
+- **`vol-upload` depuis un tuyau** prouvé à nouveau en premier : octets identiques, format sondé qcow2 après `pool-refresh`.
+- **Trois défauts trouvés et corrigés, chacun avec un test qui le reproduisait d'abord** :
+  1. retirer un disque (ou une carte) ajouté « au prochain démarrage » faute de port PCIe libre échouait sur la VM en marche (`detach-device --live` sur un appareil absent du XML vivant, « no disk with target vdf ») : le retrait d'un appareil qui n'existe que dans la définition ne touche plus que la définition et compte « maintenant » ;
+  2. annuler une création pendant une copie complète laissait la copie : libvirtd poursuit `vol-create-from` et refuse `vol-delete` (« still being allocated ») tant qu'elle dure, et l'action se fermait tout de suite en relâchant noms et pools. Le retour arrière attend la fin de la copie (recul borné, `BUILDING_DELETE_RETRY` = 15 min) puis supprime le volume ; l'action de création attend la sortie de l'outil (`cancel_waits`). Revu en réel : annulation à 140 Mio copiés, rien laissé. Le clonage de la 1.98.0 garde l'ancien comportement (reste nommé) ;
+  3. sans pools d'images déclarés, une image de base disparaissait du catalogue (et de la fenêtre de création) dès la première VM liée, la chaîne d'un disque lié comptant comme un usage direct : seul l'usage direct écarte désormais un volume (`_Survey.direct_users`).
+- **Cloud-init** : l'ISO Joliet de la console est lue par cloud-init 25.1.3 de Tumbleweed (instance, nom d'hôte, utilisateur, clé, `runcmd`, réseau statique). Deux pièges d'entrée, pas de la console : `routes: [{to: default}]` en network-config v2 est refusé par ce cloud-init (« Address default is not a valid ip network ») ; le nom `eth0` proposé par l'assistant ne correspond pas à l'interface de l'image (`enp1s0`), la config s'applique alors à une carte absente et NetworkManager reste en DHCP. L'assistant pourrait proposer un appariement par MAC (`mac_address`) : piste pour plus tard.
+- **UEFI Secure Boot + TPM** (swtpm 0.10.2 présent) : `SecureBoot=1` et `/dev/tpm0` dans l'invité ; la suppression avec stockage retire seed, variables UEFI et état vTPM.
+- **Ports PCIe** : 4 libres par défaut, le cinquième disque virtio part « au prochain démarrage » avec la raison ; le bandeau énumère les sous-champs d'un disque en attente (`disks[sdb].bus`, `.device`...), lisible mais verbeux.
+- **Réglages non gérés** : `kvmtest-pin` défini à la main (épinglage, `<cputune>` avec `vcpusched`, `<numatune>`, métadonnées étrangères, `<qemu:commandline>`), mémoire et titre changés par la console : XML identique en C14N hors des trois éléments changés.
+- **OpenSSH 10.6p1** (installé sur node2 le 24/10 à 16:53) : aucun `bad msg_len` depuis, pour des milliers de sessions pendant la vérification ; la reprise unique des lectures reste en filet.
+- **Secrets** : mots de passe VNC (relus sur l'hôte, jamais affichés) et mot de passe cloud-init factice absents des réponses, de `dev-server.log`, d'`actions.db` et des journaux d'actions.
+- Non vérifié en réel : cartes macvtap, pools NFS, disques SCSI, baisse de vCPU refusée par QEMU, invité sans pilote de ballon ; vCPU limité à 1 vers 2 (règle du banc : 2 vCPU au plus par VM) au lieu de 2 vers 4.
 
 ## Ordre et dépendances
 

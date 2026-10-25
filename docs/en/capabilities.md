@@ -2575,9 +2575,9 @@ connections for about 15 s. Declaring a host retries its SSH check once
 after 20 s.
 
 **Not in 1.96.0**: graphical console (VNC), snapshots and cloning, added
-in 1.98.0 (below). Creating and editing VMs, pools, volumes and networks,
-live migration between hosts, host maintenance and monitoring are still to
-come.
+in 1.98.0, and creating and editing VMs, images, pools, volumes and
+networks, added in 1.100.0 (below). Live migration between hosts, host
+maintenance and monitoring are still to come.
 
 API: `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, networks), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
@@ -2782,6 +2782,224 @@ and a backing file of another VM kept; a changed host refused with
 `plan-changed`. Under 8 parallel readers for 60 s, the SSH server crash
 above happened 2 to 4 times a minute, and no read failed. Not verified:
 a host that demands `--force` to revert.
+
+### Creating and editing VMs, images, pools and networks (1.100.0)
+
+**Nothing is installed on the host.** The console builds the domain XML,
+the volume, pool and network definitions and the cloud-init seed ISO
+itself, in Python, and sends them to `virsh` on standard input
+(`define --validate`, `attach-device`, `vol-create`, `net-define`,
+`pool-define`). No `virt-install`, `genisoimage` or `cloud-localds` on the
+host. Prerequisites stay libvirt, `qemu-img` and an account in the
+`libvirt` group.
+
+**Create a VM.** **Create a VM** in the KVM VMs toolbar, on a host card,
+or on an image of the catalogue opens the window of the Harvester VMs:
+the same tabs (General, Compute, Firmware, Disks, Network, Cloud-init,
+Review), the same icons and the same cloud-init assistant.
+- Header: host, name, number of instances (1 to 20, named `<name>-01`,
+  `-02`...), start after creation, guest agent, SSH keys (the KeyPairs of
+  the clusters you can read, grouped by cluster, plus pasted keys) and a
+  template.
+- The choices come from the host (`virsh capabilities` and
+  `domcapabilities`, per machine family): q35 or pc, BIOS or UEFI, Secure
+  Boot, TPM (emulated by `swtpm`), CPU mode (host-model, host-passthrough,
+  custom with the usable models), disk buses, video models. A choice the
+  host cannot give is greyed out with its reason ("the host has no TPM
+  emulator (swtpm)", "Secure Boot needs the q35 machine type").
+- vCPU and memory can be left below their maximum for later hot changes
+  (one socket per vCPU, as in Harvester). Free PCIe slots for hot-plug on
+  q35: 4 by default, 0 to 16.
+- Disks: blank, from an image (linked by default: a qcow2 overlay on the
+  image of the same pool; or a full copy, resized to the asked size), an
+  existing volume, an ISO, or an empty CD-ROM drive. The free space of the
+  pool is shown under the cards. Cards: libvirt network, host bridge, or
+  macvtap on a host card with its mode.
+- VNC display, with a password drawn by the console (8 characters, the
+  VNC limit). The password is never shown.
+- Cloud-init: user-data and network-config written by hand or by the
+  assistant, guest host name, seed pool. The guest agent and the SSH keys
+  are added to a `#cloud-config` (top-level `ssh_authorized_keys`,
+  `packages` and `runcmd`); anything the console cannot merge safely
+  (flow lists over several lines, anchors, several documents) is refused
+  with its reason and left untouched. The seed is a NoCloud ISO (label
+  `cidata`, Joliet) made by the console, its instance id is the VM uuid.
+- **Review** asks the server for the plan: refusals, warnings, volumes to
+  create, seed, and the XML with `passwd='***'`. **Create** then runs the
+  steps: volumes, seed, `define --validate`, autostart, start, check.
+  The plan is computed again at that moment (the preview is never
+  trusted), and the pools are read again before each instance. A failure
+  removes what the console created for that instance and names what could
+  not be removed; instances already created stay and are listed.
+- Cancelling a creation waits for the tool: a full copy that libvirt is
+  still building is waited for (up to 15 min) and then deleted.
+- Templates keep the form (not the XML) in the console, shared by all
+  hosts, with an owner. Passwords, keys and user-data are removed when a
+  template is saved, and the window says so.
+
+**Edit a VM.** **Edit** in the menu of a KVM VM opens the same window,
+filled from the inactive definition. Each field shows before you send
+what will happen on this VM in its current state: applied now, at the
+next boot, or refused. **Review** shows the server's exact
+classification. Only the changed fields are sent.
+
+| Change on a running VM | When | Command |
+|---|---|---|
+| vCPU count up to the maximum | now (a decrease that QEMU refuses waits for the next start, and it is said) | `setvcpus --live --config` |
+| Current memory up to the maximum | now, through the guest balloon; `dommemstat` is read back | `setmem --live --config` |
+| Maximum vCPU and memory, topology, CPU mode and model, machine type, firmware, Secure Boot, TPM, video, VNC and its password, OS preset, hot-plug slots, guest agent, tablet, RNG, power actions, bus, cache, serial, boot order of a disk, model, kind and source of a card | next boot | targeted `define` |
+| Add a virtio disk, or scsi with a controller | now if a PCIe slot is free on q35, else next boot with the reason | `attach-device --live --config` |
+| Add a SATA disk or a CD-ROM drive | next boot (no SATA hot-plug on QEMU) | `attach-device --config` |
+| Remove a virtio or scsi disk | now; if the guest does not release it within 30 s, it leaves the definition and is gone at the next boot. Its volume is kept | `detach-device --live --config` |
+| Remove a disk or card added for the next boot only | now, in the definition only | targeted `define` |
+| Change or eject the media of a CD-ROM | now | `update-device`, `change-media --eject` |
+| Add a card | now if a PCIe slot is free (q35), else next boot | `attach-device --live --config` |
+| Remove a card (by MAC) | now | `detach-interface --live --config` |
+| Title, description, autostart | now | `desc`, `autostart` |
+| Cloud-init | the new seed is read at the next start | new seed volume + `update-device` |
+| Rename | shut off VM without snapshots only | `domrename` |
+
+- On a shut off VM everything goes through one targeted `define`.
+- "Next boot" means a shutdown then a start: a reboot inside the guest
+  does not recreate the QEMU process. The window and the VM list show
+  **restart needed** with the waiting fields, and **Shut down and start**
+  does it.
+- The edit carries a digest of the whole definition read when the window
+  opened. If the VM was changed elsewhere since, the change is refused
+  (`changed`); **Reload** refreshes the untouched fields and keeps what you
+  typed.
+- What the form does not manage stays byte for byte: CPU pinning,
+  `<cputune>`, real-time scheduling, `<numatune>`, `<hostdev>`,
+  `<qemu:commandline>`, metadata of other tools, `<seclabel>`, controllers
+  added by hand. The window lists them read-only ("kept as is").
+- Balloon on or off, serial console, watchdog, firmware serial and disk
+  I/O threads are set at creation only. A transient VM opens read-only.
+- **Hot gestures** in the VM menu, as in Harvester: CPU and memory, Add a
+  disk, Add a card, Cloud-init, and per device Remove, Insert an image,
+  Eject. Each result says now, next boot or refused, with the reason.
+- **Cloud-init** of an existing VM: the seed is read back (operator role),
+  regenerated as a new volume and swapped in; **Run cloud-init again at next boot**
+  gives it a new instance id. An empty user-data that would erase the
+  current one needs **Clear user-data**.
+
+**Images.** **Storage > Images** lists, per host, the volumes of the
+declared image pools, or without them the volumes no VM uses as a disk
+(an image that linked disks are based on stays listed). Columns: name,
+pool, format and ISO badge, virtual size, use ("base of N disk(s)",
+"used by N"), SHA-256, origin URL (without credentials, query or
+fragment).
+- **Upload** from the browser: the file is received once by the console
+  (progress, rate, time left), its SHA-256 compared with the one you give,
+  its qcow2 header read, then sent to one or several hosts over a fresh
+  SSH connection (`vol-upload` on standard input, optional Mbit/s limit)
+  and checked on each host with `sha256sum`. **Cancel** works in both
+  phases and leaves nothing.
+- **Download from a URL**: by the console, with the address guard of the
+  ISO store (every redirect checked again, internal addresses refused
+  unless `iso_fetch.allow_private` allows them, cloud metadata addresses
+  always refused). A plain `http` URL needs a SHA-256.
+- Refused before anything is written: a qcow2 that names a backing file
+  or an external data file, or that announces more than 16 TiB.
+- **Verify** recomputes the SHA-256 on the host. **Create a VM from this
+  image** opens the creation window with the image as first disk.
+  **Delete** is refused while the image is a backing file or used.
+  **Image pools** (admin) sets which pools hold images.
+
+**Volumes.** Create (blank or linked to an image of the same pool),
+resize up (refused while a running VM uses the volume), delete (admin).
+Delete and resize use the 1.98 proof that no other VM uses the volume,
+and the delete carries the digest of its preview.
+
+**Pools** (admin, except refresh). Create a `dir` or NFS pool. Refused: a
+system directory (`/etc`, `/usr`...), the directory of another pool
+(compared by path and by device and inode, so a link counts), a pool of
+another type nested with it. Start, stop (refused while a running VM uses
+a volume of it), refresh (operator), autostart, delete. Delete is refused
+while a VM definition cites a volume of the pool; **Also remove the
+empty directory** only applies to an empty pool. The console never creates a
+pool on its own.
+
+**Networks** (admin). Create a NAT, routed or isolated network (the first
+free `192.168.X.0/24` is proposed, DHCP range from `.2`), or a network on
+an existing host bridge. A subnet that overlaps an address or a route of
+the host, or another libvirt network, is refused. Stop is refused while a
+running VM has a card on it, delete while a definition cites it.
+**Bridges and cards** shows the host bridges, physical cards, addresses
+and routes.
+
+**Rights.** Viewer: every read. Operator: create and edit a VM, hot
+gestures, create, upload, verify or resize a volume or an image, refresh a
+pool, read the cloud-init of a VM, templates. Admin: delete a volume or an
+image, every pool and network gesture, image pools.
+
+**Secrets.** The VNC password and the user-data never appear in an API
+answer (the cloud-init read of an operator excepted), a log, an action
+step, a command line or Activity. Specs reach the tool through a 0600 file
+of the action's working directory, removed at the end.
+
+API: `GET /api/kvm/hosts/<host>/caps?machine=q35|pc`, `.../images`,
+`.../links`, `.../pools`, `.../networks`;
+`GET /api/kvm/vms/<host>/<domain>/form` (view, unmanaged settings,
+pending fields, digest), `GET .../cloudinit` (operator);
+`POST /api/kvm/hosts/<host>/vm-plan` (`{spec}`),
+`POST /api/kvm/vms/<host>` (`{spec}`),
+`POST /api/kvm/vms/<host>/<domain>/edit-plan` and
+`PATCH /api/kvm/vms/<host>/<domain>` (`{spec, expect_config}`),
+`POST /api/kvm/vms/<host>/<domain>/hot/<op>` (`cpumem`, `add-volume`,
+`remove-volume`, `insert-cdrom`, `eject-image`, `add-nic`, `remove-nic`,
+`cloudinit`); `POST /api/kvm/hosts/<host>/images/upload` (raw body),
+`POST /api/kvm/uploads/<token>/cancel`, `POST .../images/fetch`,
+`POST .../images/<pool>/<volume>/verify`,
+`DELETE .../images/<pool>/<volume>`; `POST .../volumes`,
+`POST .../volumes/<pool>/<volume>/resize`,
+`GET|DELETE .../volumes/<pool>/<volume>[/delete-plan]`;
+`POST .../pools`, `POST .../pools/<pool>/start|stop|refresh|autostart`,
+`GET|DELETE .../pools/<pool>[/delete-plan]`; `POST .../networks`,
+`POST .../networks/<net>/start|stop|autostart`,
+`GET|DELETE .../networks/<net>[/delete-plan]`; `PUT .../image-pools`;
+`GET|POST /api/kvm/templates`, `GET|DELETE /api/kvm/templates/<name>`.
+Every delete needs the `expect_delete` digest of its preview. `/api/kvm/vms`
+gives each VM its `pending` fields and an `edit_operations` table.
+
+Command line (`bin/harvester-kvm.py`, values as `--opt=value`): `host
+caps`, `host image-pools`, `vm create --spec-file=F [--dry-run]` (or the
+short options `--name --vcpus --memory-mib --disk= --nic= ...`), `vm edit
+--spec-file=F --expect-config=DIGEST [--dry-run]`, `vm cpumem`, `vm
+add-volume|add-nic --spec-file=F`, `vm remove-volume|eject-image
+--target=T`, `vm insert-cdrom`, `vm remove-nic --mac=M`, `vm cloudinit
+[--rerun]`, `image list|verify|upload|download-url|delete`, `vol
+create|upload|resize|delete`, `pool define|start|stop|refresh|autostart|delete`,
+`net define|start|stop|autostart|delete|links`, `template list|save|delete`.
+Deletes take `--expect-delete=` from their `--dry-run`.
+
+**OpenSSH and the read retry.** The `sshd-session` crash under several
+multiplexed sessions (1.98.0) is fixed in OpenSSH 10.6p1: on the lab host,
+none since its update, over thousands of sessions during the check below.
+The single replay of a read cut by the transport stays as a safety net.
+
+**What is verified.** On the lab host (libvirt 12.8.0, QEMU 11.1.2,
+OpenSSH 10.6p1), test objects only, each step checked with `virsh` and in
+the guest: `vol-upload` from a pipe (byte-identical, format probed as
+qcow2); pool and NAT network created by the console, a network on the
+LAN subnet refused; cirros 0.6.2, openSUSE Tumbleweed and an Alpine ISO
+uploaded with their published checksums checked on the host; a BIOS q35
+VM with a disk linked to cirros and a VNC password created in the window,
+its console opened; a UEFI Secure Boot VM with a TPM from a full copy of
+Tumbleweed, with a cloud-init user, SSH key and static network-config:
+SSH into the guest with the injected key, `cloud-init status` done, host
+name, static address, Secure Boot on, `/dev/tpm0`; three instances; a
+cancel during a full copy that left nothing; vCPU 1 to 2 and memory 1 to
+2 GiB seen in the guest; four virtio disks hot-added, the fifth and sixth
+waiting for a free PCIe slot with the reason, all removed; a card added
+and removed; machine type and memory maximum changed at the next boot,
+banner, shut down and start; an ISO inserted and ejected; a hand-made VM
+with pinning, `<cputune>`, `<numatune>`, foreign metadata and
+`<qemu:commandline>` edited, its XML identical (C14N) outside the changed
+fields; delete with storage (seed, UEFI variables and vTPM removed, image
+kept); image, network and pool refusals; everything removed by the
+console; the VNC passwords and the cloud-init password found in no
+answer, log or action record. Not verified: macvtap cards, NFS pools,
+SCSI disks, a vCPU decrease, a guest without a balloon driver.
 
 ---
 

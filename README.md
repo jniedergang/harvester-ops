@@ -102,8 +102,12 @@ recorded, whether it was made from the console or somewhere else.
   resume) followed until the real state is reached. The VNC console of a
   VM goes through the SSH connection of its host, password included;
   internal snapshots, full clones and deletion with proof that no other
-  VM uses a disk. No agent on the hosts: `virsh` over SSH, also from the
-  command line.
+  VM uses a disk. VMs are created and edited in the window of the
+  Harvester VMs (UEFI, Secure Boot, TPM, linked or copied images,
+  cloud-init), with each change applied now or at the next boot as libvirt
+  allows, and the hot gestures of the VM menu. Images (upload, download,
+  checksum), volumes, pools and networks are managed with guards. No
+  agent on the hosts: `virsh` over SSH, also from the command line.
 - **Scriptable**: the power sequencing also runs from the command line,
   for pipelines and airgapped sites, and every operation has a dry run.
 

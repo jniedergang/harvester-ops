@@ -114,8 +114,13 @@ ailleurs.
   réel. La console VNC d'une VM passe par la connexion SSH de son hôte,
   mot de passe compris ; instantanés internes, clones complets et
   suppression avec la preuve qu'aucune autre VM n'utilise un disque.
-  Aucun agent sur les hôtes : `virsh` par SSH, aussi en ligne de
-  commande.
+  Les VMs se créent et se modifient dans la fenêtre des VMs Harvester
+  (UEFI, Secure Boot, TPM, images liées ou copiées, cloud-init), chaque
+  changement appliqué maintenant ou au prochain démarrage selon ce que
+  permet libvirt, avec les gestes à chaud du menu de la VM. Images
+  (téléversement, téléchargement, somme de contrôle), volumes, pools et
+  réseaux se gèrent avec des garde-fous. Aucun agent sur les hôtes :
+  `virsh` par SSH, aussi en ligne de commande.
 - **Scriptable** : le séquençage électrique s'exécute aussi en ligne de
   commande, pour les chaînes d'automatisation et les sites hors ligne, et
   chaque opération a sa simulation.
