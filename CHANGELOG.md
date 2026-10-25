@@ -321,6 +321,25 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **`folders.db` journal files are private**: the `-wal` and `-shm` files
   followed the umask; they now get 0600 like the database.
 
+- **Resume of a folder action replays its folder lines**: it marked them
+  done without replaying them. After an emptying whose last object had
+  failed, Resume said done and left the folder in the tree; after a console
+  stop in the middle of the subfolder moves, it wrote the objects under
+  paths that did not exist and a fleet read built a second tree. A folder
+  line not done yet is now replayed (move, rename or delete), and one whose
+  folder moved since is left as is and said.
+- **Undo and Resume leave an object moved outside the console**: the
+  conflict rule was checked against the console's cache only, so an object
+  annotated with `kubectl` since the last fleet read was overwritten. The
+  value read on the object just before writing now decides: an object that
+  carries neither the folder the action left nor its target is left as is
+  and counted as a conflict.
+- **Undo no longer puts objects in a folder that did not come back**: when
+  a folder could not take its name back (taken since) or its former parent
+  was gone, its objects were still written to the former path, recreated or
+  landing in another folder of the same name. They now stay with their
+  folder and are counted as conflicts (`skipped` in the journal).
+
 ### Security
 - **Fleet reads are no longer shared across identities** (present since
   1.85.0): a shared read that names no cluster (`/api/vms-all`,
@@ -517,7 +536,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   without a generation change, a real spec change is, and the mutation
   `test_drift_mutation_annotations_in_digest`. Routes and router tables:
   `#activity/action/<id>` and `#dr/<id>` round trips and error paths.
-- After the merge of 1.101.3 and the final review:
+- Also:
   `tests/api/test_replication_routes_199.py` (the contract row carries
   `resume-command` with the role the resume route requires, for every
   interrupted state and both roles, none when nothing is interrupted, a
@@ -535,6 +554,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `tests/api/test_folders_db_200.py` (database and WAL files 0600),
   `tests/e2e/test_cluster_switch.py` (the Events block reloads for the new
   host).
+- `tests/api/test_folders_cli_200.py`: Resume of an emptying, as a table
+  (an object that failed then came back: the folder is deleted; a console
+  stop in the subfolder loop: the rest moves, objects land under the target,
+  no second tree after a fleet read), a folder line whose folder moved since
+  left as is; Undo and Resume, as a table, against an object filed elsewhere
+  or unfiled outside the console with no fleet read in between (no write,
+  conflict said); Undo of a folder that cannot take its name back keeps its
+  objects. Mutations: folder lines marked done without replay, strict rule
+  off.
 
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 

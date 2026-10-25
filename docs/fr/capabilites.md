@@ -272,13 +272,21 @@ harvester-folders.py [--db F] [--json] [--as PERSONNE] [--role viewer|operator|a
 Avant d'écrire, la commande relit le dossier que l'objet porte en ce moment
 (`kubectl get`, `virsh metadata`, la déclaration) : le journal garde cette
 valeur exacte, qu'Annuler remet même si l'objet a été rangé hors de la
-console depuis la dernière lecture. Un objet que la personne ne peut pas
-lire, ou qui n'existe plus, n'est jamais rangé (sa ligne échoue).
+console depuis la dernière lecture. Annuler et Reprendre relisent aussi
+l'objet : s'il porte maintenant un dossier qui n'est ni celui laissé par
+l'action ni sa cible (rangé ailleurs hors de la console, ou annotation
+retirée), il est laissé tel quel et compté comme conflit. Un objet que la
+personne ne peut pas lire, ou qui n'existe plus, n'est jamais rangé (sa
+ligne échoue).
 `empty-into` déplace les objets d'un dossier vers la cible, ses sous-dossiers
 sous elle (sous la racine pour `unfiled`), puis supprime le dossier dans la
 même action ; rien ne bouge si un sous-dossier ne peut pas y aller (nom pris,
 bornes), et le dossier reste tant que quelque chose y est rangé. Annuler
-recrée le dossier et remet tout. Un objet que la personne ne voit pas (un
+recrée le dossier et remet tout ; si un dossier ne peut pas revenir (nom
+repris depuis, ancien parent disparu), ses objets restent avec lui et sont
+comptés comme conflits. Reprendre rejoue les lignes de dossier pas encore
+faites : le déplacement d'un sous-dossier coupé par un arrêt de la console,
+ou la suppression finale une fois le dernier objet parti. Un objet que la personne ne voit pas (un
 cluster que Rancher lui cache, un espace de noms qu'elle ne lit pas) n'est
 jamais nommé dans les étapes, la sortie ou le `--json` d'un renommage, d'un
 déplacement, d'un vidage, d'une annulation ou d'une reprise : ces objets sont

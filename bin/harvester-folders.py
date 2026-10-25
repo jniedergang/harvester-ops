@@ -289,6 +289,15 @@ class NotVisible(Exception):
     """L'objet n'existe pas ou la personne ne peut pas le lire : pas de rangement."""
 
 
+class Moved(Exception):
+    """Annuler ou Reprendre : l'objet porte un autre rangement que celui de
+    la ligne, fait hors de la console depuis. Laissé tel quel."""
+
+    def __init__(self, now):
+        super().__init__(now)
+        self.now = now
+
+
 RBAC_GET_DENIAL_RE = re.compile(r"\bcannot get resource\b")
 
 
@@ -461,13 +470,60 @@ def others(n):
     return f"{n} other object{'s' if n != 1 else ''} not shown to you"
 
 
-def run_lines(conn, args, action, lines, objects, spec):
+def replay_folder_line(conn, m, visible):
+    """Rejoue une ligne de dossier pas encore faite (reprise, revue finale
+    I-1) ; rend (statut, message). Suppression (`to_path` None) : le dossier
+    est supprimé s'il est vide (déjà absent : fait). Déplacement ou
+    renommage : appliqué si le dossier est encore à son ancien chemin, fait
+    s'il est déjà au nouveau, laissé tel quel s'il a bougé depuis."""
+    fid = int(m["object_key"].split("/", 1)[1])
+    cur = fdb.path_of(conn, fid)
+    if m["to_path"] is None:
+        if cur is None:
+            return "done", "already deleted"
+        if cur != m["from_path"]:
+            return "failed", f"folder {fid} is now {cur}, not {m['from_path']}: left as is"
+        try:
+            fdb.delete_empty(conn, fid, visible)
+        except fdb.FolderError as e:
+            return "failed", e.message
+        return "done", f"folder {cur} deleted"
+    if cur == m["to_path"]:
+        return "done", "already applied"
+    if cur != m["from_path"]:
+        return "failed", f"folder {fid} is now {cur or 'deleted'}, not {m['from_path']}: left as is"
+    new_parent = fm.parent_path(m["to_path"])
+    parent_id = fdb.id_of(conn, new_parent) if new_parent else None
+    if new_parent and parent_id is None:
+        return "failed", f"its new parent {new_parent} is gone: folder {cur} left as is"
+    try:
+        if fm.parent_path(cur) != new_parent:
+            fdb.move_folder(conn, fid, parent_id)
+        if fm.split(cur)[-1] != fm.split(m["to_path"])[-1]:
+            fdb.rename(conn, fid, fm.split(m["to_path"])[-1])
+    except fdb.FolderError as e:
+        return "failed", f"folder {cur} cannot go to {m['to_path']}: {e.message}"
+    return "done", f"folder {cur} -> {m['to_path']}"
+
+
+def run_lines(conn, args, action, lines, objects, spec, strict=False, conflicts=None):
     """Exécute les lignes du journal (`pending`) : écrit chaque objet, met le
     cache et la ligne à jour. Rend le nombre d'échecs. Débit borné par
     `--rate` écritures par seconde. Un objet que la personne ne voit pas
-    (Shown) n'a pas d'étape à son nom : une étape finale les compte."""
+    (Shown) n'a pas d'étape à son nom : une étape finale les compte.
+
+    `strict` (Annuler et Reprendre, revue finale I-2) : la valeur relue sur
+    l'objet doit être celle de la ligne (`from_path`) ou déjà sa cible ;
+    sinon l'objet a été rangé ailleurs hors de la console depuis, il est
+    laissé tel quel et compté dans `conflicts` ({"key", "expected",
+    "current"}). Sans `strict` (ranger, renommer, vider), la valeur relue
+    remplace celle du cache : Annuler la remettra exactement.
+
+    Une ligne de dossier (`folder/<id>`) n'arrive ici que par Reprendre :
+    elle est rejouée (replay_folder_line), dans l'ordre du journal."""
     ctx, failed = {}, 0
     shown = Shown(spec)
+    visible = set(spec["visible"]) if isinstance(spec.get("visible"), list) else set(objects)
 
     def say(sid, status, key, text):
         if shown.named(key):
@@ -480,7 +536,10 @@ def run_lines(conn, args, action, lines, objects, spec):
         sid = f"obj-{m['seq']}"
         what = f"{key}: {m['from_path'] or 'unfiled'} -> {to or 'unfiled'}"
         if key.startswith("folder/"):
-            fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "done")
+            status, msg = replay_folder_line(conn, m, visible)
+            fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, status, msg)
+            step(f"folder-{key.split('/', 1)[1]}", "done" if status == "done" else "error", msg)
+            failed += status != "done"
             continue
         obj = objects.get(key)
         if obj is None:
@@ -499,6 +558,8 @@ def run_lines(conn, args, action, lines, objects, spec):
             # même si l'objet a été rangé hors de la console depuis la lecture
             before = read_current(obj, spec, ctx)
             shown.read.add(key)                    # relu par la personne : elle le voit
+            if strict and before not in (m["from_path"], to):
+                raise Moved(before)
             if before != m["from_path"]:
                 fdb.set_move_from(conn, action, m["seq"], before)
                 m = dict(m, from_path=before)
@@ -518,6 +579,14 @@ def run_lines(conn, args, action, lines, objects, spec):
             message = f"{e}: {CONSOLE_ONLY}" if to is not None else f"{e}: removed from the console only"
         except UsageError:
             raise
+        except Moved as e:
+            failed += 1
+            msg = f"is now in {e.now or 'unfiled'}, not {m['from_path'] or 'unfiled'}: left as is"
+            fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", msg)
+            if conflicts is not None:
+                conflicts.append({"key": key, "expected": m["from_path"], "current": e.now})
+            say(sid, "error", key, f"{key} {msg}")
+            continue
         except NotVisible as e:
             failed += 1
             fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", str(e))
@@ -675,7 +744,7 @@ def cmd_resume(args, conn):
             else:
                 shown.tally(False)
     shown.summary("conflict")
-    failed += run_lines(conn, args, args.action, pending, objects_of(spec), spec)
+    failed += run_lines(conn, args, args.action, pending, objects_of(spec), spec, strict=True)
     return finish(args, {"action": args.action, "resumed": len(pending)}, failed,
                   f"{len(pending) - failed}/{len(pending)} pending line(s) done")
 
@@ -733,6 +802,7 @@ def cmd_undo(args, conn):
     obj_moves = [m for m in moves if not m["object_key"].startswith("folder/")]
     plan, conflicts = fm.undo_plan(obj_moves, current)
     lines = start_lines(conn, args.id, plan)
+    stuck = []          # chemins d'avant des dossiers qui n'ont pas pu revenir
     # l'arborescence d'abord (dans l'ordre inverse), pour que les chemins
     # d'avant existent quand les objets y reviennent
     for m in reversed([m for m in moves if m["object_key"].startswith("folder/") and m["status"] == "done"]):
@@ -743,6 +813,7 @@ def cmd_undo(args, conn):
                 fdb.ensure_path(conn, m["from_path"], origin="console", by=args.as_user)
             except fdb.FolderError as e:
                 failed += 1
+                stuck.append(m["from_path"])
                 step(f"folder-{fid}", "error", f"folder {m['from_path']} cannot be created again: {e.message}")
                 continue
             fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
@@ -752,12 +823,14 @@ def cmd_undo(args, conn):
         cur = fdb.path_of(conn, fid)
         if cur != m["to_path"]:
             failed += 1
+            stuck.append(m["from_path"])
             step(f"folder-{fid}", "error", f"folder {fid} is now {cur}, not {m['to_path']}: left as is")
             continue
         before_parent = fm.parent_path(m["from_path"])
         parent_id = fdb.id_of(conn, before_parent) if before_parent else None
         if before_parent and parent_id is None:
             failed += 1
+            stuck.append(m["from_path"])
             step(f"folder-{fid}", "error", f"its former parent {before_parent} is gone: folder {cur} left as is")
             continue
         try:
@@ -767,25 +840,45 @@ def cmd_undo(args, conn):
                 fdb.rename(conn, fid, fm.split(m["from_path"])[-1])
         except fdb.FolderError as e:               # nom repris depuis : les autres continuent
             failed += 1
+            stuck.append(m["from_path"])
             step(f"folder-{fid}", "error", f"folder {fid} cannot go back to {m['from_path']}: {e.message}")
             continue
         fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
                         m["to_path"], m["from_path"], "done")
         step(f"folder-{fid}", "done", f"folder {m['to_path']} -> {m['from_path']}")
+    # revue finale D-2 : un objet ne revient pas sous un dossier resté où il
+    # est (son ancien chemin n'existe pas, ou c'est un autre dossier du même
+    # nom) ; il reste à sa place, compté comme conflit
+    kept = []
+    for ln in lines:
+        home = next((f for f in stuck if ln["to_path"] and fm.within(ln["to_path"], f)), None)
+        if home is None:
+            kept.append(ln)
+            continue
+        why = f"its folder {home} could not go back: left in {ln['from_path'] or 'unfiled'}"
+        fdb.record_move(conn, args.id, ln["seq"], ln["object_key"], ln["from_path"], ln["to_path"], "skipped", why)
+        conflicts.append({"key": ln["object_key"], "expected": ln["from_path"], "current": ln["from_path"],
+                          "reason": why})
+    lines = kept
     shown = Shown(spec)
     for c in conflicts:
         failed += 1
         if shown.named(c["key"]):
-            step("conflict", "error", f"{c['key']} is now in {c['current'] or 'unfiled'}, "
-                                      f"not {c['expected'] or 'unfiled'}: left as is")
+            step("conflict", "error", f"{c['key']}: {c['reason']}" if c.get("reason") else
+                 f"{c['key']} is now in {c['current'] or 'unfiled'}, not {c['expected'] or 'unfiled'}: left as is")
         else:
             shown.tally(False)
     shown.summary("conflict")
-    failed += run_lines(conn, args, args.id, lines, objects, spec)
-    named = [c for c in conflicts if shown.named(c["key"])]
+    moved = []
+    failed += run_lines(conn, args, args.id, lines, objects, spec, strict=True, conflicts=moved)
+    conflicts += moved
+    # un objet relu pendant l'annulation (moved) est vu par la personne
+    named = [c for c in conflicts if shown.named(c["key"]) or c in moved]
+    put_back = sum(1 for m in fdb.moves_of(conn, args.id)
+                   if m["status"] == "done" and not m["object_key"].startswith("folder/"))
     return finish(args, {"action": args.id, "undone": args.action, "objects": len(plan),
                          "conflicts": named, "hidden_conflicts": len(conflicts) - len(named)}, failed,
-                  f"{len(plan)} object(s) put back, {len(conflicts)} conflict(s)")
+                  f"{put_back} object(s) put back, {len(conflicts)} conflict(s)")
 
 
 def cmd_write_back(args, conn):

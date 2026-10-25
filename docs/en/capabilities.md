@@ -252,13 +252,19 @@ harvester-folders.py [--db F] [--json] [--as USER] [--role viewer|operator|admin
 Before writing, the command reads the folder the object carries now
 (`kubectl get`, `virsh metadata`, the declaration): the journal keeps that
 exact value, which Undo puts back even when the object was filed outside the
-console since the last read. An object the person cannot read, or that no
-longer exists, is never filed (its line fails). `empty-into` moves the
+console since the last read. Undo and Resume read the object again too:
+when it now carries a folder that is neither the one the action left nor
+its target (filed elsewhere outside the console, or its annotation
+removed), it is left as is and counted as a conflict. An object the person
+cannot read, or that no longer exists, is never filed (its line fails). `empty-into` moves the
 objects of a folder to the target, its subfolders under it (under the root
 for `unfiled`), then deletes the folder in the same action; nothing moves
 when a subfolder cannot go there (name taken, limits), and the folder stays
 while anything is left inside. Undo creates the folder again and puts
-everything back. An object the person does not see (a cluster Rancher hides
+everything back; when a folder cannot go back (its name taken since, its
+former parent gone), its objects stay with it and are counted as
+conflicts. Resume replays the folder lines not done yet: a subfolder move
+cut by a console stop, or the final delete once the last object has moved. An object the person does not see (a cluster Rancher hides
 from them, a namespace they cannot read) is never named in the steps, the
 output or `--json` of a rename, move, emptying, undo or resume: such objects
 are counted in one step ("2 other objects not shown to you: 0 done, 2

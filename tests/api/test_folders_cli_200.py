@@ -680,7 +680,8 @@ def test_undo_goes_on_when_a_folder_cannot_take_its_name_back(env, capsys):
     assert run(env, "--id=ur", "undo", "--action", "rr", spec={"objects": objs}) == 1
     cap = capsys.readouterr()
     assert json.loads(cap.out)["undone"] == "rr" and "cannot go back to /Prod/ERP" in cap.err
-    assert members(env)["harvester/harv1/nav/a"] == ("/Prod/ERP", "vm")     # les objets sont remis
+    # revue finale D-2 : ses objets restent avec lui, pas dans le /Prod/ERP de quelqu'un d'autre
+    assert members(env)["harvester/harv1/nav/a"] == ("/Prod/Finance", "vm")
 
 
 def test_resume_never_overwrites_a_filing_made_since(env, capsys):
@@ -895,3 +896,162 @@ def test_undo_says_whose_action_it_undoes(env, capsys, of, expected):
     argv = ["--as", "bob", "--id=u9", "undo", "--action", "a1"] + (["--of", of] if of else [])
     assert run(env, *argv, spec={"objects": [vm("a")]}) == 0
     assert f"STEP_EVENT|undo|done|{expected}" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Revue finale 2.0.0 (I-1, I-2, D-2)
+# ---------------------------------------------------------------------------
+def _empty_into_with_a_failed_object(env, monkeypatch):
+    """empty-into /Prod -> /Lab alors qu'une VM est injoignable : la ligne de
+    suppression de /Prod échoue, /Prod reste (voulu)."""
+    assert run(env, "--id=k1", "assign", "--to", "/Prod", spec={"objects": [vm("a"), vm("b")]}) == 0
+    env["kube"].fail = {"b": "down"}
+    assert run(env, "--id=k2", "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to",
+               str(folder_id(env, "/Lab")), spec={"objects": [vm("a"), vm("b")]}) == 1
+    assert journal(env, "k2")[-1][3] == "failed" and "/Prod" in tree_paths(env)
+    env["kube"].fail = {}
+    return [vm("a"), vm("b")]
+
+
+def _empty_into_cut_in_the_subfolder_loop(env, monkeypatch):
+    """La console s'arrête pendant le déplacement du second sous-dossier."""
+    conn = fdb.connect(env["db"])
+    fdb.ensure_path(conn, "/Prod/HR", "console")
+    conn.close()
+    objs = [vm("a"), vm("b"), vm("c")]
+    assert run(env, "assign", "--to", "/Prod", spec={"objects": objs[:1]}) == 0
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs[1:2]}) == 0
+    assert run(env, "assign", "--to", "/Prod/HR", spec={"objects": objs[2:]}) == 0
+    real, calls = fdb.move_folder, []
+
+    def dies_on_second(conn, fid, parent):
+        calls.append(fid)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(conn, fid, parent)
+    monkeypatch.setattr(fdb, "move_folder", dies_on_second)
+    with pytest.raises(KeyboardInterrupt):
+        run(env, "--id=k2", "empty-into", "--folder", str(folder_id(env, "/Prod")), "--to",
+            str(folder_id(env, "/Lab")), spec={"objects": objs})
+    monkeypatch.setattr(fdb, "move_folder", real)
+    assert "/Prod/HR" in tree_paths(env) and "/Lab/ERP" in tree_paths(env)
+    return objs
+
+
+@pytest.mark.parametrize("prep,tree_after,annotations", [
+    # un objet en échec puis revenu : Resume supprime enfin /Prod
+    (_empty_into_with_a_failed_object, {"/Lab", "/Lab/ERP"}, {"a": "/Lab", "b": "/Lab"}),
+    # coupure dans la boucle des sous-dossiers : Resume déplace le reste,
+    # écrit les objets sous la cible, sans arborescence en double
+    (_empty_into_cut_in_the_subfolder_loop, {"/Lab", "/Lab/ERP", "/Lab/HR"},
+     {"a": "/Lab", "b": "/Lab/ERP", "c": "/Lab/HR"}),
+])
+def test_resume_replays_the_folder_lines_of_an_empty_into(env, monkeypatch, capsys, prep, tree_after, annotations):
+    objs = prep(env, monkeypatch)
+    assert run(env, "--id=k3", "resume", "--action", "k2", spec={"objects": objs}) == 0
+    assert set(tree_paths(env)) - {"/Old"} == tree_after
+    assert {n: env["kube"].annotations.get(n) for n in annotations} == annotations
+    assert [j[3] for j in journal(env, "k2")] == ["done"] * len(journal(env, "k2"))
+    conn = fdb.connect(env["db"])
+    try:
+        assert fdb.unfinished(conn, "k2") is False
+    finally:
+        conn.close()
+    # une lecture de flotte ensuite ne recrée rien sous l'ancien chemin
+    read_fleet(env, annotations)
+    assert set(tree_paths(env)) - {"/Old"} == tree_after
+
+
+def test_i1_mutation_folder_lines_marked_done_without_replay(env, monkeypatch, capsys):
+    """Mutation volontaire : la branche d'avant (ligne de dossier dite faite
+    sans rejouer) laisse /Prod dans l'arbre alors que l'action dit fait."""
+    objs = _empty_into_with_a_failed_object(env, monkeypatch)
+    monkeypatch.setattr(cli, "replay_folder_line", lambda conn, m, visible: ("done", ""))
+    assert run(env, "--id=k3", "resume", "--action", "k2", spec={"objects": objs}) == 0
+    assert "/Prod" in tree_paths(env)
+
+
+def test_resume_of_a_folder_line_whose_folder_moved_since_is_left_as_is(env, monkeypatch, capsys):
+    objs = _empty_into_cut_in_the_subfolder_loop(env, monkeypatch)
+    assert run(env, "rename", "--id", str(folder_id(env, "/Prod/HR")), "--name", "People",
+               spec={"objects": objs}) == 0
+    capsys.readouterr()
+    assert run(env, "--id=k3", "resume", "--action", "k2", spec={"objects": objs}) == 1
+    assert "is now /Prod/People" in capsys.readouterr().err
+    assert "/Prod/People" in tree_paths(env) and "/Lab/HR" not in tree_paths(env)
+
+
+def _assign_then_outside(env, outside):
+    assert run(env, "--id=o0", "assign", "--to", "/Old", spec={"objects": [vm("a")]}) == 0
+    assert run(env, "--id=o1", "assign", "--to", "/Prod", spec={"objects": [vm("a")]}) == 0
+    outside(env)
+    return "undo", "o1"
+
+
+def _failed_assign_then_outside(env, outside):
+    assert run(env, "--id=o0", "assign", "--to", "/Old", spec={"objects": [vm("a")]}) == 0
+    env["kube"].fail = {"a": "down"}
+    assert run(env, "--id=o1", "assign", "--to", "/Prod", spec={"objects": [vm("a")]}) == 1
+    env["kube"].fail = {}
+    outside(env)
+    return "resume", "o1"
+
+
+def _to_lab(env):
+    env["kube"].annotations["a"] = "/Lab"          # kubectl annotate hors de la console
+
+
+def _to_unfiled(env):
+    env["kube"].annotations.pop("a", None)         # annotation retirée hors de la console
+
+
+@pytest.mark.parametrize("prep,outside,now", [
+    (_assign_then_outside, _to_lab, "/Lab"),
+    (_assign_then_outside, _to_unfiled, None),
+    (_failed_assign_then_outside, _to_lab, "/Lab"),
+    (_failed_assign_then_outside, _to_unfiled, None),
+])
+def test_undo_and_resume_leave_an_object_moved_outside_the_console(env, capsys, prep, outside, now):
+    """Pas de lecture de flotte entre les deux : le cache ne sait rien du
+    changement, la valeur relue sur l'objet décide (revue finale I-2)."""
+    verb, action = prep(env, outside)
+    env["kube"].calls.clear()
+    capsys.readouterr()
+    assert run(env, "--id=o2", verb, "--action", action, spec={"objects": [vm("a")]}) == 1
+    cap = capsys.readouterr()
+    assert env["kube"].annotations.get("a") == now
+    assert [c for c in env["kube"].calls if not c[4]] == []            # aucune écriture
+    assert f"is now in {now or 'unfiled'}" in cap.err and "left as is" in cap.err
+    if verb == "undo":
+        assert json.loads(cap.out)["conflicts"][0]["current"] == now
+
+
+def test_i2_mutation_strict_off_overwrites(env, capsys, monkeypatch):
+    """Mutation volontaire : sans la règle stricte, Annuler écrase le
+    rangement fait hors de la console."""
+    real = cli.run_lines
+    monkeypatch.setattr(cli, "run_lines", lambda *a, **kw: real(*a, **dict(kw, strict=False)))
+    _assign_then_outside(env, _to_lab)
+    run(env, "--id=o2", "undo", "--action", "o1", spec={"objects": [vm("a")]})
+    assert env["kube"].annotations.get("a") == "/Old"
+
+
+def test_undo_keeps_objects_whose_folder_cannot_go_back(env, capsys):
+    """D-2 : le dossier ne peut pas reprendre son nom (repris depuis) : ses
+    objets restent où ils sont, rien n'est écrit dans le dossier homonyme."""
+    objs = [vm("a")]
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs}) == 0
+    assert run(env, "--id=rr", "rename", "--id", "2", "--name", "Finance", spec={"objects": objs}) == 0
+    conn = fdb.connect(env["db"])
+    fdb.ensure_path(conn, "/Prod/ERP", "console")
+    conn.close()
+    env["kube"].calls.clear()
+    capsys.readouterr()
+    assert run(env, "--id=ur", "undo", "--action", "rr", spec={"objects": objs}) == 1
+    cap = capsys.readouterr()
+    assert members(env)["harvester/harv1/nav/a"] == ("/Prod/Finance", "vm")
+    assert env["kube"].annotations["a"] == "/Prod/Finance" and env["kube"].calls == []
+    out = json.loads(cap.out)
+    assert out["conflicts"][0]["key"] == "harvester/harv1/nav/a"
+    assert "could not go back" in cap.err
+    assert [j[3] for j in journal(env, "ur")] == ["skipped"]
