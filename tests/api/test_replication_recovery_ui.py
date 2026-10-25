@@ -239,17 +239,20 @@ def test_mask_plan_hides_every_secret_value_and_keeps_the_rest():
     ({"Authorization": "Bearer new"}, {"Authorization": "Bearer new"}),        # nouvelle valeur
     ({"Authorization": rp.MASK, "X-Key": "k"}, {"Authorization": "Bearer s3cr3t", "X-Key": "k"}),
     ({}, {}),                                                                  # en-tête retiré
-    ({"X-Other": rp.MASK}, {"X-Other": rp.MASK}),                              # rien de rangé : refusé ensuite
 ])
 def test_keep_hook_secrets(new, want):
     got = rp.keep_hook_secrets([dict(HOOK, secret_headers=new)], [HOOK])
     assert got[0]["secret_headers"] == want
 
 
-def test_keep_hook_secrets_matches_by_hook_name():
-    got = rp.keep_hook_secrets([dict(HOOK, name="other", secret_headers={"Authorization": rp.MASK})], [HOOK])
-    with pytest.raises(rp.PlanError):
-        rp.normalize_plan(req(options={"hooks": got}))
+@pytest.mark.parametrize("hook,why", [
+    (dict(HOOK, secret_headers={"X-Other": rp.MASK}), "X-Other has no stored value"),      # rien de rangé
+    (dict(HOOK, name="other", secret_headers={"Authorization": rp.MASK}), "new or renamed"),  # par nom
+])
+def test_keep_hook_secrets_refuses_a_mask_without_stored_value(hook, why):
+    with pytest.raises(rp.PlanError) as e:
+        rp.keep_hook_secrets([hook], [HOOK])
+    assert e.value.code == "secret-missing" and why in str(e.value)
 
 
 def test_hook_secret_values():

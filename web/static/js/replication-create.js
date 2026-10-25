@@ -119,7 +119,7 @@ const ReplicationCreate = (() => {
           ${field(tr('rp.hook.name'), `<input name="h_name" value="${esc(h.name || '')}" maxlength="40">`, tr('rp.hook.nameTip'))}
           ${field(tr('rp.hook.at'), `<select name="h_at">${atOptions(h.at)}</select>`, tr('rp.hook.atTip'))}
           ${field(tr('rp.hook.method'), `<select name="h_method">${['POST', 'PUT', 'PATCH', 'GET', 'DELETE'].map((m) => `<option${(h.method || 'POST') === m ? ' selected' : ''}>${m}</option>`).join('')}</select>`, tr('rp.hook.methodTip'))}
-          ${field(tr('rp.hook.timeout'), `<input name="h_timeout" type="number" min="1" max="120" value="${h.timeout_s || 15}">`, tr('rp.hook.timeoutTip'))}
+          ${field(tr('rp.hook.timeout'), `<input name="h_timeout" type="number" min="1" max="60" value="${h.timeout_s || 15}">`, tr('rp.hook.timeoutTip'))}
         </div>
         ${field(tr('rp.hook.url'), `<input name="h_url" value="${esc(h.url || '')}" placeholder="https://dns-api.example/v1/records/erp">`, tr('rp.hook.urlTip'))}
         ${field(tr('rp.hook.headers'), `<textarea name="h_headers" rows="2" placeholder="Content-Type: application/json">${esc(Object.entries(h.headers || {}).map(([k, x]) => `${k}: ${x}`).join('\n'))}</textarea>`, tr('rp.hook.headersTip'))}

@@ -130,7 +130,9 @@ WAVE_NAME_MAX, HOOK_NAME_MAX = 40, 40
 GATE_KINDS = ("running", "agent", "delay")
 AGENT_GATE_DEFAULT, AGENT_GATE_RANGE, DELAY_GATE_RANGE = 300, (10, 3600), (1, 3600)
 HOOK_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
-HOOK_TIMEOUT_DEFAULT, HOOK_TIMEOUT_RANGE = 15, (1, 120)
+# 60 s au plus : une bascule arrêtée par la console atteint son prochain point
+# sûr (entre deux actions) bien avant le budget d'arrêt de l'unité (600 s)
+HOOK_TIMEOUT_DEFAULT, HOOK_TIMEOUT_RANGE = 15, (1, 60)
 TEXT_MAX = 16 * 1024                     # corps d'une action, données réseau
 URL_MAX, HEADER_VALUE_MAX, HEADERS_MAX = 2048, 1024, 32
 RESIZE_CPU_RANGE = (1, 256)
@@ -594,9 +596,12 @@ def _hook_url(v, what):
     if u.scheme not in ("http", "https") or not u.hostname:
         raise PlanError("bad-option", f"{what}: url must start with http:// or https:// and name a host")
     if u.username is not None or u.password is not None:
-        # l'adresse est montrée partout en clair : un identifiant va dans
-        # `secret_headers`, masqués
+        # un identifiant va dans `secret_headers`, masqués
         raise PlanError("bad-option", f"{what}: no credentials in the url, use secret_headers")
+    if MASK in v:
+        # adresse montrée masquée (`mask_url`) et renvoyée modifiée : la
+        # requête rangée est cachée, elle ne se recolle pas
+        raise PlanError("bad-option", f"{what}: the stored query of the url is hidden, type the full url again")
     return v
 
 
@@ -701,29 +706,57 @@ def normalize_recovery(raw_opts, plan_vms, cloud_init):
 
 
 def keep_hook_secrets(new_hooks, stored_hooks):
-    """Les actions annexes d'une mise à jour, où une valeur `MASK` d'un
-    en-tête secret reprend la valeur rangée (même action, même en-tête).
-    Sans valeur rangée, le masque reste et le contrôle le refuse."""
+    """Les actions annexes d'une mise à jour, où `MASK` garde une valeur
+    rangée de la même action (même nom) :
+    - une adresse égale à l'adresse rangée masquée (`mask_url`) reprend
+      l'adresse rangée (requête comprise) ;
+    - un en-tête secret `MASK` reprend la valeur rangée, SEULEMENT si
+      l'adresse garde le schéma, l'hôte et le port rangés : sinon un
+      opérateur enverrait le secret ailleurs (PlanError `secret-missing`).
+    Sans valeur rangée (action nouvelle ou renommée), PlanError aussi."""
+    import replication_http as rh
     if not isinstance(new_hooks, list):
         return new_hooks
-    stored = {h.get("name"): (h.get("secret_headers") or {}) for h in stored_hooks or [] if isinstance(h, dict)}
+    stored = {h.get("name"): h for h in stored_hooks or [] if isinstance(h, dict)}
     out = []
     for h in new_hooks:
-        if isinstance(h, dict) and isinstance(h.get("secret_headers"), dict):
-            old = stored.get(h.get("name")) or {}
-            h = dict(h, secret_headers={k: (old.get(k, v) if v == MASK else v)
-                                        for k, v in h["secret_headers"].items()})
+        if not isinstance(h, dict):
+            out.append(h)
+            continue
+        old = stored.get(h.get("name")) or {}
+        url = h.get("url")
+        if old.get("url") and isinstance(url, str) and url == rh.mask_url(old["url"]):
+            h = dict(h, url=old["url"])
+        sec = h.get("secret_headers")
+        if isinstance(sec, dict) and any(v == MASK for v in sec.values()):
+            name = h.get("name")
+            if not old:
+                raise PlanError("secret-missing", f"hook {name}: no stored secret under this name (new or renamed "
+                                                  "hook): type the secret header values again")
+            if not rh.same_origin(h.get("url"), old.get("url")):
+                raise PlanError("secret-missing", f"hook {name}: the address changed, type the secret header "
+                                                  "values again")
+            kept = {}
+            for k, v in sec.items():
+                if v == MASK and k not in (old.get("secret_headers") or {}):
+                    raise PlanError("secret-missing", f"hook {name}: secret header {k} has no stored value, "
+                                                      "type it again")
+                kept[k] = old["secret_headers"][k] if v == MASK else v
+            h = dict(h, secret_headers=kept)
         out.append(h)
     return out
 
 
 def mask_options(options):
     """Les options sans secret : chaque valeur d'un en-tête secret devient
-    `MASK` (lectures, sorties, journal)."""
+    `MASK`, l'adresse perd sa requête (`mask_url` : un jeton y est souvent
+    porté). Lectures, sorties, journal."""
+    import replication_http as rh
     if not isinstance(options, dict) or not options.get("hooks"):
         return options
     out = dict(options)
-    out["hooks"] = [dict(h, secret_headers={k: MASK for k in (h.get("secret_headers") or {})})
+    out["hooks"] = [dict(h, url=rh.mask_url(h.get("url")),
+                         secret_headers={k: MASK for k in (h.get("secret_headers") or {})})
                     if isinstance(h, dict) else h for h in options["hooks"]]
     return out
 
@@ -794,8 +827,23 @@ def hooks_at(options, point):
 
 
 def hooks_summary(options):
-    return [{"name": h["name"], "at": h["at"], "method": h["method"], "url": h["url"]}
+    import replication_http as rh
+    return [{"name": h["name"], "at": h["at"], "method": h["method"], "url": rh.mask_url(h["url"])}
             for h in (options or {}).get("hooks") or []]
+
+
+def hook_address_refusal(hooks, allow, resolver=None):
+    """Contrôle à l'enregistrement des adresses des actions annexes, par la
+    garde anti-SSRF (`replication_http`) : PlanError `hook-address` pour une
+    adresse interne non autorisée (`replication.hooks.allow_private`). Un
+    nom qui ne se résout pas encore passe (revérifié à l'appel)."""
+    import replication_http as rh
+    import url_fetch_guard as ufg
+    for h in hooks or []:
+        try:
+            rh.check_address(h.get("url"), allow, resolver=resolver, strict_dns=False)
+        except ufg.FetchRefused as e:
+            raise PlanError("hook-address", f"hook {h.get('name')}: {rh.refusal_text(e, 'hooks')}") from None
 
 
 # ---------------------------------------------------------------------------

@@ -45,10 +45,20 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
 
+def allow_loopback(monkeypatch, tmp_path):
+    """Le serveur de test écoute en 127.0.0.1 : la garde anti-SSRF le refuse
+    sauf autorisation de l'opérateur, posée ici dans un config.yaml."""
+    cfg = tmp_path / "allow-config.yaml"
+    cfg.write_text("replication:\n  hooks:\n    allow_private: [127.0.0.0/8]\n"
+                   "  notifications:\n    allow_private: [127.0.0.0/8]\n")
+    monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(cfg))
+
+
 @pytest.fixture
-def server(monkeypatch):
+def server(monkeypatch, tmp_path):
     for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"):
         monkeypatch.delenv(v, raising=False)
+    allow_loopback(monkeypatch, tmp_path)
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.seen = []
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -211,8 +221,10 @@ def test_dry_run_lists_waves_and_hooks_without_calling_them(tmp_path, server):
         {"index": 1, "name": "db", "vms": ["default/vm-b"], "gate": {"kind": "delay", "seconds": 10}},
         {"index": 2, "name": "", "vms": ["default/vm-a"], "gate": {"kind": "running", "seconds": 0},
          "implicit": True}]
+    # adresse montrée sans sa requête (un jeton y est souvent porté)
     assert res["hooks"] == [{"name": "announce", "at": "start", "method": "POST",
-                             "url": f"{server.url}/ok?h=announce"}]
+                             "url": f"{server.url}/ok?********"}]
+    assert "h=announce" not in json.dumps(res)
     assert server.seen == [] and "t0p" not in json.dumps(res)
     assert w.plan()["state"] == "protected"
 
@@ -280,12 +292,18 @@ def test_hook_test_calls_one_hook_and_writes_the_journal(tmp_path, server, path,
 
 
 def test_call_hook_scrubs_secret_values_from_errors():
-    class Boom:
-        def __call__(self, req, timeout):
-            raise OSError(f"proxy said no to {SECRET}")
+    def connector(*a):
+        class C:
+            def request(self, *a, **k):
+                raise OSError(f"proxy said no to {SECRET}")
+
+            def close(self):
+                pass
+        return C()
     res = rr.call_hook({"name": "x", "at": "end", "method": "GET", "url": "http://h.example/",
-                        "secret_headers": {"Authorization": SECRET}, "timeout_s": 3}, opener=Boom())
-    assert res["ok"] is False and SECRET not in res["error"] and rp.MASK in res["error"]
+                        "secret_headers": {"Authorization": SECRET}, "timeout_s": 3}, allow=(),
+                       resolver=lambda *a: [(2, 1, 6, "", ("93.184.216.34", 80))], connector=connector)
+    assert res["ok"] is False and SECRET not in res["error"]
 
 
 def test_get_hooks_send_no_body(server):

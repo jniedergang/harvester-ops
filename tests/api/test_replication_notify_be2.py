@@ -201,7 +201,11 @@ class _Hook(http.server.BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def server():
+def server(monkeypatch, tmp_path):
+    # 127.0.0.1 : refusé par la garde anti-SSRF sauf autorisation (config.yaml)
+    cfg = tmp_path / "allow-config.yaml"
+    cfg.write_text("replication:\n  notifications:\n    allow_private: [127.0.0.0/8]\n")
+    monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(cfg))
     _Hook.got, _Hook.status = [], 200
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Hook)
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -257,7 +261,7 @@ def test_deliver_scrubs_secrets_from_errors_and_stops_at_first_success():
     assert TOKEN not in res["error"] and rn.MASK in res["error"]
 
 
-def test_unreachable_server_is_a_failure_not_an_exception():
+def test_unreachable_server_is_a_failure_not_an_exception(server):
     res = rn.deliver({"id": "s", "kind": "webhook", "url": "http://127.0.0.1:9/x"}, "x", sleep=lambda s: None,
                      timeout=1)
     assert res["ok"] is False and res["error"].startswith("connection failed")
@@ -267,8 +271,8 @@ class FakeSMTP:
     sessions = []
     fail = None
 
-    def __init__(self, host, port, timeout=None):
-        self.log = [("connect", host, port, timeout)]
+    def __init__(self, host, port, timeout=None, implicit_tls=False):
+        self.log = [("connect", host, port, timeout)] + ([("implicit-tls",)] if implicit_tls else [])
         FakeSMTP.sessions.append(self)
         if FakeSMTP.fail == "connect":
             raise ConnectionRefusedError("refused")
@@ -292,14 +296,15 @@ class FakeSMTP:
         self.log.append(("send", msg["From"], msg["To"], msg["Subject"], msg.get_content()))
 
 
-@pytest.mark.parametrize("starttls,username,expect", [
-    (True, "ops", ["connect", "starttls", "login", "send", "quit"]),
-    (False, "ops", ["connect", "login", "send", "quit"]),
-    (True, "", ["connect", "starttls", "send", "quit"]),
+@pytest.mark.parametrize("starttls,implicit,username,expect", [
+    (True, False, "ops", ["connect", "starttls", "login", "send", "quit"]),
+    (False, True, "ops", ["connect", "implicit-tls", "login", "send", "quit"]),
+    (True, False, "", ["connect", "starttls", "send", "quit"]),
 ])
-def test_email(starttls, username, expect):
+def test_email(starttls, implicit, username, expect):
     FakeSMTP.sessions, FakeSMTP.fail = [], None
-    ch = rn.normalize({"channels": [dict(full()["channels"][3], starttls=starttls, username=username)]})["channels"][0]
+    ch = rn.normalize({"channels": [dict(full()["channels"][3], starttls=starttls, implicit_tls=implicit,
+                                         username=username)]})["channels"][0]
     assert rn.send(ch, "subject line\nbody", smtp=FakeSMTP) == 250
     [s] = FakeSMTP.sessions
     assert [x[0] for x in s.log] == expect

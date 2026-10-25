@@ -127,6 +127,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import cluster_decl  # noqa: E402
 import replication as rp  # noqa: E402
 import replication_db as db  # noqa: E402
+import replication_http as rh  # noqa: E402
 import replication_follow as rf  # noqa: E402
 import replication_link as rl  # noqa: E402
 import replication_notify as rn  # noqa: E402
@@ -622,6 +623,7 @@ def cmd_plan_create(args):
     req = plan_request(args)
     try:
         plan = rp.normalize_plan(req)
+        rp.hook_address_refusal((plan.get("options") or {}).get("hooks"), rh.allow_for("hooks"))
     except rp.PlanError as e:
         raise UsageError(str(e), e.code) from None
     for side in ("source_cluster", "target_cluster"):
@@ -765,8 +767,13 @@ def cmd_plan_set(args):
         if recovery:
             rec = dict(recovery)
             if "hooks" in rec:
-                # `********` garde la valeur rangée de l'en-tête secret
-                rec["hooks"] = rp.keep_hook_secrets(rec["hooks"], stored.get("hooks"))
+                # `********` garde la valeur rangée de l'en-tête secret (même
+                # adresse seulement) ; adresses passées par la garde anti-SSRF
+                try:
+                    rec["hooks"] = rp.keep_hook_secrets(rec["hooks"], stored.get("hooks"))
+                    rp.hook_address_refusal(rec["hooks"], rh.allow_for("hooks"))
+                except rp.PlanError as e:
+                    raise UsageError(str(e), e.code) from None
             options.update(rec)
         if options:
             fields["options"] = options
@@ -809,14 +816,14 @@ def cmd_hook_test(args):
                                  now=utcnow())
     except KeyError:
         raise UsageError(f"plan {plan['name']} has no hook {args.name}", "unknown-hook") from None
-    summary = {"name": hook["name"], "at": hook["at"], "method": hook["method"], "url": hook["url"]}
+    summary = {"name": hook["name"], "at": hook["at"], "method": hook["method"], "url": rh.mask_url(hook["url"])}
     text = f"HTTP {res['status']}" if res["ok"] else (res["error"] or f"HTTP {res['status']}")
     step("hook", "done" if res["ok"] else "error", f"hook {hook['name']}: {text}")
     out = {"ok": res["ok"], "error": None if res["ok"] else text, "kind": None if res["ok"] else "hook-failed",
            "plan": plan["id"], "hook": summary, "status": res["status"], "seconds": res["seconds"]}
     if not res["ok"]:
         print(f"error: {scrub(text)}", file=sys.stderr)
-    emit(args, out, [f"hook {hook['name']} ({hook['method']} {hook['url']}): {text} in {res['seconds']} s"])
+    emit(args, out, [f"hook {hook['name']} ({hook['method']} {summary['url']}): {text} in {res['seconds']} s"])
     return EXIT_OK if res["ok"] else EXIT_FAIL
 
 
@@ -1269,6 +1276,7 @@ def cmd_notify_set(args):
     stored = db.get_setting(conn, "notify")
     try:
         cfg = rn.normalize(raw, stored)
+        rn.address_refusal(cfg, rh.allow_for("notifications"))
     except rn.NotifyError as e:
         raise UsageError(str(e), e.code) from None
     db.set_setting(conn, "notify", cfg, by=args.by or system_user(), now=utcnow())

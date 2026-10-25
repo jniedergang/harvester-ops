@@ -2763,7 +2763,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         # points lus avant l'activation, rangés avant elle : un arrêt brutal
         # pendant l'activation ne les perd pas (le moteur activé n'en a plus)
         db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
-                      by=ctx.by, action_id=ctx.action_id)
+                      steps=ctx.steps, by=ctx.by, action_id=ctx.action_id)
         # --- point de non-retour : l'activation est définitive ---
         for r in go:
             uid = r["resource_uid"]
@@ -3029,33 +3029,40 @@ def wave_gate(ctx, op, wave, carnets):
     return True
 
 
-def call_hook(hook, opener=None, clock=time.monotonic):
-    """Appelle une action annexe HTTP. Rend {"ok", "status", "seconds",
+def call_hook(hook, allow=None, clock=time.monotonic, resolver=None, connector=None):
+    """Appelle une action annexe HTTP par la garde anti-SSRF
+    (`replication_http`) : adresse interne refusée sauf
+    `replication.hooks.allow_private`, aucune redirection suivie (un en-tête
+    secret ne part jamais ailleurs). Rend {"ok", "status", "seconds",
     "error"} ; jamais d'exception pour un échec de l'appel (refus, délai,
     statut >= 400). Les valeurs des en-têtes secrets sont retirées du
     message d'erreur ; le corps de la réponse n'est ni gardé ni montré."""
-    import urllib.error
-    import urllib.request
-    opener = opener or urllib.request.urlopen
+    import replication_http as rh
+    import url_fetch_guard as ufg
+    allow = rh.allow_for("hooks") if allow is None else allow
     headers = dict(hook.get("headers") or {})
     headers.update(hook.get("secret_headers") or {})
     body = hook.get("body") or ""
-    data = body.encode() if body and hook.get("method") != "GET" else None
-    req = urllib.request.Request(hook["url"], data=data, method=hook.get("method") or "POST", headers=headers)
+    method = hook.get("method") or "POST"
+    data = body.encode() if body and method != "GET" else None
+    kw = {"resolver": resolver}
+    if connector is not None:
+        kw["connector"] = connector
     t0 = clock()
     status, error = None, ""
     try:
-        with opener(req, timeout=int(hook.get("timeout_s") or rp.HOOK_TIMEOUT_DEFAULT)) as resp:
-            status = int(getattr(resp, "status", None) or resp.getcode())
-            resp.read(65536)
-    except urllib.error.HTTPError as e:
-        status, error = int(e.code), f"HTTP {e.code}"
-    except Exception as e:                      # noqa: BLE001 : refus, délai, nom inconnu
-        error = str(getattr(e, "reason", None) or e) or type(e).__name__
+        status = rh.request(method, hook["url"], headers=headers, body=data,
+                            timeout=int(hook.get("timeout_s") or rp.HOOK_TIMEOUT_DEFAULT), allow=allow, **kw)
+        if status >= 400:
+            error = f"HTTP {status}"
+    except ufg.FetchRefused as e:
+        error = rh.refusal_text(e, "hooks")
+    except Exception as e:                      # noqa: BLE001 : jamais d'exception vers la bascule
+        error = type(e).__name__
     secs = round(clock() - t0, 3)
     for v in rp.hook_secret_values([hook]):
         error = error.replace(v, rp.MASK)
-    ok = status is not None and 200 <= status < 400 and not error
+    ok = status is not None and 200 <= status < 300 and not error
     return {"ok": ok, "status": status, "seconds": secs, "error": error[:300]}
 
 
@@ -3088,17 +3095,17 @@ def run_hooks(ctx, op, point, points, run_id, started, refs, log):
                     "seconds": res["seconds"]})
         done.append(h["name"])
         db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
-                      by=ctx.by, action_id=ctx.action_id)
+                      steps=ctx.steps, by=ctx.by, action_id=ctx.action_id)
 
 
-def hook_test(conn, plan, name, by="", action_id="", now=None, opener=None):
+def hook_test(conn, plan, name, by="", action_id="", now=None, allow=None):
     """`hook test` : appelle une action annexe du plan tout de suite, résultat
     au journal (opération `plan`, étape `hook`). Rend (résultat, action) ;
     KeyError si l'action n'existe pas."""
     hook = next((h for h in (plan.get("options") or {}).get("hooks") or [] if h.get("name") == name), None)
     if hook is None:
         raise KeyError(name)
-    res = call_hook(hook, opener=opener)
+    res = call_hook(hook, allow=allow)
     db.record_event(conn, "plan", step="hook", plan_id=plan["id"], host=plan["target_cluster"],
                     side="target", level="info" if res["ok"] else "warn",
                     code="hook-ok" if res["ok"] else "hook-failed",

@@ -144,7 +144,7 @@ def test_settings_mappings_of_a_draft_plan(client):
     ((), {"recovery": {"bogus": 1}}, 400, None),
     ((), {"recovery": {"waves": [{"vms": ["default/rep-z"]}]}}, 400, "bad-option"),
     ((), {"recovery": {"network_data": {"default/rep-a": "v"}}}, 400, "bad-option"),
-    ((), {"recovery": {"hooks": [dict(HOOK, secret_headers={"X-New": "********"})]}}, 400, "bad-option"),
+    ((), {"recovery": {"hooks": [dict(HOOK, secret_headers={"X-New": "********"})]}}, 400, "secret-missing"),
     ((), {"mappings": {"networks": {"default/prod": "lab"}}}, 400, "bad-reference"),
     ((), {"cloud_init": "always"}, 400, None),
     ((), {"mac": True}, 400, None),

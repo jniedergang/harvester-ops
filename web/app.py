@@ -24592,6 +24592,7 @@ def api_notes_get(doc_id):
 import replication as _rp  # noqa: E402
 import replication_db as _rdb  # noqa: E402
 import replication_follow as _rf  # noqa: E402
+import replication_http as _rh  # noqa: E402
 import replication_insight as _ri  # noqa: E402
 import replication_link as _rlk  # noqa: E402
 import replication_notify as _rn  # noqa: E402
@@ -25133,6 +25134,8 @@ def api_replication_plan_create():
         return err
     try:
         plan, argv, recovery = _repl_create_request(body)
+        _rp.hook_address_refusal((plan.get("options") or {}).get("hooks"),
+                                 _rh.allowlist(load_config_ro(), "hooks"))
     except _rp.PlanError as e:
         return _repl_err(str(e), 400, e.code)
     except ValueError as e:
@@ -25528,6 +25531,7 @@ def api_replication_settings(plan_id):
             rec = dict(recovery)
             if "hooks" in rec:
                 rec["hooks"] = _rp.keep_hook_secrets(rec["hooks"], (plan.get("options") or {}).get("hooks"))
+                _rp.hook_address_refusal(rec["hooks"], _rh.allowlist(load_config_ro(), "hooks"))
             opts.update(rec)
             spec["recovery"] = recovery
         if maps:
@@ -25746,7 +25750,8 @@ def api_replication_notify_set():
     if err:
         return err
     try:
-        _rn.normalize(body, _repl_notify_stored())
+        _rn.address_refusal(_rn.normalize(body, _repl_notify_stored()),
+                            _rh.allowlist(load_config_ro(), "notifications"))
     except _rn.NotifyError as e:
         return _repl_err(str(e), 400, e.code)
     run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=body)

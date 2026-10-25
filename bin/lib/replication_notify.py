@@ -1,7 +1,13 @@
 """harvester-ops : notifications externes de la réplication.
 
 Matrix (API client-serveur), Slack (webhook entrant), webhook JSON
-générique et courriel (smtplib, STARTTLS facultatif). Le réglage vit dans
+générique et courriel (smtplib ; STARTTLS ou TLS implicite exigé dès
+qu'un mot de passe est donné).
+
+Appels sortants par la garde anti-SSRF (`replication_http`) : adresse
+interne refusée sauf `replication.notifications.allow_private`, aucune
+redirection suivie (le jeton Matrix et les en-têtes secrets ne partent
+jamais ailleurs), serveur SMTP vérifié de la même façon. Le réglage vit dans
 replication.db (table `settings`, clé `notify`) ; seule la ligne de commande
 l'écrit (`notify set --spec FICHIER`), la console le lit masqué.
 
@@ -25,17 +31,17 @@ Bibliothèque standard seulement.
 import copy
 import json
 import re
-import smtplib
 import ssl
 import threading
 import time
 import urllib.error
-import urllib.request
 import uuid
 from email.message import EmailMessage
 from urllib.parse import quote, urlparse
 
+import replication_http as rh
 import replication_insight as ri
+import url_fetch_guard as ufg
 
 MASK = "********"
 KINDS = ("matrix", "slack", "webhook", "email")
@@ -52,7 +58,8 @@ CHANNEL_FIELDS = {
     "matrix": ("id", "name", "kind", "homeserver", "room", "token"),
     "slack": ("id", "name", "kind", "url"),
     "webhook": ("id", "name", "kind", "url", "headers", "secret_headers"),
-    "email": ("id", "name", "kind", "smtp_host", "smtp_port", "starttls", "username", "password", "from", "to"),
+    "email": ("id", "name", "kind", "smtp_host", "smtp_port", "starttls", "implicit_tls", "username", "password",
+              "from", "to"),
 }
 MAX_CHANNELS = 20
 TIMEOUT_S = 10
@@ -128,7 +135,9 @@ def _channel(raw, stored):
     cid = raw.get("id")
     if not isinstance(cid, str) or not _ID_RE.match(cid):
         raise NotifyError("bad-notify", "channel id: lowercase letters, digits and dashes (40 at most)")
-    # secrets gardés seulement d'un canal de même id ET de même nature
+    # secrets gardés seulement d'un canal de même id ET de même nature, et
+    # pour un jeton ou des en-têtes, vers la même adresse (schéma, hôte,
+    # port) : sinon le secret partirait ailleurs
     old = stored if stored and stored.get("kind") == kind else {}
     out = {"id": cid, "name": _text(raw.get("name") or "", "name", 80, empty=True), "kind": kind}
     if kind == "matrix":
@@ -136,16 +145,28 @@ def _channel(raw, stored):
         out["room"] = _text(raw.get("room"), "room", 255)
         if not _ROOM_RE.match(out["room"]):
             raise NotifyError("bad-notify", "room: a room id (!...) or alias (#...) is expected")
-        out["token"] = _text(_secret(raw.get("token"), old.get("token"), "token"), "token", 1024)
+        kept_token = old.get("token") if rh.same_origin(out["homeserver"], old.get("homeserver")) else None
+        if raw.get("token") == MASK and old.get("token") and kept_token is None:
+            raise NotifyError("secret-missing", "token: the homeserver changed, type the token again")
+        out["token"] = _text(_secret(raw.get("token"), kept_token, "token"), "token", 1024)
     elif kind == "slack":
         out["url"] = _url(_secret(raw.get("url"), old.get("url"), "url"), "url", ("https",))
     elif kind == "webhook":
-        out["url"] = _url(raw.get("url"), "url")
+        url = raw.get("url")
+        if old.get("url") and url == rh.mask_url(old["url"]):
+            url = old["url"]                    # adresse renvoyée masquée : celle rangée
+        out["url"] = _url(url, "url")
+        if MASK in out["url"]:
+            raise NotifyError("bad-notify", "url: the stored query is hidden, type the full url again")
         out["headers"] = _headers(raw.get("headers"), "headers")
         sh = raw.get("secret_headers") or {}
         if not isinstance(sh, dict):
             raise NotifyError("bad-notify", "secret_headers: an object is expected")
-        kept = {k: _secret(v, (old.get("secret_headers") or {}).get(k), f"secret_headers.{k}") for k, v in sh.items()}
+        same = rh.same_origin(out["url"], old.get("url"))
+        if not same and MASK in sh.values() and old.get("secret_headers"):
+            raise NotifyError("secret-missing", "secret_headers: the url changed, type the values again")
+        old_sh = (old.get("secret_headers") or {}) if same else {}
+        kept = {k: _secret(v, old_sh.get(k), f"secret_headers.{k}") for k, v in sh.items()}
         out["secret_headers"] = _headers(kept, "secret_headers")
         if set(out["headers"]) & set(out["secret_headers"]):
             raise NotifyError("bad-notify", "a header cannot be both plain and secret")
@@ -160,11 +181,24 @@ def _channel(raw, stored):
         st = raw.get("starttls", True)
         if not isinstance(st, bool):
             raise NotifyError("bad-notify", "starttls: true or false")
+        imp = raw.get("implicit_tls", False)
+        if not isinstance(imp, bool):
+            raise NotifyError("bad-notify", "implicit_tls: true or false")
+        if imp and st:
+            raise NotifyError("bad-notify", "starttls and implicit_tls: choose one (implicit TLS is port 465)")
         out["starttls"] = st
+        out["implicit_tls"] = imp
         out["username"] = _text(raw.get("username") or "", "username", 256, empty=True)
         pw = raw.get("password") or ""
-        out["password"] = _text(_secret(pw, old.get("password"), "password") if pw else "", "password", 1024,
-                                empty=True)
+        # le mot de passe garde sa valeur rangée seulement vers le même serveur
+        same = (old.get("smtp_host"), old.get("smtp_port")) == (out["smtp_host"], out["smtp_port"])
+        if pw == MASK and old.get("password") and not same:
+            raise NotifyError("secret-missing", "password: the SMTP server changed, type the password again")
+        out["password"] = _text(_secret(pw, old.get("password") if same else None, "password") if pw else "",
+                                "password", 1024, empty=True)
+        if out["password"] and not (st or imp):
+            raise NotifyError("bad-notify", "password: needs starttls or implicit_tls, so that it is never sent "
+                                            "in clear")
         out["from"] = _text(raw.get("from"), "from", 320)
         if not _MAIL_RE.match(out["from"]):
             raise NotifyError("bad-notify", "from: an e-mail address is expected")
@@ -228,6 +262,8 @@ def mask(cfg):
                 c[f] = MASK
         if c.get("secret_headers"):
             c["secret_headers"] = {k: MASK for k in c["secret_headers"]}
+        if c.get("kind") == "webhook" and c.get("url"):
+            c["url"] = rh.mask_url(c["url"])    # un jeton dans la requête reste caché
     return out
 
 
@@ -304,41 +340,78 @@ def format_text(items, title="harvester-ops replication"):
 # Envoi
 # ---------------------------------------------------------------------------
 
-def _http(method, url, body, headers, timeout, opener):
+class SendRefused(Exception):
+    """Envoi refusé avant tout appel (adresse, TLS) : message sans secret."""
+
+
+class HTTPStatusError(Exception):
+    """Réponse hors 2xx."""
+
+    def __init__(self, status):
+        super().__init__(f"HTTP {status}")
+        self.status = status
+
+
+def _http(method, url, body, headers, timeout, allow, requester):
     data = json.dumps(body).encode()
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers=dict({"Content-Type": "application/json"}, **headers))
-    with opener(req, timeout=timeout) as resp:
-        status = getattr(resp, "status", None) or resp.getcode()
-        resp.read(65536)
+    try:
+        status = requester(method, url, headers=dict({"Content-Type": "application/json"}, **headers),
+                           body=data, timeout=timeout, allow=allow)
+    except ufg.FetchRefused as e:
+        if e.reason in ("connect", "tls", "dns"):
+            raise ConnectionError(f"connection failed: {e.message}") from None
+        raise SendRefused(rh.refusal_text(e, "notifications")) from None
     if not 200 <= int(status) < 300:
-        raise RuntimeError(f"HTTP {status}")
+        raise HTTPStatusError(int(status))
     return int(status)
 
 
-def send(channel, text, items=(), timeout=TIMEOUT_S, opener=urllib.request.urlopen, smtp=smtplib.SMTP):
-    """Un envoi sur un canal (un seul essai). Rend le statut ; lève sinon."""
+def _smtp_factory(allow):
+    def make(host, port, timeout=None, implicit_tls=False):
+        try:
+            return rh.pinned_smtp(host, port, timeout, allow, implicit_tls=implicit_tls)
+        except ufg.FetchRefused as e:
+            raise SendRefused(rh.refusal_text(e, "notifications")) from None
+    return make
+
+
+def send(channel, text, items=(), timeout=TIMEOUT_S, allow=None, requester=None, smtp=None):
+    """Un envoi sur un canal (un seul essai). Rend le statut ; lève sinon.
+    `allow` : réseaux internes autorisés (par défaut
+    `replication.notifications.allow_private` de config.yaml)."""
+    allow = rh.allow_for("notifications") if allow is None else allow
+    requester = requester or rh.request
     kind = channel.get("kind")
     if kind == "matrix":
         txn = uuid.uuid4().hex
         url = (f"{channel['homeserver']}/_matrix/client/v3/rooms/{quote(channel['room'], safe='')}"
                f"/send/m.room.message/{txn}")
         return _http("PUT", url, {"msgtype": "m.text", "body": text},
-                     {"Authorization": f"Bearer {channel['token']}"}, timeout, opener)
+                     {"Authorization": f"Bearer {channel['token']}"}, timeout, allow, requester)
     if kind == "slack":
-        return _http("POST", channel["url"], {"text": text}, {}, timeout, opener)
+        return _http("POST", channel["url"], {"text": text}, {}, timeout, allow, requester)
     if kind == "webhook":
         headers = dict(channel.get("headers") or {}, **(channel.get("secret_headers") or {}))
         return _http("POST", channel["url"], {"source": "harvester-ops", "kind": "replication", "text": text,
-                                              "events": list(items)}, headers, timeout, opener)
+                                              "events": list(items)}, headers, timeout, allow, requester)
     if kind == "email":
+        implicit = bool(channel.get("implicit_tls"))
+        starttls = bool(channel.get("starttls", True)) and not implicit
+        if channel.get("password") and not (starttls or implicit):
+            # réglage rangé avant la règle : jamais de mot de passe en clair
+            raise SendRefused("password set without starttls or implicit_tls: not sent in clear")
         msg = EmailMessage()
         msg["Subject"] = text.splitlines()[0][:200]
         msg["From"] = channel["from"]
         msg["To"] = ", ".join(channel["to"])
         msg.set_content(text)
-        with smtp(channel["smtp_host"], int(channel.get("smtp_port") or 587), timeout=timeout) as s:
-            if channel.get("starttls", True):
+        port = int(channel.get("smtp_port") or (465 if implicit else 587))
+        make = smtp or _smtp_factory(allow)
+        kw = {"timeout": timeout}
+        if implicit:
+            kw["implicit_tls"] = True
+        with make(channel["smtp_host"], port, **kw) as s:
+            if starttls:
                 s.starttls(context=ssl.create_default_context())
             if channel.get("username"):
                 s.login(channel["username"], channel.get("password") or "")
@@ -347,7 +420,33 @@ def send(channel, text, items=(), timeout=TIMEOUT_S, opener=urllib.request.urlop
     raise ValueError(f"unknown channel kind {kind}")
 
 
+def address_refusal(cfg, allow, resolver=None):
+    """Contrôle à l'enregistrement des adresses des canaux par la garde
+    anti-SSRF : NotifyError `notify-address` pour une adresse interne non
+    autorisée (`replication.notifications.allow_private`). Un nom qui ne se
+    résout pas encore passe (revérifié à l'envoi)."""
+    for c in (cfg or {}).get("channels") or []:
+        kind = c.get("kind")
+        try:
+            if kind == "email":
+                host = str(c.get("smtp_host") or "")
+                rh.check_address(f"http://{host}:{int(c.get('smtp_port') or 587)}/", allow, resolver=resolver,
+                                 strict_dns=False)
+            else:
+                rh.check_address(c.get("homeserver") if kind == "matrix" else c.get("url"), allow,
+                                 resolver=resolver, strict_dns=False)
+        except ufg.FetchRefused as e:
+            raise NotifyError("notify-address", f"channel {c.get('id')}: {rh.refusal_text(e, 'notifications')}") \
+                from None
+
+
 def _reason(e):
+    if isinstance(e, ConnectionError) and str(e).startswith("connection failed"):
+        return str(e)
+    if isinstance(e, SendRefused):
+        return f"refused: {e}"
+    if isinstance(e, HTTPStatusError):
+        return str(e)
     if isinstance(e, urllib.error.HTTPError):
         return f"HTTP {e.code}"
     if isinstance(e, urllib.error.URLError):

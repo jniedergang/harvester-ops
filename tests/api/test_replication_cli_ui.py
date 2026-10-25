@@ -159,7 +159,7 @@ def test_hook_test_command(tmp_path, capsys, server):
     assert rc == 0, data
     assert set(data) == FAILURE_KEYS | {"plan", "hook", "status", "seconds"}
     assert data["status"] == 204 and data["hook"] == {"name": "ok", "at": "end", "method": "POST",
-                                                      "url": f"{server.url}/ok?h=ok"}
+                                                      "url": f"{server.url}/ok?********"}
     assert server.seen[-1]["headers"]["authorization"] == SECRET
     rc, data, err = run(capsys, w, "hook", "test", "plan-a", "--name=ko")
     assert rc == 1 and data["kind"] == "hook-failed" and data["status"] == 500
