@@ -79,10 +79,18 @@ class ReadShare:
         """Valeur gardée de `key` si elle a moins de `max_age` s, sinon None ;
         ne lit jamais (navigation 2.0 : le menu des hôtes reprend ce que les
         écrans ont déjà lu, sans lancer de lecture par hôte)."""
+        hit = self.peek_aged(key, max_age)
+        return hit[0] if hit else None
+
+    def peek_aged(self, key, max_age):
+        """(valeur, âge en s) de `key` si elle a moins de `max_age` s, sinon
+        None ; ne lit jamais."""
         with self._lock:
             hit = self._done.get(key)
-            if hit is not None and self._clock() - hit[0] < max_age:
-                return hit[1]
+            if hit is not None:
+                age = self._clock() - hit[0]
+                if age < max_age:
+                    return hit[1], age
         return None
 
     def invalidate(self, cluster=None):

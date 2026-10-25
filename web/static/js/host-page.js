@@ -97,7 +97,12 @@ const HostPage = (() => {
                         error: tr('hnav.state.error'), unknown: tr('hnav.state.unknown') }[st] || st;
     const meta = [];
     if (h && h.version) meta.push(esc(h.version));
-    if (h && typeof h.vm_count === 'number') meta.push(esc(tr('hnav.tip.vms', { n: h.vm_count })));
+    if (h && typeof h.vm_count === 'number') {
+      // nombre repris d'une lecture déjà faite par un écran : dire son âge
+      const age = typeof h.vm_count_age === 'number' ? h.vm_count_age : null;
+      const tip = age === null ? '' : (age < 60 ? tr('hp.countAgeNow') : tr('hp.countAge', { n: Math.round(age / 60) }));
+      meta.push(`<span class="hp-count${tip ? ' tip' : ''}"${tip ? ` title="${esc(tip)}" data-tip="${esc(tip)}"` : ''}>${esc(tr('hnav.tip.vms', { n: h.vm_count }))}</span>`);
+    }
     let bar = '';
     if (sub === 'params') {
       bar = tabBar(PARAM_TABS(), route.tab, (id) => href({ sub: 'params', tab: id }), tr('hnav.sub.params'));

@@ -173,6 +173,40 @@ def test_a_denied_fleet_read_is_an_alert_with_its_reason(world, monkeypatch):
     assert (h["state"], h["error"], h["vm_count"]) == ("denied", "forbidden", None)
 
 
+@pytest.mark.parametrize("case,later,probe,state", [
+    # refus lu à l'instant : il dit l'alerte
+    ("fresh-denied", 0, True, "denied"),
+    # refus plus vieux que la sonde qui répond : la sonde l'emporte
+    ("stale-denied-probe-ok", 4, True, "ok"),
+    ("old-denied-probe-ok", 300, True, "ok"),
+    # sonde sans réponse fiable : le refus reste la seule information
+    ("stale-denied-probe-unknown", 4, None, "denied"),
+    # cluster éteint : la sonde dit injoignable, quel que soit le refus
+    ("stale-denied-probe-down", 4, False, "unreachable"),
+])
+def test_a_denied_read_older_than_the_probe_does_not_override_it(world, monkeypatch, case, later, probe, state):
+    _fleet(monkeypatch, denied=("gpudemo",))
+    world["reach"]["gpudemo"] = probe
+    with wapp.app.test_client() as c:
+        c.get("/api/vms-all")
+        world["clock"].t += later
+        h = by_key(hosts(c))[("harvester", "gpudemo")]
+    assert h["state"] == state, case
+    assert (h["error"] is not None) == (state == "denied"), case
+
+
+def test_a_reused_count_carries_its_age(world, monkeypatch):
+    _fleet(monkeypatch)
+    with wapp.app.test_client() as c:
+        before = by_key(hosts(c))[("harvester", "harv1")]
+        c.get("/api/vms-all")
+        world["clock"].t += 125
+        after = by_key(hosts(c))
+    assert (before["vm_count"], before["vm_count_age"]) == (None, None)
+    assert (after[("harvester", "harv1")]["vm_count"], after[("harvester", "harv1")]["vm_count_age"]) == (3, 125)
+    assert after[("harvester", "harvlab2")]["vm_count_age"] is None
+
+
 def test_a_too_old_screen_read_is_not_reused(world, monkeypatch):
     _fleet(monkeypatch)
     with wapp.app.test_client() as c:
@@ -214,6 +248,7 @@ def test_kvm_state_from_the_shared_kvm_read(world, entry, state, count, error):
     h = by_key(d)[("kvm", "node2")]
     assert (h["state"], h["vm_count"], h["error"]) == (state, count, error)
     assert by_key(d)[("kvm", "kvm-paris.01")]["state"] == "unknown"
+    assert h["vm_count_age"] == (0 if count is not None else None)
 
 
 def test_the_kvm_screen_read_is_found_through_the_real_route(world, monkeypatch):

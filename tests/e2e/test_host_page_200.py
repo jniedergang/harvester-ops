@@ -255,6 +255,32 @@ def test_cluster_accounts_moved_from_settings_to_security(context, flask_server)
     expect(page.locator("#tab-security #husers-body")).not_to_contain_text("…", timeout=15000)
 
 
+def test_the_account_menu_opens_cluster_accounts_of_the_current_host(context, flask_server):
+    page, _ = open_cold(context, flask_server, "#activity")
+    page.wait_for_function(f"window.App && App.getCurrentCluster() === '{A}'")
+    page.click("#btn-user")
+    item = page.locator('#user-menu [data-um="accounts"]')
+    assert item.get_attribute("data-tip")
+    item.click()
+    page.wait_for_function(f"() => location.hash === '#harvester/{A}/params/security/accounts'")
+    expect(page.locator("#tab-security #husers-body")).to_be_visible()
+    expect(page.locator("#settings-modal")).not_to_have_class(re.compile("active"))
+
+
+@pytest.mark.parametrize("age,expect_text", [(300, "5 min"), (20, "less than a minute")])
+def test_the_band_says_the_age_of_a_reused_vm_count(context, flask_server, age, expect_text):
+    hosts = {"families": {"harvester": {"ok": 1, "alert": 0, "unknown": 0}, "kvm": {"ok": 0, "alert": 0, "unknown": 0}},
+             "hosts": [{"kind": "harvester", "name": A, "state": "ok", "error": None, "vm_count": 4,
+                        "vm_count_age": age, "labels": {}, "version": "v1.9.0", "favorite": False,
+                        "folder": None, "origin": "config"}]}
+    context.route("**/api/hosts", lambda r, q: r.fulfill(status=200, content_type="application/json",
+                                                         body=json.dumps(hosts)))
+    page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/storage")
+    count = page.locator("#host-page-head .hp-count")
+    expect(count).to_contain_text("4 VMs")
+    assert expect_text in count.get_attribute("title")
+
+
 def test_a_viewer_sees_no_write_buttons(context, flask_server):
     page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/nodes", extra_js="""
       const f = window.fetch;

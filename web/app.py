@@ -9367,18 +9367,21 @@ def _folders_db_path():
     return Path(env) if env else NOTES_DB.parent / "folders.db"
 
 
-def _peek_read(endpoint, kwargs=None, scope=None):
+def _peek_read(endpoint, kwargs=None, scope=None, with_age=False):
     """Corps JSON d'une lecture partagée déjà faite pour cette personne, ou
-    None (jamais lue, trop vieille, en erreur, ou effacée par une écriture)."""
+    None (jamais lue, trop vieille, en erreur, ou effacée par une écriture).
+    `with_age` : (corps, âge en s), ou (None, None)."""
+    miss = (None, None) if with_age else None
     if not READ_SHARE_ENABLED:
-        return None
-    val = READ_SHARE.peek(_read_share_key(endpoint, kwargs or {}, scope=scope), HOSTS_PEEK_MAX_AGE)
-    if not val or val[0] != 200:
-        return None
+        return miss
+    hit = READ_SHARE.peek_aged(_read_share_key(endpoint, kwargs or {}, scope=scope), HOSTS_PEEK_MAX_AGE)
+    if not hit or not hit[0] or hit[0][0] != 200:
+        return miss
     try:
-        return json.loads(val[1])
+        body = json.loads(hit[0][1])
     except (TypeError, ValueError):
-        return None
+        return miss
+    return (body, hit[1]) if with_age else body
 
 
 def _harvester_hosts():
@@ -9402,29 +9405,39 @@ def _harvester_hosts():
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(1, min(len(rows), 16))) as pool:
         reach = list(pool.map(lambda r: _cluster_reachable(r[1]) if r[1] else None, rows))
-    fleet = _peek_read("api_vms_all") or {}
+    fleet, fleet_age = _peek_read("api_vms_all", with_age=True)
+    fleet = fleet or {}
     per_cluster = {x.get("cluster"): x for x in fleet.get("clusters") or [] if isinstance(x, dict)}
     out = []
     for (c, _kc, origin), ok in zip(rows, reach):
         name = c["name"]
         seen = per_cluster.get(name) or {}
-        state, error, vm_count = "unknown", None, None
+        state, error, vm_count, vm_count_age = "unknown", None, None, None
+        # Un refus (ou une erreur) repris d'une lecture plus vieille que la
+        # sonde qui répond ne la contredit pas : seul un refus du même
+        # instant (âge <= durée de partage) dit l'alerte.
+        stale = fleet_age is not None and fleet_age > READ_SHARE_TTL
         if ok is False:
             state = "unreachable"
-        elif seen.get("state") in ("denied", "error"):
+        elif seen.get("state") in ("denied", "error") and not (ok and stale):
             state, error = seen["state"], seen.get("error")
         elif ok:
             state = "ok"
         if state != "unreachable":
             if seen.get("state") == "ok":
-                vm_count = seen.get("count")
+                vm_count, vm_count_age = seen.get("count"), fleet_age
             else:
-                st = _peek_read("api_status", {"cluster": name}) or {}
+                st, st_age = _peek_read("api_status", {"cluster": name}, with_age=True)
+                st = st or {}
                 total = (st.get("summary") or {}).get("vms_total")
-                vm_count = total if isinstance(total, int) and not st.get("unreachable") else None
+                if isinstance(total, int) and not st.get("unreachable"):
+                    vm_count, vm_count_age = total, st_age
         upg = _peek_read("api_upgrade", {"cluster": name}) or {}
         out.append({"kind": "harvester", "name": name, "state": state, "error": error,
-                    "vm_count": vm_count, "labels": dict(c.get("labels") or {}),
+                    "vm_count": vm_count,
+                    # âge (s) de la lecture reprise pour le nombre, dit dans le bandeau
+                    "vm_count_age": int(vm_count_age) if vm_count_age is not None else None,
+                    "labels": dict(c.get("labels") or {}),
                     "version": upg.get("current") or None, "favorite": False,
                     "folder": None, "origin": origin})
     return out
@@ -9435,7 +9448,8 @@ def _kvm_hosts_menu():
     /api/kvm/hosts, sinon « unknown » (aucun SSH lancé ici)."""
     decls = _kd.load_all(_state_dir())
     seen = {}
-    for e in (_peek_read("api_kvm_hosts", scope=KVM_SCOPE) or {}).get("hosts") or []:
+    inv, inv_age = _peek_read("api_kvm_hosts", scope=KVM_SCOPE, with_age=True)
+    for e in (inv or {}).get("hosts") or []:
         if isinstance(e, dict) and e.get("name"):
             seen[e["name"]] = e
     out = []
@@ -9452,7 +9466,9 @@ def _kvm_hosts_menu():
                 vm_count = len(e.get("vms") or [])
                 version = e.get("libvirt_version") or None
         out.append({"kind": "kvm", "name": d["name"], "state": state, "error": error,
-                    "vm_count": vm_count, "labels": dict(d.get("labels") or {}),
+                    "vm_count": vm_count,
+                    "vm_count_age": int(inv_age) if vm_count is not None else None,
+                    "labels": dict(d.get("labels") or {}),
                     "version": version, "favorite": False, "folder": None, "origin": "console"})
     return out
 

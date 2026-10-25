@@ -128,7 +128,13 @@ const UserMenu = (() => {
     setOpen(false);
     if (what === 'password' && window.ConsoleAccounts) ConsoleAccounts.openPasswordChange();
     else if (what === 'console-accounts' && typeof Settings !== 'undefined') Settings.openTab('accounts');
-    else if (what === 'accounts' && typeof Settings !== 'undefined') Settings.openTab('husers');
+    // 2.0.0 : les comptes du cluster sont en Paramètres > Sécurité de chaque
+    // hôte Harvester ; sans cluster courant, la liste des hôtes.
+    else if (what === 'accounts') {
+      const c = window.App && App.getCurrentCluster();
+      if (c) App.openHost('harvester', c, 'params', 'security', 'accounts');
+      else if (window.Router) Router.go('#hosts');
+    }
     else if (what === 'language' && typeof Settings !== 'undefined') Settings.openTab('language');
     else if (what === 'versions') window.Versions?.open();
     else if (what === 'signout') signOut();

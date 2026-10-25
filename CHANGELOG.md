@@ -47,13 +47,17 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   install window shows the address in an editable field and asks to confirm
   it before Install. The chosen cluster follows the install, so a cluster
   whose kubeconfig targets one node is still recognised by its VIP.
+- **The host band says how old a reused VM count is** (tooltip), and the
+  host list gives `vm_count_age`.
 
 ### Changed
 - **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
   below the metrics; the block view of the nodes is Parameters > Nodes. The
   **Upgrade** button opens Parameters > Upgrade.
 - **Cluster accounts** moved from Settings to Parameters > Security of each
-  Harvester host.
+  Harvester host. The account menu entry opens it for the current host.
+- **Host state**: a denied or error state taken from a fleet read older than
+  the reachability probe no longer overrides a probe that answers.
 - **An address opened before signing in is opened again after.** The login
   page keeps it for the tab only when the address grammar understands it,
   and never writes it in the page.
@@ -78,7 +82,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `tests/api/test_clusters_join_url_200.py`: join address read from the
   cluster (direct, Rancher-proxied, rke2.yaml node IP, VIP read or not) and
   the chosen cluster resolved at install. Join window: editable address,
-  confirmation required, nothing guessed without a VIP.
+  confirmation required, nothing guessed without a VIP. Account menu entry,
+  age of a reused count, stale denied state against the probe.
   Tests that clicked the overview sub-tabs or Settings > Cluster accounts
   now open the host addresses.
 
