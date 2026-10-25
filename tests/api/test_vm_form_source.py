@@ -120,7 +120,7 @@ def test_no_server_value_is_interpolated_raw_into_html(name):
 # un contrôle que chaque entrée sert encore. Hors portée : les chaînes
 # assemblées par « + » hors gabarit et les .innerHTML affectés d'une variable
 # (couverts par la relecture et les e2e à noms hostiles).
-BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "hfield", "opt",
+BUILDERS = ("esc", "icon", "hostSel", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "hfield", "opt",
             "fieldHtml", "appliedBadge", "unmanagedHtml", "headHtml", "actionsHtml", "field", "li",
             "th", "checksHtml", "stateBadge", "errorBadge", "yes", "vmRow", "hostTile", "opItem",
             "existingDisksHtml", "existingNicsHtml", "renderSection",

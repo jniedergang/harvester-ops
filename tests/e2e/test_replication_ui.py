@@ -204,7 +204,7 @@ def ui_factory(context, flask_server):
                 if "level=warn" in q:
                     evs = [e for e in evs if e["level"] != "info"]
                 return route.fulfill(**ok({"plan": PID, "events": evs, "next_before": None}))
-            if bare == "hosts/harv-fake/resources":
+            if bare == "hosts/harvester/harv-fake/resources":   # 2.0.0 : famille dans la route
                 return route.fulfill(**ok({"host": "harv-fake", "side": "any", "role": role, "resources": [
                     resource("u-web", "web-1", "protected", 400, side="source", peer="harv-dr"),
                     resource("u-crm", "crm-1", "draft", None, side="target", plan=PID2, plan_name="crm", peer="harv-dr")]}))

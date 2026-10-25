@@ -50,6 +50,25 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   whose kubeconfig targets one node is still recognised by its VIP.
 - **The host band says how old a reused VM count is** (tooltip), and the
   host list gives `vm_count_age`.
+- **KVM host page.** Each KVM host opens on its own page (`#kvm/<host>`),
+  with the same band as a Harvester host: Overview (the host block),
+  Virtual machines (this host only, host filter fixed and hidden),
+  Parameters in five tabs (System: versions, CPU, memory, URI; Pools;
+  Networks; Labels; Connection: address, port, user, URI and the pinned
+  host key fingerprint, Test for an operator, Remove for an admin) and
+  Disaster Recovery (replication of KVM domains is not available yet). An
+  unreachable host keeps a block in error with the classified reason, and
+  Labels and Connection stay readable from the declaration.
+- **KVM host labels can be edited** (admin): a window with checks before
+  Apply (valid names, no name twice, value length, 32 at most, what is
+  added, changed and removed), then a tracked action that keeps the
+  previous labels. Command line: `harvester-kvm.py host label --host <h>
+  (--label k=v ... | --clear)`; API `PUT /api/kvm/hosts/<h>/labels`.
+- `GET /api/kvm/hosts/<h>/declaration`: the declaration of a KVM host
+  without asking the host, with its pinned fingerprints (never a key path).
+- `GET /api/replication/hosts/<harvester|kvm>/<host>/resources`: the host
+  family is in the route; the former form still answers for a Harvester
+  cluster, a KVM host answers an empty list with `available: false`.
 
 ### Changed
 - **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
@@ -64,6 +83,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Tests
+- `tests/api/test_kvm_host_page_200.py` (declaration without SSH and its
+  fingerprints, refusals, role in the host read, labels route argv and
+  refusals by role, `host label` command, DR route by family) and
+  `tests/e2e/test_kvm_host_page_200.py` (every KVM host address cold, a
+  KVM host and a cluster of the same name, buttons greyed by role with the
+  reason, Test and Remove from Connection, unreachable host, labels edited
+  after checks).
 - `tests/api/test_hosts_routes_200.py`, `tests/api/test_favorites_200.py`:
   states, Rancher-hidden cluster, counts filled from the screens' reads,
   refusals (400, 404), stars kept per person, and traps that fail the test

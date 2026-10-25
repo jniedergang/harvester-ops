@@ -11,6 +11,7 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py host test N
   harvester-kvm.py host list
   harvester-kvm.py host remove N
+  harvester-kvm.py host label --host N (--label k=v ... | --clear)   (2.0.0 : déclaration seule)
   harvester-kvm.py inventory [--host N] [--details]
   harvester-kvm.py vm list [--host N]
   harvester-kvm.py vm show --host N --name D
@@ -1889,6 +1890,42 @@ def cmd_host_image_pools(args):
     return EXIT_OK
 
 
+def cmd_host_label(args):
+    """Étiquettes d'un hôte (2.0.0) : remplace tout le jeu par les `--label`
+    donnés, ou le vide avec `--clear`. Seul le champ `labels` de la
+    déclaration change ; rien n'est demandé à l'hôte."""
+    state = state_of(args)
+    if not isinstance(args.host, str) or not kvm_decl.NAME_RE.match(args.host):
+        raise UsageError("invalid host name")
+    if args.clear and args.label:
+        raise UsageError("--clear and --label are exclusive")
+    if not args.clear and not args.label:
+        raise UsageError("give the labels with --label KEY=VALUE, or --clear to remove them all")
+    labels = {} if args.clear else parse_labels(args.label)
+    if not args.clear and len(labels) != len(args.label):
+        raise UsageError("a label name is given twice")
+    problem = kvm_decl.check_labels(labels)
+    if problem:
+        raise UsageError(problem)
+    with host_lock(state):
+        try:
+            decl = kvm_decl.load(state, args.host)
+        except FileNotFoundError:
+            raise UsageError(f"host {args.host} is not declared") from None
+        before = dict(decl.get("labels") or {})
+        new = dict(decl, labels=labels)
+        problem = kvm_decl.check_decl(new)
+        if problem:
+            raise UsageError(problem)
+        step("labels", "running", f"labels of {args.host}")
+        kvm_decl.write(state, new)
+        text = ", ".join(f"{k}={v}" for k, v in sorted(labels.items())) or "none"
+        step("labels", "done", text)
+    emit(args, {"ok": True, "host": args.host, "labels": labels, "previous": before},
+         f"{args.host}: labels {text}")
+    return EXIT_OK
+
+
 def cmd_host_caps(args):
     host = load_host_next(state_of(args), args.host)
     if args.machine is not None and args.machine not in kvm_caps.MACHINE_FAMILIES:
@@ -3145,6 +3182,14 @@ def build_parser():
     sp.add_argument("--pool", action="append", metavar="POOL",
                     help="pool whose volumes form the image catalogue (repeatable)")
     sp.set_defaults(fn=cmd_host_image_pools)
+
+    sp = hp.add_parser("label", parents=[common],
+                       help="replace the labels of a host (only its declaration changes)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--label", action="append", metavar="KEY=VALUE",
+                    help="label to keep or set (repeatable); the others are removed")
+    sp.add_argument("--clear", action="store_true", help="remove every label")
+    sp.set_defaults(fn=cmd_host_label)
 
     sp = hp.add_parser("caps", parents=[common],
                        help="what the VM form can offer on a host, with the reason of each "

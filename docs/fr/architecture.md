@@ -157,8 +157,15 @@ Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :
 Deux autres modules portent le menu de la 2.0 : `web/static/js/host-nav.js`
 (le menu latéral des hôtes, alimenté par `GET /api/hosts`, ordre et recherche
 purs testés dans node) et `web/static/js/host-page.js` (le bandeau de la page
-d'un hôte Harvester, posé sur la section que l'adresse désigne). Le routeur
-appelle `HostNav.sync(route)` et `HostPage.show(route)` après chaque écran.
+d'un hôte, Harvester ou KVM, posé sur la section que l'adresse désigne). Le
+routeur appelle `HostNav.sync(route)` et `HostPage.show(route)` après chaque
+écran. Sur la page d'un hôte KVM, les vues KVM reçoivent l'hôte de la route
+(`KVM.start(vue, el, {host})`) : leur filtre d'hôte est imposé et masqué. Ses
+Paramètres > Système lisent `GET /api/kvm/hosts/<h>` ; Étiquettes et Connexion
+lisent `GET /api/kvm/hosts/<h>/declaration` (aucun SSH, empreintes épinglées,
+jamais un chemin de clé) ; les étiquettes s'écrivent par `PUT
+/api/kvm/hosts/<h>/labels` (administrateur), action suivie de
+`harvester-kvm.py host label`.
 
 Les modules ne lisent jamais le sélecteur de cluster : ils passent par
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`

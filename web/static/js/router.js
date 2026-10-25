@@ -24,15 +24,21 @@
    */
   function resolve(route) {
     if (!route || !route.name) return null;
-    const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null }, extra || {});
+    const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
+                                              kvm: null, kvmTab: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
-          if (route.sub === 'vms') return t('kvmvms');
-          if (route.sub === 'dr') return t('drplans');
-          if (route.sub === 'params' && route.tab === 'pools') return t('kvmstorage');
-          if (route.sub === 'params' && route.tab === 'networks') return t('kvmnetworks');
-          return t('kvmhosts');    // vue d'ensemble, system, labels, conn
+          // 2.0.0 : page d'un hôte KVM, les vues KVM avec l'hôte imposé
+          const k = { kvm: route.host };
+          if (route.sub === 'vms') return t('kvmvms', k);
+          if (route.sub === 'dr') return t('kvmdr', k);
+          if (route.sub === 'params') {
+            if (route.tab === 'pools') return t('kvmstorage', k);
+            if (route.tab === 'networks') return t('kvmnetworks', k);
+            return t('kvmparams', Object.assign(k, { kvmTab: route.tab }));
+          }
+          return t('kvmhosts', k);          // vue d'ensemble : la tuile de l'hôte
         }
         const c = { cluster: route.host };
         switch (route.sub) {
@@ -78,6 +84,8 @@
   function screenHash(s) {
     if (!s || !s.tab) return null;
     const Rt = R();
+    const K = (f) => Rt.format(Object.assign({ name: 'host', kind: 'kvm', host: s.kvm,
+                                               sub: null, tab: null, pane: null, id: null }, f));
     const H = (f) => (s.cluster ? Rt.format(Object.assign({ name: 'host', kind: 'harvester', host: s.cluster,
                                                             sub: null, tab: null, pane: null, id: null }, f)) : '#' + s.tab);
     switch (s.tab) {
@@ -98,9 +106,12 @@
       case 'allcontainers': return '#containers';
       case 'gpus': case 'bookings': case 'usage': case 'activity': return '#' + s.tab;
       case 'forkliftglobal': return '#migrations';
-      case 'kvmhosts': return '#hosts/kvm';
-      case 'kvmvms': return '#vms/host/kvm';
-      case 'kvmstorage': case 'kvmnetworks': return '#' + s.tab;
+      case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm';
+      case 'kvmvms': return s.kvm ? K({ sub: 'vms' }) : '#vms/host/kvm';
+      case 'kvmstorage': return s.kvm ? K({ sub: 'params', tab: 'pools' }) : '#' + s.tab;
+      case 'kvmnetworks': return s.kvm ? K({ sub: 'params', tab: 'networks' }) : '#' + s.tab;
+      case 'kvmparams': return s.kvm ? K({ sub: 'params', tab: Rt.KVM_PARAMS.includes(s.kvmTab) ? s.kvmTab : 'system' }) : null;
+      case 'kvmdr': return s.kvm ? K({ sub: 'dr' }) : null;
       case 'drplans': return '#dr';
       case 'drlinks': return '#dr/links';
       case 'automation': return '#automation/' + (Rt.AUTOMATION.includes(s.automation) ? s.automation : 'capi');

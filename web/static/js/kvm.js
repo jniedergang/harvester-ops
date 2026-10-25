@@ -150,13 +150,17 @@ const KVM = (() => {
   const cachedVms = () => lastVms.slice();
   function preset(p) { nextPrefs = Object.assign({}, p || {}); }
 
-  function start(view, host) {
+  /** Monte une vue dans `host` (élément). 2.0.0 : `opts.host` = nom d'un
+   *  hôte KVM imposé (page de l'hôte) ; son filtre est fixé et masqué. */
+  function start(view, host, opts) {
     stop();
     if (!host || !VIEWS.includes(view)) return Promise.resolve();
-    cur = { view, host, data: null, details: {}, pools: {}, images: {}, links: {}, openLinks: new Set(),
+    const fixed = opts && typeof opts.host === 'string' && NAME_RE.test(opts.host) ? opts.host : '';
+    cur = { view, host, fixed, data: null, details: {}, pools: {}, images: {}, links: {}, openLinks: new Set(),
             prefs: { host: '', state: '', text: '', label: '', sort: 'name', dir: 1, sub: 'pools' },
             busy: 0, open: new Set() };
     if (nextPrefs) { Object.assign(cur.prefs, nextPrefs); nextPrefs = null; }
+    if (fixed) cur.prefs.host = fixed;
     shell();
     const text = cur.host.querySelector('[data-kvm-filter="text"]');
     if (text && cur.prefs.text) text.value = cur.prefs.text;
@@ -174,20 +178,22 @@ const KVM = (() => {
 
   function shell() {
     const v = cur.view;
+    // 2.0.0 : sur la page d'un hôte, son filtre d'hôte est imposé (pas de menu)
+    const hostSel = (tip) => (cur.fixed ? '' : `<select class="tip" data-kvm-filter="host" data-tip="${esc(tip)}"><option value="">${esc(tr('kvm.f.allHosts'))}</option></select>`);
     const filters = v === 'vms' ? `
-        <select class="tip" data-kvm-filter="host" data-tip="${esc(tr('kvm.f.hostTip'))}"><option value="">${esc(tr('kvm.f.allHosts'))}</option></select>
+        ${hostSel(tr('kvm.f.hostTip'))}
         <select class="tip" data-kvm-filter="state" data-tip="${esc(tr('kvm.f.stateTip'))}"><option value="">${esc(tr('kvm.f.allStates'))}</option>
           ${STATE_ORDER.map((s) => `<option value="${esc(s)}">${esc(stateLabel(s))}</option>`).join('')}</select>
         <input type="search" class="res-filter tip" data-kvm-filter="text" placeholder="${esc(tr('kvm.f.text'))}" data-tip="${esc(tr('kvm.f.textTip'))}">`
-      : v === 'hosts' ? `<select class="tip" data-kvm-filter="label" data-tip="${esc(tr('kvm.f.labelTip'))}"><option value="">${esc(tr('kvm.f.allLabels'))}</option></select>`
+      : v === 'hosts' ? (cur.fixed ? '' : `<select class="tip" data-kvm-filter="label" data-tip="${esc(tr('kvm.f.labelTip'))}"><option value="">${esc(tr('kvm.f.allLabels'))}</option></select>`)
         // Stockage et Réseaux : un hôte ou tous ; Stockage : pools ou images
         : `${v === 'storage' ? `<div class="sub-tabs sub-tabs-inline kvm-subtabs" role="tablist">
             <button type="button" class="sub-tab tip active" role="tab" data-kvm="sub" data-sub="pools" data-tip="${esc(tr('kvms.subPoolsTip'))}">${icon('storage')} <span>${esc(tr('kvms.subPools'))}</span></button>
             <button type="button" class="sub-tab tip" role="tab" data-kvm="sub" data-sub="images" data-tip="${esc(tr('kvms.subImagesTip'))}">${icon('disk')} <span>${esc(tr('kvms.subImages'))}</span></button></div>` : ''}
-          <select class="tip" data-kvm-filter="host" data-tip="${esc(tr('kvms.hostFilterTip'))}"><option value="">${esc(tr('kvm.f.allHosts'))}</option></select>`;
-    const declare = v === 'hosts' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="declare" data-tip="${esc(tr('kvm.declareTip'))}">${icon('add')} ${esc(tr('kvm.declare'))}</button>`
+          ${hostSel(tr('kvms.hostFilterTip'))}`;
+    const declare = v === 'hosts' && !cur.fixed ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="declare" data-tip="${esc(tr('kvm.declareTip'))}">${icon('add')} ${esc(tr('kvm.declare'))}</button>`
       // prochaine version : créer une VM (kvm-form.js), hôte choisi dans la fenêtre
-      : v === 'vms' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="create-vm" data-tip="${esc(tr('kvmf.createVmTip'))}">${icon('add')} ${esc(tr('kvmf.createVm'))}</button>` : '';
+      : v === 'vms' ? `<button type="button" class="btn btn-sm btn-primary tip" data-kvm="create-vm"${cur.fixed ? ` data-host="${esc(cur.fixed)}"` : ''} data-tip="${esc(tr('kvmf.createVmTip'))}">${icon('add')} ${esc(tr('kvmf.createVm'))}</button>` : '';
     cur.host.innerHTML = `<div class="card na-card kvm-card" data-kvm-view="${esc(v)}">
         <div class="res-tools">${filters}
           <span class="res-count"></span>
@@ -215,10 +221,18 @@ const KVM = (() => {
     const perHostView = c.view === 'storage' || c.view === 'networks';
     // Stockage et Réseaux : les déclarations (sans SSH), puis le détail de
     // chaque hôte, une lecture par hôte et non l'inventaire entier en plus
+    // 2.0.0 : la tuile d'un hôte imposé lit cet hôte seul (même lecture que
+    // ses Paramètres > Système, Pools et Réseaux)
+    const one = c.view === 'hosts' && c.fixed;
     const url = c.view === 'vms' ? `/api/kvm/vms${q}`
-      : perHostView ? '/api/kvm/hosts?declared=1' : `/api/kvm/hosts${q}`;
-    const d = await getJson(url);
+      : perHostView ? '/api/kvm/hosts?declared=1'
+        : one ? `/api/kvm/hosts/${enc(c.fixed)}${q}` : `/api/kvm/hosts${q}`;
+    let d = await getJson(url);
     if (c !== cur) return;
+    if (one && d && (d.name === c.fixed || d.status === 502)) {
+      // hôte injoignable : la réponse porte sa déclaration et l'erreur classée
+      d = { hosts: [Object.assign({ name: c.fixed }, d)], role: d.role, warnings: [] };
+    }
     c.data = d;
     if (Array.isArray(d.vms)) lastVms = d.vms.map((v) => ({ host: v.host, name: v.name }));
     else if (Array.isArray(d.hosts) && !perHostView) {
@@ -366,25 +380,45 @@ const KVM = (() => {
         <strong>${esc(c.check)}</strong> ${esc(c.message)}</li>`).join('')}</ul>`;
   }
 
-  async function testHost(name) {
-    const tile = tileOf(name);
-    const msg = tile && tile.querySelector('.kvm-tile-msg');
+  /** Test de connexion d'un hôte (action suivie). `out` : élément où dire
+   *  le résultat (Paramètres > Connexion, index des hôtes) ; sans lui, la
+   *  ligne de message de sa tuile. */
+  async function testHost(name, out) {
+    const tile = out || !cur ? null : tileOf(name);
+    const msg = out || (tile && tile.querySelector('.kvm-tile-msg'));
     if (!msg) return;
     // la vue de départ : un changement d'onglet pendant le test en crée une
     // autre, dont le compteur ne doit pas être touché
     const c = cur;
-    c.busy += 1;
+    const release = () => { if (c) c.busy = Math.max(0, c.busy - 1); };
+    if (c) c.busy += 1;
     msg.textContent = tr('kvm.testing');
     try {
-      const out = await send('POST', `/api/kvm/hosts/${enc(name)}/test`, {});
-      follow(out.action_id, (s) => { if (s.message) msg.textContent = s.message; }, (ok, run) => {
+      const res = await send('POST', `/api/kvm/hosts/${enc(name)}/test`, {});
+      follow(res.action_id, (s) => { if (s.message) msg.textContent = s.message; }, (ok, run) => {
         const o = (run.result && run.result.output) || {};
         msg.innerHTML = `<span class="${ok ? '' : 'res-error'}">${icon(ok ? 'ok' : 'fail')} ${esc(ok ? tr('kvm.testOk') : (o.error || run.error_summary || tr('kvm.testFailed')))}</span>${checksHtml(o.checks)}`;
-        c.busy = Math.max(0, c.busy - 1);
+        release();
       });
     } catch (e) {
       msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
-      c.busy = Math.max(0, c.busy - 1);
+      release();
+    }
+  }
+
+  /** Retire un hôte (action suivie, administrateur) ; la confirmation est
+   *  à l'appelant. `onEnd(ok)` à la fin. */
+  async function removeHost(name, msg, onEnd) {
+    const end = onEnd || (() => {});
+    try {
+      const res = await send('DELETE', `/api/kvm/hosts/${enc(name)}`);
+      follow(res.action_id, (s) => { if (s.message && msg) msg.textContent = s.message; }, (ok, run) => {
+        if (msg) msg.innerHTML = `<span class="${ok ? '' : 'res-error'}">${icon(ok ? 'ok' : 'fail')} ${esc(ok ? tr('kvm.removed', { name }) : (run.error_summary || '?'))}</span>`;
+        end(ok);
+      });
+    } catch (e) {
+      if (msg) msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
+      end(false);
     }
   }
 
@@ -405,17 +439,12 @@ const KVM = (() => {
     const msg = tile.querySelector('.kvm-tile-msg');
     tile.querySelectorAll('.kvm-confirm button').forEach((b) => { b.disabled = true; });
     const c = cur;
-    try {
-      const out = await send('DELETE', `/api/kvm/hosts/${enc(name)}`);
-      follow(out.action_id, (s) => { if (s.message) msg.textContent = s.message; }, (ok, run) => {
-        msg.innerHTML = `<span class="${ok ? '' : 'res-error'}">${icon(ok ? 'ok' : 'fail')} ${esc(ok ? tr('kvm.removed', { name }) : (run.error_summary || '?'))}</span>`;
-        c.busy = Math.max(0, c.busy - 1);
-        if (c === cur) setTimeout(() => load(true), ok ? 900 : 0);
-      });
-    } catch (e) {
-      msg.innerHTML = `<span class="res-error">${icon('fail')} ${esc(e.message)}</span>`;
+    await removeHost(name, msg, (ok) => {
       c.busy = Math.max(0, c.busy - 1);
-    }
+      if (c === cur) setTimeout(() => load(true), ok ? 900 : 0);
+      // 2.0.0 : le menu des hôtes ne garde pas un hôte retiré
+      if (ok && window.HostNav && HostNav.load) HostNav.load();
+    });
   }
 
   // -- Machines virtuelles ----------------------------------------------------------
@@ -430,12 +459,13 @@ const KVM = (() => {
     const sel = cur.host.querySelector('[data-kvm-filter="host"]');
     const names = hosts.map((h) => h.name);
     const want = [''].concat(names).join('|');
-    if ([...sel.options].map((o) => o.value).join('|') !== want) {
+    if (sel && [...sel.options].map((o) => o.value).join('|') !== want) {
       sel.innerHTML = `<option value="">${esc(tr('kvm.f.allHosts'))}</option>`
         + names.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
     }
-    if (!names.includes(cur.prefs.host)) cur.prefs.host = '';
-    sel.value = cur.prefs.host;
+    if (cur.fixed) cur.prefs.host = cur.fixed;
+    else if (!names.includes(cur.prefs.host)) cur.prefs.host = '';
+    if (sel) sel.value = cur.prefs.host;
     const p = cur.prefs;
     const text = p.text.trim().toLowerCase();
     const rows = (d.vms || []).filter((v) => (!p.host || v.host === p.host) && (!p.state || v.state === p.state)
@@ -446,8 +476,8 @@ const KVM = (() => {
       return (x < y ? -1 : x > y ? 1 : 0) * p.dir || a.name.localeCompare(b.name) || a.host.localeCompare(b.host);
     });
     cur.host.querySelector('.res-count').textContent = tr('kvm.vmShown', { n: rows.length, total: (d.vms || []).length });
-    const bad = hosts.filter((h) => h.state !== 'ok').map((h) => `<span class="kvm-host-state">${icon('node', 12)} ${esc(h.name)} ${badge('fail', kindLabel(h.state), h.error)}</span>`).join(' ');
-    if (!hosts.length) return emptyHosts();
+    const bad = hosts.filter((h) => h.state !== 'ok' && (!cur.fixed || h.name === cur.fixed)).map((h) => `<span class="kvm-host-state">${icon('node', 12)} ${esc(h.name)} ${badge('fail', kindLabel(h.state), h.error)}</span>`).join(' ');
+    if (!hosts.length || (cur.fixed && !names.includes(cur.fixed))) return emptyHosts();
     const th = (k, label) => `<th${k ? ` data-sort="${k}" class="tip${p.sort === k ? (p.dir > 0 ? ' sort-asc' : ' sort-desc') : ''}" data-tip="${esc(tr('kvm.sortTip'))}"` : ''}>${esc(label)}</th>`;
     const table = rows.length ? `<table class="data-table sortable kvm-vms"><thead><tr>${th('', '')}
         ${th('name', tr('kvm.col.name'))}${th('host', tr('kvm.col.host'))}${th('state', tr('kvm.col.state'))}
@@ -696,6 +726,7 @@ const KVM = (() => {
       if (!names.includes(cur.prefs.host)) cur.prefs.host = '';
       sel.value = cur.prefs.host;
     }
+    if (cur.fixed) cur.prefs.host = cur.fixed;
     const hosts = all.filter((h) => !cur.prefs.host || h.name === cur.prefs.host);
     cur.host.querySelector('.res-count').textContent = tr('kvm.hostCount', { n: hosts.length });
     if (!hosts.length) return emptyHosts();
@@ -1166,6 +1197,9 @@ const KVM = (() => {
           if (ok) {
             say(`<span>${icon('ok')} ${esc(tr('kvm.dc.added', { name }))}</span>`);
             if (cur && cur.view === 'hosts') load(true);
+            // 2.0.0 : le menu et l'index des hôtes montrent le nouvel hôte
+            if (window.HostNav && HostNav.load) HostNav.load();
+            if (window.HostsIndex && HostsIndex.reload) HostsIndex.reload();
           } else {
             bad(o.error || run.error_summary || tr('kvm.dc.failed'));
             go.disabled = false;
@@ -1182,7 +1216,7 @@ const KVM = (() => {
   // busy : gestes en cours de la vue affichée (un compteur négatif bloquerait
   // l'actualisation automatique), lu par les tests
   // follow : partagé avec kvm-vm.js (fenêtres instantanés, clonage, suppression)
-  return { start, stop, load, follow, openDeclare, gestureWhy, operationWhy, stateLabel, cachedVms, preset,
+  return { start, stop, load, follow, openDeclare, testHost, removeHost, kindLabel, gestureWhy, operationWhy, stateLabel, cachedVms, preset,
            busy: () => (cur ? cur.busy : null) };
 })();
 

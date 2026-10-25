@@ -32,6 +32,7 @@ console.log(JSON.stringify(out));
 # Tous les onglets de l'interface actuelle (data-tab et groupes routés)
 TABS = sorted(set(re.findall(r'<section id="tab-([a-z]+)"',
                              (ROOT / "web/templates/index.html").read_text(encoding="utf-8"))))
+KVM_SCREENS = {"kvmhosts", "kvmvms", "kvmstorage", "kvmnetworks", "kvmparams", "kvmdr"}
 SECTION_PANE = {"storage": "images", "network": "overlay", "addons": "list", "security": "sshkeys",
                 "monlog": "alerts", "advanced": "pci", "vmimport": "ova", "forklift": "waves"}
 
@@ -45,6 +46,11 @@ def screens():
             out += [dict(s, overview="cluster"), dict(s, overview="events")]
         if tab == "automation":
             out += [dict(s, automation="terraform"), dict(s, automation="pxe")]
+        # 2.0.0 : écrans d'un hôte KVM (hôte imposé) ; Paramètres : chaque onglet
+        if tab in KVM_SCREENS:
+            s.update(kvm="k1", kvmTab="system" if tab == "kvmparams" else None)
+            if tab == "kvmparams":
+                out += [dict(s, kvmTab="labels"), dict(s, kvmTab="conn")]
     return out
 
 
@@ -62,7 +68,7 @@ def test_the_template_has_the_expected_tabs():
     assert len(TABS) >= 25 and "overview" in TABS and "drlinks" in TABS
 
 
-@pytest.mark.parametrize("screen", screens(), ids=lambda s: f"{s['tab']}-{s['overview']}-{s['automation']}")
+@pytest.mark.parametrize("screen", screens(), ids=lambda s: f"{s['tab']}-{s['overview']}-{s['automation']}-{s.get('kvmTab')}")
 def test_every_screen_round_trips(screen):
     [got] = run([screen])
     back = got["back"]
@@ -74,6 +80,10 @@ def test_every_screen_round_trips(screen):
         assert back["overview"] == screen["overview"], got["h"]
     if screen["tab"] == "automation":
         assert back["automation"] == screen["automation"], got["h"]
+    if screen["tab"] in KVM_SCREENS:
+        assert back["kvm"] == "k1" and got["h"].startswith("#kvm/k1"), got["h"]
+        if screen["tab"] == "kvmparams":
+            assert back["kvmTab"] == screen["kvmTab"], got["h"]
     host_tabs = {"overview", "namespaces", "containers", "clusterdr", "startup", "shutdown", *SECTION_PANE}
     if screen["tab"] in host_tabs:
         assert back["cluster"] == "c1", got["h"]

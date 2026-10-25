@@ -581,7 +581,7 @@ def test_every_replication_route_requires_auth_and_mutations_have_a_valid_rate_l
     from limits import parse_many
     blocks = re.split(r"\n(?=@app\.route\()", SRC)
     routes = [b for b in blocks if b.startswith('@app.route("/api/replication/')]
-    assert len(routes) == 25
+    assert len(routes) == 26     # 2.0.0 : route d'hôte avec sa famille (point 9)
     for b in routes:
         head = b.split("\ndef ", 1)[0]
         assert "@requires_auth" in head, head

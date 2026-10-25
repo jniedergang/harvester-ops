@@ -99,9 +99,10 @@ FLEET_ROWS = [
     ("#automation/terraform", "automation", ("auto", "terraform")),
     ("#automation/pxe", "automation", ("auto", "pxe")),
     (f"#kvm/{KVM}", "kvmhosts", None), (f"#kvm/{KVM}/vms", "kvmvms", None),
-    (f"#kvm/{KVM}/params/system", "kvmhosts", None), (f"#kvm/{KVM}/params/pools", "kvmstorage", None),
-    (f"#kvm/{KVM}/params/networks", "kvmnetworks", None), (f"#kvm/{KVM}/params/labels", "kvmhosts", None),
-    (f"#kvm/{KVM}/params/conn", "kvmhosts", None), (f"#kvm/{KVM}/dr", "drplans", None),
+    # 2.0.0 (tâche 7) : la page d'un hôte KVM a ses propres écrans
+    (f"#kvm/{KVM}/params/system", "kvmparams", None), (f"#kvm/{KVM}/params/pools", "kvmstorage", None),
+    (f"#kvm/{KVM}/params/networks", "kvmnetworks", None), (f"#kvm/{KVM}/params/labels", "kvmparams", None),
+    (f"#kvm/{KVM}/params/conn", "kvmparams", None), (f"#kvm/{KVM}/dr", "kvmdr", None),
     (f"#activity/host/kvm/{KVM}", "activity", None),
 ]
 
@@ -124,8 +125,8 @@ LEGACY_ROWS = [
     ("#kvmhosts", "kvmhosts", "#hosts/kvm"),
     ("#kvm-hosts", "kvmhosts", "#hosts/kvm"),
     ("#kvmvms", "kvmvms", "#vms/host/kvm"),
-    ("#kvmstorage", "kvmstorage", "#kvmstorage"),
-    ("#kvmnetworks", "kvmnetworks", "#kvmnetworks"),
+    ("#kvmstorage", "kvmstorage", f"#kvm/{KVM}/params/pools"),
+    ("#kvmnetworks", "kvmnetworks", f"#kvm/{KVM}/params/networks"),
     ("#vmimport", "vmimport", f"#harvester/{A}/imports/vmimport/imports"),
     ("#forklift", "forklift", f"#harvester/{A}/imports/forklift/prep"),
     ("#vmio", "vmimport", f"#harvester/{A}/imports/vmimport/imports"),

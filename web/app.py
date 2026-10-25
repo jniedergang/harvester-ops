@@ -1264,7 +1264,7 @@ def _kvm_required_role(path, method):
             if parts[1] == "pools" and len(parts) == 4 and parts[3] == "refresh":
                 return "operator"
             return "admin"
-        if len(parts) == 2 and parts[1] == "image-pools":
+        if len(parts) == 2 and parts[1] in ("image-pools", "labels"):
             return "admin"
     return "operator"
 
@@ -10522,13 +10522,40 @@ def api_kvm_host(host):
     try:
         inv = _kh.host_inventory(vh, details=True)
     except _kh.KvmError as e:
-        return jsonify(dict(_kvm_public(vh.decl), error={"kind": e.kind, "message": e.message})), 502
+        return jsonify(dict(_kvm_public(vh.decl), role=current_role(),
+                            error={"kind": e.kind, "message": e.message})), 502
     except Exception as e:                     # noqa: BLE001 : erreur classée, jamais un 500 nu
         log.warning("KVM: reading %s failed: %s", host, e)
-        return jsonify(dict(_kvm_public(vh.decl), error={
+        return jsonify(dict(_kvm_public(vh.decl), role=current_role(), error={
             "kind": "failed", "message": f"{host}: failed: unexpected error ({type(e).__name__})"})), 502
     _kvm_network_details(vh, inv)
-    return jsonify(dict(_kvm_public(vh.decl), **inv))
+    # 2.0.0 : la page d'un hôte KVM grise ses boutons d'après le rôle (la clé
+    # de la lecture partagée porte déjà le rôle)
+    return jsonify(dict(_kvm_public(vh.decl), role=current_role(), **inv))
+
+
+@app.route("/api/kvm/hosts/<host>/declaration")
+@requires_auth
+def api_kvm_host_declaration(host):
+    """2.0.0 : la déclaration d'un hôte, sans rien lui demander (Paramètres >
+    Étiquettes et Connexion de sa page restent lisibles quand il ne répond
+    pas) : adresse, port, utilisateur, URI, étiquettes, pools d'images et
+    empreintes épinglées. Jamais le chemin de la clé ni celui du fichier
+    d'empreintes."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    state = _state_dir()
+    try:
+        decl = _kd.load(state, host)
+    except FileNotFoundError:
+        return _kvm_err(f"host {host} is not declared", 404)
+    except _kd.DeclError:
+        return _kvm_err(f"the declaration of host {host} cannot be read", 500)
+    return jsonify(dict(_kvm_public(decl), image_pools=decl.get("image_pools"),
+                        fingerprints=_kd.pinned_keys(state, host), role=current_role()))
 
 
 def _kvm_network_details(vh, inv):
@@ -24700,6 +24727,36 @@ def api_kvm_image_pools(host):
     return _kvm_accepted(run, host=host, pools=pools)
 
 
+@app.route("/api/kvm/hosts/<host>/labels", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_host_labels(host):
+    """2.0.0 : étiquettes d'un hôte (administrateur) {labels: {clé: valeur}} ;
+    le jeu entier est remplacé, un jeu vide les retire toutes. Seule la
+    déclaration change (rien n'est demandé à l'hôte) ; `host label` du script
+    le fait en action suivie, qui garde l'état d'avant (`previous`)."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kd.decl_path(_state_dir(), host).exists():
+        return _kvm_err(f"host {host} is not declared", 404)
+    body, err = _kvm_body()
+    if err:
+        return err
+    labels = body.get("labels")
+    problem = _kd.check_labels(labels)
+    if problem:
+        return _kvm_err(problem)
+    cmd = _kvm_base("host", "label") + [f"--host={host}"] + (
+        [f"--label={k}={v}" for k, v in sorted(labels.items())] or ["--clear"])
+    run, err = _kvm_action(host, f"kvm:host-label:{host}", cmd)
+    if err:
+        return err
+    return _kvm_accepted(run, host=host, labels=labels)
+
+
 # --- modèles ---------------------------------------------------------------------------
 #
 # Étiquette propre aux actions sur les modèles : elles ne visent aucun hôte.
@@ -27403,13 +27460,38 @@ def api_replication_plan_stats(plan_id):
     return jsonify({"plan": plan["id"], "stats": rows})
 
 
+@app.route("/api/replication/hosts/<kind>/<name>/resources")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_host_resources_kind(kind, name):
+    """Sous-menu « Disaster Recovery » d'un hôte (2.0.0, famille dans
+    l'adresse) : ses ressources incluses dans un plan, vues comme source,
+    cible ou les deux, mêmes lignes que le menu racine pour le même côté.
+    KVM : la réplication des domaines n'existe pas encore, la liste est vide
+    et `available` le dit (aucune base lue)."""
+    if kind == "kvm":
+        if not _kvm_check_host(name):
+            return _repl_err("invalid host")
+        try:
+            side = _repl_side_arg()
+        except ValueError as e:
+            return _repl_err(str(e))
+        return jsonify({"host": name, "host_kind": "kvm", "side": side, "resources": [],
+                        "available": False, "role": current_role()})
+    if kind != "harvester":
+        return _repl_err("unknown host family: harvester or kvm")
+    return _replication_harvester_rows(name)
+
+
 @app.route("/api/replication/hosts/<cluster>/resources")
 @requires_auth
 @shared_read(scope=REPLICATION_SCOPE)
 def api_replication_host_resources(cluster):
-    """Sous-menu « Disaster Recovery » d'un hôte : ses ressources incluses
-    dans un plan, vues comme source, cible ou les deux, mêmes lignes que le
-    menu racine pour le même côté."""
+    """Forme d'avant la 2.0.0, toujours comprise : un hôte Harvester."""
+    return _replication_harvester_rows(cluster)
+
+
+def _replication_harvester_rows(cluster):
     if not _rp.CLUSTER_RE.match(cluster or ""):
         return _repl_err("invalid host")
     try:
@@ -27422,7 +27504,7 @@ def api_replication_host_resources(cluster):
     finally:
         conn.close()
     return jsonify({"host": cluster, "host_kind": "harvester", "side": side, "resources": rows,
-                    "role": current_role()})
+                    "available": True, "role": current_role()})
 
 
 @app.route("/api/replication/resources/<uid>/events")

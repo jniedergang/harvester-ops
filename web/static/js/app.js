@@ -20,6 +20,11 @@ const App = (() => {
   const TAB_STORAGE = 'harvester_ops_current_tab';
   // v1.96.0 : onglets du groupe KVM -> vue du module KVM
   const KVM_TABS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
+  // 2.0.0 : hôte KVM de la route (page d'un hôte KVM) et onglet de ses
+  // Paramètres ; null sur les écrans de flotte. Posés par showRoute.
+  let navKvm = null;
+  let navKvmTab = null;
+  const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
     // Highlight every `.tab` whose data-tab matches the current name. The
@@ -83,8 +88,10 @@ const App = (() => {
     if (name === 'drlinks') { if (window.Replication) Replication.startLinks($('#rp-links-host')); }
     else if (window.Replication) Replication.stopLinks();
     // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
-    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`)); }
+    // 2.0.0 : sur la page d'un hôte KVM, l'hôte est imposé à la vue
+    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`), { host: navKvm }); }
     else if (window.KVM) KVM.stop();
+    if (name === 'kvmparams' && window.HostPage) HostPage.renderKvmParams(navKvm, navKvmTab || 'system');
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -318,6 +325,8 @@ const App = (() => {
     if (window.Replication) Replication.paintBadges();
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
+    // 2.0.0 : Paramètres d'un hôte KVM relus de même ; kvmdr est un état vide fixe
+    if (active === 'kvmparams' && window.HostPage) jobs.push(HostPage.renderKvmParams(navKvm, navKvmTab || 'system'));
     if (active === 'overview') {
       // coupe aussi les vues de l'ancien cluster (bloc Événements compris)
       mountTopology(overviewBoard(overviewMode()));
@@ -2152,6 +2161,8 @@ const App = (() => {
    * le test de mutation qui prouve que l'ordre est vérifié.
    */
   async function showRoute(t) {
+    navKvm = t.kvm || null;
+    navKvmTab = t.kvmTab || null;
     const show = () => {
       if (t.overview) paintOverviewMode(t.overview);
       setTab(t.tab);
@@ -2198,9 +2209,11 @@ const App = (() => {
     const tab = activeTab();
     let automation = 'capi';
     try { automation = localStorage.getItem('harvester_ops_automation_subtab') || 'capi'; } catch {}
+    const kvm = KVM_SCREENS.includes(tab) ? navKvm : null;
     return {
       tab, cluster: currentCluster, overview: overviewMode(), automation,
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
+      kvm, kvmTab: kvm ? navKvmTab : null,
     };
   }
 

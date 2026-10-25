@@ -2884,6 +2884,49 @@ après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
 console pendant son test de connexion, déjà enregistrée, a été défaite :
 aucun fichier de déclaration ni de clé n'est resté.
 
+### La page d'un hôte KVM (2.0.0)
+
+Chaque hôte KVM a sa page, ouverte depuis le menu des hôtes ou par son
+adresse `#kvm/<hôte>`. Un bandeau montre la famille (KVM), le nom, l'état,
+la version de libvirt et le nombre de VMs, le sous-menu de l'hôte et
+**Activité de cet hôte**.
+
+- **Vue d'ensemble** (`#kvm/<hôte>`) : le bloc de l'hôte (CPU, mémoire,
+  versions, VMs par état, étiquettes), avec **Tester**, **Créer une VM** et
+  **Retirer**.
+- **Machines virtuelles** (`.../vms`) : le tableau des VMs de cet hôte
+  seulement. Le filtre d'hôte est imposé et masqué ; l'état, le texte, le
+  tri et tous les gestes sont ceux du tableau de la flotte.
+- **Paramètres** en cinq onglets. **Système** : nom de la machine, URI
+  libvirt, versions de libvirt et de QEMU, CPU, mémoire, nombre de
+  domaines, en une lecture de l'hôte. **Pools** et **Réseaux** : les vues
+  de stockage et de réseaux avec cet hôte seulement. **Étiquettes** : les
+  étiquettes de la déclaration. **Connexion** : adresse, port et
+  utilisateur SSH, URI et empreinte de la clé d'hôte épinglée (jamais le
+  chemin de la clé) ; **Tester** (opérateur) et **Retirer** (administrateur,
+  confirmé dans la page, puis l'index des hôtes KVM s'ouvre).
+- **Disaster Recovery** (`.../dr`) : dit que la réplication des domaines
+  KVM n'est pas encore disponible.
+
+Un hôte qui ne répond pas garde un bloc en erreur, avec la raison classée.
+Étiquettes et Connexion ne lisent que la déclaration : elles restent
+lisibles. Un hôte KVM et un cluster Harvester peuvent porter le même nom :
+la famille fait partie de l'adresse, ils ne se mélangent jamais.
+
+**Modifier les étiquettes** (administrateur). **Modifier les étiquettes**
+dans Paramètres > Étiquettes ouvre une fenêtre, une ligne par étiquette.
+Des contrôles passent avant **Appliquer** : noms valides, aucun nom donné
+deux fois, valeurs de 253 caractères au plus sans caractère de contrôle,
+32 étiquettes au plus, et la liste de ce qui est ajouté, modifié et retiré.
+Appliquer reste grisé avec la raison tant qu'un contrôle échoue ou que rien
+ne change. Le jeu entier est remplacé dans une action suivie (dock,
+Activité), qui garde les étiquettes d'avant. Seule la déclaration de la
+console change : rien n'est demandé à l'hôte. La même chose en ligne de
+commande : `harvester-kvm.py host label --host <hôte> --label clé=valeur
+...` ou `--clear`. Les autres boutons suivent le rôle : un lecteur voit
+Tester grisé, un opérateur voit Retirer et Modifier les étiquettes grisés,
+chacun avec la raison.
+
 ### Console, instantanés, clonage et suppression d'une VM (1.98.0)
 
 Le menu d'une VM KVM gagne un second groupe : **Console**, **Instantanés**,
@@ -3998,7 +4041,9 @@ API : lectures `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, ligne, état, volumes, dernières
 exécutions, verrou, bail, `carnet_stale`),
 `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
-`GET /api/replication/hosts/<cluster>/resources?side=`,
+`GET /api/replication/hosts/<harvester ou kvm>/<hôte>/resources?side=` (2.0.0 ;
+l'ancienne forme `GET /api/replication/hosts/<cluster>/resources` répond encore
+pour un cluster Harvester ; un hôte KVM rend une liste vide avec `available: false`),
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
 `GET /api/replication/follower`,
 `GET /api/replication/candidates/<cluster>?namespace=&selector=` (403

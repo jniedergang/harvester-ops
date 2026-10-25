@@ -1000,6 +1000,18 @@
       <div class="na-host" id="kvm-networks-host"></div>
     </section>
 
+    <!-- 2.0.0 : page d'un hôte KVM, Paramètres > Système, Étiquettes et
+         Connexion (host-page.js), et son Disaster Recovery (état vide) -->
+    <section id="tab-kvmparams" class="tab-content">
+      <div class="na-host" id="kvmparams-host"></div>
+    </section>
+    <section id="tab-kvmdr" class="tab-content">
+      <div class="card hp-kvm-dr">
+        <div class="card-header"><h2 data-i18n="hp.kvm.drTitle">Disaster Recovery</h2></div>
+        <div class="card-body"><p class="form-hint kvm-dr-empty" data-i18n="hp.kvm.drEmpty">Replication of KVM domains is not available yet. Contracts cover Harvester VMs only.</p></div>
+      </div>
+    </section>
+
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
     <section id="tab-forkliftglobal" class="tab-content">
       <h1 data-i18n="fkg.title">Migrations (all clusters)</h1>

@@ -5789,3 +5789,20 @@ a.sub-tab { text-decoration: none; display: inline-flex; align-items: center; ga
 .bm-join-target .btn { margin-left: auto; }
 .hp-tabs .sub-tab { white-space: nowrap; }
 .hp-conn .card-body { padding: 12px 16px; }
+
+/* 2.0.0 : page d'un hôte KVM. Le bandeau dit l'hôte : les titres « de tous
+   les hôtes » des vues KVM sont masqués quand l'hôte est imposé. */
+body.host-page-kvm #tab-kvmhosts > h1, body.host-page-kvm #tab-kvmhosts > .hint,
+body.host-page-kvm #tab-kvmvms > h1, body.host-page-kvm #tab-kvmvms > .hint,
+body.host-page-kvm #tab-kvmstorage > h1, body.host-page-kvm #tab-kvmstorage > .hint,
+body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > .hint { display: none; }
+.hp-kvm-facts th { text-align: left; width: 220px; font-weight: 500; color: var(--text-dim); }
+.hp-kvm-facts td ul { margin: 0; padding-left: 16px; }
+.hp-kvm-actions { margin-top: 12px; }
+.hp-kvm-result { margin-top: 10px; }
+.hp-kvm-error { margin-bottom: 10px; }
+.hp-labels-modal .modal { width: min(640px, 96vw); }
+.hp-labels-edit input { width: 100%; box-sizing: border-box; }
+.hp-labels-checks li.bad { color: var(--danger, var(--text)); }
+.hp-labels-diff { margin-top: 8px; }
+.hp-labels-modal .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }

@@ -303,7 +303,7 @@ const Replication = (() => {
     const c = cur;
     const q = c.mode === 'cluster' ? `?host=${enc(c.cluster)}` : '';
     const reqs = [U.get(`/api/replication/plans${q}`), U.get(`/api/replication/alerts${q}`)];
-    if (c.mode === 'cluster') reqs.push(U.get(`/api/replication/hosts/${enc(c.cluster)}/resources?side=any`));
+    if (c.mode === 'cluster') reqs.push(U.get(`/api/replication/hosts/harvester/${enc(c.cluster)}/resources?side=any`));
     const [d, a, h] = await Promise.all(reqs);
     if (c !== cur) return;
     c.data = d; c.alerts = a; c.hostRows = h || null;

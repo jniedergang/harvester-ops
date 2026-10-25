@@ -2623,6 +2623,45 @@ ACPI reached `shut off` 2.4 s after the request (action done in 3.5 s). A
 declaration cancelled from the console during its connection test, after
 it was saved, was undone: no declaration or key file was left.
 
+### The page of a KVM host (2.0.0)
+
+Each KVM host has its own page, opened from the side menu of hosts or by
+its address `#kvm/<host>`. A band shows the family (KVM), the name, the
+state, the libvirt version and the VM count, the sub-menu of the host and
+**Activity of this host**.
+
+- **Overview** (`#kvm/<host>`): the host block (CPU, memory, versions, VMs
+  by state, labels), with **Test**, **Create a VM** and **Remove**.
+- **Virtual machines** (`.../vms`): the VMs table with this host only. The
+  host filter is fixed and hidden; state, text, sort and every gesture are
+  the ones of the fleet table.
+- **Parameters** in five tabs. **System**: host name, libvirt URI, libvirt
+  and QEMU versions, CPU, memory, domain count, from one read of the host.
+  **Pools** and **Networks**: the storage and networks views with this host
+  only. **Labels**: the labels of the declaration. **Connection**: address,
+  SSH port and user, URI and the pinned host key fingerprint (never the key
+  path); **Test** (operator) and **Remove** (admin, confirmed in the page,
+  then the KVM hosts index opens).
+- **Disaster Recovery** (`.../dr`): says that replication of KVM domains is
+  not available yet.
+
+A host that does not answer keeps a block in error, with the classified
+reason. Labels and Connection read the declaration only, so they stay
+readable. A KVM host and a Harvester cluster may share a name: the family
+is part of the address, so they never mix.
+
+**Editing labels** (admin). **Edit labels** in Parameters > Labels opens a
+window with one row per label. Checks run before **Apply**: valid names,
+no name given twice, values of at most 253 characters without control
+characters, 32 labels at most, and the list of what is added, changed and
+removed. Apply stays greyed with the reason while a check fails or nothing
+changes. The whole set is replaced in a tracked action (dock, Activity),
+which keeps the previous labels. Only the console's declaration changes:
+nothing is asked of the host. The same from the command line:
+`harvester-kvm.py host label --host <host> --label key=value ...` or
+`--clear`. Other buttons follow the role: a viewer sees Test greyed, an
+operator sees Remove and Edit labels greyed, each with the reason.
+
 ### Console, snapshots, cloning and deleting a VM (1.98.0)
 
 The menu of a KVM VM gains a second group: **Console**, **Snapshots**,
@@ -3649,7 +3688,9 @@ and sending a test message need admin. A link test needs operator.
 API: reads `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, row, status, volumes, last runs,
 lock, lease, `carnet_stale`), `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
-`GET /api/replication/hosts/<cluster>/resources?side=`,
+`GET /api/replication/hosts/<harvester or kvm>/<host>/resources?side=` (2.0.0;
+the former `GET /api/replication/hosts/<cluster>/resources` still answers for a
+Harvester cluster; a KVM host answers an empty list with `available: false`),
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
 `GET /api/replication/follower`,
 `GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
