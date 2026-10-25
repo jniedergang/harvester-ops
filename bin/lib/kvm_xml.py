@@ -1091,8 +1091,13 @@ def _flatten(view, prefix=""):
     return out
 
 
-# champs dont la valeur vive diffère par nature de la valeur inactive
-_LIVE_ONLY = ("display.password", "hotplug_slots", "cpu.hotplug")
+# champs dont la valeur vive diffère par nature de la valeur inactive.
+# `memory.current_mib` : QEMU démarre au plafond et libvirt relit la mémoire
+# vive par le ballon ; sans pilote de ballon dans l'invité (Windows sans
+# virtio, Linux sans virtio_balloon), elle reste au plafond pour toujours. Un
+# changement de mémoire courante n'attend jamais le prochain démarrage : en
+# marche il passe par `setmem --live --config`, arrêtée il n'y a pas de vue vive.
+_LIVE_ONLY = ("display.password", "hotplug_slots", "cpu.hotplug", "memory.current_mib")
 
 
 def diff(view_inactive, view_live):

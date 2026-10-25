@@ -471,6 +471,29 @@ def test_diff_pending():
     assert kx.diff(inactive, live) == ["cpu.max_vcpus", "disks[vda].cache"]
 
 
+@pytest.mark.parametrize("live_current, live_max, expected", [
+    # sans pilote de ballon : la mémoire vive reste au plafond, jamais « en attente »
+    ("max", None, []),
+    # pendant les ~20 s qui suivent un démarrage, avec pilote de ballon
+    (1536, None, []),
+    # un vrai changement du plafond attend toujours le prochain démarrage
+    ("max", 16384, ["memory.max_mib"]),
+])
+def test_diff_current_memory_is_never_pending(live_current, live_max, expected):
+    """Revue finale I1 : VM créée avec une mémoire courante sous le plafond
+    (golden hotplug-cpu-mem) ; le XML vivant porte currentMemory = plafond."""
+    inactive = kx.managed_view((GOLDEN / "hotplug-cpu-mem.xml").read_text())
+    assert inactive["memory"]["current_mib"] < inactive["memory"]["max_mib"]
+    live = copy.deepcopy(inactive)
+    live["memory"]["current_mib"] = (inactive["memory"]["max_mib"]
+                                     if live_current == "max" else live_current)
+    if live_max is not None:
+        live["memory"]["max_mib"] = live_max
+        if live_current == "max":
+            live["memory"]["current_mib"] = live_max
+    assert kx.diff(inactive, live) == expected
+
+
 def test_diff_ignores_host_model_expanded_by_libvirt():
     """Vu sur node2 : le XML vivant d'une VM host-model porte `mode='custom'`
     et un modèle nommé ; ce n'est pas un changement en attente."""
