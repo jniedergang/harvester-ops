@@ -22,7 +22,7 @@ const HUsers = (() => {
   }
 
   function cluster() {
-    return document.querySelector('#cluster-select')?.value || '';
+    return (window.App && App.getCurrentCluster()) || '';
   }
 
   async function refresh() {

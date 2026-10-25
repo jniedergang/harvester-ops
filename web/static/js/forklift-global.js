@@ -283,11 +283,8 @@ const ForkliftGlobal = (() => {
 
   // -- gestes ---------------------------------------------------------------
   function gotoWave(cluster) {
-    const sel = document.querySelector('#cluster-select');
-    if (sel && sel.value !== cluster) {
-      sel.value = cluster;
-      sel.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    // le routeur pose le cluster de la vague, puis l'onglet des vagues
+    if (window.App && App.openHost) return App.openHost('harvester', cluster, 'imports', 'forklift', 'waves');
     if (window.Sections) Sections.open('forklift', 'waves');
   }
 

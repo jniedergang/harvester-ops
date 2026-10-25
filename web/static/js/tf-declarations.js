@@ -124,7 +124,8 @@ const TFDecl = (() => {
     if (!raw) return;
     let old = [];
     try { old = (JSON.parse(raw) || {}).declarations || []; } catch { return; }
-    const fallbackCluster = document.querySelector('#cluster-select')?.value || '';
+    // cluster de gestion, sinon le premier visible (l'ancien premier choix du sélecteur)
+    const fallbackCluster = window.App ? (App.managementCluster() || App.listClusters()[0] || '') : '';
     const left = [];
     for (const d of old) {
       if (cache.has(d.id)) continue;

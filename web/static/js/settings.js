@@ -252,7 +252,7 @@ const Settings = (() => {
     if (!sel) return;
     try {
       const data = await fetch('/api/clusters').then(r => r.json());
-      const current = $('#cluster-select').value;
+      const current = window.App ? App.getCurrentCluster() : null;
       sel.innerHTML = '';
       (data.clusters || []).forEach(c => {
         const opt = document.createElement('option');

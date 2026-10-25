@@ -220,8 +220,7 @@ const ReplUtil = (() => {
   const roleRank = (r) => ({ viewer: 1, operator: 2, admin: 3 }[r] || 0);
 
   function clusterNames() {
-    const sel = document.getElementById('cluster-select');
-    return sel ? [...sel.options].map((o) => o.value).filter(Boolean) : [];
+    return window.App && App.listClusters ? App.listClusters() : [];
   }
 
   return { tr, enc, esc, icon, num, dur, bytes, rate, ago, when, api, get, follow, actionOutput, STATE, planState,

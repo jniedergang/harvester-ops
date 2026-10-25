@@ -8,6 +8,8 @@
  * par la console et ont chacune leur état Terraform (v1.54.0).
  */
 const TF = (() => {
+  // Cluster de gestion (navigation 2.0) : plus de lecture du sélecteur
+  const mgmtCluster = () => (window.App && App.managementCluster ? App.managementCluster() : '');
   const $  = (s) => document.querySelector(s);
   const $$ = (s) => document.querySelectorAll(s);
 
@@ -40,7 +42,7 @@ const TF = (() => {
   async function refresh() {
     const out = $('#tf-status-body');
     if (!out) return;
-    const cluster = $('#cluster-select')?.value || '';
+    const cluster = mgmtCluster();
     // Même voile flouté que les autres chargements. Posé sur la CARTE : le
     // corps est réécrit par le rendu et emporterait le voile avec lui.
     if (!window.Veil) return refreshInner(out, cluster);
@@ -579,7 +581,7 @@ const TF = (() => {
   }
 
   async function cleanStale() {
-    const cluster = $('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster) return;
     const result = $('#tf-result');
     let preview;
@@ -610,7 +612,7 @@ const TF = (() => {
     } catch (e) { if (result) result.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(e.message)}</span>`; }
   }
   async function destroyWorkspace() {
-    const cluster = $('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster) { alert(i18n.t('tf.ui.pickCluster')); return; }
     const ok = await confirmDestructive({
       title: i18n.t('tf.ui.destroyAllTitle', { cluster }),
@@ -635,7 +637,7 @@ const TF = (() => {
    *  déclaration : celle dont elle porte le nom, sinon une nouvelle. Au
    *  prochain plan, la déclaration la reprend sans la recréer. */
   async function importResourceForEdit(safe, address) {
-    const cluster = $('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster || !safe) return;
     const result = $('#tf-result');
     const say = (html) => { if (result) result.innerHTML = html; };
@@ -673,7 +675,7 @@ const TF = (() => {
   }
 
   async function destroySingleResource(address, declId) {
-    const cluster = $('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster || !address) return;
     const ok = await confirmDestructive({
       title: i18n.t('tf.ui.destroyResTitle', { address }),

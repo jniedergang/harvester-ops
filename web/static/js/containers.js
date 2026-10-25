@@ -251,8 +251,7 @@ const Containers = (() => {
 
   // -- créer une charge : formulaire, ou YAML collé ----------------------------
   function clusterNames() {
-    const sel = document.getElementById('cluster-select');
-    return sel ? [...sel.options].map((o) => o.value).filter(Boolean) : [];
+    return window.App && App.listClusters ? App.listClusters() : [];
   }
 
   async function gpuHint(root, cluster) {

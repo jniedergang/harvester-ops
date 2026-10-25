@@ -20,6 +20,9 @@ const CAPI = (() => {
   // libellés anglais et quelques phrases en français dur y restaient).
   const tr = (k, v) => i18n.t(k, v);
 
+  // Cluster de gestion (navigation 2.0) : plus de lecture du sélecteur
+  const mgmtCluster = () => (window.App && App.managementCluster ? App.managementCluster() : '');
+
   // Le diagnostic CAPI interroge le cluster : plusieurs secondes sur un
   // cluster lent. Un « Loading… » qui vide la carte donnait l'impression
   // que l'onglet s'était cassé. Même voile flouté que les autres
@@ -36,7 +39,7 @@ const CAPI = (() => {
 
   async function refresh() {
     if (!window.App) return;
-    const cluster = window.App && document.querySelector('#cluster-select')?.value;
+    const cluster = window.App && App.managementCluster();
     if (!cluster) return;
     const out = $('#capi-status-body');
     if (!out) return;
@@ -585,7 +588,7 @@ const CAPI = (() => {
     // Install button is added dynamically by render(); use event delegation
     document.addEventListener('click', (e) => {
       if (e.target.closest('#btn-capi-install')) {
-        const cluster = document.querySelector('#cluster-select')?.value;
+        const cluster = mgmtCluster();
         const dry = document.querySelector('#capi-install-dry')?.checked ?? true;
         if (cluster && confirm(dry ? tr('capi.v.legacy.confirmInstallDry', { cluster })
                                    : tr('capi.v.legacy.confirmInstall', { cluster }))) {
@@ -593,7 +596,7 @@ const CAPI = (() => {
         }
       }
       if (e.target.closest('#btn-capi-uninstall')) {
-        const cluster = document.querySelector('#cluster-select')?.value;
+        const cluster = mgmtCluster();
         if (!cluster) return;
         const dry = document.querySelector('#capi-install-dry')?.checked ?? true;
         const keepCM = confirm(dry ? tr('capi.v.legacy.confirmUninstallDry', { cluster })
@@ -679,6 +682,8 @@ const CAPI = (() => {
     const inline = document.querySelector('#tab-automation .sub-tabs-inline');
     if (inline) inline.classList.toggle('hidden', name !== 'capi');
     try { localStorage.setItem('harvester_ops_automation_subtab', name); } catch {}
+    // Navigation 2.0 : l'adresse porte le sous-onglet (#automation/<x>)
+    if (window.Router) Router.syncFromScreen();
     if (name === 'capi') refresh();
     else if (name === 'terraform' && window.TF) window.TF.refresh();
     else if (name === 'pxe' && window.BMC) window.BMC.render();
@@ -732,8 +737,10 @@ const CAPI = (() => {
     // CAPI diag. Generic group toggle in app.js handles expand/collapse;
     // we don't touch the `expanded` class here.
     document.addEventListener('click', (e) => {
+      // Navigation 2.0 : reactivate (et non refresh) recharge le sous-onglet
+      // retenu, Terraform ou Bare-metal compris, sur le cluster de gestion
       if (e.target.closest('.tab-group-head[data-group="automation"]')) {
-        setTimeout(refresh, 80);
+        setTimeout(reactivate, 80);
       }
     });
   }
@@ -742,7 +749,7 @@ const CAPI = (() => {
   // Création d'un cluster : une fenêtre à menus (capi-create.js, v1.53.0)
   // ---------------------------------------------------------------------
   function openCreate() {
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster || !window.CapiCreate) return;
     CapiCreate.open(cluster);
   }
@@ -750,7 +757,7 @@ const CAPI = (() => {
   async function refreshK8sClustersPanel() {
     const out = document.querySelector('#capi-k8s-body');
     if (!out) return;
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     if (!cluster) { out.innerHTML = `<p class="form-hint">${esc(tr('capi.new.pickCluster'))}</p>`; return; }
     return veiled(out, cluster, () => k8sClustersInner(out, cluster));
   }
@@ -802,7 +809,7 @@ const CAPI = (() => {
   }
 
   async function showClusterDetails(namespace, name) {
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     const panelId = `capi-cluster-${namespace}-${name}`;
     if (!window.FloatingPanels) { alert(tr('migrate.reload')); return; }
     const api = window.FloatingPanels.open({
@@ -848,7 +855,7 @@ const CAPI = (() => {
   }
 
   async function scaleCluster(namespace, name) {
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     const n = prompt(tr('capi.v.scale.prompt', { name: `${namespace}/${name}` }), '2');
     if (n === null) return;
     const replicas = parseInt(n, 10);
@@ -866,7 +873,7 @@ const CAPI = (() => {
   }
 
   async function deleteCluster(namespace, name) {
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     const ref = `${namespace}/${name}`;
     if (!confirm(tr('capi.v.remove.confirm', { name: ref }))) return;
     if (!confirm(tr('capi.v.remove.confirm2', { name: ref }))) return;
@@ -879,7 +886,7 @@ const CAPI = (() => {
   }
 
   async function downloadKubeconfig(namespace, name) {
-    const cluster = document.querySelector('#cluster-select')?.value;
+    const cluster = mgmtCluster();
     window.open(`/api/capi/${enc(cluster)}/cluster/${enc(namespace)}/${enc(name)}/kubeconfig`, '_blank');
   }
 

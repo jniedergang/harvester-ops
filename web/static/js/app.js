@@ -2080,6 +2080,8 @@ const App = (() => {
     if (window.Icons) Icons.mount();
     // Apply translations before first render
     if (typeof i18n !== 'undefined') i18n.applyTranslations();
+    // Navigation 2.0 : la liste des clusters, relue une fois du serveur
+    refreshClusters();
     const sel = $('#cluster-select');
     if (sel.options.length > 0) {
       // v1.4.32: restore the cluster the user last worked on. Only
@@ -2111,6 +2113,8 @@ const App = (() => {
       const savedTab = localStorage.getItem(TAB_STORAGE);
       if (savedTab && document.getElementById(`tab-${savedTab}`)) {
         setTab(savedTab);
+        // Cluster API ne se charge plus seul au démarrage (cluster de gestion vide)
+        if (savedTab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
       }
     } catch {}
 
@@ -2193,8 +2197,75 @@ const App = (() => {
   // Expose getCurrentCluster for the other modules
   function getCurrentCluster() { return currentCluster; }
 
+  // -------------------------------------------------------------------------
+  // Navigation 2.0, étape 1 : source unique des clusters. Les modules ne
+  // lisent plus le sélecteur de l'en-tête (il disparaît à l'étape 2).
+  // -------------------------------------------------------------------------
+  let clusterList = null;        // noms visibles, du sélecteur puis de /api/clusters
+  let hiddenClusters = [];       // session Rancher : clusters cachés et pourquoi
+  let clustersFetch = null;
+
+  /** Clusters visibles. Disponible tout de suite (liste rendue par le
+   *  serveur dans la page), puis relue une fois de /api/clusters. */
+  function listClusters() {
+    if (!clusterList) {
+      const sel = $('#cluster-select');
+      clusterList = sel ? [...sel.options].map(o => o.value).filter(Boolean) : [];
+    }
+    return clusterList.slice();
+  }
+
+  /** Relit /api/clusters (au démarrage, après un ajout ou un retrait). */
+  function refreshClusters() {
+    clustersFetch = fetch('/api/clusters')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => {
+        clusterList = (d.clusters || []).map(c => c.name).filter(Boolean);
+        hiddenClusters = Array.isArray(d.hidden) ? d.hidden : [];
+        return { clusters: clusterList.slice(), hidden: hiddenClusters.slice() };
+      })
+      .catch(() => ({ clusters: listClusters(), hidden: hiddenClusters.slice() }));
+    return clustersFetch;
+  }
+
+  /** Promesse de la dernière lecture de /api/clusters (lancée au besoin). */
+  function clustersInfo() { return clustersFetch || refreshClusters(); }
+
+  const MGMT_STORAGE = 'harvester_ops_mgmt_cluster';
+
+  /** Cluster de gestion des pages Cluster API, Terraform, déclarations
+   *  Terraform et services CAPI : celui que la personne a choisi, sinon le
+   *  dernier hôte Harvester visité. Vide avant le premier choix de cluster. */
+  function managementCluster() {
+    let m = null;
+    try { m = localStorage.getItem(MGMT_STORAGE); } catch {}
+    if (m && listClusters().includes(m)) return m;
+    return currentCluster || '';
+  }
+
+  function setManagementCluster(name) {
+    try {
+      if (name) localStorage.setItem(MGMT_STORAGE, name);
+      else localStorage.removeItem(MGMT_STORAGE);
+    } catch {}
+    if ($('#tab-automation')?.classList.contains('active') && window.CAPI && CAPI.reactivate) CAPI.reactivate();
+  }
+
+  /** Ouvre un écran d'un hôte (remplace « valeur du sélecteur + change »). */
+  function openHost(kind, name, sub, tab, pane) {
+    const route = { name: 'host', kind, host: name, sub: sub || null, tab: tab || null, pane: pane || null, id: null };
+    if (window.Router) return Router.go(route);
+    // sans routeur (ne devrait pas arriver) : bascule puis section
+    const sel = $('#cluster-select');
+    if (sel && [...sel.options].some(o => o.value === name)) sel.value = name;
+    return setCluster(name).then(() => {
+      if (window.Sections && Sections.isSection(tab)) Sections.open(tab, pane);
+    });
+  }
+
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
-           mountTopology, stopBoards, setTab };
+           mountTopology, stopBoards, setTab,
+           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost };
 })();
 
 window.App = App;

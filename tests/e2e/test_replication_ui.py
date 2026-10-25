@@ -243,8 +243,15 @@ def ui_factory(context, flask_server):
                                                                     "lost_after": {}, "waves": [{"index": 1, "vms": ["default/db-1"]}]}}})))
         dialogs = []
         page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+        # navigation 2.0 : la liste des clusters vient d'App.listClusters()
+        # (/api/clusters), plus du sélecteur ; harv-dr y est ajouté
+        clusters_body = {"clusters": [{"name": n, "description": "", "node_count": 1, "origin": "config"}
+                                      for n in ("harv-fake", "harv-dr")], "config_writable": True}
+        page.route(re.compile(r".*/api/clusters$"), lambda r, q: r.fulfill(**ok(clusters_body))
+                   if q.method == "GET" else r.continue_())
         page.goto(flask_server["base_url"], wait_until="domcontentloaded")
         page.wait_for_function("window.Replication && window.App && App.getCurrentCluster()")
+        page.evaluate("() => App.clustersInfo()")
         page.evaluate("""() => { const s = document.getElementById('cluster-select');
             if (![...s.options].some(o => o.value === 'harv-dr')) { const o = document.createElement('option');
             o.value = 'harv-dr'; o.textContent = 'harv-dr'; s.appendChild(o); } }""")
