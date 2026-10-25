@@ -1555,8 +1555,9 @@ flow-delete|amc-apply|amc-delete`.
 
 ### Importing VMs from VMware, OpenStack or an OVA archive (1.71.0)
 
-**VM Import**, in the VM Import / Export section of the menu (1.77.0;
-under Cluster before), drives Harvester's vm-import-controller
+**VM Import**, in Imports and migrations of a Harvester host since 2.0.0
+(`#harvester/<c>/imports/vmimport`; VM Import / Export section of the menu
+from 1.77.0, under Cluster before), drives Harvester's vm-import-controller
 add-on (enable it in Add-ons first; the section says when it is off).
 
 - **Sources**, one tab per provider:
@@ -1623,8 +1624,8 @@ add-on (expected from 1.9.1), the console enables it as it ships and never
 rewrites its chart or its values. That path is not verified for real yet:
 no bench runs a Harvester that ships this add-on.
 
-**VMware migrations**, in the VM Import / Export section of the menu,
-right after VM Import, opens
+**VMware migrations**, in Imports and migrations of a Harvester host since
+2.0.0 (`#harvester/<c>/imports/forklift`), right after VM Import, opens
 three tabs:
 
 - **Preparation**, three steps in the order they must be done, each with
@@ -1810,8 +1811,9 @@ A wave's objects (NetworkMap, StorageMap, Plan with `warm: true`,
 Migration) live in the `forklift` namespace, labelled
 `harvester-ops.io/managed` and `harvester-ops.io/wave`.
 
-**Migrations (all clusters)**, the third entry of the VM Import / Export
-section (1.77.0; next to Activity before): every VM of
+**Migrations (all clusters)**, the fleet entry **Migrations** of the side
+menu since 2.0.0 (`#migrations`; third entry of the VM Import / Export
+section from 1.77.0, next to Activity before): every VM of
 every wave of every declared cluster, in one table (VMware VM, vCenter,
 target cluster, wave, step, last copy, cutover), filtered by state and by
 vCenter, with one block per cluster (Forklift installed or not, importer
@@ -2496,7 +2498,9 @@ clusters. A KVM host stays what it is: it is not turned into a cluster,
 and libvirt remains the only source of truth. No agent is installed on a
 host. The console runs `virsh` on the host over SSH and reads what it
 returns. **KVM** is a group of four entries in the sidebar, after Shared
-resources.
+resources. Since 2.0.0 the group is gone: these four views are the tabs
+of the KVM family index (`#hosts/kvm`) and the KVM VMs list
+(`#vms/host/kvm`), see "Views of all KVM hosts" below.
 
 - **Hosts**: one block per host. Host name, `user@address`, CPU (count,
   model, frequency, sockets), memory (total, free, available), libvirt and
@@ -2654,6 +2658,26 @@ A host that does not answer keeps a block in error, with the classified
 reason. Labels and Connection read the declaration only, so they stay
 readable. A KVM host and a Harvester cluster may share a name: the family
 is part of the address, so they never mix.
+
+**Views of all KVM hosts.** The 1.x KVM group showed every host on one
+screen. Nothing of it is lost: the KVM family index (`#hosts/kvm`, the
+KVM family of the side menu) has four tabs.
+
+- **Hosts** (`#hosts/kvm`): the hosts table, with **Declare a host**, and
+  **Test** and **Remove** per row.
+- **Capacity** (`#hosts/kvm/capacity`): the block of every host side by
+  side (CPU, memory, versions, VMs by state, labels), with the label
+  filter.
+- **Pools** (`#hosts/kvm/pools`): the pools of every host, one block per
+  host, with the host filter and the **Images** sub-tab (catalogue of
+  every host).
+- **Networks** (`#hosts/kvm/networks`): the libvirt networks of every
+  host, one block per host.
+
+The name of each host in these views opens its page, on the matching tab.
+Every gesture stays available in both places. The old addresses
+`#kvmstorage` and `#kvmnetworks` open the Pools and Networks tabs, and
+`#kvmhosts` opens the KVM hosts table.
 
 **Editing labels** (admin). **Edit labels** in Parameters > Labels opens a
 window with one row per label. Checks run before **Apply**: valid names,

@@ -44,6 +44,9 @@
     forklift: ['prep', 'sources', 'inventory', 'waves'],
   };
   const AUTOMATION = ['capi', 'terraform', 'pxe'];
+  // 2.0.0 : vues de tous les hôtes KVM (1.96-1.100), onglets de l'index de
+  // la famille KVM (#hosts/kvm) à côté du tableau des hôtes
+  const KVM_FLEET_TABS = ['capacity', 'pools', 'networks'];
   const ROOTS = ['migrations', 'gpus', 'bookings', 'usage'];
 
   // Anciens jetons -> nouvelle adresse. {L} = dernier hôte Harvester visité
@@ -67,11 +70,11 @@
     allvms: '#vms',
     containers: '#containers',
     allcontainers: '#containers',
-    kvmhosts: '#hosts',
-    'kvm-hosts': '#hosts',
+    kvmhosts: '#hosts/kvm',
+    'kvm-hosts': '#hosts/kvm',
     kvmvms: '#vms/host/kvm',
-    kvmstorage: '#kvm/{LK}/params/pools',
-    kvmnetworks: '#kvm/{LK}/params/networks',
+    kvmstorage: '#hosts/kvm/pools',
+    kvmnetworks: '#hosts/kvm/networks',
     vmimport: '#harvester/{L}/imports/vmimport',
     forklift: '#harvester/{L}/imports/forklift',
     vmio: '#harvester/{L}/imports/vmimport',
@@ -152,6 +155,7 @@
       case 'hosts':
         if (!n) return route('hosts');
         if (n === 1 && KINDS.includes(rest[0])) return route('hosts', { kind: rest[0] });
+        if (n === 2 && rest[0] === 'kvm' && KVM_FLEET_TABS.includes(rest[1])) return route('hosts', { kind: 'kvm', tab: rest[1] });
         return n === 2 && rest[0] === 'folder' && validId(rest[1]) ? route('hosts', { id: rest[1] }) : null;
       case 'harvester':
       case 'kvm':
@@ -215,7 +219,10 @@
       case 'hosts':
         parts.push(r.name);
         if (r.id) parts.push('folder', e(r.id));
-        else if (r.kind && r.name === 'hosts') parts.push(r.kind);
+        else if (r.kind && r.name === 'hosts') {
+          parts.push(r.kind);
+          if (r.kind === 'kvm' && KVM_FLEET_TABS.includes(r.tab)) parts.push(r.tab);
+        }
         break;
       case 'dr':
         parts.push('dr');
@@ -282,7 +289,7 @@
 
   const api = {
     parse, format, fromLegacy, validHost, acceptable,
-    LEGACY, HARVESTER_PARAMS, KVM_PARAMS, HARVESTER_PANES, IMPORT_PANES, AUTOMATION,
+    LEGACY, HARVESTER_PARAMS, KVM_PARAMS, HARVESTER_PANES, IMPORT_PANES, AUTOMATION, KVM_FLEET_TABS,
   };
   root.Routes = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

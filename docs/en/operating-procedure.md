@@ -339,6 +339,9 @@ every host in alert), label, version or folder. `#hosts/harvester` and
 `#hosts/kvm` open with the family filter set, and changing that filter
 rewrites the address. A row opens its host page; its star works as in the
 menu. On `#hosts/kvm`, **Declare a host** and, per KVM row, **Test** and
-**Remove** (confirmed in the row) give back what KVM > Hosts offered. A link
+**Remove** (confirmed in the row) give back what KVM > Hosts offered, and
+the tabs **Capacity**, **Pools** and **Networks** show those of every KVM
+host on one screen (`#hosts/kvm/capacity`, `/pools`, `/networks`), each
+host name leading to its page. A link
 to a host you cannot see (removed, or outside your rights) opens this index
 with a notice. The index only reads the host list, never a host.

@@ -123,11 +123,12 @@ LEGACY_ROWS = [
     ("#allvms", "allvms", "#vms"),
     ("#containers", "allcontainers", "#containers"),   # décision 3 : racine de flotte
     ("#allcontainers", "allcontainers", "#containers"),
-    ("#kvmhosts", "hosts", "#hosts"),
-    ("#kvm-hosts", "hosts", "#hosts"),
+    ("#kvmhosts", "hosts", "#hosts/kvm"),
+    ("#kvm-hosts", "hosts", "#hosts/kvm"),
     ("#kvmvms", "kvmvms", "#vms/host/kvm"),
-    ("#kvmstorage", "kvmstorage", f"#kvm/{KVM}/params/pools"),
-    ("#kvmnetworks", "kvmnetworks", f"#kvm/{KVM}/params/networks"),
+    # 2.0.0 : les vues de tous les hôtes KVM, onglets de la famille KVM
+    ("#kvmstorage", "kvmstorage", "#hosts/kvm/pools"),
+    ("#kvmnetworks", "kvmnetworks", "#hosts/kvm/networks"),
     ("#vmimport", "vmimport", f"#harvester/{A}/imports/vmimport/imports"),
     ("#forklift", "forklift", f"#harvester/{A}/imports/forklift/prep"),
     ("#vmio", "vmimport", f"#harvester/{A}/imports/vmimport/imports"),
@@ -319,18 +320,17 @@ def test_a_crafted_address_is_shown_escaped(context, flask_server, how):
     assert page.evaluate("window.__xss") is None
 
 
-def test_a_legacy_token_without_any_host_says_so(context, flask_server):
-    """Ancien jeton KVM alors qu'aucun hôte KVM n'est visible : l'index des
-    hôtes s'ouvre (2.0.0) et le bandeau dit pourquoi."""
+def test_a_kvm_legacy_token_without_any_kvm_host_opens_the_fleet_view(context, flask_server):
+    """Ancien jeton KVM alors qu'aucun hôte KVM n'est déclaré : 2.0.0, la vue
+    de tous les hôtes (onglet de #hosts/kvm) s'ouvre et dit qu'il n'y en a
+    aucun ; plus besoin d'un hôte pour l'ouvrir. (L'ancien jeton qui exige un
+    hôte absent est couvert par test_routes_js_1100, NO_HOST.)"""
     empty = {"hosts": [], "warnings": [], "role": "admin", "gestures": {}}
     page, _ = open_cold(context, flask_server, "#kvmstorage", routes={
         "**/api/kvm/hosts?declared=1": lambda r, q: r.fulfill(
             status=200, content_type="application/json", body=json.dumps(empty))})
-    assert active_tab(page) == "tab-hosts" and page.evaluate("location.hash") == "#hosts"
-    notice = page.locator("#access-notice")
-    expect(notice).to_be_visible()
-    expect(notice).to_contain_text("#kvmstorage")
-    expect(notice).to_contain_text("none is visible")
+    assert active_tab(page) == "tab-kvmstorage" and page.evaluate("location.hash") == "#hosts/kvm/pools"
+    expect(page.locator("#kvm-storage-host .kvm-empty")).to_be_visible()
 
 
 def test_another_host_of_the_menu_keeps_the_screen(context, flask_server, two_clusters):

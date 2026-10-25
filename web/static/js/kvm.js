@@ -332,6 +332,17 @@ const KVM = (() => {
     return `<div class="na-tiles kvm-hosts">${shown.map(hostTile).join('')}</div>`;
   }
 
+  /** 2.0.0 : nom d'un hôte dans une vue de tous les hôtes (onglets de
+   *  #hosts/kvm) : un lien vers sa page, à l'onglet de la vue ; sur la
+   *  page d'un hôte, le nom seul. */
+  function hostName(name) {
+    if (cur.fixed || !window.Routes) return `<strong>${esc(name)}</strong>`;
+    const tab = { storage: 'pools', networks: 'networks' }[cur.view];
+    const href = window.Routes.format({ name: 'host', kind: 'kvm', host: name, sub: tab ? 'params' : null, tab: tab || null });
+    const tip = tr('kvm.openHostTip', { host: name });
+    return `<a class="kvm-host-link tip" href="${esc(href)}" data-kvm-open-host="${esc(name)}" title="${esc(tip)}" data-tip="${esc(tip)}"><strong>${esc(name)}</strong></a>`;
+  }
+
   function hostTile(h) {
     const where = `${h.user ? `${h.user}@` : ''}${h.address || ''}${h.port && h.port !== 22 ? `:${h.port}` : ''}`;
     const labels = Object.entries(h.labels || {}).map(([k, v]) => badge('dim', `${k}=${v}`)).join(' ');
@@ -360,7 +371,7 @@ const KVM = (() => {
     }
     const state = h.error ? errorBadge(h.error) : badge('ok', tr('kvm.reachable'), tr('kvm.reachableTip'));
     return `<div class="na-tile kvm-host${h.error ? ' is-error' : ''}" data-kvm-host="${esc(h.name)}">
-        <div class="na-tile-title">${icon('node')} <strong>${esc(h.name)}</strong> ${state}</div>
+        <div class="na-tile-title">${icon('node')} ${hostName(h.name)} ${state}</div>
         <div class="res-dim">${esc(h.hostname && h.hostname !== h.name ? `${h.hostname} · ${where}` : where)}</div>
         ${body}
         ${labels ? `<div class="kvm-labels">${labels}</div>` : ''}
@@ -739,7 +750,7 @@ const KVM = (() => {
       else if (det.error) inner = `<p class="res-error">${esc(typeof det.error === 'string' ? det.error : det.error.message)}</p>`;
       else inner = fn(det, h.name);
       return `<section class="kvm-host-block" data-kvm-block="${esc(h.name)}">
-          <h3>${icon('node')} ${esc(h.name)} ${h.error ? errorBadge(h.error) : (det && det.error && typeof det.error === 'object' ? errorBadge(det.error) : '')}</h3>
+          <h3>${icon('node')} ${hostName(h.name)} ${h.error ? errorBadge(h.error) : (det && det.error && typeof det.error === 'object' ? errorBadge(det.error) : '')}</h3>
           ${!h.error && head ? `<div class="kvm-block-actions">${head(h.name)}</div>` : ''}
           ${inner}</section>`;
     }).join('');

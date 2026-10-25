@@ -72,6 +72,16 @@ const HostPage = (() => {
     labels: [tr('hp.kvm.tab.labels'), tr('hp.kvm.tab.labelsTip'), 'doc'],
     conn: [tr('hp.tab.conn'), tr('hp.kvm.tab.connTip'), 'key'],
   });
+  // 2.0.0 : onglets de la famille KVM (#hosts/kvm) : le tableau des hôtes et
+  // les vues de tous les hôtes KVM de la 1.96-1.100 (tuiles de capacité côte
+  // à côte, pools et images, réseaux), chaque bloc menant à la page d'hôte
+  const KVM_FLEET_TABS = () => ({
+    hosts: [tr('hp.kvmFleet.hosts'), tr('hp.kvmFleet.hostsTip'), 'node'],
+    capacity: [tr('hp.kvmFleet.capacity'), tr('hp.kvmFleet.capacityTip'), 'compute'],
+    pools: [tr('hp.kvm.tab.pools'), tr('hp.kvmFleet.poolsTip'), 'storage'],
+    networks: [tr('hp.kvm.tab.networks'), tr('hp.kvmFleet.networksTip'), 'network'],
+  });
+  const fleetHref = (id) => window.Routes.format({ name: 'hosts', kind: 'kvm', tab: id === 'hosts' ? null : id });
   const KVM_SUBS = () => [
     ['overview', tr('hnav.sub.overview'), tr('hnav.sub.overviewKvmTip')],
     ['vms', tr('hnav.sub.vms'), tr('hnav.sub.vmsKvmTip')],
@@ -109,9 +119,14 @@ const HostPage = (() => {
     const head = $('#host-page-head');
     if (!head) return;
     const on = !!(route && route.name === 'host' && route.host);
-    head.hidden = !on;
+    const fleet = !!(route && route.name === 'hosts' && route.kind === 'kvm');
+    head.hidden = !on && !fleet;
     document.body.classList.toggle('host-page', on);
     document.body.classList.toggle('host-page-kvm', on && kindOf() === 'kvm');
+    if (fleet) {
+      head.innerHTML = `<div class="hp-bars hp-kvm-fleet">${tabBar(KVM_FLEET_TABS(), route.tab || 'hosts', fleetHref, tr('hp.kvmFleet.label'))}</div>`;
+      return;
+    }
     if (!on) { head.innerHTML = ''; return; }
     const kvm = kindOf() === 'kvm';
     const sub = route.sub || 'overview';

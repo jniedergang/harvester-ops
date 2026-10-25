@@ -68,13 +68,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - `GET /api/replication/hosts/<harvester|kvm>/<host>/resources`: the host
   family is in the route; the former form still answers for a Harvester
   cluster, a KVM host answers an empty list with `available: false`.
-
 - **Hosts index** (`#hosts`, **Hosts** in the side menu): a table of every
   Harvester cluster and KVM host with family, name, state, version, labels,
   VMs, folder and favourite. Sort by any column, filter by family, state
   (or in alert), label, version and folder. `#hosts/harvester` and
   `#hosts/kvm` open pre-filtered; on `#hosts/kvm`, Declare a host, Test and
   Remove per row give back KVM > Hosts. It reads `/api/hosts` only.
+- **Views of all KVM hosts, as tabs of the KVM family** (`#hosts/kvm`):
+  Hosts (the table), Capacity (`#hosts/kvm/capacity`, the CPU and memory
+  block of every host side by side, label filter), Pools
+  (`#hosts/kvm/pools`, pools and image catalogue of every host, one block
+  per host) and Networks (`#hosts/kvm/networks`). These are the 1.x KVM >
+  Hosts, Storage and Networks screens, kept whole; each host name opens
+  its page on the matching tab.
 - **Fleet entries in the new menu**: Disaster Recovery with Links, Shared
   resources (GPU, Bookings, Usage), Automation (Cluster API, Terraform,
   Bare-metal) and Activity, as real links. `#activity/host/<kind>/<name>`
@@ -83,6 +89,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
+
 ### Changed
 - **The 1.x menu is removed**: no more cluster selector, `+` button or
   per-cluster groups (Cluster, Virtual machines, Containers, Shared
@@ -102,8 +109,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   | Current cluster's VMs, containers | `#harvester/<c>/vms`, `#harvester/<c>/containers` |
   | All clusters VMs, containers | `#vms`, `#containers` |
   | Shared resources > GPU, Bookings, Usage | `#gpus`, `#bookings`, `#usage` |
-  | KVM > Hosts | `#hosts/kvm`, `#kvm/<h>`, `#kvm/<h>/params/conn` |
-  | KVM > Virtual machines, Storage, Networks | `#vms/host/kvm`, `#kvm/<h>/vms`, `#kvm/<h>/params/pools`, `#kvm/<h>/params/networks` |
+  | KVM > Hosts | `#hosts/kvm`, `#hosts/kvm/capacity`, `#kvm/<h>`, `#kvm/<h>/params/conn` |
+  | KVM > Virtual machines | `#vms/host/kvm`, `#kvm/<h>/vms` |
+  | KVM > Storage, Networks (all hosts) | `#hosts/kvm/pools`, `#hosts/kvm/networks` |
+  | KVM > Storage, Networks (one host) | `#kvm/<h>/params/pools`, `#kvm/<h>/params/networks` |
   | VM Import, VMware migrations | `#harvester/<c>/imports/vmimport`, `.../imports/forklift` |
   | Migrations (all clusters) | `#migrations` |
   | Disaster Recovery > Contracts, Links | `#dr`, `#dr/links` |
@@ -116,6 +125,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **A link to a host you cannot see** (removed, or hidden by Rancher), and
   an old token that needs a host while none is visible, open the hosts
   index with a notice instead of the default screen.
+- **A cold open shows only the screen of its address**: no section is
+  active in the page before the address is applied (the Overview no longer
+  flashes), and the cluster status, which feeds the Overview only, is read
+  only when an Overview opens. A first 2.0.0 open by a deep link forgets the
+  last 1.x screen at once, so it never comes back on a later empty address.
 - **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
   below the metrics; the block view of the nodes is Parameters > Nodes. The
   **Upgrade** button opens Parameters > Upgrade.
@@ -136,6 +150,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   address loaded cold shows its screen).
 - The e2e tests that clicked the old menu or set the last tab in the
   browser now open the screen by its address (`nav.goto`).
+- `tests/e2e/test_cold_load_200.py`: the sequence of active sections
+  recorded from the parsing of the page, `#vms` and an empty address cold
+  without the Overview nor a status read, an Overview cold with one status
+  read, a deep link first open that consumes the 1.x screen.
+- `tests/e2e/test_kvm_fleet_200.py`: the four KVM family tabs by address,
+  real links kept after F5, every host side by side in Capacity, Pools and
+  Networks with their 1.x filters, each host name leading to its page, the
+  old tokens `#kvmstorage`, `#kvmnetworks` and `#kvmhosts`.
 - `tests/e2e/test_fleet_roots_200.py`: every fleet root loaded cold with
   its menu entry active, the management cluster shown is the one Cluster
   API calls (and Terraform reads), changing it keeps the open host,

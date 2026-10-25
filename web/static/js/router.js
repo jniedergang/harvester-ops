@@ -16,6 +16,8 @@
 
   // Sections de Harvester tenues par Sections.DEF (pane retenu par section)
   const SECTION_TABS = ['storage', 'network', 'addons', 'security', 'monlog', 'advanced', 'vmimport', 'forklift'];
+  // Onglets de la famille KVM (#hosts/kvm/<onglet>) -> section des vues KVM
+  const KVM_FLEET = { capacity: 'kvmhosts', pools: 'kvmstorage', networks: 'kvmnetworks' };
 
   /**
    * route -> écran actuel { tab, cluster, pane, overview, automation } ;
@@ -67,7 +69,12 @@
       case 'containers': return t('allcontainers');
       // 2.0.0 (tâche 8) : l'index des hôtes, une famille en option ; les
       // dossiers d'hôtes arrivent à l'étape 3 (index entier en attendant)
-      case 'hosts': return t('hosts', { hostsKind: route.kind || null });
+      // 2.0.0 : onglets de la famille KVM, les vues de tous les hôtes KVM
+      // (capacité, pools et images, réseaux), sans hôte imposé
+      case 'hosts': {
+        const fleet = route.kind === 'kvm' && KVM_FLEET[route.tab];
+        return fleet ? t(fleet) : t('hosts', { hostsKind: route.kind || null });
+      }
       case 'dr': return t(route.tab === 'links' ? 'drlinks' : 'drplans');
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
@@ -82,9 +89,8 @@
 
   /**
    * Écran affiché -> adresse. s = { tab, cluster, pane, overview, automation }.
-   * Sans cluster, l'ancien jeton (compris pour toujours). Stockage et Réseaux
-   * KVM gardent leur ancien jeton : ils montrent tous les hôtes à la fois,
-   * aucune adresse de la grammaire ne les décrit avant l'étape 2.
+   * Sans cluster, l'ancien jeton (compris pour toujours). Les vues KVM sans
+   * hôte imposé (tous les hôtes) sont les onglets de #hosts/kvm.
    */
   function screenHash(s) {
     if (!s || !s.tab) return null;
@@ -118,10 +124,10 @@
         return '#activity';
       case 'forkliftglobal': return '#migrations';
       case 'hosts': return '#hosts' + (s.hostsKind === 'harvester' || s.hostsKind === 'kvm' ? '/' + s.hostsKind : '');
-      case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm';
+      case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm/capacity';
       case 'kvmvms': return s.kvm ? K({ sub: 'vms' }) : '#vms/host/kvm';
-      case 'kvmstorage': return s.kvm ? K({ sub: 'params', tab: 'pools' }) : '#' + s.tab;
-      case 'kvmnetworks': return s.kvm ? K({ sub: 'params', tab: 'networks' }) : '#' + s.tab;
+      case 'kvmstorage': return s.kvm ? K({ sub: 'params', tab: 'pools' }) : '#hosts/kvm/pools';
+      case 'kvmnetworks': return s.kvm ? K({ sub: 'params', tab: 'networks' }) : '#hosts/kvm/networks';
       case 'kvmparams': return s.kvm ? K({ sub: 'params', tab: Rt.KVM_PARAMS.includes(s.kvmTab) ? s.kvmTab : 'system' }) : null;
       case 'kvmdr': return s.kvm ? K({ sub: 'dr' }) : null;
       case 'drplans': return '#dr';

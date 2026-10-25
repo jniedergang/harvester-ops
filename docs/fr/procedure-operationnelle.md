@@ -354,6 +354,9 @@ s'ouvrent avec le filtre de famille posé, et changer ce filtre réécrit
 l'adresse. Une ligne ouvre la page de son hôte ; son étoile fonctionne comme
 dans le menu. Sur `#hosts/kvm`, **Déclarer un hôte** et, par ligne KVM,
 **Tester** et **Retirer** (confirmé dans la ligne) reprennent ce qu'offrait
-KVM > Hôtes. Un lien vers un hôte que vous ne voyez pas (retiré, ou hors de
+KVM > Hôtes, et les onglets **Capacité**, **Pools** et **Réseaux** montrent
+ceux de tous les hôtes KVM sur un écran (`#hosts/kvm/capacity`, `/pools`,
+`/networks`), le nom de chaque hôte menant à sa page. Un lien vers un hôte
+que vous ne voyez pas (retiré, ou hors de
 vos droits) ouvre cet index avec un message. L'index ne lit que la liste
 des hôtes, jamais un hôte.

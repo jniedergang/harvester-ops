@@ -1728,8 +1728,9 @@ output-apply|output-delete|flow-apply|flow-delete|amc-apply|amc-delete`.
 
 ### Importer des VMs depuis VMware, OpenStack ou une archive OVA (1.71.0)
 
-**VM Import**, dans la section VM Import / Export du menu (1.77.0 ; sous
-Cluster avant), pilote l'add-on vm-import-controller
+**VM Import**, dans Imports et migrations d'un hôte Harvester depuis la
+2.0.0 (`#harvester/<c>/imports/vmimport` ; section VM Import / Export du
+menu depuis la 1.77.0, sous Cluster avant), pilote l'add-on vm-import-controller
 de Harvester (à activer d'abord dans Add-ons ; la section dit quand il est
 éteint).
 
@@ -1800,8 +1801,9 @@ et ne réécrit jamais son chart ni ses valeurs. Ce chemin n'est pas encore
 vérifié en réel : aucun banc ne fait tourner un Harvester qui livre cet
 add-on.
 
-**Migrations VMware**, dans la section VM Import / Export du menu, juste
-après VM Import, ouvre
+**Migrations VMware**, dans Imports et migrations d'un hôte Harvester
+depuis la 2.0.0 (`#harvester/<c>/imports/forklift`), juste après VM Import,
+ouvre
 trois onglets :
 
 - **Préparation**, trois étapes dans l'ordre où il faut les faire, chacune
@@ -2004,8 +2006,9 @@ Les objets d'une vague (NetworkMap, StorageMap, Plan avec `warm: true`,
 Migration) vivent dans le namespace `forklift`, étiquetés
 `harvester-ops.io/managed` et `harvester-ops.io/wave`.
 
-**Migrations (tous clusters)**, troisième entrée de la section VM Import /
-Export (1.77.0 ; à côté d'Activity avant) : toutes
+**Migrations (tous clusters)**, entrée de flotte **Migrations** du menu
+latéral depuis la 2.0.0 (`#migrations` ; troisième entrée de la section VM
+Import / Export depuis la 1.77.0, à côté d'Activity avant) : toutes
 les VMs de toutes les vagues de tous les clusters déclarés, dans un seul
 tableau (VM VMware, vCenter, cluster cible, vague, étape, dernière copie,
 bascule), filtrable par état et par vCenter, avec un bloc par cluster
@@ -2748,7 +2751,9 @@ Harvester. Un hôte KVM reste ce qu'il est : il ne devient pas un cluster,
 et libvirt reste la seule source de vérité. Aucun agent n'est installé sur
 l'hôte. La console lance `virsh` sur l'hôte par SSH et lit ce qu'il rend.
 **KVM** est un groupe de quatre entrées dans le menu latéral, après Shared
-resources.
+resources. Depuis la 2.0.0 le groupe n'existe plus : ces quatre vues sont
+les onglets de l'index de la famille KVM (`#hosts/kvm`) et la liste des VMs
+KVM (`#vms/host/kvm`), voir « Vues de tous les hôtes KVM » plus bas.
 
 - **Hôtes** : un bloc par hôte. Nom de l'hôte, `utilisateur@adresse`, CPU
   (nombre, modèle, fréquence, sockets), mémoire (totale, libre,
@@ -2918,6 +2923,26 @@ Un hôte qui ne répond pas garde un bloc en erreur, avec la raison classée.
 Étiquettes et Connexion ne lisent que la déclaration : elles restent
 lisibles. Un hôte KVM et un cluster Harvester peuvent porter le même nom :
 la famille fait partie de l'adresse, ils ne se mélangent jamais.
+
+**Vues de tous les hôtes KVM.** Le groupe KVM de la 1.x montrait tous les
+hôtes sur un écran. Rien n'en est perdu : l'index de la famille KVM
+(`#hosts/kvm`, la famille KVM du menu latéral) a quatre onglets.
+
+- **Hôtes** (`#hosts/kvm`) : le tableau des hôtes, avec **Déclarer un
+  hôte**, et **Tester** et **Retirer** par ligne.
+- **Capacité** (`#hosts/kvm/capacity`) : le bloc de chaque hôte côte à
+  côte (CPU, mémoire, versions, VMs par état, étiquettes), avec le filtre
+  par étiquette.
+- **Pools** (`#hosts/kvm/pools`) : les pools de tous les hôtes, un bloc
+  par hôte, avec le filtre d'hôte et le sous-onglet **Images** (catalogue
+  de tous les hôtes).
+- **Réseaux** (`#hosts/kvm/networks`) : les réseaux libvirt de tous les
+  hôtes, un bloc par hôte.
+
+Le nom de chaque hôte dans ces vues ouvre sa page, sur l'onglet
+correspondant. Chaque geste reste disponible aux deux endroits. Les
+anciennes adresses `#kvmstorage` et `#kvmnetworks` ouvrent les onglets
+Pools et Réseaux, et `#kvmhosts` le tableau des hôtes KVM.
 
 **Modifier les étiquettes** (administrateur). **Modifier les étiquettes**
 dans Paramètres > Étiquettes ouvre une fenêtre, une ligne par étiquette.

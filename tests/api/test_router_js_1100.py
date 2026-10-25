@@ -111,3 +111,25 @@ def test_declared_cluster_names_round_trip(screen):
     assert back and back["tab"] == screen["tab"] and back["cluster"] == screen["cluster"], got
     if screen["pane"]:
         assert back["pane"] == screen["pane"], got
+
+
+# 2.0.0 : les vues de tous les hôtes KVM (1.96-1.100) sont des onglets de
+# l'index de la famille KVM ; sans hôte imposé, elles gardent leur adresse.
+FLEET_KVM = [("kvmhosts", "#hosts/kvm/capacity"), ("kvmstorage", "#hosts/kvm/pools"),
+             ("kvmnetworks", "#hosts/kvm/networks")]
+
+
+@pytest.mark.parametrize("tab,address", FLEET_KVM, ids=[t for t, _ in FLEET_KVM])
+def test_kvm_fleet_views_round_trip(tab, address):
+    [got] = run([{"tab": tab, "cluster": "c1", "pane": None, "overview": "metrics", "automation": "capi",
+                  "kvm": None, "kvmTab": None}])
+    assert got["h"] == address
+    back = got["back"]
+    assert back and back["tab"] == tab and back["kvm"] is None, got
+
+
+def test_kvm_family_index_stays_the_hosts_table():
+    [got] = run([{"tab": "hosts", "cluster": "c1", "pane": None, "overview": "metrics", "automation": "capi",
+                  "hostsKind": "kvm"}])
+    assert got["h"] == "#hosts/kvm"
+    assert got["back"]["tab"] == "hosts" and got["back"]["hostsKind"] == "kvm"

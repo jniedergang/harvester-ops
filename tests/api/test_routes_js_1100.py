@@ -66,6 +66,8 @@ def address_table():
         "#folders", "#folders/42",
         "#containers", "#containers/folder/42",
         "#hosts", "#hosts/harvester", "#hosts/kvm", "#hosts/folder/42",
+        # 2.0.0 : vues de flotte KVM, onglets de l'index de la famille KVM
+        "#hosts/kvm/capacity", "#hosts/kvm/pools", "#hosts/kvm/networks",
         f"#harvester/{c}", f"#harvester/{c}/overview/events",
         f"#harvester/{c}/vms", f"#harvester/{c}/containers",
         f"#harvester/{c}/dr", f"#kvm/{h}/dr",
@@ -129,6 +131,9 @@ EXPECTED = [
     ("#dr/rp-0123456789ab",
      {"name": "dr", "kind": None, "host": None, "sub": None, "tab": None, "pane": None,
       "id": "rp-0123456789ab"}),
+    ("#hosts/kvm/pools",
+     {"name": "hosts", "kind": "kvm", "host": None, "sub": None, "tab": "pools", "pane": None,
+      "id": None}),
     ("#activity/host/kvm/kvm-paris.01",
      {"name": "activity", "kind": "kvm", "host": "kvm-paris.01", "sub": None, "tab": None,
       "pane": None, "id": None}),
@@ -170,6 +175,10 @@ ERRORS = [
     ("#vms/folder/-x", "identifiant invalide"),
     ("#vms/host/xen", "famille inconnue sous vms"),
     ("#hosts/xen", "famille inconnue sous hosts"),
+    ("#hosts/kvm/zzz", "vue de flotte KVM inconnue"),
+    ("#hosts/harvester/pools", "vue de flotte sur la famille Harvester"),
+    ("#hosts/kvm/pools/x", "segment en trop sous une vue de flotte"),
+    ("#hosts/kvm/hosts", "l'index n'a pas de segment à lui"),
     ("#dr/a/b", "segment en trop sous dr"),
     ("#automation", "automation sans sous-onglet (ancien jeton)"),
     ("#automation/xen", "sous-onglet inconnu"),
@@ -236,11 +245,12 @@ LEGACY_ROWS = [
     ("#allvms", "#vms"),
     ("#containers", "#containers"),
     ("#allcontainers", "#containers"),
-    ("#kvmhosts", "#hosts"),
-    ("#kvm-hosts", "#hosts"),
+    ("#kvmhosts", "#hosts/kvm"),
+    ("#kvm-hosts", "#hosts/kvm"),
     ("#kvmvms", "#vms/host/kvm"),
-    ("#kvmstorage", "#kvm/kvm-b/params/pools"),
-    ("#kvmnetworks", "#kvm/kvm-b/params/networks"),
+    # 2.0.0 : les vues de tous les hôtes KVM, rendues comme onglets de #hosts/kvm
+    ("#kvmstorage", "#hosts/kvm/pools"),
+    ("#kvmnetworks", "#hosts/kvm/networks"),
     ("#vmimport", "#harvester/harv2/imports/vmimport"),
     ("#forklift", "#harvester/harv2/imports/forklift"),
     ("#vmio", "#harvester/harv2/imports/vmimport"),
@@ -295,9 +305,9 @@ LEGACY_CTX_CASES = [
     ("#storage", {"harvester": ["harv1", "harv2"], "kvm": []}, "#harvester/harv1/params/storage"),
     # dernier hôte retiré de la configuration : le premier visible
     ("#storage", {"lastHarvester": "gone", "harvester": ["harv1"]}, "#harvester/harv1/params/storage"),
-    ("#kvmstorage", {"lastKvm": "gone", "kvm": ["kvm-a"]}, "#kvm/kvm-a/params/pools"),
-    # nom à point conservé
-    ("#kvmnetworks", {"kvm": ["kvm-paris.01"]}, "#kvm/kvm-paris.01/params/networks"),
+    # vues de flotte KVM : aucun hôte nécessaire, même sans hôte KVM visible
+    ("#kvmstorage", {"lastKvm": "gone", "kvm": []}, "#hosts/kvm/pools"),
+    ("#kvmnetworks", {}, "#hosts/kvm/networks"),
     # jeton sans hôte nécessaire : ctx vide accepté
     ("#allvms", {}, "#vms"),
     ("#forkliftglobal", None, "#migrations"),
@@ -312,9 +322,7 @@ def test_legacy_picks_the_right_host(token, ctx, expected):
 
 NO_HOST = [("#storage", {"harvester": [], "kvm": ["kvm-a"]}),
            ("#overview", {}),
-           ("#namespaces", {"harvester": []}),
-           ("#kvmstorage", {"harvester": ["harv1"], "kvm": []}),
-           ("#kvmnetworks", {})]
+           ("#namespaces", {"harvester": []})]
 
 
 @pytest.mark.parametrize("token,ctx", NO_HOST)
