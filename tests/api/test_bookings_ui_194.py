@@ -34,7 +34,7 @@ def test_the_view_follows_the_tab_and_the_script_is_loaded():
     assert "else if (window.Bookings) Bookings.stop();" in app
     html = (ROOT / "web" / "templates" / "index.html").read_text()
     assert html.index("/static/js/gpus.js") < html.index("/static/js/bookings.js")
-    assert 'id="bookings-host"' in html and 'data-tab="bookings"' in html
+    assert 'id="bookings-host"' in html and 'data-hnav-root="bookings"' in html
 
 
 def test_no_raw_eventsource_no_confirm_and_escaped_holder_and_note():

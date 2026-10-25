@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 VMS = {"vms": [{"namespace": "default", "name": "web", "phase": "Running", "runStrategy": "RerunOnFailure",
                 "agent_connected": "False", "priority": 0}]}
 STATE = {"running": True, "paused": False, "agent": False, "migrating": False, "node": "n1", "targets": [],
@@ -31,8 +33,7 @@ def fulfill(route, body, status=200):
 def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','fr');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -46,7 +47,7 @@ def ui(context, flask_server):
     page.route("**/api/vm/harv-fake/default/web", lambda r, q: writes(r, q) if q.method == "DELETE" else r.fallback())
     page.route("**/api/stream/vma000000001", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('namespaces'))
     page.wait_for_function("window.VMActions && window.App && App.getCurrentCluster()")
     page.evaluate("App.setTab('namespaces')")
     dialogs = []

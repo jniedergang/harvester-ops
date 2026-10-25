@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 MEMBERS = {"managed": True, "scope": "cluster",
            "roles": [{"id": "cluster-owner", "name": "Cluster Owner"}, {"id": "cluster-member", "name": "Cluster Member"},
@@ -30,8 +31,7 @@ def fulfill(route, body, status=200):
 def setup(context, flask_server, members=MEMBERS):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -44,7 +44,7 @@ def setup(context, flask_server, members=MEMBERS):
     page.route("**/api/harvester-users/harv-fake", lambda r, q: fulfill(r, {"users": [], "admins": []}))
     page.route("**/api/stream/mb0000000173", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.RancherMembers && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent

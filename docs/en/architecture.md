@@ -127,14 +127,18 @@ exact screen and a reload (F5) gives it back. Two browser modules carry it:
   Host names are checked with the server's declaration rule (letters,
   digits, `.`, `_`, `-`), the same for a Harvester cluster and a KVM host.
 - `web/static/js/router.js` applies an address: it sets the cluster first,
-  then the tab, then the pane. A click on a menu entry, a section tab, an
-  overview tab or the cluster selector rewrites the address without adding
-  a history entry; a link
-  from one view to another (`App.openHost`) adds one, so Back returns to the
-  previous screen. An unknown host or a host hidden by Rancher opens the
+  then the tab, then the pane. It is the only way a screen opens: the side
+  menu of hosts is made of real links, and the menu of 1.x (cluster selector
+  and per-cluster groups) is gone since 2.0.0. A click inside a screen (a
+  section tab) rewrites the address without adding a history entry; a menu
+  link or a link from one view to another (`App.openHost`) adds one, so Back
+  returns to the previous screen. An unknown host or a host hidden by Rancher opens the
   hosts index (`#hosts`) with a notice, and so does an old token that needs
   a host while none is visible; an address that matches no screen opens the
-  default screen with a notice. Never an empty page. An empty address restores the last screen.
+  default screen (`#vms`) with a notice. Never an empty page. An empty
+  address opens `#vms`; the first time 2.0.0 opens in a browser, it reopens
+  the last screen of the 1.x menu once instead (the tab 1.x kept), then
+  forgets it.
 
 Address grammar (`<c>` = Harvester cluster, `<h>` = KVM host):
 
@@ -162,7 +166,7 @@ reads `GET /api/kvm/hosts/<h>`; Labels and Connection read `GET
 path); labels are written by `PUT /api/kvm/hosts/<h>/labels` (admin), a
 tracked action of `harvester-kvm.py host label`.
 
-Modules never read the cluster selector directly: they use
+Modules never read a cluster selector (there is none since 2.0.0): they use
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
 (cluster that Cluster API and Terraform manage from, the last cluster
 visited unless chosen) and `App.openHost(kind, name, sub, tab, pane)`.

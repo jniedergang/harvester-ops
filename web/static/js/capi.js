@@ -690,11 +690,8 @@ const CAPI = (() => {
   }
 
   function selectAutomationSubtab(name) {
-    // 1. Mark the matching sidebar child as active. Automation children
-    //    carry only data-subtab (their data-tab is inherited from the head).
-    $$('#tab-group-automation .tab-child').forEach(el =>
-      el.classList.toggle('sub-active', el.dataset.subtab === name));
-    // 2. Show only that content panel
+    // 2.0.0 : l'entrée du menu (#automation/<x>) est peinte par HostNav.
+    // Show only that content panel
     $$('#tab-automation > .sub-tab-content').forEach(x =>
       x.classList.toggle('active', x.dataset.subtab === name));
     // 3. The inline 📦/🛠 strip is only meaningful for capi
@@ -731,11 +728,6 @@ const CAPI = (() => {
     // Sidebar children click → ensure parent is expanded + activate sub-tab.
     // The main-tab routing (to #tab-automation) is handled by app.js.
     document.addEventListener('click', (e) => {
-      const child = e.target.closest('#tab-group-automation .tab-child');
-      if (child) {
-        document.querySelector('#tab-group-automation')?.classList.add('expanded');
-        selectAutomationSubtab(child.dataset.subtab);
-      }
       // Inline Cluster API sub-tabs
       const inlineBtn = e.target.closest('#tab-automation .sub-tabs-inline .sub-tab');
       if (inlineBtn) { e.preventDefault(); selectCapiTab(inlineBtn.dataset.capiTab); }
@@ -746,7 +738,6 @@ const CAPI = (() => {
       const saved = localStorage.getItem('harvester_ops_automation_subtab');
       if (saved && ['capi', 'terraform', 'pxe'].includes(saved)) {
         selectAutomationSubtab(saved);
-        document.querySelector('#tab-group-automation')?.classList.add('expanded');
       } else {
         selectAutomationSubtab('capi');
       }
@@ -758,16 +749,8 @@ const CAPI = (() => {
       selectAutomationSubtab('capi');
     }
 
-    // When the user opens the Automation group (head click), refresh the
-    // CAPI diag. Generic group toggle in app.js handles expand/collapse;
-    // we don't touch the `expanded` class here.
-    document.addEventListener('click', (e) => {
-      // Navigation 2.0 : reactivate (et non refresh) recharge le sous-onglet
-      // retenu, Terraform ou Bare-metal compris, sur le cluster de gestion
-      if (e.target.closest('.tab-group-head[data-group="automation"]')) {
-        setTimeout(reactivate, 80);
-      }
-    });
+    // 2.0.0 : une entrée Automatisation du menu passe par le routeur, qui
+    // appelle reactivate (sous-onglet retenu, sur le cluster de gestion)
   }
 
   // ---------------------------------------------------------------------

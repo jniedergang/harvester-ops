@@ -17,9 +17,9 @@ const App = (() => {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  const TAB_STORAGE = 'harvester_ops_current_tab';
-  // v1.96.0 : onglets du groupe KVM -> vue du module KVM
-  const KVM_TABS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
+  // Sections qui montent une vue du module KVM (v1.96.0) ; depuis la 2.0.0
+  // l'hôte KVM vient de la route (page d'un hôte), plus d'un groupe de menu.
+  const KVM_VIEWS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
   // 2.0.0 : hôte KVM de la route (page d'un hôte KVM) et onglet de ses
   // Paramètres ; null sur les écrans de flotte. Posés par showRoute.
   let navKvm = null;
@@ -28,23 +28,9 @@ const App = (() => {
   const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
-    // Highlight every `.tab` whose data-tab matches the current name. The
-    // Automation group keeps "broad-highlight" off by *not* carrying
-    // data-tab on its children — they share routing with the head but get
-    // their own .sub-active class via the group's switcher. Cluster
-    // children have UNIQUE data-tab values per child, so this selector
-    // highlights exactly one of them at a time. (Don't filter out
-    // .tab-child here or Cluster's Démarrage/Arrêt children stop
-    // lighting up when selected.)
-    // Navigation 2.0 : les entrées du menu des hôtes (data-hnav) sont
-    // peintes par HostNav d'après la route, pas par l'onglet affiché.
-    $$('.tab:not([data-hnav])').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-    // v1.77.0 : l'entrée active reste visible, même dans un groupe replié
-    // (VM Import / Export s'ouvre replié, et un F5 ou un lien direct sur
-    // l'une de ses entrées la cachait sinon).
-    $$('.tab-child.active').forEach(t => t.closest('.tab-group')?.classList.add('expanded'));
+    // 2.0.0 : le menu des hôtes (host-nav.js) peint son entrée active
+    // d'après la route ; l'adresse, et non plus localStorage, garde l'écran.
     $$('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
-    try { localStorage.setItem(TAB_STORAGE, name); } catch {}
     if (name === 'overview')   {
       refreshStatus({ veil: true });
       // 2.0.0 : les événements sont un bloc sous les métriques ; la vue en
@@ -90,7 +76,7 @@ const App = (() => {
     else if (window.Replication) Replication.stopLinks();
     // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
     // 2.0.0 : sur la page d'un hôte KVM, l'hôte est imposé à la vue
-    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`), { host: navKvm }); }
+    if (KVM_VIEWS[name]) { if (window.KVM) KVM.start(KVM_VIEWS[name], $(`#kvm-${KVM_VIEWS[name]}-host`), { host: navKvm }); }
     else if (window.KVM) KVM.stop();
     if (name === 'kvmparams' && window.HostPage) HostPage.renderKvmParams(navKvm, navKvmTab || 'system');
     // 2.0.0 : index des hôtes (#hosts, #hosts/<famille>)
@@ -260,16 +246,14 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Cluster selection
   // -------------------------------------------------------------------------
-  /** Pose le cluster courant sans rien recharger (en-tête, sélecteur,
-   *  mémoire) ; les refus de l'ancien cluster sont effacés. */
+  /** Pose le cluster courant sans rien recharger (en-tête, mémoire du
+   *  dernier hôte Harvester) ; les refus de l'ancien cluster sont effacés. */
   function commitCluster(name) {
     const previous = currentCluster;
     currentCluster = name;
     // v1.56.0 : les refus de l'ancien cluster ne valent pas pour celui-ci
     if (previous && previous !== name && window.AccessNotice) AccessNotice.reset();
     $$('.cluster-name').forEach(el => el.textContent = name);
-    const sel = $('#cluster-select');
-    if (sel && sel.value !== name && [...sel.options].some(o => o.value === name)) sel.value = name;
     // v1.4.32: persist the selection so F5 restores the same cluster
     // (was always defaulting to the first <select> option).
     try { localStorage.setItem('harvester_ops_current_cluster', name); } catch {}
@@ -1802,66 +1786,12 @@ const App = (() => {
   // Event bindings
   // -------------------------------------------------------------------------
   function bind() {
-    // Les entrées du menu des hôtes sont de vrais liens appliqués par le
-    // routeur (host-nav.js) : pas de bascule d'onglet ici.
-    $$('.tab:not([data-hnav])').forEach(t => t.addEventListener('click', (e) => {
-      e.preventDefault();
-      // Group heads without a data-tab (e.g. "cluster", "automation" —
-      // purely a container) only toggle expansion. The first child of the
-      // group is selected as the main tab so the content panel shows up.
-      const isGroupHead = t.classList.contains('tab-group-head');
-      if (isGroupHead) {
-        const group = t.dataset.group;
-        const grp = document.querySelector(`#tab-group-${group}`);
-        const expanded = grp ? !grp.classList.contains('expanded') : false;
-        if (grp) grp.classList.toggle('expanded', expanded);
-        try { localStorage.setItem(`harvester_ops_group_${group}_expanded`,
-          expanded ? '1' : '0'); } catch {}
-        if (!t.dataset.tab) {
-          // Pure container — pick the first child's effective main-tab
-          const firstChild = grp?.querySelector('.tab-child');
-          const targetTab = firstChild?.dataset.tab || `${group}`;
-          setTab(targetTab);
-          // v1.77.0 : setTab déplie le groupe de l'entrée active ; un clic
-          // sur la tête doit pourtant pouvoir le replier.
-          if (grp) grp.classList.toggle('expanded', expanded);
-          return;
-        }
-      }
-      // A `.tab-child` may inherit its main routing from its group head
-      // (e.g. Automation children carry data-subtab only — the matching
-      // main tab is named after the group: data-group="automation"
-      // ⇒ #tab-automation).
-      if (t.classList.contains('tab-child') && !t.dataset.tab) {
-        const groupHead = t.closest('.tab-group')?.querySelector('.tab-group-head');
-        const inherited = groupHead?.dataset.tab || groupHead?.dataset.group;
-        if (inherited) setTab(inherited);
-        return;
-      }
-      if (t.dataset.tab === 'overview') paintOverviewMode('metrics');
-      setTab(t.dataset.tab);
-    }));
-
-    // Restore each group's expanded state from localStorage
-    document.querySelectorAll('.tab-group').forEach(grp => {
-      const id = grp.id.replace('tab-group-', '');
-      try {
-        const saved = localStorage.getItem(`harvester_ops_group_${id}_expanded`);
-        if (saved === '0') grp.classList.remove('expanded');
-        if (saved === '1') grp.classList.add('expanded');
-      } catch {}
-    });
-
+    // 2.0.0 : les entrées du menu des hôtes sont de vrais liens appliqués
+    // par le routeur (host-nav.js) ; l'ancien menu à groupes est retiré.
     loadRole();
     // Disaster Recovery : pastilles d'alerte du menu, relues toutes les minutes
     if (window.Replication) Replication.startBadges();
 
-    // Navigation 2.0 : un écran d'hôte passe par le routeur (adresse,
-    // historique) ; un écran de flotte garde la bascule directe.
-    $('#cluster-select')?.addEventListener('change', (e) => {
-      if (window.Router) Router.selectCluster(e.target.value);
-      else setCluster(e.target.value);
-    });
 
     // Création de VM : le namespace courant sert de proposition, le panneau
     // laisse en changer.
@@ -2040,9 +1970,8 @@ const App = (() => {
     if ($('#vm-order-filter-ns')) $('#vm-order-filter-ns').addEventListener('change', (e) => { nsFilter = e.target.value; renderVMOrder(); });
     if ($('#vm-order-sort'))      $('#vm-order-sort').addEventListener('change',     (e) => { sortBy   = e.target.value; renderVMOrder(); });
     // Shutdown sub-tabs: "Arrêt du cluster" vs "Ordre d'arrêt des VMs"
-    // (Restoration is done from init() via restoreSubTabsFromStorage,
-    // AFTER setCluster() — otherwise mountTopology() bails on null
-    // cluster during the boot click. See v1.4.31 fix.)
+    // (Le sous-onglet retenu est rouvert par showRoute au premier écran,
+    // APRÈS le choix du cluster : voir le correctif de la v1.4.31.)
     $$('[data-shutdown-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
         const target = btn.dataset.shutdownTab;
@@ -2100,25 +2029,6 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Init
   // -------------------------------------------------------------------------
-  // v1.4.31: restore Overview + Shutdown sub-tabs from localStorage.
-  // Must run AFTER setCluster() in init(), because the Overview sub-tab
-  // click handler calls mountTopology(target) which early-returns when
-  // currentCluster is null. Before v1.4.31, restoration happened from
-  // bind() — before setCluster() — so the Cluster/Network/Storage tabs
-  // came back visually selected but with an empty canvas.
-  function restoreSubTabsFromStorage() {
-    const restore = (storageKey, datasetAttr) => {
-      try {
-        const saved = localStorage.getItem(storageKey);
-        if (!saved) return;
-        const btn = document.querySelector(`[${datasetAttr}="${saved}"]`);
-        if (btn) btn.click();
-      } catch {}
-    };
-    paintOverviewMode(savedOverviewMode());
-    restore('harvester_ops_shutdown_subtab', 'data-shutdown-tab');
-  }
-
   /** Cluster retenu au chargement : le dernier choisi s'il est encore
    *  déclaré (il peut avoir quitté config.yaml), sinon le premier. */
   function defaultCluster() {
@@ -2126,27 +2036,6 @@ const App = (() => {
     let saved = null;
     try { saved = localStorage.getItem('harvester_ops_current_cluster'); } catch {}
     return saved && list.includes(saved) ? saved : (list[0] || null);
-  }
-
-  /** Adresse vide : l'ancien démarrage (cluster, sous-onglets, dernier
-   *  onglet retenus dans localStorage). Les tests e2e ouvrent leurs onglets
-   *  ainsi (`harvester_ops_current_tab`). */
-  function restoreFromStorage() {
-    const target = defaultCluster();
-    if (target && target !== currentCluster) setCluster(target, { silent: !currentCluster });
-    // Restore previously selected sub-tabs now that currentCluster is set.
-    restoreSubTabsFromStorage();
-    // v1.4.33: guard via the tab-content element (#tab-<name>) instead of
-    // .tab[data-tab=<name>]. Group heads like Automation carry data-group
-    // (not data-tab), so the old guard silently failed for them — F5 on
-    // Automation > CAPI/Terraform/PXE always reverted to Overview.
-    try {
-      const savedTab = localStorage.getItem(TAB_STORAGE);
-      if (savedTab && document.getElementById(`tab-${savedTab}`)) {
-        setTab(savedTab);
-        if (savedTab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
-      }
-    } catch {}
   }
 
   /** Peint le mode de l'aperçu sans monter sa vue (setTab s'en charge). */
@@ -2254,9 +2143,8 @@ const App = (() => {
     // Navigation 2.0 : la liste des clusters, relue une fois du serveur
     refreshClusters();
     // L'adresse décide de l'écran (cluster PUIS onglet PUIS pane) ; une
-    // adresse vide restaure le dernier écran comme avant (étape 1).
+    // adresse vide ouvre #vms (2.0.0, le dernier écran d'avant une seule fois).
     if (window.Router) Router.start();
-    else restoreFromStorage();
 
     // Restore previously open floating panels
     if (window.FloatingPanels && FloatingPanels.restoreAll) {
@@ -2351,8 +2239,10 @@ const App = (() => {
    *  serveur dans la page), puis relue une fois de /api/clusters. */
   function listClusters() {
     if (!clusterList) {
-      const sel = $('#cluster-select');
-      clusterList = sel ? [...sel.options].map(o => o.value).filter(Boolean) : [];
+      // liste rendue par le serveur dans la page (premier écran), sans attendre /api/clusters
+      let seed = [];
+      try { seed = JSON.parse($('#clusters-seed')?.textContent || '[]'); } catch {}
+      clusterList = Array.isArray(seed) ? seed.filter(c => typeof c === 'string' && c) : [];
     }
     return clusterList.slice();
   }
@@ -2407,8 +2297,6 @@ const App = (() => {
     const route = { name: 'host', kind, host: name, sub: sub || null, tab: tab || null, pane: pane || null, id: null };
     if (window.Router) return Router.go(route);
     // sans routeur (ne devrait pas arriver) : bascule puis section
-    const sel = $('#cluster-select');
-    if (sel && [...sel.options].some(o => o.value === name)) sel.value = name;
     return setCluster(name).then(() => {
       if (window.Sections && Sections.isSection(tab)) Sections.open(tab, pane);
     });
@@ -2418,7 +2306,7 @@ const App = (() => {
            mountTopology, stopBoards, setTab,
            role, listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm,
            // réservé au routeur (router.js)
-           _nav: { showRoute, restoreFromStorage, screen, setCluster } };
+           _nav: { showRoute, screen, setCluster } };
 })();
 
 window.App = App;

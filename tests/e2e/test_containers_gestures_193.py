@@ -15,6 +15,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 ACTION = "ct0000000193"
 
 
@@ -40,7 +42,6 @@ def view(context, flask_server):
         "if (!sessionStorage.getItem('ctg-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','containers');"
         "localStorage.removeItem('harvester_ops_containers');"
         "sessionStorage.setItem('ctg-init','1'); }")
     page = context.new_page()
@@ -68,7 +69,7 @@ def view(context, flask_server):
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('containers'))
     page.wait_for_function("window.Containers && window.App && App.getCurrentCluster()")
     page.mouse.move(1200, 600)
     rows = page.locator("#containers-host tbody tr[data-ct-row]")

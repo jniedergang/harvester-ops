@@ -26,6 +26,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent))
 import kvm_form_fakes as F  # noqa: E402
 
@@ -35,13 +37,12 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvmr-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvmr-init','1'); }")
     page = context.new_page()
     state = F.install(page, {})
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
     page.wait_for_function("window.KVM && window.App && window.KVMForm && window.VMForm && window.CloudInitForm")
     page.mouse.move(1200, 600)
     return page, state, dialogs
@@ -67,7 +68,7 @@ def created_spec(state):
 
 
 def open_menu(page, name):
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     row = page.locator("#tab-kvmvms tr[data-kvm-vm]").filter(has=page.locator(".kvm-vm-name", has_text=name)).first
     expect(row).to_be_visible()
     row.locator('[data-kvm="menu"]').click()
@@ -345,7 +346,7 @@ def test_restart_badge_comes_from_the_list_and_the_local_flag_falls_when_the_vm_
     vms = [dict(v) for v in F.VMS]
     vms[0].update(id=12, pending=["display.video"])
     state["vms"] = vms
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     row = page.locator('#tab-kvmvms tr[data-kvm-vm="node2/kvmtest-1"]')
     expect(row).to_contain_text("restart needed")
     # repère local (appris par une modification) : tombe quand la VM est vue arrêtée

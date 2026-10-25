@@ -282,6 +282,14 @@ Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
 onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert
 une fois connecté.
 
+Le menu de la 1.x (sélecteur de cluster, groupes par cluster) est retiré.
+Les anciens liens ouvrent toujours leur écran : `#storage` ouvre Paramètres
+> Stockage du dernier hôte Harvester visité, `#allvms` ouvre `#vms`,
+`#kvmhosts` l'index des hôtes, `#forkliftglobal` les Migrations ; le
+CHANGELOG de la 2.0.0 donne chaque ancien emplacement et sa nouvelle
+adresse. Ouvrir la console sans adresse montre `#vms` ; la première fois
+après la mise à jour, c'est le dernier écran ouvert qui s'affiche.
+
 ### Page d'un hôte (Harvester)
 
 Un hôte Harvester s'ouvre sur une page avec un bandeau en tête : la famille,

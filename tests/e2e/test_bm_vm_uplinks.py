@@ -47,8 +47,7 @@ def test_optional_vm_nics_preview_and_launch_payload(context, flask_server):
     page.route(base + '/api/**', api)
     page.goto(base, wait_until="domcontentloaded")
     page.wait_for_function("window.BMC && window.FloatingPanels && window.i18n")
-    page.click('.tab-group-head[data-group="automation"]')
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1300, 450)
     form = page.locator('#bmc-discover-form')
     form.locator('[name="hosts"]').fill(HOST)

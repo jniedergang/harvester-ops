@@ -241,7 +241,8 @@ def test_the_first_start_creates_the_administrator(browser, blank_server):
     m.locator('button[type="submit"]').click()
     expect(m.locator(".my-password-msg")).to_contain_text("changé")
     page.goto(base + "/setup")
-    assert page.url.endswith("/")                     # la porte est refermée
+    # la porte est refermée : la console, dont l'adresse vide ouvre #vms (2.0.0)
+    assert page.url.split("#", 1)[0].endswith("/") and "/setup" not in page.url
     ctx.close()
 
 

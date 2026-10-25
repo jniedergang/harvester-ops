@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import settle  # noqa: E402
+
 KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJdDpkg ops@lab"
 
 
@@ -28,7 +30,6 @@ def sse(events):
 def open_view(page, lang="fr"):
     page.evaluate(f"""async () => {{
       localStorage.setItem('harvester_ops_language', '{lang}');
-      localStorage.setItem('harvester_ops_current_tab', 'automation');
       localStorage.setItem('harvester_ops_automation_subtab', 'terraform');
       localStorage.setItem('harvester_ops_tf_subtab', 'decls');
       localStorage.removeItem('harvester_ops_tfd_tab');
@@ -36,10 +37,13 @@ def open_view(page, lang="fr"):
       const d = await fetch('/api/tf-declarations').then(r => r.json());
       for (const x of d.declarations || []) await fetch('/api/tf-declarations/' + x.id, {{ method: 'DELETE' }});
     }}""")
+    # 2.0.0 : Automatisation > Terraform par son adresse, rechargée
+    page.evaluate("history.replaceState(null, '', '#automation/terraform')")
     page.reload()
+    settle(page)
     page.wait_for_function("window.TFDecl && window.TFDeclView && window.TF")
     page.evaluate("window.TFDecl.ready")
-    page.evaluate("document.querySelector('.tab-child[data-subtab=terraform]')?.click()")
+    page.locator('#host-nav [data-hnav-root="automation"][data-hnav-tab="terraform"]').click()   # entrée du menu
     page.wait_for_selector("#tf-decls-view .tfd", timeout=8000)
 
 

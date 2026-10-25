@@ -27,7 +27,6 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   first result. **Add a host** opens a window with two choices, Harvester or
   KVM. Folders, Virtual machines, Containers, Disaster Recovery and
   Migrations of the whole fleet sit around it. Every entry is a real link.
-  The previous menu stays below until it is removed.
 - **Harvester host page.** A band on top of the existing sections: family,
   name, state, version, VM count, the host's sub-menu and **Activity of this
   host**. **Parameters** become tabs: Nodes (block view, maintenance, host
@@ -85,6 +84,35 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
 ### Changed
+- **The 1.x menu is removed**: no more cluster selector, `+` button or
+  per-cluster groups (Cluster, Virtual machines, Containers, Shared
+  resources, KVM, Disaster Recovery, VM Import / Export, Automation,
+  Activity). Every screen keeps an address and an entry of the new menu;
+  the old tokens (`#storage`, `#allvms`, `#kvmhosts`, `#forkliftglobal`...)
+  still open their screen. Correspondence:
+
+  | 1.x | 2.0.0 |
+  |---|---|
+  | Cluster selector, `+` | Hosts in the side menu, Add a host |
+  | Cluster > Overview (Metrics, Cluster, Events), Upgrade button | `#harvester/<c>`, `.../params/nodes`, `.../overview/events`, `.../params/upgrade` |
+  | Cluster > Storage, Network, Add-ons, Security, Monitoring & Logging, Advanced | `#harvester/<c>/params/<storage, network, addons, security, monlog, advanced>` |
+  | Cluster > Startup, Shutdown | `#harvester/<c>/params/power/<startup, shutdown>` |
+  | Cluster > Disaster Recovery | `#harvester/<c>/dr` |
+  | Settings > Cluster accounts | `#harvester/<c>/params/security/accounts` |
+  | Current cluster's VMs, containers | `#harvester/<c>/vms`, `#harvester/<c>/containers` |
+  | All clusters VMs, containers | `#vms`, `#containers` |
+  | Shared resources > GPU, Bookings, Usage | `#gpus`, `#bookings`, `#usage` |
+  | KVM > Hosts | `#hosts/kvm`, `#kvm/<h>`, `#kvm/<h>/params/conn` |
+  | KVM > Virtual machines, Storage, Networks | `#vms/host/kvm`, `#kvm/<h>/vms`, `#kvm/<h>/params/pools`, `#kvm/<h>/params/networks` |
+  | VM Import, VMware migrations | `#harvester/<c>/imports/vmimport`, `.../imports/forklift` |
+  | Migrations (all clusters) | `#migrations` |
+  | Disaster Recovery > Contracts, Links | `#dr`, `#dr/links` |
+  | Automation > Cluster API, Terraform, Bare-metal | `#automation/<capi, terraform, pxe>` |
+  | Activity | `#activity`, `#activity/host/<kind>/<name>` |
+- **An empty address opens `#vms`** (All clusters VMs until the unified VMs
+  view arrives). The first time 2.0.0 opens in a browser, the last screen
+  of the 1.x menu is reopened once instead, then forgotten. An address that
+  matches no screen opens `#vms` with a notice.
 - **A link to a host you cannot see** (removed, or hidden by Rancher), and
   an old token that needs a host while none is visible, open the hosts
   index with a notice instead of the default screen.
@@ -100,6 +128,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Tests
+- `tests/nav_inventory.py` (one table of every screen: old place, address,
+  section, selector, old tokens), `tests/api/test_nav_inventory_200.py`
+  (every section of the template reached, every address resolving to its
+  section, every old token with its line, old menu gone, a deliberate
+  orphan section caught) and `tests/e2e/test_nav_inventory_200.py` (every
+  address loaded cold shows its screen).
+- The e2e tests that clicked the old menu or set the last tab in the
+  browser now open the screen by its address (`nav.goto`).
 - `tests/e2e/test_fleet_roots_200.py`: every fleet root loaded cold with
   its menu entry active, the management cluster shown is the one Cluster
   API calls (and Terraform reads), changing it keeps the open host,

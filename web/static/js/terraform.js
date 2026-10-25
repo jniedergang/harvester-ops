@@ -724,8 +724,7 @@ const TF = (() => {
     });
     // Refresh when the Terraform sub-tab becomes active
     document.addEventListener('click', (e) => {
-      if (e.target.closest('#tab-automation .sub-tab[data-subtab="terraform"]') ||
-          e.target.closest('.tab-child[data-subtab="terraform"]')) {
+      if (e.target.closest('#tab-automation .sub-tab[data-subtab="terraform"]')) {
         setTimeout(refresh, 50);
       }
     });

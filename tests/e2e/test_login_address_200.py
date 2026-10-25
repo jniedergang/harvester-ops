@@ -57,7 +57,7 @@ def test_an_unknown_or_crafted_address_is_forgotten(browser, local_server):
     sign_in(page)
     page.wait_for_url(re.compile(re.escape(local_server) + r"/(#.*)?$"))
     settle(page)
-    assert page.evaluate("location.hash") in ("", "#harvester/harv-fake")
+    assert page.evaluate("location.hash") in ("#vms", "#harvester/harv-fake")   # 2.0.0 : #vms par défaut
     assert page.evaluate("window.__xss") is None
     ctx.close()
 

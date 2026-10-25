@@ -1454,8 +1454,7 @@ const BMC = (() => {
       // le panneau de contenu porte le même attribut, si bien qu'un simple
       // clic sur un bouton de l'onglet reconstruisait tout 50 ms plus tard
       // et effaçait le résultat de la découverte qui venait de s'afficher.
-      if (e.target.closest('#tab-automation .sub-tab[data-subtab="pxe"]')
-          || e.target.closest('.tab-child[data-subtab="pxe"]')) {
+      if (e.target.closest('#tab-automation .sub-tab[data-subtab="pxe"]')) {
         setTimeout(render, 50);
       }
     });

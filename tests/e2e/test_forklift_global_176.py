@@ -17,6 +17,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 READY = {"ready": True, "cert_manager": True, "cert_manager_missing": [], "addon": "ready",
          "addon_message": "the forklift-operator add-on is deployed", "operator": True, "controller": True,
          "components_missing": [], "running": True, "inventory_access": True}
@@ -72,9 +74,9 @@ def fulfill(route, body, status=200):
 @pytest.fixture
 def two_clusters(flask_server, api):
     """Déclare un second cluster le temps du test, pour qu'il apparaisse
-    dans #cluster-select (même patron que test_cluster_switch.py) : la vue
-    globale elle-même est entièrement routée, mais le clic sur une vague
-    passe par le sélecteur réel, qui est rendu côté serveur."""
+    dans la liste des clusters (même patron que test_cluster_switch.py) : la
+    vue globale elle-même est entièrement routée, mais le clic sur une vague
+    ouvre la page de l'hôte réel, connu du serveur (2.0.0)."""
     payload = {
         "name": "harv-second",
         "description": "second cluster (vue globale Forklift)",
@@ -91,26 +93,28 @@ def two_clusters(flask_server, api):
 def open_global(context, flask_server, data=GLOBAL_DATA, initial_cluster="harv-second"):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        f"localStorage.setItem('harvester_ops_current_cluster','{initial_cluster}');"
-        "localStorage.setItem('harvester_ops_current_tab','forkliftglobal');")
+        f"localStorage.setItem('harvester_ops_current_cluster','{initial_cluster}');")
     page = context.new_page()
     page.route("**/api/forklift-global", lambda r, q: fulfill(r, data() if callable(data) else data))
     page.route(re.compile(r".*/api/forklift/harv-fake(\?.*)?$"), lambda r, q: fulfill(r, FK_TAB_DATA))
     page.route(re.compile(r".*/api/forklift/harv-second(\?.*)?$"), lambda r, q: fulfill(r, FK_TAB_UNREACHABLE))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    # 2.0.0 : la racine Migrations, par son adresse
+    goto(page, flask_server["base_url"], address("forkliftglobal"))
     page.wait_for_function("window.ForkliftGlobal && window.Sections && window.App && App.getCurrentCluster()")
     return page
 
 
 def test_the_entry_sits_in_the_vm_import_export_section(context, flask_server):
-    # 1.77.0 : l'entrée a quitté le voisinage d'Activity pour la section
-    # VM Import / Export ; jamais sous Cluster ni sous Automation
+    # 1.77.0 : l'entrée a quitté le voisinage d'Activity ; 2.0.0 : racine
+    # Migrations du menu des hôtes (active ici), jamais dans le sous-menu
+    # d'un hôte ni sous Automatisation
     page = open_global(context, flask_server)
-    entry = page.locator('#tab-group-vmio .tab[data-tab="forkliftglobal"]')
+    entry = page.locator('#host-nav [data-hnav-root="migrations"]')
     expect(entry).to_be_visible()
+    expect(entry).to_have_class(re.compile(r"\bactive\b"))
     assert entry.get_attribute("data-i18n-title") or entry.get_attribute("title")
-    assert page.locator('#tab-group-cluster .tab[data-tab="forkliftglobal"]').count() == 0
-    assert page.locator('#tab-group-automation .tab[data-tab="forkliftglobal"]').count() == 0
+    assert page.locator('#host-nav .hnav-sub a[href="#migrations"]').count() == 0
+    assert page.locator('#hnav-automation a[href="#migrations"]').count() == 0
     assert page.locator('#tab-forkliftglobal')
 
 
@@ -170,12 +174,14 @@ def test_the_vcenter_filter_lists_every_declared_source(context, flask_server):
 
 def test_clicking_a_wave_switches_cluster_and_opens_the_waves_tab(context, flask_server, two_clusters):
     page = open_global(context, flask_server, initial_cluster="harv-second")
-    assert page.locator('#cluster-select').input_value() == "harv-second"
+    assert page.evaluate("App.getCurrentCluster()") == "harv-second"
     row = page.locator('#tab-forkliftglobal tr[data-fkg-wave="vague-2"]')
     expect(row).to_be_visible(timeout=10000)
     row.click()
     page.wait_for_function("App.getCurrentCluster() === 'harv-fake'", timeout=10000)
-    assert page.locator('#cluster-select').input_value() == "harv-fake"
+    # 2.0.0 : le bandeau de l'hôte et l'adresse disent le nouveau cluster
+    expect(page.locator("#host-page-head .hp-name")).to_have_text("harv-fake")
+    assert page.evaluate("location.hash") == "#harvester/harv-fake/imports/forklift/waves"
     expect(page.locator('.tab-content.active')).to_have_id("tab-forklift")
     expect(page.locator('#tab-forklift [data-section-tab="waves"]')).to_have_class(re.compile(r"\bactive\b"))
     expect(page.locator('#tab-forklift .section-pane[data-pane="waves"]')).to_be_visible()

@@ -17,13 +17,14 @@ import pytest
 
 playwright = pytest.importorskip("playwright")
 
+from nav import address, goto  # noqa: E402
+
 
 def open_panel(page, base_url, lang='en'):
     page.context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
-    page.goto(base_url, wait_until="domcontentloaded")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address('namespaces'))
     page.wait_for_timeout(1500)
     page.click('#btn-vm-create')
     page.wait_for_selector('#fp-vm-create', timeout=10000)

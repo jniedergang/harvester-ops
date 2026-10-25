@@ -272,6 +272,14 @@ Every entry is a real link: middle click opens it in a new tab, and the
 address can be copied. A link opened before signing in is opened again once
 signed in.
 
+The menu of 1.x (cluster selector, per-cluster groups) is gone. Old links
+still open their screen: `#storage` opens Parameters > Storage of the last
+Harvester host visited, `#allvms` opens `#vms`, `#kvmhosts` the hosts index,
+`#forkliftglobal` Migrations; the CHANGELOG of 2.0.0 lists every old place
+and its new address. Opening the console without an address shows
+`#vms`; the first time after the upgrade, it shows the last screen you had
+open instead.
+
 ### Host page (Harvester)
 
 A Harvester host opens on a page with a band on top: the family, the name,

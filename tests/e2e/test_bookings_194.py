@@ -16,6 +16,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 ACTION = "bk0000000194"
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 
@@ -76,7 +78,6 @@ def ui(context, flask_server):
         "if (!sessionStorage.getItem('bkg-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');"
         "localStorage.removeItem('harvester_ops_bookings');"
         "localStorage.removeItem('harvester_ops_gpus');"
         "sessionStorage.setItem('bkg-init','1'); }")
@@ -129,7 +130,7 @@ def ui(context, flask_server):
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('namespaces'))
     page.wait_for_function("window.Bookings && window.App && App.getCurrentCluster()")
     page.mouse.move(1200, 600)
     return page, sent, dialogs
@@ -144,11 +145,12 @@ def open_bookings(page):
 
 def test_bookings_lives_under_shared_resources_and_says_it_is_not_enforced(ui):
     page, _, _ = ui
-    group = page.locator("#tab-group-shared")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings", "usage"]
-    assert group.locator('.tab[data-tab="bookings"]').get_attribute("title")
+    # 2.0.0 : groupe « Ressources partagées » du menu des hôtes
+    group = page.locator("#hnav-shared")
+    assert group.locator("[data-hnav-root]").evaluate_all("els => els.map(e => e.dataset.hnavRoot)") == ["gpus", "bookings", "usage"]
+    assert group.locator('[data-hnav-root="bookings"]').get_attribute("title")
     pane = open_bookings(page)
-    expect(group.locator('.tab[data-tab="bookings"]')).to_have_class(re.compile("active"))
+    expect(group.locator('[data-hnav-root="bookings"]')).to_have_class(re.compile("active"))
     expect(pane.locator(".bkg-notice")).to_contain_text("not yet enforced on the cluster")
     for el in pane.locator(".res-tools button, .res-tools select").all():
         assert el.get_attribute("data-tip"), el.evaluate("e => e.outerHTML")
@@ -275,7 +277,7 @@ def test_container_form_hints_availability_and_links_to_bookings(ui):
     expect(hint).to_contain_text("2 free now of 4, 2 booked now", timeout=5000)
     expect(hint).not_to_contain_text("H100")                               # les GPU de conteneurs seulement
     hint.locator("[data-bkg-open]").click()
-    expect(page.locator('#tab-group-shared .tab[data-tab="bookings"]')).to_have_class(re.compile("active"))
+    expect(page.locator('#hnav-shared [data-hnav-root="bookings"]')).to_have_class(re.compile("active"))
 
 
 def test_calendar_shows_every_bookable_pool_with_what_is_free(ui):

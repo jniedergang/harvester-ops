@@ -167,9 +167,13 @@
     const cur = route && route.name === 'host' ? (route.sub || 'overview') : null;
     return `<div class="hnav-sub" role="group" aria-label="${esc(h.name)}">${SUB[h.kind].map(([sub, ic, label, tip]) => {
       const on = cur === sub || (sub === 'overview' && cur === 'overview');
+      // Disaster Recovery d'un cluster : la pastille d'alertes de l'ancienne
+      // entrée Cluster > Disaster Recovery (peinte par Replication.paintBadges)
+      const badge = sub === 'dr' && h.kind === 'harvester'
+        ? ' <span class="rp-menu-badge tip" data-rp-badge="cluster" hidden></span>' : '';
       return `<a class="tab tab-child hnav-entry${on ? ' active' : ''}" data-hnav="sub" data-sub="${esc(sub)}"
         href="${esc(subHref(h.kind, h.name, sub))}" title="${esc(tip())}"${on ? ' aria-current="page"' : ''}>
-        <span class="tab-icon">${icon(ic, 16)}</span> <span class="sidebar-label">${esc(label())}</span></a>`;
+        <span class="tab-icon">${icon(ic, 16)}</span> <span class="sidebar-label">${esc(label())}</span>${badge}</a>`;
     }).join('')}</div>`;
   }
 
@@ -283,6 +287,8 @@
     renderFamilies();
     renderResults();
     paintRoots();
+    // les pastilles d'alertes DR suivent un menu redessiné
+    if (root.Replication && Replication.paintBadges) Replication.paintBadges();
   }
 
   /** Le routeur a changé d'écran : hôte ouvert et entrée active. */

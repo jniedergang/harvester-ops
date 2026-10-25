@@ -4,11 +4,14 @@ formulaires de source (identifiants saisis) et d'import (correspondance des
 réseaux, options VMware), raison d'un blocage lue dans le journal."""
 
 import json
+import re
 
 import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+
+from nav import address, goto  # noqa: E402
 
 DATA = {"cluster": "harv-fake", "addon": {"enabled": True, "status": "AddonDeploySuccessful"}, "crds": True,
         "sources": [{"type": "ova", "kind": "OvaSource", "namespace": "mig", "name": "ova1", "endpoint": "http://10.0.0.1/a.ova",
@@ -39,8 +42,7 @@ def fulfill(route, body, status=200):
 def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -52,7 +54,7 @@ def ui(context, flask_server):
     page.route("**/api/vmimport-log/harv-fake/**", lambda r, q: fulfill(r, LOG))
     page.route("**/api/stream/vi0000000171", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))   # 2.0.0 : VMs de l'hôte
     page.wait_for_function("window.VMImport && window.Sections && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent
@@ -65,8 +67,11 @@ def pane(page, kind):
 
 def test_imports_show_their_step_the_image_progress_and_why_they_are_blocked(ui):
     page, sent = ui
-    assert page.locator('.tab[data-tab="vmimport"]').get_attribute("data-i18n-title") == "tab.vmimportTip"
     body = pane(page, "imports")
+    # 2.0.0 : l'onglet Import de VM du bandeau de l'hôte, avec son info-bulle traduite
+    tab = page.locator('#host-page-head .hp-tabs a[data-hp-tab="vmimport"]')
+    expect(tab).to_have_class(re.compile(r"\bactive\b"))
+    assert tab.get_attribute("title") == page.evaluate("i18n.t('tab.vmimportTip')")
     row = body.locator('tr[data-name="imp"]')
     expect(row).to_contain_text("importing images", timeout=8000)
     expect(row).to_contain_text("step 4 of 7")
@@ -146,12 +151,11 @@ def test_a_vmware_source_pane_links_to_forklift(ui):
 def test_a_disabled_add_on_is_said(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     page.route("**/api/vmimport/harv-fake", lambda r, q: fulfill(r, {**DATA, "addon": {"enabled": False, "status": "AddonDisabled"},
                                                                      "crds": False, "sources": [], "imports": []}))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))   # 2.0.0 : VMs de l'hôte
     page.wait_for_function("window.VMImport && window.Sections && window.App && App.getCurrentCluster()")
     body = pane(page, "imports")
     expect(body.locator('[data-vi="open-addons"]')).to_be_visible(timeout=8000)

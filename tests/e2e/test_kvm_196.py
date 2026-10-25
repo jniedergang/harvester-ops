@@ -1,6 +1,11 @@
 """v1.96.0 : la section KVM de la console, API simulée.
 
-Groupe KVM de la barre latérale (titres traduits), blocs des hôtes (dont un
+2.0.0 : l'ancien groupe KVM du menu est retiré ; la famille KVM du menu des
+hôtes et le sous-menu d'un hôte KVM (titres traduits) le remplacent, les
+vues s'ouvrent par leur adresse (`#kvm/<h>`, `#vms/host/kvm`,
+`#kvm/<h>/params/pools|networks`, `#hosts/kvm` pour Déclarer).
+
+Famille KVM du menu (titres traduits), blocs des hôtes (dont un
 hôte injoignable qui dit pourquoi), tableau des VMs (filtres, tri), menu des
 gestes grisés selon l'état (table des refus servie par le serveur), arrêt
 forcé confirmé dans la page (jamais `confirm()`), résultat honnête d'un
@@ -16,6 +21,8 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+
+from nav import goto, settle  # noqa: E402
 
 EVIL = "<img src=x onerror=alert(1)>"
 FP_ED = "SHA256:81Nop5uq4NBaqU/hzSyopOIxSoyytc6DgyLZd5/xXJY"
@@ -64,7 +71,7 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvm-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
+        "localStorage.setItem('harvester_ops_sidebar_pinned','1');"
         "sessionStorage.setItem('kvm-init','1'); }")
     page = context.new_page()
     state = {"sent": [], "streams": {}, "role": "admin", "gets": []}
@@ -81,7 +88,7 @@ def ui(context, flask_server):
                 decls = [{k: h[k] for k in ("name", "address", "port", "user", "uri", "labels")} for h in (NODE2, GHOST)]
                 return ok(route, {"hosts": decls, "warnings": [], "role": state["role"], "gestures": GESTURES})
             if path == "hosts/ghost":
-                return ok(route, GHOST, 502)
+                return ok(route, dict(GHOST, role=state["role"]), 502)
             if path == "hosts":
                 return ok(route, {"hosts": [NODE2, GHOST], "warnings": [], "role": state["role"], "gestures": GESTURES})
             if path == "vms":
@@ -89,7 +96,7 @@ def ui(context, flask_server):
                                   "hosts": [{"name": "node2", "state": "ok", "count": 5},
                                             {"name": "ghost", "state": "unreachable", "error": GHOST["error"]["message"]}]})
             if path == "hosts/node2":
-                return ok(route, DETAIL)
+                return ok(route, dict(DETAIL, role=state["role"]))
             if path.startswith("vms/node2/"):
                 name = path.split("/", 2)[2]
                 return ok(route, {"name": name, "host": "node2", "state": "running", "vcpus": 4, "memory_kib": 8388608,
@@ -137,51 +144,77 @@ def ui(context, flask_server):
         status=200, content_type="text/event-stream", body=state["streams"].get(q.url.rsplit("/", 1)[1], sse([]))))
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    # 2.0.0 : le menu des hôtes et l'index lisent /api/hosts, le rôle vient de whoami
+    page.route(re.compile(r".*/api/hosts$"), lambda r, q: ok(r, {"families": {}, "hosts": [
+        {"kind": "kvm", "name": "node2", "state": "ok", "error": None, "vm_count": 5, "labels": {"site": "cave"},
+         "version": "12.7.0", "favorite": False, "folder": None, "origin": "console"},
+        {"kind": "kvm", "name": "ghost", "state": "unreachable", "error": "No route to host", "vm_count": None,
+         "labels": {}, "version": None, "favorite": False, "folder": None, "origin": "console"}]}))
+    page.route(re.compile(r".*/api/whoami$"), lambda r, q: ok(r, {"role": state["role"], "roles_active": True,
+                                                                  "user": "u", "auth": "local"}))
+    goto(page, flask_server["base_url"], "#activity")
     page.wait_for_function("window.KVM && window.App")
     page.mouse.move(1200, 600)
+    page.base_url = flask_server["base_url"]
     return page, state, dialogs
 
 
-def open_tab(page, tab):
-    page.locator(f'#tab-group-kvm .tab[data-tab="{tab}"]').evaluate("el => el.click()")
+# 2.0.0 : ancien onglet du groupe KVM -> adresse (Hôtes et Stockage/Réseaux par hôte)
+def kvm_address(tab, host="node2"):
+    return {"kvmhosts": f"#kvm/{host}", "kvmvms": "#vms/host/kvm",
+            "kvmstorage": f"#kvm/{host}/params/pools", "kvmnetworks": f"#kvm/{host}/params/networks"}[tab]
+
+
+def open_tab(page, tab, host="node2"):
+    page.evaluate(f"Router.go({json.dumps(kvm_address(tab, host))})")
+    page.evaluate("Router.idle()")
     pane = page.locator(f"#tab-{tab}")
     expect(pane.locator(".kvm-card")).to_be_visible()
     return pane
 
 
 def test_sidebar_has_the_kvm_group_with_translated_titles(ui):
+    """2.0.0 : le groupe KVM est la famille KVM du menu des hôtes (après
+    Harvester) ; le sous-menu d'un hôte KVM porte les quatre entrées, aux
+    titres traduits."""
     page, _, _ = ui
-    groups = page.locator("nav .tab-group").evaluate_all("els => els.map(e => e.id)")
-    assert groups[groups.index("tab-group-shared") + 1] == "tab-group-kvm"
-    group = page.locator("#tab-group-kvm")
-    expect(group.locator(".tab-group-head .sidebar-label")).to_have_text("KVM")
-    tabs = group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)")
-    assert tabs == ["kvmhosts", "kvmvms", "kvmstorage", "kvmnetworks"]
-    for t in group.locator(".tab").all():
-        key = t.get_attribute("data-i18n-title")
+    families = page.locator("#hnav-families .hnav-fam").evaluate_all("els => els.map(e => e.dataset.family)")
+    assert families[families.index("harvester") + 1] == "kvm"
+    group = page.locator('#hnav-families .hnav-fam[data-family="kvm"]')
+    expect(group.locator(".hnav-fam-name")).to_contain_text("KVM")
+    open_tab(page, "kvmhosts")
+    sub = group.locator(".hnav-sub")
+    tabs = sub.locator("a[data-sub]").evaluate_all("els => els.map(e => e.dataset.sub)")
+    assert tabs == ["overview", "vms", "params", "dr"]
+    for key, t in zip(["hnav.sub.overviewKvmTip", "hnav.sub.vmsKvmTip", "hnav.sub.paramsKvmTip", "hnav.sub.drKvmTip"],
+                      sub.locator("a[data-sub]").all()):
         assert t.get_attribute("title") == page.evaluate(f"i18n.t('{key}')")
-    page.evaluate("i18n.setLang('fr')")
-    expect(group.locator('.tab[data-tab="kvmhosts"] .sidebar-label')).to_have_text("Hôtes")
-    assert group.locator('.tab[data-tab="kvmstorage"]').get_attribute("title").startswith("Les pools de stockage")
-    page.evaluate("i18n.setLang('en')")
+    page.evaluate("i18n.setLang('fr'); HostNav.render(); HostPage.render()")
+    expect(sub.locator('a[data-sub="vms"] .sidebar-label')).to_have_text("Machines virtuelles")
+    assert sub.locator('a[data-sub="params"]').get_attribute("title").startswith("Versions, CPU et mémoire, pools")
+    expect(page.locator('#host-page-head .hp-tabs [data-hp-tab="pools"], #host-page-head .hp-sub-link[data-hp-sub="params"]').first).to_be_visible()
+    page.evaluate("i18n.setLang('en'); HostNav.render(); HostPage.render()")
 
 
 def test_host_cards_including_an_unreachable_host(ui):
+    """2.0.0 : un bloc par page d'hôte (#kvm/<h>) ; les deux hôtes se lisent
+    chacun sur la sienne."""
     page, state, dialogs = ui
-    pane = open_tab(page, "kvmhosts")
+    pane = open_tab(page, "kvmhosts", "ghost")
+    ghost = pane.locator('[data-kvm-host="ghost"]')
+    expect(pane.locator("[data-kvm-host]")).to_have_count(1)
+    expect(ghost).to_have_class(re.compile("is-error"))
+    expect(ghost.locator(".badge.fail")).to_have_text("unreachable")
+    assert "No route to host" in ghost.locator(".badge.fail").get_attribute("data-tip")
+    pane = open_tab(page, "kvmhosts", "node2")
     tiles = pane.locator("[data-kvm-host]")
-    expect(tiles).to_have_count(2)
+    expect(tiles).to_have_count(1)
     node2 = pane.locator('[data-kvm-host="node2"]')
     expect(node2).to_contain_text("28 CPU")
     expect(node2).to_contain_text("libvirt 12.7.0 · QEMU 10.2.2")
     expect(node2).to_contain_text("5 VM(s)")
     expect(node2.locator(".kvm-labels")).to_contain_text("site=cave")
     expect(node2.locator(".badge.ok").first).to_have_text("reachable")
-    ghost = pane.locator('[data-kvm-host="ghost"]')
-    expect(ghost).to_have_class(re.compile("is-error"))
-    expect(ghost.locator(".badge.fail")).to_have_text("unreachable")
-    assert "No route to host" in ghost.locator(".badge.fail").get_attribute("data-tip")
     for el in pane.locator(".res-tools button, .res-tools select, [data-kvm-host] button").all():
         assert el.get_attribute("data-tip"), el.evaluate("e => e.outerHTML")
     # tester : une action, puis les points un par un
@@ -201,8 +234,12 @@ def test_host_cards_including_an_unreachable_host(ui):
 def test_viewer_cannot_declare_test_or_remove(ui):
     page, state, _ = ui
     state["role"] = "viewer"
+    # 2.0.0 : Déclarer est sur l'index des hôtes KVM (rôle lu par whoami au chargement)
+    goto(page, page.base_url, "#hosts/kvm")
+    page.reload(wait_until="domcontentloaded")          # même document : relire whoami
+    settle(page)
+    expect(page.locator('#hosts-index-host [data-hix="add"]')).to_be_disabled()
     pane = open_tab(page, "kvmhosts")
-    expect(pane.locator('[data-kvm="declare"]')).to_be_disabled()
     expect(pane.locator('[data-kvm-host="node2"] [data-kvm="test"]')).to_be_disabled()
     expect(pane.locator('[data-kvm-host="node2"] [data-kvm="remove"]')).to_be_disabled()
 
@@ -310,6 +347,8 @@ def test_hostile_vm_name_is_escaped(ui):
 
 def test_storage_and_networks(ui):
     page, state, _ = ui
+    pane = open_tab(page, "kvmstorage", "ghost")
+    expect(pane.locator('[data-kvm-block="ghost"] .badge.fail')).to_have_text("unreachable")
     pane = open_tab(page, "kvmstorage")
     block = pane.locator('[data-kvm-block="node2"]')
     expect(block.locator('tr[data-kvm-pool="default"]')).to_contain_text("100.0 GiB")
@@ -317,7 +356,7 @@ def test_storage_and_networks(ui):
     expect(block.locator('tr[data-kvm-pool="iso"]')).to_contain_text("inactive pool")
     block.locator('tr[data-kvm-pool="default"] summary').click()
     expect(block.locator(".kvm-vols")).to_contain_text("web.qcow2")
-    expect(pane.locator('[data-kvm-block="ghost"] .badge.fail')).to_have_text("unreachable")
+    assert pane.locator('[data-kvm-block="ghost"]').count() == 0          # hôte imposé : node2 seul
     pane = open_tab(page, "kvmnetworks")
     row = pane.locator('[data-kvm-block="node2"] tr[data-kvm-net="default"]')
     expect(row).to_contain_text("nat")
@@ -330,8 +369,10 @@ def test_storage_and_networks(ui):
 
 def test_declare_window_requires_an_explicit_fingerprint(ui):
     page, state, dialogs = ui
-    pane = open_tab(page, "kvmhosts")
-    pane.locator('[data-kvm="declare"]').click()
+    # 2.0.0 : « Déclarer un hôte » de KVM > Hôtes est sur l'index #hosts/kvm
+    page.evaluate("Router.go('#hosts/kvm')")
+    page.evaluate("Router.idle()")
+    page.locator('#hosts-index-host [data-hix="add"]').click()
     panel = page.locator(".floating-panel", has=page.locator(".kvm-declare"))
     f = panel.locator("form")
     f.locator('[name="address"]').fill("172.16.1.12")

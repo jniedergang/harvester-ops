@@ -1,12 +1,12 @@
 /**
- * harvester-ops : routeur des adresses (navigation 2.0, étape 1)
+ * harvester-ops : routeur des adresses (navigation 2.0)
  *
  * Écoute le chargement et `hashchange`, lit l'adresse avec Routes, et montre
- * l'écran ACTUEL le plus proche par un seul point d'entrée (apply) : le
- * cluster d'abord, puis l'onglet, puis le pane. L'interface ne change pas
- * encore (le nouveau menu arrive à l'étape 2) : les adresses de la 2.0
- * (#hosts, #vms/folder/..., #kvm/<h>...) ouvrent l'écran voisin, et
- * l'adresse vide restaure le dernier écran comme avant.
+ * l'écran par un seul point d'entrée (apply) : le cluster d'abord, puis
+ * l'onglet, puis le pane. Depuis la 2.0.0 c'est la seule façon d'ouvrir un
+ * écran (l'ancien menu est retiré) : l'adresse vide ouvre #vms (le dernier
+ * écran de la 1.x une seule fois), un hôte invisible ouvre l'index des
+ * hôtes avec un message, une adresse illisible #vms avec un message.
  *
  * resolve() et screenHash() sont purs (testés dans node) ; le reste parle à
  * App, Sections et AccessNotice.
@@ -143,7 +143,30 @@
   const ls = {
     get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch (e) { /* sans stockage */ } },
+    del(k) { try { localStorage.removeItem(k); } catch (e) { /* sans stockage */ } },
   };
+
+  // 2.0.0 (décision 2) : l'adresse vide ouvre #vms. À la toute première
+  // ouverture de la 2.0.0 dans ce navigateur, le dernier écran de l'ancien
+  // menu (onglet retenu par la 1.x) est rouvert une seule fois, puis oublié.
+  const DEFAULT_HASH = '#vms';
+  const NAV2_SEEN = 'harvester_ops_nav2_seen';
+  const OLD_TAB = 'harvester_ops_current_tab';
+
+  /** Adresse d'une adresse vide (pur sauf localStorage, testé en e2e). */
+  function emptyTarget() {
+    if (ls.get(NAV2_SEEN)) return DEFAULT_HASH;
+    ls.set(NAV2_SEEN, '1');
+    const tab = ls.get(OLD_TAB);
+    ls.del(OLD_TAB);
+    if (!tab || !/^[a-z]{2,32}$/.test(tab)) return DEFAULT_HASH;
+    const h = screenHash({
+      tab, cluster: ls.get('harvester_ops_current_cluster'), pane: null,
+      overview: ls.get('harvester_ops_overview_subtab') || 'metrics',
+      automation: ls.get('harvester_ops_automation_subtab') || 'capi',
+    });
+    return h || DEFAULT_HASH;
+  }
 
   function screenNow() { return root.App && App._nav ? screenHash(App._nav.screen()) : null; }
 
@@ -181,18 +204,22 @@
     return r;
   }
 
-  /** Adresse illisible, hôte inconnu ou hors des droits : l'écran par
-   *  défaut, et le bandeau d'AccessNotice le dit (jamais une page vide). */
+  /** Adresse illisible : l'écran par défaut (#vms), et le bandeau
+   *  d'AccessNotice le dit (jamais une page vide). */
   async function fallback(raw, name, reason) {
-    history.replaceState(history.state, '', bareUrl());
-    await App._nav.restoreFromStorage();
+    history.replaceState(history.state, '', DEFAULT_HASH);
+    await App._nav.showRoute(Object.assign({}, resolve(R().parse(DEFAULT_HASH)), { tabFirst: false }));
     if (root.AccessNotice && AccessNotice.route) AccessNotice.route({ address: '#' + raw, name, reason });
   }
 
   async function apply(hash) {
     const Rt = R();
-    const raw = String(hash || '').replace(/^#/, '');
-    if (!raw) { await App._nav.restoreFromStorage(); return null; }
+    let raw = String(hash || '').replace(/^#/, '');
+    if (!raw) {
+      const target = emptyTarget();
+      history.replaceState(history.state, '', target);
+      raw = target.slice(1);
+    }
     let route = Rt.parse('#' + raw);
     let rewrite = false;
     if (route.name === 'unknown') {
@@ -205,7 +232,7 @@
       };
       const t = Rt.fromLegacy(raw, ctx);
       if (t && t.notice === 'no-host') return toHosts(raw, null, 'no-host');
-      if (!t) { await fallback(raw, null, 'unknown'); return null; }
+      if (!t) { await fallback(raw, null, 'unknown'); return R().parse(DEFAULT_HASH); }
       route = t;
       rewrite = true;
     }
@@ -214,7 +241,7 @@
       if (!v.visible) return toHosts(raw, route.host, v.reason);
     }
     const target = resolve(route);
-    if (!target) { await fallback(raw, null, 'unknown'); return null; }
+    if (!target) { await fallback(raw, null, 'unknown'); return R().parse(DEFAULT_HASH); }
     if (target.pane && root.Sections && Sections.remember) Sections.remember(target.tab, target.pane);
     if (target.automation) ls.set('harvester_ops_automation_subtab', target.automation);
     if (route.kind === 'kvm' && route.host) ls.set(LAST_KVM, route.host);
@@ -265,17 +292,6 @@
     return enqueue(h);
   }
 
-  /** Changement du sélecteur de cluster (en place jusqu'à l'étape 2). */
-  function selectCluster(name) {
-    if (!name) return Promise.resolve();
-    const s = App._nav.screen();
-    const h = screenHash(Object.assign({}, s, { cluster: name }));
-    const r = h ? R().parse(h) : null;
-    // un geste comme un clic : pas d'entrée d'historique (comme avant)
-    if (r && r.name === 'host' && r.kind === 'harvester') return go(r, { replace: true });
-    return App._nav.setCluster(name);
-  }
-
   /** L'écran a changé par un clic : l'adresse le suit, sans entrée
    *  d'historique, pour que F5 rende l'écran exact. */
   function syncFromScreen() {
@@ -311,7 +327,7 @@
   }
 
   const api = {
-    go, start, selectCluster, syncFromScreen, resolve, screenHash,
+    go, start, syncFromScreen, resolve, screenHash,
     current: () => current,
     /** Promesse de la fin des navigations en cours (tests). */
     idle: () => queue,

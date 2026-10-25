@@ -15,6 +15,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 ACTION = "us0000000195"
 
 
@@ -57,7 +59,6 @@ def open_usage(context, flask_server, rep):
         "if (!sessionStorage.getItem('usg-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');"
         "localStorage.removeItem('harvester_ops_usage');"
         "sessionStorage.setItem('usg-init','1'); }")
     page = context.new_page()
@@ -79,7 +80,7 @@ def open_usage(context, flask_server, rep):
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('namespaces'))
     page.wait_for_function("window.Usage && window.App && App.getCurrentCluster()")
     page.mouse.move(1200, 600)
     page.evaluate("App.setTab('usage')")
@@ -90,10 +91,11 @@ def open_usage(context, flask_server, rep):
 
 def test_usage_is_the_third_shared_resource_and_shows_the_table(context, flask_server):
     page, pane, seen, _, _ = open_usage(context, flask_server, report())
-    group = page.locator("#tab-group-shared")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings", "usage"]
-    assert group.locator('.tab[data-tab="usage"]').get_attribute("title")
-    expect(group.locator('.tab[data-tab="usage"]')).to_have_class(re.compile("active"))
+    # 2.0.0 : groupe « Ressources partagées » du menu des hôtes
+    group = page.locator("#hnav-shared")
+    assert group.locator("[data-hnav-root]").evaluate_all("els => els.map(e => e.dataset.hnavRoot)") == ["gpus", "bookings", "usage"]
+    assert group.locator('[data-hnav-root="usage"]').get_attribute("title")
+    expect(group.locator('[data-hnav-root="usage"]')).to_have_class(re.compile("active"))
     rows = pane.locator("tbody tr.usg-row")
     expect(rows).to_have_count(3)
     alice = pane.locator('tr[data-holder="user|alice"]')

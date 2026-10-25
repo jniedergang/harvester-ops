@@ -5811,3 +5811,7 @@ body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > 
 .mgmt-cluster-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
 .mgmt-cluster-bar[hidden] { display: none; }
 .mgmt-cluster-bar label { color: var(--text-dim); }
+/* 2.0.0 : les titres de groupe du menu des hôtes (Ressources partagées,
+   Automatisation) gardent leur hauteur dans le rail : sans quoi les lignes
+   dessous bougeaient à l'ouverture du menu (clic sur la ligne voisine). */
+body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibility: hidden; }

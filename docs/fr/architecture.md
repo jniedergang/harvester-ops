@@ -130,16 +130,19 @@ exact et un rechargement (F5) le rend. Deux modules du navigateur la portent :
   (lettres, chiffres, `.`, `_`, `-`), la même pour un cluster Harvester et
   un hôte KVM.
 - `web/static/js/router.js` applique une adresse : le cluster d'abord, puis
-  l'onglet, puis le pane. Un clic sur une entrée du menu, un onglet de
-  section ou d'aperçu, ou le sélecteur de cluster réécrit l'adresse sans
-  ajouter d'entrée d'historique ;
-  un lien d'une vue vers une autre (`App.openHost`) en ajoute une, et
-  Précédent revient à l'écran d'avant. Un hôte inconnu ou caché par
+  l'onglet, puis le pane. C'est le seul chemin d'ouverture d'un écran : le
+  menu des hôtes est fait de vrais liens, et le menu de la 1.x (sélecteur
+  de cluster et groupes par cluster) est retiré depuis la 2.0.0. Un clic dans
+  un écran (onglet de section) réécrit l'adresse sans ajouter d'entrée
+  d'historique ; un lien du menu ou d'une vue vers une autre
+  (`App.openHost`) en ajoute une, et Précédent revient à l'écran d'avant. Un hôte inconnu ou caché par
   Rancher ouvre l'index des hôtes (`#hosts`) avec un message, comme un
   ancien jeton qui demande un hôte alors qu'aucun n'est visible ; une
-  adresse qui ne mène à aucun écran ouvre l'écran par défaut avec un
-  message. Jamais une page vide. Une
-  adresse vide rend le dernier écran.
+  adresse qui ne mène à aucun écran ouvre l'écran par défaut (`#vms`) avec
+  un message. Jamais une page vide. Une adresse vide ouvre `#vms` ; la
+  première fois que la 2.0.0 s'ouvre dans un navigateur, elle rouvre à la
+  place le dernier écran du menu de la 1.x (l'onglet retenu par la 1.x),
+  une seule fois, puis l'oublie.
 
 Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :
 
@@ -168,7 +171,7 @@ jamais un chemin de clé) ; les étiquettes s'écrivent par `PUT
 /api/kvm/hosts/<h>/labels` (administrateur), action suivie de
 `harvester-kvm.py host label`.
 
-Les modules ne lisent jamais le sélecteur de cluster : ils passent par
+Les modules ne lisent jamais un sélecteur de cluster (il n'y en a plus depuis la 2.0.0) : ils passent par
 `App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
 (cluster d'où Cluster API et Terraform gèrent, le dernier cluster visité
 sauf choix contraire) et `App.openHost(famille, nom, sub, onglet, pane)`.

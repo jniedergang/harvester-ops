@@ -18,6 +18,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 READY = {"ready": True, "cert_manager": True, "cert_manager_missing": [], "addon": "ready",
          "addon_message": "the forklift-operator add-on is deployed", "operator": True, "controller": True,
          "components_missing": [], "running": True, "inventory_access": True}
@@ -96,8 +98,7 @@ def fulfill(route, body, status=200):
 def open_page(context, flask_server, tab="forklift", view=None, global_view=None):
     init = ("localStorage.setItem('harvester_ops_language','en');"
             "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-            "localStorage.setItem('harvester_ops_section_forklift','waves');"
-            f"localStorage.setItem('harvester_ops_current_tab','{tab}');")
+            "localStorage.setItem('harvester_ops_section_forklift','waves');")
     if view:
         init += f"localStorage.setItem('harvester_ops_fk_waves_view','{view}');"
     if global_view:
@@ -107,7 +108,8 @@ def open_page(context, flask_server, tab="forklift", view=None, global_view=None
     page = context.new_page()
     page.route(re.compile(r".*/api/forklift/harv-fake(\?.*)?$"), lambda r, q: fulfill(r, tab_data()))
     page.route("**/api/forklift-global", lambda r, q: fulfill(r, global_data()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    # 2.0.0 : l'écran par son adresse (un rechargement la garde)
+    goto(page, flask_server["base_url"], address(tab, sub="waves" if tab == "forklift" else None))
     page.wait_for_function("window.Forklift && window.ForkliftLanes && window.Sections && window.App && App.getCurrentCluster()")
     return page
 

@@ -14,10 +14,31 @@ Run with:  make test-e2e
 or:        python -m pytest tests/e2e/ -v
 """
 
+import re
+
 import pytest
 
 playwright = pytest.importorskip("playwright")
 from playwright.sync_api import sync_playwright, expect
+
+from nav import address, settle  # noqa: E402
+
+
+# 2.0.0 : l'ancien menu est retiré ; un écran s'ouvre par son adresse (lien du
+# menu des hôtes ou Router.go), une entrée racine par le menu des hôtes.
+def go(page, hash):
+    page.evaluate("(h) => Router.go(h)", hash)
+    settle(page)
+
+
+def entry(root, tab=None):
+    return f'#host-nav [data-hnav-root="{root}"]' + (f'[data-hnav-tab="{tab}"]' if tab else ":not([data-hnav-tab])")
+
+
+def click_entry(page, root, tab=None):
+    page.click(entry(root, tab))
+    page.wait_for_function("(r) => Router.current() && Router.current().name === r", arg=root)
+    settle(page)
 
 
 @pytest.fixture(scope="module")
@@ -40,10 +61,10 @@ def page(browser, flask_server):
 
 def test_index_loads_with_brand(page):
     expect(page.locator("#brand-title")).to_have_text("harvester-ops")
-    # v1.26.0 : le sélecteur de cluster reste utilisable dans le rail, sans
-    # avoir à déplier le menu. C'est le contrôle le plus utilisé d'une
-    # console multi-cluster, le cacher derrière un survol serait un recul.
-    expect(page.locator("#cluster-select")).to_be_visible()
+    # v1.26.0 : choisir son cluster reste possible dans le rail, sans avoir
+    # à déplier le menu. 2.0.0 : le sélecteur est remplacé par la liste des
+    # hôtes du menu, visible dans le rail.
+    expect(page.locator('#hnav-families .hnav-host[data-key="harvester/harv-fake"] .hnav-dot')).to_be_visible()
 
 
 def test_overview_data_populated_after_init(page, api):
@@ -113,8 +134,14 @@ def test_init_completes_no_js_errors(page):
 
 
 def test_sidebar_tabs_present(page):
-    for tab in ["overview", "shutdown", "startup", "namespaces", "activity"]:
-        expect(page.locator(f'.tab[data-tab="{tab}"]')).to_be_visible()
+    # 2.0.0 : Vue d'ensemble et VMs dans le sous-menu de l'hôte ouvert,
+    # Démarrage et Arrêt dans Paramètres > Alimentation, Activité en racine
+    go(page, address("startup"))
+    for sub in ["overview", "vms", "params"]:
+        expect(page.locator(f'#hnav-families .hnav-sub a[data-sub="{sub}"]')).to_be_visible()
+    for tab in ["startup", "shutdown"]:
+        expect(page.locator(f'#host-page-head .hp-tabs [data-hp-tab="{tab}"]')).to_be_visible()
+    expect(page.locator(entry("activity"))).to_be_visible()
 
 
 def test_settings_modal_opens(page):
@@ -152,8 +179,8 @@ def test_language_switch_changes_strings(page):
     # rendus. On le déplie pour les lire, comme le ferait l'opérateur.
     page.locator('#sidebar').hover()
     page.wait_for_timeout(400)
-    txt = page.locator('.tab[data-tab="shutdown"]').inner_text()
-    assert "Arrêt" in txt or "Shutdown" in txt   # tolerant if hot-swap deferred
+    txt = page.locator(entry("activity")).inner_text()
+    assert "Activité" in txt or "Activity" in txt   # tolerant if hot-swap deferred
 
 
 def test_docs_panel_opens_and_closes(page):
@@ -184,13 +211,13 @@ def test_dock_visible_by_default(page):
 def test_dock_toggle_in_activity_tab(page):
     """The checkbox has width=0/height=0 (CSS slider style) — click the
     parent label which propagates the toggle event."""
-    page.click('.tab[data-tab="activity"]')
+    click_entry(page, "activity")
     # v1.47.2 : l'onglet est dans le menu latéral, qui se déplie en calque
     # 120 ms après le survol. Le pointeur y restait, et un menu déplié à
     # temps couvrait l'interrupteur pour de bon (échec sous charge seulement).
     # Comme un utilisateur, on sort du menu et on le laisse se replier.
     page.mouse.move(1100, 450)
-    page.wait_for_function("document.body.classList.contains('sidebar-collapsed')"
+    page.wait_for_function("() => document.body.classList.contains('sidebar-collapsed')"
                            " || document.body.classList.contains('sidebar-pinned')")
     toggle = page.locator("#dock-toggle")
     expect(toggle).to_be_checked()
@@ -211,7 +238,7 @@ def test_dock_resize_handle_exists(page):
 
 
 def test_shutdown_tab_loads_vm_list(page):
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     # Depuis la v1.4.12, la liste vit dans le sous-onglet « Ordre d'arrêt ».
     page.click('[data-shutdown-tab="order"]')
     expect(page.locator(".vm-order-toolbar")).to_be_visible()
@@ -223,7 +250,7 @@ def test_vms_tab_dropdown_layout(page):
     """REGRESSION: 'Virtual machines' tab uses a top dropdown (no left sidebar).
     The old #ns-list (sidebar) must be gone; #ns-dropdown (top) must exist.
     """
-    page.click('.tab[data-tab="namespaces"]')
+    go(page, address("namespaces"))
     page.wait_for_timeout(800)
     # The vertical NS sidebar must NOT exist anymore
     expect(page.locator("#ns-list")).to_have_count(0)
@@ -233,14 +260,14 @@ def test_vms_tab_dropdown_layout(page):
     expect(page.locator("#ns-vm-count")).to_be_visible()
     expect(page.locator("#ns-vms-table")).to_be_visible()
     # Bulk toolbar starts hidden
-    expect(page.locator(".bulk-toolbar")).to_be_hidden()
+    expect(page.locator("#bulk-toolbar")).to_be_hidden()
 
 
 def test_dry_run_inline_in_shutdown_and_startup(page):
     """REGRESSION: dry-run inline checkbox must exist next to the launch buttons."""
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     expect(page.locator(".dry-run-inline").first).to_be_visible()
-    page.click('.tab[data-tab="startup"]')
+    go(page, address("startup"))
     expect(page.locator(".dry-run-inline").nth(1)).to_be_visible()
 
 
@@ -248,7 +275,7 @@ def test_dry_run_sync_across_checkboxes(page):
     """When one .dry-run-sync checkbox changes, all others must follow.
     The sidebar #dry-run was removed in 1.3.4 — sync now happens entirely
     between the inline checkboxes (shutdown tab ↔ startup tab)."""
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     page.evaluate("""
       const cb = document.querySelector('#tab-shutdown .dry-run-sync');
       cb.checked = true;
@@ -267,17 +294,17 @@ def test_dry_run_sync_across_checkboxes(page):
 
 def test_current_tab_persists_across_reload(page):
     """The currently selected tab must be restored after a page reload."""
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     expect(page.locator('#tab-shutdown')).to_have_class("tab-content active")
     page.reload()
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(400)
     expect(page.locator('#tab-shutdown')).to_have_class("tab-content active")
-    # The shutdown sidebar entry is a `tab-child` of the Cluster collapsible
-    # group since v1.4.5 — the class set is now `tab tab-child active` (or
-    # `tab active` if the layout ever flattens back). Just require .active.
-    cls = page.locator('.tab[data-tab="shutdown"]').get_attribute("class") or ""
+    # 2.0.0 : l'entrée active est Paramètres dans le sous-menu de l'hôte, et
+    # l'onglet Alimentation > Arrêt dans le bandeau de la page d'hôte
+    cls = page.locator('#hnav-families .hnav-sub a[data-sub="params"]').get_attribute("class") or ""
     assert "active" in cls.split(), f"expected `active` in classes, got: {cls!r}"
+    expect(page.locator('#host-page-head .hp-tabs [data-hp-tab="shutdown"]')).to_have_class(re.compile(r"\bactive\b"))
 
 
 def test_cluster_selection_persists_across_reload(page, flask_server):
@@ -288,11 +315,10 @@ def test_cluster_selection_persists_across_reload(page, flask_server):
     # The fake config only has one cluster (harv-fake). We exercise the
     # localStorage round-trip directly by stubbing a saved value and
     # asserting that the page picks it up.
-    sel = page.locator('#cluster-select')
-    # Sanity: at least one option exists in the fake config
-    page.wait_for_function("document.querySelector('#cluster-select').options.length > 0")
-    initial = sel.evaluate("e => e.value")
-    assert initial, "cluster select has no value"
+    # 2.0.0 : plus de <select> ; la liste des clusters vient d'App.listClusters()
+    page.wait_for_function("() => App.listClusters().length > 0")
+    initial = page.evaluate("App.getCurrentCluster()")
+    assert initial, "no current cluster"
     # Simulate prior selection
     page.evaluate(
         "(val) => localStorage.setItem('harvester_ops_current_cluster', val)",
@@ -300,9 +326,11 @@ def test_cluster_selection_persists_across_reload(page, flask_server):
     )
     page.reload()
     page.wait_for_load_state("networkidle")
-    # The select should still hold the saved value (the same one here,
-    # but the round-trip is what matters)
-    val = sel.evaluate("e => e.value")
+    # The saved value is still the current cluster (the same one here,
+    # but the round-trip is what matters), and its host is in the menu
+    page.wait_for_function("() => !!App.getCurrentCluster()")
+    val = page.evaluate("App.getCurrentCluster()")
+    expect(page.locator(f'#hnav-families .hnav-host[data-key="harvester/{initial}"]')).to_be_attached()
     assert val == initial, (
         f"cluster selection not restored: stored={initial!r}, got={val!r}"
     )
@@ -326,7 +354,7 @@ def test_overview_subtab_persists_across_reload(page):
     its shell (`.fabric-body`) is what proves it was mounted."""
     # 2.0.0 : la vue en blocs des nœuds est Paramètres > Nœuds de l'hôte ;
     # F5 garde l'adresse, et la vue est remontée pour le bon cluster.
-    page.click('.tab[data-tab="overview"]')
+    go(page, address("overview"))
     page.click('#host-page-head .hp-sub-link[data-hp-sub="params"]')
     page.wait_for_selector(
         '.overview-subtab[data-subtab="cluster"] .fabric-body',
@@ -355,18 +383,14 @@ def test_automation_tab_persists_across_reload(page):
 
     Fix: guard on document.getElementById('tab-<saved>') instead — that
     is what setTab() actually toggles."""
-    # The Automation group is collapsed by default — click the group
-    # head first. That call both expands the group AND triggers
-    # setTab(firstChild.dataset.tab || 'automation') = setTab('automation'),
-    # because Automation children carry data-subtab and not data-tab.
-    page.click('#tab-group-automation .tab-group-head')
+    # 2.0.0 : l'entrée Automatisation > Cluster API du menu des hôtes ;
+    # l'écran est gardé par l'adresse, plus par localStorage.
+    click_entry(page, "automation", "capi")
     page.wait_for_timeout(150)
     expect(page.locator('#tab-automation')).to_have_class("tab-content active")
-    # Sanity: the saved value is the group name, not a real data-tab
-    saved = page.evaluate(
-        "() => localStorage.getItem('harvester_ops_current_tab')"
-    )
-    assert saved == "automation", f"expected 'automation' saved, got {saved!r}"
+    # Sanity: the address names the screen F5 must give back
+    saved = page.evaluate("() => location.hash")
+    assert saved == "#automation/capi", f"expected '#automation/capi', got {saved!r}"
 
     page.reload()
     page.wait_for_load_state("networkidle")
@@ -530,12 +554,12 @@ def test_automation_subtabs(page):
     (Cluster API, Terraform, Bare-metal) and switching swaps the content
     panel + (for CAPI) reveals the inline Installation / Cluster-creation
     strip."""
-    page.click('.tab-group-head[data-group="automation"]')
+    click_entry(page, "automation", "capi")
     page.wait_for_timeout(300)
-    # Sidebar children visible
-    expect(page.locator('.tab-child[data-subtab="capi"]')).to_be_visible()
-    expect(page.locator('.tab-child[data-subtab="terraform"]')).to_be_visible()
-    expect(page.locator('.tab-child[data-subtab="pxe"]')).to_be_visible()
+    # Sidebar children visible (2.0.0 : entrées Automatisation du menu des hôtes)
+    expect(page.locator(entry("automation", "capi"))).to_be_visible()
+    expect(page.locator(entry("automation", "terraform"))).to_be_visible()
+    expect(page.locator(entry("automation", "pxe"))).to_be_visible()
     # CAPI subtab is active by default → its content is active
     expect(page.locator('.sub-tab-content[data-subtab="capi"]')).to_have_class("sub-tab-content active")
     # The inline Installation / Création de clusters strip is only visible
@@ -543,13 +567,13 @@ def test_automation_subtabs(page):
     strip = page.locator('.sub-tabs-inline[data-only-for="capi"]')
     expect(strip).to_be_visible()
     # Click Terraform sidebar entry: hides the inline strip
-    page.click('.tab-child[data-subtab="terraform"]')
+    page.click(entry("automation", "terraform"))
     page.wait_for_timeout(200)
     expect(strip).to_be_hidden()
     expect(page.locator('.sub-tab-content[data-subtab="terraform"]')).to_have_class("sub-tab-content active")
     expect(page.locator('.sub-tab-content[data-subtab="capi"]')).not_to_have_class("active")
     # Click Bare-metal
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.click(entry("automation", "pxe"))
     page.wait_for_timeout(200)
     expect(page.locator('.sub-tab-content[data-subtab="pxe"]')).to_have_class("sub-tab-content active")
 
@@ -559,9 +583,7 @@ def test_automation_capi_inline_subtabs(page):
     automation header swaps which .capi-tab-content is visible. v1.53.0:
     no "Création de clusters" sub-tab any more, a button in Clusters K8S
     opens the creation window."""
-    page.click('.tab-group-head[data-group="automation"]')
-    page.wait_for_timeout(200)
-    page.click('.tab-child[data-subtab="capi"]')
+    click_entry(page, "automation", "capi")
     page.wait_for_timeout(200)
     for tab in ("install", "k8s", "services"):
         expect(page.locator(f'.sub-tabs-inline .sub-tab[data-capi-tab="{tab}"]')).to_be_visible()
@@ -617,9 +639,7 @@ def _clear_tf_decls(page):
 def _open_terraform(page):
     _clear_tf_drafts(page)
     _clear_tf_decls(page)
-    page.click('.tab-group-head[data-group="automation"]')
-    page.wait_for_timeout(150)
-    page.click('.tab-child[data-subtab="terraform"]')
+    click_entry(page, "automation", "terraform")
     page.wait_for_selector('#tf-decls-view .tfd', timeout=5000)
 
 
@@ -757,7 +777,7 @@ def test_terraform_add_disk_in_section_renders_extra_block(page):
 def test_automation_header_tabs_centered(page):
     """The inline tab strip should be in the centered grid column (not
     pinned to the right). Detect via the computed justify-self value."""
-    page.click('.tab-group-head[data-group="automation"]')
+    click_entry(page, "automation", "capi")
     page.wait_for_timeout(150)
     js = page.locator('.sub-tabs-inline').first
     value = js.evaluate("el => window.getComputedStyle(el).justifySelf")
@@ -766,10 +786,8 @@ def test_automation_header_tabs_centered(page):
 
 def test_capi_diag_renders(page, api):
     """REGRESSION: when CAPI diag returns, the components table is rendered."""
-    # Automation became a collapsible group in v1.4.6 — the head carries
-    # `data-group="automation"` (not `data-tab="automation"`). Match either
-    # form so the test survives further sidebar restructuring.
-    page.click('.tab[data-group="automation"], .tab[data-tab="automation"]')
+    # 2.0.0 : l'entrée Automatisation > Cluster API du menu des hôtes
+    click_entry(page, "automation", "capi")
     page.wait_for_timeout(2000)
     # Wait for the components table to appear (driven by /api/capi/<>/diag)
     # We can't rely on a real cluster, but the structure must be there.
@@ -782,14 +800,14 @@ def test_sidebar_is_a_rail_that_opens_on_hover(page):
     sidebar = page.locator('#sidebar')
     rail = sidebar.evaluate('el => el.getBoundingClientRect().width')
     assert rail < 80, f"le menu doit démarrer en rail, mesuré {rail}"
-    assert page.locator('.tab[data-tab="overview"] .sidebar-label').evaluate(
+    assert page.locator(entry("activity") + ' .sidebar-label').evaluate(
         'el => getComputedStyle(el).display') == 'none'
 
     sidebar.hover()
     page.wait_for_timeout(500)
     opened = sidebar.evaluate('el => el.getBoundingClientRect().width')
     assert opened > 200, f"le survol doit déplier le menu, mesuré {opened}"
-    assert page.locator('.tab[data-tab="overview"] .sidebar-label').evaluate(
+    assert page.locator(entry("activity") + ' .sidebar-label').evaluate(
         'el => getComputedStyle(el).display') != 'none'
 
     page.mouse.move(1200, 500)
@@ -838,7 +856,7 @@ def test_clicking_from_the_rail_lands_on_the_entry_aimed_at(page):
     assert page.locator('#sidebar').evaluate(
         'el => el.getBoundingClientRect().width') < 80, "le menu doit être en rail"
 
-    page.click('.tab[data-tab="activity"]')
+    click_entry(page, "activity")
     page.wait_for_timeout(600)
     assert page.locator('.tab-content.active').get_attribute('id') == 'tab-activity'
 
@@ -871,8 +889,10 @@ def test_the_cluster_picker_stays_usable_in_the_rail(page):
     rendait aussi inatteignable au clavier et au script."""
     page.mouse.move(900, 400)
     page.wait_for_timeout(500)
-    picker = page.locator('#cluster-select')
-    assert picker.is_visible(), "le sélecteur de cluster doit survivre au rail"
+    # 2.0.0 : le sélecteur est remplacé par la liste des hôtes du menu
+    picker = page.locator('#hnav-families .hnav-host[data-key="harvester/harv-fake"]')
+    assert picker.is_visible(), "la liste des hôtes doit survivre au rail"
+    assert picker.locator(".hnav-host-name").get_attribute("href") == "#harvester/harv-fake"
     box = picker.bounding_box()
     assert box and box['width'] > 20, f"trop étroit pour être lisible : {box}"
 
@@ -884,7 +904,7 @@ def test_clicking_inside_the_menu_does_not_leave_it_open(page):
     jusqu'à ce qu'on aille cliquer ailleurs."""
     page.locator('#sidebar').hover()
     page.wait_for_timeout(400)
-    page.click('#cluster-select')
+    page.click('#hnav-q')                  # 2.0.0 : la recherche du menu (plus de sélecteur)
     page.keyboard.press('Escape')
     page.mouse.move(900, 400)
     page.wait_for_timeout(700)
@@ -987,15 +1007,15 @@ def test_a_pinned_sidebar_does_not_cover_the_page(page):
 
 def test_namespaces_tab_auto_selects_first(page):
     """clicking Virtual machines tab should auto-select first NS in dropdown."""
-    page.click('.tab[data-tab="namespaces"]')
+    go(page, address("namespaces"))
     page.wait_for_timeout(800)
     expect(page.locator("#ns-dropdown")).to_be_attached()
-    expect(page.locator(".bulk-toolbar")).to_be_attached()
-    expect(page.locator(".bulk-toolbar")).to_be_hidden()
+    expect(page.locator("#bulk-toolbar")).to_be_attached()
+    expect(page.locator("#bulk-toolbar")).to_be_hidden()
 
 
 def test_activity_tab_renders(page):
-    page.click('.tab[data-tab="activity"]')
+    click_entry(page, "activity")
     expect(page.locator("#activity-running")).to_be_visible()
     expect(page.locator("#activity-history")).to_be_visible()
 
@@ -1072,7 +1092,7 @@ def test_shutdown_groups_render_from_canned_vms(page):
     page.route("**/api/vms/harv-fake", lambda route:
         route.fulfill(status=200, content_type="application/json", body=__import__("json").dumps(canned))
     )
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     # v1.4.12 split Shutdown into 2 sub-tabs — the VM groups live under
     # the "order" sub-tab now. Click it to reveal the list.
     page.click('[data-shutdown-tab="order"]')
@@ -1122,7 +1142,7 @@ def test_shutdown_new_group_name_survives_periodic_refresh(page):
         route.fulfill(status=200, content_type="application/json",
                       body=__import__("json").dumps(canned))
     )
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     page.click('[data-shutdown-tab="order"]')
     page.wait_for_selector("#vm-order-list .vm-group", timeout=5000)
 
@@ -1195,7 +1215,7 @@ def test_shutdown_groups_payload_sent_on_save(page):
                       body='{"total":2,"updated":2,"results":[]}')
     page.route("**/api/vms/harv-fake/order", _capture)
 
-    page.click('.tab[data-tab="shutdown"]')
+    go(page, address("shutdown"))
     # v1.4.12 split Shutdown into 2 sub-tabs — the VM groups live under
     # the "order" sub-tab now. Click it to reveal the list.
     page.click('[data-shutdown-tab="order"]')

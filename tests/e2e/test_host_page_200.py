@@ -27,7 +27,6 @@ def open_cold(context, flask_server, hash, extra_js="", saved=A):
         "if (!sessionStorage.getItem('hp-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
         f"localStorage.setItem('harvester_ops_current_cluster','{saved}');"
-        "localStorage.setItem('harvester_ops_current_tab','activity');"
         "localStorage.setItem('harvester_ops_sidebar_pinned','1');"
         "sessionStorage.setItem('hp-init','1'); }" + extra_js)
     page = context.new_page()

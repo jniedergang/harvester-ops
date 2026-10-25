@@ -14,6 +14,7 @@ vitesse réelle du cluster serait instable.
 import pytest
 
 playwright = pytest.importorskip("playwright")
+from nav import goto  # noqa: E402
 
 SLOW_MS = 1500
 
@@ -22,17 +23,14 @@ def open_automation(page, base_url, subtab):
     page.context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
-    page.goto(base_url, wait_until="domcontentloaded")
+    goto(page, base_url)
     page.wait_for_timeout(900)
-    # Le menu est un rail : ses enfants ne sont atteignables qu'une fois
-    # déplié, et il se replie dès que le pointeur le quitte.
+    # Le menu est un rail : ses entrées ne sont atteignables qu'une fois
+    # déplié, et il se replie dès que le pointeur le quitte. 2.0.0 : l'entrée
+    # Automatisation du menu des hôtes (lien vers #automation/<sous-onglet>).
     page.locator('#sidebar').hover()
     page.wait_for_timeout(350)
-    page.click('.tab-group-head[data-group="automation"]')
-    page.wait_for_timeout(250)
-    page.locator('#sidebar').hover()
-    page.wait_for_timeout(200)
-    page.click(f'.tab-child[data-subtab="{subtab}"]')
+    page.click(f'#host-nav [data-hnav-root="automation"][data-hnav-tab="{subtab}"]')
 
 
 def veil_in(page, body_selector):

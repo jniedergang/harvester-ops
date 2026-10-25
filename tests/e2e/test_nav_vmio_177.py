@@ -1,45 +1,65 @@
-"""Section « VM Import / Export » du menu (1.77.0) : VM Import, VMware
-migrations et Migrations (all clusters) regroupées, dans cet ordre, hors du
-groupe Cluster ; la tête du groupe ouvre la première entrée."""
+"""Imports et migrations (1.77.0, déplacé en 2.0.0) : l'ancienne section
+« VM Import / Export » du menu est devenue l'entrée « Imports et migrations »
+de la page d'un hôte Harvester (deux onglets, Import de VM puis VMware
+migrations, hors des Paramètres) et la racine « Migrations » du menu des
+hôtes (toutes les vagues). L'entrée du sous-menu ouvre le premier onglet,
+l'hôte ouvert reste visible dans une famille repliée, et une famille se
+replie puis se déplie."""
+import re
+
 from playwright.sync_api import expect
 
+from nav import address, goto, settle
 
-def test_vmio_group_holds_the_three_entries(page):
-    group = page.locator("#tab-group-vmio")
-    expect(group).to_have_count(1)
-    tabs = group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)")
-    assert tabs == ["vmimport", "forklift", "forkliftglobal"]
-    for tab in tabs:
-        assert page.locator(f'#tab-group-cluster .tab[data-tab="{tab}"]').count() == 0
-        assert page.locator(f'nav > .tab[data-tab="{tab}"]').count() == 0
-    # chaque entrée a son info-bulle
-    for el in group.locator(".tab").all():
+
+def test_imports_hold_the_two_tabs_and_migrations_is_a_root(page, flask_server):
+    goto(page, flask_server["base_url"], address("vmimport"))
+    head = page.locator("#host-page-head")
+    tabs = head.locator(".hp-tabs a[data-hp-tab]").evaluate_all("els => els.map(e => e.dataset.hpTab)")
+    assert tabs == ["vmimport", "forklift"]
+    # aucun des deux dans les Paramètres de l'hôte, ni au premier niveau du menu
+    page.evaluate("Router.go('#harvester/harv-fake/params/nodes')")
+    settle(page)
+    params = head.locator(".hp-tabs a[data-hp-tab]").evaluate_all("els => els.map(e => e.dataset.hpTab)")
+    assert "vmimport" not in params and "forklift" not in params
+    assert page.locator('#host-nav > a[href*="imports"]').count() == 0
+    root = page.locator('#host-nav [data-hnav-root="migrations"]')
+    expect(root).to_have_count(1)
+    # chaque entrée a son info-bulle, traduite
+    goto(page, flask_server["base_url"], address("forklift"))
+    for el in head.locator(".hp-tabs a").all() + [root]:
         assert el.get_attribute("title")
+    page.evaluate("i18n.setLang('fr')")
+    expect(root).to_have_attribute("title", re.compile(r"\S"))
+    assert root.get_attribute("title") == page.evaluate("i18n.t('hnav.migrationsTip')")
+    page.evaluate("i18n.setLang('en')")
 
 
-def test_vmio_head_opens_vm_import(page):
-    page.locator('.tab-group-head[data-group="vmio"]').click()
+def test_imports_entry_opens_vm_import(page, flask_server):
+    goto(page, flask_server["base_url"], address("overview"))
+    page.locator('#host-page-head .hp-sub-link[data-hp-sub="imports"]').click()
+    page.wait_for_function("() => location.hash === '#harvester/harv-fake/imports/vmimport'")
+    settle(page)
     expect(page.locator("#tab-vmimport")).to_be_visible()
 
 
-def test_active_entry_opens_its_folded_group(context, flask_server):
-    context.add_init_script(
-        "localStorage.setItem('harvester_ops_group_vmio_expanded','0');"
-        "localStorage.setItem('harvester_ops_current_tab','forklift');")
+def test_the_open_host_stays_visible_in_a_folded_family(context, flask_server):
+    context.add_init_script("localStorage.setItem('harvester_ops_hnav_collapsed_harvester','1');")
     page = context.new_page()
-    page.goto(flask_server["base_url"])
-    page.wait_for_load_state("networkidle")
-    expect(page.locator('#tab-group-vmio .tab[data-tab="forklift"]')).to_be_visible()
+    goto(page, flask_server["base_url"], address("forklift"))
+    expect(page.locator('#host-nav .hnav-fam[data-family="harvester"]')).to_have_class(re.compile("collapsed"))
+    expect(page.locator('#host-nav .hnav-host[data-key="harvester/harv-fake"]')).to_be_visible()
+    expect(page.locator('#hnav-families .hnav-sub a[data-sub="imports"]')).to_have_class(re.compile("active"))
 
 
-def test_group_heads_still_fold(page):
-    # Relecture de la 1.77.0 : setTab dépliait le groupe de l'entrée active,
-    # si bien qu'un clic sur la tête ne repliait plus Cluster ni ce groupe.
-    for group in ("cluster", "vmio"):
-        head = page.locator(f'.tab-group-head[data-group="{group}"]')
-        grp = page.locator(f"#tab-group-{group}")
-        before = "expanded" in (grp.get_attribute("class") or "")
+def test_family_heads_still_fold(page, flask_server):
+    # Relecture de la 1.77.0 : un clic sur la tête doit replier puis déplier
+    goto(page, flask_server["base_url"], "#hosts")
+    for fam in ("harvester", "kvm"):
+        head = page.locator(f'#host-nav .hnav-fam-head[data-fam="{fam}"]')
+        grp = lambda: page.locator(f'#host-nav .hnav-fam[data-family="{fam}"]')  # noqa: E731 (redessiné)
+        before = "collapsed" in (grp().get_attribute("class") or "")
         head.click()
-        assert ("expanded" in (grp.get_attribute("class") or "")) is not before, group
-        head.click()
-        assert ("expanded" in (grp.get_attribute("class") or "")) is before, group
+        assert ("collapsed" in (grp().get_attribute("class") or "")) is not before, fam
+        page.locator(f'#host-nav .hnav-fam-head[data-fam="{fam}"]').click()
+        assert ("collapsed" in (grp().get_attribute("class") or "")) is before, fam

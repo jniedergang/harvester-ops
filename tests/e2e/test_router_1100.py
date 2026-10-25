@@ -161,8 +161,11 @@ def check_detail(page, tab, detail):
         expect(page.locator(f'#tab-{tab} [data-section-tab="{value}"]')).to_have_class(re.compile(r"\bactive\b"))
         expect(page.locator(f'#tab-{tab} .section-pane[data-pane="{value}"]')).to_be_visible()
     elif kind == "auto":
-        expect(page.locator(f'#tab-group-automation .tab-child[data-subtab="{value}"]')).to_have_class(
-            re.compile(r"\bsub-active\b"))
+        # 2.0.0 : l'entrée Automatisation du menu des hôtes, et le panneau du sous-onglet
+        expect(page.locator(f'#host-nav [data-hnav-root="automation"][data-hnav-tab="{value}"]')).to_have_class(
+            re.compile(r"\bactive\b"))
+        expect(page.locator(f'#tab-automation > .sub-tab-content[data-subtab="{value}"]')).to_have_class(
+            re.compile(r"\bactive\b"))
 
 
 @pytest.mark.parametrize("hash,tab,detail,cluster", HOST_ROWS, ids=[r[0] for r in HOST_ROWS])
@@ -198,12 +201,26 @@ def test_cold_load_of_a_legacy_token(context, flask_server, two_clusters, hash, 
     assert other_cluster_calls(calls, B) == []
 
 
-def test_empty_address_still_restores_the_last_tab(context, flask_server, two_clusters):
-    """Étape 1 : sans adresse, l'ancien démarrage (46 fichiers e2e en dépendent)."""
+def test_empty_address_reopens_the_last_screen_once_then_opens_vms(context, flask_server, two_clusters):
+    """2.0.0 (décision 2) : à la première ouverture de la 2.0.0, l'adresse
+    vide rouvre le dernier écran de la 1.x (onglet et cluster retenus), une
+    seule fois ; ensuite elle ouvre #vms."""
     page, calls = open_cold(context, flask_server, "", saved=B, tab="security")
     assert active_tab(page) == "tab-security"
     assert cluster_shown(page) == B
-    assert page.evaluate("location.hash") == ""      # rien n'est écrit sans geste
+    assert page.evaluate("location.hash").startswith(f"#harvester/{B}/params/security")
+    assert page.evaluate("localStorage.getItem('harvester_ops_current_tab')") is None   # oublié
+    page.goto(flask_server["base_url"] + "/", wait_until="domcontentloaded")
+    settle(page)
+    assert active_tab(page) == "tab-allvms"
+    assert page.evaluate("location.hash") == "#vms"
+
+
+def test_empty_address_of_a_new_browser_opens_vms(context, flask_server):
+    page, _ = open_cold(context, flask_server, "", extra_js="localStorage.removeItem('harvester_ops_current_tab');")
+    assert active_tab(page) == "tab-allvms"
+    assert page.evaluate("location.hash") == "#vms"
+    expect(page.locator('#host-nav [data-hnav-root="vms"]')).to_have_class(re.compile(r"\bactive\b"))
 
 
 def test_f5_after_a_pane_click_gives_the_same_pane(context, flask_server):
@@ -212,6 +229,7 @@ def test_f5_after_a_pane_click_gives_the_same_pane(context, flask_server):
     assert page.evaluate("location.hash") == f"#harvester/{A}/params/network/overlay"
     # la mémoire du pane dit autre chose : l'adresse doit l'emporter
     page.evaluate("localStorage.setItem('harvester_ops_section_network','vmnets');"
+                  "localStorage.removeItem('harvester_ops_nav2_seen');"
                   "localStorage.setItem('harvester_ops_current_tab','activity')")
     page.reload(wait_until="domcontentloaded")
     settle(page)
@@ -219,16 +237,25 @@ def test_f5_after_a_pane_click_gives_the_same_pane(context, flask_server):
     check_detail(page, "network", ("pane", "overlay"))
 
 
-def test_a_menu_click_writes_the_address_without_history(context, flask_server):
+def test_a_section_tab_click_writes_the_address_without_history(context, flask_server):
+    """2.0.0 : les entrées du menu sont de vrais liens (une entrée
+    d'historique, Précédent y revient) ; un clic DANS l'écran (onglet de
+    section) réécrit l'adresse sans entrée d'historique."""
     page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/storage")
     n = page.evaluate("history.length")
-    page.click('.tab[data-tab="activity"]')
-    assert page.evaluate("location.hash") == "#activity"
+    page.locator('#tab-storage [data-section-tab="images"]').click()
+    assert page.evaluate("location.hash") == f"#harvester/{A}/params/storage/images"
     assert page.evaluate("history.length") == n
-    page.click('[data-group="automation"]')
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.locator('#host-nav [data-hnav-root="activity"]').click()
+    page.wait_for_function("() => location.hash === '#activity'")
+    settle(page)
+    assert active_tab(page) == "tab-activity"
+    page.locator('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]').click()
+    settle(page)
     expect(page.locator("#tab-automation")).to_have_class(re.compile(r"\bactive\b"))
     assert page.evaluate("location.hash") == "#automation/pxe"
+    page.go_back()
+    page.wait_for_function("() => location.hash === '#activity'")
 
 
 def test_back_returns_to_the_previous_screen(context, flask_server, two_clusters):
@@ -250,9 +277,10 @@ def test_back_returns_to_the_previous_screen(context, flask_server, two_clusters
 NOT_OPENED = [
     ("#harvester/nope/params/storage", "nope", "opens no screen", "tab-hosts", "#hosts"),
     (f"#kvm/zzz/params/pools", "zzz", "opens no screen", "tab-hosts", "#hosts"),
-    ("#harvester/-a", "-a", "opens no screen", "tab-activity", ""),
-    ("#xen/a", "#xen/a", "opens no screen", "tab-activity", ""),
-    ("#harvester/a/params/storage/zzz", "zzz", "opens no screen", "tab-activity", ""),
+    # 2.0.0 : l'écran par défaut est #vms (décision 2)
+    ("#harvester/-a", "-a", "opens no screen", "tab-allvms", "#vms"),
+    ("#xen/a", "#xen/a", "opens no screen", "tab-allvms", "#vms"),
+    ("#harvester/a/params/storage/zzz", "zzz", "opens no screen", "tab-allvms", "#vms"),
 ]
 
 
@@ -305,16 +333,21 @@ def test_a_legacy_token_without_any_host_says_so(context, flask_server):
     expect(notice).to_contain_text("none is visible")
 
 
-def test_the_cluster_selector_adds_no_history_entry(context, flask_server, two_clusters):
-    """Le sélecteur est un geste comme un clic : l'adresse suit sans entrée
-    d'historique (comme avant le routeur)."""
+def test_another_host_of_the_menu_keeps_the_screen(context, flask_server, two_clusters):
+    """2.0.0 : le sélecteur de cluster est retiré ; un autre hôte de la même
+    famille dans le menu des hôtes garde l'écran, l'adresse suit et Précédent
+    revient à l'hôte d'avant (le lien est un vrai lien)."""
     page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/storage")
+    assert page.locator("#cluster-select").count() == 0
     before = page.evaluate("history.length")
-    page.select_option("#cluster-select", B)
+    page.locator(f'#host-nav .hnav-host[data-key="harvester/{B}"] .hnav-host-name').click()
     page.wait_for_function(f"() => App.getCurrentCluster() === '{B}'")
     settle(page)
-    assert page.evaluate("location.hash") == f"#harvester/{B}/params/storage/volumes"
-    assert page.evaluate("history.length") == before
+    assert page.evaluate("location.hash").startswith(f"#harvester/{B}/params/storage")
+    assert active_tab(page) == "tab-storage"
+    assert page.evaluate("history.length") == before + 1
+    page.go_back()
+    page.wait_for_function(f"() => App.getCurrentCluster() === '{A}'")
 
 
 def test_a_failing_navigation_is_logged_and_the_next_one_still_runs(context, flask_server):
@@ -414,5 +447,6 @@ def test_router_current_follows_the_screen(context, flask_server):
     page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/security/sshkeys")
     cur = page.evaluate("Router.current()")
     assert (cur["name"], cur["kind"], cur["host"], cur["tab"], cur["pane"]) == ("host", "harvester", A, "security", "sshkeys")
-    page.click('.tab[data-tab="gpus"]')
+    page.locator('#host-nav [data-hnav-root="gpus"]').click()
+    page.wait_for_function("() => Router.current() && Router.current().name === 'gpus'")
     assert page.evaluate("Router.current().name") == "gpus"

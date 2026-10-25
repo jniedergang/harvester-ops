@@ -16,10 +16,11 @@ def test_the_view_follows_the_tab_and_the_script_is_loaded():
     assert "else if (window.Usage) Usage.stop();" in app
     assert "if (active === 'usage' && window.Usage) jobs.push(Usage.load());" in app
     assert HTML.index("/static/js/bookings.js") < HTML.index("/static/js/usage.js")
-    assert 'id="usage-host"' in HTML and 'data-tab="usage"' in HTML
+    assert 'id="usage-host"' in HTML and 'data-hnav-root="usage"' in HTML
     # troisième entrée de Shared resources, après Bookings
-    shared = HTML.split('id="tab-group-shared"', 1)[1].split('<div class="tab-group" id=', 1)[0]
-    assert re.findall(r'data-tab="(\w+)"', shared) == ["gpus", "bookings", "usage"]
+    # 2.0.0 : groupe Ressources partagées du menu des hôtes
+    shared = HTML.split('id="hnav-shared"', 1)[1].split('</div>', 1)[0]
+    assert re.findall(r'data-hnav-root="(\w+)"', shared) == ["gpus", "bookings", "usage"]
 
 
 def test_no_raw_eventsource_no_confirm_no_library():

@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 ARCHIVE = "VMware-vix-disklib-8.0.3-23950268.x86_64.tar.gz"
 READY = {"ready": True, "cert_manager": True, "cert_manager_missing": [], "addon": "ready",
          "addon_message": "the forklift-operator add-on is deployed", "operator": True, "controller": True,
@@ -56,8 +58,7 @@ def open_tab(context, flask_server, data, section="prep", lang="en"):
     context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        f"localStorage.setItem('harvester_ops_section_forklift','{section}');"
-        "localStorage.setItem('harvester_ops_current_tab','forklift');")
+        f"localStorage.setItem('harvester_ops_section_forklift','{section}');")
     page = context.new_page()
     sent = []
 
@@ -70,7 +71,8 @@ def open_tab(context, flask_server, data, section="prep", lang="en"):
     page.route("**/api/forklift/harv-fake/inventory/vmwlab/vms*", lambda r, q: fulfill(r, {"rows": VMS_ROWS}))
     page.route("**/api/stream/fk0000000176", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    # 2.0.0 : Imports et migrations > VMware de l'hôte, par son adresse
+    goto(page, flask_server["base_url"], address("forklift", sub=section))
     page.wait_for_function("window.Forklift && window.Sections && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent

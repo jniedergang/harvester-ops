@@ -16,6 +16,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 
 def unit(cluster, uid, typ, node, state, total=1, used=0, consumers=(), **extra):
     u = {"id": uid, "type": typ, "cluster": cluster, "node": node, "name": uid.split("/")[0], "model": "NVIDIA A2",
@@ -68,7 +70,6 @@ def ui(context, flask_server):
         "if (!sessionStorage.getItem('gpu-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');"
         "localStorage.setItem('harvester_ops_gpus', JSON.stringify({scope: 'cluster'}));"   # réglage de 1.92.0
         "localStorage.removeItem('harvester_ops_allcontainers');"
         "sessionStorage.setItem('gpu-init','1'); }")
@@ -83,7 +84,7 @@ def ui(context, flask_server):
         status=200, content_type="application/json", body="{}"))[1])
     page.route("**/api/containers-all", lambda r, q: r.fulfill(
         status=200, content_type="application/json", body=json.dumps({"clusters": [], "workloads": []})))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('namespaces'))
     page.wait_for_function("window.Gpus && window.App && App.getCurrentCluster()")
     page.mouse.move(1200, 600)
     page.evaluate("App.setTab('gpus')")
@@ -97,14 +98,16 @@ def rows(pane):
 
 def test_gpu_lives_in_shared_resources_after_containers(ui):
     page, pane, state = ui
-    groups = page.locator("nav .tab-group").evaluate_all("els => els.map(e => e.id)")
-    assert groups[groups.index("tab-group-containers") + 1] == "tab-group-shared"
-    group = page.locator("#tab-group-shared")
-    expect(group.locator(".tab-group-head .sidebar-label")).to_have_text("Shared resources")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["gpus", "bookings", "usage"]
+    # 2.0.0 : le groupe « Ressources partagées » du menu des hôtes vient
+    # après les racines de flotte (Migrations) et garde GPU, Réservations, Usage
+    roots = page.locator("#host-nav [data-hnav-root]").evaluate_all("els => els.map(e => e.dataset.hnavRoot)")
+    assert roots[roots.index("migrations") + 1] == "gpus"
+    group = page.locator("#hnav-shared")
+    expect(page.locator("#hnav-shared").locator("xpath=preceding-sibling::div[1]")).to_have_text("Shared resources")
+    assert group.locator("[data-hnav-root]").evaluate_all("els => els.map(e => e.dataset.hnavRoot)") == ["gpus", "bookings", "usage"]
     for t in group.locator(".tab").all():
         assert t.get_attribute("title")
-    expect(group.locator('.tab[data-tab="gpus"]')).to_have_class(re.compile("active"))
+    expect(group.locator('[data-hnav-root="gpus"]')).to_have_class(re.compile("active"))
     # plus d'onglet GPU dans Advanced
     assert page.locator('#tab-advanced [data-section-tab="gpu"]').count() == 0
     assert page.locator('#tab-advanced [data-pane="gpu"]').count() == 0

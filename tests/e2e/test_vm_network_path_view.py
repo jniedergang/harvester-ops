@@ -14,6 +14,7 @@ import json
 import pytest
 
 playwright = pytest.importorskip("playwright")
+from nav import address, goto  # noqa: E402
 
 
 def path_payload(live=True):
@@ -82,9 +83,8 @@ def open_path_tab(page, base_url, live=True):
         status=200, content_type="application/json", body="[]"))
     page.context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
-    page.goto(base_url, wait_until="domcontentloaded")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address("namespaces"))
     page.wait_for_timeout(1800)
     page.evaluate("() => window.VMEdit.open('harv-fake','default','vm1')")
     page.wait_for_timeout(2500)

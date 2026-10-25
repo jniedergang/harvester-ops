@@ -657,7 +657,11 @@ def test_bmc_tab_rerender_targets_the_nav_link_only():
     assert 'class="sub-tab-content" data-subtab="pxe"' in html, (
         "le panneau porte bien l'attribut : c'est ce qui rend le piège réel")
     assert "e.target.closest('[data-subtab=\"pxe\"]')" not in BMC_JS
-    assert "closest('.tab-child[data-subtab=\"pxe\"]')" in BMC_JS
+    # 2.0.0 : plus de lien d'ancien menu ; seul l'onglet de la page (portée
+    # #tab-automation) et le routeur (CAPI.selectAutomationSubtab) relancent
+    assert "closest('#tab-automation .sub-tab[data-subtab=\"pxe\"]')" in BMC_JS
+    capi = (ROOT / "web" / "static" / "js" / "capi.js").read_text()
+    assert "else if (name === 'pxe' && window.BMC) window.BMC.render();" in capi
     # et un re-render non forcé préserve ce qui est déjà affiché
     assert "if (!force && out.querySelector('#bmc-discover-form'))" in BMC_JS
 

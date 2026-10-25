@@ -269,12 +269,14 @@ def flask_server_url(page):
     return page.url.split("#")[0]
 
 
-def test_the_old_menu_still_works_alongside(menu):
-    """Jusqu'au retrait de l'ancien menu, ses entrées restent utilisables et
-    ne sont pas confondues avec celles du menu des hôtes."""
+def test_the_old_menu_is_gone_and_the_section_shows_the_host_entry(menu):
+    """2.0.0 : l'ancien menu est retiré ; une section ouverte par son adresse
+    garde l'hôte ouvert et son sous-menu actifs dans le menu des hôtes, sans
+    autre entrée active."""
     page, _, _ = menu
-    page.locator('.tab[data-tab="storage"]').click()
+    assert page.locator("nav .tab[data-tab], #cluster-select, nav .tab-group").count() == 0
+    page.evaluate("Router.go('#harvester/harv-fake/params/storage')")
     settle(page)
     expect(page.locator("#tab-storage")).to_have_class(re.compile("active"))
-    assert page.locator("#host-nav .tab.active").count() == 1          # l'hôte ouvert, rien d'autre
+    assert page.locator("#host-nav .tab.active").count() == 1          # l'entrée Paramètres de l'hôte ouvert
     expect(page.locator('#hnav-families .hnav-sub a[data-sub="params"]')).to_have_class(re.compile("active"))

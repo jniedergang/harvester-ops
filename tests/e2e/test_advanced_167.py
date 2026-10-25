@@ -10,6 +10,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 SETTINGS = {"cluster": "harv-fake", "groups": ["general"], "items": [
     {"name": "log-level", "group": "general", "kind": "enum", "choices": ["info", "debug", "trace"], "value": "debug",
      "default": "info", "modified": True, "applied": "ok", "message": "", "danger": "", "readonly": False, "elsewhere": "",
@@ -51,8 +53,7 @@ def fulfill(route, body, status=200):
 def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -72,7 +73,7 @@ def ui(context, flask_server):
         status=200, content_type="application/yaml", body="kind: Config\n"))
     page.route("**/api/stream/adv000000167", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.Advanced && window.Sections && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent
@@ -87,8 +88,11 @@ def settings_tab(page):
 
 def test_the_advanced_section_sits_under_cluster(ui):
     page, _ = ui
-    link = page.locator('.tab[data-tab="advanced"]')
-    assert link.count() == 1 and link.get_attribute("data-i18n-title") == "tab.advancedTip"
+    # 2.0.0 : un onglet des Paramètres de l'hôte Harvester (bandeau de la page d'hôte)
+    page.evaluate("Router.go('#harvester/harv-fake/params/advanced')")
+    page.evaluate("Router.idle()")
+    link = page.locator('#host-page-head .hp-tabs [data-hp-tab="advanced"]')
+    assert link.count() == 1 and link.get_attribute("title") == page.evaluate("i18n.t('tab.advancedTip')")
     assert page.locator("#tab-advanced [data-section-tab]").evaluate_all("els => els.map(e => e.dataset.sectionTab)") \
         == ["settings", "pci", "usb", "sriov", "support"]       # v1.68.0 : les périphériques ; v1.93.0 : GPU parti dans Shared resources
 

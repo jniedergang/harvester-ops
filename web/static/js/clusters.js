@@ -276,7 +276,6 @@ const Clusters = (() => {
   }
 
   function init() {
-    $('#btn-add-cluster')?.addEventListener('click', openAddForm);
     $('#btn-clusters-add')?.addEventListener('click', openAddForm);
     $('#btn-clusters-refresh')?.addEventListener('click', refreshList);
     // Refresh list when settings → Clusters tab is opened

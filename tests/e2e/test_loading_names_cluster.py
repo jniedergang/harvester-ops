@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).parent))
@@ -36,11 +37,10 @@ def test_the_loading_text_names_the_cluster(context, flask_server, sub, path, la
 
     context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     page.route(path, hang)
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("overview"))
     page.wait_for_timeout(1500)
     goto_board(page, sub)
     hint = page.locator(f'[data-board="{sub}"] .fabric-body .hint').first

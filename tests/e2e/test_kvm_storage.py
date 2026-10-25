@@ -20,6 +20,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent))
 import kvm_form_fakes as F  # noqa: E402
 
@@ -247,7 +249,6 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvms-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvms-init','1'); }")
     context.add_init_script(FAKE_XHR)
     page = context.new_page()
@@ -255,14 +256,17 @@ def ui(context, flask_server):
     install(page, state)
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
     page.wait_for_function("window.KVM && window.App && window.KVMStorage && window.KVMForm")
     page.mouse.move(1200, 600)
     return page, state, dialogs
 
 
-def open_tab(page, tab):
-    page.locator(f'#tab-group-kvm .tab[data-tab="{tab}"]').evaluate("el => el.click()")
+def open_tab(page, tab, host="node2"):
+    # 2.0.0 : Stockage et Réseaux KVM sont des Paramètres de chaque hôte
+    where = {"kvmstorage": "pools", "kvmnetworks": "networks"}[tab]
+    page.evaluate(f"Router.go('#kvm/{host}/params/{where}')")
+    page.evaluate("Router.idle()")
     pane = page.locator(f"#tab-{tab}")
     expect(pane.locator(".kvm-card")).to_be_visible()
     return pane
@@ -317,13 +321,16 @@ def test_pools_and_volumes_with_actions_by_role_and_hostile_names(ui):
     evil_row = block.locator('tr' + sel('data-kvm-pool', EVIL_POOL))
     expect(evil_row.locator("td").first.locator("strong")).to_have_text(EVIL_POOL)
     assert evil_row.locator("b").count() == 0
-    # nœud injoignable : le bloc le dit, sans bouton
-    expect(pane.locator('[data-kvm-block="node9"] .res-error')).to_be_visible()
     tips_everywhere(pane.locator(".kvm-card"))
-    # un hôte seulement
-    pane.locator('[data-kvm-filter="host"]').select_option("node2")
+    # un hôte seulement : la page de node2 impose son hôte (aucun menu d'hôte)
     expect(pane.locator('[data-kvm-block="node9"]')).to_have_count(0)
+    assert pane.locator('[data-kvm-filter="host"]').count() == 0
     no_injection(page)
+    # nœud injoignable : sur sa page, le bloc le dit, sans bouton
+    pane = open_tab(page, "kvmstorage", "node9")
+    expect(pane.locator('[data-kvm-block="node9"] .res-error')).to_be_visible()
+    pane = open_tab(page, "kvmstorage")
+    block = pane.locator('[data-kvm-block="node2"]')
     # opérateur : gestes d'administrateur grisés avec la raison
     state["role"] = "operator"
     pane.locator('[data-kvm="refresh"]').click()
