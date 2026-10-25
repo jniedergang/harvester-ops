@@ -437,7 +437,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   unreachable host then resume, an interrupted rename resumed without
   rewriting done lines, undo with a conflict, two simultaneous assigns, the
   role, forged objects, exit codes, the YAML field edit, and a deliberate
-  mutation of the annotation key. After review: real RBAC and 403 webhook
+  mutation of the annotation key. Also: real RBAC and 403 webhook
   messages in one table, JSON on every error exit (an unexpected error
   hides its path), no role means read only, a fleet read in the middle of
   a rename or an undo, apply-rename of a line the renamer could not see,
