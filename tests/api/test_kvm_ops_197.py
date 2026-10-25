@@ -1147,7 +1147,7 @@ def test_clone_vm_pool_mode_flattens_and_defines_by_stdin():
     vol = ET.fromstring(create[2])
     assert (vol.findtext("name"), vol.findtext("capacity"), vol.find("target/format").get("type"),
             vol.find("backingStore")) == ("src-2-vda.qcow2", str(64 << 20), "qcow2", None)
-    assert define[1][5:] == ("define", "/dev/stdin")
+    assert define[1][5:] == ("define", "--validate", "/dev/stdin")
     # le XML (et son mot de passe) part sur l'entrée standard, jamais en argument
     assert FAKE_PASSWORD in define[2]
     assert all(FAKE_PASSWORD not in a for c in sim.calls for a in c[1])

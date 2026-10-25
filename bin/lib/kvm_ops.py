@@ -1812,8 +1812,10 @@ def _clone_vm(host, name, new_name, timeout=3600, progress=None, sleep=time.slee
         if uid:
             new_xml = _set_clone_identity(new_xml, uid, plan["seed"])
         created.append({"kind": "domain", "name": new_name, "sources": sources})
-        host.run_input(["env", "LC_ALL=C", *host._virsh_argv(("define", "/dev/stdin"))], new_xml,
-                       secrets=_passwords(xml))
+        # --validate : libvirt contrôle le XML contre son schéma avant de l'accepter
+        host.run_input(["env", "LC_ALL=C",
+                        *host._virsh_argv(("define", "--validate", "/dev/stdin"))],
+                       new_xml, secrets=_passwords(xml))
         step("define", "done", new_name)
         step("verify", "running", new_name)
         out = host.batch({"info": ("dominfo", "--domain", new_name),

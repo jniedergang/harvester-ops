@@ -418,7 +418,7 @@ def test_clone_pool_mode_argv_and_stdin(env, capsys):
                       "--vol", "mine.qcow2", "--inputpool", "kvmtest")
     assert net.virsh_commands("vol-clone") == []
     # define : XML sur l'entrée standard, jamais en argument
-    assert net.virsh_commands("define") == [("define", "/dev/stdin")]
+    assert net.virsh_commands("define") == [("define", "--validate", "/dev/stdin")]
     (define_input,) = [d for r, d in net.inputs if "define" in r]
     assert "<domain" in define_input and PASSWORD in define_input   # la copie garde l'accès
     assert all("<domain" not in a for rem in net.remotes for a in rem)
