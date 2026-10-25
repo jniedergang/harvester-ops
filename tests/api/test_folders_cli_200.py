@@ -29,6 +29,14 @@ SPEC.loader.exec_module(cli)
 UUID1 = "49960a5e-a239-42da-95f6-f55383ea5c62"
 UUID2 = "6b128cd4-f440-482d-8e90-1eb32a2c2094"
 
+# Refus vus en réel (kubectl 1.35, harv1) : RBAC d'un compte `view`
+# (real3a/real13-harv1.txt) et webhook qui refuse sans code (403 par défaut)
+RBAC_DENIAL = ('Error from server (Forbidden): virtualmachines.kubevirt.io "navtest-vm" is forbidden: '
+               'User "system:serviceaccount:nav-folders-test:nav-viewer" cannot patch resource '
+               '"virtualmachines" in API group "kubevirt.io" in the namespace "nav-folders-test"')
+WEBHOOK_403 = ('Error from server (Forbidden): admission webhook "validator.harvesterhci.io" denied the '
+               'request: the folder annotation is forbidden here')
+
 
 class FakeKube:
     """Enregistre chaque patch ; `fail` {nom: "webhook" | "forbidden" | "down"}."""
@@ -42,7 +50,9 @@ class FakeKube:
         if why == "webhook" and dry_run:
             raise KubeError('admission webhook "validator.harvesterhci.io" denied the request: no')
         if why == "forbidden":
-            raise KubeError(f'virtualmachines.kubevirt.io "{name}" is forbidden: User "x" cannot patch resource')
+            raise KubeError(RBAC_DENIAL)
+        if why == "webhook403" and dry_run:
+            raise KubeError(WEBHOOK_403)
         if why == "down":
             raise KubeError("Unable to connect to the server: dial tcp: i/o timeout")
 
@@ -305,6 +315,34 @@ def test_a_webhook_refusal_fails_its_line_and_the_others_go_on(env, capsys):
     assert ("virtualmachines.kubevirt.io", "nav", "b", {"metadata": {"annotations": {
         "harvester-ops.io/folder": "/Lab"}}}, False) not in env["kube"].calls     # jamais écrite pour de vrai
     assert "denied the request" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("message,rbac", [
+    (RBAC_DENIAL, True),
+    ('Error from server (Forbidden): deployments.apps "navtest-deploy" is forbidden: User "u" cannot patch '
+     'resource "deployments" in API group "apps" in the namespace "n"', True),
+    ('Error from server (Forbidden): statefulsets.apps "pg" is forbidden: User "u" cannot update resource '
+     '"statefulsets" in API group "apps"', True),
+    (WEBHOOK_403, False),
+    ('Error from server (Forbidden): admission webhook "v.x.io" denied the request: User "u" cannot patch '
+     'resource "virtualmachines"', False),
+    ('Error from server (Forbidden): virtualmachines.kubevirt.io "a" is forbidden: exceeded quota: q, '
+     'requested: count/virtualmachines.kubevirt.io=1', False),
+    ('Error from server (BadRequest): admission webhook "validator.harvesterhci.io" denied the request: no', False),
+    ("Unable to connect to the server: dial tcp: i/o timeout", False),
+    ('Error from server (NotFound): virtualmachines.kubevirt.io "a" not found', False),
+])
+def test_only_an_rbac_denial_counts_as_no_permission(message, rbac):
+    assert cli._denied(KubeError(message)) is rbac
+
+
+def test_a_403_webhook_refusal_is_a_failed_line_not_a_console_filing(env, capsys):
+    env["kube"].fail = {"b": "webhook403"}
+    assert run(env, "--id=w4", "assign", "--to", "/Lab", spec={"objects": [vm("a"), vm("b"), vm("c")]}) == 1
+    assert [j[3] for j in journal(env, "w4")] == ["done", "failed", "done"]
+    assert "harvester/harv1/nav/b" not in members(env)
+    err = capsys.readouterr().err
+    assert "denied the request" in err and "kept in the console only" not in err
 
 
 def test_rbac_denial_keeps_the_filing_in_the_console(env, capsys):

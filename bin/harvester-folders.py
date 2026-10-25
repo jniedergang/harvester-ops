@@ -75,7 +75,11 @@ from kube import Kube, KubeError, cluster_config  # noqa: E402
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE = 0, 1, 2
 ROLES = ("viewer", "operator", "admin")
-DENIAL_MARKERS = ("forbidden", "is not allowed", "cannot patch", "cannot update")
+# Refus de la RBAC (texte de l'autorisation de Kubernetes, `User "u" cannot
+# patch resource "virtualmachines" ...`). Un webhook qui refuse sans code
+# rend aussi 403 `(Forbidden)`, comme un quota : ce n'est pas un manque de
+# droit, la ligne échoue avec sa raison.
+RBAC_DENIAL_RE = re.compile(r"\bcannot (?:patch|update) resource\b")
 DEFAULT_RATE = 5.0
 CONSOLE_ONLY = "kept in the console only"
 SLEEP = time.sleep
@@ -136,7 +140,9 @@ class ConsoleOnly(Exception):
 
 def _denied(e):
     low = str(e).lower()
-    return any(m in low for m in DENIAL_MARKERS)
+    if "admission webhook" in low:
+        return False
+    return bool(RBAC_DENIAL_RE.search(low))
 
 
 def write_kube(obj, path, spec, kubes):
