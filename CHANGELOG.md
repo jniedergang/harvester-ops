@@ -104,10 +104,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `harvester-ops.io/folder` on VMs and Deployments, StatefulSets, DaemonSets,
   CronJobs; libvirt metadata on KVM domains; `folder` field of the host
   declaration), with one journal line per object for resume and undo. An
-  object the person may not write, or a cluster declared in config.yaml, is
-  filed in the console only. The operator role is needed to change
-  anything. Host declarations accept the optional `folder` field, and
-  editing a cluster in Settings keeps it.
+  object the person may not write (RBAC refusal), or a cluster declared in
+  config.yaml, is filed in the console only; a webhook or quota refusal,
+  even with the 403 code, fails its line. The operator role is needed to
+  change anything, and without `--role` the command runs as a viewer. With
+  `--json`, every error exit prints one JSON object, never a trace. A fleet
+  read during a rename shows the objects not yet rewritten under the new
+  path and recreates no former folder. Host declarations accept the
+  optional `folder` field, and editing a cluster in Settings keeps it: the
+  console and the command line share one lock on `clusters.d`.
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
@@ -192,7 +197,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   unreachable host then resume, an interrupted rename resumed without
   rewriting done lines, undo with a conflict, two simultaneous assigns, the
   role, forged objects, exit codes, the YAML field edit, and a deliberate
-  mutation of the annotation key.
+  mutation of the annotation key. After review: real RBAC and 403 webhook
+  messages in one table, JSON on every error exit (an unexpected error
+  hides its path), no role means read only, a fleet read in the middle of
+  a rename or an undo, apply-rename of a line the renamer could not see,
+  undo of a folder whose parent is gone or whose name was taken, resume
+  that leaves an object filed since, crashed domains, names with spaces;
+  `tests/api/test_portable_state_178.py` adds a folder write during a
+  console edit and the cross-process declaration lock.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
   rule, object keys, rebuild from the objects alone, object against cache,
   three-level rename plan, move into its own subtree, undo with a conflict,
