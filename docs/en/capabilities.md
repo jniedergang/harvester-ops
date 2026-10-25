@@ -206,6 +206,26 @@ Checked for real on five clusters (two physical, two nested, one off): 19
 VMs read in 40 ms from the shared reads, a VM of `harvlab` stopped from its
 row, then started again from a bulk action, `kubectl` confirming each step.
 
+### One row for Harvester and KVM VMs (2.0.0)
+
+`GET /api/vms-all?kinds=harvester,kvm` lists the VMs of every cluster and
+every KVM host in one list (without `kinds`, the answer is the one of
+1.85.0). Each row keeps its own fields and gains the same common fields
+whatever its family: `kind` (`harvester` or `kvm`), `source` (cluster or
+host), `namespace` (null for KVM), `name`, `phase`, `cpu`, `memory_bytes`,
+`node`, `ips`, `labels`, `uuid`, `key` (`harvester/<cluster>/<ns>/<name>`,
+`kvm/<uuid>`: a renamed domain keeps its key), `folder` and `folder_source`
+(`vm` when the object carries it, `console` when only the console keeps it,
+null). libvirt states become phases: running, idle and blocked are
+`Running`, shut off `Stopped`, paused and pmsuspended `Paused`, crashed
+`Failed`, in shutdown `Stopping`, anything else `Unknown`. `sources` gives
+one state per cluster and host; a KVM host whose folders could not all be
+read says so in its `error`, and those VMs keep the folder the console last
+knew. A folder annotation that is not a valid path is ignored and listed in
+`folder_warnings`. Checked for real on harv1, gpudemo and node2: 21
+Harvester and 16 KVM VMs, the UUIDs equal to `virsh list --all --uuid
+--name`.
+
 ### Container workloads (1.91.0)
 
 Harvester 1.9.1 makes bare-metal container workloads generally available:

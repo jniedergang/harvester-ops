@@ -226,6 +226,26 @@ Vérifié en réel sur cinq clusters (deux physiques, deux imbriqués, un
 `harvlab` arrêtée depuis sa ligne puis redémarrée par une action groupée,
 `kubectl` confirmant chaque étape.
 
+### Une ligne commune aux VMs Harvester et KVM (2.0.0)
+
+`GET /api/vms-all?kinds=harvester,kvm` liste les VMs de tous les clusters et
+de tous les hôtes KVM en une seule liste (sans `kinds`, la réponse reste
+celle de la 1.85.0). Chaque ligne garde ses champs et reçoit les mêmes champs
+communs quelle que soit sa famille : `kind` (`harvester` ou `kvm`), `source`
+(cluster ou hôte), `namespace` (null pour KVM), `name`, `phase`, `cpu`,
+`memory_bytes`, `node`, `ips`, `labels`, `uuid`, `key`
+(`harvester/<cluster>/<ns>/<nom>`, `kvm/<uuid>` : un domaine renommé garde sa
+clé), `folder` et `folder_source` (`vm` quand l'objet le porte, `console`
+quand seule la console le garde, null). Les états de libvirt deviennent des
+phases : running, idle et blocked donnent `Running`, shut off `Stopped`,
+paused et pmsuspended `Paused`, crashed `Failed`, in shutdown `Stopping`, tout
+autre `Unknown`. `sources` donne un état par cluster et par hôte ; un hôte KVM
+dont les dossiers n'ont pas tous pu être lus le dit dans son `error`, et ces
+VMs gardent le dossier que la console connaissait. Une annotation de dossier
+qui n'est pas un chemin valide est ignorée et listée dans `folder_warnings`.
+Vérifié en réel sur harv1, gpudemo et node2 : 21 VMs Harvester et 16 VMs KVM,
+UUID identiques à `virsh list --all --uuid --name`.
+
 ### Charges de conteneurs (1.91.0)
 
 Harvester 1.9.1 passe en GA les conteneurs bare-metal : des charges

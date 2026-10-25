@@ -792,13 +792,16 @@ def targets(args):
             for d in kvm_decl.load_all(state, warn=lambda m: step("hosts", "warn", m))]
 
 
-def read_all(hosts, details=False, deadline=None):
+def read_all(hosts, details=False, deadline=None, folders=False):
     """Inventaire de chaque hôte, en parallèle ; un hôte en échec rend son
     erreur sans gêner les autres. `deadline` (s) : échéance de l'ensemble ;
     un hôte qui n'a pas répondu à temps rend {kind: "timeout"} et les autres
-    sont rendus (sa lecture finit en arrière-plan, bornée par le délai SSH)."""
+    sont rendus (sa lecture finit en arrière-plan, bornée par le délai SSH).
+    `folders` (2.0.0) : dossier de chaque VM (kvm_host.read_folders)."""
     def one(host):
         try:
+            if folders:
+                return kh.host_inventory(host, details=details, folders=True)
             return kh.host_inventory(host, details=details)
         except kh.KvmError as e:
             return {"name": host.name, "address": host.decl.get("address"), "error": err_info(e)}

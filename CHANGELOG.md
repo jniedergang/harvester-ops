@@ -89,6 +89,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Bare-metal) and Activity, as real links. `#activity/host/<kind>/<name>`
   opens Activity filtered on that host (`kvm:<h>` for a KVM host), and the
   cluster filter is kept in the address.
+- **One VM row for Harvester and KVM.** `GET /api/vms-all?kinds=harvester,kvm`
+  lists the VMs of every cluster and every KVM host with the same common
+  fields (`kind`, `source`, `namespace`, `name`, `phase`, `cpu`,
+  `memory_bytes`, `node`, `ips`, `labels`, `uuid`, `key`, `folder`,
+  `folder_source`) and a state per source; without `kinds` the answer is
+  unchanged. A KVM VM is keyed by its UUID (now read with the inventory),
+  libvirt states map to the Harvester phases, and the folder comes from the
+  object (annotation, libvirt metadata read in one virsh call per host),
+  else from the console cache.
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
@@ -159,6 +168,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/api/test_vm_common_row_200.py`: every libvirt state to its phase
+  (and a deliberate mutation swapping paused and running), memory in bytes,
+  keys that survive a rename, the frozen list of common fields, the node2
+  UUID list, folder metadata present, absent, unreadable or failing (read
+  again domain by domain), the chained virsh call as one argument, an
+  invalid annotation ignored and listed, the console fallback and a dropped
+  `vm` filing in `/api/vms-all`.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
   rule, object keys, rebuild from the objects alone, object against cache,
   three-level rename plan, move into its own subtree, undo with a conflict,

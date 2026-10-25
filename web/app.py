@@ -9293,6 +9293,10 @@ def _vms_collect(cluster, kc):
                  if k.startswith("static-ip.harvesterhci.io/") and re.match(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$", str(v))]
                 + (state.get("ips") or []))),
             "labels": item["metadata"].get("labels") or {},
+            # 2.0.0 : identifiant de l'objet et dossier lu sur son annotation
+            # (un chemin invalide est ignoré et signalé par `folder_invalid`)
+            "uid": item["metadata"].get("uid"),
+            **_folder_from_annotation(annot),
         })
 
     # Sort: (group_priority, group, priority, name) so the UI sees the
@@ -9301,15 +9305,123 @@ def _vms_collect(cluster, kc):
     return {"cluster": cluster, "vms": vms}, 200, denials
 
 
+import folders as _fm  # noqa: E402
+
+_QUANTITY_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*(Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E)?\s*$")
+_QUANTITY_UNITS = {None: 1, "Ki": 2 ** 10, "Mi": 2 ** 20, "Gi": 2 ** 30, "Ti": 2 ** 40, "Pi": 2 ** 50,
+                   "Ei": 2 ** 60, "k": 10 ** 3, "K": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9, "T": 10 ** 12,
+                   "P": 10 ** 15, "E": 10 ** 18}
+
+
+def _quantity_bytes(q):
+    """Mémoire Kubernetes (`4Gi`, `512Mi`, `1G`, `1073741824`) en octets ;
+    None pour une valeur absente ou illisible."""
+    m = _QUANTITY_RE.match(str(q)) if q not in (None, "") else None
+    if not m:
+        return None
+    return int(float(m.group(1)) * _QUANTITY_UNITS[m.group(2)])
+
+
+def _folder_from_annotation(annot):
+    """{"folder", "folder_invalid"} lus sur l'annotation harvester-ops.io/folder
+    d'une VM ou d'une charge : un chemin invalide est ignoré (folder None) et
+    sa raison rendue."""
+    val = (annot or {}).get(_fm.ANNOTATION)
+    if val in (None, ""):
+        return {"folder": None, "folder_invalid": None}
+    why = _fm.check_path(val)
+    return {"folder": None if why else val, "folder_invalid": why}
+
+
+def harvester_common_row(v, cluster):
+    """Champs communs (kvm_ops.COMMON_FIELDS) d'une VM Harvester de
+    _vms_collect. Le dossier est celui de l'annotation ; le repli de la
+    console est posé ensuite par _folders_apply."""
+    folder = v.get("folder")
+    return {"kind": "harvester", "source": cluster, "namespace": v.get("namespace"), "name": v.get("name"),
+            "phase": v.get("phase"), "cpu": v.get("cpu"), "memory_bytes": _quantity_bytes(v.get("memory")),
+            "node": v.get("node"), "ips": list(v.get("ips") or []), "labels": dict(v.get("labels") or {}),
+            "uuid": v.get("uid"),
+            "key": _fm.object_key("harvester", cluster=cluster, namespace=v.get("namespace"),
+                                  name=v.get("name")),
+            "folder": folder, "folder_source": "vm" if folder else None}
+
+
+VMS_ALL_KINDS = ("harvester", "kvm")
+
+
+def _folders_apply(rows, scopes_ok):
+    """Réaligne le cache des dossiers sur les VMs lues (décision 4 : pendant
+    une lecture, sans action suivie) et pose sur chaque ligne le repli
+    « console » de celles qui ne portent rien. `scopes_ok` : lectures
+    réussies, dont les entrées trop vieilles sont purgées. Une base
+    illisible laisse les lignes telles quelles (jamais fatal pour la vue)."""
+    try:
+        conn = _fdb.connect(_folders_db_path())
+        try:
+            eff = _fdb.realign(conn, [{"key": r["key"], "folder": r["folder"],
+                                       "scope": r.pop("_scope", "")} for r in rows if r.get("key")])
+            _fdb.purge(conn, scopes=scopes_ok)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as e:
+        log.warning("folders: cache not realigned: %s", e)
+        for r in rows:
+            r.pop("_scope", None)
+        return
+    for r in rows:
+        if r.get("key") in eff:
+            r["folder"], r["folder_source"] = eff[r["key"]]
+
+
+def _vms_all_kvm():
+    """(sources, lignes) des VMs KVM pour /api/vms-all, dossiers compris (une
+    lecture de métadonnées par hôte, kvm_host.read_folders)."""
+    if not _kvm_cli or not _kd:
+        return [], []
+    state = _state_dir()
+    decls = _kd.load_all(state)
+    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    entries = _kvm_cli.read_all(hosts, deadline=KVM_READ_DEADLINE, folders=True) if hosts else []
+    sources, rows = [], []
+    for inv in entries:
+        if "error" in inv:
+            sources.append({"kind": "kvm", "source": inv["name"], "state": inv["error"]["kind"],
+                            "count": None, "error": inv["error"]["message"]})
+            continue
+        unread = [e for e in inv.get("errors") or [] if str(e.get("command", "")).startswith("metadata")]
+        sources.append({"kind": "kvm", "source": inv["name"], "state": "ok", "count": len(inv["vms"]),
+                        "error": "; ".join(e["message"] for e in unread)[:500] or None})
+        for vm in inv["vms"]:
+            row = dict(vm, **_ko.common_row(vm))
+            row["_scope"] = f"kvm/{inv['name']}"
+            if vm.get("folder_unread"):
+                row["_unread"] = True
+            rows.append(row)
+    return sources, rows
+
+
 @app.route("/api/vms-all")
 @requires_auth
-@shared_read()
+@shared_read(query_keys=("kinds",))
 def api_vms_all():
     """Toutes les VMs de tous les clusters déclarés, en une liste (v1.85.0).
     Chaque cluster est lu en parallèle avec l'identité de la personne (le
     kubeconfig est préparé dans le fil de la requête, qui seul la connaît).
     Un cluster éteint, injoignable ou qui refuse la lecture est dit dans
-    `clusters`, sans retenir les autres."""
+    `clusters`, sans retenir les autres.
+
+    2.0.0 : `?kinds=harvester,kvm` ajoute les VMs des hôtes KVM et les champs
+    communs de chaque ligne (kvm_ops.COMMON_FIELDS : kind, source, phase,
+    memory_bytes, uuid, key, folder, folder_source...), et `sources` (un
+    état par cluster et par hôte). Sans `kinds`, la réponse d'avant."""
+    kinds_arg = request.args.get("kinds")
+    kinds = None
+    if kinds_arg is not None:
+        kinds = [k for k in kinds_arg.split(",") if k]
+        bad = [k for k in kinds if k not in VMS_ALL_KINDS]
+        if bad or not kinds:
+            return jsonify({"error": f"kinds must list {', '.join(VMS_ALL_KINDS)}"}), 400
     cfg = load_config_ro()
     todo = []
     for c in cfg.get("clusters", []):
@@ -9342,7 +9454,49 @@ def api_vms_all():
         clusters.append(info)
         vms.extend(rows)
     vms.sort(key=lambda v: (v["name"], v["cluster"], v["namespace"]))
-    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "vms": vms})
+    clusters = sorted(clusters, key=lambda c: c["cluster"])
+    if kinds is None:
+        for v in vms:                       # réponse d'avant la 2.0.0
+            v.pop("folder_invalid", None)
+        return jsonify({"clusters": clusters, "vms": vms})
+    sources, rows, warnings = [], [], []
+    if "harvester" in kinds:
+        for c in clusters:
+            sources.append({"kind": "harvester", "source": c["cluster"], "state": c["state"],
+                            "count": c.get("count"), "error": c.get("error")})
+        for v in vms:
+            why = v.pop("folder_invalid", None)
+            row = dict(v, **harvester_common_row(v, v["cluster"]))
+            row["_scope"] = f"harvester/{v['cluster']}"
+            if why:
+                warnings.append({"key": row["key"], "reason": why})
+            rows.append(row)
+    if "kvm" in kinds:
+        ksources, krows = _vms_all_kvm()
+        sources += ksources
+        rows += krows
+    # une VM dont le dossier n'a pas pu être lu ne réaligne rien : son cache
+    # reste tel quel (ni retiré ni rafraîchi)
+    unread = [r for r in rows if r.pop("_unread", False)]
+    for r in unread:
+        r.pop("_scope", None)
+    _folders_apply([r for r in rows if r not in unread],
+                   [f"{s['kind']}/{s['source']}" for s in sources if s["state"] == "ok" and not s.get("error")])
+    if unread:
+        cache = {}
+        try:
+            conn = _fdb.connect(_folders_db_path())
+            try:
+                cache = _fdb.memberships(conn, [r["key"] for r in unread if r.get("key")])
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError) as e:
+            log.warning("folders: cache not read: %s", e)
+        for r in unread:
+            c = cache.get(r.get("key"))
+            r["folder"], r["folder_source"] = (c["folder_path"], c["source"]) if c else (None, None)
+    rows.sort(key=lambda r: (r["name"] or "", r["kind"], r["source"] or "", r["namespace"] or ""))
+    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings})
 
 
 # -----------------------------------------------------------------------------

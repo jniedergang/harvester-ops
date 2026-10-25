@@ -23,6 +23,7 @@ OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 
 import fcntl
 import hashlib
+import html
 import io
 import ipaddress
 import itertools
@@ -156,6 +157,49 @@ def _check_description(text):
     if not isinstance(text, str) or len(text) > DESCRIPTION_MAX or "\x00" in text:
         raise OpError("invalid", f"invalid description ({DESCRIPTION_MAX} characters at most)")
     return text
+
+
+# --- vue unique et dossiers (navigation 2.0) -------------------------------
+
+# États de libvirt ramenés aux phases de la vue unique (celles de KubeVirt)
+PHASES = {
+    "running": "Running", "idle": "Running", "blocked": "Running",
+    "shut off": "Stopped",
+    "paused": "Paused", "pmsuspended": "Paused",
+    "crashed": "Failed",
+    "in shutdown": "Stopping",
+}
+
+# Champs communs à une ligne de VM Harvester et KVM (/api/vms-all) : une
+# liste figée, un test casse si l'un d'eux est renommé
+COMMON_FIELDS = ("kind", "source", "namespace", "name", "phase", "cpu", "memory_bytes", "node",
+                 "ips", "labels", "uuid", "key", "folder", "folder_source")
+
+
+def phase_of(state):
+    """Phase d'un état libvirt (`virsh list`), « Unknown » pour un autre."""
+    return PHASES.get((state or "").strip().lower(), "Unknown")
+
+
+def vm_key(uuid):
+    """Clé d'une VM KVM : son UUID (un domaine renommé la garde) ; None
+    sans UUID lu."""
+    return f"kvm/{uuid.lower()}" if uuid else None
+
+
+def common_row(vm):
+    """Champs communs d'une VM KVM de l'inventaire (kvm_host.host_inventory) :
+    phase, vCPU, mémoire en octets, hôte, clé. Le dossier est celui lu dans
+    les métadonnées du domaine (`folder`), `folder_source` vaut « vm » s'il en
+    porte un ; le repli de la console est posé par l'appelant."""
+    kib = vm.get("memory_max_kib") if vm.get("memory_kib") is None else vm.get("memory_kib")
+    folder = vm.get("folder")
+    return {"kind": "kvm", "source": vm.get("host"), "namespace": None, "name": vm.get("name"),
+            "phase": phase_of(vm.get("state")), "cpu": vm.get("vcpus"),
+            "memory_bytes": kib * 1024 if isinstance(kib, int) else None,
+            "node": vm.get("host"), "ips": list(vm.get("ips") or []), "labels": {},
+            "uuid": vm.get("uuid"), "key": vm_key(vm.get("uuid")),
+            "folder": folder, "folder_source": "vm" if folder else None}
 
 
 # --- petites aides ---------------------------------------------------------
