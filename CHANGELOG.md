@@ -4,6 +4,176 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.100.0] - 2026-10-25 - KVM: create and edit VMs, images, pools and networks
+
+### Added
+- **Create a KVM VM** from the KVM VMs toolbar, a host card or an image of
+  the catalogue, in the window of the Harvester VMs: same tabs (General,
+  Compute, Firmware, Disks, Network, Cloud-init, Review), same icons, same
+  cloud-init assistant.
+  - Choices read from the host (`capabilities`, `domcapabilities` per
+    machine family): q35 or pc, BIOS or UEFI, Secure Boot, TPM through
+    `swtpm`, CPU mode and models, disk buses, video. An option the host
+    cannot give is greyed out with its reason.
+  - 1 to 20 instances (`<name>-01`...), start after creation, vCPU and
+    memory below their maximum for hot changes, hot-plug PCIe slots on q35
+    (4 by default, 0 to 16).
+  - Disks: blank, from an image (linked qcow2 overlay by default, or full
+    copy resized to the asked size), existing volume, ISO, empty CD-ROM.
+    Cards: libvirt network, host bridge or macvtap.
+  - VNC with a password drawn by the console (8 characters), never shown.
+  - Cloud-init: NoCloud seed ISO (label `cidata`, Joliet) built by the
+    console, instance id = VM uuid, user-data, network-config, guest host
+    name, seed pool. The guest agent and SSH keys (KeyPairs of the readable
+    clusters, pasted keys) are merged into a `#cloud-config`; a document
+    the console cannot merge safely is refused with its reason, unchanged.
+  - Review is the server plan (refusals, warnings, volumes, seed, XML with
+    `passwd='***'`). Create recomputes it, then runs volumes, seed,
+    `define --validate`, autostart, start, check. A failure removes what
+    was created for the failing instance and names the rest.
+  - Templates: form specs kept by the console (`kvm-templates/`, 0600),
+    shared by all hosts, with an owner; secrets and user-data removed when
+    saved, and said.
+- **Edit a KVM VM**: the same window filled from the inactive definition,
+  a forecast per field (now, next boot, refused) and the server's exact
+  classification in Review. Only changed fields are sent, with the digest
+  of the definition read at opening (409 `changed`, then Reload keeps what
+  was typed). Changes that wait for the next start show a "restart
+  needed" banner, with Shut down and start, and a badge in the VM list
+  (`pending` in `/api/kvm/vms`). Settings the form does not manage
+  (pinning, `<cputune>`, `<numatune>`, `<hostdev>`, `<qemu:commandline>`,
+  foreign metadata, `<seclabel>`...) are kept byte for byte and listed
+  read-only. Rename of a shut off VM without snapshots.
+- **Hot gestures** in the KVM VM menu, as for Harvester VMs: CPU and
+  memory, add a disk, add a card, remove a disk or a card, insert or eject
+  a CD-ROM media, cloud-init (new seed, run again at next boot, clear
+  user-data on purpose). Each result says now, next boot or refused with
+  the reason (no free PCIe slot, SATA, guest that does not release a disk
+  within 30 s). Removing a disk or card that waits for the next boot only
+  edits the definition.
+- **Image catalogue** per host (Storage > Images): format, ISO badge,
+  virtual size, use (base of N disks, used by N), SHA-256, origin URL
+  without credentials or query. Upload from the browser (received once,
+  checked, sent to one or several hosts on a fresh SSH connection,
+  optional Mbit/s limit, SHA-256 recomputed on each host, cancel in both
+  phases), download from a URL by the console, verify, delete with proof,
+  create a VM from an image, image pools of a host (admin).
+- **Volumes**: create (blank or linked to an image of the same pool),
+  resize up (VM shut off), delete with the 1.98 ownership proof and the
+  digest of the preview.
+- **Pools**: create `dir` or NFS (admin), start, stop, refresh, autostart,
+  delete with or without the empty directory. Guards: system directories,
+  the directory of another pool (path and device:inode), nesting of other
+  types, a running VM on stop, any definition citing a volume on delete.
+- **Networks**: create NAT, routed, isolated (free `192.168.X.0/24`
+  proposed) or on a host bridge; start, stop, autostart, delete. A subnet
+  overlapping a host address or route or another network is refused; stop
+  is refused while a running VM has a card on it, delete while a
+  definition cites it. Bridges and cards view of the host.
+- Command line `bin/harvester-kvm.py`: `host caps`, `host image-pools`,
+  `vm create|edit|cpumem|add-volume|remove-volume|insert-cdrom|eject-image|add-nic|remove-nic|cloudinit`,
+  `image list|verify|upload|download-url|delete`,
+  `vol create|upload|resize|delete`,
+  `pool define|start|stop|refresh|autostart|delete`,
+  `net define|start|stop|autostart|delete|links`,
+  `template list|save|delete`. Specs by `--spec-file=` (0600) or stdin;
+  deletes need `--expect-delete=` from their `--dry-run`; edit needs
+  `--expect-config=`.
+- API under `/api/kvm`: `hosts/<host>/caps|images|links|pools|networks`,
+  `vms/<host>/<domain>/form`, `.../cloudinit` (operator),
+  `hosts/<host>/vm-plan`, `POST vms/<host>`, `vms/<host>/<domain>/edit-plan`,
+  `PATCH vms/<host>/<domain>`, `vms/<host>/<domain>/hot/<op>`,
+  `hosts/<host>/images/upload|fetch`, `uploads/<token>/cancel`,
+  `.../images/<pool>/<volume>/verify`, image, volume, pool and network
+  create, gesture, delete-plan and delete routes, `PUT .../image-pools`,
+  `/api/kvm/templates`. `/api/kvm/vms` also gives `edit_operations`.
+- Docs: section 10 of the capabilities page (EN, FR) and the README KVM
+  line.
+
+### Changed
+- The Harvester VM creation window runs on a shell shared with the KVM
+  window (`vm-form.js`); the cloud-init assistant moved to
+  `cloudinit-form.js`. The Harvester behaviour is unchanged (every
+  existing end-to-end test passes as is).
+- ssh to KVM hosts runs with `LogLevel=ERROR`: a login banner no longer
+  reaches error messages.
+- The KVM disk survey kept for views is shared between the console and
+  its reader processes through a per-host generation, moved by every
+  write of the console or the command line.
+- A KVM action forgets the shared views before it ends, so the page that
+  reloads on the end event sees the change.
+- Cancelling an image upload or download, or a VM creation, waits for the
+  tool: the action stays running, names and pools stay held, until the
+  rollback is done. A full copy that libvirt is still building after a
+  cancel is waited for (up to 15 min) and deleted.
+- The URL guard of `/api/iso/fetch` moved to `bin/lib/url_fetch_guard.py`
+  and is shared with the KVM image download (console and command line).
+  A plain `http` image URL needs a SHA-256.
+- Without declared image pools, a base image stays in the catalogue while
+  linked disks use it (only direct use hides a volume).
+- The read retry after a transport cut (1.98.0) stays as a safety net: the
+  `sshd-session` crash under multiplexed sessions is fixed in OpenSSH
+  10.6p1 (none seen on the lab host since its update).
+
+### Security
+- The VNC password and the user-data never reach an API answer (the
+  cloud-init read of an operator excepted), a log, an action step, a
+  command line or Activity; specs reach the tool by a 0600 file of the
+  action's working directory, removed at the end.
+- An uploaded or downloaded qcow2 that names a backing file or an external
+  data file, or announces more than 16 TiB, is refused before anything is
+  written on a host. The SHA-256 is compared before the first byte is
+  sent.
+- Uploads are staged in a 0700 directory (files 0600), with space reserved
+  per reception and checked while writing; stale staging files are swept
+  at startup.
+- The upload cancel token works only for the user who started the upload,
+  with the operator role.
+- Roles: deleting a volume or an image, every pool and network gesture and
+  the image pools need the admin role; create, edit, hot gestures,
+  uploads, verify, resize, pool refresh and the cloud-init read need the
+  operator role.
+
+### Internal
+- Not in this version: Windows answer file, making a transient VM
+  persistent, live resize of a used volume (`blockresize`), download of
+  an image by the host itself, a key store of the console, LVM and iSCSI
+  pools, fixed DHCP leases, saving an existing VM as a template, changing
+  the balloon, serial console, watchdog, firmware serial or disk I/O
+  threads after creation.
+- After a nested `dir` pool is deleted with its directory, libvirt keeps
+  listing that directory in the parent pool until the parent is
+  refreshed; the console does not refresh pools it was not asked to touch.
+- New stdlib modules in `bin/lib`: `kvm_caps`, `kvm_xml`, `iso9660`,
+  `qcow2`, `kvm_storage`, `kvm_net`, `kvm_create`, `kvm_edit`,
+  `kvm_templates`, `kvm_pending`.
+
+### Tests
+- New API tests: `test_kvm_caps`, `test_kvm_xml` (golden files checked
+  by `virt-xml-validate` when present), `test_iso9660`, `test_qcow2`,
+  `test_kvm_storage`, `test_kvm_net`, `test_kvm_create`, `test_kvm_edit`,
+  `test_kvm_ssh_banner`, `test_kvm_next_review`, `test_kvm_cli_create`,
+  `test_kvm_cli_create_review`, `test_kvm_routes_create`,
+  `test_kvm_routes_create_review`, `test_kvm_pending`,
+  `test_kvm_storage_views`, `test_kvm_upload_cancel`,
+  `test_vm_form_source`, on a simulated host (`kvm_next_sim.py`) and
+  fixtures read on the lab host. New end-to-end tests: `test_kvm_create`,
+  `test_kvm_edit`, `test_kvm_form_review`, `test_kvm_storage`.
+- Real check on the lab host (libvirt 12.8.0, QEMU 11.1.2, OpenSSH
+  10.6p1), test objects only, identical inventory before and after:
+  upload from a pipe, cirros 0.6.2, openSUSE Tumbleweed and Alpine with
+  their published checksums, BIOS VM linked to cirros with a VNC password
+  created in the window, UEFI Secure Boot TPM VM from a full copy with a
+  static network-config reached by SSH (`cloud-init status` done), three
+  instances, cancel during a full copy with nothing left, hot vCPU,
+  memory, disks, card and media seen in the guest, PCIe slots exhausted,
+  next-boot machine type and memory maximum, unmanaged settings identical
+  in C14N, delete with storage, guards, cleanup by the console, secrets in
+  no answer, log or action record. Three defects found there are fixed
+  with tests: removing a disk added for the next boot failed, a cancel
+  during a full copy left the copy behind, a base image vanished from the
+  catalogue after its first linked VM.
+
 ## [1.99.0] - 2026-10-24 - Asynchronous VM replication between Harvester clusters (engine, CLI, console API)
 
 ### Added

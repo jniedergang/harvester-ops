@@ -100,10 +100,12 @@ HOTNESS = (
      "note": "virtio, or scsi with a SCSI controller, and a free PCIe slot on q35; SATA and "
              "CD-ROM drives wait for the next start"},
     {"field": "disks[-]", "running": "now", "command": "detach-device --live --config",
-     "note": "virtio or scsi; the guest must release it within 30 s, the volume is kept"},
+     "note": "virtio or scsi; the guest must release it within 30 s, the volume is kept; "
+             "a disk added for the next start only leaves the definition"},
     {"field": "nics[+]", "running": "now", "command": "attach-device --live --config",
      "note": "needs a free PCIe slot on q35"},
-    {"field": "nics[-]", "running": "now", "command": "detach-interface --live --config"},
+    {"field": "nics[-]", "running": "now", "command": "detach-interface --live --config",
+     "note": "a card added for the next start only leaves the definition"},
     {"field": "nics[].model", "running": "next-boot", "command": "define"},
     {"field": "nics[].kind", "running": "next-boot", "command": "define"},
     {"field": "nics[].source", "running": "next-boot", "command": "define"},
