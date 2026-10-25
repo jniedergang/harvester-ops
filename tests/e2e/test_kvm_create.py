@@ -322,3 +322,35 @@ def test_network_config_by_mac_refusals(ui, label, setup, entries, error):
     expect(ci.locator('.apply-result[data-section="ci-net"]')).to_contain_text(error)
     assert ci.locator('[data-ci="networkData"]').input_value() == ""
     assert state.get("macs_drawn", []) == ([] if setup == "count" else ["52:54:00:5e:00:01"])
+
+
+def test_the_create_window_opens_before_the_catalogue_and_then_proposes_an_image(ui):
+    # 1.101.2 : la fenêtre s'affiche sans attendre le catalogue ; à son
+    # arrivée, le premier disque (non touché) devient l'image du catalogue
+    page, state, dialogs = ui
+    state["hold"] = "hosts/node2/images"
+    panel = open_create(page)
+    assert len(state.get("held", [])) == 1
+    disks = tab(panel, "disks")
+    src = disks.locator('[data-editor="kvm-disks"] [name$=".source"]').first
+    expect(src).to_have_value("blank")
+    expect(disks.locator('[data-kvmf="images-state"]')).to_be_visible()
+    F.release(state)
+    expect(disks.locator('[data-kvmf="images-state"]')).to_be_hidden()
+    expect(src).to_have_value("image")
+    expect(disks.locator('[data-editor="kvm-disks"] [name$=".image"]').first).to_have_value("images/cirros-0.6.3.qcow2")
+    assert dialogs == []
+
+
+def test_a_disk_touched_before_the_catalogue_is_kept(ui):
+    page, state, dialogs = ui
+    state["hold"] = "hosts/node2/images"
+    panel = open_create(page)
+    disks = tab(panel, "disks")
+    size = disks.locator('[data-editor="kvm-disks"] [name$=".size"]').first
+    size.fill("33G")
+    size.dispatch_event("change")
+    F.release(state)
+    expect(disks.locator('[data-kvmf="images-state"]')).to_be_hidden()
+    expect(disks.locator('[data-editor="kvm-disks"] [name$=".source"]').first).to_have_value("blank")
+    expect(size).to_have_value("33G")

@@ -251,13 +251,41 @@ const KVMForm = (() => {
   }
 
   // -- disques et cartes : moteur TFForm, schémas KVM -------------------------------------
+  /** Choix d'images des cartes de disque. Le catalogue arrive APRÈS
+   *  l'ouverture de la fenêtre (il demande un relevé du stockage de l'hôte) :
+   *  les mêmes tableaux sont remplis en place, un schéma déjà construit (carte
+   *  ajoutée plus tard, validation) voit donc la liste à jour. */
+  function imageLists(ctx) {
+    if (!ctx.imgLists) ctx.imgLists = { imgs: [], isos: [], vols: [] };
+    return ctx.imgLists;
+  }
+  /** État du catalogue dans l'onglet Disques : en cours, erreur, ou rien. */
+  function imagesStateText(ctx) {
+    if (ctx.imagesState === 'loading') return tr('kvmf.imagesLoading');
+    if (ctx.imagesState === 'error') return tr('kvmf.imagesError', { error: errText(ctx.imagesError || '?') });
+    return '';
+  }
+  function imagesStateHtml(ctx) {
+    const text = imagesStateText(ctx);
+    return `<p class="form-hint${ctx.imagesState === 'error' ? ' res-warn' : ''}" data-kvmf="images-state" role="status"${text ? '' : ' hidden'}>${esc(text)}</p>`;
+  }
+  function fillImageLists(ctx, images) {
+    const l = imageLists(ctx);
+    const put = (arr, vals) => { arr.splice(0, arr.length, ...vals); };
+    const ref = (i) => `${i.pool}/${i.volume}`;
+    // l'image d'ouverture (« Créer une VM » depuis une image) reste choisie
+    const all = (images || []).slice();
+    if (ctx.image && !all.some((i) => i.pool === ctx.image.pool && i.volume === ctx.image.volume)) all.push(ctx.image);
+    put(l.imgs, all.filter((i) => !i.iso).map(ref));
+    put(l.isos, all.filter((i) => i.iso).map(ref));
+    put(l.vols, all.map(ref));
+  }
+
   /** Schéma des cartes de disque, choix venus de l'hôte (pools actifs,
    *  images, bus annoncés par `domcapabilities`). */
   function diskSchema(ctx) {
     const pools = (ctx.pools || []).filter((p) => p.state === 'running').map((p) => p.name);
-    const imgs = (ctx.images || []).filter((i) => !i.iso).map((i) => `${i.pool}/${i.volume}`);
-    const isos = (ctx.images || []).filter((i) => i.iso).map((i) => `${i.pool}/${i.volume}`);
-    const vols = (ctx.images || []).map((i) => `${i.pool}/${i.volume}`);
+    const { imgs, isos, vols } = imageLists(ctx);
     const buses = (ctx.opts && ctx.opts.disk_buses) || ['virtio', 'sata', 'scsi'];
     const L = (s) => ({ en: s });
     return {
@@ -550,6 +578,7 @@ const KVMForm = (() => {
       return `<h3>${esc(tr('kvmf.s.disks'))}</h3>
         ${existing}
         ${ctx.mode === 'edit' ? `<h4>${esc(tr('kvmf.addDisks'))}</h4>` : ''}
+        ${imagesStateHtml(ctx)}
         <div class="vm-edit-cards" data-editor="kvm-disks">${TFForm.render(diskSchema(ctx), '', { disk: ctx.initialDisks || [] }, { hideHeader: true })}
           <p class="form-hint vm-disk-capacity" data-disk-capacity></p></div>
         <p class="form-hint">${esc(tr('kvmf.disksHint'))}</p>
@@ -594,7 +623,7 @@ const KVMForm = (() => {
   function existingDisksHtml(ctx) {
     const disks = (ctx.form.view.disks || []);
     if (!disks.length) return `<p class="form-hint">${esc(tr('kvmf.noDisk'))}</p>`;
-    const isos = (ctx.images || []).filter((i) => i.iso).map((i) => `${i.pool}/${i.volume}`);
+    const isos = imageLists(ctx).isos;
     const seed = ctx.form.view.seed;
     const ro = ctx.readOnly ? ' disabled' : '';
     const buses = (ctx.opts && ctx.opts.disk_buses) || ['virtio', 'sata', 'scsi'];
@@ -757,13 +786,22 @@ const KVMForm = (() => {
     // -- références de l'hôte ---------------------------------------------------------
     /** Références de l'hôte. Un changement d'hôte pendant la lecture rend
      *  la réponse périmée : elle est ignorée (jeton de requête), seule la
-     *  dernière demande remplit la fenêtre. */
+     *  dernière demande remplit la fenêtre.
+     *
+     *  Le catalogue d'images n'est PAS attendu : il demande un relevé du
+     *  stockage de l'hôte (plusieurs secondes sur un hôte chargé, à froid).
+     *  La fenêtre s'affiche dès les autres références ; les choix d'images
+     *  arrivent ensuite dans l'onglet Disques, avec leur propre indicateur
+     *  de chargement et leur erreur (`onImages`). */
     async function loadRefs(host) {
       const token = (st.refToken = (st.refToken || 0) + 1);
-      const [caps, pools, nets, links, images] = await Promise.all([
+      ctx.images = [];
+      ctx.imagesState = 'loading';
+      fillImageLists(ctx, []);
+      const imagesP = getJson(`/api/kvm/hosts/${enc(host)}/images`);
+      const [caps, pools, nets, links] = await Promise.all([
         getJson(`/api/kvm/hosts/${enc(host)}/caps`), getJson(`/api/kvm/hosts/${enc(host)}/pools`),
-        getJson(`/api/kvm/hosts/${enc(host)}/networks`), getJson(`/api/kvm/hosts/${enc(host)}/links`),
-        getJson(`/api/kvm/hosts/${enc(host)}/images`)]);
+        getJson(`/api/kvm/hosts/${enc(host)}/networks`), getJson(`/api/kvm/hosts/${enc(host)}/links`)]);
       if (token !== st.refToken) { const e = new Error('stale'); e.stale = true; throw e; }
       if (caps.error) throw new Error(caps.error);
       ctx.caps = caps.options || {};
@@ -771,8 +809,38 @@ const KVMForm = (() => {
       ctx.pools = pools.pools || [];
       ctx.networks = nets.networks || [];
       ctx.links = links.error ? {} : links;
-      ctx.images = images.images || [];
-      ctx.refWarnings = [pools, nets, links, images].filter((x) => x.error).map((x) => x.error);
+      ctx.refWarnings = [pools, nets, links].filter((x) => x.error).map((x) => x.error);
+      st.imagesP = imagesP.then((images) => { if (token === st.refToken) onImages(images); });
+    }
+
+    /** Catalogue d'images arrivé : listes remplies en place, listes
+     *  déroulantes déjà affichées refaites (la valeur choisie est gardée),
+     *  indicateur retiré ou remplacé par l'erreur. */
+    function onImages(images) {
+      const failed = !images || images.error;
+      ctx.images = failed ? [] : (images.images || []);
+      ctx.imagesState = failed ? 'error' : 'ready';
+      ctx.imagesError = failed ? ((images && images.error) || '?') : null;
+      if (failed) ctx.refWarnings = (ctx.refWarnings || []).concat([ctx.imagesError]);
+      fillImageLists(ctx, ctx.images);
+      const l = imageLists(ctx);
+      const opts = (list, cur, blank) => blank + (cur && !list.includes(cur) ? [cur] : []).concat(list)
+        .map((v) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(v)}</option>`).join('');
+      const lists = { image: l.imgs, iso: l.isos, volume: l.vols };
+      root.querySelectorAll('[data-editor="kvm-disks"] select').forEach((sel) => {
+        const m = /\.(image|iso|volume)$/.exec(sel.name || '');
+        if (!m) return;
+        const cur = sel.value;
+        // une valeur gardée qui n'est plus au catalogue reste visible
+        sel.innerHTML = opts(lists[m[1]], cur, sel.required ? '' : '<option value=""></option>');
+      });
+      root.querySelectorAll('select[data-disk-field="source"]').forEach((sel) => {
+        const cur = sel.value;
+        sel.innerHTML = opts(l.isos, cur, `<option value="">${esc(tr('kvmf.emptyDrive'))}</option>`);
+      });
+      const box = root.querySelector('[data-kvmf="images-state"]');
+      if (box) box.outerHTML = imagesStateHtml(ctx);
+      if (ctx.mode === 'create' && st.onImagesCreate) st.onImagesCreate();
     }
 
     function setFamily(fam) {
@@ -1503,6 +1571,7 @@ const KVMForm = (() => {
           loadKeys(head.querySelector('[name="ssh_keys"]'), st.keys);
           loadTemplates();
           const start = async () => {
+            st.onImagesCreate = null;
             await loadRefs(ctx.host);
             setFamily(ctx.caps.default_machine);
             ctx.defaultPool = ((ctx.pools || []).find((p) => p.state === 'running') || {}).name || '';
@@ -1516,6 +1585,9 @@ const KVMForm = (() => {
                   : { source: 'blank', pool: ctx.defaultPool, size: '10G', boot_order: 1 };
               })()];
             if (img && img.iso) ctx.initialDisks.push({ source: 'blank', pool: img.pool, size: '10G', boot_order: 2 });
+            // catalogue encore en route : le premier disque deviendra l'image
+            // du catalogue à son arrivée, si rien n'a été saisi d'ici là
+            const autoImage = !img && ctx.initialDisks[0].source === 'blank';
             const net = (ctx.networks || []).find((n) => n.active) || (ctx.networks || [])[0];
             ctx.initialNics = net ? [{ kind: 'network', network: net.name, model: 'virtio' }] : [];
             build();
@@ -1528,6 +1600,25 @@ const KVMForm = (() => {
             syncAgent();
             form.show('general');
             st.pristine = snapshot();
+            if (autoImage) {
+              st.onImagesCreate = () => {
+                st.onImagesCreate = null;
+                const first = (ctx.images || []).find((i) => !i.iso && (ctx.pools || []).some((p) => p.name === i.pool && p.state === 'running'));
+                if (!first || snapshot() !== st.pristine) return;
+                const card = root.querySelector('[data-editor="kvm-disks"] .tf-block-item');
+                const g = (n) => card && card.querySelector(`[name$=".${n}"]`);
+                if (!g('source') || !g('image')) return;
+                g('source').value = 'image';
+                if (g('pool')) g('pool').value = first.pool;
+                g('image').value = `${first.pool}/${first.volume}`;
+                if (g('linked')) g('linked').checked = true;
+                if (g('size')) g('size').value = '';
+                g('source').dispatchEvent(new Event('change', { bubbles: true }));
+                syncAgent();
+                st.pristine = snapshot();
+              };
+              if (ctx.imagesState !== 'loading') st.onImagesCreate();
+            }
             if ((ROLE_RANK[ctx.role] || 0) < ROLE_RANK.operator) {
               root.querySelector('[data-kvmf="create"]').disabled = true;
               root.querySelector('[data-kvmf="create"]').dataset.tip = tr('kvm.operatorOnly');

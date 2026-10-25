@@ -2530,6 +2530,17 @@ closed, ssh status 255) is tried once more, half a second later, on a new
 connection. A write is never tried again: whether it happened is unknown,
 and the action says the connection was lost.
 
+**Reads in parallel (1.101.2).** A read of many objects (the definition of
+each VM, each volume of each pool) runs 8 `virsh` commands at a time on
+the host, each with its own output, status and time limit. Writes stay one
+after the other, in order. On a host with 15 VMs and 63 volumes, the
+storage survey went from 24.9 s to about 5 s. The image catalogue of the
+Create and Edit windows no longer holds them: the window opens at once,
+and the Disks tab says "Loading the host's images..." until the catalogue
+arrives, or why it could not be read. Viewing the KVM section or a host
+prepares the storage survey in the background, so the catalogue is
+usually ready when a window opens. Nothing runs when nobody looks.
+
 **Lifecycle gestures.** The menu of a VM offers **Start**, **Shut down**,
 **Reboot**, **Force off**, **Suspend** and **Resume**. A gesture the state
 does not allow is greyed out and says why. Each gesture is a tracked action

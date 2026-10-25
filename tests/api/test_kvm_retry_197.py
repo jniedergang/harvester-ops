@@ -63,7 +63,7 @@ class Scripted:
             return SimpleNamespace(returncode=0, stdout="running\n", stderr="")
         script = remote[2]
         token = next(ln[2:] for ln in script.split("\n") if ln.startswith("T="))
-        n = sum(1 for ln in script.split("\n") if ln.startswith(("_kvm_run ", "_r ")))
+        n = sum(1 for ln in script.split("\n") if ln.startswith(("_kvm_run ", "_kvm_bg ", "_r ")))
         if "@@kvmops-" in token:                 # lot shell de kvm_ops (_sh_batch)
             out = "".join(f"ok{i}\n{token} {i} 0\n" for i in range(n))
             if what == "cut":
