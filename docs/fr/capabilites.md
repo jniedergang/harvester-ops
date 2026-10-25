@@ -209,6 +209,10 @@ dans un tableau avec une colonne **Cluster**.
   connectée. Un cluster éteint, injoignable, qui refuse la lecture ou sans
   accès dans cette session est dit tel quel sur sa puce, sans retenir les
   autres.
+- Un cluster que Rancher cache à la personne n'a pas de puce et son nom
+  n'apparaît jamais. La vue dit seulement combien de clusters ne sont pas
+  affichés (« Clusters non affichés : 2 »), comme le menu des hôtes. La
+  même règle vaut pour Conteneurs, GPU et Migrations de toute la flotte.
 - **Filtres** : puces de clusters (un ou plusieurs, ou Tous les clusters),
   état (en marche, arrêtées, en démarrage, en pause, en échec, autre),
   namespace, et texte libre (nom, IP, nœud, cluster, étiquette `clé=valeur`).

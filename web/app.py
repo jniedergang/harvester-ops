@@ -9518,6 +9518,27 @@ def _vms_all_kvm_shared():
     return [dict(x) for x in sources], [dict(r) for r in rows]
 
 
+def _fleet_clusters(cfg):
+    """([(nom, kubeconfig)] des clusters que la personne voit, nombre de
+    clusters cachés). Décision 93 (2.0.0) : une vue de flotte ne nomme
+    jamais un cluster que Rancher cache à la personne, comme le menu des
+    hôtes ; elle en dit au plus le nombre. Une session Rancher n'a pas de
+    kubeconfig pour un cluster caché (_sso_kubeconfig rend None, la même
+    règle que la garde _sso_cluster_guard)."""
+    sso = _sso_session() is not None
+    todo, hidden = [], 0
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if not name:
+            continue
+        kc = _kubectl_for_cluster(name)
+        if kc is None and sso:
+            hidden += 1
+            continue
+        todo.append((name, kc))
+    return todo, hidden
+
+
 @app.route("/api/vms-all")
 @requires_auth
 @shared_read(query_keys=("kinds",))
@@ -9540,11 +9561,7 @@ def api_vms_all():
         if bad or not kinds:
             return jsonify({"error": f"kinds must list {', '.join(VMS_ALL_KINDS)}"}), 400
     cfg = load_config_ro()
-    todo = []
-    for c in cfg.get("clusters", []):
-        name = c.get("name")
-        if name:
-            todo.append((name, _kubectl_for_cluster(name)))
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -9617,7 +9634,8 @@ def api_vms_all():
             c = cache.get(r.get("key"))
             r["folder"], r["folder_source"] = (c["folder_path"], c["source"]) if c else (None, None)
     rows.sort(key=lambda r: (r["name"] or "", r["kind"], r["source"] or "", r["namespace"] or ""))
-    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings})
+    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
+                    "hidden_count": hidden})
 
 
 # -----------------------------------------------------------------------------
@@ -10690,11 +10708,7 @@ def api_containers_all():
     parallèle avec l'identité de la personne, comme /api/vms-all. Un cluster
     éteint, injoignable ou qui refuse la lecture est dit dans `clusters`."""
     cfg = load_config_ro()
-    todo = []
-    for c in cfg.get("clusters", []):
-        name = c.get("name")
-        if name:
-            todo.append((name, _kubectl_for_cluster(name)))
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -10725,7 +10739,8 @@ def api_containers_all():
     _containers_folders(rows, [f"container/{c['cluster']}" for c in clusters
                                if c["state"] == "ok" and _purge_allowed(c.get("denials"))])
     rows.sort(key=lambda w: (w["name"], w["cluster"], w["namespace"], w["kind"]))
-    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows})
+    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows,
+                    "hidden_count": hidden})
 
 
 @app.route("/api/containers/<cluster>/<namespace>/pod/<oname>/logs")
@@ -10970,8 +10985,7 @@ def api_gpus_all():
     injoignable, qui refuse la lecture ou sans l'add-on des périphériques
     est dit dans `clusters`."""
     cfg = load_config_ro()
-    todo = [(c.get("name"), _kubectl_for_cluster(c.get("name")))
-            for c in cfg.get("clusters", []) if c.get("name")]
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -11010,7 +11024,8 @@ def api_gpus_all():
         pools.extend({"cluster": info["cluster"], "type": e["type"], "model": e["model"],
                       "capacity": e["capacity"], "used": e["used"]} for e in _hbk.catalog(part))
     return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]),
-                    "units": units, "summary": _hgpu.summarize(units), "pools": pools})
+                    "units": units, "summary": _hgpu.summarize(units), "pools": pools,
+                    "hidden_count": hidden})
 
 
 
@@ -20287,8 +20302,7 @@ def _fk_taken_across_clusters():
     déclarés qui répondent (v1.76.0, refus avant `wave-apply`, et vue
     globale). Rend ({(hôte vCenter, vm-NN): {"wave", "state", "cluster"}},
     [clusters injoignables ou dont la lecture a échoué])."""
-    cfg = load_config()
-    clusters = [(c["name"], _kubectl_for_cluster(c["name"])) for c in cfg.get("clusters", [])]
+    clusters, _hidden = _fleet_clusters(load_config())
 
     def scan(name, kc):
         if not kc or _cluster_reachable(kc) is False:
@@ -20546,12 +20560,11 @@ def api_forklift_global():
     hit = _FK_GLOBAL_CACHE.get(key)
     if hit and now - hit[0] < _FK_GLOBAL_TTL:
         return jsonify(hit[1])
-    cfg = load_config()
-    clusters = [(c["name"], _kubectl_for_cluster(c["name"])) for c in cfg.get("clusters", [])]
+    clusters, hidden = _fleet_clusters(load_config())
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(1, len(clusters))) as pool:
         rows = list(pool.map(lambda nk: _fk_global_cluster(*nk), clusters))
-    body = {"clusters": sorted(rows, key=lambda r: r["cluster"] or "")}
+    body = {"clusters": sorted(rows, key=lambda r: r["cluster"] or ""), "hidden_count": hidden}
     _FK_GLOBAL_CACHE[key] = (now, body)
     return jsonify(body)
 

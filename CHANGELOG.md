@@ -387,6 +387,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   in a cluster Rancher hides from the person or in a namespace they cannot
   read. Those objects are counted in one step ("2 other objects not shown
   to you"); the console sends only the person's own keys as `visible`.
+- **Fleet views no longer name a cluster Rancher hides from the person**
+  (present since 1.85.0): Virtual machines, Containers, GPU and Migrations
+  of the whole fleet (`/api/vms-all?kinds=...`, `/api/containers-all`,
+  `/api/gpus-all`, `/api/forklift-global`) listed such a cluster by name,
+  with the state `unknown`, while the hosts menu left it out. They now
+  follow the menu: the cluster is left out and its name appears nowhere in
+  the answer. `hidden_count` gives their number, and Virtual machines shows
+  it ("Clusters not shown: 2"), never a name. A visible cluster that
+  refuses the read stays listed as `denied`, as in the menu.
 
 ### Rolling back to 1.101.x
 - **How**: stage the signed 1.101.x archive and call `POST /api/update/apply`
@@ -430,6 +439,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/api/test_fleet_hidden_clusters_200.py`: five fleet routes times
+  three identities (local admin, Rancher session with a hidden cluster,
+  delegated identity refused by a cluster); the hidden name appears nowhere
+  in the answer, the count is given, the hosts menu and Virtual machines
+  name the same clusters. Deliberate mutations (hidden cluster kept, count
+  not incremented) fail it.
 - Folder routes: name clash at create, rename and move refused with 409
   before any action (and the cases that are not a clash), one access review
   per namespace then by name on "no", the console-identity reason without

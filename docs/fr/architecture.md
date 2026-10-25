@@ -137,6 +137,14 @@ pour tous et gardée 10 secondes (`HARVESTER_OPS_KVM_VMS_SHARE_TTL`) ; seule
 sa part Harvester est lue par identité. Trente personnes sur Machines
 virtuelles font au plus une tournée SSH par hôte KVM toutes les 10 secondes.
 
+Ces lectures de flotte (`/api/vms-all?kinds=...`, `/api/containers-all`,
+`/api/gpus-all`, `/api/forklift-global`) ne listent que les clusters que la
+personne voit, avec la règle du menu des hôtes (`_fleet_clusters`) : un
+cluster que Rancher cache à une session Rancher est laissé de côté, et son
+nom n'apparaît nulle part dans la réponse. `hidden_count` en donne le
+nombre. Un cluster visible qui refuse la lecture (RBAC, délégation
+d'identité) reste listé `denied`, comme dans le menu.
+
 ## Navigation et adresses
 
 Chaque écran de la console a une adresse après `#` : un lien ouvre l'écran

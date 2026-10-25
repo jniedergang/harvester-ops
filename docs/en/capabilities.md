@@ -192,6 +192,10 @@ clusters VMs**, every VM of every declared cluster in one table with a
 - Each cluster is read in parallel, with the identity of the person signed
   in. A cluster that is off, unreachable, refuses the read or has no access
   in this session is shown as such on its chip, without holding the others.
+- A cluster that Rancher hides from the person gets no chip and its name is
+  never shown. The view only says how many clusters are not shown
+  ("Clusters not shown: 2"), like the hosts menu. The same rule holds for
+  Containers, GPU and Migrations of the whole fleet.
 - **Filters**: cluster chips (one or more, or All clusters), state (running,
   stopped, starting, paused, failed, other), namespace, and free text (name,
   IP, node, cluster, label `key=value`). **Sort** on any column, both ways.

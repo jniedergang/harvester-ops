@@ -133,6 +133,14 @@ part of `/api/vms-all` is read once for everybody and kept 10 seconds
 identity. Thirty people on Virtual machines make at most one SSH survey per
 KVM host every 10 seconds.
 
+These fleet reads (`/api/vms-all?kinds=...`, `/api/containers-all`,
+`/api/gpus-all`, `/api/forklift-global`) list only the clusters the person
+sees, with the same rule as the hosts menu (`_fleet_clusters`): a cluster
+Rancher hides from a Rancher session is left out, and its name appears
+nowhere in the answer. `hidden_count` gives their number. A cluster that is
+visible but refuses the read (RBAC, identity delegation) stays listed as
+`denied`, as in the menu.
+
 ## Navigation and addresses
 
 Every screen of the console has an address after `#`, so a link opens the

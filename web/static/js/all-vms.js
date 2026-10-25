@@ -294,8 +294,12 @@ const AllVMs = (() => {
           ${st ? `<span class="badge ${st[0]}">${esc(st[1]())}</span>` : `<span class="avm-chip-n">${c.count || 0}</span>`}
         </button>`;
     }).join('');
+    // décision 93 : un cluster que Rancher cache n'est jamais nommé, seulement compté
+    const hidden = data && data.hidden_count > 0 && (!scope.kind || scope.kind === 'harvester')
+      ? `<span class="hint avm-hidden tip" data-avm="hidden" data-tip="${esc(tr('avm.cl.hiddenTip'))}">${esc(tr('avm.cl.hidden', { n: data.hidden_count }))}</span>`
+      : '';
     box.innerHTML = `<button type="button" class="avm-chip tip${all ? ' active' : ''}" data-avm-cluster="*"
-        aria-pressed="${all}" data-tip="${esc(tr('avm.filter.allClustersTip'))}">${esc(tr('avm.filter.allClusters'))}</button>${chips}`;
+        aria-pressed="${all}" data-tip="${esc(tr('avm.filter.allClustersTip'))}">${esc(tr('avm.filter.allClusters'))}</button>${chips}${hidden}`;
   }
 
   function renderNamespaces() {
