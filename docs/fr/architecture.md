@@ -307,8 +307,11 @@ Chaque geste est un `ActionRun` (dock, Activité) qui lance
   les lignes `pending` et `failed` d'une action finie en erreur ou arrêtée
   par l'arrêt de la console ; une ligne `done` n'est jamais réécrite, et un
   objet rangé ailleurs depuis est laissé. Le serveur ajoute un chemin
-  `resume` à une telle action (`_folder_resume`), dont le dock et l'Activité
-  font un bouton.
+  `resume` à une telle action tant qu'il reste des lignes
+  (`_folder_resume`), dont le dock et l'Activité font un bouton. Une action
+  de dossiers est rangée dans `actions.db` dès son départ : coupée par un
+  arrêt de la console, elle revient `interrupted` au redémarrage, avec
+  Reprendre et Annuler.
 - Un objet que la personne ne voit pas (cluster masqué, namespace illisible)
   n'est jamais nommé dans les étapes, la sortie ou `--json` : il est compté
   (« 2 other objects not shown to you »), et sa vraie clé reste

@@ -340,7 +340,7 @@ const Dock = (() => {
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
-          ${!isRunning ? undoButton(a, 'data-undo') + resumeButton(a, 'data-resume') : ''}
+          ${!isRunning && (a.undo || a.resume) ? `<span class="dock-gestures">${undoButton(a, 'data-undo')}${resumeButton(a, 'data-resume')}</span>` : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');

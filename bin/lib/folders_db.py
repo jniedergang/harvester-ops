@@ -460,6 +460,13 @@ def moves_of(conn, action_id):
         "WHERE action_id = ? ORDER BY seq", (action_id,))]
 
 
+def unfinished(conn, action_id):
+    """L'action a-t-elle encore une ligne `pending` ou `failed` (ce que
+    `resume` reprend) ?"""
+    return conn.execute("SELECT 1 FROM moves WHERE action_id = ? AND status IN ('pending', 'failed') LIMIT 1",
+                        (action_id,)).fetchone() is not None
+
+
 def pending_moves(conn, action_id):
     """Lignes encore `pending` d'une action (reprise après interruption)."""
     return [m for m in moves_of(conn, action_id) if m["status"] == "pending"]

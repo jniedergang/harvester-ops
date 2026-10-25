@@ -291,8 +291,10 @@ writes one `moves` line per object (`pending`, then `done`, `failed` or
   `pending` and `failed` lines of an action that ended in error or was
   stopped by the console shutdown; a `done` line is never rewritten, and an
   object filed elsewhere since is left alone. The server adds a `resume`
-  path to such an action (`_folder_resume`), which the dock and Activity
-  turn into a button.
+  path to such an action while lines remain (`_folder_resume`), which the
+  dock and Activity turn into a button. A folder action is recorded in
+  `actions.db` when it starts, so one cut by a console stop comes back
+  `interrupted` after the restart, with Resume and Undo.
 - An object the person cannot see (hidden cluster, unreadable namespace) is
   never named in the steps, the output or `--json`: it is counted ("2 other
   objects not shown to you"), and its real key stays in the journal only.

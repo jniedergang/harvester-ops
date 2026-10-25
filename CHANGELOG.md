@@ -10,8 +10,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - **Hosts list and favourites (API).** `GET /api/hosts` lists every
   Harvester cluster the person sees and every declared KVM host, with its
   state, VM count, version, labels and origin, and a summary per family. It
-  never reads a host: state, counts and versions come from the cached TCP
-  probe and from the reads the screens already made. `PUT` and `DELETE
+  makes no API call to a host: the state comes from the TCP reachability
+  probe (cached a few seconds), counts and versions from the reads the
+  screens already made. `PUT` and `DELETE
   /api/me/favorites/<kind>/<host>` star a host for the person (any role),
   stored in the console database `folders.db`; not a tracked action, nothing
   written on a cluster.
@@ -96,7 +97,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `folder_source`) and a state per source; without `kinds` the answer is
   unchanged. A KVM VM is keyed by its UUID (now read with the inventory),
   libvirt states map to the Harvester phases, and the folder comes from the
-  object (annotation, libvirt metadata read in one virsh call per host),
+  object (annotation, libvirt metadata read in one SSH call per host),
   else from the console cache.
 - **Folders on the command line.** `bin/harvester-folders.py tree, create,
   rename, move-folder, delete, assign, resume, undo, apply-rename,
@@ -114,8 +115,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   optional `folder` field, and editing a cluster in Settings keeps it: the
   console and the command line share one lock on `clusters.d`.
 - **Folder routes and checks before a gesture.** `GET /api/folders` gives
-  the tree with, per folder, its origin and the VMs, containers and hosts
-  filed inside that the person saw (never what they cannot see). Create,
+  the tree with, per folder, its origin and the count of VMs, containers
+  and hosts filed inside that the person saw (never what they cannot
+  see). Create,
   rename, move, delete an empty folder, empty a folder into another then
   delete it, file objects, undo, and write console-only filings on the
   objects: each is a tracked action that runs `harvester-folders.py` with
@@ -304,6 +306,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   same reading as `resume`) and `_repl_resume_role`; the button is greyed
   with the role it needs, and no longer appears when nothing is
   interrupted (a measure still running).
+- **A folder action stopped by a console shutdown is no longer lost**: it
+  was recorded in `actions.db` only when it ended, so after a restart it
+  vanished from Activity and its pending lines could be resumed only from
+  the command line (seen in a real test). It is now recorded when it
+  starts, comes back `interrupted` after a restart, and offers **Resume**
+  and **Undo**. **Resume** is offered only while lines remain to finish,
+  and sits next to Undo in the dock card instead of stretching across it.
 - **The `/` shortcut no longer moves the focus behind an open window**: the
   host search kept taking the key while a modal was open.
 - **`folders.db` journal files are private**: the `-wal` and `-shm` files
@@ -423,7 +432,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   checked, counts off by one, Undo offered to a viewer).
   `tests/api/test_folders_ui_model_200.py`: the pure folder helpers and
   every folder or host address to its screen and back, with a deliberate
-  mutation of the path rule. Updated: `test_all_vms_185.py`,
+  mutation of the path rule. Updated (in `tests/e2e/`): `test_all_vms_185.py`,
   `test_router_1100.py`, `test_hosts_index_200.py`, `test_host_nav_200.py`
   and the screen inventory for the new view and addresses.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
@@ -514,7 +523,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   of `resumable` fail them), `tests/api/test_folders_routes_200.py` and
   `tests/e2e/test_folders_200.py` (resume path of a stopped folder action
   from memory and from the history, Resume from Activity, none on a finished
-  action), `tests/api/test_nav_inventory_200.py` (every pane of every
+  action nor once every line is done, an action recorded at start and found
+  `interrupted` after a restart, Undo and Resume side by side in the dock,
+  with mutations), `tests/api/test_nav_inventory_200.py` (every pane of every
   section has its own address, and the correspondence table above is
   complete: every old token, every address resolved and written back, with
   mutations), `tests/e2e/test_host_nav_200.py` (`/` held by an open window),

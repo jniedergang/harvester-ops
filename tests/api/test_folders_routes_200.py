@@ -761,9 +761,15 @@ def test_tree_of_2000_folders_with_2000_objects_reads_fast(world, call, monkeypa
     ("vm-start", "error", None),
     (None, "error", None),
 ])
-def test_stopped_folder_actions_carry_their_resume_path(action, status, expect):
+def test_stopped_folder_actions_carry_their_resume_path(action, status, expect, monkeypatch, tmp_path):
     """2.0.0 : le serveur dit qu'une action de dossiers se reprend (dock et
     Activité n'ont aucune règle d'état), en mémoire comme relue de la base."""
+    monkeypatch.setenv("HARVESTER_OPS_FOLDERS_DB", str(tmp_path / "f.db"))
+    conn = fdb.connect(tmp_path / "f.db")
+    for aid in ("AID", "fa0000000001"):
+        fdb.record_move(conn, aid, 0, "harvester/harv1/nav/a", "/A", "/B", status="done")
+        fdb.record_move(conn, aid, 1, "harvester/harv1/nav/b", "/A", "/B", status="pending")
+    conn.close()
     got = wapp._folder_resume(action, status, "AID")
     assert got == ({"resume": {"path": expect}} if expect else {})
     row = wapp._row_finish({"id": "AID", "action": action, "status": status, "dry_run": 0, "result": None,
@@ -772,3 +778,44 @@ def test_stopped_folder_actions_carry_their_resume_path(action, status, expect):
     run = wapp.ActionRun("AID", action or "", "folders", ["x"])
     run.status = status
     assert run.to_dict().get("resume") == got.get("resume")
+
+
+def test_a_folder_action_is_recorded_at_start_and_found_interrupted_after_a_stop(call, world, monkeypatch, tmp_path):
+    """Vu en réel (console arrêtée en plein renommage) : l'action n'était
+    rangée qu'à sa fin, elle disparaissait de l'Activité et ses lignes
+    `pending` n'étaient plus reprises que par la CLI. Rangée dès le départ,
+    elle revient au redémarrage `interrupted`, avec Reprendre et Annuler."""
+    import sqlite3
+    monkeypatch.setattr(wapp, "ACTIONS_DB", tmp_path / "actions.db")
+    wapp._actions_init_db()
+    r = call("alice", "PATCH", "/api/folders/1", {"name": "Prod2"})
+    assert r.status_code == 202
+    aid = r.get_json()["action_id"]
+    row = sqlite3.connect(str(tmp_path / "actions.db")).execute(
+        "SELECT status, undo FROM actions WHERE id = ?", (aid,)).fetchone()
+    assert row is not None and row[0] in ("starting", "running")
+    assert json.loads(row[1]) == {"path": f"/api/folders/actions/{aid}/undo"}
+    conn = fdb.connect(world["db"])           # l'outil avait écrit son journal
+    fdb.record_move(conn, aid, 0, "harvester/harv1/nav/a", "/Prod/ERP", "/Prod2/ERP", status="pending")
+    conn.close()
+    wapp.ACTIONS.clear()                      # la console redémarre
+    wapp._actions_load_history()
+    d = wapp.ACTIONS[aid].to_dict()
+    assert d["status"] == "interrupted"
+    assert d["resume"] == {"path": f"/api/folders/actions/{aid}/resume"}
+    assert d["undo"] == {"path": f"/api/folders/actions/{aid}/undo"}
+
+
+@pytest.mark.parametrize("lines,offered", [
+    ((("done", "done")), False),            # reprise déjà faite : plus de bouton
+    ((("done", "failed")), True),
+    ((("pending", "done")), True),
+    ((), False),                            # arrêtée avant d'écrire son journal
+])
+def test_resume_is_offered_only_while_lines_remain(lines, offered, monkeypatch, tmp_path):
+    monkeypatch.setenv("HARVESTER_OPS_FOLDERS_DB", str(tmp_path / "f.db"))
+    conn = fdb.connect(tmp_path / "f.db")
+    for i, st in enumerate(lines):
+        fdb.record_move(conn, "AID", i, f"harvester/harv1/nav/v{i}", "/A", "/B", status=st)
+    conn.close()
+    assert bool(wapp._folder_resume("folders:rename:/A", "interrupted", "AID")) is offered

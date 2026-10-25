@@ -1894,6 +1894,17 @@ def _folder_resume(action, status, action_id):
     if status not in _FOLDER_RESUMABLE or not str(action or "").startswith("folders:"):
         return {}
     target = action.split(":", 2)[2] if action.startswith("folders:resume:") else action_id
+    # plus rien à reprendre (reprise déjà faite) : pas de bouton ; une base
+    # illisible laisse le bouton, la route dira
+    try:
+        conn = _folders_conn()
+        try:
+            if not _fdb.unfinished(conn, target):
+                return {}
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        pass
     return {"resume": {"path": f"/api/folders/actions/{target}/resume"}}
 
 
@@ -10096,6 +10107,14 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False, resul
                            spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
     if err:
         return err
+    # rangée dès le départ (et non à la fin seulement) : une console arrêtée
+    # en plein geste la retrouve au redémarrage, `interrupted`, avec
+    # « Reprendre » ; sans cette ligne l'action disparaissait de l'Activité
+    # et ses lignes `pending` n'étaient plus reprises que par la CLI
+    try:
+        _actions_persist(run)
+    except (sqlite3.Error, OSError) as e:
+        log_actions.warning("folder action %s not recorded at start: %s", run.id, e)
     return jsonify({"action_id": run.id}), 202
 
 

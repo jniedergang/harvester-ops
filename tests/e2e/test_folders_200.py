@@ -502,6 +502,25 @@ def test_resume_an_interrupted_folder_action_from_activity(world):
     assert state["errors"] == []
 
 
+def test_dock_card_keeps_undo_and_resume_together(world):
+    """Vu en réel : « Reprendre » s'étirait sur toute la largeur de la carte
+    du dock (8e cellule d'une grille à 6 colonnes). Les deux gestes restent
+    côte à côte, à leur taille."""
+    go, page, state = world
+    now = time.time()
+    state["actions"].append({"id": "fa0000000080", "action": "folders:rename:/EdgeC4", "cluster": "folders",
+                             "status": "interrupted", "exit_code": -1, "started_at": now - 3, "ended_at": now - 2,
+                             "dry_run": False, "error_summary": None,
+                             "undo": {"path": "/api/folders/actions/fa0000000080/undo"},
+                             "resume": {"path": "/api/folders/actions/fa0000000080/resume"}})
+    go("#vms/folder/1")
+    card = page.locator("#dock-card-fa0000000080")
+    expect(card.locator(".dock-gestures .dock-resume")).to_be_visible(timeout=8000)
+    expect(card.locator(".dock-gestures .dock-undo")).to_be_visible()
+    res, und = card.locator(".dock-resume").bounding_box(), card.locator(".dock-undo").bounding_box()
+    assert res["width"] < 200 and abs(res["y"] - und["y"]) < 4, (res, und)
+
+
 RENDER_MS = """() => new Promise((res) => { const t = performance.now();
   document.dispatchEvent(new CustomEvent('hops:folders'));
   requestAnimationFrame(() => requestAnimationFrame(() => res(performance.now() - t))); })"""

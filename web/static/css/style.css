@@ -1512,7 +1512,8 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 }
 .dock-action-summary {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto;
+  /* 2.0.0 : 7e colonne = Annuler et Reprendre d'une action de dossiers */
+  grid-template-columns: auto 1fr auto auto auto auto auto;
   gap: 12px;
   align-items: center;
   padding: 8px 12px;
@@ -5810,6 +5811,7 @@ body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibi
 .fview-item .btn-icon-action { margin-left: auto; }
 .ct-folder-scope, .hix-folder-scope { display: flex; align-items: center; gap: 6px; }
 .dock-undo-failed { border-color: var(--error); }
+.dock-gestures { display: inline-flex; gap: 4px; white-space: nowrap; }
 .fld-node.fld-family { cursor: default; }
 .fld-node.fld-family:hover { background: none; }
 .fld-win { padding: 10px 14px; }
