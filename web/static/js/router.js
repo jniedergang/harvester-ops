@@ -25,7 +25,7 @@
   function resolve(route) {
     if (!route || !route.name) return null;
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
-                                              kvm: null, kvmTab: null, hostsKind: null }, extra || {});
+                                              kvm: null, kvmTab: null, hostsKind: null, activityHost: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -72,7 +72,10 @@
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
       case 'automation': return t('automation', { automation: route.tab || 'capi' });
-      case 'activity': return t('activity');
+      // 2.0.0 (tâche 9) : Activité filtrée sur un hôte (filtre `cluster`
+      // existant ; les actions d'un hôte KVM portent l'étiquette kvm:<hôte>)
+      case 'activity':
+        return t('activity', { activityHost: route.host ? (route.kind === 'kvm' ? `kvm:${route.host}` : route.host) : null });
       default: return null;
     }
   }
@@ -106,7 +109,13 @@
       case 'containers': return H({ sub: 'containers' });
       case 'allvms': return '#vms';
       case 'allcontainers': return '#containers';
-      case 'gpus': case 'bookings': case 'usage': case 'activity': return '#' + s.tab;
+      case 'gpus': case 'bookings': case 'usage': return '#' + s.tab;
+      case 'activity':
+        if (s.activityHost && /^kvm:/.test(s.activityHost) && Rt.validHost('kvm', s.activityHost.slice(4))) {
+          return Rt.format({ name: 'activity', kind: 'kvm', host: s.activityHost.slice(4) });
+        }
+        if (s.activityHost && s.activityIsCluster) return Rt.format({ name: 'activity', kind: 'harvester', host: s.activityHost });
+        return '#activity';
       case 'forkliftglobal': return '#migrations';
       case 'hosts': return '#hosts' + (s.hostsKind === 'harvester' || s.hostsKind === 'kvm' ? '/' + s.hostsKind : '');
       case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm';

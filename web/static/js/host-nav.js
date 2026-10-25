@@ -259,8 +259,13 @@
   /** Entrées racines : celle de la route courante est active. */
   function paintRoots() {
     const name = route ? route.name : null;
-    document.querySelectorAll('#host-nav [data-hnav-root]').forEach((a) => {
-      const on = a.dataset.hnavRoot === name;
+    const tab = route ? route.tab : null;
+    const all = [...document.querySelectorAll('#host-nav [data-hnav-root]')];
+    // une entrée à onglet (#dr/links, #automation/<x>) est active pour son
+    // onglet ; l'entrée sans onglet de la même racine l'est pour le reste
+    const tabbed = all.some((a) => a.dataset.hnavRoot === name && a.dataset.hnavTab && a.dataset.hnavTab === tab);
+    all.forEach((a) => {
+      const on = a.dataset.hnavRoot === name && (a.dataset.hnavTab ? a.dataset.hnavTab === tab : !tabbed);
       a.classList.toggle('active', on);
       if (on) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
     });

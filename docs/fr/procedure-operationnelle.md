@@ -260,8 +260,23 @@ qui défile seule.
   cluster Harvester (le formulaire de Réglages > Clusters) ou un hyperviseur
   KVM (la fenêtre de déclaration des écrans KVM).
 - Au-dessus des hôtes : **Dossiers**, **Machines virtuelles** et
-  **Conteneurs** de toute la flotte ; en dessous : **Disaster Recovery** et
-  **Migrations**.
+  **Conteneurs** de toute la flotte ; en dessous : **Disaster Recovery**
+  (avec **Liens**), **Migrations**, **Ressources partagées** (GPU,
+  Réservations, Usage), **Automatisation** (Cluster API, Terraform,
+  Bare-metal) et **Activité**. Ces écrans de flotte n'ont pas d'hôte
+  courant : `#containers` montre les charges de tous les clusters,
+  `#migrations` toutes les vagues VMware.
+- **Activité d'un hôte.** `#activity/host/harvester/<c>` et
+  `#activity/host/kvm/<h>` ouvrent l'Activité filtrée sur cet hôte (les
+  actions d'un hôte KVM portent l'étiquette `kvm:<h>`) ; le bouton
+  **Activité de cet hôte** d'une page d'hôte y mène. Changer le filtre de
+  cluster réécrit l'adresse.
+- **Cluster de gestion.** Cluster API et Terraform (déclarations comprises)
+  affichent **Cluster de gestion** dans leur en-tête : le cluster que
+  visent leurs appels, le dernier hôte Harvester visité sauf si vous en
+  choisissez un autre dans le menu à côté. Le choisir là ne change pas
+  l'hôte ouvert. Bare-metal n'a pas cet en-tête : une jonction choisit son
+  cluster elle-même.
 
 Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
 onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert

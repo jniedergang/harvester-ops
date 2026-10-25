@@ -1902,6 +1902,11 @@ Create and operate Kubernetes clusters whose nodes are Harvester VMs,
 through Cluster API and the Cluster API Provider Harvester (CAPHV). The
 console runs `harvester-capi` for every step, which the CLI can run too.
 
+**Management cluster (2.0.0).** The Cluster API and Terraform pages say in
+their header which cluster they work from (**Management cluster**): the last
+Harvester host visited, unless you pick another one in the menu next to it.
+That choice is kept per browser and does not change the host you have open.
+
 ### Installing the stack (1.48.0)
 
 - **Harvester v1.9 and later** embed Rancher Turtles, which already runs the

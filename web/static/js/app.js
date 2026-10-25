@@ -1619,6 +1619,8 @@ const App = (() => {
       activityFilters[key] = e.target.value;
       saveActivityFilters();
       refreshActivity();
+      // 2.0.0 : le filtre d'hôte est dans l'adresse (#activity/host/...)
+      if (key === 'cluster' && window.Router) Router.syncFromScreen();
     };
     $('#act-f-cluster')?.addEventListener('change', onChange('cluster'));
     $('#act-f-status')?.addEventListener('change', onChange('status'));
@@ -1638,6 +1640,7 @@ const App = (() => {
       Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
       saveActivityFilters();
       refreshActivity();
+      if (window.Router) Router.syncFromScreen();
     });
   }
 
@@ -2173,6 +2176,11 @@ const App = (() => {
     navKvm = t.kvm || null;
     navKvmTab = t.kvmTab || null;
     navHostsKind = t.hostsKind || null;
+    // 2.0.0 : #activity/host/<famille>/<nom> pose le filtre « cluster » de l'Activité
+    if (t.tab === 'activity' && t.activityHost) {
+      activityFilters.cluster = t.activityHost;
+      saveActivityFilters();
+    }
     const show = () => {
       if (t.overview) paintOverviewMode(t.overview);
       setTab(t.tab);
@@ -2225,6 +2233,8 @@ const App = (() => {
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
       kvm, kvmTab: kvm ? navKvmTab : null,
       hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,
+      activityHost: tab === 'activity' ? (activityFilters.cluster || null) : null,
+      activityIsCluster: tab === 'activity' && listClusters().includes(activityFilters.cluster),
     };
   }
 

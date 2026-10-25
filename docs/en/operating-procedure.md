@@ -253,7 +253,20 @@ scrolls on its own.
   cluster (the same form as Settings > Clusters) or a KVM hypervisor (the
   declaration window of the KVM screens).
 - Above the hosts: **Folders**, **Virtual machines** and **Containers** of the
-  whole fleet; below: **Disaster Recovery** and **Migrations**.
+  whole fleet; below: **Disaster Recovery** (with **Links**), **Migrations**,
+  **Shared resources** (GPU, Bookings, Usage), **Automation** (Cluster API,
+  Terraform, Bare-metal) and **Activity**. These fleet screens have no
+  current host: `#containers` shows the workloads of every cluster,
+  `#migrations` every VMware wave.
+- **Activity of a host.** `#activity/host/harvester/<c>` and
+  `#activity/host/kvm/<h>` open Activity filtered on that host (a KVM host's
+  actions are labelled `kvm:<h>`); the button **Activity of this host** of a
+  host page leads there. Changing the cluster filter rewrites the address.
+- **Management cluster.** Cluster API and Terraform (declarations included)
+  show **Management cluster** in their header: the cluster their calls go
+  to, the last Harvester host visited unless you pick another one in the
+  menu next to it. Picking one there does not change the host you have
+  open. Bare-metal has no such header: a join chooses its cluster itself.
 
 Every entry is a real link: middle click opens it in a new tab, and the
 address can be copied. A link opened before signing in is opened again once

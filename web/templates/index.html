@@ -89,10 +89,58 @@
           <span class="sidebar-label" data-i18n="hnav.dr">Disaster Recovery</span>
           <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
         </a>
+        <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="dr" data-hnav-tab="links" href="#dr/links"
+           data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
+          <span class="tab-icon" data-icon="network"></span>
+          <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
+        </a>
         <a class="tab hnav-entry" data-hnav="root" data-hnav-root="migrations" href="#migrations"
            data-i18n-title="hnav.migrationsTip" title="Every VMware migration wave and transfer between hosts">
           <span class="tab-icon" data-icon="migrate"></span>
           <span class="sidebar-label" data-i18n="hnav.migrations">Migrations</span>
+        </a>
+        <!-- 2.0.0 (tâche 9) : ressources partagées, automatisation et activité,
+             racines de flotte (aucun hôte courant) -->
+        <div class="hnav-sec sidebar-label" data-i18n="tab.shared">Shared resources</div>
+        <div class="hnav-group" id="hnav-shared">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="gpus" href="#gpus"
+             data-i18n-title="tab.gpusTip" title="GPU inventory of every declared cluster">
+            <span class="tab-icon" data-icon="gamepad"></span>
+            <span class="sidebar-label" data-i18n="tab.gpus">GPU</span>
+          </a>
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="bookings" href="#bookings"
+             data-i18n-title="tab.bookingsTip" title="Book GPUs on a time slot">
+            <span class="tab-icon" data-icon="timer"></span>
+            <span class="sidebar-label" data-i18n="tab.bookings">Bookings</span>
+          </a>
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="usage" href="#usage"
+             data-i18n-title="tab.usageTip" title="GPU-hours booked and consumed, and quotas">
+            <span class="tab-icon" data-icon="metrics"></span>
+            <span class="sidebar-label" data-i18n="tab.usage">Usage</span>
+          </a>
+        </div>
+        <div class="hnav-sec sidebar-label" data-i18n="tab.automation">Automation</div>
+        <div class="hnav-group" id="hnav-automation">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="capi" href="#automation/capi"
+             data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2): declarative cluster provisioning via CAPHV">
+            <span class="tab-icon" data-icon="capi"></span>
+            <span class="sidebar-label" data-i18n="automation.tab.capi">Cluster API</span>
+          </a>
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="terraform" href="#automation/terraform"
+             data-i18n-title="hnav.terraformTip" title="Terraform declarations kept by the console, each with its own state">
+            <span class="tab-icon" data-icon="terraform"></span>
+            <span class="sidebar-label" data-i18n="automation.tab.terraform">Terraform</span>
+          </a>
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="pxe" href="#automation/pxe"
+             data-i18n-title="automation.tab.pxe.tip" title="Bare-metal (BMC / Redfish)">
+            <span class="tab-icon" data-icon="baremetal"></span>
+            <span class="sidebar-label" data-i18n="automation.tab.pxe">Bare-metal</span>
+          </a>
+        </div>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="activity" href="#activity"
+           data-i18n-title="hnav.activityTip" title="Every tracked action of the console, running or finished, with its logs">
+          <span class="tab-icon" data-icon="activity"></span>
+          <span class="sidebar-label" data-i18n="tab.activity">Activity</span>
         </a>
       </div>
       <div class="cluster-selector">
@@ -843,6 +891,13 @@
         <div class="automation-header-text">
           <h1><span data-icon="robot" data-icon-size="22"></span> <span data-i18n="automation.title">Automation</span></h1>
           <p class="hint" data-i18n="automation.hint">Provision and manage infrastructure declaratively.</p>
+          <!-- 2.0.0 : le cluster de gestion de Cluster API et Terraform, dit
+               et changeable ici (pas l'hôte ouvert) ; masqué sur Bare-metal -->
+          <div class="mgmt-cluster-bar" id="mgmt-cluster-bar" hidden>
+            <label for="mgmt-cluster-pick" data-i18n="mgmt.label">Management cluster</label>
+            <select id="mgmt-cluster-pick" class="tip" data-tip-i18n="mgmt.tip" data-i18n-title="mgmt.tip"
+                    title="The cluster Cluster API and Terraform work from; changing it does not change the host you have open"></select>
+          </div>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" data-only-for="capi">
           <button class="sub-tab active" data-capi-tab="install"

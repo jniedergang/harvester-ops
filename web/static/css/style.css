@@ -5806,3 +5806,8 @@ body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > 
 .hp-labels-checks li.bad { color: var(--danger, var(--text)); }
 .hp-labels-diff { margin-top: 8px; }
 .hp-labels-modal .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+
+/* 2.0.0 : cluster de gestion de Cluster API et Terraform */
+.mgmt-cluster-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.mgmt-cluster-bar[hidden] { display: none; }
+.mgmt-cluster-bar label { color: var(--text-dim); }

@@ -670,6 +670,25 @@ const CAPI = (() => {
     });
   }
 
+  /** 2.0.0 : en-tête « Cluster de gestion » de Cluster API et Terraform
+   *  (déclarations comprises) ; masqué sur Bare-metal, qui choisit son
+   *  cluster à la jonction. La valeur est celle qu'utilisent les appels
+   *  (App.managementCluster). */
+  function paintMgmt(name) {
+    const bar = $('#mgmt-cluster-bar');
+    const pick = $('#mgmt-cluster-pick');
+    if (!bar || !pick || !window.App) return;
+    const list = App.listClusters();
+    const cur = App.managementCluster();
+    bar.hidden = name === 'pxe' || !list.length;
+    const want = list.join('|');
+    if (pick.dataset.list !== want) {
+      pick.innerHTML = list.map((c) => `<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      pick.dataset.list = want;
+    }
+    if (cur) pick.value = cur;
+  }
+
   function selectAutomationSubtab(name) {
     // 1. Mark the matching sidebar child as active. Automation children
     //    carry only data-subtab (their data-tab is inherited from the head).
@@ -682,6 +701,7 @@ const CAPI = (() => {
     const inline = document.querySelector('#tab-automation .sub-tabs-inline');
     if (inline) inline.classList.toggle('hidden', name !== 'capi');
     try { localStorage.setItem('harvester_ops_automation_subtab', name); } catch {}
+    paintMgmt(name);
     // Navigation 2.0 : l'adresse porte le sous-onglet (#automation/<x>)
     if (window.Router) Router.syncFromScreen();
     if (name === 'capi') refresh();
@@ -703,6 +723,11 @@ const CAPI = (() => {
   }
 
   function initSubtabs() {
+    // 2.0.0 : changer de cluster de gestion relit la page affichée, sans
+    // toucher à l'hôte ouvert
+    $('#mgmt-cluster-pick')?.addEventListener('change', (e) => {
+      if (window.App && App.setManagementCluster) App.setManagementCluster(e.target.value);
+    });
     // Sidebar children click → ensure parent is expanded + activate sub-tab.
     // The main-tab routing (to #tab-automation) is handled by app.js.
     document.addEventListener('click', (e) => {

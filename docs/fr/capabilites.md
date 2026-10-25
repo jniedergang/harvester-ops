@@ -2101,6 +2101,12 @@ Harvester, par Cluster API et le Cluster API Provider Harvester (CAPHV). La
 console lance `harvester-capi` à chaque étape, que la CLI peut lancer
 aussi.
 
+**Cluster de gestion (2.0.0).** Les pages Cluster API et Terraform disent
+dans leur en-tête depuis quel cluster elles travaillent (**Cluster de
+gestion**) : le dernier hôte Harvester visité, sauf si vous en choisissez un
+autre dans le menu à côté. Ce choix est gardé par le navigateur et ne change
+pas l'hôte ouvert.
+
 ### Installer la pile (1.48.0)
 
 - **Harvester v1.9 et suivants** embarquent Rancher Turtles, qui fait déjà

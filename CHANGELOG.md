@@ -76,6 +76,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (or in alert), label, version and folder. `#hosts/harvester` and
   `#hosts/kvm` open pre-filtered; on `#hosts/kvm`, Declare a host, Test and
   Remove per row give back KVM > Hosts. It reads `/api/hosts` only.
+- **Fleet entries in the new menu**: Disaster Recovery with Links, Shared
+  resources (GPU, Bookings, Usage), Automation (Cluster API, Terraform,
+  Bare-metal) and Activity, as real links. `#activity/host/<kind>/<name>`
+  opens Activity filtered on that host (`kvm:<h>` for a KVM host), and the
+  cluster filter is kept in the address.
+- **Management cluster header** on Cluster API and Terraform: it shows the
+  cluster their calls go to, with a menu to pick another one, which does
+  not change the open host. Bare-metal has none.
 ### Changed
 - **A link to a host you cannot see** (removed, or hidden by Rancher), and
   an old token that needs a host while none is visible, open the hosts
@@ -92,6 +100,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   and never writes it in the page.
 
 ### Tests
+- `tests/e2e/test_fleet_roots_200.py`: every fleet root loaded cold with
+  its menu entry active, the management cluster shown is the one Cluster
+  API calls (and Terraform reads), changing it keeps the open host,
+  Bare-metal without it, Activity filtered on a KVM host and kept after a
+  reload.
 - `tests/api/test_hosts_index_model_200.py` (filters and sorts in a table,
   same name in both families, facets, 100 hosts, a deliberate mutation of
   the state order) and `tests/e2e/test_hosts_index_200.py` (columns,
