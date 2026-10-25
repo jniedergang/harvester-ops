@@ -104,7 +104,7 @@
     stop();
     if (!el) return Promise.resolve();
     const o = opts || {};
-    cur = { el, data: null, error: '', pending: null,
+    cur = { el, data: null, error: '', pending: null, msgs: new Map(),
             prefs: { kind: KINDS.includes(o.kind) ? o.kind : '', state: '', label: '', version: '', folder: '', sort: 'name', dir: 1 } };
     shell();
     // la liste du menu est déjà lue : l'afficher tout de suite, puis relire
@@ -204,6 +204,10 @@
         title="${esc(tr('hix.sortTip'))}" data-tip="${esc(tr('hix.sortTip'))}"${p.sort === k ? ` aria-sort="${p.dir > 0 ? 'ascending' : 'descending'}"` : ''}>${esc(label)}</th>`;
     body.innerHTML = `<table class="data-table sortable hix-table"><thead><tr>${COLS().map(th).join('')}<th></th></tr></thead>
       <tbody>${rows.map(rowHtml).join('')}</tbody></table>`;
+    // le message d'une action (Tester, Retirer) est un élément gardé par
+    // hôte : remis dans sa ligne à chaque rendu, l'action en cours continue
+    // d'y écrire
+    cur.msgs.forEach((el, key) => rowOf(key)?.querySelector('.hix-msg')?.replaceWith(el));
   }
 
   function rowHtml(h) {
@@ -237,7 +241,19 @@
   }
 
   const findHost = (key) => ((cur && cur.data && cur.data.hosts) || []).find((h) => `${h.kind}/${h.name}` === key);
-  const msgOf = (key) => [...cur.el.querySelectorAll('[data-hix-row]')].find((r) => r.dataset.hixRow === key)?.querySelector('.hix-msg');
+  const rowOf = (key) => [...cur.el.querySelectorAll('[data-hix-row]')].find((r) => r.dataset.hixRow === key);
+  /** Message d'action d'un hôte : un élément unique par clé, posé dans sa ligne. */
+  function msgOf(key) {
+    let el = cur.msgs.get(key);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'kvm-tile-msg hix-msg';
+      el.setAttribute('role', 'status');
+      cur.msgs.set(key, el);
+      rowOf(key)?.querySelector('.hix-msg')?.replaceWith(el);
+    }
+    return el;
+  }
 
   async function toggleStar(key, btn) {
     const h = findHost(key);

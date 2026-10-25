@@ -225,3 +225,29 @@ def test_every_control_has_a_tooltip(index):
     go("#hosts/kvm")
     for el in page.locator("#hosts-index-host select, #hosts-index-host button, #hosts-index-host th[data-sort]").all():
         assert el.get_attribute("title") or el.get_attribute("data-tip"), el.evaluate("e => e.outerHTML")
+
+
+def test_the_test_result_survives_a_re_render(index):
+    """Mineur 3 : le résultat de Tester est gardé par clé d'hôte, pas dans la
+    ligne ; un nouveau rendu (rôle relu, tri, filtre) pendant l'action ne
+    l'efface pas, et la fin de l'action arrive encore à l'écran."""
+    go, page, state = index
+    held = []
+    page.route(re.compile(r".*/api/stream/kvm\d+$"), lambda r, q: held.append(r))
+    go("#hosts/kvm")
+    row = page.locator('#hosts-index-host tr[data-hix-row="kvm/node2"]')
+    row.locator('[data-hix="test"]').click()
+    expect(row.locator(".hix-msg")).to_contain_text("Testing")
+    for _ in range(50):
+        if held:
+            break
+        page.wait_for_timeout(100)
+    assert held, "le flux de l'action n'a pas été ouvert"
+    page.evaluate("document.dispatchEvent(new Event('hops:role'))")
+    page.locator('#hosts-index-host th[data-sort="name"]').click()
+    expect(row.locator(".hix-msg")).to_contain_text("Testing")
+    held[0].fulfill(status=200, content_type="text/event-stream",
+                    body='event: end\ndata: {"status": "done", "result": {"output": {"ok": true, "checks": []}}}\n\n')
+    expect(row.locator(".hix-msg")).to_contain_text("Connection test passed")
+    page.locator('#hosts-index-host th[data-sort="name"]').click()
+    expect(row.locator(".hix-msg")).to_contain_text("Connection test passed")

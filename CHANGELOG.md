@@ -169,7 +169,8 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   same name in both families, facets, 100 hosts, a deliberate mutation of
   the state order) and `tests/e2e/test_hosts_index_200.py` (columns,
   pre-filtered addresses, filters, sort by state, 100 hosts, star, KVM row
-  gestures and their roles, a vanished host landing here with the notice).
+  gestures and their roles, a Test result kept through a re-render, a
+  vanished host landing here with the notice).
 - `tests/api/test_kvm_host_page_200.py` (declaration without SSH and its
   fingerprints, refusals, role in the host read, labels route argv and
   refusals by role, `host label` command, DR route by family) and
