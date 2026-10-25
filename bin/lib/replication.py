@@ -798,17 +798,42 @@ def settings_refusal(state, recovery=False, options=(), mappings=()):
     return None
 
 
-def protect_needed(state, recovery=None, options=(), mappings=()):
-    """Un plan protégé dont le carnet de reprise change (VM cible) : protect
-    doit le réécrire."""
-    touched = set(options or ()) | set(recovery or ()) | ({"networks"} & set(mappings or ()))
-    return state == "protected" and bool(touched & (set(CARNET_KEYS) | {"networks"}))
+# valeur d'un réglage du carnet quand il n'est pas donné
+CARNET_DEFAULTS = {"cloud_init": "keep", "mac": "keep", "start": "started", "network_data": {}, "resize": {},
+                   "networks": {}}
 
 
-def carnet_keys_touched(recovery=None, options=(), mappings=()):
-    """Les réglages d'un changement qui réécrivent le carnet de reprise."""
-    touched = set(options or ()) | set(recovery or ()) | ({"networks"} & set(mappings or ()))
-    return sorted(touched & (set(CARNET_KEYS) | {"networks"}))
+def carnet_values(options=None, mappings=None):
+    """Les valeurs des réglages qui réécrivent le carnet de reprise (options
+    normalisées du plan et correspondance des réseaux), défauts compris."""
+    o = options or {}
+    vals = {k: (o.get(k) or d) for k, d in CARNET_DEFAULTS.items() if k != "networks"}
+    vals["networks"] = (mappings or {}).get("networks") or {}
+    return vals
+
+
+def carnet_changes(before, after):
+    """Les réglages du carnet dont la VALEUR diffère entre `before` et
+    `after` (`carnet_values`) : renvoyer la même valeur ne compte pas."""
+    return sorted(k for k, d in CARNET_DEFAULTS.items() if (before or {}).get(k, d) != (after or {}).get(k, d))
+
+
+def stale_carnet_keys(flag, before, after):
+    """Les réglages du carnet en retard après un changement de `before` vers
+    `after`. La marque `carnet-stale` garde les valeurs du dernier protect
+    (`baseline`) : on compare à elles, donc revenir aux valeurs protégées
+    (Annuler) ne laisse rien en retard. Une marque sans `baseline` garde
+    ses clés."""
+    flag = flag or {}
+    if isinstance(flag.get("baseline"), dict):
+        return carnet_changes(flag["baseline"], after)
+    return sorted(set(flag.get("keys") or ()) | set(carnet_changes(before, after)))
+
+
+def protect_needed(state, stale_keys=()):
+    """Un plan protégé dont le carnet de reprise est en retard sur ses
+    réglages (`stale_carnet_keys`) : protect doit le réécrire."""
+    return state == "protected" and bool(stale_keys)
 
 
 def failover_waves(options, refs):

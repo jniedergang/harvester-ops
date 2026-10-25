@@ -3513,9 +3513,12 @@ plans par sélecteur ; son côté console est décrit avec le suiveur.
 `networks` et `drill_networks` dans les mêmes états, et les autres
 correspondances sur un plan brouillon seulement (sinon `state-forbids`).
 Taille, configuration réseau, cloud-init, MAC, démarrage et
-correspondance de réseaux changent le carnet de reprise : sur un plan
-protégé la réponse porte `protect_needed: true`, et le protect suivant
-réécrit le carnet. D'ici là, le plan garde les clés changées
+correspondance de réseaux changent le carnet de reprise. Seule la valeur
+compte : renvoyer les mêmes valeurs, ne changer que les actions annexes,
+les vagues ou l'accord sur un secours dégradé, ou revenir aux valeurs
+protégées (Annuler) ne marque rien. Sur un plan protégé dont une valeur du
+carnet a vraiment changé, la réponse porte `protect_needed: true`, et le
+protect suivant réécrit le carnet. D'ici là, le plan garde les clés changées
 (`carnet_stale` dans `GET /api/replication/plans/<id>`), le suiveur
 signale aussi chaque VM dont le carnet diffère de ce que protect écrirait
 aujourd'hui, et les deux se montrent par l'alerte `carnet-stale`. Une

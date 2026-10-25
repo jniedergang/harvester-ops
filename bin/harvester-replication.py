@@ -756,6 +756,7 @@ def cmd_plan_set(args):
         if why:
             raise UsageError(why, "state-forbids")
         stored = plan.get("options") or {}
+        before = rp.carnet_values(stored, plan.get("mappings"))
         if timeouts is not None:
             cur = dict(stored.get("timeouts") or {})
             for k, v in timeouts.items():
@@ -784,16 +785,24 @@ def cmd_plan_set(args):
             new = db.update_plan(conn, plan["id"], now=utcnow(), **fields)
         except rp.PlanError as e:
             raise UsageError(str(e), e.code) from None
+        # carnet en retard : VALEURS comparées à celles du dernier protect
+        # (renvoyer les mêmes, ou y revenir, ne marque rien)
+        need = False
+        if plan["state"] == "protected":
+            flag = db.get_plan_flag(conn, "carnet-stale", plan["id"])
+            stale = rp.stale_carnet_keys(flag, before, rp.carnet_values(new.get("options"), new.get("mappings")))
+            need = rp.protect_needed(plan["state"], stale)
+            if stale:
+                # gardé jusqu'au prochain protect : alerte et contrôle de la bascule
+                db.mark_carnet_stale(conn, plan["id"], stale, baseline=None if flag else before, by=args.by or system_user(),
+                                     now=utcnow(), replace=True)
+            elif flag:
+                db.clear_plan_flag(conn, "carnet-stale", plan["id"])
     changed = {k: new[k] for k in ("rpo_objective_s",) if "rpo_objective_s" in fields}
     changed.update({k: (new.get("options") or {}).get(k) for k in options})
     changed = rp.mask_options(changed)
     if maps:
         changed["mappings"] = {k: (new.get("mappings") or {}).get(k) for k in maps}
-    need = rp.protect_needed(plan["state"], recovery, carnet, maps)
-    if need:
-        # gardé jusqu'au prochain protect : alerte et contrôle de la bascule
-        db.mark_carnet_stale(conn, plan["id"], rp.carnet_keys_touched(recovery, carnet, maps),
-                             by=args.by or system_user(), now=utcnow())
     names = sorted(changed)
     _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(names), changed, args)
     step("plan", "done", "settings changed: " + ", ".join(names))

@@ -372,18 +372,14 @@ def test_settings_refusal(state, recovery, options, mappings, refused):
     assert bool(rp.settings_refusal(state, recovery, options, mappings)) is refused
 
 
-@pytest.mark.parametrize("state,recovery,options,mappings,need", [
-    ("protected", {"resize": {}}, {}, {}, True),
-    ("protected", {"network_data": {}}, {}, {}, True),
-    ("protected", {"waves": [], "hooks": [], "auto_protect": True}, {}, {}, False),
-    ("protected", None, {"cloud_init": "rerun"}, {}, True),
-    ("protected", None, {}, {"networks": {}}, True),
-    ("protected", None, {}, {"drill_networks": {}}, False),
-    ("draft", {"resize": {}}, {"mac": "new"}, {}, False),
-    ("failed_over", {"resize": {}}, {}, {}, False),
+@pytest.mark.parametrize("state,stale,need", [
+    ("protected", ["resize"], True),
+    ("protected", [], False),
+    ("draft", ["mac"], False),
+    ("failed_over", ["resize"], False),
 ])
-def test_protect_needed(state, recovery, options, mappings, need):
-    assert rp.protect_needed(state, recovery, options, mappings) is need
+def test_protect_needed(state, stale, need):
+    assert rp.protect_needed(state, stale) is need
 
 
 # ---------------------------------------------------------------------------

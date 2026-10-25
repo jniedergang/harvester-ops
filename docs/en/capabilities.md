@@ -3204,9 +3204,12 @@ plans; the console side of it is described with the follower.
 in every state except `failing_over`, the `networks` and `drill_networks`
 mappings in the same states, and the other mappings on a draft plan only
 (otherwise `state-forbids`). Size, network data, cloud-init, MAC, start
-and the network mapping change the recovery carnet: on a protected plan
-the answer says `protect_needed: true`, and the next protect rewrites the
-carnet. Until then the plan keeps the changed keys (`carnet_stale` in
+and the network mapping change the recovery carnet. What counts is the
+value: sending the same values again, changing only hooks, waves or the
+degraded standby acknowledgement, or going back to the protected values
+(Undo) marks nothing. On a protected plan whose carnet value really
+changed, the answer says `protect_needed: true`, and the next protect
+rewrites the carnet. Until then the plan keeps the changed keys (`carnet_stale` in
 `GET /api/replication/plans/<id>`), the follower also flags each VM whose
 carnet differs from what protect would write today, and both show as the
 `carnet-stale` alert. A failover then refuses to start (`carnet-stale`

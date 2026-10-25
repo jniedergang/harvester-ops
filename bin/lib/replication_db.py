@@ -1675,12 +1675,24 @@ def clear_plan_flag(conn, kind, plan_id):
     return cur.rowcount > 0
 
 
-def mark_carnet_stale(conn, plan_id, keys, by="", now=None):
-    """Ajoute `keys` aux réglages de reprise changés depuis le dernier protect."""
+def mark_carnet_stale(conn, plan_id, keys, baseline=None, by="", now=None, replace=False):
+    """Note `keys` parmi les réglages de reprise changés depuis le dernier
+    protect (ajoutées, ou à la place des clés notées avec `replace`).
+    `baseline` : les valeurs du carnet au dernier protect (`carnet_values`),
+    gardées à la première marque pour comparer les changements suivants."""
     cur = get_plan_flag(conn, "carnet-stale", plan_id) or {}
-    merged = sorted(set(cur.get("keys") or []) | set(keys))
-    set_plan_flag(conn, "carnet-stale", plan_id, {"keys": merged, "since": cur.get("since") or _iso(_now(now)),
-                                                  "by": by or cur.get("by") or ""}, by=by, now=now)
+    merged = sorted(set(keys) if replace else set(cur.get("keys") or []) | set(keys))
+    val = {"keys": merged, "since": cur.get("since") or _iso(_now(now)), "by": by or cur.get("by") or ""}
+    base = cur.get("baseline") if isinstance(cur.get("baseline"), dict) else baseline
+    if isinstance(base, dict):
+        val["baseline"] = base
+    set_plan_flag(conn, "carnet-stale", plan_id, val, by=by, now=now)
+
+
+def public_carnet_stale(flag):
+    """La marque `carnet-stale` montrée (clés, date, auteur), sans les
+    valeurs du dernier protect."""
+    return {k: v for k, v in flag.items() if k != "baseline"} if flag else flag
 
 
 def max_event_id(conn):

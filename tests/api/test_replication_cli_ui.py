@@ -128,7 +128,7 @@ def _to_state(w, *states):
 
 @pytest.mark.parametrize("states,argv,spec,rc,kind", [
     (("protecting", "protected"), ["--cloud-init=rerun"], None, 0, None),
-    (("protecting", "protected"), [], {"mappings": {"networks": {"default/prod": "default/lab-net"}}}, 0, None),
+    (("protecting", "protected"), [], {"mappings": {"networks": {"default/prod": "default/lab-net2"}}}, 0, None),
     (("protecting", "protected"), [], {"mappings": {"drill_networks": {"default/prod": "default/lab-net"}}}, 0, None),
     (("protecting", "protected"), [], {"mappings": {"disk_classes": {"default/vm-a/data": "x"}}}, 2,
      "state-forbids"),

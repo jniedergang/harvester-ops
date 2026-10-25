@@ -24882,7 +24882,7 @@ def api_replication_plan(plan_id):
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
                "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role(),
                # réglages de reprise changés depuis le dernier protect (bandeau « protect à relancer »)
-               "carnet_stale": _rdb.get_plan_flag(conn, "carnet-stale", plan["id"])}
+               "carnet_stale": _rdb.public_carnet_stale(_rdb.get_plan_flag(conn, "carnet-stale", plan["id"]))}
     finally:
         conn.close()
     return jsonify(out)
@@ -25541,8 +25541,9 @@ def api_replication_settings(plan_id):
             spec["recovery"] = recovery
         if maps:
             spec["mappings"] = maps
+        after = None
         if recovery or maps or carnet:
-            _rp.normalize_plan({"name": plan["name"], "source_cluster": plan["source_cluster"],
+            after = _rp.normalize_plan({"name": plan["name"], "source_cluster": plan["source_cluster"],
                                 "target_cluster": plan["target_cluster"],
                                 "rpo_objective_s": plan["rpo_objective_s"], "interval_s": plan.get("interval_s"),
                                 "retain": plan["retain"], "vms": plan.get("vms") or [],
@@ -25561,8 +25562,24 @@ def api_replication_settings(plan_id):
                             busy_clusters=("",), spec=spec or None)
     if err:
         return err
-    extra = {"protect_needed": True} if _rp.protect_needed(plan["state"], recovery, carnet, maps) else {}
+    extra = {"protect_needed": True} if _repl_protect_needed(plan, after) else {}
     return _repl_accepted(run, plan["id"], **extra)
+
+
+def _repl_protect_needed(plan, after):
+    """Indice de la réponse : le carnet sera en retard après le réglage
+    (`after`, plan normalisé), même règle que `plan set` (valeurs comparées
+    à celles du dernier protect, pas les clés données)."""
+    if after is None or plan["state"] != "protected":
+        return False
+    conn = _replication_conn()
+    try:
+        flag = _rdb.get_plan_flag(conn, "carnet-stale", plan["id"])
+    finally:
+        conn.close()
+    stale = _rp.stale_carnet_keys(flag, _rp.carnet_values(plan.get("options"), plan.get("mappings")),
+                                  _rp.carnet_values(after["options"], after["mappings"]))
+    return _rp.protect_needed(plan["state"], stale)
 
 
 @app.route("/api/replication/plans/<plan_id>/hooks/test", methods=["POST"])
