@@ -4445,7 +4445,9 @@ contrat dessus, un clic sur un contrat l'écrit, fermer la fenêtre rend
 `#dr`, et F5 la rouvre. Depuis le Disaster Recovery d'un hôte, la fenêtre
 s'ouvre sur la page de l'hôte, qui garde son adresse. Dans le journal d'un
 contrat, l'icône Activité d'un événement mène à `#activity/action/<id>` :
-l'Activité filtrée sur cette action, son détail ouvert. Dans **Machines
+l'Activité filtrée sur cette action, son détail ouvert. Ce filtre n'est pas
+enregistré : vos propres filtres de l'Activité reviennent quand vous quittez
+l'adresse ou changez un filtre. Dans **Machines
 virtuelles**, une VM tenue par un contrat porte une pastille **DR** qui
 mène au contrat ; elle est relue à chaque ouverture de la vue et chaque
 minute. Les boutons suivent les actions que le serveur rend avec chaque

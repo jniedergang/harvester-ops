@@ -4074,7 +4074,9 @@ click on a contract writes it, closing the window gives back `#dr`, and F5
 reopens it. From a host's Disaster Recovery the window opens over the host
 page, which keeps its address. In the journal of a contract, the Activity
 icon of an event leads to `#activity/action/<id>`: Activity filtered on
-that action, its detail open. In **Virtual machines**, a VM held by a
+that action, its detail open. That filter is not saved: your own Activity
+filters come back when you leave the address or change a filter. In
+**Virtual machines**, a VM held by a
 contract carries a **DR** badge that leads to the contract; it is read
 again each time the view opens and every minute. The buttons follow the
 actions the server gives with each contract row (role, allowed, reason):

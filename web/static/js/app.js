@@ -1594,8 +1594,22 @@ const App = (() => {
     return p.toString();
   }
 
+  // #activity/action/<id> pose un filtre passager : il n'est jamais
+  // enregistré, et les filtres gardés de la personne reviennent quand elle
+  // quitte cette adresse ou touche à un filtre (revue finale A-1)
+  let activityLens = null;
+
   function saveActivityFilters() {
     try { localStorage.setItem(ACT_FILTER_KEY, JSON.stringify(activityFilters)); } catch {}
+  }
+
+  /** Quitte le filtre passager d'une action : les filtres gardés reviennent. */
+  function leaveActivityLens() {
+    if (!activityLens) return false;
+    activityLens = null;
+    Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
+    restoreActivityFilters();
+    return true;
   }
 
   function restoreActivityFilters() {
@@ -1637,6 +1651,7 @@ const App = (() => {
 
   function bindActivityFilters() {
     const onChange = (key) => (e) => {
+      leaveActivityLens();
       activityFilters[key] = e.target.value;
       saveActivityFilters();
       refreshActivity();
@@ -1653,6 +1668,7 @@ const App = (() => {
       clearTimeout(activityQTimer);
       const v = e.target.value;
       activityQTimer = setTimeout(() => {
+        leaveActivityLens();
         activityFilters.q = v;
         saveActivityFilters();
         refreshActivity();
@@ -1660,6 +1676,7 @@ const App = (() => {
       }, 250);
     });
     $('#btn-act-filter-reset')?.addEventListener('click', () => {
+      activityLens = null;
       Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
       saveActivityFilters();
       refreshActivity();
@@ -2109,11 +2126,14 @@ const App = (() => {
     navDrPlan = t.drPlan || null;
     navActivityAction = t.activityAction || null;
     // #activity/action/<id> : l'Activité filtrée sur cette action, son détail ouvert
+    // (filtre passager : jamais enregistré, les filtres gardés reviennent après)
     if (t.tab === 'activity' && t.activityAction) {
       Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
       activityFilters.q = t.activityAction;
-      saveActivityFilters();
+      activityLens = t.activityAction;
       pendingActionOpen = t.activityAction;
+    } else {
+      leaveActivityLens();
     }
     // 2.0.0 : #activity/host/<famille>/<nom> pose le filtre « cluster » de l'Activité
     if (t.tab === 'activity' && t.activityHost) {

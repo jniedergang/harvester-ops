@@ -1055,3 +1055,14 @@ def test_undo_keeps_objects_whose_folder_cannot_go_back(env, capsys):
     assert out["conflicts"][0]["key"] == "harvester/harv1/nav/a"
     assert "could not go back" in cap.err
     assert [j[3] for j in journal(env, "ur")] == ["skipped"]
+
+
+def test_install_links_the_folders_tool_like_the_other_clis():
+    """Revue finale D-6 : `harvester-folders` est lié comme les autres outils,
+    et le message de fin nomme chaque lien posé."""
+    import re
+    text = (ROOT / "install.sh").read_text()
+    assert re.search(r'ln -sf "\$PREFIX/harvester-folders\.py" "\$PREFIX/harvester-folders"', text)
+    linked = re.findall(r'ln -sf "\$PREFIX/harvester-[\w-]+\.(?:sh|py)" +"\$PREFIX/harvester-([\w-]+)"', text)
+    said = re.search(r'Scripts installed: harvester-\{([^}]*)\}', text).group(1).split(",")
+    assert sorted(linked) == sorted(said)

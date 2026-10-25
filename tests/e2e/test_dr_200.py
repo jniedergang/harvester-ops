@@ -234,6 +234,36 @@ def test_journal_action_link_opens_the_action_in_activity(ui):
     page.wait_for_function("() => location.hash === '#activity'", timeout=5000)
 
 
+def test_an_action_address_never_erases_the_saved_activity_filters(ui):
+    """Revue finale A-1 : #activity/action/<id> filtre l'Activité sur une
+    action sans enregistrer ce filtre ; les filtres gardés de la personne
+    reviennent quand elle quitte l'adresse (et après un rechargement)."""
+    page, _, _ = ui
+    saved = {"cluster": "", "status": "error", "action": "", "q": "backup"}
+    page.route(re.compile(r".*/api/activity(\?.*)?$"), lambda r, q: r.fulfill(**ok(
+        {"in_progress": [], "log_files": [], "matched": 0, "total": 0, "filters": {"active": True},
+         "facets": {"statuses": ["done", "error"]}, "actions_done": []})))
+    page.evaluate("(v) => localStorage.setItem('harvester_ops_activity_filters', v)", json.dumps(saved))
+    goto(page, base(page), f"#activity/action/{ACT_ID}")
+    page.evaluate("() => Router.idle()")
+    expect(page.locator("#act-f-q")).to_have_value(ACT_ID)
+    stored = lambda: json.loads(page.evaluate("() => localStorage.getItem('harvester_ops_activity_filters')"))  # noqa: E731
+    assert stored() == saved
+    page.evaluate("() => { location.hash = '#activity'; }")
+    page.wait_for_function("() => location.hash === '#activity'")
+    page.evaluate("() => Router.idle()")
+    expect(page.locator("#act-f-q")).to_have_value("backup")
+    expect(page.locator("#act-f-status")).to_have_value("error")
+    assert stored() == saved
+    # une autre action puis un filtre changé : les filtres gardés plus le changement
+    goto(page, base(page), f"#activity/action/{ACT_ID}")
+    page.evaluate("() => Router.idle()")
+    page.locator("#act-f-status").select_option("done")
+    page.wait_for_function("() => location.hash === '#activity'", timeout=5000)
+    assert stored() == dict(saved, status="done")
+    expect(page.locator("#act-f-q")).to_have_value("backup")
+
+
 # --- pastille DR des VMs -----------------------------------------------------------
 
 def test_vm_dr_pill_is_read_again_when_the_view_comes_back(world):  # noqa: F811

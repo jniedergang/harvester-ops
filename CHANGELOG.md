@@ -340,6 +340,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   landing in another folder of the same name. They now stay with their
   folder and are counted as conflicts (`skipped` in the journal).
 
+- **Opening an action's address keeps your Activity filters**:
+  `#activity/action/<id>` cleared every Activity filter and saved that, so
+  the person's saved filters were lost for good. The action filter is now
+  passing: never saved, and the saved filters come back when the address is
+  left or a filter is changed.
+- **`harvester-folders` is linked by the installer** like the other
+  command-line tools, and the end message names every link (`kvm` was
+  missing too).
 - **A partial read no longer purges console-only filings**: every
   cluster read without error was a purge scope, even a Rancher member's read
   limited to her namespaces, so console-only filings in namespaces she
@@ -588,6 +596,10 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   ignored).
 - `tests/api/test_clusters_join_url_200.py`: the join address of a cluster
   Rancher hides answers like an undeclared cluster.
+- `tests/e2e/test_dr_200.py`: `#activity/action/<id>` leaves the saved
+  Activity filters untouched, they come back on `#activity` and after a
+  filter change. `tests/api/test_folders_cli_200.py`: `install.sh` links
+  `harvester-folders` and names every link it makes.
 
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 
