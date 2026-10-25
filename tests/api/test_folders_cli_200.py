@@ -194,6 +194,39 @@ def test_refusals_and_exit_codes(env, capsys, argv, code, message):
     assert message in err, err
 
 
+@pytest.mark.parametrize("argv,code,kind", [
+    (["create", "--parent", "/", "--name", "Prod"], 1, "conflict"),
+    (["create", "--parent", "/", "--name", "a/b"], 2, "invalid"),
+    (["create", "--parent", "999", "--name", "N"], 1, "refused"),
+    (["assign", "--to", "Prod", "--spec", "/nonexistent"], 2, "usage"),
+    (["undo", "--action", "bad id!"], 2, "usage"),
+    (["no-such-command"], 2, "usage"),
+])
+def test_every_error_exit_prints_one_json_object(env, capsys, argv, code, kind):
+    assert run(env, *argv) == code
+    cap = capsys.readouterr()
+    out = json.loads(cap.out)
+    assert out["ok"] is False and out["kind"] == kind and out["error"]
+    assert "STEP_EVENT|" in cap.err and "|error|" in cap.err
+
+
+def test_an_unexpected_error_hides_its_internals(env, capsys, monkeypatch):
+    def broken(path=None):
+        raise cli.fdb.sqlite3.OperationalError("unable to open database file /srv/secret/folders.db")
+    monkeypatch.setattr(cli.fdb, "connect", broken)
+    assert run(env, "tree") == 1
+    cap = capsys.readouterr()
+    assert json.loads(cap.out) == {"ok": False, "error": "unexpected internal error (OperationalError)",
+                                   "kind": "failed"}
+    assert "/srv/secret" not in cap.out + cap.err and "Traceback" not in cap.out + cap.err
+
+
+def test_an_error_without_json_prints_no_json(env, capsys):
+    assert cli.main(["--db", str(env["db"]), "create", "--parent", "/", "--name", "Prod"]) == 1
+    cap = capsys.readouterr()
+    assert cap.out == "" and "already exists" in cap.err
+
+
 def test_delete_of_a_non_empty_folder_is_refused_with_code_1(env, capsys):
     assert run(env, "assign", "--to", "/Lab", spec={"objects": [vm("a")]}) == 0
     capsys.readouterr()

@@ -256,11 +256,14 @@ patch checked first by the server in dry-run (a webhook refusal fails that
 line and the others go on), `virsh metadata` with `--config` and `--live`
 when the domain runs (a transient domain is written live and also kept by
 the console), the `folder` field of the host declaration. When the person
-may not write the object, or the cluster refuses the patch, the filing is
-kept by the console only; an object that carries a folder the person cannot
+may not write the object, or the RBAC refuses the patch (`cannot patch
+resource`), the filing is kept by the console only; a webhook or quota
+refusal, even with the 403 code, fails the line with its reason; an object that carries a folder the person cannot
 change keeps it. A viewer reads the tree and changes nothing. Exit codes: 0
 done, 1 refused or an object failed, 2 invalid request (name, path, depth,
-length, unknown object).
+length, unknown object). With `--json`, every error exit prints one object
+`{"ok": false, "error", "kind"}` on stdout; an unexpected error is told by
+its type only, without trace or path.
 
 Checked for real: on harv1, a stopped then running VM and a Deployment
 filed, moved, undone and unfiled (annotation read back by `kubectl`, VM

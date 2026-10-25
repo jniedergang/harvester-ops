@@ -48,7 +48,8 @@ Rôle (`--role`, posé par la console) : viewer en lecture seule, operator
 pour tout geste. Progression sur stderr en STEP_EVENT|étape|statut|message.
 
 Codes de sortie : 0 fait, 1 refus ou au moins un objet en échec,
-2 erreur d'usage ou demande invalide.
+2 erreur d'usage ou demande invalide. Avec --json, toute sortie en erreur
+écrit un seul objet {"ok": false, "error", "kind"} sur stdout.
 """
 
 import argparse
@@ -92,6 +93,13 @@ class UsageError(Exception):
 
 class Refused(Exception):
     pass
+
+
+class Parser(argparse.ArgumentParser):
+    """Erreur d'usage levée (et non sys.exit) : main la rend en JSON avec --json."""
+
+    def error(self, message):
+        raise UsageError(message)
 
 
 def step(sid, status, msg=""):
@@ -473,7 +481,6 @@ def cmd_delete(args, conn):
     try:
         path = fdb.delete_empty(conn, fid, visible)
     except fdb.FolderError as e:
-        step("delete", "error", e.message)
         raise Refused(e.message) from None
     step("delete", "done", f"folder {path} deleted")
     return finish(args, {"id": fid, "path": path}, 0, f"{path} deleted")
@@ -594,7 +601,7 @@ def parse_args(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     action_ids = [a.split("=", 1)[1] for a in argv if a.startswith("--id=")]
     argv = [a for a in argv if not a.startswith("--id=")]
-    p = argparse.ArgumentParser(prog="harvester-folders.py", description=__doc__.split("\n")[0])
+    p = Parser(prog="harvester-folders.py", description=__doc__.split("\n")[0])
     p.add_argument("--db", help="folders.db (HARVESTER_OPS_FOLDERS_DB by default)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--as", dest="as_user", default=None, help="person on whose behalf")
@@ -640,29 +647,41 @@ COMMANDS = {"tree": cmd_tree, "create": cmd_create, "rename": cmd_rename,
             "write-back": cmd_write_back}
 
 
+def fail_exit(want_json, sid, message, kind, code):
+    """Un échec : STEP_EVENT, message sur stderr, et avec --json un seul
+    objet {"ok": false, "error", "kind"} sur stdout (comme harvester-kvm.py)."""
+    step(sid, "error", message)
+    print(f"error: {message}", file=sys.stderr)
+    if want_json:
+        print(json.dumps({"ok": False, "error": message, "kind": kind}, indent=2))
+    return code
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    want_json = "--json" in argv
     try:
-        args = parse_args(argv)
-    except SystemExit as e:
-        return EXIT_USAGE if e.code else EXIT_OK
-    args.as_user = args.as_user or getpass.getuser()
-    args.id = args.id or "fa-" + uuid.uuid4().hex[:12]
-    for a in ("id", "action"):
-        if getattr(args, a, None) is not None and not ACTION_ID_RE.match(getattr(args, a)):
-            print(f"error: invalid {a}", file=sys.stderr)
-            return EXIT_USAGE
-    try:
+        try:
+            args = parse_args(argv)
+        except SystemExit as e:                # --help
+            return EXIT_USAGE if e.code else EXIT_OK
+        args.as_user = args.as_user or getpass.getuser()
+        args.id = args.id or "fa-" + uuid.uuid4().hex[:12]
+        for a in ("id", "action"):
+            if getattr(args, a, None) is not None and not ACTION_ID_RE.match(getattr(args, a)):
+                raise UsageError(f"invalid {a}")
         conn = fdb.connect(args.db)
         return COMMANDS[args.cmd](args, conn)
     except UsageError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return EXIT_USAGE
+        return fail_exit(want_json, "validate", str(e), "usage", EXIT_USAGE)
     except fdb.FolderError as e:
-        print(f"error: {e.message}", file=sys.stderr)
-        return EXIT_USAGE if e.kind == "invalid" else EXIT_FAIL
+        return fail_exit(want_json, "folder", e.message, e.kind,
+                         EXIT_USAGE if e.kind == "invalid" else EXIT_FAIL)
     except Refused as e:
-        print(f"refused: {e}", file=sys.stderr)
-        return EXIT_FAIL
+        return fail_exit(want_json, "refuse", str(e), "refused", EXIT_FAIL)
+    except Exception as e:                     # noqa: BLE001 : ni trace ni chemin à l'appelant
+        return fail_exit(want_json, "internal", f"unexpected internal error ({type(e).__name__})",
+                         "failed", EXIT_FAIL)
 
 
 if __name__ == "__main__":

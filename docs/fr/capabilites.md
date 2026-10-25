@@ -277,11 +277,14 @@ webhook fait échouer cette ligne, les autres continuent), `virsh metadata`
 avec `--config` et `--live` si le domaine tourne (un domaine transitoire est
 écrit à chaud et gardé aussi par la console), le champ `folder` de la
 déclaration de l'hôte. Quand la personne n'a pas le droit d'écrire l'objet,
-ou que le cluster refuse le patch, le rangement est gardé par la console
-seule ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
+ou que la RBAC refuse le patch (`cannot patch resource`), le rangement est
+gardé par la console seule ; un refus de webhook ou de quota, même en code
+403, fait échouer la ligne avec sa raison ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
 Un lecteur lit l'arborescence et ne change rien. Codes de sortie : 0 fait,
 1 refus ou un objet en échec, 2 demande invalide (nom, chemin, profondeur,
-longueur, objet inconnu).
+longueur, objet inconnu). Avec `--json`, toute sortie en erreur écrit un seul
+objet `{"ok": false, "error", "kind"}` sur stdout ; une erreur inattendue
+n'est dite que par son type, sans trace ni chemin.
 
 Vérifié en réel : sur harv1, une VM arrêtée puis en marche et un Deployment
 rangés, déplacés, remis par Annuler puis sortis du dossier (annotation relue
