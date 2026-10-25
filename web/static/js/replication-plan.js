@@ -115,8 +115,10 @@ const ReplicationPlan = (() => {
     const keys = (d.carnet_stale && d.carnet_stale.keys) || [];
     const vms = ((d.row && d.row.resources) || []).filter((r) => (r.reasons || []).includes('carnet-stale')).map((r) => `${r.namespace}/${r.name}`);
     if (!keys.length && !vms.length) return '';
+    const canOp = U.roleRank(d.role) >= 2;
+    // un contrat protégé ne propose pas « Protéger » dans ses actions : protect relancé ici, comme Réglages > Appliquer
     return `<div class="sto-finding sev-action" data-rpv="stale"><div class="sto-finding-title">${icon('warn')} ${esc(tr('rp.stale.title'))}
-        ${U.actionButton(d.row, 'protect', 'btn-primary')}</div>
+        <button type="button" class="btn btn-sm btn-primary tip" data-rpv="protect-again" data-tip="${esc(canOp ? tr('rp.stale.protectTip') : tr('rp.viewerTip'))}"${canOp ? '' : ' disabled'}>${icon('shield')} ${esc(tr('rp.stale.protect'))}</button></div>
       ${keys.length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.keys', { keys: keys.join(', ') }))}</p>` : ''}
       ${vms.length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.vms', { vms: vms.join(', ') }))}</p>` : ''}
       <p class="sto-finding-advice">${esc(tr('rp.stale.advice'))}</p></div>`;
@@ -434,6 +436,7 @@ const ReplicationPlan = (() => {
     const k = b.dataset.rpv;
     if (k === 'failover') failover(v.id);
     else if (k === 'check') checkPlan(v, b, msg);
+    else if (k === 'protect-again') send(v, b, msg, 'POST', `/api/replication/plans/${enc(v.id)}/protect`, {}, tr('rp.fo.protectFirstDone'));
     else if (k === 'resume-cmd') send(v, b, msg, 'POST', `/api/replication/plans/${enc(v.id)}/resume`, {}, tr('rp.act.resumeCmdDone'));
     else if (k === 'more') renderJournal(v, v.root.querySelector('.rp-view-pane'), false);
     else if (k === 'save-follow') saveFollow(v, b);

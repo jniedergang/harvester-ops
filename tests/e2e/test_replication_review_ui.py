@@ -110,12 +110,17 @@ def test_failover_window_names_stale_settings_and_needs_a_choice(ui):
 
 
 def test_contract_view_shows_a_protect_needed_banner(ui):
-    page, _, _ = ui
+    page, sent, _ = ui
     d = plan_detail("admin")
     d["carnet_stale"] = {"keys": ["network_data"], "since": "2030-01-01T00:00:00Z"}
     page.route(re.compile(rf".*/api/replication/plans/{PID}$"), lambda r, q: r.fulfill(**ok(d)))
     view = open_view(page)
-    expect(view.locator('[data-rpv="stale"]')).to_contain_text("network_data")
+    banner = view.locator('[data-rpv="stale"]')
+    expect(banner).to_contain_text("network_data")
+    again = banner.locator('[data-rpv="protect-again"]')
+    assert again.get_attribute("data-tip")
+    again.click()
+    wait_sent(page, sent, lambda s: s[0] == "POST" and s[1] == f"plans/{PID}/protect")
 
 
 def test_undo_keeps_an_exact_objective_and_never_sends_an_unchanged_one(ui):
