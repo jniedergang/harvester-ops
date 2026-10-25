@@ -3033,6 +3033,18 @@ demi-seconde plus tard, sur une connexion neuve. Une écriture n'est jamais
 retentée : on ne sait pas si elle a eu lieu, et l'action dit que la
 connexion a été perdue.
 
+**Lectures en parallèle (1.101.2).** Une lecture de nombreux objets (la
+définition de chaque VM, chaque volume de chaque pool) lance 8 commandes
+`virsh` à la fois sur l'hôte, chacune avec sa sortie, son code et son délai.
+Les écritures restent l'une après l'autre, dans l'ordre. Sur un hôte de
+15 VMs et 63 volumes, le relevé du stockage est passé de 24,9 s à 5 s
+environ. Le catalogue d'images ne retient plus les fenêtres Créer et
+Modifier : la fenêtre s'ouvre tout de suite, et l'onglet Disques affiche
+« Chargement des images de l'hôte... » jusqu'à son arrivée, ou dit pourquoi
+il n'a pas pu être lu. Regarder la section KVM ou un hôte prépare le relevé
+en arrière-plan : le catalogue est en général prêt à l'ouverture d'une
+fenêtre. Rien ne part quand personne ne regarde.
+
 **Gestes de cycle de vie.** Le menu d'une VM propose **Démarrer**,
 **Arrêter**, **Redémarrer**, **Arrêt forcé**, **Suspendre** et
 **Reprendre**. Un geste que l'état n'autorise pas est grisé et dit
@@ -3488,10 +3500,15 @@ classification exacte du serveur. Seuls les champs changés partent.
 - Ballon actif ou non, console série, chien de garde, numéro de série du
   micrologiciel et fils d'E/S des disques se règlent à la création
   seulement. Une VM transitoire s'ouvre en lecture seule.
-- **Gestes à chaud** dans le menu de la VM, comme dans Harvester : CPU et
-  mémoire, Ajouter un disque, Ajouter une carte, Cloud-init, et par
-  appareil Retirer, Insérer une image, Éjecter. Chaque résultat dit
-  maintenant, prochain démarrage ou refusé, avec la raison.
+- **Une seule entrée d'édition dans le menu (1.101.3).** Sous les entrées
+  d'alimentation, de console, d'instantanés, de clonage et de suppression,
+  le menu d'une VM KVM n'a plus qu'une entrée d'édition, **Modifier**. Les
+  changements à chaud se font dans cette fenêtre : CPU et mémoire, ajouter
+  ou retirer un disque, insérer ou éjecter le média d'un CD-ROM, ajouter ou
+  retirer une carte, cloud-init (avec une nouvelle exécution). Chaque champ
+  dit maintenant, prochain démarrage ou refusé avant l'envoi, et le
+  résultat le dit par changement. Les routes `/hot/<op>` et
+  `harvester-kvm vm <geste>` restent pour les scripts.
 - **Cloud-init** d'une VM existante : le seed est relu (rôle opérateur),
   régénéré dans un nouveau volume et mis à la place ;
   **Rejouer cloud-init au prochain démarrage** lui donne un nouvel identifiant

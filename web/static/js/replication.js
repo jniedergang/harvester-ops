@@ -365,7 +365,8 @@ const Replication = (() => {
     const sel = cur.host.querySelector('[data-rp="state"]');
     const states = [...new Set(plans.map(U.planState))].sort();
     const want = [''].concat(states).join('|');
-    if ([...sel.options].map((o) => o.value).join('|') !== want) {
+    // Comparer la liste entière : une liste vide et la seule option « tous » donnaient la même chaîne.
+    if (sel.options.length !== states.length + 1 || [...sel.options].map((o) => o.value).join('|') !== want) {
       sel.innerHTML = `<option value="">${esc(tr('rp.filter.allStates'))}</option>`
         + states.map((s) => `<option value="${esc(s)}">${esc(U.STATE[s] ? U.STATE[s][1]() : s)}</option>`).join('');
     }

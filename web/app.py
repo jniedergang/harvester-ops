@@ -11467,6 +11467,23 @@ def _kvm_read_all(details=False):
     return [dict(public.get(e["name"], {}), **e) for e in entries], warnings
 
 
+def _kvm_warm_surveys(names):
+    """Prépare en arrière-plan le relevé de stockage des hôtes `names` (qui
+    viennent de répondre) : le catalogue d'images de la fenêtre « Modifier »
+    ou « Créer » est alors prêt quand on l'ouvre. Seulement quand une vue KVM
+    est relue (jamais de minuterie) ; rien si un relevé frais existe ou est
+    en route, ou si l'hôte a déjà KVM_SURVEYS_PER_HOST relevés en cours."""
+    state = _state_dir()
+    for name in names:
+        vh, err = _kvm_host(state, name)
+        if err:
+            continue
+        try:
+            _ko.SURVEYS.warm(vh, slot=lambda n=name: _kvm_survey_slot(n))
+        except Exception as e:                 # noqa: BLE001 : la vue elle-même passe
+            log.warning("KVM: survey warm-up for %s not started: %s", name, e)
+
+
 def _kvm_unavailable():
     if _kvm_cli is None or not (BIN_DIR / KVM_SCRIPT).is_file():
         return _kvm_err(f"{KVM_SCRIPT} not deployed", 503)
@@ -11490,6 +11507,7 @@ def api_kvm_hosts():
         entries = [_kvm_public(d) for d in decls]
     else:
         entries, warnings = _kvm_read_all()
+        _kvm_warm_surveys([e["name"] for e in entries if "error" not in e])
     return jsonify({"hosts": entries, "warnings": warnings, "role": current_role(),
                     "gestures": {a: sorted(r[1]) for a, r in _kvm_cli.GESTURES.items()}})
 
@@ -11517,6 +11535,7 @@ def api_kvm_host(host):
     _kvm_network_details(vh, inv)
     # 2.0.0 : la page d'un hôte KVM grise ses boutons d'après le rôle (la clé
     # de la lecture partagée porte déjà le rôle)
+    _kvm_warm_surveys([host])
     return jsonify(dict(_kvm_public(vh.decl), role=current_role(), **inv))
 
 
@@ -11589,6 +11608,7 @@ def api_kvm_vms():
             continue
         hosts.append({"name": inv["name"], "state": "ok", "count": len(inv["vms"])})
         vms.extend(inv["vms"])
+    _kvm_warm_surveys([h["name"] for h in hosts if h["state"] == "ok"])
     # « redémarrage nécessaire » : repères notés par la console (kvm_pending),
     # valables tant que la VM tourne avec le même Id ; aucun dumpxml ici
     try:

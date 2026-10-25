@@ -16,8 +16,9 @@
  *     bandeau « redémarrage nécessaire », résultat par changement. L'empreinte
  *     `config_digest` lue à l'ouverture part avec la modification ; un 409
  *     `changed` propose de relire sans perdre la saisie.
- *   - gestes à chaud du menu d'une VM (CPU et mémoire, disque, carte, CD-ROM,
- *     cloud-init), par les routes `/hot/<op>`.
+ *   - le menu d'une VM n'offre que « Modifier » dans son groupe d'édition
+ *     (1.101.3) : CPU et mémoire, disques, médias, cartes et cloud-init se
+ *     changent dans cette fenêtre, en un seul PATCH.
  *
  * Toute écriture est une action suivie (dock, Activité) que le serveur lance
  * par bin/harvester-kvm.py ; on la suit par `KVM.follow` (SSEReconnect). Aucun
@@ -251,13 +252,41 @@ const KVMForm = (() => {
   }
 
   // -- disques et cartes : moteur TFForm, schémas KVM -------------------------------------
+  /** Choix d'images des cartes de disque. Le catalogue arrive APRÈS
+   *  l'ouverture de la fenêtre (il demande un relevé du stockage de l'hôte) :
+   *  les mêmes tableaux sont remplis en place, un schéma déjà construit (carte
+   *  ajoutée plus tard, validation) voit donc la liste à jour. */
+  function imageLists(ctx) {
+    if (!ctx.imgLists) ctx.imgLists = { imgs: [], isos: [], vols: [] };
+    return ctx.imgLists;
+  }
+  /** État du catalogue dans l'onglet Disques : en cours, erreur, ou rien. */
+  function imagesStateText(ctx) {
+    if (ctx.imagesState === 'loading') return tr('kvmf.imagesLoading');
+    if (ctx.imagesState === 'error') return tr('kvmf.imagesError', { error: errText(ctx.imagesError || '?') });
+    return '';
+  }
+  function imagesStateHtml(ctx) {
+    const text = imagesStateText(ctx);
+    return `<p class="form-hint${ctx.imagesState === 'error' ? ' res-warn' : ''}" data-kvmf="images-state" role="status"${text ? '' : ' hidden'}>${esc(text)}</p>`;
+  }
+  function fillImageLists(ctx, images) {
+    const l = imageLists(ctx);
+    const put = (arr, vals) => { arr.splice(0, arr.length, ...vals); };
+    const ref = (i) => `${i.pool}/${i.volume}`;
+    // l'image d'ouverture (« Créer une VM » depuis une image) reste choisie
+    const all = (images || []).slice();
+    if (ctx.image && !all.some((i) => i.pool === ctx.image.pool && i.volume === ctx.image.volume)) all.push(ctx.image);
+    put(l.imgs, all.filter((i) => !i.iso).map(ref));
+    put(l.isos, all.filter((i) => i.iso).map(ref));
+    put(l.vols, all.map(ref));
+  }
+
   /** Schéma des cartes de disque, choix venus de l'hôte (pools actifs,
    *  images, bus annoncés par `domcapabilities`). */
   function diskSchema(ctx) {
     const pools = (ctx.pools || []).filter((p) => p.state === 'running').map((p) => p.name);
-    const imgs = (ctx.images || []).filter((i) => !i.iso).map((i) => `${i.pool}/${i.volume}`);
-    const isos = (ctx.images || []).filter((i) => i.iso).map((i) => `${i.pool}/${i.volume}`);
-    const vols = (ctx.images || []).map((i) => `${i.pool}/${i.volume}`);
+    const { imgs, isos, vols } = imageLists(ctx);
     const buses = (ctx.opts && ctx.opts.disk_buses) || ['virtio', 'sata', 'scsi'];
     const L = (s) => ({ en: s });
     return {
@@ -550,6 +579,7 @@ const KVMForm = (() => {
       return `<h3>${esc(tr('kvmf.s.disks'))}</h3>
         ${existing}
         ${ctx.mode === 'edit' ? `<h4>${esc(tr('kvmf.addDisks'))}</h4>` : ''}
+        ${imagesStateHtml(ctx)}
         <div class="vm-edit-cards" data-editor="kvm-disks">${TFForm.render(diskSchema(ctx), '', { disk: ctx.initialDisks || [] }, { hideHeader: true })}
           <p class="form-hint vm-disk-capacity" data-disk-capacity></p></div>
         <p class="form-hint">${esc(tr('kvmf.disksHint'))}</p>
@@ -594,7 +624,7 @@ const KVMForm = (() => {
   function existingDisksHtml(ctx) {
     const disks = (ctx.form.view.disks || []);
     if (!disks.length) return `<p class="form-hint">${esc(tr('kvmf.noDisk'))}</p>`;
-    const isos = (ctx.images || []).filter((i) => i.iso).map((i) => `${i.pool}/${i.volume}`);
+    const isos = imageLists(ctx).isos;
     const seed = ctx.form.view.seed;
     const ro = ctx.readOnly ? ' disabled' : '';
     const buses = (ctx.opts && ctx.opts.disk_buses) || ['virtio', 'sata', 'scsi'];
@@ -757,13 +787,22 @@ const KVMForm = (() => {
     // -- références de l'hôte ---------------------------------------------------------
     /** Références de l'hôte. Un changement d'hôte pendant la lecture rend
      *  la réponse périmée : elle est ignorée (jeton de requête), seule la
-     *  dernière demande remplit la fenêtre. */
+     *  dernière demande remplit la fenêtre.
+     *
+     *  Le catalogue d'images n'est PAS attendu : il demande un relevé du
+     *  stockage de l'hôte (plusieurs secondes sur un hôte chargé, à froid).
+     *  La fenêtre s'affiche dès les autres références ; les choix d'images
+     *  arrivent ensuite dans l'onglet Disques, avec leur propre indicateur
+     *  de chargement et leur erreur (`onImages`). */
     async function loadRefs(host) {
       const token = (st.refToken = (st.refToken || 0) + 1);
-      const [caps, pools, nets, links, images] = await Promise.all([
+      ctx.images = [];
+      ctx.imagesState = 'loading';
+      fillImageLists(ctx, []);
+      const imagesP = getJson(`/api/kvm/hosts/${enc(host)}/images`);
+      const [caps, pools, nets, links] = await Promise.all([
         getJson(`/api/kvm/hosts/${enc(host)}/caps`), getJson(`/api/kvm/hosts/${enc(host)}/pools`),
-        getJson(`/api/kvm/hosts/${enc(host)}/networks`), getJson(`/api/kvm/hosts/${enc(host)}/links`),
-        getJson(`/api/kvm/hosts/${enc(host)}/images`)]);
+        getJson(`/api/kvm/hosts/${enc(host)}/networks`), getJson(`/api/kvm/hosts/${enc(host)}/links`)]);
       if (token !== st.refToken) { const e = new Error('stale'); e.stale = true; throw e; }
       if (caps.error) throw new Error(caps.error);
       ctx.caps = caps.options || {};
@@ -771,8 +810,38 @@ const KVMForm = (() => {
       ctx.pools = pools.pools || [];
       ctx.networks = nets.networks || [];
       ctx.links = links.error ? {} : links;
-      ctx.images = images.images || [];
-      ctx.refWarnings = [pools, nets, links, images].filter((x) => x.error).map((x) => x.error);
+      ctx.refWarnings = [pools, nets, links].filter((x) => x.error).map((x) => x.error);
+      st.imagesP = imagesP.then((images) => { if (token === st.refToken) onImages(images); });
+    }
+
+    /** Catalogue d'images arrivé : listes remplies en place, listes
+     *  déroulantes déjà affichées refaites (la valeur choisie est gardée),
+     *  indicateur retiré ou remplacé par l'erreur. */
+    function onImages(images) {
+      const failed = !images || images.error;
+      ctx.images = failed ? [] : (images.images || []);
+      ctx.imagesState = failed ? 'error' : 'ready';
+      ctx.imagesError = failed ? ((images && images.error) || '?') : null;
+      if (failed) ctx.refWarnings = (ctx.refWarnings || []).concat([ctx.imagesError]);
+      fillImageLists(ctx, ctx.images);
+      const l = imageLists(ctx);
+      const opts = (list, cur, blank) => blank + (cur && !list.includes(cur) ? [cur] : []).concat(list)
+        .map((v) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(v)}</option>`).join('');
+      const lists = { image: l.imgs, iso: l.isos, volume: l.vols };
+      root.querySelectorAll('[data-editor="kvm-disks"] select').forEach((sel) => {
+        const m = /\.(image|iso|volume)$/.exec(sel.name || '');
+        if (!m) return;
+        const cur = sel.value;
+        // une valeur gardée qui n'est plus au catalogue reste visible
+        sel.innerHTML = opts(lists[m[1]], cur, sel.required ? '' : '<option value=""></option>');
+      });
+      root.querySelectorAll('select[data-disk-field="source"]').forEach((sel) => {
+        const cur = sel.value;
+        sel.innerHTML = opts(l.isos, cur, `<option value="">${esc(tr('kvmf.emptyDrive'))}</option>`);
+      });
+      const box = root.querySelector('[data-kvmf="images-state"]');
+      if (box) box.outerHTML = imagesStateHtml(ctx);
+      if (ctx.mode === 'create' && st.onImagesCreate) st.onImagesCreate();
     }
 
     function setFamily(fam) {
@@ -1503,6 +1572,7 @@ const KVMForm = (() => {
           loadKeys(head.querySelector('[name="ssh_keys"]'), st.keys);
           loadTemplates();
           const start = async () => {
+            st.onImagesCreate = null;
             await loadRefs(ctx.host);
             setFamily(ctx.caps.default_machine);
             ctx.defaultPool = ((ctx.pools || []).find((p) => p.state === 'running') || {}).name || '';
@@ -1516,6 +1586,9 @@ const KVMForm = (() => {
                   : { source: 'blank', pool: ctx.defaultPool, size: '10G', boot_order: 1 };
               })()];
             if (img && img.iso) ctx.initialDisks.push({ source: 'blank', pool: img.pool, size: '10G', boot_order: 2 });
+            // catalogue encore en route : le premier disque deviendra l'image
+            // du catalogue à son arrivée, si rien n'a été saisi d'ici là
+            const autoImage = !img && ctx.initialDisks[0].source === 'blank';
             const net = (ctx.networks || []).find((n) => n.active) || (ctx.networks || [])[0];
             ctx.initialNics = net ? [{ kind: 'network', network: net.name, model: 'virtio' }] : [];
             build();
@@ -1528,6 +1601,25 @@ const KVMForm = (() => {
             syncAgent();
             form.show('general');
             st.pristine = snapshot();
+            if (autoImage) {
+              st.onImagesCreate = () => {
+                st.onImagesCreate = null;
+                const first = (ctx.images || []).find((i) => !i.iso && (ctx.pools || []).some((p) => p.name === i.pool && p.state === 'running'));
+                if (!first || snapshot() !== st.pristine) return;
+                const card = root.querySelector('[data-editor="kvm-disks"] .tf-block-item');
+                const g = (n) => card && card.querySelector(`[name$=".${n}"]`);
+                if (!g('source') || !g('image')) return;
+                g('source').value = 'image';
+                if (g('pool')) g('pool').value = first.pool;
+                g('image').value = `${first.pool}/${first.volume}`;
+                if (g('linked')) g('linked').checked = true;
+                if (g('size')) g('size').value = '';
+                g('source').dispatchEvent(new Event('change', { bubbles: true }));
+                syncAgent();
+                st.pristine = snapshot();
+              };
+              if (ctx.imagesState !== 'loading') st.onImagesCreate();
+            }
             if ((ROLE_RANK[ctx.role] || 0) < ROLE_RANK.operator) {
               root.querySelector('[data-kvmf="create"]').disabled = true;
               root.querySelector('[data-kvmf="create"]').dataset.tip = tr('kvm.operatorOnly');
@@ -1615,14 +1707,14 @@ const KVMForm = (() => {
   }
 
   // =========================================================================================
-  // Gestes à chaud du menu d'une VM (groupe « Disques et réseau »)
+  // Groupe d'édition du menu d'une VM : « Modifier » seul (1.101.3). La
+  // fenêtre couvre CPU et mémoire, disques, médias, cartes et cloud-init,
+  // avec le repère « maintenant / prochain démarrage » de chaque champ.
   // =========================================================================================
-  const HOT_ICON = { edit: 'edit', cpumem: 'compute', 'add-volume': 'hotplug', 'remove-volume': 'trash', 'insert-cdrom': 'cdrom',
-                     'eject-image': 'eject', 'add-nic': 'network', 'remove-nic': 'trash', cloudinit: 'cloud' };
 
-  /** Pourquoi un geste est grisé, d'après la table servie (`edit_operations`). */
-  function hotWhy(table, op, v, role) {
-    const t = table && table[op === 'edit' ? 'edit' : 'hot'];
+  /** Pourquoi « Modifier » est grisé, d'après la table servie (`edit_operations`). */
+  function editWhy(table, v, role) {
+    const t = table && table.edit;
     if (!t) return tr('kvm.op.unavailable');
     if ((ROLE_RANK[role] || 0) < (ROLE_RANK[t.role] || 3)) return t.role === 'admin' ? tr('kvm.adminOnly') : tr('kvm.operatorOnly');
     if (t.persistent && !v.persistent) return tr('kvm.why.transient');
@@ -1630,46 +1722,12 @@ const KVMForm = (() => {
     return '';
   }
 
-  /** Le groupe du menu : rendu tout de suite (Modifier, CPU et mémoire,
-   *  ajouts), complété par les disques et cartes de la VM une fois lus. */
+  /** Le groupe du menu : une seule entrée, rendue sans lecture réseau. */
   function menuGroupHtml(v, table, role) {
-    const item = (op, label, tip, extra = '') => {
-      const why = hotWhy(table, op, v, role);
-      return `<button type="button" class="vma-item tip" role="menuitem" data-kvm-hot="${esc(op)}"${extra}
-          data-tip="${esc(why || tip)}"${why ? ' aria-disabled="true"' : ''}><span class="vma-ic">${icon(HOT_ICON[op])}</span> ${esc(label)}</button>`;
-    };
+    const why = editWhy(table, v, role);
     return `<div class="vma-group kvm-hot-group" data-kvm-hot-group>
-        ${item('edit', tr('kvmf.m.edit'), tr('kvmf.m.editTip'))}
-        ${item('cpumem', tr('kvmf.m.cpumem'), tr('kvmf.m.cpumemTip'))}
-        ${item('add-volume', tr('kvmf.m.addVolume'), tr('kvmf.m.addVolumeTip'))}
-        ${item('add-nic', tr('kvmf.m.addNic'), tr('kvmf.m.addNicTip'))}
-        ${item('cloudinit', tr('kvmf.m.cloudinit'), tr('kvmf.m.cloudinitTip'))}
-        <div data-kvm-hot-devices><span class="res-dim kvm-hot-loading">${esc(tr('common.loading'))}</span></div></div>`;
-  }
-
-  async function fillMenuDevices(groupEl, v, table, role) {
-    const d = await getJson(`/api/kvm/vms/${enc(v.host)}/${enc(v.name)}`);
-    const box = groupEl.querySelector('[data-kvm-hot-devices]');
-    if (!box) return;
-    if (d.error) { box.innerHTML = `<span class="res-error vma-item">${esc(errText(d.error))}</span>`; return; }
-    const item = (op, label, tip, attrs) => {
-      const why = hotWhy(table, op, v, role);
-      return `<button type="button" class="vma-item tip" role="menuitem" data-kvm-hot="${esc(op)}"${attrs}
-          data-tip="${esc(why || tip)}"${why ? ' aria-disabled="true"' : ''}><span class="vma-ic">${icon(HOT_ICON[op])}</span> ${esc(label)}</button>`;
-    };
-    const out = [];
-    (d.disks || []).forEach((x) => {
-      const t = x.target || '';
-      if (!t) return;
-      if (x.device === 'cdrom') {
-        out.push(item('insert-cdrom', tr('kvmf.m.insert', { target: t }), tr('kvmf.m.insertTip'), ` data-target="${esc(t)}"`));
-        if (x.source) out.push(item('eject-image', tr('kvmf.m.eject', { target: t }), tr('kvmf.m.ejectTip'), ` data-target="${esc(t)}"`));
-      } else out.push(item('remove-volume', tr('kvmf.m.removeVolume', { target: t }), tr('kvmf.m.removeVolumeTip'), ` data-target="${esc(t)}"`));
-    });
-    (d.nics || []).forEach((x) => {
-      if (x.mac) out.push(item('remove-nic', tr('kvmf.m.removeNic', { mac: x.mac }), tr('kvmf.m.removeNicTip'), ` data-mac="${esc(x.mac)}"`));
-    });
-    box.innerHTML = out.join('');
+        <button type="button" class="vma-item tip" role="menuitem" data-kvm-hot="edit"
+          data-tip="${esc(why || tr('kvmf.m.editTip'))}"${why ? ' aria-disabled="true"' : ''}><span class="vma-ic">${icon('edit')}</span> ${esc(tr('kvmf.m.edit'))}</button></div>`;
   }
 
   /** Clic dans le groupe : rend vrai s'il a été traité. */
@@ -1678,186 +1736,8 @@ const KVMForm = (() => {
     if (!b) return false;
     if (b.getAttribute('aria-disabled')) return true;
     close();
-    const op = b.dataset.kvmHot;
-    if (op === 'edit') openEdit(v.host, v.name);
-    else openHot(v, op, { target: b.dataset.target, mac: b.dataset.mac });
+    openEdit(v.host, v.name);
     return true;
-  }
-
-  const hfield = (name, label, input, tip) => `<label class="bk-field"><span>${esc(label)}</span>${
-    input.replace(/^<(input|select|textarea)/, `<$1 class="tip" data-tip="${esc(tip)}"`)}</label>`;
-
-  /** La fenêtre d'un geste à chaud (même patron que vm-actions.js). */
-  function openHot(v, op, arg = {}) {
-    const titles = {
-      cpumem: tr('kvmf.m.cpumem'), 'add-volume': tr('kvmf.m.addVolume'), 'add-nic': tr('kvmf.m.addNic'),
-      'remove-volume': tr('kvmf.m.removeVolume', { target: arg.target }), 'insert-cdrom': tr('kvmf.m.insert', { target: arg.target }),
-      'eject-image': tr('kvmf.m.eject', { target: arg.target }), 'remove-nic': tr('kvmf.m.removeNic', { mac: arg.mac }),
-      cloudinit: tr('kvmf.m.cloudinit'),
-    };
-    const panel = FloatingPanels.open({
-      id: `kvm-hot-${op}-${v.host}-${enc(v.name)}`, icon: HOT_ICON[op], width: op === 'cloudinit' ? 760 : 520,
-      height: op === 'cloudinit' ? 680 : 460, title: `${titles[op]} · ${v.name}`,
-      bodyHtml: `<form class="of-form vma-form kvm-hot" data-kvm-hot-op="${esc(op)}" autocomplete="off" novalidate>
-          <p class="form-hint" data-h="hint">${esc(tr('common.loading'))}</p><div data-h="fields"></div>
-          <div class="bk-form-actions"><button type="submit" class="btn btn-sm ${/^remove|eject/.test(op) ? 'btn-danger' : 'btn-primary'} tip" data-h="go"
-            data-tip="${esc(tr('kvmf.hotGoTip'))}">${icon(HOT_ICON[op])} ${esc(tr('kvmf.hotGo'))}</button></div>
-          <div class="of-msg" data-h="msg" role="status" aria-live="polite"></div><ul class="kvm-steps" data-h="steps"></ul><div data-h="result"></div></form>`,
-    });
-    const root = panel.el;
-    if (root.dataset.hotReady) return root;
-    root.dataset.hotReady = '1';
-    const formEl = root.querySelector('form');
-    const $ = (k) => root.querySelector(`[data-h="${k}"]`);
-    const hint = (t) => { $('hint').textContent = t; };
-    const st = { body: null };
-
-    (async () => {
-      const base = `/api/kvm/hosts/${enc(v.host)}`;
-      if (op === 'cpumem') {
-        const f = await getJson(`/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/form`);
-        const c = (f.view && f.view.cpu) || {}, m = (f.view && f.view.memory) || {};
-        hint(tr('kvmf.h.cpumem', { cpu: c.max_vcpus || '?', mem: m.max_mib || '?' }));
-        $('fields').innerHTML = hfield('vcpus', tr('kvmf.f.vcpus'), `<input name="vcpus" type="number" min="1" max="${esc(c.max_vcpus || '')}" value="${esc(c.vcpus || v.vcpus || 1)}">`, tr('kvmf.t.hotVcpus'))
-          + hfield('memory_mib', tr('kvmf.f.memory'), `<input name="memory_mib" type="number" min="16" max="${esc(m.max_mib || '')}" value="${esc(m.current_mib || Math.round((v.memory_kib || 0) / 1024))}">`, tr('kvmf.t.hotMemory'));
-        st.body = () => ({ vcpus: Number(formEl.vcpus.value) || undefined, memory_mib: Number(formEl.memory_mib.value) || undefined });
-      } else if (op === 'add-volume' || op === 'insert-cdrom') {
-        const [pools, images] = await Promise.all([getJson(`${base}/pools`), getJson(`${base}/images`)]);
-        const act = (pools.pools || []).filter((p) => p.state === 'running');
-        const imgs = (images.images || []).filter((i) => (op === 'insert-cdrom' ? i.iso : !i.iso));
-        const opt = (list) => list.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
-        if (op === 'insert-cdrom') {
-          hint(tr('kvmf.h.insert'));
-          $('fields').innerHTML = hfield('iso', tr('kvmf.d.iso'), `<select name="iso">${imgs.length ? opt(imgs.map((i) => `${i.pool}/${i.volume}`)) : `<option value="" disabled selected>${esc(tr('kvmf.noIso'))}</option>`}</select>`, tr('kvmf.d.isoTip'));
-          st.body = () => { const [p, ...r] = formEl.iso.value.split('/'); return { target: arg.target, pool: p, volume: r.join('/') }; };
-        } else {
-          hint(tr('kvmf.h.addVolume'));
-          $('fields').innerHTML = hfield('source', tr('kvmf.d.source'), `<select name="source"><option value="blank">blank</option><option value="image">image</option></select>`, tr('kvmf.d.sourceTip'))
-            + hfield('pool', tr('kvmf.d.pool'), `<select name="pool">${opt(act.map((p) => p.name))}</select>`, tr('kvmf.d.poolTip'))
-            + hfield('image', tr('kvmf.d.image'), `<select name="image"><option value=""></option>${opt(imgs.map((i) => `${i.pool}/${i.volume}`))}</select>`, tr('kvmf.h.linkedOnly'))
-            + hfield('size', tr('kvmf.d.size'), '<input name="size" value="1G" maxlength="20">', tr('kvmf.d.sizeTip'))
-            + hfield('bus', tr('kvmf.d.bus'), `<select name="bus">${opt(['virtio', 'scsi', 'sata'])}</select>`, tr('kvmf.d.busTip'));
-          st.body = () => {
-            const errs = [];
-            const c = { source: formEl.source.value, pool: formEl.pool.value, image: formEl.image.value, size: formEl.size.value, bus: formEl.bus.value, linked: true, device: 'disk' };
-            const disk = diskItem(c, errs, 0);
-            if (errs.length) throw new Error(errs.map((x) => x.message).join(' · '));
-            return { disk };
-          };
-        }
-      } else if (op === 'add-nic') {
-        const [nets, links] = await Promise.all([getJson(`${base}/networks`), getJson(`${base}/links`)]);
-        hint(tr('kvmf.h.addNic'));
-        const opt = (list) => list.map((x) => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
-        $('fields').innerHTML = hfield('kind', tr('kvmf.n.kind'), `<select name="kind">${opt(NIC_KINDS)}</select>`, tr('kvmf.n.kindTip'))
-          + hfield('network', tr('kvmf.n.network'), `<select name="network">${opt((nets.networks || []).map((n) => n.name))}</select>`, tr('kvmf.n.networkTip'))
-          + hfield('bridge', tr('kvmf.n.bridge'), `<select name="bridge">${opt(((links.bridges) || []).map((b) => b.name))}</select>`, tr('kvmf.n.bridgeTip'))
-          + hfield('dev', tr('kvmf.n.dev'), `<select name="dev">${opt(((links.physical) || []).map((b) => b.name))}</select>`, tr('kvmf.n.devTip'))
-          + hfield('mode', tr('kvmf.n.mode'), `<select name="mode">${opt(DIRECT_MODES)}</select>`, tr('kvmf.n.modeTip'))
-          + hfield('model', tr('kvmf.n.model'), `<select name="model">${opt(NIC_MODELS)}</select>`, tr('kvmf.n.modelTip'))
-          + hfield('mac', tr('kvmf.n.mac'), '<input name="mac" maxlength="17" placeholder="52:54:00:…">', tr('kvmf.n.macTip'));
-        const sync = () => {
-          const k = formEl.kind.value;
-          ['network', 'bridge', 'dev', 'mode'].forEach((n) => {
-            formEl[n].closest('label').hidden = !((n === 'network' && k === 'network') || (n === 'bridge' && k === 'bridge') || ((n === 'dev' || n === 'mode') && k === 'direct'));
-          });
-        };
-        formEl.kind.addEventListener('change', sync);
-        sync();
-        st.body = () => {
-          const errs = [];
-          const nic = nicItem({ kind: formEl.kind.value, network: formEl.network.value, bridge: formEl.bridge.value, dev: formEl.dev.value,
-                                mode: formEl.mode.value, model: formEl.model.value, mac: formEl.mac.value.trim() }, errs, 0);
-          if (errs.length) throw new Error(errs.map((x) => x.message).join(' · '));
-          return { nic };
-        };
-      } else if (op === 'remove-volume' || op === 'eject-image') {
-        hint(op === 'remove-volume' ? tr('kvmf.h.removeVolume', { target: arg.target, name: v.name }) : tr('kvmf.h.eject', { target: arg.target, name: v.name }));
-        st.body = () => ({ target: arg.target });
-      } else if (op === 'remove-nic') {
-        hint(tr('kvmf.h.removeNic', { mac: arg.mac, name: v.name }));
-        st.body = () => ({ mac: arg.mac });
-      } else if (op === 'cloudinit') {
-        hint(tr('kvmf.h.cloudinit'));
-        // « Appliquer » reste grisé tant que le seed actuel n'est pas lu : un
-        // envoi sur une zone vide effacerait le cloud-init de la VM
-        const go = $('go');
-        go.disabled = true;
-        go.dataset.tip = tr('kvmf.ciLoading');
-        $('fields').innerHTML = `<div class="form-row"><label>${esc(tr('kvmf.f.userData'))}</label><textarea class="yaml-editor tall tip" data-ci="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}" disabled></textarea>
-          <button type="button" class="btn btn-sm btn-secondary tip" data-h="clear" data-tip="${esc(tr('kvmf.ciClearTip'))}" disabled>${icon('trash')} ${esc(tr('kvmf.ciClear'))}</button>
-          <span class="form-hint" data-h="cleared" hidden>${esc(tr('kvmf.ciCleared'))}</span></div>
-          <div class="form-row"><label>${esc(tr('kvmf.f.networkData'))}</label><textarea class="yaml-editor tip" data-ci="networkData" spellcheck="false" data-tip="${esc(tr('kvmf.t.networkData'))}"></textarea></div>
-          ${hfield('hostname', tr('kvmf.f.hostname'), '<input name="hostname" maxlength="63">', tr('kvmf.t.hostname'))}
-          <label class="bk-check tip" data-tip="${esc(tr('kvmf.t.rerun'))}"><input type="checkbox" name="rerun"> <span>${esc(tr('kvmf.f.rerun'))}</span></label>`;
-        const ud = root.querySelector('[data-ci="userData"]');
-        const d = await getJson(`/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/cloudinit`);
-        if (d.error) {
-          // lecture impossible : rien ne part, l'erreur reste affichée
-          hint(errText(d.error));
-          $('msg').innerHTML = `<span class="res-error">${icon('fail')} ${esc(tr('kvmf.ciLoadFailed', { error: errText(d.error) }))}</span>`;
-          go.dataset.tip = tr('kvmf.ciLoadFailed', { error: errText(d.error) });
-          return;
-        }
-        st.loaded = d.user_data || '';
-        st.cleared = false;
-        ud.value = st.loaded;
-        root.querySelector('[data-ci="networkData"]').value = d.network_data || '';
-        ud.disabled = false;
-        go.disabled = false;
-        go.dataset.tip = tr('kvmf.hotGoTip');
-        const clear = $('clear');
-        clear.disabled = false;
-        clear.addEventListener('click', () => { ud.value = ''; st.cleared = true; $('cleared').hidden = false; });
-        ud.addEventListener('input', () => { if (ud.value.trim()) { st.cleared = false; $('cleared').hidden = true; } });
-        st.body = () => {
-          const b = { user_data: ud.value,
-                      network_data: root.querySelector('[data-ci="networkData"]').value || undefined, rerun: formEl.rerun.checked };
-          if (formEl.hostname.value.trim()) b.hostname = formEl.hostname.value.trim();
-          if (!b.user_data.trim()) {
-            // vide : seulement par « Vider » (le serveur le refuse aussi sans clear)
-            if (st.cleared) { b.user_data = ''; b.clear = true; }
-            else if (st.loaded.trim()) throw new Error(tr('kvmf.e.ciEmpty'));
-          }
-          return b;
-        };
-      }
-    })();
-
-    formEl.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      if (!st.body) return;
-      const go = $('go');
-      let body;
-      try { body = st.body(); } catch (err) { $('msg').innerHTML = `<span class="res-error">${icon('fail')} ${esc(err.message)}</span>`; return; }
-      go.disabled = true;
-      $('steps').innerHTML = '';
-      $('result').innerHTML = '';
-      $('msg').textContent = tr('kvmf.sending');
-      try {
-        const out = await send('POST', `/api/kvm/vms/${enc(v.host)}/${enc(v.name)}/hot/${op}`, body);
-        follow(out.action_id, (s) => {
-          const list = $('steps');
-          let li = [...list.children].find((x) => x.dataset.step === (s.step_id || ''));
-          if (!li) { li = document.createElement('li'); li.dataset.step = s.step_id || ''; list.appendChild(li); }
-          li.className = `kvm-step is-${s.status || 'running'}`;
-          li.innerHTML = `<span class="badge info">${esc(s.step_id || '')}</span> ${esc(s.message || '')}`;
-        }, (ok, run) => {
-          go.disabled = false;
-          const o = (run.result && run.result.output) || {};
-          const pend = (o.after && o.after.pending) || [];
-          if (o.after) notePending(v.host, v.name, pend, o.after.id);
-          $('msg').innerHTML = ok ? `<span>${icon('ok')} ${esc(tr('kvmf.applied'))}</span>`
-            : `<span class="res-error">${icon('fail')} ${esc(o.error || run.error_summary || tr('kvmf.failed'))}</span>`;
-          $('result').innerHTML = VMForm.changesHtml(o.changes || []) + VMForm.restartBanner(o.restart_required ? pend : []);
-          if (window.KVM && KVM.load) KVM.load(true);
-        });
-      } catch (err) {
-        go.disabled = false;
-        $('msg').innerHTML = `<span class="res-error">${icon('fail')} ${esc(err.message)}</span>`;
-      }
-    });
-    return root;
   }
 
   /** Champs en attente d'un redémarrage pour une ligne de la liste : ceux
@@ -1876,7 +1756,7 @@ const KVMForm = (() => {
   }
 
   // parseSize : partagé avec kvm-storage.js (volumes, redimensionnement)
-  return { openCreate, openEdit, openHot, menuGroupHtml, fillMenuDevices, onMenuClick, hotWhy, restartFor, parseSize,
+  return { openCreate, openEdit, menuGroupHtml, onMenuClick, editWhy, restartFor, parseSize,
            _internals: { parseSize, diskItem, nicItem, hotness, cardOf, nicCardOf, notePending,
                          agentDefault, bootCard, restartFor, poll: POLL } };
 })();

@@ -21,6 +21,7 @@ Les refus et échecs propres à ces opérations sont des `OpError` (genre dans
 OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 """
 
+import contextlib
 import fcntl
 import hashlib
 import html
@@ -931,6 +932,7 @@ class _Survey:
 
 SURVEY_TTL = 20.0                # âge au-delà duquel un relevé est rafraîchi
 SURVEY_MAX_STALE = 120.0         # au-delà, la vue attend un relevé neuf
+WARM_WAIT = 120.0                # attente bornée d'un préchauffage par une vue
 
 
 def _spawn_thread(fn):
@@ -969,7 +971,14 @@ class SurveyCache:
       relevé est refait (une vue un peu plus lente, jamais fausse) ; échec
       d'écriture du compteur : ignoré (rien d'autre à faire), les autres
       processus gardent au pire leur entrée jusqu'à `ttl`.
-    Un hôte sans répertoire d'état (objets des tests) a la génération 0."""
+    Un hôte sans répertoire d'état (objets des tests) a la génération 0.
+
+    Préchauffage (1.101.2). Le rafraîchissement en arrière-plan ci-dessus ne
+    sert qu'une entrée DÉJÀ présente : le premier catalogue après le
+    démarrage de la console, ou après une écriture, attendait un relevé
+    entier. `warm` lance ce relevé en arrière-plan quand quelqu'un regarde
+    la section KVM ou un hôte (jamais sans vue : aucune minuterie), et un
+    `get` qui arrive pendant ce relevé l'attend au lieu d'en refaire un."""
 
     def __init__(self, ttl=SURVEY_TTL, max_stale=SURVEY_MAX_STALE, clock=time.monotonic,
                  spawn=_spawn_thread, factory=None, enabled=None, generation=None, bump=None):
@@ -983,6 +992,7 @@ class SurveyCache:
         self._entries = {}          # hôte -> (relevé, date)
         self._gen = {}              # hôte -> génération (invalidations)
         self._refreshing = set()
+        self._warming = {}          # hôte -> Event d'un préchauffage en cours
 
     def _store(self, key, gen, survey, at, shared):
         with self._lock:
@@ -999,6 +1009,10 @@ class SurveyCache:
         shared = self.generation(host)
         if shared is None:                      # compteur illisible : pas de cache
             return self.factory(host), 0.0
+        with self._lock:
+            warming = self._warming.get(key)
+        if warming is not None:                 # préchauffage en route : l'attendre
+            warming.wait(WARM_WAIT)
         now = self.clock()
         with self._lock:
             entry = self._entries.get(key)
@@ -1030,6 +1044,47 @@ class SurveyCache:
         survey = self.factory(host)
         self._store(key, gen, survey, at, shared)
         return survey, 0.0
+
+    def warm(self, host, slot=None):
+        """Relevé préparé en arrière-plan s'il n'y a pas d'entrée fraîche et
+        qu'aucun relevé n'est déjà en route pour cet hôte. `slot` : fabrique
+        d'un gestionnaire de contexte rendant True si un relevé peut tourner
+        (limite par hôte de la console) ; False : rien n'est fait. Rend True
+        si un relevé a été lancé."""
+        enabled = self.enabled if self.enabled is not None else (
+            os.environ.get("HARVESTER_OPS_KVM_SURVEY_CACHE", "1") != "0")
+        if not enabled:
+            return False
+        key = _host_key(host)
+        shared = self.generation(host)
+        if shared is None:
+            return False
+        now = self.clock()
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry and entry[2] == shared and now - entry[1] < self.ttl:
+                return False
+            if key in self._refreshing or key in self._warming:
+                return False
+            self._refreshing.add(key)
+            done = self._warming[key] = threading.Event()
+            gen = self._gen.get(key, 0)
+
+        def run():
+            try:
+                with (slot() if slot else contextlib.nullcontext(True)) as ok:
+                    if ok:
+                        at = self.clock()
+                        self._store(key, gen, self.factory(host), at, shared)
+            except Exception:                   # noqa: BLE001 - la vue refera le relevé
+                pass
+            finally:
+                with self._lock:
+                    self._refreshing.discard(key)
+                    self._warming.pop(key, None)
+                done.set()
+        self.spawn(run)
+        return True
 
     def invalidate(self, host):
         key = _host_key(host)

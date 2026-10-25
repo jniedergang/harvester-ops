@@ -254,7 +254,8 @@ def test_the_multi_command_goes_as_one_quoted_virsh_argument():
     import shlex
     rem = shlex.split(calls[0][-1])
     assert rem[:2] == ["sh", "-c"]
-    run = [ln for ln in rem[2].splitlines() if ln.startswith("_kvm_run 0 ")][0]
+    # lecture : lot parallèle depuis la 1.101.2 (`_kvm_bg`), même argv
+    run = [ln for ln in rem[2].splitlines() if ln.startswith(("_kvm_run 0 ", "_kvm_bg 0 "))][0]
     words = shlex.split(run)[2:]
     assert words[:3] == ["virsh", "-c", "qemu:///system"] and len(words) == 4
     assert re.fullmatch(r"echo (@@hops-[0-9a-f]+)-0; metadata --domain 'a b' --uri "

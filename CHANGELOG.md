@@ -465,6 +465,91 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `test_drift_mutation_annotations_in_digest`. Routes and router tables:
   `#activity/action/<id>` and `#dr/<id>` round trips and error paths.
 
+## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
+
+### Changed
+- **The editing group of a KVM VM menu holds only Edit.** CPU and memory,
+  Add a disk, Add a card, Cloud-init, and the Remove, Insert and Eject
+  entries per disk, CD-ROM drive and card are gone from the menu. The Edit
+  window already does each of them, with the now / next boot mark of each
+  field: hot vCPU and memory, add a disk (blank, image, ISO, volume),
+  remove a disk (hot unplug where QEMU allows it), insert or eject the
+  media of a CD-ROM, add or remove a card, cloud-init with a new run.
+  The power, console, snapshot, clone and delete entries are unchanged.
+- **Opening the menu reads nothing.** The menu no longer fetches the disks
+  and cards of the VM each time it opens.
+- The `/hot/<op>` routes and `harvester-kvm vm <gesture>` stay for scripts.
+
+### Internal
+- Removed the hot gesture dialogs of the menu (`openHot`,
+  `fillMenuDevices`), their 32 strings in the five languages and their
+  styles.
+
+### Tests
+- e2e: the menu editing group holds exactly one entry, Edit, and opening
+  it reads nothing; a viewer sees Edit greyed with the reason.
+- e2e: each gesture of the old menu goes through the Edit window as a
+  partial PATCH: hot vCPU and memory, remove a disk, insert and eject a
+  CD-ROM media, remove a card, add a disk and a card, cloud-init run again
+  only once the current seed is read, nothing sent when the seed cannot be
+  read.
+- Source test: the menu group has a single button and no hot dialog code
+  is left.
+
+## [1.101.2] - 2026-10-25 - Faster KVM windows
+
+### Fixed
+- **KVM Edit and Create windows stayed on "Loading" for a long time.** They
+  waited for the image catalogue, which needs a survey of the host storage.
+  On node2 (15 VMs, 10 pools, 63 volumes) that survey took 24.9 s cold,
+  because each of its ~115 `virsh` reads paid its own libvirt connection,
+  one after the other.
+
+### Changed
+- **Read batches run in parallel on the host.** A batch of reads now runs
+  8 `virsh` commands at a time (`BATCH_PARALLEL` in `bin/lib/kvm_host.py`).
+  Each command keeps its own output, error, status, time limit and
+  markers; outputs come back in order. Each command writes to its own
+  files in a `mktemp -d` directory removed on exit. Without `mktemp`, the
+  batch runs in series as before. Write batches stay strictly sequential.
+  Measured on node2: survey 24.9 s -> 5.2 s, fresh image catalogue
+  26.8 s -> 6.7 s, pools list 5.2 s -> 1.5 s, Edit form 1.1 s -> 0.5 s.
+- **The windows no longer wait for the image catalogue.** They open as soon
+  as the form, the host choices, pools and networks arrive. The Disks tab
+  shows "Loading the host's images..." until the catalogue arrives, or the
+  reason it could not be read. Image choices already shown are filled in
+  place, with the current choice kept. In the Create window, an untouched
+  first disk becomes the first image of the catalogue when it arrives.
+- **The storage survey is prepared in the background.** Reading the KVM
+  hosts, the KVM VMs or one host starts a survey for each host that
+  answered, if none is fresh or running. A catalogue asked during that
+  survey waits for it instead of starting another one. No timer: nothing
+  runs when nobody looks. Before, the background refresh only renewed a
+  survey already in the cache.
+
+### Tests
+- API: the real batch script played by a local `sh` with a fake `virsh`:
+  commands really run at the same time and never more than the limit,
+  markers come back in order (a mutation that reverses the emission is
+  caught), status and error per command, a hung command times out alone,
+  random token that output cannot forge, series without `mktemp`, writes
+  in series, replay after a transport cut. Survey warm-up: starts only
+  when useful, a read waits for it, busy slot, write during the warm-up,
+  failure; routes warm only the hosts that answered.
+- e2e: the Edit window shows its form while the catalogue is held, then
+  fills the image choices; an unreadable catalogue is said in the Disks
+  tab; the Create window opens first then proposes an image, and keeps a
+  disk touched before the catalogue arrived.
+
+## [1.101.1] - 2026-10-25 - State filter of the contracts list
+
+### Fixed
+- **Contracts list without any contract.** The state filter stayed empty,
+  without its "All states" choice. It now always offers it.
+
+### Tests
+- e2e: the contracts list with no contract offers "All states".
+
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 
 ### Added

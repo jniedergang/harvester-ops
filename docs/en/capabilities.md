@@ -2764,6 +2764,17 @@ closed, ssh status 255) is tried once more, half a second later, on a new
 connection. A write is never tried again: whether it happened is unknown,
 and the action says the connection was lost.
 
+**Reads in parallel (1.101.2).** A read of many objects (the definition of
+each VM, each volume of each pool) runs 8 `virsh` commands at a time on
+the host, each with its own output, status and time limit. Writes stay one
+after the other, in order. On a host with 15 VMs and 63 volumes, the
+storage survey went from 24.9 s to about 5 s. The image catalogue of the
+Create and Edit windows no longer holds them: the window opens at once,
+and the Disks tab says "Loading the host's images..." until the catalogue
+arrives, or why it could not be read. Viewing the KVM section or a host
+prepares the storage survey in the background, so the catalogue is
+usually ready when a window opens. Nothing runs when nobody looks.
+
 **Lifecycle gestures.** The menu of a VM offers **Start**, **Shut down**,
 **Reboot**, **Force off**, **Suspend** and **Resume**. A gesture the state
 does not allow is greyed out and says why. Each gesture is a tracked action
@@ -3188,9 +3199,14 @@ classification. Only the changed fields are sent.
   added by hand. The window lists them read-only ("kept as is").
 - Balloon on or off, serial console, watchdog, firmware serial and disk
   I/O threads are set at creation only. A transient VM opens read-only.
-- **Hot gestures** in the VM menu, as in Harvester: CPU and memory, Add a
-  disk, Add a card, Cloud-init, and per device Remove, Insert an image,
-  Eject. Each result says now, next boot or refused, with the reason.
+- **One editing entry in the menu (1.101.3).** Below the power, console,
+  snapshot, clone and delete entries, the menu of a KVM VM has a single
+  editing entry, **Edit**. Hot changes are made in this window: CPU and
+  memory, add or remove a disk, insert or eject the media of a CD-ROM,
+  add or remove a card, cloud-init (with a new run). Each field says
+  now, next boot or refused before you send, and the result says it per
+  change. The `/hot/<op>` routes and `harvester-kvm vm <gesture>` stay
+  for scripts.
 - **Cloud-init** of an existing VM: the seed is read back (operator role),
   regenerated as a new volume and swapped in; **Run cloud-init again at next boot**
   gives it a new instance id. An empty user-data that would erase the

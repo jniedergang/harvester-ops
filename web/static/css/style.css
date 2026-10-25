@@ -5617,8 +5617,6 @@ body.sidebar-collapsed .rp-menu-badge { position: absolute; margin: 0; right: 4p
 .kvmf-tpl { display: inline-flex; gap: 6px; align-items: center; }
 .kvmf-tpl[hidden] { display: none; }
 .kvmf-unmanaged ul { margin: 4px 0 0; padding-left: 18px; }
-.kvm-hot-group [data-kvm-hot-devices]:empty { display: none; }
-.kvm-hot-loading { display: block; padding: 4px 10px; font-size: 12px; }
 .kvmf .vm-create-section .vm-edit-ci-wizard .apply-bar { display: flex; }
 .kvmf-edit-head { padding: 4px 6px 8px; }
 .vmf-applied { white-space: nowrap; }

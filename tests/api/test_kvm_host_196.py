@@ -23,6 +23,10 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import kvm_host as kh  # noqa: E402
 
+# fins de vague d'un lot de lectures en parallèle (_kvm_wave <i...>), retirées
+# avant de découper les commandes
+WAVE_RE = re.compile(r"\n_kvm_wave[ 0-9]*(?=\n|$)")
+
 FIX = ROOT / "tests" / "fixtures" / "kvm"
 DECL = {"name": "node2", "address": "172.16.1.12", "port": 22, "user": "ju",
         "ssh_key": "ssh/node2_id", "known_hosts": "ssh/node2_known", "uri": "qemu:///system"}
@@ -47,7 +51,7 @@ def split_batch(script):
     assert lines[0] == "export LC_ALL=C"
     token = re.search(r"^T=(@@kvm-[0-9a-f]+)$", script, re.M).group(1)
     cmds = []
-    for chunk in re.split(r"\n_kvm_run (?=\d+ )", script)[1:]:
+    for chunk in re.split(r"\n_kvm_(?:run|bg) (?=\d+ )", WAVE_RE.sub("", script))[1:]:
         words = shlex.split(chunk)
         cmds.append((int(words[0]), words[1:]))
     return token, cmds
