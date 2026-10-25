@@ -212,6 +212,16 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   page keeps it for the tab only when the address grammar understands it,
   and never writes it in the page.
 
+### Fixed
+- **Fleet reads are no longer shared across identities** (security, present
+  since 1.85): a shared read that names no cluster (`/api/vms-all`,
+  `/api/containers-all`, `/api/gpus-all`, the hosts menu, the folder counts)
+  now carries the identity the person presents to the clusters (Rancher
+  session, or delegated user and groups). Before, two people of the same
+  role signed in through Rancher, or under identity delegation, could be
+  served each other's fleet, VMs of clusters hidden from them included.
+  Local accounts without delegation still share one read.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
@@ -227,6 +237,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/api/test_read_share_identity_200.py`: two Rancher identities of
+  the same role (and the same user name on two Rancher servers) never share a
+  fleet read, two delegated identities neither, local accounts still share;
+  folder counts of one person never include another's keys; a deliberate
+  mutation that drops the identity part fails them.
 - `tests/api/test_vm_common_row_200.py`: every libvirt state to its phase
   (and a deliberate mutation swapping paused and running), memory in bytes,
   keys that survive a rename, the frozen list of common fields, the node2

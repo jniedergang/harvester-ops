@@ -889,15 +889,35 @@ def _fresh_allowed(key, min_interval):
         return True
 
 
+def _read_share_identity():
+    """Identité que la personne présente aux clusters, pour la clé d'une
+    lecture qui ne nomme pas de cluster (vue de flotte) : la session Rancher
+    (serveur + identifiant Rancher), sinon l'identité déléguée (utilisateur +
+    groupes), sinon None. None = kubeconfig de la console, la même vue pour
+    tous les comptes d'un rôle : le cas nominal partage toujours."""
+    sess = _sso_session()
+    if sess is not None:
+        ident = getattr(sess, "ident", None) or {}
+        return ("sso", getattr(sess, "server_id", None), ident.get("id") or sess.login)
+    who = current_cluster_identity()
+    if who and who.get("user"):
+        return ("as", who["user"], tuple(sorted(who.get("groups") or ())))
+    return None
+
+
 def _read_share_key(endpoint, kwargs, qargs=(), scope=None, per_user=False):
     """Clé d'une lecture partagée. Seule source de cette forme : le menu des
-    hôtes (navigation 2.0) relit le cache avec les mêmes clés que les écrans."""
+    hôtes (navigation 2.0) relit le cache avec les mêmes clés que les écrans.
+    Une route qui nomme un cluster porte le kubeconfig rendu pour la personne ;
+    une vue de flotte (sans cluster) porte son identité (2.0.0, revue I-2 :
+    sinon deux personnes du même rôle partageaient la flotte de l'autre)."""
     cluster = kwargs.get("cluster")
     return (scope or cluster, endpoint,
             tuple(sorted(qargs)),
             tuple(sorted((k, str(v)) for k, v in kwargs.items())),
             _kubectl_for_cluster(cluster) if cluster else None,
-            current_role(), current_user() if per_user else None)
+            current_role(), current_user() if per_user else None,
+            None if cluster else _read_share_identity())
 
 
 def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys=None):
