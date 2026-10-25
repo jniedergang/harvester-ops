@@ -227,3 +227,57 @@ def test_resume_of_a_failover_carries_the_stale_settings_acknowledgement(tmp_pat
     assert w.plan()["state"] == "failing_over"
     res = rr.resume(w.ctx(), accept_stale_carnet=True)
     assert res["exit"] == 0 and w.plan()["state"] == "failed_over", res
+
+
+# ---------------------------------------------------------------------------
+# m2 : la redirection refusée dit où elle mène, masquée ; m5 : délai de
+# l'appel entier
+# ---------------------------------------------------------------------------
+
+def _raw_server(handler):
+    import socket
+    import threading
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+
+    def serve():
+        c, _ = srv.accept()
+        try:
+            c.recv(65536)
+            handler(c)
+        except OSError:
+            pass
+        finally:
+            c.close()
+            srv.close()
+    threading.Thread(target=serve, daemon=True).start()
+    return f"http://127.0.0.1:{srv.getsockname()[1]}"
+
+
+def test_a_redirect_refusal_names_the_masked_target():
+    import replication_http as rh
+    import url_fetch_guard as ufg
+    url = _raw_server(lambda c: c.sendall(b"HTTP/1.1 308 Permanent Redirect\r\nLocation: /hooks/T0/s3cr3t-tok\r\n"
+                                          b"Content-Length: 0\r\n\r\n"))
+    with pytest.raises(ufg.FetchRefused) as e:
+        rh.request("POST", url + "/hooks", allow=ufg.parse_allowlist({"iso_fetch": {"allow_private": ["127.0.0.1/32"]}}))
+    assert e.value.reason == "redirect"
+    assert f"({url}/hooks/********)" in str(e.value) and "s3cr3t-tok" not in str(e.value)
+
+
+def test_the_timeout_bounds_the_whole_call_not_each_read():
+    import time
+    import replication_http as rh
+    import url_fetch_guard as ufg
+
+    def drip(c):
+        for b in b"HTTP/1.1 200 OK\r\nX-Slow: " + b"x" * 40:
+            c.sendall(bytes([b]))
+            time.sleep(0.2)
+    url = _raw_server(drip)
+    t0 = time.monotonic()
+    with pytest.raises(ufg.FetchRefused) as e:
+        rh.request("GET", url + "/", timeout=1,
+                   allow=ufg.parse_allowlist({"iso_fetch": {"allow_private": ["127.0.0.1/32"]}}))
+    assert e.value.reason == "timeout" and time.monotonic() - t0 < 3

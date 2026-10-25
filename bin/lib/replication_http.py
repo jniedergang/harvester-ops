@@ -24,7 +24,8 @@ import http.client
 import os
 import socket
 import ssl
-from urllib.parse import urlsplit
+import threading
+from urllib.parse import urljoin, urlsplit
 
 import url_fetch_guard as ufg
 
@@ -151,27 +152,49 @@ def request(method, url, headers=None, body=None, timeout=15, allow=(), resolver
             connector=ufg.default_connector):
     """Un appel HTTP vers une adresse vérifiée par la garde ; jamais de
     redirection suivie. Rend le statut (le corps est lu, 64 Kio au plus, et
-    jeté). Lève `ufg.FetchRefused` (refus d'adresse, connexion, TLS,
-    redirection)."""
+    jeté). `timeout` borne l'appel ENTIER (un serveur qui répond octet par
+    octet est coupé à l'échéance), pas seulement chaque lecture. Lève
+    `ufg.FetchRefused` (refus d'adresse, connexion, TLS, délai,
+    redirection, dont l'adresse visée est dite masquée)."""
     _scheme, host, port, path = ufg.check_url(url)
     ip = ufg.resolve_checked(host, port, allow, resolver)
     conn = connector(_scheme, host, ip, port, timeout)
     hdrs = dict({"User-Agent": "harvester-ops"}, **(headers or {}))
+    expired = threading.Event()
+
+    def _cut():
+        expired.set()
+        try:
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    timer = threading.Timer(timeout, _cut)
+    timer.daemon = True
+    timer.start()
     try:
         conn.request(method, path, body=body, headers=hdrs)
         resp = conn.getresponse()
         status = int(resp.status)
+        location = resp.getheader("Location") or ""
         resp.read(BODY_READ_MAX)
     except ssl.SSLError:
+        if expired.is_set():
+            raise ufg.FetchRefused("timeout", f"{host} did not answer within {timeout} s") from None
         raise ufg.FetchRefused("tls", f"TLS verification failed for {host}") from None
     except (OSError, http.client.HTTPException) as e:
+        if expired.is_set():
+            raise ufg.FetchRefused("timeout", f"{host} did not answer within {timeout} s") from None
         raise ufg.FetchRefused("connect", f"cannot reach {host} ({type(e).__name__})") from None
     finally:
+        timer.cancel()
         conn.close()
     if status in ufg.REDIRECT_CODES:
+        target = mask_url(urljoin(url, location)) if location else ""
         raise ufg.FetchRefused("redirect", f"{host} answered a redirect (HTTP {status}): redirects are not "
                                            "followed, so headers never reach another address; use the final "
-                                           "address")
+                                           "address" + (f" ({target})" if target else ""))
     return status
 
 

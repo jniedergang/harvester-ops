@@ -359,7 +359,7 @@ def _http(method, url, body, headers, timeout, allow, requester):
         status = requester(method, url, headers=dict({"Content-Type": "application/json"}, **headers),
                            body=data, timeout=timeout, allow=allow)
     except ufg.FetchRefused as e:
-        if e.reason in ("connect", "tls", "dns"):
+        if e.reason in ("connect", "tls", "dns", "timeout"):
             raise ConnectionError(f"connection failed: {e.message}") from None
         raise SendRefused(rh.refusal_text(e, "notifications")) from None
     if not 200 <= int(status) < 300:

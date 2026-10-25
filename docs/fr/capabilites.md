@@ -3446,7 +3446,7 @@ chaque vague.
 (après l'activation, avant la première vague), `wave:<n>` (après le
 passage de la vague n ; n peut être la dernière vague, implicite) ou
 `end`. La méthode est GET, POST (par défaut), PUT, PATCH ou DELETE ; le
-corps fait au plus 16 Kio ; le délai va de 1 à 60 s (15 par défaut), pour
+corps fait au plus 16 Kio ; le délai va de 1 à 60 s (15 par défaut) pour l'appel entier, pas pour chaque lecture, pour
 qu'un arrêt de la console atteigne le prochain point sûr bien avant son
 budget d'arrêt. L'adresse commence par `http://` ou `https://`, sans
 identifiants : ils vont dans `secret_headers`.
@@ -3459,7 +3459,7 @@ réservées sont refusés, sauf autorisation dans `config.yaml` par
 `iso_fetch.allow_private`) ; les adresses de métadonnées de cloud restent
 refusées même autorisées. Les cibles des actions annexes sont souvent
 internes (API DNS, répartiteur) : déclarez-y leurs réseaux. Une
-redirection n'est jamais suivie (l'appel échoue en le disant) : un en-tête
+redirection n'est jamais suivie (l'appel échoue en le disant, avec l'adresse visée masquée) : un en-tête
 secret n'atteint jamais une autre adresse. L'adresse est aussi contrôlée à
 la création ou au changement du plan : une adresse interne répond 400
 `hook-address` tout de suite (un nom qui ne se résout pas encore est

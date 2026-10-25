@@ -3142,7 +3142,7 @@ its hooks. The journal gets `wave-start`, `wave-passed` or
 activation, before the first wave), `wave:<n>` (after wave n passed its
 gate; n can be the implicit last wave) or `end`. The method is GET, POST
 (default), PUT, PATCH or DELETE; the body is at most 16 KiB; the timeout
-is 1 to 60 s (15 by default), so that a console stop reaches the next safe
+is 1 to 60 s (15 by default) for the whole call, not for each read, so that a console stop reaches the next safe
 point well within its stop budget. The URL is `http://` or `https://`,
 without credentials: they go in `secret_headers`.
 
@@ -3153,7 +3153,7 @@ unless allowed in `config.yaml` by `replication.hooks.allow_private` (a
 list of CIDR, like `iso_fetch.allow_private`); cloud metadata addresses
 stay refused even when allowed. Hook targets are often internal (a DNS
 API, a load balancer): list their networks there. A redirect is never
-followed (the call fails with the reason), so a secret header never
+followed (the call fails with the reason and the masked target), so a secret header never
 reaches another address. The address is also checked when the plan is
 created or changed: an internal address answers 400 `hook-address` at
 once (a name that does not resolve yet is checked again at the call). A hook that fails (refused, timed
