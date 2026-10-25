@@ -1,6 +1,6 @@
 # Parité avec l'interface de Harvester
 
-État au 2026-09-30, console **v1.80.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
+État au 2026-10-25, console **v2.0.0**, comparée à l'interface de **Harvester v1.9** (menus relevés dans le code de harvester-ui-extension v1.9.0 et la documentation v1.9).
 
 Sur 136 fonctions de l'interface de Harvester : **133 faites**, **3 partielles**, **0 manquantes** ; 1 hors périmètre. Une fonction manquante porte la version où elle est prévue.
 
@@ -14,9 +14,9 @@ Menu Harvester : *Dashboard*
 |---|---|---|---|
 | Compteurs nœuds, VMs, volumes | Fait | 1.2 | Vue d'ensemble |
 | Capacité CPU, mémoire, stockage | Fait | 1.62 | usage réel (metrics.k8s.io), réservé, stockage écrit et promis |
-| Événements du cluster (hôtes, VMs, volumes, images) | Fait | 1.62 | onglet Événements de l'aperçu, filtre avertissements |
+| Événements du cluster (hôtes, VMs, volumes, images) | Fait | 1.62 | bloc Événements de la Vue d'ensemble de l'hôte, filtre avertissements |
 | Métriques du cluster et des VMs (rancher-monitoring) | Fait | 1.70 | onglet Métriques : Prometheus quand rancher-monitoring est actif, metrics-server sinon ; CPU de VM juste (Harvester le divise par 1000) |
-| Bouton Mettre à jour Harvester | Fait | 1.69 | dans l'en-tête de l'aperçu et sur server-version |
+| Bouton Mettre à jour Harvester | Fait | 1.69 | dans la Vue d'ensemble de l'hôte, ouvre Paramètres > Mise à jour (2.0) ; aussi sur server-version |
 
 ## Hôtes
 
@@ -269,6 +269,10 @@ Menu Harvester : *VM Imports / VM Migration*
 |---|---|---|---|
 | Connexion par plusieurs Rancher réglés dans l'interface, directe ou SSO, droits hérités | Console seulement | 1.79 | la console s'enregistre elle-même dans Rancher pour le SSO et installe le chart Harvester RBAC |
 | Plusieurs clusters dans une seule interface, sans Rancher | Console seulement | 1.1 | Rancher (Virtualization Management) réunit aussi plusieurs clusters Harvester ; la console le fait seule, et ajoute les gestes d'un cluster à l'autre |
+| Navigation par hôtes : clusters Harvester et hyperviseurs KVM dans un seul menu, une adresse par écran | Console seulement | 2.0 | favoris par personne, index des hôtes, anciennes adresses 1.x toujours comprises |
+| Dossiers partagés pour les VMs, les conteneurs et les hôtes, écrits sur les objets | Console seulement | 2.0 | contrôles avant le geste, annulation et reprise ; Harvester n'a pas de dossiers |
+| Réplication asynchrone entre clusters Harvester (contrats, RPO, bascule) | Console seulement | 1.99 | volumes de secours Longhorn ; écrans Disaster Recovery depuis la 1.101, placés dans la navigation 2.0 |
+| Hyperviseurs KVM (libvirt) gérés à côté des clusters | Console seulement | 1.96 | virsh par SSH, sans agent ; page d'hôte en 2.0 |
 | Arrêt et démarrage gracieux d'un cluster entier | Console seulement | 1.0 | Harvester le décrit comme une procédure manuelle |
 | Transfert de VM entre clusters, export / import | Console seulement | 1.45 |  |
 | Terraform : déclarations gardées par la console | Console seulement | 1.54 |  |

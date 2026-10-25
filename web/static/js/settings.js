@@ -32,24 +32,33 @@ const Settings = (() => {
     )).filter(el => el.offsetParent !== null);
   }
 
-  function _installFocusTrap(modal) {
-    _trapKeydown = (e) => {
+  /** Piège à focus d'une fenêtre : Tab et Maj+Tab tournent dans `modal`.
+   *  Rend la fonction qui le retire. 2.0.0 : partagé (Settings.trapFocus)
+   *  avec les fenêtres construites par d'autres modules (étiquettes KVM). */
+  function trapFocus(modal) {
+    const onKey = (e) => {
       if (e.key !== 'Tab') return;
       const focusables = _focusableIn(modal);
       if (focusables.length === 0) { e.preventDefault(); return; }
       const first = focusables[0];
       const last  = focusables[focusables.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
+      const inside = modal.contains(document.activeElement);
+      if (e.shiftKey && (document.activeElement === first || !inside)) {
         e.preventDefault(); last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
         e.preventDefault(); first.focus();
       }
     };
-    modal.addEventListener('keydown', _trapKeydown);
+    modal.addEventListener('keydown', onKey);
+    return () => modal.removeEventListener('keydown', onKey);
   }
-  function _removeFocusTrap(modal) {
+
+  function _installFocusTrap(modal) {
+    _trapKeydown = trapFocus(modal);
+  }
+  function _removeFocusTrap() {
     if (_trapKeydown) {
-      modal.removeEventListener('keydown', _trapKeydown);
+      _trapKeydown();
       _trapKeydown = null;
     }
   }
@@ -236,6 +245,7 @@ const Settings = (() => {
       btn.innerHTML = `<span class="lang-flag">${code.toUpperCase()}</span><span>${label}</span>`;
       btn.addEventListener('click', () => {
         i18n.setLang(code);
+        if (window.HostNav) HostNav.render();     // menu des hôtes, dessiné par le script
         renderLanguageGrid();
         if (window.App && window.App.refreshStatus)  window.App.refreshStatus();
         if (window.App && window.App.loadVMOrder)    window.App.loadVMOrder();
@@ -252,7 +262,7 @@ const Settings = (() => {
     if (!sel) return;
     try {
       const data = await fetch('/api/clusters').then(r => r.json());
-      const current = $('#cluster-select').value;
+      const current = window.App ? App.getCurrentCluster() : null;
       sel.innerHTML = '';
       (data.clusters || []).forEach(c => {
         const opt = document.createElement('option');
@@ -440,7 +450,7 @@ const Settings = (() => {
     if (tab) tab.click();
   }
 
-  return { init, openModal, closeModal, openTab };
+  return { init, openModal, closeModal, openTab, trapFocus };
 })();
 
 document.addEventListener('DOMContentLoaded', () => {

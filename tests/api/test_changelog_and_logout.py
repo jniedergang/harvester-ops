@@ -104,3 +104,14 @@ def test_an_open_console_has_nothing_to_forget(monkeypatch, tmp_path):
     with wapp.app.test_client() as c:
         r = c.get("/logout/local")
         assert r.status_code == 200 and r.get_json()["login"] == "/"
+
+
+def test_the_2_0_0_entry_carries_no_process_wording():
+    """Revue finale T-1 : le CHANGELOG public dit ce que le client reçoit,
+    pas le déroulé interne du chantier (revues, fusions, étapes)."""
+    import re
+    text = (Path(__file__).resolve().parents[2] / "CHANGELOG.md").read_text()
+    entry = text.split("## [2.0.0]", 1)[1].split("\n## [", 1)[0]
+    found = re.findall(r"(?i)\b(?:after (?:the )?(?:final )?review|final review|after the merge of|"
+                       r"review fixes?|step \d[ab]?\b|task \d+)", entry)
+    assert found == []

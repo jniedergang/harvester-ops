@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 LISTS = {
     "vmbackups": [{"namespace": "default", "name": "web-b1", "vm": "web", "ready": True, "progress": 100,
                    "error": "", "target": "nfs://nas/x", "size": 5 * 2**30, "volumes": 1, "schedule": "nightly",
@@ -37,7 +39,6 @@ def win(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','fr');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');"
         "localStorage.removeItem('harvester_ops_backups_tab');")
     page = context.new_page()
     posted = []
@@ -59,7 +60,7 @@ def win(context, flask_server):
         page.route(pat, writes)
     page.route("**/api/stream/bk0000000001", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('namespaces'))
     page.wait_for_function("window.Backups && window.ResourceViews && window.App && App.getCurrentCluster()")
     btn = page.locator("#btn-vm-backups")
     assert btn.get_attribute("data-tip-i18n") == "vms.backupsTip"

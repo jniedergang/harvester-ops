@@ -19,6 +19,7 @@ _sys.path.insert(0, str(_Path(__file__).parent))
 from boards import goto_board  # noqa: E402
 
 playwright = pytest.importorskip("playwright")
+from nav import address, goto  # noqa: E402
 
 GIB = 1024 ** 3
 
@@ -80,9 +81,8 @@ def open_storage(page, base_url, data, fix_status=201, fixes=None, lang="en"):
     page.route("**/api/volume-health/**", fix)
     page.context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');")
-    page.goto(base_url, wait_until="domcontentloaded")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address("overview"))
     page.wait_for_timeout(1500)
     goto_board(page, "storage")
     page.wait_for_selector('[data-board="storage"] .vsw', timeout=10000)

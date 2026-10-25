@@ -42,228 +42,111 @@
               title="What each version brought">v{{ version }}</button>
     </header>
 
-    <div class="cluster-selector">
-      <label class="sidebar-label" data-i18n="header.cluster">Cluster</label>
-      <div class="cluster-row">
-        <select id="cluster-select">
-          {% for c in clusters %}
-          <option value="{{ c.name }}">{{ c.name }}</option>
-          {% endfor %}
-        </select>
-        <button class="btn-icon-sm" id="btn-add-cluster" data-i18n-title="clusters.add" title="Add cluster">+</button>
-      </div>
-    </div>
-
     <nav>
-      <div class="tab-group expanded" id="tab-group-cluster">
-        <a class="tab tab-group-head" data-group="cluster" href="#cluster" data-i18n-title="tab.cluster" title="Cluster">
-          <span class="tab-icon" data-icon="node"></span>
-          <span class="sidebar-label" data-i18n="tab.cluster">Cluster</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+      <!-- Navigation 2.0 : le menu des hôtes (host-nav.js), seul menu depuis
+           la 2.0.0 ; chaque entrée est un lien que le routeur applique. -->
+      <div id="host-nav" class="host-nav">
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="folders" href="#folders"
+           data-i18n-title="hnav.foldersTip" title="Your folders: VMs, containers and hosts in one shared tree">
+          <span class="tab-icon" data-icon="folder"></span>
+          <span class="sidebar-label" data-i18n="hnav.folders">Folders</span>
         </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child active" data-tab="overview" href="#overview" data-i18n-title="tab.overview" title="Overview">
-            <span class="tab-icon" data-icon="metrics"></span>
-            <span class="sidebar-label" data-i18n="tab.overview">Overview</span>
-          </a>
-          <!-- v1.57.0 : les sections de Harvester, un cluster à la fois -->
-          <a class="tab tab-child" data-tab="storage" href="#storage" data-i18n-title="tab.storageTip" title="Volumes, images and storage classes">
-            <span class="tab-icon" data-icon="storage"></span>
-            <span class="sidebar-label" data-i18n="tab.storage">Storage</span>
-          </a>
-          <a class="tab tab-child" data-tab="network" href="#network" data-i18n-title="tab.networkTip" title="VM networks, overlay networks (kube-ovn) and underlay networks">
-            <span class="tab-icon" data-icon="network"></span>
-            <span class="sidebar-label" data-i18n="tab.network">Network</span>
-          </a>
-          <a class="tab tab-child" data-tab="addons" href="#addons" data-i18n-title="tab.addonsTip" title="Harvester add-ons: what is installed, enable or disable">
-            <span class="tab-icon" data-icon="plug"></span>
-            <span class="sidebar-label" data-i18n="tab.addons">Add-ons</span>
-          </a>
-          <a class="tab tab-child" data-tab="security" href="#security" data-i18n-title="tab.securityTip" title="Secrets and SSH keys of the cluster">
-            <span class="tab-icon" data-icon="shield"></span>
-            <span class="sidebar-label" data-i18n="tab.security">Security</span>
-          </a>
-          <a class="tab tab-child" data-tab="monlog" href="#monlog" data-i18n-title="tab.monlogTip" title="Metrics, alerting and log forwarding of the cluster">
-            <span class="tab-icon" data-icon="activity"></span>
-            <span class="sidebar-label" data-i18n="tab.monlog">Monitoring &amp; Logging</span>
-          </a>
-          <a class="tab tab-child" data-tab="advanced" href="#advanced" data-i18n-title="tab.advancedTip" title="Harvester settings, devices, backup target, support bundles and kubeconfigs">
-            <span class="tab-icon" data-icon="settings"></span>
-            <span class="sidebar-label" data-i18n="tab.advanced">Advanced</span>
-          </a>
-          <!-- Disaster Recovery : contrats où ce cluster est source ou secours -->
-          <a class="tab tab-child" data-tab="clusterdr" href="#clusterdr" data-i18n-title="tab.clusterdrTip" title="Replication contracts where this cluster is the source or the recovery site">
-            <span class="tab-icon" data-icon="shield"></span>
-            <span class="sidebar-label" data-i18n="tab.dr">Disaster Recovery</span>
-            <span class="rp-menu-badge tip" data-rp-badge="cluster" hidden></span>
-          </a>
-          <a class="tab tab-child" data-tab="startup" href="#startup" data-i18n-title="tab.startup" title="Startup">
-            <span class="tab-icon icon-green" data-icon="play"></span>
-            <span class="sidebar-label" data-i18n="tab.startup">Startup</span>
-          </a>
-          <a class="tab tab-child" data-tab="shutdown" href="#shutdown" data-i18n-title="tab.shutdown" title="Shutdown">
-            <span class="tab-icon icon-red" data-icon="stop"></span>
-            <span class="sidebar-label" data-i18n="tab.shutdown">Shutdown</span>
-          </a>
+        <div class="hnav-search">
+          <span class="hnav-search-icon" data-icon="search" data-icon-size="14" aria-hidden="true"></span>
+          <input type="search" id="hnav-q" autocomplete="off" class="tip"
+                 data-i18n-placeholder="hnav.search" placeholder="Search a host or a VM"
+                 data-i18n-title="hnav.searchTip" data-tip-i18n="hnav.searchTip"
+                 title="Filters the hosts by name, label or family and offers the matching VMs. Shortcut: /. Enter opens the first result."
+                 aria-label="Search a host or a VM">
+          <kbd class="hnav-kbd sidebar-label" data-i18n-title="hnav.searchKeyTip" title="Press / to go to the search">/</kbd>
         </div>
-      </div>
-      <!-- v1.85.0 : Virtual machines devient un groupe : les VMs du cluster
-           choisi (l'onglet d'avant, inchangé) et celles de tous les clusters -->
-      <div class="tab-group expanded" id="tab-group-vms">
-        <a class="tab tab-group-head" data-group="vms" href="#vms" data-i18n-title="tab.vmsGroupTip" title="The VMs of the chosen cluster, or of every cluster">
+        <div id="hnav-results" class="hnav-results" hidden></div>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="vms" href="#vms"
+           data-i18n-title="hnav.vmsTip" title="Every VM, Harvester and KVM, in your folders">
           <span class="tab-icon" data-icon="vm"></span>
-          <span class="sidebar-label" data-i18n="tab.vms">Virtual machines</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+          <span class="sidebar-label" data-i18n="hnav.vms">Virtual machines</span>
         </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="namespaces" href="#namespaces" data-i18n-title="tab.vmsCurrentTip" title="The VMs of the cluster chosen at the top, by namespace">
-            <span class="tab-icon" data-icon="vm"></span>
-            <span class="sidebar-label" data-i18n="tab.vmsCurrent">Current cluster's VMs</span>
-          </a>
-          <a class="tab tab-child" data-tab="allvms" href="#allvms" data-i18n-title="tab.allvmsTip" title="Every VM of every declared cluster in one list: filter, sort and act on them">
-            <span class="tab-icon" data-icon="compute"></span>
-            <span class="sidebar-label" data-i18n="tab.allvms">All clusters VMs</span>
-          </a>
-        </div>
-      </div>
-      <!-- v1.91.0 : les charges de conteneurs, sur le modèle des VMs -->
-      <div class="tab-group expanded" id="tab-group-containers">
-        <a class="tab tab-group-head" data-group="containers" href="#containers" data-i18n-title="tab.containersGroupTip" title="The container workloads of the chosen cluster, or of every cluster">
-          <span class="tab-icon" data-icon="container"></span>
-          <span class="sidebar-label" data-i18n="tab.containersGroup">Containers</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="containers" href="#containers"
+           data-i18n-title="hnav.containersTip" title="The container workloads of every cluster">
+          <span class="tab-icon" data-icon="containers"></span>
+          <span class="sidebar-label" data-i18n="hnav.containers">Containers</span>
         </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="containers" href="#containers" data-i18n-title="tab.containersTip" title="The container workloads of the cluster chosen at the top">
-            <span class="tab-icon" data-icon="container"></span>
-            <span class="sidebar-label" data-i18n="tab.containers">Current cluster's containers</span>
-          </a>
-          <a class="tab tab-child" data-tab="allcontainers" href="#allcontainers" data-i18n-title="tab.allcontainersTip" title="The container workloads of every declared cluster in one list">
-            <span class="tab-icon" data-icon="containers"></span>
-            <span class="sidebar-label" data-i18n="tab.allcontainers">All clusters containers</span>
-          </a>
-        </div>
-      </div>
-      <!-- v1.93.0 : les ressources partagées par les VM et les conteneurs
-           (les GPU d'un nœud servent les deux) ; Bookings depuis la v1.94.0 -->
-      <div class="tab-group expanded" id="tab-group-shared">
-        <a class="tab tab-group-head" data-group="shared" href="#gpus" data-i18n-title="tab.sharedTip" title="Resources that VMs and containers share across the clusters, such as GPUs">
-          <span class="tab-icon" data-icon="placement"></span>
-          <span class="sidebar-label" data-i18n="tab.shared">Shared resources</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
+        <a class="tab hnav-entry hnav-hosts-head" data-hnav="root" data-hnav-root="hosts" href="#hosts"
+           data-i18n-title="hnav.hostsTip" title="Index of every host: a table to sort and filter">
+          <span class="tab-icon" data-icon="node"></span>
+          <span class="sidebar-label" data-i18n="hnav.hosts">Hosts</span>
         </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="gpus" href="#gpus" data-i18n-title="tab.gpusTip" title="GPU inventory of every declared cluster: whole GPUs, vGPUs, MIG instances and container GPUs, free or used">
+        <div id="hnav-families" class="hnav-families"></div>
+        <button type="button" class="tab hnav-entry hnav-add needs-admin" id="hnav-add" data-hnav="add"
+                data-i18n-title="hnav.addTip" title="Add a host: a Harvester cluster or a KVM hypervisor">
+          <span class="tab-icon" data-icon="add"></span>
+          <span class="sidebar-label" data-i18n="hnav.add">Add a host</span>
+        </button>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="dr" href="#dr"
+           data-i18n-title="hnav.drTip" title="Every replication contract: state, RPO held, actions">
+          <span class="tab-icon" data-icon="shield"></span>
+          <span class="sidebar-label" data-i18n="hnav.dr">Disaster Recovery</span>
+          <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
+        </a>
+        <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="dr" data-hnav-tab="links" href="#dr/links"
+           data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
+          <span class="tab-icon" data-icon="network"></span>
+          <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
+        </a>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="migrations" href="#migrations"
+           data-i18n-title="hnav.migrationsTip" title="Every VMware migration wave and transfer between hosts">
+          <span class="tab-icon" data-icon="migrate"></span>
+          <span class="sidebar-label" data-i18n="hnav.migrations">Migrations</span>
+        </a>
+        <!-- 2.0.0 (tâche 9) : ressources partagées, automatisation et activité,
+             racines de flotte (aucun hôte courant) -->
+        <div class="hnav-sec sidebar-label" data-i18n="tab.shared">Shared resources</div>
+        <div class="hnav-group" id="hnav-shared">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="gpus" href="#gpus"
+             data-i18n-title="tab.gpusTip" title="GPU inventory of every declared cluster">
             <span class="tab-icon" data-icon="gamepad"></span>
             <span class="sidebar-label" data-i18n="tab.gpus">GPU</span>
           </a>
-          <!-- v1.94.0 : réserver des GPU sur un créneau (gardé par la console) -->
-          <a class="tab tab-child" data-tab="bookings" href="#bookings" data-i18n-title="tab.bookingsTip" title="Book GPUs, vGPUs, MIG instances or container GPUs on a time slot for a person or a group; kept by the console, not yet enforced on the cluster">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="bookings" href="#bookings"
+             data-i18n-title="tab.bookingsTip" title="Book GPUs on a time slot">
             <span class="tab-icon" data-icon="timer"></span>
             <span class="sidebar-label" data-i18n="tab.bookings">Bookings</span>
           </a>
-          <!-- v1.95.0 : GPU-heures réservées et consommées, quotas -->
-          <a class="tab tab-child" data-tab="usage" href="#usage" data-i18n-title="tab.usageTip" title="GPU-hours booked and consumed per person, group or namespace over a period, waste, use without booking, and quotas">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="usage" href="#usage"
+             data-i18n-title="tab.usageTip" title="GPU-hours booked and consumed, and quotas">
             <span class="tab-icon" data-icon="metrics"></span>
             <span class="sidebar-label" data-i18n="tab.usage">Usage</span>
           </a>
         </div>
-      </div>
-      <!-- v1.96.0 : les hyperviseurs KVM (libvirt) déclarés, au même niveau
-           que les clusters : hôtes, leurs VMs, leur stockage, leurs réseaux -->
-      <div class="tab-group" id="tab-group-kvm">
-        <a class="tab tab-group-head" data-group="kvm" href="#kvmhosts" data-i18n-title="tab.kvmTip" title="KVM hypervisors declared in the console: their hosts, VMs, storage pools and networks">
-          <span class="tab-icon" data-icon="node"></span>
-          <span class="sidebar-label" data-i18n="tab.kvm">KVM</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
-        </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="kvmhosts" href="#kvmhosts" data-i18n-title="tab.kvmHostsTip" title="The KVM hosts: CPU, memory, versions, VMs by state; declare, test or remove a host">
-            <span class="tab-icon" data-icon="node"></span>
-            <span class="sidebar-label" data-i18n="tab.kvmHosts">Hosts</span>
-          </a>
-          <a class="tab tab-child" data-tab="kvmvms" href="#kvmvms" data-i18n-title="tab.kvmVmsTip" title="Every VM of every KVM host: filter, sort, start, stop, reboot, suspend">
-            <span class="tab-icon" data-icon="vm"></span>
-            <span class="sidebar-label" data-i18n="tab.kvmVms">Virtual machines</span>
-          </a>
-          <a class="tab tab-child" data-tab="kvmstorage" href="#kvmstorage" data-i18n-title="tab.kvmStorageTip" title="The storage pools of every KVM host, with their capacity and volumes">
-            <span class="tab-icon" data-icon="storage"></span>
-            <span class="sidebar-label" data-i18n="tab.kvmStorage">Storage</span>
-          </a>
-          <a class="tab tab-child" data-tab="kvmnetworks" href="#kvmnetworks" data-i18n-title="tab.kvmNetworksTip" title="The libvirt networks of every KVM host">
-            <span class="tab-icon" data-icon="network"></span>
-            <span class="sidebar-label" data-i18n="tab.kvmNetworks">Networks</span>
-          </a>
-        </div>
-      </div>
-      <!-- Disaster Recovery : réplication asynchrone des VMs entre clusters -->
-      <div class="tab-group" id="tab-group-dr">
-        <a class="tab tab-group-head" data-group="dr" href="#drplans" data-i18n-title="tab.drTip" title="Disaster recovery: asynchronous VM replication between clusters, contracts, links and failover">
-          <span class="tab-icon" data-icon="shield"></span>
-          <span class="sidebar-label" data-i18n="tab.dr">Disaster Recovery</span>
-          <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
-        </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="drplans" href="#drplans" data-i18n-title="tab.drplansTip" title="Every replication contract: RPO held against the objective, direction, VMs, last transfer">
-            <span class="tab-icon" data-icon="doc"></span>
-            <span class="sidebar-label" data-i18n="tab.drplans">Contracts</span>
-          </a>
-          <a class="tab tab-child" data-tab="drlinks" href="#drlinks" data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
-            <span class="tab-icon" data-icon="network"></span>
-            <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
-          </a>
-        </div>
-      </div>
-      <!-- v1.77.0 : tout ce qui fait entrer ou déplacer des VMs, regroupé.
-           VM Import et VMware migrations portent sur le cluster choisi ;
-           Migrations (all clusters) les voit tous. -->
-      <div class="tab-group" id="tab-group-vmio">
-        <a class="tab tab-group-head" data-group="vmio" href="#vmio" data-i18n-title="tab.vmioTip" title="Bring VMs in and move them: imports, VMware migrations, every migration across the clusters">
-          <span class="tab-icon" data-icon="switch"></span>
-          <span class="sidebar-label" data-i18n="tab.vmio">VM Import / Export</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
-        </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-tab="vmimport" href="#vmimport" data-i18n-title="tab.vmimportTip" title="Import VMs from VMware, OpenStack or an OVA archive">
-            <span class="tab-icon" data-icon="download"></span>
-            <span class="sidebar-label" data-i18n="tab.vmimport">VM Import</span>
-          </a>
-          <a class="tab tab-child" data-tab="forklift" href="#forklift" data-i18n-title="tab.forkliftTip" title="Warm migrations of VMware VMs with Forklift: preparation, vCenter sources, inventory">
-            <span class="tab-icon" data-icon="migrate"></span>
-            <span class="sidebar-label" data-i18n="tab.forklift">VMware migrations</span>
-          </a>
-          <a class="tab tab-child" data-tab="forkliftglobal" href="#forkliftglobal" data-i18n-title="tab.forkliftglobalTip" title="Every VMware migration wave running on every declared cluster">
-            <span class="tab-icon" data-icon="cloud"></span>
-            <span class="sidebar-label" data-i18n="tab.forkliftglobal">Migrations (all clusters)</span>
-          </a>
-        </div>
-      </div>
-      <div class="tab-group" id="tab-group-automation">
-        <a class="tab tab-group-head" data-group="automation" href="#automation" data-i18n-title="tab.automation" title="Automation">
-          <span class="tab-icon" data-icon="robot"></span>
-          <span class="sidebar-label" data-i18n="tab.automation">Automation</span>
-          <span class="tab-group-chevron when-expanded" aria-hidden="true" data-icon="chevronDown" data-icon-size="14"></span>
-        </a>
-        <div class="tab-group-children">
-          <a class="tab tab-child" data-subtab="capi"
-             href="#automation/capi" data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2) — declarative cluster provisioning via CAPHV">
+        <div class="hnav-sec sidebar-label" data-i18n="tab.automation">Automation</div>
+        <div class="hnav-group" id="hnav-automation">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="capi" href="#automation/capi"
+             data-i18n-title="automation.tab.capi.tip" title="Cluster API (RKE2): declarative cluster provisioning via CAPHV">
             <span class="tab-icon" data-icon="capi"></span>
             <span class="sidebar-label" data-i18n="automation.tab.capi">Cluster API</span>
           </a>
-          <a class="tab tab-child" data-subtab="terraform"
-             href="#automation/terraform" data-i18n-title="automation.tab.terraform" title="Terraform infrastructure">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="terraform" href="#automation/terraform"
+             data-i18n-title="hnav.terraformTip" title="Terraform declarations kept by the console, each with its own state">
             <span class="tab-icon" data-icon="terraform"></span>
             <span class="sidebar-label" data-i18n="automation.tab.terraform">Terraform</span>
           </a>
-          <a class="tab tab-child" data-subtab="pxe"
-             href="#automation/pxe" data-i18n-title="automation.tab.pxe.tip" title="Bare-metal (BMC / Redfish)">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="automation" data-hnav-tab="pxe" href="#automation/pxe"
+             data-i18n-title="automation.tab.pxe.tip" title="Bare-metal (BMC / Redfish)">
             <span class="tab-icon" data-icon="baremetal"></span>
             <span class="sidebar-label" data-i18n="automation.tab.pxe">Bare-metal</span>
           </a>
         </div>
+        <a class="tab hnav-entry" data-hnav="root" data-hnav-root="activity" href="#activity"
+           data-i18n-title="hnav.activityTip" title="Every tracked action of the console, running or finished, with its logs">
+          <span class="tab-icon" data-icon="activity"></span>
+          <span class="sidebar-label" data-i18n="tab.activity">Activity</span>
+        </a>
       </div>
-      <a class="tab"        data-tab="activity"     href="#activity" data-i18n-title="tab.activity" title="Activity"><span class="tab-icon" data-icon="activity"></span> <span class="sidebar-label" data-i18n="tab.activity">Activity</span></a>
+      <!-- 2.0.0 : l'ancien menu (sélecteur de cluster, groupes par cluster)
+           est retiré ; ses écrans ont tous une adresse et une entrée
+           ci-dessus. Liste des clusters rendue par le serveur pour le premier
+           écran (App.listClusters), relue ensuite de /api/clusters. -->
+      <script type="application/json" id="clusters-seed">{{ clusters | map(attribute='name') | list | tojson }}</script>
     </nav>
 
     <footer>
@@ -311,17 +194,19 @@
     <!-- v1.56.0 : ce que le cluster (ou Rancher) a refusé de montrer -->
     <div class="access-notice" id="access-notice" role="status" hidden></div>
 
+    <!-- Navigation 2.0 : bandeau de la page d'un hôte (host-page.js), posé
+         au-dessus de la section que l'adresse désigne -->
+    <div id="host-page-head" class="host-page-head" hidden></div>
+
     <!-- OVERVIEW -->
-    <section id="tab-overview" class="tab-content active">
+    <section id="tab-overview" class="tab-content">
       <div class="shutdown-header">
         <div class="automation-header-text">
           <h1><span data-i18n="overview.title">Overview</span> — <span class="cluster-name"></span></h1>
         </div>
-        <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Overview sub-tabs">
-          <button type="button" class="sub-tab active" data-overview-tab="metrics"><span class="tab-icon" data-icon="metrics"></span> <span data-i18n="overview.tabMetrics">Metrics</span></button>
-          <button type="button" class="sub-tab" data-overview-tab="cluster"><span class="tab-icon" data-icon="node"></span> <span data-i18n="overview.tabCluster">Cluster</span></button>
-          <button type="button" class="sub-tab tip" data-overview-tab="events" data-tip-i18n="ev.tip.tab" data-i18n-title="ev.tip.tab" title="The cluster events, by hosts, VMs, volumes and images, as on Harvester's dashboard"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="ev.tab">Events</span></button>
-        </div>
+        <!-- 2.0.0 : les sous-onglets Cluster et Événements sont partis : les
+             événements sont un bloc sous les métriques, la vue en blocs des
+             nœuds est Paramètres > Nœuds -->
         <!-- v1.69.0 : le bouton Upgrade du tableau de bord de Harvester -->
         <div class="section-actions">
           <button type="button" id="btn-upgrade" class="btn btn-sm btn-secondary tip"
@@ -358,13 +243,21 @@
         </div>
       </div>
 
-      <!-- Vue de blocs du cluster (v1.43.0). Depuis la v1.57.0, Réseau,
-           Fabrique, Stockage et VPC vivent dans leurs sections. -->
+      <!-- Vue de blocs du cluster (v1.43.0) : Paramètres > Nœuds depuis la
+           2.0.0, avec « Joindre un nœud » (Bare-metal, cluster déjà choisi) -->
       <div class="overview-subtab" data-subtab="cluster" data-board="cluster" hidden>
+        <div class="section-actions hp-nodes-actions">
+          <button type="button" id="btn-join-node" class="btn btn-sm btn-secondary tip needs-admin"
+                  data-tip-i18n="hp.joinTip" data-i18n-title="hp.joinTip"
+                  title="Add a machine to this cluster from its BMC: Automation, Bare-metal, with this cluster already chosen">
+            <span data-icon="add"></span> <span data-i18n="hp.join">Join a node</span></button>
+        </div>
         <div class="topology-host" data-topology-mode="cluster"></div>
       </div>
-      <!-- v1.62.0 : les événements du tableau de bord de Harvester -->
+      <!-- v1.62.0 : les événements du tableau de bord de Harvester, en bloc
+           sous les métriques depuis la 2.0.0 -->
       <div class="overview-subtab" data-subtab="events" data-board="events" hidden>
+        <h2 class="hp-block-title" data-i18n="ev.tab">Events</h2>
         <div class="topology-host"></div>
       </div>
     </section>
@@ -443,10 +336,21 @@
         <div class="sub-tabs sub-tabs-inline" role="tablist">
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="secrets" data-i18n-title="section.secretsTip" title="Secrets of the cluster: type, key names and the VMs using them. Values are never shown."><span class="tab-icon" data-icon="lock"></span> <span data-i18n="section.secrets">Secrets</span></button>
           <button type="button" class="sub-tab tip" role="tab" data-section-tab="sshkeys" data-i18n-title="section.sshkeysTip" title="SSH public keys declared on the cluster and the VMs that received them"><span class="tab-icon" data-icon="key"></span> <span data-i18n="section.sshkeys">SSH Keys</span></button>
+          <!-- 2.0.0 : les comptes du cluster, venus de Réglages (décision 7) -->
+          <button type="button" class="sub-tab tip" role="tab" data-section-tab="accounts" data-i18n-title="section.accountsTip" title="Accounts declared on this cluster, who holds its administration, and its members in Rancher"><span class="tab-icon" data-icon="user"></span> <span data-i18n="husers.title">Cluster accounts</span></button>
         </div>
       </div>
       <div class="section-pane" data-pane="secrets" hidden><div class="resource-host" data-resource="secrets"></div></div>
       <div class="section-pane" data-pane="sshkeys" hidden><div class="resource-host" data-resource="sshkeys"></div></div>
+      <div class="section-pane" data-pane="accounts" hidden><div class="na-host husers-pane">
+        <p class="form-hint" data-i18n="husers.intro">Accounts declared on the
+          selected Harvester cluster, and who holds cluster administration.</p>
+        <div id="husers-body"><p class="form-hint">…</p></div>
+        <!-- v1.73.0 : les membres du cluster dans Rancher, avec leurs rôles -->
+        <h4 data-i18n="rm.clusterTitle">Members in Rancher</h4>
+        <p class="form-hint" data-i18n="rm.clusterIntro">Who Rancher gives rights on this cluster, and with which role.</p>
+        <div id="rmembers-body"></div>
+      </div></div>
     </section>
 
     <!-- v1.71.0 : VM IMPORT (vm-import-controller) -->
@@ -526,6 +430,27 @@
       <div class="section-pane" data-pane="usb" hidden><div class="na-host" data-adv="usb"></div></div>
       <div class="section-pane" data-pane="sriov" hidden><div class="na-host" data-adv="sriov"></div></div>
       <div class="section-pane" data-pane="support" hidden><div class="na-host" data-adv="support"></div></div>
+    </section>
+
+    <!-- 2.0.0 : Paramètres > Mise à jour (contenu de la fenêtre Upgrade) -->
+    <section id="tab-hupgrade" class="tab-content">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="upg.title">Upgrade Harvester</span> · <span class="cluster-name"></span></h1>
+        </div>
+      </div>
+      <div id="hupgrade-host"></div>
+    </section>
+
+    <!-- 2.0.0 : Paramètres > Connexion (origine, nœuds déclarés, tests) -->
+    <section id="tab-hconn" class="tab-content">
+      <div class="shutdown-header">
+        <div class="automation-header-text">
+          <h1><span data-i18n="hp.tab.conn">Connection</span> · <span class="cluster-name"></span></h1>
+          <p class="hint" data-i18n="hp.conn.hint">How the console reaches this cluster: who declared it, its nodes, and a test of its kubeconfig and of SSH.</p>
+        </div>
+      </div>
+      <div id="hconn-host"></div>
     </section>
 
     <!-- SHUTDOWN -->
@@ -749,6 +674,13 @@
         <div class="automation-header-text">
           <h1><span data-icon="robot" data-icon-size="22"></span> <span data-i18n="automation.title">Automation</span></h1>
           <p class="hint" data-i18n="automation.hint">Provision and manage infrastructure declaratively.</p>
+          <!-- 2.0.0 : le cluster de gestion de Cluster API et Terraform, dit
+               et changeable ici (pas l'hôte ouvert) ; masqué sur Bare-metal -->
+          <div class="mgmt-cluster-bar" id="mgmt-cluster-bar" hidden>
+            <label for="mgmt-cluster-pick" data-i18n="mgmt.label">Management cluster</label>
+            <select id="mgmt-cluster-pick" class="tip" data-tip-i18n="mgmt.tip" data-i18n-title="mgmt.tip"
+                    title="The cluster Cluster API and Terraform work from; changing it does not change the host you have open"></select>
+          </div>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" data-only-for="capi">
           <button class="sub-tab active" data-capi-tab="install"
@@ -829,9 +761,16 @@
 
     <!-- ALL VMS : v1.85.0, les VMs de tous les clusters -->
     <section id="tab-allvms" class="tab-content">
-      <h1 data-i18n="avm.title">All clusters VMs</h1>
-      <p class="hint" data-i18n="avm.hint">Every VM of every declared cluster, in one list. Click clusters to keep only theirs, filter by state, namespace or text, sort any column; the selection can span clusters. A cluster that is off or refuses the read is shown as such.</p>
+      <h1 data-i18n="vmf.title">Virtual machines</h1>
+      <p class="hint" data-i18n="vmf.hint">Every VM of the fleet, Harvester and KVM, in one list. File them in your folders: drag rows onto a folder, or use Move to folder. The folder is written on the VM (Harvester annotation, libvirt metadata) and the console keeps a copy.</p>
       <div class="avm-host" id="all-vms-host"></div>
+    </section>
+
+    <!-- 2.0.0 : la vue « Dossiers », trois groupes (VMs, conteneurs, hôtes) -->
+    <section id="tab-folders" class="tab-content">
+      <h1 data-i18n="fview.title">Folders</h1>
+      <p class="hint" data-i18n="fview.hint">One shared tree for VMs, containers and hosts. Pick a folder to see what is filed in it, in three groups; each group opens its own view filtered on the folder.</p>
+      <div class="avm-host" id="folders-view-host"></div>
     </section>
 
     <!-- CONTAINERS : v1.91.0, les charges de conteneurs (lecture seule) -->
@@ -904,6 +843,25 @@
       <h1 data-i18n="kvm.networks.title">KVM networks</h1>
       <p class="hint" data-i18n="kvm.networks.hint">The libvirt networks of every KVM host: state, forwarding mode, bridge and addresses.</p>
       <div class="na-host" id="kvm-networks-host"></div>
+    </section>
+
+    <!-- 2.0.0 : index des hôtes, les deux familles (hosts-index.js) -->
+    <section id="tab-hosts" class="tab-content">
+      <h1 data-i18n="hix.title">Hosts</h1>
+      <p class="hint" data-i18n="hix.hint">Every Harvester cluster and KVM host in one table. Sort any column, filter by family, state, label, version or folder.</p>
+      <div class="na-host" id="hosts-index-host"></div>
+    </section>
+
+    <!-- 2.0.0 : page d'un hôte KVM, Paramètres > Système, Étiquettes et
+         Connexion (host-page.js), et son Disaster Recovery (état vide) -->
+    <section id="tab-kvmparams" class="tab-content">
+      <div class="na-host" id="kvmparams-host"></div>
+    </section>
+    <section id="tab-kvmdr" class="tab-content">
+      <div class="card hp-kvm-dr">
+        <div class="card-header"><h2 data-i18n="hp.kvm.drTitle">Disaster Recovery</h2></div>
+        <div class="card-body"><p class="form-hint kvm-dr-empty" data-i18n="hp.kvm.drEmpty">Replication of KVM domains is not available yet. Contracts cover Harvester VMs only.</p></div>
+      </div>
     </section>
 
     <!-- MIGRATIONS (ALL CLUSTERS) : v1.76.0, vue globale des vagues Forklift -->
@@ -1008,7 +966,6 @@
       <button class="settings-tab"        data-stab="connection" data-i18n="settings.tab.connection">Connection</button>
       <button class="settings-tab needs-admin" data-stab="rancher" data-i18n="settings.tab.rancher">Rancher sign-in</button>
       <button class="settings-tab needs-admin" data-stab="accounts" data-i18n="settings.tab.accounts">Console accounts</button>
-      <button class="settings-tab"        data-stab="husers"     data-i18n="settings.tab.husers">Cluster accounts</button>
       <button class="settings-tab"        data-stab="support"    data-i18n="settings.tab.support">Support</button>
       <button class="settings-tab"        data-stab="about"      data-i18n="settings.tab.about">About</button>
     </div>
@@ -1030,17 +987,6 @@
         <p class="form-hint" data-i18n="accounts.intro">Who can sign in to this console, and with which role. Accounts from the installer (htpasswd) are managed on the server.</p>
         <div id="accounts-feedback" class="res-feedback"></div>
         <div id="accounts-body"><p class="form-hint">…</p></div>
-      </div>
-
-      <div class="settings-tab-content" id="stab-husers">
-        <h4 data-i18n="husers.title">Cluster accounts</h4>
-        <p class="form-hint" data-i18n="husers.intro">Accounts declared on the
-          selected Harvester cluster, and who holds cluster administration.</p>
-        <div id="husers-body"><p class="form-hint">…</p></div>
-        <!-- v1.73.0 : les membres du cluster dans Rancher, avec leurs rôles -->
-        <h4 data-i18n="rm.clusterTitle">Members in Rancher</h4>
-        <p class="form-hint" data-i18n="rm.clusterIntro">Who Rancher gives rights on this cluster, and with which role.</p>
-        <div id="rmembers-body"></div>
       </div>
 
       <div class="settings-tab-content" id="stab-appearance">
@@ -1201,6 +1147,35 @@
         </table>
       </div>
 
+    </div>
+  </div>
+</div>
+
+<!-- Navigation 2.0 : « + Ajouter un hôte », un cluster Harvester ou un hyperviseur KVM -->
+<div class="modal-overlay" id="host-add-modal" role="dialog" aria-modal="true" aria-labelledby="host-add-title" aria-hidden="true">
+  <div class="modal host-add-modal">
+    <div class="modal-header">
+      <div>
+        <h3 id="host-add-title" data-i18n="hnav.addTitle">Add a host</h3>
+        <div class="modal-subtitle" data-i18n="hnav.addSubtitle">Choose the family of the new host</div>
+      </div>
+      <button class="btn-close" data-add-close data-i18n-title="common.close" title="Close" aria-label="Close">×</button>
+    </div>
+    <div class="modal-body host-add-choices">
+      <button type="button" class="card host-add-choice tip" data-add-kind="harvester"
+              data-tip-i18n="hnav.addHarvesterTip" data-i18n-title="hnav.addHarvesterTip"
+              title="Declare a Harvester cluster: kubeconfig, nodes and their SSH key">
+        <span class="host-add-icon" data-icon="node" data-icon-size="22"></span>
+        <strong data-i18n="hnav.addHarvester">Harvester cluster</strong>
+        <span class="hint" data-i18n="hnav.addHarvesterHint">A whole cluster: its kubeconfig, its nodes and their SSH key.</span>
+      </button>
+      <button type="button" class="card host-add-choice tip" data-add-kind="kvm"
+              data-tip-i18n="hnav.addKvmTip" data-i18n-title="hnav.addKvmTip"
+              title="Declare a KVM host: address, SSH user and key, host key fingerprint">
+        <span class="host-add-icon" data-icon="compute" data-icon-size="22"></span>
+        <strong data-i18n="hnav.addKvm">KVM hypervisor</strong>
+        <span class="hint" data-i18n="hnav.addKvmHint">A libvirt host reached over SSH, without agent.</span>
+      </button>
     </div>
   </div>
 </div>
@@ -1383,6 +1358,7 @@
   <script src="/static/js/forklift-lanes.js"></script>
   <script src="/static/js/forklift.js"></script>
   <script src="/static/js/forklift-global.js"></script>
+  <script src="/static/js/folders.js"></script>
   <script src="/static/js/all-vms.js"></script>
   <script src="/static/js/containers.js"></script>
 <script src="/static/js/versions.js"></script>
@@ -1393,6 +1369,11 @@
 <script src="/static/js/access-notice.js"></script>
 <!-- Yjs notes module (ESM) -->
 <script type="module" src="/static/js/notes.js"></script>
+<script src="/static/js/routes.js"></script>
+<script src="/static/js/router.js"></script>
+<script src="/static/js/host-nav.js"></script>
+<script src="/static/js/host-page.js"></script>
+<script src="/static/js/hosts-index.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
 </html>

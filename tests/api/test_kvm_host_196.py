@@ -681,6 +681,7 @@ def inventory_answers():
                 ("list", "--all"): (0, fx("list-all.txt"), ""),
                 ("list", "--all", "--autostart", "--name"): (0, "harvlab-n1\n\n", ""),
                 ("list", "--all", "--transient", "--name"): (0, "\n", ""),
+                ("list", "--all", "--uuid", "--name"): (0, fx("list-uuid-name.txt"), ""),
                 kh.INVENTORY_COMMANDS["domstats"]: (0, fx("domstats-raw.txt"), ""),
                 ("pool-list", "--all", "--details"): (0, fx("pool-list-details.txt"), ""),
                 ("net-list", "--all"): (0, fx("net-list.txt"), "")})
@@ -702,7 +703,8 @@ def test_host_inventory_one_batch():
     n1 = inv["vms"][0]
     assert n1 == {"host": "node2", "name": "harvlab-n1", "id": 1, "state": "running",
                   "persistent": True, "autostart": True, "vcpus": 8, "memory_kib": 16777216,
-                  "memory_max_kib": 16777216, "cpu_time_ns": 1080982388000}
+                  "memory_max_kib": 16777216, "cpu_time_ns": 1080982388000,
+                  "uuid": "be02dfd3-538b-4ee2-80de-a0e7f0b12548"}
     assert inv["vms"][1]["autostart"] is False
 
 

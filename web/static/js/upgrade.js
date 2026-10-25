@@ -50,21 +50,13 @@ const Upgrade = (() => {
     schedules: tr('upg.chk.schedules'), addons: tr('upg.chk.addons'), charts: tr('upg.chk.charts'),
   });
 
-  function open(cluster) {
-    if (!cluster) return;
-    const id = `upgrade-${cluster}`;
-    const panel = FloatingPanels.open({
-      id, icon: 'upload', width: 820, height: 680, title: `${tr('upg.title')} · ${cluster}`,
-      restoreSpec: { type: 'harvester-upgrade', args: { cluster } },
-      onClose: () => { const w = WINS.get(id); if (w && w.timer) clearInterval(w.timer); WINS.delete(id); },
-      bodyHtml: `<div class="upg-win">
+  const BODY = () => `<div class="upg-win">
         <div class="upg-head" data-upg="head"></div>
         <div class="res-feedback" data-upg="feedback"></div>
-        <div data-upg="body"><p class="form-hint">${esc(tr('common.loading'))}</p></div></div>`,
-    });
-    const root = panel.el;
-    if (root.dataset.upgReady) return;
-    root.dataset.upgReady = '1';
+        <div data-upg="body"><p class="form-hint">${esc(tr('common.loading'))}</p></div></div>`;
+
+  /** Branche le contenu (même rendu dans la fenêtre et dans l'onglet). */
+  function attach(id, cluster, root) {
     const w = { id, cluster, root, data: null, source: 'version', dirty: false };
     WINS.set(id, w);
     root.addEventListener('click', (e) => onClick(w, e));
@@ -75,6 +67,39 @@ const Upgrade = (() => {
       if ((w.data && w.data.running) || !w.dirty) load(w);
     }, 8000);
     load(w);
+    return w;
+  }
+
+  function open(cluster) {
+    if (!cluster) return;
+    const id = `upgrade-${cluster}`;
+    const panel = FloatingPanels.open({
+      id, icon: 'upload', width: 820, height: 680, title: `${tr('upg.title')} · ${cluster}`,
+      restoreSpec: { type: 'harvester-upgrade', args: { cluster } },
+      onClose: () => { const w = WINS.get(id); if (w && w.timer) clearInterval(w.timer); WINS.delete(id); },
+      bodyHtml: BODY(),
+    });
+    const root = panel.el;
+    if (root.dataset.upgReady) return;
+    root.dataset.upgReady = '1';
+    attach(id, cluster, root);
+  }
+
+  // 2.0.0 : Paramètres > Mise à jour d'un hôte, le même contenu dans la page
+  const INLINE = 'upgrade-inline';
+  /** Monte le contenu dans `host` pour ce cluster (remplace le précédent). */
+  function mount(cluster, host) {
+    unmount();
+    if (!cluster || !host) return null;
+    host.innerHTML = BODY();
+    return attach(INLINE, cluster, host.firstElementChild);
+  }
+  /** Quitte l'onglet : la minuterie s'arrête, rien ne lit plus en fond. */
+  function unmount() {
+    const w = WINS.get(INLINE);
+    if (!w) return;
+    clearInterval(w.timer);
+    WINS.delete(INLINE);
   }
 
   async function load(w) {
@@ -305,12 +330,17 @@ const Upgrade = (() => {
 
   function init() {
     const btn = document.getElementById('btn-upgrade');
-    if (btn) btn.addEventListener('click', () => open(window.App && App.getCurrentCluster()));
+    // 2.0.0 : le bouton de l'aperçu mène à Paramètres > Mise à jour de l'hôte
+    if (btn) btn.addEventListener('click', () => {
+      const c = window.App && App.getCurrentCluster();
+      if (c && window.App.openHost) App.openHost('harvester', c, 'params', 'upgrade');
+      else open(c);
+    });
   }
   document.addEventListener('DOMContentLoaded', init);
   if (window.FloatingPanels && FloatingPanels.registerType) {
     FloatingPanels.registerType('harvester-upgrade', (a) => open(a.cluster));
   }
-  return { open };
+  return { open, mount, unmount };
 })();
 window.Upgrade = Upgrade;

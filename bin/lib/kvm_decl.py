@@ -138,6 +138,12 @@ def check_decl(decl):
                     "without control characters")
         if len(set(pools)) != len(pools):
             return "image_pools lists a pool twice"
+    # 2.0.0 : dossier de l'hôte (facultatif), écrit par harvester-folders.py
+    if decl.get("folder") is not None:
+        import folders
+        why = folders.check_path(decl["folder"])
+        if why:
+            return f"folder: {why}"
     return None
 
 
@@ -281,6 +287,54 @@ def write_known_hosts(state, name, lines):
     text = "".join(_check_known_line(line) + "\n" for line in lines)
     write_private(Path(state) / known_hosts_rel(name), text)
     return known_hosts_rel(name)
+
+
+# Étiquettes d'une déclaration (2.0.0, `host label`) : bornes du nombre et de
+# la longueur d'une valeur, comme pour une étiquette Kubernetes (63 car. de
+# clé, valeur courte) ; une valeur ne porte aucun caractère de contrôle.
+LABELS_MAX = 32
+LABEL_VALUE_MAX = 253
+
+
+def check_labels(labels):
+    """Raison du refus d'un jeu d'étiquettes {clé: valeur}, ou None."""
+    if not isinstance(labels, dict):
+        return "labels must map names to strings"
+    if len(labels) > LABELS_MAX:
+        return f"at most {LABELS_MAX} labels"
+    for k, v in labels.items():
+        if not isinstance(k, str) or not LABEL_KEY_RE.match(k):
+            return f"invalid label name {k!r}"
+        if not isinstance(v, str) or len(v) > LABEL_VALUE_MAX \
+                or any(ord(c) < 32 or ord(c) == 127 for c in v):
+            return f"invalid value for label {k!r} (at most {LABEL_VALUE_MAX} characters, no control character)"
+    return None
+
+
+def pinned_keys(state, name):
+    """Clés épinglées d'un hôte, lues dans son fichier known_hosts : [{type,
+    fingerprint}], l'empreinte calculée comme `ssh-keygen -l -E sha256` (SHA-256
+    du blob de la clé, base64 sans remplissage). Ni le chemin ni la ligne ne
+    sortent d'ici ; un fichier absent ou illisible rend []."""
+    import base64
+    import hashlib
+    decl_path(state, name)                     # nom validé avant toute lecture
+    try:
+        text = (Path(state) / known_hosts_rel(name)).read_text()
+    except OSError:
+        return []
+    out = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or line.lstrip().startswith(("#", "@")):
+            continue
+        try:
+            blob = base64.b64decode(parts[2], validate=True)
+        except ValueError:
+            continue
+        digest = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+        out.append({"type": parts[1], "fingerprint": f"SHA256:{digest}"})
+    return out
 
 
 def remove(state, name):

@@ -120,14 +120,14 @@ def test_no_server_value_is_interpolated_raw_into_html(name):
 # un contrôle que chaque entrée sert encore. Hors portée : les chaînes
 # assemblées par « + » hors gabarit et les .innerHTML affectés d'une variable
 # (couverts par la relecture et les e2e à noms hostiles).
-BUILDERS = ("esc", "icon", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "opt",
+BUILDERS = ("esc", "icon", "hostSel", "Icons.svg", "tip", "badge", "dim", "row", "f", "item", "opt",
             "fieldHtml", "appliedBadge", "unmanagedHtml", "headHtml", "actionsHtml", "field", "li",
             "th", "checksHtml", "stateBadge", "errorBadge", "yes", "vmRow", "hostTile", "opItem",
             "existingDisksHtml", "existingNicsHtml", "renderSection", "imagesStateHtml",
             "VMForm.shellHtml", "VMForm.appliedBadge", "VMForm.changesHtml", "VMForm.restartBanner",
             "VMForm.reviewHtml", "TFForm.render", "CloudInitForm.renderWizard",
             "KVMForm.menuGroupHtml", "errHtml", "okHtml", "listHtml", "progressHtml", "sendFieldsHtml",
-            "poolRow", "volRow", "imageRow", "netRow")
+            "poolRow", "volRow", "imageRow", "netRow", "hostName")
 HTML_VARS = {
     "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
     "cloudinit-form.js": set(),

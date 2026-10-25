@@ -11,6 +11,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 EVIL = "<img src=x onerror=window.__xss=1>"
 LABEL = f"kvm:vm-start:node2/{EVIL}"
 
@@ -35,7 +37,8 @@ def run(rid, status, ended=None, error=None):
 def page_xss(context, flask_server):
     context.add_init_script("localStorage.setItem('harvester_ops_language','en');"
                             "localStorage.setItem('harvester_ops_dock_visible','true');"
-                            "localStorage.setItem('harvester_ops_dock_collapsed','false');")
+                            "localStorage.setItem('harvester_ops_dock_collapsed','false');"
+                            "localStorage.setItem('harvester_ops_sidebar_pinned','1');")
     page = context.new_page()
     live = run("kvmxss000001", "running")
     done = run("kvmxss000002", "error", ended=time.time() - 1, error=f"cannot start {EVIL}")
@@ -45,7 +48,7 @@ def page_xss(context, flask_server):
     page.route("**/api/stream/*", lambda r, q: fulfill(r, sse([
         ("step", {"step_id": "action", "status": "running", "message": f"virsh start {EVIL}", "ts": 1}),
     ]), ctype="text/event-stream"))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#gpus")     # 2.0.0 : écran ouvert par son adresse
     page.wait_for_function("window.App && window.i18n")
     return page
 
@@ -67,7 +70,8 @@ def test_the_dock_shows_a_hostile_label_as_text(page_xss):
 
 def test_the_activity_tab_shows_a_hostile_label_as_text(page_xss):
     page = page_xss
-    page.click('.tab[data-tab="activity"]', timeout=5000)
+    # 2.0.0 : l'entrée Activité du menu des hôtes
+    page.click('#host-nav [data-hnav-root="activity"]', timeout=5000)
     running = page.locator("#activity-running tbody tr").first
     expect(running).to_contain_text(EVIL, timeout=10000)
     hist = page.locator("#activity-history tbody tr").first

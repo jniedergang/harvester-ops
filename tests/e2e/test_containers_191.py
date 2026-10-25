@@ -14,6 +14,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 
 def pod(name, node="n1", state="Running", ready=True, restarts=0, containers=("app",)):
     return {"name": name, "namespace": "x", "node": node, "phase": "Running", "state": state, "ready": ready,
@@ -48,7 +50,6 @@ def view(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('ct-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','allcontainers');"
         "localStorage.removeItem('harvester_ops_allcontainers');"
         "localStorage.removeItem('harvester_ops_containers');"
         "sessionStorage.setItem('ct-init','1'); }")
@@ -72,7 +73,7 @@ def view(context, flask_server):
         return route.fulfill(status=200, content_type="application/json",
                              body=json.dumps({"yaml": "kind: Deployment\nmetadata:\n  name: web\n", "writable": False}))
     page.route(re.compile(r".*/api/yaml/.*"), yaml)
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('allcontainers'))
     page.wait_for_function("window.Containers && window.i18n")
     page.mouse.move(1200, 600)                     # loin du menu latéral, qui s'ouvre au survol
     rows = page.locator("#all-containers-host tbody tr[data-ct-row]")
@@ -85,15 +86,22 @@ def names(rows):
 
 
 def test_containers_is_a_group_right_below_virtual_machines(view):
+    """2.0.0 : l'entrée racine Conteneurs (toutes les charges) suit
+    Machines virtuelles dans le menu des hôtes ; les conteneurs du cluster
+    sont l'entrée « Conteneurs » du sous-menu de l'hôte ouvert."""
     page, _, _, _ = view
-    groups = page.locator("nav .tab-group").evaluate_all("els => els.map(e => e.id)")
-    assert groups[groups.index("tab-group-vms") + 1] == "tab-group-containers"
-    group = page.locator("#tab-group-containers")
-    expect(group.locator(".tab-group-head .sidebar-label")).to_have_text("Containers")
-    assert group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["containers", "allcontainers"]
-    labels = [x.strip() for x in group.locator(".tab-child .sidebar-label").all_inner_texts()]
-    assert labels == ["Current cluster's containers", "All clusters containers"]
-    for t in group.locator(".tab").all():
+    roots = page.locator("#host-nav [data-hnav-root]").evaluate_all("els => els.map(e => e.dataset.hnavRoot)")
+    assert roots[roots.index("vms") + 1] == "containers"
+    root = page.locator('#host-nav [data-hnav-root="containers"]')
+    expect(root.locator(".sidebar-label")).to_have_text("Containers")
+    assert root.get_attribute("href") == "#containers"
+    page.evaluate("Router.go('#harvester/harv-fake')")
+    page.evaluate("Router.idle()")
+    subs = page.locator('#hnav-families .hnav-sub a').evaluate_all("els => els.map(e => e.dataset.sub)")
+    assert subs[subs.index("vms") + 1] == "containers"
+    sub = page.locator('#hnav-families .hnav-sub a[data-sub="containers"]')
+    assert sub.get_attribute("href") == "#harvester/harv-fake/containers"
+    for t in (root, sub):
         assert t.get_attribute("title")                        # bulle d'aide sur chaque entrée
 
 
@@ -188,7 +196,8 @@ def test_row_menu_yaml_is_read_only(view):
 
 def test_current_cluster_view_and_a_refusal_said(view):
     page, _, _, state = view
-    page.locator('.tab[data-tab="containers"]').click()
+    # 2.0.0 : les conteneurs du cluster, par la page de l'hôte
+    page.evaluate("Router.go('#harvester/harv-fake/containers')")
     rows = page.locator("#containers-host tbody tr[data-ct-row]")
     expect(rows).to_have_count(2)
     expect(page.locator("#containers-host [data-ct-cluster]")).to_have_count(0)     # pas de puces

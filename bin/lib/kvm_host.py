@@ -142,9 +142,12 @@ class CmdOutput(str):
     """Sortie d'une commande d'un `batch` : une chaîne (la sortie, ou le
     texte d'erreur en cas d'échec), avec `rc` et `error` (KvmError ou None)."""
 
-    def __new__(cls, text, rc=0, error=None):
+    def __new__(cls, text, rc=0, error=None, stderr=""):
         obj = super().__new__(cls, text)
         obj.rc, obj.error = rc, error
+        # 2.0.0 : stderr d'une commande réussie (une commande virsh à
+        # plusieurs sous-commandes rend 0 même si l'une d'elles a échoué)
+        obj.stderr = stderr
         return obj
 
     @property
@@ -785,7 +788,7 @@ class VirshHost:
                 result[key] = CmdOutput(_redact(errs.get(i, ""), paths) or err.message,
                                         rc=rcs[i], error=err)
             else:
-                result[key] = CmdOutput(outs[i])
+                result[key] = CmdOutput(outs[i], stderr=_redact(errs.get(i, ""), paths))
         return result
 
 
@@ -880,6 +883,22 @@ def parse_list_all(text):
 def parse_names(text):
     """`virsh list --name` : un nom par ligne."""
     return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+
+def parse_uuid_names(text):
+    """`virsh list --all --uuid --name` -> {nom: uuid} (une ligne « uuid nom »
+    par domaine, ligne vide finale ignorée)."""
+    out = {}
+    for ln in (text or "").splitlines():
+        # virsh écrit « uuid nom » avec UNE espace : le nom est gardé tel quel,
+        # espaces de tête ou de fin comprises
+        uid, sep, name = ln.lstrip().partition(" ")
+        if sep and name and UUID_RE.match(uid):
+            out[name] = uid.lower()
+    return out
+
+
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 
 
 def parse_dominfo(text):
@@ -1269,6 +1288,121 @@ def parse_net_xml(text):
             "domain": dom.get("name") if dom is not None else None, "ips": ips}
 
 
+# --- dossiers (navigation 2.0) -----------------------------------------
+#
+# Le dossier d'une VM KVM est écrit DANS le domaine, en métadonnées libvirt :
+#   <hops:folder xmlns:hops="https://harvester-ops.io/xmlns/folder/1" path="/Production/ERP"/>
+# Il suit donc le domaine (redéfinition, clone, autre console). Mesuré sur
+# node2 (15 domaines, libvirt 12.8.0, docs/design/2026-10-24-navigation-hotes-vms.md) :
+# un `virsh metadata` par domaine coûte ~180 ms chacun (+2,7 s pour 15),
+# un `dumpxml` par domaine +2,9 s (93 Ko) ; UNE invocation de virsh qui
+# enchaîne les 15 lectures (« cmd; cmd; ... ») +0,3 s. C'est celle-ci,
+# avec un repère `echo` aléatoire entre deux domaines.
+FOLDER_NS = "https://harvester-ops.io/xmlns/folder/1"
+FOLDER_PREFIX = "hops"
+# lecture impossible (distincte de « pas de dossier », qui vaut None)
+FOLDER_UNREAD = object()
+# domaines par invocation de virsh : une chaîne de commandes reste loin de
+# la borne d'un argument (128 Kio sous Linux)
+FOLDER_CHUNK = 200
+# libvirt < 12 répond « metadata not found » (code 1) pour un élément
+# absent ; libvirt 12.8.0 rend 0 et une sortie vide (relevé sur node2)
+_FOLDER_ABSENT_RE = re.compile(r"metadata not found|metadata element is not present", re.I)
+
+
+def _virsh_word(text):
+    """Argument entre apostrophes pour l'analyseur de commandes de virsh ;
+    None si le nom porte un caractère qu'il faudrait échapper (il est alors
+    lu à part, par une commande à lui)."""
+    if any(c in text for c in "'\\\n\r") or any(ord(c) < 32 for c in text):
+        return None
+    return f"'{text}'"
+
+
+def parse_folder_metadata(text):
+    """Sortie de `virsh metadata --uri FOLDER_NS` -> chemin, ou None quand le
+    domaine n'en porte pas (sortie vide). ValueError pour un XML illisible,
+    un autre élément ou un élément sans `path`."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    try:
+        root = _safe_xml(t)
+    except ET.ParseError as e:
+        raise ValueError(f"unreadable folder metadata ({e})") from None
+    if root.tag.rsplit("}", 1)[-1] != "folder":
+        raise ValueError("unexpected folder metadata element")
+    path = root.get("path")
+    if path is None:
+        raise ValueError("folder metadata without a path")
+    return path
+
+
+def _absent_only(stderr):
+    """True si chaque ligne d'erreur dit seulement « pas de métadonnées »."""
+    lines = [ln for ln in (stderr or "").splitlines() if ln.strip()]
+    return all(_FOLDER_ABSENT_RE.search(ln) or not ln.lower().startswith("error")
+               for ln in lines)
+
+
+def read_folders(host, names):
+    """Dossier de chaque domaine nommé : ({nom: chemin ou None}, erreurs).
+    Un domaine absent du dictionnaire n'a pas pu être lu (FOLDER_UNREAD pour
+    l'appelant) ; son erreur est dans la liste. Une invocation de virsh par
+    tranche de FOLDER_CHUNK domaines, toutes dans le même appel SSH ; si
+    virsh signale une erreur autre que « pas de métadonnées », la tranche est
+    relue domaine par domaine pour savoir lequel a échoué."""
+    found, errors = {}, []
+    simple = [n for n in names if _virsh_word(n)]
+    retry = [n for n in names if not _virsh_word(n)]
+    chunks = [simple[i:i + FOLDER_CHUNK] for i in range(0, len(simple), FOLDER_CHUNK)]
+    tok = "@@hops-" + secrets.token_hex(8)
+    cmds = {}
+    for c, chunk in enumerate(chunks):
+        parts = []
+        for i, n in enumerate(chunk):
+            parts += [f"echo {tok}-{i}", f"metadata --domain {_virsh_word(n)} --uri {FOLDER_NS}"]
+        parts.append(f"echo {tok}-end")
+        cmds[f"folders-{c}"] = ("; ".join(parts),)
+    out = host.batch(cmds, idempotent=True) if cmds else {}
+    for c, chunk in enumerate(chunks):
+        res = out.get(f"folders-{c}")
+        if res is None or not res.ok or not _absent_only(res.stderr):
+            retry.extend(chunk)
+            continue
+        pieces = re.split(rf"(?m)^{re.escape(tok)}-(\d+|end)$", str(res))
+        texts = {int(pieces[j]): pieces[j + 1] for j in range(1, len(pieces) - 1, 2)
+                 if pieces[j] != "end"}
+        for i, n in enumerate(chunk):
+            if i not in texts:
+                retry.append(n)
+                continue
+            try:
+                found[n] = parse_folder_metadata(texts[i])
+            except ValueError as e:
+                errors.append({"command": f"metadata {n}", "kind": "failed",
+                               "message": f"{host.name}: {n}: {e}"})
+    if retry:
+        outs = host.batch({n: ("metadata", "--domain", n, "--uri", FOLDER_NS) for n in retry},
+                          idempotent=True)
+        for n in retry:
+            v = outs.get(n)
+            if v is not None and not v.ok and _FOLDER_ABSENT_RE.search(str(v)):
+                found[n] = None
+            elif v is not None and v.ok:
+                try:
+                    found[n] = parse_folder_metadata(str(v))
+                except ValueError as e:
+                    errors.append({"command": f"metadata {n}", "kind": "failed",
+                                   "message": f"{host.name}: {n}: {e}"})
+            else:
+                errors.append({"command": f"metadata {n}",
+                               "kind": v.error.kind if v is not None else "failed",
+                               "message": v.error.message if v is not None
+                               else f"{host.name}: no answer for {n}"})
+    return found, errors
+
+
 # --- lectures composées -------------------------------------------------
 
 # --nowait : un domaine dont le moniteur QEMU est occupé (job en cours) ne
@@ -1281,6 +1415,9 @@ INVENTORY_COMMANDS = {
     "nodememstats": ("nodememstats",),
     "version": ("version",),
     "list": ("list", "--all"),
+    # 2.0.0 : l'UUID de chaque domaine, clé stable d'une VM KVM (un domaine
+    # renommé la garde) pour la vue unique et les dossiers
+    "uuids": ("list", "--all", "--uuid", "--name"),
     "autostart": ("list", "--all", "--autostart", "--name"),
     "transient": ("list", "--all", "--transient", "--name"),
     "domstats": ("domstats", "--raw", "--nowait", "--state", "--cpu-total", "--balloon", "--vcpu"),
@@ -1291,12 +1428,15 @@ DETAIL_COMMANDS = {
 }
 
 
-def host_inventory(host, details=False):
+def host_inventory(host, details=False, folders=False):
     """Résumé d'un hôte et de ses VMs en un appel `batch`. Une commande en
     échec laisse son champ vide et s'ajoute à `errors` ; seul un hôte
     injoignable (aucune commande lancée) ou dont toutes les commandes
     échouent (libvirt refusé) lève KvmError. `details` ajoute
-    pools (avec leurs volumes, second appel) et réseaux."""
+    pools (avec leurs volumes, second appel) et réseaux. `folders` (2.0.0)
+    ajoute le dossier de chaque VM (`folder`, lu dans ses métadonnées par
+    `read_folders`, un appel de plus) ; une lecture de dossier en échec laisse
+    `folder` à None, met `folder_unread` à True et s'ajoute à `errors`."""
     cmds = dict(INVENTORY_COMMANDS)
     if details:
         cmds.update(DETAIL_COMMANDS)
@@ -1317,10 +1457,12 @@ def host_inventory(host, details=False):
     autostart = set(parse_names(ok("autostart")))
     transient = set(parse_names(ok("transient")))
     stats = parse_domstats_raw(ok("domstats"))
+    uuids = parse_uuid_names(ok("uuids"))
     vms = []
     for d in parse_list_all(ok("list")):
         st = stats.get(d["name"], {})
         vms.append({"host": host.name, "name": d["name"], "id": d["id"], "state": d["state"],
+                    "uuid": uuids.get(d["name"]),
                     "persistent": d["name"] not in transient,
                     "autostart": d["name"] in autostart,
                     "vcpus": st.get("vcpus"), "memory_kib": st.get("memory_kib"),
@@ -1333,6 +1475,13 @@ def host_inventory(host, details=False):
                                    "available_kib": mem.get("available_kib")},
            "libvirt_version": ver["libvirt"], "qemu_version": ver["qemu"],
            "vms": vms, "errors": errors}
+    if folders and vms:
+        found, ferrors = read_folders(host, [v["name"] for v in vms])
+        errors.extend(ferrors)
+        for v in vms:
+            got = found.get(v["name"], FOLDER_UNREAD)
+            v["folder"] = None if got is FOLDER_UNREAD else got
+            v["folder_unread"] = got is FOLDER_UNREAD
     if details:
         pools = parse_pool_list_details(ok("pools"))
         active = [p["name"] for p in pools if p["state"] == "running"]

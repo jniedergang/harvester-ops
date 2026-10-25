@@ -889,6 +889,42 @@ def _fresh_allowed(key, min_interval):
         return True
 
 
+def _read_share_identity():
+    """Identité que la personne présente aux clusters, pour la clé d'une
+    lecture qui ne nomme pas de cluster (vue de flotte) : la session Rancher
+    (serveur + identifiant Rancher), sinon l'identité déléguée (utilisateur +
+    groupes), sinon None. None = kubeconfig de la console, la même vue pour
+    tous les comptes d'un rôle : le cas nominal partage toujours."""
+    sess = _sso_session()
+    if sess is not None:
+        ident = getattr(sess, "ident", None) or {}
+        return ("sso", getattr(sess, "server_id", None), ident.get("id") or sess.login)
+    who = current_cluster_identity()
+    if who and who.get("user"):
+        return ("as", who["user"], tuple(sorted(who.get("groups") or ())))
+    return None
+
+
+def _read_share_key(endpoint, kwargs, qargs=(), scope=None, per_user=False):
+    """Clé d'une lecture partagée. Seule source de cette forme : le menu des
+    hôtes (navigation 2.0) relit le cache avec les mêmes clés que les écrans.
+    Une route qui nomme un cluster porte le kubeconfig rendu pour la personne ;
+    une vue de flotte (sans cluster) porte son identité (2.0.0, revue I-2 :
+    sinon deux personnes du même rôle partageaient la flotte de l'autre).
+    Les lectures KVM (`scope=KVM_SCOPE`) ne portent pas l'identité : la
+    console lit les hôtes avec sa propre clé, la réponse est la même pour
+    tous ; N personnes ne lancent pas N tournées SSH (revue finale I-3)."""
+    cluster = kwargs.get("cluster")
+    return (scope or cluster, endpoint,
+            tuple(sorted(qargs)),
+            tuple(sorted((k, str(v)) for k, v in kwargs.items())),
+            _kubectl_for_cluster(cluster) if cluster else None,
+            current_role(), current_user() if per_user else None,
+            # un hôte KVM est un objet de la console, lu avec SA clé SSH quelle
+            # que soit la personne (revue finale I-3) : pas d'identité
+            None if cluster or scope == KVM_SCOPE else _read_share_identity())
+
+
 def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys=None):
     """Décorateur d'une vue GET qui ne fait que lire. `?fresh=1` passe outre.
     `scope` remplace le cluster en tête de clé pour une vue qui n'en a pas
@@ -905,17 +941,12 @@ def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys
             if (not READ_SHARE_ENABLED or request.method != "GET"
                     or (fresh and not fresh_min)):
                 return f(*args, **kwargs)
-            cluster = kwargs.get("cluster")
             qargs = request.args.items(multi=True)
             if query_keys is not None:
                 qargs = [(k, v) for k, v in qargs if k in query_keys or k == "fresh"]
             if fresh_min:                      # lecture forcée ou non : même clé
                 qargs = [(k, v) for k, v in qargs if k != "fresh"]
-            key = (scope or cluster, request.endpoint,
-                   tuple(sorted(qargs)),
-                   tuple(sorted((k, str(v)) for k, v in kwargs.items())),
-                   _kubectl_for_cluster(cluster) if cluster else None,
-                   current_role(), current_user() if per_user else None)
+            key = _read_share_key(request.endpoint, kwargs, qargs, scope=scope, per_user=per_user)
 
             kc_for_worker = key[4]
 
@@ -968,6 +999,13 @@ def _read_share_invalidate(response):
                     ("/console-ticket", "/vm-plan", "/edit-plan")):
                 READ_SHARE.invalidate(KVM_SCOPE)
                 READ_SHARE.invalidate("_activity")
+            return response
+        if request.path == "/api/folders/check":
+            # 2.0.0 : contrôles avant un rangement, rien n'est écrit
+            return response
+        if request.path.startswith("/api/me/favorites/"):
+            # navigation 2.0 : une préférence de la personne, pas un cluster
+            READ_SHARE.invalidate(HOSTS_SCOPE)
             return response
         if request.path.startswith("/api/replication/"):
             # v1.99.0 : le registre de la réplication n'est pas un cluster
@@ -1254,7 +1292,7 @@ def _kvm_required_role(path, method):
             if parts[1] == "pools" and len(parts) == 4 and parts[3] == "refresh":
                 return "operator"
             return "admin"
-        if len(parts) == 2 and parts[1] == "image-pools":
+        if len(parts) == 2 and parts[1] in ("image-pools", "labels"):
             return "admin"
     return "operator"
 
@@ -1539,6 +1577,9 @@ class ActionRun:
         # sûr, sans retour arrière) ; None = `kill_grace`
         self.shutdown_grace = None
         self.shutdown_requested = False
+        # 2.0.0 : geste réversible (dossiers) : {"path": route d'annulation} ;
+        # None = pas de bouton « Annuler »
+        self.undo = None
         self.proc = None
         self._cond = threading.Condition()
         self._closed = False
@@ -1618,6 +1659,9 @@ class ActionRun:
             "progress_current": self.progress_last,
             "result": dict(self.result),
             "cancel_requested": self.cancel_requested,
+            # 2.0.0 : seulement pour une action qui sait s'annuler (dossiers)
+            **({"undo": dict(self.undo)} if self.undo else {}),
+            **_folder_resume(self.action, self.status, self.id),
         }
 
 
@@ -1695,6 +1739,13 @@ def _actions_init_db():
         conn.execute("ALTER TABLE actions ADD COLUMN result TEXT")
     except sqlite3.OperationalError:
         pass
+    # 2.0.0 (revue I-4) : la route d'annulation d'un geste réversible
+    # (dossiers), gardée pour que l'Activité propose Annuler après un
+    # redémarrage ; même migration additive, à chaud
+    try:
+        conn.execute("ALTER TABLE actions ADD COLUMN undo TEXT")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("CREATE INDEX IF NOT EXISTS actions_started ON actions(started_at DESC)")
     # v1.6.0: compound index for "recent actions per cluster" lookup
     # (the dock + activity tab queries by cluster + recency).
@@ -1716,22 +1767,25 @@ def _actions_persist(run):
         result_json = json.dumps(getattr(run, "result", None) or {})
     except (TypeError, ValueError):
         result_json = "{}"
+    undo = getattr(run, "undo", None)
+    undo_json = json.dumps(undo) if isinstance(undo, dict) and undo else None
     conn = sqlite3.connect(str(ACTIONS_DB))
     conn.execute("""
         INSERT INTO actions(id, action, cluster, status, exit_code,
                             started_at, ended_at, dry_run, cmd, events,
-                            error_summary, result)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                            error_summary, result, undo)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             status=excluded.status,
             exit_code=excluded.exit_code,
             ended_at=excluded.ended_at,
             events=excluded.events,
             error_summary=excluded.error_summary,
-            result=excluded.result
+            result=excluded.result,
+            undo=excluded.undo
     """, (run.id, run.action, run.cluster, run.status, run.exit_code,
           run.started_at, run.ended_at, int(bool(run.dry_run)),
-          cmd_str, events_json, run.error_summary, result_json))
+          cmd_str, events_json, run.error_summary, result_json, undo_json))
     conn.commit()
     # Cap history at 500 rows (drop oldest done/error)
     conn.execute("""
@@ -1757,6 +1811,15 @@ def _row_result(raw):
     except (TypeError, ValueError):
         return {}
     return v if isinstance(v, dict) else {}
+
+
+def _row_undo(raw):
+    """La colonne `undo` relue : {"path": ...} ou None (pas de bouton)."""
+    try:
+        v = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return v if isinstance(v, dict) and isinstance(v.get("path"), str) else None
 
 
 def _actions_load_history():
@@ -1802,6 +1865,8 @@ def _actions_load_history():
                 pass
             if "result" in row.keys():
                 run.result = _row_result(row["result"])
+            if "undo" in row.keys():
+                run.undo = _row_undo(row["undo"])
             run._closed = True
             ACTIONS[row["id"]] = run
             restored += 1
@@ -1820,7 +1885,44 @@ _actions_load_history()
 # /api/action/<id> and /api/stream/<id> for runs no longer in memory.
 _ACTIONS_LIST_COLUMNS = ("id", "action", "cluster", "status", "exit_code",
                          "started_at", "ended_at", "dry_run", "error_summary",
-                         "result")
+                         "result", "undo")
+
+
+_FOLDER_RESUMABLE = ("error", "interrupted")
+
+
+def _folder_resume(action, status, action_id):
+    """2.0.0 : {"resume": {"path": ...}} pour une action de dossiers arrêtée
+    (erreur ou arrêt de la console), {} sinon. La reprise d'une reprise vise
+    l'action d'origine (`folders:resume:<id>`) : ses lignes sont les seules
+    rangées. La route dit 404 quand il ne reste rien à reprendre."""
+    if status not in _FOLDER_RESUMABLE or not str(action or "").startswith("folders:"):
+        return {}
+    target = action.split(":", 2)[2] if action.startswith("folders:resume:") else action_id
+    # plus rien à reprendre (reprise déjà faite) : pas de bouton ; une base
+    # illisible laisse le bouton, la route dira
+    try:
+        conn = _folders_conn()
+        try:
+            if not _fdb.unfinished(conn, target):
+                return {}
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError):
+        pass
+    return {"resume": {"path": f"/api/folders/actions/{target}/resume"}}
+
+
+def _row_finish(d):
+    """Champs relus d'une ligne : booléen, résultat, et `undo` seulement s'il
+    est posé (comme ActionRun.to_dict)."""
+    d["dry_run"] = bool(d.get("dry_run"))
+    d["result"] = _row_result(d.get("result"))
+    undo = _row_undo(d.pop("undo", None))
+    if undo:
+        d["undo"] = undo
+    d.update(_folder_resume(d.get("action"), d.get("status"), d.get("id")))
+    return d
 
 
 def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
@@ -1858,13 +1960,7 @@ def _actions_db_recent(limit=50, cluster=None, status=None, action=None,
         conn.close()
     except sqlite3.Error:
         return []
-    out = []
-    for r in rows:
-        d = {k: r[k] for k in _ACTIONS_LIST_COLUMNS}
-        d["dry_run"] = bool(d["dry_run"])
-        d["result"] = _row_result(d.get("result"))
-        out.append(d)
-    return out
+    return [_row_finish({k: r[k] for k in _ACTIONS_LIST_COLUMNS}) for r in rows]
 
 
 def _actions_db_count():
@@ -1893,8 +1989,7 @@ def _actions_db_get(run_id):
         return None, []
     d = {k: row[k] for k in _ACTIONS_LIST_COLUMNS if k in row.keys()}
     d.setdefault("error_summary", None)
-    d["dry_run"] = bool(d.get("dry_run"))
-    d["result"] = _row_result(d.get("result"))
+    _row_finish(d)
     try:
         events = json.loads(row["events"] or "[]")
     except (json.JSONDecodeError, TypeError):
@@ -3938,11 +4033,96 @@ def api_clusters():
             "description": c.get("description", ""),
             "node_count": len(c.get("nodes", [])),
             "origin": "config" if c["name"] in config_names else "console",
+            # 2.0.0 : Paramètres > Connexion d'un hôte (nœuds déclarés).
+            # L'adresse de jonction se lit à part, dans le cluster
+            # (/api/clusters/<c>/join-url).
+            "nodes": [{"hostname": str(n.get("hostname", "")), "ip": str(n.get("ip", "")),
+                       "role": str(n.get("role", ""))} for n in c.get("nodes", []) if isinstance(n, dict)],
         })
     out = {"clusters": clusters, "config_writable": _config_writable()}
     if sso:
         out["hidden"] = hidden
     return jsonify(out)
+
+
+# Harvester range la VIP de gestion dans la ConfigMap `harvester-system/vip`
+# (clé `ip`, avec enabled, mode, serviceType, hwAddress) : c'est elle que lit
+# son contrôleur pour poser la VIP sur ses services, voir
+# harvester/harvester pkg/controller/master/rancher/register.go
+# (VipConfigmapName = "vip", getVipConfig, v1.9.0). Vérifié sur harv1 :
+# ip = 172.16.3.100.
+VIP_CONFIGMAP = ("harvester-system", "vip")
+# Chemins de serveur d'un kubeconfig qui parle au cluster lui-même : aucun
+# (rke2.yaml, https://VIP:6443) ou le Rancher embarqué de Harvester
+# (kubeconfig téléchargé depuis son interface, https://VIP/k8s/clusters/local).
+_DIRECT_SERVER_PATHS = ("", "/", "/k8s/clusters/local", "/k8s/clusters/local/")
+
+
+def _kubeconfig_server(kubeconfig):
+    """URL du serveur d'API du contexte courant, ou None."""
+    try:
+        with open(kubeconfig) as fh:
+            kc = yaml.safe_load(fh) or {}
+    except (OSError, TypeError, yaml.YAMLError):
+        return None
+    ctx_name = kc.get("current-context")
+    cluster_name = None
+    for ctx in kc.get("contexts") or []:
+        if ctx.get("name") == ctx_name:
+            cluster_name = (ctx.get("context") or {}).get("cluster")
+            break
+    for c in kc.get("clusters") or []:
+        if cluster_name is None or c.get("name") == cluster_name:
+            return (c.get("cluster") or {}).get("server")
+    return None
+
+
+def _cluster_vip(kc):
+    """VIP de gestion lue dans le cluster (ConfigMap de Harvester), ou None
+    si elle ne se lit pas ou n'est pas une adresse IP utilisable."""
+    import ipaddress
+    ns, name = VIP_CONFIGMAP
+    doc = _kubectl_json(kc, "get", "configmap", name, "-n", ns)
+    ip = str(((doc or {}).get("data") or {}).get("ip") or "").strip()
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    return None if addr.is_unspecified else str(addr)
+
+
+def _cluster_join_url(cluster):
+    """(adresse de jonction https://VIP:443, raison) de ce cluster.
+
+    Elle prépare une installation qui efface des disques : jamais devinée.
+    Raison quand l'adresse manque : `unavailable` (pas de kubeconfig),
+    `proxied` (kubeconfig derrière un mandataire, Rancher), `unreachable`,
+    `vip-unreadable`."""
+    kc = _kubectl_for_cluster(cluster)
+    server = _kubeconfig_server(kc) if kc else None
+    if not server:
+        return None, "unavailable"
+    from urllib.parse import urlparse
+    if urlparse(server).path not in _DIRECT_SERVER_PATHS:
+        return None, "proxied"
+    # cluster éteint : dit en deux secondes, sans attendre le délai de kubectl
+    if _cluster_reachable(kc) is False:
+        return None, "unreachable"
+    vip = _cluster_vip(kc)
+    if not vip:
+        return None, "vip-unreadable"
+    return (f"https://[{vip}]:443" if ":" in vip else f"https://{vip}:443"), None
+
+
+@app.route("/api/clusters/<cluster>/join-url")
+@requires_auth
+@_rate_limit("30/minute")
+def api_cluster_join_url(cluster):
+    """Lue à l'ouverture de « Joindre un nœud », jamais en tâche de fond."""
+    if not any(c.get("name") == cluster for c in load_config_ro().get("clusters", [])):
+        return jsonify({"error": "unknown cluster"}), 404
+    url, reason = _cluster_join_url(cluster)
+    return jsonify({"cluster": cluster, "join_url": url, "reason": reason})
 
 
 @app.route("/api/status/<cluster>")
@@ -5711,7 +5891,7 @@ def _bm_vm_plan(data, cfg):
         return None
     if data.get("mode") != "join":
         raise ValueError("VM network selection is available when joining a declared cluster")
-    cluster = _cluster_for_server(data.get("server_url", ""))
+    cluster = _join_cluster(data.get("server_url", ""), data.get("join_cluster"))
     kc = _kubectl_for_cluster(cluster) if cluster else None
     if not kc:
         raise ValueError("VM network: declare the target cluster first")
@@ -5728,7 +5908,7 @@ def _bm_vm_plan(data, cfg):
 @requires_auth
 @_rate_limit("30/minute")
 def api_bm_vm_network_options():
-    cluster = _cluster_for_server(request.args.get("server_url", ""))
+    cluster = _join_cluster(request.args.get("server_url", ""), request.args.get("cluster"))
     kc = _kubectl_for_cluster(cluster) if cluster else None
     if not kc:
         return jsonify({"error": "declare the target cluster first"}), 400
@@ -5899,6 +6079,26 @@ def _cluster_for_server(server_url):
             if urlparse((entry.get("cluster") or {}).get("server") or "").hostname == host:
                 return c["name"]
     return None
+
+
+def _join_cluster(server_url, cluster=None):
+    """Cluster visé par une jonction. `cluster` (choisi par « Joindre un
+    nœud ») n'est retenu que si l'hôte de `server_url` est le sien : hôte de
+    son kubeconfig ou VIP lue dans le cluster (son kubeconfig peut viser un
+    seul nœud). Sans choix, la règle d'avant (_cluster_for_server)."""
+    if not cluster:
+        return _cluster_for_server(server_url)
+    from urllib.parse import urlparse
+    host = urlparse(str(server_url)).hostname
+    entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
+    if not entry or not host:
+        return None
+    server = _kubeconfig_server(entry.get("kubeconfig") or "")
+    if server and urlparse(server).hostname == host:
+        return cluster
+    kc = _kubectl_for_cluster(cluster)
+    vip = _cluster_vip(kc) if kc else None
+    return cluster if vip and vip == host.strip("[]") else None
 
 
 def _bm_cluster_kubeconfig(opts):
@@ -7218,7 +7418,9 @@ def _bm_prepare_install(data, defer_join=False):
             return None, (jsonify({"error": "invalid server_url (https://host[:port])",
                                    "fields": ["server_url"]}), 400)
         # Suivre l'arrivée du nœud demande de lire ce cluster.
-        data["cluster"] = None if defer_join else _cluster_for_server(data["server_url"])
+        # 2.0.0 : « Joindre un nœud » nomme le cluster (join_cluster) ; il
+        # n'est retenu que si l'adresse est la sienne (_join_cluster).
+        data["cluster"] = None if defer_join else _join_cluster(data["server_url"], data.get("join_cluster"))
         if not data["cluster"] and not defer_join:
             return None, (jsonify({"error": "declare the cluster of server_url first",
                                    "fields": ["server_url"]}), 400)
@@ -9176,6 +9378,10 @@ def _vms_collect(cluster, kc):
                  if k.startswith("static-ip.harvesterhci.io/") and re.match(r"^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$", str(v))]
                 + (state.get("ips") or []))),
             "labels": item["metadata"].get("labels") or {},
+            # 2.0.0 : identifiant de l'objet et dossier lu sur son annotation
+            # (un chemin invalide est ignoré et signalé par `folder_invalid`)
+            "uid": item["metadata"].get("uid"),
+            **_folder_from_annotation(annot),
         })
 
     # Sort: (group_priority, group, priority, name) so the UI sees the
@@ -9184,21 +9390,178 @@ def _vms_collect(cluster, kc):
     return {"cluster": cluster, "vms": vms}, 200, denials
 
 
+import folders as _fm  # noqa: E402
+
+_QUANTITY_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)\s*(Ki|Mi|Gi|Ti|Pi|Ei|k|K|M|G|T|P|E)?\s*$")
+_QUANTITY_UNITS = {None: 1, "Ki": 2 ** 10, "Mi": 2 ** 20, "Gi": 2 ** 30, "Ti": 2 ** 40, "Pi": 2 ** 50,
+                   "Ei": 2 ** 60, "k": 10 ** 3, "K": 10 ** 3, "M": 10 ** 6, "G": 10 ** 9, "T": 10 ** 12,
+                   "P": 10 ** 15, "E": 10 ** 18}
+
+
+def _quantity_bytes(q):
+    """Mémoire Kubernetes (`4Gi`, `512Mi`, `1G`, `1073741824`) en octets ;
+    None pour une valeur absente ou illisible."""
+    m = _QUANTITY_RE.match(str(q)) if q not in (None, "") else None
+    if not m:
+        return None
+    return int(float(m.group(1)) * _QUANTITY_UNITS[m.group(2)])
+
+
+def _folder_from_annotation(annot):
+    """{"folder", "folder_invalid"} lus sur l'annotation harvester-ops.io/folder
+    d'une VM ou d'une charge : un chemin invalide est ignoré (folder None) et
+    sa raison rendue."""
+    val = (annot or {}).get(_fm.ANNOTATION)
+    if val in (None, ""):
+        return {"folder": None, "folder_invalid": None}
+    why = _fm.check_path(val)
+    return {"folder": None if why else val, "folder_invalid": why}
+
+
+def harvester_common_row(v, cluster):
+    """Champs communs (kvm_ops.COMMON_FIELDS) d'une VM Harvester de
+    _vms_collect. Le dossier est celui de l'annotation ; le repli de la
+    console est posé ensuite par _folders_apply."""
+    folder = v.get("folder")
+    return {"kind": "harvester", "source": cluster, "namespace": v.get("namespace"), "name": v.get("name"),
+            "phase": v.get("phase"), "cpu": v.get("cpu"), "memory_bytes": _quantity_bytes(v.get("memory")),
+            "node": v.get("node"), "ips": list(v.get("ips") or []), "labels": dict(v.get("labels") or {}),
+            "uuid": v.get("uid"),
+            "key": _fm.object_key("harvester", cluster=cluster, namespace=v.get("namespace"),
+                                  name=v.get("name")),
+            "folder": folder, "folder_source": "vm" if folder else None}
+
+
+VMS_ALL_KINDS = ("harvester", "kvm")
+
+
+def _purge_allowed(denials):
+    """Une lecture de cluster peut-elle purger les rangements non vus de son
+    périmètre (revue finale D-4) ? Seulement une lecture complète : aucun
+    refus RBAC, et le kubeconfig de la console (ni session Rancher ni
+    identité déléguée, qui ne voient qu'une partie). Sinon un rangement
+    « console » d'un namespace que le lecteur ne voit pas vieillirait et
+    serait retiré si seuls de tels lecteurs ouvraient la vue 30 jours."""
+    return not denials and _read_share_identity() is None
+
+
+def _folders_apply(rows, scopes_ok):
+    """Réaligne le cache des dossiers sur les VMs lues (décision 4 : pendant
+    une lecture, sans action suivie) et pose sur chaque ligne le repli
+    « console » de celles qui ne portent rien. `scopes_ok` : lectures
+    réussies, dont les entrées trop vieilles sont purgées. Une base
+    illisible laisse les lignes telles quelles (jamais fatal pour la vue)."""
+    try:
+        conn = _fdb.connect(_folders_db_path())
+        try:
+            eff = _fdb.realign(conn, [{"key": r["key"], "folder": r["folder"],
+                                       "scope": r.pop("_scope", "")} for r in rows if r.get("key")])
+            _fdb.purge(conn, scopes=scopes_ok)
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as e:
+        log.warning("folders: cache not realigned: %s", e)
+        for r in rows:
+            r.pop("_scope", None)
+        return
+    for r in rows:
+        if r.get("key") in eff:
+            r["folder"], r["folder_source"] = eff[r["key"]]
+
+
+def _vms_all_kvm():
+    """(sources, lignes) des VMs KVM pour /api/vms-all, dossiers compris (une
+    lecture de métadonnées par hôte, kvm_host.read_folders)."""
+    if not _kvm_cli or not _kd:
+        return [], []
+    state = _state_dir()
+    decls = _kd.load_all(state)
+    hosts = [_kh.VirshHost(d, state, timeout=KVM_READ_TIMEOUT) for d in decls]
+    entries = _kvm_cli.read_all(hosts, deadline=KVM_READ_DEADLINE, folders=True) if hosts else []
+    sources, rows = [], []
+    for inv in entries:
+        if "error" in inv:
+            sources.append({"kind": "kvm", "source": inv["name"], "state": inv["error"]["kind"],
+                            "count": None, "error": inv["error"]["message"]})
+            continue
+        unread = [e for e in inv.get("errors") or [] if str(e.get("command", "")).startswith("metadata")]
+        sources.append({"kind": "kvm", "source": inv["name"], "state": "ok", "count": len(inv["vms"]),
+                        "error": "; ".join(e["message"] for e in unread)[:500] or None})
+        for vm in inv["vms"]:
+            row = dict(vm, **_ko.common_row(vm))
+            row["_scope"] = f"kvm/{inv['name']}"
+            if vm.get("folder_unread"):
+                row["_unread"] = True
+            rows.append(row)
+    return sources, rows
+
+
+# 2.0.0 (revue finale I-3) : la part KVM de /api/vms-all est lue pour tous,
+# sans identité ni rôle (clé SSH de la console, même réponse pour chacun) ;
+# la part Harvester reste lue avec l'identité de chacun. Durée de partage
+# plus longue que celle de la vue : l'écran des VMs relit toutes les 15 s,
+# N personnes font au plus une tournée SSH par hôte et par période.
+KVM_VMS_SHARE_TTL = float(os.environ.get("HARVESTER_OPS_KVM_VMS_SHARE_TTL", "10"))
+
+
+def _kvm_part_key():
+    return (KVM_SCOPE, "_vms_all_kvm")
+
+
+def _vms_all_kvm_shared():
+    """_vms_all_kvm() par la lecture partagée de la console ; chaque requête
+    reçoit sa copie des lignes (elles sont modifiées ensuite)."""
+    if READ_SHARE_ENABLED:
+        sources, rows = READ_SHARE.get(_kvm_part_key(), KVM_VMS_SHARE_TTL, _vms_all_kvm)
+    else:
+        sources, rows = _vms_all_kvm()
+    return [dict(x) for x in sources], [dict(r) for r in rows]
+
+
+def _fleet_clusters(cfg):
+    """([(nom, kubeconfig)] des clusters que la personne voit, nombre de
+    clusters cachés). Décision 93 (2.0.0) : une vue de flotte ne nomme
+    jamais un cluster que Rancher cache à la personne, comme le menu des
+    hôtes ; elle en dit au plus le nombre. Une session Rancher n'a pas de
+    kubeconfig pour un cluster caché (_sso_kubeconfig rend None, la même
+    règle que la garde _sso_cluster_guard)."""
+    sso = _sso_session() is not None
+    todo, hidden = [], 0
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if not name:
+            continue
+        kc = _kubectl_for_cluster(name)
+        if kc is None and sso:
+            hidden += 1
+            continue
+        todo.append((name, kc))
+    return todo, hidden
+
+
 @app.route("/api/vms-all")
 @requires_auth
-@shared_read()
+@shared_read(query_keys=("kinds",))
 def api_vms_all():
     """Toutes les VMs de tous les clusters déclarés, en une liste (v1.85.0).
     Chaque cluster est lu en parallèle avec l'identité de la personne (le
     kubeconfig est préparé dans le fil de la requête, qui seul la connaît).
     Un cluster éteint, injoignable ou qui refuse la lecture est dit dans
-    `clusters`, sans retenir les autres."""
+    `clusters`, sans retenir les autres.
+
+    2.0.0 : `?kinds=harvester,kvm` ajoute les VMs des hôtes KVM et les champs
+    communs de chaque ligne (kvm_ops.COMMON_FIELDS : kind, source, phase,
+    memory_bytes, uuid, key, folder, folder_source...), et `sources` (un
+    état par cluster et par hôte). Sans `kinds`, la réponse d'avant."""
+    kinds_arg = request.args.get("kinds")
+    kinds = None
+    if kinds_arg is not None:
+        kinds = [k for k in kinds_arg.split(",") if k]
+        bad = [k for k in kinds if k not in VMS_ALL_KINDS]
+        if bad or not kinds:
+            return jsonify({"error": f"kinds must list {', '.join(VMS_ALL_KINDS)}"}), 400
     cfg = load_config_ro()
-    todo = []
-    for c in cfg.get("clusters", []):
-        name = c.get("name")
-        if name:
-            todo.append((name, _kubectl_for_cluster(name)))
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -9220,12 +9583,1027 @@ def api_vms_all():
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(1, min(len(todo), 16))) as pool:
         results = list(pool.map(one, todo))
-    clusters, vms = [], []
-    for info, rows, _denials in results:
+    clusters, vms, full = [], [], set()
+    for info, rows, denials in results:
         clusters.append(info)
         vms.extend(rows)
+        if info["state"] == "ok" and _purge_allowed(denials):
+            full.add(info["cluster"])
     vms.sort(key=lambda v: (v["name"], v["cluster"], v["namespace"]))
-    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "vms": vms})
+    clusters = sorted(clusters, key=lambda c: c["cluster"])
+    if kinds is None:
+        for v in vms:                       # réponse d'avant la 2.0.0
+            v.pop("folder_invalid", None)
+        return jsonify({"clusters": clusters, "vms": vms})
+    sources, rows, warnings = [], [], []
+    if "harvester" in kinds:
+        for c in clusters:
+            sources.append({"kind": "harvester", "source": c["cluster"], "state": c["state"],
+                            "count": c.get("count"), "error": c.get("error")})
+        for v in vms:
+            why = v.pop("folder_invalid", None)
+            row = dict(v, **harvester_common_row(v, v["cluster"]))
+            row["_scope"] = f"harvester/{v['cluster']}"
+            if why:
+                warnings.append({"key": row["key"], "reason": why})
+            rows.append(row)
+    if "kvm" in kinds:
+        ksources, krows = _vms_all_kvm_shared()
+        sources += ksources
+        rows += krows
+    # une VM dont le dossier n'a pas pu être lu ne réaligne rien : son cache
+    # reste tel quel (ni retiré ni rafraîchi)
+    unread = [r for r in rows if r.pop("_unread", False)]
+    for r in unread:
+        r.pop("_scope", None)
+    unread_ids = {id(r) for r in unread}       # pas de comparaison de dicts (revue P-4)
+    _folders_apply([r for r in rows if id(r) not in unread_ids],
+                   [f"{s['kind']}/{s['source']}" for s in sources if s["state"] == "ok" and not s.get("error")
+                    and (s["kind"] == "kvm" or s["source"] in full)])
+    if unread:
+        cache = {}
+        try:
+            conn = _fdb.connect(_folders_db_path())
+            try:
+                cache = _fdb.memberships(conn, [r["key"] for r in unread if r.get("key")])
+            finally:
+                conn.close()
+        except (sqlite3.Error, OSError) as e:
+            log.warning("folders: cache not read: %s", e)
+        for r in unread:
+            c = cache.get(r.get("key"))
+            r["folder"], r["folder_source"] = (c["folder_path"], c["source"]) if c else (None, None)
+    rows.sort(key=lambda r: (r["name"] or "", r["kind"], r["source"] or "", r["namespace"] or ""))
+    return jsonify({"sources": sources, "vms": rows, "clusters": clusters, "folder_warnings": warnings,
+                    "hidden_count": hidden})
+
+
+# -----------------------------------------------------------------------------
+# Navigation 2.0 : la liste des hôtes du menu et les favoris de chacun
+# -----------------------------------------------------------------------------
+# Un hôte est un cluster Harvester entier ou un hyperviseur KVM. Le menu ne
+# lance AUCUNE lecture par hôte : l'état d'un cluster vient de la sonde TCP
+# déjà en cache (_cluster_reachable), son nombre de VMs et sa version de ce
+# que les écrans ont déjà lu (lectures partagées /api/vms-all, /api/status/<c>,
+# /api/upgrade/<c>), l'état d'un hôte KVM de la lecture partagée de
+# /api/kvm/hosts. Ce qui n'a pas encore été lu est rendu null ou « unknown ».
+import folders_db as _fdb  # noqa: E402
+
+HOSTS_SCOPE = "_hosts"
+# âge maximal d'une lecture d'écran reprise par le menu (s) : au-delà, le
+# nombre de VMs et la version d'un hôte sont rendus null
+HOSTS_PEEK_MAX_AGE = float(os.environ.get("HARVESTER_OPS_HOSTS_PEEK_AGE", "600"))
+HOST_ALERT_STATES = ("unreachable", "denied", "error")
+# classement d'une erreur KVM (kvm_host.KINDS) en état du menu
+_KVM_STATE_OF = {"unreachable": "unreachable", "timeout": "unreachable",
+                 "auth": "denied", "denied": "denied", "hostkey": "denied"}
+
+
+def _folders_db_path():
+    env = os.environ.get("HARVESTER_OPS_FOLDERS_DB")
+    return Path(env) if env else NOTES_DB.parent / "folders.db"
+
+
+def _peek_read(endpoint, kwargs=None, scope=None, with_age=False):
+    """Corps JSON d'une lecture partagée déjà faite pour cette personne, ou
+    None (jamais lue, trop vieille, en erreur, ou effacée par une écriture).
+    `with_age` : (corps, âge en s), ou (None, None)."""
+    miss = (None, None) if with_age else None
+    if not READ_SHARE_ENABLED:
+        return miss
+    hit = READ_SHARE.peek_aged(_read_share_key(endpoint, kwargs or {}, scope=scope), HOSTS_PEEK_MAX_AGE)
+    if not hit or not hit[0] or hit[0][0] != 200:
+        return miss
+    try:
+        body = json.loads(hit[0][1])
+    except (TypeError, ValueError):
+        return miss
+    return (body, hit[1]) if with_age else body
+
+
+def _harvester_hosts():
+    """Clusters visibles par la personne, comme /api/clusters (une session
+    Rancher ne voit pas ceux que Rancher lui cache)."""
+    cfg = load_config_ro()
+    config_names = _config_cluster_names()
+    sso = _sso_session() is not None
+    rows = []
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if not name:
+            continue
+        if sso:
+            kc, _why = _sso_cluster_state(c)
+            if kc is None:
+                continue
+        else:
+            kc = _kubectl_for_cluster(name)
+        rows.append((c, kc, "config" if name in config_names else "console"))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(rows), 16))) as pool:
+        reach = list(pool.map(lambda r: _cluster_reachable(r[1]) if r[1] else None, rows))
+    fleet, fleet_age = _peek_read("api_vms_all", with_age=True)
+    fleet = fleet or {}
+    per_cluster = {x.get("cluster"): x for x in fleet.get("clusters") or [] if isinstance(x, dict)}
+    out = []
+    for (c, _kc, origin), ok in zip(rows, reach):
+        name = c["name"]
+        seen = per_cluster.get(name) or {}
+        state, error, vm_count, vm_count_age = "unknown", None, None, None
+        # Un refus (ou une erreur) repris d'une lecture plus vieille que la
+        # sonde qui répond ne la contredit pas : seul un refus du même
+        # instant (âge <= durée de partage) dit l'alerte.
+        stale = fleet_age is not None and fleet_age > READ_SHARE_TTL
+        if ok is False:
+            state = "unreachable"
+        elif seen.get("state") in ("denied", "error") and not (ok and stale):
+            state, error = seen["state"], seen.get("error")
+        elif ok:
+            state = "ok"
+        if state != "unreachable":
+            if seen.get("state") == "ok":
+                vm_count, vm_count_age = seen.get("count"), fleet_age
+            else:
+                st, st_age = _peek_read("api_status", {"cluster": name}, with_age=True)
+                st = st or {}
+                total = (st.get("summary") or {}).get("vms_total")
+                if isinstance(total, int) and not st.get("unreachable"):
+                    vm_count, vm_count_age = total, st_age
+        upg = _peek_read("api_upgrade", {"cluster": name}) or {}
+        out.append({"kind": "harvester", "name": name, "state": state, "error": error,
+                    "vm_count": vm_count,
+                    # âge (s) de la lecture reprise pour le nombre, dit dans le bandeau
+                    "vm_count_age": int(vm_count_age) if vm_count_age is not None else None,
+                    "labels": dict(c.get("labels") or {}),
+                    "version": upg.get("current") or None, "favorite": False,
+                    "folder": None, "origin": origin})
+    return out
+
+
+def _kvm_hosts_menu():
+    """Hôtes KVM déclarés ; état et nombre de VMs de la dernière lecture de
+    /api/kvm/hosts, sinon de celle de l'hôte seul (/api/kvm/hosts/<h>, page
+    de l'hôte), sinon « unknown » (aucun SSH lancé ici)."""
+    decls = _kd.load_all(_state_dir())
+    seen = {}
+    inv, inv_age = _peek_read("api_kvm_hosts", scope=KVM_SCOPE, with_age=True)
+    for e in (inv or {}).get("hosts") or []:
+        if isinstance(e, dict) and e.get("name"):
+            seen[e["name"]] = e
+    out = []
+    for d in decls:
+        e = seen.get(d["name"])
+        age = inv_age
+        if e is None:
+            # 2.0.0 : la page d'un hôte KVM lit cet hôte seul ; sa lecture
+            # partagée vaut aussi pour le menu (le bandeau ne dit plus « pas
+            # encore lu » d'un hôte qu'il vient de montrer)
+            e, age = _peek_read("api_kvm_host", {"host": d["name"]}, scope=KVM_SCOPE, with_age=True)
+        state, error, vm_count, version = "unknown", None, None, None
+        if e is not None:
+            if e.get("error"):
+                err = e["error"] if isinstance(e["error"], dict) else {}
+                state = _KVM_STATE_OF.get(err.get("kind"), "error")
+                error = err.get("message")
+            else:
+                state = "ok"
+                vm_count = len(e.get("vms") or [])
+                version = e.get("libvirt_version") or None
+        out.append({"kind": "kvm", "name": d["name"], "state": state, "error": error,
+                    "vm_count": vm_count,
+                    "vm_count_age": int(age) if vm_count is not None and age is not None else None,
+                    "labels": dict(d.get("labels") or {}),
+                    "version": version, "favorite": False, "folder": None, "origin": "console"})
+    return out
+
+
+@app.route("/api/hosts")
+@requires_auth
+@shared_read(per_user=True, scope=HOSTS_SCOPE)
+def api_hosts():
+    """Les hôtes du menu : clusters Harvester et hyperviseurs KVM, leur état,
+    leur nombre de VMs s'il est connu, et les favoris de la personne. La tête
+    de chaque famille résume l'état (ok, en alerte)."""
+    hosts = _harvester_hosts() + _kvm_hosts_menu()
+    user = current_user() or "anonymous"
+    try:
+        conn = _fdb.connect(_folders_db_path())
+        try:
+            favs = _fdb.favorites(conn, user)
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        log.warning("folders.db unreadable: %s", e)
+        favs = set()
+    families = {k: {"ok": 0, "alert": 0, "unknown": 0} for k in _fdb.HOST_KINDS}
+    for h in hosts:
+        h["favorite"] = _fdb.host_key(h["kind"], h["name"]) in favs
+        fam = families[h["kind"]]
+        if h["state"] in HOST_ALERT_STATES:
+            fam["alert"] += 1
+        elif h["state"] == "ok":
+            fam["ok"] += 1
+        else:
+            fam["unknown"] += 1
+    _hosts_folders(hosts)
+    hosts.sort(key=lambda h: (_fdb.HOST_KINDS.index(h["kind"]), h["name"].lower(), h["name"]))
+    return jsonify({"families": families, "hosts": hosts})
+
+
+def _hosts_folders(hosts):
+    """2.0.0 : dossier de chaque hôte, lu dans sa déclaration (qui fait foi),
+    sinon le rangement gardé par la console (cluster de config.yaml)."""
+    decl = {}
+    for c in load_config_ro().get("clusters", []):
+        if c.get("name"):
+            decl[("harvester", c["name"])] = c.get("folder")
+    for d in _kd.load_all(_state_dir()):
+        decl[("kvm", d["name"])] = d.get("folder")
+    rows = []
+    for h in hosts:
+        try:
+            key = _fm.object_key("host", family=h["kind"], name=h["name"])
+        except ValueError:
+            continue
+        raw = decl.get((h["kind"], h["name"]))
+        f = _folder_from_annotation({_fm.ANNOTATION: raw if isinstance(raw, str) else None})
+        h.update(key=key, folder=f["folder"], folder_source="vm" if f["folder"] else None, _scope="hosts")
+        rows.append(h)
+    _folders_apply(rows, ["hosts"])
+    for h in hosts:
+        h.pop("_scope", None)
+
+
+def _favorite_target(kind, host):
+    """None si l'hôte peut porter une étoile, sinon la réponse d'erreur :
+    famille inconnue ou nom invalide (400), hôte non déclaré ou invisible
+    pour la personne (404, sans dire lequel des deux)."""
+    if kind not in _fdb.HOST_KINDS:
+        return jsonify({"error": "unknown host kind", "kinds": list(_fdb.HOST_KINDS)}), 400
+    rule = _cd.NAME_RE if kind == "harvester" else _kd.NAME_RE
+    if not isinstance(host, str) or not rule.match(host):
+        return jsonify({"error": "invalid host name"}), 400
+    if kind == "harvester":
+        entry = next((c for c in load_config_ro().get("clusters", []) if c.get("name") == host), None)
+        if entry is None or (_sso_session() is not None and _sso_cluster_state(entry)[0] is None):
+            return jsonify({"error": f"host {host} is not declared"}), 404
+    elif not _kd.decl_path(_state_dir(), host).is_file():
+        return jsonify({"error": f"host {host} is not declared"}), 404
+    return None
+
+
+@app.route("/api/me/favorites/<kind>/<host>", methods=["PUT", "DELETE"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_my_favorite(kind, host):
+    """Étoile d'un hôte dans le menu : une préférence de la personne (comme
+    son mot de passe), gardée dans la base de la console, retrouvée sur un
+    autre poste. Ni action suivie ni ligne de commande (décision 5 du
+    25/10/2026) : rien n'est écrit sur un cluster ou un hyperviseur."""
+    bad = _favorite_target(kind, host)
+    if bad:
+        return bad
+    user = current_user() or "anonymous"
+    conn = _fdb.connect(_folders_db_path())
+    try:
+        if request.method == "PUT":
+            changed = _fdb.add_favorite(conn, user, kind, host)
+        else:
+            changed = _fdb.remove_favorite(conn, user, kind, host)
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "kind": kind, "name": host,
+                    "favorite": request.method == "PUT", "changed": changed})
+
+
+# -----------------------------------------------------------------------------
+# Navigation 2.0 (tâche 14) : les dossiers de la console
+# -----------------------------------------------------------------------------
+# Lecture de l'arborescence pour tous ; chaque geste (créer, renommer,
+# déplacer, ranger, vider, supprimer, annuler, écrire sur les objets) est une
+# action suivie qui lance bin/harvester-folders.py avec le rôle et les
+# kubeconfigs de la personne (parité CLI). Les chemins sont sous
+# /api/folders, pas sous /api/clusters (réservé aux admins) : la règle par
+# défaut de required_role_for donne « operator » à toute écriture.
+FOLDERS_SCRIPT = "harvester-folders.py"
+FOLDERS_RATE = "30/minute"
+FOLDER_OBJECTS_MAX = 500
+FOLDERS_CLUSTER = "folders"          # « cluster » des actions de dossiers (Activité)
+_FOLDER_ACTION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# libellés d'action qui gardent un état d'avant : « Annuler » proposé
+FOLDER_UNDOABLE = ("assign", "rename", "move", "empty-into", "undo")
+_FOLDER_KEY_RE = {
+    "harvester": re.compile(r"^harvester/([^/]+)/([^/]+)/([^/]+)$"),
+    "container": re.compile(r"^container/([^/]+)/([^/]+)/([^/]+)/([^/]+)$"),
+    "kvm": re.compile(r"^kvm/([0-9a-fA-F-]{36})$"),
+    "host": re.compile(r"^host/(harvester|kvm)/([^/]+)$"),
+}
+# sorte d'une charge dans sa clé (en minuscules) -> sorte Kubernetes
+_WORKLOAD_OF_KEY = {k.lower(): k for k in _fm.WORKLOAD_RESOURCES}
+
+
+def _folders_cmd(*sub):
+    """Ligne de commande de l'outil, avec la personne et SON rôle (jamais le
+    défaut : sans --role, l'outil travaille en lecteur)."""
+    return [sys.executable, str(BIN_DIR / FOLDERS_SCRIPT), "--db", str(_folders_db_path()),
+            "--as", current_user() or "anonymous", "--role", current_role(), *sub]
+
+
+def _folders_conn():
+    return _fdb.connect(_folders_db_path())
+
+
+def _visible_cluster_names():
+    """Clusters que la personne voit (une session Rancher ne voit pas ceux
+    que Rancher lui cache), sans lire aucun cluster."""
+    sso = _sso_session() is not None
+    out = set()
+    for c in load_config_ro().get("clusters", []):
+        name = c.get("name")
+        if not name:
+            continue
+        if sso and _sso_cluster_state(c)[0] is None:
+            continue
+        out.add(name)
+    return out
+
+
+def _peek_query(endpoint, qargs):
+    """Corps d'une lecture partagée faite avec ces paramètres de requête, ou None."""
+    if not READ_SHARE_ENABLED:
+        return None
+    hit = READ_SHARE.peek_aged(_read_share_key(endpoint, {}, tuple(qargs)), HOSTS_PEEK_MAX_AGE)
+    if not hit or not hit[0] or hit[0][0] != 200:
+        return None
+    try:
+        return json.loads(hit[0][1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _folder_visible_keys():
+    """{groupe: ensemble des clés que la personne voit, ou None (pas encore
+    lu)}. VMs et conteneurs : les lignes de SES dernières lectures de flotte
+    (lectures partagées) ; hôtes : les clusters qu'elle voit et les hôtes KVM
+    déclarés. Rien de ce qu'elle ne voit pas n'est jamais compté."""
+    vms = _peek_query("api_vms_all", [("kinds", "harvester,kvm")])
+    cts = _peek_query("api_containers_all", [])
+    hosts = {_fm.object_key("host", family="harvester", name=n) for n in _visible_cluster_names()
+             if _cd.NAME_RE.match(n)}
+    hosts |= {_fm.object_key("host", family="kvm", name=d["name"]) for d in _kd.load_all(_state_dir())}
+    return {"vms": {v["key"] for v in vms.get("vms") or [] if v.get("key")} if vms else None,
+            "containers": {w["key"] for w in cts.get("workloads") or [] if w.get("key")} if cts else None,
+            "hosts": hosts}
+
+
+def _folders_tree_with_counts(conn, visible):
+    """Arborescence et comptes par groupe, sous-dossiers compris : chaque
+    objet visible compte pour son dossier et ses ancêtres (un passage, une
+    grande arborescence reste rapide)."""
+    tree = _fdb.list_tree(conn)
+    per = {g: {} for g in ("vms", "containers", "hosts")}
+    for k, m in _fdb.memberships(conn).items():
+        g = _fm.group_of(k)
+        seen = visible.get(g)
+        if not m["folder_path"] or seen is None or k not in seen:
+            continue
+        for a in _fm.ancestors(m["folder_path"]):
+            per[g][a] = per[g].get(a, 0) + 1
+    for f in tree:
+        f["counts"] = {g: (None if visible.get(g) is None else per[g].get(f["path"], 0)) for g in per}
+        f.pop("created_by", None)
+    return tree
+
+
+@app.route("/api/folders")
+@requires_auth
+def api_folders():
+    """L'arborescence des dossiers, et pour chacun le nombre de VMs, de
+    conteneurs et d'hôtes rangés dedans (sous-dossiers compris), limité à ce
+    que la personne voit (null : pas encore lu par elle)."""
+    try:
+        conn = _folders_conn()
+        try:
+            tree = _folders_tree_with_counts(conn, _folder_visible_keys())
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        log.warning("folders.db unreadable: %s", e)
+        return jsonify({"error": "folders database unreadable"}), 500
+    return jsonify({"tree": tree, "role": current_role()})
+
+
+def _folder_body():
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return None, (jsonify({"error": "a JSON object is expected"}), 400)
+    return body, None
+
+
+def _folder_by_id(conn, folder_id):
+    """Chemin d'un dossier, ou une réponse 404."""
+    path = _fdb.path_of(conn, folder_id)
+    if path is None:
+        return None, (jsonify({"error": f"no folder {folder_id}"}), 404)
+    return path, None
+
+
+def _folder_target(conn, value, allow_unfiled=True):
+    """`unfiled`, ou un identifiant de dossier existant -> (chemin|None, id|None)."""
+    if allow_unfiled and value == _fm.UNFILED:
+        return (None, None), None
+    try:
+        fid = int(value)
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "the target must be a folder id" + (" or 'unfiled'" if allow_unfiled else "")}), 400)
+    path, err = _folder_by_id(conn, fid)
+    if err:
+        return None, err
+    return (path, fid), None
+
+
+def _kvm_host_of_scope(scope):
+    return scope[4:] if isinstance(scope, str) and scope.startswith("kvm/") else None
+
+
+def _folder_object(item, cache=None, clusters=None):
+    """Objet de la demande pour l'outil, depuis sa clé (et l'hôte pour une VM
+    KVM). Le domaine KVM est désigné par son UUID (virsh l'accepte). Rend
+    (objet, None) ou (None, raison)."""
+    if isinstance(item, str):
+        item = {"key": item}
+    if not isinstance(item, dict) or not isinstance(item.get("key"), str):
+        return None, "each object needs a key"
+    key = item["key"]
+    kind = key.split("/", 1)[0]
+    m = _FOLDER_KEY_RE.get(kind) and _FOLDER_KEY_RE[kind].match(key)
+    if not m:
+        return None, f"invalid object key: {key[:120]}"
+    clusters = _visible_cluster_names() if clusters is None else clusters
+    if kind in ("harvester", "container"):
+        cluster = m.group(1)
+        if cluster not in clusters:
+            return None, f"unknown cluster: {cluster}"
+        ns, name = m.group(2), m.group(m.lastindex)
+        if not _K8S_NAME_RE.match(ns) or not _K8S_SUBDOMAIN_RE.match(name):
+            return None, f"invalid object key: {key[:120]}"
+        obj = {"kind": kind, "cluster": cluster, "namespace": ns, "name": name}
+        if kind == "container":
+            wk = _WORKLOAD_OF_KEY.get(m.group(3))
+            if not wk:
+                return None, f"workload kind {m.group(3)} cannot be filed"
+            obj["workload_kind"] = wk
+    elif kind == "kvm":
+        uuid_ = m.group(1).lower()
+        host = item.get("host")
+        if host is None and cache is not None:
+            host = _kvm_host_of_scope((cache.get(key) or {}).get("scope"))
+        if not isinstance(host, str) or not _kd.NAME_RE.match(host) or \
+                not _kd.decl_path(_state_dir(), host).is_file():
+            return None, f"{key}: unknown KVM host"
+        obj = {"kind": "kvm", "uuid": uuid_, "host": host, "domain": uuid_}
+    else:
+        family, name = m.group(1), m.group(2)
+        if family == "harvester" and name not in clusters:
+            return None, f"unknown cluster: {name}"
+        if family == "kvm" and (not _kd.NAME_RE.match(name) or not _kd.decl_path(_state_dir(), name).is_file()):
+            return None, f"KVM host {name} is not declared"
+        obj = {"kind": "host", "family": family, "name": name}
+    try:
+        parts = {k: v for k, v in obj.items() if k not in ("kind", "host", "domain")}
+        if kind == "host":
+            parts = {"family": obj["family"], "name": obj["name"]}
+        if _fm.object_key(kind, **parts) != (key.lower() if kind == "kvm" else key):
+            return None, f"invalid object key: {key[:120]}"
+    except ValueError as e:
+        return None, f"{key[:120]}: {e}"
+    obj["key"] = _fm.object_key(kind, **parts)
+    return obj, None
+
+
+def _folder_objects(items, cache=None):
+    """Objets d'une demande (liste de clés ou d'objets), sans doublon ; une
+    réponse 400 au premier invalide."""
+    if not isinstance(items, list) or not items:
+        return None, (jsonify({"error": "objects must be a non-empty list"}), 400)
+    if len(items) > FOLDER_OBJECTS_MAX:
+        return None, (jsonify({"error": f"{FOLDER_OBJECTS_MAX} objects at most per gesture"}), 400)
+    clusters = _visible_cluster_names()
+    out = {}
+    for it in items:
+        obj, why = _folder_object(it, cache, clusters)
+        if why:
+            return None, (jsonify({"error": why}), 400)
+        out[obj["key"]] = obj
+    return list(out.values()), None
+
+
+def _members_objects(conn, path):
+    """Objets rangés dans `path` (sous-dossiers compris) que la console peut
+    désigner ; une clé qu'elle ne sait plus désigner (hôte KVM retiré...)
+    reste hors de la demande et son ligne le dit."""
+    cache = _fdb.memberships(conn)
+    clusters = _visible_cluster_names()
+    objs = []
+    for key, m in sorted(cache.items()):
+        if m["folder_path"] and _fm.within(m["folder_path"], path):
+            obj, _why = _folder_object({"key": key}, cache, clusters)
+            if obj:
+                objs.append(obj)
+    return objs
+
+
+def _folder_spec(objects, chosen=False):
+    """Demande de l'outil : objets, clés visibles et kubeconfig de la personne
+    par cluster (préparé ICI, dans le fil de la requête qui connaît son
+    identité ; jamais renvoyé ni affiché). `visible` = les clés de SES
+    lectures (revue I-1) : un objet rangé qu'elle ne voit pas peut être dans
+    la demande (la console le réécrit) mais l'outil ne le nomme jamais. Seul
+    `assign` (`chosen`) y ajoute les objets qu'elle a choisis."""
+    kcs = {}
+    for o in objects:
+        c = o.get("cluster") or (o["name"] if o["kind"] == "host" and o.get("family") == "harvester" else None)
+        if o["kind"] in ("harvester", "container") and c not in kcs:
+            kc = _kubectl_for_cluster(c)
+            if kc:
+                kcs[c] = kc
+    vis = _folder_visible_keys()
+    visible = set(vis["hosts"]) | (vis["vms"] or set()) | (vis["containers"] or set())
+    if chosen:
+        visible |= {o["key"] for o in objects}
+    return {"objects": objects, "visible": sorted(visible), "kubeconfigs": kcs}
+
+
+def _name_clash(conn, parent_id, name, folder_id=None):
+    """Revue M-1 : réponse 409 si un frère porte déjà ce nom (avant le 202,
+    comme empty-into), sinon None."""
+    if not _fm.name_taken(_fdb.list_tree(conn), parent_id, name, folder_id):
+        return None
+    where = _fdb.path_of(conn, parent_id) if parent_id is not None else "the root"
+    return jsonify({"error": f"a folder named {name!r} already exists in {where}",
+                    "conflicts": [name]}), 409
+
+
+def _folders_after():
+    # le dossier lu sur les objets est dans les lectures de flotte partagées
+    READ_SHARE.invalidate(None)
+
+
+def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None):
+    """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur."""
+    script = BIN_DIR / FOLDERS_SCRIPT
+    if not script.is_file():
+        return jsonify({"error": f"{FOLDERS_SCRIPT} not deployed"}), 503
+
+    def setup(run):
+        run.required_role = "operator"
+        if undoable:
+            run.undo = {"path": f"/api/folders/actions/{run.id}/undo"}
+        if result:
+            run.result = dict(result)
+    spec = _folder_spec(objects, chosen) if objects is not None else None
+    run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
+                           spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
+    if err:
+        return err
+    # rangée dès le départ (et non à la fin seulement) : une console arrêtée
+    # en plein geste la retrouve au redémarrage, `interrupted`, avec
+    # « Reprendre » ; sans cette ligne l'action disparaissait de l'Activité
+    # et ses lignes `pending` n'étaient plus reprises que par la CLI
+    try:
+        _actions_persist(run)
+    except (sqlite3.Error, OSError) as e:
+        log_actions.warning("folder action %s not recorded at start: %s", run.id, e)
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/folders", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_create():
+    """Crée un dossier (`parent_id` null = à la racine)."""
+    body, err = _folder_body()
+    if err:
+        return err
+    name = body.get("name")
+    why = _fm.check_name(name) if isinstance(name, str) else "the name must be text"
+    if why:
+        return jsonify({"error": why}), 400
+    parent = body.get("parent_id")
+    conn = _folders_conn()
+    try:
+        if parent is not None:
+            t, err = _folder_target(conn, parent, allow_unfiled=False)
+            if err:
+                return err
+            parent = t[1]
+        clash = _name_clash(conn, parent, name)
+        if clash:
+            return clash
+    finally:
+        conn.close()
+    return _folder_action(f"create:{name}", ["create", "--parent", str(parent) if parent is not None else "/",
+                                             "--name", name])
+
+
+@app.route("/api/folders/<int:folder_id>", methods=["PATCH"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_update(folder_id):
+    """Renomme (`name`) ou déplace (`parent_id`, null = racine) un dossier ;
+    ses objets sont réécrits dans la même action. Un seul changement à la fois."""
+    body, err = _folder_body()
+    if err:
+        return err
+    if "position" in body:
+        return jsonify({"error": "folders are sorted by name: position cannot be set"}), 400
+    has_name, has_parent = "name" in body, "parent_id" in body
+    if has_name == has_parent:
+        return jsonify({"error": "give either name or parent_id"}), 400
+    conn = _folders_conn()
+    try:
+        path, err = _folder_by_id(conn, folder_id)
+        if err:
+            return err
+        objects = _members_objects(conn, path)
+        if has_name:
+            why = _fm.check_name(body["name"]) if isinstance(body["name"], str) else "the name must be text"
+            if why:
+                return jsonify({"error": why}), 400
+            me = next(f for f in _fdb.list_tree(conn) if f["id"] == folder_id)
+            clash = _name_clash(conn, me["parent_id"], body["name"], folder_id)
+            if clash:
+                return clash
+            sub = ["rename", "--folder", str(folder_id), "--name", body["name"]]
+            label = f"rename:{path}"
+        else:
+            parent = body["parent_id"]
+            if parent is not None:
+                t, err = _folder_target(conn, parent, allow_unfiled=False)
+                if err:
+                    return err
+                parent = t[1]
+            clash = _name_clash(conn, parent, _fm.split(path)[-1], folder_id)
+            if clash:
+                return clash
+            sub = ["move-folder", "--folder", str(folder_id), "--parent", str(parent) if parent is not None else "/"]
+            label = f"move:{path}"
+    finally:
+        conn.close()
+    return _folder_action(label, sub, objects, undoable=True)
+
+
+def _delete_refusal(conn, folder_id, path):
+    """None si le dossier est vide pour tout le monde, sinon la réponse 409
+    qui dit ce que la personne voit (jamais le nombre caché)."""
+    vis = _folder_visible_keys()
+    visible = set(vis["hosts"]) | (vis["vms"] or set()) | (vis["containers"] or set())
+    members = {k: m["folder_path"] for k, m in _fdb.memberships(conn).items()}
+    check = _fm.delete_check(_fdb.list_tree(conn), folder_id, members, visible)
+    if check["empty"]:
+        return None
+    return jsonify({"error": f"folder {path} is not empty: move its content to another folder first",
+                    "nonempty": True, "count_visible": check["count_visible"],
+                    "subfolders": check["subfolders"], "hidden": check["hidden"]}), 409
+
+
+@app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_delete(folder_id):
+    """Supprime un dossier VIDE ; un dossier non vide est refusé (409) et la
+    fenêtre propose d'en déplacer d'abord le contenu (empty-into)."""
+    conn = _folders_conn()
+    try:
+        path, err = _folder_by_id(conn, folder_id)
+        if err:
+            return err
+        refusal = _delete_refusal(conn, folder_id, path)
+        if refusal:
+            return refusal
+    finally:
+        conn.close()
+    return _folder_action(f"delete:{path}", ["delete", "--folder", str(folder_id)], [])
+
+
+@app.route("/api/folders/<int:folder_id>/empty-into", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_empty_into(folder_id):
+    """Déplace le contenu d'un dossier (objets et sous-dossiers) vers
+    `target_id` (ou `unfiled`), puis le supprime : une action, réversible."""
+    body, err = _folder_body()
+    if err:
+        return err
+    conn = _folders_conn()
+    try:
+        path, err = _folder_by_id(conn, folder_id)
+        if err:
+            return err
+        t, err = _folder_target(conn, body.get("target_id"))
+        if err:
+            return err
+        to_path, target = t
+        tree = _fdb.list_tree(conn)
+        if target is not None and target in _fm.subtree_ids(tree, folder_id):
+            return jsonify({"error": "the content cannot go into the folder itself or one of its subfolders"}), 400
+        # contrôle avant geste : un sous-dossier qui ferait doublon dans la cible
+        clash = _fm.empty_into_conflicts(tree, folder_id, target)
+        if clash:
+            return jsonify({"error": f"a folder named {clash[0]!r} already exists in {to_path or 'the root'}: "
+                                     "rename or move it first, or choose another target",
+                            "conflicts": clash}), 409
+        objects = _members_objects(conn, path)
+    finally:
+        conn.close()
+    return _folder_action(f"empty-into:{path}", ["empty-into", "--folder", str(folder_id),
+                                                 "--to", str(target) if target is not None else _fm.UNFILED],
+                          objects, undoable=True)
+
+
+@app.route("/api/folders/assign", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_assign():
+    """Range des objets (VMs, conteneurs, hôtes) dans un dossier (`to` : id
+    ou `unfiled`). Chaque objet que la personne peut écrire porte son
+    dossier ; sinon seule la console le garde. Réversible (Annuler)."""
+    body, err = _folder_body()
+    if err:
+        return err
+    conn = _folders_conn()
+    try:
+        t, err = _folder_target(conn, body.get("to"))
+        if err:
+            return err
+        to_path = t[0]
+        objects, err = _folder_objects(body.get("objects"), _fdb.memberships(conn))
+        if err:
+            return err
+    finally:
+        conn.close()
+    dest = to_path or _fm.UNFILED
+    return _folder_action(f"assign:{dest}", ["assign", "--to", dest], objects, undoable=True, chosen=True)
+
+
+def _action_launcher(action_id):
+    """Qui a lancé cette action (`--as` de sa ligne), en mémoire ou dans
+    l'historique ; None si on ne le sait pas."""
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    cmd = run.cmd if run is not None else None
+    if cmd is None:
+        try:
+            conn = sqlite3.connect(str(ACTIONS_DB))
+            row = conn.execute("SELECT cmd FROM actions WHERE id = ?", (action_id,)).fetchone()
+            conn.close()
+            cmd = json.loads(row[0]) if row and row[0] and row[0].startswith("[") else None
+        except (sqlite3.Error, ValueError):
+            cmd = None
+    if isinstance(cmd, list) and "--as" in cmd[:-1]:
+        who = cmd[cmd.index("--as") + 1]
+        return who if isinstance(who, str) and who else None
+    return None
+
+
+@app.route("/api/folders/actions/<action_id>/undo", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_undo(action_id):
+    """Annule une action de dossiers : remet les dossiers d'avant (un objet
+    déplacé ailleurs depuis n'est pas touché, le conflit est dit)."""
+    if not _FOLDER_ACTION_RE.match(action_id):
+        return jsonify({"error": "invalid action id"}), 400
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None and run.status in ("starting", "running"):
+        return jsonify({"error": "the action is still running: wait for its end"}), 409
+    conn = _folders_conn()
+    try:
+        moves = _fdb.moves_of(conn, action_id)
+        if not moves:
+            return jsonify({"error": f"no folder action {action_id}"}), 404
+        cache = _fdb.memberships(conn)
+        clusters = _visible_cluster_names()
+        objects = []
+        for key in sorted({m["object_key"] for m in moves if not m["object_key"].startswith("folder/")}):
+            obj, _why = _folder_object({"key": key}, cache, clusters)
+            if obj:
+                objects.append(obj)
+    finally:
+        conn.close()
+    # revue M-4 : tout opérateur peut annuler (règle gardée) ; le journal dit
+    # de qui était le geste et qui l'annule
+    owner = _action_launcher(action_id)
+    sub = ["undo", "--action", action_id] + (["--of", owner] if owner else [])
+    return _folder_action(f"undo:{action_id}", sub, objects, undoable=True,
+                          result={"undoes": action_id, "of": owner, "by": current_user() or "anonymous"})
+
+
+@app.route("/api/folders/actions/<action_id>/resume", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_resume(action_id):
+    """Revue M-5 : reprend une action de dossiers interrompue (lignes
+    `pending` ou `failed`), comme `resume` en ligne de commande ; une ligne
+    faite n'est jamais réécrite, un objet rangé ailleurs depuis est laissé."""
+    if not _FOLDER_ACTION_RE.match(action_id):
+        return jsonify({"error": "invalid action id"}), 400
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None and run.status in ("starting", "running"):
+        return jsonify({"error": "the action is still running: wait for its end"}), 409
+    conn = _folders_conn()
+    try:
+        moves = _fdb.moves_of(conn, action_id)
+        if not moves:
+            return jsonify({"error": f"no folder action {action_id}"}), 404
+        cache = _fdb.memberships(conn)
+        clusters = _visible_cluster_names()
+        objects = []
+        for key in sorted({m["object_key"] for m in moves if m["status"] in ("pending", "failed")
+                           and not m["object_key"].startswith("folder/")}):
+            obj, _why = _folder_object({"key": key}, cache, clusters)
+            if obj:
+                objects.append(obj)
+    finally:
+        conn.close()
+    return _folder_action(f"resume:{action_id}", ["resume", "--action", action_id], objects)
+
+
+@app.route("/api/folders/<int:folder_id>/write-back", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_write_back(folder_id):
+    """Écrit sur les objets les rangements gardés par la console seulement
+    (dossier et sous-dossiers) que la personne peut désormais écrire."""
+    conn = _folders_conn()
+    try:
+        path, err = _folder_by_id(conn, folder_id)
+        if err:
+            return err
+        cache = _fdb.memberships(conn)
+        objects = [o for o in _members_objects(conn, path) if cache[o["key"]]["source"] == "console"]
+    finally:
+        conn.close()
+    return _folder_action(f"write-back:{path}", ["write-back", "--folder", str(folder_id)], objects)
+
+
+# --- contrôles avant geste --------------------------------------------------------
+
+def _patch_resource(obj):
+    return ("virtualmachines.kubevirt.io" if obj["kind"] == "harvester"
+            else _fm.WORKLOAD_RESOURCES.get(obj.get("workload_kind")))
+
+
+def _can_i_patch(kc, obj, named=True):
+    """(écrit sur l'objet ?, raison) par `kubectl auth can-i` avec le
+    kubeconfig de la personne (SelfSubjectAccessReview, usurpation et
+    Rancher compris). None pour une erreur (raison donnée). `named=False` :
+    toute la ressource de l'espace de noms (revue M-2 : un « yes » vaut pour
+    chaque objet, un « no » fait demander par nom)."""
+    resource = _patch_resource(obj)
+    target = f"{resource}/{obj['name']}" if named else resource
+    try:
+        r = _kubectl_run(["kubectl", "--kubeconfig", kc, "auth", "can-i", "patch",
+                          target, "-n", obj["namespace"]],
+                         capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired as e:
+        return None, _safe_proc_error(e)
+    out = (r.stdout or "").strip().lower()
+    if out.startswith("yes"):
+        return True, ""
+    if out.startswith("no"):
+        return False, ""
+    return None, ((r.stderr or "").strip().replace(kc, "<kubeconfig>") or f"exit code {r.returncode}")[:300]
+
+
+def _check_kube_objects(objs):
+    from concurrent.futures import ThreadPoolExecutor
+    kcs, reach = {}, {}
+    for o in objs:
+        c = o["cluster"]
+        if c not in kcs:
+            kcs[c] = _kubectl_for_cluster(c)
+            reach[c] = _cluster_reachable(kcs[c]) if kcs[c] else None
+    # revue M-3 : compte local sans délégation ni session Rancher, le
+    # kubeconfig est celui de la console (system:masters) ; la raison le dit
+    own = _sso_session() is None and not current_cluster_identity()
+    write_reason = ("the console writes it with its own identity (no identity delegation): the folder is "
+                    "written on it" if own else "you can write this object: the folder is written on it")
+    # revue M-2 : une revue sans nom par (cluster, espace de noms, ressource)
+    # de plusieurs objets ; par nom seulement si elle ne répond pas « yes »
+    groups = {}
+    for o in objs:
+        if kcs[o["cluster"]] and reach[o["cluster"]] is not False:
+            groups.setdefault((o["cluster"], o["namespace"], _patch_resource(o)), []).append(o)
+    wide = [g for g in groups.values() if len(g) > 1]
+    with ThreadPoolExecutor(max_workers=max(1, min(len(wide), 8))) as pool:
+        granted = {(g[0]["cluster"], g[0]["namespace"], _patch_resource(g[0]))
+                   for g, (ok, _why) in zip(wide, pool.map(lambda g: _can_i_patch(kcs[g[0]["cluster"]], g[0], named=False), wide))
+                   if ok}
+
+    def one(o):
+        kc = kcs[o["cluster"]]
+        if not kc:
+            return {"key": o["key"], "write": False, "outcome": "fail", "check": "ssar",
+                    "reason": f"cluster {o['cluster']} is not visible to you"}
+        if reach[o["cluster"]] is False:
+            return {"key": o["key"], "write": False, "outcome": "fail", "check": "ssar",
+                    "reason": f"cluster {o['cluster']} does not answer: the move will fail for this object"}
+        ok, why = (True, "") if (o["cluster"], o["namespace"], _patch_resource(o)) in granted else _can_i_patch(kc, o)
+        if ok:
+            return {"key": o["key"], "write": True, "outcome": "object", "check": "ssar",
+                    "reason": write_reason}
+        if ok is False:
+            return {"key": o["key"], "write": False, "outcome": "console", "check": "ssar",
+                    "reason": "you cannot write this object on its cluster: only the console's filing changes"}
+        return {"key": o["key"], "write": False, "outcome": "fail", "check": "ssar",
+                "reason": f"the access review failed: {why}"}
+    with ThreadPoolExecutor(max_workers=max(1, min(len(objs), 8))) as pool:
+        return list(pool.map(one, objs))
+
+
+def _check_kvm_objects(objs):
+    """Hôte joignable et domaine persistant : un seul appel SSH par hôte."""
+    out = []
+    by_host = {}
+    for o in objs:
+        by_host.setdefault(o["host"], []).append(o)
+    state = _state_dir()
+    for host, items in sorted(by_host.items()):
+        try:
+            vh = _kh.VirshHost(_kd.load(state, host), state, timeout=KVM_READ_TIMEOUT)
+            res = vh.batch({f"d{i}": ("dominfo", "--domain", o["domain"]) for i, o in enumerate(items)},
+                           idempotent=True)
+        except Exception as e:  # noqa: BLE001 : hôte injoignable, clé refusée...
+            msg = str(getattr(e, "message", e))[:200]
+            out += [{"key": o["key"], "write": False, "outcome": "fail", "check": "virsh",
+                     "reason": f"host {host} cannot be reached: {msg}"} for o in items]
+            continue
+        for i, o in enumerate(items):
+            r = res.get(f"d{i}")
+            if r is None or not r.ok:
+                out.append({"key": o["key"], "write": False, "outcome": "fail", "check": "virsh",
+                            "reason": f"domain not found on {host}"})
+                continue
+            info = _kh.parse_dominfo(str(r))
+            if info.get("persistent"):
+                out.append({"key": o["key"], "write": True, "outcome": "object", "check": "virsh",
+                            "reason": "the folder is written in the domain's libvirt metadata"})
+            elif info.get("id") is not None:
+                out.append({"key": o["key"], "write": False, "outcome": "console", "check": "virsh",
+                            "reason": "transient domain: the folder would be lost when it stops, the console keeps it"})
+            else:
+                out.append({"key": o["key"], "write": False, "outcome": "fail", "check": "virsh",
+                            "reason": "the domain is neither persistent nor running"})
+    return out
+
+
+def _check_host_objects(objs):
+    config = _config_cluster_names()
+    out = []
+    for o in objs:
+        if o["family"] == "harvester" and o["name"] in config:
+            out.append({"key": o["key"], "write": False, "outcome": "console", "check": "decl",
+                        "reason": "declared in config.yaml (read-only for the console): filed in the console only"})
+        else:
+            out.append({"key": o["key"], "write": True, "outcome": "object", "check": "decl",
+                        "reason": "the folder is written in the host declaration"})
+    return out
+
+
+@app.route("/api/folders/check", methods=["POST"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_folders_check():
+    """Contrôles avant un rangement, objet par objet, sans rien écrire : la
+    personne peut-elle écrire l'objet (revue d'accès du serveur pour
+    Harvester, hôte joignable et domaine persistant pour KVM, déclaration
+    de la console pour un hôte), sinon seul le rangement de la console
+    change (`outcome: console`), ou le geste échouera (`fail`, raison dite)."""
+    body, err = _folder_body()
+    if err:
+        return err
+    conn = _folders_conn()
+    try:
+        if body.get("to") is not None:
+            _t, err = _folder_target(conn, body.get("to"))
+            if err:
+                return err
+        objects, err = _folder_objects(body.get("objects"), _fdb.memberships(conn))
+        if err:
+            return err
+    finally:
+        conn.close()
+    kube = [o for o in objects if o["kind"] in ("harvester", "container")]
+    kvm = [o for o in objects if o["kind"] == "kvm"]
+    hosts = [o for o in objects if o["kind"] == "host"]
+    res = {}
+    for r in (_check_kube_objects(kube) if kube else []) + (_check_kvm_objects(kvm) if kvm else []) \
+            + _check_host_objects(hosts):
+        res[r["key"]] = r
+    return jsonify({"objects": [res[o["key"]] for o in objects]})
 
 
 # -----------------------------------------------------------------------------
@@ -9281,6 +10659,25 @@ def _containers_collect(cluster, kc):
             "denials": [d[:300] for d in denials]}, 200, denials
 
 
+def _containers_folders(rows, scopes_ok):
+    """2.0.0 : clé et dossier des charges rangeables (Deployment, StatefulSet,
+    DaemonSet, CronJob), lus sur leur annotation, et réalignement du cache
+    (décision 4 : pendant une lecture, sans action suivie). Les autres
+    charges n'ont ni clé ni dossier."""
+    tagged = []
+    for w in rows:
+        raw = w.pop("folder_annotation", None)
+        if w.get("kind") not in _fm.WORKLOAD_RESOURCES:
+            continue
+        f = _folder_from_annotation({_fm.ANNOTATION: raw})
+        w["key"] = _fm.object_key("container", cluster=w["cluster"], namespace=w["namespace"],
+                                  workload_kind=w["kind"], name=w["name"])
+        w["folder"], w["folder_source"] = f["folder"], ("vm" if f["folder"] else None)
+        w["_scope"] = f"container/{w['cluster']}"
+        tagged.append(w)
+    _folders_apply(tagged, scopes_ok)
+
+
 @app.route("/api/containers/<cluster>")
 @requires_auth
 @shared_read()
@@ -9295,6 +10692,11 @@ def api_containers_list(cluster):
     payload, status, denials = _containers_collect(cluster, kc)
     for d in denials:
         _note_cluster_denial(d)
+    if status == 200:
+        for w in payload["workloads"]:
+            w["cluster"] = cluster
+        _containers_folders(payload["workloads"],
+                            [f"container/{cluster}"] if _purge_allowed(payload.get("denials")) else [])
     return jsonify(payload), status
 
 
@@ -9306,11 +10708,7 @@ def api_containers_all():
     parallèle avec l'identité de la personne, comme /api/vms-all. Un cluster
     éteint, injoignable ou qui refuse la lecture est dit dans `clusters`."""
     cfg = load_config_ro()
-    todo = []
-    for c in cfg.get("clusters", []):
-        name = c.get("name")
-        if name:
-            todo.append((name, _kubectl_for_cluster(name)))
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -9338,8 +10736,11 @@ def api_containers_all():
     for info, part, _denials in results:
         clusters.append(info)
         rows.extend(part)
+    _containers_folders(rows, [f"container/{c['cluster']}" for c in clusters
+                               if c["state"] == "ok" and _purge_allowed(c.get("denials"))])
     rows.sort(key=lambda w: (w["name"], w["cluster"], w["namespace"], w["kind"]))
-    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows})
+    return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows,
+                    "hidden_count": hidden})
 
 
 @app.route("/api/containers/<cluster>/<namespace>/pod/<oname>/logs")
@@ -9584,8 +10985,7 @@ def api_gpus_all():
     injoignable, qui refuse la lecture ou sans l'add-on des périphériques
     est dit dans `clusters`."""
     cfg = load_config_ro()
-    todo = [(c.get("name"), _kubectl_for_cluster(c.get("name")))
-            for c in cfg.get("clusters", []) if c.get("name")]
+    todo, hidden = _fleet_clusters(cfg)
 
     def one(item):
         name, kc = item
@@ -9624,7 +11024,8 @@ def api_gpus_all():
         pools.extend({"cluster": info["cluster"], "type": e["type"], "model": e["model"],
                       "capacity": e["capacity"], "used": e["used"]} for e in _hbk.catalog(part))
     return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]),
-                    "units": units, "summary": _hgpu.summarize(units), "pools": pools})
+                    "units": units, "summary": _hgpu.summarize(units), "pools": pools,
+                    "hidden_count": hidden})
 
 
 
@@ -10217,14 +11618,41 @@ def api_kvm_host(host):
     try:
         inv = _kh.host_inventory(vh, details=True)
     except _kh.KvmError as e:
-        return jsonify(dict(_kvm_public(vh.decl), error={"kind": e.kind, "message": e.message})), 502
+        return jsonify(dict(_kvm_public(vh.decl), role=current_role(),
+                            error={"kind": e.kind, "message": e.message})), 502
     except Exception as e:                     # noqa: BLE001 : erreur classée, jamais un 500 nu
         log.warning("KVM: reading %s failed: %s", host, e)
-        return jsonify(dict(_kvm_public(vh.decl), error={
+        return jsonify(dict(_kvm_public(vh.decl), role=current_role(), error={
             "kind": "failed", "message": f"{host}: failed: unexpected error ({type(e).__name__})"})), 502
     _kvm_network_details(vh, inv)
+    # 2.0.0 : la page d'un hôte KVM grise ses boutons d'après le rôle (la clé
+    # de la lecture partagée porte déjà le rôle)
     _kvm_warm_surveys([host])
-    return jsonify(dict(_kvm_public(vh.decl), **inv))
+    return jsonify(dict(_kvm_public(vh.decl), role=current_role(), **inv))
+
+
+@app.route("/api/kvm/hosts/<host>/declaration")
+@requires_auth
+def api_kvm_host_declaration(host):
+    """2.0.0 : la déclaration d'un hôte, sans rien lui demander (Paramètres >
+    Étiquettes et Connexion de sa page restent lisibles quand il ne répond
+    pas) : adresse, port, utilisateur, URI, étiquettes, pools d'images et
+    empreintes épinglées. Jamais le chemin de la clé ni celui du fichier
+    d'empreintes."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    state = _state_dir()
+    try:
+        decl = _kd.load(state, host)
+    except FileNotFoundError:
+        return _kvm_err(f"host {host} is not declared", 404)
+    except _kd.DeclError:
+        return _kvm_err(f"the declaration of host {host} cannot be read", 500)
+    return jsonify(dict(_kvm_public(decl), image_pools=decl.get("image_pools"),
+                        fingerprints=_kd.pinned_keys(state, host), role=current_role()))
 
 
 def _kvm_network_details(vh, inv):
@@ -10579,7 +12007,43 @@ def api_kvm_vm_gesture(host, domain, gesture):
 # -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
-CONFIG_LOCK = threading.Lock()
+class _ConfigLock:
+    """Verrou des déclarations de clusters : entre les fils de la console
+    (threading) ET avec les autres processus qui écrivent clusters.d
+    (cluster_decl.decl_lock, pris aussi par harvester-folders.py pour le
+    champ `folder`). Sans état inscriptible, le verrou des fils seul."""
+
+    def __init__(self):
+        self._thread_lock = threading.Lock()
+        self._file_lock = None
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        try:
+            cm = _cd.decl_lock(_state_dir(), wait=30.0)
+            cm.__enter__()
+        except TimeoutError:
+            self._thread_lock.release()
+            raise
+        except OSError:
+            cm = None
+        except BaseException:
+            self._thread_lock.release()
+            raise
+        self._file_lock = cm
+        return self
+
+    def __exit__(self, *exc):
+        cm, self._file_lock = self._file_lock, None
+        try:
+            if cm is not None:
+                cm.__exit__(*exc)
+        finally:
+            self._thread_lock.release()
+        return False
+
+
+CONFIG_LOCK = _ConfigLock()
 
 
 def _config_dir():
@@ -10864,6 +12328,10 @@ def api_clusters_update(name):
             cluster["ssh"]["key"] == (original.get("ssh") or {}).get("key", "")
         if generated:
             cluster["ssh"]["generated"] = True
+        # 2.0.0 : le dossier de l'hôte n'est écrit que par harvester-folders.py
+        # (rôle operator) ; la fenêtre d'édition le garde tel quel
+        if original.get("folder") is not None:
+            cluster["folder"] = original["folder"]
         # Rename handling: if cluster name changed, move kubeconfig/sshkey files
         if cluster["name"] != name:
             if any(c.get("name") == cluster["name"] for c in load_config().get("clusters", [])):
@@ -18834,8 +20302,7 @@ def _fk_taken_across_clusters():
     déclarés qui répondent (v1.76.0, refus avant `wave-apply`, et vue
     globale). Rend ({(hôte vCenter, vm-NN): {"wave", "state", "cluster"}},
     [clusters injoignables ou dont la lecture a échoué])."""
-    cfg = load_config()
-    clusters = [(c["name"], _kubectl_for_cluster(c["name"])) for c in cfg.get("clusters", [])]
+    clusters, _hidden = _fleet_clusters(load_config())
 
     def scan(name, kc):
         if not kc or _cluster_reachable(kc) is False:
@@ -19093,12 +20560,11 @@ def api_forklift_global():
     hit = _FK_GLOBAL_CACHE.get(key)
     if hit and now - hit[0] < _FK_GLOBAL_TTL:
         return jsonify(hit[1])
-    cfg = load_config()
-    clusters = [(c["name"], _kubectl_for_cluster(c["name"])) for c in cfg.get("clusters", [])]
+    clusters, hidden = _fleet_clusters(load_config())
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(1, len(clusters))) as pool:
         rows = list(pool.map(lambda nk: _fk_global_cluster(*nk), clusters))
-    body = {"clusters": sorted(rows, key=lambda r: r["cluster"] or "")}
+    body = {"clusters": sorted(rows, key=lambda r: r["cluster"] or ""), "hidden_count": hidden}
     _FK_GLOBAL_CACHE[key] = (now, body)
     return jsonify(body)
 
@@ -24397,6 +25863,36 @@ def api_kvm_image_pools(host):
     return _kvm_accepted(run, host=host, pools=pools)
 
 
+@app.route("/api/kvm/hosts/<host>/labels", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_kvm_host_labels(host):
+    """2.0.0 : étiquettes d'un hôte (administrateur) {labels: {clé: valeur}} ;
+    le jeu entier est remplacé, un jeu vide les retire toutes. Seule la
+    déclaration change (rien n'est demandé à l'hôte) ; `host label` du script
+    le fait en action suivie, qui garde l'état d'avant (`previous`)."""
+    err = _kvm_unavailable()
+    if err:
+        return err
+    if not _kvm_check_host(host):
+        return _kvm_err("invalid host name")
+    if not _kd.decl_path(_state_dir(), host).exists():
+        return _kvm_err(f"host {host} is not declared", 404)
+    body, err = _kvm_body()
+    if err:
+        return err
+    labels = body.get("labels")
+    problem = _kd.check_labels(labels)
+    if problem:
+        return _kvm_err(problem)
+    cmd = _kvm_base("host", "label") + [f"--host={host}"] + (
+        [f"--label={k}={v}" for k, v in sorted(labels.items())] or ["--clear"])
+    run, err = _kvm_action(host, f"kvm:host-label:{host}", cmd)
+    if err:
+        return err
+    return _kvm_accepted(run, host=host, labels=labels)
+
+
 # --- modèles ---------------------------------------------------------------------------
 #
 # Étiquette propre aux actions sur les modèles : elles ne visent aucun hôte.
@@ -27056,6 +28552,11 @@ def api_replication_plan(plan_id):
     try:
         v = _rdb.plan_view(conn, plan, now)
         row = _rdb.plan_rows(conn, [plan], now, role=current_role())[0]
+        # reprise d'une commande interrompue : décidée ici (rôle du geste
+        # repris), jamais par une liste d'états dans le navigateur
+        resume_action = _repl_resume_action(conn, plan)
+        if resume_action:
+            row["actions"] = list(row.get("actions") or []) + [resume_action]
         status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
         out = {"plan": _rp.mask_plan(plan), "row": row, "status": status, "volumes": v["volumes"],
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
@@ -27100,13 +28601,42 @@ def api_replication_plan_stats(plan_id):
     return jsonify({"plan": plan["id"], "stats": rows})
 
 
+@app.route("/api/replication/hosts/<kind>/<host>/resources")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_host_resources_kind(kind, host):
+    """Sous-menu « Disaster Recovery » d'un hôte (2.0.0, famille dans
+    l'adresse) : ses ressources incluses dans un plan, vues comme source,
+    cible ou les deux, mêmes lignes que le menu racine pour le même côté.
+    KVM : la réplication des domaines n'existe pas encore, la liste est vide
+    et `available` le dit (aucune base lue). L'argument s'appelle `host`, pas
+    `name` : `name` passe par la règle RFC 1123 du before_request, qui
+    refusait un nom de déclaration valide (`Node_2`) ; chaque famille
+    valide ici avec sa propre règle de déclaration."""
+    name = host
+    if kind == "kvm":
+        if not _kvm_check_host(name):
+            return _repl_err("invalid host")
+        try:
+            side = _repl_side_arg()
+        except ValueError as e:
+            return _repl_err(str(e))
+        return jsonify({"host": name, "host_kind": "kvm", "side": side, "resources": [],
+                        "available": False, "role": current_role()})
+    if kind != "harvester":
+        return _repl_err("unknown host family: harvester or kvm")
+    return _replication_harvester_rows(name)
+
+
 @app.route("/api/replication/hosts/<cluster>/resources")
 @requires_auth
 @shared_read(scope=REPLICATION_SCOPE)
 def api_replication_host_resources(cluster):
-    """Sous-menu « Disaster Recovery » d'un hôte : ses ressources incluses
-    dans un plan, vues comme source, cible ou les deux, mêmes lignes que le
-    menu racine pour le même côté."""
+    """Forme d'avant la 2.0.0, toujours comprise : un hôte Harvester."""
+    return _replication_harvester_rows(cluster)
+
+
+def _replication_harvester_rows(cluster):
     if not _rp.CLUSTER_RE.match(cluster or ""):
         return _repl_err("invalid host")
     try:
@@ -27119,7 +28649,7 @@ def api_replication_host_resources(cluster):
     finally:
         conn.close()
     return jsonify({"host": cluster, "host_kind": "harvester", "side": side, "resources": rows,
-                    "role": current_role()})
+                    "available": True, "role": current_role()})
 
 
 @app.route("/api/replication/resources/<uid>/events")
@@ -27537,6 +29067,19 @@ def _repl_resume_role(plan):
     if eff == "unprotecting" and _repl_inherits_backup_deletion(plan):
         return "admin", "resuming an unprotect that deletes the plan's backups needs the 'admin' role"
     return "operator", None
+
+
+def _repl_resume_action(conn, plan):
+    """L'action « reprendre la commande » d'un plan, de la même forme que
+    les autres (`name`, `role`, `allowed`, `reason`, plus `hint`), ou None
+    quand `resume` n'aurait rien à finir (`replication_run.resumable`)."""
+    origin = _rdb.error_origin(conn, plan["id"]) if plan.get("state") == "error" else None
+    if not _rr.resumable(plan.get("state"), origin, _rdb.list_runs(conn, plan["id"]), plan.get("generation")):
+        return None
+    role, hint = _repl_resume_role(plan)
+    ok = ROLE_RANK.get(current_role(), 0) >= ROLE_RANK[role]
+    return {"name": "resume-command", "role": role, "allowed": ok, "reason": "" if ok else "role",
+            "hint": "" if ok else (hint or "")}
 
 
 def _repl_forbidden(role, hint):

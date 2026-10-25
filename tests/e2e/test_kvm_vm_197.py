@@ -18,6 +18,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 EVIL = "<img src=x onerror=window.__xss=1>"
 EVIL_SNAP = "<img src=x onerror=window.__xss=2>"
 UNREAD = "/var/lib/machines/moon/netperf.qcow2"
@@ -111,7 +113,6 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvmv-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvmv-init','1'); }")
     page = context.new_page()
     state = {"role": "admin", "sent": [], "streams": {}, "gets": [], "changed": False, "deletes": 0}
@@ -209,14 +210,14 @@ def ui(context, flask_server):
         status=200, content_type="text/event-stream", body=state["streams"].get(q.url.rsplit("/", 1)[1], sse([]))))
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
     page.wait_for_function("window.KVM && window.App && window.KVMVm")
     page.mouse.move(1200, 600)
     return page, state, dialogs
 
 
 def open_menu(page, name):
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     pane = page.locator("#tab-kvmvms")
     row = pane.locator(f'tr[data-kvm-vm="node2/{name}"]')
     expect(row).to_be_visible()
@@ -434,7 +435,7 @@ def test_delete_needs_the_preview_the_acknowledgement_and_the_typed_name(ui):
 
 def test_an_operator_sees_the_delete_preview_but_cannot_delete(ui):
     page, state, _ = ui
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     expect(page.locator('#tab-kvmvms tr[data-kvm-vm="node2/db"]')).to_be_visible()
     state["role"] = "operator"
     page.evaluate("window.KVMVm.openDelete('node2', 'db')")
@@ -493,7 +494,7 @@ def test_the_dock_shows_the_new_labels_as_text(context, flask_server, verb):
     page.route("**/api/stream/*", lambda r, q: r.fulfill(status=200, content_type="text/event-stream", body=(
         "event: step\ndata: " + json.dumps({"step_id": "plan", "status": "running",
                                             "message": f"snapshot {EVIL_SNAP} of {EVIL}", "ts": 1}) + "\n\n")))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
     card = page.locator("#dock-card-kvmxss000197")
     expect(card).to_be_visible(timeout=10000)
     expect(card.locator(".name")).to_contain_text(EVIL)

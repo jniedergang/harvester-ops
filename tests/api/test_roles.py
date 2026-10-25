@@ -221,7 +221,9 @@ def test_every_mutating_route_is_covered_by_the_gate():
     fois."""
     # v1.57.0 : changer SON mot de passe est ouvert à tout compte connecté,
     # lecteur compris (l'ancien mot de passe est exigé).
-    for_everyone = {"POST /api/me/password"}
+    for_everyone = {"POST /api/me/password",
+                    # 2.0.0 : ses propres favoris, une préférence personnelle (décision 5)
+                    "PUT /api/me/favorites/<kind>/<host>", "DELETE /api/me/favorites/<kind>/<host>"}
     uncovered = []
     for rule in wapp.app.url_map.iter_rules():
         path = str(rule)

@@ -9,6 +9,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 
 def pci(name, addr, state="disabled", driver="e1000e", group="22", siblings=(), used=(), can=True, vf_of=""):
     return {"name": name, "address": addr, "node": "n3", "vendor_id": "8086", "device_id": "10d3", "class_id": "0200",
@@ -38,8 +40,7 @@ def fulfill(route, body, status=200):
 def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent, state = [], {"devices": DEVICES}
 
@@ -50,7 +51,7 @@ def ui(context, flask_server):
     page.route("**/api/devices/harv-fake/do/**", writes)
     page.route("**/api/stream/dev000000168", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.Devices && window.Sections && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent, state

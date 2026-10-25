@@ -96,7 +96,7 @@ L'UI web re-streame les mêmes événements via Server-Sent Events (SSE) pour un
 ## 6. Multi-cluster
 
 Le fichier de config `/etc/harvester-ops/config.yaml` déclare tous les clusters connus.
-Chaque commande exige `--cluster <nom>`. L'UI web permet de basculer entre clusters via la sidebar gauche.
+Chaque commande exige `--cluster <nom>`. Depuis la 2.0.0, l'UI web liste tous les hôtes (clusters Harvester et hyperviseurs KVM) dans son menu latéral ; voir la section 13.
 
 Pour lister les clusters configurés :
 
@@ -113,7 +113,7 @@ harvester-status   --cluster prod --namespace tenant-a
 # (pas d'extinction par namespace en v1.0 — utiliser l'onglet Namespace de l'UI web)
 ```
 
-Dans l'UI web, l'onglet **Namespaces** liste chaque namespace avec ses VMs et permet de les démarrer/arrêter en groupe.
+Dans l'UI web, **Machines virtuelles** d'un hôte Harvester (`#harvester/<c>/vms`, l'ancien onglet Namespaces) liste chaque namespace avec ses VMs et permet de les démarrer/arrêter en groupe.
 
 ## 8. Suivi temps réel (dock Activity)
 
@@ -143,7 +143,7 @@ Pour restaurer les noms d'origine dans un fichier log qui t'a été retourné pa
 
 Pour ajouter un cluster sans éditer `config.yaml` à la main :
 
-- Paramètres → onglet **Clusters** → *Add cluster*, OU bouton **+** à côté du sélecteur de cluster dans la sidebar.
+- Réglages > onglet **Clusters** > *Add cluster*, OU **Ajouter un hôte** sous Hôtes dans le menu latéral, puis **Cluster Harvester**.
 - Renseigner : un nom unique, une description, l'utilisateur SSH (défaut `rancher`), la liste des nœuds (hostname + IP + role : `control-plane` ou `worker`), upload kubeconfig + clé SSH privée.
 - Le cluster est persisté dans le répertoire d'état de la console (`/var/lib/harvester-ops`, `HARVESTER_OPS_STATE_DIR`), jamais dans `config.yaml` : `clusters.d/<nom>.yaml` (mode 0600, écriture atomique), avec des chemins relatifs à ce répertoire pour que sa copie déplace la console (voir « Déplacer harvops vers un autre hôte » dans le guide d'installation).
 - Le kubeconfig est stocké dans `<état>/kubeconfigs/<nom>.yaml` (mode 0600) ; la clé SSH dans `<état>/ssh/<nom>_id` (mode 0600).
@@ -227,3 +227,221 @@ rendue `not-started` n'a jamais commencé : la relancer.
 la cible (listé dans `left`). Après une bascule terminée, les sauvegardes
 se purgent à la main : voir « Purger les sauvegardes après une bascule
 terminée » dans la page des capacités.
+
+## 13. Navigation par hôtes (2.0)
+
+Un **hôte** est un cluster Harvester entier ou un hyperviseur KVM, jamais un
+nœud Harvester. Le menu latéral liste tous les hôtes que la personne voit, en
+deux familles, Harvester et KVM, sous **Hôtes**. Pas de plafond : une flotte
+de 60 clusters et 40 hôtes KVM est listée en entier, dans une partie du menu
+qui défile seule.
+
+- **Tête de famille.** Chaque famille se replie (le choix est gardé par le
+  navigateur) et dit son état en une ligne, par exemple `58 ok, 2 en alerte`.
+  Les hôtes pas encore lus sont comptés dans son info-bulle.
+- **Ligne d'un hôte.** Une pastille donne l'état (verte joignable, rouge
+  injoignable ou en erreur, orange accès refusé, grise pas encore lu), puis
+  le nom et le nombre de VMs quand un écran les a déjà lues. Un hôte en alerte
+  reste visible même dans une famille repliée. La liste ne lit jamais un hôte
+  elle-même.
+- **Favoris.** L'étoile d'un hôte le garde en tête de sa famille. Les étoiles
+  sont gardées par la console, par personne : on les retrouve sur un autre
+  poste. Tout rôle peut poser une étoile.
+- **Hôte ouvert.** L'hôte à l'écran se déplie sous son nom (un seul à la
+  fois) : Vue d'ensemble, Machines virtuelles, Conteneurs, Imports et
+  migrations, Paramètres, Disaster Recovery pour un cluster Harvester ; Vue
+  d'ensemble, Machines virtuelles, Paramètres, Disaster Recovery pour un hôte
+  KVM.
+- **Recherche** (raccourci `/`). Elle filtre les hôtes par nom, étiquette
+  (`clé`, `valeur` ou `clé=valeur`) et famille, et propose les VMs que les
+  écrans ont déjà lues (« Aller à la VM » ouvre les VMs de son hôte, filtrées
+  sur elle). Entrée ouvre le premier résultat, Échap vide la recherche.
+- **Ajouter un hôte** (administrateur) ouvre une fenêtre à deux choix : un
+  cluster Harvester (le formulaire de Réglages > Clusters) ou un hyperviseur
+  KVM (la fenêtre de déclaration des écrans KVM).
+- Au-dessus des hôtes : **Dossiers**, **Machines virtuelles** et
+  **Conteneurs** de toute la flotte ; en dessous : **Disaster Recovery**
+  (avec **Liens**), **Migrations**, **Ressources partagées** (GPU,
+  Réservations, Usage), **Automatisation** (Cluster API, Terraform,
+  Bare-metal) et **Activité**. Ces écrans de flotte n'ont pas d'hôte
+  courant : `#containers` montre les charges de tous les clusters,
+  `#migrations` toutes les vagues VMware.
+- **Activité d'un hôte.** `#activity/host/harvester/<c>` et
+  `#activity/host/kvm/<h>` ouvrent l'Activité filtrée sur cet hôte (les
+  actions d'un hôte KVM portent l'étiquette `kvm:<h>`) ; le bouton
+  **Activité de cet hôte** d'une page d'hôte y mène. Changer le filtre de
+  cluster réécrit l'adresse.
+- **Cluster de gestion.** Cluster API et Terraform (déclarations comprises)
+  affichent **Cluster de gestion** dans leur en-tête : le cluster que
+  visent leurs appels, le dernier hôte Harvester visité sauf si vous en
+  choisissez un autre dans le menu à côté. Le choisir là ne change pas
+  l'hôte ouvert. Bare-metal n'a pas cet en-tête : une jonction choisit son
+  cluster elle-même.
+
+Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
+onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert
+une fois connecté.
+
+Le menu de la 1.x (sélecteur de cluster, groupes par cluster) est retiré.
+Les anciens liens ouvrent toujours leur écran : `#storage` ouvre Paramètres
+> Stockage du dernier hôte Harvester visité, `#allvms` ouvre `#vms`,
+`#kvmhosts` l'index des hôtes KVM, `#forkliftglobal` les Migrations ; le
+CHANGELOG de la 2.0.0 donne chaque ancien emplacement et sa nouvelle
+adresse. Ouvrir la console sans adresse montre `#vms` ; la première fois
+après la mise à jour, c'est le dernier écran ouvert qui s'affiche.
+
+### Page d'un hôte (Harvester)
+
+Un hôte Harvester s'ouvre sur une page avec un bandeau en tête : la famille,
+le nom, l'état, la version et le nombre de VMs, le sous-menu de l'hôte (Vue
+d'ensemble, Machines virtuelles, Conteneurs, Imports et migrations,
+Paramètres, Disaster Recovery) et **Activité de cet hôte**. Chaque vue déjà
+construite garde sa place ; le bandeau ne fait que l'encadrer.
+
+- **Vue d'ensemble** (`#harvester/<c>`) : métriques, jauges d'usage, tableau
+  des nœuds, et le bloc **Événements** en dessous (les sous-onglets Cluster
+  et Événements sont partis). `#harvester/<c>/overview/events` fait défiler
+  jusqu'aux événements. Le bouton **Upgrade** ouvre Paramètres > Mise à jour.
+- **Paramètres** (`#harvester/<c>/params/<onglet>`), en onglets :
+  - **Nœuds** : la vue en blocs des nœuds, avec la maintenance et les
+    réglages d'hôte, et **Joindre un nœud** (administrateur), qui ouvre
+    Automatisation > Bare-metal avec ce cluster déjà choisi : la fenêtre
+    d'installation s'ouvre en mode jonction vers `https://<VIP>:443`. La VIP
+    est lue dans le cluster même (ConfigMap `harvester-system/vip` de
+    Harvester) au clic. Par un kubeconfig Rancher, ou quand la VIP ne se lit
+    pas, aucune adresse n'est devinée : le bandeau le dit et vous la
+    saisissez. L'adresse reste modifiable dans la fenêtre, et sa
+    confirmation est à cocher avant Installer, car l'installation efface les
+    disques choisis de la machine.
+  - **Stockage**, **Réseau**, **Add-ons**, **Monitoring et journaux**,
+    **Avancé** : les mêmes sections et sous-onglets qu'avant.
+  - **Sécurité** : Secrets, Clés SSH, et **Comptes du cluster** (venus des
+    Réglages).
+  - **Mise à jour** : le contenu de la fenêtre Upgrade, dans la page.
+  - **Alimentation** : Démarrage et Arrêt (avec l'ordre des VMs).
+  - **Connexion** : qui a déclaré le cluster (`config.yaml` ou la console),
+    ses nœuds déclarés, **Tester le kubeconfig** et **Tester SSH**
+    (administrateur), et un raccourci vers Réglages > Clusters.
+- **Machines virtuelles** (`#harvester/<c>/vms`) : la vue par espace de noms
+  et ses boutons (Backups, Modèles, Configurations cloud, Namespaces,
+  Exports, Créer).
+- **Imports et migrations** (`#harvester/<c>/imports/vmimport`,
+  `.../imports/forklift`) : Import de VM et migrations VMware.
+
+Un clic sur un autre hôte Harvester du menu garde l'écran : depuis
+Paramètres > Stockage > Images d'un cluster, on arrive sur le même onglet de
+l'autre (avec le voile de bascule). Un lecteur voit les mêmes pages, sans les
+boutons d'écriture.
+
+### Page d'un hôte (KVM)
+
+Un hôte KVM s'ouvre sur le même genre de page (`#kvm/<hôte>`) : Vue
+d'ensemble (le bloc de l'hôte), Machines virtuelles (cet hôte seulement),
+Paramètres (Système, Pools, Réseaux, Étiquettes, Connexion) et Disaster
+Recovery (pas encore disponible pour les domaines KVM). Connexion porte
+**Tester** (opérateur) et **Retirer** (administrateur, confirmé dans la
+page). Un administrateur peut modifier les étiquettes, après les contrôles
+que montre la fenêtre. Voir Capacités, section 10.
+
+### Index des hôtes
+
+**Hôtes** dans le menu latéral (`#hosts`) ouvre un tableau de tous les hôtes
+des deux familles : famille, nom, état, version, étiquettes, VMs, dossier et
+favori. Un clic sur le titre d'une colonne trie (un second inverse) ; les
+filtres portent sur la famille, l'état (ou tous les hôtes en alerte),
+l'étiquette, la version ou le dossier. `#hosts/harvester` et `#hosts/kvm`
+s'ouvrent avec le filtre de famille posé, et changer ce filtre réécrit
+l'adresse. Une ligne ouvre la page de son hôte ; son étoile fonctionne comme
+dans le menu. Sur `#hosts/kvm`, **Déclarer un hôte** et, par ligne KVM,
+**Tester** et **Retirer** (confirmé dans la ligne) reprennent ce qu'offrait
+KVM > Hôtes, et les onglets **Capacité**, **Pools** et **Réseaux** montrent
+ceux de tous les hôtes KVM sur un écran (`#hosts/kvm/capacity`, `/pools`,
+`/networks`), le nom de chaque hôte menant à sa page. Un lien vers un hôte
+que vous ne voyez pas (retiré, ou hors de
+vos droits) ouvre cet index avec un message. L'index ne lit que la liste
+des hôtes, jamais un hôte.
+
+### Retrouver un écran de la 1.x
+
+Les anciens liens et favoris du navigateur marchent toujours : la console
+traduit le jeton 1.x vers sa nouvelle adresse et réécrit la barre
+d'adresse. Un jeton propre à un cluster ouvre cet écran sur le dernier hôte
+Harvester visité (sinon le premier visible) ; un jeton KVM ouvre la famille
+KVM. Les plus courants :
+
+| Vous cherchiez | Désormais |
+|---|---|
+| Le sélecteur de cluster | **Hôtes** dans le menu latéral, ou l'index des hôtes `#hosts` |
+| Cluster > Vue d'ensemble, Événements | la **Vue d'ensemble** de l'hôte (Événements sous les métriques) |
+| Cluster > Stockage, Réseau, Modules, Sécurité, Monitoring et journaux, Avancé | les **Paramètres** de l'hôte, mêmes noms d'onglets |
+| Cluster > Démarrage, Arrêt | **Paramètres > Alimentation** |
+| Réglages > Comptes du cluster | **Paramètres > Sécurité > Comptes du cluster** |
+| VMs du cluster courant | les **Machines virtuelles** de l'hôte |
+| VMs de tous les clusters, KVM > Machines virtuelles | **Machines virtuelles** (`#vms`), panneau Hôtes pour un hôte ou une famille |
+| `#containers` | les conteneurs de toute la flotte ; ceux d'un cluster : **Conteneurs** de l'hôte |
+| KVM > Hôtes, Stockage, Réseaux | la famille KVM (`#hosts/kvm`) et ses onglets Capacité, Pools, Réseaux, ou les **Paramètres** de l'hôte |
+| Import / export de VM | **Imports et migrations** de l'hôte ; tous les clusters : **Migrations** |
+
+Le CHANGELOG de la 2.0.0 donne le tableau complet, chaque ancien jeton
+compris.
+
+### Ranger des VMs, des conteneurs et des hôtes dans des dossiers
+
+Un dossier est partagé par tous ceux qui utilisent la console. Un objet
+(VM, charge de conteneurs, hôte) est dans un seul dossier, sans héritage :
+ranger un hôte ne range pas ses VMs (la fenêtre propose **Ranger aussi ses
+N VMs**, décoché).
+
+1. Ouvrir **Machines virtuelles** (`#vms`), **Conteneurs** ou l'index des
+   hôtes. Le panneau Dossiers, à gauche, montre l'arborescence, **Toutes les VMs**
+   et **Non rangées**, avec les compteurs de ce que vous voyez.
+2. Sélectionner des lignes et les glisser sur un dossier, ou **Déplacer
+   vers un dossier** sur une ligne ou une sélection, puis choisir le
+   dossier (recherche par nom).
+3. Lire les contrôles que la fenêtre montre, objet par objet, avant son
+   bouton : **écrit sur l'objet** (annotation d'une VM ou d'une charge
+   Harvester, métadonnées libvirt d'un domaine KVM, champ `folder` d'une
+   déclaration d'hôte), **console seulement** (vous ne pouvez pas écrire
+   l'objet, ou le cluster est déclaré dans `config.yaml` : le rangement est
+   gardé par la console, avec une pastille), ou **refusé** avec la raison et
+   quoi faire.
+4. Confirmer. L'action apparaît au dock, une ligne par objet, et reste dans
+   l'Activité.
+
+Créer, renommer et supprimer des dossiers depuis le panneau. Un dossier non
+vide ne se supprime pas : la fenêtre propose **Déplacer le contenu de...**
+vers un autre dossier, puis le supprime, en une action. Un nom déjà pris
+par un frère est refusé avant que rien ne parte.
+
+### Annuler et reprendre un geste sur les dossiers
+
+- **Annuler** : un rangement, renommage, déplacement, vidage ou une
+  annulation terminés proposent **Annuler** sur leur carte du dock, puis
+  dans l'Activité (aussi après un redémarrage de la console). L'annulation
+  remet exactement le dossier que chaque objet avait juste avant l'action.
+  Tout opérateur peut annuler le geste d'un autre ; l'annulation nomme les
+  deux personnes.
+- **Reprendre** : une action finie en erreur (un hôte injoignable en
+  chemin, un refus de webhook) ou arrêtée par l'arrêt de la console propose
+  **Reprendre**. Elle n'écrit que les objets que l'action n'a pas atteints ;
+  un objet fait n'est jamais réécrit, et un objet rangé ailleurs depuis est
+  laissé. En ligne de commande : `harvester-folders.py resume --action <id>`
+  et `undo --action <id>`.
+- Les objets que vous ne voyez pas (un cluster que Rancher vous masque, un
+  namespace que vous ne pouvez pas lire) ne sont jamais nommés dans les
+  étapes : ils sont comptés.
+
+### Rôles (2.0.0)
+
+| Geste | lecteur | opérateur | admin |
+|---|---|---|---|
+| Lire chaque écran, étoiler un hôte | oui | oui | oui |
+| Créer, renommer, supprimer un dossier vide, vider un dossier, ranger et déplacer des objets | non (grisé, avec la raison) | oui | oui |
+| Annuler ou reprendre un geste sur les dossiers, de n'importe qui | non | oui | oui |
+| Tester un hôte KVM | non | oui | oui |
+| Disaster Recovery : mesurer, protéger, suspendre, reprendre, déprotéger | non | oui | oui |
+| Disaster Recovery : bascule, déprotection qui supprime les sauvegardes, reprise de l'une ou l'autre | non | non | oui |
+| Ajouter un hôte, retirer un hôte KVM, modifier ses étiquettes, Joindre un nœud, Tester kubeconfig et SSH | non | non | oui |
+
+Un bouton que vous ne pouvez pas utiliser reste visible, grisé, avec le
+rôle qu'il faut dans son info-bulle ; le serveur applique la même règle.

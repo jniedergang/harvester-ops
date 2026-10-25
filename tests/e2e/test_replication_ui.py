@@ -21,6 +21,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 NOW = datetime.now(timezone.utc).replace(microsecond=0)
 PID, PID2 = "rp-0123456789ab", "rp-ba9876543210"
 ACTION = "rpact0000001"
@@ -159,7 +161,6 @@ def ui_factory(context, flask_server):
             "if (!sessionStorage.getItem('rp-init')) {"
             "localStorage.setItem('harvester_ops_language','en');"
             "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-            "localStorage.setItem('harvester_ops_current_tab','namespaces');"
             "localStorage.removeItem('harvester_ops_replication');"
             "localStorage.removeItem('harvester_ops_open_panels');"
             "sessionStorage.setItem('rp-init','1'); }")
@@ -206,7 +207,7 @@ def ui_factory(context, flask_server):
                 if "level=warn" in q:
                     evs = [e for e in evs if e["level"] != "info"]
                 return route.fulfill(**ok({"plan": PID, "events": evs, "next_before": None}))
-            if bare == "hosts/harv-fake/resources":
+            if bare == "hosts/harvester/harv-fake/resources":   # 2.0.0 : famille dans la route
                 return route.fulfill(**ok({"host": "harv-fake", "side": "any", "role": role, "resources": [
                     resource("u-web", "web-1", "protected", 400, side="source", peer="harv-dr"),
                     resource("u-crm", "crm-1", "draft", None, side="target", plan=PID2, plan_name="crm", peer="harv-dr")]}))
@@ -245,11 +246,17 @@ def ui_factory(context, flask_server):
                                                                     "lost_after": {}, "waves": [{"index": 1, "vms": ["default/db-1"]}]}}})))
         dialogs = []
         page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-        page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+        # navigation 2.0 : la liste des clusters vient d'App.listClusters()
+        # (/api/clusters), plus du sélecteur ; harv-dr y est ajouté
+        clusters_body = {"clusters": [{"name": n, "description": "", "node_count": 1, "origin": "config"}
+                                      for n in ("harv-fake", "harv-dr")], "config_writable": True}
+        page.route(re.compile(r".*/api/clusters$"), lambda r, q: r.fulfill(**ok(clusters_body))
+                   if q.method == "GET" else r.continue_())
+        goto(page, flask_server["base_url"], address('namespaces'))
         page.wait_for_function("window.Replication && window.App && App.getCurrentCluster()")
-        page.evaluate("""() => { const s = document.getElementById('cluster-select');
-            if (![...s.options].some(o => o.value === 'harv-dr')) { const o = document.createElement('option');
-            o.value = 'harv-dr'; o.textContent = 'harv-dr'; s.appendChild(o); } }""")
+        page.evaluate("() => App.clustersInfo()")
+        # 2.0.0 : plus de sélecteur ; harv-dr vient de /api/clusters (simulé ci-dessus)
+        page.wait_for_function("() => App.listClusters().includes('harv-dr')")
         page.mouse.move(1200, 600)
         return page, sent, dialogs
     return make
@@ -279,16 +286,33 @@ def open_plans(page):
 # --- menu et liste ----------------------------------------------------------------------
 
 def test_menu_places_and_alert_badges(ui):
+    """2.0.0 : Disaster Recovery (contrats) et Liens sont des entrées racines
+    du menu des hôtes ; le DR d'un cluster est l'entrée « Disaster Recovery »
+    du sous-menu de l'hôte ouvert."""
     page, _, _ = ui
-    grp = page.locator("#tab-group-dr")
-    assert grp.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)") == ["drplans", "drlinks"]
-    assert page.locator('#tab-group-cluster .tab[data-tab="clusterdr"]').count() == 1
-    for t in ("drplans", "drlinks", "clusterdr"):
-        assert page.locator(f'.tab[data-tab="{t}"]').get_attribute("title")
+    dr = page.locator('#host-nav [data-hnav-root="dr"]')
+    assert dr.evaluate_all("els => els.map(e => e.getAttribute('href'))") == ["#dr", "#dr/links"]
+    clusterdr = page.locator('#hnav-families .hnav-sub a[data-sub="dr"]')
+    expect(clusterdr).to_have_count(1)
+    assert clusterdr.get_attribute("href") == "#harvester/harv-fake/dr"
+    for t in (dr.nth(0), dr.nth(1), clusterdr):
+        assert t.get_attribute("title")
     # pastilles : 2 alertes, toutes sur harv-fake
+    grp = dr.nth(0)
     expect(grp.locator('[data-rp-badge="all"]')).to_have_text("2")
-    expect(page.locator('[data-rp-badge="cluster"]')).to_have_text("2")
     assert "2 active" in grp.locator('[data-rp-badge="all"]').get_attribute("data-tip")
+
+
+def test_the_cluster_dr_entry_has_its_alert_badge(ui):
+    """2.0.0 : la pastille d'alertes de l'ancienne entrée Cluster > Disaster
+    Recovery est sur l'entrée DR du sous-menu de l'hôte ouvert, et survit au
+    rafraîchissement du menu."""
+    page, _, _ = ui
+    badge = page.locator('#hnav-families .hnav-sub a[data-sub="dr"] [data-rp-badge="cluster"]')
+    expect(badge).to_have_text("2", timeout=3000)
+    assert badge.get_attribute("data-tip")
+    page.evaluate("HostNav.render()")
+    expect(badge).to_have_text("2")
 
 
 def test_contract_cards_show_gauge_direction_vms_event_and_transfer(ui):
@@ -362,8 +386,8 @@ def test_cluster_subview_shows_both_roles_and_filters(ui):
 
 def test_events_tab_lists_replication_alerts(ui):
     page, _, _ = ui
-    page.evaluate("App.setTab('overview')")
-    page.locator('[data-overview-tab="events"]').click()
+    # 2.0.0 : les événements sont un bloc sous les métriques de l'aperçu
+    page.evaluate("Router.go('#harvester/' + App.getCurrentCluster() + '/overview/events')")
     board = page.locator('[data-board="events"]')
     btn = board.locator('[data-ev-group="dr"]')
     expect(btn).to_be_visible()

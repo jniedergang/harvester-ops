@@ -11,6 +11,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 IMAGES = {"cluster": "harv-fake", "kind": "images", "items": [
     {"namespace": "default", "name": "image-b", "display_name": "zeta.qcow2", "source_type": "download",
@@ -39,7 +40,6 @@ def open_section(context, flask_server, tab, pane=None, lang="fr"):
     context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        f"localStorage.setItem('harvester_ops_current_tab','{tab}');"
         + (f"localStorage.setItem('harvester_ops_section_{tab}','{pane}');" if pane else ""))
     page = context.new_page()
     calls = []
@@ -54,18 +54,24 @@ def open_section(context, flask_server, tab, pane=None, lang="fr"):
                  "keys": ["token"], "system": True, "cloud_init": False, "used_by": [], "created": None}])
         fulfill(route, body)
     page.route("**/api/cluster-objects/**", objects)
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address(tab, sub=pane))
     page.wait_for_function("window.Sections && window.ResourceViews")
     return page, calls
 
 
-def test_the_sidebar_has_the_harvester_sections(page):
+def test_the_sidebar_has_the_harvester_sections(page, flask_server):
+    # 2.0.0 : les sections de Harvester sont les onglets de Paramètres de la
+    # page d'hôte, chacun un lien avec son info-bulle
+    goto(page, flask_server["base_url"], address("storage"))
     for tab in ("storage", "network", "addons", "security"):
-        link = page.locator(f'.tab[data-tab="{tab}"]')
-        assert link.count() == 1 and link.get_attribute("data-i18n-title"), tab
-    # l'aperçu garde Métriques et Cluster ; v1.62.0 : les Événements du tableau de bord de Harvester
-    assert page.locator("[data-overview-tab]").evaluate_all("els => els.map(e => e.dataset.overviewTab)") \
-        == ["metrics", "cluster", "events"]
+        link = page.locator(f'#host-page-head .hp-tabs a[data-hp-tab="{tab}"]')
+        assert link.count() == 1 and link.get_attribute("title"), tab
+        assert link.get_attribute("href") == f"#harvester/harv-fake/params/{tab}", tab
+    # 2.0.0 : l'aperçu n'a plus de sous-onglets : les événements sont un bloc
+    # sous les métriques, la vue en blocs des nœuds est Paramètres > Nœuds
+    assert page.locator("[data-overview-tab]").count() == 0
+    assert page.locator("#tab-overview .overview-subtab").evaluate_all(
+        "els => els.map(e => e.dataset.subtab)") == ["metrics", "cluster", "events"]
 
 
 def test_images_list_sorts_and_filters(context, flask_server):

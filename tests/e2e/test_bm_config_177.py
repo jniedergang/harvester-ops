@@ -56,8 +56,7 @@ def open_window(context, flask_server):
     page.goto(flask_server["base_url"], wait_until="domcontentloaded")
     page.wait_for_function("window.BMC && window.FloatingPanels && window.i18n")
     page.on("dialog", lambda d: d.accept())
-    page.click('.tab-group-head[data-group="automation"]')
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     # le menu latéral s'ouvre en calque au survol : écarter la souris, sinon
     # il recouvre la fenêtre (ouverte à 120 px du bord) et prend les clics
     page.mouse.move(1100, 450)

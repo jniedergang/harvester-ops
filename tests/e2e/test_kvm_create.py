@@ -17,6 +17,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 sys.path.insert(0, str(Path(__file__).parent))
 import kvm_form_fakes as F  # noqa: E402
 
@@ -26,13 +28,12 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvmf-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvmf-init','1'); }")
     page = context.new_page()
     state = F.install(page, {})
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
     page.wait_for_function("window.KVM && window.App && window.KVMForm && window.VMForm && window.CloudInitForm")
     page.mouse.move(1200, 600)
     return page, state, dialogs
@@ -40,7 +41,7 @@ def ui(context, flask_server):
 
 def open_create(page, host="node2", from_view=True):
     if from_view:
-        page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+        page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
         btn = page.locator('#tab-kvmvms .res-tools [data-kvm="create-vm"]')
         expect(btn).to_be_enabled()
         btn.click()
@@ -235,6 +236,9 @@ def test_create_from_a_catalogue_image_prefills_the_first_disk(ui):
     page, state, _ = ui
     page.evaluate("KVMForm.openCreate('node2', {image: {pool: 'images', volume: 'netinst.iso', iso: true}})")
     panel = page.locator("#fp-kvm-create")
+    # la fenêtre se redessine une fois l'hôte lu (suite chargée : un clic
+    # avant serait perdu) ; l'image proposée posée = formulaire final
+    expect(panel.locator('[name$=".iso"]').first).to_have_value("images/netinst.iso", timeout=15000)
     disks = tab(panel, "disks")
     src = disks.locator('[name$=".source"]').evaluate_all("els => els.map(e => e.value)")
     assert src == ["iso", "blank"]
@@ -245,7 +249,7 @@ def test_create_from_a_catalogue_image_prefills_the_first_disk(ui):
 def test_viewer_cannot_create(ui):
     page, state, _ = ui
     state["role"] = "viewer"
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     btn = page.locator('#tab-kvmvms .res-tools [data-kvm="create-vm"]')
     expect(btn).to_be_disabled()
     assert btn.get_attribute("data-tip") == "Needs the operator role"

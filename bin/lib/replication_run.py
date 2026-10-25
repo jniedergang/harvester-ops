@@ -3364,6 +3364,23 @@ def _unprotect_target(ctx, op, uids, held):
 # Reprise
 # ---------------------------------------------------------------------------
 
+def resumable(state, origin, runs, generation):
+    """`resume` a-t-il quelque chose à finir ? Même lecture que `resume` :
+    une commande arrêtée par l'arrêt de la console (ligne `runs` ouverte,
+    `interrupted`, de la génération courante), une protection, une bascule
+    ou une déprotection interrompue, une mesure tombée en erreur. La console
+    en tire le bouton « Reprendre la commande » (aucune liste d'états dans
+    le navigateur)."""
+    eff = origin or state
+    opened = [r for r in runs or () if r["operation"] in SUSPENDABLE_RUNS and not r["finished_at"]
+              and r.get("result") == "interrupted" and int(r["generation"]) == int(generation or 1)]
+    if opened and (opened[-1]["operation"] != "measure-stop" or state == "measuring"):
+        return True
+    if eff in ("protecting", "failing_over", "unprotecting"):
+        return True
+    return eff == "measuring" and state == "error"
+
+
 def resume(ctx, yes=False, accept_degraded_standby=False, accept_stale_carnet=False):
     """Reprend la commande interrompue d'après l'état rangé (après un arrêt
     brutal, le verrou abandonné est repris par `acquire_lock`). Une bascule

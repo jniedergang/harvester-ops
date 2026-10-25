@@ -24,6 +24,7 @@ OP_KINDS) ; les échecs de transport restent des `kvm_host.KvmError`.
 import contextlib
 import fcntl
 import hashlib
+import html
 import io
 import ipaddress
 import itertools
@@ -157,6 +158,89 @@ def _check_description(text):
     if not isinstance(text, str) or len(text) > DESCRIPTION_MAX or "\x00" in text:
         raise OpError("invalid", f"invalid description ({DESCRIPTION_MAX} characters at most)")
     return text
+
+
+# --- vue unique et dossiers (navigation 2.0) -------------------------------
+
+# États de libvirt ramenés aux phases de la vue unique (celles de KubeVirt)
+PHASES = {
+    "running": "Running", "idle": "Running", "blocked": "Running",
+    "shut off": "Stopped",
+    "paused": "Paused", "pmsuspended": "Paused",
+    "crashed": "Failed",
+    "in shutdown": "Stopping",
+}
+
+# Champs communs à une ligne de VM Harvester et KVM (/api/vms-all) : une
+# liste figée, un test casse si l'un d'eux est renommé
+COMMON_FIELDS = ("kind", "source", "namespace", "name", "phase", "cpu", "memory_bytes", "node",
+                 "ips", "labels", "uuid", "key", "folder", "folder_source")
+
+
+def phase_of(state):
+    """Phase d'un état libvirt (`virsh list`), « Unknown » pour un autre."""
+    return PHASES.get((state or "").strip().lower(), "Unknown")
+
+
+def vm_key(uuid):
+    """Clé d'une VM KVM : son UUID (un domaine renommé la garde) ; None
+    sans UUID lu."""
+    return f"kvm/{uuid.lower()}" if uuid else None
+
+
+def common_row(vm):
+    """Champs communs d'une VM KVM de l'inventaire (kvm_host.host_inventory) :
+    phase, vCPU, mémoire en octets, hôte, clé. Le dossier est celui lu dans
+    les métadonnées du domaine (`folder`), `folder_source` vaut « vm » s'il en
+    porte un ; le repli de la console est posé par l'appelant."""
+    kib = vm.get("memory_max_kib") if vm.get("memory_kib") is None else vm.get("memory_kib")
+    folder = vm.get("folder")
+    return {"kind": "kvm", "source": vm.get("host"), "namespace": None, "name": vm.get("name"),
+            "phase": phase_of(vm.get("state")), "cpu": vm.get("vcpus"),
+            "memory_bytes": kib * 1024 if isinstance(kib, int) else None,
+            "node": vm.get("host"), "ips": list(vm.get("ips") or []), "labels": {},
+            "uuid": vm.get("uuid"), "key": vm_key(vm.get("uuid")),
+            "folder": folder, "folder_source": "vm" if folder else None}
+
+
+def folder_element(path):
+    """Élément XML posé par `virsh metadata --set` (libvirt y met l'espace de
+    noms et le préfixe donnés par --uri et --key)."""
+    return f'<folder path="{html.escape(path, quote=True)}"/>'
+
+
+def folder_commands(name, path, persistent, active):
+    """Arguments virsh qui posent (`path`) ou retirent (None) le dossier :
+    `--config` pour un domaine persistant, `--live` s'il tourne ; un domaine
+    transitoire n'a que `--live` (le dossier se perd à son arrêt)."""
+    base = ["metadata", "--domain", name, "--uri", kh.FOLDER_NS]
+    if path is None:
+        base.append("--remove")
+    else:
+        base += ["--key", kh.FOLDER_PREFIX, "--set", folder_element(path)]
+    if persistent:
+        base.append("--config")
+    if active:
+        base.append("--live")
+    return tuple(base)
+
+
+def set_folder(host, name, path, live=None):
+    """Pose ou retire le dossier d'un domaine. L'état est relu juste avant
+    (dominfo) : persistance et marche décident de `--config` / `--live`.
+    `live` force la marche (True/False) sans la relire. Rend
+    {"persistent", "live"} ; KvmError ou OpError en cas d'échec."""
+    check_vm_name(name)
+    info = kh.parse_dominfo(_need(host.batch({"info": ("dominfo", "--domain", name)},
+                                             idempotent=True), "info"))
+    # actif = un Id numérique (« - » sinon) : un domaine planté est arrêté,
+    # sauf on_crash=preserve qui le garde actif
+    active = info["id"] is not None if live is None else bool(live)
+    persistent = info["persistent"]
+    if not persistent and not active:
+        raise OpError("refused", f"{name} is neither persistent nor running")
+    _need(host.batch({"set": folder_commands(name, path, persistent, active)}), "set")
+    return {"persistent": persistent, "live": active}
 
 
 # --- petites aides ---------------------------------------------------------

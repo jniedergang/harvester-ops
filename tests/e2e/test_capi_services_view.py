@@ -13,6 +13,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 CATALOG = [
     {"key": "coredns", "title": "DNS (CoreDNS)", "repo": "https://coredns.github.io/helm", "chart": "coredns",
      "version": "1.47.1", "namespace": "dns", "params": {"upstream": "1.1.1.1 9.9.9.9", "hosts": "", "ipam": "dhcp"},
@@ -41,8 +43,6 @@ def sse(events):
 def view(context, flask_server):
     def make(state=STATE, check=None, stream=()):
         context.add_init_script("""localStorage.setItem('harvester_ops_language','fr');
-          localStorage.setItem('harvester_ops_current_tab','automation');
-          localStorage.setItem('harvester_ops_automation_subtab','capi');
           localStorage.setItem('harvester_ops_capi_subtab','services');""")
         page = context.new_page()
         calls = {"check": [], "deploy": [], "delete": []}
@@ -66,9 +66,9 @@ def view(context, flask_server):
         page.route("**/api/capi/harv-fake/service/**", on_delete)
         page.route("**/api/stream/svc000000001",
                    lambda r, q: fulfill(r, sse(list(stream)), ctype="text/event-stream"))
-        page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+        # 2.0.0 : Automatisation > Cluster API par son adresse
+        goto(page, flask_server["base_url"], address("automation", sub="capi"))
         page.wait_for_function("window.CapiServices && window.i18n")
-        page.evaluate("document.querySelector('.tab[data-tab=\"automation\"]')?.click()")
         page.evaluate("document.querySelector('#tab-automation .sub-tab[data-capi-tab=\"services\"]')?.click()")
         host = page.locator("#capi-services-body")
         expect(host.locator(".svc-card").first).to_be_visible(timeout=8000)

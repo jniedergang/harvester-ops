@@ -350,8 +350,7 @@ const Bookings = (() => {
   }
 
   function clusterNames() {
-    const sel = document.getElementById('cluster-select');
-    return sel ? [...sel.options].map((o) => o.value).filter(Boolean) : [];
+    return window.App && App.listClusters ? App.listClusters() : [];
   }
 
   function onClick(e) {

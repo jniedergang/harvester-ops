@@ -415,7 +415,7 @@ const CapiServices = (() => {
 
   function start() {
     const h = document.querySelector('#capi-services-body');
-    const c = document.querySelector('#cluster-select')?.value;
+    const c = window.App && App.managementCluster ? App.managementCluster() : '';
     if (!h) return Promise.resolve();
     if (!c) { h.innerHTML = `<p class="form-hint">${esc(tr('capi.new.pickCluster', 'Select a cluster'))}</p>`; return Promise.resolve(); }
     if (cluster !== c) lastData = null;

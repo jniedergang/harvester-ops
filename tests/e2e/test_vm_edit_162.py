@@ -10,6 +10,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 UNATTEND = '<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="oobeSystem"/></unattend>'
 VM = {"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
       "metadata": {"name": "vm1", "namespace": "default", "resourceVersion": "7",
@@ -26,9 +28,8 @@ VM = {"apiVersion": "kubevirt.io/v1", "kind": "VirtualMachine",
 def boot(page, base_url):
     page.context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
-    page.goto(base_url, wait_until="domcontentloaded")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address('namespaces'))
     page.wait_for_function("window.VMEdit && window.App && App.getCurrentCluster()")
 
 

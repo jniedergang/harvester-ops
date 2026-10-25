@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 SHAPES = {"loki": {"text": ["url", "tenant", "username"], "secret": ["password"], "bool": ["configure_kubernetes_labels"]},
           "nullout": {}, "file": {"text": ["path"], "example": {"path": "/tmp/logs/${tag}/%Y/%m/%d.%H.%M"}}}
@@ -38,8 +39,7 @@ def fulfill(route, body, status=200):
 def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -51,7 +51,7 @@ def ui(context, flask_server):
     page.route("**/api/monlog/harv-fake/do/**", writes)
     page.route("**/api/stream/ml0000000170", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.MonLog && window.Sections && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent
@@ -64,8 +64,11 @@ def pane(page, kind):
 
 def test_the_section_and_its_metrics(ui):
     page, _ = ui
-    assert page.locator('.tab[data-tab="monlog"]').get_attribute("data-i18n-title") == "tab.monlogTip"
     body = pane(page, "metrics")
+    # 2.0.0 : l'onglet Monitoring de la page d'hôte porte l'info-bulle tab.monlogTip
+    tab = page.locator('#host-page-head .hp-tabs a[data-hp-tab="monlog"]')
+    expect(tab).to_be_visible()
+    assert tab.get_attribute("title") == page.evaluate("i18n.t('tab.monlogTip')")
     expect(body.locator('[data-ml="open-addons"]')).to_be_visible(timeout=8000)          # monitoring éteint, dit
     expect(body).to_contain_text("72.8 %")                                               # part des vCPU, pas le / 1000
 
@@ -142,12 +145,11 @@ def test_a_new_button_clicked_before_the_data_arrives_still_opens_its_form(conte
     un clic sur « Nouvelle sortie » avant son arrivée ne faisait rien."""
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     held = []
     page.route("**/api/monlog/harv-fake", lambda r, q: held.append(r))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.MonLog && window.Sections && window.App && App.getCurrentCluster()")
     pane(page, "outputs")
     for _ in range(50):

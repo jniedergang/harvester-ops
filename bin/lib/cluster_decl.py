@@ -18,8 +18,11 @@ Partagé par la console (web/app.py) et la ligne de commande (kube.py) ;
 common.sh applique les mêmes règles pour les scripts bash.
 """
 
+import contextlib
+import fcntl
 import os
 import re
+import time
 from pathlib import Path
 
 DEFAULT_STATE_DIR = "/var/lib/harvester-ops"
@@ -44,6 +47,34 @@ def decl_path(state, name):
     if not isinstance(name, str) or not NAME_RE.match(name):
         return None
     return Path(state) / DECL_DIR / f"{name}.yaml"
+
+
+LOCK_NAME = ".lock"
+
+
+@contextlib.contextmanager
+def decl_lock(state, wait=10.0):
+    """Verrou exclusif des déclarations de clusters entre processus
+    (`<état>/clusters.d/.lock`, flock) : la console (CONFIG_LOCK de
+    web/app.py) et harvester-folders.py relisent puis réécrivent la même
+    déclaration ; sans lui, la seconde écriture efface la première.
+    TimeoutError au-delà de `wait` secondes."""
+    d = Path(state) / DECL_DIR
+    d.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(d / LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > end:
+                    raise TimeoutError("another cluster declaration change is in progress: try again") from None
+                time.sleep(0.05)
+        yield
+    finally:
+        os.close(fd)                              # libère le verrou
 
 
 def _map_paths(cluster, fn):
@@ -90,6 +121,12 @@ def check_decl(doc, path):
         return f"name '{name}' does not match the file name"
     if not isinstance(doc.get("nodes", []), list):
         return "nodes must be a list"
+    # 2.0.0 : dossier de l'hôte (facultatif), écrit par harvester-folders.py
+    if doc.get("folder") is not None:
+        import folders
+        why = folders.check_path(doc["folder"])
+        if why:
+            return f"folder: {why}"
     return None
 
 

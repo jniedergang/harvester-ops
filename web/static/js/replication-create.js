@@ -502,6 +502,11 @@ const ReplicationCreate = (() => {
       if (!nets.length) return `<p class="hint">${esc(tr('rp.c.noNets'))}</p>`;
       if (st.dst.error) return `<p class="res-error">${esc(st.dst.error)}</p>`;
       const srcVlan = (n) => ((st.src.nets || []).find((x) => `${x.namespace}/${x.name}` === n) || {}).vlan;
+      // la cible n'a aucun réseau de VM (aucune NetworkAttachmentDefinition) :
+      // la liste le dit et la ligne mène à « Créer sur la cible ». Le réseau
+      // de gestion (pod) n'est pas proposé : le moteur ne fait correspondre
+      // qu'un réseau multus à un autre (retarget_vm, check « network-unmapped »)
+      const none = Array.isArray(st.dst.nets) && !st.dst.nets.length;
       const opt = (sel, allowEmpty, emptyLabel) => `${allowEmpty ? `<option value="">${esc(emptyLabel)}</option>` : ''}${dstNetKeys().map((k) => `<option${k === sel ? ' selected' : ''}>${esc(k)}</option>`).join('')}`;
       return `<div class="tw"><table class="data-table rp-nets"><thead><tr><th>${esc(tr('rp.c.srcNet'))}</th><th>VLAN</th><th>${esc(tr('rp.c.dstNet', { cluster: st.to }))}</th>
           <th>${esc(tr('rp.col.state'))}</th><th>${esc(tr('rp.c.drillNet'))}</th></tr></thead>
@@ -510,7 +515,7 @@ const ReplicationCreate = (() => {
           const c = st.netCreate[n];
           const same = t && t === n;
           return `<tr data-rpc-net="${esc(n)}"><td><b>${esc(n)}</b></td><td>${esc(srcVlan(n) || '-')}</td>
-            <td><select class="tip" data-rpc-netmap="${esc(n)}" data-tip="${esc(tr('rp.c.dstNetTip'))}" aria-label="${esc(tr('rp.c.dstNet', { cluster: st.to }))}">${opt(t, true, tr('rp.c.pickNet'))}</select>
+            <td><select class="tip" data-rpc-netmap="${esc(n)}" data-tip="${esc(none ? tr('rp.c.noDstNetTip', { cluster: st.to }) : tr('rp.c.dstNetTip'))}" aria-label="${esc(tr('rp.c.dstNet', { cluster: st.to }))}">${opt(t, true, none ? tr('rp.c.noDstNet', { cluster: st.to }) : tr('rp.c.pickNet'))}</select>
               ${t ? '' : `<button type="button" class="btn btn-sm btn-secondary tip" data-rpc-netcreate="${esc(n)}" data-tip="${esc(tr('rp.c.createNetTip', { cluster: st.to }))}">${icon('add')} ${esc(tr('rp.c.createNet'))}</button>`}
               ${c ? `<div class="rp-netcreate" data-rpc-netform="${esc(n)}"><div class="ct-create-row">
                 ${field(tr('rp.c.newNetName'), `<input data-rpc-nc="name" value="${esc(c.name)}">`, tr('rp.c.newNetNameTip'))}
@@ -518,7 +523,8 @@ const ReplicationCreate = (() => {
                 ${field(tr('of.f.clusterNetwork'), `<select data-rpc-nc="cn">${(st.dst.cns.length ? st.dst.cns : ['mgmt']).map((x) => `<option${x === c.cn ? ' selected' : ''}>${esc(x)}</option>`).join('')}</select>`, tr('rp.c.cnTip'))}</div>
                 <div class="btn-row"><button type="button" class="btn btn-sm btn-primary tip" data-rpc-ncgo="${esc(n)}" data-tip="${esc(tr('rp.c.createNetGoTip'))}">${esc(tr('rp.c.createNetGo'))}</button>
                   <button type="button" class="btn btn-sm btn-secondary tip" data-rpc-ncno="${esc(n)}" data-tip="${esc(tr('rp.hook.cancelTip'))}">${esc(tr('rp.hook.cancel'))}</button></div>
-                <div class="of-msg" data-rpc-ncmsg="${esc(n)}"></div></div>` : ''}</td>
+                <div class="of-msg" data-rpc-ncmsg="${esc(n)}"></div></div>` : ''}
+              ${none && !c ? `<p class="form-hint rp-nonet-hint" data-rpc-nonet="${esc(n)}">${esc(tr('rp.c.noDstNetHint', { cluster: st.to }))}</p>` : ''}</td>
             <td>${t ? okBadge('ok', same ? tr('rp.c.netSame') : tr('rp.c.netMapped')) : okBadge('fail', tr('rp.c.netMissing'))}</td>
             <td><select class="tip" data-rpc-drill="${esc(n)}" data-tip="${esc(tr('rp.c.drillTip'))}" aria-label="${esc(tr('rp.c.drillNet'))}">${opt(st.drillMap[n] || '', true, tr('rp.c.drillNone'))}</select></td></tr>`;
         }).join('')}</tbody></table></div>`;

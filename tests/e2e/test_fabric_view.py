@@ -22,6 +22,7 @@ import sys as _sys
 from pathlib import Path as _Path
 _sys.path.insert(0, str(_Path(__file__).parent))
 from boards import goto_board  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 playwright = pytest.importorskip("playwright")
 
@@ -137,10 +138,8 @@ def open_fabric(page, base_url, fabric=None, lang="en", detail_calls=None,
     page.route("**/api/network-fabric/*/node/*", detail_route)
     page.context.add_init_script(
         f"localStorage.setItem('harvester_ops_language','{lang}');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');")
-    page.goto(base_url, wait_until="domcontentloaded")
-    page.wait_for_timeout(1500)
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address("overview"))
     goto_board(page, "fabric")
     page.wait_for_selector('.vsw', timeout=10000)
     page.wait_for_timeout(1200)

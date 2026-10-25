@@ -19,6 +19,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import goto  # noqa: E402
+
 EVIL = "<img src=x onerror=window.__xss=1>"
 GESTURES = {"destroy": ["shut off"], "reboot": ["paused", "shut off"],
             "resume": ["blocked", "crashed", "idle", "in shutdown", "running", "shut off"],
@@ -78,7 +80,6 @@ def ui(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('kvmc-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','overview');"
         "sessionStorage.setItem('kvmc-init','1'); }")
     state = {"role": "admin", "tickets": [], "posts": [], "status": {"count": 1, "viewers": ["admin"]},
              "last_close": None}
@@ -118,7 +119,7 @@ def ui(context, flask_server):
             body='event: end\ndata: {"status": "done", "result": {"output": {"ok": true}}}\n\n'))
         dialogs = []
         page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
-        page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+        goto(page, flask_server["base_url"], "#activity")   # 2.0.0 : écran ouvert par son adresse
         page.wait_for_function("window.KVM && window.App && window.VMConsole")
         page.mouse.move(1200, 600)
         return page, dialogs
@@ -126,7 +127,7 @@ def ui(context, flask_server):
 
 
 def open_console_from_menu(page, name):
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     pane = page.locator("#tab-kvmvms")
     row = pane.locator(f'tr[data-kvm-vm="node2/{name}"]')
     expect(row).to_be_visible()
@@ -232,7 +233,7 @@ def test_a_viewer_sees_the_console_item_disabled(ui):
     make_page, state = ui
     state["role"] = "viewer"
     page, _ = make_page()
-    page.locator('#tab-group-kvm .tab[data-tab="kvmvms"]').evaluate("el => el.click()")
+    page.evaluate("Router.go('#vms/host/kvm')")   # 2.0.0 : KVM > Virtual machines, par son adresse
     pane = page.locator("#tab-kvmvms")
     pane.locator('tr[data-kvm-vm="node2/kvmtest-cirros"] [data-kvm="menu"]').click()
     item = page.locator(".kvm-menu [data-kvm-console]")

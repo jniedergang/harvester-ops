@@ -16,6 +16,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 GIB = 1024 ** 3
 POOL_A = {"name": "capi-vm-pool", "subnet": "172.16.0.0/16", "gateway": "172.16.0.1",
           "mask": "255.255.0.0", "total": 16, "available": 13, "used": [],
@@ -284,16 +286,14 @@ def test_the_window_opens_from_the_k8s_clusters_tab_and_minimises(context, flask
     """Demandé par l'exploitant : plus de sous-onglet de création, un bouton
     dans Clusters K8S qui ouvre une fenêtre qu'on replie dans la barre."""
     context.add_init_script("""localStorage.setItem('harvester_ops_language','fr');
-      localStorage.setItem('harvester_ops_current_tab','automation');
-      localStorage.setItem('harvester_ops_automation_subtab','capi');
       localStorage.setItem('harvester_ops_capi_subtab','clusters');""")      # ancien choix mémorisé
     page = context.new_page()
     page.route("**/api/capi/harv-fake/inventory*", lambda r, q: fulfill(r, INVENTORY))
     page.route("**/api/capi/harv-fake/diag*", lambda r, q: fulfill(r, {"capi_clusters": []}))
     page.route("**/api/capi/harv-fake/cluster-check", lambda r, q: fulfill(r, {"blocked": False, "findings": []}))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    # 2.0.0 : Automatisation > Cluster API par son adresse
+    goto(page, flask_server["base_url"], address("automation", sub="capi"))
     page.wait_for_function("window.CapiCreate && window.CAPI && window.i18n")
-    page.evaluate("document.querySelector('.tab[data-tab=automation]')?.click()")
     assert page.locator('#tab-automation .sub-tab[data-capi-tab="clusters"]').count() == 0
     expect(page.locator('#tab-automation .sub-tab[data-capi-tab="k8s"]')).to_have_class("sub-tab active")
     btn = page.locator("#btn-capi-create")

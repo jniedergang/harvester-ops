@@ -85,6 +85,7 @@ const BMC = (() => {
     if (!force && out.querySelector('#bmc-discover-form')) {
       renderIsoStore();
       if (window.BMProfiles) BMProfiles.render();
+      paintJoin();
       return;
     }
     out.innerHTML = `
@@ -116,6 +117,7 @@ const BMC = (() => {
     renderIsoStore();
     // v1.80.0 : profils d'installation multi-nœuds (bm-profiles.js)
     if (window.BMProfiles) BMProfiles.render();
+    paintJoin();
   }
 
   async function discover(ev) {
@@ -366,7 +368,15 @@ const BMC = (() => {
           </div>
           <div class="bm-config-msg" id="bm-config-msg" role="status"></div>
           <input type="hidden" name="mode" value="create">
-          <input type="hidden" name="server_url" value="">
+          <fieldset class="bm-join-addr" hidden>
+            <legend>${esc(tr('bmc.fs.join'))}</legend>
+            <label style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.joinUrl'))}>${esc(tr('bmc.f.joinUrl'))} *
+              <input name="server_url" value="" placeholder="https://192.0.2.100:443" spellcheck="false"
+                     title="${esc(tr('bmc.tip.joinUrl'))}"></label>
+            <label class="bm-check bm-join-confirm" style="grid-column:1/-1;" ${tipAttr(tr('bmc.tip.joinConfirm'))}>
+              <input type="checkbox" name="join_confirm" title="${esc(tr('bmc.tip.joinConfirm'))}">
+              <span class="bm-join-confirm-text"></span></label>
+          </fieldset>
           <fieldset>
             <legend>${esc(tr('bmc.fs.image'))}</legend>
             <label style="grid-column:1/-1;">${esc(tr('bmc.f.iso'))} *
@@ -986,6 +996,7 @@ const BMC = (() => {
     let vmServer = '';
     async function loadVmTemplates(force = false) {
       const server = field('server_url').value;
+      const chosen = joinTarget ? '&cluster=' + encodeURIComponent(joinTarget.cluster) : '';
       if (!force && server === vmServer) return;
       vmServer = server;
       const select = field('vm_template');
@@ -994,7 +1005,7 @@ const BMC = (() => {
       message.textContent = '';
       if (!server) return;
       try {
-        const response = await fetch('/api/baremetal/vm-network/options?server_url=' + encodeURIComponent(server));
+        const response = await fetch('/api/baremetal/vm-network/options?server_url=' + encodeURIComponent(server) + chosen);
         const data = await response.json();
         if (vmServer !== server) return;
         if (!response.ok) throw new Error(data.error || response.status);
@@ -1022,6 +1033,12 @@ const BMC = (() => {
         if (input) input.required = creating;
       });
       panel.el.querySelectorAll('.bm-create-opt').forEach(l => { l.hidden = !creating; });
+      // 2.0.0 : l'adresse rejointe est montrée et modifiable ; venue de
+      // « Joindre un nœud », elle doit en plus être confirmée.
+      form.querySelector('.bm-join-addr').hidden = creating;
+      field('server_url').required = !creating;
+      form.querySelector('.bm-join-confirm').hidden = creating || !joinTarget;
+      field('join_confirm').required = !creating && !!joinTarget;
       const lacp = bondMode.value === '802.3ad';
       panel.el.querySelectorAll('.bm-lacp').forEach(l => { l.hidden = !lacp; });
       const xmit = XMIT_MODES.includes(bondMode.value);
@@ -1034,6 +1051,16 @@ const BMC = (() => {
     };
     method.addEventListener('change', syncAll);
     bondMode.addEventListener('change', syncAll);
+    // 2.0.0 : « Joindre un nœud » d'un hôte : mode jonction vers ce cluster
+    // Adresse lue dans le cluster, ou vide quand elle n'a pas pu l'être :
+    // jamais devinée, toujours confirmée (l'installation efface des disques).
+    if (joinTarget) {
+      field('mode').value = 'join';
+      field('server_url').value = joinTarget.server_url || '';
+      form.querySelector('.bm-join-confirm-text').textContent = tr('bmc.f.joinConfirm', { cluster: joinTarget.cluster });
+      // une adresse modifiée après confirmation se reconfirme
+      field('server_url').addEventListener('input', () => { field('join_confirm').checked = false; });
+    }
     syncAll();
     renderDisks();
     loadInventory();
@@ -1064,6 +1091,8 @@ const BMC = (() => {
       body.wipe_all_disks = field('wipe_all_disks').checked;
       if (body.bond_mode !== '802.3ad') delete body.bond_lacp_rate;
       if (!XMIT_MODES.includes(body.bond_mode)) delete body.bond_xmit_hash_policy;
+      delete body.join_confirm;
+      if (body.mode === 'join' && joinTarget) body.join_cluster = joinTarget.cluster;
       if (body.mode === 'join') {
         delete body.vip;
         delete body.vip_mode;
@@ -1157,6 +1186,13 @@ const BMC = (() => {
       // un secret saisi avant l'import céderait la place au fichier : le vider
       if (fromFile.token) field('token').value = '';
       if (fromFile.password) field('password').value = '';
+      // venue de « Joindre un nœud » : un fichier importé ne repasse pas en
+      // création en silence, et l'adresse se reconfirme
+      if (joinTarget) {
+        field('mode').value = 'join';
+        if (!field('server_url').value) field('server_url').value = joinTarget.server_url || '';
+        field('join_confirm').checked = false;
+      }
       syncAll();
     }
 
@@ -1297,6 +1333,10 @@ const BMC = (() => {
         res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(reasonText('no-os'))}</span>`;
         return;
       }
+      if (body.mode === 'join' && joinTarget && !field('join_confirm').checked) {
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.join.needConfirm'))}</span>`;
+        return;
+      }
       body.bmc_host = host;
       body.bmc_user = creds.user;
       body.bmc_password = creds.password;
@@ -1355,8 +1395,54 @@ const BMC = (() => {
     } catch (e) { alert(e.message); }
   }
 
+  // -------------------------------------------------------------------------
+  // 2.0.0 : « Joindre un nœud » depuis Paramètres > Nœuds d'un hôte. Ouvre
+  // Bare-metal avec ce cluster déjà choisi : la fenêtre d'installation part
+  // en mode jonction vers son adresse (https://VIP:443), lue DANS le
+  // cluster à l'ouverture (/api/clusters/<c>/join-url, ConfigMap de VIP de
+  // Harvester) ; null si elle ne se lit pas : la personne la saisit.
+  // -------------------------------------------------------------------------
+  let joinTarget = null;        // { cluster, server_url }
+
+  function paintJoin() {
+    const out = $('#bmc-body');
+    if (!out) return;
+    let el = out.querySelector('#bm-join-target');
+    if (!joinTarget) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'bm-join-target';
+      el.className = 'summary-bar info bm-join-target';
+      el.setAttribute('role', 'status');
+      out.prepend(el);
+    }
+    el.innerHTML = joinTarget.server_url
+      ? `${Icons.svg('info', { size: 14 })} <span>${esc(tr('bmc.join.banner', { cluster: joinTarget.cluster, url: joinTarget.server_url }))}</span>
+         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
+                 data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`
+      : `${Icons.svg('warn', { size: 14 })} <span>${esc(tr('bmc.join.noUrl', { cluster: joinTarget.cluster }))}</span>
+         <button type="button" class="btn btn-sm btn-secondary tip" data-bm="join-cancel" title="${esc(tr('bmc.join.cancelTip'))}"
+                 data-tip="${esc(tr('bmc.join.cancelTip'))}">${esc(tr('bmc.join.cancel'))}</button>`;
+  }
+
+  /** Ouvre Automatisation > Bare-metal pour joindre une machine à `cluster`. */
+  async function openJoin(cluster) {
+    if (!cluster) return;
+    let url = null;
+    try {
+      const r = await fetch('/api/clusters/' + encodeURIComponent(cluster) + '/join-url');
+      if (r.ok) url = (await r.json()).join_url || null;
+    } catch (e) { /* dit dans le bandeau */ }
+    joinTarget = { cluster, server_url: url };
+    try { localStorage.setItem('harvester_ops_automation_subtab', 'pxe'); } catch (e) { /* sans stockage */ }
+    if (window.Router) await Router.go('#automation/pxe');
+    render();
+    paintJoin();
+  }
+
   function init() {
     document.addEventListener('click', (e) => {
+      if (e.target.closest('[data-bm="join-cancel"]')) { joinTarget = null; paintJoin(); return; }
       if (e.target.closest('#btn-bmc-refresh')) render(true);
       const p = e.target.closest('.bmc-power');
       if (p) { e.preventDefault(); power(p.dataset.host, p.dataset.action); }
@@ -1364,14 +1450,9 @@ const BMC = (() => {
       if (i) { e.preventDefault(); openInstall(i.dataset.host); }
       const del = e.target.closest('.bmc-iso-del');
       if (del) { e.preventDefault(); deleteIso(del.dataset.name); }
-      // Viser le LIEN de navigation, pas n'importe quel `data-subtab="pxe"` :
-      // le panneau de contenu porte le même attribut, si bien qu'un simple
-      // clic sur un bouton de l'onglet reconstruisait tout 50 ms plus tard
-      // et effaçait le résultat de la découverte qui venait de s'afficher.
-      if (e.target.closest('#tab-automation .sub-tab[data-subtab="pxe"]')
-          || e.target.closest('.tab-child[data-subtab="pxe"]')) {
-        setTimeout(render, 50);
-      }
+      // 2.0.0 : l'onglet Bare-metal est rendu par le routeur
+      // (CAPI.selectAutomationSubtab) ; aucun clic dans le panneau ne le
+      // reconstruit (il effaçait le résultat d'une découverte).
     });
     document.addEventListener('submit', (e) => {
       if (e.target?.id === 'bmc-discover-form') discover(e);
@@ -1379,7 +1460,7 @@ const BMC = (() => {
     });
   }
 
-  return { init, render };
+  return { init, render, openJoin };
 })();
 
 document.addEventListener('DOMContentLoaded', BMC.init);

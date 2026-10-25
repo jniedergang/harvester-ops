@@ -86,8 +86,7 @@ def open_window(context, flask_server, inventory=INVENTORY, node=None, state=Non
     page.goto(flask_server["base_url"], wait_until="domcontentloaded")
     page.wait_for_function("window.BMC && window.FloatingPanels && window.i18n")
     page.on("dialog", lambda d: d.accept())
-    page.click('.tab-group-head[data-group="automation"]')
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     # menu latéral en calque au survol : écarter la souris
     page.mouse.move(1300, 450)
     form = page.locator("#bmc-discover-form")

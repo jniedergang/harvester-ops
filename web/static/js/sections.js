@@ -22,7 +22,9 @@ const Sections = (() => {
                                          underlay: { board: 'fabric' } } },
     addons: { first: 'list', panes: { list: { list: 'addons' } } },
     security: { first: 'secrets', panes: { secrets: { list: 'secrets' },
-                                           sshkeys: { list: 'sshkeys' } } },
+                                           sshkeys: { list: 'sshkeys' },
+                                           // 2.0.0 : comptes du cluster, venus de Réglages (décision 7)
+                                           accounts: { mod: 'HUsers' } } },
     // v1.70.0 : le menu Monitoring & Logging de Harvester
     monlog: { first: 'metrics', panes: { metrics: { mod: 'MonLog' }, alerts: { mod: 'MonLog' },
                                          flows: { mod: 'MonLog' }, outputs: { mod: 'MonLog' } } },
@@ -43,7 +45,7 @@ const Sections = (() => {
                                             support: { mod: 'Advanced' } } },
   };
   // les modules qui tiennent leur onglet eux-mêmes : un seul vit à la fois
-  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'MonLog', 'VMImport', 'Forklift'];
+  const MODS = ['NetAdmin', 'Advanced', 'Devices', 'MonLog', 'VMImport', 'Forklift', 'HUsers'];
   const KEY = (sec) => `harvester_ops_section_${sec}`;
 
   function isSection(name) { return Object.prototype.hasOwnProperty.call(DEF, name); }
@@ -96,10 +98,22 @@ const Sections = (() => {
   function show(sec, pane) {
     if (!isSection(sec) || !DEF[sec].panes[pane]) return;
     try { localStorage.setItem(KEY(sec), pane); } catch {}
-    return activate(sec);
+    const loading = activate(sec);
+    // Navigation 2.0 : l'adresse porte le pane (F5 rend le même pane)
+    if (window.Router) Router.syncFromScreen();
+    return loading;
   }
 
-  /** Ouvre une section sur un onglet (liens d'une vue vers une autre). */
+  /** Retient le pane d'une section sans rien montrer (le routeur pose
+   *  ensuite le cluster et l'onglet, qui l'activent). */
+  function remember(sec, pane) {
+    if (!isSection(sec) || !DEF[sec].panes[pane]) return false;
+    try { localStorage.setItem(KEY(sec), pane); } catch {}
+    return true;
+  }
+
+  /** Ouvre une section sur un onglet (liens d'une vue vers une autre) ;
+   *  setTab en écrit l'adresse. */
   function open(sec, pane) {
     if (pane) { try { localStorage.setItem(KEY(sec), pane); } catch {} }
     if (window.App && App.setTab) App.setTab(sec);
@@ -128,6 +142,6 @@ const Sections = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { isSection, activate, show, open, stopLists, current };
+  return { isSection, activate, show, open, remember, stopLists, current, DEF };
 })();
 window.Sections = Sections;

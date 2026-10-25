@@ -18,6 +18,8 @@ import time
 
 import pytest
 
+from nav import address, goto  # noqa: E402
+
 playwright = pytest.importorskip("playwright")
 
 FAKE_WS = """
@@ -47,9 +49,8 @@ def open_console(page, base_url, status):
         status=200, content_type="application/json", body=json.dumps(status())))
     page.context.add_init_script(
         FAKE_WS + "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
-    page.goto(base_url, wait_until="domcontentloaded")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
+    goto(page, base_url, address("namespaces"))
     page.wait_for_timeout(1500)
     page.evaluate("() => window.VMConsole.open('harv-fake','default','vm1')")
     return tickets

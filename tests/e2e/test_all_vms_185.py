@@ -15,6 +15,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 
 def vm(cluster, ns, name, phase, rs="Always", ip=None, node="n1", mem="4Gi", cpu=2):
     return {"cluster": cluster, "namespace": ns, "name": name, "phase": phase, "runStrategy": rs,
@@ -39,12 +41,11 @@ def view(context, flask_server):
     context.add_init_script(
         "if (!sessionStorage.getItem('avm-init')) {"
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_tab','allvms');"
         "localStorage.removeItem('harvester_ops_allvms');"
         "sessionStorage.setItem('avm-init','1'); }")
     page = context.new_page()
     sent = []
-    page.route("**/api/vms-all", lambda r, q: r.fulfill(status=200, content_type="application/json",
+    page.route(re.compile(r".*/api/vms-all(\?.*)?$"), lambda r, q: r.fulfill(status=200, content_type="application/json",
                                                          body=json.dumps(DATA)))
 
     def patch(route, req):
@@ -55,7 +56,7 @@ def view(context, flask_server):
                              body=json.dumps({"runStrategy": "Always", "phase": "Running", "volumes": []}))
     page.route(re.compile(r".*/api/vm/[^/]+/[^/]+/[^/]+/(runStrategy|state)$"), patch)
     page.on("dialog", lambda d: d.accept())
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address('allvms'))
     page.wait_for_function("window.AllVMs && window.i18n")
     rows = page.locator("#all-vms-host tbody tr")
     expect(rows).to_have_count(5)
@@ -63,23 +64,28 @@ def view(context, flask_server):
 
 
 def names(rows):
-    return rows.evaluate_all("rs => rs.map(r => r.children[3].textContent.trim())")
+    return rows.evaluate_all("rs => rs.map(r => r.querySelector('[data-avm-col=name]').textContent.trim())")
 
 
 def test_virtual_machines_is_a_group_of_two_entries(view):
     """Décision de ju : « Virtual machines » regroupe les VMs du cluster
-    choisi (l'onglet d'avant) et celles de tous les clusters."""
+    choisi et celles de tous les clusters. 2.0.0 : l'entrée racine du menu
+    des hôtes (#vms, toutes les VMs) et l'entrée « Machines virtuelles » du
+    sous-menu de l'hôte ouvert (VMs du cluster)."""
     page, _, _ = view
-    group = page.locator("#tab-group-vms")
-    expect(group.locator(".tab-group-head .sidebar-label")).to_have_text("Virtual machines")
-    tabs = group.locator(".tab-child").evaluate_all("els => els.map(e => e.dataset.tab)")
-    assert tabs == ["namespaces", "allvms"]
-    labels = group.locator(".tab-child .sidebar-label").all_inner_texts()
-    assert [x.strip() for x in labels] == ["Current cluster's VMs", "All clusters VMs"]
+    root = page.locator('#host-nav [data-hnav-root="vms"]')
+    expect(root.locator(".sidebar-label")).to_have_text("Virtual machines")
+    assert root.get_attribute("href") == "#vms"
+    expect(root).to_have_class(re.compile(r"\bactive\b"))      # écran ouvert : toutes les VMs
     assert page.locator('nav > .tab[data-tab="namespaces"]').count() == 0
-    expect(group).to_have_class(re.compile("expanded"))
+    assert page.locator("nav .tab[data-tab]").count() == 0       # l'ancien menu est retiré
     page.mouse.move(1200, 600)
-    page.locator('.tab[data-tab="namespaces"]').click()
+    page.evaluate("Router.go('#harvester/harv-fake')")
+    page.evaluate("Router.idle()")
+    sub = page.locator('#hnav-families .hnav-sub a[data-sub="vms"]')
+    expect(sub.locator(".sidebar-label")).to_have_text("Virtual machines")
+    assert sub.get_attribute("href") == "#harvester/harv-fake/vms"
+    sub.click()
     expect(page.locator("#tab-namespaces")).to_have_class(re.compile("active"))
 
 
@@ -113,6 +119,7 @@ def test_filters_by_cluster_state_namespace_and_text_and_remembers_them(view):
     assert names(rows) == ["db"]
     page.select_option('[data-avm="ns"]', "")
     page.fill('[data-avm="text"]', "10.0.0.11")
+    expect(rows).to_have_count(1)            # 2.0.0 : la recherche attend 150 ms
     assert names(rows) == ["web-1"]
     page.reload(wait_until="domcontentloaded")
     page.wait_for_function("window.AllVMs")

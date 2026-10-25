@@ -197,31 +197,26 @@ def test_i18n_exposes_itself_on_window_for_es_modules():
 
 
 def test_app_js_restores_subtabs_after_setcluster():
-    """REGRESSION (v1.4.31): the Overview sub-tab restoration must run
-    AFTER setCluster() — otherwise mountTopology() bails on null
-    cluster and the Cluster/Network/Storage tabs come back with an
-    empty canvas. The restore helper is a separate function so the
-    ordering is explicit at the init() call site."""
+    """REGRESSION (v1.4.31): the sub-tab restoration (overview mode,
+    shutdown sub-tab) must run AFTER the cluster is set, otherwise
+    mountTopology() bails on a null cluster and the views come back with an
+    empty canvas. Navigation 2.0.0: the first screen of a session goes
+    through showRoute(), which commits the cluster, then restores the saved
+    sub-tabs, then shows the tab (the address path is also covered by
+    tests/e2e/test_router_1100.py::test_router_cold_load_detects_order)."""
     app_js = WEB_DIR.parent / "web" / "static" / "js" / "app.js"
     src = app_js.read_text()
-    assert "function restoreSubTabsFromStorage" in src, (
-        "restoreSubTabsFromStorage helper missing — sub-tab restore "
-        "race with setCluster() will recur."
-    )
-    # And init() must call it AFTER setCluster()
-    init_body = src[src.find("function init()"):]
-    init_body = init_body[:2500]
-    sc = init_body.find("setCluster(")
-    rs = init_body.find("restoreSubTabsFromStorage()")
-    assert sc >= 0 and rs >= 0, (
-        f"init() body lacks setCluster() or restoreSubTabsFromStorage() "
-        f"(setCluster={sc}, restoreSubTabs={rs})"
-    )
-    assert rs > sc, (
-        "restoreSubTabsFromStorage() must be called AFTER setCluster() "
-        "in init() — otherwise currentCluster is null at click time and "
-        "mountTopology() short-circuits."
-    )
+    body = src[src.find("async function showRoute(t)"):]
+    body = body[:body.find("\n  }\n")]
+    first = body[body.find("if (!previous) {"):]
+    sc = body.find("commitCluster(cluster)")
+    ov = first.find("paintOverviewMode(savedOverviewMode())")
+    sh = first.find("harvester_ops_shutdown_subtab")
+    assert sc >= 0 and ov >= 0 and sh >= 0, (sc, ov, sh)
+    assert body.find("if (!previous) {") > sc, (
+        "the first-screen restore must come AFTER commitCluster(): otherwise "
+        "currentCluster is null at click time and mountTopology() short-circuits.")
+    assert first.find("show()") > max(ov, sh), "the tab is shown after the sub-tabs are restored"
 
 
 def test_topology_cache_ttl_is_reasonable():

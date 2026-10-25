@@ -186,7 +186,7 @@ def test_console_clusters_are_edited_renamed_and_deleted_in_the_state_dir(env):
     assert stat.S_IMODE((ssh / "lab2_id").stat().st_mode) == 0o600
     # supprimé : déclaration et fichiers partent
     assert c.delete("/api/clusters/lab2").status_code == 200
-    assert not list((state / "clusters.d").iterdir())
+    assert [p.name for p in (state / "clusters.d").iterdir()] in ([], [".lock"])
     assert not list(ssh.iterdir()) and not list((state / "kubeconfigs").iterdir())
     assert env["cfg"].read_text() == before
 
@@ -345,3 +345,68 @@ def test_the_support_bundle_carries_the_console_declarations(env, monkeypatch, t
         assert "lab1" not in text and "192.0.2.50" not in text and "lab1" not in decls[0]
     else:
         assert decls[0] == "clusters.d/lab1.yaml" and "name: lab1" in text
+
+
+def test_editing_a_console_cluster_keeps_its_folder(env):
+    """2.0.0 : le champ `folder` (écrit par harvester-folders.py) survit à
+    une modification depuis Settings > Clusters, renommage compris."""
+    _put_decl(env["state"], _decl("lab1", folder="/Production/ERP"))
+    c = env["client"]
+    r = c.put("/api/clusters/lab1", json={"name": "lab1", "description": "edited", "nodes": [NODE]})
+    assert r.status_code == 200, r.get_json()
+    doc = yaml.safe_load((env["state"] / "clusters.d" / "lab1.yaml").read_text())
+    assert (doc["folder"], doc["description"]) == ("/Production/ERP", "edited")
+    r = c.put("/api/clusters/lab1", json={"name": "lab3", "description": "edited", "nodes": [NODE]})
+    assert yaml.safe_load((env["state"] / "clusters.d" / "lab3.yaml").read_text())["folder"] == "/Production/ERP"
+
+
+def test_a_folder_write_during_a_console_edit_is_not_lost(env, monkeypatch):
+    """2.0.0 : harvester-folders.py (un autre processus) et la fenêtre
+    d'édition du cluster écrivent la même déclaration. Le verrou partagé de
+    clusters.d sérialise les deux : l'édition, qui a lu la déclaration avant
+    le rangement, ne l'efface pas."""
+    import importlib.util
+    import threading
+    import time
+    spec = importlib.util.spec_from_file_location("hf_lock", ROOT / "bin" / "harvester-folders.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    monkeypatch.setenv("HARVESTER_OPS_CONFIG", str(env["cfg"]))
+    _put_decl(env["state"], _decl("lab1"))
+    real, read, results = wapp._find_cluster, threading.Event(), []
+
+    def slow_find(name):
+        out = real(name)
+        read.set()                               # déclaration lue, pas encore écrite
+        time.sleep(0.5)
+        return out
+    monkeypatch.setattr(wapp, "_find_cluster", slow_find)
+    t = threading.Thread(target=lambda: results.append(env["client"].put(
+        "/api/clusters/lab1", json={"name": "lab1", "description": "edited", "nodes": [NODE]})))
+    t.start()
+    assert read.wait(5)
+    cli.write_host({"family": "harvester", "name": "lab1"}, "/Lab")
+    t.join()
+    assert results[0].status_code == 200
+    doc = yaml.safe_load((env["state"] / "clusters.d" / "lab1.yaml").read_text())
+    assert (doc.get("folder"), doc["description"]) == ("/Lab", "edited")
+
+
+def test_the_declaration_lock_is_exclusive_between_processes(tmp_path):
+    """Le verrou de clusters.d tenu par un processus fait attendre l'autre,
+    puis refuse au-delà du délai."""
+    import time
+    code = ("import sys, time; sys.path.insert(0, sys.argv[1]); import cluster_decl as c\n"
+            "with c.decl_lock(sys.argv[2]):\n    print('held', flush=True); time.sleep(1.5)\n")
+    p = subprocess.Popen([sys.executable, "-c", code, str(ROOT / "bin" / "lib"), str(tmp_path)],
+                         stdout=subprocess.PIPE, text=True)
+    try:
+        assert p.stdout.readline().strip() == "held"
+        with pytest.raises(TimeoutError):
+            with cluster_decl.decl_lock(tmp_path, wait=0.3):
+                pass
+        t0 = time.monotonic()
+        with cluster_decl.decl_lock(tmp_path, wait=5):
+            assert time.monotonic() - t0 > 0.5       # obtenu seulement une fois relâché
+    finally:
+        p.wait(5)

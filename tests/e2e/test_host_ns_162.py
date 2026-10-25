@@ -14,6 +14,8 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+from nav import address, goto  # noqa: E402
+
 GI = 1024 ** 3
 SETTINGS = {
     "node": "n1", "custom_name": "baie 1", "console_url": "https://10.0.0.21", "labels": {"rack": "r2"},
@@ -65,7 +67,6 @@ def ui(context, flask_server):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','fr');"
         "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');"
         "localStorage.removeItem('harvester_ops_host_tab');")
     page = context.new_page()
     sent = []
@@ -83,7 +84,7 @@ def ui(context, flask_server):
     page.route("**/api/namespaces/harv-fake", lambda r, q: fulfill(r, [{"name": "team-a"}]))
     page.route("**/api/stream/host00000162", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.HostSettings && window.Namespaces && window.App && App.getCurrentCluster()")
     dialogs = []
     page.on("dialog", lambda d: (dialogs.append(d.message), d.accept()))
@@ -231,8 +232,8 @@ def test_the_events_board_and_the_usage_gauges(ui):
     page.route("**/api/events/harv-fake", lambda r, q: fulfill(r, EVENTS))
     page.route("**/api/usage/harv-fake", lambda r, q: fulfill(r, USAGE))
     page.route("**/api/status/harv-fake", lambda r, q: fulfill(r, {"summary": {"nodes_total": 1, "nodes_ready": 1}, "nodes": []}))
-    page.evaluate("App.setTab('overview')")
-    page.locator('[data-overview-tab="events"]').click()
+    # 2.0.0 : les événements sont un bloc sous les métriques de l'aperçu
+    page.evaluate("Router.go('#harvester/harv-fake/overview/events')")
     rows = page.locator(".ev-table tbody tr")
     expect(rows).to_have_count(2, timeout=8000)
     expect(page.locator('[data-ev-count="hosts"] .ev-warn')).to_contain_text("1")
@@ -245,9 +246,8 @@ def test_the_events_board_and_the_usage_gauges(ui):
     expect(rows.first).to_contain_text("web")
     page.locator('[data-ev="q"]').fill("nothing-matches")
     expect(page.locator(".ev-list .hint")).to_be_visible()
-    page.locator('[data-overview-tab="metrics"]').click()
-    expect(page.locator('[data-overview-tab="metrics"]')).to_have_class(re.compile(r"\bactive\b"))
-    expect(page.locator('[data-overview-tab="events"]')).not_to_have_class(re.compile(r"\bactive\b"))
+    # les jauges sont sur la même page, au-dessus des événements
+    expect(page.locator('#tab-overview .overview-subtab[data-subtab="metrics"]')).to_be_visible()
     expect(page.locator("#overview-usage .usage-gauge")).to_have_count(3, timeout=8000)
     expect(page.locator("#overview-usage")).to_contain_text("25 %")               # 2 cœurs sur 8
     expect(page.locator("#overview-usage")).to_contain_text("200 %")             # sur-provisionnement

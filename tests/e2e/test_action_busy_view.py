@@ -6,11 +6,14 @@ dans le journal de l'onglet, dans la langue de l'interface.
 """
 
 import json
+import re
 
 import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+
+from nav import goto  # noqa: E402
 
 
 def _refuse(route, request):
@@ -24,11 +27,17 @@ def _refuse(route, request):
 def test_a_refused_shutdown_is_written_in_the_log(context, flask_server, lang, needle):
     context.add_init_script(f"localStorage.setItem('harvester_ops_language','{lang}');")
     page = context.new_page()
-    page.goto(flask_server["base_url"])
+    goto(page, flask_server["base_url"], "#harvester/harv-fake/params/nodes")
     page.wait_for_load_state("networkidle")
     page.route("**/api/action", _refuse)
     page.on("dialog", lambda d: d.accept())
-    page.locator('.tab[data-tab="shutdown"]').first.click()
+    # 2.0.0 : Paramètres > Alimentation > Arrêt, par la barre d'onglets de l'hôte
+    page.locator('#host-page-head .hp-tabs [data-hp-tab="power"]').click()
+    page.locator('#host-page-head .hp-tabs [data-hp-tab="shutdown"]').click()
+    expect(page.locator("#tab-shutdown")).to_have_class(re.compile(r"\bactive\b"))
+    # 2.0.0 : le bandeau de l'hôte décale la page ; le menu ouvert en calque
+    # au survol couvrirait le bouton : écarter la souris, comme un exploitant
+    page.mouse.move(1100, 300)
     page.locator("#btn-shutdown").click()
     log = page.locator("#shutdown-log")
     expect(log).to_contain_text(needle, timeout=5000)

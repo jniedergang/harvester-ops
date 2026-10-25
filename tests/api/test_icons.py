@@ -248,7 +248,8 @@ def test_i18n_strings_carry_no_icons():
     """Icons live in sibling elements: applyTranslations() overwrites the
     textContent of translated nodes, which would wipe an inline SVG."""
     src = (JS / "i18n.js").read_text()
-    for key in ("overview.tabMetrics", "overview.tabCluster", "section.volumes",
+    # 2.0.0 : les sous-onglets de l'aperçu sont partis (bloc Événements, Paramètres > Nœuds)
+    for key in ("section.secrets", "section.sshkeys", "section.volumes",
                 "section.vmnets", "cluster.filter",
                 "action.cancelled", "topology.lockedHint"):
         values = re.findall(rf"'{re.escape(key)}':\s*'([^']*)'", src)
@@ -258,7 +259,7 @@ def test_i18n_strings_carry_no_icons():
     # the overview and section sub-tabs put their icon in a sibling span
     # (v1.57.0 : Network and Storage left the overview for their sections)
     index = (TEMPLATES / "index.html").read_text()
-    for key, icon in (("overview.tabMetrics", "metrics"), ("overview.tabCluster", "node"),
+    for key, icon in (("section.secrets", "lock"), ("section.sshkeys", "key"),
                       ("section.vmnets", "network"), ("section.volumes", "volume")):
         assert f'data-icon="{icon}"></span> <span data-i18n="{key}"' in index
 

@@ -467,28 +467,7 @@ body.sidebar-collapsed #sidebar .brand .title {
    le clic atterrissait sur la ligne voisine. `visibility` masque sans
    libérer la place, donc la géométrie verticale est rigoureusement la
    même dans les deux états. */
-body.sidebar-collapsed #sidebar .version,
-body.sidebar-collapsed .cluster-selector label {
-  visibility: hidden;
-}
-/* Le sélecteur de cluster, LUI, reste utilisable dans le rail. Le masquer
-   obligeait à ouvrir le menu pour lire ou changer de cluster, sur une
-   console dont c'est le contrôle le plus utilisé, et le rendait carrément
-   inatteignable au clavier comme au script. Il occupe la largeur du rail,
-   le nom est tronqué mais lisible, et le bouton « + » (ajouter un cluster,
-   geste rare) attend le dépliage. La hauteur de la rangée ne change pas. */
-body.sidebar-collapsed .cluster-row #cluster-select {
-  width: 100%;
-  min-width: 0;
-  padding-left: 4px;
-  padding-right: 4px;
-}
-body.sidebar-collapsed .cluster-row .btn-icon-sm { display: none; }
-/* Exception au `display:none !important` ci-dessus : ce libellé porte la
-   classe `sidebar-label` mais occupe une LIGNE dans l'en-tête. Le retirer
-   du flux remontait toute la navigation de 19 px. */
-body.sidebar-collapsed .cluster-selector > label.sidebar-label {
-  display: block !important;
+body.sidebar-collapsed #sidebar .version {
   visibility: hidden;
 }
 /* Seul l'espacement HORIZONTAL change : toucher au vertical recréerait le
@@ -498,13 +477,6 @@ body.sidebar-collapsed #sidebar header {
   text-align: center;
 }
 body.sidebar-collapsed #sidebar .brand { justify-content: center; }
-body.sidebar-collapsed .cluster-selector {
-  padding: 14px 8px;
-  border-bottom: 1px solid var(--border);
-}
-body.sidebar-collapsed .cluster-row {
-  justify-content: center;
-}
 body.sidebar-collapsed .tab {
   padding: 10px 0;
   text-align: center;
@@ -581,47 +553,6 @@ body.sidebar-collapsed .sidebar-collapse-btn {
 }
 .version { color: var(--text-dim); font-size: 11px; margin-top: 4px; }
 
-.cluster-selector {
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--border);
-}
-.cluster-selector label {
-  display: block;
-  text-transform: uppercase;
-  font-size: 10px;
-  letter-spacing: 1px;
-  color: var(--text-dim);
-  margin-bottom: 6px;
-}
-.cluster-selector select {
-  flex: 1;
-  background: var(--bg-elev);
-  color: var(--text);
-  border: 1px solid var(--border);
-  padding: 6px 8px;
-  border-radius: 4px;
-  font-size: 13px;
-}
-.cluster-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.cluster-row .btn-icon-sm {
-  background: var(--bg-elev);
-  border: 1px solid var(--accent);
-  color: var(--accent);
-  width: 26px; height: 26px;
-  border-radius: 4px;
-  font-size: 16px;
-  font-weight: 500;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.cluster-row .btn-icon-sm:hover {
-  background: var(--accent);
-  color: var(--btn-primary-text);
-}
 
 #sidebar nav {
   flex: 1;
@@ -1581,7 +1512,8 @@ h4 { font-size: 13px; margin: 12px 0 6px; color: var(--text-dim); }
 }
 .dock-action-summary {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto;
+  /* 2.0.0 : 7e colonne = Annuler et Reprendre d'une action de dossiers */
+  grid-template-columns: auto 1fr auto auto auto auto auto;
   gap: 12px;
   align-items: center;
   padding: 8px 12px;
@@ -5703,3 +5635,190 @@ body.sidebar-collapsed .rp-menu-badge { position: absolute; margin: 0; right: 4p
 .kvms-progress { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
 .kvms-progress[hidden] { display: none; }
 .kvms-phase-head { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }
+
+/* ============================================================================
+   Navigation 2.0 : menu des hôtes (host-nav.js)
+   Mêmes rangées que .tab ; rien ne revient à la ligne (règle de #sidebar).
+   ============================================================================ */
+.host-nav { display: flex; flex-direction: column; padding-bottom: 6px; margin-bottom: 6px; border-bottom: 1px solid var(--border); }
+/* Mêmes rangées que les entrées de l'ancien menu (display block) : une rangée
+   flex changeait de hauteur d'un pixel quand le libellé disparaît dans le rail,
+   et toute la navigation bougeait au dépliage (test_the_menu_rows_never_move). */
+button.tab.hnav-entry { background: none; border: 0; border-left: 3px solid transparent; width: 100%; text-align: left; font: inherit; font-size: 13px; cursor: pointer; }
+body.sidebar-collapsed button.tab.hnav-entry { text-align: center; border-left: 0; }
+.hnav-search { position: relative; padding: 6px 12px 6px 12px; }
+.hnav-search input { width: 100%; padding: 5px 26px 5px 26px; font-size: 12px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 4px; box-sizing: border-box; }
+.hnav-search-icon { position: absolute; left: 20px; top: 12px; color: var(--text-dim); display: inline-flex; pointer-events: none; }
+.hnav-kbd { position: absolute; right: 18px; top: 10px; font-size: 10px; border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 4px; color: var(--text-dim); background: var(--bg); font-family: var(--font-mono); }
+.hnav-sec { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; padding: 6px 18px 2px; }
+.hnav-results { padding-bottom: 4px; }
+.hnav-dim { color: var(--text-dim); font-size: 11px; }
+/* La liste des hôtes a sa propre hauteur : cent hôtes ne repoussent pas le reste du menu */
+.hnav-families { max-height: 52vh; overflow-y: auto; overflow-x: hidden; }
+.hnav-fam-head { display: flex; align-items: center; gap: 6px; width: 100%; background: none; border: 0; cursor: pointer;
+  height: 28px; box-sizing: border-box; padding: 0 12px 0 18px; color: var(--text); font: inherit; font-size: 12.5px; font-weight: 600; text-align: left; }
+.hnav-fam-head:hover { background: var(--bg-elev); }
+.hnav-chev { display: inline-flex; transition: transform .15s ease; color: var(--text-dim); }
+.hnav-fam.collapsed .hnav-chev { transform: rotate(-90deg); }
+.hnav-fam-total { color: var(--text-dim); font-weight: 400; }
+.hnav-fam-sum { margin-left: auto; font-weight: 400; font-size: 11px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.hnav-fam-sum.has-alert { color: var(--warn); }
+.hnav-host { display: flex; align-items: center; gap: 6px; height: 26px; box-sizing: border-box; padding: 0 10px 0 26px; border-left: 3px solid transparent; font-size: 12.5px; }
+.hnav-host:hover { background: var(--bg-elev); }
+.hnav-host.open { background: var(--bg-elev); border-left-color: var(--accent); }
+.hnav-host { position: relative; }
+/* 2.0.0 : pastille des alertes DR d'un hôte (source ou secours), lien vers son DR */
+.hnav-dr-badge { margin-left: 0; text-decoration: none; flex: none; }
+.hnav-dr-badge:hover { filter: brightness(1.1); }
+.hnav-host.alert .hnav-host-name { color: var(--warn); }
+.hnav-host-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); text-decoration: none; padding: 2px 0; }
+.hnav-host-name:hover, .hnav-host.open .hnav-host-name { color: var(--text); }
+.hnav-host.open .hnav-host-name { color: var(--accent); font-weight: 600; }
+.hnav-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-dim); opacity: .6; }
+.hnav-dot.st-ok { background: var(--done); opacity: 1; }
+.hnav-dot.st-unreachable, .hnav-dot.st-error { background: var(--error); opacity: 1; }
+.hnav-dot.st-denied { background: var(--warn); opacity: 1; }
+.hnav-count { font-size: 11px; color: var(--text-dim); min-width: 1.5em; text-align: right; }
+.hnav-star { background: none; border: 0; padding: 0 2px; cursor: pointer; color: var(--text-dim); opacity: .35; display: inline-flex; }
+.hnav-host:hover .hnav-star, .hnav-star:focus-visible { opacity: 1; }
+.hnav-star.on { color: #d39b00; opacity: 1; }
+.hnav-star.on svg { fill: currentColor; }
+.hnav-sub { margin: 0 0 4px 30px; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+.hnav-empty { height: 24px; line-height: 24px; padding: 0 18px 0 30px; font-size: 12px; color: var(--text-dim); overflow: hidden; }
+body.sidebar-collapsed .hnav-empty { visibility: hidden; }
+body.sidebar-collapsed .hnav-search input { padding-left: 4px; padding-right: 4px; }
+body.sidebar-collapsed .hnav-search-icon, body.sidebar-collapsed .hnav-chev { visibility: hidden; }
+body.sidebar-collapsed .hnav-host { padding-left: 10px; }
+body.sidebar-collapsed .hnav-sub { margin-left: 0; border-left: 0; }
+/* « + Ajouter un hôte » : deux choix */
+.host-add-modal { max-width: 560px; }
+.host-add-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 18px 24px 24px; }
+.host-add-choice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px; cursor: pointer;
+  text-align: left; font: inherit; color: var(--text); white-space: normal; }
+.host-add-choice:hover, .host-add-choice:focus-visible { border-color: var(--accent); }
+.host-add-choice .hint { margin: 0; font-size: 12px; }
+.host-add-icon { color: var(--accent); display: inline-flex; }
+@media (max-width: 560px) { .host-add-choices { grid-template-columns: 1fr; } }
+
+/* Navigation 2.0 : bandeau de la page d'un hôte (host-page.js) */
+.host-page-head { margin: 0 0 14px; padding: 0 0 8px; border-bottom: 1px solid var(--border); max-width: calc(100% - 150px); }
+.hp-title { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; margin-bottom: 4px; }
+.hp-name { font-size: 20px; font-weight: 600; font-family: var(--font-mono); color: var(--accent); }
+.hp-family { color: var(--accent); border-color: var(--accent); }
+.hp-meta { color: var(--text-dim); font-size: 12px; }
+.hp-activity { margin-left: auto; text-decoration: none; }
+.hp-sub { display: flex; gap: 2px; flex-wrap: wrap; margin-left: 12px; }
+.hp-bars { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 4px 18px; }
+.hp-sub-link { padding: 4px 10px; border-radius: 4px; color: var(--text-dim); text-decoration: none; font-size: 13px; }
+.hp-sub-link:hover { background: var(--bg-elev); color: var(--text); }
+.hp-sub-link.active { background: var(--bg-elev); color: var(--accent); font-weight: 600; }
+.hp-tabs { margin: 2px 6px 4px 0; }
+a.sub-tab { text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+.hp-block-title { margin: 18px 0 8px; }
+.hp-nodes-actions { margin-bottom: 8px; display: flex; justify-content: flex-end; }
+.hp-conn-tests { margin-top: 12px; }
+.bm-join-target { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.bm-join-target .btn { margin-left: auto; }
+.hp-tabs .sub-tab { white-space: nowrap; }
+.hp-conn .card-body { padding: 12px 16px; }
+
+/* 2.0.0 : page d'un hôte KVM. Le bandeau dit l'hôte : les titres « de tous
+   les hôtes » des vues KVM sont masqués quand l'hôte est imposé. */
+body.host-page-kvm #tab-kvmhosts > h1, body.host-page-kvm #tab-kvmhosts > .hint,
+body.host-page-kvm #tab-kvmvms > h1, body.host-page-kvm #tab-kvmvms > .hint,
+body.host-page-kvm #tab-kvmstorage > h1, body.host-page-kvm #tab-kvmstorage > .hint,
+body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > .hint { display: none; }
+.hp-kvm-facts th { text-align: left; width: 220px; font-weight: 500; color: var(--text-dim); }
+.hp-kvm-facts td ul { margin: 0; padding-left: 16px; }
+.hp-kvm-actions { margin-top: 12px; }
+.hp-kvm-result { margin-top: 10px; }
+.hp-kvm-error { margin-bottom: 10px; }
+.hp-labels-modal .modal { width: min(640px, 96vw); }
+.hp-labels-edit input { width: 100%; box-sizing: border-box; }
+.hp-labels-checks li.bad { color: var(--danger, var(--text)); }
+.hp-labels-diff { margin-top: 8px; }
+.hp-labels-modal .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); }
+
+/* 2.0.0 : cluster de gestion de Cluster API et Terraform */
+.mgmt-cluster-bar { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
+.mgmt-cluster-bar[hidden] { display: none; }
+.mgmt-cluster-bar label { color: var(--text-dim); }
+/* 2.0.0 : les titres de groupe du menu des hôtes (Ressources partagées,
+   Automatisation) gardent leur hauteur dans le rail : sans quoi les lignes
+   dessous bougeaient à l'ouverture du menu (clic sur la ligne voisine). */
+body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibility: hidden; }
+
+/* -------------------------------------------------------------------------
+   2.0.0 (tâche 15) : vue des VMs avec le panneau Dossiers / Hôtes, vue
+   « Dossiers », fenêtres de rangement (folders.js, all-vms.js)
+   ------------------------------------------------------------------------- */
+.vmf-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+.vmf-side { position: sticky; top: 12px; }
+.vmf-main { min-width: 0; }
+@media (max-width: 900px) { .vmf-layout { grid-template-columns: 1fr; } .vmf-side { position: static; } }
+.fld-panel { padding: 6px 4px 8px; }
+.fld-modes { margin: 2px 6px 6px; }
+.fld-tree, .fld-tree ul { list-style: none; margin: 0; padding: 0; }
+.fld-tree ul { padding-left: 14px; }
+.fld-node { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; cursor: pointer;
+  color: var(--text); text-decoration: none; border: 1px dashed transparent; user-select: none; min-width: 0; }
+.fld-node:hover { background: var(--bg-elev); }
+.fld-node.active { background: var(--bg-elev); color: var(--accent); font-weight: 600; }
+.fld-node.virtual { color: var(--text-dim); }
+.fld-node.virtual.active { color: var(--accent); }
+.fld-node.drop { border-color: var(--accent); background: var(--selection-bg); }
+.fld-node .fld-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fld-node .fld-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-weight: 400; }
+.fld-origin { font-size: 10px; padding: 0 4px; }
+.fld-input { width: 100%; padding: 3px 6px; font-size: 12px; }
+.fld-tools { display: flex; gap: 4px; padding: 6px 8px 0; margin-top: 6px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.fld-confirm { margin: 6px 8px 0; padding: 8px; border: 1px solid var(--error); border-radius: 6px; font-size: 12px; }
+.fld-confirm .btn-row { margin-top: 6px; display: flex; gap: 6px; }
+.fld-viewer, .fld-empty { margin: 6px 8px 0; font-size: 12px; }
+.fld-msg { margin: 4px 8px 0; font-size: 12px; }
+.fld-win { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.fld-step { display: flex; flex-direction: column; gap: 6px; }
+.fld-targets { max-height: 170px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 4px; }
+.fld-target { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; }
+.fld-target:hover { background: var(--bg-elev); }
+.fld-checks { max-height: 210px; overflow: auto; }
+.fld-check-table td { vertical-align: top; }
+.fld-check-table .fld-reason { font-size: 12px; color: var(--text-dim); }
+.fld-summary { margin: 0 0 4px; font-size: 12px; }
+.fld-extra { margin: 0; }
+.fld-toast { position: fixed; right: 18px; bottom: calc(var(--dock-padding, 20px) + 8px); z-index: 2000;
+  background: var(--bg-panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 6px; padding: 8px 12px; box-shadow: var(--shadow-soft); font-size: 13px; opacity: 0;
+  transform: translateY(6px); transition: opacity .15s, transform .15s; pointer-events: none; max-width: 420px; }
+.fld-toast.show { opacity: 1; transform: none; }
+.fld-toast.bad { border-left-color: var(--error); }
+.vmf-scope-title { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 16px; }
+.vmf-family { font-size: 10.5px; }
+.vmf-family-kvm { border-color: var(--accent); }
+.vmf-console { font-size: 10.5px; }
+.vmf-dr { font-size: 10px; padding: 0 4px; margin-left: 4px; text-decoration: none; }
+.avm-table tr[draggable="true"] { cursor: grab; }
+.vmf-viewer { margin-top: 8px; }
+.fview-groups { display: grid; gap: 12px; }
+.fview-group .card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fview-group h3 { display: flex; gap: 6px; align-items: center; margin: 0; font-size: 14px; }
+.fview-list { list-style: none; margin: 0; padding: 0; }
+.fview-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.fview-item:last-child { border-bottom: 0; }
+.fview-item .fview-name { font-weight: 500; }
+.fview-item .btn-icon-action { margin-left: auto; }
+.ct-folder-scope, .hix-folder-scope { display: flex; align-items: center; gap: 6px; }
+.dock-undo-failed { border-color: var(--error); }
+.dock-gestures { display: inline-flex; gap: 4px; white-space: nowrap; }
+.fld-node.fld-family { cursor: default; }
+.fld-node.fld-family:hover { background: none; }
+.fld-win { padding: 10px 14px; }
+.vmf-main .avm-table { min-width: 100%; }
+.vmf-main { overflow-x: auto; }
+
+/* 2.0.0 (revue I-3) : avec les bulles en calque (tooltips.js, body.js-tips),
+   les porteurs de bulle du tableau des VMs n'ont pas besoin d'être des
+   blocs positionnés ; mesuré à 300 lignes, le rendu y gagne ~150 ms. */
+body.js-tips .avm-table tbody .tip { position: static; }

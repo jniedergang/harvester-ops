@@ -4,6 +4,654 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.0] - 2026-10-25 - Host-centred navigation, unified VMs with folders, Disaster Recovery screens
+
+### Added
+- **Hosts list and favourites (API).** `GET /api/hosts` lists every
+  Harvester cluster the person sees and every declared KVM host, with its
+  state, VM count, version, labels and origin, and a summary per family. It
+  makes no API call to a host: the state comes from the TCP reachability
+  probe (cached a few seconds), counts and versions from the reads the
+  screens already made. `PUT` and `DELETE
+  /api/me/favorites/<kind>/<host>` star a host for the person (any role),
+  stored in the console database `folders.db`; not a tracked action, nothing
+  written on a cluster.
+- **Side menu of hosts.** Under **Hosts**, every Harvester cluster and KVM
+  host in two foldable families, each with a one-line state (`58 ok, 2 in
+  alert`), a state dot and the VM count per host, a star to keep a host at
+  the top (kept per person by the console), and the open host unfolded with
+  its sub-menu (Overview, Virtual machines, Containers, Imports and
+  migrations, Parameters, Disaster Recovery). No cap: every host is listed,
+  in a part of the menu that scrolls on its own, and a host in alert stays
+  visible in a folded family. A search (shortcut `/`) filters the hosts by
+  name, label and family and offers the VMs already read; Enter opens the
+  first result. **Add a host** opens a window with two choices, Harvester or
+  KVM. Folders, Virtual machines, Containers, Disaster Recovery and
+  Migrations of the whole fleet sit around it. Every entry is a real link.
+- **Harvester host page.** A band on top of the existing sections: family,
+  name, state, version, VM count, the host's sub-menu and **Activity of this
+  host**. **Parameters** become tabs: Nodes (block view, maintenance, host
+  settings, **Join a node**, which opens Bare-metal with the cluster chosen
+  and the install window in join mode), Storage, Network, Add-ons, Security,
+  Monitoring & Logging, Advanced, Upgrade (the Upgrade window's content in
+  the page), Power (Startup, Shutdown) and Connection (origin, declared
+  nodes, Test kubeconfig, Test SSH, shortcut to Settings > Clusters).
+  **Imports and migrations** become two tabs (VM Import, VMware
+  migrations). Clicking another Harvester host keeps the screen.
+- `/api/clusters` gives each cluster's declared nodes.
+- **Join a node never guesses the address.** `GET
+  /api/clusters/<c>/join-url` reads the VIP from the cluster itself
+  (Harvester's `harvester-system/vip` ConfigMap) when the join starts. It
+  answers null, with the reason, for a kubeconfig that goes through Rancher,
+  a cluster that does not answer (in two seconds) or a VIP that cannot be
+  read; the banner then asks for the address. The
+  install window shows the address in an editable field and asks to confirm
+  it before Install. The chosen cluster follows the install, so a cluster
+  whose kubeconfig targets one node is still recognised by its VIP.
+- **The host band says how old a reused VM count is** (tooltip), and the
+  host list gives `vm_count_age`.
+- **KVM host page.** Each KVM host opens on its own page (`#kvm/<host>`),
+  with the same band as a Harvester host: Overview (the host block),
+  Virtual machines (this host only, host filter fixed and hidden),
+  Parameters in five tabs (System: versions, CPU, memory, URI; Pools;
+  Networks; Labels; Connection: address, port, user, URI and the pinned
+  host key fingerprint, Test for an operator, Remove for an admin) and
+  Disaster Recovery (replication of KVM domains is not available yet). An
+  unreachable host keeps a block in error with the classified reason, and
+  Labels and Connection stay readable from the declaration.
+- **KVM host labels can be edited** (admin): a window (keyboard focus kept
+  inside, as in the settings window) with checks before
+  Apply (valid names, no name twice, value length, 32 at most, what is
+  added, changed and removed), then a tracked action that keeps the
+  previous labels. Command line: `harvester-kvm.py host label --host <h>
+  (--label k=v ... | --clear)`; API `PUT /api/kvm/hosts/<h>/labels`.
+- `GET /api/kvm/hosts/<h>/declaration`: the declaration of a KVM host
+  without asking the host, with its pinned fingerprints (never a key path).
+- `GET /api/replication/hosts/<harvester|kvm>/<host>/resources`: the host
+  family is in the route; the former form still answers for a Harvester
+  cluster, a KVM host answers an empty list with `available: false`. The
+  host name follows the declaration rule of its family (`Node_2` is
+  accepted), not RFC 1123.
+- **Hosts index** (`#hosts`, **Hosts** in the side menu): a table of every
+  Harvester cluster and KVM host with family, name, state, version, labels,
+  VMs, folder and favourite. Sort by any column, filter by family, state
+  (or in alert), label, version and folder. `#hosts/harvester` and
+  `#hosts/kvm` open pre-filtered; on `#hosts/kvm`, Declare a host, Test and
+  Remove per row give back KVM > Hosts. It reads `/api/hosts` only.
+- **Views of all KVM hosts, as tabs of the KVM family** (`#hosts/kvm`):
+  Hosts (the table), Capacity (`#hosts/kvm/capacity`, the CPU and memory
+  block of every host side by side, label filter), Pools
+  (`#hosts/kvm/pools`, pools and image catalogue of every host, one block
+  per host) and Networks (`#hosts/kvm/networks`). These are the 1.x KVM >
+  Hosts, Storage and Networks screens, kept whole; each host name opens
+  its page on the matching tab.
+- **Fleet entries in the new menu**: Disaster Recovery with Links, Shared
+  resources (GPU, Bookings, Usage), Automation (Cluster API, Terraform,
+  Bare-metal) and Activity, as real links. `#activity/host/<kind>/<name>`
+  opens Activity filtered on that host (`kvm:<h>` for a KVM host), and the
+  cluster filter is kept in the address.
+- **One VM row for Harvester and KVM.** `GET /api/vms-all?kinds=harvester,kvm`
+  lists the VMs of every cluster and every KVM host with the same common
+  fields (`kind`, `source`, `namespace`, `name`, `phase`, `cpu`,
+  `memory_bytes`, `node`, `ips`, `labels`, `uuid`, `key`, `folder`,
+  `folder_source`) and a state per source; without `kinds` the answer is
+  unchanged. A KVM VM is keyed by its UUID (now read with the inventory),
+  libvirt states map to the Harvester phases, and the folder comes from the
+  object (annotation, libvirt metadata read in one SSH call per host),
+  else from the console cache.
+- **Folders on the command line.** `bin/harvester-folders.py tree, create,
+  rename, move-folder, delete, assign, resume, undo, apply-rename,
+  write-back`: the folder is written on each object (annotation
+  `harvester-ops.io/folder` on VMs and Deployments, StatefulSets, DaemonSets,
+  CronJobs; libvirt metadata on KVM domains; `folder` field of the host
+  declaration), with one journal line per object for resume and undo. An
+  object the person may not write (RBAC refusal), or a cluster declared in
+  config.yaml, is filed in the console only; a webhook or quota refusal,
+  even with the 403 code, fails its line. The operator role is needed to
+  change anything, and without `--role` the command runs as a viewer. With
+  `--json`, every error exit prints one JSON object, never a trace. A fleet
+  read during a rename shows the objects not yet rewritten under the new
+  path and recreates no former folder. Host declarations accept the
+  optional `folder` field, and editing a cluster in Settings keeps it: the
+  console and the command line share one lock on `clusters.d`.
+- **Folder routes and checks before a gesture.** `GET /api/folders` gives
+  the tree with, per folder, its origin and the count of VMs, containers
+  and hosts filed inside that the person saw (never what they cannot
+  see). Create,
+  rename, move, delete an empty folder, empty a folder into another then
+  delete it, file objects, undo, and write console-only filings on the
+  objects: each is a tracked action that runs `harvester-folders.py` with
+  the person's role and kubeconfig, under `/api/folders` (operator role).
+  Deleting a non-empty folder answers 409 with what the person sees.
+  `POST /api/folders/check` says, object by object and before any write,
+  whether the folder will be written on the object (`kubectl auth can-i`
+  with the person's identity, KVM host reached and domain persistent, host
+  declaration), whether only the console's filing changes, or why the
+  gesture will fail. A finished folder action shows **Undo** in the dock.
+  Fleet reads give the folder of container workloads and hosts. The command
+  line reads the value an object carries just before writing it, so Undo
+  puts back that exact value, never files an object the person cannot read,
+  and gains `empty-into`. A fleet read creates every folder named by
+  objects, without a cap (2,000 such folders measured fast), and a read
+  that started before a rename ended no longer creates the former folder.
+- **Virtual machines view with folders.** `#vms` lists every VM of the
+  fleet, Harvester and KVM, with family, host, folder, a console badge
+  (filing known to the console only) and a DR badge (VM held by a
+  replication contract). A panel on the left has two modes: Folders (All
+  VMs, Unfiled and the shared tree with counts of what you see, a badge on
+  folders created again from objects, create, rename and delete in place)
+  and Hosts (by family then host, read-only, `#vms/host/<family>/<host>`).
+  Drag rows onto a folder, or use Move to folder on a row or a selection
+  with a folder search: the window shows the server's checks object by
+  object before its button. Deleting a non-empty folder offers Move the
+  content of..., then deletes, in one action that Undo reverses (a name
+  already taken in the target is refused before anything moves). The row
+  menu follows the family (Harvester menu, or console, snapshots, clone,
+  delete and Open on its host for KVM). Viewers see everything, with every
+  filing control greyed and its reason.
+- **Folders view** (`#folders`, `#folders/<id>`): what a folder holds in
+  three groups, VMs, containers and hosts, each opening its view filtered
+  on the folder (`#vms/folder/<id>`, `#containers/folder/<id>`,
+  `#hosts/folder/<id>`). Containers and the hosts index gain a Folder
+  column and Move to folder; filing a host offers to file its VMs too
+  (unchecked).
+- **Management cluster header** on Cluster API and Terraform: it shows the
+  cluster their calls go to, with a menu to pick another one, which does
+  not change the open host. Bare-metal has none.
+- **Disaster Recovery in the new navigation.** The replication screens of
+  1.101.0 keep every behaviour (cards or table, filters, the creation and
+  failover windows, notifications) and get their addresses: `#dr`,
+  `#dr/links`, and `#dr/<id>` for one contract (the contracts with the
+  contract window on top; a click writes it, closing gives back `#dr`, F5
+  reopens it). A host's **Disaster Recovery** (`#harvester/<c>/dr`) shows
+  the contracts where it is the source or the recovery site, with the role
+  filter; `#kvm/<h>/dr` says that KVM replication is not available yet.
+  Every Harvester host line of the side menu carries a badge of its DR
+  alerts (as source or recovery site), which leads to its Disaster
+  Recovery. The **DR** badge of a VM in Virtual machines is read again when
+  the view opens and every minute, so a new or removed contract shows
+  without reloading the page.
+- **`#activity/action/<id>`**: Activity filtered on one action, its detail
+  open. The Activity icon of an event in a contract's journal leads there
+  (it opened Activity unfiltered); changing a filter gives back
+  `#activity`.
+- **Resume a stopped folder action from the dock or Activity.** A folder
+  action that ended in error or was stopped by the console shutdown carries
+  a `resume` path decided by the server (`_folder_resume`); **Resume**
+  finishes only the objects it did not reach (`POST
+  /api/folders/actions/<id>/resume`, a tracked action, operator role,
+  greyed for a viewer). The resume of a resume targets the original action.
+
+### Changed
+- **The 1.x menu is removed**: no more cluster selector, `+` button or
+  per-cluster groups (Cluster, Virtual machines, Containers, Shared
+  resources, KVM, Disaster Recovery, VM Import / Export, Automation,
+  Activity). Every screen keeps an address and an entry of the new menu;
+  the old tokens (`#storage`, `#allvms`, `#kvmhosts`, `#forkliftglobal`...)
+  still open their screen. Complete correspondence (`<c>` a Harvester
+  host, `<h>` a KVM host; an old token that needs a host opens the last
+  Harvester or KVM host visited, else the first visible one, else the hosts
+  index with a notice; `[a|b]` = optional tab):
+
+  | 1.x place | Old token | 2.0.0 address |
+  |---|---|---|
+  | Cluster selector (`#cluster-select`) | | **Hosts** in the side menu, `#hosts` |
+  | `+` button next to the selector | | **Add a host** in the side menu |
+  | Cluster > Overview > Metrics | `#overview`, `#cluster` | `#harvester/<c>` |
+  | Cluster > Overview > Cluster (node blocks) | | `#harvester/<c>/params/nodes` |
+  | Cluster > Overview > Events | | `#harvester/<c>/overview/events` (block below the metrics) |
+  | Cluster > Overview, Upgrade button | | `#harvester/<c>/params/upgrade` |
+  | Cluster > Storage | `#storage` | `#harvester/<c>/params/storage[/volumes\|images\|classes]` |
+  | Cluster > Network (7 tabs) | `#network` | `#harvester/<c>/params/network[/vmnets\|clusternets\|lbs\|pools\|hostnets\|overlay\|underlay]` |
+  | Cluster > Add-ons | `#addons` | `#harvester/<c>/params/addons` |
+  | Cluster > Security | `#security` | `#harvester/<c>/params/security[/secrets\|sshkeys]` |
+  | Settings > Cluster accounts | | `#harvester/<c>/params/security/accounts` |
+  | Cluster > Monitoring & Logging | `#monlog` | `#harvester/<c>/params/monlog[/metrics\|alerts\|flows\|outputs]` |
+  | Cluster > Advanced | `#advanced` | `#harvester/<c>/params/advanced[/settings\|pci\|usb\|sriov\|support]` |
+  | Cluster > Startup | `#startup` | `#harvester/<c>/params/power/startup` |
+  | Cluster > Shutdown | `#shutdown` | `#harvester/<c>/params/power/shutdown` |
+  | Settings > Clusters, for one cluster | | `#harvester/<c>/params/conn` (Settings > Clusters stays) |
+  | Cluster > Disaster Recovery | `#clusterdr` | `#harvester/<c>/dr` |
+  | Virtual machines > Current cluster's VMs | `#namespaces` | `#harvester/<c>/vms` |
+  | Virtual machines > All clusters VMs | `#allvms` | `#vms` (also `#vms/folder/<id>`, `#vms/folder/unfiled`, `#vms/host/harvester/<c>`) |
+  | Containers > Current cluster's containers | | `#harvester/<c>/containers` |
+  | Containers > All clusters containers | `#allcontainers`, `#containers` | `#containers` (also `#containers/folder/<id>`) |
+  | Shared resources > GPU, Bookings, Usage | `#gpus`, `#bookings`, `#usage` | unchanged |
+  | KVM > Hosts | `#kvmhosts`, `#kvm-hosts` | `#hosts/kvm` (table), `#kvm/<h>` (one host) |
+  | KVM > Hosts, Test and Remove | | `#kvm/<h>/params/conn`, and each row of `#hosts/kvm` |
+  | KVM > Hosts, CPU and memory tiles | | `#hosts/kvm/capacity` (all hosts), `#kvm/<h>/params/system` (one host) |
+  | KVM host labels (1.96 declaration) | | `#kvm/<h>/params/labels` |
+  | KVM > Virtual machines | `#kvmvms` | `#vms/host/kvm` (all hosts), `#kvm/<h>/vms`, `#vms/host/kvm/<h>` |
+  | KVM > Storage | `#kvmstorage` | `#hosts/kvm/pools` (all hosts), `#kvm/<h>/params/pools` |
+  | KVM > Networks | `#kvmnetworks` | `#hosts/kvm/networks` (all hosts), `#kvm/<h>/params/networks` |
+  | VM Import / Export > VM Import | `#vmimport`, `#vmio` | `#harvester/<c>/imports/vmimport[/imports\|vmware\|openstack\|ova]` |
+  | VM Import / Export > VMware migrations | `#forklift` | `#harvester/<c>/imports/forklift[/prep\|sources\|inventory\|waves]` |
+  | VM Import / Export > Migrations (all clusters) | `#forkliftglobal` | `#migrations` |
+  | Disaster Recovery > Contracts | `#drplans` | `#dr`, `#dr/<id>` (one contract) |
+  | Disaster Recovery > Links | `#drlinks` | `#dr/links` |
+  | Automation > Cluster API, Terraform, Bare-metal | `#automation`, `#automation/capi`, `#automation/terraform`, `#automation/pxe` | `#automation/capi`, `#automation/terraform`, `#automation/pxe` |
+  | Activity | `#activity` | `#activity`, `#activity/host/harvester/<c>`, `#activity/host/kvm/<h>`, `#activity/action/<id>` |
+  | (new) Folders | | `#folders`, `#folders/<id>` |
+  | (new) Hosts index | | `#hosts`, `#hosts/harvester`, `#hosts/kvm`, `#hosts/folder/<id>` |
+  | (new) Disaster Recovery of a KVM host | | `#kvm/<h>/dr` |
+
+  `#containers` named the current cluster's containers in 1.x; it now opens
+  the containers of the whole fleet (the current cluster's list is
+  `#harvester/<c>/containers`).
+- **An empty address opens `#vms`**, the Virtual machines view. The first
+  time 2.0.0 opens in a browser, the last screen
+  of the 1.x menu is reopened once instead, then forgotten. An address that
+  matches no screen opens `#vms` with a notice.
+- `#vms/host/harvester/<c>` and `#vms/host/kvm/<h>` open the Virtual
+  machines view on that host, Hosts panel shown (the cluster's own VM list
+  stays at `#harvester/<c>/vms`); `#hosts/folder/<id>` and
+  `#containers/folder/<id>` filter on the folder, subfolders included.
+- **A link to a host you cannot see** (removed, or hidden by Rancher), and
+  an old token that needs a host while none is visible, open the hosts
+  index with a notice instead of the default screen.
+- **A cold open shows only the screen of its address**: no section is
+  active in the page before the address is applied (the Overview no longer
+  flashes), and the cluster status, which feeds the Overview only, is read
+  only when an Overview opens. A first 2.0.0 open by a deep link forgets the
+  last 1.x screen at once, so it never comes back on a later empty address.
+- **Overview**: the Cluster and Events sub-tabs are gone. Events are a block
+  below the metrics; the block view of the nodes is Parameters > Nodes. The
+  **Upgrade** button opens Parameters > Upgrade.
+- **Cluster accounts** moved from Settings to Parameters > Security of each
+  Harvester host. The account menu entry opens it for the current host.
+- **Host state**: a denied or error state taken from a fleet read older than
+  the reachability probe no longer overrides a probe that answers.
+- **An address opened before signing in is opened again after.** The login
+  page keeps it for the tab only when the address grammar understands it,
+  and never writes it in the page.
+
+### Fixed
+- **Undo from the Activity tab**: a finished folder action (assign, rename,
+  move, empty-into, undo) keeps its **Undo** button in Activity once the
+  dock card is gone, greyed with the reason for a viewer. What Undo needs is
+  kept in `actions.db` (additive `undo` column, applied at start without
+  rewriting rows), so it survives a console restart.
+- **Who undoes whose folder action is said**: any operator may still undo
+  another person's folder action; the undo action's first step and its
+  `result` (`undoes`, `of`, `by`) name the person who launched the original
+  and the one who undoes it.
+- **The Virtual machines view holds large fleets**: it draws the first 300
+  rows with **Show 300 more**, applies the text filter 150 ms after typing,
+  redraws nothing on a refresh that brings the same list and only the rows
+  that changed otherwise. Selection, Select all and dragging still act on
+  the whole filtered list. At 2,000 VMs a full redraw went from 3.6 s on
+  every refresh and every key to about 0.6 s (0.1 s without change); 10,000
+  VMs measured at about 0.9 s.
+- **A folder name clash is refused before anything starts**: creating,
+  renaming or moving a folder where a sibling already has that name answers
+  409 `{conflicts}` instead of starting an action that fails.
+- **Checks before a move ask less**: one access review per cluster,
+  namespace and resource for several objects (by name only when it is not
+  "yes"), and the window keeps each object's check while open, so changing
+  the target asks nothing again.
+- **A local account without identity delegation is told the truth**: the
+  check says the console writes the object with its own identity instead
+  of "you can write this object".
+- **Creation of a contract, recovery site without a VM network**: the
+  network list said only "choose a network". It now says **No VM network on
+  <cluster>** and the line points to **Create on the target**. The
+  management (pod) network is not offered: the engine maps a VM network only
+  to another network of the recovery site (`retarget_vm`, check
+  `network-unmapped`).
+- **Resume command of a contract follows the server**: the contract window
+  kept its own list of resumable states and offered **Resume command** to an
+  operator for a failover the server only lets an admin finish (refused with
+  403). The contract row now carries a `resume-command` action with its
+  role, `allowed` and reason, decided by `replication_run.resumable` (the
+  same reading as `resume`) and `_repl_resume_role`; the button is greyed
+  with the role it needs, and no longer appears when nothing is
+  interrupted (a measure still running).
+- **A folder action stopped by a console shutdown is no longer lost**: it
+  was recorded in `actions.db` only when it ended, so after a restart it
+  vanished from Activity and its pending lines could be resumed only from
+  the command line (seen in a real test). It is now recorded when it
+  starts, comes back `interrupted` after a restart, and offers **Resume**
+  and **Undo**. **Resume** is offered only while lines remain to finish,
+  and sits next to Undo in the dock card instead of stretching across it.
+- **The RBAC refusal said on a console-only filing is complete**: it was
+  cut at 200 characters and lost the namespace; the first line of the
+  refusal is kept, up to 400 characters.
+- **The `/` shortcut no longer moves the focus behind an open window**: the
+  host search kept taking the key while a modal was open.
+- **`folders.db` journal files are private**: the `-wal` and `-shm` files
+  followed the umask; they now get 0600 like the database.
+
+- **Resume of a folder action replays its folder lines**: it marked them
+  done without replaying them. After an emptying whose last object had
+  failed, Resume said done and left the folder in the tree; after a console
+  stop in the middle of the subfolder moves, it wrote the objects under
+  paths that did not exist and a fleet read built a second tree. A folder
+  line not done yet is now replayed (move, rename or delete), and one whose
+  folder moved since is left as is and said.
+- **Undo and Resume leave an object moved outside the console**: the
+  conflict rule was checked against the console's cache only, so an object
+  annotated with `kubectl` since the last fleet read was overwritten. The
+  value read on the object just before writing now decides: an object that
+  carries neither the folder the action left nor its target is left as is
+  and counted as a conflict.
+- **Undo no longer puts objects in a folder that did not come back**: when
+  a folder could not take its name back (taken since) or its former parent
+  was gone, its objects were still written to the former path, recreated or
+  landing in another folder of the same name. They now stay with their
+  folder and are counted as conflicts (`skipped` in the journal).
+
+- **Filing a protected VM no longer marks its recovery carnet stale**
+  (seen in a real test, harvlab to harvlab2): renaming the folder of a VM
+  held by a contract raised `carnet-stale` ("run protect again"), which
+  also made the failover ask for `--accept-stale-carnet`. The follower now
+  compares the carnet without the folder annotation, as the drift digest
+  already did.
+- **Opening an action's address keeps your Activity filters**:
+  `#activity/action/<id>` cleared every Activity filter and saved that, so
+  the person's saved filters were lost for good. The action filter is now
+  passing: never saved, and the saved filters come back when the address is
+  left or a filter is changed.
+- **`harvester-folders` is linked by the installer** like the other
+  command-line tools, and the end message names every link (`kvm` was
+  missing too).
+- **A partial read no longer purges console-only filings**: every
+  cluster read without error was a purge scope, even a Rancher member's read
+  limited to her namespaces, so console-only filings in namespaces she
+  cannot see aged out after 30 days if only such people opened Virtual
+  machines. Only a complete read (no refusal, the console's own kubeconfig)
+  purges now, for VMs and containers.
+- **KVM hosts are surveyed once for everybody**: since fleet reads carry
+  the person's identity, the KVM part of Virtual machines (the landing
+  screen) opened one SSH survey of every KVM host per person signed in
+  through Rancher or under delegation, although the console reads KVM hosts
+  with its own key. The KVM routes no longer carry the identity in their
+  key, and the KVM part of `/api/vms-all` is read once for everybody, kept
+  10 seconds (`HARVESTER_OPS_KVM_VMS_SHARE_TTL`); the Harvester part stays
+  per identity.
+
+### Security
+- **Fleet reads are no longer shared across identities** (present since
+  1.85.0): a shared read that names no cluster (`/api/vms-all`,
+  `/api/containers-all`, `/api/gpus-all`, the hosts menu, the folder counts)
+  now carries the identity the person presents to the clusters (Rancher
+  session, or delegated user and groups). Before, two people of the same
+  role signed in through Rancher, or under identity delegation, could be
+  served each other's fleet, VMs of clusters hidden from them included.
+  Local accounts without delegation still share one read; KVM reads, made
+  with the console's own SSH key, are shared by everybody. **Fixed in
+  2.0.0 only, not backported**: versions 1.85.0 to 1.101.3 keep the leak
+  when Rancher sign-in or identity delegation is on; upgrade to 2.0.0.
+- **Folder actions never name an object the person cannot see**: a rename,
+  move, emptying, undo or resume no longer writes in the dock, Activity or
+  the command's output the key of an object filed in the folder that sits
+  in a cluster Rancher hides from the person or in a namespace they cannot
+  read. Those objects are counted in one step ("2 other objects not shown
+  to you"); the console sends only the person's own keys as `visible`.
+- **Fleet views no longer name a cluster Rancher hides from the person**
+  (present since 1.85.0): Virtual machines, Containers, GPU and Migrations
+  of the whole fleet (`/api/vms-all?kinds=...`, `/api/containers-all`,
+  `/api/gpus-all`, `/api/forklift-global`) listed such a cluster by name,
+  with the state `unknown`, while the hosts menu left it out. They now
+  follow the menu: the cluster is left out and its name appears nowhere in
+  the answer. `hidden_count` gives their number, and Virtual machines shows
+  it ("Clusters not shown: 2"), never a name. A visible cluster that
+  refuses the read stays listed as `denied`, as in the menu.
+
+### Rolling back to 1.101.x
+- **How**: stage the signed 1.101.x archive and call `POST /api/update/apply`
+  with `"allow_older": true` (the update window does not offer an older
+  release). The host agent checks the signature, keeps the files and image
+  of 2.0.0 and installs 1.101.x like an update. Checked on a packaged
+  install: 2.0.0 to 1.101.3, then back to 2.0.0.
+- **Kept, and found again when you update to 2.0.0**: folders, favourites
+  and the folder journal (`folders.db`, which 1.101.x ignores); the folder
+  written on the objects (annotation `harvester-ops.io/folder` on VMs and
+  workloads, libvirt metadata on KVM domains), which 1.101.x neither reads
+  nor removes; the `folder` field of KVM host declarations (`kvm.d`), since
+  1.101.x cannot edit them; the history in `actions.db`, read and written
+  normally by 1.101.x with its added `undo` column. Undo of a folder action
+  comes back with 2.0.0.
+- **Lost**: editing a cluster in Settings under 1.101.x rewrites its
+  declaration in `clusters.d` without the `folder` field, so that host is
+  unfiled back on 2.0.0 (file it again). Removing and declaring a host
+  again, or recreating a VM, under 1.101.x also loses its folder.
+- **Not available under 1.101.x**: the hosts menu, host pages, folders,
+  the Virtual machines view with folders and the Disaster Recovery
+  placement. 1.101.x has no addresses: a 2.0.0 link or bookmark opens its
+  default screen. The `harvester-folders` command stays installed on the
+  host. The fix of fleet reads shared across identities (see Security) is
+  not in 1.101.x.
+- A browser that already opened 2.0.0 does not reopen the last 1.x screen
+  again after a new update; an empty address opens `#vms`.
+
+### Internal
+- **Folder registry and rules** (`bin/lib/folders.py`, pure, and
+  `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
+  and the journal of folder actions in `folders.db` (additive tables next to
+  the favourites). Names of 1 to 63 characters, 8 levels, 253 characters per
+  path, siblings with distinct names (also when two people create the same
+  folder at once), the object wins over the cache, no inheritance, plans for
+  rename, move and undo, delete refused while anything is filed inside
+  (objects the person cannot see are said, never counted), entries purged
+  after 30 days only once their cluster or host was read again.
+- Dead code of the 1.x menu removed: the Bare-metal and Terraform click
+  listeners on automation menu tabs that no longer exist (the router
+  refreshes these tabs) and the cluster selector styles.
+
+### Tests
+- `tests/api/test_fleet_hidden_clusters_200.py`: five fleet routes times
+  three identities (local admin, Rancher session with a hidden cluster,
+  delegated identity refused by a cluster); the hidden name appears nowhere
+  in the answer, the count is given, the hosts menu and Virtual machines
+  name the same clusters. Deliberate mutations (hidden cluster kept, count
+  not incremented) fail it.
+- Folder routes: name clash at create, rename and move refused with 409
+  before any action (and the cases that are not a clash), one access review
+  per namespace then by name on "no", the console-identity reason without
+  delegation, resume of an interrupted action (409 while it runs, viewer
+  403, unknown 404); e2e: three target changes, one check request.
+- `tests/e2e/test_folders_200.py`: 5,000 simulated VMs (300 rows drawn, Show
+  300 more appends, Select all selects the filtered 5,000, one update after
+  typing, an unchanged refresh redraws nothing, a changed one does) with
+  deliberate mutations (no debounce, no page); render and refresh times
+  measured at 2,000 and 10,000 VMs.
+- Undo: kept through a console restart (`actions.db` column, migration of
+  an older base), Undo from Activity after the dock card is gone and greyed
+  for a viewer (e2e, with a deliberate mutation that offers it to a viewer),
+  the undo of another person's action naming both people, from memory and
+  from the history.
+- `tests/api/test_folders_masking_200.py`: rename, move, empty-into and
+  undo of a folder holding a visible object, one in an unreadable namespace
+  and one in a hidden cluster, table driven: no hidden key in the steps,
+  stdout or `--json`, the count said, the real key kept in the journal; a
+  deliberate mutation that unmasks fails. Routes: `visible` is only the
+  person's keys for every gesture but assign.
+- `tests/api/test_read_share_identity_200.py`: two Rancher identities of
+  the same role (and the same user name on two Rancher servers) never share a
+  fleet read, two delegated identities neither, local accounts still share;
+  folder counts of one person never include another's keys; a deliberate
+  mutation that drops the identity part fails them.
+- `tests/api/test_vm_common_row_200.py`: every libvirt state to its phase
+  (and a deliberate mutation swapping paused and running), memory in bytes,
+  keys that survive a rename, the frozen list of common fields, the node2
+  UUID list, folder metadata present, absent, unreadable or failing (read
+  again domain by domain), the chained virsh call as one argument, an
+  invalid annotation ignored and listed, the console fallback and a dropped
+  `vm` filing in `/api/vms-all`.
+- `tests/api/test_folders_cli_200.py`: every command, the exact patch
+  (key, value, `null`) and virsh command (a path with an apostrophe and a
+  space quoted for the shell), a transient domain, a webhook refusal that
+  lets the other lines go on, an RBAC refusal kept in the console, an
+  unreachable host then resume, an interrupted rename resumed without
+  rewriting done lines, undo with a conflict, two simultaneous assigns, the
+  role, forged objects, exit codes, the YAML field edit, and a deliberate
+  mutation of the annotation key. Also: real RBAC and 403 webhook
+  messages in one table, JSON on every error exit (an unexpected error
+  hides its path), no role means read only, a fleet read in the middle of
+  a rename or an undo, apply-rename of a line the renamer could not see,
+  undo of a folder whose parent is gone or whose name was taken, resume
+  that leaves an object filed since, crashed domains, names with spaces;
+  `tests/api/test_portable_state_178.py` adds a folder write during a
+  console edit and the cross-process declaration lock.
+- `tests/api/test_folders_routes_200.py`: every route in success and in
+  error (body that is not an object, invalid name, unknown folder, invalid
+  or forged key, too many objects), viewer 403, operator and admin 202 with
+  their role on the command line, the operator rule frozen for every
+  gesture and a deliberate mutation declaring assign for viewers, checks
+  with permission, without (`can-i` no), on an unreachable cluster and KVM
+  host, transient and vanished domains, config.yaml clusters, no kubeconfig
+  path in any response or shown command, valid rate limits, `undo` in
+  `to_dict()` only for folder actions, counts limited to what the person
+  read, container and host folders in fleet reads, no cap on folders
+  created from objects, a name clash refused before emptying, and a
+  2,000-folder tree read in time. `test_folders_cli_200.py` adds the exact previous value put
+  back by Undo for the three families (and a deliberate mutation reading
+  the cache instead), unreadable or vanished objects never filed, and
+  `empty-into` with its refusals, its undo, a failed object keeping the
+  folder and objects outside the request, and a stale read right after a
+  rename; `test_folders_db_200.py` adds every folder named by objects
+  created (no cap) and a timed realignment of 2,000 folders.
+- `tests/e2e/test_folders_200.py` (simulated API): three rows of two
+  families dragged onto a folder, the check window with a console-only line
+  and no active button before the checks, the action in the dock then Undo
+  putting the original folders back, a row menu with folder search, create,
+  rename and delete in place without browser prompt, a non-empty folder
+  refused with Move the content of..., `#vms/folder/unfiled`,
+  `#vms/host/kvm/node2`, a viewer without any filing gesture (Undo greyed in
+  the dock), a hostile folder name kept as text, the Folders view and the
+  folder filters of containers and hosts with the unchecked host VMs box,
+  the new labels in five languages, a timed panel of 2,000 folders created
+  from objects with 2,000 VMs, and deliberate mutations (button active
+  before the checks, viewer rows draggable, unescaped name, host box
+  checked, counts off by one, Undo offered to a viewer).
+  `tests/api/test_folders_ui_model_200.py`: the pure folder helpers and
+  every folder or host address to its screen and back, with a deliberate
+  mutation of the path rule. Updated (in `tests/e2e/`): `test_all_vms_185.py`,
+  `test_router_1100.py`, `test_hosts_index_200.py`, `test_host_nav_200.py`
+  and the screen inventory for the new view and addresses.
+- `tests/api/test_folders_model_200.py` (names and paths, one case per
+  rule, object keys, rebuild from the objects alone, object against cache,
+  three-level rename plan, move into its own subtree, undo with a conflict,
+  delete check that hides what others filed, and a deliberate mutation that
+  inherits the host folder) and `tests/api/test_folders_db_200.py` (additive
+  schema keeping the favourites, every refusal, two connections creating the
+  same sibling, realignment that writes only changes, purge at 29 and 31
+  days, an unreachable host keeping its entries, journal).
+- `tests/nav_inventory.py` (one table of every screen: old place, address,
+  section, selector, old tokens), `tests/api/test_nav_inventory_200.py`
+  (every section of the template reached, every address resolving to its
+  section, every old token with its line, old menu gone, a deliberate
+  orphan section caught) and `tests/e2e/test_nav_inventory_200.py` (every
+  address loaded cold shows its screen).
+- The e2e tests that clicked the old menu or set the last tab in the
+  browser now open the screen by its address (`nav.goto`).
+- `tests/e2e/test_cold_load_200.py`: the sequence of active sections
+  recorded from the parsing of the page, `#vms` and an empty address cold
+  without the Overview nor a status read, an Overview cold with one status
+  read, a deep link first open that consumes the 1.x screen.
+- `tests/e2e/test_kvm_fleet_200.py`: the four KVM family tabs by address,
+  real links kept after F5, every host side by side in Capacity, Pools and
+  Networks with their 1.x filters, each host name leading to its page, the
+  old tokens `#kvmstorage`, `#kvmnetworks` and `#kvmhosts`.
+- `tests/e2e/test_fleet_roots_200.py`: every fleet root loaded cold with
+  its menu entry active, the management cluster shown is the one Cluster
+  API calls (and Terraform reads), changing it keeps the open host,
+  Bare-metal without it, Activity filtered on a KVM host and kept after a
+  reload.
+- `tests/api/test_hosts_index_model_200.py` (filters and sorts in a table,
+  same name in both families, facets, 100 hosts, a deliberate mutation of
+  the state order) and `tests/e2e/test_hosts_index_200.py` (columns,
+  pre-filtered addresses, filters, sort by state, 100 hosts, star, KVM row
+  gestures and their roles, a Test result kept through a re-render, a
+  vanished host landing here with the notice).
+- `tests/api/test_kvm_host_page_200.py` (declaration without SSH and its
+  fingerprints, refusals, role in the host read, labels route argv and
+  refusals by role, `host label` command, DR route by family) and
+  `tests/e2e/test_kvm_host_page_200.py` (every KVM host address cold, a
+  KVM host and a cluster of the same name, buttons greyed by role with the
+  reason, Test and Remove from Connection, unreachable host, labels edited
+  after checks, focus kept inside the labels window).
+- `tests/api/test_hosts_routes_200.py`, `tests/api/test_favorites_200.py`:
+  states, Rancher-hidden cluster, counts filled from the screens' reads,
+  refusals (400, 404), stars kept per person, and traps that fail the test
+  if the list reads a cluster or a KVM host.
+- `tests/api/test_host_nav_model_200.py` (ordering, folding, search, no cap,
+  a deliberate mutation that hides alerts), `tests/e2e/test_host_nav_200.py`
+  (100 hosts, translated family heads, search, `/`, Enter, stars kept after a
+  reload, keyboard, tooltips, Add a host, Go to the VM),
+  `tests/api/test_login_address_200.py` and
+  `tests/e2e/test_login_address_200.py` (address kept through the login,
+  crafted address forgotten).
+- `tests/e2e/test_host_page_200.py`: every host screen loaded cold (active
+  tab, visible section, only the address's cluster called), switching host
+  keeps the tab with the veil, Upgrade button, Join a node with the cluster
+  prefilled, Connection tests, Cluster accounts in Security, viewer without
+  write buttons, and a deliberate mutation that drops a Parameters tab.
+  `tests/api/test_clusters_join_url_200.py`: join address read from the
+  cluster (direct, Rancher-proxied, rke2.yaml node IP, VIP read or not) and
+  the chosen cluster resolved at install. Join window: editable address,
+  confirmation required, nothing guessed without a VIP. Account menu entry,
+  age of a reused count, stale denied state against the probe.
+  Tests that clicked the overview sub-tabs or Settings > Cluster accounts
+  now open the host addresses.
+- `tests/e2e/test_dr_200.py`: `#dr`, `#dr/<id>` cold, F5 and closed,
+  click without history, `#dr/links`, a host's DR as source and as recovery
+  site (roles swapped, side filter, the window keeps the host address), KVM
+  empty state without replication reads, badges on the root, the open host
+  entry and every host line (worst level, link), journal link to the
+  action in Activity, the VM DR badge read again, the creation window with
+  and without target networks. `tests/api/test_dr_ui_200.py`: action
+  buttons follow `actions[].allowed` only, no state table in the browser,
+  with the mutation `test_dr_mutation_role_copy`; address links, host
+  badges, management network never offered. `tests/api/test_replication_model_199.py`:
+  the folder annotation added, changed or removed is never a drift, with or
+  without a generation change, a real spec change is, and the mutation
+  `test_drift_mutation_annotations_in_digest`. Routes and router tables:
+  `#activity/action/<id>` and `#dr/<id>` round trips and error paths.
+- Also:
+  `tests/api/test_replication_routes_199.py` (the contract row carries
+  `resume-command` with the role the resume route requires, for every
+  interrupted state and both roles, none when nothing is interrupted, a
+  measure stopped by the console in `draft`, `resumable` read like `resume`,
+  no state list left in the contract window; mutations of the role check and
+  of `resumable` fail them), `tests/api/test_folders_routes_200.py` and
+  `tests/e2e/test_folders_200.py` (resume path of a stopped folder action
+  from memory and from the history, Resume from Activity, none on a finished
+  action nor once every line is done, an action recorded at start and found
+  `interrupted` after a restart, Undo and Resume side by side in the dock,
+  with mutations), `tests/api/test_nav_inventory_200.py` (every pane of every
+  section has its own address, and the correspondence table above is
+  complete: every old token, every address resolved and written back, with
+  mutations), `tests/e2e/test_host_nav_200.py` (`/` held by an open window),
+  `tests/api/test_folders_db_200.py` (database and WAL files 0600),
+  `tests/e2e/test_cluster_switch.py` (the Events block reloads for the new
+  host).
+- `tests/api/test_folders_cli_200.py`: Resume of an emptying, as a table
+  (an object that failed then came back: the folder is deleted; a console
+  stop in the subfolder loop: the rest moves, objects land under the target,
+  no second tree after a fleet read), a folder line whose folder moved since
+  left as is; Undo and Resume, as a table, against an object filed elsewhere
+  or unfiled outside the console with no fleet read in between (no write,
+  conflict said); Undo of a folder that cannot take its name back keeps its
+  objects. Mutations: folder lines marked done without replay, strict rule
+  off.
+- `tests/api/test_read_share_identity_200.py`: two Rancher identities make
+  one SSH survey per KVM host and still get their own Harvester part, a KVM
+  write drops the shared part, KVM keys equal across identities; mutation:
+  the identity put back in the KVM key gives one survey per person. A read
+  through Rancher or with a refusal keeps an old console-only filing, a
+  complete read purges it (mutations: purge always allowed, identity
+  ignored).
+- `tests/api/test_replication_follow_199.py`: a protected VM filed, moved to
+  another folder or removed from its folder raises neither `carnet-stale`
+  nor `plan-drift` (fails when the folder annotation is compared).
+- `tests/api/test_clusters_join_url_200.py`: the join address of a cluster
+  Rancher hides answers like an undeclared cluster.
+- `tests/e2e/test_dr_200.py`: `#activity/action/<id>` leaves the saved
+  Activity filters untouched, they come back on `#activity` and after a
+  filter change. `tests/api/test_folders_cli_200.py`: `install.sh` links
+  `harvester-folders` and names every link it makes.
+
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 
 ### Changed

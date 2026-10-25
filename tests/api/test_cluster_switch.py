@@ -127,7 +127,8 @@ def test_returning_to_the_overview_remounts_the_topology():
     Cluster/Aperçu affichait le nœud et les VMs de harv1. La vue n'était
     (re)montée que par un clic sur son sous-onglet."""
     set_tab = APP.split("function setTab(name)", 1)[1].split("\n  }", 1)[0]
-    assert "mountTopology(overviewMode())" in set_tab
+    # 2.0.0 : le mode de l'aperçu choisit sa vue (bloc Événements ou nœuds)
+    assert "mountTopology(overviewBoard(mode))" in set_tab and "const mode = overviewMode();" in set_tab
     # v1.57.0 : les sections Storage et Network portent aussi des vues de
     # blocs ; y entrer les monte (Sections.activate), en sortir les coupe.
     assert "if (name !== 'overview' && !section) stopBoards(null);" in set_tab, (

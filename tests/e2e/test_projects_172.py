@@ -10,6 +10,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 CID = "c-sg2q6"
 TEAM = {"id": "p-abcde", "full_id": f"{CID}:p-abcde", "name": "Team A", "description": "web", "quota": {"limitsCpu": "4000m"},
@@ -43,8 +44,7 @@ def fulfill(route, body, status=200):
 def setup(context, flask_server, data):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -55,7 +55,7 @@ def setup(context, flask_server, data):
     page.route("**/api/projects/harv-fake/do/**", writes)
     page.route("**/api/stream/pj0000000172", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.Namespaces && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     page.evaluate("Namespaces.open('harv-fake')")

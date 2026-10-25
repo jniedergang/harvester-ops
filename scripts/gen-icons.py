@@ -171,6 +171,7 @@ MANIFEST = [
     ("Conteneurs", {
         "container": "container",
         "containers": "boxes",
+        "folder": "folder",
         "logs": "scroll-text",
     }),
 ]

@@ -287,11 +287,10 @@ const Gpus = (() => {
       return;
     }
     if (act === 'open-addons' && window.Sections) {
-      // Add-ons porte sur le cluster choisi en haut : on y passe d'abord
-      const sel = document.getElementById('cluster-select');
-      if (sel && b.dataset.cluster && sel.value !== b.dataset.cluster) {
-        sel.value = b.dataset.cluster;
-        sel.dispatchEvent(new Event('change'));
+      // Add-ons porte sur un cluster : le routeur y passe d'abord (voile,
+      // refus de l'ancien cluster effacés), puis ouvre l'onglet
+      if (b.dataset.cluster && window.App && App.openHost) {
+        return App.openHost('harvester', b.dataset.cluster, 'params', 'addons', 'list');
       }
       return Sections.open('addons', 'list');
     }

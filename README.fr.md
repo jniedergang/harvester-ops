@@ -34,10 +34,15 @@ ailleurs.
 
 ### Tous les clusters dans une interface moderne
 
-- **Tous vos clusters, une seule console.** On en déclare autant qu'il en
-  faut et on passe de l'un à l'autre en un clic : toutes les vues suivent.
-  Un cluster éteint ou injoignable le dit en deux secondes, et les autres
-  continuent de répondre.
+- **Tous vos hôtes, une seule console.** Clusters Harvester et
+  hyperviseurs KVM sont listés côte à côte dans le menu, chacun avec son
+  état, son nombre de VMs et sa page ; chaque écran a une adresse à garder
+  en favori ou à partager. Un hôte éteint ou injoignable le dit en deux
+  secondes, et les autres continuent de répondre.
+- **Toutes les VMs de la flotte dans une vue, rangées dans des dossiers
+  partagés** : VMs, conteneurs et hôtes vont dans des dossiers écrits sur
+  les objets eux-mêmes, avec les contrôles montrés avant chaque
+  déplacement, et l'annulation.
 - **Des vues à raison d'un bloc par objet** : les hôtes et les VMs qu'ils
   font tourner, les réseaux et ce qui y est raccordé, les classes de
   stockage, les volumes et la place réellement disponible sur chaque

@@ -42,7 +42,11 @@ const ReplicationPlan = (() => {
     const panel = FloatingPanels.open({
       id: `rp-plan-${planId}`, icon: 'shield', width: 1100, height: 800, title: tr('rp.view.title', { name: planId }),
       bodyHtml: `<div class="rp-view" data-rp-view-plan="${esc(planId)}"><p class="form-hint">${esc(tr('common.loading'))}</p></div>`,
-      onClose: () => { const v = views.get(planId); if (v && v.timer) clearInterval(v.timer); views.delete(planId); },
+      onClose: () => {
+        const v = views.get(planId); if (v && v.timer) clearInterval(v.timer); views.delete(planId);
+        // 2.0.0 : #dr/<id> redevient #dr quand sa fenêtre se ferme
+        if (window.Router) Router.syncFromScreen();
+      },
     });
     let v = views.get(planId);
     if (!v) {
@@ -68,7 +72,8 @@ const ReplicationPlan = (() => {
     const row = d.row;
     const p = d.plan;
     const st = U.planState(row);
-    const resumable = ['error', 'protecting', 'measuring', 'unprotecting', 'failing_over'].includes(p.state);
+    // reprise d'une commande interrompue : le serveur dit si elle existe et qui peut la lancer
+    const resumeCmd = U.action(row, 'resume-command');
     const canOp = U.roleRank(d.role) >= 2;
     return `<div class="rp-view-head">
       <div class="rp-view-title"><h2>${esc(p.name)}</h2> ${U.stateBadge(st)} ${U.flow(row)}</div>
@@ -79,7 +84,8 @@ const ReplicationPlan = (() => {
         <button type="button" class="btn btn-sm btn-secondary tip" data-rpv="check" data-tip="${esc(canOp ? tr('rp.act.checkTip') : tr('rp.viewerTip'))}"${canOp ? '' : ' disabled'}>${icon('test')} ${esc(tr('rp.act.check'))}</button>
         ${U.actionButton(row, 'measure-start')}${U.actionButton(row, 'measure-stop')}${U.actionButton(row, 'protect', 'btn-primary')}
         ${U.actionButton(row, 'pause')}${U.actionButton(row, 'resume')}
-        ${resumable ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpv="resume-cmd" data-tip="${esc(tr('rp.act.resumeCmdTip'))}"${canOp ? '' : ' disabled'}>${icon('play')} ${esc(tr('rp.act.resumeCmd'))}</button>` : ''}
+        ${resumeCmd ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpv="resume-cmd"
+          data-tip="${esc(resumeCmd.allowed ? tr('rp.act.resumeCmdTip') : `${tr('rp.act.resumeCmdTip')} ${tr('rp.act.needsRole', { role: resumeCmd.role })}`)}"${resumeCmd.allowed ? '' : ' disabled aria-disabled="true"'}>${icon('play')} ${esc(tr('rp.act.resumeCmd'))}</button>` : ''}
         ${(U.action(row, 'failover') || U.action(row, 'failover-unplanned')) ? `<button type="button" class="btn btn-sm btn-danger tip" data-rpv="failover"
           data-tip="${esc(tr('rp.act.failoverDialogTip'))}">${icon('migrate')} ${esc(tr('rp.act.failoverDots'))}</button>` : ''}
       </div>
@@ -283,7 +289,7 @@ const ReplicationPlan = (() => {
         <td>${esc(e.operation)}${e.step ? ` <span class="res-dim">${esc(e.step)}</span>` : ''}</td>
         <td>${esc(e.resource_uid ? (names[e.resource_uid] || e.resource_uid) : tr('rp.journal.plan'))}</td><td><code>${esc(e.code)}</code></td>
         <td class="ev-msg">${esc(e.message)}</td>
-        <td>${esc(e.by || '')}${e.action_id ? ` <a href="#activity" class="tip" data-tip="${esc(tr('rp.journal.actionTip', { id: e.action_id }))}">${icon('activity', 11)}</a>` : ''}</td></tr>`).join('')}</tbody></table></div>
+        <td>${esc(e.by || '')}${e.action_id ? ` <a href="#activity/action/${enc(e.action_id)}" data-rp-ev-action="${esc(e.action_id)}" class="tip" data-tip="${esc(tr('rp.journal.actionTip', { id: e.action_id }))}">${icon('activity', 11)}</a>` : ''}</td></tr>`).join('')}</tbody></table></div>
       ${v.journal.next ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpv="more" data-tip="${esc(tr('rp.journal.moreTip'))}">${esc(tr('rp.journal.more'))}</button>` : ''}`
       : `<p class="hint">${esc(tr('rp.journal.none'))}</p>`;
   }
@@ -728,6 +734,8 @@ const ReplicationPlan = (() => {
       ${o.message ? `<p class="form-hint">${esc(o.message)}</p>` : ''}${findingsHtml(o.findings || [])}`;
   }
 
-  return { open, act, failover, confirmDanger };
+  /** La fenêtre de ce contrat est-elle ouverte ? (adresse #dr/<id>) */
+  const isOpen = (planId) => views.has(planId);
+  return { open, isOpen, act, failover, confirmDanger };
 })();
 window.ReplicationPlan = ReplicationPlan;

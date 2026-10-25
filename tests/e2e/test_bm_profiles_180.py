@@ -78,8 +78,7 @@ def open_tab(context, flask_server):
     page.on("dialog", lambda d: d.accept())
     page.goto(flask_server["base_url"], wait_until="domcontentloaded")
     page.wait_for_function("window.BMC && window.BMProfiles && window.FloatingPanels && window.i18n")
-    page.click('.tab-group-head[data-group="automation"]')
-    page.click('.tab-child[data-subtab="pxe"]')
+    page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1100, 450)
     expect(page.locator('#bmp-table tr[data-profile="rack-a"]')).to_be_visible()
     return page, calls

@@ -209,6 +209,10 @@ dans un tableau avec une colonne **Cluster**.
   connectée. Un cluster éteint, injoignable, qui refuse la lecture ou sans
   accès dans cette session est dit tel quel sur sa puce, sans retenir les
   autres.
+- Un cluster que Rancher cache à la personne n'a pas de puce et son nom
+  n'apparaît jamais. La vue dit seulement combien de clusters ne sont pas
+  affichés (« Clusters non affichés : 2 »), comme le menu des hôtes. La
+  même règle vaut pour Conteneurs, GPU et Migrations de toute la flotte.
 - **Filtres** : puces de clusters (un ou plusieurs, ou Tous les clusters),
   état (en marche, arrêtées, en démarrage, en pause, en échec, autre),
   namespace, et texte libre (nom, IP, nœud, cluster, étiquette `clé=valeur`).
@@ -225,6 +229,246 @@ Vérifié en réel sur cinq clusters (deux physiques, deux imbriqués, un
 éteint) : 19 VMs lues en 40 ms grâce aux lectures partagées, une VM de
 `harvlab` arrêtée depuis sa ligne puis redémarrée par une action groupée,
 `kubectl` confirmant chaque étape.
+
+### Une ligne commune aux VMs Harvester et KVM (2.0.0)
+
+`GET /api/vms-all?kinds=harvester,kvm` liste les VMs de tous les clusters et
+de tous les hôtes KVM en une seule liste (sans `kinds`, la réponse reste
+celle de la 1.85.0). Chaque ligne garde ses champs et reçoit les mêmes champs
+communs quelle que soit sa famille : `kind` (`harvester` ou `kvm`), `source`
+(cluster ou hôte), `namespace` (null pour KVM), `name`, `phase`, `cpu`,
+`memory_bytes`, `node`, `ips`, `labels`, `uuid`, `key`
+(`harvester/<cluster>/<ns>/<nom>`, `kvm/<uuid>` : un domaine renommé garde sa
+clé), `folder` et `folder_source` (`vm` quand l'objet le porte, `console`
+quand seule la console le garde, null). Les états de libvirt deviennent des
+phases : running, idle et blocked donnent `Running`, shut off `Stopped`,
+paused et pmsuspended `Paused`, crashed `Failed`, in shutdown `Stopping`, tout
+autre `Unknown`. `sources` donne un état par cluster et par hôte ; un hôte KVM
+dont les dossiers n'ont pas tous pu être lus le dit dans son `error`, et ces
+VMs gardent le dossier que la console connaissait. Une annotation de dossier
+qui n'est pas un chemin valide est ignorée et listée dans `folder_warnings`.
+Vérifié en réel sur harv1, gpudemo et node2 : 21 VMs Harvester et 16 VMs KVM,
+UUID identiques à `virsh list --all --uuid --name`.
+
+### Les dossiers en ligne de commande (2.0.0)
+
+`bin/harvester-folders.py` crée, renomme, déplace et supprime les dossiers,
+et y range des objets (VMs, charges de conteneurs, hôtes). Les fenêtres de
+la console (à venir) le lancent en action suivie ; il tourne aussi seul, sur
+un hôte airgap, avec la seule bibliothèque standard.
+
+```
+harvester-folders.py [--db F] [--json] [--as PERSONNE] [--role viewer|operator|admin] [--id=ACTION] COMMANDE
+  tree
+  create --parent <id ou /> --name N
+  rename --id I --name N [--spec F]          renomme, puis réécrit chaque objet rangé dedans
+  move-folder --id I --parent <id ou /> [--spec F]
+  delete --id I [--spec F]                   refusé tant que quelque chose y est rangé
+  assign --to <chemin ou unfiled> --spec F   une ligne de journal par objet
+  resume --action A --spec F                 lignes pas encore faites (interruption, hôte éteint)
+  undo --action A --spec F                   retour à l'état d'avant ; conflits dits
+  apply-rename --id I --spec F               objets restés sous l'ancien chemin
+  write-back --folder I --spec F             rangements de la console que la personne peut désormais écrire
+  empty-into --folder I --to <id ou unfiled> --spec F
+                                             déplace le contenu (objets, sous-dossiers), puis supprime
+```
+
+Avant d'écrire, la commande relit le dossier que l'objet porte en ce moment
+(`kubectl get`, `virsh metadata`, la déclaration) : le journal garde cette
+valeur exacte, qu'Annuler remet même si l'objet a été rangé hors de la
+console depuis la dernière lecture. Annuler et Reprendre relisent aussi
+l'objet : s'il porte maintenant un dossier qui n'est ni celui laissé par
+l'action ni sa cible (rangé ailleurs hors de la console, ou annotation
+retirée), il est laissé tel quel et compté comme conflit. Un objet que la
+personne ne peut pas lire, ou qui n'existe plus, n'est jamais rangé (sa
+ligne échoue).
+`empty-into` déplace les objets d'un dossier vers la cible, ses sous-dossiers
+sous elle (sous la racine pour `unfiled`), puis supprime le dossier dans la
+même action ; rien ne bouge si un sous-dossier ne peut pas y aller (nom pris,
+bornes), et le dossier reste tant que quelque chose y est rangé. Annuler
+recrée le dossier et remet tout ; si un dossier ne peut pas revenir (nom
+repris depuis, ancien parent disparu), ses objets restent avec lui et sont
+comptés comme conflits. Reprendre rejoue les lignes de dossier pas encore
+faites : le déplacement d'un sous-dossier coupé par un arrêt de la console,
+ou la suppression finale une fois le dernier objet parti. Un objet que la personne ne voit pas (un
+cluster que Rancher lui cache, un espace de noms qu'elle ne lit pas) n'est
+jamais nommé dans les étapes, la sortie ou le `--json` d'un renommage, d'un
+déplacement, d'un vidage, d'une annulation ou d'une reprise : ces objets sont
+comptés dans une seule étape (« 2 other objects not shown to you: 0 done, 2
+failed »). Depuis la console, `visible` dans la demande liste les clés des
+lectures de flotte de la personne (plus les objets qu'elle a choisis pour
+`assign`) ; un objet qu'elle a pu relire pendant l'action est nommé lui
+aussi. Sans `visible` (ligne de commande d'un exploitant), tout est nommé.
+
+La demande (`--spec`) liste les objets, chacun avec `kind` (`harvester`,
+`container`, `kvm`, `host`) et ses champs (`cluster`, `namespace`, `name`,
+`workload_kind`, `host`, `domain`, `uuid`, `family`), `write` (faux quand la
+personne n'a pas le droit d'écrire l'objet) et, depuis la console, le
+kubeconfig préparé pour la personne par cluster. L'écriture sur l'objet : un
+patch d'annotation contrôlé d'abord à blanc par le serveur (un refus du
+webhook fait échouer cette ligne, les autres continuent), `virsh metadata`
+avec `--config` et `--live` si le domaine tourne (un domaine transitoire est
+écrit à chaud et gardé aussi par la console), le champ `folder` de la
+déclaration de l'hôte. Quand la personne n'a pas le droit d'écrire l'objet,
+ou que la RBAC refuse le patch (`cannot patch resource`), le rangement est
+gardé par la console seule ; un refus de webhook ou de quota, même en code
+403, fait échouer la ligne avec sa raison ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
+Tant qu'un renommage ou un déplacement a des objets à réécrire (en cours,
+ou en échec pour un objet que la personne ne voyait pas), une lecture de
+flotte montre ces objets sous le nouveau chemin et ne recrée jamais l'ancien
+dossier ; `apply-rename` les réécrit et retire un ancien dossier resté vide.
+Un lecteur lit l'arborescence et ne change rien ; sans `--role`, la commande tourne en lecteur. Codes de sortie : 0 fait,
+1 refus ou un objet en échec, 2 demande invalide (nom, chemin, profondeur,
+longueur, objet inconnu). Avec `--json`, toute sortie en erreur écrit un seul
+objet `{"ok": false, "error", "kind"}` sur stdout ; une erreur inattendue
+n'est dite que par son type, sans trace ni chemin.
+
+Vérifié en réel : sur harv1, une VM arrêtée puis en marche et un Deployment
+rangés, déplacés, remis par Annuler puis sortis du dossier (annotation relue
+par `kubectl`, génération de la VM et VMI inchangées, aucune condition de
+redémarrage ; la génération d'un Deployment monte de un à tout changement
+d'annotation, comme le fait Kubernetes, sans nouveau ReplicaSet), un compte
+de service au rôle view gardé dans la console, puis écrit sur les objets
+avec un kubeconfig d'opérateur ; sur node2, un domaine de test sans disque
+rangé arrêté puis en marche, le dossier gardé après un redémarrage et par un
+clone, puis retiré ; les 15 autres domaines identiques à l'octet près.
+
+### Vue Machines virtuelles, dossiers et vue Dossiers (2.0.0)
+
+**Machines virtuelles** (`#vms`) liste toutes les VMs de la flotte,
+Harvester et KVM, depuis `/api/vms-all?kinds=harvester,kvm` : hôte,
+pastille de famille, espace de noms, état, CPU, mémoire, IP, nœud et
+dossier, avec une pastille **console** quand seule la console connaît le
+rangement (la personne ne peut pas écrire l'objet) et une pastille **DR**
+vers le contrat de réplication qui protège la VM. Puces de sources, filtres
+d'état, d'espace de noms et de texte et tri par colonne sont repris de la
+1.85. Le tableau dessine les 300 premières lignes de la liste filtrée et
+triée ; **Afficher 300 de plus** ajoute les suivantes. La sélection, **Tout
+cocher** et le glisser portent sur toute la liste filtrée, pas seulement sur
+les lignes dessinées. Le filtre de texte s'applique 150 ms après la dernière
+touche, et une relecture qui rapporte la même liste ne redessine rien
+(sinon, seules les lignes qui ont changé sont refaites). Mesuré dans
+Chromium sans affichage : à 2 000 VMs, un rendu sans changement prend
+environ 0,1 s et un rendu complet (nouveau tri) environ 0,6 s ; à 10 000 VMs
+environ 0,15 s et 0,9 s (avant : 3,6 s à chaque relecture et à chaque
+touche, à 2 000). Le menu d'une ligne suit sa famille : celui des VMs Harvester, ou pour
+une VM KVM la console, les instantanés, le clonage, la suppression et
+**Ouvrir sur son hôte** (démarrer et arrêter sont sur la page de l'hôte).
+Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
+s'appliquent à ses VMs Harvester.
+
+À gauche, un panneau à deux modes, comme vCenter. **Dossiers** : Toutes les
+VMs, Non rangées (non modifiables) et l'arborescence partagée avec, pour
+chaque dossier, les VMs que vous voyez dedans (sous-dossiers compris ; une
+VM cachée par vos droits n'est jamais comptée). Un dossier recréé par une
+lecture de flotte depuis les objets qui le nomment porte la pastille
+**depuis les objets**. **+ Dossier**, **Renommer** et **Supprimer** se font
+en saisie sur place (Entrée valide, Échap annule, aucune fenêtre du
+navigateur). Supprimer un dossier vide se confirme dans le panneau ; un
+dossier non vide ouvre **Déplacer le contenu de...** : choisir un dossier
+cible ou Non rangées, ses objets et sous-dossiers y vont, puis le dossier
+est supprimé, en une action qu'Annuler défait. **Hôtes** : les VMs
+regroupées par famille puis par hôte, en lecture seule ;
+`#vms/host/<famille>/<hôte>` l'ouvre sur un hôte. `#vms/host/kvm` garde la
+vue de toutes les VMs KVM et leurs gestes.
+
+Ranger : glisser une ligne, ou une sélection, sur un dossier (Non rangées
+les en sort), ou **Déplacer vers un dossier** sur une ligne ou la
+sélection, avec recherche de dossier. La fenêtre montre les contrôles du
+serveur objet par objet avant son bouton : écrit sur l'objet, gardé par la
+console seulement, ou échouera (raison dite) ; les objets qui échoueraient
+sont laissés de côté. Ranger un hôte (depuis l'index des hôtes) propose
+**Ranger aussi ses N VMs**, décoché : un hôte ne range jamais ses VMs de
+lui-même. Chaque geste est une action suivie ; le dock propose **Annuler**
+à sa fin, et l'onglet Activité ensuite (grisé avec la raison pour un lecteur). Un lecteur voit les dossiers et leur contenu, chaque contrôle de
+rangement est grisé avec la raison, et les lignes ne se glissent pas.
+
+**Dossiers** (`#folders`, `#folders/<id>`, première entrée du menu latéral)
+montre le contenu d'un dossier en trois groupes (VMs, conteneurs, hôtes),
+chacun ouvrant sa vue filtrée sur le dossier : `#vms/folder/<id>`,
+`#containers/folder/<id>` et `#hosts/folder/<id>`, sous-dossiers compris.
+Conteneurs et l'index des hôtes ont une colonne Dossier et **Déplacer vers
+un dossier** (menu d'une charge pour les Deployments, StatefulSets,
+DaemonSets et CronJobs ; un bouton par hôte).
+
+Vérifié en réel sur harv1 et node2 avec une console de l'arbre de
+développement (port propre, configuration copiée, état à part, comptes
+admin, opérateur et lecteur temporaires) : une VM de test arrêtée rangée par
+glisser-déposer, un domaine KVM de test et un Deployment par le menu, puis
+`/Essais` renommé `/Essais2` (trois objets réécrits), annulé depuis le dock,
+et vidé vers Non rangées (son sous-dossier remonté à la racine) puis
+supprimé, ce vidage annulé (dossier recréé) ; une annotation posée avec
+kubectl dans le dos de la console remise exactement par Annuler ; un hôte
+déclaré par la console et un cluster de config.yaml (console seulement)
+rangés puis remis ; un lecteur avec chaque contrôle grisé et un 403 sur un
+appel direct. Chaque écriture relue avec kubectl et virsh ; la génération de
+la VM n'a jamais changé, celle du Deployment a monté de un par changement
+d'annotation (comportement de Kubernetes), rien d'autre n'a changé ; les 15
+autres domaines de node2 identiques à l'octet près.
+
+### Routes des dossiers et contrôles avant geste (2.0.0)
+
+La console lance `harvester-folders.py` en action suivie, avec le rôle de
+la personne (`--role`, jamais le défaut) et le kubeconfig préparé pour elle
+par cluster (usurpation et Rancher compris ; jamais dans une réponse ni dans
+la ligne de commande montrée). Les routes sont sous `/api/folders`, pas sous
+`/api/clusters` (réservé aux admins) : tout changement demande le rôle
+opérateur, la lecture est ouverte à tous.
+
+| Route | Rôle |
+|---|---|
+| `GET /api/folders` | l'arborescence, chaque dossier avec son `origin` (`console`, ou `objects` quand une lecture de flotte l'a créé depuis les objets qui le nomment) et ses `counts` `{vms, containers, hosts}`, sous-dossiers compris, limités à ce que la personne a vu dans ses propres lectures de flotte (`null` : pas encore lu) |
+| `POST /api/folders` | créer (`parent_id`, `name`) ; un frère du même nom répond 409 `{conflicts}` avant que rien ne parte |
+| `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé. Un frère du même nom (au nouveau nom ou sous le nouveau parent) répond 409 `{conflicts}` avant que rien ne parte |
+| `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre) |
+| `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action ; un sous-dossier dont le nom est déjà pris dans la cible répond 409 avant que rien ne bouge |
+| `POST /api/folders/assign` | `objects` (clés ; une VM KVM donne aussi son `host`) et `to` (identifiant de dossier ou `unfiled`) |
+| `POST /api/folders/check` | les contrôles montrés avant un déplacement, objet par objet, rien n'est écrit |
+| `POST /api/folders/actions/<id>/undo` | annuler une action de dossiers terminée |
+| `POST /api/folders/actions/<id>/resume` | reprendre une action de dossiers interrompue : les lignes pas encore faites (en attente ou en échec) sont réécrites, jamais celles faites ; 409 tant qu'elle tourne |
+| `POST /api/folders/<id>/write-back` | écrire sur les objets les rangements du dossier gardés par la console seule |
+
+Chaque changement répond tout de suite `202 {"action_id"}` ; le dock montre
+l'action, et un rangement, un renommage, un déplacement, un vidage ou une
+annulation terminés proposent **Annuler** (`undo.path` dans l'action), dans
+le dock puis dans l'onglet Activité, aussi après un redémarrage de la console
+(`undo` gardé dans actions.db). Tout opérateur peut annuler le geste d'un
+autre ; l'annulation dit de qui était le geste et qui l'annule (première
+étape, et `result` `{"undoes", "of", "by"}`). Une action finie en erreur ou
+arrêtée par l'arrêt de la console propose **Reprendre** dans le dock et
+dans l'Activité (`resume.path` dans l'action, posé par le serveur) : elle
+finit seulement les objets que l'action n'a pas atteints, et la reprise
+d'une reprise vise l'action d'origine. Un domaine KVM est désigné par son
+UUID, que virsh accepte : un domaine renommé est retrouvé.
+
+`POST /api/folders/check` répond `{"objects": [{"key", "write", "outcome",
+"reason", "check"}]}`. `outcome` dit ce que fera le déplacement : `object`
+(le dossier est écrit sur l'objet), `console` (seul le rangement de la
+console change) ou `fail` (le geste échouera pour cet objet, raison dite).
+VMs et charges Harvester : `kubectl auth can-i patch` avec le kubeconfig de
+la personne (une SelfSubjectAccessReview, `check: ssar`), demandé une fois
+par cluster, espace de noms et ressource pour plusieurs objets, puis par nom
+seulement si la réponse n'est pas « yes » ; un cluster qui ne répond pas est
+dit sans l'interroger. Pour un compte local de la console sans délégation
+d'identité, ce kubeconfig est celui de la console : la raison dit alors que
+la console écrit l'objet avec sa propre identité, et non que la personne le
+peut. La fenêtre garde le contrôle de chaque objet tant qu'elle est ouverte :
+changer de cible ne redemande rien. KVM : hôte joint et domaine persistant
+(un `dominfo` par domaine dans un seul appel SSH par hôte, `check: virsh`) ;
+un domaine transitoire est gardé par la console. Hôte : sa déclaration
+(`check: decl`) ; un cluster de `config.yaml` est rangé dans la console
+seulement.
+
+Les lectures de flotte donnent aussi le dossier des charges de conteneurs
+(`key`, `folder`, `folder_source` sur `/api/containers/<cluster>` et
+`/api/containers-all` pour les Deployments, StatefulSets, DaemonSets et
+CronJobs) et des hôtes (`/api/hosts` : le champ `folder` de la déclaration,
+sinon le rangement de la console). Une lecture de flotte crée chaque
+dossier nommé par des objets, sans plafond ; ces dossiers portent l'origine
+`objects`, montrée par une pastille dans le panneau. Mesuré : 2 000 de ces
+dossiers créés en une lecture en 0,3 s (0,08 s pour une lecture sans
+changement), `GET /api/folders` avec 2 044 dossiers et 2 000 objets en
+0,05 s, le panneau dessiné en 0,1 s environ dans le navigateur.
 
 ### Charges de conteneurs (1.91.0)
 
@@ -660,10 +904,52 @@ bit à bit après une copie, un export et un import entre versions.
 
 ## 3. Observabilité cluster (console)
 
+### Hôtes : menu latéral, index et pages d'hôte (2.0.0)
+
+Un hôte est un cluster Harvester entier ou un hyperviseur KVM. Depuis la
+2.0.0, la console s'organise autour des hôtes au lieu d'un cluster choisi ;
+la correspondance de chaque écran 1.x avec sa nouvelle adresse est dans le
+CHANGELOG (2.0.0) et dans la procédure opérationnelle.
+
+- **Menu latéral.** Sous **Hôtes**, chaque cluster Harvester et chaque
+  hôte KVM en deux familles repliables, chacune avec un résumé d'une ligne
+  (`58 ok, 2 en alerte`). Chaque hôte a une pastille d'état, son nombre de
+  VMs, une étoile (favoris gardés par personne par la console, retrouvés
+  depuis un autre poste) et, pour un hôte Harvester, une pastille de ses
+  alertes de Disaster Recovery. Pas de plafond : tous les hôtes sont
+  listés, et un hôte en alerte reste visible dans une famille repliée.
+  L'hôte ouvert déplie son sous-menu (Vue d'ensemble, Machines virtuelles,
+  Conteneurs, Imports et migrations, Paramètres, Disaster Recovery). La
+  recherche (`/`) filtre les hôtes par nom, étiquette et famille et propose
+  les VMs déjà lues. **Ajouter un hôte** propose Harvester ou KVM. Autour :
+  Dossiers, Machines virtuelles, Conteneurs, Disaster Recovery,
+  Migrations, Ressources partagées, Automatisation et Activité, tous de
+  vrais liens.
+- **Index des hôtes** (`#hosts`, `#hosts/harvester`, `#hosts/kvm`,
+  `#hosts/folder/<id>`) : un tableau de tous les hôtes avec famille, état,
+  version, étiquettes, VMs, dossier et favori ; tri et filtre sur chaque
+  colonne, **Déplacer vers un dossier** sur une sélection. La famille KVM
+  ajoute Déclarer un hôte, Tester et Retirer par ligne, et trois onglets
+  sur tous les hôtes KVM : Capacité, Pools et Réseaux.
+- **Page d'un hôte Harvester** (`#harvester/<c>`) : un bandeau (famille,
+  nom, état, version, nombre de VMs, sous-menu, Activité de cet hôte)
+  au-dessus des sections existantes. Vue d'ensemble = métriques avec le
+  bloc Événements dessous ; Paramètres = Nœuds, Stockage, Réseau, Modules,
+  Sécurité (avec les Comptes du cluster), Monitoring et journaux, Avancé,
+  Mise à jour, Alimentation (Démarrage, Arrêt) et Connexion ; Imports et
+  migrations = Import de VM et Migrations VMware. Cliquer un autre hôte
+  Harvester garde l'écran.
+- **Page d'un hôte KVM** (`#kvm/<h>`) : voir la section 10.
+
+Chaque écran a une adresse après `#` : un lien ouvre l'écran exact et F5 le
+rend. Les jetons 1.x (`#storage`, `#allvms`, `#kvmhosts`...) ouvrent encore
+leur écran.
+
 ### Les sections de Harvester, un cluster à la fois (1.57.0)
 
 Le menu latéral regroupe, sous Cluster, les menus que les opérateurs
-connaissent de Harvester, pour le cluster choisi :
+connaissent de Harvester, pour le cluster choisi (depuis la 2.0.0 : les
+Paramètres de chaque hôte Harvester, voir plus haut) :
 
 - **Stockage** : Volumes (la vue du stockage : répliques, santé,
   corrections), Images (source, taille, état, classe de stockage, VMs qui
@@ -675,7 +961,8 @@ connaissent de Harvester, pour le cluster choisi :
   plus bas), Réseaux overlay (les VPC et subnets kube-ovn, avec leurs
   formulaires) et Réseaux underlay (la fabrique : cartes physiques, switchs
   virtuels, LLDP). Ces vues ont quitté
-  l'Aperçu, qui garde Métriques et la vue Cluster.
+  l'Aperçu. Depuis la 2.0.0 elles sont dans les onglets Paramètres de
+  l'hôte, et la vue Cluster est Paramètres > Nœuds.
 - **Add-ons** : chaque add-on de Harvester, son chart et sa version, son
   état, et Activer / Désactiver pour les administrateurs, suivi dans le dock
   (`harvester-resources addon` en ligne de commande). Un refus de Harvester
@@ -1039,7 +1326,8 @@ En ligne de commande, avec le kubeconfig d'une session Rancher :
 
 ### Membres Rancher du cluster et de ses projets (1.73.0)
 
-Sous les comptes du cluster (Réglages, **Comptes du cluster**), **Membres
+Sous les comptes du cluster (Paramètres > Sécurité > **Comptes du cluster**
+de l'hôte depuis la 2.0.0, avant dans les Réglages), **Membres
 dans Rancher** liste à qui Rancher donne des droits sur le cluster, avec le
 rôle et le fournisseur (local, Keycloak...) ; dans la fenêtre Namespaces,
 **Membres** sur un projet fait de même pour le projet. Un membre s'ajoute en
@@ -1056,10 +1344,12 @@ En ligne de commande, avec le kubeconfig d'une session Rancher :
 
 ### Événements et utilisation du tableau de bord (1.62.0)
 
-L'aperçu a un onglet **Événements** : les événements du cluster, rangés comme
+La Vue d'ensemble de l'hôte montre un bloc **Événements** sous les métriques
+(un onglet avant la 2.0.0 ; `#harvester/<c>/overview/events` y fait
+défiler) : les événements du cluster, rangés comme
 sur le tableau de bord de Harvester (hôtes, VMs, volumes, images), avec leurs
 nombres, les avertissements marqués, un filtre « avertissements seulement »
-et une recherche ; relus toutes les 20 secondes. L'onglet Métriques montre
+et une recherche ; relus toutes les 20 secondes. Les métriques montrent
 des jauges d'**utilisation** : CPU et mémoire mesurés maintenant
 (metrics.k8s.io) face à la capacité des hôtes, avec ce que pods et VMs ont
 réservé ; le stockage Longhorn écrit, et ce qui est promis aux volumes face à
@@ -1623,6 +1913,8 @@ refusée avec sa raison. Non vérifié sur du vrai matériel GPU.
 
 **Mettre à jour**, dans l'en-tête de l'Aperçu (et sur le réglage
 `server-version`, comme dans Harvester), ouvre une fenêtre par cluster.
+Depuis la 2.0.0 le même contenu est aussi l'onglet Paramètres > **Mise à
+jour** de l'hôte, où mène le bouton de la Vue d'ensemble.
 
 - **Avant** : la version actuelle, et deux chemins :
   - **une version** : un objet `Version` de Harvester. La liste dit celles
@@ -1722,8 +2014,9 @@ output-apply|output-delete|flow-apply|flow-delete|amc-apply|amc-delete`.
 
 ### Importer des VMs depuis VMware, OpenStack ou une archive OVA (1.71.0)
 
-**VM Import**, dans la section VM Import / Export du menu (1.77.0 ; sous
-Cluster avant), pilote l'add-on vm-import-controller
+**VM Import**, dans Imports et migrations d'un hôte Harvester depuis la
+2.0.0 (`#harvester/<c>/imports/vmimport` ; section VM Import / Export du
+menu depuis la 1.77.0, sous Cluster avant), pilote l'add-on vm-import-controller
 de Harvester (à activer d'abord dans Add-ons ; la section dit quand il est
 éteint).
 
@@ -1794,8 +2087,9 @@ et ne réécrit jamais son chart ni ses valeurs. Ce chemin n'est pas encore
 vérifié en réel : aucun banc ne fait tourner un Harvester qui livre cet
 add-on.
 
-**Migrations VMware**, dans la section VM Import / Export du menu, juste
-après VM Import, ouvre
+**Migrations VMware**, dans Imports et migrations d'un hôte Harvester
+depuis la 2.0.0 (`#harvester/<c>/imports/forklift`), juste après VM Import,
+ouvre
 trois onglets :
 
 - **Préparation**, trois étapes dans l'ordre où il faut les faire, chacune
@@ -1998,8 +2292,9 @@ Les objets d'une vague (NetworkMap, StorageMap, Plan avec `warm: true`,
 Migration) vivent dans le namespace `forklift`, étiquetés
 `harvester-ops.io/managed` et `harvester-ops.io/wave`.
 
-**Migrations (tous clusters)**, troisième entrée de la section VM Import /
-Export (1.77.0 ; à côté d'Activity avant) : toutes
+**Migrations (tous clusters)**, entrée de flotte **Migrations** du menu
+latéral depuis la 2.0.0 (`#migrations` ; troisième entrée de la section VM
+Import / Export depuis la 1.77.0, à côté d'Activity avant) : toutes
 les VMs de toutes les vagues de tous les clusters déclarés, dans un seul
 tableau (VM VMware, vCenter, cluster cible, vague, étape, dernière copie,
 bascule), filtrable par état et par vCenter, avec un bloc par cluster
@@ -2094,6 +2389,12 @@ Créer et exploiter des clusters Kubernetes dont les nœuds sont des VMs
 Harvester, par Cluster API et le Cluster API Provider Harvester (CAPHV). La
 console lance `harvester-capi` à chaque étape, que la CLI peut lancer
 aussi.
+
+**Cluster de gestion (2.0.0).** Les pages Cluster API et Terraform disent
+dans leur en-tête depuis quel cluster elles travaillent (**Cluster de
+gestion**) : le dernier hôte Harvester visité, sauf si vous en choisissez un
+autre dans le menu à côté. Ce choix est gardé par le navigateur et ne change
+pas l'hôte ouvert.
 
 ### Installer la pile (1.48.0)
 
@@ -2419,7 +2720,8 @@ un workspace Terraform.
   distinguable : rien n'est bridé, et la console le dit plutôt que de mettre
   discrètement tout le monde, exploitant compris, en lecture seule.
 
-- **Les comptes du cluster** (Réglages > Comptes du cluster) : les comptes
+- **Les comptes du cluster** (Paramètres > Sécurité > Comptes du cluster de
+  l'hôte, aussi depuis le menu du compte) : les comptes
   déclarés sur le cluster Harvester sélectionné, leur activation et qui
   détient l'administration, d'un seul regard. L'administration s'accorde et
   se retire, les comptes s'activent et se désactivent. Les délégations
@@ -2457,8 +2759,8 @@ users:
 ```
 
 - `cluster_user` est l'**identifiant** de l'objet
-  `users.management.cattle.io` (`user-2fhwx`), pas le login. Réglages >
-  Comptes du cluster les liste.
+  `users.management.cattle.io` (`user-2fhwx`), pas le login. Paramètres >
+  Sécurité > Comptes du cluster de l'hôte les liste.
 - **Un compte sans correspondance est refusé** tant que la délégation est
   active, plutôt que de retomber sur le kubeconfig administrateur partagé,
   qui est précisément ce que la délégation supprime. `deny_unmapped: false`
@@ -2735,7 +3037,9 @@ Harvester. Un hôte KVM reste ce qu'il est : il ne devient pas un cluster,
 et libvirt reste la seule source de vérité. Aucun agent n'est installé sur
 l'hôte. La console lance `virsh` sur l'hôte par SSH et lit ce qu'il rend.
 **KVM** est un groupe de quatre entrées dans le menu latéral, après Shared
-resources.
+resources. Depuis la 2.0.0 le groupe n'existe plus : ces quatre vues sont
+les onglets de l'index de la famille KVM (`#hosts/kvm`) et la liste des VMs
+KVM (`#vms/host/kvm`), voir « Vues de tous les hôtes KVM » plus bas.
 
 - **Hôtes** : un bloc par hôte. Nom de l'hôte, `utilisateur@adresse`, CPU
   (nombre, modèle, fréquence, sockets), mémoire (totale, libre,
@@ -2888,6 +3192,69 @@ supprimés. Un invité SLES 16 qui suit l'ACPI est arrivé à `shut off` 2,4 s
 après la demande (action finie en 3,5 s). Une déclaration annulée depuis la
 console pendant son test de connexion, déjà enregistrée, a été défaite :
 aucun fichier de déclaration ni de clé n'est resté.
+
+### La page d'un hôte KVM (2.0.0)
+
+Chaque hôte KVM a sa page, ouverte depuis le menu des hôtes ou par son
+adresse `#kvm/<hôte>`. Un bandeau montre la famille (KVM), le nom, l'état,
+la version de libvirt et le nombre de VMs, le sous-menu de l'hôte et
+**Activité de cet hôte**.
+
+- **Vue d'ensemble** (`#kvm/<hôte>`) : le bloc de l'hôte (CPU, mémoire,
+  versions, VMs par état, étiquettes), avec **Tester**, **Créer une VM** et
+  **Retirer**.
+- **Machines virtuelles** (`.../vms`) : le tableau des VMs de cet hôte
+  seulement. Le filtre d'hôte est imposé et masqué ; l'état, le texte, le
+  tri et tous les gestes sont ceux du tableau de la flotte.
+- **Paramètres** en cinq onglets. **Système** : nom de la machine, URI
+  libvirt, versions de libvirt et de QEMU, CPU, mémoire, nombre de
+  domaines, en une lecture de l'hôte. **Pools** et **Réseaux** : les vues
+  de stockage et de réseaux avec cet hôte seulement. **Étiquettes** : les
+  étiquettes de la déclaration. **Connexion** : adresse, port et
+  utilisateur SSH, URI et empreinte de la clé d'hôte épinglée (jamais le
+  chemin de la clé) ; **Tester** (opérateur) et **Retirer** (administrateur,
+  confirmé dans la page, puis l'index des hôtes KVM s'ouvre).
+- **Disaster Recovery** (`.../dr`) : dit que la réplication des domaines
+  KVM n'est pas encore disponible.
+
+Un hôte qui ne répond pas garde un bloc en erreur, avec la raison classée.
+Étiquettes et Connexion ne lisent que la déclaration : elles restent
+lisibles. Un hôte KVM et un cluster Harvester peuvent porter le même nom :
+la famille fait partie de l'adresse, ils ne se mélangent jamais.
+
+**Vues de tous les hôtes KVM.** Le groupe KVM de la 1.x montrait tous les
+hôtes sur un écran. Rien n'en est perdu : l'index de la famille KVM
+(`#hosts/kvm`, la famille KVM du menu latéral) a quatre onglets.
+
+- **Hôtes** (`#hosts/kvm`) : le tableau des hôtes, avec **Déclarer un
+  hôte**, et **Tester** et **Retirer** par ligne.
+- **Capacité** (`#hosts/kvm/capacity`) : le bloc de chaque hôte côte à
+  côte (CPU, mémoire, versions, VMs par état, étiquettes), avec le filtre
+  par étiquette.
+- **Pools** (`#hosts/kvm/pools`) : les pools de tous les hôtes, un bloc
+  par hôte, avec le filtre d'hôte et le sous-onglet **Images** (catalogue
+  de tous les hôtes).
+- **Réseaux** (`#hosts/kvm/networks`) : les réseaux libvirt de tous les
+  hôtes, un bloc par hôte.
+
+Le nom de chaque hôte dans ces vues ouvre sa page, sur l'onglet
+correspondant. Chaque geste reste disponible aux deux endroits. Les
+anciennes adresses `#kvmstorage` et `#kvmnetworks` ouvrent les onglets
+Pools et Réseaux, et `#kvmhosts` le tableau des hôtes KVM.
+
+**Modifier les étiquettes** (administrateur). **Modifier les étiquettes**
+dans Paramètres > Étiquettes ouvre une fenêtre, une ligne par étiquette.
+Des contrôles passent avant **Appliquer** : noms valides, aucun nom donné
+deux fois, valeurs de 253 caractères au plus sans caractère de contrôle,
+32 étiquettes au plus, et la liste de ce qui est ajouté, modifié et retiré.
+Appliquer reste grisé avec la raison tant qu'un contrôle échoue ou que rien
+ne change. Le jeu entier est remplacé dans une action suivie (dock,
+Activité), qui garde les étiquettes d'avant. Seule la déclaration de la
+console change : rien n'est demandé à l'hôte. La même chose en ligne de
+commande : `harvester-kvm.py host label --host <hôte> --label clé=valeur
+...` ou `--clear`. Les autres boutons suivent le rôle : un lecteur voit
+Tester grisé, un opérateur voit Retirer et Modifier les étiquettes grisés,
+chacun avec la raison.
 
 ### Console, instantanés, clonage et suppression d'une VM (1.98.0)
 
@@ -3934,7 +4301,9 @@ drapeau de santé du suiveur : après une bascule, il surveille la VM source
 et la signale tant qu'elle tourne à nouveau. `since` est la date du
 dernier événement de ce genre au journal (ou la date où une VM en attente
 a été vue la première fois). `host` garde les plans où ce cluster est
-source ou cible.
+source ou cible. Ranger une VM protégée dans un dossier, la déplacer vers
+un autre dossier ou renommer son dossier ne lève ni `plan-drift` ni
+`carnet-stale` : l'annotation de dossier n'est pas un réglage de reprise.
 
 **Notifications externes.** Matrix (API client-serveur, un id de salon et
 un jeton d'accès), Slack (webhook entrant), un webhook JSON générique
@@ -4008,7 +4377,9 @@ API : lectures `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, ligne, état, volumes, dernières
 exécutions, verrou, bail, `carnet_stale`),
 `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
-`GET /api/replication/hosts/<cluster>/resources?side=`,
+`GET /api/replication/hosts/<harvester ou kvm>/<hôte>/resources?side=` (2.0.0 ;
+l'ancienne forme `GET /api/replication/hosts/<cluster>/resources` répond encore
+pour un cluster Harvester ; un hôte KVM rend une liste vide avec `available: false`),
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
 `GET /api/replication/follower`,
 `GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
@@ -4070,8 +4441,26 @@ commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 
 La console a un groupe de menu racine **Disaster Recovery** avec deux
 entrées, **Contrats** et **Liens**, et une entrée **Disaster Recovery** dans
-le groupe de menu de chaque cluster Harvester. Chaque geste lance la ligne
-de commande `harvester-replication` en action suivie (dock et Activité) ;
+le groupe de menu de chaque cluster Harvester. Depuis la 2.0.0 ce sont des
+entrées du menu latéral, chacune avec son adresse : **Disaster Recovery**
+(`#dr`) et **Liens** (`#dr/links`) à la racine, et **Disaster Recovery**
+dans le sous-menu de chaque hôte (`#harvester/<c>/dr` ; `#kvm/<h>/dr` dit
+que la réplication des domaines KVM n'existe pas encore). Un contrat a sa
+propre adresse, `#dr/<id>` : elle ouvre les contrats avec la fenêtre du
+contrat dessus, un clic sur un contrat l'écrit, fermer la fenêtre rend
+`#dr`, et F5 la rouvre. Depuis le Disaster Recovery d'un hôte, la fenêtre
+s'ouvre sur la page de l'hôte, qui garde son adresse. Dans le journal d'un
+contrat, l'icône Activité d'un événement mène à `#activity/action/<id>` :
+l'Activité filtrée sur cette action, son détail ouvert. Ce filtre n'est pas
+enregistré : vos propres filtres de l'Activité reviennent quand vous quittez
+l'adresse ou changez un filtre. Dans **Machines
+virtuelles**, une VM tenue par un contrat porte une pastille **DR** qui
+mène au contrat ; elle est relue à chaque ouverture de la vue et chaque
+minute. Les boutons suivent les actions que le serveur rend avec chaque
+ligne de contrat (rôle, permis, raison) : **Reprendre la commande**
+n'apparaît que lorsque la commande `resume` a quelque chose à finir, grisé
+avec le rôle qu'il faut (admin pour finir une bascule). Chaque geste lance
+la ligne de commande `harvester-replication` en action suivie (dock et Activité) ;
 les écrans n'écrivent jamais par un autre chemin.
 
 **Contrats.** Tous les contrats, en cartes ou en tableau (la bascule est
@@ -4110,7 +4499,12 @@ prêt, et rien n'est écrit avant **Créer** :
    absent du secours bloque la création tant qu'il n'est pas associé à un
    réseau existant ou créé là-bas par **Créer sur la cible** (nom, VLAN et
    réseau de cluster modifiables ; c'est la création de réseau habituelle,
-   administrateur). La colonne **Réseau d'exercice** est gardée pour les
+   administrateur). Quand le secours n'a aucun réseau de VM, la liste dit
+   **Aucun réseau de VM sur <cluster>** et la ligne mène à **Créer sur la
+   cible**. Le réseau de gestion (pod) n'est pas proposé : le moteur
+   n'associe un réseau de VM qu'à un autre réseau de VM du secours (une
+   NetworkAttachmentDefinition), et `check` refuse tout le reste. La
+   colonne **Réseau d'exercice** est gardée pour les
    exercices à venir. Le stockage se choisit **disque par disque** ; la
    classe de même nom est proposée quand elle existe sur le secours. Une
    classe qui demande plus de répliques que le secours n'a de nœuds
@@ -4199,8 +4593,11 @@ source rallumée après une bascule, sauvegarde en erreur, volume de secours
 dégradé, source injoignable, spec d'une VM changée, contrat en erreur,
 nouvelle VM qui répond à une règle, réglages de reprise plus récents que la
 dernière protection, protection automatique en échec. Elles s'affichent en pastille sur les
-entrées Disaster Recovery du menu (racine et cluster courant), dans
-l'onglet **Événements** de l'aperçu du cluster (groupe Disaster Recovery,
+entrées Disaster Recovery du menu (racine et cluster courant) et, depuis
+la 2.0.0, sur la ligne de chaque hôte Harvester du menu latéral (une alerte
+compte pour sa source et pour son secours ; la pastille mène au Disaster
+Recovery de cet hôte), dans
+le bloc **Événements** de la Vue d'ensemble de l'hôte (groupe Disaster Recovery,
 même quand le cluster ne répond pas), et partent vers les notifications
 réglées.
 

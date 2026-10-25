@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-09-30, console **v1.80.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-10-25, console **v2.0.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -14,9 +14,9 @@ Harvester menu: *Dashboard*
 |---|---|---|---|
 | Host, VM and volume counts | Done | 1.2 | Overview tiles |
 | CPU, memory and storage capacity | Done | 1.62 | live usage (metrics.k8s.io), reserved, storage written and promised |
-| Cluster events (hosts, VMs, volumes, images) | Done | 1.62 | Overview Events tab, warnings filter |
+| Cluster events (hosts, VMs, volumes, images) | Done | 1.62 | Events block of the host Overview, warnings filter |
 | Cluster and VM metrics (rancher-monitoring) | Done | 1.70 | Metrics tab: Prometheus when rancher-monitoring is on, metrics-server otherwise; correct VM CPU (Harvester divides it by 1000) |
-| Upgrade Harvester button | Done | 1.69 | in the Overview header and on server-version |
+| Upgrade Harvester button | Done | 1.69 | on the host Overview, opens Parameters > Upgrade (2.0); also on server-version |
 
 ## Hosts
 
@@ -269,6 +269,10 @@ Harvester menu: *VM Imports / VM Migration*
 |---|---|---|---|
 | Sign-in through several Ranchers set in the interface, direct or SSO, inherited rights | Console only | 1.79 | the console registers itself in Rancher for SSO and installs the Harvester RBAC chart |
 | Several clusters in one interface, without Rancher | Console only | 1.1 | Rancher (Virtualization Management) also gathers several Harvester clusters; the console does it on its own and adds actions between clusters |
+| Host-centred navigation: Harvester clusters and KVM hypervisors in one menu, one address per screen | Console only | 2.0 | favourites per person, hosts index, 1.x addresses still understood |
+| Shared folders for VMs, containers and hosts, written on the objects | Console only | 2.0 | checks before the gesture, undo and resume; Harvester has no folders |
+| Asynchronous replication between Harvester clusters (contracts, RPO, failover) | Console only | 1.99 | Longhorn standby volumes; Disaster Recovery screens since 1.101, placed in the 2.0 navigation |
+| KVM hypervisors (libvirt) managed next to the clusters | Console only | 1.96 | virsh over SSH, no agent; host page in 2.0 |
 | Graceful shutdown and startup of a whole cluster | Console only | 1.0 | Harvester documents it as a manual procedure |
 | VM transfer between clusters, export / import | Console only | 1.45 |  |
 | Terraform: declarations kept by the console | Console only | 1.54 |  |

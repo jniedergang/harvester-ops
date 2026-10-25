@@ -112,6 +112,8 @@ const Clusters = (() => {
         const r = await fetch(`/api/clusters/${encodeURIComponent(name)}`, { method: 'DELETE' });
         if (r.ok) {
           resEl.innerHTML = `<div class="summary-bar ok">${Icons.svg('ok', { size: 14 })} Deleted</div>`;
+          // source unique des clusters (navigation 2.0) relue après un retrait
+          if (window.App && App.refreshClusters) App.refreshClusters();
           setTimeout(refreshList, 600);
         } else {
           const d = await r.json();
@@ -274,7 +276,6 @@ const Clusters = (() => {
   }
 
   function init() {
-    $('#btn-add-cluster')?.addEventListener('click', openAddForm);
     $('#btn-clusters-add')?.addEventListener('click', openAddForm);
     $('#btn-clusters-refresh')?.addEventListener('click', refreshList);
     // Refresh list when settings → Clusters tab is opened

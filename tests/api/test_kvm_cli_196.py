@@ -880,7 +880,7 @@ def test_host_list_and_remove(env, capsys):
 INV_KEYS = {"name", "hostname", "address", "labels", "cpu", "memory", "libvirt_version",
             "qemu_version", "vms", "errors"}
 VM_KEYS = {"host", "name", "id", "state", "persistent", "autostart", "vcpus", "memory_kib",
-           "memory_max_kib", "cpu_time_ns"}
+           "memory_max_kib", "cpu_time_ns", "uuid"}
 
 
 def test_inventory_all_hosts_one_failing(env, capsys):

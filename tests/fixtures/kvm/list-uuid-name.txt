@@ -1,0 +1,16 @@
+49960a5e-a239-42da-95f6-f55383ea5c62 bmcfg-n1
+6b128cd4-f440-482d-8e90-1eb32a2c2094 bmcfg-n2
+d516b457-b2a1-440a-8df3-0657d2523ba7 hardpipe-node0
+be02dfd3-538b-4ee2-80de-a0e7f0b12548 harvlab-n1
+1a078cce-b206-43db-9c94-fd241e3c1440 harvlab-n2
+486a7423-02ac-4b6f-86be-dff3c5fedbc6 harvlab-n3
+7b7b49df-5c40-4707-9a2f-e98db9934bbe harvlab2-n1
+1ac83091-e151-4ebe-aea8-7a7f4ab4f226 mlm-dst
+db540746-4fb3-4d1a-9d61-eb283bd776e0 mlm-src
+51b2c60f-306e-4912-b84f-11c70cdeb9ff netperf
+f848a8d8-e161-4793-bd17-d329791ef469 sles15sp6
+851f88c6-88b0-4e6a-85a6-acf4bb595771 sles15sp7
+a69ce12b-eabc-4bfb-b0a6-217f28ca70ed vmwlab-esx1
+8540a291-f310-4045-b20f-e3fe1ce1273b xen-build
+31243d82-9e00-4ee4-8655-ad9cd18cd05a xen-sles16
+

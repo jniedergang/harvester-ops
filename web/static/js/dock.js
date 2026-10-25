@@ -340,6 +340,7 @@ const Dock = (() => {
           ${isRunning
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
+          ${!isRunning && (a.undo || a.resume) ? `<span class="dock-gestures">${undoButton(a, 'data-undo')}${resumeButton(a, 'data-resume')}</span>` : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
       const cancelBtn = card.querySelector('[data-cancel]');
@@ -356,6 +357,15 @@ const Dock = (() => {
           }
           poll();
         } catch (err) { alert(err.message); }
+      });
+      // 2.0.0 : une action réversible (dossiers) propose « Annuler » une fois
+      // finie ; l'annulation est elle-même une action suivie
+      const resumeBtn = card.querySelector('[data-resume]');
+      if (resumeBtn) resumeBtn.addEventListener('click', (e) => { e.stopPropagation(); resume(a, resumeBtn); });
+      const undoBtn = card.querySelector('[data-undo]');
+      if (undoBtn) undoBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        undo(a, undoBtn);
       });
       card.querySelector('.toggle-details').addEventListener('click', (e) => {
         e.stopPropagation();
@@ -410,6 +420,69 @@ const Dock = (() => {
 
   // i18n avec repli : le dock se re-rend toutes les 3s en dehors du scan
   // data-i18n, donc les libellés passent par t() à chaque rendu.
+  // 2.0.0 : annuler un geste de dossiers demande le rôle opérateur (le
+  // serveur décide ; le bouton d'un lecteur est grisé avec la raison)
+  function canUndo() {
+    const r = window.App && App.role ? App.role() : null;
+    return r === 'operator' || r === 'admin' || r == null;
+  }
+
+  // Bouton « Annuler » d'une action finie qui porte `undo` (dock et onglet
+  // Activité, revue I-4) : grisé avec la raison pour un lecteur. `attr` :
+  // attribut qui le désigne dans la vue qui l'affiche.
+  function undoButton(a, attr) {
+    if (!a || !a.undo || !a.undo.path) return '';
+    const label = escapeHtml(tr('dock.undo', 'Undo'));
+    return canUndo()
+      ? `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${label}</button>`
+      : `<button class="btn-mini dock-undo" ${attr}="${escapeHtml(a.id)}" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${label}</button>`;
+  }
+
+  // 2.0.0 : une action de dossiers arrêtée (erreur, arrêt de la console)
+  // propose « Reprendre » ; le serveur décide (champ `resume`), la reprise
+  // est une action suivie qui ne réécrit jamais une ligne faite
+  function resumeButton(a, attr) {
+    if (!a || !a.resume || !a.resume.path) return '';
+    const label = escapeHtml(tr('dock.resume', 'Resume'));
+    return canUndo()
+      ? ` <button class="btn-mini dock-resume" ${attr}="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.resumeTip', 'Finish the objects this action did not reach'))}">${label}</button>`
+      : ` <button class="btn-mini dock-resume" ${attr}="${escapeHtml(a.id)}" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${label}</button>`;
+  }
+  async function resume(a, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(a.resume.path, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
+      poll();
+      return d.action_id;
+    } catch (err) {
+      if (btn) { btn.disabled = false; btn.title = tr('dock.resumeFailed', `Resume failed: ${err.message}`, { error: err.message }); }
+      return null;
+    }
+  }
+
+  // L'annulation est elle-même une action suivie : elle part de la route
+  // existante, apparaît au dock, et publie `hops:undo`.
+  async function undo(a, btn) {
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch(a.undo.path, { method: 'POST' });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.hint || d.error || `HTTP ${r.status}`);
+      document.dispatchEvent(new CustomEvent('hops:undo', { detail: { action: a.id, undo: d.action_id } }));
+      poll();
+      return d.action_id;
+    } catch (err) {
+      if (btn) {
+        btn.disabled = false;
+        btn.title = tr('dock.undoFailed', `Undo failed: ${err.message}`, { error: err.message });
+        btn.classList.add('dock-undo-failed');
+      }
+      return null;
+    }
+  }
+
   function tr(key, fallback, vars) {
     return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key, vars) : fallback;
   }
@@ -507,7 +580,7 @@ const Dock = (() => {
     });
   }
 
-  return { init, poll, isVisible, setVisible };
+  return { init, poll, isVisible, setVisible, undoButton, undo, resumeButton, resume };
 })();
 
 document.addEventListener('DOMContentLoaded', Dock.init);

@@ -31,9 +31,14 @@ recorded, whether it was made from the console or somewhere else.
 
 ### Every cluster in one modern interface
 
-- **All your clusters, one console.** Declare as many as you need and
-  switch in one click: every view follows. A cluster that is powered off or
-  unreachable says so within two seconds, and the others keep working.
+- **All your hosts, one console.** Harvester clusters and KVM hypervisors
+  are listed side by side in the menu, each with its state, its VM count
+  and its own page; every screen has an address you can bookmark or share.
+  A host that is powered off or unreachable says so within two seconds, and
+  the others keep working.
+- **Every VM of the fleet in one view, filed in shared folders**: VMs,
+  containers and hosts go into folders written on the objects themselves,
+  with the checks shown before each move, and Undo.
 - **Views laid out one block per object**: hosts and the VMs they run,
   networks and what is attached to them, storage classes, volumes and the
   space really left on each disk, network cards, bonds and virtual

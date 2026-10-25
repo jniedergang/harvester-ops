@@ -11,6 +11,7 @@ seul chemin d'écriture : la console le lance en action suivie.
   harvester-kvm.py host test N
   harvester-kvm.py host list
   harvester-kvm.py host remove N
+  harvester-kvm.py host label --host N (--label k=v ... | --clear)   (2.0.0 : déclaration seule)
   harvester-kvm.py inventory [--host N] [--details]
   harvester-kvm.py vm list [--host N]
   harvester-kvm.py vm show --host N --name D
@@ -791,13 +792,16 @@ def targets(args):
             for d in kvm_decl.load_all(state, warn=lambda m: step("hosts", "warn", m))]
 
 
-def read_all(hosts, details=False, deadline=None):
+def read_all(hosts, details=False, deadline=None, folders=False):
     """Inventaire de chaque hôte, en parallèle ; un hôte en échec rend son
     erreur sans gêner les autres. `deadline` (s) : échéance de l'ensemble ;
     un hôte qui n'a pas répondu à temps rend {kind: "timeout"} et les autres
-    sont rendus (sa lecture finit en arrière-plan, bornée par le délai SSH)."""
+    sont rendus (sa lecture finit en arrière-plan, bornée par le délai SSH).
+    `folders` (2.0.0) : dossier de chaque VM (kvm_host.read_folders)."""
     def one(host):
         try:
+            if folders:
+                return kh.host_inventory(host, details=details, folders=True)
             return kh.host_inventory(host, details=details)
         except kh.KvmError as e:
             return {"name": host.name, "address": host.decl.get("address"), "error": err_info(e)}
@@ -1886,6 +1890,42 @@ def cmd_host_image_pools(args):
         step("image-pools", "done", ", ".join(pools) if pools else "every pool")
     emit(args, {"ok": True, "host": args.host, "image_pools": pools},
          f"{args.host}: image pools " + (", ".join(pools) if pools else "not set (every pool)"))
+    return EXIT_OK
+
+
+def cmd_host_label(args):
+    """Étiquettes d'un hôte (2.0.0) : remplace tout le jeu par les `--label`
+    donnés, ou le vide avec `--clear`. Seul le champ `labels` de la
+    déclaration change ; rien n'est demandé à l'hôte."""
+    state = state_of(args)
+    if not isinstance(args.host, str) or not kvm_decl.NAME_RE.match(args.host):
+        raise UsageError("invalid host name")
+    if args.clear and args.label:
+        raise UsageError("--clear and --label are exclusive")
+    if not args.clear and not args.label:
+        raise UsageError("give the labels with --label KEY=VALUE, or --clear to remove them all")
+    labels = {} if args.clear else parse_labels(args.label)
+    if not args.clear and len(labels) != len(args.label):
+        raise UsageError("a label name is given twice")
+    problem = kvm_decl.check_labels(labels)
+    if problem:
+        raise UsageError(problem)
+    with host_lock(state):
+        try:
+            decl = kvm_decl.load(state, args.host)
+        except FileNotFoundError:
+            raise UsageError(f"host {args.host} is not declared") from None
+        before = dict(decl.get("labels") or {})
+        new = dict(decl, labels=labels)
+        problem = kvm_decl.check_decl(new)
+        if problem:
+            raise UsageError(problem)
+        step("labels", "running", f"labels of {args.host}")
+        kvm_decl.write(state, new)
+        text = ", ".join(f"{k}={v}" for k, v in sorted(labels.items())) or "none"
+        step("labels", "done", text)
+    emit(args, {"ok": True, "host": args.host, "labels": labels, "previous": before},
+         f"{args.host}: labels {text}")
     return EXIT_OK
 
 
@@ -3145,6 +3185,14 @@ def build_parser():
     sp.add_argument("--pool", action="append", metavar="POOL",
                     help="pool whose volumes form the image catalogue (repeatable)")
     sp.set_defaults(fn=cmd_host_image_pools)
+
+    sp = hp.add_parser("label", parents=[common],
+                       help="replace the labels of a host (only its declaration changes)")
+    sp.add_argument("--host", required=True)
+    sp.add_argument("--label", action="append", metavar="KEY=VALUE",
+                    help="label to keep or set (repeatable); the others are removed")
+    sp.add_argument("--clear", action="store_true", help="remove every label")
+    sp.set_defaults(fn=cmd_host_label)
 
     sp = hp.add_parser("caps", parents=[common],
                        help="what the VM form can offer on a host, with the reason of each "

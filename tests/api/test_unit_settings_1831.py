@@ -25,7 +25,7 @@ def test_every_documented_setting_reaches_the_container():
     # un réglage lu comme un nombre a une valeur par défaut numérique : une
     # valeur vide ferait tomber la console au démarrage
     for name in ("HARVESTER_OPS_WATCH_INTERVAL", "HARVESTER_OPS_WATCH_IDLE_AFTER",
-                 "HARVESTER_OPS_WATCH_IDLE_INTERVAL", "HARVESTER_OPS_READ_SHARE_TTL",
+                 "HARVESTER_OPS_WATCH_IDLE_INTERVAL", "HARVESTER_OPS_READ_SHARE_TTL", "HARVESTER_OPS_KVM_VMS_SHARE_TTL",
                  "HARVESTER_OPS_READ_WORKER_TASKS"):
         float(passed[name])
 

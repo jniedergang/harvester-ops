@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
+from nav import address, goto  # noqa: E402
 
 MEMBERS = {"managed": True, "scope": "cluster",
            "roles": [{"id": "cluster-owner", "name": "Cluster Owner"}, {"id": "cluster-member", "name": "Cluster Member"},
@@ -30,8 +31,7 @@ def fulfill(route, body, status=200):
 def setup(context, flask_server, members=MEMBERS):
     context.add_init_script(
         "localStorage.setItem('harvester_ops_language','en');"
-        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');"
-        "localStorage.setItem('harvester_ops_current_tab','namespaces');")
+        "localStorage.setItem('harvester_ops_current_cluster','harv-fake');")
     page = context.new_page()
     sent = []
 
@@ -44,7 +44,7 @@ def setup(context, flask_server, members=MEMBERS):
     page.route("**/api/harvester-users/harv-fake", lambda r, q: fulfill(r, {"users": [], "admins": []}))
     page.route("**/api/stream/mb0000000173", lambda r, q: r.fulfill(
         status=200, content_type="text/event-stream", body='event: end\ndata: {"status": "done"}\n\n'))
-    page.goto(flask_server["base_url"], wait_until="domcontentloaded")
+    goto(page, flask_server["base_url"], address("namespaces"))
     page.wait_for_function("window.RancherMembers && window.App && App.getCurrentCluster()")
     page.on("dialog", lambda d: d.accept())
     return page, sent
@@ -52,8 +52,8 @@ def setup(context, flask_server, members=MEMBERS):
 
 def test_cluster_members_are_added_after_a_search_and_system_accounts_are_kept(context, flask_server):
     page, sent = setup(context, flask_server)
-    page.click("#btn-settings")
-    page.click('.settings-tab[data-stab="husers"]')                  # chargé à l'ouverture de l'onglet
+    # 2.0.0 : les comptes du cluster sont dans Paramètres > Sécurité de l'hôte (décision 7)
+    page.evaluate("Router.go('#harvester/harv-fake/params/security/accounts')")   # chargé à l'ouverture
     box = page.locator("#rmembers-body")
     expect(box.locator('tr[data-rm="c-sg2q6:u-sys-admin"] [data-rm-act="remove"]')).to_be_disabled(timeout=8000)
     box.locator('[name="q"]').fill("jul")
@@ -91,6 +91,5 @@ def test_a_project_s_members_open_from_the_projects_tab(context, flask_server):
 
 def test_a_console_account_is_told_to_sign_in_through_rancher(context, flask_server):
     page, _ = setup(context, flask_server, {"managed": False, "members": [], "roles": []})
-    page.click("#btn-settings")
-    page.click('.settings-tab[data-stab="husers"]')
+    page.evaluate("Router.go('#harvester/harv-fake/params/security/accounts')")
     expect(page.locator("#rmembers-body")).to_contain_text("sign in to the console through Rancher", timeout=8000)

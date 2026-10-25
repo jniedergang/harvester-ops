@@ -17,27 +17,42 @@ const App = (() => {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
-  const TAB_STORAGE = 'harvester_ops_current_tab';
-  // v1.96.0 : onglets du groupe KVM -> vue du module KVM
-  const KVM_TABS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
+  // Sections qui montent une vue du module KVM (v1.96.0) ; depuis la 2.0.0
+  // l'hôte KVM vient de la route (page d'un hôte), plus d'un groupe de menu.
+  const KVM_VIEWS = { kvmhosts: 'hosts', kvmvms: 'vms', kvmstorage: 'storage', kvmnetworks: 'networks' };
+  // 2.0.0 : hôte KVM de la route (page d'un hôte KVM) et onglet de ses
+  // Paramètres ; null sur les écrans de flotte. Posés par showRoute.
+  let navKvm = null;
+  let navKvmTab = null;
+  let navHostsKind = null;
+  // 2.0.0 (tâche 15) : périmètre de la vue des VMs ({ id, kind, host }) et
+  // dossier de la route (#folders/<id>, #containers/folder/<id>, #hosts/folder/<id>)
+  let navVms = null;
+  let navFolder = null;
+  // 2.0.0 (tâche 16) : contrat DR ouvert par l'adresse (#dr/<id>) et action
+  // d'Activité demandée par l'adresse (#activity/action/<id>, lien du journal)
+  let navDrPlan = null;
+  let navActivityAction = null;
+  let pendingActionOpen = null;
+  const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
-    // Highlight every `.tab` whose data-tab matches the current name. The
-    // Automation group keeps "broad-highlight" off by *not* carrying
-    // data-tab on its children — they share routing with the head but get
-    // their own .sub-active class via the group's switcher. Cluster
-    // children have UNIQUE data-tab values per child, so this selector
-    // highlights exactly one of them at a time. (Don't filter out
-    // .tab-child here or Cluster's Démarrage/Arrêt children stop
-    // lighting up when selected.)
-    $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
-    // v1.77.0 : l'entrée active reste visible, même dans un groupe replié
-    // (VM Import / Export s'ouvre replié, et un F5 ou un lien direct sur
-    // l'une de ses entrées la cachait sinon).
-    $$('.tab-child.active').forEach(t => t.closest('.tab-group')?.classList.add('expanded'));
+    // 2.0.0 : le menu des hôtes (host-nav.js) peint son entrée active
+    // d'après la route ; l'adresse, et non plus localStorage, garde l'écran.
     $$('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + name));
-    try { localStorage.setItem(TAB_STORAGE, name); } catch {}
-    if (name === 'overview')   { refreshStatus({ veil: true }); mountTopology(overviewMode()); }
+    if (name === 'overview')   {
+      refreshStatus({ veil: true });
+      // 2.0.0 : les événements sont un bloc sous les métriques ; la vue en
+      // blocs des nœuds est Paramètres > Nœuds (mode « cluster »)
+      const mode = overviewMode();
+      mountTopology(overviewBoard(mode));
+      if (mode === 'events') document.querySelector('.overview-subtab[data-subtab="events"]')?.scrollIntoView({ block: 'start' });
+    }
+    // 2.0.0 : Paramètres > Mise à jour, le contenu de la fenêtre Upgrade dans la page
+    if (name === 'hupgrade') { if (window.Upgrade && Upgrade.mount) Upgrade.mount(currentCluster, $('#hupgrade-host')); }
+    else if (window.Upgrade && Upgrade.unmount) Upgrade.unmount();
+    // 2.0.0 : Paramètres > Connexion
+    if (name === 'hconn' && window.HostPage) HostPage.renderConn(currentCluster);
     if (name === 'namespaces') { refreshNamespaces(true); }
     if (name === 'activity')   refreshActivity();
     if (name === 'shutdown')   loadVMOrder();
@@ -46,12 +61,15 @@ const App = (() => {
     if (name === 'forkliftglobal') { if (window.ForkliftGlobal) ForkliftGlobal.start($('#forklift-global-host')); }
     else if (window.ForkliftGlobal) ForkliftGlobal.stop();
     // v1.85.0 : toutes les VMs, même cycle (rafraîchie seulement à l'écran)
-    if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host')); }
+    if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host'), navVms); }
     else if (window.AllVMs) AllVMs.stop();
+    // 2.0.0 : la vue « Dossiers », trois groupes (VMs, conteneurs, hôtes)
+    if (name === 'folders') { if (window.FoldersView) FoldersView.start($('#folders-view-host'), navFolder); }
+    else if (window.FoldersView) FoldersView.stop();
     // v1.91.0 : les charges de conteneurs, même cycle que les VMs
     if (name === 'containers') { if (window.Containers) Containers.current.start($('#containers-host')); }
     else if (window.Containers) Containers.current.stop();
-    if (name === 'allcontainers') { if (window.Containers) Containers.all.start($('#all-containers-host')); }
+    if (name === 'allcontainers') { if (window.Containers) Containers.all.start($('#all-containers-host'), { folder: navFolder }); }
     else if (window.Containers) Containers.all.stop();
     // v1.93.0 : Shared resources > GPU, l'inventaire de la flotte
     if (name === 'gpus') { if (window.Gpus) Gpus.start($('#gpus-host')); }
@@ -63,14 +81,22 @@ const App = (() => {
     if (name === 'usage') { if (window.Usage) Usage.start($('#usage-host')); }
     else if (window.Usage) Usage.stop();
     // Disaster Recovery : contrats (tous les clusters) et sous-onglet d'un cluster
-    if (name === 'drplans') { if (window.Replication) Replication.start($('#rp-plans-host'), 'all'); }
+    if (name === 'drplans') {
+      if (window.Replication) Replication.start($('#rp-plans-host'), 'all');
+      if (navDrPlan && window.ReplicationPlan) ReplicationPlan.open(navDrPlan);
+    }
     else if (name === 'clusterdr') { if (window.Replication) Replication.start($('#rp-cluster-host'), 'cluster', currentCluster); }
     else if (window.Replication) Replication.stop();
     if (name === 'drlinks') { if (window.Replication) Replication.startLinks($('#rp-links-host')); }
     else if (window.Replication) Replication.stopLinks();
     // v1.96.0 : KVM > Hôtes, Machines virtuelles, Stockage, Réseaux
-    if (KVM_TABS[name]) { if (window.KVM) KVM.start(KVM_TABS[name], $(`#kvm-${KVM_TABS[name]}-host`)); }
+    // 2.0.0 : sur la page d'un hôte KVM, l'hôte est imposé à la vue
+    if (KVM_VIEWS[name]) { if (window.KVM) KVM.start(KVM_VIEWS[name], $(`#kvm-${KVM_VIEWS[name]}-host`), { host: navKvm }); }
     else if (window.KVM) KVM.stop();
+    if (name === 'kvmparams' && window.HostPage) HostPage.renderKvmParams(navKvm, navKvmTab || 'system');
+    // 2.0.0 : index des hôtes (#hosts, #hosts/<famille>)
+    if (name === 'hosts') { if (window.HostsIndex) HostsIndex.start($('#hosts-index-host'), { kind: navHostsKind, folder: navFolder }); }
+    else if (window.HostsIndex) HostsIndex.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
     const section = window.Sections && Sections.isSection(name);
@@ -81,14 +107,17 @@ const App = (() => {
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
     if (name !== 'overview' && !section) stopBoards(null);
+    // Navigation 2.0 : l'adresse suit l'écran (F5 rend l'écran exact). Sans
+    // effet pendant que le routeur applique lui-même une adresse.
+    if (window.Router) Router.syncFromScreen();
   }
 
-  /** Sous-onglet d'aperçu actif (metrics | cluster). */
-  function overviewMode() {
-    const btn = document.querySelector('[data-overview-tab].active');
-    if (btn) return btn.dataset.overviewTab;
-    return savedOverviewMode();
-  }
+  /** Mode de l'aperçu : metrics (métriques + bloc Événements), events (le
+   *  même, défilé sur les événements) ou cluster (Paramètres > Nœuds). */
+  let ovMode = null;
+  function overviewMode() { return ovMode || savedOverviewMode(); }
+  /** Vue de blocs montée pour un mode de l'aperçu. */
+  const overviewBoard = (mode) => (mode === 'cluster' ? 'cluster' : 'events');
 
   // v1.57.0 : un navigateur peut encore garder « storage », « network »,
   // « fabric » ou « vpc », partis dans leurs sections : on revient aux
@@ -158,6 +187,7 @@ const App = (() => {
   // de ne pas proposer ce qui sera refusé, et de le DIRE.
   // -------------------------------------------------------------------------
   let sessionRole = 'admin';
+  let roleKnown = false;
 
   // v1.50.0 : une session Rancher expirée ne doit pas laisser l'écran
   // tourner sur des 401 : on retourne à la page de connexion.
@@ -184,6 +214,9 @@ const App = (() => {
     try {
       const d = await fetch('/api/whoami').then(r => r.json());
       sessionRole = d.role || 'admin';
+      roleKnown = true;
+      // 2.0.0 : les vues qui grisent leurs boutons d'après le rôle le suivent
+      document.dispatchEvent(new CustomEvent('hops:role', { detail: { role: sessionRole } }));
       document.body.classList.toggle('auth-rancher', d.auth === 'rancher');
       // v1.56.0 : le compte et la déconnexion vivent dans le menu du compte
       // (en haut à droite), pour tous les modes de connexion
@@ -228,8 +261,9 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Cluster selection
   // -------------------------------------------------------------------------
-  async function setCluster(name, opts = {}) {
-    if (!name) return;
+  /** Pose le cluster courant sans rien recharger (en-tête, mémoire du
+   *  dernier hôte Harvester) ; les refus de l'ancien cluster sont effacés. */
+  function commitCluster(name) {
     const previous = currentCluster;
     currentCluster = name;
     // v1.56.0 : les refus de l'ancien cluster ne valent pas pour celui-ci
@@ -238,6 +272,12 @@ const App = (() => {
     // v1.4.32: persist the selection so F5 restores the same cluster
     // (was always defaulting to the first <select> option).
     try { localStorage.setItem('harvester_ops_current_cluster', name); } catch {}
+    return previous;
+  }
+
+  async function setCluster(name, opts = {}) {
+    if (!name) return;
+    const previous = commitCluster(name);
 
     // Premier choix de la session : il n'y a rien à l'écran à remplacer,
     // le voile n'aurait rien à masquer.
@@ -280,6 +320,8 @@ const App = (() => {
       jobs.push(ForkliftGlobal.start($('#forklift-global-host')));
     }
     if (active === 'allvms' && window.AllVMs) jobs.push(AllVMs.load());
+    // 2.0.0 : la vue « Dossiers » (flotte entière) relit ses trois groupes
+    if (active === 'folders' && window.FoldersView) FoldersView.start(document.querySelector('#folders-view-host'), FoldersView.current());
     if (active === 'containers' && window.Containers) jobs.push(Containers.current.load());
     if (active === 'allcontainers' && window.Containers) jobs.push(Containers.all.load());
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
@@ -292,12 +334,15 @@ const App = (() => {
     if (window.Replication) Replication.paintBadges();
     // KVM ne dépend pas du cluster choisi ; relu comme Activity
     if (['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks'].includes(active) && window.KVM) jobs.push(KVM.load());
+    if (active === 'hosts' && window.HostsIndex) jobs.push(HostsIndex.reload());
+    // 2.0.0 : Paramètres d'un hôte KVM relus de même ; kvmdr est un état vide fixe
+    if (active === 'kvmparams' && window.HostPage) jobs.push(HostPage.renderKvmParams(navKvm, navKvmTab || 'system'));
     if (active === 'overview') {
-      const mode = savedOverviewMode();
-      if (mode !== 'metrics') {
-        mountTopology(mode);             // coupe aussi les vues de l'ancien
-      }
+      // coupe aussi les vues de l'ancien cluster (bloc Événements compris)
+      mountTopology(overviewBoard(overviewMode()));
     }
+    if (active === 'hupgrade' && window.Upgrade && Upgrade.mount) Upgrade.mount(currentCluster, $('#hupgrade-host'));
+    if (active === 'hconn' && window.HostPage) jobs.push(HostPage.renderConn(currentCluster));
     if (active === 'automation' && window.CAPI && window.CAPI.reactivate) {
       jobs.push(window.CAPI.reactivate());
     }
@@ -510,6 +555,14 @@ const App = (() => {
       (data.vms || []).forEach(vm => {
         (groups[vm.namespace] = groups[vm.namespace] || []).push(vm);
       });
+      // Navigation 2.0 : « Aller à la VM » de la recherche du menu
+      if (pendingVm && pendingVm.cluster === asked) {
+        if (groups[pendingVm.ns]) currentNamespace = pendingVm.ns;
+        const f = $('#ns-vm-filter');
+        if (f) f.value = pendingVm.name;
+        nsVmFilter = pendingVm.name;        // le filtre de la liste, comme une saisie
+        pendingVm = null;
+      }
 
       // Populate the namespace dropdown
       const sortedNs = Object.keys(groups).sort();
@@ -1407,6 +1460,8 @@ const App = (() => {
           duration: (a.ended_at && a.started_at) ? (a.ended_at - a.started_at) : null,
           dry_run: a.dry_run,
           error_summary: a.error_summary || null,
+          undo: a.undo || null,
+          resume: a.resume || null,
         });
       });
       (data.log_files || []).forEach(f => {
@@ -1465,11 +1520,23 @@ const App = (() => {
             <td>${Icons.svg('activity', { cls: 'icon-dim' })}</td>
             <td>${typeBadge}</td>
             <td>${escapeHtml(it.cluster)}</td>
-            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}</td>
+            <td>${escapeHtml(it.action)}${it.dry_run ? ' <span class="activity-type-badge">dry</span>' : ''}${
+              it.kind === 'action' && typeof Dock !== 'undefined' && Dock.undoButton ? ' ' + Dock.undoButton(it, 'data-act-undo') + Dock.resumeButton(it, 'data-act-resume') : ''}</td>
             <td>${statusBadge}</td>
             <td>${tsStr}</td>
             <td>${dur}</td>`;
           if (it.error_summary) tr.title = it.error_summary;
+          // revue I-4 : Annuler un geste de dossiers fini, bien après le dock
+          const resumeBtn = tr.querySelector('[data-act-resume]');
+          if (resumeBtn) resumeBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (await Dock.resume(it, resumeBtn)) refreshActivity();
+          });
+          const undoBtn = tr.querySelector('[data-act-undo]');
+          if (undoBtn) undoBtn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            if (await Dock.undo(it, undoBtn)) refreshActivity();
+          });
           if (it.kind === 'log') {
             tr.addEventListener('click', () => showLogFile(it.filename));
           } else {
@@ -1480,6 +1547,12 @@ const App = (() => {
           }
           histBody.appendChild(tr);
         });
+      }
+      // #activity/action/<id> : le détail de l'action s'ouvre une fois
+      if (pendingActionOpen) {
+        const idx = activityActionList.findIndex(a => a.id === pendingActionOpen);
+        pendingActionOpen = null;
+        if (idx >= 0) showActionDetails(idx);
       }
     } catch (e) { console.warn('activity refresh failed', e); }
   }
@@ -1521,8 +1594,22 @@ const App = (() => {
     return p.toString();
   }
 
+  // #activity/action/<id> pose un filtre passager : il n'est jamais
+  // enregistré, et les filtres gardés de la personne reviennent quand elle
+  // quitte cette adresse ou touche à un filtre (revue finale A-1)
+  let activityLens = null;
+
   function saveActivityFilters() {
     try { localStorage.setItem(ACT_FILTER_KEY, JSON.stringify(activityFilters)); } catch {}
+  }
+
+  /** Quitte le filtre passager d'une action : les filtres gardés reviennent. */
+  function leaveActivityLens() {
+    if (!activityLens) return false;
+    activityLens = null;
+    Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
+    restoreActivityFilters();
+    return true;
   }
 
   function restoreActivityFilters() {
@@ -1564,9 +1651,13 @@ const App = (() => {
 
   function bindActivityFilters() {
     const onChange = (key) => (e) => {
+      leaveActivityLens();
       activityFilters[key] = e.target.value;
       saveActivityFilters();
       refreshActivity();
+      // 2.0.0 : le filtre d'hôte est dans l'adresse (#activity/host/...) ;
+      // tout autre filtre fait quitter l'adresse d'une action (#activity/action/<id>)
+      if (window.Router) Router.syncFromScreen();
     };
     $('#act-f-cluster')?.addEventListener('change', onChange('cluster'));
     $('#act-f-status')?.addEventListener('change', onChange('status'));
@@ -1577,15 +1668,19 @@ const App = (() => {
       clearTimeout(activityQTimer);
       const v = e.target.value;
       activityQTimer = setTimeout(() => {
+        leaveActivityLens();
         activityFilters.q = v;
         saveActivityFilters();
         refreshActivity();
+        if (window.Router) Router.syncFromScreen();
       }, 250);
     });
     $('#btn-act-filter-reset')?.addEventListener('click', () => {
+      activityLens = null;
       Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
       saveActivityFilters();
       refreshActivity();
+      if (window.Router) Router.syncFromScreen();
     });
   }
 
@@ -1747,58 +1842,12 @@ const App = (() => {
   // Event bindings
   // -------------------------------------------------------------------------
   function bind() {
-    $$('.tab').forEach(t => t.addEventListener('click', (e) => {
-      e.preventDefault();
-      // Group heads without a data-tab (e.g. "cluster", "automation" —
-      // purely a container) only toggle expansion. The first child of the
-      // group is selected as the main tab so the content panel shows up.
-      const isGroupHead = t.classList.contains('tab-group-head');
-      if (isGroupHead) {
-        const group = t.dataset.group;
-        const grp = document.querySelector(`#tab-group-${group}`);
-        const expanded = grp ? !grp.classList.contains('expanded') : false;
-        if (grp) grp.classList.toggle('expanded', expanded);
-        try { localStorage.setItem(`harvester_ops_group_${group}_expanded`,
-          expanded ? '1' : '0'); } catch {}
-        if (!t.dataset.tab) {
-          // Pure container — pick the first child's effective main-tab
-          const firstChild = grp?.querySelector('.tab-child');
-          const targetTab = firstChild?.dataset.tab || `${group}`;
-          setTab(targetTab);
-          // v1.77.0 : setTab déplie le groupe de l'entrée active ; un clic
-          // sur la tête doit pourtant pouvoir le replier.
-          if (grp) grp.classList.toggle('expanded', expanded);
-          return;
-        }
-      }
-      // A `.tab-child` may inherit its main routing from its group head
-      // (e.g. Automation children carry data-subtab only — the matching
-      // main tab is named after the group: data-group="automation"
-      // ⇒ #tab-automation).
-      if (t.classList.contains('tab-child') && !t.dataset.tab) {
-        const groupHead = t.closest('.tab-group')?.querySelector('.tab-group-head');
-        const inherited = groupHead?.dataset.tab || groupHead?.dataset.group;
-        if (inherited) setTab(inherited);
-        return;
-      }
-      setTab(t.dataset.tab);
-    }));
-
-    // Restore each group's expanded state from localStorage
-    document.querySelectorAll('.tab-group').forEach(grp => {
-      const id = grp.id.replace('tab-group-', '');
-      try {
-        const saved = localStorage.getItem(`harvester_ops_group_${id}_expanded`);
-        if (saved === '0') grp.classList.remove('expanded');
-        if (saved === '1') grp.classList.add('expanded');
-      } catch {}
-    });
-
+    // 2.0.0 : les entrées du menu des hôtes sont de vrais liens appliqués
+    // par le routeur (host-nav.js) ; l'ancien menu à groupes est retiré.
     loadRole();
     // Disaster Recovery : pastilles d'alerte du menu, relues toutes les minutes
     if (window.Replication) Replication.startBadges();
 
-    $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
 
     // Création de VM : le namespace courant sert de proposition, le panneau
     // laisse en changer.
@@ -1977,9 +2026,8 @@ const App = (() => {
     if ($('#vm-order-filter-ns')) $('#vm-order-filter-ns').addEventListener('change', (e) => { nsFilter = e.target.value; renderVMOrder(); });
     if ($('#vm-order-sort'))      $('#vm-order-sort').addEventListener('change',     (e) => { sortBy   = e.target.value; renderVMOrder(); });
     // Shutdown sub-tabs: "Arrêt du cluster" vs "Ordre d'arrêt des VMs"
-    // (Restoration is done from init() via restoreSubTabsFromStorage,
-    // AFTER setCluster() — otherwise mountTopology() bails on null
-    // cluster during the boot click. See v1.4.31 fix.)
+    // (Le sous-onglet retenu est rouvert par showRoute au premier écran,
+    // APRÈS le choix du cluster : voir le correctif de la v1.4.31.)
     $$('[data-shutdown-tab]').forEach(btn => {
       btn.addEventListener('click', () => {
         const target = btn.dataset.shutdownTab;
@@ -1989,19 +2037,8 @@ const App = (() => {
       });
     });
 
-    // Overview sub-tabs (Metrics / Cluster / Network / Fabric / Storage).
-    $$('[data-overview-tab]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const target = btn.dataset.overviewTab;
-        $$('[data-overview-tab]').forEach(b => b.classList.toggle('active', b === btn));
-        $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== target));
-        try { localStorage.setItem('harvester_ops_overview_subtab', target); } catch {}
-        // Un seul chemin de montage : mountTopology gère lui-même le cas
-        // « Métriques » (pas de vue de blocs, mais il faut couper le polling).
-        mountTopology(target);
-        if (target === 'metrics') refreshStatus({ veil: true });
-      });
-    });
+    // 2.0.0 : plus de sous-onglets d'aperçu ; le mode vient de l'adresse
+    // (#harvester/<c>, .../overview/events, .../params/nodes).
 
     // Namespace bulk toolbar
     if ($('#ns-vms-check-all')) {
@@ -2048,23 +2085,125 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Init
   // -------------------------------------------------------------------------
-  // v1.4.31: restore Overview + Shutdown sub-tabs from localStorage.
-  // Must run AFTER setCluster() in init(), because the Overview sub-tab
-  // click handler calls mountTopology(target) which early-returns when
-  // currentCluster is null. Before v1.4.31, restoration happened from
-  // bind() — before setCluster() — so the Cluster/Network/Storage tabs
-  // came back visually selected but with an empty canvas.
-  function restoreSubTabsFromStorage() {
-    const restore = (storageKey, datasetAttr) => {
-      try {
-        const saved = localStorage.getItem(storageKey);
-        if (!saved) return;
-        const btn = document.querySelector(`[${datasetAttr}="${saved}"]`);
-        if (btn) btn.click();
-      } catch {}
+  /** Cluster retenu au chargement : le dernier choisi s'il est encore
+   *  déclaré (il peut avoir quitté config.yaml), sinon le premier. */
+  function defaultCluster() {
+    const list = listClusters();
+    let saved = null;
+    try { saved = localStorage.getItem('harvester_ops_current_cluster'); } catch {}
+    return saved && list.includes(saved) ? saved : (list[0] || null);
+  }
+
+  /** Peint le mode de l'aperçu sans monter sa vue (setTab s'en charge). */
+  function paintOverviewMode(mode) {
+    const m = ['metrics', 'cluster', 'events'].includes(mode) ? mode : 'metrics';
+    ovMode = m;
+    $$('.overview-subtab').forEach(p => {
+      p.hidden = m === 'cluster' ? p.dataset.subtab !== 'cluster' : p.dataset.subtab === 'cluster';
+    });
+    // Paramètres > Nœuds : le bandeau de l'hôte suffit, pas de titre d'aperçu
+    const head = $('#tab-overview > .shutdown-header');
+    if (head) head.style.display = m === 'cluster' ? 'none' : '';     // .shutdown-header l'emporte sur [hidden]
+    try { localStorage.setItem('harvester_ops_overview_subtab', m); } catch {}
+  }
+
+  const activeTab = () => document.querySelector('.tab-content.active')?.id?.replace(/^tab-/, '') || null;
+
+  /**
+   * Point d'entrée du routeur : pose le cluster, PUIS l'onglet (le pane est
+   * déjà retenu par Sections.remember). Défaut de 1.4.31 : un onglet montré
+   * avant son cluster restait une toile vide. Changement de cluster = voile
+   * et refus de l'ancien effacés, comme la bascule par le sélecteur.
+   * t = { cluster, tab, overview, tabFirst } ; tabFirst n'existe que pour
+   * le test de mutation qui prouve que l'ordre est vérifié.
+   */
+  async function showRoute(t) {
+    navKvm = t.kvm || null;
+    navKvmTab = t.kvmTab || null;
+    navHostsKind = t.hostsKind || null;
+    navVms = t.vms || null;
+    navFolder = t.folderId || null;
+    navDrPlan = t.drPlan || null;
+    navActivityAction = t.activityAction || null;
+    // #activity/action/<id> : l'Activité filtrée sur cette action, son détail ouvert
+    // (filtre passager : jamais enregistré, les filtres gardés reviennent après)
+    if (t.tab === 'activity' && t.activityAction) {
+      Object.keys(activityFilters).forEach(k => { activityFilters[k] = ''; });
+      activityFilters.q = t.activityAction;
+      activityLens = t.activityAction;
+      pendingActionOpen = t.activityAction;
+    } else {
+      leaveActivityLens();
+    }
+    // 2.0.0 : #activity/host/<famille>/<nom> pose le filtre « cluster » de l'Activité
+    if (t.tab === 'activity' && t.activityHost) {
+      activityFilters.cluster = t.activityHost;
+      saveActivityFilters();
+    }
+    const show = () => {
+      if (t.overview) paintOverviewMode(t.overview);
+      setTab(t.tab);
+      if (t.tab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
     };
-    restore('harvester_ops_overview_subtab', 'data-overview-tab');
-    restore('harvester_ops_shutdown_subtab', 'data-shutdown-tab');
+    const cluster = t.cluster || currentCluster || defaultCluster();
+    const previous = currentCluster;
+    if (!cluster || cluster === previous) { show(); return; }
+    if (t.tabFirst) show();
+    commitCluster(cluster);
+    if (!previous) {
+      // premier écran de la session : sous-onglets retenus, sans voile
+      if (!t.overview) paintOverviewMode(savedOverviewMode());
+      let shut = null;
+      try { shut = localStorage.getItem('harvester_ops_shutdown_subtab'); } catch {}
+      if (shut) document.querySelector(`[data-shutdown-tab="${CSS.escape(shut)}"]`)?.click();
+      if (!t.tabFirst) show();
+      // 2.0.0 : l'état du cluster ne nourrit que la Vue d'ensemble, que
+      // setTab('overview') lit déjà ; un autre premier écran ne le lit pas
+      return;
+    }
+    const work = async () => {
+      if (t.tabFirst) { await refreshStatus({ veil: true }); return; }
+      if (activeTab() === t.tab) {
+        // reloadForCluster remonte la vue du mode (bloc Événements ou vue en
+        // blocs des nœuds) pour le nouveau cluster, et coupe celle de l'ancien
+        if (t.overview) paintOverviewMode(t.overview);
+        await reloadForCluster();
+      } else {
+        show();
+        await refreshStatus({ veil: true });
+      }
+    };
+    if (window.Veil) {
+      await window.Veil.during(null, {
+        message: i18n.t('cluster.switching'), name: cluster, hint: i18n.t('cluster.switchingHint'),
+      }, work);
+    } else {
+      await work();
+    }
+  }
+
+  /** L'écran affiché, pour que le routeur en écrive l'adresse. */
+  function screen() {
+    const tab = activeTab();
+    let automation = 'capi';
+    try { automation = localStorage.getItem('harvester_ops_automation_subtab') || 'capi'; } catch {}
+    const kvm = KVM_SCREENS.includes(tab) ? navKvm : null;
+    return {
+      tab, cluster: currentCluster, overview: overviewMode(), automation,
+      pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
+      kvm, kvmTab: kvm ? navKvmTab : null,
+      hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,
+      vms: tab === 'allvms' && window.AllVMs ? AllVMs.scope() : null,
+      folderId: tab === 'hosts' && window.HostsIndex && HostsIndex.folder ? (HostsIndex.folder() || null)
+        : (['folders', 'allcontainers'].includes(tab) ? navFolder : null),
+      activityHost: tab === 'activity' ? (activityFilters.cluster || null) : null,
+      // l'adresse garde l'action tant que le filtre est le sien, seul
+      activityAction: tab === 'activity' && navActivityAction && activityFilters.q === navActivityAction
+        && !activityFilters.cluster && !activityFilters.status && !activityFilters.action ? navActivityAction : null,
+      // et le contrat tant que sa fenêtre est ouverte
+      drPlan: tab === 'drplans' && navDrPlan && window.ReplicationPlan && ReplicationPlan.isOpen(navDrPlan) ? navDrPlan : null,
+      activityIsCluster: tab === 'activity' && listClusters().includes(activityFilters.cluster),
+    };
   }
 
   function init() {
@@ -2080,39 +2219,11 @@ const App = (() => {
     if (window.Icons) Icons.mount();
     // Apply translations before first render
     if (typeof i18n !== 'undefined') i18n.applyTranslations();
-    const sel = $('#cluster-select');
-    if (sel.options.length > 0) {
-      // v1.4.32: restore the cluster the user last worked on. Only
-      // honor a saved value that's still in the dropdown (a cluster
-      // may have been removed from config.yaml between sessions).
-      let target = sel.value;
-      try {
-        const saved = localStorage.getItem('harvester_ops_current_cluster');
-        if (saved) {
-          const opt = [...sel.options].find(o => o.value === saved);
-          if (opt) {
-            sel.value = saved;
-            target = saved;
-          }
-        }
-      } catch {}
-      setCluster(target);
-    }
-
-    // Restore previously selected sub-tabs now that currentCluster is set.
-    restoreSubTabsFromStorage();
-
-    // Restore last active tab (persisted in localStorage).
-    // v1.4.33: guard via the tab-content element (#tab-<name>) instead of
-    // .tab[data-tab=<name>]. Group heads like Automation carry data-group
-    // (not data-tab), so the old guard silently failed for them — F5 on
-    // Automation > CAPI/Terraform/PXE always reverted to Overview.
-    try {
-      const savedTab = localStorage.getItem(TAB_STORAGE);
-      if (savedTab && document.getElementById(`tab-${savedTab}`)) {
-        setTab(savedTab);
-      }
-    } catch {}
+    // Navigation 2.0 : la liste des clusters, relue une fois du serveur
+    refreshClusters();
+    // L'adresse décide de l'écran (cluster PUIS onglet PUIS pane) ; une
+    // adresse vide ouvre #vms (2.0.0, le dernier écran d'avant une seule fois).
+    if (window.Router) Router.start();
 
     // Restore previously open floating panels
     if (window.FloatingPanels && FloatingPanels.restoreAll) {
@@ -2192,9 +2303,99 @@ const App = (() => {
 
   // Expose getCurrentCluster for the other modules
   function getCurrentCluster() { return currentCluster; }
+  /** Rôle de la session (whoami), null tant qu'il n'est pas lu. */
+  function role() { return roleKnown ? sessionRole : null; }
+
+  // -------------------------------------------------------------------------
+  // Navigation 2.0, étape 1 : source unique des clusters. Les modules ne
+  // lisent plus le sélecteur de l'en-tête (il disparaît à l'étape 2).
+  // -------------------------------------------------------------------------
+  let clusterList = null;        // noms visibles, du sélecteur puis de /api/clusters
+  let hiddenClusters = [];       // session Rancher : clusters cachés et pourquoi
+  let clustersFetch = null;
+
+  /** Clusters visibles. Disponible tout de suite (liste rendue par le
+   *  serveur dans la page), puis relue une fois de /api/clusters. */
+  function listClusters() {
+    if (!clusterList) {
+      // liste rendue par le serveur dans la page (premier écran), sans attendre /api/clusters
+      let seed = [];
+      try { seed = JSON.parse($('#clusters-seed')?.textContent || '[]'); } catch {}
+      clusterList = Array.isArray(seed) ? seed.filter(c => typeof c === 'string' && c) : [];
+    }
+    return clusterList.slice();
+  }
+
+  /** Relit /api/clusters (au démarrage, après un ajout ou un retrait). */
+  function refreshClusters() {
+    clustersFetch = fetch('/api/clusters')
+      .then(r => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+      .then(d => {
+        clusterList = (d.clusters || []).map(c => c.name).filter(Boolean);
+        hiddenClusters = Array.isArray(d.hidden) ? d.hidden : [];
+        return { clusters: clusterList.slice(), hidden: hiddenClusters.slice() };
+      })
+      .catch(() => ({ clusters: listClusters(), hidden: hiddenClusters.slice() }));
+    return clustersFetch;
+  }
+
+  /** Promesse de la dernière lecture de /api/clusters (lancée au besoin). */
+  function clustersInfo() { return clustersFetch || refreshClusters(); }
+
+  const MGMT_STORAGE = 'harvester_ops_mgmt_cluster';
+
+  /** Cluster de gestion des pages Cluster API, Terraform, déclarations
+   *  Terraform et services CAPI : celui que la personne a choisi, sinon le
+   *  dernier hôte Harvester visité. Vide avant le premier choix de cluster. */
+  function managementCluster() {
+    let m = null;
+    try { m = localStorage.getItem(MGMT_STORAGE); } catch {}
+    if (m && listClusters().includes(m)) return m;
+    return currentCluster || '';
+  }
+
+  function setManagementCluster(name) {
+    try {
+      if (name) localStorage.setItem(MGMT_STORAGE, name);
+      else localStorage.removeItem(MGMT_STORAGE);
+    } catch {}
+    if ($('#tab-automation')?.classList.contains('active') && window.CAPI && CAPI.reactivate) CAPI.reactivate();
+  }
+
+  /** 2.0.0 (tâche 16) : ouvre la fenêtre d'un contrat DR. Sur la liste des
+   *  contrats, l'adresse devient #dr/<id> (F5 la rouvre) ; ailleurs (DR
+   *  d'un hôte) la fenêtre flotte sur l'écran, adresse inchangée. */
+  function openDrPlan(id) {
+    if (!window.ReplicationPlan) return;
+    if (activeTab() === 'drplans') navDrPlan = id;
+    ReplicationPlan.open(id);
+    if (window.Router) Router.syncFromScreen();
+  }
+
+  // Navigation 2.0 : la recherche du menu ouvre les VMs d'un cluster sur une VM
+  let pendingVm = null;
+  /** Ouvre les VMs du cluster, espace de noms de la VM choisi et liste
+   *  filtrée sur son nom (la navigation elle-même suit le lien cliqué). */
+  function focusVm(cluster, ns, name) {
+    pendingVm = { cluster, ns, name };
+    if ($('#tab-namespaces')?.classList.contains('active') && currentCluster === cluster) refreshNamespaces(false);
+  }
+
+  /** Ouvre un écran d'un hôte (remplace « valeur du sélecteur + change »). */
+  function openHost(kind, name, sub, tab, pane) {
+    const route = { name: 'host', kind, host: name, sub: sub || null, tab: tab || null, pane: pane || null, id: null };
+    if (window.Router) return Router.go(route);
+    // sans routeur (ne devrait pas arriver) : bascule puis section
+    return setCluster(name).then(() => {
+      if (window.Sections && Sections.isSection(tab)) Sections.open(tab, pane);
+    });
+  }
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
-           mountTopology, stopBoards, setTab };
+           mountTopology, stopBoards, setTab,
+           role, listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost, focusVm, openDrPlan,
+           // réservé au routeur (router.js)
+           _nav: { showRoute, screen, setCluster } };
 })();
 
 window.App = App;
