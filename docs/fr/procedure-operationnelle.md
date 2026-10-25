@@ -283,8 +283,13 @@ construite garde sa place ; le bandeau ne fait que l'encadrer.
   - **Nœuds** : la vue en blocs des nœuds, avec la maintenance et les
     réglages d'hôte, et **Joindre un nœud** (administrateur), qui ouvre
     Automatisation > Bare-metal avec ce cluster déjà choisi : la fenêtre
-    d'installation s'ouvre en mode jonction vers `https://<hôte du serveur
-    d'API>:443`, lu dans le kubeconfig du cluster.
+    d'installation s'ouvre en mode jonction vers `https://<VIP>:443`. La VIP
+    est lue dans le cluster même (ConfigMap `harvester-system/vip` de
+    Harvester) au clic. Par un kubeconfig Rancher, ou quand la VIP ne se lit
+    pas, aucune adresse n'est devinée : le bandeau le dit et vous la
+    saisissez. L'adresse reste modifiable dans la fenêtre, et sa
+    confirmation est à cocher avant Installer, car l'installation efface les
+    disques choisis de la machine.
   - **Stockage**, **Réseau**, **Add-ons**, **Monitoring et journaux**,
     **Avancé** : les mêmes sections et sous-onglets qu'avant.
   - **Sécurité** : Secrets, Clés SSH, et **Comptes du cluster** (venus des

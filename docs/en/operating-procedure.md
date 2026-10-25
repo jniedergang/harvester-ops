@@ -275,8 +275,12 @@ place; the band only frames it.
   - **Nodes**: the block view of the nodes, with maintenance and host
     settings, and **Join a node** (administrator), which opens Automation >
     Bare-metal with this cluster already chosen: the install window opens in
-    join mode towards `https://<API server host>:443`, read from the
-    cluster's kubeconfig.
+    join mode towards `https://<VIP>:443`. The VIP is read from the cluster
+    itself (Harvester's `harvester-system/vip` ConfigMap) when the button is
+    clicked. Through a Rancher kubeconfig, or when the VIP cannot be read,
+    no address is guessed: the banner says so and you type it. The address
+    stays editable in the window, and you must tick its confirmation before
+    Install, since the install erases the machine's selected disks.
   - **Storage**, **Network**, **Add-ons**, **Monitoring & Logging**,
     **Advanced**: the same sections and sub-tabs as before.
   - **Security**: Secrets, SSH Keys, and **Cluster accounts** (moved here

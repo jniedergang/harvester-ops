@@ -155,17 +155,27 @@ def test_the_upgrade_button_of_the_overview_opens_the_upgrade_tab(context, flask
     assert page.evaluate("performance.getEntriesByType('resource').filter(e => e.name.includes('/api/upgrade/')).length") == n
 
 
-def test_join_a_node_opens_bare_metal_with_the_cluster_chosen(context, flask_server):
+def _open_join(context, flask_server, join_url):
     from test_bm_config_177 import HOST, ISOS, NODE, fulfill
     page, _ = open_cold(context, flask_server, f"#harvester/{A}/params/nodes")
+    installs, reads = [], []
+
+    def install(route, req):
+        installs.append(req.post_data_json)
+        fulfill(route, {"action_id": "bm0000000200", "hostname": "x"}, 202)
+
+    def join_read(route, req):
+        reads.append(req.url)
+        fulfill(route, {"cluster": A, "join_url": join_url, "reason": None if join_url else "proxied"})
     page.route("**/api/isos", lambda r, q: fulfill(r, ISOS))
     page.route("**/api/bmc/discover", lambda r, q: fulfill(r, {"nodes": [NODE]}))
+    page.route("**/api/baremetal/install", install)
+    page.route(f"**/api/clusters/{A}/join-url", join_read)
+    page.on("dialog", lambda d: d.accept())
     page.click("#btn-join-node")
     page.wait_for_function("() => location.hash === '#automation/pxe'")
     settle(page)
-    banner = page.locator("#bm-join-target")
-    expect(banner).to_contain_text(A)
-    expect(banner).to_contain_text("https://127.0.0.1:443")        # hôte du kubeconfig de test
+    assert len(reads) == 1                    # lue à l'ouverture, dans le cluster
     page.mouse.move(1100, 450)
     form = page.locator("#bmc-discover-form")
     form.locator('[name="hosts"]').fill(HOST)
@@ -174,12 +184,55 @@ def test_join_a_node_opens_bare_metal_with_the_cluster_chosen(context, flask_ser
     page.locator(f'.bmc-install[data-host="{HOST}"]').click()
     win = page.locator(f'[id="fp-bm-install-{HOST}"]')
     expect(win.locator("#bm-install-form")).to_be_visible()
+    return page, win, installs
+
+
+def test_join_a_node_opens_bare_metal_with_the_address_read_from_the_cluster(context, flask_server):
+    from test_bm_config_177 import FIXTURE
+    page, win, installs = _open_join(context, flask_server, "https://192.0.2.100:443")
+    banner = page.locator("#bm-join-target")
+    expect(banner).to_contain_text(A)
+    expect(banner).to_contain_text("https://192.0.2.100:443")
     assert win.locator('[name="mode"]').input_value() == "join"
-    assert win.locator('[name="server_url"]').input_value() == "https://127.0.0.1:443"
-    expect(win.locator(".bm-vm-network")).to_be_visible()           # partie propre à la jonction
+    url = win.locator('[name="server_url"]')
+    expect(url).to_be_visible()                                       # montrée, modifiable
+    expect(url).to_be_editable()
+    assert url.input_value() == "https://192.0.2.100:443"
+    assert url.get_attribute("title")                                 # info-bulle
+    confirm = win.locator('[name="join_confirm"]')
+    expect(confirm).to_be_visible()
+    expect(win.locator(".bm-join-confirm")).to_contain_text(A)
+    expect(win.locator(".bm-vm-network")).to_be_visible()             # partie propre à la jonction
+    win.locator('[data-bm="file"]').set_input_files(str(FIXTURE))
+    expect(win.locator(".bm-imported")).to_be_visible()
+    assert win.locator('[name="mode"]').input_value() == "join"       # l'import ne repasse pas en création
+    submit = win.locator('#bm-install-form button[type="submit"]')
+    submit.click()
+    page.wait_for_timeout(500)
+    assert installs == []                                             # pas sans confirmation
+    confirm.check()
+    url.fill("https://192.0.2.101:443")                               # adresse changée : à reconfirmer
+    assert not confirm.is_checked()
+    url.fill("https://192.0.2.100:443")
+    confirm.check()
+    submit.click()
+    expect(win.locator("#bm-install-result")).to_contain_text("bm0000000200")
+    body = installs[-1]
+    assert (body["mode"], body["server_url"], body["join_cluster"]) == ("join", "https://192.0.2.100:443", A)
+    assert "join_confirm" not in body and "vip" not in body
     # Annuler rend l'installation d'un nouveau cluster
     banner.locator('[data-bm="join-cancel"]').click()
     expect(page.locator("#bm-join-target")).to_have_count(0)
+
+
+def test_join_without_a_readable_address_asks_for_it(context, flask_server):
+    page, win, installs = _open_join(context, flask_server, None)
+    expect(page.locator("#bm-join-target")).to_contain_text("could not be read from the cluster")
+    url = win.locator('[name="server_url"]')
+    expect(url).to_be_visible()
+    assert url.input_value() == ""                                    # jamais devinée
+    assert url.evaluate("e => e.required")
+    assert win.locator('[name="join_confirm"]').evaluate("e => e.required")
 
 
 def test_the_connection_tab_tests_the_kubeconfig(context, flask_server):

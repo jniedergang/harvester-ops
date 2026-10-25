@@ -3948,11 +3948,11 @@ def api_clusters():
             "description": c.get("description", ""),
             "node_count": len(c.get("nodes", [])),
             "origin": "config" if c["name"] in config_names else "console",
-            # 2.0.0 : Paramètres > Connexion d'un hôte (nœuds déclarés) et
-            # « Joindre un nœud » (adresse de jonction, https://VIP:443)
+            # 2.0.0 : Paramètres > Connexion d'un hôte (nœuds déclarés).
+            # L'adresse de jonction se lit à part, dans le cluster
+            # (/api/clusters/<c>/join-url).
             "nodes": [{"hostname": str(n.get("hostname", "")), "ip": str(n.get("ip", "")),
                        "role": str(n.get("role", ""))} for n in c.get("nodes", []) if isinstance(n, dict)],
-            "join_url": _cluster_join_url(c),
         })
     out = {"clusters": clusters, "config_writable": _config_writable()}
     if sso:
@@ -3960,15 +3960,80 @@ def api_clusters():
     return jsonify(out)
 
 
-def _cluster_join_url(entry):
-    """Adresse qu'un nœud vise pour rejoindre ce cluster (https://VIP:443),
-    tirée de l'hôte du serveur d'API de son kubeconfig, la règle même de
-    _cluster_for_server ; None si le kubeconfig ne se lit pas."""
-    endpoint = _cluster_api_endpoint(entry.get("kubeconfig") or "")
-    if not endpoint:
+# Harvester range la VIP de gestion dans la ConfigMap `harvester-system/vip`
+# (clé `ip`, avec enabled, mode, serviceType, hwAddress) : c'est elle que lit
+# son contrôleur pour poser la VIP sur ses services, voir
+# harvester/harvester pkg/controller/master/rancher/register.go
+# (VipConfigmapName = "vip", getVipConfig, v1.9.0). Vérifié sur harv1 :
+# ip = 172.16.3.100.
+VIP_CONFIGMAP = ("harvester-system", "vip")
+# Chemins de serveur d'un kubeconfig qui parle au cluster lui-même : aucun
+# (rke2.yaml, https://VIP:6443) ou le Rancher embarqué de Harvester
+# (kubeconfig téléchargé depuis son interface, https://VIP/k8s/clusters/local).
+_DIRECT_SERVER_PATHS = ("", "/", "/k8s/clusters/local", "/k8s/clusters/local/")
+
+
+def _kubeconfig_server(kubeconfig):
+    """URL du serveur d'API du contexte courant, ou None."""
+    try:
+        with open(kubeconfig) as fh:
+            kc = yaml.safe_load(fh) or {}
+    except (OSError, TypeError, yaml.YAMLError):
         return None
-    host = endpoint[0]
-    return f"https://[{host}]:443" if ":" in host else f"https://{host}:443"
+    ctx_name = kc.get("current-context")
+    cluster_name = None
+    for ctx in kc.get("contexts") or []:
+        if ctx.get("name") == ctx_name:
+            cluster_name = (ctx.get("context") or {}).get("cluster")
+            break
+    for c in kc.get("clusters") or []:
+        if cluster_name is None or c.get("name") == cluster_name:
+            return (c.get("cluster") or {}).get("server")
+    return None
+
+
+def _cluster_vip(kc):
+    """VIP de gestion lue dans le cluster (ConfigMap de Harvester), ou None
+    si elle ne se lit pas ou n'est pas une adresse IP utilisable."""
+    import ipaddress
+    ns, name = VIP_CONFIGMAP
+    doc = _kubectl_json(kc, "get", "configmap", name, "-n", ns)
+    ip = str(((doc or {}).get("data") or {}).get("ip") or "").strip()
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    return None if addr.is_unspecified else str(addr)
+
+
+def _cluster_join_url(cluster):
+    """(adresse de jonction https://VIP:443, raison) de ce cluster.
+
+    Elle prépare une installation qui efface des disques : jamais devinée.
+    Raison quand l'adresse manque : `unavailable` (pas de kubeconfig),
+    `proxied` (kubeconfig derrière un mandataire, Rancher), `vip-unreadable`."""
+    kc = _kubectl_for_cluster(cluster)
+    server = _kubeconfig_server(kc) if kc else None
+    if not server:
+        return None, "unavailable"
+    from urllib.parse import urlparse
+    if urlparse(server).path not in _DIRECT_SERVER_PATHS:
+        return None, "proxied"
+    vip = _cluster_vip(kc)
+    if not vip:
+        return None, "vip-unreadable"
+    return (f"https://[{vip}]:443" if ":" in vip else f"https://{vip}:443"), None
+
+
+@app.route("/api/clusters/<cluster>/join-url")
+@requires_auth
+@_rate_limit("30/minute")
+def api_cluster_join_url(cluster):
+    """Lue à l'ouverture de « Joindre un nœud », jamais en tâche de fond."""
+    if not any(c.get("name") == cluster for c in load_config_ro().get("clusters", [])):
+        return jsonify({"error": "unknown cluster"}), 404
+    url, reason = _cluster_join_url(cluster)
+    return jsonify({"cluster": cluster, "join_url": url, "reason": reason})
 
 
 @app.route("/api/status/<cluster>")
@@ -5737,7 +5802,7 @@ def _bm_vm_plan(data, cfg):
         return None
     if data.get("mode") != "join":
         raise ValueError("VM network selection is available when joining a declared cluster")
-    cluster = _cluster_for_server(data.get("server_url", ""))
+    cluster = _join_cluster(data.get("server_url", ""), data.get("join_cluster"))
     kc = _kubectl_for_cluster(cluster) if cluster else None
     if not kc:
         raise ValueError("VM network: declare the target cluster first")
@@ -5754,7 +5819,7 @@ def _bm_vm_plan(data, cfg):
 @requires_auth
 @_rate_limit("30/minute")
 def api_bm_vm_network_options():
-    cluster = _cluster_for_server(request.args.get("server_url", ""))
+    cluster = _join_cluster(request.args.get("server_url", ""), request.args.get("cluster"))
     kc = _kubectl_for_cluster(cluster) if cluster else None
     if not kc:
         return jsonify({"error": "declare the target cluster first"}), 400
@@ -5925,6 +5990,26 @@ def _cluster_for_server(server_url):
             if urlparse((entry.get("cluster") or {}).get("server") or "").hostname == host:
                 return c["name"]
     return None
+
+
+def _join_cluster(server_url, cluster=None):
+    """Cluster visé par une jonction. `cluster` (choisi par « Joindre un
+    nœud ») n'est retenu que si l'hôte de `server_url` est le sien : hôte de
+    son kubeconfig ou VIP lue dans le cluster (son kubeconfig peut viser un
+    seul nœud). Sans choix, la règle d'avant (_cluster_for_server)."""
+    if not cluster:
+        return _cluster_for_server(server_url)
+    from urllib.parse import urlparse
+    host = urlparse(str(server_url)).hostname
+    entry = next((c for c in load_config().get("clusters", []) if c.get("name") == cluster), None)
+    if not entry or not host:
+        return None
+    server = _kubeconfig_server(entry.get("kubeconfig") or "")
+    if server and urlparse(server).hostname == host:
+        return cluster
+    kc = _kubectl_for_cluster(cluster)
+    vip = _cluster_vip(kc) if kc else None
+    return cluster if vip and vip == host.strip("[]") else None
 
 
 def _bm_cluster_kubeconfig(opts):
@@ -7244,7 +7329,9 @@ def _bm_prepare_install(data, defer_join=False):
             return None, (jsonify({"error": "invalid server_url (https://host[:port])",
                                    "fields": ["server_url"]}), 400)
         # Suivre l'arrivée du nœud demande de lire ce cluster.
-        data["cluster"] = None if defer_join else _cluster_for_server(data["server_url"])
+        # 2.0.0 : « Joindre un nœud » nomme le cluster (join_cluster) ; il
+        # n'est retenu que si l'adresse est la sienne (_join_cluster).
+        data["cluster"] = None if defer_join else _join_cluster(data["server_url"], data.get("join_cluster"))
         if not data["cluster"] and not defer_join:
             return None, (jsonify({"error": "declare the cluster of server_url first",
                                    "fields": ["server_url"]}), 400)
