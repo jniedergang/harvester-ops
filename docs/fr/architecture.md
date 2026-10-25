@@ -159,6 +159,31 @@ Les modules ne lisent jamais le sélecteur de cluster : ils passent par
 (cluster d'où Cluster API et Terraform gèrent, le dernier cluster visité
 sauf choix contraire) et `App.openHost(famille, nom, sub, onglet, pane)`.
 
+### Liste des hôtes et favoris
+
+`GET /api/hosts` donne au menu latéral ses hôtes : chaque cluster Harvester
+que la personne voit (une session Rancher ne reçoit pas les clusters que
+Rancher lui cache) et chaque hôte KVM déclaré, avec un état (`ok`,
+`unreachable`, `denied`, `error`, `unknown`), le nombre de VMs, la version,
+les étiquettes, l'origine (`config` ou `console`) et l'étoile de la personne.
+Chaque famille a son résumé (`ok`, `alert`, `unknown`). Pas de plafond : tous
+les hôtes sont listés.
+
+La liste ne lit jamais un hôte. L'état d'un cluster vient de la sonde TCP en
+cache de son serveur d'API ; son nombre de VMs et sa version viennent des
+lectures partagées que les écrans ont déjà faites (`/api/vms-all`,
+`/api/status/<c>`, `/api/upgrade/<c>`, de 10 minutes au plus,
+`HARVESTER_OPS_HOSTS_PEEK_AGE`) ; l'état et le nombre de VMs d'un hôte KVM
+viennent de la dernière lecture de `/api/kvm/hosts`. Ce qui n'a pas encore été
+lu vaut `null` ou `unknown`.
+
+Les favoris sont une préférence personnelle : `PUT` et `DELETE
+/api/me/favorites/<famille>/<hôte>` (tout rôle, comme changer son propre mot
+de passe), rangés par personne dans la base de la console `folders.db` (à côté
+de `notes.db`, ou `HARVESTER_OPS_FOLDERS_DB`), retrouvés depuis un autre poste.
+Ce ne sont pas des actions suivies et il n'y a pas de ligne de commande : rien
+n'est écrit sur un cluster ou un hyperviseur.
+
 ## Flux d'événements SSE
 
 Quand la console déclenche une action (un shutdown ici) :

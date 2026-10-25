@@ -155,6 +155,29 @@ Modules never read the cluster selector directly: they use
 (cluster that Cluster API and Terraform manage from, the last cluster
 visited unless chosen) and `App.openHost(kind, name, sub, tab, pane)`.
 
+### Hosts list and favourites
+
+`GET /api/hosts` gives the side menu its hosts: every Harvester cluster the
+person sees (a Rancher session does not get the clusters Rancher hides) and
+every declared KVM host, with a state (`ok`, `unreachable`, `denied`,
+`error`, `unknown`), the number of VMs, the version, the labels, the origin
+(`config` or `console`) and whether the person starred it. Each family gets a
+summary (`ok`, `alert`, `unknown`). There is no cap: every host is listed.
+
+The list never reads a host. A cluster's state comes from the cached TCP
+probe of its API server; its VM count and version come from the shared reads
+the screens already made (`/api/vms-all`, `/api/status/<c>`,
+`/api/upgrade/<c>`, at most 10 minutes old, `HARVESTER_OPS_HOSTS_PEEK_AGE`);
+a KVM host's state and VM count come from the last `/api/kvm/hosts` read.
+What has not been read yet is `null` or `unknown`.
+
+Favourites are a personal preference: `PUT` and `DELETE
+/api/me/favorites/<kind>/<host>` (any role, like changing one's own
+password), stored per person in the console database `folders.db` (next to
+`notes.db`, or `HARVESTER_OPS_FOLDERS_DB`), found again from another
+computer. They are not tracked actions and have no command line: nothing is
+written on a cluster or a hypervisor.
+
 ## SSE event stream
 
 When the console triggers any action (a shutdown here):

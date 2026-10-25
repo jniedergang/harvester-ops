@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.0] - 2026-10-25 - Navigation by hosts, VMs and folders
+
+### Added
+- **Hosts list and favourites (API).** `GET /api/hosts` lists every
+  Harvester cluster the person sees and every declared KVM host, with its
+  state, VM count, version, labels and origin, and a summary per family. It
+  never reads a host: state, counts and versions come from the cached TCP
+  probe and from the reads the screens already made. `PUT` and `DELETE
+  /api/me/favorites/<kind>/<host>` star a host for the person (any role),
+  stored in the console database `folders.db`; not a tracked action, nothing
+  written on a cluster.
+
+### Tests
+- `tests/api/test_hosts_routes_200.py`, `tests/api/test_favorites_200.py`:
+  states, Rancher-hidden cluster, counts filled from the screens' reads,
+  refusals (400, 404), stars kept per person, and traps that fail the test
+  if the list reads a cluster or a KVM host.
+
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 
 ### Added

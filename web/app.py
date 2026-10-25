@@ -889,6 +889,17 @@ def _fresh_allowed(key, min_interval):
         return True
 
 
+def _read_share_key(endpoint, kwargs, qargs=(), scope=None, per_user=False):
+    """Clé d'une lecture partagée. Seule source de cette forme : le menu des
+    hôtes (navigation 2.0) relit le cache avec les mêmes clés que les écrans."""
+    cluster = kwargs.get("cluster")
+    return (scope or cluster, endpoint,
+            tuple(sorted(qargs)),
+            tuple(sorted((k, str(v)) for k, v in kwargs.items())),
+            _kubectl_for_cluster(cluster) if cluster else None,
+            current_role(), current_user() if per_user else None)
+
+
 def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys=None):
     """Décorateur d'une vue GET qui ne fait que lire. `?fresh=1` passe outre.
     `scope` remplace le cluster en tête de clé pour une vue qui n'en a pas
@@ -905,17 +916,12 @@ def shared_read(ttl=None, per_user=False, scope=None, fresh_min=None, query_keys
             if (not READ_SHARE_ENABLED or request.method != "GET"
                     or (fresh and not fresh_min)):
                 return f(*args, **kwargs)
-            cluster = kwargs.get("cluster")
             qargs = request.args.items(multi=True)
             if query_keys is not None:
                 qargs = [(k, v) for k, v in qargs if k in query_keys or k == "fresh"]
             if fresh_min:                      # lecture forcée ou non : même clé
                 qargs = [(k, v) for k, v in qargs if k != "fresh"]
-            key = (scope or cluster, request.endpoint,
-                   tuple(sorted(qargs)),
-                   tuple(sorted((k, str(v)) for k, v in kwargs.items())),
-                   _kubectl_for_cluster(cluster) if cluster else None,
-                   current_role(), current_user() if per_user else None)
+            key = _read_share_key(request.endpoint, kwargs, qargs, scope=scope, per_user=per_user)
 
             kc_for_worker = key[4]
 
@@ -968,6 +974,10 @@ def _read_share_invalidate(response):
                     ("/console-ticket", "/vm-plan", "/edit-plan")):
                 READ_SHARE.invalidate(KVM_SCOPE)
                 READ_SHARE.invalidate("_activity")
+            return response
+        if request.path.startswith("/api/me/favorites/"):
+            # navigation 2.0 : une préférence de la personne, pas un cluster
+            READ_SHARE.invalidate(HOSTS_SCOPE)
             return response
         if request.path.startswith("/api/replication/"):
             # v1.99.0 : le registre de la réplication n'est pas un cluster
@@ -9226,6 +9236,196 @@ def api_vms_all():
         vms.extend(rows)
     vms.sort(key=lambda v: (v["name"], v["cluster"], v["namespace"]))
     return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "vms": vms})
+
+
+# -----------------------------------------------------------------------------
+# Navigation 2.0 : la liste des hôtes du menu et les favoris de chacun
+# -----------------------------------------------------------------------------
+# Un hôte est un cluster Harvester entier ou un hyperviseur KVM. Le menu ne
+# lance AUCUNE lecture par hôte : l'état d'un cluster vient de la sonde TCP
+# déjà en cache (_cluster_reachable), son nombre de VMs et sa version de ce
+# que les écrans ont déjà lu (lectures partagées /api/vms-all, /api/status/<c>,
+# /api/upgrade/<c>), l'état d'un hôte KVM de la lecture partagée de
+# /api/kvm/hosts. Ce qui n'a pas encore été lu est rendu null ou « unknown ».
+import folders_db as _fdb  # noqa: E402
+
+HOSTS_SCOPE = "_hosts"
+# âge maximal d'une lecture d'écran reprise par le menu (s) : au-delà, le
+# nombre de VMs et la version d'un hôte sont rendus null
+HOSTS_PEEK_MAX_AGE = float(os.environ.get("HARVESTER_OPS_HOSTS_PEEK_AGE", "600"))
+HOST_ALERT_STATES = ("unreachable", "denied", "error")
+# classement d'une erreur KVM (kvm_host.KINDS) en état du menu
+_KVM_STATE_OF = {"unreachable": "unreachable", "timeout": "unreachable",
+                 "auth": "denied", "denied": "denied", "hostkey": "denied"}
+
+
+def _folders_db_path():
+    env = os.environ.get("HARVESTER_OPS_FOLDERS_DB")
+    return Path(env) if env else NOTES_DB.parent / "folders.db"
+
+
+def _peek_read(endpoint, kwargs=None, scope=None):
+    """Corps JSON d'une lecture partagée déjà faite pour cette personne, ou
+    None (jamais lue, trop vieille, en erreur, ou effacée par une écriture)."""
+    if not READ_SHARE_ENABLED:
+        return None
+    val = READ_SHARE.peek(_read_share_key(endpoint, kwargs or {}, scope=scope), HOSTS_PEEK_MAX_AGE)
+    if not val or val[0] != 200:
+        return None
+    try:
+        return json.loads(val[1])
+    except (TypeError, ValueError):
+        return None
+
+
+def _harvester_hosts():
+    """Clusters visibles par la personne, comme /api/clusters (une session
+    Rancher ne voit pas ceux que Rancher lui cache)."""
+    cfg = load_config_ro()
+    config_names = _config_cluster_names()
+    sso = _sso_session() is not None
+    rows = []
+    for c in cfg.get("clusters", []):
+        name = c.get("name")
+        if not name:
+            continue
+        if sso:
+            kc, _why = _sso_cluster_state(c)
+            if kc is None:
+                continue
+        else:
+            kc = _kubectl_for_cluster(name)
+        rows.append((c, kc, "config" if name in config_names else "console"))
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max(1, min(len(rows), 16))) as pool:
+        reach = list(pool.map(lambda r: _cluster_reachable(r[1]) if r[1] else None, rows))
+    fleet = _peek_read("api_vms_all") or {}
+    per_cluster = {x.get("cluster"): x for x in fleet.get("clusters") or [] if isinstance(x, dict)}
+    out = []
+    for (c, _kc, origin), ok in zip(rows, reach):
+        name = c["name"]
+        seen = per_cluster.get(name) or {}
+        state, error, vm_count = "unknown", None, None
+        if ok is False:
+            state = "unreachable"
+        elif seen.get("state") in ("denied", "error"):
+            state, error = seen["state"], seen.get("error")
+        elif ok:
+            state = "ok"
+        if state != "unreachable":
+            if seen.get("state") == "ok":
+                vm_count = seen.get("count")
+            else:
+                st = _peek_read("api_status", {"cluster": name}) or {}
+                total = (st.get("summary") or {}).get("vms_total")
+                vm_count = total if isinstance(total, int) and not st.get("unreachable") else None
+        upg = _peek_read("api_upgrade", {"cluster": name}) or {}
+        out.append({"kind": "harvester", "name": name, "state": state, "error": error,
+                    "vm_count": vm_count, "labels": dict(c.get("labels") or {}),
+                    "version": upg.get("current") or None, "favorite": False,
+                    "folder": None, "origin": origin})
+    return out
+
+
+def _kvm_hosts_menu():
+    """Hôtes KVM déclarés ; état et nombre de VMs de la dernière lecture de
+    /api/kvm/hosts, sinon « unknown » (aucun SSH lancé ici)."""
+    decls = _kd.load_all(_state_dir())
+    seen = {}
+    for e in (_peek_read("api_kvm_hosts", scope=KVM_SCOPE) or {}).get("hosts") or []:
+        if isinstance(e, dict) and e.get("name"):
+            seen[e["name"]] = e
+    out = []
+    for d in decls:
+        e = seen.get(d["name"])
+        state, error, vm_count, version = "unknown", None, None, None
+        if e is not None:
+            if e.get("error"):
+                err = e["error"] if isinstance(e["error"], dict) else {}
+                state = _KVM_STATE_OF.get(err.get("kind"), "error")
+                error = err.get("message")
+            else:
+                state = "ok"
+                vm_count = len(e.get("vms") or [])
+                version = e.get("libvirt_version") or None
+        out.append({"kind": "kvm", "name": d["name"], "state": state, "error": error,
+                    "vm_count": vm_count, "labels": dict(d.get("labels") or {}),
+                    "version": version, "favorite": False, "folder": None, "origin": "console"})
+    return out
+
+
+@app.route("/api/hosts")
+@requires_auth
+@shared_read(per_user=True, scope=HOSTS_SCOPE)
+def api_hosts():
+    """Les hôtes du menu : clusters Harvester et hyperviseurs KVM, leur état,
+    leur nombre de VMs s'il est connu, et les favoris de la personne. La tête
+    de chaque famille résume l'état (ok, en alerte)."""
+    hosts = _harvester_hosts() + _kvm_hosts_menu()
+    user = current_user() or "anonymous"
+    try:
+        conn = _fdb.connect(_folders_db_path())
+        try:
+            favs = _fdb.favorites(conn, user)
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        log.warning("folders.db unreadable: %s", e)
+        favs = set()
+    families = {k: {"ok": 0, "alert": 0, "unknown": 0} for k in _fdb.HOST_KINDS}
+    for h in hosts:
+        h["favorite"] = _fdb.host_key(h["kind"], h["name"]) in favs
+        fam = families[h["kind"]]
+        if h["state"] in HOST_ALERT_STATES:
+            fam["alert"] += 1
+        elif h["state"] == "ok":
+            fam["ok"] += 1
+        else:
+            fam["unknown"] += 1
+    hosts.sort(key=lambda h: (_fdb.HOST_KINDS.index(h["kind"]), h["name"].lower(), h["name"]))
+    return jsonify({"families": families, "hosts": hosts})
+
+
+def _favorite_target(kind, host):
+    """None si l'hôte peut porter une étoile, sinon la réponse d'erreur :
+    famille inconnue ou nom invalide (400), hôte non déclaré ou invisible
+    pour la personne (404, sans dire lequel des deux)."""
+    if kind not in _fdb.HOST_KINDS:
+        return jsonify({"error": "unknown host kind", "kinds": list(_fdb.HOST_KINDS)}), 400
+    rule = _cd.NAME_RE if kind == "harvester" else _kd.NAME_RE
+    if not isinstance(host, str) or not rule.match(host):
+        return jsonify({"error": "invalid host name"}), 400
+    if kind == "harvester":
+        entry = next((c for c in load_config_ro().get("clusters", []) if c.get("name") == host), None)
+        if entry is None or (_sso_session() is not None and _sso_cluster_state(entry)[0] is None):
+            return jsonify({"error": f"host {host} is not declared"}), 404
+    elif not _kd.decl_path(_state_dir(), host).is_file():
+        return jsonify({"error": f"host {host} is not declared"}), 404
+    return None
+
+
+@app.route("/api/me/favorites/<kind>/<host>", methods=["PUT", "DELETE"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_my_favorite(kind, host):
+    """Étoile d'un hôte dans le menu : une préférence de la personne (comme
+    son mot de passe), gardée dans la base de la console, retrouvée sur un
+    autre poste. Ni action suivie ni ligne de commande (décision 5 du
+    25/10/2026) : rien n'est écrit sur un cluster ou un hyperviseur."""
+    bad = _favorite_target(kind, host)
+    if bad:
+        return bad
+    user = current_user() or "anonymous"
+    conn = _fdb.connect(_folders_db_path())
+    try:
+        if request.method == "PUT":
+            changed = _fdb.add_favorite(conn, user, kind, host)
+        else:
+            changed = _fdb.remove_favorite(conn, user, kind, host)
+    finally:
+        conn.close()
+    return jsonify({"ok": True, "kind": kind, "name": host,
+                    "favorite": request.method == "PUT", "changed": changed})
 
 
 # -----------------------------------------------------------------------------

@@ -75,6 +75,16 @@ class ReadShare:
         flight[0].set()
         return value
 
+    def peek(self, key, max_age):
+        """Valeur gardée de `key` si elle a moins de `max_age` s, sinon None ;
+        ne lit jamais (navigation 2.0 : le menu des hôtes reprend ce que les
+        écrans ont déjà lu, sans lancer de lecture par hôte)."""
+        with self._lock:
+            hit = self._done.get(key)
+            if hit is not None and self._clock() - hit[0] < max_age:
+                return hit[1]
+        return None
+
     def invalidate(self, cluster=None):
         """Oublie ce qui concerne `cluster` (premier élément des clés), ou
         tout quand `cluster` est None."""
