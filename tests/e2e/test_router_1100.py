@@ -292,6 +292,24 @@ def test_a_link_of_another_cluster_pasted_in_this_tab(context, flask_server, two
     assert other_cluster_calls(calls, A) == []
 
 
+def test_switching_cluster_on_the_overview_to_metrics_stops_the_old_board(
+        context, flask_server, two_clusters):
+    """Aperçu ouvert sur la vue en blocs de A, puis adresse de B en mode
+    Métriques (Précédent, lien collé, Router.go) : la vue de A doit être
+    arrêtée, sinon elle continue d'interroger A sous un aperçu titré B."""
+    page, calls = open_cold(context, flask_server, f"#harvester/{A}/params/nodes")
+    page.wait_for_selector('.overview-subtab[data-subtab="cluster"] .fabric-body', timeout=8000)
+    assert [c for c in calls if f"/api/topology/{A}" in c]
+    calls.clear()
+    page.evaluate(f"Router.go('#harvester/{B}')")
+    page.wait_for_function(f"() => App.getCurrentCluster() === '{B}'")
+    settle(page)
+    check_detail(page, "overview", ("overview", "metrics"))
+    # la vue en blocs se rafraîchit toutes les 8 s (cluster-map.js REFRESH_MS)
+    page.wait_for_timeout(9000)
+    assert [c for c in calls if f"/api/topology/{A}" in c] == [], "la vue de A tourne encore"
+
+
 def test_router_cold_load_detects_order(context, flask_server):
     """Mutation volontaire : un routeur qui pose l'onglet AVANT le cluster
     (défaut de 1.4.31) laisse la toile des nœuds vide ; le test qui suit

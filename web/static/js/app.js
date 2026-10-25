@@ -2156,7 +2156,12 @@ const App = (() => {
     const work = async () => {
       if (t.tabFirst) { await refreshStatus({ veil: true }); return; }
       if (activeTab() === t.tab) {
-        if (t.overview) paintOverviewMode(t.overview);
+        if (t.overview) {
+          paintOverviewMode(t.overview);
+          // reloadForCluster ne remonte pas la vue en mode Métriques : sans
+          // cet appel, la vue en blocs de l'ancien cluster continuerait.
+          if (t.overview === 'metrics') mountTopology('metrics');
+        }
         await reloadForCluster();
       } else {
         show();
