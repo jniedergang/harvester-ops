@@ -3049,9 +3049,9 @@ both clusters, Longhorn recurring backups on the source, and Longhorn
 **standby volumes** on the target that apply each new backup as it lands.
 Nothing is installed on the clusters. This release delivers the engine,
 the command line `harvester-replication` and the console routes. The
-console windows (follow-up view, creation window, drills) come in later
-releases: until then the console shows replication actions in the dock
-and in Activity, and the command line does the rest.
+screens (contracts, creation window, contract view, failover, links,
+alerts) are described below in "Disaster Recovery screens"; drills will
+come with their engine.
 
 **The contract is the plan.** A plan names a source cluster, a target
 cluster, the VMs (a list `ns/name`, or a label selector in a namespace),
@@ -3301,8 +3301,9 @@ already use the same backup target. Each disk is backed up for itself:
 there is no atomic snapshot of several volumes, the barrier only narrows
 the gap, and the skew is shown and checked at failover. A VM with a
 container disk, host disk or empty disk is replicated without those disks
-(reported). Returning to the first site (failback), drills, waves and
-guest freeze are not in this release. A Longhorn backup is consistent
+(reported). Returning to the first site (failback), drills and guest
+freeze are not in this release (drill networks can already be mapped,
+see below). A Longhorn backup is consistent
 like after a power cut (the guest is not frozen). A standby volume takes
 its room on the target from the protection on, not only on the failover
 day. An activation is definitive: to protect again, the standby volume is
@@ -3357,26 +3358,322 @@ name and a taken MAC. The dry unplanned check judges `caught-up` against
 the backups the target sees at that moment, which may lag the source by 1
 to 4 minutes; the real failover resyncs first.
 
+### Recovery options: waves, hooks, size, network data, per-disk class
+
+A plan also carries a **recovery** block, set at creation or changed later
+(`recovery` in the console, `--spec FILE` on the command line), plus two
+more mapping kinds. What was run for real on the benches is listed at the
+end of the Disaster Recovery screens section.
+
+**Per-disk storage class** (`disk_classes`, `{"ns/vm/disk": "class"}`,
+disk = the KubeVirt disk name). It wins over the image and storage class
+mappings for that disk. A class missing on the target blocks the check
+(`storage-class-unmapped`, with the `disk` fact). A disk with its own class
+does not get the target image annotation (the image would point to
+another class). It changes what protect creates, so it can change only on
+a draft plan.
+
+**Drill networks** (`drill_networks`, `{"ns/net": "ns/net"}`) are stored
+and checked like the network mappings. Drills come in a later release.
+
+**Waves** (at most 10): `{"name", "vms": ["ns/name", ...], "gate": {"kind",
+"seconds"}}`. After the activation, the failover brings the VMs up wave by
+wave. A VM listed in no wave goes in an implicit last wave. Each wave
+passes a gate before the next one starts: `running` (default, the VMs
+run), `agent` (the guest agent answers, VMI condition `AgentConnected`,
+for at most `seconds`, 300 by default, 10 to 3600) or `delay` (`seconds`
+after the VMs run, 1 to 3600). An `agent` gate not met in time warns
+(`wave-gate-timeout`) and the failover goes on. A VM left stopped
+(`start: stopped`) does not wait for any gate. A VM listed twice is
+refused. A selector plan may list VMs that do not exist yet. When only
+part of a plan fails over, a wave without any of its VMs is skipped, with
+its hooks. The journal gets `wave-start`, `wave-passed` or
+`wave-gate-timeout` (step `wave`) for each wave.
+
+**HTTP hooks** (at most 20): `{"name", "at", "method", "url", "headers",
+"secret_headers", "body", "timeout_s"}`. `at` is `start` (after the
+activation, before the first wave), `wave:<n>` (after wave n passed its
+gate; n can be the implicit last wave) or `end`. The method is GET, POST
+(default), PUT, PATCH or DELETE; the body is at most 16 KiB; the timeout
+is 1 to 60 s (15 by default) for the whole call, not for each read, so that a console stop reaches the next safe
+point well within its stop budget. The URL is `http://` or `https://`,
+without credentials: they go in `secret_headers`.
+
+Every call goes through the same SSRF guard as the ISO download: the name
+is resolved once and the connection goes to the checked address; loopback,
+link-local, private, CGNAT, multicast and reserved addresses are refused
+unless allowed in `config.yaml` by `replication.hooks.allow_private` (a
+list of CIDR, like `iso_fetch.allow_private`); cloud metadata addresses
+stay refused even when allowed. Hook targets are often internal (a DNS
+API, a load balancer): list their networks there. A redirect is never
+followed (the call fails with the reason and the masked target), so a secret header never
+reaches another address. The address is also checked when the plan is
+created or changed: an internal address answers 400 `hook-address` at
+once (a name that does not resolve yet is checked again at the call). A hook that fails (refused, timed
+out, status 400 or more) warns (`hook-failed`) and the failover goes on: the
+activation is definitive. Each call writes its status and duration to the
+journal (step `hook`, `hook-ok` or `hook-failed`), never a header value nor
+the response body. A failover resumed after an interruption does not call
+again a hook it already called. `hook test` calls one hook at once.
+
+**Secret headers** are stored in `replication.db` and shown as `********`
+everywhere else: the plan read by the console, `plan show --json`, `plan
+create` and `plan set` outputs, the journal and Activity. Sending
+`********` back on a change keeps the stored value of that header, only
+when the hook keeps its name, its method and its exact stored URL (scheme,
+host, port, path and query). Otherwise the change is refused with
+`secret-missing` ("the address changed" or "the method changed, type the
+secret header values again"), so an operator can neither send a stored
+secret elsewhere nor make another call with someone else's credential. A
+`********` without a stored value (new or renamed hook) is refused the same
+way. The URL is shown with its scheme, host, port and the first segment of
+its path only, the same for every role: the rest of the path becomes
+`/********` (a single segment becomes `/********`) and the query
+`?********`, because incoming webhooks carry their token there
+(`https://hooks.slack.com/services/T0/B0/XXX` is shown
+`https://hooks.slack.com/services/********`). This holds in every read,
+output, journal entry, Activity line and action label: sending that masked
+URL back keeps the stored one; editing it means typing the full URL
+again. They never travel on a
+command line: the console passes them to the script in its private spec
+file.
+
+**Size at the backup site** (`resize`, `{"ns/vm": {"cpu": 1..256,
+"memory": "<n>Mi|<n>Gi"}}`). The target VM is written the way Harvester
+writes it: CPUs in `domain.cpu.cores` and `resources.limits.cpu`, memory
+in `resources.limits.memory`, the source `requests` removed (the target's
+VM mutator computes them from its overcommit setting) and
+`domain.memory.guest` keeping the source gap between limit and guest (or
+the `harvesterhci.io/reservedMemory` annotation). A VM with CPU and memory
+hotplug counts its CPUs in `sockets` and keeps the memory in
+`memory.guest` (this case was not tried on a cluster).
+
+**Network data** (`network_data`, `{"ns/vm": "<cloud-init network-config,
+16 KiB at most>"}`) needs `cloud_init: rerun`. The cloud-init volume of the
+target VM (NoCloud or ConfigDrive) carries it inline (`networkData`) and
+loses its network data secret reference; a VM without a cloud-init volume
+gets a NoCloud one.
+
+**Auto protect** (`auto_protect`, true or false) is stored for selector
+plans; the console side of it is described with the follower.
+
+**Changing them.** `PATCH .../settings` and `plan set` change `recovery`
+(each given key replaces the stored one), `cloud_init`, `mac` and `start`
+in every state except `failing_over`, the `networks` and `drill_networks`
+mappings in the same states, and the other mappings on a draft plan only
+(otherwise `state-forbids`). Size, network data, cloud-init, MAC, start
+and the network mapping change the recovery carnet. What counts is the
+value: sending the same values again, changing only hooks, waves or the
+degraded standby acknowledgement, or going back to the protected values
+(Undo) marks nothing. On a protected plan whose carnet value really
+changed, the answer says `protect_needed: true`, and the next protect
+rewrites the carnet. Until then the plan keeps the changed keys (`carnet_stale` in
+`GET /api/replication/plans/<id>`), the follower also flags each VM whose
+carnet differs from what protect would write today, and both show as the
+`carnet-stale` alert. A failover then refuses to start (`carnet-stale`
+finding, blocking, naming the changed keys and the VMs) unless it is told
+to use the previous settings: `accept_stale_carnet: true` in the console,
+`--accept-stale-carnet` on the command line (the finding becomes a
+warning). A successful protect clears the mark. A failover interrupted
+before any volume was activated checks again when it is finished: if the
+settings went stale meanwhile (seen by the follower, or a failover started
+under 1.99), `resume P --accept-stale-carnet` finishes it with the previous
+settings, and so does `failover P --accept-stale-carnet` with the same VMs
+(it takes over the open run). Neither flag is accepted for another
+interrupted command (`bad-option`).
+
+**Standby replicas.** At protect, a target class that asks for more
+replicas (`numberOfReplicas` of the StorageClass, 3 when absent, as
+Longhorn) than the target has schedulable Longhorn nodes blocks the check
+(`standby-replicas-exceed-nodes`, with the classes that fit in `suggest`):
+every standby volume would stay degraded and the `standby-degraded` alert
+would never clear. A degraded standby can be a deliberate choice (a
+single-node backup site): the recovery key `accept_degraded_standby: true`
+(the "Accept degraded standby volumes" checkbox of the Settings tab) turns
+the finding into a warning, for every later protect. On the command line,
+`protect P --accept-degraded-standby` and `resume P
+--accept-degraded-standby` accept it for that run only. The refusal says
+this in a sentence (console in five languages, command line and journal in
+English). Behaviour change from 1.99.0, where it was a warning: a protect
+interrupted under 1.99 on such a class is refused on resume until one of
+these is given.
+
+**Dry run.** `failover --dry-run` (and `check --phase failover`) lists the
+waves (`index`, `name`, `vms`, `gate`, `implicit` for the last one) and the
+hooks (`name`, `at`, `method`, `url`) without calling anything. A real
+failover reports the calls in `hook_results`.
+
+**Candidates.** `candidates --cluster C [--namespace NS [--selector
+k=v]] --json`, and `GET /api/replication/candidates/<cluster>` in the
+console (viewer, with the person's kubeconfig), list the VMs of a source
+cluster a plan can protect: CPU, memory, networks, cloud-init kind, labels,
+running or not, and per disk the claim, size, used size, storage class,
+image and whether it is eligible. Reasons: `not-longhorn`, `longhorn-v2`,
+`encrypted`, `rwx-not-migratable`, `containerDisk`, `hostDisk`,
+`emptyDisk`, `no-disk`. A disk the replication does not copy (container
+disk) is listed as not eligible without making the VM not eligible.
+`plans` lists the plans already holding the VM (any state except
+`unprotected`).
+
 The operator procedure (first protection, failover, unprotect) is in
 [operating-procedure.md](operating-procedure.md#12-disaster-recovery-asynchronous-replication).
 
+### Follow-up data, alerts, notifications and link tests
+
+These are the reads and settings behind the replication screens. The
+console and the command line call the same functions, so they show the
+same objects.
+
+**Plan rows.** Each plan row (`GET /api/replication/plans`, the `row` of a
+plan, `plan list --json`, `plan show --json`) also carries `transfer` (the
+last pass of any VM: date, bytes sent, upload and apply throughput; bytes
+and passes over the last 24 hours), `pending_vms` (VMs of a selector plan
+that carry the label but are not protected yet, as `ns/name`), `alerts`
+(the number of active alerts of the plan) and `reach` (whether the
+follower last read the source and the target: `true`, `false`, or `null`
+when never read; the worst value over the plan's VMs, with the date of the
+latest reading).
+
+**Chart series.** `GET /api/replication/plans/<id>/series?range=1h|24h|7d|30d`
+(optional `resource=<uid>`) groups the per-pass statistics in buckets of
+60 s, 600 s, 3600 s and 21600 s: the worst RPO held and backlog, the mean
+throughputs (weighted by passes for hourly rows), the bytes sent and the
+number of passes. Empty buckets are left out.
+
+**Selector plans.** At each spec reading (every 10 minutes by default,
+`follow_spec`), the follower lists the source VMs of the selector
+namespace. A VM that carries the label and is not in the plan is written
+once to the journal (`selector-new-vm`, warning) and kept in the plan's
+`pending_vms` until it is protected or loses the label. A VM of the plan
+that lost the label is written once (`selector-vm-left`, information): it
+stays protected until unprotect. A follower restart writes neither again.
+The follower never protects anything.
+
+**Automatic protection.** With the plan option `auto_protect: true` (stored
+by the plan settings), a protected selector plan with pending VMs and no
+command running gets a `protect` started by the console itself: a tracked
+action `replication:<plan>:protect`, author `console`, run with the
+console's own kubeconfigs, at most once every 10 minutes per plan. Only
+the console that holds the follower lock does this. A protect started this
+way that fails (a labelled VM that cannot be protected: disk class missing
+on the target, encrypted volume, container disk only...) is not started
+again at each round: the wait doubles at each failure (10 min, 20 min, 40
+min...) up to 6 hours, and one journal event `auto-protect-failed` (warning,
+also sent to the notifications) is written for the whole series, with the
+active alert of the same name. The series starts again when the pending
+VMs or the plan change, and a successful protect clears it. The state lives
+in `replication.db`, so a console restart does not start it again at
+once. `auto_protect: true` is refused on a plan that lists its VMs (it has
+no new VM to protect). Kill switch, read
+again every minute: `replication: {auto_protect: false}` in `config.yaml`.
+
+**Active alerts.** `GET /api/replication/alerts?host=<cluster>` and
+`harvester-replication alerts [--host H] --json` compute the alerts from
+the present state, errors first: `rpo-exceeded`, `disk-never-backs-up`,
+`standby-degraded`, `plan-drift`, `selector-new-vm`, `carnet-stale`,
+`auto-protect-failed` (warnings),
+`source-unreachable`, `backup-error`, `plan-error` (plan in `error`) and
+`source-vm-running-after-failover` (errors). The last one comes from a
+follower health flag: after a failover, the follower watches the source VM
+and flags it as long as it runs again. `since` is the date of the latest
+journal event of that kind (or the date a pending VM was first seen).
+`host` keeps the plans where that cluster is source or target.
+
+**External notifications.** Matrix (client-server API, a room id and an
+access token), Slack (incoming webhook), a generic JSON webhook (plain
+headers and secret headers) and e-mail (SMTP with STARTTLS or implicit TLS
+on port 465, optional login; a password needs one of them, so it is never
+sent in clear, `implicit_tls` in the settings). The settings live in `replication.db`: `enabled`, `min_level`
+(`warn` or `error`), `codes` (`null` for every alert code above plus the
+failover results `failed-over` and `interrupted` and the return under the
+objective `rpo-recovered`), and the channels. `failed-over` and
+`rpo-recovered` are sent whatever `min_level`, when selected. The console
+follower sends them: at each round, the new journal events that pass the
+filter are grouped into one message per channel, sent from a background
+thread (10 s per call, 3 tries), so a slow mail server never delays the
+follower. The journal position moves on once a batch is done; a channel
+that failed three times is written to the journal (`notify-failed`). A
+batch in flight when the follower stops is sent again at its restart. The
+first round after an upgrade starts at the end of the journal (nothing old
+is sent). A shell follower sends only with `follow --all --notify`.
+Secrets (Matrix token, Slack URL, secret header values, mail password) are
+shown as `********` on every read (API, command line output, journal,
+Activity), and a webhook URL masked as for hooks (first path segment
+only, `?********` for the query). Writing `********` back
+keeps the stored value, so a screen can send the settings it read, but only
+towards the same server: a Matrix token is kept only when the homeserver
+keeps its scheme, host and port, webhook secret headers only for the same
+exact URL (path and query included), a mail password only for the same SMTP host and port
+(`secret-missing` otherwise). Every call goes through the SSRF guard
+(internal addresses refused unless allowed by
+`replication.notifications.allow_private`, redirects never followed, the
+SMTP server checked the same way); a refusal is not retried. The addresses
+are also checked when the settings are saved (`notify-address`). The settings reach the command line through a
+private file (`notify set --spec FILE`), never through its arguments.
+
+**Links between clusters.** `GET /api/replication/links` and `link list
+--json` give one entry per source and target pair that has a plan or a
+test: its plans, the passive figures from the plans' passes (last upload
+and apply throughput, medians and totals over 24 hours, an hourly series)
+and the last active test. The active test (`POST
+/api/replication/links/test`, `link test --from A --to B --size-mib N`,
+64 to 4096 MiB, 512 by default) measures what replication really uses: a
+temporary pod on the source writes N MiB of random data to the shared NFS
+backup target, then a pod on the target reads it back and deletes it. The
+durations come from the pods' logs. Both pods use the cluster's own
+longhorn-manager image (already on every node, nothing to pull, airgap
+safe) and run in `longhorn-system`. Pods and file are always removed, on
+error, on cancel and at a console shutdown; a file whose removal is not
+confirmed is removed by a cleanup pod, and the result says so if even
+that fails. The test is refused with `backup-target-differs` when the two
+clusters do not use the same backup target, and `not-supported` for a
+target other than NFS. It runs with the person's kubeconfigs for both
+clusters, as a tracked action, one at a time per pair, and its result is
+kept (table `link_tests`). The read pod also removes the test directory
+(`harvester-ops-linktest/`) from the share, unless another test still has
+its file there. Verified for real on 24-25/10/2026 between harvlab
+(Harvester 1.8.2) and harvlab2 (1.9.0) over the bench NFS share: 256 MiB
+written at 99 MiB/s, read at 103 MiB/s, pods removed.
+
+**Roles** for these routes: every read is viewer, except the notification
+settings (operator, even masked: they say where alerts go). Changing them
+and sending a test message need admin. A link test needs operator.
+
 API: reads `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, row, status, volumes, last runs,
-lock, lease), `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
+lock, lease, `carnet_stale`), `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
 `GET /api/replication/hosts/<cluster>/resources?side=`,
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
-`GET /api/replication/follower`; writes (answer `202 {action_id}`)
-`POST /api/replication/plans`,
+`GET /api/replication/follower`,
+`GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
+`source-denied`, 404 `unknown-cluster`),
+`GET /api/replication/plans/<id>/events?limit=&before=&level=warn` (the
+journal of the plan and of its VMs),
+`GET /api/replication/plans/<id>/series?range=&resource=`,
+`GET /api/replication/alerts?host=`, `GET /api/replication/links`,
+`GET /api/replication/notify` (operator, secrets masked); writes (answer
+`202 {action_id}`) `PUT /api/replication/notify` (admin),
+`POST /api/replication/notify/test` (`{channel}`, admin),
+`POST /api/replication/links/test` (`{from, to, size_mib}`),
+`POST /api/replication/plans` (also `map_disk_class`, `map_drill_net` and
+`recovery {waves, hooks, network_data, resize, auto_protect,
+accept_degraded_standby}`; an internal hook address answers 400
+`hook-address`),
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
 `POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
 `POST /api/replication/plans/<id>/failover` (`{vms | all_vms, mode,
-force_unplanned, accept_skew, dry_run, confirm}`, admin),
+force_unplanned, accept_skew, accept_stale_carnet, dry_run, confirm}`,
+admin),
 `POST /api/replication/plans/<id>/resume`,
 `POST /api/replication/plans/<id>/unprotect` (`{confirm, delete_backups}`),
 `PATCH /api/replication/plans/<id>/settings` (`{rpo, paused, follow,
-skew_tolerance, timeouts}`; `interval` and `retain` answer
-`not-settable`), `DELETE /api/replication/plans/<id>`. Each write runs the
+skew_tolerance, timeouts, recovery, mappings, cloud_init, mac, start}`;
+`interval` and `retain` answer `not-settable`, a change the state does not
+allow answers `state-forbids`, the answer adds `protect_needed: true` when
+the carnet of a protected plan changes),
+`POST /api/replication/plans/<id>/hooks/test` (`{name}`, operator),
+`DELETE /api/replication/plans/<id>`. Each write runs the
 command line with the person's own kubeconfigs (403 `target-denied` or
 `source-denied` when the session cannot see a cluster, never the
 console's).
@@ -3384,16 +3681,192 @@ console's).
 Command line: `harvester-replication plan create|list|show|set|delete`,
 `check P [--phase protect|failover|failover-unplanned]`, `measure
 start|stop|report P`, `measure formula`, `protect P [--dry-run]
-[--interval D] [--retain N]`, `follow (--plan P | --all) [--once]
+[--interval D] [--retain N] [--accept-degraded-standby]`, `follow (--plan P | --all) [--once]
 [--take-over]`, `status [P] [--host H]`, `resources --host H [--side S]`,
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/name ... | --all-vms) [--unplanned]
-[--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
-`unprotect P --yes [--delete-backups]`. P is a plan id or name. Commands
+[--force-unplanned] [--accept-skew] [--accept-stale-carnet] [--yes]
+[--dry-run]`, `resume P [--accept-degraded-standby | --accept-stale-carnet]`,
+`unprotect P --yes [--delete-backups]`, `hook test P --name N`,
+`candidates --cluster C [--namespace NS [--selector k=v]]`, `alerts [--host
+H]`, `notify show|set --spec FILE|test --channel ID`, `link list`, `link test
+--from A --to B [--size-mib N]`. `plan create` also takes `--map-disk-class
+ns/vm/disk=class` and `--map-drill-net S=D`; `plan set` takes
+`--cloud-init`, `--mac` and `--start`; `recovery` and `mappings` objects
+come only through `--spec FILE`. P is a plan id or name. Commands
 that talk to clusters take `--from-kubeconfig`, `--to-kubeconfig` and
 `--timeout NAME=S`; every command takes `--json`.
 
 ---
+
+### Disaster Recovery screens
+
+The console has a root menu group **Disaster Recovery** with two entries,
+**Contracts** and **Links**, and a **Disaster Recovery** entry inside each
+Harvester cluster's menu group. Every gesture runs the command line
+`harvester-replication` as a tracked action (dock and Activity); the
+screens never write by another path.
+
+**Contracts.** All the contracts, as cards or as a table (the toggle is
+kept per browser). Each contract shows: its state (the worst state of its
+VMs when protected), a gauge of the RPO held against the objective (the
+mark is the objective; the bar turns orange past 80 % and red past the
+objective), the direction source -> recovery site with a dot per cluster
+(green: it answers the follower, red: it does not, grey: not read yet),
+the number of VMs and their states, the VMs that carry the label of a
+rule but are not protected yet, the last event, and the last transfer
+(data sent by the last pass, upload throughput to the backup target, apply
+throughput on the recovery site, and the amount sent in 24 hours). A
+search box and a state filter narrow the list. The active alerts are listed
+on top. The **Notifications** button opens the external notification
+settings (Matrix room, Slack incoming webhook, mail by SMTP or a generic
+JSON webhook; an administrator edits them, secrets are never shown again,
+a masked value kept as is keeps the stored secret; each channel has a
+**Send a test** button).
+
+**New contract window.** Five blocks on one page, each one says whether it
+is ready, and nothing is written before **Create**:
+1. *What and where*: name, source and recovery clusters, VMs chosen from a
+   list (VMs that cannot be replicated are greyed with the reason), or by a
+   label rule `key=value` in a namespace. With a rule, **Protect new VMs
+   that get the label automatically** lets the console protect a VM that
+   receives the label later (otherwise an alert waits for you).
+2. *Objective*: RPO objective (5, 15, 60 minutes or any value), points
+   kept, and the measurement phase. **Measure first** creates the contract
+   and starts the measure; **Protect directly** creates and protects at
+   once and shows a warning with the estimated interval, a reachable RPO
+   that ignores the change rate, and the duration of the first full copy
+   from the throughput known for the link.
+3. *Mappings*: one line per network used by the chosen VMs. A network
+   missing on the recovery site blocks the creation until it is mapped to
+   an existing network or created there with **Create on the target**
+   (name, VLAN and cluster network editable; it runs the usual network
+   creation, admin). The **Drill network** column is stored for the drills
+   to come. Storage is chosen **disk by disk**; the same class name is
+   proposed when it exists on the recovery site. A class that asks for more
+   replicas than the recovery site has schedulable nodes is marked
+   *Degraded*: the window names it, offers **Use <class>** for a class that
+   fits, or **Accept degraded standby volumes** (a deliberate choice, said
+   in the tooltip); until one of them, Create stays locked. A namespace
+   missing there is mapped to another one or created at the failover.
+4. *Recovery*: start waves (drag the VMs from one wave to another, or use
+   the menu on each VM; each wave has a gate: VMs running, guest agent
+   connected within a delay, or running then a delay), cloud-init kept or
+   rerun with a per-VM recovery network configuration, MAC addresses kept
+   or new, CPU and memory per VM on the recovery site, VMs started or
+   stopped after the failover, and annex HTTP actions (when, method, URL,
+   headers, one secret header whose value is masked once kept, body,
+   timeout). An annex action can be tried once the contract exists. A
+   renamed action, or one whose URL or method changed, asks for its secret
+   again; other secret headers set from the command line are kept.
+5. *Summary and pre-checks*: your role, the source and recovery clusters
+   readable with your rights, every mapping present, the measured
+   throughput of the link; free space and the backup target are checked by
+   the pre-check that runs before the protection. Then what still blocks,
+   the equivalent command line (without secrets) and the create button.
+
+**Contract window.** Opened from a card or a line, with the gestures the
+contract allows (each greyed button says why: role, or backups in use):
+Check, Measure, Stop measuring, Protect, Pause, Unpause, Resume command
+(after an interruption) and Failover. Four tabs:
+- *Overview*: RPO held, interval, next pass, passes waiting, skew, upload
+  and apply throughput, data sent in 24 hours, one line per VM with its
+  reasons, and the last failovers and unprotects;
+- *Charts*: RPO held against the objective, upload and apply throughput,
+  and data sent per period, over 24 hours by default, or 1 hour, 7 days, 30
+  days (hover shows the values);
+- *Journal*: every operation of the contract and of its VMs, newest first,
+  warnings only on demand, linked to the Activity action;
+- *Settings*: objective, skew tolerance, follower and pause (hot), the
+  interval and retention (applied by protecting again), the recovery block
+  of the creation window (saved for the next failover; a protected contract
+  rewrites its carnets at the next protect), and the danger zone (unprotect,
+  unprotect and delete the backups, delete the contract, each with the
+  contract name typed). A saved change offers **Undo**, which sends the
+  previous values back as a new tracked action; pause and unpause do too.
+  Undo sends the exact previous values (an objective of 90 s comes back as
+  90 s, not rounded to minutes); a change that touched a hook secret or a
+  hidden URL offers no Undo and says why. While the recovery settings are
+  newer than the last protect, the Overview shows a banner naming them,
+  with **Protect again**.
+
+**Failover window.** Admin only: for another role it opens read only and
+says why. It lists the steps of the chosen mode (planned: pause the
+follower, stop the source VMs, fence, final backup, apply, activation as
+the point of no return, objects, waves, annex actions; unplanned: last
+read of the backup target, catch-up, points and skew, activation, objects,
+waves, annex actions, late fence), what may be lost, and pre-checks: role,
+state of the contract, reachability of both clusters, and a dry run started
+on opening. When the recovery settings changed since the last protect, the
+window names them and offers **Protect again first** (then the dry run runs
+again) or **Fail over with the previous settings** (explicit choice); the
+button stays locked until one of them. The VMs can be restricted, and the
+button unlocks once the contract name is typed.
+
+**Links.** One block per pair of clusters with a contract or a test: the
+two legs source -> backup target -> recovery site with the median
+throughput of the real backups over 24 hours (the slower leg is marked),
+the last pass, a 24-hour curve per leg, and the **active test**: a
+temporary pod writes random data (256 MiB to 2 GiB) to the NFS backup
+target from the source and a pod reads it back from the recovery site,
+both removed afterwards (operator). A pair without a contract can be
+tested before creating one.
+
+**Disaster Recovery of a cluster.** The contracts where this cluster is
+the source or the recovery site, with a badge for its role and a filter
+(all, as source, as recovery site), and the list of its VMs held by a
+contract.
+
+**Alerts.** Objective exceeded, a disk that never backs up, a source VM
+running again after a failover, a backup in error, a degraded standby
+volume, an unreachable source, a VM spec changed, a contract in error, a
+new VM matching a rule, recovery settings newer than the last protect, an
+automatic protection that failed. They show as a badge on the Disaster Recovery menu
+entries (root and current cluster), in the **Events** tab of the cluster
+overview (group Disaster Recovery, also when the cluster does not answer),
+and are sent to the configured notifications.
+
+Not in this release: drills (the drill network column is only stored).
+
+**Verified for real** on 25/10/2026, harvlab (Harvester 1.8.2) to
+harvlab2 (1.9.0, one node), through a console of this release, with a
+local HTTP receiver on the console host:
+- hooks: the four kinds of call (POST with a secret header and a body, PUT,
+  GET) reached the receiver at `start`, after wave 1 and at `end` of a real
+  failover; a hook answering a redirect failed with the reason and the
+  redirect target received nothing; a loopback, metadata or private
+  address was refused at save (`hook-address`) outside the allowlist; a
+  masked secret sent with another host was refused (`secret-missing`); the
+  URL query never appeared in outputs, the journal or `actions.db`;
+- notifications: a webhook channel received the test message and the
+  follower's own messages (`selector-new-vm`, `auto-protect-failed`); a
+  redirecting channel failed once without retry; a loopback SMTP host and a
+  password without TLS were refused at save;
+- automatic protection: a newly labelled VM was protected by the console on
+  its own; a labelled VM whose disk class is missing on the target failed,
+  waited 10 then 20 minutes, with a single journal event and alert; removing
+  the label ended the series;
+- recovery: wave 1 waited for the guest agent (openSUSE Leap 15.6 with
+  qemu-guest-agent, 22 s), CPU and memory were 2 vCPU / 2 GiB on the
+  recovery site (guest topology read back), the network data was applied by
+  the rerun cloud-init (the extra address seen in the guest by the agent);
+- standby replicas: the creation window marked `harvester-longhorn` (3
+  replicas, one node) and **Use harv-rep1** fixed it;
+- stale settings: a resize changed on the protected plan blocked the
+  failover dry run (`carnet-stale`, keys and VM named), the acknowledgement
+  turned it into a warning, protect cleared it; the banner and the failover
+  window showed it;
+- link test: 64 MiB at 97 / 103 MiB/s, and the test directory was gone from
+  the share afterwards.
+
+Not verified on a cluster: notifications to a real Matrix room, Slack or a
+mail server (unit-tested against local servers), CPU and memory hotplug at
+recovery, the resume of a failover interrupted with the stale settings
+acknowledgement, and drag and drop with a real mouse (end-to-end tests
+only). The second review fixes (stale mark judged on values, URL path
+masking, stored secret kept only for the same request, `--accept-degraded-standby`
+and the resume flags) are covered by unit and end-to-end tests, not run on a
+cluster.
 
 ## What needs what
 

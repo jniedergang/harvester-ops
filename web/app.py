@@ -1181,6 +1181,10 @@ def required_role_for(path, method):
     # v1.57.0 : chacun change son propre mot de passe, lecteur compris
     if path.startswith("/api/me/"):
         return "viewer"
+    # réplication : lectures comprises (le réglage des notifications se lit
+    # en opérateur)
+    if path.startswith("/api/replication/"):
+        return _replication_required_role(path, method)
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
@@ -1192,8 +1196,6 @@ def required_role_for(path, method):
         return "viewer"
     if path.startswith("/api/kvm/"):
         return _kvm_required_role(path, method)
-    if path.startswith("/api/replication/"):
-        return _replication_required_role(path, method)
     # v1.96.0 : annuler une action demande le rôle qu'il a fallu pour la
     # lancer (contrôlé par api_action_cancel ; admin pour une action qui ne
     # le dit pas) : un opérateur annule son propre geste sur une VM KVM
@@ -1217,10 +1219,18 @@ KVM_ADMIN_PATHS = ("/api/kvm/hosts", "/api/kvm/hosts/scan")
 # bascule ou d'une telle déprotection, qui dépendent du corps de la demande
 # ou de l'état du plan, sont contrôlées dans leur route (admin).
 REPLICATION_ADMIN_SUFFIXES = ("/failover",)
+# Écrans de suivi : lire le réglage des notifications (même masqué : il dit
+# où partent les alertes) = opérateur ; le changer ou envoyer un message
+# d'essai (une connexion vers une adresse choisie) = admin. L'essai actif
+# d'un lien (pods temporaires sur deux clusters) = opérateur, comme le reste.
+REPLICATION_OPERATOR_READS = ("/api/replication/notify",)
+REPLICATION_ADMIN_PATHS = ("/api/replication/notify", "/api/replication/notify/test")
 
 
 def _replication_required_role(path, method):
-    if path.endswith(REPLICATION_ADMIN_SUFFIXES):
+    if method in ("GET", "HEAD", "OPTIONS"):
+        return "operator" if path in REPLICATION_OPERATOR_READS else "viewer"
+    if path in REPLICATION_ADMIN_PATHS or path.endswith(REPLICATION_ADMIN_SUFFIXES):
         return "admin"
     return "operator"
 
@@ -26741,6 +26751,10 @@ def api_notes_get(doc_id):
 import replication as _rp  # noqa: E402
 import replication_db as _rdb  # noqa: E402
 import replication_follow as _rf  # noqa: E402
+import replication_http as _rh  # noqa: E402
+import replication_insight as _ri  # noqa: E402
+import replication_link as _rlk  # noqa: E402
+import replication_notify as _rn  # noqa: E402
 import replication_run as _rr  # noqa: E402
 
 REPLICATION_SCRIPT = "harvester-replication.py"
@@ -26809,12 +26823,13 @@ def _repl_plan(plan_id):
     return plan, None
 
 
-def _repl_base(*sub):
+def _repl_base(*sub, by=None):
     """Ligne de commande du script : sortie JSON, répertoire d'état et base de
-    la console (masqués dans la commande montrée), auteur du journal."""
+    la console (masqués dans la commande montrée), auteur du journal (la
+    personne, ou `by` pour un geste de la console elle-même)."""
     cmd = [sys.executable, str(BIN_DIR / REPLICATION_SCRIPT), *sub, "--json",
            f"--state-dir={_state_dir()}", f"--db={_replication_db_path()}"]
-    user = current_user()
+    user = by or current_user()
     if user:
         cmd.append(f"--by={user}")
     return cmd
@@ -26918,10 +26933,12 @@ def _repl_summarize(run, rc, data, last_error):
     return "error", str(data.get("error") or data.get("message") or last_error or f"exit {rc}")
 
 
-def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=None, dry_run=False):
+def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=None, dry_run=False, spec=None):
     """Lance une commande en action suivie. Libellé `replication:<plan>:<op>`
     (identifiant contrôlé, jamais de nom libre) ; un geste à la fois par plan,
-    et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters."""
+    et aucun pendant l'arrêt ou le démarrage de l'un des deux clusters.
+    `spec` : objet passé par le fichier privé `--spec` (secrets jamais dans
+    la ligne de commande)."""
     label = f"replication:{plan['id']}:{op}"
 
     def setup(run):
@@ -26932,7 +26949,7 @@ def _repl_action(plan, op, cmd, role, cluster=None, busy=True, busy_clusters=Non
         run.shutdown_grace = _repl_shutdown_grace(plan, op)
         run.cancel_waits = True
         run.result = dict(run.result or {}, plan=plan["id"])
-    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run,
+    return _cli_action(cluster or plan["source_cluster"], label, cmd, REPLICATION_TOOL, dry_run=dry_run, spec=spec,
                        after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=busy,
                        capture=True,
                        busy_clusters=busy_clusters or (plan["source_cluster"], plan["target_cluster"]),
@@ -27020,9 +27037,11 @@ def api_replication_plan(plan_id):
         v = _rdb.plan_view(conn, plan, now)
         row = _rdb.plan_rows(conn, [plan], now, role=current_role())[0]
         status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
-        out = {"plan": plan, "row": row, "status": status, "volumes": v["volumes"],
+        out = {"plan": _rp.mask_plan(plan), "row": row, "status": status, "volumes": v["volumes"],
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
-               "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role()}
+               "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role(),
+               # réglages de reprise changés depuis le dernier protect (bandeau « protect à relancer »)
+               "carnet_stale": _rdb.public_carnet_stale(_rdb.get_plan_flag(conn, "carnet-stale", plan["id"]))}
     finally:
         conn.close()
     return jsonify(out)
@@ -27111,6 +27130,41 @@ def api_replication_resource_events(uid):
                     "next_before": evs[-1]["id"] if len(evs) >= limit else None})
 
 
+@app.route("/api/replication/plans/<plan_id>/events")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plan_events(plan_id):
+    """Journal d'un plan (ses événements propres et ceux de ses ressources),
+    du plus récent au plus ancien : l'onglet Journal de la vue d'un contrat.
+    Mêmes `?limit=` et `?before=` que le journal d'une ressource ; `?level=`
+    (warn : avertissements et erreurs) filtre côté serveur."""
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    try:
+        limit = int(request.args.get("limit", 100))
+        if not 1 <= limit <= REPLICATION_EVENTS_MAX:
+            raise ValueError
+    except ValueError:
+        return _repl_err(f"limit must be between 1 and {REPLICATION_EVENTS_MAX}")
+    level = request.args.get("level") or ""
+    if level not in ("", "warn"):
+        return _repl_err("level must be warn")
+    before = request.args.get("before") or None
+    conn = _replication_conn()
+    try:
+        if level == "warn":
+            evs = _rdb._events(conn, "plan_id = ? AND level IN ('warn', 'error')", [plan["id"]], limit, before)
+        else:
+            evs = _rdb.plan_events(conn, plan["id"], limit=limit, before=before)
+    except ValueError:
+        return _repl_err("before must be an event id or an ISO 8601 date")
+    finally:
+        conn.close()
+    return jsonify({"plan": plan["id"], "events": evs,
+                    "next_before": evs[-1]["id"] if len(evs) >= limit else None})
+
+
 @app.route("/api/replication/follower")
 @requires_auth
 def api_replication_follower():
@@ -27126,9 +27180,11 @@ _CREATE_SCALARS = (("name", "--name"), ("from", "--from"), ("to", "--to"), ("sel
                    ("follow", "--follow"), ("skew_tolerance", "--skew-tolerance"))
 _CREATE_MAPS = (("map_net", "--map-net", "networks"), ("map_sc", "--map-sc", "storage_classes"),
                 ("map_ns", "--map-ns", "namespaces"), ("map_image", "--map-image", "images"),
-                ("map_claim", "--map-claim", "claims"), ("target_name", "--target-name", "target_names"))
+                ("map_claim", "--map-claim", "claims"), ("target_name", "--target-name", "target_names"),
+                ("map_disk_class", "--map-disk-class", "disk_classes"),
+                ("map_drill_net", "--map-drill-net", "drill_networks"))
 _CREATE_KEYS = ({k for k, _ in _CREATE_SCALARS} | {k for k, _o, _m in _CREATE_MAPS}
-                | {"vms", "create_namespace", "timeouts"})
+                | {"vms", "create_namespace", "timeouts", "recovery"})
 
 
 def _repl_pairs(body, key):
@@ -27161,9 +27217,24 @@ def _repl_timeouts(body, key="timeouts", allow_null=False):
     return out
 
 
+def _repl_recovery(body):
+    """Le bloc `recovery` d'un corps (création, réglages) : un objet aux clés
+    de `replication.RECOVERY_KEYS`, passé au script par le fichier privé
+    `--spec` (jamais dans la ligne de commande : en-têtes secrets)."""
+    rec = body.get("recovery")
+    if rec is None:
+        return None
+    if not isinstance(rec, dict):
+        raise ValueError("recovery must be an object")
+    unknown = set(rec) - set(_rp.RECOVERY_KEYS)
+    if unknown:
+        raise ValueError(f"recovery: unknown key {sorted(unknown)[0][:40]}")
+    return rec
+
+
 def _repl_create_request(body):
-    """(demande normalisée, options du script) d'un corps de création ;
-    ValueError ou PlanError sinon. La demande passe par
+    """(demande normalisée, options du script, bloc `recovery`) d'un corps
+    de création ; ValueError ou PlanError sinon. La demande passe par
     `replication.normalize_plan`, le contrôle même du script, pour répondre
     400 tout de suite au lieu d'une action en échec."""
     unknown = set(body) - _CREATE_KEYS
@@ -27196,6 +27267,9 @@ def _repl_create_request(body):
     if timeouts:
         options["timeouts"] = timeouts
         argv += [f"--timeout={k}={v}" for k, v in timeouts.items()]
+    recovery = _repl_recovery(body)
+    if recovery:
+        options.update(recovery)
     req = {"name": vals.get("name"), "source_cluster": vals.get("from"), "target_cluster": vals.get("to"),
            "rpo_objective_s": vals.get("rpo"), "interval_s": vals.get("interval"), "vms": vms,
            "selector": vals.get("selector", ""), "namespace": vals.get("namespace", ""),
@@ -27205,7 +27279,7 @@ def _repl_create_request(body):
             req["retain"] = int(vals["retain"])
         except ValueError:
             raise ValueError("retain must be an integer") from None
-    return _rp.normalize_plan(req), argv
+    return _rp.normalize_plan(req), argv, recovery
 
 
 @app.route("/api/replication/plans", methods=["POST"])
@@ -27220,7 +27294,9 @@ def api_replication_plan_create():
     if err:
         return err
     try:
-        plan, argv = _repl_create_request(body)
+        plan, argv, recovery = _repl_create_request(body)
+        _rp.hook_address_refusal((plan.get("options") or {}).get("hooks"),
+                                 _rh.allowlist(load_config_ro(), "hooks"))
     except _rp.PlanError as e:
         return _repl_err(str(e), 400, e.code)
     except ValueError as e:
@@ -27240,6 +27316,7 @@ def api_replication_plan_create():
         run.cancel_waits = True
     run, err = _cli_action(plan["source_cluster"], f"replication:create:{plan['name']}",
                            _repl_base("plan", "create") + argv, REPLICATION_TOOL,
+                           spec={"recovery": recovery} if recovery else None,
                            after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=False,
                            capture=True, summarize=_repl_summarize, id_arg=True, setup=setup)
     if err:
@@ -27359,7 +27436,8 @@ def api_replication_protect(plan_id):
 def api_replication_failover(plan_id):
     """Bascule (administrateur) : `vms` (ns/nom) ou `all_vms: true`, `mode`
     planned (défaut) ou unplanned, `force_unplanned` et `accept_skew` avec
-    unplanned, `dry_run`. Hors essai à blanc, `confirm` doit porter le nom
+    unplanned, `accept_stale_carnet` (réglages de reprise changés depuis le
+    dernier protect : les VMs démarrent avec les précédents), `dry_run`. Hors essai à blanc, `confirm` doit porter le nom
     du plan : une activation est définitive."""
     err = _repl_unavailable()
     if err:
@@ -27373,6 +27451,7 @@ def api_replication_failover(plan_id):
     try:
         all_vms, dry = _repl_flag(body, "all_vms"), _repl_flag(body, "dry_run")
         force, skew = _repl_flag(body, "force_unplanned"), _repl_flag(body, "accept_skew")
+        stale = _repl_flag(body, "accept_stale_carnet")
         vms = body.get("vms") or []
         if not isinstance(vms, list):
             raise ValueError("vms must be a list")
@@ -27395,6 +27474,7 @@ def api_replication_failover(plan_id):
     cmd = (_repl_base("failover", plan["id"]) + [f"--vm={v}" for v in vms]
            + (["--all-vms"] if all_vms else []) + (["--unplanned"] if mode == "unplanned" else [])
            + (["--force-unplanned"] if force else []) + (["--accept-skew"] if skew else [])
+           + (["--accept-stale-carnet"] if stale else [])
            + (["--dry-run"] if dry else ["--yes"]) + kargs)
     run, err = _repl_action(plan, "failover", cmd, "admin", cluster=plan["target_cluster"],
                             busy=not dry, dry_run=dry)
@@ -27518,7 +27598,20 @@ def api_replication_unprotect(plan_id):
     return _repl_accepted(run, plan["id"], delete_backups=delete_backups)
 
 
-_SETTINGS_KEYS = ("rpo", "paused", "follow", "skew_tolerance", "timeouts")
+_SETTINGS_KEYS = ("rpo", "paused", "follow", "skew_tolerance", "timeouts", "recovery", "mappings",
+                  "cloud_init", "mac", "start")
+
+
+def _repl_settings_mappings(body):
+    maps = body.get("mappings")
+    if maps is None:
+        return {}
+    if not isinstance(maps, dict) or not maps:
+        raise ValueError("mappings must be a non-empty object")
+    unknown = set(maps) - set(_rp.MAPPING_KINDS)
+    if unknown:
+        raise ValueError(f"mappings: unknown kind {sorted(unknown)[0][:40]}")
+    return maps
 
 
 @app.route("/api/replication/plans/<plan_id>/settings", methods=["PATCH"])
@@ -27528,7 +27621,17 @@ def api_replication_settings(plan_id):
     """Réglages à chaud, lus par le suiveur au tour suivant : `rpo`, `paused`,
     `follow` (console, cli, off), `skew_tolerance`, `timeouts` ({nom:
     secondes}, null retire la surcharge). L'intervalle (`protect
-    --interval`) et la rétention ne se changent pas ici."""
+    --interval`) et la rétention ne se changent pas ici.
+
+    Reprise (écrans de réplication) : `recovery` (`waves`, `hooks`,
+    `network_data`, `resize`, `auto_protect`, chaque clé donnée remplace la
+    valeur rangée ; un en-tête secret `********` garde la sienne),
+    `cloud_init`, `mac`, `start`, permis dans tout état sauf pendant une
+    bascule ; `mappings` ({genre: {...}}, chaque genre donné remplace le
+    sien) : `networks` et `drill_networks` dans tout état sauf pendant une
+    bascule, les autres en brouillon seulement (400 `state-forbids`). Les
+    objets passent par le fichier privé `--spec`. Sur un plan protégé dont
+    le carnet de reprise change, la réponse porte `protect_needed: true`."""
     err = _repl_unavailable()
     if err:
         return err
@@ -27550,6 +27653,8 @@ def api_replication_settings(plan_id):
     if not body:
         return _repl_err("nothing to change")
     argv = []
+    spec = {}
+    carnet = {}
     try:
         for key, opt in (("rpo", "--rpo"), ("skew_tolerance", "--skew-tolerance")):
             if body.get(key) is not None:
@@ -27560,9 +27665,21 @@ def api_replication_settings(plan_id):
             if body["follow"] not in _rp.OPTION_CHOICES["follow"]:
                 raise ValueError("follow must be console, cli or off")
             argv.append(f"--follow={body['follow']}")
+        for key in ("cloud_init", "mac", "start"):
+            if body.get(key) is not None:
+                if body[key] not in _rp.OPTION_CHOICES[key]:
+                    raise ValueError(f"{key} must be one of {', '.join(_rp.OPTION_CHOICES[key])}")
+                carnet[key] = body[key]
+                argv.append(f"--{key.replace('_', '-')}={body[key]}")
+        recovery = _repl_recovery(body)
+        maps = _repl_settings_mappings(body)
+        why = _rp.settings_refusal(plan["state"], bool(recovery), carnet, maps)
+        if why:
+            return _repl_err(why, 400, "state-forbids")
         changes = _repl_timeouts(body, allow_null=True)
         argv += [f"--timeout={k}={'' if v is None else v}" for k, v in changes.items()]
-        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu ?
+        # le plan tel qu'il sera après le réglage : budget d'arrêt tenu, et
+        # même contrôle que le script (`normalize_plan`), pour un 400 tout de suite
         opts = dict(plan.get("options") or {})
         merged = dict(opts.get("timeouts") or {})
         for k, v in changes.items():
@@ -27573,6 +27690,26 @@ def api_replication_settings(plan_id):
         opts["timeouts"] = _rp.normalize_timeouts(merged)
         if body.get("follow") is not None:
             opts["follow"] = body["follow"]
+        opts.update(carnet)
+        if recovery:
+            rec = dict(recovery)
+            if "hooks" in rec:
+                rec["hooks"] = _rp.keep_hook_secrets(rec["hooks"], (plan.get("options") or {}).get("hooks"))
+                _rp.hook_address_refusal(rec["hooks"], _rh.allowlist(load_config_ro(), "hooks"))
+            opts.update(rec)
+            spec["recovery"] = recovery
+        if maps:
+            spec["mappings"] = maps
+        after = None
+        if recovery or maps or carnet:
+            after = _rp.normalize_plan({"name": plan["name"], "source_cluster": plan["source_cluster"],
+                                "target_cluster": plan["target_cluster"],
+                                "rpo_objective_s": plan["rpo_objective_s"], "interval_s": plan.get("interval_s"),
+                                "retain": plan["retain"], "vms": plan.get("vms") or [],
+                                "selector": plan.get("selector") or "",
+                                "namespace": plan.get("selector_namespace") or "",
+                                "mappings": dict(plan.get("mappings") or {}, **maps),
+                                "options": {k: v for k, v in opts.items() if k != "timeouts"}})
     except _rp.PlanError as e:
         return _repl_err(str(e), 400, e.code)
     except ValueError as e:
@@ -27581,10 +27718,96 @@ def api_replication_settings(plan_id):
     if err:
         return err
     run, err = _repl_action(plan, "settings", _repl_base("plan", "set", plan["id"]) + argv, "operator",
-                            busy_clusters=("",))
+                            busy_clusters=("",), spec=spec or None)
     if err:
         return err
-    return _repl_accepted(run, plan["id"])
+    extra = {"protect_needed": True} if _repl_protect_needed(plan, after) else {}
+    return _repl_accepted(run, plan["id"], **extra)
+
+
+def _repl_protect_needed(plan, after):
+    """Indice de la réponse : le carnet sera en retard après le réglage
+    (`after`, plan normalisé), même règle que `plan set` (valeurs comparées
+    à celles du dernier protect, pas les clés données)."""
+    if after is None or plan["state"] != "protected":
+        return False
+    conn = _replication_conn()
+    try:
+        flag = _rdb.get_plan_flag(conn, "carnet-stale", plan["id"])
+    finally:
+        conn.close()
+    stale = _rp.stale_carnet_keys(flag, _rp.carnet_values(plan.get("options"), plan.get("mappings")),
+                                  _rp.carnet_values(after["options"], after["mappings"]))
+    return _rp.protect_needed(plan["state"], stale)
+
+
+@app.route("/api/replication/plans/<plan_id>/hooks/test", methods=["POST"])
+@requires_auth
+@_rate_limit("20/minute")
+def api_replication_hook_test(plan_id):
+    """Appelle tout de suite une action annexe HTTP du plan (`name`), en
+    action suivie (opérateur) : statut et durée dans la sortie et au
+    journal, jamais un en-tête secret."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    name = body.get("name")
+    if not isinstance(name, str) or not _rp.NAME_RE.match(name):
+        return _repl_err("name must be a hook name", 400, "bad-option")
+    if not any(h.get("name") == name for h in (plan.get("options") or {}).get("hooks") or []):
+        return _repl_err(f"plan {plan['name']} has no hook {name}", 404, "unknown-hook")
+    run, err = _repl_action(plan, "hook-test", _repl_base("hook", "test", plan["id"]) + [f"--name={name}"],
+                            "operator", busy=False, busy_clusters=("",))
+    if err:
+        return err
+    return _repl_accepted(run, plan["id"], name=name)
+
+
+@app.route("/api/replication/candidates/<cluster>")
+@requires_auth
+def api_replication_candidates(cluster):
+    """VMs d'un cluster source qu'un plan peut protéger (fenêtre de
+    création) : disques, éligibilité et raisons, plans qui les tiennent déjà.
+    Lu avec le kubeconfig de la personne (403 `source-denied` si cette
+    session ne voit pas le cluster) ; `namespace`, `selector` (`clé=valeur`,
+    avec `namespace`). Même fonction que `candidates --json`."""
+    if not _rp.CLUSTER_RE.match(cluster or ""):
+        return _repl_err("invalid cluster")
+    if cluster not in {c.get("name") for c in load_config_ro().get("clusters", [])}:
+        return _repl_err(f"unknown cluster: {cluster}", 404, "unknown-cluster")
+    ns = request.args.get("namespace") or None
+    sel = request.args.get("selector") or None
+    if ns is not None and not _rp.NAME_RE.match(ns):
+        return _repl_err("invalid namespace")
+    if sel is not None:
+        try:
+            _rp._selector(sel)
+        except _rp.PlanError as e:
+            return _repl_err(str(e), 400, e.code)
+        if ns is None:
+            return _repl_err("selector needs namespace", 400, "bad-selection")
+    kc = _kubectl_for_cluster(cluster)
+    if not kc:
+        return _repl_err(f"this session has no access to cluster {cluster}", 403, "source-denied")
+    from kube import Kube as _Kube
+    conn = _replication_conn()
+    try:
+        held = _rr.plans_holding(conn, cluster)
+    finally:
+        conn.close()
+    try:
+        data = _rr.candidates(_Kube(kc, timeout=30), cluster, ns, sel, held=held)
+    except Exception as e:                      # noqa: BLE001 : jamais de chemin ni de trace
+        if any(m in str(e).lower() for m in ("forbidden", "unauthorized", "provide credentials")):
+            return _repl_err(f"this session cannot read cluster {cluster}", 403, "source-denied")
+        return _repl_err(f"cluster {cluster} cannot be read", 502, "source-unreachable")
+    return jsonify(data)
 
 
 @app.route("/api/replication/plans/<plan_id>", methods=["DELETE"])
@@ -27603,6 +27826,370 @@ def api_replication_plan_delete(plan_id):
     if err:
         return err
     return _repl_accepted(run, plan["id"])
+
+
+# --- écrans de suivi : séries, alertes, notifications, liens ----------------------
+
+@app.route("/api/replication/plans/<plan_id>/series")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_plan_series(plan_id):
+    """Points des graphiques d'un plan : `?range=` 1h (tranches de 60 s),
+    24h (600 s), 7d (3600 s) ou 30d (21600 s), `?resource=<uid>` pour une
+    seule VM. Tranches vides omises."""
+    plan, err = _repl_plan(plan_id)
+    if err:
+        return err
+    rng = request.args.get("range", "24h")
+    if rng not in _ri.SERIES_RANGES:
+        return _repl_err(f"range must be one of {', '.join(_ri.SERIES_RANGES)}")
+    uid = request.args.get("resource") or None
+    if uid is not None and not REPLICATION_UID_RE.match(uid):
+        return _repl_err("invalid resource")
+    conn = _replication_conn()
+    try:
+        out = _rdb.stats_series(conn, plan, rng, _repl_now(), resource_uid=uid)
+    finally:
+        conn.close()
+    return jsonify(out)
+
+
+@app.route("/api/replication/alerts")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_alerts():
+    """Alertes en cours, calculées sur l'état présent (`?host=` : plans où ce
+    cluster est source ou cible), erreurs d'abord. Même fonction que
+    `harvester-replication alerts --json`."""
+    host = request.args.get("host") or None
+    if host is not None and not _rp.CLUSTER_RE.match(host):
+        return _repl_err("invalid host")
+    conn = _replication_conn()
+    try:
+        out = _rdb.alerts(conn, _repl_now(), host=host)
+    finally:
+        conn.close()
+    return jsonify(out)
+
+
+@app.route("/api/replication/links")
+@requires_auth
+@shared_read(scope=REPLICATION_SCOPE)
+def api_replication_links():
+    """Liens entre clusters : plans, débits passifs (24 h) et dernier essai
+    actif. Même fonction que `harvester-replication link list --json`."""
+    conn = _replication_conn()
+    try:
+        out = _rdb.links(conn, _repl_now())
+    finally:
+        conn.close()
+    return jsonify(out)
+
+
+def _repl_notify_stored():
+    conn = _replication_conn()
+    try:
+        return _rdb.get_setting(conn, "notify")
+    finally:
+        conn.close()
+
+
+@app.route("/api/replication/notify")
+@requires_auth
+def api_replication_notify():
+    """Réglage des notifications externes (opérateur), secrets masqués
+    (`********`)."""
+    return jsonify({"notify": _rn.mask(_repl_notify_stored()), "codes": list(_rn.NOTIFY_CODES),
+                    "kinds": list(_rn.KINDS)})
+
+
+def _repl_simple_action(label, cmd, role, spec=None, busy_clusters=None, setup_extra=None):
+    """Action suivie d'une commande de réplication hors plan (notifications,
+    liens) : rôle exigé à l'annulation, sortie JSON gardée, journal lié."""
+    def setup(run):
+        run.required_role = role
+        run.cancel_waits = True
+        if setup_extra:
+            setup_extra(run)
+    return _cli_action(busy_clusters[0] if busy_clusters else "", label, cmd, REPLICATION_TOOL, spec=spec,
+                       after=lambda: READ_SHARE.invalidate(REPLICATION_SCOPE), check_busy=bool(busy_clusters),
+                       capture=True, busy_clusters=busy_clusters, busy_prefix=label if busy_clusters else None,
+                       summarize=_repl_summarize, id_arg=True, setup=setup)
+
+
+@app.route("/api/replication/notify", methods=["PUT"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_notify_set():
+    """Remplace le réglage des notifications (admin). Corps : le réglage
+    entier ; un secret donné `********` garde la valeur rangée. Le réglage
+    part par un fichier privé (`notify set --spec`), jamais en argument."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    try:
+        _rn.address_refusal(_rn.normalize(body, _repl_notify_stored()),
+                            _rh.allowlist(load_config_ro(), "notifications"))
+    except _rn.NotifyError as e:
+        return _repl_err(str(e), 400, e.code)
+    run, err = _repl_simple_action("replication:notify:set", _repl_base("notify", "set"), "admin", spec=body)
+    if err:
+        return err
+    return jsonify({"action_id": run.id}), 202
+
+
+@app.route("/api/replication/notify/test", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_notify_test():
+    """Envoie un message d'essai sur un canal rangé (admin)."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    cid = body.get("channel")
+    if not isinstance(cid, str) or not _rn._ID_RE.match(cid):
+        return _repl_err("channel: a channel id is expected")
+    if not any(c.get("id") == cid for c in (_repl_notify_stored() or {}).get("channels") or []):
+        return _repl_err(f"unknown channel: {cid}", 400, "unknown-channel")
+    run, err = _repl_simple_action(f"replication:notify:test:{cid}",
+                                   _repl_base("notify", "test") + [f"--channel={cid}"], "admin")
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "channel": cid}), 202
+
+
+# délai laissé à l'essai d'un lien annulé pour retirer ses pods et son fichier
+REPLICATION_LINK_KILL_GRACE = 180
+REPLICATION_LINK_SHUTDOWN_GRACE = 120
+
+
+@app.route("/api/replication/links/test", methods=["POST"])
+@requires_auth
+@_rate_limit("10/minute")
+def api_replication_link_test():
+    """Essai actif d'un lien (opérateur) : `from`, `to`, `size_mib` (64 à
+    4096, 512 par défaut). Pods temporaires sur les deux clusters avec les
+    kubeconfigs de la personne ; pods et fichier toujours retirés."""
+    err = _repl_unavailable()
+    if err:
+        return err
+    body, err = _repl_body()
+    if err:
+        return err
+    src, dst, size = body.get("from"), body.get("to"), body.get("size_mib", 512)
+    for v in (src, dst):
+        if not isinstance(v, str) or not _rp.CLUSTER_RE.match(v):
+            return _repl_err("from and to must be cluster names")
+    if src == dst:
+        return _repl_err("from and to must be two different clusters", 400, "same-cluster")
+    if isinstance(size, bool) or not isinstance(size, int) or not _rlk.SIZE_MIN_MIB <= size <= _rlk.SIZE_MAX_MIB:
+        return _repl_err(f"size_mib: an integer between {_rlk.SIZE_MIN_MIB} and {_rlk.SIZE_MAX_MIB}", 400,
+                         "bad-size")
+    declared = {c.get("name") for c in load_config_ro().get("clusters", [])}
+    kargs = []
+    for name, opt, code in ((src, "--from-kubeconfig", "source-denied"), (dst, "--to-kubeconfig", "target-denied")):
+        if name not in declared:
+            return _repl_err(f"unknown cluster: {name}", 400, "unknown-cluster")
+        kc = _kubectl_for_cluster(name)
+        if not kc:
+            return _repl_err(f"this session has no access to cluster {name}", 403, code)
+        kargs.append(f"{opt}={kc}")
+
+    def extra(run):
+        run.kill_grace = REPLICATION_LINK_KILL_GRACE
+        run.shutdown_grace = REPLICATION_LINK_SHUTDOWN_GRACE
+    cmd = _repl_base("link", "test") + [f"--from={src}", f"--to={dst}", f"--size-mib={size}"] + kargs
+    run, err = _repl_simple_action(f"replication:link-test:{src}:{dst}", cmd, "operator",
+                                   busy_clusters=(src, dst), setup_extra=extra)
+    if err:
+        return err
+    return jsonify({"action_id": run.id, "from": src, "to": dst, "size_mib": size}), 202
+
+
+# --- protection automatique des nouvelles VMs d'un sélecteur -----------------------
+#
+# Un plan à sélecteur avec `auto_protect: true`, protégé, dont le suiveur a
+# relevé des VMs qui portent l'étiquette sans être protégées (`pending_vms`),
+# sans commande en cours : la console lance elle-même `protect`, en action
+# suivie (`replication:<plan>:protect`, auteur `console`), avec ses propres
+# kubeconfigs, au plus une fois toutes les 10 minutes par plan. Le suiveur ne
+# le fait jamais (il n'écrit que des relectures). Interrupteur à chaud :
+# `replication: {auto_protect: false}` dans config.yaml.
+
+REPLICATION_AUTO_PROTECT_EVERY_S = 600
+REPLICATION_AUTO_PROTECT_POLL_S = 60
+# attente plafonnée après des échecs répétés de la protection automatique
+REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S = 6 * 3600
+
+
+def _replication_auto_protect_enabled():
+    cfg = load_config_ro().get("replication") or {}
+    return not (isinstance(cfg, dict) and cfg.get("auto_protect") is False)
+
+
+class ReplicationAutoProtect:
+    """Le fil de la protection automatique. `tick()` : un passage sur les
+    plans ; tout est injectable pour les tests.
+
+    Une protection lancée par ce fil qui échoue (VM étiquetée mais pas
+    protégeable : disque de conteneur, volume chiffré, refus du contrôle)
+    n'est pas relancée à chaque tour : attente doublée à chaque échec
+    (REPLICATION_AUTO_PROTECT_EVERY_S, puis 2x, 4x... jusqu'à
+    REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S), un seul événement
+    `auto-protect-failed` au journal (et une alerte en cours) pour la série.
+    La série repart de zéro quand les VMs en attente ou le plan changent.
+    L'état vit dans replication.db (marque `auto-protect` du plan) : un
+    redémarrage de la console ne relance pas tout de suite."""
+
+    _RUNNING = ("running", "pending", "queued", "starting")
+
+    def __init__(self, enabled=_replication_auto_protect_enabled, clock=time.monotonic, launch=None,
+                 wall=time.time):
+        self._enabled, self._clock, self._wall = enabled, clock, wall
+        self._launch = launch or self._launch_protect
+        self.last = {}               # plan -> instant du dernier lancement
+        self.runs = {}               # plan -> action lancée par ce fil, suivie jusqu'à sa fin
+        self._stop = threading.Event()
+        self._thread = None
+
+    @staticmethod
+    def _eligible(conn, p):
+        opts = p.get("options") or {}
+        if not p.get("selector") or opts.get("auto_protect") is not True or p.get("state") != "protected" \
+                or opts.get("paused"):
+            return None
+        return _rdb.get_selector_watch(conn, p["id"])["pending"] or None
+
+    def candidates(self, conn):
+        out = []
+        for p in _rdb.list_plans(conn):
+            if not self._eligible(conn, p):
+                continue
+            if _rdb.get_lock(conn, p["id"]):
+                continue                     # une commande tient le plan
+            out.append(p)
+        return out
+
+    @staticmethod
+    def _key(conn, p):
+        """Ce qui relance une série d'échecs : VMs en attente et plan modifié."""
+        pending = _rdb.get_selector_watch(conn, p["id"])["pending"]
+        return [sorted(x.get("uid") or "" for x in pending), p.get("updated_at") or ""]
+
+    def _finished(self, conn, p, run, flag):
+        """Fin d'une protection lancée par ce fil : réussite = série effacée ;
+        échec = attente doublée, un événement au premier échec seulement."""
+        pid = p["id"]
+        if run.status == "done":
+            _rdb.clear_plan_flag(conn, "auto-protect", pid)
+            return
+        failures = int((flag or {}).get("failures") or 0) + 1
+        delay = min(REPLICATION_AUTO_PROTECT_EVERY_S * 2 ** (failures - 1), REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S)
+        error = str(getattr(run, "error_summary", "") or run.status)[:200]
+        # les constats bloquants du contrôle disent quoi corriger (classe absente, volume chiffré...)
+        found = (((getattr(run, "result", None) or {}).get("output") or {}).get("findings")) or []
+        codes = sorted({f.get("code") for f in found if isinstance(f, dict) and f.get("level") == "block"} - {None})
+        if codes:
+            error = f"{error} ({', '.join(codes)})"
+        now_iso = _rp.iso(_repl_now())
+        _rdb.set_plan_flag(conn, "auto-protect", pid, {
+            "key": self._key(conn, p), "failures": failures, "since": (flag or {}).get("since") or now_iso,
+            "next_at": self._wall() + delay, "retry": f"{delay // 3600} h" if delay >= 3600 else f"{delay // 60} min", "error": error, "action_id": run.id}, by="console")
+        if failures == 1:
+            _rdb.record_event(conn, "plan", step="auto-protect", plan_id=pid, host=p["source_cluster"], level="warn",
+                              code="auto-protect-failed",
+                              message=f"automatic protection failed: {error}; retried with a growing delay "
+                                      f"(up to {REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S // 3600} h)",
+                              facts={"action_id": run.id, "pending": len(self._key(conn, p)[0])}, by="console",
+                              action_id=run.id)
+        log_watch.info("replication auto-protect for %s failed (%d), next try in %d s", pid, failures, delay)
+
+    def tick(self):
+        """Rend la liste des plans pour lesquels `protect` a été lancé."""
+        if not self._enabled() or not (BIN_DIR / REPLICATION_SCRIPT).is_file():
+            return []
+        path = _replication_db_path()
+        if not path.exists():
+            return []
+        launched = []
+        conn = _rdb.connect(path)
+        try:
+            plans = {p["id"]: p for p in _rdb.list_plans(conn)}
+            for pid in list(plans):
+                flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                run = self.runs.get(pid)
+                if run is not None and run.status not in self._RUNNING:
+                    self.runs.pop(pid, None)
+                    self._finished(conn, plans[pid], run, flag)
+                    flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                if flag and (not self._eligible(conn, plans[pid]) or flag.get("key") != self._key(conn, plans[pid])):
+                    _rdb.clear_plan_flag(conn, "auto-protect", pid)     # VMs ou plan changés : nouvelle série
+            now = self._clock()
+            for p in self.candidates(conn):
+                if self._stop.is_set():
+                    break                    # arrêt de la console : plus rien n'est lancé
+                pid = p["id"]
+                if pid in self.runs:
+                    continue                 # la précédente n'est pas finie
+                flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                if flag and self._wall() < float(flag.get("next_at") or 0):
+                    continue                 # en attente après un échec
+                at = self.last.get(pid)
+                if at is not None and now - at < REPLICATION_AUTO_PROTECT_EVERY_S:
+                    continue
+                run = self._launch(p)
+                if run:
+                    self.last[pid] = now
+                    if hasattr(run, "status"):
+                        self.runs[pid] = run
+                    launched.append(pid)
+        finally:
+            conn.close()
+        return launched
+
+    @staticmethod
+    def _launch_protect(plan):
+        """`protect` en action suivie par `console`, hors de toute requête :
+        contexte d'application pour les réponses de refus, auteur imposé,
+        aucun kubeconfig de personne (la ligne de commande prend ceux de la
+        console)."""
+        with app.app_context():
+            if _repl_budget_error(plan) is not None:
+                return False
+            run, err = _repl_action(plan, "protect", _repl_base("protect", plan["id"], by="console"), "operator")
+        if err is not None or run is None:
+            return None                      # geste en cours sur le plan ou un cluster : au tour suivant
+        run.result = dict(run.result or {}, by="console", auto=True)
+        log_watch.info("replication auto-protect started for %s (action %s)", plan["id"], run.id)
+        return run
+
+    def _loop(self):
+        while not self._stop.wait(REPLICATION_AUTO_PROTECT_POLL_S):
+            try:
+                self.tick()
+            except Exception as e:           # noqa: BLE001 : le fil ne meurt pas
+                log_watch.warning("replication auto-protect: %s", type(e).__name__)
+
+    def start(self):
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="replication-auto-protect")
+        self._thread.start()
+        return self._thread
+
+    def stop(self, timeout=10):
+        """Plus aucun lancement : le fil est attendu (un tour en cours finit
+        de lancer avant que l'arrêt ne relève les actions en cours)."""
+        self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout)
+
+
+REPLICATION_AUTO_PROTECT = None
 
 
 # --- fil de suivi ------------------------------------------------------------------
@@ -27877,7 +28464,7 @@ def _start_replication_follower():
     lecteur, sauf HARVESTER_OPS_REPLICATION_FOLLOW=0, et pas si une autre
     console suit déjà le même répertoire d'état (verrou
     `replication-follow.lock`)."""
-    global REPLICATION_FOLLOWER, REPLICATION_FOLLOWER_ELSEWHERE, _REPLICATION_FOLLOW_LOCK_FD
+    global REPLICATION_FOLLOWER, REPLICATION_FOLLOWER_ELSEWHERE, _REPLICATION_FOLLOW_LOCK_FD, REPLICATION_AUTO_PROTECT
     if IS_READ_WORKER or not _replication_follow_env_on() or not (BIN_DIR / REPLICATION_SCRIPT).is_file():
         return None
     with _replication_follower_lock:
@@ -27896,6 +28483,10 @@ def _start_replication_follower():
             _replication_follow_cmd, _replication_follow_log,
             _replication_follow_enabled, _replication_follow_grace, ready=_MODULE_READY)
         REPLICATION_FOLLOWER.start()
+        # protection automatique : la console qui tient le verrou du suivi seulement
+        if REPLICATION_AUTO_PROTECT is None:
+            REPLICATION_AUTO_PROTECT = ReplicationAutoProtect()
+            REPLICATION_AUTO_PROTECT.start()
         return REPLICATION_FOLLOWER
 
 
@@ -27987,6 +28578,8 @@ def _replication_shutdown(clock=time.monotonic, sleep=time.sleep, budget=None):
     podman tuerait tout sans prévenir. Rend {action: code de sortie}."""
     budget = REPLICATION_STOP_BUDGET if budget is None else budget
     start = clock()
+    if REPLICATION_AUTO_PROTECT is not None:
+        REPLICATION_AUTO_PROTECT.stop()          # plus aucun geste lancé par la console
     sup = REPLICATION_FOLLOWER
     stopper = None
     if sup is not None:

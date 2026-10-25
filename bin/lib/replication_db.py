@@ -9,8 +9,14 @@ Migrations additives seulement : chaque table est décrite par ses colonnes,
 créée si elle manque, et complétée des colonnes qui manquent à une base créée
 par une version précédente (ALTER TABLE ADD COLUMN, valeur par défaut).
 
-Les secrets ne sont jamais rangés ici (le carnet de reprise vit sur la
-cible). Rien n'est jamais écrit sur un cluster.
+Les secrets des VMs ne sont jamais rangés ici (le carnet de reprise vit
+sur la cible). Deux sortes de secrets le sont, la base étant privée (0600,
+posé avant la première ouverture, voir `connect`) : ceux des notifications
+externes (jetons, mots de passe, URL secrètes, réglage `notify` de la table
+`settings`) et les en-têtes secrets des actions annexes (`secret_headers`
+dans `plans.options`), avec leurs adresses complètes. Ils ne sortent jamais
+d'une lecture (`replication_notify.mask`, `replication.mask_plan`). Rien
+n'est jamais écrit sur un cluster.
 """
 
 import json
@@ -25,6 +31,7 @@ from pathlib import Path
 
 import cluster_decl
 import replication as rp
+import replication_insight as ri
 
 RETENTION_DAYS = 400
 # Statistiques gardées passage par passage pendant 30 jours, puis réduites à
@@ -246,6 +253,40 @@ TABLES = {
         ("heartbeat", "TEXT NOT NULL DEFAULT ''"),
         ("ttl_s", "INTEGER NOT NULL DEFAULT 0"),
     ],
+    # VMs d'un plan à sélecteur relevées par le suiveur (relecture des specs) :
+    # celles qui portent l'étiquette sans être protégées (`pending`, liste de
+    # {uid, namespace, name, since}) et celles qui l'ont perdue (`left_uids`).
+    # Chaque constat n'est écrit au journal qu'une fois par VM.
+    "selector_watch": [
+        ("plan_id", "TEXT PRIMARY KEY"),
+        ("pending", "TEXT NOT NULL DEFAULT '[]'"),
+        ("left_uids", "TEXT NOT NULL DEFAULT '[]'"),
+        ("checked_at", "TEXT NOT NULL DEFAULT ''"),
+    ],
+    # réglages de la réplication (`notify` : notifications externes, secrets
+    # compris, jamais montrés ; `notify_cursor` : dernier événement traité)
+    "settings": [
+        ("key", "TEXT PRIMARY KEY"),
+        ("value", "TEXT NOT NULL DEFAULT 'null'"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_by", "TEXT NOT NULL DEFAULT ''"),
+    ],
+    # essais actifs d'un lien entre deux clusters (`link test`)
+    "link_tests": [
+        ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+        ("at", "TEXT NOT NULL"),
+        ("source", "TEXT NOT NULL"),
+        ("target", "TEXT NOT NULL"),
+        ("by", "TEXT NOT NULL DEFAULT ''"),
+        ("action_id", "TEXT NOT NULL DEFAULT ''"),
+        ("size_bytes", "INTEGER NOT NULL DEFAULT 0"),
+        ("write_bps", "REAL"),
+        ("read_bps", "REAL"),
+        ("write_s", "REAL"),
+        ("read_s", "REAL"),
+        ("error", "TEXT NOT NULL DEFAULT ''"),
+        ("backup_target", "TEXT NOT NULL DEFAULT ''"),
+    ],
 }
 KEYS = {
     "plan_resources": ("plan_id", "generation", "resource_uid"),
@@ -267,9 +308,10 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS stats_resource ON stats (resource_uid, ts)",
     # lignes que la réduction à l'heure n'a pas encore vues
     "CREATE INDEX IF NOT EXISTS stats_unreduced ON stats (pass_at) WHERE reduced = 0",
+    "CREATE INDEX IF NOT EXISTS link_tests_pair ON link_tests (source, target, id)",
 )
 _JSON = {"plans": ("mappings", "options", "vms"), "events": ("facts",), "plan_resources": ("health",),
-         "runs": ("vms", "points", "steps")}
+         "runs": ("vms", "points", "steps"), "selector_watch": ("pending", "left_uids"), "settings": ("value",)}
 
 
 class StateConflict(Exception):
@@ -648,9 +690,12 @@ def delete_plan(conn, plan_id):
             return False
         if p["state"] not in ("draft", "unprotected"):
             raise StateConflict(plan_id, p["state"], "deleted", "only a draft or unprotected plan can be deleted")
-        for t in ("plan_resources", "plan_volumes", "ticks", "tick_hours", "measures", "leases", "locks"):
+        for t in ("plan_resources", "plan_volumes", "ticks", "tick_hours", "measures", "leases", "locks",
+                  "selector_watch"):
             conn.execute(f'DELETE FROM "{t}" WHERE plan_id = ?', (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+        for kind in PLAN_FLAGS:
+            conn.execute("DELETE FROM settings WHERE key = ?", (f"{kind}:{plan_id}",))
     return True
 
 
@@ -988,16 +1033,35 @@ def plan_view(conn, plan, now):
             "events": events, "health": health, "vm_running": vm_running}
 
 
+def _plan_rows_alerts(conn, plans, now, role=None, side="any"):
+    """[(ligne, alertes)] : la ligne de `replication.plan_row`, complétée
+    du résumé des transferts (`transfer`), des VMs du sélecteur pas encore
+    protégées (`pending_vms`), du nombre d'alertes en cours (`alerts`) et de
+    la joignabilité vue par le suiveur (`reach`)."""
+    out = []
+    for p in plans:
+        v = plan_view(conn, p, now)
+        row = rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
+                          role=role, health=v["health"], side=side)
+        pending = get_selector_watch(conn, p["id"])["pending"] if p.get("selector") else []
+        alerts = ri.plan_alerts(p, row, v["health"], pending, alert_since(conn, p["id"]),
+                                stale=get_plan_flag(conn, "carnet-stale", p["id"]),
+                                auto_failed=get_plan_flag(conn, "auto-protect", p["id"]))
+        row["transfer"] = ri.transfer_summary(list_stats(conn, p["id"], since=rp._t(now) - timedelta(days=1),
+                                                         limit=100000) or last_stats(conn, p["id"]), now)
+        row["pending_vms"] = [f"{x['namespace']}/{x['name']}" for x in pending]
+        row["alerts"] = len(alerts)
+        row["reach"] = ri.reach(v["health"])
+        out.append((row, alerts))
+    return out
+
+
 def plan_rows(conn, plans, now, role=None, side="any"):
     """Lignes de plans (`replication.plan_row`) lues par `plan_view` : la
     ligne de commande (`plan list`) et la console (menu racine) passent par
-    ici, et rendent donc les mêmes objets."""
-    rows = []
-    for p in plans:
-        v = plan_view(conn, p, now)
-        rows.append(rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
-                                role=role, health=v["health"], side=side))
-    return rows
+    ici, et rendent donc les mêmes objets (voir `_plan_rows_alerts` pour les
+    champs ajoutés)."""
+    return [row for row, _alerts in _plan_rows_alerts(conn, plans, now, role=role, side=side)]
 
 
 def host_rows(conn, host, side, now, role=None):
@@ -1493,3 +1557,204 @@ def last_follow_events(conn, since_per_backup=None):
 
 def retention_cutoff(now=None):
     return _now(now) - timedelta(days=RETENTION_DAYS)
+
+
+# ---------------------------------------------------------------------------
+# Écrans de suivi : séries, alertes, VMs du sélecteur, réglages, liens
+# ---------------------------------------------------------------------------
+
+def last_stats(conn, plan_id):
+    """La ligne `stats` la plus récente d'un plan (liste vide sans)."""
+    r = conn.execute("SELECT * FROM stats WHERE plan_id = ? ORDER BY pass_at DESC, resource_uid LIMIT 1",
+                     (plan_id,)).fetchone()
+    return [dict(r)] if r else []
+
+
+def stats_series(conn, plan, range_name, now, resource_uid=None):
+    """Points du graphique d'un plan (`replication_insight.bucket_series`)
+    sur une fenêtre de SERIES_RANGES. ValueError si la fenêtre est
+    inconnue."""
+    range_s, bucket_s = ri.series_range(range_name)
+    rows = list_stats(conn, plan["id"], resource_uid=resource_uid, since=ri.window_start(now, range_s),
+                      limit=100000)
+    return {"plan": plan["id"], "range": range_name, "bucket_s": bucket_s,
+            "rpo_objective_s": plan.get("rpo_objective_s"),
+            "points": ri.bucket_series(rows, bucket_s, now, range_s)}
+
+
+# codes du journal qui datent une alerte ; `error` : passage du plan en erreur
+_ALERT_EVENT_CODES = tuple(c for c in ri.ALERT_CODES if c != "plan-error") + ("error",)
+
+
+def alert_since(conn, plan_id):
+    """{(uid, code): date du dernier événement} des codes d'alerte d'un plan
+    (uid vide : constat du plan entier)."""
+    q = ("SELECT resource_uid, code, MAX(ts) AS ts FROM events WHERE plan_id = ? AND code IN ("
+         + ",".join("?" for _ in _ALERT_EVENT_CODES) + ") GROUP BY resource_uid, code")
+    return {(r["resource_uid"], r["code"]): r["ts"] for r in conn.execute(q, [plan_id, *_ALERT_EVENT_CODES])}
+
+
+def alerts(conn, now, host=None):
+    """Alertes en cours de tous les plans (ou de ceux où `host` est source ou
+    cible), erreurs d'abord : {"count", "alerts"}."""
+    found = []
+    for _row, al in _plan_rows_alerts(conn, list_plans(conn, host=host), now):
+        found += al
+    found = ri.sort_alerts(found)
+    return {"count": len(found), "alerts": found}
+
+
+def get_selector_watch(conn, plan_id):
+    r = _row("selector_watch", conn.execute("SELECT * FROM selector_watch WHERE plan_id = ?",
+                                            (plan_id,)).fetchone())
+    if not r:
+        return {"plan_id": plan_id, "pending": [], "left_uids": [], "checked_at": ""}
+    r["pending"] = [x for x in r.get("pending") or [] if isinstance(x, dict)]
+    r["left_uids"] = [x for x in r.get("left_uids") or [] if isinstance(x, str)]
+    return r
+
+
+def set_selector_watch(conn, plan_id, pending, left_uids, now=None):
+    """Range ce que le suiveur a relevé du sélecteur d'un plan (remplace)."""
+    vals = {"plan_id": plan_id, "pending": [{k: x.get(k) or "" for k in ("uid", "namespace", "name", "since")}
+                                            for x in pending],
+            "left_uids": sorted(set(left_uids)), "checked_at": _iso(_now(now))}
+    with _tx(conn):
+        conn.execute("INSERT INTO selector_watch (plan_id, pending, left_uids, checked_at) VALUES (?, ?, ?, ?)"
+                     " ON CONFLICT (plan_id) DO UPDATE SET pending = excluded.pending,"
+                     " left_uids = excluded.left_uids, checked_at = excluded.checked_at",
+                     (plan_id, json.dumps(vals["pending"], sort_keys=True), json.dumps(vals["left_uids"]),
+                      vals["checked_at"]))
+    return get_selector_watch(conn, plan_id)
+
+
+def get_setting(conn, key, default=None):
+    r = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+    if r is None:
+        return default
+    try:
+        v = json.loads(r["value"])
+    except ValueError:
+        return default
+    return default if v is None else v
+
+
+def set_setting(conn, key, value, by="", now=None):
+    with _tx(conn):
+        conn.execute('INSERT INTO settings (key, value, updated_at, updated_by) VALUES (?, ?, ?, ?)'
+                     ' ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at,'
+                     ' updated_by = excluded.updated_by',
+                     (key, json.dumps(value, sort_keys=True), _iso(_now(now)), by or ""))
+
+
+# Marques d'un plan rangées dans `settings` (clé `<genre>:<plan>`) :
+# `carnet-stale` : réglages de reprise changés sur un plan protégé, pas encore
+#   réécrits par protect ({"keys", "since", "by"}) ;
+# `auto-protect` : échecs de la protection automatique et prochain essai
+#   ({"key", "failures", "since", "next_at", "error"}).
+PLAN_FLAGS = ("carnet-stale", "auto-protect")
+
+
+def get_plan_flag(conn, kind, plan_id):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    return get_setting(conn, f"{kind}:{plan_id}")
+
+
+def set_plan_flag(conn, kind, plan_id, value, by="", now=None):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    set_setting(conn, f"{kind}:{plan_id}", value, by=by, now=now)
+
+
+def clear_plan_flag(conn, kind, plan_id):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    with _tx(conn):
+        cur = conn.execute("DELETE FROM settings WHERE key = ?", (f"{kind}:{plan_id}",))
+    return cur.rowcount > 0
+
+
+def mark_carnet_stale(conn, plan_id, keys, baseline=None, by="", now=None, replace=False):
+    """Note `keys` parmi les réglages de reprise changés depuis le dernier
+    protect (ajoutées, ou à la place des clés notées avec `replace`).
+    `baseline` : les valeurs du carnet au dernier protect (`carnet_values`),
+    gardées à la première marque pour comparer les changements suivants."""
+    cur = get_plan_flag(conn, "carnet-stale", plan_id) or {}
+    merged = sorted(set(keys) if replace else set(cur.get("keys") or []) | set(keys))
+    val = {"keys": merged, "since": cur.get("since") or _iso(_now(now)), "by": by or cur.get("by") or ""}
+    base = cur.get("baseline") if isinstance(cur.get("baseline"), dict) else baseline
+    if isinstance(base, dict):
+        val["baseline"] = base
+    set_plan_flag(conn, "carnet-stale", plan_id, val, by=by, now=now)
+
+
+def public_carnet_stale(flag):
+    """La marque `carnet-stale` montrée (clés, date, auteur), sans les
+    valeurs du dernier protect."""
+    return {k: v for k, v in flag.items() if k != "baseline"} if flag else flag
+
+
+def max_event_id(conn):
+    r = conn.execute("SELECT MAX(id) AS m FROM events").fetchone()
+    return int(r["m"] or 0)
+
+
+def events_after(conn, after_id, limit=500):
+    """Événements d'id > `after_id`, plus anciens d'abord (faits décodés)."""
+    rows = conn.execute("SELECT * FROM events WHERE id > ? ORDER BY id LIMIT ?",
+                        (int(after_id), max(1, min(int(limit), 5000))))
+    return [_row("events", r) for r in rows]
+
+
+_LINK_COLS = ("at", "source", "target", "by", "action_id", "size_bytes", "write_bps", "read_bps", "write_s",
+              "read_s", "error", "backup_target")
+
+
+def record_link_test(conn, row, now=None):
+    vals = {k: row.get(k) for k in _LINK_COLS if k in row}
+    vals.setdefault("at", _iso(_now(now)))
+    vals["error"] = scrub_text(vals.get("error") or "")[:500]
+    for k in ("source", "target"):
+        if not vals.get(k):
+            raise ValueError(f"link test: {k} is required")
+    with _tx(conn):
+        cur = conn.execute("INSERT INTO link_tests (" + ", ".join(f'"{k}"' for k in vals) + ") VALUES ("
+                           + ", ".join("?" for _ in vals) + ")", list(vals.values()))
+    return cur.lastrowid
+
+
+def last_link_tests(conn):
+    """Dernier essai actif de chaque lien : {(source, cible): ligne}."""
+    rows = conn.execute("SELECT t.* FROM link_tests t JOIN (SELECT MAX(id) AS id FROM link_tests"
+                        " GROUP BY source, target) m ON t.id = m.id")
+    return {(r["source"], r["target"]): dict(r) for r in rows}
+
+
+def links(conn, now):
+    """Liens entre clusters : un par couple (source, cible) qui porte un plan
+    ou un essai, avec ses plans, la cible de sauvegarde vue au dernier essai,
+    les débits passifs des passages de ses plans (24 h) et le dernier essai
+    actif."""
+    pairs = {}
+    for p in list_plans(conn):
+        pairs.setdefault((p["source_cluster"], p["target_cluster"]), []).append(p)
+    tests = last_link_tests(conn)
+    since = rp._t(now) - timedelta(days=1)
+    out = []
+    for key in sorted(set(pairs) | set(tests)):
+        plans = pairs.get(key, [])
+        stats = []
+        for p in plans:
+            stats += list_stats(conn, p["id"], since=since, limit=100000) or last_stats(conn, p["id"])
+        t = tests.get(key)
+        active = None
+        if t:
+            active = {"at": t["at"], "by": t["by"], "action_id": t["action_id"], "size_bytes": t["size_bytes"],
+                      "write_bps": t["write_bps"], "read_bps": t["read_bps"], "write_s": t["write_s"],
+                      "read_s": t["read_s"], "error": t["error"]}
+        out.append({"source": key[0], "target": key[1],
+                    "plans": [{"id": p["id"], "name": p["name"]} for p in plans],
+                    "backup_target": (t or {}).get("backup_target") or None,
+                    "passive": ri.link_passive(stats, now), "active": active})
+    return {"links": out}

@@ -170,6 +170,12 @@ tourner la console qui suit les plans sur le site de secours ou hors des
 deux sites, jamais seulement sur le site source : elle serait perdue avec
 lui.
 
+**Depuis la console.** Les mêmes étapes existent dans Disaster Recovery >
+Contrats : **Nouveau contrat** (blocs 1 à 5, mesurer d'abord ou protéger
+directement), puis la fenêtre du contrat (Vérifier, Mesurer, Protéger, les
+onglets Graphiques et Journal) et **Bascule...** (administrateur, nom du
+contrat tapé). Voir [capabilites.md, Écrans Disaster Recovery](capabilites.md#écrans-disaster-recovery).
+
 **Première protection.**
 1. `plan create --name web --from harv1 --to harv2 --vm default/web-01
    --rpo 15m --map-net default/prod=default/prod --map-sc

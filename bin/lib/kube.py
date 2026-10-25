@@ -93,6 +93,10 @@ class Kube:
                         f"--field-manager={field_manager}", "-f", "-",
                         input=body, timeout=timeout)
 
+    def logs(self, ns, name, tail=200):
+        """Journal d'une pod (les `tail` dernières lignes)."""
+        return self.run("logs", name, *self._ns(ns), f"--tail={int(tail)}")
+
     def delete(self, kind, ns, name, cascade=None):
         args = ["delete", kind, name, *self._ns(ns), "--wait=false"]
         if cascade:

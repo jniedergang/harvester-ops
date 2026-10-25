@@ -672,6 +672,105 @@ def collect_target(ctx, namespaces=()):
     return facts
 
 
+# ---------------------------------------------------------------------------
+# VMs candidates (fenêtre de création d'un plan, `candidates`)
+# ---------------------------------------------------------------------------
+
+# constat bloquant d'un disque -> raison montrée
+_CANDIDATE_REASONS = {"not-longhorn": "not-longhorn", "data-engine-v2": "longhorn-v2",
+                      "encrypted-volume": "encrypted", "rwx-share-manager": "rwx-not-migratable"}
+
+
+def plans_holding(conn, cluster):
+    """{uid ou `namespace/nom`: [identifiants de plan]} des plans dont
+    `cluster` est la source et qui tiennent encore la VM (tout état sauf
+    `unprotected`) : par ressource rangée, et par la liste de VMs du plan."""
+    out = {}
+    for p in db.list_plans(conn, host=cluster):
+        if p["source_cluster"] != cluster or p["state"] == "unprotected":
+            continue
+        keys = set(p.get("vms") or [])
+        for r in db.list_resources(conn, p["id"], p["generation"]):
+            keys.add(r["resource_uid"])
+        for k in keys:
+            out.setdefault(k, [])
+            if p["id"] not in out[k]:
+                out[k].append(p["id"])
+    return out
+
+
+def candidates(kube, cluster, namespace=None, selector=None, held=None):
+    """Les VMs d'un cluster source qu'un plan peut protéger, avec leurs
+    disques et ce qui les rend inéligibles (mêmes constats que le contrôle,
+    `replication.volume_findings` et `vm_disk_findings`). Quatre listes
+    seulement (VMs, VMI, PVC, PV) plus les volumes Longhorn et les classes,
+    quel que soit le nombre de VMs. `held` : `plans_holding`. Une VM est
+    éligible si elle a au moins un disque PVC et qu'aucun ne bloque ; un
+    disque que la réplication ne recopie pas (containerDisk...) est montré,
+    inéligible, sans rendre la VM inéligible."""
+    held = held or {}
+    ns = namespace or None
+    vms = kube.list(K_VM, ns, selector=selector or None)
+    vmis = {(_md(v).get("namespace"), _md(v).get("name")): v for v in kube.list(K_VMI, ns)}
+    pvcs = {(_md(p).get("namespace"), _md(p).get("name")): p for p in kube.list(K_PVC, ns)}
+    pvs = {_md(p).get("name"): p for p in kube.list(K_PV)}
+    lhv = {_md(v).get("name"): v for v in kube.list(K_LH_VOLUME, NS)}
+    classes = {_md(c).get("name"): c for c in kube.list(K_SC)}
+    out = []
+    for vm in sorted(vms, key=lambda v: (_md(v).get("namespace") or "", _md(v).get("name") or "")):
+        md = _md(vm)
+        vns, name = md.get("namespace"), md.get("name")
+        tspec = vt._tspec(vm)
+        domain = tspec.get("domain") or {}
+        cpu = domain.get("cpu") or {}
+        res = domain.get("resources") or {}
+        n_cpu = int(cpu.get("cores") or 1) * int(cpu.get("sockets") or 1) * int(cpu.get("threads") or 1) \
+            if cpu else _int((res.get("limits") or {}).get("cpu")) or 1
+        memory = (domain.get("memory") or {}).get("guest") or (res.get("limits") or {}).get("memory") or ""
+        ci = next((("nocloud" if "cloudInitNoCloud" in v else "configdrive") for v in tspec.get("volumes") or []
+                   if "cloudInitNoCloud" in v or "cloudInitConfigDrive" in v), "")
+        disks, reasons = [], []
+        for vol in tspec.get("volumes") or []:
+            claim = (vol.get("persistentVolumeClaim") or {}).get("claimName")
+            kind = next((t for t in rp._DISK_TYPES_NOT_REPLICATED if t in vol), None)
+            if kind:
+                disks.append({"disk": vol.get("name"), "claim": "", "size": 0, "used": 0, "storage_class": "",
+                              "image": "", "eligible": False, "reason": kind})
+                reasons.append(kind)
+                continue
+            if not claim:
+                continue
+            pvc = pvcs.get((vns, claim)) or {}
+            ps = _spec(pvc)
+            pv = pvs.get(ps.get("volumeName")) if ps.get("volumeName") else None
+            lh_name = ((_spec(pv).get("csi") or {}).get("volumeHandle")) or ps.get("volumeName") or ""
+            lh = lhv.get(lh_name)
+            sc = classes.get(ps.get("storageClassName"))
+            blocks = [f["code"] for f in rp.volume_findings(lh, pvc or {"metadata": {"name": claim}}, sc)
+                      if f["level"] == "block"]
+            reason = _CANDIDATE_REASONS.get(blocks[0], blocks[0]) if blocks else ""
+            if reason:
+                reasons.append(reason)
+            disks.append({"disk": vol.get("name"), "claim": claim,
+                          "size": vt.parse_quantity(((ps.get("resources") or {}).get("requests") or {}).get(
+                              "storage")) or _int(_spec(lh).get("size")),
+                          "used": _int(_status(lh).get("actualSize")),
+                          "storage_class": ps.get("storageClassName") or "",
+                          "image": (_md(pvc).get("annotations") or {}).get(rp.IMAGE_ID_ANNOTATION) or "",
+                          "eligible": not reason, "reason": reason})
+        pvc_disks = [d for d in disks if d["claim"]]
+        if not pvc_disks:
+            reasons.append("no-disk")
+        eligible = bool(pvc_disks) and all(d["eligible"] for d in pvc_disks)
+        plans = sorted(set(held.get(md.get("uid"), [])) | set(held.get(f"{vns}/{name}", [])))
+        out.append({"namespace": vns, "name": name, "uid": md.get("uid") or "",
+                    "running": _status(vmis.get((vns, name))).get("phase") == "Running",
+                    "labels": dict(md.get("labels") or {}), "cpu": n_cpu, "memory": memory,
+                    "networks": vt.vm_inventory(vm, {})["networks"], "cloud_init": ci, "disks": disks,
+                    "eligible": eligible, "reasons": sorted(set(reasons)), "plans": plans})
+    return {"cluster": cluster, "vms": out}
+
+
 def build_works(ctx, src_facts, dst_facts):
     """Le travail par VM : noms cibles, classe, paramètres, PVC cibles."""
     plan = ctx.plan
@@ -684,12 +783,17 @@ def build_works(ctx, src_facts, dst_facts):
         w = {"uid": vm["uid"], "namespace": vm["namespace"], "name": vm["name"], "vm": vm["vm"],
              "firmware_uuid": vm.get("firmware_uuid") or "", "tns": tns, "tname": tname,
              "job": rp.recurring_job_name(pid, vm["uid"]), "disks": []}
+        ref = f"{vm['namespace']}/{vm['name']}"
         for d in vm.get("disks") or []:
-            sc, _f = rp._target_class(d, plan, dst_facts)
+            sc, _f = rp._target_class(d, plan, dst_facts, ref)
             params = ((dst_facts.get("classes_raw") or {}).get(sc) or {}).get("parameters") or {}
             spec = _spec(d.get("lh_volume"))
             image = d.get("image")
-            mapped = (maps.get("images") or {}).get(image) if image else None
+            # une classe choisie pour ce disque l'emporte sur l'image mappée :
+            # le PVC ne porte alors pas l'image de la cible (sa classe serait
+            # une autre)
+            mapped = (maps.get("images") or {}).get(image) \
+                if image and not rp.disk_class_override(plan, ref, d["disk"]) else None
             w["disks"].append(dict(
                 d, target_volume=rp.target_volume_name(pid, vm["uid"], d["disk"], gen, vm["name"]),
                 target_claim=rp.target_claim(plan, vm["namespace"], d["claim"]), target_class=sc,
@@ -1862,7 +1966,7 @@ def _choose_retain(retain):
     return n
 
 
-def protect(ctx, interval=None, dry_run=False, retain=None):
+def protect(ctx, interval=None, dry_run=False, retain=None, accept_degraded_standby=False):
     """(`draft`, `measuring`, `protecting`, `protected`, `error`) ->
     `protecting` -> `protected`. Rejouable : chaque sous-étape constate
     l'existant. Annulation : retour arrière de ce que cette exécution a
@@ -1870,7 +1974,10 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
     restauration initiale n'est pas perdue), plan en `error`.
     `retain` (v1.99.0, décision 56) : nombre de sauvegardes gardées par la
     tâche récurrente ; sur un plan déjà protégé, la tâche existante est mise
-    à jour avec la ligne du plan (seul chemin pour changer la rétention)."""
+    à jour avec la ligne du plan (seul chemin pour changer la rétention).
+    `accept_degraded_standby` : pour cette exécution, comme la clé de reprise
+    du même nom (des répliques au-delà des nœuds de la cible avertissent au
+    lieu de bloquer)."""
     uids = []
     prev = {}
     try:
@@ -1885,9 +1992,14 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         uids = [v["uid"] for v in src.get("vms") or []]
         dst = collect_target(ctx, [rp.target_ref(ctx.plan, {"namespace": v["namespace"], "name": v["name"]})[0]
                                    for v in src.get("vms") or []])
-        findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase="protect"))
+        checked = dict(ctx.plan, id=ctx.plan_id, phase="protect")
+        if accept_degraded_standby:
+            checked["options"] = dict(checked.get("options") or {}, accept_degraded_standby=True)
+        findings = rp.check(src, dst, checked)
         if rp.blocking(findings):
-            raise Refused("check", "the pre-check refuses this protection", findings=findings)
+            hint = rp.refusal_hint(findings)
+            raise Refused("check", "the pre-check refuses this protection" + (f": {hint}" if hint else ""),
+                          findings=findings)
         works = build_works(ctx, src, dst)
         activated = sorted(d["target_volume"] for w in works for d in w["disks"]
                            if _is_activated(ctx.dst.get(K_LH_VOLUME, NS, d["target_volume"])))
@@ -1949,6 +2061,8 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         ensure_backing_images(ctx, works, src)
         ensure_standby(ctx, works, latest, visible)
         write_carnets(ctx, works)
+        # carnets réécrits avec les réglages du moment : plus rien d'en retard
+        db.clear_plan_flag(ctx.conn, "carnet-stale", ctx.plan_id)
         _set_resources(ctx, uids, "protected")
         _set_state(ctx, "protected")
         ctx.event("protect", "done", code="protected", facts={"interval_s": chosen, "how": how, "vms": len(uids)})
@@ -2438,8 +2552,24 @@ def _final_applied(ctx, carnet, finals):
     return True
 
 
+def stale_carnet_finding(conn, plan_id, gen, sel, accepted=False):
+    """Carnet de reprise d'avant les réglages du plan : marque `carnet-stale`
+    (réglages changés sur le plan protégé, protect pas relancé) ou santé
+    relevée par le suiveur (`carnet_stale` d'une VM). La bascule démarrerait
+    ces VMs avec les réglages du dernier protect : refusé sauf accord
+    explicite (`accept_stale_carnet`, alors un avertissement). None sinon."""
+    flag = db.get_plan_flag(conn, "carnet-stale", plan_id) or {}
+    health = db.health_map(conn, plan_id, gen)
+    vms = sorted(f"{r['namespace']}/{r['name']}" for r in sel
+                 if (health.get(r["resource_uid"]) or {}).get("carnet_stale"))
+    if not flag.get("keys") and not vms:
+        return None
+    return rp._finding("carnet-stale", "warn" if accepted else "block", keys=list(flag.get("keys") or []),
+                       vms=vms, since=flag.get("since"), accepted=bool(accepted))
+
+
 def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=False, yes=False, dry_run=False,
-             record=True):
+             record=True, accept_stale_carnet=False):
     """(`protected`, `failing_over`, `error`) -> `failing_over` ->
     `failed_over` (ou `protected` si une partie seulement du plan bascule).
 
@@ -2494,6 +2624,11 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             src = _unplanned_src_facts(ctx, carnets)
             phase = "failover-unplanned"
         findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase=phase))
+        if not resuming:
+            # une VM déjà activée ne peut que finir : le contrôle ne vaut qu'au départ
+            stale = stale_carnet_finding(ctx.conn, ctx.plan_id, ctx.gen, sel, accept_stale_carnet)
+            if stale:
+                findings.append(stale)
         extra, dry = _preflight_targets(ctx, carnets, dst)
         findings = sorted(findings + extra, key=lambda f: rp._ORDER[f["level"]])
         if rp.blocking(findings):
@@ -2502,7 +2637,11 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             if phase == "failover-unplanned":
                 findings = sorted(findings + _unplanned_dry_findings(ctx, sel, carnets),
                                   key=lambda f: rp._ORDER[f["level"]])
-            return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry)
+            # ordre de démarrage et actions annexes qu'aurait la bascule (aucun appel)
+            opts = ctx.plan.get("options") or {}
+            return _result(ctx, "dry-run", EXIT_OK, "dry run", findings=findings, dry_run=dry,
+                           waves=rp.failover_waves(opts, [f"{r['namespace']}/{r['name']}" for r in sel]),
+                           hooks=rp.hooks_summary(opts))
         ctx.safe_point()
         _lock_checked(ctx, "failover", before, lambda: _sel_key(_select(ctx, vms)), _sel_key(sel))
     except Refused as e:
@@ -2526,9 +2665,12 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
     refs = [f"{r['namespace']}/{r['name']}" for r in sel]
     prev = _open_run(ctx, "failover")
     run_id = prev["id"] if prev else db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, vms=refs,
-                                                    points={"mode": mode, "force_unplanned": bool(force_unplanned)},
+                                                    points={"mode": mode, "force_unplanned": bool(force_unplanned),
+                                                            "accept_stale_carnet": bool(accept_stale_carnet)},
                                                     by=ctx.by, action_id=ctx.action_id)
-    points = dict((prev or {}).get("points") or {}, mode=mode, force_unplanned=bool(force_unplanned))
+    points = dict((prev or {}).get("points") or {}, mode=mode, force_unplanned=bool(force_unplanned),
+                  accept_stale_carnet=bool(accept_stale_carnet) or bool(((prev or {}).get("points") or {})
+                                                                       .get("accept_stale_carnet")))
     paused_before = bool(opts.get("paused"))
     if prev and "paused_before" in points:
         paused_before = points["paused_before"]
@@ -2655,7 +2797,7 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         # points lus avant l'activation, rangés avant elle : un arrêt brutal
         # pendant l'activation ne les perd pas (le moteur activé n'en a plus)
         db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
-                      by=ctx.by, action_id=ctx.action_id)
+                      steps=ctx.steps, by=ctx.by, action_id=ctx.action_id)
         # --- point de non-retour : l'activation est définitive ---
         for r in go:
             uid = r["resource_uid"]
@@ -2673,23 +2815,61 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         # point réel est plus récent que celui rangé : `lost_after` reste
         # prudent (plus tôt que la réalité), jamais optimiste.
         src_back = probe(ctx, "src") == "ok"
-        for r in go:
-            uid, key = r["resource_uid"], f"{r['namespace']}/{r['name']}"
-            _bring_up(ctx, op, r, carnets[uid], opts)
-            if src_back:
-                tvm = _md(carnets[uid]["vm"])
-                try:
-                    ctx.src.patch(K_VM, r["namespace"], r["name"], {"metadata": {"annotations": {
-                        FAILED_OVER_TO: f"{ctx.plan['target_cluster']}/{tvm['namespace']}/{tvm['name']}",
-                        STOPPED_ANNOTATION: None}}})
-                except Exception as e:          # noqa: BLE001
-                    ctx.event(op, "annotate-source", uid, "source", level="warn", code="annotation-failed",
-                              message=str(e)[:300])
-            _set_resources(ctx, [uid], "failed_over")
-            ctx.event(op, "done", uid, "target", code="failed-over", message=f"{key} failed over ({mode})",
-                      facts={"lost_after": result["lost_after"].get(key), "point_at": result["point_at"].get(key),
-                             "skew_s": result["skew_s"].get(key),
-                             "points": points["applied"].get(uid), "mode": mode})
+        # démarrage par vagues (v1.99.0, écrans) : les VMs d'une vague, puis
+        # sa condition de passage, puis ses actions annexes ; une VM listée
+        # nulle part part dans la dernière vague, implicite. Les actions
+        # `start` passent après l'activation, avant la première vague ; leur
+        # échec avertit, rien n'est défait (l'activation est définitive)
+        by_ref = {f"{r['namespace']}/{r['name']}": r for r in go}
+        # périmètre de la bascule : à la reprise, les VMs déjà basculées par
+        # elle comptent (les actions d'une vague interrompue restent dues)
+        scope = list(dict.fromkeys(list(points.get("scope") or []) + list((prev or {}).get("vms") or [])
+                                   + list(by_ref)))
+        points["scope"] = scope
+        hook_log = []
+        run_hooks(ctx, op, "start", points, run_id, started, refs, hook_log)
+        for wave in rp.failover_waves(opts, scope):
+            if not wave["vms"]:
+                continue                        # aucune VM de cette bascule : sautée, actions comprises
+            if not any(ref in by_ref for ref in wave["vms"]):
+                # reprise : vague déjà démarrée, seules ses actions non appelées restent
+                run_hooks(ctx, op, f"wave:{wave['index']}", points, run_id, started, refs, hook_log)
+                continue
+            wave = dict(wave, vms=[ref for ref in wave["vms"] if ref in by_ref])
+            ctx.step = "wave"
+            facts = {"index": wave["index"], "name": wave["name"], "vms": wave["vms"], "gate": wave["gate"]}
+            ctx.emit("wave", "running", f"wave {wave['index']}: {len(wave['vms'])} VM(s)")
+            ctx.event(op, "wave", side="target", code="wave-start",
+                      message=f"wave {wave['index']} {wave['name']}".rstrip(), facts=facts)
+            for ref in wave["vms"]:
+                r = by_ref[ref]
+                uid, key = r["resource_uid"], ref
+                _bring_up(ctx, op, r, carnets[uid], opts)
+                if src_back:
+                    tvm = _md(carnets[uid]["vm"])
+                    try:
+                        ctx.src.patch(K_VM, r["namespace"], r["name"], {"metadata": {"annotations": {
+                            FAILED_OVER_TO: f"{ctx.plan['target_cluster']}/{tvm['namespace']}/{tvm['name']}",
+                            STOPPED_ANNOTATION: None}}})
+                    except Exception as e:          # noqa: BLE001
+                        ctx.event(op, "annotate-source", uid, "source", level="warn", code="annotation-failed",
+                                  message=str(e)[:300])
+                _set_resources(ctx, [uid], "failed_over")
+                ctx.event(op, "done", uid, "target", code="failed-over", message=f"{key} failed over ({mode})",
+                          facts={"lost_after": result["lost_after"].get(key),
+                                 "point_at": result["point_at"].get(key), "skew_s": result["skew_s"].get(key),
+                                 "points": points["applied"].get(uid), "mode": mode})
+            passed = wave_gate(ctx, op, wave, [carnets[by_ref[ref]["resource_uid"]] for ref in wave["vms"]])
+            ctx.event(op, "wave", side="target", code="wave-passed" if passed else "wave-gate-timeout",
+                      level="info" if passed else "warn",
+                      message=f"wave {wave['index']} " + ("passed its gate" if passed else
+                                                          "did not pass its gate in time: going on"),
+                      facts=facts)
+            ctx.emit("wave", "done", f"wave {wave['index']} " + ("passed" if passed else "gate timed out"))
+            run_hooks(ctx, op, f"wave:{wave['index']}", points, run_id, started, refs, hook_log)
+        run_hooks(ctx, op, "end", points, run_id, started, refs, hook_log)
+        if hook_log:
+            result["hook_results"] = hook_log
         back = [r["resource_uid"] for r in sel if r not in go]
         _set_resources(ctx, back, "protected", "not failed over")
         rest = [x for x in db.list_resources(ctx.conn, ctx.plan_id, ctx.gen) if x["state"] != "failed_over"]
@@ -2734,7 +2914,12 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
         msg = f"failover stopped after activation ({e}): run failover again to finish"
         db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, result="interrupted", vms=refs,
                       points=points, steps=ctx.steps, by=ctx.by, action_id=ctx.action_id, run_id=run_id)
-        _error(ctx, uids, msg)
+        # une VM déjà basculée par cette bascule le reste (la reprise ne
+        # reprend que les autres) ; avant, elle passait en `error`, d'où
+        # aucune sortie ne menait à la reprise
+        _error(ctx, [u for u in uids
+                     if (db.get_resource(ctx.conn, ctx.plan_id, u, ctx.gen) or {}).get("state") != "failed_over"],
+               msg)
         return _result(ctx, "interrupted", EXIT_CANCELLED if cancelled else EXIT_FAIL, msg, run_id=run_id, **result)
 
 
@@ -2833,6 +3018,137 @@ def _bring_up(ctx, op, r, carnet, opts):
 # ---------------------------------------------------------------------------
 # Déprotection
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Vagues et actions annexes de la bascule
+# ---------------------------------------------------------------------------
+
+def _agent_connected(vmi):
+    """Condition `AgentConnected` de la VMI (KubeVirt, posée quand l'agent
+    invité qemu-guest-agent répond)."""
+    for c in _status(vmi).get("conditions") or []:
+        if c.get("type") == "AgentConnected":
+            return str(c.get("status")) == "True"
+    return False
+
+
+def wave_gate(ctx, op, wave, carnets):
+    """Condition de passage d'une vague, une fois ses VMs démarrées (le
+    démarrage attend déjà `Running`, `_bring_up`) : `running` passe tout de
+    suite, `agent` attend l'agent invité de chaque VM (au plus `seconds`),
+    `delay` attend `seconds`. Une VM laissée arrêtée (`start: stopped`)
+    n'attend rien. Rend False quand `agent` n'est pas venu à temps (la
+    bascule continue : avertissement). Attentes au travers de `wait_for`,
+    donc annulables et interrompues par l'arrêt de la console."""
+    gate = wave.get("gate") or {}
+    kind, secs = gate.get("kind") or "running", int(gate.get("seconds") or 0)
+    ctx.step = "wave"                   # étape rangée si la console s'arrête ici
+    started = [_md(c["vm"]) for c in carnets if (_spec(c["vm"]).get("runStrategy") or "Halted") != "Halted"]
+    if kind == "running" or not started:
+        return True
+    if kind == "delay":
+        until = ctx.now() + secs
+        wait_for(ctx, "wave", f"wave {wave['index']} delay", lambda: True if ctx.now() >= until else "waiting",
+                 secs + 1, every=min(5, max(1, secs)))
+        return True
+
+    def agents():
+        late = [f"{m['namespace']}/{m['name']}" for m in started
+                if not _agent_connected(ctx.dst.get(K_VMI, m["namespace"], m["name"]))]
+        return True if not late else f"guest agent not connected yet on {len(late)} VM(s)"
+    try:
+        wait_for(ctx, "wave", f"wave {wave['index']} guest agents", agents, secs, every=2)
+    except TransferError:
+        return False
+    return True
+
+
+def call_hook(hook, allow=None, clock=time.monotonic, resolver=None, connector=None):
+    """Appelle une action annexe HTTP par la garde anti-SSRF
+    (`replication_http`) : adresse interne refusée sauf
+    `replication.hooks.allow_private`, aucune redirection suivie (un en-tête
+    secret ne part jamais ailleurs). Rend {"ok", "status", "seconds",
+    "error"} ; jamais d'exception pour un échec de l'appel (refus, délai,
+    statut >= 400). Les valeurs des en-têtes secrets sont retirées du
+    message d'erreur ; le corps de la réponse n'est ni gardé ni montré."""
+    import replication_http as rh
+    import url_fetch_guard as ufg
+    allow = rh.allow_for("hooks") if allow is None else allow
+    headers = dict(hook.get("headers") or {})
+    headers.update(hook.get("secret_headers") or {})
+    body = hook.get("body") or ""
+    method = hook.get("method") or "POST"
+    data = body.encode() if body and method != "GET" else None
+    kw = {"resolver": resolver}
+    if connector is not None:
+        kw["connector"] = connector
+    t0 = clock()
+    status, error = None, ""
+    try:
+        status = rh.request(method, hook["url"], headers=headers, body=data,
+                            timeout=int(hook.get("timeout_s") or rp.HOOK_TIMEOUT_DEFAULT), allow=allow, **kw)
+        if status >= 400:
+            error = f"HTTP {status}"
+    except ufg.FetchRefused as e:
+        error = rh.refusal_text(e, "hooks")
+    except Exception as e:                      # noqa: BLE001 : jamais d'exception vers la bascule
+        error = type(e).__name__
+    secs = round(clock() - t0, 3)
+    for v in rp.hook_secret_values([hook]):
+        error = error.replace(v, rp.MASK)
+    ok = status is not None and 200 <= status < 300 and not error
+    return {"ok": ok, "status": status, "seconds": secs, "error": error[:300]}
+
+
+def hook_event(ctx, op, hook, res):
+    """Le résultat d'un appel au journal : statut et durée, jamais d'en-tête."""
+    ctx.event(op, "hook", side="target", level="info" if res["ok"] else "warn",
+              code="hook-ok" if res["ok"] else "hook-failed",
+              message=f"hook {hook['name']} ({hook['at']}): " + (f"HTTP {res['status']}" if res["ok"] else
+                                                                (res["error"] or f"HTTP {res['status']}")),
+              facts={"name": hook["name"], "at": hook["at"], "status": res["status"], "seconds": res["seconds"]})
+
+
+def run_hooks(ctx, op, point, points, run_id, started, refs, log):
+    """Actions annexes d'un point de la bascule. Une action déjà appelée par
+    cette bascule (relance après une interruption) n'est pas rappelée :
+    `runs.points.hooks_done`. Un échec avertit et la bascule continue."""
+    hooks = rp.hooks_at(ctx.plan.get("options") or {}, point)
+    done = points.setdefault("hooks_done", [])
+    for h in hooks:
+        if h["name"] in done:
+            continue
+        ctx.safe_point()
+        ctx.step = "hook"
+        ctx.emit("hook", "running", f"hook {h['name']} ({point})")
+        res = call_hook(h)
+        hook_event(ctx, op, h, res)
+        ctx.emit("hook", "done" if res["ok"] else "error", f"hook {h['name']}: "
+                 + (f"HTTP {res['status']}" if res["ok"] else res["error"] or f"HTTP {res['status']}"))
+        log.append({"name": h["name"], "at": point, "ok": res["ok"], "status": res["status"],
+                    "seconds": res["seconds"]})
+        done.append(h["name"])
+        db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, points=points, vms=refs, run_id=run_id,
+                      steps=ctx.steps, by=ctx.by, action_id=ctx.action_id)
+
+
+def hook_test(conn, plan, name, by="", action_id="", now=None, allow=None):
+    """`hook test` : appelle une action annexe du plan tout de suite, résultat
+    au journal (opération `plan`, étape `hook`). Rend (résultat, action) ;
+    KeyError si l'action n'existe pas."""
+    hook = next((h for h in (plan.get("options") or {}).get("hooks") or [] if h.get("name") == name), None)
+    if hook is None:
+        raise KeyError(name)
+    res = call_hook(hook, allow=allow)
+    db.record_event(conn, "plan", step="hook", plan_id=plan["id"], host=plan["target_cluster"],
+                    side="target", level="info" if res["ok"] else "warn",
+                    code="hook-ok" if res["ok"] else "hook-failed",
+                    message=f"hook {name} tested: " + (f"HTTP {res['status']}" if res["ok"] else
+                                                     (res["error"] or f"HTTP {res['status']}")),
+                    facts={"name": name, "at": hook["at"], "status": res["status"], "seconds": res["seconds"],
+                           "test": True}, by=by, action_id=action_id, now=now)
+    return res, hook
+
 
 def _held_vms(ctx, prev, dst_ok):
     """VMs dont la bascule a déjà touché la cible (décision 47) : un volume
@@ -3048,11 +3364,14 @@ def _unprotect_target(ctx, op, uids, held):
 # Reprise
 # ---------------------------------------------------------------------------
 
-def resume(ctx, yes=False):
+def resume(ctx, yes=False, accept_degraded_standby=False, accept_stale_carnet=False):
     """Reprend la commande interrompue d'après l'état rangé (après un arrêt
     brutal, le verrou abandonné est repris par `acquire_lock`). Une bascule
     reprend avec son mode, ses VMs et `force_unplanned` rangés dans sa ligne
-    `runs` : la confirmation donnée au départ vaut pour sa reprise."""
+    `runs` : la confirmation donnée au départ vaut pour sa reprise.
+    `accept_degraded_standby` ne vaut que pour un protect repris,
+    `accept_stale_carnet` que pour une bascule reprise (refus `bad-option`
+    sinon : un accord ne se donne pas pour une autre commande)."""
     plan = ctx.reload()
     state = plan["state"]
     origin = db.error_origin(ctx.conn, ctx.plan_id) if state == "error" else None
@@ -3069,14 +3388,21 @@ def resume(ctx, yes=False):
         return measure_stop(ctx)
     if last is not None and last["operation"] == "measure-start":
         return measure_start(ctx, (last.get("points") or {}).get("interval_s") or _measure_interval(ctx.conn, plan))
-    if eff == "protecting" or (last is not None and last["operation"] == "protect"):
-        return protect(ctx)
+    is_protect = eff == "protecting" or (last is not None and last["operation"] == "protect")
+    wrong = ([] if is_protect or not accept_degraded_standby else ["--accept-degraded-standby (a protect)"]) + \
+        ([] if eff == "failing_over" or not accept_stale_carnet else ["--accept-stale-carnet (a failover)"])
+    if wrong:
+        return _result(ctx, "bad-option", EXIT_BLOCKED, f"{' and '.join(wrong)}: not what resume finishes "
+                                                        f"from {state}")
+    if is_protect:
+        return protect(ctx, accept_degraded_standby=accept_degraded_standby)
     if eff == "failing_over":
         r = _open_run(ctx, "failover") or {}
         pts = r.get("points") or {}
         planned = pts.get("mode", "planned") == "planned"
         return failover(ctx, vms=(_open_scope(ctx, r) if r else None) or None, planned=planned,
-                        force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r))
+                        force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r),
+                        accept_stale_carnet=bool(accept_stale_carnet) or bool(pts.get("accept_stale_carnet")))
     if eff == "unprotecting":
         r = _open_run(ctx, "unprotect") or {}
         return unprotect(ctx, delete_backups=bool((r.get("points") or {}).get("delete_backups")), yes=True)

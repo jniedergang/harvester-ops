@@ -3349,11 +3349,10 @@ de sauvegarde commune aux deux clusters, des sauvegardes récurrentes
 Longhorn sur la source, et des **volumes de secours** Longhorn (standby)
 sur la cible, qui appliquent chaque nouvelle sauvegarde dès qu'elle arrive.
 Rien n'est installé sur les clusters. Cette version livre le moteur, la
-ligne de commande `harvester-replication` et les routes de la console. Les
-fenêtres de la console (vue de suivi, fenêtre de création, exercices)
-viennent dans les versions suivantes : d'ici là, la console montre les
-actions de réplication dans le dock et dans l'Activité, et la ligne de
-commande fait le reste.
+ligne de commande `harvester-replication` et les routes de la console.
+Les écrans (contrats, fenêtre de création, vue d'un contrat, bascule,
+liens, alertes) sont décrits plus bas dans « Écrans Disaster Recovery » ;
+les exercices de reprise viendront avec leur moteur.
 
 **Le contrat, c'est le plan.** Un plan nomme un cluster source, un cluster
 cible, les VMs (une liste `ns/nom`, ou un sélecteur d'étiquettes dans un
@@ -3621,8 +3620,9 @@ de sauvegarde. Chaque disque est sauvegardé pour lui-même : il n'existe pas
 d'instantané atomique de plusieurs volumes, la barrière ne fait que réduire
 l'écart, et l'écart est montré et contrôlé à la bascule. Une VM avec un
 disque conteneur, hôte ou vide est répliquée sans ces disques (signalé). Le
-retour au premier site, les exercices, les vagues et le gel de l'invité ne
-sont pas dans cette version. Une sauvegarde Longhorn est cohérente comme
+retour au premier site, les exercices et le gel de l'invité ne sont pas
+dans cette version (les réseaux d'exercice se déclarent déjà, voir
+plus bas). Une sauvegarde Longhorn est cohérente comme
 après une coupure de courant (l'invité n'est pas gelé). Un volume de
 secours occupe sa place sur la cible dès la protection, pas seulement le
 jour de la bascule. Une activation est définitive : pour protéger de
@@ -3683,27 +3683,346 @@ planifié à blanc juge `caught-up` d'après les sauvegardes que la cible voit
 à cet instant, qui peuvent avoir 1 à 4 minutes de retard sur la source ; la
 vraie bascule resynchronise d'abord.
 
+### Options de reprise : vagues, actions annexes, taille, réseau, classe par disque
+
+Un plan porte aussi un bloc **reprise** (`recovery`), posé à la création ou
+changé ensuite (`recovery` dans la console, `--spec FICHIER` en ligne de
+commande), et deux genres de correspondances de plus. Ce qui a été joué
+pour de vrai sur les bancs est listé à la fin de la section des écrans
+Disaster Recovery.
+
+**Classe de stockage par disque** (`disk_classes`, `{"ns/vm/disque":
+"classe"}`, disque = le nom du disque KubeVirt). Elle l'emporte sur les
+correspondances d'images et de classes pour ce disque. Une classe absente
+de la cible bloque le contrôle (`storage-class-unmapped`, avec le fait
+`disk`). Un disque qui a sa classe ne reçoit pas l'annotation d'image de la
+cible (l'image désignerait une autre classe). Elle change ce que pose
+protect : elle ne se change que sur un plan brouillon.
+
+**Réseaux d'exercice** (`drill_networks`, `{"ns/réseau": "ns/réseau"}`) :
+rangés et contrôlés comme les correspondances de réseaux. Les exercices
+viendront dans une version suivante.
+
+**Vagues** (10 au plus) : `{"name", "vms": ["ns/nom", ...], "gate":
+{"kind", "seconds"}}`. Après l'activation, la bascule démarre les VMs vague
+par vague. Une VM listée dans aucune vague part dans une dernière vague,
+implicite. Chaque vague passe une condition avant la suivante : `running`
+(par défaut, les VMs tournent), `agent` (l'agent invité répond, condition
+`AgentConnected` de la VMI, pendant au plus `seconds`, 300 par défaut, de
+10 à 3600) ou `delay` (`seconds` après le démarrage des VMs, de 1 à
+3600). Une condition `agent` non remplie à temps avertit
+(`wave-gate-timeout`) et la bascule continue. Une VM laissée arrêtée
+(`start: stopped`) n'attend aucune condition. Une VM listée deux fois est
+refusée. Un plan par sélecteur peut nommer des VMs qui n'existent pas
+encore. Quand une partie seulement d'un plan bascule, une vague sans
+aucune de ses VMs est sautée, avec ses actions. Le journal reçoit
+`wave-start`, `wave-passed` ou `wave-gate-timeout` (étape `wave`) pour
+chaque vague.
+
+**Actions annexes HTTP** (20 au plus) : `{"name", "at", "method", "url",
+"headers", "secret_headers", "body", "timeout_s"}`. `at` vaut `start`
+(après l'activation, avant la première vague), `wave:<n>` (après le
+passage de la vague n ; n peut être la dernière vague, implicite) ou
+`end`. La méthode est GET, POST (par défaut), PUT, PATCH ou DELETE ; le
+corps fait au plus 16 Kio ; le délai va de 1 à 60 s (15 par défaut) pour l'appel entier, pas pour chaque lecture, pour
+qu'un arrêt de la console atteigne le prochain point sûr bien avant son
+budget d'arrêt. L'adresse commence par `http://` ou `https://`, sans
+identifiants : ils vont dans `secret_headers`.
+
+Chaque appel passe par la même garde anti-SSRF que le téléchargement
+d'ISO : le nom est résolu une fois et la connexion part vers l'adresse
+vérifiée ; bouclage, lien local, adresses privées, CGNAT, multidiffusion et
+réservées sont refusés, sauf autorisation dans `config.yaml` par
+`replication.hooks.allow_private` (liste de CIDR, comme
+`iso_fetch.allow_private`) ; les adresses de métadonnées de cloud restent
+refusées même autorisées. Les cibles des actions annexes sont souvent
+internes (API DNS, répartiteur) : déclarez-y leurs réseaux. Une
+redirection n'est jamais suivie (l'appel échoue en le disant, avec l'adresse visée masquée) : un en-tête
+secret n'atteint jamais une autre adresse. L'adresse est aussi contrôlée à
+la création ou au changement du plan : une adresse interne répond 400
+`hook-address` tout de suite (un nom qui ne se résout pas encore est
+revérifié à l'appel). Une action en échec (refus, délai dépassé,
+statut 400 ou plus) avertit (`hook-failed`) et la bascule continue :
+l'activation est définitive. Chaque appel écrit son statut et sa durée au
+journal (étape `hook`, `hook-ok` ou `hook-failed`), jamais la valeur d'un
+en-tête ni le corps de la réponse. Une bascule reprise après une
+interruption ne rappelle pas une action déjà appelée. `hook test` appelle
+une action tout de suite.
+
+**En-têtes secrets** : rangés dans `replication.db`, montrés `********`
+partout ailleurs : plan lu par la console, `plan show --json`, sorties de
+`plan create` et `plan set`, journal et Activité. Renvoyer `********` à
+une modification garde la valeur rangée de cet en-tête, seulement si
+l'action garde son nom, sa méthode et son adresse rangée exacte (schéma,
+hôte, port, chemin et requête). Sinon le changement est refusé avec
+`secret-missing` (« l'adresse a changé » ou « la méthode a changé,
+saisissez de nouveau les valeurs des en-têtes secrets ») : un opérateur ne
+peut ni envoyer ailleurs un secret rangé, ni faire un autre appel avec le
+droit d'un autre. Un `********` sans valeur rangée (action nouvelle ou
+renommée) est refusé de même. L'adresse se montre avec son schéma, son
+hôte, son port et le premier segment de son chemin seulement, la même pour
+tous les rôles : le reste du chemin devient `/********` (un seul segment
+devient `/********`) et la requête `?********`, car les webhooks entrants
+y portent leur jeton (`https://hooks.slack.com/services/T0/B0/XXX` se
+montre `https://hooks.slack.com/services/********`). C'est vrai dans toute
+lecture, sortie, ligne du journal et d'Activité, et dans le libellé des
+actions : renvoyer cette adresse masquée garde celle rangée ; la modifier
+demande de la retaper en entier. Ils ne passent jamais par une ligne de
+commande : la console les donne au script dans son fichier privé.
+
+**Taille au secours** (`resize`, `{"ns/vm": {"cpu": 1..256, "memory":
+"<n>Mi|<n>Gi"}}`). La VM cible est écrite comme Harvester l'écrit : vCPU
+dans `domain.cpu.cores` et `resources.limits.cpu`, mémoire dans
+`resources.limits.memory`, `requests` de la source retirées (le mutateur
+de VM de la cible les calcule depuis son réglage de surallocation) et
+`domain.memory.guest` qui garde l'écart limite - invité de la source (ou
+l'annotation `harvesterhci.io/reservedMemory`). Une VM à branchement à
+chaud du processeur et de la mémoire compte ses vCPU en `sockets` et garde
+la mémoire en `memory.guest` (cas non joué sur un cluster).
+
+**Configuration réseau** (`network_data`, `{"ns/vm": "<network-config
+cloud-init, 16 Kio au plus>"}`) : demande `cloud_init: rerun`. Le volume
+cloud-init de la VM cible (NoCloud ou ConfigDrive) la porte en ligne
+(`networkData`) et perd sa référence au secret des données réseau ; une VM
+sans volume cloud-init en reçoit un (NoCloud).
+
+**Protection d'office** (`auto_protect`, vrai ou faux) : rangée pour les
+plans par sélecteur ; son côté console est décrit avec le suiveur.
+
+**Les changer.** `PATCH .../settings` et `plan set` changent `recovery`
+(chaque clé donnée remplace la valeur rangée), `cloud_init`, `mac` et
+`start` dans tout état sauf `failing_over`, les correspondances
+`networks` et `drill_networks` dans les mêmes états, et les autres
+correspondances sur un plan brouillon seulement (sinon `state-forbids`).
+Taille, configuration réseau, cloud-init, MAC, démarrage et
+correspondance de réseaux changent le carnet de reprise. Seule la valeur
+compte : renvoyer les mêmes valeurs, ne changer que les actions annexes,
+les vagues ou l'accord sur un secours dégradé, ou revenir aux valeurs
+protégées (Annuler) ne marque rien. Sur un plan protégé dont une valeur du
+carnet a vraiment changé, la réponse porte `protect_needed: true`, et le
+protect suivant réécrit le carnet. D'ici là, le plan garde les clés changées
+(`carnet_stale` dans `GET /api/replication/plans/<id>`), le suiveur
+signale aussi chaque VM dont le carnet diffère de ce que protect écrirait
+aujourd'hui, et les deux se montrent par l'alerte `carnet-stale`. Une
+bascule refuse alors de partir (constat `carnet-stale`, bloquant, qui
+nomme les clés changées et les VMs), sauf si on lui dit de prendre les
+réglages précédents : `accept_stale_carnet: true` dans la console,
+`--accept-stale-carnet` en ligne de commande (le constat devient un
+avertissement). Un protect réussi efface la marque. Une bascule
+interrompue avant toute activation de volume refait le contrôle quand on
+la termine : si les réglages sont passés en retard entre-temps (vu par le
+suiveur, ou bascule partie sous 1.99), `resume P --accept-stale-carnet` la
+termine avec les réglages précédents, de même que `failover P
+--accept-stale-carnet` avec les mêmes VMs (elle reprend l'exécution
+ouverte). Aucun des deux drapeaux n'est accepté pour une autre commande
+interrompue (`bad-option`).
+
+**Répliques du secours.** Au protect, une classe cible qui demande plus de
+répliques (`numberOfReplicas` de la StorageClass, 3 en son absence, comme
+Longhorn) que la cible n'a de nœuds Longhorn planifiables bloque le
+contrôle (`standby-replicas-exceed-nodes`, avec les classes qui tiennent
+dans `suggest`) : chaque volume de secours resterait dégradé et l'alerte
+`standby-degraded` ne s'éteindrait jamais. Un secours dégradé peut être un
+choix (site de secours d'un seul nœud) : la clé de reprise
+`accept_degraded_standby: true` (la case « Accepter des volumes de secours
+dégradés » de l'onglet Réglages) change le constat en avertissement, pour
+tous les protect suivants. En ligne de commande, `protect P
+--accept-degraded-standby` et `resume P --accept-degraded-standby`
+l'acceptent pour cette exécution seulement. Le refus le dit en une phrase
+(console en cinq langues, ligne de commande et journal en anglais).
+Changement de comportement depuis 1.99.0, où c'était un avertissement : un
+protect interrompu sous 1.99 sur une telle classe est refusé à la reprise
+tant que l'un des deux n'est pas donné.
+
+**À blanc.** `failover --dry-run` (et `check --phase failover`) liste les
+vagues (`index`, `name`, `vms`, `gate`, `implicit` pour la dernière) et
+les actions (`name`, `at`, `method`, `url`), sans rien appeler. Une vraie
+bascule rend les appels dans `hook_results`.
+
+**Candidates.** `candidates --cluster C [--namespace NS [--selector
+k=v]] --json`, et `GET /api/replication/candidates/<cluster>` dans la
+console (lecteur, kubeconfig de la personne), listent les VMs d'un cluster
+source qu'un plan peut protéger : vCPU, mémoire, réseaux, genre de
+cloud-init, étiquettes, en marche ou non, et par disque le PVC, la taille,
+la place occupée, la classe, l'image et l'éligibilité. Raisons :
+`not-longhorn`, `longhorn-v2`, `encrypted`, `rwx-not-migratable`,
+`containerDisk`, `hostDisk`, `emptyDisk`, `no-disk`. Un disque que la
+réplication ne recopie pas (disque conteneur) est montré inéligible sans
+rendre la VM inéligible. `plans` liste les plans qui tiennent déjà la VM
+(tout état sauf `unprotected`).
+
 La procédure d'exploitation (première protection, bascule, déprotection)
 est dans [procedure-operationnelle.md](procedure-operationnelle.md#12-reprise-après-sinistre-réplication-asynchrone).
 
+### Données de suivi, alertes, notifications et essais de lien
+
+Ce sont les lectures et les réglages derrière les écrans de la
+réplication. La console et la ligne de commande appellent les mêmes
+fonctions, et montrent donc les mêmes objets.
+
+**Lignes de plan.** Chaque ligne de plan (`GET /api/replication/plans`, la
+`row` d'un plan, `plan list --json`, `plan show --json`) porte aussi
+`transfer` (le dernier passage de n'importe quelle VM : date, octets
+envoyés, débits d'envoi et d'application ; octets et passages des
+dernières 24 heures), `pending_vms` (les VMs d'un plan à sélecteur qui
+portent l'étiquette sans être encore protégées, en `ns/nom`), `alerts` (le
+nombre d'alertes en cours du plan) et `reach` (si le suiveur a lu la source
+et la cible à son dernier relevé : `true`, `false`, ou `null` jamais lu ;
+la pire valeur des VMs du plan, avec la date du relevé le plus récent).
+
+**Séries des graphiques.**
+`GET /api/replication/plans/<id>/series?range=1h|24h|7d|30d` (`resource=<uid>`
+facultatif) regroupe les statistiques par passage en tranches de 60 s,
+600 s, 3600 s et 21600 s : pire RPO tenu et pire arriéré, débits moyens
+(pondérés par les passages pour les lignes réduites à l'heure), octets
+envoyés et nombre de passages. Les tranches vides sont omises.
+
+**Plans à sélecteur.** À chaque relecture des specs (toutes les 10 minutes
+par défaut, `follow_spec`), le suiveur liste les VMs source du namespace du
+sélecteur. Une VM qui porte l'étiquette sans être dans le plan est écrite
+une fois au journal (`selector-new-vm`, avertissement) et gardée dans les
+`pending_vms` du plan jusqu'à sa protection ou la perte de l'étiquette.
+Une VM du plan qui a perdu l'étiquette est écrite une fois
+(`selector-vm-left`, information) : elle reste protégée jusqu'à la
+déprotection. Un redémarrage du suiveur ne réécrit ni l'un ni l'autre. Le
+suiveur ne protège jamais rien.
+
+**Protection automatique.** Avec l'option de plan `auto_protect: true`
+(rangée par les réglages du plan), un plan à sélecteur protégé qui a des
+VMs en attente et aucune commande en cours reçoit un `protect` lancé par
+la console elle-même : action suivie `replication:<plan>:protect`, auteur
+`console`, avec les kubeconfigs de la console, au plus une fois toutes les
+10 minutes par plan. Seule la console qui tient le verrou du suivi le
+fait. Une protection lancée ainsi qui échoue (VM étiquetée qu'on ne peut
+pas protéger : classe absente sur la cible, volume chiffré, disque de
+conteneur seul...) n'est pas relancée à chaque tour : l'attente double à
+chaque échec (10 min, 20 min, 40 min...) jusqu'à 6 heures, et un seul
+événement `auto-protect-failed` (avertissement, envoyé aussi aux
+notifications, avec les constats bloquants) est écrit pour toute la série,
+avec l'alerte en cours du même nom. La série repart quand les VMs en
+attente ou le plan changent, et un protect réussi l'efface. L'état vit
+dans `replication.db` : un redémarrage de la console ne relance pas tout
+de suite. `auto_protect: true` est refusé sur un plan qui liste ses VMs
+(il n'a pas de nouvelle VM à protéger). Interrupteur, relu chaque minute : `replication: {auto_protect:
+false}` dans `config.yaml`.
+
+**Alertes en cours.** `GET /api/replication/alerts?host=<cluster>` et
+`harvester-replication alerts [--host H] --json` calculent les alertes sur
+l'état présent, erreurs d'abord : `rpo-exceeded`, `disk-never-backs-up`,
+`standby-degraded`, `plan-drift`, `selector-new-vm`, `carnet-stale`,
+`auto-protect-failed` (avertissements),
+`source-unreachable`, `backup-error`, `plan-error` (plan en `error`) et
+`source-vm-running-after-failover` (erreurs). Cette dernière vient d'un
+drapeau de santé du suiveur : après une bascule, il surveille la VM source
+et la signale tant qu'elle tourne à nouveau. `since` est la date du
+dernier événement de ce genre au journal (ou la date où une VM en attente
+a été vue la première fois). `host` garde les plans où ce cluster est
+source ou cible.
+
+**Notifications externes.** Matrix (API client-serveur, un id de salon et
+un jeton d'accès), Slack (webhook entrant), un webhook JSON générique
+(en-têtes en clair et en-têtes secrets) et le courriel (SMTP avec STARTTLS
+ou TLS implicite sur le port 465, identification facultative ; un mot de
+passe exige l'un des deux, il ne part donc jamais en clair, `implicit_tls`
+dans le réglage). Le réglage vit dans `replication.db` :
+`enabled`, `min_level` (`warn` ou `error`), `codes` (`null` pour tous les
+codes d'alerte ci-dessus, plus les résultats de bascule `failed-over` et
+`interrupted` et le retour sous l'objectif `rpo-recovered`), et les canaux.
+`failed-over` et `rpo-recovered` partent quel que soit `min_level`, quand
+ils sont choisis. Le suiveur de la console les envoie : à chaque tour, les
+nouveaux événements du journal qui passent le filtre sont groupés en un
+message par canal, envoyé depuis un fil à part (10 s par appel, 3 essais) :
+un serveur de courriel lent ne retarde jamais le suiveur. La position dans
+le journal avance une fois le lot traité ; un canal en échec après trois
+essais est écrit au journal (`notify-failed`). Un lot encore en vol à
+l'arrêt du suiveur est renvoyé à son redémarrage. Le premier tour après une
+mise à jour part de la fin du journal (rien d'ancien n'est envoyé). Un
+suiveur lancé à la main n'envoie qu'avec `follow --all --notify`. Les
+secrets (jeton Matrix, URL Slack, valeurs des en-têtes secrets, mot de
+passe du courriel) s'affichent `********` à chaque lecture (API, sortie de
+la ligne de commande, journal, Activité), et l'adresse d'un webhook
+masquée comme celle d'une action annexe (premier segment du chemin
+seulement, `?********` pour la requête). Renvoyer `********` garde la valeur rangée : un écran peut
+renvoyer le réglage qu'il a lu, mais seulement vers le même serveur : un
+jeton Matrix n'est gardé que si le serveur garde son schéma, son hôte et
+son port, les en-têtes secrets d'un webhook que pour la même adresse exacte (chemin
+et requête compris), un
+mot de passe de courriel que pour le même serveur SMTP et le même port
+(`secret-missing` sinon). Chaque appel passe par la garde anti-SSRF
+(adresses internes refusées sauf autorisation par
+`replication.notifications.allow_private`, redirections jamais suivies,
+serveur SMTP contrôlé de même) ; un refus n'est pas réessayé. Les adresses
+sont aussi contrôlées à l'enregistrement du réglage (`notify-address`). Le réglage
+arrive à la ligne de commande par un fichier privé (`notify set --spec
+FICHIER`), jamais par ses arguments.
+
+**Liens entre clusters.** `GET /api/replication/links` et `link list
+--json` rendent une entrée par couple source et cible qui porte un plan ou
+un essai : ses plans, les chiffres passifs tirés des passages de ses plans
+(derniers débits d'envoi et d'application, médianes et totaux sur 24 heures,
+une série par heure) et le dernier essai actif. L'essai actif (`POST
+/api/replication/links/test`, `link test --from A --to B --size-mib N`,
+64 à 4096 Mio, 512 par défaut) mesure ce que la réplication emprunte
+vraiment : une pod temporaire sur la source écrit N Mio de données
+aléatoires dans la cible de sauvegarde NFS commune, puis une pod sur la
+cible les relit et les efface. Les durées sont lues dans le journal des
+pods. Les deux pods prennent l'image longhorn-manager du cluster même
+(déjà sur chaque nœud, rien à tirer, compatible airgap) et tournent dans
+`longhorn-system`. Pods et fichier sont toujours retirés, en échec, en
+annulation et à l'arrêt de la console ; un fichier dont l'effacement n'est
+pas confirmé est retiré par une pod de nettoyage, et le résultat le dit si
+même cela échoue. L'essai est refusé avec `backup-target-differs` quand les
+deux clusters n'utilisent pas la même cible de sauvegarde, et
+`not-supported` pour une cible autre que NFS. Il tourne avec les
+kubeconfigs de la personne pour les deux clusters, en action suivie, un à
+la fois par couple, et son résultat est gardé (table `link_tests`). La pod
+de lecture retire aussi le répertoire de l'essai
+(`harvester-ops-linktest/`) du partage, sauf si un autre essai y a encore
+son fichier. Vérifié en réel les 24 et 25/10/2026 entre harvlab
+(Harvester 1.8.2) et harvlab2 (1.9.0) sur le partage NFS du banc : 256 Mio
+écrits à 99 Mio/s, relus à 103 Mio/s, pods retirées.
+
+**Rôles** de ces routes : toute lecture est en lecteur, sauf le réglage des
+notifications (opérateur, même masqué : il dit où partent les alertes). Le
+changer et envoyer un message d'essai demandent administrateur. Un essai de
+lien demande opérateur.
+
 API : lectures `GET /api/replication/plans?side=any|source|target&host=`,
 `GET /api/replication/plans/<id>` (plan, ligne, état, volumes, dernières
-exécutions, verrou, bail),
+exécutions, verrou, bail, `carnet_stale`),
 `GET /api/replication/plans/<id>/stats?resource=&since=&limit=`,
 `GET /api/replication/hosts/<cluster>/resources?side=`,
 `GET /api/replication/resources/<uid>/events?limit=&before=`,
-`GET /api/replication/follower` ; écritures (réponse `202 {action_id}`)
-`POST /api/replication/plans`,
+`GET /api/replication/follower`,
+`GET /api/replication/candidates/<cluster>?namespace=&selector=` (403
+`source-denied`, 404 `unknown-cluster`),
+`GET /api/replication/plans/<id>/events?limit=&before=&level=warn` (le
+journal du plan et de ses VMs),
+`GET /api/replication/plans/<id>/series?range=&resource=`,
+`GET /api/replication/alerts?host=`, `GET /api/replication/links`,
+`GET /api/replication/notify` (opérateur, secrets masqués) ; écritures
+(réponse `202 {action_id}`) `PUT /api/replication/notify` (administrateur),
+`POST /api/replication/notify/test` (`{channel}`, administrateur),
+`POST /api/replication/links/test` (`{from, to, size_mib}`),
+`POST /api/replication/plans` (aussi `map_disk_class`, `map_drill_net` et
+`recovery {waves, hooks, network_data, resize, auto_protect,
+accept_degraded_standby}` ; une adresse d'action annexe interne répond 400
+`hook-address`),
 `POST /api/replication/plans/<id>/check` (`{phase, force_unplanned}`),
 `POST /api/replication/plans/<id>/measure` (`{op: start|stop, interval}`),
 `POST /api/replication/plans/<id>/protect` (`{interval, retain, dry_run}`),
 `POST /api/replication/plans/<id>/failover` (`{vms | all_vms, mode,
-force_unplanned, accept_skew, dry_run, confirm}`, administrateur),
+force_unplanned, accept_skew, accept_stale_carnet, dry_run, confirm}`,
+administrateur),
 `POST /api/replication/plans/<id>/resume`,
 `POST /api/replication/plans/<id>/unprotect` (`{confirm, delete_backups}`),
 `PATCH /api/replication/plans/<id>/settings` (`{rpo, paused, follow,
-skew_tolerance, timeouts}` ; `interval` et `retain` répondent
-`not-settable`), `DELETE /api/replication/plans/<id>`. Chaque écriture
+skew_tolerance, timeouts, recovery, mappings, cloud_init, mac, start}` ;
+`interval` et `retain` répondent `not-settable`, un changement que l'état
+interdit répond `state-forbids`, la réponse ajoute `protect_needed: true`
+quand le carnet d'un plan protégé change),
+`POST /api/replication/plans/<id>/hooks/test` (`{name}`, opérateur),
+`DELETE /api/replication/plans/<id>`. Chaque écriture
 lance la ligne de commande avec les kubeconfigs de la personne (403
 `target-denied` ou `source-denied` quand la session ne voit pas un
 cluster, jamais celui de la console).
@@ -3711,16 +4030,212 @@ cluster, jamais celui de la console).
 Ligne de commande : `harvester-replication plan create|list|show|set|delete`,
 `check P [--phase protect|failover|failover-unplanned]`, `measure
 start|stop|report P`, `measure formula`, `protect P [--dry-run]
-[--interval D] [--retain N]`, `follow (--plan P | --all) [--once]
+[--interval D] [--retain N] [--accept-degraded-standby]`, `follow (--plan P | --all) [--once]
 [--take-over]`, `status [P] [--host H]`, `resources --host H [--side S]`,
 `events (--resource UID | --plan P | --host H) [--before ID|DATE]`,
 `failover P (--vm ns/nom ... | --all-vms) [--unplanned]
-[--force-unplanned] [--accept-skew] [--yes] [--dry-run]`, `resume P`,
-`unprotect P --yes [--delete-backups]`. P est un id ou un nom de plan. Les
+[--force-unplanned] [--accept-skew] [--accept-stale-carnet] [--yes]
+[--dry-run]`, `resume P [--accept-degraded-standby | --accept-stale-carnet]`,
+`unprotect P --yes [--delete-backups]`, `hook test P --name N`,
+`candidates --cluster C [--namespace NS [--selector k=v]]`, `alerts [--host
+H]`, `notify show|set --spec FICHIER|test --channel ID`, `link list`, `link
+test --from A --to B [--size-mib N]`. `plan create` prend aussi
+`--map-disk-class ns/vm/disque=classe` et `--map-drill-net S=D` ; `plan
+set` prend `--cloud-init`, `--mac` et `--start` ; les objets `recovery` et
+`mappings` ne passent que par `--spec FICHIER`. P est un id ou un nom de
+plan. Les
 commandes qui parlent aux clusters prennent `--from-kubeconfig`,
 `--to-kubeconfig` et `--timeout NOM=S` ; toutes prennent `--json`.
 
 ---
+
+### Écrans Disaster Recovery
+
+La console a un groupe de menu racine **Disaster Recovery** avec deux
+entrées, **Contrats** et **Liens**, et une entrée **Disaster Recovery** dans
+le groupe de menu de chaque cluster Harvester. Chaque geste lance la ligne
+de commande `harvester-replication` en action suivie (dock et Activité) ;
+les écrans n'écrivent jamais par un autre chemin.
+
+**Contrats.** Tous les contrats, en cartes ou en tableau (la bascule est
+gardée par navigateur). Chaque contrat montre : son état (le pire de ses
+VMs quand il est protégé), une jauge du RPO tenu face à l'objectif (le
+repère est l'objectif ; la barre passe à l'orange au-delà de 80 % et au
+rouge au-delà de l'objectif), le sens source -> secours avec un point par
+cluster (vert : il répond au suiveur, rouge : il ne répond pas, gris : pas
+encore lu), le nombre de VMs et leurs états, les VMs qui portent
+l'étiquette d'une règle sans être encore protégées, le dernier événement et
+le dernier transfert (données envoyées par le dernier passage, débit
+d'envoi vers la cible de sauvegarde, débit d'application sur le secours, et
+la quantité envoyée en 24 heures). Une recherche et un filtre d'état
+resserrent la liste. Les alertes actives sont en tête. Le bouton
+**Notifications** ouvre le réglage des notifications externes (salon
+Matrix, webhook entrant Slack, courriel par SMTP ou webhook JSON générique ;
+un administrateur les modifie, les secrets ne sont plus jamais montrés, une
+valeur masquée laissée telle quelle garde le secret rangé ; chaque canal a
+un bouton **Envoyer un test**).
+
+**Fenêtre Nouveau contrat.** Cinq blocs sur une page, chacun dit s'il est
+prêt, et rien n'est écrit avant **Créer** :
+1. *Quoi et vers où* : nom, clusters source et de secours, VMs choisies
+   dans une liste (celles qui ne se répliquent pas sont grisées avec la
+   raison) ou par une règle d'étiquette `clé=valeur` dans un namespace.
+   Avec une règle, **Protéger automatiquement les nouvelles VMs qui reçoivent l'étiquette**
+   laisse la console protéger une VM qui reçoit l'étiquette plus tard
+   (sinon une alerte vous attend).
+2. *Objectif* : objectif de RPO (5, 15, 60 minutes ou toute valeur), points
+   gardés et phase de mesure. **Mesurer d'abord** crée le contrat et lance
+   la mesure ; **Protéger directement** crée et protège tout de suite et
+   affiche un avertissement avec l'intervalle estimé, un RPO atteignable
+   qui ignore le volume des changements, et la durée de la première copie
+   complète d'après le débit connu du lien.
+3. *Correspondances* : une ligne par réseau des VMs choisies. Un réseau
+   absent du secours bloque la création tant qu'il n'est pas associé à un
+   réseau existant ou créé là-bas par **Créer sur la cible** (nom, VLAN et
+   réseau de cluster modifiables ; c'est la création de réseau habituelle,
+   administrateur). La colonne **Réseau d'exercice** est gardée pour les
+   exercices à venir. Le stockage se choisit **disque par disque** ; la
+   classe de même nom est proposée quand elle existe sur le secours. Une
+   classe qui demande plus de répliques que le secours n'a de nœuds
+   planifiables est marquée *Dégradé* : la fenêtre la nomme, propose
+   **Utiliser <classe>** pour une classe qui tient, ou **Accepter des
+   volumes de secours dégradés** (un choix délibéré, dit dans la bulle
+   d'aide) ; tant qu'aucun n'est fait, Créer reste verrouillé. Un namespace
+   absent là-bas est associé à un autre ou créé à la bascule.
+4. *Reprise* : vagues de démarrage (glisser les VMs d'une vague à l'autre,
+   ou le menu de chaque VM ; chaque vague a une condition de passage : VMs
+   en marche, agent invité connecté dans un délai, ou en marche puis un
+   délai), cloud-init gardé ou rejoué avec une configuration réseau de
+   secours par VM, adresses MAC gardées ou nouvelles, CPU et mémoire par VM
+   sur le secours, VMs démarrées ou arrêtées après la bascule, et actions
+   annexes HTTP (moment, méthode, URL, en-têtes, un en-tête secret masqué
+   une fois gardé, corps, délai). Une action annexe s'essaie une fois le
+   contrat créé. Une action renommée, ou dont l'adresse ou la méthode a
+   changé, redemande son secret ; les autres en-têtes secrets posés en ligne
+   de commande sont gardés.
+5. *Résumé et vérifications préalables* : votre rôle, les clusters source et de
+   secours lisibles avec vos droits, chaque correspondance présente, le
+   débit mesuré du lien ; la place libre et la cible de sauvegarde sont
+   contrôlées par le contrôle préalable de la protection. Puis ce qui
+   bloque encore, la ligne de commande équivalente (sans secret) et le
+   bouton de création.
+
+**Fenêtre d'un contrat.** Ouverte depuis une carte ou une ligne, avec les
+gestes que le contrat permet (un bouton grisé dit pourquoi : rôle, ou
+sauvegardes tenues) : Vérifier, Mesurer, Arrêter la mesure, Protéger,
+Pause, Reprendre le suivi, Reprendre la commande (après une interruption)
+et « Bascule... ». Quatre onglets :
+- *Vue d'ensemble* : RPO tenu, intervalle, prochain passage, passages en
+  attente, écart, débits d'envoi et d'application, données envoyées en 24
+  heures, une ligne par VM avec ses raisons, et les dernières bascules et
+  déprotections ;
+- *Graphiques* : RPO tenu face à l'objectif, débits d'envoi et
+  d'application, et données envoyées par période, sur 24 heures par
+  défaut, ou 1 heure, 7 jours, 30 jours (le survol montre les valeurs) ;
+- *Journal* : chaque opération du contrat et de ses VMs, la plus récente
+  d'abord, avertissements seuls à la demande, avec le lien vers l'action
+  d'Activité ;
+- *Réglages* : objectif, tolérance d'écart, suiveur et pause (à chaud),
+  intervalle et rétention (appliqués en protégeant de nouveau), le bloc
+  Reprise de la fenêtre de création (gardé pour la prochaine bascule ; un
+  contrat protégé réécrit ses carnets à la prochaine protection), et la zone
+  dangereuse (déprotéger, déprotéger et supprimer les sauvegardes, supprimer
+  le contrat, chacun avec le nom du contrat tapé). Un changement enregistré
+  propose **Annuler**, qui renvoie les valeurs d'avant dans une nouvelle
+  action suivie ; la pause et sa levée aussi. Annuler renvoie les valeurs
+  exactes (un objectif de 90 s revient à 90 s, pas arrondi aux minutes) ; un
+  changement qui touche un secret d'action annexe ou une adresse masquée ne
+  propose pas Annuler et dit pourquoi. Tant que les réglages de reprise sont
+  plus récents que la dernière protection, la vue d'ensemble montre un
+  bandeau qui les nomme, avec **Protéger de nouveau**.
+
+**Fenêtre de bascule.** Réservée aux administrateurs : pour un autre rôle
+elle s'ouvre en lecture et dit pourquoi. Elle liste les étapes du mode
+choisi (planifiée : pause du suiveur, arrêt des VMs source, clôture,
+sauvegarde finale, application, activation comme point de non-retour,
+objets, vagues, actions annexes ; non planifiée : dernière lecture de la
+cible de sauvegarde, rattrapage, points et écart, activation, objets,
+vagues, actions annexes, clôture tardive), ce qui peut être perdu, et des
+contrôles : rôle, état du contrat, joignabilité des deux clusters, et un
+essai à blanc lancé à l'ouverture. Quand les réglages de reprise ont changé
+depuis la dernière protection, la fenêtre les nomme et propose **Protéger
+d'abord** (puis l'essai à blanc se relance) ou **Basculer avec les réglages
+précédents** (choix explicite) ; le bouton reste verrouillé tant qu'aucun
+n'est fait. Les VMs peuvent être restreintes, et le bouton se déverrouille
+une fois le nom du contrat tapé.
+
+**Liens.** Un bloc par paire de clusters ayant un contrat ou un essai : les
+deux trajets source -> cible de sauvegarde -> secours avec le débit médian
+des vraies sauvegardes sur 24 heures (le trajet le plus lent est marqué),
+le dernier passage, une courbe de 24 heures par trajet, et le **test
+actif** : un pod temporaire écrit des données aléatoires (256 Mio à 2 Gio)
+vers la cible de sauvegarde NFS depuis la source et un pod les relit depuis
+le secours, tous deux supprimés ensuite (opérateur). Une paire sans contrat
+s'essaie avant d'en créer un.
+
+**Disaster Recovery d'un cluster.** Les contrats où ce cluster est source
+ou secours, avec un badge de son rôle et un filtre (tous, comme source,
+comme secours), et la liste de ses VMs tenues par un contrat.
+
+**Alertes.** Objectif dépassé, disque qui ne se sauvegarde jamais, VM
+source rallumée après une bascule, sauvegarde en erreur, volume de secours
+dégradé, source injoignable, spec d'une VM changée, contrat en erreur,
+nouvelle VM qui répond à une règle, réglages de reprise plus récents que la
+dernière protection, protection automatique en échec. Elles s'affichent en pastille sur les
+entrées Disaster Recovery du menu (racine et cluster courant), dans
+l'onglet **Événements** de l'aperçu du cluster (groupe Disaster Recovery,
+même quand le cluster ne répond pas), et partent vers les notifications
+réglées.
+
+Pas dans cette version : les exercices de reprise (la colonne réseau
+d'exercice est seulement gardée).
+
+**Vérifié en réel** le 25/10/2026, de harvlab (Harvester 1.8.2) vers
+harvlab2 (1.9.0, un nœud), par une console de cette version, avec un
+récepteur HTTP local sur l'hôte de la console :
+- actions annexes : les quatre sortes d'appel (POST avec un en-tête secret
+  et un corps, PUT, GET) ont atteint le récepteur à `start`, après la vague
+  1 et à `end` d'une vraie bascule ; une action qui répond par une
+  redirection a échoué en le disant et la cible de la redirection n'a rien
+  reçu ; une adresse de bouclage, de métadonnées ou privée a été refusée à
+  l'enregistrement (`hook-address`) hors de la liste autorisée ; un secret
+  masqué envoyé avec un autre hôte a été refusé (`secret-missing`) ; la
+  requête de l'adresse n'est apparue ni dans les sorties, ni au journal, ni
+  dans `actions.db` ;
+- notifications : un canal webhook a reçu le message d'essai et les
+  messages du suiveur lui-même (`selector-new-vm`, `auto-protect-failed`) ;
+  un canal qui redirige a échoué une fois, sans nouvel essai ; un serveur
+  SMTP en bouclage et un mot de passe sans TLS ont été refusés à
+  l'enregistrement ;
+- protection automatique : une VM nouvellement étiquetée a été protégée par
+  la console d'elle-même ; une VM étiquetée dont la classe de disque manque
+  sur la cible a échoué, attendu 10 puis 20 minutes, avec un seul événement
+  au journal et une alerte ; retirer l'étiquette a clos la série ;
+- reprise : la vague 1 a attendu l'agent invité (openSUSE Leap 15.6 avec
+  qemu-guest-agent, 22 s), CPU et mémoire valaient 2 vCPU / 2 Gio au
+  secours (topologie relue dans l'invité), la configuration réseau a été
+  appliquée par le cloud-init rejoué (l'adresse ajoutée vue dans l'invité
+  par l'agent) ;
+- répliques du secours : la fenêtre de création a marqué
+  `harvester-longhorn` (3 répliques, un nœud) et **Utiliser harv-rep1** l'a
+  corrigé ;
+- réglages en retard : une taille changée sur le plan protégé a bloqué
+  l'essai à blanc de la bascule (`carnet-stale`, clés et VM nommées),
+  l'accord l'a changé en avertissement, protect l'a effacé ; le bandeau et
+  la fenêtre de bascule l'ont montré ;
+- essai de lien : 64 Mio à 97 / 103 Mio/s, et le répertoire de l'essai
+  avait disparu du partage ensuite.
+
+Non vérifié sur un cluster : les notifications vers un vrai salon Matrix,
+Slack ou un serveur de courriel (testées sur des serveurs locaux), l'ajout
+à chaud de CPU et de mémoire à la reprise, la reprise d'une bascule
+interrompue après l'accord sur des réglages en retard, et le
+glisser-déposer à la vraie souris (tests de bout en bout seulement). Les
+corrections de la seconde revue (marque de retard jugée sur les valeurs,
+masquage du chemin des adresses, secret rangé gardé pour la même requête
+seulement, `--accept-degraded-standby` et les drapeaux de `resume`) sont
+couvertes par des tests unitaires et de bout en bout, pas jouées sur un
+cluster.
 
 ## Ce qui nécessite quoi
 
