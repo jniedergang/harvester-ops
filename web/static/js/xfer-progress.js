@@ -20,6 +20,7 @@ const XferProgress = (() => {
     restore: () => tr('progress.phase.restore'),
     upload: () => tr('progress.phase.upload'),
     verify: () => tr('progress.phase.verify'),
+    receive: () => tr('progress.phase.receive'),
   };
 
   function lang() {

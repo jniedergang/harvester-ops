@@ -2834,9 +2834,10 @@ peut couper les nouvelles connexions une quinzaine de secondes. La
 déclaration d'un hôte refait une fois son test SSH après 20 s.
 
 **Pas dans la 1.96.0** : console graphique (VNC), instantanés et clonage,
-ajoutés en 1.98.0 (plus bas). Création et modification de VMs, de pools,
-de volumes et de réseaux, migration à chaud entre hôtes, maintenance d'un
-hôte et supervision restent à venir.
+ajoutés en 1.98.0, et création et modification de VMs, d'images, de
+pools, de volumes et de réseaux, ajoutées en 1.100.0 (plus bas). Migration
+à chaud entre hôtes, maintenance d'un hôte et supervision restent à
+venir.
 
 API : `GET /api/kvm/hosts`, `GET /api/kvm/hosts/<host>` (VMs, pools,
 volumes, réseaux), `GET /api/kvm/vms`, `GET /api/kvm/vms/<host>/<domain>`,
@@ -2957,6 +2958,11 @@ que l'aperçu ne correspond pas au nom saisi ou contient un refus.
   progression. **Annuler** dans le dock arrête la copie et retire tout ce
   qui a été créé. Une copie qui échoue est défaite de la même façon, et ce
   qui n'a pas pu être retiré est nommé.
+- Une copie dans un pool (`vol-create-from`) continue dans libvirt après
+  une annulation, et libvirt refuse de la supprimer tant qu'elle dure.
+  Depuis la 1.100.0, l'action reste en cours, les deux noms tenus, jusqu'à
+  la fin de la copie (jusqu'à 15 min) ; la copie est alors supprimée.
+  Avant, l'action se fermait aussitôt et la copie restait.
 
 **Supprimer.** **Supprimer** retire une VM arrêtée et persistante. Il
 faut le rôle administrateur. La fenêtre montre d'abord un aperçu, puis
@@ -3057,6 +3063,278 @@ d'une autre VM gardés ; un hôte modifié refusé par `plan-changed`. Sous
 8 lecteurs en parallèle pendant 60 s, la chute du serveur SSH décrite plus
 haut est arrivée 2 à 4 fois par minute, sans aucune lecture en échec. Non
 vérifié : un hôte qui exige `--force` pour revenir à un instantané.
+
+
+### Créer et modifier des VMs, images, pools et réseaux (1.100.0)
+
+**Rien n'est installé sur l'hôte.** La console fabrique elle-même, en
+Python, le XML du domaine, les définitions de volume, de pool et de réseau
+et l'ISO cloud-init, et les passe à `virsh` par l'entrée standard
+(`define --validate`, `attach-device`, `vol-create`, `net-define`,
+`pool-define`). Ni `virt-install`, ni `genisoimage`, ni `cloud-localds`
+sur l'hôte. Prérequis inchangés : libvirt, `qemu-img` et un compte du
+groupe `libvirt`.
+
+**Créer une VM.** **Créer une VM** dans la barre des VMs KVM, sur la carte
+d'un hôte ou sur une image du catalogue ouvre la fenêtre des VMs
+Harvester : mêmes onglets (Général, Calcul, Micrologiciel, Disques,
+Réseau, Cloud-init, Revue), mêmes icônes, même assistant cloud-init.
+- En-tête : hôte, nom, nombre d'instances (1 à 20, nommées `<nom>-01`,
+  `-02`...), démarrer après création, agent invité, clés SSH (les
+  KeyPairs des clusters que vous pouvez lire, regroupées par cluster, plus
+  des clés collées) et modèle.
+- Les choix viennent de l'hôte (`virsh capabilities` et
+  `domcapabilities`, par famille de machine) : q35 ou pc, BIOS ou UEFI,
+  Secure Boot, TPM (émulé par `swtpm`), mode CPU (host-model,
+  host-passthrough, custom avec les modèles utilisables), bus de disque,
+  modèles vidéo. Un choix que l'hôte ne peut pas donner est grisé avec sa
+  raison (« the host has no TPM emulator (swtpm) », « Secure Boot needs
+  the q35 machine type »).
+- vCPU et mémoire peuvent rester sous leur maximum pour des changements à
+  chaud plus tard (un socket par vCPU, comme Harvester). Emplacements PCIe
+  libres pour l'ajout à chaud sur q35 : 4 par défaut, de 0 à 16.
+- Disques : vierge, depuis une image (lié par défaut : un qcow2 posé sur
+  l'image du même pool ; ou copie complète, agrandie à la taille
+  demandée), volume existant, ISO, ou lecteur de CD-ROM vide. La place
+  libre du pool s'affiche sous les cartes. Cartes : réseau libvirt, pont
+  de l'hôte, ou macvtap sur une carte de l'hôte avec son mode. La console
+  tire la MAC de chaque carte laissée vide (`52:54:00:...`, contrôlée
+  contre toutes les cartes de l'hôte) et l'écrit dans la définition. Une
+  carte ajoutée plus tard reçoit la sienne de la même façon.
+- Affichage VNC, avec un mot de passe tiré par la console (8 caractères,
+  la limite de VNC). Le mot de passe n'est jamais affiché.
+- Cloud-init : user-data et network-config écrits à la main ou par
+  l'assistant, nom d'hôte invité, pool du seed. L'agent invité et les clés
+  SSH sont ajoutés à un `#cloud-config` (clés de premier niveau
+  `ssh_authorized_keys`, `packages` et `runcmd`) ; ce que la console ne
+  peut pas fusionner sans risque (listes en accolades sur plusieurs
+  lignes, ancres, plusieurs documents) est refusé avec sa raison et laissé
+  tel quel. Le seed est une ISO NoCloud (étiquette `cidata`, Joliet)
+  fabriquée par la console ; son identifiant d'instance est l'uuid de la
+  VM.
+- L'assistant écrit un network-config version 2 qui retrouve chaque carte
+  par sa MAC (`match: macaddress`). Chaque entrée désigne une carte de
+  l'onglet Réseau (1 = la première). La carte n'est renommée dans
+  l'invité (`set-name`) que si vous donnez un nom. Le nom que l'image
+  donne à la carte (`eth0`, `enp1s0`) ne compte donc plus. **Générer le
+  network-data** tire la MAC des cartes qui n'en ont pas et l'écrit dans
+  leur carte. C'est refusé pour plusieurs instances, qui ne peuvent pas
+  partager une MAC : créez-les en DHCP, puis réglez chaque VM par
+  Cloud-init. Dans la fenêtre Modifier, les entrées désignent les cartes
+  existantes.
+- **Revue** demande le plan au serveur : refus, avertissements, volumes à
+  créer, seed, et le XML avec `passwd='***'`. **Créer** lance ensuite les
+  étapes : volumes, seed, `define --validate`, autostart, démarrage,
+  contrôle. Le plan est recalculé à ce moment (l'aperçu n'est jamais
+  cru), et les pools sont relus avant chaque instance. Un échec retire ce
+  que la console a créé pour cette instance et nomme ce qui n'a pas pu
+  l'être ; les instances déjà créées restent et sont listées.
+- Annuler une création ou un clonage attend l'outil : une copie complète
+  que libvirt construit encore est attendue (jusqu'à 15 min), puis
+  supprimée.
+- Les modèles gardent le formulaire (pas le XML) dans la console, communs
+  à tous les hôtes, avec un propriétaire. Mots de passe, clés et user-data
+  sont retirés à l'enregistrement, et la fenêtre le dit.
+
+**Modifier une VM.** **Modifier** dans le menu d'une VM KVM ouvre la même
+fenêtre, remplie depuis la définition inactive. Chaque champ dit avant
+l'envoi ce qui se passera sur cette VM dans son état actuel : appliqué
+maintenant, au prochain démarrage, ou refusé. **Revue** montre la
+classification exacte du serveur. Seuls les champs changés partent.
+
+| Changement sur une VM en marche | Quand | Commande |
+|---|---|---|
+| Nombre de vCPU jusqu'au maximum | maintenant (une baisse que QEMU refuse attend le prochain démarrage, et c'est dit) | `setvcpus --live --config` |
+| Mémoire courante jusqu'au maximum | maintenant, par le ballon de l'invité ; `dommemstat` est relu | `setmem --live --config` |
+| Maximum de vCPU et de mémoire, topologie, mode et modèle CPU, type de machine, micrologiciel, Secure Boot, TPM, vidéo, VNC et son mot de passe, préréglage d'OS, emplacements d'ajout à chaud, agent invité, tablette, RNG, actions d'alimentation, bus, cache, numéro de série, ordre de démarrage d'un disque, modèle, genre et source d'une carte | prochain démarrage | `define` ciblé |
+| Ajouter un disque virtio, ou scsi avec un contrôleur | maintenant si un emplacement PCIe est libre sur q35, sinon au prochain démarrage avec la raison | `attach-device --live --config` |
+| Ajouter un disque SATA ou un lecteur de CD-ROM | prochain démarrage (pas d'enfichage à chaud SATA sur QEMU) | `attach-device --config` |
+| Retirer un disque virtio ou scsi | maintenant ; si l'invité ne le libère pas en 30 s, il quitte la définition et disparaît au prochain démarrage. Son volume est gardé | `detach-device --live --config` |
+| Retirer un disque ou une carte ajouté pour le prochain démarrage seulement | maintenant, dans la définition seule | `define` ciblé |
+| Changer ou éjecter le média d'un CD-ROM | maintenant | `update-device`, `change-media --eject` |
+| Ajouter une carte | maintenant si un emplacement PCIe est libre (q35), sinon au prochain démarrage | `attach-device --live --config` |
+| Retirer une carte (par sa MAC) | maintenant | `detach-interface --live --config` |
+| Titre, description, démarrage automatique | maintenant | `desc`, `autostart` |
+| Cloud-init | le nouveau seed est lu au prochain démarrage | nouveau volume de seed + `update-device` |
+| Renommer | VM arrêtée et sans instantané seulement | `domrename` |
+
+- Sur une VM arrêtée, tout passe par un seul `define` ciblé.
+- La mémoire courante n'apparaît jamais en attente du prochain démarrage.
+  QEMU démarre au maximum, et un invité sans pilote de ballon y reste :
+  la valeur vive peut donc différer de la définition pour toujours.
+- « Prochain démarrage » veut dire un arrêt puis un démarrage : un
+  redémarrage dans l'invité ne recrée pas le processus QEMU. La fenêtre
+  et la liste des VMs affichent **restart needed** avec les champs en
+  attente, et **Arrêter puis démarrer** le fait.
+- La modification porte l'empreinte de toute la définition lue à
+  l'ouverture de la fenêtre. Si la VM a été changée ailleurs entre-temps,
+  la modification est refusée (`changed`) ; **Relire** rafraîchit les
+  champs non touchés et garde ce que vous avez saisi.
+- Ce que le formulaire ne gère pas reste octet pour octet : épinglage CPU,
+  `<cputune>`, ordonnancement temps réel, `<numatune>`, `<hostdev>`,
+  `<qemu:commandline>`, métadonnées d'autres outils, `<seclabel>`,
+  contrôleurs ajoutés à la main. La fenêtre les liste en lecture seule
+  (« kept as is »).
+- Ballon actif ou non, console série, chien de garde, numéro de série du
+  micrologiciel et fils d'E/S des disques se règlent à la création
+  seulement. Une VM transitoire s'ouvre en lecture seule.
+- **Gestes à chaud** dans le menu de la VM, comme dans Harvester : CPU et
+  mémoire, Ajouter un disque, Ajouter une carte, Cloud-init, et par
+  appareil Retirer, Insérer une image, Éjecter. Chaque résultat dit
+  maintenant, prochain démarrage ou refusé, avec la raison.
+- **Cloud-init** d'une VM existante : le seed est relu (rôle opérateur),
+  régénéré dans un nouveau volume et mis à la place ;
+  **Rejouer cloud-init au prochain démarrage** lui donne un nouvel identifiant
+  d'instance. Un user-data vide qui effacerait l'actuel exige
+  **Vider le user-data**.
+
+**Images.** **Stockage > Images** liste, par hôte, les volumes des pools
+d'images déclarés, ou sans eux les volumes qu'aucune VM n'utilise comme
+disque (une image sur laquelle reposent des disques liés reste listée).
+Colonnes : nom, pool, format et badge ISO, taille virtuelle, usage
+(« base de N disque(s) », « utilisée par N »), SHA-256, URL d'origine
+(sans identifiants, paramètres ni fragment).
+- **Téléverser** depuis le navigateur : le fichier est reçu une fois par
+  la console (progression, débit, temps restant), son SHA-256 comparé à
+  celui que vous donnez, son en-tête qcow2 lu, puis envoyé à un ou
+  plusieurs hôtes sur une connexion SSH propre (`vol-upload` par l'entrée
+  standard, plafond de débit en Mbit/s au choix) et contrôlé sur chaque
+  hôte par `sha256sum`. **Annuler** marche dans les deux phases et ne
+  laisse rien.
+- **Télécharger depuis une URL** : par la console, avec la garde
+  d'adresses du magasin d'ISO (chaque redirection recontrôlée, adresses
+  internes refusées sauf si `iso_fetch.allow_private` les autorise,
+  adresses de métadonnées cloud toujours refusées). Une URL `http` simple
+  exige un SHA-256.
+- Les envois et les téléchargements sont plafonnés par
+  `iso_fetch.max_bytes` (20 Gio par défaut), contrôlé sur la taille
+  annoncée et sur les octets reçus.
+- Refusé avant toute écriture : un qcow2 qui nomme un fichier de base ou
+  un fichier de données externe, ou qui annonce plus de 16 Tio.
+- **Vérifier** recalcule le SHA-256 sur l'hôte. **Créer une VM depuis
+  cette image** ouvre la fenêtre de création avec l'image en premier
+  disque. **Supprimer** est refusé tant que l'image sert de base ou est
+  utilisée. **Pools d'images** (administrateur) dit quels pools portent
+  les images.
+
+**Volumes.** Créer (vierge ou lié à une image du même pool), agrandir
+(refusé tant qu'une VM en marche utilise le volume), supprimer
+(administrateur). Suppression et agrandissement reprennent la preuve de la
+1.98 qu'aucune autre VM n'utilise le volume, et la suppression porte
+l'empreinte de son aperçu. Les volumes d'un pool NFS (`netfs`), images
+téléversées là comprises, ne peuvent être ni supprimés ni agrandis par la
+console : le stockage est partagé, cette preuve ne peut pas être faite.
+
+**Pools** (administrateur, sauf rafraîchir). Créer un pool `dir` ou NFS.
+Refusés : un répertoire système (`/etc`, `/usr`...), le répertoire d'un
+autre pool (comparé par chemin et par périphérique et inode : un lien
+compte), un pool d'un autre type imbriqué avec lui. Démarrer, arrêter
+(refusé tant qu'une VM en marche utilise un de ses volumes), rafraîchir
+(opérateur), autostart, supprimer. La suppression est refusée tant
+qu'une définition de VM cite un volume du pool ; **Retirer aussi
+le répertoire vide** ne vaut que pour un pool vide. La console ne crée jamais
+de pool d'elle-même.
+
+**Réseaux** (administrateur). Créer un réseau NAT, routé ou isolé (le
+premier `192.168.X.0/24` libre est proposé, plage DHCP à partir de `.2`),
+ou un réseau sur un pont existant de l'hôte. Un sous-réseau qui chevauche
+une adresse ou une route de l'hôte, ou un autre réseau libvirt, est
+refusé. L'arrêt est refusé tant qu'une VM en marche y a une carte, la
+suppression tant qu'une définition le cite. **Ponts et cartes** montre les
+ponts, cartes physiques, adresses et routes de l'hôte.
+
+**Droits.** Lecteur : toutes les lectures. Opérateur : créer et modifier
+une VM, gestes à chaud, créer, téléverser, vérifier ou agrandir un volume
+ou une image, rafraîchir un pool, lire le cloud-init d'une VM, modèles.
+Administrateur : supprimer un volume ou une image, tous les gestes de pool
+et de réseau, pools d'images.
+
+**Secrets.** Le mot de passe VNC et le user-data n'apparaissent dans
+aucune réponse d'API (sauf la lecture du cloud-init par un opérateur),
+aucun journal, aucune étape d'action, aucune ligne de commande ni dans
+l'Activité. Les specs parviennent à l'outil par un fichier 0600 du
+répertoire de travail de l'action, supprimé à la fin.
+
+API : `GET /api/kvm/hosts/<hôte>/caps?machine=q35|pc`, `.../images`,
+`.../links`, `.../pools`, `.../networks`, `.../macs?count=N` (1 à 16 MAC
+libres tirées pour les cartes d'une VM à créer, jamais gardées en cache) ;
+`GET /api/kvm/vms/<hôte>/<domaine>/form` (vue, réglages non gérés, champs
+en attente, empreinte), `GET .../cloudinit` (opérateur) ;
+`POST /api/kvm/hosts/<hôte>/vm-plan` (`{spec}`),
+`POST /api/kvm/vms/<hôte>` (`{spec}`),
+`POST /api/kvm/vms/<hôte>/<domaine>/edit-plan` et
+`PATCH /api/kvm/vms/<hôte>/<domaine>` (`{spec, expect_config}`),
+`POST /api/kvm/vms/<hôte>/<domaine>/hot/<op>` (`cpumem`, `add-volume`,
+`remove-volume`, `insert-cdrom`, `eject-image`, `add-nic`, `remove-nic`,
+`cloudinit`) ; `POST /api/kvm/hosts/<hôte>/images/upload` (corps brut),
+`POST /api/kvm/uploads/<jeton>/cancel`, `POST .../images/fetch`,
+`POST .../images/<pool>/<volume>/verify`,
+`DELETE .../images/<pool>/<volume>` ; `POST .../volumes`,
+`POST .../volumes/<pool>/<volume>/resize`,
+`GET|DELETE .../volumes/<pool>/<volume>[/delete-plan]` ;
+`POST .../pools`, `POST .../pools/<pool>/start|stop|refresh|autostart`,
+`GET|DELETE .../pools/<pool>[/delete-plan]` ; `POST .../networks`,
+`POST .../networks/<réseau>/start|stop|autostart`,
+`GET|DELETE .../networks/<réseau>[/delete-plan]` ; `PUT .../image-pools` ;
+`GET|POST /api/kvm/templates`, `GET|DELETE /api/kvm/templates/<nom>`.
+Toute suppression exige l'empreinte `expect_delete` de son aperçu.
+`/api/kvm/vms` donne à chaque VM ses champs en attente (`pending`) et une
+table `edit_operations`.
+
+Ligne de commande (`bin/harvester-kvm.py`, valeurs en `--opt=valeur`) :
+`host caps`, `host image-pools`, `vm create --spec-file=F [--dry-run]` (ou
+les options courtes `--name --vcpus --memory-mib --disk= --nic= ...`),
+`vm edit --spec-file=F --expect-config=EMPREINTE [--dry-run]`,
+`vm cpumem`, `vm add-volume|add-nic --spec-file=F`,
+`vm remove-volume|eject-image --target=T`, `vm insert-cdrom`,
+`vm remove-nic --mac=M`, `vm cloudinit [--rerun]`,
+`image list|verify|upload|download-url|delete`,
+`vol create|upload|resize|delete`,
+`pool define|start|stop|refresh|autostart|delete`,
+`net define|start|stop|autostart|delete|links`,
+`template list|save|delete`. Les suppressions prennent `--expect-delete=`
+de leur `--dry-run`.
+
+**OpenSSH et la reprise des lectures.** Aucun plantage de `sshd-session`
+sous plusieurs sessions multiplexées (1.98.0) n'a été observé depuis
+OpenSSH 10.6p1 sur l'hôte du banc (1303 lectures multiplexées
+simultanées, 0 échec). La reprise unique d'une lecture coupée par le
+transport est gardée comme filet de sécurité.
+
+**Ce qui est vérifié.** Sur l'hôte du banc (libvirt 12.8.0, QEMU 11.1.2,
+OpenSSH 10.6p1), objets de test seulement, chaque étape contrôlée par
+`virsh` et dans l'invité, l'inventaire de l'hôte identique avant et après
+(hormis la liste gardée par libvirt du pool parent d'un pool imbriqué
+supprimé) : `vol-upload` depuis un tuyau (octets
+identiques, format sondé qcow2) ; pool et réseau NAT créés par la console,
+un réseau sur le sous-réseau du LAN refusé ; cirros 0.6.2, openSUSE
+Tumbleweed et une ISO Alpine téléversées avec leurs sommes publiées
+contrôlées sur l'hôte ; une VM BIOS q35 avec un disque lié à cirros et un
+mot de passe VNC créée dans la fenêtre, sa console ouverte ; une VM UEFI
+Secure Boot avec TPM depuis une copie complète de Tumbleweed, avec un
+utilisateur et une clé SSH : SSH dans l'invité avec la clé injectée,
+`cloud-init status` done, nom d'hôte, Secure Boot actif, `/dev/tpm0` ;
+une VM Tumbleweed créée dans la fenêtre dont l'adresse statique vient du
+network-config de l'assistant, seed jamais retouché à la main : la carte,
+nommée `enp1s0` par l'image, retrouvée par la MAC tirée par la console,
+l'invité joint à cette adresse sans bail DHCP ; trois instances ; une
+annulation pendant une copie complète qui n'a rien laissé ; un clonage
+annulé pendant une copie dans un pool, l'action restée en cours jusqu'à
+la fin de la copie par libvirt, puis rien de laissé ; une carte ajoutée
+à une VM arrêtée avec une MAC tirée par la console ; vCPU de 1 à 2
+et mémoire de 1 à 2 Gio vus dans l'invité ; quatre disques virtio ajoutés
+à chaud, le cinquième et le sixième en attente d'un emplacement PCIe avec
+la raison, tous retirés ; une carte ajoutée puis retirée ; type de
+machine et maximum de mémoire changés au prochain démarrage, bandeau,
+arrêt puis démarrage ; une ISO insérée puis éjectée ; une VM faite à la
+main avec épinglage, `<cputune>`, `<numatune>`, métadonnées étrangères et
+`<qemu:commandline>` modifiée, son XML identique (C14N) hors des champs
+changés ; suppression avec stockage (seed, variables UEFI et vTPM
+retirés, image gardée) ; refus sur image, réseau et pool ; tout retiré
+par la console ; les mots de passe VNC et le mot de passe cloud-init
+introuvables dans les réponses, journaux et traces d'actions. Non
+vérifié : cartes macvtap, pools NFS, disques SCSI, baisse de vCPU, invité
+sans pilote de ballon.
 
 ---
 

@@ -117,7 +117,8 @@ def test_ssh_argv_contract(state):
     opts = [argv[i + 1] for i, a in enumerate(argv) if a == "-o"]
     cpath = kh.control_path({**DECL, "port": 2222}, state)
     assert re.fullmatch(rf"{state}/ssh/cm-node2-[0-9a-f]{{8}}", str(cpath))
-    assert opts == ["BatchMode=yes", "ConnectTimeout=10", "StrictHostKeyChecking=yes",
+    assert opts == ["BatchMode=yes", "ConnectTimeout=10", "LogLevel=ERROR",
+                    "StrictHostKeyChecking=yes",
                     f"UserKnownHostsFile={state}/ssh/node2_known",
                     "GlobalKnownHostsFile=/dev/null", "IdentitiesOnly=yes",
                     "ControlMaster=auto", f"ControlPath={cpath}", "ControlPersist=60"]

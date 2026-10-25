@@ -347,3 +347,28 @@ def test_scan_host_key_failures_are_classified(runner, kind, match):
     with pytest.raises(kvm_host.KvmError, match=match) as e:
         kvm_decl.scan_host_key("10.0.0.21", 22, runner=runner)
     assert e.value.kind == kind and e.value.host == "10.0.0.21"
+
+
+# --- prochaine version KVM : pools d'images déclarés (facultatif) --------------------
+
+@pytest.mark.parametrize("pools,why", [
+    ("images", "image_pools must be a list"),
+    ([1], "image_pools must be a list"),
+    ([""], "image_pools must be a list"),
+    (["a\nb"], "image_pools must be a list"),
+    (["p"] * 33, "image_pools must be a list"),
+    (["images", "images"], "lists a pool twice"),
+])
+def test_check_decl_refuses_bad_image_pools(pools, why):
+    assert why in kvm_decl.check_decl(kvm_decl.normalize({**GOOD, "image_pools": pools}))
+
+
+@pytest.mark.parametrize("pools", [[], ["images"], ["images", "iso"], [f"p{i}" for i in range(32)],
+                                   ["a pool with spaces"]])
+def test_check_decl_accepts_image_pools(pools):
+    assert kvm_decl.check_decl(kvm_decl.normalize({**GOOD, "image_pools": pools})) is None
+
+
+def test_old_declaration_without_image_pools_stays_valid(tmp_path):
+    assert "image_pools" not in GOOD
+    assert kvm_decl.check_decl(kvm_decl.normalize(dict(GOOD))) is None

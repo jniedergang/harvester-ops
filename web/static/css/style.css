@@ -5493,3 +5493,52 @@ td.fk-reason { max-width: 260px; }
 .kvm-check { display: flex; align-items: flex-start; gap: 6px; }
 .kvm-snap-acts { white-space: nowrap; }
 .kvm-snap-table td, .kvm-clone-disks td { vertical-align: top; }
+/* prochaine version KVM : fenêtres Créer une VM et Modifier (vm-form.js, kvm-form.js) */
+.kvmf { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.kvmf > .vm-create { flex: 1; min-height: 0; }
+.kvmf-errors:empty, .kvmf .kvm-steps:empty { display: none; }
+.kvmf-errors, .kvmf .kvm-steps { flex: none; padding: 0 12px 6px; }
+.vmf-errors { list-style: none; margin: 4px 0; padding: 0; font-size: 12.5px; }
+.vmf-err-count { margin-left: auto; font-size: 10.5px; }
+.vmf-invalid, .vmf-invalid input, .vmf-invalid select { border-color: var(--error) !important; }
+.kvmf-checks { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 6px 0; }
+.kvmf-why { color: var(--text-dim); font-size: 11.5px; }
+.kvmf-hot:empty { display: none; }
+.kvmf-hot .badge { font-size: 10px; padding: 0 5px; }
+.kvmf-edit-head { flex: none; display: flex; flex-direction: column; gap: 6px; padding: 4px 2px 8px; }
+.vmf-restart { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; border: 1px solid var(--warn);
+  border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
+.vmf-readonly { border: 1px solid var(--error); border-radius: 6px; padding: 6px 10px; font-size: 12.5px; }
+.vmf-changes { list-style: none; margin: 6px 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
+.vmf-changes li { overflow-wrap: anywhere; }
+.vmf-refusals, .vmf-warnings { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 6px 0; font-size: 12.5px; }
+.vmf-refusals { border-color: var(--error); }
+.vmf-warnings { border-color: var(--warn); }
+.vmf-refusals ul, .vmf-warnings ul { list-style: none; margin: 4px 0 0; padding: 0; }
+.vmf-xml pre { max-height: 320px; overflow: auto; white-space: pre; }
+.kvmf-existing { margin-bottom: 10px; }
+.kvmf-existing td { vertical-align: middle; overflow-wrap: anywhere; }
+.kvmf-existing select, .kvmf-existing input[type=number] { max-width: 130px; }
+.kvmf-instance ul { margin: 4px 0 8px; padding-left: 18px; font-size: 12.5px; overflow-wrap: anywhere; }
+.kvmf-tpl { display: inline-flex; gap: 6px; align-items: center; }
+.kvmf-tpl[hidden] { display: none; }
+.kvmf-unmanaged ul { margin: 4px 0 0; padding-left: 18px; }
+.kvm-hot-group [data-kvm-hot-devices]:empty { display: none; }
+.kvm-hot-loading { display: block; padding: 4px 10px; font-size: 12px; }
+.kvmf .vm-create-section .vm-edit-ci-wizard .apply-bar { display: flex; }
+.kvmf-edit-head { padding: 4px 6px 8px; }
+.vmf-applied { white-space: nowrap; }
+.kvmf [data-disk-capacity]:empty { display: none; }
+/* prochaine version KVM, tâche 6 : Images, Stockage et Réseaux (kvm.js, kvm-storage.js) */
+.kvm-subtabs { margin: 0; }
+.kvm-block-actions { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 8px; }
+.kvm-row-acts { white-space: nowrap; }
+.kvm-row-acts .btn-icon-action[disabled] { opacity: 0.4; cursor: not-allowed; }
+.kvm-img-notes { margin: 0 0 6px; }
+.kvm-links { margin-top: 10px; border-top: 1px solid var(--border); padding-top: 6px; }
+.kvm-links h4 { margin: 6px 0 2px; font-size: 12.5px; }
+.kvms-hosts { border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; margin: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.kvms-hosts legend { font-size: 12px; color: var(--text-dim); padding: 0 4px; }
+.kvms-progress { display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }
+.kvms-progress[hidden] { display: none; }
+.kvms-phase-head { font-size: 12.5px; font-weight: 600; margin-bottom: 2px; }
