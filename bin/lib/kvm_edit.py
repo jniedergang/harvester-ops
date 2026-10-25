@@ -206,6 +206,17 @@ def _ctx(vm, options=None):
             "snapshots": vm["snapshots"], "options": options}
 
 
+def _in_live(field, live_view):
+    """Vrai si le disque (`disks[<cible>]`) ou la carte (`nics[<mac>]`) du
+    champ existe dans la VM en marche ; vrai pour tout autre champ."""
+    for prefix, key, items in (("disks[", "target", "disks"), ("nics[", "mac", "nics")):
+        if field.startswith(prefix) and "]" in field and "]." not in field:
+            ident = field[len(prefix):field.index("]")]
+            return any((d.get(key) or "").lower() == ident.lower()
+                       for d in live_view.get(items) or [])
+    return True
+
+
 def _classify(ch, ctx, spec_after, gesture):
     """(applied, reason) d'un changement : `now`, `next-boot` ou `refused`.
     `ctx["free_ports"]` est consommé par les ajouts à chaud."""
@@ -255,6 +266,10 @@ def _classify(ch, ctx, spec_after, gesture):
         if field == "autostart" and not persistent:
             return "refused", REASON_TRANSIENT_NEXT
         return "now", None
+    if new is None and ch["old"] is not None and not _in_live(field, view):
+        # appareil seulement dans la définition (ajout reporté au prochain
+        # démarrage) : le retirer annule cet ajout, définition seule
+        return "config", None
     if field.startswith("disks["):
         if field.endswith("].source"):
             return "now", None
@@ -334,6 +349,8 @@ def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False,
         applied, reason = _classify(ch, ctx, spec, gesture)
         if applied == "config":
             applied = "now"
+            # dans une VM en marche : définition seule (pas de --live)
+            ch["_config_only"] = bool(ctx["live"])
         if ch["field"] == "cloudinit" and applied != "refused":
             why = empty_user_data_refusal(host, view.get("seed"), ch["new"])
             if why:
@@ -343,8 +360,8 @@ def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False,
             refusals.append(f"{ch['field']}: {reason}")
     _check_targets(changes, view, spec, blocking)
     refusals += blocking
-    public = [{k: _scrub(v) if k in ("new", "old") else v for k, v in ch.items()}
-              for ch in changes]
+    public = [{k: _scrub(v) if k in ("new", "old") else v for k, v in ch.items()
+               if not k.startswith("_")} for ch in changes]
     return {"name": name, "state": ctx["state"], "persistent": ctx["persistent"],
             "config_digest": digest, "changes": public, "refusals": refusals,
             "empty": not changes, "_blocking": blocking, "_changes": changes, "_ctx": ctx, "_spec": spec, "_vm": vm}
@@ -821,7 +838,7 @@ def apply_edit(host, name, plan, progress=None, cancel=None, sleep=time.sleep,
     created = []
     ko.invalidate_survey(host)
     now = [c for c in changes if c["applied"] == "now" and ctx["live"]
-           and c["field"] not in ("name", "cloudinit")]
+           and c["field"] not in ("name", "cloudinit") and not c.get("_config_only")]
     special = {"autostart", "name", "cloudinit"}
     config = [c for c in changes if c["applied"] in ("now", "next-boot")
               and c not in now and c["field"] not in special

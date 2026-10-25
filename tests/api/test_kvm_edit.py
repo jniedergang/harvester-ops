@@ -495,3 +495,48 @@ def test_clone_refused_when_the_new_seed_exists():
                                          ("", None), ("actual x\n", None)])
 def test_parse_memstat(text, actual):
     assert ke.parse_memstat(text).get("actual") == actual
+
+
+# --- retrait d'un appareil présent seulement dans la définition (ajout reporté) ------
+# Vu en réel sur node2 (tâche 7) : un disque ajouté « au prochain démarrage »
+# faute de port PCIe libre n'existe que dans le XML inactif ; le retirer de la
+# VM en marche partait en detach-device --live et échouait (« no disk with
+# target vdf »). Le retrait annule l'ajout reporté : définition seule, « now ».
+
+PENDING_CASES = [
+    # (libellé, appareil en plus dans la définition, geste)
+    ("virtio disk", {"target": "vdb", "source": {"kind": "volume", "pool": "images",
+                                                 "volume": "extra.qcow2", "format": "qcow2"}},
+     lambda s: ke.detach_disk(s, "vm1", "vdb")),
+    ("sata disk", {"target": "sdb", "bus": "sata",
+                   "source": {"kind": "volume", "pool": "images", "volume": "extra.qcow2",
+                              "format": "qcow2"}},
+     lambda s: ke.detach_disk(s, "vm1", "sdb")),
+    ("nic", {"nic": {"kind": "network", "source": "default", "mac": "52:54:00:00:00:bb"}},
+     lambda s: ke.detach_nic(s, "vm1", "52:54:00:00:00:bb")),
+]
+
+
+@pytest.mark.parametrize("label,extra,gesture", PENDING_CASES, ids=[c[0] for c in PENDING_CASES])
+def test_removing_a_device_only_in_the_definition_of_a_running_vm(label, extra, gesture):
+    s = vm_world("running")
+    s.add_vol("images", "extra.qcow2", fmt="qcow2")
+    live = s.domains["vm1"]["live"]
+    sp = base_spec()
+    if "nic" in extra:
+        sp["nics"] = sp["nics"] + [extra["nic"]]
+    else:
+        sp["disks"] = sp["disks"] + [extra]
+    xml = kx.build_domain(sp, OPTS).replace("<name>vm1</name>",
+                                            "<name>vm1</name><uuid>u-vm1</uuid>")
+    s.domains["vm1"].update(xml=xml, live=live)
+    res = gesture(s)
+    ch = res["changes"][0]
+    assert ch["applied"] == "now", ch
+    assert not any("--live" in w for w in s.writes), s.writes
+    assert [w[0] for w in s.writes] == ["define"]
+    assert ("extra.qcow2" not in s.domains["vm1"]["xml"]
+            and "52:54:00:00:00:bb" not in s.domains["vm1"]["xml"])
+    assert s.domains["vm1"]["live"] == live
+    assert "extra.qcow2" in s.pools["images"]["vols"]          # le volume n'est jamais supprimé
+    assert not any(k.startswith("_") for k in ch)
