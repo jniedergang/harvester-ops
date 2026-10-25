@@ -572,7 +572,7 @@ const KVMForm = (() => {
           ${ctx.mode === 'create' ? `<label class="bk-field"><span>${esc(tr('kvmf.f.seedPool'))}</span><select name="seed_pool" class="tip" data-tip="${esc(tr('kvmf.t.seedPool'))}"><option value="">${esc(tr('kvmf.firstDiskPool'))}</option>${pools.map((p) => `<option value="${esc(p)}">${esc(p)}</option>`).join('')}</select></label>` : ''}
           <label class="bk-field"><span>${esc(tr('kvmf.f.hostname'))}</span><input name="ci_hostname" maxlength="63" autocomplete="off" class="tip" data-tip="${esc(tr('kvmf.t.hostname'))}"${ro}></label>
         </div>
-        ${ctx.readOnly ? '' : CloudInitForm.renderWizard('', { schema: CloudInitForm.userSchema({ harvesterKey: false }), tips: true })}
+        ${ctx.readOnly ? '' : CloudInitForm.renderWizard('', { schema: CloudInitForm.userSchema({ harvesterKey: false }), netSchema: CloudInitForm.netSchemaByMac(), tips: true })}
         <div class="form-row"><label>${esc(tr('kvmf.f.userData'))}</label>
           <textarea class="yaml-editor tall tip" data-ci="userData" data-vmf-field="userData" spellcheck="false" data-tip="${esc(tr('kvmf.t.userData'))}"${ro}></textarea>
           ${ctx.mode === 'create' ? `<p class="form-hint res-warn" data-ci-agent-hint hidden>${icon('warn', 12)} ${esc(tr('kvmf.ciAgentHint'))}</p>` : ''}</div>
@@ -780,6 +780,32 @@ const KVMForm = (() => {
       ctx.opts = (ctx.caps.by_machine || {})[ctx.family] || {};
     }
 
+    /** MAC des cartes de la VM, dans l'ordre de l'onglet Réseau, pour le
+     *  network-config de l'assistant (qui désigne chaque carte par sa MAC).
+     *  Modification : les cartes existantes. Création : une carte sans MAC en
+     *  reçoit une tirée par la console (contrôlée contre les cartes de
+     *  l'hôte), écrite dans la carte et donc envoyée avec le spec. */
+    async function cardMacs() {
+      if (ctx.mode === 'edit') return (ctx.form.view.nics || []).map((n) => n.mac).filter(Boolean);
+      const count = parseInt((root.querySelector('.kvmf-head [name="count"]') || {}).value, 10) || 1;
+      if (count > 1) throw new Error(tr('kvmf.e.ciNetMulti'));
+      const items = [...root.querySelectorAll('[data-editor="kvm-nics"] .tf-block[data-block="nic"] .tf-block-item')];
+      const inputs = items.map((it) => it.querySelector('[name$=".mac"]')).filter(Boolean);
+      const empty = inputs.filter((i) => !i.value.trim());
+      if (empty.length) {
+        const d = await getJson(`/api/kvm/hosts/${enc(ctx.host)}/macs?count=${empty.length}`);
+        if (d.error || !Array.isArray(d.macs) || d.macs.length !== empty.length) {
+          throw new Error(tr('kvmf.e.ciNetMacs', { error: errText(d.error || '?') }));
+        }
+        empty.forEach((i, k) => {
+          i.value = d.macs[k];
+          i.dispatchEvent(new Event('input', { bubbles: true }));
+          i.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+      }
+      return inputs.map((i) => i.value.trim().toLowerCase());
+    }
+
     // -- agent invité (création) : coché par défaut sauf démarrage sur ISO ou
     // Windows, tant que la personne n'a pas touché la case ----------------------------
     function diskCards() {
@@ -849,6 +875,8 @@ const KVMForm = (() => {
       if (sid === 'cloudinit' && !ctx.readOnly) {
         CloudInitForm.wireWizard(el, '', {
           schema: CloudInitForm.userSchema({ harvesterKey: false }),
+          netSchema: CloudInitForm.netSchemaByMac(),
+          nicMacs: () => cardMacs(),
           tips: true,
           confirmReplace: () => confirmInPage(el.querySelector('[data-ci-confirm]'), tr('kvmf.ciReplace')),
         });

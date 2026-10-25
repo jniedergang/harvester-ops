@@ -107,6 +107,35 @@ def check_new_vm_name(name):
     return name
 
 
+# préfixe des MAC tirées par la console : celui de QEMU/KVM, que libvirt
+# utilise aussi quand il tire lui-même (adresse unicast, administrée localement)
+MAC_PREFIX = "52:54:00"
+MAC_DRAW_TRIES = 1000
+
+
+def macs_in_use(domains):
+    """MAC de toutes les cartes de l'hôte, définitions inactives et vives,
+    d'après un résultat de kvm_storage.read_domains ; ensemble en minuscules."""
+    return {(n.get("mac") or "").lower() for e in (domains.get("domains") or {}).values()
+            for vm in (e.get("inactive"), e.get("live")) if vm for n in vm.get("nics") or []
+            if n.get("mac")}
+
+
+def draw_mac(in_use, rand=None):
+    """Tire une MAC `52:54:00:xx:xx:xx` absente de `in_use` (ensemble en
+    minuscules, complété par l'appelant à chaque tirage). La console écrit
+    la MAC de chaque carte qu'elle définit, pour que le network-config de
+    cloud-init puisse désigner la carte par son adresse. `rand()` rend 24
+    bits (secrets.randbits par défaut, injectable pour les tests)."""
+    rand = rand or (lambda: secrets.randbits(24))
+    for _ in range(MAC_DRAW_TRIES):
+        n = rand() & 0xFFFFFF
+        mac = f"{MAC_PREFIX}:{n >> 16:02x}:{(n >> 8) & 0xFF:02x}:{n & 0xFF:02x}"
+        if n and mac not in in_use:
+            return mac
+    raise OpError("failed", "no free MAC address could be drawn")
+
+
 def check_snapshot_name(name, new=False):
     """`new` : nom d'un instantané créé par la console (SNAPSHOT_RE) ; sinon
     un instantané existant, désigné par tout nom libvirt."""

@@ -319,7 +319,31 @@ def _classify(ch, ctx, spec_after, gesture):
     return "next-boot", REASON_RESTART
 
 
-def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False, vm=None):
+def _draw_added_macs(host, changes, refusals, mac_rand=None):
+    """Cartes ajoutées : la console tire la MAC de chaque carte qui n'en a
+    pas (ko.draw_mac, contrôlée contre toutes les cartes de l'hôte, comme à
+    la création) et l'écrit dans le XML ; une MAC donnée déjà prise sur
+    l'hôte est refusée. Les MAC de l'hôte ne sont relues que s'il y a un
+    ajout."""
+    added = [c for c in changes if c["field"].startswith("nics[") and c["old"] is None
+             and isinstance(c["new"], dict)]
+    if not added:
+        return
+    in_use = ko.macs_in_use(ks.read_domains(host))
+    for c in added:
+        mac = c["new"].get("mac")
+        if isinstance(mac, str) and mac:
+            if mac.lower() in in_use:
+                refusals.append(f"{c['field']}: MAC address already used on this host: "
+                                f"{mac.lower()}")
+            in_use.add(mac.lower())
+            continue
+        c["new"] = {**c["new"], "mac": ko.draw_mac(in_use, mac_rand)}
+        in_use.add(c["new"]["mac"])
+
+
+def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False, vm=None,
+              mac_rand=None):
     """Plan d'une modification (lecture seule) : XML relus, empreinte
     contrôlée (OpError `changed`), changements calculés et classés. Rend
     {name, state, persistent, config_digest, changes: [{field, old, new,
@@ -347,6 +371,7 @@ def edit_plan(host, name, spec, expect_digest=None, options=None, gesture=False,
     # cpu.hotplug est déduit (courant < maximum), jamais un réglage
     changes = [c for c in changes if c["field"] != "cpu.hotplug"]
     refusals, blocking = [], []
+    _draw_added_macs(host, changes, blocking, mac_rand)
     for ch in changes:
         applied, reason = _classify(ch, ctx, spec, gesture)
         if applied == "config":

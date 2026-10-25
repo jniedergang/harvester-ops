@@ -134,6 +134,13 @@ def install(page, state):
                 if what == "links":
                     return ok(route, dict(LINKS, role=state["role"]))
                 return ok(route, {"images": IMAGES, "pools": ["images"], "role": state["role"]})
+            mm = re.fullmatch(r"hosts/(node2|node9)/macs", path)
+            if mm:
+                n = int(parse_qs(parts.query).get("count", ["1"])[0])
+                drawn = state.setdefault("macs_drawn", [])
+                macs = [f"52:54:00:5e:00:{len(drawn) + k + 1:02x}" for k in range(n)]
+                drawn.extend(macs)
+                return ok(route, {"host": mm.group(1), "macs": macs, "unchecked": []})
             if path == "templates":
                 return ok(route, {"templates": [{"name": "web-small", "owner": "ju"}], "role": state["role"]})
             if path == "templates/web-small":

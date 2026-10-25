@@ -249,3 +249,76 @@ def test_viewer_cannot_create(ui):
     btn = page.locator('#tab-kvmvms .res-tools [data-kvm="create-vm"]')
     expect(btn).to_be_disabled()
     assert btn.get_attribute("data-tip") == "Needs the operator role"
+
+
+# --- network-config par MAC (revue finale I2) -------------------------------------
+# La console tire la MAC des cartes sans MAC, l'écrit dans la carte (envoyée
+# avec le spec) et le network-config v2 de l'assistant désigne la carte par
+# cette adresse : le nom que l'image donne à la carte ne compte plus.
+
+def gen_net(panel, entries):
+    ci = tab(panel, "cloudinit")
+    if not ci.locator(".vm-edit-ci-wizard").evaluate("d => d.open"):
+        ci.locator(".vm-edit-ci-wizard summary").click()
+    net = ci.locator(".vm-edit-ci-netform")
+    for i, e in enumerate(entries):
+        net.locator('.tf-block-add[data-block="nic"]').click()
+        item = net.locator(".tf-block-item").nth(i)
+        for k, v in e.items():
+            el = item.locator(f'[name$=".{k}"]')
+            if el.evaluate("e => e.tagName") == "SELECT":
+                el.select_option(v)
+            else:
+                el.fill(str(v))
+    ci.locator('[data-action="gen-netdata"]').click()
+    return ci
+
+
+def test_network_config_names_cards_by_a_console_drawn_mac(ui):
+    page, state, dialogs = ui
+    panel = open_create(page)
+    panel.locator('.kvmf-head [name="name"]').fill("kvmtest-net-c")
+    net = tab(panel, "network")
+    net.locator('.tf-block-add[data-block="nic"]').click()
+    net.locator('.tf-block-item').nth(1).locator('[name$=".mac"]').fill("52:54:00:12:34:56")
+    ci = gen_net(panel, [{"card": 1, "mode": "static", "address": "10.213.77.10/24",
+                          "gateway": "10.213.77.1"},
+                         {"card": 2, "iface": "lan1"}])
+    nd = ci.locator('[data-ci="networkData"]')
+    expect(nd).to_have_value(re.compile("macaddress: '52:54:00:5e:00:01'"))
+    text = nd.input_value()
+    assert text.startswith("version: 2\nethernets:\n")
+    assert "macaddress: '52:54:00:12:34:56'\n    set-name: lan1" in text
+    assert "addresses:\n      - 10.213.77.10/24" in text and "via: 10.213.77.1" in text
+    assert "eth0" not in text
+    # une seule MAC demandée à la console (la seconde carte avait la sienne)
+    assert [g for g in state["gets"] if g.endswith("/macs")] == ["hosts/node2/macs"]
+    assert state["macs_drawn"] == ["52:54:00:5e:00:01"]
+    net = tab(panel, "network")
+    assert net.locator('[name$=".mac"]').evaluate_all("els => els.map(e => e.value)") == [
+        "52:54:00:5e:00:01", "52:54:00:12:34:56"]
+    panel.locator('[data-kvmf="create"]').click()
+    expect(panel.locator("[data-result]")).to_contain_text("Created: kvmtest-net-c")
+    spec = [s for s in state["sent"] if s[1] == "vms/node2"][-1][2]["spec"]
+    assert [n.get("mac") for n in spec["nics"]] == ["52:54:00:5e:00:01", "52:54:00:12:34:56"]
+    assert spec["cloudinit"]["network_data"] == text
+    # régénérer ne retire pas une nouvelle MAC : les cartes ont déjà la leur
+    gen_net(panel, [])
+    assert state["macs_drawn"] == ["52:54:00:5e:00:01"]
+    assert dialogs == []
+
+
+@pytest.mark.parametrize("label,setup,entries,error", [
+    ("card that does not exist", None, [{"card": 3}], "card 3 does not exist: the VM has 1 card(s)"),
+    ("card configured twice", None, [{"card": 1}, {"card": 1}], "card 1 is configured twice"),
+    ("several instances", "count", [{"card": 1}], "Several instances cannot share"),
+])
+def test_network_config_by_mac_refusals(ui, label, setup, entries, error):
+    page, state, _ = ui
+    panel = open_create(page)
+    if setup == "count":
+        panel.locator('.kvmf-head [name="count"]').fill("2")
+    ci = gen_net(panel, entries)
+    expect(ci.locator('.apply-result[data-section="ci-net"]')).to_contain_text(error)
+    assert ci.locator('[data-ci="networkData"]').input_value() == ""
+    assert state.get("macs_drawn", []) == ([] if setup == "count" else ["52:54:00:5e:00:01"])

@@ -1385,3 +1385,37 @@ def test_cancelling_a_creation_waits_for_the_tool_rollback(client, lib):
 def test_other_vm_gestures_still_close_at_once_on_cancel(client, lib):
     assert client.post("/api/kvm/vms/node2/kvmtest-1/start").status_code == 202
     assert only_run().cancel_waits is False
+
+
+# --- MAC tirées pour les cartes de la fenêtre de création (revue finale I2) --------
+
+MACS_CASES = [
+    # (libellé, requête, statut, MAC rendues)
+    ("one by default", "", 200, ["52:54:00:00:00:02"]),
+    ("collision skipped, distinct", "?count=3", 200,
+     ["52:54:00:00:00:02", "52:54:00:00:00:04", "52:54:00:00:00:05"]),
+    ("zero refused", "?count=0", 400, None),
+    ("above the cap refused", f"?count={wapp.KVM_MACS_MAX + 1}", 400, None),
+    ("not a number refused", "?count=two", 400, None),
+]
+
+
+@pytest.mark.parametrize("label,query,status,macs", MACS_CASES, ids=[c[0] for c in MACS_CASES])
+def test_mac_draw_route(client, monkeypatch, as_user, label, query, status, macs):
+    used = {"domains": {"web": {"active": True, "inactive": {"nics": [{"mac": "52:54:00:00:00:01"}]},
+                                "live": {"nics": [{"mac": "52:54:00:00:00:03"}]}}},
+            "unknown": ["odd"]}
+    monkeypatch.setattr(ks, "read_domains", lambda host: used)
+    draws = iter([1, 2, 2, 3, 4, 5])        # .01 et .03 pris sur l'hôte, .02 déjà tiré
+    monkeypatch.setattr(ko.secrets, "randbits", lambda bits: next(draws))
+    r = as_user("curieux", "GET", f"/api/kvm/hosts/node2/macs{query}")     # lecture : lecteur
+    assert r.status_code == status, r.get_json()
+    if macs is not None:
+        assert r.get_json() == {"host": "node2", "macs": macs, "unchecked": ["odd"]}
+    assert wapp.ACTIONS == {}
+
+
+def test_mac_draw_route_is_never_a_shared_cached_read():
+    i = SRC.index("def api_kvm_host_macs(")
+    head = SRC[SRC.rindex("@app.route", 0, i):i]
+    assert "shared_read" not in head and "_rate_limit(KVM_READ_RATE)" in head

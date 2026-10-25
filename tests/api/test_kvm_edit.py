@@ -540,3 +540,50 @@ def test_removing_a_device_only_in_the_definition_of_a_running_vm(label, extra, 
     assert s.domains["vm1"]["live"] == live
     assert "extra.qcow2" in s.pools["images"]["vols"]          # le volume n'est jamais supprimé
     assert not any(k.startswith("_") for k in ch)
+
+
+# --- MAC tirée par la console pour une carte ajoutée (revue finale I2) -------------
+
+ADDED_NIC_CASES = [
+    # (libellé, état, carte ajoutée, tirages, MAC attendue, refus attendu)
+    ("drawn on a running VM", "running", {"kind": "network", "source": "default"},
+     [0xAA, 0xBB], "52:54:00:00:00:bb", None),       # 0xaa = la carte existante (MAC)
+    ("drawn on a stopped VM", "shut off", {"kind": "network", "source": "default"},
+     [0xCC], "52:54:00:00:00:cc", None),
+    ("given MAC kept", "shut off", {"kind": "network", "source": "default",
+                                    "mac": "52:54:00:00:00:dd"}, [], "52:54:00:00:00:dd", None),
+    ("given MAC of another VM refused", "shut off", {"kind": "network", "source": "default",
+                                                     "mac": "52:54:00:00:00:EE"}, [], None,
+     "already used"),
+]
+
+
+@pytest.mark.parametrize("label,state,nic,draws,want,refusal", ADDED_NIC_CASES,
+                         ids=[c[0] for c in ADDED_NIC_CASES])
+def test_an_added_card_gets_a_console_drawn_mac(label, state, nic, draws, want, refusal):
+    s = vm_world(state)
+    s.add_domain("other", kx.build_domain(base_spec(
+        name="other", nics=[{"kind": "network", "source": "default",
+                             "mac": "52:54:00:00:00:ee"}]), OPTS))
+    it = iter(draws)
+    plan = ke.edit_plan(s, "vm1", {"nics": [{"mac": MAC}, nic]}, options=OPTS,
+                        mac_rand=lambda: next(it))
+    if refusal:
+        assert any(refusal in r for r in plan["refusals"])
+        with pytest.raises(ko.OpError):
+            ke.apply_edit(s, "vm1", plan)
+        return
+    (ch,) = [c for c in plan["changes"] if c["old"] is None and c["field"].startswith("nics[")]
+    assert ch["new"]["mac"] == want
+    ke.apply_edit(s, "vm1", plan)
+    xml = s.domains["vm1"]["xml"]
+    assert want in [m.get("address") for m in ET.fromstring(xml).iter("mac")]
+
+
+def test_the_attach_nic_gesture_sends_the_drawn_mac_to_libvirt():
+    s = vm_world("running")
+    ke.attach_nic(s, "vm1", {"kind": "network", "source": "default"})
+    sent = [c for c in s.calls if c[0] == "input" and "attach-device" in c[1]][-1][2]
+    mac = ET.fromstring(sent).find("mac")
+    assert mac is not None and mac.get("address").startswith("52:54:00:")
+    assert mac.get("address") != MAC

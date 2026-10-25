@@ -408,6 +408,91 @@ const CloudInitForm = (() => {
   }
 
 
+  /** Schéma réseau des VMs KVM : chaque entrée désigne une carte de la VM
+   *  par son rang dans l'onglet Réseau (la console connaît sa MAC), le nom
+   *  dans l'invité n'est qu'un renommage facultatif (`set-name`). Construit à
+   *  l'appel : les libellés suivent la langue courante. */
+  function netSchemaByMac() {
+    const L = (k, fb) => ({ en: tr(k, fb) });
+    const base = CI_NET_SCHEMA.nested.nic.args.filter(a => a.name !== 'iface');
+    return Object.assign({}, CI_NET_SCHEMA, {
+      id: 'ci-netdata-mac',
+      nested: { nic: Object.assign({}, CI_NET_SCHEMA.nested.nic, {
+        itemTitle: (v) => ({ icon: 'plug', text:
+          `${tr('ci.kvm.cardN', 'card {n}').replace('{n}', v.card || 1)}${v.iface ? ' (' + v.iface + ')' : ''} (${v.mode || 'dhcp'})${v.address ? ' · ' + v.address : ''}` }),
+        newItem: (items) => {
+          const used = new Set(items.map(i => Number(i.card) || 1));
+          let n = 1;
+          while (used.has(n) && n < 16) n++;
+          return { card: n };
+        },
+        args: [
+          { name: 'card', type: 'int', required: true, default: 1, min: 1, max: 16,
+            label: L('ci.kvm.card', 'Network card'),
+            description: L('ci.kvm.cardTip', 'Card of the VM, in the order of the Network tab (1 = first); found in the guest by its MAC address') },
+          { name: 'iface', type: 'text', validate: /^[A-Za-z0-9_.-]{1,15}$/,
+            label: L('ci.kvm.rename', 'Rename to (optional)'),
+            description: L('ci.kvm.renameTip', 'Interface name given in the guest (set-name). Empty: the guest keeps its own name (enp1s0...)') },
+        ].concat(base),
+      }) },
+    });
+  }
+
+  /** network-config v2 (format NoCloud de cloud-init) dont chaque entrée
+   *  trouve sa carte par sa MAC (`match: macaddress`) : le nom que l'image
+   *  donne à la carte (eth0, enp1s0...) ne compte plus. `macs` : MAC des
+   *  cartes de la VM, dans l'ordre de l'onglet Réseau. Sans entrée, la
+   *  première carte en DHCP. `set-name` seulement si un nom est demandé. */
+  function genNetworkDataByMac(spec, macs) {
+    macs = (macs || []).filter(Boolean).map(m => String(m).toLowerCase());
+    if (!macs.length) throw new Error(tr('ci.kvm.errNoCard', 'the VM has no network card to configure'));
+    const nics = (spec.nic && spec.nic.length) ? spec.nic : [{ card: 1, mode: 'dhcp' }];
+    const dns = csvOf(spec.dns);
+    const search = csvOf(spec.search);
+    const seen = new Set();
+    const L = ['version: 2', 'ethernets:'];
+    nics.forEach(n => {
+      const card = Number(n.card) || 1;
+      if (!Number.isInteger(card) || card < 1 || card > macs.length) {
+        throw new Error(tr('ci.kvm.errCard', 'card {n} does not exist: the VM has {count} card(s)')
+          .replace('{n}', card).replace('{count}', macs.length));
+      }
+      if (seen.has(card)) throw new Error(tr('ci.kvm.errCardTwice', 'card {n} is configured twice').replace('{n}', card));
+      seen.add(card);
+      L.push(`  nic${card}:`);
+      L.push('    match:');
+      L.push(`      macaddress: ${yamlStr(macs[card - 1])}`);
+      if (n.iface) L.push(`    set-name: ${yamlStr(n.iface)}`);
+      if (n.mtu) L.push(`    mtu: ${n.mtu}`);
+      if (n.mode === 'static') {
+        if (!n.address) throw new Error(tr('vm.edit.ci.errAddr', 'a CIDR address is required for static addressing') + ` (${tr('ci.kvm.cardN', 'card {n}').replace('{n}', card)})`);
+        L.push('    dhcp4: false');
+        L.push('    addresses:');
+        L.push(`      - ${yamlStr(n.address)}`);
+        if (n.gateway) {
+          // 0.0.0.0/0 plutôt que `default` : refusé par le cloud-init 25.1 de Tumbleweed
+          L.push('    routes:');
+          L.push("      - to: 0.0.0.0/0");
+          L.push(`        via: ${yamlStr(n.gateway)}`);
+        }
+      } else {
+        L.push('    dhcp4: true');
+      }
+      if (dns.length || search.length) {
+        L.push('    nameservers:');
+        if (dns.length) {
+          L.push('      addresses:');
+          dns.forEach(d => L.push(`        - ${yamlStr(d)}`));
+        }
+        if (search.length) {
+          L.push('      search:');
+          search.forEach(d => L.push(`        - ${yamlStr(d)}`));
+        }
+      }
+    });
+    return L.join('\n') + '\n';
+  }
+
   /** Le schéma des utilisateurs : celui de Harvester (champ « SSH key
    *  (Harvester) » qui lit les KeyPairs du cluster), ou sans ce champ quand
    *  il n'y a pas de cluster (KVM : clés choisies dans l'en-tête). */
@@ -427,12 +512,15 @@ const CloudInitForm = (() => {
    *  `opts.tips` : bulles d'aide sur les boutons. */
   function renderWizard(cluster, opts = {}) {
     const schema = opts.schema || CI_USER_SCHEMA;
+    const netSchema = opts.netSchema || CI_NET_SCHEMA;
     const tip = (k, fb) => (opts.tips ? ` tip" data-tip="${esc(tr(k, fb))}` : '');
     return `
       <details class="vm-edit-adv vm-edit-ci-wizard">
         <summary>${Icons.svg('wizard')} ${esc(tr('vm.edit.ci.wizard', 'Assistant, generate the YAML below'))}</summary>
-        <p class="form-hint">${esc(tr('vm.edit.ci.wizardHint',
-          'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
+        <p class="form-hint">${esc(opts.netSchema
+          ? tr('ci.kvm.wizardHint', 'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config YAML and a network-config v2 that finds each card by its MAC address. Review, then Save.')
+          : tr('vm.edit.ci.wizardHint',
+            'Fill in what you need, then Generate: the editors below are replaced with clean cloud-config / network-data v1 YAML. Review, then Save.'))}</p>
         <h4>${esc(tr('vm.edit.ci.userTitle', 'System (user-data)'))}</h4>
         <div class="vm-edit-ci-userform">
           ${schema.sections.map(sec => `
@@ -444,7 +532,7 @@ const CloudInitForm = (() => {
           <span class="apply-result" data-section="ci-user"></span>
         </div>
         <h4>${esc(tr('vm.edit.ci.netTitle', 'Network (network-data)'))}</h4>
-        <div class="vm-edit-ci-netform">${TFForm.render(CI_NET_SCHEMA, cluster, {}, { hideHeader: true })}</div>
+        <div class="vm-edit-ci-netform">${TFForm.render(netSchema, cluster, {}, { hideHeader: true })}</div>
         <div class="apply-bar">
           <button class="btn btn-sm btn-primary${tip('ci.genNetTip', 'Writes the network-data editor below from this form')}" data-action="gen-netdata">${esc(tr('vm.edit.ci.genNet', 'Generate network-data'))}</button>
           <span class="apply-result" data-section="ci-net"></span>
@@ -455,16 +543,18 @@ const CloudInitForm = (() => {
   /** Câble l'assistant rendu par `renderWizard` dans `sectionEl` : les deux
    *  formulaires, les champs statiques d'une carte, les boutons « Générer ».
    *  `opts.confirmReplace()` rend vrai ou faux (ou une promesse) avant
-   *  d'écraser un éditeur non vide. */
+   *  d'écraser un éditeur non vide. `opts.netSchema` + `opts.nicMacs()`
+   *  (promesse des MAC des cartes, VMs KVM) : network-config v2 par MAC. */
   function wireWizard(sectionEl, cluster, opts = {}) {
     const schema = opts.schema || CI_USER_SCHEMA;
+    const netSchema = opts.netSchema || CI_NET_SCHEMA;
     const confirmReplace = opts.confirmReplace || (() => true);
     // Container divs (the user form spans several section renders, so
     // there are multiple .tf-form roots inside, so wire/read on the parent).
     const userForm = sectionEl.querySelector('.vm-edit-ci-userform');
     const netForm = sectionEl.querySelector('.vm-edit-ci-netform');
     TFForm.wire(userForm, schema, cluster);
-    TFForm.wire(netForm, CI_NET_SCHEMA, cluster);
+    TFForm.wire(netForm, netSchema, cluster);
     // Per-NIC card: address/gateway only make sense in static mode.
     const syncNet = () => {
       netForm.querySelectorAll('.tf-block-item').forEach(item => {
@@ -500,9 +590,13 @@ const CloudInitForm = (() => {
       const result = sectionEl.querySelector(`.apply-result[data-section="ci-${isUser ? 'user' : 'net'}"]`);
       try {
         const spec = TFForm.read(isUser ? userForm : netForm,
-                                 isUser ? schema : CI_NET_SCHEMA,
+                                 isUser ? schema : netSchema,
                                  { emitEmptyLists: true });
-        const yaml = isUser ? genUserData(spec) : genNetworkData(spec);
+        // KVM : `nicMacs()` rend les MAC des cartes de la VM (tirées par la
+        // console au besoin), le network-config les désigne par leur adresse
+        const yaml = isUser ? genUserData(spec)
+          : opts.nicMacs ? genNetworkDataByMac(spec, await opts.nicMacs())
+          : genNetworkData(spec);
         if (target.value.trim() && !(await confirmReplace(result))) return;
         target.value = yaml;
         result.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('vm.edit.ci.generated', 'generated, review below, then Save'))}</span>`;
@@ -677,8 +771,8 @@ const CloudInitForm = (() => {
     return { text: lines.map((l, k) => l + ends[k]).join(''), skipped: false, reason: null, key: null };
   }
 
-  return { CI_USER_SCHEMA, CI_NET_SCHEMA, genUserData, genNetworkData, userSchema,
-           renderWizard, wireWizard, withKeysAndAgent, SSH_KEY_RE };
+  return { CI_USER_SCHEMA, CI_NET_SCHEMA, genUserData, genNetworkData, genNetworkDataByMac,
+           netSchemaByMac, userSchema, renderWizard, wireWizard, withKeysAndAgent, SSH_KEY_RE };
 })();
 
 if (typeof window !== 'undefined') window.CloudInitForm = CloudInitForm;

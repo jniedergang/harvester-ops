@@ -148,9 +148,7 @@ def _read_world(host, specs):
         elif r.error.kind != "notfound":
             raise r.error
     doms = ks.read_domains(host)
-    macs = sorted({(n.get("mac") or "").lower() for e in doms["domains"].values()
-                   for vm in (e["inactive"], e["live"]) if vm for n in vm.get("nics") or []
-                   if n.get("mac")})
+    macs = sorted(ko.macs_in_use(doms))
     pools = {p["name"]: p for p in ks.list_pools(host)}
     nets = {n["name"]: n for n in kvm_net.list_networks(host)}
     need_links = any(n.get("kind") in ("bridge", "direct") for s in specs
@@ -189,10 +187,17 @@ def _volume_plan(s, vols, world):
     return out
 
 
-def create_plan(host, spec, options=None, world=None):
+def create_plan(host, spec, options=None, world=None, mac_rand=None):
     """Plan de création (lecture seule, aussi pour `--dry-run`). Rend
-    {possible, refusals, warnings, instances: [{name, volumes, seed,
-    xml_preview}]} ; le `xml_preview` porte `passwd='***'`."""
+    {possible, refusals, warnings, instances: [{name, volumes, seed, macs,
+    xml_preview}]} ; le `xml_preview` porte `passwd='***'`.
+
+    Chaque carte sans MAC en reçoit une tirée par la console (ko.draw_mac,
+    contrôlée contre les MAC de l'hôte et celles déjà tirées) et écrite dans
+    le XML : le network-config de cloud-init peut la désigner par son
+    adresse. Le plan est recalculé à l'exécution, donc une MAC tirée pour
+    l'aperçu n'est pas celle de la création ; une MAC donnée dans le spec
+    reste la même."""
     specs = instance_specs(spec)
     options = options or host_options(host)
     world = world or _read_world(host, specs)
@@ -207,12 +212,19 @@ def create_plan(host, spec, options=None, world=None):
         warnings.append(f"unreadable VM definition(s) {', '.join(world['unknown'])}: their MAC "
                         "addresses were not checked")
     instances, space = [], {}
+    # MAC de l'hôte + MAC fixées par le spec : jamais tirées pour une autre carte
+    drawn = set(world["macs"]) | {n["mac"].lower() for s0 in specs for n in s0.get("nics") or []
+                                  if isinstance(n, dict) and isinstance(n.get("mac"), str)}
     for s0 in specs:
         reasons = kx.check_spec(s0, opts)
         refusals += [r for r in reasons if r not in refusals]
         if reasons:
             continue
         s = kx.normalize(s0, opts)
+        for n in s["nics"]:
+            if not n.get("mac"):
+                n["mac"] = ko.draw_mac(drawn, mac_rand)
+            drawn.add(n["mac"])
         if s["name"] in world["taken"]:
             refusals.append(f"a VM named {s['name']} already exists")
         vols = kx.resolve_volumes(s)
@@ -273,6 +285,7 @@ def create_plan(host, spec, options=None, world=None):
             refusals.append(e.message)
             i["xml_preview"] = None
     public = [{"name": i["name"], "volumes": i["volumes"], "seed": i["seed"],
+               "macs": [n["mac"] for n in i["spec"]["nics"]],
                "xml_preview": i["xml_preview"]} for i in instances]
     return {"possible": not refusals, "refusals": refusals, "warnings": warnings,
             "instances": public, "_instances": instances, "_options": opts}
@@ -455,7 +468,7 @@ def rollback(host, created, sleep=None, clock=None):
 
 
 def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uuidlib.uuid4,
-              password_gen=vnc_password, start=None, before_write=None):
+              password_gen=vnc_password, start=None, before_write=None, mac_rand=None):
     """Crée les instances d'un spec : plan recalculé ici (jamais l'aperçu),
     puis pour chaque instance volumes, seed, define, autostart, start,
     relecture. `before_write(volumes, networks)` : appelé une fois le plan
@@ -482,7 +495,7 @@ def create_vm(host, spec, progress=None, cancel=None, options=None, uuid_gen=uui
             raise kh.Cancelled(0, "creation cancelled")
 
     step("plan", "running", str(spec.get("name") if isinstance(spec, dict) else "?"))
-    plan = create_plan(host, spec, options)
+    plan = create_plan(host, spec, options, mac_rand=mac_rand)
     if not plan["possible"]:
         step("plan", "failed", "; ".join(plan["refusals"]))
         raise OpError("refused", "; ".join(plan["refusals"]),

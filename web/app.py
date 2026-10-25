@@ -22641,6 +22641,37 @@ def api_kvm_host_caps(host):
                     "role": current_role()})
 
 
+KVM_MACS_MAX = 16
+
+
+@app.route("/api/kvm/hosts/<host>/macs")
+@_rate_limit(KVM_READ_RATE)
+@requires_auth
+def api_kvm_host_macs(host):
+    """MAC libres pour les cartes d'une VM à créer (`?count=N`, 1 à 16) :
+    tirées par la console (`52:54:00:xx:xx:xx`), contrôlées contre toutes les
+    cartes de l'hôte (définitions inactives et vives). La fenêtre de création
+    les écrit dans les cartes pour que le network-config de cloud-init les
+    désigne par leur adresse ; la création les recontrôle. Ne modifie rien,
+    jamais gardé en cache (chaque appel tire de nouvelles adresses)."""
+    vh, err = _kvm_host_target(host)
+    if err:
+        return err
+    raw = request.args.get("count", "1")
+    if not raw.isdigit() or not 1 <= int(raw) <= KVM_MACS_MAX:
+        return _kvm_err(f"count: an integer from 1 to {KVM_MACS_MAX}")
+    try:
+        doms = _ks.read_domains(vh)
+        in_use = _ko.macs_in_use(doms)
+        macs = []
+        for _ in range(int(raw)):
+            macs.append(_ko.draw_mac(in_use))
+            in_use.add(macs[-1])
+    except (_ko.OpError, _kh.KvmError) as e:
+        return _kvm_op_error(e, {"host": host})
+    return jsonify({"host": host, "macs": macs, "unchecked": doms["unknown"]})
+
+
 @app.route("/api/kvm/hosts/<host>/images")
 @_rate_limit(KVM_PREVIEW_RATE)
 @requires_auth

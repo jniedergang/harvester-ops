@@ -299,3 +299,25 @@ def test_viewer_sees_the_gestures_greyed_with_the_reason(ui):
     assert item.get_attribute("data-tip") == "Needs the operator role"
     item.click(force=True)
     assert page.locator('.floating-panel form[data-kvm-hot-op="cpumem"]').count() == 0
+
+
+def test_cloudinit_assistant_names_the_existing_cards_by_mac(ui):
+    """Revue finale I2 : dans la fenêtre Modifier, l'assistant désigne les
+    cartes existantes par leur MAC (aucune MAC tirée : elles en ont une)."""
+    page, state, dialogs = ui
+    panel = open_edit(page)
+    ci = tab(panel, "cloudinit")
+    ci.locator(".vm-edit-ci-wizard summary").click()
+    net = ci.locator(".vm-edit-ci-netform")
+    net.locator('.tf-block-add[data-block="nic"]').click()
+    item = net.locator(".tf-block-item").first
+    item.locator('[name$=".card"]').fill("2")
+    item.locator('[name$=".mode"]').select_option("static")
+    item.locator('[name$=".address"]').fill("10.213.77.20/24")
+    ci.locator('[data-ci="networkData"]').fill("")
+    ci.locator('[data-action="gen-netdata"]').click()
+    nd = ci.locator('[data-ci="networkData"]')
+    expect(nd).to_have_value(re.compile("macaddress: '52:54:00:aa:bb:cc'"))
+    assert "nic2:" in nd.input_value() and "10.213.77.20/24" in nd.input_value()
+    assert not [g for g in state["gets"] if g.endswith("/macs")]
+    assert dialogs == []

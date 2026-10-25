@@ -374,3 +374,67 @@ def test_rollback_of_a_finished_volume_does_not_wait(monkeypatch):
     out = kc.rollback(host, [{"kind": "volume", "pool": "p", "volume": "x"}],
                       sleep=lambda s: pytest.fail("no wait for a volume that is not being built"))
     assert len(out) == 1 and "still being allocated" in out[0]["error"]
+
+
+# --- MAC tirées par la console (revue finale I2) ------------------------------------
+# Le network-config de cloud-init désigne la carte par sa MAC : la console
+# écrit donc la MAC de chaque carte qu'elle définit, au lieu de laisser
+# libvirt la tirer après coup.
+
+def seq(*values):
+    it = iter(values)
+    return lambda: next(it)
+
+
+DRAW_CASES = [
+    # (libellé, MAC déjà prises, tirages successifs, MAC attendue ou erreur)
+    ("first draw is free", set(), [0xABCDEF], "52:54:00:ab:cd:ef"),
+    ("collision with a host card", {"52:54:00:ab:cd:ef"}, [0xABCDEF, 0x000102], "52:54:00:00:01:02"),
+    ("zero suffix never drawn", set(), [0, 0x000001], "52:54:00:00:00:01"),
+    ("bits above 24 masked", set(), [0x1FF000010], "52:54:00:00:00:10"),
+    ("no free address", {"52:54:00:00:00:07"}, [7] * ko.MAC_DRAW_TRIES, None),
+]
+
+
+@pytest.mark.parametrize("label,taken,draws,want", DRAW_CASES, ids=[c[0] for c in DRAW_CASES])
+def test_draw_mac(label, taken, draws, want):
+    if want is None:
+        with pytest.raises(ko.OpError, match="no free MAC"):
+            ko.draw_mac(taken, seq(*draws))
+    else:
+        assert ko.draw_mac(taken, seq(*draws)) == want
+
+
+def test_draw_mac_default_source_is_random_and_well_formed():
+    macs = {ko.draw_mac(set()) for _ in range(20)}
+    assert len(macs) == 20 and all(m.startswith("52:54:00:") and len(m) == 17 for m in macs)
+
+
+def _xml_macs(xml):
+    return [m.get("address") for m in ET.fromstring(xml).iter("mac")]
+
+
+def test_create_writes_a_console_drawn_mac_for_every_card_without_one():
+    s = world()
+    s.add_domain("other", W.dom("other", [], nics=1))
+    other = ko.macs_in_use(ks.read_domains(s))
+    (taken,) = other
+    n = int(taken.replace(":", "")[6:], 16)
+    sp = spec(nics=[{"kind": "network", "source": "kvmtest-net"},
+                    {"kind": "network", "source": "kvmtest-net", "mac": "52:54:00:12:34:56"},
+                    {"kind": "network", "source": "kvmtest-net"}])
+    # 1er tirage : la MAC de l'autre VM, 2e : la MAC fixée par le spec, puis deux libres
+    res, _ = create(s, sp, mac_rand=seq(n, 0x123456, 0x0000A1, 0x0000A2))
+    define = [c for c in s.calls if c[0] == "input" and "define" in c[1]][-1]
+    assert _xml_macs(define[2]) == ["52:54:00:00:00:a1", "52:54:00:12:34:56", "52:54:00:00:00:a2"]
+    assert res["created"][0]["macs"] == ["52:54:00:00:00:a1", "52:54:00:12:34:56",
+                                         "52:54:00:00:00:a2"]
+
+
+def test_each_instance_gets_its_own_macs():
+    s = world()
+    plan = kc.create_plan(s, spec(instances=3, cloudinit=None),
+                          mac_rand=seq(1, 1, 2, 3))     # 2e tirage en collision avec le 1er
+    assert [i["macs"] for i in plan["instances"]] == [
+        ["52:54:00:00:00:01"], ["52:54:00:00:00:02"], ["52:54:00:00:00:03"]]
+    assert all(_xml_macs(i["xml_preview"]) == i["macs"] for i in plan["instances"])
