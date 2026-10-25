@@ -76,23 +76,29 @@
           <span class="tab-icon" data-icon="node"></span>
           <span class="sidebar-label" data-i18n="hnav.hosts">Hosts</span>
         </a>
-        <div id="hnav-families" class="hnav-families"></div>
-        <button type="button" class="tab hnav-entry hnav-add needs-admin" id="hnav-add" data-hnav="add"
-                data-i18n-title="hnav.addTip" title="Add a host: a Harvester cluster or a KVM hypervisor">
-          <span class="tab-icon" data-icon="add"></span>
-          <span class="sidebar-label" data-i18n="hnav.add">Add a host</span>
-        </button>
+        <!-- 2.0.1 : les familles et « Ajouter un hôte » pendent sous Hôtes
+             (retrait + trait vertical), comme Liens sous Disaster Recovery -->
+        <div class="hnav-children" data-hnav-parent="hosts">
+          <div id="hnav-families" class="hnav-families"></div>
+          <button type="button" class="tab hnav-entry hnav-add needs-admin" id="hnav-add" data-hnav="add"
+                  data-i18n-title="hnav.addTip" title="Add a host: a Harvester cluster or a KVM hypervisor">
+            <span class="tab-icon" data-icon="add"></span>
+            <span class="sidebar-label" data-i18n="hnav.add">Add a host</span>
+          </button>
+        </div>
         <a class="tab hnav-entry" data-hnav="root" data-hnav-root="dr" href="#dr"
            data-i18n-title="hnav.drTip" title="Every replication contract: state, RPO held, actions">
           <span class="tab-icon" data-icon="shield"></span>
           <span class="sidebar-label" data-i18n="hnav.dr">Disaster Recovery</span>
           <span class="rp-menu-badge tip" data-rp-badge="all" hidden></span>
         </a>
-        <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="dr" data-hnav-tab="links" href="#dr/links"
-           data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
-          <span class="tab-icon" data-icon="network"></span>
-          <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
-        </a>
+        <div class="hnav-children" data-hnav-parent="dr">
+          <a class="tab tab-child hnav-entry" data-hnav="root" data-hnav-root="dr" data-hnav-tab="links" href="#dr/links"
+             data-i18n-title="tab.drlinksTip" title="Links between clusters: throughput of the real backups and an active test on demand">
+            <span class="tab-icon" data-icon="network"></span>
+            <span class="sidebar-label" data-i18n="tab.drlinks">Links</span>
+          </a>
+        </div>
         <a class="tab hnav-entry" data-hnav="root" data-hnav-root="migrations" href="#migrations"
            data-i18n-title="hnav.migrationsTip" title="Every VMware migration wave and transfer between hosts">
           <span class="tab-icon" data-icon="migrate"></span>

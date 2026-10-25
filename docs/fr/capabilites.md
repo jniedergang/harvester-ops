@@ -917,14 +917,20 @@ CHANGELOG (2.0.0) et dans la procédure opérationnelle.
   VMs, une étoile (favoris gardés par personne par la console, retrouvés
   depuis un autre poste) et, pour un hôte Harvester, une pastille de ses
   alertes de Disaster Recovery. Pas de plafond : tous les hôtes sont
-  listés, et un hôte en alerte reste visible dans une famille repliée.
-  L'hôte ouvert déplie son sous-menu (Vue d'ensemble, Machines virtuelles,
+  listés. Une famille repliée ne montre aucune ligne d'hôte, pas même un
+  hôte en alerte : son résumé dit les alertes, en couleur d'alerte, et
+  compte chaque hôte (`0 ok, 0 en alerte, 1 sans état` pour un hôte pas
+  encore lu), de sorte que les nombres font toujours le total de la
+  famille. L'hôte ouvert déplie son sous-menu (Vue d'ensemble, Machines virtuelles,
   Conteneurs, Imports et migrations, Paramètres, Disaster Recovery). La
   recherche (`/`) filtre les hôtes par nom, étiquette et famille et propose
   les VMs déjà lues. **Ajouter un hôte** propose Harvester ou KVM. Autour :
   Dossiers, Machines virtuelles, Conteneurs, Disaster Recovery,
   Migrations, Ressources partagées, Automatisation et Activité, tous de
-  vrais liens.
+  vrais liens. Les titres de section (Ressources partagées, Automatisation)
+  sont en gras, couleur d'accent du thème, sous un trait fin ; les familles
+  sont en retrait sous Hôtes et Liens sous Disaster Recovery, avec un trait
+  vertical.
 - **Index des hôtes** (`#hosts`, `#hosts/harvester`, `#hosts/kvm`,
   `#hosts/folder/<id>`) : un tableau de tous les hôtes avec famille, état,
   version, étiquettes, VMs, dossier et favori ; tri et filtre sur chaque

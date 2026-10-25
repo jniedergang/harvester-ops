@@ -237,13 +237,16 @@ de 60 clusters et 40 hôtes KVM est listée en entier, dans une partie du menu
 qui défile seule.
 
 - **Tête de famille.** Chaque famille se replie (le choix est gardé par le
-  navigateur) et dit son état en une ligne, par exemple `58 ok, 2 en alerte`.
-  Les hôtes pas encore lus sont comptés dans son info-bulle.
+  navigateur) et dit son état, par exemple `58 ok, 2 en alerte`. Un hôte pas
+  encore lu compte aussi (`0 ok, 0 en alerte, 1 sans état`) : les nombres
+  font toujours le total de la famille. L'info-bulle du résumé explique les
+  trois états avec les couleurs des pastilles. Une famille repliée ne montre
+  aucune ligne d'hôte, ni hôte en alerte ni hôte ouvert : le résumé, en
+  couleur d'alerte, suffit.
 - **Ligne d'un hôte.** Une pastille donne l'état (verte joignable, rouge
   injoignable ou en erreur, orange accès refusé, grise pas encore lu), puis
-  le nom et le nombre de VMs quand un écran les a déjà lues. Un hôte en alerte
-  reste visible même dans une famille repliée. La liste ne lit jamais un hôte
-  elle-même.
+  le nom et le nombre de VMs quand un écran les a déjà lues. La liste ne lit
+  jamais un hôte elle-même.
 - **Favoris.** L'étoile d'un hôte le garde en tête de sa famille. Les étoiles
   sont gardées par la console, par personne : on les retrouve sur un autre
   poste. Tout rôle peut poser une étoile.

@@ -4,8 +4,10 @@ La liste des hôtes (route /api/hosts interceptée : 60 clusters, dont 2 en
 alerte, et 40 hôtes KVM) : hauteur bornée, tête de famille au format
 traduit, recherche par nom et par étiquette, « / » qui donne le focus,
 Entrée qui ouvre l'hôte, étoile gardée par la console (appel PUT vu,
-retrouvée après rechargement), alertes visibles dans une famille repliée,
-clavier, info-bulle sur chaque contrôle, fenêtre « Ajouter un hôte »,
+retrouvée après rechargement), famille repliée sans aucune ligne d'hôte
+(2.0.1, alertes comprises : le résumé suffit), résumé dont les nombres font
+le total, sections lisibles (titre en gras et trait, Liens en retrait sous
+Disaster Recovery), clavier, info-bulle sur chaque contrôle, fenêtre « Ajouter un hôte »,
 « Aller à la VM ».
 """
 
@@ -199,18 +201,31 @@ def test_a_refused_star_is_put_back_and_says_why(context, flask_server):
     expect(star).to_have_attribute("title", re.compile("host x is not declared"))
 
 
-def test_a_folded_family_keeps_its_alerts_and_the_open_host(menu):
+def test_a_folded_family_shows_no_host_line_not_even_alerts(menu):
+    """2.0.1 (responsable produit, règle inversée) : repliée, une famille ne
+    montre aucune ligne d'hôte, ni les deux hôtes en alerte ni l'hôte ouvert ;
+    sa tête garde le résumé, en couleur d'alerte. Dépliée : tous les hôtes."""
     page, _, _ = menu
-    fam(page, "harvester").locator(".hnav-fam-head").click()
-    expect(fam(page, "harvester").locator(".hnav-fam-head")).to_have_attribute("aria-expanded", "false")
-    assert sorted(names(page, "harvester")) == sorted(["harv-site-17", "harv-site-41", REAL])
+    head = fam(page, "harvester").locator(".hnav-fam-head")
+    head.click()
+    expect(head).to_have_attribute("aria-expanded", "false")
+    expect(fam(page, "harvester").locator(".hnav-host")).to_have_count(0)
+    expect(fam(page, "harvester").locator(".hnav-fam-sum")).to_have_text("58 ok, 2 in alert")
+    expect(fam(page, "harvester").locator(".hnav-fam-sum")).to_have_class(re.compile("has-alert"))
+    expect(fam(page, "harvester").locator(".hnav-fam-sum")).to_be_visible()
     fam(page, "kvm").locator(".hnav-fam-head").click()
     assert names(page, "kvm") == []
     # repli gardé par le navigateur
     page.reload()
     settle(page)
-    page.wait_for_selector("#hnav-families .hnav-host")
-    assert sorted(names(page, "harvester")) == sorted(["harv-site-17", "harv-site-41", REAL])
+    page.wait_for_selector("#hnav-families .hnav-fam")
+    expect(fam(page, "harvester").locator(".hnav-host")).to_have_count(0)
+    # une recherche montre quand même ce qu'elle trouve, alerte comprise
+    page.fill("#hnav-q", "site-17")
+    assert names(page, "harvester") == ["harv-site-17"]
+    page.fill("#hnav-q", "")
+    fam(page, "harvester").locator(".hnav-fam-head").click()
+    assert len(names(page, "harvester")) == 60
     page.evaluate("localStorage.removeItem('harvester_ops_hnav_collapsed_harvester');"
                   "localStorage.removeItem('harvester_ops_hnav_collapsed_kvm')")
 
@@ -294,3 +309,107 @@ def test_the_old_menu_is_gone_and_the_section_shows_the_host_entry(menu):
     expect(page.locator("#tab-storage")).to_have_class(re.compile("active"))
     assert page.locator("#host-nav .tab.active").count() == 1          # l'entrée Paramètres de l'hôte ouvert
     expect(page.locator('#hnav-families .hnav-sub a[data-sub="params"]')).to_have_class(re.compile("active"))
+
+def mixed_hosts():
+    """La forme de la capture du responsable produit : un hôte KVM pas encore
+    lu (pastille grise) et des clusters injoignables, refusés ou en échec."""
+    def x(name, kind, state):
+        return {"kind": kind, "name": name, "state": state, "error": None, "vm_count": None, "labels": {},
+                "version": None, "favorite": False, "folder": None, "origin": "console"}
+    return [x("bmcfg", "harvester", "unreachable"), x("harv4", "harvester", "denied"),
+            x("harv5", "harvester", "error"), x("harv6", "harvester", "unknown"),
+            x(REAL, "harvester", "ok"), x("harv1", "harvester", "ok"), x("node2", "kvm", "unknown")]
+
+
+@pytest.fixture
+def mixed(context, flask_server):
+    context.add_init_script("localStorage.setItem('harvester_ops_language','en');"
+                            "localStorage.setItem('harvester_ops_sidebar_pinned','1');")
+    page = context.new_page()
+    page.route("**/api/hosts", lambda r, q: r.fulfill(status=200, content_type="application/json",
+                                                      body=json.dumps({"families": {}, "hosts": mixed_hosts()})))
+    goto(page, flask_server["base_url"], "#vms")
+    page.wait_for_selector("#hnav-families .hnav-host")
+    return page
+
+
+@pytest.mark.parametrize("kind,text,ok,alert,unknown,total", [
+    ("kvm", "0 ok, 0 in alert, 1 unknown", 0, 0, 1, 1),
+    ("harvester", "2 ok, 3 in alert, 1 unknown", 2, 3, 1, 6),
+])
+def test_the_summary_counts_every_host(mixed, kind, text, ok, alert, unknown, total):
+    """2.0.1 : « KVM (1) : 0 ok, 0 en alerte » avec node2 listé en gris. Les
+    hôtes sans état comptent : ok + en alerte + sans état = le total, et une
+    info-bulle explique les états avec les couleurs des pastilles."""
+    page = mixed
+    summ = fam(page, kind).locator(".hnav-fam-sum")
+    expect(summ).to_have_text(text)
+    got = summ.evaluate("e => [e.dataset.ok, e.dataset.alert, e.dataset.unknown].map(Number)")
+    assert got == [ok, alert, unknown] and sum(got) == total
+    expect(fam(page, kind).locator(".hnav-fam-total")).to_have_text(f"({total})")
+    assert len(fam(page, kind).locator(".hnav-dot").all()) == total
+    grey = fam(page, kind).locator(".hnav-dot.st-unknown").count()
+    assert grey == unknown
+    tip = summ.get_attribute("title")
+    assert "grey dot" in tip and f"{total} hosts" in tip
+    # le texte n'est pas coupé (il passe sous le nom de la famille)
+    assert summ.evaluate("e => e.scrollWidth <= e.clientWidth")
+
+
+def test_folded_family_hides_alerting_and_grey_hosts(mixed):
+    page = mixed
+    for kind in ("harvester", "kvm"):
+        fam(page, kind).locator(".hnav-fam-head").click()
+        expect(fam(page, kind).locator(".hnav-host")).to_have_count(0)
+    expect(fam(page, "harvester").locator(".hnav-fam-sum")).to_have_class(re.compile("has-alert"))
+    expect(fam(page, "kvm").locator(".hnav-fam-sum")).not_to_have_class(re.compile("has-alert"))
+    page.evaluate("localStorage.removeItem('harvester_ops_hnav_collapsed_harvester');"
+                  "localStorage.removeItem('harvester_ops_hnav_collapsed_kvm')")
+
+
+def x_of(page, sel):
+    return page.locator(sel).first.locator(".tab-icon").first.bounding_box()["x"]
+
+
+@pytest.mark.parametrize("mode", ["light", "dark"])
+def test_sections_are_bold_ruled_and_children_indented(context, flask_server, mode):
+    """2.0.1 : titres de section en gras, couleur d'accent du thème, capitales
+    espacées, sous un trait ; Liens en retrait sous Disaster Recovery et les
+    familles sous Hôtes, avec un trait vertical. Dans le rail, plus de retrait
+    (colonne d'icônes) et les titres gardent leur hauteur."""
+    context.add_init_script("localStorage.setItem('harvester_ops_language','en');"
+                            f"localStorage.setItem('harvester_ops_theme','suse');localStorage.setItem('harvester_ops_mode','{mode}');"
+                            "localStorage.setItem('harvester_ops_sidebar_pinned','1');")
+    page = context.new_page()
+    page.route("**/api/hosts", lambda r, q: r.fulfill(status=200, content_type="application/json",
+                                                      body=json.dumps({"families": {}, "hosts": mixed_hosts()})))
+    goto(page, flask_server["base_url"], "#vms")
+    page.wait_for_selector("#hnav-families .hnav-host")
+    secs = page.locator("#host-nav > .hnav-sec")
+    assert secs.count() >= 2
+    styles = secs.evaluate_all("""els => els.map(e => { const c = getComputedStyle(e);
+        return [c.fontWeight, c.color, c.textTransform, parseFloat(c.letterSpacing), c.borderTopStyle,
+                parseFloat(c.borderTopWidth)]; })""")
+    accent = page.evaluate("""() => { const p = document.createElement('span'); p.style.color = 'var(--accent)';
+        document.body.appendChild(p); const c = getComputedStyle(p).color; p.remove(); return c; }""")
+    for weight, color, transform, spacing, border, width in styles:
+        assert int(weight) >= 700 and color == accent and transform == "uppercase"
+        assert spacing > 0 and border == "solid" and width >= 1
+    # Liens pend sous Disaster Recovery, les familles sous Hôtes
+    links = page.locator('#host-nav [data-hnav-tab="links"]')
+    assert links.evaluate("e => e.parentElement.matches('.hnav-children[data-hnav-parent=\"dr\"]')")
+    assert page.locator("#hnav-families").evaluate(
+        "e => e.parentElement.matches('.hnav-children[data-hnav-parent=\"hosts\"]')")
+    dr_x = x_of(page, '#host-nav > [data-hnav-root="dr"]')
+    assert x_of(page, '#host-nav [data-hnav-tab="links"]') >= dr_x + 12
+    hosts_x = x_of(page, '#host-nav > [data-hnav-root="hosts"]')
+    assert x_of(page, "#hnav-families .hnav-fam-head") >= hosts_x + 12
+    guide = page.locator('.hnav-children[data-hnav-parent="dr"]').evaluate(
+        "e => [getComputedStyle(e).borderLeftStyle, parseFloat(getComputedStyle(e).borderLeftWidth)]")
+    assert guide[0] == "solid" and guide[1] >= 1
+    # rail : plus de retrait, la colonne d'icônes est droite
+    heights = secs.evaluate_all("els => els.map(e => e.getBoundingClientRect().height)")
+    page.evaluate("document.body.classList.add('sidebar-collapsed')")
+    page.wait_for_timeout(400)
+    assert abs(x_of(page, '#host-nav [data-hnav-tab="links"]') - x_of(page, '#host-nav > [data-hnav-root="dr"]')) <= 1
+    assert secs.evaluate_all("els => els.map(e => e.getBoundingClientRect().height)") == heights

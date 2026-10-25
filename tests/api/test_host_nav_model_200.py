@@ -2,8 +2,9 @@
 
 Chargée dans node (comme `test_routes_js_1100.py`). Pas de plafond
 (décision 6 du 25/10/2026) : tous les hôtes sont listés, favoris en tête,
-puis par nom. Une famille repliée garde l'hôte ouvert et les hôtes en
-alerte : une alerte n'est jamais cachée."""
+puis par nom. 2.0.1 (responsable produit) : une famille repliée ne montre
+aucune ligne d'hôte, ni en alerte ni ouvert ; le résumé de sa tête compte
+chaque hôte (ok + en alerte + inconnus = total)."""
 
 import json
 import subprocess
@@ -16,13 +17,17 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 RUNNER = r"""
 const input = JSON.parse(require('fs').readFileSync(0, 'utf8'));
 const H = require('./web/static/js/host-nav.js');
-if (input.mutate === 'alert-hidden') {
-  // mutation : un repli cache aussi les alertes
-  const orig = H.isAlert;
+if (input.mutate === 'alert-kept') {
+  // mutation : la règle d'avant 2.0.1, un repli garde l'hôte ouvert et les alertes
   H.visible = function (hosts, openKey, collapsed) {
-    return H.order(hosts).filter((h) => !collapsed || H.keyOf(h) === openKey)
+    return H.order(hosts).filter((h) => !collapsed || H.keyOf(h) === openKey || H.isAlert(h))
       .map((h) => ({ key: H.keyOf(h), reason: h.favorite ? 'favorite' : 'rest' }));
   };
+}
+if (input.mutate === 'unknown-dropped') {
+  // mutation : la tête ne compte que ok et alerte (le défaut vu sur la 2.0.0)
+  const orig = H.summaryParts;
+  H.summaryParts = (hosts) => { const s = orig(hosts); s.total = s.ok + s.alert; s.unknown = 0; return s; };
 }
 const out = input.cases.map((c) => ({
   visible: H.visible(c.hosts, c.open || null, !!c.collapsed),
@@ -65,18 +70,17 @@ CASES = [
      + [f"harvester/harv-{i:02d}" for i in range(1, 61) if i not in (3, 17, 44)],
      {"harvester/harv-03": "favorite", "harvester/harv-40": "open",
       "harvester/harv-59": "alert", "harvester/harv-60": "alert", "harvester/harv-01": "rest"}),
-    ("sixty-collapsed-keeps-alerts-and-open", SIXTY, "harvester/harv-40", True,
-     ["harvester/harv-40", "harvester/harv-59", "harvester/harv-60"],
-     {"harvester/harv-40": "open", "harvester/harv-59": "alert"}),
-    ("collapsed-without-alert-shows-only-open", fleet(8), "harvester/harv-02", True,
-     ["harvester/harv-02"], {}),
+    # 2.0.1 : repliée, une famille ne montre aucune ligne, alertes et hôte ouvert compris
+    ("sixty-collapsed-hides-alerts-and-open", SIXTY, "harvester/harv-40", True, [], {}),
+    ("collapsed-without-alert-hides-open", fleet(8), "harvester/harv-02", True, [], {}),
     ("collapsed-nothing-open", fleet(8), None, True, [], {}),
     ("ties-by-name-case-insensitive-then-exact",
      [h("beta"), h("Alpha"), h("alpha"), h("Beta", favorite=True), h("gamma", state="denied")], None, False,
      ["harvester/Beta", "harvester/Alpha", "harvester/alpha", "harvester/beta", "harvester/gamma"],
      {"harvester/Beta": "favorite", "harvester/gamma": "alert"}),
-    ("favourite-alert-reason-is-favourite", [h("a", state="error", favorite=True), h("b")], None, True,
-     ["harvester/a"], {"harvester/a": "favorite"}),
+    ("favourite-alert-reason-is-favourite", [h("a", state="error", favorite=True), h("b")], None, False,
+     ["harvester/a", "harvester/b"], {"harvester/a": "favorite"}),
+    ("collapsed-favourite-alert-hidden", [h("a", state="error", favorite=True), h("b")], None, True, [], {}),
 ]
 
 
@@ -121,9 +125,31 @@ def test_summary_buckets(state, bucket):
     assert out["summary"][bucket] == 1 and out["summary"]["total"] == 1
 
 
-def test_mutation_alert_hidden_is_caught():
-    """test_hosts_mutation_alert_hidden : un repli qui cacherait les alertes
-    fait échouer la ligne « sixty-collapsed-keeps-alerts-and-open »."""
-    case = next(c for c in CASES if c[0] == "sixty-collapsed-keeps-alerts-and-open")
-    [out] = run([{"hosts": case[1], "open": case[2], "collapsed": case[3]}], mutate="alert-hidden")
+def test_mutation_alert_kept_is_caught():
+    """Un repli qui garderait encore les alertes et l'hôte ouvert (règle
+    d'avant 2.0.1) fait échouer la ligne « sixty-collapsed-hides-alerts-and-open »."""
+    case = next(c for c in CASES if c[0] == "sixty-collapsed-hides-alerts-and-open")
+    [out] = run([{"hosts": case[1], "open": case[2], "collapsed": case[3]}], mutate="alert-kept")
     assert [x["key"] for x in out["visible"]] != case[4]
+
+
+MIXED = [h("a"), h("b", state="unreachable"), h("c", state="unknown"), h("d", state=None),
+         h("e", state="denied"), h("f", state="error"), h("g")]
+
+
+@pytest.mark.parametrize("name,hosts,expected", [
+    ("one-kvm-not-read", [h("node2", "kvm", state="unknown")], {"total": 1, "ok": 0, "alert": 0, "unknown": 1}),
+    ("all-states", MIXED, {"total": 7, "ok": 2, "alert": 3, "unknown": 2}),
+    ("empty", [], {"total": 0, "ok": 0, "alert": 0, "unknown": 0}),
+])
+def test_summary_adds_up_to_the_family(name, hosts, expected):
+    """2.0.1 : « 0 ok, 0 en alerte » pour un hôte listé ; chaque hôte compte
+    dans un seul compteur et la somme fait le total."""
+    [out] = run([{"hosts": hosts}])
+    s = out["summary"]
+    assert s == expected and s["ok"] + s["alert"] + s["unknown"] == s["total"] == len(hosts)
+
+
+def test_mutation_unknown_dropped_is_caught():
+    [out] = run([{"hosts": MIXED}], mutate="unknown-dropped")
+    assert out["summary"] != {"total": 7, "ok": 2, "alert": 3, "unknown": 2}

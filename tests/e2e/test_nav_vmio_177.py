@@ -43,11 +43,17 @@ def test_imports_entry_opens_vm_import(page, flask_server):
     expect(page.locator("#tab-vmimport")).to_be_visible()
 
 
-def test_the_open_host_stays_visible_in_a_folded_family(context, flask_server):
+def test_a_folded_family_hides_even_the_open_host(context, flask_server):
+    """2.0.1 (responsable produit, règle inversée) : repliée, la famille ne
+    montre aucune ligne, pas même l'hôte ouvert ; dépliée, l'hôte ouvert et
+    son entrée Imports et migrations sont là et actifs."""
     context.add_init_script("localStorage.setItem('harvester_ops_hnav_collapsed_harvester','1');")
     page = context.new_page()
     goto(page, flask_server["base_url"], address("forklift"))
     expect(page.locator('#host-nav .hnav-fam[data-family="harvester"]')).to_have_class(re.compile("collapsed"))
+    expect(page.locator('#host-nav .hnav-host[data-key="harvester/harv-fake"]')).to_have_count(0)
+    expect(page.locator("#hnav-families .hnav-sub")).to_have_count(0)
+    page.locator('#host-nav .hnav-fam-head[data-fam="harvester"]').click()
     expect(page.locator('#host-nav .hnav-host[data-key="harvester/harv-fake"]')).to_be_visible()
     expect(page.locator('#hnav-families .hnav-sub a[data-sub="imports"]')).to_have_class(re.compile("active"))
 
