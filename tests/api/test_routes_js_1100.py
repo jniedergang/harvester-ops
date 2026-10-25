@@ -7,6 +7,7 @@ chaque chemin d'erreur rendre `unknown` (ou `null` pour un jeton vide).
 """
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -73,8 +74,12 @@ def address_table():
         "#migrations", "#gpus", "#bookings", "#usage",
         "#automation/capi", "#automation/terraform", "#automation/pxe",
         "#activity", f"#activity/host/harvester/{c}", f"#activity/host/kvm/{h}",
-        # nom Harvester à point (RFC 1123 l'admet)
+        # nom Harvester à point
         "#harvester/lab.home.lo/params/storage/images",
+        # règle de déclaration d'un cluster (cluster_decl.NAME_RE) : majuscules et _
+        "#harvester/Lab_1/params/nodes", "#harvester/Lab_1/params/addons/list",
+        "#harvester/Lab_1/imports/forklift/waves", "#harvester/HARV1/vms",
+        "#activity/host/harvester/Lab_1", "#vms/host/harvester/Lab_1",
     ]
     for tab, panes in IMPORT_PANES.items():
         rows.append(f"#harvester/{c}/imports/{tab}")
@@ -146,8 +151,9 @@ ERRORS = [
     ("#harvester/a/params/foo", "onglet inconnu"),
     ("#harvester/a/params/storage/zzz", "pane inconnu"),
     ("#harvester/a/params/nodes/x", "pane sur un onglet qui n'en a pas"),
-    ("#harvester/-a", "nom invalide (RFC 1123)"),
-    ("#harvester/Harv1", "majuscule refusée pour Harvester"),
+    ("#harvester/-a", "nom invalide (tiret en tête)"),
+    ("#harvester/_a", "nom invalide (souligné en tête)"),
+    ("#harvester/" + "a" * 62, "nom de cluster trop long"),
     ("#kvm/-a", "nom KVM invalide"),
     ("#kvm/a%2Fb", "barre oblique encodée dans un nom"),
     ("#harvester/a%2Fb/vms", "barre oblique encodée dans un nom de cluster"),
@@ -179,6 +185,26 @@ ERRORS = [
 def test_error_paths_render_unknown(address, why):
     got = run_node(cases=[address])["parsed"][0]
     assert got["r"] == {"name": "unknown", "raw": address.lstrip("#")}, why
+
+
+def _js_name_res():
+    src = (ROOT / "web/static/js/routes.js").read_text()
+    return dict(re.findall(r"const (\w+_NAME_RE) = /(.+?)/;", src))
+
+
+def test_host_name_rule_is_the_server_declaration_rule():
+    """Un cluster se déclare avec cluster_decl.NAME_RE et un hôte KVM avec
+    kvm_decl.NAME_RE : la grammaire reprend ces règles telles quelles (une
+    règle plus stricte rendait illisibles les adresses de `Lab_1`)."""
+    import sys
+    sys.path.insert(0, str(ROOT / "bin/lib"))
+    import cluster_decl
+    import kvm_decl
+    found = _js_name_res()
+    assert found, "aucune règle de nom dans routes.js"
+    for name, pattern in found.items():
+        assert pattern in (cluster_decl.NAME_RE.pattern, kvm_decl.NAME_RE.pattern), name
+    assert cluster_decl.NAME_RE.pattern in found.values()
 
 
 def test_cluster_and_kvm_host_of_the_same_name_are_two_routes():

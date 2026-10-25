@@ -11,10 +11,11 @@
  * null ; { name: 'unknown', raw } pour une adresse illisible.
  */
 (function (root) {
-  // Mêmes expressions que le serveur : _K8S_NAME_RE (web/app.py) pour un
-  // cluster Harvester, kvm_decl.NAME_RE (et kvm.js) pour un hôte KVM.
-  const HARVESTER_NAME_RE = /^[a-z0-9](?:[a-z0-9.-]{0,61}[a-z0-9])?$/;
-  const KVM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$/;
+  // Même règle que le serveur pour les deux familles : cluster_decl.NAME_RE
+  // (déclaration d'un cluster, web/app.py _validate_cluster_payload) et
+  // kvm_decl.NAME_RE (hôte KVM, comme kvm.js). Pas RFC 1123 : un cluster peut
+  // s'appeler `Lab_1` (un test vérifie l'égalité avec les règles Python).
+  const HOST_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,60}$/;
   // Identifiant de dossier ou de contrat (rp-<12 hex>, entier, `unfiled`)
   const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -96,7 +97,7 @@
 
   function validHost(kind, name) {
     if (typeof name !== 'string') return false;
-    return kind === 'kvm' ? KVM_NAME_RE.test(name) : kind === 'harvester' && HARVESTER_NAME_RE.test(name);
+    return KINDS.indexOf(kind) >= 0 && HOST_NAME_RE.test(name);
   }
 
   function validId(id) { return typeof id === 'string' && ID_RE.test(id); }

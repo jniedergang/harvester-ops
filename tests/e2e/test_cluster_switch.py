@@ -19,15 +19,9 @@ playwright = pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
 
-@pytest.fixture
-def two_clusters(flask_server, api):
-    """Déclare un second cluster le temps du test.
-
-    On ne touche pas au config.yaml partagé de la session : d'autres tests
-    comptent les clusters déclarés.
-    """
+def _declare(flask_server, api, name):
     payload = {
-        "name": "harv-second",
+        "name": name,
         "description": "second cluster (test de bascule)",
         "kubeconfig": str(flask_server["config"]["kubeconfig"]),
         "nodes": [{"hostname": "second-node1", "ip": "10.0.0.2",
@@ -36,8 +30,27 @@ def two_clusters(flask_server, api):
     status, _ = api("POST", "/api/clusters", payload, expect_status=None)
     if status not in (201, 409):
         pytest.skip(f"impossible de déclarer le second cluster: {status}")
+
+
+@pytest.fixture
+def two_clusters(flask_server, api):
+    """Déclare un second cluster le temps du test.
+
+    On ne touche pas au config.yaml partagé de la session : d'autres tests
+    comptent les clusters déclarés.
+    """
+    _declare(flask_server, api, "harv-second")
     yield "harv-second"
     api("DELETE", "/api/clusters/harv-second", expect_status=None)
+
+
+@pytest.fixture
+def lab_cluster(flask_server, api):
+    """Second cluster au nom admis par la déclaration mais pas par RFC 1123
+    (majuscule et souligné) : l'adresse de ses écrans doit rester lisible."""
+    _declare(flask_server, api, "Lab_1")
+    yield "Lab_1"
+    api("DELETE", "/api/clusters/Lab_1", expect_status=None)
 
 
 def _goto(page, base_url, tab, cluster="harv-fake"):
@@ -314,7 +327,9 @@ def _spy_veil_and_notice(page):
     expect(page.locator("#access-notice")).to_be_visible()
 
 
-def test_gpu_open_addons_of_another_cluster_goes_there(context, flask_server, two_clusters):
+@pytest.mark.parametrize("second", ["two_clusters", "lab_cluster"])
+def test_gpu_open_addons_of_another_cluster_goes_there(context, flask_server, request, second):
+    two_clusters = request.getfixturevalue(second)
     data = {"clusters": [{"cluster": "harv-fake", "state": "ok", "count": 0, "addon": True,
                           "available": {"addon": True, "gpu": True, "vgpu": True, "mig": True, "node": True}},
                          {"cluster": two_clusters, "state": "no-addon", "count": 0, "addon": False}],

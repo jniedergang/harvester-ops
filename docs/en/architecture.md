@@ -124,8 +124,8 @@ exact screen and a reload (F5) gives it back. Two browser modules carry it:
   reads an address into a route `{name, kind, host, sub, tab, pane, id}`,
   writes it back (`encodeURIComponent` on every segment), and translates the
   old tokens (`#storage`, `#allvms`, `#kvmhosts`...), which stay understood.
-  Host names are checked with the server's expressions: RFC 1123 for a
-  Harvester cluster, the KVM declaration name rule for a KVM host.
+  Host names are checked with the server's declaration rule (letters,
+  digits, `.`, `_`, `-`), the same for a Harvester cluster and a KVM host.
 - `web/static/js/router.js` applies an address: it sets the cluster first,
   then the tab, then the pane. A click on a menu entry, a section tab or an
   overview tab rewrites the address without adding a history entry; a link

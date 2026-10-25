@@ -126,8 +126,9 @@ exact et un rechargement (F5) le rend. Deux modules du navigateur la portent :
   lit une adresse en route `{name, kind, host, sub, tab, pane, id}`, l'écrit
   à l'inverse (`encodeURIComponent` sur chaque segment) et traduit les
   anciens jetons (`#storage`, `#allvms`, `#kvmhosts`...), qui restent compris.
-  Les noms d'hôte sont contrôlés par les expressions du serveur : RFC 1123
-  pour un cluster Harvester, la règle des déclarations KVM pour un hôte KVM.
+  Les noms d'hôte sont contrôlés par la règle de déclaration du serveur
+  (lettres, chiffres, `.`, `_`, `-`), la même pour un cluster Harvester et
+  un hôte KVM.
 - `web/static/js/router.js` applique une adresse : le cluster d'abord, puis
   l'onglet, puis le pane. Un clic sur une entrée du menu, un onglet de
   section ou d'aperçu réécrit l'adresse sans ajouter d'entrée d'historique ;

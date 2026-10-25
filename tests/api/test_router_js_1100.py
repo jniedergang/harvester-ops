@@ -83,3 +83,21 @@ def test_every_screen_round_trips(screen):
 def test_without_cluster_the_old_token_is_written():
     [got] = run([{"tab": "storage", "cluster": None, "pane": "images"}])
     assert got["h"] == "#storage"
+
+
+# Nom accepté par la déclaration d'un cluster mais pas par RFC 1123 : F5 et les
+# liens de GPU (Add-ons) et de Migrations (vagues) doivent rouvrir le même écran.
+LAB = [{"tab": "overview", "cluster": "Lab_1", "pane": None, "overview": "cluster", "automation": "capi"},
+       {"tab": "addons", "cluster": "Lab_1", "pane": "list", "overview": "metrics", "automation": "capi"},
+       {"tab": "forklift", "cluster": "Lab_1", "pane": "waves", "overview": "metrics", "automation": "capi"},
+       {"tab": "storage", "cluster": "HARV1", "pane": "volumes", "overview": "metrics", "automation": "capi"}]
+
+
+@pytest.mark.parametrize("screen", LAB, ids=lambda s: f"{s['cluster']}-{s['tab']}")
+def test_declared_cluster_names_round_trip(screen):
+    [got] = run([screen])
+    assert got["h"].startswith("#harvester/" + screen["cluster"] + "/"), got["h"]
+    back = got["back"]
+    assert back and back["tab"] == screen["tab"] and back["cluster"] == screen["cluster"], got
+    if screen["pane"]:
+        assert back["pane"] == screen["pane"], got
