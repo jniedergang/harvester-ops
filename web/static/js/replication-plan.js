@@ -323,8 +323,8 @@ const ReplicationPlan = (() => {
     const f = v.root.querySelector('.rp-settings');
     const p = v.data.plan, o = p.options || {};
     const body = {};
-    const rpo = Number(f.rpo.value) * 60;
-    if (rpo !== p.rpo_objective_s) body.rpo = `${Math.round(rpo / 60)}m`;
+    // le champ montre des minutes arrondies : seul un champ changé envoie l'objectif
+    if (Number(f.rpo.value) !== Math.round((p.rpo_objective_s || 900) / 60)) body.rpo = `${Number(f.rpo.value)}m`;
     if (f.paused.checked !== !!o.paused) body.paused = f.paused.checked;
     if (f.follow.value !== (o.follow || 'console')) body.follow = f.follow.value;
     if (Number(f.skew.value) !== Number(o.skew_tolerance_s ?? 10)) body.skew_tolerance = `${Number(f.skew.value)}s`;
@@ -332,7 +332,7 @@ const ReplicationPlan = (() => {
     if (!Object.keys(body).length) { msg.textContent = tr('rp.set.nothing'); return; }
     // valeurs d'avant, pour « Annuler »
     const prev = {};
-    if ('rpo' in body) prev.rpo = `${Math.round(p.rpo_objective_s / 60)}m`;
+    if ('rpo' in body) prev.rpo = `${p.rpo_objective_s}s`;           // valeur exacte, en secondes
     if ('paused' in body) prev.paused = !!o.paused;
     if ('follow' in body) prev.follow = o.follow || 'console';
     if ('skew_tolerance' in body) prev.skew_tolerance = `${Number(o.skew_tolerance_s ?? 10)}s`;
@@ -354,10 +354,17 @@ const ReplicationPlan = (() => {
     if (r.errors.length) { msg.innerHTML = `<span class="res-error">${esc(r.errors.join(' · '))}</span>`; return; }
     const body = { recovery: r.recovery, cloud_init: r.cloud_init, mac: r.mac, start: r.start };
     const o = v.data.plan.options || {};
+    // « Annuler » renvoie exactement les clés changées ; pas d'annulation quand un secret
+    // est touché (une valeur masquée ne se renvoie pas, une nouvelle resterait)
     const prev = { recovery: { waves: o.waves || [], hooks: o.hooks || [], network_data: o.network_data || {}, resize: o.resize || {} },
                    cloud_init: o.cloud_init || 'keep', mac: o.mac || 'keep', start: o.start || 'started' };
+    Object.keys(r.recovery).forEach((k) => { if (!(k in prev.recovery)) prev.recovery[k] = k in o ? o[k] : false; });
+    const secretOf = (hs) => JSON.stringify((hs || []).filter((h) => Object.keys(h.secret_headers || {}).length || String(h.url || '').includes('********'))
+      .map((h) => [h.name, h.url, h.secret_headers]));
+    const noUndo = secretOf(o.hooks) !== secretOf(r.recovery.hooks) ? tr('rp.undoNoSecret') : '';
     await send(v, btn, msg, 'PATCH', `/api/replication/plans/${enc(v.id)}/settings`, body,
-      ['protected', 'lagging'].includes(v.data.plan.state) ? tr('rp.set.recoverySavedProtect') : tr('rp.set.saved'), prev);
+      ['protected', 'lagging'].includes(v.data.plan.state) ? tr('rp.set.recoverySavedProtect') : tr('rp.set.saved'),
+      noUndo ? null : prev, noUndo);
   }
   /** Bouton « Annuler » : renvoie les valeurs d'avant par la même route (action suivie). */
   function offerUndo(msg, method, url, prev, onDone) {
@@ -378,7 +385,7 @@ const ReplicationPlan = (() => {
     msg.appendChild(document.createTextNode(' '));
     msg.appendChild(b);
   }
-  async function send(v, btn, msg, method, url, body, doneText, prev) {
+  async function send(v, btn, msg, method, url, body, doneText, prev, noUndo) {
     if (btn) btn.disabled = true;
     try {
       const out = await U.api(method, url, body);
@@ -386,6 +393,7 @@ const ReplicationPlan = (() => {
         if (btn) btn.disabled = false;
         load(v); reloadLists();
         if (ok && prev) offerUndo(msg, method, url, prev, () => load(v));
+        if (ok && noUndo) msg.insertAdjacentHTML('beforeend', ` <span class="res-dim" data-rp-noundo="1">${esc(noUndo)}</span>`);
       });
       return out;
     } catch (e) {

@@ -98,8 +98,8 @@ def _store_hooks(env, hooks, plan_id=PID):
 
 
 @pytest.mark.parametrize("body,argv,spec,need", [
-    ({"recovery": {"waves": [{"vms": ["default/rep-b"]}], "auto_protect": True}}, [],
-     {"recovery": {"waves": [{"vms": ["default/rep-b"]}], "auto_protect": True}}, False),
+    ({"recovery": {"waves": [{"vms": ["default/rep-b"]}], "accept_degraded_standby": True}}, [],
+     {"recovery": {"waves": [{"vms": ["default/rep-b"]}], "accept_degraded_standby": True}}, False),
     ({"recovery": {"resize": {"default/rep-a": {"memory": "2Gi"}}}}, [],
      {"recovery": {"resize": {"default/rep-a": {"memory": "2Gi"}}}}, True),
     ({"cloud_init": "rerun", "mac": "new", "start": "stopped"},

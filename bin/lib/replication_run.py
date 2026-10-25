@@ -2053,6 +2053,8 @@ def protect(ctx, interval=None, dry_run=False, retain=None):
         ensure_backing_images(ctx, works, src)
         ensure_standby(ctx, works, latest, visible)
         write_carnets(ctx, works)
+        # carnets réécrits avec les réglages du moment : plus rien d'en retard
+        db.clear_plan_flag(ctx.conn, "carnet-stale", ctx.plan_id)
         _set_resources(ctx, uids, "protected")
         _set_state(ctx, "protected")
         ctx.event("protect", "done", code="protected", facts={"interval_s": chosen, "how": how, "vms": len(uids)})
@@ -2542,8 +2544,24 @@ def _final_applied(ctx, carnet, finals):
     return True
 
 
+def stale_carnet_finding(conn, plan_id, gen, sel, accepted=False):
+    """Carnet de reprise d'avant les réglages du plan : marque `carnet-stale`
+    (réglages changés sur le plan protégé, protect pas relancé) ou santé
+    relevée par le suiveur (`carnet_stale` d'une VM). La bascule démarrerait
+    ces VMs avec les réglages du dernier protect : refusé sauf accord
+    explicite (`accept_stale_carnet`, alors un avertissement). None sinon."""
+    flag = db.get_plan_flag(conn, "carnet-stale", plan_id) or {}
+    health = db.health_map(conn, plan_id, gen)
+    vms = sorted(f"{r['namespace']}/{r['name']}" for r in sel
+                 if (health.get(r["resource_uid"]) or {}).get("carnet_stale"))
+    if not flag.get("keys") and not vms:
+        return None
+    return rp._finding("carnet-stale", "warn" if accepted else "block", keys=list(flag.get("keys") or []),
+                       vms=vms, since=flag.get("since"), accepted=bool(accepted))
+
+
 def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=False, yes=False, dry_run=False,
-             record=True):
+             record=True, accept_stale_carnet=False):
     """(`protected`, `failing_over`, `error`) -> `failing_over` ->
     `failed_over` (ou `protected` si une partie seulement du plan bascule).
 
@@ -2598,6 +2616,11 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
             src = _unplanned_src_facts(ctx, carnets)
             phase = "failover-unplanned"
         findings = rp.check(src, dst, dict(ctx.plan, id=ctx.plan_id, phase=phase))
+        if not resuming:
+            # une VM déjà activée ne peut que finir : le contrôle ne vaut qu'au départ
+            stale = stale_carnet_finding(ctx.conn, ctx.plan_id, ctx.gen, sel, accept_stale_carnet)
+            if stale:
+                findings.append(stale)
         extra, dry = _preflight_targets(ctx, carnets, dst)
         findings = sorted(findings + extra, key=lambda f: rp._ORDER[f["level"]])
         if rp.blocking(findings):
@@ -2634,9 +2657,12 @@ def failover(ctx, vms=None, planned=True, accept_skew=False, force_unplanned=Fal
     refs = [f"{r['namespace']}/{r['name']}" for r in sel]
     prev = _open_run(ctx, "failover")
     run_id = prev["id"] if prev else db.record_run(ctx.conn, ctx.plan_id, "failover", started, ctx.gen, vms=refs,
-                                                    points={"mode": mode, "force_unplanned": bool(force_unplanned)},
+                                                    points={"mode": mode, "force_unplanned": bool(force_unplanned),
+                                                            "accept_stale_carnet": bool(accept_stale_carnet)},
                                                     by=ctx.by, action_id=ctx.action_id)
-    points = dict((prev or {}).get("points") or {}, mode=mode, force_unplanned=bool(force_unplanned))
+    points = dict((prev or {}).get("points") or {}, mode=mode, force_unplanned=bool(force_unplanned),
+                  accept_stale_carnet=bool(accept_stale_carnet) or bool(((prev or {}).get("points") or {})
+                                                                       .get("accept_stale_carnet")))
     paused_before = bool(opts.get("paused"))
     if prev and "paused_before" in points:
         paused_before = points["paused_before"]
@@ -3358,7 +3384,8 @@ def resume(ctx, yes=False):
         pts = r.get("points") or {}
         planned = pts.get("mode", "planned") == "planned"
         return failover(ctx, vms=(_open_scope(ctx, r) if r else None) or None, planned=planned,
-                        force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r))
+                        force_unplanned=bool(pts.get("force_unplanned")), yes=yes or planned or bool(r),
+                        accept_stale_carnet=bool(pts.get("accept_stale_carnet")))
     if eff == "unprotecting":
         r = _open_run(ctx, "unprotect") or {}
         return unprotect(ctx, delete_backups=bool((r.get("points") or {}).get("delete_backups")), yes=True)

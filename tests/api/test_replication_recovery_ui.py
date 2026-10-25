@@ -127,13 +127,13 @@ def test_recovery_normalized():
         "hooks": [dict(HOOK, timeout_s=None, method=None)],
         "network_data": {"default/web-1": "version: 2\n"},
         "resize": {"default/db-1": {"cpu": 2, "memory": "4Gi"}, "default/web-1": {"memory": "512Mi"}},
-        "auto_protect": True}))["options"]
+        "accept_degraded_standby": True}))["options"]
     assert opts["waves"] == [
         {"name": "databases", "vms": ["default/db-1"], "gate": {"kind": "agent", "seconds": 300}},
         {"name": "", "vms": ["default/web-1"], "gate": {"kind": "delay", "seconds": 30}},
         {"name": "", "vms": ["default/web-2"], "gate": {"kind": "running", "seconds": 0}}]
     assert opts["hooks"][0]["method"] == "POST" and opts["hooks"][0]["timeout_s"] == 15
-    assert opts["resize"]["default/web-1"] == {"memory": "512Mi"} and opts["auto_protect"] is True
+    assert opts["resize"]["default/web-1"] == {"memory": "512Mi"} and opts["accept_degraded_standby"] is True
 
 
 def _wave(vms, **kw):
@@ -199,6 +199,8 @@ def _wave(vms, **kw):
     ({"resize": {"default/zzz": {"cpu": 1}}}, "not a VM of this plan"),
     ({"resize": [1]}, "resize"),
     ({"auto_protect": "yes"}, "auto_protect"),
+    ({"auto_protect": True}, "needs a plan by label selector"),                 # liste de VMs : sans effet
+    ({"accept_degraded_standby": "yes"}, "accept_degraded_standby"),
 ])
 def test_recovery_refusals(options, message):
     with pytest.raises(rp.PlanError) as e:

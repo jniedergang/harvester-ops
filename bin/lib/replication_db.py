@@ -691,6 +691,8 @@ def delete_plan(conn, plan_id):
                   "selector_watch"):
             conn.execute(f'DELETE FROM "{t}" WHERE plan_id = ?', (plan_id,))
         conn.execute("DELETE FROM plans WHERE id = ?", (plan_id,))
+        for kind in PLAN_FLAGS:
+            conn.execute("DELETE FROM settings WHERE key = ?", (f"{kind}:{plan_id}",))
     return True
 
 
@@ -1039,7 +1041,9 @@ def _plan_rows_alerts(conn, plans, now, role=None, side="any"):
         row = rp.plan_row(p, v["resources"], v["volumes"], v["ticks"], v["events"], now, v["vm_running"],
                           role=role, health=v["health"], side=side)
         pending = get_selector_watch(conn, p["id"])["pending"] if p.get("selector") else []
-        alerts = ri.plan_alerts(p, row, v["health"], pending, alert_since(conn, p["id"]))
+        alerts = ri.plan_alerts(p, row, v["health"], pending, alert_since(conn, p["id"]),
+                                stale=get_plan_flag(conn, "carnet-stale", p["id"]),
+                                auto_failed=get_plan_flag(conn, "auto-protect", p["id"]))
         row["transfer"] = ri.transfer_summary(list_stats(conn, p["id"], since=rp._t(now) - timedelta(days=1),
                                                          limit=100000) or last_stats(conn, p["id"]), now)
         row["pending_vms"] = [f"{x['namespace']}/{x['name']}" for x in pending]
@@ -1638,6 +1642,42 @@ def set_setting(conn, key, value, by="", now=None):
                      ' ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at,'
                      ' updated_by = excluded.updated_by',
                      (key, json.dumps(value, sort_keys=True), _iso(_now(now)), by or ""))
+
+
+# Marques d'un plan rangées dans `settings` (clé `<genre>:<plan>`) :
+# `carnet-stale` : réglages de reprise changés sur un plan protégé, pas encore
+#   réécrits par protect ({"keys", "since", "by"}) ;
+# `auto-protect` : échecs de la protection automatique et prochain essai
+#   ({"key", "failures", "since", "next_at", "error"}).
+PLAN_FLAGS = ("carnet-stale", "auto-protect")
+
+
+def get_plan_flag(conn, kind, plan_id):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    return get_setting(conn, f"{kind}:{plan_id}")
+
+
+def set_plan_flag(conn, kind, plan_id, value, by="", now=None):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    set_setting(conn, f"{kind}:{plan_id}", value, by=by, now=now)
+
+
+def clear_plan_flag(conn, kind, plan_id):
+    if kind not in PLAN_FLAGS:
+        raise ValueError(kind)
+    with _tx(conn):
+        cur = conn.execute("DELETE FROM settings WHERE key = ?", (f"{kind}:{plan_id}",))
+    return cur.rowcount > 0
+
+
+def mark_carnet_stale(conn, plan_id, keys, by="", now=None):
+    """Ajoute `keys` aux réglages de reprise changés depuis le dernier protect."""
+    cur = get_plan_flag(conn, "carnet-stale", plan_id) or {}
+    merged = sorted(set(cur.get("keys") or []) | set(keys))
+    set_plan_flag(conn, "carnet-stale", plan_id, {"keys": merged, "since": cur.get("since") or _iso(_now(now)),
+                                                  "by": by or cur.get("by") or ""}, by=by, now=now)
 
 
 def max_event_id(conn):

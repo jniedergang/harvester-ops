@@ -25275,7 +25275,8 @@ def api_replication_protect(plan_id):
 def api_replication_failover(plan_id):
     """Bascule (administrateur) : `vms` (ns/nom) ou `all_vms: true`, `mode`
     planned (défaut) ou unplanned, `force_unplanned` et `accept_skew` avec
-    unplanned, `dry_run`. Hors essai à blanc, `confirm` doit porter le nom
+    unplanned, `accept_stale_carnet` (réglages de reprise changés depuis le
+    dernier protect : les VMs démarrent avec les précédents), `dry_run`. Hors essai à blanc, `confirm` doit porter le nom
     du plan : une activation est définitive."""
     err = _repl_unavailable()
     if err:
@@ -25289,6 +25290,7 @@ def api_replication_failover(plan_id):
     try:
         all_vms, dry = _repl_flag(body, "all_vms"), _repl_flag(body, "dry_run")
         force, skew = _repl_flag(body, "force_unplanned"), _repl_flag(body, "accept_skew")
+        stale = _repl_flag(body, "accept_stale_carnet")
         vms = body.get("vms") or []
         if not isinstance(vms, list):
             raise ValueError("vms must be a list")
@@ -25311,6 +25313,7 @@ def api_replication_failover(plan_id):
     cmd = (_repl_base("failover", plan["id"]) + [f"--vm={v}" for v in vms]
            + (["--all-vms"] if all_vms else []) + (["--unplanned"] if mode == "unplanned" else [])
            + (["--force-unplanned"] if force else []) + (["--accept-skew"] if skew else [])
+           + (["--accept-stale-carnet"] if stale else [])
            + (["--dry-run"] if dry else ["--yes"]) + kargs)
     run, err = _repl_action(plan, "failover", cmd, "admin", cluster=plan["target_cluster"],
                             busy=not dry, dry_run=dry)
@@ -25843,6 +25846,8 @@ def api_replication_link_test():
 
 REPLICATION_AUTO_PROTECT_EVERY_S = 600
 REPLICATION_AUTO_PROTECT_POLL_S = 60
+# attente plafonnée après des échecs répétés de la protection automatique
+REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S = 6 * 3600
 
 
 def _replication_auto_protect_enabled():
@@ -25852,28 +25857,75 @@ def _replication_auto_protect_enabled():
 
 class ReplicationAutoProtect:
     """Le fil de la protection automatique. `tick()` : un passage sur les
-    plans ; tout est injectable pour les tests."""
+    plans ; tout est injectable pour les tests.
 
-    def __init__(self, enabled=_replication_auto_protect_enabled, clock=time.monotonic, launch=None):
-        self._enabled, self._clock = enabled, clock
+    Une protection lancée par ce fil qui échoue (VM étiquetée mais pas
+    protégeable : disque de conteneur, volume chiffré, refus du contrôle)
+    n'est pas relancée à chaque tour : attente doublée à chaque échec
+    (REPLICATION_AUTO_PROTECT_EVERY_S, puis 2x, 4x... jusqu'à
+    REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S), un seul événement
+    `auto-protect-failed` au journal (et une alerte en cours) pour la série.
+    La série repart de zéro quand les VMs en attente ou le plan changent.
+    L'état vit dans replication.db (marque `auto-protect` du plan) : un
+    redémarrage de la console ne relance pas tout de suite."""
+
+    _RUNNING = ("running", "pending", "queued", "starting")
+
+    def __init__(self, enabled=_replication_auto_protect_enabled, clock=time.monotonic, launch=None,
+                 wall=time.time):
+        self._enabled, self._clock, self._wall = enabled, clock, wall
         self._launch = launch or self._launch_protect
         self.last = {}               # plan -> instant du dernier lancement
+        self.runs = {}               # plan -> action lancée par ce fil, suivie jusqu'à sa fin
         self._stop = threading.Event()
         self._thread = None
+
+    @staticmethod
+    def _eligible(conn, p):
+        opts = p.get("options") or {}
+        if not p.get("selector") or opts.get("auto_protect") is not True or p.get("state") != "protected" \
+                or opts.get("paused"):
+            return None
+        return _rdb.get_selector_watch(conn, p["id"])["pending"] or None
 
     def candidates(self, conn):
         out = []
         for p in _rdb.list_plans(conn):
-            opts = p.get("options") or {}
-            if not p.get("selector") or opts.get("auto_protect") is not True or p.get("state") != "protected" \
-                    or opts.get("paused"):
-                continue
-            if not _rdb.get_selector_watch(conn, p["id"])["pending"]:
+            if not self._eligible(conn, p):
                 continue
             if _rdb.get_lock(conn, p["id"]):
                 continue                     # une commande tient le plan
             out.append(p)
         return out
+
+    @staticmethod
+    def _key(conn, p):
+        """Ce qui relance une série d'échecs : VMs en attente et plan modifié."""
+        pending = _rdb.get_selector_watch(conn, p["id"])["pending"]
+        return [sorted(x.get("uid") or "" for x in pending), p.get("updated_at") or ""]
+
+    def _finished(self, conn, p, run, flag):
+        """Fin d'une protection lancée par ce fil : réussite = série effacée ;
+        échec = attente doublée, un événement au premier échec seulement."""
+        pid = p["id"]
+        if run.status == "done":
+            _rdb.clear_plan_flag(conn, "auto-protect", pid)
+            return
+        failures = int((flag or {}).get("failures") or 0) + 1
+        delay = min(REPLICATION_AUTO_PROTECT_EVERY_S * 2 ** (failures - 1), REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S)
+        error = str(getattr(run, "error_summary", "") or run.status)[:200]
+        now_iso = _rp.iso(_repl_now())
+        _rdb.set_plan_flag(conn, "auto-protect", pid, {
+            "key": self._key(conn, p), "failures": failures, "since": (flag or {}).get("since") or now_iso,
+            "next_at": self._wall() + delay, "retry": f"{delay // 3600} h" if delay >= 3600 else f"{delay // 60} min", "error": error, "action_id": run.id}, by="console")
+        if failures == 1:
+            _rdb.record_event(conn, "plan", step="auto-protect", plan_id=pid, host=p["source_cluster"], level="warn",
+                              code="auto-protect-failed",
+                              message=f"automatic protection failed: {error}; retried with a growing delay "
+                                      f"(up to {REPLICATION_AUTO_PROTECT_BACKOFF_MAX_S // 3600} h)",
+                              facts={"action_id": run.id, "pending": len(self._key(conn, p)[0])}, by="console",
+                              action_id=run.id)
+        log_watch.info("replication auto-protect for %s failed (%d), next try in %d s", pid, failures, delay)
 
     def tick(self):
         """Rend la liste des plans pour lesquels `protect` a été lancé."""
@@ -25882,20 +25934,40 @@ class ReplicationAutoProtect:
         path = _replication_db_path()
         if not path.exists():
             return []
+        launched = []
         conn = _rdb.connect(path)
         try:
-            plans = self.candidates(conn)
+            plans = {p["id"]: p for p in _rdb.list_plans(conn)}
+            for pid in list(plans):
+                flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                run = self.runs.get(pid)
+                if run is not None and run.status not in self._RUNNING:
+                    self.runs.pop(pid, None)
+                    self._finished(conn, plans[pid], run, flag)
+                    flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                if flag and (not self._eligible(conn, plans[pid]) or flag.get("key") != self._key(conn, plans[pid])):
+                    _rdb.clear_plan_flag(conn, "auto-protect", pid)     # VMs ou plan changés : nouvelle série
+            now = self._clock()
+            for p in self.candidates(conn):
+                if self._stop.is_set():
+                    break                    # arrêt de la console : plus rien n'est lancé
+                pid = p["id"]
+                if pid in self.runs:
+                    continue                 # la précédente n'est pas finie
+                flag = _rdb.get_plan_flag(conn, "auto-protect", pid)
+                if flag and self._wall() < float(flag.get("next_at") or 0):
+                    continue                 # en attente après un échec
+                at = self.last.get(pid)
+                if at is not None and now - at < REPLICATION_AUTO_PROTECT_EVERY_S:
+                    continue
+                run = self._launch(p)
+                if run:
+                    self.last[pid] = now
+                    if hasattr(run, "status"):
+                        self.runs[pid] = run
+                    launched.append(pid)
         finally:
             conn.close()
-        launched = []
-        now = self._clock()
-        for p in plans:
-            at = self.last.get(p["id"])
-            if at is not None and now - at < REPLICATION_AUTO_PROTECT_EVERY_S:
-                continue
-            if self._launch(p):
-                self.last[p["id"]] = now
-                launched.append(p["id"])
         return launched
 
     @staticmethod
@@ -25909,10 +25981,10 @@ class ReplicationAutoProtect:
                 return False
             run, err = _repl_action(plan, "protect", _repl_base("protect", plan["id"], by="console"), "operator")
         if err is not None or run is None:
-            return False                     # geste en cours sur le plan ou un cluster : au tour suivant
+            return None                      # geste en cours sur le plan ou un cluster : au tour suivant
         run.result = dict(run.result or {}, by="console", auto=True)
         log_watch.info("replication auto-protect started for %s (action %s)", plan["id"], run.id)
-        return True
+        return run
 
     def _loop(self):
         while not self._stop.wait(REPLICATION_AUTO_PROTECT_POLL_S):
@@ -25926,8 +25998,12 @@ class ReplicationAutoProtect:
         self._thread.start()
         return self._thread
 
-    def stop(self):
+    def stop(self, timeout=10):
+        """Plus aucun lancement : le fil est attendu (un tour en cours finit
+        de lancer avant que l'arrêt ne relève les actions en cours)."""
         self._stop.set()
+        if self._thread is not None and self._thread is not threading.current_thread():
+            self._thread.join(timeout)
 
 
 REPLICATION_AUTO_PROTECT = None

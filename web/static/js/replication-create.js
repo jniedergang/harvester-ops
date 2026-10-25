@@ -30,6 +30,8 @@ const ReplicationCreate = (() => {
     input.replace(/^<(input|select|textarea)/, `<$1 class="tip" data-tip="${esc(tip)}"`)}</label>`;
   const okBadge = (state, text) => `<span class="badge ${state === 'ok' ? 'ok' : (state === 'warn' ? 'warn' : 'fail')}" data-rpc-ready="${state}">${esc(text)}</span>`;
   const vmKey = (v) => `${v.namespace}/${v.name}`;
+  /** Schéma, hôte et port d'une adresse (« » si illisible). */
+  const originOf = (u) => { try { const x = new URL(u); return `${x.protocol}//${x.host}`; } catch (e) { return ''; } };
 
   // ===========================================================================
   // Éditeur de reprise (bloc 4), partagé avec les réglages d'un contrat
@@ -45,6 +47,7 @@ const ReplicationCreate = (() => {
       cloud_init: o.cloud_init || 'keep', mac: o.mac || 'keep', start: o.start || 'started',
       network_data: Object.assign({}, o.network_data || {}), resize: JSON.parse(JSON.stringify(o.resize || {})),
       hooks: JSON.parse(JSON.stringify(o.hooks || [])), editing: null,
+      degraded: !!o.accept_degraded_standby,
     };
     if (!st.waves.length) st.waves = [{ name: '', vms: st.vms.map(vmKey), gate: { kind: 'running' } }];
     const wavedVms = () => new Set(st.waves.flatMap((w) => w.vms || []));
@@ -150,7 +153,8 @@ const ReplicationCreate = (() => {
       host.innerHTML = `<div class="rp-rec">
         <h4>${esc(tr('rp.rec.waves'))}</h4><p class="form-hint">${esc(tr('rp.rec.wavesHint'))}</p><div data-rpr="waves">${wavesHtml()}</div>
         <h4>${esc(tr('rp.rec.guest'))}</h4><p class="form-hint">${esc(tr('rp.rec.guestHint'))}</p><div data-rpr="guest">${guestHtml()}</div>
-        <h4>${esc(tr('rp.rec.hooks'))}</h4><p class="form-hint">${esc(tr('rp.rec.hooksHint'))}</p><div data-rpr="hooks">${hooksHtml()}</div></div>`;
+        <h4>${esc(tr('rp.rec.hooks'))}</h4><p class="form-hint">${esc(tr('rp.rec.hooksHint'))}</p><div data-rpr="hooks">${hooksHtml()}</div>
+        ${opts.planId ? `<h4>${esc(tr('rp.rec.standby'))}</h4><label class="bk-check tip" data-tip="${esc(tr('rp.c.ackDegradedTip'))}"><input type="checkbox" data-rpr-degraded${st.degraded ? ' checked' : ''}${dis}> <span>${esc(tr('rp.c.ackDegraded'))}</span></label>` : ''}</div>`;
     }
     const redraw = (part) => {
       if (part === 'waves') host.querySelector('[data-rpr="waves"]').innerHTML = wavesHtml();
@@ -190,7 +194,16 @@ const ReplicationCreate = (() => {
         const i = l.indexOf(':');
         if (i < 1) errs.push(tr('rp.hook.errHeader', { line: l })); else h.headers[l.slice(0, i).trim()] = l.slice(i + 1).trim();
       });
+      const prev = st.editing >= 0 ? st.hooks[st.editing] : null;
+      const prevSec = (prev && prev.secret_headers) || {};
+      const first = Object.keys(prevSec)[0];
+      // les en-têtes secrets au-delà du premier (posés en ligne de commande) restent tels quels
+      Object.entries(prevSec).forEach(([k, x]) => { if (k !== first) h.secret_headers[k] = x; });
       if (v('h_sname').trim()) h.secret_headers[v('h_sname').trim()] = v('h_svalue');
+      const masked = Object.values(h.secret_headers).includes(MASK);
+      // même règle que le serveur : un secret masqué ne suit ni un renommage ni un autre hôte
+      if (masked && prev && prev.name !== h.name) errs.push(tr('rp.hook.errRenameSecret'));
+      else if (masked && prev && originOf(prev.url) !== originOf(h.url)) errs.push(tr('rp.hook.errUrlSecret'));
       if (errs.length) { m.innerHTML = `<span class="res-error">${esc(errs.join(' · '))}</span>`; return; }
       if (st.editing === -1) st.hooks.push(h); else st.hooks[st.editing] = h;
       st.editing = null;
@@ -233,6 +246,7 @@ const ReplicationCreate = (() => {
         w.gate = el.value === 'running' ? { kind: 'running' } : { kind: el.value, seconds: el.value === 'agent' ? 300 : 60 };
         redraw('waves'); return;
       }
+      if (el.dataset.rprDegraded !== undefined) { st.degraded = el.checked; if (opts.onChange) opts.onChange(); return; }
       if (el.dataset.rpwSec !== undefined) { st.waves[Number(el.dataset.rpwSec)].gate.seconds = Number(el.value); return; }
       if (el.dataset.rpwName !== undefined) { st.waves[Number(el.dataset.rpwName)].name = el.value.trim(); return; }
       if (el.dataset.rpwMove !== undefined) { moveVm(el.dataset.rpwMove, Number(el.value)); return; }
@@ -282,7 +296,8 @@ const ReplicationCreate = (() => {
         // une seule vague « au démarrage » = l'ordre par défaut : rien à envoyer
         const trivial = waves.length <= 1 && (!waves[0] || waves[0].gate.kind === 'running') && !(waves[0] && waves[0].name);
         return { errors, cloud_init: st.cloud_init, mac: st.mac, start: st.start,
-                 recovery: { waves: trivial ? [] : waves, hooks: st.hooks, network_data: st.cloud_init === 'rerun' ? st.network_data : {}, resize: st.resize } };
+                 recovery: Object.assign({ waves: trivial ? [] : waves, hooks: st.hooks, network_data: st.cloud_init === 'rerun' ? st.network_data : {}, resize: st.resize },
+                   opts.planId ? { accept_degraded_standby: st.degraded } : {}) };
       },
       state: st,
     };
@@ -303,7 +318,7 @@ const ReplicationCreate = (() => {
       from: from0, to: names.find((n) => n !== from0) || '', mode: 'list', selected: new Set(pre.vms || []),
       ruleKey: '', ns: '', auto: true, rpo: 15, retain: 6, measure: true,
       cand: null, ruleCand: null, src: {}, dst: {}, links: null,
-      netMap: {}, drillMap: {}, netCreate: {}, diskClass: {}, nsMap: {}, createNs: {}, seq: 0,
+      netMap: {}, drillMap: {}, netCreate: {}, diskClass: {}, nsMap: {}, createNs: {}, seq: 0, ackDegraded: false,
     };
     f.innerHTML = `
       <p class="form-hint">${esc(tr('rp.c.hint'))}</p>
@@ -368,10 +383,12 @@ const ReplicationCreate = (() => {
     }
     async function loadTarget() {
       const c = st.to;
-      const [nets, scs, nss, fab, links] = await Promise.all([U.get(`/api/networks/${enc(c)}`), U.get(`/api/storageclasses/${enc(c)}`),
-        U.get(`/api/namespaces/${enc(c)}`), U.get(`/api/network-fabric/${enc(c)}`), st.links ? Promise.resolve(st.links) : U.get('/api/replication/links')]);
+      const [nets, scs, nss, fab, links, cap] = await Promise.all([U.get(`/api/networks/${enc(c)}`), U.get(`/api/storageclasses/${enc(c)}`),
+        U.get(`/api/namespaces/${enc(c)}`), U.get(`/api/network-fabric/${enc(c)}`), st.links ? Promise.resolve(st.links) : U.get('/api/replication/links'),
+        U.get(`/api/storage-capacity/${enc(c)}`).catch(() => null)]);
       if (c !== st.to) return;
       st.dst = { nets: Array.isArray(nets) ? nets : [], scs: Array.isArray(scs) ? scs : [], nss: Array.isArray(nss) ? nss : [],
+                 cap: cap && cap.classes ? cap : null,
                  cns: ((fab && fab.cluster_networks) || []).map((x) => (typeof x === 'string' ? x : x.name)).filter(Boolean),
                  error: nets && nets.error ? nets.error : null };
       st.links = links;
@@ -411,6 +428,19 @@ const ReplicationCreate = (() => {
       return dstClasses().includes(d.storage_class) ? d.storage_class : '';
     }
     const dstNs = () => (st.dst.nss || []).map((n) => n.name);
+    /** Classes choisies qui demandent plus de répliques que la cible n'a de nœuds Longhorn planifiables
+     *  (numberOfReplicas de la StorageClass, lu par /api/storage-capacity) : secours dégradé à vie. */
+    function overClasses(vms) {
+      const cap = st.dst.cap;
+      if (!cap) return [];
+      const nodes = Number(cap.schedulable_nodes) || 0;
+      const used = new Set();
+      vms.forEach((v) => (v.disks || []).filter((d) => d.eligible !== false).forEach((d) => { const t = diskTarget(v, d); if (t) used.add(t); }));
+      const fits = Object.entries(cap.classes).filter(([n, c]) => dstClasses().includes(n) && c.replicas <= nodes)
+        .sort((a, b) => b[1].replicas - a[1].replicas || a[0].localeCompare(b[0]));
+      return [...used].sort().filter((sc) => nodes && cap.classes[sc] && cap.classes[sc].replicas > nodes)
+        .map((sc) => ({ sc, replicas: cap.classes[sc].replicas, nodes, suggest: fits.length ? fits[0][0] : '' }));
+    }
     function nsTarget(ns) { return st.nsMap[ns] !== undefined ? st.nsMap[ns] : ns; }
     function issues() {
       const out = [];
@@ -432,6 +462,8 @@ const ReplicationCreate = (() => {
       [...new Set(vms.map((v) => v.namespace))].forEach((ns) => {
         if (!dstNs().includes(nsTarget(ns)) && !st.createNs[ns] && st.dst.nss) out.push(['3', tr('rp.c.errNs', { ns })]);
       });
+      const over = overClasses(vms);
+      if (over.length && !st.ackDegraded) out.push(['3', tr('rp.c.errReplicas', { classes: over.map((x) => x.sc).join(', ') })]);
       rec.read().errors.forEach((x) => out.push(['4', x]));
       return out;
     }
@@ -495,6 +527,8 @@ const ReplicationCreate = (() => {
       const rows = vms.flatMap((v) => (v.disks || []).map((d) => [v, d]));
       if (!rows.length) return `<p class="hint">${esc(tr('rp.c.noDisks'))}</p>`;
       const classes = dstClasses();
+      const over = overClasses(vms);
+      const overSet = new Set(over.map((x) => x.sc));
       return `<div class="tw"><table class="data-table rp-disks"><thead><tr><th>${esc(tr('rp.col.vm'))}</th><th>${esc(tr('rp.c.disk'))}</th><th>${esc(tr('rp.c.size'))}</th>
           <th>${esc(tr('rp.c.srcClass'))}</th><th>${esc(tr('rp.c.dstClass', { cluster: st.to }))}</th><th>${esc(tr('rp.col.state'))}</th></tr></thead>
         <tbody>${rows.map(([v, d]) => {
@@ -508,8 +542,17 @@ const ReplicationCreate = (() => {
             <td>${esc(U.bytes(d.size))}</td><td>${esc(d.storage_class || '-')}</td>
             <td><select class="tip" data-rpc-sc="${esc(k)}" data-tip="${esc(tr('rp.c.dstClassTip'))}" aria-label="${esc(tr('rp.c.dstClass', { cluster: st.to }))}">
               <option value="">${esc(tr('rp.c.pickClass'))}</option>${classes.map((c) => `<option value="${esc(c)}"${c === t ? ' selected' : ''}>${esc(c)}${c === defaultClass() ? ` (${esc(tr('rp.c.default'))})` : ''}</option>`).join('')}</select></td>
-            <td>${t ? okBadge('ok', t === d.storage_class ? tr('rp.c.netSame') : tr('rp.c.netMapped')) : okBadge('fail', tr('rp.c.classMissing'))}</td></tr>`;
-        }).join('')}</tbody></table></div>`;
+            <td>${!t ? okBadge('fail', tr('rp.c.classMissing')) : (overSet.has(t) ? okBadge('warn', tr('rp.c.degraded'))
+              : okBadge('ok', t === d.storage_class ? tr('rp.c.netSame') : tr('rp.c.netMapped')))}</td></tr>`;
+        }).join('')}</tbody></table></div>${replicasHtml(over)}`;
+    }
+    /** Avertissement répliques > nœuds : changer de classe en un clic, ou accepter un secours dégradé. */
+    function replicasHtml(over) {
+      if (!over.length) return '';
+      return `<div class="sto-finding sev-action" data-rpc="replicas"><div class="sto-finding-title">${icon('warn')} ${esc(tr('rp.c.replicasTitle'))}</div>
+        ${over.map((x) => `<p class="sto-finding-facts" data-rpc-over="${esc(x.sc)}">${esc(tr('rp.c.replicasOver', { sc: x.sc, replicas: x.replicas, nodes: x.nodes }))}
+          ${x.suggest ? `<button type="button" class="btn btn-sm btn-secondary tip" data-rpc-usesc="${esc(x.sc)}" data-to="${esc(x.suggest)}" data-tip="${esc(tr('rp.c.useClassTip', { sc: x.suggest, replicas: (st.dst.cap.classes[x.suggest] || {}).replicas }))}">${esc(tr('rp.c.useClass', { sc: x.suggest }))}</button>` : ''}</p>`).join('')}
+        <label class="bk-check tip" data-tip="${esc(tr('rp.c.ackDegradedTip'))}"><input type="checkbox" data-rpc-ackdeg${st.ackDegraded ? ' checked' : ''}> <span>${esc(tr('rp.c.ackDegraded'))}</span></label></div>`;
     }
     function nssHtml(vms) {
       const nss = [...new Set(vms.map((v) => v.namespace))].sort();
@@ -569,6 +612,7 @@ const ReplicationCreate = (() => {
       b.cloud_init = r.cloud_init; b.mac = r.mac; b.start = r.start;
       const recovery = Object.assign({}, r.recovery);
       if (st.mode === 'rule') recovery.auto_protect = !!f.auto.checked;
+      if (st.ackDegraded && overClasses(vms).length) recovery.accept_degraded_standby = true;
       Object.keys(recovery).forEach((k) => {
         const x = recovery[k];
         if ((Array.isArray(x) && !x.length) || (x && typeof x === 'object' && !Array.isArray(x) && !Object.keys(x).length)) delete recovery[k];
@@ -599,6 +643,8 @@ const ReplicationCreate = (() => {
       if (st.dst.nets) out.push(st.dst.error ? li(false, tr('rp.chk.targetNo', { cluster: st.to, why: st.dst.error })) : li(true, tr('rp.chk.target', { cluster: st.to })));
       const map = list.filter((x) => x[0] === '3').length;
       out.push(li(!map, map ? tr('rp.chk.mappingNo') : tr('rp.chk.mapping')));
+      const over = overClasses(chosenVms());
+      if (st.dst.cap) out.push(over.length ? li(st.ackDegraded ? null : false, tr('rp.chk.replicasNo', { classes: over.map((x) => x.sc).join(', ') })) : li(true, tr('rp.chk.replicas')));
       const link = ((st.links && st.links.links) || []).find((l) => l.source === st.from && l.target === st.to);
       const p = (link && link.passive) || {}, a = (link && link.active) || {};
       const up = p.upload_bps_p50_24h || a.write_bps, ap = p.apply_bps_p50_24h || a.read_bps;
@@ -660,7 +706,14 @@ const ReplicationCreate = (() => {
       const no = e.target.closest('[data-rpc-ncno]');
       if (no) { delete st.netCreate[no.dataset.rpcNcno]; refresh(); return; }
       const go = e.target.closest('[data-rpc-ncgo]');
-      if (go) { createNetwork(go.dataset.rpcNcgo, go); }
+      if (go) { createNetwork(go.dataset.rpcNcgo, go); return; }
+      const use = e.target.closest('[data-rpc-usesc]');
+      if (use) {
+        chosenVms().forEach((v) => (v.disks || []).filter((d) => d.eligible !== false).forEach((d) => {
+          if (diskTarget(v, d) === use.dataset.rpcUsesc) st.diskClass[`${vmKey(v)}/${d.disk}`] = use.dataset.to;
+        }));
+        refresh();
+      }
     });
     async function createNetwork(n, btn) {
       const form = f.querySelector(`[data-rpc-netform="${CSS.escape(n)}"]`);
@@ -688,7 +741,7 @@ const ReplicationCreate = (() => {
       const el = e.target;
       if (el.closest('[data-rpc="recovery"]')) return;
       if (el.name === 'from') { st.from = el.value; st.selected.clear(); st.diskClass = {}; loadSource(); return; }
-      if (el.name === 'to') { st.to = el.value; st.netMap = {}; st.drillMap = {}; st.diskClass = {}; st.nsMap = {}; st.netCreate = {}; loadTarget(); return; }
+      if (el.name === 'to') { st.to = el.value; st.ackDegraded = false; st.netMap = {}; st.drillMap = {}; st.diskClass = {}; st.nsMap = {}; st.netCreate = {}; loadTarget(); return; }
       if (el.name === 'rule_ns') { st.ns = el.value; loadRule(); return; }
       if (el.dataset.rpcPick) { if (el.checked) st.selected.add(el.dataset.rpcPick); else st.selected.delete(el.dataset.rpcPick); refresh(); return; }
       if (el.dataset.rpcNetmap !== undefined) { st.netMap[el.dataset.rpcNetmap] = el.value; refresh(); return; }
@@ -696,6 +749,7 @@ const ReplicationCreate = (() => {
       if (el.dataset.rpcSc !== undefined) { st.diskClass[el.dataset.rpcSc] = el.value; refresh(); return; }
       if (el.dataset.rpcNsmap !== undefined) { st.nsMap[el.dataset.rpcNsmap] = el.value; refresh(); return; }
       if (el.dataset.rpcNscreate !== undefined) { st.createNs[el.dataset.rpcNscreate] = el.checked; refresh(); return; }
+      if (el.dataset.rpcAckdeg !== undefined) { st.ackDegraded = el.checked; refresh(); return; }
       if (el.dataset.rpcNc) { const n = el.closest('[data-rpc-netform]').dataset.rpcNetform; st.netCreate[n][el.dataset.rpcNc] = el.value; return; }
       if (['measure', 'auto', 'rpo', 'retain'].includes(el.name)) refresh();
     });

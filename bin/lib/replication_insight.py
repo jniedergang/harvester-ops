@@ -33,11 +33,11 @@ LINK_BUCKET_S = 3600
 ALERT_LEVELS = {
     "rpo-exceeded": "warn", "disk-never-backs-up": "warn", "source-vm-running-after-failover": "error",
     "backup-error": "error", "standby-degraded": "warn", "source-unreachable": "error", "plan-drift": "warn",
-    "plan-error": "error", "selector-new-vm": "warn",
+    "plan-error": "error", "selector-new-vm": "warn", "carnet-stale": "warn", "auto-protect-failed": "warn",
 }
 ALERT_CODES = tuple(ALERT_LEVELS)
 _REASON_ALERTS = ("source-unreachable", "backup-error", "standby-degraded", "disk-never-backs-up", "plan-drift",
-                  "rpo-exceeded")
+                  "rpo-exceeded", "carnet-stale")
 _MESSAGES = {
     "rpo-exceeded": "RPO held {rpo} s, objective {objective} s",
     "disk-never-backs-up": "a disk shows no backup for several intervals: check the recurring job",
@@ -48,6 +48,9 @@ _MESSAGES = {
     "plan-drift": "the VM spec changed since protect: run protect again",
     "plan-error": "the plan is in error (from {origin}): see its journal",
     "selector-new-vm": "a VM matches the plan selector but is not protected yet: run protect",
+    "carnet-stale": "the recovery settings changed since the last protect ({keys}): run protect again, or a failover "
+                    "starts the VM with the previous settings",
+    "auto-protect-failed": "automatic protection failed ({failures} time(s)), next try in {retry}: {error}",
 }
 _LEVEL_RANK = {"warn": 1, "error": 2}
 
@@ -190,7 +193,7 @@ def _alert(plan, code, level=None, uid="", namespace="", name="", since=None, **
             "since": since, "message": _MESSAGES[code].format(**fmt)}
 
 
-def plan_alerts(plan, row, health=None, pending=(), since=None):
+def plan_alerts(plan, row, health=None, pending=(), since=None, stale=None, auto_failed=None):
     """Alertes en cours d'un plan, calculées sur l'état présent : raisons
     des ressources (`row["resources"][*]["reasons"]`), VM source revenue en
     marche après une bascule (santé `source_running_after_failover`), plan
@@ -202,6 +205,13 @@ def plan_alerts(plan, row, health=None, pending=(), since=None):
     if plan.get("state") == "error":
         out.append(_alert(plan, "plan-error", since=since.get(("", "error")),
                           origin=plan.get("error_origin") or "unknown"))
+    if stale and stale.get("keys"):
+        # réglages de reprise changés sur un plan protégé, protect pas relancé
+        out.append(_alert(plan, "carnet-stale", since=stale.get("since"), keys=", ".join(stale["keys"])))
+    if auto_failed and auto_failed.get("failures"):
+        out.append(_alert(plan, "auto-protect-failed", since=auto_failed.get("since"),
+                          failures=auto_failed["failures"], retry=auto_failed.get("retry") or "-",
+                          error=auto_failed.get("error") or "-"))
     for r in (row or {}).get("resources") or ():
         uid = r.get("resource_uid") or ""
         reasons = r.get("reasons") or ()
@@ -210,7 +220,7 @@ def plan_alerts(plan, row, health=None, pending=(), since=None):
                 continue
             at = since.get((uid, code)) or (since.get(("", code)) if code == "disk-never-backs-up" else None)
             fmt = {"rpo": r.get("rpo_held_s"), "objective": r.get("rpo_objective_s")} if code == "rpo-exceeded" \
-                else {}
+                else ({"keys": "seen by the follower"} if code == "carnet-stale" else {})
             out.append(_alert(plan, code, uid=uid, namespace=r.get("namespace"), name=r.get("name"), since=at,
                               **fmt))
         if (health.get(uid) or {}).get("source_running_after_failover"):

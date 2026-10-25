@@ -40,6 +40,7 @@ actions suivies, et son fil de suivi lance `follow --all --console`.
   harvester-replication events (--resource UID | --plan P | --host H) [--limit N] [--before ID|DATE]
   harvester-replication failover P (--vm ns/nom ... | --all-vms --yes) [--unplanned --yes]
         [--force-unplanned] [--accept-skew] [--dry-run]   (les deux dernières avec --unplanned)
+        [--accept-stale-carnet]   (réglages de reprise changés depuis le dernier protect)
   harvester-replication resume P
   harvester-replication unprotect P --yes [--delete-backups]
   harvester-replication alerts [--host H]
@@ -789,6 +790,10 @@ def cmd_plan_set(args):
     if maps:
         changed["mappings"] = {k: (new.get("mappings") or {}).get(k) for k in maps}
     need = rp.protect_needed(plan["state"], recovery, carnet, maps)
+    if need:
+        # gardé jusqu'au prochain protect : alerte et contrôle de la bascule
+        db.mark_carnet_stale(conn, plan["id"], rp.carnet_keys_touched(recovery, carnet, maps),
+                             by=args.by or system_user(), now=utcnow())
     names = sorted(changed)
     _plan_event(conn, new, "set", "settings", "settings changed: " + ", ".join(names), changed, args)
     step("plan", "done", "settings changed: " + ", ".join(names))
@@ -1000,7 +1005,8 @@ def cmd_failover(args):
             raise UsageError("--all-vms needs --yes", "confirmation-required")
     _conn, _plan, ctx = _plan_ctx(args)
     return finish(args, rr.failover(ctx, vms=vms, planned=not args.unplanned, accept_skew=args.accept_skew,
-                                    force_unplanned=args.force_unplanned, yes=args.yes, dry_run=args.dry_run))
+                                    force_unplanned=args.force_unplanned, yes=args.yes, dry_run=args.dry_run,
+                                    accept_stale_carnet=args.accept_stale_carnet))
 
 
 def cmd_resume(args):
@@ -1614,6 +1620,9 @@ def build_parser():
     sp.add_argument("--accept-skew", action="store_true",
                     help="accept a skew between disks above the tolerance (with --unplanned)")
     sp.add_argument("--yes", action="store_true", help="confirm --all-vms or an unplanned failover")
+    sp.add_argument("--accept-stale-carnet", action="store_true",
+                    help="fail over although the recovery settings changed since the last protect (the VMs "
+                         "start with the previous settings)")
     sp.add_argument("--dry-run", action="store_true")
 
     sp = leaf(sub, "resume", cmd_resume, [common, clusters], 1,

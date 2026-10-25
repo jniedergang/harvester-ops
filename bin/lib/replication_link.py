@@ -22,10 +22,10 @@ Règles tenues :
 * droits : ceux des kubeconfigs reçus (ceux de la personne, passés par la
   console).
 
-Non vérifié sur un cluster réel à la livraison : le format du journal et
-les outils de l'image (`sh`, `dd`, `date +%s.%N`, `stat`) sont ceux de
-l'image longhorn-manager v1.11 / v1.12 (base SLE BCI) ; essais unitaires
-sur un faux cluster seulement.
+Vérifié en réel le 24-25/10/2026 entre harvlab (Harvester 1.8.2) et
+harvlab2 (1.9.0), partage NFS du banc : écriture 99 Mio/s, lecture
+103 Mio/s pour 256 Mio, pods retirées. Les outils de l'image (`sh`, `dd`,
+`date +%s.%N`, `stat`) sont ceux de longhorn-manager v1.11 / v1.12.
 
 Bibliothèque standard seulement.
 """
@@ -131,12 +131,15 @@ def write_script(test_id, size_mib):
 
 def read_script(test_id):
     f = _file(test_id)
-    return (f"set -e; trap 'rm -f {f}' EXIT; "
+    # le répertoire part aussi (rmdir échoue sans dommage si un autre essai
+    # y a encore son fichier)
+    d = f"{MOUNT}/{DIR}"
+    return (f"set -e; trap 'rm -f {f}; rmdir {d} 2>/dev/null || true' EXIT; "
             "s=$(date +%s.%N); "
             f"dd if={f} of=/dev/null bs=1M 2>/dev/null; "
             "e=$(date +%s.%N); "
             f"echo \"HOPS_LINK read_start=$s read_end=$e bytes=$(stat -c %s {f})\"; "
-            f"rm -f {f} && echo \"HOPS_LINK removed=1\"")
+            f"rm -f {f} && echo \"HOPS_LINK removed=1\"; rmdir {d} 2>/dev/null || true")
 
 
 def cleanup_script(test_id):

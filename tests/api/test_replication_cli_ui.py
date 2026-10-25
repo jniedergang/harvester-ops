@@ -104,12 +104,12 @@ def test_plan_set_recovery_keeps_masked_secrets_and_replaces_given_keys(tmp_path
     hooks[0]["url"] = "https://hooks.example/v2"
     hooks[0]["secret_headers"]["X-Key"] = "k-new"
     rc, data, err = run(capsys, w, "plan", "set", "plan-b",
-                        spec_file(tmp_path, {"recovery": {"hooks": hooks, "auto_protect": True}}))
+                        spec_file(tmp_path, {"recovery": {"hooks": hooks, "accept_degraded_standby": True}}))
     assert rc == 0, data
     stored = db.get_plan_by_name(w.conn, "plan-b")["options"]
     assert stored["hooks"][0]["secret_headers"] == {"Authorization": SECRET, "X-Key": "k-new"}
     assert stored["hooks"][0]["url"] == "https://hooks.example/v2"
-    assert stored["waves"] and stored["resize"] and stored["auto_protect"] is True        # clés non données gardées
+    assert stored["waves"] and stored["resize"] and stored["accept_degraded_standby"] is True    # clés non données gardées
     assert data["changed"]["hooks"][0]["secret_headers"] == {"Authorization": rp.MASK, "X-Key": rp.MASK}
     assert "protect_needed" not in data
     text = json.dumps(data) + err + everything(w)

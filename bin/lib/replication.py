@@ -122,7 +122,7 @@ MAPPING_KINDS = ("networks", "storage_classes", "namespaces", "images", "claims"
 
 # -- reprise (« recovery ») : vagues, actions annexes HTTP, données réseau,
 # taille au secours, protection d'office des nouvelles VMs d'un sélecteur ----
-RECOVERY_KEYS = ("waves", "hooks", "network_data", "resize", "auto_protect")
+RECOVERY_KEYS = ("waves", "hooks", "network_data", "resize", "auto_protect", "accept_degraded_standby")
 # changent la VM cible, donc le carnet (protect le réécrit)
 CARNET_KEYS = ("cloud_init", "mac", "start", "network_data", "resize")
 WAVES_MAX, HOOKS_MAX = 10, 20
@@ -697,9 +697,16 @@ def normalize_recovery(raw_opts, plan_vms, cloud_init):
     auto = raw_opts.get("auto_protect", False)
     if not isinstance(auto, bool):
         raise PlanError("bad-option", "auto_protect: true or false")
+    if auto and plan_vms is not None:
+        # sans effet hors sélecteur : refusé plutôt qu'ignoré en silence
+        raise PlanError("bad-option", "auto_protect needs a plan by label selector (a VM list has no new VMs)")
+    degraded = raw_opts.get("accept_degraded_standby", False)
+    if not isinstance(degraded, bool):
+        raise PlanError("bad-option", "accept_degraded_standby: true or false")
     out = {"waves": waves, "hooks": _hooks(raw_opts.get("hooks"), len(waves)),
            "network_data": _network_data(raw_opts.get("network_data"), plan_vms, cloud_init),
-           "resize": _resize(raw_opts.get("resize"), plan_vms), "auto_protect": auto}
+           "resize": _resize(raw_opts.get("resize"), plan_vms), "auto_protect": auto,
+           "accept_degraded_standby": degraded}
     # seules les valeurs posées sont rangées : un plan sans reprise garde la
     # forme d'avant (lue partout par `.get`)
     return {k: v for k, v in out.items() if v}
@@ -796,6 +803,12 @@ def protect_needed(state, recovery=None, options=(), mappings=()):
     doit le réécrire."""
     touched = set(options or ()) | set(recovery or ()) | ({"networks"} & set(mappings or ()))
     return state == "protected" and bool(touched & (set(CARNET_KEYS) | {"networks"}))
+
+
+def carnet_keys_touched(recovery=None, options=(), mappings=()):
+    """Les réglages d'un changement qui réécrivent le carnet de reprise."""
+    touched = set(options or ()) | set(recovery or ()) | ({"networks"} & set(mappings or ()))
+    return sorted(touched & (set(CARNET_KEYS) | {"networks"}))
 
 
 def failover_waves(options, refs):
@@ -1228,8 +1241,7 @@ def _capacity(needed, classes):
         info = classes.get(sc) or {}
         alloc = int(info.get("allocatable") or 0)
         if not alloc and info.get("degraded_allocatable"):
-            out.append(_finding("replicas-degraded", "warn", storage_class=sc,
-                                replicas=info.get("replicas"), nodes=info.get("nodes")))
+            # répliques au-delà des nœuds : dit par `replica_findings`
             alloc = int(info["degraded_allocatable"])
         eff[sc] = alloc
     used = sorted(sc for sc in needed if needed[sc])
@@ -1254,6 +1266,27 @@ def _capacity(needed, classes):
             else:
                 facts.update(storage_classes=members, pool=pool)
             out.append(_finding("capacity-short", "block", **facts))
+    return out
+
+
+def replica_findings(used, classes, accepted):
+    """Classes des volumes de secours qui demandent plus de répliques
+    (`numberOfReplicas` de la StorageClass, 3 par défaut comme Longhorn) que
+    la cible n'a de nœuds Longhorn planifiables : chaque volume de secours y
+    resterait dégradé, et l'alerte `standby-degraded` ne s'éteindrait
+    jamais. Bloquant, sauf accord explicite du plan
+    (`accept_degraded_standby` : un secours dégradé peut être un choix, par
+    exemple une cible d'un seul nœud) ; `suggest` : les classes de la cible
+    qui tiennent."""
+    out = []
+    for sc in sorted(used):
+        info = classes.get(sc) or {}
+        replicas, nodes = int(info.get("replicas") or 0), int(info.get("nodes") or 0)
+        if nodes and replicas > nodes:
+            suggest = sorted(c for c, i in classes.items() if 0 < int((i or {}).get("replicas") or 0) <= nodes)
+            out.append(_finding("standby-replicas-exceed-nodes", "warn" if accepted else "block",
+                                storage_class=sc, replicas=replicas, nodes=nodes, suggest=suggest,
+                                accepted=bool(accepted)))
     return out
 
 
@@ -1324,7 +1357,7 @@ def check(src, dst, plan):
     maps = plan.get("mappings") or {}
     opts = plan.get("options") or {}
     nets = maps.get("networks") or {}
-    needed, images_seen = {}, set()
+    needed, images_seen, used_classes = {}, set(), set()
     src_bi, dst_bi = src.get("backing_images") or {}, dst.get("backing_images") or {}
     dst_volumes = dst.get("volumes") or {}
     namespaces_seen = set()
@@ -1357,6 +1390,7 @@ def check(src, dst, plan):
                 out.append(f)
             if not sc:
                 continue
+            used_classes.add(sc)
             # un volume de secours déjà à nous (relance après l'ajout d'un
             # disque) occupe déjà sa place : il n'en demande pas davantage
             standby = target_volume_name(pid, uid, d["disk"], gen, vm["name"])
@@ -1390,6 +1424,9 @@ def check(src, dst, plan):
             out.append(_finding("node-affinity-removed", "warn", vm=f"{vm['namespace']}/{vm['name']}"))
 
     out += _capacity(needed, dst.get("storage_classes") or {})
+    if phase == "protect":
+        out += replica_findings(used_classes, dst.get("storage_classes") or {},
+                                bool(opts.get("accept_degraded_standby")))
 
     if opts.get("cloud_init") == "rerun":
         out.append(_finding("cloud-init-rerun", "warn"))
@@ -1686,7 +1723,10 @@ def _vm_eval(plan, uid, volumes, ticks, now, vm_running):
 # Raison -> état calculé, et priorité des états (le premier l'emporte)
 REASON_STATE = {"source-unreachable": "source-unreachable", "backup-error": "degraded",
                 "standby-degraded": "degraded", "rpo-drift": "drifting", "plan-drift": "drifting",
-                "rpo-exceeded": "lagging", "no-point": "lagging", "disk-never-backs-up": "degraded"}
+                "rpo-exceeded": "lagging", "no-point": "lagging", "disk-never-backs-up": "degraded",
+                # alerte sans changer l'état : la réplication continue, seul le
+                # carnet de reprise est d'avant (protect le réécrit)
+                "carnet-stale": None}
 COMPUTED_PRIORITY = ("source-unreachable", "degraded", "drifting", "lagging")
 
 
@@ -1721,7 +1761,11 @@ def _resource_eval(plan, resource, volumes, ticks, now, vm_running, health=None)
         if not ev["complete"]:
             # un disque sans point appliqué : jamais « protégé » tout court
             reasons.append("no-point")
-        found = {REASON_STATE[r] for r in reasons}
+        if health.get("carnet_stale"):
+            # carnet de reprise relu par le suiveur, différent de ce que protect
+            # écrirait aujourd'hui (réglages ou VM source changés)
+            reasons.append("carnet-stale")
+        found = {REASON_STATE[r] for r in reasons} - {None}
         state = next((s for s in COMPUTED_PRIORITY if s in found), stored)
     ev["state"], ev["reasons"] = state, reasons
     return ev

@@ -1236,7 +1236,7 @@ class Follower:
             if due_spec and p["source_cluster"] not in self._down_now:
                 self._spec(v, r, vm, h)
                 if carnets is not None and vm is not None:
-                    self._carnet(v, r, vm, carnets.get(rp.carnet_name(p["id"], uid)))
+                    self._carnet(v, r, vm, carnets.get(rp.carnet_name(p["id"], uid)), h)
             out[uid] = h
             if h != self.written_health.get(key):
                 db.set_health(self.conn, p["id"], uid, v["gen"], h, now=_utc(self.t))
@@ -1272,7 +1272,7 @@ class Follower:
         else:
             self.clear(("plan-drift", p["id"], uid))
 
-    def _carnet(self, v, r, vm, secret):
+    def _carnet(self, v, r, vm, secret, h=None):
         """Le carnet de reprise est-il celui que la protection écrirait
         aujourd'hui ? La VM cible est recalculée depuis la VM source
         (`replication.target_vm`, comme `replication_run.write_carnets`) et
@@ -1296,9 +1296,13 @@ class Follower:
         except ValueError:
             return
         key = ("carnet-stale", p["id"], uid)
+        h = h if h is not None else {}
         if _canon(want) == _canon(carnet["vm"]):
+            h["carnet_stale"] = False
             self.clear(key)
             return
+        # gardé dans la santé de la VM : alerte en cours et contrôle de la bascule
+        h["carnet_stale"] = True
         digest = hashlib.sha256(_canon(want).encode()).hexdigest()[:16]
         if self.once_on(key, digest):
             self.event(p, "spec", "carnet-stale", uid, "target", "warn",
