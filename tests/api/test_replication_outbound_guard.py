@@ -345,3 +345,40 @@ def test_hooks_summary_and_notify_mask_hide_the_query():
     assert QTOKEN not in json.dumps(rp.hooks_summary(opts)) and QTOKEN not in json.dumps(rp.mask_options(opts))
     shown = rn.mask(rn.normalize({"channels": [_webhook()]}))
     assert QTOKEN not in json.dumps(shown) and shown["channels"][0]["url"] == "https://hook.example/in?********"
+
+
+# ---------------------------------------------------------------------------
+# Routes et ligne de commande : refus tout de suite, rien en clair
+# ---------------------------------------------------------------------------
+
+from test_replication_routes_199 import PID, _NoThread, as_user, client, db, env, wapp  # noqa: E402,F401
+
+CREATE = {"name": "erp", "from": "harvlab", "to": "harvlab2", "vms": ["default/web-1"], "rpo": "15m"}
+
+
+def test_create_and_settings_refuse_an_internal_hook_address_at_once(client, env):
+    bad = _hook("http://127.0.0.1:8200/v1/sys/health")
+    r = client.post("/api/replication/plans", json=dict(CREATE, recovery={"hooks": [bad]}))
+    assert r.status_code == 400 and r.get_json()["code"] == "hook-address", r.get_json()
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json={"recovery": {"hooks": [bad]}})
+    assert r.status_code == 400 and r.get_json()["code"] == "hook-address", r.get_json()
+    assert _NoThread.started == []
+
+
+def test_settings_refuse_a_masked_secret_sent_to_another_host(client, env):
+    conn = db.connect(env["db"])
+    db.update_plan(conn, PID, options={"hooks": [STORED]})
+    conn.close()
+    shown = client.get(f"/api/replication/plans/{PID}").get_json()["plan"]["options"]["hooks"][0]
+    shown["url"] = "https://attacker.example/x"
+    r = client.patch(f"/api/replication/plans/{PID}/settings", json={"recovery": {"hooks": [shown]}})
+    assert r.status_code == 400 and r.get_json()["code"] == "secret-missing" and _NoThread.started == []
+
+
+def test_a_viewer_never_reads_the_query_of_a_hook_url(as_user, env):
+    conn = db.connect(env["db"])
+    db.update_plan(conn, PID, options={"hooks": [STORED]})
+    conn.close()
+    for path in (f"/api/replication/plans/{PID}", "/api/replication/plans"):
+        text = as_user("curieux", "GET", path).get_data(as_text=True)
+        assert QTOKEN not in text and SECRET not in text
