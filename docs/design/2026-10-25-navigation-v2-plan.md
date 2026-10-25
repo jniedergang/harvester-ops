@@ -434,6 +434,7 @@ Elles s'appliquent aux tâches ci-dessous et l'emportent sur leur texte en cas d
 | 14 | Adresses ajoutées acceptées. |
 | 15 | **Tout en 2.0.0** : le routeur ne sort pas seul. Une seule branche, `VERSION` à 2.0.0 dès le premier commit visible, une entrée de CHANGELOG complétée au fil des commits. |
 | 16 | Info-bulle de l'interrupteur retirée. |
+| Base | Depuis la rédaction, master porte 1.100.0 (KVM création et modification, `bin/lib/url_fetch_guard.py`, routes `/api/kvm/hosts/<hôte>/macs`) et 1.101.0 (écrans de réplication : groupe racine « Disaster Recovery » avec Contrats et Liens, entrée « Disaster Recovery » dans le groupe de chaque cluster, `web/static/js/replication*.js`). La tâche 16 ne construit donc plus ces écrans : elle les place dans la nouvelle navigation (racine `#dr`, sous-menu d'hôte, adresses) et branche la route d'hôte corrigée (point 9). |
 
 ## Points à trancher
 
