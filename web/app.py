@@ -11070,7 +11070,43 @@ def api_kvm_vm_gesture(host, domain, gesture):
 # -----------------------------------------------------------------------------
 # Cluster CRUD — declare/update/delete clusters from the UI
 # -----------------------------------------------------------------------------
-CONFIG_LOCK = threading.Lock()
+class _ConfigLock:
+    """Verrou des déclarations de clusters : entre les fils de la console
+    (threading) ET avec les autres processus qui écrivent clusters.d
+    (cluster_decl.decl_lock, pris aussi par harvester-folders.py pour le
+    champ `folder`). Sans état inscriptible, le verrou des fils seul."""
+
+    def __init__(self):
+        self._thread_lock = threading.Lock()
+        self._file_lock = None
+
+    def __enter__(self):
+        self._thread_lock.acquire()
+        try:
+            cm = _cd.decl_lock(_state_dir(), wait=30.0)
+            cm.__enter__()
+        except TimeoutError:
+            self._thread_lock.release()
+            raise
+        except OSError:
+            cm = None
+        except BaseException:
+            self._thread_lock.release()
+            raise
+        self._file_lock = cm
+        return self
+
+    def __exit__(self, *exc):
+        cm, self._file_lock = self._file_lock, None
+        try:
+            if cm is not None:
+                cm.__exit__(*exc)
+        finally:
+            self._thread_lock.release()
+        return False
+
+
+CONFIG_LOCK = _ConfigLock()
 
 
 def _config_dir():

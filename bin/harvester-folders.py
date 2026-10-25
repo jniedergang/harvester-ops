@@ -248,8 +248,12 @@ def write_host(obj, path):
     p = cluster_decl.decl_path(state, name)
     if p is None or not p.is_file():
         raise RuntimeError(f"cluster {name} is not declared")
-    with _decl_lock(state):
-        kvm_decl.write_private(p, set_yaml_folder(p.read_text(), path))
+    # même verrou que la fenêtre d'édition du cluster (CONFIG_LOCK de la console)
+    try:
+        with cluster_decl.decl_lock(state):
+            kvm_decl.write_private(p, set_yaml_folder(p.read_text(), path))
+    except TimeoutError as e:
+        raise RuntimeError(str(e)) from None
 
 
 def write_object(obj, path, spec, ctx):
