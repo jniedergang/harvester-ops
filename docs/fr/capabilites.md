@@ -278,7 +278,15 @@ lire, ou qui n'existe plus, n'est jamais rangé (sa ligne échoue).
 sous elle (sous la racine pour `unfiled`), puis supprime le dossier dans la
 même action ; rien ne bouge si un sous-dossier ne peut pas y aller (nom pris,
 bornes), et le dossier reste tant que quelque chose y est rangé. Annuler
-recrée le dossier et remet tout.
+recrée le dossier et remet tout. Un objet que la personne ne voit pas (un
+cluster que Rancher lui cache, un espace de noms qu'elle ne lit pas) n'est
+jamais nommé dans les étapes, la sortie ou le `--json` d'un renommage, d'un
+déplacement, d'un vidage, d'une annulation ou d'une reprise : ces objets sont
+comptés dans une seule étape (« 2 other objects not shown to you: 0 done, 2
+failed »). Depuis la console, `visible` dans la demande liste les clés des
+lectures de flotte de la personne (plus les objets qu'elle a choisis pour
+`assign`) ; un objet qu'elle a pu relire pendant l'action est nommé lui
+aussi. Sans `visible` (ligne de commande d'un exploitant), tout est nommé.
 
 La demande (`--spec`) liste les objets, chacun avec `kind` (`harvester`,
 `container`, `kvm`, `host`) et ses champs (`cluster`, `namespace`, `name`,

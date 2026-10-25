@@ -258,7 +258,14 @@ objects of a folder to the target, its subfolders under it (under the root
 for `unfiled`), then deletes the folder in the same action; nothing moves
 when a subfolder cannot go there (name taken, limits), and the folder stays
 while anything is left inside. Undo creates the folder again and puts
-everything back.
+everything back. An object the person does not see (a cluster Rancher hides
+from them, a namespace they cannot read) is never named in the steps, the
+output or `--json` of a rename, move, emptying, undo or resume: such objects
+are counted in one step ("2 other objects not shown to you: 0 done, 2
+failed"). From the console, `visible` in the request lists the keys of the
+person's own fleet reads (plus the objects they chose for `assign`); an
+object the person could read during the action is named too. Without
+`visible` (the command line of an operator), every object is named.
 
 The request (`--spec`) lists the objects, each with `kind` (`harvester`,
 `container`, `kvm`, `host`) and its fields (`cluster`, `namespace`, `name`,

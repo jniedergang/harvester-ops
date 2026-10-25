@@ -35,7 +35,7 @@ de la RBAC à l'écriture), le rangement est gardé dans la console seulement
 La demande (`--spec`, fichier privé écrit par la console) :
   {"objects": [{"key", "kind", "cluster", "namespace", "name", "workload_kind", "uuid",
                 "host", "domain", "family", "write": true|false}],
-   "visible": [clés que la personne voit],
+   "visible": [clés que la personne voit ; les autres objets sont comptés, jamais nommés],
    "kubeconfigs": {"<cluster>": "<kubeconfig préparé pour la personne>"}}
 Sans `kubeconfigs`, le kubeconfig du cluster déclaré est lu.
 
@@ -425,11 +425,52 @@ def folder_ref(conn, ref):
 
 # --- exécution d'un lot de déplacements ---------------------------------------------
 
+class Shown:
+    """Ce que la personne voit, pour les étapes et la sortie (2.0.0, revue
+    I-1) : les clés `visible` de la demande (ses lectures de flotte) et les
+    objets qu'elle a pu relire elle-même pendant l'action. Les autres sont
+    comptés, jamais nommés (« 2 other objects not shown to you ») ; leur vraie
+    clé ne reste que dans le journal `moves`, dont Annuler a besoin. Sans
+    `visible` (ligne de commande de l'exploitant), tout est nommé."""
+
+    def __init__(self, spec):
+        v = spec.get("visible") if isinstance(spec, dict) else None
+        self.keys = set(v) if isinstance(v, list) else None
+        self.read = set()
+        self.done = self.failed = 0
+
+    def named(self, key):
+        return self.keys is None or key in self.keys or key in self.read
+
+    def tally(self, ok):
+        if ok:
+            self.done += 1
+        else:
+            self.failed += 1
+
+    def summary(self, sid="hidden"):
+        n = self.done + self.failed
+        if n:
+            step(sid, "error" if self.failed else "done", f"{others(n)}: {self.done} done, {self.failed} failed")
+
+
+def others(n):
+    return f"{n} other object{'s' if n != 1 else ''} not shown to you"
+
+
 def run_lines(conn, args, action, lines, objects, spec):
     """Exécute les lignes du journal (`pending`) : écrit chaque objet, met le
     cache et la ligne à jour. Rend le nombre d'échecs. Débit borné par
-    `--rate` écritures par seconde."""
+    `--rate` écritures par seconde. Un objet que la personne ne voit pas
+    (Shown) n'a pas d'étape à son nom : une étape finale les compte."""
     ctx, failed = {}, 0
+    shown = Shown(spec)
+
+    def say(sid, status, key, text):
+        if shown.named(key):
+            step(sid, status, text)
+        else:
+            shown.tally(status == "done")
     rate = args.rate if args.rate and args.rate > 0 else DEFAULT_RATE
     for n, m in enumerate(lines):
         key, to = m["object_key"], m["to_path"]
@@ -443,7 +484,7 @@ def run_lines(conn, args, action, lines, objects, spec):
             failed += 1
             fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed",
                             "not in the request (not visible to you)")
-            step(sid, "error", f"{what}: not in the request (not visible to you)")
+            say(sid, "error", key, f"{what}: not in the request (not visible to you)")
             continue
         if n:
             SLEEP(1.0 / rate)
@@ -454,6 +495,7 @@ def run_lines(conn, args, action, lines, objects, spec):
             # la valeur exacte d'avant, lue sur l'objet : « Annuler » la remet
             # même si l'objet a été rangé hors de la console depuis la lecture
             before = read_current(obj, spec, ctx)
+            shown.read.add(key)                    # relu par la personne : elle le voit
             if before != m["from_path"]:
                 fdb.set_move_from(conn, action, m["seq"], before)
                 m = dict(m, from_path=before)
@@ -467,7 +509,7 @@ def run_lines(conn, args, action, lines, objects, spec):
                 failed += 1
                 msg = f"{e}; the object carries its folder {cached['folder_path']} and keeps it"
                 fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", msg)
-                step(sid, "error", f"{what}: {msg}")
+                say(sid, "error", key, f"{what}: {msg}")
                 continue
             source = "console"
             message = f"{e}: {CONSOLE_ONLY}" if to is not None else f"{e}: removed from the console only"
@@ -476,17 +518,18 @@ def run_lines(conn, args, action, lines, objects, spec):
         except NotVisible as e:
             failed += 1
             fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", str(e))
-            step(sid, "error", f"{what}: {e}")
+            say(sid, "error", key, f"{what}: {e}")
             continue
         except Exception as e:                     # noqa: BLE001 : un objet n'arrête pas le lot
             failed += 1
             msg = str(getattr(e, "message", e))[:300]
             fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "failed", msg)
-            step(sid, "error", f"{what}: {msg}")
+            say(sid, "error", key, f"{what}: {msg}")
             continue
         fdb.upsert_membership(conn, key, to, source, scope=(cached or {}).get("scope", ""))
         fdb.record_move(conn, action, m["seq"], key, m["from_path"], to, "done", message)
-        step(sid, "done", f"{what}" + (f" ({message})" if message else ""))
+        say(sid, "done", key, f"{what}" + (f" ({message})" if message else ""))
+    shown.summary()
     return failed
 
 
@@ -617,13 +660,18 @@ def cmd_resume(args, conn):
     # règle d'Annuler : un objet rangé ailleurs depuis n'est pas réécrit
     current = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
     failed = 0
+    shown = Shown(spec)
     for m in [m for m in pending if not m["object_key"].startswith("folder/")]:
         now = current.get(m["object_key"])
         if now not in (m["from_path"], m["to_path"]):
             failed += 1
             pending.remove(m)
-            step(f"obj-{m['seq']}", "error", f"{m['object_key']} is now in {now or 'unfiled'}, "
-                                            f"not {m['from_path'] or 'unfiled'}: left as is")
+            if shown.named(m["object_key"]):
+                step(f"obj-{m['seq']}", "error", f"{m['object_key']} is now in {now or 'unfiled'}, "
+                                                f"not {m['from_path'] or 'unfiled'}: left as is")
+            else:
+                shown.tally(False)
+    shown.summary("conflict")
     failed += run_lines(conn, args, args.action, pending, objects_of(spec), spec)
     return finish(args, {"action": args.action, "resumed": len(pending)}, failed,
                   f"{len(pending) - failed}/{len(pending)} pending line(s) done")
@@ -717,13 +765,19 @@ def cmd_undo(args, conn):
         fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
                         m["to_path"], m["from_path"], "done")
         step(f"folder-{fid}", "done", f"folder {m['to_path']} -> {m['from_path']}")
+    shown = Shown(spec)
     for c in conflicts:
         failed += 1
-        step("conflict", "error", f"{c['key']} is now in {c['current'] or 'unfiled'}, "
-                                  f"not {c['expected'] or 'unfiled'}: left as is")
+        if shown.named(c["key"]):
+            step("conflict", "error", f"{c['key']} is now in {c['current'] or 'unfiled'}, "
+                                      f"not {c['expected'] or 'unfiled'}: left as is")
+        else:
+            shown.tally(False)
+    shown.summary("conflict")
     failed += run_lines(conn, args, args.id, lines, objects, spec)
+    named = [c for c in conflicts if shown.named(c["key"])]
     return finish(args, {"action": args.id, "undone": args.action, "objects": len(plan),
-                         "conflicts": conflicts}, failed,
+                         "conflicts": named, "hidden_conflicts": len(conflicts) - len(named)}, failed,
                   f"{len(plan)} object(s) put back, {len(conflicts)} conflict(s)")
 
 

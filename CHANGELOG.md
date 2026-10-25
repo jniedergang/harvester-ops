@@ -222,6 +222,13 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   served each other's fleet, VMs of clusters hidden from them included.
   Local accounts without delegation still share one read.
 
+- **Folder actions never name an object the person cannot see**: a rename,
+  move, emptying, undo or resume no longer writes in the dock, Activity or
+  the command's output the key of an object filed in the folder that sits
+  in a cluster Rancher hides from the person or in a namespace they cannot
+  read. Those objects are counted in one step ("2 other objects not shown
+  to you"); the console sends only the person's own keys as `visible`.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
@@ -237,6 +244,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- `tests/api/test_folders_masking_200.py`: rename, move, empty-into and
+  undo of a folder holding a visible object, one in an unreadable namespace
+  and one in a hidden cluster, table driven: no hidden key in the steps,
+  stdout or `--json`, the count said, the real key kept in the journal; a
+  deliberate mutation that unmasks fails. Routes: `visible` is only the
+  person's keys for every gesture but assign.
 - `tests/api/test_read_share_identity_200.py`: two Rancher identities of
   the same role (and the same user name on two Rancher servers) never share a
   fleet read, two delegated identities neither, local accounts still share;

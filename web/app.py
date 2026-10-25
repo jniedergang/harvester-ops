@@ -10002,10 +10002,13 @@ def _members_objects(conn, path):
     return objs
 
 
-def _folder_spec(objects):
+def _folder_spec(objects, chosen=False):
     """Demande de l'outil : objets, clés visibles et kubeconfig de la personne
     par cluster (préparé ICI, dans le fil de la requête qui connaît son
-    identité ; jamais renvoyé ni affiché)."""
+    identité ; jamais renvoyé ni affiché). `visible` = les clés de SES
+    lectures (revue I-1) : un objet rangé qu'elle ne voit pas peut être dans
+    la demande (la console le réécrit) mais l'outil ne le nomme jamais. Seul
+    `assign` (`chosen`) y ajoute les objets qu'elle a choisis."""
     kcs = {}
     for o in objects:
         c = o.get("cluster") or (o["name"] if o["kind"] == "host" and o.get("family") == "harvester" else None)
@@ -10015,7 +10018,8 @@ def _folder_spec(objects):
                 kcs[c] = kc
     vis = _folder_visible_keys()
     visible = set(vis["hosts"]) | (vis["vms"] or set()) | (vis["containers"] or set())
-    visible |= {o["key"] for o in objects}
+    if chosen:
+        visible |= {o["key"] for o in objects}
     return {"objects": objects, "visible": sorted(visible), "kubeconfigs": kcs}
 
 
@@ -10024,7 +10028,7 @@ def _folders_after():
     READ_SHARE.invalidate(None)
 
 
-def _folder_action(label, sub, objects=None, undoable=False):
+def _folder_action(label, sub, objects=None, undoable=False, chosen=False):
     """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur."""
     script = BIN_DIR / FOLDERS_SCRIPT
     if not script.is_file():
@@ -10034,7 +10038,7 @@ def _folder_action(label, sub, objects=None, undoable=False):
         run.required_role = "operator"
         if undoable:
             run.undo = {"path": f"/api/folders/actions/{run.id}/undo"}
-    spec = _folder_spec(objects) if objects is not None else None
+    spec = _folder_spec(objects, chosen) if objects is not None else None
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
                            spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
     if err:
@@ -10198,7 +10202,7 @@ def api_folders_assign():
     finally:
         conn.close()
     dest = to_path or _fm.UNFILED
-    return _folder_action(f"assign:{dest}", ["assign", "--to", dest], objects, undoable=True)
+    return _folder_action(f"assign:{dest}", ["assign", "--to", dest], objects, undoable=True, chosen=True)
 
 
 @app.route("/api/folders/actions/<action_id>/undo", methods=["POST"])

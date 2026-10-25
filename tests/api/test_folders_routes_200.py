@@ -313,6 +313,42 @@ def test_undo_is_launched_for_a_finished_action_only(world, call):
     assert [o["key"] for o in script_spec()["objects"]] == ["harvester/harv1/nav/a"]
 
 
+SEEN = {"api_vms_all": {"vms": [{"key": "harvester/harv1/nav/a"}, {"key": f"kvm/{UUID1}"}]}}
+
+
+def _undo_req(world):
+    conn = fdb.connect(world["db"])
+    fdb.record_move(conn, "act9", 0, "harvester/harv1/secret/hidden", "/Lab", "/Prod", "done")
+    fdb.record_move(conn, "act9", 1, "harvester/harv1/nav/a", "/Lab", "/Prod/ERP", "done")
+    conn.close()
+    return "POST", "/api/folders/actions/act9/undo", None
+
+
+@pytest.mark.parametrize("gesture", ["rename", "move", "empty-into", "undo"])
+def test_visible_sent_to_the_command_is_only_what_the_person_sees(world, call, monkeypatch, gesture):
+    """Revue I-1 : `visible` = les clés de SES lectures, jamais les objets de
+    la demande ; un objet rangé qu'elle ne voit pas (namespace `secret`) est
+    dans la demande (la console le réécrit) mais pas dans `visible`."""
+    monkeypatch.setattr(wapp, "_peek_query", lambda ep, q: SEEN.get(ep))
+    req = {"rename": lambda: ("PATCH", f"/api/folders/{fid(world, '/Prod')}", {"name": "P2"}),
+           "move": lambda: ("PATCH", f"/api/folders/{fid(world, '/Prod/ERP')}", {"parent_id": None}),
+           "empty-into": lambda: ("POST", f"/api/folders/{fid(world, '/Prod')}/empty-into", {"target_id": "unfiled"}),
+           "undo": lambda: _undo_req(world)}[gesture]()
+    assert call("alice", *req).status_code == 202
+    spec = script_spec()
+    assert "harvester/harv1/secret/hidden" not in spec["visible"]
+    assert {"harvester/harv1/nav/a", f"kvm/{UUID1}"} <= set(spec["visible"])
+    if gesture != "move":
+        assert "harvester/harv1/secret/hidden" in {o["key"] for o in spec["objects"]}
+
+
+def test_assign_counts_the_chosen_objects_as_visible(world, call, monkeypatch):
+    monkeypatch.setattr(wapp, "_peek_query", lambda ep, q: None)
+    body = {"objects": ["harvester/harv1/nav/b"], "to": fid(world, "/Lab")}
+    assert call("alice", "POST", "/api/folders/assign", body).status_code == 202
+    assert "harvester/harv1/nav/b" in script_spec()["visible"]
+
+
 def test_write_back_sends_only_console_filings(world, call):
     r = call("alice", "POST", f"/api/folders/{fid(world, '/Prod')}/write-back")
     assert r.status_code == 202
