@@ -350,3 +350,14 @@ def delete_check(tree, folder_id, members, visible=None):
     hidden = len(seen) < len(inside)
     return {"empty": not inside and subfolders == 0, "count_visible": len(seen),
             "subfolders": subfolders, "hidden": hidden}
+
+
+def empty_into_conflicts(tree, folder_id, target_id):
+    """Noms des sous-dossiers de `folder_id` qui ne peuvent pas passer sous
+    `target_id` (None = racine) : un frère y porte déjà ce nom (le dossier
+    vidé compris, qui existe encore pendant le déplacement)."""
+    parent = next((f["parent_id"] for f in tree if f["id"] == folder_id), None)
+    taken = {f["name"] for f in tree if f["parent_id"] == target_id and f["id"] != folder_id}
+    if target_id == parent:
+        taken.add(next(f["name"] for f in tree if f["id"] == folder_id))
+    return sorted(f["name"] for f in tree if f["parent_id"] == folder_id and f["name"] in taken)

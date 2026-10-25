@@ -250,3 +250,18 @@ def test_delete_check(fid, visible, expected):
 ])
 def test_remap_of_a_path_during_a_rename(path, renames, known, expected):
     assert fm.remap(path, renames, known) == expected
+
+
+@pytest.mark.parametrize("folder,target,want", [
+    (1, None, []),               # /A vidé à la racine : son enfant B ne heurte rien
+    (1, 3, ["B"]),               # /C a déjà un B
+    (4, None, ["A"]),            # /D/A remonte à la racine où /A existe
+    (2, 1, ["B"]),               # /A/B vidé dans /A : il existe encore, son enfant B le heurte
+    (2, 3, ["B"]),
+])
+def test_empty_into_conflicts(folder, target, want):
+    tree = [{"id": 1, "parent_id": None, "name": "A"}, {"id": 2, "parent_id": 1, "name": "B"},
+            {"id": 3, "parent_id": None, "name": "C"}, {"id": 5, "parent_id": 3, "name": "B"},
+            {"id": 4, "parent_id": None, "name": "D"}, {"id": 6, "parent_id": 4, "name": "A"},
+            {"id": 7, "parent_id": 2, "name": "x"}, {"id": 8, "parent_id": 2, "name": "B"}]
+    assert fm.empty_into_conflicts(tree, folder, target) == want

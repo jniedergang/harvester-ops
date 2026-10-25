@@ -235,7 +235,18 @@ for one `virsh metadata` command per domain and plus 2.9 s for one
 `dumpxml` per domain. A virsh error other than "no metadata" makes the host
 read again domain by domain, so a failure is never taken for "no folder".
 
-Every change goes through `bin/harvester-folders.py` (see Capabilities).
+A fleet read creates every folder named by objects, without a cap. A read that started before a rename or a
+move ended (kubectl and SSH take seconds) still returns the former path: for
+two minutes after the change, or while objects remain to rewrite, that path
+is mapped to the new one instead of creating the former folder again.
+
+Every change goes through `bin/harvester-folders.py` (see Capabilities); the
+console launches it from the routes under `/api/folders`. In the browser,
+`web/static/js/folders.js` (`window.Folders`) draws the panel of the
+Virtual machines view and of the Folders view, and the Move to folder and
+Move the content windows; `all-vms.js` is the Virtual machines view
+(`#vms`, `#vms/folder/<id>`, `#vms/folder/unfiled`,
+`#vms/host/<family>/<host>`); `FoldersView` (in `folders.js`) is `#folders`.
 
 ## SSE event stream
 

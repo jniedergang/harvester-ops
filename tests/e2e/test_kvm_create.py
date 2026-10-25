@@ -236,6 +236,9 @@ def test_create_from_a_catalogue_image_prefills_the_first_disk(ui):
     page, state, _ = ui
     page.evaluate("KVMForm.openCreate('node2', {image: {pool: 'images', volume: 'netinst.iso', iso: true}})")
     panel = page.locator("#fp-kvm-create")
+    # la fenêtre se redessine une fois l'hôte lu (suite chargée : un clic
+    # avant serait perdu) ; l'image proposée posée = formulaire final
+    expect(panel.locator('[name$=".iso"]').first).to_have_value("images/netinst.iso", timeout=15000)
     disks = tab(panel, "disks")
     src = disks.locator('[name$=".source"]').evaluate_all("els => els.map(e => e.value)")
     assert src == ["iso", "blank"]

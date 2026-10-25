@@ -763,13 +763,11 @@ def cmd_empty_into(args, conn):
     to_path = paths[target] if target is not None else None
     members = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
     children = [f for f in tree if f["parent_id"] == fid]
-    taken = {f["name"] for f in tree if f["parent_id"] == target and f["id"] != fid}
-    if target == next((f["parent_id"] for f in tree if f["id"] == fid), None):
-        taken.add(fm.split(path)[-1])             # le dossier vidé existe encore
+    clash = fm.empty_into_conflicts(tree, fid, target)
+    if clash:
+        raise Refused(f"a folder named {clash[0]!r} already exists in {to_path or 'the root'}")
     plan_folders, plan_objects = [], []
     for c in children:
-        if c["name"] in taken:
-            raise Refused(f"a folder named {c['name']!r} already exists in {to_path or 'the root'}")
         try:
             rewrite = fm.move_plan(tree, members, c["id"], target)
         except ValueError as e:

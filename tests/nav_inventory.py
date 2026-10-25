@@ -40,6 +40,7 @@ SCREENS = [
     ("Virtual machines > Current cluster's VMs", "#harvester/{c}/vms", "namespaces", "#btn-vm-backups",
      ("namespaces",)),
     ("Virtual machines > All clusters VMs", "#vms", "allvms", "#all-vms-host", ("allvms",)),
+    ("Folders (VMs, containers, hosts)", "#folders", "folders", "#folders-view-host", ()),
     ("Containers > Current cluster's containers", "#harvester/{c}/containers", "containers", "#containers-host", ()),
     ("Containers > All clusters containers", "#containers", "allcontainers", "#all-containers-host",
      ("containers", "allcontainers")),
@@ -52,6 +53,8 @@ SCREENS = [
     ("KVM host: versions, CPU, memory", "#kvm/{h}/params/system", "kvmparams", "#kvmparams-host .hp-kvm-system", ()),
     ("KVM host: labels", "#kvm/{h}/params/labels", "kvmparams", "#kvmparams-host .hp-kvm-labels", ()),
     ("KVM > Virtual machines", "#vms/host/kvm", "kvmvms", "#kvm-vms-host .kvm-card", ("kvmvms",)),
+    # 2.0.0 (tâche 15) : la vue des VMs, panneau Hôtes sur un hôte
+    ("Virtual machines of one host (Hosts panel)", "#vms/host/kvm/{h}", "allvms", "#all-vms-host .vmf-layout", ()),
     ("KVM > Virtual machines (one host)", "#kvm/{h}/vms", "kvmvms", "#kvm-vms-host .kvm-card", ()),
     ("KVM > Hosts (CPU and memory tiles of all hosts)", "#hosts/kvm/capacity", "kvmhosts",
      '#kvm-hosts-host [data-kvm-host]', ()),

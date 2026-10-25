@@ -188,45 +188,37 @@ def test_journal_of_an_action(conn):
 
 
 # ---------------------------------------------------------------------------
-# Étape 3b (relecture M-8) : une lecture ne remplit pas l'arborescence partagée
+# Étape 3b (décision 90) : aucun plafond aux dossiers recréés depuis les
+# objets ; une grande arborescence reste rapide
 # ---------------------------------------------------------------------------
 def _rows(n, depth=1, prefix="/Flood"):
     return [{"key": f"harvester/c/ns/vm{i}", "folder": prefix + "".join(f"/L{i}-{d}" for d in range(depth)),
              "scope": "harvester/c"} for i in range(n)]
 
 
-@pytest.mark.parametrize("rows,cap,created,overflow,cached", [
-    # sous le plafond : tout est créé
-    (_rows(3), 200, 4, 0, 3),
-    # plafond atteint pile : /Flood + 199 dossiers
-    (_rows(199), 200, 200, 0, 199),
-    # au-delà : 200 créés, le reste attend ; les objets concernés gardent leur cache
-    (_rows(250), 200, 200, 51, 199),
-    # chemins profonds : un ancêtre non créé retient tout son sous-arbre
-    (_rows(2, depth=3), 3, 3, 4, 0),
-    # plafond 0 : rien n'est créé, rien n'est rangé
-    (_rows(2), 0, 0, 3, 0),
+@pytest.mark.parametrize("n,depth,created", [
+    (3, 1, 4),                   # /Flood + 3
+    (250, 1, 251),               # au-delà de l'ancien plafond de 200 : tout est créé
+    (2, 3, 7),                   # chemins profonds : chaque niveau
 ])
-def test_realign_caps_the_folders_created_by_one_read(conn, rows, cap, created, overflow, cached):
-    stats = {}
-    fdb.realign(conn, rows, max_create=cap, stats=stats)
-    assert stats == {"created": created, "overflow": overflow}
-    assert len(fdb.list_tree(conn)) == created
-    assert all(f["origin"] == "objects" for f in fdb.list_tree(conn))
-    assert len(fdb.memberships(conn)) == cached
+def test_realign_creates_every_folder_named_by_objects(conn, n, depth, created):
+    fdb.realign(conn, _rows(n, depth))
+    tree = fdb.list_tree(conn)
+    assert len(tree) == created and all(f["origin"] == "objects" for f in tree)
+    assert len(fdb.memberships(conn)) == n
 
 
-def test_realign_cap_keeps_the_cache_of_an_object_left_waiting(conn):
-    fdb.ensure_path(conn, "/Prod", "console")
-    fdb.upsert_membership(conn, "harvester/c/ns/vm0", "/Prod", "console")
-    fdb.realign(conn, _rows(1), max_create=0)
-    assert fdb.memberships(conn)["harvester/c/ns/vm0"]["folder_path"] == "/Prod"     # rien de changé
-    fdb.realign(conn, _rows(1))                                                       # plafond normal
-    assert fdb.memberships(conn)["harvester/c/ns/vm0"]["folder_path"] == "/Flood/L0-0"
-
-
-def test_realign_cap_default_is_200(conn):
-    assert fdb.MAX_CREATED_PER_READ == 200
-    stats = {}
-    fdb.realign(conn, _rows(300), stats=stats)
-    assert stats["created"] == 200
+def test_realign_of_2000_folders_stays_fast(conn):
+    """2 000 dossiers recréés en une lecture, puis une lecture sans
+    changement : temps mesurés (rapport de l'étape 3b), bornés large."""
+    import time
+    rows = _rows(2000)
+    t = time.perf_counter()
+    fdb.realign(conn, rows)
+    first = time.perf_counter() - t
+    t = time.perf_counter()
+    fdb.realign(conn, rows)
+    again = time.perf_counter() - t
+    assert len(fdb.list_tree(conn)) == 2001
+    print(f"realign 2000 folders: first {first:.3f}s, unchanged {again:.3f}s")
+    assert first < 10 and again < 5

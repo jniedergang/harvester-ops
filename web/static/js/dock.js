@@ -341,7 +341,9 @@ const Dock = (() => {
             ? `<button class="btn-mini" data-cancel="${escapeHtml(a.id)}" title="${tr('dock.cancelTip', 'Stop this action')}">${tr('dock.cancel', 'Cancel')}</button>`
             : `<span class="ended-badge" title="${tr('dock.endedTip', 'ended')} ${endedHuman}">${endedHuman}</span>`}
           ${!isRunning && a.undo && a.undo.path
-            ? `<button class="btn-mini dock-undo" data-undo="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`
+            ? (canUndo()
+              ? `<button class="btn-mini dock-undo" data-undo="${escapeHtml(a.id)}" title="${escapeHtml(tr('dock.undoTip', 'Put back the state from before this action'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`
+              : `<button class="btn-mini dock-undo" disabled title="${escapeHtml(tr('fld.operatorOnly', 'Read only: filing needs the operator role.'))}">${escapeHtml(tr('dock.undo', 'Undo'))}</button>`)
             : ''}
         </div>
         <pre class="dock-action-log" id="dock-log-${escapeHtml(a.id)}"></pre>`;
@@ -431,6 +433,13 @@ const Dock = (() => {
 
   // i18n avec repli : le dock se re-rend toutes les 3s en dehors du scan
   // data-i18n, donc les libellés passent par t() à chaque rendu.
+  // 2.0.0 : annuler un geste de dossiers demande le rôle opérateur (le
+  // serveur décide ; le bouton d'un lecteur est grisé avec la raison)
+  function canUndo() {
+    const r = window.App && App.role ? App.role() : null;
+    return r === 'operator' || r === 'admin' || r == null;
+  }
+
   function tr(key, fallback, vars) {
     return (window.i18n && typeof i18n.t === 'function') ? i18n.t(key, vars) : fallback;
   }

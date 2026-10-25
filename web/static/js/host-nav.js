@@ -223,9 +223,13 @@
     if (!words.length) return [];
     const out = [];
     const fleet = root.AllVMs && AllVMs.cached ? AllVMs.cached() : null;
-    ((fleet && fleet.vms) || []).forEach((v) => out.push({ kind: 'harvester', host: v.cluster, ns: v.namespace, name: v.name }));
+    // 2.0.0 : la vue des VMs lit aussi les VMs KVM (`kind`, `source`)
+    const seen = new Set();
+    const push = (v) => { const k = `${v.kind}/${v.host}/${v.name}`; if (!seen.has(k)) { seen.add(k); out.push(v); } };
+    ((fleet && fleet.vms) || []).forEach((v) => push({ kind: v.kind || 'harvester', host: v.source || v.cluster,
+                                                       ns: v.namespace || null, name: v.name }));
     const kvm = root.KVM && KVM.cachedVms ? KVM.cachedVms() : [];
-    (kvm || []).forEach((v) => out.push({ kind: 'kvm', host: v.host, ns: null, name: v.name }));
+    (kvm || []).forEach((v) => push({ kind: 'kvm', host: v.host, ns: null, name: v.name }));
     return out.filter((v) => words.every((w) => `${v.name} ${v.host}`.toLowerCase().includes(w)))
       .sort((a, b) => a.name.localeCompare(b.name) || a.host.localeCompare(b.host))
       .slice(0, VM_RESULTS_MAX);

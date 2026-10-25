@@ -241,7 +241,7 @@ def test_add_a_host_offers_the_two_families(menu):
 
 def test_search_offers_a_vm_already_read_and_goes_to_it(menu):
     page, _, _ = menu
-    page.route("**/api/vms-all", lambda r, q: r.fulfill(status=200, content_type="application/json", body=json.dumps({
+    page.route(re.compile(r".*/api/vms-all(\?.*)?$"), lambda r, q: r.fulfill(status=200, content_type="application/json", body=json.dumps({
         "clusters": [{"cluster": REAL, "state": "ok", "count": 1}],
         "vms": [{"cluster": REAL, "namespace": "prod", "name": "erp-db-01", "phase": "Running"}]})))
     page.goto(flask_server_url(page) + "#vms")

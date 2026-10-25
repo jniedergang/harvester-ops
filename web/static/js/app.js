@@ -25,6 +25,10 @@ const App = (() => {
   let navKvm = null;
   let navKvmTab = null;
   let navHostsKind = null;
+  // 2.0.0 (tâche 15) : périmètre de la vue des VMs ({ id, kind, host }) et
+  // dossier de la route (#folders/<id>, #containers/folder/<id>, #hosts/folder/<id>)
+  let navVms = null;
+  let navFolder = null;
   const KVM_SCREENS = ['kvmhosts', 'kvmvms', 'kvmstorage', 'kvmnetworks', 'kvmparams', 'kvmdr'];
 
   function setTab(name) {
@@ -52,12 +56,15 @@ const App = (() => {
     if (name === 'forkliftglobal') { if (window.ForkliftGlobal) ForkliftGlobal.start($('#forklift-global-host')); }
     else if (window.ForkliftGlobal) ForkliftGlobal.stop();
     // v1.85.0 : toutes les VMs, même cycle (rafraîchie seulement à l'écran)
-    if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host')); }
+    if (name === 'allvms') { if (window.AllVMs) AllVMs.start($('#all-vms-host'), navVms); }
     else if (window.AllVMs) AllVMs.stop();
+    // 2.0.0 : la vue « Dossiers », trois groupes (VMs, conteneurs, hôtes)
+    if (name === 'folders') { if (window.FoldersView) FoldersView.start($('#folders-view-host'), navFolder); }
+    else if (window.FoldersView) FoldersView.stop();
     // v1.91.0 : les charges de conteneurs, même cycle que les VMs
     if (name === 'containers') { if (window.Containers) Containers.current.start($('#containers-host')); }
     else if (window.Containers) Containers.current.stop();
-    if (name === 'allcontainers') { if (window.Containers) Containers.all.start($('#all-containers-host')); }
+    if (name === 'allcontainers') { if (window.Containers) Containers.all.start($('#all-containers-host'), { folder: navFolder }); }
     else if (window.Containers) Containers.all.stop();
     // v1.93.0 : Shared resources > GPU, l'inventaire de la flotte
     if (name === 'gpus') { if (window.Gpus) Gpus.start($('#gpus-host')); }
@@ -80,7 +87,7 @@ const App = (() => {
     else if (window.KVM) KVM.stop();
     if (name === 'kvmparams' && window.HostPage) HostPage.renderKvmParams(navKvm, navKvmTab || 'system');
     // 2.0.0 : index des hôtes (#hosts, #hosts/<famille>)
-    if (name === 'hosts') { if (window.HostsIndex) HostsIndex.start($('#hosts-index-host'), { kind: navHostsKind }); }
+    if (name === 'hosts') { if (window.HostsIndex) HostsIndex.start($('#hosts-index-host'), { kind: navHostsKind, folder: navFolder }); }
     else if (window.HostsIndex) HostsIndex.stop();
     // v1.57.0 : Storage, Network, Add-ons, Security montent leur onglet
     // (une vue de blocs ou une liste) ; les autres pages coupent les listes.
@@ -305,6 +312,8 @@ const App = (() => {
       jobs.push(ForkliftGlobal.start($('#forklift-global-host')));
     }
     if (active === 'allvms' && window.AllVMs) jobs.push(AllVMs.load());
+    // 2.0.0 : la vue « Dossiers » (flotte entière) relit ses trois groupes
+    if (active === 'folders' && window.FoldersView) FoldersView.start(document.querySelector('#folders-view-host'), FoldersView.current());
     if (active === 'containers' && window.Containers) jobs.push(Containers.current.load());
     if (active === 'allcontainers' && window.Containers) jobs.push(Containers.all.load());
     if (active === 'gpus' && window.Gpus) jobs.push(Gpus.load());
@@ -2065,6 +2074,8 @@ const App = (() => {
     navKvm = t.kvm || null;
     navKvmTab = t.kvmTab || null;
     navHostsKind = t.hostsKind || null;
+    navVms = t.vms || null;
+    navFolder = t.folderId || null;
     // 2.0.0 : #activity/host/<famille>/<nom> pose le filtre « cluster » de l'Activité
     if (t.tab === 'activity' && t.activityHost) {
       activityFilters.cluster = t.activityHost;
@@ -2123,6 +2134,9 @@ const App = (() => {
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
       kvm, kvmTab: kvm ? navKvmTab : null,
       hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,
+      vms: tab === 'allvms' && window.AllVMs ? AllVMs.scope() : null,
+      folderId: tab === 'hosts' && window.HostsIndex && HostsIndex.folder ? (HostsIndex.folder() || null)
+        : (['folders', 'allcontainers'].includes(tab) ? navFolder : null),
       activityHost: tab === 'activity' ? (activityFilters.cluster || null) : null,
       activityIsCluster: tab === 'activity' && listClusters().includes(activityFilters.cluster),
     };

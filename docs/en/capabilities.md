@@ -292,6 +292,64 @@ diskless test domain filed while shut off and while running, the folder
 kept through a restart and by a clone, then removed; the 15 other domains
 byte for byte unchanged.
 
+### Virtual machines view, folders and the Folders view (2.0.0)
+
+**Virtual machines** (`#vms`) lists every VM of the fleet, Harvester and
+KVM, from `/api/vms-all?kinds=harvester,kvm`: host, family badge,
+namespace, state, CPU, memory, IP, node and folder, with a **console**
+badge when only the console knows the filing (the person may not write the
+object) and a **DR** badge linking to the replication contract that holds
+the VM. Source chips, state, namespace and text filters and the column sort
+are kept from 1.85. The row menu follows the family: the Harvester VM menu,
+or for a KVM VM the console, snapshots, clone, delete and **Open on its
+host** (start and stop are on the host page). Start, stop, restart, force
+stop and migrate of a selection apply to its Harvester VMs.
+
+On the left, a panel with two modes, like vCenter. **Folders**: All VMs,
+Unfiled (both cannot be changed) and the shared tree with, per folder, the
+VMs you see inside (subfolders included; a VM hidden by your rights is
+never counted). A folder created again by a fleet read from the objects
+that name it carries a **from objects** badge. **+ Folder**, **Rename** and
+**Delete** edit in place (Enter confirms, Escape cancels, no browser
+prompt). Deleting an empty folder asks in the panel; a non-empty one opens
+**Move the content of...**: pick a target folder or Unfiled, its objects and
+subfolders move there, then the folder is deleted, in one action that Undo
+reverses. **Hosts**: VMs grouped by family then by host, read-only;
+`#vms/host/<family>/<host>` opens it on one host. `#vms/host/kvm` keeps the
+view of all KVM VMs with their gestures.
+
+To file: drag one row, or a selection, onto a folder (Unfiled takes them
+out), or use **Move to folder** on a row or on the selection, with a folder
+search. The window shows the server's checks object by object before its
+button: written on the object, kept by the console only, or will fail (the
+reason is said); objects that would fail are left out. Filing a host (from
+the hosts index) offers **Also file its N VMs**, unchecked: a host never
+files its VMs by itself. Each gesture is a tracked action; the dock offers
+**Undo** once it ends. A viewer sees the folders and their content, every
+filing control is greyed with the reason, and rows are not draggable.
+
+**Folders** (`#folders`, `#folders/<id>`, first entry of the side menu)
+shows a folder's content in three groups (VMs, containers, hosts), each
+opening its own view filtered on the folder: `#vms/folder/<id>`,
+`#containers/folder/<id>` and `#hosts/folder/<id>`, subfolders included.
+Containers and the hosts index have a Folder column and **Move to folder**
+(container menu for Deployments, StatefulSets, DaemonSets and CronJobs; a
+button per host).
+
+Checked for real on harv1 and node2 with a console of the development tree
+(own port, copied configuration, own state, temporary admin, operator and
+viewer accounts): a stopped test VM filed by drag and drop, a test KVM
+domain and a Deployment by the menu, then `/Essais` renamed `/Essais2`
+(three objects rewritten), undone from the dock, and emptied into Unfiled
+(its subfolder moved to the root) then deleted, that emptying undone (the
+folder created again); an annotation set with kubectl behind the console's
+back put back exactly by Undo; a host declared by the console and a
+config.yaml cluster (console only) filed and put back; a viewer with every
+control greyed and a 403 on a direct call. Each write read back with
+kubectl and virsh; the VM's generation never changed, the Deployment's rose
+by one per annotation change (Kubernetes behaviour), nothing else changed;
+the other 15 domains of node2 byte for byte the same.
+
 ### Folder routes and checks before a gesture (2.0.0)
 
 The console launches `harvester-folders.py` as a tracked action, with the
@@ -307,7 +365,7 @@ role, reading is for everyone.
 | `POST /api/folders` | create (`parent_id`, `name`) |
 | `PATCH /api/folders/<id>` | rename (`name`) or move (`parent_id`, `null` for the root), one change at a time; its objects are rewritten in the same action. Folders are sorted by name: `position` is refused |
 | `DELETE /api/folders/<id>` | delete an empty folder; a non-empty one answers 409 with what the person sees (`count_visible`, `subfolders`, and `hidden` without a number) |
-| `POST /api/folders/<id>/empty-into` | `target_id` (a folder or `unfiled`): move the content, then delete, in one action |
+| `POST /api/folders/<id>/empty-into` | `target_id` (a folder or `unfiled`): move the content, then delete, in one action; a subfolder whose name is already taken in the target answers 409 before anything moves |
 | `POST /api/folders/assign` | `objects` (keys; a KVM VM also gives its `host`) and `to` (a folder id or `unfiled`) |
 | `POST /api/folders/check` | the checks shown before a move, object by object, nothing written |
 | `POST /api/folders/actions/<id>/undo` | undo a finished folder action |
@@ -334,9 +392,11 @@ Fleet reads also give the folder of container workloads (`key`, `folder`,
 `folder_source` on `/api/containers/<cluster>` and `/api/containers-all`
 for Deployments, StatefulSets, DaemonSets and CronJobs) and of hosts
 (`/api/hosts`: the `folder` field of the declaration, else the console's
-filing). A fleet read creates at most 200 folders named by objects: anyone
-who may annotate objects cannot flood the shared tree in one read; the
-others wait for the next reads, and the overflow is logged once.
+filing). A fleet read creates every folder named by objects, without a
+cap; those folders carry the origin `objects`, shown in the panel with a
+badge. Measured: 2,000 such folders created in one read in 0.3 s (0.08 s
+for a read with no change), `GET /api/folders` with 2,044 folders and
+2,000 objects in 0.05 s, the panel drawn in about 0.1 s in the browser.
 
 ### Container workloads (1.91.0)
 

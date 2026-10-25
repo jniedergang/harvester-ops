@@ -244,7 +244,21 @@ de plus pour un `dumpxml` par domaine. Une erreur de virsh autre que « pas de
 métadonnées » fait relire l'hôte domaine par domaine : un échec n'est jamais
 pris pour « pas de dossier ».
 
-Toute modification passe par `bin/harvester-folders.py` (voir Capacités).
+Une lecture de flotte crée chaque dossier nommé par des objets, sans
+plafond. Une lecture
+partie avant la fin d'un renommage ou d'un déplacement (kubectl et SSH
+prennent quelques secondes) rend encore l'ancien chemin : pendant deux
+minutes après le changement, ou tant que des objets restent à réécrire, ce
+chemin est ramené sur le nouveau au lieu de recréer l'ancien dossier.
+
+Toute modification passe par `bin/harvester-folders.py` (voir Capacités) ;
+la console le lance depuis les routes sous `/api/folders`. Dans le
+navigateur, `web/static/js/folders.js` (`window.Folders`) dessine le panneau
+de la vue Machines virtuelles et de la vue Dossiers, et les fenêtres
+« Déplacer vers un dossier » et « Déplacer le contenu » ; `all-vms.js` est la
+vue Machines virtuelles (`#vms`, `#vms/folder/<id>`, `#vms/folder/unfiled`,
+`#vms/host/<famille>/<hôte>`) ; `FoldersView` (dans `folders.js`) est
+`#folders`.
 
 ## Flux d'événements SSE
 

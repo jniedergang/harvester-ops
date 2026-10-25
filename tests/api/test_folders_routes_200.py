@@ -512,17 +512,45 @@ def test_hosts_carry_the_folder_of_their_declaration_or_the_console(pool, world,
         ("/Prod", "console")
 
 
-def test_a_flood_of_annotated_objects_is_capped_and_logged_once(world, monkeypatch, caplog):
+def test_every_folder_named_by_objects_is_created_without_cap(world, monkeypatch, caplog):
+    """Décision 90 : aucun plafond ni journal de débordement."""
     rows = [{"key": f"harvester/harv1/ns/v{i}", "folder": f"/Flood/F{i}", "_scope": "harvester/harv1"}
             for i in range(700)]
-    monkeypatch.setitem(wapp._folders_overflow_logged, "n", None)
     with caplog.at_level("WARNING"):
-        for _ in range(3):                       # débordement de 501, 301 puis 101 : dit une fois
-            wapp._folders_apply([dict(r) for r in rows], [])
-    assert sum("not created" in r.message for r in caplog.records) == 1
+        wapp._folders_apply([dict(r) for r in rows], [])
+    assert not [r for r in caplog.records if "folders" in r.message]
     conn = fdb.connect(world["db"])
     try:
         made = [f for f in fdb.list_tree(conn) if f["origin"] == "objects"]
     finally:
         conn.close()
-    assert len(made) == 600                      # trois lectures, 200 chacune au plus
+    assert len(made) == 701
+
+
+def test_empty_into_refuses_a_subfolder_name_already_in_the_target_before_any_action(world, call):
+    conn = fdb.connect(world["db"])
+    fdb.ensure_path(conn, "/ERP", "objects")                  # même nom que /Prod/ERP, à la racine
+    conn.close()
+    r = call("alice", "POST", f"/api/folders/{fid(world, '/Prod')}/empty-into", {"target_id": "unfiled"})
+    assert r.status_code == 409 and r.get_json()["conflicts"] == ["ERP"]
+    assert "already exists in the root" in r.get_json()["error"] and _NoThread.started == []
+
+
+def test_tree_of_2000_folders_with_2000_objects_reads_fast(world, call, monkeypatch):
+    """Décision 90 : une grande arborescence recréée depuis les objets reste
+    rapide à lire (temps mesuré, rapport de l'étape 3b)."""
+    import time
+    conn = fdb.connect(world["db"])
+    keys = [f"harvester/harv1/ns/vm{i}" for i in range(2000)]
+    fdb.realign(conn, [{"key": k, "folder": f"/Big/G{i % 40}/F{i}", "scope": "harvester/harv1"}
+                       for i, k in enumerate(keys)])
+    conn.close()
+    seen = {"api_vms_all": {"vms": [{"key": k} for k in keys]}}
+    monkeypatch.setattr(wapp, "_peek_query", lambda ep, q: seen.get(ep))
+    t = time.perf_counter()
+    r = call("curieux", "GET", "/api/folders")
+    took = time.perf_counter() - t
+    tree = {f["path"]: f for f in r.get_json()["tree"]}
+    assert len(tree) >= 2041 and tree["/Big"]["counts"]["vms"] == 2000 and tree["/Big/G0"]["counts"]["vms"] == 50
+    print(f"GET /api/folders, {len(tree)} folders, 2000 objects: {took:.3f}s")
+    assert took < 5

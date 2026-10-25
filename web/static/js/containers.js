@@ -59,6 +59,7 @@ const Containers = (() => {
     cluster: (w) => w.cluster, namespace: (w) => w.namespace, name: (w) => w.name,
     kind: (w) => KINDS.indexOf(w.kind), ready: readyKey, state: (w) => STATES.indexOf(w.state),
     gpus: (w) => w.gpus || 0, age: createdKey, images: (w) => (w.images || []).join(' '),
+    folder: (w) => w.folder || '\uffff',
   };
 
   // -- le menu d'une ligne (même allure que celui des VMs) ----------------------
@@ -92,6 +93,9 @@ const Containers = (() => {
         ${item('download', 'download', tr('cw.menu.download'), tr('cw.menu.downloadTip'))}
         ${item('logs', 'logs', tr('cw.menu.logs'), noPod ? tr('cw.menu.logsNone') : tr('cw.menu.logsTip'), noPod)}
       </div>
+      ${FILEABLE.includes(w.kind) && window.Folders ? `<div class="vma-group">
+        ${item('folder', 'folder', tr('fld.move'), Folders.canOperate() ? tr('fld.moveOneTip') : tr('fld.operatorOnly'), !Folders.canOperate())}
+      </div>` : ''}
       <div class="vma-group">
         ${item('scale', 'moveVertical', tr('cw.menu.scale'), canScale ? tr('cw.menu.scaleTip') : tr('cw.menu.scaleNo', { kind: w.kind }), !canScale)}
         ${item('restart', 'restart', tr('cw.menu.restart'), canRestart ? tr('cw.menu.restartTip') : tr('cw.menu.restartNo', { kind: w.kind }), !canRestart)}
@@ -135,6 +139,10 @@ const Containers = (() => {
       else if (act === 'scale') scaleDialog(w);
       else if (act === 'restart') restartDialog(w);
       else if (act === 'delete') deleteDialog(w);
+      else if (act === 'folder' && window.Folders) {
+        Folders.openMove([{ key: w.key, label: `${w.name} (${w.kind} · ${w.cluster}/${w.namespace})` }],
+          { onDone: () => refreshViews() });
+      }
     });
   }
 
@@ -142,6 +150,8 @@ const Containers = (() => {
   // Le serveur lance bin/harvester-containers.py ; on suit l'action (dock,
   // Activity) et on relit les listes à la fin.
   const SCALABLE = ['Deployment', 'StatefulSet', 'ReplicaSet'];
+  // 2.0.0 : charges rangeables dans un dossier (décision 11)
+  const FILEABLE = ['Deployment', 'StatefulSet', 'DaemonSet', 'CronJob'];
   const RESTARTABLE = ['Deployment', 'StatefulSet', 'DaemonSet'];
   const NAME_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
   const QTY_MEM_RE = /^[0-9]+(\.[0-9]+)?([kMGTPE]i?)?$/;
@@ -450,6 +460,7 @@ const Containers = (() => {
     let loading = false;
     let builtLang = '';
     let shownCluster = null;
+    let scopeFolder = null;          // 2.0.0 : dossier de l'adresse (#containers/folder/<id>)
     const expanded = new Set();
     const prefs = { clusters: [], state: '', kind: '', ns: '', text: '', sort: 'name', dir: 'asc' };
 
@@ -465,7 +476,11 @@ const Containers = (() => {
     function visible() {
       if (!data) return [];
       const words = prefs.text.toLowerCase().split(/\s+/).filter(Boolean);
+      const fpath = scopeFolder == null ? null : (scopeFolder === 'unfiled' ? 'unfiled'
+        : (window.Folders ? Folders.pathOf(scopeFolder) : null) || '\u0000');
       const rows = data.workloads.filter((w) => {
+        if (fpath === 'unfiled' && (!w.key || w.folder)) return false;
+        if (fpath && fpath !== 'unfiled' && !(window.Folders && Folders.within(w.folder, fpath))) return false;
         if (ALL && prefs.clusters.length && !prefs.clusters.includes(w.cluster)) return false;
         if (prefs.state && w.state !== prefs.state) return false;
         if (prefs.kind && w.kind !== prefs.kind) return false;
@@ -486,7 +501,7 @@ const Containers = (() => {
       });
     }
 
-    const columns = () => (ALL ? 11 : 10);
+    const columns = () => (ALL ? 12 : 11);
 
     function skeleton() {
       const th = (k, label, tip, cls = '') => `<th class="sortable tip ${cls}" data-ct-sort="${k}" data-tip="${esc(tip)}"
@@ -522,6 +537,7 @@ const Containers = (() => {
                   data-tip="${esc(tr('cw.create.btnTip'))}">${icon('add')} ${esc(tr('cw.create.btn'))}</button>
         </div>
         <p class="hint warn ct-notice" data-ct="notice" hidden></p>
+        <p class="hint ct-folder-scope" data-ct="scope" hidden></p>
         <table class="data-table ns-vm-table avm-table ct-table">
           <thead><tr>
             <th class="check-col" aria-label="${esc(tr('cw.col.expand'))}"></th>
@@ -534,6 +550,7 @@ const Containers = (() => {
             ${th('images', tr('cw.col.images'), tr('cw.tip.sortImages'))}
             ${th('gpus', tr('cw.col.gpus'), tr('cw.tip.sortGpus'), 'num')}
             ${th('age', tr('cw.col.age'), tr('cw.tip.sortAge'), 'num')}
+            ${th('folder', tr('vmf.col.folder'), tr('vmf.tip.sortFolder'))}
             <th>${esc(tr('col.actions'))}</th>
           </tr></thead>
           <tbody></tbody>
@@ -649,14 +666,34 @@ const Containers = (() => {
         <td class="ct-images">${imgs.length ? `<code>${esc(imgs[0])}</code>${imgs.length > 1 ? ` <span class="res-dim tip" data-tip="${esc(imgs.slice(1).join(', '))}">+${imgs.length - 1}</span>` : ''}` : '<span class="res-dim">–</span>'}</td>
         <td class="num">${w.gpus ? `<span class="tip" data-tip="${esc(tr('cw.tip.gpus'))}">${esc(w.gpus)}</span>` : '<span class="res-dim">–</span>'}</td>
         <td class="num">${esc(age(w.created))}</td>
+        <td class="vmf-folder">${folderCell(w)}</td>
         <td class="vm-actions-cell">
           ${b('logs', icon('logs'), (w.pods || []).length ? tr('cw.menu.logsTip') : tr('cw.menu.logsNone'))}
           ${b('more', icon('more'), tr('cw.moreTip'))}
         </td></tr>${open ? podsRow(w) : ''}`;
     }
 
+    function folderCell(w) {
+      if (!w.key) return '<span class="res-dim">–</span>';
+      if (!w.folder) return `<span class="res-dim">${esc(tr('fld.unfiledShort'))}</span>`;
+      const consoleOnly = w.folder_source === 'console'
+        ? ` <span class="badge warn tip" data-tip="${esc(tr('vmf.consoleOnlyTip', { host: w.cluster }))}" title="${esc(tr('vmf.consoleOnlyTip', { host: w.cluster }))}">${esc(tr('vmf.consoleOnly'))}</span>` : '';
+      return esc(w.folder) + consoleOnly;
+    }
+
+    function renderScope() {
+      const box = host.querySelector('[data-ct="scope"]');
+      if (!box) return;
+      box.hidden = scopeFolder == null;
+      if (scopeFolder == null) return;
+      const label = scopeFolder === 'unfiled' ? tr('fld.unfiled') : ((window.Folders && Folders.pathOf(scopeFolder)) || tr('vmf.folderGone'));
+      box.innerHTML = `${icon('folder', 13)} ${esc(tr('cw.folderScope', { path: label }))}
+        <a href="#containers" class="tip" title="${esc(tr('cw.folderScopeAllTip'))}">${esc(tr('cw.folderScopeAll'))}</a>`;
+    }
+
     function render() {
       if (!host) return;
+      renderScope();
       renderClusters();
       renderNotice();
       renderNamespaces();
@@ -731,8 +768,10 @@ const Containers = (() => {
       render();
     }
 
-    function start(el) {
+    function start(el, opts) {
       if (!el) return;
+      scopeFolder = opts && opts.folder != null ? String(opts.folder) : null;
+      if (window.Folders && scopeFolder != null) Folders.load();
       const lang = window.i18n ? i18n.currentLang : '';
       if (host !== el || builtLang !== lang) {
         host = el;
@@ -767,7 +806,11 @@ const Containers = (() => {
         .map((w) => w.namespace))];
     }
 
-    const view = { start, stop, load, focus, namespaces, _visible: visible };
+    // 2.0.0 : l'arborescence des dossiers relue (chemin du filtre) ou changée
+    document.addEventListener('hops:folders', () => { if (host && timer) render(); });
+    document.addEventListener('hops:folders-changed', () => { if (host && timer) load({ fresh: true }); });
+
+    const view = { start, stop, load, focus, namespaces, _visible: visible, folder: () => scopeFolder };
     views.push(view);
     return view;
   }

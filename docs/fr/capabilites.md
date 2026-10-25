@@ -313,6 +313,70 @@ avec un kubeconfig d'opérateur ; sur node2, un domaine de test sans disque
 rangé arrêté puis en marche, le dossier gardé après un redémarrage et par un
 clone, puis retiré ; les 15 autres domaines identiques à l'octet près.
 
+### Vue Machines virtuelles, dossiers et vue Dossiers (2.0.0)
+
+**Machines virtuelles** (`#vms`) liste toutes les VMs de la flotte,
+Harvester et KVM, depuis `/api/vms-all?kinds=harvester,kvm` : hôte,
+pastille de famille, espace de noms, état, CPU, mémoire, IP, nœud et
+dossier, avec une pastille **console** quand seule la console connaît le
+rangement (la personne ne peut pas écrire l'objet) et une pastille **DR**
+vers le contrat de réplication qui protège la VM. Puces de sources, filtres
+d'état, d'espace de noms et de texte et tri par colonne sont repris de la
+1.85. Le menu d'une ligne suit sa famille : celui des VMs Harvester, ou pour
+une VM KVM la console, les instantanés, le clonage, la suppression et
+**Ouvrir sur son hôte** (démarrer et arrêter sont sur la page de l'hôte).
+Démarrer, arrêter, redémarrer, arrêt forcé et migrer une sélection
+s'appliquent à ses VMs Harvester.
+
+À gauche, un panneau à deux modes, comme vCenter. **Dossiers** : Toutes les
+VMs, Non rangées (non modifiables) et l'arborescence partagée avec, pour
+chaque dossier, les VMs que vous voyez dedans (sous-dossiers compris ; une
+VM cachée par vos droits n'est jamais comptée). Un dossier recréé par une
+lecture de flotte depuis les objets qui le nomment porte la pastille
+**depuis les objets**. **+ Dossier**, **Renommer** et **Supprimer** se font
+en saisie sur place (Entrée valide, Échap annule, aucune fenêtre du
+navigateur). Supprimer un dossier vide se confirme dans le panneau ; un
+dossier non vide ouvre **Déplacer le contenu de...** : choisir un dossier
+cible ou Non rangées, ses objets et sous-dossiers y vont, puis le dossier
+est supprimé, en une action qu'Annuler défait. **Hôtes** : les VMs
+regroupées par famille puis par hôte, en lecture seule ;
+`#vms/host/<famille>/<hôte>` l'ouvre sur un hôte. `#vms/host/kvm` garde la
+vue de toutes les VMs KVM et leurs gestes.
+
+Ranger : glisser une ligne, ou une sélection, sur un dossier (Non rangées
+les en sort), ou **Déplacer vers un dossier** sur une ligne ou la
+sélection, avec recherche de dossier. La fenêtre montre les contrôles du
+serveur objet par objet avant son bouton : écrit sur l'objet, gardé par la
+console seulement, ou échouera (raison dite) ; les objets qui échoueraient
+sont laissés de côté. Ranger un hôte (depuis l'index des hôtes) propose
+**Ranger aussi ses N VMs**, décoché : un hôte ne range jamais ses VMs de
+lui-même. Chaque geste est une action suivie ; le dock propose **Annuler**
+à sa fin. Un lecteur voit les dossiers et leur contenu, chaque contrôle de
+rangement est grisé avec la raison, et les lignes ne se glissent pas.
+
+**Dossiers** (`#folders`, `#folders/<id>`, première entrée du menu latéral)
+montre le contenu d'un dossier en trois groupes (VMs, conteneurs, hôtes),
+chacun ouvrant sa vue filtrée sur le dossier : `#vms/folder/<id>`,
+`#containers/folder/<id>` et `#hosts/folder/<id>`, sous-dossiers compris.
+Conteneurs et l'index des hôtes ont une colonne Dossier et **Déplacer vers
+un dossier** (menu d'une charge pour les Deployments, StatefulSets,
+DaemonSets et CronJobs ; un bouton par hôte).
+
+Vérifié en réel sur harv1 et node2 avec une console de l'arbre de
+développement (port propre, configuration copiée, état à part, comptes
+admin, opérateur et lecteur temporaires) : une VM de test arrêtée rangée par
+glisser-déposer, un domaine KVM de test et un Deployment par le menu, puis
+`/Essais` renommé `/Essais2` (trois objets réécrits), annulé depuis le dock,
+et vidé vers Non rangées (son sous-dossier remonté à la racine) puis
+supprimé, ce vidage annulé (dossier recréé) ; une annotation posée avec
+kubectl dans le dos de la console remise exactement par Annuler ; un hôte
+déclaré par la console et un cluster de config.yaml (console seulement)
+rangés puis remis ; un lecteur avec chaque contrôle grisé et un 403 sur un
+appel direct. Chaque écriture relue avec kubectl et virsh ; la génération de
+la VM n'a jamais changé, celle du Deployment a monté de un par changement
+d'annotation (comportement de Kubernetes), rien d'autre n'a changé ; les 15
+autres domaines de node2 identiques à l'octet près.
+
 ### Routes des dossiers et contrôles avant geste (2.0.0)
 
 La console lance `harvester-folders.py` en action suivie, avec le rôle de
@@ -328,7 +392,7 @@ opérateur, la lecture est ouverte à tous.
 | `POST /api/folders` | créer (`parent_id`, `name`) |
 | `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé |
 | `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre) |
-| `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action |
+| `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action ; un sous-dossier dont le nom est déjà pris dans la cible répond 409 avant que rien ne bouge |
 | `POST /api/folders/assign` | `objects` (clés ; une VM KVM donne aussi son `host`) et `to` (identifiant de dossier ou `unfiled`) |
 | `POST /api/folders/check` | les contrôles montrés avant un déplacement, objet par objet, rien n'est écrit |
 | `POST /api/folders/actions/<id>/undo` | annuler une action de dossiers terminée |
@@ -356,10 +420,12 @@ Les lectures de flotte donnent aussi le dossier des charges de conteneurs
 (`key`, `folder`, `folder_source` sur `/api/containers/<cluster>` et
 `/api/containers-all` pour les Deployments, StatefulSets, DaemonSets et
 CronJobs) et des hôtes (`/api/hosts` : le champ `folder` de la déclaration,
-sinon le rangement de la console). Une lecture de flotte crée au plus 200
-dossiers nommés par des objets : qui peut annoter des objets ne remplit pas
-l'arborescence partagée en une lecture ; les autres attendent les lectures
-suivantes, et le débordement est journalisé une fois.
+sinon le rangement de la console). Une lecture de flotte crée chaque
+dossier nommé par des objets, sans plafond ; ces dossiers portent l'origine
+`objects`, montrée par une pastille dans le panneau. Mesuré : 2 000 de ces
+dossiers créés en une lecture en 0,3 s (0,08 s pour une lecture sans
+changement), `GET /api/folders` avec 2 044 dossiers et 2 000 objets en
+0,05 s, le panneau dessiné en 0,1 s environ dans le navigateur.
 
 ### Charges de conteneurs (1.91.0)
 

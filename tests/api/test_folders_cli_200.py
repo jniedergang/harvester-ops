@@ -550,12 +550,15 @@ def tree_paths(env):
         conn.close()
 
 
-def read_fleet(env, values):
-    """Lecture de flotte de la console (realign) : {nom de VM: annotation lue}."""
+def read_fleet(env, values, later=0):
+    """Lecture de flotte de la console (realign) : {nom de VM: annotation lue},
+    `later` secondes après maintenant."""
+    import time as _t
     conn = fdb.connect(env["db"])
     try:
+        now = _t.strftime("%Y-%m-%dT%H:%M:%SZ", _t.gmtime(_t.time() + later)) if later else None
         return fdb.realign(conn, [{"key": f"harvester/harv1/nav/{n}", "folder": v, "scope": "harvester/harv1"}
-                                  for n, v in values.items()])
+                                  for n, v in values.items()], now=now)
     finally:
         conn.close()
 
@@ -578,8 +581,12 @@ def test_a_fleet_read_in_the_middle_of_a_rename_recreates_nothing(env, monkeypat
     assert seen == [want]
     assert "/Prod/ERP" not in tree_paths(env)
     assert members(env) == want
-    # rien en cours : un objet qui porte encore /Prod/ERP le recrée (origine objects)
-    assert read_fleet(env, {"a": "/Prod/ERP"}) == {"harvester/harv1/nav/a": ("/Prod/ERP", "vm")}
+    # lecture partie avant la fin (vue réelle, étape 3b) : encore ramenée sur le nouveau chemin
+    assert read_fleet(env, {"a": "/Prod/ERP"}, later=60) == {"harvester/harv1/nav/a": ("/Prod/Finance", "vm")}
+    assert "/Prod/ERP" not in tree_paths(env)
+    # passé le délai, rien en cours : un objet qui porte encore /Prod/ERP le recrée (origine objects)
+    assert read_fleet(env, {"a": "/Prod/ERP"}, later=fdb.RENAME_GRACE_S + 10) == \
+        {"harvester/harv1/nav/a": ("/Prod/ERP", "vm")}
     assert "/Prod/ERP" in tree_paths(env)
 
 

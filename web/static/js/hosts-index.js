@@ -105,7 +105,10 @@
     if (!el) return Promise.resolve();
     const o = opts || {};
     cur = { el, data: null, error: '', pending: null, msgs: new Map(),
+            // 2.0.0 : dossier de l'adresse (#hosts/folder/<id>), sous-dossiers compris
+            scope: o.folder != null ? String(o.folder) : null,
             prefs: { kind: KINDS.includes(o.kind) ? o.kind : '', state: '', label: '', version: '', folder: '', sort: 'name', dir: 1 } };
+    if (cur.scope != null && root.Folders) Folders.load();
     shell();
     // la liste du menu est déjà lue : l'afficher tout de suite, puis relire
     const known = root.HostNav && HostNav._data ? HostNav._data() : null;
@@ -117,6 +120,16 @@
 
   /** Famille filtrée (l'adresse #hosts/<famille> la suit). */
   const kind = () => (cur ? cur.prefs.kind : '');
+  /** Dossier de l'adresse (#hosts/folder/<id>), ou null. */
+  const folder = () => (cur ? cur.scope : null);
+
+  /** Hôtes du dossier de l'adresse (null : tous). */
+  function inScope(hosts) {
+    if (!cur || cur.scope == null || !root.Folders) return hosts;
+    if (cur.scope === 'unfiled') return hosts.filter((h) => !h.folder);
+    const path = Folders.pathOf(cur.scope);
+    return path ? hosts.filter((h) => Folders.within(h.folder, path)) : [];
+  }
 
   function shell() {
     const sel = (f, tip, all) => `<select class="tip" data-hix-filter="${f}" title="${esc(tip)}" data-tip="${esc(tip)}" aria-label="${esc(tip)}"><option value="">${esc(all)}</option></select>`;
@@ -131,6 +144,7 @@
           <button type="button" class="btn btn-sm btn-secondary tip" data-hix="refresh" title="${esc(tr('hix.refreshTip'))}" data-tip="${esc(tr('hix.refreshTip'))}">${icon('refresh')} ${esc(tr('overview.refresh'))}</button>
           <button type="button" class="btn btn-sm btn-primary tip" data-hix="add">${icon('add')} <span></span></button>
         </div>
+        <p class="hint hix-folder-scope" data-hix="scope" hidden></p>
         <div class="res-feedback" data-hix="feedback" role="status" aria-live="polite"></div>
         <div data-hix="body"><p class="form-hint">${esc(tr('common.loading'))}</p></div></div>`;
     const card = cur.el.querySelector('.hix-card');
@@ -186,7 +200,14 @@
         : `<p class="form-hint">${esc(tr('common.loading'))}</p>`;
       return;
     }
-    const hosts = cur.data.hosts || [];
+    const hosts = inScope(cur.data.hosts || []);
+    const scopeBox = cur.el.querySelector('[data-hix="scope"]');
+    scopeBox.hidden = cur.scope == null;
+    if (cur.scope != null) {
+      const label = cur.scope === 'unfiled' ? tr('fld.unfiled') : ((root.Folders && Folders.pathOf(cur.scope)) || tr('vmf.folderGone'));
+      scopeBox.innerHTML = `${icon('folder', 13)} ${esc(tr('hix.folderScope', { path: label }))}
+        <a href="#hosts" title="${esc(tr('hix.folderScopeAllTip'))}">${esc(tr('hix.folderScopeAll'))}</a>`;
+    }
     const f = facets(hosts);
     const p = cur.prefs;
     const sels = (n) => cur.el.querySelector(`[data-hix-filter="${n}"]`);
@@ -234,10 +255,20 @@
         <td>${esc(h.version || '–')}</td>
         <td class="hix-labels">${labels || '<span class="res-dim">–</span>'}</td>
         <td>${typeof h.vm_count === 'number' ? esc(h.vm_count) : '<span class="res-dim">–</span>'}</td>
-        <td>${h.folder ? esc(h.folder) : `<span class="res-dim">${esc(tr('hix.unfiled'))}</span>`}</td>
+        <td>${h.folder ? esc(h.folder) : `<span class="res-dim">${esc(tr('hix.unfiled'))}</span>`}${h.folder_source === 'console'
+          ? ` <span class="badge warn tip" title="${esc(tr('hix.consoleOnlyTip'))}" data-tip="${esc(tr('hix.consoleOnlyTip'))}">${esc(tr('vmf.consoleOnly'))}</span>` : ''}</td>
         <td><button type="button" class="hnav-star${h.favorite ? ' on' : ''}" data-hix="star" data-key="${esc(key)}"
               aria-pressed="${h.favorite ? 'true' : 'false'}" title="${esc(starTip)}" aria-label="${esc(starTip)}">${icon('star', 13)}</button></td>
-        <td class="hix-acts">${acts}<div class="kvm-tile-msg hix-msg" role="status"></div></td></tr>`;
+        <td class="hix-acts">${folderBtn(key)}${acts}<div class="kvm-tile-msg hix-msg" role="status"></div></td></tr>`;
+  }
+
+  /** « Déplacer vers un dossier » d'un hôte (opérateur ; grisé avec la raison). */
+  function folderBtn(key) {
+    if (!root.Folders) return '';
+    const op = can('operator');
+    const tip = op ? tr('hix.moveTip') : tr('fld.operatorOnly');
+    return `<button type="button" class="btn btn-sm btn-secondary tip" data-hix="folder" data-key="${esc(key)}" ${op ? '' : 'disabled'}
+        title="${esc(tip)}" data-tip="${esc(tip)}">${icon('folder', 13)} ${esc(tr('fld.move'))}</button>`;
   }
 
   const findHost = (key) => ((cur && cur.data && cur.data.hosts) || []).find((h) => `${h.kind}/${h.name}` === key);
@@ -296,6 +327,7 @@
     }
     if (act === 'star') { toggleStar(key, b); return; }
     if (!h) return;
+    if (act === 'folder' && root.Folders) { Folders.openHostMove(h, () => reload()); return; }
     if (act === 'test' && root.KVM) { KVM.testHost(h.name, msgOf(key)); return; }
     if (act === 'remove') { cur.pending = key; render(); cur.el.querySelector('[data-hix="remove-no"]')?.focus(); return; }
     if (act === 'remove-no') { cur.pending = null; render(); return; }
@@ -313,6 +345,9 @@
 
   // le rôle arrive après le premier rendu (whoami) : les boutons suivent
   document.addEventListener('hops:role', () => render());
+  // 2.0.0 : l'arborescence relue (chemin du dossier de l'adresse) ou changée
+  document.addEventListener('hops:folders', () => render());
+  document.addEventListener('hops:folders-changed', () => { if (cur) reload(); });
 
-  root.HostsIndex = Object.assign({ start, stop, reload, kind }, pure);
+  root.HostsIndex = Object.assign({ start, stop, reload, kind, folder }, pure);
 })(typeof window !== 'undefined' ? window : globalThis);

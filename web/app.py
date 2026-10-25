@@ -9364,13 +9364,11 @@ def _folders_apply(rows, scopes_ok):
     « console » de celles qui ne portent rien. `scopes_ok` : lectures
     réussies, dont les entrées trop vieilles sont purgées. Une base
     illisible laisse les lignes telles quelles (jamais fatal pour la vue)."""
-    stats = {}
     try:
         conn = _fdb.connect(_folders_db_path())
         try:
             eff = _fdb.realign(conn, [{"key": r["key"], "folder": r["folder"],
-                                       "scope": r.pop("_scope", "")} for r in rows if r.get("key")],
-                               stats=stats)
+                                       "scope": r.pop("_scope", "")} for r in rows if r.get("key")])
             _fdb.purge(conn, scopes=scopes_ok)
         finally:
             conn.close()
@@ -9379,13 +9377,6 @@ def _folders_apply(rows, scopes_ok):
         for r in rows:
             r.pop("_scope", None)
         return
-    if stats.get("overflow") and not _folders_overflow_logged["n"]:
-        # dit une fois, pas à chaque lecture, tant que le débordement dure
-        _folders_overflow_logged["n"] = stats["overflow"]
-        log.warning("folders: %d folder(s) named by objects not created (at most %d per read); "
-                    "they come at the next reads", stats["overflow"], _fdb.MAX_CREATED_PER_READ)
-    elif "overflow" in stats and not stats["overflow"]:
-        _folders_overflow_logged["n"] = None
     for r in rows:
         if r.get("key") in eff:
             r["folder"], r["folder_source"] = eff[r["key"]]
@@ -9776,7 +9767,6 @@ _FOLDER_KEY_RE = {
     "kvm": re.compile(r"^kvm/([0-9a-fA-F-]{36})$"),
     "host": re.compile(r"^host/(harvester|kvm)/([^/]+)$"),
 }
-_folders_overflow_logged = {"n": None}
 # sorte d'une charge dans sa clé (en minuscules) -> sorte Kubernetes
 _WORKLOAD_OF_KEY = {k.lower(): k for k in _fm.WORKLOAD_RESOURCES}
 
@@ -9836,18 +9826,20 @@ def _folder_visible_keys():
 
 
 def _folders_tree_with_counts(conn, visible):
+    """Arborescence et comptes par groupe, sous-dossiers compris : chaque
+    objet visible compte pour son dossier et ses ancêtres (un passage, une
+    grande arborescence reste rapide)."""
     tree = _fdb.list_tree(conn)
-    members = _fdb.memberships(conn)
+    per = {g: {} for g in ("vms", "containers", "hosts")}
+    for k, m in _fdb.memberships(conn).items():
+        g = _fm.group_of(k)
+        seen = visible.get(g)
+        if not m["folder_path"] or seen is None or k not in seen:
+            continue
+        for a in _fm.ancestors(m["folder_path"]):
+            per[g][a] = per[g].get(a, 0) + 1
     for f in tree:
-        counts = {}
-        for group in ("vms", "containers", "hosts"):
-            seen = visible.get(group)
-            if seen is None:
-                counts[group] = None
-                continue
-            counts[group] = sum(1 for k, m in members.items()
-                                if k in seen and m["folder_path"] and _fm.within(m["folder_path"], f["path"]))
-        f["counts"] = counts
+        f["counts"] = {g: (None if visible.get(g) is None else per[g].get(f["path"], 0)) for g in per}
         f.pop("created_by", None)
     return tree
 
@@ -10147,8 +10139,15 @@ def api_folders_empty_into(folder_id):
         if err:
             return err
         to_path, target = t
-        if target is not None and target in _fm.subtree_ids(_fdb.list_tree(conn), folder_id):
+        tree = _fdb.list_tree(conn)
+        if target is not None and target in _fm.subtree_ids(tree, folder_id):
             return jsonify({"error": "the content cannot go into the folder itself or one of its subfolders"}), 400
+        # contrôle avant geste : un sous-dossier qui ferait doublon dans la cible
+        clash = _fm.empty_into_conflicts(tree, folder_id, target)
+        if clash:
+            return jsonify({"error": f"a folder named {clash[0]!r} already exists in {to_path or 'the root'}: "
+                                     "rename or move it first, or choose another target",
+                            "conflicts": clash}), 409
         objects = _members_objects(conn, path)
     finally:
         conn.close()

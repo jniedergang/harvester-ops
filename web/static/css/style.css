@@ -5746,3 +5746,70 @@ body.host-page-kvm #tab-kvmnetworks > h1, body.host-page-kvm #tab-kvmnetworks > 
    Automatisation) gardent leur hauteur dans le rail : sans quoi les lignes
    dessous bougeaient à l'ouverture du menu (clic sur la ligne voisine). */
 body.sidebar-collapsed #host-nav > .hnav-sec { display: block !important; visibility: hidden; }
+
+/* -------------------------------------------------------------------------
+   2.0.0 (tâche 15) : vue des VMs avec le panneau Dossiers / Hôtes, vue
+   « Dossiers », fenêtres de rangement (folders.js, all-vms.js)
+   ------------------------------------------------------------------------- */
+.vmf-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+.vmf-side { position: sticky; top: 12px; }
+.vmf-main { min-width: 0; }
+@media (max-width: 900px) { .vmf-layout { grid-template-columns: 1fr; } .vmf-side { position: static; } }
+.fld-panel { padding: 6px 4px 8px; }
+.fld-modes { margin: 2px 6px 6px; }
+.fld-tree, .fld-tree ul { list-style: none; margin: 0; padding: 0; }
+.fld-tree ul { padding-left: 14px; }
+.fld-node { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 4px; cursor: pointer;
+  color: var(--text); text-decoration: none; border: 1px dashed transparent; user-select: none; min-width: 0; }
+.fld-node:hover { background: var(--bg-elev); }
+.fld-node.active { background: var(--bg-elev); color: var(--accent); font-weight: 600; }
+.fld-node.virtual { color: var(--text-dim); }
+.fld-node.virtual.active { color: var(--accent); }
+.fld-node.drop { border-color: var(--accent); background: var(--selection-bg); }
+.fld-node .fld-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fld-node .fld-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-weight: 400; }
+.fld-origin { font-size: 10px; padding: 0 4px; }
+.fld-input { width: 100%; padding: 3px 6px; font-size: 12px; }
+.fld-tools { display: flex; gap: 4px; padding: 6px 8px 0; margin-top: 6px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.fld-confirm { margin: 6px 8px 0; padding: 8px; border: 1px solid var(--error); border-radius: 6px; font-size: 12px; }
+.fld-confirm .btn-row { margin-top: 6px; display: flex; gap: 6px; }
+.fld-viewer, .fld-empty { margin: 6px 8px 0; font-size: 12px; }
+.fld-msg { margin: 4px 8px 0; font-size: 12px; }
+.fld-win { display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.fld-step { display: flex; flex-direction: column; gap: 6px; }
+.fld-targets { max-height: 170px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 4px; }
+.fld-target { display: flex; align-items: center; gap: 6px; padding: 3px 6px; border-radius: 4px; cursor: pointer; }
+.fld-target:hover { background: var(--bg-elev); }
+.fld-checks { max-height: 210px; overflow: auto; }
+.fld-check-table td { vertical-align: top; }
+.fld-check-table .fld-reason { font-size: 12px; color: var(--text-dim); }
+.fld-summary { margin: 0 0 4px; font-size: 12px; }
+.fld-extra { margin: 0; }
+.fld-toast { position: fixed; right: 18px; bottom: calc(var(--dock-padding, 20px) + 8px); z-index: 2000;
+  background: var(--bg-panel); border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: 6px; padding: 8px 12px; box-shadow: var(--shadow-soft); font-size: 13px; opacity: 0;
+  transform: translateY(6px); transition: opacity .15s, transform .15s; pointer-events: none; max-width: 420px; }
+.fld-toast.show { opacity: 1; transform: none; }
+.fld-toast.bad { border-left-color: var(--error); }
+.vmf-scope-title { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; font-size: 16px; }
+.vmf-family { font-size: 10.5px; }
+.vmf-family-kvm { border-color: var(--accent); }
+.vmf-console { font-size: 10.5px; }
+.vmf-dr { font-size: 10px; padding: 0 4px; margin-left: 4px; text-decoration: none; }
+.avm-table tr[draggable="true"] { cursor: grab; }
+.vmf-viewer { margin-top: 8px; }
+.fview-groups { display: grid; gap: 12px; }
+.fview-group .card-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.fview-group h3 { display: flex; gap: 6px; align-items: center; margin: 0; font-size: 14px; }
+.fview-list { list-style: none; margin: 0; padding: 0; }
+.fview-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.fview-item:last-child { border-bottom: 0; }
+.fview-item .fview-name { font-weight: 500; }
+.fview-item .btn-icon-action { margin-left: auto; }
+.ct-folder-scope, .hix-folder-scope { display: flex; align-items: center; gap: 6px; }
+.dock-undo-failed { border-color: var(--error); }
+.fld-node.fld-family { cursor: default; }
+.fld-node.fld-family:hover { background: none; }
+.fld-win { padding: 10px 14px; }
+.vmf-main .avm-table { min-width: 100%; }
+.vmf-main { overflow-x: auto; }

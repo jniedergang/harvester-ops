@@ -48,7 +48,7 @@
       <div id="host-nav" class="host-nav">
         <a class="tab hnav-entry" data-hnav="root" data-hnav-root="folders" href="#folders"
            data-i18n-title="hnav.foldersTip" title="Your folders: VMs, containers and hosts in one shared tree">
-          <span class="tab-icon" data-icon="bundle"></span>
+          <span class="tab-icon" data-icon="folder"></span>
           <span class="sidebar-label" data-i18n="hnav.folders">Folders</span>
         </a>
         <div class="hnav-search">
@@ -761,9 +761,16 @@
 
     <!-- ALL VMS : v1.85.0, les VMs de tous les clusters -->
     <section id="tab-allvms" class="tab-content">
-      <h1 data-i18n="avm.title">All clusters VMs</h1>
-      <p class="hint" data-i18n="avm.hint">Every VM of every declared cluster, in one list. Click clusters to keep only theirs, filter by state, namespace or text, sort any column; the selection can span clusters. A cluster that is off or refuses the read is shown as such.</p>
+      <h1 data-i18n="vmf.title">Virtual machines</h1>
+      <p class="hint" data-i18n="vmf.hint">Every VM of the fleet, Harvester and KVM, in one list. File them in your folders: drag rows onto a folder, or use Move to folder. The folder is written on the VM (Harvester annotation, libvirt metadata) and the console keeps a copy.</p>
       <div class="avm-host" id="all-vms-host"></div>
+    </section>
+
+    <!-- 2.0.0 : la vue « Dossiers », trois groupes (VMs, conteneurs, hôtes) -->
+    <section id="tab-folders" class="tab-content">
+      <h1 data-i18n="fview.title">Folders</h1>
+      <p class="hint" data-i18n="fview.hint">One shared tree for VMs, containers and hosts. Pick a folder to see what is filed in it, in three groups; each group opens its own view filtered on the folder.</p>
+      <div class="avm-host" id="folders-view-host"></div>
     </section>
 
     <!-- CONTAINERS : v1.91.0, les charges de conteneurs (lecture seule) -->
@@ -1351,6 +1358,7 @@
   <script src="/static/js/forklift-lanes.js"></script>
   <script src="/static/js/forklift.js"></script>
   <script src="/static/js/forklift-global.js"></script>
+  <script src="/static/js/folders.js"></script>
   <script src="/static/js/all-vms.js"></script>
   <script src="/static/js/containers.js"></script>
 <script src="/static/js/versions.js"></script>

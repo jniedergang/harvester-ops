@@ -26,6 +26,7 @@ et le journal ; la console y réaligne le cache pendant ses lectures (décision
 4, exception documentée : pas d'action suivie pour un cache).
 """
 
+import calendar
 import os
 import sqlite3
 import time
@@ -343,23 +344,16 @@ def _age_s(older, newer):
         return float("inf")
 
 
-# Dossiers créés au plus par une lecture de flotte à partir des valeurs
-# portées par les objets : quiconque peut annoter des objets ne remplit pas
-# l'arborescence partagée de la console (au-delà, ces objets attendent).
-MAX_CREATED_PER_READ = 200
-
-
-def realign(conn, rows, now=None, max_create=MAX_CREATED_PER_READ, stats=None):
+def realign(conn, rows, now=None):
     """Réaligne le cache sur une lecture d'objets (folders.reconcile) et
-    crée les dossiers nommés par les objets. Rend {clé: (dossier, source)}.
-    Écrit seulement ce qui a changé, ou un `seen_at` de plus d'une heure.
-    Au plus `max_create` dossiers créés par appel : un objet dont le dossier
-    n'a pas été créé garde son cache tel quel, et `stats` (dict) reçoit
-    `created` et `overflow` (dossiers non créés)."""
+    crée les dossiers nommés par les objets (origine « objects », sans
+    plafond : décision 90 du propriétaire du produit). Rend {clé: (dossier,
+    source)}. Écrit seulement ce qui a changé, ou un `seen_at` de plus d'une
+    heure."""
     now = _iso(now) if now else _now()
     with _write(conn):
         tree = list_tree(conn)
-        renames = active_renames(conn)
+        renames = active_renames(conn, now)
         if renames:
             # renommage en cours : un objet pas encore réécrit ne recrée pas
             # l'ancien dossier, il est montré sous le nouveau
@@ -369,17 +363,6 @@ def realign(conn, rows, now=None, max_create=MAX_CREATED_PER_READ, stats=None):
         cache = memberships(conn, [r["key"] for r in rows if r.get("key")])
         upd, created = fm.reconcile(tree, rows, cache, now)
         idx = fm.index(tree)
-        dropped = set(created[max_create:]) if max_create is not None else set()
-        created = [c for c in created if c not in dropped]
-        if dropped:
-            # objets dont un ancêtre n'est pas créé : rien de changé pour eux
-            for r in rows:
-                if r.get("key") in upd and r.get("folder") and \
-                        any(a in dropped for a in fm.ancestors(r["folder"])):
-                    del upd[r["key"]]
-        if stats is not None:
-            stats["created"] = len(created)
-            stats["overflow"] = len(dropped)
         for path in created:
             parent = idx.get(fm.parent_path(path)) if fm.parent_path(path) else None
             try:
@@ -401,15 +384,25 @@ def realign(conn, rows, now=None, max_create=MAX_CREATED_PER_READ, stats=None):
         return fm.effective(rows, memberships(conn, [r["key"] for r in rows if r.get("key")]))
 
 
-def active_renames(conn):
+# Une lecture de flotte partie avant la fin d'un renommage (kubectl, SSH :
+# quelques secondes) rend encore l'ancien chemin après lui : il est ramené
+# sur le nouveau pendant ce délai, au lieu de recréer l'ancien dossier.
+RENAME_GRACE_S = 120
+
+
+def active_renames(conn, now=None, grace_s=RENAME_GRACE_S):
     """[(ancien chemin, nouveau)] des renommages et déplacements de dossier
     faits dont des lignes d'objets de la même action restent à faire
-    (`pending`, `failed`), dans l'ordre du journal."""
+    (`pending`, `failed`), ou faits depuis moins de `grace_s` secondes
+    (lecture partie avant leur fin), dans l'ordre du journal."""
+    t = time.time() if now is None else (calendar.timegm(time.strptime(now, "%Y-%m-%dT%H:%M:%SZ"))
+                                         if isinstance(now, str) else now.timestamp())
+    since = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t - grace_s))
     return [(r["from_path"], r["to_path"]) for r in conn.execute(
         "SELECT f.from_path, f.to_path FROM moves f WHERE f.object_key LIKE 'folder/%' "
-        "AND f.status = 'done' AND EXISTS (SELECT 1 FROM moves o WHERE o.action_id = f.action_id "
-        "AND o.object_key NOT LIKE 'folder/%' AND o.status IN ('pending', 'failed')) "
-        "ORDER BY f.at, f.rowid")]
+        "AND f.status = 'done' AND f.to_path IS NOT NULL AND (f.at >= ? OR EXISTS (SELECT 1 FROM moves o "
+        "WHERE o.action_id = f.action_id AND o.object_key NOT LIKE 'folder/%' AND o.status IN ('pending', 'failed'))) "
+        "ORDER BY f.at, f.rowid", (since,))]
 
 
 def purge(conn, now=None, days=PURGE_DAYS, scopes=None):

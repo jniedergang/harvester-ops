@@ -97,8 +97,8 @@ def test_every_host_of_both_families_with_its_columns(index):
 PRESETS = [
     ("#hosts/harvester", {"kind": "harvester"}, ["harvester/gpudemo", "harvester/harv-fake", "harvester/harvlab2"]),
     ("#hosts/kvm", {"kind": "kvm"}, ["kvm/ghost", "kvm/node2"]),
-    ("#hosts/folder/prod", {"kind": ""}, ["kvm/ghost", "harvester/gpudemo", "harvester/harv-fake",
-                                          "harvester/harvlab2", "kvm/node2"]),
+    # 2.0.0 (tâche 15) : le dossier de l'adresse filtre ; « prod » n'est pas un dossier connu
+    ("#hosts/folder/prod", {"kind": ""}, []),
 ]
 
 

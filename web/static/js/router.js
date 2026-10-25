@@ -27,7 +27,8 @@
   function resolve(route) {
     if (!route || !route.name) return null;
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
-                                              kvm: null, kvmTab: null, hostsKind: null, activityHost: null }, extra || {});
+                                              kvm: null, kvmTab: null, hostsKind: null, activityHost: null,
+                                              vms: null, folderId: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -61,19 +62,23 @@
           default: return null;
         }
       }
+      // 2.0.0 (tâche 15) : la vue des VMs, son périmètre dans l'adresse
+      // (dossier, non rangées, famille ou hôte du panneau Hôtes)
+      // `#vms/host/kvm` (famille KVM entière) garde la vue des VMs KVM et ses
+      // gestes (cible de l'ancien #kvmvms) ; un hôte KVM, la famille ou un
+      // cluster Harvester ouvrent la vue des VMs, panneau Hôtes
       case 'vms':
-        if (route.kind === 'kvm') return t('kvmvms');
-        if (route.kind === 'harvester' && route.host) return t('namespaces', { cluster: route.host });
-        return t('allvms');                  // racine, dossier, famille Harvester
-      case 'folders': return t('allvms');
-      case 'containers': return t('allcontainers');
+        if (route.kind === 'kvm' && !route.host) return t('kvmvms');
+        return t('allvms', { vms: { id: route.id || null, kind: route.kind || null, host: route.host || null } });
+      case 'folders': return t('folders', { folderId: route.id || null });
+      case 'containers': return t('allcontainers', { folderId: route.id || null });
       // 2.0.0 (tâche 8) : l'index des hôtes, une famille en option ; les
       // dossiers d'hôtes arrivent à l'étape 3 (index entier en attendant)
       // 2.0.0 : onglets de la famille KVM, les vues de tous les hôtes KVM
       // (capacité, pools et images, réseaux), sans hôte imposé
       case 'hosts': {
         const fleet = route.kind === 'kvm' && KVM_FLEET[route.tab];
-        return fleet ? t(fleet) : t('hosts', { hostsKind: route.kind || null });
+        return fleet ? t(fleet) : t('hosts', { hostsKind: route.kind || null, folderId: route.id || null });
       }
       case 'dr': return t(route.tab === 'links' ? 'drlinks' : 'drplans');
       case 'migrations': return t('forkliftglobal');
@@ -113,8 +118,12 @@
       case 'hconn': return H({ sub: 'params', tab: 'conn' });
       case 'namespaces': return H({ sub: 'vms' });
       case 'containers': return H({ sub: 'containers' });
-      case 'allvms': return '#vms';
-      case 'allcontainers': return '#containers';
+      case 'allvms': {
+        const v = s.vms || {};
+        return Rt.format({ name: 'vms', id: v.kind ? null : (v.id || null), kind: v.kind || null, host: v.kind ? (v.host || null) : null });
+      }
+      case 'folders': return Rt.format({ name: 'folders', id: s.folderId || null });
+      case 'allcontainers': return Rt.format({ name: 'containers', id: s.folderId || null });
       case 'gpus': case 'bookings': case 'usage': return '#' + s.tab;
       case 'activity':
         if (s.activityHost && /^kvm:/.test(s.activityHost) && Rt.validHost('kvm', s.activityHost.slice(4))) {
@@ -123,7 +132,9 @@
         if (s.activityHost && s.activityIsCluster) return Rt.format({ name: 'activity', kind: 'harvester', host: s.activityHost });
         return '#activity';
       case 'forkliftglobal': return '#migrations';
-      case 'hosts': return '#hosts' + (s.hostsKind === 'harvester' || s.hostsKind === 'kvm' ? '/' + s.hostsKind : '');
+      case 'hosts':
+        if (s.folderId) return Rt.format({ name: 'hosts', id: s.folderId });
+        return '#hosts' + (s.hostsKind === 'harvester' || s.hostsKind === 'kvm' ? '/' + s.hostsKind : '');
       case 'kvmhosts': return s.kvm ? K({}) : '#hosts/kvm/capacity';
       case 'kvmvms': return s.kvm ? K({ sub: 'vms' }) : '#vms/host/kvm';
       case 'kvmstorage': return s.kvm ? K({ sub: 'params', tab: 'pools' }) : '#hosts/kvm/pools';

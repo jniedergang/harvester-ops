@@ -80,15 +80,16 @@ HOST_ROWS = [
     # 2.0.0 : Mise à jour et Connexion ont leur écran dans la page d'hôte
     (f"#harvester/{B}/params/upgrade", "hupgrade", None, B),
     (f"#harvester/{B}/params/conn", "hconn", None, B),
-    (f"#vms/host/harvester/{B}", "namespaces", None, B),
+    # 2.0.0 (tâche 15) : la vue des VMs, panneau Hôtes (le cluster courant reste)
+    (f"#vms/host/harvester/{B}", "allvms", None, A),
     (f"#activity/host/harvester/{B}", "activity", None, A),
 ]
 
 FLEET_ROWS = [
     ("#vms", "allvms", None), ("#vms/folder/unfiled", "allvms", None), ("#vms/folder/12", "allvms", None),
     ("#vms/host/harvester", "allvms", None), ("#vms/host/kvm", "kvmvms", None),
-    (f"#vms/host/kvm/{KVM}", "kvmvms", None),
-    ("#folders", "allvms", None), ("#folders/12", "allvms", None),
+    (f"#vms/host/kvm/{KVM}", "allvms", None),
+    ("#folders", "folders", None), ("#folders/12", "folders", None),
     ("#containers", "allcontainers", None), ("#containers/folder/12", "allcontainers", None),
     # 2.0.0 (tâche 8) : l'index des hôtes
     ("#hosts", "hosts", None), ("#hosts/kvm", "hosts", None), ("#hosts/folder/12", "hosts", None),

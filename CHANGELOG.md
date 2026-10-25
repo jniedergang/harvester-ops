@@ -129,8 +129,30 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Fleet reads give the folder of container workloads and hosts. The command
   line reads the value an object carries just before writing it, so Undo
   puts back that exact value, never files an object the person cannot read,
-  and gains `empty-into`. A fleet read creates at most 200 folders named by
-  objects (logged once when more wait).
+  and gains `empty-into`. A fleet read creates every folder named by
+  objects, without a cap (2,000 such folders measured fast), and a read
+  that started before a rename ended no longer creates the former folder.
+- **Virtual machines view with folders.** `#vms` lists every VM of the
+  fleet, Harvester and KVM, with family, host, folder, a console badge
+  (filing known to the console only) and a DR badge (VM held by a
+  replication contract). A panel on the left has two modes: Folders (All
+  VMs, Unfiled and the shared tree with counts of what you see, a badge on
+  folders created again from objects, create, rename and delete in place)
+  and Hosts (by family then host, read-only, `#vms/host/<family>/<host>`).
+  Drag rows onto a folder, or use Move to folder on a row or a selection
+  with a folder search: the window shows the server's checks object by
+  object before its button. Deleting a non-empty folder offers Move the
+  content of..., then deletes, in one action that Undo reverses (a name
+  already taken in the target is refused before anything moves). The row
+  menu follows the family (Harvester menu, or console, snapshots, clone,
+  delete and Open on its host for KVM). Viewers see everything, with every
+  filing control greyed and its reason.
+- **Folders view** (`#folders`, `#folders/<id>`): what a folder holds in
+  three groups, VMs, containers and hosts, each opening its view filtered
+  on the folder (`#vms/folder/<id>`, `#containers/folder/<id>`,
+  `#hosts/folder/<id>`). Containers and the hosts index gain a Folder
+  column and Move to folder; filing a host offers to file its VMs too
+  (unchecked).
 - **Management cluster header** on Cluster API and Terraform: it shows the
   cluster their calls go to, with a menu to pick another one, which does
   not change the open host. Bare-metal has none.
@@ -163,10 +185,14 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   | Disaster Recovery > Contracts, Links | `#dr`, `#dr/links` |
   | Automation > Cluster API, Terraform, Bare-metal | `#automation/<capi, terraform, pxe>` |
   | Activity | `#activity`, `#activity/host/<kind>/<name>` |
-- **An empty address opens `#vms`** (All clusters VMs until the unified VMs
-  view arrives). The first time 2.0.0 opens in a browser, the last screen
+- **An empty address opens `#vms`**, the Virtual machines view. The first
+  time 2.0.0 opens in a browser, the last screen
   of the 1.x menu is reopened once instead, then forgotten. An address that
   matches no screen opens `#vms` with a notice.
+- `#vms/host/harvester/<c>` and `#vms/host/kvm/<h>` open the Virtual
+  machines view on that host, Hosts panel shown (the cluster's own VM list
+  stays at `#harvester/<c>/vms`); `#hosts/folder/<id>` and
+  `#containers/folder/<id>` filter on the folder, subfolders included.
 - **A link to a host you cannot see** (removed, or hidden by Rancher), and
   an old token that needs a host while none is visible, open the hosts
   index with a notice instead of the default screen.
@@ -232,13 +258,33 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   host, transient and vanished domains, config.yaml clusters, no kubeconfig
   path in any response or shown command, valid rate limits, `undo` in
   `to_dict()` only for folder actions, counts limited to what the person
-  read, container and host folders in fleet reads, and the 200-folder cap
-  logged once. `test_folders_cli_200.py` adds the exact previous value put
+  read, container and host folders in fleet reads, no cap on folders
+  created from objects, a name clash refused before emptying, and a
+  2,000-folder tree read in time. `test_folders_cli_200.py` adds the exact previous value put
   back by Undo for the three families (and a deliberate mutation reading
   the cache instead), unreadable or vanished objects never filed, and
   `empty-into` with its refusals, its undo, a failed object keeping the
-  folder and objects outside the request; `test_folders_db_200.py` adds a
-  table of the per-read cap.
+  folder and objects outside the request, and a stale read right after a
+  rename; `test_folders_db_200.py` adds every folder named by objects
+  created (no cap) and a timed realignment of 2,000 folders.
+- `tests/e2e/test_folders_200.py` (simulated API): three rows of two
+  families dragged onto a folder, the check window with a console-only line
+  and no active button before the checks, the action in the dock then Undo
+  putting the original folders back, a row menu with folder search, create,
+  rename and delete in place without browser prompt, a non-empty folder
+  refused with Move the content of..., `#vms/folder/unfiled`,
+  `#vms/host/kvm/node2`, a viewer without any filing gesture (Undo greyed in
+  the dock), a hostile folder name kept as text, the Folders view and the
+  folder filters of containers and hosts with the unchecked host VMs box,
+  the new labels in five languages, a timed panel of 2,000 folders created
+  from objects with 2,000 VMs, and deliberate mutations (button active
+  before the checks, viewer rows draggable, unescaped name, host box
+  checked, counts off by one, Undo offered to a viewer).
+  `tests/api/test_folders_ui_model_200.py`: the pure folder helpers and
+  every folder or host address to its screen and back, with a deliberate
+  mutation of the path rule. Updated: `test_all_vms_185.py`,
+  `test_router_1100.py`, `test_hosts_index_200.py`, `test_host_nav_200.py`
+  and the screen inventory for the new view and addresses.
 - `tests/api/test_folders_model_200.py` (names and paths, one case per
   rule, object keys, rebuild from the objects alone, object against cache,
   three-level rename plan, move into its own subtree, undo with a conflict,

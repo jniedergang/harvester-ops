@@ -45,7 +45,7 @@ def view(context, flask_server):
         "sessionStorage.setItem('avm-init','1'); }")
     page = context.new_page()
     sent = []
-    page.route("**/api/vms-all", lambda r, q: r.fulfill(status=200, content_type="application/json",
+    page.route(re.compile(r".*/api/vms-all(\?.*)?$"), lambda r, q: r.fulfill(status=200, content_type="application/json",
                                                          body=json.dumps(DATA)))
 
     def patch(route, req):
@@ -64,7 +64,7 @@ def view(context, flask_server):
 
 
 def names(rows):
-    return rows.evaluate_all("rs => rs.map(r => r.children[3].textContent.trim())")
+    return rows.evaluate_all("rs => rs.map(r => r.querySelector('[data-avm-col=name]').textContent.trim())")
 
 
 def test_virtual_machines_is_a_group_of_two_entries(view):
