@@ -128,6 +128,6 @@ const Sections = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { isSection, activate, show, open, stopLists, current };
+  return { isSection, activate, show, open, stopLists, current, DEF };
 })();
 window.Sections = Sections;
