@@ -10310,10 +10310,12 @@ def _kvm_base(*sub):
             f"--state-dir={_state_dir()}"]
 
 
-def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
+def _kvm_action(host, label, cmd, cleanup=None, cluster=None, waits=False):
     """Action suivie du script KVM. `cluster` : étiquette d'une action qui ne
     vise aucun hôte (modèles : KVM_TEMPLATES_TAG) ; elle ne fait alors pas
-    avancer de génération de relevés (aucun fichier survey-gen créé)."""
+    avancer de génération de relevés (aucun fichier survey-gen créé).
+    `waits` : une annulation est demandée et l'action reste en cours jusqu'à
+    la sortie du script, qui défait ce qu'il a posé (`cancel_waits`)."""
     state = _state_dir()
 
     def refresh_views():
@@ -10332,6 +10334,7 @@ def _kvm_action(host, label, cmd, cleanup=None, cluster=None):
     refreshed = []
 
     def setup(run):
+        run.cancel_waits = bool(waits)
         # vues oubliées AVANT la fin de l'action : la page relit dès l'événement
         # `end` (vu en réel : un pool créé n'apparaissait qu'au relevé suivant)
         close = run.close
@@ -22158,7 +22161,7 @@ def _kvm_json_body():
     return body if isinstance(body, dict) else None
 
 
-def _kvm_vm_op(host, domain, verb, cmd, names=(), holds=(), cleanup=None):
+def _kvm_vm_op(host, domain, verb, cmd, names=(), holds=(), cleanup=None, waits=False):
     """Lance une opération sur une VM : refus 409 si une autre opération tient
     déjà la VM (ou l'un des `names`, le nom d'un clone ou d'une instance),
     ou un objet de `holds` (pools, réseaux : voir _kvm_holds_busy), sinon
@@ -22171,7 +22174,8 @@ def _kvm_vm_op(host, domain, verb, cmd, names=(), holds=(), cleanup=None):
             if cleanup:
                 cleanup()
             return None, _busy_response(busy)
-        run, err = _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd, cleanup=cleanup)
+        run, err = _kvm_action(host, f"kvm:vm-{verb}:{host}/{domain}", cmd, cleanup=cleanup,
+                               waits=waits)
         if run is not None:
             # posé sous le verrou : un geste concurrent le voit déjà
             run.kvm_vms = (domain, *names)
@@ -22927,8 +22931,11 @@ def api_kvm_vm_create(host):
     cmd = _kvm_base("vm", "create") + [f"--host={host}", f"--spec-file={path}"]
     holds = [(host, "pool", p, "s") for p in _kvm_spec_pools(spec)] + \
             [(host, "network", n, "s") for n in _kvm_spec_networks(spec)]
+    # annuler attend la sortie du script : une copie complète en cours est
+    # attendue puis supprimée par son retour arrière (vu en réel sur node2),
+    # les noms et les pools restent tenus jusque-là
     run, err = _kvm_vm_op(host, names[0], "create", cmd, names=tuple(names[1:]), holds=holds,
-                          cleanup=cleanup)
+                          cleanup=cleanup, waits=True)
     if err:
         return err
     return _kvm_accepted(run, host=host, names=names)

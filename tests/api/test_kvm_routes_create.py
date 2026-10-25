@@ -1361,3 +1361,27 @@ def test_no_secret_in_any_response_or_log(client, env, lib, surveys, caplog):
     out.append(caplog.text)
     text = "\n".join(out)
     assert MARKER not in text and VNC_PW not in text and str(env["state"]) not in text
+
+
+# Vu en réel (tâche 7) : annuler une création pendant une copie complète
+# fermait l'action tout de suite (« cancelled », résultat vide) et relâchait
+# les noms et les pools tenus pendant que l'outil défaisait encore la copie.
+# L'action attend désormais la sortie de l'outil, comme les envois d'image.
+def test_cancelling_a_creation_waits_for_the_tool_rollback(client, lib):
+    assert client.post("/api/kvm/vms/node2", json={"spec": SPEC}).status_code == 202
+    run = only_run()
+    assert run.cancel_waits is True
+    proc = types.SimpleNamespace(terminated=0, poll=lambda: None)
+    proc.terminate = lambda: setattr(proc, "terminated", proc.terminated + 1)
+    run.proc, run.status = proc, "running"
+    r = client.delete(f"/api/action/{run.id}")
+    assert r.status_code == 200
+    assert proc.terminated == 1 and run.cancel_requested is True
+    assert run.status == "running"            # noms et pools encore tenus pendant le retour arrière
+    r = client.post("/api/kvm/vms/node2", json={"spec": SPEC})
+    assert r.status_code == 409
+
+
+def test_other_vm_gestures_still_close_at_once_on_cancel(client, lib):
+    assert client.post("/api/kvm/vms/node2/kvmtest-1/start").status_code == 202
+    assert only_run().cancel_waits is False

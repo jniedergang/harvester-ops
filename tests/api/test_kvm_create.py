@@ -322,3 +322,54 @@ def test_hostile_vm_name_reaches_virsh_as_one_argument():
     assert name in s.domains
     assert ("vol-create-as", "--pool", "images", "--name", f"{name}-vda.qcow2") == \
         s.writes[0][:5]
+
+
+# --- retour arrière d'une copie complète encore en cours (vu en réel, tâche 7) ------
+# Annulée pendant `vol-create-from`, la copie continue dans libvirtd : le
+# volume refuse d'être supprimé (« still being allocated ») jusqu'à la fin de
+# la copie. Le retour arrière attend (recul borné) puis le supprime.
+
+class _BuildingHost:
+    def __init__(self, refusals):
+        self.refusals, self.calls = list(refusals), []
+
+    def virsh(self, *args, **kw):
+        self.calls.append(args)
+        if args[0] == "vol-delete" and self.refusals:
+            raise kh.KvmError("failed", self.refusals.pop(0), rc=1)
+        return ""
+
+
+BUILDING = "error: Requested operation is not valid: volume 'x' is still being allocated."
+ROLLBACK_CASES = [
+    # (libellé, refus successifs, reste attendu, appels vol-delete)
+    ("copy ends while waiting", [BUILDING] * 3, None, 4),
+    ("still copying at the deadline", [BUILDING] * 500, "may still be building", None),
+    ("other error said at once", ["error: disk on fire"], "disk on fire", 1),
+]
+
+
+@pytest.mark.parametrize("label,refusals,left,calls", ROLLBACK_CASES, ids=[c[0] for c in ROLLBACK_CASES])
+def test_rollback_waits_for_a_volume_libvirt_is_still_copying(label, refusals, left, calls, monkeypatch):
+    clock = {"t": 0.0}
+    monkeypatch.setattr(kc, "BUILDING_DELETE_RETRY", 60.0)
+    host = _BuildingHost(refusals)
+    created = [{"kind": "volume", "pool": "p", "volume": "x", "building": True}]
+    out = kc.rollback(host, created, sleep=lambda s: clock.__setitem__("t", clock["t"] + s),
+                      clock=lambda: clock["t"])
+    deletes = [c for c in host.calls if c[0] == "vol-delete"]
+    if left is None:
+        assert out == [] and len(deletes) == calls
+    else:
+        assert len(out) == 1 and left in out[0]["error"] and "building" not in out[0]
+        if calls:
+            assert len(deletes) == calls
+        else:
+            assert clock["t"] <= 60.0 and len(deletes) > 3
+
+
+def test_rollback_of_a_finished_volume_does_not_wait(monkeypatch):
+    host = _BuildingHost([BUILDING])
+    out = kc.rollback(host, [{"kind": "volume", "pool": "p", "volume": "x"}],
+                      sleep=lambda s: pytest.fail("no wait for a volume that is not being built"))
+    assert len(out) == 1 and "still being allocated" in out[0]["error"]
