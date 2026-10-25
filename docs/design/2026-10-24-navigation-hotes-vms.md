@@ -119,10 +119,10 @@ Pourquoi « Machines virtuelles » en tête : c'est l'objet que l'on cherche le 
 | Containers > Current cluster's containers | Hôte Harvester > Conteneurs |
 | Containers > All clusters containers | Conteneurs (racine) |
 | Shared resources > GPU, Bookings, Usage | Ressources partagées, inchangé |
-| KVM > Hosts (bloc par hôte, Tester, Retirer, Déclarer) | Hôtes > KVM, et Hôte KVM > Vue d'ensemble ; Tester et Retirer dans Paramètres > Connexion ; Déclarer dans « + Ajouter un hôte » |
+| KVM > Hosts (bloc par hôte, Tester, Retirer, Déclarer) | Hôtes > KVM (tuiles de tous les hôtes : onglet Capacité, `#hosts/kvm/capacity`), et Hôte KVM > Vue d'ensemble ; Tester et Retirer dans Paramètres > Connexion ; Déclarer dans « + Ajouter un hôte » |
 | KVM > Virtual machines | Machines virtuelles (racine, filtre KVM) et Hôte KVM > Machines virtuelles |
-| KVM > Storage | Hôte KVM > Paramètres > Pools |
-| KVM > Networks | Hôte KVM > Paramètres > Réseaux |
+| KVM > Storage | Hôte KVM > Paramètres > Pools ; tous les hôtes : onglet Pools de Hôtes > KVM (`#hosts/kvm/pools`, ajouté à la revue de l'étape 2b, rien n'est perdu) |
+| KVM > Networks | Hôte KVM > Paramètres > Réseaux ; tous les hôtes : onglet Réseaux de Hôtes > KVM (`#hosts/kvm/networks`) |
 | VM Import / Export > VM Import | Hôte Harvester > Imports et migrations > Imports |
 | VM Import / Export > VMware migrations | Hôte Harvester > Imports et migrations > VMware |
 | VM Import / Export > Migrations (all clusters) | Migrations (racine) |
@@ -146,7 +146,7 @@ Les adresses ne portent que des jetons d'ancre `#...`, sans chemin côté serveu
 | Les VMs non rangées | `#vms/folder/unfiled` |
 | Toutes les VMs, panneau Hôtes, un hôte | `#vms/host/harvester/<cluster>`, `#vms/host/kvm/<hôte>` |
 | Toutes les charges de conteneurs | `#containers` |
-| Index des hôtes | `#hosts`, une famille : `#hosts/harvester`, `#hosts/kvm` |
+| Index des hôtes | `#hosts`, une famille : `#hosts/harvester`, `#hosts/kvm` ; vues de tous les hôtes KVM : `#hosts/kvm/capacity`, `#hosts/kvm/pools`, `#hosts/kvm/networks` |
 | Vue d'ensemble d'un hôte | `#harvester/<cluster>` ou `#kvm/<hôte>` |
 | VMs d'un hôte | `#harvester/<cluster>/vms` |
 | Paramètres d'un hôte, un onglet | `#harvester/<cluster>/params/storage`, `#kvm/<hôte>/params/pools` |
