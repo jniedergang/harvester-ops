@@ -2087,7 +2087,8 @@ const App = (() => {
       try { shut = localStorage.getItem('harvester_ops_shutdown_subtab'); } catch {}
       if (shut) document.querySelector(`[data-shutdown-tab="${CSS.escape(shut)}"]`)?.click();
       if (!t.tabFirst) show();
-      if (t.tab !== 'overview') await refreshStatus();
+      // 2.0.0 : l'état du cluster ne nourrit que la Vue d'ensemble, que
+      // setTab('overview') lit déjà ; un autre premier écran ne le lit pas
       return;
     }
     const work = async () => {

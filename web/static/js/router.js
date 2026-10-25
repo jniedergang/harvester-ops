@@ -322,6 +322,10 @@
     if (started) return queue;
     started = true;
     restoreAfterLogin();
+    // première ouverture de la 2.0.0 par un lien profond : l'écran de la
+    // 1.x est oublié tout de suite, il ne ressort pas des jours plus tard
+    // sur la première adresse vide
+    if (location.hash) { ls.set(NAV2_SEEN, '1'); ls.del(OLD_TAB); }
     root.addEventListener('hashchange', () => { enqueue(location.hash); });
     return enqueue(location.hash);
   }
