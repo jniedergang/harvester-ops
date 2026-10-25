@@ -263,6 +263,25 @@ def test_move_menu_on_a_row_with_folder_search(world):
     assert sent(state, "/api/folders/assign")[-1] == {"objects": [{"key": "harvester/harv-fake/lab/cirros"}], "to": 2}
 
 
+def test_changing_the_target_asks_the_server_once(world):
+    """Revue M-2 : le contrôle ne dépend pas de la cible ; changer trois fois
+    de cible ne relance pas la revue d'accès des objets déjà contrôlés."""
+    go, page, state = world
+    go("#vms")
+    page.locator('tr[data-avm-row="harvester/harv-fake/lab/cirros"] [data-avm-act="folder"]').click()
+    win = page.locator("#fp-fld-move")
+    for fid in ("2", "3", "5"):
+        win.locator(f'input[value="{fid}"]').check()
+    expect(win.locator("tr[data-fld-check]")).to_have_count(1)
+    expect(win.locator("[data-fld-apply]")).to_be_enabled()
+    win.locator('input[value="1"]').check()
+    page.wait_for_timeout(400)
+    expect(win.locator("[data-fld-apply]")).to_be_enabled()
+    assert len(sent(state, "/api/folders/check")) == 1
+    win.locator("[data-fld-apply]").click()
+    assert sent(state, "/api/folders/assign")[-1]["to"] == 1
+
+
 def test_create_rename_delete_inline_without_browser_prompt(world):
     go, page, state = world
     dialogs = []

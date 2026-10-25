@@ -123,7 +123,7 @@ def fid(world, path):
 MUTATIONS = [("POST", "/api/folders"), ("PATCH", "/api/folders/1"), ("DELETE", "/api/folders/1"),
              ("POST", "/api/folders/1/empty-into"), ("POST", "/api/folders/check"),
              ("POST", "/api/folders/assign"), ("POST", "/api/folders/actions/abc/undo"),
-             ("POST", "/api/folders/1/write-back")]
+             ("POST", "/api/folders/1/write-back"), ("POST", "/api/folders/actions/abc/resume")]
 
 
 @pytest.mark.parametrize("method,path", MUTATIONS)
@@ -412,6 +412,62 @@ def test_undo_of_another_persons_action_says_whose_and_by_whom(world, call, monk
     assert run.result == {"undoes": "act7", "of": "alice", "by": "patronne"}
 
 
+@pytest.mark.parametrize("method,path,body,clash", [
+    # créer à la racine un nom déjà pris
+    ("POST", "/api/folders", lambda w: {"parent_id": None, "name": "Lab"}, "Lab"),
+    # créer sous /Prod un nom déjà pris
+    ("POST", "/api/folders", lambda w: {"parent_id": fid(w, "/Prod"), "name": "ERP"}, "ERP"),
+    # renommer /Lab en Prod (frère à la racine)
+    ("PATCH", "/api/folders/{Lab}", lambda w: {"name": "Prod"}, "Prod"),
+    # déplacer /Prod/ERP sous la racine où ERP... n'existe pas : pas de conflit (cas témoin plus bas)
+    # déplacer /Lab sous /Prod alors qu'un /Prod/Lab existe
+    ("PATCH", "/api/folders/{Lab}", lambda w: {"parent_id": fid(w, "/Prod")}, "Lab"),
+])
+def test_name_clash_is_refused_with_409_before_any_action(world, call, method, path, body, clash):
+    """Revue M-1 : un doublon de nom entre frères est refusé (409) avant le
+    202, comme pour empty-into ; aucune action n'est lancée."""
+    conn = fdb.connect(world["db"])
+    fdb.ensure_path(conn, "/Prod/Lab", "console")
+    conn.close()
+    r = call("alice", method, path.format(Lab=fid(world, "/Lab")), body(world))
+    assert r.status_code == 409, r.get_json()
+    assert r.get_json()["conflicts"] == [clash]
+    assert _NoThread.started == [] and wapp.ACTIONS == {}
+
+
+@pytest.mark.parametrize("method,path,body", [
+    ("PATCH", "/api/folders/{Lab}", {"name": "Lab"}),                 # même nom : lui-même
+    ("PATCH", "/api/folders/{ERP}", {"parent_id": None}),             # pas d'ERP à la racine
+    ("POST", "/api/folders", {"parent_id": None, "name": "lab"}),     # la casse distingue (index SQLite)
+])
+def test_no_clash_launches_the_action(world, call, method, path, body):
+    r = call("alice", method, path.format(Lab=fid(world, "/Lab"), ERP=fid(world, "/Prod/ERP")), body)
+    assert r.status_code == 202
+
+
+def test_resume_relaunches_the_lines_not_done_of_an_interrupted_action(world, call):
+    """Revue M-5 : reprendre une action de dossiers interrompue depuis la
+    console (comme `resume` en ligne de commande)."""
+    conn = fdb.connect(world["db"])
+    fdb.record_move(conn, "act5", 0, "harvester/harv1/nav/a", "/Lab", "/Prod/ERP", "done")
+    fdb.record_move(conn, "act5", 1, f"kvm/{UUID1}", "/Lab", "/Prod", "pending")
+    conn.close()
+    running = wapp.ActionRun("act5", "folders:assign:/Prod", "folders", ["x"])
+    running.status = "running"
+    wapp.ACTIONS["act5"] = running
+    assert call("alice", "POST", "/api/folders/actions/act5/resume").status_code == 409
+    running.status = "interrupted"
+    assert call("curieux", "POST", "/api/folders/actions/act5/resume").status_code == 403
+    assert call("alice", "POST", "/api/folders/actions/nope/resume").status_code == 404
+    r = call("alice", "POST", "/api/folders/actions/act5/resume")
+    assert r.status_code == 202
+    cmd = script_cmd()
+    assert cmd[cmd.index("resume"):cmd.index("resume") + 3] == ["resume", "--action", "act5"]
+    assert [o["key"] for o in script_spec()["objects"]] == [f"kvm/{UUID1}"]
+    run = wapp.ACTIONS[r.get_json()["action_id"]]
+    assert run.action == "folders:resume:act5" and run.undo is None
+
+
 def test_write_back_sends_only_console_filings(world, call):
     r = call("alice", "POST", f"/api/folders/{fid(world, '/Prod')}/write-back")
     assert r.status_code == 202
@@ -484,6 +540,47 @@ def test_check_workload_uses_its_resource_and_an_unreachable_cluster_fails(pool,
     assert calls[0][6] == "statefulsets.apps/front" and a["write"] is True
     assert (b["write"], b["outcome"]) == (False, "fail") and "does not answer" in b["reason"]
     assert len(calls) == 1                     # rien demandé au cluster éteint
+
+
+def fake_can_i_ns(ns_answer, names):
+    """can-i sans nom (tout l'espace de noms) puis par nom."""
+    calls = []
+
+    def run(argv, **kw):
+        calls.append(argv)
+        target = argv[argv.index("patch") + 1]
+        out = ns_answer if "/" not in target else names[target.split("/", 1)[1]]
+        return types.SimpleNamespace(returncode=0 if out == "yes" else 1, stdout=out + "\n", stderr="")
+    return run, calls
+
+
+@pytest.mark.parametrize("ns_answer,names,expected_calls,writes", [
+    # oui sur tout l'espace de noms : une seule revue pour les trois VMs
+    ("yes", {}, 1, [True, True, True]),
+    # non sur l'espace de noms : une revue par nom ensuite
+    ("no", {"a": "yes", "b": "no", "c": "yes"}, 4, [True, False, True]),
+])
+def test_check_asks_once_per_namespace_then_per_name_on_no(pool, world, call, monkeypatch,
+                                                            ns_answer, names, expected_calls, writes):
+    """Revue M-2 : une revue d'accès par (cluster, espace de noms, ressource)
+    sans nom ; par nom seulement sur « no » (500 objets ne font plus 500 appels)."""
+    run, calls = fake_can_i_ns(ns_answer, names)
+    monkeypatch.setattr(wapp, "_kubectl_run", run)
+    keys = [f"harvester/harv1/nav/{n}" for n in "abc"]
+    d = call("alice", "POST", "/api/folders/check", {"objects": keys}).get_json()["objects"]
+    assert [o["write"] for o in d] == writes
+    assert len(calls) == expected_calls
+    assert calls[0][6:] == ["virtualmachines.kubevirt.io", "-n", "nav"]
+
+
+def test_check_without_delegation_says_the_console_writes_with_its_own_identity(pool, world, call, monkeypatch):
+    """Revue M-3 : compte local sans délégation d'identité, le kubeconfig est
+    celui de la console : la raison le dit au lieu de « you can write »."""
+    monkeypatch.setattr(wapp, "current_cluster_identity", lambda: None)
+    run, _calls = fake_can_i({"a": (0, "yes\n", "")})
+    monkeypatch.setattr(wapp, "_kubectl_run", run)
+    d = call("alice", "POST", "/api/folders/check", {"objects": ["harvester/harv1/nav/a"]}).get_json()["objects"][0]
+    assert d["outcome"] == "object" and "its own identity" in d["reason"] and "you can write" not in d["reason"]
 
 
 class FakeHost:

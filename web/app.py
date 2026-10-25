@@ -10048,6 +10048,16 @@ def _folder_spec(objects, chosen=False):
     return {"objects": objects, "visible": sorted(visible), "kubeconfigs": kcs}
 
 
+def _name_clash(conn, parent_id, name, folder_id=None):
+    """Revue M-1 : réponse 409 si un frère porte déjà ce nom (avant le 202,
+    comme empty-into), sinon None."""
+    if not _fm.name_taken(_fdb.list_tree(conn), parent_id, name, folder_id):
+        return None
+    where = _fdb.path_of(conn, parent_id) if parent_id is not None else "the root"
+    return jsonify({"error": f"a folder named {name!r} already exists in {where}",
+                    "conflicts": [name]}), 409
+
+
 def _folders_after():
     # le dossier lu sur les objets est dans les lectures de flotte partagées
     READ_SHARE.invalidate(None)
@@ -10093,6 +10103,9 @@ def api_folders_create():
             if err:
                 return err
             parent = t[1]
+        clash = _name_clash(conn, parent, name)
+        if clash:
+            return clash
     finally:
         conn.close()
     return _folder_action(f"create:{name}", ["create", "--parent", str(parent) if parent is not None else "/",
@@ -10123,6 +10136,10 @@ def api_folders_update(folder_id):
             why = _fm.check_name(body["name"]) if isinstance(body["name"], str) else "the name must be text"
             if why:
                 return jsonify({"error": why}), 400
+            me = next(f for f in _fdb.list_tree(conn) if f["id"] == folder_id)
+            clash = _name_clash(conn, me["parent_id"], body["name"], folder_id)
+            if clash:
+                return clash
             sub = ["rename", "--folder", str(folder_id), "--name", body["name"]]
             label = f"rename:{path}"
         else:
@@ -10132,6 +10149,9 @@ def api_folders_update(folder_id):
                 if err:
                     return err
                 parent = t[1]
+            clash = _name_clash(conn, parent, _fm.split(path)[-1], folder_id)
+            if clash:
+                return clash
             sub = ["move-folder", "--folder", str(folder_id), "--parent", str(parent) if parent is not None else "/"]
             label = f"move:{path}"
     finally:
@@ -10286,6 +10306,37 @@ def api_folders_undo(action_id):
                           result={"undoes": action_id, "of": owner, "by": current_user() or "anonymous"})
 
 
+@app.route("/api/folders/actions/<action_id>/resume", methods=["POST"])
+@requires_auth
+@_rate_limit(FOLDERS_RATE)
+def api_folders_resume(action_id):
+    """Revue M-5 : reprend une action de dossiers interrompue (lignes
+    `pending` ou `failed`), comme `resume` en ligne de commande ; une ligne
+    faite n'est jamais réécrite, un objet rangé ailleurs depuis est laissé."""
+    if not _FOLDER_ACTION_RE.match(action_id):
+        return jsonify({"error": "invalid action id"}), 400
+    with ACTIONS_LOCK:
+        run = ACTIONS.get(action_id)
+    if run is not None and run.status in ("starting", "running"):
+        return jsonify({"error": "the action is still running: wait for its end"}), 409
+    conn = _folders_conn()
+    try:
+        moves = _fdb.moves_of(conn, action_id)
+        if not moves:
+            return jsonify({"error": f"no folder action {action_id}"}), 404
+        cache = _fdb.memberships(conn)
+        clusters = _visible_cluster_names()
+        objects = []
+        for key in sorted({m["object_key"] for m in moves if m["status"] in ("pending", "failed")
+                           and not m["object_key"].startswith("folder/")}):
+            obj, _why = _folder_object({"key": key}, cache, clusters)
+            if obj:
+                objects.append(obj)
+    finally:
+        conn.close()
+    return _folder_action(f"resume:{action_id}", ["resume", "--action", action_id], objects)
+
+
 @app.route("/api/folders/<int:folder_id>/write-back", methods=["POST"])
 @requires_auth
 @_rate_limit(FOLDERS_RATE)
@@ -10306,15 +10357,22 @@ def api_folders_write_back(folder_id):
 
 # --- contrôles avant geste --------------------------------------------------------
 
-def _can_i_patch(kc, obj):
+def _patch_resource(obj):
+    return ("virtualmachines.kubevirt.io" if obj["kind"] == "harvester"
+            else _fm.WORKLOAD_RESOURCES.get(obj.get("workload_kind")))
+
+
+def _can_i_patch(kc, obj, named=True):
     """(écrit sur l'objet ?, raison) par `kubectl auth can-i` avec le
     kubeconfig de la personne (SelfSubjectAccessReview, usurpation et
-    Rancher compris). None pour une erreur (raison donnée)."""
-    resource = ("virtualmachines.kubevirt.io" if obj["kind"] == "harvester"
-                else _fm.WORKLOAD_RESOURCES.get(obj.get("workload_kind")))
+    Rancher compris). None pour une erreur (raison donnée). `named=False` :
+    toute la ressource de l'espace de noms (revue M-2 : un « yes » vaut pour
+    chaque objet, un « no » fait demander par nom)."""
+    resource = _patch_resource(obj)
+    target = f"{resource}/{obj['name']}" if named else resource
     try:
         r = _kubectl_run(["kubectl", "--kubeconfig", kc, "auth", "can-i", "patch",
-                          f"{resource}/{obj['name']}", "-n", obj["namespace"]],
+                          target, "-n", obj["namespace"]],
                          capture_output=True, text=True, timeout=15)
     except subprocess.TimeoutExpired as e:
         return None, _safe_proc_error(e)
@@ -10334,6 +10392,22 @@ def _check_kube_objects(objs):
         if c not in kcs:
             kcs[c] = _kubectl_for_cluster(c)
             reach[c] = _cluster_reachable(kcs[c]) if kcs[c] else None
+    # revue M-3 : compte local sans délégation ni session Rancher, le
+    # kubeconfig est celui de la console (system:masters) ; la raison le dit
+    own = _sso_session() is None and not current_cluster_identity()
+    write_reason = ("the console writes it with its own identity (no identity delegation): the folder is "
+                    "written on it" if own else "you can write this object: the folder is written on it")
+    # revue M-2 : une revue sans nom par (cluster, espace de noms, ressource)
+    # de plusieurs objets ; par nom seulement si elle ne répond pas « yes »
+    groups = {}
+    for o in objs:
+        if kcs[o["cluster"]] and reach[o["cluster"]] is not False:
+            groups.setdefault((o["cluster"], o["namespace"], _patch_resource(o)), []).append(o)
+    wide = [g for g in groups.values() if len(g) > 1]
+    with ThreadPoolExecutor(max_workers=max(1, min(len(wide), 8))) as pool:
+        granted = {(g[0]["cluster"], g[0]["namespace"], _patch_resource(g[0]))
+                   for g, (ok, _why) in zip(wide, pool.map(lambda g: _can_i_patch(kcs[g[0]["cluster"]], g[0], named=False), wide))
+                   if ok}
 
     def one(o):
         kc = kcs[o["cluster"]]
@@ -10343,10 +10417,10 @@ def _check_kube_objects(objs):
         if reach[o["cluster"]] is False:
             return {"key": o["key"], "write": False, "outcome": "fail", "check": "ssar",
                     "reason": f"cluster {o['cluster']} does not answer: the move will fail for this object"}
-        ok, why = _can_i_patch(kc, o)
+        ok, why = (True, "") if (o["cluster"], o["namespace"], _patch_resource(o)) in granted else _can_i_patch(kc, o)
         if ok:
             return {"key": o["key"], "write": True, "outcome": "object", "check": "ssar",
-                    "reason": "you can write this object: the folder is written on it"}
+                    "reason": write_reason}
         if ok is False:
             return {"key": o["key"], "write": False, "outcome": "console", "check": "ssar",
                     "reason": "you cannot write this object on its cluster: only the console's filing changes"}

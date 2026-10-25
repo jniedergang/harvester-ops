@@ -406,13 +406,14 @@ opérateur, la lecture est ouverte à tous.
 | Route | Rôle |
 |---|---|
 | `GET /api/folders` | l'arborescence, chaque dossier avec son `origin` (`console`, ou `objects` quand une lecture de flotte l'a créé depuis les objets qui le nomment) et ses `counts` `{vms, containers, hosts}`, sous-dossiers compris, limités à ce que la personne a vu dans ses propres lectures de flotte (`null` : pas encore lu) |
-| `POST /api/folders` | créer (`parent_id`, `name`) |
-| `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé |
+| `POST /api/folders` | créer (`parent_id`, `name`) ; un frère du même nom répond 409 `{conflicts}` avant que rien ne parte |
+| `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé. Un frère du même nom (au nouveau nom ou sous le nouveau parent) répond 409 `{conflicts}` avant que rien ne parte |
 | `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre) |
 | `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action ; un sous-dossier dont le nom est déjà pris dans la cible répond 409 avant que rien ne bouge |
 | `POST /api/folders/assign` | `objects` (clés ; une VM KVM donne aussi son `host`) et `to` (identifiant de dossier ou `unfiled`) |
 | `POST /api/folders/check` | les contrôles montrés avant un déplacement, objet par objet, rien n'est écrit |
 | `POST /api/folders/actions/<id>/undo` | annuler une action de dossiers terminée |
+| `POST /api/folders/actions/<id>/resume` | reprendre une action de dossiers interrompue : les lignes pas encore faites (en attente ou en échec) sont réécrites, jamais celles faites ; 409 tant qu'elle tourne |
 | `POST /api/folders/<id>/write-back` | écrire sur les objets les rangements du dossier gardés par la console seule |
 
 Chaque changement répond tout de suite `202 {"action_id"}` ; le dock montre
@@ -430,8 +431,14 @@ est retrouvé.
 (le dossier est écrit sur l'objet), `console` (seul le rangement de la
 console change) ou `fail` (le geste échouera pour cet objet, raison dite).
 VMs et charges Harvester : `kubectl auth can-i patch` avec le kubeconfig de
-la personne (une SelfSubjectAccessReview, `check: ssar`) ; un cluster qui ne
-répond pas est dit sans l'interroger. KVM : hôte joint et domaine persistant
+la personne (une SelfSubjectAccessReview, `check: ssar`), demandé une fois
+par cluster, espace de noms et ressource pour plusieurs objets, puis par nom
+seulement si la réponse n'est pas « yes » ; un cluster qui ne répond pas est
+dit sans l'interroger. Pour un compte local de la console sans délégation
+d'identité, ce kubeconfig est celui de la console : la raison dit alors que
+la console écrit l'objet avec sa propre identité, et non que la personne le
+peut. La fenêtre garde le contrôle de chaque objet tant qu'elle est ouverte :
+changer de cible ne redemande rien. KVM : hôte joint et domaine persistant
 (un `dominfo` par domaine dans un seul appel SSH par hôte, `check: virsh`) ;
 un domaine transitoire est gardé par la console. Hôte : sa déclaration
 (`check: decl`) ; un cluster de `config.yaml` est rangé dans la console

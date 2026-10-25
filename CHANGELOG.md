@@ -247,6 +247,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   every refresh and every key to about 0.6 s (0.1 s without change); 10,000
   VMs measured at about 0.9 s.
 
+- **A folder name clash is refused before anything starts**: creating,
+  renaming or moving a folder where a sibling already has that name answers
+  409 `{conflicts}` instead of starting an action that fails.
+- **Checks before a move ask less**: one access review per cluster,
+  namespace and resource for several objects (by name only when it is not
+  "yes"), and the window keeps each object's check while open, so changing
+  the target asks nothing again.
+- **A local account without identity delegation is told the truth**: the
+  check says the console writes the object with its own identity instead
+  of "you can write this object".
+- **Resume an interrupted folder action from the console**:
+  `POST /api/folders/actions/<id>/resume`, like `resume` on the command line.
+
 ### Internal
 - **Folder registry and rules** (`bin/lib/folders.py`, pure, and
   `bin/lib/folders_db.py`): the tree of folders, the cache of memberships
@@ -262,6 +275,11 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   refreshes these tabs) and the cluster selector styles.
 
 ### Tests
+- Folder routes: name clash at create, rename and move refused with 409
+  before any action (and the cases that are not a clash), one access review
+  per namespace then by name on "no", the console-identity reason without
+  delegation, resume of an interrupted action (409 while it runs, viewer
+  403, unknown 404); e2e: three target changes, one check request.
 - `tests/e2e/test_folders_200.py`: 5,000 simulated VMs (300 rows drawn, Show
   300 more appends, Select all selects the filtered 5,000, one update after
   typing, an unchanged refresh redraws nothing, a changed one does) with

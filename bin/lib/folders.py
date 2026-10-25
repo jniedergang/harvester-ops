@@ -352,6 +352,12 @@ def delete_check(tree, folder_id, members, visible=None):
             "subfolders": subfolders, "hidden": hidden}
 
 
+def name_taken(tree, parent_id, name, folder_id=None):
+    """Un frère sous `parent_id` (None = racine), autre que `folder_id`,
+    porte-t-il déjà `name` ? Même règle que l'index de folders.db (nom exact)."""
+    return any(f["parent_id"] == parent_id and f["name"] == name and f["id"] != folder_id for f in tree)
+
+
 def empty_into_conflicts(tree, folder_id, target_id):
     """Noms des sous-dossiers de `folder_id` qui ne peuvent pas passer sous
     `target_id` (None = racine) : un frère y porte déjà ce nom (le dossier

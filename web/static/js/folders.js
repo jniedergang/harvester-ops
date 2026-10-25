@@ -605,6 +605,12 @@
     const win = api.el || document.getElementById('fp-fld-move');
     const box = win.querySelector('[data-fld-win="move"]');
     const state = { target: o.target == null ? null : String(o.target), checks: null, seq: 0 };
+    // revue M-2 : le contrôle d'un objet ne dépend pas de la cible ; gardé
+    // pour la vie de la fenêtre (même personne), un changement de cible ne
+    // relance aucune revue d'accès, les objets ajoutés seulement
+    const known = new Map();
+    let checkTimer = null;
+    const checkSoon = () => { clearTimeout(checkTimer); checkTimer = setTimeout(check, 150); };
     const list = () => objects.concat(extra && box.querySelector('[data-fld-extra]')?.checked ? extra.objects : []);
     const labelOf = new Map(objects.concat(extra ? extra.objects : []).map((x) => [x.key, x.label || x.key]));
 
@@ -622,12 +628,16 @@
       out.innerHTML = `<p class="form-hint">${esc(tr('fld.checking'))}</p>`;
       try {
         const objs = list();
-        const d = await send('POST', '/api/folders/check', {
-          objects: objs.map((x) => (x.host ? { key: x.key, host: x.host } : { key: x.key })),
-          to: state.target === UNFILED ? UNFILED : Number(state.target),
-        });
+        const ask = objs.filter((x) => !known.has(x.key));
+        if (ask.length) {
+          const d = await send('POST', '/api/folders/check', {
+            objects: ask.map((x) => (x.host ? { key: x.key, host: x.host } : { key: x.key })),
+            to: state.target === UNFILED ? UNFILED : Number(state.target),
+          });
+          (d.objects || []).forEach((c) => known.set(c.key, c));
+        }
         if (seq !== state.seq) return;
-        state.checks = d.objects || [];
+        state.checks = objs.map((x) => known.get(x.key)).filter(Boolean);
         const oc = OUTCOME();
         const counts = { object: 0, console: 0, fail: 0 };
         state.checks.forEach((c) => { counts[c.outcome] = (counts[c.outcome] || 0) + 1; });
@@ -648,8 +658,8 @@
     drawTargets('');
     box.querySelector('[data-fld-search]').addEventListener('input', (e) => drawTargets(e.target.value));
     box.addEventListener('change', (e) => {
-      if (e.target.name === 'fld-move-to') { state.target = e.target.value; check(); }
-      if (e.target.matches('[data-fld-extra]')) check();
+      if (e.target.name === 'fld-move-to') { state.target = e.target.value; checkSoon(); }
+      if (e.target.matches('[data-fld-extra]')) checkSoon();
     });
     box.querySelector('[data-fld-apply]').addEventListener('click', async (e) => {
       const btn = e.currentTarget;

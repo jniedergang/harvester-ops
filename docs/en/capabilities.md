@@ -378,13 +378,14 @@ role, reading is for everyone.
 | Route | What it does |
 |---|---|
 | `GET /api/folders` | the tree, each folder with its `origin` (`console`, or `objects` when a fleet read created it from the objects naming it) and `counts` `{vms, containers, hosts}`, subfolders included, limited to what the person saw in their own latest fleet reads (`null`: not read yet) |
-| `POST /api/folders` | create (`parent_id`, `name`) |
-| `PATCH /api/folders/<id>` | rename (`name`) or move (`parent_id`, `null` for the root), one change at a time; its objects are rewritten in the same action. Folders are sorted by name: `position` is refused |
+| `POST /api/folders` | create (`parent_id`, `name`); a sibling with the same name answers 409 `{conflicts}` before anything starts |
+| `PATCH /api/folders/<id>` | rename (`name`) or move (`parent_id`, `null` for the root), one change at a time; its objects are rewritten in the same action. Folders are sorted by name: `position` is refused. A sibling with the same name (at the new name or under the new parent) answers 409 `{conflicts}` before anything starts |
 | `DELETE /api/folders/<id>` | delete an empty folder; a non-empty one answers 409 with what the person sees (`count_visible`, `subfolders`, and `hidden` without a number) |
 | `POST /api/folders/<id>/empty-into` | `target_id` (a folder or `unfiled`): move the content, then delete, in one action; a subfolder whose name is already taken in the target answers 409 before anything moves |
 | `POST /api/folders/assign` | `objects` (keys; a KVM VM also gives its `host`) and `to` (a folder id or `unfiled`) |
 | `POST /api/folders/check` | the checks shown before a move, object by object, nothing written |
 | `POST /api/folders/actions/<id>/undo` | undo a finished folder action |
+| `POST /api/folders/actions/<id>/resume` | resume an interrupted folder action: lines not done yet (pending or failed) are written again, done lines never; 409 while it runs |
 | `POST /api/folders/<id>/write-back` | write on the objects the console-only filings of the folder |
 
 Every change answers `202 {"action_id"}` at once; the dock shows the action,
@@ -400,8 +401,14 @@ virsh accepts, so a renamed domain is still found.
 folder is written on the object), `console` (only the console's filing
 changes) or `fail` (the gesture will fail for this object, with the reason).
 Harvester VMs and workloads: `kubectl auth can-i patch` with the person's
-kubeconfig (a SelfSubjectAccessReview, `check: ssar`), a cluster that does
-not answer is said without asking it. KVM: the host is reached and the
+kubeconfig (a SelfSubjectAccessReview, `check: ssar`), asked once per
+cluster, namespace and resource for several objects, then by name only when
+that answer is not "yes"; a cluster that does not answer is said without
+asking it. For a local console account without identity delegation, that
+kubeconfig is the console's own: the reason then says that the console
+writes the object with its own identity, not that the person may. The
+window keeps each object's check while it is open: changing the target asks
+nothing again. KVM: the host is reached and the
 domain is persistent (one `dominfo` per domain in one SSH call per host,
 `check: virsh`); a transient domain is kept by the console. Host: its
 declaration (`check: decl`); a cluster of `config.yaml` is filed in the
