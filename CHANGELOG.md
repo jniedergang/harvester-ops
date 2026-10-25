@@ -4,6 +4,15 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [1.101.1] - 2026-10-25 - State filter of the contracts list
+
+### Fixed
+- **Contracts list without any contract.** The state filter stayed empty,
+  without its "All states" choice. It now always offers it.
+
+### Tests
+- e2e: the contracts list with no contract offers "All states".
+
 ## [1.101.0] - 2026-10-25 - Replication screens: contracts, protection, failover and recovery options
 
 ### Added

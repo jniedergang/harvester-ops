@@ -154,7 +154,7 @@ NOTIFY = {"enabled": True, "min_level": "warn", "codes": None, "channels": [
 
 @pytest.fixture
 def ui_factory(context, flask_server):
-    def make(role="admin"):
+    def make(role="admin", empty=False):
         context.add_init_script(
             "if (!sessionStorage.getItem('rp-init')) {"
             "localStorage.setItem('harvester_ops_language','en');"
@@ -181,6 +181,8 @@ def ui_factory(context, flask_server):
             sent.append(("GET", bare, q))
             if bare == "plans":
                 d = plans_payload(role)
+                if empty:
+                    d["plans"] = []
                 if created:
                     d["plans"][0]["name"] = created["name"]       # le contrat tout juste créé
                 return route.fulfill(**ok(d))
@@ -328,6 +330,16 @@ def test_cards_table_toggle_is_kept_and_filters_work(ui):
     pane.locator('[data-rp="q"]').fill("db-1")
     expect(pane.locator(".rp-table tbody tr")).to_have_count(1)
     expect(pane.locator(".rp-table tbody tr")).to_contain_text("erp")
+
+
+def test_state_filter_offers_all_states_without_any_contract(ui_factory):
+    # 1.101.1 : sans contrat, la liste des états restait vide (aucune option).
+    page, _, _ = ui_factory(empty=True)
+    pane = open_plans(page)
+    expect(pane.locator(".rp-empty")).to_be_visible()
+    sel = pane.locator('[data-rp="state"]')
+    expect(sel.locator("option")).to_have_count(1)
+    expect(sel.locator("option")).to_have_text("All states")
 
 
 def test_cluster_subview_shows_both_roles_and_filters(ui):
