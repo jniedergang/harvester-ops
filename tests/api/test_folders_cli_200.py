@@ -500,6 +500,88 @@ def test_an_interrupted_rename_is_resumed_without_rewriting_done_lines(env, monk
     assert {v for v in members(env).values()} == {("/Prod/Finance", "vm")}
 
 
+def tree_paths(env):
+    conn = fdb.connect(env["db"])
+    try:
+        return [f["path"] for f in fdb.list_tree(conn)]
+    finally:
+        conn.close()
+
+
+def read_fleet(env, values):
+    """Lecture de flotte de la console (realign) : {nom de VM: annotation lue}."""
+    conn = fdb.connect(env["db"])
+    try:
+        return fdb.realign(conn, [{"key": f"harvester/harv1/nav/{n}", "folder": v, "scope": "harvester/harv1"}
+                                  for n, v in values.items()])
+    finally:
+        conn.close()
+
+
+def test_a_fleet_read_in_the_middle_of_a_rename_recreates_nothing(env, monkeypatch, capsys):
+    """Renommage en cours (a réécrite, b et c pas encore) : une lecture de
+    flotte voit b et c sous l'ancien chemin. Elle ne recrée pas l'ancien
+    dossier vide, et les montre déjà sous le nouveau."""
+    objs = [vm("a"), vm("b"), vm("c")]
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs}) == 0
+    real, seen = cli.write_object, []
+
+    def read_before_b(obj, path, spec, ctx):
+        if obj["name"] == "b":
+            seen.append(read_fleet(env, {"a": "/Prod/Finance", "b": "/Prod/ERP", "c": "/Prod/ERP"}))
+        return real(obj, path, spec, ctx)
+    monkeypatch.setattr(cli, "write_object", read_before_b)
+    assert run(env, "--id=rn", "rename", "--id", "2", "--name", "Finance", spec={"objects": objs}) == 0
+    want = {f"harvester/harv1/nav/{n}": ("/Prod/Finance", "vm") for n in "abc"}
+    assert seen == [want]
+    assert "/Prod/ERP" not in tree_paths(env)
+    assert members(env) == want
+    # rien en cours : un objet qui porte encore /Prod/ERP le recrée (origine objects)
+    assert read_fleet(env, {"a": "/Prod/ERP"}) == {"harvester/harv1/nav/a": ("/Prod/ERP", "vm")}
+    assert "/Prod/ERP" in tree_paths(env)
+
+
+def test_an_object_the_renamer_could_not_see_follows_and_apply_rename_fixes_it(env, capsys):
+    objs = [vm("a"), vm("b")]
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs}) == 0
+    # b n'est pas dans la demande : ligne `failed`, b garde /Prod/ERP sur l'objet
+    assert run(env, "--id=rv", "rename", "--id", "2", "--name", "Finance", spec={"objects": objs[:1]}) == 1
+    assert read_fleet(env, {"a": "/Prod/Finance", "b": "/Prod/ERP"})["harvester/harv1/nav/b"] == \
+        ("/Prod/Finance", "vm")
+    assert "/Prod/ERP" not in tree_paths(env)
+    env["kube"].calls.clear()
+    assert run(env, "--id=ap", "apply-rename", "--id", "2", spec={"objects": objs}) == 0
+    assert [(c[2], c[3]["metadata"]["annotations"]["harvester-ops.io/folder"]) for c in env["kube"].calls
+            if not c[4]] == [("b", "/Prod/Finance")]
+    assert [j[3] for j in journal(env, "rv")] == ["done", "done", "done"]
+
+
+def test_undo_of_a_rename_read_midway_recreates_nothing(env, monkeypatch, capsys):
+    objs = [vm("a"), vm("b")]
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": objs}) == 0
+    assert run(env, "--id=r5", "rename", "--id", "2", "--name", "Finance", spec={"objects": objs}) == 0
+    real, seen = cli.write_object, []
+
+    def read_first(obj, path, spec, ctx):
+        if not seen:
+            seen.append(read_fleet(env, {"a": "/Prod/Finance", "b": "/Prod/Finance"}))
+        return real(obj, path, spec, ctx)
+    monkeypatch.setattr(cli, "write_object", read_first)
+    assert run(env, "--id=u5", "undo", "--action", "r5", spec={"objects": objs}) == 0
+    assert seen == [{f"harvester/harv1/nav/{n}": ("/Prod/ERP", "vm") for n in "ab"}]
+    assert "/Prod/Finance" not in tree_paths(env)
+
+
+def test_apply_rename_removes_an_empty_folder_recreated_from_the_objects(env, capsys):
+    assert run(env, "assign", "--to", "/Prod/ERP", spec={"objects": [vm("a")]}) == 0
+    assert run(env, "--id=r6", "rename", "--id", "2", "--name", "Finance", spec={"objects": []}) == 1
+    conn = fdb.connect(env["db"])
+    fdb.ensure_path(conn, "/Prod/ERP")                   # recréée par une lecture d'avant le correctif
+    conn.close()
+    assert run(env, "apply-rename", "--id", "2", spec={"objects": [vm("a")]}) == 0
+    assert "/Prod/ERP" not in tree_paths(env) and "/Prod/Finance" in tree_paths(env)
+
+
 def test_an_unreachable_host_mid_batch_then_resume(env, capsys):
     env["virsh"].down = {"vm-b"}
     objs = [kvm("vm-a", UUID1), kvm("vm-b", UUID2)]

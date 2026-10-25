@@ -237,3 +237,16 @@ def test_undo_of_two_moves_of_the_same_object_goes_back_to_the_first():
 def test_delete_check(fid, visible, expected):
     tree = TREE + [{"id": 5, "parent_id": None, "name": "Empty"}]
     assert fm.delete_check(tree, fid, MEMBERS, visible) == expected
+
+
+@pytest.mark.parametrize("path,renames,known,expected", [
+    ("/Old/x", [("/Old", "/New")], {"/New"}, "/New/x"),
+    ("/Old", [("/Old", "/New")], {"/New"}, "/New"),
+    ("/Older/x", [("/Old", "/New")], {"/New"}, "/Older/x"),               # préfixe de nom, pas de chemin
+    ("/Old/x", [("/Old", "/New")], {"/Old", "/New"}, "/Old/x"),            # ancien chemin recréé exprès
+    ("/A/x", [("/A", "/B"), ("/B", "/C")], {"/C"}, "/C/x"),                # renommages enchaînés
+    ("/A/b/c/d/e/f/g/h", [("/A", "/Z/y")], set(), "/A/b/c/d/e/f/g/h"),         # dépasserait 8 niveaux
+    ("/A/x", [], set(), "/A/x"),
+])
+def test_remap_of_a_path_during_a_rename(path, renames, known, expected):
+    assert fm.remap(path, renames, known) == expected

@@ -350,6 +350,13 @@ def realign(conn, rows, now=None):
     now = _iso(now) if now else _now()
     with _write(conn):
         tree = list_tree(conn)
+        renames = active_renames(conn)
+        if renames:
+            # renommage en cours : un objet pas encore réécrit ne recrée pas
+            # l'ancien dossier, il est montré sous le nouveau
+            known = set(fm.index(tree))
+            rows = [dict(r, folder=fm.remap(r["folder"], renames, known)) if r.get("folder") else r
+                    for r in rows]
         cache = memberships(conn, [r["key"] for r in rows if r.get("key")])
         upd, created = fm.reconcile(tree, rows, cache, now)
         idx = fm.index(tree)
@@ -372,6 +379,17 @@ def realign(conn, rows, now=None):
                 continue
             upsert_membership(conn, key, m["folder_path"], m["source"], now, m.get("scope") or "")
         return fm.effective(rows, memberships(conn, [r["key"] for r in rows if r.get("key")]))
+
+
+def active_renames(conn):
+    """[(ancien chemin, nouveau)] des renommages et déplacements de dossier
+    faits dont des lignes d'objets de la même action restent à faire
+    (`pending`, `failed`), dans l'ordre du journal."""
+    return [(r["from_path"], r["to_path"]) for r in conn.execute(
+        "SELECT f.from_path, f.to_path FROM moves f WHERE f.object_key LIKE 'folder/%' "
+        "AND f.status = 'done' AND EXISTS (SELECT 1 FROM moves o WHERE o.action_id = f.action_id "
+        "AND o.object_key NOT LIKE 'folder/%' AND o.status IN ('pending', 'failed')) "
+        "ORDER BY f.at, f.rowid")]
 
 
 def purge(conn, now=None, days=PURGE_DAYS, scopes=None):

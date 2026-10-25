@@ -236,6 +236,20 @@ def reconcile(tree, rows, cache, now):
     return out, created
 
 
+def remap(path, renames, known):
+    """Chemin lu sur un objet, ramené sur l'arborescence pendant un
+    renommage ou un déplacement de dossier en cours (objets pas encore
+    réécrits) : `renames` [(ancien, nouveau)] dans l'ordre du journal. Un
+    ancien chemin de nouveau présent dans `known` (recréé exprès, ou remis
+    par Annuler) n'est pas réécrit."""
+    for old, new in renames:
+        if old and new and old not in known and within(path, old):
+            moved = new + path[len(old):]
+            if check_path(moved) is None:
+                path = moved
+    return path
+
+
 def effective(rows, cache):
     """(dossier, source) de chaque clé lue, après réalignement : la valeur
     de l'objet, sinon le repli « console » du cache."""

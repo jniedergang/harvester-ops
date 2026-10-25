@@ -452,10 +452,12 @@ def _rewrite_folder(args, conn, folder_id, change, label):
     members = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
     old, new = change()
     plan = fm._rewrite(members, old, new)
-    lines = start_lines(conn, args.id, [(f"folder/{folder_id}", old, new)])
+    # les lignes des objets sont posées AVANT de dire le dossier fait : une
+    # lecture de flotte voit ainsi le renommage en cours (folders_db.realign)
+    lines = start_lines(conn, args.id, [(f"folder/{folder_id}", old, new)] + plan)
     fdb.record_move(conn, args.id, lines[0]["seq"], f"folder/{folder_id}", old, new, "done")
     step(label, "done", f"folder {old} -> {new}")
-    failed = run_lines(conn, args, args.id, start_lines(conn, args.id, plan), objects, spec)
+    failed = run_lines(conn, args, args.id, lines[1:], objects, spec)
     return finish(args, {"action": args.id, "from": old, "to": new, "objects": len(plan)}, failed,
                   f"{old} -> {new}: {len(plan) - failed}/{len(plan)} object(s) rewritten")
 
@@ -529,14 +531,30 @@ def cmd_apply_rename(args, conn):
     déplacé (dernier renommage du journal), sans toucher à l'arborescence."""
     need_operator(args)
     fid = folder_ref(conn, args.folder_id)
-    row = conn.execute("SELECT from_path, to_path FROM moves WHERE object_key = ? AND status = 'done' "
-                       "ORDER BY at DESC, rowid DESC LIMIT 1", (f"folder/{fid}",)).fetchone()
+    row = conn.execute("SELECT action_id, from_path, to_path FROM moves WHERE object_key = ? "
+                       "AND status = 'done' ORDER BY at DESC, rowid DESC LIMIT 1", (f"folder/{fid}",)).fetchone()
     if row is None:
         raise Refused(f"folder {fid} has not been renamed or moved")
     spec = read_spec(args.spec)
     members = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
     plan = fm._rewrite(members, row["from_path"], row["to_path"])
-    failed = run_lines(conn, args, args.id, start_lines(conn, args.id, plan), objects_of(spec), spec)
+    # objets restés en échec dans le renommage : le cache les montre déjà
+    # sous le nouveau chemin (realign), l'objet porte encore l'ancien
+    left = [m for m in fdb.moves_of(conn, row["action_id"])
+            if not m["object_key"].startswith("folder/") and m["status"] in ("pending", "failed")]
+    planned = {k for k, _, _ in plan}
+    plan += [(m["object_key"], m["from_path"], m["to_path"]) for m in left if m["object_key"] not in planned]
+    lines = start_lines(conn, args.id, plan)
+    failed = run_lines(conn, args, args.id, lines, objects_of(spec), spec)
+    done = {m["object_key"] for m in fdb.moves_of(conn, args.id) if m["status"] == "done"}
+    for m in left:
+        if m["object_key"] in done:
+            fdb.set_move_status(conn, row["action_id"], m["seq"], "done", f"applied by {args.id}")
+    old_id = fdb.id_of(conn, row["from_path"])
+    if not failed and old_id is not None and conn.execute(
+            "SELECT origin FROM folders WHERE id = ?", (old_id,)).fetchone()["origin"] == "objects":
+        with contextlib.suppress(fdb.FolderError):   # dossier recréé par une lecture, laissé vide
+            fdb.delete_empty(conn, old_id)
     return finish(args, {"action": args.id, "objects": len(plan)}, failed,
                   f"{len(plan) - failed}/{len(plan)} object(s) rewritten")
 
@@ -549,6 +567,14 @@ def cmd_undo(args, conn):
     spec = read_spec(args.spec)
     objects = objects_of(spec)
     failed = 0
+    # les objets portent encore le chemin écrit par l'action : ils y sont
+    # repris pour revenir à celui d'avant (conflit s'ils ont bougé depuis).
+    # Leurs lignes sont posées avant de toucher à l'arborescence, pour
+    # qu'une lecture de flotte voie l'annulation en cours.
+    current = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
+    obj_moves = [m for m in moves if not m["object_key"].startswith("folder/")]
+    plan, conflicts = fm.undo_plan(obj_moves, current)
+    lines = start_lines(conn, args.id, plan)
     # l'arborescence d'abord (dans l'ordre inverse), pour que les chemins
     # d'avant existent quand les objets y reviennent
     for m in reversed([m for m in moves if m["object_key"].startswith("folder/") and m["status"] == "done"]):
@@ -567,16 +593,11 @@ def cmd_undo(args, conn):
         fdb.record_move(conn, args.id, len(fdb.moves_of(conn, args.id)), m["object_key"],
                         m["to_path"], m["from_path"], "done")
         step(f"folder-{fid}", "done", f"folder {m['to_path']} -> {m['from_path']}")
-    # les objets portent encore le chemin écrit par l'action : ils y sont
-    # repris pour revenir à celui d'avant (conflit s'ils ont bougé depuis)
-    current = {k: v["folder_path"] for k, v in fdb.memberships(conn).items()}
-    obj_moves = [m for m in moves if not m["object_key"].startswith("folder/")]
-    plan, conflicts = fm.undo_plan(obj_moves, current)
     for c in conflicts:
         failed += 1
         step("conflict", "error", f"{c['key']} is now in {c['current'] or 'unfiled'}, "
                                   f"not {c['expected'] or 'unfiled'}: left as is")
-    failed += run_lines(conn, args, args.id, start_lines(conn, args.id, plan), objects, spec)
+    failed += run_lines(conn, args, args.id, lines, objects, spec)
     return finish(args, {"action": args.id, "undone": args.action, "objects": len(plan),
                          "conflicts": conflicts}, failed,
                   f"{len(plan)} object(s) put back, {len(conflicts)} conflict(s)")

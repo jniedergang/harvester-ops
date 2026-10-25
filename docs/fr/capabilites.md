@@ -280,6 +280,10 @@ déclaration de l'hôte. Quand la personne n'a pas le droit d'écrire l'objet,
 ou que la RBAC refuse le patch (`cannot patch resource`), le rangement est
 gardé par la console seule ; un refus de webhook ou de quota, même en code
 403, fait échouer la ligne avec sa raison ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
+Tant qu'un renommage ou un déplacement a des objets à réécrire (en cours,
+ou en échec pour un objet que la personne ne voyait pas), une lecture de
+flotte montre ces objets sous le nouveau chemin et ne recrée jamais l'ancien
+dossier ; `apply-rename` les réécrit et retire un ancien dossier resté vide.
 Un lecteur lit l'arborescence et ne change rien ; sans `--role`, la commande tourne en lecteur. Codes de sortie : 0 fait,
 1 refus ou un objet en échec, 2 demande invalide (nom, chemin, profondeur,
 longueur, objet inconnu). Avec `--json`, toute sortie en erreur écrit un seul

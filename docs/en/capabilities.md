@@ -259,7 +259,11 @@ the console), the `folder` field of the host declaration. When the person
 may not write the object, or the RBAC refuses the patch (`cannot patch
 resource`), the filing is kept by the console only; a webhook or quota
 refusal, even with the 403 code, fails the line with its reason; an object that carries a folder the person cannot
-change keeps it. A viewer reads the tree and changes nothing; without `--role` the command runs as a viewer. Exit codes: 0
+change keeps it. While a rename or move still has objects to rewrite (in progress, or
+failed for an object the person could not see), a fleet read shows those
+objects under the new path and never recreates the former folder;
+`apply-rename` rewrites them and removes a former folder left empty. A
+viewer reads the tree and changes nothing; without `--role` the command runs as a viewer. Exit codes: 0
 done, 1 refused or an object failed, 2 invalid request (name, path, depth,
 length, unknown object). With `--json`, every error exit prints one object
 `{"ok": false, "error", "kind"}` on stdout; an unexpected error is told by
