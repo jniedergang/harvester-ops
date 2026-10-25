@@ -88,7 +88,9 @@ def test_refused_reads_are_told_and_grouped(fr, flask_server):
         resp = route.fetch()
         route.fulfill(response=resp, headers={**resp.headers, "x-cluster-denied": json.dumps(denied)})
     page.route("**/api/status/**", with_denials)
-    page.goto(flask_server["base_url"] + "/")
+    # 2.0.0 : l'état du cluster n'est lu que par la Vue d'ensemble (l'adresse
+    # vide ouvre #vms sans le lire) ; on ouvre donc la Vue d'ensemble
+    page.goto(flask_server["base_url"] + "/#harvester/harv-fake")
     notice = page.locator("#access-notice")
     expect(notice).to_be_visible(timeout=15000)
     expect(notice).to_contain_text("Une partie de cette vue vous est cachée")
