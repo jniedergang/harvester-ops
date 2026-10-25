@@ -127,7 +127,7 @@ BUILDERS = ("esc", "icon", "hostSel", "Icons.svg", "tip", "badge", "dim", "row",
             "VMForm.shellHtml", "VMForm.appliedBadge", "VMForm.changesHtml", "VMForm.restartBanner",
             "VMForm.reviewHtml", "TFForm.render", "CloudInitForm.renderWizard",
             "KVMForm.menuGroupHtml", "errHtml", "okHtml", "listHtml", "progressHtml", "sendFieldsHtml",
-            "poolRow", "volRow", "imageRow", "netRow")
+            "poolRow", "volRow", "imageRow", "netRow", "hostName")
 HTML_VARS = {
     "vm-form.js": {"a[0]", "actions", "buttonHtml", "head", "html"},
     "cloudinit-form.js": set(),
