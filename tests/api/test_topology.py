@@ -208,8 +208,11 @@ def test_app_js_restores_subtabs_after_setcluster():
         "restoreSubTabsFromStorage helper missing — sub-tab restore "
         "race with setCluster() will recur."
     )
-    # And init() must call it AFTER setCluster()
-    init_body = src[src.find("function init()"):]
+    # And the start-up restore must call it AFTER setCluster(). Navigation
+    # 2.0: init() hands over to the router, whose empty-address path is
+    # restoreFromStorage() (the address path is covered by
+    # tests/e2e/test_router_1100.py::test_router_cold_load_detects_order).
+    init_body = src[src.find("function restoreFromStorage()"):]
     init_body = init_body[:2500]
     sc = init_body.find("setCluster(")
     rs = init_body.find("restoreSubTabsFromStorage()")

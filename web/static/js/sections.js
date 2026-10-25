@@ -96,10 +96,22 @@ const Sections = (() => {
   function show(sec, pane) {
     if (!isSection(sec) || !DEF[sec].panes[pane]) return;
     try { localStorage.setItem(KEY(sec), pane); } catch {}
-    return activate(sec);
+    const loading = activate(sec);
+    // Navigation 2.0 : l'adresse porte le pane (F5 rend le même pane)
+    if (window.Router) Router.syncFromScreen();
+    return loading;
   }
 
-  /** Ouvre une section sur un onglet (liens d'une vue vers une autre). */
+  /** Retient le pane d'une section sans rien montrer (le routeur pose
+   *  ensuite le cluster et l'onglet, qui l'activent). */
+  function remember(sec, pane) {
+    if (!isSection(sec) || !DEF[sec].panes[pane]) return false;
+    try { localStorage.setItem(KEY(sec), pane); } catch {}
+    return true;
+  }
+
+  /** Ouvre une section sur un onglet (liens d'une vue vers une autre) ;
+   *  setTab en écrit l'adresse. */
   function open(sec, pane) {
     if (pane) { try { localStorage.setItem(KEY(sec), pane); } catch {} }
     if (window.App && App.setTab) App.setTab(sec);
@@ -128,6 +140,6 @@ const Sections = (() => {
   }
 
   document.addEventListener('DOMContentLoaded', init);
-  return { isSection, activate, show, open, stopLists, current, DEF };
+  return { isSection, activate, show, open, remember, stopLists, current, DEF };
 })();
 window.Sections = Sections;

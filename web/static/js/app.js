@@ -81,6 +81,9 @@ const App = (() => {
     // une bascule, l'ANCIEN cluster : c'est ce qui repeignait les VMs de
     // harv1 sur un aperçu titré harv3.
     if (name !== 'overview' && !section) stopBoards(null);
+    // Navigation 2.0 : l'adresse suit l'écran (F5 rend l'écran exact). Sans
+    // effet pendant que le routeur applique lui-même une adresse.
+    if (window.Router) Router.syncFromScreen();
   }
 
   /** Sous-onglet d'aperçu actif (metrics | cluster). */
@@ -228,16 +231,25 @@ const App = (() => {
   // -------------------------------------------------------------------------
   // Cluster selection
   // -------------------------------------------------------------------------
-  async function setCluster(name, opts = {}) {
-    if (!name) return;
+  /** Pose le cluster courant sans rien recharger (en-tête, sélecteur,
+   *  mémoire) ; les refus de l'ancien cluster sont effacés. */
+  function commitCluster(name) {
     const previous = currentCluster;
     currentCluster = name;
     // v1.56.0 : les refus de l'ancien cluster ne valent pas pour celui-ci
     if (previous && previous !== name && window.AccessNotice) AccessNotice.reset();
     $$('.cluster-name').forEach(el => el.textContent = name);
+    const sel = $('#cluster-select');
+    if (sel && sel.value !== name && [...sel.options].some(o => o.value === name)) sel.value = name;
     // v1.4.32: persist the selection so F5 restores the same cluster
     // (was always defaulting to the first <select> option).
     try { localStorage.setItem('harvester_ops_current_cluster', name); } catch {}
+    return previous;
+  }
+
+  async function setCluster(name, opts = {}) {
+    if (!name) return;
+    const previous = commitCluster(name);
 
     // Premier choix de la session : il n'y a rien à l'écran à remplacer,
     // le voile n'aurait rien à masquer.
@@ -1798,7 +1810,12 @@ const App = (() => {
     // Disaster Recovery : pastilles d'alerte du menu, relues toutes les minutes
     if (window.Replication) Replication.startBadges();
 
-    $('#cluster-select')?.addEventListener('change', (e) => setCluster(e.target.value));
+    // Navigation 2.0 : un écran d'hôte passe par le routeur (adresse,
+    // historique) ; un écran de flotte garde la bascule directe.
+    $('#cluster-select')?.addEventListener('change', (e) => {
+      if (window.Router) Router.selectCluster(e.target.value);
+      else setCluster(e.target.value);
+    });
 
     // Création de VM : le namespace courant sert de proposition, le panneau
     // laisse en changer.
@@ -2000,6 +2017,7 @@ const App = (() => {
         // « Métriques » (pas de vue de blocs, mais il faut couper le polling).
         mountTopology(target);
         if (target === 'metrics') refreshStatus({ veil: true });
+        if (window.Router) Router.syncFromScreen();
       });
     });
 
@@ -2067,6 +2085,104 @@ const App = (() => {
     restore('harvester_ops_shutdown_subtab', 'data-shutdown-tab');
   }
 
+  /** Cluster retenu au chargement : le dernier choisi s'il est encore
+   *  déclaré (il peut avoir quitté config.yaml), sinon le premier. */
+  function defaultCluster() {
+    const list = listClusters();
+    let saved = null;
+    try { saved = localStorage.getItem('harvester_ops_current_cluster'); } catch {}
+    return saved && list.includes(saved) ? saved : (list[0] || null);
+  }
+
+  /** Adresse vide : l'ancien démarrage (cluster, sous-onglets, dernier
+   *  onglet retenus dans localStorage). Les tests e2e ouvrent leurs onglets
+   *  ainsi (`harvester_ops_current_tab`). */
+  function restoreFromStorage() {
+    const target = defaultCluster();
+    if (target && target !== currentCluster) setCluster(target, { silent: !currentCluster });
+    // Restore previously selected sub-tabs now that currentCluster is set.
+    restoreSubTabsFromStorage();
+    // v1.4.33: guard via the tab-content element (#tab-<name>) instead of
+    // .tab[data-tab=<name>]. Group heads like Automation carry data-group
+    // (not data-tab), so the old guard silently failed for them — F5 on
+    // Automation > CAPI/Terraform/PXE always reverted to Overview.
+    try {
+      const savedTab = localStorage.getItem(TAB_STORAGE);
+      if (savedTab && document.getElementById(`tab-${savedTab}`)) {
+        setTab(savedTab);
+        if (savedTab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
+      }
+    } catch {}
+  }
+
+  /** Peint le sous-onglet d'aperçu sans monter sa vue (setTab s'en charge). */
+  function paintOverviewMode(mode) {
+    $$('[data-overview-tab]').forEach(b => b.classList.toggle('active', b.dataset.overviewTab === mode));
+    $$('.overview-subtab').forEach(p => p.hidden = (p.dataset.subtab !== mode));
+    try { localStorage.setItem('harvester_ops_overview_subtab', mode); } catch {}
+  }
+
+  const activeTab = () => document.querySelector('.tab-content.active')?.id?.replace(/^tab-/, '') || null;
+
+  /**
+   * Point d'entrée du routeur : pose le cluster, PUIS l'onglet (le pane est
+   * déjà retenu par Sections.remember). Défaut de 1.4.31 : un onglet montré
+   * avant son cluster restait une toile vide. Changement de cluster = voile
+   * et refus de l'ancien effacés, comme la bascule par le sélecteur.
+   * t = { cluster, tab, overview, tabFirst } ; tabFirst n'existe que pour
+   * le test de mutation qui prouve que l'ordre est vérifié.
+   */
+  async function showRoute(t) {
+    const show = () => {
+      if (t.overview) paintOverviewMode(t.overview);
+      setTab(t.tab);
+      if (t.tab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
+    };
+    const cluster = t.cluster || currentCluster || defaultCluster();
+    const previous = currentCluster;
+    if (!cluster || cluster === previous) { show(); return; }
+    if (t.tabFirst) show();
+    commitCluster(cluster);
+    if (!previous) {
+      // premier écran de la session : sous-onglets retenus, sans voile
+      if (!t.overview) paintOverviewMode(savedOverviewMode());
+      let shut = null;
+      try { shut = localStorage.getItem('harvester_ops_shutdown_subtab'); } catch {}
+      if (shut) document.querySelector(`[data-shutdown-tab="${CSS.escape(shut)}"]`)?.click();
+      if (!t.tabFirst) show();
+      if (t.tab !== 'overview') await refreshStatus();
+      return;
+    }
+    const work = async () => {
+      if (t.tabFirst) { await refreshStatus({ veil: true }); return; }
+      if (activeTab() === t.tab) {
+        if (t.overview) paintOverviewMode(t.overview);
+        await reloadForCluster();
+      } else {
+        show();
+        await refreshStatus({ veil: true });
+      }
+    };
+    if (window.Veil) {
+      await window.Veil.during(null, {
+        message: i18n.t('cluster.switching'), name: cluster, hint: i18n.t('cluster.switchingHint'),
+      }, work);
+    } else {
+      await work();
+    }
+  }
+
+  /** L'écran affiché, pour que le routeur en écrive l'adresse. */
+  function screen() {
+    const tab = activeTab();
+    let automation = 'capi';
+    try { automation = localStorage.getItem('harvester_ops_automation_subtab') || 'capi'; } catch {}
+    return {
+      tab, cluster: currentCluster, overview: overviewMode(), automation,
+      pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
+    };
+  }
+
   function init() {
     bind();
     if (window.Versions) Versions.init();
@@ -2082,41 +2198,10 @@ const App = (() => {
     if (typeof i18n !== 'undefined') i18n.applyTranslations();
     // Navigation 2.0 : la liste des clusters, relue une fois du serveur
     refreshClusters();
-    const sel = $('#cluster-select');
-    if (sel.options.length > 0) {
-      // v1.4.32: restore the cluster the user last worked on. Only
-      // honor a saved value that's still in the dropdown (a cluster
-      // may have been removed from config.yaml between sessions).
-      let target = sel.value;
-      try {
-        const saved = localStorage.getItem('harvester_ops_current_cluster');
-        if (saved) {
-          const opt = [...sel.options].find(o => o.value === saved);
-          if (opt) {
-            sel.value = saved;
-            target = saved;
-          }
-        }
-      } catch {}
-      setCluster(target);
-    }
-
-    // Restore previously selected sub-tabs now that currentCluster is set.
-    restoreSubTabsFromStorage();
-
-    // Restore last active tab (persisted in localStorage).
-    // v1.4.33: guard via the tab-content element (#tab-<name>) instead of
-    // .tab[data-tab=<name>]. Group heads like Automation carry data-group
-    // (not data-tab), so the old guard silently failed for them — F5 on
-    // Automation > CAPI/Terraform/PXE always reverted to Overview.
-    try {
-      const savedTab = localStorage.getItem(TAB_STORAGE);
-      if (savedTab && document.getElementById(`tab-${savedTab}`)) {
-        setTab(savedTab);
-        // Cluster API ne se charge plus seul au démarrage (cluster de gestion vide)
-        if (savedTab === 'automation' && window.CAPI && CAPI.reactivate) CAPI.reactivate();
-      }
-    } catch {}
+    // L'adresse décide de l'écran (cluster PUIS onglet PUIS pane) ; une
+    // adresse vide restaure le dernier écran comme avant (étape 1).
+    if (window.Router) Router.start();
+    else restoreFromStorage();
 
     // Restore previously open floating panels
     if (window.FloatingPanels && FloatingPanels.restoreAll) {
@@ -2265,7 +2350,9 @@ const App = (() => {
 
   return { init, refreshStatus, refreshNamespaces, refreshActivity, cancelAction, loadVMOrder, getCurrentCluster,
            mountTopology, stopBoards, setTab,
-           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost };
+           listClusters, refreshClusters, clustersInfo, managementCluster, setManagementCluster, openHost,
+           // réservé au routeur (router.js)
+           _nav: { showRoute, restoreFromStorage, screen, setCluster } };
 })();
 
 window.App = App;

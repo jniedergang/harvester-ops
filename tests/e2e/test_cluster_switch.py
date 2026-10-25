@@ -10,9 +10,13 @@ Ces tests exercent la bascule dans un vrai navigateur, sur une page servie
 par l'application, avec deux clusters déclarés.
 """
 
+import json
+import re
+
 import pytest
 
 playwright = pytest.importorskip("playwright")
+from playwright.sync_api import expect  # noqa: E402
 
 
 @pytest.fixture
@@ -293,3 +297,81 @@ def test_the_counter_says_how_much_is_hidden(context, flask_server):
     text = page.locator('#act-filter-count').inner_text()
     assert text.strip(), "aucun compteur affiché"
     assert "entries" in text
+
+
+# ---------------------------------------------------------------------------
+# Navigation 2.0, étape 1 : GPU et Migrations demandent l'hôte au routeur au
+# lieu de piloter le sélecteur (qui disparaît à l'étape 2)
+# ---------------------------------------------------------------------------
+
+def _spy_veil_and_notice(page):
+    page.evaluate("""() => {
+      window.__veils = [];
+      const orig = window.Veil.during;
+      window.Veil.during = (t, o, w) => { if (!t) window.__veils.push(o && o.name); return orig(t, o, w); };
+      AccessNotice.report([{verb: 'list', resource: 'pods', group: '', namespace: 'x'}]);
+    }""")
+    expect(page.locator("#access-notice")).to_be_visible()
+
+
+def test_gpu_open_addons_of_another_cluster_goes_there(context, flask_server, two_clusters):
+    data = {"clusters": [{"cluster": "harv-fake", "state": "ok", "count": 0, "addon": True,
+                          "available": {"addon": True, "gpu": True, "vgpu": True, "mig": True, "node": True}},
+                         {"cluster": two_clusters, "state": "no-addon", "count": 0, "addon": False}],
+            "units": [], "summary": {t: {"total": 0, "used": 0, "free": 0} for t in ("gpu", "vgpu", "mig", "node")}}
+    page = context.new_page()
+    page.route(re.compile(r".*/api/gpus-all(\?.*)?$"), lambda r, q: r.fulfill(
+        status=200, content_type="application/json", body=json.dumps(data)))
+    _goto(page, flask_server["base_url"], "gpus")
+    pane = page.locator("#tab-gpus")
+    pane.locator('[data-gpu="cluster"]').select_option(two_clusters)
+    btn = pane.locator(f'[data-gpu="open-addons"][data-cluster="{two_clusters}"]')
+    expect(btn).to_be_visible(timeout=8000)
+    _spy_veil_and_notice(page)
+    btn.click()
+    page.wait_for_function(f"App.getCurrentCluster() === '{two_clusters}'", timeout=10000)
+    page.wait_for_selector('.veil-fullscreen', state='detached', timeout=30000)
+    expect(page.locator('.tab-content.active')).to_have_id("tab-addons")
+    assert page.evaluate("window.__veils") == [two_clusters], "pas de voile de bascule"
+    expect(page.locator("#access-notice")).to_be_hidden()
+    assert page.evaluate("location.hash") == f"#harvester/{two_clusters}/params/addons/list"
+    # Précédent revient à l'inventaire des GPU
+    page.go_back()
+    expect(page.locator('.tab-content.active')).to_have_id("tab-gpus", timeout=10000)
+
+
+def test_migrations_wave_of_another_cluster_goes_to_its_waves(context, flask_server, two_clusters):
+    import test_forklift_global_176 as G
+    page = G.open_global(context, flask_server, initial_cluster="harv-second")
+    row = page.locator('#tab-forkliftglobal tr[data-fkg-wave="vague-2"]')
+    expect(row).to_be_visible(timeout=10000)
+    _spy_veil_and_notice(page)
+    row.click()
+    page.wait_for_function("App.getCurrentCluster() === 'harv-fake'", timeout=10000)
+    page.wait_for_selector('.veil-fullscreen', state='detached', timeout=30000)
+    expect(page.locator('.tab-content.active')).to_have_id("tab-forklift")
+    expect(page.locator('#tab-forklift .section-pane[data-pane="waves"]')).to_be_visible()
+    assert page.evaluate("window.__veils") == ["harv-fake"], "pas de voile de bascule"
+    expect(page.locator("#access-notice")).to_be_hidden()
+    assert page.evaluate("location.hash") == "#harvester/harv-fake/imports/forklift/waves"
+
+
+def test_cluster_api_keeps_its_management_cluster(context, flask_server, two_clusters):
+    """Le cluster de gestion choisi reste celui de Cluster API quand l'hôte
+    courant change ; sans choix, il suit le dernier hôte visité."""
+    page = context.new_page()
+    calls = []
+    page.on("request", lambda r: calls.append(r.url))
+    _goto(page, flask_server["base_url"], "automation")
+    assert page.evaluate("App.managementCluster()") == "harv-fake"
+    page.evaluate(f"App.setManagementCluster('{two_clusters}')")
+    page.select_option('#cluster-select', "harv-fake")
+    page.wait_for_timeout(500)
+    assert page.evaluate("App.managementCluster()") == two_clusters
+    calls.clear()
+    page.evaluate("CAPI.refresh()")
+    page.wait_for_timeout(800)
+    capi = [c for c in calls if "/api/capi/" in c]
+    assert capi and all(f"/api/capi/{two_clusters}/" in c for c in capi), capi
+    page.evaluate("App.setManagementCluster(null)")
+    assert page.evaluate("App.managementCluster()") == "harv-fake"

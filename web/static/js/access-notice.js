@@ -15,6 +15,7 @@ const AccessNotice = (() => {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   const denied = new Map();      // clé -> refus
   let hidden = [];               // clusters absents et pourquoi
+  let routeMiss = [];            // adresses qui n'ont pas pu s'ouvrir (navigation 2.0)
   let dismissed = new Set();     // clés déjà vues quand on a fermé le bandeau
   let who = { auth: 'open' };
 
@@ -50,7 +51,8 @@ const AccessNotice = (() => {
   function render() {
     const el = $('#access-notice');
     if (!el) return;
-    const keys = [...denied.keys(), ...hidden.map(h => 'cluster:' + h.name)];
+    const keys = [...denied.keys(), ...hidden.map(h => 'cluster:' + h.name),
+                  ...routeMiss.map(m => 'route:' + m.address)];
     const fresh = keys.filter(k => !dismissed.has(k));
     if (!fresh.length) { el.hidden = true; el.innerHTML = ''; return; }
     const user = who.user || '';
@@ -63,16 +65,22 @@ const AccessNotice = (() => {
       parts.push(`<p class="an-intro">${escapeHtml(intro)}</p>
         <ul class="an-list">${grouped().map(e => `<li><code>${escapeHtml(itemText(e))}</code></li>`).join('')}</ul>`);
     }
-    if (hidden.length) {
+    // une adresse vers un cluster caché par Rancher se lit avec les autres
+    const routeHidden = routeMiss.filter(m => REASON[m.reason] && m.name && !hidden.some(h => h.name === m.name));
+    const shownHidden = hidden.concat(routeHidden);
+    if (shownHidden.length) {
       parts.push(`<p class="an-intro">${escapeHtml(tr('access.clustersTitle'))}</p>
-        <ul class="an-list">${hidden.map(h => `<li>${escapeHtml((REASON[h.reason] || REASON['not-found'])(h.name))}</li>`).join('')}</ul>`);
+        <ul class="an-list">${shownHidden.map(h => `<li>${escapeHtml((REASON[h.reason] || REASON['not-found'])(h.name))}</li>`).join('')}</ul>`);
     }
+    routeMiss.filter(m => !REASON[m.reason]).forEach(m => {
+      parts.push(`<p class="an-intro an-route">${escapeHtml(tr('access.route.unknown', { address: m.address }))}</p>`);
+    });
     el.innerHTML = `
       <span class="an-icon" aria-hidden="true">${window.Icons ? Icons.svg('lock', { size: 16 }) : ''}</span>
       <div class="an-body">
         <strong class="an-title">${escapeHtml(tr('access.title'))}</strong>
         ${parts.join('')}
-        <p class="an-hint">${escapeHtml(hint)}</p>
+        ${denied.size || hidden.length || routeMiss.some(m => REASON[m.reason]) ? `<p class="an-hint">${escapeHtml(hint)}</p>` : ''}
       </div>
       <button type="button" class="btn-icon-sm an-close tip" data-tip="${escapeHtml(tr('access.dismissTip'))}"
               aria-label="${escapeHtml(tr('common.close'))}">×</button>`;
@@ -104,15 +112,28 @@ const AccessNotice = (() => {
     render();
   }
 
+  /** Adresse qui n'a pas pu s'ouvrir (hôte inconnu, caché par Rancher,
+   *  adresse illisible) : le routeur a ouvert l'écran par défaut.
+   *  m = { address, name, reason } ; reason 'no-access' / 'not-found' (Rancher)
+   *  ou 'unknown'. */
+  function route(m) {
+    if (!m || !m.address) return;
+    routeMiss = routeMiss.filter(x => x.address !== m.address).concat([{
+      address: String(m.address), name: m.name ? String(m.name) : '', reason: m.reason || 'unknown' }]);
+    dismissed.delete('route:' + m.address);
+    render();
+  }
+
   /** Changement de cluster : les refus du précédent ne valent plus. */
   function reset() {
     denied.clear();
+    routeMiss = [];
     dismissed = new Set([...dismissed].filter(k => k.startsWith('cluster:')));
     render();
   }
 
   function setIdentity(d) { who = d || who; render(); }
 
-  return { report, clusters, reset, setIdentity };
+  return { report, clusters, route, reset, setIdentity };
 })();
 window.AccessNotice = AccessNotice;

@@ -117,6 +117,44 @@ Un seul `config.yaml` déclare N clusters. Chaque commande CLI
 de la console liste tous les clusters ; basculer ne fait que changer le
 contexte actif — pas d'opération cross-cluster en fan-out.
 
+## Navigation et adresses
+
+Chaque écran de la console a une adresse après `#` : un lien ouvre l'écran
+exact et un rechargement (F5) le rend. Deux modules du navigateur la portent :
+
+- `web/static/js/routes.js` est pur (ni DOM ni réseau, testé dans node). Il
+  lit une adresse en route `{name, kind, host, sub, tab, pane, id}`, l'écrit
+  à l'inverse (`encodeURIComponent` sur chaque segment) et traduit les
+  anciens jetons (`#storage`, `#allvms`, `#kvmhosts`...), qui restent compris.
+  Les noms d'hôte sont contrôlés par les expressions du serveur : RFC 1123
+  pour un cluster Harvester, la règle des déclarations KVM pour un hôte KVM.
+- `web/static/js/router.js` applique une adresse : le cluster d'abord, puis
+  l'onglet, puis le pane. Un clic sur une entrée du menu, un onglet de
+  section ou d'aperçu réécrit l'adresse sans ajouter d'entrée d'historique ;
+  un lien d'une vue vers une autre (`App.openHost`) en ajoute une, et
+  Précédent revient à l'écran d'avant. Un hôte inconnu, caché par Rancher,
+  ou une adresse qui ne mène à aucun écran ouvre l'écran par défaut avec un
+  message, jamais une page vide. Une adresse vide rend le dernier écran.
+
+Grammaire des adresses (`<c>` = cluster Harvester, `<h>` = hôte KVM) :
+
+| Adresse | Écran |
+|---|---|
+| `#vms`, `#vms/folder/<id>`, `#vms/host/<harvester ou kvm>[/<nom>]` | machines virtuelles |
+| `#folders[/<id>]`, `#containers[/folder/<id>]`, `#hosts[/harvester, /kvm ou /folder/<id>]` | dossiers, conteneurs, hôtes |
+| `#harvester/<c>`, `#harvester/<c>/overview/events` | aperçu d'un cluster |
+| `#harvester/<c>/vms`, `#harvester/<c>/containers`, `#harvester/<c>/dr` | VMs, conteneurs, reprise après sinistre d'un cluster |
+| `#harvester/<c>/imports/<vmimport ou forklift>[/<pane>]` | imports et migrations VMware |
+| `#harvester/<c>/params/<onglet>[/<pane>]` | paramètres : `nodes`, `storage`, `network`, `addons`, `security`, `monlog`, `advanced`, `upgrade`, `power`, `conn` |
+| `#kvm/<h>`, `#kvm/<h>/vms`, `#kvm/<h>/dr`, `#kvm/<h>/params/<system, pools, networks, labels ou conn>` | hôte KVM |
+| `#dr`, `#dr/<contrat>`, `#dr/links` | contrats de réplication, liens |
+| `#migrations`, `#gpus`, `#bookings`, `#usage`, `#automation/<capi, terraform ou pxe>`, `#activity[/host/<famille>/<nom>]` | écrans de flotte |
+
+Les modules ne lisent jamais le sélecteur de cluster : ils passent par
+`App.getCurrentCluster()`, `App.listClusters()`, `App.managementCluster()`
+(cluster d'où Cluster API et Terraform gèrent, le dernier cluster visité
+sauf choix contraire) et `App.openHost(famille, nom, sub, onglet, pane)`.
+
 ## Flux d'événements SSE
 
 Quand la console déclenche une action (un shutdown ici) :
