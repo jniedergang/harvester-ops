@@ -340,6 +340,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   landing in another folder of the same name. They now stay with their
   folder and are counted as conflicts (`skipped` in the journal).
 
+- **A partial read no longer purges console-only filings**: every
+  cluster read without error was a purge scope, even a Rancher member's read
+  limited to her namespaces, so console-only filings in namespaces she
+  cannot see aged out after 30 days if only such people opened Virtual
+  machines. Only a complete read (no refusal, the console's own kubeconfig)
+  purges now, for VMs and containers.
 - **KVM hosts are surveyed once for everybody**: since fleet reads carry
   the person's identity, the KVM part of Virtual machines (the landing
   screen) opened one SSH survey of every KVM host per person signed in
@@ -576,7 +582,12 @@ This file summarises each minor release; per-patch detail lives in `git log`.
 - `tests/api/test_read_share_identity_200.py`: two Rancher identities make
   one SSH survey per KVM host and still get their own Harvester part, a KVM
   write drops the shared part, KVM keys equal across identities; mutation:
-  the identity put back in the KVM key gives one survey per person.
+  the identity put back in the KVM key gives one survey per person. A read
+  through Rancher or with a refusal keeps an old console-only filing, a
+  complete read purges it (mutations: purge always allowed, identity
+  ignored).
+- `tests/api/test_clusters_join_url_200.py`: the join address of a cluster
+  Rancher hides answers like an undeclared cluster.
 
 ## [1.101.3] - 2026-10-25 - Shorter KVM VM menu
 

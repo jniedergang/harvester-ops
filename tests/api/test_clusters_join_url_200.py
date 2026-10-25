@@ -168,3 +168,31 @@ def test_install_resolves_the_chosen_cluster(monkeypatch):
     with pytest.raises(ValueError):
         wapp._bm_vm_plan(dict(data, vm_network={"template": "t", "macs": []}), {})
     assert seen[-1] == ("https://172.16.3.100:443", "harv1")
+
+
+@pytest.mark.parametrize("settings,seen,cluster,code", [
+    (True, True, "harv1", 200),     # Rancher montre le cluster à la personne
+    (True, False, "harv1", 403),    # Rancher le lui cache : la garde centrale répond
+    (True, False, "other", 403),    # non déclaré : la même réponse, rien ne trahit l'existence
+    (False, False, "harv1", 403),   # session sans réglages Rancher : refusée aussi
+])
+def test_join_url_of_a_cluster_rancher_hides_says_nothing(tmp_path, monkeypatch, settings, seen, cluster, code):
+    """Revue finale S-1 : la route ne dit pas qu'existe un cluster que
+    Rancher cache à la personne. La garde centrale (_sso_cluster_guard)
+    répond avant elle, la même chose que pour un cluster non déclaré."""
+    import types
+    _setup(monkeypatch, _kc(tmp_path, "https://172.16.3.11:6443"), VIP_CM)
+    cfg = {"clusters": [{"name": "harv1", "kubeconfig": "x"}]}
+    monkeypatch.setattr(wapp, "load_config_ro", lambda: cfg)
+    monkeypatch.setattr(wapp, "load_config", lambda: cfg)
+    monkeypatch.setattr(wapp, "HTPASSWD_PATH", tmp_path / "htpasswd")
+    sess = types.SimpleNamespace(login="ann@rancher", role="operator", token="t", server_id="r1",
+                                 ident={"id": "u-ann", "username": "ann"})
+    monkeypatch.setattr(wapp, "_sso_session", lambda: sess)
+    monkeypatch.setattr(wapp, "_session_settings", lambda s: {"url": "https://r"} if settings else None)
+    monkeypatch.setattr(wapp, "_sso_cluster_state", lambda entry: ("/sso/harv1.yaml" if seen else None, None))
+    with wapp.app.test_client() as c:
+        r = c.get(f"/api/clusters/{cluster}/join-url")
+        assert r.status_code == code
+        if code == 403:
+            assert r.get_json() == c.get("/api/clusters/other/join-url").get_json()

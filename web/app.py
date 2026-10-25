@@ -9435,6 +9435,16 @@ def harvester_common_row(v, cluster):
 VMS_ALL_KINDS = ("harvester", "kvm")
 
 
+def _purge_allowed(denials):
+    """Une lecture de cluster peut-elle purger les rangements non vus de son
+    périmètre (revue finale D-4) ? Seulement une lecture complète : aucun
+    refus RBAC, et le kubeconfig de la console (ni session Rancher ni
+    identité déléguée, qui ne voient qu'une partie). Sinon un rangement
+    « console » d'un namespace que le lecteur ne voit pas vieillirait et
+    serait retiré si seuls de tels lecteurs ouvraient la vue 30 jours."""
+    return not denials and _read_share_identity() is None
+
+
 def _folders_apply(rows, scopes_ok):
     """Réaligne le cache des dossiers sur les VMs lues (décision 4 : pendant
     une lecture, sans action suivie) et pose sur chaque ligne le repli
@@ -9556,10 +9566,12 @@ def api_vms_all():
     from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=max(1, min(len(todo), 16))) as pool:
         results = list(pool.map(one, todo))
-    clusters, vms = [], []
-    for info, rows, _denials in results:
+    clusters, vms, full = [], [], set()
+    for info, rows, denials in results:
         clusters.append(info)
         vms.extend(rows)
+        if info["state"] == "ok" and _purge_allowed(denials):
+            full.add(info["cluster"])
     vms.sort(key=lambda v: (v["name"], v["cluster"], v["namespace"]))
     clusters = sorted(clusters, key=lambda c: c["cluster"])
     if kinds is None:
@@ -9589,7 +9601,8 @@ def api_vms_all():
         r.pop("_scope", None)
     unread_ids = {id(r) for r in unread}       # pas de comparaison de dicts (revue P-4)
     _folders_apply([r for r in rows if id(r) not in unread_ids],
-                   [f"{s['kind']}/{s['source']}" for s in sources if s["state"] == "ok" and not s.get("error")])
+                   [f"{s['kind']}/{s['source']}" for s in sources if s["state"] == "ok" and not s.get("error")
+                    and (s["kind"] == "kvm" or s["source"] in full)])
     if unread:
         cache = {}
         try:
@@ -10664,7 +10677,8 @@ def api_containers_list(cluster):
     if status == 200:
         for w in payload["workloads"]:
             w["cluster"] = cluster
-        _containers_folders(payload["workloads"], [] if payload.get("denials") else [f"container/{cluster}"])
+        _containers_folders(payload["workloads"],
+                            [f"container/{cluster}"] if _purge_allowed(payload.get("denials")) else [])
     return jsonify(payload), status
 
 
@@ -10709,7 +10723,7 @@ def api_containers_all():
         clusters.append(info)
         rows.extend(part)
     _containers_folders(rows, [f"container/{c['cluster']}" for c in clusters
-                               if c["state"] == "ok" and not c.get("denials")])
+                               if c["state"] == "ok" and _purge_allowed(c.get("denials"))])
     rows.sort(key=lambda w: (w["name"], w["cluster"], w["namespace"], w["kind"]))
     return jsonify({"clusters": sorted(clusters, key=lambda c: c["cluster"]), "workloads": rows})
 

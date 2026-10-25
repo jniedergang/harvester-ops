@@ -252,8 +252,11 @@ the folders it names; an object without a value keeps a `console` filing and
 loses a `vm` one (someone removed it on the object). This write happens
 during a read, without a tracked action: it is the documented exception, as
 it only mirrors what the objects say. An entry not seen for 30 days is
-removed, but only after a successful read of its cluster or host: an
-unreachable host keeps its entries.
+removed, but only after a successful and complete read of its cluster or
+host: an unreachable host keeps its entries, and so does a cluster read with
+a refusal or by a person signed in through Rancher or under identity
+delegation (such a read sees only part of the cluster, so the filings it
+cannot see are not aged out).
 
 KVM folders are read with one `virsh` invocation per host that chains the
 `metadata` reads of every domain, in a second SSH call over the same

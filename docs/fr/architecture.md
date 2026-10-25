@@ -263,8 +263,11 @@ rangement `console` et perd un rangement `vm` (quelqu'un l'a retiré sur
 l'objet). Cette écriture se fait pendant une lecture, sans action suivie :
 c'est l'exception documentée, puisqu'elle ne fait que recopier ce que disent
 les objets. Une entrée non vue depuis 30 jours est retirée, mais seulement
-après une lecture réussie de son cluster ou de son hôte : un hôte injoignable
-garde ses entrées.
+après une lecture réussie et complète de son cluster ou de son hôte : un hôte
+injoignable garde ses entrées, de même qu'un cluster lu avec un refus ou par
+une personne connectée par Rancher ou sous identité déléguée (une telle
+lecture ne voit qu'une partie du cluster, les rangements qu'elle ne voit pas
+ne vieillissent pas).
 
 Les dossiers KVM sont lus par une seule invocation de `virsh` par hôte, qui
 enchaîne les lectures `metadata` de tous les domaines, dans un second appel

@@ -223,3 +223,55 @@ def test_a_kvm_write_drops_the_shared_kvm_part(kvm_survey):
     wapp.READ_SHARE.invalidate(wapp.KVM_SCOPE)
     get("bob", "/api/vms-all?kinds=harvester,kvm")
     assert len(kvm_survey) == 4
+
+
+# ---------------------------------------------------------------------------
+# Revue finale D-4 : une lecture partielle n'est pas une lecture complète
+# ---------------------------------------------------------------------------
+OLD = "2026-01-01T00:00:00Z"                 # bien plus de 30 jours
+
+
+def _seed_old_console_filing(path):
+    sys.path.insert(0, str(ROOT / "bin" / "lib"))
+    import folders_db as fdb
+    conn = fdb.connect(path)
+    try:
+        fdb.ensure_path(conn, "/Prod", "console")
+        # rangement « console » d'une VM d'un namespace que la personne ne lit pas
+        fdb.upsert_membership(conn, "harvester/harv1/hidden/vm-x", "/Prod", "console", seen_at=OLD,
+                              scope="harvester/harv1")
+        return set(fdb.memberships(conn))
+    finally:
+        conn.close()
+
+
+def _kept(path):
+    import folders_db as fdb
+    conn = fdb.connect(path)
+    try:
+        return "harvester/harv1/hidden/vm-x" in fdb.memberships(conn)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("who,denials,kept", [
+    ("ann", [], True),              # session Rancher : lecture limitée à ses droits
+    (None, ["forbidden: cannot list virtualmachines in the namespace hidden"], True),   # refus RBAC
+    (None, [], False),              # kubeconfig de la console, tout lu : purge
+])
+def test_a_partial_read_never_purges_filings_it_cannot_see(sso, monkeypatch, tmp_path, who, denials, kept):
+    db = tmp_path / "folders.db"
+    monkeypatch.setenv("HARVESTER_OPS_FOLDERS_DB", str(db))
+    _seed_old_console_filing(db)
+    if who is None:
+        monkeypatch.setattr(wapp, "_sso_session", lambda: None)
+        monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: f"/k/{c}.yaml")
+        monkeypatch.setattr(wapp, "current_cluster_identity", lambda: None)
+
+    def collect(name, kc_path):
+        return {"vms": [{"name": f"vm-{name}", "namespace": "ns", "key": f"harvester/{name}/ns/vm-{name}"}]}, \
+            200, denials
+    monkeypatch.setattr(wapp, "_vms_collect", collect)
+    monkeypatch.setattr(wapp._kd, "load_all", lambda d: [])
+    assert get(who or "local", "/api/vms-all?kinds=harvester,kvm").status_code == 200
+    assert _kept(db) is kept
