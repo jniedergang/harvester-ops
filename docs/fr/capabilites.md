@@ -280,7 +280,7 @@ déclaration de l'hôte. Quand la personne n'a pas le droit d'écrire l'objet,
 ou que la RBAC refuse le patch (`cannot patch resource`), le rangement est
 gardé par la console seule ; un refus de webhook ou de quota, même en code
 403, fait échouer la ligne avec sa raison ; un objet qui porte un dossier qu'elle ne peut pas changer le garde.
-Un lecteur lit l'arborescence et ne change rien. Codes de sortie : 0 fait,
+Un lecteur lit l'arborescence et ne change rien ; sans `--role`, la commande tourne en lecteur. Codes de sortie : 0 fait,
 1 refus ou un objet en échec, 2 demande invalide (nom, chemin, profondeur,
 longueur, objet inconnu). Avec `--json`, toute sortie en erreur écrit un seul
 objet `{"ok": false, "error", "kind"}` sur stdout ; une erreur inattendue

@@ -123,9 +123,7 @@ def env(monkeypatch, tmp_path):
 
 
 def run(env, *argv, spec=None, role=None, capsys=None):
-    args = ["--db", str(env["db"]), "--json"]
-    if role:
-        args += ["--role", role]
+    args = ["--db", str(env["db"]), "--json", "--role", role or "operator"]
     argv = list(argv)
     if spec is not None:
         f = env["tmp"] / "spec.json"
@@ -222,7 +220,7 @@ def test_an_unexpected_error_hides_its_internals(env, capsys, monkeypatch):
 
 
 def test_an_error_without_json_prints_no_json(env, capsys):
-    assert cli.main(["--db", str(env["db"]), "create", "--parent", "/", "--name", "Prod"]) == 1
+    assert cli.main(["--db", str(env["db"]), "--role", "operator", "create", "--parent", "/", "--name", "Prod"]) == 1
     cap = capsys.readouterr()
     assert cap.out == "" and "already exists" in cap.err
 
@@ -243,6 +241,30 @@ def test_a_viewer_reads_but_never_writes(env, capsys):
         assert run(env, *argv, spec=spec, role="viewer") == 1
         assert "operator role is needed" in capsys.readouterr().err
     assert env["kube"].calls == []
+
+
+def test_without_a_role_nothing_is_written(env, capsys):
+    """Sans `--role`, la ligne de commande est en lecture seule (viewer) :
+    une console qui oublierait de le passer ne donnerait aucun geste."""
+    base = ["--db", str(env["db"]), "--json"]
+    assert cli.main(base + ["tree"]) == 0
+    capsys.readouterr()
+    f = env["tmp"] / "spec.json"
+    f.write_text(json.dumps({"objects": [vm("a")]}))
+    for argv in (["create", "--parent", "/", "--name", "X"], ["assign", "--to", "/Lab", "--spec", str(f)]):
+        assert cli.main(base + argv) == 1
+        assert json.loads(capsys.readouterr().out)["kind"] == "refused"
+    assert env["kube"].calls == []
+
+
+def test_the_console_always_passes_the_role():
+    """Chaque appel de harvester-folders.py par la console porte `--role`."""
+    src = (ROOT / "web" / "app.py").read_text()
+    lines = src.splitlines()
+    for i, ln in enumerate(lines):
+        if '"harvester-folders.py"' in ln:
+            call = "\n".join(lines[i:i + 4])
+            assert '"--role"' in call, f"web/app.py:{i + 1} calls harvester-folders.py without --role"
 
 
 @pytest.mark.parametrize("obj,message", [

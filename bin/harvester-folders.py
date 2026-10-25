@@ -44,8 +44,8 @@ interrompue) et `failed` (hôte injoignable...) sans réécrire celles déjà
 faites, `undo` rejoue l'état d'avant (un objet déplacé ailleurs depuis
 n'est pas remis : conflit dit).
 
-Rôle (`--role`, posé par la console) : viewer en lecture seule, operator
-pour tout geste. Progression sur stderr en STEP_EVENT|étape|statut|message.
+Rôle (`--role`, posé par la console ; viewer par défaut) : viewer en
+lecture seule, operator pour tout geste. Progression sur stderr en STEP_EVENT|étape|statut|message.
 
 Codes de sortie : 0 fait, 1 refus ou au moins un objet en échec,
 2 erreur d'usage ou demande invalide. Avec --json, toute sortie en erreur
@@ -605,7 +605,8 @@ def parse_args(argv=None):
     p.add_argument("--db", help="folders.db (HARVESTER_OPS_FOLDERS_DB by default)")
     p.add_argument("--json", action="store_true")
     p.add_argument("--as", dest="as_user", default=None, help="person on whose behalf")
-    p.add_argument("--role", choices=ROLES, default="admin")
+    # lecture seule par défaut : la console passe toujours le rôle de la personne
+    p.add_argument("--role", choices=ROLES, default="viewer")
     p.add_argument("--id", default=None, help="action id (journal linked to the Activity)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
