@@ -110,6 +110,18 @@ const ReplicationPlan = (() => {
     if (v.tab === 'settings') renderSettings(v, pane);
   }
 
+  /** Carnet de reprise en retard : réglages changés depuis le dernier protect, ou vu par le suiveur. */
+  function staleHtml(d) {
+    const keys = (d.carnet_stale && d.carnet_stale.keys) || [];
+    const vms = ((d.row && d.row.resources) || []).filter((r) => (r.reasons || []).includes('carnet-stale')).map((r) => `${r.namespace}/${r.name}`);
+    if (!keys.length && !vms.length) return '';
+    return `<div class="sto-finding sev-action" data-rpv="stale"><div class="sto-finding-title">${icon('warn')} ${esc(tr('rp.stale.title'))}
+        ${U.actionButton(d.row, 'protect', 'btn-primary')}</div>
+      ${keys.length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.keys', { keys: keys.join(', ') }))}</p>` : ''}
+      ${vms.length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.vms', { vms: vms.join(', ') }))}</p>` : ''}
+      <p class="sto-finding-advice">${esc(tr('rp.stale.advice'))}</p></div>`;
+  }
+
   // -- vue d'ensemble --------------------------------------------------------------------
   function overviewHtml(v) {
     const d = v.data;
@@ -129,6 +141,7 @@ const ReplicationPlan = (() => {
         <div><small>${esc(tr('rp.kpi.apply'))}</small><b class="tip" data-tip="${esc(tr('rp.kpi.applyTip'))}">${esc(U.rate(t.apply_bps))}</b></div>
         <div><small>${esc(tr('rp.kpi.day'))}</small><b>${esc(U.bytes(t.bytes_24h))}</b></div>
       </div>
+      ${staleHtml(d)}
       ${pending.length ? `<div class="sto-finding sev-action" data-rpv="pending"><div class="sto-finding-title">${icon('warn')} ${esc(tr('rp.pending', { n: pending.length, list: pending.join(', ') }))}
         ${U.actionButton(row, 'protect', 'btn-primary')}</div></div>` : ''}
       <div class="tw"><table class="data-table rp-vm-table"><thead><tr>
@@ -572,13 +585,14 @@ const ReplicationPlan = (() => {
       ${hooks.length ? `<p class="form-hint">${esc(tr('rp.fo.hooksLine', { list: hooks.map((h) => `${h.name} (${h.at})`).join(', ') }))}</p>` : ''}
       <div class="btn-row"><button type="button" class="btn btn-sm btn-secondary tip" data-rp-fo="dry" data-tip="${esc(tr('rp.fo.dryTip'))}"${isAdmin ? '' : ' disabled'}>${icon('test')} ${esc(tr('rp.fo.dry'))}</button></div>
       <div class="rp-fo-dry" data-rp-fo="dryout"></div>
+      <div data-rp-fo="stale" hidden></div>
       ${field(tr('rp.fo.typeName', { name: p.name }), `<input name="confirm" autocomplete="off" spellcheck="false"${isAdmin ? '' : ' disabled'}>`, tr('rp.fo.typeNameTip'))}
       <div class="bk-form-actions"><button type="submit" class="btn btn-sm btn-danger tip" data-rp-fo="go" disabled
         data-tip="${esc(isAdmin ? tr('rp.fo.goTip') : tr('rp.fo.adminOnly', { role: d.role }))}">${icon('migrate')} ${esc(tr('rp.fo.go'))}</button></div>
       <div class="of-msg" data-rp-fo="msg" role="status" aria-live="polite"></div>`;
     const $ = (s) => f.querySelector(s);
     const mode = () => (f.querySelector('[name="mode"]:checked') || {}).value || mode0;
-    const dry = { state: 'none', why: '' };
+    const dry = { state: 'none', why: '', stale: null };
     const li = (ok, text) => `<li class="${ok === true ? 'ok' : (ok === false ? 'fail' : 'warn')}" data-rp-fo-check="${ok === true ? 'ok' : (ok === false ? 'fail' : 'warn')}">${icon(ok === true ? 'ok' : (ok === false ? 'fail' : 'info'), 11)} ${esc(text)}</li>`;
     const reachLi = (v, cluster) => li(v === true ? true : (v === false ? false : null),
       v === true ? tr('rp.chk.reach', { cluster }) : (v === false ? tr('rp.chk.reachNo', { cluster }) : tr('rp.chk.reachUnknown', { cluster })));
@@ -594,6 +608,7 @@ const ReplicationPlan = (() => {
       if (dry.state === 'running') out.push(li(null, tr('rp.chk.dryRunning')));
       if (dry.state === 'ok') out.push(li(true, tr('rp.chk.dry')));
       if (dry.state === 'fail') out.push(li(false, tr('rp.chk.dryNo', { why: dry.why })));
+      if (dry.stale) out.push(li(staleOk() ? null : false, tr('rp.chk.stale')));
       $('[data-rp-fo="checks"]').innerHTML = out.join('');
     };
     const sync = () => {
@@ -606,18 +621,45 @@ const ReplicationPlan = (() => {
       $('[data-rp-fo="loss"]').innerHTML = m === 'planned' ? `<p class="hint ok-t">${icon('ok')} ${esc(tr('rp.fo.lossPlanned'))}</p>`
         : `<p class="hint warn-t">${icon('warn')} ${esc(tr('rp.fo.lossUnplanned', { rpo: maxRpo == null ? '?' : U.dur(maxRpo) }))}</p>`;
       const sel = $('[name="all"]').checked || f.querySelectorAll('[name="vm"]:checked').length;
-      $('[data-rp-fo="go"]').disabled = !isAdmin || f.confirm.value !== p.name || !sel;
+      $('[data-rp-fo="go"]').disabled = !isAdmin || f.confirm.value !== p.name || !sel || (dry.stale && !staleOk());
     };
     const body = (dry) => {
       const b = { mode: mode(), dry_run: !!dry };
       if ($('[name="all"]').checked) b.all_vms = true;
       else b.vms = [...f.querySelectorAll('[name="vm"]:checked')].map((x) => x.value);
       if (b.mode === 'unplanned') { b.force_unplanned = f.force_unplanned.checked; b.accept_skew = f.accept_skew.checked; }
+      if (staleOk()) b.accept_stale_carnet = true;
       if (!dry) b.confirm = f.confirm.value;
       return b;
     };
-    f.addEventListener('change', sync);
+    const staleOk = () => !!(f.querySelector('[name="accept_stale"]') || {}).checked;
+    /** Réglages de reprise d'avant le dernier changement : protéger d'abord, ou basculer avec eux (accord explicite). */
+    const renderStale = () => {
+      const el = $('[data-rp-fo="stale"]');
+      const s = dry.stale;
+      el.hidden = !s;
+      if (!s) { el.innerHTML = ''; return; }
+      const fx = s.facts || {};
+      const was = staleOk();
+      el.innerHTML = `<div class="sto-finding sev-action"><div class="sto-finding-title">${icon('warn')} ${esc(tr('rp.stale.title'))}</div>
+        ${(fx.keys || []).length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.keys', { keys: fx.keys.join(', ') }))}</p>` : ''}
+        ${(fx.vms || []).length ? `<p class="sto-finding-facts">${esc(tr('rp.stale.vms', { vms: fx.vms.join(', ') }))}</p>` : ''}
+        <div class="btn-row"><button type="button" class="btn btn-sm btn-primary tip" data-rp-fo="protect-first" data-tip="${esc(tr('rp.fo.protectFirstTip'))}"${isAdmin ? '' : ' disabled'}>${icon('shield')} ${esc(tr('rp.fo.protectFirst'))}</button></div>
+        <label class="bk-check tip" data-tip="${esc(tr('rp.fo.acceptStaleTip'))}"><input type="checkbox" name="accept_stale"${was ? ' checked' : ''}${isAdmin ? '' : ' disabled'}> <span>${esc(tr('rp.fo.acceptStale'))}</span></label>
+        <div class="of-msg" data-rp-fo="stalemsg" role="status"></div></div>`;
+    };
+    f.addEventListener('change', (e) => { if (e.target.name === 'accept_stale') { runDry(); return; } sync(); });
     f.addEventListener('input', sync);
+    f.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-rp-fo="protect-first"]');
+      if (!b || b.disabled) return;
+      b.disabled = true;
+      const msg = $('[data-rp-fo="stalemsg"]');
+      try {
+        const r = await U.api('POST', `/api/replication/plans/${enc(p.id)}/protect`, {});
+        U.follow(r.action_id, msg, tr('rp.fo.protectFirstDone'), (ok) => { b.disabled = false; if (ok) runDry(); });
+      } catch (er) { b.disabled = false; msg.innerHTML = err(er); }
+    });
     sync();
     const runDry = async () => {
       const out = $('[data-rp-fo="dryout"]');
@@ -628,7 +670,9 @@ const ReplicationPlan = (() => {
           const o = await U.actionOutput(r.action_id);
           dry.state = ok ? 'ok' : 'fail';
           dry.why = (o && (o.message || o.error || o.code)) || '';
-          checks();
+          dry.stale = ((o && o.findings) || []).find((x) => x.code === 'carnet-stale') || null;
+          renderStale();
+          sync();
           if (o) out.innerHTML += dryHtml(o);
         });
       } catch (e) { dry.state = 'fail'; dry.why = e.message; checks(); out.innerHTML = err(e); }

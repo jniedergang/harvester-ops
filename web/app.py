@@ -24880,7 +24880,9 @@ def api_replication_plan(plan_id):
         status = _rp.plan_status(plan, v["resources"], v["volumes"], v["ticks"], now, v["vm_running"], v["health"])
         out = {"plan": _rp.mask_plan(plan), "row": row, "status": status, "volumes": v["volumes"],
                "runs": _rdb.list_runs(conn, plan["id"])[-10:], "lock": _rdb.get_lock(conn, plan["id"]),
-               "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role()}
+               "lease": _rdb.get_lease(conn, plan["id"]), "role": current_role(),
+               # réglages de reprise changés depuis le dernier protect (bandeau « protect à relancer »)
+               "carnet_stale": _rdb.get_plan_flag(conn, "carnet-stale", plan["id"])}
     finally:
         conn.close()
     return jsonify(out)

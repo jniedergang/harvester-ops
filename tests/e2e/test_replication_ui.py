@@ -537,7 +537,8 @@ def test_contract_settings_save_then_undo(ui):
     expect(undo).to_be_visible()
     assert undo.get_attribute("data-tip")
     undo.click()
-    patches = wait_sent(page, sent, lambda s: s[0] == "PATCH" and s[2] == {"rpo": "15m", "paused": False})
+    # valeur d'avant exacte, en secondes (pas arrondie aux minutes du champ)
+    patches = wait_sent(page, sent, lambda s: s[0] == "PATCH" and s[2] == {"rpo": "900s", "paused": False})
     assert patches
     # la reprise existante est relue : vagues et action annexe masquée
     expect(view.locator('[data-rp-wave="0"] [data-rpw-vm="default/db-1"]')).to_be_visible()

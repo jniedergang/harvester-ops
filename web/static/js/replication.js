@@ -390,7 +390,8 @@ const Replication = (() => {
     'source-vm-running-after-failover': () => tr('rp.alert.sourceRunning'), 'backup-error': () => tr('rp.alert.backupError'),
     'standby-degraded': () => tr('rp.alert.standbyDegraded'), 'source-unreachable': () => tr('rp.alert.sourceUnreachable'),
     'plan-drift': () => tr('rp.alert.planDrift'), 'plan-error': () => tr('rp.alert.planError'),
-    'selector-new-vm': () => tr('rp.alert.selectorNewVm'),
+    'selector-new-vm': () => tr('rp.alert.selectorNewVm'), 'carnet-stale': () => tr('rp.alert.carnetStale'),
+    'auto-protect-failed': () => tr('rp.alert.autoProtectFailed'),
   };
   const alertText = (a) => (ALERT[a.code] ? ALERT[a.code]() : a.code);
   function renderAlerts(el, a) {
