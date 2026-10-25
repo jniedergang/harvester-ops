@@ -487,6 +487,35 @@ def test_delete_pool_sequence(remove_dir, verbs):
     assert [w[0] for w in s.writes] == verbs and "kvmtest-pool" not in s.pools
 
 
+def test_delete_pool_writes_inside_writing_even_on_failure(monkeypatch):
+    """Revue finale m10 : les écritures de delete_pool passent par
+    ko.writing comme les autres ; le relevé est oublié même si libvirt
+    refuse au milieu."""
+    s = pool_sim()
+    entered = []
+
+    class Spy(ko.writing):
+        def __enter__(self):
+            entered.append("enter")
+            return super().__enter__()
+
+        def __exit__(self, *exc):
+            entered.append("exit")
+            return super().__exit__(*exc)
+    monkeypatch.setattr(ko, "writing", Spy)
+    real = s.virsh
+
+    def virsh(*args, **kw):
+        if args[0] == "pool-undefine":
+            assert entered == ["enter"]
+            raise kh.KvmError("failed", "error: boom", rc=1)
+        return real(*args, **kw)
+    monkeypatch.setattr(s, "virsh", virsh)
+    with pytest.raises(kh.KvmError):
+        ks.delete_pool(s, "kvmtest-pool")
+    assert entered == ["enter", "exit"]
+
+
 def test_pool_users_reads_live_and_inactive_definitions():
     doms = {"domains": {
         "a": {"active": True, "inactive": {"disks": []},

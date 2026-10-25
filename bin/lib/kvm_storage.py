@@ -1182,16 +1182,15 @@ def delete_pool(host, name, remove_dir=False, busy=(), step=None, acknowledged_u
         raise OpError("plan-changed", msg, {"refusals": []})
     stp("plan", "done", "nothing uses it")
     stp("delete", "running", name)
-    ko.invalidate_survey(host)
-    if plan["state"]["state"] == "running":
-        if not remove_dir:
-            host.virsh("pool-destroy", "--pool", name)
-        else:
-            # pool-delete exige un pool arrêté pour dir/netfs
-            host.virsh("pool-destroy", "--pool", name)
-            host.virsh("pool-delete", "--pool", name)
-    if plan["state"].get("persistent", True):
-        host.virsh("pool-undefine", "--pool", name)
-    ko.invalidate_survey(host)
+    with ko.writing(host):
+        if plan["state"]["state"] == "running":
+            if not remove_dir:
+                host.virsh("pool-destroy", "--pool", name)
+            else:
+                # pool-delete exige un pool arrêté pour dir/netfs
+                host.virsh("pool-destroy", "--pool", name)
+                host.virsh("pool-delete", "--pool", name)
+        if plan["state"].get("persistent", True):
+            host.virsh("pool-undefine", "--pool", name)
     stp("delete", "done", name)
     return {"name": name, "deleted": True, "directory_removed": bool(remove_dir)}
