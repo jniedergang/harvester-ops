@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import self_update as su  # noqa: E402
+import container_runtime as cr  # noqa: E402
 
 STATE_DIR = Path(os.environ.get("HARVESTER_OPS_STATE_DIR", "/var/lib/harvester-ops"))
 ETC_DIR = Path(os.environ.get("HARVESTER_OPS_ETC", "/etc/harvester-ops"))
@@ -202,7 +203,8 @@ class Agent:
         try:
             self.step("install", "running", f"install.sh --upgrade of {info['version']}")
             self.sh(["bash", str(root / "install.sh"), "--upgrade"], cwd=str(root),
-                    env={**os.environ, "HARVESTER_OPS_UPGRADE": "1"})
+                    env={**os.environ, "HARVESTER_OPS_UPGRADE": "1",
+                         cr.OVERRIDE: runtime})
             self.step("install", "done")
             self.step("restart", "running")
             self.sh(["systemctl", "daemon-reload"], check=False)
@@ -272,10 +274,10 @@ def _installed_version():
 
 
 def _runtime():
-    for r in ("podman", "docker"):
-        if shutil.which(r):
-            return r
-    return "podman"
+    try:
+        return cr.select_runtime(UNIT_DIR)
+    except cr.RuntimeError as e:
+        raise su.UpdateError(str(e)) from e
 
 
 def _bind():

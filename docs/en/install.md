@@ -10,7 +10,7 @@
 | `ssh` / `ssh-keygen` | OpenSSH 7+; `ssh-keygen -Y` (8.2+) for updates, otherwise the console image checks the signature (1.87.2) | Node shutdown + release signature verification |
 | `yq` | ≥ 4.0 (mikefarah) | Config parsing |
 | `python3` | ≥ 3.9 | JSON helpers + Flask UI |
-| `podman` | recent | Required only if you install the web UI |
+| `podman` or `docker` | recent | Required only if you install the web UI |
 
 One-liner to install dependencies:
 
@@ -24,6 +24,26 @@ and pins its absolute path in `harvester-ops-update.service`. It refuses to
 install the agent if none is available, without changing the system Python
 alternative. A current Python inside the container does not satisfy this
 host requirement.
+
+The installer and update agent preserve the runtime used by the installed
+`harvester-ops.service`; installing Podman alongside an existing Docker console
+does not switch image stores. On a fresh host, Podman is preferred when both
+are available. Set `HARVESTER_OPS_CONTAINER_RUNTIME=docker` or `podman` explicitly
+when needed, for example `sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh`.
+A selected runtime that is missing is an error, rather than an implicit switch.
+The update agent passes its choice to the release installer and uses it for the
+previous-image tag and rollback as well.
+
+The installer renders the service for that runtime. Docker requires
+`docker.service`; Podman CLI needs no socket service. Docker does not support
+`--passwd-entry`, so a pre-start helper copies the image's account files and adds
+the host service account under `/var/lib/harvester-ops/.nss/`. Those files are
+mounted read-only so SSH resolves the non-root account inside the container.
+Existing service drop-ins remain in place; operator overrides still take
+precedence. Remove obsolete runtime-specific overrides when deliberately
+switching runtime. On an older mixed-runtime installation whose updater still
+selects Podman first, install the verified new release with `./install.sh --upgrade`
+on the host to update the agent before using web-based updates.
 
 When the host's `ssh-keygen` does not know `-Y` (OpenSSH before 8.2, as on
 RHEL 8), the update agent has the signature checked by the `ssh-keygen` of

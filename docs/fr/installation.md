@@ -10,7 +10,7 @@
 | `ssh` / `ssh-keygen` | OpenSSH 7+ ; `ssh-keygen -Y` (8.2+) pour les mises à jour, sinon l'image de la console vérifie la signature (1.87.2) | Extinction des nodes + vérification des signatures |
 | `yq` | ≥ 4.0 (mikefarah) | Parsing config |
 | `python3` | ≥ 3.9 | Helpers JSON + UI Flask |
-| `podman` | récent | Requis uniquement pour l'UI web |
+| `podman` ou `docker` | récent | Requis uniquement pour l'UI web |
 
 One-liner pour installer les dépendances :
 
@@ -23,6 +23,26 @@ L'installeur choisit un Python >= 3.9 (`python3`, ou `python3.9`–`python3.14`)
 et inscrit son chemin absolu dans `harvester-ops-update.service`. Sans
 interpréteur compatible, il refuse d'installer l'agent ; il ne change pas
 l'alternative Python du système. Le Python du conteneur ne suffit pas.
+
+L'installeur et l'agent conservent le moteur utilisé par l'unité installée
+`harvester-ops.service`. Ajouter Podman à un hôte Docker ne change pas le
+magasin d'images. Sur une nouvelle installation, Podman est préféré si les deux
+sont présents. Le choix explicite `HARVESTER_OPS_CONTAINER_RUNTIME=docker` ou
+`podman` est disponible, par exemple
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh`. Un moteur choisi mais
+absent provoque une erreur. L'agent transmet son choix à l'installeur de la
+livraison et le conserve pour la sauvegarde de l'image et le retour arrière.
+
+L'unité est générée pour le moteur choisi : `docker.service` pour Docker,
+aucun service socket pour la CLI Podman. Docker n'ayant pas `--passwd-entry`,
+un helper de pré-démarrage reprend les comptes de l'image et ajoute le compte
+de service de l'hôte dans `/var/lib/harvester-ops/.nss/`, monté en lecture seule.
+SSH peut ainsi résoudre ce compte non root dans le conteneur. Les surcharges
+systemd de l'exploitant sont conservées et restent prioritaires ; retirer les
+anciennes surcharges propres au moteur lors d'un changement volontaire.
+Sur une ancienne installation mixte dont l'agent choisit encore Podman en
+premier, installer la nouvelle livraison vérifiée avec `./install.sh --upgrade`
+sur l'hôte afin de mettre à jour l'agent avant les mises à jour depuis l'interface.
 
 Quand le `ssh-keygen` de l'hôte ne connaît pas `-Y` (OpenSSH avant 8.2, comme
 sur RHEL 8), l'agent de mise à jour fait vérifier la signature par le
