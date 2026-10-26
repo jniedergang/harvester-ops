@@ -4,6 +4,24 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.2] - 2026-10-26 - Preserve the console container runtime during updates
+
+### Fixed
+- Installations and self-updates preserve the container runtime of the installed
+  service, including hosts with both Docker and Podman. The updater passes its
+  selected runtime to the release installer so image backup, installation and
+  rollback use the same image store. A missing selected runtime fails clearly
+  instead of silently switching stores.
+- Docker installations receive a Docker systemd unit, without `podman.socket`
+  or `--passwd-entry`. Persistent passwd/group mounts preserve image accounts
+  and resolve the host service account for SSH inside the non-root container.
+  Podman's daemonless CLI no longer requires `podman.socket`.
+
+### Tests
+- Runtime selection, Docker/Podman service rendering, the real installer upgrade
+  function with both CLIs present, updater runtime propagation and rollback, and
+  Docker account-file generation and failure handling.
+
 ## [2.0.1] - 2026-10-25 - Readable side menu
 
 ### Changed

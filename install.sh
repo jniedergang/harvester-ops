@@ -15,6 +15,8 @@ CONF_DIR="/etc/harvester-ops"
 LOG_DIR="/var/log/harvester-ops"
 STATE_DIR="/var/lib/harvester-ops"
 INSTALL_DIR="/opt/harvester-ops"
+SYSTEMD_DIR="${HARVESTER_OPS_UNIT_DIR:-/etc/systemd/system}"
+CONTAINER_RUNTIME=""
 
 C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RED=$'\e[31m'; C_BLUE=$'\e[34m'; C_BOLD=$'\e[1m'; C_RESET=$'\e[0m'
 
@@ -55,13 +57,16 @@ prompt_yesno() {
 }
 
 detect_container_runtime() {
-    if command -v podman >/dev/null 2>&1; then
-        echo "podman"
-    elif command -v docker >/dev/null 2>&1; then
-        echo "docker"
-    else
-        echo ""
-    fi
+    local python
+    python="$(detect_update_python)" || return 2
+    "$python" "$SCRIPT_DIR/bin/lib/container_runtime.py" --unit-dir "$SYSTEMD_DIR"
+}
+
+render_container_service() {
+    local python
+    python="$(detect_update_python)" || return 2
+    "$python" "$SCRIPT_DIR/bin/lib/container_runtime.py" --unit-dir "$SYSTEMD_DIR" \
+        --runtime "$CONTAINER_RUNTIME" --template "$SCRIPT_DIR/config/systemd/harvester-ops.service"
 }
 
 check_deps() {
@@ -207,7 +212,10 @@ ROLES
 # -----------------------------------------------------------------------------
 install_web_ui() {
     local runtime
-    runtime="$(detect_container_runtime)"
+    if [[ -z "$CONTAINER_RUNTIME" ]]; then
+        CONTAINER_RUNTIME="$(detect_container_runtime)" || return 2
+    fi
+    runtime="$CONTAINER_RUNTIME"
     if [[ -z "$runtime" ]]; then
         err "Neither podman nor docker found — cannot install Web UI"
         return 1
@@ -431,9 +439,10 @@ setup_firewall() {
 }
 
 install_systemd() {
-    install -d -m 0755 /etc/systemd/system
-    install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops.service" \
-        /etc/systemd/system/harvester-ops.service
+    local rendered
+    rendered="$(render_container_service)" || return 2
+    install -d -m 0755 "$SYSTEMD_DIR"
+    printf '%s\n' "$rendered" > "$SYSTEMD_DIR/harvester-ops.service"
     systemctl daemon-reload
     ok "systemd unit installed (not yet enabled)"
     if prompt_yesno "Enable and start harvester-ops now?" "Y"; then
@@ -528,14 +537,17 @@ install_update_agent() {
 upgrade() {
     require_root
     detect_update_python >/dev/null || return 2
+    # Resolve before scripts/image/unit writes; preserve the existing image store.
+    CONTAINER_RUNTIME="$(detect_container_runtime)" || return 2
     info "Upgrading harvester-ops to $(cat "$SCRIPT_DIR/VERSION")"
     install_scripts
     setup_service_account
     install_bundles
     install_web_ui
-    if [[ -f /etc/systemd/system/harvester-ops.service ]]; then
-        install -m 0644 "$SCRIPT_DIR/config/systemd/harvester-ops.service" \
-            /etc/systemd/system/harvester-ops.service
+    if [[ -f "$SYSTEMD_DIR/harvester-ops.service" ]]; then
+        local rendered
+        rendered="$(render_container_service)" || return 2
+        printf '%s\n' "$rendered" > "$SYSTEMD_DIR/harvester-ops.service"
     fi
     install_update_agent
     install_uninstaller
