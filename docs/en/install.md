@@ -328,6 +328,25 @@ The restart leaves the interface unavailable for a few seconds; the clusters
 are not touched. An install is refused while actions are running (they would
 stop with the restart) unless you confirm.
 
+**Rolling back (2.0.2).** The **Previous versions** card of the same tab
+goes back to an older release. It lists the staged archives that are signed
+and older than the running version. To go back, give the older archive and
+its `.sig` (from the release page of that version) like an offline update.
+**Roll back to x.y.z** opens a window that says what is kept (configuration,
+accounts, certificates, history, folders and the rest of the state; the
+clusters) and what is lost (everything added or fixed after that version,
+security fixes included). The rollback starts only once you type the target
+version. It then follows the same path as an update: the agent checks the
+signature, keeps the current files and image, installs the older release,
+and puts the current one back by itself if the older one does not answer.
+The request is tracked in Activity (`console-update:rollback`), and the API is
+`POST /api/update/rollback` with `{"archive": ..., "confirm": "<version>"}`
+(administrators). The agent removes its backup once an update succeeds, so a
+staged signed archive is the only way back. Two limits: below 2.0.0, read the
+2.0.0 note "Rolling back to 1.101.x" in the CHANGELOG first; below 2.0.2, the
+console cannot run under Docker, so on a Docker host the agent puts the
+current version back.
+
 **Trust.** The agent installs only an archive signed by a key of
 `/opt/harvester-ops/update-signers` (shipped with the installed version), or
 of `/etc/harvester-ops/update-signers` when you write one (it then wins: put

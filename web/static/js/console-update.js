@@ -25,6 +25,8 @@ const ConsoleUpdate = (() => {
   let sending = '';
   let sourceDraft = null;   // saisie en cours : un rafraîchissement ne l'efface pas
   let loadError = null;     // état illisible : dit, au lieu d'un « chargement » sans fin
+  let rollingBack = null;   // 2.0.2 : archive dont la fenêtre de retour arrière est ouverte
+  let rbTyped = '';         // saisie de confirmation, gardée si la vue se redessine
 
   async function api(method, url, body) {
     const r = await fetch(url, {
@@ -107,7 +109,8 @@ const ConsoleUpdate = (() => {
     if (!st.staged.length) return `<p class="form-hint">${esc(tr('upd.staged.none'))}</p>`;
     return `<table class="data-table upd-staged"><tbody>${st.staged.map(s => {
       const state = s.error ? `<span class="upd-err">${esc(s.error)}</span>`
-        : s.signature === 'valid' ? (s.newer ? esc(tr('upd.staged.sigValid')) : `<span class="upd-err">${esc(tr('upd.staged.older'))}</span>`)
+        : s.signature === 'valid' ? (s.newer ? esc(tr('upd.staged.sigValid'))
+          : s.older ? esc(tr('upd.staged.canRollback')) : `<span class="upd-err">${esc(tr('upd.staged.older'))}</span>`)
         : `<span class="upd-err">${esc(tr('upd.staged.sigMissing'))}</span>`;
       const canInstall = st.can_apply && s.ok && s.newer && st.agent && !st.pending;
       return `<tr data-name="${esc(s.name)}">
@@ -122,6 +125,94 @@ const ConsoleUpdate = (() => {
     }).join('')}</tbody></table>`;
   }
 
+  // -- 2.0.2 : revenir à une version précédente -----------------------------
+  function rollbackTargets() {
+    return (st.staged || []).filter(s => s.ok && s.older);
+  }
+
+  function rollbackBlock() {
+    const targets = rollbackTargets();
+    const usable = st.agent && !st.pending;
+    return `<div class="card upd-card upd-rollback">
+      <h4>${esc(tr('upd.rb.title'))}</h4>
+      <p class="form-hint">${esc(targets.length ? tr('upd.rb.hint') : tr('upd.rb.none'))}</p>
+      ${targets.map(s => `<div class="upd-row" data-name="${esc(s.name)}">
+        <button type="button" class="btn btn-sm tip" data-upd="rollback" ${usable ? '' : 'disabled'}
+          data-tip="${esc(tr('upd.rb.buttonTip', { v: s.version }))}" title="${esc(tr('upd.rb.buttonTip', { v: s.version }))}">${esc(tr('upd.rb.button', { v: s.version }))}</button>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  // '2.0.2-rc' < '2.0.2' : même ordre que parse_version côté serveur, pour les notes seulement
+  function below(v, ref) {
+    const p = (x) => { const m = /^(\d+)\.(\d+)\.(\d+)([-.].+)?$/.exec(String(x || '')) || [];
+      return [+m[1] || 0, +m[2] || 0, +m[3] || 0, m[4] ? 0 : 1]; };
+    const a = p(v); const b = p(ref);
+    for (let i = 0; i < 4; i++) if (a[i] !== b[i]) return a[i] < b[i];
+    return false;
+  }
+
+  function renderRollback(pane) {
+    const s = (st.staged || []).find(x => x.name === rollingBack);
+    if (!s) { rollingBack = null; render(); return; }
+    const v = s.version; const cur = st.current;
+    const notes = [];
+    if (below(v, '2.0.0')) notes.push(tr('upd.rb.before200'));
+    if (below(v, '2.0.2')) notes.push(tr('upd.rb.before202', { cur }));
+    pane.innerHTML = `<div class="card upd-card upd-rb-dialog" role="dialog" aria-modal="false" aria-labelledby="upd-rb-title">
+      <h4 id="upd-rb-title">${esc(tr('upd.rb.dialogTitle', { v, cur }))}</h4>
+      <p><strong>${esc(tr('upd.rb.keeps'))}</strong></p>
+      <ul class="upd-rb-list">
+        <li>${esc(tr('upd.rb.keep1'))}</li><li>${esc(tr('upd.rb.keep2'))}</li><li>${esc(tr('upd.rb.keep3', { v, cur }))}</li>
+      </ul>
+      <p><strong>${esc(tr('upd.rb.loses'))}</strong></p>
+      <ul class="upd-rb-list">
+        <li>${esc(tr('upd.rb.lose1', { v }))}</li><li>${esc(tr('upd.rb.lose2'))}</li>
+        ${notes.map(n => `<li>${esc(n)}</li>`).join('')}
+      </ul>
+      <label class="upd-row" for="upd-rb-confirm">${esc(tr('upd.rb.type', { v }))}</label>
+      <input type="text" id="upd-rb-confirm" autocomplete="off" spellcheck="false" maxlength="64"
+        class="tip" data-tip="${esc(tr('upd.rb.typeTip'))}" title="${esc(tr('upd.rb.typeTip'))}">
+      <p class="upd-err" id="upd-rb-msg" role="status" aria-live="polite"></p>
+      <div class="upd-row">
+        <button type="button" class="btn btn-danger btn-sm tip" data-upd="rollback-go" disabled
+          data-tip="${esc(tr('upd.rb.goTip', { v }))}" title="${esc(tr('upd.rb.goTip', { v }))}">${esc(tr('upd.rb.go'))}</button>
+        <button type="button" class="btn btn-sm tip" data-upd="rollback-cancel"
+          data-tip="${esc(tr('upd.rb.cancelTip'))}" title="${esc(tr('upd.rb.cancelTip'))}">${esc(tr('upd.rb.cancel'))}</button>
+      </div>
+    </div>`;
+    const input = $('#upd-rb-confirm');
+    if (input) { input.value = rbTyped; input.focus(); }
+    rollbackTyped();
+  }
+
+  function rollbackTyped() {
+    const s = (st.staged || []).find(x => x.name === rollingBack);
+    const go = document.querySelector('[data-upd="rollback-go"]');
+    const input = $('#upd-rb-confirm');
+    if (input) rbTyped = input.value;
+    if (go && s) go.disabled = (rbTyped.trim() !== s.version);
+  }
+
+  async function rollback() {
+    const s = (st.staged || []).find(x => x.name === rollingBack);
+    if (!s) return;
+    const body = { archive: s.name, confirm: $('#upd-rb-confirm').value.trim() };
+    let r = await api('POST', '/api/update/rollback', body);
+    if (r.status === 409 && r.d.busy) {
+      if (!confirm(tr('upd.confirmBusy', { n: r.d.busy.length }))) return;
+      r = await api('POST', '/api/update/rollback', { ...body, force: true });
+    }
+    if (!r.ok) {
+      const msg = $('#upd-rb-msg');
+      if (msg) msg.textContent = (r.d && (r.d.error || '')) + (r.d && r.d.hint ? ` (${r.d.hint})` : '') || String(r.status);
+      return;
+    }
+    rollingBack = null;
+    if (window.Dock && Dock.poll) Dock.poll();
+    follow(s.version);
+  }
+
   function render() {
     const pane = $('#versions-pane-update');
     if (!pane) return;
@@ -133,6 +224,7 @@ const ConsoleUpdate = (() => {
     }
     if (!st) { pane.innerHTML = `<p class="form-hint">${esc(tr('common.loading'))}</p>`; return; }
     if (following) { renderFollow(pane); return; }
+    if (rollingBack && st.can_apply) { renderRollback(pane); return; }
     const admin = st.can_apply;
     pane.innerHTML = `
       <div class="upd-head">
@@ -171,6 +263,7 @@ const ConsoleUpdate = (() => {
         <h4>${esc(tr('upd.staged.title'))}</h4>
         ${stagedBlock()}
       </div>
+      ${admin ? rollbackBlock() : ''}
       ${lastBlock()}`;
   }
 
@@ -305,6 +398,9 @@ const ConsoleUpdate = (() => {
       case 'download': download(); break;
       case 'install': install(name); break;
       case 'delete': remove(name); break;
+      case 'rollback': rollingBack = b.closest('[data-name]')?.dataset.name || null; rbTyped = ''; render(); break;
+      case 'rollback-go': rollback(); break;
+      case 'rollback-cancel': rollingBack = null; render(); break;
       case 'reload': loadError = null; render(); load(); break;
       default: break;
     }
@@ -325,7 +421,13 @@ const ConsoleUpdate = (() => {
     if (pane) {
       pane.addEventListener('click', onClick);
       pane.addEventListener('change', (e) => { if (e.target.id === 'upd-files') uploadFiles(e.target.files); });
-      pane.addEventListener('input', (e) => { if (e.target.id === 'upd-source') sourceDraft = e.target.value; });
+      pane.addEventListener('input', (e) => {
+        if (e.target.id === 'upd-source') sourceDraft = e.target.value;
+        if (e.target.id === 'upd-rb-confirm') rollbackTyped();
+      });
+      pane.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && rollingBack) { e.stopPropagation(); rollingBack = null; render(); }
+      });
     }
     // l'état (et donc la pastille « mise à jour disponible ») au chargement
     load();

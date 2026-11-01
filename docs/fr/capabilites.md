@@ -2929,7 +2929,9 @@ groupée est reprise type par type).
   interne) et télécharger, ou fournir une archive et sa signature pour un site
   isolé, puis installer. L'agent de mise à jour de l'hôte vérifie la
   signature, installe, redémarre la console et remet la version précédente
-  tout seul si la nouvelle ne répond pas. Voir
+  tout seul si la nouvelle ne répond pas. Depuis la 2.0.2, l'onglet revient
+  aussi à une version signée plus ancienne, après une fenêtre qui dit ce qui
+  est gardé et perdu et demande de saisir la version visée. Voir
   [installation.md](installation.md#mettre-harvops-à-jour-1820).
 
 - **Un menu latéral qui rend l'écran.** Le menu de gauche est un rail

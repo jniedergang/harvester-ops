@@ -339,6 +339,26 @@ Le redémarrage rend l'interface indisponible quelques secondes ; les clusters
 ne sont pas touchés. L'installation est refusée tant que des actions tournent
 (elles s'arrêteraient avec le redémarrage), sauf confirmation.
 
+**Revenir en arrière (2.0.2).** La carte **Versions précédentes** du même
+onglet revient à une version plus ancienne. Elle liste les archives préparées
+signées et plus anciennes que la version qui tourne. Pour revenir en arrière,
+fournir l'archive plus ancienne et sa `.sig` (page de publication de cette
+version) comme pour une mise à jour hors ligne. **Revenir à x.y.z** ouvre une
+fenêtre qui dit ce qui est gardé (configuration, comptes, certificats,
+historique, dossiers et le reste de l'état ; les clusters) et ce qui est perdu
+(tout ce qui a été ajouté ou corrigé après cette version, correctifs de
+sécurité compris). Le retour ne part qu'une fois la version visée saisie. Il
+suit ensuite le chemin d'une mise à jour : l'agent vérifie la signature, garde
+les fichiers et l'image en place, installe la version plus ancienne, et remet
+la version en cours tout seul si l'ancienne ne répond pas. La demande est
+tracée dans l'Activité (`console-update:rollback`) ; l'API est
+`POST /api/update/rollback` avec `{"archive": ..., "confirm": "<version>"}`
+(administrateurs). L'agent efface sa sauvegarde après une mise à jour réussie :
+une archive signée préparée est donc le seul chemin de retour. Deux limites :
+avant 2.0.0, lire d'abord la note 2.0.0 « Rolling back to 1.101.x » du
+CHANGELOG ; avant 2.0.2, la console ne tourne pas sous Docker, donc sur un
+hôte Docker l'agent remet la version en cours.
+
 **Confiance.** L'agent n'installe qu'une archive signée par une clé de
 `/opt/harvester-ops/update-signers` (livré avec la version installée), ou de
 `/etc/harvester-ops/update-signers` si vous en écrivez un (il prévaut alors :
