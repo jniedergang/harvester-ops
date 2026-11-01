@@ -285,7 +285,21 @@ ligne échoue).
 `empty-into` déplace les objets d'un dossier vers la cible, ses sous-dossiers
 sous elle (sous la racine pour `unfiled`), puis supprime le dossier dans la
 même action ; rien ne bouge si un sous-dossier ne peut pas y aller (nom pris,
-bornes), et le dossier reste tant que quelque chose y est rangé. Annuler
+bornes), et le dossier reste tant que quelque chose y est rangé.
+
+`delete` (2.0.2) retire d'abord les entrées d'objets prouvés disparus : un
+hôte KVM ou un cluster qui n'est plus déclaré, un domaine que son hôte dit
+absent (`failed to get domain`), une VM ou une charge pour laquelle le
+cluster répond `NotFound`, lue avec l'identité de la personne. Chaque
+retrait est une ligne `done` du journal (`to_path` vide, message
+`purged: <raison>`) et une étape. Toute autre entrée bloque avec sa raison
+(objet présent, objet que la personne ne voit pas, hôte injoignable,
+lecture en échec, tout autre texte « not found » comme un contexte de
+kubeconfig absent), et rien n'est alors retiré. Depuis la console, la
+demande porte les clusters que la personne voit et ses kubeconfigs : un
+cluster que Rancher cache n'est jamais lu, et jamais avec le kubeconfig de
+la console. Une entrée retirée que la personne ne voit pas (un cluster
+retiré de la configuration) est comptée, pas nommée. Annuler
 recrée le dossier et remet tout ; si un dossier ne peut pas revenir (nom
 repris depuis, ancien parent disparu), ses objets restent avec lui et sont
 comptés comme conflits. Reprendre rejoue les lignes de dossier pas encore
@@ -420,7 +434,7 @@ opérateur, la lecture est ouverte à tous.
 | `GET /api/folders` | l'arborescence, chaque dossier avec son `origin` (`console`, ou `objects` quand une lecture de flotte l'a créé depuis les objets qui le nomment) et ses `counts` `{vms, containers, hosts}`, sous-dossiers compris, limités à ce que la personne a vu dans ses propres lectures de flotte (`null` : pas encore lu) |
 | `POST /api/folders` | créer (`parent_id`, `name`) ; un frère du même nom répond 409 `{conflicts}` avant que rien ne parte |
 | `PATCH /api/folders/<id>` | renommer (`name`) ou déplacer (`parent_id`, `null` pour la racine), un changement à la fois ; ses objets sont réécrits dans la même action. Les dossiers sont triés par nom : `position` est refusé. Un frère du même nom (au nouveau nom ou sous le nouveau parent) répond 409 `{conflicts}` avant que rien ne parte |
-| `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre) |
+| `DELETE /api/folders/<id>` | supprimer un dossier vide ; un dossier non vide répond 409 avec ce que la personne voit (`count_visible`, `subfolders`, et `hidden` sans nombre). Depuis la 2.0.2, les entrées d'objets absents des lectures de la personne partent à l'action, qui retire celles prouvées disparues (voir plus bas) |
 | `POST /api/folders/<id>/empty-into` | `target_id` (un dossier ou `unfiled`) : déplacer le contenu puis supprimer, en une action ; un sous-dossier dont le nom est déjà pris dans la cible répond 409 avant que rien ne bouge |
 | `POST /api/folders/assign` | `objects` (clés ; une VM KVM donne aussi son `host`) et `to` (identifiant de dossier ou `unfiled`) |
 | `POST /api/folders/check` | les contrôles montrés avant un déplacement, objet par objet, rien n'est écrit |

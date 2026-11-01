@@ -334,6 +334,13 @@ def upsert_membership(conn, key, path, source, seen_at=None, scope=""):
                  (key, path, source, seen_at or _now(), scope or ""))
 
 
+def drop_membership(conn, key, path):
+    """Retire le rangement de `key` s'il est encore `path` (une entrée rangée
+    ailleurs entre-temps reste) ; rend True si une ligne est partie."""
+    return conn.execute("DELETE FROM memberships WHERE vm_key = ? AND folder_path = ?",
+                        (key, path)).rowcount > 0
+
+
 def _iso(t):
     return t if isinstance(t, str) else t.strftime("%Y-%m-%dT%H:%M:%SZ")
 

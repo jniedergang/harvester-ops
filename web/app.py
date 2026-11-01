@@ -10149,8 +10149,9 @@ def _folders_after():
     READ_SHARE.invalidate(None)
 
 
-def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None):
-    """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur."""
+def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None, spec=None):
+    """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur. `spec` :
+    demande déjà faite (suppression), sinon celle des `objects`."""
     script = BIN_DIR / FOLDERS_SCRIPT
     if not script.is_file():
         return jsonify({"error": f"{FOLDERS_SCRIPT} not deployed"}), 503
@@ -10161,7 +10162,8 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False, resul
             run.undo = {"path": f"/api/folders/actions/{run.id}/undo"}
         if result:
             run.result = dict(result)
-    spec = _folder_spec(objects, chosen) if objects is not None else None
+    if spec is None and objects is not None:
+        spec = _folder_spec(objects, chosen)
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
                            spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
     if err:
@@ -10254,17 +10256,47 @@ def api_folders_update(folder_id):
 
 
 def _delete_refusal(conn, folder_id, path):
-    """None si le dossier est vide pour tout le monde, sinon la réponse 409
-    qui dit ce que la personne voit (jamais le nombre caché)."""
+    """(None, demande de l'outil) si la suppression peut partir, sinon
+    (réponse 409, None) qui dit ce que la personne voit (jamais le nombre
+    caché).
+
+    2.0.2 (décision 94) : une entrée rangée dont l'objet n'existe peut-être
+    plus (absente des lectures de la personne : VM supprimée, hôte ou
+    cluster retiré) ne bloque plus ici ; l'outil la vérifie et la retire si
+    l'objet est prouvé disparu. Refus immédiat seulement pour un
+    sous-dossier, un objet que la personne voit encore dans ses lectures, ou
+    l'entrée d'un cluster que Rancher lui cache."""
     vis = _folder_visible_keys()
     visible = set(vis["hosts"]) | (vis["vms"] or set()) | (vis["containers"] or set())
     members = {k: m["folder_path"] for k, m in _fdb.memberships(conn).items()}
-    check = _fm.delete_check(_fdb.list_tree(conn), folder_id, members, visible)
-    if check["empty"]:
-        return None
-    return jsonify({"error": f"folder {path} is not empty: move its content to another folder first",
-                    "nonempty": True, "count_visible": check["count_visible"],
-                    "subfolders": check["subfolders"], "hidden": check["hidden"]}), 409
+    tree = _fdb.list_tree(conn)
+    check = _fm.delete_check(tree, folder_id, members, visible)
+    seen = _visible_cluster_names()
+    declared = {c.get("name") for c in load_config_ro().get("clusters", []) if c.get("name")}
+    inside = [k for k, v in members.items() if v and _fm.within(v, path)]
+    hidden_cluster = False
+    clusters = set()
+    for k in inside:
+        kind = _fm.key_kind(k)
+        c = k.split("/")[2] if k.startswith("host/harvester/") else (
+            k.split("/")[1] if kind in ("harvester", "container") else None)
+        if c is None:
+            continue
+        if c in declared and c not in seen:
+            hidden_cluster = True
+        elif c in seen:
+            clusters.add(c)
+    blocking = check["subfolders"] or check["count_visible"] or hidden_cluster
+    if not check["empty"] and blocking:
+        return (jsonify({"error": f"folder {path} is not empty: move its content to another folder first",
+                         "nonempty": True, "count_visible": check["count_visible"],
+                         "subfolders": check["subfolders"], "hidden": check["hidden"]}), 409), None
+    kcs = {}
+    for c in sorted(clusters):
+        kc = _kubectl_for_cluster(c)
+        if kc:
+            kcs[c] = kc
+    return None, {"objects": [], "visible": sorted(visible), "kubeconfigs": kcs, "clusters": sorted(seen)}
 
 
 @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
@@ -10272,18 +10304,20 @@ def _delete_refusal(conn, folder_id, path):
 @_rate_limit(FOLDERS_RATE)
 def api_folders_delete(folder_id):
     """Supprime un dossier VIDE ; un dossier non vide est refusé (409) et la
-    fenêtre propose d'en déplacer d'abord le contenu (empty-into)."""
+    fenêtre propose d'en déplacer d'abord le contenu (empty-into). 2.0.2 :
+    les entrées d'objets qui n'existent plus sont retirées par l'outil dans
+    la même action (une étape et une ligne de journal chacune)."""
     conn = _folders_conn()
     try:
         path, err = _folder_by_id(conn, folder_id)
         if err:
             return err
-        refusal = _delete_refusal(conn, folder_id, path)
+        refusal, spec = _delete_refusal(conn, folder_id, path)
         if refusal:
             return refusal
     finally:
         conn.close()
-    return _folder_action(f"delete:{path}", ["delete", "--folder", str(folder_id)], [])
+    return _folder_action(f"delete:{path}", ["delete", "--folder", str(folder_id)], spec=spec)
 
 
 @app.route("/api/folders/<int:folder_id>/empty-into", methods=["POST"])
