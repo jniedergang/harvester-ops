@@ -36019,7 +36019,8 @@ class I18n {
     const dict = translations[this.currentLang] || translations.en;
     let str = dict[key] || translations.en[key] || key;
     if (vars) {
-      for (const k in vars) str = str.replace(`{${k}}`, vars[k]);
+      // every occurrence, taken literally (a string may name a value twice)
+      for (const k in vars) str = str.split(`{${k}}`).join(String(vars[k]));
     }
     return str;
   }

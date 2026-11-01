@@ -97,3 +97,15 @@ def test_recent_target_has_no_old_version_notes(context, flask_server):
     dialog = pane.locator(".upd-rb-dialog")
     expect(dialog).to_be_visible()
     expect(dialog).not_to_contain_text(page.evaluate("i18n.t('upd.rb.before202', {cur: '2.0.3'})"))
+
+
+def test_a_value_named_twice_is_filled_twice(context, flask_server):
+    """Vu en réel sur hops-upd : la deuxième mention de {cur} restait brute.
+    i18n.t remplaçait la première occurrence seulement (na.hint.migrate aussi)."""
+    page, _ = _open(context, flask_server, _state())
+    for lang in ("en", "fr", "it", "es", "de"):
+        got = page.evaluate("""([lang]) => { i18n.currentLang = lang;
+            return [i18n.t('upd.rb.keep3', {v: '1.0.0', cur: '2.0.0'}),
+                    i18n.t('na.hint.migrate', {from: 'mgmt'})]; }""", [lang])
+        assert all("{" not in g for g in got), (lang, got)
+    assert page.evaluate("i18n.t('upd.rb.dialogTitle', {v: '$&', cur: '$1'})").count("$&") == 1
