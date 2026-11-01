@@ -240,10 +240,11 @@ done
 CONTAINER_RUNTIME=""
 upgrade
 """
-    environment = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "CALLS": str(tmp_path / "calls"),
+    # PATH is the fake tools only: a runtime of the test host must not be found.
+    environment = {**os.environ, "PATH": str(tools), "CALLS": str(tmp_path / "calls"),
                    "HOST_PYTHON": sys.executable, "SCRIPT_DIR": str(release), "SYSTEMD_DIR": str(units)}
     environment.pop(cr.OVERRIDE, None)
-    result = subprocess.run(["bash", "-c", script], env=environment, capture_output=True, text=True)
+    result = subprocess.run(["/bin/bash", "-c", script], env=environment, capture_output=True, text=True)
     assert result.returncode != 0
     assert "refusing to switch" in result.stderr
     assert not (tmp_path / "calls").exists()
@@ -407,8 +408,9 @@ def test_uninstall_removes_the_console_from_every_runtime(tmp_path, installed):
     for name in installed:
         (tools / name).write_text('#!/bin/sh\necho "${0##*/} $*" >> "$CALLS"\n')
         (tools / name).chmod(0o755)
-    env = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "CALLS": str(tmp_path / "calls")}
-    assert subprocess.run(["bash", "-c", block], env=env).returncode == 0
+    # PATH is the fake tools only: a real runtime of the test host is never called.
+    env = {**os.environ, "PATH": str(tools), "CALLS": str(tmp_path / "calls")}
+    assert subprocess.run(["/bin/bash", "-c", block], env=env).returncode == 0
     calls = (tmp_path / "calls").read_text().splitlines()
     for name in installed:
         assert f"{name} rm -f harvester-ops" in calls

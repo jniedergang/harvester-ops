@@ -34,15 +34,26 @@ absent provoque une erreur. L'agent transmet son choix à l'installeur de la
 livraison et le conserve pour la sauvegarde de l'image et le retour arrière.
 
 L'unité est générée pour le moteur choisi : `docker.service` pour Docker,
-aucun service socket pour la CLI Podman. Docker n'ayant pas `--passwd-entry`,
-un helper de pré-démarrage reprend les comptes de l'image et ajoute le compte
-de service de l'hôte dans `/var/lib/harvester-ops/.nss/`, monté en lecture seule.
-SSH peut ainsi résoudre ce compte non root dans le conteneur. Les surcharges
-systemd de l'exploitant sont conservées et restent prioritaires ; retirer les
-anciennes surcharges propres au moteur lors d'un changement volontaire.
-Sur une ancienne installation mixte dont l'agent choisit encore Podman en
-premier, installer la nouvelle livraison vérifiée avec `./install.sh --upgrade`
-sur l'hôte afin de mettre à jour l'agent avant les mises à jour depuis l'interface.
+aucun service socket pour la CLI Podman.
+
+Docker n'a pas `--passwd-entry`. Un helper de pré-démarrage, lancé en root,
+reprend les comptes de l'image et ajoute le compte de service de l'hôte. Il
+les écrit dans `/run/harvester-ops-nss/`, un répertoire de root que systemd
+recrée à chaque démarrage (`RuntimeDirectory=`). Les fichiers sont montés en
+lecture seule : SSH résout ainsi ce compte non root dans le conteneur. Rien
+n'est écrit dans le répertoire d'état, qui appartient au compte de la console.
+
+Les surcharges systemd de l'exploitant sont conservées et restent
+prioritaires. Retirer les anciennes surcharges propres au moteur lors d'un
+changement volontaire.
+
+Un hôte Docker seul dont l'unité lance encore Podman ne peut pas changer de
+moteur par une mise à jour depuis l'interface : l'agent refuse et donne la
+commande à lancer. La lancer sur l'hôte, depuis la livraison extraite :
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh --upgrade`.
+De même pour un hôte mixte mis à jour depuis la 2.0.1 ou avant, dont l'agent
+choisit encore Podman en premier : installer cette livraison une fois avec
+`./install.sh --upgrade` sur l'hôte, puis passer par l'interface.
 
 Quand le `ssh-keygen` de l'hôte ne connaît pas `-Y` (OpenSSH avant 8.2, comme
 sur RHEL 8), l'agent de mise à jour fait vérifier la signature par le

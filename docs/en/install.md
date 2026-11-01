@@ -35,15 +35,25 @@ The update agent passes its choice to the release installer and uses it for the
 previous-image tag and rollback as well.
 
 The installer renders the service for that runtime. Docker requires
-`docker.service`; Podman CLI needs no socket service. Docker does not support
-`--passwd-entry`, so a pre-start helper copies the image's account files and adds
-the host service account under `/var/lib/harvester-ops/.nss/`. Those files are
-mounted read-only so SSH resolves the non-root account inside the container.
-Existing service drop-ins remain in place; operator overrides still take
-precedence. Remove obsolete runtime-specific overrides when deliberately
-switching runtime. On an older mixed-runtime installation whose updater still
-selects Podman first, install the verified new release with `./install.sh --upgrade`
-on the host to update the agent before using web-based updates.
+`docker.service`. The Podman CLI needs no socket service.
+
+Docker has no `--passwd-entry`. A pre-start helper, run as root, copies the
+image's account files and adds the host service account. It writes them in
+`/run/harvester-ops-nss/`, a root-owned directory that systemd recreates at
+each start (`RuntimeDirectory=`). The files are mounted read-only, so SSH
+resolves the non-root account inside the container. Nothing is written under
+the state directory, which the console account owns.
+
+Existing service drop-ins stay in place, and operator overrides still win.
+Remove obsolete runtime-specific overrides when you switch runtime on purpose.
+
+A Docker-only host whose unit still runs Podman cannot be moved by a web
+update: the agent refuses and names the command to run instead. Run it on the
+host, from the extracted release:
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh --upgrade`.
+The same applies to a mixed host updated from 2.0.1 or older, whose agent
+still picks Podman first: install this release once with
+`./install.sh --upgrade` on the host, then use web updates.
 
 When the host's `ssh-keygen` does not know `-Y` (OpenSSH before 8.2, as on
 RHEL 8), the update agent has the signature checked by the `ssh-keygen` of
