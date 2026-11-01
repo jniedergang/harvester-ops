@@ -41,7 +41,15 @@ def select_runtime(unit_dir=Path("/etc/systemd/system"), override=None):
                     requested = match.group(1)
     if requested:
         if not shutil.which(requested):
-            raise RuntimeError(f"The selected container runtime {requested} is not installed; refusing to switch image stores")
+            if override is not None or os.environ.get(OVERRIDE):
+                raise RuntimeError(f"{OVERRIDE}={requested} but {requested} is not installed")
+            other = RUNTIMES[1 - RUNTIMES.index(requested)]
+            # The update agent cannot receive the override: only an
+            # installation run by hand on the host can move the image store.
+            raise RuntimeError(
+                f"The installed unit runs {requested}, which is not installed; refusing to switch image stores. "
+                f"To move the console to {other}, run on the host, from the extracted release: "
+                f"{OVERRIDE}={other} ./install.sh --upgrade")
         return requested
     for runtime in RUNTIMES:
         if shutil.which(runtime):
