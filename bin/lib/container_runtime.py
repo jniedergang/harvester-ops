@@ -10,17 +10,19 @@ RUNTIMES = ("podman", "docker")
 OVERRIDE = "HARVESTER_OPS_CONTAINER_RUNTIME"
 NSS_NAME = "harvester-ops-nss"
 NSS_DIR = "/run/" + NSS_NAME
+# The three runtime commands of config/systemd/harvester-ops.service.
+PODMAN_ANCHORS = ("ExecStartPre=-/usr/bin/podman rm ", "exec /usr/bin/podman run ", "ExecStop=/usr/bin/podman stop ")
 SAFE_EXECUTABLE = re.compile(r"^/[A-Za-z0-9._/+-]+$")
 
 
-class RuntimeError(ValueError):
+class RuntimeSelectionError(ValueError):
     pass
 
 
 def select_runtime(unit_dir=Path("/etc/systemd/system"), override=None):
     requested = override if override is not None else os.environ.get(OVERRIDE, "")
     if requested and requested not in RUNTIMES:
-        raise RuntimeError(f"{OVERRIDE} must be podman or docker")
+        raise RuntimeSelectionError(f"{OVERRIDE} must be podman or docker")
     if not requested:
         # Read the installed unit before the installer replaces it. Follow
         # ExecStop resets in administrator drop-ins as systemd does.
@@ -37,16 +39,16 @@ def select_runtime(unit_dir=Path("/etc/systemd/system"), override=None):
                         continue
                     match = re.match(r"-?(?:/[^\s]+/)?(podman|docker)\s", command)
                     if not match:
-                        raise RuntimeError(f"Cannot identify the installed runtime in {path}; set {OVERRIDE}")
+                        raise RuntimeSelectionError(f"Cannot identify the installed runtime in {path}; set {OVERRIDE}")
                     requested = match.group(1)
     if requested:
         if not shutil.which(requested):
             if override is not None or os.environ.get(OVERRIDE):
-                raise RuntimeError(f"{OVERRIDE}={requested} but {requested} is not installed")
+                raise RuntimeSelectionError(f"{OVERRIDE}={requested} but {requested} is not installed")
             other = RUNTIMES[1 - RUNTIMES.index(requested)]
             # The update agent cannot receive the override: only an
             # installation run by hand on the host can move the image store.
-            raise RuntimeError(
+            raise RuntimeSelectionError(
                 f"The installed unit runs {requested}, which is not installed; refusing to switch image stores. "
                 f"To move the console to {other}, run on the host, from the extracted release: "
                 f"{OVERRIDE}={other} ./install.sh --upgrade")
@@ -54,30 +56,45 @@ def select_runtime(unit_dir=Path("/etc/systemd/system"), override=None):
     for runtime in RUNTIMES:
         if shutil.which(runtime):
             return runtime
-    raise RuntimeError("Neither podman nor docker is installed")
+    raise RuntimeSelectionError("Neither podman nor docker is installed")
+
+
+def _replace_once(text, anchor, replacement):
+    # A changed template must fail here, not render a unit missing a line.
+    if text.count(anchor) != 1:
+        raise RuntimeSelectionError(f"Unit template anchor missing or repeated: {anchor.strip()!r}")
+    return text.replace(anchor, replacement)
 
 
 def render_service(template, runtime):
     if runtime not in RUNTIMES:
-        raise RuntimeError("Unsupported container runtime")
+        raise RuntimeSelectionError("Unsupported container runtime")
     executable = shutil.which(runtime)
     # Interpolated in systemd command lines and in a sh -c '...' string.
     if not executable or not SAFE_EXECUTABLE.match(executable):
-        raise RuntimeError(f"Cannot render an absolute, systemd-safe executable for {runtime}")
-    text = template.replace("/usr/bin/podman", executable)
+        raise RuntimeSelectionError(f"Cannot render an absolute, systemd-safe executable for {runtime}")
+    if template.count("/usr/bin/podman") != len(PODMAN_ANCHORS):
+        raise RuntimeSelectionError("Unit template calls /usr/bin/podman outside the known commands")
+    text = template
+    for anchor in PODMAN_ANCHORS:
+        text = _replace_once(text, anchor, anchor.replace("/usr/bin/podman", executable))
     if runtime == "docker":
-        text = text.replace("After=network-online.target\n", "After=network-online.target docker.service\n")
-        text = text.replace("Wants=network-online.target\n", "Wants=network-online.target\nRequires=docker.service\n")
-        text = "\n".join(line for line in text.split("\n") if "--passwd-entry " not in line)
+        text = _replace_once(text, "After=network-online.target\n", "After=network-online.target docker.service\n")
+        text = _replace_once(text, "Wants=network-online.target\n", "Wants=network-online.target\nRequires=docker.service\n")
+        lines = text.split("\n")
+        kept = [line for line in lines if "--passwd-entry " not in line]
+        if len(lines) - len(kept) != 1:
+            raise RuntimeSelectionError("Unit template anchor missing: --passwd-entry")
+        text = "\n".join(kept)
         # Account files for Docker, built by root in a root-owned directory
         # that systemd recreates at each start (never under the state
         # directory, which the console account owns).
-        text = text.replace("# Read-only root filesystem;",
-                            f"RuntimeDirectory={NSS_NAME}\nRuntimeDirectoryMode=0755\n"
-                            f"ExecStartPre=/usr/local/bin/harvester-container-user.sh {executable}\n# Read-only root filesystem;", 1)
-        text = text.replace("    -e HOME=/var/lib/harvester-ops \\\n", "    -e HOME=/var/lib/harvester-ops \\\n"
-                            f"    -v {NSS_DIR}/passwd:/etc/passwd:ro,Z \\\n"
-                            f"    -v {NSS_DIR}/group:/etc/group:ro,Z \\\n")
+        text = _replace_once(text, "# Read-only root filesystem;",
+                             f"RuntimeDirectory={NSS_NAME}\nRuntimeDirectoryMode=0755\n"
+                             f"ExecStartPre=/usr/local/bin/harvester-container-user.sh {executable}\n# Read-only root filesystem;")
+        text = _replace_once(text, "    -e HOME=/var/lib/harvester-ops \\\n", "    -e HOME=/var/lib/harvester-ops \\\n"
+                             f"    -v {NSS_DIR}/passwd:/etc/passwd:ro,Z \\\n"
+                             f"    -v {NSS_DIR}/group:/etc/group:ro,Z \\\n")
     return text
 
 
@@ -91,7 +108,7 @@ def main():
         runtime = select_runtime(args.unit_dir, args.runtime)
         print(render_service(args.template.read_text(), runtime) if args.template else runtime,
               end="" if args.template else "\n")
-    except (RuntimeError, OSError) as error:
+    except (RuntimeSelectionError, OSError) as error:
         print(str(error), file=sys.stderr)
         return 2
     return 0

@@ -82,7 +82,7 @@ def test_runtime_selection(tmp_path, monkeypatch, installed, override, main, dro
     if expected in cr.RUNTIMES:
         assert cr.select_runtime(tmp_path) == expected
     else:
-        with pytest.raises(cr.RuntimeError, match=expected):
+        with pytest.raises(cr.RuntimeSelectionError, match=expected):
             cr.select_runtime(tmp_path)
 
 
@@ -107,7 +107,7 @@ def test_render_accepts_only_a_safe_executable(monkeypatch, path, error):
     if error is None:
         assert f"ExecStop={path} stop -t 600" in cr.render_service(template, "docker")
     else:
-        with pytest.raises(cr.RuntimeError, match=error):
+        with pytest.raises(cr.RuntimeSelectionError, match=error):
             cr.render_service(template, "docker")
 
 
@@ -152,8 +152,10 @@ def test_real_upgrade_function_keeps_docker_for_load_and_unit(tmp_path):
         executable = tools / name
         executable.write_text('#!/bin/bash\nprintf "%s %s\\n" "${0##*/}" "$*" >> "$CALLS"\n')
         executable.chmod(0o755)
-    script = '\n'.join(function(n) for n in ["detect_container_runtime", "render_container_service", "install_web_ui", "upgrade"])
-    script += '\n' + '''require_root() { :; }
+    script = '\n'.join(function(n) for n in ["detect_container_runtime", "render_container_service",
+                                                       "write_container_service", "install_web_ui", "upgrade"])
+    script += '\n' + '''umask 077
+require_root() { :; }
 detect_update_python() { echo "$HOST_PYTHON"; }
 info() { :; }; ok() { :; }; warn() { :; }; err() { echo "$*" >&2; }
 install_scripts() { :; }; setup_service_account() { :; }; install_bundles() { :; }
@@ -168,9 +170,48 @@ upgrade
     result = subprocess.run(["bash", "-ec", script], env=environment, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "calls").read_text().startswith("docker load -i ")
-    unit = (units / "harvester-ops.service").read_text()
+    unit_path = units / "harvester-ops.service"
+    unit = unit_path.read_text()
     assert "Requires=docker.service" in unit and "--passwd-entry" not in unit
     assert f"ExecStop={tools}/docker stop" in unit
+    # written whole and world-readable whatever the umask, no temporary left
+    assert unit_path.stat().st_mode & 0o777 == 0o644
+    assert [p.name for p in units.iterdir()] == ["harvester-ops.service"]
+
+
+TEMPLATE_BREAKS = {
+    "no ExecStop": ("ExecStop=/usr/bin/podman stop ", "ExecStop=/usr/bin/true "),
+    "extra podman call": ("ExecStop=", "ExecReload=/usr/bin/podman kill harvester-ops\nExecStop="),
+    "no After line": ("After=network-online.target\n", ""),
+    "no Wants line": ("Wants=network-online.target\n", ""),
+    "no passwd entry": ("    --passwd-entry ", "    --env-entry "),
+    "no read-only comment": ("# Read-only root filesystem;", "# Root filesystem;"),
+    "no HOME line": ("    -e HOME=/var/lib/harvester-ops \\\n", ""),
+}
+
+
+@pytest.mark.parametrize("old,new", TEMPLATE_BREAKS.values(), ids=TEMPLATE_BREAKS.keys())
+def test_render_fails_on_a_missing_template_anchor(monkeypatch, old, new):
+    available(monkeypatch, cr.RUNTIMES)
+    template = (ROOT / "config/systemd/harvester-ops.service").read_text()
+    assert old in template
+    with pytest.raises(cr.RuntimeSelectionError, match="anchor|outside the known"):
+        cr.render_service(template.replace(old, new, 1), "docker")
+
+
+def test_failed_render_leaves_the_installed_unit_alone(tmp_path):
+    units = tmp_path / "units"
+    units.mkdir()
+    (units / "harvester-ops.service").write_text(DOCKER_UNIT)
+    script = function("write_container_service") + """
+render_container_service() { echo partial; return 2; }
+write_container_service
+"""
+    result = subprocess.run(["bash", "-c", script], env={**os.environ, "SYSTEMD_DIR": str(units)},
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert [p.name for p in units.iterdir()] == ["harvester-ops.service"]
+    assert (units / "harvester-ops.service").read_text() == DOCKER_UNIT
 
 
 def test_upgrade_resolves_the_runtime_before_writing_anything(tmp_path):
@@ -188,7 +229,7 @@ def test_upgrade_resolves_the_runtime_before_writing_anything(tmp_path):
     (tools / "podman").write_text("#!/bin/sh\nexit 0\n")
     (tools / "podman").chmod(0o755)
     script = "\n".join(function(n) for n in ["detect_container_runtime", "render_container_service",
-                                             "install_web_ui", "upgrade"])
+                                             "write_container_service", "install_web_ui", "upgrade"])
     script += """
 require_root() { :; }
 detect_update_python() { echo "$HOST_PYTHON"; }

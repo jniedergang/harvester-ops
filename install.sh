@@ -15,6 +15,8 @@ CONF_DIR="/etc/harvester-ops"
 LOG_DIR="/var/log/harvester-ops"
 STATE_DIR="/var/lib/harvester-ops"
 INSTALL_DIR="/opt/harvester-ops"
+# Test hook: only the main unit follows it (the update agent units always go
+# to /etc/systemd/system).
 SYSTEMD_DIR="${HARVESTER_OPS_UNIT_DIR:-/etc/systemd/system}"
 CONTAINER_RUNTIME=""
 
@@ -67,6 +69,20 @@ render_container_service() {
     python="$(detect_update_python)" || return 2
     "$python" "$SCRIPT_DIR/bin/lib/container_runtime.py" --unit-dir "$SYSTEMD_DIR" \
         --runtime "$CONTAINER_RUNTIME" --template "$SCRIPT_DIR/config/systemd/harvester-ops.service"
+}
+
+# Render into a temporary file of the same directory, then rename: systemd
+# never reads a half-written unit, and the mode does not depend on the umask.
+write_container_service() {
+    local tmp
+    install -d -m 0755 "$SYSTEMD_DIR"
+    tmp="$(mktemp "$SYSTEMD_DIR/.harvester-ops.service.XXXXXX")" || return 2
+    if ! render_container_service > "$tmp"; then
+        rm -f -- "$tmp"
+        return 2
+    fi
+    chmod 0644 "$tmp"
+    mv -fT -- "$tmp" "$SYSTEMD_DIR/harvester-ops.service"
 }
 
 check_deps() {
@@ -216,10 +232,6 @@ install_web_ui() {
         CONTAINER_RUNTIME="$(detect_container_runtime)" || return 2
     fi
     runtime="$CONTAINER_RUNTIME"
-    if [[ -z "$runtime" ]]; then
-        err "Neither podman nor docker found — cannot install Web UI"
-        return 1
-    fi
     info "Container runtime: $runtime"
 
     local image_tar="$SCRIPT_DIR/images/harvester-ops-ui.tar"
@@ -439,10 +451,7 @@ setup_firewall() {
 }
 
 install_systemd() {
-    local rendered
-    rendered="$(render_container_service)" || return 2
-    install -d -m 0755 "$SYSTEMD_DIR"
-    printf '%s\n' "$rendered" > "$SYSTEMD_DIR/harvester-ops.service"
+    write_container_service || return 2
     systemctl daemon-reload
     ok "systemd unit installed (not yet enabled)"
     if prompt_yesno "Enable and start harvester-ops now?" "Y"; then
@@ -545,9 +554,7 @@ upgrade() {
     install_bundles
     install_web_ui
     if [[ -f "$SYSTEMD_DIR/harvester-ops.service" ]]; then
-        local rendered
-        rendered="$(render_container_service)" || return 2
-        printf '%s\n' "$rendered" > "$SYSTEMD_DIR/harvester-ops.service"
+        write_container_service || return 2
     fi
     install_update_agent
     install_uninstaller

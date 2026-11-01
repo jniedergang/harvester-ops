@@ -276,7 +276,7 @@ def _installed_version():
 def _runtime():
     try:
         return cr.select_runtime(UNIT_DIR)
-    except cr.RuntimeError as e:
+    except cr.RuntimeSelectionError as e:
         raise su.UpdateError(str(e)) from e
 
 
