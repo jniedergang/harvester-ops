@@ -11131,6 +11131,20 @@ def _booking_conflicts(booking, cap):
     return [dict(r, message=_hbk.describe(r)) for r in reasons]
 
 
+def _fleet_cluster_allow():
+    """(noms des clusters que la personne voit, ou None = aucun filtre ;
+    nombre de clusters cachés). Décision 96 (2.0.2) : Réservations et Usage
+    suivent la règle de la décision 93 (même aide, _fleet_clusters). Une
+    session Rancher ne lit que les clusters qu'elle voit, un cluster retiré
+    de la configuration compris (on ne sait plus si Rancher le lui
+    cacherait) ; hors session Rancher rien n'est caché et l'historique d'un
+    cluster retiré reste lisible."""
+    todo, hidden = _fleet_clusters(load_config_ro())
+    if _sso_session() is None:
+        return None, hidden
+    return {n for n, _kc in todo}, hidden
+
+
 @app.route("/api/bookings")
 @requires_auth
 def api_bookings_list():
@@ -11143,10 +11157,13 @@ def api_bookings_list():
     rows = [_booking_view(b, now, user, role)
             for b in _bookings_read(cluster=request.args.get("cluster") or None,
                                     since=now - timedelta(days=BOOKINGS_HISTORY_DAYS))]
+    allowed, hidden = _fleet_cluster_allow()
+    if allowed is not None:
+        rows = [b for b in rows if b.get("cluster") in allowed]
     if request.args.get("scope") == "mine":
         rows = [b for b in rows if b["mine"]]
     return jsonify({"bookings": rows, "user": user, "role": role, "now": _hbk.iso(now),
-                    "enforced": False, "max_days": _hbk.MAX_DAYS})
+                    "enforced": False, "max_days": _hbk.MAX_DAYS, "hidden_count": hidden})
 
 
 @app.route("/api/bookings/options/<cluster>")
@@ -11226,7 +11243,9 @@ def api_bookings_cancel(bid):
         b = _bkdb.get(conn, bid)
     finally:
         conn.close()
-    if not b:
+    allowed, _hidden = _fleet_cluster_allow() if b else (None, 0)
+    if not b or (allowed is not None and b.get("cluster") not in allowed):
+        # décision 96 : une réservation d'un cluster caché n'existe pas pour elle
         return jsonify({"error": f"no booking {bid}"}), 404
     user, role = _bookings_me(), current_role()
     if not _hbk.can_cancel(b, user, role):
@@ -11358,14 +11377,16 @@ def _usage_report_from_args():
         start, end = _hu.period(request.args.get("from"), request.args.get("to"), now)
     except ValueError as e:
         return None, (jsonify({"error": str(e)}), 400)
+    allowed, hidden = _fleet_cluster_allow()
     bconn, uconn = _bkdb.connect(_bookings_db_path()), _udb.connect(_usage_db_path())
     try:
-        rep = _udb.build_report(bconn, uconn, start, end, _hu.tz_from(request.args.get("tz")), now)
+        rep = _udb.build_report(bconn, uconn, start, end, _hu.tz_from(request.args.get("tz")), now,
+                                clusters=allowed)
     finally:
         bconn.close()
         uconn.close()
     rep.update(now=_hbk.iso(now), interval=USAGE_INTERVAL, sampling=USAGE_ENABLED,
-               role=current_role(), user=_bookings_me(), enforced=False)
+               role=current_role(), user=_bookings_me(), enforced=False, hidden_count=hidden)
     return rep, None
 
 

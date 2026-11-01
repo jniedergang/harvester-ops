@@ -1820,6 +1820,11 @@ API : `GET /api/bookings` (`?cluster=`, `?scope=mine`),
 n'est écrit), `POST /api/bookings` (202 avec l'identifiant de l'action, 409
 avec les raisons), `POST /api/bookings/<id>/cancel`.
 
+Confidentialité (2.0.2) : une session Rancher ne voit aucune réservation
+d'un cluster que Rancher lui cache. L'écran dit seulement combien de
+clusters ne sont pas affichés (« Clusters non affichés : N »), jamais leurs
+noms.
+
 Ligne de commande : `bin/harvester-bookings.py list|check|create|cancel`.
 La console lit l'inventaire GPU avec votre identité et le passe dans la
 demande (`inventory` de `--spec`) : le script n'a pas besoin du cluster.
@@ -1901,6 +1906,13 @@ en cours en UTC ; `tz` en minutes à l'est d'UTC), `GET /api/usage.csv`
 (mêmes paramètres), `GET /api/usage/quotas`, `POST /api/usage/quotas`
 (`{holder: {kind, name}, monthly_hours, max_units}`, 202 avec l'action),
 `DELETE /api/usage/quotas` (`{holder}`).
+
+Confidentialité (2.0.2) : pour une session Rancher, le rapport, le
+graphique, le CSV et la ligne de l'échantillonneur laissent de côté les
+clusters que Rancher lui cache, et les consommateurs sans réservation qui
+ne tournent que là. La vue dit combien de clusters ne sont pas affichés,
+jamais leurs noms. Le quota du mois compte toujours toutes les réservations
+du titulaire, comme le contrôle d'une nouvelle réservation.
 
 Ligne de commande : `bin/harvester-bookings.py usage [--from --to] [--tz]
 [--json | --csv]` et `bin/harvester-bookings.py quota list|set|delete`

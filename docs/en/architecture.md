@@ -141,6 +141,15 @@ nowhere in the answer. `hidden_count` gives their number. A cluster that is
 visible but refuses the read (RBAC, identity delegation) stays listed as
 `denied`, as in the menu.
 
+Bookings and Usage (`/api/bookings`, `/api/usage`, `/api/usage.csv`) follow
+the same rule since 2.0.2, through the same helper: a Rancher session reads
+only the bookings, samples and sampler states of the clusters it sees, a
+cluster removed from the configuration included. Only `hidden_count` says
+how many clusters are left out. A booking of a hidden cluster answers 404 to
+a cancel, like an unknown id. The quota of a holder still counts all their
+bookings (a number, with no cluster name), since that is the quota a new
+booking is checked against.
+
 ## Navigation and addresses
 
 Every screen of the console has an address after `#`, so a link opens the

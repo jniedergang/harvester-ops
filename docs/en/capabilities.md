@@ -1647,6 +1647,10 @@ API: `GET /api/bookings` (`?cluster=`, `?scope=mine`),
 written), `POST /api/bookings` (202 with the action id, 409 with the
 reasons), `POST /api/bookings/<id>/cancel`.
 
+Privacy (2.0.2): a Rancher session sees no booking of a cluster Rancher
+hides from it. The screen only says how many clusters are not shown
+("Clusters not shown: N"), never their names.
+
 Command line: `bin/harvester-bookings.py list|check|create|cancel`. The
 console reads the GPU inventory with your identity and passes it in the
 request (`inventory` in `--spec`), so the script does not need the
@@ -1723,6 +1727,12 @@ UTC; `tz` in minutes east of UTC), `GET /api/usage.csv` (same parameters),
 `GET /api/usage/quotas`, `POST /api/usage/quotas`
 (`{holder: {kind, name}, monthly_hours, max_units}`, 202 with the action
 id), `DELETE /api/usage/quotas` (`{holder}`).
+
+Privacy (2.0.2): for a Rancher session, the report, the chart, the CSV and
+the sampler line leave out the clusters Rancher hides from it, and the
+consumers without booking that only run there. The view says how many
+clusters are not shown, never their names. The quota of the month still
+counts every booking of the holder, as the check of a new booking does.
 
 Command line: `bin/harvester-bookings.py usage [--from --to] [--tz]
 [--json | --csv]` and `bin/harvester-bookings.py quota list|set|delete`

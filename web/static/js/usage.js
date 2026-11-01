@@ -165,7 +165,15 @@ const Usage = (() => {
     }
     const admin = d.role === 'admin';
     cur.host.querySelector('[data-usg="quotas"]').hidden = !admin;
-    body.innerHTML = `${samplerHtml(d)}${tilesHtml(d)}${chartHtml(d.days || [])}${tableHtml(d, admin)}`;
+    body.innerHTML = `${samplerHtml(d)}${hiddenHtml(d)}${tilesHtml(d)}${chartHtml(d.days || [])}${tableHtml(d, admin)}`;
+  }
+
+  /** Décision 96 : les clusters que Rancher cache à la personne ne sont pas
+   *  comptés ; leur nombre seulement, jamais un nom (comme la vue des VMs). */
+  function hiddenHtml(d) {
+    return d.hidden_count > 0
+      ? `<p class="hint usg-hidden tip" data-usg="hidden" data-tip="${esc(tr('avm.cl.hiddenTip'))}">${icon('info', 12)} ${esc(tr('avm.cl.hidden', { n: d.hidden_count }))}</p>`
+      : '';
   }
 
   // -- l'état de l'échantillonneur, les totaux -----------------------------------
