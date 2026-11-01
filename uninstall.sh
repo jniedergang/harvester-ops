@@ -38,17 +38,21 @@ rm -rf /var/lib/harvester-ops-update
 systemctl daemon-reload 2>/dev/null || true
 
 info "Removing container image..."
-if command -v podman >/dev/null 2>&1; then
-    podman rm -f harvester-ops 2>/dev/null || true
-    podman rmi localhost/harvester-ops:latest 2>/dev/null || true
-elif command -v docker >/dev/null 2>&1; then
-    docker rm -f harvester-ops 2>/dev/null || true
-    docker rmi harvester-ops:latest 2>/dev/null || true
-fi
+# Both runtimes: a host may carry Docker and Podman, and the console runs in
+# the one its unit names. The previous tag is the update agent's rollback copy.
+for runtime in podman docker; do
+    command -v "$runtime" >/dev/null 2>&1 || continue
+    "$runtime" rm -f harvester-ops >/dev/null 2>&1 || true
+    for image in localhost/harvester-ops:latest localhost/harvester-ops:previous harvester-ops:latest; do
+        "$runtime" rmi "$image" >/dev/null 2>&1 || true
+    done
+done
+rm -rf /run/harvester-ops-nss
 
 info "Removing CLI scripts..."
 rm -f "$PREFIX/harvester-shutdown" "$PREFIX/harvester-startup" "$PREFIX/harvester-status"
 rm -f "$PREFIX/harvester-shutdown.sh" "$PREFIX/harvester-startup.sh" "$PREFIX/harvester-status.sh"
+rm -f "$PREFIX/harvester-container-user.sh"
 rm -f "$PREFIX/lib/common.sh"
 [[ -d "$PREFIX/lib" ]] && rmdir --ignore-fail-on-non-empty "$PREFIX/lib" 2>/dev/null || true
 

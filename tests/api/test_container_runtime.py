@@ -395,3 +395,24 @@ def test_docker_nss_script_never_hands_files_to_the_console_account():
     code = "\n".join(l for l in script.splitlines() if not l.lstrip().startswith("#"))
     for forbidden in ("install ", "chown", "STATE_DIR", "/var/lib/harvester-ops/.nss"):
         assert forbidden not in code
+
+
+@pytest.mark.parametrize("installed", [["podman"], ["docker"], ["podman", "docker"]])
+def test_uninstall_removes_the_console_from_every_runtime(tmp_path, installed):
+    source = (ROOT / "uninstall.sh").read_text()
+    start = source.index("for runtime in podman docker; do")
+    block = source[start:source.index("\ndone\n", start) + 6]
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in installed:
+        (tools / name).write_text('#!/bin/sh\necho "${0##*/} $*" >> "$CALLS"\n')
+        (tools / name).chmod(0o755)
+    env = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "CALLS": str(tmp_path / "calls")}
+    assert subprocess.run(["bash", "-c", block], env=env).returncode == 0
+    calls = (tmp_path / "calls").read_text().splitlines()
+    for name in installed:
+        assert f"{name} rm -f harvester-ops" in calls
+        assert f"{name} rmi localhost/harvester-ops:latest" in calls
+        assert f"{name} rmi localhost/harvester-ops:previous" in calls
+    assert not any(c.split()[0] not in installed for c in calls)
+    assert "/run/harvester-ops-nss" in source and "harvester-container-user.sh" in source
