@@ -8,6 +8,8 @@ import sys
 
 RUNTIMES = ("podman", "docker")
 OVERRIDE = "HARVESTER_OPS_CONTAINER_RUNTIME"
+NSS_NAME = "harvester-ops-nss"
+NSS_DIR = "/run/" + NSS_NAME
 
 
 class RuntimeError(ValueError):
@@ -57,10 +59,15 @@ def render_service(template, runtime):
         text = text.replace("After=network-online.target\n", "After=network-online.target docker.service\n")
         text = text.replace("Wants=network-online.target\n", "Wants=network-online.target\nRequires=docker.service\n")
         text = "\n".join(line for line in text.split("\n") if "--passwd-entry " not in line)
-        text = text.replace("# Read-only root filesystem;", f"ExecStartPre=/usr/local/bin/harvester-container-user.sh {executable}\n# Read-only root filesystem;", 1)
+        # Account files for Docker, built by root in a root-owned directory
+        # that systemd recreates at each start (never under the state
+        # directory, which the console account owns).
+        text = text.replace("# Read-only root filesystem;",
+                            f"RuntimeDirectory={NSS_NAME}\nRuntimeDirectoryMode=0755\n"
+                            f"ExecStartPre=/usr/local/bin/harvester-container-user.sh {executable}\n# Read-only root filesystem;", 1)
         text = text.replace("    -e HOME=/var/lib/harvester-ops \\\n", "    -e HOME=/var/lib/harvester-ops \\\n"
-                            "    -v /var/lib/harvester-ops/.nss/passwd:/etc/passwd:ro,Z \\\n"
-                            "    -v /var/lib/harvester-ops/.nss/group:/etc/group:ro,Z \\\n")
+                            f"    -v {NSS_DIR}/passwd:/etc/passwd:ro,Z \\\n"
+                            f"    -v {NSS_DIR}/group:/etc/group:ro,Z \\\n")
     return text
 
 
