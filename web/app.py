@@ -2317,7 +2317,9 @@ def _update_precheck(path):
     try:
         res = _update_precheck_inner(path)
         if res.get("version"):
-            res = dict(res, newer=_su.is_newer(res["version"], _harvester_ops_version()))
+            cur = _harvester_ops_version()
+            res = dict(res, newer=_su.is_newer(res["version"], cur),
+                       older=_su.is_newer(cur, res["version"]))
         return res
     except OSError as e:
         return {"name": path.name, "ok": False, "size": 0,
@@ -2371,6 +2373,7 @@ def _update_busy_actions():
 def api_update_status():
     d = _updates_dir()
     status = _su.read_json(d / _su.STATUS)
+    staged = _update_staged()
     with _update_lock:
         check = _update_check["result"]
     return jsonify({
@@ -2379,7 +2382,9 @@ def api_update_status():
         "source": _update_source(),
         "default_source": UPDATE_DEFAULT_SOURCE,
         "trusted_keys": bool(_update_signers()),
-        "staged": _update_staged(),
+        "staged": staged,
+        # 2.0.2 : versions vers lesquelles revenir (archive signée, plus ancienne)
+        "rollback": [x["version"] for x in staged if x.get("ok") and x.get("older")],
         "pending": (d / _su.REQUEST).exists(),
         "last": status,
         "check": check,
@@ -2581,49 +2586,96 @@ def api_update_staged_delete(name):
     return jsonify({"ok": True})
 
 
-@app.route("/api/update/apply", methods=["POST"])
-@requires_auth
-@_rate_limit("5/minute")
-def api_update_apply():
-    b = request.get_json(silent=True) or {}
-    name = str(b.get("archive") or "")
+def _update_staged_check(name):
+    """(contrôle, refus) d'une archive préparée, avant de la confier à l'agent."""
     if not _su.ARCHIVE_RE.match(name):
-        return jsonify({"error": "bad archive name"}), 400
+        return None, (jsonify({"error": "bad archive name"}), 400)
     if _update_agent() is None:
-        return jsonify({"error": "no update agent on this host",
-                        "hint": "the console was not installed with install.sh 1.82.0 or later "
-                                "(or runs from sources): install this release with install.sh"}), 409
-    d = _updates_dir()
-    path = d / _su.STAGED / name
+        return None, (jsonify({"error": "no update agent on this host",
+                               "hint": "the console was not installed with install.sh 1.82.0 or later "
+                                       "(or runs from sources): install this release with install.sh"}), 409)
+    path = _updates_dir() / _su.STAGED / name
     if not path.is_file():
-        return jsonify({"error": "this archive is not staged"}), 404
+        return None, (jsonify({"error": "this archive is not staged"}), 404)
     chk = _update_precheck(path)
     if not chk.get("ok"):
-        return jsonify({"error": chk.get("error") or "the release is not signed", "staged": chk}), 409
-    if not chk.get("newer") and not b.get("allow_older"):
-        return jsonify({"error": f"{chk['version']} is not newer than {_harvester_ops_version()}"}), 409
+        return None, (jsonify({"error": chk.get("error") or "the release is not signed", "staged": chk}), 409)
+    return chk, None
+
+
+def _update_hand_over(name, chk, b, kind, steps):
+    """Dépose la demande pour l'agent de l'hôte et la trace (ActionRun)."""
+    d = _updates_dir()
     busy = _update_busy_actions()
     if busy and not b.get("force"):
         return jsonify({"error": "actions are running; the console restart would stop them",
                         "busy": [{"id": a["id"], "action": a["action"], "cluster": a["cluster"]}
                                  for a in busy]}), 409
+    older = kind == "rollback" or bool(b.get("allow_older"))
     with _update_lock:
         if (d / _su.REQUEST).exists():
             return jsonify({"error": "an update is already requested"}), 409
         _su.write_json_atomic(d / _su.REQUEST, {
             "archive": name, "version": chk["version"], "from": _harvester_ops_version(),
             "requested_by": current_user() or "?", "ts": time.time(),
-            "allow_older": bool(b.get("allow_older"))}, mode=0o640)
-    run = ActionRun(uuid.uuid4().hex[:12], f"console-update:request:{chk['version']}", "", ["apply", name])
+            "allow_older": older, "kind": kind}, mode=0o640)
+    run = ActionRun(uuid.uuid4().hex[:12], f"console-update:{kind}:{chk['version']}", "", [kind, name])
     run.cluster_user = current_user()
     with ACTIONS_LOCK:
         ACTIONS[run.id] = run
-    run.emit({"type": "step", "step_id": "request", "status": "done",
-              "message": f"{_harvester_ops_version()} -> {chk['version']} handed to the host agent; "
-                         "the console restarts in a moment", "ts": time.time()})
+    for sid, msg in steps + [("request", f"{_harvester_ops_version()} -> {chk['version']} handed to the host "
+                                         "agent; the console restarts in a moment")]:
+        run.emit({"type": "step", "step_id": sid, "status": "done", "message": msg, "ts": time.time()})
     run.status, run.exit_code = "done", 0
     run.close()
     return jsonify({"ok": True, "action_id": run.id, "version": chk["version"]}), 202
+
+
+@app.route("/api/update/apply", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_update_apply():
+    b = request.get_json(silent=True) or {}
+    name = str(b.get("archive") or "")
+    chk, refused = _update_staged_check(name)
+    if refused:
+        return refused
+    if not chk.get("newer") and not b.get("allow_older"):
+        return jsonify({"error": f"{chk['version']} is not newer than {_harvester_ops_version()}"}), 409
+    return _update_hand_over(name, chk, b, "request", [])
+
+
+@app.route("/api/update/rollback", methods=["POST"])
+@requires_auth
+@_rate_limit("5/minute")
+def api_update_rollback():
+    """2.0.2 : revenir à une version précédente. Même chemin qu'une mise à
+    jour (archive signée préparée, agent de l'hôte qui la vérifie, sauvegarde
+    et retour arrière seul) ; la cible doit être plus ancienne que la version
+    qui tourne, et la personne retape son numéro. L'agent efface sa
+    sauvegarde après une mise à jour réussie : seule une archive signée
+    préparée permet de revenir en arrière."""
+    b = request.get_json(silent=True) or {}
+    name = str(b.get("archive") or "")
+    if not name:
+        targets = [x for x in _update_staged() if x.get("ok") and x.get("older")]
+        if not targets:
+            return jsonify({"error": "no older signed release is staged",
+                            "hint": "upload the archive of the version to go back to and its .sig "
+                                    "(release page of that version), then try again"}), 409
+        return jsonify({"error": "choose the archive to go back to",
+                        "rollback": [x["version"] for x in targets]}), 400
+    chk, refused = _update_staged_check(name)
+    if refused:
+        return refused
+    if not chk.get("older"):
+        return jsonify({"error": f"{chk['version']} is not older than {_harvester_ops_version()}; "
+                                 "use Install for a newer release"}), 409
+    if str(b.get("confirm") or "").strip() != chk["version"]:
+        return jsonify({"error": f"type {chk['version']} to confirm the rollback"}), 400
+    return _update_hand_over(name, chk, b, "rollback", [
+        ("check", f"{chk['version']} is older than {_harvester_ops_version()}, signature valid"),
+        ("confirm", f"{chk['version']} typed by {current_user() or '?'}")])
 
 
 def _update_record_outcome():

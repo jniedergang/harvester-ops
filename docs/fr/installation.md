@@ -10,7 +10,7 @@
 | `ssh` / `ssh-keygen` | OpenSSH 7+ ; `ssh-keygen -Y` (8.2+) pour les mises à jour, sinon l'image de la console vérifie la signature (1.87.2) | Extinction des nodes + vérification des signatures |
 | `yq` | ≥ 4.0 (mikefarah) | Parsing config |
 | `python3` | ≥ 3.9 | Helpers JSON + UI Flask |
-| `podman` | récent | Requis uniquement pour l'UI web |
+| `podman` ou `docker` | récent | Requis uniquement pour l'UI web |
 
 One-liner pour installer les dépendances :
 
@@ -23,6 +23,37 @@ L'installeur choisit un Python >= 3.9 (`python3`, ou `python3.9`–`python3.14`)
 et inscrit son chemin absolu dans `harvester-ops-update.service`. Sans
 interpréteur compatible, il refuse d'installer l'agent ; il ne change pas
 l'alternative Python du système. Le Python du conteneur ne suffit pas.
+
+L'installeur et l'agent conservent le moteur utilisé par l'unité installée
+`harvester-ops.service`. Ajouter Podman à un hôte Docker ne change pas le
+magasin d'images. Sur une nouvelle installation, Podman est préféré si les deux
+sont présents. Le choix explicite `HARVESTER_OPS_CONTAINER_RUNTIME=docker` ou
+`podman` est disponible, par exemple
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh`. Un moteur choisi mais
+absent provoque une erreur. L'agent transmet son choix à l'installeur de la
+livraison et le conserve pour la sauvegarde de l'image et le retour arrière.
+
+L'unité est générée pour le moteur choisi : `docker.service` pour Docker,
+aucun service socket pour la CLI Podman.
+
+Docker n'a pas `--passwd-entry`. Un helper de pré-démarrage, lancé en root,
+reprend les comptes de l'image et ajoute le compte de service de l'hôte. Il
+les écrit dans `/run/harvester-ops-nss/`, un répertoire de root que systemd
+recrée à chaque démarrage (`RuntimeDirectory=`). Les fichiers sont montés en
+lecture seule : SSH résout ainsi ce compte non root dans le conteneur. Rien
+n'est écrit dans le répertoire d'état, qui appartient au compte de la console.
+
+Les surcharges systemd de l'exploitant sont conservées et restent
+prioritaires. Retirer les anciennes surcharges propres au moteur lors d'un
+changement volontaire.
+
+Un hôte Docker seul dont l'unité lance encore Podman ne peut pas changer de
+moteur par une mise à jour depuis l'interface : l'agent refuse et donne la
+commande à lancer. La lancer sur l'hôte, depuis la livraison extraite :
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh --upgrade`.
+De même pour un hôte mixte mis à jour depuis la 2.0.1 ou avant, dont l'agent
+choisit encore Podman en premier : installer cette livraison une fois avec
+`./install.sh --upgrade` sur l'hôte, puis passer par l'interface.
 
 Quand le `ssh-keygen` de l'hôte ne connaît pas `-Y` (OpenSSH avant 8.2, comme
 sur RHEL 8), l'agent de mise à jour fait vérifier la signature par le
@@ -307,6 +338,26 @@ le numéro de version, puis l'onglet **Mise à jour** (administrateurs).
 Le redémarrage rend l'interface indisponible quelques secondes ; les clusters
 ne sont pas touchés. L'installation est refusée tant que des actions tournent
 (elles s'arrêteraient avec le redémarrage), sauf confirmation.
+
+**Revenir en arrière (2.0.2).** La carte **Versions précédentes** du même
+onglet revient à une version plus ancienne. Elle liste les archives préparées
+signées et plus anciennes que la version qui tourne. Pour revenir en arrière,
+fournir l'archive plus ancienne et sa `.sig` (page de publication de cette
+version) comme pour une mise à jour hors ligne. **Revenir à x.y.z** ouvre une
+fenêtre qui dit ce qui est gardé (configuration, comptes, certificats,
+historique, dossiers et le reste de l'état ; les clusters) et ce qui est perdu
+(tout ce qui a été ajouté ou corrigé après cette version, correctifs de
+sécurité compris). Le retour ne part qu'une fois la version visée saisie. Il
+suit ensuite le chemin d'une mise à jour : l'agent vérifie la signature, garde
+les fichiers et l'image en place, installe la version plus ancienne, et remet
+la version en cours tout seul si l'ancienne ne répond pas. La demande est
+tracée dans l'Activité (`console-update:rollback`) ; l'API est
+`POST /api/update/rollback` avec `{"archive": ..., "confirm": "<version>"}`
+(administrateurs). L'agent efface sa sauvegarde après une mise à jour réussie :
+une archive signée préparée est donc le seul chemin de retour. Deux limites :
+avant 2.0.0, lire d'abord la note 2.0.0 « Rolling back to 1.101.x » du
+CHANGELOG ; avant 2.0.2, la console ne tourne pas sous Docker, donc sur un
+hôte Docker l'agent remet la version en cours.
 
 **Confiance.** L'agent n'installe qu'une archive signée par une clé de
 `/opt/harvester-ops/update-signers` (livré avec la version installée), ou de

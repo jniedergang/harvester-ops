@@ -2671,7 +2671,9 @@ either (the grouped read is retried kind by kind).
   download, or give an archive and its signature for an air-gapped site, then
   install. The host's update agent checks the signature, installs, restarts
   the console and puts the previous version back by itself if the new one
-  does not answer. See [install.md](install.md#updating-harvops-1820).
+  does not answer. Since 2.0.2 the tab also goes back to an older signed
+  release, after a window that says what is kept and lost and asks for the
+  target version to be typed. See [install.md](install.md#updating-harvops-1820).
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
   of icons that expands over the page while the pointer is on it, and
