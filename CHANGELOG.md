@@ -4,6 +4,99 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.2] - 2026-11-02 - Container runtime kept on update, rollback from the Update tab, orphan folder entries
+
+### Added
+- **Roll back from the Update tab** (decision 95). A "Previous versions"
+  card lists the staged signed archives older than the running version.
+  "Roll back to x.y.z" opens a window that says what is kept
+  (configuration, accounts, certificates, history, folders and the rest of
+  the state; the clusters) and what is lost (everything added or fixed
+  after that version), with the extra notes that apply below 2.0.0 (see
+  "Rolling back to 1.101.x" in 2.0.0) and below 2.0.2. The request leaves
+  only once the target version is typed. It goes through the host update
+  agent like an update: signature checked again, backup, automatic return
+  if the older version does not answer. It is tracked in Activity as
+  `console-update:rollback:<version>` with its steps. Administrators only;
+  refused when no older signed archive is staged. API:
+  `POST /api/update/rollback` with `{"archive", "confirm"}`;
+  `/api/update/status` gains `rollback` and each staged archive an `older`
+  flag.
+
+### Changed
+- **The console keeps its container runtime across updates** (PR #8,
+  thanks to Paul Dresch). The installer and the update agent share one
+  runtime decision, read from the installed `harvester-ops.service` and its
+  drop-ins, passed to the release installer and used for the `previous`
+  image tag and the rollback. A host with both Podman and Docker stays on
+  the runtime its unit names; a fresh host still prefers Podman.
+  `HARVESTER_OPS_CONTAINER_RUNTIME=podman|docker` forces the choice for a
+  manual install. The unit is rendered for that runtime: on Docker it
+  requires `docker.service` and mounts account files built before each
+  start. The Podman unit no longer requires `podman.socket` (the CLI never
+  used it).
+- **A Docker-only host whose unit still runs Podman** cannot be switched by
+  a web update: the agent refuses and names the command to run on the host
+  (`HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh --upgrade`). The
+  same applies once to a mixed host updated from 2.0.1 or older, whose
+  agent still picks Podman first.
+- **`uninstall.sh`** removes the console container and both image tags
+  (`latest`, `previous`) from every runtime present, and the Docker account
+  helper.
+- **The installer writes the console unit atomically** (temporary file in
+  the same directory, 0644, rename) whatever the umask, and refuses to
+  render a unit when a line of the template it relies on is missing.
+
+### Fixed
+- **Folders: the entry of an object that no longer exists** (a KVM host no
+  longer declared, a deleted VM or workload, a removed cluster) no longer
+  blocks the deletion of its folder (decision 94). Delete checks each entry
+  with the person's identity and purges those proven gone, each with a
+  journal line and a step, in the same tracked action. An entry that cannot
+  be checked (host unreachable, object the person cannot see, read error)
+  still blocks with its reason, and nothing is purged then.
+- **Bookings and Usage never name a cluster Rancher hides from the
+  person**, like the other fleet views (decisions 93 and 96). The list, the
+  report, the chart, the CSV export and the sampler line leave it out and
+  only give `hidden_count`; a booking of a hidden cluster answers 404 to a
+  cancel. The monthly quota still counts every booking of the holder.
+- **A translated text that names the same value twice** now shows it
+  twice: the second mention stayed raw (`{from}` in the network migration
+  hint of the cluster network screens).
+
+### Security
+- **Docker hosts: the account files mounted into the container** are built
+  by root in a root-owned directory recreated by systemd at each start
+  (`/run/harvester-ops-nss`, `RuntimeDirectory=`), never under the state
+  directory that the console account owns. During review of PR #8, the
+  pre-start helper running as root was found to follow paths that the
+  console account controls, which a compromised console could have used to
+  gain root on the host. This never shipped in a release: it only existed
+  in the pull request branch.
+
+### Tests
+- Runtime selection as a table with one case per rule and per refusal,
+  executables the renderer must refuse, template anchors, atomic unit
+  write, upgrade that stops before writing anything when the installed
+  runtime is gone, uninstall on each runtime with fake runtimes only, and a
+  planted link that must leave its target untouched. Mutations that
+  survived the PR tests now fail them.
+- Rollback route: admin only, typed confirmation, no older signed archive,
+  newer or same version refused, busy actions, success path with request
+  contents and action steps (mutations checked); Playwright tests of the
+  window.
+- `test_folders_orphans_202.py`: each orphan and each blocking kind in one
+  table, journal and steps, naming rules, conditional purge, console
+  request and refusals, with mutations.
+- `test_fleet_hidden_bookings_usage_202.py`: Bookings, Usage and CSV seen
+  by an admin, a Rancher member and a delegated identity, cancel of a
+  hidden booking, quota count, with a mutation.
+- **Host tools guard**: during the tests `podman`, `docker` and `systemctl`
+  resolve to guards placed first on `PATH` (tests and test server), which
+  log the call and exit 97, so no test reaches the real tools of the
+  machine that runs it. `test_host_tools_guard_202.py` proves the guard is
+  active and that no test calls these tools by an absolute path.
+
 ## [2.0.1] - 2026-10-25 - Readable side menu
 
 ### Changed
