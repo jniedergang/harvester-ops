@@ -399,6 +399,13 @@ empty cannot be deleted: the window offers **Move the content of...** to
 another folder, then deletes it, in one action. A name already taken by a
 sibling is refused before anything starts.
 
+Since 2.0.2, the entry of an object that no longer exists (a KVM host that
+was removed, a deleted VM, a removed cluster) does not block the deletion.
+**Delete** checks each entry and purges it when the object is proven gone:
+one step and one journal line each, in the same action. An entry that
+cannot be checked (host unreachable, object you cannot see, read error)
+still blocks, and the action says why. Nothing is purged then.
+
 ### Undo and resume a folder action
 
 - **Undo**: a finished assign, rename, move, empty-into or undo offers

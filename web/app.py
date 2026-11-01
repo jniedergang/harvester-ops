@@ -10201,8 +10201,9 @@ def _folders_after():
     READ_SHARE.invalidate(None)
 
 
-def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None):
-    """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur."""
+def _folder_action(label, sub, objects=None, undoable=False, chosen=False, result=None, spec=None):
+    """Lance l'outil en action suivie ; 202 {action_id} ou l'erreur. `spec` :
+    demande déjà faite (suppression), sinon celle des `objects`."""
     script = BIN_DIR / FOLDERS_SCRIPT
     if not script.is_file():
         return jsonify({"error": f"{FOLDERS_SCRIPT} not deployed"}), 503
@@ -10213,7 +10214,8 @@ def _folder_action(label, sub, objects=None, undoable=False, chosen=False, resul
             run.undo = {"path": f"/api/folders/actions/{run.id}/undo"}
         if result:
             run.result = dict(result)
-    spec = _folder_spec(objects, chosen) if objects is not None else None
+    if spec is None and objects is not None:
+        spec = _folder_spec(objects, chosen)
     run, err = _cli_action(FOLDERS_CLUSTER, f"folders:{label}", _folders_cmd(*sub), "harvester-folders",
                            spec=spec, check_busy=False, id_arg=True, after=_folders_after, setup=setup)
     if err:
@@ -10306,17 +10308,47 @@ def api_folders_update(folder_id):
 
 
 def _delete_refusal(conn, folder_id, path):
-    """None si le dossier est vide pour tout le monde, sinon la réponse 409
-    qui dit ce que la personne voit (jamais le nombre caché)."""
+    """(None, demande de l'outil) si la suppression peut partir, sinon
+    (réponse 409, None) qui dit ce que la personne voit (jamais le nombre
+    caché).
+
+    2.0.2 (décision 94) : une entrée rangée dont l'objet n'existe peut-être
+    plus (absente des lectures de la personne : VM supprimée, hôte ou
+    cluster retiré) ne bloque plus ici ; l'outil la vérifie et la retire si
+    l'objet est prouvé disparu. Refus immédiat seulement pour un
+    sous-dossier, un objet que la personne voit encore dans ses lectures, ou
+    l'entrée d'un cluster que Rancher lui cache."""
     vis = _folder_visible_keys()
     visible = set(vis["hosts"]) | (vis["vms"] or set()) | (vis["containers"] or set())
     members = {k: m["folder_path"] for k, m in _fdb.memberships(conn).items()}
-    check = _fm.delete_check(_fdb.list_tree(conn), folder_id, members, visible)
-    if check["empty"]:
-        return None
-    return jsonify({"error": f"folder {path} is not empty: move its content to another folder first",
-                    "nonempty": True, "count_visible": check["count_visible"],
-                    "subfolders": check["subfolders"], "hidden": check["hidden"]}), 409
+    tree = _fdb.list_tree(conn)
+    check = _fm.delete_check(tree, folder_id, members, visible)
+    seen = _visible_cluster_names()
+    declared = {c.get("name") for c in load_config_ro().get("clusters", []) if c.get("name")}
+    inside = [k for k, v in members.items() if v and _fm.within(v, path)]
+    hidden_cluster = False
+    clusters = set()
+    for k in inside:
+        kind = _fm.key_kind(k)
+        c = k.split("/")[2] if k.startswith("host/harvester/") else (
+            k.split("/")[1] if kind in ("harvester", "container") else None)
+        if c is None:
+            continue
+        if c in declared and c not in seen:
+            hidden_cluster = True
+        elif c in seen:
+            clusters.add(c)
+    blocking = check["subfolders"] or check["count_visible"] or hidden_cluster
+    if not check["empty"] and blocking:
+        return (jsonify({"error": f"folder {path} is not empty: move its content to another folder first",
+                         "nonempty": True, "count_visible": check["count_visible"],
+                         "subfolders": check["subfolders"], "hidden": check["hidden"]}), 409), None
+    kcs = {}
+    for c in sorted(clusters):
+        kc = _kubectl_for_cluster(c)
+        if kc:
+            kcs[c] = kc
+    return None, {"objects": [], "visible": sorted(visible), "kubeconfigs": kcs, "clusters": sorted(seen)}
 
 
 @app.route("/api/folders/<int:folder_id>", methods=["DELETE"])
@@ -10324,18 +10356,20 @@ def _delete_refusal(conn, folder_id, path):
 @_rate_limit(FOLDERS_RATE)
 def api_folders_delete(folder_id):
     """Supprime un dossier VIDE ; un dossier non vide est refusé (409) et la
-    fenêtre propose d'en déplacer d'abord le contenu (empty-into)."""
+    fenêtre propose d'en déplacer d'abord le contenu (empty-into). 2.0.2 :
+    les entrées d'objets qui n'existent plus sont retirées par l'outil dans
+    la même action (une étape et une ligne de journal chacune)."""
     conn = _folders_conn()
     try:
         path, err = _folder_by_id(conn, folder_id)
         if err:
             return err
-        refusal = _delete_refusal(conn, folder_id, path)
+        refusal, spec = _delete_refusal(conn, folder_id, path)
         if refusal:
             return refusal
     finally:
         conn.close()
-    return _folder_action(f"delete:{path}", ["delete", "--folder", str(folder_id)], [])
+    return _folder_action(f"delete:{path}", ["delete", "--folder", str(folder_id)], spec=spec)
 
 
 @app.route("/api/folders/<int:folder_id>/empty-into", methods=["POST"])
@@ -11183,6 +11217,20 @@ def _booking_conflicts(booking, cap):
     return [dict(r, message=_hbk.describe(r)) for r in reasons]
 
 
+def _fleet_cluster_allow():
+    """(noms des clusters que la personne voit, ou None = aucun filtre ;
+    nombre de clusters cachés). Décision 96 (2.0.2) : Réservations et Usage
+    suivent la règle de la décision 93 (même aide, _fleet_clusters). Une
+    session Rancher ne lit que les clusters qu'elle voit, un cluster retiré
+    de la configuration compris (on ne sait plus si Rancher le lui
+    cacherait) ; hors session Rancher rien n'est caché et l'historique d'un
+    cluster retiré reste lisible."""
+    todo, hidden = _fleet_clusters(load_config_ro())
+    if _sso_session() is None:
+        return None, hidden
+    return {n for n, _kc in todo}, hidden
+
+
 @app.route("/api/bookings")
 @requires_auth
 def api_bookings_list():
@@ -11195,10 +11243,13 @@ def api_bookings_list():
     rows = [_booking_view(b, now, user, role)
             for b in _bookings_read(cluster=request.args.get("cluster") or None,
                                     since=now - timedelta(days=BOOKINGS_HISTORY_DAYS))]
+    allowed, hidden = _fleet_cluster_allow()
+    if allowed is not None:
+        rows = [b for b in rows if b.get("cluster") in allowed]
     if request.args.get("scope") == "mine":
         rows = [b for b in rows if b["mine"]]
     return jsonify({"bookings": rows, "user": user, "role": role, "now": _hbk.iso(now),
-                    "enforced": False, "max_days": _hbk.MAX_DAYS})
+                    "enforced": False, "max_days": _hbk.MAX_DAYS, "hidden_count": hidden})
 
 
 @app.route("/api/bookings/options/<cluster>")
@@ -11278,7 +11329,9 @@ def api_bookings_cancel(bid):
         b = _bkdb.get(conn, bid)
     finally:
         conn.close()
-    if not b:
+    allowed, _hidden = _fleet_cluster_allow() if b else (None, 0)
+    if not b or (allowed is not None and b.get("cluster") not in allowed):
+        # décision 96 : une réservation d'un cluster caché n'existe pas pour elle
         return jsonify({"error": f"no booking {bid}"}), 404
     user, role = _bookings_me(), current_role()
     if not _hbk.can_cancel(b, user, role):
@@ -11410,14 +11463,16 @@ def _usage_report_from_args():
         start, end = _hu.period(request.args.get("from"), request.args.get("to"), now)
     except ValueError as e:
         return None, (jsonify({"error": str(e)}), 400)
+    allowed, hidden = _fleet_cluster_allow()
     bconn, uconn = _bkdb.connect(_bookings_db_path()), _udb.connect(_usage_db_path())
     try:
-        rep = _udb.build_report(bconn, uconn, start, end, _hu.tz_from(request.args.get("tz")), now)
+        rep = _udb.build_report(bconn, uconn, start, end, _hu.tz_from(request.args.get("tz")), now,
+                                clusters=allowed)
     finally:
         bconn.close()
         uconn.close()
     rep.update(now=_hbk.iso(now), interval=USAGE_INTERVAL, sampling=USAGE_ENABLED,
-               role=current_role(), user=_bookings_me(), enforced=False)
+               role=current_role(), user=_bookings_me(), enforced=False, hidden_count=hidden)
     return rep, None
 
 

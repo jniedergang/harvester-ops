@@ -116,15 +116,29 @@ def last_runs(conn):
     return [dict(r) for r in rows], first
 
 
-def build_report(bookings_conn, usage_conn, start, end, tz, now):
+def build_report(bookings_conn, usage_conn, start, end, tz, now, clusters=None):
     """Le rapport de la période, avec les quotas et l'état de
-    l'échantillonneur (`sampler`: {clusters, first})."""
+    l'échantillonneur (`sampler`: {clusters, first}).
+
+    `clusters` (2.0.2, décision 96) : les clusters que la personne voit
+    (None = tous). Réservations, relevés et état de l'échantillonneur des
+    autres sont écartés : aucun nom caché ne sort, ni dans le détail ni dans
+    les titulaires « namespace ». Le décompte d'un quota reste celui de
+    toutes les réservations (un nombre, sans nom), le seul que la création
+    d'une réservation applique."""
     import bookings_db as bdb
     since = min(hb.parse_time(start), hu.quota_month(start, end, now))
     bookings = bdb.list_bookings(bookings_conn, since=since)
     quotas = bdb.list_quotas(bookings_conn)
-    rep = hu.report(bookings, read_samples(usage_conn, start, end), start, end, quotas=quotas, tz=tz, now=now)
+    samples = read_samples(usage_conn, start, end)
     runs, first = last_runs(usage_conn)
+    shown = bookings
+    if clusters is not None:
+        clusters = set(clusters)
+        shown = [b for b in bookings if b.get("cluster") in clusters]
+        samples = [x for x in samples if x.get("cluster") in clusters]
+        runs = [r for r in runs if r.get("cluster") in clusters]
+    rep = hu.report(shown, samples, start, end, quotas=quotas, tz=tz, now=now, quota_bookings=bookings)
     rep["sampler"] = {"clusters": runs, "first": first}
     rep["quotas"] = quotas
     return rep

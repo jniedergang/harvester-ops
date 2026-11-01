@@ -416,6 +416,14 @@ vide ne se supprime pas : la fenêtre propose **Déplacer le contenu de...**
 vers un autre dossier, puis le supprime, en une action. Un nom déjà pris
 par un frère est refusé avant que rien ne parte.
 
+Depuis la 2.0.2, l'entrée d'un objet qui n'existe plus (hôte KVM retiré, VM
+supprimée, cluster retiré) ne bloque plus la suppression. **Supprimer**
+vérifie chaque entrée et la retire quand l'objet est prouvé disparu : une
+étape et une ligne de journal chacune, dans la même action. Une entrée
+qu'on ne peut pas vérifier (hôte injoignable, objet que vous ne voyez pas,
+lecture en échec) bloque toujours, et l'action dit pourquoi. Rien n'est
+alors retiré.
+
 ### Annuler et reprendre un geste sur les dossiers
 
 - **Annuler** : un rangement, renommage, déplacement, vidage ou une

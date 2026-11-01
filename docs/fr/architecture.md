@@ -145,6 +145,16 @@ nom n'apparaît nulle part dans la réponse. `hidden_count` en donne le
 nombre. Un cluster visible qui refuse la lecture (RBAC, délégation
 d'identité) reste listé `denied`, comme dans le menu.
 
+Réservations et Usage (`/api/bookings`, `/api/usage`, `/api/usage.csv`)
+suivent la même règle depuis la 2.0.2, par la même aide : une session
+Rancher ne lit que les réservations, relevés et états de l'échantillonneur
+des clusters qu'elle voit, un cluster retiré de la configuration compris.
+Seul `hidden_count` dit combien de clusters sont laissés de côté. Une
+réservation d'un cluster caché répond 404 à une annulation, comme un
+identifiant inconnu. Le quota d'un titulaire compte toujours toutes ses
+réservations (un nombre, sans nom de cluster) : c'est ce quota qu'une
+nouvelle réservation doit respecter.
+
 ## Navigation et adresses
 
 Chaque écran de la console a une adresse après `#` : un lien ouvre l'écran
