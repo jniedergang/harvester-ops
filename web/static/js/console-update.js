@@ -170,9 +170,11 @@ const ConsoleUpdate = (() => {
         <li>${esc(tr('upd.rb.lose1', { v }))}</li><li>${esc(tr('upd.rb.lose2'))}</li>
         ${notes.map(n => `<li>${esc(n)}</li>`).join('')}
       </ul>
-      <label class="upd-row" for="upd-rb-confirm">${esc(tr('upd.rb.type', { v }))}</label>
-      <input type="text" id="upd-rb-confirm" autocomplete="off" spellcheck="false" maxlength="64"
-        class="tip" data-tip="${esc(tr('upd.rb.typeTip'))}" title="${esc(tr('upd.rb.typeTip'))}">
+      <div class="upd-row">
+        <label for="upd-rb-confirm">${esc(tr('upd.rb.type', { v }))}</label>
+        <input type="text" id="upd-rb-confirm" autocomplete="off" spellcheck="false" maxlength="64"
+          class="tip" data-tip="${esc(tr('upd.rb.typeTip'))}" title="${esc(tr('upd.rb.typeTip'))}">
+      </div>
       <p class="upd-err" id="upd-rb-msg" role="status" aria-live="polite"></p>
       <div class="upd-row">
         <button type="button" class="btn btn-danger btn-sm tip" data-upd="rollback-go" disabled
