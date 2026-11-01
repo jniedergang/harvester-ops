@@ -148,7 +148,14 @@ CASES = [
     ("cluster hidden from the person", [VM_GONE], {"gone": "gone"}, {},
      {"visible": [], "clusters": [], "kubeconfigs": {}}, 1, [], "objects you cannot see"),
     ("visible cluster without the person's kubeconfig", [VM_GONE], {"gone": "gone"}, {},
-     {"visible": [], "clusters": ["harv1"], "kubeconfigs": {}}, 1, [], "objects you cannot see"),
+     {"visible": [], "clusters": ["harv1"], "kubeconfigs": {}}, 1, [],
+     "1 entry that cannot be checked: cluster harv1 cannot be read with your identity"),
+    ("object not shown on an unreachable cluster", [VM_GONE], {"gone": "down"}, {},
+     {"visible": [], "clusters": ["harv1"], "kubeconfigs": {"harv1": "/staged/p.yaml"}}, 1, [],
+     "1 entry that cannot be checked: cluster harv1 cannot be read)"),
+    ("object not shown that exists", [VM_HERE], {}, {},
+     {"visible": [], "clusters": ["harv1"], "kubeconfigs": {"harv1": "/staged/p.yaml"}}, 1, [],
+     "(objects you cannot see)"),
     ("one orphan and one live object", [("host/kvm/kvmfake", "hosts"), VM_HERE], {}, {}, None, 1,
      [], "1 object(s)"),
 ]
@@ -165,6 +172,9 @@ def test_delete_purges_proven_orphans_and_blocks_on_the_rest(probe, capsys, monk
     cap = capsys.readouterr()
     assert fragment in cap.err, cap.err
     left = set(base.members(probe))
+    if spec is not None:
+        # un objet que la personne ne voit pas : ni son nom ni le détail de l'erreur
+        assert "nav/" not in cap.err and "i/o timeout" not in cap.err
     if code:
         # refus : RIEN n'est retiré, pas même l'orphelin d'un lot mixte
         assert {k for k, _ in entries} <= left and folder_exists(probe, "/Old")

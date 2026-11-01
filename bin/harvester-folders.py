@@ -829,7 +829,11 @@ def cmd_delete(args, conn):
                 orphans.append((key, m, why))
             elif verdict == PRESENT and shown.named(key):
                 present += 1
-            elif verdict == UNKNOWN and shown.named(key):
+            elif verdict == UNKNOWN:
+                # la raison ne nomme qu'un cluster que la personne voit ou un
+                # hôte KVM (vus de tous) ; le détail de l'erreur, qui peut
+                # citer l'objet, n'est dit que pour un objet qu'elle voit
+                why = why if shown.named(key) else why.split(" (", 1)[0]
                 unknown[why] = unknown.get(why, 0) + 1
             else:
                 # objet caché, ou que la personne ne voit pas : jamais nommé ni compté

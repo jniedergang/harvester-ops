@@ -59,6 +59,13 @@ class FakeKube:
         val = self.annotations.get(name)
         return {"metadata": {"name": name, "annotations": {cli.fm.ANNOTATION: val} if val else {}}}
 
+    def run(self, *args, timeout=None, input=None):
+        """`get <ressource> <nom> -n <ns> -o name` (2.0.2, contrôle d'existence
+        de la suppression d'un dossier) : même `fail` que get."""
+        if self.get(args[1], args[4], args[2]) is None:
+            raise KubeError(f'Error from server (NotFound): {args[1]} "{args[2]}" not found')
+        return f"{args[1]}/{args[2]}\n"
+
     def patch(self, kind, ns, name, patch, dry_run=False):
         self.calls.append((kind, ns, name, json.loads(json.dumps(patch)), dry_run))
         why = self.fail.get(name)
