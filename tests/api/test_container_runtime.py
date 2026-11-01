@@ -26,47 +26,85 @@ def available(monkeypatch, names):
     monkeypatch.delenv(cr.OVERRIDE, raising=False)
 
 
-@pytest.mark.parametrize("names,expected", [(["docker"], "docker"), (["podman"], "podman"),
-                                         (["docker", "podman"], "podman")])
-def test_fresh_install_selects_an_available_runtime(tmp_path, monkeypatch, names, expected):
-    available(monkeypatch, names)
-    assert cr.select_runtime(tmp_path) == expected
+def unit_files(tmp_path, main, dropins=()):
+    if main is not None:
+        (tmp_path / "harvester-ops.service").write_text(main)
+    if dropins:
+        d = tmp_path / "harvester-ops.service.d"
+        d.mkdir()
+        for i, text in enumerate(dropins):
+            (d / f"{i:02d}.conf").write_text(text)
 
 
-@pytest.mark.parametrize("runtime", cr.RUNTIMES)
-def test_installed_runtime_wins_even_when_both_are_installed(tmp_path, monkeypatch, runtime):
-    available(monkeypatch, cr.RUNTIMES)
-    (tmp_path / "harvester-ops.service").write_text(f"ExecStop=/usr/local/bin/{runtime} stop -t 600 harvester-ops\n")
-    assert cr.select_runtime(tmp_path) == runtime
+PODMAN_UNIT = "ExecStop=/usr/bin/podman stop -t 600 harvester-ops\n"
+DOCKER_UNIT = "ExecStop=/usr/bin/docker stop -t 600 harvester-ops\n"
 
 
-def test_respects_execstop_reset_in_a_dropin(tmp_path, monkeypatch):
-    available(monkeypatch, cr.RUNTIMES)
-    (tmp_path / "harvester-ops.service").write_text("ExecStop=/usr/bin/podman stop harvester-ops\n")
-    dropin = tmp_path / "harvester-ops.service.d"
-    dropin.mkdir()
-    (dropin / "runtime.conf").write_text("[Service]\nExecStop=\nExecStop=/usr/bin/docker stop harvester-ops\n")
-    assert cr.select_runtime(tmp_path) == "docker"
+# installed, override, main unit, drop-ins, expected runtime or error pattern
+SELECTION_CASES = {
+    "fresh, podman only": (["podman"], None, None, (), "podman"),
+    "fresh, docker only": (["docker"], None, None, (), "docker"),
+    "fresh, both: podman": (["podman", "docker"], None, None, (), "podman"),
+    "unit docker, both installed": (["podman", "docker"], None, DOCKER_UNIT, (), "docker"),
+    "unit podman, both installed": (["podman", "docker"], None, PODMAN_UNIT, (), "podman"),
+    "absolute path elsewhere": (["podman", "docker"], None, "ExecStop=/usr/local/bin/docker stop x\n", (), "docker"),
+    "ignored-failure prefix": (["podman", "docker"], None, "ExecStop=-/usr/bin/docker stop x\n", (), "docker"),
+    "drop-in switches runtime": (["podman", "docker"], None, PODMAN_UNIT,
+                                 ("[Service]\nExecStop=\nExecStop=/usr/bin/docker stop x\n",), "docker"),
+    "drop-in only resets: detection": (["docker"], None, PODMAN_UNIT, ("[Service]\nExecStop=\n",), "docker"),
+    "later drop-in wins": (["podman", "docker"], None, PODMAN_UNIT,
+                           ("[Service]\nExecStop=\nExecStop=/usr/bin/docker stop x\n",
+                            "[Service]\nExecStop=\nExecStop=/usr/bin/podman stop x\n"), "podman"),
+    "override beats unit": (["podman", "docker"], "docker", PODMAN_UNIT, (), "docker"),
+    "error: invalid override": (["podman"], "bad;command", None, (), "must be podman or docker"),
+    "error: override not installed": (["podman"], "docker", None, (), "docker is not installed"),
+    "error: unit runtime not installed": (["podman"], None, DOCKER_UNIT, (), "refusing to switch"),
+    "error: no runtime at all": ([], None, None, (), "Neither podman nor docker"),
+    "error: unreadable ExecStop": (["podman", "docker"], None, "ExecStop=/usr/bin/crun stop x\n", (),
+                                   "Cannot identify the installed runtime"),
+    "error: ExecStop in a drop-in unreadable": (["podman", "docker"], None, PODMAN_UNIT,
+                                                ("[Service]\nExecStop=\nExecStop=/bin/sh -c stop\n",),
+                                                "Cannot identify the installed runtime"),
+}
 
 
-def test_missing_existing_runtime_never_switches_image_store(tmp_path, monkeypatch):
-    available(monkeypatch, ["podman"])
-    (tmp_path / "harvester-ops.service").write_text("ExecStop=/usr/bin/docker stop harvester-ops\n")
-    with pytest.raises(cr.RuntimeError, match="refusing to switch"):
-        cr.select_runtime(tmp_path)
+@pytest.mark.parametrize("installed,override,main,dropins,expected", SELECTION_CASES.values(),
+                         ids=SELECTION_CASES.keys())
+def test_runtime_selection(tmp_path, monkeypatch, installed, override, main, dropins, expected):
+    available(monkeypatch, installed)
+    if override is not None:
+        monkeypatch.setenv(cr.OVERRIDE, override)
+    unit_files(tmp_path, main, dropins)
+    if expected in cr.RUNTIMES:
+        assert cr.select_runtime(tmp_path) == expected
+    else:
+        with pytest.raises(cr.RuntimeError, match=expected):
+            cr.select_runtime(tmp_path)
 
 
-def test_explicit_override_and_invalid_or_missing_runtime(tmp_path, monkeypatch):
-    available(monkeypatch, ["docker"])
-    monkeypatch.setenv(cr.OVERRIDE, "docker")
-    assert cr.select_runtime(tmp_path) == "docker"
-    monkeypatch.setenv(cr.OVERRIDE, "bad;command")
-    with pytest.raises(cr.RuntimeError, match="must be"):
-        cr.select_runtime(tmp_path)
-    monkeypatch.delenv(cr.OVERRIDE)
-    available(monkeypatch, [])
-    with pytest.raises(cr.RuntimeError, match="Neither"):
-        cr.select_runtime(tmp_path)
+# executable found on PATH, expected error (None = rendered)
+EXECUTABLE_CASES = {
+    "plain": ("/usr/bin/docker", None),
+    "plus and dots": ("/opt/c++/v1.2_x/docker", None),
+    "relative": ("bin/docker", "systemd-safe"),
+    "space": ("/opt/my tools/docker", "systemd-safe"),
+    "percent": ("/opt/%h/docker", "systemd-safe"),
+    "quote": ("/opt/it's/docker", "systemd-safe"),
+    "dollar": ("/opt/$HOME/docker", "systemd-safe"),
+    "backslash": ("/opt/a\\b/docker", "systemd-safe"),
+    "not found": (None, "systemd-safe"),
+}
+
+
+@pytest.mark.parametrize("path,error", EXECUTABLE_CASES.values(), ids=EXECUTABLE_CASES.keys())
+def test_render_accepts_only_a_safe_executable(monkeypatch, path, error):
+    monkeypatch.setattr(cr.shutil, "which", lambda n: path)
+    template = (ROOT / "config/systemd/harvester-ops.service").read_text()
+    if error is None:
+        assert f"ExecStop={path} stop -t 600" in cr.render_service(template, "docker")
+    else:
+        with pytest.raises(cr.RuntimeError, match=error):
+            cr.render_service(template, "docker")
 
 
 @pytest.mark.parametrize("runtime", cr.RUNTIMES)
@@ -129,6 +167,42 @@ upgrade
     unit = (units / "harvester-ops.service").read_text()
     assert "Requires=docker.service" in unit and "--passwd-entry" not in unit
     assert f"ExecStop={tools}/docker stop" in unit
+
+
+def test_upgrade_resolves_the_runtime_before_writing_anything(tmp_path):
+    """A host whose unit runs a runtime that is gone must stop the upgrade
+    before scripts, image or unit are touched."""
+    release = tmp_path / "release"
+    (release / "bin/lib").mkdir(parents=True)
+    shutil.copy(ROOT / "bin/lib/container_runtime.py", release / "bin/lib/container_runtime.py")
+    (release / "VERSION").write_text("9.9.9\n")
+    units = tmp_path / "units"
+    units.mkdir()
+    (units / "harvester-ops.service").write_text(DOCKER_UNIT)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "podman").write_text("#!/bin/sh\nexit 0\n")
+    (tools / "podman").chmod(0o755)
+    script = "\n".join(function(n) for n in ["detect_container_runtime", "render_container_service",
+                                             "install_web_ui", "upgrade"])
+    script += """
+require_root() { :; }
+detect_update_python() { echo "$HOST_PYTHON"; }
+info() { :; }; ok() { :; }; warn() { :; }; err() { echo "$*" >&2; }
+for f in install_scripts setup_service_account install_bundles install_update_agent install_uninstaller; do
+    eval "$f() { echo $f >> \\"\\$CALLS\\"; }"
+done
+CONTAINER_RUNTIME=""
+upgrade
+"""
+    environment = {**os.environ, "PATH": f"{tools}:/usr/bin:/bin", "CALLS": str(tmp_path / "calls"),
+                   "HOST_PYTHON": sys.executable, "SCRIPT_DIR": str(release), "SYSTEMD_DIR": str(units)}
+    environment.pop(cr.OVERRIDE, None)
+    result = subprocess.run(["bash", "-c", script], env=environment, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "refusing to switch" in result.stderr
+    assert not (tmp_path / "calls").exists()
+    assert (units / "harvester-ops.service").read_text() == DOCKER_UNIT
 
 
 @pytest.mark.parametrize("install_rc", [0, 3])

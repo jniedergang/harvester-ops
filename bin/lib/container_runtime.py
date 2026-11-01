@@ -10,6 +10,7 @@ RUNTIMES = ("podman", "docker")
 OVERRIDE = "HARVESTER_OPS_CONTAINER_RUNTIME"
 NSS_NAME = "harvester-ops-nss"
 NSS_DIR = "/run/" + NSS_NAME
+SAFE_EXECUTABLE = re.compile(r"^/[A-Za-z0-9._/+-]+$")
 
 
 class RuntimeError(ValueError):
@@ -52,7 +53,8 @@ def render_service(template, runtime):
     if runtime not in RUNTIMES:
         raise RuntimeError("Unsupported container runtime")
     executable = shutil.which(runtime)
-    if not executable or not Path(executable).is_absolute() or re.search(r"[\s%]", executable):
+    # Interpolated in systemd command lines and in a sh -c '...' string.
+    if not executable or not SAFE_EXECUTABLE.match(executable):
         raise RuntimeError(f"Cannot render an absolute, systemd-safe executable for {runtime}")
     text = template.replace("/usr/bin/podman", executable)
     if runtime == "docker":
