@@ -546,7 +546,7 @@ const Containers = (() => {
         </div>
         <p class="hint warn ct-notice" data-ct="notice" hidden></p>
         <p class="hint ct-folder-scope" data-ct="scope" hidden></p>
-        <table class="data-table ns-vm-table avm-table ct-table">
+        <div class="tbl-scroll"><table class="data-table ns-vm-table avm-table ct-table">
           <thead><tr>
             <th class="check-col" aria-label="${esc(tr('cw.col.expand'))}"></th>
             ${ALL ? th('cluster', tr('col.cluster'), tr('avm.tip.sortCluster')) : ''}
@@ -559,13 +559,14 @@ const Containers = (() => {
             ${th('gpus', tr('cw.col.gpus'), tr('cw.tip.sortGpus'), 'num')}
             ${th('age', tr('cw.col.age'), tr('cw.tip.sortAge'), 'num')}
             ${th('folder', tr('vmf.col.folder'), tr('vmf.tip.sortFolder'))}
-            <th>${esc(tr('col.actions'))}</th>
+            <th class="vm-actions-cell"><span class="tbl-vh">${esc(tr('col.actions'))}</span></th>
           </tr></thead>
           <tbody></tbody>
-        </table>
+        </table></div>
         <p class="avm-more"><button type="button" class="btn btn-sm btn-secondary tip" data-ct="more" hidden></button></p>
         <p class="hint avm-empty" data-ct="empty" hidden></p>`;
       const q = (s) => host.querySelector(s);
+      if (window.TableScroll) TableScroll.watch(host);
       q('[data-ct="more"]').addEventListener('click', () => { limit += PAGE; render(); });
       q('[data-ct="state"]').value = prefs.state;
       q('[data-ct="kind"]').value = prefs.kind;
@@ -665,9 +666,9 @@ const Containers = (() => {
         <td class="check-col"><button type="button" class="btn-icon-action ct-expand tip" data-ct-act="expand"
             aria-expanded="${open}" data-tip="${esc(open ? tr('cw.tip.collapse') : tr('cw.tip.expand'))}"
             aria-label="${esc(open ? tr('cw.tip.collapse') : tr('cw.tip.expand'))}">${icon(open ? 'chevronDown' : 'chevronRight', 13)}</button></td>
-        ${ALL ? `<td><span class="avm-cluster">${esc(w.cluster)}</span></td>` : ''}
-        <td>${esc(w.namespace)}</td>
-        <td>${esc(w.name)}</td>
+        ${ALL ? `<td><span class="avm-cluster cell-trunc" title="${esc(w.cluster)}">${esc(w.cluster)}</span></td>` : ''}
+        <td><span class="cell-trunc avm-ns" title="${esc(w.namespace)}">${esc(w.namespace)}</span></td>
+        <td><span class="cell-trunc avm-name" title="${esc(w.name)}">${esc(w.name)}</span></td>
         <td>${esc(w.kind)}</td>
         <td class="num">${esc(ready)}</td>
         <td><span class="badge ${STATE_BADGE[w.state] || 'dim'}">${esc(stateLabel(w.state))}</span></td>
@@ -685,7 +686,7 @@ const Containers = (() => {
       if (!w.folder) return `<span class="res-dim">${esc(tr('fld.unfiledShort'))}</span>`;
       const consoleOnly = w.folder_source === 'console'
         ? ` <span class="badge warn tip" data-tip="${esc(tr('vmf.consoleOnlyTip', { host: w.cluster }))}" title="${esc(tr('vmf.consoleOnlyTip', { host: w.cluster }))}">${esc(tr('vmf.consoleOnly'))}</span>` : '';
-      return esc(w.folder) + consoleOnly;
+      return `<span class="cell-trunc" title="${esc(w.folder)}">${esc(w.folder)}</span>` + consoleOnly;
     }
 
     function renderScope() {

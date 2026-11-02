@@ -5877,10 +5877,45 @@ body.sidebar-collapsed .hnav-children .hnav-host { padding-left: 10px; }
 .fld-node.fld-family { cursor: default; }
 .fld-node.fld-family:hover { background: none; }
 .fld-win { padding: 10px 14px; }
-.vmf-main .avm-table { min-width: 100%; }
-.vmf-main { overflow-x: auto; }
 
 /* 2.0.0 (revue I-3) : avec les bulles en calque (tooltips.js, body.js-tips),
    les porteurs de bulle du tableau des VMs n'ont pas besoin d'être des
    blocs positionnés ; mesuré à 300 lignes, le rendu y gagne ~150 ms. */
 body.js-tips .avm-table tbody .tip { position: static; }
+
+/* 2.0.4 : tableaux à bouton « ⋮ » (Machines virtuelles, VMs d'un hôte
+   Harvester ou KVM, Conteneurs). Le tableau défile dans son .tbl-scroll et
+   la colonne d'actions reste collée au bord droit, avec le fond de la ligne ;
+   une ombre légère à sa gauche quand du contenu passe dessous (tbl-more-r,
+   posé par table-scroll.js). Les noms tiennent sur une ligne (ellipse, nom
+   entier en title). */
+.tbl-scroll { overflow-x: auto; max-width: 100%; --tbl-row-bg: var(--bg); --tbl-shade: rgba(0, 0, 0, 0.13); }
+html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
+.tbl-scroll > .data-table { min-width: 100%; }
+.tbl-scroll .vm-actions-cell { position: sticky; right: 0; z-index: 1; width: 1px; background-color: var(--tbl-row-bg); }
+.tbl-scroll thead .vm-actions-cell { background-color: var(--bg-elev); z-index: 2; }
+.tbl-scroll tbody tr:hover > .vm-actions-cell { background-color: var(--bg-elev); }
+.tbl-scroll tbody tr.selected > .vm-actions-cell { background-image: linear-gradient(var(--selection-bg), var(--selection-bg)); }
+.tbl-scroll .vm-actions-cell::before { content: ""; position: absolute; top: 0; bottom: 0; left: -10px; width: 10px;
+  pointer-events: none; background: linear-gradient(to left, var(--tbl-shade), transparent); opacity: 0; transition: opacity .15s; }
+.tbl-scroll.tbl-more-r .vm-actions-cell::before { opacity: 1; }
+.tbl-scroll .data-table > thead > tr > th,
+.tbl-scroll .data-table > tbody > tr:not(.ct-pods-row):not(.kvm-detail-row) > td { white-space: nowrap; }
+.tbl-scroll .avm-table > thead > tr > th,
+.tbl-scroll .avm-table > tbody > tr:not(.ct-pods-row) > td,
+.tbl-scroll .ns-vm-table > thead > tr > th,
+.tbl-scroll .ns-vm-table > tbody > tr:not(.ct-pods-row) > td { padding-left: 7px; padding-right: 7px; }
+.tbl-scroll .data-table > thead > tr > th { letter-spacing: 0.3px; }
+.tbl-scroll td.vm-actions-cell { padding-left: 6px; padding-right: 8px; }
+/* libellé « Actions » gardé pour les lecteurs d'écran, sans largeur à l'écran */
+.tbl-vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.cell-trunc { display: inline-block; max-width: var(--trunc, 18ch); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; vertical-align: bottom; }
+.avm-cluster.cell-trunc { --trunc: 13ch; }
+.avm-ns.cell-trunc { --trunc: 13ch; }
+.avm-name.cell-trunc { --trunc: 24ch; }
+.avm-node.cell-trunc { --trunc: 11ch; }
+.vmf-folder .cell-trunc { --trunc: 16ch; }
+.avm-table td code, #ns-vms-table td code { font-size: 12px; }
+.avm-table .vmf-family { padding: 1px 5px; font-size: 10px; }
+.tbl-scroll .ct-table .ct-images code { max-width: 200px; font-size: 12px; }

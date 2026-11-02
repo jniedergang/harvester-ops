@@ -203,7 +203,7 @@ const AllVMs = (() => {
         <button class="btn btn-sm tip" data-avm-bulk="clear" data-tip="${esc(tr('avm.bulk.clearTip'))}">
           ${esc(tr('namespaces.clearSelection'))}</button>
       </div>
-      <table class="data-table ns-vm-table avm-table">
+      <div class="tbl-scroll"><table class="data-table ns-vm-table avm-table">
         <thead><tr>
           <th class="check-col"><input type="checkbox" data-avm="all" class="tip"
               data-tip="${esc(tr('vms.tip.checkAll'))}" title="${esc(tr('vms.tip.checkAll'))}"></th>
@@ -217,16 +217,17 @@ const AllVMs = (() => {
           ${th('ip', tr('col.ip'), tr('vms.tip.sortIp'))}
           ${th('node', tr('col.node'), tr('vms.tip.sortNode'))}
           ${th('folder', tr('vmf.col.folder'), tr('vmf.tip.sortFolder'))}
-          <th>${esc(tr('col.actions'))}</th>
+          <th class="vm-actions-cell"><span class="tbl-vh">${esc(tr('col.actions'))}</span></th>
         </tr></thead>
         <tbody></tbody>
-      </table>
+      </table></div>
       <p class="avm-more"><button type="button" class="btn btn-sm btn-secondary tip" data-avm="more" hidden></button></p>
       <p class="hint avm-empty" data-avm="empty" hidden></p>
       <p class="hint vmf-viewer" data-avm="viewer" hidden></p>
       <pre class="live-log avm-log" data-avm="log" hidden></pre>
       </div></div>`;
     const q = (s) => host.querySelector(s);
+    if (window.TableScroll) TableScroll.watch(host);
     q('[data-avm="phase"]').value = prefs.phase;
     q('[data-avm="text"]').value = prefs.text;
     q('[data-avm="phase"]').addEventListener('change', (e) => { prefs.phase = e.target.value; savePrefs(); render(); });
@@ -362,8 +363,8 @@ const AllVMs = (() => {
   function folderCell(v) {
     if (!v.folder) return `<span class="res-dim">${esc(tr('fld.unfiledShort'))}</span>`;
     const f = window.Folders ? Folders.byPath(v.folder) : null;
-    const link = f ? `<a href="#vms/folder/${enc(f.id)}" class="tip" title="${esc(tr('vmf.openFolderTip'))}">${esc(v.folder)}</a>`
-      : `<span class="tip" title="${esc(tr('vmf.folderNotInTree'))}">${esc(v.folder)}</span>`;
+    const link = f ? `<a href="#vms/folder/${enc(f.id)}" class="tip cell-trunc" title="${esc(`${v.folder}: ${tr('vmf.openFolderTip')}`)}">${esc(v.folder)}</a>`
+      : `<span class="tip cell-trunc" title="${esc(`${v.folder}: ${tr('vmf.folderNotInTree')}`)}">${esc(v.folder)}</span>`;
     const consoleOnly = v.folder_source === 'console'
       ? ` <span class="badge warn vmf-console tip" data-tip="${esc(tr('vmf.consoleOnlyTip', { host: src(v) }))}" title="${esc(tr('vmf.consoleOnlyTip', { host: src(v) }))}">${esc(tr('vmf.consoleOnly'))}</span>` : '';
     return link + consoleOnly;
@@ -376,8 +377,9 @@ const AllVMs = (() => {
     const ips = v.ips || [];
     const plan = dr && v.uuid ? dr[v.uuid] : null;
     const fam = kvm ? 'KVM' : 'Harvester';
-    const hostCell = kvm ? `<a class="avm-cluster" href="#kvm/${enc(src(v))}/vms" title="${esc(tr('vmf.hostTip', { host: src(v) }))}">${esc(src(v))}</a>`
-      : `<span class="avm-cluster">${esc(src(v))}</span>`;
+    // 2.0.4 : noms sur une ligne, coupés par une ellipse, valeur entière en title
+    const hostCell = kvm ? `<a class="avm-cluster cell-trunc" href="#kvm/${enc(src(v))}/vms" title="${esc(tr('vmf.hostTip', { host: src(v) }))}">${esc(src(v))}</a>`
+      : `<span class="avm-cluster cell-trunc" title="${esc(src(v))}">${esc(src(v))}</span>`;
     // 2.0.3 : un seul bouton « ⋮ » par ligne (les gestes de ligne sont en tête
     // du menu) ; le dessin de 300 lignes ne paie plus six boutons à icône
     return `<tr data-avm-row="${esc(k)}" class="${selection.has(k) ? 'selected' : ''}">
@@ -385,13 +387,13 @@ const AllVMs = (() => {
           aria-label="${esc(`${src(v)}/${v.namespace ? `${v.namespace}/` : ''}${v.name}`)}"></td>
       <td>${hostCell}</td>
       <td><span class="badge dim vmf-family vmf-family-${esc(v.kind)}">${esc(fam)}</span></td>
-      <td>${v.namespace ? esc(v.namespace) : '<span class="res-dim">–</span>'}</td>
-      <td data-avm-col="name">${esc(v.name)}${v.agent_connected === 'True' ? ` <span class="agent-dot ok tip" data-tip="${esc(tr('vm.tooltip.agentOk'))}">${icon('dotOn', 10)}</span>` : ''}${plan ? ` <a class="badge info vmf-dr tip" href="#dr/${enc(plan)}" data-tip="${esc(tr('vmf.drTip'))}" title="${esc(tr('vmf.drTip'))}">DR</a>` : ''}</td>
+      <td>${v.namespace ? `<span class="cell-trunc avm-ns" title="${esc(v.namespace)}">${esc(v.namespace)}</span>` : '<span class="res-dim">–</span>'}</td>
+      <td data-avm-col="name"><span class="cell-trunc avm-name" title="${esc(v.name)}">${esc(v.name)}</span>${v.agent_connected === 'True' ? ` <span class="agent-dot ok tip" data-tip="${esc(tr('vm.tooltip.agentOk'))}">${icon('dotOn', 10)}</span>` : ''}${plan ? ` <a class="badge info vmf-dr tip" href="#dr/${enc(plan)}" data-tip="${esc(tr('vmf.drTip'))}" title="${esc(tr('vmf.drTip'))}">DR</a>` : ''}</td>
       <td><span class="phase ${esc(phase)} tip" data-tip="${esc(kvm ? (v.state || phase) : tr('avm.tip.strategy', { s: v.runStrategy || '?' }))}">${esc(phaseLabel(phase))}</span></td>
       <td class="num">${v.cpu ? esc(v.cpu) : '–'}</td>
       <td class="num">${esc(memText(v))}</td>
       <td>${ips.length ? `<code>${esc(ips[0])}</code>${ips.length > 1 ? ` <span class="res-dim tip" data-tip="${esc(ips.slice(1).join(', '))}">+${ips.length - 1}</span>` : ''}` : '<span class="res-dim">–</span>'}</td>
-      <td>${v.node ? esc(v.node) : '<span class="res-dim">–</span>'}</td>
+      <td>${v.node ? `<span class="cell-trunc avm-node" title="${esc(v.node)}">${esc(v.node)}</span>` : '<span class="res-dim">–</span>'}</td>
       <td class="vmf-folder">${folderCell(v)}</td>
       <td class="vm-actions-cell"><button type="button" class="btn-icon-action row-menu tip" data-avm-act="more" aria-haspopup="menu" aria-expanded="false"
           data-tip="${esc(menuTip)}" aria-label="${esc(tr('vma.label', { name: v.name }))}">&#8942;</button></td></tr>`;

@@ -616,6 +616,7 @@ const App = (() => {
   function renderNamespaceDetail(vms) {
     const tbody = $('#ns-vms-table tbody');
     tbody.innerHTML = '';
+    if (window.TableScroll) TableScroll.watch($('#ns-vms-scroll'));
     lastNsVMs = vms;
     const words = nsVmFilter.toLowerCase().split(/\s+/).filter(Boolean);
     if (words.length) vms = vms.filter(vm => vmMatches(vm, words));
@@ -640,7 +641,7 @@ const App = (() => {
 
       tr.innerHTML = `
         <td class="check-col"><input type="checkbox" data-key="${key}" ${nsSelection.has(key) ? 'checked' : ''}></td>
-        <td>${vm.name}
+        <td><span class="cell-trunc avm-name" title="${escapeHtml(vm.name)}">${escapeHtml(vm.name)}</span>
           ${vm.agent_connected === 'True' ? `<span class="agent-dot ok tip" data-tip="${i18n.t('vm.tooltip.agentOk')}">${Icons.svg('dotOn', { size: 10 })}</span>` : ''}
         </td>
         <td><span class="phase ${phase} tip" data-tip="${phaseTip}">${i18n.t('vm.state.' + phase)}</span></td>
@@ -655,7 +656,7 @@ const App = (() => {
         <td class="num">${vm.cpu ? escapeHtml(String(vm.cpu)) : '–'}</td>
         <td class="num">${escapeHtml(vm.memory || '–')}</td>
         <td>${(vm.ips || []).length ? `<code>${escapeHtml(vm.ips[0])}</code>${vm.ips.length > 1 ? ` <span class="res-dim tip" data-tip="${escapeHtml(vm.ips.slice(1).join(', '))}">+${vm.ips.length - 1}</span>` : ''}` : '<span class="res-dim">–</span>'}</td>
-        <td>${vm.node ? escapeHtml(vm.node) : '<span class="res-dim">–</span>'}</td>
+        <td>${vm.node ? `<span class="cell-trunc avm-node" title="${escapeHtml(vm.node)}">${escapeHtml(vm.node)}</span>` : '<span class="res-dim">–</span>'}</td>
         <td class="vm-actions-cell"><button type="button" class="btn-icon-action row-menu tip" data-tip="${escapeHtml(i18n.t('avm.menuTip'))}"
             aria-haspopup="menu" aria-expanded="false" aria-label="${escapeHtml(i18n.t('vma.label', { name: vm.name }))}"
             data-vm-more data-ns="${escapeHtml(vm.namespace)}" data-name="${escapeHtml(vm.name)}">&#8942;</button></td>`;
