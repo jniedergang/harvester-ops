@@ -218,6 +218,34 @@ sent to the installer.
 The token and the password never appear in a response, in an action
 label, or in a log line.
 
+**A machine that already carries a system (2.2.0).** Before the Install
+button, the window says whether a system seems present on the machine,
+from what the BMC already publishes (read only, nothing is changed):
+
+- a UEFI boot entry that starts a loader `\EFI\...` from a disk partition
+  (USB keys, CDs and network entries are left out), named with the loader
+  and the disk, for example `Boot entry "elemental-shim" starts
+  \EFI\elemental\shim.efi from a disk partition (HD.Emb.1.3)`;
+- the same entry at the head of the boot order ("boots first from");
+- a logical drive (RAID volume) on a controller.
+
+On an iLO 4 these come from `Systems/1/BIOS/Boot/` (the iLO 4 publishes no
+disk nor volume), as of the machine's last boot; on an iDRAC 9 or an iLO 5,
+from `Systems/<id>/BootOptions` and `Boot.BootOrder`. When a system seems
+present, the evidence is listed and installing requires typing the machine
+name exactly: its serial number, or the BMC address when the serial is
+unknown; Install stays off until it matches. **No sign** is said only when
+the boot entries could be read and none points to a system (a system
+started in legacy BIOS mode would not show); when the BMC tells nothing,
+the window says **Unknown**, never empty. The console checks again at
+install time, on its own Redfish read, and refuses with `409` and
+`fields: ["system_confirm"]` when a system seems present and the typed
+name (`system_confirm`) does not match. `POST /api/bmc/system-check`
+(`{host, user, password}`, administrator) returns `state` (`present`,
+`absent`, `unknown`), `evidence` and `confirm_name`. A boot entry can
+outlive a wiped disk: the check then asks for the name once more, which is
+the safe side. Batches of a profile are not covered by this check yet.
+
 ### 4. Watch it install
 
 The installation is a tracked action like any other: it appears in the

@@ -277,7 +277,7 @@ Harvester menu: *VM Imports / VM Migration*
 | VM transfer between clusters, export / import | Console only | 1.45 |  |
 | Terraform: declarations kept by the console | Console only | 1.54 | screen in tabs Declarations, Resources, History, Installation (2.2) |
 | RKE2 clusters through Cluster API, services through CAAPH | Console only | 1.48 | Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2) |
-| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1) |
+| Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1); a machine that already carries a system is guarded (2.2) |
 | Activity: every action tracked, action dock | Console only | 1.6 |  |
 | Collaborative notes on VMs and nodes | Console only | 1.4 |  |
 | Real Longhorn allocatable per class | Console only | 1.29 |  |

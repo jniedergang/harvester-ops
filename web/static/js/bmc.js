@@ -713,8 +713,10 @@ const BMC = (() => {
                         autocapitalize="off" placeholder="os:&#10;  write_files:&#10;  - path: /etc/example.conf&#10;    content: |&#10;      key=value"></textarea>
               <span class="form-hint">${esc(tr('bmc.f.advYamlHint'))}</span></label>
           </fieldset>
+          <!-- 2.2.0 : un système semble-t-il déjà présent ? (vérifier avant d'agir) -->
+          <div class="bm-system" data-bm="system" role="status"></div>
           <div class="apply-bar">
-            <button type="submit" class="btn btn-primary btn-sm btn-ico tip"
+            <button type="submit" class="btn btn-primary btn-sm btn-ico tip" data-bm="install-go"
                     data-tip="${esc(tr('bmc.installTip'))}">${Icons.svg('install')} ${esc(tr('bmc.installGo'))}</button>
             <span class="apply-result" id="bm-install-result"></span>
           </div>
@@ -787,6 +789,71 @@ const BMC = (() => {
     }
     onboardEnabled.addEventListener('change', syncOnboarding);
     field('onboard_profile').addEventListener('change', renderStoragePorts);
+
+    // --- Système déjà présent (2.2.0) ----------------------------------------
+    // Ce que le BMC publie (entrées UEFI, ordre de démarrage, volumes) dit
+    // si la machine porte déjà un système. Présent : le nom de la machine
+    // (série, sinon adresse du BMC) doit être tapé, et la console le revérifie
+    // à l'installation. Inconnu : dit tel quel, jamais « vide ».
+    const sysBox = form.querySelector('[data-bm="system"]');
+    const goBtn = form.querySelector('[data-bm="install-go"]');
+    let sysCheck = null;
+    const evidenceText = (ev) => (ev.code === 'boots-from-disk' ? tr('bmc.sys.ev.bootsFromDisk', { name: ev.name })
+      : ev.code === 'boot-entry' ? tr('bmc.sys.ev.bootEntry', { name: ev.name, loader: ev.loader, disk: ev.disk })
+        : ev.code === 'volume' ? tr('bmc.sys.ev.volume', { name: ev.name, controller: ev.controller }) : ev.code);
+    function syncSystemGate() {
+      const typed = field('system_confirm');
+      const need = sysCheck && sysCheck.state === 'present';
+      const ok = !need || (typed && typed.value.trim() === sysCheck.confirm_name);
+      goBtn.disabled = !ok;
+      const hint = sysBox.querySelector('.bm-system-mismatch');
+      if (hint) hint.hidden = ok || !typed || !typed.value.trim();
+    }
+    function paintSystem(d, refusedNow) {
+      sysCheck = d;
+      const recheck = `<button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bm="system-recheck"
+          data-tip="${esc(tr('bmc.sys.recheckTip'))}">${Icons.svg('refresh')} ${esc(tr('bmc.sys.recheck'))}</button>`;
+      if (!d) {
+        sysBox.innerHTML = `<p class="form-hint">${esc(tr('bmc.sys.checking'))}</p>`;
+      } else if (d.state === 'present') {
+        const keep = field('system_confirm') ? field('system_confirm').value : '';
+        sysBox.innerHTML = `<div class="ct-banner auto-banner-warn bm-system-present">${Icons.svg('warn', { size: 14 })}
+            <div><strong>${esc(tr('bmc.sys.present'))}</strong>
+              ${refusedNow ? `<p class="bm-system-refused">${esc(tr('bmc.sys.refused'))}</p>` : ''}
+              <ul class="bm-system-evidence">${(d.evidence || []).map(ev => `<li>${esc(evidenceText(ev))}</li>`).join('')}</ul>
+              <label class="bm-system-confirm tip" data-tip="${esc(tr('bmc.sys.typeTip'))}">${esc(tr('bmc.sys.typeName'))}
+                <code class="bm-system-name">${esc(d.confirm_name)}</code>
+                <input name="system_confirm" autocomplete="off" spellcheck="false" value="${esc(keep)}"
+                       title="${esc(tr('bmc.sys.typeTip'))}" aria-label="${esc(tr('bmc.sys.typeTip'))}"></label>
+              <span class="form-hint bm-system-mismatch" hidden>${esc(tr('bmc.sys.mismatch'))}</span>
+            </div>${recheck}</div>`;
+      } else if (d.state === 'absent') {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-absent">${Icons.svg('info', { size: 14 })}
+            <span>${esc(tr('bmc.sys.absent'))}</span>${recheck}</div>`;
+      } else {
+        sysBox.innerHTML = `<div class="ct-banner bm-system-unknown">${Icons.svg('info', { size: 14 })}
+            <span>${esc(d.noCreds ? tr('bmc.sys.noCreds') : tr('bmc.sys.unknown'))}</span>${recheck}</div>`;
+      }
+      field('system_confirm')?.addEventListener('input', syncSystemGate);
+      syncSystemGate();
+    }
+    async function checkSystem() {
+      paintSystem(null);
+      if (!creds.password) { paintSystem({ state: 'unknown', evidence: [], noCreds: true }); return; }
+      let d = null;
+      try {
+        const r = await fetch('/api/bmc/system-check', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, user: creds.user, password: creds.password }),
+        });
+        if (r.ok) d = await r.json();
+      } catch (e) { d = null; }
+      paintSystem(d && d.state ? d : { state: 'unknown', evidence: [] });
+    }
+    sysBox.addEventListener('click', (e) => {
+      if (e.target.closest('[data-bm="system-recheck"]')) checkSystem();
+    });
+    checkSystem();
 
     // Secrets d'un fichier importé : gardés par le serveur, désignés par cet
     // identifiant ; le navigateur ne les voit jamais.
@@ -1552,6 +1619,10 @@ const BMC = (() => {
         res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.join.needConfirm'))}</span>`;
         return;
       }
+      if (sysCheck && sysCheck.state === 'present' && String(body.system_confirm || '').trim() !== sysCheck.confirm_name) {
+        res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.mismatch'))}</span>`;
+        return;
+      }
       body.bmc_host = host;
       body.bmc_user = creds.user;
       body.bmc_password = creds.password;
@@ -1566,6 +1637,11 @@ const BMC = (() => {
         const d = await r.json().catch(() => ({}));
         if (r.ok) {
           res.innerHTML = `<span style="color:var(--accent)">${Icons.svg('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(d.action_id)}</span>`;
+        } else if ((d.fields || []).includes('system_confirm') && d.system) {
+          // 2.2.0 : la console a relu le BMC et refuse ; la fenêtre le montre
+          paintSystem(d.system, true);
+          res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(tr('bmc.sys.refused'))}</span>`;
+          sysBox.scrollIntoView({ block: 'nearest' });
         } else {
           msg.innerHTML = refusalFor(d, r.status);
           res.innerHTML = `<span style="color:var(--danger)">${Icons.svg('fail', { size: 14 })} ${esc(d.error || r.status)}</span>`;

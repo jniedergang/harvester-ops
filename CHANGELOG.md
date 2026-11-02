@@ -46,7 +46,31 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   declarations need, or the OpenTofu (or Terraform) command, is missing,
   with a link to Installation.
 
+### Security
+- **Bare-metal: a machine that already carries a system is guarded**
+  (check before acting). The install window reads what the BMC already
+  publishes, read only: UEFI boot entries that start a loader `\EFI\...`
+  from a disk partition (USB, CD and network entries left out), the same
+  entry at the head of the boot order, logical drives (RAID volumes). It
+  lists the evidence before the Install button, for example `Boot entry
+  "elemental-shim" starts \EFI\elemental\shim.efi from a disk partition
+  (HD.Emb.1.3)`; when a system seems present, installing requires typing
+  the machine name exactly (serial number, or BMC address when the serial
+  is unknown), and Install stays off until it matches. "No sign" is said
+  only when the boot entries were read; when the BMC tells nothing the
+  window says "Unknown", never empty. The install route reads the BMC
+  again itself and refuses with `409` and `fields: ["system_confirm"]` when
+  a system seems present and the typed name does not match; the window
+  then shows what the console read. New read route
+  `POST /api/bmc/system-check` (administrator). iLO 4: from
+  `Systems/1/BIOS/Boot/`, as of the last boot; iDRAC 9 and iLO 5: from
+  `BootOptions` and `Boot.BootOrder`. Batches of a profile do not go
+  through this check yet.
+
 ### Internal
+- `bin/lib/bm_presence.py`: the pure analysis of the boot entries, the
+  boot order and the volumes (present, absent, unknown, evidence, name to
+  type).
 - `auto-history.js`: the History tab shared by Bare-metal, Terraform and
   Cluster API (one poll per screen, stopped by `stop()` or when its tab is
   hidden); Bare-metal uses it instead of its own copy.
@@ -75,6 +99,19 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   labels, log links, refresh, error and empty paths, escaping), polling
   stopped when leaving the screen or the tab; a mutation that ignores the
   shown check is seen.
+- `tests/api/test_bm_presence_220.py`: loader detection (disk partitions,
+  USB, CD, network, raw disk), present, absent and unknown on the boot
+  entries read from node3 and node4 and on the standard dialect, volumes,
+  the name to type, the read route (address refused, administrator only,
+  authenticated and rate limited, no secret in the answer), the install
+  refused without the name, with a wrong name or another case, accepted
+  with the right name, absent or unknown; mutations: no server check, a
+  loader rule that accepts USB, unknown read as absent.
+- `tests/e2e/test_bm_presence_220.py`: the install window for a present
+  system (evidence, name to type, Install off until it matches, wrong name
+  said, the name sent), absent, unknown, a failed read, no credentials in
+  the page, Check again, the server refusal shown in the window, escaping;
+  a mutation that leaves Install on is seen.
 - Navigation inventory, address and router tables: one row per tab;
   existing Cluster API and Terraform tests follow the new tabs.
 

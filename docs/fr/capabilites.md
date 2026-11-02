@@ -2687,6 +2687,15 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   répertoire d'état, jamais les identifiants) : la liste survit à un
   rechargement, avec sa date et un bouton **Relire**.
 
+- **Une machine qui porte déjà un système est gardée (2.2.0)** : la
+  fenêtre d'installation liste ce que montre le BMC (entrées de démarrage
+  UEFI d'un chargeur sur une partition de disque, tête de l'ordre de
+  démarrage, volumes logiques) et, quand un système semble présent,
+  l'installation demande de taper le nom de la machine (numéro de série, ou
+  adresse du BMC) ; la console revérifie sur sa propre lecture Redfish et
+  refuse sinon. « Inconnu » est dit tel quel quand le BMC ne dit rien.
+  Détails dans [bare-metal.md](bare-metal.md).
+
 - **Découverte BMC / Redfish** — pointer un ou plusieurs endpoints BMC et
   lire les profils des nodes : modèle, numéro de série, BIOS, mémoire,
   NICs avec leurs MAC, état d'alimentation, disques amorçables, et la

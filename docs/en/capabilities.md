@@ -2447,6 +2447,14 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   discovery (read cache in the state directory, never the credentials):
   the list survives a reload, with its date and a **Re-read** button.
 
+- **A machine that already carries a system is guarded (2.2.0)**: the
+  install window lists what the BMC shows (UEFI boot entries of a loader
+  on a disk partition, the head of the boot order, logical drives) and,
+  when a system seems present, installing requires typing the machine name
+  (serial number, or BMC address); the console checks again on its own
+  Redfish read and refuses otherwise. "Unknown" is said plainly when the
+  BMC tells nothing. Details in [bare-metal.md](bare-metal.md).
+
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
   read back node profiles: model, serial, BIOS, memory, NICs with their
   MACs, power state, bootable disks, and whether the machine can be

@@ -5939,3 +5939,16 @@ html[data-mode="dark"] .tbl-scroll { --tbl-shade: rgba(0, 0, 0, 0.42); }
 .avm-table td code, #ns-vms-table td code { font-size: 12px; }
 .avm-table .vmf-family { padding: 1px 5px; font-size: 10px; }
 .tbl-scroll .ct-table .ct-images code { max-width: 200px; font-size: 12px; }
+/* 2.2.0 : système déjà présent sur une machine (fenêtre d'installation) */
+.bm-system { grid-column: 1 / -1; margin: 10px 0 4px; }
+.bm-system .ct-banner { align-items: flex-start; color: var(--text); }
+.bm-system .ct-banner > div, .bm-system .ct-banner > span { flex: 1; }
+.bm-system .ct-banner .btn { margin-left: auto; flex: none; }
+.bm-system-evidence { margin: 6px 0 8px 18px; padding: 0; }
+.bm-system-evidence li { margin: 2px 0; }
+.capi-form label.bm-system-confirm { flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-start;
+  gap: 8px; font-size: 12px; color: var(--text); }
+.bm-system-name { font-weight: 600; }
+.bm-system-confirm input { width: 240px; }
+.bm-system-refused { margin: 4px 0; color: var(--danger); }
+.bm-system-mismatch { display: block; margin-top: 4px; color: var(--danger); }
