@@ -43,6 +43,15 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   provider version, checksum and signer.
 
 ### Security
+- **Terraform workspaces are private.** A Terraform or OpenTofu state can
+  hold secrets (provider credentials, generated tokens, cloud-init data, the
+  RKE2 token of the new template); the states and their backups were created
+  0644. Every workspace directory (root, cluster, `decls`, declaration, KVM)
+  is now 0700 and its files 0600 (0700 for an executable), whatever the
+  umask: OpenTofu runs under umask 077 and the console tightens the files it
+  writes, before and after each run. Existing workspaces are repaired once
+  when the console starts, and the count is logged. Same code for the
+  service (`/var/lib/harvester-ops/terraform`) and a development state.
 - **Strict host key checking for KVM declarations.** The provider connects
   through `qemu+sshcmd` and a script of the workspace that starts OpenSSH
   with strict options first (`-F /dev/null`, `StrictHostKeyChecking=yes`,
@@ -102,6 +111,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   (and an escape without the template guard caught), URI and SSH script,
   every refused value in a table, RKE2 nodes, cloud-init and network
   configuration.
+- Workspace permissions: fresh workspaces under umask 002, OpenTofu run
+  under umask 077, existing 0644 states repaired once, links not followed;
+  five mutations caught.
 - `tests/api/test_tf_kvm_decl_230.py`: store migration and families, routes
   and error paths, roles, runner with OpenTofu simulated (key staged only
   for the run, removed after a failure or an exception, token by

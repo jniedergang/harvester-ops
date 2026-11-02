@@ -26728,6 +26728,79 @@ def _tf_write_rc(ws_dir):
     return rc
 
 
+# 2.3.0 : un état Terraform/OpenTofu porte des secrets (identifiants des
+# providers, jetons générés, cloud-init : le jeton RKE2 du modèle KVM). Les
+# espaces de travail sont en 0700 et leurs fichiers en 0600, à la création
+# (tofu lancé sous umask 077, fichiers de la console resserrés) ET pour les
+# espaces d'avant, réparés une fois au démarrage (journalisé). Vu dans l'état
+# de développement : terraform.tfstate et ses copies en 0644, lisibles de tous.
+TF_DIR_MODE, TF_FILE_MODE_MASK = 0o700, 0o600   # fichier : 0600 (0700 s'il est exécutable)
+
+
+def _tf_secure_dir(d):
+    """Répertoire en 0700 ; rend 1 s'il a fallu le resserrer."""
+    try:
+        mode = _stat.S_IMODE(d.stat().st_mode)
+        if mode != TF_DIR_MODE:
+            os.chmod(d, TF_DIR_MODE)
+            return 1
+    except OSError:
+        pass
+    return 0
+
+
+def _tf_secure_files(ws):
+    """Fichiers réguliers d'un espace (état, copies, plan, kubeconfig, code,
+    fiches, sorties) sans droit pour le groupe ni les autres ; ne suit aucun
+    lien. Rend le nombre de fichiers resserrés."""
+    n = 0
+    try:
+        entries = list(os.scandir(ws))
+    except OSError:
+        return 0
+    for e in entries:
+        try:
+            if not e.is_file(follow_symlinks=False):
+                continue
+            mode = _stat.S_IMODE(e.stat(follow_symlinks=False).st_mode)
+            if mode & 0o077:
+                # les droits du propriétaire restent (le script kvm_ssh garde son x)
+                os.chmod(e.path, (mode & 0o700) or TF_FILE_MODE_MASK)
+                n += 1
+        except OSError:
+            continue
+    return n
+
+
+def _tf_secure_ws(ws):
+    return _tf_secure_dir(ws) + _tf_secure_files(ws)
+
+
+def _tf_secure_all(root=None):
+    """Réparation de tous les espaces existants (racine, clusters, `decls`,
+    déclarations, `.kvm`) : (répertoires, fichiers) resserrés."""
+    root = Path(root or TF_WORKSPACES)
+    dirs = files = 0
+    if not root.is_dir():
+        return 0, 0
+    dirs += _tf_secure_dir(root)
+    stack = [root]
+    while stack:
+        cur = stack.pop()
+        files += _tf_secure_files(cur)
+        try:
+            subs = [Path(e.path) for e in os.scandir(cur) if e.is_dir(follow_symlinks=False)]
+        except OSError:
+            continue
+        for sub in subs:
+            if sub.name in (".terraform", "plugins", ".tmp"):
+                dirs += _tf_secure_dir(sub)      # contenu reconstruit par tofu (greffons exécutables)
+                continue
+            dirs += _tf_secure_dir(sub)
+            stack.append(sub)
+    return dirs, files
+
+
 def _tf_workspace_dir(cluster):
     """Per-cluster workspace dir — keeps state files isolated.
 
@@ -26737,6 +26810,8 @@ def _tf_workspace_dir(cluster):
     safe = re.sub(r"[^a-z0-9-]+", "-", cluster.lower()) or "default"
     p = TF_WORKSPACES / safe
     p.mkdir(parents=True, exist_ok=True)
+    _tf_secure_dir(TF_WORKSPACES)
+    _tf_secure_dir(p)
     return p
 
 
@@ -26762,15 +26837,14 @@ def _tf_decl_workspace_dir(cluster, decl_id, create=True, target_kind="harvester
         p = TF_WORKSPACES / ".kvm" / cluster / "decls" / decl_id
         if create:
             p.mkdir(parents=True, exist_ok=True)
-            for d in (TF_WORKSPACES / ".kvm", p.parent.parent, p.parent, p):
-                try:
-                    os.chmod(d, 0o700)
-                except OSError:
-                    pass
+            for d in (TF_WORKSPACES, TF_WORKSPACES / ".kvm", p.parent.parent, p.parent, p):
+                _tf_secure_dir(d)
         return p
     p = _tf_workspace_dir(cluster) / "decls" / decl_id
     if create:
         p.mkdir(parents=True, exist_ok=True)
+        _tf_secure_dir(p.parent)
+        _tf_secure_dir(p)
     return p
 
 
@@ -26926,8 +27000,12 @@ try:
     _swept = _tf_kvm_sweep()
     if _swept:
         log_tf.warning("KVM declarations: %d staged SSH file(s) left by an interrupted run removed", _swept)
+    _fixed = _tf_secure_all()
+    if any(_fixed):
+        log_tf.warning("Terraform workspaces: permissions tightened on %d director(y/ies) (0700) and "
+                       "%d file(s) (0600): states can hold secrets", *_fixed)
 except Exception as _e:          # noqa: BLE001 : le démarrage passe
-    log_tf.warning("KVM declaration sweep failed: %s", _e)
+    log_tf.warning("Terraform workspace repair failed: %s", _e)
 
 
 def _tf_kvm_secret(ws, var):
@@ -27455,6 +27533,7 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     Internet. `extra_env` : variables ajoutées (jeton RKE2 en TF_VAR_, jamais
     dans argv) ; `drop_env` : variables retirées (SSH_AUTH_SOCK : seule la
     clé de l'hôte doit servir)."""
+    _tf_secure_ws(ws_dir)
     rc_file = _tf_write_rc(ws_dir) or (ws_dir / "terraformrc")
     env = {
         **os.environ,
@@ -27468,8 +27547,9 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
         env.pop(k, None)
     env.update(extra_env or {})
     try:
+        # umask 077 : état, copies et plans que crée tofu naissent en 0600
         r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
-                           capture_output=True, text=True, timeout=timeout)
+                           capture_output=True, text=True, timeout=timeout, umask=0o077)
         # 2.3.0 : un espace dont le verrou a été écrit d'après un provider
         # téléchargé sur Internet (OpenTofu, avant le double miroir) refuse le
         # miroir local au prochain `init` (sommes différentes, vu en réel). Le
@@ -27482,10 +27562,12 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
             log_tf.warning("terraform lock file of %s did not match the local mirror: recreated",
                            ws_dir.name)
             r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
-                               capture_output=True, text=True, timeout=timeout)
+                               capture_output=True, text=True, timeout=timeout, umask=0o077)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
+    finally:
+        _tf_secure_ws(ws_dir)
 
 
 _TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"

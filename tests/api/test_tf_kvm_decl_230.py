@@ -643,3 +643,84 @@ def test_a_stale_lock_file_is_recreated_once(tmp_path, monkeypatch, stderr, lock
     seen.clear()
     wapp._tf_run_cmd(tmp_path, "", ["plan"])                    # jamais pour une autre commande
     assert len(seen) == 1
+
+
+# ---------------------------------------------------------------------------
+# Droits des espaces de travail (2.3.0) : un état peut porter des secrets
+# ---------------------------------------------------------------------------
+def _mode(p):
+    return stat.S_IMODE(Path(p).stat().st_mode)
+
+
+def test_fresh_workspaces_are_private_whatever_the_umask(tmp_path, monkeypatch):
+    monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path / "ws")
+    old = os.umask(0o002)
+    try:
+        h = wapp._tf_decl_workspace_dir("harv1", "a" * 12)
+        kv = wapp._tf_decl_workspace_dir("node2", "b" * 12, target_kind="kvm")
+    finally:
+        os.umask(old)
+    for d in (tmp_path / "ws", tmp_path / "ws" / "harv1", h.parent, h, tmp_path / "ws" / ".kvm", kv.parent, kv):
+        assert _mode(d) == 0o700, d
+
+
+def test_tofu_runs_under_umask_077_and_files_are_tightened(tmp_path, monkeypatch):
+    seen = {}
+
+    class R:
+        returncode, stdout, stderr = 0, "", ""
+
+    def fake_run(argv, **kw):
+        seen["umask"] = kw.get("umask")
+        (tmp_path / "terraform.tfstate.backup").write_text("{}")      # créé « par tofu » sous umask 022
+        os.chmod(tmp_path / "terraform.tfstate.backup", 0o644)
+        return R()
+
+    monkeypatch.setattr(wapp.subprocess, "run", fake_run)
+    (tmp_path / "terraform.tfstate").write_text("{}")
+    os.chmod(tmp_path / "terraform.tfstate", 0o644)
+    (tmp_path / "kvm_ssh").write_text("#!/bin/sh\n")
+    os.chmod(tmp_path / "kvm_ssh", 0o755)
+    wapp._tf_run_cmd(tmp_path, "", ["plan"])
+    assert seen["umask"] == 0o077
+    assert _mode(tmp_path / "terraform.tfstate") == 0o600
+    assert _mode(tmp_path / "terraform.tfstate.backup") == 0o600
+    assert _mode(tmp_path / "kvm_ssh") == 0o700                    # reste exécutable par son propriétaire
+    assert _mode(tmp_path) == 0o700
+
+
+def test_existing_workspaces_are_repaired_once(tmp_path):
+    root = tmp_path / "terraform"
+    ws = root / "harv1" / "decls" / ("a" * 12)
+    ws.mkdir(parents=True)
+    kv = root / ".kvm" / "node2" / "decls" / ("b" * 12)
+    kv.mkdir(parents=True)
+    plug = root / "harv1" / "plugins" / "registry.terraform.io"
+    plug.mkdir(parents=True)
+    (plug / "provider").write_text("x")
+    os.chmod(plug / "provider", 0o755)
+    files = [root / "harv1" / "terraform.tfstate", root / "harv1" / "terraform.tfstate.backup",
+             root / "harv1" / "terraform.tfstate.pre-move-20260926", ws / "terraform.tfstate", ws / "tfplan",
+             ws / "tfplan.meta", ws / "vm1.json", ws / "vm1.tf", ws / "kubeconfig", kv / "terraform.tfstate"]
+    for f in files:
+        f.write_text("secret")
+        os.chmod(f, 0o644)
+    for d in [root, root / "harv1", ws.parent, ws, root / ".kvm", kv]:
+        os.chmod(d, 0o755)
+    dirs, nfiles = wapp._tf_secure_all(root)
+    assert nfiles == len(files) and dirs >= 6
+    assert all(_mode(f) == 0o600 for f in files)
+    assert all(_mode(d) == 0o700 for d in (root, root / "harv1", ws.parent, ws, root / ".kvm", kv))
+    assert _mode(plug / "provider") == 0o755                       # greffons : non touchés
+    assert wapp._tf_secure_all(root) == (0, 0)                      # une seule fois
+
+
+def test_a_link_in_a_workspace_is_not_followed(tmp_path):
+    outside = tmp_path / "outside"
+    outside.write_text("x")
+    os.chmod(outside, 0o644)
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "terraform.tfstate").symlink_to(outside)
+    wapp._tf_secure_files(ws)
+    assert _mode(outside) == 0o644

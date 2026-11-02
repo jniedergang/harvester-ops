@@ -2393,6 +2393,10 @@ Drive the Terraform provider for Harvester from saved declarations.
   libvirt resources (VM, volume, network) and the template "RKE2 on libvirt
   VMs", described in section 10; free code stays on Harvester targets. Plan, read, apply, destroy and history work
   the same way.
+- **Private workspaces (2.3.0)**: a state can hold secrets, so every
+  workspace directory is 0700 and its files (states, backups, plans, code)
+  0600, whatever the umask; workspaces made before are repaired once when the
+  console starts (logged).
 - **Offline providers (2.3.0)**: every provider of a workspace comes from a
   local mirror laid out under both registry names (`registry.opentofu.org`
   and `registry.terraform.io`), included in the mirror and excluded from

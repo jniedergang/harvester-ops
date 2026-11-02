@@ -2629,6 +2629,10 @@ sauvegardées.
   le modèle « RKE2 sur des VMs libvirt », décrits en section 10 ; le code
   libre reste sur les cibles Harvester. Plan,
   lecture, application, destruction et historique marchent de la même façon.
+- **Espaces privés (2.3.0)** : un état peut porter des secrets ; chaque
+  répertoire d'espace est donc en 0700 et ses fichiers (états, copies, plans,
+  code) en 0600, quel que soit l'umask ; les espaces d'avant sont réparés
+  une fois au démarrage de la console (journalisé).
 - **Providers hors ligne (2.3.0)** : chaque provider d'un espace vient d'un
   miroir local posé sous les deux noms de registre (`registry.opentofu.org`
   et `registry.terraform.io`), inclus au miroir et exclu des téléchargements
