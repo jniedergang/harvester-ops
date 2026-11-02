@@ -524,3 +524,11 @@ Chaque lot est livrable seul et utile seul. 2.4.0 sert déjà sans Cluster API.
 | 129 | Secrets du plan | A saisis au lancement et redemandés à la reprise, puis seulement en Secrets Kubernetes ; B gardés chiffrés par la console | A |
 | 130 | Bancs de vérification | A banc Redfish de node2 (chaîne complète, 1 cluster 1+1) et harvlab (cluster existant), harv4 sur accord pour plusieurs clusters ; B harv4 d'abord | A |
 | 131 | Découpage | A 2.4.0 à 2.8.0 comme ci-dessus ; B moins de lots, plus gros | A |
+
+## Décisions du propriétaire du produit (02/11/2026)
+
+Toutes les recommandations de 111 à 131 sont retenues, avec ces précisions :
+- 119 : registre du client s'il est donné, sinon registre d'amorçage sur Harvester. Plusieurs registres peuvent être déclarés (par cluster, par usage, en miroir).
+- 120 : on commence par CNCF Distribution. Le déploiement du registre privé de SUSE (basé sur Harbor) sera proposé ensuite.
+- 121 : paquet tar.gz signé avec une clé du client, mais en mode permissif par défaut. Un paquet non signé, ou signé par une clé inconnue, passe après un avertissement clair et un acquittement explicite, noté au journal. Un réglage d'administration impose le mode strict.
+- 129 : secrets saisis au lancement et redemandés à la reprise, puis gardés seulement en Secrets Kubernetes. L'intégration d'un gestionnaire de secrets (OpenBao) fait l'objet d'une conception séparée.
