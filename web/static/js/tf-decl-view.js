@@ -20,6 +20,12 @@
  * Données : TFDecl (déclarations gardées par la console, v1.54.0),
  * TFForm / TF_SCHEMA (formulaires), /api/tf-declarations/<id>/code|history,
  * /api/terraform/<cluster>/apply_declaration|destroy_declaration.
+ *
+ * 2.3.0 : une seule liste pour toutes les cibles (décision 107) : chaque
+ * déclaration vise un cluster Harvester OU un hôte KVM, choisi à sa
+ * création ; un filtre de famille (toutes, Harvester, KVM) tient la liste.
+ * Une déclaration KVM s'exécute par /api/terraform/kvm/<hôte>/... et propose
+ * les ressources libvirt (VM, volume, réseau) et le modèle RKE2.
  */
 const TFDeclView = (() => {
   const enc = encodeURIComponent;
@@ -30,6 +36,13 @@ const TFDeclView = (() => {
   const lang = () => { try { return localStorage.getItem('harvester_ops_language') || 'en'; } catch { return 'en'; } };
   const st = (o) => (!o ? '' : typeof o === 'string' ? o : (o[lang()] || o.en || ''));
   const TAB_KEY = 'harvester_ops_tfd_tab';
+  const FAMILY_KEY = 'harvester_ops_tfd_family';
+  const FAMILIES = {
+    all: () => tr('tfd.family.all'), harvester: () => tr('tfd.family.harvester'), kvm: () => tr('tfd.family.kvm'),
+  };
+  // types de ressource proposés par famille de cible (raw : les deux)
+  const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'raw'],
+                      kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2', 'raw'] };
 
   // Un appel littéral par texte : le contrôle de parité des traductions ne
   // voit que ces formes (une clé construite par concaténation lui échappe).
@@ -69,7 +82,7 @@ const TFDeclView = (() => {
   const text = (map, key, ...a) => (map[key] ? map[key](...a) : String(key || ''));
 
   let host = null;
-  let cluster = '';
+  let cluster = '';            // cible proposée par défaut à la création (cluster de gestion)
   let filter = '';
   let editing = null;          // { declId, resId, spec } pendant l'édition d'une ressource
   let modal = null;
@@ -83,6 +96,20 @@ const TFDeclView = (() => {
   }
 
   function lastPart(ref) { return String(ref || '').split('/').pop(); }
+
+  const familyOf = (d) => (d && d.target_kind) || 'harvester';
+  /** Texte de la cible d'une déclaration : « Harvester harv1 », « Hôte KVM node2 ». */
+  function targetText(d) {
+    return familyOf(d) === 'kvm' ? tr('tfd.target.kvm', { name: d.cluster }) : tr('tfd.target.harvester', { name: d.cluster });
+  }
+  /** Base des routes d'exécution selon la cible. */
+  function runBase(d) {
+    return familyOf(d) === 'kvm' ? `/api/terraform/kvm/${enc(d.cluster)}` : `/api/terraform/${enc(d.cluster)}`;
+  }
+  function getFamily() {
+    try { const f = localStorage.getItem(FAMILY_KEY); return FAMILIES[f] ? f : 'all'; } catch { return 'all'; }
+  }
+  function setFamily(f) { try { localStorage.setItem(FAMILY_KEY, f); } catch {} }
 
   function summaryOf(r) {
     const s = r.spec || {};
@@ -102,6 +129,17 @@ const TFDeclView = (() => {
       return parts.length > 1 ? `${parts[0]} …${parts[1].slice(-10)}${parts[2] ? ' ' + parts[2] : ''}` : '';
     }
     if (r.kind === 'raw') return r.address || '';
+    if (r.kind === 'kvm_vm') {
+      return [s.vcpu ? tr('tfd.sum.cpu', { n: s.vcpu }) : '', s.memory_mib ? `${s.memory_mib} MiB` : '',
+              lastPart(s.base_image), s.disk_gib ? `${s.disk_gib} GiB` : '',
+              s.network_type === 'bridge' ? s.bridge : s.network].filter(Boolean).join(' · ');
+    }
+    if (r.kind === 'kvm_volume') return [s.pool, s.capacity_gib ? `${s.capacity_gib} GiB` : '', s.format].filter(Boolean).join(' · ');
+    if (r.kind === 'kvm_network') return [s.mode, s.address ? `${s.address}/${s.prefix || 24}` : ''].filter(Boolean).join(' · ');
+    if (r.kind === 'kvm_rke2') {
+      return [tr('tfd.sum.rke2', { s: s.servers || 1, a: s.agents || 0 }), lastPart(s.base_image), s.network,
+              s.address_start].filter(Boolean).join(' · ');
+    }
     return '';
   }
 
@@ -124,7 +162,9 @@ const TFDeclView = (() => {
   }
 
   function removedAddresses(d) {
-    const mine = new Set((d.resources || []).map(r => r.address).filter(Boolean));
+    // 2.3.0 : une ressource KVM produit plusieurs adresses (VM, disque...)
+    const mine = new Set((d.resources || []).flatMap(r => (r.addresses && r.addresses.length)
+      ? r.addresses : [r.address]).filter(Boolean));
     return (d.deployed || []).filter(a => !mine.has(a));
   }
 
@@ -158,14 +198,17 @@ const TFDeclView = (() => {
 
   function decls() {
     const q = filter.trim().toLowerCase();
-    return (window.TFDecl ? TFDecl.list(cluster) : [])
-      .filter(d => !q || d.name.toLowerCase().includes(q) || (d.description || '').toLowerCase().includes(q))
-      .sort((a, b) => a.name.localeCompare(b.name));
+    const fam = getFamily();
+    return (window.TFDecl ? TFDecl.list(null, fam === 'all' ? undefined : fam) : [])
+      .filter(d => !q || d.name.toLowerCase().includes(q) || (d.description || '').toLowerCase().includes(q)
+                   || String(d.cluster || '').toLowerCase().includes(q))
+      .sort((a, b) => a.name.localeCompare(b.name) || String(a.cluster).localeCompare(String(b.cluster)));
   }
 
   function selected() {
     const a = window.TFDecl && TFDecl.getActive();
-    return a && a.cluster === cluster ? a : null;
+    const fam = getFamily();
+    return a && (fam === 'all' || familyOf(a) === fam) ? a : null;
   }
 
   function getTab() { try { return localStorage.getItem(TAB_KEY) || 'resources'; } catch { return 'resources'; } }
@@ -185,6 +228,9 @@ const TFDeclView = (() => {
             <input type="search" class="tfd-filter tip" value="${esc(filter)}"
                    placeholder="${esc(tr('tfd.filter'))}" aria-label="${esc(tr('tfd.filter'))}"
                    data-tip="${esc(tr('tfd.t.filter'))}">
+            <select class="tfd-family tip" aria-label="${esc(tr('tfd.familyLabel'))}" data-tip="${esc(tr('tfd.t.family'))}">
+              ${Object.keys(FAMILIES).map(f => `<option value="${f}" ${f === getFamily() ? 'selected' : ''}>${esc(text(FAMILIES, f))}</option>`).join('')}
+            </select>
             <button type="button" class="btn btn-primary btn-sm tfd-new tip" aria-label="${esc(tr('tfd.new'))}"
                     data-tip="${esc(tr('tfd.t.new'))}">${Icons.svg('add', { size: 14 })}</button>
           </div>
@@ -213,6 +259,7 @@ const TFDeclView = (() => {
     return `
       <button type="button" class="tfd-card ${isActive ? 'is-active' : ''}" data-decl="${esc(d.id)}">
         <span class="tfd-card-top"><strong>${esc(d.name)}</strong><span class="badge ${esc(s.cls)}">${esc(s.text)}</span></span>
+        <span class="tfd-card-target tfd-fam-${esc(familyOf(d))}">${esc(targetText(d))}</span>
         ${d.description ? `<span class="tfd-card-desc">${esc(d.description)}</span>` : ''}
         <span class="tfd-card-meta">${esc(bits.join(' · '))}</span>
       </button>`;
@@ -236,6 +283,7 @@ const TFDeclView = (() => {
                placeholder="${esc(tr('tfd.descPh'))}" aria-label="${esc(tr('tfd.descPh'))}"
                data-tip="${esc(tr('tfd.t.desc'))}">
         <div class="tfd-badges">
+          <span class="badge tip tfd-target-badge tfd-fam-${esc(familyOf(d))}" data-tip="${esc(tr('tfd.t.target', { target: targetText(d) }))}">${esc(targetText(d))}</span>
           <span class="badge info tip" data-tip="${esc(tr('tfd.t.ownState'))}">${esc(tr('tfd.ownState'))}</span>
           ${deployed ? `<span class="badge ok tip" data-tip="${esc((d.deployed || []).join(', '))}">${esc(tr('tfd.nDeployed', { n: deployed }))}</span>` : ''}
           ${d.last_applied_at ? `<span class="tfd-meta">${esc(d.last_applied_by
@@ -286,11 +334,25 @@ const TFDeclView = (() => {
         </article>`);
     return `
       <div class="tfd-grid">${cards.concat(ghosts).join('') || `<p class="tfd-empty">${esc(tr('tfd.noResource'))}</p>`}</div>
+      ${outputsHtml(d)}
       <div class="tfd-add">
         <span>${esc(tr('tfd.add'))}</span>
-        ${['vm', 'image', 'ssh_key', 'raw'].map(k => `<button type="button" class="btn btn-sm tfd-add-kind tip" data-kind="${k}"
+        ${ADD_KINDS[familyOf(d)].map(k => `<button type="button" class="btn btn-sm tfd-add-kind tip" data-kind="${k}"
             data-tip="${esc(tr('tfd.t.add', { kind: kindLabel(k) }))}">${Icons.svg('add', { size: 12 })} ${esc(kindLabel(k))}</button>`).join('')}
       </div>`;
+  }
+
+  /** Sorties non sensibles du dernier apply (adresses des nœuds RKE2...). */
+  function outputsHtml(d) {
+    const o = d.outputs || {};
+    const keys = Object.keys(o);
+    if (!keys.length) return '';
+    const val = (v) => (typeof v === 'string' ? v : JSON.stringify(v, null, 1));
+    return `<details class="tfd-outputs" open>
+        <summary class="tip" data-tip="${esc(tr('tfd.t.outputs'))}">${esc(tr('tfd.outputs'))}</summary>
+        <table class="tfd-fields"><tbody>${keys.map(k => `<tr><td><code>${esc(k)}</code></td>
+          <td><pre class="capi-yaml">${esc(val(o[k]))}</pre></td></tr>`).join('')}</tbody></table>
+      </details>`;
   }
 
   function applyTips(root) {
@@ -395,7 +457,7 @@ const TFDeclView = (() => {
             ${r.address ? `<code class="tfd-addr">${esc(r.address)}</code>` : ''}</div>
           ${sections.map(sec => `<fieldset class="tfd-sec" data-sec="${esc(sec.id)}">
               <legend>${esc(st(sec.label) || kindLabel(r.kind))}</legend>
-              ${TFForm.render(r.kind, cluster, spec, { sectionId: sec.id, hideHeader: true })}
+              ${TFForm.render(r.kind, d.cluster, spec, { sectionId: sec.id, hideHeader: true })}
             </fieldset>`).join('')}
         </div>
         <aside class="tfd-edit-check" aria-live="polite">
@@ -406,7 +468,7 @@ const TFDeclView = (() => {
           <p class="tfd-meta">${esc(tr('tfd.saveHint'))}</p>
         </aside>
       </div>`;
-    box.querySelectorAll('.tfd-sec .tf-form').forEach(root => TFForm.wire(root, r.kind, cluster));
+    box.querySelectorAll('.tfd-sec .tf-form').forEach(root => TFForm.wire(root, r.kind, d.cluster));
     const recheck = () => {
       editing.spec = readEditor(box, r, editing.spec);
       const v = TFForm.validateAll(editing.spec, r.kind);
@@ -528,11 +590,11 @@ const TFDeclView = (() => {
   }
 
   async function runPlan(d) {
-    openModal(tr('tfd.planTitle', { name: d.name, cluster }), tr('tfd.planSub', { name: d.name }));
+    openModal(tr('tfd.planTitle', { name: d.name, cluster: d.cluster }), tr('tfd.planSub', { name: d.name }));
     progress(tr('tfd.p.start'));
     try {
       await TFDecl.flush(d.id);
-      const out = await startAction(`/api/terraform/${enc(cluster)}/apply_declaration`,
+      const out = await startAction(`${runBase(d)}/apply_declaration`,
                                     { declaration: { id: d.id }, dry_run: true });
       const a = await follow(out.action_id);
       await TFDecl.refresh(d.id);
@@ -605,7 +667,7 @@ const TFDeclView = (() => {
     q('foot').innerHTML = '';
     progress(tr('tfd.p.start'));
     try {
-      const out = await startAction(`/api/terraform/${enc(cluster)}/apply_declaration`,
+      const out = await startAction(`${runBase(d)}/apply_declaration`,
                                     { declaration: { id: d.id }, dry_run: false, plan_hash: hash });
       const a = await follow(out.action_id);
       await TFDecl.refresh(d.id);
@@ -621,7 +683,7 @@ const TFDeclView = (() => {
   async function reviewLastPlan(d) {
     const plan = currentPlan(d);
     if (!plan) return;
-    openModal(tr('tfd.planTitle', { name: d.name, cluster }),
+    openModal(tr('tfd.planTitle', { name: d.name, cluster: d.cluster }),
               plan.by ? tr('tfd.reviewSub', { when: when(plan.at), by: plan.by }) : tr('tfd.reviewSubAt', { when: when(plan.at) }));
     showPlan(d, plan.summary, plan.hash, []);
   }
@@ -629,16 +691,16 @@ const TFDeclView = (() => {
   async function runDestroy(d) {
     const ok = window.TF && TF.confirmDestructive ? await TF.confirmDestructive({
       title: tr('tfd.destroyTitle', { name: d.name }),
-      message: tr('tfd.destroyMsg', { cluster }),
+      message: familyOf(d) === 'kvm' ? tr('tfd.destroyMsgKvm', { host: d.cluster }) : tr('tfd.destroyMsg', { cluster: d.cluster }),
       detail: (d.deployed || []).join('\n'),
       requiredText: d.name,
       confirmLabel: tr('tfd.destroyGo', { name: d.name }),
     }) : confirm(tr('tfd.destroyTitle', { name: d.name }));
     if (!ok) return;
-    openModal(tr('tfd.destroyTitle', { name: d.name }), cluster);
+    openModal(tr('tfd.destroyTitle', { name: d.name }), targetText(d));
     progress(tr('tfd.p.start'));
     try {
-      const out = await startAction(`/api/terraform/${enc(cluster)}/destroy_declaration`,
+      const out = await startAction(`${runBase(d)}/destroy_declaration`,
                                     { declaration: { id: d.id }, dry_run: false });
       const a = await follow(out.action_id);
       await TFDecl.refresh(d.id);
@@ -653,10 +715,32 @@ const TFDeclView = (() => {
   // -------------------------------------------------------------------------
   // Création, renommage, suppression
   // -------------------------------------------------------------------------
+  /** Cibles possibles d'une famille : clusters Harvester visibles, ou
+   *  hôtes KVM déclarés (lus sans les interroger). */
+  async function targetsOf(fam) {
+    if (fam === 'kvm') {
+      try {
+        const r = await fetch('/api/kvm/hosts?declared=1');
+        if (!r.ok) return [];
+        return ((await r.json()).hosts || []).map(h => h.name).filter(Boolean);
+      } catch { return []; }
+    }
+    const list = window.App && App.listClusters ? App.listClusters() : [];
+    return list.length ? list : (cluster ? [cluster] : []);
+  }
+
   function openCreate() {
-    openModal(tr('tfd.newTitle'), cluster);
+    const startFam = getFamily() === 'kvm' ? 'kvm' : 'harvester';
+    openModal(tr('tfd.newTitle'), '');
     q('body').innerHTML = `
       <div class="tf-form">
+        <label class="tf-field"><span class="tf-label">${esc(tr('tfd.f.family'))}</span>
+          <select data-x="family" class="tip" data-tip="${esc(tr('tfd.t.familyPick'))}">
+            <option value="harvester" ${startFam === 'harvester' ? 'selected' : ''}>${esc(tr('tfd.family.harvester'))}</option>
+            <option value="kvm" ${startFam === 'kvm' ? 'selected' : ''}>${esc(tr('tfd.family.kvm'))}</option>
+          </select></label>
+        <label class="tf-field"><span class="tf-label">${esc(tr('tfd.f.target'))}</span>
+          <select data-x="target" class="tip" data-tip="${esc(tr('tfd.t.targetPick'))}"></select></label>
         <label class="tf-field"><span class="tf-label">${esc(tr('tfd.f.name'))}</span>
           <input type="text" data-x="name" maxlength="80" class="tip" data-tip="${esc(tr('tfd.t.name'))}" autocomplete="off"></label>
         <label class="tf-field"><span class="tf-label">${esc(tr('tfd.f.desc'))}</span>
@@ -667,12 +751,25 @@ const TFDeclView = (() => {
       <button type="button" class="btn btn-primary btn-sm tip" data-x="create" data-tip="${esc(tr('tfd.t.create'))}">${Icons.svg('add', { size: 13 })} ${esc(tr('tfd.create'))}</button>
       <button type="button" class="btn btn-secondary btn-sm" data-x="dismiss">${esc(tr('common.cancel'))}</button>`;
     const name = q('name');
+    const famSel = q('family');
+    const tgtSel = q('target');
+    const fillTargets = async () => {
+      const fam = famSel.value;
+      const list = await targetsOf(fam);
+      if (famSel.value !== fam) return;               // changé entre-temps
+      tgtSel.innerHTML = list.map(n => `<option value="${esc(n)}" ${n === cluster ? 'selected' : ''}>${esc(n)}</option>`).join('');
+      tgtSel.disabled = !list.length;
+      q('err').textContent = list.length ? '' : (fam === 'kvm' ? tr('tfd.noKvmHost') : tr('tfd.noCluster'));
+    };
+    famSel.addEventListener('change', fillTargets);
+    fillTargets();
     name.focus();
     const go = async () => {
       const v = name.value.trim();
       if (!v) { q('err').textContent = tr('tfd.needName'); return; }
+      if (!tgtSel.value) { q('err').textContent = famSel.value === 'kvm' ? tr('tfd.noKvmHost') : tr('tfd.noCluster'); return; }
       try {
-        const d = await TFDecl.createAsync(v, cluster, q('desc').value.trim());
+        const d = await TFDecl.createAsync(v, tgtSel.value, q('desc').value.trim(), famSel.value);
         closeModal();
         TFDecl.setActive(d.id);
         setTab('resources');
@@ -782,6 +879,14 @@ const TFDeclView = (() => {
       }
     });
     host.addEventListener('change', (e) => {
+      if (e.target.classList.contains('tfd-family')) {
+        setFamily(e.target.value);
+        editing = null;
+        const sel = selected();
+        if (!sel) { const first = decls()[0]; TFDecl.setActive(first ? first.id : null); }
+        render();
+        return;
+      }
       const d = selected();
       if (d && e.target.classList.contains('tfd-desc')) TFDecl.describe(d.id, e.target.value.trim());
     });
@@ -803,7 +908,8 @@ const TFDeclView = (() => {
   function mount(el, clusterName) {
     if (!el) return;
     if (host !== el) { host = el; if (!el.dataset.wired) wire(); }
-    if (cluster !== clusterName) { editing = null; filter = ''; }
+    // 2.3.0 : la liste montre toutes les cibles ; le cluster de gestion n'est
+    // plus que la cible proposée à la création
     cluster = clusterName || '';
     const sel = selected();
     if (!sel) {
@@ -818,13 +924,15 @@ const TFDeclView = (() => {
    *  l'édition d'une de ses ressources. */
   function select(declId, resId) {
     if (!window.TFDecl) return;
+    const d = TFDecl.get(declId);
+    if (d && getFamily() !== 'all' && getFamily() !== familyOf(d)) setFamily('all');
     TFDecl.setActive(declId);
     editing = resId ? { declId, resId, spec: null } : null;
     setTab('resources');
     render();
   }
 
-  return { mount, select, render, _internals: { declState, resState, currentPlan, summaryOf } };
+  return { mount, select, render, _internals: { declState, resState, currentPlan, summaryOf, removedAddresses, targetText, runBase } };
 })();
 
 if (typeof window !== 'undefined') window.TFDeclView = TFDeclView;

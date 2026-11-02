@@ -628,6 +628,17 @@ PY
             ok "Terraform provider: the one installed from the console is kept"
         fi
     fi
+    # 2.3.0 : le provider libvirt des déclarations KVM, vérifié au build
+    # (signature GPG + somme) ; celui du livrable remplace toujours le précédent
+    local lv="$src/terraform-provider-libvirt"
+    if [[ -x "$lv/bin/terraform-provider-libvirt" ]]; then
+        local ldest="$STATE_DIR/.local/share/harvester-ops/terraform-provider-libvirt"
+        install -d -m 0750 "$ldest/bin"
+        install -m 0755 "$lv/bin/terraform-provider-libvirt" "$ldest/bin/terraform-provider-libvirt"
+        install -m 0644 "$lv/provider.json" "$ldest/provider.json"
+        chown -R "$owner" "$STATE_DIR/.local" 2>/dev/null || warn "could not give $STATE_DIR/.local to $owner"
+        ok "libvirt Terraform provider $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("version","?"))' "$lv/provider.json") installed"
+    fi
 }
 
 main() {

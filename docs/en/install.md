@@ -111,6 +111,21 @@ provider in `/var/lib/harvester-ops` (1.51.0): the Cluster API and
 Terraform tabs work without anything to download. A bundle or provider you
 choose later from the console is kept by later installations.
 
+Since 2.3.0 the package also carries the Terraform provider
+`dmacvicar/libvirt` (Apache-2.0, version pinned in
+`scripts/embedded-providers.env`, 0.9.9) for declarations that target a KVM
+host. `package.sh` checks it before embedding it: the GPG signature of the
+release `SHA256SUMS`, made by the key pinned in
+`config/terraform-provider-keys/dmacvicar-libvirt.asc` (fingerprint
+`F6D373750D6F5983E70634DC0833E38C51E74D26`, the key the Terraform registry
+publishes for this provider), then the archive checksum. The installer
+places it in
+`/var/lib/harvester-ops/.local/share/harvester-ops/terraform-provider-libvirt`,
+replacing the one of the previous package. Both providers are laid out as an
+offline filesystem mirror under both registry names, so OpenTofu never
+downloads them. The Installation tab of Terraform shows its version and the
+signer.
+
 ### 3. Provide kubeconfigs and SSH keys
 
 For each cluster you intend to manage:

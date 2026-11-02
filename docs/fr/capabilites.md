@@ -2619,6 +2619,20 @@ sauvegardées.
   quand le provider Harvester dont les déclarations ont besoin, ou la
   commande OpenTofu (ou Terraform), manque, Déclarations le dit avec un
   lien vers Installation.
+- **Cibles : un cluster Harvester ou un hôte KVM (2.3.0)**. Une seule liste
+  de déclarations pour toutes les cibles : chaque déclaration choisit, à sa
+  création, un cluster Harvester (provider `harvester/harvester`) ou un hôte
+  KVM déclaré dans la console (provider `dmacvicar/libvirt`, embarqué). Un
+  filtre de famille (toutes les cibles, clusters Harvester, hôtes KVM) tient
+  la liste ; chaque carte et l'en-tête de la déclaration nomment la cible.
+  Une déclaration KVM propose les ressources libvirt (VM, volume, réseau) et
+  le modèle « RKE2 sur des VMs libvirt », décrits en section 10. Plan,
+  lecture, application, destruction et historique marchent de la même façon.
+- **Providers hors ligne (2.3.0)** : chaque provider d'un espace vient d'un
+  miroir local posé sous les deux noms de registre (`registry.opentofu.org`
+  et `registry.terraform.io`), inclus au miroir et exclu des téléchargements
+  directs. Avant, OpenTofu résolvait `harvester/harvester` en
+  `registry.opentofu.org` et le téléchargeait sur Internet.
 - **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
   clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
   avec son propre état Terraform (1.54.0). Elles sont gardées par la
@@ -3828,6 +3842,87 @@ vérifié : cartes macvtap, pools NFS, disques SCSI, baisse de vCPU, invité
 sans pilote de ballon.
 
 ---
+
+### Déclarations Terraform sur un hôte KVM (2.3.0)
+
+Une déclaration Terraform peut viser un hôte KVM au lieu d'un cluster
+Harvester (Automatisation, Terraform, Déclarations, « Nouvelle
+déclaration », famille de cible KVM). Décisions de l'exploitant : une seule
+liste de déclarations avec un filtre de famille, pas de menus en double
+(107) ; pas de Cluster API sur KVM, un modèle Terraform « RKE2 sur des VMs
+libvirt » à la place (108).
+
+- **Provider** : `dmacvicar/libvirt` 0.9.9 (Apache-2.0), embarqué dans la
+  livraison et vérifié à la construction (signature GPG du `SHA256SUMS` de
+  la release par la clé épinglée, puis somme). Il tourne depuis un miroir
+  local : rien n'est téléchargé à l'exécution, airgap compris.
+- **Connexion** : `qemu+sshcmd://<user>@<adresse>/system?command=<espace>/kvm_ssh`.
+  À chaque exécution, la console copie la clé SSH de l'hôte et son empreinte
+  épinglée dans l'espace de la déclaration (0600) et écrit `kvm_ssh`, un
+  script qui lance OpenSSH avec les options strictes en tête :
+  `-F /dev/null`, `StrictHostKeyChecking=yes`, l'empreinte épinglée seule
+  (`UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`), la clé de l'hôte
+  seule (`IdentitiesOnly`, sans agent), `BatchMode`, sans multiplexage ni
+  redirection. OpenSSH garde la première valeur de chaque option : rien de ce
+  que le provider ajoute ne peut les affaiblir. Les trois fichiers sont
+  retirés après l'exécution, échec compris ; ni clé ni chemin dans argv,
+  dans le code, dans une réponse ou dans l'état. Avant OpenTofu, une
+  connexion SSH par le même script contrôle l'hôte et dit pourquoi elle
+  échoue (`hostkey`, `auth`, `unreachable`) : le provider, lui, ne dit que
+  « procedure interrupted ».
+- **Pourquoi pas `qemu+ssh://...?keyfile=&knownhosts=`** : son client SSH
+  (écrit en Go) choisit un type de clé d'hôte sans regarder ceux épinglés et
+  refusait un hôte dont l'empreinte épinglée était ed25519 (« knownhosts: key
+  mismatch », vu sur node2). Et dans les deux transports, `no_verify` coupe
+  la vérification dès qu'il apparaît, quelle que soit sa valeur
+  (`no_verify=0` compris) : l'URI n'en porte jamais.
+- **Ce que demande l'hôte** : son URI libvirt est `qemu:///system` ou
+  `qemu:///session` (un hôte déclaré avec une autre URI est refusé), et il a
+  `virt-ssh-helper` (client libvirt) ou `nc`.
+- **Ressources** :
+  - **Machine virtuelle (KVM)** : nom, processeurs, modèle de processeur
+    (`host-model` par défaut, `host-passthrough`), mémoire, démarrage,
+    démarrage avec l'hôte ; disque dans un pool, tiré d'une image de base du
+    catalogue de l'hôte (copie sur écriture) ou vierge ; un réseau libvirt ou
+    un pont de l'hôte ; premier démarrage par cloud-init (configuration, ou
+    une simple clé SSH). Chaque domaine reçoit ACPI et APIC : sans eux, sur
+    q35, le disque restait introuvable au démarrage et la carte réseau sans
+    porteuse (vu sur node2).
+  - **Volume (KVM)** : dans un pool, qcow2 ou raw, vierge ou sur une image.
+  - **Réseau (KVM)** : isolé, NAT ou routé, avec l'adresse de l'hôte, son
+    préfixe et une plage DHCP.
+- **Modèle « RKE2 sur des VMs libvirt »** : N serveurs (1, 3, 5 ou 7) et M
+  agents (0 à 20) tirés d'une image cloud du catalogue de l'hôte.
+  Paramètres : préfixe des noms des nœuds, canal ou version exacte de RKE2,
+  processeurs, modèle de processeur, mémoire, disque, pool, image de base,
+  réseau libvirt, première adresse fixe, préfixe, passerelle, DNS,
+  utilisateur et clé publique SSH. Chaque nœud reçoit une adresse MAC fixe
+  et son adresse fixe par cloud-init (réseau reconnu par sa MAC) ;
+  cloud-init installe RKE2 (`INSTALL_RKE2_METHOD=tar`) et démarre
+  `rke2-server` ou `rke2-agent` ; les autres nœuds rejoignent le premier
+  serveur. Le jeton RKE2 est tiré par la console à la première exécution,
+  gardé dans l'espace de la déclaration (`.secrets/`, 0600, espace en 0700),
+  passé à OpenTofu par une variable d'environnement d'une variable sensible,
+  et jamais montré (code, plan, historique, réponses). Le fichier d'état
+  (0600) et le disque cloud-init sur l'hôte le portent, comme ils portent la
+  configuration des nœuds. Sorties : l'adresse de chaque nœud et la commande
+  qui lit le kubeconfig du premier serveur, sous « Sorties du dernier
+  apply » (une sortie sensible n'est jamais gardée).
+- **Airgap** : le modèle installe RKE2 depuis `get.rke2.io` ; les VMs ont
+  donc besoin d'Internet (un réseau NAT de l'hôte suffit). Une installation
+  airgap (archive RKE2 donnée comme volume) n'est **pas couverte** en 2.3.0.
+- **Essai réel (node2, 02/11/2026)** : une déclaration avec une VM (cirros
+  sur `kvmtest-net`), un volume et un réseau isolé : plan 6 s, apply 6 s,
+  contrôlé par `virsh` (domaine démarré avec ACPI/APIC, disque sur son image
+  de base, disque cloud-init, bail DHCP), destruction 9 s, rien ne reste. Le
+  modèle avec 1 serveur et 1 agent depuis l'image cloud openSUSE Tumbleweed
+  (somme publiée vérifiée) : plan 6 s, apply 6 s, SSH sur le serveur 47 s
+  après l'apply, les deux nœuds `Ready` 153 s après l'apply (RKE2
+  v1.36.5+rke2r1, lus avec le kubeconfig par un tunnel SSH), destruction
+  12 s. Une copie de la déclaration de l'hôte avec une mauvaise empreinte
+  épinglée a été refusée avant OpenTofu (`hostkey: Host key verification
+  failed.`), rien créé. Non vérifié en réel : VMs sur un pont, réseaux NAT ou
+  routés créés par une déclaration, plusieurs serveurs.
 
 ## 11. Reprise après sinistre : réplication asynchrone des VMs (CLI + API de la console)
 

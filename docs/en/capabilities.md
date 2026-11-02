@@ -2384,6 +2384,20 @@ Drive the Terraform provider for Harvester from saved declarations.
   the Harvester provider that declarations need, or the OpenTofu (or
   Terraform) command, is missing, Declarations says so with a link to
   Installation.
+- **Targets: a Harvester cluster or a KVM host (2.3.0)**. One list of
+  declarations for every target: each declaration chooses, at creation, a
+  Harvester cluster (provider `harvester/harvester`) or a KVM host declared
+  in the console (provider `dmacvicar/libvirt`, embedded). A family filter
+  (all targets, Harvester clusters, KVM hosts) sits above the list; each
+  card and the declaration header name the target. A KVM declaration offers
+  libvirt resources (VM, volume, network) and the template "RKE2 on libvirt
+  VMs", described in section 10. Plan, read, apply, destroy and history work
+  the same way.
+- **Offline providers (2.3.0)**: every provider of a workspace comes from a
+  local mirror laid out under both registry names (`registry.opentofu.org`
+  and `registry.terraform.io`), included in the mirror and excluded from
+  direct downloads. Before, OpenTofu resolved `harvester/harvester` to
+  `registry.opentofu.org` and fetched it from the Internet.
 - **Declarations**: named groups of resources (VMs, VM images, SSH keys,
   Terraform code written by hand) applied together, each with its own
   Terraform state (1.54.0). They are kept by the console (shared between
@@ -3496,6 +3510,84 @@ answer, log or action record. Not verified: macvtap cards, NFS pools,
 SCSI disks, a vCPU decrease, a guest without a balloon driver.
 
 ---
+
+### Terraform declarations on a KVM host (2.3.0)
+
+A Terraform declaration can target a KVM host instead of a Harvester cluster
+(Automation, Terraform, Declarations, "New declaration", target family KVM).
+Decisions of the product owner: one list of declarations with a family
+filter, no duplicated menus (107); no Cluster API on KVM, a Terraform
+template "RKE2 on libvirt VMs" instead (108).
+
+- **Provider**: `dmacvicar/libvirt` 0.9.9 (Apache-2.0), embedded in the
+  package and checked at build time (GPG signature of the release
+  `SHA256SUMS` by the pinned key, then checksum). It runs from a local
+  mirror: nothing is downloaded at run time, airgap included.
+- **Connection**: `qemu+sshcmd://<user>@<address>/system?command=<workspace>/kvm_ssh`.
+  For each run the console copies the host SSH key and its pinned host key
+  into the declaration workspace (0600) and writes `kvm_ssh`, a script that
+  starts OpenSSH with strict options first: `-F /dev/null`,
+  `StrictHostKeyChecking=yes`, the pinned host key only
+  (`UserKnownHostsFile`, `GlobalKnownHostsFile=/dev/null`), the host key
+  only (`IdentitiesOnly`, no agent), `BatchMode`, no multiplexing nor
+  forwarding. OpenSSH keeps the first value of each option, so nothing the
+  provider adds can loosen them. The three files are removed after the run,
+  failed or not; no key and no path appears in argv, in the code, in an
+  answer or in the state. Before OpenTofu runs, one SSH connection through
+  the same script checks the host and tells why it fails (`hostkey`,
+  `auth`, `unreachable`): the provider itself only says "procedure
+  interrupted".
+- **Why not `qemu+ssh://...?keyfile=&knownhosts=`**: its SSH client (written
+  in Go) picks a host key type without looking at the pinned ones and refused
+  a host whose pinned key was ed25519 ("knownhosts: key mismatch", seen on
+  node2). And in both transports `no_verify` turns verification off as soon
+  as it appears, whatever its value (`no_verify=0` included): the URI never
+  carries it.
+- **Host requirements**: the host libvirt URI is `qemu:///system` or
+  `qemu:///session` (a host declared with another URI is refused), and the
+  host has `virt-ssh-helper` (libvirt client) or `nc`.
+- **Resources**:
+  - **Virtual machine (KVM)**: name, processors, CPU model (`host-model`
+    by default, `host-passthrough`), memory, start, start with the host;
+    disk in a pool, made from a base image of the host catalogue (copy on
+    write) or blank; a libvirt network or a bridge of the host; first boot
+    by cloud-init (configuration, or just an SSH key). Every domain gets
+    ACPI and APIC: without them, on q35, the disk was not found at boot and
+    the network card had no carrier (seen on node2).
+  - **Volume (KVM)**: in a pool, qcow2 or raw, blank or on a base image.
+  - **Network (KVM)**: isolated, NAT or routed, with the host address, its
+    prefix and a DHCP range.
+- **Template "RKE2 on libvirt VMs"**: N servers (1, 3, 5 or 7) and M agents
+  (0 to 20) from a cloud image of the host catalogue. Parameters: prefix of
+  the node names, RKE2 channel or exact version, processors, CPU model,
+  memory, disk, pool, base image, libvirt network, first static address,
+  prefix, gateway, DNS, SSH user and public key. Each node gets a fixed MAC
+  address and its static address by cloud-init (network matched by MAC);
+  cloud-init installs RKE2 (`INSTALL_RKE2_METHOD=tar`) and starts
+  `rke2-server` or `rke2-agent`; the other nodes join the first server.
+  The RKE2 token is drawn by the console at the first run, kept in the
+  declaration workspace (`.secrets/`, 0600, workspace 0700), passed to
+  OpenTofu by an environment variable of a sensitive variable, and never
+  shown (code, plan, history and answers). The state file (0600) and the
+  cloud-init disk on the host do hold it, as they hold the node
+  configuration. Outputs: the address of each node and the command that
+  reads the kubeconfig of the first server, shown under "Outputs of the
+  last apply" (sensitive outputs are never kept).
+- **Airgap**: the template installs RKE2 from `get.rke2.io`, so the VMs need
+  Internet access (a NAT network of the host is enough). An airgap install
+  (RKE2 tarball given as a volume) is **not covered** in 2.3.0.
+- **Real check (node2, 02/11/2026)**: a declaration with a VM (cirros on
+  `kvmtest-net`), a volume and an isolated network: plan 6 s, apply 6 s,
+  checked with `virsh` (domain running with ACPI/APIC, disk on its base
+  image, seed disk, DHCP lease), destroy 9 s, nothing left. The template
+  with 1 server and 1 agent from the openSUSE Tumbleweed cloud image
+  (published checksum checked): plan 6 s, apply 6 s, SSH on the server 47 s
+  after apply, both nodes `Ready` 153 s after apply (RKE2 v1.36.5+rke2r1,
+  read with the kubeconfig through an SSH tunnel), destroy 12 s. A copied
+  host declaration with a wrong pinned key was refused before OpenTofu
+  (`hostkey: Host key verification failed.`), nothing created. Not checked
+  for real: bridged VMs, NAT or routed networks created by a declaration,
+  several servers.
 
 ## 11. Disaster recovery: asynchronous VM replication (CLI + console API)
 

@@ -19,7 +19,8 @@
  *   load()                              → Promise (relit le serveur)
  *   list() / get(id)                    → declaration[] / declaration | null
  *   create(name, cluster)               → declaration (enregistrée en tâche de fond)
- *   createAsync(name, cluster, desc)    → Promise<declaration>
+ *   createAsync(name, cluster, desc, targetKind) -> Promise<declaration>
+ *                                         (2.3.0 : targetKind 'harvester' ou 'kvm')
  *   rename(id, newName)                 → declaration (renameAsync : Promise)
  *   describe(id, text)                  → declaration
  *   remove(id)                          → boolean (removeAsync : Promise, refusé si déployée)
@@ -222,30 +223,34 @@ const TFDecl = (() => {
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
-  function list(cluster) {
+  /** 2.3.0 : `cluster` = une cible ; sans `family`, un cluster Harvester
+   *  (comme avant). `family` seul : toutes les cibles de cette famille. */
+  function list(cluster, family) {
     const all = Array.from(cache.values());
-    return cluster ? all.filter(d => d.cluster === cluster) : all;
+    const kind = (d) => d.target_kind || 'harvester';
+    if (cluster) return all.filter(d => d.cluster === cluster && kind(d) === (family || 'harvester'));
+    return family ? all.filter(d => kind(d) === family) : all;
   }
 
   function get(id) { return cache.get(id) || null; }
 
-  function createAsync(name, cluster, description = '') {
-    return _start(name, cluster, description).saved;
+  function createAsync(name, cluster, description = '', targetKind = 'harvester') {
+    return _start(name, cluster, description, targetKind).saved;
   }
 
   /** Le brouillon est dans le cache tout de suite ; `saved` dit si la
    *  console l'a accepté (un nom déjà pris est refusé). */
-  function _start(name, cluster, description) {
+  function _start(name, cluster, description, targetKind = 'harvester') {
     const id = _uuid();
     const draft = {
-      id, cluster: cluster || '', name: name || 'untitled', description,
+      id, cluster: cluster || '', target_kind: targetKind, name: name || 'untitled', description,
       resources: [], revision: 0, deployed: [], last_plan: null, _creating: true,
       created_at: now(), updated_at: now(), last_applied_at: null, last_applied_status: null,
     };
     cache.set(id, draft);
     try { localStorage.setItem(ACTIVE_KEY, id); } catch {}
     emit();
-    const saved = api('POST', '/api/tf-declarations', { id, cluster, name, description })
+    const saved = api('POST', '/api/tf-declarations', { id, cluster, name, description, target_kind: targetKind })
       .then(saved => {
         const cur = cache.get(id) || {};
         cache.set(id, Object.assign({}, saved, cur.resources && cur.resources.length

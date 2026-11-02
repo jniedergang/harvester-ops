@@ -8,7 +8,9 @@
  * gestion, déclaration par déclaration), Historique (les plans, applications
  * et destructions de l'Activité) et Installation (OpenTofu, provider
  * embarqué, paquet airgap). Les déclarations sont gardées par la console et
- * ont chacune leur état Terraform (v1.54.0).
+ * ont chacune leur état Terraform (v1.54.0). 2.3.0 : une déclaration vise
+ * un cluster Harvester ou un hôte KVM (provider libvirt, listé dans
+ * Installation).
  */
 const TF = (() => {
   // Cluster de gestion (navigation 2.0) : plus de lecture du sélecteur
@@ -148,6 +150,10 @@ const TF = (() => {
   function missingBanner(info, cluster) {
     const msgs = [];
     if (!info.provider_binary) msgs.push(i18n.t('tf.banner.provider', { cluster: cluster || '-' }));
+    // 2.3.0 : sans le provider libvirt, les déclarations qui visent un hôte KVM ne s'exécutent pas
+    if (!info.libvirt_provider_binary && window.TFDecl && TFDecl.list(null, 'kvm').length) {
+      msgs.push(i18n.t('tf.banner.libvirt'));
+    }
     if (!info.terraform_available) {
       msgs.push(i18n.t('tf.banner.cli', { cli: info.terraform_flavor === 'opentofu' ? 'OpenTofu' : 'Terraform' }));
     }
@@ -252,6 +258,16 @@ const TF = (() => {
                        <ul class="form-hint">${(info.provider_searched || [])
                          .map(x => `<li><code>${esc(x)}</code></li>`).join('')}</ul>
                      </details>`}</td></tr>
+            <tr><td>${esc(i18n.t('tf.ui.libvirtProvider'))}</td>
+                <td>${info.libvirt_provider_binary
+                  ? `<code>${esc(info.libvirt_provider_binary)}</code>
+                     <span class="badge">${esc(i18n.t('tf.prov.origin.bundled'))}</span>
+                     <span class="form-hint">v${esc(info.libvirt_provider_version || '?')}${info.libvirt_provider_signer
+                       ? `, ${esc(i18n.t('tf.ui.libvirtVerified', { fpr: String(info.libvirt_provider_signer).slice(-16) }))}` : ''}</span>
+                     <p class="form-hint">${esc(i18n.t('tf.ui.libvirtHint'))}</p>`
+                  : `<span class="badge bad">${esc(i18n.t('tf.ui.missing'))}</span>
+                     <p class="form-hint">${esc(i18n.t('tf.ui.libvirtHint'))}</p>
+                     <p class="form-hint"><code>${esc(info.libvirt_provider_dir || '')}</code></p>`}</td></tr>
             <tr><td>${esc(i18n.t('tf.ui.workspaces'))}</td>
                 <td><code>${esc(info.workspaces_dir)}</code></td></tr>
             <tr><td>${esc(i18n.t('tf.ui.examples'))}</td>

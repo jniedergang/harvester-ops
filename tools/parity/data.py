@@ -3,7 +3,7 @@
 # Statuts : ok (fait), part (partiel), todo (manquant), plus (console seulement), na (hors périmètre).
 # v : version où c'est arrivé (ok/part) ou prévue (todo).
 
-AS_OF = "2.2.1"
+AS_OF = "2.3.0"
 DATE = "2026-11-02"
 
 S = []  # sections
@@ -261,8 +261,8 @@ r("plus", "1.0", "Arrêt et démarrage gracieux d'un cluster entier", "Graceful 
   "Harvester le décrit comme une procédure manuelle", "Harvester documents it as a manual procedure")
 r("plus", "1.45", "Transfert de VM entre clusters, export / import", "VM transfer between clusters, export / import")
 r("plus", "1.54", "Terraform : déclarations gardées par la console", "Terraform: declarations kept by the console",
-  "écran en onglets Déclarations, Ressources, Historique, Installation (2.2)",
-  "screen in tabs Declarations, Resources, History, Installation (2.2)")
+  "écran en onglets Déclarations, Ressources, Historique, Installation (2.2) ; cible cluster Harvester ou hôte KVM, modèle RKE2 sur VMs libvirt (2.3)",
+  "screen in tabs Declarations, Resources, History, Installation (2.2); target a Harvester cluster or a KVM host, RKE2 on libvirt VMs template (2.3)")
 r("plus", "1.48", "Clusters RKE2 par Cluster API, services par CAAPH", "RKE2 clusters through Cluster API, services through CAAPH",
   "Rancher les crée aussi, par son pilote de nœud Harvester ; la console le fait sans Rancher ; écran en onglets Clusters, Services, Historique, Installation (2.2)",
   "Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2)")

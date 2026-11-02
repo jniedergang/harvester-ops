@@ -11,6 +11,12 @@ son espace de travail Terraform), un cluster, un nom unique dans ce cluster
 description, des ressources, et un numéro de révision pour que deux
 opérateurs qui modifient la même déclaration ne s'écrasent pas en silence.
 
+2.3.0 : une déclaration vise une CIBLE, cluster Harvester ou hôte KVM
+(`target_kind`, colonne ajoutée sans rien réécrire : les anciennes lignes
+valent `harvester`). Le champ `cluster` garde le nom de la cible. Les
+ressources d'une famille ne vont pas dans une déclaration de l'autre ; le
+code libre (`raw`) va dans les deux.
+
 Ce module ne connaît ni Flask ni Terraform : il est essayé seul.
 """
 
@@ -21,7 +27,11 @@ import threading
 import time
 
 ID_RE = re.compile(r"^[0-9a-f]{12}$")
-KINDS = ("vm", "image", "ssh_key", "raw")
+TARGET_KINDS = ("harvester", "kvm")
+HARVESTER_KINDS = ("vm", "image", "ssh_key")
+KVM_KINDS = ("kvm_vm", "kvm_volume", "kvm_network", "kvm_rke2")
+KINDS = HARVESTER_KINDS + KVM_KINDS + ("raw",)
+KINDS_OF = {"harvester": HARVESTER_KINDS + ("raw",), "kvm": KVM_KINDS + ("raw",)}
 MAX_NAME = 80
 MAX_DESCRIPTION = 500
 MAX_BODY = 1024 * 1024
@@ -56,7 +66,15 @@ def clean_name(name):
     return name
 
 
-def clean_resources(resources):
+def clean_target_kind(kind):
+    kind = kind or "harvester"
+    if kind not in TARGET_KINDS:
+        raise StoreError("invalid-target", f"unknown target kind {kind!r}")
+    return kind
+
+
+def clean_resources(resources, target_kind="harvester"):
+    allowed = KINDS_OF[clean_target_kind(target_kind)]
     if resources is None:
         return []
     if not isinstance(resources, list):
@@ -74,6 +92,9 @@ def clean_resources(resources):
             raise StoreError("invalid-resources", f"resource #{i + 1} has no valid id")
         if kind not in KINDS:
             raise StoreError("invalid-resources", f"resource #{i + 1}: unknown kind {kind!r}")
+        if kind not in allowed:
+            raise StoreError("invalid-resources",
+                             f"resource #{i + 1}: a {kind} resource does not go to a {target_kind} target")
         seen.add(rid)
         out.append({"id": rid, "kind": kind, "spec": spec})
     if len(json.dumps(out)) > MAX_BODY:
@@ -103,6 +124,10 @@ class DeclStore:
                   last_applied_by TEXT
                 )""")
             c.execute("CREATE INDEX IF NOT EXISTS tf_decl_cluster ON tf_declarations(cluster)")
+            # 2.3.0 : migration additive, les lignes d'avant visent Harvester
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(tf_declarations)")}
+            if "target_kind" not in cols:
+                c.execute("ALTER TABLE tf_declarations ADD COLUMN target_kind TEXT NOT NULL DEFAULT 'harvester'")
 
     def _conn(self):
         c = sqlite3.connect(self.path, timeout=10)
@@ -119,13 +144,21 @@ class DeclStore:
         return d
 
     # -- lecture -------------------------------------------------------------
-    def list(self, cluster=None):
+    def list(self, cluster=None, target_kind=None):
+        """Déclarations, d'une cible (`cluster` ; Harvester si `target_kind`
+        n'est pas dit, comme avant la 2.3.0) ou d'une famille, ou toutes."""
+        where, args = [], []
+        if cluster:
+            where.append("cluster = ? AND target_kind = ?")
+            args += [cluster, target_kind or "harvester"]
+        elif target_kind:
+            where.append("target_kind = ?")
+            args.append(target_kind)
+        sql = "SELECT * FROM tf_declarations"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
         with self._conn() as c:
-            if cluster:
-                rows = c.execute("SELECT * FROM tf_declarations WHERE cluster = ? "
-                                 "ORDER BY lower(name)", (cluster,)).fetchall()
-            else:
-                rows = c.execute("SELECT * FROM tf_declarations ORDER BY cluster, lower(name)").fetchall()
+            rows = c.execute(sql + " ORDER BY target_kind, cluster, lower(name)", args).fetchall()
         return [self._row(r) for r in rows]
 
     def get(self, decl_id):
@@ -136,28 +169,32 @@ class DeclStore:
                                        (decl_id,)).fetchone())
 
     # -- écriture ------------------------------------------------------------
-    def _name_taken(self, c, cluster, name, but=None):
-        row = c.execute("SELECT id FROM tf_declarations WHERE cluster = ? AND lower(name) = lower(?)",
-                        (cluster, name)).fetchone()
+    def _name_taken(self, c, cluster, name, but=None, target_kind="harvester"):
+        row = c.execute("SELECT id FROM tf_declarations WHERE cluster = ? AND target_kind = ? "
+                        "AND lower(name) = lower(?)", (cluster, target_kind, name)).fetchone()
         return row is not None and row["id"] != but
 
-    def create(self, decl_id, cluster, name, description="", resources=None, user=""):
+    def create(self, decl_id, cluster, name, description="", resources=None, user="",
+               target_kind="harvester"):
         if not ID_RE.match(str(decl_id or "")):
             raise StoreError("invalid-id", "invalid declaration id")
         if not cluster:
             raise StoreError("invalid-cluster", "a declaration belongs to a cluster")
+        target_kind = clean_target_kind(target_kind)
         name = clean_name(name)
         description = str(description or "")[:MAX_DESCRIPTION]
-        resources = clean_resources(resources)
+        resources = clean_resources(resources, target_kind)
         now = _now()
         with self._lock, self._conn() as c:
             if c.execute("SELECT 1 FROM tf_declarations WHERE id = ?", (decl_id,)).fetchone():
                 raise StoreError("id-taken", "a declaration with this id already exists", id=decl_id)
-            if self._name_taken(c, cluster, name):
+            if self._name_taken(c, cluster, name, target_kind=target_kind):
                 raise StoreError("name-taken", f"a declaration named {name!r} already exists", name=name)
             c.execute("INSERT INTO tf_declarations (id, cluster, name, description, resources, revision, "
-                      "created_at, created_by, updated_at, updated_by) VALUES (?,?,?,?,?,1,?,?,?,?)",
-                      (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user))
+                      "created_at, created_by, updated_at, updated_by, target_kind) "
+                      "VALUES (?,?,?,?,?,1,?,?,?,?,?)",
+                      (decl_id, cluster, name, description, json.dumps(resources), now, user, now, user,
+                       target_kind))
         return self.get(decl_id)
 
     def update(self, decl_id, revision, user="", name=None, description=None, resources=None):
@@ -172,13 +209,13 @@ class DeclStore:
             fields = {}
             if name is not None:
                 n = clean_name(name)
-                if self._name_taken(c, cur["cluster"], n, but=decl_id):
+                if self._name_taken(c, cur["cluster"], n, but=decl_id, target_kind=cur["target_kind"]):
                     raise StoreError("name-taken", f"a declaration named {n!r} already exists", name=n)
                 fields["name"] = n
             if description is not None:
                 fields["description"] = str(description)[:MAX_DESCRIPTION]
             if resources is not None:
-                fields["resources"] = json.dumps(clean_resources(resources))
+                fields["resources"] = json.dumps(clean_resources(resources, cur["target_kind"]))
             fields.update(revision=cur["revision"] + 1, updated_at=_now(), updated_by=user)
             sets = ", ".join(f"{k} = ?" for k in fields)
             c.execute(f"UPDATE tf_declarations SET {sets} WHERE id = ?", (*fields.values(), decl_id))
