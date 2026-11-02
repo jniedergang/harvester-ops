@@ -44,9 +44,14 @@
     forklift: ['prep', 'sources', 'inventory', 'waves'],
   };
   const AUTOMATION = ['capi', 'terraform', 'pxe'];
-  // 2.1.0 : onglets de Bare-metal (#automation/pxe/<onglet>) ; sans onglet,
-  // #automation/pxe ouvre Machines
-  const AUTOMATION_PANES = { pxe: ['machines', 'profiles', 'images', 'history'] };
+  // Onglets d'Automatisation (#automation/<x>/<onglet>), dans leur ordre ;
+  // sans onglet, l'adresse ouvre le premier. 2.1.0 : Bare-metal ; 2.2.0 :
+  // Cluster API et Terraform
+  const AUTOMATION_PANES = {
+    capi: ['clusters', 'services', 'history', 'installation'],
+    terraform: ['declarations', 'resources', 'history', 'installation'],
+    pxe: ['machines', 'profiles', 'images', 'history'],
+  };
   // 2.0.0 : vues de tous les hôtes KVM (1.96-1.100), onglets de l'index de
   // la famille KVM (#hosts/kvm) à côté du tableau des hôtes
   const KVM_FLEET_TABS = ['capacity', 'pools', 'networks'];

@@ -4,6 +4,80 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.2.0] - 2026-11-02 - Terraform and Cluster API in tabs
+
+### Changed
+- **Automation > Cluster API and Automation > Terraform are in four tabs
+  each**, in the header like Bare-metal (2.1.0). Each tab has its address;
+  F5 shows the same tab, and Back works as for any other screen. The
+  **Management cluster** header of 2.0 stays on both screens. Nothing is
+  removed; every function keeps its place in a tab:
+
+  | 2.1 place | 2.2.0 address |
+  | --- | --- |
+  | Cluster API > K8S Clusters (list, Create a cluster, details, kubeconfig, scale, delete) | `#automation/capi/clusters` (also `#automation/capi`) |
+  | Cluster API > Services (catalog, deploy, remove, state) | `#automation/capi/services` |
+  | (new) Cluster API actions of Activity | `#automation/capi/history` |
+  | Cluster API > Installation, was the first tab (stack, providers, fixes, old installation, bundles: build, upload, choose, inspect, delete) | `#automation/capi/installation` |
+  | Terraform > Declarations (list, forms, plan, apply, destroy, code, history of a declaration) | `#automation/terraform/declarations` (also `#automation/terraform`) |
+  | Terraform > Cluster resources (resources, open or adopt, destroy one, clean stale files, destroy all) | `#automation/terraform/resources` |
+  | (new) Terraform plans, applies and destroys of Activity | `#automation/terraform/history` |
+  | Terraform > Installation (command, provider, provider update and revert, airgap bundle) | `#automation/terraform/installation` |
+
+- Cluster API opens on **Clusters**, no longer on Installation; Terraform
+  opens on **Declarations**. The tab comes from the address: the choice a
+  browser remembered before 2.2.0 is no longer read.
+- Terraform: the tabs move from the second strip inside the card to the
+  header; **Cluster resources** is now **Resources**; the "ready" line of
+  OpenTofu and the provider moves to Installation.
+
+### Added
+- **History** on both screens: Activity filtered on the actions of the
+  screen (Cluster API: `capi-*`; Terraform: plans, applies and destroys),
+  running and past, with the cluster, the duration and a link to each
+  action and its log (`#activity/action/<id>`). It reads Activity again
+  every five seconds while an action runs, and only while the tab is shown.
+  An action of another kind whose name merely contains the filter (a VM
+  called `capi-demo`) does not enter it.
+- **Check before acting.** Cluster API > Clusters says when the Cluster API
+  stack is not installed on the management cluster, with what is missing
+  and a link to Installation; nothing is said when the cluster cannot be
+  read. Terraform > Declarations says when the Harvester provider that
+  declarations need, or the OpenTofu (or Terraform) command, is missing,
+  with a link to Installation.
+
+### Internal
+- `auto-history.js`: the History tab shared by Bare-metal, Terraform and
+  Cluster API (one poll per screen, stopped by `stop()` or when its tab is
+  hidden); Bare-metal uses it instead of its own copy.
+- `routes.js`: `AUTOMATION_PANES` holds the tabs of the three sub-tabs, in
+  order (the first is the default); `router.js` and `app.js` carry
+  `autoTab` (was `bmTab`); `CAPI.setTab()`/`CAPI.tab()` and
+  `TF.setTab()`/`TF.tab()` like `BMC`.
+- `capi.js`: only the shown tab is rendered (opening Clusters no longer
+  renders Installation and its bundle list); the remembered sub-tabs
+  (`harvester_ops_capi_subtab`, `harvester_ops_tf_subtab`) and the unused
+  `.sub-tabs-2nd` and `.tf-subtab-content` styles are removed.
+
+### Tests
+- `tests/api/test_auto_tabs_220.py`: the `#automation/capi/<tab>` and
+  `#automation/terraform/<tab>` addresses and their default tabs, one error
+  path per row, the order and tooltips of the strips, the new keys in the
+  five languages, a History label for every Cluster API and Terraform verb
+  the server creates, `auto-history.js` in node (exact prefixes,
+  deduplication, escaping, error and empty paths, polling only while
+  shown); mutations: a tab list removed, the order changed, a verb without
+  label, the prefix check removed, the shown check removed.
+- `tests/e2e/test_auto_tabs_220.py`: default tabs and the old addresses,
+  each tab (content, address without history entry, F5), the strips follow
+  the Automation sub-tab and the management header stays, Resources opens
+  its declaration, the banners and their links, both Histories (filters,
+  labels, log links, refresh, error and empty paths, escaping), polling
+  stopped when leaving the screen or the tab; a mutation that ignores the
+  shown check is seen.
+- Navigation inventory, address and router tables: one row per tab;
+  existing Cluster API and Terraform tests follow the new tabs.
+
 ## [2.1.0] - 2026-11-02 - Bare-metal in tabs
 
 ### Changed

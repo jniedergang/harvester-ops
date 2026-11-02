@@ -2453,6 +2453,20 @@ gestion**) : le dernier hôte Harvester visité, sauf si vous en choisissez un
 autre dans le menu à côté. Ce choix est gardé par le navigateur et ne change
 pas l'hôte ouvert.
 
+**Quatre onglets (2.2.0).** Dans l'en-tête, dans cet ordre : **Clusters**
+(par défaut : les clusters créés par Cluster API, avec **Créer un cluster**,
+détails, kubeconfig, mise à l'échelle et suppression), **Services** (charts
+Helm par CAAPH), **Historique** (les actions Cluster API de l'Activité :
+clusters créés, mis à l'échelle ou supprimés, services déployés ou retirés,
+pile installée ou retirée, paquets construits ; en cours et passées, chacune
+avec un lien vers son journal, relues toutes les cinq secondes tant que l'une
+tourne et seulement quand l'onglet est affiché) et **Installation** (la pile,
+ses fournisseurs et les paquets ; c'était le premier onglet avant la 2.2.0).
+Adresses `#automation/capi/<onglet>` ; `#automation/capi` ouvre Clusters.
+**Vérifier avant d'agir :** quand la pile Cluster API n'est pas installée
+sur le cluster de gestion, Clusters le dit, avec ce qui manque et un lien
+vers Installation (rien n'est dit quand le cluster ne peut pas être lu).
+
 ### Installer la pile (1.48.0)
 
 - **Harvester v1.9 et suivants** embarquent Rancher Turtles, qui fait déjà
@@ -2479,7 +2493,7 @@ pas l'hôte ouvert.
 
 ### Créer un cluster (1.48.0, fenêtre à menus en 1.53.0)
 
-Le bouton **Créer un cluster** de l'onglet Clusters K8S ouvre une fenêtre
+Le bouton **Créer un cluster** de l'onglet Clusters ouvre une fenêtre
 qu'on peut replier dans la barre des fenêtres, le temps de vérifier un
 réglage ailleurs, et rouvrir telle quelle. Elle est organisée en menus,
 comme la création d'une VM, et remplie à partir du cluster lui-même :
@@ -2593,6 +2607,18 @@ v0.6.4) :
 Piloter le provider Terraform pour Harvester depuis des déclarations
 sauvegardées.
 
+- **Quatre onglets (2.2.0)** dans l'en-tête, dans cet ordre :
+  **Déclarations** (par défaut), **Ressources** (ex « Ressources du
+  cluster »), **Historique** (les plans, applications et destructions
+  Terraform de l'Activité, sur tous les clusters de gestion, chacun avec un
+  lien vers son journal ; relus toutes les cinq secondes tant que l'un tourne
+  et seulement quand l'onglet est affiché) et **Installation** (OpenTofu, le
+  provider Harvester embarqué et ses mises à jour, le paquet airgap ; la
+  ligne « prêt » y est passée). Adresses `#automation/terraform/<onglet>` ;
+  `#automation/terraform` ouvre Déclarations. **Vérifier avant d'agir :**
+  quand le provider Harvester dont les déclarations ont besoin, ou la
+  commande OpenTofu (ou Terraform), manque, Déclarations le dit avec un
+  lien vers Installation.
 - **Déclarations** : des groupes nommés de ressources (VMs, images de VM,
   clés SSH, code Terraform écrit à la main) appliquées ensemble, chacune
   avec son propre état Terraform (1.54.0). Elles sont gardées par la
@@ -2624,14 +2650,14 @@ sauvegardées.
   « Appliquer ».
 - Une ressource retirée d'une déclaration est détruite par son prochain
   apply (le plan le dit) ; une ressource détruite à l'unité depuis
-  l'onglet des ressources du cluster sort de sa déclaration. Détruire une
+  l'onglet Ressources sort de sa déclaration. Détruire une
   déclaration demande de taper son nom ; une déclaration qui a des
   ressources déployées ne peut pas être supprimée. Deux opérateurs qui
   modifient la même déclaration ne s'écrasent pas : le second est prévenu
   et voit la version courante.
 - Une VM détruite emporte ses disques, sauf si « supprimé avec la VM » est
   décoché sur le disque (1.52.1).
-- **Ressources du cluster** : tout ce que Terraform gère sur le cluster,
+- **Ressources** : tout ce que Terraform gère sur le cluster,
   déclaration par déclaration ; une ressource de l'espace partagé
   (appliquée avant la 1.54) peut être adoptée par une déclaration, qui la
   reprend à son prochain plan sans la recréer.
@@ -2640,7 +2666,7 @@ sauvegardées.
   Au choix : une version (la release officielle est téléchargée puis
   comparée au `SHA256SUMS` publié), une URL vers un miroir interne, ou le
   téléversement de l'archive depuis un poste sans aucun accès réseau
-  sortant. Le sous-onglet Install nomme le binaire actif, sa version et sa
+  sortant. L'onglet Installation nomme le binaire actif, sa version et sa
   provenance, et un clic rend la main à celui du livrable. Chaque
   workspace est réinitialisé à son prochain apply ; le state Terraform
   n'est jamais touché. La même installation se fait en CLI :

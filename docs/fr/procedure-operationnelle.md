@@ -282,6 +282,16 @@ qui défile seule.
   cluster elle-même. Bare-metal est en quatre onglets (2.1.0) : **Machines**
   (par défaut), **Profils**, **Images** et **Historique**, à
   `#automation/pxe/<onglet>` ; l'ancienne `#automation/pxe` ouvre Machines.
+  Cluster API (2.2.0) : **Clusters** (par défaut), **Services**,
+  **Historique** et **Installation**, à `#automation/capi/<onglet>` ;
+  `#automation/capi` ouvre Clusters. Terraform (2.2.0) : **Déclarations**
+  (par défaut), **Ressources**, **Historique** et **Installation**, à
+  `#automation/terraform/<onglet>` ; `#automation/terraform` ouvre
+  Déclarations. Chaque Historique est l'Activité filtrée sur les actions de
+  son écran, avec un lien vers chaque journal. Clusters prévient quand la
+  pile Cluster API n'est pas installée sur le cluster de gestion,
+  Déclarations quand le provider Harvester ou OpenTofu manque ; les deux
+  mènent à Installation.
 
 Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
 onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert

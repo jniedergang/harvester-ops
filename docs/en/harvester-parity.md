@@ -1,6 +1,6 @@
 # Parity with the Harvester UI
 
-Status on 2026-11-02, console **v2.1.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
+Status on 2026-11-02, console **v2.2.0**, compared with the **Harvester v1.9** UI (menus taken from the harvester-ui-extension v1.9.0 source and the v1.9 documentation).
 
 Of 136 functions of the Harvester UI: **133 done**, **3 partial**, **0 missing**; 1 out of scope. A missing function shows the version it is planned for.
 
@@ -275,8 +275,8 @@ Harvester menu: *VM Imports / VM Migration*
 | KVM hypervisors (libvirt) managed next to the clusters | Console only | 1.96 | virsh over SSH, no agent; host page in 2.0 |
 | Graceful shutdown and startup of a whole cluster | Console only | 1.0 | Harvester documents it as a manual procedure |
 | VM transfer between clusters, export / import | Console only | 1.45 |  |
-| Terraform: declarations kept by the console | Console only | 1.54 |  |
-| RKE2 clusters through Cluster API, services through CAAPH | Console only | 1.48 | Rancher also creates them, with its Harvester node driver; the console does it without Rancher |
+| Terraform: declarations kept by the console | Console only | 1.54 | screen in tabs Declarations, Resources, History, Installation (2.2) |
+| RKE2 clusters through Cluster API, services through CAAPH | Console only | 1.48 | Rancher also creates them, with its Harvester node driver; the console does it without Rancher; screen in tabs Clusters, Services, History, Installation (2.2) |
 | Bare-metal Harvester install over Redfish | Console only | 1.19 | complete installer configuration, import of an existing file and preview (1.77); disk discovery, roles, pools, cluster declared automatically (1.78); screen in tabs Machines, Profiles, Images, History, last discovery remembered (2.1) |
 | Activity: every action tracked, action dock | Console only | 1.6 |  |
 | Collaborative notes on VMs and nodes | Console only | 1.4 |  |

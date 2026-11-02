@@ -7,6 +7,7 @@ français, aperçu des valeurs), l'envoi et le suivi.
 """
 
 import json
+import re
 
 import pytest
 
@@ -42,8 +43,7 @@ def sse(events):
 @pytest.fixture
 def view(context, flask_server):
     def make(state=STATE, check=None, stream=()):
-        context.add_init_script("""localStorage.setItem('harvester_ops_language','fr');
-          localStorage.setItem('harvester_ops_capi_subtab','services');""")
+        context.add_init_script("localStorage.setItem('harvester_ops_language','fr');")
         page = context.new_page()
         calls = {"check": [], "deploy": [], "delete": []}
 
@@ -66,10 +66,9 @@ def view(context, flask_server):
         page.route("**/api/capi/harv-fake/service/**", on_delete)
         page.route("**/api/stream/svc000000001",
                    lambda r, q: fulfill(r, sse(list(stream)), ctype="text/event-stream"))
-        # 2.0.0 : Automatisation > Cluster API par son adresse
-        goto(page, flask_server["base_url"], address("automation", sub="capi"))
+        # 2.2.0 : Cluster API > Services par son adresse
+        goto(page, flask_server["base_url"], "#automation/capi/services")
         page.wait_for_function("window.CapiServices && window.i18n")
-        page.evaluate("document.querySelector('#tab-automation .sub-tab[data-capi-tab=\"services\"]')?.click()")
         host = page.locator("#capi-services-body")
         expect(host.locator(".svc-card").first).to_be_visible(timeout=8000)
         return page, host, calls
@@ -100,7 +99,8 @@ def test_without_caaph_the_view_says_so_and_deploy_is_off(view):
     assert all(b.is_disabled() for b in host.locator("[data-svc-deploy]").all())
     expect(host).to_contain_text("Aucun service déployé")
     host.locator("[data-svc-goto]").click()
-    expect(page.locator('#tab-automation .sub-tab[data-capi-tab="install"]')).to_have_class("sub-tab active")
+    expect(page.locator('#tab-automation .sub-tab[data-capi-tab="installation"]')).to_have_class(re.compile(r"\bactive\b"))
+    assert page.evaluate("location.hash") == "#automation/capi/installation"
 
 
 def test_the_form_checks_previews_and_deploys(view):

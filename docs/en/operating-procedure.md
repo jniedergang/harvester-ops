@@ -273,7 +273,15 @@ scrolls on its own.
   open. Bare-metal has no such header: a join chooses its cluster itself.
   Bare-metal is in four tabs (2.1.0): **Machines** (default), **Profiles**,
   **Images** and **History**, at `#automation/pxe/<tab>`; the old
-  `#automation/pxe` opens Machines.
+  `#automation/pxe` opens Machines. Cluster API (2.2.0): **Clusters**
+  (default), **Services**, **History** and **Installation**, at
+  `#automation/capi/<tab>`; `#automation/capi` opens Clusters. Terraform
+  (2.2.0): **Declarations** (default), **Resources**, **History** and
+  **Installation**, at `#automation/terraform/<tab>`; `#automation/terraform`
+  opens Declarations. Each History is Activity filtered on the actions of its
+  screen, with a link to each log. Clusters warns when the Cluster API stack
+  is not installed on the management cluster, Declarations when the
+  Harvester provider or OpenTofu is missing; both link to Installation.
 
 Every entry is a real link: middle click opens it in a new tab, and the
 address can be copied. A link opened before signing in is opened again once
