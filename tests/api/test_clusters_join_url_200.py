@@ -53,6 +53,8 @@ def _setup(monkeypatch, kc, reads):
     monkeypatch.setattr(wapp, "_kubectl_json", fake_json)
     monkeypatch.setattr(wapp, "_kubectl_for_cluster", lambda c: kc if c == "harv1" else None)
     monkeypatch.setattr(wapp, "_cluster_reachable", lambda kc_, **k: True)
+    # 2.1.0 : la version du cluster (join-url la donne) ; jamais de vrai kubectl ici
+    monkeypatch.setattr(wapp, "_harvester_server_version", lambda kc_: "")
     return calls
 
 
@@ -104,7 +106,8 @@ def test_join_url_route(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "HTPASSWD_PATH", tmp_path / "htpasswd")
     with wapp.app.test_client() as c:
         d = c.get("/api/clusters/harv1/join-url").get_json()
-        assert d == {"cluster": "harv1", "join_url": "https://172.16.3.100:443", "reason": None}
+        assert d == {"cluster": "harv1", "join_url": "https://172.16.3.100:443", "reason": None,
+                     "harvester_version": None, "isos_of_version": []}
         # cluster non déclaré : 404, sans lecture
         assert c.get("/api/clusters/other/join-url").status_code == 404
 

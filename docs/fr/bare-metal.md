@@ -14,12 +14,30 @@ n’installent pas de chart CSI et ne configurent pas les identifiants des baies
 
 ---
 
+## L'écran : quatre onglets (2.1.0)
+
+Automatisation > Bare-metal s'ouvre sur **Machines** ; les autres onglets
+sont à côté, chacun avec son adresse :
+
+| Onglet | Adresse | Contenu |
+|---|---|---|
+| **Machines** (par défaut) | `#automation/pxe/machines` (et `#automation/pxe`) | Les machines de la dernière découverte, une ligne chacune : matériel, état d'alimentation, disques, cartes réseau, et les gestes **Installer** (ou **Joindre à** *cluster* pendant une jonction), allumer, arrêt propre, arrêt forcé, redémarrer. **Découvrir...** ouvre la fenêtre de découverte ; **Relire** relit les mêmes BMC. Le bandeau de jonction et le bandeau « aucun ISO » sont au-dessus. |
+| **Profils** | `#automation/pxe/profiles` | Les profils d'installation multi-nœuds et le lancement d'une série. |
+| **Images** | `#automation/pxe/images` | Le magasin d'ISO. |
+| **Historique** | `#automation/pxe/history` | Les actions bare-metal de l'Activité, en cours et passées, chacune avec un lien vers son journal. |
+
+**Rafraîchir**, dans l'en-tête de la carte, relit l'onglet ouvert. Rien ne
+se perd en changeant d'onglet, en rechargeant la page ou en revenant le
+lendemain : la console garde la dernière découverte (voir plus bas).
+
+---
+
 ## Ce qu'il faut avant de commencer
 
 | Prérequis | Pourquoi | Comment le vérifier |
 |---|---|---|
 | Le BMC parle Redfish | Tout passe par lui | La découverte liste le node |
-| Le BMC expose un **média virtuel CD** | L'ISO est monté par le réseau | La carte du node propose **Installer Harvester** ; sinon elle affiche *pas de média virtuel* |
+| Le BMC expose un **média virtuel CD** | L'ISO est monté par le réseau | La ligne de la machine propose **Installer Harvester** ; sinon elle affiche *pas de média virtuel* |
 | Le BMC sait amorcer sur `Cd` | La machine doit démarrer une fois sur cet ISO | Même indication que ci-dessus |
 | La console est joignable **depuis le BMC** | C'est le BMC qui télécharge l'ISO | Un `curl` vers la console depuis une machine du réseau BMC |
 
@@ -28,7 +46,7 @@ Advanced**. Sans cette licence le BMC n'expose aucun lecteur CD, et la
 console le dit tout de suite plutôt que d'échouer trente secondes après
 le début d'une installation.
 
-La carte du node indique aussi combien de disques le firmware sait
+La ligne de la machine indique aussi combien de disques le firmware sait
 amorcer. S'il n'en voit aucun, la machine n'a pas de cible
 d'installation exploitable et il n'y a rien à installer dessus.
 
@@ -50,7 +68,7 @@ console (votre serveur)                        machine cible
 
 ### 1. Amener un ISO dans le magasin
 
-**Images d'installation** télécharge un ISO **côté serveur, en flux**.
+L'onglet **Images** télécharge un ISO **côté serveur, en flux**.
 Le fichier ne transite jamais par votre navigateur : un ISO Harvester
 pèse environ 7,6 Go, et un upload de cette taille depuis un navigateur
 serait tamponné en mémoire à l'arrivée.
@@ -93,14 +111,43 @@ le toolkit entier pèse 135 Mo, l'ISO à lui seul cinquante fois plus.
 
 ### 2. Découvrir le BMC
 
-Saisissez une ou plusieurs adresses de BMC, un utilisateur et un mot de
-passe. Les identifiants ne sont **jamais stockés côté serveur** : ils
-restent dans la page le temps de la session, et chaque action les
-renvoie.
+Dans **Machines**, **Découvrir...** ouvre une fenêtre : saisissez une ou
+plusieurs adresses de BMC, un utilisateur et un mot de passe. Les
+identifiants ne sont **jamais stockés côté serveur** : ils restent dans la
+page le temps de la session, et chaque action les renvoie. Une adresse de
+BMC est un nom d'hôte ou une adresse IP, avec un port facultatif ; tout
+autre chose (un chemin, un schéma, un utilisateur) est refusé avant toute
+lecture.
 
-Chaque BMC joignable revient sous forme de carte : modèle, numéro de
-série, BIOS, mémoire, NICs avec leurs adresses MAC, état d'alimentation,
-et la possibilité ou non d'installer la machine.
+Chaque BMC joignable revient sous forme de ligne : modèle, numéro de
+série, BIOS, CPU et mémoire, disques, NICs avec leurs adresses MAC et
+l'état du lien, état d'alimentation, et la possibilité ou non d'installer
+la machine. Un BMC injoignable garde sa ligne, avec la raison.
+
+**La console garde la dernière découverte** (2.1.0) : les adresses, la
+date et ce que chaque BMC a répondu ; la liste est donc encore là après un
+rechargement ou le lendemain. La ligne au-dessus de la liste donne sa
+date ; **Relire** relit les mêmes BMC avec les identifiants de la page, et
+ouvre la fenêtre pour les demander quand la page a été rechargée. L'état
+d'alimentation affiché est celui lu à cette date (son info-bulle le dit).
+
+- Rangée dans `<état>/baremetal-last-discovery.json` (mode 0600,
+  remplacement atomique, relative au répertoire d'état, elle le suit
+  quand il se déplace). Seuls les champs connus d'une machine sont
+  gardés ; un identifiant, jamais.
+- C'est un **cache de lecture**, comme le cache des dossiers : écrit
+  pendant la lecture Redfish elle-même, sans action suivie, car rien ne
+  change sur une machine ni sur un cluster. Une nouvelle découverte la
+  remplace.
+- La lire demande le rôle **admin** (`GET /api/bmc/last-discovery`) : elle
+  nomme les BMC du parc et leurs numéros de série.
+
+Avant d'agir, l'onglet vérifie le magasin : un bandeau dit **Aucun ISO
+dans le magasin** quand il est vide et, pendant une jonction, **Aucun ISO
+de la version X dans le magasin** quand aucun ISO n'a la version du
+cluster (lue dans le cluster, `setting/server-version`, et comparée au
+`harvester-release.yaml` de chaque ISO, ou à son nom). **Ouvrir Images**
+mène au magasin.
 
 > **Attention avec une machine éteinte.** Un BMC ne relit pas le matériel
 > hors tension : il rejoue l'inventaire du **dernier POST**. Sur une
@@ -315,6 +362,8 @@ cartes de gestion montrent alors leur nom Linux.
 
 ### Plusieurs nœuds identiques : profils d'installation et séries (1.80.0)
 
+Les profils sont dans l'onglet **Profils** (2.1.0).
+
 Un **profil** est une configuration d'installation nommée : les champs de
 la fenêtre d'installation, écrits en YAML, et le YAML avancé, où toute
 valeur peut porter une variable `{{nom}}`. Variables intégrées :
@@ -410,6 +459,17 @@ tient sur une ligne, 512 caractères au plus, sans caractère de contrôle.
   défauts, corrigés en 1.83.2 : `skipchecks: true` n'atteignait pas
   l'installeur, une ligne en échec ne disait pas pourquoi, et le nœud qui
   rejoint manquait à la déclaration.
+
+### Historique des actions bare-metal (2.1.0)
+
+L'onglet **Historique** liste les actions bare-metal de l'Activité :
+installations et jonctions (`baremetal-install`), séries
+(`baremetal-batch`), démarrages de découverte (`baremetal-discover`) et
+gestes d'alimentation (`bmc-power`), celles en cours d'abord. Il se sert
+du filtre d'action de l'Activité, côté serveur : les actions anciennes
+sont trouvées aussi. Chaque ligne mène à l'action dans l'Activité
+(`#activity/action/<id>`), où s'ouvre son journal. Tant qu'une action
+tourne, l'onglet la relit toutes les cinq secondes.
 
 ### Redfish : ce que la 1.78.0 a changé
 
@@ -549,7 +609,7 @@ le préflight préviennent déjà quand l'inventaire de découverte montre une
 carte de gestion sous 10 Gbit/s. Si la machine vous convient, ajouter
 `harvester.install.skipchecks=true` aux arguments noyau supplémentaires.
 
-**« pas de média virtuel » sur la carte du node.** Le BMC n'expose aucun
+**« pas de média virtuel » sur la ligne de la machine.** Le BMC n'expose aucun
 lecteur CD ou ne sait pas amorcer dessus. Sur iLO, vérifier la licence
 Advanced. Aucun contournement depuis la console : sans média virtuel, la
 machine doit être installée autrement.

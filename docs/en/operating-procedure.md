@@ -271,6 +271,9 @@ scrolls on its own.
   to, the last Harvester host visited unless you pick another one in the
   menu next to it. Picking one there does not change the host you have
   open. Bare-metal has no such header: a join chooses its cluster itself.
+  Bare-metal is in four tabs (2.1.0): **Machines** (default), **Profiles**,
+  **Images** and **History**, at `#automation/pxe/<tab>`; the old
+  `#automation/pxe` opens Machines.
 
 Every entry is a real link: middle click opens it in a new tab, and the
 address can be copied. A link opened before signing in is opened again once
@@ -301,8 +304,10 @@ built keeps its place; the band only frames it.
 - **Parameters** (`#harvester/<c>/params/<tab>`), in tabs:
   - **Nodes**: the block view of the nodes, with maintenance and host
     settings, and **Join a node** (administrator), which opens Automation >
-    Bare-metal with this cluster already chosen: the install window opens in
-    join mode towards `https://<VIP>:443`. The VIP is read from the cluster
+    Bare-metal > Machines (`#automation/pxe/machines`) with this cluster
+    already chosen: the install window opens in join mode towards
+    `https://<VIP>:443`, and the tab says before you act when the store has
+    no ISO of the cluster's version. The VIP is read from the cluster
     itself (Harvester's `harvester-system/vip` ConfigMap) when the button is
     clicked. Through a Rancher kubeconfig, or when the VIP cannot be read,
     no address is guessed: the banner says so and you type it. The address

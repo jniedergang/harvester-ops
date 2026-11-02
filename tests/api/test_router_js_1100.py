@@ -46,6 +46,8 @@ def screens():
             out += [dict(s, overview="cluster"), dict(s, overview="events")]
         if tab == "automation":
             out += [dict(s, automation="terraform"), dict(s, automation="pxe")]
+            # 2.1.0 : chaque onglet de Bare-metal a son adresse, aller et retour
+            out += [dict(s, automation="pxe", bmTab=t) for t in ("machines", "profiles", "images", "history")]
         # 2.0.0 : écrans d'un hôte KVM (hôte imposé) ; Paramètres : chaque onglet
         if tab in KVM_SCREENS:
             s.update(kvm="k1", kvmTab="system" if tab == "kvmparams" else None)
@@ -68,7 +70,7 @@ def test_the_template_has_the_expected_tabs():
     assert len(TABS) >= 25 and "overview" in TABS and "drlinks" in TABS
 
 
-@pytest.mark.parametrize("screen", screens(), ids=lambda s: f"{s['tab']}-{s['overview']}-{s['automation']}-{s.get('kvmTab')}")
+@pytest.mark.parametrize("screen", screens(), ids=lambda s: f"{s['tab']}-{s['overview']}-{s['automation']}-{s.get('kvmTab')}-{s.get('bmTab')}")
 def test_every_screen_round_trips(screen):
     [got] = run([screen])
     back = got["back"]
@@ -80,6 +82,8 @@ def test_every_screen_round_trips(screen):
         assert back["overview"] == screen["overview"], got["h"]
     if screen["tab"] == "automation":
         assert back["automation"] == screen["automation"], got["h"]
+        if screen.get("bmTab"):
+            assert back["bmTab"] == screen["bmTab"], got["h"]
     if screen["tab"] in KVM_SCREENS:
         assert back["kvm"] == "k1" and got["h"].startswith("#kvm/k1"), got["h"]
         if screen["tab"] == "kvmparams":

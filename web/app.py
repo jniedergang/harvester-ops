@@ -1205,7 +1205,10 @@ ADMIN_ONLY_READ_PREFIXES = ("/api/harvester-users", "/api/users",
                             # un kubeconfig délivré porte un jeton
                             "/api/hv-support/",
                             # v1.71.0 : le journal du contrôleur d'import cite URL et serveurs des sources
-                            "/api/vmimport-log/")
+                            "/api/vmimport-log/",
+                            # 2.1.0 : la dernière découverte nomme les BMC du parc (adresses,
+                            # numéros de série) ; seul un administrateur s'en sert
+                            "/api/bmc/last-discovery")
 
 
 # Lectures qui donnent plus qu'une vue : le kubeconfig d'un cluster créé
@@ -3779,22 +3782,115 @@ def _bmc_discover_one(host, user, pwd):
     }
 
 
+# 2.1.0 : la dernière découverte des BMC, gardée par la console (onglet
+# Machines de Bare-metal, avec sa date et « Relire »).
+#
+# Choix de conception : un CACHE DE LECTURE, comme le cache des dossiers
+# (décision 4 de la 2.0.0), et non une action suivie passée par un outil de
+# bin/. La découverte est une lecture Redfish : rien ne change sur une
+# machine ni sur un cluster ; la console garde une copie de ce qu'elle a lu,
+# écrite pendant la lecture même. Aucun identifiant n'y entre : le nom et le
+# mot de passe du BMC restent dans la page (bmc.js), comme avant. Seuls les
+# champs connus d'une machine sont gardés (liste blanche ci-dessous).
+# Fichier relatif au répertoire d'état (règle de la 1.78.0), 0600,
+# remplacement atomique : la console se déplace avec son état.
+BM_LAST_DISCOVERY = "baremetal-last-discovery.json"
+BMC_HOST_RE = re.compile(r"[A-Za-z0-9.:\[\]-]{1,253}")
+BMC_DISCOVER_MAX = 64
+_BM_NODE_KEYS = ("ok", "host", "error", "system_path", "manager_path", "virtualmedia_path",
+                 "virtualmedia_inserted", "boot_targets", "boot_override", "uefi_targets",
+                 "post_state", "manufacturer", "model", "serial", "asset", "bios_version",
+                 "power_state", "cpu_count", "memory_gib", "indicator_led", "uuid")
+_BM_NIC_KEYS = ("name", "mac", "status", "speed_mbps")
+
+
+def _bm_scalar(v):
+    """Valeur gardée telle quelle si elle est simple ; texte borné sinon."""
+    if v is None or isinstance(v, (bool, int, float)):
+        return v
+    return str(v)[:512]
+
+
+def _bm_discovery_record(hosts, nodes, at):
+    """Ce que la console garde d'une découverte : adresses, date, champs
+    connus de chaque machine (jamais un identifiant)."""
+    out = []
+    for n in nodes[:BMC_DISCOVER_MAX]:
+        if not isinstance(n, dict):
+            continue
+        rec = {}
+        for k in _BM_NODE_KEYS:
+            if k not in n:
+                continue
+            v = n[k]
+            rec[k] = [_bm_scalar(x) for x in v[:64]] if isinstance(v, list) else _bm_scalar(v)
+        rec["nics"] = [{k: _bm_scalar(x.get(k)) for k in _BM_NIC_KEYS}
+                       for x in (n.get("nics") or [])[:32] if isinstance(x, dict)]
+        out.append(rec)
+    return {"at": at, "hosts": list(hosts)[:BMC_DISCOVER_MAX], "nodes": out}
+
+
+def _bm_last_discovery_path():
+    return _state_dir() / BM_LAST_DISCOVERY
+
+
+def _bm_last_discovery_save(doc):
+    path = _bm_last_discovery_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(doc, f)
+    os.replace(tmp, path)
+
+
+def _bm_last_discovery_load():
+    """Dernière découverte gardée, ou None (absente ou illisible)."""
+    try:
+        doc = json.loads(_bm_last_discovery_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("nodes"), list):
+        return None
+    return _bm_discovery_record(doc.get("hosts") or [], doc["nodes"], doc.get("at"))
+
+
 @app.route("/api/bmc/discover", methods=["POST"])
 @requires_auth
 def api_bmc_discover():
     """Discover one or many BMCs via Redfish.
     Body: { hosts: ["192.0.2.10", ...], user, password }
-    Returns the list of node profiles."""
+    Returns the list of node profiles. 2.1.0 : the result is remembered by
+    the console (read cache, no credentials), see BM_LAST_DISCOVERY."""
     data = request.get_json(force=True, silent=True) or {}
     hosts = data.get("hosts") or []
     user  = data.get("user", "")
     pwd   = data.get("password", "")
     if not hosts or not isinstance(hosts, list):
         return jsonify({"error": "hosts (list of IPs) required"}), 400
+    # une adresse de BMC, rien d'autre : elle finit dans une URL https://<hôte>/
+    if not all(isinstance(h, str) and BMC_HOST_RE.fullmatch(h) for h in hosts):
+        return jsonify({"error": "invalid BMC address", "fields": ["hosts"]}), 400
+    hosts = list(dict.fromkeys(hosts))[:BMC_DISCOVER_MAX]
     results = []
-    for h in hosts[:64]:
+    for h in hosts:
         results.append(_bmc_discover_one(h, user, pwd))
-    return jsonify({"nodes": results, "count": len(results)})
+    at = time.time()
+    remembered = True
+    try:
+        _bm_last_discovery_save(_bm_discovery_record(hosts, results, at))
+    except OSError as e:
+        remembered = False
+        log.warning("bare-metal: last discovery not remembered: %s", type(e).__name__)
+    return jsonify({"nodes": results, "count": len(results), "at": at, "remembered": remembered})
+
+
+@app.route("/api/bmc/last-discovery", methods=["GET"])
+@requires_auth
+@_rate_limit("60/minute")
+def api_bmc_last_discovery():
+    """2.1.0 : la dernière découverte gardée par la console, ou null."""
+    return jsonify({"discovery": _bm_last_discovery_load()})
 
 
 @app.route("/api/bmc/storage", methods=["POST"])
@@ -4174,7 +4270,40 @@ def api_cluster_join_url(cluster):
     if not any(c.get("name") == cluster for c in load_config_ro().get("clusters", [])):
         return jsonify({"error": "unknown cluster"}), 404
     url, reason = _cluster_join_url(cluster)
-    return jsonify({"cluster": cluster, "join_url": url, "reason": reason})
+    # 2.1.0 : un nœud rejoint avec la version du cluster ; l'onglet Machines
+    # dit avant d'agir quand le magasin n'a pas d'ISO de cette version
+    version = _cluster_harvester_version(cluster) if reason != "unreachable" else ""
+    return jsonify({"cluster": cluster, "join_url": url, "reason": reason,
+                    "harvester_version": version or None,
+                    "isos_of_version": _bm_isos_of_version(version) if version else []})
+
+
+_ISO_NAME_VERSION_RE = re.compile(r"v?(\d+\.\d+\.\d+(?:-rc\d+)?)")
+
+
+def _cluster_harvester_version(cluster):
+    """Version de Harvester du cluster (setting server-version), ou ""."""
+    kc = _kubectl_for_cluster(cluster)
+    if not kc or _cluster_reachable(kc) is False:
+        return ""
+    return _harvester_server_version(kc)
+
+
+def _bm_isos_of_version(version):
+    """ISO du magasin de cette version de Harvester : celle que porte
+    l'ISO (harvester-release.yaml), sinon celle de son nom."""
+    want = str(version or "").strip().lstrip("v")
+    if not want:
+        return []
+    out = []
+    for p in sorted(_iso_dir().glob("*.iso")):
+        v = (_iso_release_info(p) or {}).get("harvester") or ""
+        if not v:
+            m = _ISO_NAME_VERSION_RE.search(p.name)
+            v = m.group(1) if m else ""
+        if str(v).strip().lstrip("v") == want:
+            out.append(p.name)
+    return out
 
 
 @app.route("/api/status/<cluster>")

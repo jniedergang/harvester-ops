@@ -700,6 +700,17 @@
           <button class="sub-tab" data-capi-tab="services"
                   data-i18n-title="capi.tab.services.tip" title="Deploy services (Helm charts) on the clusters created by Cluster API"><span class="tab-icon" data-icon="bundle"></span> <span data-i18n="capi.tab.services">Services</span></button>
         </div>
+        <!-- 2.1.0 : onglets de Bare-metal (#automation/pxe/<onglet>), peints par bmc.js -->
+        <div class="sub-tabs sub-tabs-inline bm-tabs hidden" role="tablist" data-only-for="pxe" aria-label="Bare-metal">
+          <button type="button" class="sub-tab tip active" role="tab" aria-selected="true" data-bm-tab="machines"
+                  data-tip-i18n="bmt.machinesTip" data-i18n-title="bmt.machinesTip" title="The machines found by the last discovery: hardware, power, disks, network cards; install, join or power them"><span class="tab-icon" data-icon="compute"></span> <span data-i18n="bmt.machines">Machines</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="profiles"
+                  data-tip-i18n="bmt.profilesTip" data-i18n-title="bmt.profilesTip" title="Multi-node installation profiles and batch launch"><span class="tab-icon" data-icon="notes"></span> <span data-i18n="bmt.profiles">Profiles</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="images"
+                  data-tip-i18n="bmt.imagesTip" data-i18n-title="bmt.imagesTip" title="The store of Harvester ISOs used by installations"><span class="tab-icon" data-icon="cdrom"></span> <span data-i18n="bmt.images">Images</span></button>
+          <button type="button" class="sub-tab tip" role="tab" aria-selected="false" data-bm-tab="history"
+                  data-tip-i18n="bmt.historyTip" data-i18n-title="bmt.historyTip" title="Bare-metal installations, joins, discovery boots and power gestures, running and past, with their logs"><span class="tab-icon" data-icon="activity"></span> <span data-i18n="bmt.history">History</span></button>
+        </div>
       </div>
 
       <div class="sub-tab-content active" data-subtab="capi">

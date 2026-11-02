@@ -24,6 +24,8 @@ sys.path.insert(0, str(ROOT / "web"))
 sys.path.insert(0, str(ROOT / "bin" / "lib"))
 import baremetal_disks  # noqa: E402
 import bm_discover  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nav import bm_discover as nav_bm_discover  # noqa: E402
 
 RAW = (ROOT / "tests/api/fixtures/bm_disks_178/discovery.txt").read_text()
 PARSED = baremetal_disks.parse_discovery(RAW)
@@ -89,11 +91,7 @@ def open_window(context, flask_server, inventory=INVENTORY, node=None, state=Non
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     # menu latéral en calque au survol : écarter la souris
     page.mouse.move(1300, 450)
-    form = page.locator("#bmc-discover-form")
-    expect(form).to_be_visible()
-    form.locator('[name="hosts"]').fill(HOST)
-    form.locator('[name="password"]').fill("bmc-secret")
-    form.locator('button[type="submit"]').click()
+    nav_bm_discover(page, HOST, "bmc-secret")      # 2.1.0 : fenêtre de découverte
     page.locator(f'.bmc-install[data-host="{HOST}"]').click()
     win = page.locator(f'[id="fp-bm-install-{HOST}"]')
     expect(win.locator("#bm-install-form")).to_be_visible()

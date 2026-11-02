@@ -2413,6 +2413,15 @@ Drive the Terraform provider for Harvester from saved declarations.
 Turn a blank server into a running Harvester node without touching it.
 Full walkthrough in **[bare-metal.md](bare-metal.md)**.
 
+- **Four tabs (2.1.0)**: **Machines** (default: the machines of the last
+  discovery with their gestures, the discovery in its own window, the join
+  banner and a "no ISO of version X" check before acting), **Profiles**,
+  **Images** (the ISO store) and **History** (the bare-metal actions of
+  Activity, with their logs). Addresses `#automation/pxe/<tab>`;
+  `#automation/pxe` opens Machines. The console remembers the last
+  discovery (read cache in the state directory, never the credentials):
+  the list survives a reload, with its date and a **Re-read** button.
+
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
   read back node profiles: model, serial, BIOS, memory, NICs with their
   MACs, power state, bootable disks, and whether the machine can be

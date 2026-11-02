@@ -16,6 +16,10 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from nav import bm_discover  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[2]
 FIXTURE = ROOT / "tests/api/fixtures/bm_config_177/operator.yaml"
 HOST = "192.0.2.31"
@@ -60,11 +64,7 @@ def open_window(context, flask_server):
     # le menu latéral s'ouvre en calque au survol : écarter la souris, sinon
     # il recouvre la fenêtre (ouverte à 120 px du bord) et prend les clics
     page.mouse.move(1100, 450)
-    form = page.locator("#bmc-discover-form")
-    expect(form).to_be_visible()
-    form.locator('[name="hosts"]').fill(HOST)
-    form.locator('[name="password"]').fill("bmc-secret")
-    form.locator('button[type="submit"]').click()
+    bm_discover(page, HOST, "bmc-secret")          # 2.1.0 : fenêtre de découverte
     page.locator(f'.bmc-install[data-host="{HOST}"]').click()
     win = page.locator(f'[id="fp-bm-install-{HOST}"]')
     expect(win.locator("#bm-install-form")).to_be_visible()
