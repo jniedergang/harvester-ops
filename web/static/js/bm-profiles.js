@@ -262,6 +262,16 @@ const BMProfiles = (() => {
                       data-tip="${esc(tr('bmp.loadCsvTip'))}">${icon('upload')} ${esc(tr('bmp.loadCsv'))}</button>
             </div>
           </fieldset>
+          <fieldset class="bmp-system-fs">
+            <legend>${esc(tr('bmp.sys.legend'))}</legend>
+            <p class="form-hint" style="grid-column:1/-1;">${esc(tr('bmp.sys.hint'))}</p>
+            <!-- 2.2.1 : système déjà présent sur chaque machine (lecture seule) -->
+            <div class="bm-system bmp-system" data-bmp="system" role="status"></div>
+            <div class="apply-bar" style="grid-column:1/-1;">
+              <button type="button" class="btn btn-sm btn-secondary btn-ico tip" data-bmp="system-check"
+                      data-tip="${esc(tr('bmp.sys.checkTip'))}">${icon('refresh')} ${esc(tr('bmp.sys.check'))}</button>
+            </div>
+          </fieldset>
           <div class="bmp-msg" role="status"></div>
           <div class="apply-bar">
             <button type="button" class="btn btn-sm btn-secondary btn-ico" data-bmp="preview"
@@ -326,6 +336,65 @@ const BMProfiles = (() => {
       });
     }
 
+    // --- Système déjà présent (2.2.1) ---------------------------------------
+    // La lecture de la fenêtre d'installation (2.2.0), faite par la console
+    // pour chaque machine de la série : présent, absent ou inconnu, avec ses
+    // signes. Pour chaque machine où un système semble présent, son nom
+    // (série, sinon adresse du BMC) doit être tapé ; la console relit chaque
+    // BMC au lancement et refuse la série sinon.
+    const sysBox = panel.el.querySelector('[data-bmp="system"]');
+    const typedByHost = {};
+    let sysState = null;                    // { sig, machines } de la dernière lecture
+    const sysSig = () => JSON.stringify([rows().map(r => [r.bmc_host, r.bmc_user, r.bmc_password]),
+      form.bmc_password.value]);
+    const typedOk = (m) => m.state !== 'present' || (typedByHost[m.bmc_host] || '').trim() === m.confirm_name;
+    function machineHtml(m) {
+      const head = `<strong class="bmp-sys-machine">${esc(tr('bmp.sys.machine', { row: m.row, host: m.bmc_host }))}</strong>`;
+      if (m.state === 'present') {
+        const ev = (m.evidence || []).map(e => `<li>${esc(BMC.evidenceText(e))}</li>`).join('');
+        return `<div class="ct-banner auto-banner-warn bm-system-present" data-sys-row="${esc(m.row)}">${icon('warn', { size: 14 })}
+          <div>${head} <strong>${esc(tr('bmc.sys.present'))}</strong>
+            <ul class="bm-system-evidence">${ev}</ul>
+            <label class="bm-system-confirm tip" data-tip="${esc(tr('bmp.sys.typeTip'))}">${esc(tr('bmc.sys.typeName'))}
+              <code class="bm-system-name">${esc(m.confirm_name)}</code>
+              <input data-sys-host="${esc(m.bmc_host)}" autocomplete="off" spellcheck="false"
+                     value="${esc(typedByHost[m.bmc_host] || '')}"
+                     title="${esc(tr('bmp.sys.typeTip'))}" aria-label="${esc(tr('bmp.sys.typeTip'))}"></label>
+            <span class="form-hint bm-system-mismatch"${typedOk(m) || !(typedByHost[m.bmc_host] || '').trim() ? ' hidden' : ''}>${esc(tr('bmc.sys.mismatch'))}</span>
+          </div></div>`;
+      }
+      const cls = m.state === 'absent' ? 'bm-system-absent' : 'bm-system-unknown';
+      const text = m.state === 'absent' ? tr('bmc.sys.absent') : tr('bmc.sys.unknown');
+      return `<div class="ct-banner ${cls}" data-sys-row="${esc(m.row)}">${icon('info', { size: 14 })}
+        <span>${head} ${esc(text)}</span></div>`;
+    }
+    function paintSystem(machines, refusedN) {
+      if (machines === null) { sysBox.innerHTML = `<p class="form-hint">${esc(tr('bmp.sys.checking'))}</p>`; return; }
+      sysBox.innerHTML = (refusedN ? `<p class="bm-system-refused">${esc(tr('bmp.sys.refused', { n: refusedN }))}</p>` : '')
+        + machines.map(machineHtml).join('');
+    }
+    async function checkSystem() {
+      const sig = sysSig();
+      const list = rows();
+      if (!list.length) { sysState = null; sysBox.innerHTML = `<p class="form-hint">${esc(tr('bmp.sys.noRows'))}</p>`; return false; }
+      paintSystem(null);
+      const res = await api('POST', `/api/baremetal/profiles/${encodeURIComponent(name)}/system-check`,
+        { rows: list, bmc_password: form.bmc_password.value });
+      if (!res.ok) { sysState = null; sysBox.innerHTML = refusal(res.d, res.status); return false; }
+      sysState = { sig, machines: res.d.machines || [] };
+      paintSystem(sysState.machines);
+      return true;
+    }
+    sysBox.addEventListener('input', (e) => {
+      const inp = e.target.closest('[data-sys-host]');
+      if (!inp) return;
+      typedByHost[inp.dataset.sysHost] = inp.value;
+      const m = ((sysState && sysState.machines) || []).find(x => x.bmc_host === inp.dataset.sysHost);
+      const hint = inp.closest('.bm-system-present').querySelector('.bm-system-mismatch');
+      if (m && hint) hint.hidden = typedOk(m) || !inp.value.trim();
+    });
+    panel.el.querySelector('[data-bmp="system-check"]').addEventListener('click', () => { checkSystem(); });
+
     addRow();
     panel.el.querySelector('[data-bmp="add-row"]').addEventListener('click', () => addRow());
     tbody.addEventListener('click', (e) => {
@@ -384,12 +453,35 @@ const BMProfiles = (() => {
         token: form.token.value, password: form.password.value, bmc_password: form.bmc_password.value,
       };
       if (importId) body.import_id = importId;
+      // 2.2.1 : chaque machine lue avant le départ (relue si le tableau a changé)
+      if (!sysState || sysState.sig !== sysSig()) {
+        res.textContent = '…';
+        const ok = await checkSystem();
+        res.textContent = '';
+        if (!ok) { sysBox.scrollIntoView({ block: 'nearest' }); return; }
+      }
+      const pending = sysState.machines.filter(m => !typedOk(m));
+      if (pending.length) {
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmp.sys.needTyped', { n: pending.length }))}</div>`;
+        sysBox.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      const present = new Set(sysState.machines.filter(m => m.state === 'present').map(m => m.bmc_host));
+      body.rows = body.rows.map(r => (present.has(r.bmc_host)
+        ? { ...r, system_confirm: (typedByHost[r.bmc_host] || '').trim() } : r));
       if (!confirm(tr('bmp.confirmStart', { n: body.rows.length, cluster: body.cluster_name }))) return;
       res.textContent = '…';
       const r2 = await api('POST', `/api/baremetal/profiles/${encodeURIComponent(name)}/batch`, body);
       if (r2.ok) {
         res.innerHTML = `<span style="color:var(--accent)">${icon('ok', { size: 14 })} ${esc(tr('bmc.started'))} ${esc(r2.d.action_id)}</span>`;
         msg.innerHTML = '';
+      } else if (r2.status === 409 && Array.isArray(r2.d.machines)) {
+        // la console a relu chaque BMC et refuse : la fenêtre montre sa lecture
+        sysState = { sig: sysSig(), machines: r2.d.machines };
+        paintSystem(r2.d.machines, (r2.d.refused || []).length);
+        res.innerHTML = '';
+        msg.innerHTML = `<div class="bm-refusal">${icon('fail', { size: 14 })} ${esc(tr('bmp.sys.refused', { n: (r2.d.refused || []).length }))}</div>`;
+        sysBox.scrollIntoView({ block: 'nearest' });
       } else {
         res.innerHTML = '';
         msg.innerHTML = refusal(r2.d, r2.status);

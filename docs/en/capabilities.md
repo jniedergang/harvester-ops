@@ -2453,7 +2453,10 @@ Full walkthrough in **[bare-metal.md](bare-metal.md)**.
   when a system seems present, installing requires typing the machine name
   (serial number, or BMC address); the console checks again on its own
   Redfish read and refuses otherwise. "Unknown" is said plainly when the
-  BMC tells nothing. Details in [bare-metal.md](bare-metal.md).
+  BMC tells nothing. **Profile batches too (2.2.1)**: the batch window
+  checks every machine and needs the name of each one where a system seems
+  present; the console reads every BMC again and refuses the whole batch
+  (`409`, machine list) otherwise. Details in [bare-metal.md](bare-metal.md).
 
 - **BMC / Redfish discovery** — point at one or many BMC endpoints and
   read back node profiles: model, serial, BIOS, memory, NICs with their

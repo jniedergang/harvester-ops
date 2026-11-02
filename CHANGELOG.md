@@ -4,6 +4,68 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.2.1] - 2026-11-02 - Profile batches guard machines that already carry a system
+
+### Security
+- **Bare-metal: profile batches guard the machines that already carry a
+  system** (check before acting, decision 132). In 2.2.0 only the install
+  window of one machine read what the BMC publishes; a batch of a profile
+  installed every machine of its table without that check. The batch window
+  now runs the same check on every machine (**Check the machines**, read
+  only) and shows one banner per machine, `Row <n> · <BMC>`: present with
+  its evidence (UEFI boot entries of a loader on a disk partition, the head
+  of the boot order, logical drives), no sign, or unknown said plainly. For
+  every machine where a system seems present, its name (serial number, or
+  BMC address when the serial is unknown) must be typed exactly; a wrong
+  name is said. **Start the batch** reads the machines again when the table
+  changed since the last check, and does not start while a name is missing
+  or wrong.
+
+### Fixed
+- `POST /api/baremetal/profiles/<name>/batch` reads every BMC itself, after
+  the row checks and before anything is powered on, and refuses the whole
+  batch with `409`, `fields: ["system_confirm"]`, `refused` (BMC hosts) and
+  `machines` (row, state, evidence, name to type, `confirmed`) when a
+  machine where a system seems present lacks its typed name
+  (`rows[].system_confirm`); nothing starts, and the window shows what the
+  console read. "Unknown" is not a refusal, as for one machine. The typed
+  names never reach the install options.
+- Command line: `harvester-baremetal profile apply` goes through the same
+  check; it prints each machine with its state and evidence, starts nothing
+  and exits 2, and `--confirm-system <BMC host>=<name>` (once per machine)
+  confirms a machine.
+
+### Added
+- `POST /api/baremetal/profiles/<name>/system-check` (administrator, same
+  body as `/batch`, read only): the check of each machine of a batch, in
+  row order, with the row password or the common one.
+
+### Internal
+- `bm_presence.confirmed()`: the rule (no system present, or the exact
+  name typed) shared by the install window and the batches;
+  `_bm_batch_presence()` runs `_bm_system_presence()`, the read of the
+  install window, on every machine in parallel (8 at most); a read that
+  fails is unknown and carries no detail.
+- `BMC.evidenceText()`: the sentence of each evidence code, shared by the
+  install window and the batch window.
+
+### Tests
+- `tests/api/test_bm_batch_presence_221.py`: mixed batch (absent, present
+  confirmed, present without a name, unknown) refused with the machine
+  list and nothing started; wrong names (case, partial, BMC address,
+  empty); a confirmed batch starts without the typed names; row errors
+  before any BMC read; the check route (row or common password, bad rows,
+  unknown profile, administrators, authenticated and rate limited); the
+  command line; a failing read is unknown and leaks nothing; mutations: no
+  server check lets the batch go, a rule that confirms everything is seen.
+- `tests/e2e/test_bm_batch_presence_221.py`: banners per machine with
+  their evidence (escaped), the batch held while a name is missing or
+  wrong, the names sent only for the machines where a system seems present,
+  the table read again when it changed, the server refusal shown.
+- Checked for real, read only: a batch window with node3 and node4 (iLO 4)
+  showed both present with their evidence and serial numbers; a wrong name
+  held the batch. The batch was never submitted.
+
 ## [2.2.0] - 2026-11-02 - Terraform and Cluster API in tabs
 
 ### Changed
@@ -65,7 +127,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   `POST /api/bmc/system-check` (administrator). iLO 4: from
   `Systems/1/BIOS/Boot/`, as of the last boot; iDRAC 9 and iLO 5: from
   `BootOptions` and `Boot.BootOrder`. Batches of a profile do not go
-  through this check yet.
+  through this check yet (they do from 2.2.1).
 
 ### Internal
 - `bin/lib/bm_presence.py`: the pure analysis of the boot entries, the

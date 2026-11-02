@@ -26,6 +26,12 @@ const BMC = (() => {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;')
     .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
+  // 2.2.0 : un signe de système déjà présent (code de bin/lib/bm_presence.py)
+  // en phrase ; partagé avec la fenêtre de série (bm-profiles.js, 2.2.1)
+  const evidenceText = (ev) => (ev.code === 'boots-from-disk' ? tr('bmc.sys.ev.bootsFromDisk', { name: ev.name })
+    : ev.code === 'boot-entry' ? tr('bmc.sys.ev.bootEntry', { name: ev.name, loader: ev.loader, disk: ev.disk })
+      : ev.code === 'volume' ? tr('bmc.sys.ev.volume', { name: ev.name, controller: ev.controller }) : ev.code);
+
   let creds = { user: '', password: '' };   // mémoire volatile, jamais envoyée ailleurs
   let lastNodes = [];
   let lastHosts = [];                       // adresses de la découverte affichée
@@ -798,9 +804,6 @@ const BMC = (() => {
     const sysBox = form.querySelector('[data-bm="system"]');
     const goBtn = form.querySelector('[data-bm="install-go"]');
     let sysCheck = null;
-    const evidenceText = (ev) => (ev.code === 'boots-from-disk' ? tr('bmc.sys.ev.bootsFromDisk', { name: ev.name })
-      : ev.code === 'boot-entry' ? tr('bmc.sys.ev.bootEntry', { name: ev.name, loader: ev.loader, disk: ev.disk })
-        : ev.code === 'volume' ? tr('bmc.sys.ev.volume', { name: ev.name, controller: ev.controller }) : ev.code);
     function syncSystemGate() {
       const typed = field('system_confirm');
       const need = sysCheck && sysCheck.state === 'present';
@@ -1756,7 +1759,7 @@ const BMC = (() => {
     });
   }
 
-  return { init, render, openJoin, setTab, tab: () => tab };
+  return { init, render, openJoin, setTab, tab: () => tab, evidenceText };
 })();
 
 document.addEventListener('DOMContentLoaded', BMC.init);

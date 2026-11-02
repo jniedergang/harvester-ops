@@ -2694,7 +2694,10 @@ toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
   l'installation demande de taper le nom de la machine (numéro de série, ou
   adresse du BMC) ; la console revérifie sur sa propre lecture Redfish et
   refuse sinon. « Inconnu » est dit tel quel quand le BMC ne dit rien.
-  Détails dans [bare-metal.md](bare-metal.md).
+  **Les séries de profils aussi (2.2.1)** : la fenêtre de série vérifie
+  chaque machine et demande le nom de chacune où un système semble
+  présent ; la console relit chaque BMC et refuse toute la série (`409`,
+  liste des machines) sinon. Détails dans [bare-metal.md](bare-metal.md).
 
 - **Découverte BMC / Redfish** — pointer un ou plusieurs endpoints BMC et
   lire les profils des nodes : modèle, numéro de série, BIOS, mémoire,
