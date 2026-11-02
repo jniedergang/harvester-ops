@@ -4,6 +4,59 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.0.3] - 2026-11-02 - Lighter VM rows and compact host band
+
+### Changed
+- **One "⋮" button per VM row** (decision 97 A). In Virtual machines and in
+  the VM list of a Harvester host, each row now has a single **⋮** button
+  instead of six icon buttons. The former row gestures sit at the top of the
+  actions menu: start or stop, console, settings, notes, move to folder (and
+  **Migrate or transfer** on a host page). They are available at once, before
+  the VM state is read, with the same roles and the same greyed reasons (a
+  viewer sees Move to folder greyed with the operator-role reason). The
+  menu is one shared element in the page, opened from the keyboard (Enter,
+  arrows, Escape gives the focus back to the button). The KVM row menu gains
+  **Move to folder**. A full redraw of 300 rows (new sort), headless Chromium,
+  measured alone: 0.22 s with 2,000 VMs (0.49 to 0.57 s in 2.0.2) and 0.23 to
+  0.29 s with 10,000 VMs (0.89 to 0.90 s). Re-sorting no longer rebuilds the
+  folder panel, and the sort uses one shared collator (localeCompare with
+  options cost 120 ms per sort of 10,000 VMs).
+- **Containers**: one **⋮** button per row as well (its logs button was
+  already in the menu), and the table draws the first 300 rows of the
+  filtered and sorted list, **Show 300 more** adding the next ones, as in
+  Virtual machines. Full redraw: 0.17 to 0.23 s with 500 workloads (0.34 to
+  0.54 s) and 0.18 to 0.19 s with 2,000 (1.46 to 1.61 s). Its row menu
+  tooltip lists every gesture of the menu.
+- **Compact host band**: the band of a host page holds on one line (family,
+  name, state, version and VM count, sub-menu, **Activity of this host** as
+  an icon button): 34 px instead of 59 px on a wide window and 146 px on a
+  narrow one. A long host name ends with an ellipsis (full name in the
+  tooltip). When the window is narrow, the sub-menu scrolls sideways with a
+  fade on the side that has more entries, and keeps the current entry in
+  view; version and VM count hide below 1,100 px.
+- **Parameters > Power has one tab bar**: Startup and Shutdown moved from a
+  second tab bar under the band to a selector next to the panel title (the
+  addresses `.../params/power/startup` and `.../power/shutdown` are
+  unchanged). The band with the Parameters tabs measures 88 px on Power
+  instead of 170 px.
+- The hosts index keeps its row buttons: measured 0.09 s for a full redraw
+  of 100 hosts and 0.26 s for 300, within the budget.
+
+### Tests
+- New Playwright tests: one menu button per row and nothing else (VM view,
+  host VM list, containers), the former row gestures at the top of the menu
+  for a running and a halted VM and for a KVM VM, each gesture opening its
+  window with the row's cluster, keyboard walk and a single shared menu, the
+  viewer's greyed folder gesture, container paging, the one-line band on
+  three host screens, the single tab bar and the selector of Power.
+- Budget check of the VM view at 2,000 and 10,000 VMs: at most 40 elements
+  and no SVG icon in a row's action cell (deterministic), and the best of
+  three full redraws under a bound wide enough for the parallel suite.
+- Tests that clicked a row button now open the **⋮** menu and click the same
+  gesture there, with the same assertions. Mutations checked: a second row
+  button, the menu head removed, the second Power tab bar back, a band that
+  wraps, containers without paging, the viewer reason dropped.
+
 ## [2.0.2] - 2026-11-02 - Container runtime kept on update, rollback from the Update tab, orphan folder entries
 
 ### Added

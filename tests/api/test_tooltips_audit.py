@@ -51,7 +51,11 @@ def test_vm_actions_row_fully_tipped():
     js = (JS_DIR / "app.js").read_text()
     cell = js.split("vm-actions-cell", 1)[1].split("</td>", 1)[0]
     assert 'title="' not in cell, "vm-actions row must use i18n data-tips"
-    assert cell.count("data-tip=") >= 6
+    # 2.0.3 : un seul bouton « ⋮ » par ligne, avec sa bulle ; chaque geste de
+    # tête du menu porte la sienne
+    assert cell.count("data-tip=") == 1 and "i18n.t('avm.menuTip')" in cell
+    lead = js.split("const lead = [", 1)[1].split("];", 1)[0]
+    assert lead.count("tip: i18n.t(") >= 5
 
 
 def test_hardcoded_title_debt_only_shrinks():

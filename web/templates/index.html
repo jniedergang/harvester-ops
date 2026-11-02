@@ -462,8 +462,9 @@
     <!-- SHUTDOWN -->
     <section id="tab-shutdown" class="tab-content">
       <div class="shutdown-header">
-        <div class="automation-header-text">
+        <div class="automation-header-text hp-power-head">
           <h1><span data-i18n="shutdown.title">Shutdown</span> — <span class="cluster-name"></span></h1>
+          <nav class="seg hp-power-seg" role="tablist" data-hp-power-seg hidden></nav>
         </div>
         <div class="sub-tabs sub-tabs-inline" role="tablist" aria-label="Shutdown sub-tabs">
           <button type="button" class="sub-tab active" data-shutdown-tab="cluster" data-i18n="shutdown.subtabCluster">Arrêt du cluster</button>
@@ -561,7 +562,10 @@
 
     <!-- STARTUP -->
     <section id="tab-startup" class="tab-content">
-      <h1><span data-i18n="startup.title">Startup</span> — <span class="cluster-name"></span></h1>
+      <div class="hp-power-head">
+        <h1><span data-i18n="startup.title">Startup</span> — <span class="cluster-name"></span></h1>
+        <nav class="seg hp-power-seg" role="tablist" data-hp-power-seg hidden></nav>
+      </div>
       <p class="hint" data-i18n="startup.hint">Bring the cluster back online.</p>
 
       <p class="hint groups-intro" data-i18n="startup.groupsIntro">

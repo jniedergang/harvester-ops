@@ -8,6 +8,11 @@
  * Les gestes qui demandent un choix (clone, template, suppression, disque,
  * migration) ouvrent une petite fenêtre. Chaque geste est une action suivie
  * dans le dock, par bin/harvester-resources.py vm.
+ *
+ * 2.0.3 : les listes de VMs n'ont plus qu'un bouton « ⋮ » par ligne. Les
+ * gestes qui étaient des boutons de ligne (démarrer ou arrêter, console,
+ * modifier, notes, ranger) arrivent en tête du menu par `opts.lead` : ils
+ * s'affichent tout de suite, sans attendre la lecture de l'état.
  */
 const VMActions = (() => {
   const tr = (k, p) => (window.i18n ? i18n.t(k, p) : k);
@@ -93,6 +98,15 @@ const VMActions = (() => {
       data-vma="${esc(act)}" ${extra} data-tip="${esc(why || TIP[act]())}" ${why ? 'aria-disabled="true"' : ''}>
       <span class="vma-ic">${icon(ico)}</span><span>${esc(label)}</span></button>`;
   }
+  /** Gestes de tête (`opts.lead`) : { act, label, ico, tip, why, run, cls }.
+   *  `why` grise le geste et dit pourquoi (même règle que les autres). */
+  function leadHtml(lead) {
+    if (!lead || !lead.length) return '';
+    return `<div class="vma-group vma-lead" role="group">${lead.map((l, i) => `<button type="button" role="menuitem"
+      class="vma-item tip${l.cls ? ` ${esc(l.cls)}` : ''}" data-vma-lead="${i}" data-act="${esc(l.act)}"
+      data-tip="${esc(l.why || l.tip)}" ${l.why ? 'aria-disabled="true"' : ''}>
+      <span class="vma-ic">${l.icoHtml || icon(l.ico)}</span><span>${esc(l.label)}</span></button>`).join('')}</div>`;
+  }
   const group = (title, body) => (body ? `<div class="vma-group" role="group" aria-label="${esc(title)}">
       <div class="vma-title">${esc(title)}</div>${body}</div>` : '');
 
@@ -166,7 +180,7 @@ const VMActions = (() => {
     el.setAttribute('role', 'menu');
     el.setAttribute('aria-label', tr('vma.label', { name: `${ns}/${name}` }));
     el.innerHTML = `<div class="vma-head">${icon('vm', 13)} <strong>${esc(name)}</strong> <span class="res-dim">${esc(ns)}</span></div>
-      <div class="vma-body"><p class="form-hint">${esc(tr('common.loading'))}</p></div>`;
+      ${leadHtml(opts.lead)}<div class="vma-body"><p class="form-hint">${esc(tr('common.loading'))}</p></div>`;
     document.body.appendChild(el);
     place(el, anchor);
     anchor.setAttribute('aria-expanded', 'true');
@@ -187,19 +201,31 @@ const VMActions = (() => {
     document.addEventListener('pointerdown', menu.outside, true);
     document.addEventListener('keydown', menu.keys, true);
     const mine = menu;
+    // les gestes de tête marchent avant la lecture de l'état
+    el.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-vma-lead]');
+      if (!b || b.getAttribute('aria-disabled')) return;
+      const l = opts.lead[Number(b.dataset.vmaLead)];
+      close();
+      if (l && l.run) l.run();
+    });
+    el.querySelector('.vma-item:not([aria-disabled])')?.focus();
     try {
       const st = await call('GET', `${base(cluster, ns, name)}/state`);
       if (menu !== mine) return;
       mine.st = st;
       el.querySelector('.vma-body').innerHTML = build(st);
       place(el, anchor);
-      el.querySelector('.vma-item:not([aria-disabled])')?.focus();
+      // un geste de tête déjà choisi au clavier garde le focus
+      if (!el.contains(document.activeElement) || !document.activeElement.matches('.vma-item')) {
+        el.querySelector('.vma-item:not([aria-disabled])')?.focus();
+      }
     } catch (err) {
       if (menu !== mine) return;
       el.querySelector('.vma-body').innerHTML = `<p class="res-error">${esc(err.message)}</p>`;
     }
     el.addEventListener('click', (e) => {
-      const b = e.target.closest('.vma-item');
+      const b = e.target.closest('.vma-item[data-vma]');
       if (!b || b.getAttribute('aria-disabled')) return;
       const act = b.dataset.vma;
       const vol = b.dataset.volume;

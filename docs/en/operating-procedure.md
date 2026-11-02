@@ -286,11 +286,13 @@ open instead.
 
 ### Host page (Harvester)
 
-A Harvester host opens on a page with a band on top: the family, the name,
-the state, the version and the VM count, the host's sub-menu (Overview,
-Virtual machines, Containers, Imports and migrations, Parameters, Disaster
-Recovery) and **Activity of this host**. Every view already built keeps its
-place; the band only frames it.
+A Harvester host opens on a page with a band on top, on one line: the
+family, the name, the state, the version and the VM count, the host's
+sub-menu (Overview, Virtual machines, Containers, Imports and migrations,
+Parameters, Disaster Recovery) and the **Activity of this host** icon
+button. When the window is narrow, the sub-menu scrolls sideways instead of
+wrapping, and a fade shows the side with more entries. Every view already
+built keeps its place; the band only frames it.
 
 - **Overview** (`#harvester/<c>`): metrics, usage gauges, the nodes table,
   and the **Events** block below them (the Cluster and Events sub-tabs are
@@ -311,7 +313,8 @@ place; the band only frames it.
   - **Security**: Secrets, SSH Keys, and **Cluster accounts** (moved here
     from Settings).
   - **Upgrade**: the content of the Upgrade window, in the page.
-  - **Power**: Startup and Shutdown (with the VM order).
+  - **Power**: Startup and Shutdown (with the VM order). The two sit in a
+    selector next to the panel title, so the page has one tab bar only.
   - **Connection**: who declared the cluster (`config.yaml` or the console),
     its declared nodes, **Test kubeconfig** and **Test SSH** (administrator),
     and a shortcut to Settings > Clusters.

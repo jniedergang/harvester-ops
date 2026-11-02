@@ -250,7 +250,7 @@ def test_drag_three_rows_of_two_families_checks_then_undo_restores(world):
 def test_move_menu_on_a_row_with_folder_search(world):
     go, page, state = world
     go("#vms")
-    page.locator('tr[data-avm-row="harvester/harv-fake/lab/cirros"] [data-avm-act="folder"]').click()
+    row_menu(page, "harvester/harv-fake/lab/cirros", "folder").click()
     win = page.locator("#fp-fld-move")
     # pas de bouton actif avant les contrôles du serveur
     expect(win.locator("[data-fld-apply]")).to_be_disabled()
@@ -268,7 +268,7 @@ def test_changing_the_target_asks_the_server_once(world):
     de cible ne relance pas la revue d'accès des objets déjà contrôlés."""
     go, page, state = world
     go("#vms")
-    page.locator('tr[data-avm-row="harvester/harv-fake/lab/cirros"] [data-avm-act="folder"]').click()
+    row_menu(page, "harvester/harv-fake/lab/cirros", "folder").click()
     win = page.locator("#fp-fld-move")
     for fid in ("2", "3", "5"):
         win.locator(f'input[value="{fid}"]').check()
@@ -346,7 +346,13 @@ def test_viewer_has_no_filing_gesture(world):
     for tool in ("new", "rename", "delete"):
         expect(panel.locator(f'[data-fld-tool="{tool}"]')).to_be_disabled()
         expect(panel.locator(f'[data-fld-tool="{tool}"]')).to_have_attribute("title", re.compile("operator role"))
-    expect(page.locator('#all-vms-host tbody [data-avm-act="folder"]').first).to_be_disabled()
+    # 2.0.3 : « Déplacer vers un dossier » du menu « ⋮ », grisé avec la raison
+    item = row_menu(page, "harvester/harv-fake/default/web-1", "folder")
+    expect(item).to_be_disabled()                                   # aria-disabled : refusé par le clic
+    expect(item).to_have_attribute("data-tip", re.compile("operator role"))
+    item.dispatch_event("click")
+    expect(page.locator("#fp-fld-move")).to_have_count(0)
+    page.keyboard.press("Escape")
     assert page.locator("#all-vms-host tbody tr[draggable=true]").count() == 0
     expect(page.locator('#all-vms-host [data-avm="viewer"]')).to_be_visible()
     # le dock montre l'annulation d'un geste d'un autre, grisée avec la raison
@@ -519,6 +525,12 @@ def test_dock_card_keeps_undo_and_resume_together(world):
     expect(card.locator(".dock-gestures .dock-undo")).to_be_visible()
     res, und = card.locator(".dock-resume").bounding_box(), card.locator(".dock-undo").bounding_box()
     assert res["width"] < 200 and abs(res["y"] - und["y"]) < 4, (res, und)
+
+
+def row_menu(page, key, act):
+    """2.0.3 : ouvre le menu « ⋮ » d'une ligne et rend son geste `act`."""
+    page.locator(f'tr[data-avm-row="{key}"] [data-avm-act="more"]').click()
+    return page.locator(f'.vma-menu [data-act="{act}"], .vma-menu [data-vmf-kvm="{act}"]').first
 
 
 RENDER_MS = """() => new Promise((res) => { const t = performance.now();

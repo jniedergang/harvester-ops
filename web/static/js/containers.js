@@ -463,6 +463,11 @@ const Containers = (() => {
     let scopeFolder = null;          // 2.0.0 : dossier de l'adresse (#containers/folder/<id>)
     const expanded = new Set();
     const prefs = { clusters: [], state: '', kind: '', ns: '', text: '', sort: 'name', dir: 'asc' };
+    // 2.0.3 : comme la vue des VMs, seules les PAGE premières lignes de la
+    // liste filtrée et triée sont dessinées (« Afficher 300 de plus » en ajoute)
+    const PAGE = 300;
+    let limit = PAGE;
+    let listKey = '';
 
     function loadPrefs() {
       try { Object.assign(prefs, JSON.parse(localStorage.getItem(STORE) || '{}')); } catch { /* réglages illisibles */ }
@@ -495,11 +500,14 @@ const Containers = (() => {
       const dir = prefs.dir === 'desc' ? -1 : 1;
       return rows.sort((a, b) => {
         const x = get(a); const y = get(b);
-        const c = typeof x === 'number' && typeof y === 'number' ? x - y
-          : String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: 'base' });
-        return (c || a.name.localeCompare(b.name) || a.cluster.localeCompare(b.cluster)) * dir;
+        const c = typeof x === 'number' && typeof y === 'number' ? x - y : NUMERIC.compare(String(x), String(y));
+        return (c || PLAIN.compare(a.name, b.name) || PLAIN.compare(a.cluster, b.cluster)) * dir;
       });
     }
+    // 2.0.3 : comparateurs créés une fois (localeCompare avec options en crée un par comparaison)
+    const NUMERIC = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+    const PLAIN = new Intl.Collator();
+    let menuTip = '';                   // info-bulle du bouton « ⋮ », lue une fois par rendu
 
     const columns = () => (ALL ? 12 : 11);
 
@@ -555,8 +563,10 @@ const Containers = (() => {
           </tr></thead>
           <tbody></tbody>
         </table>
+        <p class="avm-more"><button type="button" class="btn btn-sm btn-secondary tip" data-ct="more" hidden></button></p>
         <p class="hint avm-empty" data-ct="empty" hidden></p>`;
       const q = (s) => host.querySelector(s);
+      q('[data-ct="more"]').addEventListener('click', () => { limit += PAGE; render(); });
       q('[data-ct="state"]').value = prefs.state;
       q('[data-ct="kind"]').value = prefs.kind;
       q('[data-ct="text"]').value = prefs.text;
@@ -651,8 +661,6 @@ const Containers = (() => {
       const open = expanded.has(k);
       const imgs = w.images || [];
       const ready = w.desired == null ? `${w.ready}` : `${w.ready}/${w.desired}`;
-      const b = (attr, ic, tip) => `<button type="button" class="btn-icon-action tip" data-ct-act="${attr}"
-          data-tip="${esc(tip)}" aria-label="${esc(tip)}">${ic}</button>`;
       return `<tr data-ct-row="${esc(k)}" class="${open ? 'ct-open' : ''}">
         <td class="check-col"><button type="button" class="btn-icon-action ct-expand tip" data-ct-act="expand"
             aria-expanded="${open}" data-tip="${esc(open ? tr('cw.tip.collapse') : tr('cw.tip.expand'))}"
@@ -667,9 +675,8 @@ const Containers = (() => {
         <td class="num">${w.gpus ? `<span class="tip" data-tip="${esc(tr('cw.tip.gpus'))}">${esc(w.gpus)}</span>` : '<span class="res-dim">–</span>'}</td>
         <td class="num">${esc(age(w.created))}</td>
         <td class="vmf-folder">${folderCell(w)}</td>
-        <td class="vm-actions-cell">
-          ${b('logs', icon('logs'), (w.pods || []).length ? tr('cw.menu.logsTip') : tr('cw.menu.logsNone'))}
-          ${b('more', icon('more'), tr('cw.moreTip'))}
+        <td class="vm-actions-cell"><button type="button" class="btn-icon-action row-menu tip" data-ct-act="more" aria-haspopup="menu"
+            aria-expanded="false" data-tip="${esc(menuTip)}" aria-label="${esc(tr('cw.menuLabel', { name: `${w.namespace}/${w.name}` }))}">&#8942;</button>
         </td></tr>${open ? podsRow(w) : ''}`;
     }
 
@@ -698,7 +705,15 @@ const Containers = (() => {
       renderNotice();
       renderNamespaces();
       const rows = visible();
-      host.querySelector('tbody').innerHTML = rows.map(row).join('');
+      menuTip = tr('cw.moreTip');
+      const key = JSON.stringify([prefs, scopeFolder, shownCluster]);
+      if (key !== listKey) { listKey = key; limit = PAGE; }
+      host.querySelector('tbody').innerHTML = rows.slice(0, limit).map(row).join('');
+      const more = host.querySelector('[data-ct="more"]');
+      const next = Math.min(PAGE, rows.length - limit);
+      more.hidden = next <= 0;
+      more.textContent = tr('avm.more', { n: Math.max(next, 0) });
+      more.title = more.dataset.tip = tr('cw.moreRowsTip', { shown: Math.min(limit, rows.length), total: rows.length });
       host.querySelectorAll('[data-ct-sort]').forEach((h) => {
         const on = h.dataset.ctSort === prefs.sort;
         h.classList.toggle('active-sort', on);
