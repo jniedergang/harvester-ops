@@ -2391,7 +2391,7 @@ Drive the Terraform provider for Harvester from saved declarations.
   (all targets, Harvester clusters, KVM hosts) sits above the list; each
   card and the declaration header name the target. A KVM declaration offers
   libvirt resources (VM, volume, network) and the template "RKE2 on libvirt
-  VMs", described in section 10. Plan, read, apply, destroy and history work
+  VMs", described in section 10; free code stays on Harvester targets. Plan, read, apply, destroy and history work
   the same way.
 - **Offline providers (2.3.0)**: every provider of a workspace comes from a
   local mirror laid out under both registry names (`registry.opentofu.org`
@@ -3543,6 +3543,19 @@ template "RKE2 on libvirt VMs" instead (108).
   node2). And in both transports `no_verify` turns verification off as soon
   as it appears, whatever its value (`no_verify=0` included): the URI never
   carries it.
+- **Rights**, aligned on the KVM module: an operator plans and applies a
+  declaration of VMs and volumes; applying a reviewed plan that destroys or
+  replaces something, applying a declaration that holds a network, and
+  destroying a declaration need an administrator. A KVM declaration is
+  applied only from a reviewed plan. Free Terraform code is not offered on a
+  KVM host (its workspace holds the host key during a run). The cloud-init of
+  a declaration is hidden from viewers (Harvester declarations too), and its
+  Code tab needs an operator.
+- **Base images**: a base image must be an image of the host catalogue, in
+  the pool of the new disk, of the declared format, and not used as a disk by
+  a domain. The console reads the catalogue on the host before every plan
+  and apply; a free path (a block device, the disk of another VM) is
+  refused.
 - **Host requirements**: the host libvirt URI is `qemu:///system` or
   `qemu:///session` (a host declared with another URI is refused), and the
   host has `virt-ssh-helper` (libvirt client) or `nc`.
@@ -3577,16 +3590,18 @@ template "RKE2 on libvirt VMs" instead (108).
   Internet access (a NAT network of the host is enough). An airgap install
   (RKE2 tarball given as a volume) is **not covered** in 2.3.0.
 - **Real check (node2, 02/11/2026)**: a declaration with a VM (cirros on
-  `kvmtest-net`), a volume and an isolated network: plan 6 s, apply 6 s,
-  checked with `virsh` (domain running with ACPI/APIC, disk on its base
-  image, seed disk, DHCP lease), destroy 9 s, nothing left. The template
-  with 1 server and 1 agent from the openSUSE Tumbleweed cloud image
-  (published checksum checked): plan 6 s, apply 6 s, SSH on the server 47 s
-  after apply, both nodes `Ready` 153 s after apply (RKE2 v1.36.5+rke2r1,
-  read with the kubeconfig through an SSH tunnel), destroy 12 s. A copied
-  host declaration with a wrong pinned key was refused before OpenTofu
-  (`hostkey: Host key verification failed.`), nothing created. Not checked
-  for real: bridged VMs, NAT or routed networks created by a declaration,
+  `kvmtest-net`), a volume and an isolated network: plan 12 s and apply
+  15 s (both read the image catalogue on the host first), checked with
+  `virsh` (domain running with ACPI/APIC, disk on its base image, seed disk,
+  DHCP lease), destroy 9 s, nothing left. The template with 1 server and
+  1 agent from the openSUSE Tumbleweed cloud image (published checksum
+  checked): plan 12 s, apply 15 s, SSH on the server under a minute after
+  apply, both nodes `Ready` 153 s and 167 s after apply over two runs (RKE2
+  v1.36.5+rke2r1, read with the kubeconfig through an SSH tunnel), destroy
+  12 s. A copied host declaration with a wrong pinned key was refused before
+  OpenTofu (`hostkey: Host key verification failed.`), a base image
+  `/dev/sda` was refused before OpenTofu, nothing created. Not checked for
+  real: bridged VMs, NAT or routed networks created by a declaration,
   several servers.
 
 ## 11. Disaster recovery: asynchronous VM replication (CLI + console API)

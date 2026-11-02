@@ -252,7 +252,7 @@ def ssh_wrapper(ws):
     un chemin que ssh ne lirait pas tel quel (`%` développé par ssh,
     guillemet, caractère de contrôle)."""
     ws = os.path.abspath(str(ws))
-    if any(c in ws for c in '%"\\') or any(ord(c) < 32 for c in ws):
+    if any(c in ws for c in '%"\\$') or any(ord(c) < 32 for c in ws):
         raise SpecError("the Terraform workspace path holds a character ssh would rewrite")
     opts = ["-F", "/dev/null",
             "-o", "StrictHostKeyChecking=yes",
@@ -691,6 +691,26 @@ def addresses(kind, safe, spec=None):
         return [f"libvirt_domain.{safe}", f"libvirt_volume.{safe}_disk",
                 f"libvirt_cloudinit_disk.{safe}", f"libvirt_volume.{safe}_seed"]
     return []
+
+
+def base_images(kind, spec):
+    """(chemin, pool, format) de l'image de base d'une ressource, ou None :
+    la console la contrôle sur l'hôte avant chaque exécution."""
+    if kind not in ("kvm_vm", "kvm_volume", "kvm_rke2") or not isinstance(spec, dict):
+        return None
+    path = str(spec.get("base_image") or "").strip()
+    if not path:
+        return None
+    return path, str(spec.get("pool") or "").strip(), spec.get("base_format") or "qcow2"
+
+
+def output_names(rendered):
+    """Les seules sorties gardées après un apply : celles des modèles RKE2."""
+    out = set()
+    for r in rendered:
+        if r[1] == "kvm_rke2":
+            out |= {f"{r[0]}_nodes", f"{r[0]}_kubeconfig"}
+    return out
 
 
 def token_vars(rendered):

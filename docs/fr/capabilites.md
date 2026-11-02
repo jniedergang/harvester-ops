@@ -2626,7 +2626,8 @@ sauvegardées.
   filtre de famille (toutes les cibles, clusters Harvester, hôtes KVM) tient
   la liste ; chaque carte et l'en-tête de la déclaration nomment la cible.
   Une déclaration KVM propose les ressources libvirt (VM, volume, réseau) et
-  le modèle « RKE2 sur des VMs libvirt », décrits en section 10. Plan,
+  le modèle « RKE2 sur des VMs libvirt », décrits en section 10 ; le code
+  libre reste sur les cibles Harvester. Plan,
   lecture, application, destruction et historique marchent de la même façon.
 - **Providers hors ligne (2.3.0)** : chaque provider d'un espace vient d'un
   miroir local posé sous les deux noms de registre (`registry.opentofu.org`
@@ -3876,6 +3877,19 @@ libvirt » à la place (108).
   mismatch », vu sur node2). Et dans les deux transports, `no_verify` coupe
   la vérification dès qu'il apparaît, quelle que soit sa valeur
   (`no_verify=0` compris) : l'URI n'en porte jamais.
+- **Droits**, alignés sur le module KVM : un opérateur planifie et applique
+  une déclaration de VMs et de volumes ; appliquer un plan relu qui détruit
+  ou remplace quelque chose, appliquer une déclaration qui porte un réseau,
+  et détruire une déclaration demandent un administrateur. Une déclaration
+  KVM ne s'applique que depuis un plan relu. Le code Terraform libre n'est
+  pas proposé sur un hôte KVM (son espace porte la clé de l'hôte pendant une
+  exécution). Le cloud-init d'une déclaration est caché aux lecteurs (les
+  déclarations Harvester aussi), et son onglet Code demande un opérateur.
+- **Images de base** : une image de base doit être une image du catalogue de
+  l'hôte, du pool du nouveau disque, au format déclaré, et qu'aucun domaine
+  n'utilise comme disque. La console lit le catalogue sur l'hôte avant
+  chaque plan et chaque apply ; un chemin libre (un périphérique bloc, le
+  disque d'une autre VM) est refusé.
 - **Ce que demande l'hôte** : son URI libvirt est `qemu:///system` ou
   `qemu:///session` (un hôte déclaré avec une autre URI est refusé), et il a
   `virt-ssh-helper` (client libvirt) ou `nc`.
@@ -3912,17 +3926,19 @@ libvirt » à la place (108).
   donc besoin d'Internet (un réseau NAT de l'hôte suffit). Une installation
   airgap (archive RKE2 donnée comme volume) n'est **pas couverte** en 2.3.0.
 - **Essai réel (node2, 02/11/2026)** : une déclaration avec une VM (cirros
-  sur `kvmtest-net`), un volume et un réseau isolé : plan 6 s, apply 6 s,
-  contrôlé par `virsh` (domaine démarré avec ACPI/APIC, disque sur son image
-  de base, disque cloud-init, bail DHCP), destruction 9 s, rien ne reste. Le
-  modèle avec 1 serveur et 1 agent depuis l'image cloud openSUSE Tumbleweed
-  (somme publiée vérifiée) : plan 6 s, apply 6 s, SSH sur le serveur 47 s
-  après l'apply, les deux nœuds `Ready` 153 s après l'apply (RKE2
-  v1.36.5+rke2r1, lus avec le kubeconfig par un tunnel SSH), destruction
-  12 s. Une copie de la déclaration de l'hôte avec une mauvaise empreinte
-  épinglée a été refusée avant OpenTofu (`hostkey: Host key verification
-  failed.`), rien créé. Non vérifié en réel : VMs sur un pont, réseaux NAT ou
-  routés créés par une déclaration, plusieurs serveurs.
+  sur `kvmtest-net`), un volume et un réseau isolé : plan 12 s et apply 15 s
+  (tous deux lisent d'abord le catalogue d'images de l'hôte), contrôlé par
+  `virsh` (domaine démarré avec ACPI/APIC, disque sur son image de base,
+  disque cloud-init, bail DHCP), destruction 9 s, rien ne reste. Le modèle
+  avec 1 serveur et 1 agent depuis l'image cloud openSUSE Tumbleweed (somme
+  publiée vérifiée) : plan 12 s, apply 15 s, SSH sur le serveur en moins
+  d'une minute après l'apply, les deux nœuds `Ready` 153 s et 167 s après
+  l'apply sur deux passages (RKE2 v1.36.5+rke2r1, lus avec le kubeconfig par
+  un tunnel SSH), destruction 12 s. Une copie de la déclaration de l'hôte
+  avec une mauvaise empreinte épinglée a été refusée avant OpenTofu
+  (`hostkey: Host key verification failed.`), une image de base `/dev/sda`
+  refusée avant OpenTofu, rien créé. Non vérifié en réel : VMs sur un pont,
+  réseaux NAT ou routés créés par une déclaration, plusieurs serveurs.
 
 ## 11. Reprise après sinistre : réplication asynchrone des VMs (CLI + API de la console)
 

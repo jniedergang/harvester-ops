@@ -15,7 +15,7 @@ opérateurs qui modifient la même déclaration ne s'écrasent pas en silence.
 (`target_kind`, colonne ajoutée sans rien réécrire : les anciennes lignes
 valent `harvester`). Le champ `cluster` garde le nom de la cible. Les
 ressources d'une famille ne vont pas dans une déclaration de l'autre ; le
-code libre (`raw`) va dans les deux.
+code libre (`raw`) ne va que sur Harvester.
 
 Ce module ne connaît ni Flask ni Terraform : il est essayé seul.
 """
@@ -31,7 +31,9 @@ TARGET_KINDS = ("harvester", "kvm")
 HARVESTER_KINDS = ("vm", "image", "ssh_key")
 KVM_KINDS = ("kvm_vm", "kvm_volume", "kvm_network", "kvm_rke2")
 KINDS = HARVESTER_KINDS + KVM_KINDS + ("raw",)
-KINDS_OF = {"harvester": HARVESTER_KINDS + ("raw",), "kvm": KVM_KINDS + ("raw",)}
+# Pas de code libre sur un hôte KVM : l'espace d'une déclaration KVM porte,
+# le temps d'une exécution, la clé SSH de l'hôte, qu'un `file()` lirait.
+KINDS_OF = {"harvester": HARVESTER_KINDS + ("raw",), "kvm": KVM_KINDS}
 MAX_NAME = 80
 MAX_DESCRIPTION = 500
 MAX_BODY = 1024 * 1024

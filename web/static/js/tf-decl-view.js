@@ -40,9 +40,10 @@ const TFDeclView = (() => {
   const FAMILIES = {
     all: () => tr('tfd.family.all'), harvester: () => tr('tfd.family.harvester'), kvm: () => tr('tfd.family.kvm'),
   };
-  // types de ressource proposés par famille de cible (raw : les deux)
+  // types de ressource proposés par famille de cible ; pas de code libre sur
+  // un hôte KVM (l'espace porte la clé de l'hôte le temps d'une exécution)
   const ADD_KINDS = { harvester: ['vm', 'image', 'ssh_key', 'raw'],
-                      kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2', 'raw'] };
+                      kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2'] };
 
   // Un appel littéral par texte : le contrôle de parité des traductions ne
   // voit que ces formes (une clé construite par concaténation lui échappe).

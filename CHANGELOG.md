@@ -15,7 +15,7 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   applying, apply of the reviewed plan, destroy, history and per-declaration
   state work as for a cluster.
 - **KVM resources in the declaration forms**: virtual machine (base image of
-  the host catalogue in copy on write or blank disk, pool, libvirt network or
+  the host catalogue in copy on write, same pool, or blank disk, libvirt network or
   bridge, CPU model, cloud-init configuration or SSH key), volume and
   network (isolated, NAT, routed, DHCP range). Pools, networks and images
   are read from the host.
@@ -54,6 +54,23 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   off as soon as the parameter appears, whatever its value. A connection
   through the same script runs first and says why a host is refused
   (`hostkey: Host key verification failed.`).
+- **Base images come from the host catalogue only.** A base image must be a
+  catalogue image of the host, in the pool of the new disk, of the declared
+  format, not used as a disk by a domain; the console reads the catalogue on
+  the host before every plan and apply. A free path (block device, disk of
+  another VM) is refused.
+- **Rights aligned on the KVM module**: applying a reviewed plan that
+  destroys or replaces, applying a declaration with a network, and
+  destroying a KVM declaration need an administrator; a KVM declaration is
+  applied only from a reviewed plan (`plan_hash`). Free Terraform code
+  (`raw`) is refused on KVM targets: the workspace holds the host key during
+  a run. Only the known outputs of the RKE2 template are kept.
+- **Cloud-init hidden from viewers**: declaration reads replace `user_data`
+  and `network_data` with `(hidden)` for the viewer role (Harvester
+  declarations too), and `GET /api/tf-declarations/<id>/code` needs an
+  operator, as the KVM and Harvester cloud-init reads already did.
+- A KVM declaration cannot be deleted while it runs (`409`); staged SSH
+  files left by an interrupted console are removed at start.
 - Every form value written into the generated Terraform code is checked
   (names, paths, addresses, numbers, keys) or escaped (quotes, backslashes,
   new lines, `${` and `%{` template sequences); no heredoc.
@@ -66,7 +83,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   Internet, since the mirror only existed under `registry.terraform.io`.
   Every provider is now laid out under both registry names, included in the
   mirror and excluded from direct downloads, and the `terraformrc` of a
-  workspace follows its mirror.
+  workspace follows its mirror. A workspace whose lock file was written from
+  an Internet download refused the mirror at its next `init` (checksums
+  differ, seen with OpenTofu 1.12): the stale lock file is recreated once.
 
 ### Internal
 - `web/tf_kvm.py` (pure): HCL escaping, provider block, OpenSSH script and
@@ -91,8 +110,9 @@ This file summarises each minor release; per-patch detail lives in `git log`.
   signer, altered archive, altered checksums).
 - Real check on node2 (objects `kvmtest-*` only): VM, volume and network
   declaration planned, applied, checked with `virsh` and destroyed; RKE2
-  template with 1 server and 1 agent, both nodes `Ready` 153 s after apply;
-  wrong pinned host key refused before OpenTofu.
+  template with 1 server and 1 agent, both nodes `Ready` 153 s and 167 s
+  after apply over two runs; wrong pinned host key and a `/dev/sda` base
+  image refused before OpenTofu.
 
 ## [2.2.1] - 2026-11-02 - Profile batches guard machines that already carry a system
 

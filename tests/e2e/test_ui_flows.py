@@ -739,12 +739,15 @@ def _open_editor(page, name, kind="vm"):
 
 
 def test_terraform_add_kind_selector_lists_every_schema_entry(page):
-    """Les boutons « Ajouter » de la vue proposent chaque type du schéma."""
+    """Les boutons « Ajouter » de la vue proposent chaque type du schéma de
+    la famille de la cible (2.3.0 : un cluster Harvester ici)."""
     _open_terraform(page)
     page.evaluate("""async () => { const d = await window.TFDecl.createAsync('kind-test', 'harv-fake');
       window.TFDecl.setActive(d.id); window.TFDeclView.render(); }""")
     page.wait_for_selector('.tfd-add-kind', timeout=5000)
-    schema_kinds = page.evaluate("Object.keys(window.TF_SCHEMA || {})")
+    schema_kinds = page.evaluate(
+        "Object.keys(window.TF_SCHEMA || {}).filter(k => window.TF_SCHEMA[k].family === 'harvester')")
+    assert len(schema_kinds) == 4
     offered = page.evaluate("Array.from(document.querySelectorAll('.tfd-add-kind')).map(b => b.dataset.kind)")
     assert sorted(schema_kinds) == sorted(offered), (schema_kinds, offered)
 

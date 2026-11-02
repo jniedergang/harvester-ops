@@ -78,7 +78,7 @@ def test_an_old_database_gains_the_target_column(tmp_path):
 
 @pytest.mark.parametrize("target, kind, ok", [
     ("harvester", "vm", True), ("harvester", "raw", True), ("harvester", "kvm_vm", False),
-    ("kvm", "kvm_vm", True), ("kvm", "kvm_rke2", True), ("kvm", "raw", True), ("kvm", "vm", False),
+    ("kvm", "kvm_vm", True), ("kvm", "kvm_rke2", True), ("kvm", "raw", False), ("kvm", "vm", False),
     ("kvm", "ssh_key", False),
 ])
 def test_resources_go_to_their_family_only(store, target, kind, ok):
@@ -208,7 +208,8 @@ class FakeTofu:
             return 0, json.dumps({"resource_changes": []}), ""
         if args[0] == "output":
             return 0, json.dumps({"lab_nodes": {"sensitive": False, "value": {"lab-server-0": "10.213.77.50"}},
-                                  "secret": {"sensitive": True, "value": "hidden"}}), ""
+                                  "secret": {"sensitive": True, "value": "hidden"},
+                                  "stray": {"sensitive": False, "value": "not a template output"}}), ""
         if args[0] == "plan" and "-out=tfplan" in args:
             (ws / "tfplan").write_text("plan")
         if args[0] == "init":
@@ -226,6 +227,7 @@ def kvm_world(tmp_path, monkeypatch):
     monkeypatch.setattr(wapp, "_state_dir", lambda: state)
     monkeypatch.setattr(wapp, "_tf_plugin_cache_init_libvirt", lambda ws: "0.9.9")
     monkeypatch.setattr(wapp, "_tf_kvm_preflight", lambda ws, host, env: None)
+    monkeypatch.setattr(wapp, "_tf_kvm_check_bases", lambda host, rendered: None)
     return store
 
 
@@ -292,14 +294,14 @@ def test_apply_keeps_only_non_sensitive_outputs_and_destroy_removes_them(kvm_wor
     run, d, ws = run_kvm(kvm_world, [rke2("1" * 12)], "plan", fake, monkeypatch)
     run, d, ws = run_kvm(kvm_world, None, "apply", FakeTofu(), monkeypatch, plan_hash=run.result["plan_hash"])
     assert run.status == "done", run.error_summary
-    out = json.loads((ws / "outputs.json").read_text())
-    assert out == {"lab_nodes": {"lab-server-0": "10.213.77.50"}}
-    assert stat.S_IMODE((ws / "outputs.json").stat().st_mode) == 0o600
+    out = json.loads((ws / ".outputs.json").read_text())
+    assert out == {"lab_nodes": {"lab-server-0": "10.213.77.50"}}          # ni sensible, ni inconnue
+    assert stat.S_IMODE((ws / ".outputs.json").stat().st_mode) == 0o600
     assert wapp._tf_decl_view(kvm_world.get(d["id"]))["outputs"] == out
     run_kvm(kvm_world, None, "plan", FakeTofu(), monkeypatch)              # un plan ne les efface pas
-    assert (ws / "outputs.json").exists()
+    assert (ws / ".outputs.json").exists()
     run, d, ws = run_kvm(kvm_world, None, "destroy", FakeTofu(), monkeypatch)
-    assert run.status == "done" and not (ws / "outputs.json").exists()
+    assert run.status == "done" and not (ws / ".outputs.json").exists()
 
 
 def test_preflight_classifies_a_host_key_refusal(tmp_path, monkeypatch):
@@ -464,7 +466,7 @@ def test_the_view_routes_runs_by_target_and_filters_by_family():
     js = (ROOT / "web" / "static" / "js" / "tf-decl-view.js").read_text()
     assert "`/api/terraform/kvm/${enc(d.cluster)}`" in js
     assert "class=\"tfd-family tip\"" in js and "data-tip=\"${esc(tr('tfd.t.family'))}\"" in js
-    assert "kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2', 'raw']" in js
+    assert "kvm: ['kvm_vm', 'kvm_volume', 'kvm_network', 'kvm_rke2'] };" in js
     assert "/api/kvm/hosts?declared=1" in js
     assert "${esc(targetText(d))}" in js                      # cible échappée
     form = (ROOT / "web" / "static" / "js" / "tf-form.js").read_text()
@@ -489,3 +491,155 @@ def test_tf_run_cmd_drops_the_agent_and_passes_the_token_by_env(tmp_path, monkey
     assert "s3cret" not in " ".join(seen["argv"])
     wapp._tf_run_cmd(tmp_path, "", ["plan"])
     assert seen["env"]["SSH_AUTH_SOCK"] == "/run/user/1000/agent.sock"     # Harvester : inchangé
+
+
+# ---------------------------------------------------------------------------
+# Relecture indépendante (2.3.0) : images de base, rôles, restes
+# ---------------------------------------------------------------------------
+CATALOGUE = {"images": [
+    {"pool": "kvmtest-pool", "volume": "base.qcow2", "path": BASE, "format": "qcow2", "iso": False, "used_by": []},
+    {"pool": "kvmtest-pool", "volume": "seed.iso", "path": "/var/lib/libvirt/images/kvmtest-pool/seed.iso",
+     "format": "raw", "iso": True, "used_by": []},
+    {"pool": "other", "volume": "base2.qcow2", "path": "/srv/other/base2.qcow2", "format": "qcow2", "iso": False,
+     "used_by": []},
+    {"pool": "kvmtest-pool", "volume": "live.qcow2", "path": "/var/lib/libvirt/images/kvmtest-pool/live.qcow2",
+     "format": "qcow2", "iso": False, "used_by": ["prod-db"]},
+]}
+
+
+@pytest.mark.parametrize("base, fmt, want", [
+    (BASE, "qcow2", None),
+    ("/dev/sda", "raw", "not an image of the catalogue"),
+    ("/var/lib/libvirt/images/kvmtest-pool/seed.iso", "raw", "not an image of the catalogue"),
+    ("/srv/other/base2.qcow2", "qcow2", "must be in the pool of the new disk"),
+    ("/var/lib/libvirt/images/kvmtest-pool/live.qcow2", "qcow2", "used as a disk by prod-db"),
+    (BASE, "raw", "its format is qcow2, not raw"),
+])
+def test_base_images_must_come_from_the_host_catalogue(monkeypatch, tmp_path, base, fmt, want):
+    monkeypatch.setattr(wapp, "_state_dir", lambda: tmp_path)
+    monkeypatch.setattr(wapp._kh, "VirshHost", lambda decl, state, timeout=0: type("H", (), {"decl": decl})())
+    monkeypatch.setattr(wapp._ks, "list_images", lambda vh, decl, notes, fresh=False: CATALOGUE)
+    rendered, errors = wapp._tf_render_resources([kvm_vm("0" * 12, base_image=base, base_format=fmt)], "kvm")
+    assert not errors
+    why = wapp._tf_kvm_check_bases({"name": "tfhost"}, rendered)
+    assert (why is None) if want is None else (want in why), why
+
+
+def test_a_vm_without_base_image_reads_no_catalogue(monkeypatch):
+    monkeypatch.setattr(wapp._ks, "list_images", lambda *a, **k: (_ for _ in ()).throw(AssertionError("read")))
+    rendered, _ = wapp._tf_render_resources([kvm_vm("0" * 12, base_image="")], "kvm")
+    assert wapp._tf_kvm_check_bases({"name": "tfhost"}, rendered) is None
+
+
+def test_the_runner_stops_on_a_refused_base_image(kvm_world, monkeypatch):
+    monkeypatch.setattr(wapp, "_tf_kvm_check_bases", lambda host, rendered: "base image /dev/sda: not an image")
+    fake = FakeTofu()
+    run, d, ws = run_kvm(kvm_world, [kvm_vm("0" * 12)], "plan", fake, monkeypatch)
+    assert run.status == "error" and "not an image" in run.error_summary and fake.calls == []
+    assert not (ws / "kvm_ssh_key").exists()
+
+
+@pytest.mark.parametrize("resources, mode, counts, want", [
+    ([kvm_vm("0" * 12)], "plan", None, "operator"),
+    ([kvm_vm("0" * 12)], "apply", {"create": 3}, "operator"),
+    ([kvm_vm("0" * 12)], "apply", {"update": 1}, "operator"),
+    ([kvm_vm("0" * 12)], "apply", {"replace": 1}, "admin"),
+    ([kvm_vm("0" * 12)], "apply", {"delete": 1}, "admin"),
+    ([kvm_vm("0" * 12)], "destroy-plan", None, "operator"),
+    ([kvm_vm("0" * 12)], "destroy", None, "admin"),
+    ([{"id": "1" * 12, "kind": "kvm_network", "spec": {"name": "n", "mode": "isolated"}}], "apply", {"create": 1}, "admin"),
+    ([{"id": "1" * 12, "kind": "kvm_network", "spec": {"name": "n", "mode": "isolated"}}], "plan", None, "operator"),
+])
+def test_kvm_roles_follow_the_kvm_module(tmp_path, monkeypatch, resources, mode, counts, want):
+    monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path / "ws")
+    decl = {"id": "a" * 12, "cluster": "tfhost", "target_kind": "kvm", "resources": resources}
+    ws = wapp._tf_decl_ws(decl)
+    if counts is not None:
+        (ws / "tfplan.meta").write_text(json.dumps({"summary": {"counts": counts}}))
+    assert wapp._tf_kvm_needed_role(decl, mode) == want
+
+
+def test_a_kvm_apply_needs_a_reviewed_plan(api, test_config):
+    declare_host(test_config["root"] / "state")
+    _, d = api("POST", "/api/tf-declarations", expect_status=201, json_body={
+        "cluster": "tfhost", "target_kind": "kvm", "name": "noplan", "resources": [kvm_vm("0" * 12)]})
+    status, out = api("POST", "/api/terraform/kvm/tfhost/apply_declaration", expect_status=None,
+                      json_body={"declaration": {"id": d["id"]}, "dry_run": False})
+    assert status == 400 and "reviewed plan" in out["error"]
+    api("DELETE", f"/api/tf-declarations/{d['id']}")
+
+
+def test_viewers_do_not_read_cloud_init(monkeypatch):
+    view = {"resources": [{"id": "0" * 12, "kind": "kvm_vm", "spec": {"name": "a", "user_data": "#cloud-config\npassword: x"}},
+                          {"id": "1" * 12, "kind": "vm", "spec": {"cloudinit": [{"type": "noCloud", "user_data": "pw"}]}}]}
+    monkeypatch.setattr(wapp, "current_role", lambda: "viewer")
+    out = wapp._tf_decl_for_role(view)
+    assert out["resources"][0]["spec"]["user_data"] == "(hidden)"
+    assert out["resources"][1]["spec"]["cloudinit"][0]["user_data"] == "(hidden)"
+    assert view["resources"][0]["spec"]["user_data"].startswith("#cloud")        # l'original n'est pas touché
+    monkeypatch.setattr(wapp, "current_role", lambda: "operator")
+    assert wapp._tf_decl_for_role(view) is view
+    assert wapp.required_role_for("/api/tf-declarations/aaaaaaaaaaaa/code", "GET") == "operator"
+
+
+def test_a_running_kvm_declaration_cannot_be_deleted(tmp_path, monkeypatch):
+    store = ts.DeclStore(tmp_path / "tf.db")
+    monkeypatch.setattr(wapp, "TF_DECLS", store)
+    monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path / "ws")
+    d = store.create("b" * 12, "tfhost", "busy", target_kind="kvm")
+    with wapp.TF_KVM_RUNNING_LOCK:
+        wapp.TF_KVM_RUNNING.add(d["id"])
+    try:
+        with wapp.app.test_client() as c:
+            r = c.delete(f"/api/tf-declarations/{d['id']}")
+        assert r.status_code == 409 and r.get_json()["code"] == "running"
+        assert store.get(d["id"]) is not None
+    finally:
+        with wapp.TF_KVM_RUNNING_LOCK:
+            wapp.TF_KVM_RUNNING.discard(d["id"])
+    with wapp.app.test_client() as c:
+        assert c.delete(f"/api/tf-declarations/{d['id']}").status_code == 200
+
+
+def test_the_startup_sweep_removes_staged_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(wapp, "TF_WORKSPACES", tmp_path)
+    ws = tmp_path / ".kvm" / "tfhost" / "decls" / ("a" * 12)
+    ws.mkdir(parents=True)
+    for n in (k.KEY_FILE, k.KNOWN_FILE, k.WRAPPER_FILE, "terraform.tfstate"):
+        (ws / n).write_text("x")
+    assert wapp._tf_kvm_sweep() == 3
+    assert sorted(p.name for p in ws.iterdir()) == ["terraform.tfstate"]
+
+
+def test_the_ssh_wrapper_refuses_a_dollar_in_the_path():
+    with pytest.raises(k.SpecError):
+        k.ssh_wrapper("/srv/${HOME}/ws")
+
+
+@pytest.mark.parametrize("stderr, lock, calls, lock_left", [
+    ("Error: ... the local package for registry.opentofu.org/harvester/harvester 1.9.0 doesn't match any\n"
+     "of the checksums previously recorded in the dependency lock file (this might be", True, 2, False),
+    ("Error: Failed to query available provider packages", True, 1, True),
+    ("doesn't match any of the checksums previously recorded in the dependency lock file", False, 1, False),
+])
+def test_a_stale_lock_file_is_recreated_once(tmp_path, monkeypatch, stderr, lock, calls, lock_left):
+    """Le verrou d'un espace écrit d'après un téléchargement Internet ne
+    bloque pas le miroir local (vu en réel avec OpenTofu 1.12)."""
+    seen = []
+
+    class R:
+        def __init__(self, rc, err):
+            self.returncode, self.stdout, self.stderr = rc, "", err
+
+    def fake_run(argv, **kw):
+        seen.append(argv)
+        return R(1, stderr) if len(seen) == 1 else R(0, "")
+
+    monkeypatch.setattr(wapp.subprocess, "run", fake_run)
+    if lock:
+        (tmp_path / ".terraform.lock.hcl").write_text("old")
+    wapp._tf_run_cmd(tmp_path, "", ["init", "-input=false"])
+    assert len(seen) == calls and (tmp_path / ".terraform.lock.hcl").exists() is lock_left
+    seen.clear()
+    wapp._tf_run_cmd(tmp_path, "", ["plan"])                    # jamais pour une autre commande
+    assert len(seen) == 1

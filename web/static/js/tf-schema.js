@@ -459,9 +459,8 @@ const TF_SCHEMA = {
 };
 
 // 2.3.0 : chaque type de ressource dit sa famille de cibles ; le code libre
-// (`raw`) va dans les deux.
-['vm', 'image', 'ssh_key'].forEach((k) => { TF_SCHEMA[k].family = 'harvester'; });
-TF_SCHEMA.raw.family = 'any';
+// (`raw`) reste sur Harvester.
+['vm', 'image', 'ssh_key', 'raw'].forEach((k) => { TF_SCHEMA[k].family = 'harvester'; });
 
 // ---------------------------------------------------------------------------
 // v1.55.0 : libellés lisibles et cinq langues pour tout le schéma (audit

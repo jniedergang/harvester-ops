@@ -1231,6 +1231,9 @@ def required_role_for(path, method):
     if method in ("GET", "HEAD", "OPTIONS"):
         if path.startswith("/api/capi/") and path.endswith(OPERATOR_READ_SUFFIXES):
             return "operator"
+        # 2.3.0 : le code d'une déclaration porte le cloud-init de ses VMs
+        if path.startswith("/api/tf-declarations/") and path.endswith("/code"):
+            return "operator"
         # prochaine version KVM : le cloud-init d'une VM KVM peut porter des
         # mots de passe, lu par un opérateur seulement (comme côté Harvester)
         if path.startswith("/api/kvm/vms/") and path.endswith("/cloudinit") and \
@@ -26871,6 +26874,62 @@ def _tf_kvm_preflight(ws, host_decl, env):
     return _tf_kvm_scrub(str(err), ws)
 
 
+def _tf_kvm_check_bases(host_decl, rendered):
+    """Chaque image de base doit être une image du catalogue de l'hôte (comme
+    pour la création de VM de la console), du MÊME pool que le disque qui s'y
+    appuie, au format déclaré, et qu'aucun domaine n'utilise comme disque :
+    jamais un chemin libre (/dev/sda, le disque d'une autre VM). Lu sur
+    l'hôte à chaque plan ou apply. Rend None, ou la raison."""
+    wanted = [b for b in (_tfk.base_images(r[1], r[2]) for r in rendered) if b]
+    if not wanted:
+        return None
+    try:
+        vh = _kh.VirshHost(host_decl, _state_dir(), timeout=KVM_READ_TIMEOUT)
+        cat = _ks.list_images(vh, vh.decl, {}, fresh=True)
+    except (_ko.OpError, _kh.KvmError) as e:
+        return f"host {host_decl['name']}: the image catalogue cannot be read ({getattr(e, 'kind', 'failed')})"
+    by_path = {i.get("path"): i for i in cat.get("images") or [] if i.get("path")}
+    for path, pool, fmt in wanted:
+        img = by_path.get(path)
+        if not img or img.get("iso"):
+            return f"base image {path}: not an image of the catalogue of host {host_decl['name']}"
+        if img.get("pool") != pool:
+            return (f"base image {img['pool']}/{img['volume']}: it must be in the pool of the new "
+                    f"disk ({pool})")
+        if img.get("used_by"):
+            return f"base image {img['pool']}/{img['volume']}: used as a disk by {', '.join(img['used_by'])}"
+        if img.get("format") and img["format"] != fmt:
+            return f"base image {img['pool']}/{img['volume']}: its format is {img['format']}, not {fmt}"
+    return None
+
+
+def _tf_kvm_sweep():
+    """Au démarrage : retire la clé, l'empreinte et le script ssh qu'une
+    exécution interrompue par l'arrêt de la console aurait laissés."""
+    root = TF_WORKSPACES / ".kvm"
+    if not root.is_dir():
+        return 0
+    n = 0
+    for ws in root.glob("*/decls/*"):
+        for name in (_tfk.KEY_FILE, _tfk.KNOWN_FILE, _tfk.WRAPPER_FILE):
+            try:
+                (ws / name).unlink()
+                n += 1
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                log_tf.warning("KVM declaration sweep: %s", e)
+    return n
+
+
+try:
+    _swept = _tf_kvm_sweep()
+    if _swept:
+        log_tf.warning("KVM declarations: %d staged SSH file(s) left by an interrupted run removed", _swept)
+except Exception as _e:          # noqa: BLE001 : le démarrage passe
+    log_tf.warning("KVM declaration sweep failed: %s", _e)
+
+
 def _tf_kvm_secret(ws, var):
     """Le jeton d'une variable sensible, tiré une fois et gardé dans
     `<espace>/.secrets/<variable>` (0600) ; jamais rendu par l'API."""
@@ -27411,9 +27470,25 @@ def _tf_run_cmd(ws_dir, kc_path, args, timeout=300, extra_env=None, drop_env=())
     try:
         r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
                            capture_output=True, text=True, timeout=timeout)
+        # 2.3.0 : un espace dont le verrou a été écrit d'après un provider
+        # téléchargé sur Internet (OpenTofu, avant le double miroir) refuse le
+        # miroir local au prochain `init` (sommes différentes, vu en réel). Le
+        # miroir de la console est la seule source du provider : le verrou
+        # périmé part, une seule nouvelle tentative.
+        if (args and args[0] == "init" and r.returncode != 0
+                and _TF_STALE_LOCK in " ".join((r.stderr or "").split())
+                and (ws_dir / ".terraform.lock.hcl").exists()):
+            (ws_dir / ".terraform.lock.hcl").unlink()
+            log_tf.warning("terraform lock file of %s did not match the local mirror: recreated",
+                           ws_dir.name)
+            r = subprocess.run([TF_BIN, *args], cwd=str(ws_dir), env=env,
+                               capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout"
+
+
+_TF_STALE_LOCK = "doesn't match any of the checksums previously recorded in the dependency lock file"
 
 
 @app.route("/api/terraform/<cluster>/state")
@@ -27546,6 +27621,31 @@ def _tf_decl_id_ok(decl_id):
     return bool(_tfs.ID_RE.match(str(decl_id or "")))
 
 
+# Le cloud-init d'une ressource peut porter des mots de passe : lu par un
+# opérateur seulement, comme côté Harvester et KVM (/cloudinit). Un lecteur
+# voit la déclaration sans ces champs ; le code produit demande l'opérateur.
+_TF_HIDDEN_FOR_VIEWERS = ("user_data", "network_data")
+
+
+def _tf_decl_for_role(view):
+    if view is None or ROLE_RANK.get(current_role(), 0) >= ROLE_RANK["operator"]:
+        return view
+    out = dict(view)
+    res = []
+    for r in view.get("resources") or []:
+        spec = dict(r.get("spec") or {})
+        for key in _TF_HIDDEN_FOR_VIEWERS:
+            if spec.get(key):
+                spec[key] = "(hidden)"
+        for blk in ("cloudinit",):
+            if isinstance(spec.get(blk), list):
+                spec[blk] = [{k: ("(hidden)" if k in _TF_HIDDEN_FOR_VIEWERS and v else v)
+                              for k, v in (b or {}).items()} for b in spec[blk]]
+        res.append(dict(r, spec=spec))
+    out["resources"] = res
+    return out
+
+
 @app.route("/api/tf-declarations")
 @requires_auth
 def api_tf_declarations():
@@ -27556,7 +27656,7 @@ def api_tf_declarations():
     family = request.args.get("family") or None
     if family and family not in _tfs.TARGET_KINDS:
         return jsonify({"error": "family must be harvester or kvm"}), 400
-    return jsonify({"declarations": [_tf_decl_view(d) for d in TF_DECLS.list(cluster, family)]})
+    return jsonify({"declarations": [_tf_decl_for_role(_tf_decl_view(d)) for d in TF_DECLS.list(cluster, family)]})
 
 
 @app.route("/api/tf-declarations", methods=["POST"])
@@ -27593,7 +27693,7 @@ def api_tf_declaration_get(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
-    return jsonify(_tf_decl_view(d))
+    return jsonify(_tf_decl_for_role(_tf_decl_view(d)))
 
 
 @app.route("/api/tf-declarations/<decl_id>", methods=["PUT"])
@@ -27686,6 +27786,10 @@ def api_tf_declaration_delete(decl_id):
     d = TF_DECLS.get(decl_id) if _tf_decl_id_ok(decl_id) else None
     if d is None:
         return jsonify({"error": "declaration not found"}), 404
+    with TF_KVM_RUNNING_LOCK:
+        if decl_id in TF_KVM_RUNNING:
+            return jsonify({"error": "this declaration is running", "code": "running",
+                            "hint": "wait for the current plan, apply or destroy to end"}), 409
     ws = _tf_decl_ws(d, create=False)
     deployed = _tfst.addresses(ws) if ws.exists() else []
     if deployed:
@@ -27797,7 +27901,7 @@ def _tf_render_resources(resources, target_kind="harvester"):
         spec = (res or {}).get("spec") or {}
         # 2.3.0 : chaque famille de ressources va à sa cible ; le code libre
         # va dans les deux
-        if kind != "raw" and kind not in _tfs.KINDS_OF.get(target_kind, ()):
+        if kind not in _tfs.KINDS_OF.get(target_kind, ()):
             errors.append({"index": i, "kind": kind, "name": spec.get("name"),
                            "error": f"a {kind} resource does not go to a {target_kind} target"})
             continue
@@ -27979,7 +28083,7 @@ def _tf_apply_declaration_runner(run, cluster, kc, rendered, dry_run,
 
 
 # Fichiers d'un espace de déclaration qui ne décrivent pas une ressource.
-_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", "outputs.json"}
+_TF_KEEP = {"_providers.tf", "kubeconfig", "terraformrc", "tfplan", "tfplan.meta", ".outputs.json"}
 
 
 def _tf_decl_hash(rendered):
@@ -28023,9 +28127,9 @@ def _tf_decl_view(decl):
     d["deployed"] = _tfst.addresses(ws) if ws and ws.exists() else []
     # sorties non sensibles du dernier apply (adresses des nœuds RKE2...)
     d["outputs"] = None
-    if ws and (ws / "outputs.json").exists():
+    if ws and (ws / ".outputs.json").exists():
         try:
-            d["outputs"] = json.loads((ws / "outputs.json").read_text())
+            d["outputs"] = json.loads((ws / ".outputs.json").read_text())
         except (OSError, ValueError):
             d["outputs"] = None
     meta = {}
@@ -28102,7 +28206,14 @@ def _tf_decl_runner(run, cluster, kc, decl, rendered, mode, content_hash, use_sa
     except Exception as e:                 # noqa: BLE001 : l'action ne reste pas « en cours »
         log_tf.exception("declaration %s", decl.get("id"))
         if run.status not in ("done", "error"):
-            _close_err(run, "internal", str(e)[:300])
+            msg = str(e)
+            if kvm:
+                try:
+                    msg = _tf_kvm_scrub(msg, _tf_decl_ws(decl, create=False))
+                except ValueError:
+                    msg = type(e).__name__
+                msg = _tf_kvm_scrub(msg, TF_WORKSPACES)
+            _close_err(run, "internal", msg[:300])
     finally:
         if kvm:
             try:
@@ -28158,6 +28269,10 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         why = _tf_kvm_preflight(ws, host_decl, env)
         if why:
             return _close_err(run, "preflight", why)
+        if not destroying:
+            why = _tf_kvm_check_bases(host_decl, rendered)
+            if why:
+                return _close_err(run, "preflight", why)
     else:
         try:
             _stage_kubeconfig(kc, ws)
@@ -28232,7 +28347,7 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         if mode == "destroy":
             for f in list(ws.glob("*.tf")) + list(ws.glob("*.json")) + [ws / "tfplan", ws / "tfplan.meta"]:
                 if f.name != "_providers.tf":
-                    f.unlink(missing_ok=True)       # outputs.json compris
+                    f.unlink(missing_ok=True)       # .outputs.json compris
             TF_DECLS.mark_applied(decl["id"], "destroyed", user)
         step("destroy", "done", f"declaration '{name}' destroyed" if mode == "destroy" else "destroy plan ready")
         return done({"deployed": _tfst.addresses(ws)})
@@ -28252,6 +28367,9 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
             summary = _tfst.plan_summary(json.loads(js)) if rc2 == 0 else None
         except ValueError:
             summary = None
+        if kvm and summary:
+            # les chemins de l'espace (ISO cloud-init sous .tmp) ne sortent pas
+            summary = json.loads(_tf_kvm_scrub(json.dumps(summary), ws))
         meta = {"hash": content_hash, "revision": decl["revision"],
                 "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "by": user,
                 "summary": summary}
@@ -28283,26 +28401,29 @@ def _tf_decl_runner_body(run, cluster, kc, decl, rendered, mode, content_hash, u
         return _close_err(run, "apply", err.strip()[:400] or out.strip()[:400])
     TF_DECLS.mark_applied(decl["id"], "done", user)
     if kvm:
-        _tf_save_outputs(ws, tf)
+        _tf_save_outputs(ws, tf, _tfk.output_names(rendered))
     step("apply", "done", f"declaration '{name}' applied ({len(rendered)} resources)")
     return done({"plan": summary, "deployed": _tfst.addresses(ws)})
 
 
-def _tf_save_outputs(ws, tf):
-    """Garde les sorties NON sensibles du dernier apply (`outputs.json`,
-    0600) : adresses des nœuds, commande du kubeconfig. Une sortie sensible
-    n'est jamais écrite."""
+def _tf_save_outputs(ws, tf, wanted=None):
+    """Garde les sorties NON sensibles du dernier apply (`.outputs.json`,
+    0600) : adresses des nœuds, commande du kubeconfig. Seulement celles de
+    `wanted` (les sorties connues des modèles) ; une sortie sensible n'est
+    jamais écrite."""
     rc, js, _ = tf(["output", "-json"], 60)
     out = {}
     if rc == 0:
         try:
             for k, v in (json.loads(js or "{}") or {}).items():
+                if wanted is not None and k not in wanted:
+                    continue
                 if isinstance(v, dict) and not v.get("sensitive"):
                     out[k] = v.get("value")
         except ValueError:
             out = {}
     try:
-        _tf_private_write(ws / "outputs.json", json.dumps(out, indent=2).encode())
+        _tf_private_write(ws / ".outputs.json", json.dumps(out, indent=2).encode())
     except OSError as e:
         log_tf.warning("outputs: %s", e)
 
@@ -28760,6 +28881,27 @@ def api_terraform_destroy_declaration(cluster):
 
 # 2.3.0 : déclarations qui visent un hôte KVM. Seulement par identifiant
 # (gardées par la console) ; mêmes rôles que pour un cluster (opérateur).
+def _tf_kvm_needed_role(decl, mode):
+    """Rôle qu'il faut pour exécuter une déclaration KVM, aligné sur le
+    module KVM : un réseau sert à toutes les VMs de l'hôte, supprimer une VM
+    ou un volume est réservé (admin). Donc admin pour une déclaration qui
+    porte un réseau, pour toute destruction, et pour un apply dont le plan
+    relu détruit ou remplace ; opérateur pour le reste (un plan ne touche à
+    rien)."""
+    if mode in ("plan", "destroy-plan"):
+        return "operator"
+    if mode == "destroy":
+        return "admin"
+    if any(r.get("kind") == "kvm_network" for r in decl.get("resources") or []):
+        return "admin"
+    try:
+        meta = json.loads((_tf_decl_ws(decl, create=False) / "tfplan.meta").read_text())
+        counts = (meta.get("summary") or {}).get("counts") or {}
+    except (OSError, ValueError):
+        counts = {}
+    return "admin" if counts.get("delete") or counts.get("replace") else "operator"
+
+
 def _tf_kvm_route_start(host, mode_dry, mode_real):
     data = request.get_json(force=True, silent=True) or {}
     decl_id = str((data.get("declaration") or {}).get("id") or "")
@@ -28770,6 +28912,17 @@ def _tf_kvm_route_start(host, mode_dry, mode_real):
     if err:
         return jsonify({"error": err[0]}), err[1]
     dry_run = bool(data.get("dry_run", False))
+    mode = mode_dry if dry_run else mode_real
+    decl = TF_DECLS.get(decl_id)
+    if decl is not None and (decl.get("target_kind") or "harvester") == "kvm" and decl["cluster"] == host:
+        if mode == "apply" and not data.get("plan_hash"):
+            return jsonify({"error": "a KVM declaration applies a reviewed plan",
+                            "hint": "plan first, then apply with its plan_hash"}), 400
+        needed, have = _tf_kvm_needed_role(decl, mode), current_role()
+        if ROLE_RANK.get(have, 0) < ROLE_RANK[needed]:
+            return jsonify({"error": "forbidden", "role": have, "required": needed,
+                            "hint": f"this action needs the '{needed}' role; "
+                                    f"'{current_user() or 'you'}' has '{have}'"}), 403
     return _tf_decl_start(host, None, decl_id, mode_dry if dry_run else mode_real,
                           plan_hash=data.get("plan_hash") if not dry_run else None,
                           target_kind="kvm")
