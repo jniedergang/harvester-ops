@@ -2651,6 +2651,16 @@ sauvegardées.
 Transformer un serveur vierge en node Harvester opérationnel sans y
 toucher. Marche à suivre complète dans **[bare-metal.md](bare-metal.md)**.
 
+- **Quatre onglets (2.1.0)** : **Machines** (par défaut : les machines de
+  la dernière découverte avec leurs gestes, la découverte dans sa propre
+  fenêtre, le bandeau de jonction et un contrôle « aucun ISO de la version
+  X » avant d'agir), **Profils**, **Images** (le magasin d'ISO) et
+  **Historique** (les actions bare-metal de l'Activité, avec leur journal).
+  Adresses `#automation/pxe/<onglet>` ; `#automation/pxe` ouvre Machines.
+  La console garde la dernière découverte (cache de lecture dans le
+  répertoire d'état, jamais les identifiants) : la liste survit à un
+  rechargement, avec sa date et un bouton **Relire**.
+
 - **Découverte BMC / Redfish** — pointer un ou plusieurs endpoints BMC et
   lire les profils des nodes : modèle, numéro de série, BIOS, mémoire,
   NICs avec leurs MAC, état d'alimentation, disques amorçables, et la

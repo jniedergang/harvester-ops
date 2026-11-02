@@ -16,7 +16,7 @@ import pytest
 pytest.importorskip("playwright")
 from playwright.sync_api import expect  # noqa: E402
 
-from nav import goto, settle  # noqa: E402
+from nav import bm_discover, goto, settle  # noqa: E402
 from test_cluster_switch import two_clusters  # noqa: E402,F401  (fixture)
 
 A, B = "harv-fake", "harv-second"
@@ -172,14 +172,12 @@ def _open_join(context, flask_server, join_url):
     page.route(f"**/api/clusters/{A}/join-url", join_read)
     page.on("dialog", lambda d: d.accept())
     page.click("#btn-join-node")
-    page.wait_for_function("() => location.hash === '#automation/pxe'")
+    # 2.1.0 : l'onglet Machines de Bare-metal, où reste le bandeau de jonction
+    page.wait_for_function("() => location.hash === '#automation/pxe/machines'")
     settle(page)
     assert len(reads) == 1                    # lue à l'ouverture, dans le cluster
     page.mouse.move(1100, 450)
-    form = page.locator("#bmc-discover-form")
-    form.locator('[name="hosts"]').fill(HOST)
-    form.locator('[name="password"]').fill("bmc-secret")
-    form.locator('button[type="submit"]').click()
+    bm_discover(page, HOST, "bmc-secret")          # 2.1.0 : fenêtre de découverte
     page.locator(f'.bmc-install[data-host="{HOST}"]').click()
     win = page.locator(f'[id="fp-bm-install-{HOST}"]')
     expect(win.locator("#bm-install-form")).to_be_visible()
@@ -191,6 +189,8 @@ def test_join_a_node_opens_bare_metal_with_the_address_read_from_the_cluster(con
     page, win, installs = _open_join(context, flask_server, "https://192.0.2.100:443")
     banner = page.locator("#bm-join-target")
     expect(banner).to_contain_text(A)
+    # le bandeau est sur Machines, au-dessus des machines
+    expect(page.locator('#bmc-body [data-bm-pane="machines"]')).to_be_visible()
     expect(banner).to_contain_text("https://192.0.2.100:443")
     assert win.locator('[name="mode"]').input_value() == "join"
     url = win.locator('[name="server_url"]')

@@ -694,9 +694,10 @@ const CAPI = (() => {
     // Show only that content panel
     $$('#tab-automation > .sub-tab-content').forEach(x =>
       x.classList.toggle('active', x.dataset.subtab === name));
-    // 3. The inline 📦/🛠 strip is only meaningful for capi
-    const inline = document.querySelector('#tab-automation .sub-tabs-inline');
-    if (inline) inline.classList.toggle('hidden', name !== 'capi');
+    // 3. Each inline strip belongs to one sub-tab (data-only-for) : Cluster
+    // API, and since 2.1.0 Bare-metal
+    $$('#tab-automation .sub-tabs-inline[data-only-for]').forEach(x =>
+      x.classList.toggle('hidden', x.dataset.onlyFor !== name));
     try { localStorage.setItem('harvester_ops_automation_subtab', name); } catch {}
     paintMgmt(name);
     // Navigation 2.0 : l'adresse porte le sous-onglet (#automation/<x>)
@@ -710,7 +711,7 @@ const CAPI = (() => {
     // v1.53.0 : plus de sous-onglet « Création de clusters », la création
     // s'ouvre en fenêtre depuis Clusters K8S (un choix mémorisé y mène).
     if (name === 'clusters') name = 'k8s';
-    $$('#tab-automation .sub-tabs-inline .sub-tab').forEach(x =>
+    $$('#tab-automation .sub-tabs-inline .sub-tab[data-capi-tab]').forEach(x =>
       x.classList.toggle('active', x.dataset.capiTab === name));
     $$('[data-subtab="capi"] .capi-tab-content').forEach(x =>
       x.classList.toggle('active', x.dataset.capiTab === name));
@@ -729,7 +730,7 @@ const CAPI = (() => {
     // The main-tab routing (to #tab-automation) is handled by app.js.
     document.addEventListener('click', (e) => {
       // Inline Cluster API sub-tabs
-      const inlineBtn = e.target.closest('#tab-automation .sub-tabs-inline .sub-tab');
+      const inlineBtn = e.target.closest('#tab-automation .sub-tabs-inline .sub-tab[data-capi-tab]');
       if (inlineBtn) { e.preventDefault(); selectCapiTab(inlineBtn.dataset.capiTab); }
     });
 

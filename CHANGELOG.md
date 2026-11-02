@@ -4,6 +4,85 @@ All notable changes to this project will be documented here.
 Format inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 This file summarises each minor release; per-patch detail lives in `git log`.
 
+## [2.1.0] - 2026-11-02 - Bare-metal in tabs
+
+### Changed
+- **Automation > Bare-metal is in four tabs**, in the header like the Cluster
+  API tabs: **Machines** (default), **Profiles**, **Images** and **History**.
+  Each tab has its address; F5 shows the same tab, and Back works as for
+  any other screen:
+
+  | 2.0 place (one column) | 2.1.0 address |
+  | --- | --- |
+  | Discovery form and its results | `#automation/pxe/machines` (also `#automation/pxe`) |
+  | Multi-node installation profiles, batch launch | `#automation/pxe/profiles` |
+  | Installation images (ISO store) | `#automation/pxe/images` |
+  | (new) Bare-metal actions of Activity | `#automation/pxe/history` |
+
+- **Machines** lists the discovered machines, one row each: BMC, model,
+  serial and BIOS, CPU and memory, disks, network cards (MAC and link
+  state), power state, and the gestures **Install** (or **Join** *cluster*
+  during a join), power on, graceful shutdown, force off and restart, each
+  with its tooltip. **Discover...** opens the discovery form in a window.
+  The "Join to cluster X" banner of **Join a node** stays on top of
+  Machines.
+
+### Added
+- **The console remembers the last discovery.** The addresses, the date
+  and what each BMC answered stay after a reload or the next day; the line
+  above the list gives the date, and **Re-read** reads the same BMCs again
+  (it asks for the credentials when the page was reloaded). Kept in
+  `<state>/baremetal-last-discovery.json` (0600, relative to the state
+  directory); only the known fields of a machine are kept, never a
+  credential: the BMC user and password stay in the page, as before.
+  It is a read cache like the folders cache, written during the Redfish
+  read with no tracked action, since nothing changes on a machine.
+  Reading it needs the admin role.
+- **Check before acting: no ISO.** Machines says **No ISO in the store**
+  when the store is empty and, during a join, **No ISO of version X in the
+  store** when no ISO has the cluster's version, with a link to Images.
+  `GET /api/clusters/<c>/join-url` now also returns `harvester_version`
+  and `isos_of_version` (version read in `harvester-release.yaml` of each
+  ISO, or from its name).
+- **History**: installs and joins, batches, discovery boots and power
+  gestures, running and past, from the action filter of Activity (server
+  side), each with a link to the action and its log
+  (`#activity/action/<id>`); read again every five seconds while an action
+  runs.
+
+### Fixed
+- **Refresh** no longer wipes a discovery: it reads the open tab again.
+- **A BMC address is checked before any read** (`POST /api/bmc/discover`):
+  a host name or IP with an optional port; a path, a scheme or a user name
+  is refused with `fields: ["hosts"]`. Duplicates are read once.
+- A power gesture without credentials (page reloaded) opens the discovery
+  window to ask for them, instead of an alert.
+
+### Internal
+- `routes.js`: `AUTOMATION_PANES` (`#automation/pxe/<tab>`); `router.js`
+  carries `bmTab` both ways; `BMC.setTab()` and `BMC.tab()`.
+- `capi.js`: each inline strip of Automation belongs to one sub-tab
+  (`data-only-for`), and the Cluster API strip handlers only take its own
+  buttons.
+- Unused `bmc.speed` translation removed.
+
+### Tests
+- `tests/api/test_bm_tabs_210.py`: the discovery is remembered without
+  credentials (0600, no temporary file left, moves with the state
+  directory, known fields only, bounded), absent or unreadable file reads
+  as null, a storage failure keeps the answer, one refused BMC address per
+  row, admin-only read, the cluster version and its ISOs in `join-url`,
+  `#automation/pxe/<tab>` addresses; mutations: a whitelisted `password`,
+  an unchecked address, `routes.js` without the tab list.
+- `tests/e2e/test_bm_tabs_210.py`: default tab and the old address, each
+  tab (content, address without history entry, F5), the strip follows the
+  Automation sub-tab, discovery window, last discovery after a reload
+  through the real route with no credential in the state file and Re-read
+  asking for them, the "no ISO" banners and their link, the join banner,
+  History filtered on bare-metal actions with its log links, its error and
+  empty paths, and escaping.
+- Navigation inventory and address tables: one row per tab.
+
 ## [2.0.4] - 2026-11-02 - Row menu always visible
 
 ### Fixed

@@ -2127,6 +2127,8 @@ const App = (() => {
       activityFilters.cluster = t.activityHost;
       saveActivityFilters();
     }
+    // 2.1.0 : l'onglet de Bare-metal de l'adresse, posé avant le rendu
+    if (t.tab === 'automation' && t.bmTab && window.BMC && BMC.setTab) BMC.setTab(t.bmTab, { render: false });
     const show = () => {
       if (t.overview) paintOverviewMode(t.overview);
       setTab(t.tab);
@@ -2177,6 +2179,7 @@ const App = (() => {
     const kvm = KVM_SCREENS.includes(tab) ? navKvm : null;
     return {
       tab, cluster: currentCluster, overview: overviewMode(), automation,
+      bmTab: tab === 'automation' && automation === 'pxe' && window.BMC && BMC.tab ? BMC.tab() : null,
       pane: tab && window.Sections && Sections.isSection(tab) ? Sections.current(tab) : null,
       kvm, kvmTab: kvm ? navKvmTab : null,
       hostsKind: tab === 'hosts' && window.HostsIndex ? (HostsIndex.kind() || null) : null,

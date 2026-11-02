@@ -279,7 +279,9 @@ qui défile seule.
   visent leurs appels, le dernier hôte Harvester visité sauf si vous en
   choisissez un autre dans le menu à côté. Le choisir là ne change pas
   l'hôte ouvert. Bare-metal n'a pas cet en-tête : une jonction choisit son
-  cluster elle-même.
+  cluster elle-même. Bare-metal est en quatre onglets (2.1.0) : **Machines**
+  (par défaut), **Profils**, **Images** et **Historique**, à
+  `#automation/pxe/<onglet>` ; l'ancienne `#automation/pxe` ouvre Machines.
 
 Chaque entrée est un vrai lien : le clic milieu l'ouvre dans un nouvel
 onglet, et l'adresse se copie. Un lien ouvert avant la connexion est rouvert
@@ -311,8 +313,10 @@ que l'encadrer.
 - **Paramètres** (`#harvester/<c>/params/<onglet>`), en onglets :
   - **Nœuds** : la vue en blocs des nœuds, avec la maintenance et les
     réglages d'hôte, et **Joindre un nœud** (administrateur), qui ouvre
-    Automatisation > Bare-metal avec ce cluster déjà choisi : la fenêtre
-    d'installation s'ouvre en mode jonction vers `https://<VIP>:443`. La VIP
+    Automatisation > Bare-metal > Machines (`#automation/pxe/machines`) avec
+    ce cluster déjà choisi : la fenêtre d'installation s'ouvre en mode
+    jonction vers `https://<VIP>:443`, et l'onglet dit avant d'agir quand le
+    magasin n'a aucun ISO de la version du cluster. La VIP
     est lue dans le cluster même (ConfigMap `harvester-system/vip` de
     Harvester) au clic. Par un kubeconfig Rancher, ou quand la VIP ne se lit
     pas, aucune adresse n'est devinée : le bandeau le dit et vous la

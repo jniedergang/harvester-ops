@@ -75,6 +75,8 @@ def address_table():
         "#dr", "#dr/rp-0123456789ab", "#dr/links",
         "#migrations", "#gpus", "#bookings", "#usage",
         "#automation/capi", "#automation/terraform", "#automation/pxe",
+        # 2.1.0 : onglets de Bare-metal
+        "#automation/pxe/machines", "#automation/pxe/profiles", "#automation/pxe/images", "#automation/pxe/history",
         "#activity", f"#activity/host/harvester/{c}", f"#activity/host/kvm/{h}",
         # nom Harvester à point
         "#harvester/lab.home.lo/params/storage/images",
@@ -187,6 +189,11 @@ ERRORS = [
     ("#dr/a/b", "segment en trop sous dr"),
     ("#automation", "automation sans sous-onglet (ancien jeton)"),
     ("#automation/xen", "sous-onglet inconnu"),
+    # 2.1.0 : onglets de Bare-metal, un chemin d'erreur par ligne
+    ("#automation/pxe/zzz", "onglet de Bare-metal inconnu"),
+    ("#automation/capi/machines", "onglet de Bare-metal sous un autre sous-onglet"),
+    ("#automation/pxe/machines/x", "segment de trop après l'onglet"),
+    ("#automation/pxe/Machines", "onglet en majuscules"),
     ("#gpus/x", "racine avec segment"),
     ("#activity/host/harvester/-a", "activité, nom invalide"),
     ("#activity/action", "action sans identifiant"),

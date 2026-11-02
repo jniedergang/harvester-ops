@@ -48,3 +48,18 @@ def address(tab, cluster="harv-fake", kvm="node2", sub=None):
     if tab == "automation":
         return f"#automation/{sub or 'capi'}"
     return f"#{tab}"                       # gpus, bookings, usage, activity
+
+
+def bm_discover(page, host, password, user=None):
+    """2.1.0 : Bare-metal > Machines, la découverte passe par sa fenêtre
+    (bouton « Découvrir… ») ; attend la ligne de la machine."""
+    page.locator('#bmc-body [data-bm="discover-open"]').click()
+    form = page.locator("#bm-discover-modal #bmc-discover-form")
+    form.wait_for(state="visible")
+    form.locator('[name="hosts"]').fill(host)
+    if user is not None:
+        form.locator('[name="user"]').fill(user)
+    form.locator('[name="password"]').fill(password)
+    form.locator('button[type="submit"]').click()
+    page.locator(f'#bmc-discover-result tr.bm-machine[data-host="{host}"]').wait_for(state="visible")
+    return form

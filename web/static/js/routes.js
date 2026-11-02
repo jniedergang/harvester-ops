@@ -44,6 +44,9 @@
     forklift: ['prep', 'sources', 'inventory', 'waves'],
   };
   const AUTOMATION = ['capi', 'terraform', 'pxe'];
+  // 2.1.0 : onglets de Bare-metal (#automation/pxe/<onglet>) ; sans onglet,
+  // #automation/pxe ouvre Machines
+  const AUTOMATION_PANES = { pxe: ['machines', 'profiles', 'images', 'history'] };
   // 2.0.0 : vues de tous les hôtes KVM (1.96-1.100), onglets de l'index de
   // la famille KVM (#hosts/kvm) à côté du tableau des hôtes
   const KVM_FLEET_TABS = ['capacity', 'pools', 'networks'];
@@ -168,7 +171,11 @@
         if (rest[0] === 'links') return route('dr', { tab: 'links' });
         return validId(rest[0]) ? route('dr', { id: rest[0] }) : null;
       case 'automation':
-        return n === 1 && AUTOMATION.includes(rest[0]) ? route('automation', { tab: rest[0] }) : null;
+        if (n === 1 && AUTOMATION.includes(rest[0])) return route('automation', { tab: rest[0] });
+        if (n === 2 && (AUTOMATION_PANES[rest[0]] || []).includes(rest[1])) {
+          return route('automation', { tab: rest[0], pane: rest[1] });
+        }
+        return null;
       case 'activity':
         if (!n) return route('activity');
         if (n === 3 && rest[0] === 'host' && validHost(rest[1], rest[2])) {
@@ -233,6 +240,7 @@
         break;
       case 'automation':
         parts.push('automation', r.tab || 'capi');
+        if (r.pane && (AUTOMATION_PANES[r.tab] || []).includes(r.pane)) parts.push(r.pane);
         break;
       case 'activity':
         parts.push('activity');
@@ -292,7 +300,7 @@
 
   const api = {
     parse, format, fromLegacy, validHost, acceptable,
-    LEGACY, HARVESTER_PARAMS, KVM_PARAMS, HARVESTER_PANES, IMPORT_PANES, AUTOMATION, KVM_FLEET_TABS,
+    LEGACY, HARVESTER_PARAMS, KVM_PARAMS, HARVESTER_PANES, IMPORT_PANES, AUTOMATION, AUTOMATION_PANES, KVM_FLEET_TABS,
   };
   root.Routes = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;

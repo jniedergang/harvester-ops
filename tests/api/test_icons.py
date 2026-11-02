@@ -141,7 +141,8 @@ def test_baremetal_actions_use_svg_not_emoji():
     """v1.19.0 — the bare-metal power/install buttons went through the same
     emoji-to-SVG pass as the VM row."""
     js = (JS / "bmc.js").read_text()
-    bar = js.split("bmc-power", 1)[1].split("</div>", 1)[0]
+    # 2.1.0 : les gestes sont dans la cellule d'actions de la ligne d'une machine
+    bar = js.split('class="bm-power-group"', 1)[1].split("</td>", 1)[0]
     assert not EMOJI_RE.search(bar), (
         f"emoji left on the bare-metal action bar: {EMOJI_RE.findall(bar)}")
     assert bar.count("Icons.svg(") >= 4

@@ -80,6 +80,7 @@ def open_tab(context, flask_server):
     page.wait_for_function("window.BMC && window.BMProfiles && window.FloatingPanels && window.i18n")
     page.click('#host-nav [data-hnav-root="automation"][data-hnav-tab="pxe"]')   # 2.0.0 : entrée du menu des hôtes
     page.mouse.move(1100, 450)
+    page.locator('#tab-automation [data-bm-tab="profiles"]').click()             # 2.1.0 : onglet Profils
     expect(page.locator('#bmp-table tr[data-profile="rack-a"]')).to_be_visible()
     return page, calls
 

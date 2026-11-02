@@ -28,7 +28,8 @@
     if (!route || !route.name) return null;
     const t = (tab, extra) => Object.assign({ tab, cluster: null, pane: null, overview: null, automation: null,
                                               kvm: null, kvmTab: null, hostsKind: null, activityHost: null,
-                                              vms: null, folderId: null, drPlan: null, activityAction: null }, extra || {});
+                                              vms: null, folderId: null, drPlan: null, activityAction: null,
+                                              bmTab: null }, extra || {});
     switch (route.name) {
       case 'host': {
         if (route.kind === 'kvm') {
@@ -84,7 +85,9 @@
       case 'dr': return route.tab === 'links' ? t('drlinks') : t('drplans', { drPlan: route.id || null });
       case 'migrations': return t('forkliftglobal');
       case 'gpus': case 'bookings': case 'usage': return t(route.name);
-      case 'automation': return t('automation', { automation: route.tab || 'capi' });
+      // 2.1.0 : onglet de Bare-metal ; #automation/pxe seul ouvre Machines
+      case 'automation': return t('automation', { automation: route.tab || 'capi',
+                                                  bmTab: route.tab === 'pxe' ? (route.pane || 'machines') : null });
       // 2.0.0 (tâche 9) : Activité filtrée sur un hôte (filtre `cluster`
       // existant ; les actions d'un hôte KVM portent l'étiquette kvm:<hôte>)
       case 'activity':
@@ -146,7 +149,11 @@
       case 'kvmdr': return s.kvm ? K({ sub: 'dr' }) : null;
       case 'drplans': return s.drPlan ? Rt.format({ name: 'dr', id: s.drPlan }) : '#dr';
       case 'drlinks': return '#dr/links';
-      case 'automation': return '#automation/' + (Rt.AUTOMATION.includes(s.automation) ? s.automation : 'capi');
+      case 'automation': {
+        const a = Rt.AUTOMATION.includes(s.automation) ? s.automation : 'capi';
+        const panes = Rt.AUTOMATION_PANES[a] || [];
+        return '#automation/' + a + (panes.includes(s.bmTab) ? '/' + s.bmTab : '');
+      }
       default: return null;
     }
   }
