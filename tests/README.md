@@ -58,6 +58,7 @@ make test-live                  # ≈ pytest --live -v
 - **`flask_server`** (session-scoped): boots `web/app.py` on a random port, with a sandboxed `config.yaml` declaring a fake cluster `harv-fake` (no real cluster needed). Test logs/bundles go under `tmp_path`.
 - **`api`**: tiny request helper with assertion-friendly status check, returns `(status, json_body)`.
 - **`browser`** (Playwright): a chromium browser; each test gets a fresh `page`.
+- **Host tools guard** (`tests/conftest.py`, 2.0.2): `podman`, `docker` and `systemctl` resolve to guards placed first on `PATH` for every test and for the test server. A guard logs the call and exits 97, so a test never reaches the real tools of the machine that runs it. A test that needs a runtime puts its own fake tools before the guard, or runs with a `PATH` that holds only them.
 
 ## CI guidelines
 

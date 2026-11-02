@@ -45,6 +45,24 @@ os.environ.setdefault("HARVESTER_OPS_ACCOUNTS", _TF_TEST_DIR + "/accounts.json")
 # v1.78.0 : les clusters déclarés par la console (clusters.d, clés,
 # kubeconfigs) des tests restent dans leur dossier
 os.environ.setdefault("HARVESTER_OPS_STATE_DIR", _TF_TEST_DIR + "/state")
+# 2.0.2 : aucun test ne doit atteindre le podman, le docker ou le systemctl
+# RÉELS de la machine (vécu : un test de désinstallation a retiré l'étiquette
+# localhost/harvester-ops:latest de l'hôte). Des gardes passent devant dans le
+# PATH, consignent l'appel et répondent 97 ; un test qui a besoin d'un moteur
+# pose ses propres faux outils devant (ou un PATH qui ne contient qu'eux).
+HOST_TOOLS_GUARDED = ("podman", "docker", "systemctl")
+HOST_TOOLS_GUARD_DIR = os.path.join(_TF_TEST_DIR, "host-tools-guard")
+HOST_TOOLS_GUARD_LOG = HOST_TOOLS_GUARD_DIR + ".log"
+os.makedirs(HOST_TOOLS_GUARD_DIR, exist_ok=True)
+for _tool in HOST_TOOLS_GUARDED:
+    _guard = os.path.join(HOST_TOOLS_GUARD_DIR, _tool)
+    with open(_guard, "w") as _f:
+        _f.write('#!/bin/sh\nprintf "%%s %%s\\n" "%s" "$*" >> "%s"\n'
+                 'echo "test guard: the real %s of this host is not available to tests" >&2\n'
+                 'exit 97\n' % (_tool, HOST_TOOLS_GUARD_LOG, _tool))
+    os.chmod(_guard, 0o755)
+os.environ["PATH"] = HOST_TOOLS_GUARD_DIR + os.pathsep + os.environ.get("PATH", "")
+os.environ["HARVESTER_OPS_TEST_TOOLS_GUARD"] = HOST_TOOLS_GUARD_DIR
 
 import pytest
 

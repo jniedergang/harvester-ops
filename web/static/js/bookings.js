@@ -190,7 +190,7 @@ const Bookings = (() => {
     if (cur.prefs.view === 'calendar') {
       cur.host.querySelector('.res-count').textContent = '';
       const pools = (cur.pools || []).filter((p) => !cur.prefs.cluster || p.cluster === cur.prefs.cluster);
-      body.innerHTML = calendarHtml(inCluster, d.now, pools);
+      body.innerHTML = hiddenHtml(d) + calendarHtml(inCluster, d.now, pools);
       return;
     }
     const rows = cur.prefs.view === 'mine' ? inCluster.filter((b) => b.mine) : inCluster;
@@ -198,7 +198,15 @@ const Bookings = (() => {
     const rank = { active: 0, upcoming: 1, ended: 2, cancelled: 3 };
     rows.sort((a, b) => (rank[a.state] - rank[b.state]) || a.start.localeCompare(b.start));
     cur.host.querySelector('.res-count').textContent = tr('bkg.count', { n: rows.length });
-    body.innerHTML = rows.length ? tableHtml(rows) : `<p class="form-hint bkg-empty">${esc(cur.prefs.view === 'mine' ? tr('bkg.noneMine') : tr('bkg.none'))}</p>`;
+    body.innerHTML = hiddenHtml(d) + (rows.length ? tableHtml(rows) : `<p class="form-hint bkg-empty">${esc(cur.prefs.view === 'mine' ? tr('bkg.noneMine') : tr('bkg.none'))}</p>`);
+  }
+
+  /** Décision 96 : les clusters que Rancher cache à la personne, en nombre
+   *  seulement (jamais un nom), comme la vue des VMs. */
+  function hiddenHtml(d) {
+    return d && d.hidden_count > 0
+      ? `<p class="hint bkg-hidden tip" data-bkg="hidden" data-tip="${esc(tr('avm.cl.hiddenTip'))}">${icon('info', 12)} ${esc(tr('avm.cl.hidden', { n: d.hidden_count }))}</p>`
+      : '';
   }
 
   // -- tableau --------------------------------------------------------------------

@@ -250,7 +250,7 @@ def quota_month(start, end, now):
     return month_start(ref)
 
 
-def report(bookings, samples, start, end, quotas=(), tz=0, now=None):
+def report(bookings, samples, start, end, quotas=(), tz=0, now=None, quota_bookings=None):
     """Le décompte d'une période.
 
     `bookings` : les réservations (annulées comprises) ; `samples` : les
@@ -258,7 +258,8 @@ def report(bookings, samples, start, end, quotas=(), tz=0, now=None):
     monthly_hours, max_units}]. Rend {from, to, holders, days, totals,
     quota_month} ; une ligne par titulaire (personne, groupe, ou namespace
     « sans réservation ») avec réservé, consommé, gaspillage, hors règle,
-    le détail par cluster et type d'unité, et son quota."""
+    le détail par cluster et type d'unité, et son quota. `quota_bookings` :
+    les réservations du décompte des quotas (par défaut `bookings`)."""
     start, end = _t(start), _t(end)
     now = _t(now) if now else end
     rows = {}
@@ -329,7 +330,9 @@ def report(bookings, samples, start, end, quotas=(), tz=0, now=None):
         q = qmap.get(key)
         quota = None
         if q:
-            month_booked = sum(booking_hours(b, qm, qm_end) for b in bookings or [] if holder_key(b) == key)
+            month_booked = sum(booking_hours(b, qm, qm_end) for b in
+                               (bookings if quota_bookings is None else quota_bookings) or []
+                               if holder_key(b) == key)
             cap = q.get("monthly_hours")
             quota = {"monthly_hours": cap, "max_units": q.get("max_units"), "month_booked": _r(month_booked),
                      "remaining": None if cap is None else _r(max(0.0, cap - month_booked)),

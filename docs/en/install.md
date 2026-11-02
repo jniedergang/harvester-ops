@@ -10,7 +10,7 @@
 | `ssh` / `ssh-keygen` | OpenSSH 7+; `ssh-keygen -Y` (8.2+) for updates, otherwise the console image checks the signature (1.87.2) | Node shutdown + release signature verification |
 | `yq` | ≥ 4.0 (mikefarah) | Config parsing |
 | `python3` | ≥ 3.9 | JSON helpers + Flask UI |
-| `podman` | recent | Required only if you install the web UI |
+| `podman` or `docker` | recent | Required only if you install the web UI |
 
 One-liner to install dependencies:
 
@@ -24,6 +24,36 @@ and pins its absolute path in `harvester-ops-update.service`. It refuses to
 install the agent if none is available, without changing the system Python
 alternative. A current Python inside the container does not satisfy this
 host requirement.
+
+The installer and update agent preserve the runtime used by the installed
+`harvester-ops.service`; installing Podman alongside an existing Docker console
+does not switch image stores. On a fresh host, Podman is preferred when both
+are available. Set `HARVESTER_OPS_CONTAINER_RUNTIME=docker` or `podman` explicitly
+when needed, for example `sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh`.
+A selected runtime that is missing is an error, rather than an implicit switch.
+The update agent passes its choice to the release installer and uses it for the
+previous-image tag and rollback as well.
+
+The installer renders the service for that runtime. Docker requires
+`docker.service`. The Podman CLI needs no socket service.
+
+Docker has no `--passwd-entry`. A pre-start helper, run as root, copies the
+image's account files and adds the host service account. It writes them in
+`/run/harvester-ops-nss/`, a root-owned directory that systemd recreates at
+each start (`RuntimeDirectory=`). The files are mounted read-only, so SSH
+resolves the non-root account inside the container. Nothing is written under
+the state directory, which the console account owns.
+
+Existing service drop-ins stay in place, and operator overrides still win.
+Remove obsolete runtime-specific overrides when you switch runtime on purpose.
+
+A Docker-only host whose unit still runs Podman cannot be moved by a web
+update: the agent refuses and names the command to run instead. Run it on the
+host, from the extracted release:
+`sudo HARVESTER_OPS_CONTAINER_RUNTIME=docker ./install.sh --upgrade`.
+The same applies to a mixed host updated from 2.0.1 or older, whose agent
+still picks Podman first: install this release once with
+`./install.sh --upgrade` on the host, then use web updates.
 
 When the host's `ssh-keygen` does not know `-Y` (OpenSSH before 8.2, as on
 RHEL 8), the update agent has the signature checked by the `ssh-keygen` of
@@ -297,6 +327,25 @@ version number, then the **Update** tab (administrators).
 The restart leaves the interface unavailable for a few seconds; the clusters
 are not touched. An install is refused while actions are running (they would
 stop with the restart) unless you confirm.
+
+**Rolling back (2.0.2).** The **Previous versions** card of the same tab
+goes back to an older release. It lists the staged archives that are signed
+and older than the running version. To go back, give the older archive and
+its `.sig` (from the release page of that version) like an offline update.
+**Roll back to x.y.z** opens a window that says what is kept (configuration,
+accounts, certificates, history, folders and the rest of the state; the
+clusters) and what is lost (everything added or fixed after that version,
+security fixes included). The rollback starts only once you type the target
+version. It then follows the same path as an update: the agent checks the
+signature, keeps the current files and image, installs the older release,
+and puts the current one back by itself if the older one does not answer.
+The request is tracked in Activity (`console-update:rollback`), and the API is
+`POST /api/update/rollback` with `{"archive": ..., "confirm": "<version>"}`
+(administrators). The agent removes its backup once an update succeeds, so a
+staged signed archive is the only way back. Two limits: below 2.0.0, read the
+2.0.0 note "Rolling back to 1.101.x" in the CHANGELOG first; below 2.0.2, the
+console cannot run under Docker, so on a Docker host the agent puts the
+current version back.
 
 **Trust.** The agent installs only an archive signed by a key of
 `/opt/harvester-ops/update-signers` (shipped with the installed version), or

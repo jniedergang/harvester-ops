@@ -264,7 +264,20 @@ cannot read, or that no longer exists, is never filed (its line fails). `empty-i
 objects of a folder to the target, its subfolders under it (under the root
 for `unfiled`), then deletes the folder in the same action; nothing moves
 when a subfolder cannot go there (name taken, limits), and the folder stays
-while anything is left inside. Undo creates the folder again and puts
+while anything is left inside.
+
+`delete` (2.0.2) purges the entries of objects proven gone before it
+deletes: a KVM host or a cluster no longer declared, a domain its host says
+is gone (`failed to get domain`), a VM or a workload the cluster answers
+`NotFound` for, read with the person's identity. Each purge is a `done`
+journal line (`to_path` empty, message `purged: <reason>`) and a step.
+Any other entry blocks with its reason (object present, object the person
+cannot see, host unreachable, read error, any other "not found" text such
+as a missing kubeconfig context), and nothing is purged then. From the
+console, the request carries the clusters the person sees and their
+kubeconfigs: a cluster Rancher hides is never read, and never with the
+console's own kubeconfig. A purged entry the person does not see (a cluster
+removed from the configuration) is counted, not named. Undo creates the folder again and puts
 everything back; when a folder cannot go back (its name taken since, its
 former parent gone), its objects stay with it and are counted as
 conflicts. Resume replays the folder lines not done yet: a subfolder move
@@ -390,7 +403,7 @@ role, reading is for everyone.
 | `GET /api/folders` | the tree, each folder with its `origin` (`console`, or `objects` when a fleet read created it from the objects naming it) and `counts` `{vms, containers, hosts}`, subfolders included, limited to what the person saw in their own latest fleet reads (`null`: not read yet) |
 | `POST /api/folders` | create (`parent_id`, `name`); a sibling with the same name answers 409 `{conflicts}` before anything starts |
 | `PATCH /api/folders/<id>` | rename (`name`) or move (`parent_id`, `null` for the root), one change at a time; its objects are rewritten in the same action. Folders are sorted by name: `position` is refused. A sibling with the same name (at the new name or under the new parent) answers 409 `{conflicts}` before anything starts |
-| `DELETE /api/folders/<id>` | delete an empty folder; a non-empty one answers 409 with what the person sees (`count_visible`, `subfolders`, and `hidden` without a number) |
+| `DELETE /api/folders/<id>` | delete an empty folder; a non-empty one answers 409 with what the person sees (`count_visible`, `subfolders`, and `hidden` without a number). Since 2.0.2, entries of objects absent from the person's reads go to the action, which purges those proven gone (see below) |
 | `POST /api/folders/<id>/empty-into` | `target_id` (a folder or `unfiled`): move the content, then delete, in one action; a subfolder whose name is already taken in the target answers 409 before anything moves |
 | `POST /api/folders/assign` | `objects` (keys; a KVM VM also gives its `host`) and `to` (a folder id or `unfiled`) |
 | `POST /api/folders/check` | the checks shown before a move, object by object, nothing written |
@@ -1647,6 +1660,10 @@ API: `GET /api/bookings` (`?cluster=`, `?scope=mine`),
 written), `POST /api/bookings` (202 with the action id, 409 with the
 reasons), `POST /api/bookings/<id>/cancel`.
 
+Privacy (2.0.2): a Rancher session sees no booking of a cluster Rancher
+hides from it. The screen only says how many clusters are not shown
+("Clusters not shown: N"), never their names.
+
 Command line: `bin/harvester-bookings.py list|check|create|cancel`. The
 console reads the GPU inventory with your identity and passes it in the
 request (`inventory` in `--spec`), so the script does not need the
@@ -1723,6 +1740,12 @@ UTC; `tz` in minutes east of UTC), `GET /api/usage.csv` (same parameters),
 `GET /api/usage/quotas`, `POST /api/usage/quotas`
 (`{holder: {kind, name}, monthly_hours, max_units}`, 202 with the action
 id), `DELETE /api/usage/quotas` (`{holder}`).
+
+Privacy (2.0.2): for a Rancher session, the report, the chart, the CSV and
+the sampler line leave out the clusters Rancher hides from it, and the
+consumers without booking that only run there. The view says how many
+clusters are not shown, never their names. The quota of the month still
+counts every booking of the holder, as the check of a new booking does.
 
 Command line: `bin/harvester-bookings.py usage [--from --to] [--tz]
 [--json | --csv]` and `bin/harvester-bookings.py quota list|set|delete`
@@ -2671,7 +2694,9 @@ either (the grouped read is retried kind by kind).
   download, or give an archive and its signature for an air-gapped site, then
   install. The host's update agent checks the signature, installs, restarts
   the console and puts the previous version back by itself if the new one
-  does not answer. See [install.md](install.md#updating-harvops-1820).
+  does not answer. Since 2.0.2 the tab also goes back to an older signed
+  release, after a window that says what is kept and lost and asks for the
+  target version to be typed. See [install.md](install.md#updating-harvops-1820).
 
 - **A sidebar that gives the screen back.** The left menu is a 56 px rail
   of icons that expands over the page while the pointer is on it, and

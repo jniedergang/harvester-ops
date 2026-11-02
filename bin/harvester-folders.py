@@ -43,6 +43,9 @@ Avant d'écrire, la valeur portée par l'objet est relue (kubectl get, virsh
 metadata, déclaration) : le journal garde la valeur exacte d'avant, que
 « Annuler » remet ; un objet que la personne ne peut pas lire n'est pas rangé.
 
+`delete` (2.0.2) retire d'abord les entrées d'objets prouvés disparus
+(journal et étape) ; une entrée qu'on ne peut pas vérifier bloque.
+
 `empty-into` vide un dossier puis le supprime, en une action : ses objets
 vont dans la cible, ses sous-dossiers passent sous elle (sous la racine pour
 `unfiled`) ; « Annuler » recrée le dossier et remet tout.
@@ -685,19 +688,192 @@ def cmd_move_folder(args, conn):
     return _rewrite_folder(args, conn, fid, lambda: fdb.move_folder(conn, fid, parent), "move")
 
 
+# --- entrées orphelines (2.0.2, décision 94) ---------------------------------------
+# Un dossier qui ne garde que l'entrée d'un objet disparu (hôte KVM retiré,
+# VM supprimée, cluster retiré) ne doit plus bloquer sa suppression. Chaque
+# entrée est classée : `orphan` (on SAIT que l'objet n'existe plus : retirée,
+# ligne au journal et étape), `present` (l'objet existe), `hidden` (la
+# personne ne le voit pas) ou `unknown` (hôte injoignable, lecture en
+# échec). Les trois dernières bloquent : on ne retire jamais ce qu'on ne
+# peut pas prouver disparu.
+ORPHAN, PRESENT, HIDDEN, UNKNOWN = "orphan", "present", "hidden", "unknown"
+PROBE_TIMEOUT = 20
+_KUBE_KEY_RE = re.compile(r"^(harvester|container)/([^/]+)/([^/]+)/(?:([^/]+)/)?([^/]+)$")
+_WORKLOAD_OF_KEY = {k.lower(): k for k in fm.WORKLOAD_RESOURCES}
+
+
+def known_clusters():
+    """Clusters déclarés : config.yaml et clusters.d de la console."""
+    names = {n for n in config_clusters() if n}
+    d = cluster_decl.state_dir() / cluster_decl.DECL_DIR
+    if d.is_dir():
+        names |= {p.stem for p in d.glob("*.yaml")}
+    return names
+
+
+def kvm_declared(name):
+    p = kvm_decl.decl_path(cluster_decl.state_dir(), name)
+    return p is not None and p.is_file()
+
+
+def probe_kube(cluster, resource, ns, name, spec, ctx):
+    """Existence d'un objet lu avec l'identité de la personne : PRESENT,
+    ORPHAN (le serveur répond NotFound), HIDDEN (lecture refusée) ou
+    (UNKNOWN, raison). Une session de la console (`clusters` dans la demande)
+    n'emploie que les kubeconfigs de la demande, jamais celui de la console."""
+    kubes = ctx.setdefault("kubes", {})
+    if cluster not in kubes:
+        if "clusters" in spec and cluster not in (spec.get("kubeconfigs") or {}):
+            return UNKNOWN, f"cluster {cluster} cannot be read with your identity"
+        try:
+            kubes[cluster] = make_kube(cluster, spec)
+        except RuntimeError as e:
+            return UNKNOWN, str(e)[:200]
+    try:
+        kubes[cluster].run("get", resource, name, "-n", ns, "-o", "name", timeout=PROBE_TIMEOUT)
+    except KubeError as e:
+        text = str(e)
+        if "(NotFound)" in text:
+            return ORPHAN, f"not found on cluster {cluster}"
+        if "(Forbidden)" in text or RBAC_GET_DENIAL_RE.search(text.lower()):
+            return HIDDEN, None
+        return UNKNOWN, f"cluster {cluster} cannot be read ({text.splitlines()[0][:120] if text else 'error'})"
+    except Exception as e:                         # noqa: BLE001 : jamais un retrait sur une erreur
+        return UNKNOWN, f"cluster {cluster} cannot be read ({type(e).__name__})"
+    return PRESENT, None
+
+
+def probe_kvm(host, uuid_, ctx):
+    hosts = ctx.setdefault("hosts", {})
+    try:
+        if host not in hosts:
+            hosts[host] = make_host(host)
+        res = hosts[host].batch({"d": ("domname", uuid_)}, idempotent=True)["d"]
+    except kh.KvmError as e:
+        return UNKNOWN, f"KVM host {host} cannot be reached ({e.kind})"
+    except RuntimeError as e:
+        return UNKNOWN, str(e)[:200]
+    except Exception as e:                         # noqa: BLE001 : jamais un retrait sur une erreur
+        return UNKNOWN, f"KVM host {host} cannot be read ({type(e).__name__})"
+    if res.ok:
+        return PRESENT, None
+    if res.error is not None and res.error.kind == "notfound":
+        return ORPHAN, f"domain no longer on KVM host {host}"
+    return UNKNOWN, f"KVM host {host} cannot be read ({getattr(res.error, 'kind', 'failed')})"
+
+
+def classify_entry(key, entry, spec, ctx, clusters, seen):
+    """(verdict, raison) d'une entrée rangée. `clusters` : clusters connus ;
+    `seen` : clusters que la personne voit (None = tous)."""
+    def visible_cluster(c):
+        return seen is None or c in seen
+    kind = fm.key_kind(key)
+    if kind == "host":
+        parts = key.split("/")
+        if len(parts) != 3:
+            return UNKNOWN, "unrecognised entry"
+        family, name = parts[1], parts[2]
+        if family == "kvm":
+            return (PRESENT, None) if kvm_declared(name) else (ORPHAN, f"KVM host {name} is no longer declared")
+        if name not in clusters:
+            return ORPHAN, f"cluster {name} is no longer declared"
+        return (PRESENT, None) if visible_cluster(name) else (HIDDEN, None)
+    if kind == "kvm":
+        scope = (entry or {}).get("scope") or ""
+        host = scope[4:] if scope.startswith("kvm/") else None
+        if not host or not kvm_decl.NAME_RE.match(host):
+            return UNKNOWN, "its KVM host is not known"
+        if not kvm_declared(host):
+            return ORPHAN, f"KVM host {host} is no longer declared"
+        return probe_kvm(host, key[4:], ctx)
+    m = _KUBE_KEY_RE.match(key)
+    if not m or (m.group(1) == "container") != bool(m.group(4)):
+        return UNKNOWN, "unrecognised entry"
+    cluster, ns, wk, name = m.group(2), m.group(3), m.group(4), m.group(5)
+    if cluster not in clusters:
+        return ORPHAN, f"cluster {cluster} is no longer declared"
+    if not visible_cluster(cluster):
+        return HIDDEN, None
+    if m.group(1) == "harvester":
+        resource = "virtualmachines.kubevirt.io"
+    else:
+        resource = fm.WORKLOAD_RESOURCES.get(_WORKLOAD_OF_KEY.get(wk))
+        if not resource:
+            return UNKNOWN, "unrecognised entry"
+    return probe_kube(cluster, resource, ns, name, spec, ctx)
+
+
 def cmd_delete(args, conn):
+    """Supprime un dossier vide. 2.0.2 (décision 94) : les entrées d'objets
+    qui n'existent plus sont d'abord retirées (journal et étape) ; une entrée
+    qu'on ne peut pas prouver disparue (hôte injoignable, objet caché) bloque
+    avec sa raison, et rien n'est alors retiré."""
     need_operator(args)
     fid = folder_ref(conn, args.folder_id)
     if fid is None:
         raise UsageError("the root cannot be deleted")
     spec = read_spec(args.spec)
     visible = set(spec["visible"]) if isinstance(spec.get("visible"), list) else None
+    tree = fdb.list_tree(conn)
+    path = fm.paths(tree)[fid]
+    inside = {k: m for k, m in fdb.memberships(conn).items() if m["folder_path"] and fm.within(m["folder_path"], path)}
+    purged = []
+    if inside and len(fm.subtree_ids(tree, fid)) == 1:
+        clusters = known_clusters()
+        seen = set(spec["clusters"]) if isinstance(spec.get("clusters"), list) else None
+        shown, ctx = Shown(spec), {}
+        orphans, present, hidden, unknown = [], 0, False, {}
+        for key, m in sorted(inside.items()):
+            verdict, why = classify_entry(key, m, spec, ctx, clusters, seen)
+            if verdict == ORPHAN:
+                orphans.append((key, m, why))
+            elif verdict == PRESENT and shown.named(key):
+                present += 1
+            elif verdict == UNKNOWN:
+                # la raison ne nomme qu'un cluster que la personne voit ou un
+                # hôte KVM (vus de tous) ; le détail de l'erreur, qui peut
+                # citer l'objet, n'est dit que pour un objet qu'elle voit
+                why = why if shown.named(key) else why.split(" (", 1)[0]
+                unknown[why] = unknown.get(why, 0) + 1
+            else:
+                # objet caché, ou que la personne ne voit pas : jamais nommé ni compté
+                hidden = True
+        if present or hidden or unknown:
+            what = []
+            if present:
+                what.append(f"{present} object(s)")
+            if hidden:
+                what.append("objects you cannot see")
+            what += [f"{n} entr{'y' if n == 1 else 'ies'} that cannot be checked: {why}"
+                     for why, n in sorted(unknown.items())]
+            raise Refused(f"folder {path} is not empty ({'; '.join(what)}): move content to another folder "
+                          "first; an entry is removed only once its object is proven gone")
+        seq = len(fdb.moves_of(conn, args.id))
+        for key, m, why in orphans:
+            if not fdb.drop_membership(conn, key, m["folder_path"]):
+                continue                               # rangée ailleurs entre-temps : laissée
+            fdb.record_move(conn, args.id, seq, key, m["folder_path"], None, "done", f"purged: {why}")
+            seq += 1
+            # un hôte KVM et ses domaines ne sont cachés à personne (lecture commune)
+            if fm.key_kind(key) == "kvm" or key.startswith("host/kvm/") or "not found on cluster" in why:
+                shown.read.add(key)
+            if shown.named(key):
+                step(f"purge-{len(purged)}", "done", f"{key}: entry purged, the object no longer exists ({why})")
+            else:
+                shown.tally(True)
+            purged.append(key)
+        n = shown.done
+        if n:
+            step("purge-hidden", "done", f"{n} other entr{'y' if n == 1 else 'ies'} of objects that no longer "
+                                         "exist purged")
     try:
         path = fdb.delete_empty(conn, fid, visible)
     except fdb.FolderError as e:
         raise Refused(e.message) from None
-    step("delete", "done", f"folder {path} deleted")
-    return finish(args, {"id": fid, "path": path}, 0, f"{path} deleted")
+    step("delete", "done", f"folder {path} deleted" + (f" ({len(purged)} orphan entr"
+                                                        f"{'y' if len(purged) == 1 else 'ies'} purged)"
+                                                        if purged else ""))
+    return finish(args, {"id": fid, "path": path, "action": args.id, "purged": len(purged)}, 0, f"{path} deleted")
 
 
 def cmd_assign(args, conn):
